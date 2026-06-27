@@ -286,7 +286,7 @@ discovered inbound-DMA aperture **before** any register is touched (fail
 closed, `AGENTS.md` §5.4), maps the granted register BAR, brings the
 controller up (`rustos_usb::Xhci::open` + `UsbDevice::start`), and runs the
 arch-neutral root→hub→downstream-HID enumeration
-(`UsbDevice::enumerate_boot_keyboard`, which descends the Pi 4's onboard hub
+(`UsbDevice::bring_up_keyboard`, which descends the Pi 4's onboard hub
 when present, `AGENTS.md` §2.2). It returns a `BootKeyboard` the driver's
 service loop drives with `pump_once`, injecting each decoded key edge through
 `key_inject`. The device-shared DMA size is the one `rustos_usb::XHCI_DMA_BYTES`

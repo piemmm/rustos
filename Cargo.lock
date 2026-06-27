@@ -696,6 +696,7 @@ dependencies = [
  "rustos-log",
  "rustos-rt",
  "rustos-usb",
+ "rustos-util",
 ]
 
 [[package]]
@@ -787,6 +788,7 @@ dependencies = [
  "rustos-log",
  "rustos-rt",
  "rustos-usb",
+ "rustos-util",
 ]
 
 [[package]]

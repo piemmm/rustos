@@ -4,7 +4,10 @@
 //! This is the composition the **host-controller driver** runs at start-up: it
 //! brings the controller up over the device-resource grants the kernel minted
 //! for it (its already-assigned register BAR and a DMA constraint) and returns
-//! the [`UsbDevice`] enumeration engine pointed at the attached device's slot.
+//! the [`UsbDevice`] enumeration engine. The engine is pointed at the attached
+//! device's slot when one is present, or left serving with its first-connect
+//! watch armed when none is (a keyboard absent at boot is a first-class state,
+//! not a failure).
 //! The HCD then serves that device's transfers over the URB transport seam
 //! (`rustos_usb::transport`) to the autoloaded class driver — it does **not**
 //! decode HID reports itself; that is the class driver's job.
@@ -33,12 +36,13 @@
 use rustos_abi::driver::dma::DmaSlab;
 use rustos_abi::hwtree::{HwResource, HwResourceKind};
 use rustos_abi::{CapabilityId, Delay, DriverError, DriverHost, MmioMapper, RegisterWindow};
-use rustos_usb::device::{EnumStage, UsbDevice};
+use rustos_usb::device::{BringUp, EnumStage, UsbDevice};
 use rustos_usb::{Xhci, XhciOpenStage, DEFAULT_POLL_BUDGET, XHCI_DMA_BYTES};
 
 /// The brought-up controller engine the HCD serves: a [`UsbDevice`] over the
-/// mapped register BAR and the carved DMA region, enumerated and pointed at
-/// the attached device's slot.
+/// mapped register BAR and the carved DMA region. It is enumerated and pointed
+/// at the attached device's slot when a device is present, or left serving
+/// with its first-connect watch armed when none is yet attached.
 pub type ControllerDevice = UsbDevice<RegisterWindow, DmaSlab>;
 
 /// The concrete bring-up inputs the HCD derives from its kernel-issued
@@ -202,7 +206,9 @@ pub enum BringupPhase {
     /// Programming the DMA structures and starting the controller
     /// ([`UsbDevice::start`]).
     ControllerStart,
-    /// Enumerating the attached device ([`UsbDevice::enumerate_boot_keyboard`]).
+    /// Bringing the controller up to serve the keyboard
+    /// ([`UsbDevice::bring_up_keyboard`]); a device absent at boot is not a
+    /// failure of this phase, only a real enumeration fault is.
     Enumerate,
 }
 
@@ -375,20 +381,30 @@ pub fn bring_up_controller_diagnostic(
     let mut device = UsbDevice::start(xhci, dma, DEFAULT_POLL_BUDGET)
         .map_err(|e| ControllerBringupError::bare(BringupPhase::ControllerStart, e))?;
 
-    // Enumerate the attached device, transparently descending one tier through
-    // an onboard hub. The arch-neutral root→hub→downstream orchestration lives
-    // once in `rustos_usb`, so the device is discovered, never a guessed port;
-    // on success `device` is left pointed at the device's slot so the HCD can
-    // serve its interrupt-IN endpoint. On failure the engine's per-transfer
-    // breadcrumbs localise the stall.
-    if let Err(error) = device.enumerate_boot_keyboard(delay) {
-        let mut e = ControllerBringupError::bare(BringupPhase::Enumerate, error);
-        e.enum_stage = Some(device.enum_stage());
-        e.last_completion = device.last_completion_code();
-        e.last_event_type = device.last_event_type();
-        e.last_reject = device.last_reject_reason();
-        e.port1_portsc = device.port_status_raw(1);
-        return Err(e);
+    // Bring the controller up to serve the keyboard, transparently descending
+    // one tier through an onboard hub. The arch-neutral
+    // root→hub→downstream orchestration lives once in `rustos_usb`, so the
+    // device is discovered, never a guessed port. A device absent at boot is
+    // **not** a failure: `bring_up_keyboard` returns `AwaitingDevice` with the
+    // controller up and the first-connect watch armed (the onboard hub's
+    // status-change endpoint, or the root port), and the HCD publishes the
+    // interface node only once that first connect enumerates a device. On a
+    // real bring-up failure the engine's per-transfer breadcrumbs localise the
+    // stall.
+    match device.bring_up_keyboard(delay) {
+        // `Device`: a device is enumerated and `device.device_present()` is
+        // true. `AwaitingDevice`: the controller is up and waiting for the
+        // first hot-plug connect. Both leave the controller serving.
+        Ok(BringUp::Device(_) | BringUp::AwaitingDevice) => {}
+        Err(error) => {
+            let mut e = ControllerBringupError::bare(BringupPhase::Enumerate, error);
+            e.enum_stage = Some(device.enum_stage());
+            e.last_completion = device.last_completion_code();
+            e.last_event_type = device.last_event_type();
+            e.last_reject = device.last_reject_reason();
+            e.port1_portsc = device.port_status_raw(1);
+            return Err(e);
+        }
     }
     Ok(device)
 }

@@ -81,6 +81,7 @@ mod program {
     use rustos_drvrt::{RtDriverHost, RtGrantSyscalls};
     use rustos_log::{log, Event, EventId, Field, Level};
     use rustos_rt::{ClockDelay, LogSink};
+    use rustos_usb::device::{BringUp, HubEvent};
     use rustos_usb::{regs, InterrupterSnapshot};
     use rustos_util::fmt::format_hex_u64;
 
@@ -111,6 +112,10 @@ mod program {
     /// Diagnostic event id: the device disconnected and its interface node was
     /// retracted.
     const HCD_DISCONNECT: EventId = EventId(4127);
+
+    /// Diagnostic event id: a device (re)attached behind the hub and a fresh
+    /// interface node was published.
+    const HCD_ATTACHED: EventId = EventId(4156);
 
     /// Diagnostic event id: URB transport setup or IRQ arming state.
     const HCD_URB_SETUP: EventId = EventId(4149);
@@ -320,6 +325,30 @@ mod program {
             .is_none_or(|portsc| portsc & 1 != 0)
     }
 
+    /// Build and publish the enumerated device's interface node — its
+    /// `vid:pid:class` match keys plus the per-interface URB-transport grants
+    /// (the call endpoint and the shared buffer) the class driver inherits —
+    /// returning the kernel-assigned node id.
+    ///
+    /// Used for the initial publish and, identically, for a re-attach after a
+    /// hot-plug: a *fresh* node so `devmgr` re-autoloads the class driver onto
+    /// the same transport endpoint, so keystrokes resume to the same OS sink.
+    /// `None` if the device is not enumerated or the kernel refuses the node.
+    fn emit_interface_node(
+        device: &mut rustos_drv_bus_usb::bringup::ControllerDevice,
+        endpoint_id: u64,
+        shm_id: u64,
+    ) -> Option<u32> {
+        let node = device.describe_device(HW_NODE_ROOT, 0).ok()?;
+        let node = attach_transport_grants(node, endpoint_id, shm_id).ok()?;
+        let emit = rustos_rt::hw_emit_node(&node);
+        if emit < 0 {
+            return None;
+        }
+        #[allow(clippy::cast_sign_loss)] // `emit >= 0` is the assigned node id.
+        Some(emit as u32)
+    }
+
     /// Program entry point. `rustos-rt`'s `_start` calls it once the runtime is
     /// set up and routes its return value through the `exit` syscall.
     fn main() -> i32 {
@@ -398,19 +427,14 @@ mod program {
             endpoint_id,
         );
 
-        // Build the interface node carrying the device's USB match keys plus
-        // the transport grants the class driver inherits. Publish it only after
-        // the IRQ wait source has been proved live below, so the class driver
-        // cannot be autoloaded into a transport that has no completion wake.
-        let node = match device.describe_device(HW_NODE_ROOT, 0) {
-            Ok(node) => node,
-            Err(_) => return EXIT_EMIT_FAILED,
-        };
-        let node = match attach_transport_grants(node, endpoint_id, shm_id) {
-            Ok(node) => node,
-            Err(_) => return EXIT_EMIT_FAILED,
-        };
-        let root_port = device.root_port();
+        // The interface node (USB match keys + transport grants) is published
+        // only after the IRQ wait source is proved live below, so the class
+        // driver cannot be autoloaded into a transport with no completion wake.
+        // `root_port` tracks the directly-attached device's root port for the
+        // disconnect watch; it is refreshed after a re-enumeration. `0` while
+        // no directly-attached device is present (a cold boot, or the hub
+        // topology where the hub-status watch is used instead).
+        let mut root_port = device.root_port();
 
         // Bind the controller's IRQ line before arming the completion
         // interrupter, so a completion produced immediately after `USBCMD.INTE`
@@ -508,19 +532,36 @@ mod program {
             irq_handle,
         );
 
-        let emit = rustos_rt::hw_emit_node(&node);
-        if emit < 0 {
-            return EXIT_EMIT_FAILED;
+        // Publish the interface node only if a device is actually present.
+        // A cold boot with the keyboard unplugged is a first-class state: the
+        // controller comes up with no node, and the first hot-plug connect —
+        // delivered through the onboard hub's status-change watch, or a
+        // root-port connect — publishes the node from the event loop below.
+        let mut node_live = device.device_present();
+        let mut interface_node_id = 0u32;
+        if node_live {
+            let Some(id) = emit_interface_node(&mut device, endpoint_id, shm_id) else {
+                return EXIT_EMIT_FAILED;
+            };
+            interface_node_id = id;
+            log_hex_event(
+                HCD_URB_SETUP,
+                Level::Info,
+                "usb-hcd: interface node emitted",
+                "node_hex",
+                u64::from(id),
+            );
+        } else {
+            log(
+                &LogSink,
+                &Event {
+                    level: Level::Info,
+                    id: HCD_READY,
+                    message: "usb-hcd: controller up, awaiting first device connect",
+                    fields: &[],
+                },
+            );
         }
-        #[allow(clippy::cast_sign_loss)] // `emit >= 0` here is the assigned node id.
-        let interface_node_id = emit as u32;
-        log_hex_event(
-            HCD_URB_SETUP,
-            Level::Info,
-            "usb-hcd: interface node emitted",
-            "node_hex",
-            u64::from(interface_node_id),
-        );
 
         log(
             &LogSink,
@@ -533,7 +574,6 @@ mod program {
         );
 
         let mut service = UrbService::new();
-        let mut node_live = true;
 
         // The asynchronous event loop: park until the transport endpoint or the
         // controller interrupt is ready, never spinning a quiet controller.
@@ -638,11 +678,64 @@ mod program {
                             );
                         }
                     }
-                    // Watch the root-hub port: on a disconnect, retract the
-                    // interface node once so `devmgr` unloads the class driver
-                    // while this controller stays up.
-                    if node_live && !still_connected(&mut device, root_port) {
-                        if rustos_rt::hw_remove_node(interface_node_id) >= 0 {
+                    // Hot-plug. When a hub is watched (the device sits behind
+                    // the onboard hub, so its root port never changes), a hub
+                    // status-change report drives connect/disconnect: a fresh
+                    // device is enumerated and a new interface node published
+                    // (so `devmgr` re-autoloads the class driver onto the same
+                    // transport), and a disconnect retracts the node. A
+                    // directly-attached device instead has its root port
+                    // watched for disconnect, and a root-port connect — whether
+                    // the first ever (cold boot, nothing attached at bring-up)
+                    // or a re-attach — drives a fresh re-enumeration. Both leave
+                    // the controller up.
+                    if device.hub_watch_active() {
+                        match device.next_hub_change(&delay) {
+                            Ok(HubEvent::Attached(_)) => {
+                                if let Some(id) =
+                                    emit_interface_node(&mut device, endpoint_id, shm_id)
+                                {
+                                    interface_node_id = id;
+                                    node_live = true;
+                                    log_hex_event(
+                                        HCD_ATTACHED,
+                                        Level::Info,
+                                        "usb-hcd: device attached, interface published",
+                                        "node_hex",
+                                        u64::from(id),
+                                    );
+                                }
+                            }
+                            Ok(HubEvent::Detached) => {
+                                if node_live && rustos_rt::hw_remove_node(interface_node_id) >= 0 {
+                                    node_live = false;
+                                    log(
+                                        &LogSink,
+                                        &Event {
+                                            level: Level::Info,
+                                            id: HCD_DISCONNECT,
+                                            message:
+                                                "usb-hcd: device disconnected, interface retracted",
+                                            fields: &[],
+                                        },
+                                    );
+                                }
+                            }
+                            Ok(HubEvent::None) => {}
+                            Err(err) => log_hex_event(
+                                HCD_WAIT_ERROR,
+                                Level::Warn,
+                                "usb-hcd: hub status-change service failed",
+                                "errno_hex",
+                                err as u64,
+                            ),
+                        }
+                    } else if node_live {
+                        // Directly-attached device: retract on a root-port
+                        // disconnect (the `CCS` connect bit clearing).
+                        if !still_connected(&mut device, root_port)
+                            && rustos_rt::hw_remove_node(interface_node_id) >= 0
+                        {
                             node_live = false;
                             log(
                                 &LogSink,
@@ -653,6 +746,35 @@ mod program {
                                     fields: &[],
                                 },
                             );
+                        }
+                    } else if device.any_root_port_connected() {
+                        // A directly-attached device appeared on a root port —
+                        // either the first connect after a cold boot with
+                        // nothing attached at bring-up, or a re-attach after a
+                        // disconnect. Reset the controller and enumerate it as a
+                        // brand-new device, re-arm the interrupter the reset
+                        // cleared (so the next connect/disconnect still wakes
+                        // the loop), refresh the watched root port, and publish a
+                        // fresh interface node so the class driver is autoloaded
+                        // onto the same transport.
+                        if let Ok(outcome) = device.reset_and_reenumerate(&delay) {
+                            let _ = device.enable_interrupter();
+                            root_port = device.root_port();
+                            if matches!(outcome, BringUp::Device(_)) {
+                                if let Some(id) =
+                                    emit_interface_node(&mut device, endpoint_id, shm_id)
+                                {
+                                    interface_node_id = id;
+                                    node_live = true;
+                                    log_hex_event(
+                                        HCD_ATTACHED,
+                                        Level::Info,
+                                        "usb-hcd: device attached, interface published",
+                                        "node_hex",
+                                        u64::from(id),
+                                    );
+                                }
+                            }
                         }
                     }
                 }

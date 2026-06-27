@@ -37,13 +37,17 @@ build on the *same* engine without depending on each other — exactly the split
   so the host-controller driver arms one interrupt-IN transfer for the class URB
   it is currently serving. The interrupt-IN endpoint's DCI, packet size, and
   interval are read from the device's endpoint descriptor (never hard-coded).
-  `enumerate_boot_keyboard` is the arch-neutral
+  `bring_up_keyboard` is the arch-neutral
   bring-up orchestration a keyboard driver runs once: it enumerates the first
   connected root-hub port and, when that device is itself a hub (the Pi 4B's
   onboard hub), powers the hub's ports, finds the connected one, resets it
   (settle windows supplied by the `rustos_abi::Delay` seam), and addresses the
   device behind it on a second slot — so the keyboard is discovered, never a
-  guessed port, with one definition shared by every consumer (§2.2 / §18).
+  guessed port, with one definition shared by every consumer (§2.2 / §18). A
+  device absent at bring-up is a first-class state, not a failure: it returns
+  `BringUp::AwaitingDevice` with the controller up and the first-connect watch
+  armed (the onboard hub's status-change endpoint, or the root port), so a cold
+  boot with the keyboard unplugged works and it autoloads when plugged in.
 - `regs` / `trb` / `ring` — the register, TRB, and ring-state vocabularies; the
   ring state machines (`ProducerRing`, `EventRingCursor`) hold no memory of
   their own, so the owner publishes every write through the `device::DmaRegion`

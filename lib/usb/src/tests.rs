@@ -10,8 +10,9 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use super::device::{
-    hub_port_connected, hub_port_enabled, hub_port_speed, DeviceDescriptor, DmaRegion, EnumStage,
-    InterfaceInfo, UsbDevice, EVENT_RING_SEGMENT_MIN_TRBS, REPORT_LEN, RING_TRBS,
+    hub_port_connected, hub_port_enabled, hub_port_speed, BringUp, DeviceDescriptor, DmaRegion,
+    EnumStage, HubEvent, InterfaceInfo, UsbDevice, EVENT_RING_SEGMENT_MIN_TRBS, REPORT_LEN,
+    RING_TRBS,
 };
 use super::ring::{EventRingCursor, ProducerRing};
 use super::trb::{CompletionCode, Trb, TrbType, CONTROL_CYCLE, TRB_LEN};
@@ -31,8 +32,9 @@ const MOCK_WINDOW_LEN: usize = 0x3000;
 /// Device-visible base address of the shared DMA buffer.
 const MOCK_DMA_BASE: u64 = 0x0010_0000;
 /// Byte length of the shared DMA buffer (the layout for 32 slots with
-/// 64-byte contexts needs ~5.1 KiB).
-const MOCK_DMA_LEN: usize = 0x2000;
+/// 64-byte contexts, plus the hub status-change ring and report buffer,
+/// needs ~5.4 KiB).
+const MOCK_DMA_LEN: usize = 0x4000;
 /// The mock's 64-byte contexts (its `HCCPARAMS1` sets CSZ).
 const MOCK_CTX_SIZE: usize = 64;
 
@@ -189,11 +191,17 @@ const MOCK_HUB_DESCRIPTOR: [u8; 18] = [
 ];
 
 /// Configuration descriptor fixture for the hub: one interface of the
-/// hub class (`0x09_00_00`) with one interrupt status-change endpoint.
-const MOCK_HUB_CONFIG_DESCRIPTOR: [u8; 18] = [
-    0x09, 0x02, 0x12, 0x00, 0x01, 0x01, 0x00, 0xA0, 0x32, //
-    // Interface: class=0x09 (hub), sub=0x00, protocol=0x00.
-    0x09, 0x04, 0x00, 0x00, 0x01, 0x09, 0x00, 0x00, 0x00,
+/// hub class (`0x09_00_00`) with one interrupt-IN status-change endpoint
+/// (USB 2.0 §11.12.3), so the engine arms the hub-hotplug watch.
+const MOCK_HUB_CONFIG_DESCRIPTOR: [u8; 25] = [
+    // Configuration: wTotalLength=25, 1 interface.
+    0x09, 0x02, 0x19, 0x00, 0x01, 0x01, 0x00, 0xA0, 0x32, //
+    // Interface: class=0x09 (hub), sub=0x00, protocol=0x00, 1 endpoint.
+    0x09, 0x04, 0x00, 0x00, 0x01, 0x09, 0x00, 0x00, 0x00, //
+    // Endpoint: bEndpointAddress=0x82 (EP2 IN -> DCI 5, distinct from a
+    // downstream keyboard's DCI 3), interrupt, wMaxPacketSize=1 (the
+    // port-change bitmap byte), bInterval=12.
+    0x07, 0x05, 0x82, 0x03, 0x01, 0x00, 0x0C,
 ];
 
 /// Register-level xHCI model: the capability block, `USBCMD`/`USBSTS`
@@ -263,6 +271,14 @@ struct MockXhci {
     ep0_base: u64,
     ep0_index: usize,
     ep0_cycle: bool,
+    /// The slot whose EP0 ring is currently the live `ep0_base`/`ep0_index`/
+    /// `ep0_cycle`. The engine keeps a hub and a downstream device addressed
+    /// at once and switches the active control context between them; a
+    /// control doorbell for a different slot saves the live ring state and
+    /// loads that slot's, mirroring the DCBAA-indexed hardware.
+    ep0_slot: u8,
+    /// Saved per-slot EP0 ring `(base, index, cycle)`, indexed by slot id.
+    ep0_saved: [(u64, usize, bool); 33],
     int_base: u64,
     int_index: usize,
     int_cycle: bool,
@@ -397,6 +413,22 @@ struct MockXhci {
     /// whose interrupt endpoint is not endpoint 1 is serviced honestly
     /// (the metal no-report bug was the driver hard-coding DCI 3).
     int_dci: u8,
+    /// The slot marked as a hub (the Configure Endpoint that raised the Hub
+    /// bit), so a later endpoint-add on that slot is recognised as the hub's
+    /// status-change endpoint rather than the downstream device's interrupt
+    /// endpoint. `0` until a hub is marked.
+    hub_slot_id: u8,
+    /// The hub status-change endpoint's transfer-ring base / DCI / consumer
+    /// state, set by the Configure Endpoint that adds it to the hub slot. The
+    /// test posts a port-change report with [`Self::post_hub_status_change`].
+    hub_int_base: u64,
+    hub_int_dci: u8,
+    hub_int_index: usize,
+    hub_int_cycle: bool,
+    /// `wPortChange` (USB 2.0 §11.24.2.7.2) the downstream-port `GET_STATUS`
+    /// reports — the latched port changes (e.g. Connect Status Change). `0`
+    /// = no change latched.
+    hub_downstream_change: u16,
 }
 
 impl MockXhci {
@@ -435,6 +467,8 @@ impl MockXhci {
             ep0_base: 0,
             ep0_index: 0,
             ep0_cycle: true,
+            ep0_slot: 0,
+            ep0_saved: [(0, 0, true); 33],
             int_base: 0,
             int_index: 0,
             int_cycle: true,
@@ -474,6 +508,12 @@ impl MockXhci {
             int_max_esit: 0,
             keyboard_config: &MOCK_CONFIG_DESCRIPTOR,
             int_dci: 3,
+            hub_slot_id: 0,
+            hub_int_base: 0,
+            hub_int_dci: 0,
+            hub_int_index: 0,
+            hub_int_cycle: true,
+            hub_downstream_change: 0,
         }
     }
 
@@ -650,12 +690,22 @@ impl MockXhci {
     /// driver's [`CompletionCode`] enum does not model (e.g. xHCI code
     /// `7`, Resource Error), which `await_event_for`'s decode rejects.
     fn post_transfer_event_raw(&mut self, trb_addr: u64, code: u8, dci: u8, residual: u32) {
+        // A control-endpoint (DCI 1) transfer event belongs to the slot whose
+        // EP0 ring is currently live (`ep0_slot`) — the engine keeps a hub and
+        // a downstream device addressed at once and switches the active
+        // control context between them. Any other endpoint's event belongs to
+        // the most-recently-addressed device slot.
+        let slot = if dci == 1 {
+            self.ep0_slot
+        } else {
+            self.active_slot
+        };
         self.post_event(Trb {
             parameter: trb_addr,
             status: (u32::from(code) << 24) | residual,
             control: (u32::from(TrbType::TransferEvent.as_u8()) << 10)
                 | (u32::from(dci) << 16)
-                | trb::control_slot(self.active_slot),
+                | trb::control_slot(slot),
         });
     }
 
@@ -719,8 +769,14 @@ impl MockXhci {
                     let code = self.handle_address_device(trb.parameter);
                     self.post_command_completion(addr, code, trb.slot_id());
                 }
+                Ok(TrbType::DisableSlot) => {
+                    // Free a device slot on hot-removal (xHCI §6.4.3.3); the
+                    // mock just acknowledges it (the engine clears its own
+                    // per-device state and DCBAA entry).
+                    self.post_command_completion(addr, CompletionCode::Success, trb.slot_id());
+                }
                 Ok(TrbType::ConfigureEndpoint) => {
-                    let code = self.handle_configure_endpoint(trb.parameter);
+                    let code = self.handle_configure_endpoint(trb.parameter, trb.slot_id());
                     self.post_command_completion(addr, code, trb.slot_id());
                 }
                 Ok(TrbType::NoOpCommand) => {
@@ -777,14 +833,29 @@ impl MockXhci {
             self.downstream_active = true;
             self.downstream_route_port = route_port;
         }
+        // Save the previously-live slot's EP0 ring progress before this slot
+        // becomes the live control context, so switching back to it (e.g. the
+        // hub after a downstream device is addressed) resumes where it left
+        // off rather than re-reading consumed TRBs.
+        let prev = usize::from(self.ep0_slot);
+        if prev < self.ep0_saved.len() {
+            self.ep0_saved[prev] = (self.ep0_base, self.ep0_index, self.ep0_cycle);
+        }
         self.ep0_base = self.ep_ctx_dequeue(input_ctx + 2 * MOCK_CTX_SIZE as u64);
         self.ep0_index = 0;
         self.ep0_cycle = true;
+        // This slot's EP0 ring becomes the live control context; record it so
+        // a later doorbell for another slot can switch away and back.
+        self.ep0_slot = self.active_slot;
+        let s = usize::from(self.active_slot);
+        if s < self.ep0_saved.len() {
+            self.ep0_saved[s] = (self.ep0_base, 0, true);
+        }
         self.addressed = true;
         CompletionCode::Success
     }
 
-    fn handle_configure_endpoint(&mut self, input_ctx: u64) -> CompletionCode {
+    fn handle_configure_endpoint(&mut self, input_ctx: u64, slot: u8) -> CompletionCode {
         let control = self.read_dwords(input_ctx, 2);
         let add = control[1];
         // A Configure Endpoint that adds any endpoint (an A(dci) flag
@@ -802,6 +873,17 @@ impl MockXhci {
                 return CompletionCode::TrbError;
             }
             let dci = endpoint_adds.trailing_zeros();
+            // An endpoint added to the slot already marked a hub is the hub's
+            // interrupt-IN status-change endpoint, recorded separately so it
+            // does not clobber a downstream device's interrupt endpoint state.
+            if self.hub_marked_as_hub && slot == self.hub_slot_id {
+                self.hub_int_dci = u8::try_from(dci).expect("DCI fits a byte");
+                self.hub_int_base =
+                    self.ep_ctx_dequeue(input_ctx + (1 + u64::from(dci)) * MOCK_CTX_SIZE as u64);
+                self.hub_int_index = 0;
+                self.hub_int_cycle = true;
+                return CompletionCode::Success;
+            }
             self.int_dci = u8::try_from(dci).expect("DCI fits a byte");
             let ep_ctx_off = input_ctx + (1 + u64::from(dci)) * MOCK_CTX_SIZE as u64;
             let int_ctx = self.read_dwords(ep_ctx_off, 5);
@@ -827,6 +909,7 @@ impl MockXhci {
             return CompletionCode::TrbError;
         }
         self.hub_marked_as_hub = true;
+        self.hub_slot_id = slot;
         self.hub_ctx_num_ports = ((slot_ctx[1] >> 24) & 0xFF) as u8;
         self.hub_ctx_tt_think_time = ((slot_ctx[2] >> 16) & 0b11) as u8;
         CompletionCode::Success
@@ -946,8 +1029,16 @@ impl MockXhci {
                         // PORT_POWER (8): mark the 1-based port powered.
                         8 => self.hub_powered |= bit,
                         // PORT_RESET (4): mark it reset, so its next
-                        // GET_STATUS reports the port enabled.
-                        4 => self.hub_reset |= bit,
+                        // GET_STATUS reports the port enabled — and, like real
+                        // hardware, latch the Reset-change bit (wPortChange
+                        // bit 4) so the driver must clear it as well as the
+                        // connect change or the port stays flagged forever.
+                        4 => {
+                            self.hub_reset |= bit;
+                            if setup[4] == self.hub_downstream_port {
+                                self.hub_downstream_change |= 1 << 4;
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -955,39 +1046,16 @@ impl MockXhci {
             // Class GET_STATUS on a downstream port (USB 2.0 §11.24.2.7):
             // the connected downstream port reports its status once
             // powered, every other port reads disconnected.
-            (0xA3, 0x00) => {
-                if self.fault_hub_port_status {
-                    self.post_transfer_event(status_addr, CompletionCode::StallError, 1, 0);
-                    return;
-                }
-                if self.fault_hub_port_status_raw != 0 {
-                    self.post_transfer_event_raw(status_addr, self.fault_hub_port_status_raw, 1, 0);
-                    return;
-                }
-                if self.fault_hub_port_status_evtype != 0 {
-                    self.post_event_raw_type(status_addr, self.fault_hub_port_status_evtype);
-                    return;
-                }
-                let port = setup[4];
-                let bit = if port >= 1 {
-                    1 << (u32::from(port) - 1)
-                } else {
-                    0
-                };
-                let powered = port >= 1 && self.hub_powered & bit != 0;
-                let w_status = if powered && port == self.hub_downstream_port {
-                    // Once the port has been reset it reports enabled
-                    // (PORT_STATUS_ENABLE, bit 1) in addition to its
-                    // connect/speed bits.
-                    let enabled = if self.hub_reset & bit != 0 { 1 << 1 } else { 0 };
-                    self.hub_downstream_status | enabled
-                } else {
-                    0
-                };
-                let bytes = w_status.to_le_bytes();
-                let reply = [bytes[0], bytes[1], 0, 0];
-                if !self.deliver_in_data(data, &reply, w_length, status_addr) {
-                    return;
+            (0xA3, 0x00) => self.execute_get_port_status(setup[4], data, w_length, status_addr),
+            // Class CLEAR_FEATURE on a downstream port (USB 2.0 §11.24.2.2):
+            // clear *only* the latched change the feature selector names
+            // (C_PORT_CONNECTION=16 .. C_PORT_RESET=20 → wPortChange bits 0..4),
+            // mirroring real hardware. A driver that clears only the connect
+            // change leaves the reset change (bit 4) latched and the port
+            // permanently flagged, so the watch keeps re-firing.
+            (0x23, 0x01) => {
+                if (16..=20).contains(&setup[2]) {
+                    self.hub_downstream_change &= !(1u16 << (setup[2] - 16));
                 }
             }
             // SET_CONFIGURATION
@@ -1072,6 +1140,127 @@ impl MockXhci {
             };
             self.post_transfer_event(addr, code, self.int_dci, residual);
         }
+    }
+
+    /// Deliver one hub status-change report: write `bitmap` (the port-change
+    /// bitmap, USB 2.0 §11.12.4) into the armed status-change transfer's
+    /// buffer and post its completion on the hub slot's status-change
+    /// endpoint, so the engine's `next_hub_change` wakes and services it.
+    ///
+    /// Mirrors [`Self::process_int_ring`] for the hub's interrupt-IN
+    /// status-change endpoint; the event carries the hub's slot id and DCI so
+    /// the engine routes it as a hub completion, never a keyboard report.
+    fn post_hub_status_change(&mut self, bitmap: &[u8]) {
+        let (mut index, mut cycle) = (self.hub_int_index, self.hub_int_cycle);
+        let base = self.hub_int_base;
+        let Some((addr, trb)) = self.next_owned(base, &mut index, &mut cycle) else {
+            return;
+        };
+        if trb.trb_type() != Ok(TrbType::Normal) {
+            return;
+        }
+        self.hub_int_index = index;
+        self.hub_int_cycle = cycle;
+        self.write_mem(trb.parameter, bitmap);
+        let residual = trb.status - u32::try_from(bitmap.len()).expect("bitmap fits");
+        let code = if residual > 0 {
+            CompletionCode::ShortPacket
+        } else {
+            CompletionCode::Success
+        };
+        self.post_event(Trb {
+            parameter: addr,
+            status: (u32::from(code.as_u8()) << 24) | residual,
+            control: (u32::from(TrbType::TransferEvent.as_u8()) << 10)
+                | (u32::from(self.hub_int_dci) << 16)
+                | trb::control_slot(self.hub_slot_id),
+        });
+    }
+
+    /// Execute a class `GET_STATUS` on downstream hub `port` (USB 2.0
+    /// §11.24.2.7): honour the fault knobs, then reply with the port's
+    /// `wPortStatus` (connect/speed once powered, plus enabled once reset) and
+    /// its latched `wPortChange`.
+    fn execute_get_port_status(
+        &mut self,
+        port: u8,
+        data: Option<(u64, u64, u32, bool)>,
+        w_length: usize,
+        status_addr: u64,
+    ) {
+        if self.fault_hub_port_status {
+            self.post_transfer_event(status_addr, CompletionCode::StallError, 1, 0);
+            return;
+        }
+        if self.fault_hub_port_status_raw != 0 {
+            self.post_transfer_event_raw(status_addr, self.fault_hub_port_status_raw, 1, 0);
+            return;
+        }
+        if self.fault_hub_port_status_evtype != 0 {
+            self.post_event_raw_type(status_addr, self.fault_hub_port_status_evtype);
+            return;
+        }
+        let bit = if port >= 1 {
+            1 << (u32::from(port) - 1)
+        } else {
+            0
+        };
+        let powered = port >= 1 && self.hub_powered & bit != 0;
+        let w_status = if powered && port == self.hub_downstream_port {
+            // Once the port has been reset it reports enabled
+            // (PORT_STATUS_ENABLE, bit 1) in addition to its connect/speed bits.
+            let enabled = if self.hub_reset & bit != 0 { 1 << 1 } else { 0 };
+            self.hub_downstream_status | enabled
+        } else {
+            0
+        };
+        // The latched `wPortChange` (e.g. Connect Status Change) is reported
+        // for the watched downstream port, so the hub-hotplug path can confirm
+        // and clear it.
+        let change = if port == self.hub_downstream_port {
+            self.hub_downstream_change
+        } else {
+            0
+        };
+        let status_bytes = w_status.to_le_bytes();
+        let change_bytes = change.to_le_bytes();
+        let reply = [
+            status_bytes[0],
+            status_bytes[1],
+            change_bytes[0],
+            change_bytes[1],
+        ];
+        self.deliver_in_data(data, &reply, w_length, status_addr);
+    }
+
+    /// Reset the device-model ring consumer positions and per-slot state, as a
+    /// Host Controller Reset does on real hardware (xHCI §4.2): every slot,
+    /// ring dequeue position, and addressed/configured state is cleared, so a
+    /// re-bring-up re-programs the rings and re-enumerates from scratch rather
+    /// than reading a ring from a stale dequeue position.
+    fn reset_device_model(&mut self) {
+        self.cmd_index = 0;
+        self.cmd_cycle = true;
+        self.ep0_index = 0;
+        self.ep0_cycle = true;
+        self.ep0_slot = 0;
+        self.ep0_saved = [(0, 0, true); 33];
+        self.int_index = 0;
+        self.int_cycle = true;
+        self.event_index = 0;
+        self.event_cycle = true;
+        self.next_slot = 1;
+        self.active_slot = 0;
+        self.addressed = false;
+        self.configured = false;
+        self.downstream_active = false;
+        self.downstream_route_port = 0;
+        self.hub_marked_as_hub = false;
+        self.hub_slot_id = 0;
+        self.hub_int_base = 0;
+        self.hub_int_dci = 0;
+        self.hub_reset = 0;
+        self.hub_powered = 0;
     }
 }
 
@@ -1185,6 +1374,7 @@ impl XhciHost for MockXhci {
                 self.hcrst_reads = 3;
                 self.hcrst_stuck |= self.hse_latched || self.pcd_latched;
                 self.cnr_reads = 0;
+                self.reset_device_model();
             }
             return Ok(());
         }
@@ -1256,17 +1446,40 @@ impl XhciHost for MockXhci {
         if offset >= db_base && offset < db_base + 256 * 4 {
             self.doorbells.push((offset - db_base, value));
             if self.mem.is_some() && self.usbcmd & regs::USBCMD_RUN != 0 {
-                let index = (offset - db_base) / 4;
-                match (index, value) {
-                    (0, 0) => self.process_command_ring(),
-                    (_, 1) => self.process_ep0_ring(),
-                    (_, 3) => self.process_int_ring(),
-                    _ => {}
-                }
+                self.ring_doorbell_model((offset - db_base) / 4, value);
             }
             return Ok(());
         }
         Ok(())
+    }
+}
+
+impl MockXhci {
+    /// Service a doorbell write at slot `index` with target `value` (the DCI,
+    /// or `0` for the command ring), driving the matching ring's device model.
+    fn ring_doorbell_model(&mut self, index: usize, value: u32) {
+        match (index, value) {
+            (0, 0) => self.process_command_ring(),
+            (_, 1) => {
+                // Switch the live EP0 ring to the rung slot's, like the
+                // DCBAA-indexed hardware: save the current slot's ring state
+                // and load the rung slot's.
+                if index < self.ep0_saved.len() && u8::try_from(index) != Ok(self.ep0_slot) {
+                    let cur = usize::from(self.ep0_slot);
+                    if cur < self.ep0_saved.len() {
+                        self.ep0_saved[cur] = (self.ep0_base, self.ep0_index, self.ep0_cycle);
+                    }
+                    let (base, idx, cycle) = self.ep0_saved[index];
+                    self.ep0_base = base;
+                    self.ep0_index = idx;
+                    self.ep0_cycle = cycle;
+                    self.ep0_slot = u8::try_from(index).unwrap_or(0);
+                }
+                self.process_ep0_ring();
+            }
+            (_, 3) => self.process_int_ring(),
+            _ => {}
+        }
     }
 }
 
@@ -2367,7 +2580,7 @@ impl Delay for TestDelay {
 }
 
 #[test]
-fn enumerate_boot_keyboard_returns_a_directly_attached_keyboard() {
+fn bring_up_keyboard_returns_a_directly_attached_keyboard() {
     // A keyboard wired straight to a root-hub port (no intervening hub):
     // the orchestration enumerates the first connected port and, because
     // the device is not a hub, returns it without touching the clock.
@@ -2375,9 +2588,14 @@ fn enumerate_boot_keyboard_returns_a_directly_attached_keyboard() {
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
     let delay = TestDelay::default();
 
-    let descriptor = device
-        .enumerate_boot_keyboard(&delay)
-        .expect("the directly-attached keyboard enumerates");
+    let descriptor = match device
+        .bring_up_keyboard(&delay)
+        .expect("the directly-attached keyboard enumerates")
+    {
+        BringUp::Device(descriptor) => descriptor,
+        BringUp::AwaitingDevice => panic!("a directly-attached keyboard must enumerate now"),
+    };
+    assert!(device.device_present(), "the enumerated device is live");
     assert!(!descriptor.is_hub(), "the root-port device is the keyboard");
     assert_eq!(descriptor.vendor_id, 0x046D);
     assert_eq!(
@@ -2403,7 +2621,7 @@ fn enumerate_boot_keyboard_returns_a_directly_attached_keyboard() {
 }
 
 #[test]
-fn enumerate_boot_keyboard_descends_through_a_hub_to_the_keyboard() {
+fn bring_up_keyboard_descends_through_a_hub_to_the_keyboard() {
     // The Pi 4B metal topology: the onboard hub enumerates on the root
     // port and a full-speed keyboard hangs off a downstream port. The
     // orchestration recognises the hub, powers its ports, waits the
@@ -2418,9 +2636,13 @@ fn enumerate_boot_keyboard_descends_through_a_hub_to_the_keyboard() {
     let mut device = started_device(mock, &mem);
     let delay = TestDelay::default();
 
-    let keyboard = device
-        .enumerate_boot_keyboard(&delay)
-        .expect("the keyboard behind the onboard hub is reached");
+    let keyboard = match device
+        .bring_up_keyboard(&delay)
+        .expect("the keyboard behind the onboard hub is reached")
+    {
+        BringUp::Device(keyboard) => keyboard,
+        BringUp::AwaitingDevice => panic!("a connected downstream keyboard must enumerate now"),
+    };
     assert!(
         !keyboard.is_hub(),
         "the downstream device is the HID keyboard, not another hub"
@@ -2452,10 +2674,12 @@ fn enumerate_boot_keyboard_descends_through_a_hub_to_the_keyboard() {
 }
 
 #[test]
-fn enumerate_boot_keyboard_fails_closed_when_a_hub_has_no_connected_downstream() {
-    // The root device is a hub, but no downstream port ever reports a
-    // connected device. The orchestration must fail closed
-    // (`DriverError::NotFound`) rather than guess a port.
+fn bring_up_keyboard_arms_the_hub_watch_when_no_downstream_device_is_present() {
+    // The root device is the onboard hub, but no downstream port has a
+    // device yet (a cold boot with the keyboard unplugged). Bring-up must
+    // NOT fail: the controller comes up, the hub's status-change watch is
+    // armed, and `AwaitingDevice` is returned so the HCD waits for the first
+    // connect event rather than failing closed.
     let mem = shared_mem();
     let mut mock = MockXhci::with_hub(&mem, 4, 4);
     // No connect bit, so every downstream port reads disconnected even
@@ -2465,13 +2689,81 @@ fn enumerate_boot_keyboard_fails_closed_when_a_hub_has_no_connected_downstream()
     let delay = TestDelay::default();
 
     assert_eq!(
-        device.enumerate_boot_keyboard(&delay).err(),
-        Some(DriverError::NotFound),
-        "a hub with nothing attached downstream fails closed"
+        device.bring_up_keyboard(&delay),
+        Ok(BringUp::AwaitingDevice),
+        "a hub with nothing attached downstream comes up awaiting a device"
+    );
+    assert!(
+        device.hub_watch_active(),
+        "the hub status-change watch is armed so the first connect is delivered event-driven"
+    );
+    assert!(
+        !device.device_present(),
+        "no HID device is live until one connects downstream"
     );
     // The power-on-good window was waited once; the reset-recovery wait is
     // never reached because no connected port is found.
     assert_eq!(delay.calls.get(), 1);
+}
+
+#[test]
+fn bring_up_keyboard_then_a_downstream_connect_enumerates_a_fresh_keyboard() {
+    // The cold-boot hot-plug path: the controller comes up with the onboard
+    // hub present but no downstream device (`AwaitingDevice`, watch armed),
+    // then a keyboard is plugged into a downstream port. A hub status-change
+    // report drives `next_hub_change` to enumerate it as a brand-new device,
+    // exactly as a re-attach would, and the keyboard's reports then drain.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    mock.hub_downstream_status = 0; // nothing attached downstream at boot
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+
+    assert_eq!(
+        device.bring_up_keyboard(&delay),
+        Ok(BringUp::AwaitingDevice),
+        "cold boot with no downstream device comes up awaiting one"
+    );
+    assert!(device.hub_watch_active());
+
+    // A full-speed keyboard is now plugged into downstream port 4: the hub
+    // latches a connect change and posts a status-change report naming that
+    // port (bit 4 of the change bitmap).
+    device.host_mut().hub_downstream_status = 1 << 0;
+    device.host_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
+    device.host_mut().post_hub_status_change(&[1 << 4]);
+
+    let descriptor = match device
+        .next_hub_change(&delay)
+        .expect("the status-change report is serviced")
+    {
+        HubEvent::Attached(descriptor) => descriptor,
+        other => panic!("a downstream connect must enumerate a device, got {other:?}"),
+    };
+    assert!(
+        !descriptor.is_hub(),
+        "the downstream device is the keyboard"
+    );
+    assert_eq!(descriptor.vendor_id, 0x046D);
+    assert!(
+        device.device_present(),
+        "the freshly-attached keyboard is now live"
+    );
+
+    // Keystrokes flow over the freshly-enumerated slot.
+    arm_report_request(&mut device);
+    device
+        .host_mut()
+        .pending_reports
+        .push_back(alloc::vec![0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    device.host_mut().process_int_ring();
+    let mut buf = [0u8; REPORT_LEN];
+    let len = device
+        .next_report(&mut buf)
+        .expect("a report drains")
+        .expect("a report is available after the cold-boot attach");
+    assert_eq!(len, REPORT_LEN);
+    assert_eq!(buf[2], 0x04, "the 'a' keycode reaches the report buffer");
 }
 
 #[test]
@@ -3154,5 +3446,226 @@ fn describe_device_before_enumeration_fails_closed() {
     assert_eq!(
         device.describe_device(7, 9).err(),
         Some(DriverError::NotFound)
+    );
+}
+
+/// `C_PORT_CONNECTION` (USB 2.0 §11.24.2.7.2.1) — the connect-status-change
+/// bit a hub latches in `wPortChange`, which the watch reads and clears.
+const PORT_CHANGE_CONNECTION: u16 = 1 << 0;
+
+#[test]
+fn hub_watch_arms_after_enumerating_through_a_hub() {
+    // Reaching the keyboard through the onboard hub arms the hub's
+    // status-change endpoint, so a later downstream connect/disconnect is
+    // delivered event-driven rather than polled.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    mock.hub_downstream_status = 1 << 0;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+
+    device
+        .bring_up_keyboard(&delay)
+        .expect("the keyboard behind the hub is reached");
+    assert!(
+        device.hub_watch_active(),
+        "the hub status-change watch is armed once a hub is descended"
+    );
+    // With no change pending, servicing the watch is a no-op (it parks on the
+    // controller interrupt, never polling).
+    assert_eq!(device.next_hub_change(&delay), Ok(HubEvent::None));
+}
+
+#[test]
+fn enumeration_drains_every_port_change_latch_so_the_hub_watch_stays_quiet() {
+    // Real hubs latch a Reset-change (`wPortChange` bit 4) when a downstream
+    // port is reset during enumeration, alongside the connect change. The hub
+    // keeps its status-change endpoint asserting a report for that port until
+    // *every* latched change is cleared. Clearing only the connect change
+    // leaves the reset change latched, so the freshly-armed watch fires
+    // immediately and forever on a stale change — drowning/faulting the
+    // keyboard's reports. This is the metal regression: enumeration must drain
+    // the whole change set so the watch goes quiet until a real hot-plug.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    mock.hub_downstream_status = 1 << 0;
+    mock.hub_downstream_change = PORT_CHANGE_CONNECTION;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+
+    device
+        .bring_up_keyboard(&delay)
+        .expect("the keyboard behind the hub is reached");
+
+    // Enumeration reset the downstream port (latching the Reset-change) and
+    // must have drained both that and the connect change, so nothing remains
+    // for the status-change endpoint to report.
+    assert_eq!(
+        device.host_mut().hub_downstream_change,
+        0,
+        "enumeration must clear every port-change latch, not just connect"
+    );
+
+    // A status-change report with no genuine change pending is a no-op: the
+    // watch fabricates neither a connect nor a disconnect, and leaves the port
+    // clear (no re-arm storm).
+    device.host_mut().post_hub_status_change(&[1 << 4]);
+    assert_eq!(device.next_hub_change(&delay), Ok(HubEvent::None));
+    assert_eq!(device.host_mut().hub_downstream_change, 0);
+    assert!(
+        device.device_present(),
+        "the keyboard stays enumerated through a spurious status-change report"
+    );
+}
+
+#[test]
+fn hub_watch_retracts_a_disconnected_downstream_device() {
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    mock.hub_downstream_status = 1 << 0;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+
+    device
+        .bring_up_keyboard(&delay)
+        .expect("the keyboard behind the hub is reached");
+    assert_eq!(device.slot(), 2, "the keyboard occupies the second slot");
+
+    // Unplug the keyboard: its hub port now reads disconnected with the
+    // connect-status change latched, and the hub posts a status-change report
+    // naming downstream port 4 (bit 4 of the change bitmap).
+    device.host_mut().hub_downstream_status = 0;
+    device.host_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
+    device.host_mut().post_hub_status_change(&[1 << 4]);
+
+    assert_eq!(
+        device.next_hub_change(&delay),
+        Ok(HubEvent::Detached),
+        "the disconnected downstream device is detected"
+    );
+    assert!(!device.device_present(), "its device slot was freed");
+    assert!(
+        device.hub_watch_active(),
+        "the controller and its hub watch stay up after a detach"
+    );
+}
+
+#[test]
+fn hub_watch_reenumerates_a_reattached_device_on_a_fresh_slot() {
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    mock.hub_downstream_status = 1 << 0;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+
+    device
+        .bring_up_keyboard(&delay)
+        .expect("the keyboard behind the hub is reached");
+
+    // Unplug.
+    device.host_mut().hub_downstream_status = 0;
+    device.host_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
+    device.host_mut().post_hub_status_change(&[1 << 4]);
+    assert_eq!(device.next_hub_change(&delay), Ok(HubEvent::Detached));
+
+    // Re-plug: the port reads connected again with the change latched. The
+    // reconnect is treated as a brand-new device — a fresh slot, no reuse of
+    // the old one.
+    device.host_mut().hub_downstream_status = 1 << 0;
+    device.host_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
+    device.host_mut().post_hub_status_change(&[1 << 4]);
+    match device.next_hub_change(&delay) {
+        Ok(HubEvent::Attached(descriptor)) => {
+            assert!(
+                !descriptor.is_hub(),
+                "the reattached device is the keyboard"
+            );
+            assert_eq!(descriptor.vendor_id, 0x046D);
+            assert_eq!(descriptor.product_id, 0xC077);
+        }
+        other => panic!("expected a fresh attach, got {other:?}"),
+    }
+    assert!(
+        device.slot() > 2,
+        "a re-attach allocates a brand-new slot, never the freed one"
+    );
+}
+
+#[test]
+fn reset_and_reenumerate_brings_up_a_directly_attached_device_as_new() {
+    // The recovery path for a directly-attached (no hub) device that
+    // reconnected on its root port: a full controller reset + re-enumeration
+    // brings it up as a brand-new device.
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_device(&mem), &mem);
+    let delay = TestDelay::default();
+
+    device
+        .bring_up_keyboard(&delay)
+        .expect("the directly-attached keyboard enumerates");
+    assert_eq!(device.slot(), 1);
+
+    let descriptor = match device
+        .reset_and_reenumerate(&delay)
+        .expect("the controller resets and re-enumerates the device")
+    {
+        BringUp::Device(descriptor) => descriptor,
+        BringUp::AwaitingDevice => panic!("a connected directly-attached device must enumerate"),
+    };
+    assert!(!descriptor.is_hub());
+    assert_eq!(descriptor.vendor_id, 0x046D);
+    assert_ne!(device.slot(), 0, "a device is enumerated after the reset");
+}
+
+#[test]
+fn bring_up_keyboard_comes_up_awaiting_a_connect_when_no_device_is_attached() {
+    // The cold-boot path for a directly-attached topology with nothing
+    // plugged in: no root-hub port reports a connected device, so bring-up
+    // must NOT fail. The controller comes up `AwaitingDevice` (no hub, so the
+    // root-port connect watch is used, not a hub status-change watch) and the
+    // HCD waits for the first root-port connect rather than failing closed.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_device(&mem);
+    // No connected device on any root port, and no latent device to assert a
+    // connect when the ports are powered.
+    mock.portsc[0] = 0;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+
+    assert_eq!(
+        device.bring_up_keyboard(&delay),
+        Ok(BringUp::AwaitingDevice),
+        "an empty root hub comes up awaiting a device, not failing"
+    );
+    assert!(
+        !device.hub_watch_active(),
+        "no hub is present, so the root-port connect watch is used"
+    );
+    assert!(!device.device_present(), "no device is live yet");
+    assert!(
+        !device.any_root_port_connected(),
+        "no root port reports a connected device while nothing is attached"
+    );
+
+    // A keyboard is now plugged into a root port: the controller resets and
+    // enumerates it as a brand-new device.
+    device.host_mut().portsc[0] =
+        regs::PORTSC_CCS | regs::PORTSC_PED | regs::PORTSC_PP | (3 << regs::PORTSC_SPEED_SHIFT);
+    assert!(
+        device.any_root_port_connected(),
+        "the freshly-attached device is seen on its root port"
+    );
+    let descriptor = match device
+        .reset_and_reenumerate(&delay)
+        .expect("the controller resets and enumerates the freshly-attached device")
+    {
+        BringUp::Device(descriptor) => descriptor,
+        BringUp::AwaitingDevice => panic!("the now-connected device must enumerate"),
+    };
+    assert!(!descriptor.is_hub());
+    assert_eq!(descriptor.vendor_id, 0x046D);
+    assert!(
+        device.device_present(),
+        "the keyboard is live after the attach"
     );
 }

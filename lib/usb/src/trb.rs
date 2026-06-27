@@ -217,6 +217,9 @@ pub enum TrbType {
     NoOp = 8,
     /// Enable Slot command (§6.4.3.2).
     EnableSlot = 9,
+    /// Disable Slot command (§6.4.3.3): release a device slot when its
+    /// device has disconnected, returning the slot to the controller's pool.
+    DisableSlot = 10,
     /// Address Device command (§6.4.3.4).
     AddressDevice = 11,
     /// Configure Endpoint command (§6.4.3.5).
@@ -252,6 +255,7 @@ impl TrbType {
             6 => Ok(Self::Link),
             8 => Ok(Self::NoOp),
             9 => Ok(Self::EnableSlot),
+            10 => Ok(Self::DisableSlot),
             11 => Ok(Self::AddressDevice),
             12 => Ok(Self::ConfigureEndpoint),
             23 => Ok(Self::NoOpCommand),

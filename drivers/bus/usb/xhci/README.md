@@ -3,10 +3,13 @@
 `plans/USB.md` U3b. The loadable, autoloaded **host-controller driver**: the
 sole owner of one xHCI controller. It maps the controller's register BAR, owns
 its DMA rings and root-hub ports, brings it up, enumerates the attached device,
-publishes one hardware-tree node per USB interface, and **serves that
-interface's transfers** over the bus-agnostic URB transport to an autoloaded
-**class** driver (`drivers/input/usb_kbd`, …). It names no class driver, no
-board, and no bus (`AGENTS.md` §2.20 / §17.4).
+publishes one hardware-tree node per USB interface once a device is present,
+and **serves that interface's transfers** over the bus-agnostic URB transport to
+an autoloaded **class** driver (`drivers/input/usb_kbd`, …). It names no class
+driver, no board, and no bus (`AGENTS.md` §2.20 / §17.4). A device absent at
+boot is a first-class state: the controller comes up and waits for the first
+hot-plug connect (the onboard hub's status-change watch, or a root-port
+connect), so a cold boot with the keyboard unplugged works.
 
 The crate is a `lib` (host-testable logic) **and** a `Run` binary (the process).
 
@@ -25,7 +28,9 @@ lib/*` only; the USB analogue of `lib/virtio` ↔ `drivers/bus/virtio`).
   derive the BAR/DMA bounds from the granted resources, carve+aperture-check
   the DMA region (fail-closed `OutOfRange`, §5.4), map the BAR, and bring the
   controller up via `rustos_usb::Xhci::open` + `UsbDevice::start` +
-  `enumerate_boot_keyboard`, returning the enumerated `UsbDevice`.
+  `UsbDevice::bring_up_keyboard`, returning the `UsbDevice` engine — pointed at
+  the device's slot when one is present, or serving with its first-connect watch
+  armed (`BringUp::AwaitingDevice`) when none is yet attached.
 - `serve` — `UrbService`, the per-interface state holding at most one
   outstanding interrupt-IN URB (a second concurrent submit fails closed
   `AlreadyExists`), driven on submit/IRQ through `rustos_usb::drive_urb` /
@@ -39,8 +44,13 @@ lib/*` only; the USB analogue of `lib/virtio` ↔ `drivers/bus/virtio`).
   on the URB endpoint **and** the controller IRQ: a URB submit is driven and
   either replied at once or held outstanding; a controller interrupt drains the
   event ring, replies the now-complete URB (bounce-copying the report into the
-  shared buffer), and watches the root-hub port to retract the interface node
-  on disconnect. It never busy-polls (`AGENTS.md` §2.23).
+  shared buffer), and services hot-plug — the onboard hub's status-change watch
+  (`next_hub_change`: enumerate a freshly-connected device and publish a node,
+  or retract on disconnect) or, for a directly-attached device, the root-port
+  connect/disconnect (`any_root_port_connected` → `reset_and_reenumerate`). Every
+  (re)attach publishes a fresh node carrying the same transport grants so the
+  class driver re-autoloads onto the same sink. It never busy-polls
+  (`AGENTS.md` §2.23).
 
 ## Least privilege (`AGENTS.md` §5.4)
 
@@ -65,8 +75,13 @@ controller behaviour is a metal checklist (`plans/PI.md` §0.4).
 ## Limitations
 
 - One enumerated device per controller engine (`UsbDevice` drives a single HID
-  device's slot + interrupt-IN endpoint). Re-enumeration on re-attach and
-  hub-downstream disconnect detection are staged (`plans/USB.md` U5).
+  device's slot + interrupt-IN endpoint). Event-driven hot-plug — hub-downstream
+  connect/disconnect, directly-attached connect/disconnect, fresh
+  re-enumeration, and cold boot with no device attached — is built and
+  host-proven (`plans/USB.md` U5); live attach/detach/cold-boot acceptance is
+  metal-only (QEMU models no Pi USB).
+- Only a single hub tier (the Pi 4's onboard hub) is descended and watched; a
+  hub behind a hub is out of scope (`plans/USB.md` §4).
 
 ## Test surface
 

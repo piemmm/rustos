@@ -400,27 +400,93 @@ the live controller behaviour is host- and CI-proven first.
   `drivers/input/usb_hid` stub is deleted. Image builder ships both the
   `xhci` HCD bundle (`bus_usb/xhci`) and the retuned `usb_kbd` class-driver
   bundle.
-- **U5 — end-to-end metal acceptance + cleanup `[ ]`.** Attach → keystroke;
-  detach → `usb_kbd` unloaded, controller stays up; re-attach → autoloads
-  again. The HCD's disconnect→`hw_remove_node` is wired (root-port `CCS`);
-  two refinements are staged here, not yet built: **re-enumeration on
-  re-attach** (the `UsbDevice` engine is one-shot; a fresh connect needs a
-  reset+re-enumerate path) and **hub-downstream disconnect detection** (the
-  current watch is the device's root port; a device behind the onboard hub
-  needs the hub's per-port status). Update `README.md` matrix on metal sign-off.
+- **U5 — event-driven hot-plug + re-enumeration `[x]` (DONE host/CI; live
+  metal acceptance is the operator's).** Both staged refinements are built in
+  `lib/usb`, and the HCD services them:
+  - **Hub-downstream hot-plug is event-driven, not polled.** The `UsbDevice`
+    engine, when it descends one tier through a hub, configures and **arms the
+    hub's interrupt-IN status-change endpoint** (USB 2.0 §11.12.3) and keeps
+    the hub addressed (the resting active control context) concurrently with
+    the downstream device. The shared xHCI event ring is **demultiplexed per
+    endpoint** (`is_hub_async`/`is_kbd_async` + the `pending_kbd`/`pending_hub`
+    parking slots), so a status-change report and a keyboard report never
+    collide and a synchronous EP0/command wait never faults on an async
+    completion. `next_hub_change` reads the changed downstream port: a
+    disconnect frees the device slot (Disable Slot) → `HubEvent::Detached`; a
+    connect enumerates a **brand-new** device → `HubEvent::Attached`. No
+    busy-poll, no spin (§2.23) — it parks on the controller interrupt.
+  - **Every port-change latch is drained, not just connect.** Resetting a
+    downstream port during enumeration latches the hub's Reset-change (and may
+    latch Enable-change) in `wPortChange` alongside Connect-change; a hub keeps
+    its status-change endpoint asserting a report for that port until **all**
+    its latched changes are cleared. So `clear_hub_port_changes` issues one
+    `CLEAR_FEATURE` per set change bit (connection/enable/suspend/over-current/
+    reset), and enumeration drains the whole set before the watch is armed.
+    Clearing only Connect-change left the Reset-change latched, so the
+    freshly-armed watch fired immediately and forever on a stale change — on
+    metal that derailed the keyboard (the hub status-change service faulted
+    `DeviceFault` and the keyboard's reports errored out). `process_hub_change`
+    acts only on a genuine connect/disconnect transition and drains every
+    latch, so the watch goes quiet until the next real hot-plug.
+  - **Re-attach is a fresh device, never reused state** (the operator's
+    requirement): on connect the engine resets the downstream port and
+    enumerates on a fresh slot; the HCD re-emits a **new** interface node
+    carrying the same endpoint+shm grants, so `devmgr` re-autoloads `usb_kbd`
+    onto the same transport and keystrokes resume to the same OS sink.
+    Re-attach zeroes the reused EP0/interrupt ring regions first (stale TRBs at
+    the producer cycle would otherwise be consumed past the new enqueue
+    pointer — a real-hardware correctness fix).
+  - **Directly-attached (no hub) hot-plug** uses the root-port `CCS` watch for
+    disconnect and `UsbDevice::reset_and_reenumerate` (full HCRST + re-program
+    + re-enumerate) on a root-port connect, treating it as a brand-new device.
+    The connect trigger is `UsbDevice::any_root_port_connected` (any root port,
+    since with no device addressed there is no specific port to watch).
+  - **A device absent at initial bring-up is a first-class state, not a
+    failure.** `UsbDevice::bring_up_keyboard` (replacing the old
+    `enumerate_boot_keyboard`) returns `BringUp::{Device, AwaitingDevice}`: the
+    controller is always brought up and left serving. When the root device is
+    the onboard hub but no downstream device is connected yet, the hub's
+    status-change watch is armed and `AwaitingDevice` is returned; when no root
+    device is present at all, the controller waits for the first root-port
+    connect. The HCD publishes the interface node only once the first connect
+    enumerates a device (`device_present()`), so a cold boot with the keyboard
+    unplugged works: plug it in afterwards and it autoloads. `reset_and_reenumerate`
+    returns the same `BringUp`, so a device that vanished before re-enumeration
+    leaves the controller awaiting one rather than faulting.
+  - Host/CI-proven over the register-level mock (the mock gained a hub
+    status-change endpoint, per-slot EP0-ring tracking, Disable Slot, and HCRST
+    state reset; `SET_FEATURE(PORT_RESET)` latches the Reset-change bit and
+    `CLEAR_FEATURE` clears only the selected change, mirroring real hardware):
+    `hub_watch_arms…`, `hub_watch_retracts_a_disconnected…`,
+    `hub_watch_reenumerates_a_reattached_device_on_a_fresh_slot`,
+    `reset_and_reenumerate_brings_up_a_directly_attached_device_as_new`,
+    `enumeration_drains_every_port_change_latch_so_the_hub_watch_stays_quiet`,
+    and the cold-boot-no-device cases
+    `bring_up_keyboard_arms_the_hub_watch_when_no_downstream_device_is_present`,
+    `bring_up_keyboard_then_a_downstream_connect_enumerates_a_fresh_keyboard`,
+    `bring_up_keyboard_comes_up_awaiting_a_connect_when_no_device_is_attached`.
+  - **Remaining (operator's):** live metal acceptance — attach → keystroke,
+    detach → `usb_kbd` unloaded (controller stays up), re-attach → autoloads
+    again, **and cold boot with the keyboard unplugged then plugged in** — is
+    inherently metal-only (QEMU models no Pi USB, §0.4). Update the `README.md`
+    matrix on metal sign-off.
 
-U1, U2, U3a, U3a2, U3a3, U3b, and U4 are landed; the modular split is complete
-and host-/CI-proven. U5 (live metal acceptance + the two staged refinements
-above) is the remaining increment, and is inherently metal-only (QEMU models
-no Pi USB, §0.4).
+U1–U5 are landed; the modular USB stack — bus driver → user-space HCD owning
+one controller and serving the URB transport → per-interface class drivers,
+with event-driven hub hot-plug and fresh re-enumeration — is complete and
+host-/CI-proven. The live attach/detach/re-attach behaviour is metal-only and
+is the operator's acceptance step (QEMU models no Pi USB, §0.4).
 
 ---
 
 ## 4. Out of scope (explicitly)
 
-- Non-boot-protocol HID, hubs beyond the root hub, isochronous transfers, and
-  bulk-storage class drivers — each is a later class driver or HCD extension on
-  top of this seam, not part of bringing the split up.
+- Non-boot-protocol HID, **multi-tier** hubs (a hub behind a hub — only the
+  single onboard-hub tier the Pi 4 presents is descended and watched),
+  isochronous transfers, and bulk-storage class drivers — each is a later class
+  driver or HCD extension on top of this seam, not part of bringing the split
+  up. (Single-tier hub *hot-plug* is in: U5 services the onboard hub's
+  status-change endpoint event-driven.)
 - A second host-controller driver (a non-xHCI controller): the architecture
   admits it (it binds a different controller node and serves the same URB ABI),
   but none is planned here.

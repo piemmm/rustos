@@ -1251,11 +1251,15 @@ device that is present but faults part-way through enumeration.
 root→hub→downstream-HID bring-up sequence (enumerate the first connected
 root-hub port; if it is a hub, power its ports, find the connected one,
 reset it, and address the device behind it on a second xHCI slot) lives in
-one place — `rustos_usb::device::UsbDevice::enumerate_boot_keyboard` — so a
+one place — `rustos_usb::device::UsbDevice::bring_up_keyboard` — so a
 keyboard reached through the Pi 4B's onboard hub is *discovered*, never a
 guessed port (`AGENTS.md` §2.2 / §18), and the same routine serves any USB
-keyboard driver over `lib/usb`. `bring_up_keyboard` calls it once and logs
-the enumerated device; a fault fails closed.
+keyboard driver over `lib/usb`. The HCD calls it once at bring-up; a device
+absent at that point is not a failure — it returns `BringUp::AwaitingDevice`
+with the controller up and the first-connect watch armed (the onboard hub's
+status-change endpoint, or the root port), so a cold boot with the keyboard
+unplugged works and it autoloads when plugged in. A real enumeration fault
+fails closed.
 
 **Keyboard poll-loop diagnostics (`4129`/`4130`/`4131`).** Once the
 keyboard is brought up, the keyboard
@@ -1975,7 +1979,7 @@ silently dropped two things the metal-debugged scaffold relied on:
    EL0 cannot do cache maintenance (`SCTLR_EL1.UCI` is clear), so it could
    not have anyway. The carve was plain cacheable RAM, so the first
    command-ring TRB the driver wrote sat in a dirty cache line the controller
-   never saw: `UsbDevice::enumerate_boot_keyboard` stalled on the very first
+   never saw: `UsbDevice::bring_up_keyboard` stalled on the very first
    Enable Slot (no completion ⇒ the budget-poll timeout), so the onboard
    hub's downstream ports were never powered — the "no device power" metal
    symptom, the chain exiting ~644 ms after the last syscall with no `delay`

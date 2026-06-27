@@ -473,7 +473,7 @@ impl<H: XhciHost> Xhci<H> {
     /// Host System Error / Port Change status firmware left, issue the
     /// Host Controller Reset, and wait for it to self-clear and for
     /// Controller Not Ready to clear before any further programming.
-    fn reset_to_ready(&mut self, budget: u32) -> Result<(), XhciOpenError> {
+    pub(crate) fn reset_to_ready(&mut self, budget: u32) -> Result<(), XhciOpenError> {
         // Halt a running controller before resetting it (§5.4.1.1).
         let usbcmd = self
             .read_op(regs::USBCMD)
