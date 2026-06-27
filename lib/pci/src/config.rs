@@ -186,6 +186,10 @@ pub enum Capability {
         message_count: u8,
         /// `true` if the capability advertises 64-bit addressing.
         addressing_64bit: bool,
+        /// `true` if the capability carries per-vector mask and pending
+        /// registers. A masked MSI vector never emits its message write, so
+        /// the routing path must explicitly clear the mask register.
+        per_vector_masking: bool,
     },
     /// MSI-X capability (`cap_id = 0x11`).
     MsiX {

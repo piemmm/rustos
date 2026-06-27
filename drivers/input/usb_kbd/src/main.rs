@@ -13,10 +13,9 @@
 //! reports, decodes each boot report through the arch-neutral `rustos_hid`
 //! composition, and injects keystrokes through `key_inject`. It knows neither
 //! the controller type nor the bus — the same binary works unchanged behind
-//! any host controller that speaks the URB transport (`AGENTS.md` §2.20 /
-//! §17.4).
+//! any host controller that speaks the URB transport.
 //!
-//! # Least privilege (`AGENTS.md` §5.4)
+//! # Least privilege
 //!
 //! It holds only `CAP_INPUT_INJECT` (inject decoded key edges), `CAP_SHM` (map
 //! the granted URB buffer), `CAP_IPC_ENDPOINT` (submit URBs on its one
@@ -24,7 +23,7 @@
 //! A compromised keyboard driver cannot reprogram the controller, reach
 //! another device's buffer, or touch the bus.
 //!
-//! # Event-driven, never a busy-poll (`AGENTS.md` §2.23)
+//! # Event-driven, never a busy-poll
 //!
 //! Reading the next report is a **blocking** `ipc_call` (the URB submit): the
 //! host-controller driver leaves the call outstanding and replies only when the
@@ -32,9 +31,9 @@
 //! the kernel between keystrokes rather than spinning. The service loop is just
 //! `pump_once` over the URB-backed report source.
 //!
-//! It is a **pure-Rust** program (`AGENTS.md` §1); on the host it is an inert
+//! It is a **pure-Rust** program; on the host it is an inert
 //! stub so `cargo build --workspace`, clippy, and fmt still cover the file. The
-//! live report path is metal-only (QEMU models no Pi USB, §0.4).
+//! live report path is metal-only because QEMU models no Pi USB.
 
 #![cfg_attr(freestanding, no_std)]
 #![cfg_attr(freestanding, no_main)]
@@ -44,9 +43,16 @@
 // bind table — lives in the crate's `lib` target so the host image builder can
 // author the signed manifest from it; this binary is the `Run` entry point.
 
+#[cfg(any(test, freestanding))]
+fn pump_error_limit_reached(consecutive_errors: &mut u8, limit: u8) -> bool {
+    *consecutive_errors = consecutive_errors.saturating_add(1);
+    *consecutive_errors >= limit
+}
+
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
+    use super::pump_error_limit_reached;
     use rustos_abi::driver::input::ReportSource;
     use rustos_abi::input::KeyInput;
     use rustos_abi::{CapabilityId, DriverError, Errno};
@@ -56,6 +62,7 @@ mod program {
     use rustos_log::{log, Event, EventId, Level};
     use rustos_rt::LogSink;
     use rustos_usb::transport::{UrbCall, UrbClient};
+    use rustos_util::fmt::format_hex_u64;
 
     /// Exit code when the rt-backed driver host could not be built from the
     /// kernel-delivered grants. A reserved, fail-closed value.
@@ -67,6 +74,31 @@ mod program {
 
     /// Diagnostic event id: the one-shot "bound, pumping reports" beacon.
     const USB_KBD_READY: EventId = EventId(4101);
+
+    /// Diagnostic event id: a keyboard-driver setup step completed.
+    const USB_KBD_SETUP: EventId = EventId(4142);
+
+    /// Diagnostic event id: a keyboard-driver URB request is about to be sent.
+    const USB_KBD_URB_SUBMIT: EventId = EventId(4143);
+
+    /// Diagnostic event id: a keyboard-driver URB returned.
+    const USB_KBD_URB_REPLY: EventId = EventId(4144);
+
+    /// Diagnostic event id: a keyboard-driver URB/syscall failed.
+    const USB_KBD_URB_ERROR: EventId = EventId(4145);
+
+    /// Diagnostic event id: a report was copied from the shared URB buffer.
+    const USB_KBD_REPORT: EventId = EventId(4146);
+
+    /// Diagnostic event id: decoded keyboard input reached the injection sink.
+    const USB_KBD_INJECT: EventId = EventId(4147);
+
+    /// Diagnostic event id: one `pump_once` iteration failed.
+    const USB_KBD_PUMP_ERROR: EventId = EventId(4148);
+
+    /// Consecutive immediate pump faults tolerated before the driver exits
+    /// fail-closed rather than retrying hot.
+    const MAX_CONSECUTIVE_PUMP_ERRORS: u8 = 4;
 
     /// The interrupt-IN endpoint number named in the URB. The host-controller
     /// driver serves the device's single enumerated interrupt-IN endpoint
@@ -93,13 +125,63 @@ mod program {
         endpoint: u64,
     }
 
+    fn log_hex_event(
+        id: EventId,
+        level: Level,
+        message: &'static str,
+        key: &'static str,
+        value: u64,
+    ) {
+        let mut value_buf = [0u8; 16];
+        log(
+            &LogSink,
+            &Event {
+                level,
+                id,
+                message,
+                fields: &[rustos_log::Field {
+                    key,
+                    value: format_hex_u64(value, &mut value_buf),
+                }],
+            },
+        );
+    }
+
     impl UrbCall for IpcUrbCall {
         fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
             // The call blocks in the kernel until the HCD replies (when the
             // report arrives), so this driver parks rather than busy-polling.
-            rustos_rt::ipc_call(self.endpoint, request, reply).map_err(|neg| {
-                Errno::from_i32(i32::try_from(-neg).unwrap_or(0)).unwrap_or(Errno::NotFound)
-            })
+            log_hex_event(
+                USB_KBD_URB_SUBMIT,
+                Level::Debug,
+                "usb-keyboard: submitting interrupt-in URB",
+                "endpoint_hex",
+                self.endpoint,
+            );
+            match rustos_rt::ipc_call(self.endpoint, request, reply) {
+                Ok(len) => {
+                    log_hex_event(
+                        USB_KBD_URB_REPLY,
+                        Level::Debug,
+                        "usb-keyboard: URB reply received",
+                        "len_hex",
+                        len as u64,
+                    );
+                    Ok(len)
+                }
+                Err(neg) => {
+                    let errno = Errno::from_i32(i32::try_from(-neg).unwrap_or(0))
+                        .unwrap_or(Errno::NotFound);
+                    log_hex_event(
+                        USB_KBD_URB_ERROR,
+                        Level::Warn,
+                        "usb-keyboard: URB ipc_call failed",
+                        "errno_hex",
+                        errno as u64,
+                    );
+                    Err(errno)
+                }
+            }
         }
     }
 
@@ -119,10 +201,23 @@ mod program {
             // Submit the interrupt-IN URB and block until the HCD delivers a
             // report into the shared buffer; a transport/controller fault is a
             // non-fatal poll error the service loop retries.
-            let transferred = self
-                .client
-                .interrupt_in(INTERRUPT_ENDPOINT, self.shm_base, REPORT_BUF_LEN as u32)
-                .map_err(|_| DriverError::DeviceFault)?;
+            let transferred = match self.client.interrupt_in(
+                INTERRUPT_ENDPOINT,
+                self.shm_base,
+                REPORT_BUF_LEN as u32,
+            ) {
+                Ok(transferred) => transferred,
+                Err(err) => {
+                    log_hex_event(
+                        USB_KBD_URB_ERROR,
+                        Level::Warn,
+                        "usb-keyboard: interrupt-in URB completion carried an error",
+                        "errno_hex",
+                        err as u64,
+                    );
+                    return Err(DriverError::DeviceFault);
+                }
+            };
             let n = (transferred as usize).min(REPORT_BUF_LEN).min(buf.len());
             // SAFETY: `RtDriverHost::map_shared` mapped at least
             // `REPORT_BUF_LEN` bytes of the granted shared region RW into this
@@ -135,6 +230,13 @@ mod program {
                 core::slice::from_raw_parts(self.shm_base as usize as *const u8, REPORT_BUF_LEN)
             };
             buf[..n].copy_from_slice(&shm[..n]);
+            log_hex_event(
+                USB_KBD_REPORT,
+                Level::Debug,
+                "usb-keyboard: report copied from shared buffer",
+                "len_hex",
+                n as u64,
+            );
             Ok(Some(n))
         }
     }
@@ -152,9 +254,30 @@ mod program {
     impl ConsoleSink for KeyInjectSink {
         fn write(&mut self, bytes: &[u8]) -> Result<(), DriverError> {
             let record = KeyInput::from_bytes(bytes).map_err(|_| DriverError::DeviceFault)?;
+            log_hex_event(
+                USB_KBD_INJECT,
+                Level::Debug,
+                "usb-keyboard: decoded key record ready for injection",
+                "bytes_hex",
+                bytes.len() as u64,
+            );
             if rustos_rt::key_inject(&record) < 0 {
+                log_hex_event(
+                    USB_KBD_INJECT,
+                    Level::Warn,
+                    "usb-keyboard: key injection failed",
+                    "bytes_hex",
+                    bytes.len() as u64,
+                );
                 return Err(DriverError::DeviceFault);
             }
+            log_hex_event(
+                USB_KBD_INJECT,
+                Level::Debug,
+                "usb-keyboard: key injection accepted",
+                "bytes_hex",
+                bytes.len() as u64,
+            );
             Ok(())
         }
     }
@@ -174,9 +297,23 @@ mod program {
         let Some(endpoint) = host.urb_endpoint() else {
             return EXIT_NO_TRANSPORT;
         };
+        log_hex_event(
+            USB_KBD_SETUP,
+            Level::Info,
+            "usb-keyboard: URB endpoint grant discovered",
+            "endpoint_hex",
+            endpoint,
+        );
         let Ok(shm_base) = host.map_shared() else {
             return EXIT_NO_TRANSPORT;
         };
+        log_hex_event(
+            USB_KBD_SETUP,
+            Level::Info,
+            "usb-keyboard: shared report buffer mapped",
+            "base_hex",
+            shm_base,
+        );
 
         let source = UrbReportSource {
             client: UrbClient::new(IpcUrbCall { endpoint }),
@@ -185,6 +322,7 @@ mod program {
         let mut keyboard = BootKeyboard::new(source);
         let mut console = KeyboardConsole::new();
         let mut sink = KeyInjectSink;
+        let mut consecutive_pump_errors = 0u8;
 
         log(
             &LogSink,
@@ -199,10 +337,36 @@ mod program {
         // Event-driven service loop: `pump_once` reads the next report through
         // the URB-backed source, which blocks in the kernel on the `ipc_call`
         // until the host-controller driver delivers one — so this loop parks
-        // between keystrokes and never busy-polls (§2.23). A `pump_once` error
-        // is non-fatal: the next iteration re-submits.
+        // between keystrokes and never busy-polls. A single `pump_once` error
+        // is retried, but repeated immediate faults exit fail-closed rather
+        // than retrying hot.
         loop {
-            let _ = pump_once(&mut keyboard, &mut console, &mut sink);
+            match pump_once(&mut keyboard, &mut console, &mut sink) {
+                Ok(_) => consecutive_pump_errors = 0,
+                Err(_) => {
+                    let exhausted = pump_error_limit_reached(
+                        &mut consecutive_pump_errors,
+                        MAX_CONSECUTIVE_PUMP_ERRORS,
+                    );
+                    log_hex_event(
+                        USB_KBD_PUMP_ERROR,
+                        Level::Warn,
+                        "usb-keyboard: pump_once returned an error",
+                        "consecutive_hex",
+                        u64::from(consecutive_pump_errors),
+                    );
+                    if exhausted {
+                        log_hex_event(
+                            USB_KBD_PUMP_ERROR,
+                            Level::Error,
+                            "usb-keyboard: repeated pump errors, exiting fail-closed",
+                            "consecutive_hex",
+                            u64::from(consecutive_pump_errors),
+                        );
+                        return EXIT_NO_TRANSPORT;
+                    }
+                }
+            }
         }
     }
 
@@ -216,4 +380,30 @@ fn main() {
     // above is built only for the bare-metal driver targets. Keeping a host
     // `main` lets `cargo build --workspace`, clippy, and fmt still cover the
     // file, mirroring the other driver `Run` binaries.
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pump_error_limit_reached;
+
+    #[test]
+    fn pump_error_limit_fails_closed_without_wrapping() {
+        let mut errors = u8::MAX - 1;
+        assert!(pump_error_limit_reached(&mut errors, u8::MAX));
+        assert_eq!(errors, u8::MAX);
+        assert!(pump_error_limit_reached(&mut errors, u8::MAX));
+        assert_eq!(errors, u8::MAX);
+    }
+
+    #[test]
+    fn pump_error_limit_allows_transient_errors() {
+        let mut errors = 0;
+        assert!(!pump_error_limit_reached(&mut errors, 3));
+        assert_eq!(errors, 1);
+        assert!(!pump_error_limit_reached(&mut errors, 3));
+        assert_eq!(errors, 2);
+        errors = 0;
+        assert!(!pump_error_limit_reached(&mut errors, 3));
+        assert_eq!(errors, 1);
+    }
 }

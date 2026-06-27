@@ -125,9 +125,17 @@
 //! login prompts lethargic. Draining must never block the CPU; only a **full**
 //! ring blocks, and only the producer.
 //!
-//! When the ring fills, a producer block-flushes (`flush_blocking`) to bound
-//! memory (operator-directed: block when full); when the UART is genuinely
-//! wedged that flush drops bytes rather than hanging (lossy). The boot
+//! When the ring fills, a producer makes room **without blocking on the
+//! UART** (`enqueue_byte`): it pushes only what the transmit FIFO accepts
+//! right now and drops the overflow, because logging is best-effort and must
+//! never stall the calling task at the line's byte rate. A 4 KiB ring drained
+//! at 9600 baud takes ~4.3 s to flush, so a *blocking* full-ring flush froze
+//! the kernel for seconds during a logging burst — long enough to leave the
+//! USB interrupt endpoint un-armed and silently swallow typed keystrokes — and
+//! is exactly the hot-path stall the charter forbids. The transmit ISR and the
+//! dispatch-loop pump drain the backlog at the device's real throughput. The
+//! debug image enlarges the ring so a bursty bring-up rarely drops; the
+//! shippable image keeps it small. The boot
 //! beacons stay on the direct, lock-free path (`beacon`) because they run with
 //! the MMU off, where the ring's lock is unusable, and must trace a hang
 //! *immediately*. This is the design `lib/log` always documented ("sinks copy
@@ -152,20 +160,34 @@ use crate::console::{tx_wait, TxOutcome, TX_POLL_BUDGET};
 /// A producer copies its bytes into this RAM buffer and returns,
 /// instead of spinning in [`crate::console::tx_wait`] until the FIFO accepts every byte —
 /// so a producer never blocks the calling task on the slow UART transmit
-/// (: logging must not stall the keyboard report
-/// pump). ~4 KiB per operator direction: large enough that ordinary boots
-/// never fill it, small enough to bound the kernel `.bss` footprint.
+/// (logging must not stall the keyboard report pump or any other hot path).
+/// A full ring is drained opportunistically and then overflowed (lossy),
+/// never block-flushed, so a logging burst can never freeze the kernel at the
+/// UART's byte rate.
+///
+/// The **debug** image (which streams a verbose per-syscall boot log to a
+/// slow UART) gets a large ring so a bursty driver bring-up rarely has to drop
+/// a line; the shippable **release** image logs sparingly, so a small ring
+/// bounds its `.bss` footprint. At 9600 baud even the large ring drains in
+/// well under a second of real console time once the burst ends.
+#[cfg(all(debug_assertions, target_os = "none"))]
+const SERIAL_RING_CAP: usize = 256 * 1024;
+/// See the debug freestanding variant above; the release image and the
+/// host unit-test build (which only exercises the pure ring discipline)
+/// keep a small ring.
+#[cfg(not(all(debug_assertions, target_os = "none")))]
 const SERIAL_RING_CAP: usize = 4096;
 
 /// A bounded byte FIFO buffering outbound serial bytes (log lines and
 /// raw console output alike).
 ///
 /// Pure (no MMIO), so the queue discipline is host-unit-tested; the
-/// freestanding glue in this module drains it to the UART. The ring never
-/// silently discards bytes: when it is full the producer drains it to the
-/// device first ([`flush_blocking`]), which becomes lossy only when the
-/// UART is wedged ([`crate::console::tx_wait`] drops a byte a dead transmitter can never
-/// accept, never hang).
+/// freestanding glue in this module drains it to the UART. When it is full
+/// the producer ([`enqueue_byte`]) makes room without blocking on the device
+/// — it pushes only what the transmit FIFO accepts right now and drops the
+/// overflow — so a logging burst on a slow UART can never stall the kernel;
+/// the transmit ISR and the dispatch-loop pump drain the rest at the device's
+/// real rate.
 struct SerialRing {
     buf: [u8; SERIAL_RING_CAP],
     head: usize,
@@ -419,16 +441,26 @@ fn flush_n(ring: &mut SerialRing, max: usize) {
     }
 }
 
-/// Enqueue one byte into the ring, draining the ring to the device first
-/// (blocking / lossy-if-wedged) when it is full so there is always room.
-/// The single per-byte enqueue both UART producers share — the buffered
-/// log line ([`RingWriter`]) and raw console output ([`write_console_bytes`])
-/// — so the full-ring policy lives in one place.
+/// Enqueue one byte into the ring **without ever blocking on the UART**.
+///
+/// On a full ring it pushes only what the transmit FIFO will accept right now
+/// ([`drain_ready`], a single non-spinning sweep) to make room, then retries
+/// the push once; if the ring is still full the console genuinely cannot keep
+/// up, so the byte is **dropped** rather than block-flushed. Block-flushing a
+/// full 4 KiB ring at 9600 baud froze the kernel for ~4.3 s during a logging
+/// burst — long enough to leave the USB interrupt endpoint un-armed and lose
+/// typed keystrokes — and a hot path must never wait on the slow console;
+/// best-effort log output is the correct trade. The transmit ISR and the
+/// dispatch-loop pump drain the backlog at the device's real throughput. The
+/// single per-byte enqueue both UART producers share — the buffered log line
+/// ([`RingWriter`]) and raw console output ([`write_console_bytes`]) — so the
+/// full-ring policy lives in one place.
 fn enqueue_byte(ring: &mut SerialRing, byte: u8) {
-    if !ring.push_byte(byte) {
-        flush_blocking(ring);
-        let _ = ring.push_byte(byte);
+    if ring.push_byte(byte) {
+        return;
     }
+    drain_ready(ring);
+    let _ = ring.push_byte(byte);
 }
 
 /// Append `bytes` **verbatim** to the buffered serial ring and push out
@@ -1057,6 +1089,29 @@ mod tests {
         // bytes are untouched.
         assert!(!ring.push_byte(b'y'));
         assert_eq!(ring.len, SERIAL_RING_CAP);
+    }
+
+    #[test]
+    fn enqueue_byte_drops_when_full_and_never_blocks() {
+        // The regression guard for the keyboard-stall bug: a full ring whose
+        // transmitter cannot drain must DROP the overflow byte rather than
+        // block-flushing at the UART's byte rate. On the host build
+        // `tx_ready_now` is always "not ready", so the opportunistic
+        // `drain_ready` inside `enqueue_byte` frees nothing — the call must
+        // still return promptly, leaving the ring full and the queued bytes
+        // intact (the dropped byte never displaces an existing one). A
+        // block-flush here would have spun ~4 s draining 4 KiB at 9600 baud,
+        // the stall that swallowed keystrokes.
+        let mut ring = SerialRing::new();
+        for _ in 0..SERIAL_RING_CAP {
+            assert!(ring.push_byte(b'x'));
+        }
+        assert!(ring.is_full());
+        enqueue_byte(&mut ring, b'y');
+        assert!(ring.is_full(), "the overflow byte is dropped, not stored");
+        assert_eq!(ring.len, SERIAL_RING_CAP);
+        // FIFO order is untouched: the oldest queued byte is still first out.
+        assert_eq!(ring.pop_byte(), Some(b'x'));
     }
 
     #[test]

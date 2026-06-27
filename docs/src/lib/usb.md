@@ -33,11 +33,11 @@ build on the *same* engine without depending on each other — exactly the split
   `set_port_power` / `ring_doorbell` / `ack_event` drive the root hub and rings.
 - `device::UsbDevice` — the single-device HID enumeration engine: Enable Slot →
   Address Device → `GET_DESCRIPTOR` → `SET_CONFIGURATION` → `SET_PROTOCOL(boot)`
-  → Configure Endpoint → a primed interrupt-IN ring, then the
-  `rustos_abi::driver::input::ReportSource` seam so the `drivers/input/usb_hid`
-  decoders read reports straight off the transfer ring. The interrupt-IN
-  endpoint's DCI, packet size, and interval are read from the device's endpoint
-  descriptor (never hard-coded). `enumerate_boot_keyboard` is the arch-neutral
+  → Configure Endpoint, then the `rustos_abi::driver::input::ReportSource` seam
+  so the host-controller driver arms one interrupt-IN transfer for the class URB
+  it is currently serving. The interrupt-IN endpoint's DCI, packet size, and
+  interval are read from the device's endpoint descriptor (never hard-coded).
+  `enumerate_boot_keyboard` is the arch-neutral
   bring-up orchestration a keyboard driver runs once: it enumerates the first
   connected root-hub port and, when that device is itself a hub (the Pi 4B's
   onboard hub), powers the hub's ports, finds the connected one, resets it
@@ -69,13 +69,14 @@ build on the *same* engine without depending on each other — exactly the split
   - `UrbEngine` — the controller-side operation seam the HCD's live engine
     performs (`UsbDevice` implements it: `control_in` over the EP0 control
     transfer, `interrupt_in` over the `ReportSource` report poll).
-  - `serve_urb` — the controller-side server transformation: decode a URB,
+  - `drive_urb` — the controller-side server transformation: decode a URB,
     validate it fail-closed against the interface (control ⇒ endpoint 0 / IN;
     interrupt ⇒ a device endpoint / IN; an oversize length, a bulk or
     control-OUT transfer, or a malformed frame is refused **before** the engine
     is touched), drive the engine over the shared buffer, and frame the
-    completion in band. A not-yet-arrived interrupt-IN report is the benign,
-    retryable `Errno::WouldBlock`.
+    completion in band. A not-yet-arrived interrupt-IN report leaves the HCD's
+    IPC ticket outstanding until the controller event arrives, so the class
+    driver parks instead of retrying.
   - `UrbCall` / `UrbClient` — the class-side client: a class driver implements
     `UrbCall` over the kernel `ipc_call` surface (a host test routes the bytes
     straight to `serve_urb`), and `UrbClient::{control_in, interrupt_in}` build

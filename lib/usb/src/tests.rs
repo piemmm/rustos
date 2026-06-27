@@ -11,7 +11,7 @@ use core::cell::RefCell;
 
 use super::device::{
     hub_port_connected, hub_port_enabled, hub_port_speed, DeviceDescriptor, DmaRegion, EnumStage,
-    InterfaceInfo, UsbDevice, EVENT_RING_SEGMENT_MIN_TRBS, PRIMED_REPORTS, REPORT_LEN, RING_TRBS,
+    InterfaceInfo, UsbDevice, EVENT_RING_SEGMENT_MIN_TRBS, REPORT_LEN, RING_TRBS,
 };
 use super::ring::{EventRingCursor, ProducerRing};
 use super::trb::{CompletionCode, Trb, TrbType, CONTROL_CYCLE, TRB_LEN};
@@ -227,6 +227,9 @@ struct MockXhci {
     /// When set, `USBSTS` reports a latched Host System Error until a
     /// host-controller reset clears it.
     hse_latched: bool,
+    /// When set, `USBSTS` reports a latched Event Interrupt until a
+    /// write-1-to-clear status write clears it.
+    eint_latched: bool,
     /// When set, `USBSTS` reports a latched Port Change Detect until a
     /// write-1-to-clear status write clears it.
     pcd_latched: bool,
@@ -411,6 +414,7 @@ impl MockXhci {
             hcrst_stuck: false,
             cnr_stuck: false,
             hse_latched: false,
+            eint_latched: false,
             pcd_latched: false,
             status_write_needs_read_flush: false,
             pending_status_clear: 0,
@@ -1110,6 +1114,9 @@ impl XhciHost for MockXhci {
             if self.pending_status_clear & regs::USBSTS_HSE != 0 {
                 self.hse_latched = false;
             }
+            if self.pending_status_clear & regs::USBSTS_EINT != 0 {
+                self.eint_latched = false;
+            }
             if self.pending_status_clear & regs::USBSTS_PCD != 0 {
                 self.pcd_latched = false;
             }
@@ -1125,6 +1132,9 @@ impl XhciHost for MockXhci {
             if self.hse_latched {
                 status |= regs::USBSTS_HSE;
             }
+            if self.eint_latched {
+                status |= regs::USBSTS_EINT;
+            }
             if self.pcd_latched {
                 status |= regs::USBSTS_PCD;
             }
@@ -1133,8 +1143,20 @@ impl XhciHost for MockXhci {
         if offset == Self::op(regs::CONFIG) {
             return Ok(self.config);
         }
+        if offset == Self::ir0(regs::IR_IMAN) {
+            return Ok(self.iman);
+        }
+        if offset == Self::ir0(regs::IR_IMOD) {
+            return Ok(self.imod);
+        }
         if offset == Self::ir0(regs::IR_ERSTSZ) {
             return Ok(self.erstsz);
+        }
+        if offset == Self::ir0(regs::IR_ERDP) {
+            return Ok(self.erdp[0]);
+        }
+        if offset == Self::ir0(regs::IR_ERDP) + 4 {
+            return Ok(self.erdp[1]);
         }
         let portsc_base = Self::op(regs::PORTSC_BASE);
         for port in 0..self.portsc.len() {
@@ -1167,12 +1189,15 @@ impl XhciHost for MockXhci {
             return Ok(());
         }
         if offset == Self::op(regs::USBSTS) {
-            let clear = value & (regs::USBSTS_HSE | regs::USBSTS_PCD);
+            let clear = value & (regs::USBSTS_HSE | regs::USBSTS_EINT | regs::USBSTS_PCD);
             if self.status_write_needs_read_flush {
                 self.pending_status_clear |= clear;
             } else {
                 if clear & regs::USBSTS_HSE != 0 {
                     self.hse_latched = false;
+                }
+                if clear & regs::USBSTS_EINT != 0 {
+                    self.eint_latched = false;
                 }
                 if clear & regs::USBSTS_PCD != 0 {
                     self.pcd_latched = false;
@@ -1727,6 +1752,15 @@ fn started_device(mock: MockXhci, mem: &SharedMem) -> UsbDevice<MockXhci, MockDm
         phys: MOCK_DMA_BASE,
     };
     UsbDevice::start(xhci, dma, 4096).expect("engine starts")
+}
+
+fn arm_report_request(device: &mut UsbDevice<MockXhci, MockDma>) {
+    let mut buf = [0u8; REPORT_LEN];
+    assert_eq!(
+        device.next_report(&mut buf),
+        Ok(None),
+        "a class report request arms one interrupt-IN transfer and then parks"
+    );
 }
 
 #[test]
@@ -2291,11 +2325,13 @@ fn enumerate_downstream_hid_addresses_a_full_speed_keyboard_through_the_hub() {
     assert_eq!(device.host_mut().downstream_route_port, 4);
 
     // The keyboard's HID interface is captured for the hardware-tree
-    // child node, and its boot report ring drains.
+    // child node, and a class report request drains after the controller
+    // completes it.
     let node = device
         .describe_device(0, 1)
         .expect("the keyboard describes a child node");
     assert_eq!(node.class(), Some(rustos_abi::HwDeviceClass::Input));
+    arm_report_request(&mut device);
     device
         .host_mut()
         .pending_reports
@@ -2350,7 +2386,8 @@ fn enumerate_boot_keyboard_returns_a_directly_attached_keyboard() {
         "no hub tier means no settle window is waited"
     );
 
-    // Its boot report ring drains.
+    // Its boot report drains after the class side asks for one.
+    arm_report_request(&mut device);
     device
         .host_mut()
         .pending_reports
@@ -2398,7 +2435,8 @@ fn enumerate_boot_keyboard_descends_through_a_hub_to_the_keyboard() {
     // reset-recovery), each exactly once.
     assert_eq!(delay.calls.get(), 2);
 
-    // With the hub marked and the endpoint configured, reports drain.
+    // With the hub marked and the endpoint configured, a requested report drains.
+    arm_report_request(&mut device);
     device
         .host_mut()
         .pending_reports
@@ -2474,7 +2512,8 @@ fn addressing_a_downstream_keyboard_marks_the_parent_hub_as_a_hub() {
         "the hub's downstream port count reaches the slot context"
     );
 
-    // With the hub marked, a queued report now drains — keystrokes flow.
+    // With the hub marked, a requested report now drains — keystrokes flow.
+    arm_report_request(&mut device);
     device
         .host_mut()
         .pending_reports
@@ -2522,7 +2561,8 @@ fn the_downstream_interrupt_endpoint_carries_a_nonzero_max_esit_payload() {
          Payload so the periodic scheduler reserves bandwidth for it"
     );
 
-    // And, with bandwidth reserved, a queued report actually drains.
+    // And, with bandwidth reserved, a requested report actually drains.
+    arm_report_request(&mut device);
     device
         .host_mut()
         .pending_reports
@@ -2578,8 +2618,9 @@ fn downstream_keyboard_is_serviced_on_its_descriptor_reported_endpoint() {
         "the interrupt endpoint is configured at the descriptor-reported DCI 5"
     );
 
-    // A queued report drains: the controller services DCI 5 and the
+    // A requested report drains: the controller services DCI 5 and the
     // driver accepts the Transfer Event for that endpoint id.
+    arm_report_request(&mut device);
     device
         .host_mut()
         .pending_reports
@@ -2754,17 +2795,23 @@ fn reports_flow_through_the_report_source() {
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
     device.enumerate_hid(1).expect("enumeration succeeds");
 
-    let mock = device.host_mut();
-    mock.pending_reports
-        .push_back(alloc::vec![0, 0, 0x04, 0, 0, 0, 0, 0]);
-    mock.pending_reports
-        .push_back(alloc::vec![0x01, 0xFF, 0x02]);
-    mock.process_int_ring();
-
     let mut buf = [0u8; REPORT_LEN];
+    assert_eq!(device.next_report(&mut buf), Ok(None));
+    device
+        .host_mut()
+        .pending_reports
+        .push_back(alloc::vec![0, 0, 0x04, 0, 0, 0, 0, 0]);
+    device.host_mut().process_int_ring();
     assert_eq!(device.next_report(&mut buf), Ok(Some(REPORT_LEN)));
     assert_eq!(buf, [0, 0, 0x04, 0, 0, 0, 0, 0]);
+
     // The 3-byte mouse report arrives as a short packet.
+    assert_eq!(device.next_report(&mut buf), Ok(None));
+    device
+        .host_mut()
+        .pending_reports
+        .push_back(alloc::vec![0x01, 0xFF, 0x02]);
+    device.host_mut().process_int_ring();
     assert_eq!(device.next_report(&mut buf), Ok(Some(3)));
     assert_eq!(buf[..3], [0x01, 0xFF, 0x02]);
     assert_eq!(device.next_report(&mut buf), Ok(None));
@@ -2776,22 +2823,19 @@ fn report_source_rearms_across_the_ring_wrap() {
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
     device.enumerate_hid(1).expect("enumeration succeeds");
 
-    // More reports than the primed TRBs and than the ring's data
-    // slots: draining them all proves retire + re-arm keep the ring
-    // live across the Link-TRB wrap.
+    // More reports than the ring's data slots: arming and draining them all
+    // proves retire + on-demand arm keep the ring live across the Link-TRB wrap.
     let total = 2 * RING_TRBS;
-    assert!(total > PRIMED_REPORTS);
-    let mock = device.host_mut();
-    for index in 0..total {
-        let marker = u8::try_from(index).expect("small index");
-        mock.pending_reports
-            .push_back(alloc::vec![marker, 0, 0, 0, 0, 0, 0, 0]);
-    }
-    mock.process_int_ring();
 
     let mut buf = [0u8; REPORT_LEN];
     for index in 0..total {
         let marker = u8::try_from(index).expect("small index");
+        assert_eq!(device.next_report(&mut buf), Ok(None));
+        device
+            .host_mut()
+            .pending_reports
+            .push_back(alloc::vec![marker, 0, 0, 0, 0, 0, 0, 0]);
+        device.host_mut().process_int_ring();
         assert_eq!(device.next_report(&mut buf), Ok(Some(REPORT_LEN)));
         assert_eq!(buf[0], marker, "reports arrive in order");
     }
@@ -2813,21 +2857,28 @@ fn report_source_rearms_after_a_rejected_completion() {
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
     device.enumerate_hid(1).expect("enumeration succeeds");
 
-    let mock = device.host_mut();
     // The next report posts a non-Success/ShortPacket completion code the
     // decode rejects; the one after is normal.
-    mock.fault_one_report_completion = Some(CompletionCode::StallError);
-    mock.pending_reports
-        .push_back(alloc::vec![0xAA, 0, 0, 0, 0, 0, 0, 0]);
-    mock.pending_reports
-        .push_back(alloc::vec![0, 0, 0x05, 0, 0, 0, 0, 0]);
-    mock.process_int_ring();
-
     let mut buf = [0u8; REPORT_LEN];
+    device.host_mut().fault_one_report_completion = Some(CompletionCode::StallError);
+    assert_eq!(device.next_report(&mut buf), Ok(None));
+    device
+        .host_mut()
+        .pending_reports
+        .push_back(alloc::vec![0xAA, 0, 0, 0, 0, 0, 0, 0]);
+    device.host_mut().process_int_ring();
+
     // The rejected report surfaces a per-report fault…
     assert_eq!(device.next_report(&mut buf), Err(DriverError::DeviceFault));
-    // …but the endpoint was re-armed, so the following good report still
-    // arrives rather than the keyboard going permanently silent.
+    // …but the ring was retired, so the next class request can arm a fresh
+    // transfer and the following good report still arrives rather than the
+    // keyboard going permanently silent.
+    assert_eq!(device.next_report(&mut buf), Ok(None));
+    device
+        .host_mut()
+        .pending_reports
+        .push_back(alloc::vec![0, 0, 0x05, 0, 0, 0, 0, 0]);
+    device.host_mut().process_int_ring();
     assert_eq!(device.next_report(&mut buf), Ok(Some(REPORT_LEN)));
     assert_eq!(buf, [0, 0, 0x05, 0, 0, 0, 0, 0]);
     assert_eq!(device.next_report(&mut buf), Ok(None));
@@ -2879,15 +2930,77 @@ fn enable_interrupter_arms_iman_imod_and_usbcmd_inte() {
 }
 
 #[test]
-fn acknowledge_interrupt_clears_pending_and_keeps_enable() {
-    // Servicing a delivered interrupt clears `IMAN.IP` (write-1-to-clear)
-    // before draining the event ring, keeping Interrupt Enable set so the
-    // interrupter stays armed for the next completion (xHCI §4.17.5).
+fn enable_interrupter_clears_stale_global_status_before_arming() {
+    // Port-change and event latches can be left visible by the discovery /
+    // enumeration path. Clear them before enabling xHCI interrupts so the
+    // first real report completion produces a fresh controller interrupt.
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_device(&mem), &mem);
+    device.enumerate_hid(1).expect("enumeration succeeds");
+    device.host_mut().hse_latched = true;
+    device.host_mut().eint_latched = true;
+    device.host_mut().pcd_latched = true;
+    device.host_mut().status_write_needs_read_flush = true;
+
+    device.enable_interrupter().expect("enable interrupter");
+
+    let host = device.host_mut();
+    assert_eq!(
+        host.read32(MockXhci::op(regs::USBSTS)).unwrap()
+            & (regs::USBSTS_HSE | regs::USBSTS_EINT | regs::USBSTS_PCD),
+        0,
+        "stale global status was cleared and flushed before arming"
+    );
+    assert_eq!(
+        host.iman & regs::IMAN_IE,
+        regs::IMAN_IE,
+        "interrupter is still armed after stale status cleanup"
+    );
+    assert_eq!(
+        host.usbcmd & regs::USBCMD_INTE,
+        regs::USBCMD_INTE,
+        "global interrupt enable is still set after stale status cleanup"
+    );
+}
+
+#[test]
+fn interrupter_snapshot_reads_status_without_acknowledging() {
     let mem = shared_mem();
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
     device.enumerate_hid(1).expect("enumeration succeeds");
     device.enable_interrupter().expect("enable interrupter");
-    // The controller posts an event and sets Interrupt Pending.
+    device.host_mut().hse_latched = true;
+    device.host_mut().eint_latched = true;
+    device.host_mut().iman |= regs::IMAN_IP;
+
+    let snapshot = device
+        .interrupter_snapshot()
+        .expect("snapshot reads interrupt registers");
+
+    assert_eq!(snapshot.usbsts & regs::USBSTS_HSE, regs::USBSTS_HSE);
+    assert_eq!(snapshot.usbsts & regs::USBSTS_EINT, regs::USBSTS_EINT);
+    assert_eq!(snapshot.iman & regs::IMAN_IE, regs::IMAN_IE);
+    assert_eq!(snapshot.iman & regs::IMAN_IP, regs::IMAN_IP);
+    assert_eq!(snapshot.erdp_low, device.host_mut().erdp[0]);
+    assert_eq!(snapshot.erdp_high, device.host_mut().erdp[1]);
+    assert_eq!(
+        device.host_mut().iman & regs::IMAN_IP,
+        regs::IMAN_IP,
+        "snapshot read must not acknowledge Interrupt Pending"
+    );
+}
+
+#[test]
+fn acknowledge_interrupt_clears_global_and_interrupter_pending_and_keeps_enable() {
+    // Servicing a delivered interrupt clears `USBSTS.EINT` and `IMAN.IP`
+    // before draining the event ring, keeping Interrupt Enable set so the
+    // interrupter stays armed for the next completion.
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_device(&mem), &mem);
+    device.enumerate_hid(1).expect("enumeration succeeds");
+    device.enable_interrupter().expect("enable interrupter");
+    // The controller posts an event and sets both interrupt-status latches.
+    device.host_mut().eint_latched = true;
     device.host_mut().iman |= regs::IMAN_IP;
 
     device
@@ -2895,6 +3008,11 @@ fn acknowledge_interrupt_clears_pending_and_keeps_enable() {
         .expect("acknowledge interrupt");
 
     let host = device.host_mut();
+    assert_eq!(
+        host.read32(MockXhci::op(regs::USBSTS)).unwrap() & regs::USBSTS_EINT,
+        0,
+        "global Event Interrupt status was cleared"
+    );
     assert_eq!(
         host.iman & regs::IMAN_IP,
         0,
@@ -2912,12 +3030,14 @@ fn forged_report_residual_fails_closed() {
     let mem = shared_mem();
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
     device.enumerate_hid(1).expect("enumeration succeeds");
-    let mock = device.host_mut();
-    mock.forge_report_residual = true;
-    mock.pending_reports
-        .push_back(alloc::vec![0, 0, 0x04, 0, 0, 0, 0, 0]);
-    mock.process_int_ring();
     let mut buf = [0u8; REPORT_LEN];
+    assert_eq!(device.next_report(&mut buf), Ok(None));
+    device.host_mut().forge_report_residual = true;
+    device
+        .host_mut()
+        .pending_reports
+        .push_back(alloc::vec![0, 0, 0x04, 0, 0, 0, 0, 0]);
+    device.host_mut().process_int_ring();
     assert_eq!(device.next_report(&mut buf), Err(DriverError::DeviceFault));
 }
 
@@ -2926,6 +3046,8 @@ fn boot_keyboard_decodes_over_the_xhci_transfer_ring() {
     let mem = shared_mem();
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
     device.enumerate_hid(1).expect("enumeration succeeds");
+    let mut arm = [0u8; REPORT_LEN];
+    assert_eq!(device.next_report(&mut arm), Ok(None));
     // Left Shift held plus key usage 0x04 (`A`).
     device
         .host_mut()

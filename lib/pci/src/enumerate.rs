@@ -79,6 +79,11 @@ const MSI_CTRL_ENABLE: u32 = 1 << 16;
 /// kernel did not allocate.
 const MSI_CTRL_MME_MASK: u32 = 0x7 << 20;
 
+/// MSI Message Control "Per-vector Masking Capable" bit (MC bit 8 →
+/// dword bit 24). When set, the capability appends a 32-bit mask register;
+/// any bit left set suppresses that vector's MSI write at the device.
+const MSI_CTRL_PVM_CAPABLE: u32 = 1 << 24;
+
 /// The PCI bus driver instance.
 ///
 /// Holds the [`ConfigSpace`] backend; everything else is
@@ -759,7 +764,7 @@ impl<C: ConfigSpace> Pci<C> {
         // function can never deliver it (PCI Local Bus 3.0 §6.2.2).
         self.enable_bus_master(bdf);
 
-        let (cap_offset, addr64) = self.find_msi(bdf)?;
+        let (cap_offset, addr64, per_vector_masking) = self.find_msi(bdf)?;
         let base = unpack_bdf(bdf, 0);
         // Message Address (low). Bits 1:0 are reserved and must be written
         // zero (the doorbell is at least dword-aligned, §6.8.1.1).
@@ -780,6 +785,10 @@ impl<C: ConfigSpace> Pci<C> {
                 addr_with_byte_offset(base, cap_offset + 0x0C),
                 message.data & 0xFFFF,
             );
+            if per_vector_masking {
+                self.config
+                    .write32(addr_with_byte_offset(base, cap_offset + 0x10), 0);
+            }
         } else {
             // 32-bit capable only: a doorbell above 4 GiB cannot be
             // expressed, so fail closed rather than truncate it.
@@ -790,6 +799,10 @@ impl<C: ConfigSpace> Pci<C> {
                 addr_with_byte_offset(base, cap_offset + 8),
                 message.data & 0xFFFF,
             );
+            if per_vector_masking {
+                self.config
+                    .write32(addr_with_byte_offset(base, cap_offset + 0x0C), 0);
+            }
         }
         // Enable MSI and force Multiple Message Enable to 0 (one vector),
         // so the function delivers only the single doorbell the kernel
@@ -805,7 +818,7 @@ impl<C: ConfigSpace> Pci<C> {
 
     /// Locate the function's MSI capability, returning its
     /// `(cap_offset, addressing_64bit)`.
-    fn find_msi(&self, bdf: u64) -> Result<(u8, bool), DriverError> {
+    fn find_msi(&self, bdf: u64) -> Result<(u8, bool, bool), DriverError> {
         let mut caps = [Capability::Other { offset: 0, id: 0 }; CAP_LIST_HARD_LIMIT];
         let n = self.capabilities(bdf, &mut caps)?;
         caps[..n]
@@ -814,8 +827,9 @@ impl<C: ConfigSpace> Pci<C> {
                 Capability::Msi {
                     offset,
                     addressing_64bit,
+                    per_vector_masking,
                     ..
-                } => Some((offset, addressing_64bit)),
+                } => Some((offset, addressing_64bit, per_vector_masking)),
                 _ => None,
             })
             .ok_or(DriverError::NotFound)
@@ -1050,6 +1064,7 @@ fn decode_msi<C: ConfigSpace>(
         offset,
         message_count: 1 << mmc,
         addressing_64bit: msg_ctrl & 0x80 != 0,
+        per_vector_masking: msg_ctrl & 0x100 != 0,
     }
 }
 

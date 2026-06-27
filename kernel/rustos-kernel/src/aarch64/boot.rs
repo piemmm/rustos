@@ -1059,7 +1059,7 @@ fn configure_from_dtb(dtb: u64) -> Discovered {
         crate::aarch64::root_unlock::pcie_msi_spi(&fdt),
     ) {
         if let Ok(base) = usize::try_from(pcie.regs_phys) {
-            rustos_arch_aarch64::brcm_msi::configure(base);
+            rustos_arch_aarch64::brcm_msi::configure(base, pcie.inbound_size);
             crate::aarch64::gic_irq::set_brcm_msi_spi(msi_intid);
         }
     }

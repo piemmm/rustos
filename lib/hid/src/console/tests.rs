@@ -196,6 +196,24 @@ impl ReportSource for MockReports {
     }
 }
 
+/// Mock report source that panics if the decoder asks for another report after
+/// it already has a deliverable key edge. It models the metal URB source, where
+/// a second report read would block and delay the first typed character.
+struct BlockingAfterFirstReport {
+    first: Option<Vec<u8>>,
+}
+
+impl ReportSource for BlockingAfterFirstReport {
+    fn next_report(&mut self, buf: &mut [u8]) -> Result<Option<usize>, DriverError> {
+        let Some(report) = self.first.take() else {
+            panic!("keyboard poll read a second report before delivering the first edge");
+        };
+        let n = report.len().min(buf.len());
+        buf[..n].copy_from_slice(&report[..n]);
+        Ok(Some(n))
+    }
+}
+
 /// Recording [`ConsoleSink`]: decodes and accumulates every injected record.
 struct Recorder {
     records: Vec<KeyInput>,
@@ -252,4 +270,26 @@ fn pump_drives_the_full_decode_record_chain() {
         .filter(|record| matches!(record, KeyInput::Released { .. }))
         .count();
     assert_eq!(releases, 2);
+}
+
+#[test]
+fn pump_delivers_a_completed_report_before_reading_another() {
+    let mut keyboard = BootKeyboard::new(BlockingAfterFirstReport {
+        first: Some(kbd_report(&[0x15])),
+    });
+    let mut console = KeyboardConsole::new();
+    let mut sink = Recorder {
+        records: Vec::new(),
+    };
+
+    let drained = pump_once(&mut keyboard, &mut console, &mut sink).expect("pump");
+
+    assert_eq!(drained, 1);
+    assert_eq!(
+        sink.records,
+        [KeyInput::Pressed {
+            key: KeyValue::Char('r'),
+            modifiers: AbiModifiers::default(),
+        }]
+    );
 }

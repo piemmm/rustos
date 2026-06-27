@@ -10,7 +10,7 @@
 //! `vid:pid:class` match keys) so `devmgr` autoloads the matching **class**
 //! driver (`drivers/input/usb_kbd`, …), and **serves that class driver's URB
 //! transfers** over the bus-agnostic URB transport seam. It names no class
-//! driver, no board, and no bus (`AGENTS.md` §2.20 / §17.4).
+//! driver, no board, and no private bus implementation.
 //!
 //! It holds no class-specific authority: the keyboard driver decodes reports
 //! and injects keystrokes; this HCD only moves bytes between the controller
@@ -42,17 +42,29 @@
 //! **zero** DMA authority — and the HCD bounce-copies between it and its own
 //! DMA-granted ring.
 //!
-//! It is a **pure-Rust** program (`AGENTS.md` §1): it links the Rust userland
+//! It is a **pure-Rust** program: it links the Rust userland
 //! runtime `rustos-rt` (`_start`, the stack canary, the panic handler, the
 //! syscall wrappers); on the host it is an inert stub so `cargo build
 //! --workspace`, clippy, and fmt still cover the file. The live controller
-//! bring-up and report path are metal-only (QEMU models no Pi USB, §0.4); the
+//! bring-up and report path are metal-only because QEMU models no Pi USB; the
 //! HCD's host-testable logic lives in the crate's `lib` target
 //! ([`rustos_drv_bus_usb::bringup`] / [`rustos_drv_bus_usb::serve`]).
 
 #![cfg_attr(freestanding, no_std)]
 #![cfg_attr(freestanding, no_main)]
 #![deny(missing_docs)]
+
+#[cfg(any(freestanding, test))]
+fn waitset_ctl_result(ret: i64) -> Result<(), i64> {
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(ret)
+    }
+}
+
+#[cfg(freestanding)]
+const WAIT_FOREVER_NS: u64 = u64::MAX;
 
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
@@ -69,6 +81,8 @@ mod program {
     use rustos_drvrt::{RtDriverHost, RtGrantSyscalls};
     use rustos_log::{log, Event, EventId, Field, Level};
     use rustos_rt::{ClockDelay, LogSink};
+    use rustos_usb::{regs, InterrupterSnapshot};
+    use rustos_util::fmt::format_hex_u64;
 
     /// Exit code when the rt-backed driver host could not be built from the
     /// kernel-delivered grants. A reserved, fail-closed value.
@@ -98,6 +112,27 @@ mod program {
     /// retracted.
     const HCD_DISCONNECT: EventId = EventId(4127);
 
+    /// Diagnostic event id: URB transport setup or IRQ arming state.
+    const HCD_URB_SETUP: EventId = EventId(4149);
+
+    /// Diagnostic event id: a URB submit was received from the class driver.
+    const HCD_URB_SUBMIT: EventId = EventId(4150);
+
+    /// Diagnostic event id: a URB was held awaiting a controller event.
+    const HCD_URB_HELD: EventId = EventId(4151);
+
+    /// Diagnostic event id: a URB reply was sent or attempted.
+    const HCD_URB_REPLY: EventId = EventId(4152);
+
+    /// Diagnostic event id: a controller IRQ woke the HCD loop.
+    const HCD_IRQ_WAKE: EventId = EventId(4153);
+
+    /// Diagnostic event id: a wait-set or IPC transport error happened.
+    const HCD_WAIT_ERROR: EventId = EventId(4154);
+
+    /// Diagnostic event id: xHCI interrupter state at bounded safe points.
+    const HCD_INTERRUPT_SNAPSHOT: EventId = EventId(4155);
+
     /// Reserved base of the URB call-endpoint id range the HCD allocates from.
     ///
     /// A grant-restricted endpoint id the class driver reaches only through
@@ -124,6 +159,110 @@ mod program {
     const TOKEN_URB: u64 = 1;
     /// Wait-set token for "the controller completion interrupt fired".
     const TOKEN_IRQ: u64 = 2;
+
+    fn log_hex_event(
+        id: EventId,
+        level: Level,
+        message: &'static str,
+        key: &'static str,
+        value: u64,
+    ) {
+        let mut value_buf = [0u8; 16];
+        log(
+            &LogSink,
+            &Event {
+                level,
+                id,
+                message,
+                fields: &[Field {
+                    key,
+                    value: format_hex_u64(value, &mut value_buf),
+                }],
+            },
+        );
+    }
+
+    fn log_interrupter_snapshot(message: &'static str, snapshot: InterrupterSnapshot) {
+        let mut usbsts_buf = [0u8; 16];
+        let mut iman_buf = [0u8; 16];
+        let mut erdp_low_buf = [0u8; 16];
+        let mut erdp_high_buf = [0u8; 16];
+        let mut erdp_ptr_buf = [0u8; 16];
+        let mut erdp_ehb_buf = [0u8; 16];
+        let erdp_low_ptr = snapshot.erdp_low & !0xFu32;
+        let erdp_ehb = u64::from((snapshot.erdp_low & regs::ERDP_EHB) != 0);
+        log(
+            &LogSink,
+            &Event {
+                level: Level::Debug,
+                id: HCD_INTERRUPT_SNAPSHOT,
+                message,
+                fields: &[
+                    Field {
+                        key: "usbsts_hex",
+                        value: format_hex_u64(u64::from(snapshot.usbsts), &mut usbsts_buf),
+                    },
+                    Field {
+                        key: "iman_hex",
+                        value: format_hex_u64(u64::from(snapshot.iman), &mut iman_buf),
+                    },
+                    Field {
+                        key: "erdp_low_hex",
+                        value: format_hex_u64(u64::from(snapshot.erdp_low), &mut erdp_low_buf),
+                    },
+                    Field {
+                        key: "erdp_high_hex",
+                        value: format_hex_u64(u64::from(snapshot.erdp_high), &mut erdp_high_buf),
+                    },
+                    Field {
+                        key: "erdp_ptr_low_hex",
+                        value: format_hex_u64(u64::from(erdp_low_ptr), &mut erdp_ptr_buf),
+                    },
+                    Field {
+                        key: "erdp_ehb",
+                        value: format_hex_u64(erdp_ehb, &mut erdp_ehb_buf),
+                    },
+                ],
+            },
+        );
+    }
+
+    fn log_device_interrupter_snapshot(
+        message: &'static str,
+        device: &mut rustos_drv_bus_usb::bringup::ControllerDevice,
+    ) {
+        match device.interrupter_snapshot() {
+            Ok(snapshot) => log_interrupter_snapshot(message, snapshot),
+            Err(err) => log_hex_event(
+                HCD_INTERRUPT_SNAPSHOT,
+                Level::Warn,
+                "usb-hcd: interrupter snapshot failed",
+                "err_hex",
+                err as u64,
+            ),
+        }
+    }
+
+    fn reply_to_urb(endpoint_id: u64, reply: rustos_drv_bus_usb::serve::UrbReply) {
+        let ret = rustos_rt::call_reply(endpoint_id, reply.ticket, &reply.bytes[..reply.len]);
+        if ret == 0 {
+            log_hex_event(
+                HCD_URB_REPLY,
+                Level::Debug,
+                "usb-hcd: URB reply sent",
+                "ticket_hex",
+                reply.ticket,
+            );
+        } else {
+            log_hex_event(
+                HCD_URB_REPLY,
+                Level::Warn,
+                "usb-hcd: URB reply failed",
+                "ret_hex",
+                ret as u64,
+            );
+        }
+    }
 
     /// The capability set the HCD host re-checks up front; the kernel is the
     /// authority and re-checks every trap. It mirrors the resources the
@@ -240,15 +379,29 @@ mod program {
         // the URB reply, which happens-after the HCD's write here.
         let shm: &mut [u8] =
             unsafe { core::slice::from_raw_parts_mut(shm_base as usize as *mut u8, SHM_LEN) };
+        log_hex_event(
+            HCD_URB_SETUP,
+            Level::Info,
+            "usb-hcd: shared URB buffer created",
+            "shm_id_hex",
+            shm_id,
+        );
 
         let Some(endpoint_id) = bind_urb_endpoint() else {
             return EXIT_NO_TRANSPORT;
         };
+        log_hex_event(
+            HCD_URB_SETUP,
+            Level::Info,
+            "usb-hcd: URB endpoint created",
+            "endpoint_hex",
+            endpoint_id,
+        );
 
-        // Publish one interface node carrying the device's USB match keys plus
-        // the transport grants the class driver inherits. The kernel assigns
-        // and returns the node id, which the HCD keeps so it can retract the
-        // node when the device disconnects.
+        // Build the interface node carrying the device's USB match keys plus
+        // the transport grants the class driver inherits. Publish it only after
+        // the IRQ wait source has been proved live below, so the class driver
+        // cannot be autoloaded into a transport that has no completion wake.
         let node = match device.describe_device(HW_NODE_ROOT, 0) {
             Ok(node) => node,
             Err(_) => return EXIT_EMIT_FAILED,
@@ -257,13 +410,117 @@ mod program {
             Ok(node) => node,
             Err(_) => return EXIT_EMIT_FAILED,
         };
+        let root_port = device.root_port();
+
+        // Bind the controller's IRQ line before arming the completion
+        // interrupter, so a completion produced immediately after `USBCMD.INTE`
+        // is set has a kernel-owned line to latch onto instead of becoming a
+        // stray message. The loop then parks on the interrupt rather than
+        // polling a quiet controller.
+        let irq_handle = match host.irq_line() {
+            Some(line) => {
+                let handle = rustos_rt::irq_bind(line);
+                if handle >= 0 && device.enable_interrupter().is_ok() {
+                    #[allow(clippy::cast_sign_loss)] // `handle >= 0` is the bound IrqHandle.
+                    let handle = handle as u64;
+                    log_hex_event(
+                        HCD_URB_SETUP,
+                        Level::Info,
+                        "usb-hcd: IRQ bound and interrupter enabled",
+                        "handle_hex",
+                        handle,
+                    );
+                    log_device_interrupter_snapshot(
+                        "usb-hcd: interrupter snapshot after enable",
+                        &mut device,
+                    );
+                    Some(handle)
+                } else {
+                    log_hex_event(
+                        HCD_URB_SETUP,
+                        Level::Warn,
+                        "usb-hcd: IRQ bind or interrupter enable failed",
+                        "line_hex",
+                        u64::from(line),
+                    );
+                    None
+                }
+            }
+            _ => {
+                log(
+                    &LogSink,
+                    &Event {
+                        level: Level::Warn,
+                        id: HCD_URB_SETUP,
+                        message: "usb-hcd: no IRQ line grant for event-driven URB transport",
+                        fields: &[],
+                    },
+                );
+                None
+            }
+        };
+        let Some(irq_handle) = irq_handle else {
+            return EXIT_NO_TRANSPORT;
+        };
+
+        // Build the wait-set the loop parks on: the transport endpoint always,
+        // and the controller IRQ line. Both must succeed before the interface
+        // is published, because interrupt-IN URBs complete only through that
+        // event-driven wake path.
+        let set = rustos_rt::waitset_create();
+        if set < 0 {
+            return EXIT_NO_TRANSPORT;
+        }
+        #[allow(clippy::cast_sign_loss)] // `set >= 0` is the wait-set handle.
+        let set = set as u64;
+        let endpoint_add = rustos_rt::waitset_ctl(
+            set,
+            WaitSetOp::Add,
+            WaitSourceKind::Endpoint,
+            endpoint_id,
+            TOKEN_URB,
+        );
+        if super::waitset_ctl_result(endpoint_add).is_err() {
+            return EXIT_NO_TRANSPORT;
+        }
+        let irq_add = rustos_rt::waitset_ctl(
+            set,
+            WaitSetOp::Add,
+            WaitSourceKind::Irq,
+            irq_handle,
+            TOKEN_IRQ,
+        );
+        if let Err(ret) = super::waitset_ctl_result(irq_add) {
+            log_hex_event(
+                HCD_URB_SETUP,
+                Level::Warn,
+                "usb-hcd: IRQ source add to wait-set failed",
+                "ret_hex",
+                ret as u64,
+            );
+            return EXIT_NO_TRANSPORT;
+        }
+        log_hex_event(
+            HCD_URB_SETUP,
+            Level::Info,
+            "usb-hcd: IRQ source added to wait-set",
+            "handle_hex",
+            irq_handle,
+        );
+
         let emit = rustos_rt::hw_emit_node(&node);
         if emit < 0 {
             return EXIT_EMIT_FAILED;
         }
         #[allow(clippy::cast_sign_loss)] // `emit >= 0` here is the assigned node id.
         let interface_node_id = emit as u32;
-        let root_port = device.root_port();
+        log_hex_event(
+            HCD_URB_SETUP,
+            Level::Info,
+            "usb-hcd: interface node emitted",
+            "node_hex",
+            u64::from(interface_node_id),
+        );
 
         log(
             &LogSink,
@@ -275,47 +532,6 @@ mod program {
             },
         );
 
-        // Arm the completion interrupter and bind the controller's IRQ line if
-        // the matched node carried one, so the loop parks on the interrupt
-        // rather than polling a quiet controller.
-        let irq_handle = match host.irq_line() {
-            Some(line) if device.enable_interrupter().is_ok() => {
-                let handle = rustos_rt::irq_bind(line);
-                if handle >= 0 {
-                    #[allow(clippy::cast_sign_loss)] // `handle >= 0` is the bound IrqHandle.
-                    Some(handle as u64)
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        };
-
-        // Build the wait-set the loop parks on: the transport endpoint always,
-        // the controller IRQ line when one was bound.
-        let set = rustos_rt::waitset_create();
-        if set < 0 {
-            return EXIT_NO_TRANSPORT;
-        }
-        #[allow(clippy::cast_sign_loss)] // `set >= 0` is the wait-set handle.
-        let set = set as u64;
-        if rustos_rt::waitset_ctl(
-            set,
-            WaitSetOp::Add,
-            WaitSourceKind::Endpoint,
-            endpoint_id,
-            TOKEN_URB,
-        ) != 0
-        {
-            return EXIT_NO_TRANSPORT;
-        }
-        if let Some(handle) = irq_handle {
-            // A failure to add the IRQ member is non-fatal: the endpoint is
-            // still serviced; only interrupt-driven completion is lost.
-            let _ =
-                rustos_rt::waitset_ctl(set, WaitSetOp::Add, WaitSourceKind::Irq, handle, TOKEN_IRQ);
-        }
-
         let mut service = UrbService::new();
         let mut node_live = true;
 
@@ -323,7 +539,15 @@ mod program {
         // controller interrupt is ready, never spinning a quiet controller.
         loop {
             let mut token = 0u64;
-            if rustos_rt::waitset_wait(set, u64::MAX, &mut token) < 0 {
+            let wait_ret = rustos_rt::waitset_wait(set, super::WAIT_FOREVER_NS, &mut token);
+            if wait_ret < 0 {
+                log_hex_event(
+                    HCD_WAIT_ERROR,
+                    Level::Warn,
+                    "usb-hcd: wait-set wait failed",
+                    "ret_hex",
+                    wait_ret as u64,
+                );
                 // With an unbounded timeout on a wait-set we own, a negative
                 // result means the set was torn down — stop rather than spin.
                 return 0;
@@ -332,28 +556,87 @@ mod program {
                 TOKEN_URB => {
                     let mut request = [0u8; URB_REQUEST_LEN];
                     let mut ticket = 0u64;
-                    if let Ok(n) = rustos_rt::call_recv(endpoint_id, &mut request, &mut ticket) {
-                        if let UrbOutcome::Reply(reply) =
-                            service.on_submit(ticket, &request[..n], shm, &mut device)
-                        {
-                            let _ = rustos_rt::call_reply(
-                                endpoint_id,
-                                reply.ticket,
-                                &reply.bytes[..reply.len],
+                    match rustos_rt::call_recv(endpoint_id, &mut request, &mut ticket) {
+                        Ok(n) => {
+                            log_hex_event(
+                                HCD_URB_SUBMIT,
+                                Level::Debug,
+                                "usb-hcd: URB submit received",
+                                "ticket_hex",
+                                ticket,
+                            );
+                            match service.on_submit(ticket, &request[..n], shm, &mut device) {
+                                UrbOutcome::Reply(reply) => reply_to_urb(endpoint_id, reply),
+                                UrbOutcome::Held => {
+                                    log_hex_event(
+                                        HCD_URB_HELD,
+                                        Level::Debug,
+                                        "usb-hcd: URB held for interrupt completion",
+                                        "ticket_hex",
+                                        ticket,
+                                    );
+                                    log_device_interrupter_snapshot(
+                                        "usb-hcd: interrupter snapshot after held URB",
+                                        &mut device,
+                                    );
+                                }
+                                UrbOutcome::Idle => log_hex_event(
+                                    HCD_WAIT_ERROR,
+                                    Level::Warn,
+                                    "usb-hcd: submit path produced idle outcome",
+                                    "ticket_hex",
+                                    ticket,
+                                ),
+                            }
+                        }
+                        Err(err) => {
+                            log_hex_event(
+                                HCD_WAIT_ERROR,
+                                Level::Warn,
+                                "usb-hcd: call_recv failed after endpoint wake",
+                                "errno_hex",
+                                err as u64,
                             );
                         }
                     }
                 }
                 TOKEN_IRQ => {
+                    log(
+                        &LogSink,
+                        &Event {
+                            level: Level::Debug,
+                            id: HCD_IRQ_WAKE,
+                            message: "usb-hcd: controller IRQ woke URB loop",
+                            fields: &[],
+                        },
+                    );
                     // Acknowledge before draining so a completion posted during
                     // the drain re-asserts rather than being lost.
                     let _ = device.acknowledge_interrupt();
-                    if let UrbOutcome::Reply(reply) = service.on_event(shm, &mut device) {
-                        let _ = rustos_rt::call_reply(
-                            endpoint_id,
-                            reply.ticket,
-                            &reply.bytes[..reply.len],
-                        );
+                    match service.on_event(shm, &mut device) {
+                        UrbOutcome::Reply(reply) => reply_to_urb(endpoint_id, reply),
+                        UrbOutcome::Held => {
+                            let _ = log(
+                                &LogSink,
+                                &Event {
+                                    level: Level::Debug,
+                                    id: HCD_URB_HELD,
+                                    message: "usb-hcd: IRQ did not complete held URB yet",
+                                    fields: &[],
+                                },
+                            );
+                        }
+                        UrbOutcome::Idle => {
+                            let _ = log(
+                                &LogSink,
+                                &Event {
+                                    level: Level::Debug,
+                                    id: HCD_IRQ_WAKE,
+                                    message: "usb-hcd: IRQ had no outstanding URB",
+                                    fields: &[],
+                                },
+                            );
+                        }
                     }
                     // Watch the root-hub port: on a disconnect, retract the
                     // interface node once so `devmgr` unloads the class driver
@@ -388,4 +671,15 @@ fn main() {
     // above is built only for the bare-metal driver targets. Keeping a host
     // `main` lets `cargo build --workspace`, clippy, and fmt still cover the
     // file, mirroring the other driver `Run` binaries.
+}
+
+#[cfg(test)]
+mod tests {
+    use super::waitset_ctl_result;
+
+    #[test]
+    fn waitset_ctl_result_preserves_failure_code() {
+        assert_eq!(waitset_ctl_result(0), Ok(()));
+        assert_eq!(waitset_ctl_result(-2), Err(-2));
+    }
 }

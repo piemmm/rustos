@@ -183,9 +183,11 @@ pub fn pump_once<I: Input, S: ConsoleSink>(
 
 /// Events drained from the keyboard per [`pump_once`] call.
 ///
-/// A batch size, not a capacity: undrained reports stay
-/// queued in the keyboard's [`crate::ReportSource`] and are read next call.
-pub const EVENT_BATCH: usize = 16;
+/// The USB keyboard driver uses a blocking interrupt-IN report source, so the
+/// pump asks the decoder for one key edge at a time. That delivers a completed
+/// key press to the focused console before the next report read can park for a
+/// later key or release.
+pub const EVENT_BATCH: usize = 1;
 
 /// Resolve a HID page-`0x07` usage to the [`Key`] a US keyboard layout
 /// produces, given the active `shift`, `caps`, and `num` lock state.

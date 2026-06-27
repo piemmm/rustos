@@ -100,6 +100,12 @@ pub const USBSTS_HCH: u32 = 1 << 0;
 /// firmware left a stale error before RustOS takes ownership.
 pub const USBSTS_HSE: u32 = 1 << 2;
 
+/// `USBSTS` Event Interrupt: a write-1-to-clear latched indication that an
+/// interrupter posted an event. The interrupt handler clears it together with
+/// `IMAN.IP` so the controller can generate a fresh edge after the event ring
+/// has been drained.
+pub const USBSTS_EINT: u32 = 1 << 3;
+
 /// `USBSTS` Port Change Detect: a write-1-to-clear latched port-change
 /// status bit. Firmware handoff can leave it set before RustOS
 /// resets the controller.

@@ -224,12 +224,12 @@ Audit events live in the `kernel/ipc` reserved range `3_000..4_000`
 | 3040 | Info  | `CALL_ENDPOINT_CREATED`       | A capability-checked synchronous call endpoint was created. |
 | 3041 | Error | `CALL_ENDPOINT_CREATE_DENIED` | A call-endpoint creation request was refused. |
 | 3042 | Info  | `CALL_ENDPOINT_DESTROYED`     | A call endpoint was destroyed (in-flight callers fail closed). |
-| 3043 | Info  | `CALL_POSTED`                 | A request was posted to a call endpoint, awaiting a reply. |
+| 3043 | Debug | `CALL_POSTED`                 | A request was posted to a call endpoint, awaiting a reply. `Debug`, not `Info`: the synchronous call path is the high-throughput RPC transport (e.g. the USB URB endpoint), so a successful post is routine throughput that would flood the log two records per round-trip; it stays available when the level is lowered for forensics. Its denials (3044–3047) stay at `Error`. |
 | 3044 | Error | `CALL_POST_DENIED`            | Caller lacks the endpoint's required capabilities. |
 | 3045 | Error | `CALL_REQUEST_TOO_LARGE`      | Request payload exceeded `max_request`. |
 | 3046 | Error | `CALL_POST_TO_CLOSED_ENDPOINT`| A post raced with destruction and lost. |
 | 3047 | Error | `CALL_QUEUE_FULL`             | The endpoint's outstanding-call queue was full. |
-| 3048 | Info  | `CALL_REPLIED`                | A server delivered a reply to an in-flight call. |
+| 3048 | Debug | `CALL_REPLIED`                | A server delivered a reply to an in-flight call. `Debug` for the same reason as `CALL_POSTED` (3043): routine high-throughput RPC completion. Its denial (3049) stays at `Error`. |
 | 3049 | Error | `CALL_REPLY_DENIED`           | Unknown ticket, or reply exceeded `max_reply`. |
 
 Adding a new event requires assigning the next free identifier in

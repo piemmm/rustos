@@ -115,8 +115,22 @@ pub const FR_BUSY: u32 = 1 << 3;
 /// divisor arithmetic and the silicon agree; QEMU ignores baud entirely.
 pub const UART_CLOCK_HZ: u32 = 48_000_000;
 
-/// The boot console line rate: 9600 baud (8N1), the documented serial
-/// configuration of the Pi image (`docs/src/install/raspberry_pi.md`).
+/// The boot console line rate (8N1), the documented serial configuration of
+/// the Pi image (`docs/src/install/raspberry_pi.md`).
+///
+/// The **debug** image streams a verbose per-syscall boot log to this UART,
+/// so it runs the line faster (57600 baud) to drain bursts sooner; the
+/// shippable **release** image keeps the conservative 9600. This value must
+/// match the firmware's early-boot `init_uart_baud` the image author writes
+/// into `config.txt` (`tools/mkimage`'s `config_txt`, keyed off the same
+/// image profile), so the firmware's early beacons and the kernel's
+/// reprogrammed line agree — exactly the cross-boundary pairing
+/// `init_uart_clock` / [`UART_CLOCK_HZ`] already keep in step.
+#[cfg(all(debug_assertions, target_os = "none"))]
+pub const CONSOLE_BAUD: u32 = 57_600;
+/// See the debug freestanding variant above; the release image and the host
+/// build keep the conservative 9600 baud.
+#[cfg(not(all(debug_assertions, target_os = "none")))]
 pub const CONSOLE_BAUD: u32 = 9600;
 
 /// Compute the PL011 `(IBRD, FBRD)` divisor pair for `baud` from

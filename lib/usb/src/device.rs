@@ -4,7 +4,7 @@
 //! [`UsbDevice`] drives one controller through the full bring-up of a
 //! single attached HID device: port reset, Enable Slot, Address
 //! Device, `GET_DESCRIPTOR(device)`, `SET_PROTOCOL(boot)`, Configure
-//! Endpoint, and a primed interrupt-IN transfer ring. It then
+//! Endpoint, and on-demand interrupt-IN transfer arming. It then
 //! implements the [`ReportSource`] seam from
 //! `rustos_abi::driver::input`, so the host-controller driver serves reports
 //! straight off the transfer ring over the URB transport to a class driver
@@ -26,7 +26,7 @@ use rustos_abi::{Delay, DriverError, HwDeviceClass, HwMatchKey, HwNode};
 
 use crate::ring::{EventRingCursor, ProducerRing, PushOutcome};
 use crate::trb::{self, CompletionCode, Trb, TrbType};
-use crate::{DmaProgram, Xhci, XhciHost};
+use crate::{DmaProgram, InterrupterSnapshot, Xhci, XhciHost};
 
 /// Device-shared memory the engine and the controller both see.
 ///
@@ -64,19 +64,14 @@ pub trait DmaRegion {
 
 /// TRB slots in the command, EP0, and interrupt transfer rings and in
 /// the event segment. Protocol working sets for one device, not
-/// scalable capacities: each ring only ever holds
-/// the single in-flight command or control TD plus the primed
-/// interrupt TRBs below.
+/// scalable capacities: each ring only ever holds the single in-flight
+/// command, control TD, or class-driver interrupt-IN URB.
 pub const RING_TRBS: usize = 16;
 
 /// Minimum TRBs in an xHCI event-ring segment.
 pub const EVENT_RING_SEGMENT_MIN_TRBS: usize = 16;
 
 const _: () = assert!(RING_TRBS >= EVENT_RING_SEGMENT_MIN_TRBS);
-
-/// Interrupt-IN transfers kept primed on the transfer ring, so the
-/// device always has somewhere to deliver the next report.
-pub const PRIMED_REPORTS: usize = 4;
 
 /// Byte length of one HID boot-protocol report buffer (USB HID 1.11
 /// App. B: keyboard 8, mouse 3..=8).
@@ -853,10 +848,8 @@ pub enum EnumStage {
     SetConfiguration = 7,
     /// HID `SET_PROTOCOL(boot)` class request (HID 1.11 §7.2.6).
     SetProtocol = 8,
-    /// Priming the interrupt-IN ring with report TRBs.
-    ArmReport = 9,
-    /// Enumeration completed: the device is configured and primed.
-    Configured = 10,
+    /// Enumeration completed: the device is configured and ready for a class URB.
+    Configured = 9,
 }
 
 impl EnumStage {
@@ -888,10 +881,10 @@ const REJECT_BUDGET_TIMEOUT: u8 = 4;
 /// [`UsbDevice::start`] lays the DMA structures out, programs them
 /// through [`Xhci::start`], and leaves the controller running.
 /// [`UsbDevice::enumerate_hid`] then brings the device on `port` to
-/// the configured state (boot protocol when the device accepts it)
-/// with a primed interrupt-IN ring, after which
-/// [`ReportSource::next_report`] drains reports the host-controller driver
-/// serves over the URB transport to the `drivers/input/usb_kbd` decoders.
+/// the configured state (boot protocol when the device accepts it).
+/// [`ReportSource::next_report`] arms one interrupt-IN transfer for the
+/// class-driver URB it is currently serving, and the host-controller driver
+/// completes that URB from the controller event.
 pub struct UsbDevice<H: XhciHost, M: DmaRegion> {
     xhci: Xhci<H>,
     dma: M,
@@ -1091,6 +1084,19 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     /// [`DriverError::DeviceFault`] if the register window rejects a write.
     pub fn enable_interrupter(&mut self) -> Result<(), DriverError> {
         self.xhci.enable_interrupter()
+    }
+
+    /// Read the controller interrupter's state without acknowledging it.
+    ///
+    /// Used by the HCD's bounded diagnostics around a held interrupt-IN URB.
+    /// The snapshot is observational only and does not poll the event ring or
+    /// alter interrupt delivery.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::DeviceFault`] if the register window rejects a read.
+    pub fn interrupter_snapshot(&mut self) -> Result<InterrupterSnapshot, DriverError> {
+        self.xhci.interrupter_snapshot()
     }
 
     /// Acknowledge the controller interrupter's pending interrupt
@@ -1463,9 +1469,8 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     /// port reset (when not yet enabled), Enable Slot, Address Device,
     /// `GET_DESCRIPTOR(device)`/`(configuration)`, and `SET_CONFIGURATION`.
     /// A **HID** interface additionally gets its interrupt-IN endpoint
-    /// configured, a best-effort `SET_PROTOCOL(boot)`, and a primed
-    /// interrupt-IN ring; a non-HID interface (e.g. a hub, class `0x09`)
-    /// uses only its control endpoint.
+    /// configured and a best-effort `SET_PROTOCOL(boot)`; a non-HID
+    /// interface (e.g. a hub, class `0x09`) uses only its control endpoint.
     ///
     /// The interrupt-IN endpoint is armed and doorbelled **only** for a HID
     /// interface: arming a hub's status-change endpoint (which this engine
@@ -1513,8 +1518,8 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     /// Complete enumeration of the device already Enable-Slotted into
     /// `slot` and Address-Deviced with topology `base`: read its device
     /// and configuration descriptors and, for a HID interface, configure
-    /// the interrupt-IN endpoint, `SET_CONFIGURATION`, best-effort
-    /// `SET_PROTOCOL(boot)`, and prime the report ring.
+    /// the interrupt-IN endpoint, `SET_CONFIGURATION`, and best-effort
+    /// `SET_PROTOCOL(boot)`.
     ///
     /// Shared by the root-hub ([`Self::enumerate_hid`]) and downstream
     /// ([`Self::enumerate_downstream_hid`]) paths so the post-Address
@@ -1602,11 +1607,6 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             self.stage = EnumStage::SetProtocol;
             self.control_optional(setup_set_protocol_boot(interface.interface_number))?;
 
-            self.stage = EnumStage::ArmReport;
-            for _ in 0..PRIMED_REPORTS {
-                self.arm_report()?;
-            }
-            self.xhci.ring_doorbell(slot, u32::from(self.int_dci))?;
             self.identity = Some(HidIdentity {
                 vendor_id: descriptor.vendor_id,
                 product_id: descriptor.product_id,
@@ -2137,26 +2137,21 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         Ok(len)
     }
 
-    /// Retire the just-completed interrupt-IN transfer and prime a fresh one,
-    /// ringing the endpoint doorbell so the controller delivers the next
-    /// report.
+    /// Retire the just-completed interrupt-IN transfer.
     ///
     /// Called by [`ReportSource::next_report`] for **every** completed
     /// transfer event addressed to this endpoint — including one whose report
-    /// was rejected by [`Self::decode_transfer_report`] — so the interrupt
-    /// endpoint is never left un-armed (which would permanently stall input:
-    /// a busy-polling driver would keep reading an empty event ring forever
-    /// while the keyboard appears dead).
+    /// was rejected by [`Self::decode_transfer_report`] — so the transfer-ring
+    /// software dequeue always matches what the controller has consumed. The
+    /// next class-driver URB arms the next transfer; the controller is not kept
+    /// polling the keyboard when no URB is waiting.
     ///
     /// # Errors
     ///
-    /// Propagates a transfer-ring or doorbell failure ([`DriverError::Busy`]
-    /// if the ring is unexpectedly full, or the register-window error from the
-    /// doorbell write).
-    fn rearm_interrupt_endpoint(&mut self) -> Result<(), DriverError> {
-        self.int_ring.retire_one()?;
-        self.arm_report()?;
-        self.xhci.ring_doorbell(self.slot, u32::from(self.int_dci))
+    /// [`DriverError::OutOfRange`] if the controller reported a completion
+    /// when no transfer was in flight.
+    fn retire_interrupt_transfer(&mut self) -> Result<(), DriverError> {
+        self.int_ring.retire_one()
     }
 }
 
@@ -2165,6 +2160,12 @@ impl<H: XhciHost, M: DmaRegion> ReportSource for UsbDevice<H, M> {
         if self.slot == 0 {
             // Not enumerated: there is no endpoint to drain.
             return Err(DriverError::DeviceFault);
+        }
+        if self.int_ring.in_flight() == 0 {
+            self.arm_report()?;
+            self.xhci
+                .ring_doorbell(self.slot, u32::from(self.int_dci))?;
+            return Ok(None);
         }
         // Bounded by the event segment: one pass can hold at most the
         // segment's TRBs, and `next_report` never blocks.
@@ -2183,13 +2184,13 @@ impl<H: XhciHost, M: DmaRegion> ReportSource for UsbDevice<H, M> {
                 // without disturbing our own transfer ring.
                 return Err(DriverError::DeviceFault);
             }
-            // Decode this completed transfer first, then re-arm the endpoint
-            // **unconditionally**: an unexpected completion code or a
-            // malformed buffer mapping is surfaced as a per-report error, but
-            // the endpoint is always re-primed so a single odd report can
-            // never leave it silent and wedge the keyboard.
+            // Decode this completed transfer first, then retire it
+            // unconditionally: an unexpected completion code or a malformed
+            // buffer mapping is surfaced as a per-report error, but the ring
+            // state must still advance so the next class URB can arm another
+            // transfer.
             let decoded = self.decode_transfer_report(event, buf);
-            self.rearm_interrupt_endpoint()?;
+            self.retire_interrupt_transfer()?;
             return decoded.map(Some);
         }
         Ok(None)

@@ -109,6 +109,24 @@ pub const XHCI_BAR_INDEX: u8 = 0;
 /// copy in each.
 pub const XHCI_COMPATIBLE: &[u8] = b"usb,xhci";
 
+/// Runtime interrupt state for xHCI interrupter 0.
+///
+/// Read by the HCD at bounded setup/error points to diagnose whether the
+/// controller has latched an interrupt (`IMAN.IP` / `USBSTS.EINT`) and whether
+/// the interrupter remains enabled. It is a snapshot only; reading it does not
+/// acknowledge or re-arm anything.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct InterrupterSnapshot {
+    /// Raw `USBSTS` operational status register.
+    pub usbsts: u32,
+    /// Raw interrupter-0 `IMAN` management register.
+    pub iman: u32,
+    /// Raw interrupter-0 `ERDP` low dword.
+    pub erdp_low: u32,
+    /// Raw interrupter-0 `ERDP` high dword.
+    pub erdp_high: u32,
+}
+
 /// Highest doorbell target value (: endpoint IDs 1..=31 for device
 /// doorbells; 0 is the command-ring target on doorbell 0).
 const DOORBELL_TARGET_MAX: u32 = 31;
@@ -642,6 +660,10 @@ impl<H: XhciHost> Xhci<H> {
             .write32(self.rt_base + regs::IR0_BASE + offset, value)
     }
 
+    fn read_ir0(&mut self, offset: usize) -> Result<u32, DriverError> {
+        self.host.read32(self.rt_base + regs::IR0_BASE + offset)
+    }
+
     /// Program the DMA structures and start the controller (
     /// steps 5–7): `CONFIG` (all reported slots enabled), `DCBAAP`,
     /// `CRCR` (consumer cycle state 1), interrupter 0's single-entry
@@ -715,6 +737,12 @@ impl<H: XhciHost> Xhci<H> {
     ///
     /// [`DriverError::DeviceFault`] if the register window rejects a write.
     pub fn enable_interrupter(&mut self) -> Result<(), DriverError> {
+        let stale_status =
+            self.read_op(regs::USBSTS)? & (regs::USBSTS_HSE | regs::USBSTS_EINT | regs::USBSTS_PCD);
+        if stale_status != 0 {
+            self.write_op(regs::USBSTS, stale_status)?;
+            self.read_op(regs::USBSTS)?;
+        }
         self.write_ir0(regs::IR_IMOD, 0)?;
         // Write IE together with IP: IP is write-1-to-clear, so this both
         // arms the interrupter and discards any pending bit a prior owner
@@ -725,21 +753,42 @@ impl<H: XhciHost> Xhci<H> {
         self.write_op(regs::USBCMD, usbcmd | regs::USBCMD_INTE)
     }
 
-    /// Acknowledge interrupter 0's pending interrupt by clearing
-    /// `IMAN.IP`, keeping Interrupt Enable set (§4.17.5).
+    /// Read interrupter 0's interrupt-state registers without acknowledging
+    /// anything.
+    ///
+    /// Used by the HCD's bounded diagnostics to distinguish "no controller
+    /// event was posted" from "an interrupt is pending but did not wake the
+    /// driver" on real hardware.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::DeviceFault`] if the register window rejects a read.
+    pub fn interrupter_snapshot(&mut self) -> Result<InterrupterSnapshot, DriverError> {
+        Ok(InterrupterSnapshot {
+            usbsts: self.read_op(regs::USBSTS)?,
+            iman: self.read_ir0(regs::IR_IMAN)?,
+            erdp_low: self.read_ir0(regs::IR_ERDP)?,
+            erdp_high: self.read_ir0(regs::IR_ERDP + 4)?,
+        })
+    }
+
+    /// Acknowledge interrupter 0's pending interrupt by clearing the xHCI
+    /// global event status and `IMAN.IP`, keeping Interrupt Enable set.
     ///
     /// Called at the **start** of servicing a delivered interrupt, before
-    /// the event ring is drained: clearing IP first means a completion that
-    /// the controller posts while the handler is draining re-sets IP and
-    /// re-asserts the interrupt, so no event edge is lost (the drain then
-    /// advances `ERDP` via [`Self::ack_event`]). Writing IP as 1 clears it;
-    /// the companion IE bit is re-written set so the interrupter stays
-    /// armed.
+    /// the event ring is drained: clearing the global event latch before
+    /// `IMAN.IP` follows the controller-defined ordering, and clearing IP
+    /// before the drain means a completion the controller posts while the
+    /// handler is draining re-sets IP and re-asserts the interrupt, so no
+    /// event edge is lost (the drain then advances `ERDP` via
+    /// [`Self::ack_event`]). Writing IP as 1 clears it; the companion IE bit
+    /// is re-written set so the interrupter stays armed.
     ///
     /// # Errors
     ///
     /// [`DriverError::DeviceFault`] if the register window rejects the write.
     pub fn acknowledge_interrupt(&mut self) -> Result<(), DriverError> {
+        self.write_op(regs::USBSTS, regs::USBSTS_EINT)?;
         self.write_ir0(regs::IR_IMAN, regs::IMAN_IE | regs::IMAN_IP)
     }
 

@@ -1,6 +1,6 @@
 [package]
 name = "rustos-drv-input-usb-kbd"
-description = "RustOS autoloaded user-space USB HID boot-keyboard *class* driver: binds an emitted HID-interface node, submits interrupt-IN URBs to its host-controller driver over the bus-agnostic URB transport, decodes each boot report via `rustos-hid`, and injects key edges into the kernel input-focus arbiter (`AGENTS.md` §2.20 / §17.4, plans/USB.md U4)."
+description = "RustOS autoloaded user-space USB HID boot-keyboard *class* driver: binds an emitted HID-interface node, submits interrupt-IN URBs to its host-controller driver over the bus-agnostic URB transport, decodes each boot report via `rustos-hid`, and injects key edges into the kernel input-focus arbiter (plans/USB.md U4)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,13 +13,13 @@ workspace = true
 
 # The crate is **only** a binary: the `Run` entry point of the keyboard class
 # driver bundle, installed under `/System/Drivers/` and autoloaded into user
-# space by `devmgr` when a HID boot-keyboard interface node is discovered
-# (`AGENTS.md` §18). It links the userland runtime `rustos-rt` and depends only
-# on `lib/*` crates so the §17.4 layering holds (no `drivers/*`→`drivers/*`
+# space by `devmgr` when a HID boot-keyboard interface node is discovered. It
+# links the userland runtime `rustos-rt` and depends only
+# on `lib/*` crates so the layered dependency direction holds (no `drivers/*`→`drivers/*`
 # edge — it reaches its host-controller driver only through the public URB
 # transport ABI). It is a freestanding pure-Rust program on the native Tier-1
 # targets and an inert host stub elsewhere (`src/main.rs` / `build.rs`),
-# mirroring `userland/session/login` (`AGENTS.md` §2.2).
+# mirroring `userland/session/login`.
 
 # The `lib` target (the `BIND_KEYS` bind table the host image builder reads)
 # and the freestanding `Run` binary both build over the frozen `abi-v1`
@@ -31,28 +31,31 @@ rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # for the bare-metal targets the binary is actually built for; on the host the
 # binary is an inert stub.
 [target.'cfg(target_os = "none")'.dependencies]
-# The capability-set type the rt-backed `DriverHost` is built over (§5.2).
+# The capability-set type the rt-backed `DriverHost` is built over.
 rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
 # The arch-neutral HID boot-report decode + console producer this class
 # driver composes: `BootKeyboard`, `KeyboardConsole`, `pump_once`,
-# `ConsoleSink`, `ReportSource`, `REPORT_BUF_LEN` — a `lib/*` crate, so the
-# §17.4 layering holds (no `drivers/*`→`drivers/*` edge).
+# `ConsoleSink`, `ReportSource`, `REPORT_BUF_LEN` — a `lib/*` crate, so there
+# is no `drivers/*`→`drivers/*` edge.
 rustos-hid = { path = "../../../lib/hid", version = "=0.0.0" }
 # The bus-agnostic URB transport client (`UrbCall`, `UrbClient`): the seam this
 # class driver submits interrupt-IN URBs to its host-controller driver over,
-# without naming the controller or the bus (`AGENTS.md` §2.20 / §17.4).
+# without naming the controller or the bus.
 rustos-usb = { path = "../../../lib/usb", version = "=0.0.0" }
 # The user-space driver runtime: turns the kernel-issued device-resource grants
 # into the `DriverHost` the bring-up consumes (`mmio_map` / `dma_alloc` /
-# `resource_grants` over the syscall surface, §5.4).
+# `resource_grants` over the syscall surface).
 rustos-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0" }
-# The pure-Rust userland runtime (`AGENTS.md` §1 / §16.4): `_start`, the stack
+# The pure-Rust userland runtime: `_start`, the stack
 # canary, the panic handler, and the syscall wrappers the class driver issues
 # (`ipc_call` for the URB transport, `shm_map` via the host, `key_inject`), plus
 # the `LogSink` that marshals its one-shot beacon to the kernel log over
-# `log_emit` (`AGENTS.md` §19.4).
+# `log_emit`.
 rustos-rt = { path = "../../../lib/rt", version = "=0.0.0" }
 # The structured diagnostic event vocabulary (`Event`/`Field`/`Level`) the
 # driver emits its one-shot "bound, pumping reports" beacon through, routed to
-# the kernel log by `rustos_rt::LogSink` (`AGENTS.md` §19.4 / §2.2).
+# the kernel log by `rustos_rt::LogSink`.
 rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+# Fixed-buffer formatting helpers for numeric diagnostic fields, avoiding
+# allocation in the freestanding driver.
+rustos-util = { path = "../../../lib/util", version = "=0.0.0" }

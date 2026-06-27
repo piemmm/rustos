@@ -36,7 +36,7 @@
 //! BCM2711 peripherals datasheet. They are isolated here as documented
 //! constants for metal verification (QEMU models no Pi PCIe).
 
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 /// Number of distinct MSI message vectors the BCM2711 root-complex MSI
 /// controller demultiplexes onto its one shared GIC SPI. A hardware fact
@@ -56,13 +56,27 @@ const NO_BASE: usize = 0;
 /// registers below are accessed at fixed offsets from it.
 static RC_BASE: AtomicUsize = AtomicUsize::new(NO_BASE);
 
-/// Point the MSI controller at the discovered root-complex register base.
+/// Low half of the currently selected MSI doorbell target. The target depends
+/// on the discovered inbound PCIe aperture size, so boot configures it beside
+/// [`RC_BASE`] before the first MSI allocation.
+static MSI_TARGET_LO: AtomicU32 = AtomicU32::new(MSI_TARGET_ADDR_LT_4GB_LO);
+
+/// High half of the currently selected MSI doorbell target; see
+/// [`MSI_TARGET_LO`].
+static MSI_TARGET_HI: AtomicU32 = AtomicU32::new(MSI_TARGET_ADDR_LT_4GB_HI);
+
+/// Point the MSI controller at the discovered root-complex register base and
+/// select the doorbell target matching the discovered inbound aperture.
 ///
 /// Called once on the boot path after the `brcm,bcm2711-pcie` node is
-/// discovered, before the controller is initialised. `Release`/`Acquire`
-/// pairs the store with [`current`]'s load so the freestanding MMIO path
-/// observes the resolved base.
-pub fn configure(rc_base: usize) {
+/// discovered, before the controller is initialised. `Release`/`Acquire` pairs
+/// the stores with [`current`] and [`current_msi_target`]'s loads so the
+/// freestanding MMIO path observes the resolved base and target.
+pub fn configure(rc_base: usize, inbound_size: u64) {
+    let target = msi_target_for_inbound_size(inbound_size);
+    let (target_lo, target_hi) = msi_target_halves(target);
+    MSI_TARGET_LO.store(target_lo, Ordering::Release);
+    MSI_TARGET_HI.store(target_hi, Ordering::Release);
     RC_BASE.store(rc_base, Ordering::Release);
 }
 
@@ -71,6 +85,13 @@ pub fn configure(rc_base: usize) {
 #[must_use]
 pub fn current() -> usize {
     RC_BASE.load(Ordering::Acquire)
+}
+
+/// The MSI doorbell target selected from the discovered inbound aperture.
+#[must_use]
+pub fn current_msi_target() -> u64 {
+    (u64::from(MSI_TARGET_HI.load(Ordering::Acquire)) << 32)
+        | u64::from(MSI_TARGET_LO.load(Ordering::Acquire))
 }
 
 // --- Register offsets (from the RC register base) -------------------------
@@ -106,19 +127,49 @@ pub const MSI_DATA_CONFIG_VAL_32: u32 = 0xffe0_6540;
 /// the vector index, so the controller routes the write to that vector.
 pub const MSI_DATA_MAGIC: u32 = 0x6540;
 
-/// Low 32 bits of the doorbell target address the endpoint writes to raise
-/// an MSI (`BRCM_MSI_TARGET_ADDR_LT_4GB`). A fixed RC-internal address below
-/// 4 GiB — not real memory; the controller captures the write rather than
-/// letting it land. Held split into low/high halves so the register writes
-/// need no truncating cast.
-pub const MSI_TARGET_ADDR_LO: u32 = 0xFFFF_FFFC;
+/// Threshold at which the BCM2711 root complex uses the high MSI target.
+pub const MSI_TARGET_GT_4GB_THRESHOLD: u64 = 0x1_0000_0000;
 
-/// High 32 bits of the doorbell target address (zero — the target sits
-/// below 4 GiB).
-pub const MSI_TARGET_ADDR_HI: u32 = 0x0000_0000;
+/// Doorbell target used when the inbound aperture is smaller than 4 GiB
+/// (`BRCM_MSI_TARGET_ADDR_LT_4GB`). It is an RC-internal capture address, not
+/// RAM.
+pub const MSI_TARGET_ADDR_LT_4GB: u64 = 0x0000_0000_FFFF_FFFC;
 
-/// The full 64-bit doorbell target address, composed from its halves.
-pub const MSI_TARGET_ADDR: u64 = ((MSI_TARGET_ADDR_HI as u64) << 32) | MSI_TARGET_ADDR_LO as u64;
+/// Doorbell target used when the inbound aperture is at least 4 GiB
+/// (`BRCM_MSI_TARGET_ADDR_GT_4GB`). Pi 4 firmware commonly exposes an 8 GiB
+/// inbound aperture, so using the below-4GiB target there leaves endpoint MSI
+/// writes visible to xHCI but invisible to the root-complex INTR2 status.
+pub const MSI_TARGET_ADDR_GT_4GB: u64 = 0x0000_000F_FFFF_FFFC;
+
+/// Low 32 bits of the below-4GiB doorbell target.
+pub const MSI_TARGET_ADDR_LT_4GB_LO: u32 = 0xFFFF_FFFC;
+
+/// High 32 bits of the below-4GiB doorbell target.
+pub const MSI_TARGET_ADDR_LT_4GB_HI: u32 = 0x0000_0000;
+
+/// Low 32 bits of the high doorbell target.
+pub const MSI_TARGET_ADDR_GT_4GB_LO: u32 = 0xFFFF_FFFC;
+
+/// High 32 bits of the high doorbell target.
+pub const MSI_TARGET_ADDR_GT_4GB_HI: u32 = 0x0000_000F;
+
+/// Select the BCM2711 MSI doorbell target for the discovered inbound aperture.
+#[must_use]
+pub const fn msi_target_for_inbound_size(inbound_size: u64) -> u64 {
+    if inbound_size >= MSI_TARGET_GT_4GB_THRESHOLD {
+        MSI_TARGET_ADDR_GT_4GB
+    } else {
+        MSI_TARGET_ADDR_LT_4GB
+    }
+}
+
+fn msi_target_halves(target: u64) -> (u32, u32) {
+    let bytes = target.to_le_bytes();
+    (
+        u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+        u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+    )
+}
 
 /// Base of the per-vector `INTR2` interrupt block within the RC register
 /// window (`PCIE_MSI_INTR2_BASE`): a standard brcmstb level-2 interrupt
@@ -148,18 +199,22 @@ const ALL_VECTORS: u32 = 0xFFFF_FFFF;
 /// endpoint's MSI capability is programmed with so its interrupt is routed
 /// to `vector` through the BCM2711 root-complex MSI controller.
 ///
-/// The address is the fixed RC doorbell ([`MSI_TARGET_ADDR`]); the data is
-/// [`MSI_DATA_MAGIC`] OR the vector index, matching the controller's
-/// programmed [`MSI_DATA_CONFIG_VAL_32`] pattern so the write demultiplexes
-/// to `vector`. Returned as `(address, data)` so the kernel binary can wrap
-/// it in the `abi-v1` `MsiMessage` the bus-driver MSI-programming path
-/// copies verbatim, without this port depending on `lib/abi`.
+/// The address is the RC doorbell selected from the discovered inbound
+/// aperture; the data is [`MSI_DATA_MAGIC`] OR the vector index, matching the
+/// controller's programmed [`MSI_DATA_CONFIG_VAL_32`] pattern so the write
+/// demultiplexes to `vector`. Returned as `(address, data)` so the kernel
+/// binary can wrap it in the `abi-v1` `MsiMessage` the bus-driver
+/// MSI-programming path copies verbatim, without this port depending on
+/// `lib/abi`.
 #[must_use]
 pub fn msi_message(vector: u32) -> (u64, u32) {
-    (
-        MSI_TARGET_ADDR,
-        MSI_DATA_MAGIC | (vector & (NUM_MSI_VECTORS - 1)),
-    )
+    msi_message_for_target(vector, current_msi_target())
+}
+
+/// Build an MSI message for an explicitly selected BCM2711 doorbell target.
+#[must_use]
+pub const fn msi_message_for_target(vector: u32, target: u64) -> (u64, u32) {
+    (target, MSI_DATA_MAGIC | (vector & (NUM_MSI_VECTORS - 1)))
 }
 
 /// `true` iff `vector` is a valid MSI vector index (`0..NUM_MSI_VECTORS`).
@@ -194,25 +249,35 @@ impl<M: MsiMmio> BrcmMsi<M> {
         Self { mmio }
     }
 
-    /// Initialise the controller: mask and clear every vector, program the
-    /// doorbell target address (enabled) and the data-config pattern.
+    /// Initialise the controller: unmask and clear every supported vector,
+    /// program the doorbell target address (enabled) and the data-config
+    /// pattern.
     ///
     /// Idempotent and safe to call once the root complex is out of reset
     /// (the user-space `pcie_brcm` driver has trained the link before any
-    /// endpoint that uses MSI is enumerated). Leaves every vector **masked**;
-    /// a vector is unmasked only when a driver binds and waits on it.
+    /// endpoint that uses MSI is enumerated). This mirrors the BCM2711 Linux
+    /// setup sequence: the INTR2 block must be able to latch supported vector
+    /// messages, while the kernel IRQ table still masks each virtual vector
+    /// before waking its waiter and the waiter re-arms it after draining.
     pub fn init(&self) {
-        // Mask all vectors first, then clear any stale pending status a
+        self.init_with_target(current_msi_target());
+    }
+
+    /// Initialise the controller with an explicitly selected MSI doorbell
+    /// target. Host tests exercise both hardware aperture shapes through this
+    /// entry point; production uses [`init`](Self::init), which reads the
+    /// target selected by [`configure`].
+    pub fn init_with_target(&self, target: u64) {
+        let (target_lo, target_hi) = msi_target_halves(target);
+        // Unmask the supported vectors and clear any stale pending status a
         // prior owner (firmware) left, before enabling the doorbell.
-        self.mmio.write32(INTR2_BASE + INTR2_MASK_SET, ALL_VECTORS);
+        self.mmio.write32(INTR2_BASE + INTR2_MASK_CLR, ALL_VECTORS);
         self.mmio.write32(INTR2_BASE + INTR2_CLR, ALL_VECTORS);
         // Program the doorbell target address (low half carries the enable
         // bit) and the data-config pattern the per-vector data matches.
-        self.mmio.write32(
-            MSI_BAR_CONFIG_LO,
-            MSI_TARGET_ADDR_LO | MSI_BAR_CONFIG_LO_ENABLE,
-        );
-        self.mmio.write32(MSI_BAR_CONFIG_HI, MSI_TARGET_ADDR_HI);
+        self.mmio
+            .write32(MSI_BAR_CONFIG_LO, target_lo | MSI_BAR_CONFIG_LO_ENABLE);
+        self.mmio.write32(MSI_BAR_CONFIG_HI, target_hi);
         self.mmio.write32(MSI_DATA_CONFIG, MSI_DATA_CONFIG_VAL_32);
     }
 
@@ -321,28 +386,67 @@ mod tests {
 
     #[test]
     fn msi_message_encodes_target_and_vector() {
-        // The doorbell address is fixed; the data is the magic OR the
-        // vector index, matching the programmed data-config pattern.
-        assert_eq!(msi_message(0), (MSI_TARGET_ADDR, MSI_DATA_MAGIC));
-        assert_eq!(msi_message(1), (MSI_TARGET_ADDR, MSI_DATA_MAGIC | 1));
-        assert_eq!(msi_message(31), (MSI_TARGET_ADDR, MSI_DATA_MAGIC | 31));
+        // The data is the magic OR the vector index, matching the programmed
+        // data-config pattern; the address comes from the discovered aperture.
+        assert_eq!(
+            msi_message_for_target(0, MSI_TARGET_ADDR_GT_4GB),
+            (MSI_TARGET_ADDR_GT_4GB, MSI_DATA_MAGIC)
+        );
+        assert_eq!(
+            msi_message_for_target(1, MSI_TARGET_ADDR_GT_4GB),
+            (MSI_TARGET_ADDR_GT_4GB, MSI_DATA_MAGIC | 1)
+        );
+        assert_eq!(
+            msi_message_for_target(31, MSI_TARGET_ADDR_GT_4GB),
+            (MSI_TARGET_ADDR_GT_4GB, MSI_DATA_MAGIC | 31)
+        );
     }
 
     #[test]
-    fn init_masks_clears_then_enables_the_doorbell() {
+    fn msi_target_follows_discovered_inbound_aperture() {
+        assert_eq!(msi_target_for_inbound_size(0), MSI_TARGET_ADDR_LT_4GB);
+        assert_eq!(
+            msi_target_for_inbound_size(MSI_TARGET_GT_4GB_THRESHOLD - 1),
+            MSI_TARGET_ADDR_LT_4GB
+        );
+        assert_eq!(
+            msi_target_for_inbound_size(MSI_TARGET_GT_4GB_THRESHOLD),
+            MSI_TARGET_ADDR_GT_4GB
+        );
+        assert_eq!(
+            msi_target_for_inbound_size(0x2_0000_0000),
+            MSI_TARGET_ADDR_GT_4GB
+        );
+    }
+
+    #[test]
+    fn init_unmasks_clears_then_enables_the_below_4g_doorbell() {
         let msi = BrcmMsi::new(MockMsiMmio::default());
-        msi.init();
+        msi.init_with_target(MSI_TARGET_ADDR_LT_4GB);
         let m = &msi.mmio;
-        // Every vector masked and cleared.
-        assert!(m.wrote(INTR2_BASE + INTR2_MASK_SET, ALL_VECTORS));
+        // Every supported vector unmasked and cleared.
+        assert!(m.wrote(INTR2_BASE + INTR2_MASK_CLR, ALL_VECTORS));
         assert!(m.wrote(INTR2_BASE + INTR2_CLR, ALL_VECTORS));
         // Doorbell target programmed with the enable bit, and the data
         // pattern set.
         assert!(m.wrote(
             MSI_BAR_CONFIG_LO,
-            MSI_TARGET_ADDR_LO | MSI_BAR_CONFIG_LO_ENABLE
+            MSI_TARGET_ADDR_LT_4GB_LO | MSI_BAR_CONFIG_LO_ENABLE
         ));
-        assert!(m.wrote(MSI_BAR_CONFIG_HI, MSI_TARGET_ADDR_HI));
+        assert!(m.wrote(MSI_BAR_CONFIG_HI, MSI_TARGET_ADDR_LT_4GB_HI));
+        assert!(m.wrote(MSI_DATA_CONFIG, MSI_DATA_CONFIG_VAL_32));
+    }
+
+    #[test]
+    fn init_programs_the_high_doorbell_for_large_inbound_apertures() {
+        let msi = BrcmMsi::new(MockMsiMmio::default());
+        msi.init_with_target(MSI_TARGET_ADDR_GT_4GB);
+        let m = &msi.mmio;
+        assert!(m.wrote(
+            MSI_BAR_CONFIG_LO,
+            MSI_TARGET_ADDR_GT_4GB_LO | MSI_BAR_CONFIG_LO_ENABLE
+        ));
+        assert!(m.wrote(MSI_BAR_CONFIG_HI, MSI_TARGET_ADDR_GT_4GB_HI));
         assert!(m.wrote(MSI_DATA_CONFIG, MSI_DATA_CONFIG_VAL_32));
     }
 

@@ -447,16 +447,17 @@ interface descriptor's class triple and `bConfigurationValue` /
 `bInterfaceNumber` drive the steps below — never assumed), and
 `SET_CONFIGURATION`.
 
-The interrupt-IN endpoint (DCI 3) is configured (Configure Endpoint),
-primed, and doorbelled — and `SET_PROTOCOL(boot)` issued — **only for a
-HID interface**. A hub reports interface class `0x09`, not HID: it
-keeps only its control endpoint, because this engine reads a hub's
-downstream ports over EP0 hub-class `GET_STATUS`, never its interrupt
-status-change endpoint. Arming that endpoint for a hub would make the
-hub deliver asynchronous status-change reports that interleave with —
-and fault — those EP0 control transfers (a transfer event whose
-interrupt-TRB pointer is not in the control wait's watch list →
-`REJECT_ADDRESS_MISMATCH`, then a wedged ring; the metal symptom was
+The interrupt-IN endpoint is configured (Configure Endpoint) and
+`SET_PROTOCOL(boot)` is issued **only for a HID interface**. It is not
+primed during enumeration: `next_report` arms one transfer only when the
+class driver has submitted a URB and is waiting for that report. A hub
+reports interface class `0x09`, not HID: it keeps only its control endpoint,
+because this engine reads a hub's downstream ports over EP0 hub-class
+`GET_STATUS`, never its interrupt status-change endpoint. Arming that
+endpoint for a hub would make the hub deliver asynchronous status-change
+reports that interleave with — and fault — those EP0 control transfers (a
+transfer event whose interrupt-TRB pointer is not in the control wait's watch
+list → `REJECT_ADDRESS_MISMATCH`, then a wedged ring; the metal symptom was
 the hub's per-port `GET_STATUS` reads returning the all-ones sentinel).
 
 A device *downstream* of an enumerated hub (the Pi 4B keyboard hangs
@@ -471,9 +472,9 @@ port, §8.9) and — for a full/low-speed device behind the high-speed hub
 — the **transaction-translator** Hub Slot ID and Port Number (§6.2.2),
 so the controller splits its transactions through the hub's TT. The
 post-Address sequence (descriptors → Configure Endpoint →
-`SET_CONFIGURATION` → `SET_PROTOCOL(boot)` → primed report ring) is the
-shared `finish_enumeration`, identical to a root-port device — only the
-topology in the slot context differs. The caller owns the wall-clock
+`SET_CONFIGURATION` → `SET_PROTOCOL(boot)` → ready for request-driven report
+arming) is the shared `finish_enumeration`, identical to a root-port device —
+only the topology in the slot context differs. The caller owns the wall-clock
 power-on-good and reset-recovery delays: it powers the port, resets it
 (`SET_FEATURE(PORT_RESET)`), waits, and confirms the port enabled with
 the speed read from `GET_STATUS` before addressing.
@@ -508,8 +509,8 @@ The interrupt-IN endpoint itself is **read from the configuration
 descriptor, never assumed** (`InterfaceInfo::decode`). The driver walks
 past the matched interface descriptor to its first interrupt-IN endpoint
 and takes its Device Context Index (`2 × endpoint_number + 1`),
-`wMaxPacketSize`, and `bInterval`; `finish_enumeration` then configures,
-doorbells, and (via `next_report`) drains *that* DCI, and
+`wMaxPacketSize`, and `bInterval`; `finish_enumeration` then configures
+*that* DCI, and `next_report` doorbells and drains it for each waiting URB.
 `interrupt_interval` encodes the endpoint-context Interval from the
 descriptor's `bInterval` and the device speed (high/SuperSpeed
 `bInterval − 1`; full/low-speed frames → the `fls(bInterval × 8) − 1`
@@ -532,13 +533,14 @@ engine's poll budget (`AGENTS.md` §2.1 / §2.9).
 `UsbDevice` implements the `rustos_abi::driver::input::ReportSource`
 seam (hoisted into `lib/abi` because its consumer,
 `drivers/input/usb_hid`, is a sibling driver and drivers depend only
-on `lib/*`, `AGENTS.md` §17.4): `next_report` consumes one transfer
-event, validates the controller's claim end to end (slot, endpoint
-ID, completion code, TRB address inside the interrupt ring, residual
-within the TRB length — §5.4), copies the report out of the slot's
-buffer, retires and re-arms the ring, and rings the endpoint doorbell,
-so the boot-protocol decoders poll reports straight off the transfer
-ring. The crate's tests prove the whole chain against the
+on `lib/*`, `AGENTS.md` §17.4): when no interrupt-IN transfer is in flight,
+`next_report` arms exactly one TRB for the class-driver URB currently waiting
+and rings the endpoint doorbell, returning `None` so the HCD holds the IPC
+ticket. When the controller event arrives, the next `next_report` consumes
+that event, validates the controller's claim end to end (slot, endpoint ID,
+completion code, TRB address inside the interrupt ring, residual within the
+TRB length — §5.4), copies the report out of the slot's buffer, and retires
+the transfer. The crate's tests prove the whole chain against the
 register-level mock plus an in-memory ring model sharing the same
 buffer — including a `BootKeyboard` polling decoded key events over
 the mock controller — plus the fail-closed paths (forged residual,

@@ -1051,12 +1051,15 @@ fn route_msix_propagates_capability_denial() {
 /// A function advertising the legacy **MSI** capability at byte 0x50,
 /// 64-bit-address capable — the shape the Pi 4's VL805 xHCI presents.
 /// `addr64` selects whether the Message Control "64-bit capable" bit
-/// (MC bit 7) is set, so a test can exercise both the 64-bit and the
-/// 32-bit-only data-register placement.
-fn msi_fixture(addr64: bool) -> MockConfigSpace {
+/// (MC bit 7) is set, and `per_vector_masking` selects whether the mask
+/// register is present, so tests can exercise both data-register placements
+/// and the optional device-side MSI mask.
+fn msi_fixture(addr64: bool, per_vector_masking: bool) -> MockConfigSpace {
     // Message Control occupies the high 16 bits of the header dword;
-    // bit 7 (→ dword bit 23) advertises 64-bit addressing.
-    let msg_ctrl: u32 = if addr64 { 0x0080 } else { 0x0000 };
+    // bit 7 advertises 64-bit addressing and bit 8 advertises per-vector
+    // mask/pending registers.
+    let msg_ctrl: u32 =
+        (if addr64 { 0x0080 } else { 0x0000 }) | if per_vector_masking { 0x0100 } else { 0x0000 };
     let func = MockFunction {
         bus: 0,
         device: 6,
@@ -1087,7 +1090,7 @@ fn msi_bdf() -> u64 {
 
 #[test]
 fn route_msi_programs_address_data_and_enables_single_vector() {
-    let config = msi_fixture(true);
+    let config = msi_fixture(true, false);
     let state = config.shared_state();
     let pci = Pci::new(config);
     // A BCM2711-style doorbell pair: the RC MSI controller's target
@@ -1125,6 +1128,48 @@ fn route_msi_programs_address_data_and_enables_single_vector() {
 }
 
 #[test]
+fn route_msi_unmasks_64bit_per_vector_mask_register() {
+    let config = msi_fixture(true, true);
+    let state = config.shared_state();
+    let pci = Pci::new(config);
+    let message = MsiMessage {
+        address: 0xFFFF_FFFC,
+        data: 0x0000_6540,
+    };
+
+    pci.route_msi(msi_bdf(), message).expect("routes msi");
+
+    let st = state.borrow();
+    assert!(
+        st.writes.iter().any(|(a, v)| {
+            a.bus == 0 && a.device == 6 && a.function == 0 && a.register == 24 && *v == 0
+        }),
+        "64-bit MSI mask register at cap+0x10 is cleared"
+    );
+}
+
+#[test]
+fn route_msi_unmasks_32bit_per_vector_mask_register() {
+    let config = msi_fixture(false, true);
+    let state = config.shared_state();
+    let pci = Pci::new(config);
+    let message = MsiMessage {
+        address: 0xFFFF_FFFC,
+        data: 0x0000_6540,
+    };
+
+    pci.route_msi(msi_bdf(), message).expect("routes msi");
+
+    let st = state.borrow();
+    assert!(
+        st.writes.iter().any(|(a, v)| {
+            a.bus == 0 && a.device == 6 && a.function == 0 && a.register == 23 && *v == 0
+        }),
+        "32-bit MSI mask register at cap+0x0c is cleared"
+    );
+}
+
+#[test]
 fn route_msi_reports_not_found_without_msi_capability() {
     // The q35 virtio function advertises MSI-X, not legacy MSI.
     let pci = Pci::new(q35_fixture());
@@ -1143,7 +1188,7 @@ fn route_msi_rejects_a_64bit_address_on_a_32bit_capability() {
     // A 32-bit-only MSI capability cannot express a doorbell above 4 GiB:
     // writing the low half alone would deliver to the wrong address, so
     // fail closed rather than silently truncate.
-    let pci = Pci::new(msi_fixture(false));
+    let pci = Pci::new(msi_fixture(false, false));
     let message = MsiMessage {
         address: 0x1_0000_0000,
         data: 0x6540,

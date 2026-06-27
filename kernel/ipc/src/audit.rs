@@ -36,12 +36,12 @@
 //! | 3040 | Info  | `CALL_ENDPOINT_CREATED`       | A capability-checked synchronous call endpoint was created. |
 //! | 3041 | Error | `CALL_ENDPOINT_CREATE_DENIED` | A call-endpoint creation request was refused (creator lacks bind authority). |
 //! | 3042 | Info  | `CALL_ENDPOINT_DESTROYED`     | A call endpoint was destroyed (in-flight callers fail closed). |
-//! | 3043 | Info  | `CALL_POSTED`                 | A request was posted to a call endpoint, awaiting a reply. |
+//! | 3043 | Debug | `CALL_POSTED`                 | A request was posted to a call endpoint, awaiting a reply. Recorded at `Debug`: the synchronous call path is the high-throughput RPC transport (e.g. the USB URB endpoint), so a successful post is routine and would otherwise flood the log two records per round-trip. Its denials (3044–3047) stay at `Error`. |
 //! | 3044 | Error | `CALL_POST_DENIED`            | A request was refused for lack of the endpoint's required capabilities. |
 //! | 3045 | Error | `CALL_REQUEST_TOO_LARGE`      | A request was refused because its payload exceeded `max_request`. |
 //! | 3046 | Error | `CALL_POST_TO_CLOSED_ENDPOINT`| A post raced with destruction and lost. |
 //! | 3047 | Error | `CALL_QUEUE_FULL`             | A post was refused because the endpoint's outstanding-call queue was full. |
-//! | 3048 | Info  | `CALL_REPLIED`                | A server delivered a reply to an in-flight call. |
+//! | 3048 | Debug | `CALL_REPLIED`                | A server delivered a reply to an in-flight call. Recorded at `Debug` for the same reason as `CALL_POSTED` (3043): routine high-throughput RPC completion. Its denial (3049) stays at `Error`. |
 //! | 3049 | Error | `CALL_REPLY_DENIED`           | A reply was refused (unknown ticket, or reply exceeded `max_reply`). |
 //!
 //! Adding a new event requires assigning the next free identifier in
@@ -164,9 +164,16 @@ impl AuditEvent {
 
     /// Severity at which this event is emitted.
     ///
-    /// Successful decisions are recorded at [`Level::Info`]; refused
-    /// decisions are recorded at [`Level::Error`] so they surface above
-    /// a routine info filter without further configuration.
+    /// Refused decisions are recorded at [`Level::Error`] so they surface
+    /// above a routine info filter without further configuration.
+    /// Successful decisions are recorded at [`Level::Info`], **except** the
+    /// per-round-trip synchronous-call records [`CallPosted`](Self::CallPosted)
+    /// and [`CallReplied`](Self::CallReplied): the call path is the
+    /// high-throughput RPC transport (e.g. the USB URB endpoint), so a
+    /// successful post/reply is routine throughput that would flood the log
+    /// two records per round-trip. They are recorded at [`Level::Debug`],
+    /// below the default `Info` filter, and remain available for forensics
+    /// when the level is lowered; their *denials* stay at `Error`.
     #[must_use]
     pub const fn level(self) -> Level {
         match self {
@@ -183,9 +190,8 @@ impl AuditEvent {
             | Self::NotifyBound
             | Self::NotifySignalled
             | Self::CallEndpointCreated
-            | Self::CallEndpointDestroyed
-            | Self::CallPosted
-            | Self::CallReplied => Level::Info,
+            | Self::CallEndpointDestroyed => Level::Info,
+            Self::CallPosted | Self::CallReplied => Level::Debug,
             Self::PortCreateDenied
             | Self::PortRegisterDenied
             | Self::PortNamePublishDenied
@@ -419,6 +425,23 @@ mod tests {
         }];
         record(&sink, AuditEvent::MessageDelivered, &fields);
         assert_eq!(sink.len(), 1);
+    }
+
+    #[test]
+    fn routine_call_round_trip_logs_below_info() {
+        // The synchronous-call post/reply pair fires on every RPC
+        // round-trip (notably the USB URB transport), so a successful
+        // post/reply is demoted below the default `Info` filter to keep a
+        // busy IPC path from flooding the log; the records remain available
+        // when the level is lowered for forensics. Their denials stay at
+        // `Error` (covered by `refused_events_log_at_error_level`).
+        use rustos_log::Level;
+        assert_eq!(AuditEvent::CallPosted.level(), Level::Debug);
+        assert_eq!(AuditEvent::CallReplied.level(), Level::Debug);
+        assert!(AuditEvent::CallPosted.level() < Level::Info);
+        assert!(AuditEvent::CallReplied.level() < Level::Info);
+        // The one-way control-plane delivery stays at `Info`.
+        assert_eq!(AuditEvent::MessageDelivered.level(), Level::Info);
     }
 
     #[test]
