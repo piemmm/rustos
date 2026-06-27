@@ -41,7 +41,9 @@ below wins for the area it owns, and `AGENTS.md` wins over all of them.
   capability database (`lib/termcap`), and the curses/TUI screen model
   (`lib/curses`). The shell's interactive rendering, key decoding, and any
   full-screen affordance go through that one vocabulary, never a second
-  divergent escape-sequence definition (`AGENTS.md` §2.2).
+  divergent escape-sequence definition (`AGENTS.md` §2.2). See "Interactive
+  terminal" for how the REPL line editor, capability-keyed rendering, and
+  completion-menu display build on this stack.
 
 A note on the word **alias**. This document already used "alias" for an
 ordinary shell *command* alias (`alias ll='ls -l'`), expanded by the lexer.
@@ -473,6 +475,35 @@ Resolution MUST fail closed (`AGENTS.md` §5.4):
   with the `ALIAS.md` diagnostic rather than resolving (`ALIAS.md` §9.3).
 - An **unregistered** prefix is not special: it is a path, exactly as the
   resolution rule states.
+
+### Typed resource values
+
+Where the shell exposes a resource selection as a shell value — for example
+binding the result of a selector to a variable — that value MUST be a **typed
+resource value**, not a plain string (`plans/ALIAS.md` §15.2):
+
+```sh
+let target = pick disk:?removable=true,size>=16GiB
+image-write installer.img -> $target::raw
+```
+
+A typed resource value carries the resolved identity, not just a name:
+`resource_kind`, `canonical_identity`, `short_fingerprint`, `facet_rights`,
+`generation`, and `scope` (`plans/ALIAS.md` §15.2). The shell MUST resolve the
+selection through the single shared resolver (it never re-implements
+resolution in-process) and MUST re-check the generation/identity at use time so
+a stale handle fails closed rather than acting on the wrong device
+(`plans/ALIAS.md` §9.3, §3.11).
+
+Serializing a typed resource value back to text (for display, logging, or
+`stdout`) MUST serialize only its identity, never its authority: the value's
+underlying capability/descriptor is not embedded in, or reconstructable from,
+the text form (`plans/ALIAS.md` §15.2; `AGENTS.md` §4, §5.2). A text rendering
+of `$target` is therefore safe to print and pipe, and confers no access.
+
+Typed resource values are an optional shell feature; a shell without variables
+need not provide them, but a shell that does provide them MUST follow the rules
+above rather than store resource selections as bare strings.
 
 ## Standard streams
 
@@ -1190,6 +1221,69 @@ The prompt is REPL `stdout` text rendered through the shared terminal stack
 (see the `Console` seam); it is never written to a discovered console device
 (`AGENTS.md` §20).
 
+## Interactive terminal
+
+The interactive REPL — its line editor, prompt rendering, key and escape
+decoding, history navigation, and any menu or full-screen affordance — is
+expressed entirely through the shared terminal stack of `plans/CURSES.md`:
+the ANSI/VT/xterm vocabulary (`lib/vt`), the compiled-in capability database
+(`lib/termcap`), and the curses/TUI screen model (`lib/curses`). The shell
+MUST NOT define a second, shell-private escape-sequence vocabulary, key table,
+or screen model (`AGENTS.md` §2.2). `lib/curses` is the OS-provided,
+dynamically linked Terminal/TUI library (`AGENTS.md` §16.4); the shell links
+it like any other curated `/System/Libraries/` library, so one fix to the
+library covers every consumer (`plans/CURSES.md` §2).
+
+All terminal I/O still flows over the shell's inherited standard streams
+(fd 0/1/2). The terminal stack is I/O-injected over those descriptors through
+the `Console` seam; it never opens a console, UART, or framebuffer device
+(`AGENTS.md` §20). fd 3 (`stdinfo`) is reserved and advisory: the line editor
+and curses screen model MUST NOT write to fd 3 (`plans/CURSES.md`, Stage C4).
+
+### Capability-keyed rendering and input
+
+The shell reads the terminal's capabilities from `lib/termcap`, keyed off the
+inherited `TERM` value, and renders only what the active terminal supports:
+
+1. Output attributes and colour MUST degrade by capability rather than emit
+   sequences the terminal does not understand — truecolour → 256-colour →
+   16-colour → monochrome — using `lib/curses`'s minimal-diff renderer, never
+   hand-rolled cursor arithmetic (`plans/CURSES.md`, Stages C3–C4).
+2. Key input — function, arrow, and editing keys, bracketed paste, and (where
+   advertised) mouse reporting — MUST be decoded through `lib/vt`'s parser and
+   `lib/termcap`'s key tables into typed key/mouse events, never a second
+   shell-private input parser (`plans/CURSES.md`, Stage C4).
+3. Terminal resize MUST be handled through the curses screen model; the prompt,
+   line editor, and any open menu re-lay out at the new size.
+
+### Fail-closed and non-interactive degradation
+
+An unknown or missing `TERM` MUST degrade to the safe baseline (`dumb`, then a
+`vt100`-class fallback) rather than fail; the shell MUST NOT panic and MUST NOT
+read any file derived from `TERM` — there is no `/etc`/`terminfo` to read
+(`AGENTS.md` §2.9, §16.1; `plans/CURSES.md` §0). When `stdin`/`stdout` is not
+an interactive terminal (a pipe, a file, or `TERM=dumb`), interactive line
+editing, the completion menu, and full-screen affordances MUST degrade to
+plain line input and plain `stdout` text; scripted and piped execution MUST
+behave identically with or without a capable terminal.
+
+### Completion menu rendering
+
+The completion *result model* and contexts are defined under "Tab expansion
+and completion". Their on-screen presentation — the candidate menu, resource
+cards (`plans/ALIAS.md` §15.1), annotations, and stale markers — is drawn
+through `lib/curses` over the same capability-keyed path above. On a terminal
+that cannot support a menu the shell MUST fall back to a plain inline listing.
+
+### Remote terminals
+
+When the shell runs over a remote serial or SSH session, the terminal the user
+sees is the terminal application's concern, not the shell's (`plans/CURSES.md`,
+Stage C6). The shell only consumes the `TERM`/capabilities it inherits and
+emits sequences through the one shared `lib/vt` vocabulary, so the same shell
+output is correct locally and across a remote link end-to-end (`AGENTS.md`
+§2.2).
+
 ## Tab expansion and completion
 
 Tab expansion is a required feature of the interactive shell. It SHOULD feel
@@ -1704,6 +1798,20 @@ should still implement and test the target semantics described here.
   renderers, and fd redirections
 - completion safety: no side effects, no network, no secrets, no `$?` change
 - malformed and hostile `stdinfo` being treated as untrusted data
+- interactive rendering and key decoding go through the shared terminal stack
+  (`lib/vt`/`lib/termcap`/`lib/curses`) with no second escape-sequence
+  vocabulary, key table, or screen model
+- capability-keyed rendering degrades attributes/colour to the active `TERM`'s
+  capabilities (truecolour → 256 → 16 → mono)
+- an unknown/missing `TERM` degrades to the safe baseline without panicking and
+  without any `TERM`-derived file read
+- a non-interactive `stdin`/`stdout` (pipe, file, `TERM=dumb`) degrades line
+  editing and the completion menu to plain line input and plain text, with
+  identical scripted/piped behavior
+- the line editor and curses screen model never write to fd 3
+- a typed resource value carries identity (kind, canonical identity, short
+  fingerprint, facet rights, generation, scope), re-checks generation/identity
+  at use time, and its text serialization carries identity but never authority
 
 ## Summary
 
