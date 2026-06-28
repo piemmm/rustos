@@ -2855,12 +2855,20 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         if let Some(ring) = self.hub_int_ring.as_mut() {
             ring.retire_one()?;
         }
-        let outcome = self.process_hub_change(delay)?;
-        // Re-arm the status-change endpoint for the next change.
+        // Service the change, but re-arm the status-change endpoint
+        // **regardless of the outcome**. Right after a downstream disconnect
+        // the gone device's transaction translator can briefly fail to answer
+        // the hub's `GET_PORT_STATUS`, so servicing this report errors; if the
+        // re-arm were skipped on that error the status-change endpoint would be
+        // left with no outstanding transfer and the hub could never post
+        // another report — the later reconnect would then produce no interrupt
+        // and go unseen. Re-arming first keeps the watch live so a single odd
+        // report never silences it; the error is surfaced afterwards.
+        let outcome = self.process_hub_change(delay);
         self.arm_hub_report()?;
         let dci = self.hub_int_dci;
         self.xhci.ring_doorbell(self.hub_slot, u32::from(dci))?;
-        Ok(outcome)
+        outcome
     }
 
     /// Poll the event ring for a hub status-change endpoint completion,

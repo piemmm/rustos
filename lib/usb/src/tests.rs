@@ -4001,6 +4001,90 @@ fn split_transaction_detach_frees_the_slot_even_when_disable_is_never_confirmed(
 }
 
 #[test]
+fn a_failed_status_change_service_re_arms_the_watch_so_a_replug_is_still_seen() {
+    // The decisive reconnect bug: after a downstream keyboard is torn down on
+    // its own device-unreachable fault code, the hub posts a status-change
+    // report, but the gone device's transaction translator briefly cannot
+    // answer the hub's `GET_PORT_STATUS` (the metal `reject_hex=4` timeout), so
+    // servicing that report errors. The status-change endpoint MUST still be
+    // re-armed across that error — otherwise it is left with no outstanding
+    // transfer, the hub can never post another report, and the later reconnect
+    // produces no interrupt at all (the "re-plug not detected" symptom). The
+    // engine then never wakes again.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    mock.hub_downstream_status = 1 << 0;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+
+    device
+        .bring_up_keyboard(&delay)
+        .expect("the keyboard behind the hub is reached");
+
+    // Unplug: the keyboard's interrupt-IN endpoint faults with a Split
+    // Transaction Error and the slot is freed directly (the hub confirmation is
+    // unreliable, so the device-unreachable code is conclusive on its own).
+    let mut buf = [0u8; REPORT_LEN];
+    device.host_mut().fault_one_report_completion = Some(CompletionCode::SplitTransactionError);
+    assert_eq!(device.next_report(&mut buf), Ok(None));
+    device
+        .host_mut()
+        .pending_reports
+        .push_back(alloc::vec![0xAA, 0, 0, 0, 0, 0, 0, 0]);
+    device.host_mut().process_int_ring();
+    assert_eq!(device.next_report(&mut buf), Err(DriverError::DeviceFault));
+    assert_eq!(device.detach_if_watched_device_gone(), Ok(true));
+    assert!(!device.device_present(), "the gone device's slot was freed");
+    assert!(device.hub_watch_active());
+
+    // The hub posts a status-change report, but servicing it fails: right
+    // after a downstream disconnect the gone device's transaction translator
+    // briefly cannot answer the hub's class control transfers (the metal
+    // `reject_hex=4`), so reading the hub topology faults. The service
+    // therefore returns an error — yet the status-change endpoint MUST still
+    // be re-armed across that error, or the watch is left with no outstanding
+    // transfer, the hub can never post another report, and the later reconnect
+    // produces no interrupt at all (the "re-plug not detected" symptom).
+    device.host_mut().forge_hub_descriptor = true;
+    device.host_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
+    device.host_mut().post_hub_status_change(&[1 << 4]);
+    assert!(
+        device.next_hub_change(&delay).is_err(),
+        "the faulting hub control transfer surfaces as an error"
+    );
+    assert!(
+        device.hub_watch_active(),
+        "the watch stays active after a failed status-change service"
+    );
+    assert!(
+        !device.device_present(),
+        "the failed service enumerated nothing yet"
+    );
+
+    // The transient hub fault clears and the keyboard is (re-)plugged. The
+    // connect is only delivered if the status-change endpoint was re-armed
+    // despite the earlier error — i.e. an interrupt can still reach the engine.
+    device.host_mut().forge_hub_descriptor = false;
+    device.host_mut().hub_downstream_status = 1 << 0;
+    device.host_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
+    device.host_mut().post_hub_status_change(&[1 << 4]);
+    match device.next_hub_change(&delay) {
+        Ok(HubEvent::Attached(descriptor)) => {
+            assert!(!descriptor.is_hub());
+            assert_eq!(descriptor.vendor_id, 0x046D);
+            assert_eq!(descriptor.product_id, 0xC077);
+        }
+        other => {
+            panic!("expected a fresh attach after the transient hub fault cleared, got {other:?}")
+        }
+    }
+    assert!(
+        device.device_present(),
+        "the re-plugged keyboard is live again"
+    );
+}
+
+#[test]
 fn hub_watch_reenumerates_a_reattached_device_on_a_fresh_slot() {
     let mem = shared_mem();
     let mut mock = MockXhci::with_hub(&mem, 4, 4);

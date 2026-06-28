@@ -550,6 +550,19 @@ the live controller behaviour is host- and CI-proven first.
     `split_transaction_fault_detaches_without_a_hub_status_confirmation`,
     `split_transaction_detach_frees_the_slot_even_when_disable_is_never_confirmed`,
     `rejected_report_records_its_completion_code_surviving_a_later_control_transfer`.
+  - **A failed status-change service never silences the watch.**
+    `UsbDevice::next_hub_change` re-arms the hub's status-change interrupt-IN
+    endpoint (a fresh transfer + doorbell) **even when `process_hub_change`
+    returns an error**, then surfaces that error. Right after a downstream
+    disconnect the gone device's transaction translator can briefly fail a hub
+    class control transfer (the `reject_hex=4` timeout), so servicing that
+    report faults; previously the re-arm was skipped on that error, leaving the
+    status-change endpoint with no outstanding transfer — the hub could then
+    never post another report and the **re-plug produced no interrupt at all**
+    (the engine never woke again — the captured "reconnect not detected"
+    symptom). Re-arming first keeps the watch live so the next genuine report
+    (the reconnect) still wakes the loop. Host regression:
+    `a_failed_status_change_service_re_arms_the_watch_so_a_replug_is_still_seen`.
   - **Remaining (operator's):** live metal acceptance — attach → keystroke,
     detach → `usb_kbd` unloaded (controller stays up), re-attach → autoloads
     again, **and cold boot with the keyboard unplugged then plugged in** — is
