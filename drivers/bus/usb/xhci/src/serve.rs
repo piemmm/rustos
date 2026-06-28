@@ -102,16 +102,21 @@ impl UrbService {
     /// transfer, or an interrupt-IN report already queued) is
     /// [`UrbOutcome::Reply`]-now; an interrupt-IN report not yet arrived is
     /// [`UrbOutcome::Held`] (the controller event will complete it); a
-    /// malformed or illegal URB is answered fail-closed. A submit arriving
-    /// while a URB is already outstanding is rejected [`Errno::AlreadyExists`]
-    /// without disturbing the in-flight URB.
+    /// malformed or illegal URB is answered fail-closed. If the interface node
+    /// is not live, a submit is rejected [`Errno::NotFound`] without touching
+    /// the controller. A submit arriving while a URB is already outstanding is
+    /// rejected [`Errno::AlreadyExists`] without disturbing the in-flight URB.
     pub fn on_submit<E: UrbEngine>(
         &mut self,
+        interface_live: bool,
         ticket: u64,
         request: &[u8],
         shm: &mut [u8],
         engine: &mut E,
     ) -> UrbOutcome {
+        if !interface_live {
+            return UrbOutcome::Reply(Self::reply(ticket, Err(Errno::NotFound)));
+        }
         if self.outstanding.is_some() {
             return UrbOutcome::Reply(Self::reply(ticket, Err(Errno::AlreadyExists)));
         }
@@ -153,6 +158,21 @@ impl UrbService {
             }
             Err(err) => UrbOutcome::Reply(Self::reply(ticket, Err(err))),
         }
+    }
+
+    /// Abort the in-flight URB, if any, with `errno` and clear the service for
+    /// the next class-driver instance.
+    ///
+    /// A device disconnect can unload a class driver while its blocking
+    /// interrupt-IN request is still parked in the kernel. The HCD keeps
+    /// serving the same endpoint across a later replug, so the stale request
+    /// must not survive and block the freshly loaded class driver.
+    #[must_use]
+    pub fn abort_outstanding(&mut self, errno: Errno) -> UrbOutcome {
+        let Some((ticket, _, _)) = self.outstanding.take() else {
+            return UrbOutcome::Idle;
+        };
+        UrbOutcome::Reply(Self::reply(ticket, Err(errno)))
     }
 }
 

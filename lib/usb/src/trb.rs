@@ -287,6 +287,13 @@ pub enum CompletionCode {
     /// The transfer completed short of the requested length —
     /// expected for variable-length HID interrupt reports.
     ShortPacket = 13,
+    /// A split transaction to a low/full-speed device behind a high-speed
+    /// hub's transaction translator failed: the hub could not complete the
+    /// start-/complete-split handshake to the device. On a hot-removal of a
+    /// low/full-speed device (e.g. a keyboard plugged into a USB-A port behind
+    /// the controller's internal hub) the controller surfaces the unplug here,
+    /// on the device's *own* endpoint, before the hub posts a port change.
+    SplitTransactionError = 36,
 }
 
 impl CompletionCode {
@@ -312,7 +319,27 @@ impl CompletionCode {
             5 => Ok(Self::TrbError),
             6 => Ok(Self::StallError),
             13 => Ok(Self::ShortPacket),
+            36 => Ok(Self::SplitTransactionError),
             _ => Err(DriverError::OutOfRange),
         }
+    }
+
+    /// Whether this completion code means the device failed to respond to a
+    /// transaction — it is unreachable, as at a hot-removal — rather than
+    /// actively responding with an error.
+    ///
+    /// A removed device cannot answer: the controller reports either a
+    /// [`Self::UsbTransactionError`] (no handshake/timeout/bad PID on a
+    /// directly-attached or high-speed device) or a
+    /// [`Self::SplitTransactionError`] (the hub's transaction translator could
+    /// not reach a low/full-speed device behind it). A [`Self::StallError`] or
+    /// [`Self::BabbleDetected`], by contrast, is the device *responding*, so it
+    /// is deliberately excluded — those must not be read as a disconnect.
+    #[must_use]
+    pub const fn indicates_device_unreachable(self) -> bool {
+        matches!(
+            self,
+            Self::UsbTransactionError | Self::SplitTransactionError
+        )
     }
 }

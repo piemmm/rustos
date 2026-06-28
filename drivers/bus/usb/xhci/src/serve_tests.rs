@@ -30,6 +30,7 @@ const BUFFER_HANDLE: u64 = 0x0BAD_F00D_0000_0001;
 struct MockEngine {
     control_response: Vec<u8>,
     reports: Vec<Vec<u8>>,
+    interrupt_fault: Option<DriverError>,
     control_calls: usize,
     interrupt_calls: usize,
 }
@@ -39,6 +40,7 @@ impl MockEngine {
         Self {
             control_response: Vec::new(),
             reports: Vec::new(),
+            interrupt_fault: None,
             control_calls: 0,
             interrupt_calls: 0,
         }
@@ -55,6 +57,9 @@ impl UrbEngine for MockEngine {
 
     fn interrupt_in(&mut self, data: &mut [u8]) -> Result<Option<usize>, DriverError> {
         self.interrupt_calls += 1;
+        if let Some(err) = self.interrupt_fault.take() {
+            return Err(err);
+        }
         if self.reports.is_empty() {
             return Ok(None);
         }
@@ -96,7 +101,7 @@ fn an_interrupt_in_is_held_until_a_controller_event_completes_it() {
     let request = interrupt_urb(1, 8);
 
     // No report queued yet: the submit is held outstanding, not replied.
-    let outcome = service.on_submit(0x11, &request, &mut shm, &mut engine);
+    let outcome = service.on_submit(true, 0x11, &request, &mut shm, &mut engine);
     assert_eq!(outcome, UrbOutcome::Held);
     assert!(service.is_busy());
     assert_eq!(engine.interrupt_calls, 1);
@@ -135,7 +140,7 @@ fn a_control_in_is_replied_synchronously() {
     let mut buf = [0u8; URB_REQUEST_LEN];
     let n = urb.encode(&mut buf).expect("encodes");
 
-    let outcome = service.on_submit(0x22, &buf[..n], &mut shm, &mut engine);
+    let outcome = service.on_submit(true, 0x22, &buf[..n], &mut shm, &mut engine);
     assert_eq!(reply_result(&outcome), Ok(8));
     // A control transfer completes within the call — never left outstanding.
     assert!(!service.is_busy());
@@ -152,13 +157,13 @@ fn a_second_submit_while_one_is_outstanding_is_rejected_without_displacing_it() 
 
     // First submit is held (no report yet).
     assert_eq!(
-        service.on_submit(0x11, &request, &mut shm, &mut engine),
+        service.on_submit(true, 0x11, &request, &mut shm, &mut engine),
         UrbOutcome::Held
     );
     // A second concurrent submit is fail-closed `AlreadyExists` and does not
     // touch the engine or the in-flight URB.
     let before = engine.interrupt_calls;
-    let outcome = service.on_submit(0x22, &request, &mut shm, &mut engine);
+    let outcome = service.on_submit(true, 0x22, &request, &mut shm, &mut engine);
     assert_eq!(reply_result(&outcome), Err(Errno::AlreadyExists));
     assert_eq!(engine.interrupt_calls, before);
     assert!(service.is_busy());
@@ -170,6 +175,82 @@ fn a_second_submit_while_one_is_outstanding_is_rejected_without_displacing_it() 
         UrbOutcome::Reply(reply) => assert_eq!(reply.ticket, 0x11),
         other => panic!("expected a Reply to the held ticket, got {other:?}"),
     }
+}
+
+#[test]
+fn aborting_an_outstanding_urb_replies_and_unblocks_a_replugged_driver() {
+    let mut engine = MockEngine::new();
+    let mut shm = vec![0u8; 8];
+    let mut service = UrbService::new();
+    let request = interrupt_urb(1, 8);
+
+    assert_eq!(
+        service.on_submit(true, 0x11, &request, &mut shm, &mut engine),
+        UrbOutcome::Held
+    );
+
+    let outcome = service.abort_outstanding(Errno::NotFound);
+    match outcome {
+        UrbOutcome::Reply(reply) => {
+            assert_eq!(reply.ticket, 0x11);
+            assert_eq!(
+                decode_completion(&reply.bytes[..reply.len]),
+                Err(Errno::NotFound)
+            );
+        }
+        other => panic!("expected a Reply to the aborted ticket, got {other:?}"),
+    }
+    assert!(!service.is_busy());
+
+    assert_eq!(
+        service.on_submit(true, 0x22, &request, &mut shm, &mut engine),
+        UrbOutcome::Held
+    );
+}
+
+#[test]
+fn disconnect_abort_wins_over_a_stale_transfer_fault() {
+    let mut engine = MockEngine::new();
+    let mut shm = vec![0u8; 8];
+    let mut service = UrbService::new();
+    let request = interrupt_urb(1, 8);
+
+    assert_eq!(
+        service.on_submit(true, 0x11, &request, &mut shm, &mut engine),
+        UrbOutcome::Held
+    );
+    engine.interrupt_fault = Some(DriverError::DeviceFault);
+
+    let outcome = service.abort_outstanding(Errno::NotFound);
+    assert_eq!(reply_result(&outcome), Err(Errno::NotFound));
+    assert!(!service.is_busy());
+    assert_eq!(service.on_event(&mut shm, &mut engine), UrbOutcome::Idle);
+    assert_eq!(
+        engine.interrupt_calls, 1,
+        "disconnect abort must not drain a stale transfer fault after replying NotFound"
+    );
+}
+
+#[test]
+fn submit_after_interface_removal_is_rejected_without_touching_the_engine() {
+    let mut engine = MockEngine::new();
+    let mut shm = vec![0u8; 8];
+    let mut service = UrbService::new();
+    let request = interrupt_urb(1, 8);
+
+    let outcome = service.on_submit(false, 0x33, &request, &mut shm, &mut engine);
+    match outcome {
+        UrbOutcome::Reply(reply) => {
+            assert_eq!(reply.ticket, 0x33);
+            assert_eq!(
+                decode_completion(&reply.bytes[..reply.len]),
+                Err(Errno::NotFound)
+            );
+        }
+        other => panic!("expected a NotFound reply for an absent interface, got {other:?}"),
+    }
+    assert!(!service.is_busy());
+    assert_eq!(engine.interrupt_calls, 0);
 }
 
 #[test]
@@ -190,7 +271,7 @@ fn an_illegal_urb_is_replied_fail_closed_without_reaching_the_engine() {
     let mut buf = [0u8; URB_REQUEST_LEN];
     let n = urb.encode(&mut buf).expect("encodes");
 
-    let outcome = service.on_submit(0x33, &buf[..n], &mut shm, &mut engine);
+    let outcome = service.on_submit(true, 0x33, &buf[..n], &mut shm, &mut engine);
     assert_eq!(reply_result(&outcome), Err(Errno::NotImplemented));
     assert!(!service.is_busy());
     assert_eq!(engine.control_calls, 0);

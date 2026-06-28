@@ -312,6 +312,12 @@ struct MockXhci {
     /// delivered (a single rejected report must never silence the
     /// keyboard).
     fault_one_report_completion: Option<CompletionCode>,
+    /// When set, a `DisableSlot` command posts **no** completion event,
+    /// modelling the metal hot-removal where the gone device's hub never
+    /// lets the controller acknowledge the Disable Slot in time. The
+    /// best-effort teardown must still free the slot locally so a re-plug
+    /// re-enumerates.
+    suppress_disable_completion: bool,
     /// A root-hub port (0-based) whose device only reports Current
     /// Connect Status once software writes Port Power — modelling a
     /// port-power-controlled controller (the VL805, `HCCPARAMS1`
@@ -487,6 +493,7 @@ impl MockXhci {
             fault_class_requests: false,
             forge_report_residual: false,
             fault_one_report_completion: None,
+            suppress_disable_completion: false,
             latent_device_port: None,
             hcsparams2: 0,
             pagesize: 0,
@@ -685,6 +692,27 @@ impl MockXhci {
         self.post_transfer_event_raw(trb_addr, code.as_u8(), dci, residual);
     }
 
+    /// Post a transfer event explicitly addressed to `slot`, so a test can
+    /// model a *trailing* completion the controller posts for a slot the
+    /// engine has already freed (after a hot-removal Disable Slot) — which no
+    /// longer matches any live endpoint.
+    fn post_transfer_event_for_slot(
+        &mut self,
+        trb_addr: u64,
+        code: CompletionCode,
+        dci: u8,
+        residual: u32,
+        slot: u8,
+    ) {
+        self.post_event(Trb {
+            parameter: trb_addr,
+            status: (u32::from(code.as_u8()) << 24) | residual,
+            control: (u32::from(TrbType::TransferEvent.as_u8()) << 10)
+                | (u32::from(dci) << 16)
+                | trb::control_slot(slot),
+        });
+    }
+
     /// Post a transfer event carrying a *raw* completion-code byte — so
     /// a test can model a controller-specific or reserved code the
     /// driver's [`CompletionCode`] enum does not model (e.g. xHCI code
@@ -772,8 +800,14 @@ impl MockXhci {
                 Ok(TrbType::DisableSlot) => {
                     // Free a device slot on hot-removal (xHCI §6.4.3.3); the
                     // mock just acknowledges it (the engine clears its own
-                    // per-device state and DCBAA entry).
-                    self.post_command_completion(addr, CompletionCode::Success, trb.slot_id());
+                    // per-device state and DCBAA entry). When
+                    // `suppress_disable_completion` is set the controller posts
+                    // no completion at all, modelling the metal hot-removal
+                    // where the gone device's hub never lets the Disable Slot
+                    // be acknowledged.
+                    if !self.suppress_disable_completion {
+                        self.post_command_completion(addr, CompletionCode::Success, trb.slot_id());
+                    }
                 }
                 Ok(TrbType::ConfigureEndpoint) => {
                     let code = self.handle_configure_endpoint(trb.parameter, trb.slot_id());
@@ -3177,6 +3211,65 @@ fn report_source_rearms_after_a_rejected_completion() {
 }
 
 #[test]
+fn rejected_report_records_its_completion_code_surviving_a_later_control_transfer() {
+    // When a downstream keyboard is unplugged, on metal the disconnect first
+    // surfaces as the device's interrupt-IN transfer faulting. The HCD then
+    // issues a hub GET_PORT_STATUS control transfer to confirm — which resets
+    // the shared per-transfer event diagnostics. The controller's verdict on
+    // the keyboard's *own* endpoint (a transient transaction error vs. a
+    // device-gone code) is the datum that decides the correct teardown, so it
+    // must be captured at the report fault and survive that confirmation
+    // control transfer. This asserts the dedicated `last_report_fault_code`
+    // records the rejected code and is not clobbered by a subsequent control
+    // transfer (it fails before that field existed, when the code was lost).
+    use crate::transport::UrbEngine;
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_device(&mem), &mem);
+    device.enumerate_hid(1).expect("enumeration succeeds");
+    assert_eq!(
+        device.last_report_fault_code(),
+        0,
+        "no report has faulted yet"
+    );
+
+    // The next interrupt-IN report posts a completion code the decode rejects
+    // (the unplug-style fault).
+    let mut buf = [0u8; REPORT_LEN];
+    device.host_mut().fault_one_report_completion = Some(CompletionCode::UsbTransactionError);
+    assert_eq!(device.next_report(&mut buf), Ok(None));
+    device
+        .host_mut()
+        .pending_reports
+        .push_back(alloc::vec![0xAA, 0, 0, 0, 0, 0, 0, 0]);
+    device.host_mut().process_int_ring();
+    assert_eq!(device.next_report(&mut buf), Err(DriverError::DeviceFault));
+    assert_eq!(
+        device.last_report_fault_code(),
+        CompletionCode::UsbTransactionError.as_u8(),
+        "the rejected report's completion code is captured"
+    );
+
+    // A subsequent control transfer (standing in for the hub disconnect
+    // confirmation the HCD issues next) resets the shared event diagnostics
+    // but must leave the report fault code intact.
+    let mut descriptor = [0u8; 18];
+    let get_device_descriptor = [0x80, 0x06, 0x00, 0x01, 0x00, 0x00, 0x12, 0x00];
+    device
+        .control_in(get_device_descriptor, &mut descriptor)
+        .expect("the device-descriptor control transfer completes");
+    assert_eq!(
+        device.last_completion_code(),
+        CompletionCode::Success.as_u8(),
+        "the control transfer reset the shared diagnostics to its own result"
+    );
+    assert_eq!(
+        device.last_report_fault_code(),
+        CompletionCode::UsbTransactionError.as_u8(),
+        "the report fault code survives a later control transfer"
+    );
+}
+
+#[test]
 fn next_report_before_enumeration_fails_closed() {
     let mem = shared_mem();
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
@@ -3551,6 +3644,363 @@ fn hub_watch_retracts_a_disconnected_downstream_device() {
 }
 
 #[test]
+fn faulted_downstream_report_can_confirm_and_detach_a_gone_device() {
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    mock.hub_downstream_status = 1 << 0;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+
+    device
+        .bring_up_keyboard(&delay)
+        .expect("the keyboard behind the hub is reached");
+    let mut buf = [0u8; REPORT_LEN];
+    device.host_mut().fault_one_report_completion = Some(CompletionCode::StallError);
+    assert_eq!(device.next_report(&mut buf), Ok(None));
+    device
+        .host_mut()
+        .pending_reports
+        .push_back(alloc::vec![0xAA, 0, 0, 0, 0, 0, 0, 0]);
+    device.host_mut().process_int_ring();
+
+    device.host_mut().hub_downstream_status = 0;
+    assert_eq!(device.next_report(&mut buf), Err(DriverError::DeviceFault));
+    assert_eq!(device.detach_if_watched_device_gone(), Ok(true));
+    assert!(
+        !device.device_present(),
+        "the vanished device slot was freed"
+    );
+    assert!(
+        device.hub_watch_active(),
+        "the hub watch remains armed for a later reattach"
+    );
+}
+
+#[test]
+fn fault_driven_detach_rearms_a_stashed_hub_change_for_reattach() {
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    mock.hub_downstream_status = 1 << 0;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+
+    device
+        .bring_up_keyboard(&delay)
+        .expect("the keyboard behind the hub is reached");
+    let mut buf = [0u8; REPORT_LEN];
+    device.host_mut().fault_one_report_completion = Some(CompletionCode::StallError);
+    assert_eq!(device.next_report(&mut buf), Ok(None));
+    device.host_mut().hub_downstream_status = 0;
+    device.host_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
+    device.host_mut().post_hub_status_change(&[1 << 4]);
+    device
+        .host_mut()
+        .pending_reports
+        .push_back(alloc::vec![0xAA, 0, 0, 0, 0, 0, 0, 0]);
+    device.host_mut().process_int_ring();
+
+    assert_eq!(device.next_report(&mut buf), Err(DriverError::DeviceFault));
+    assert_eq!(device.detach_if_watched_device_gone(), Ok(true));
+
+    assert_eq!(device.next_hub_change(&delay), Ok(HubEvent::None));
+    device.host_mut().hub_downstream_status = 1 << 0;
+    device.host_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
+    device.host_mut().post_hub_status_change(&[1 << 4]);
+    match device.next_hub_change(&delay) {
+        Ok(HubEvent::Attached(descriptor)) => {
+            assert!(!descriptor.is_hub());
+            assert_eq!(descriptor.vendor_id, 0x046D);
+            assert_eq!(descriptor.product_id, 0xC077);
+        }
+        other => panic!("expected a fresh attach after re-arming the hub watch, got {other:?}"),
+    }
+}
+
+#[test]
+fn trailing_freed_slot_transfer_event_is_drained_not_faulted() {
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    mock.hub_downstream_status = 1 << 0;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+
+    device
+        .bring_up_keyboard(&delay)
+        .expect("the keyboard behind the hub is reached");
+    let freed_slot = device.raw_device_slot();
+    assert!(freed_slot != 0, "the keyboard enumerated on a real slot");
+
+    // The unplug faults the device's interrupt-IN transfer; the fault path
+    // confirms the downstream port is gone and frees the device slot.
+    let mut buf = [0u8; REPORT_LEN];
+    device.host_mut().fault_one_report_completion = Some(CompletionCode::StallError);
+    assert_eq!(device.next_report(&mut buf), Ok(None));
+    device.host_mut().hub_downstream_status = 0;
+    device
+        .host_mut()
+        .pending_reports
+        .push_back(alloc::vec![0xAA, 0, 0, 0, 0, 0, 0, 0]);
+    device.host_mut().process_int_ring();
+    assert_eq!(device.next_report(&mut buf), Err(DriverError::DeviceFault));
+    assert_eq!(device.detach_if_watched_device_gone(), Ok(true));
+
+    // The controller now posts a *trailing* transfer completion still addressed
+    // to the just-freed device slot — ahead of the hub's disconnect
+    // status-change report on the shared event ring. Before the fix this
+    // matched no live endpoint and faulted the hub watch.
+    device.host_mut().post_transfer_event_for_slot(
+        0x4242,
+        CompletionCode::StallError,
+        3,
+        0,
+        freed_slot,
+    );
+    device.host_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
+    device.host_mut().post_hub_status_change(&[1 << 4]);
+
+    // The stale event is drained, not faulted: the hub change is serviced
+    // quietly (the device is already gone) and the watch stays armed.
+    assert_eq!(device.next_hub_change(&delay), Ok(HubEvent::None));
+    assert!(
+        device.stale_freed_event_count() >= 1,
+        "the trailing freed-slot completion was drained, not faulted"
+    );
+    assert!(
+        device.hub_watch_active(),
+        "the hub watch survived the stale event and is armed for a reconnect"
+    );
+
+    // A genuine reconnect still enumerates a brand-new device on a fresh slot.
+    device.host_mut().hub_downstream_status = 1 << 0;
+    device.host_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
+    device.host_mut().post_hub_status_change(&[1 << 4]);
+    match device.next_hub_change(&delay) {
+        Ok(HubEvent::Attached(descriptor)) => {
+            assert!(!descriptor.is_hub());
+            assert_eq!(descriptor.vendor_id, 0x046D);
+            assert_eq!(descriptor.product_id, 0xC077);
+        }
+        other => panic!("expected a fresh attach after draining the stale event, got {other:?}"),
+    }
+    // Once the fresh device owns its slot the freed-slot tolerance is cleared.
+    assert!(device.device_present());
+}
+
+#[test]
+fn fault_driven_detach_leaves_unposted_hub_latch_for_rearm() {
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    mock.hub_downstream_status = 1 << 0;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+
+    device
+        .bring_up_keyboard(&delay)
+        .expect("the keyboard behind the hub is reached");
+    let mut buf = [0u8; REPORT_LEN];
+    device.host_mut().fault_one_report_completion = Some(CompletionCode::StallError);
+    assert_eq!(device.next_report(&mut buf), Ok(None));
+    device.host_mut().hub_downstream_status = 0;
+    device.host_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
+    device
+        .host_mut()
+        .pending_reports
+        .push_back(alloc::vec![0xAA, 0, 0, 0, 0, 0, 0, 0]);
+    device.host_mut().process_int_ring();
+
+    assert_eq!(device.next_report(&mut buf), Err(DriverError::DeviceFault));
+    assert_eq!(device.detach_if_watched_device_gone(), Ok(true));
+    assert_eq!(
+        device.host_mut().hub_downstream_change,
+        PORT_CHANGE_CONNECTION,
+        "the hub latch stays set until the status endpoint reports it"
+    );
+
+    device.host_mut().post_hub_status_change(&[1 << 4]);
+    assert_eq!(device.next_hub_change(&delay), Ok(HubEvent::None));
+    assert_eq!(device.host_mut().hub_downstream_change, 0);
+
+    device.host_mut().hub_downstream_status = 1 << 0;
+    device.host_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
+    device.host_mut().post_hub_status_change(&[1 << 4]);
+    match device.next_hub_change(&delay) {
+        Ok(HubEvent::Attached(descriptor)) => {
+            assert!(!descriptor.is_hub());
+            assert_eq!(descriptor.vendor_id, 0x046D);
+            assert_eq!(descriptor.product_id, 0xC077);
+        }
+        other => panic!("expected a fresh attach after the delayed hub re-arm, got {other:?}"),
+    }
+}
+
+#[test]
+fn live_downstream_report_fault_is_not_misclassified_as_detach() {
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    mock.hub_downstream_status = 1 << 0;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+
+    device
+        .bring_up_keyboard(&delay)
+        .expect("the keyboard behind the hub is reached");
+    let mut buf = [0u8; REPORT_LEN];
+    device.host_mut().fault_one_report_completion = Some(CompletionCode::StallError);
+    assert_eq!(device.next_report(&mut buf), Ok(None));
+    device
+        .host_mut()
+        .pending_reports
+        .push_back(alloc::vec![0xAA, 0, 0, 0, 0, 0, 0, 0]);
+    device.host_mut().process_int_ring();
+
+    assert_eq!(device.next_report(&mut buf), Err(DriverError::DeviceFault));
+    assert_eq!(device.detach_if_watched_device_gone(), Ok(false));
+    assert!(
+        device.device_present(),
+        "a live device's transfer fault remains a report fault"
+    );
+}
+
+#[test]
+fn split_transaction_fault_detaches_without_a_hub_status_confirmation() {
+    // The metal case: a low/full-speed keyboard hangs off a hub that stays
+    // plugged in, so on unplug the hub's downstream port keeps reading
+    // connected and a hub `GET_PORT_STATUS` confirmation is unreliable (it
+    // times out). The disconnect surfaces *only* as the keyboard's own
+    // interrupt-IN transfer faulting with a Split Transaction Error (the hub's
+    // transaction translator can no longer reach the gone device). That code is
+    // conclusive on its own, so the device slot must be freed directly —
+    // without depending on the hub confirmation, which here would (wrongly)
+    // report the port still connected and leave the device wedged forever.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    mock.hub_downstream_status = 1 << 0;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+
+    device
+        .bring_up_keyboard(&delay)
+        .expect("the keyboard behind the hub is reached");
+
+    let mut buf = [0u8; REPORT_LEN];
+    device.host_mut().fault_one_report_completion = Some(CompletionCode::SplitTransactionError);
+    assert_eq!(device.next_report(&mut buf), Ok(None));
+    device
+        .host_mut()
+        .pending_reports
+        .push_back(alloc::vec![0xAA, 0, 0, 0, 0, 0, 0, 0]);
+    device.host_mut().process_int_ring();
+    assert_eq!(device.next_report(&mut buf), Err(DriverError::DeviceFault));
+    assert_eq!(
+        device.last_report_fault_code(),
+        CompletionCode::SplitTransactionError.as_u8(),
+        "the keyboard endpoint's device-gone code is captured"
+    );
+
+    // The hub's downstream port is deliberately left reading connected: the fix
+    // must NOT depend on the hub confirmation. Before the fix this returned
+    // Ok(false) (hub says connected) and the device was never freed.
+    assert_eq!(device.detach_if_watched_device_gone(), Ok(true));
+    assert!(!device.device_present(), "the gone device's slot was freed");
+    assert!(
+        device.hub_watch_active(),
+        "the hub watch stays armed for the re-plug"
+    );
+    assert_eq!(
+        device.last_report_fault_code(),
+        0,
+        "the acted-on fault code is cleared so a re-plug is not re-detached"
+    );
+
+    // Re-plug: the hub posts a connect change and the device re-enumerates on a
+    // fresh slot.
+    device.host_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
+    device.host_mut().post_hub_status_change(&[1 << 4]);
+    match device.next_hub_change(&delay) {
+        Ok(HubEvent::Attached(descriptor)) => {
+            assert!(!descriptor.is_hub());
+            assert_eq!(descriptor.vendor_id, 0x046D);
+            assert_eq!(descriptor.product_id, 0xC077);
+        }
+        other => {
+            panic!("expected a fresh attach after the split-transaction detach, got {other:?}")
+        }
+    }
+    assert!(
+        device.device_present(),
+        "the re-plugged keyboard is live again"
+    );
+}
+
+#[test]
+fn split_transaction_detach_frees_the_slot_even_when_disable_is_never_confirmed() {
+    // The decisive metal case (matching the captured log): the keyboard's
+    // interrupt-IN endpoint faults with a Split Transaction Error AND the
+    // controller never lets the Disable Slot command complete — the gone
+    // device's hub cannot acknowledge it, so the teardown's command wait times
+    // out. The teardown must still free the slot *locally* (best-effort), or
+    // `device_slot` stays set, `process_hub_change` ignores the re-plug connect
+    // (it enumerates only when no device is tracked), and the keyboard is never
+    // re-detected — exactly the "no log on re-plug" symptom.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    mock.hub_downstream_status = 1 << 0;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+
+    device
+        .bring_up_keyboard(&delay)
+        .expect("the keyboard behind the hub is reached");
+
+    let mut buf = [0u8; REPORT_LEN];
+    device.host_mut().fault_one_report_completion = Some(CompletionCode::SplitTransactionError);
+    assert_eq!(device.next_report(&mut buf), Ok(None));
+    device
+        .host_mut()
+        .pending_reports
+        .push_back(alloc::vec![0xAA, 0, 0, 0, 0, 0, 0, 0]);
+    device.host_mut().process_int_ring();
+    assert_eq!(device.next_report(&mut buf), Err(DriverError::DeviceFault));
+
+    // The controller will NOT acknowledge the Disable Slot — model the metal
+    // controller that never posts the completion the teardown waits for.
+    device.host_mut().suppress_disable_completion = true;
+
+    // The slot is still freed locally despite the unconfirmable Disable Slot.
+    assert_eq!(device.detach_if_watched_device_gone(), Ok(true));
+    assert!(
+        !device.device_present(),
+        "the slot is freed best-effort even without a Disable Slot confirmation"
+    );
+    assert!(
+        !device.slot_disable_confirmed(),
+        "the teardown records that the controller never confirmed the Disable Slot"
+    );
+    assert!(
+        device.hub_watch_active(),
+        "the hub watch stays armed for the re-plug"
+    );
+
+    // Re-plug now re-enumerates (it would not if `device_slot` were still set).
+    // The controller acknowledges the re-enumeration's commands again.
+    device.host_mut().suppress_disable_completion = false;
+    device.host_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
+    device.host_mut().post_hub_status_change(&[1 << 4]);
+    match device.next_hub_change(&delay) {
+        Ok(HubEvent::Attached(descriptor)) => {
+            assert!(!descriptor.is_hub());
+            assert_eq!(descriptor.vendor_id, 0x046D);
+            assert_eq!(descriptor.product_id, 0xC077);
+        }
+        other => panic!("expected a fresh attach after an unconfirmed detach, got {other:?}"),
+    }
+    assert!(
+        device.device_present(),
+        "the re-plugged keyboard is live again"
+    );
+}
+
+#[test]
 fn hub_watch_reenumerates_a_reattached_device_on_a_fresh_slot() {
     let mem = shared_mem();
     let mut mock = MockXhci::with_hub(&mem, 4, 4);
@@ -3588,6 +4038,82 @@ fn hub_watch_reenumerates_a_reattached_device_on_a_fresh_slot() {
     assert!(
         device.slot() > 2,
         "a re-attach allocates a brand-new slot, never the freed one"
+    );
+}
+
+#[test]
+fn hub_assembly_unplug_at_root_port_tears_down_and_replug_reenumerates() {
+    // On the Pi 4 the keyboard hangs off a hub, and pulling the keyboard out
+    // takes that hub with it: the unplug surfaces as the hub's own *root* port
+    // losing connection, not as a downstream hub-port change. The hub being
+    // gone, it answers neither its status-change interrupt endpoint nor a
+    // GET_PORT_STATUS control transfer, so watching only the downstream port
+    // never sees the disconnect (the metal symptom: the hub control transfer
+    // times out and the re-plug is never enumerated). The engine must notice
+    // the root port gone, drop the hub watch and all tracking, and let a
+    // re-plug re-enumerate from scratch.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    mock.hub_downstream_status = 1 << 0;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+
+    device
+        .bring_up_keyboard(&delay)
+        .expect("the keyboard behind the hub is reached");
+    assert!(device.hub_watch_active());
+    assert!(device.device_present());
+    assert_eq!(device.root_port(), 1, "the hub enumerated on root port 1");
+
+    // While the hub is present its root port reads connected, so the check is
+    // a no-op and the watch is left intact for the normal status-change path.
+    assert_eq!(device.detach_if_hub_root_gone(), Ok(false));
+    assert!(device.hub_watch_active());
+
+    // The whole hub assembly is now unplugged: its root port clears the
+    // connect bit.
+    device.host_mut().portsc[0] = 0;
+    assert_eq!(
+        device.detach_if_hub_root_gone(),
+        Ok(true),
+        "the hub assembly vanishing at its root port is detected"
+    );
+    assert!(
+        !device.hub_watch_active(),
+        "the hub watch is dropped once the hub itself is gone"
+    );
+    assert!(
+        !device.device_present(),
+        "no device is tracked after the hub assembly is removed"
+    );
+
+    // A re-plug: the hub assembly reappears on a root port. Treated as a
+    // brand-new device, a full reset + re-enumeration brings the keyboard back
+    // through the hub.
+    device.host_mut().portsc[0] =
+        regs::PORTSC_CCS | regs::PORTSC_PED | regs::PORTSC_PP | (3 << regs::PORTSC_SPEED_SHIFT);
+    assert!(device.any_root_port_connected());
+    match device
+        .reset_and_reenumerate(&delay)
+        .expect("the controller resets and re-enumerates the reattached hub assembly")
+    {
+        BringUp::Device(descriptor) => {
+            assert!(
+                !descriptor.is_hub(),
+                "the downstream keyboard is reached again"
+            );
+            assert_eq!(descriptor.vendor_id, 0x046D);
+            assert_eq!(descriptor.product_id, 0xC077);
+        }
+        BringUp::AwaitingDevice => panic!("the reattached hub+keyboard must enumerate"),
+    }
+    assert!(
+        device.device_present(),
+        "the keyboard is live again after the re-plug"
+    );
+    assert!(
+        device.hub_watch_active(),
+        "the hub watch is re-armed for the freshly enumerated assembly"
     );
 }
 

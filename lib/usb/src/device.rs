@@ -1080,6 +1080,20 @@ pub struct UsbDevice<H: XhciHost, M: DmaRegion> {
     /// awaiting its event, parked for the hub watcher to consume. As
     /// [`Self::pending_kbd`].
     pending_hub: Option<Trb>,
+    /// The slot of a device that was just freed by a hot-removal
+    /// ([`Self::detach_downstream_device`]), retained so a *trailing* transfer
+    /// event the controller still posts for that vanished slot (an in-flight
+    /// transfer dropped by the unplug, or a Disable Slot side-effect) is
+    /// recognised as stale and drained, never mistaken for a controller
+    /// protocol violation. `0` once no freed slot is being tolerated (the
+    /// steady state, and again after a fresh device enumerates). Without this,
+    /// such a stale event matched neither the (now-cleared) device endpoint
+    /// nor the hub endpoint and faulted the event-ring consumers, wedging the
+    /// hub status-change watch so a later re-plug went unseen.
+    freed_slot: u8,
+    /// Count of trailing transfer events drained for [`Self::freed_slot`], for
+    /// a hot-removal diagnostic ([`Self::stale_freed_event_count`]).
+    stale_freed_events: u32,
     /// The last enumeration step [`Self::enumerate_hid`] entered, for a
     /// one-shot fault-localising diagnostic ([`Self::enum_stage`]).
     stage: EnumStage,
@@ -1099,6 +1113,29 @@ pub struct UsbDevice<H: XhciHost, M: DmaRegion> {
     /// `3` an event carrying an undecodable completion code, `4` the
     /// poll budget elapsed with no event (a genuine timeout).
     last_reject: u8,
+    /// Raw completion code of the most recent device interrupt-IN transfer
+    /// event [`Self::decode_transfer_report`] *rejected* (a non-`Success`/
+    /// non-`ShortPacket` code), for [`Self::last_report_fault_code`].
+    ///
+    /// Unlike [`Self::last_completion`] this is **not** reset by a later
+    /// [`Self::control`] / [`Self::command`], so it survives the hub
+    /// disconnect-confirmation control transfer the HCD issues right after a
+    /// report fault — the only place the controller's verdict on the
+    /// keyboard's own endpoint (a transaction error vs. a device-gone /
+    /// stall code) can still be read when that confirmation itself faults.
+    /// `0` until an interrupt-IN report has been rejected.
+    last_report_fault_code: u8,
+    /// Whether the most recent device-slot teardown's Disable Slot command was
+    /// confirmed by the controller (a Command Completion with a Success code),
+    /// for [`Self::slot_disable_confirmed`].
+    ///
+    /// A hot-removal teardown frees the slot **best-effort**: the gone device's
+    /// (often flaky) hub frequently cannot let the controller post the Disable
+    /// Slot completion in time, so the local slot state is cleared regardless.
+    /// This records whether the controller did confirm, so a metal capture can
+    /// tell whether the command ring still completes commands after the fault
+    /// that triggered the removal. `true` until the first unconfirmed teardown.
+    last_disable_confirmed: bool,
 }
 
 impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
@@ -1158,10 +1195,14 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             hub_int_endpoint: None,
             pending_kbd: None,
             pending_hub: None,
+            freed_slot: 0,
+            stale_freed_events: 0,
             stage: EnumStage::Scan,
             last_completion: 0,
             last_event_type: 0,
             last_reject: 0,
+            last_report_fault_code: 0,
+            last_disable_confirmed: true,
         })
     }
 
@@ -1390,6 +1431,20 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             && event.endpoint_id() == self.hub_int_dci
     }
 
+    /// Whether `event` is a trailing transfer completion the controller posted
+    /// for a just-freed device slot ([`Self::freed_slot`]).
+    ///
+    /// A physical unplug can drop an in-flight transfer, and tearing the slot
+    /// down (Disable Slot) can itself leave a completion event behind; either
+    /// lands on the shared event ring *after* the device endpoint is gone, so
+    /// it matches neither [`Self::is_kbd_async`] (the device slot is cleared)
+    /// nor [`Self::is_hub_async`]. Recognising it here lets the event-ring
+    /// consumers drain it instead of faulting — a fatal fault there would
+    /// silence the hub status-change watch and a later re-plug would go unseen.
+    fn is_stale_freed_transfer(&self, event: Trb) -> bool {
+        self.freed_slot != 0 && event.slot_id() == self.freed_slot
+    }
+
     /// Park an asynchronous interrupt-IN completion for its endpoint's
     /// consumer, so a synchronous EP0/command wait sharing the one event ring
     /// neither faults on it nor drops it.
@@ -1415,6 +1470,10 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
                 return Err(DriverError::DeviceFault);
             }
             self.pending_hub = Some(event);
+            return Ok(true);
+        }
+        if self.is_stale_freed_transfer(event) {
+            self.stale_freed_events = self.stale_freed_events.saturating_add(1);
             return Ok(true);
         }
         Ok(false)
@@ -2442,6 +2501,12 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         self.restore_hub_active()?;
         let change = self.hub_port_status_change(down_port)?.1;
         self.clear_hub_port_changes(down_port, change)?;
+        // A fresh device now owns its slot, so stop tolerating stale events for
+        // the previously-freed one (any trailing completion has long since
+        // arrived in the detach→reconnect window), and forget the prior device's
+        // removal fault code.
+        self.freed_slot = 0;
+        self.last_report_fault_code = 0;
         Ok(descriptor)
     }
 
@@ -2522,20 +2587,45 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         publish(&mut self.dma, ring_off, link_slot, &outcome)
     }
 
-    /// Issue a Disable Slot command for `slot`, returning it to the
-    /// controller's pool (xHCI §6.4.3.3).
+    /// Issue a Disable Slot command for `slot` (xHCI §6.4.3.3) **best-effort**,
+    /// returning the slot to the controller's pool if the controller confirms.
     ///
-    /// # Errors
-    ///
-    /// [`DriverError::DeviceFault`] if the controller rejects the command.
-    fn disable_slot(&mut self, slot: u8) -> Result<(), DriverError> {
-        self.command(Trb::new(
-            TrbType::DisableSlot,
-            0,
-            0,
-            trb::control_slot(slot),
-        ))?;
-        Ok(())
+    /// A device-removal teardown must complete locally even when the gone
+    /// device's hub cannot let the controller post the Disable Slot completion
+    /// in time (the metal failure: the confirmation times out and the slot was
+    /// never freed, so a re-plug was never re-enumerated). So this never fails
+    /// the teardown: it posts the command, waits within budget, and retires the
+    /// command-ring slot whether or not the completion was observed — keeping
+    /// the command ring consistent for the next enumeration. A late completion
+    /// is drained as a freed-slot event by the event-ring consumers. The
+    /// observed outcome is recorded in [`Self::last_disable_confirmed`].
+    fn disable_slot_best_effort(&mut self, slot: u8) {
+        self.last_disable_confirmed = false;
+        self.reset_event_diagnostics();
+        let command = Trb::new(TrbType::DisableSlot, 0, 0, trb::control_slot(slot));
+        let Ok(outcome) = self.command_ring.push(command) else {
+            return;
+        };
+        if publish(
+            &mut self.dma,
+            self.layout.command_ring,
+            self.command_ring.link_slot(),
+            &outcome,
+        )
+        .is_err()
+            || self.xhci.ring_doorbell(0, 0).is_err()
+        {
+            let _ = self.command_ring.retire_one();
+            return;
+        }
+        if let Ok(event) = self.await_event_for(&[outcome.address]) {
+            self.last_disable_confirmed = event.trb_type() == Ok(TrbType::CommandCompletion)
+                && event.completion_code() == Ok(CompletionCode::Success);
+        }
+        // Retire our producer slot regardless: a removed device's teardown must
+        // not leave the command ring wedged, and any late completion is drained
+        // as a freed-slot event rather than retired here a second time.
+        let _ = self.command_ring.retire_one();
     }
 
     /// Tear down the watched downstream device after it has disconnected:
@@ -2545,11 +2635,13 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     ///
     /// # Errors
     ///
-    /// [`DriverError`] from the Disable Slot command or the ring rebuild.
+    /// [`DriverError`] from the local DMA writes that clear the DCBAA entry and
+    /// rebuild the interrupt ring. The Disable Slot command is best-effort and
+    /// never fails the teardown (see [`Self::disable_slot_best_effort`]).
     fn detach_downstream_device(&mut self) -> Result<(), DriverError> {
         let slot = self.device_slot;
         if slot != 0 {
-            self.disable_slot(slot)?;
+            self.disable_slot_best_effort(slot);
             self.dma.write(
                 self.layout.dcbaa + usize::from(slot) * 8,
                 &0u64.to_le_bytes(),
@@ -2571,11 +2663,22 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             &link.to_bytes(),
         )?;
         self.int_ring = ring;
+        // Tolerate a trailing transfer completion the controller may still post
+        // for this now-gone slot (a dropped in-flight transfer, or a Disable
+        // Slot side-effect): retained as the freed slot so the event-ring
+        // consumers drain it instead of faulting the hub watch on it. Cleared
+        // again once a fresh device enumerates (`attach_downstream_device` /
+        // `reset_and_reenumerate`).
+        self.freed_slot = slot;
         self.device_slot = 0;
         self.int_dci = DCI_CONTROL;
         self.identity = None;
         self.hub_down_port = 0;
         self.pending_kbd = None;
+        // The fault that triggered this teardown is now acted on; clear it so a
+        // freshly re-enumerated device is not immediately re-detached on a stale
+        // code.
+        self.last_report_fault_code = 0;
         Ok(())
     }
 
@@ -2591,6 +2694,127 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     #[must_use]
     pub const fn device_present(&self) -> bool {
         self.device_slot != 0
+    }
+
+    /// Number of trailing transfer events drained for a just-freed device slot
+    /// since bring-up (a hot-removal diagnostic). A non-zero count after a
+    /// disconnect confirms the controller posted late completions for the gone
+    /// device that the hub watch correctly tolerated rather than faulting on.
+    #[must_use]
+    pub const fn stale_freed_event_count(&self) -> u32 {
+        self.stale_freed_events
+    }
+
+    /// Confirm and detach a watched downstream device whose interrupt endpoint
+    /// just faulted.
+    ///
+    /// Some controllers report a physical unplug first as a failed transfer on
+    /// the device's interrupt endpoint, before the hub status-change endpoint
+    /// posts its own completion. The HCD calls this only from that event-driven
+    /// fault path.
+    ///
+    /// The device's *own* interrupt-IN endpoint may already have reported a
+    /// completion code that is conclusive on its own — the device failed to
+    /// answer a transaction, i.e. it is unreachable
+    /// ([`CompletionCode::indicates_device_unreachable`], captured in
+    /// [`Self::last_report_fault_code`]). On a low/full-speed keyboard behind a
+    /// high-speed hub's transaction translator a hot-removal surfaces as a
+    /// Split Transaction Error there, and the gone device's hub frequently
+    /// cannot answer a `GET_PORT_STATUS` confirmation in time. So when the fault
+    /// code is a device-unreachable code the slot is freed directly, without
+    /// depending on the unreliable hub control transfer.
+    ///
+    /// Otherwise — a fault code that is not conclusive of removal — it falls
+    /// back to reading the already-addressed hub's watched downstream port, and
+    /// only if the port now reports disconnected does it free the device slot;
+    /// a live device's ordinary transfer fault is left visible to the caller.
+    /// Either way the hub's connection-change latch is left for the
+    /// status-change endpoint to report and drain, so the watch re-arms before
+    /// a later reconnect.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError`] from the hub control transfer or slot teardown.
+    pub fn detach_if_watched_device_gone(&mut self) -> Result<bool, DriverError> {
+        if self.device_slot == 0 || self.hub_int_ring.is_none() || self.hub_down_port == 0 {
+            return Ok(false);
+        }
+        // The device's own endpoint already gave a conclusive device-gone
+        // verdict; free the slot directly rather than trusting a confirmation
+        // the vanished device's hub often cannot answer.
+        if CompletionCode::from_raw(u32::from(self.last_report_fault_code))
+            .is_ok_and(CompletionCode::indicates_device_unreachable)
+        {
+            self.detach_downstream_device()?;
+            return Ok(true);
+        }
+        let port = self.hub_down_port;
+        let (status, _change) = self.hub_port_status_change(port)?;
+        if hub_port_connected(status) {
+            return Ok(false);
+        }
+        self.detach_downstream_device()?;
+        Ok(true)
+    }
+
+    /// Detect a *whole-assembly* unplug: a watched hub whose own root-hub port
+    /// has lost its connection, so the hub — and every device behind it — is
+    /// physically gone.
+    ///
+    /// On the Pi 4 the keyboard hangs off a hub (an onboard or integrated one),
+    /// and pulling the keyboard out takes that hub with it. The unplug then
+    /// surfaces as the *root* port (where the hub sat) clearing its connect
+    /// bit, **not** as a downstream hub-port status-change: the hub is gone, so
+    /// it answers neither its status-change interrupt endpoint nor a
+    /// `GET_PORT_STATUS` control transfer — leaving [`Self::next_hub_change`]
+    /// and [`Self::detach_if_watched_device_gone`] waiting on a device that can
+    /// no longer reply. Watching only the downstream hub port therefore never
+    /// observes the disconnect, and the later re-plug goes unseen.
+    ///
+    /// This reads the watched hub's root port directly (a register read, no USB
+    /// transaction). If it is still connected the hub is present and the caller
+    /// services it through [`Self::next_hub_change`] as usual. If it is gone the
+    /// engine drops the hub watch and all device/hub tracking and returns
+    /// `Ok(true)`: the controller is left awaiting a fresh root-port connect,
+    /// which [`Self::reset_and_reenumerate`] re-enumerates from scratch (a full
+    /// Host Controller Reset there rebuilds every slot and context this leaves
+    /// behind). A root-port read fault is treated as still-connected, so a
+    /// transient read never triggers a spurious teardown (fail safe).
+    ///
+    /// # Errors
+    ///
+    /// Never returns `Err`; the signature mirrors the sibling detach helpers so
+    /// the HCD handles all three outcomes uniformly.
+    pub fn detach_if_hub_root_gone(&mut self) -> Result<bool, DriverError> {
+        if self.hub_int_ring.is_none() || self.hub_slot == 0 || self.root_port == 0 {
+            return Ok(false);
+        }
+        let connected = self
+            .xhci
+            .port_status(self.root_port)
+            .map_or(true, super::PortStatus::connected);
+        if connected {
+            return Ok(false);
+        }
+        // The hub assembly is physically gone. Drop the hub watch and every
+        // tracked slot/ring so the controller falls back to awaiting a fresh
+        // root-port connect; the reconnect's full reset rebuilds the rest.
+        self.slot = 0;
+        self.device_slot = 0;
+        self.identity = None;
+        self.int_dci = DCI_CONTROL;
+        self.hub_slot = 0;
+        self.hub_int_dci = 0;
+        self.hub_down_port = 0;
+        self.hub_ep0_ring = None;
+        self.hub_int_ring = None;
+        self.hub_int_endpoint = None;
+        self.pending_kbd = None;
+        self.pending_hub = None;
+        self.freed_slot = 0;
+        self.root_port = 0;
+        self.stage = EnumStage::Scan;
+        Ok(true)
     }
 
     /// Service one hub status-change notification, returning what changed.
@@ -2651,6 +2875,14 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             match event.trb_type() {
                 Ok(TrbType::PortStatusChange) => continue,
                 Ok(TrbType::TransferEvent) => {}
+                // A trailing Disable Slot Command Completion for the just-freed
+                // slot (its confirmation arrived after the best-effort teardown
+                // moved on): drain it like any other freed-slot event rather
+                // than faulting the hub watch on it.
+                Ok(TrbType::CommandCompletion) if self.is_stale_freed_transfer(event) => {
+                    self.stale_freed_events = self.stale_freed_events.saturating_add(1);
+                    continue;
+                }
                 _ => return Err(DriverError::DeviceFault),
             }
             if self.is_hub_async(event) {
@@ -2661,6 +2893,12 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
                     return Err(DriverError::DeviceFault);
                 }
                 self.pending_kbd = Some(event);
+                continue;
+            }
+            // A trailing completion for a just-freed device slot: drain it and
+            // keep scanning rather than faulting the hub watch on it.
+            if self.is_stale_freed_transfer(event) {
+                self.stale_freed_events = self.stale_freed_events.saturating_add(1);
                 continue;
             }
             return Err(DriverError::DeviceFault);
@@ -2777,6 +3015,8 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         self.hub_int_endpoint = None;
         self.pending_kbd = None;
         self.pending_hub = None;
+        self.freed_slot = 0;
+        self.last_report_fault_code = 0;
         self.stage = EnumStage::Scan;
         self.reset_event_diagnostics();
         self.bring_up_keyboard(delay)
@@ -2828,6 +3068,32 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     #[must_use]
     pub const fn last_reject_reason(&self) -> u8 {
         self.last_reject
+    }
+
+    /// Raw completion code of the most recent device interrupt-IN report the
+    /// engine rejected (`0` = none rejected since bring-up).
+    ///
+    /// This is the controller's verdict on the keyboard's *own* endpoint at a
+    /// hot-removal, captured when an interrupt-IN report is rejected and —
+    /// unlike [`Self::last_completion_code`] — not overwritten by the hub
+    /// disconnect-confirmation control transfer that follows it. It tells a
+    /// metal capture whether the unplug surfaced as a transient transaction
+    /// error or a definitive device-gone / stall code.
+    #[must_use]
+    pub const fn last_report_fault_code(&self) -> u8 {
+        self.last_report_fault_code
+    }
+
+    /// Whether the most recent device-slot teardown's Disable Slot command was
+    /// confirmed by the controller (`true` until the first unconfirmed one).
+    ///
+    /// A hot-removal teardown frees the slot best-effort, so a `false` here
+    /// after a disconnect tells a metal capture the controller did not post the
+    /// Disable Slot completion in time — the slot was still freed locally so a
+    /// re-plug can re-enumerate.
+    #[must_use]
+    pub const fn slot_disable_confirmed(&self) -> bool {
+        self.last_disable_confirmed
     }
 
     /// Read the controller's `USBCMD` for a one-shot bring-up diagnostic
@@ -2893,6 +3159,12 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     pub(crate) fn host_mut(&mut self) -> &mut H {
         &mut self.xhci.host
     }
+
+    /// Test-only read of the enumerated device's raw slot, so a hot-removal
+    /// test can capture which slot a later trailing transfer event names.
+    pub(crate) fn raw_device_slot(&self) -> u8 {
+        self.device_slot
+    }
 }
 
 impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
@@ -2913,9 +3185,18 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     /// completed-TRB address outside the interrupt ring, a misaligned or
     /// out-of-range ring slot, or a residual larger than the report.
     fn decode_transfer_report(&mut self, event: Trb, buf: &mut [u8]) -> Result<usize, DriverError> {
-        match event.completion_code() {
-            Ok(CompletionCode::Success | CompletionCode::ShortPacket) => {}
-            _ => return Err(DriverError::DeviceFault),
+        if !matches!(
+            event.completion_code(),
+            Ok(CompletionCode::Success | CompletionCode::ShortPacket)
+        ) {
+            // Preserve the controller's verdict on the keyboard's own
+            // interrupt-IN endpoint before failing closed: a later hub
+            // disconnect-confirmation control transfer resets the shared event
+            // diagnostics, so this is the only surviving record of why the
+            // report faulted (a transient transaction error vs. a device-gone /
+            // stall code).
+            self.last_report_fault_code = event.completion_code_raw();
+            return Err(DriverError::DeviceFault);
         }
         // Map the completed TRB back to its slot's report buffer,
         // validating every step of the controller's claim.

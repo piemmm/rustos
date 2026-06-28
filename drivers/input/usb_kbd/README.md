@@ -26,7 +26,10 @@ host controller that speaks the URB transport (`AGENTS.md` §2.20 / §17.4).
    `ipc_call`) and copies the delivered report out of the shared buffer. The
    HCD leaves the call outstanding and replies only when the controller's
    completion interrupt delivers a report, so this driver **parks in the kernel
-   between keystrokes** rather than busy-polling (`AGENTS.md` §2.23).
+   between keystrokes** rather than busy-polling (`AGENTS.md` §2.23). If the
+   HCD reports `NotFound`, the interface has vanished; the driver exits so
+   `devmgr` can load a fresh instance when the HCD publishes the replugged
+   interface.
 4. Decodes each boot report through `rustos_hid` and injects each key edge into
    the kernel input-focus arbiter via `key_inject`.
 
@@ -61,5 +64,6 @@ on-metal acceptance item; QEMU models no Pi USB timing (`AGENTS.md` §0.4).
 The decode logic is host-tested in `lib/hid`; the URB transport in `lib/usb`;
 the grant accessors in `lib/drvrt`. This crate is the thin wiring binary (an
 inert host stub off bare-metal targets, so `cargo build --workspace` / clippy /
-fmt cover it). The end-to-end path is the metal acceptance item (`plans/USB.md`
-U5).
+fmt cover it) with unit coverage for its bounded pump-error policy and terminal
+disconnected-transport classification. The end-to-end path is the metal
+acceptance item (`plans/USB.md` U5).

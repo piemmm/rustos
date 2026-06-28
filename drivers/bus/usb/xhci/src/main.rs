@@ -70,14 +70,14 @@ const WAIT_FOREVER_NS: u64 = u64::MAX;
 #[cfg(freestanding)]
 mod program {
     use rustos_abi::hwtree::HW_NODE_ROOT;
-    use rustos_abi::usb_urb::{URB_COMPLETION_LEN, URB_REQUEST_LEN};
+    use rustos_abi::usb_urb::{decode_completion, URB_COMPLETION_LEN, URB_REQUEST_LEN};
     use rustos_abi::waitset::{WaitSetOp, WaitSourceKind};
-    use rustos_abi::CapabilityId;
+    use rustos_abi::{CapabilityId, Errno};
     use rustos_caps::CapabilitySet;
     use rustos_drv_bus_usb::bringup::{
         bring_up_controller_diagnostic, derive_controller_resources,
     };
-    use rustos_drv_bus_usb::serve::{attach_transport_grants, UrbOutcome, UrbService};
+    use rustos_drv_bus_usb::serve::{attach_transport_grants, UrbOutcome, UrbReply, UrbService};
     use rustos_drvrt::{RtDriverHost, RtGrantSyscalls};
     use rustos_log::{log, Event, EventId, Field, Level};
     use rustos_rt::{ClockDelay, LogSink};
@@ -187,6 +187,123 @@ mod program {
         );
     }
 
+    /// TEMPORARY hot-plug localisation diagnostic (remove once metal re-plug is
+    /// confirmed): records what the controller event loop observed on a wake —
+    /// whether a hub is watched, a device is present, the interface node is
+    /// live, how many trailing freed-slot completions have been drained, and
+    /// whether the watched hub's own root port still reports connected (so a
+    /// metal capture shows the whole-hub-assembly unplug as `root_conn` going
+    /// to 0).
+    fn log_hotplug_state(
+        message: &'static str,
+        device: &mut rustos_drv_bus_usb::bringup::ControllerDevice,
+        node_live: bool,
+    ) {
+        let mut hub_buf = [0u8; 16];
+        let mut dev_buf = [0u8; 16];
+        let mut node_buf = [0u8; 16];
+        let mut stale_buf = [0u8; 16];
+        let mut root_buf = [0u8; 16];
+        let hub_watch = u64::from(device.hub_watch_active());
+        let dev_present = u64::from(device.device_present());
+        let stale = u64::from(device.stale_freed_event_count());
+        let root_port = device.root_port();
+        let root_conn = u64::from(still_connected(device, root_port));
+        log(
+            &LogSink,
+            &Event {
+                level: Level::Info,
+                id: HCD_IRQ_WAKE,
+                message,
+                fields: &[
+                    Field {
+                        key: "hub_watch",
+                        value: format_hex_u64(hub_watch, &mut hub_buf),
+                    },
+                    Field {
+                        key: "dev_present",
+                        value: format_hex_u64(dev_present, &mut dev_buf),
+                    },
+                    Field {
+                        key: "node_live",
+                        value: format_hex_u64(u64::from(node_live), &mut node_buf),
+                    },
+                    Field {
+                        key: "stale_drained",
+                        value: format_hex_u64(stale, &mut stale_buf),
+                    },
+                    Field {
+                        key: "root_conn",
+                        value: format_hex_u64(root_conn, &mut root_buf),
+                    },
+                ],
+            },
+        );
+    }
+
+    /// TEMPORARY hot-plug localisation diagnostic (remove with the others once
+    /// metal re-plug is confirmed): why the disconnect-confirmation control
+    /// transfer faulted. `err_hex` is the returned [`DriverError`]; the engine
+    /// breadcrumbs split the two sub-causes a bare `DeviceFault` conflates —
+    /// `reject_hex` is `UsbDevice::last_reject_reason` (`0` the wait succeeded
+    /// so the GET_PORT_STATUS data was simply short, `1` unexpected TRB type,
+    /// `2` address mismatch, `3` undecodable code, `4` budget timeout),
+    /// `evtype_hex` the raw TRB-type the wait last saw, and `compl_hex` its raw
+    /// completion code. `kbd_compl_hex` is the controller's verdict on the
+    /// keyboard's *own* interrupt-IN endpoint at the unplug
+    /// (`UsbDevice::last_report_fault_code`) — the one code the confirmation
+    /// control transfer does not overwrite — which tells a transient
+    /// transaction error apart from a definitive device-gone / stall code.
+    fn log_detach_confirmation_failure(
+        err: rustos_abi::driver::DriverError,
+        device: &rustos_drv_bus_usb::bringup::ControllerDevice,
+    ) {
+        let mut err_buf = [0u8; 16];
+        let mut reject_buf = [0u8; 16];
+        let mut evtype_buf = [0u8; 16];
+        let mut compl_buf = [0u8; 16];
+        let mut kbd_compl_buf = [0u8; 16];
+        log(
+            &LogSink,
+            &Event {
+                level: Level::Warn,
+                id: HCD_WAIT_ERROR,
+                message: "usb-hcd: disconnect confirmation after transfer fault failed",
+                fields: &[
+                    Field {
+                        key: "err_hex",
+                        value: format_hex_u64(err as u64, &mut err_buf),
+                    },
+                    Field {
+                        key: "reject_hex",
+                        value: format_hex_u64(
+                            u64::from(device.last_reject_reason()),
+                            &mut reject_buf,
+                        ),
+                    },
+                    Field {
+                        key: "evtype_hex",
+                        value: format_hex_u64(u64::from(device.last_event_type()), &mut evtype_buf),
+                    },
+                    Field {
+                        key: "compl_hex",
+                        value: format_hex_u64(
+                            u64::from(device.last_completion_code()),
+                            &mut compl_buf,
+                        ),
+                    },
+                    Field {
+                        key: "kbd_compl_hex",
+                        value: format_hex_u64(
+                            u64::from(device.last_report_fault_code()),
+                            &mut kbd_compl_buf,
+                        ),
+                    },
+                ],
+            },
+        );
+    }
+
     fn log_interrupter_snapshot(message: &'static str, snapshot: InterrupterSnapshot) {
         let mut usbsts_buf = [0u8; 16];
         let mut iman_buf = [0u8; 16];
@@ -266,6 +383,120 @@ mod program {
                 "ret_hex",
                 ret as u64,
             );
+        }
+    }
+
+    fn abort_pending_urb(endpoint_id: u64, service: &mut UrbService) {
+        if let UrbOutcome::Reply(reply) = service.abort_outstanding(Errno::NotFound) {
+            reply_to_urb(endpoint_id, reply);
+        }
+    }
+
+    fn reply_error(endpoint_id: u64, ticket: u64, errno: Errno) {
+        let mut bytes = [0u8; URB_COMPLETION_LEN];
+        let len = rustos_usb::transport::frame_completion(&mut bytes, Err(errno)).unwrap_or(0);
+        reply_to_urb(endpoint_id, UrbReply { ticket, bytes, len });
+    }
+
+    fn urb_reply_errno(reply: &UrbReply) -> Option<Errno> {
+        match decode_completion(&reply.bytes[..reply.len]) {
+            Ok(_) => None,
+            Err(err) => Some(err),
+        }
+    }
+
+    enum FaultDetachOutcome {
+        NotDetached,
+        Detached,
+        Reattached,
+    }
+
+    fn service_hub_after_fault_detach(
+        endpoint_id: u64,
+        shm_id: u64,
+        device: &mut rustos_drv_bus_usb::bringup::ControllerDevice,
+        delay: &ClockDelay,
+    ) -> Option<u32> {
+        match device.next_hub_change(delay) {
+            Ok(HubEvent::Attached(_)) => {
+                let id = emit_interface_node(device, endpoint_id, shm_id);
+                if let Some(node) = id {
+                    log_hex_event(
+                        HCD_ATTACHED,
+                        Level::Info,
+                        "usb-hcd: device attached while re-arming hub watch after fault detach",
+                        "node_hex",
+                        u64::from(node),
+                    );
+                }
+                id
+            }
+            Ok(HubEvent::Detached | HubEvent::None) => None,
+            Err(err) => {
+                log_hex_event(
+                    HCD_WAIT_ERROR,
+                    Level::Warn,
+                    "usb-hcd: hub watch re-arm after transfer fault failed",
+                    "err_hex",
+                    err as u64,
+                );
+                None
+            }
+        }
+    }
+
+    fn retract_after_fault_if_gone(
+        endpoint_id: u64,
+        shm_id: u64,
+        interface_node_id: &mut u32,
+        device: &mut rustos_drv_bus_usb::bringup::ControllerDevice,
+        reply: UrbReply,
+        delay: &ClockDelay,
+    ) -> FaultDetachOutcome {
+        if urb_reply_errno(&reply) != Some(Errno::NotImplemented) {
+            return FaultDetachOutcome::NotDetached;
+        }
+        match device.detach_if_watched_device_gone() {
+            Ok(true) => {
+                if rustos_rt::hw_remove_node(*interface_node_id) >= 0 {
+                    reply_error(endpoint_id, reply.ticket, Errno::NotFound);
+                    // TEMPORARY (remove with the other hot-plug diagnostics once
+                    // metal re-plug is confirmed): disable_confirmed=0 means the
+                    // controller did not acknowledge the Disable Slot in time —
+                    // the slot was still freed locally so a re-plug can
+                    // re-enumerate. It reveals whether the command ring still
+                    // completes commands after the removal fault.
+                    log_hex_event(
+                        HCD_DISCONNECT,
+                        Level::Info,
+                        "usb-hcd: device transfer fault confirmed disconnect, interface retracted",
+                        "disable_confirmed",
+                        u64::from(device.slot_disable_confirmed()),
+                    );
+                    if let Some(node) =
+                        service_hub_after_fault_detach(endpoint_id, shm_id, device, delay)
+                    {
+                        *interface_node_id = node;
+                        FaultDetachOutcome::Reattached
+                    } else {
+                        FaultDetachOutcome::Detached
+                    }
+                } else {
+                    log_hex_event(
+                        HCD_WAIT_ERROR,
+                        Level::Warn,
+                        "usb-hcd: interface retraction failed after transfer fault",
+                        "node_hex",
+                        u64::from(*interface_node_id),
+                    );
+                    FaultDetachOutcome::NotDetached
+                }
+            }
+            Ok(false) => FaultDetachOutcome::NotDetached,
+            Err(err) => {
+                log_detach_confirmation_failure(err, device);
+                FaultDetachOutcome::NotDetached
+            }
         }
     }
 
@@ -605,7 +836,13 @@ mod program {
                                 "ticket_hex",
                                 ticket,
                             );
-                            match service.on_submit(ticket, &request[..n], shm, &mut device) {
+                            match service.on_submit(
+                                node_live,
+                                ticket,
+                                &request[..n],
+                                shm,
+                                &mut device,
+                            ) {
                                 UrbOutcome::Reply(reply) => reply_to_urb(endpoint_id, reply),
                                 UrbOutcome::Held => {
                                     log_hex_event(
@@ -641,43 +878,16 @@ mod program {
                     }
                 }
                 TOKEN_IRQ => {
-                    log(
-                        &LogSink,
-                        &Event {
-                            level: Level::Debug,
-                            id: HCD_IRQ_WAKE,
-                            message: "usb-hcd: controller IRQ woke URB loop",
-                            fields: &[],
-                        },
+                    // TEMPORARY: Info-level so a metal capture shows every
+                    // controller wake, including a re-plug after a hot-removal.
+                    log_hotplug_state(
+                        "usb-hcd: controller IRQ woke URB loop",
+                        &mut device,
+                        node_live,
                     );
                     // Acknowledge before draining so a completion posted during
                     // the drain re-asserts rather than being lost.
                     let _ = device.acknowledge_interrupt();
-                    match service.on_event(shm, &mut device) {
-                        UrbOutcome::Reply(reply) => reply_to_urb(endpoint_id, reply),
-                        UrbOutcome::Held => {
-                            let _ = log(
-                                &LogSink,
-                                &Event {
-                                    level: Level::Debug,
-                                    id: HCD_URB_HELD,
-                                    message: "usb-hcd: IRQ did not complete held URB yet",
-                                    fields: &[],
-                                },
-                            );
-                        }
-                        UrbOutcome::Idle => {
-                            let _ = log(
-                                &LogSink,
-                                &Event {
-                                    level: Level::Debug,
-                                    id: HCD_IRQ_WAKE,
-                                    message: "usb-hcd: IRQ had no outstanding URB",
-                                    fields: &[],
-                                },
-                            );
-                        }
-                    }
                     // Hot-plug. When a hub is watched (the device sits behind
                     // the onboard hub, so its root port never changes), a hub
                     // status-change report drives connect/disconnect: a fresh
@@ -689,27 +899,64 @@ mod program {
                     // the first ever (cold boot, nothing attached at bring-up)
                     // or a re-attach — drives a fresh re-enumeration. Both leave
                     // the controller up.
+                    let mut disconnect_handled = false;
                     if device.hub_watch_active() {
-                        match device.next_hub_change(&delay) {
-                            Ok(HubEvent::Attached(_)) => {
-                                if let Some(id) =
-                                    emit_interface_node(&mut device, endpoint_id, shm_id)
-                                {
-                                    interface_node_id = id;
-                                    node_live = true;
+                        // A keyboard on the Pi 4 hangs off a hub, and pulling it
+                        // out takes that hub with it: the unplug surfaces as the
+                        // *root* port (where the hub sat) clearing its connect
+                        // bit, not as a downstream hub-port change — the hub is
+                        // gone, so it answers neither its status-change endpoint
+                        // nor a control transfer. Check the hub's own root port
+                        // first; if it is gone, retract the interface and tear
+                        // down so a re-plug re-enumerates from scratch.
+                        match device.detach_if_hub_root_gone() {
+                            Ok(true) => {
+                                if node_live && rustos_rt::hw_remove_node(interface_node_id) < 0 {
                                     log_hex_event(
-                                        HCD_ATTACHED,
-                                        Level::Info,
-                                        "usb-hcd: device attached, interface published",
+                                        HCD_WAIT_ERROR,
+                                        Level::Warn,
+                                        "usb-hcd: interface retraction failed after hub assembly detach",
                                         "node_hex",
-                                        u64::from(id),
+                                        u64::from(interface_node_id),
                                     );
                                 }
+                                abort_pending_urb(endpoint_id, &mut service);
+                                node_live = false;
+                                disconnect_handled = true;
+                                log(
+                                    &LogSink,
+                                    &Event {
+                                        level: Level::Info,
+                                        id: HCD_DISCONNECT,
+                                        message: "usb-hcd: hub assembly disconnected at root port, interface retracted",
+                                        fields: &[],
+                                    },
+                                );
                             }
-                            Ok(HubEvent::Detached) => {
-                                if node_live && rustos_rt::hw_remove_node(interface_node_id) >= 0 {
-                                    node_live = false;
-                                    log(
+                            Ok(false) => match device.next_hub_change(&delay) {
+                                Ok(HubEvent::Attached(_)) => {
+                                    if let Some(id) =
+                                        emit_interface_node(&mut device, endpoint_id, shm_id)
+                                    {
+                                        interface_node_id = id;
+                                        node_live = true;
+                                        log_hex_event(
+                                            HCD_ATTACHED,
+                                            Level::Info,
+                                            "usb-hcd: device attached, interface published",
+                                            "node_hex",
+                                            u64::from(id),
+                                        );
+                                    }
+                                }
+                                Ok(HubEvent::Detached) => {
+                                    if node_live
+                                        && rustos_rt::hw_remove_node(interface_node_id) >= 0
+                                    {
+                                        abort_pending_urb(endpoint_id, &mut service);
+                                        node_live = false;
+                                        disconnect_handled = true;
+                                        log(
                                         &LogSink,
                                         &Event {
                                             level: Level::Info,
@@ -719,13 +966,41 @@ mod program {
                                             fields: &[],
                                         },
                                     );
+                                    } else if node_live {
+                                        log_hex_event(
+                                            HCD_WAIT_ERROR,
+                                            Level::Warn,
+                                            "usb-hcd: interface retraction failed after hub detach",
+                                            "node_hex",
+                                            u64::from(interface_node_id),
+                                        );
+                                    } else {
+                                        abort_pending_urb(endpoint_id, &mut service);
+                                        disconnect_handled = true;
+                                    }
                                 }
-                            }
-                            Ok(HubEvent::None) => {}
+                                Ok(HubEvent::None) => {
+                                    // TEMPORARY: confirm the watch is still armed and
+                                    // quiet after a hot-removal wake (remove with the
+                                    // other hot-plug diagnostics once metal-confirmed).
+                                    log_hotplug_state(
+                                        "usb-hcd: hub change serviced, no event",
+                                        &mut device,
+                                        node_live,
+                                    );
+                                }
+                                Err(err) => log_hex_event(
+                                    HCD_WAIT_ERROR,
+                                    Level::Warn,
+                                    "usb-hcd: hub status-change service failed",
+                                    "errno_hex",
+                                    err as u64,
+                                ),
+                            },
                             Err(err) => log_hex_event(
                                 HCD_WAIT_ERROR,
                                 Level::Warn,
-                                "usb-hcd: hub status-change service failed",
+                                "usb-hcd: hub root-port check failed",
                                 "errno_hex",
                                 err as u64,
                             ),
@@ -733,19 +1008,30 @@ mod program {
                     } else if node_live {
                         // Directly-attached device: retract on a root-port
                         // disconnect (the `CCS` connect bit clearing).
-                        if !still_connected(&mut device, root_port)
-                            && rustos_rt::hw_remove_node(interface_node_id) >= 0
-                        {
-                            node_live = false;
-                            log(
-                                &LogSink,
-                                &Event {
-                                    level: Level::Info,
-                                    id: HCD_DISCONNECT,
-                                    message: "usb-hcd: device disconnected, interface retracted",
-                                    fields: &[],
-                                },
-                            );
+                        if !still_connected(&mut device, root_port) {
+                            if rustos_rt::hw_remove_node(interface_node_id) >= 0 {
+                                abort_pending_urb(endpoint_id, &mut service);
+                                node_live = false;
+                                disconnect_handled = true;
+                                log(
+                                    &LogSink,
+                                    &Event {
+                                        level: Level::Info,
+                                        id: HCD_DISCONNECT,
+                                        message:
+                                            "usb-hcd: device disconnected, interface retracted",
+                                        fields: &[],
+                                    },
+                                );
+                            } else {
+                                log_hex_event(
+                                    HCD_WAIT_ERROR,
+                                    Level::Warn,
+                                    "usb-hcd: interface retraction failed after root-port detach",
+                                    "node_hex",
+                                    u64::from(interface_node_id),
+                                );
+                            }
                         }
                     } else if device.any_root_port_connected() {
                         // A directly-attached device appeared on a root port —
@@ -775,6 +1061,53 @@ mod program {
                                     );
                                 }
                             }
+                        }
+                    }
+                    if disconnect_handled {
+                        continue;
+                    }
+                    match service.on_event(shm, &mut device) {
+                        UrbOutcome::Reply(reply) => {
+                            if node_live {
+                                match retract_after_fault_if_gone(
+                                    endpoint_id,
+                                    shm_id,
+                                    &mut interface_node_id,
+                                    &mut device,
+                                    reply,
+                                    &delay,
+                                ) {
+                                    FaultDetachOutcome::NotDetached => {
+                                        reply_to_urb(endpoint_id, reply)
+                                    }
+                                    FaultDetachOutcome::Detached => node_live = false,
+                                    FaultDetachOutcome::Reattached => node_live = true,
+                                }
+                            } else {
+                                reply_to_urb(endpoint_id, reply);
+                            }
+                        }
+                        UrbOutcome::Held => {
+                            let _ = log(
+                                &LogSink,
+                                &Event {
+                                    level: Level::Debug,
+                                    id: HCD_URB_HELD,
+                                    message: "usb-hcd: IRQ did not complete held URB yet",
+                                    fields: &[],
+                                },
+                            );
+                        }
+                        UrbOutcome::Idle => {
+                            let _ = log(
+                                &LogSink,
+                                &Event {
+                                    level: Level::Debug,
+                                    id: HCD_IRQ_WAKE,
+                                    message: "usb-hcd: IRQ had no outstanding URB",
+                                    fields: &[],
+                                },
+                            );
                         }
                     }
                 }

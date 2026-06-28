@@ -34,8 +34,11 @@ lib/*` only; the USB analogue of `lib/virtio` ↔ `drivers/bus/virtio`).
 - `serve` — `UrbService`, the per-interface state holding at most one
   outstanding interrupt-IN URB (a second concurrent submit fails closed
   `AlreadyExists`), driven on submit/IRQ through `rustos_usb::drive_urb` /
-  `frame_completion`; and `attach_transport_grants`, which adds the URB endpoint
-  + shared-buffer grants onto the `describe_device` interface node.
+  `frame_completion`; a disconnect aborts any parked URB with `NotFound` before
+  the interface node is retracted, and any later submit while no interface node
+  is live is rejected with `NotFound`, so a replugged class driver starts from a
+  clean transport state. `attach_transport_grants` adds the URB endpoint +
+  shared-buffer grants onto the `describe_device` interface node.
 - `main.rs` — the freestanding `Run` program: `from_grants_query` → bring-up →
   `shm_create` (the URB data buffer) + grant-restricted `call_create` (the URB
   transport endpoint) → emit the interface node carrying both grants
@@ -43,14 +46,28 @@ lib/*` only; the USB analogue of `lib/virtio` ↔ `drivers/bus/virtio`).
   interrupter + `irq_bind` → an **asynchronous wait-set event loop** that parks
   on the URB endpoint **and** the controller IRQ: a URB submit is driven and
   either replied at once or held outstanding; a controller interrupt drains the
-  event ring, replies the now-complete URB (bounce-copying the report into the
-  shared buffer), and services hot-plug — the onboard hub's status-change watch
-  (`next_hub_change`: enumerate a freshly-connected device and publish a node,
-  or retract on disconnect) or, for a directly-attached device, the root-port
-  connect/disconnect (`any_root_port_connected` → `reset_and_reenumerate`). Every
-  (re)attach publishes a fresh node carrying the same transport grants so the
-  class driver re-autoloads onto the same sink. It never busy-polls
-  (`AGENTS.md` §2.23).
+  event ring, services hot-plug before stale transfer completions, and replies
+  the now-complete URB (bounce-copying the report into the shared buffer). The
+  hot-plug path is the onboard hub's status-change watch (`next_hub_change`:
+  enumerate a freshly-connected device and publish a node, or abort the parked
+  URB, retract on disconnect, and reject stale old-driver submits while absent)
+  plus a fault-confirmation path for controllers that report unplug first as the
+  watched device's failed interrupt transfer; that path retracts when the
+  device's own endpoint reported a device-unreachable completion code (a USB or
+  split transaction error — conclusive on its own, since the gone device's hub
+  often cannot answer a port-status read), else falls back to reading the hub
+  port and retracting only when it is now disconnected. The slot teardown is
+  **best-effort**: it issues a Disable Slot but frees the local slot state even
+  if the gone device's hub never lets the controller confirm it (otherwise the
+  device would stay tracked and a re-plug would be ignored), so a re-plug always
+  re-enumerates. It leaves the hub's
+  connection-change latch for the status endpoint to report, so a delayed
+  disconnect notification still wakes the loop, drains the latch, and re-arms
+  the watch before the later reconnect. A directly-attached device uses the
+  root-port connect/disconnect (`any_root_port_connected` →
+  `reset_and_reenumerate`). Every (re)attach publishes a fresh node carrying the
+  same transport grants so the class driver re-autoloads onto the same sink. It
+  never busy-polls (`AGENTS.md` §2.23).
 
 ## Least privilege (`AGENTS.md` §5.4)
 
@@ -93,5 +110,10 @@ and the URB transport) are tested in `lib/usb` (`cargo test -p rustos-usb`).
 fail-closed paths up to the controller hand-off (the inert mock window faults —
 the on-metal boundary), and the `serve` `UrbService` state machine (held
 interrupt-IN completed on a later event; synchronous control-IN; second-submit
-`AlreadyExists`; illegal/fail-closed URBs; idle event) plus the interface-node
-grant builder, over a mock engine.
+`AlreadyExists`; aborting a parked URB on disconnect before stale transfer
+faults are drained; rejecting a stale submit after interface removal;
+illegal/fail-closed URBs; idle event) plus the interface-node grant builder,
+over a mock engine. `cargo test -p rustos-usb` also covers confirming a watched
+hub-downstream detach from a failed report transfer while preserving ordinary
+live-device report faults, and re-arming a stashed hub status-change completion
+or delayed disconnect latch so a later reconnect re-enumerates.

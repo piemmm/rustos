@@ -44,9 +44,20 @@
 // author the signed manifest from it; this binary is the `Run` entry point.
 
 #[cfg(any(test, freestanding))]
+use rustos_abi::{DriverError, Errno};
+
+#[cfg(any(test, freestanding))]
 fn pump_error_limit_reached(consecutive_errors: &mut u8, limit: u8) -> bool {
     *consecutive_errors = consecutive_errors.saturating_add(1);
     *consecutive_errors >= limit
+}
+
+#[cfg(any(test, freestanding))]
+fn transport_error(err: Errno) -> DriverError {
+    match err {
+        Errno::NotFound => DriverError::NotFound,
+        _ => DriverError::DeviceFault,
+    }
 }
 
 // --- Pure-Rust program --------------------------------------------------
@@ -215,7 +226,7 @@ mod program {
                         "errno_hex",
                         err as u64,
                     );
-                    return Err(DriverError::DeviceFault);
+                    return Err(super::transport_error(err));
                 }
             };
             let n = (transferred as usize).min(REPORT_BUF_LEN).min(buf.len());
@@ -343,6 +354,16 @@ mod program {
         loop {
             match pump_once(&mut keyboard, &mut console, &mut sink) {
                 Ok(_) => consecutive_pump_errors = 0,
+                Err(DriverError::NotFound) => {
+                    log_hex_event(
+                        USB_KBD_PUMP_ERROR,
+                        Level::Info,
+                        "usb-keyboard: transport disappeared, exiting for reload",
+                        "consecutive_hex",
+                        u64::from(consecutive_pump_errors),
+                    );
+                    return 0;
+                }
                 Err(_) => {
                     let exhausted = pump_error_limit_reached(
                         &mut consecutive_pump_errors,
@@ -384,7 +405,8 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::pump_error_limit_reached;
+    use super::{pump_error_limit_reached, transport_error};
+    use rustos_abi::{DriverError, Errno};
 
     #[test]
     fn pump_error_limit_fails_closed_without_wrapping() {
@@ -405,5 +427,14 @@ mod tests {
         errors = 0;
         assert!(!pump_error_limit_reached(&mut errors, 3));
         assert_eq!(errors, 1);
+    }
+
+    #[test]
+    fn disconnected_transport_is_terminal_for_the_pump_loop() {
+        assert_eq!(transport_error(Errno::NotFound), DriverError::NotFound);
+        assert_eq!(
+            transport_error(Errno::NotImplemented),
+            DriverError::DeviceFault
+        );
     }
 }

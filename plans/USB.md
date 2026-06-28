@@ -373,18 +373,27 @@ the live controller behaviour is host- and CI-proven first.
     the metal boundary).
   - `serve`: the alloc-free `UrbService` (≤1 outstanding interrupt-IN URB,
     second concurrent submit → `AlreadyExists`, driven on submit/IRQ via
-    `lib/usb::drive_urb`/`frame_completion`) + `attach_transport_grants` (adds
-    the endpoint + shm grants onto the `describe_device` node). Host-tested.
+    `lib/usb::drive_urb`/`frame_completion`, rejecting submits with `NotFound`
+    while no interface node is live) + `attach_transport_grants` (adds the
+    endpoint + shm grants onto the `describe_device` node). Host-tested.
   - `main.rs` (freestanding): `from_grants_query` → bring-up → `shm_create`
     (the URB buffer) + grant-restricted `call_create` (probed id range) →
     `describe_device`/`attach_transport_grants`/`hw_emit_node` (now returns the
     assigned node id) → enable interrupter + `irq_bind` → **async wait-set
     loop** (URB endpoint + controller IRQ): recv → `UrbService::on_submit`
-    (reply now or hold); IRQ → ack + `on_event` (reply the completed URB) +
-    root-port `CCS` watch → `hw_remove_node`. Bounce-copy is internal to the
-    engine's `interrupt_in` writing the report into the HCD's shm mapping; the
-    class driver holds no DMA grant. `lib/rt` `shm_*`/`waitset_*` wrappers and
-    `lib/drvrt` `urb_endpoint()`/`map_shared()` landed as the consumers.
+    (reply now or hold); IRQ → ack + hotplug service first (hub status-change
+    or root-port `CCS`; disconnect aborts the parked URB with `NotFound`) →
+    `on_event` only when no disconnect was handled. If a hub-downstream unplug
+    appears first as the watched device's failed interrupt transfer, the HCD
+    confirms the hub port is disconnected before retracting the node and
+    replying `NotFound`. It leaves the hub connection-change latch for the
+    status endpoint to report, so an already-stashed or delayed disconnect
+    notification drains/re-arms the watch before the later reconnect; live-device
+    report faults are not reclassified.
+    Bounce-copy is internal to the engine's `interrupt_in` writing the report
+    into the HCD's shm mapping; the class driver holds no DMA grant. `lib/rt`
+    `shm_*`/`waitset_*` wrappers and `lib/drvrt` `urb_endpoint()`/`map_shared()`
+    landed as the consumers.
   - `hw_emit_node` was evolved to **return the kernel-assigned node id** (the
     emitter cannot choose it but needs it to `hw_remove_node` on disconnect);
     `drvrt`/existing bus drivers treat `≥0` as success unchanged.
@@ -395,7 +404,10 @@ the live controller behaviour is host- and CI-proven first.
   `CAP_LOG_EMIT`. It `map_shared`s the granted buffer and runs `pump_once` over
   a `UrbReportSource: ReportSource` that submits a **blocking** interrupt-IN URB
   (`UrbClient` over `ipc_call`) and copies the report out of the shared buffer —
-  event-driven, parking in the kernel between keystrokes (§2.23). The
+  event-driven, parking in the kernel between keystrokes (§2.23). `NotFound`
+  from the URB transport is terminal: the old class-driver process exits so a
+  re-emitted node loads a fresh instance instead of retrying a vanished
+  interface. The
   controller bring-up is deleted (§2.14); the redundant never-shipped
   `drivers/input/usb_hid` stub is deleted. Image builder ships both the
   `xhci` HCD bundle (`bus_usb/xhci`) and the retuned `usb_kbd` class-driver
@@ -435,7 +447,27 @@ the live controller behaviour is host- and CI-proven first.
     onto the same transport and keystrokes resume to the same OS sink.
     Re-attach zeroes the reused EP0/interrupt ring regions first (stale TRBs at
     the producer cycle would otherwise be consumed past the new enqueue
-    pointer — a real-hardware correctness fix).
+    pointer — a real-hardware correctness fix). A disconnect also aborts any
+    parked interrupt-IN URB with `NotFound` before draining a stale faulting
+    transfer completion from the vanished device. If the fault arrives before a
+    hub status-change completion, `UsbDevice::detach_if_watched_device_gone`
+    reads the watched hub port and only then converts the stale transfer into
+    interface retraction + `NotFound`, deliberately leaving the hub latch for
+    the status endpoint. If the report path had already stashed the hub
+    status-change completion, or if it arrives just after retraction, the HCD
+    drains it to re-arm the status endpoint before the physical reconnect.
+    Ordinary live-device report faults stay visible as transfer errors.
+    Old-driver submits that race in after retraction while no interface is live
+    are rejected, so the reloaded class driver cannot be blocked by a stale
+    ticket from the vanished instance. A freed device slot is retained as
+    `UsbDevice::freed_slot` so a **trailing** transfer completion the controller
+    still posts for the gone slot (a dropped in-flight transfer, or a Disable
+    Slot side-effect) is drained by the event-ring consumers
+    (`stash_async_event`/`poll_hub_completion`) rather than faulted — without
+    this such an event matched no live endpoint and faulted the hub watch,
+    silencing it so a later re-plug went unseen. The tolerance is cleared once a
+    fresh device enumerates; `UsbDevice::stale_freed_event_count` exposes the
+    drain count for a hot-removal diagnostic.
   - **Directly-attached (no hub) hot-plug** uses the root-port `CCS` watch for
     disconnect and `UsbDevice::reset_and_reenumerate` (full HCRST + re-program
     + re-enumerate) on a root-port connect, treating it as a brand-new device.
@@ -461,10 +493,63 @@ the live controller behaviour is host- and CI-proven first.
     `hub_watch_reenumerates_a_reattached_device_on_a_fresh_slot`,
     `reset_and_reenumerate_brings_up_a_directly_attached_device_as_new`,
     `enumeration_drains_every_port_change_latch_so_the_hub_watch_stays_quiet`,
+    `trailing_freed_slot_transfer_event_is_drained_not_faulted`,
+    `hub_assembly_unplug_at_root_port_tears_down_and_replug_reenumerates`,
     and the cold-boot-no-device cases
     `bring_up_keyboard_arms_the_hub_watch_when_no_downstream_device_is_present`,
     `bring_up_keyboard_then_a_downstream_connect_enumerates_a_fresh_keyboard`,
     `bring_up_keyboard_comes_up_awaiting_a_connect_when_no_device_is_attached`.
+  - **Whole-hub-assembly unplug (hub directly on a root port) is detected at
+    the root port.** When a hub sits directly on a root port and is itself
+    pulled, the unplug surfaces as that root port clearing its connect bit, not
+    as a downstream hub-port status-change. `UsbDevice::detach_if_hub_root_gone`
+    reads the watched hub's root port directly (a register read, no USB
+    transaction): still-connected → the normal `next_hub_change` path runs; gone
+    → the engine drops the hub watch and all device/hub tracking and the HCD
+    retracts the interface, leaving the controller awaiting a fresh root-port
+    connect that `reset_and_reenumerate` re-enumerates from scratch. A root-port
+    read fault is treated as still-connected (fail safe). The HCD's IRQ handler
+    checks this first whenever a hub is watched.
+  - **Downstream keyboard unplug behind a *persistent* hub is detected on the
+    device's own fault code.** The Pi 4 keyboard hangs off a hub that stays
+    plugged in, so on unplug the root port keeps reading connected
+    (`root_conn=1`, the root-port check above is correctly inert) and the
+    disconnect surfaces *only* as the keyboard's own interrupt-IN transfer
+    faulting. The metal capture identified that fault as completion code `0x24`
+    (xHCI Split Transaction Error) — the hub's transaction translator can no
+    longer reach the gone low/full-speed device — while the hub
+    `GET_PORT_STATUS` confirmation is unreliable there (it times out,
+    `reject_hex=4`). A code that means *the device failed to answer a
+    transaction* (`CompletionCode::indicates_device_unreachable`:
+    `UsbTransactionError` or `SplitTransactionError`, excluding a stall/babble
+    where the device is responding) is conclusive on its own, so
+    `UsbDevice::detach_if_watched_device_gone` frees the device slot
+    **directly** on that code — captured in `last_report_fault_code` by
+    `decode_transfer_report` and read before any hub control transfer — instead
+    of depending on the confirmation the vanished device's hub often cannot
+    answer. A non-conclusive fault code still falls back to the hub
+    `GET_PORT_STATUS` port read.
+  - **The teardown is best-effort and never blocks on the controller.** The
+    metal capture then showed the *teardown itself* timing out (`reject_hex=4`):
+    `detach_downstream_device` issued a Disable Slot command and waited for its
+    completion, but the gone device's hub does not let the controller post that
+    completion in time, so the teardown returned `DeviceFault`, the slot was
+    never freed (`device_present()` stayed true), and `process_hub_change`
+    ignored the re-plug connect (it enumerates only when no device is tracked) —
+    the "no log on re-plug" symptom. `UsbDevice::disable_slot_best_effort` now
+    posts the Disable Slot, waits within budget, and **frees the local slot
+    state regardless of whether the controller confirms** — retiring the
+    command-ring slot either way so the ring stays consistent for the next
+    enumeration, and recording the outcome in `slot_disable_confirmed()`. A late
+    Disable Slot Command Completion for the freed slot is drained as a freed-slot
+    event by the event-ring consumers (`await_event_for`/`poll_hub_completion`)
+    rather than faulting the hub watch. The acted-on fault code is cleared on
+    teardown and on a fresh enumeration so a re-plugged device is never
+    immediately re-detached; the HCD then re-arms the hub watch, and the hub's
+    connect change re-enumerates a fresh keyboard. Host regressions:
+    `split_transaction_fault_detaches_without_a_hub_status_confirmation`,
+    `split_transaction_detach_frees_the_slot_even_when_disable_is_never_confirmed`,
+    `rejected_report_records_its_completion_code_surviving_a_later_control_transfer`.
   - **Remaining (operator's):** live metal acceptance — attach → keystroke,
     detach → `usb_kbd` unloaded (controller stays up), re-attach → autoloads
     again, **and cold boot with the keyboard unplugged then plugged in** — is
