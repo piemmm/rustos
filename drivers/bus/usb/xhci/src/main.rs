@@ -560,6 +560,92 @@ mod program {
         }
     }
 
+    /// Reset the controller and re-enumerate from scratch, re-arming the
+    /// interrupter the reset cleared and — if a device is already back —
+    /// publishing a fresh interface node so `devmgr` re-autoloads the class
+    /// driver onto the same transport.
+    ///
+    /// This is the recovery a root-port re-attach uses and the recovery from a
+    /// latched controller fault uses: in both cases the controller is returned
+    /// to the same state a cold boot with nothing attached reaches, from which
+    /// the next connect enumerates through the normal attach path. With no
+    /// device present yet (`BringUp::AwaitingDevice`) it simply leaves the
+    /// controller awaiting that connect. The caller refreshes its watched root
+    /// port from `device.root_port()` afterwards.
+    fn reset_reenumerate_and_publish(
+        device: &mut rustos_drv_bus_usb::bringup::ControllerDevice,
+        endpoint_id: u64,
+        shm_id: u64,
+        interface_node_id: &mut u32,
+        node_live: &mut bool,
+        delay: &ClockDelay,
+    ) {
+        let Ok(outcome) = device.reset_and_reenumerate(delay) else {
+            return;
+        };
+        let _ = device.enable_interrupter();
+        if matches!(outcome, BringUp::Device(_)) {
+            if let Some(id) = emit_interface_node(device, endpoint_id, shm_id) {
+                *interface_node_id = id;
+                *node_live = true;
+                log_hex_event(
+                    HCD_ATTACHED,
+                    Level::Info,
+                    "usb-hcd: device attached, interface published",
+                    "node_hex",
+                    u64::from(id),
+                );
+            }
+        }
+    }
+
+    /// Recover if the controller has latched a fatal error or halted
+    /// (`USBSTS.HSE`/HCHalted). Such a controller raises no further interrupts
+    /// until it is reset (xHCI §4.24.1), so a watched device's hot-plug and
+    /// transfers go silent — on the Pi 4 the VL805 latches a Host System Error
+    /// during a downstream-device hot-removal teardown, after its Disable Slot
+    /// has already completed, which is why an unplug worked but the controller
+    /// never saw the re-plug. Retract any still-live interface, abort a held
+    /// URB, then reset and re-enumerate so the controller returns to the proven
+    /// await-connect state and a re-plug enumerates normally. Returns whether a
+    /// recovery ran (so the caller refreshes its watched root port).
+    fn recover_if_controller_faulted(
+        device: &mut rustos_drv_bus_usb::bringup::ControllerDevice,
+        endpoint_id: u64,
+        shm_id: u64,
+        interface_node_id: &mut u32,
+        node_live: &mut bool,
+        service: &mut UrbService,
+        delay: &ClockDelay,
+    ) -> bool {
+        if !device.controller_faulted() {
+            return false;
+        }
+        log(
+            &LogSink,
+            &Event {
+                level: Level::Warn,
+                id: HCD_DISCONNECT,
+                message: "usb-hcd: controller fault latched, resetting to recover",
+                fields: &[],
+            },
+        );
+        if *node_live {
+            let _ = rustos_rt::hw_remove_node(*interface_node_id);
+            *node_live = false;
+        }
+        abort_pending_urb(endpoint_id, service);
+        reset_reenumerate_and_publish(
+            device,
+            endpoint_id,
+            shm_id,
+            interface_node_id,
+            node_live,
+            delay,
+        );
+        true
+    }
+
     /// The capability set the HCD host re-checks up front; the kernel is the
     /// authority and re-checks every trap. It mirrors the resources the
     /// matched node carries plus the privilege to publish the interface node
@@ -1112,25 +1198,31 @@ mod program {
                         // the loop), refresh the watched root port, and publish a
                         // fresh interface node so the class driver is autoloaded
                         // onto the same transport.
-                        if let Ok(outcome) = device.reset_and_reenumerate(&delay) {
-                            let _ = device.enable_interrupter();
-                            root_port = device.root_port();
-                            if matches!(outcome, BringUp::Device(_)) {
-                                if let Some(id) =
-                                    emit_interface_node(&mut device, endpoint_id, shm_id)
-                                {
-                                    interface_node_id = id;
-                                    node_live = true;
-                                    log_hex_event(
-                                        HCD_ATTACHED,
-                                        Level::Info,
-                                        "usb-hcd: device attached, interface published",
-                                        "node_hex",
-                                        u64::from(id),
-                                    );
-                                }
-                            }
-                        }
+                        reset_reenumerate_and_publish(
+                            &mut device,
+                            endpoint_id,
+                            shm_id,
+                            &mut interface_node_id,
+                            &mut node_live,
+                            &delay,
+                        );
+                        root_port = device.root_port();
+                    }
+                    // A disconnect-handling teardown above (a hub status-change
+                    // detach or a hub-assembly detach) can leave the controller
+                    // halted with a latched Host System Error on the Pi 4 VL805;
+                    // recover before the shortcut so the re-plug is still seen.
+                    if recover_if_controller_faulted(
+                        &mut device,
+                        endpoint_id,
+                        shm_id,
+                        &mut interface_node_id,
+                        &mut node_live,
+                        &mut service,
+                        &delay,
+                    ) {
+                        root_port = device.root_port();
+                        continue;
                     }
                     // A disconnect tore the device down; the endpoint is gone,
                     // so there is nothing left to service this wake.
@@ -1193,6 +1285,22 @@ mod program {
                         &mut device,
                     );
                     log_last_foreign_event(&device);
+                    // The transfer-fault disconnect teardown (the Disable Slot in
+                    // `retract_after_fault_if_gone`) latches the same controller
+                    // fault on the Pi 4 VL805 after it completes; recover here too
+                    // so the re-plug is seen rather than the controller staying
+                    // halted and silent.
+                    if recover_if_controller_faulted(
+                        &mut device,
+                        endpoint_id,
+                        shm_id,
+                        &mut interface_node_id,
+                        &mut node_live,
+                        &mut service,
+                        &delay,
+                    ) {
+                        root_port = device.root_port();
+                    }
                 }
                 _ => {}
             }

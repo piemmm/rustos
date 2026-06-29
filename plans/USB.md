@@ -649,12 +649,40 @@ the live controller behaviour is host- and CI-proven first.
     (the harness models a cycle-visible/body-zeroed entry via
     `MockXhci::unland_last_event`/`land_last_event`; it faults+over-consumes
     without the guard and is left alone with it).
-    The TEMPORARY Info diagnostics added to localise this (the BCM2711
-    `brcm-msi` diag; the HCD `URB submit received` / `URB held`; the end-of-wake
-    interrupter snapshot; and `usb-hcd: last drained foreign event` over
-    `UsbDevice::last_foreign_event()`) are kept until metal confirms the fix —
-    on the next capture `foreign_drained` must stay `0` and `erdp_ehb` must be
-    `0` at end of wake — then removed.
+    Metal-confirmed: with this fix, boot-time typing works end to end and every
+    keystroke wake reads `foreign_drained=0` and `erdp_ehb=0` (a healthy
+    interrupter), exactly as predicted. The TEMPORARY Info diagnostics (the
+    BCM2711 `brcm-msi` diag; the HCD `URB submit received` / `URB held`; the
+    end-of-wake interrupter snapshot; and `usb-hcd: last drained foreign event`)
+    are kept only until the controller-fault recovery below is metal-confirmed,
+    then removed.
+  - **A controller that latches a fatal error / halts is reset and
+    re-enumerated, never left silent (the "unplug worked but the re-plug is
+    never seen" fix).** With boot typing fixed, the remaining failure was
+    purely unplug→replug: the metal capture showed the unplug retract the node
+    and complete its Disable Slot (`disable_confirmed=1`), then the end-of-wake
+    interrupter snapshot read `usbsts=0x0d`/`0x05` — `USBSTS.HSE` (Host System
+    Error) **and** `HCHalted` set, `erdp_ehb` stuck — whereas every keystroke
+    wake read `usbsts=0`. The controller *halts itself* during the
+    downstream-device hot-removal teardown, **after** the Disable Slot already
+    completed (so the controller was alive then — the halt is induced later in
+    the teardown, not by the unplug). A halted controller runs nothing and
+    raises no further interrupts, so the re-armed hub status-change watch never
+    saw the re-plug. Decisive corroboration: a cold boot with the keyboard
+    **unplugged** then plugged in works, because that path never runs the
+    teardown. Per the xHCI spec a Host System Error clears only with a Host
+    Controller Reset, so the fix detects the faulted controller
+    (`UsbDevice::controller_faulted` = `USBSTS & (HSE|HCHalted)`) at the end of
+    each controller-IRQ wake and recovers via `reset_and_reenumerate` — the
+    same full HC reset + fresh enumeration a cold boot performs — returning to
+    the proven await-connect state so the re-plug enumerates through the normal
+    attach path. The recovery body is shared with the root-port re-attach path
+    (`reset_reenumerate_and_publish`, no duplication) and runs after both
+    disconnect exits (`recover_if_controller_faulted`). Host regression:
+    `controller_faulted_reports_hse_and_halt_and_recovery_clears_it` (healthy →
+    not faulted; latched HSE → faulted; HC reset clears it; Run/Stop clear →
+    HCHalted → faulted). The HCD main-loop wiring is a freestanding binary, so
+    coverage is at the lib/usb predicate+recovery level.
     (Metal-only acceptance still required — QEMU models no Pi USB, §0.4.)
   - **Remaining (operator's):** live metal acceptance — attach → keystroke,
     detach → `usb_kbd` unloaded (controller stays up), re-attach → autoloads

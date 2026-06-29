@@ -635,6 +635,23 @@ impl<H: XhciHost> Xhci<H> {
         self.read_op(regs::USBSTS).ok()
     }
 
+    /// Whether the controller has latched a fatal Host System Error
+    /// (`USBSTS.HSE`) or halted (`USBSTS.HCHalted`).
+    ///
+    /// A host-system error self-clears only through a Host Controller Reset
+    /// (xHCI §4.24.1), and a halted controller runs nothing, so once either
+    /// bit is set the interrupter never re-asserts and no further interrupt is
+    /// raised — a watched device's hot-plug and transfers go silent until the
+    /// controller is reset and re-enumerated. The caller recovers by resetting
+    /// and re-enumerating the engine. An unreadable `USBSTS` is reported as
+    /// not-faulted so a transient register-read miss never triggers a spurious
+    /// reset.
+    #[must_use]
+    pub fn controller_faulted(&mut self) -> bool {
+        self.read_op(regs::USBSTS)
+            .is_ok_and(|status| status & (regs::USBSTS_HSE | regs::USBSTS_HCH) != 0)
+    }
+
     /// Byte offset of the runtime register block within the window
     /// (`RTSOFF`).
     #[must_use]

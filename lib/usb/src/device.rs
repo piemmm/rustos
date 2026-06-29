@@ -3208,6 +3208,22 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         self.xhci.read_usbsts()
     }
 
+    /// Whether the controller has latched a fatal error or halted
+    /// (delegates to [`Xhci::controller_faulted`]).
+    ///
+    /// A faulted controller raises no further interrupts until it is reset, so
+    /// a downstream device's hot-plug and transfers go silent. The Pi 4 VL805
+    /// latches a Host System Error during a downstream-device hot-removal
+    /// teardown (after its Disable Slot completes), so the HCD checks this
+    /// after servicing a wake and recovers with [`Self::reset_and_reenumerate`]
+    /// — the same full Host Controller Reset and fresh enumeration a cold boot
+    /// with no device attached performs, returning to the proven await-connect
+    /// state so a re-plug enumerates normally.
+    #[must_use]
+    pub fn controller_faulted(&mut self) -> bool {
+        self.xhci.controller_faulted()
+    }
+
     /// Raw `PORTSC` of root-hub `port` (1-based) for a bring-up diagnostic,
     /// or `None` if the port is out of range or the read faults. A capture
     /// of the connect/power/enable/speed bits when enumeration stalls on a

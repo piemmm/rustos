@@ -3621,6 +3621,51 @@ fn a_cycle_owned_but_not_yet_landed_event_is_not_consumed_until_its_body_arrives
 }
 
 #[test]
+fn controller_faulted_reports_hse_and_halt_and_recovery_clears_it() {
+    // A halted/errored controller (USBSTS.HSE or HCHalted) raises no further
+    // interrupts until a Host Controller Reset, so a watched device's hot-plug
+    // and transfers go silent — the metal "unplug worked but the controller
+    // never saw the re-plug" fault. On the Pi 4 the VL805 latches a Host System
+    // Error during the downstream-device hot-removal teardown, after its
+    // Disable Slot has already completed. The HCD detects this and recovers by
+    // resetting and re-enumerating; this verifies the predicate it keys on and
+    // that the mandated reset clears the fault.
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_device(&mem), &mem);
+    assert!(
+        !device.controller_faulted(),
+        "a running, error-free controller is healthy"
+    );
+
+    // A latched Host System Error is a fault.
+    device.host_mut().hse_latched = true;
+    assert!(
+        device.controller_faulted(),
+        "USBSTS.HSE is a controller fault"
+    );
+
+    // The recovery (a full Host Controller Reset plus fresh enumeration) clears
+    // the fault and returns the controller to a usable, interrupt-capable state
+    // — the same path a cold boot performs.
+    let delay = TestDelay::default();
+    device
+        .reset_and_reenumerate(&delay)
+        .expect("reset recovers a faulted controller");
+    assert!(
+        !device.controller_faulted(),
+        "the Host Controller Reset cleared the latched fault"
+    );
+
+    // A halted controller (Run/Stop clear → USBSTS.HCHalted) is equally a
+    // fault, independent of HSE.
+    device.host_mut().usbcmd &= !regs::USBCMD_RUN;
+    assert!(
+        device.controller_faulted(),
+        "USBSTS.HCHalted is a controller fault"
+    );
+}
+
+#[test]
 fn forged_report_residual_fails_closed() {
     let mem = shared_mem();
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
