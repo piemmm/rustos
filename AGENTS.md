@@ -813,14 +813,18 @@ an update to this section.
   2. `cargo xtask ci` — the full pull-request pipeline (clippy, deps-check,
      cfg-check, the test matrix, docs-check, `cargo deny`, supply-chain,
      the per-PR `--quick` fuzz and proptest gates, model-check, spec-review,
-     crypto constant-time, and abi-check).
+     crypto constant-time, and abi-check). Run this **exactly once**: the
+     pipeline is internally idempotent and runs each check a single time, so a
+     second consecutive `cargo xtask ci` is pure waste and is forbidden.
   3. A fuzzing run of **at least 5 seconds** per harness:
      `cargo xtask fuzz --secs 5` (this is on top of the `--quick` gate that
      `cargo xtask ci` already runs).
-  4. Anything else exercised by `.github/workflows/ci.yml` that the two
-     commands above do not already cover (e.g. the parallel soak via
-     `tools/ci/soak.sh`). A locally green run and a green CI run must be
-     equivalent by construction; if CI runs it, you run it.
+  4. Anything `.github/workflows/ci.yml` runs **beyond `cargo xtask ci`
+     itself** that steps 1–3 above do not already cover — i.e. the parallel
+     soak via `tools/ci/soak.sh`. `ci.yml`'s own `cargo xtask ci` step is
+     already covered by step 2 and is **never** re-run: "run what CI runs"
+     means the extra soak step, not a second `cargo xtask ci`. A locally green
+     run and a green CI run are equivalent by construction.
      - **`tools/ci/soak.sh` on a developer machine (that's us) runs for a
        maximum of 20 seconds.** Run it as `tools/ci/soak.sh both --secs 20`
        (or another kind with `--secs 20`): a developer-machine soak is a
@@ -1161,9 +1165,12 @@ You are not exempt from any rule above. In addition:
    independent places and documented.
 6. **Run the full test suite over the *entire* project** before reporting a
    task complete — never a per-crate (`-p`) subset. At minimum this means
-   `cargo fmt --all`, the complete `cargo xtask ci` pipeline, and a fuzzing
-   run of at least 5 seconds (`cargo xtask fuzz --secs 5`), plus anything
-   else `.github/workflows/ci.yml` runs (see §7's "Definition of done").
+   `cargo fmt --all`, the complete `cargo xtask ci` pipeline run **exactly
+   once** (it is internally idempotent — a second consecutive `cargo xtask ci`
+   is pure waste and is forbidden), and a fuzzing run of at least 5 seconds
+   (`cargo xtask fuzz --secs 5`), plus whatever `.github/workflows/ci.yml` runs
+   **beyond `cargo xtask ci` itself** — the `tools/ci/soak.sh` soak, never a
+   second `cargo xtask ci` (see §7's "Definition of done").
    `tools/ci/soak.sh` is run on a developer machine (that's us) for a
    **maximum of 20 seconds** — `tools/ci/soak.sh both --secs 20` — never the
    unbounded 24 h nightly budget, which belongs to the CI/soak host alone.
@@ -2359,10 +2366,12 @@ Trace, do not assume. For every entry point the change adds or touches
   test, and an escalated-but-not-yet-fixed defect (§15.7) carries that
   test requirement with it (§7).
 - **Whole-project gate run (§7, §15.6).** `cargo fmt --all`, the full
-  `cargo xtask ci`, and `cargo xtask fuzz --secs 5` (plus anything else
-  `.github/workflows/ci.yml` runs) were executed over the **entire**
-  workspace — never a `-p` subset — and the actual output is quoted in the
-  completion report. The coverage targets (§7) still hold.
+  `cargo xtask ci` (run **exactly once** — never twice consecutively), and
+  `cargo xtask fuzz --secs 5` (plus whatever `.github/workflows/ci.yml` runs
+  *beyond* `cargo xtask ci` itself — the `tools/ci/soak.sh` soak, not a second
+  `cargo xtask ci`) were executed over the **entire** workspace — never a `-p`
+  subset — and the actual output is quoted in the completion report. The
+  coverage targets (§7) still hold.
 - **Docs updated in the same change (§2.8, §13).** Rustdoc on every public
   item, the relevant `docs/src/` page, and any affected `README.md` stability
   tier (§6) are current. No stale symbol references remain.
