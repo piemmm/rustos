@@ -44,10 +44,11 @@
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use rustos_abi::hwtree::{GrantedResource, HwResource};
-use rustos_abi::{DescriptorTable, LimitKind, ResourceLimit};
+use rustos_abi::{DescriptorTable, Errno, LimitKind, OpenFlags, ResourceLimit, STD_STREAM_COUNT};
 use rustos_kernel_mem::{PhysMap, UserAddressSpace};
 use rustos_kernel_sec::TaskId;
 
@@ -124,6 +125,77 @@ pub struct AddressSpaceRegistry {
     /// Dropped at [`withdraw`](Self::withdraw) so a reused id never inherits a
     /// dead driver's node.
     loaded_nodes: BTreeMap<TaskId, u32>,
+    /// Each live task's open file/directory handles (the descriptors
+    /// `fs_open` returns and `fs_close` releases). Co-located with the
+    /// address space for the same reason as [`Self::streams`]: a handle
+    /// shares the exact per-process lifecycle — allocated on `fs_open`,
+    /// released on `fs_close`, and reclaimed when the task exits — and is
+    /// keyed by the same [`TaskId`]. A task with no entry owns no open
+    /// files, so [`Self::open_file`] resolves to `None` (fail closed: a
+    /// task can only operate on a descriptor it actually opened). Dropped at
+    /// [`withdraw`](Self::withdraw) so a reused id never inherits a dead
+    /// task's handles.
+    open_files: BTreeMap<TaskId, OpenFileTable>,
+}
+
+/// One open file or directory handle: the absolute path it was resolved to
+/// and the [`OpenFlags`] it was opened with.
+///
+/// The path is stored, not a driver inode pointer, because the filesystem is
+/// owned by the disk-owning service the handle ops route to; the kernel
+/// re-resolves and re-authorises the path through the secured VFS on every
+/// operation under the caller's real credentials (no cached authority). The
+/// flags fix the access the handle permits — a read against a handle opened
+/// without [`OpenFlags::READ`], or a write without [`OpenFlags::WRITE`],
+/// fails closed without ever reaching the filesystem.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OpenFile {
+    /// The absolute path the descriptor resolves to.
+    pub path: String,
+    /// The access/behaviour flags the descriptor was opened with.
+    pub flags: OpenFlags,
+}
+
+/// One task's open file/directory descriptors.
+///
+/// Descriptor numbers are allocated at or above [`STD_STREAM_COUNT`] (the
+/// standard streams fd 0..3 are reserved by the process ABI and never handed
+/// out here) using the lowest free number, so a long-lived process that
+/// opens and closes many files reuses descriptors rather than marching a
+/// monotonic counter toward exhaustion (a grow-not-cap posture, never a
+/// fixed ceiling). The whole record is dropped when the task is
+/// [`withdraw`](AddressSpaceRegistry::withdraw)n, so a reused [`TaskId`]
+/// starts from an empty descriptor set.
+#[derive(Default)]
+struct OpenFileTable {
+    by_fd: BTreeMap<u32, OpenFile>,
+}
+
+impl OpenFileTable {
+    /// Allocate the lowest free descriptor number at or above
+    /// [`STD_STREAM_COUNT`].
+    ///
+    /// Returns [`Errno::OutOfRange`] only when every descriptor number up to
+    /// [`u32::MAX`] is in use — a genuine exhaustion of the descriptor space,
+    /// not a hand-picked ceiling.
+    fn alloc_fd(&self) -> Result<u32, Errno> {
+        // `STD_STREAM_COUNT` (4) fits a u32 with room to spare; the checked
+        // conversion makes that explicit rather than truncating.
+        let mut candidate = u32::try_from(STD_STREAM_COUNT).map_err(|_| Errno::OutOfRange)?;
+        for &fd in self.by_fd.keys() {
+            if fd < candidate {
+                continue;
+            }
+            if fd > candidate {
+                break;
+            }
+            // `fd == candidate`: this number is taken, try the next. Saturate
+            // at the top of the descriptor space and fail closed below rather
+            // than wrapping back into the reserved range.
+            candidate = candidate.checked_add(1).ok_or(Errno::OutOfRange)?;
+        }
+        Ok(candidate)
+    }
 }
 
 /// One task's device-resource grants: the handles it may pass to
@@ -155,6 +227,7 @@ impl AddressSpaceRegistry {
             limits: BTreeMap::new(),
             grants: BTreeMap::new(),
             loaded_nodes: BTreeMap::new(),
+            open_files: BTreeMap::new(),
         }
     }
 
@@ -230,7 +303,13 @@ impl AddressSpaceRegistry {
         let had_limits = self.limits.remove(&task).is_some();
         let had_grants = self.grants.remove(&task).is_some();
         let had_node = self.loaded_nodes.remove(&task).is_some();
-        self.tasks.remove(&task).is_some() || had_streams || had_limits || had_grants || had_node
+        let had_files = self.open_files.remove(&task).is_some();
+        self.tasks.remove(&task).is_some()
+            || had_streams
+            || had_limits
+            || had_grants
+            || had_node
+            || had_files
     }
 
     /// Record that the autoloaded driver `task` was loaded for the discovered
@@ -398,6 +477,62 @@ impl AddressSpaceRegistry {
     #[must_use]
     pub fn limits(&self, task: TaskId) -> LimitSet {
         self.limits.get(&task).copied().unwrap_or_default()
+    }
+
+    /// Open a file/directory descriptor for `task`, recording the resolved
+    /// absolute `path` and the `flags` it was opened with, and return the
+    /// freshly allocated descriptor number (at or above [`STD_STREAM_COUNT`]).
+    ///
+    /// Called by the `fs_open` handler *after* it has resolved and authorised
+    /// `path` through the secured VFS under the caller's real credentials, so
+    /// this records an already-checked handle; it grants no authority of its
+    /// own. The number is the lowest free descriptor, so a process that opens
+    /// and closes many files reuses numbers rather than exhausting the space.
+    /// The `task` argument is the kernel-trusted caller id, never a
+    /// caller-supplied value.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] only when `task` already holds every descriptor
+    /// number up to [`u32::MAX`] (genuine exhaustion, fail closed).
+    pub fn open_file(
+        &mut self,
+        task: TaskId,
+        path: String,
+        flags: OpenFlags,
+    ) -> Result<u32, Errno> {
+        let table = self.open_files.entry(task).or_default();
+        let fd = table.alloc_fd()?;
+        table.by_fd.insert(fd, OpenFile { path, flags });
+        Ok(fd)
+    }
+
+    /// Resolve `task`'s open descriptor `fd` to its recorded path and flags,
+    /// or `None` if `fd` is not one of `task`'s open descriptors (fail
+    /// closed).
+    ///
+    /// Returns a clone so the caller (a handle op such as `fs_read`) holds no
+    /// borrow of the registry across the filesystem operation it then routes
+    /// to. `None` covers an unopened descriptor, a standard-stream number
+    /// (never recorded here), and a descriptor opened by a *different* task —
+    /// the `task` argument is the kernel-trusted caller id, so one process
+    /// cannot reach another's open file by guessing a number.
+    #[must_use]
+    pub fn open_file_entry(&self, task: TaskId, fd: u32) -> Option<OpenFile> {
+        self.open_files.get(&task)?.by_fd.get(&fd).cloned()
+    }
+
+    /// Release `task`'s open descriptor `fd`, returning `true` if it was
+    /// open.
+    ///
+    /// Idempotent and fail-closed: closing a descriptor `task` does not hold
+    /// (an unopened number, a standard stream, or another task's descriptor)
+    /// is a no-op returning `false`, never an error or a panic. The `task`
+    /// argument is the kernel-trusted caller id.
+    pub fn close_file(&mut self, task: TaskId, fd: u32) -> bool {
+        self.open_files
+            .get_mut(&task)
+            .is_some_and(|table| table.by_fd.remove(&fd).is_some())
     }
 
     /// Resolve `task` to the `(address space, physical map)` pair the
@@ -722,5 +857,98 @@ mod tests {
             reg.grant(TaskId(5), fresh),
             Some(HwResource::mmio(0x3F20_0000, 0x1000))
         );
+    }
+
+    // --- open file/directory descriptors --------
+
+    #[test]
+    fn first_opened_descriptor_is_the_first_number_after_the_standard_streams() {
+        let mut reg = AddressSpaceRegistry::new();
+        let fd = reg
+            .open_file(TaskId(2), String::from("/System/Logs/a"), OpenFlags::READ)
+            .expect("descriptor space is not exhausted");
+        // fd 0..3 are the reserved standard streams; the first file handle is 4.
+        assert_eq!(fd, u32::try_from(STD_STREAM_COUNT).unwrap());
+        assert_eq!(
+            reg.open_file_entry(TaskId(2), fd),
+            Some(OpenFile {
+                path: String::from("/System/Logs/a"),
+                flags: OpenFlags::READ,
+            })
+        );
+    }
+
+    #[test]
+    fn an_unopened_descriptor_resolves_to_none() {
+        let reg = AddressSpaceRegistry::new();
+        assert_eq!(reg.open_file_entry(TaskId(9), 4), None);
+        // A standard-stream number is never recorded in the open-file table.
+        assert_eq!(reg.open_file_entry(TaskId(9), 0), None);
+    }
+
+    #[test]
+    fn open_descriptor_is_owner_bound_against_forgery() {
+        let mut reg = AddressSpaceRegistry::new();
+        let fd = reg
+            .open_file(TaskId(2), String::from("/Storage/x"), OpenFlags::READ)
+            .expect("fits");
+        // A *different* task passing the same number reaches nothing — one
+        // process cannot read another's open file by guessing the descriptor.
+        assert_eq!(reg.open_file_entry(TaskId(3), fd), None);
+        assert_eq!(
+            reg.open_file_entry(TaskId(2), fd).map(|f| f.path),
+            Some(String::from("/Storage/x"))
+        );
+    }
+
+    #[test]
+    fn closing_a_descriptor_frees_it_and_close_is_idempotent() {
+        let mut reg = AddressSpaceRegistry::new();
+        let fd = reg
+            .open_file(TaskId(2), String::from("/Storage/x"), OpenFlags::READ)
+            .expect("fits");
+        assert!(reg.close_file(TaskId(2), fd));
+        assert_eq!(reg.open_file_entry(TaskId(2), fd), None);
+        // Closing again, or closing an unopened number, is a fail-closed no-op.
+        assert!(!reg.close_file(TaskId(2), fd));
+        assert!(!reg.close_file(TaskId(2), 999));
+        // Closing another task's descriptor number is refused.
+        assert!(!reg.close_file(TaskId(3), fd));
+    }
+
+    #[test]
+    fn the_lowest_free_descriptor_is_reused_after_a_close() {
+        let mut reg = AddressSpaceRegistry::new();
+        let a = reg
+            .open_file(TaskId(2), String::from("/a"), OpenFlags::READ)
+            .expect("fits");
+        let b = reg
+            .open_file(TaskId(2), String::from("/b"), OpenFlags::READ)
+            .expect("fits");
+        let c = reg
+            .open_file(TaskId(2), String::from("/c"), OpenFlags::READ)
+            .expect("fits");
+        assert_eq!((a, b, c), (4, 5, 6));
+        // Free the middle one; the next open reuses the lowest free number.
+        assert!(reg.close_file(TaskId(2), b));
+        let reused = reg
+            .open_file(TaskId(2), String::from("/d"), OpenFlags::READ)
+            .expect("fits");
+        assert_eq!(reused, 5);
+    }
+
+    #[test]
+    fn withdraw_reclaims_every_open_descriptor() {
+        let mut reg = AddressSpaceRegistry::new();
+        let fd = reg
+            .open_file(TaskId(4), String::from("/Storage/x"), OpenFlags::READ)
+            .expect("fits");
+        assert!(reg.withdraw(TaskId(4)));
+        assert_eq!(reg.open_file_entry(TaskId(4), fd), None);
+        // A reused id starts from an empty descriptor set, back at 4.
+        let fresh = reg
+            .open_file(TaskId(4), String::from("/Storage/y"), OpenFlags::READ)
+            .expect("fits");
+        assert_eq!(fresh, u32::try_from(STD_STREAM_COUNT).unwrap());
     }
 }

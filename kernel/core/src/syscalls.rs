@@ -77,9 +77,10 @@ use crate::sched::{CpuId, SchedError, Scheduler, SchedulerArch};
 use rustos_abi::hwtree::{HwResource, HwResourceKind};
 use rustos_abi::input::KeyInput;
 use rustos_abi::{
-    decode_log_record, CapabilityId, DescriptorTable, Errno, IrqHandle, LimitKind, MapFlags,
-    RandomFlags, ResourceLimit, StreamMode, SyscallNumber, WaitSetOp, WaitSourceKind,
-    CONSOLE_INHERIT, LOG_FIELDS_MAX, LOG_RECORD_MAX, RANDOM_REQUEST_MAX_BYTES,
+    decode_log_record, CapabilityId, DescriptorTable, DirEntry, Errno, FileStat, IrqHandle,
+    LimitKind, MapFlags, OpenFlags, RandomFlags, ResourceLimit, StreamMode, SyscallNumber,
+    WaitSetOp, WaitSourceKind, CONSOLE_INHERIT, FS_IO_MAX, FS_NAME_MAX, FS_PATH_MAX,
+    LOG_FIELDS_MAX, LOG_RECORD_MAX, RANDOM_REQUEST_MAX_BYTES,
 };
 use rustos_caps::CapabilitySet;
 use rustos_kernel_ipc::{
@@ -100,6 +101,9 @@ use rustos_util::fmt::format_hex_u64;
 use zeroize::Zeroize;
 
 use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
 
 use crate::aspace::AddressSpaceRegistry;
 use crate::audit::AuditEvent;
@@ -111,6 +115,7 @@ use crate::devres::{
     NULL_MSI_ALLOC_FACILITY, NULL_SHARED_MEM_FACILITY,
 };
 use crate::dispatch_slot::{DispatchHook, DispatchOutcome, RescheduleAction};
+use crate::fs::{FilesystemService, NULL_FILESYSTEM};
 use crate::hwtree::{HwTreeSource, NULL_HW_TREE};
 use crate::input_focus::{InputFocus, NULL_INPUT_FOCUS};
 use crate::memmap::{MemMap, NULL_MEM_MAP};
@@ -317,6 +322,14 @@ where
     /// `kernel/mem`-backed producer through [`Self::with_shared_mem_facility`].
     /// Held as a `'static` borrow, exactly like the MMIO-map producer.
     shared_mem_facility: &'static (dyn SharedMemFacility + 'static),
+    /// The kernel filesystem service the `fs_*` syscalls route through
+    /// (`PREREQUISITES.md` P-A). Defaults to [`NULL_FILESYSTEM`] (every
+    /// operation fails closed with [`Errno::NotImplemented`]); the boot path
+    /// that owns the mounted volume installs the real disk-backed service
+    /// through [`Self::with_filesystem`]. Held as a `'static` borrow, exactly
+    /// like the users database, because the mounted filesystem lives for the
+    /// lifetime of the running kernel.
+    filesystem: &'static (dyn FilesystemService + 'static),
 }
 
 impl<'a, A> KernelSyscallHandlers<'a, A>
@@ -427,7 +440,31 @@ where
             // `shm_map` / `shm_unmap` fail closed with `NotImplemented`,
             // never fabricating a region.
             shared_mem_facility: &NULL_SHARED_MEM_FACILITY,
+            // The filesystem service is unwired until the boot path that owns
+            // the mounted volume installs the disk-backed producer
+            // (`PREREQUISITES.md` P-A): every `fs_*` syscall fails closed with
+            // `NotImplemented`, never fabricating a handle or a read.
+            filesystem: &NULL_FILESYSTEM,
         }
+    }
+
+    /// Install the kernel filesystem service the `fs_*` syscalls route
+    /// through, consuming and returning `self`.
+    ///
+    /// Called once by the boot path that owns the mounted volume
+    /// (`PREREQUISITES.md` P-A). Until this is called the handler holds the
+    /// fail-closed [`NULL_FILESYSTEM`] and every `fs_*` syscall returns
+    /// [`Errno::NotImplemented`]. The service must be `'static` because the
+    /// boot path leaks it alongside `KernelState`, which lives for the
+    /// lifetime of the running kernel (no global mutable static; the install
+    /// is a one-shot move).
+    #[must_use]
+    pub const fn with_filesystem(
+        mut self,
+        filesystem: &'static (dyn FilesystemService + 'static),
+    ) -> Self {
+        self.filesystem = filesystem;
+        self
     }
 
     /// Install the discovered system console list `stream_write` /
@@ -741,6 +778,40 @@ where
             self.aspaces
                 .write()
                 .reregister_space(caller.task_id, Box::new(frozen));
+        }
+    }
+
+    /// Copy a filesystem path of `len` bytes from the caller's address space
+    /// at `ptr` and validate it as a UTF-8 string, for the `fs_open` /
+    /// `fs_mkdir` / `fs_unlink` handlers.
+    ///
+    /// Validates every input before use: an empty path or one longer than
+    /// [`FS_PATH_MAX`] is refused with [`Errno::LengthOutOfRange`] before any
+    /// allocation; a copy fault — or a caller with no registered address
+    /// space — fails closed with [`Errno::BadAddress`], never leaking which;
+    /// non-UTF-8 bytes are [`Errno::OutOfRange`]. The path's structural
+    /// validity (absolute, no `.`/`..`, component bounds) is the secured
+    /// VFS's to judge under the caller's credentials, not this copy step's.
+    fn copy_path_in(
+        &self,
+        caller: &CallerContext<'_>,
+        ptr: u64,
+        len: usize,
+    ) -> Result<String, Errno> {
+        if len == 0 || len > FS_PATH_MAX {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let mut buf = vec![0u8; len];
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_in(space, physmap, VirtAddr::new(ptr), &mut buf)
+        }) {
+            Some(Ok(())) => {}
+            Some(Err(err)) => return Err(copy_fault_errno(err)),
+            None => return Err(Errno::BadAddress),
+        }
+        match core::str::from_utf8(&buf) {
+            Ok(path) => Ok(String::from(path)),
+            Err(_) => Err(Errno::OutOfRange),
         }
     }
 }
@@ -3024,6 +3095,261 @@ where
                 .irq
                 .try_wait_step(IrqHandle::from_raw(id), caller.task_id, now, u64::MAX);
         }
+        Ok(0)
+    }
+
+    fn fs_open(
+        &self,
+        caller: &CallerContext<'_>,
+        path: u64,
+        path_len: usize,
+        flags: OpenFlags,
+    ) -> SyscallResult {
+        // The dispatcher already checked `CAP_FS_ACCESS` and that `path` is a
+        // non-null `UserPtr`, and rejected any illegal `OpenFlags`. Copy the
+        // path in, then resolve+authorise it through the secured VFS under
+        // the caller's kernel-attested identity (uid + effective caps), which
+        // performs the create/exclusive/truncate/directory semantics and
+        // every per-inode and mount-flag check. Only on success is a
+        // descriptor recorded, so a refused open never produces a handle.
+        let path = self.copy_path_in(caller, path, path_len)?;
+        let uid = caller.caps.owner().0;
+        self.filesystem
+            .open(uid, caller.caps.effective(), &path, flags)?;
+        let fd = self
+            .aspaces
+            .write()
+            .open_file(caller.task_id, path, flags)?;
+        Ok(u64::from(fd))
+    }
+
+    fn fs_close(&self, caller: &CallerContext<'_>, fd: u32) -> SyscallResult {
+        // Release the caller's own descriptor. `fd` is resolved against the
+        // kernel-trusted caller id, so one task cannot close another's
+        // handle; an unopened descriptor fails closed with `NotFound`.
+        if self.aspaces.write().close_file(caller.task_id, fd) {
+            Ok(0)
+        } else {
+            Err(Errno::NotFound)
+        }
+    }
+
+    fn fs_read(
+        &self,
+        caller: &CallerContext<'_>,
+        fd: u32,
+        offset: u64,
+        buf: u64,
+        len: usize,
+    ) -> SyscallResult {
+        // Resolve the handle (owner-checked clone, no lock held across the
+        // read). A handle not opened for reading fails closed before the
+        // filesystem is touched.
+        let handle = self
+            .aspaces
+            .read()
+            .open_file_entry(caller.task_id, fd)
+            .ok_or(Errno::NotFound)?;
+        if !handle.flags.is_read() {
+            return Err(Errno::PermissionDenied);
+        }
+        // Cap the per-call transfer at the staging bound (the `lib/rt`
+        // wrapper splits a larger read into successive calls).
+        let len = len.min(FS_IO_MAX);
+        if len == 0 {
+            return Ok(0);
+        }
+        let uid = caller.caps.owner().0;
+        let mut data = vec![0u8; len];
+        let n = self.filesystem.read(
+            uid,
+            caller.caps.effective(),
+            &handle.path,
+            offset,
+            &mut data,
+        )?;
+        // `n <= len` by the service contract; copy exactly what was read out
+        // through the validated boundary.
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_out(space, physmap, VirtAddr::new(buf), &data[..n])
+        }) {
+            Some(Ok(())) => Ok(n as u64),
+            Some(Err(err)) => Err(copy_fault_errno(err)),
+            None => Err(Errno::BadAddress),
+        }
+    }
+
+    fn fs_write(
+        &self,
+        caller: &CallerContext<'_>,
+        fd: u32,
+        offset: u64,
+        buf: u64,
+        len: usize,
+    ) -> SyscallResult {
+        let handle = self
+            .aspaces
+            .read()
+            .open_file_entry(caller.task_id, fd)
+            .ok_or(Errno::NotFound)?;
+        if !handle.flags.is_write() {
+            return Err(Errno::PermissionDenied);
+        }
+        let len = len.min(FS_IO_MAX);
+        if len == 0 {
+            return Ok(0);
+        }
+        // Stage the caller's bytes in through the validated boundary *before*
+        // touching the filesystem (a faulting buffer writes nothing).
+        let mut data = vec![0u8; len];
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_in(space, physmap, VirtAddr::new(buf), &mut data)
+        }) {
+            Some(Ok(())) => {}
+            Some(Err(err)) => return Err(copy_fault_errno(err)),
+            None => return Err(Errno::BadAddress),
+        }
+        let uid = caller.caps.owner().0;
+        // An append handle writes at the current end of file, ignoring the
+        // supplied offset (the journal-append posture).
+        let append = handle.flags.contains(OpenFlags::APPEND);
+        let n = self.filesystem.write(
+            uid,
+            caller.caps.effective(),
+            &handle.path,
+            offset,
+            append,
+            &data,
+        )?;
+        Ok(n as u64)
+    }
+
+    fn fs_readdir(
+        &self,
+        caller: &CallerContext<'_>,
+        fd: u32,
+        buf: u64,
+        len: usize,
+    ) -> SyscallResult {
+        let handle = self
+            .aspaces
+            .read()
+            .open_file_entry(caller.task_id, fd)
+            .ok_or(Errno::NotFound)?;
+        let uid = caller.caps.owner().0;
+        // The secured VFS enforces that the path is a directory the caller
+        // may list; a non-directory fails closed there.
+        let entries = self
+            .filesystem
+            .readdir(uid, caller.caps.effective(), &handle.path)?;
+        // Pack the listing into the `DirEntry` wire stream. A name the driver
+        // reports that is empty or longer than `FS_NAME_MAX` is a structural
+        // fault and fails the whole call closed (never a truncated record).
+        let mut out = Vec::new();
+        let mut rec = [0u8; DirEntry::HEADER_LEN + FS_NAME_MAX];
+        for (kind, name) in &entries {
+            let entry = DirEntry {
+                kind: *kind,
+                name: name.as_bytes(),
+            };
+            let written = entry.encode_into(&mut rec)?;
+            out.extend_from_slice(&rec[..written]);
+        }
+        // The whole listing or nothing: never truncate to fit an undersized
+        // buffer (the caller grows `buf` and retries).
+        if out.len() > len {
+            return Err(Errno::BufferTooSmall);
+        }
+        if out.is_empty() {
+            return Ok(0);
+        }
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_out(space, physmap, VirtAddr::new(buf), &out)
+        }) {
+            Some(Ok(())) => Ok(out.len() as u64),
+            Some(Err(err)) => Err(copy_fault_errno(err)),
+            None => Err(Errno::BadAddress),
+        }
+    }
+
+    fn fs_stat(
+        &self,
+        caller: &CallerContext<'_>,
+        fd: u32,
+        out: u64,
+        out_len: usize,
+    ) -> SyscallResult {
+        let handle = self
+            .aspaces
+            .read()
+            .open_file_entry(caller.task_id, fd)
+            .ok_or(Errno::NotFound)?;
+        let uid = caller.caps.owner().0;
+        let stat = self
+            .filesystem
+            .stat(uid, caller.caps.effective(), &handle.path)?;
+        // The whole record or nothing: an undersized buffer fails closed.
+        if out_len < FileStat::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let mut buf = [0u8; FileStat::WIRE_LEN];
+        stat.encode(&mut buf)?;
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_out(space, physmap, VirtAddr::new(out), &buf)
+        }) {
+            Some(Ok(())) => Ok(FileStat::WIRE_LEN as u64),
+            Some(Err(err)) => Err(copy_fault_errno(err)),
+            None => Err(Errno::BadAddress),
+        }
+    }
+
+    fn fs_truncate(&self, caller: &CallerContext<'_>, fd: u32, size: u64) -> SyscallResult {
+        let handle = self
+            .aspaces
+            .read()
+            .open_file_entry(caller.task_id, fd)
+            .ok_or(Errno::NotFound)?;
+        // Truncation is a write; a handle not opened for writing fails closed
+        // before the filesystem is touched (the secured VFS also rejects a
+        // read-only mount or a directory).
+        if !handle.flags.is_write() {
+            return Err(Errno::PermissionDenied);
+        }
+        let uid = caller.caps.owner().0;
+        self.filesystem
+            .truncate(uid, caller.caps.effective(), &handle.path, size)?;
+        Ok(0)
+    }
+
+    fn fs_sync(&self, caller: &CallerContext<'_>, fd: u32) -> SyscallResult {
+        // The descriptor must be one of the caller's own open handles (a
+        // forged or foreign number fails closed); the flush itself is
+        // filesystem-wide, so the path is not needed beyond proving the
+        // caller holds a live handle on the mounted volume.
+        self.aspaces
+            .read()
+            .open_file_entry(caller.task_id, fd)
+            .ok_or(Errno::NotFound)?;
+        let uid = caller.caps.owner().0;
+        self.filesystem.sync(uid, caller.caps.effective())?;
+        Ok(0)
+    }
+
+    fn fs_mkdir(&self, caller: &CallerContext<'_>, path: u64, path_len: usize) -> SyscallResult {
+        // The dispatcher already checked `CAP_FS_ACCESS` and that `path` is a
+        // non-null `UserPtr`. Resolution and the permission/mount-flag model
+        // are the secured VFS's, under the caller's attested identity.
+        let path = self.copy_path_in(caller, path, path_len)?;
+        let uid = caller.caps.owner().0;
+        self.filesystem.mkdir(uid, caller.caps.effective(), &path)?;
+        Ok(0)
+    }
+
+    fn fs_unlink(&self, caller: &CallerContext<'_>, path: u64, path_len: usize) -> SyscallResult {
+        let path = self.copy_path_in(caller, path, path_len)?;
+        let uid = caller.caps.owner().0;
+        self.filesystem
+            .unlink(uid, caller.caps.effective(), &path)?;
         Ok(0)
     }
 }
@@ -11397,5 +11723,537 @@ mod tests {
             ReplyOutcome::Ready(b"pong".to_vec())
         );
         crate::callreg::unregister(EndpointId(id));
+    }
+
+    // --- filesystem syscalls (P-A) ----------------
+
+    // `DirEntry`, `FileStat`, and `OpenFlags` are already in scope through
+    // `use super::*`; only `FileKind` is additionally needed here.
+    use rustos_abi::FileKind;
+
+    /// A recording [`FilesystemService`] double: it logs each call's
+    /// attested uid and arguments (so a test can prove the handler attested
+    /// the caller and forwarded the right path/offset/append), serves
+    /// canned read/readdir/stat results, and can be set to fail a chosen op
+    /// closed. Recording goes through a [`std::sync::Mutex`] because the
+    /// service must be `Send + Sync`.
+    struct RecordingFs {
+        read_data: Vec<u8>,
+        entries: Vec<(FileKind, String)>,
+        stat: FileStat,
+        open_err: Option<Errno>,
+        log: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl RecordingFs {
+        fn new() -> Self {
+            Self {
+                read_data: Vec::new(),
+                entries: Vec::new(),
+                stat: FileStat {
+                    kind: FileKind::Regular,
+                    size: 0,
+                    mode: 0o644,
+                    uid: 1000,
+                    gid: 1000,
+                },
+                open_err: None,
+                log: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn record(&self, entry: alloc::string::String) {
+            self.log.lock().expect("uncontended").push(entry);
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.log.lock().expect("uncontended").clone()
+        }
+    }
+
+    impl FilesystemService for RecordingFs {
+        fn open(
+            &self,
+            uid: u32,
+            _caps: &dyn rustos_abi::CapabilityQuery,
+            path: &str,
+            flags: OpenFlags,
+        ) -> Result<(), Errno> {
+            self.record(alloc::format!(
+                "open uid={uid} path={path} flags={}",
+                flags.bits()
+            ));
+            match self.open_err {
+                Some(err) => Err(err),
+                None => Ok(()),
+            }
+        }
+
+        fn read(
+            &self,
+            uid: u32,
+            _caps: &dyn rustos_abi::CapabilityQuery,
+            path: &str,
+            offset: u64,
+            buf: &mut [u8],
+        ) -> Result<usize, Errno> {
+            self.record(alloc::format!(
+                "read uid={uid} path={path} off={offset} len={}",
+                buf.len()
+            ));
+            let n = self.read_data.len().min(buf.len());
+            buf[..n].copy_from_slice(&self.read_data[..n]);
+            Ok(n)
+        }
+
+        fn write(
+            &self,
+            uid: u32,
+            _caps: &dyn rustos_abi::CapabilityQuery,
+            path: &str,
+            offset: u64,
+            append: bool,
+            data: &[u8],
+        ) -> Result<usize, Errno> {
+            self.record(alloc::format!(
+                "write uid={uid} path={path} off={offset} append={append} data={data:?}"
+            ));
+            Ok(data.len())
+        }
+
+        fn readdir(
+            &self,
+            uid: u32,
+            _caps: &dyn rustos_abi::CapabilityQuery,
+            path: &str,
+        ) -> Result<Vec<(FileKind, String)>, Errno> {
+            self.record(alloc::format!("readdir uid={uid} path={path}"));
+            Ok(self.entries.clone())
+        }
+
+        fn stat(
+            &self,
+            uid: u32,
+            _caps: &dyn rustos_abi::CapabilityQuery,
+            path: &str,
+        ) -> Result<FileStat, Errno> {
+            self.record(alloc::format!("stat uid={uid} path={path}"));
+            Ok(self.stat)
+        }
+
+        fn truncate(
+            &self,
+            uid: u32,
+            _caps: &dyn rustos_abi::CapabilityQuery,
+            path: &str,
+            size: u64,
+        ) -> Result<(), Errno> {
+            self.record(alloc::format!("truncate uid={uid} path={path} size={size}"));
+            Ok(())
+        }
+
+        fn sync(&self, uid: u32, _caps: &dyn rustos_abi::CapabilityQuery) -> Result<(), Errno> {
+            self.record(alloc::format!("sync uid={uid}"));
+            Ok(())
+        }
+
+        fn mkdir(
+            &self,
+            uid: u32,
+            _caps: &dyn rustos_abi::CapabilityQuery,
+            path: &str,
+        ) -> Result<(), Errno> {
+            self.record(alloc::format!("mkdir uid={uid} path={path}"));
+            Ok(())
+        }
+
+        fn unlink(
+            &self,
+            uid: u32,
+            _caps: &dyn rustos_abi::CapabilityQuery,
+            path: &str,
+        ) -> Result<(), Errno> {
+            self.record(alloc::format!("unlink uid={uid} path={path}"));
+            Ok(())
+        }
+    }
+
+    /// `fs_open` resolves+authorises through the service under the caller's
+    /// attested uid and records a descriptor at/above the standard streams.
+    #[test]
+    fn fs_open_attests_the_caller_and_allocates_a_descriptor() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, b"/System/Logs/a");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(fs);
+
+        let fd = h
+            .fs_open(&ctx, 0x1000, "/System/Logs/a".len(), OpenFlags::READ)
+            .expect("open succeeds");
+        assert_eq!(fd, 4, "the first descriptor follows the standard streams");
+        assert_eq!(
+            fs.calls(),
+            alloc::vec![alloc::string::String::from(
+                "open uid=1000 path=/System/Logs/a flags=1"
+            )],
+            "the handler attested the caller's uid and forwarded the path/flags"
+        );
+    }
+
+    /// With no filesystem wired the handler holds `NULL_FILESYSTEM` and
+    /// `fs_open` fails closed with `NotImplemented`.
+    #[test]
+    fn fs_open_without_filesystem_is_not_implemented() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, b"/Storage/x");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(
+            h.fs_open(&ctx, 0x1000, "/Storage/x".len(), OpenFlags::READ),
+            Err(Errno::NotImplemented)
+        );
+        // No descriptor was recorded for the caller.
+        assert_eq!(aspaces.read().open_file_entry(SecTaskId(2), 4), None);
+    }
+
+    /// A refused open (e.g. exclusive-create clash) yields no descriptor.
+    #[test]
+    fn fs_open_refused_records_no_descriptor() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, b"/Storage/x");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let mut mock = RecordingFs::new();
+        mock.open_err = Some(Errno::AlreadyExists);
+        let fs: &'static RecordingFs = Box::leak(Box::new(mock));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(fs);
+        assert_eq!(
+            h.fs_open(&ctx, 0x1000, "/Storage/x".len(), OpenFlags::READ),
+            Err(Errno::AlreadyExists)
+        );
+        assert_eq!(aspaces.read().open_file_entry(SecTaskId(2), 4), None);
+    }
+
+    /// `fs_read` re-authorises through the service and copies the read bytes
+    /// out to the caller; an unknown fd and a write-only handle fail closed.
+    #[test]
+    fn fs_read_copies_bytes_out_and_enforces_the_handle() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, b"/f");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let mut mock = RecordingFs::new();
+        mock.read_data = b"hello".to_vec();
+        let fs: &'static RecordingFs = Box::leak(Box::new(mock));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(fs);
+
+        // An unknown descriptor fails closed before the service is touched.
+        assert_eq!(h.fs_read(&ctx, 99, 0, 0x1000, 5), Err(Errno::NotFound));
+
+        let fd = u32::try_from(
+            h.fs_open(&ctx, 0x1000, "/f".len(), OpenFlags::READ)
+                .expect("open"),
+        )
+        .unwrap();
+        let n = h.fs_read(&ctx, fd, 0, 0x1000, 5).expect("read");
+        assert_eq!(n, 5);
+        let delivered = h
+            .with_caller_aspace(&ctx, |space, physmap| {
+                let mut buf = alloc::vec![0u8; 5];
+                copy_in(space, physmap, VirtAddr::new(0x1000), &mut buf).expect("readable");
+                buf
+            })
+            .expect("caller space");
+        assert_eq!(delivered.as_slice(), b"hello");
+
+        // A handle opened without READ refuses fs_read.
+        let wo = u32::try_from(
+            h.fs_open(&ctx, 0x1000, "/f".len(), OpenFlags::WRITE)
+                .expect("open write-only"),
+        )
+        .unwrap();
+        // Re-seed the path page is unnecessary; the handle keeps its own path.
+        assert_eq!(
+            h.fs_read(&ctx, wo, 0, 0x1000, 5),
+            Err(Errno::PermissionDenied)
+        );
+    }
+
+    /// `fs_write` stages the caller's bytes in and forwards them, honouring
+    /// the append posture; a read-only handle is refused.
+    #[test]
+    fn fs_write_forwards_bytes_and_honours_append() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, b"AB");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(fs);
+
+        // Open append+write; page 0x1000 holds the two payload bytes "AB".
+        let fd = u32::try_from(
+            h.fs_open(&ctx, 0x1000, 2, OpenFlags::WRITE.union(OpenFlags::APPEND))
+                .expect("open append"),
+        )
+        .unwrap();
+        // The path was 2 bytes ("AB" doubles as the path and the payload here).
+        let n = h.fs_write(&ctx, fd, 0x999, 0x1000, 2).expect("write");
+        assert_eq!(n, 2);
+        let calls = fs.calls();
+        assert!(
+            calls.iter().any(|c| c.contains("write uid=1000")
+                && c.contains("append=true")
+                && c.contains("data=[65, 66]")),
+            "the append write forwarded the staged bytes: {calls:?}"
+        );
+
+        // A read-only handle refuses fs_write.
+        let ro = u32::try_from(
+            h.fs_open(&ctx, 0x1000, 2, OpenFlags::READ)
+                .expect("open ro"),
+        )
+        .unwrap();
+        assert_eq!(
+            h.fs_write(&ctx, ro, 0, 0x1000, 2),
+            Err(Errno::PermissionDenied)
+        );
+    }
+
+    /// `fs_readdir` packs the service's entries into the `DirEntry` stream;
+    /// an undersized buffer fails closed without truncating.
+    #[test]
+    fn fs_readdir_packs_entries_and_rejects_a_small_buffer() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, b"/d");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let mut mock = RecordingFs::new();
+        mock.entries = alloc::vec![
+            (FileKind::Directory, alloc::string::String::from("Logs")),
+            (FileKind::Regular, alloc::string::String::from("motd")),
+        ];
+        let fs: &'static RecordingFs = Box::leak(Box::new(mock));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(fs);
+
+        let fd = u32::try_from(
+            h.fs_open(&ctx, 0x1000, "/d".len(), OpenFlags::DIRECTORY)
+                .expect("open dir"),
+        )
+        .unwrap();
+        // Two records: (4 + 4) + (4 + 4) = 16 bytes.
+        let total = usize::try_from(h.fs_readdir(&ctx, fd, 0x1000, 64).expect("readdir")).unwrap();
+        assert_eq!(total, 16);
+        let stream = h
+            .with_caller_aspace(&ctx, |space, physmap| {
+                let mut buf = alloc::vec![0u8; total];
+                copy_in(space, physmap, VirtAddr::new(0x1000), &mut buf).expect("readable");
+                buf
+            })
+            .expect("caller space");
+        let (first, used) = DirEntry::decode(&stream).expect("first entry");
+        assert_eq!(first.kind, FileKind::Directory);
+        assert_eq!(first.name, b"Logs");
+        let (second, _) = DirEntry::decode(&stream[used..]).expect("second entry");
+        assert_eq!(second.name, b"motd");
+
+        // A buffer too small for the whole listing fails closed.
+        assert_eq!(
+            h.fs_readdir(&ctx, fd, 0x1000, 4),
+            Err(Errno::BufferTooSmall)
+        );
+    }
+
+    /// `fs_stat` writes the service's `FileStat` to the caller; `fs_close`
+    /// frees the descriptor and a double close fails closed.
+    #[test]
+    fn fs_stat_writes_metadata_and_close_frees_the_descriptor() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, b"/f");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let mut mock = RecordingFs::new();
+        mock.stat = FileStat {
+            kind: FileKind::Regular,
+            size: 0x1234,
+            mode: 0o640,
+            uid: 1000,
+            gid: 1000,
+        };
+        let fs: &'static RecordingFs = Box::leak(Box::new(mock));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(fs);
+
+        let fd = u32::try_from(
+            h.fs_open(&ctx, 0x1000, "/f".len(), OpenFlags::READ)
+                .expect("open"),
+        )
+        .unwrap();
+        let n = usize::try_from(
+            h.fs_stat(&ctx, fd, 0x1000, FileStat::WIRE_LEN)
+                .expect("stat"),
+        )
+        .unwrap();
+        assert_eq!(n, FileStat::WIRE_LEN);
+        let decoded = h
+            .with_caller_aspace(&ctx, |space, physmap| {
+                let mut buf = alloc::vec![0u8; FileStat::WIRE_LEN];
+                copy_in(space, physmap, VirtAddr::new(0x1000), &mut buf).expect("readable");
+                FileStat::decode(&buf).expect("valid stat")
+            })
+            .expect("caller space");
+        assert_eq!(decoded.size, 0x1234);
+        assert_eq!(decoded.mode, 0o640);
+
+        // An undersized stat buffer fails closed.
+        assert_eq!(
+            h.fs_stat(&ctx, fd, 0x1000, FileStat::WIRE_LEN - 1),
+            Err(Errno::BufferTooSmall)
+        );
+
+        // Close frees the descriptor; a second close fails closed.
+        assert_eq!(h.fs_close(&ctx, fd), Ok(0));
+        assert_eq!(h.fs_close(&ctx, fd), Err(Errno::NotFound));
+        assert_eq!(
+            h.fs_stat(&ctx, fd, 0x1000, FileStat::WIRE_LEN),
+            Err(Errno::NotFound)
+        );
     }
 }

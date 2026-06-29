@@ -127,8 +127,8 @@ pub use driver_store::{
     MAX_DRIVER_IMAGE_LEN, MAX_STORE_DEPTH, MAX_STORE_DRIVERS, SYSTEM_VOLUME_STORE_PATH,
 };
 pub use fs::{
-    Access, AclEntry, AclWho, Credentials, Metadata, Mode, MountPoint, MountTable, Path, Vfs,
-    VfsError,
+    Access, AclEntry, AclWho, Credentials, FilesystemService, Metadata, Mode, MountPoint,
+    MountTable, NullFilesystemService, Path, Vfs, VfsError, NULL_FILESYSTEM,
 };
 pub use hwtree::{HwTreeSource, NullHwTreeSource, NULL_HW_TREE};
 pub use init::{kernel_main, InitError, KernelInitSpawner, Phase};

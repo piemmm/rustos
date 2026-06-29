@@ -47,6 +47,7 @@ mod delegate;
 pub mod mount;
 pub mod path;
 pub mod perm;
+pub mod service;
 mod vfs;
 
 pub use delegate::{DelegatedFs, DelegatedInfo, MetaPolicy, PerInode, Uniform};
@@ -56,6 +57,7 @@ pub use path::{
     ROOT_TEMPLATE,
 };
 pub use perm::{Access, AclEntry, AclWho, Credentials, Metadata, Mode};
+pub use service::{FilesystemService, NullFilesystemService, NULL_FILESYSTEM};
 pub use vfs::Vfs;
 
 use core::fmt;
