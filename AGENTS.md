@@ -2540,5 +2540,168 @@ one writes a second.
 
 ---
 
+## 26. Operating-Conditions Design Assumptions
+
+RustOS is designed for **real, contended, imperfect hardware under sustained
+multi-user load**, never for the quiet single-user laptop a developer happens
+to test on. Every part of the system — kernel subsystem, driver, `lib/*`
+crate, userland service, and every spec/plan — MUST be designed, written, and
+reviewed against the operating conditions below. They are binding and as
+non-negotiable as §2: a design that only behaves under ideal conditions
+(one disk, one user, ample RAM, idle network, healthy hardware) is defective
+even when it compiles and its tests pass (§23). This section names the
+conditions; it does not relax any existing rule — it focuses §2.16
+(performance), §4 (memory/OOM), §5.4 (fail closed), §17.1 (scheduling),
+§19 (threat model), and §24 (scalability) onto the workloads RustOS must
+actually survive.
+
+These are *design assumptions*, not optional tuning. When the clean design and
+the robust-under-load design differ, the robust one is the §2.6 senior bar.
+When a requirement here conflicts with another in-flight design or another
+rule, stop and ask (§15.7) — never resolve it with a "for now" shortcut
+(§2.19).
+
+### 26.1 Many heterogeneous disks of differing speed, all contended
+
+- The machine may present **many** storage devices at once — one or more fast
+  NVMe drives **and** many slow rotational SATA drives — each discovered as its
+  own hardware-tree node (§18.1) and driven concurrently (§4 SMP). No design
+  may assume a single disk, a single queue, or one storage class.
+- **Per-device, not global.** Queueing, scheduling, caching, readahead, and
+  back-pressure are reasoned about and accounted **per device**, sized from the
+  device's own discovered characteristics (§24.1/§24.2), never from one global
+  constant that lumps a 7 ms-seek spinning disk together with a sub-100 µs NVMe
+  namespace. A fixed compile-time queue depth or buffer count shared across
+  classes is the §24.1 defect.
+- **A slow device must never stall a fast one, and one user's I/O must never
+  monopolise a device (§17.1, §2.16).** I/O issued to a slow rotational drive
+  must not block, serialise behind, or steal the bandwidth of an unrelated
+  fast device or an unrelated user's request. Request scheduling is fair across
+  users (the `(uid, …)` of §5.1) and across devices; one tenant's bulk
+  sequential read cannot starve another's latency-sensitive access. Waiters
+  block and are woken by completion — never busy-poll a queue (§2.23).
+- **Bound the work, fail closed (§5.4, §24.3).** Per-user and per-process I/O
+  concurrency, queue occupancy, and cache footprint are bounded through the
+  §24.3 resource-limit facility and fail closed when a limit is reached, rather
+  than letting an unbounded fan-out of requests exhaust kernel memory (§4).
+
+### 26.2 Many simultaneous users, each with greedy processes
+
+- The system may host **many logged-in users at once**, each running processes
+  that are individually memory-hungry, disk-hungry, CPU-hungry, or I/O-hungry.
+  Isolation between users and between processes is a hardware-enforced default
+  (§4, §5.1), not a behaviour that degrades under load.
+- **Fair share, bounded blast radius.** No single user or process may starve
+  the others of CPU (§17.1 fairness/no-starvation, exercised by the §17.1
+  conformance suite), memory (§4 per-process heaps, §24.3 limits), disk
+  bandwidth (§26.1), or I/O completion handling. A greedy or runaway tenant is
+  throttled or denied through the §24.3 limit facility and fails closed (§5.4);
+  it never brings down or wedges the system for everyone else.
+- **Accounting is per principal.** Resource usage is attributed to the owning
+  `(uid, gid, …)` (§5.1) and observable through the System Information API
+  (§16.6) behind the appropriate capability — never a `/proc`-style scrape
+  (§16.1).
+
+### 26.3 Operating under memory pressure
+
+- **Memory may be scarce at any time, and the system must stay correct and
+  responsive when it is.** Designs assume RAM can be constrained — a small
+  board (§24.2) or a large machine whose RAM is fully committed by many users
+  (§26.2) — not that allocation always succeeds.
+- **Every allocation can fail, and failure is a `Result`, never a panic (§4,
+  §2.9).** Out-of-memory is handled as a value on the spot, with all
+  partially-acquired resources released (§23.2 error paths). `unwrap`/`expect`/
+  `panic!` on an allocation path is a defect (§2.9).
+- **Reclaim before refusal, and reclaim safely.** Caches, buffers, and other
+  growable capacities (§24.1) are sized to shrink under pressure and to be
+  reclaimed before the system denies forward progress — preserving every safety
+  invariant when they do (zero-on-free §4, isolation §4). Anonymous, stack, and
+  capability-bearing pages that are paged out go to **encrypted swap only**
+  (§4); there is no plaintext-swap fallback under pressure.
+- **No memory-pressure busy-loops.** A subsystem waiting on reclaim parks and
+  is woken (§2.23), it does not spin retrying an allocation.
+
+### 26.4 Heavy network and external I/O serving many remote users
+
+- The machine may sustain **high volumes of network and other external I/O**
+  while serving many external clients at once. The networking and I/O paths are
+  designed for many concurrent connections, not a single flow, and are
+  efficient by construction on their data path (§2.16).
+- **Event-driven, never busy-polled (§2.23).** Connections, sockets, and device
+  queues block and are woken by their interrupt/completion event; a service
+  with nothing to do until data arrives parks (`irq_wait`/`WaitQueue`/IPC
+  backing), it does not peg a core spinning. A periodic re-poll fallback is
+  tickless and one-shot-timed (§17.1), never a tight loop.
+- **Untrusted external input is hostile and sandboxed (§19.5).** Every decoder
+  of attacker-controlled network input runs in a minimum-capability sandbox
+  with a fuzz harness (§19.6); a parser crash is contained and the sandbox
+  replaced, never taking down the serving process (§19.5). External clients are
+  treated as adversaries (§5, §19), and per-client resource use is bounded and
+  fails closed (§24.3, §5.4) so a flood cannot exhaust kernel memory (§4) or
+  starve other tenants (§26.2).
+
+### 26.5 A disk may be failing
+
+- **Storage hardware is assumed to be able to fail — slowly, intermittently, or
+  outright — and the system must degrade gracefully, never crash.** A read or
+  write that errors, times out, returns corrupt data, or hangs is an expected
+  outcome a driver and the filesystem layer handle as a typed `Result`, never a
+  panic (§2.9) and never an unbounded retry-until-it-works (§2.1).
+- **Detect, contain, report.** I/O errors are surfaced as typed errors up the
+  stack, the affected device/volume is contained (a failing disk must not wedge
+  unrelated devices or the whole system, §26.1), and the event is logged
+  through the hash-chained audit log with a stable event ID (§19.4) so a
+  failing drive is observable through the System Information API (§16.6).
+- **Integrity over silent corruption (§5.4 fail closed).** RustFS checksums
+  every record (§3, RustFS spec) so corruption from a failing disk is *detected*
+  rather than silently served; on a checksum or read failure the layer fails
+  closed and reports, it does not return data it cannot vouch for. Bounded,
+  documented retry/timeout budgets that fail closed are permitted; an unbounded
+  spin or a hang is not (§2.1, §2.23).
+- **No data-loss shortcut.** A failing disk is never "handled" by ignoring the
+  error, masking it, or weakening a checksum/validation to make I/O appear to
+  succeed (§2.17) — that is a security and correctness regression and a review
+  blocker (§23).
+
+### 26.6 Very large filesystems (well over 100 TB)
+
+- **A mounted volume or filesystem may exceed 100 TB, and every size, count,
+  offset, and address that describes on-disk data is 64-bit-native (§21).** No
+  design may assume a volume, file, directory, extent map, free-space map, or
+  object count fits in 32 bits or in pointer width (`usize`/`isize`) — pointer
+  width is not storage width any more than it is time width (§21). A block
+  number, byte offset, inode/record id, or file length stored or computed as
+  32-bit (or as `usize`) is a defect, on every target including `wasm32` and
+  any 32-bit port.
+- **Metadata scales sub-linearly; no whole-volume scan on the hot path.**
+  Mount, lookup, allocation, free-space search, `stat`, and directory listing
+  must not require reading, building, or walking an O(volume-size) in-memory
+  structure: a 100 TB+ volume cannot have its entire allocation map, inode
+  table, or directory index resident or linearly scanned per operation. RustFS
+  and every filesystem driver use paged, on-demand, indexed (B-tree / extent /
+  bitmap-hierarchy) structures so cost scales with the working set, not the
+  device (§2.16, §24.1). A design that is fine at 1 TB but quadratic or
+  memory-proportional at 100 TB is a §2.16 / §24.1 defect.
+- **In-memory caches of on-disk metadata are bounded, growable capacities, not
+  whole-volume residents (§24.1, §26.3).** The fraction of a huge volume's
+  metadata cached at once is sized from discovered RAM and reclaimed under
+  pressure (§26.3) — never "load the whole table". A small machine must mount
+  and serve a 100 TB+ volume; running out of RAM proportional to volume size is
+  the §24.1 / §26.3 defect.
+- **Long-running whole-volume operations are incremental, interruptible, and
+  fail closed.** Format (mkfs), check/repair, scrub, resize, and rebalance over
+  a 100 TB+ device must make bounded forward progress, be cancellable, report
+  progress, and never block the system or busy-spin (§2.23) for the hours such
+  an operation legitimately takes; an I/O error mid-operation fails closed and
+  reports (§5.4, §26.5), it does not corrupt or silently truncate.
+- **Foreign-format limits are declared, not papered over (§21).** Where an
+  ext4 / FAT32 / other foreign volume imposes its own maximum volume, file, or
+  offset size, the driver declares those limits through the filesystem
+  capability API and fails closed when a RustOS request exceeds them (§21) —
+  it never silently wraps, truncates, or saturates a large size into a foreign
+  format's narrower field.
+
+---
+
 Violation of any rule in this document is a defect, regardless of whether
 the code compiles or the tests pass.
