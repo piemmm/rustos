@@ -64,7 +64,9 @@ use rustos_abi::{CapabilityId, DriverError};
 use rustos_caps::CapabilitySet;
 use rustos_partition::mbr::{self, MbrError};
 use rustos_partition::{Partition, PartitionType};
-use rustos_users::{AccountState, Gid, Identity, Salt, Uid, UserRecord, UsersDb};
+use rustos_users::{
+    AccountState, Gid, GroupRecord, GroupsDb, Identity, Salt, Uid, UserRecord, UsersDb,
+};
 
 /// First sector of the FAT32 boot partition (1 MiB alignment, the
 /// universal SD-card convention).
@@ -121,6 +123,8 @@ pub enum MkimageError {
     Unlock(DriverError),
     /// Authoring the seeded user database failed.
     UsersDb(String),
+    /// Authoring the seeded group registry failed.
+    GroupsDb(String),
 }
 
 impl fmt::Display for MkimageError {
@@ -136,6 +140,7 @@ impl fmt::Display for MkimageError {
             Self::Entropy(msg) => write!(f, "host entropy: {msg}"),
             Self::Unlock(err) => write!(f, "unlock descriptor: driver error {err:?}"),
             Self::UsersDb(msg) => write!(f, "users database: {msg}"),
+            Self::GroupsDb(msg) => write!(f, "group registry: {msg}"),
         }
     }
 }
@@ -152,11 +157,12 @@ impl std::error::Error for MkimageError {}
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ImageProfile {
     /// Development image: the root volume is seeded with the
-    /// [`DEBUG_USERNAME`]/[`DEBUG_PASSWORD`] account so the login prompt is
-    /// usable without the installer. Never shipped.
+    /// [`DEBUG_USERNAME`]/[`DEBUG_PASSWORD`] account and the matching
+    /// [`DEBUG_GROUP`] group registry so the login prompt is usable — and the
+    /// kernel's identity table builds — without the installer. Never shipped.
     Debug,
     /// Shippable image: no user accounts; the installer authors
-    /// `/System/Security/Users` on first boot.
+    /// `/System/Security/Users` and `/System/Security/Groups` on first boot.
     Installer,
 }
 
@@ -189,6 +195,17 @@ pub const DEBUG_USERNAME: &str = "root";
 /// debug image exists for bring-up on development hardware and must never
 /// ship; the installer image seeds no account at all.
 pub const DEBUG_PASSWORD: &str = "root";
+
+/// Primary group id of the debug-profile test account, and the one group the
+/// seeded group registry declares. Defined once so the seeded user's
+/// `primary_gid` and the group registry it must resolve against cannot
+/// disagree about which gid exists.
+pub const DEBUG_PRIMARY_GID: Gid = Gid(0);
+
+/// Name of the debug-profile primary group (gid [`DEBUG_PRIMARY_GID`]). The
+/// conventional administrative group; the seeded `root` account's powers come
+/// from capabilities, not from this group.
+pub const DEBUG_GROUP: &str = "wheel";
 
 /// Passphrase the **debug** image's encrypted root is unlocked with.
 ///
@@ -285,7 +302,7 @@ fn debug_users_db(entropy: &mut dyn EntropySource) -> Result<String, MkimageErro
         Identity {
             username: DEBUG_USERNAME,
             uid: Uid(0),
-            primary_gid: Gid(0),
+            primary_gid: DEBUG_PRIMARY_GID,
             supplementary_gids: &[],
             display_name: "System Administrator",
             home: "/Users/root",
@@ -300,6 +317,20 @@ fn debug_users_db(entropy: &mut dyn EntropySource) -> Result<String, MkimageErro
     .map_err(|e| MkimageError::UsersDb(format!("debug root record: {e}")))?;
     let db = UsersDb::new(vec![record])
         .map_err(|e| MkimageError::UsersDb(format!("debug database: {e}")))?;
+    Ok(db.serialise())
+}
+
+/// Build the debug-profile `/System/Security/Groups` text: the single
+/// [`DEBUG_GROUP`] group (gid [`DEBUG_PRIMARY_GID`]) the seeded `root`
+/// account's primary gid references, so the kernel's boot-time identity-table
+/// build resolves that reference against a real registry rather than failing
+/// closed on a dangling group. Membership is not stored here — it lives in the
+/// user records; this is only the authoritative name↔gid set.
+fn debug_groups_db() -> Result<String, MkimageError> {
+    let record = GroupRecord::new(DEBUG_GROUP, DEBUG_PRIMARY_GID)
+        .map_err(|e| MkimageError::GroupsDb(format!("debug group record: {e}")))?;
+    let db = GroupsDb::new(vec![record])
+        .map_err(|e| MkimageError::GroupsDb(format!("debug registry: {e}")))?;
     Ok(db.serialise())
 }
 
@@ -367,6 +398,10 @@ pub fn build_rpi_image(
         ImageProfile::Debug => Some(debug_users_db(entropy)?),
         ImageProfile::Installer => None,
     };
+    let groups_db = match profile {
+        ImageProfile::Debug => Some(debug_groups_db()?),
+        ImageProfile::Installer => None,
+    };
     let kernel8 = elfflat::elf_to_flat(kernel_elf)?;
 
     // Derive the root volume key from the profile's passphrase under a
@@ -395,6 +430,7 @@ pub fn build_rpi_image(
         &root_key,
         entropy,
         users_db.as_deref(),
+        groups_db.as_deref(),
     )?;
 
     let mbr_sector = mbr::encode(&[
@@ -742,6 +778,49 @@ mod tests {
         assert_eq!(record.shell(), "/Apps/Shell.app/Run");
         assert!(record.capabilities().contains(CapabilityId::USER_ADMIN));
         assert!(db.authenticate(DEBUG_USERNAME, b"wrong").is_err());
+    }
+
+    #[test]
+    fn a_debug_image_seeds_a_group_registry_the_root_account_resolves_against() {
+        use rustos_users::GroupsDb;
+
+        let built = build_rpi_image(
+            &test_kernel_elf(),
+            &test_firmware(),
+            &mut TestEntropy(9),
+            ImageProfile::Debug,
+            &[],
+        )
+        .expect("image builds");
+
+        let root_at = ROOT_PART_LBA as usize * SECTOR_BYTES;
+        let root_len = ROOT_PART_SECTORS as usize * SECTOR_BYTES;
+        let root_bytes = built.image[root_at..root_at + root_len].to_vec();
+        let mut rfs = RustFs::open(
+            MemBlock::from_bytes(root_bytes).expect("whole sectors"),
+            &built.root_key,
+        )
+        .expect("root partition mounts");
+        let rustfs_root = rfs.root();
+        let system = rfs.lookup(rustfs_root, b"System").expect("/System");
+        let security = rfs.lookup(system, b"Security").expect("Security");
+
+        let groups = rfs
+            .lookup(security, rootfs::GROUPS_DB_NAME.as_bytes())
+            .expect("Groups registry exists");
+        let mut buf = vec![0u8; rustos_users::MAX_GROUPS_DB_LEN];
+        let read = rfs
+            .read_at(groups, 0, &mut buf)
+            .expect("Groups registry reads");
+        let text = core::str::from_utf8(&buf[..read]).expect("valid UTF-8");
+        let db = GroupsDb::parse(text).expect("seeded registry parses");
+        // The seeded root account's primary gid must resolve to a real group,
+        // or the kernel's identity-table build would fail closed.
+        assert!(db.lookup_gid(DEBUG_PRIMARY_GID).is_some());
+        assert_eq!(
+            db.lookup(DEBUG_GROUP).map(GroupRecord::gid),
+            Some(DEBUG_PRIMARY_GID)
+        );
     }
 
     #[test]

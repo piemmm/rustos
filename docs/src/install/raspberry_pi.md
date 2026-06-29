@@ -16,11 +16,13 @@ Two image profiles exist (`--profile`, default `debug`):
 
 - **`debug`** — the development image: the root volume is seeded with a
   `/System/Security/Users` database carrying the single test account
-  `root` / `root` (salted and hashed per build, `lib/users`), so the
-  login prompt is usable without running the installer. A debug image
-  must never ship.
+  `root` / `root` (salted and hashed per build, `lib/users`) **and** the
+  matching `/System/Security/Groups` registry (the `wheel` group, gid 0,
+  the account's primary group), so the login prompt is usable — and the
+  kernel's identity table builds — without running the installer. A debug
+  image must never ship.
 - **`installer`** — the shippable image: no user accounts; the first-boot
-  installer (`AGENTS.md` §11) authors the user database.
+  installer (`AGENTS.md` §11) authors the user database and group registry.
 
 ## Image layout
 
@@ -29,7 +31,7 @@ Two image profiles exist (`--profile`, default `debug`):
 | Sector 0 | MBR: three primary partitions, `0x55AA` signature |
 | Partition 1 (`0x0C`, FAT32, 64 MiB at sector 2048) | `start4.elf`, `fixup4.dat`, `bcm2711-rpi-4-b.dtb`, `overlays/disable-bt.dtbo`, generated `config.txt`, `kernel8.img`, `root.unlock` |
 | Partition 2 (`0x7E`, RustFS, 64 MiB) | read-only, signed-bundle `/System` volume (the §16.2 skeleton); keyed by the non-secret well-known `SYSTEM_VOLUME_KEY` (effectively unencrypted — integrity rests on the per-bundle signatures, `AGENTS.md` §18.6), mounted read-only before unlock (the design-B pre-unlock driver store, `plans/PI.md`) |
-| Partition 3 (`0x7F`, RustFS, 64 MiB) | encrypted data-root volume with the `AGENTS.md` §16 skeleton (`/Users`, `/Apps`, `/Storage`, `/System/Security`), unlocked by a passphrase-derived key |
+| Partition 3 (`0x7F`, RustFS, 64 MiB) | encrypted data-root volume with the `AGENTS.md` §16 skeleton (`/Users`, `/Apps`, `/Storage`, `/System/Security`), plus — for a debug image — the seeded `Users` database and `Groups` registry; unlocked by a passphrase-derived key |
 
 `root.unlock` is the root volume's plaintext key-derivation descriptor
 (`AGENTS.md` §11): the per-volume random salt and PBKDF2 iteration count
