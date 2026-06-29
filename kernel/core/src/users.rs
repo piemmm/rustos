@@ -26,22 +26,19 @@
 //! boot reader is a configuration defect surfaced loudly, never silently
 //! bypassed.
 
-use alloc::vec;
 use alloc::vec::Vec;
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemSecurity, NodeKind};
+use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemSecurity};
 use rustos_abi::Errno;
-use rustos_caps::CapabilitySet;
-use rustos_kernel_sec::{GroupId, UserId};
 use rustos_log::{Field, Level, Sink};
 use rustos_sync::OnceCell;
 use rustos_users::{ParseError, UsersDb, MAX_DB_LEN};
 use rustos_util::fmt::format_usize;
 
 use crate::audit::{emit, AuditEvent};
-use crate::fs::{Credentials, Path, VfsError};
+use crate::fs::{read_bootstrap_file, BootstrapReadError, VfsError};
 
 /// Absolute path of the user database on the root volume.
 pub const USERS_DB_PATH: &str = "/System/Security/Users";
@@ -388,6 +385,17 @@ impl From<VfsError> for UsersLoadError {
     }
 }
 
+impl From<BootstrapReadError> for UsersLoadError {
+    fn from(err: BootstrapReadError) -> Self {
+        match err {
+            BootstrapReadError::Vfs(err) => Self::Vfs(err),
+            BootstrapReadError::NotAFile => Self::NotAFile,
+            BootstrapReadError::TooLarge => Self::TooLarge,
+            BootstrapReadError::ShortRead => Self::ShortRead,
+        }
+    }
+}
+
 /// Read and parse `/System/Security/Users` from the mounted root
 /// volume's filesystem driver.
 ///
@@ -526,40 +534,9 @@ fn read_users_bytes<F>(fs: &mut F) -> Result<Vec<u8>, UsersLoadError>
 where
     F: FilesystemRead + FilesystemSecurity + ?Sized,
 {
-    // A minimal VFS whose root mount is backed by the caller's driver —
-    // the shape of the real root volume, which carries the whole
-    // tree from its own root directory (: shared builder).
-    let vfs = crate::fs::root_backed_vfs()?;
-
-    let caps = CapabilitySet::empty();
-    let cred = Credentials {
-        uid: UserId(0),
-        gid: GroupId(0),
-        supplementary_gids: &[],
-        caps: &caps,
-    };
-    let path = Path::parse(USERS_DB_PATH)?;
-
-    // Bound the file against the format's own maximum before reading a
-    // single byte.
-    let info = vfs.stat_via_secured(&cred, &path, fs)?;
-    if info.kind != NodeKind::RegularFile {
-        return Err(UsersLoadError::NotAFile);
-    }
-    if info.size > MAX_DB_LEN as u64 {
-        return Err(UsersLoadError::TooLarge);
-    }
-    let size = usize::try_from(info.size).map_err(|_| UsersLoadError::TooLarge)?;
-
-    let mut buf = vec![0u8; size];
-    let read = vfs.read_via_secured(&cred, &path, fs, 0, &mut buf)?;
-    if read != size {
-        // A truncated database is never parsed; zero the
-        // partial read before release.
-        buf.fill(0);
-        return Err(UsersLoadError::ShortRead);
-    }
-    Ok(buf)
+    // The bounded, fail-closed `uid 0` read shared with the group registry
+    // reader; the database is bounded by the `users-v1` format maximum.
+    Ok(read_bootstrap_file(fs, USERS_DB_PATH, MAX_DB_LEN)?)
 }
 
 /// Validate `buf` as UTF-8 and parse it with the fail-closed `users-v1`

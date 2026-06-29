@@ -120,6 +120,11 @@ pub const TARGETS: &[Target] = &[
         test: "fuzz_users",
         description: "lib/users database parser (untrusted /System/Security/Users bytes)",
     },
+    Target {
+        package: "rustos-users",
+        test: "fuzz_groups",
+        description: "lib/users group-database parser (untrusted /System/Security/Groups bytes)",
+    },
 ];
 
 /// How long to run each harness.

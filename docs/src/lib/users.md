@@ -1,12 +1,14 @@
 # `rustos-users`
 
-The user-account database: the single definition of a RustOS account and of
-the versioned text format persisted at `/System/Security/Users`
+The user-account database **and** the first-class group registry: the single
+definition of a RustOS account, of a RustOS group, and of the versioned text
+formats persisted at `/System/Security/Users` and `/System/Security/Groups`
 (`AGENTS.md` §5.1, §16.2). The installer (`AGENTS.md` §11) and the image
-builder (`tools/mkimage`) *author* the database; the kernel's boot-time
-root-volume read path (`rustos_kernel_core::users::load_users_db`, see the
+builder (`tools/mkimage`) *author* the databases; the kernel's boot-time
+root-volume read paths (`rustos_kernel_core::users::load_users_db` and
+`rustos_kernel_core::groups::load_groups_db`, see the
 [kernel page](../architecture/kernel.md)) and the login path
-(`userland/session/login`) *read* it — one format, defined once
+(`userland/session/login`) *read* them — one format each, defined once
 (`AGENTS.md` §2.2). The crate is `no_std` + `alloc`, has no `unsafe`, and
 depends only on `rustos-abi`, `rustos-caps`, and `rustos-crypto`.
 
@@ -42,6 +44,40 @@ whole file on the first defect (`ParseError`). `UsersDb::serialise` emits
 text that parses back to an equal database, and the deterministic fuzz
 harness (`tests/fuzz_users.rs`, enrolled in `cargo xtask fuzz`) drives the
 parser with mutated, truncated, spliced, and noise inputs under the
+never-panic + round-trip invariants.
+
+## The group registry (`rustos-groups-v1`)
+
+Groups are first-class objects (`AGENTS.md` §5.1): every group a user may
+belong to is declared once in the group registry, by name and numeric gid.
+Line one is exactly the header `rustos-groups-v1`; every other line is
+blank, a `#` comment, or one record of two `:`-separated fields
+`groupname:gid`:
+
+```text
+rustos-groups-v1
+wheel:0
+ada:1000
+```
+
+A group name obeys the same identifier grammar as a username
+(`[a-z_][a-z0-9_-]*`, ≤ 32 bytes — one shared charset definition, never two
+copies). **Membership is not stored here**: a user's primary and
+supplementary groups live in that user's `UserRecord`
+(`/System/Security/Users`), so a membership fact has a single home and the
+two files can never disagree about who is in a group. The registry answers
+only *which groups exist, and what they are called* — the authoritative set
+every user's group references are checked against when the kernel assembles
+its identity table (`rustos_kernel_core::groups::build_identity_table`): a
+user naming a group with no registry record is refused, fail closed
+(referential integrity, `AGENTS.md` §5.4).
+
+`GroupsDb::parse` is held to the identical fail-closed discipline as the
+user database — it bounds the file (64 KiB), each line (128 bytes), and the
+record count (1024) before reading anything, validates every field,
+enforces group-name and gid uniqueness, and rejects the whole file on the
+first defect — and its own deterministic fuzz harness
+(`tests/fuzz_groups.rs`, enrolled in `cargo xtask fuzz`) drives it under the
 never-panic + round-trip invariants.
 
 ## Authentication without information leaks

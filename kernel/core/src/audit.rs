@@ -130,6 +130,14 @@ pub enum AuditEvent {
     /// failed its bounded fail-closed validation; no database is held
     /// and every login refuses.
     UsersDbRejected,
+    /// The `/System/Security/Groups` group registry was read off the
+    /// mounted root volume and parsed (`crate::groups`).
+    GroupsDbLoaded,
+    /// The `/System/Security/Groups` registry could not be read, failed its
+    /// bounded fail-closed validation, or did not resolve every group a
+    /// user references; no identity table is installed and the filesystem
+    /// path resolves no caller groups (fail closed).
+    GroupsDbRejected,
     /// The `/System/Drivers/` signed-driver store was enumerated for
     /// autoload candidates (`crate::driver_store`).
     ///
@@ -174,6 +182,8 @@ impl AuditEvent {
             Self::DriverUnloaded => 4033,
             Self::UsersDbLoaded => 4040,
             Self::UsersDbRejected => 4041,
+            Self::GroupsDbLoaded => 4043,
+            Self::GroupsDbRejected => 4044,
             Self::DriverStoreScanned => 4042,
             Self::InputDelivered => 4050,
         })
@@ -199,6 +209,8 @@ impl AuditEvent {
             Self::DriverUnloaded => "driver unloaded",
             Self::UsersDbLoaded => "users database loaded",
             Self::UsersDbRejected => "users database rejected",
+            Self::GroupsDbLoaded => "groups database loaded",
+            Self::GroupsDbRejected => "groups database rejected",
             Self::DriverStoreScanned => "driver store scanned",
             Self::InputDelivered => "first input delivered to focus arbiter",
         }
@@ -239,6 +251,8 @@ mod tests {
             AuditEvent::DriverUnloaded,
             AuditEvent::UsersDbLoaded,
             AuditEvent::UsersDbRejected,
+            AuditEvent::GroupsDbLoaded,
+            AuditEvent::GroupsDbRejected,
             AuditEvent::DriverStoreScanned,
             AuditEvent::InputDelivered,
         ] {
@@ -267,6 +281,8 @@ mod tests {
             AuditEvent::DriverUnloaded.id().0,
             AuditEvent::UsersDbLoaded.id().0,
             AuditEvent::UsersDbRejected.id().0,
+            AuditEvent::GroupsDbLoaded.id().0,
+            AuditEvent::GroupsDbRejected.id().0,
             AuditEvent::DriverStoreScanned.id().0,
             AuditEvent::InputDelivered.id().0,
         ];

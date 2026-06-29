@@ -45,7 +45,7 @@
 
 mod delegate;
 #[cfg(test)]
-mod memfs;
+pub(crate) mod memfs;
 pub mod mount;
 mod mounted;
 pub mod path;
@@ -102,6 +102,91 @@ pub(crate) fn root_backed_vfs() -> Result<Vfs, VfsError> {
     let handle = DriverHandle::from_raw(PRIVATE_ROOT_HANDLE).map_err(|_| VfsError::Io)?;
     vfs.mounts_mut().back_root(handle)?;
     Ok(vfs)
+}
+
+/// Why [`read_bootstrap_file`] could not return a file's exact bytes.
+///
+/// The structural refusals every boot-time reader of a `/System/Security`
+/// database shares; each reader maps these onto its own load-error type.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) enum BootstrapReadError {
+    /// Resolving, stat-ing, or reading the path failed (missing file,
+    /// permission refusal, driver fault, …).
+    Vfs(VfsError),
+    /// The path names a directory, not a regular file.
+    NotAFile,
+    /// The file exceeds the caller's format bound; it is refused before any
+    /// byte is read.
+    TooLarge,
+    /// The driver returned fewer bytes than the file's reported size; a
+    /// truncated database is never parsed.
+    ShortRead,
+}
+
+impl From<VfsError> for BootstrapReadError {
+    fn from(err: VfsError) -> Self {
+        Self::Vfs(err)
+    }
+}
+
+/// Read the exact-size, fully-read bytes of `path` off the mounted root
+/// volume under the kernel's capability-less `uid 0` bootstrap identity,
+/// applying the permission check and the `max_len` size bound *before* a
+/// single byte is read.
+///
+/// `uid 0` carries no ambient power: a read succeeds only because the
+/// target's stored record makes it owner-readable, never because the kernel
+/// bypasses the check. This is the one definition shared by every
+/// `/System/Security` boot reader ([`crate::users`], [`crate::groups`]), so
+/// the bounded, fail-closed read is not copied per file. The returned buffer
+/// may carry credential bytes; the caller is responsible for zeroing it if
+/// it does not retain it.
+///
+/// # Errors
+///
+/// The [`BootstrapReadError`] naming the first check that refused.
+pub(crate) fn read_bootstrap_file<F>(
+    fs: &mut F,
+    path: &str,
+    max_len: usize,
+) -> Result<alloc::vec::Vec<u8>, BootstrapReadError>
+where
+    F: rustos_abi::driver::filesystem::FilesystemRead
+        + rustos_abi::driver::filesystem::FilesystemSecurity
+        + ?Sized,
+{
+    use rustos_abi::driver::filesystem::NodeKind;
+
+    let vfs = root_backed_vfs()?;
+    let caps = rustos_caps::CapabilitySet::empty();
+    let cred = Credentials {
+        uid: UserId(0),
+        gid: GroupId(0),
+        supplementary_gids: &[],
+        caps: &caps,
+    };
+    let path = Path::parse(path)?;
+
+    // Bound the file against the format's own maximum before reading a
+    // single byte.
+    let info = vfs.stat_via_secured(&cred, &path, fs)?;
+    if info.kind != NodeKind::RegularFile {
+        return Err(BootstrapReadError::NotAFile);
+    }
+    if info.size > max_len as u64 {
+        return Err(BootstrapReadError::TooLarge);
+    }
+    let size = usize::try_from(info.size).map_err(|_| BootstrapReadError::TooLarge)?;
+
+    let mut buf = alloc::vec![0u8; size];
+    let read = vfs.read_via_secured(&cred, &path, fs, 0, &mut buf)?;
+    if read != size {
+        // A truncated file is never parsed; zero the partial read before
+        // release in case it held credential bytes.
+        buf.fill(0);
+        return Err(BootstrapReadError::ShortRead);
+    }
+    Ok(buf)
 }
 
 /// An error returned by a VFS operation.

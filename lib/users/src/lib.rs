@@ -30,10 +30,15 @@
 extern crate alloc;
 
 mod db;
+mod groups;
 mod password;
 mod record;
 
 pub use db::{UsersDb, FORMAT_HEADER, MAX_DB_LEN, MAX_LINE_LEN, MAX_USERS};
+pub use groups::{
+    GroupRecord, GroupsDb, GROUPS_FORMAT_HEADER, MAX_GROUPNAME_LEN, MAX_GROUPS, MAX_GROUPS_DB_LEN,
+    MAX_GROUP_LINE_LEN,
+};
 pub use password::{
     PasswordRecord, Salt, DEFAULT_ITERATIONS, MAX_ITERATIONS, MAX_PASSWORD_LEN, MIN_ITERATIONS,
     PASSWORD_SCHEME, SALT_LEN,
@@ -84,6 +89,14 @@ pub enum ParseError {
     DuplicateUserId,
     /// The database exceeds [`MAX_USERS`] records.
     TooManyUsers,
+    /// A group record carries an invalid group name.
+    GroupName,
+    /// Two group records share a name.
+    DuplicateGroupName,
+    /// Two group records share a gid.
+    DuplicateGroupId,
+    /// The group database exceeds [`MAX_GROUPS`] records.
+    TooManyGroups,
 }
 
 impl fmt::Display for ParseError {
@@ -105,6 +118,10 @@ impl fmt::Display for ParseError {
             Self::DuplicateUsername => "users database repeats a username",
             Self::DuplicateUserId => "users database repeats a uid",
             Self::TooManyUsers => "users database exceeds the record budget",
+            Self::GroupName => "group record carries an invalid group name",
+            Self::DuplicateGroupName => "groups database repeats a group name",
+            Self::DuplicateGroupId => "groups database repeats a gid",
+            Self::TooManyGroups => "groups database exceeds the record budget",
         };
         f.write_str(message)
     }

@@ -294,25 +294,42 @@ impl UserRecord {
     }
 }
 
-/// Validate a username: 1..=[`MAX_USERNAME_LEN`] bytes, first byte
-/// `[a-z_]`, the rest `[a-z0-9_-]`. The charset keeps a username unambiguous
-/// in paths, logs, and this colon-separated format.
-fn check_username(name: &str) -> Result<(), ParseError> {
+/// Whether `name` is a well-formed account/group identifier:
+/// 1..=`max_len` bytes, first byte `[a-z_]`, the rest `[a-z0-9_-]`.
+///
+/// The single charset definition shared by the username check below and
+/// the group-name check in `groups.rs`, so a user and a group obey the
+/// one identifier grammar rather than two copies drifting apart. The
+/// charset keeps an identifier unambiguous in paths, logs, and the
+/// colon-separated database formats.
+pub(crate) fn name_charset_ok(name: &str, max_len: usize) -> bool {
     let bytes = name.as_bytes();
-    if bytes.is_empty() || bytes.len() > MAX_USERNAME_LEN {
-        return Err(ParseError::Username);
+    if bytes.is_empty() || bytes.len() > max_len {
+        return false;
     }
     if !(bytes[0].is_ascii_lowercase() || bytes[0] == b'_') {
-        return Err(ParseError::Username);
+        return false;
     }
-    if bytes[1..]
+    bytes[1..]
         .iter()
         .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'-'))
-    {
+}
+
+/// Validate a username against the shared identifier grammar
+/// ([`name_charset_ok`]) within [`MAX_USERNAME_LEN`].
+fn check_username(name: &str) -> Result<(), ParseError> {
+    if name_charset_ok(name, MAX_USERNAME_LEN) {
         Ok(())
     } else {
         Err(ParseError::Username)
     }
+}
+
+/// Parse a canonically spelled `u32` group/user id: no sign, no leading
+/// `+`, and no leading zeros (other than `"0"`), so each value has exactly
+/// one accepted spelling. Shared with `groups.rs`.
+pub(crate) fn parse_canonical_u32(text: &str) -> Option<u32> {
+    parse_u32(text)
 }
 
 /// Validate a display name: at most [`MAX_DISPLAY_NAME_LEN`] bytes of

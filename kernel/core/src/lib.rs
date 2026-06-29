@@ -78,6 +78,7 @@ pub mod devres;
 pub mod dispatch_slot;
 pub mod driver_store;
 pub mod fs;
+pub mod groups;
 pub mod hwtree;
 pub mod init;
 pub mod input_focus;
@@ -132,6 +133,7 @@ pub use fs::{
     IdentityAlreadyInstalled, LateFilesystem, LateIdentity, Metadata, Mode, MountPoint, MountTable,
     MountedFilesystemService, NullFilesystemService, Path, Vfs, VfsError, NULL_FILESYSTEM,
 };
+pub use groups::{build_identity_table, load_groups_db, GroupsLoadError, GROUPS_DB_PATH};
 pub use hwtree::{HwTreeSource, NullHwTreeSource, NULL_HW_TREE};
 pub use init::{kernel_main, InitError, KernelInitSpawner, Phase};
 pub use input_focus::{InputFocus, KEYBOARD_CHANNEL_CAPACITY, NULL_INPUT_FOCUS};
