@@ -811,6 +811,117 @@ impl SyscallNumber {
     /// wait-set, or a faulting `token_out`, fails closed.
     pub const WAITSET_WAIT: Self = Self(45);
 
+    /// Open a file or directory by absolute path, returning a per-process
+    /// file descriptor (`PREREQUISITES.md` P-A).
+    ///
+    /// Arguments: `path: *const u8` (user pointer to the absolute path),
+    /// `path_len: usize` (its length, at most [`crate::FS_PATH_MAX`]), and
+    /// `flags: u32` ([`crate::OpenFlags`]). Returns a new file descriptor
+    /// at or above [`crate::STD_STREAM_COUNT`] (the standard descriptors fd
+    /// 0/1/2/3 are never reused), bound to the caller's per-process
+    /// descriptor table, or `-errno`.
+    ///
+    /// The kernel copies the path in through the validated `copy_from_user`
+    /// boundary, parses it with the shared VFS path parser, and resolves it
+    /// against the mounted secured VFS under the **caller's real
+    /// `Credentials`** (the kernel supplies identity, never the caller), so
+    /// every per-inode owner/mode/ACL/`required_cap` check and mount-flag
+    /// (`ro`/`nosuid`/`nodev`/`noexec`) decision stays kernel-side. Gated by
+    /// [`crate::CapabilityId::FS_ACCESS`]; the per-path authority remains the
+    /// inode model. With [`crate::OpenFlags::CREATE`] a missing regular file
+    /// is created; [`crate::OpenFlags::EXCLUSIVE`] refuses an existing one;
+    /// [`crate::OpenFlags::TRUNCATE`] empties it. An open of neither `READ`
+    /// nor `WRITE` is a resolve-only handle for `fs_stat`/`fs_readdir`. A
+    /// build with no filesystem service wired fails closed with
+    /// [`Errno::NotImplemented`]; any resolution or permission failure fails
+    /// closed.
+    pub const FS_OPEN: Self = Self(46);
+    /// Release a file descriptor returned by [`SyscallNumber::FS_OPEN`]
+    /// (`PREREQUISITES.md` P-A).
+    ///
+    /// Argument: `fd: u32`. Returns `0`, or `-errno`. The kernel drops the
+    /// open-handle entry from the caller's per-process descriptor table; a
+    /// standard descriptor (fd 0/1/2/3) or an `fd` naming no open handle
+    /// fails closed with [`Errno::NotFound`]. Needs
+    /// [`crate::CapabilityId::FS_ACCESS`].
+    pub const FS_CLOSE: Self = Self(47);
+    /// Read up to `len` bytes from an open file at an explicit offset
+    /// (`PREREQUISITES.md` P-A).
+    ///
+    /// Arguments: `fd: u32` (an open handle with read access), `offset: u64`
+    /// (the byte offset to read from), `buf: *mut u8` (user pointer), and
+    /// `len: usize` (at most [`crate::FS_IO_MAX`]). Returns the number of
+    /// bytes read (`0` at end of file), or `-errno`. The kernel resolves the
+    /// handle against the caller's descriptor table, re-authorises the read
+    /// through the secured VFS, and copies the bytes out through the
+    /// validated `copy_to_user` boundary. A handle without read access, or a
+    /// standard descriptor, fails closed.
+    pub const FS_READ: Self = Self(48);
+    /// Write up to `len` bytes to an open file at an explicit offset
+    /// (`PREREQUISITES.md` P-A).
+    ///
+    /// Arguments: `fd: u32` (an open handle with write access), `offset: u64`
+    /// (ignored when the handle was opened [`crate::OpenFlags::APPEND`], which
+    /// always writes at the current end of file), `buf: *const u8` (user
+    /// pointer), and `len: usize` (at most [`crate::FS_IO_MAX`]). Returns the
+    /// number of bytes written, or `-errno`. The kernel copies the buffer in
+    /// through the validated `copy_from_user` boundary and re-authorises the
+    /// write through the secured VFS; a read-only mount, a handle without
+    /// write access, or a standard descriptor fails closed.
+    pub const FS_WRITE: Self = Self(49);
+    /// List the entries of an open directory into a caller buffer
+    /// (`PREREQUISITES.md` P-A).
+    ///
+    /// Arguments: `fd: u32` (an open directory handle), `buf: *mut u8` (user
+    /// pointer), and `len: usize`. Returns the number of bytes written: a
+    /// packed stream of [`crate::DirEntry`] records. A buffer too small to
+    /// hold the whole listing fails closed with [`Errno::BufferTooSmall`]
+    /// (the listing is never truncated); the caller grows its buffer and
+    /// retries. A handle that does not name a directory fails closed.
+    pub const FS_READDIR: Self = Self(50);
+    /// Report the structural metadata of an open file or directory
+    /// (`PREREQUISITES.md` P-A).
+    ///
+    /// Arguments: `fd: u32` (any open handle, including a resolve-only one),
+    /// `out: *mut u8` (user pointer), and `out_len: usize`. Returns the
+    /// number of bytes written: one [`crate::FileStat`]
+    /// ([`crate::FileStat::WIRE_LEN`] bytes). A buffer too small fails closed
+    /// with [`Errno::BufferTooSmall`].
+    pub const FS_STAT: Self = Self(51);
+    /// Set the length of an open file (`PREREQUISITES.md` P-A).
+    ///
+    /// Arguments: `fd: u32` (an open handle with write access) and
+    /// `size: u64`. Returns `0`, or `-errno`. The kernel re-authorises the
+    /// operation through the secured VFS; a read-only mount, a directory
+    /// handle, or a handle without write access fails closed.
+    pub const FS_TRUNCATE: Self = Self(52);
+    /// Flush an open handle's filesystem to its backing store
+    /// (`PREREQUISITES.md` P-A).
+    ///
+    /// Argument: `fd: u32` (any open handle). Returns `0`, or `-errno`. The
+    /// kernel flushes the filesystem backing the handle so prior writes are
+    /// durable. A standard descriptor or an `fd` naming no open handle fails
+    /// closed.
+    pub const FS_SYNC: Self = Self(53);
+    /// Create a directory by absolute path (`PREREQUISITES.md` P-A).
+    ///
+    /// Arguments: `path: *const u8` (user pointer), `path_len: usize` (at
+    /// most [`crate::FS_PATH_MAX`]). Returns `0`, or `-errno`. Resolution and
+    /// the permission/mount-flag model match [`SyscallNumber::FS_OPEN`]; a
+    /// reserved legacy top-level name, a read-only mount, an existing target,
+    /// or a denied parent fails closed. Gated by
+    /// [`crate::CapabilityId::FS_ACCESS`].
+    pub const FS_MKDIR: Self = Self(54);
+    /// Remove a file or empty directory by absolute path
+    /// (`PREREQUISITES.md` P-A).
+    ///
+    /// Arguments: `path: *const u8` (user pointer), `path_len: usize` (at
+    /// most [`crate::FS_PATH_MAX`]). Returns `0`, or `-errno`. Resolution and
+    /// the permission/mount-flag model match [`SyscallNumber::FS_OPEN`]; a
+    /// non-empty directory, a read-only mount, a missing target, or a denied
+    /// parent fails closed. Gated by [`crate::CapabilityId::FS_ACCESS`].
+    pub const FS_UNLINK: Self = Self(55);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 
@@ -931,6 +1042,16 @@ mod tests {
         assert_eq!(SyscallNumber::WAITSET_CREATE.as_u16(), 43);
         assert_eq!(SyscallNumber::WAITSET_CTL.as_u16(), 44);
         assert_eq!(SyscallNumber::WAITSET_WAIT.as_u16(), 45);
+        assert_eq!(SyscallNumber::FS_OPEN.as_u16(), 46);
+        assert_eq!(SyscallNumber::FS_CLOSE.as_u16(), 47);
+        assert_eq!(SyscallNumber::FS_READ.as_u16(), 48);
+        assert_eq!(SyscallNumber::FS_WRITE.as_u16(), 49);
+        assert_eq!(SyscallNumber::FS_READDIR.as_u16(), 50);
+        assert_eq!(SyscallNumber::FS_STAT.as_u16(), 51);
+        assert_eq!(SyscallNumber::FS_TRUNCATE.as_u16(), 52);
+        assert_eq!(SyscallNumber::FS_SYNC.as_u16(), 53);
+        assert_eq!(SyscallNumber::FS_MKDIR.as_u16(), 54);
+        assert_eq!(SyscallNumber::FS_UNLINK.as_u16(), 55);
     }
 
     #[test]

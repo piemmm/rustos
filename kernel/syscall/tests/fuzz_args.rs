@@ -27,8 +27,8 @@
 
 use core::cell::RefCell;
 use rustos_abi::{
-    spec_for, AbiType, CapabilityId, Errno, IrqHandle, MapFlags, RandomFlags, SyscallNumber,
-    ENCODED_TABLE_LEN, SYSCALLS, SYSCALL_MAX_ARGS,
+    spec_for, AbiType, CapabilityId, Errno, IrqHandle, MapFlags, OpenFlags, RandomFlags,
+    SyscallNumber, ENCODED_TABLE_LEN, SYSCALLS, SYSCALL_MAX_ARGS,
 };
 use rustos_caps::CapabilitySet;
 use rustos_kernel_sec::{TaskCapabilities, TaskId, UserId};
@@ -341,6 +341,78 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn fs_open(
+        &self,
+        _c: &CallerContext<'_>,
+        _path: u64,
+        _path_len: usize,
+        _flags: OpenFlags,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn fs_close(&self, _c: &CallerContext<'_>, _fd: u32) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn fs_read(
+        &self,
+        _c: &CallerContext<'_>,
+        _fd: u32,
+        _offset: u64,
+        _buf: u64,
+        _len: usize,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn fs_write(
+        &self,
+        _c: &CallerContext<'_>,
+        _fd: u32,
+        _offset: u64,
+        _buf: u64,
+        _len: usize,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn fs_readdir(
+        &self,
+        _c: &CallerContext<'_>,
+        _fd: u32,
+        _buf: u64,
+        _len: usize,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn fs_stat(
+        &self,
+        _c: &CallerContext<'_>,
+        _fd: u32,
+        _out: u64,
+        _out_len: usize,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn fs_truncate(&self, _c: &CallerContext<'_>, _fd: u32, _size: u64) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn fs_sync(&self, _c: &CallerContext<'_>, _fd: u32) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn fs_mkdir(&self, _c: &CallerContext<'_>, _path: u64, _path_len: usize) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn fs_unlink(&self, _c: &CallerContext<'_>, _path: u64, _path_len: usize) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
 }
 
 /// Silent sink — fuzz output must not pollute test stdout. Capacity
@@ -388,6 +460,17 @@ fn would_accept(spec_idx: usize, raw_number: u16, args: &[u64; SYSCALL_MAX_ARGS]
     if spec.number == SyscallNumber::MEM_MAP {
         let allowed = u64::from(MapFlags::FIXED.bits());
         if args[1] & !allowed != 0 {
+            return false;
+        }
+    }
+    // `fs_open`'s flags argument (arg 2) runs through `OpenFlags::from_bits`,
+    // which rejects both a reserved bit and an illegal dependent combination
+    // (TRUNCATE/APPEND without WRITE, EXCLUSIVE without CREATE, DIRECTORY with
+    // WRITE). That decode is canonical ABI logic, so mirror it through the same
+    // predicate the dispatcher uses rather than re-deriving the rule set.
+    if spec.number == SyscallNumber::FS_OPEN {
+        let raw = u32::try_from(args[2] & 0xFFFF_FFFF).unwrap_or(u32::MAX);
+        if OpenFlags::from_bits(raw).is_err() {
             return false;
         }
     }

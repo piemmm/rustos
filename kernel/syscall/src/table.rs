@@ -9,8 +9,8 @@
 //! (no bloat).
 
 use rustos_abi::{
-    spec_for, AbiType, CapabilityId, Errno, IrqHandle, MapFlags, RandomFlags, SyscallNumber,
-    SyscallSpec, ENCODED_TABLE, SYSCALL_MAX_ARGS,
+    spec_for, AbiType, CapabilityId, Errno, IrqHandle, MapFlags, OpenFlags, RandomFlags,
+    SyscallNumber, SyscallSpec, ENCODED_TABLE, SYSCALL_MAX_ARGS,
 };
 use rustos_crypto::{sha256, Sha256Digest};
 use rustos_kernel_sec::{TaskCapabilities, TaskId};
@@ -982,6 +982,146 @@ pub trait SyscallHandlers {
     ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
+
+    /// Open the file or directory at the absolute path `path` (`path_len`
+    /// bytes) with `flags`, returning a new per-process file descriptor
+    /// (`PREREQUISITES.md` P-A).
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::FS_ACCESS`] and that `path` is a non-null `UserPtr`.
+    /// The implementation copies the path in through the validated
+    /// `copy_from_user` boundary, resolves it against the mounted secured
+    /// VFS under the caller's kernel-attested `Credentials`, allocates a
+    /// descriptor in the caller's per-process table, and returns it. Every
+    /// per-inode and mount-flag check stays kernel-side; any failure fails
+    /// closed.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]: a kernel build with no filesystem service
+    /// wired never fabricates a handle. The real handler is installed in
+    /// `kernel/core`.
+    fn fs_open(
+        &self,
+        _caller: &CallerContext<'_>,
+        _path: u64,
+        _path_len: usize,
+        _flags: OpenFlags,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Release the open file descriptor `fd` from the caller's per-process
+    /// table (`PREREQUISITES.md` P-A).
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn fs_close(&self, _caller: &CallerContext<'_>, _fd: u32) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Read up to `len` bytes from open file `fd` at `offset` into the user
+    /// buffer `buf`, returning the number read (`PREREQUISITES.md` P-A).
+    ///
+    /// The dispatcher has already validated `buf` is a non-null `UserPtr`.
+    /// The implementation resolves `fd` against the caller's table,
+    /// re-authorises the read through the secured VFS, and copies the bytes
+    /// out through the validated `copy_to_user` boundary.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn fs_read(
+        &self,
+        _caller: &CallerContext<'_>,
+        _fd: u32,
+        _offset: u64,
+        _buf: u64,
+        _len: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Write up to `len` bytes from the user buffer `buf` to open file `fd`
+    /// at `offset` (ignored for an append handle), returning the number
+    /// written (`PREREQUISITES.md` P-A).
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn fs_write(
+        &self,
+        _caller: &CallerContext<'_>,
+        _fd: u32,
+        _offset: u64,
+        _buf: u64,
+        _len: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// List open directory `fd` into the user buffer `buf`, returning the
+    /// number of bytes written as a packed [`rustos_abi::DirEntry`] stream
+    /// (`PREREQUISITES.md` P-A).
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn fs_readdir(
+        &self,
+        _caller: &CallerContext<'_>,
+        _fd: u32,
+        _buf: u64,
+        _len: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Write the [`rustos_abi::FileStat`] of open handle `fd` to the user
+    /// buffer `out`, returning the number of bytes written
+    /// (`PREREQUISITES.md` P-A).
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn fs_stat(
+        &self,
+        _caller: &CallerContext<'_>,
+        _fd: u32,
+        _out: u64,
+        _out_len: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Set the length of open file `fd` to `size` (`PREREQUISITES.md` P-A).
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn fs_truncate(&self, _caller: &CallerContext<'_>, _fd: u32, _size: u64) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Flush the filesystem backing open handle `fd` to its store
+    /// (`PREREQUISITES.md` P-A).
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn fs_sync(&self, _caller: &CallerContext<'_>, _fd: u32) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Create the directory at the absolute path `path` (`path_len` bytes)
+    /// (`PREREQUISITES.md` P-A).
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::FS_ACCESS`] and that `path` is a non-null `UserPtr`.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn fs_mkdir(&self, _caller: &CallerContext<'_>, _path: u64, _path_len: usize) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Remove the file or empty directory at the absolute path `path`
+    /// (`path_len` bytes) (`PREREQUISITES.md` P-A).
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn fs_unlink(
+        &self,
+        _caller: &CallerContext<'_>,
+        _path: u64,
+        _path_len: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
 }
 
 /// Architecture-neutral syscall dispatcher.
@@ -1352,6 +1492,50 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 // `token_out` `UserPtr` (dispatcher-checked).
                 self.handlers
                     .waitset_wait(caller, args.0[0], args.0[1], args.0[2])
+            }
+            SyscallNumber::FS_OPEN => {
+                // args[0] is the non-null path `UserPtr` (dispatcher-checked);
+                // args[1] is the path length; args[2] is the `OpenFlags`
+                // bits, rejected for any reserved/illegal combination here.
+                let path_len = decode_len(args.0[1])?;
+                let flags = OpenFlags::from_bits(decode_u32(args.0[2]))?;
+                self.handlers.fs_open(caller, args.0[0], path_len, flags)
+            }
+            SyscallNumber::FS_CLOSE => self.handlers.fs_close(caller, decode_u32(args.0[0])),
+            SyscallNumber::FS_READ => {
+                // args[0] fd; args[1] offset; args[2] non-null destination
+                // `UserPtr` (dispatcher-checked); args[3] length.
+                let len = decode_len(args.0[3])?;
+                self.handlers
+                    .fs_read(caller, decode_u32(args.0[0]), args.0[1], args.0[2], len)
+            }
+            SyscallNumber::FS_WRITE => {
+                let len = decode_len(args.0[3])?;
+                self.handlers
+                    .fs_write(caller, decode_u32(args.0[0]), args.0[1], args.0[2], len)
+            }
+            SyscallNumber::FS_READDIR => {
+                let len = decode_len(args.0[2])?;
+                self.handlers
+                    .fs_readdir(caller, decode_u32(args.0[0]), args.0[1], len)
+            }
+            SyscallNumber::FS_STAT => {
+                let out_len = decode_len(args.0[2])?;
+                self.handlers
+                    .fs_stat(caller, decode_u32(args.0[0]), args.0[1], out_len)
+            }
+            SyscallNumber::FS_TRUNCATE => {
+                self.handlers
+                    .fs_truncate(caller, decode_u32(args.0[0]), args.0[1])
+            }
+            SyscallNumber::FS_SYNC => self.handlers.fs_sync(caller, decode_u32(args.0[0])),
+            SyscallNumber::FS_MKDIR => {
+                let path_len = decode_len(args.0[1])?;
+                self.handlers.fs_mkdir(caller, args.0[0], path_len)
+            }
+            SyscallNumber::FS_UNLINK => {
+                let path_len = decode_len(args.0[1])?;
+                self.handlers.fs_unlink(caller, args.0[0], path_len)
             }
             _ => Err(Errno::NotFound),
         }
@@ -2002,6 +2186,88 @@ mod tests {
             self.record("waitset_wait");
             Ok(0)
         }
+
+        fn fs_open(
+            &self,
+            _c: &CallerContext<'_>,
+            _path: u64,
+            _path_len: usize,
+            _flags: OpenFlags,
+        ) -> SyscallResult {
+            self.record("fs_open");
+            Ok(4)
+        }
+
+        fn fs_close(&self, _c: &CallerContext<'_>, _fd: u32) -> SyscallResult {
+            self.record("fs_close");
+            Ok(0)
+        }
+
+        fn fs_read(
+            &self,
+            _c: &CallerContext<'_>,
+            _fd: u32,
+            _offset: u64,
+            _buf: u64,
+            _len: usize,
+        ) -> SyscallResult {
+            self.record("fs_read");
+            Ok(0)
+        }
+
+        fn fs_write(
+            &self,
+            _c: &CallerContext<'_>,
+            _fd: u32,
+            _offset: u64,
+            _buf: u64,
+            _len: usize,
+        ) -> SyscallResult {
+            self.record("fs_write");
+            Ok(0)
+        }
+
+        fn fs_readdir(
+            &self,
+            _c: &CallerContext<'_>,
+            _fd: u32,
+            _buf: u64,
+            _len: usize,
+        ) -> SyscallResult {
+            self.record("fs_readdir");
+            Ok(0)
+        }
+
+        fn fs_stat(
+            &self,
+            _c: &CallerContext<'_>,
+            _fd: u32,
+            _out: u64,
+            _out_len: usize,
+        ) -> SyscallResult {
+            self.record("fs_stat");
+            Ok(0)
+        }
+
+        fn fs_truncate(&self, _c: &CallerContext<'_>, _fd: u32, _size: u64) -> SyscallResult {
+            self.record("fs_truncate");
+            Ok(0)
+        }
+
+        fn fs_sync(&self, _c: &CallerContext<'_>, _fd: u32) -> SyscallResult {
+            self.record("fs_sync");
+            Ok(0)
+        }
+
+        fn fs_mkdir(&self, _c: &CallerContext<'_>, _path: u64, _path_len: usize) -> SyscallResult {
+            self.record("fs_mkdir");
+            Ok(0)
+        }
+
+        fn fs_unlink(&self, _c: &CallerContext<'_>, _path: u64, _path_len: usize) -> SyscallResult {
+            self.record("fs_unlink");
+            Ok(0)
+        }
     }
 
     #[test]
@@ -2031,6 +2297,7 @@ mod tests {
                 CapabilityId::LOG_EMIT,
                 CapabilityId::HW_EMIT,
                 CapabilityId::SHM,
+                CapabilityId::FS_ACCESS,
             ],
             &sink,
         );

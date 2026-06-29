@@ -21,6 +21,7 @@ pub mod capability;
 pub mod driver;
 pub mod driver_store;
 pub mod error;
+pub mod fs;
 pub mod hwtree;
 pub mod input;
 pub mod ipc;
@@ -58,6 +59,7 @@ pub use driver::{
     VIRTIO_PCI_CFG_NOTIFY, VIRTIO_PCI_CFG_PCI, VIRTIO_PCI_VENDOR_ID,
 };
 pub use error::Errno;
+pub use fs::{DirEntry, FileKind, FileStat, OpenFlags, FS_IO_MAX, FS_NAME_MAX, FS_PATH_MAX};
 pub use hwtree::{
     HwDeviceClass, HwMatchKey, HwMatchKind, HwNode, HwResource, HwResourceKind, HwTreeHeader,
     MsiAllocation, HWTREE_VERSION_V1, HW_COMPATIBLE_MAX, HW_NODE_MAX_MATCH_KEYS,

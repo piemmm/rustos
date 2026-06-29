@@ -1135,6 +1135,181 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: None,
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::FS_OPEN,
+        name: "fs_open",
+        arg_count: 3,
+        args: [
+            // Non-null `UserPtr` to the absolute path, its length, then the
+            // `OpenFlags` bits.
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::U32,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // Returns the new file descriptor; a `Handle` minted against the
+        // caller's per-process descriptor table.
+        ret: AbiType::Handle,
+        // The coarse filesystem-access gate; the per-path authority is the
+        // VFS inode model under the caller's real credentials. Opening a
+        // path (which may create) is security-relevant and audited.
+        required_capability: Some(CapabilityId::FS_ACCESS),
+        audit: true,
+    },
+    SyscallSpec {
+        number: SyscallNumber::FS_CLOSE,
+        name: "fs_close",
+        arg_count: 1,
+        args: [
+            AbiType::U32,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        required_capability: Some(CapabilityId::FS_ACCESS),
+        // Releasing one's own descriptor is high-volume and not audited.
+        audit: false,
+    },
+    SyscallSpec {
+        number: SyscallNumber::FS_READ,
+        name: "fs_read",
+        arg_count: 4,
+        args: [
+            // fd, byte offset, non-null `UserPtr` destination, length.
+            AbiType::U32,
+            AbiType::U64,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::U64,
+        required_capability: Some(CapabilityId::FS_ACCESS),
+        // Reads are high-volume; not audited per call.
+        audit: false,
+    },
+    SyscallSpec {
+        number: SyscallNumber::FS_WRITE,
+        name: "fs_write",
+        arg_count: 4,
+        args: [
+            // fd, byte offset, non-null `UserPtr` source, length.
+            AbiType::U32,
+            AbiType::U64,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::U64,
+        required_capability: Some(CapabilityId::FS_ACCESS),
+        // A write mutates persistent state; audited.
+        audit: true,
+    },
+    SyscallSpec {
+        number: SyscallNumber::FS_READDIR,
+        name: "fs_readdir",
+        arg_count: 3,
+        args: [
+            AbiType::U32,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::U64,
+        required_capability: Some(CapabilityId::FS_ACCESS),
+        audit: false,
+    },
+    SyscallSpec {
+        number: SyscallNumber::FS_STAT,
+        name: "fs_stat",
+        arg_count: 3,
+        args: [
+            AbiType::U32,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::U64,
+        required_capability: Some(CapabilityId::FS_ACCESS),
+        audit: false,
+    },
+    SyscallSpec {
+        number: SyscallNumber::FS_TRUNCATE,
+        name: "fs_truncate",
+        arg_count: 2,
+        args: [
+            AbiType::U32,
+            AbiType::U64,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        required_capability: Some(CapabilityId::FS_ACCESS),
+        // Mutates persistent state; audited.
+        audit: true,
+    },
+    SyscallSpec {
+        number: SyscallNumber::FS_SYNC,
+        name: "fs_sync",
+        arg_count: 1,
+        args: [
+            AbiType::U32,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        required_capability: Some(CapabilityId::FS_ACCESS),
+        audit: false,
+    },
+    SyscallSpec {
+        number: SyscallNumber::FS_MKDIR,
+        name: "fs_mkdir",
+        arg_count: 2,
+        args: [
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        required_capability: Some(CapabilityId::FS_ACCESS),
+        // Creates a directory; audited.
+        audit: true,
+    },
+    SyscallSpec {
+        number: SyscallNumber::FS_UNLINK,
+        name: "fs_unlink",
+        arg_count: 2,
+        args: [
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        required_capability: Some(CapabilityId::FS_ACCESS),
+        // Removes a name; audited.
+        audit: true,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in
@@ -1444,6 +1619,63 @@ mod tests {
             SyscallNumber::IPC_RECV,
         ] {
             assert!(spec_for(n).unwrap().required_capability.is_none());
+        }
+    }
+
+    #[test]
+    fn fs_capability_requirements_are_frozen() {
+        // The filesystem syscalls share the single coarse CAP_FS_ACCESS
+        // entry gate (the per-path authority is the VFS inode model under
+        // the caller's real credentials, not this capability). State-
+        // mutating calls (open — which may create — write, truncate, mkdir,
+        // unlink) are audited; the pure reads (read, readdir, stat) and the
+        // own-handle lifecycle calls (close, sync) are high-volume and not
+        // audited per call. Lock this down so a refactor cannot loosen the
+        // gate or drop the audit on a mutator.
+        for n in [
+            SyscallNumber::FS_OPEN,
+            SyscallNumber::FS_CLOSE,
+            SyscallNumber::FS_READ,
+            SyscallNumber::FS_WRITE,
+            SyscallNumber::FS_READDIR,
+            SyscallNumber::FS_STAT,
+            SyscallNumber::FS_TRUNCATE,
+            SyscallNumber::FS_SYNC,
+            SyscallNumber::FS_MKDIR,
+            SyscallNumber::FS_UNLINK,
+        ] {
+            assert_eq!(
+                spec_for(n).unwrap().required_capability,
+                Some(CapabilityId::FS_ACCESS),
+                "{} must be gated on CAP_FS_ACCESS",
+                spec_for(n).unwrap().name
+            );
+        }
+        for n in [
+            SyscallNumber::FS_OPEN,
+            SyscallNumber::FS_WRITE,
+            SyscallNumber::FS_TRUNCATE,
+            SyscallNumber::FS_MKDIR,
+            SyscallNumber::FS_UNLINK,
+        ] {
+            assert!(
+                spec_for(n).unwrap().audit,
+                "{} must be audited",
+                spec_for(n).unwrap().name
+            );
+        }
+        for n in [
+            SyscallNumber::FS_CLOSE,
+            SyscallNumber::FS_READ,
+            SyscallNumber::FS_READDIR,
+            SyscallNumber::FS_STAT,
+            SyscallNumber::FS_SYNC,
+        ] {
+            assert!(
+                !spec_for(n).unwrap().audit,
+                "{} must not audit per call",
+                spec_for(n).unwrap().name
+            );
         }
     }
 

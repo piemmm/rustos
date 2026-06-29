@@ -329,6 +329,23 @@ impl CapabilityId {
     /// Creating a region is gated by this capability so a region is never
     /// minted ambiently.
     pub const SHM: Self = Self(29);
+    /// Open, read, write, create, and remove files and directories by path
+    /// through the filesystem syscalls (`fs_open` and friends, `abi-v1`
+    /// numbers 46..=56).
+    ///
+    /// The coarse entry gate on the userland filesystem surface: a holder
+    /// may *attempt* a path operation, but the authority over any one path
+    /// remains the per-inode owner/mode/ACL/`required_cap` check the VFS
+    /// applies under the caller's real `Credentials` (the kernel supplies
+    /// identity, never the caller). Holding it confers no blanket reach —
+    /// a file the inode model denies is still refused — so it is the
+    /// "may use the filesystem at all" gate, not ambient authority
+    /// (no ambient authority; capability checks before state touches).
+    /// Mount flags (`ro`/`nosuid`/`nodev`/`noexec`) are honoured
+    /// independently. The early bring-up and ordinary file-using
+    /// principals (login, the shell, services, apps) hold it; a sandboxed
+    /// parser that should reach no filesystem does not.
+    pub const FS_ACCESS: Self = Self(30);
 
     /// Every capability assigned a canonical name in `abi-v1`, paired with
     /// that name.
@@ -369,6 +386,7 @@ impl CapabilityId {
         (Self::HW_EMIT, "CAP_HW_EMIT"),
         (Self::IPC_ENDPOINT, "CAP_IPC_ENDPOINT"),
         (Self::SHM, "CAP_SHM"),
+        (Self::FS_ACCESS, "CAP_FS_ACCESS"),
     ];
 
     /// The canonical `CAP_*` name of this capability, or [`None`] for an
@@ -492,6 +510,7 @@ mod tests {
         assert_eq!(CapabilityId::HW_EMIT.as_u16(), 27);
         assert_eq!(CapabilityId::IPC_ENDPOINT.as_u16(), 28);
         assert_eq!(CapabilityId::SHM.as_u16(), 29);
+        assert_eq!(CapabilityId::FS_ACCESS.as_u16(), 30);
     }
 
     #[test]
@@ -523,9 +542,9 @@ mod tests {
 
     #[test]
     fn every_assigned_id_has_a_name() {
-        // Capabilities 1..=29 are assigned in abi-v1; each must carry a
+        // Capabilities 1..=30 are assigned in abi-v1; each must carry a
         // canonical name so `getcap`/`setcap` can render and accept it.
-        for raw in 1..=29 {
+        for raw in 1..=30 {
             let cap = CapabilityId::from_raw(raw).expect("in range");
             assert!(cap.name().is_some(), "capability {raw} has no name");
         }

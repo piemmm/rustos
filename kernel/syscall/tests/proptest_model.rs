@@ -32,8 +32,8 @@ use core::cell::RefCell;
 
 use proptest::prelude::*;
 use rustos_abi::{
-    AbiType, CapabilityId, Errno, IrqHandle, RandomFlags, SyscallNumber, SyscallSpec, SYSCALLS,
-    SYSCALL_MAX_ARGS,
+    AbiType, CapabilityId, Errno, IrqHandle, OpenFlags, RandomFlags, SyscallNumber, SyscallSpec,
+    SYSCALLS, SYSCALL_MAX_ARGS,
 };
 use rustos_caps::CapabilitySet;
 use rustos_kernel_sec::{TaskCapabilities, TaskId, UserId};
@@ -340,6 +340,78 @@ impl SyscallHandlers for CountingHandlers {
         _timeout_ns: u64,
         _token_out: u64,
     ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn fs_open(
+        &self,
+        _c: &CallerContext<'_>,
+        _path: u64,
+        _path_len: usize,
+        _flags: OpenFlags,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn fs_close(&self, _c: &CallerContext<'_>, _fd: u32) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn fs_read(
+        &self,
+        _c: &CallerContext<'_>,
+        _fd: u32,
+        _offset: u64,
+        _buf: u64,
+        _len: usize,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn fs_write(
+        &self,
+        _c: &CallerContext<'_>,
+        _fd: u32,
+        _offset: u64,
+        _buf: u64,
+        _len: usize,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn fs_readdir(
+        &self,
+        _c: &CallerContext<'_>,
+        _fd: u32,
+        _buf: u64,
+        _len: usize,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn fs_stat(
+        &self,
+        _c: &CallerContext<'_>,
+        _fd: u32,
+        _out: u64,
+        _out_len: usize,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn fs_truncate(&self, _c: &CallerContext<'_>, _fd: u32, _size: u64) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn fs_sync(&self, _c: &CallerContext<'_>, _fd: u32) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn fs_mkdir(&self, _c: &CallerContext<'_>, _path: u64, _path_len: usize) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn fs_unlink(&self, _c: &CallerContext<'_>, _path: u64, _path_len: usize) -> SyscallResult {
         self.bump();
         Ok(0)
     }

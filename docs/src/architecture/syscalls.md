@@ -92,6 +92,20 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  36 | `log_emit`     | `user_ptr` (record), `len`              | `errno` | `CAP_LOG_EMIT`    | no      |
 |  37 | `hw_emit_node` | `user_ptr` (node), `len`                | `errno` | `CAP_HW_EMIT`     | yes     |
 |  38 | `hw_remove_node` | `u64 node_id`                         | `errno` | `CAP_HW_EMIT`     | yes     |
+|  46 | `fs_open`      | `user_ptr` (path), `len`, `u32 flags`   | `u64` (fd)    | `CAP_FS_ACCESS` | yes   |
+|  47 | `fs_close`     | `u32 fd`                                | `errno`       | `CAP_FS_ACCESS` | no    |
+|  48 | `fs_read`      | `u32 fd`, `u64 offset`, `user_ptr`, `len` | `u64` (bytes) | `CAP_FS_ACCESS` | no  |
+|  49 | `fs_write`     | `u32 fd`, `u64 offset`, `user_ptr`, `len` | `u64` (bytes) | `CAP_FS_ACCESS` | yes |
+|  50 | `fs_readdir`   | `u32 fd`, `user_ptr` (buf), `len`       | `u64` (bytes) | `CAP_FS_ACCESS` | no    |
+|  51 | `fs_stat`      | `u32 fd`, `user_ptr` (out), `len`       | `u64` (bytes) | `CAP_FS_ACCESS` | no    |
+|  52 | `fs_truncate`  | `u32 fd`, `u64 size`                    | `errno`       | `CAP_FS_ACCESS` | yes   |
+|  53 | `fs_sync`      | `u32 fd`                                | `errno`       | `CAP_FS_ACCESS` | no    |
+|  54 | `fs_mkdir`     | `user_ptr` (path), `len`                | `errno`       | `CAP_FS_ACCESS` | yes   |
+|  55 | `fs_unlink`    | `user_ptr` (path), `len`                | `errno`       | `CAP_FS_ACCESS` | yes   |
+
+(Syscall numbers 39–45 — `msi_alloc`, `shm_create`/`shm_map`/`shm_unmap`,
+`waitset_create`/`waitset_ctl`/`waitset_wait` — are defined in
+`lib/abi/src/syscall.rs`; their rows are not yet transcribed into this table.)
 
 ### Capability matrix
 
@@ -115,6 +129,7 @@ is exhaustive — anything not listed below is ungated:
 | `CAP_SYSINFO_HW`   | `hw_tree_read`, `hw_tree_wait` |
 | `CAP_LOG_EMIT`     | `log_emit`                 |
 | `CAP_HW_EMIT`      | `hw_emit_node`, `hw_remove_node` |
+| `CAP_FS_ACCESS`    | `fs_open`, `fs_close`, `fs_read`, `fs_write`, `fs_readdir`, `fs_stat`, `fs_truncate`, `fs_sync`, `fs_mkdir`, `fs_unlink` |
 
 The `CAP_IRQ_BIND` rationale, the wake-up contract, and the failure
 modes are documented in

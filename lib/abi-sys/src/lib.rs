@@ -106,6 +106,16 @@ const NUM_SHM_UNMAP: u64 = SyscallNumber::SHM_UNMAP.as_u16() as u64;
 const NUM_WAITSET_CREATE: u64 = SyscallNumber::WAITSET_CREATE.as_u16() as u64;
 const NUM_WAITSET_CTL: u64 = SyscallNumber::WAITSET_CTL.as_u16() as u64;
 const NUM_WAITSET_WAIT: u64 = SyscallNumber::WAITSET_WAIT.as_u16() as u64;
+const NUM_FS_OPEN: u64 = SyscallNumber::FS_OPEN.as_u16() as u64;
+const NUM_FS_CLOSE: u64 = SyscallNumber::FS_CLOSE.as_u16() as u64;
+const NUM_FS_READ: u64 = SyscallNumber::FS_READ.as_u16() as u64;
+const NUM_FS_WRITE: u64 = SyscallNumber::FS_WRITE.as_u16() as u64;
+const NUM_FS_READDIR: u64 = SyscallNumber::FS_READDIR.as_u16() as u64;
+const NUM_FS_STAT: u64 = SyscallNumber::FS_STAT.as_u16() as u64;
+const NUM_FS_TRUNCATE: u64 = SyscallNumber::FS_TRUNCATE.as_u16() as u64;
+const NUM_FS_SYNC: u64 = SyscallNumber::FS_SYNC.as_u16() as u64;
+const NUM_FS_MKDIR: u64 = SyscallNumber::FS_MKDIR.as_u16() as u64;
+const NUM_FS_UNLINK: u64 = SyscallNumber::FS_UNLINK.as_u16() as u64;
 
 /// Empty argument vector for the no-argument syscalls.
 const NO_ARGS: [u64; SYSCALL_MAX_ARGS] = [0; SYSCALL_MAX_ARGS];
@@ -1018,6 +1028,179 @@ pub extern "C" fn sys_waitset_wait(set: u64, timeout_ns: u64, token_out: *mut c_
     }
 }
 
+/// `fs_open`: open the file or directory at the absolute path
+/// `(path, path_len)` (`SyscallNumber::FS_OPEN`). Returns a new per-process
+/// file descriptor (at or above `ROS_STD_STREAM_COUNT`), or a `ROS_E_*` code
+/// reinterpreted into the result.
+///
+/// `flags` is the `ROS_OPEN_*` bit set ([`rustos_abi::OpenFlags`]). Requires
+/// `ROS_CAP_FS_ACCESS`; the kernel validates the capability and the
+/// `(path, path_len)` pair against the caller's address space, then resolves
+/// the path under the caller's real credentials so every per-inode and
+/// mount-flag check stays kernel-side.
+#[must_use]
+#[export_name = "ros_sys_fs_open"]
+pub extern "C" fn sys_fs_open(path: *mut c_void, path_len: usize, flags: u32) -> u64 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates `(path, path_len)`.
+    unsafe {
+        raw_syscall(
+            NUM_FS_OPEN,
+            [ptr_arg(path), path_len as u64, u64::from(flags), 0, 0, 0],
+        )
+    }
+}
+
+/// `fs_close`: release the open descriptor `fd` (`SyscallNumber::FS_CLOSE`).
+/// Returns a `ROS_E_*` code.
+#[must_use]
+#[export_name = "ros_sys_fs_close"]
+pub extern "C" fn sys_fs_close(fd: u32) -> i32 {
+    // SAFETY: see `sys_yield`. The kernel resolves `fd` against the caller's
+    // descriptor table.
+    unsafe { ret_i32(raw_syscall(NUM_FS_CLOSE, [u64::from(fd), 0, 0, 0, 0, 0])) }
+}
+
+/// `fs_read`: read up to `len` bytes from open file `fd` at byte `offset`
+/// into `buf` (`SyscallNumber::FS_READ`). Returns the number of bytes read
+/// (`0` at end of file), or a `ROS_E_*` code reinterpreted into the result.
+///
+/// The kernel resolves `fd`, re-authorises the read through the secured VFS,
+/// and validates `(buf, len)` against the caller's address space before
+/// writing it.
+#[must_use]
+#[export_name = "ros_sys_fs_read"]
+pub extern "C" fn sys_fs_read(fd: u32, offset: u64, buf: *mut c_void, len: usize) -> u64 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates `(buf, len)`.
+    unsafe {
+        raw_syscall(
+            NUM_FS_READ,
+            [u64::from(fd), offset, ptr_arg(buf), len as u64, 0, 0],
+        )
+    }
+}
+
+/// `fs_write`: write up to `len` bytes at `buf` to open file `fd` at byte
+/// `offset` (`SyscallNumber::FS_WRITE`). Returns the number of bytes written,
+/// or a `ROS_E_*` code reinterpreted into the result.
+///
+/// When the handle was opened `ROS_OPEN_APPEND` the kernel ignores `offset`
+/// and writes at the current end of file. The kernel validates `(buf, len)`
+/// and re-authorises the write through the secured VFS.
+#[must_use]
+#[export_name = "ros_sys_fs_write"]
+pub extern "C" fn sys_fs_write(fd: u32, offset: u64, buf: *mut c_void, len: usize) -> u64 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates `(buf, len)`.
+    unsafe {
+        raw_syscall(
+            NUM_FS_WRITE,
+            [u64::from(fd), offset, ptr_arg(buf), len as u64, 0, 0],
+        )
+    }
+}
+
+/// `fs_readdir`: list the entries of open directory `fd` into `buf` as a
+/// packed stream of [`rustos_abi::DirEntry`] records
+/// (`SyscallNumber::FS_READDIR`). Returns the number of bytes written, or a
+/// `ROS_E_*` code reinterpreted into the result.
+///
+/// A buffer too small to hold the whole listing fails closed with
+/// `ROS_E_BUFFER_TOO_SMALL` (the listing is never truncated); the caller
+/// grows `buf` and retries.
+#[must_use]
+#[export_name = "ros_sys_fs_readdir"]
+pub extern "C" fn sys_fs_readdir(fd: u32, buf: *mut c_void, len: usize) -> u64 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates `(buf, len)`.
+    unsafe {
+        raw_syscall(
+            NUM_FS_READDIR,
+            [u64::from(fd), ptr_arg(buf), len as u64, 0, 0, 0],
+        )
+    }
+}
+
+/// `fs_stat`: report the structural metadata of open handle `fd` as one
+/// [`rustos_abi::FileStat`] record at `out` (`SyscallNumber::FS_STAT`).
+/// Returns the number of bytes written, or a `ROS_E_*` code reinterpreted
+/// into the result.
+///
+/// A buffer too small fails closed with `ROS_E_BUFFER_TOO_SMALL`.
+#[must_use]
+#[export_name = "ros_sys_fs_stat"]
+pub extern "C" fn sys_fs_stat(fd: u32, out: *mut c_void, out_len: usize) -> u64 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates `(out, out_len)`.
+    unsafe {
+        raw_syscall(
+            NUM_FS_STAT,
+            [u64::from(fd), ptr_arg(out), out_len as u64, 0, 0, 0],
+        )
+    }
+}
+
+/// `fs_truncate`: set the length of open file `fd` to `size` bytes
+/// (`SyscallNumber::FS_TRUNCATE`). Returns a `ROS_E_*` code.
+///
+/// The kernel re-authorises the operation through the secured VFS; a
+/// read-only mount, a directory handle, or a handle without write access
+/// fails closed.
+#[must_use]
+#[export_name = "ros_sys_fs_truncate"]
+pub extern "C" fn sys_fs_truncate(fd: u32, size: u64) -> i32 {
+    // SAFETY: see `sys_yield`.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_FS_TRUNCATE,
+            [u64::from(fd), size, 0, 0, 0, 0],
+        ))
+    }
+}
+
+/// `fs_sync`: flush the filesystem backing open handle `fd` to its backing
+/// store so prior writes are durable (`SyscallNumber::FS_SYNC`). Returns a
+/// `ROS_E_*` code.
+#[must_use]
+#[export_name = "ros_sys_fs_sync"]
+pub extern "C" fn sys_fs_sync(fd: u32) -> i32 {
+    // SAFETY: see `sys_yield`.
+    unsafe { ret_i32(raw_syscall(NUM_FS_SYNC, [u64::from(fd), 0, 0, 0, 0, 0])) }
+}
+
+/// `fs_mkdir`: create a directory at the absolute path `(path, path_len)`
+/// (`SyscallNumber::FS_MKDIR`). Returns a `ROS_E_*` code.
+///
+/// Requires `ROS_CAP_FS_ACCESS`; resolution and the permission/mount-flag
+/// model match `ros_sys_fs_open`. The kernel validates `(path, path_len)`
+/// against the caller's address space before reading it.
+#[must_use]
+#[export_name = "ros_sys_fs_mkdir"]
+pub extern "C" fn sys_fs_mkdir(path: *mut c_void, path_len: usize) -> i32 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates `(path, path_len)`.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_FS_MKDIR,
+            [ptr_arg(path), path_len as u64, 0, 0, 0, 0],
+        ))
+    }
+}
+
+/// `fs_unlink`: remove the file or empty directory at the absolute path
+/// `(path, path_len)` (`SyscallNumber::FS_UNLINK`). Returns a `ROS_E_*` code.
+///
+/// Requires `ROS_CAP_FS_ACCESS`; resolution and the permission/mount-flag
+/// model match `ros_sys_fs_open`. A non-empty directory fails closed. The
+/// kernel validates `(path, path_len)` against the caller's address space
+/// before reading it.
+#[must_use]
+#[export_name = "ros_sys_fs_unlink"]
+pub extern "C" fn sys_fs_unlink(path: *mut c_void, path_len: usize) -> i32 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates `(path, path_len)`.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_FS_UNLINK,
+            [ptr_arg(path), path_len as u64, 0, 0, 0, 0],
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1078,6 +1261,16 @@ mod tests {
         (NUM_WAITSET_CREATE, "waitset_create", 0),
         (NUM_WAITSET_CTL, "waitset_ctl", 5),
         (NUM_WAITSET_WAIT, "waitset_wait", 3),
+        (NUM_FS_OPEN, "fs_open", 3),
+        (NUM_FS_CLOSE, "fs_close", 1),
+        (NUM_FS_READ, "fs_read", 4),
+        (NUM_FS_WRITE, "fs_write", 4),
+        (NUM_FS_READDIR, "fs_readdir", 3),
+        (NUM_FS_STAT, "fs_stat", 3),
+        (NUM_FS_TRUNCATE, "fs_truncate", 2),
+        (NUM_FS_SYNC, "fs_sync", 1),
+        (NUM_FS_MKDIR, "fs_mkdir", 2),
+        (NUM_FS_UNLINK, "fs_unlink", 2),
     ];
 
     #[test]
@@ -1625,5 +1818,134 @@ mod tests {
         assert_eq!(i32_arg(1), 1);
         assert_eq!(i32_arg(-1), u64::MAX);
         assert_eq!(i32_arg(i32::MIN), 0xFFFF_FFFF_8000_0000);
+    }
+
+    #[test]
+    fn fs_open_marshals_path_len_and_flags() {
+        let mut path = *b"/System/Logs";
+        let ptr = path.as_mut_ptr().cast::<c_void>();
+        let (number, args) = capture(0x100, || {
+            assert_eq!(sys_fs_open(ptr, path.len(), 0x3), 0x100);
+        });
+        assert_eq!(number, NUM_FS_OPEN);
+        assert_eq!(args[0], ptr as usize as u64);
+        assert_eq!(args[1], path.len() as u64);
+        assert_eq!(args[2], 0x3);
+        assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn fs_close_marshals_the_descriptor() {
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_fs_close(0x104), 0);
+        });
+        assert_eq!(number, NUM_FS_CLOSE);
+        assert_eq!(args[0], 0x104);
+        assert_eq!(&args[1..], &[0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn fs_read_marshals_fd_offset_pointer_and_len() {
+        let mut buffer = [0u8; 32];
+        let ptr = buffer.as_mut_ptr().cast::<c_void>();
+        let (number, args) = capture(32, || {
+            assert_eq!(sys_fs_read(0x104, 0x1000, ptr, 32), 32);
+        });
+        assert_eq!(number, NUM_FS_READ);
+        assert_eq!(args[0], 0x104);
+        assert_eq!(args[1], 0x1000);
+        assert_eq!(args[2], ptr as usize as u64);
+        assert_eq!(args[3], 32);
+        assert_eq!(&args[4..], &[0, 0]);
+    }
+
+    #[test]
+    fn fs_write_marshals_fd_offset_pointer_and_len() {
+        let mut buffer = [0u8; 16];
+        let ptr = buffer.as_mut_ptr().cast::<c_void>();
+        let (number, args) = capture(16, || {
+            assert_eq!(sys_fs_write(0x104, 0x2000, ptr, 16), 16);
+        });
+        assert_eq!(number, NUM_FS_WRITE);
+        assert_eq!(args[0], 0x104);
+        assert_eq!(args[1], 0x2000);
+        assert_eq!(args[2], ptr as usize as u64);
+        assert_eq!(args[3], 16);
+        assert_eq!(&args[4..], &[0, 0]);
+    }
+
+    #[test]
+    fn fs_readdir_marshals_fd_pointer_and_len() {
+        let mut buffer = [0u8; 64];
+        let ptr = buffer.as_mut_ptr().cast::<c_void>();
+        let (number, args) = capture(48, || {
+            assert_eq!(sys_fs_readdir(0x104, ptr, 64), 48);
+        });
+        assert_eq!(number, NUM_FS_READDIR);
+        assert_eq!(args[0], 0x104);
+        assert_eq!(args[1], ptr as usize as u64);
+        assert_eq!(args[2], 64);
+        assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn fs_stat_marshals_fd_pointer_and_len() {
+        let mut buffer = [0u8; 32];
+        let ptr = buffer.as_mut_ptr().cast::<c_void>();
+        let (number, args) = capture(32, || {
+            assert_eq!(sys_fs_stat(0x104, ptr, 32), 32);
+        });
+        assert_eq!(number, NUM_FS_STAT);
+        assert_eq!(args[0], 0x104);
+        assert_eq!(args[1], ptr as usize as u64);
+        assert_eq!(args[2], 32);
+        assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn fs_truncate_marshals_fd_and_size() {
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_fs_truncate(0x104, 0x4000), 0);
+        });
+        assert_eq!(number, NUM_FS_TRUNCATE);
+        assert_eq!(args[0], 0x104);
+        assert_eq!(args[1], 0x4000);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn fs_sync_marshals_the_descriptor() {
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_fs_sync(0x104), 0);
+        });
+        assert_eq!(number, NUM_FS_SYNC);
+        assert_eq!(args[0], 0x104);
+        assert_eq!(&args[1..], &[0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn fs_mkdir_marshals_path_and_len() {
+        let mut path = *b"/Storage/new";
+        let ptr = path.as_mut_ptr().cast::<c_void>();
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_fs_mkdir(ptr, path.len()), 0);
+        });
+        assert_eq!(number, NUM_FS_MKDIR);
+        assert_eq!(args[0], ptr as usize as u64);
+        assert_eq!(args[1], path.len() as u64);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn fs_unlink_marshals_path_and_len() {
+        let mut path = *b"/Storage/old";
+        let ptr = path.as_mut_ptr().cast::<c_void>();
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_fs_unlink(ptr, path.len()), 0);
+        });
+        assert_eq!(number, NUM_FS_UNLINK);
+        assert_eq!(args[0], ptr as usize as u64);
+        assert_eq!(args[1], path.len() as u64);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
     }
 }
