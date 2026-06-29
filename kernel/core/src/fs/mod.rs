@@ -44,7 +44,10 @@
 //! mode bits, failing closed and never branching on `uid == 0`.
 
 mod delegate;
+#[cfg(test)]
+mod memfs;
 pub mod mount;
+mod mounted;
 pub mod path;
 pub mod perm;
 pub mod service;
@@ -52,6 +55,10 @@ mod vfs;
 
 pub use delegate::{DelegatedFs, DelegatedInfo, MetaPolicy, PerInode, Uniform};
 pub use mount::{MountPoint, MountTable};
+pub use mounted::{
+    FilesystemAlreadyInstalled, IdentityAlreadyInstalled, LateFilesystem, LateIdentity,
+    MountedFilesystemService,
+};
 pub use path::{
     is_reserved_top_level, Path, MAX_COMPONENT_LEN, MAX_PATH_COMPONENTS, RESERVED_TOP_LEVEL,
     ROOT_TEMPLATE,

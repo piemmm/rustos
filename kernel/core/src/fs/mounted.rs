@@ -1,0 +1,473 @@
+//! The production [`FilesystemService`]: the `fs_*` syscalls served against
+//! a mounted volume (`PREREQUISITES.md` P-A).
+//!
+//! The hollow [`NULL_FILESYSTEM`](super::service::NULL_FILESYSTEM) default
+//! fails every `fs_*` syscall closed. This module is the real producer the
+//! boot path installs once the disk is mounted: [`MountedFilesystemService`]
+//! resolves the caller's **kernel-attested** identity into full VFS
+//! [`Credentials`] and authorises every operation through the secured VFS.
+//!
+//! # Concurrent, caller-context, per-mount-serialised
+//!
+//! Each `fs_*` operation runs in the **calling task's own context**, directly
+//! against the resolved mount, so N tasks drive N concurrent operations and a
+//! task waiting on a slow device completion parks on *its own* block-driver
+//! IRQ wait rather than behind a single global server. Operations on
+//! *different* mounts proceed fully in parallel. Within one mount the
+//! filesystem driver needs `&mut self` per operation and may **park** across a
+//! block-device completion IRQ ([`rustos_abi::driver::block::Block::read_blocks`]
+//! parks the caller), so the per-mount lock is a scheduler-blocking
+//! [`SleepLock`] held across that park — never a `lib/sync` spin lock, which a
+//! second contender would busy-spin on while the holder sleeps
+//! (`docs/src/architecture/sync.md`). This is the architecture a future
+//! async/multi-queue `Block` overlaps operations *within* a device on, with no
+//! change above the driver.
+//!
+//! # Identity is kernel-attested, never caller-supplied
+//!
+//! The syscall handler supplies the caller's owning `uid` and effective
+//! capability set, both read from the task's
+//! [`rustos_kernel_sec::TaskCapabilities`] — never anything the caller passed.
+//! This service resolves the caller's primary and supplementary **groups**
+//! from the authoritative [`IdentityTable`] keyed by that uid (a frozen,
+//! credential-free index — it carries no password material), then runs
+//! `Vfs::*_via_secured` so every per-inode owner/mode/ACL/`required_cap` and
+//! mount-flag check stays kernel-side and fails closed. A principal with no
+//! account, or a call made before the identity table or the mount is
+//! installed, is denied rather than served.
+
+use alloc::string::String;
+use alloc::vec::Vec;
+
+use rustos_abi::driver::filesystem::{
+    FilesystemRead, FilesystemSecurity, FilesystemWrite, NodeKind as DriverNodeKind,
+};
+use rustos_abi::{CapabilityQuery, Errno, FileKind, FileStat, OpenFlags};
+use rustos_kernel_sec::{IdentityTable, UserId, UserRecord};
+use rustos_sync::OnceCell;
+
+use crate::sleeplock::SleepLock;
+
+use super::path::Path;
+use super::perm::Credentials;
+use super::service::FilesystemService;
+use super::{Vfs, VfsError};
+
+/// A mounted volume: the root-backed [`Vfs`] policy layer and its filesystem
+/// driver behind the per-mount [`SleepLock`].
+///
+/// The [`Vfs`] is consulted through a shared `&self` reference (its mount
+/// table and resolution structure never mutate after mount), so it sits
+/// outside the lock; only the driver — which needs `&mut self` and may park
+/// across a device completion IRQ — is serialised by the lock.
+struct MountedVolume<F> {
+    /// The policy layer: absolute-path resolution, the mount table, and the
+    /// per-inode permission model, delegating structural I/O below the mount
+    /// point to `fs`.
+    vfs: Vfs,
+    /// The mounted volume's filesystem driver, serialised by a sleeping lock
+    /// because one operation may be held across a block-device completion park.
+    fs: SleepLock<F>,
+}
+
+/// A set-once cell the boot path installs the mounted volume into after the
+/// disk comes online (mirrors [`crate::users::LateUsersDb`]).
+///
+/// The syscall layer is built before the disk is mounted, so the handlers
+/// hold a `&'static LateFilesystem` from boot; until [`install`](Self::install)
+/// publishes the mount, every operation fails closed with
+/// [`Errno::NotImplemented`] — identical to the hollow
+/// [`NULL_FILESYSTEM`](super::service::NULL_FILESYSTEM). After install the
+/// service routes to the published mount for the life of the system.
+///
+/// `Sync` (through [`OnceCell`] and the per-mount [`SleepLock`]) so the single
+/// `&'static` instance is shared by the per-CPU syscall handlers.
+pub struct LateFilesystem<F> {
+    mount: OnceCell<MountedVolume<F>>,
+}
+
+/// A mount install was refused because a volume is already installed.
+///
+/// The cell is immutable after the first successful [`install`](LateFilesystem::install),
+/// so the live mount cannot be replaced by a later code path.
+#[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
+pub struct FilesystemAlreadyInstalled;
+
+impl<F> LateFilesystem<F> {
+    /// Construct an empty cell. `const` so a boot path can place it in a
+    /// `static` and hand `&LATE_FILESYSTEM` to the handler builder.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            mount: OnceCell::new(),
+        }
+    }
+
+    /// Publish the mounted volume exactly once: the root-backed `vfs` policy
+    /// layer and its filesystem driver `fs`.
+    ///
+    /// On success the cell serves operations against `vfs`/`fs` for the rest
+    /// of the kernel's lifetime.
+    ///
+    /// # Errors
+    ///
+    /// [`FilesystemAlreadyInstalled`] if a volume is already installed — the
+    /// cell is immutable after the first successful install.
+    pub fn install(&self, vfs: Vfs, fs: F) -> Result<(), FilesystemAlreadyInstalled> {
+        self.mount
+            .set(MountedVolume {
+                vfs,
+                fs: SleepLock::new(fs),
+            })
+            .map_err(|_| FilesystemAlreadyInstalled)
+    }
+
+    /// Whether a volume has been installed.
+    #[must_use]
+    pub fn is_installed(&self) -> bool {
+        self.mount.is_initialised()
+    }
+}
+
+impl<F> Default for LateFilesystem<F> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<F> LateFilesystem<F> {
+    /// The installed mount, or [`Errno::NotImplemented`] before one is
+    /// published (fail closed — a kernel with no mounted volume serves no
+    /// `fs_*` syscall).
+    fn mount(&self) -> Result<&MountedVolume<F>, Errno> {
+        match self.mount.get() {
+            Ok(Some(mount)) => Ok(mount),
+            _ => Err(Errno::NotImplemented),
+        }
+    }
+}
+
+/// A set-once cell holding the authoritative user/group identity table the
+/// `fs_*` path resolves caller groups against (mirrors
+/// [`crate::users::LateUsersDb`]).
+///
+/// The on-disk accounts are read only after the encrypted root is unlocked,
+/// past the point where the handler set is built, so the service holds a
+/// `&'static LateIdentity` from boot and the trusted unlock step installs the
+/// verified [`IdentityTable`] once it exists. The table is **credential-free**
+/// (it carries the uid → group/capability mapping the VFS needs, never the
+/// salted password records the `users_db_read` text path serves), so a
+/// long-lived `&'static` copy leaks no secret.
+///
+/// Until [`install`](Self::install), resolving a uid fails closed with
+/// [`Errno::NotImplemented`]; an attested uid with no account is denied with
+/// [`Errno::PermissionDenied`]. Neither path ever invents a principal.
+pub struct LateIdentity {
+    table: OnceCell<IdentityTable>,
+}
+
+/// An identity-table install was refused because one is already installed.
+#[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
+pub struct IdentityAlreadyInstalled;
+
+impl LateIdentity {
+    /// Construct an empty cell. `const` so a boot path can place it in a
+    /// `static`.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            table: OnceCell::new(),
+        }
+    }
+
+    /// Publish the verified identity table exactly once.
+    ///
+    /// # Errors
+    ///
+    /// [`IdentityAlreadyInstalled`] if a table is already installed — the cell
+    /// is immutable after the first successful install, so no later code path
+    /// can swap the authoritative identity table.
+    pub fn install(&self, table: IdentityTable) -> Result<(), IdentityAlreadyInstalled> {
+        self.table.set(table).map_err(|_| IdentityAlreadyInstalled)
+    }
+
+    /// Whether an identity table has been installed.
+    #[must_use]
+    pub fn is_installed(&self) -> bool {
+        self.table.is_initialised()
+    }
+
+    /// Resolve the record for the attested `uid`.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::NotImplemented`] before a table is installed (the disk has
+    ///   not been unlocked/read yet) — fail closed, never resolve.
+    /// * [`Errno::PermissionDenied`] when the table holds no account for
+    ///   `uid` — an unknown principal is denied, never granted a guessed
+    ///   identity, and the refusal does not distinguish "unknown uid" so it
+    ///   cannot be used to probe for valid ids.
+    fn resolve(&self, uid: u32) -> Result<&UserRecord, Errno> {
+        match self.table.get() {
+            Ok(Some(table)) => table.user(UserId(uid)).map_err(|_| Errno::PermissionDenied),
+            _ => Err(Errno::NotImplemented),
+        }
+    }
+}
+
+impl Default for LateIdentity {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The production [`FilesystemService`]: serves the `fs_*` syscalls against a
+/// late-installed mount, resolving caller groups from a late-installed
+/// authoritative identity table.
+///
+/// Holds only two `&'static` borrows — the mount cell and the identity cell —
+/// and adds no authority of its own; every check stays kernel-side in the
+/// secured VFS and fails closed. The trait signature is unchanged from the
+/// landed handlers, so the handler logic and its mock-backed tests stand
+/// as-is — only this production impl and its boot wiring are new.
+pub struct MountedFilesystemService<F: 'static> {
+    /// The mounted volume the operations run against.
+    mount: &'static LateFilesystem<F>,
+    /// The authoritative identity table caller groups are resolved against.
+    identity: &'static LateIdentity,
+}
+
+impl<F: 'static> MountedFilesystemService<F> {
+    /// Build the service over the boot-installed mount and identity cells.
+    #[must_use]
+    pub const fn new(mount: &'static LateFilesystem<F>, identity: &'static LateIdentity) -> Self {
+        Self { mount, identity }
+    }
+}
+
+impl<F> MountedFilesystemService<F>
+where
+    F: FilesystemRead + FilesystemWrite + FilesystemSecurity + Send + 'static,
+{
+    /// Resolve the mount and the caller's record, parse `path`, and run `op`
+    /// against the secured VFS under the per-mount lock.
+    ///
+    /// The caller's full [`Credentials`] are built here — `uid`/`caps` are the
+    /// kernel-attested values the handler supplied, and the groups come from
+    /// the authoritative identity table — so an operation never sees a
+    /// caller-supplied identity. The lock is held for the whole operation,
+    /// including any device-completion park, then released.
+    fn with_secured<R>(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        path: &str,
+        op: impl FnOnce(&Vfs, &mut F, &Credentials<'_>, &Path) -> Result<R, VfsError>,
+    ) -> Result<R, Errno> {
+        let mount = self.mount.mount()?;
+        let record = self.identity.resolve(uid)?;
+        let path = Path::parse(path).map_err(VfsError::to_errno)?;
+        let cred = Credentials {
+            uid: UserId(uid),
+            gid: record.primary_gid,
+            supplementary_gids: &record.supplementary_gids,
+            caps,
+        };
+        let mut fs = mount.fs.lock();
+        op(&mount.vfs, &mut fs, &cred, &path).map_err(VfsError::to_errno)
+    }
+}
+
+/// Map a driver structural node kind to the userland [`FileKind`] the
+/// `fs_*` contract exposes.
+fn file_kind(kind: DriverNodeKind) -> FileKind {
+    match kind {
+        DriverNodeKind::Directory => FileKind::Directory,
+        DriverNodeKind::RegularFile => FileKind::Regular,
+    }
+}
+
+impl<F> FilesystemService for MountedFilesystemService<F>
+where
+    F: FilesystemRead + FilesystemWrite + FilesystemSecurity + Send + 'static,
+{
+    fn open(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        path: &str,
+        flags: OpenFlags,
+    ) -> Result<(), Errno> {
+        self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
+            match vfs.stat_via_secured(cred, path, fs) {
+                Ok(info) => {
+                    // An exclusive create demands the path not already exist.
+                    if flags.contains(OpenFlags::CREATE) && flags.contains(OpenFlags::EXCLUSIVE) {
+                        return Err(VfsError::AlreadyExists);
+                    }
+                    // A directory open must name a directory; a byte-access
+                    // open must not name one.
+                    if flags.contains(OpenFlags::DIRECTORY) {
+                        if info.kind != DriverNodeKind::Directory {
+                            return Err(VfsError::NotADirectory);
+                        }
+                    } else if info.kind == DriverNodeKind::Directory
+                        && (flags.is_read() || flags.is_write())
+                    {
+                        return Err(VfsError::IsADirectory);
+                    }
+                    // Truncate-on-open zeroes the file; it requires write
+                    // access (enforced at `OpenFlags::from_bits`) and is
+                    // authorised by the secured truncate.
+                    if flags.contains(OpenFlags::TRUNCATE) {
+                        vfs.truncate_via_secured(cred, path, fs, 0)?;
+                    }
+                    Ok(())
+                }
+                // A missing path is created only when asked, and `open` only
+                // ever creates a regular file (directories are made by
+                // `mkdir`); a directory-typed create is a contradiction and
+                // fails closed.
+                Err(VfsError::NotFound) if flags.contains(OpenFlags::CREATE) => {
+                    if flags.contains(OpenFlags::DIRECTORY) {
+                        return Err(VfsError::NotADirectory);
+                    }
+                    vfs.create_via_secured(cred, path, fs)
+                }
+                Err(err) => Err(err),
+            }
+        })
+    }
+
+    fn read(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        path: &str,
+        offset: u64,
+        buf: &mut [u8],
+    ) -> Result<usize, Errno> {
+        self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
+            vfs.read_via_secured(cred, path, fs, offset, buf)
+        })
+    }
+
+    fn write(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        path: &str,
+        offset: u64,
+        append: bool,
+        data: &[u8],
+    ) -> Result<usize, Errno> {
+        self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
+            // An append write ignores the supplied offset and writes at the
+            // current end of file (the journal-append posture), resolved under
+            // the same lock so the size cannot change before the write.
+            let offset = if append {
+                vfs.stat_via_secured(cred, path, fs)?.size
+            } else {
+                offset
+            };
+            vfs.write_via_secured(cred, path, fs, offset, data)
+        })
+    }
+
+    fn readdir(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        path: &str,
+    ) -> Result<Vec<(FileKind, String)>, Errno> {
+        self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
+            let names = vfs.list_via_secured(cred, path, fs)?;
+            let mut entries = Vec::with_capacity(names.len());
+            for name in names {
+                // Resolve each child's kind under the same authorised
+                // traversal; a child that vanished between the listing and the
+                // stat fails the whole call closed rather than reporting a
+                // guessed kind.
+                let mut child = path_str(path);
+                if !child.ends_with('/') {
+                    child.push('/');
+                }
+                child.push_str(&name);
+                let child = Path::parse(&child)?;
+                let info = vfs.stat_via_secured(cred, &child, fs)?;
+                entries.push((file_kind(info.kind), name));
+            }
+            Ok(entries)
+        })
+    }
+
+    fn stat(&self, uid: u32, caps: &dyn CapabilityQuery, path: &str) -> Result<FileStat, Errno> {
+        self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
+            let info = vfs.stat_via_secured(cred, path, fs)?;
+            Ok(FileStat {
+                kind: file_kind(info.kind),
+                size: info.size,
+                mode: u32::from(info.meta.mode.bits()),
+                uid: info.meta.owner.0,
+                gid: info.meta.group.0,
+            })
+        })
+    }
+
+    fn truncate(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        path: &str,
+        size: u64,
+    ) -> Result<(), Errno> {
+        self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
+            vfs.truncate_via_secured(cred, path, fs, size)
+        })
+    }
+
+    fn sync(&self, _uid: u32, _caps: &dyn CapabilityQuery) -> Result<(), Errno> {
+        // Flush the mounted volume's buffered writes to its backing device.
+        // This is a whole-mount operation with no per-inode target, gated by
+        // `CAP_FS_ACCESS` at dispatch; a read-through driver flushes as a
+        // no-op. A device fault fails closed.
+        let mount = self.mount.mount()?;
+        // `abi-v1` has no dedicated I/O errno; a device fault collapses onto
+        // the same code the VFS uses for a driver fault.
+        mount.fs.lock().flush().map_err(|_| VfsError::Io.to_errno())
+    }
+
+    fn mkdir(&self, uid: u32, caps: &dyn CapabilityQuery, path: &str) -> Result<(), Errno> {
+        self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
+            vfs.mkdir_via_secured(cred, path, fs)
+        })
+    }
+
+    fn unlink(&self, uid: u32, caps: &dyn CapabilityQuery, path: &str) -> Result<(), Errno> {
+        self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
+            vfs.remove_via_secured(cred, path, fs)
+        })
+    }
+}
+
+/// Reconstruct the absolute path string of `path` for building a child path.
+///
+/// The VFS [`Path`] stores validated components; joining a child for the
+/// per-entry stat in `readdir` needs the textual parent. The root is the bare
+/// `"/"`; a deeper path is `"/" + components.join("/")`.
+fn path_str(path: &Path) -> String {
+    let mut out = String::from("/");
+    let mut first = true;
+    for component in path.components() {
+        if !first {
+            out.push('/');
+        }
+        out.push_str(component);
+        first = false;
+    }
+    out
+}
+
+#[cfg(test)]
+#[path = "mounted_tests.rs"]
+mod tests;
