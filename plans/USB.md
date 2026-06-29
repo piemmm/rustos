@@ -563,6 +563,99 @@ the live controller behaviour is host- and CI-proven first.
     symptom). Re-arming first keeps the watch live so the next genuine report
     (the reconnect) still wakes the loop. Host regression:
     `a_failed_status_change_service_re_arms_the_watch_so_a_replug_is_still_seen`.
+  - **A stray controller event never silences the hub watch (the
+    "controller goes quiet after the first report" fix).** The Pi 4's black
+    USB2 sockets sit behind an *integrated* hub (the engine reports
+    `hub_watch=1` even with no external hub and the keyboard in a black port),
+    so the keyboard is always a downstream-hub device and the hub-watch path is
+    correct. The decisive metal capture showed the `usb-hcd: hub status-change
+    service failed` warning with `reject_hex=0`, `evtype_hex=0x21`
+    (CommandCompletion), `compl_hex=0x1` (Success): since `control()`/`command()`
+    are the only callers of `reset_event_diagnostics`, those fields were
+    **stale** from the last successful command — proving the fault issued no
+    control/command transfer and so came from `poll_hub_completion`, not the
+    `GET_PORT_STATUS` transfer earlier hypotheses blamed. `poll_hub_completion`
+    failed closed (`_ => Err(DeviceFault)`) on an event it did not model, and
+    `next_hub_change` propagated that error at its `?` **before** the
+    status-change endpoint was re-armed — leaving it with no outstanding
+    transfer, so the hub could never post another report and every later
+    keystroke/unplug/replug produced no interrupt (the controller "went
+    silent"). The fix makes that opportunistic poll **drain** any event it does
+    not model — an informational controller event (device notification,
+    host-controller event, MFINDEX wrap), a trailing freed-slot completion, or a
+    keyboard report arriving before the previous one is drained — and keep
+    scanning, never faulting (the shared event ring is not a security boundary;
+    a genuine fault still surfaces synchronously through the control/command
+    waits that follow). Drained-but-unmodelled events are counted in
+    `UsbDevice::drained_foreign_event_count()` and surfaced in the HCD
+    hotplug-state log as `foreign_drained`. Host regression:
+    `a_stray_controller_event_during_a_hub_poll_never_silences_the_watch`.
+  - **The event-ring drain is the *only* writer of `ERDP`; never a standalone
+    Event-Handler-Busy clear (the "weird storm as soon as a key is pressed"
+    fix).** xHCI Event Handler Busy (`ERDP.EHB`): the controller sets EHB when
+    it asserts the interrupt and re-asserts `IMAN.IP` for a later event only
+    once software writes `ERDP` (with the EHB bit) to a position **equal to**
+    the controller's internal enqueue. `UsbDevice::poll_event` does exactly
+    that per event it dequeues (`ack_event`), so EHB is released precisely when
+    the ring is genuinely caught up. A *standalone* `ERDP` write performed on
+    every interrupt service — including a wake that dequeued **nothing** —
+    was the storm: on the non-coherent VL805/PCIe path the MSI can arrive
+    before the event TRB's DMA write is visible to the PE, so the drain sees an
+    empty ring while the controller's enqueue is already ahead; writing `ERDP`
+    there points the controller at a dequeue *behind* its own enqueue, so it
+    re-asserts immediately and the loop spins (the capture: `controller IRQ
+    woke URB loop` + `hub change serviced, no event` thousands of times at one
+    millisecond, `foreign_drained` frozen, only the first keystroke delivered).
+    Writing `ERDP` at the *start* of servicing has the same effect; the timing
+    was never the cure. The fix removes the standalone clear entirely:
+    `UsbDevice::acknowledge_interrupt` clears `IMAN.IP` **only** (called at the
+    start, so a completion posted during the drain re-asserts and is not lost),
+    and the per-event `ack_event` the drain performs is the sole `ERDP`/EHB
+    writer — matching the metal-confirmed bring-up model, which never wrote
+    `ERDP` except per consumed event. A genuinely undelivered event is then
+    picked up when its DMA lands and the drain consumes it, not by a
+    speculative write. Host regression:
+    `acknowledge_clears_ip_only_and_a_zero_event_wake_never_writes_erdp`.
+    (Metal-only acceptance still required — QEMU models no Pi USB, §0.4.)
+  - **The event-ring drain never consumes a cycle-owned but not-yet-landed
+    TRB (the "first key then silent" fix).** With only the keyboard attached
+    (the two hubs in the log are the VL805's own integrated USB2/USB3 hubs,
+    keyboard on USB2), the **first** keystroke worked end to end and then the
+    controller went silent — continuously working only while an *external* hub
+    injected extra interrupts. The decisive metal capture's end-of-wake
+    **interrupter snapshot** showed `erdp_ehb=1` (Event Handler Busy **stuck
+    set**) with `IMAN.IP=0`, and `usb-hcd: last drained foreign event` showed
+    `trbtype=0` (an all-zero TRB) drained on the first keypress (`foreign_drained`
+    0→1). Root cause: `UsbDevice::poll_event` gated consumption on the cycle bit
+    alone. On the non-coherent BCM2711/VL805 PCIe path the VL805's 16-byte event
+    TRB write does not reach RAM atomically, so the announcing cycle bit can be
+    visible to the PE while the body is still the zeroed initial state — the
+    `dma_rmb` orders *this PE's* reads (body after cycle) but cannot order the
+    *controller's* posted writes into RAM. The drain then popped that phantom
+    zero TRB, advanced the dequeue **past** the controller's enqueue, wrote
+    `ERDP` there, and permanently desynchronised the consumer cycle: the
+    controller next set EHB for a real event whose cycle the (over-advanced)
+    cursor no longer recognised, so `owned()` stayed false, EHB stayed set, and
+    no further completion interrupt was raised. The external hub's unrelated
+    MSIs were the only thing that incidentally re-woke the HCD. (This is the
+    same defect class as the earlier storm — the zero-event-wake `ERDP` write —
+    here triggered by the *body* lagging the cycle rather than the MSI lagging
+    the event.) Fix: after the barrier and a re-confirmed `owned()`, `poll_event`
+    refuses to consume an entry whose `trb_type_raw() == 0` (a real event TRB is
+    never type 0): it leaves the entry un-consumed, writes no `ERDP`, and the
+    next wake re-reads it once the body has landed — no poll, no spin, no stale
+    pointer. Host regression:
+    `a_cycle_owned_but_not_yet_landed_event_is_not_consumed_until_its_body_arrives`
+    (the harness models a cycle-visible/body-zeroed entry via
+    `MockXhci::unland_last_event`/`land_last_event`; it faults+over-consumes
+    without the guard and is left alone with it).
+    The TEMPORARY Info diagnostics added to localise this (the BCM2711
+    `brcm-msi` diag; the HCD `URB submit received` / `URB held`; the end-of-wake
+    interrupter snapshot; and `usb-hcd: last drained foreign event` over
+    `UsbDevice::last_foreign_event()`) are kept until metal confirms the fix —
+    on the next capture `foreign_drained` must stay `0` and `erdp_ehb` must be
+    `0` at end of wake — then removed.
+    (Metal-only acceptance still required — QEMU models no Pi USB, §0.4.)
   - **Remaining (operator's):** live metal acceptance — attach → keystroke,
     detach → `usb_kbd` unloaded (controller stays up), re-attach → autoloads
     again, **and cold boot with the keyboard unplugged then plugged in** — is

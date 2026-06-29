@@ -1094,6 +1094,17 @@ pub struct UsbDevice<H: XhciHost, M: DmaRegion> {
     /// Count of trailing transfer events drained for [`Self::freed_slot`], for
     /// a hot-removal diagnostic ([`Self::stale_freed_event_count`]).
     stale_freed_events: u32,
+    /// Count of events [`Self::poll_hub_completion`] drained because they were
+    /// neither the hub status-change completion it sought, a parkable keyboard
+    /// report, nor a recognised freed-slot completion — an informational
+    /// controller event (device notification, host-controller event, MFINDEX
+    /// wrap, …) or a keyboard report arriving before the previous one was
+    /// drained. That opportunistic poll must never fault on such an event: a
+    /// fault would make [`Self::next_hub_change`] return before the
+    /// status-change endpoint is re-armed, silencing downstream hotplug
+    /// permanently on a single stray event. Counted for the hot-plug
+    /// diagnostic ([`Self::drained_foreign_event_count`]).
+    drained_foreign_events: u32,
     /// The last enumeration step [`Self::enumerate_hid`] entered, for a
     /// one-shot fault-localising diagnostic ([`Self::enum_stage`]).
     stage: EnumStage,
@@ -1136,6 +1147,15 @@ pub struct UsbDevice<H: XhciHost, M: DmaRegion> {
     /// tell whether the command ring still completes commands after the fault
     /// that triggered the removal. `true` until the first unconfirmed teardown.
     last_disable_confirmed: bool,
+    /// TEMPORARY metal diagnostic: the most recent event
+    /// [`Self::poll_hub_completion`] drained as *foreign* (neither the hub's
+    /// status-change completion, a parkable keyboard report, nor a recognised
+    /// freed-slot completion), recorded as `(raw TRB type, slot id, endpoint
+    /// id, raw completion code)`. On the Pi 4 the controller posts an
+    /// unexplained second event on the first keystroke; capturing what it is
+    /// localises the "first key then silent" fault. `(0, 0, 0, 0)` until one is
+    /// drained. Read through [`Self::last_foreign_event`].
+    last_foreign_event: (u8, u8, u8, u8),
 }
 
 impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
@@ -1197,12 +1217,14 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             pending_hub: None,
             freed_slot: 0,
             stale_freed_events: 0,
+            drained_foreign_events: 0,
             stage: EnumStage::Scan,
             last_completion: 0,
             last_event_type: 0,
             last_reject: 0,
             last_report_fault_code: 0,
             last_disable_confirmed: true,
+            last_foreign_event: (0, 0, 0, 0),
         })
     }
 
@@ -1347,9 +1369,19 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     ///
     /// Called at the **start** of servicing a delivered interrupt — before
     /// the reports are drained through [`ReportSource::next_report`] — so a
-    /// completion the controller posts during the drain re-asserts the
-    /// interrupt and is not lost. Delegates to
-    /// [`Xhci::acknowledge_interrupt`].
+    /// completion the controller posts during the drain re-asserts `IMAN.IP`
+    /// and is not lost. Delegates to [`Xhci::acknowledge_interrupt`].
+    ///
+    /// This clears only `IMAN.IP`, never `ERDP`. Event Handler Busy
+    /// (`ERDP.EHB`) is released solely by the per-event dequeue advance the
+    /// drain performs (`ack_event`, one write per event actually consumed),
+    /// so `ERDP` is only ever written with EHB once the controller's event is
+    /// genuinely caught up. A standalone `ERDP` write on an empty or
+    /// not-yet-consumed ring would tell the controller the ring is drained to
+    /// a point behind its own enqueue and re-assert the interrupt
+    /// immediately — a self-sustaining storm (the metal symptom: the loop
+    /// wakes continuously the moment a key is pressed). So the drain, not a
+    /// separate write, owns EHB.
     ///
     /// # Errors
     ///
@@ -1381,6 +1413,26 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         // after the cycle observation, then re-read and consume (see `rustos_dma_barrier`).
         rustos_dma_barrier::dma_rmb();
         let trbs = self.read_event_segment()?;
+        // Re-confirm ownership on the post-barrier snapshot, then verify the
+        // entry has actually landed before consuming it. The read barrier
+        // orders *this PE's* reads (body after cycle), but it cannot order the
+        // *controller's* writes into RAM: on the BCM2711 PCIe path the VL805's
+        // 16-byte TRB write is not guaranteed to reach RAM atomically, so the
+        // announcing cycle bit can become visible while the body is still the
+        // zeroed initial state. A real event TRB never has type 0, so a
+        // cycle-owned entry whose type is still 0 has not fully landed: leave it
+        // un-consumed (do not advance the cursor, do not write `ERDP`) and
+        // re-read it on the next wake once the body is visible. Consuming such a
+        // phantom would advance the dequeue past the controller's enqueue and
+        // permanently desynchronise the consumer cycle, wedging the interrupter
+        // with Event Handler Busy stuck set so no further completion interrupts
+        // — the metal "first key then silent" fault.
+        if !self.event_cursor.owned(&trbs)? {
+            return Ok(None);
+        }
+        if trbs[self.event_cursor.dequeue_index()].trb_type_raw() == 0 {
+            return Ok(None);
+        }
         let event = self.event_cursor.pop(&trbs)?;
         if event.is_some() {
             let erdp = self.phys_of(self.layout.event_segment)
@@ -2705,6 +2757,37 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         self.stale_freed_events
     }
 
+    /// Number of events the opportunistic hub-completion poll drained rather
+    /// than faulted because they were neither its hub status-change completion,
+    /// a parkable keyboard report, nor a freed-slot completion (a hot-plug
+    /// diagnostic). A non-zero count means a stray controller event reached the
+    /// shared event ring and was tolerated — keeping the status-change watch
+    /// live — instead of silencing downstream hotplug.
+    #[must_use]
+    pub const fn drained_foreign_event_count(&self) -> u32 {
+        self.drained_foreign_events
+    }
+
+    /// TEMPORARY metal diagnostic: record the identity of an event the
+    /// hub-completion poll drained as foreign, so the HCD can log *what* the
+    /// unexplained extra Pi 4 first-keystroke event is.
+    fn record_foreign_event(&mut self, event: Trb) {
+        self.last_foreign_event = (
+            event.trb_type_raw(),
+            event.slot_id(),
+            event.endpoint_id(),
+            event.completion_code_raw(),
+        );
+    }
+
+    /// TEMPORARY metal diagnostic: the most recent foreign event drained by the
+    /// hub-completion poll, as `(raw TRB type, slot id, endpoint id, raw
+    /// completion code)`. `(0, 0, 0, 0)` until one is drained.
+    #[must_use]
+    pub const fn last_foreign_event(&self) -> (u8, u8, u8, u8) {
+        self.last_foreign_event
+    }
+
     /// Confirm and detach a watched downstream device whose interrupt endpoint
     /// just faulted.
     ///
@@ -2880,36 +2963,45 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             let Some(event) = self.poll_event()? else {
                 return Ok(false);
             };
-            match event.trb_type() {
-                Ok(TrbType::PortStatusChange) => continue,
-                Ok(TrbType::TransferEvent) => {}
-                // A trailing Disable Slot Command Completion for the just-freed
-                // slot (its confirmation arrived after the best-effort teardown
-                // moved on): drain it like any other freed-slot event rather
-                // than faulting the hub watch on it.
-                Ok(TrbType::CommandCompletion) if self.is_stale_freed_transfer(event) => {
-                    self.stale_freed_events = self.stale_freed_events.saturating_add(1);
-                    continue;
-                }
-                _ => return Err(DriverError::DeviceFault),
-            }
-            if self.is_hub_async(event) {
+            // The event this poll is looking for: the watched hub's
+            // status-change interrupt-IN completion.
+            if event.trb_type() == Ok(TrbType::TransferEvent) && self.is_hub_async(event) {
                 return Ok(true);
             }
-            if self.is_kbd_async(event) {
-                if self.pending_kbd.is_some() {
-                    return Err(DriverError::DeviceFault);
+            // The enumerated keyboard's report shares this one event ring. Park
+            // the first seen for the report consumer ([`ReportSource::next_report`]).
+            // A second report arriving before the first is drained cannot be
+            // parked, so it is dropped (recoverable: the class driver re-arms
+            // and the next report is delivered) rather than faulting the watch.
+            if event.trb_type() == Ok(TrbType::TransferEvent) && self.is_kbd_async(event) {
+                if self.pending_kbd.is_none() {
+                    self.pending_kbd = Some(event);
+                } else {
+                    self.record_foreign_event(event);
+                    self.drained_foreign_events = self.drained_foreign_events.saturating_add(1);
                 }
-                self.pending_kbd = Some(event);
                 continue;
             }
-            // A trailing completion for a just-freed device slot: drain it and
-            // keep scanning rather than faulting the hub watch on it.
+            // Everything else is DRAINED and the scan continues — never faulted.
+            // This poll is opportunistic: faulting here would make
+            // `next_hub_change` return (its `?`) before the status-change
+            // endpoint is re-armed, leaving it with no outstanding transfer so
+            // the hub can never post another report — downstream hotplug is
+            // then silenced permanently on a single stray event (the metal
+            // symptom: the controller goes quiet after the first report). The
+            // shared event ring is not a security boundary, so an event this
+            // poll does not model fails *open to draining* (advancing the ring),
+            // not closed: an informational controller event (port-status-change,
+            // device notification, host-controller event, MFINDEX wrap, …) is
+            // skipped, and a trailing completion for a just-freed slot is
+            // counted as such. A genuine fault still surfaces synchronously
+            // through the control/command waits that follow.
             if self.is_stale_freed_transfer(event) {
                 self.stale_freed_events = self.stale_freed_events.saturating_add(1);
-                continue;
+            } else if event.trb_type() != Ok(TrbType::PortStatusChange) {
+                self.record_foreign_event(event);
+                self.drained_foreign_events = self.drained_foreign_events.saturating_add(1);
             }
-            return Err(DriverError::DeviceFault);
         }
         Ok(false)
     }

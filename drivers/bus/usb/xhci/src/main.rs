@@ -203,10 +203,12 @@ mod program {
         let mut dev_buf = [0u8; 16];
         let mut node_buf = [0u8; 16];
         let mut stale_buf = [0u8; 16];
+        let mut drained_buf = [0u8; 16];
         let mut root_buf = [0u8; 16];
         let hub_watch = u64::from(device.hub_watch_active());
         let dev_present = u64::from(device.device_present());
         let stale = u64::from(device.stale_freed_event_count());
+        let drained = u64::from(device.drained_foreign_event_count());
         let root_port = device.root_port();
         let root_conn = u64::from(still_connected(device, root_port));
         log(
@@ -233,6 +235,10 @@ mod program {
                         value: format_hex_u64(stale, &mut stale_buf),
                     },
                     Field {
+                        key: "foreign_drained",
+                        value: format_hex_u64(drained, &mut drained_buf),
+                    },
+                    Field {
                         key: "root_conn",
                         value: format_hex_u64(root_conn, &mut root_buf),
                     },
@@ -242,19 +248,22 @@ mod program {
     }
 
     /// TEMPORARY hot-plug localisation diagnostic (remove with the others once
-    /// metal re-plug is confirmed): why the disconnect-confirmation control
-    /// transfer faulted. `err_hex` is the returned [`DriverError`]; the engine
-    /// breadcrumbs split the two sub-causes a bare `DeviceFault` conflates —
-    /// `reject_hex` is `UsbDevice::last_reject_reason` (`0` the wait succeeded
-    /// so the GET_PORT_STATUS data was simply short, `1` unexpected TRB type,
-    /// `2` address mismatch, `3` undecodable code, `4` budget timeout),
-    /// `evtype_hex` the raw TRB-type the wait last saw, and `compl_hex` its raw
-    /// completion code. `kbd_compl_hex` is the controller's verdict on the
-    /// keyboard's *own* interrupt-IN endpoint at the unplug
-    /// (`UsbDevice::last_report_fault_code`) — the one code the confirmation
-    /// control transfer does not overwrite — which tells a transient
-    /// transaction error apart from a definitive device-gone / stall code.
-    fn log_detach_confirmation_failure(
+    /// metal re-plug is confirmed): why a hub control transfer faulted, used at
+    /// every site that surfaces a `next_hub_change` / disconnect-confirmation
+    /// failure (the hub status-change service, the hub root-port check, and the
+    /// fault-path disconnect confirmation). `err_hex` is the returned
+    /// [`DriverError`]; the engine breadcrumbs split the sub-causes a bare
+    /// `DeviceFault` conflates — `reject_hex` is `UsbDevice::last_reject_reason`
+    /// (`0` the wait succeeded so the GET_PORT_STATUS data was simply short, `1`
+    /// unexpected TRB type, `2` address mismatch, `3` undecodable code, `4`
+    /// budget timeout), `evtype_hex` the raw TRB-type the wait last saw, and
+    /// `compl_hex` its raw completion code. `kbd_compl_hex` is the controller's
+    /// verdict on the keyboard's *own* interrupt-IN endpoint
+    /// (`UsbDevice::last_report_fault_code`) — the one code a hub control
+    /// transfer does not overwrite — which tells a transient transaction error
+    /// apart from a definitive device-gone / stall code.
+    fn log_transfer_fault_detail(
+        message: &'static str,
         err: rustos_abi::driver::DriverError,
         device: &rustos_drv_bus_usb::bringup::ControllerDevice,
     ) {
@@ -268,7 +277,7 @@ mod program {
             &Event {
                 level: Level::Warn,
                 id: HCD_WAIT_ERROR,
-                message: "usb-hcd: disconnect confirmation after transfer fault failed",
+                message,
                 fields: &[
                     Field {
                         key: "err_hex",
@@ -316,7 +325,15 @@ mod program {
         log(
             &LogSink,
             &Event {
-                level: Level::Debug,
+                // TEMPORARY: Info-level so the INFO/WARN-only metal capture
+                // shows the interrupter's *idle* state at the end of a wake
+                // (IMAN.IP / USBSTS.EINT / ERDP+EHB). After the first keystroke
+                // is drained this is the decisive datum: a clean interrupter
+                // (IP=0, EHB=0, ERDP==enqueue) means the controller is left able
+                // to re-assert, isolating "no second event posted"; a wedged one
+                // (IP or EHB still set) means an acknowledge bug. Remove with the
+                // other hot-plug diagnostics once metal-confirmed.
+                level: Level::Info,
                 id: HCD_INTERRUPT_SNAPSHOT,
                 message,
                 fields: &[
@@ -363,6 +380,45 @@ mod program {
                 err as u64,
             ),
         }
+    }
+
+    /// TEMPORARY metal diagnostic: surface the identity of the last event the
+    /// hub-completion poll drained as *foreign* (the unexplained extra event
+    /// the Pi 4 posts on the first keystroke), as raw TRB type / slot /
+    /// endpoint / completion code, so the next capture can name it. Remove with
+    /// the other hot-plug diagnostics once metal-confirmed.
+    fn log_last_foreign_event(device: &rustos_drv_bus_usb::bringup::ControllerDevice) {
+        let (trb_type, slot, endpoint, completion) = device.last_foreign_event();
+        let mut type_buf = [0u8; 16];
+        let mut slot_buf = [0u8; 16];
+        let mut ep_buf = [0u8; 16];
+        let mut compl_buf = [0u8; 16];
+        log(
+            &LogSink,
+            &Event {
+                level: Level::Info,
+                id: HCD_IRQ_WAKE,
+                message: "usb-hcd: last drained foreign event",
+                fields: &[
+                    Field {
+                        key: "trbtype_hex",
+                        value: format_hex_u64(u64::from(trb_type), &mut type_buf),
+                    },
+                    Field {
+                        key: "slot_hex",
+                        value: format_hex_u64(u64::from(slot), &mut slot_buf),
+                    },
+                    Field {
+                        key: "ep_hex",
+                        value: format_hex_u64(u64::from(endpoint), &mut ep_buf),
+                    },
+                    Field {
+                        key: "compl_hex",
+                        value: format_hex_u64(u64::from(completion), &mut compl_buf),
+                    },
+                ],
+            },
+        );
     }
 
     fn reply_to_urb(endpoint_id: u64, reply: rustos_drv_bus_usb::serve::UrbReply) {
@@ -494,7 +550,11 @@ mod program {
             }
             Ok(false) => FaultDetachOutcome::NotDetached,
             Err(err) => {
-                log_detach_confirmation_failure(err, device);
+                log_transfer_fault_detail(
+                    "usb-hcd: disconnect confirmation after transfer fault failed",
+                    err,
+                    device,
+                );
                 FaultDetachOutcome::NotDetached
             }
         }
@@ -829,9 +889,12 @@ mod program {
                     let mut ticket = 0u64;
                     match rustos_rt::call_recv(endpoint_id, &mut request, &mut ticket) {
                         Ok(n) => {
+                            // TEMPORARY: Info-level so a metal capture shows
+                            // each URB the keyboard submits, to confirm whether
+                            // it re-submits after the first report is delivered.
                             log_hex_event(
                                 HCD_URB_SUBMIT,
-                                Level::Debug,
+                                Level::Info,
                                 "usb-hcd: URB submit received",
                                 "ticket_hex",
                                 ticket,
@@ -845,9 +908,13 @@ mod program {
                             ) {
                                 UrbOutcome::Reply(reply) => reply_to_urb(endpoint_id, reply),
                                 UrbOutcome::Held => {
+                                    // TEMPORARY: Info-level so a metal capture
+                                    // confirms each repeat report URB is armed
+                                    // (held for its transfer completion) rather
+                                    // than replied/faulted immediately.
                                     log_hex_event(
                                         HCD_URB_HELD,
-                                        Level::Debug,
+                                        Level::Info,
                                         "usb-hcd: URB held for interrupt completion",
                                         "ticket_hex",
                                         ticket,
@@ -885,8 +952,14 @@ mod program {
                         &mut device,
                         node_live,
                     );
-                    // Acknowledge before draining so a completion posted during
-                    // the drain re-asserts rather than being lost.
+                    // Acknowledge IMAN.IP before draining so a completion
+                    // posted during the drain re-asserts rather than being
+                    // lost. Event Handler Busy is released only by the per-event
+                    // ERDP advance the drain performs, never by a standalone
+                    // write on an empty ring: writing ERDP while the controller
+                    // still has an un-dequeued event re-asserts immediately and
+                    // spins the loop, while a per-event advance only ever clears
+                    // EHB once the ring is genuinely caught up.
                     let _ = device.acknowledge_interrupt();
                     // Hot-plug. When a hub is watched (the device sits behind
                     // the onboard hub, so its root port never changes), a hub
@@ -989,20 +1062,16 @@ mod program {
                                         node_live,
                                     );
                                 }
-                                Err(err) => log_hex_event(
-                                    HCD_WAIT_ERROR,
-                                    Level::Warn,
+                                Err(err) => log_transfer_fault_detail(
                                     "usb-hcd: hub status-change service failed",
-                                    "errno_hex",
-                                    err as u64,
+                                    err,
+                                    &device,
                                 ),
                             },
-                            Err(err) => log_hex_event(
-                                HCD_WAIT_ERROR,
-                                Level::Warn,
+                            Err(err) => log_transfer_fault_detail(
                                 "usb-hcd: hub root-port check failed",
-                                "errno_hex",
-                                err as u64,
+                                err,
+                                &device,
                             ),
                         }
                     } else if node_live {
@@ -1063,6 +1132,8 @@ mod program {
                             }
                         }
                     }
+                    // A disconnect tore the device down; the endpoint is gone,
+                    // so there is nothing left to service this wake.
                     if disconnect_handled {
                         continue;
                     }
@@ -1110,6 +1181,18 @@ mod program {
                             );
                         }
                     }
+                    // TEMPORARY: snapshot the interrupter at the end of every
+                    // controller-IRQ wake so a metal capture shows whether, after
+                    // the first report, the controller is left able to re-assert
+                    // (IMAN.IP clear, USBSTS.EINT clear, ERDP advanced with EHB
+                    // released) or wedged silent — the decisive evidence for the
+                    // "first key then silent" fault. Remove with the other
+                    // hot-plug diagnostics once metal-confirmed.
+                    log_device_interrupter_snapshot(
+                        "usb-hcd: interrupter snapshot at end of controller-IRQ wake",
+                        &mut device,
+                    );
+                    log_last_foreign_event(&device);
                 }
                 _ => {}
             }

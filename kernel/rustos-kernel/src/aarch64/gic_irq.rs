@@ -104,7 +104,10 @@ fn log_brcm_msi_diag(message: &'static str, spi: u32, line: u32, vector: u32, pe
     log(
         &rustos_arch_aarch64::serial::SERIAL_SINK,
         &Event {
-            level: Level::Debug,
+            // TEMPORARY: Info-level so a metal capture (INFO/WARN only) shows
+            // every MSI delivery and vector re-arm, to localise the "first key
+            // then silent" fault to the controller, the MSI demux, or re-arm.
+            level: Level::Info,
             id: BRCM_MSI_DIAG,
             message,
             fields: &[

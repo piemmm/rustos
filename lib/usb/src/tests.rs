@@ -265,6 +265,13 @@ struct MockXhci {
     iman: u32,
     /// Interrupter 0 moderation register (`IMOD`).
     imod: u32,
+    /// Event Handler Busy (`ERDP.EHB`): the controller sets it when it
+    /// asserts the interrupt and refuses to re-assert `IMAN.IP` for a later
+    /// event while it is set; software clears it by writing `ERDP` with the
+    /// EHB bit. Modelled so a regression can prove a zero-event interrupt
+    /// still clears it (otherwise the controller goes silent — the metal
+    /// keyboard bug).
+    event_handler_busy: bool,
     // Device-model ring consumer / event producer state.
     cmd_index: usize,
     cmd_cycle: bool,
@@ -284,6 +291,15 @@ struct MockXhci {
     int_cycle: bool,
     event_index: usize,
     event_cycle: bool,
+    /// Address of the most-recently-posted event-ring slot, so a test can
+    /// model the non-coherent hazard where the controller's cycle bit is
+    /// visible while the entry body has not yet reached RAM
+    /// ([`Self::unland_last_event`] / [`Self::land_last_event`]).
+    last_event_addr: u64,
+    /// The real body of an event temporarily "un-landed" (body zeroed, cycle
+    /// bit kept) to model that hazard; `land_last_event` restores it.
+    unlanded_event: Option<Trb>,
+    unlanded_addr: u64,
     // Device-model device state.
     next_slot: u8,
     active_slot: u8,
@@ -468,6 +484,7 @@ impl MockXhci {
             erdp: [0; 2],
             iman: 0,
             imod: 0,
+            event_handler_busy: false,
             cmd_index: 0,
             cmd_cycle: true,
             ep0_base: 0,
@@ -480,6 +497,9 @@ impl MockXhci {
             int_cycle: true,
             event_index: 0,
             event_cycle: true,
+            last_event_addr: 0,
+            unlanded_event: None,
+            unlanded_addr: 0,
             next_slot: 1,
             active_slot: 0,
             addressed: false,
@@ -597,7 +617,13 @@ impl MockXhci {
         } else if offset == Self::ir0(regs::IR_ERSTBA) + 4 {
             self.erstba[1] = value;
         } else if offset == Self::ir0(regs::IR_ERDP) {
-            self.erdp[0] = value;
+            // EHB (bit 3) is write-1-to-clear; the dequeue pointer is the
+            // upper bits. Clear Event Handler Busy when the write sets it and
+            // store only the pointer, mirroring a read returning EHB low.
+            if value & regs::ERDP_EHB != 0 {
+                self.event_handler_busy = false;
+            }
+            self.erdp[0] = value & !regs::ERDP_EHB;
         } else if offset == Self::ir0(regs::IR_ERDP) + 4 {
             self.erdp[1] = value;
         } else if offset == Self::ir0(regs::IR_IMAN) {
@@ -617,6 +643,20 @@ impl MockXhci {
 
     fn qword(pair: [u32; 2]) -> u64 {
         (u64::from(pair[1]) << 32) | u64::from(pair[0])
+    }
+
+    /// Model the controller asserting interrupter 0: it sets Event Handler
+    /// Busy and `IMAN.IP` (and the global `EINT` latch) — but **only while
+    /// EHB is clear**. Once EHB is set the controller does not re-assert `IP`
+    /// for a later event until software clears EHB with an `ERDP` write, so a
+    /// driver that never clears EHB on a zero-event interrupt goes silent.
+    fn assert_event_interrupt(&mut self) {
+        if self.event_handler_busy {
+            return;
+        }
+        self.event_handler_busy = true;
+        self.iman |= regs::IMAN_IP;
+        self.eint_latched = true;
     }
 
     // ---- in-memory device model -------------------------------------
@@ -668,15 +708,40 @@ impl MockXhci {
         if self.event_cycle {
             event.control |= CONTROL_CYCLE;
         }
-        self.write_mem(
-            segment + (self.event_index * TRB_LEN) as u64,
-            &event.to_bytes(),
-        );
+        let addr = segment + (self.event_index * TRB_LEN) as u64;
+        self.write_mem(addr, &event.to_bytes());
+        self.last_event_addr = addr;
         self.event_index += 1;
         if self.event_index == len {
             self.event_index = 0;
             self.event_cycle = !self.event_cycle;
         }
+    }
+
+    /// Model the non-coherent BCM2711/VL805 hazard where the controller has
+    /// advanced its event-ring enqueue and set the new entry's cycle bit, but
+    /// the entry's 16-byte body has not yet reached RAM: zero the body of the
+    /// most-recently-posted event while keeping its cycle bit, so the consumer
+    /// sees a cycle-owned but all-zero (type 0) entry. [`Self::land_last_event`]
+    /// restores the real body.
+    fn unland_last_event(&mut self) {
+        let addr = self.last_event_addr;
+        let real = self.read_trb_at(addr);
+        let zeroed = Trb {
+            parameter: 0,
+            status: 0,
+            control: real.control & CONTROL_CYCLE,
+        };
+        self.write_mem(addr, &zeroed.to_bytes());
+        self.unlanded_event = Some(real);
+        self.unlanded_addr = addr;
+    }
+
+    /// Land the real body of the event previously hidden by
+    /// [`Self::unland_last_event`], preserving the cycle bit already published.
+    fn land_last_event(&mut self) {
+        let real = self.unlanded_event.take().expect("an event was un-landed");
+        self.write_mem(self.unlanded_addr, &real.to_bytes());
     }
 
     fn post_command_completion(&mut self, command_addr: u64, code: CompletionCode, slot: u8) {
@@ -3411,6 +3476,151 @@ fn acknowledge_interrupt_clears_global_and_interrupter_pending_and_keeps_enable(
 }
 
 #[test]
+fn acknowledge_clears_ip_only_and_a_zero_event_wake_never_writes_erdp() {
+    // The metal symptom this guards against: the controller wakes the URB loop
+    // continuously the moment a key is pressed (a self-sustaining interrupt
+    // storm), and the keyboard never types. Its cause was a *standalone* ERDP
+    // write performed on every interrupt service, including a wake that
+    // dequeued nothing. Writing ERDP (with the Event Handler Busy clear bit)
+    // while the controller still holds an un-dequeued event — routine on the
+    // non-coherent VL805/PCIe path, where the MSI can arrive before the event
+    // TRB's DMA write is visible to this PE — tells the controller the ring is
+    // drained to a point *behind* its own enqueue, so it re-asserts the
+    // interrupt immediately and the loop spins forever.
+    //
+    // The contract: `acknowledge_interrupt` clears IMAN.IP only and never
+    // touches ERDP, and a wake that dequeues nothing performs no ERDP write at
+    // all. Event Handler Busy is released solely by the per-event dequeue
+    // advance the drain performs (`ack_event`), so ERDP is written only once
+    // the controller's event is genuinely consumed — never speculatively.
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_device(&mem), &mem);
+    device.enumerate_hid(1).expect("enumeration succeeds");
+    device.enable_interrupter().expect("enable interrupter");
+
+    // The controller asserts an interrupt (sets EHB + IP) but the event TRB is
+    // not yet visible to this PE: the drain that follows finds nothing.
+    device.host_mut().assert_event_interrupt();
+    assert!(
+        device.host_mut().event_handler_busy,
+        "the controller marks the event handler busy on assertion"
+    );
+    let erdp_before = device.host_mut().erdp[0];
+
+    // Servicing: acknowledge clears IMAN.IP but must NOT write ERDP or clear
+    // EHB — a standalone ERDP write on a not-yet-consumed ring is the storm.
+    device.acknowledge_interrupt().expect("acknowledge");
+    assert_eq!(
+        device.host_mut().iman & regs::IMAN_IP,
+        0,
+        "IP cleared on ack"
+    );
+    assert!(
+        device.host_mut().event_handler_busy,
+        "acknowledge must leave EHB set: only the drain advances ERDP"
+    );
+    assert_eq!(
+        device.host_mut().erdp[0],
+        erdp_before,
+        "acknowledge must not write ERDP"
+    );
+
+    // The (empty) drain dequeues nothing: `next_report` only arms a transfer
+    // and writes no ERDP — so the controller is given no stale pointer to
+    // re-assert on, and the loop does not spin.
+    let mut buf = [0u8; REPORT_LEN];
+    assert_eq!(device.next_report(&mut buf), Ok(None));
+    assert_eq!(
+        device.host_mut().erdp[0],
+        erdp_before,
+        "a zero-event wake performs no ERDP write (no storm)"
+    );
+
+    // When the real report finally lands, the per-event drain consumes it and
+    // its ERDP advance releases EHB, so the next event re-asserts the
+    // interrupt — interrupt delivery resumes without any standalone write.
+    device
+        .host_mut()
+        .pending_reports
+        .push_back(alloc::vec![0, 0, 0x04, 0, 0, 0, 0, 0]);
+    device.host_mut().process_int_ring();
+    assert!(matches!(device.next_report(&mut buf), Ok(Some(_))));
+    assert!(
+        !device.host_mut().event_handler_busy,
+        "the per-event ERDP advance releases Event Handler Busy"
+    );
+    device.host_mut().assert_event_interrupt();
+    assert_eq!(
+        device.host_mut().iman & regs::IMAN_IP,
+        regs::IMAN_IP,
+        "the next event re-asserts the interrupt once the drain cleared EHB"
+    );
+}
+
+#[test]
+fn a_cycle_owned_but_not_yet_landed_event_is_not_consumed_until_its_body_arrives() {
+    // The metal "first key then silent" fault: on the non-coherent BCM2711/
+    // VL805 PCIe path the controller's event-TRB write does not reach RAM
+    // atomically, so the announcing cycle bit can be visible to this PE while
+    // the 16-byte body is still the zeroed initial state. The drain must NOT
+    // consume such a phantom: a real event TRB never has type 0, and consuming
+    // a cycle-owned but type-0 entry advances the dequeue past the controller's
+    // enqueue, permanently desynchronises the consumer cycle, and (because the
+    // stray ERDP write leaves the interrupter pointing behind its enqueue)
+    // wedges the controller with Event Handler Busy stuck — no further
+    // completion interrupts, so only the first keystroke is ever delivered.
+    // The entry must be left un-consumed (no ERDP write) and re-read once its
+    // body lands.
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_device(&mem), &mem);
+    device.enumerate_hid(1).expect("enumeration succeeds");
+    device.enable_interrupter().expect("enable interrupter");
+    let mut buf = [0u8; REPORT_LEN];
+    assert_eq!(device.next_report(&mut buf), Ok(None), "arms a transfer");
+
+    // The controller posts the report event (its cycle bit is visible) but its
+    // body has not yet reached RAM — the entry reads as cycle-owned, all-zero.
+    device
+        .host_mut()
+        .pending_reports
+        .push_back(alloc::vec![0, 0, 0x04, 0, 0, 0, 0, 0]);
+    device.host_mut().process_int_ring();
+    device.host_mut().unland_last_event();
+    let erdp_before = device.host_mut().erdp[0];
+
+    // The drain leaves the not-yet-landed entry alone: no consume, no fault,
+    // and crucially no ERDP write (which would desync the ring and wedge EHB).
+    assert_eq!(
+        device.next_report(&mut buf),
+        Ok(None),
+        "a cycle-owned but zero-body entry is not consumed"
+    );
+    assert_eq!(
+        device.host_mut().erdp[0],
+        erdp_before,
+        "no ERDP write on a not-yet-landed entry — the controller is not desynced"
+    );
+    assert_eq!(
+        device.drained_foreign_event_count(),
+        0,
+        "the phantom is not drained as a foreign event"
+    );
+
+    // Once the body lands, the very same entry is consumed normally and the
+    // report is delivered.
+    device.host_mut().land_last_event();
+    assert!(
+        matches!(device.next_report(&mut buf), Ok(Some(_))),
+        "the report is delivered once its body lands"
+    );
+    assert_ne!(
+        device.host_mut().erdp[0],
+        erdp_before,
+        "the real event advances ERDP (releasing Event Handler Busy)"
+    );
+}
+
+#[test]
 fn forged_report_residual_fails_closed() {
     let mem = shared_mem();
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
@@ -3641,6 +3851,67 @@ fn hub_watch_retracts_a_disconnected_downstream_device() {
         device.hub_watch_active(),
         "the controller and its hub watch stay up after a detach"
     );
+}
+
+#[test]
+fn a_stray_controller_event_during_a_hub_poll_never_silences_the_watch() {
+    // The decisive "controller goes quiet after the first report" metal
+    // symptom: while a keyboard sits behind the (integrated) hub, a stray
+    // controller event the engine does not model lands on the shared event
+    // ring ahead of the hub's status-change completion. `poll_hub_completion`
+    // used to fault on it, so `next_hub_change` returned its `?` error before
+    // re-arming the status-change endpoint — leaving it with no outstanding
+    // transfer, so the hub could never post another report and every later
+    // disconnect/reconnect went unseen. The opportunistic poll must instead
+    // DRAIN such an event and keep scanning, so the watch is never silenced.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    mock.hub_downstream_status = 1 << 0;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+
+    device
+        .bring_up_keyboard(&delay)
+        .expect("the keyboard behind the hub is reached");
+    assert!(device.hub_watch_active());
+    assert!(device.device_present());
+
+    // A stray controller event (a Host Controller Event, raw TRB-type 37 —
+    // not a transfer/command this poll tracks, not a port-status-change) lands
+    // ahead of the hub's status-change completion, which carries no genuine
+    // port change.
+    device.host_mut().post_event_raw_type(0xDEAD, 37);
+    device.host_mut().post_hub_status_change(&[1 << 4]);
+
+    // The stray event is drained, the hub completion is still found, and the
+    // (no-change) report is serviced quietly. Before the fix this returned
+    // `Err` and silenced the watch.
+    assert_eq!(device.next_hub_change(&delay), Ok(HubEvent::None));
+    assert!(
+        device.drained_foreign_event_count() >= 1,
+        "the stray controller event was drained, not faulted"
+    );
+    assert!(
+        device.hub_watch_active(),
+        "the watch survived the stray event"
+    );
+    assert!(
+        device.device_present(),
+        "the keyboard stays enumerated through a stray controller event"
+    );
+
+    // A genuine later disconnect is still detected — proof the watch was never
+    // silenced by the earlier stray event.
+    device.host_mut().hub_downstream_status = 0;
+    device.host_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
+    device.host_mut().post_hub_status_change(&[1 << 4]);
+    assert_eq!(
+        device.next_hub_change(&delay),
+        Ok(HubEvent::Detached),
+        "the disconnect is still seen after the stray event was tolerated"
+    );
+    assert!(!device.device_present(), "its device slot was freed");
+    assert!(device.hub_watch_active());
 }
 
 #[test]
