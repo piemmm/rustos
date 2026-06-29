@@ -2701,6 +2701,42 @@ rule, stop and ask (§15.7) — never resolve it with a "for now" shortcut
   it never silently wraps, truncates, or saturates a large size into a foreign
   format's narrower field.
 
+### 26.7 Many huge drives on a tiny machine — the combined minimum floor
+
+The conditions above are not independent dials a design may satisfy one at a
+time; RustOS MUST satisfy them **simultaneously**. The binding worst-case
+floor every storage and memory design is held to:
+
+- **A machine with as little as 1 GiB of RAM MUST mount and serve *several*
+  100 TB+ drives at once, without issue.** "Without issue" means no panic, no
+  out-of-memory crash, no refusal to mount, no busy-spin, and no
+  silent-corruption shortcut — the system stays correct, responsive, and
+  fail-closed (§2.9, §4, §5.4, §2.23). This is the explicit conjunction of the
+  "many heterogeneous disks" assumption (§26.1), the "operating under memory
+  pressure" assumption (§26.3), and the "very large filesystems" assumption
+  (§26.6); a design that meets any one of them but breaks when all three hold
+  together is defective (§23).
+- **RAM is sized to the working set, never to the storage.** Total resident
+  metadata across *all* mounted volumes combined is a bounded, growable
+  capacity sized from discovered RAM and reclaimed under pressure (§24.1,
+  §26.3, §26.6) — never proportional to aggregate device size or volume count.
+  Mounting an additional 100 TB+ drive adds working-set-bounded footprint, not
+  a fixed per-volume slab that a 1 GiB machine cannot afford; a per-mount
+  allocation that scales with device size (or a hand-picked constant times the
+  number of volumes) is the §24.1 defect this clause forecloses.
+- **Aggregate I/O across many large devices stays fair and bounded.** Many
+  concurrently busy drives — fast and slow, large and small — share the
+  machine's scarce RAM and CPU without one device's queues, caches, or readahead
+  starving another or exhausting kernel memory (§26.1, §26.2, §24.3). Per-device
+  and per-user bounds (§24.3) hold under the combined load and fail closed when
+  reached, never degrading into unbounded allocation (§4).
+- **Tested at the floor, not just in the abstract.** The §24.5 / §7 scalability
+  tests exercise this conjunction: small discovered RAM (on the order of 1 GiB)
+  with multiple emulated 100 TB+ volumes mounted and active at once, asserting
+  bounded resident metadata, growth-then-fail-closed on exhaustion, and no
+  panic or busy-spin. A design that only demonstrates each condition in
+  isolation has not met this floor.
+
 ---
 
 Violation of any rule in this document is a defect, regardless of whether
