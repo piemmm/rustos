@@ -2950,10 +2950,18 @@ and fail-closed (§24.4) — this work must not loosen them.
   real volume is overwhelmingly free, so the set holds the few used blocks),
   and the transaction-private set the handful of blocks a transaction touches.
   Resident size now scales with the volume's contents (working set), not its
-  size. **Residual (§26.6, not a boot blocker):** a pathologically fragmented,
-  nearly-full very large volume still costs RAM proportional to its used
-  blocks; a paged / on-disk free-space representation is the long-term
-  structural answer (see `docs/src/filesystem/rustfs-spec.md` §4).
+  size. Free space is a single 64-bit count, and the transient pending-discard
+  queue is capped at a fixed, volume-independent `MAX_PENDING_DISCARD` (was
+  `as_usize(total_blocks)`, which saturated to `usize::MAX` on a huge device
+  and could grow the queue until heap exhaustion). A `SparseBlock` test double
+  proves a 100 TiB volume (~26.8 billion blocks) formats, mounts, and serves
+  with only its working set resident and the discard queue bounded. **Residual
+  (§26.6, not a boot blocker), next free-space work:** a near-full very large
+  volume still costs RAM proportional to its *used* blocks; the structural
+  answer is a paged / on-disk free-space representation (extent /
+  bitmap-hierarchy) with only a bounded working-set cache resident, so even a
+  near-full 100 TB+ volume mounts within a fixed RAM budget (see
+  `docs/src/filesystem/rustfs-spec.md` §4).
 - (Explicitly **out of scope / leave fixed**: the §22 RNG reserve
   `DEFAULT_RESERVE_BYTES`/`RANDOM_RESERVE_DEFAULT_BYTES` (charter-blessed), and
   all untrusted-input/format bounds — `lib/vt` `MAX_PARAMS`/`MAX_STRING`,

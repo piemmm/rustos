@@ -535,6 +535,16 @@ const EXTENT_VALUE_LEN: usize = 16;
 /// draw on this reserve; data allocation stops above it (`alloc_block`).
 const METADATA_RESERVE: u64 = 16;
 
+/// Upper bound on the transient pending-discard queue, in blocks. The queue
+/// batches freed-but-not-yet-trimmed blocks; it is rebuildable, non-authoritative
+/// state, so a deliberately bounded, **volume-independent** ceiling keeps its
+/// worst-case footprint fixed (8 bytes per entry, so under 1 MiB here) no matter
+/// how large the device is. A device-sized cap would scale the queue with the
+/// block count and exhaust the bounded kernel heap on a large volume; dropping a
+/// freed block from a full queue merely leaves it un-discarded (still free) until
+/// a future free, trim pass, or mount rebuild requeues it, so nothing is lost.
+const MAX_PENDING_DISCARD: usize = 1 << 16;
+
 /// The inode tree's record shape: a 256-byte inode keyed by its number.
 fn inode_spec() -> btree::TreeSpec {
     btree::TreeSpec {
@@ -1025,14 +1035,16 @@ impl<B: Block> RustFs<B> {
     /// The queue is transient, rebuildable state: it only ever holds
     /// blocks already marked free, [`Self::trim`] re-checks each is still free
     /// before discarding, and a crash that drops it loses no live data. The
-    /// queue is capped at the volume's block count so a long-running mount that
-    /// never trims cannot grow it without bound; a dropped entry merely stays
-    /// un-discarded (still free) until a future free or rebuild requeues it.
+    /// queue is capped at a fixed, volume-independent [`MAX_PENDING_DISCARD`]
+    /// blocks so a long-running mount that never trims cannot grow it without
+    /// bound and a huge device cannot size it into a heap-exhausting allocation;
+    /// a dropped entry merely stays un-discarded (still free) until a future
+    /// free, trim pass, or mount rebuild requeues it.
     fn enqueue_discard(&mut self, block: u64) {
         if block < RING_BLOCKS || block >= self.total_blocks {
             return;
         }
-        if self.pending_discard.len() < as_usize(self.total_blocks) {
+        if self.pending_discard.len() < MAX_PENDING_DISCARD {
             self.pending_discard.push(block);
         }
     }

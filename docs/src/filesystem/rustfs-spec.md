@@ -174,6 +174,28 @@ allocated and may overwrite in place — is likewise a sparse set keyed by block
 number, bounded by the transaction's working set and never by the device block
 count.
 
+Free space itself is a single 64-bit count, so a near-empty device of any size
+costs no per-block memory: a freshly formatted 100 TiB volume (about 26.8
+billion 4 KiB blocks) mounts and serves with only its few used blocks resident,
+well within a 1 GiB machine. Every other transient allocator structure is
+bounded the same way and never sized to the device: the pending-discard queue
+(freed blocks awaiting a TRIM pass) is capped at a fixed, volume-independent
+ceiling (`MAX_PENDING_DISCARD`), so a long-running mount cannot grow it without
+bound and a huge device cannot size it into a heap-exhausting allocation. A
+dropped entry merely stays un-discarded (still free) until a future free, trim
+pass, or mount rebuild requeues it.
+
+Known limit, heavily-allocated very large volumes: because occupancy is tracked
+as a resident set, the in-RAM footprint scales with the number of blocks *in
+use*, not with the device size. This meets the 1 GiB-RAM / 100 TB+ floor for
+the realistic case (volumes that are mostly free) but a volume whose *used*
+fraction is itself enormous (many billions of allocated blocks) would still
+want more resident memory than a tiny machine has. The structural answer, an
+on-disk paged free-space representation (extent / bitmap-hierarchy) with only a
+bounded working-set cache resident so even a near-full 100 TB+ volume mounts
+within a fixed RAM budget, is the next planned free-space work (`PLAN.md`); the
+sparse used-set is the step on the way, not the end state.
+
 ---
 
 ## 5. Fixed v1 constants

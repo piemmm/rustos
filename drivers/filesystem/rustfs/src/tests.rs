@@ -162,6 +162,124 @@ impl Block for MemBlock {
     }
 }
 
+/// A *sparse* in-memory block device that reports a huge logical block count
+/// but stores only the blocks actually written, keyed by block index in a
+/// `BTreeMap`. It lets a test model a multi-terabyte volume without allocating
+/// a multi-terabyte backing store: an unwritten block reads back as zeroes,
+/// exactly as a freshly provisioned device would. The resident footprint
+/// equals the working set (the handful of metadata blocks `format`/commit
+/// touch), not the device size, so it proves the driver's own in-RAM state is
+/// likewise working-set-bounded.
+struct SparseBlock {
+    blocks: alloc::collections::BTreeMap<u64, alloc::vec::Vec<u8>>,
+    block_size: u32,
+    block_count: u64,
+    discard: Option<DiscardCapability>,
+}
+
+impl SparseBlock {
+    fn new(block_size: u32, block_count: u64) -> Self {
+        Self {
+            blocks: alloc::collections::BTreeMap::new(),
+            block_size,
+            block_count,
+            discard: None,
+        }
+    }
+
+    fn with_discard(mut self, granularity_blocks: u64, max_blocks_per_request: u64) -> Self {
+        self.discard = Some(DiscardCapability {
+            supported: true,
+            granularity_blocks,
+            max_blocks_per_request,
+        });
+        self
+    }
+
+    /// Number of distinct blocks physically stored — the device's resident
+    /// footprint, which a test asserts stays small on a huge volume.
+    fn stored_blocks(&self) -> usize {
+        self.blocks.len()
+    }
+}
+
+impl Block for SparseBlock {
+    fn geometry(&self) -> Result<rustos_abi::driver::block::BlockGeometry, DriverError> {
+        Ok(rustos_abi::driver::block::BlockGeometry {
+            block_size: self.block_size,
+            block_count: self.block_count,
+        })
+    }
+
+    fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
+        let bs = self.block_size as usize;
+        if buf.is_empty() || buf.len() % bs != 0 {
+            return Err(DriverError::BufferTooSmall);
+        }
+        let count = (buf.len() / bs) as u64;
+        if lba.saturating_add(count) > self.block_count {
+            return Err(DriverError::LengthOutOfRange);
+        }
+        for (i, chunk) in buf.chunks_mut(bs).enumerate() {
+            match self.blocks.get(&(lba + i as u64)) {
+                Some(stored) => chunk.copy_from_slice(stored),
+                None => chunk.fill(0),
+            }
+        }
+        Ok(())
+    }
+
+    fn write_blocks(&mut self, lba: u64, buf: &[u8]) -> Result<(), DriverError> {
+        let bs = self.block_size as usize;
+        if buf.is_empty() || buf.len() % bs != 0 {
+            return Err(DriverError::BufferTooSmall);
+        }
+        let count = (buf.len() / bs) as u64;
+        if lba.saturating_add(count) > self.block_count {
+            return Err(DriverError::LengthOutOfRange);
+        }
+        for (i, chunk) in buf.chunks(bs).enumerate() {
+            self.blocks.insert(lba + i as u64, chunk.to_vec());
+        }
+        Ok(())
+    }
+
+    fn discard_capability(&self) -> Result<DiscardCapability, DriverError> {
+        Ok(self.discard.unwrap_or_else(DiscardCapability::unsupported))
+    }
+
+    fn device_health(&self) -> Result<DeviceHealth, DriverError> {
+        Ok(DeviceHealth::Unavailable)
+    }
+
+    fn discard(&mut self, lba: u64, blocks: u64) -> Result<(), DriverError> {
+        self.discard.ok_or(DriverError::Unsupported)?;
+        if lba.saturating_add(blocks) > self.block_count {
+            return Err(DriverError::LengthOutOfRange);
+        }
+        for b in lba..lba + blocks {
+            self.blocks.remove(&b);
+        }
+        Ok(())
+    }
+}
+
+/// A clean "100 TiB" volume on a [`SparseBlock`]: `100 * 2^28` 4 KiB blocks
+/// (≈ 26.8 billion blocks). Formatting it touches only a handful of metadata
+/// blocks, so both the device and the driver stay working-set-bounded.
+const HUGE_BLOCK_COUNT: u64 = 100 * (1 << 28);
+
+fn fmt_huge() -> RustFs<SparseBlock> {
+    RustFs::format(
+        SparseBlock::new(4096, HUGE_BLOCK_COUNT).with_discard(1, 0),
+        128,
+        &TEST_KEY,
+        &mut TestEntropy::new(),
+    )
+    .expect("format a 100 TiB sparse device")
+    .with_clock(fixed_clock)
+}
+
 fn fixed_clock() -> Time64 {
     Time64::from_secs(1_700_000_000)
 }
@@ -4311,4 +4429,130 @@ fn a_volume_smaller_than_the_device_mounts_and_leaves_the_tail_unused() {
     let added = reopened.grow().expect("grow into the surplus");
     assert_eq!(added, 1024 - 256);
     assert_eq!(reopened.total_blocks, 1024);
+}
+
+// ---------------------------------------------------------------------------
+// Scaling: a 100 TiB volume must format, mount, and serve on a tiny-RAM
+// machine. Every in-RAM structure scales with the working set, never with the
+// device block count (AGENTS.md §24.1, §26.6, §26.7: 100 TB+ volumes on a
+// machine with as little as 1 GiB of RAM).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_100_tib_volume_formats_mounts_and_serves_with_working_set_bounded_memory() {
+    // The whole point of the sparse free-space design: a 100 TiB device
+    // (~26.8 billion 4 KiB blocks) must be usable without any in-RAM structure
+    // sized to that block count. A dense per-block bitmap would need ~3 GiB
+    // resident at 4 KiB blocks (and ~24 GiB at 512-byte blocks) and could never
+    // mount on a 1 GiB machine; the sparse used-set + free *count* tracks only
+    // the blocks actually in use.
+    let mut fs = fmt_huge();
+    assert_eq!(fs.total_blocks, HUGE_BLOCK_COUNT);
+
+    // A freshly formatted volume tracks only the reserved ring plus a handful
+    // of metadata blocks — a few hundred at most, never billions.
+    assert!(
+        fs.used.len() < 2000,
+        "a near-empty 100 TiB volume must track only its few used blocks, not \
+         one entry per device block (tracked {})",
+        fs.used.len()
+    );
+    // Free space is a single 64-bit count, so essentially the whole 100 TiB is
+    // free and that fact costs no per-block memory.
+    assert_eq!(fs.free_count, fs.total_blocks - fs.used.len() as u64);
+    assert!(
+        fs.free_count > HUGE_BLOCK_COUNT - 2000,
+        "almost the entire device is free"
+    );
+
+    // Serve real I/O: create a file, write several blocks, read them back.
+    let root = fs.root();
+    fs.create(root, b"big", NodeKind::RegularFile)
+        .expect("create on a huge volume");
+    let body = alloc::vec![0xC3u8; 200_000];
+    assert_eq!(fs.write_at(root, b"big", 0, &body), Ok(200_000));
+    let node = fs.lookup(root, b"big").expect("lookup");
+    let mut back = alloc::vec![0u8; 200_000];
+    assert_eq!(fs.read_at(node, 0, &mut back), Ok(200_000));
+    assert_eq!(back, body);
+
+    // The used set grew by only the blocks that file occupies, not by anything
+    // proportional to the 100 TiB device.
+    assert!(
+        fs.used.len() < 2200,
+        "serving a 200 KiB file must add only a handful of used blocks (tracked {})",
+        fs.used.len()
+    );
+
+    // The device itself stored only the working set — proof the test models a
+    // 100 TiB volume without a 100 TiB backing allocation, and that the driver
+    // never touched a volume-proportional span of blocks.
+    let device = fs.into_block();
+    assert!(
+        device.stored_blocks() < 4000,
+        "format + serve touched only the working set of blocks (stored {})",
+        device.stored_blocks()
+    );
+
+    // Reopening the huge volume is likewise working-set-bounded and reads the
+    // committed content back unchanged.
+    let mut reopened = RustFs::open(device, &TEST_KEY).expect("reopen 100 TiB volume");
+    assert_eq!(reopened.total_blocks, HUGE_BLOCK_COUNT);
+    assert!(
+        reopened.used.len() < 2200,
+        "mounting a 100 TiB volume rebuilds only the used-block working set (tracked {})",
+        reopened.used.len()
+    );
+    let node = reopened.lookup(reopened.root(), b"big").expect("lookup");
+    let mut back = alloc::vec![0u8; 200_000];
+    assert_eq!(reopened.read_at(node, 0, &mut back), Ok(200_000));
+    assert_eq!(back, body);
+}
+
+#[test]
+fn metadata_allocates_at_the_high_end_of_a_huge_volume_without_a_whole_volume_scan() {
+    // Metadata (the transaction root, tree nodes) is allocated by scanning
+    // *downward* from the top of the device. On a 100 TiB volume the top block
+    // is ~26.8 billion; the allocator must reach it via the cursor in O(1),
+    // never by walking the whole volume. The committed root therefore lives
+    // near the top of the device, proving the high-end allocation works at
+    // scale.
+    let fs = fmt_huge();
+    let top = HUGE_BLOCK_COUNT - 1;
+    let device = fs.into_block();
+    // Some block in the top few of the device was written (the committed root
+    // pair), confirming the downward metadata cursor reached the high end.
+    let highest_written = device
+        .blocks
+        .keys()
+        .copied()
+        .next_back()
+        .expect("format wrote metadata");
+    assert!(
+        highest_written >= top - 8,
+        "metadata must allocate at the very top of the device (highest written {highest_written}, top {top})"
+    );
+}
+
+#[test]
+fn the_pending_discard_queue_is_capped_independent_of_volume_size() {
+    // Regression: the pending-discard queue must be bounded by a fixed,
+    // volume-independent ceiling, never by the device block count. The previous
+    // `pending_discard.len() < as_usize(self.total_blocks)` cap let the queue
+    // grow toward the block count — `as_usize` saturates to `usize::MAX` on a
+    // huge volume — so a long-running mount could grow it until the bounded
+    // kernel heap was exhausted. A fixed cap keeps the worst-case footprint
+    // constant whatever the device size.
+    let mut fs = fmt_huge();
+    // Enqueue far more freed blocks than the cap allows. Every block is in
+    // range and free on this near-empty volume.
+    let start = RING_BLOCKS + 1;
+    for block in start..start + MAX_PENDING_DISCARD as u64 + 1000 {
+        fs.enqueue_discard(block);
+    }
+    assert_eq!(
+        fs.pending_discard_count(),
+        MAX_PENDING_DISCARD,
+        "the discard queue must cap at MAX_PENDING_DISCARD, never grow with the volume"
+    );
 }
