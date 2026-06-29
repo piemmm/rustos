@@ -758,12 +758,12 @@ fn free_space_rebuild_matches_authoritative_extents() {
         let name = alloc::format!("d{i}");
         fs.remove(root, name.as_bytes()).expect("remove");
     }
-    let live = fs.free.clone();
+    let live = fs.used.clone();
 
     let bytes = fs.into_block().bytes();
     let rebuilt = RustFs::open(MemBlock::from_bytes(bytes, 4096, 2048), &TEST_KEY).expect("reopen");
     assert_eq!(
-        rebuilt.free, live,
+        rebuilt.used, live,
         "mount-time free-space rebuild must equal the authoritative live set"
     );
 }
@@ -2289,7 +2289,7 @@ fn check_rebuilds_a_corrupt_free_space_and_dedupe_derivation() {
     let bytes = populated().into_block().bytes();
     let reference =
         RustFs::open(MemBlock::from_bytes(bytes.clone(), 4096, 512), &TEST_KEY).expect("reference");
-    let good_free = reference.free.clone();
+    let good_used = reference.used.clone();
     let good_count = reference.free_count;
     assert!(
         !reference.dedupe_index.is_empty(),
@@ -2297,18 +2297,18 @@ fn check_rebuilds_a_corrupt_free_space_and_dedupe_derivation() {
     );
 
     let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 4096, 512), &TEST_KEY).expect("reopen");
-    // Wreck the in-memory derived state: flip the free bitmap and clear the
-    // dedupe index.
-    for word in &mut fs.free {
-        *word = !*word;
-    }
+    // Wreck the in-memory derived state: drop the used-block set (so every
+    // block looks free), plant a spurious used marker the trees do not
+    // support, and clear the dedupe index.
+    fs.used.clear();
+    fs.used.insert(8);
     fs.free_count = 0;
     fs.dedupe_index.clear();
 
     let report = check_full(&mut fs);
     assert!(report.complete);
     assert!(report.rebuilt_derived_state);
-    assert_eq!(fs.free, good_free, "the free bitmap was rebuilt");
+    assert_eq!(fs.used, good_used, "the free bitmap was rebuilt");
     assert_eq!(fs.free_count, good_count, "the free count was rebuilt");
     assert!(
         !fs.dedupe_index.is_empty(),
@@ -4227,6 +4227,74 @@ fn open_rejects_a_committed_size_larger_than_the_device() {
         RustFs::open(truncated, &TEST_KEY),
         Err(DriverError::BadMagic)
     ));
+}
+
+#[test]
+fn the_transaction_private_tracker_is_sparse_not_one_entry_per_block() {
+    // Regression: the per-transaction private-block tracker must be a sparse
+    // set bounded by the transaction's working set, never a dense structure
+    // sized to the whole device. The previous `vec![false; total_blocks]`
+    // allocated one byte per device block, so a real multi-GB volume's mount
+    // ballooned to tens of MiB and exhausted the kernel heap (the Raspberry
+    // Pi 4 eMMC2 boot OOM); a sparse set scales with the work, not the disk.
+    let mut fs = fmt(512, 4096, 32);
+    assert_eq!(fs.total_blocks, 4096);
+    // A freshly formatted (and committed) volume holds no private blocks: the
+    // tracker is empty, not `total_blocks` entries long as the dense form was.
+    assert!(
+        fs.txn_private.is_empty(),
+        "the tracker must start empty, not pre-sized to the device block count"
+    );
+
+    // A committed write marks only the handful of blocks the transaction
+    // touches private, then clears them at commit — so between operations the
+    // tracker is empty and never approaches the device block count.
+    let root = fs.root();
+    fs.create(root, b"f", NodeKind::RegularFile)
+        .expect("create");
+    let body = alloc::vec![0xA5u8; 4000];
+    assert_eq!(fs.write_at(root, b"f", 0, &body), Ok(4000));
+    assert!(
+        fs.txn_private.is_empty(),
+        "a committed transaction clears its private-block set"
+    );
+}
+
+#[test]
+fn the_used_block_set_is_sparse_not_one_entry_per_block() {
+    // Regression: the in-memory free-space tracker must scale with the blocks
+    // actually in use, never with the device block count. The previous dense
+    // `Vec<u64>` bitmap allocated `total_blocks / 64` words at mount, so a real
+    // multi-GB eMMC volume's mount alone exhausted the bounded kernel heap (the
+    // Raspberry Pi 4 boot OOM). A sparse set of used blocks scales with the
+    // working set: a freshly formatted, near-empty volume names only the
+    // reserved ring plus a handful of metadata blocks, far fewer than the
+    // device's block count, however large the device is.
+    let mut fs = fmt(512, 65536, 32);
+    assert_eq!(fs.total_blocks, 65536);
+    assert!(
+        fs.used.len() < 256,
+        "a near-empty {}-block volume must track only the few used blocks, \
+         not one entry per device block (tracked {})",
+        fs.total_blocks,
+        fs.used.len()
+    );
+    // The used set never exceeds the device block count, and every member is a
+    // real in-range block.
+    assert!(fs.used.iter().all(|&b| b < fs.total_blocks));
+
+    // A committed write grows the set by only the blocks the file occupies, not
+    // by anything proportional to the device size.
+    let before = fs.used.len();
+    let root = fs.root();
+    fs.create(root, b"f", NodeKind::RegularFile)
+        .expect("create");
+    let body = alloc::vec![0xA5u8; 4000];
+    assert_eq!(fs.write_at(root, b"f", 0, &body), Ok(4000));
+    assert!(
+        fs.used.len() < before + 64,
+        "a small write must add only a handful of used blocks"
+    );
 }
 
 #[test]

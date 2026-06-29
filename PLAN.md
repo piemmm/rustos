@@ -2938,6 +2938,22 @@ and fail-closed (§24.4) — this work must not loosen them.
   configurable ceiling (`IdentityTableBuilder::with_supplementary_group_limit`);
   the supplementary-group store was already a growable `Vec`, and a candidate
   record can never raise the ceiling, so the §24.4 anti-DoS bound is preserved.
+- RustFS mount footprint (`drivers/filesystem/rustfs/src/lib.rs`) — **done**
+  (the §24.1 fix for the Raspberry Pi 4 eMMC2 boot OOM): both in-RAM
+  allocation structures that scaled with the device block count are now
+  sparse. The per-transaction private-block tracker was a dense
+  `vec![false; total_blocks]` and the free-space map was a dense
+  `free: Vec<u64>` bitmap (`total_blocks / 64` words allocated at mount from
+  the device geometry); mounting a real multi-GiB volume allocated O(volume)
+  and exhausted the 64 MiB kernel heap before any file was read. Both are now
+  sparse `BTreeSet<u64>`s — the free map tracks the *used* block numbers (a
+  real volume is overwhelmingly free, so the set holds the few used blocks),
+  and the transaction-private set the handful of blocks a transaction touches.
+  Resident size now scales with the volume's contents (working set), not its
+  size. **Residual (§26.6, not a boot blocker):** a pathologically fragmented,
+  nearly-full very large volume still costs RAM proportional to its used
+  blocks; a paged / on-disk free-space representation is the long-term
+  structural answer (see `docs/src/filesystem/rustfs-spec.md` §4).
 - (Explicitly **out of scope / leave fixed**: the §22 RNG reserve
   `DEFAULT_RESERVE_BYTES`/`RANDOM_RESERVE_DEFAULT_BYTES` (charter-blessed), and
   all untrusted-input/format bounds — `lib/vt` `MAX_PARAMS`/`MAX_STRING`,
@@ -3499,3 +3515,15 @@ can see *why* a rule exists without diffing the charter's history.
   folded into `drivers/bus/usb/vl805` and `drivers/bus/pcie_brcm` and deleted;
   `lib/vcmailbox` stays (its non-driver consumer, the aarch64 framebuffer boot
   console, is genuine). Charter + §3/§16.4 + docs + the fold.
+
+- **2026-06-29 — Huge drives on a tiny machine (combined minimum floor).**
+  Added §26.7 making the §26 operating-conditions hold *simultaneously*: a
+  machine with as little as 1 GiB of RAM MUST mount and serve *several* 100 TB+
+  drives at once without panic, OOM crash, mount refusal, busy-spin, or
+  silent-corruption shortcut — the explicit conjunction of §26.1 (many
+  heterogeneous disks), §26.3 (memory pressure), and §26.6 (very large
+  filesystems). Binds resident metadata across all mounts to a working-set-sized,
+  growable capacity (§24.1) rather than anything proportional to aggregate device
+  size or volume count, keeps aggregate I/O fair/bounded (§24.3), and requires the
+  §24.5/§7 scalability tests to exercise the conjunction, not each condition in
+  isolation. Documentation only.

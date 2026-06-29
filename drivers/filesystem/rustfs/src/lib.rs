@@ -44,7 +44,7 @@
 
 extern crate alloc;
 
-use alloc::vec;
+use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
 use rustos_abi::driver::block::Block;
@@ -481,11 +481,23 @@ pub struct RustFs<B: Block> {
     /// data.
     dedupe_index: DedupeIndex,
     root_phys: u64,
-    free: Vec<u64>,
+    /// Sparse set of the *used* physical block numbers. The bitmap tracks
+    /// occupancy, and on a mostly-empty volume almost every block is free, so
+    /// recording only the (comparatively few) used blocks scales the in-RAM
+    /// cost with the working set rather than with the device size. A dense
+    /// per-block bitmap sized to the whole device allocates O(volume) words at
+    /// mount and exhausts the bounded kernel heap on a real multi-GB volume.
+    used: BTreeSet<u64>,
     free_count: u64,
     txn_allocated: Vec<u64>,
     txn_freed: Vec<u64>,
-    txn_private: Vec<bool>,
+    /// The blocks allocated by the current, not-yet-committed transaction,
+    /// held as a sparse set keyed by physical block number. Only the handful
+    /// of blocks a single transaction touches are ever present, so this is
+    /// bounded by the transaction working set — never by the device block
+    /// count. A dense per-block marker would scale with the whole volume and
+    /// exhaust the kernel heap on a large device.
+    txn_private: BTreeSet<u64>,
     /// Transient, rebuildable queue of physical blocks that a
     /// committed transaction returned to the free pool and that have
     /// not yet been discarded to the device. A block enters here only
@@ -569,30 +581,23 @@ impl<B: Block> RustFs<B> {
     // --- in-memory used-block bitmap ---
 
     fn bit_used(&self, block: u64) -> bool {
-        let word = as_usize(block / 64);
-        let bit = block % 64;
-        self.free.get(word).is_some_and(|w| (w >> bit) & 1 == 1)
+        self.used.contains(&block)
     }
 
     fn mark_used(&mut self, block: u64) {
-        let word = as_usize(block / 64);
-        let bit = block % 64;
-        if let Some(w) = self.free.get_mut(word) {
-            if (*w >> bit) & 1 == 0 {
-                self.free_count = self.free_count.saturating_sub(1);
-            }
-            *w |= 1u64 << bit;
+        // A block outside the committed volume is never marked, exactly as the
+        // dense bitmap ignored an out-of-range word.
+        if block >= self.total_blocks {
+            return;
+        }
+        if self.used.insert(block) {
+            self.free_count = self.free_count.saturating_sub(1);
         }
     }
 
     fn mark_free(&mut self, block: u64) {
-        let word = as_usize(block / 64);
-        let bit = block % 64;
-        if let Some(w) = self.free.get_mut(word) {
-            if (*w >> bit) & 1 == 1 {
-                self.free_count = self.free_count.saturating_add(1);
-            }
-            *w &= !(1u64 << bit);
+        if self.used.remove(&block) {
+            self.free_count = self.free_count.saturating_add(1);
         }
     }
 
@@ -765,10 +770,7 @@ impl<B: Block> RustFs<B> {
     /// Whether `phys` was allocated by the current, not-yet-committed
     /// transaction and may therefore be overwritten in place.
     fn is_txn_private(&self, phys: u64) -> bool {
-        self.txn_private
-            .get(as_usize(phys))
-            .copied()
-            .unwrap_or(false)
+        self.txn_private.contains(&phys)
     }
 
     /// Allocate one free block from the pool, marking it used and private to
@@ -800,9 +802,7 @@ impl<B: Block> RustFs<B> {
     /// rollback.
     fn claim_block(&mut self, block: u64) {
         self.mark_used(block);
-        if let Some(slot) = self.txn_private.get_mut(as_usize(block)) {
-            *slot = true;
-        }
+        self.txn_private.insert(block);
         self.txn_allocated.push(block);
     }
 
@@ -876,9 +876,7 @@ impl<B: Block> RustFs<B> {
         }
         if self.is_txn_private(phys) {
             self.mark_free(phys);
-            if let Some(slot) = self.txn_private.get_mut(as_usize(phys)) {
-                *slot = false;
-            }
+            self.txn_private.remove(&phys);
         } else {
             self.txn_freed.push(phys);
         }
@@ -1002,9 +1000,7 @@ impl<B: Block> RustFs<B> {
         let allocated = core::mem::take(&mut self.txn_allocated);
         for block in allocated {
             self.mark_free(block);
-            if let Some(slot) = self.txn_private.get_mut(as_usize(block)) {
-                *slot = false;
-            }
+            self.txn_private.remove(&block);
         }
         self.txn_freed.clear();
     }
@@ -1014,16 +1010,12 @@ impl<B: Block> RustFs<B> {
     fn finish_txn(&mut self) {
         let allocated = core::mem::take(&mut self.txn_allocated);
         for block in allocated {
-            if let Some(slot) = self.txn_private.get_mut(as_usize(block)) {
-                *slot = false;
-            }
+            self.txn_private.remove(&block);
         }
         let freed = core::mem::take(&mut self.txn_freed);
         for block in freed {
             self.mark_free(block);
-            if let Some(slot) = self.txn_private.get_mut(as_usize(block)) {
-                *slot = false;
-            }
+            self.txn_private.remove(&block);
             self.enqueue_discard(block);
         }
     }
@@ -1123,7 +1115,6 @@ impl<B: Block> RustFs<B> {
         if total_blocks <= RING_BLOCKS + 8 {
             return Err(DriverError::NoSpace);
         }
-        let words = as_usize(total_blocks.div_ceil(64));
         let mut fs = Self {
             block,
             fs_uuid: 0,
@@ -1145,11 +1136,11 @@ impl<B: Block> RustFs<B> {
             dedupe_domain: 0,
             dedupe_index: DedupeIndex::new(),
             root_phys: 0,
-            free: vec![0u64; words],
+            used: BTreeSet::new(),
             free_count: total_blocks,
             txn_allocated: Vec::new(),
             txn_freed: Vec::new(),
-            txn_private: vec![false; as_usize(total_blocks)],
+            txn_private: BTreeSet::new(),
             pending_discard: Vec::new(),
             saved_inode_tree_root: 0,
             saved_next_ino: 0,
@@ -1366,18 +1357,18 @@ impl<B: Block> RustFs<B> {
         Ok(fs)
     }
 
-    /// Resize the rebuildable in-memory free-block bitmap and per-block
-    /// transaction-private markers to span exactly `total` blocks, and set the
-    /// volume's working block count. The free bitmap and `txn_private` vector
-    /// are derived state, so growing them simply adds zeroed (free, not
-    /// private) words for the new blocks and shrinking them drops the tail.
-    /// The allocation cursors are reset into the new range so the next walk
-    /// stays in bounds.
+    /// Set the volume's working block count to span exactly `total` blocks.
+    /// The used-block set is sparse and derived state, so growing the volume
+    /// needs no resize (the new tail blocks are simply absent from the set,
+    /// i.e. free) and shrinking drops any used entries that fall beyond the
+    /// new tail. The transaction-private set is likewise sparse and keyed by
+    /// block number, so it too needs no resize. The allocation cursors are
+    /// reset into the new range so the next walk stays in bounds.
     fn adopt_total_blocks(&mut self, total: u64) {
         self.total_blocks = total;
-        let words = as_usize(total.div_ceil(64));
-        self.free.resize(words, 0);
-        self.txn_private.resize(as_usize(total), false);
+        // Drop any used markers in the truncated tail so the set never names a
+        // block outside the committed volume.
+        let _ = self.used.split_off(&total);
         self.alloc_cursor = RING_BLOCKS;
         self.meta_cursor = total.saturating_sub(1);
     }
@@ -1578,9 +1569,7 @@ impl<B: Block> RustFs<B> {
     /// offline [`Self::check`]. It is idempotent: a second
     /// rebuild of an unchanged volume produces the same bitmap.
     fn rebuild_free_space(&mut self) -> Result<(), DriverError> {
-        for word in &mut self.free {
-            *word = 0;
-        }
+        self.used.clear();
         self.free_count = self.total_blocks;
         for block in 0..RING_BLOCKS {
             self.mark_used(block);

@@ -159,6 +159,21 @@ Rebuildable metadata:
 A corrupt rebuildable tree must not make a valid volume unmountable.
 `rustfs check` must rebuild it from authoritative metadata.
 
+### In-memory allocation state (mount-time footprint)
+
+The free-space map is held in RAM as a **sparse set of the used block
+numbers**, rebuilt at mount from authoritative metadata. Because occupancy is
+tracked rather than free space, and a real volume is overwhelmingly free, the
+resident size scales with the blocks actually in use — the working set — not
+with the device block count, so mounting a multi-GiB or multi-hundred-GiB
+volume costs RAM proportional to its contents rather than its size. A dense
+per-block bitmap sized to the whole device is forbidden: it allocated O(volume)
+words at mount and exhausted the bounded kernel heap on a real volume. The
+per-transaction bookkeeping — the blocks a not-yet-committed transaction has
+allocated and may overwrite in place — is likewise a sparse set keyed by block
+number, bounded by the transaction's working set and never by the device block
+count.
+
 ---
 
 ## 5. Fixed v1 constants

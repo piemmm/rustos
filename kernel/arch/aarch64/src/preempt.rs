@@ -675,6 +675,22 @@ mod tests {
 
     extern "C" fn host_cb(_cpu: CpuId) {}
 
+    /// Serialises the tests that mutate the process-wide preemption statics
+    /// (the callback slots and the registered per-CPU slices). The host test
+    /// runner executes a crate's tests on parallel threads, and these statics
+    /// are global: without this lock one test's `clear_for_tests` /
+    /// `reset_preempt_storage_for_tests` races another's record-then-read and
+    /// the suite fails intermittently. Poison is tolerated (a panicking test
+    /// still leaves the statics in a defined state, which each test resets on
+    /// entry) so one failure does not cascade into spurious failures.
+    static GLOBAL_STATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn lock_global_state() -> std::sync::MutexGuard<'static, ()> {
+        GLOBAL_STATE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     #[test]
     fn interval_clamps_to_at_least_one_tick() {
         assert_eq!(interval_for_hz(1000, 100), 10);
@@ -693,6 +709,7 @@ mod tests {
 
     #[test]
     fn callback_round_trips_through_the_slot() {
+        let _guard = lock_global_state();
         clear_for_tests();
         assert!(timer_callback().is_none());
         set_timer_callback(host_cb);
@@ -703,6 +720,7 @@ mod tests {
 
     #[test]
     fn ipi_callback_round_trips_through_its_own_slot() {
+        let _guard = lock_global_state();
         clear_for_tests();
         assert!(ipi_callback().is_none());
         set_ipi_callback(host_cb);
@@ -715,6 +733,7 @@ mod tests {
 
     #[test]
     fn preempt_callback_round_trips_through_its_own_slot() {
+        let _guard = lock_global_state();
         clear_for_tests();
         assert!(preempt_callback().is_none());
         set_preempt_callback(host_cb);
@@ -743,6 +762,7 @@ mod tests {
         static STORAGE: PreemptStorage<4> = PreemptStorage::new();
         static STORAGE2: PreemptStorage<2> = PreemptStorage::new();
 
+        let _guard = lock_global_state();
         reset_preempt_storage_for_tests();
 
         // Before any storage is registered, every per-CPU observer fails
