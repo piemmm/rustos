@@ -69,6 +69,16 @@ extern "C" {
 #define ROS_SYS_WAITSET_CREATE 43u
 #define ROS_SYS_WAITSET_CTL 44u
 #define ROS_SYS_WAITSET_WAIT 45u
+#define ROS_SYS_FS_OPEN 46u
+#define ROS_SYS_FS_CLOSE 47u
+#define ROS_SYS_FS_READ 48u
+#define ROS_SYS_FS_WRITE 49u
+#define ROS_SYS_FS_READDIR 50u
+#define ROS_SYS_FS_STAT 51u
+#define ROS_SYS_FS_TRUNCATE 52u
+#define ROS_SYS_FS_SYNC 53u
+#define ROS_SYS_FS_MKDIR 54u
+#define ROS_SYS_FS_UNLINK 55u
 
 /* Syscall entry points, implemented by the user-space stub library. */
 void ros_sys_yield(void);
@@ -117,6 +127,16 @@ int32_t ros_sys_shm_unmap(uint64_t a0, uintptr_t a1);
 uint64_t ros_sys_waitset_create(void);
 int32_t ros_sys_waitset_ctl(uint64_t a0, uint32_t a1, uint32_t a2, uint64_t a3, uint64_t a4);
 int32_t ros_sys_waitset_wait(uint64_t a0, uint64_t a1, void * a2);
+uint64_t ros_sys_fs_open(void * a0, uintptr_t a1, uint32_t a2);
+int32_t ros_sys_fs_close(uint32_t a0);
+uint64_t ros_sys_fs_read(uint32_t a0, uint64_t a1, void * a2, uintptr_t a3);
+uint64_t ros_sys_fs_write(uint32_t a0, uint64_t a1, void * a2, uintptr_t a3);
+uint64_t ros_sys_fs_readdir(uint32_t a0, void * a1, uintptr_t a2);
+uint64_t ros_sys_fs_stat(uint32_t a0, void * a1, uintptr_t a2);
+int32_t ros_sys_fs_truncate(uint32_t a0, uint64_t a1);
+int32_t ros_sys_fs_sync(uint32_t a0);
+int32_t ros_sys_fs_mkdir(void * a0, uintptr_t a1);
+int32_t ros_sys_fs_unlink(void * a0, uintptr_t a1);
 
 #ifdef __cplusplus
 } /* extern "C" */

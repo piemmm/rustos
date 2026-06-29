@@ -49,5 +49,6 @@
 #define ROS_CAP_HW_EMIT ((uint16_t)27u)
 #define ROS_CAP_IPC_ENDPOINT ((uint16_t)28u)
 #define ROS_CAP_SHM ((uint16_t)29u)
+#define ROS_CAP_FS_ACCESS ((uint16_t)30u)
 
 #endif /* ROS_CAPABILITY_H */
