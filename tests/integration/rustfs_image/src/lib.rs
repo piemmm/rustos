@@ -37,7 +37,9 @@ use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
 use rustos_abi::DriverError;
 use rustos_caps::CapabilitySet;
 use rustos_drv_fs_rustfs::{EntropySource, RustFs, VolumeKey, VOLUME_KEY_LEN};
-use rustos_users::{AccountState, Gid, Identity, ParseError, Salt, Uid, UserRecord, UsersDb};
+use rustos_users::{
+    AccountState, Gid, GroupRecord, GroupsDb, Identity, ParseError, Salt, Uid, UserRecord, UsersDb,
+};
 
 /// Logical block (sector) size of the produced image, in bytes. Matches
 /// both the 512-byte sector QEMU's virtio-blk reports by default and the
@@ -134,6 +136,23 @@ pub fn users_db_text() -> Result<String, ParseError> {
         USERS_FIXTURE_ITERATIONS,
     )?;
     Ok(UsersDb::new(alloc::vec![record])?.serialise())
+}
+
+/// Serialise the users-root volume's `/System/Security/Groups` registry:
+/// the single `wheel` group (gid 0) the planted [`USERS_FIXTURE_USERNAME`]
+/// account names as its primary group, so the kernel's boot-time identity
+/// table build (`rustos_kernel_core::build_identity_table`) resolves the
+/// account's gid against a real registry rather than failing closed on a
+/// dangling reference.
+///
+/// # Errors
+///
+/// Propagates the [`ParseError`] if a fixture constant violates the
+/// `groups-v1` bounds — a programming error in this fixture, surfaced
+/// rather than panicked.
+pub fn groups_db_text() -> Result<String, ParseError> {
+    let record = GroupRecord::new("wheel", Gid(0))?;
+    Ok(GroupsDb::new(alloc::vec![record])?.serialise())
 }
 
 /// In-memory [`Block`] device backing the fixture build and the host
@@ -266,6 +285,7 @@ pub fn build_users_root_image() -> Result<Vec<u8>, DriverError> {
 /// surfaced rather than panicked).
 pub fn build_users_root_image_with_key(volume_key: &VolumeKey) -> Result<Vec<u8>, DriverError> {
     let text = users_db_text().map_err(|_| DriverError::Unsupported)?;
+    let groups_text = groups_db_text().map_err(|_| DriverError::Unsupported)?;
     let dev = VecBlock::new(TOTAL_SECTORS);
     let mut fs = RustFs::format(
         dev,
@@ -281,6 +301,14 @@ pub fn build_users_root_image_with_key(volume_key: &VolumeKey) -> Result<Vec<u8>
             fs.create(security, b"Users", NodeKind::RegularFile)?;
             let written = fs.write_at(security, b"Users", 0, text.as_bytes())?;
             if written != text.len() {
+                return Err(DriverError::DeviceFault);
+            }
+            // The group registry the kernel identity-table build resolves
+            // the planted account's primary gid against; without it the
+            // build fails closed on the dangling gid 0 reference.
+            fs.create(security, b"Groups", NodeKind::RegularFile)?;
+            let written = fs.write_at(security, b"Groups", 0, groups_text.as_bytes())?;
+            if written != groups_text.len() {
                 return Err(DriverError::DeviceFault);
             }
         }

@@ -65,16 +65,19 @@
 
 use rustos_abi::driver::block::Block;
 use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemSecurity, NodeKind};
-use rustos_abi::DriverError;
+use rustos_abi::{DriverError, Errno};
 use rustos_drv_fs_fat32::Fat32;
 use rustos_drv_fs_rustfs::{
     RustFs, UnlockDescriptor, VolumeKey, ROOT_UNLOCK_NAME, SYSTEM_VOLUME_KEY, UNLOCK_DESCRIPTOR_LEN,
 };
 use rustos_kernel_core::{
-    load_users_db_source, ConsoleRead, ConsoleWrite, HeldUsersDbSource, LateUsersDb, UsersLoadError,
+    build_identity_table, load_groups_db, load_users_db_source, ConsoleRead, ConsoleWrite,
+    GroupsLoadError, HeldUsersDbSource, LateIdentity, LateUsersDb, UsersDbSource, UsersLoadError,
 };
+use rustos_kernel_sec::IdentityTable;
 use rustos_log::{log, Event, EventId, Field, Level, Sink};
 use rustos_partition::{parse_partition_table, PartitionBlock, PartitionError, PartitionType};
+use rustos_users::UsersDb;
 use zeroize::Zeroizing;
 
 /// A mounted root volume, viewed as the read + security surface the
@@ -182,6 +185,18 @@ pub enum RootMountError {
     /// bounds-checked window could not be built (a
     /// fixed extent, validated against the device before any access).
     PartitionWindow(DriverError),
+    /// The volume mounted but `/System/Security/Groups` could not be read
+    /// or validated; [`load_groups_db`] has already audited the precise
+    /// cause. Without a group registry the kernel identity table cannot be
+    /// built, so the unlock fails closed rather than resolving caller groups
+    /// against an invented registry.
+    Groups(GroupsLoadError),
+    /// The user and group databases read but the authoritative identity
+    /// table could not be built (a dangling group reference, a duplicate id,
+    /// or — never on well-formed input — a re-parse of the validated users
+    /// text failing). No identity is installed, so the `fs_*` path resolves
+    /// no caller groups (fail closed).
+    Identity(Errno),
 }
 
 impl RootMountError {
@@ -199,7 +214,40 @@ impl RootMountError {
             Self::NoBootPartition => "no_boot_partition",
             Self::NoRootPartition => "no_root_partition",
             Self::PartitionWindow(_) => "partition_out_of_range",
+            Self::Groups(err) => err.cause(),
+            Self::Identity(_) => "identity_build_failed",
         }
+    }
+}
+
+/// The product of a successful root unlock.
+///
+/// Carries both halves the trusted unlock step publishes: the validated
+/// `users-v1` text served to `users_db_read`, and the authoritative
+/// user/group [`IdentityTable`] the userland `fs_*` path resolves a
+/// caller's groups against. They are produced together — from the one
+/// mounted encrypted root that holds both `/System/Security/Users` and
+/// `/System/Security/Groups` — so a single trusted step installs both
+/// (`PREREQUISITES.md` P-A).
+pub struct UnlockedRoot {
+    /// The validated `users-v1` text (zeroed on drop), installed into the
+    /// [`LateUsersDb`] cell and served to `users_db_read`.
+    pub users: HeldUsersDbSource,
+    /// The verified user/group identity table, installed into the
+    /// [`LateIdentity`] cell and consulted by the `fs_*` syscalls to resolve
+    /// a caller's primary and supplementary groups kernel-side.
+    pub identity: IdentityTable,
+}
+
+impl core::fmt::Debug for UnlockedRoot {
+    /// Redacted: the held users text is salted credential records and must
+    /// never reach a log or panic message (the `HeldUsersDbSource` Debug is
+    /// itself redacted). Only the presence of each half is printed.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("UnlockedRoot")
+            .field("users", &self.users)
+            .field("identity", &"<installed>")
+            .finish_non_exhaustive()
     }
 }
 
@@ -216,9 +264,14 @@ impl RootMountError {
 ///   [`load_users_db_source`]) the database-read decision are logged
 ///   through.
 ///
-/// On success the returned [`HeldUsersDbSource`] owns the validated
-/// `users-v1` text (zeroed on drop); the boot path
-/// `Box::leak`s it and installs it through `BootInfo::with_users_db`.
+/// On success the returned [`UnlockedRoot`] owns the validated `users-v1`
+/// text (zeroed on drop) and the verified user/group identity table; the
+/// boot path installs the former through `BootInfo::with_users_db` /
+/// [`LateUsersDb`] and the latter through [`LateIdentity`].
+///
+/// Both `/System/Security/Users` and `/System/Security/Groups` live on this
+/// one mounted encrypted root, so the identity table is built here, where
+/// the volume is open, rather than re-mounting it later.
 ///
 /// # Errors
 ///
@@ -230,7 +283,7 @@ pub fn unlock_root_and_load_users<B: Block>(
     passphrase: &[u8],
     block: B,
     audit: &dyn Sink,
-) -> Result<HeldUsersDbSource, RootMountError> {
+) -> Result<UnlockedRoot, RootMountError> {
     // 1. Decode the untrusted on-FAT descriptor fail-closed before its
     //    parameters drive any key derivation.
     let descriptor = match UnlockDescriptor::decode(descriptor_bytes) {
@@ -271,8 +324,30 @@ pub fn unlock_root_and_load_users<B: Block>(
 
     // 4. Read and validate the users database off the mounted root. This
     //    audits its own outcome (`UsersDbLoaded` / `UsersDbRejected`) and
-    //    retains the canonical text in the returned holder.
-    load_users_db_source(&mut fs, audit).map_err(RootMountError::Users)
+    //    retains the canonical text in the returned holder (served to
+    //    `users_db_read`).
+    let users = load_users_db_source(&mut fs, audit).map_err(RootMountError::Users)?;
+
+    // 5. Read the group registry off the same root and build the kernel's
+    //    authoritative identity table from the two databases together, so
+    //    the userland `fs_*` path can resolve a caller's groups kernel-side.
+    //    The held users text was just validated, so re-parsing it to feed
+    //    the identity build cannot fail on well-formed input; a parse
+    //    refusal fails the unlock closed rather than installing a partial
+    //    identity (no invented principal).
+    let groups = load_groups_db(&mut fs, audit).map_err(RootMountError::Groups)?;
+    let users_text = core::str::from_utf8(
+        users
+            .text()
+            .map_err(|_| RootMountError::Identity(Errno::NotImplemented))?,
+    )
+    .map_err(|_| RootMountError::Identity(Errno::BadMagic))?;
+    let users_db =
+        UsersDb::parse(users_text).map_err(|_| RootMountError::Identity(Errno::BadMagic))?;
+    let identity =
+        build_identity_table(&users_db, &groups, audit).map_err(RootMountError::Identity)?;
+
+    Ok(UnlockedRoot { users, identity })
 }
 
 /// Recover the `root.unlock` descriptor off the FAT boot partition and
@@ -312,7 +387,7 @@ pub fn mount_root_and_load_users<Boot, Root>(
     root_block: Root,
     passphrase: &[u8],
     audit: &dyn Sink,
-) -> Result<HeldUsersDbSource, RootMountError>
+) -> Result<UnlockedRoot, RootMountError>
 where
     Boot: Block,
     Root: Block,
@@ -376,7 +451,7 @@ pub fn mount_root_disk_and_load_users<Disk: Block>(
     mut disk: Disk,
     passphrase: &[u8],
     audit: &dyn Sink,
-) -> Result<HeldUsersDbSource, RootMountError> {
+) -> Result<UnlockedRoot, RootMountError> {
     // 1. Parse the untrusted partition table fail-closed (MBR or GPT).
     let table = match parse_partition_table(&mut disk) {
         Ok(table) => table,
@@ -593,6 +668,20 @@ pub const MAX_PASSPHRASE_LEN: usize = 256;
 /// [`UsersDbSource::text`]: rustos_kernel_core::UsersDbSource::text
 pub static LATE_USERS_DB: LateUsersDb = LateUsersDb::new();
 
+/// The set-once authoritative user/group identity table the `fs_*` syscalls
+/// resolve a caller's groups against (`PREREQUISITES.md` P-A), installed by
+/// the same trusted unlock step that installs [`LATE_USERS_DB`].
+///
+/// Held by the production [`MountedFilesystemService`](rustos_kernel_core::MountedFilesystemService)
+/// the dispatch hook serves the `fs_*` syscalls through. Until the unlock
+/// installs it, every `fs_*` group resolution fails closed
+/// ([`Errno::NotImplemented`]) — the credential-free table carries the
+/// uid → group/capability mapping the VFS needs, never password material,
+/// so the long-lived `&'static` copy leaks no secret. Defined beside
+/// [`LATE_USERS_DB`] so the two halves the one unlock publishes are one
+/// definition.
+pub static LATE_IDENTITY: LateIdentity = LateIdentity::new();
+
 /// The result of [`unlock_root_disk_interactively`].
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum UnlockOutcome {
@@ -628,11 +717,23 @@ enum PassphraseReadError {
 /// already published (the kthread runs once, so that is a logic error),
 /// and the rejected holder is zeroed inside `install`.
 fn finish_install(
-    source: HeldUsersDbSource,
+    unlocked: UnlockedRoot,
     late_db: &LateUsersDb,
+    late_identity: &LateIdentity,
     audit: &dyn Sink,
 ) -> UnlockOutcome {
-    if late_db.install(source).is_err() {
+    let UnlockedRoot { users, identity } = unlocked;
+    // Install the authoritative identity table first, so the `fs_*` group
+    // resolution is ready before `login` can act on the installed users
+    // database. Both cells are set-once; a refusal means something was
+    // already published (the kthread runs once, so that is a logic error),
+    // and the rejected value is dropped (the identity table carries no
+    // secret; the users holder is zeroed inside `install`).
+    if late_identity.install(identity).is_err() {
+        gave_up(audit, "identity_already_installed");
+        return UnlockOutcome::GaveUp;
+    }
+    if late_db.install(users).is_err() {
         gave_up(audit, "already_installed");
         return UnlockOutcome::GaveUp;
     }
@@ -700,6 +801,9 @@ fn finish_install(
 /// * `console` — the primary console's byte sink for the prompt.
 /// * `input` — the primary console's (blocking) byte source.
 /// * `late_db` — the set-once cell the loaded database is published into.
+/// * `late_identity` — the set-once cell the verified identity table is
+///   published into (the `fs_*` group-resolution source), installed by the
+///   same trusted step as `late_db`.
 /// * `audit` — the sink every decision is logged through; no passphrase, key, or volume byte is ever logged.
 /// * `on_resolved` — invoked exactly once, after the unlock reaches its
 ///   terminal outcome (installed or gave up) and on every internal return
@@ -719,6 +823,7 @@ pub fn unlock_root_disk_interactively<Disk: Block>(
     console: &dyn ConsoleWrite,
     input: &dyn ConsoleRead,
     late_db: &LateUsersDb,
+    late_identity: &LateIdentity,
     audit: &dyn Sink,
     on_resolved: &dyn Fn(),
 ) -> UnlockOutcome {
@@ -735,7 +840,8 @@ pub fn unlock_root_disk_interactively<Disk: Block>(
     // fail-closed branches ran it), wedging both the keyboard and serial
     // `login` after a good unlock; threading it through `on_resolved` makes
     // forgetting it impossible.
-    let outcome = unlock_root_disk_interactively_impl(disk, console, input, late_db, audit);
+    let outcome =
+        unlock_root_disk_interactively_impl(disk, console, input, late_db, late_identity, audit);
     on_resolved();
     outcome
 }
@@ -749,6 +855,7 @@ fn unlock_root_disk_interactively_impl<Disk: Block>(
     console: &dyn ConsoleWrite,
     input: &dyn ConsoleRead,
     late_db: &LateUsersDb,
+    late_identity: &LateIdentity,
     audit: &dyn Sink,
 ) -> UnlockOutcome {
     // The disk is borrowed mutably for each attempt through the
@@ -766,7 +873,7 @@ fn unlock_root_disk_interactively_impl<Disk: Block>(
     // non-blank simply fails this attempt — the master key never unwraps,
     // exactly like any wrong passphrase, so it is no oracle — and falls through to the interactive prompt below.
     match mount_root_disk_and_load_users(&mut disk, b"", audit) {
-        Ok(source) => return finish_install(source, late_db, audit),
+        Ok(unlocked) => return finish_install(unlocked, late_db, late_identity, audit),
         Err(RootMountError::Mount(DriverError::PermissionDenied)) => {
             // Non-blank passphrase: prompt the operator interactively.
         }
@@ -806,7 +913,7 @@ fn unlock_root_disk_interactively_impl<Disk: Block>(
         };
 
         match mount_root_disk_and_load_users(&mut disk, &passphrase[..len], audit) {
-            Ok(source) => return finish_install(source, late_db, audit),
+            Ok(unlocked) => return finish_install(unlocked, late_db, late_identity, audit),
             Err(RootMountError::Mount(DriverError::PermissionDenied)) => {
                 // Wrong passphrase: the master key never unwrapped. Bounded
                 // retry — never an oracle and never an infinite loop. Falls through to the next loop
@@ -1139,7 +1246,8 @@ mod tests {
         let sink = RecordingSink::new();
 
         let source = unlock_root_and_load_users(&descriptor_bytes, PASSPHRASE, block, &sink)
-            .expect("the correct passphrase unlocks the root and loads the database");
+            .expect("the correct passphrase unlocks the root and loads the database")
+            .users;
 
         let text = source.text().expect("a loaded holder serves its text");
         let serialised = image::users_db_text().expect("fixture text serialises");
@@ -1406,7 +1514,8 @@ mod tests {
         let root = image::VecBlock::from_bytes(root_bytes);
         let sink = RecordingSink::new();
         let source = unlock_root_and_load_users(&read, PASSPHRASE, root, &sink)
-            .expect("the FAT-read descriptor unlocks the root");
+            .expect("the FAT-read descriptor unlocks the root")
+            .users;
         assert!(source.text().is_ok(), "a database is served");
     }
 
@@ -1474,7 +1583,8 @@ mod tests {
         let sink = RecordingSink::new();
 
         let source = mount_root_and_load_users(boot, root, PASSPHRASE, &sink)
-            .expect("the descriptor + passphrase unlock the root and load the database");
+            .expect("the descriptor + passphrase unlock the root and load the database")
+            .users;
 
         let text = source.text().expect("a loaded holder serves its text");
         let db = UsersDb::parse(core::str::from_utf8(text).expect("utf-8"))
@@ -1549,7 +1659,8 @@ mod tests {
         let sink = RecordingSink::new();
 
         let source = mount_root_disk_and_load_users(disk, disk_image::PASSPHRASE, &sink)
-            .expect("the disk splits and the root unlocks end to end");
+            .expect("the disk splits and the root unlocks end to end")
+            .users;
 
         let text = source.text().expect("a loaded holder serves its text");
         let db = UsersDb::parse(core::str::from_utf8(text).expect("utf-8"))
@@ -1705,6 +1816,7 @@ mod tests {
         // authenticate (`plans/PI.md` P11 Chunk B-2).
         let input = ScriptInput::new(script(&[PASSPHRASE]));
         let late = LateUsersDb::new();
+        let late_identity = LateIdentity::new();
         let sink = RecordingSink::new();
 
         let outcome = unlock_root_disk_interactively(
@@ -1712,6 +1824,7 @@ mod tests {
             &AcceptConsole,
             &input,
             &late,
+            &late_identity,
             &sink,
             &|| {},
         );
@@ -1753,6 +1866,7 @@ mod tests {
             .expect("the blank-passphrase image assembles");
         let disk = FatVecBlock { store: bytes };
         let late = LateUsersDb::new();
+        let late_identity = LateIdentity::new();
         let sink = RecordingSink::new();
 
         let outcome = unlock_root_disk_interactively(
@@ -1760,6 +1874,7 @@ mod tests {
             &AcceptConsole,
             &ScriptInput::failing(),
             &late,
+            &late_identity,
             &sink,
             &|| {},
         );
@@ -1795,6 +1910,7 @@ mod tests {
         // installs — the same disk is reused across attempts.
         let input = ScriptInput::new(script(&[b"nope", b"still wrong", PASSPHRASE]));
         let late = LateUsersDb::new();
+        let late_identity = LateIdentity::new();
         let sink = RecordingSink::new();
 
         let outcome = unlock_root_disk_interactively(
@@ -1802,6 +1918,7 @@ mod tests {
             &AcceptConsole,
             &input,
             &late,
+            &late_identity,
             &sink,
             &|| {},
         );
@@ -1821,6 +1938,7 @@ mod tests {
         let lines = alloc::vec![b"wrong" as &[u8]; MAX_UNLOCK_ATTEMPTS as usize];
         let input = ScriptInput::new(script(&lines));
         let late = LateUsersDb::new();
+        let late_identity = LateIdentity::new();
         let sink = RecordingSink::new();
 
         let outcome = unlock_root_disk_interactively(
@@ -1828,6 +1946,7 @@ mod tests {
             &AcceptConsole,
             &input,
             &late,
+            &late_identity,
             &sink,
             &|| {},
         );
@@ -1855,6 +1974,7 @@ mod tests {
         // fails closed.
         let input = ScriptInput::new(script(&[PASSPHRASE]));
         let late = LateUsersDb::new();
+        let late_identity = LateIdentity::new();
         let sink = RecordingSink::new();
 
         let outcome = unlock_root_disk_interactively(
@@ -1862,6 +1982,7 @@ mod tests {
             &AcceptConsole,
             &input,
             &late,
+            &late_identity,
             &sink,
             &|| {},
         );
@@ -1896,6 +2017,7 @@ mod tests {
             &AcceptConsole,
             &ScriptInput::new(script(&[PASSPHRASE])),
             &LateUsersDb::new(),
+            &LateIdentity::new(),
             &RecordingSink::new(),
             &|| releases.set(releases.get() + 1),
         );
@@ -1913,6 +2035,7 @@ mod tests {
             &AcceptConsole,
             &ScriptInput::new(script(&[PASSPHRASE])),
             &LateUsersDb::new(),
+            &LateIdentity::new(),
             &RecordingSink::new(),
             &|| releases.set(releases.get() + 1),
         );
@@ -1931,6 +2054,7 @@ mod tests {
         // fabricated secret, and never touches the disk.
         let input = ScriptInput::failing();
         let late = LateUsersDb::new();
+        let late_identity = LateIdentity::new();
         let sink = RecordingSink::new();
 
         let outcome = unlock_root_disk_interactively(
@@ -1938,6 +2062,7 @@ mod tests {
             &AcceptConsole,
             &input,
             &late,
+            &late_identity,
             &sink,
             &|| {},
         );
@@ -1960,6 +2085,7 @@ mod tests {
         let over_long = alloc::vec![b'a'; MAX_PASSPHRASE_LEN + 16];
         let input = ScriptInput::new(script(&[&over_long, PASSPHRASE]));
         let late = LateUsersDb::new();
+        let late_identity = LateIdentity::new();
         let sink = RecordingSink::new();
 
         let outcome = unlock_root_disk_interactively(
@@ -1967,6 +2093,7 @@ mod tests {
             &AcceptConsole,
             &input,
             &late,
+            &late_identity,
             &sink,
             &|| {},
         );

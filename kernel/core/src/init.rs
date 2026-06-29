@@ -920,6 +920,7 @@ fn run_phases<A: KernelArch>(
         input_focus,
         users_db,
         hw_tree,
+        filesystem,
         ..
     } = boot;
 
@@ -1107,6 +1108,11 @@ fn run_phases<A: KernelArch>(
         // (Design D); the default `NULL_HW_TREE` keeps `hw_tree_read` /
         // `hw_tree_wait` fail-closed when no inventory was seeded.
         .with_hw_tree(hw_tree)
+        // Serve the `fs_*` syscalls through the disk-backed filesystem
+        // service the boot path installed (`PREREQUISITES.md` P-A); the
+        // default `NULL_FILESYSTEM` keeps every `fs_*` syscall fail-closed
+        // when no volume was mounted.
+        .with_filesystem(filesystem)
         // Serve `log_emit` through the kernel diagnostic sink; the audit sink
         // stays kernel-only.
         .with_log_sink(log_sink)

@@ -886,7 +886,16 @@ fn enter_kernel_core(
     // `HW_TREE` the boot path seeds and the floor bus bring-up appends to,
     // so the user-space device manager observes the same inventory the
     // kernel discovered (Design D).
-    .with_hw_tree(&crate::hwtree_store::HW_TREE_SOURCE);
+    .with_hw_tree(&crate::hwtree_store::HW_TREE_SOURCE)
+    // Serve the `fs_*` syscalls through the production filesystem service
+    // (`PREREQUISITES.md` P-A): it routes each operation through the secured
+    // VFS against the late-installed read-only `/System` mount and resolves
+    // caller groups against the late-installed identity table. Both cells
+    // fail closed (`NotImplemented`) until the disk-owning task publishes the
+    // `/System` window (`crate::system_mount::install_system_mount`) and the
+    // encrypted-root unlock publishes the identity table, so wiring the hook
+    // here changes no boot behaviour until those installs land.
+    .with_filesystem(&crate::system_mount::FS_SERVICE);
     if boot_info.validate().is_err() {
         halt_current_cpu()
     }

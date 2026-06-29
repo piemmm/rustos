@@ -207,6 +207,20 @@ pub mod driver_spawn_loader;
 #[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64"))]
 pub mod system_files;
 
+// The boot-time install of the read-only `/System` volume as the userland
+// `fs_*` filesystem mount (`PREREQUISITES.md` P-A): the type-erased
+// `KernelFs` mount driver, the `LATE_FILESYSTEM` / `FS_SERVICE` statics the
+// dispatch hook serves the `fs_*` syscalls through, and `install_system_mount`
+// (a second, park-safe `'static` window onto the boot disk's `/System`
+// volume, published once the disk is up). The production identity half is
+// installed by `root_mount` at the encrypted-root unlock. It names
+// `rustos_drv_fs_rustfs` and the kernel-core mount service, and consumes the
+// `shared_block` window, so it is gated like `shared_block` on the two
+// instruction sets where the boot path compiles; its bounds/forwarding unit
+// tests run on the CI host.
+#[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64"))]
+pub mod system_mount;
+
 // The kernel-resident `/System` driver-store IPC *server* (Design D
 // D2b-2c): the arch-neutral request→reply translation that drains a
 // `rustos_kernel_ipc::CallEndpoint` and serves each

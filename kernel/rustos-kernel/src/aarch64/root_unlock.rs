@@ -844,6 +844,7 @@ fn finish_unlock<B: Block + 'static>(
             console_write,
             &reader,
             &LATE_USERS_DB,
+            &crate::root_mount::LATE_IDENTITY,
             audit,
             &release_console0_to_login,
         ) {
@@ -878,6 +879,14 @@ fn finish_unlock<B: Block + 'static>(
             release_console0_to_login();
         }
     }
+
+    // Publish the read-only `/System` volume as the userland `fs_*` mount
+    // before entering the serve loop: a second, park-safe `'static` window
+    // onto the same `'static`-leaked disk (`PREREQUISITES.md` P-A). The store
+    // serve loop below keeps its own independent window, so the two never
+    // conflict. Fail-soft and audited: a disk with no readable `/System`
+    // volume simply leaves the `fs_*` syscalls failing closed.
+    crate::system_mount::install_system_mount(store, audit);
 
     // The driver-signing trust anchor the autoload load gate verifies each
     // winning bundle against — the kernel's own embedded key, the single

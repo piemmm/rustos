@@ -3851,6 +3851,22 @@ where
         self
     }
 
+    /// Install the disk-backed filesystem service the `fs_*` syscalls route
+    /// through, consuming and returning `self` (`PREREQUISITES.md` P-A).
+    ///
+    /// The hook-level mirror of [`KernelSyscallHandlers::with_filesystem`]:
+    /// called once by the boot path that owns a mounted volume. A boot path
+    /// that mounts no volume simply never calls it and every `fs_*` syscall
+    /// stays fail-closed through [`NULL_FILESYSTEM`].
+    #[must_use]
+    pub fn with_filesystem(
+        mut self,
+        filesystem: &'static (dyn FilesystemService + 'static),
+    ) -> Self {
+        self.handlers = self.handlers.with_filesystem(filesystem);
+        self
+    }
+
     /// Install the kernel's diagnostic log sink the `log_emit` syscall emits
     /// user-space records through, consuming and returning `self`.
     ///

@@ -18,7 +18,7 @@ use rustos_abi::driver::virtio::VirtioHost;
 use rustos_abi::Errno;
 use rustos_drv_storage_virtio_blk::{register as virtio_blk_register, VirtioBlk};
 use rustos_kernel::root_mount::{unlock_root_disk_interactively, UnlockOutcome};
-use rustos_kernel_core::{ConsoleRead, LateUsersDb, NullConsole, UsersDbSource};
+use rustos_kernel_core::{ConsoleRead, LateIdentity, LateUsersDb, NullConsole, UsersDbSource};
 use rustos_test_encrypted_root_image as disk_image;
 use rustos_test_virtio_qemu_support::{
     define_mmio_boot_harness_aarch64, run_virtio_mmio_scenario, FixedSpawner, QemuEnv,
@@ -92,6 +92,12 @@ fn root_unlock_login(
     // the same, and a local cell keeps the one-shot scenario free of global
     // state.
     let late = LateUsersDb::new();
+    // A fresh identity-table cell stands in for the boot-wired
+    // `rustos_kernel::root_mount::LATE_IDENTITY`: the unlock builds and
+    // installs the verified user/group identity table into it from the
+    // planted root's `/System/Security/{Users,Groups}` in the same step it
+    // installs the users database.
+    let late_identity = LateIdentity::new();
     let input = ScriptedPassphrase::new();
 
     // `NullConsole` swallows the prompt bytes (the test asserts the unlock
@@ -107,10 +113,15 @@ fn root_unlock_login(
     // end-to-end witness of the fix that a *successful* unlock hands the
     // console back (it previously did not, wedging `login`).
     let released = AtomicBool::new(false);
-    let outcome =
-        unlock_root_disk_interactively(blk, &NullConsole, &input, &late, env.audit_sink(), &|| {
-            released.store(true, Ordering::Release)
-        });
+    let outcome = unlock_root_disk_interactively(
+        blk,
+        &NullConsole,
+        &input,
+        &late,
+        &late_identity,
+        env.audit_sink(),
+        &|| released.store(true, Ordering::Release),
+    );
     if outcome != UnlockOutcome::Installed {
         return Err("interactive unlock did not install a database");
     }

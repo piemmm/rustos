@@ -34,6 +34,7 @@ use rustos_log::{Level, Sink};
 
 use crate::console::{ConsoleDevice, NO_CONSOLES};
 use crate::dispatch_slot::DispatchCallbackSlot;
+use crate::fs::{FilesystemService, NULL_FILESYSTEM};
 use crate::hwtree::{HwTreeSource, NULL_HW_TREE};
 use crate::input_focus::{InputFocus, NULL_INPUT_FOCUS};
 use crate::spawn::{
@@ -647,6 +648,20 @@ where
     /// of the running kernel, exactly like the users database.
     pub hw_tree: &'static (dyn HwTreeSource + 'static),
 
+    /// The kernel filesystem service the `fs_*` syscalls route through
+    /// (`PREREQUISITES.md` P-A).
+    ///
+    /// Defaults to [`NULL_FILESYSTEM`], whose every operation fails closed
+    /// with [`rustos_abi::Errno::NotImplemented`]: a boot path that has not
+    /// mounted a volume leaves this default and every `fs_*` syscall announces
+    /// an inert interface rather than fabricating a handle or a read. A boot
+    /// path that owns a mounted volume installs the disk-backed service
+    /// through [`Self::with_filesystem`]; `kernel_main` then threads it into
+    /// the production dispatch hook. Held as a `'static` borrow because the
+    /// mounted filesystem lives for the lifetime of the running kernel,
+    /// exactly like the users database.
+    pub filesystem: &'static (dyn FilesystemService + 'static),
+
     // Holds the lifetime parameter (covers `command_line`). The PhantomData
     // is invariant in `'a` so callers cannot accidentally extend the
     // borrow.
@@ -718,6 +733,11 @@ where
             // `with_hw_tree` (Design D): `hw_tree_read` / `hw_tree_wait`
             // fail closed through `NULL_HW_TREE`.
             hw_tree: &NULL_HW_TREE,
+            // Filesystem service unwired until a boot path mounts a volume
+            // and installs the disk-backed service through `with_filesystem`
+            // (`PREREQUISITES.md` P-A): every `fs_*` syscall fails closed
+            // through `NULL_FILESYSTEM`.
+            filesystem: &NULL_FILESYSTEM,
             _marker: core::marker::PhantomData,
         }
     }
@@ -831,6 +851,25 @@ where
     #[must_use]
     pub fn with_hw_tree(mut self, hw_tree: &'static (dyn HwTreeSource + 'static)) -> Self {
         self.hw_tree = hw_tree;
+        self
+    }
+
+    /// Install the disk-backed filesystem service the `fs_*` syscalls route
+    /// through, consuming and returning `self` (`PREREQUISITES.md` P-A).
+    ///
+    /// Called by a boot path that owns a mounted volume, handing the
+    /// `Box::leak`'d production service here. Until this is called the
+    /// handover holds [`NULL_FILESYSTEM`] and every `fs_*` syscall fails
+    /// closed with [`rustos_abi::Errno::NotImplemented`], so userland sees an
+    /// inert filesystem rather than a fabricated handle. The service must be
+    /// `'static`: it lives for the lifetime of the running kernel, exactly
+    /// like the users database.
+    #[must_use]
+    pub fn with_filesystem(
+        mut self,
+        filesystem: &'static (dyn FilesystemService + 'static),
+    ) -> Self {
+        self.filesystem = filesystem;
         self
     }
 

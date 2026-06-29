@@ -104,6 +104,13 @@ rustos-util = { path = "../../lib/util", version = "=0.0.0" }
 # composition is architecture-neutral, so it is a common dependency and its
 # host tests run on the CI host.
 rustos-drv-fs-rustfs = { path = "../../drivers/filesystem/rustfs", version = "=0.0.0" }
+# The user-database parser (`AGENTS.md` §2.2): the root-unlock path re-parses
+# the validated `users-v1` text it just loaded to feed the kernel identity
+# table build (`kernel/core::build_identity_table`), reusing the one
+# definition the users database is parsed and serialised through rather than
+# a second parser. First-party, architecture-neutral; host-tested on the CI
+# host.
+rustos-users = { path = "../../lib/users", version = "=0.0.0" }
 # The FAT boot partition holds the plaintext `root.unlock` key-derivation
 # descriptor the boot path reads *before* the encrypted root is mounted
 # (`AGENTS.md` §11, `plans/PI.md` P11 Chunk B). `root_mount` reads it back
