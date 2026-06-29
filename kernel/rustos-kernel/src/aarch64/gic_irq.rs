@@ -56,12 +56,8 @@ use rustos_arch_aarch64::gic::{GicController, GicMmio};
 use rustos_kernel_core::IrqRouting;
 use rustos_kernel_irq::{IrqController, IrqTable, MaskError};
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
-use rustos_log::{log, Event, EventId, Field, Level};
-#[cfg(all(freestanding, kernel_isa = "aarch64"))]
 use rustos_sync::once::Once;
 use rustos_sync::once::OnceCell;
-#[cfg(all(freestanding, kernel_isa = "aarch64"))]
-use rustos_util::fmt::format_hex_u64;
 
 /// Set while the console UART's receive line is **masked at the GIC because
 /// its receive queue was full** (`drain_uart_into_console_queue`): the ISR
@@ -86,51 +82,6 @@ static UART_RX_MASKED: AtomicBool = AtomicBool::new(false);
 /// diverge.
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 const PREEMPT_TICK_HZ: u64 = rustos_arch_api::timer::DEFAULT_PREEMPT_QUANTUM_HZ;
-
-/// Diagnostic event for the BCM2711 root-complex MSI path used by the Pi 4
-/// VL805 xHCI controller. It is intentionally narrow: one line for vector
-/// allocation, one for vector re-arm, and one when the shared MSI SPI is
-/// delivered, so a metal log can identify whether a USB completion reached the
-/// MSI controller without adding a polling path.
-#[cfg(all(freestanding, kernel_isa = "aarch64"))]
-const BRCM_MSI_DIAG: EventId = EventId(4156);
-
-#[cfg(all(freestanding, kernel_isa = "aarch64"))]
-fn log_brcm_msi_diag(message: &'static str, spi: u32, line: u32, vector: u32, pending: u32) {
-    let mut spi_buf = [0u8; 16];
-    let mut line_buf = [0u8; 16];
-    let mut vector_buf = [0u8; 16];
-    let mut pending_buf = [0u8; 16];
-    log(
-        &rustos_arch_aarch64::serial::SERIAL_SINK,
-        &Event {
-            // TEMPORARY: Info-level so a metal capture (INFO/WARN only) shows
-            // every MSI delivery and vector re-arm, to localise the "first key
-            // then silent" fault to the controller, the MSI demux, or re-arm.
-            level: Level::Info,
-            id: BRCM_MSI_DIAG,
-            message,
-            fields: &[
-                Field {
-                    key: "spi_hex",
-                    value: format_hex_u64(u64::from(spi), &mut spi_buf),
-                },
-                Field {
-                    key: "line_hex",
-                    value: format_hex_u64(u64::from(line), &mut line_buf),
-                },
-                Field {
-                    key: "vector_hex",
-                    value: format_hex_u64(u64::from(vector), &mut vector_buf),
-                },
-                Field {
-                    key: "pending_hex",
-                    value: format_hex_u64(u64::from(pending), &mut pending_buf),
-                },
-            ],
-        },
-    );
-}
 
 /// A kernel-side [`IrqController`] over the arch port's [`GicController`].
 ///
@@ -420,14 +371,6 @@ impl IrqController for CompositeIrqController {
             // `INTR2` bit for the next message.
             Some(vector) => {
                 BRCM_MSI.unmask(vector);
-                let spi = BRCM_MSI_SPI.get().ok().flatten().copied().unwrap_or(0);
-                log_brcm_msi_diag(
-                    "brcm-msi: vector rearmed",
-                    spi,
-                    line,
-                    vector,
-                    BRCM_MSI.pending(),
-                );
                 Ok(())
             }
             None => GIC_IRQ_CONTROLLER.rearm(line),
@@ -492,13 +435,6 @@ pub fn allocate_msi_vector() -> Result<rustos_abi::MsiAllocation, rustos_abi::Er
         }
     };
     let (address, data) = rustos_arch_aarch64::brcm_msi::msi_message(vector);
-    log_brcm_msi_diag(
-        "brcm-msi: vector allocated",
-        spi,
-        MSI_LINE_BASE + vector,
-        vector,
-        BRCM_MSI.pending(),
-    );
     Ok(rustos_abi::MsiAllocation::new(
         address,
         data,
@@ -576,17 +512,7 @@ pub extern "C" fn production_device_irq_dispatch(intid: u32) {
     // stray message cannot wedge the line.
     if BRCM_MSI_SPI.get().ok().flatten().copied() == Some(intid) {
         let pending = BRCM_MSI.pending();
-        if pending == 0 {
-            log_brcm_msi_diag("brcm-msi: shared spi delivered", intid, 0, 0, pending);
-        }
         for vector in rustos_arch_aarch64::brcm_msi::pending_vectors(pending) {
-            log_brcm_msi_diag(
-                "brcm-msi: vector pending on shared spi",
-                intid,
-                MSI_LINE_BASE + vector,
-                vector,
-                pending,
-            );
             let _ = table.fire(MSI_LINE_BASE + vector, &COMPOSITE_IRQ_CONTROLLER);
             BRCM_MSI.clear(vector);
         }

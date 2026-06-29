@@ -26,7 +26,7 @@ use rustos_abi::{Delay, DriverError, HwDeviceClass, HwMatchKey, HwNode};
 
 use crate::ring::{EventRingCursor, ProducerRing, PushOutcome};
 use crate::trb::{self, CompletionCode, Trb, TrbType};
-use crate::{DmaProgram, InterrupterSnapshot, Xhci, XhciHost};
+use crate::{DmaProgram, Xhci, XhciHost};
 
 /// Device-shared memory the engine and the controller both see.
 ///
@@ -1091,20 +1091,6 @@ pub struct UsbDevice<H: XhciHost, M: DmaRegion> {
     /// nor the hub endpoint and faulted the event-ring consumers, wedging the
     /// hub status-change watch so a later re-plug went unseen.
     freed_slot: u8,
-    /// Count of trailing transfer events drained for [`Self::freed_slot`], for
-    /// a hot-removal diagnostic ([`Self::stale_freed_event_count`]).
-    stale_freed_events: u32,
-    /// Count of events [`Self::poll_hub_completion`] drained because they were
-    /// neither the hub status-change completion it sought, a parkable keyboard
-    /// report, nor a recognised freed-slot completion — an informational
-    /// controller event (device notification, host-controller event, MFINDEX
-    /// wrap, …) or a keyboard report arriving before the previous one was
-    /// drained. That opportunistic poll must never fault on such an event: a
-    /// fault would make [`Self::next_hub_change`] return before the
-    /// status-change endpoint is re-armed, silencing downstream hotplug
-    /// permanently on a single stray event. Counted for the hot-plug
-    /// diagnostic ([`Self::drained_foreign_event_count`]).
-    drained_foreign_events: u32,
     /// The last enumeration step [`Self::enumerate_hid`] entered, for a
     /// one-shot fault-localising diagnostic ([`Self::enum_stage`]).
     stage: EnumStage,
@@ -1136,26 +1122,6 @@ pub struct UsbDevice<H: XhciHost, M: DmaRegion> {
     /// stall code) can still be read when that confirmation itself faults.
     /// `0` until an interrupt-IN report has been rejected.
     last_report_fault_code: u8,
-    /// Whether the most recent device-slot teardown's Disable Slot command was
-    /// confirmed by the controller (a Command Completion with a Success code),
-    /// for [`Self::slot_disable_confirmed`].
-    ///
-    /// A hot-removal teardown frees the slot **best-effort**: the gone device's
-    /// (often flaky) hub frequently cannot let the controller post the Disable
-    /// Slot completion in time, so the local slot state is cleared regardless.
-    /// This records whether the controller did confirm, so a metal capture can
-    /// tell whether the command ring still completes commands after the fault
-    /// that triggered the removal. `true` until the first unconfirmed teardown.
-    last_disable_confirmed: bool,
-    /// TEMPORARY metal diagnostic: the most recent event
-    /// [`Self::poll_hub_completion`] drained as *foreign* (neither the hub's
-    /// status-change completion, a parkable keyboard report, nor a recognised
-    /// freed-slot completion), recorded as `(raw TRB type, slot id, endpoint
-    /// id, raw completion code)`. On the Pi 4 the controller posts an
-    /// unexplained second event on the first keystroke; capturing what it is
-    /// localises the "first key then silent" fault. `(0, 0, 0, 0)` until one is
-    /// drained. Read through [`Self::last_foreign_event`].
-    last_foreign_event: (u8, u8, u8, u8),
 }
 
 impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
@@ -1216,15 +1182,11 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             pending_kbd: None,
             pending_hub: None,
             freed_slot: 0,
-            stale_freed_events: 0,
-            drained_foreign_events: 0,
             stage: EnumStage::Scan,
             last_completion: 0,
             last_event_type: 0,
             last_reject: 0,
             last_report_fault_code: 0,
-            last_disable_confirmed: true,
-            last_foreign_event: (0, 0, 0, 0),
         })
     }
 
@@ -1349,19 +1311,6 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     /// [`DriverError::DeviceFault`] if the register window rejects a write.
     pub fn enable_interrupter(&mut self) -> Result<(), DriverError> {
         self.xhci.enable_interrupter()
-    }
-
-    /// Read the controller interrupter's state without acknowledging it.
-    ///
-    /// Used by the HCD's bounded diagnostics around a held interrupt-IN URB.
-    /// The snapshot is observational only and does not poll the event ring or
-    /// alter interrupt delivery.
-    ///
-    /// # Errors
-    ///
-    /// [`DriverError::DeviceFault`] if the register window rejects a read.
-    pub fn interrupter_snapshot(&mut self) -> Result<InterrupterSnapshot, DriverError> {
-        self.xhci.interrupter_snapshot()
     }
 
     /// Acknowledge the controller interrupter's pending interrupt
@@ -1525,7 +1474,6 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             return Ok(true);
         }
         if self.is_stale_freed_transfer(event) {
-            self.stale_freed_events = self.stale_freed_events.saturating_add(1);
             return Ok(true);
         }
         Ok(false)
@@ -2649,10 +2597,8 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     /// the teardown: it posts the command, waits within budget, and retires the
     /// command-ring slot whether or not the completion was observed — keeping
     /// the command ring consistent for the next enumeration. A late completion
-    /// is drained as a freed-slot event by the event-ring consumers. The
-    /// observed outcome is recorded in [`Self::last_disable_confirmed`].
+    /// is drained as a freed-slot event by the event-ring consumers.
     fn disable_slot_best_effort(&mut self, slot: u8) {
-        self.last_disable_confirmed = false;
         self.reset_event_diagnostics();
         let command = Trb::new(TrbType::DisableSlot, 0, 0, trb::control_slot(slot));
         let Ok(outcome) = self.command_ring.push(command) else {
@@ -2670,10 +2616,10 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             let _ = self.command_ring.retire_one();
             return;
         }
-        if let Ok(event) = self.await_event_for(&[outcome.address]) {
-            self.last_disable_confirmed = event.trb_type() == Ok(TrbType::CommandCompletion)
-                && event.completion_code() == Ok(CompletionCode::Success);
-        }
+        // Wait within budget for the Disable Slot completion so the command
+        // ring is left consistent for the next enumeration; a late completion
+        // is drained as a freed-slot event by the event-ring consumers instead.
+        let _ = self.await_event_for(&[outcome.address]);
         // Retire our producer slot regardless: a removed device's teardown must
         // not leave the command ring wedged, and any late completion is drained
         // as a freed-slot event rather than retired here a second time.
@@ -2746,46 +2692,6 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     #[must_use]
     pub const fn device_present(&self) -> bool {
         self.device_slot != 0
-    }
-
-    /// Number of trailing transfer events drained for a just-freed device slot
-    /// since bring-up (a hot-removal diagnostic). A non-zero count after a
-    /// disconnect confirms the controller posted late completions for the gone
-    /// device that the hub watch correctly tolerated rather than faulting on.
-    #[must_use]
-    pub const fn stale_freed_event_count(&self) -> u32 {
-        self.stale_freed_events
-    }
-
-    /// Number of events the opportunistic hub-completion poll drained rather
-    /// than faulted because they were neither its hub status-change completion,
-    /// a parkable keyboard report, nor a freed-slot completion (a hot-plug
-    /// diagnostic). A non-zero count means a stray controller event reached the
-    /// shared event ring and was tolerated — keeping the status-change watch
-    /// live — instead of silencing downstream hotplug.
-    #[must_use]
-    pub const fn drained_foreign_event_count(&self) -> u32 {
-        self.drained_foreign_events
-    }
-
-    /// TEMPORARY metal diagnostic: record the identity of an event the
-    /// hub-completion poll drained as foreign, so the HCD can log *what* the
-    /// unexplained extra Pi 4 first-keystroke event is.
-    fn record_foreign_event(&mut self, event: Trb) {
-        self.last_foreign_event = (
-            event.trb_type_raw(),
-            event.slot_id(),
-            event.endpoint_id(),
-            event.completion_code_raw(),
-        );
-    }
-
-    /// TEMPORARY metal diagnostic: the most recent foreign event drained by the
-    /// hub-completion poll, as `(raw TRB type, slot id, endpoint id, raw
-    /// completion code)`. `(0, 0, 0, 0)` until one is drained.
-    #[must_use]
-    pub const fn last_foreign_event(&self) -> (u8, u8, u8, u8) {
-        self.last_foreign_event
     }
 
     /// Confirm and detach a watched downstream device whose interrupt endpoint
@@ -2976,31 +2882,24 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             if event.trb_type() == Ok(TrbType::TransferEvent) && self.is_kbd_async(event) {
                 if self.pending_kbd.is_none() {
                     self.pending_kbd = Some(event);
-                } else {
-                    self.record_foreign_event(event);
-                    self.drained_foreign_events = self.drained_foreign_events.saturating_add(1);
                 }
-                continue;
-            }
-            // Everything else is DRAINED and the scan continues — never faulted.
-            // This poll is opportunistic: faulting here would make
-            // `next_hub_change` return (its `?`) before the status-change
-            // endpoint is re-armed, leaving it with no outstanding transfer so
-            // the hub can never post another report — downstream hotplug is
-            // then silenced permanently on a single stray event (the metal
-            // symptom: the controller goes quiet after the first report). The
-            // shared event ring is not a security boundary, so an event this
-            // poll does not model fails *open to draining* (advancing the ring),
-            // not closed: an informational controller event (port-status-change,
-            // device notification, host-controller event, MFINDEX wrap, …) is
-            // skipped, and a trailing completion for a just-freed slot is
-            // counted as such. A genuine fault still surfaces synchronously
-            // through the control/command waits that follow.
-            if self.is_stale_freed_transfer(event) {
-                self.stale_freed_events = self.stale_freed_events.saturating_add(1);
-            } else if event.trb_type() != Ok(TrbType::PortStatusChange) {
-                self.record_foreign_event(event);
-                self.drained_foreign_events = self.drained_foreign_events.saturating_add(1);
+            } else {
+                // Everything else is DRAINED (the `poll_event` dequeue already
+                // advanced the ring) and the scan continues — never faulted.
+                // This poll is opportunistic: faulting here would make
+                // `next_hub_change` return (its `?`) before the status-change
+                // endpoint is re-armed, leaving it with no outstanding transfer
+                // so the hub can never post another report — downstream hotplug
+                // is then silenced permanently on a single stray event (the
+                // metal symptom: the controller goes quiet after the first
+                // report). The shared event ring is not a security boundary, so
+                // an event this poll does not model fails *open to draining*
+                // (advancing the ring), not closed: an informational controller
+                // event (port-status-change, device notification,
+                // host-controller event, MFINDEX wrap, …) and a trailing
+                // completion for a just-freed slot are both drained. A genuine
+                // fault still surfaces synchronously through the control/command
+                // waits that follow.
             }
         }
         Ok(false)
@@ -3182,18 +3081,6 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     #[must_use]
     pub const fn last_report_fault_code(&self) -> u8 {
         self.last_report_fault_code
-    }
-
-    /// Whether the most recent device-slot teardown's Disable Slot command was
-    /// confirmed by the controller (`true` until the first unconfirmed one).
-    ///
-    /// A hot-removal teardown frees the slot best-effort, so a `false` here
-    /// after a disconnect tells a metal capture the controller did not post the
-    /// Disable Slot completion in time — the slot was still freed locally so a
-    /// re-plug can re-enumerate.
-    #[must_use]
-    pub const fn slot_disable_confirmed(&self) -> bool {
-        self.last_disable_confirmed
     }
 
     /// Read the controller's `USBCMD` for a one-shot bring-up diagnostic

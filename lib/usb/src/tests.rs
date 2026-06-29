@@ -3414,33 +3414,6 @@ fn enable_interrupter_clears_stale_global_status_before_arming() {
 }
 
 #[test]
-fn interrupter_snapshot_reads_status_without_acknowledging() {
-    let mem = shared_mem();
-    let mut device = started_device(MockXhci::with_device(&mem), &mem);
-    device.enumerate_hid(1).expect("enumeration succeeds");
-    device.enable_interrupter().expect("enable interrupter");
-    device.host_mut().hse_latched = true;
-    device.host_mut().eint_latched = true;
-    device.host_mut().iman |= regs::IMAN_IP;
-
-    let snapshot = device
-        .interrupter_snapshot()
-        .expect("snapshot reads interrupt registers");
-
-    assert_eq!(snapshot.usbsts & regs::USBSTS_HSE, regs::USBSTS_HSE);
-    assert_eq!(snapshot.usbsts & regs::USBSTS_EINT, regs::USBSTS_EINT);
-    assert_eq!(snapshot.iman & regs::IMAN_IE, regs::IMAN_IE);
-    assert_eq!(snapshot.iman & regs::IMAN_IP, regs::IMAN_IP);
-    assert_eq!(snapshot.erdp_low, device.host_mut().erdp[0]);
-    assert_eq!(snapshot.erdp_high, device.host_mut().erdp[1]);
-    assert_eq!(
-        device.host_mut().iman & regs::IMAN_IP,
-        regs::IMAN_IP,
-        "snapshot read must not acknowledge Interrupt Pending"
-    );
-}
-
-#[test]
 fn acknowledge_interrupt_clears_global_and_interrupter_pending_and_keeps_enable() {
     // Servicing a delivered interrupt clears `USBSTS.EINT` and `IMAN.IP`
     // before draining the event ring, keeping Interrupt Enable set so the
@@ -3600,12 +3573,6 @@ fn a_cycle_owned_but_not_yet_landed_event_is_not_consumed_until_its_body_arrives
         erdp_before,
         "no ERDP write on a not-yet-landed entry — the controller is not desynced"
     );
-    assert_eq!(
-        device.drained_foreign_event_count(),
-        0,
-        "the phantom is not drained as a foreign event"
-    );
-
     // Once the body lands, the very same entry is consumed normally and the
     // report is delivered.
     device.host_mut().land_last_event();
@@ -3933,10 +3900,6 @@ fn a_stray_controller_event_during_a_hub_poll_never_silences_the_watch() {
     // `Err` and silenced the watch.
     assert_eq!(device.next_hub_change(&delay), Ok(HubEvent::None));
     assert!(
-        device.drained_foreign_event_count() >= 1,
-        "the stray controller event was drained, not faulted"
-    );
-    assert!(
         device.hub_watch_active(),
         "the watch survived the stray event"
     );
@@ -4077,10 +4040,6 @@ fn trailing_freed_slot_transfer_event_is_drained_not_faulted() {
     // The stale event is drained, not faulted: the hub change is serviced
     // quietly (the device is already gone) and the watch stays armed.
     assert_eq!(device.next_hub_change(&delay), Ok(HubEvent::None));
-    assert!(
-        device.stale_freed_event_count() >= 1,
-        "the trailing freed-slot completion was drained, not faulted"
-    );
     assert!(
         device.hub_watch_active(),
         "the hub watch survived the stale event and is armed for a reconnect"
@@ -4287,10 +4246,6 @@ fn split_transaction_detach_frees_the_slot_even_when_disable_is_never_confirmed(
     assert!(
         !device.device_present(),
         "the slot is freed best-effort even without a Disable Slot confirmation"
-    );
-    assert!(
-        !device.slot_disable_confirmed(),
-        "the teardown records that the controller never confirmed the Disable Slot"
     );
     assert!(
         device.hub_watch_active(),

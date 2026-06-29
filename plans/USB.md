@@ -466,8 +466,7 @@ the live controller behaviour is host- and CI-proven first.
     (`stash_async_event`/`poll_hub_completion`) rather than faulted — without
     this such an event matched no live endpoint and faulted the hub watch,
     silencing it so a later re-plug went unseen. The tolerance is cleared once a
-    fresh device enumerates; `UsbDevice::stale_freed_event_count` exposes the
-    drain count for a hot-removal diagnostic.
+    fresh device enumerates.
   - **Directly-attached (no hub) hot-plug** uses the root-port `CCS` watch for
     disconnect and `UsbDevice::reset_and_reenumerate` (full HCRST + re-program
     + re-enumerate) on a root-port connect, treating it as a brand-new device.
@@ -540,7 +539,7 @@ the live controller behaviour is host- and CI-proven first.
     posts the Disable Slot, waits within budget, and **frees the local slot
     state regardless of whether the controller confirms** — retiring the
     command-ring slot either way so the ring stays consistent for the next
-    enumeration, and recording the outcome in `slot_disable_confirmed()`. A late
+    enumeration. A late
     Disable Slot Command Completion for the freed slot is drained as a freed-slot
     event by the event-ring consumers (`await_event_for`/`poll_hub_completion`)
     rather than faulting the hub watch. The acted-on fault code is cleared on
@@ -586,9 +585,7 @@ the live controller behaviour is host- and CI-proven first.
     keyboard report arriving before the previous one is drained — and keep
     scanning, never faulting (the shared event ring is not a security boundary;
     a genuine fault still surfaces synchronously through the control/command
-    waits that follow). Drained-but-unmodelled events are counted in
-    `UsbDevice::drained_foreign_event_count()` and surfaced in the HCD
-    hotplug-state log as `foreign_drained`. Host regression:
+    waits that follow). Host regression:
     `a_stray_controller_event_during_a_hub_poll_never_silences_the_watch`.
   - **The event-ring drain is the *only* writer of `ERDP`; never a standalone
     Event-Handler-Busy clear (the "weird storm as soon as a key is pressed"
@@ -650,12 +647,13 @@ the live controller behaviour is host- and CI-proven first.
     `MockXhci::unland_last_event`/`land_last_event`; it faults+over-consumes
     without the guard and is left alone with it).
     Metal-confirmed: with this fix, boot-time typing works end to end and every
-    keystroke wake reads `foreign_drained=0` and `erdp_ehb=0` (a healthy
-    interrupter), exactly as predicted. The TEMPORARY Info diagnostics (the
-    BCM2711 `brcm-msi` diag; the HCD `URB submit received` / `URB held`; the
-    end-of-wake interrupter snapshot; and `usb-hcd: last drained foreign event`)
-    are kept only until the controller-fault recovery below is metal-confirmed,
-    then removed.
+    keystroke wake reads a healthy interrupter, exactly as predicted. The
+    TEMPORARY metal diagnostics used to localise these faults (the BCM2711
+    `brcm-msi` vector diag; the HCD `URB submit received` / `URB held` / hotplug
+    / interrupter-snapshot / foreign-event Info logs, and the `UsbDevice`
+    drain-count / foreign-event / disable-confirmed accessors that fed them)
+    have been removed now that the chain is complete; the load-bearing tolerance
+    behaviour they observed remains.
   - **A controller that latches a fatal error / halts is reset and
     re-enumerated, never left silent (the "unplug worked but the re-plug is
     never seen" fix).** With boot typing fixed, the remaining failure was
