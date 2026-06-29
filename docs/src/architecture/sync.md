@@ -21,6 +21,27 @@ queue); the rest is pure `core`.
 | `Epoch` / `Guard` / `defer_free` | Lock-free / RCU-style structures where the old version of an object must be freed once no reader can observe it. | Mutual exclusion; small payloads (use `SeqLock`); no-`alloc` contexts. | `SeqCst` pin; `Acquire/Release` on the deferred queue. | Process / kernel-thread only. |
 | `OnceCell<T>` / `Once<T>` | Set-once or lazy-init data. **No panic on poison** — the API returns `Result`. | Inside interrupt context against the same cell as the initialiser (busy loop). | `Release` publication; `Acquire` observation. | Process / kernel-thread only. |
 
+### When a critical section may *sleep* — `SleepLock` (kernel-side)
+
+Every primitive above **spins** on contention, which is correct only when
+the holder never gives up the CPU. A critical section that may **park** — most
+importantly one held across a block-device completion-IRQ wait
+(`Block::read_blocks` parks the calling task on the controller interrupt) —
+must not use a spin lock: a second contender on the same CPU would deadlock,
+and on another CPU it would busy-spin on a sleeping holder (forbidden
+busy-waiting, `AGENTS.md` §2.23).
+
+For that case the kernel provides `rustos_kernel_core::SleepLock<T>`: a
+scheduler-blocking mutex whose contenders **park off the run queue** and are
+woken on release. It cannot live in `lib/sync` because parking/waking is the
+scheduler's job and the layering forbids a `lib/*` crate from depending on the
+kernel; it reaches the scheduler through the installed `WaitQueueArch` hook and
+the kernel's `reschedule_current` park primitive, reusing the same
+register-before-re-test lost-wakeup discipline as the other kernel waiters. Use
+it for the per-mount filesystem lock and any other mutual-exclusion region that
+must be held across a park; keep using the `lib/sync` spin locks for short,
+non-sleeping critical sections.
+
 ## Decision tree
 
 ```text

@@ -76,6 +76,17 @@ pub trait WaitQueueArch: Sync {
         let _ = cpu;
         None
     }
+
+    /// The CPU the caller is currently running on, or [`None`] before a hook
+    /// is installed. A blocking primitive that is **not** handed a CPU id
+    /// (the [`SleepLock`](crate::SleepLock), reached through a fixed-signature
+    /// method that carries no caller context) resolves the current CPU here
+    /// to then look up [`current_task`](Self::current_task) and park it. The
+    /// default returns [`None`] so an uninstalled hook fails closed rather
+    /// than acting on a guessed CPU.
+    fn current_cpu(&self) -> Option<CpuId> {
+        None
+    }
 }
 
 /// One registered waiter: the task to wake and the absolute monotonic-ns

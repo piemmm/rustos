@@ -372,6 +372,14 @@ impl<A: KernelArch + 'static> crate::waitq::WaitQueueArch for SchedWaitQueueArch
         // being handed its id, so it resolves it here.
         self.scheduler.current_task(cpu)
     }
+
+    fn current_cpu(&self) -> Option<rustos_kernel_sched_api::CpuId> {
+        // The arch port's per-CPU identity — the same value the scheduler
+        // and timed-wake paths read. A blocking primitive reached without a
+        // caller context (a `SleepLock` contended acquire) resolves the
+        // current CPU here to then look up and park the current task.
+        Some(SchedulerArch::current_cpu(self.arch))
+    }
 }
 
 /// Leak a [`SchedWaitQueueArch`] over the boot-leaked `KernelState` and

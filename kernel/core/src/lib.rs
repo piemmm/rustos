@@ -90,6 +90,7 @@ pub mod procwait;
 pub mod random;
 pub mod rlimit;
 pub mod sharedreg;
+pub mod sleeplock;
 // The single scheduler selection point. Internal:
 // the concrete policy must not leak to crates that should depend on the
 // `rustos_kernel_sched_api` contract instead.
@@ -149,6 +150,7 @@ pub use procwait::{
 };
 pub use random::{reserve_errno, BootReserve, NullEntropy, RandomReserve};
 pub use rlimit::{authorize_set, LimitSet};
+pub use sleeplock::{SleepGuard, SleepLock};
 pub use spawn::{
     spawn_and_enter, spawn_image, AdmitError, EmbeddedProgram, InitSpawn, InitSpawnCtx,
     NullProcessSpawn, ProcessSpawn, ProgramRegistry, SpawnCallerError, SpawnCtx, SpawnRequest,
