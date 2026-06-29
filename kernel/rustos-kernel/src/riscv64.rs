@@ -17,3 +17,16 @@ pub mod boot;
 pub mod init_spawn;
 #[cfg(freestanding)]
 pub mod spawn_producer;
+
+/// First non-addressable user virtual address on this port.
+///
+/// The riscv64 ports run Sv39: a 39-bit virtual address whose bits 63:39
+/// must sign-extend bit 38, so the canonical *lower* (user) half is
+/// `[0, 2^38)` = 256 GiB. `2^38` is therefore the first address a user
+/// mapping can never reach, and the ceiling the anonymous-heap window
+/// ([`crate::anon_layout::anon_window_pages`]) sizes itself below so it can
+/// never run past addressable user space. Genuinely target-specific — the
+/// paging mode dictates it — so it lives beside the port, not in the
+/// architecture-neutral layout module.
+#[cfg(freestanding)]
+pub const USER_VA_TOP: u64 = 1 << 38;

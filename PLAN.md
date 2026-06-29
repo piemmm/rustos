@@ -769,9 +769,14 @@ order (one fully-gated increment each):
        `map_anonymous`/`unmap_anonymous` (one mapping path, §2.2), exposing
        `map_anonymous_placed` and releasing the placement record on unmap
        (fail-closed validate before any teardown). `LiveMemMap::map` routes
-       non-`FIXED` requests there (FIXED still uses `addr_hint`); the aarch64
-       `init_spawn`/`spawn_producer` thread a `spawn_layout::ANON_WINDOW`
-       (2 GiB above the image bias). Proven by `kernel/mem` + `kernel/core`
+       non-`FIXED` requests there (FIXED still uses `addr_hint`); every port's
+       `init_spawn`/`spawn_producer` place the window at
+       `spawn_layout::ANON_WINDOW_OFFSET` (4 GiB above the image bias — the
+       topmost user region, above the device/DMA/shared windows) and size it
+       from discovered RAM via `anon_layout::anon_window_pages` (physical RAM
+       clamped to the addressable user VA above the base, floored at 16 MiB),
+       never a fixed `const` ceiling (§24.1). Proven by `kernel/mem` +
+       `kernel/core`
        host tests and the extended `mmio_map_qemu_aarch64` `-M virt` vertical
        (the EL0 program now also round-trips a placed `mem_map`: map → write →
        read-back → `mem_unmap`); no ABI/C-header change. **5d-0-ii (c) DMA

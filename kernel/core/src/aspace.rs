@@ -136,6 +136,19 @@ pub struct AddressSpaceRegistry {
     /// [`withdraw`](Self::withdraw) so a reused id never inherits a dead
     /// task's handles.
     open_files: BTreeMap<TaskId, OpenFileTable>,
+    /// Each live task's running total of anonymous memory it has mapped
+    /// through `mem_map`, in bytes (whole pages). Co-located with the
+    /// address space for the same reason as [`Self::streams`]: it shares the
+    /// exact per-process lifecycle — accrued on a `mem_map`, released on a
+    /// `mem_unmap`, and dropped when the task exits — and is keyed by the
+    /// same [`TaskId`]. This is the live usage the kernel checks the
+    /// `LimitKind::AddressSpaceBytes` ceiling against so the limit is
+    /// actually enforced on the allocation path (fail closed) rather than
+    /// merely stored. A task with no entry has mapped nothing, so
+    /// [`Self::mapped_anon_bytes`] resolves to `0`. Dropped at
+    /// [`withdraw`](Self::withdraw) so a reused id never inherits a dead
+    /// task's accounting.
+    mapped_anon_bytes: BTreeMap<TaskId, u64>,
 }
 
 /// One open file or directory handle: the absolute path it was resolved to
@@ -228,6 +241,7 @@ impl AddressSpaceRegistry {
             grants: BTreeMap::new(),
             loaded_nodes: BTreeMap::new(),
             open_files: BTreeMap::new(),
+            mapped_anon_bytes: BTreeMap::new(),
         }
     }
 
@@ -304,12 +318,14 @@ impl AddressSpaceRegistry {
         let had_grants = self.grants.remove(&task).is_some();
         let had_node = self.loaded_nodes.remove(&task).is_some();
         let had_files = self.open_files.remove(&task).is_some();
+        let had_anon = self.mapped_anon_bytes.remove(&task).is_some();
         self.tasks.remove(&task).is_some()
             || had_streams
             || had_limits
             || had_grants
             || had_node
             || had_files
+            || had_anon
     }
 
     /// Record that the autoloaded driver `task` was loaded for the discovered
@@ -477,6 +493,49 @@ impl AddressSpaceRegistry {
     #[must_use]
     pub fn limits(&self, task: TaskId) -> LimitSet {
         self.limits.get(&task).copied().unwrap_or_default()
+    }
+
+    /// `task`'s running total of anonymous memory mapped through `mem_map`,
+    /// in bytes, or `0` when it has mapped none.
+    ///
+    /// The `mem_map` handler reads this to check a request against the
+    /// `LimitKind::AddressSpaceBytes` ceiling before mapping. The `task`
+    /// argument is the kernel-trusted caller id.
+    #[must_use]
+    pub fn mapped_anon_bytes(&self, task: TaskId) -> u64 {
+        self.mapped_anon_bytes.get(&task).copied().unwrap_or(0)
+    }
+
+    /// Accrue `bytes` against `task`'s mapped-anonymous-memory total.
+    ///
+    /// Called by the `mem_map` handler *after* a map succeeds and only once
+    /// the request has been admitted against the task's
+    /// `LimitKind::AddressSpaceBytes` ceiling, so the saturating add never
+    /// loses accounting in practice; it saturates rather than wraps purely
+    /// so a future miscount can never silently understate usage (fail
+    /// closed, never a panic). The `task` argument is the kernel-trusted
+    /// caller id.
+    pub fn charge_anon(&mut self, task: TaskId, bytes: u64) {
+        let entry = self.mapped_anon_bytes.entry(task).or_insert(0);
+        *entry = entry.saturating_add(bytes);
+    }
+
+    /// Release `bytes` from `task`'s mapped-anonymous-memory total.
+    ///
+    /// Called by the `mem_unmap` handler *after* an unmap succeeds, so
+    /// `bytes` corresponds to pages that were actually backed and charged.
+    /// The subtraction saturates at zero (it can never underflow into a
+    /// bogus huge total that would wrongly deny later maps) and drops the
+    /// entry once it reaches zero so a task that frees everything holds no
+    /// residual accounting. The `task` argument is the kernel-trusted
+    /// caller id.
+    pub fn credit_anon(&mut self, task: TaskId, bytes: u64) {
+        if let Some(entry) = self.mapped_anon_bytes.get_mut(&task) {
+            *entry = entry.saturating_sub(bytes);
+            if *entry == 0 {
+                self.mapped_anon_bytes.remove(&task);
+            }
+        }
     }
 
     /// Open a file/directory descriptor for `task`, recording the resolved
@@ -950,5 +1009,48 @@ mod tests {
             .open_file(TaskId(4), String::from("/Storage/y"), OpenFlags::READ)
             .expect("fits");
         assert_eq!(fresh, u32::try_from(STD_STREAM_COUNT).unwrap());
+    }
+
+    // --- mapped anonymous-memory accounting (the AddressSpaceBytes limit) --
+
+    #[test]
+    fn a_task_with_no_mapping_has_zero_mapped_anon_bytes() {
+        let reg = AddressSpaceRegistry::new();
+        assert_eq!(reg.mapped_anon_bytes(TaskId(2)), 0);
+    }
+
+    #[test]
+    fn charge_then_credit_tracks_the_running_total() {
+        let mut reg = AddressSpaceRegistry::new();
+        reg.charge_anon(TaskId(2), 0x4000);
+        assert_eq!(reg.mapped_anon_bytes(TaskId(2)), 0x4000);
+        // A second map accrues onto the existing total.
+        reg.charge_anon(TaskId(2), 0x1000);
+        assert_eq!(reg.mapped_anon_bytes(TaskId(2)), 0x5000);
+        // Freeing one region credits it back.
+        reg.credit_anon(TaskId(2), 0x1000);
+        assert_eq!(reg.mapped_anon_bytes(TaskId(2)), 0x4000);
+    }
+
+    #[test]
+    fn credit_saturates_at_zero_and_drops_the_entry() {
+        let mut reg = AddressSpaceRegistry::new();
+        reg.charge_anon(TaskId(2), 0x2000);
+        // Crediting more than is charged can never underflow into a bogus
+        // huge total that would wrongly deny later maps.
+        reg.credit_anon(TaskId(2), 0x9000);
+        assert_eq!(reg.mapped_anon_bytes(TaskId(2)), 0);
+        // Crediting a task that holds nothing is a no-op.
+        reg.credit_anon(TaskId(3), 0x1000);
+        assert_eq!(reg.mapped_anon_bytes(TaskId(3)), 0);
+    }
+
+    #[test]
+    fn withdraw_drops_anon_accounting_so_a_reused_id_starts_clean() {
+        let mut reg = AddressSpaceRegistry::new();
+        reg.charge_anon(TaskId(4), 0x8000);
+        assert!(reg.withdraw(TaskId(4)));
+        // A reused id never inherits the dead task's mapped-memory total.
+        assert_eq!(reg.mapped_anon_bytes(TaskId(4)), 0);
     }
 }

@@ -120,7 +120,9 @@ const MMIO_WINDOW_BASE: u64 = INIT_USER_BIAS + spawn_layout::MMIO_WINDOW_OFFSET;
 /// Base of PID 1's non-`FIXED` anonymous-heap virtual region (`plans/PI.md`
 /// 5d-0-ii (c)): the retained [`LiveSpace`]'s
 /// [`rustos_kernel_mem::AnonWindowMap`] places each non-`FIXED` `mem_map`
-/// out of `[ANON_WINDOW_BASE, ANON_WINDOW_BASE + ANON_WINDOW_PAGES·4 KiB)`.
+/// out of `[ANON_WINDOW_BASE, ANON_WINDOW_BASE + anon_window_pages·4 KiB)`,
+/// where the page count scales with discovered RAM (the window is the
+/// topmost user region so it has room to grow up to `super::USER_VA_TOP`).
 const ANON_WINDOW_BASE: u64 = INIT_USER_BIAS + spawn_layout::ANON_WINDOW_OFFSET;
 /// Base of PID 1's guarded DMA-buffer virtual region (`plans/PI.md`
 /// 5d-0-ii (c) DMA half): the retained [`LiveSpace`]'s
@@ -334,7 +336,11 @@ impl InitSpawn for X86_64InitSpawn {
                 VirtAddr::new(MMIO_WINDOW_BASE),
                 spawn_layout::MMIO_WINDOW_PAGES,
                 VirtAddr::new(ANON_WINDOW_BASE),
-                spawn_layout::ANON_WINDOW_PAGES,
+                crate::anon_layout::anon_window_pages(
+                    static_frames.total_frames() as u64,
+                    ANON_WINDOW_BASE,
+                    super::USER_VA_TOP,
+                ),
                 VirtAddr::new(DMA_WINDOW_BASE),
                 spawn_layout::DMA_WINDOW_PAGES,
                 VirtAddr::new(SHARED_WINDOW_BASE),

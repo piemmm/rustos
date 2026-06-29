@@ -174,8 +174,8 @@ pub const USER_BLOCK_OFFSET: u64 = 0x30_0000;
 
 /// Offset of the device-window virtual region above the image bias
 /// (`plans/PI.md` 5d-0-ii (b′)): placed 1 GiB above the image bias — far
-/// clear of the program image, stack, and startup block — and well below
-/// the 64 GiB user/identity ceiling the spawn-window check guards.
+/// clear of the program image, stack, and startup block, and the lowest of
+/// the four guarded windows.
 ///
 /// Every port retains a live address space and grants its tasks an
 /// `mmio_map` device window out of this region, so the offset — shared by
@@ -187,32 +187,14 @@ pub const MMIO_WINDOW_OFFSET: u64 = 0x4000_0000;
 /// the few device windows a driver task maps.
 pub const MMIO_WINDOW_PAGES: usize = 256;
 
-/// Offset of the non-`FIXED` anonymous-heap virtual window above the image
-/// bias (`plans/PI.md` 5d-0-ii (c)): placed 2 GiB above the bias — above the
-/// device window (1 GiB up) and far clear of the program image, stack, and
-/// startup block — and well below the 64 GiB user/identity ceiling the
-/// spawn-window check guards. The `mem_map` placement allocator hands each
-/// non-`FIXED` request a base out of `[bias + ANON_WINDOW_OFFSET, … +
-/// ANON_WINDOW_PAGES·4 KiB)`. One value shared by every port for the same
-/// reason as [`MMIO_WINDOW_OFFSET`].
-pub const ANON_WINDOW_OFFSET: u64 = 0x8000_0000;
-
-/// Pages backing the anonymous-heap window (1 GiB of *address space*). The
-/// window costs no RAM until the frame allocator backs a mapping (which
-/// fails closed as a deterministic OOM), so it is
-/// sized generously for a userland heap; the placement allocator's own
-/// memory is bounded by the live-region count, not the page count.
-pub const ANON_WINDOW_PAGES: usize = 0x4_0000;
-
 /// Offset of the guarded DMA-buffer virtual window above the image bias
-/// (`plans/PI.md` 5d-0-ii (c) DMA half): placed 3 GiB above the bias — above
-/// the anonymous-heap window (which spans `[2 GiB, 3 GiB)`) and far clear of
-/// the program image, stack, and startup block — and well below the 64 GiB
-/// user/identity ceiling the spawn-window check guards. The `dma_alloc`
-/// carve hands each request a guard-bracketed buffer out of `[bias +
-/// DMA_WINDOW_OFFSET, … + DMA_WINDOW_PAGES·4 KiB)`. One value shared by
-/// every port for the same reason as [`MMIO_WINDOW_OFFSET`].
-pub const DMA_WINDOW_OFFSET: u64 = 0xC000_0000;
+/// (`plans/PI.md` 5d-0-ii (c) DMA half): placed 2 GiB above the bias — above
+/// the device window (1 GiB up) and far clear of the program image, stack,
+/// and startup block. The `dma_alloc` carve hands each request a
+/// guard-bracketed buffer out of `[bias + DMA_WINDOW_OFFSET, … +
+/// DMA_WINDOW_PAGES·4 KiB)`. One value shared by every port for the same
+/// reason as [`MMIO_WINDOW_OFFSET`].
+pub const DMA_WINDOW_OFFSET: u64 = 0x8000_0000;
 
 /// Pages backing the DMA-buffer window (1 MiB): generous headroom over the
 /// few small coherent buffers a driver task carves (a DMA
@@ -220,20 +202,31 @@ pub const DMA_WINDOW_OFFSET: u64 = 0xC000_0000;
 pub const DMA_WINDOW_PAGES: usize = 256;
 
 /// Offset of the cross-process shared-memory virtual window above the image
-/// bias: placed 4 GiB above the bias - above the DMA window (which spans
-/// `[3 GiB, 3 GiB + 1 MiB)`) and far clear of the program image, stack,
-/// startup block, device, anonymous-heap, and DMA windows below it - and
-/// well below the 64 GiB user/identity ceiling the spawn-window check
-/// guards. The `shm_create` / `shm_map` syscalls map a granted shared
-/// region out of `[bias + SHARED_WINDOW_OFFSET, ... +
-/// SHARED_WINDOW_PAGES * 4 KiB)`. One value shared by every port for the
-/// same reason as [`MMIO_WINDOW_OFFSET`].
-pub const SHARED_WINDOW_OFFSET: u64 = 0x1_0000_0000;
+/// bias: placed 3 GiB above the bias — above the DMA window (which spans
+/// `[2 GiB, 2 GiB + 1 MiB)`) and far clear of the program image, stack,
+/// startup block, and the device and DMA windows below it. The
+/// `shm_create` / `shm_map` syscalls map a granted shared region out of
+/// `[bias + SHARED_WINDOW_OFFSET, ... + SHARED_WINDOW_PAGES * 4 KiB)`. One
+/// value shared by every port for the same reason as [`MMIO_WINDOW_OFFSET`].
+pub const SHARED_WINDOW_OFFSET: u64 = 0xC000_0000;
 
 /// Pages backing the shared-memory window (1 MiB): generous headroom over
 /// the few small shared regions a driver task maps (an URB data buffer is
 /// a handful of pages).
 pub const SHARED_WINDOW_PAGES: usize = 256;
+
+/// Offset of the non-`FIXED` anonymous-heap virtual window above the image
+/// bias (`plans/PI.md` 5d-0-ii (c)): placed 4 GiB above the bias — the
+/// **topmost** of the four guarded windows, above the device (1 GiB), DMA
+/// (2 GiB), and shared-memory (3 GiB) windows and far clear of the program
+/// image, stack, and startup block. It is highest so it can extend upward
+/// toward the per-architecture user-VA ceiling without colliding with a
+/// fixed-size sibling — the room that lets the heap window scale with
+/// discovered RAM (see [`crate::anon_layout::anon_window_pages`]). The
+/// `mem_map` placement allocator hands each non-`FIXED` request a base out
+/// of `[bias + ANON_WINDOW_OFFSET, … + anon_window_pages·4 KiB)`. One value
+/// shared by every port for the same reason as [`MMIO_WINDOW_OFFSET`].
+pub const ANON_WINDOW_OFFSET: u64 = 0x1_0000_0000;
 
 /// Per-process stack-canary seed handed to PID 1 `init`. Any value; the kernel RNG-seeded canary is a later stage.
 pub const INIT_CANARY: u64 = 0x1117_A5ED_C0DE_0001;

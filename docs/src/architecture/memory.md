@@ -715,12 +715,21 @@ allocator over one configured heap window, driven against a borrowed live
   ranges and a free-list of released holes (first-fit, split on a partial
   match) serves reuse, so the allocator's own memory is bounded by the
   live-plus-freed region count, never the page count of the window. The
-  window is *address space*, not a physical resource: it is sized generously
-  (the aarch64 spawn layout places it 2 GiB above the image bias,
-  `spawn_layout::ANON_WINDOW_OFFSET`/`PAGES`) and costs no RAM until the
-  frame allocator backs a mapping — and that backing fails closed as a
-  deterministic OOM (§4), so a per-page bitmap that would cap the window or
-  waste memory on a large machine is deliberately avoided.
+  window is *address space*, not a physical resource, and its size is
+  **derived from discovered RAM, never a hard-wired constant** (`AGENTS.md`
+  §24.1): each port places it as the **topmost** user region (4 GiB above
+  the image bias, `spawn_layout::ANON_WINDOW_OFFSET`, above the device, DMA,
+  and shared-memory windows) so it has room to grow, and sizes it through
+  `anon_layout::anon_window_pages(total_frames, base, USER_VA_TOP)` — the
+  size of physical RAM (the true upper bound on backable pages), clamped to
+  the addressable user VA above the base and floored at
+  `ANON_WINDOW_MIN_PAGES` (16 MiB) for a tiny machine. A 1 GiB machine gets
+  the same 1 GiB window the former fixed constant gave; a large server
+  scales up instead of being capped at 1 GiB. The window costs no RAM until
+  the frame allocator backs a mapping — and that backing fails closed as a
+  deterministic OOM (§4), so a 20 GiB request on a 1 GiB machine is refused
+  (at the virtual reservation if it exceeds the window, else at frame
+  exhaustion), never over-committed.
 - **Tested.** `AnonWindowMap` host-unit tests (bump/no-overlap, exhaustion,
   release+reuse, fail-closed release), `LiveSpace` placement tests (real
   `HostPageTable` map + zero-on-map + reuse + fail-closed wrong-extent

@@ -27,3 +27,17 @@ pub mod panic_ctx;
 pub mod serial_sink;
 #[cfg(freestanding)]
 pub mod spawn_producer;
+
+/// First non-addressable user virtual address on this port.
+///
+/// The x86_64 port runs 4-level paging: a 48-bit virtual address space
+/// whose canonical *lower* (user) half is `[0, 2^47)` — the same
+/// `0x0000_8000_0000_0000` boundary the syscall-entry canonicality check
+/// guards. `2^47` is therefore the first address a user mapping can never
+/// reach, and the ceiling the anonymous-heap window
+/// ([`crate::anon_layout::anon_window_pages`]) sizes itself below so it can
+/// never run past addressable user space. Genuinely target-specific — the
+/// paging mode dictates it — so it lives beside the port, not in the
+/// architecture-neutral layout module.
+#[cfg(freestanding)]
+pub const USER_VA_TOP: u64 = 1 << 47;

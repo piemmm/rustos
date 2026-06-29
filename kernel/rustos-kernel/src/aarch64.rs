@@ -21,3 +21,16 @@ pub mod init_spawn;
 pub mod root_unlock;
 #[cfg(freestanding)]
 pub mod spawn_producer;
+
+/// First non-addressable user virtual address on this port.
+///
+/// The aarch64 port configures `TCR_EL1.T0SZ = 25`, so the `TTBR0_EL1`
+/// (user) translation regime covers a 39-bit virtual address range
+/// `[0, 2^39)` = 512 GiB. `2^39` is therefore the first address a user
+/// mapping can never reach, and the ceiling the anonymous-heap window
+/// ([`crate::anon_layout::anon_window_pages`]) sizes itself below so it can
+/// never run past addressable user space. Genuinely target-specific — the
+/// `T0SZ` the port programs dictates it — so it lives beside the port, not
+/// in the architecture-neutral layout module.
+#[cfg(freestanding)]
+pub const USER_VA_TOP: u64 = 1 << 39;

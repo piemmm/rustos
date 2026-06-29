@@ -100,6 +100,26 @@ second code path.
   so a child can never hold a bound wider than either the parent's ceiling or
   the default — the never-widen rule, mirroring capability delegation (§5.2).
 
+Storing a limit is not enough — it is **enforced on the path that consumes the
+resource**, before the resource is committed, and fails closed (`AGENTS.md`
+§24.3 / §5.4):
+
+- **`AddressSpaceBytes` on `mem_map`.** The kernel keeps each task's running
+  total of anonymous memory mapped through `mem_map` in the per-task
+  `AddressSpaceRegistry` (`mapped_anon_bytes`, accrued on a successful map,
+  credited on `mem_unmap`, dropped at exit — the same lifecycle and `TaskId`
+  key as the limit set, no parallel registry, §2.2). The `mem_map` handler
+  rounds the request up to whole pages and, *before* reaching the producer,
+  refuses it with `OutOfRange` if the task's live total plus the request would
+  exceed its soft `AddressSpaceBytes` bound. A task at the default
+  `RLIMIT_INFINITY` is never affected; a tightened ceiling is honoured rather
+  than silently ignored.
+
+The remaining `LimitKind`s (`OpenStreams`, `Processes`, `StackBytes`) carry
+their soft/hard bounds and inherit correctly, but their *consuming-path*
+enforcement is not yet wired; until it is, those ceilings are observed and
+settable but not yet acted on at the descriptor/spawn/stack path.
+
 ## The `ulimit` shell command
 
 The `ulimit` builtin in the default shell (`userland/shell/shell`) is the

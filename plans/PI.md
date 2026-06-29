@@ -3311,9 +3311,13 @@ table, so a new board is match **data**, not new code. Sub-increments
     `unmap_anonymous` validates + releases the placement record before any
     teardown (fail closed on a wrong base/extent, §5.4). `LiveMemMap::map`
     routes non-`FIXED` requests there while `FIXED` still names `addr_hint`;
-    the aarch64 `init_spawn`/`spawn_producer` thread the shared
-    `spawn_layout::ANON_WINDOW_OFFSET`/`PAGES` (2 GiB above the image bias,
-    above the device window). Host-tested (`AnonWindowMap` 7 + `LiveSpace`
+    every port's `init_spawn`/`spawn_producer` thread the shared
+    `spawn_layout::ANON_WINDOW_OFFSET` (4 GiB above the image bias — the
+    topmost user region, above the device/DMA/shared windows) and size the
+    window from discovered RAM via `anon_layout::anon_window_pages`
+    (physical RAM clamped to the addressable user VA above the base, floored
+    at 16 MiB), never a fixed `const` ceiling (§24.1). Host-tested
+    (`anon_window_pages` 5 + `AnonWindowMap` 7 + `LiveSpace`
     placement 4 + `LiveMemMap` routing 2) and proven on `-M virt` by the
     extended `mmio_map_qemu_aarch64` vertical (the EL0 program maps its granted
     window **and** round-trips a placed `mem_map`: map → write sentinel →

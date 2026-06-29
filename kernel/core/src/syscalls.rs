@@ -1745,6 +1745,38 @@ where
         if len == 0 {
             return Err(Errno::LengthOutOfRange);
         }
+        // Whole pages are what the producer actually backs, so charge — and
+        // check the limit against — the page-rounded size, the same figure
+        // `mem_unmap` later credits. An overflow on rounding is a request no
+        // address space could hold; reject it closed.
+        let charged = (len as u64)
+            .div_ceil(PAGE_SIZE as u64)
+            .checked_mul(PAGE_SIZE as u64)
+            .ok_or(Errno::OutOfRange)?;
+        // Enforce the caller's `AddressSpaceBytes` ceiling *before* mapping
+        // (check capacity before touching state, fail closed): the live
+        // total this map would reach must not exceed the task's soft limit —
+        // the operative `ulimit -v`-style bound a principal may impose
+        // (default `UNLIMITED`, so an unconstrained task is never affected).
+        // The limit set is stored against the kernel-trusted caller id, never
+        // a caller-supplied value, and a saturated/overflowing projection
+        // denies rather than wrapping into a bogus small total. Without this
+        // the limit would be settable but silently ignored on the one path
+        // that consumes the resource (fail open).
+        {
+            let aspaces = self.aspaces.read();
+            let soft = aspaces
+                .limits(caller.task_id)
+                .get(LimitKind::AddressSpaceBytes)
+                .soft;
+            let projected = aspaces
+                .mapped_anon_bytes(caller.task_id)
+                .checked_add(charged)
+                .ok_or(Errno::OutOfRange)?;
+            if projected > soft {
+                return Err(Errno::OutOfRange);
+            }
+        }
         // Hand the request to the installed `kernel/mem` producer, which
         // maps the region into the caller's own live address space, zeroes
         // it, and returns its base (`plans/SPAWN.md` SP5b). Until one is
@@ -1753,11 +1785,13 @@ where
         // mapped. A frame exhaustion surfaces as `OutOfMemory` here
         // (deterministic OOM).
         let result = self.mem_map.map(len, flags, addr_hint);
-        // The map grew the caller's live space; re-freeze the registry
-        // snapshot so the next `copy_in`/`copy_out` can see the new region
-        // (the copy path must reflect live memory). Only
-        // on success: a failed map touched no mappings.
+        // The map grew the caller's live space; charge the page-rounded size
+        // against the task's address-space accounting and re-freeze the
+        // registry snapshot so the next `copy_in`/`copy_out` can see the new
+        // region (the copy path must reflect live memory). Only on success:
+        // a failed map touched no mappings and charges nothing.
         if result.is_ok() {
+            self.aspaces.write().charge_anon(caller.task_id, charged);
             self.refreeze_caller_aspace(caller);
         }
         result
@@ -1926,13 +1960,20 @@ where
         // `Ok(0)` — the `Errno`-return ABI shape (`mem_unmap` returns an
         // error code, not a value).
         let result = self.mem_map.unmap(base, len).map(|()| 0);
-        // The unmap shrank the caller's live space; re-freeze the registry
-        // snapshot so the freed pages are dropped from it too — leaving them
-        // in the stale snapshot would let the copy path read or write memory
-        // the task no longer owns (fail closed,
-        // never expose freed memory). Only on success: a failed unmap left
-        // the mappings unchanged.
+        // The unmap shrank the caller's live space; credit the page-rounded
+        // size back to the task's address-space accounting (the same figure
+        // `mem_map` charged) and re-freeze the registry snapshot so the freed
+        // pages are dropped from it too — leaving them in the stale snapshot
+        // would let the copy path read or write memory the task no longer
+        // owns (fail closed, never expose freed memory). Only on success: a
+        // failed unmap left the mappings — and the accounting — unchanged.
+        // The credit saturates at zero, so a `len` that rounds larger than
+        // the live total can never underflow into a bogus huge usage.
         if result.is_ok() {
+            let credited = (len as u64)
+                .div_ceil(PAGE_SIZE as u64)
+                .saturating_mul(PAGE_SIZE as u64);
+            self.aspaces.write().credit_anon(caller.task_id, credited);
             self.refreeze_caller_aspace(caller);
         }
         result
@@ -8006,6 +8047,115 @@ mod tests {
         // The producer was never reached: the zero-length guard fails
         // closed before any state is touched.
         assert!(producer.last_map.lock().is_none());
+    }
+
+    /// The `AddressSpaceBytes` ulimit is actually enforced on the `mem_map`
+    /// path: a request whose page-rounded size would push the task's live
+    /// total past its soft ceiling is refused *before* the producer is
+    /// reached (fail closed), an admitted map is charged, and a `mem_unmap`
+    /// credits the freed bytes back so a later map fits again. Without the
+    /// enforcement the limit was settable but silently ignored (fail open).
+    #[test]
+    fn mem_map_enforces_the_address_space_limit_and_fails_closed() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        // Impose a 2-page (0x2000-byte) address-space ceiling on the caller.
+        aspaces.write().set_limit(
+            SecTaskId(2),
+            LimitKind::AddressSpaceBytes,
+            ResourceLimit::new(0x2000, u64::MAX).expect("well-formed"),
+        );
+
+        let producer: &'static RecordingMemMap = Box::leak(Box::new(RecordingMemMap::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_mem_map(producer);
+
+        // A request exactly at the ceiling is admitted and charged.
+        let base = h
+            .mem_map(&ctx, 0x2000, rustos_abi::MapFlags::empty(), 0)
+            .expect("a map at the ceiling succeeds");
+        assert_eq!(aspaces.read().mapped_anon_bytes(SecTaskId(2)), 0x2000);
+
+        // A further page would exceed the ceiling: denied, fail closed, and
+        // the producer is never reached for the rejected request.
+        *producer.last_map.lock() = None;
+        assert_eq!(
+            h.mem_map(&ctx, 0x1000, rustos_abi::MapFlags::empty(), 0),
+            Err(Errno::OutOfRange)
+        );
+        assert!(producer.last_map.lock().is_none());
+        // The denied request changed no accounting.
+        assert_eq!(aspaces.read().mapped_anon_bytes(SecTaskId(2)), 0x2000);
+
+        // Freeing the mapped region credits the bytes back, so a fresh map
+        // of the same size fits under the ceiling again.
+        assert_eq!(h.mem_unmap(&ctx, base, 0x2000), Ok(0));
+        assert_eq!(aspaces.read().mapped_anon_bytes(SecTaskId(2)), 0);
+        assert!(h
+            .mem_map(&ctx, 0x2000, rustos_abi::MapFlags::empty(), 0)
+            .is_ok());
+        assert_eq!(aspaces.read().mapped_anon_bytes(SecTaskId(2)), 0x2000);
+    }
+
+    /// A page-rounded request: a sub-page `len` is charged as a whole page,
+    /// the same figure `mem_unmap` later credits, so accounting stays
+    /// consistent and a single byte still consumes one page of the ceiling.
+    #[test]
+    fn mem_map_charges_whole_pages_against_the_limit() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        // A one-page ceiling.
+        aspaces.write().set_limit(
+            SecTaskId(2),
+            LimitKind::AddressSpaceBytes,
+            ResourceLimit::new(0x1000, u64::MAX).expect("well-formed"),
+        );
+
+        let producer: &'static RecordingMemMap = Box::leak(Box::new(RecordingMemMap::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_mem_map(producer);
+
+        // One byte rounds up to a whole page and just fits the one-page
+        // ceiling; it is charged as a full page, not a single byte.
+        assert!(h.mem_map(&ctx, 1, rustos_abi::MapFlags::empty(), 0).is_ok());
+        assert_eq!(aspaces.read().mapped_anon_bytes(SecTaskId(2)), 0x1000);
+        // A second single byte would need a second page: denied.
+        assert_eq!(
+            h.mem_map(&ctx, 1, rustos_abi::MapFlags::empty(), 0),
+            Err(Errno::OutOfRange)
+        );
     }
 
     /// A minimal published live space whose [`LiveUserSpace::freeze`] returns

@@ -273,6 +273,24 @@ pub mod riscv64;
 ))]
 mod spawn_layout;
 
+// The discovered-RAM anonymous-heap-window sizing policy
+// (`anon_window_pages`): pure arithmetic, free of the bare-metal ports and
+// of the rxe-laden layout constants, so it compiles — and its unit tests
+// run — on the CI host as well as on each bare-metal production build whose
+// spawn seam consumes it, and on no other configuration, so it is never
+// dead code. Kept separate from `spawn_layout` precisely so the host test
+// build pulls in only this testable arithmetic, not the freestanding-only
+// layout constants — which would otherwise be unused on host and trip the
+// dead-code lint.
+#[cfg(any(
+    all(
+        freestanding,
+        any(kernel_isa = "aarch64", kernel_isa = "x86_64", kernel_isa = "riscv64")
+    ),
+    test
+))]
+mod anon_layout;
+
 // The boot memory-map arithmetic (`plans/PI.md` P6c-1, G3b-2): the aarch64
 // `/memory` → `BootMemoryMap` window translation and the shared
 // guard-arena sizing / carving every port uses to reserve the kthread-stack
