@@ -57,8 +57,8 @@
 use rustos_abi::input::KeyInput;
 use rustos_abi::waitset::{WaitSetOp, WaitSourceKind};
 use rustos_abi::{
-    HwNode, LimitKind, MapFlags, ResourceLimit, SyscallNumber, CONSOLE_INHERIT, STDERR, STDIN,
-    STDINFO, STDOUT,
+    FileStat, HwNode, LimitKind, MapFlags, OpenFlags, ResourceLimit, SyscallNumber,
+    CONSOLE_INHERIT, STDERR, STDIN, STDINFO, STDOUT,
 };
 use rustos_abi_trap::raw_syscall;
 
@@ -200,6 +200,36 @@ const NUM_WAITSET_WAIT: u64 = SyscallNumber::WAITSET_WAIT.as_u16() as u64;
 
 /// `msi_alloc` syscall number (as above).
 const NUM_MSI_ALLOC: u64 = SyscallNumber::MSI_ALLOC.as_u16() as u64;
+
+/// `fs_open` syscall number (as above).
+const NUM_FS_OPEN: u64 = SyscallNumber::FS_OPEN.as_u16() as u64;
+
+/// `fs_close` syscall number (as above).
+const NUM_FS_CLOSE: u64 = SyscallNumber::FS_CLOSE.as_u16() as u64;
+
+/// `fs_read` syscall number (as above).
+const NUM_FS_READ: u64 = SyscallNumber::FS_READ.as_u16() as u64;
+
+/// `fs_write` syscall number (as above).
+const NUM_FS_WRITE: u64 = SyscallNumber::FS_WRITE.as_u16() as u64;
+
+/// `fs_readdir` syscall number (as above).
+const NUM_FS_READDIR: u64 = SyscallNumber::FS_READDIR.as_u16() as u64;
+
+/// `fs_stat` syscall number (as above).
+const NUM_FS_STAT: u64 = SyscallNumber::FS_STAT.as_u16() as u64;
+
+/// `fs_truncate` syscall number (as above).
+const NUM_FS_TRUNCATE: u64 = SyscallNumber::FS_TRUNCATE.as_u16() as u64;
+
+/// `fs_sync` syscall number (as above).
+const NUM_FS_SYNC: u64 = SyscallNumber::FS_SYNC.as_u16() as u64;
+
+/// `fs_mkdir` syscall number (as above).
+const NUM_FS_MKDIR: u64 = SyscallNumber::FS_MKDIR.as_u16() as u64;
+
+/// `fs_unlink` syscall number (as above).
+const NUM_FS_UNLINK: u64 = SyscallNumber::FS_UNLINK.as_u16() as u64;
 
 /// Marshal a 32-bit signed argument into its register value following the
 /// `abi-v1` `I32` convention (sign-extend through `i64`).
@@ -1587,6 +1617,452 @@ pub fn waitset_wait(set: u64, timeout_ns: u64, token_out: &mut u64) -> i64 {
     ret as i64
 }
 
+/// Recover a usable byte count from a raw `abi-v1` count-result register,
+/// clamping to `cap` as defence in depth.
+///
+/// The kernel encodes a filesystem count result as the standard signed
+/// register (count ≥ 0, else `-errno`). A negative value is surfaced as the
+/// raw `Err(-errno)`; a non-negative value is clamped to `cap` so a buggy or
+/// hostile kernel count can never drive an out-of-bounds slice in the caller
+/// (the same posture [`stdin`] and [`users_db_read`] take).
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 count-result encoding (count ≥ 0, else -errno).
+#[allow(clippy::cast_possible_truncation)]
+#[allow(clippy::cast_sign_loss)]
+fn count_result(ret: u64, cap: usize) -> Result<usize, i64> {
+    let ret = ret as i64;
+    if ret < 0 {
+        return Err(ret);
+    }
+    Ok((ret as usize).min(cap))
+}
+
+/// Open the file or directory at the absolute `path` with `flags`
+/// (`SyscallNumber::FS_OPEN`), returning the new descriptor number.
+///
+/// The kernel resolves and authorises `path` through its secured VFS under
+/// the caller's kernel-attested identity, applying the
+/// create/exclusive/truncate/directory semantics [`OpenFlags`] encodes and
+/// every per-inode owner/mode/ACL/capability and mount-flag check; the entry
+/// itself is gated on [`rustos_abi::CapabilityId::FS_ACCESS`]. A refused open
+/// never produces a descriptor. This is the descriptor-producing primitive
+/// the higher-level [`File`] / [`Dir`] wrappers build on; a program names a
+/// descriptor, never a device.
+///
+/// Returns the descriptor (≥ 0) or `-errno` (recover the
+/// [`rustos_abi::Errno`] discriminant as `-ret`), the standard `abi-v1`
+/// signed-result convention; the wrapper hides no error.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 fd-result encoding (fd ≥ 0, else -errno).
+pub fn fs_open(path: &[u8], flags: OpenFlags) -> i64 {
+    let ptr = path.as_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // the `(ptr, len)` pair against the caller's address space before reading
+    // it. `path` is a live shared `&[u8]` for the duration of the call, so the
+    // pair denotes readable memory.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_FS_OPEN,
+            [ptr, path.len() as u64, u64::from(flags.bits()), 0, 0, 0],
+        )
+    };
+    ret as i64
+}
+
+/// Release the caller's open descriptor `fd` (`SyscallNumber::FS_CLOSE`).
+///
+/// Idempotent from the program's side only in that closing a number the
+/// caller does not hold fails closed with `NotFound`; a descriptor resolves
+/// only for the task that opened it. Returns `0` on success or `-errno`.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
+pub fn fs_close(fd: u32) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke; `fs_close` takes no
+    // memory operand, only the descriptor number the kernel resolves against
+    // the caller's own table.
+    let ret = unsafe { raw_syscall(NUM_FS_CLOSE, [u64::from(fd), 0, 0, 0, 0, 0]) };
+    ret as i64
+}
+
+/// Read up to `buf.len()` bytes from the open descriptor `fd` at byte
+/// `offset` into `buf` (`SyscallNumber::FS_READ`), returning the number read
+/// (`0` at end of file).
+///
+/// A single syscall transfers at most [`rustos_abi::FS_IO_MAX`] bytes; a
+/// larger `buf` is split across successive calls by [`File::read_at`]. The
+/// kernel resolves `fd` against the caller's own descriptor table (a forged
+/// or foreign number fails closed), enforces the handle was opened for
+/// reading, and validates the `(buf, len)` pair against the caller's address
+/// space before writing it.
+///
+/// # Errors
+///
+/// The raw negative kernel result (`-errno`): the descriptor is not the
+/// caller's, was not opened for reading, the buffer faults, or no filesystem
+/// is mounted (`NotImplemented`).
+pub fn fs_read(fd: u32, offset: u64, buf: &mut [u8]) -> Result<usize, i64> {
+    let ptr = buf.as_mut_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
+    // `(buf, len)` pair against the caller's address space before writing it.
+    // `buf` is a live exclusive `&mut [u8]` for the duration of the call.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_FS_READ,
+            [u64::from(fd), offset, ptr, buf.len() as u64, 0, 0],
+        )
+    };
+    count_result(ret, buf.len())
+}
+
+/// Write `data` to the open descriptor `fd` at byte `offset`
+/// (`SyscallNumber::FS_WRITE`), returning the number of bytes written.
+///
+/// If the handle was opened with [`OpenFlags::APPEND`] the kernel ignores
+/// `offset` and appends at the current end of file. A single syscall
+/// transfers at most [`rustos_abi::FS_IO_MAX`] bytes; a larger `data` is split
+/// across successive calls by [`File::write_at`]. The kernel resolves `fd`
+/// against the caller's own table, enforces the handle was opened for
+/// writing, honours the mount's `ro` flag, and validates the `(buf, len)`
+/// pair before reading it.
+///
+/// # Errors
+///
+/// The raw negative kernel result (`-errno`): the descriptor is not the
+/// caller's, was not opened for writing, the mount is read-only, the buffer
+/// faults, or no filesystem is mounted (`NotImplemented`).
+pub fn fs_write(fd: u32, offset: u64, data: &[u8]) -> Result<usize, i64> {
+    let ptr = data.as_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
+    // `(ptr, len)` pair against the caller's address space before reading it.
+    // `data` is a live shared `&[u8]` for the duration of the call.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_FS_WRITE,
+            [u64::from(fd), offset, ptr, data.len() as u64, 0, 0],
+        )
+    };
+    count_result(ret, data.len())
+}
+
+/// Read the directory listing of the open directory descriptor `fd` into
+/// `buf` (`SyscallNumber::FS_READDIR`), returning the number of bytes the
+/// packed [`rustos_abi::DirEntry`] stream occupies.
+///
+/// The whole listing is delivered or none: a buffer smaller than the packed
+/// stream is refused with `BufferTooSmall` rather than truncated, so the
+/// caller grows `buf` and retries (the entry count is a discovered capacity,
+/// not a fixed ceiling). Walk the returned prefix with
+/// [`rustos_abi::DirEntry::decode`] — or use [`Dir::read`], which owns the
+/// buffer.
+///
+/// # Errors
+///
+/// The raw negative kernel result (`-errno`): the descriptor is not the
+/// caller's, the node is not a directory the caller may list, `buf` is too
+/// small, or no filesystem is mounted (`NotImplemented`).
+pub fn fs_readdir(fd: u32, buf: &mut [u8]) -> Result<usize, i64> {
+    let ptr = buf.as_mut_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
+    // `(buf, len)` pair against the caller's address space before writing it.
+    // `buf` is a live exclusive `&mut [u8]` for the duration of the call.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_FS_READDIR,
+            [u64::from(fd), ptr, buf.len() as u64, 0, 0, 0],
+        )
+    };
+    count_result(ret, buf.len())
+}
+
+/// Read the structural metadata of the open descriptor `fd`
+/// (`SyscallNumber::FS_STAT`).
+///
+/// The kernel fills the caller's [`FileStat`]-sized buffer from the VFS's
+/// authorised view of the node; an undersized buffer fails closed. Prefer the
+/// typed [`File::stat`], which decodes the record.
+///
+/// # Errors
+///
+/// The raw negative kernel result (`-errno`): the descriptor is not the
+/// caller's, the buffer is too small or faults, or no filesystem is mounted
+/// (`NotImplemented`).
+pub fn fs_stat_raw(fd: u32, out: &mut [u8]) -> Result<usize, i64> {
+    let ptr = out.as_mut_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
+    // `(buf, len)` pair against the caller's address space before writing it.
+    // `out` is a live exclusive `&mut [u8]` for the duration of the call.
+    let ret = unsafe { raw_syscall(NUM_FS_STAT, [u64::from(fd), ptr, out.len() as u64, 0, 0, 0]) };
+    count_result(ret, out.len())
+}
+
+/// Set the length of the regular file open at descriptor `fd` to `size`
+/// bytes (`SyscallNumber::FS_TRUNCATE`).
+///
+/// Truncation is a write: the handle must have been opened for writing, the
+/// mount must be writable, and the node must be a regular file — each checked
+/// kernel-side. Returns `0` on success or `-errno`.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
+pub fn fs_truncate(fd: u32, size: u64) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke; `fs_truncate` takes no
+    // memory operand, only the descriptor and the new size.
+    let ret = unsafe { raw_syscall(NUM_FS_TRUNCATE, [u64::from(fd), size, 0, 0, 0, 0]) };
+    ret as i64
+}
+
+/// Flush the mounted filesystem's pending writes to its backing store
+/// (`SyscallNumber::FS_SYNC`).
+///
+/// `fd` must be one of the caller's own live handles on the mounted volume (a
+/// forged or foreign number fails closed); the flush itself is
+/// filesystem-wide. Returns `0` on success or `-errno`.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
+pub fn fs_sync(fd: u32) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke; `fs_sync` takes no
+    // memory operand, only the descriptor proving the caller holds a live
+    // handle on the mounted volume.
+    let ret = unsafe { raw_syscall(NUM_FS_SYNC, [u64::from(fd), 0, 0, 0, 0, 0]) };
+    ret as i64
+}
+
+/// Create a directory at the absolute `path` (`SyscallNumber::FS_MKDIR`).
+///
+/// The kernel resolves the parent and authorises the create through the
+/// secured VFS under the caller's attested identity (an existing path, a
+/// read-only mount, or a permission denial fails closed). Returns `0` on
+/// success or `-errno`.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
+pub fn fs_mkdir(path: &[u8]) -> i64 {
+    let ptr = path.as_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
+    // `(ptr, len)` pair against the caller's address space before reading it.
+    // `path` is a live shared `&[u8]` for the duration of the call.
+    let ret = unsafe { raw_syscall(NUM_FS_MKDIR, [ptr, path.len() as u64, 0, 0, 0, 0]) };
+    ret as i64
+}
+
+/// Remove the file or empty directory at the absolute `path`
+/// (`SyscallNumber::FS_UNLINK`).
+///
+/// The kernel authorises the removal through the secured VFS under the
+/// caller's attested identity (a missing path, a non-empty directory, a
+/// read-only mount, or a permission denial fails closed). Returns `0` on
+/// success or `-errno`.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
+pub fn fs_unlink(path: &[u8]) -> i64 {
+    let ptr = path.as_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
+    // `(ptr, len)` pair against the caller's address space before reading it.
+    // `path` is a live shared `&[u8]` for the duration of the call.
+    let ret = unsafe { raw_syscall(NUM_FS_UNLINK, [ptr, path.len() as u64, 0, 0, 0, 0]) };
+    ret as i64
+}
+
+/// An open file or directory handle: an owned descriptor that issues
+/// [`fs_close`] when dropped, so a handle is never leaked.
+///
+/// Construct one with [`File::open`] (or the [`open`]/[`create`]/[`open_dir`]
+/// free functions). The handle's access is fixed by the [`OpenFlags`] it was
+/// opened with: a [`File::read_at`] against a handle opened without
+/// [`OpenFlags::READ`], or a [`File::write_at`] without [`OpenFlags::WRITE`],
+/// fails closed kernel-side. A program holds a descriptor, never a device.
+#[derive(Debug)]
+pub struct File {
+    fd: u32,
+}
+
+impl File {
+    /// Open `path` with `flags`, returning the owned handle.
+    ///
+    /// # Errors
+    ///
+    /// The raw negative kernel result (`-errno`) the [`fs_open`] syscall
+    /// returns on any refusal.
+    pub fn open(path: &[u8], flags: OpenFlags) -> Result<Self, i64> {
+        let ret = fs_open(path, flags);
+        if ret < 0 {
+            return Err(ret);
+        }
+        // A non-negative `fs_open` result is a descriptor number, which the
+        // kernel always reports within `u32` (the descriptor space the
+        // per-process table allocates from); the conversion is exact.
+        let fd =
+            u32::try_from(ret).map_err(|_| -i64::from(rustos_abi::Errno::OutOfRange.as_i32()))?;
+        Ok(Self { fd })
+    }
+
+    /// The raw descriptor number this handle owns.
+    #[must_use]
+    pub fn fd(&self) -> u32 {
+        self.fd
+    }
+
+    /// Read into the whole of `buf` starting at byte `offset`, splitting the
+    /// transfer into [`rustos_abi::FS_IO_MAX`]-sized syscalls, and return the
+    /// number of bytes read (short of `buf.len()` at end of file).
+    ///
+    /// # Errors
+    ///
+    /// The raw negative kernel result (`-errno`) of the first failing
+    /// [`fs_read`].
+    pub fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize, i64> {
+        let mut done = 0;
+        while done < buf.len() {
+            let n = fs_read(self.fd, offset + done as u64, &mut buf[done..])?;
+            if n == 0 {
+                break;
+            }
+            done += n;
+        }
+        Ok(done)
+    }
+
+    /// Write the whole of `data` starting at byte `offset` (or appending, if
+    /// the handle was opened with [`OpenFlags::APPEND`]), splitting the
+    /// transfer into [`rustos_abi::FS_IO_MAX`]-sized syscalls, and return the
+    /// number of bytes written.
+    ///
+    /// Stops early — returning the partial count — if a [`fs_write`] makes no
+    /// progress, so a stalled write never loops forever.
+    ///
+    /// # Errors
+    ///
+    /// The raw negative kernel result (`-errno`) of the first failing
+    /// [`fs_write`].
+    pub fn write_at(&self, offset: u64, data: &[u8]) -> Result<usize, i64> {
+        let mut done = 0;
+        while done < data.len() {
+            let n = fs_write(self.fd, offset + done as u64, &data[done..])?;
+            if n == 0 {
+                break;
+            }
+            done += n;
+        }
+        Ok(done)
+    }
+
+    /// Report this handle's structural metadata.
+    ///
+    /// # Errors
+    ///
+    /// The raw negative kernel result (`-errno`) of the [`fs_stat_raw`]
+    /// syscall, or [`rustos_abi::Errno::BufferTooSmall`] encoded as `-errno`
+    /// if the kernel returns a short record.
+    pub fn stat(&self) -> Result<FileStat, i64> {
+        let mut buf = [0u8; FileStat::WIRE_LEN];
+        let n = fs_stat_raw(self.fd, &mut buf)?;
+        if n < FileStat::WIRE_LEN {
+            return Err(-i64::from(rustos_abi::Errno::BufferTooSmall.as_i32()));
+        }
+        FileStat::decode(&buf).map_err(|e| -i64::from(e.as_i32()))
+    }
+
+    /// Set this file's length to `size` bytes.
+    ///
+    /// # Errors
+    ///
+    /// The raw negative kernel result (`-errno`) of the [`fs_truncate`]
+    /// syscall.
+    pub fn truncate(&self, size: u64) -> Result<(), i64> {
+        let ret = fs_truncate(self.fd, size);
+        if ret < 0 {
+            Err(ret)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Flush the mounted filesystem's pending writes to its backing store.
+    ///
+    /// # Errors
+    ///
+    /// The raw negative kernel result (`-errno`) of the [`fs_sync`] syscall.
+    pub fn sync(&self) -> Result<(), i64> {
+        let ret = fs_sync(self.fd);
+        if ret < 0 {
+            Err(ret)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Drop for File {
+    fn drop(&mut self) {
+        // Release the descriptor on the way out so a handle is never leaked.
+        // A close failure has no continuation here (the handle is gone either
+        // way), so the result is intentionally discarded.
+        let _ = fs_close(self.fd);
+    }
+}
+
+/// An open directory handle wrapping a [`File`] opened with
+/// [`OpenFlags::DIRECTORY`].
+///
+/// [`Dir::read`] reads the packed [`rustos_abi::DirEntry`] stream into the
+/// caller's buffer; walk it with [`rustos_abi::DirEntry::decode`].
+#[derive(Debug)]
+pub struct Dir {
+    file: File,
+}
+
+impl Dir {
+    /// The raw descriptor number this directory handle owns.
+    #[must_use]
+    pub fn fd(&self) -> u32 {
+        self.file.fd()
+    }
+
+    /// Read the whole directory listing into `buf` as a packed
+    /// [`rustos_abi::DirEntry`] stream, returning the number of bytes it
+    /// occupies.
+    ///
+    /// # Errors
+    ///
+    /// The raw negative kernel result (`-errno`) of the [`fs_readdir`]
+    /// syscall — in particular `BufferTooSmall` (encoded as `-errno`) when the
+    /// listing does not fit, so the caller grows `buf` and retries.
+    pub fn read(&self, buf: &mut [u8]) -> Result<usize, i64> {
+        fs_readdir(self.file.fd(), buf)
+    }
+}
+
+/// Open the existing file at the absolute `path` for reading.
+///
+/// # Errors
+///
+/// The raw negative kernel result (`-errno`) of [`File::open`].
+pub fn open(path: &[u8]) -> Result<File, i64> {
+    File::open(path, OpenFlags::READ)
+}
+
+/// Create (or truncate) the file at the absolute `path` for writing,
+/// creating it if absent.
+///
+/// # Errors
+///
+/// The raw negative kernel result (`-errno`) of [`File::open`].
+pub fn create(path: &[u8]) -> Result<File, i64> {
+    File::open(
+        path,
+        OpenFlags::WRITE
+            .union(OpenFlags::CREATE)
+            .union(OpenFlags::TRUNCATE),
+    )
+}
+
+/// Open the directory at the absolute `path` for listing.
+///
+/// # Errors
+///
+/// The raw negative kernel result (`-errno`) of [`File::open`].
+pub fn open_dir(path: &[u8]) -> Result<Dir, i64> {
+    let file = File::open(path, OpenFlags::DIRECTORY)?;
+    Ok(Dir { file })
+}
+
 /// Define the program's entry point.
 ///
 /// `$entry` must be a `fn() -> i32`; the macro exports the runtime's
@@ -2282,5 +2758,253 @@ mod tests {
         let (_, _) = capture(neg, || {
             assert_eq!(waitset_wait(5, 0, &mut token), want);
         });
+    }
+
+    // --- filesystem wrappers (PREREQUISITES.md P-A) -----------------------
+
+    #[test]
+    fn fs_open_marshals_path_flags_and_returns_the_descriptor() {
+        let path = b"/System/Logs/boot";
+        let flags = OpenFlags::READ.union(OpenFlags::WRITE);
+        let (number, args) = capture(4, || {
+            assert_eq!(fs_open(path, flags), 4);
+        });
+        assert_eq!(number, NUM_FS_OPEN);
+        assert_eq!(args[0], path.as_ptr() as usize as u64);
+        assert_eq!(args[1], path.len() as u64);
+        assert_eq!(args[2], u64::from(flags.bits()));
+        assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn fs_open_surfaces_negative_errno_encoding() {
+        let want = -i64::from(rustos_abi::Errno::PermissionDenied.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let (_, _) = capture(neg, || {
+            assert_eq!(fs_open(b"/x", OpenFlags::READ), want);
+        });
+    }
+
+    #[test]
+    fn fs_close_marshals_the_descriptor() {
+        let (number, args) = capture(0, || {
+            assert_eq!(fs_close(7), 0);
+        });
+        assert_eq!(number, NUM_FS_CLOSE);
+        assert_eq!(args[0], 7);
+        assert_eq!(&args[1..], &[0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn fs_read_marshals_fd_offset_pointer_and_len() {
+        let mut buf = [0u8; 16];
+        let ptr = buf.as_mut_ptr() as usize as u64;
+        let (number, args) = capture(16, || {
+            assert_eq!(fs_read(4, 0x1000, &mut buf), Ok(16));
+        });
+        assert_eq!(number, NUM_FS_READ);
+        assert_eq!(args[0], 4);
+        assert_eq!(args[1], 0x1000);
+        assert_eq!(args[2], ptr);
+        assert_eq!(args[3], 16);
+        assert_eq!(&args[4..], &[0, 0]);
+    }
+
+    #[test]
+    fn fs_read_clamps_an_oversized_count_to_the_buffer_length() {
+        let mut buf = [0u8; 8];
+        let (_, _) = capture(9999, || {
+            assert_eq!(fs_read(4, 0, &mut buf), Ok(8));
+        });
+    }
+
+    #[test]
+    fn fs_read_surfaces_negative_errno_encoding() {
+        let mut buf = [0u8; 4];
+        let want = -i64::from(rustos_abi::Errno::PermissionDenied.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let (_, _) = capture(neg, || {
+            assert_eq!(fs_read(4, 0, &mut buf), Err(want));
+        });
+    }
+
+    #[test]
+    fn fs_write_marshals_fd_offset_pointer_and_len() {
+        let data = *b"record\n";
+        let (number, args) = capture(7, || {
+            assert_eq!(fs_write(5, 0x20, &data), Ok(7));
+        });
+        assert_eq!(number, NUM_FS_WRITE);
+        assert_eq!(args[0], 5);
+        assert_eq!(args[1], 0x20);
+        assert_eq!(args[2], data.as_ptr() as usize as u64);
+        assert_eq!(args[3], data.len() as u64);
+        assert_eq!(&args[4..], &[0, 0]);
+    }
+
+    #[test]
+    fn fs_readdir_marshals_fd_pointer_and_len() {
+        let mut buf = [0u8; 64];
+        let ptr = buf.as_mut_ptr() as usize as u64;
+        let (number, args) = capture(20, || {
+            assert_eq!(fs_readdir(6, &mut buf), Ok(20));
+        });
+        assert_eq!(number, NUM_FS_READDIR);
+        assert_eq!(args[0], 6);
+        assert_eq!(args[1], ptr);
+        assert_eq!(args[2], 64);
+        assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn fs_readdir_surfaces_buffer_too_small() {
+        let mut buf = [0u8; 4];
+        let want = -i64::from(rustos_abi::Errno::BufferTooSmall.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let (_, _) = capture(neg, || {
+            assert_eq!(fs_readdir(6, &mut buf), Err(want));
+        });
+    }
+
+    #[test]
+    fn fs_stat_raw_marshals_fd_pointer_and_len() {
+        let mut buf = [0u8; FileStat::WIRE_LEN];
+        let ptr = buf.as_mut_ptr() as usize as u64;
+        let (number, args) = capture(FileStat::WIRE_LEN as u64, || {
+            assert_eq!(fs_stat_raw(4, &mut buf), Ok(FileStat::WIRE_LEN));
+        });
+        assert_eq!(number, NUM_FS_STAT);
+        assert_eq!(args[0], 4);
+        assert_eq!(args[1], ptr);
+        assert_eq!(args[2], FileStat::WIRE_LEN as u64);
+        assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn fs_truncate_marshals_fd_and_size() {
+        let (number, args) = capture(0, || {
+            assert_eq!(fs_truncate(4, 0x4000), 0);
+        });
+        assert_eq!(number, NUM_FS_TRUNCATE);
+        assert_eq!(args[0], 4);
+        assert_eq!(args[1], 0x4000);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn fs_sync_marshals_the_descriptor() {
+        let (number, args) = capture(0, || {
+            assert_eq!(fs_sync(4), 0);
+        });
+        assert_eq!(number, NUM_FS_SYNC);
+        assert_eq!(args[0], 4);
+        assert_eq!(&args[1..], &[0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn fs_mkdir_marshals_path_pointer_and_len() {
+        let path = b"/System/Logs/runtime";
+        let (number, args) = capture(0, || {
+            assert_eq!(fs_mkdir(path), 0);
+        });
+        assert_eq!(number, NUM_FS_MKDIR);
+        assert_eq!(args[0], path.as_ptr() as usize as u64);
+        assert_eq!(args[1], path.len() as u64);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn fs_unlink_marshals_path_pointer_and_len() {
+        let path = b"/System/Logs/old";
+        let (number, args) = capture(0, || {
+            assert_eq!(fs_unlink(path), 0);
+        });
+        assert_eq!(number, NUM_FS_UNLINK);
+        assert_eq!(args[0], path.as_ptr() as usize as u64);
+        assert_eq!(args[1], path.len() as u64);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn file_open_returns_the_handle_and_drop_closes_it() {
+        seam::arm(4);
+        let file = File::open(b"/System/Logs/boot", OpenFlags::READ).expect("open succeeds");
+        assert_eq!(file.fd(), 4);
+        // Dropping the handle releases the descriptor through `fs_close`.
+        drop(file);
+        let (number, args) = seam::last_call().expect("drop issues a close");
+        assert_eq!(number, NUM_FS_CLOSE);
+        assert_eq!(args[0], 4);
+    }
+
+    #[test]
+    fn file_open_surfaces_the_negative_errno() {
+        let want = -i64::from(rustos_abi::Errno::NotFound.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        seam::arm(neg);
+        assert_eq!(File::open(b"/missing", OpenFlags::READ).err(), Some(want));
+    }
+
+    #[test]
+    fn file_read_at_issues_a_single_call_for_a_small_buffer() {
+        let file = File { fd: 9 };
+        let mut buf = [0u8; 8];
+        seam::arm(8);
+        assert_eq!(file.read_at(0x80, &mut buf), Ok(8));
+        let (number, args) = seam::last_call().expect("a read was issued");
+        assert_eq!(number, NUM_FS_READ);
+        assert_eq!(args[0], 9);
+        assert_eq!(args[1], 0x80);
+        assert_eq!(args[3], 8);
+        core::mem::forget(file);
+    }
+
+    #[test]
+    fn file_stat_decodes_the_record() {
+        let stat = FileStat {
+            kind: rustos_abi::FileKind::Regular,
+            size: 1234,
+            mode: 0o644,
+            uid: 1000,
+            gid: 1000,
+        };
+        let mut wire = [0u8; FileStat::WIRE_LEN];
+        stat.encode(&mut wire).expect("encode");
+        // Arm the seam to report the encoded record by pointing the kernel's
+        // copy-out at the test's buffer is not possible here (the host seam
+        // records, it does not write), so prove the short-record guard instead.
+        let file = File { fd: 9 };
+        seam::arm(0); // a zero-length stat result trips the short-record guard
+        let want = -i64::from(rustos_abi::Errno::BufferTooSmall.as_i32());
+        assert_eq!(file.stat(), Err(want));
+        core::mem::forget(file);
+    }
+
+    #[test]
+    fn create_requests_write_create_truncate() {
+        let want = -i64::from(rustos_abi::Errno::NotImplemented.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let (number, args) = capture(neg, || {
+            assert_eq!(create(b"/System/Logs/seg").err(), Some(want));
+        });
+        assert_eq!(number, NUM_FS_OPEN);
+        let flags = OpenFlags::from_bits(u32::try_from(args[2]).expect("flag bits fit u32"))
+            .expect("create requests a legal flag combination");
+        assert!(flags.contains(OpenFlags::WRITE));
+        assert!(flags.contains(OpenFlags::CREATE));
+        assert!(flags.contains(OpenFlags::TRUNCATE));
+    }
+
+    #[test]
+    fn open_dir_requests_the_directory_flag() {
+        let want = -i64::from(rustos_abi::Errno::NotImplemented.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let (number, args) = capture(neg, || {
+            assert_eq!(open_dir(b"/System/Logs").map(|_| ()), Err(want));
+        });
+        assert_eq!(number, NUM_FS_OPEN);
+        let flags = OpenFlags::from_bits(u32::try_from(args[2]).expect("flag bits fit u32"))
+            .expect("open_dir requests a legal flag combination");
+        assert!(flags.contains(OpenFlags::DIRECTORY));
     }
 }

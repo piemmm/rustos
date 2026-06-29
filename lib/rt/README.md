@@ -68,6 +68,21 @@ reusing its own freed bytes is not a security boundary (`AGENTS.md` §2.16). The
 arena and metadata bases are fixed virtual addresses documented in
 `src/heap.rs`.
 
+## Filesystem (`File`, `Dir`)
+
+`rustos-rt` exposes the userland filesystem surface (`PREREQUISITES.md` P-A):
+thin `fs_open`/`fs_close`/`fs_read`/`fs_write`/`fs_readdir`/`fs_stat_raw`/
+`fs_truncate`/`fs_sync`/`fs_mkdir`/`fs_unlink` wrappers over the `abi-v1`
+syscalls, plus the ergonomic `File` and `Dir` handles a program normally uses.
+`File` owns its descriptor and releases it with `fs_close` on `Drop`, so a
+handle is never leaked; `File::read_at` / `write_at` split a transfer larger
+than `rustos_abi::FS_IO_MAX` across successive syscalls. A program names a
+descriptor, never a device (`AGENTS.md` §20). Every capability, identity, and
+per-inode check stays kernel-side behind the secured VFS (`AGENTS.md` §5.4); a
+refusal surfaces as the raw `-errno`. The `open` / `create` / `open_dir` free
+functions are the common-case openers (read-only, write+create+truncate, and
+directory-listing respectively).
+
 ## Targets
 
 The `_start` trampoline, stack-canary symbols, and panic handler are compiled
