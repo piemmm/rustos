@@ -16,11 +16,11 @@
 //! (on-demand and reactive driver loads), so the
 //! one device must back **two concurrent partition windows**. This module
 //! is that primitive: a [`SharedBlock`] owns the device behind a
-//! `lib/sync` [`SpinLock`] and hands out as many [`SharedBlockHandle`]s as
-//! there are windows, each of which is itself a [`Block`]. Every read /
-//! write / discard takes the lock for the duration of the single device
-//! operation, so concurrent windows on different CPUs are serialised
-//! (SMP from day one, explicit synchronisation).
+//! scheduler-blocking [`SleepLock`] and hands out as many
+//! [`SharedBlockHandle`]s as there are windows, each of which is itself a
+//! [`Block`]. Every read / write / discard takes the lock for the duration
+//! of the single device operation, so concurrent windows on different CPUs
+//! are serialised (SMP from day one, explicit synchronisation).
 //!
 //! The device's [`BlockGeometry`] is immutable for the life of a disk, so
 //! it is queried **once** at construction and cached: [`SharedBlock::geometry`]
@@ -28,13 +28,17 @@
 //! keeping that hot, frequently-read value off the lock. Geometry is the only cached value; every byte-moving operation
 //! goes to the device under the lock.
 //!
-//! A plain [`SpinLock`] (not the IRQ-safe variant) is correct here: block
-//! I/O is driven from task / kthread context — the device IRQ only *wakes*
-//! the waiting kthread, it never issues a `read_blocks` from inside the
-//! handler — so the lock is never taken from an interrupt
-//! (`docs/src/architecture/sync.md`). The critical section is one device
-//! operation and contention is low (at most the unlock window vs. the
-//! driver-store window), matching the [`SpinLock`] use case.
+//! A **sleeping** [`SleepLock`] is required here, not a `lib/sync` spin lock:
+//! a device operation may **park** the calling task across the controller's
+//! completion interrupt ([`Block::read_blocks`] parks on the device IRQ), and
+//! the lock is held for the duration of that operation. A spin lock held
+//! across such a park is a defect — a second window contending for the same
+//! disk would busy-spin on a holder that is asleep (forbidden busy-waiting),
+//! or deadlock a single CPU outright. The [`SleepLock`] instead parks the
+//! contending window off the run queue and wakes it when the holder releases,
+//! so two concurrent windows (the `/System` driver-store window and the
+//! encrypted-root unlock window) can safely drive one disk
+//! (`docs/src/architecture/sync.md`).
 //!
 //! Architecture-neutral: the layer names no
 //! device type and no architecture — it is generic over any [`Block`], so
@@ -44,8 +48,7 @@
 use rustos_abi::driver::block::{Block, BlockGeometry, DeviceHealth, DiscardCapability};
 use rustos_abi::driver::BufferClass;
 use rustos_abi::DriverError;
-use rustos_kernel_core::CooperativeYield;
-use rustos_sync::SpinLock;
+use rustos_kernel_core::{CooperativeYield, SleepLock};
 
 /// A [`Block`] device shared behind a lock so several concurrent windows
 /// can drive it, each device operation serialised.
@@ -56,12 +59,13 @@ use rustos_sync::SpinLock;
 /// `SharedBlock`, is itself a [`Block`], and may be layered under a
 /// `rustos_partition::PartitionBlock` window exactly like a bare device.
 ///
-/// `SharedBlock<B>` is [`Sync`] when `B: Send` (the [`SpinLock`] makes the
+/// `SharedBlock<B>` is [`Sync`] when `B: Send` (the [`SleepLock`] makes the
 /// interior access exclusive), so it may be shared by `&` across CPUs.
 pub struct SharedBlock<B: Block> {
     /// The owned device. Every byte-moving operation locks this for the
-    /// duration of one device call.
-    device: SpinLock<B>,
+    /// duration of one device call. A sleeping lock because that operation
+    /// may be held across a completion-IRQ park.
+    device: SleepLock<B>,
     /// The device geometry, queried once at construction. Immutable for the
     /// life of a disk, so it is served lock-free.
     geometry: BlockGeometry,
@@ -78,7 +82,7 @@ impl<B: Block> SharedBlock<B> {
     pub fn new(device: B) -> Result<Self, DriverError> {
         let geometry = device.geometry()?;
         Ok(Self {
-            device: SpinLock::new(device),
+            device: SleepLock::new(device),
             geometry,
         })
     }
@@ -110,7 +114,9 @@ impl<B: Block> SharedBlock<B> {
 //      device goes through `self.device.lock()` (the cached `geometry` is the
 //      only lock-free field and is an immutable `Copy` value), so `B` is never
 //      touched by two tasks at once — there is no data race on `B`'s interior,
-//      including any non-atomic bookkeeping it keeps.
+//      including any non-atomic bookkeeping it keeps. The `SleepLock` grants
+//      exclusive ownership for the whole operation, even one held across a
+//      completion-IRQ park, parking a second contender rather than spinning.
 //   2. **Location-independent backing.** `B`'s `!Send` parts are raw pointers
 //      into globally-valid device memory: an MMIO register window and a DMA
 //      slab, both reachable from any CPU/task through the kernel's identity
@@ -124,8 +130,9 @@ impl<B: Block> SharedBlock<B> {
 // transport/host (encapsulated behind a safe API).
 unsafe impl<B: Block> Send for SharedBlock<B> {}
 // SAFETY: as for `Send` above — `&SharedBlock` hands out `SharedBlockHandle`s
-// whose every device op locks `self.device`, so concurrent `&` access from
-// multiple tasks is serialised down to one device operation at a time.
+// whose every device op locks `self.device` (a sleeping lock that parks rather
+// than spins on contention), so concurrent `&` access from multiple tasks is
+// serialised down to one device operation at a time.
 unsafe impl<B: Block> Sync for SharedBlock<B> {}
 
 /// One window onto a [`SharedBlock`]. It is itself a [`Block`]: every
