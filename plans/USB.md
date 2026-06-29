@@ -684,6 +684,23 @@ the live controller behaviour is host- and CI-proven first.
     HCHalted → faulted). The HCD main-loop wiring is a freestanding binary, so
     coverage is at the lib/usb predicate+recovery level.
     (Metal-only acceptance still required — QEMU models no Pi USB, §0.4.)
+  - **A re-plugged device reloads its class driver (the "unplug seen, re-plug
+    never reloads" fix).** With the controller recovery above, the HCD
+    correctly retracts the interface node on unplug and re-emits it on
+    re-plug, but the re-plugged keyboard produced no input because `devmgr`
+    never reloaded the class driver. Root cause was in the kernel driver-load
+    path, not USB: the user-space load mechanism reported the **driver host's
+    per-instance handle counter** (always `1`, since a fresh `Host` is built
+    per load) instead of the spawned process id. `devmgr`'s hot-removal diff
+    (`unload_vanished`) keys teardown on that handle and skips a driver while
+    *any other* bound node shares its handle — so with every driver reporting
+    handle `1`, the vanished keyboard's driver was never torn down and its
+    loaded-bundle cache never purged, so the re-emitted node reused the stale
+    handle and was never re-spawned. (The same handle was also wrong for the
+    teardown seam, which resolves it as a PID.) `SpawnDriverLoader::load` now
+    returns the unique spawned PID as the driver handle. Host regression: the
+    store-server `a_load_spawns_the_matched_signed_driver_with_the_nodes_resources`
+    test asserts the reported handle is the spawned PID, not the host counter.
   - **Remaining (operator's):** live metal acceptance — attach → keystroke,
     detach → `usb_kbd` unloaded (controller stays up), re-attach → autoloads
     again, **and cold boot with the keyboard unplugged then plugged in** — is

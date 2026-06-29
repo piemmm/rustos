@@ -40,6 +40,8 @@
 //! kernel state. Host tests here supply a recording double, so the gate and
 //! resource-threading logic are exercised on the CI host without a scheduler.
 
+use core::cell::Cell;
+
 use rustos_abi::hwtree::HwResource;
 use rustos_abi::{DriverError, DriverHandle, Errno, ABI_VERSION_CURRENT};
 use rustos_caps::CapabilitySet;
@@ -193,6 +195,13 @@ struct SpawningDriverSpawner<'a> {
     /// children are parented under it. [`None`] when the load is not
     /// node-matched.
     node_id: Option<u32>,
+    /// The spawned driver's process id, captured on a successful
+    /// registration so the load mechanism can report it as the driver's
+    /// lifecycle handle. The kernel teardown resolves the handle as a PID,
+    /// and the PID is unique per driver, whereas the host's own per-instance
+    /// counter is not (a fresh host is built per load, so it would report the
+    /// same value for every driver). Zero means no spawn was recorded.
+    spawned_pid: Cell<u64>,
 }
 
 impl DriverSpawner for SpawningDriverSpawner<'_> {
@@ -215,10 +224,13 @@ impl DriverSpawner for SpawningDriverSpawner<'_> {
                 self.node_id,
             )
             .map_err(|e| SpawnRegisterError::Register(spawn_errno_as_driver_error(e)))?;
-        // The spawned process id doubles as the driver's reported handle;
-        // the host mints its own unforgeable handle on success, so this is
-        // informational. A zero pid is impossible from a successful admit,
-        // but is rejected fail-closed rather than asserted.
+        // Record the spawned PID so the load mechanism reports it as the
+        // driver's handle — the unique, teardown-resolvable identity, not the
+        // host's throwaway per-instance counter.
+        self.spawned_pid.set(pid);
+        // The spawned process id is the driver's handle. A zero pid is
+        // impossible from a successful admit, but is rejected fail-closed
+        // rather than asserted.
         DriverHandle::from_raw(pid)
             .map_err(|_| SpawnRegisterError::Register(DriverError::DeviceFault))
     }
@@ -295,6 +307,7 @@ impl DriverLoader for SpawnDriverLoader<'_> {
             grants: resources,
             args: self.args,
             node_id: self.node_id,
+            spawned_pid: Cell::new(0),
         };
         let mut host = Host::new(HostConfig {
             trusted_signers: self.trusted,
@@ -310,7 +323,15 @@ impl DriverLoader for SpawnDriverLoader<'_> {
             virtio_host_factory: None,
             mmio_mapper: None,
         });
-        host.load(path, caller_caps).map_err(HostError::as_errno)
+        // The host gate verifies the image and spawns it; its own returned
+        // handle is a per-instance counter that is `1` for every driver here
+        // (a fresh host per load) and cannot be torn down. The driver's real
+        // lifecycle handle is the spawned process id the spawner captured —
+        // unique per driver and the value `terminate_driver_process`
+        // resolves. A successful load always records a non-zero PID; a zero
+        // value (impossible from a successful admit) fails closed.
+        host.load(path, caller_caps).map_err(HostError::as_errno)?;
+        DriverHandle::from_raw(spawner.spawned_pid.get()).map_err(|_| Errno::OutOfRange)
     }
 }
 
@@ -426,6 +447,7 @@ mod tests {
             grants: &grants,
             args: &args,
             node_id: Some(0x42),
+            spawned_pid: Cell::new(0),
         };
         let manifest = stub_manifest();
         let host = StubHost {
@@ -458,6 +480,7 @@ mod tests {
             grants: &[],
             args: &[],
             node_id: None,
+            spawned_pid: Cell::new(0),
         };
         let manifest = stub_manifest();
         let host = StubHost {

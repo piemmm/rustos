@@ -828,11 +828,18 @@ mod tests {
         let mut rbuf = [0u8; LOAD_REQUEST_LEN];
         let n = req.encode(&mut rbuf).expect("encode");
         let reply = build_reply(&service, &serve_ctx, &store, &rbuf[..n], &NullSink);
-        // The reply carries the load gate's minted driver handle (non-zero);
-        // the spawn pid is informational, so the handle value is the host's,
-        // not the recording spawn's pid.
+        // The reply carries the spawned driver's process id as its handle —
+        // the unique, teardown-resolvable identity. It must be the recording
+        // spawn's pid, not the driver host's per-instance counter (which is
+        // `1` for every driver, since a fresh host is built per load, and
+        // could neither be unloaded nor distinguished). Reporting the host
+        // counter is the bug that left every driver at handle=1 and broke
+        // hot-plug unload/reload.
         let handle = decode_load_reply(&reply).expect("the load succeeds and returns a handle");
-        assert_ne!(handle, 0, "a successful load reports a non-zero handle");
+        assert_eq!(
+            handle, 0x4242,
+            "the reported handle is the spawned PID, not the host's counter"
+        );
 
         let calls = spawn.calls.borrow();
         assert_eq!(calls.len(), 1);
