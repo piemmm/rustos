@@ -1775,7 +1775,7 @@ riscv64, mirroring the aarch64 P-stage arc.
   Shell → `id=5000 sc=spawn` → SiFive PASS). **No ABI change.** Doc:
   `docs/src/platform/riscv64.md` ("PID 1 into user mode").
 
-### P7 — VideoCore mailbox + framebuffer (metal) `[~]`
+### P7 — VideoCore mailbox + framebuffer (metal) `[x]`
 
 **Landed — the host-provable protocol half.** The BCM2711 mailbox
 property-channel client lives in the shared `lib/vcmailbox` crate
@@ -1832,23 +1832,18 @@ property-channel client lives in the shared `lib/vcmailbox` crate
   (firmware scan-out + the host's `HvsRegions`: DLIST RAM, control
   window, plane carves) and calls `RpiHvs::open`.
 
-**Remaining — metal acceptance.**
-
-- Metal bring-up checklist (record each step's UART log): boot the P6
-  image with HDMI attached → `MmioMailbox` exchange returns the
-  firmware framebuffer (log bus address, size, pitch) →
-  `bus_to_arm_physical` + map → `RpiHvs::open` + clear the frame to the
-  theme colour → capture the photo + UART log as the acceptance
-  artefact.
+**Accepted on metal.** A real Pi 4B drives the VideoCore mailbox exchange,
+maps the firmware framebuffer, and scans the HVS surface out to HDMI; the
+operator's photo + UART log is the recorded acceptance artefact.
 
 **Done when:** the mailbox property protocol has host unit tests
 (request/response framing, bus↔physical translation, fail-closed on a bad
 aperture) — done; `rpi_hvs` consumes a discovered `HvsConfig` — done
-(hardware-tree mailbox node + `wiring::open_discovered`); and a metal
-bring-up checklist + a captured "framebuffer cleared to theme colour"
-photo/UART-log is recorded as the acceptance artefact — pending metal.
+(hardware-tree mailbox node + `wiring::open_discovered`); a metal bring-up
+scans the firmware framebuffer out to HDMI — done (operator metal
+acceptance).
 
-### P7b — Framebuffer boot console: video first, UART fallback `[~]`
+### P7b — Framebuffer boot console: video first, UART fallback `[x]`
 
 Console output (boot log and every later phase) defaults to the
 **attached display**; the UART is the last resort when no video output
@@ -1889,16 +1884,17 @@ console".
   fail-closed surface validation, and the renderer (glyph rows,
   `?` fallback, `\n`/`\r`, column wrap, ring-row clear, dirty bands).
 
-**Remaining — metal acceptance.** Boot the SD image with HDMI attached
-and capture the boot log **on screen** (photo) plus the
-`video_console=true` audit line; with HDMI detached confirm the UART
-carries the same log (`video_console=false`).
+**Accepted on metal.** The boot log renders on the attached HDMI display
+on a real Pi 4 (`video_console=true`), and a detached-display boot proves
+the UART fallback (`video_console=false`); the operator's photo + UART
+logs are the recorded acceptance artefacts.
 
 **Done when:** the boot log renders on the attached display on a real
-Pi 4 with the UART fallback proven by the detached-display boot —
-pending metal; everything host-provable is landed and tested — done.
+Pi 4 with the UART fallback proven by the detached-display boot — done
+(operator metal acceptance); everything host-provable is landed and
+tested — done.
 
-### P8 — SD-card storage (EMMC2) `[~]` (read + write paths code-complete; metal pending)
+### P8 — SD-card storage (EMMC2) `[x]` (read + write paths; metal-accepted)
 
 **Depends on `PLAN.md` Stage 4.HW** (bind table + `devmgr` + the drvhost
 `.rxe` process-spawn path) — all landed: the aarch64 walk emits a
@@ -1958,19 +1954,21 @@ implementing `rustos_abi::driver::block::Block`:
   deliberately** — QEMU models no Pi EMMC2 controller (§0.4); the
   emulation artefact is the host state-machine test.
 
-**Remaining — metal acceptance.** A metal checklist (boot the P9 image on
-a real Pi 4 → read the FAT boot partition and the RustFS root from the
-card → capture the UART log as the acceptance artefact).
+**Accepted on metal.** A real Pi 4 boots the P9 image, reads the FAT boot
+partition and mounts the RustFS root from the SD card; the operator's UART
+log is the recorded acceptance artefact. The interrupt-driven SDHCI
+wait-parking (no busy-poll) that made the boot-time driver-store scan fast
+is landed in the driver and the aarch64 root-unlock path.
 
 **Done when:** host unit tests cover the SDHCI command/response + block
 transfer state machine (both transfer directions) against a mock host —
 done; a metal checklist demonstrates reading the FAT boot partition and
-the RustFS root from a real card — pending hardware.
+the RustFS root from a real card — done (operator metal acceptance).
 
-### P9 — Bootable SD image (`tools/mkimage`) `[~]`
+### P9 — Bootable SD image (`tools/mkimage`) `[x]`
 
-The image builder is landed; only the on-metal boot of the emitted image
-remains (pending hardware).
+The image builder is landed and the emitted image boots a real Pi 4 into
+user mode (operator metal acceptance).
 
 - `tools/mkimage` (`rustos-mkimage`, lib + bin) authors
   `images/rustos-aarch64-rpi.img` in pure Rust (§12 — no
@@ -2038,14 +2036,14 @@ remains (pending hardware).
   author and reader cannot drift (§2.2); its MBR/GPT encode/parse tests
   live in that crate. Docs: `docs/src/install/raspberry_pi.md`.
 
-**Remaining — metal:** boot the emitted image on a real Pi 4 per the
-flashing/first-boot doc and record the UART-log checklist (the P7/P8
-metal items ride the same boot).
+**Accepted on metal.** The emitted `.img` boots a real Pi 4 into user mode
+per the flashing/first-boot doc; the operator's UART log is the recorded
+acceptance artefact (the P7/P8 metal items ride the same boot).
 
 **Done when:** `cargo xtask build --target aarch64-rpi` (and `--headless`)
 produces a flashable `.img` — done; `docs/src/install/raspberry_pi.md`
 documents flashing + first boot — done; the image boots P6 (user mode) on
-real hardware per a recorded checklist — pending hardware.
+real hardware per a recorded checklist — done (operator metal acceptance).
 
 ### P10 — USB-HID input + desktop on the Pi `[~]`
 
@@ -2071,8 +2069,15 @@ and pumps. The kernel's bootstrap floor is storage-only (§18.6). **The
 historical "Landed" subsections below describe the superseded in-kernel
 diagnostic path (the old `drivers/bus/usb` path is now `drivers/bus/usb/xhci`);
 they are retained for the PCIe root-cause findings that still apply to
-`drivers/bus/pcie_brcm`.** Metal acceptance is the real-Pi UART log in
-PLAN.md Stage 4.HW item 5. The status detail of record lives in `PLAN.md`.
+`drivers/bus/pcie_brcm`.** **The user-space USB-HID keyboard chain is
+accepted on metal** (attach → keystroke, detach → `usb_kbd` unloads while
+the controller stays up, re-attach → autoloads again, and cold boot with
+the keyboard unplugged then plugged in); the operator's UART logs are the
+recorded acceptance artefact. **Remaining for P10:** run
+`userland/gui/{wm,taskbar,session}` on the HVS path so
+`userland/session/login` offers the launchable graphical session when the
+display + input drivers are present (the headless build stays first-class,
+§17.3). The status detail of record lives in `PLAN.md`.
 
 **Landed — the host-provable protocol layers** (the `emmc2`/`rpi_hvs`
 seam shape, §2.2; no QEMU vertical — QEMU models no Pi USB timing,

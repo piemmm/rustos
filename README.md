@@ -44,7 +44,7 @@ for filesystems, the block below.
 | Block storage | ✓ virtio | ✓ virtio + eMMC | ✓ virtio | — |
 | Networking | ◐ virtio | ◐ virtio | ◐ virtio | — |
 | Input devices | ✓ ps2 + USB | ✓ virtio + USB | ✓ virtio | ✓ host |
-| Production kernel binary | ✓ | ◐ | ▢ | ▢ |
+| Production kernel binary | ✓ | ✓ | ▢ | ▢ |
 | Bootable image | ▢ iso | ✓ rpi.img | ▢ | ▢ |
 
 Networking is the virtio-net link-layer driver plus a test ARP/ICMP-echo

@@ -356,7 +356,8 @@ deferred to later stages (not stubbed, §15.1).
   `input/ps2` (x86_64), `bus/pci` (x86_64 PIO mechanism #1 + cross-arch PCIe
   ECAM, plus the BCM2711 *windowed* index/data config mechanism
   `mechanism_brcm` for the Pi 4 VL805 path), `bus/pcie_brcm` (the BCM2711
-  PCIe root-complex link bring-up, host-tested; metal pending),
+  PCIe root-complex link bring-up, host-tested and metal-confirmed via the
+  user-space USB-HID chain, `plans/PI.md` P10),
   `bus/mmio`, `bus/virtio`
   (+ in-kernel `KernelVirtioHost` with the owned-`DmaSlab` DMA shape),
   `storage/virtio_blk`, `network/virtio_net`. Each emulable driver has a
@@ -367,8 +368,8 @@ deferred to later stages (not stubbed, §15.1).
   command/transfer waits park on the controller's bound GIC line through a
   `CompletionWait` seam rather than busy-spinning, §17.1/§2.16) ships its
   read and write paths host-tested against a register-level mock; it has no
-  QEMU vertical (QEMU models no Pi EMMC2) and its metal acceptance is the
-  `plans/PI.md` P8 checklist.
+  QEMU vertical (QEMU models no Pi EMMC2); it is accepted on metal (reads the
+  FAT boot partition + RustFS root off a real Pi 4 SD card, `plans/PI.md` P8).
 - DMA goes through `kernel/sec::dma` (`CAP_MMIO_MAP`/`MEM_DMA` checked, audited);
   MMIO is reached only through the capability-gated `KernelMmioMapper`.
 
@@ -2614,8 +2615,9 @@ transfer, landed in increments:
     operator-staged, every download checksum-gated —
     generated `config.txt`, flattened `kernel8.img`), and an encrypted
     RustFS root with the §16 skeleton, both laid down by the real
-    in-tree drivers. Docs: `docs/src/install/raspberry_pi.md`. The
-    on-metal boot of the emitted image is tracked in `plans/PI.md` P9.
+    in-tree drivers. Docs: `docs/src/install/raspberry_pi.md`. The emitted
+    image boots a real Pi 4 into user mode (operator metal acceptance,
+    `plans/PI.md` P9).
   - `images/rustos-riscv64.img`.
   - `images/rustos-web/` static tree.
 
