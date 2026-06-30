@@ -191,7 +191,12 @@ mod tests {
         /// Matches [`super::super::SlabFreeFn`]: the caller (only
         /// [`super::super::DmaSlab::drop`]) guarantees the call
         /// happens once with the slab's bookkeeping.
-        pub(super) unsafe fn free_shim(_pool: *const (), slot: usize, len: usize) {
+        pub(super) unsafe fn free_shim(
+            _pool: *const (),
+            _cpu: core::ptr::NonNull<u8>,
+            slot: usize,
+            len: usize,
+        ) {
             FREED.fetch_add(1, Ordering::SeqCst);
             LAST_SLOT.store(slot, Ordering::SeqCst);
             LAST_LEN.store(len, Ordering::SeqCst);

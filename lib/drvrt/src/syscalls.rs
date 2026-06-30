@@ -38,6 +38,16 @@ pub trait GrantSyscalls {
     /// Mirrors [`rustos_rt::dma_alloc`].
     fn dma_alloc(&self, handle: u64, len: usize, device_out: &mut u64) -> i64;
 
+    /// Release the coherent DMA buffer based at `cpu_va` (the user virtual
+    /// base a prior [`Self::dma_alloc`] returned) bounded by the constraint
+    /// named by grant `handle`, returning `0` on success (or `-errno`). The
+    /// symmetric free for [`Self::dma_alloc`]: a long-running driver reclaims
+    /// each transfer's buffers through this rather than leaking DMA frames
+    /// until it exits.
+    ///
+    /// Mirrors [`rustos_rt::dma_free`].
+    fn dma_free(&self, handle: u64, cpu_va: u64) -> i64;
+
     /// Map the cross-process shared-memory region named by the kernel-issued
     /// grant `handle` into the calling task's own address space, returning the
     /// base user virtual address of the mapping (or `-errno`).
@@ -125,6 +135,11 @@ impl GrantSyscalls for RtGrantSyscalls {
     #[inline]
     fn dma_alloc(&self, handle: u64, len: usize, device_out: &mut u64) -> i64 {
         rustos_rt::dma_alloc(handle, len, device_out)
+    }
+
+    #[inline]
+    fn dma_free(&self, handle: u64, cpu_va: u64) -> i64 {
+        rustos_rt::dma_free(handle, cpu_va)
     }
 
     #[inline]

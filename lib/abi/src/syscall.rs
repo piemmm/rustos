@@ -921,6 +921,24 @@ impl SyscallNumber {
     /// non-empty directory, a read-only mount, a missing target, or a denied
     /// parent fails closed. Gated by [`crate::CapabilityId::FS_ACCESS`].
     pub const FS_UNLINK: Self = Self(55);
+    /// Release a per-process DMA buffer previously carved by
+    /// [`SyscallNumber::DMA_ALLOC`] — the symmetric free for the device-DMA
+    /// allocator (`plans/PI.md` P10). A long-running driver that issues many
+    /// transfers must reclaim each request's bounce buffers, or it leaks DMA
+    /// frames until it exits.
+    ///
+    /// Arguments: `handle: u64` (the same unforgeable DMA-constraint grant
+    /// handle [`SyscallNumber::DMA_ALLOC`] was called with) and `cpu_va: u64`
+    /// (the CPU base address that `dma_alloc` returned). Returns `0`, or
+    /// `-errno`. The kernel frees only a buffer live in the **calling task's**
+    /// own DMA window (`caller.task_id` is kernel-trusted); a forged or
+    /// foreign handle, or a `cpu_va` that is not the base of a live carve,
+    /// fails closed without releasing anything, so a stale, double, or
+    /// cross-task free can never release frames it does not own. The freed
+    /// frames are zeroed before they return to the allocator (zero-on-free),
+    /// so a later allocation cannot recover the buffer's bytes. Gated by
+    /// [`crate::CapabilityId::MEM_DMA`].
+    pub const DMA_FREE: Self = Self(56);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
@@ -1052,6 +1070,7 @@ mod tests {
         assert_eq!(SyscallNumber::FS_SYNC.as_u16(), 53);
         assert_eq!(SyscallNumber::FS_MKDIR.as_u16(), 54);
         assert_eq!(SyscallNumber::FS_UNLINK.as_u16(), 55);
+        assert_eq!(SyscallNumber::DMA_FREE.as_u16(), 56);
     }
 
     #[test]

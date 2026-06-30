@@ -105,6 +105,9 @@ const NUM_MMIO_MAP: u64 = SyscallNumber::MMIO_MAP.as_u16() as u64;
 /// `dma_alloc` syscall number (as above).
 const NUM_DMA_ALLOC: u64 = SyscallNumber::DMA_ALLOC.as_u16() as u64;
 
+/// `dma_free` syscall number (as above).
+const NUM_DMA_FREE: u64 = SyscallNumber::DMA_FREE.as_u16() as u64;
+
 /// `wait` syscall number (as above).
 const NUM_WAIT: u64 = SyscallNumber::WAIT.as_u16() as u64;
 
@@ -889,6 +892,36 @@ pub fn dma_alloc(handle: u64, len: usize, device_out: &mut u64) -> i64 {
     // device-visible base; the kernel validates it against the caller's own
     // address space before writing.
     let ret = unsafe { raw_syscall(NUM_DMA_ALLOC, [handle, len as u64, ptr, 0, 0, 0]) };
+    ret as i64
+}
+
+/// Release a coherent DMA buffer previously carved by [`dma_alloc`]
+/// (`SyscallNumber::DMA_FREE`) — the symmetric free a long-running driver
+/// calls so each transfer's bounce buffers are reclaimed rather than leaked
+/// until the process exits.
+///
+/// `handle` is the same unforgeable, kernel-issued DMA-constraint grant
+/// handle the matching [`dma_alloc`] was called with, and `cpu_va` is the
+/// base **user virtual address** that `dma_alloc` returned. The kernel
+/// resolves the handle **owner-checked against the calling task**, confirms
+/// it names a DMA constraint, and releases the buffer based at `cpu_va` from
+/// the caller's own address space, zeroing every backing byte (zero-on-free)
+/// before the frames return to the allocator. A forged or foreign handle, or
+/// a `cpu_va` that is not the base of a live carve, fails closed without
+/// releasing anything. The call carries `CAP_MEM_DMA` (enforced by the kernel
+/// before any state is touched).
+///
+/// Returns `0` on success, or `-errno` (recover the [`rustos_abi::Errno`]
+/// discriminant as `-ret`). The wrapper surfaces the raw signed value and
+/// hides no error.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 dma_free-result encoding (0, else -errno).
+pub fn dma_free(handle: u64, cpu_va: u64) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke — the kernel validates
+    // the call on the far side of the trap. `dma_free` dereferences no user
+    // pointer; it resolves the grant handle and releases the carve named by
+    // `cpu_va` from the caller's own address space.
+    let ret = unsafe { raw_syscall(NUM_DMA_FREE, [handle, cpu_va, 0, 0, 0, 0]) };
     ret as i64
 }
 

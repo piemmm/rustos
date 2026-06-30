@@ -123,14 +123,18 @@ pub type SlabCoherencyFn = fn(base: *const u8, len: usize);
 /// Type-erased free shim called from [`DmaSlab::drop`].
 ///
 /// * `pool` is the opaque pointer the slab was built with;
-/// * `slot` and `len` are the slab's bookkeeping.
+/// * `cpu` is the slab's CPU base pointer (the user virtual base the
+///   allocator returned) — the key a syscall-backed pool (the user-space
+///   `RtDriverHost`) frees the buffer by;
+/// * `slot` and `len` are the slab's bookkeeping (a slot-bitmap pool such as
+///   the in-kernel host frees by `slot`, ignoring `cpu`).
 ///
 /// # Safety
 ///
 /// The shim is `unsafe` because [`DmaSlab::drop`] (the only caller)
 /// must guarantee `pool` still points at the originating pool, which
 /// the pool enforces by outliving every slab it minted.
-pub type SlabFreeFn = unsafe fn(pool: *const (), slot: usize, len: usize);
+pub type SlabFreeFn = unsafe fn(pool: *const (), cpu: NonNull<u8>, slot: usize, len: usize);
 
 /// Owned, device-visible DMA region.
 ///
@@ -347,8 +351,10 @@ impl Drop for DmaSlab {
             // SAFETY: at construction the caller of `from_pool`
             // proved that `pool_ptr` outlives this slab and that
             // `(slot, len)` is the slab's exclusive slot in the
-            // pool's bitmap. `Drop::drop` runs exactly once.
-            unsafe { f(self.pool_ptr, self.slot, self.len) }
+            // pool's bitmap. `self.ptr` is this slab's CPU base, the
+            // key a syscall-backed pool frees by. `Drop::drop` runs
+            // exactly once.
+            unsafe { f(self.pool_ptr, self.ptr, self.slot, self.len) }
         }
     }
 }

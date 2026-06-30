@@ -1910,6 +1910,36 @@ where
         }
     }
 
+    fn dma_free(&self, caller: &CallerContext<'_>, handle: u64, cpu_va: u64) -> SyscallResult {
+        // step 2 (capability) was enforced by the dispatcher: the `dma_free`
+        // spec carries `CAP_MEM_DMA`, symmetric with `dma_alloc`. Step 3
+        // (validate every input): resolve `handle` to a granted resource **for
+        // the calling task** (`caller.task_id` is kernel-trusted), so a forged
+        // or another driver's handle resolves to nothing and is refused, and
+        // the grant must name a DMA constraint — exactly as `dma_alloc`. A
+        // task may free only against a DMA constraint it still holds.
+        let Some(resource) = self.aspaces.read().grant(caller.task_id, handle) else {
+            return Err(Errno::NotFound);
+        };
+        let _constraint = dma_constraint(&resource)?;
+        // Mechanism: the installed producer releases the buffer based at
+        // `cpu_va` from the caller's own live space, zeroing every backing
+        // byte (zero-on-free) before its frames return to the allocator. Only
+        // `cpu_va` is taken from the caller; the buffer's extent is the
+        // allocator's own authoritative record, so a `cpu_va` that is not the
+        // base of a live carve in *this task's* DMA window fails closed
+        // (covering a stale, double, or cross-task free) without releasing
+        // anything. The default `NULL_DMA_ALLOC_FACILITY` fails closed with
+        // `NotImplemented`.
+        self.dma_alloc_facility.free(cpu_va)?;
+        // The free shrank the caller's live space; re-freeze the registry
+        // snapshot so the copy path no longer sees the released DMA window
+        // (leaving it in the stale snapshot would let a copy read or write
+        // memory the task no longer owns — fail closed). Only on success.
+        self.refreeze_caller_aspace(caller);
+        Ok(0)
+    }
+
     fn resource_grants(&self, caller: &CallerContext<'_>, buf: u64, len: usize) -> SyscallResult {
         // step 2 (capability): none required — a task reads only its
         // *own* minted grants, which confers no authority over anything else
@@ -4102,7 +4132,7 @@ mod tests {
     use rustos_kernel_ipc::{CallEndpoint, CallEndpointLimits, Port, RecvCall};
     use rustos_kernel_irq::{IrqTable, UnsupportedController};
     use rustos_kernel_mem::{
-        AddressSpace, AnonError, BootMemoryMap, DmaMapping, Frame, FrameAllocator,
+        AddressSpace, AnonError, BootMemoryMap, DmaError, DmaMapping, Frame, FrameAllocator,
         FrozenAddressSpace, HostPageTable, LiveSpaceError, LiveUserSpace, MapFlags, MemoryRegion,
         Page, PhysAddr, RegionKind, SimPhysMap, VirtAddr, PAGE_SIZE,
     };
@@ -8183,6 +8213,9 @@ mod tests {
         fn alloc_dma(&mut self, _len: usize, _limit: u64) -> Result<DmaMapping, LiveSpaceError> {
             Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
         }
+        fn free_dma(&mut self, _cpu_va: u64) -> Result<(), LiveSpaceError> {
+            Err(LiveSpaceError::Dma(DmaError::UnknownBuffer))
+        }
         fn map_shared(&mut self, _phys: u64, _len: usize) -> Result<u64, LiveSpaceError> {
             Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
         }
@@ -8596,12 +8629,17 @@ mod tests {
     /// a real `kernel/mem` carve path.
     struct RecordingDmaFacility {
         last: rustos_sync::SpinLock<Option<(usize, u64)>>,
+        freed: rustos_sync::SpinLock<Option<u64>>,
         ret: Result<crate::devres::DmaCarve, Errno>,
     }
     impl crate::devres::DmaAllocFacility for RecordingDmaFacility {
         fn alloc(&self, len: usize, addr_limit: u64) -> Result<crate::devres::DmaCarve, Errno> {
             *self.last.lock() = Some((len, addr_limit));
             self.ret
+        }
+        fn free(&self, cpu_va: u64) -> Result<(), Errno> {
+            *self.freed.lock() = Some(cpu_va);
+            Ok(())
         }
     }
 
@@ -8642,6 +8680,7 @@ mod tests {
         );
         let facility: &'static RecordingDmaFacility = Box::leak(Box::new(RecordingDmaFacility {
             last: rustos_sync::SpinLock::new(None),
+            freed: rustos_sync::SpinLock::new(None),
             ret: Ok(crate::devres::DmaCarve {
                 cpu_va: 0xD000_0000,
                 device_addr: 0x4000_0000,
@@ -8695,6 +8734,7 @@ mod tests {
         );
         let facility: &'static RecordingDmaFacility = Box::leak(Box::new(RecordingDmaFacility {
             last: rustos_sync::SpinLock::new(None),
+            freed: rustos_sync::SpinLock::new(None),
             ret: Ok(crate::devres::DmaCarve {
                 cpu_va: 0xD000_0000,
                 device_addr: 0x4000_0000,
@@ -8743,6 +8783,7 @@ mod tests {
         );
         let facility: &'static RecordingDmaFacility = Box::leak(Box::new(RecordingDmaFacility {
             last: rustos_sync::SpinLock::new(None),
+            freed: rustos_sync::SpinLock::new(None),
             ret: Ok(crate::devres::DmaCarve {
                 cpu_va: 0xD000_0000,
                 device_addr: 0x10_0000,
@@ -8787,6 +8828,7 @@ mod tests {
         );
         let facility: &'static RecordingDmaFacility = Box::leak(Box::new(RecordingDmaFacility {
             last: rustos_sync::SpinLock::new(None),
+            freed: rustos_sync::SpinLock::new(None),
             ret: Ok(crate::devres::DmaCarve {
                 cpu_va: 0xD000_0000,
                 device_addr: 0x4000_0000,
@@ -8861,6 +8903,7 @@ mod tests {
         );
         let facility: &'static RecordingDmaFacility = Box::leak(Box::new(RecordingDmaFacility {
             last: rustos_sync::SpinLock::new(None),
+            freed: rustos_sync::SpinLock::new(None),
             ret: Ok(crate::devres::DmaCarve {
                 cpu_va: 0xD000_0000,
                 device_addr: 0x4000_0000,
@@ -8880,6 +8923,171 @@ mod tests {
         // The carve nonetheless ran with the request length and the grant's
         // addressing limit — never a caller-supplied bound.
         assert_eq!(*facility.last.lock(), Some((0x1000, 0x4000_0000)));
+    }
+
+    /// Build a `RecordingDmaFacility` over a fresh-and-`None` carve record,
+    /// leaked to the `'static` shape the handler holds. The five `dma_free`
+    /// tests share this.
+    fn recording_dma_facility() -> &'static RecordingDmaFacility {
+        Box::leak(Box::new(RecordingDmaFacility {
+            last: rustos_sync::SpinLock::new(None),
+            freed: rustos_sync::SpinLock::new(None),
+            ret: Ok(crate::devres::DmaCarve {
+                cpu_va: 0xD000_0000,
+                device_addr: 0x4000_0000,
+            }),
+        }))
+    }
+
+    /// A valid `dma_free` against an owned DMA grant reaches the release
+    /// mechanism with the caller-supplied CPU base and reports `Ok(0)` — the
+    /// symmetric free for `dma_alloc`.
+    #[test]
+    fn dma_free_reaches_the_mechanism_with_the_cpu_base() {
+        let sink = make_sink();
+        let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
+        let sched = make_sched(arch.clone());
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let handle = aspaces.write().mint_grant(
+            SecTaskId(2),
+            rustos_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
+        );
+        let facility = recording_dma_facility();
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_dma_alloc_facility(facility);
+
+        assert_eq!(h.dma_free(&ctx, handle, 0xD000_0000), Ok(0));
+        assert_eq!(*facility.freed.lock(), Some(0xD000_0000));
+    }
+
+    /// With no grant minted for the caller, `dma_free` resolves nothing and
+    /// fails closed with `NotFound` without touching the release mechanism —
+    /// a driver can never free against an ungranted constraint.
+    #[test]
+    fn dma_free_without_grant_is_not_found() {
+        let sink = make_sink();
+        let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
+        let sched = make_sched(arch.clone());
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let facility = recording_dma_facility();
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_dma_alloc_facility(facility);
+
+        assert_eq!(h.dma_free(&ctx, 7, 0xD000_0000), Err(Errno::NotFound));
+        assert!(facility.freed.lock().is_none(), "no release was attempted");
+    }
+
+    /// The DMA grant is owner-bound: a handle minted for another task, or an
+    /// unknown handle value, resolves to nothing and `dma_free` is refused
+    /// (handle forgery rejected exactly as `dma_alloc`).
+    #[test]
+    fn dma_free_forged_or_foreign_handle_is_not_found() {
+        let sink = make_sink();
+        let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
+        let sched = make_sched(arch.clone());
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let handle = aspaces.write().mint_grant(
+            SecTaskId(2),
+            rustos_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
+        );
+        let facility = recording_dma_facility();
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_dma_alloc_facility(facility);
+
+        // Right owner, wrong handle → NotFound.
+        let owner = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        assert_eq!(
+            h.dma_free(&owner, handle + 1, 0xD000_0000),
+            Err(Errno::NotFound)
+        );
+        // Right handle value, wrong (foreign) task → NotFound.
+        let foreign = CallerContext {
+            task_id: SecTaskId(3),
+            caps: &caps,
+        };
+        assert_eq!(
+            h.dma_free(&foreign, handle, 0xD000_0000),
+            Err(Errno::NotFound)
+        );
+        assert!(facility.freed.lock().is_none(), "no release was attempted");
+    }
+
+    /// A grant of a non-DMA kind (an MMIO window) is refused with `OutOfRange`
+    /// before the release mechanism is reached: `dma_free` releases against
+    /// DMA constraints only.
+    #[test]
+    fn dma_free_non_dma_grant_is_out_of_range() {
+        let sink = make_sink();
+        let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
+        let sched = make_sched(arch.clone());
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let handle = aspaces.write().mint_grant(
+            SecTaskId(2),
+            rustos_abi::hwtree::HwResource::mmio(0xFE98_0000, 0x4000),
+        );
+        let facility = recording_dma_facility();
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_dma_alloc_facility(facility);
+
+        assert_eq!(
+            h.dma_free(&ctx, handle, 0xD000_0000),
+            Err(Errno::OutOfRange)
+        );
+        assert!(facility.freed.lock().is_none(), "no release was attempted");
+    }
+
+    /// With a DMA grant but no facility wired, `dma_free` reaches the default
+    /// `NullDmaAllocFacility` and fails closed with `NotImplemented` (the
+    /// fail-closed default, symmetric with `dma_alloc`).
+    #[test]
+    fn dma_free_with_grant_but_no_facility_is_not_implemented() {
+        let sink = make_sink();
+        let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
+        let sched = make_sched(arch.clone());
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let handle = aspaces.write().mint_grant(
+            SecTaskId(2),
+            rustos_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
+        );
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(
+            h.dma_free(&ctx, handle, 0xD000_0000),
+            Err(Errno::NotImplemented)
+        );
     }
 
     // --- resource_grants (the grant-delivery syscall, `plans/PI.md` 5d-2) ---

@@ -115,6 +115,25 @@ pub trait DmaAllocFacility: Sync {
     /// another stable code the platform reports. The default producer
     /// ([`NullDmaAllocFacility`]) returns [`Errno::NotImplemented`].
     fn alloc(&self, len: usize, addr_limit: u64) -> Result<DmaCarve, Errno>;
+
+    /// Release the DMA buffer whose CPU virtual base is `cpu_va` from the
+    /// caller's own address space, zeroing every backing byte (zero-on-free)
+    /// before its frames return to the allocator — the symmetric free for
+    /// [`Self::alloc`].
+    ///
+    /// The handler has already resolved + owner-checked the grant; this only
+    /// performs the release mechanism on the caller's own live space. Only
+    /// `cpu_va` is taken from the caller; the buffer's extent is the
+    /// allocator's authoritative record, so a `cpu_va` that is not the base of
+    /// a live carve fails closed without releasing anything.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable [`Errno`] — [`Errno::OutOfRange`] when `cpu_va` is not
+    /// the base of a live DMA carve of the caller's space (covering a forged,
+    /// stale, or double free). The default producer
+    /// ([`NullDmaAllocFacility`]) returns [`Errno::NotImplemented`].
+    fn free(&self, cpu_va: u64) -> Result<(), Errno>;
 }
 
 /// The DMA-alloc facility installed before any real one exists.
@@ -126,6 +145,10 @@ pub struct NullDmaAllocFacility;
 
 impl DmaAllocFacility for NullDmaAllocFacility {
     fn alloc(&self, _len: usize, _addr_limit: u64) -> Result<DmaCarve, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn free(&self, _cpu_va: u64) -> Result<(), Errno> {
         Err(Errno::NotImplemented)
     }
 }

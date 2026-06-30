@@ -437,6 +437,102 @@ fn slot_base_rejects_unknown_buffer() {
 }
 
 #[test]
+fn free_at_releases_by_virtual_base_and_fails_closed_on_unknown_va() {
+    // `free_at` is the syscall-side release: it keys on the CPU virtual base
+    // alone (the driver holds no `DmaBuffer` across the trap). It must reclaim
+    // exactly the carve at that base and fail closed on any other address.
+    let frames = fresh_frames(16);
+    let sim = fresh_sim(16);
+    let initial_free = frames.free_frames();
+    let mut pool = pool_with_capacity(&frames, &sim, 16);
+    let buf = pool.alloc(2 * PAGE_SIZE).expect("alloc");
+    let virt = buf.virt();
+    assert!(frames.free_frames() < initial_free);
+    // An address that is not the base of a live carve fails closed without
+    // releasing anything (covers a forged, stale, or mid-buffer free).
+    assert_eq!(
+        pool.window.free_at(
+            &mut pool.address_space,
+            pool.frames,
+            pool.phys,
+            VirtAddr::new(virt.as_u64() + PAGE_SIZE as u64),
+        ),
+        Err(DmaError::UnknownBuffer)
+    );
+    assert_eq!(pool.live(), 1, "a bad free released nothing");
+    // The matching base reclaims the carve.
+    pool.window
+        .free_at(&mut pool.address_space, pool.frames, pool.phys, virt)
+        .expect("free by base");
+    assert_eq!(pool.live(), 0);
+    assert_eq!(frames.free_frames(), initial_free, "frames fully returned");
+    // A second free of the same base is now unknown (no double-free).
+    assert_eq!(
+        pool.window
+            .free_at(&mut pool.address_space, pool.frames, pool.phys, virt),
+        Err(DmaError::UnknownBuffer)
+    );
+}
+
+#[test]
+fn allocate_all_dma_then_free_it_all_reclaims_fully_every_round() {
+    // The device-buffer analogue of the kalloc reclamation property: claim
+    // every carve the window can serve, release them all, and find the pool
+    // empty and the frame allocator exactly as full as before — round after
+    // round, with no leak or drift. A driver that runs for years issuing many
+    // transfers depends on exactly this.
+    let frames = fresh_frames(64);
+    let sim = fresh_sim(64);
+    let initial_free = frames.free_frames();
+    // A window large enough that the frame allocator (not the virtual window)
+    // is the binding limit on some rounds, exercising both exhaustion paths.
+    let mut pool = pool_with_capacity(&frames, &sim, 64);
+
+    let mut first_round: Option<usize> = None;
+    for round in 0..6 {
+        assert_eq!(pool.live(), 0, "round {round} starts empty");
+        assert_eq!(
+            frames.free_frames(),
+            initial_free,
+            "round {round} starts with every frame free"
+        );
+        // Claim single-page carves until either the frame allocator or the
+        // virtual window is exhausted (a `Result` error, never a panic).
+        let mut live = alloc::vec::Vec::new();
+        while let Ok(buf) = pool.alloc(PAGE_SIZE) {
+            live.push(buf);
+        }
+        let count = live.len();
+        assert!(count > 0, "the pool must serve at least one carve");
+        match first_round {
+            None => first_round = Some(count),
+            Some(expected) => assert_eq!(
+                count, expected,
+                "round {round} served {count} carves, expected {expected} — \
+                 capacity must not drift"
+            ),
+        }
+        // Release every carve by its virtual base, exactly as `dma_free` does.
+        for buf in live.drain(..) {
+            pool.window
+                .free_at(&mut pool.address_space, pool.frames, pool.phys, buf.virt())
+                .expect("free by base");
+        }
+        assert_eq!(pool.live(), 0, "round {round} reclaimed every carve");
+        assert_eq!(
+            frames.free_frames(),
+            initial_free,
+            "round {round} returned every frame to the allocator"
+        );
+        assert_eq!(
+            pool.address_space.mapped_pages(),
+            0,
+            "round {round} left no data page mapped"
+        );
+    }
+}
+
+#[test]
 fn dma_buffer_is_not_empty() {
     let frames = fresh_frames(8);
     let sim = fresh_sim(8);

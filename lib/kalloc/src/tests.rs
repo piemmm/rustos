@@ -206,6 +206,78 @@ fn churn_runs_in_bounded_memory() {
 }
 
 #[test]
+// A 64 KiB on-stack backing: large enough to hold many blocks so each round's
+// exhaustion is meaningful, and comfortably within a host test thread's stack.
+#[allow(clippy::large_stack_arrays)]
+fn allocate_all_memory_then_free_it_all_reclaims_fully_every_round() {
+    // The defining long-uptime property an OS allocator must hold: claim
+    // *every* byte the heap can serve, release it all, and find the heap
+    // exactly as empty and exactly as capacious as before — round after round,
+    // with no drift, no stranding, and no leak. A bump allocator fails this on
+    // round two; a freeing allocator passes every round identically.
+    let mut backing = Backing([0u8; 1 << 16]);
+    let alloc = fixture(&mut backing);
+    let layout = Layout::from_size_align(64, 8).unwrap();
+
+    let mut first_round_blocks: Option<usize> = None;
+    for round in 0..8 {
+        assert_eq!(
+            alloc.used(),
+            0,
+            "round {round} must start from a fully reclaimed heap"
+        );
+        // Claim every block the heap can serve until it is genuinely
+        // exhausted (null, never a panic).
+        let mut live = alloc::vec::Vec::new();
+        loop {
+            // SAFETY: non-zero layout.
+            let p = unsafe { alloc.alloc(layout) };
+            if p.is_null() {
+                break;
+            }
+            // Touch the whole block so a double-hand-out would corrupt a live
+            // neighbour (caught under Miri / by the count check below).
+            // SAFETY: `p` owns 64 writable bytes per the alloc contract.
+            unsafe { core::ptr::write_bytes(p, 0xCD, 64) };
+            live.push(p);
+        }
+        let blocks = live.len();
+        assert!(blocks > 0, "the heap must serve at least one block");
+        // Exhausted: a further request fails closed rather than panicking.
+        // SAFETY: non-zero layout.
+        assert!(unsafe { alloc.alloc(layout) }.is_null());
+        // Every round must serve the identical number of blocks: a leak or
+        // progressive fragmentation would shrink this on a later round.
+        match first_round_blocks {
+            None => first_round_blocks = Some(blocks),
+            Some(expected) => assert_eq!(
+                blocks, expected,
+                "round {round} served {blocks} blocks, expected {expected} — \
+                 capacity must not drift across rounds"
+            ),
+        }
+        // Release everything.
+        for p in live.drain(..) {
+            // SAFETY: each `p` came from this allocator with `layout`.
+            unsafe { alloc.dealloc(p, layout) };
+        }
+        assert_eq!(
+            alloc.used(),
+            0,
+            "round {round} must reclaim every byte after freeing all blocks"
+        );
+    }
+    // After all the churn the heap has coalesced back to a single hole: a
+    // near-heap-sized allocation succeeds, proving no permanent fragmentation.
+    let big = Layout::from_size_align((1 << 16) - MIN_BLOCK, 8).unwrap();
+    // SAFETY: non-zero layout.
+    assert!(
+        !unsafe { alloc.alloc(big) }.is_null(),
+        "the heap must coalesce back to one large hole after every round"
+    );
+}
+
+#[test]
 fn over_aligned_request_uses_a_hole_that_is_not_already_over_aligned() {
     // Regression: a free hole is only ever `ALIGN` (8)-aligned, so an
     // over-aligned (16-byte) request can find the aligned start sitting a

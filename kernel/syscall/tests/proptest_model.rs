@@ -220,6 +220,10 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
+    fn dma_free(&self, _c: &CallerContext<'_>, _handle: u64, _cpu_va: u64) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
     fn resource_grants(&self, _c: &CallerContext<'_>, _buf: u64, _len: usize) -> SyscallResult {
         self.bump();
         Ok(0)

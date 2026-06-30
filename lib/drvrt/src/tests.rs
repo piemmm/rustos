@@ -49,6 +49,9 @@ struct MockSyscalls {
     /// assert the host requested only the sub-region (not the whole grant).
     last_mmio: Rc<Cell<(u64, usize)>>,
     dma_calls: Rc<Cell<usize>>,
+    /// Every CPU base address passed to `dma_free`, in call order. Shared so a
+    /// test can assert each carve's slab freed itself on drop.
+    dma_frees: Rc<RefCell<Vec<u64>>>,
     /// The grant set `resource_grants` delivers (the kernel-minted grants the
     /// driver process would learn at start-up). A test populates it before
     /// building a host with `from_grants_query`.
@@ -89,6 +92,7 @@ impl MockSyscalls {
             mmio_calls: Rc::new(Cell::new(0)),
             last_mmio: Rc::new(Cell::new((0, 0))),
             dma_calls: Rc::new(Cell::new(0)),
+            dma_frees: Rc::new(RefCell::new(Vec::new())),
             delivered: RefCell::new(Vec::new()),
             grants_error: Cell::new(None),
             irq_line_bound: Rc::new(Cell::new(0)),
@@ -170,6 +174,12 @@ impl MockSyscalls {
         Rc::clone(&self.mmio_calls)
     }
 
+    /// A shared handle to the CPU bases passed to `dma_free`, read after the
+    /// mock moves into the host to assert each slab freed itself on drop.
+    fn dma_frees(&self) -> Rc<RefCell<Vec<u64>>> {
+        Rc::clone(&self.dma_frees)
+    }
+
     /// A shared handle to the most recent `mmio_map` `(offset, len)`, read
     /// after the mock moves into the host.
     fn last_mmio(&self) -> Rc<Cell<(u64, usize)>> {
@@ -209,6 +219,25 @@ impl GrantSyscalls for MockSyscalls {
                 b.buffer.as_ptr() as usize as i64
             }
             Some(_) => -i64::from(Errno::OutOfMemory.as_i32()),
+            None => -i64::from(Errno::NotFound.as_i32()),
+        }
+    }
+
+    fn dma_free(&self, handle: u64, cpu_va: u64) -> i64 {
+        // Mirror the kernel: the carve must lie inside a backing the grant
+        // names, else fail closed. Record the freed base so a test can assert
+        // each slab released itself on drop.
+        let backings = self.backings.borrow();
+        match backings.iter().find(|b| b.handle == handle) {
+            Some(b) => {
+                let base = b.buffer.as_ptr() as usize as u64;
+                let end = base + b.buffer.len() as u64;
+                if cpu_va < base || cpu_va >= end {
+                    return -i64::from(Errno::OutOfRange.as_i32());
+                }
+                self.dma_frees.borrow_mut().push(cpu_va);
+                0
+            }
             None => -i64::from(Errno::NotFound.as_i32()),
         }
     }
@@ -539,6 +568,44 @@ fn dma_exhaustion_maps_to_length_out_of_range() {
     assert_eq!(
         host.alloc_dma_zeroed(0x4000).err(),
         Some(DriverError::LengthOutOfRange)
+    );
+}
+
+#[test]
+fn dma_slab_frees_itself_on_drop_and_repeated_cycles_do_not_leak() {
+    // The leak fix: a carve's slab releases its buffer through `dma_free` when
+    // it drops, instead of leaking until process exit. A long-running driver
+    // issuing many transfers therefore frees one buffer per transfer — the
+    // `dma_free` syscall count matches the carve count, with nothing live.
+    let mock = MockSyscalls::new();
+    let base = mock.back(DMA_HANDLE, 0x4000, DMA_DEVICE_BASE);
+    let frees = mock.dma_frees();
+    let host =
+        RtDriverHost::new(caps(&[CapabilityId::MEM_DMA]), mock, &[dma_grant()], None).unwrap();
+
+    {
+        let _slab = host.alloc_dma_zeroed(0x1000).expect("carve");
+        assert!(
+            frees.borrow().is_empty(),
+            "a live slab must not have freed its carve yet"
+        );
+    }
+    // Dropping the slab released exactly its CPU base through `dma_free`.
+    assert_eq!(
+        &*frees.borrow(),
+        &[base],
+        "the slab freed its carve on drop"
+    );
+
+    // Many alloc/free cycles: each dropped slab frees exactly once, so the
+    // free count tracks the carve count — no buffer leaks across cycles.
+    for _ in 0..16 {
+        let _ = host.alloc_dma_zeroed(0x1000).expect("carve");
+    }
+    assert_eq!(
+        frees.borrow().len(),
+        17,
+        "every carve's slab freed itself exactly once across cycles"
     );
 }
 

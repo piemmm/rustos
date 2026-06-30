@@ -215,6 +215,7 @@ impl<'a, P: PageTable, S: Sink + Sync + ?Sized> KernelVirtioHost<'a, P, S> {
 ///   once).
 unsafe fn slab_free_shim<P: PageTable, S: Sink + Sync + ?Sized>(
     pool: *const (),
+    _cpu: core::ptr::NonNull<u8>,
     slot: usize,
     _len: usize,
 ) {

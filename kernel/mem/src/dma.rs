@@ -337,6 +337,38 @@ impl DmaWindowMap {
         self.free_inner(space, frames, phys, buf)
     }
 
+    /// Free the live allocation whose first data page is at `virt`, zeroing
+    /// every byte (zero-on-free) before its frames return to `frames`.
+    ///
+    /// The symmetric free for the `dma_free` syscall, which keys a release on
+    /// the CPU virtual base the carve returned (the driver holds no
+    /// [`DmaBuffer`] descriptor across the syscall boundary). The record's own
+    /// `phys`/`len` are authoritative; only `virt` is taken from the caller,
+    /// so a `virt` that is not the base of a live carve fails closed with
+    /// [`DmaError::UnknownBuffer`] (covering a forged, stale, or double free).
+    ///
+    /// # Errors
+    ///
+    /// As [`DmaPool::free`].
+    pub fn free_at<P: PageTable>(
+        &mut self,
+        space: &mut AddressSpace<P>,
+        frames: &FrameAllocator,
+        phys: &dyn PhysMap,
+        virt: VirtAddr,
+    ) -> Result<(), DmaError> {
+        let record = self
+            .allocations
+            .get(&virt.as_u64())
+            .ok_or(DmaError::UnknownBuffer)?;
+        let buf = DmaBuffer {
+            virt,
+            phys: record.start_frame.start(),
+            len: record.data_pages * PAGE_SIZE,
+        };
+        self.free_inner(space, frames, phys, buf)
+    }
+
     /// Look up `buf`'s live record and return its `(physical base, byte
     /// length)`. Returns [`DmaError::UnknownBuffer`] if the buffer is not
     /// live in this window.

@@ -405,22 +405,75 @@ impl<S: GrantSyscalls> DmaHost for RtDriverHost<S> {
         let ptr = NonNull::new(addr as *mut u8).ok_or(DriverError::DeviceFault)?;
         let slot = self.next_slot.get();
         self.next_slot.set(slot.wrapping_add(1));
+        let pool_ptr: *const () = (self as *const Self).cast::<()>();
         // SAFETY: `dma_alloc` carved exactly `size` bytes of zeroed,
         // physically-contiguous, coherent, `RW` (non-executable),
-        // guard-bracketed memory mapped into this process's own address space,
-        // and kept it valid for the process's lifetime (longer than the
-        // returned slab — there is no userland free, the kernel reclaims it on
-        // exit via `LiveSpace::Drop`). `ptr` is its non-null,
-        // page-aligned CPU base and `device` its device-visible base; the
-        // region is exclusively this slab's (a fresh carve per call), so no
-        // other live reference aliases it. The slab's drop is a no-op
-        // (`from_leaked`): the kernel owns reclamation.
-        let slab = unsafe { DmaSlab::from_leaked(device, ptr, size, self.dma_pool, slot) };
+        // guard-bracketed memory mapped into this process's own address space.
+        // `ptr` is its non-null, page-aligned CPU base and `device` its
+        // device-visible base; the region is exclusively this slab's (a fresh
+        // carve per call), so no other live reference aliases it. `pool_ptr`
+        // is this host, which outlives every slab it mints: the host is owned
+        // by the driver process for its whole lifetime, and a slab is always
+        // dropped (its buffers reclaimed) strictly before the host — the carve
+        // is per-request and its slab never escapes the host's borrow. On
+        // drop, `free_dma_shim::<S>` reaches the host back through `pool_ptr`
+        // and issues `dma_free`, so the kernel zeroes and reclaims the carve's
+        // frames rather than leaking them until process exit.
+        let slab = unsafe {
+            DmaSlab::from_pool(
+                device,
+                ptr,
+                size,
+                self.dma_pool,
+                slot,
+                pool_ptr,
+                free_dma_shim::<S>,
+            )
+        };
         Ok(match self.coherency {
             Some(coherency) => slab.with_coherency(coherency),
             None => slab,
         })
     }
+}
+
+/// Drop-path shim invoked by [`DmaSlab::drop`] for a slab minted by
+/// [`RtDriverHost::alloc_dma_zeroed`].
+///
+/// Reaches the originating host back through the opaque `pool` pointer and
+/// releases the carve through the `dma_free` syscall, keyed by the slab's CPU
+/// base `cpu` and the host's single DMA-constraint grant. A host that holds no
+/// DMA grant (so the carve could never have happened) or a kernel refusal is
+/// dropped — `Drop` cannot propagate an error, and the kernel reclaims any
+/// stragglers when the process's live space is torn down at exit, so a missed
+/// free degrades to the old leak-until-exit behaviour rather than unsoundness.
+///
+/// # Safety
+///
+/// Mirrors the [`SlabFreeFn`](rustos_abi::driver::dma::SlabFreeFn) contract:
+/// `pool` must be the `*const ()` produced by
+/// [`RtDriverHost::alloc_dma_zeroed`] casting `&RtDriverHost<S>`, and the
+/// originating host must still be live (the host outlives every slab it
+/// mints). `cpu` is the slab's CPU base, the user virtual address the carve
+/// returned.
+unsafe fn free_dma_shim<S: GrantSyscalls>(
+    pool: *const (),
+    cpu: NonNull<u8>,
+    _slot: usize,
+    _len: usize,
+) {
+    // SAFETY: `pool` was produced at the matching `from_pool` call by casting
+    // `&RtDriverHost<S>` through `*const Self as *const ()`; the host outlives
+    // the slab (see the `from_pool` SAFETY note), so this observes a live host
+    // of the same monomorphisation.
+    let host: &RtDriverHost<S> = unsafe { &*(pool.cast::<RtDriverHost<S>>()) };
+    let Some(grant) = host.dma_grant() else {
+        return;
+    };
+    // The kernel resolves `cpu` against this task's own DMA window and fails
+    // closed on anything but a live carve; the result has no recovery on a
+    // drop path, so it is intentionally discarded.
+    let _ = host.syscalls.dma_free(grant.handle, cpu.as_ptr() as u64);
 }
 
 impl<S: GrantSyscalls> VirtioHost for RtDriverHost<S> {

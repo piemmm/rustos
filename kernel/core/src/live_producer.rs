@@ -256,6 +256,13 @@ where
             })
             .map_err(live_errno)
     }
+
+    fn free(&self, cpu_va: u64) -> Result<(), Errno> {
+        let cpu = self.arch.current_cpu();
+        with_current_live_space(cpu, |space| space.free_dma(cpu_va))
+            .ok_or(Errno::NotImplemented)?
+            .map_err(live_errno)
+    }
 }
 
 /// The production shared-memory facility: allocates, zeroes, maps, and frees
@@ -405,6 +412,7 @@ mod tests {
         anon_unmaps: Vec<(u64, u64)>,
         device_maps: Vec<(u64, usize)>,
         dma_allocs: Vec<(usize, u64)>,
+        dma_frees: Vec<u64>,
         next: Option<LiveSpaceError>,
     }
 
@@ -457,6 +465,14 @@ mod tests {
                     cpu_va: 0xD000_2000,
                     phys_base: DMA_PHYS,
                 }),
+            }
+        }
+
+        fn free_dma(&mut self, cpu_va: u64) -> Result<(), LiveSpaceError> {
+            self.dma_frees.push(cpu_va);
+            match self.next.take() {
+                Some(err) => Err(err),
+                None => Ok(()),
             }
         }
 

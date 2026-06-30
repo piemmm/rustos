@@ -549,6 +549,31 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Release a DMA-coherent buffer previously carved by [`Self::dma_alloc`]
+    /// — the symmetric free for the device-DMA allocator (`plans/PI.md` P10).
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::MEM_DMA`] (symmetric with [`Self::dma_alloc`]).
+    /// `handle` is the same unforgeable grant the carve used; the
+    /// implementation resolves it **against the calling task** (rejecting
+    /// forgery exactly as [`Self::dma_alloc`]), confirms it names a DMA
+    /// constraint, and releases the buffer whose CPU virtual base is
+    /// `cpu_va` from the caller's own address space, zeroing every backing
+    /// byte (zero-on-free) before its frames return to the allocator. Only
+    /// `cpu_va` is taken from the caller; a `cpu_va` that is not the base of a
+    /// live carve in *this task's* DMA window fails closed (covering a stale,
+    /// double, or cross-task free) without releasing anything. A long-running
+    /// driver reclaims each request's bounce buffers through this rather than
+    /// leaking DMA frames until it exits.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]: a build with neither a grant table nor a
+    /// DMA facility wired has nothing to free. The real handler is installed
+    /// in `kernel/core`.
+    fn dma_free(&self, _caller: &CallerContext<'_>, _handle: u64, _cpu_va: u64) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// Enumerate the device-resource grants the kernel minted for the
     /// calling driver task, delivering its unforgeable handles
     /// (`plans/PI.md` P10 chunk 5d-2).
@@ -1360,6 +1385,13 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 let len = decode_len(args.0[1])?;
                 self.handlers.dma_alloc(caller, args.0[0], len, args.0[2])
             }
+            SyscallNumber::DMA_FREE => {
+                // `validate_arg` accepts args[0] as an opaque `Handle` u64
+                // (resolved against the calling task + grant table in the
+                // handler); args[1] is the CPU virtual base the carve
+                // returned — a lookup key, never dereferenced by the kernel.
+                self.handlers.dma_free(caller, args.0[0], args.0[1])
+            }
             SyscallNumber::RESOURCE_GRANTS => {
                 // args[0] is a non-null `UserPtr` (dispatcher-checked); args[1]
                 // is the buffer capacity.
@@ -2013,6 +2045,14 @@ mod tests {
             // dispatcher decoded the arguments without wiring a real grant
             // table / DMA facility here.
             Ok(handle)
+        }
+
+        fn dma_free(&self, _c: &CallerContext<'_>, handle: u64, cpu_va: u64) -> SyscallResult {
+            self.record("dma_free");
+            // Echo `handle + cpu_va` back so the reachability test can assert
+            // the dispatcher decoded both arguments (grant handle, CPU base)
+            // without wiring a real grant table / DMA facility here.
+            Ok(handle + cpu_va)
         }
 
         fn resource_grants(

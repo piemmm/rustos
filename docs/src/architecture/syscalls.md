@@ -102,6 +102,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  53 | `fs_sync`      | `u32 fd`                                | `errno`       | `CAP_FS_ACCESS` | no    |
 |  54 | `fs_mkdir`     | `user_ptr` (path), `len`                | `errno`       | `CAP_FS_ACCESS` | yes   |
 |  55 | `fs_unlink`    | `user_ptr` (path), `len`                | `errno`       | `CAP_FS_ACCESS` | yes   |
+|  56 | `dma_free`     | `Handle handle`, `u64 cpu_va`           | `errno`       | `CAP_MEM_DMA`   | yes   |
 
 (Syscall numbers 39–45 — `msi_alloc`, `shm_create`/`shm_map`/`shm_unmap`,
 `waitset_create`/`waitset_ctl`/`waitset_wait` — are defined in
@@ -125,7 +126,7 @@ is exhaustive — anything not listed below is ungated:
 | `CAP_DISPLAY`      | `display_acquire`, `display_release` |
 | `CAP_INPUT_READ`   | `keyboard_read`            |
 | `CAP_MMIO_MAP`     | `mmio_map`                 |
-| `CAP_MEM_DMA`      | `dma_alloc`                |
+| `CAP_MEM_DMA`      | `dma_alloc`, `dma_free`    |
 | `CAP_SYSINFO_HW`   | `hw_tree_read`, `hw_tree_wait` |
 | `CAP_LOG_EMIT`     | `log_emit`                 |
 | `CAP_HW_EMIT`      | `hw_emit_node`, `hw_remove_node` |
@@ -210,6 +211,30 @@ fail-closed NULL producer (`NULL_DMA_ALLOC_FACILITY` → `NotImplemented`),
 so a kernel without the `kernel/mem` live producer denies rather than
 carving (`AGENTS.md` §2.9). The first-party Rust wrapper is
 `rustos_rt::dma_alloc`.
+
+`dma_free` (no. 56) is the **symmetric free** for `dma_alloc`: a driver that
+issues many transfers must reclaim each request's bounce buffers, or it leaks
+DMA frames until it exits — an OS expected to run for years cannot leak per
+I/O (`AGENTS.md` §26). It takes the same unforgeable DMA-constraint grant
+`handle` and the buffer's `cpu_va` (the base virtual address `dma_alloc`
+returned), resolves the handle owner-checked against the calling task (a
+forged or foreign handle → `NotFound`), validates the constraint, then
+releases the buffer through the same `DmaAllocFacility` (`free`), which
+zeroes every backing byte (zero-on-free, §4) before its frames return to the
+allocator, and re-freezes the caller's address-space snapshot so the
+released window leaves the copy path's view. Only `cpu_va` crosses the trap;
+the buffer's extent is the allocator's authoritative per-task record, so a
+`cpu_va` that is not the base of a live carve in *this task's* DMA window
+fails closed (covering a stale, double, or cross-task free) without releasing
+anything (§5.4 — fail closed). Like `dma_alloc` it is gated on
+**`CAP_MEM_DMA`** and audited, and the mechanism defaults to the fail-closed
+NULL producer (`NotImplemented`). The first-party Rust wrapper is
+`rustos_rt::dma_free`; the user-space driver host (`rustos_drvrt`) mints each
+carve's `DmaSlab` so its `Drop` issues `dma_free` automatically — a driver's
+per-request slabs reclaim themselves at scope end, never leaking. (Frames a
+driver never frees are still reclaimed wholesale when its live space is
+dropped on exit, `LiveSpace::drop`; `dma_free` is what keeps a *running*
+driver's footprint bounded.)
 
 `resource_grants` (no. 28) enumerates the device-resource grants the kernel
 minted for the calling driver task, delivering the unforgeable handles it
@@ -626,6 +651,7 @@ re-validates arguments — the dispatcher does that first.
 | `stream_echo`   | resolves `fd` against the caller's per-process descriptor table (direction first), then the descriptor's console index against the installed console list, and toggles that console's echo flag (`ConsoleDevice::set_echo`, which also resets the line-discipline column) so a subsequent `stream_read` echoes the consumed bytes back to the console write half (`AGENTS.md` §20 — terminal local echo); `stream_read` performs the echo itself, rendering a bare CR/LF as CR-LF and rubbing out the previous character (column-bounded `BS SP BS`) on a Backspace/Delete | `fd` not a readable inherited stream → `NotFound`. No console installed at the descriptor's index → `NotImplemented`. Otherwise `Ok(0)`. |
 | `mmio_map`      | resolves `handle` against the caller (`AddressSpaceRegistry::grant(caller.task_id, handle)`, owner-checked per-task grant table; a task with no minted grant resolves to nothing), validates the granted resource is a memory window and the `[offset, offset + len)` sub-region lies wholly inside it (`devres::mappable_subwindow` — `Mmio` / `BusWindow`, non-zero `len`, in-bounds, non-overflowing), then maps **only** that sub-region `(grant_base + offset, len)` into the caller's own address space through the installed `MmioMapFacility` (`with_mmio_map_facility`; default `NULL_MMIO_MAP_FACILITY`), returning its base virtual address — so a large outbound bus-window grant maps just one enumerated BAR, not the whole window (`AGENTS.md` §24.1; `plans/PI.md` P10 chunk 5d-0) | Unknown / non-owned handle → `NotFound`. Non-window grant or a sub-region escaping it → `OutOfRange` / `LengthOutOfRange`. No map facility wired → `NotImplemented`. Frame/virtual-window exhaustion → `OutOfMemory`. Otherwise `Ok(base)`. |
 | `dma_alloc`     | resolves `handle` against the caller (same owner-checked per-task grant table), validates the grant is a DMA constraint (`devres::dma_constraint`), rejects a zero / over-the-grant-maximum `len`, then carves a physically-contiguous, zeroed, coherent `RW` buffer bounded by the grant's CPU-side `addr_limit` into the caller's own address space through the installed `DmaAllocFacility` (`with_dma_alloc_facility`; default `NULL_DMA_ALLOC_FACILITY`), resolves the device-visible base via `devres::translate_device_addr` (CPU-physical for a coherent constraint, re-based onto the far side for a translating inbound viewport, `HwResource::dma_translated`), and copies it out to `device_out`, returning the buffer's base virtual address (`plans/PI.md` P10 chunk 5d-0) | Unknown / non-owned handle → `NotFound`. Non-DMA grant → `OutOfRange`. `len == 0` → `LengthOutOfRange`. Over-max / over-limit, or a carve escaping a translating viewport → `OutOfRange`. No DMA facility wired → `NotImplemented`. Frame exhaustion → `OutOfMemory`. Faulting `device_out` → `BadAddress`. Otherwise `Ok(base)`. |
+| `dma_free`      | the symmetric free for `dma_alloc`: resolves `handle` against the caller (same owner-checked per-task grant table), validates the grant is a DMA constraint (`devres::dma_constraint`), then releases the buffer based at `cpu_va` from the caller's own address space through the same `DmaAllocFacility` (`free`), zeroing every backing byte (zero-on-free, `AGENTS.md` §4) before its frames return to the allocator, and re-freezes the caller's address-space snapshot. Only `cpu_va` is taken from the caller; the buffer's extent is the allocator's authoritative record. A long-running driver reclaims each transfer's bounce buffers through this rather than leaking DMA frames until it exits (`plans/PI.md` P10) | Unknown / non-owned handle → `NotFound`. Non-DMA grant → `OutOfRange`. `cpu_va` not the base of a live carve in the caller's DMA window (covers a stale, double, or cross-task free) → `OutOfRange`. No DMA facility wired → `NotImplemented`. Otherwise `Ok(0)`. |
 
 `KernelArch::monotonic_ns` is a new trait method with **no default
 impl**: every architecture port must opt in so an arch that cannot

@@ -89,6 +89,7 @@ const NUM_DISPLAY_RELEASE: u64 = SyscallNumber::DISPLAY_RELEASE.as_u16() as u64;
 const NUM_KEYBOARD_READ: u64 = SyscallNumber::KEYBOARD_READ.as_u16() as u64;
 const NUM_MMIO_MAP: u64 = SyscallNumber::MMIO_MAP.as_u16() as u64;
 const NUM_DMA_ALLOC: u64 = SyscallNumber::DMA_ALLOC.as_u16() as u64;
+const NUM_DMA_FREE: u64 = SyscallNumber::DMA_FREE.as_u16() as u64;
 const NUM_RESOURCE_GRANTS: u64 = SyscallNumber::RESOURCE_GRANTS.as_u16() as u64;
 const NUM_HW_TREE_READ: u64 = SyscallNumber::HW_TREE_READ.as_u16() as u64;
 const NUM_HW_TREE_WAIT: u64 = SyscallNumber::HW_TREE_WAIT.as_u16() as u64;
@@ -535,6 +536,28 @@ pub extern "C" fn sys_dma_alloc(handle: u64, len: usize, device_out: *mut c_void
             [handle, len as u64, ptr_arg(device_out), 0, 0, 0],
         )
     }
+}
+
+/// `dma_free`: release a coherent DMA buffer previously carved by
+/// [`sys_dma_alloc`] (`SyscallNumber::DMA_FREE`) — the symmetric free a
+/// long-running driver calls so each transfer's bounce buffers are reclaimed
+/// rather than leaked until the process exits. Returns a `ROS_E_*` code.
+///
+/// `handle` is the same unforgeable, kernel-issued DMA-constraint grant the
+/// matching [`sys_dma_alloc`] used, and `cpu_va` is the base virtual address
+/// that `dma_alloc` returned. The kernel resolves the handle against the
+/// calling task, confirms it names a DMA constraint, and releases the buffer
+/// based at `cpu_va` from the caller's own address space, zeroing every
+/// backing byte before the frames return to the allocator; a forged/non-owned
+/// handle, a `cpu_va` that is not the base of a live carve, or a build with no
+/// DMA facility wired fails closed. Gated kernel-side on `ROS_CAP_MEM_DMA`.
+#[must_use]
+#[export_name = "ros_sys_dma_free"]
+pub extern "C" fn sys_dma_free(handle: u64, cpu_va: u64) -> i32 {
+    // SAFETY: see `sys_yield`. No user pointer is dereferenced here; `cpu_va`
+    // is an opaque lookup key the kernel resolves against the caller's own
+    // DMA window before releasing the carve.
+    unsafe { ret_i32(raw_syscall(NUM_DMA_FREE, [handle, cpu_va, 0, 0, 0, 0])) }
 }
 
 /// `mem_map`: map `len` bytes of fresh anonymous `RW` memory into the
@@ -1244,6 +1267,7 @@ mod tests {
         (NUM_KEYBOARD_READ, "keyboard_read", 2),
         (NUM_MMIO_MAP, "mmio_map", 3),
         (NUM_DMA_ALLOC, "dma_alloc", 3),
+        (NUM_DMA_FREE, "dma_free", 2),
         (NUM_RESOURCE_GRANTS, "resource_grants", 2),
         (NUM_HW_TREE_READ, "hw_tree_read", 2),
         (NUM_HW_TREE_WAIT, "hw_tree_wait", 2),

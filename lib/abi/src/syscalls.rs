@@ -1310,6 +1310,30 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // Removes a name; audited.
         audit: true,
     },
+    SyscallSpec {
+        number: SyscallNumber::DMA_FREE,
+        name: "dma_free",
+        arg_count: 2,
+        args: [
+            AbiType::Handle,
+            AbiType::U64,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // Releasing a DMA buffer is gated by the same `CAP_MEM_DMA` that
+        // carved it: a task that may carve a device-readable region must be
+        // the one to reclaim it, and the kernel additionally frees only a
+        // buffer live in the caller's own DMA window.
+        required_capability: Some(CapabilityId::MEM_DMA),
+        // IS audited per call, symmetric with `dma_alloc`: releasing a
+        // region the hardware could touch is a security-relevant event, and
+        // a long-running driver frees one buffer per transfer — low-volume
+        // relative to the data it moves — so the record cannot drown the log.
+        audit: true,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

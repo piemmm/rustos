@@ -183,6 +183,23 @@ pub trait LiveUserSpace: Send {
     /// addressing-limit exceeded, no virtual slot, …).
     fn alloc_dma(&mut self, len: usize, addr_limit: u64) -> Result<DmaMapping, LiveSpaceError>;
 
+    /// Release the DMA buffer whose CPU virtual base is `cpu_va`, zeroing
+    /// every backing byte (zero-on-free) before its frames return to the
+    /// allocator — the symmetric free for [`Self::alloc_dma`].
+    ///
+    /// A long-running driver that issues many transfers reclaims each
+    /// request's buffers through this rather than leaking frames until it
+    /// exits. Only `cpu_va` is taken from the caller; the buffer's extent is
+    /// the allocator's own authoritative record, so a `cpu_va` that is not the
+    /// base of a live carve in this space fails closed (covering a forged,
+    /// stale, or double free) without releasing anything.
+    ///
+    /// # Errors
+    ///
+    /// [`LiveSpaceError::Dma`] — [`DmaError::UnknownBuffer`] when `cpu_va` is
+    /// not the base of a live DMA carve of this space.
+    fn free_dma(&mut self, cpu_va: u64) -> Result<(), LiveSpaceError>;
+
     /// Map `len` bytes of an existing, kernel-owned, physically-contiguous
     /// **shared-memory region** beginning at `phys_base` into this space as
     /// cacheable `RW|USER` (never executable), guard-bracketed, returning the
@@ -440,6 +457,16 @@ where
             cpu_va: buf.virt().as_u64(),
             phys_base: buf.phys().as_u64(),
         })
+    }
+
+    fn free_dma(&mut self, cpu_va: u64) -> Result<(), LiveSpaceError> {
+        self.dma.free_at(
+            &mut self.space,
+            self.frames,
+            &self.physmap,
+            VirtAddr::new(cpu_va),
+        )?;
+        Ok(())
     }
 
     fn map_shared(&mut self, phys_base: u64, len: usize) -> Result<u64, LiveSpaceError> {
@@ -788,6 +815,48 @@ mod tests {
             frames.free_frames(),
             before,
             "every DMA frame is returned to the allocator on teardown"
+        );
+    }
+
+    #[test]
+    fn free_dma_releases_a_carve_and_repeated_cycles_reclaim_fully() {
+        // `free_dma` is the per-buffer release the `dma_free` syscall drives:
+        // a long-running driver allocates and frees a DMA buffer every
+        // transfer, so many alloc/free cycles must leave the frame allocator
+        // exactly as full as it started — never marching upward (the leak the
+        // syscall exists to close).
+        let frames = leaked_frames();
+        let before = frames.free_frames();
+        let mut live = LiveSpace::new(
+            AddressSpace::new(HostPageTable::new()),
+            sim(),
+            frames,
+            VirtAddr::new(MMIO_WINDOW_BASE),
+            MMIO_WINDOW_PAGES,
+            VirtAddr::new(ANON_WINDOW_BASE),
+            ANON_WINDOW_PAGES,
+            VirtAddr::new(DMA_WINDOW_BASE),
+            DMA_WINDOW_PAGES,
+            VirtAddr::new(SHARED_WINDOW_BASE),
+            SHARED_WINDOW_PAGES,
+        )
+        .expect("windows are valid");
+
+        for _ in 0..50 {
+            let mapping = live.alloc_dma(2 * PAGE_SIZE, 0).expect("a free block");
+            assert!(frames.free_frames() < before, "the carve consumed frames");
+            live.free_dma(mapping.cpu_va).expect("free by cpu base");
+            assert_eq!(
+                frames.free_frames(),
+                before,
+                "each free returns every frame — no leak across cycles"
+            );
+            assert_eq!(live.space().mapped_pages(), 0, "no data page left mapped");
+        }
+        // A free of an address that names no live carve fails closed.
+        assert_eq!(
+            live.free_dma(DMA_WINDOW_BASE + PAGE_SIZE as u64),
+            Err(LiveSpaceError::Dma(DmaError::UnknownBuffer))
         );
     }
 
