@@ -954,6 +954,26 @@ impl SyscallNumber {
     /// cross-mount move, or a denied parent fails closed. Gated by
     /// [`crate::CapabilityId::FS_ACCESS`].
     pub const FS_RENAME: Self = Self(57);
+    /// Read the kernel-attested [`Origin`](crate::Origin) of the caller whose
+    /// in-service call this server is currently handling
+    /// (`PREREQUISITES.md` P-C).
+    ///
+    /// Arguments: `endpoint: u64` (a call endpoint the calling task owns),
+    /// `ticket: u64` (the in-service ticket a prior
+    /// [`CALL_RECV`](Self::CALL_RECV) returned), `origin: *mut u8` (user
+    /// buffer), `origin_cap: usize` (its capacity, at least
+    /// [`crate::ORIGIN_WIRE_LEN`]). On success the caller's attested origin is
+    /// written little-endian to `origin` and its byte length returned.
+    ///
+    /// The origin was snapshotted from the *posting* task's own kernel state
+    /// at call time, so it is authoritative and unforgeable by that caller.
+    /// Like [`CALL_RECV`](Self::CALL_RECV)/[`CALL_REPLY`](Self::CALL_REPLY)
+    /// the kernel confirms the reader owns the endpoint and holds its required
+    /// receive capability before exposing anything; a foreign endpoint, an
+    /// unknown or not-in-service ticket, or a buffer shorter than
+    /// [`crate::ORIGIN_WIRE_LEN`] fails closed. The summary it carries is the
+    /// caller's capability *membership* bitmap, never any capability token.
+    pub const CALL_PEER_ORIGIN: Self = Self(58);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
@@ -1087,6 +1107,7 @@ mod tests {
         assert_eq!(SyscallNumber::FS_UNLINK.as_u16(), 55);
         assert_eq!(SyscallNumber::DMA_FREE.as_u16(), 56);
         assert_eq!(SyscallNumber::FS_RENAME.as_u16(), 57);
+        assert_eq!(SyscallNumber::CALL_PEER_ORIGIN.as_u16(), 58);
     }
 
     #[test]

@@ -49,7 +49,7 @@ use crate::source::{Caller, ProcessScope, SysinfoSource};
 /// * Any error returned by the backing [`SysinfoSource`].
 pub fn serve(
     source: &dyn SysinfoSource,
-    caller: &Caller<'_>,
+    caller: &Caller,
     audit: &dyn Sink,
     request: &[u8],
     response: &mut [u8],
@@ -96,7 +96,7 @@ pub fn serve(
     let payload = &request[SysinfoRequestHeader::WIRE_LEN..payload_end];
 
     if let Some(required) = spec.required_capability {
-        if !caller.capabilities.holds(required) {
+        if !caller.capabilities().holds(required) {
             emit(
                 audit,
                 Level::Warn,
@@ -127,7 +127,7 @@ pub fn serve(
 /// encode the answer.
 fn dispatch(
     source: &dyn SysinfoSource,
-    caller: &Caller<'_>,
+    caller: &Caller,
     query: SysinfoQueryId,
     payload: &[u8],
     response: &mut [u8],
@@ -148,6 +148,12 @@ fn dispatch(
         mount_list(source, caller, payload, response)
     } else if query == SysinfoQueryId::RESOURCE_LIMITS {
         resource_limits(source, caller, response)
+    } else if query == SysinfoQueryId::PROCESS_IDENTITY {
+        // The answer is the caller's own kernel-attested origin, which the
+        // dispatcher already holds: it is the attested principal, not state a
+        // `SysinfoSource` would supply, so it is encoded here directly rather
+        // than echoed through the source seam.
+        write_bytes(&caller.origin().to_le_bytes(), response)
     } else {
         Err(Errno::NotImplemented)
     }
@@ -161,7 +167,7 @@ fn dispatch(
 /// closed with [`Errno::BufferTooSmall`] if `response` cannot hold them.
 fn resource_limits(
     source: &dyn SysinfoSource,
-    caller: &Caller<'_>,
+    caller: &Caller,
     response: &mut [u8],
 ) -> Result<usize, Errno> {
     let records = source.resource_limits(caller)?;
@@ -182,7 +188,7 @@ fn resource_limits(
 /// [`ProcessRecord`]s into `response`.
 fn process_list(
     source: &dyn SysinfoSource,
-    caller: &Caller<'_>,
+    caller: &Caller,
     scope: ProcessScope,
     payload: &[u8],
     response: &mut [u8],
@@ -203,7 +209,7 @@ fn process_list(
 /// [`MountRecord`]s into `response`.
 fn mount_list(
     source: &dyn SysinfoSource,
-    caller: &Caller<'_>,
+    caller: &Caller,
     payload: &[u8],
     response: &mut [u8],
 ) -> Result<usize, Errno> {
@@ -293,16 +299,14 @@ mod tests {
         SYSINFO_VERSION_CURRENT,
     };
     use rustos_abi::time::{Duration64, Time64};
-    use rustos_abi::{CapabilityId, CapabilityQuery, Errno, LimitKind, ResourceLimit};
+    use rustos_abi::{
+        CapabilityId, CapabilitySummary, Errno, LimitKind, Origin, ProcId, ResourceLimit,
+        TrustDomain, ORIGIN_WIRE_LEN,
+    };
     use rustos_log::{Event, Level, Sink};
 
-    /// A capability view granting exactly the listed capabilities.
+    /// The capabilities a test caller's attested origin should summarise.
     struct Caps(&'static [CapabilityId]);
-    impl CapabilityQuery for Caps {
-        fn holds(&self, cap: CapabilityId) -> bool {
-            self.0.contains(&cap)
-        }
-    }
 
     /// Records every event it receives so tests can assert on audit output.
     struct RecordingSink {
@@ -389,7 +393,7 @@ mod tests {
     impl SysinfoSource for FixtureSource {
         fn process_records(
             &self,
-            _caller: &Caller<'_>,
+            _caller: &Caller,
             scope: ProcessScope,
         ) -> Result<&[ProcessRecord], Errno> {
             Ok(match scope {
@@ -397,7 +401,7 @@ mod tests {
                 ProcessScope::Global => &self.global,
             })
         }
-        fn kernel_memory_stats(&self, _caller: &Caller<'_>) -> Result<KernelMemoryStats, Errno> {
+        fn kernel_memory_stats(&self, _caller: &Caller) -> Result<KernelMemoryStats, Errno> {
             Ok(KernelMemoryStats {
                 total_bytes: 1 << 30,
                 free_bytes: 1 << 29,
@@ -407,24 +411,24 @@ mod tests {
                 reserved: 0,
             })
         }
-        fn hardware_tree(&self, _caller: &Caller<'_>) -> Result<&[u8], Errno> {
+        fn hardware_tree(&self, _caller: &Caller) -> Result<&[u8], Errno> {
             Ok(&self.hwtree)
         }
-        fn system_identity(&self, _caller: &Caller<'_>) -> Result<SystemIdentity, Errno> {
+        fn system_identity(&self, _caller: &Caller) -> Result<SystemIdentity, Errno> {
             SystemIdentity::new([9u8; MACHINE_ID_LEN], 1, 0, 0, b"rustos-box")
         }
-        fn uptime(&self, _caller: &Caller<'_>) -> Result<Uptime, Errno> {
+        fn uptime(&self, _caller: &Caller) -> Result<Uptime, Errno> {
             Ok(Uptime {
                 since_boot: Duration64::from_nanos(1_000),
                 boot_time: Time64::from_secs(1_700_000_000),
             })
         }
-        fn mount_records(&self, _caller: &Caller<'_>) -> Result<&[MountRecord], Errno> {
+        fn mount_records(&self, _caller: &Caller) -> Result<&[MountRecord], Errno> {
             Ok(&self.mounts)
         }
         fn resource_limits(
             &self,
-            _caller: &Caller<'_>,
+            _caller: &Caller,
         ) -> Result<[ResourceLimitRecord; LimitKind::COUNT], Errno> {
             // A distinct usage per kind so the positional decode is checkable.
             Ok([
@@ -465,11 +469,40 @@ mod tests {
         buf
     }
 
-    fn caller(caps: &Caps) -> Caller<'_> {
-        Caller {
-            uid: 1000,
-            capabilities: caps,
+    fn caller(caps: &Caps) -> Caller {
+        let mut summary = CapabilitySummary::EMPTY;
+        for cap in caps.0 {
+            summary.insert(*cap);
         }
+        // A representative attested user-process origin; the dispatcher gates
+        // on the capability summary and scopes by uid, both read from here.
+        Caller::new(Origin::new(
+            TrustDomain::User,
+            1000,
+            10,
+            ProcId::from_raw([0x10; 16]),
+            summary,
+        ))
+    }
+
+    #[test]
+    fn process_identity_returns_the_callers_attested_origin() {
+        let source = FixtureSource::new();
+        let caps = Caps(&[CapabilityId::SYSINFO_GLOBAL]);
+        let who = caller(&caps);
+        let expected = *who.origin();
+        let sink = RecordingSink::new();
+        let req = request_bytes(SysinfoQueryId::PROCESS_IDENTITY, &[]);
+        let mut resp = [0u8; 128];
+        let n = serve(&source, &who, &sink, &req, &mut resp).expect("served");
+        assert_eq!(n, ORIGIN_WIRE_LEN);
+        let decoded = Origin::from_bytes(&resp[..n]).expect("valid origin");
+        assert_eq!(decoded, expected);
+        assert_eq!(decoded.uid(), 1000);
+        assert_eq!(decoded.trust_domain(), TrustDomain::User);
+        assert!(decoded
+            .capabilities()
+            .holds_cap(CapabilityId::SYSINFO_GLOBAL));
     }
 
     #[test]

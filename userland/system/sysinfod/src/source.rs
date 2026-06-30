@@ -13,20 +13,47 @@
 use rustos_abi::sysinfo::{
     KernelMemoryStats, MountRecord, ProcessRecord, ResourceLimitRecord, SystemIdentity, Uptime,
 };
-use rustos_abi::{CapabilityQuery, Errno, LimitKind};
+use rustos_abi::{CapabilityQuery, Errno, LimitKind, Origin};
 
 /// The authenticated principal on whose behalf a request is served.
 ///
-/// The identity is supplied by the IPC layer, never by the caller's own
-/// payload: `sysinfod` trusts the kernel-provided
-/// `uid` and capability view, not bytes on the wire.
-pub struct Caller<'a> {
+/// The identity is the kernel-attested [`Origin`] of the requesting task —
+/// obtained from the IPC layer (`call_peer_origin`), never from the caller's
+/// own payload — so `sysinfod` trusts the kernel's view, not bytes on the
+/// wire. The owning uid and the effective capability summary the dispatcher
+/// gates on are read from that one attested record, so they cannot drift
+/// apart.
+pub struct Caller {
+    origin: Origin,
+}
+
+impl Caller {
+    /// Wrap a kernel-attested [`Origin`] as the serving principal.
+    #[must_use]
+    pub fn new(origin: Origin) -> Self {
+        Self { origin }
+    }
+
+    /// The caller's kernel-attested origin.
+    #[must_use]
+    pub fn origin(&self) -> &Origin {
+        &self.origin
+    }
+
     /// Owning user identifier of the requesting task.
-    pub uid: u32,
-    /// The caller's effective capability set, queried through the
-    /// object-safe [`CapabilityQuery`] seam so `sysinfod` never names a
-    /// concrete `CapabilitySet` type.
-    pub capabilities: &'a dyn CapabilityQuery,
+    #[must_use]
+    pub fn uid(&self) -> u32 {
+        self.origin.uid()
+    }
+
+    /// The caller's effective capability set, as the object-safe
+    /// [`CapabilityQuery`] seam the dispatcher gates on — backed by the
+    /// non-secret membership summary the attested origin carries, so
+    /// `sysinfod` never names a concrete `CapabilitySet` type.
+    #[must_use]
+    pub fn capabilities(&self) -> &dyn CapabilityQuery {
+        self.origin.capabilities()
+    }
 }
 
 /// Which processes a process-list query should observe.
@@ -61,14 +88,14 @@ pub trait SysinfoSource {
     /// walking the list never skips or repeats a record.
     fn process_records(
         &self,
-        caller: &Caller<'_>,
+        caller: &Caller,
         scope: ProcessScope,
     ) -> Result<&[ProcessRecord], Errno>;
 
     /// Return kernel memory statistics.
     ///
     /// Reached only after the `CAP_SYSINFO_KERNEL` gate has passed.
-    fn kernel_memory_stats(&self, caller: &Caller<'_>) -> Result<KernelMemoryStats, Errno>;
+    fn kernel_memory_stats(&self, caller: &Caller) -> Result<KernelMemoryStats, Errno>;
 
     /// Return the encoded detected hardware tree.
     ///
@@ -76,13 +103,13 @@ pub trait SysinfoSource {
     /// are passed through verbatim: the hardware-tree wire format is owned
     /// by `lib/abi`, not by this service, so `sysinfod`
     /// frames them without interpreting them.
-    fn hardware_tree(&self, caller: &Caller<'_>) -> Result<&[u8], Errno>;
+    fn hardware_tree(&self, caller: &Caller) -> Result<&[u8], Errno>;
 
     /// Return the machine identity (machine ID, OS version, hostname).
-    fn system_identity(&self, caller: &Caller<'_>) -> Result<SystemIdentity, Errno>;
+    fn system_identity(&self, caller: &Caller) -> Result<SystemIdentity, Errno>;
 
     /// Return system uptime and boot wall-clock time.
-    fn uptime(&self, caller: &Caller<'_>) -> Result<Uptime, Errno>;
+    fn uptime(&self, caller: &Caller) -> Result<Uptime, Errno>;
 
     /// Return the current mount table.
     ///
@@ -91,7 +118,7 @@ pub trait SysinfoSource {
     /// there is no per-principal scope to narrow. As with the process list
     /// the slice is returned whole and [`crate::serve`] applies the
     /// `offset`/`limit` paging; ordering must be stable across paged calls.
-    fn mount_records(&self, caller: &Caller<'_>) -> Result<&[MountRecord], Errno>;
+    fn mount_records(&self, caller: &Caller) -> Result<&[MountRecord], Errno>;
 
     /// Return `caller`'s effective resource limits and current live usage,
     /// one record per [`LimitKind`] in discriminant order. The query is self-scoped — the answer describes the caller's
@@ -103,6 +130,6 @@ pub trait SysinfoSource {
     /// the array is always [`LimitKind::COUNT`] long and positional.
     fn resource_limits(
         &self,
-        caller: &Caller<'_>,
+        caller: &Caller,
     ) -> Result<[ResourceLimitRecord; LimitKind::COUNT], Errno>;
 }

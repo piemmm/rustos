@@ -45,7 +45,7 @@ use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
 
 use rustos_abi::ipc::IPC_MESSAGE_MAX_PAYLOAD_LEN;
-use rustos_abi::Errno;
+use rustos_abi::{Errno, Origin};
 use rustos_caps::CapabilitySet;
 use rustos_kernel_sec::captable::TaskCapabilities;
 use rustos_log::{Field, Sink};
@@ -146,6 +146,13 @@ pub struct CallEndpointLimits {
 struct PendingCall {
     ticket: u64,
     sender: u64,
+    /// The caller's kernel-attested identity, captured at post time so the
+    /// server can later retrieve it by ticket through
+    /// [`CallEndpoint::peer_origin`]. Snapshotting it at post (rather than
+    /// resolving the caller again at receive) ties the origin to the exact
+    /// principal that made *this* call, immune to later changes to that
+    /// task's capabilities or to PID reuse.
+    origin: Origin,
     request: Vec<u8>,
 }
 
@@ -156,9 +163,10 @@ struct Inner {
     /// Posted, not yet received by the server (FIFO).
     pending: VecDeque<PendingCall>,
     /// Received by the server, awaiting [`CallEndpoint::reply`]. Keyed by
-    /// ticket; the value is the posting caller's task id, so only that task
-    /// may later claim the reply.
-    in_service: BTreeMap<u64, u64>,
+    /// ticket; the value is the posting caller's task id (so only that task
+    /// may later claim the reply) paired with its kernel-attested
+    /// [`Origin`], which [`CallEndpoint::peer_origin`] hands the server.
+    in_service: BTreeMap<u64, (u64, Origin)>,
     /// Replied, awaiting [`CallEndpoint::take_reply`]. Keyed by ticket; the
     /// value is the posting caller's task id and the reply bytes.
     completed: BTreeMap<u64, (u64, Vec<u8>)>,
@@ -475,9 +483,11 @@ impl CallEndpoint {
         let ticket = g.next_ticket;
         g.next_ticket += 1;
         let sender = caller.task().0;
+        let origin = caller.attest_origin();
         g.pending.push_back(PendingCall {
             ticket,
             sender,
+            origin,
             request: request.to_vec(),
         });
         drop(g);
@@ -517,12 +527,32 @@ impl CallEndpoint {
             };
         }
         let call = g.pending.pop_front().expect("front was present");
-        g.in_service.insert(call.ticket, call.sender);
+        g.in_service.insert(call.ticket, (call.sender, call.origin));
         RecvCall::Received(ReceivedCall {
             ticket: CallTicket(call.ticket),
             sender: call.sender,
             request: call.request,
         })
+    }
+
+    /// The kernel-attested [`Origin`] of the caller that posted the
+    /// in-service call identified by `ticket`.
+    ///
+    /// Returns [`None`] unless `ticket` names a call this endpoint has handed
+    /// to the server via [`recv_call`](Self::recv_call) and not yet replied —
+    /// so a server reads a caller's identity only while actively servicing
+    /// that caller's request, never for a pending, completed, or unknown
+    /// ticket (fail closed). The origin was snapshotted from the caller's own
+    /// kernel state at [`post`](Self::post) time and is unforgeable by the
+    /// caller; the syscall layer additionally confirms the reader owns this
+    /// endpoint before exposing it.
+    #[must_use]
+    pub fn peer_origin(&self, ticket: CallTicket) -> Option<Origin> {
+        self.inner
+            .lock()
+            .in_service
+            .get(&ticket.0)
+            .map(|(_, origin)| *origin)
     }
 
     /// Deliver `reply` for the in-service call identified by `ticket`.
@@ -575,7 +605,7 @@ impl CallEndpoint {
         }
 
         let mut g = self.inner.lock();
-        let Some(sender) = g.in_service.remove(&ticket.0) else {
+        let Some((sender, _origin)) = g.in_service.remove(&ticket.0) else {
             drop(g);
             record(
                 audit,
@@ -625,7 +655,7 @@ impl CallEndpoint {
         if self.is_closed() {
             return ReplyOutcome::Cancelled;
         }
-        let in_service = g.in_service.get(&ticket.0) == Some(&claimant);
+        let in_service = g.in_service.get(&ticket.0).map(|(sender, _)| *sender) == Some(claimant);
         let pending = g
             .pending
             .iter()
@@ -953,6 +983,41 @@ mod tests {
         // A second claim finds nothing.
         assert_eq!(ep.take_reply(7, ticket), ReplyOutcome::Unknown);
         assert_eq!(ep.outstanding(), 0);
+    }
+
+    #[test]
+    fn peer_origin_reflects_the_in_service_caller_and_fails_closed() {
+        use rustos_abi::{ProcId, TrustDomain};
+        let sink = RecordingSink::new();
+        let ep = open_endpoint(&sink);
+        // A caller with a minted process instance and a real capability.
+        let mut caller = task_with(7, &[CapabilityId::SYSINFO_GLOBAL]);
+        let minted = ProcId::from_raw([0x9E; 16]);
+        caller = caller.with_proc_id(minted);
+
+        let ticket = ep.post(&caller, b"ping", &sink).expect("posted");
+        // A pending (not-yet-received) call exposes no origin: the server
+        // only learns a caller's identity while actively servicing it.
+        assert_eq!(ep.peer_origin(ticket), None);
+        // An unknown ticket never resolves.
+        assert_eq!(ep.peer_origin(CallTicket(0xDEAD)), None);
+
+        recv_one(&ep).expect("received");
+        let origin = ep.peer_origin(ticket).expect("in-service origin");
+        assert_eq!(origin.trust_domain(), TrustDomain::User);
+        assert_eq!(origin.pid(), 7);
+        assert_eq!(origin.proc_id(), minted);
+        assert!(origin
+            .capabilities()
+            .holds_cap(CapabilityId::SYSINFO_GLOBAL));
+        // It equals exactly what the caller's own record attests — proving
+        // the server reads kernel-attested state, not anything on the wire.
+        assert_eq!(origin, caller.attest_origin());
+
+        // Once replied, the call leaves the in-service table and the origin
+        // is no longer readable.
+        ep.reply(ticket, b"pong", &sink).expect("replied");
+        assert_eq!(ep.peer_origin(ticket), None);
     }
 
     #[test]

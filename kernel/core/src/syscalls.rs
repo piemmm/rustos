@@ -2679,6 +2679,55 @@ where
         Ok(0)
     }
 
+    fn call_peer_origin(
+        &self,
+        caller: &CallerContext<'_>,
+        endpoint: u64,
+        ticket: u64,
+        origin: u64,
+        origin_cap: usize,
+    ) -> SyscallResult {
+        // Resolve + gate before touching state, exactly as `call_recv` /
+        // `call_reply`: the reader must hold the endpoint's required receive
+        // capability and be the owning task. A foreign or insufficiently
+        // capable task is denied (no ambient authority); an unknown endpoint
+        // fails closed.
+        let Some(ep) = crate::callreg::lookup(EndpointId(endpoint)) else {
+            return Err(Errno::NotFound);
+        };
+        if !ep
+            .required_recv_caps()
+            .is_subset_of(caller.caps.effective())
+            || ep.owner() != caller.caps.task().0
+        {
+            return Err(Errno::PermissionDenied);
+        }
+
+        // The reader's buffer must hold a whole origin; a short buffer fails
+        // closed rather than truncating the record.
+        if origin_cap < rustos_abi::ORIGIN_WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+
+        // Look up the kernel-attested origin captured for this in-service
+        // ticket. An unknown, still-pending, already-replied, or foreign
+        // ticket resolves to nothing and fails closed: a server learns a
+        // caller's identity only while it is actively servicing that caller's
+        // call. The origin was snapshotted from the caller's own task state at
+        // post time, so it cannot be forged on the wire.
+        let Some(peer) = ep.peer_origin(CallTicket(ticket)) else {
+            return Err(Errno::NotFound);
+        };
+        let bytes = peer.to_le_bytes();
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_out(space, physmap, VirtAddr::new(origin), &bytes)
+        }) {
+            Some(Ok(())) => Ok(bytes.len() as u64),
+            Some(Err(err)) => Err(copy_fault_errno(err)),
+            None => Err(Errno::BadAddress),
+        }
+    }
+
     fn log_emit(&self, caller: &CallerContext<'_>, record: u64, len: usize) -> SyscallResult {
         // The dispatcher has already checked `CAP_LOG_EMIT` and that
         // `record` is a non-null `UserPtr`. A valid
@@ -11839,9 +11888,9 @@ mod tests {
         let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(8, &[CapabilityId::IRQ_BIND], sink);
+        let caps = make_caps_record(0x5701, &[CapabilityId::IRQ_BIND], sink);
         let ctx = CallerContext {
-            task_id: SecTaskId(8),
+            task_id: SecTaskId(0x5701),
             caps: &caps,
         };
         let h = KernelSyscallHandlers::new(
@@ -11853,7 +11902,7 @@ mod tests {
             .expect("add irq member");
         // The line has not fired: a zero-timeout wait expires without writing.
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
-        assert_eq!(crate::waitset::release_owned_by(8), 1);
+        assert_eq!(crate::waitset::release_owned_by(0x5701), 1);
     }
 
     /// A fired IRQ member makes `waitset_wait` report that member's token and
@@ -11924,20 +11973,20 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(7), space, physmap)
+            .register(SecTaskId(0x5702), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(7, &[], sink);
+        let caps = make_caps_record(0x5702, &[], sink);
         let ctx = CallerContext {
-            task_id: SecTaskId(7),
+            task_id: SecTaskId(0x5702),
             caps: &caps,
         };
 
         // An unrestricted endpoint owned by the caller (task 7), with a posted
         // request waiting to be received (so `has_pending()` is true).
         let id = 0xCA11_5001;
-        let creator = make_caps_record(7, &[], sink);
+        let creator = make_caps_record(0x5702, &[], sink);
         let ep = Arc::new(
             CallEndpoint::create(
                 EndpointId(id),
@@ -11968,7 +12017,11 @@ mod tests {
         // reported.
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Ok(0));
         let token_bytes = read_reply_page(
-            aspaces.read().resolve(SecTaskId(7)).expect("registered").1,
+            aspaces
+                .read()
+                .resolve(SecTaskId(0x5702))
+                .expect("registered")
+                .1,
             8,
         );
         assert_eq!(
@@ -11982,7 +12035,7 @@ mod tests {
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
 
         crate::callreg::unregister(EndpointId(id));
-        assert_eq!(crate::waitset::release_owned_by(7), 1);
+        assert_eq!(crate::waitset::release_owned_by(0x5702), 1);
     }
 
     /// `call_recv` / `call_reply` against an unbound id fail closed with
@@ -12143,6 +12196,125 @@ mod tests {
             ep.take_reply(7, CallTicket(recv_ticket)),
             ReplyOutcome::Ready(b"pong".to_vec())
         );
+        crate::callreg::unregister(EndpointId(id));
+    }
+
+    /// `call_peer_origin` hands the server the kernel-attested identity of
+    /// the caller it is servicing, immune to the request payload, and fails
+    /// closed for a foreign reader, a short buffer, or a ticket not in
+    /// service.
+    #[test]
+    fn call_peer_origin_attests_the_caller_and_fails_closed() {
+        use rustos_abi::{Origin, ProcId, TrustDomain, ORIGIN_WIRE_LEN};
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = server_aspace(b"unused");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        // Server task 9 owns both the aspace and the endpoint.
+        aspaces
+            .write()
+            .register(SecTaskId(9), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+
+        let id = 0xCA11_4004;
+        let server_caps = make_caps_record(9, &[], sink);
+        let ep = Arc::new(
+            CallEndpoint::create(
+                EndpointId(id),
+                &server_caps,
+                CapabilitySet::empty(),
+                CapabilitySet::empty(),
+                CallEndpointLimits {
+                    max_request: 64,
+                    max_reply: 64,
+                    capacity: 4,
+                },
+                sink,
+            )
+            .expect("unrestricted endpoint"),
+        );
+        crate::callreg::register(ep.clone()).expect("registered");
+
+        // A client (task 7) with a minted process instance and a real
+        // capability posts a request.
+        let client_caps = make_caps_record(7, &[CapabilityId::SYSINFO_GLOBAL], sink)
+            .with_proc_id(ProcId::from_raw([0x71; 16]));
+        let expected = client_caps.attest_origin();
+        let ticket = ep.post(&client_caps, b"who-am-i", sink).expect("posted");
+
+        let ctx = CallerContext {
+            task_id: SecTaskId(9),
+            caps: &server_caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+
+        // Before the server receives the call, the ticket is not in service,
+        // so the origin is not yet readable (fail closed).
+        assert_eq!(
+            h.call_peer_origin(&ctx, id, ticket.0, 0x1000, 64),
+            Err(Errno::NotFound)
+        );
+
+        // Receive the call, moving it into service.
+        let got = h.call_recv(&ctx, id, 0x2000, 64, 0x3000).expect("received");
+        assert_eq!(got, 8);
+
+        // A foreign reader (task 8, not the owner) is denied before any
+        // state is touched.
+        let foreign_caps = make_caps_record(8, &[], sink);
+        let foreign_ctx = CallerContext {
+            task_id: SecTaskId(8),
+            caps: &foreign_caps,
+        };
+        assert_eq!(
+            h.call_peer_origin(&foreign_ctx, id, ticket.0, 0x1000, 64),
+            Err(Errno::PermissionDenied)
+        );
+
+        // A buffer too small for a whole origin fails closed.
+        assert_eq!(
+            h.call_peer_origin(&ctx, id, ticket.0, 0x1000, ORIGIN_WIRE_LEN - 1),
+            Err(Errno::BufferTooSmall)
+        );
+
+        // An unknown ticket fails closed.
+        assert_eq!(
+            h.call_peer_origin(&ctx, id, 0xDEAD, 0x1000, 64),
+            Err(Errno::NotFound)
+        );
+
+        // The happy path writes the attested origin to page 1.
+        let wrote = h
+            .call_peer_origin(&ctx, id, ticket.0, 0x1000, 64)
+            .expect("origin written");
+        assert_eq!(wrote, ORIGIN_WIRE_LEN as u64);
+
+        let guard = aspaces.read();
+        let (_space, physmap) = guard.resolve(SecTaskId(9)).expect("aspace present");
+        let bytes = read_server_page(physmap, 1, ORIGIN_WIRE_LEN);
+        let decoded = Origin::from_bytes(&bytes).expect("valid origin");
+        drop(guard);
+
+        // It is exactly what the client's own record attests — proving the
+        // server reads kernel-attested state, never the request payload.
+        assert_eq!(decoded, expected);
+        assert_eq!(decoded.trust_domain(), TrustDomain::User);
+        assert_eq!(decoded.uid(), 1000);
+        assert_eq!(decoded.pid(), 7);
+        assert_eq!(decoded.proc_id(), ProcId::from_raw([0x71; 16]));
+        assert!(decoded
+            .capabilities()
+            .holds_cap(CapabilityId::SYSINFO_GLOBAL));
+
         crate::callreg::unregister(EndpointId(id));
     }
 

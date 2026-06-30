@@ -54,9 +54,8 @@ pub const SYSCALL_MAX_ARGS: usize = 6;
 ///
 /// Pinned so that [`ENCODED_TABLE`] uses a fixed stride per record and the
 /// encoding is computable in a `const fn` without an allocator. Sized to fit
-/// the longest `abi-v1` name (`display_acquire` / `display_release`, 15
-/// bytes).
-pub const SYSCALL_NAME_MAX: usize = 15;
+/// the longest `abi-v1` name (`call_peer_origin`, 16 bytes).
+pub const SYSCALL_NAME_MAX: usize = 16;
 
 /// Stride, in bytes, of one record inside [`ENCODED_TABLE`].
 pub const SYSCALL_ENCODED_RECORD_LEN: usize = 14 + SYSCALL_NAME_MAX;
@@ -1351,6 +1350,30 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // Moves a name (and may replace a destination); audited like the
         // other mutating filesystem calls.
         audit: true,
+    },
+    SyscallSpec {
+        number: SyscallNumber::CALL_PEER_ORIGIN,
+        name: "call_peer_origin",
+        arg_count: 4,
+        args: [
+            // endpoint id, in-service ticket, origin-out ptr, out cap.
+            AbiType::IpcEndpoint,
+            AbiType::Handle,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `U64` carries the origin-bytes-written-or-`-errno` convention, like
+        // `call_recv`.
+        ret: AbiType::U64,
+        // Gated like `call_recv`/`call_reply` by the endpoint's required
+        // receive capability against the reading server (enforced in the
+        // handler), not a flat dispatcher gate. Not audited per call: a
+        // server reads a caller's origin on its high-volume serve path, and a
+        // refused capability is audited by the dispatcher regardless.
+        required_capability: None,
+        audit: false,
     },
 ];
 

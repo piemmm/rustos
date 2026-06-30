@@ -33,7 +33,7 @@
 /* Canonical query-registry encoding constants (the hashable registry image). */
 #define ROS_SYSINFO_QUERY_NAME_MAX 20u
 #define ROS_SYSINFO_QUERY_RECORD_LEN 26u
-#define ROS_SYSINFO_ENCODED_QUERY_TABLE_LEN 208u
+#define ROS_SYSINFO_ENCODED_QUERY_TABLE_LEN 234u
 
 /* Well-known sysinfo-v1 query identifiers (uint16_t). Do not renumber. */
 #define ROS_SYSINFO_QUERY_SELF_PROCESS_LIST ((uint16_t)0u)

@@ -104,6 +104,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  55 | `fs_unlink`    | `user_ptr` (path), `len`                | `errno`       | `CAP_FS_ACCESS` | yes   |
 |  56 | `dma_free`     | `Handle handle`, `u64 cpu_va`           | `errno`       | `CAP_MEM_DMA`   | yes   |
 |  57 | `fs_rename`    | `user_ptr` (src), `len`, `user_ptr` (dst), `len` | `errno` | `CAP_FS_ACCESS` | yes |
+|  58 | `call_peer_origin` | `IpcEndpoint`, `Handle` (ticket), `user_ptr` (origin out), `len` | `u64` (bytes) | — | no |
 
 (Syscall numbers 39–45 — `msi_alloc`, `shm_create`/`shm_map`/`shm_unmap`,
 `waitset_create`/`waitset_ctl`/`waitset_wait` — are defined in
@@ -375,6 +376,27 @@ its production consumer. The first-party Rust wrappers are
 `rustos_rt::{ipc_call, call_create, call_recv, call_reply}`; the C stubs are
 `ros_sys_ipc_call` / `ros_sys_call_create` / `ros_sys_call_recv` /
 `ros_sys_call_reply`.
+
+`call_peer_origin` (no. 58) lets a server read the **kernel-attested
+identity** of the caller whose in-service call it is handling (P-C). After a
+`call_recv` hands the server a ticket, `call_peer_origin` returns the
+`rustos_abi::Origin` the kernel captured from the *posting* task's own state
+at `ipc_call` time — its trust domain, uid, reusable pid, the unforgeable
+`ProcId` that distinguishes process instances across PID reuse, and a
+non-secret capability *summary* (a membership bitmap, never any capability
+token). The origin is filled entirely kernel-side, so a caller can neither
+forge another principal's identity nor inflate its own, and it is read from
+the call's own snapshot rather than re-resolving the task — immune to later
+capability changes or PID reuse. Like `call_recv`/`call_reply` it is
+dispatcher-ungated but resolves the endpoint and checks the reader's
+`recv_caps` **and** owner identity before exposing anything; a foreign
+endpoint, an unknown or not-in-service ticket, or a buffer shorter than
+`rustos_abi::ORIGIN_WIRE_LEN` fails closed, and it is unaudited (a server's
+high-volume serve path; refusals are audited by the dispatcher regardless).
+It is the foundation a capability-gated user-space service builds on to learn
+who called it — its first consumer is `sysinfod`'s self-scoped
+`PROCESS_IDENTITY` query (`AGENTS.md` §16.6). The first-party Rust wrapper is
+`rustos_rt::call_peer_origin`; the C stub is `ros_sys_call_peer_origin`.
 
 `mem_map` / `mem_unmap` are deliberately **ungated** (no row above). They
 grow and shrink the caller's *own* hardware-isolated address space with

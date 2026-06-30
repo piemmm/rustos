@@ -22,7 +22,7 @@ extern crate alloc;
 
 use alloc::collections::BTreeMap;
 
-use rustos_abi::{Errno, ProcId};
+use rustos_abi::{CapabilitySummary, Errno, Origin, ProcId, TrustDomain};
 use rustos_caps::{CapabilitySet, CapabilityToken, RevocationEpoch};
 use rustos_crypto::Ed25519PublicKey;
 use rustos_log::{Field, Sink};
@@ -140,6 +140,33 @@ impl TaskCapabilities {
     #[must_use]
     pub fn proc_id(&self) -> ProcId {
         self.proc_id
+    }
+
+    /// Produce the kernel-attested [`Origin`] of this task.
+    ///
+    /// Every field is read from this record's own kernel-held state — never
+    /// from anything a caller supplied — so the result is authoritative: a
+    /// task can neither forge another principal's origin nor inflate its own.
+    /// The trust domain is [`TrustDomain::Kernel`] for the
+    /// [`ProcId::KERNEL`] sentinel (kernel threads and in-kernel binder /
+    /// device-host records) and [`TrustDomain::User`] for a minted process
+    /// instance. The capability summary is the effective set's wire image —
+    /// the non-secret membership bitmap, carrying no capability *tokens*.
+    #[must_use]
+    pub fn attest_origin(&self) -> Origin {
+        let trust_domain = if self.proc_id.is_kernel() {
+            TrustDomain::Kernel
+        } else {
+            TrustDomain::User
+        };
+        let capabilities = CapabilitySummary::from_raw(self.effective.to_le_bytes());
+        Origin::new(
+            trust_domain,
+            self.owner.0,
+            self.task.0,
+            self.proc_id,
+            capabilities,
+        )
     }
 
     /// Currently effective capability set.
@@ -463,6 +490,39 @@ mod tests {
         assert!(!admitted.proc_id().is_kernel());
         // Attaching the identity changes nothing about the capability set.
         assert!(admitted.has(CapabilityId::FS_MOUNT));
+    }
+
+    #[test]
+    fn attest_origin_is_built_from_kernel_state() {
+        use rustos_abi::{ProcId, TrustDomain};
+        let grant = caps_of(&[CapabilityId::FS_MOUNT, CapabilityId::SYSINFO_GLOBAL]);
+        let sink = RecordingSink::new();
+        // A kernel-domain record (no minted proc_id) attests as Kernel.
+        let kernel_task = TaskCapabilities::derive(TaskId(3), UserId(0), grant, grant, &sink);
+        let kernel_origin = kernel_task.attest_origin();
+        assert_eq!(kernel_origin.trust_domain(), TrustDomain::Kernel);
+        assert!(kernel_origin.proc_id().is_kernel());
+
+        // A minted process instance attests as User, carrying its own uid,
+        // pid, proc_id, and a capability summary mirroring its effective set.
+        let minted = ProcId::from_raw([0x5A; 16]);
+        let proc = TaskCapabilities::derive(TaskId(42), UserId(1000), grant, grant, &sink)
+            .with_proc_id(minted);
+        let origin = proc.attest_origin();
+        assert_eq!(origin.trust_domain(), TrustDomain::User);
+        assert_eq!(origin.uid(), 1000);
+        assert_eq!(origin.pid(), 42);
+        assert_eq!(origin.proc_id(), minted);
+        assert!(origin.capabilities().holds_cap(CapabilityId::FS_MOUNT));
+        assert!(origin
+            .capabilities()
+            .holds_cap(CapabilityId::SYSINFO_GLOBAL));
+        assert!(!origin.capabilities().holds_cap(CapabilityId::NET_RAW));
+        // The summary is exactly the effective set's wire image.
+        assert_eq!(
+            origin.capabilities().as_bytes(),
+            &proc.effective().to_le_bytes()
+        );
     }
 
     #[test]

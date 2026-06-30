@@ -118,6 +118,7 @@ const NUM_FS_SYNC: u64 = SyscallNumber::FS_SYNC.as_u16() as u64;
 const NUM_FS_MKDIR: u64 = SyscallNumber::FS_MKDIR.as_u16() as u64;
 const NUM_FS_UNLINK: u64 = SyscallNumber::FS_UNLINK.as_u16() as u64;
 const NUM_FS_RENAME: u64 = SyscallNumber::FS_RENAME.as_u16() as u64;
+const NUM_CALL_PEER_ORIGIN: u64 = SyscallNumber::CALL_PEER_ORIGIN.as_u16() as u64;
 
 /// Empty argument vector for the no-argument syscalls.
 const NO_ARGS: [u64; SYSCALL_MAX_ARGS] = [0; SYSCALL_MAX_ARGS];
@@ -852,6 +853,32 @@ pub extern "C" fn sys_call_reply(
     }
 }
 
+/// `call_peer_origin`: read the kernel-attested `rustos_abi::Origin` of the
+/// caller whose in-service call this server is handling
+/// (`SyscallNumber::CALL_PEER_ORIGIN`). `ticket` is the value
+/// `ros_sys_call_recv` wrote; the caller's attested origin wire image is
+/// written to the `origin_cap`-byte buffer at `origin` and its byte count
+/// returned (or a `ROS_E_*` code reinterpreted into the result). The origin is
+/// filled by the kernel from the posting task's own state and cannot be
+/// forged.
+#[must_use]
+#[export_name = "ros_sys_call_peer_origin"]
+pub extern "C" fn sys_call_peer_origin(
+    endpoint: u64,
+    ticket: u64,
+    origin: *mut c_void,
+    origin_cap: usize,
+) -> u64 {
+    // SAFETY: see `sys_call_recv`; the kernel validates the origin `(ptr, len)`
+    // pair against the caller's address space before writing it.
+    unsafe {
+        raw_syscall(
+            NUM_CALL_PEER_ORIGIN,
+            [endpoint, ticket, ptr_arg(origin), origin_cap as u64, 0, 0],
+        )
+    }
+}
+
 /// `log_emit`: emit one encoded diagnostic record (a `rustos_abi::log`
 /// `LogRecord` wire image of `len` bytes at `record`) to the kernel's
 /// diagnostic log sink (`SyscallNumber::LOG_EMIT`).
@@ -1331,6 +1358,7 @@ mod tests {
         (NUM_FS_MKDIR, "fs_mkdir", 2),
         (NUM_FS_UNLINK, "fs_unlink", 2),
         (NUM_FS_RENAME, "fs_rename", 4),
+        (NUM_CALL_PEER_ORIGIN, "call_peer_origin", 4),
     ];
 
     #[test]

@@ -73,6 +73,18 @@ impl SysinfoQueryId {
     /// [`Self::SELF_PROCESS_LIST`]. Observing *another* principal's limits
     /// would be a separate, capability-gated query.
     pub const RESOURCE_LIMITS: Self = Self(7);
+    /// Read the calling principal's own kernel-attested [`Origin`](crate::Origin).
+    ///
+    /// Self-scoped and ungated: the answer describes only the caller — its
+    /// trust domain, uid, pid, unforgeable [`ProcId`](crate::ProcId), and a
+    /// non-secret capability summary — all filled by the kernel from the
+    /// caller's own task state, never from the request payload. A principal
+    /// observing *its own* attested identity exposes no other principal's
+    /// state, so — like [`Self::SELF_PROCESS_LIST`] and
+    /// [`Self::RESOURCE_LIMITS`] — it carries no capability gate. Reading
+    /// *another* principal's origin would be a separate, capability-gated
+    /// query.
+    pub const PROCESS_IDENTITY: Self = Self(8);
 
     /// Inclusive upper bound on the query identifier space in `sysinfo-v1`.
     ///
@@ -192,6 +204,12 @@ pub const SYSINFO_QUERIES: &[SysinfoQuerySpec] = &[
     SysinfoQuerySpec {
         id: SysinfoQueryId::RESOURCE_LIMITS,
         name: "resource_limits",
+        required_capability: None,
+        audit: false,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::PROCESS_IDENTITY,
+        name: "process_identity",
         required_capability: None,
         audit: false,
     },
@@ -1121,6 +1139,7 @@ mod tests {
         assert_eq!(SysinfoQueryId::UPTIME.as_u16(), 5);
         assert_eq!(SysinfoQueryId::MOUNT_LIST.as_u16(), 6);
         assert_eq!(SysinfoQueryId::RESOURCE_LIMITS.as_u16(), 7);
+        assert_eq!(SysinfoQueryId::PROCESS_IDENTITY.as_u16(), 8);
         assert_eq!(SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1);
     }
 
@@ -1199,6 +1218,15 @@ mod tests {
             None
         );
         assert!(!spec_for(SysinfoQueryId::RESOURCE_LIMITS).unwrap().audit);
+        // A principal reads its own attested origin; self-scoped, so ungated
+        // and unaudited.
+        assert_eq!(
+            spec_for(SysinfoQueryId::PROCESS_IDENTITY)
+                .unwrap()
+                .required_capability,
+            None
+        );
+        assert!(!spec_for(SysinfoQueryId::PROCESS_IDENTITY).unwrap().audit);
     }
 
     #[test]

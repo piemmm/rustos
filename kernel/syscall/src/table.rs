@@ -788,6 +788,34 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Read the kernel-attested [`rustos_abi::Origin`] of the caller whose
+    /// in-service call this server is currently handling (P-C — the
+    /// server-side identity attestation half).
+    ///
+    /// The dispatcher has already checked `origin` is a non-null `UserPtr`.
+    /// The implementation resolves `endpoint`, enforces the endpoint's
+    /// required **receive** capability against the caller and confirms it is
+    /// the owning task — both before touching state — then looks up the
+    /// attested origin captured for `ticket` when the call was posted and
+    /// copies its wire image out (returning its byte length). A foreign
+    /// endpoint, an unknown or not-in-service ticket, or a buffer shorter
+    /// than [`rustos_abi::ORIGIN_WIRE_LEN`] fails closed; the origin is never
+    /// caller-supplied, so it cannot be forged.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]; the real handler is installed in
+    /// `kernel/core`.
+    fn call_peer_origin(
+        &self,
+        _caller: &CallerContext<'_>,
+        _endpoint: u64,
+        _ticket: u64,
+        _origin: u64,
+        _origin_cap: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// Emit a structured diagnostic record to the kernel's diagnostic log
     /// sink.
     ///
@@ -1481,6 +1509,14 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 let reply_len = decode_len(args.0[3])?;
                 self.handlers
                     .call_reply(caller, args.0[0], args.0[1], args.0[2], reply_len)
+            }
+            SyscallNumber::CALL_PEER_ORIGIN => {
+                // args[0] is the endpoint id; args[1] the in-service ticket;
+                // args[2] is a non-null origin-out `UserPtr` (dispatcher-
+                // checked); args[3] its capacity in bytes.
+                let origin_cap = decode_len(args.0[3])?;
+                self.handlers
+                    .call_peer_origin(caller, args.0[0], args.0[1], args.0[2], origin_cap)
             }
             SyscallNumber::LOG_EMIT => {
                 // args[0] is the non-null record `UserPtr` (dispatcher-
@@ -2208,6 +2244,21 @@ mod tests {
         ) -> SyscallResult {
             self.record("call_reply");
             Ok(0)
+        }
+
+        fn call_peer_origin(
+            &self,
+            _c: &CallerContext<'_>,
+            _endpoint: u64,
+            _ticket: u64,
+            _origin: u64,
+            origin_cap: usize,
+        ) -> SyscallResult {
+            self.record("call_peer_origin");
+            // Echo the buffer capacity so the reachability test can assert the
+            // dispatcher decoded the four arguments without wiring a real
+            // endpoint / in-service call here.
+            Ok(origin_cap as u64)
         }
 
         fn log_emit(&self, _c: &CallerContext<'_>, _record: u64, _len: usize) -> SyscallResult {

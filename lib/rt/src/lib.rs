@@ -235,6 +235,9 @@ const NUM_FS_MKDIR: u64 = SyscallNumber::FS_MKDIR.as_u16() as u64;
 const NUM_FS_UNLINK: u64 = SyscallNumber::FS_UNLINK.as_u16() as u64;
 const NUM_FS_RENAME: u64 = SyscallNumber::FS_RENAME.as_u16() as u64;
 
+/// `call_peer_origin` syscall number (as above).
+const NUM_CALL_PEER_ORIGIN: u64 = SyscallNumber::CALL_PEER_ORIGIN.as_u16() as u64;
+
 /// Marshal a 32-bit signed argument into its register value following the
 /// `abi-v1` `I32` convention (sign-extend through `i64`).
 #[inline]
@@ -1488,6 +1491,47 @@ pub fn call_reply(endpoint: u64, ticket: u64, reply: &[u8]) -> i64 {
         )
     };
     ret as i64
+}
+
+/// Read the kernel-attested [`rustos_abi::Origin`] of the caller whose
+/// in-service call this server is currently handling
+/// (`SyscallNumber::CALL_PEER_ORIGIN`; P-C).
+///
+/// `endpoint` is a call endpoint this task owns; `ticket` is the value a prior
+/// [`call_recv`] returned for a call still in service. On success the caller's
+/// attested origin wire image is copied into `out` and its byte length
+/// returned; decode it with [`rustos_abi::Origin::from_bytes`]. The origin is
+/// filled by the kernel from the posting task's own state, so a caller cannot
+/// forge it.
+///
+/// # Errors
+///
+/// Returns the raw negative kernel result (`-errno`): a buffer shorter than
+/// [`rustos_abi::ORIGIN_WIRE_LEN`] (`BufferTooSmall`), a missing receive
+/// capability or a foreign endpoint (`PermissionDenied`), or an unknown
+/// endpoint or a ticket not in service (`NotFound`). The wrapper hides no
+/// error.
+pub fn call_peer_origin(endpoint: u64, ticket: u64, out: &mut [u8]) -> Result<usize, i64> {
+    let out_ptr = out.as_mut_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
+    // `(ptr, len)` pair against the caller's address space before writing.
+    // `out` is a live exclusive `&mut [u8]` for the duration of the call.
+    #[allow(clippy::cast_possible_wrap)]
+    // The kernel guarantees the i64 count-result encoding (count ≥ 0, else -errno).
+    let ret = unsafe {
+        raw_syscall(
+            NUM_CALL_PEER_ORIGIN,
+            [endpoint, ticket, out_ptr, out.len() as u64, 0, 0],
+        )
+    } as i64;
+    if ret < 0 {
+        return Err(ret);
+    }
+    // Defence in depth: clamp the kernel's count to the buffer so a buggy
+    // count can never drive an out-of-bounds slice.
+    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_sign_loss)]
+    Ok((ret as usize).min(out.len()))
 }
 
 /// Create a kernel-owned, zeroed, cross-process shared-memory region and map
