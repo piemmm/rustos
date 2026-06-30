@@ -908,9 +908,8 @@ impl SyscallNumber {
     /// Arguments: `path: *const u8` (user pointer), `path_len: usize` (at
     /// most [`crate::FS_PATH_MAX`]). Returns `0`, or `-errno`. Resolution and
     /// the permission/mount-flag model match [`SyscallNumber::FS_OPEN`]; a
-    /// reserved legacy top-level name, a read-only mount, an existing target,
-    /// or a denied parent fails closed. Gated by
-    /// [`crate::CapabilityId::FS_ACCESS`].
+    /// read-only mount, an existing target, or a denied parent fails closed.
+    /// Gated by [`crate::CapabilityId::FS_ACCESS`].
     pub const FS_MKDIR: Self = Self(54);
     /// Remove a file or empty directory by absolute path
     /// (`PREREQUISITES.md` P-A).

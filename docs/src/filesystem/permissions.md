@@ -61,7 +61,9 @@ directory.
 ## Errors
 
 Permission failures return `VfsError::PermissionDenied`. A write blocked by
-a read-only mount returns `VfsError::ReadOnly`; a reserved top-level name
-returns `VfsError::ReservedPath`. `VfsError::to_errno` maps these to the
-stable user/kernel `Errno` at the syscall boundary (read-only and
-reserved-name refusals both surface as `PermissionDenied`).
+a read-only mount returns `VfsError::ReadOnly`. `VfsError::to_errno` maps
+these to the stable user/kernel `Errno` at the syscall boundary (both
+surface as `PermissionDenied`). Creating a top-level directory — including
+a legacy POSIX name the OS itself never authors — is governed by ordinary
+write permission on the root directory; the VFS reserves no error for the
+name itself (see the [layout page](./layout.md)).

@@ -20,7 +20,7 @@ use rustos_kernel_sec::{GroupId, UserId};
 
 use super::delegate::{DelegatedFs, DelegatedInfo};
 use super::mount::MountTable;
-use super::path::{is_reserved_top_level, Path, ROOT_TEMPLATE};
+use super::path::{Path, ROOT_TEMPLATE};
 use super::perm::{Access, Credentials, Metadata, Mode};
 use super::VfsError;
 
@@ -521,16 +521,6 @@ impl Vfs {
         if src_mount.path() != dst_mount.path() {
             return Err(VfsError::InvalidPath);
         }
-        // A rename must not be a back door to creating a reserved legacy
-        // POSIX top-level name on the writable root volume that a direct
-        // create/mkdir refuses.
-        if dst.depth() == 1 {
-            if let Some(name) = dst.file_name() {
-                if is_reserved_top_level(name) {
-                    return Err(VfsError::ReservedPath);
-                }
-            }
-        }
         let mount_depth = src_mount.path().depth();
         let mount_path = src_mount.path().clone();
         // A sub-mount roots its content at `backing_subtree` on the backing
@@ -572,23 +562,8 @@ impl Vfs {
         if mount.backing().is_none() {
             return Err(VfsError::NotFound);
         }
-        if require_writable {
-            // The reserved legacy POSIX top-level names are refused on a
-            // driver-backed mount exactly as on the in-RAM tree: with the
-            // writable root volume backing `/`, a delegated create/mkdir must
-            // not be able to lay down `/etc`, `/home`, … on the volume. The
-            // ban is a structural layout rule, not a permission, so it fails
-            // closed before any driver write.
-            if path.depth() == 1 {
-                if let Some(name) = path.file_name() {
-                    if is_reserved_top_level(name) {
-                        return Err(VfsError::ReservedPath);
-                    }
-                }
-            }
-            if mount.is_read_only() {
-                return Err(VfsError::ReadOnly);
-            }
+        if require_writable && mount.is_read_only() {
+            return Err(VfsError::ReadOnly);
         }
         let mount_depth = mount.path().depth();
         let mount_path = mount.path().clone();
@@ -624,8 +599,6 @@ impl Vfs {
     ///
     /// # Errors
     ///
-    /// * [`VfsError::ReservedPath`] if `path` is a reserved legacy POSIX
-    ///   top-level name.
     /// * [`VfsError::ReadOnly`] if the covering mount is read-only.
     /// * [`VfsError::PermissionDenied`] if the caller lacks write
     ///   permission on the parent directory.
@@ -783,13 +756,10 @@ impl Vfs {
     }
 
     /// Insert `child` at `path`, enforcing the shared create preconditions:
-    /// reserved-name refusal, read-only refusal, parent resolution, parent
-    /// write permission, and the no-clobber existence check.
+    /// read-only refusal, parent resolution, parent write permission, and the
+    /// no-clobber existence check.
     fn create(&mut self, cred: &Credentials<'_>, path: &Path, child: Node) -> Result<(), VfsError> {
         let name = path.file_name().ok_or(VfsError::InvalidPath)?.to_string();
-        if path.depth() == 1 && is_reserved_top_level(&name) {
-            return Err(VfsError::ReservedPath);
-        }
         let parent_path = path.parent().ok_or(VfsError::InvalidPath)?;
         // Creation mutates the parent directory, so the parent's covering
         // mount governs writability.

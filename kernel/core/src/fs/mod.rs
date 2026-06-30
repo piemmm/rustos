@@ -28,13 +28,14 @@
 //!
 //! # Layout enforcement
 //!
-//! * The VFS refuses to create any reserved legacy POSIX top-level name
-//!   ([`path::RESERVED_TOP_LEVEL`]) directly under the root, returning
-//!   [`VfsError::ReservedPath`].
 //! * [`Vfs::with_default_layout`] provides exactly the four top-level
 //!   directories the charter permits (`/System`, `/Users`, `/Apps`,
 //!   `/Storage`) and mounts `/System` read-only with its `/System/Logs`
-//!   and `/System/Settings` children as writable child mounts.
+//!   and `/System/Settings` children as writable child mounts. The OS
+//!   never authors the reserved legacy POSIX top-level names; refusing a
+//!   user's own request to create one is not the VFS's job — a top-level
+//!   create is governed by ordinary write permission on the root
+//!   directory like any other.
 //! * Writes to a read-only mount fail with [`VfsError::ReadOnly`].
 //!
 //! # Permission enforcement
@@ -59,10 +60,7 @@ pub use mounted::{
     FilesystemAlreadyInstalled, IdentityAlreadyInstalled, LateFilesystem, LateIdentity,
     MountedFilesystemService,
 };
-pub use path::{
-    is_reserved_top_level, Path, MAX_COMPONENT_LEN, MAX_PATH_COMPONENTS, RESERVED_TOP_LEVEL,
-    ROOT_TEMPLATE,
-};
+pub use path::{Path, MAX_COMPONENT_LEN, MAX_PATH_COMPONENTS, ROOT_TEMPLATE};
 pub use perm::{Access, AclEntry, AclWho, Credentials, Metadata, Mode};
 pub use service::{FilesystemService, NullFilesystemService, NULL_FILESYSTEM};
 pub use vfs::Vfs;
@@ -201,8 +199,6 @@ pub enum VfsError {
     /// The path is not absolute, has an empty/over-long component, or
     /// contains a `.`/`..`/NUL token.
     InvalidPath,
-    /// The path names a reserved legacy POSIX top-level directory.
-    ReservedPath,
     /// The named object does not exist.
     NotFound,
     /// A path component that must be a directory is not one.
@@ -231,7 +227,7 @@ impl VfsError {
     ///
     /// `abi-v1` has no dedicated code for `ENOTDIR`/`EISDIR`/`EEXIST`/
     /// `ENOTEMPTY`/`EINVAL`, so those collapse onto [`Errno::OutOfRange`];
-    /// the read-only and reserved-name refusals are reported as
+    /// the read-only refusal is reported as
     /// [`Errno::PermissionDenied`]. `abi-v1` likewise has no dedicated
     /// `EIO`, so [`Self::Io`] collapses onto [`Errno::NotImplemented`],
     /// mirroring how [`DriverError::DeviceFault`](rustos_abi::driver::DriverError)
@@ -241,7 +237,7 @@ impl VfsError {
     pub const fn to_errno(self) -> Errno {
         match self {
             Self::NotFound => Errno::NotFound,
-            Self::PermissionDenied | Self::ReadOnly | Self::ReservedPath => Errno::PermissionDenied,
+            Self::PermissionDenied | Self::ReadOnly => Errno::PermissionDenied,
             Self::InvalidPath
             | Self::NotADirectory
             | Self::IsADirectory
@@ -256,7 +252,6 @@ impl fmt::Display for VfsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
             Self::InvalidPath => "invalid path",
-            Self::ReservedPath => "reserved top-level name",
             Self::NotFound => "not found",
             Self::NotADirectory => "not a directory",
             Self::IsADirectory => "is a directory",
@@ -278,7 +273,6 @@ mod tests {
     fn errno_mapping_is_stable() {
         assert_eq!(VfsError::NotFound.to_errno(), Errno::NotFound);
         assert_eq!(VfsError::ReadOnly.to_errno(), Errno::PermissionDenied);
-        assert_eq!(VfsError::ReservedPath.to_errno(), Errno::PermissionDenied);
         assert_eq!(
             VfsError::PermissionDenied.to_errno(),
             Errno::PermissionDenied
@@ -292,7 +286,6 @@ mod tests {
     fn display_is_non_empty_for_every_variant() {
         for e in [
             VfsError::InvalidPath,
-            VfsError::ReservedPath,
             VfsError::NotFound,
             VfsError::NotADirectory,
             VfsError::IsADirectory,

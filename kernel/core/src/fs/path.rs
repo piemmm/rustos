@@ -1,14 +1,12 @@
-//! Absolute-path parsing and the reserved-name policy.
+//! Absolute-path parsing and the top-level layout names.
 //!
 //! A [`Path`] is an *absolute*, already-normalised sequence of name
 //! components. Parsing rejects relative paths, empty components, and the
 //! `.`/`..` traversal tokens outright: the VFS never resolves a path that
 //! could escape the tree, so there is no traversal logic to get wrong.
 //!
-//! The reserved-name policy is data, not control flow: [`RESERVED_TOP_LEVEL`]
-//! lists every legacy POSIX top-level directory the charter forbids,
-//! and [`ROOT_TEMPLATE`] lists the only four top-level directories the
-//! installer lays out. Both are consulted by the VFS in `super::vfs`.
+//! [`ROOT_TEMPLATE`] lists the only four top-level directories the OS lays
+//! out; it is data, not control flow.
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -27,26 +25,11 @@ pub const MAX_COMPONENT_LEN: usize = 255;
 /// here, not a per-call override.
 pub const MAX_PATH_COMPONENTS: usize = 64;
 
-/// Legacy POSIX top-level directory names that are **reserved and
-/// forbidden** as top-level directories.
-///
-/// The VFS refuses to create any of these directly under the root.
-pub const RESERVED_TOP_LEVEL: [&str; 18] = [
-    "etc", "home", "usr", "var", "proc", "sys", "lib", "lib64", "bin", "sbin", "opt", "root",
-    "tmp", "dev", "mnt", "media", "run", "boot",
-];
-
 /// The only four top-level directories RustOS has.
 ///
 /// The default root template ([`super::Vfs::with_default_layout`])
 /// provides exactly these and nothing else.
 pub const ROOT_TEMPLATE: [&str; 4] = ["System", "Users", "Apps", "Storage"];
-
-/// `true` if `name` is a reserved legacy POSIX top-level directory name.
-#[must_use]
-pub fn is_reserved_top_level(name: &str) -> bool {
-    RESERVED_TOP_LEVEL.contains(&name)
-}
 
 /// An absolute, normalised filesystem path.
 ///
@@ -241,15 +224,5 @@ mod tests {
         assert!(Path::root().is_prefix_of(&logs));
         assert!(!logs.is_prefix_of(&sys));
         assert!(!sys.is_prefix_of(&syslike));
-    }
-
-    #[test]
-    fn reserved_names_match_agents_md() {
-        for name in RESERVED_TOP_LEVEL {
-            assert!(is_reserved_top_level(name), "{name} must be reserved");
-        }
-        for name in ROOT_TEMPLATE {
-            assert!(!is_reserved_top_level(name), "{name} must be allowed");
-        }
     }
 }

@@ -28,7 +28,7 @@ The test files mirror `pjdfstest`'s operation groups:
 | `truncate.rs`     | `truncate`       | shrink, grow with zero-fill, `EISDIR`, `ENOENT`        |
 | `readdir_stat.rs` | `readdir`/`stat` | listing, `ENOTDIR`, reported kind and size            |
 | `permission.rs`   | §5.3 model       | owner vs. stranger, the capability gate, an ACL grant, directory search permission, write into a read-only directory |
-| `layout.rs`       | §16 layout       | the four top-level directories, reserved-name refusal, read-only `/System` with writable `Logs`/`Settings`, read-only-mount refusal |
+| `layout.rs`       | §16 layout       | the four top-level directories, a user may create a legacy POSIX name (no refusal), read-only `/System` with writable `Logs`/`Settings`, read-only-mount refusal |
 | `errno.rs`        | errno mapping    | the stable `Errno` each `VfsError` surfaces           |
 | `pathname.rs`     | namespace        | absolute-only paths; `.`/`..`, NUL, and over-long components refused |
 

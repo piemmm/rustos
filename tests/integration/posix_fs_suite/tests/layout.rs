@@ -1,14 +1,14 @@
 //! on-disk-layout enforcement: the four permitted
-//! top-level directories, the refusal of reserved legacy POSIX names, the
-//! read-only `/System` subtree with its writable `/System/Logs` and
-//! `/System/Settings` exceptions, and the read-only-mount refusal on
-//! a driver-backed volume.
+//! top-level directories, the read-only `/System` subtree with its writable
+//! `/System/Logs` and `/System/Settings` exceptions, and the
+//! read-only-mount refusal on a driver-backed volume.
 
 use rustos_test_posix_fs_suite::*;
 
-/// The reserved legacy POSIX top-level names the installer and VFS refuse. A representative subset is enough to assert the
-/// rule; the exhaustive list is unit-tested in `kernel/core`.
-const RESERVED: &[&str] = &[
+/// Legacy POSIX top-level names. The OS never authors these, but the VFS
+/// does not refuse a user's own request to create one; a representative
+/// subset is enough to assert that.
+const LEGACY_NAMES: &[&str] = &[
     "etc", "home", "usr", "var", "proc", "sys", "bin", "sbin", "dev", "tmp", "root", "boot",
 ];
 
@@ -24,28 +24,18 @@ fn default_layout_exposes_exactly_the_four_top_level_directories() {
 }
 
 #[test]
-fn reserved_top_level_names_are_refused() {
+fn legacy_top_level_names_are_not_refused_for_a_user() {
     let mut vfs = default_layout_vfs();
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
-    for name in RESERVED {
+    for name in LEGACY_NAMES {
         let target = path(&format!("/{name}"));
-        assert_eq!(
-            vfs.mkdir(&owner, &target, Mode::from_bits(0o755)),
-            Err(VfsError::ReservedPath),
-            "/{name} must be refused"
-        );
+        vfs.mkdir(&owner, &target, Mode::from_bits(0o755))
+            .unwrap_or_else(|e| panic!("a user may create /{name}, got {e:?}"));
     }
-}
 
-#[test]
-fn reserved_name_below_top_level_is_allowed() {
-    // The reservation is top-level only; `/Users/tmp` is a normal name.
-    let mut vfs = default_layout_vfs();
-    let caps = CapabilitySet::empty();
-    let owner = cred(ROOT_UID, ROOT_GID, &caps);
-
+    // The same names below the top level were never special either.
     vfs.mkdir(&owner, &path("/Users/tmp"), Mode::from_bits(0o755))
         .expect("/Users/tmp is permitted");
 }

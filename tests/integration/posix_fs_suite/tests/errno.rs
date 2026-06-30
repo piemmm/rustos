@@ -14,7 +14,6 @@ fn vfs_error_maps_to_the_documented_stable_errno() {
         Errno::PermissionDenied
     );
     assert_eq!(VfsError::ReadOnly.to_errno(), Errno::PermissionDenied);
-    assert_eq!(VfsError::ReservedPath.to_errno(), Errno::PermissionDenied);
     assert_eq!(VfsError::InvalidPath.to_errno(), Errno::OutOfRange);
     assert_eq!(VfsError::NotADirectory.to_errno(), Errno::OutOfRange);
     assert_eq!(VfsError::IsADirectory.to_errno(), Errno::OutOfRange);

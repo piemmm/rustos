@@ -1307,15 +1307,28 @@ defect.
 └── Storage/   # Mount points for removable / extra volumes.
 ```
 
-The following legacy POSIX names are **reserved and forbidden** as
-top-level directories: `/etc`, `/home`, `/usr`, `/var`, `/proc`, `/sys`,
-`/lib`, `/lib64`, `/bin`, `/sbin`, `/opt`, `/root`, `/tmp`, `/dev`,
-`/mnt`, `/media`, `/run`, `/boot`. The kernel filesystem layer refuses
-to create them; the installer refuses to lay them out; any driver or
-userland code that hard-codes one of these paths is a defect.
+The following legacy POSIX names are ones **the OS itself never creates**
+as top-level directories: `/etc`, `/home`, `/usr`, `/var`, `/proc`,
+`/sys`, `/lib`, `/lib64`, `/bin`, `/sbin`, `/opt`, `/root`, `/tmp`,
+`/dev`, `/mnt`, `/media`, `/run`, `/boot`. The OS lays out only the four
+directories above: the installer refuses to lay any legacy name out, the
+image builder authors only the four, and any driver or in-tree userland
+code that hard-codes or creates one of these paths is a defect.
 
-There is **no `/proc`** and **no `/sys`**. Live system information is
-exposed exclusively through the System Information API (§16.6).
+This is a rule the **OS** keeps to, not a structural ban the kernel
+imposes on userland. The kernel filesystem layer does **not** police a
+user's own request: a user who holds the authority to write to the root
+directory (its owner/mode/ACL, §5.3) may create a top-level entry of any
+name, legacy or not, exactly as any other directory — there is no
+separate capability for it and no error reserved for the name. Production
+`/` is owned by the system user with a restrictive mode, so an
+unprivileged user cannot create a top-level entry of *any* name; a
+privileged one may. The OS simply never authors the legacy names itself.
+
+There is **no OS-provided `/proc`** and **no `/sys`**: the OS does not
+create them and nothing in the system relies on them. Live system
+information is exposed exclusively through the System Information API
+(§16.6).
 
 ### 16.2 `/System`
 

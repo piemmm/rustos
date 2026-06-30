@@ -2190,22 +2190,22 @@ order (one fully-gated increment each):
   cards).
 - VFS layer in `kernel/core` (path resolution, mount table, permission
   enforcement via `kernel/sec`).
-- Enforcement of the on-disk layout defined in `AGENTS.md` §16: the VFS
-  refuses to create any of the reserved legacy POSIX top-level names
-  (`/etc`, `/home`, `/usr`, `/var`, `/proc`, `/sys`, `/lib`, `/lib64`,
-  `/bin`, `/sbin`, `/opt`, `/root`, `/tmp`, `/dev`, `/mnt`, `/media`,
-  `/run`, `/boot`), and the default root template provides only
-  `/System`, `/Users`, `/Apps`, `/Storage`.
+- Enforcement of the on-disk layout defined in `AGENTS.md` §16: the OS
+  never authors the legacy POSIX top-level names (`/etc`, `/home`, …) —
+  the default root template, the image builder, and the installer create
+  only `/System`, `/Users`, `/Apps`, `/Storage`. The VFS does not police
+  a user's own request to create such a name; a top-level create is
+  governed by ordinary write permission on `/`.
 
 **Tests**
 - POSIX FS test suite (`pjdfstest`-equivalent) run under QEMU.
 - ACL + capability gate tests: a user without `CAP_AUDIT_READ` cannot read
   a file marked as such, even with mode 0644.
 - Crash-consistency tests for `rustfs` journal.
-- Layout-enforcement tests: attempting to `mkdir /etc` (or any other
-  reserved name from `AGENTS.md` §16.1) at the root returns
-  `Error::ReservedPath`; `/System` is read-only at runtime except for
-  the two writable paths listed in §16.2.
+- Layout-enforcement tests: the default layout exposes exactly the four
+  top-level directories; a user with root write permission may `mkdir
+  /etc` (the VFS reserves no error for the name); `/System` is read-only
+  at runtime except for the two writable paths listed in §16.2.
 
 **Docs**
 - `docs/src/filesystem/{overview,rustfs,ext4,fat32,permissions,layout}.md`
@@ -2214,7 +2214,7 @@ order (one fully-gated increment each):
 **Status: complete.**
 - Arch-neutral **VFS** in `kernel/core/src/fs/` (`path`, `perm`, `mount`,
   `vfs`): absolute-path-only parsing rejecting relative/`.`/`..`/NUL/over-long
-  components, the §16.1 reserved-name list + four-entry root template; the §5.3
+  components, the §16.1 four-entry root template; the §5.3
   permission model (mode bits + ACL + per-inode capability gate) via one
   fail-closed `Metadata::authorize` (never branches on `uid == 0`);
   longest-prefix `MountTable` with read-only `/System` (writable `Logs`/
@@ -3343,6 +3343,17 @@ of how much code was produced.
 
 Amendments to `AGENTS.md` (the binding charter) are logged here so an agent
 can see *why* a rule exists without diffing the charter's history.
+
+- **2026-06-30 — Legacy POSIX names: the OS never authors them, the kernel
+  does not police the user.** Reworded §16.1: the ban is on the *OS* creating
+  the reserved legacy top-level names (installer/image-builder/in-tree code),
+  not a structural refusal the VFS imposes on userland. A user with write
+  authority on `/` may create `/etc` like any other directory; ordinary
+  owner/mode/ACL on the root governs it, with no new capability (§5.2) and no
+  reserved error. Removed the VFS `ReservedPath` refusal and the now-dead
+  `RESERVED_TOP_LEVEL`/`is_reserved_top_level`/`VfsError::ReservedPath` surface
+  (§2.14); OS-side non-authoring stays (mkimage authors only the four,
+  installer refuses per §11).
 
 - **2026-06-24 — No charter-section citations in code comments.** Scoped
   §2.11's "references" to external/cross-file pointers (specs, manuals, papers,

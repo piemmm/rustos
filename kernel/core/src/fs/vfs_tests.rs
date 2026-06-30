@@ -2,7 +2,6 @@
 //! read-only `/System`, and the permission and capability gates.
 
 use super::*;
-use crate::fs::path::RESERVED_TOP_LEVEL;
 use crate::fs::perm::Credentials;
 use rustos_abi::CapabilityId;
 use rustos_caps::CapabilitySet;
@@ -49,26 +48,23 @@ fn default_layout_system_writable_exceptions_exist() {
 }
 
 #[test]
-fn mkdir_reserved_top_level_name_is_refused() {
+fn mkdir_legacy_posix_top_level_name_is_allowed() {
+    // The OS never authors the legacy POSIX names, but the VFS does not
+    // police a user's own request: with write permission on the root a
+    // caller may create `/etc`, `/home`, … like any other directory. The
+    // refusal is a layout rule the OS keeps to, not a structural ban the
+    // kernel imposes on userland.
     let mut vfs = default_vfs();
     let caps = CapabilitySet::empty();
     let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
-    for name in RESERVED_TOP_LEVEL {
+    for name in ["etc", "home", "usr", "var", "proc", "tmp", "dev", "bin"] {
         let path = p(&alloc::format!("/{name}"));
-        assert_eq!(
-            vfs.mkdir(&admin, &path, Mode::from_bits(0o755)),
-            Err(VfsError::ReservedPath),
-            "/{name} must be refused"
+        assert!(
+            vfs.mkdir(&admin, &path, Mode::from_bits(0o755)).is_ok(),
+            "a user may create /{name}"
         );
     }
-}
-
-#[test]
-fn mkdir_reserved_name_below_top_level_is_allowed() {
-    // The reservation is *top-level only*: `/Users/tmp` is fine.
-    let mut vfs = default_vfs();
-    let caps = CapabilitySet::empty();
-    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    // The same names below the top level were never special, and remain fine.
     assert!(vfs
         .mkdir(&admin, &p("/Users/tmp"), Mode::from_bits(0o755))
         .is_ok());

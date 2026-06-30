@@ -589,49 +589,26 @@ fn root_backed_rw_vfs() -> Vfs {
 }
 
 #[test]
-fn delegated_create_of_reserved_top_level_name_is_refused() {
+fn delegated_create_of_legacy_top_level_name_is_allowed() {
     // With the writable root volume backing `/`, a delegated mkdir/create
-    // must still refuse the reserved legacy POSIX top-level names (§16.1) —
-    // the structural layout ban, not a permission, applied before any
-    // driver write.
+    // of a legacy POSIX top-level name is *not* refused by the VFS: the OS
+    // never authors these names, but it does not police a user's own
+    // request — a top-level create is governed by write permission on the
+    // root directory like any other. Rename is likewise not policed.
     let vfs = root_backed_rw_vfs();
     let caps = CapabilitySet::empty();
     let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
     let mut fs = RwMockFs::new();
 
-    for reserved in ["/etc", "/home", "/usr", "/bin", "/tmp", "/dev", "/proc"] {
-        assert_eq!(
-            vfs.mkdir_via(&admin, &p(reserved), &mut fs),
-            Err(VfsError::ReservedPath),
-            "delegated mkdir of {reserved} is refused"
-        );
-        assert_eq!(
-            vfs.create_via(&admin, &p(reserved), &mut fs),
-            Err(VfsError::ReservedPath),
-            "delegated create of {reserved} is refused"
-        );
+    for name in ["/etc", "/home", "/usr", "/bin", "/tmp", "/dev", "/proc"] {
+        vfs.mkdir_via(&admin, &p(name), &mut fs)
+            .unwrap_or_else(|e| panic!("delegated mkdir of {name} is allowed, got {e:?}"));
     }
 
-    // A non-reserved top-level directory is allowed (the four-name layout
-    // and mounted volumes are created this way).
-    vfs.mkdir_via(&admin, &p("/Workspace"), &mut fs)
-        .expect("a non-reserved top-level directory is allowed");
-}
-
-#[test]
-fn delegated_rename_into_reserved_top_level_name_is_refused() {
-    // Renaming an existing entry to a reserved top-level name must be
-    // refused too, so rename is not a back door around the create ban.
-    let vfs = root_backed_rw_vfs();
-    let caps = CapabilitySet::empty();
-    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
-    let mut fs = RwMockFs::new();
     vfs.mkdir_via(&admin, &p("/Scratch"), &mut fs)
         .expect("create a renameable source");
-    assert_eq!(
-        vfs.rename_via(&admin, &p("/Scratch"), &p("/etc"), &mut fs),
-        Err(VfsError::ReservedPath)
-    );
+    vfs.rename_via(&admin, &p("/Scratch"), &p("/var"), &mut fs)
+        .expect("delegated rename into a legacy top-level name is allowed");
 }
 
 // ---------------------------------------------------------------------

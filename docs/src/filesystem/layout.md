@@ -18,24 +18,33 @@ RustOS has **exactly four** top-level directories:
 `Vfs::with_default_layout` provides exactly these and, beneath `/System`,
 the two writable exceptions `Logs` and `Settings` (see below).
 
-## Reserved legacy names
+## Legacy POSIX names: the OS never authors them
 
-The following legacy POSIX names are **reserved and forbidden** as
-top-level directories:
+The legacy POSIX top-level names —
 
 ```
 etc  home  usr  var  proc  sys  lib  lib64  bin
 sbin opt   root tmp  dev   mnt  media run    boot
 ```
 
-`Vfs::mkdir` (and `create_file`) refuse to create any of them directly
-under the root, returning `VfsError::ReservedPath`. The same refusal
-applies on the **driver-backed** create/mkdir/rename path, so once the
-writable root volume backs `/` (see below) a delegated operation cannot
-lay a reserved name onto the volume either — the ban is a structural
-layout rule, not a permission, enforced before any driver write. The
-reservation is **top-level only**: `/Users/tmp` is fine; `/tmp` is not.
-There is no `/proc` and no `/sys`; live system information is exposed
+— are names the **OS itself never creates**. `Vfs::with_default_layout`
+lays out exactly the four permitted directories and nothing else, the
+image builder authors only those four (`tools/mkimage`), and the
+installer refuses to lay any legacy name out (`AGENTS.md` §11). No
+in-tree component hard-codes one of these paths.
+
+This is a rule the OS keeps to, **not** a structural ban the kernel
+imposes on userland. The VFS does **not** police a user's own request:
+with write permission on the root directory a caller may `mkdir /etc`
+like any other directory — ordinary owner/mode/ACL permission on `/`
+governs it, exactly as for a non-legacy name, with no separate
+capability and no `VfsError` reserved for the name. Because production
+`/` is owned by the system user with a restrictive mode, an unprivileged
+user cannot create a top-level entry of *any* name; a privileged one
+may.
+
+There is no OS-provided `/proc` and no `/sys`: the OS does not create
+them and nothing relies on them. Live system information is exposed
 exclusively through the System Information API (`AGENTS.md` §16.6,
 Stage 6).
 
