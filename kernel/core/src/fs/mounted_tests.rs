@@ -359,3 +359,80 @@ fn sync_flushes_the_mounted_volume() {
     let caps = caps();
     assert_eq!(svc.sync(TEST_UID, &caps), Ok(()));
 }
+
+#[test]
+fn rename_moves_a_file_under_the_attested_identity() {
+    let svc = ready();
+    let caps = caps();
+    let src = path("a");
+    let dst = path("b");
+    svc.open(
+        TEST_UID,
+        &caps,
+        &src,
+        OpenFlags::CREATE.union(OpenFlags::WRITE),
+    )
+    .expect("create");
+    svc.write(TEST_UID, &caps, &src, 0, false, b"hi")
+        .expect("write");
+    svc.rename(TEST_UID, &caps, &src, &dst).expect("rename");
+    let mut buf = [0u8; 2];
+    assert_eq!(
+        svc.read(TEST_UID, &caps, &src, 0, &mut buf),
+        Err(Errno::NotFound)
+    );
+    assert_eq!(svc.read(TEST_UID, &caps, &dst, 0, &mut buf), Ok(2));
+    assert_eq!(&buf, b"hi");
+}
+
+#[test]
+fn rename_of_a_missing_source_fails_closed() {
+    let svc = ready();
+    let caps = caps();
+    assert_eq!(
+        svc.rename(TEST_UID, &caps, &path("nope"), &path("x")),
+        Err(Errno::NotFound)
+    );
+}
+
+#[test]
+fn rename_on_a_read_only_mount_fails_closed() {
+    // `ReadOnly` collapses onto `PermissionDenied` at the ABI boundary.
+    let svc = service(true, true, true);
+    let caps = caps();
+    assert_eq!(
+        svc.rename(TEST_UID, &caps, &path("a"), &path("b")),
+        Err(Errno::PermissionDenied)
+    );
+}
+
+#[test]
+fn rename_before_a_mount_is_installed_fails_closed() {
+    let svc = service(false, true, false);
+    let caps = caps();
+    assert_eq!(
+        svc.rename(TEST_UID, &caps, &path("a"), &path("b")),
+        Err(Errno::NotImplemented)
+    );
+}
+
+#[test]
+fn rename_to_a_path_outside_the_mounted_volume_fails_closed() {
+    // The destination resolves to a different, backing-less mount, so the
+    // move never escapes the volume; it fails closed rather than fabricating
+    // a cross-device move.
+    let svc = ready();
+    let caps = caps();
+    let src = path("a");
+    svc.open(
+        TEST_UID,
+        &caps,
+        &src,
+        OpenFlags::CREATE.union(OpenFlags::WRITE),
+    )
+    .expect("create");
+    assert_eq!(
+        svc.rename(TEST_UID, &caps, &src, "/Apps/b"),
+        Err(Errno::NotFound)
+    );
+}

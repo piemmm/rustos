@@ -1525,6 +1525,39 @@ impl<B: Block> Fat32<B> {
             return Err(DriverError::Busy);
         }
 
+        let is_dir = matches!(kind, NodeKind::Directory);
+        let child_cluster = if is_dir {
+            let fresh = self.alloc_cluster(true)?;
+            self.init_dir_cluster(fresh, dir_cluster)?;
+            fresh
+        } else {
+            0
+        };
+        let attr = if is_dir { ATTR_DIRECTORY } else { 0x20 };
+        if let Err(e) = self.write_dir_entry(dir_cluster, name, attr, child_cluster, 0) {
+            // Reclaim the directory cluster if naming the entry failed, so a
+            // rejected create leaves no orphaned chain behind.
+            if is_dir && child_cluster >= 2 {
+                let _ = self.free_chain(child_cluster);
+            }
+            return Err(e);
+        }
+        Ok(pack_node(child_cluster, is_dir, 0))
+    }
+
+    /// Encode `name` as a run of directory slots — the long-name fragments
+    /// followed by the 8.3 short entry pointing at `cluster`/`size` with
+    /// attribute `attr` — in a free run of `dir_cluster`. Shared by
+    /// [`Self::create_child`] and [`Self::rename_child`] so the long-name
+    /// encoding lives in one place.
+    fn write_dir_entry(
+        &mut self,
+        dir_cluster: u32,
+        name: &[u8],
+        attr: u8,
+        cluster: u32,
+        size: u32,
+    ) -> Result<(), DriverError> {
         let mut units = [0u16; MAX_LONG_NAME_UNITS];
         let unit_count = encode_utf16le(name, &mut units).ok_or(DriverError::LengthOutOfRange)?;
         if unit_count == 0 {
@@ -1540,15 +1573,6 @@ impl<B: Block> Fat32<B> {
         let total_slots = frag_count as u64 + 1;
         let (start_slot, at_end) = self.find_free_slots(dir_cluster, total_slots)?;
 
-        let is_dir = matches!(kind, NodeKind::Directory);
-        let child_cluster = if is_dir {
-            let fresh = self.alloc_cluster(true)?;
-            self.init_dir_cluster(fresh, dir_cluster)?;
-            fresh
-        } else {
-            0
-        };
-
         // Physical order: the highest sequence (flagged last-logical) is
         // written first, descending to sequence 1, then the short entry.
         for phys in 0..frag_count {
@@ -1556,8 +1580,7 @@ impl<B: Block> Fat32<B> {
             let entry = Self::build_lfn_entry(&units[..unit_count], seq, phys == 0, checksum);
             self.write_slot(dir_cluster, start_slot + phys as u64, &entry)?;
         }
-        let attr = if is_dir { ATTR_DIRECTORY } else { 0x20 };
-        let short_entry = Self::build_short_entry(&short, attr, child_cluster, 0);
+        let short_entry = Self::build_short_entry(&short, attr, cluster, size);
         self.write_slot(dir_cluster, start_slot + frag_count as u64, &short_entry)?;
 
         if at_end {
@@ -1565,7 +1588,7 @@ impl<B: Block> Fat32<B> {
             self.write_slot(dir_cluster, start_slot + total_slots, &terminator)?;
         }
 
-        Ok(pack_node(child_cluster, is_dir, 0))
+        Ok(())
     }
 
     /// Shared implementation of [`FilesystemWrite::write_at`].
@@ -1678,10 +1701,155 @@ impl<B: Block> Fat32<B> {
         if entry.cluster >= 2 {
             self.free_chain(entry.cluster)?;
         }
-        for i in 0..entry.slot_span {
-            if let Some(offset) = self.dir_slot_offset(dir_cluster, entry.first_slot + i)? {
+        self.delete_entry_slots(dir_cluster, entry.first_slot, entry.slot_span)
+    }
+
+    /// Mark the `slot_span` physical slots starting at `first_slot` in
+    /// `dir_cluster` as deleted (the long-name fragments plus the short
+    /// entry of one logical entry). Shared by [`Self::remove_child`] and
+    /// [`Self::rename_child`].
+    fn delete_entry_slots(
+        &mut self,
+        dir_cluster: u32,
+        first_slot: u64,
+        slot_span: u64,
+    ) -> Result<(), DriverError> {
+        for i in 0..slot_span {
+            if let Some(offset) = self.dir_slot_offset(dir_cluster, first_slot + i)? {
                 self.write_bytes(offset, &[DELETED_ENTRY])?;
             }
+        }
+        Ok(())
+    }
+
+    /// The cluster of `dir_cluster`'s parent, read from its `..` entry
+    /// (which stores `0` for the root). Returns the real root cluster in
+    /// that case so the walk in [`Self::is_subdir_of`] terminates.
+    fn dir_parent_cluster(&mut self, dir_cluster: u32) -> Result<u32, DriverError> {
+        let mut raw = [0u8; DIR_ENTRY_LEN];
+        self.read_bytes(
+            self.cluster_byte(dir_cluster) + DIR_ENTRY_LEN as u64,
+            &mut raw,
+        )?;
+        let cl = (u32::from(le16(&raw, 20)) << 16) | u32::from(le16(&raw, 26));
+        Ok(if cl == 0 {
+            self.layout.root_cluster
+        } else {
+            cl
+        })
+    }
+
+    /// Whether directory `candidate` is `ancestor` itself or lives anywhere
+    /// beneath it, walking `..` links up to the root. Refuses moving a
+    /// directory into its own subtree (which would detach the cycle).
+    fn is_subdir_of(&mut self, mut candidate: u32, ancestor: u32) -> Result<bool, DriverError> {
+        loop {
+            if candidate == ancestor {
+                return Ok(true);
+            }
+            if candidate == self.layout.root_cluster || candidate < 2 {
+                return Ok(false);
+            }
+            let parent = self.dir_parent_cluster(candidate)?;
+            if parent == candidate {
+                return Ok(false);
+            }
+            candidate = parent;
+        }
+    }
+
+    /// Shared implementation of [`FilesystemWrite::rename`].
+    ///
+    /// FAT has no inode and no journal: the move re-encodes the source's
+    /// long-name + short entry under the destination name (preserving its
+    /// first cluster, size, and attribute byte verbatim), then deletes the
+    /// source entry, so the file's data clusters are never touched. Across
+    /// directories a moved directory's `..` is repointed at the new parent.
+    /// Replacement of an existing destination is therefore best-effort
+    /// rather than atomic, matching the non-transactional create/remove
+    /// paths the on-disk format allows.
+    fn rename_child(
+        &mut self,
+        src_dir: NodeId,
+        src_name: &[u8],
+        dst_dir: NodeId,
+        dst_name: &[u8],
+    ) -> Result<(), DriverError> {
+        if !node_is_dir(src_dir) || !node_is_dir(dst_dir) {
+            return Err(DriverError::Unsupported);
+        }
+        if dst_name.is_empty() || dst_name.len() > MAX_NAME_BYTES {
+            return Err(DriverError::LengthOutOfRange);
+        }
+        if dst_name == b"." || dst_name == b".." {
+            return Err(DriverError::Unsupported);
+        }
+        let src_cluster = node_cluster(src_dir);
+        let dst_cluster = node_cluster(dst_dir);
+        let src_entry = self
+            .find_child(src_cluster, src_name)?
+            .ok_or(DriverError::NotFound)?;
+        let moving_dir = src_entry.is_dir;
+
+        // Preserve the source's attribute byte (read-only/hidden/system/
+        // archive/directory) verbatim across the move.
+        let mut attr_buf = [0u8; 1];
+        self.read_bytes(src_entry.short_offset + 11, &mut attr_buf)?;
+        let attr = attr_buf[0];
+
+        let dst_existing = self.find_child(dst_cluster, dst_name)?;
+        if let Some(d) = &dst_existing {
+            if d.short_offset == src_entry.short_offset {
+                // Source and destination resolve to the same entry already.
+                return Ok(());
+            }
+        }
+
+        // Refuse moving a directory into itself or its own subtree.
+        if moving_dir && self.is_subdir_of(dst_cluster, src_entry.cluster)? {
+            return Err(DriverError::Busy);
+        }
+
+        // Replace an existing destination, subject to kind compatibility.
+        if let Some(d) = dst_existing {
+            if d.is_dir != moving_dir {
+                return Err(DriverError::Unsupported);
+            }
+            if d.is_dir {
+                let mut cur = DirCursor {
+                    cluster: d.cluster,
+                    intra: 0,
+                    slot: 0,
+                };
+                if self.next_entry(&mut cur)?.is_some() {
+                    return Err(DriverError::Busy);
+                }
+            }
+            if d.cluster >= 2 {
+                self.free_chain(d.cluster)?;
+            }
+            self.delete_entry_slots(dst_cluster, d.first_slot, d.slot_span)?;
+        }
+
+        // Link the moved node under its new name, then unlink the source.
+        self.write_dir_entry(
+            dst_cluster,
+            dst_name,
+            attr,
+            src_entry.cluster,
+            src_entry.size,
+        )?;
+        self.delete_entry_slots(src_cluster, src_entry.first_slot, src_entry.slot_span)?;
+
+        // Repoint the moved directory's `..` at its new parent cluster.
+        if moving_dir && src_cluster != dst_cluster && src_entry.cluster >= 2 {
+            let parent_field = if dst_cluster == self.layout.root_cluster {
+                0
+            } else {
+                dst_cluster
+            };
+            let dotdot_offset = self.cluster_byte(src_entry.cluster) + DIR_ENTRY_LEN as u64;
+            self.set_entry_meta(dotdot_offset, parent_field, 0)?;
         }
         Ok(())
     }
@@ -1837,6 +2005,16 @@ impl<B: Block> FilesystemWrite for Fat32<B> {
 
     fn remove(&mut self, dir: NodeId, name: &[u8]) -> Result<(), DriverError> {
         self.remove_child(dir, name)
+    }
+
+    fn rename(
+        &mut self,
+        src_dir: NodeId,
+        src_name: &[u8],
+        dst_dir: NodeId,
+        dst_name: &[u8],
+    ) -> Result<(), DriverError> {
+        self.rename_child(src_dir, src_name, dst_dir, dst_name)
     }
 
     fn flush(&mut self) -> Result<(), DriverError> {

@@ -3423,6 +3423,26 @@ where
             .unlink(uid, caller.caps.effective(), &path)?;
         Ok(0)
     }
+
+    fn fs_rename(
+        &self,
+        caller: &CallerContext<'_>,
+        src: u64,
+        src_len: usize,
+        dst: u64,
+        dst_len: usize,
+    ) -> SyscallResult {
+        // The dispatcher already checked `CAP_FS_ACCESS` and that both `src`
+        // and `dst` are non-null `UserPtr`s. Both paths are copied in and
+        // validated; resolution and the permission/mount-flag model are the
+        // secured VFS's, under the caller's attested identity.
+        let src = self.copy_path_in(caller, src, src_len)?;
+        let dst = self.copy_path_in(caller, dst, dst_len)?;
+        let uid = caller.caps.owner().0;
+        self.filesystem
+            .rename(uid, caller.caps.effective(), &src, &dst)?;
+        Ok(0)
+    }
 }
 
 /// The [`SpawnCtx`] the `spawn` syscall handler hands its architecture
@@ -12248,6 +12268,17 @@ mod tests {
             path: &str,
         ) -> Result<(), Errno> {
             self.record(alloc::format!("unlink uid={uid} path={path}"));
+            Ok(())
+        }
+
+        fn rename(
+            &self,
+            uid: u32,
+            _caps: &dyn rustos_abi::CapabilityQuery,
+            src: &str,
+            dst: &str,
+        ) -> Result<(), Errno> {
+            self.record(alloc::format!("rename uid={uid} src={src} dst={dst}"));
             Ok(())
         }
     }

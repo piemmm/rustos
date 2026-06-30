@@ -94,6 +94,35 @@ impl RwMockFs {
         }
         Ok(None)
     }
+
+    /// Remove whatever entry in directory `dir_idx` maps to `child_idx`.
+    fn unlink_index(&mut self, dir_idx: usize, child_idx: usize) {
+        if let RwNode::Dir(children) = &mut self.nodes[dir_idx] {
+            let key = children
+                .iter()
+                .find(|(_, &v)| v == child_idx)
+                .map(|(k, _)| k.clone());
+            if let Some(key) = key {
+                children.remove(&key);
+            }
+        }
+    }
+
+    /// Whether `target_idx` is `root_idx` or anywhere within its subtree,
+    /// used to refuse moving a directory into its own descendants.
+    fn is_in_subtree(&self, root_idx: usize, target_idx: usize) -> bool {
+        if root_idx == target_idx {
+            return true;
+        }
+        if let Some(RwNode::Dir(children)) = self.nodes.get(root_idx) {
+            for &child in children.values() {
+                if self.is_in_subtree(child, target_idx) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
 }
 
 impl FilesystemRead for RwMockFs {
@@ -236,14 +265,56 @@ impl FilesystemWrite for RwMockFs {
             }
         }
         let dir_idx = Self::index(dir)?;
-        if let RwNode::Dir(children) = &mut self.nodes[dir_idx] {
-            let key = children
-                .iter()
-                .find(|(_, &v)| v == child)
-                .map(|(k, _)| k.clone());
-            if let Some(key) = key {
-                children.remove(&key);
+        self.unlink_index(dir_idx, child);
+        Ok(())
+    }
+
+    fn rename(
+        &mut self,
+        src_dir: NodeId,
+        src_name: &[u8],
+        dst_dir: NodeId,
+        dst_name: &[u8],
+    ) -> Result<(), DriverError> {
+        let src_idx = self
+            .child_index(src_dir, src_name)?
+            .ok_or(DriverError::NotFound)?;
+        let dst_dir_idx = Self::index(dst_dir)?;
+        if !matches!(self.nodes.get(dst_dir_idx), Some(RwNode::Dir(_))) {
+            return Err(DriverError::Unsupported);
+        }
+        let dst_key = core::str::from_utf8(dst_name)
+            .map_err(|_| DriverError::LengthOutOfRange)?
+            .to_string();
+        let moving_dir = matches!(self.nodes[src_idx], RwNode::Dir(_));
+
+        // Refuse moving a directory into itself or its own subtree.
+        if moving_dir && self.is_in_subtree(src_idx, dst_dir_idx) {
+            return Err(DriverError::Busy);
+        }
+
+        // Replace an existing destination of a compatible kind.
+        if let Some(dst_idx) = self.child_index(dst_dir, dst_name)? {
+            if dst_idx == src_idx {
+                return Ok(());
             }
+            let dst_is_dir = matches!(self.nodes[dst_idx], RwNode::Dir(_));
+            if dst_is_dir != moving_dir {
+                return Err(DriverError::Unsupported);
+            }
+            if let RwNode::Dir(children) = &self.nodes[dst_idx] {
+                if !children.is_empty() {
+                    return Err(DriverError::Busy);
+                }
+            }
+            self.unlink_index(dst_dir_idx, dst_idx);
+        }
+
+        // Detach the source name and attach the node under the new name.
+        let src_dir_idx = Self::index(src_dir)?;
+        self.unlink_index(src_dir_idx, src_idx);
+        if let RwNode::Dir(children) = &mut self.nodes[dst_dir_idx] {
+            children.insert(dst_key, src_idx);
         }
         Ok(())
     }

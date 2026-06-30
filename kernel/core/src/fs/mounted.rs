@@ -448,6 +448,33 @@ where
             vfs.remove_via_secured(cred, path, fs)
         })
     }
+
+    fn rename(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        src: &str,
+        dst: &str,
+    ) -> Result<(), Errno> {
+        // Rename names two paths, so it resolves both under one lock rather
+        // than through the single-path `with_secured`. Identity is attested
+        // exactly as elsewhere; both paths must lie under the same mount.
+        let mount = self.mount.mount()?;
+        let record = self.identity.resolve(uid)?;
+        let src = Path::parse(src).map_err(VfsError::to_errno)?;
+        let dst = Path::parse(dst).map_err(VfsError::to_errno)?;
+        let cred = Credentials {
+            uid: UserId(uid),
+            gid: record.primary_gid,
+            supplementary_gids: &record.supplementary_gids,
+            caps,
+        };
+        let mut fs = mount.fs.lock();
+        mount
+            .vfs
+            .rename_via_secured(&cred, &src, &dst, &mut *fs)
+            .map_err(VfsError::to_errno)
+    }
 }
 
 /// Reconstruct the absolute path string of `path` for building a child path.

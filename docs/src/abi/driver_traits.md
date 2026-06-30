@@ -334,6 +334,7 @@ The mutating surface is a second separate versioned trait,
 | `write_at(dir, name, offset, data)`   | Driver handle (writable mount).   |
 | `truncate(dir, name, size)`           | Driver handle (writable mount).   |
 | `remove(dir, name)`                   | Driver handle (writable mount).   |
+| `rename(src_dir, src_name, dst_dir, dst_name)` | Driver handle (writable mount). |
 | `flush()`                             | Driver handle.                    |
 
 Unlike the read surface, the mutating methods address their target as a

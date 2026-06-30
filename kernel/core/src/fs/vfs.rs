@@ -455,6 +455,84 @@ impl Vfs {
         DelegatedFs::new_secured(fs, template).remove(cred, &remainder)
     }
 
+    /// Move `src` to `dst` under a driver-backed mount, delegating to `fs`.
+    ///
+    /// Both paths must lie under the *same* writable driver-backed mount
+    /// (rename never crosses mounts); see [`Vfs::create_via`] for the
+    /// resolution and permission model.
+    ///
+    /// # Errors
+    ///
+    /// * [`VfsError::NotFound`] if no driver-backed mount covers a path.
+    /// * [`VfsError::ReadOnly`] if the covering mount is read-only.
+    /// * [`VfsError::InvalidPath`] if `src` and `dst` are on different
+    ///   mounts.
+    /// * [`VfsError::NotEmpty`], [`VfsError::PermissionDenied`],
+    ///   [`VfsError::NotADirectory`], or [`VfsError::Io`].
+    pub fn rename_via<F: FilesystemRead + FilesystemWrite + ?Sized>(
+        &self,
+        cred: &Credentials<'_>,
+        src: &Path,
+        dst: &Path,
+        fs: &mut F,
+    ) -> Result<(), VfsError> {
+        let (template, src_rem, dst_rem) = self.delegate_rename_context(cred, src, dst)?;
+        DelegatedFs::new(fs, template).rename(cred, &src_rem, &dst_rem)
+    }
+
+    /// Per-inode counterpart of [`Vfs::rename_via`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Vfs::rename_via`].
+    pub fn rename_via_secured<F: FilesystemRead + FilesystemSecurity + FilesystemWrite + ?Sized>(
+        &self,
+        cred: &Credentials<'_>,
+        src: &Path,
+        dst: &Path,
+        fs: &mut F,
+    ) -> Result<(), VfsError> {
+        let (template, src_rem, dst_rem) = self.delegate_rename_context(cred, src, dst)?;
+        DelegatedFs::new_secured(fs, template).rename(cred, &src_rem, &dst_rem)
+    }
+
+    /// Resolve the driver-backed mount covering *both* `src` and `dst` for a
+    /// rename, returning the permission template and the components of each
+    /// path below the shared mount point.
+    ///
+    /// Both paths must be covered by the same writable driver-backed mount;
+    /// a rename that would cross mounts is refused with
+    /// [`VfsError::InvalidPath`] (it cannot preserve the node's identity
+    /// across two independent backings).
+    fn delegate_rename_context(
+        &self,
+        cred: &Credentials<'_>,
+        src: &Path,
+        dst: &Path,
+    ) -> Result<(Metadata, Vec<String>, Vec<String>), VfsError> {
+        let src_mount = self.mounts.resolve(src);
+        let dst_mount = self.mounts.resolve(dst);
+        if src_mount.backing().is_none() || dst_mount.backing().is_none() {
+            return Err(VfsError::NotFound);
+        }
+        if src_mount.is_read_only() || dst_mount.is_read_only() {
+            return Err(VfsError::ReadOnly);
+        }
+        if src_mount.path() != dst_mount.path() {
+            return Err(VfsError::InvalidPath);
+        }
+        let mount_depth = src_mount.path().depth();
+        let mount_path = src_mount.path().clone();
+        let node = self.resolve(cred, &mount_path)?;
+        let NodeKind::Directory(_) = &node.kind else {
+            return Err(VfsError::NotADirectory);
+        };
+        let template = node.meta.clone();
+        let src_rem = src.components()[mount_depth..].to_vec();
+        let dst_rem = dst.components()[mount_depth..].to_vec();
+        Ok((template, src_rem, dst_rem))
+    }
+
     /// Resolve the driver-backed mount covering `path`, returning the
     /// permission template to apply to delegated nodes and the path
     /// components below the mount point.

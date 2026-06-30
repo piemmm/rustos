@@ -939,6 +939,21 @@ impl SyscallNumber {
     /// so a later allocation cannot recover the buffer's bytes. Gated by
     /// [`crate::CapabilityId::MEM_DMA`].
     pub const DMA_FREE: Self = Self(56);
+    /// Move a file or directory from one absolute path to another
+    /// (`PREREQUISITES.md` P-A rename follow-up).
+    ///
+    /// Arguments: `src: *const u8`, `src_len: usize`, `dst: *const u8`,
+    /// `dst_len: usize` (each length at most [`crate::FS_PATH_MAX`]).
+    /// Returns `0`, or `-errno`. Both paths must resolve under the same
+    /// mounted volume; the moved node keeps its identity and contents.
+    /// Resolution and the permission/mount-flag model match
+    /// [`SyscallNumber::FS_OPEN`]: search + write on both parent
+    /// directories (and write on a directory moved to a new parent) are
+    /// required, and a missing source, a non-empty directory destination, a
+    /// directory-into-its-own-subtree move, a read-only mount, a
+    /// cross-mount move, or a denied parent fails closed. Gated by
+    /// [`crate::CapabilityId::FS_ACCESS`].
+    pub const FS_RENAME: Self = Self(57);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
@@ -1071,6 +1086,7 @@ mod tests {
         assert_eq!(SyscallNumber::FS_MKDIR.as_u16(), 54);
         assert_eq!(SyscallNumber::FS_UNLINK.as_u16(), 55);
         assert_eq!(SyscallNumber::DMA_FREE.as_u16(), 56);
+        assert_eq!(SyscallNumber::FS_RENAME.as_u16(), 57);
     }
 
     #[test]

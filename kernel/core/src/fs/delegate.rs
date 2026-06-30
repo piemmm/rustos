@@ -69,6 +69,20 @@ const fn map_driver_error(error: DriverError) -> VfsError {
     }
 }
 
+/// Maps a [`DriverError`] from a rename onto the VFS error type.
+///
+/// Rename adds [`DriverError::Busy`] to the errors the write surface can
+/// report: the driver returns it for a non-empty directory destination and
+/// for a refused directory-into-its-own-subtree move. Both are reported as
+/// [`VfsError::NotEmpty`] (the closest structural refusal); every other
+/// error maps as for any write ([`map_driver_error`]).
+const fn map_rename_error(error: DriverError) -> VfsError {
+    match error {
+        DriverError::Busy => VfsError::NotEmpty,
+        other => map_driver_error(other),
+    }
+}
+
 /// A filesystem driver bound to its mount point, exposing VFS-shaped
 /// resolution over the delegated subtree under a [`MetaPolicy`] `P`.
 ///
@@ -400,6 +414,54 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
             }
         }
         self.fs.remove(parent, name).map_err(map_driver_error)
+    }
+
+    /// Move the leaf at `src_components` to `dst_components` within the same
+    /// delegated mount, preserving the node's identity and contents.
+    ///
+    /// Authorises search + write on both the source and destination parent
+    /// directories; when a directory is moved to a *different* parent its
+    /// `..` link is rewritten, so write permission on the moved directory
+    /// itself is additionally required (POSIX). The structural move — the
+    /// existence, kind-compatibility, empty-target, and
+    /// directory-into-its-own-subtree checks — is performed by the driver.
+    ///
+    /// # Errors
+    ///
+    /// * [`VfsError::InvalidPath`] if either path is empty (names the mount
+    ///   point itself).
+    /// * [`VfsError::NotFound`] if the source does not exist.
+    /// * [`VfsError::NotEmpty`] if the destination is a non-empty directory,
+    ///   or the move would place a directory inside its own subtree.
+    /// * [`VfsError::NotADirectory`] on a kind-incompatible replacement.
+    /// * [`VfsError::PermissionDenied`], or [`VfsError::Io`].
+    pub fn rename(
+        &mut self,
+        cred: &Credentials<'_>,
+        src_components: &[String],
+        dst_components: &[String],
+    ) -> Result<(), VfsError> {
+        let src_parent = self.parent_for_write(cred, src_components)?;
+        let dst_parent = self.parent_for_write(cred, dst_components)?;
+        let src_name = src_components[src_components.len() - 1].as_bytes();
+        let dst_name = dst_components[dst_components.len() - 1].as_bytes();
+
+        // A directory moved to a different parent has its `..` rewritten, so
+        // write permission on the directory itself is required as well.
+        let src_node = self
+            .fs
+            .lookup(src_parent, src_name)
+            .map_err(map_driver_error)?;
+        if src_parent != dst_parent
+            && self.fs.node_info(src_node).map_err(map_driver_error)?.kind == NodeKind::Directory
+        {
+            let meta = P::metadata(self.fs, src_node, &self.template)?;
+            meta.authorize(cred, Access::Write)?;
+        }
+
+        self.fs
+            .rename(src_parent, src_name, dst_parent, dst_name)
+            .map_err(map_rename_error)
     }
 }
 

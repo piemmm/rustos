@@ -1334,6 +1334,24 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // relative to the data it moves — so the record cannot drown the log.
         audit: true,
     },
+    SyscallSpec {
+        number: SyscallNumber::FS_RENAME,
+        name: "fs_rename",
+        arg_count: 4,
+        args: [
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        required_capability: Some(CapabilityId::FS_ACCESS),
+        // Moves a name (and may replace a destination); audited like the
+        // other mutating filesystem calls.
+        audit: true,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in
@@ -1667,6 +1685,7 @@ mod tests {
             SyscallNumber::FS_SYNC,
             SyscallNumber::FS_MKDIR,
             SyscallNumber::FS_UNLINK,
+            SyscallNumber::FS_RENAME,
         ] {
             assert_eq!(
                 spec_for(n).unwrap().required_capability,
@@ -1681,6 +1700,7 @@ mod tests {
             SyscallNumber::FS_TRUNCATE,
             SyscallNumber::FS_MKDIR,
             SyscallNumber::FS_UNLINK,
+            SyscallNumber::FS_RENAME,
         ] {
             assert!(
                 spec_for(n).unwrap().audit,

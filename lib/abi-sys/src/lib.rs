@@ -117,6 +117,7 @@ const NUM_FS_TRUNCATE: u64 = SyscallNumber::FS_TRUNCATE.as_u16() as u64;
 const NUM_FS_SYNC: u64 = SyscallNumber::FS_SYNC.as_u16() as u64;
 const NUM_FS_MKDIR: u64 = SyscallNumber::FS_MKDIR.as_u16() as u64;
 const NUM_FS_UNLINK: u64 = SyscallNumber::FS_UNLINK.as_u16() as u64;
+const NUM_FS_RENAME: u64 = SyscallNumber::FS_RENAME.as_u16() as u64;
 
 /// Empty argument vector for the no-argument syscalls.
 const NO_ARGS: [u64; SYSCALL_MAX_ARGS] = [0; SYSCALL_MAX_ARGS];
@@ -1224,6 +1225,40 @@ pub extern "C" fn sys_fs_unlink(path: *mut c_void, path_len: usize) -> i32 {
     }
 }
 
+/// `fs_rename`: move the file or directory at the absolute path
+/// `(src, src_len)` to the absolute path `(dst, dst_len)`
+/// (`SyscallNumber::FS_RENAME`). Returns a `ROS_E_*` code.
+///
+/// Requires `ROS_CAP_FS_ACCESS`; resolution and the permission/mount-flag
+/// model match `ros_sys_fs_open`. Both paths must resolve under the same
+/// mounted volume; a non-empty directory destination, a
+/// directory-into-its-own-subtree move, or a cross-mount move fails closed.
+/// The kernel validates both `(ptr, len)` pairs against the caller's
+/// address space before reading them.
+#[must_use]
+#[export_name = "ros_sys_fs_rename"]
+pub extern "C" fn sys_fs_rename(
+    src: *mut c_void,
+    src_len: usize,
+    dst: *mut c_void,
+    dst_len: usize,
+) -> i32 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates both `(ptr, len)`.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_FS_RENAME,
+            [
+                ptr_arg(src),
+                src_len as u64,
+                ptr_arg(dst),
+                dst_len as u64,
+                0,
+                0,
+            ],
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1295,6 +1330,7 @@ mod tests {
         (NUM_FS_SYNC, "fs_sync", 1),
         (NUM_FS_MKDIR, "fs_mkdir", 2),
         (NUM_FS_UNLINK, "fs_unlink", 2),
+        (NUM_FS_RENAME, "fs_rename", 4),
     ];
 
     #[test]
@@ -1971,5 +2007,22 @@ mod tests {
         assert_eq!(args[0], ptr as usize as u64);
         assert_eq!(args[1], path.len() as u64);
         assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn fs_rename_marshals_both_paths_and_lens() {
+        let mut src = *b"/Storage/old";
+        let mut dst = *b"/Storage/new";
+        let src_ptr = src.as_mut_ptr().cast::<c_void>();
+        let dst_ptr = dst.as_mut_ptr().cast::<c_void>();
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_fs_rename(src_ptr, src.len(), dst_ptr, dst.len()), 0);
+        });
+        assert_eq!(number, NUM_FS_RENAME);
+        assert_eq!(args[0], src_ptr as usize as u64);
+        assert_eq!(args[1], src.len() as u64);
+        assert_eq!(args[2], dst_ptr as usize as u64);
+        assert_eq!(args[3], dst.len() as u64);
+        assert_eq!(&args[4..], &[0, 0]);
     }
 }

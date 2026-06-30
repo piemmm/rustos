@@ -2785,6 +2785,142 @@ impl<B: Block> RustFs<B> {
         self.write_inode(dir_ino, &dir_inode)?;
         self.commit()
     }
+
+    /// Whether directory `candidate` is `ancestor` itself or lives anywhere
+    /// beneath it, walking parent (`..`) links up to the root. Used to refuse
+    /// moving a directory into its own subtree, which would detach the cycle
+    /// from the tree.
+    fn is_subdir_of(&mut self, mut candidate: u32, ancestor: u32) -> Result<bool, DriverError> {
+        loop {
+            if candidate == ancestor {
+                return Ok(true);
+            }
+            if candidate == ROOT_INO {
+                return Ok(false);
+            }
+            let inode = self.read_inode(candidate)?;
+            let parent = self
+                .dir_lookup(&inode, b"..")?
+                .ok_or(DriverError::DeviceFault)?;
+            if parent == candidate {
+                return Ok(false);
+            }
+            candidate = parent;
+        }
+    }
+
+    fn rename_inner(
+        &mut self,
+        src_dir: NodeId,
+        src_name: &[u8],
+        dst_dir: NodeId,
+        dst_name: &[u8],
+    ) -> Result<(), DriverError> {
+        Self::check_name(dst_name)?;
+        let now = (self.clock)();
+        let src_dir_ino = self.ino_of(src_dir)?;
+        let dst_dir_ino = self.ino_of(dst_dir)?;
+        let same_dir = src_dir_ino == dst_dir_ino;
+
+        let mut src_dir_inode = self.read_inode(src_dir_ino)?;
+        if !src_dir_inode.is_dir() {
+            return Err(DriverError::Unsupported);
+        }
+        let src_ino = self
+            .dir_lookup(&src_dir_inode, src_name)?
+            .ok_or(DriverError::NotFound)?;
+
+        // A rename onto the same entry changes nothing.
+        if same_dir && src_name == dst_name {
+            return Ok(());
+        }
+
+        let src_child = self.read_inode(src_ino)?;
+        let moving_dir = src_child.is_dir();
+
+        // The destination directory's working inode: `None` means the move is
+        // within one directory and both sides mutate `src_dir_inode`.
+        let mut dst_dir_inode = if same_dir {
+            None
+        } else {
+            let d = self.read_inode(dst_dir_ino)?;
+            if !d.is_dir() {
+                return Err(DriverError::Unsupported);
+            }
+            Some(d)
+        };
+
+        // Refuse moving a directory into itself or its own subtree.
+        if moving_dir && self.is_subdir_of(dst_dir_ino, src_ino)? {
+            return Err(DriverError::Busy);
+        }
+
+        // Replace an existing destination, subject to kind compatibility.
+        let dst_existing = {
+            let dst_ref = dst_dir_inode.as_ref().unwrap_or(&src_dir_inode);
+            self.dir_lookup(dst_ref, dst_name)?
+        };
+        if let Some(dst_ino) = dst_existing {
+            if dst_ino == src_ino {
+                // Source and destination resolve to the same node already.
+                return Ok(());
+            }
+            let mut dst_child = self.read_inode(dst_ino)?;
+            if dst_child.is_dir() != moving_dir {
+                return Err(DriverError::Unsupported);
+            }
+            if dst_child.is_dir() && !self.dir_is_empty(&dst_child)? {
+                return Err(DriverError::Busy);
+            }
+            self.free_all_blocks(&mut dst_child, dst_ino)?;
+            self.free_inode(dst_ino)?;
+            match &mut dst_dir_inode {
+                Some(d) => self.remove_entry(d, dst_dir_ino, dst_name)?,
+                None => self.remove_entry(&mut src_dir_inode, dst_dir_ino, dst_name)?,
+            };
+            if dst_child.is_dir() {
+                match &mut dst_dir_inode {
+                    Some(d) => d.nlink = d.nlink.saturating_sub(1),
+                    None => src_dir_inode.nlink = src_dir_inode.nlink.saturating_sub(1),
+                }
+            }
+        }
+
+        // Detach the source name; add the destination name in its place.
+        self.remove_entry(&mut src_dir_inode, src_dir_ino, src_name)?;
+        if moving_dir {
+            src_dir_inode.nlink = src_dir_inode.nlink.saturating_sub(1);
+        }
+        match &mut dst_dir_inode {
+            Some(d) => self.add_entry(d, dst_dir_ino, src_ino, dst_name)?,
+            None => self.add_entry(&mut src_dir_inode, dst_dir_ino, src_ino, dst_name)?,
+        }
+        if moving_dir {
+            match &mut dst_dir_inode {
+                Some(d) => d.nlink += 1,
+                None => src_dir_inode.nlink += 1,
+            }
+        }
+
+        // Repoint the moved directory's `..` at its new parent.
+        let mut moved = src_child;
+        if moving_dir && !same_dir {
+            self.remove_entry(&mut moved, src_ino, b"..")?;
+            self.add_entry(&mut moved, src_ino, dst_dir_ino, b"..")?;
+        }
+        moved.times.changed = now;
+        self.write_inode(src_ino, &moved)?;
+
+        src_dir_inode.times.modified = now;
+        src_dir_inode.times.changed = now;
+        self.write_inode(src_dir_ino, &src_dir_inode)?;
+        if let Some(mut d) = dst_dir_inode {
+            d.times.modified = now;
+            d.times.changed = now;
+            self.write_inode(dst_dir_ino, &d)?;
+        }
+        self.commit()
+    }
 }
 
 /// Draw a random, non-zero per-volume filesystem UUID from the platform RNG
@@ -2945,6 +3081,22 @@ impl<B: Block> FilesystemWrite for RustFs<B> {
         self.deny_if_read_only()?;
         self.begin();
         let result = self.remove_inner(dir, name);
+        if result.is_err() {
+            self.rollback();
+        }
+        result
+    }
+
+    fn rename(
+        &mut self,
+        src_dir: NodeId,
+        src_name: &[u8],
+        dst_dir: NodeId,
+        dst_name: &[u8],
+    ) -> Result<(), DriverError> {
+        self.deny_if_read_only()?;
+        self.begin();
+        let result = self.rename_inner(src_dir, src_name, dst_dir, dst_name);
         if result.is_err() {
             self.rollback();
         }

@@ -386,6 +386,56 @@ pub trait FilesystemWrite {
     /// * [`DriverError::DeviceFault`] on an unrecoverable block write.
     fn remove(&mut self, dir: NodeId, name: &[u8]) -> Result<(), DriverError>;
 
+    /// Move the child `src_name` of directory `src_dir` so that it becomes
+    /// the child `dst_name` of directory `dst_dir`, preserving the moved
+    /// node's identity, contents, and metadata.
+    ///
+    /// `src_name` and `dst_name` are each a single path component
+    /// containing no separator and neither `.` nor `..` (the VFS resolves
+    /// those itself). `src_dir` and `dst_dir` may be the same directory (a
+    /// pure within-directory rename) or different directories on the same
+    /// mounted volume.
+    ///
+    /// # Replacing an existing destination
+    ///
+    /// If `dst_name` already names an entry in `dst_dir` it is atomically
+    /// replaced, subject to kind compatibility: a regular file may replace
+    /// a regular file, and a directory may replace an **empty** directory.
+    /// The replaced node's backing storage is freed. Replacing a directory
+    /// with a non-directory, or a non-directory with a directory, is
+    /// refused.
+    ///
+    /// A rename whose source and destination name the *same* entry
+    /// (`src_dir == dst_dir` and `src_name == dst_name`) succeeds and
+    /// changes nothing.
+    ///
+    /// When a directory is moved to a different parent, its `..` link is
+    /// repointed at `dst_dir` and both parents' link counts are adjusted.
+    /// Moving a directory into itself or into its own subtree is refused
+    /// (it would detach the cycle from the tree).
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::Unsupported`] if `src_dir` or `dst_dir` is not a
+    ///   directory, or a kind-incompatible replacement is attempted
+    ///   (a file over a directory, or a directory over a file).
+    /// * [`DriverError::NotFound`] if `src_name` does not exist in
+    ///   `src_dir`.
+    /// * [`DriverError::Busy`] if `dst_name` is a non-empty directory, or
+    ///   if the move would place a directory inside its own subtree.
+    /// * [`DriverError::LengthOutOfRange`] if `dst_name` is empty or longer
+    ///   than the filesystem's maximum component length.
+    /// * [`DriverError::NoSpace`] if `dst_dir` cannot grow to hold the new
+    ///   entry because the volume is full.
+    /// * [`DriverError::DeviceFault`] on an unrecoverable block write.
+    fn rename(
+        &mut self,
+        src_dir: NodeId,
+        src_name: &[u8],
+        dst_dir: NodeId,
+        dst_name: &[u8],
+    ) -> Result<(), DriverError>;
+
     /// Flush any buffered metadata or data to the backing device.
     ///
     /// A driver that writes through to the block device synchronously may
@@ -793,9 +843,12 @@ mod tests {
     /// A minimal `(dir, name)`-addressed `FilesystemWrite` holding one
     /// regular file directly under a root directory. It exercises the
     /// whole `abi-v1` write surface: create, extend via `write_at`,
-    /// `truncate`, and `remove`.
+    /// `truncate`, `remove`, and `rename` (which re-labels the single
+    /// file within the root).
     struct MockWriteFs {
         present: bool,
+        name: [u8; 8],
+        name_len: usize,
         body: [u8; 8],
         len: usize,
     }
@@ -803,6 +856,31 @@ mod tests {
     const W_ROOT: NodeId = NodeId::from_raw(1);
     const W_FILE: NodeId = NodeId::from_raw(2);
     const W_NAME: &[u8] = b"data";
+
+    impl MockWriteFs {
+        fn empty() -> Self {
+            Self {
+                present: false,
+                name: [0; 8],
+                name_len: 0,
+                body: [0; 8],
+                len: 0,
+            }
+        }
+
+        fn name(&self) -> &[u8] {
+            &self.name[..self.name_len]
+        }
+
+        fn store_name(&mut self, name: &[u8]) -> Result<(), DriverError> {
+            if name.is_empty() || name.len() > self.name.len() {
+                return Err(DriverError::LengthOutOfRange);
+            }
+            self.name[..name.len()].copy_from_slice(name);
+            self.name_len = name.len();
+            Ok(())
+        }
+    }
 
     impl FilesystemWrite for MockWriteFs {
         fn create(
@@ -814,12 +892,13 @@ mod tests {
             if dir != W_ROOT {
                 return Err(DriverError::Unsupported);
             }
-            if name != W_NAME || kind != NodeKind::RegularFile {
+            if kind != NodeKind::RegularFile {
                 return Err(DriverError::Unsupported);
             }
             if self.present {
                 return Err(DriverError::Busy);
             }
+            self.store_name(name)?;
             self.present = true;
             self.len = 0;
             Ok(W_FILE)
@@ -832,11 +911,14 @@ mod tests {
             offset: u64,
             data: &[u8],
         ) -> Result<usize, DriverError> {
-            if dir != W_ROOT || name != W_NAME {
+            if dir != W_ROOT {
                 return Err(DriverError::Unsupported);
             }
             if !self.present {
                 return Err(DriverError::NotFound);
+            }
+            if name != self.name() {
+                return Err(DriverError::Unsupported);
             }
             let start = usize::try_from(offset).map_err(|_| DriverError::LengthOutOfRange)?;
             let end = start
@@ -854,11 +936,14 @@ mod tests {
         }
 
         fn truncate(&mut self, dir: NodeId, name: &[u8], size: u64) -> Result<(), DriverError> {
-            if dir != W_ROOT || name != W_NAME {
+            if dir != W_ROOT {
                 return Err(DriverError::Unsupported);
             }
             if !self.present {
                 return Err(DriverError::NotFound);
+            }
+            if name != self.name() {
+                return Err(DriverError::Unsupported);
             }
             let new = usize::try_from(size).map_err(|_| DriverError::LengthOutOfRange)?;
             if new > self.body.len() {
@@ -875,12 +960,34 @@ mod tests {
             if dir != W_ROOT {
                 return Err(DriverError::Unsupported);
             }
-            if name != W_NAME || !self.present {
+            if !self.present || name != self.name() {
                 return Err(DriverError::NotFound);
             }
             self.present = false;
             self.len = 0;
+            self.name_len = 0;
             Ok(())
+        }
+
+        fn rename(
+            &mut self,
+            src_dir: NodeId,
+            src_name: &[u8],
+            dst_dir: NodeId,
+            dst_name: &[u8],
+        ) -> Result<(), DriverError> {
+            if src_dir != W_ROOT || dst_dir != W_ROOT {
+                return Err(DriverError::Unsupported);
+            }
+            if !self.present || src_name != self.name() {
+                return Err(DriverError::NotFound);
+            }
+            if dst_name == src_name {
+                return Ok(());
+            }
+            // The model holds a single file, so the destination name can
+            // never already be in use; re-label the present file.
+            self.store_name(dst_name)
         }
 
         fn flush(&mut self) -> Result<(), DriverError> {
@@ -890,11 +997,7 @@ mod tests {
 
     #[test]
     fn mock_write_fs_round_trip() {
-        let mut fs = MockWriteFs {
-            present: false,
-            body: [0u8; 8],
-            len: 0,
-        };
+        let mut fs = MockWriteFs::empty();
         assert_eq!(fs.create(W_ROOT, W_NAME, NodeKind::RegularFile), Ok(W_FILE));
         // Creating it again is rejected as busy.
         assert_eq!(
@@ -918,16 +1021,39 @@ mod tests {
 
     #[test]
     fn mock_write_fs_rejects_non_root_dir() {
-        let mut fs = MockWriteFs {
-            present: false,
-            body: [0u8; 8],
-            len: 0,
-        };
+        let mut fs = MockWriteFs::empty();
         assert_eq!(
             fs.create(W_FILE, W_NAME, NodeKind::RegularFile),
             Err(DriverError::Unsupported)
         );
         assert_eq!(fs.remove(W_FILE, W_NAME), Err(DriverError::Unsupported));
+    }
+
+    #[test]
+    fn mock_write_fs_rename_relabels_the_file() {
+        let mut fs = MockWriteFs::empty();
+        assert_eq!(fs.create(W_ROOT, W_NAME, NodeKind::RegularFile), Ok(W_FILE));
+        assert_eq!(fs.write_at(W_ROOT, W_NAME, 0, b"hi"), Ok(2));
+        // Renaming a missing source fails closed.
+        assert_eq!(
+            fs.rename(W_ROOT, b"absent", W_ROOT, b"moved"),
+            Err(DriverError::NotFound)
+        );
+        // The self-rename is a no-op success.
+        assert_eq!(fs.rename(W_ROOT, W_NAME, W_ROOT, W_NAME), Ok(()));
+        // Moving to a new name re-labels the file and preserves contents.
+        assert_eq!(fs.rename(W_ROOT, W_NAME, W_ROOT, b"moved"), Ok(()));
+        assert_eq!(
+            fs.write_at(W_ROOT, W_NAME, 0, b"x"),
+            Err(DriverError::Unsupported)
+        );
+        assert_eq!(fs.write_at(W_ROOT, b"moved", 2, b"!"), Ok(1));
+        assert_eq!(&fs.body[..fs.len], b"hi!");
+        // A non-root directory is refused.
+        assert_eq!(
+            fs.rename(W_FILE, b"moved", W_ROOT, b"x"),
+            Err(DriverError::Unsupported)
+        );
     }
 
     #[test]

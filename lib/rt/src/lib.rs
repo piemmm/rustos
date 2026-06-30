@@ -233,6 +233,7 @@ const NUM_FS_MKDIR: u64 = SyscallNumber::FS_MKDIR.as_u16() as u64;
 
 /// `fs_unlink` syscall number (as above).
 const NUM_FS_UNLINK: u64 = SyscallNumber::FS_UNLINK.as_u16() as u64;
+const NUM_FS_RENAME: u64 = SyscallNumber::FS_RENAME.as_u16() as u64;
 
 /// Marshal a 32-bit signed argument into its register value following the
 /// `abi-v1` `I32` convention (sign-extend through `i64`).
@@ -1893,6 +1894,32 @@ pub fn fs_unlink(path: &[u8]) -> i64 {
     ret as i64
 }
 
+/// Move the file or directory at absolute `src` to absolute `dst`
+/// (`SyscallNumber::FS_RENAME`).
+///
+/// Both paths must resolve under the same mounted volume. The kernel
+/// authorises the move through the secured VFS under the caller's attested
+/// identity (a missing source, a non-empty directory destination, a
+/// directory-into-its-own-subtree move, a read-only mount, a cross-mount
+/// move, or a permission denial fails closed). Returns `0` on success or
+/// `-errno`.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
+pub fn fs_rename(src: &[u8], dst: &[u8]) -> i64 {
+    let src_ptr = src.as_ptr() as usize as u64;
+    let dst_ptr = dst.as_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // both `(ptr, len)` pairs against the caller's address space before
+    // reading them. `src`/`dst` are live shared slices for the call.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_FS_RENAME,
+            [src_ptr, src.len() as u64, dst_ptr, dst.len() as u64, 0, 0],
+        )
+    };
+    ret as i64
+}
+
 /// An open file or directory handle: an owned descriptor that issues
 /// [`fs_close`] when dropped, so a handle is never leaked.
 ///
@@ -2956,6 +2983,21 @@ mod tests {
         assert_eq!(args[0], path.as_ptr() as usize as u64);
         assert_eq!(args[1], path.len() as u64);
         assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn fs_rename_marshals_both_paths_and_lens() {
+        let src = b"/System/Logs/old";
+        let dst = b"/System/Logs/new";
+        let (number, args) = capture(0, || {
+            assert_eq!(fs_rename(src, dst), 0);
+        });
+        assert_eq!(number, NUM_FS_RENAME);
+        assert_eq!(args[0], src.as_ptr() as usize as u64);
+        assert_eq!(args[1], src.len() as u64);
+        assert_eq!(args[2], dst.as_ptr() as usize as u64);
+        assert_eq!(args[3], dst.len() as u64);
+        assert_eq!(&args[4..], &[0, 0]);
     }
 
     #[test]

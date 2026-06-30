@@ -84,6 +84,17 @@ impl FilesystemWrite for SentinelFs {
         Ok(())
     }
 
+    fn rename(
+        &mut self,
+        _src_dir: NodeId,
+        _src_name: &[u8],
+        _dst_dir: NodeId,
+        _dst_name: &[u8],
+    ) -> Result<(), DriverError> {
+        // A distinct sentinel so the forwarding test observes the call.
+        Err(DriverError::Busy)
+    }
+
     fn flush(&mut self) -> Result<(), DriverError> {
         Ok(())
     }
@@ -170,6 +181,11 @@ fn boxed_kernel_fs_forwards_every_trait_method() {
     boxed
         .remove(NodeId::from_raw(1), b"f")
         .expect("remove forwards");
+    assert_eq!(
+        boxed.rename(NodeId::from_raw(1), b"a", NodeId::from_raw(1), b"b"),
+        Err(DriverError::Busy),
+        "rename forwards to the inner driver"
+    );
     boxed.flush().expect("flush forwards");
 
     // FilesystemSecurity

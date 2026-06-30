@@ -115,6 +115,16 @@ impl FilesystemWrite for Box<dyn KernelFs> {
         (**self).remove(dir, name)
     }
 
+    fn rename(
+        &mut self,
+        src_dir: NodeId,
+        src_name: &[u8],
+        dst_dir: NodeId,
+        dst_name: &[u8],
+    ) -> Result<(), DriverError> {
+        (**self).rename(src_dir, src_name, dst_dir, dst_name)
+    }
+
     fn flush(&mut self) -> Result<(), DriverError> {
         (**self).flush()
     }

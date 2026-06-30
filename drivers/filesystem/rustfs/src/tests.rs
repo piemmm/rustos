@@ -4556,3 +4556,157 @@ fn the_pending_discard_queue_is_capped_independent_of_volume_size() {
         "the discard queue must cap at MAX_PENDING_DISCARD, never grow with the volume"
     );
 }
+
+#[test]
+fn rename_within_directory_moves_a_file_preserving_contents() {
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"a", NodeKind::RegularFile)
+        .expect("create");
+    assert_eq!(fs.write_at(root, b"a", 0, b"hello"), Ok(5));
+    fs.rename(root, b"a", root, b"b").expect("rename");
+    assert_eq!(fs.lookup(root, b"a"), Err(DriverError::NotFound));
+    let node = fs.lookup(root, b"b").expect("dst present");
+    let mut back = [0u8; 5];
+    assert_eq!(fs.read_at(node, 0, &mut back), Ok(5));
+    assert_eq!(&back, b"hello");
+}
+
+#[test]
+fn rename_self_is_a_noop() {
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"a", NodeKind::RegularFile)
+        .expect("create");
+    fs.rename(root, b"a", root, b"a").expect("noop");
+    assert!(fs.lookup(root, b"a").is_ok());
+}
+
+#[test]
+fn rename_missing_source_fails_closed() {
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    assert_eq!(
+        fs.rename(root, b"x", root, b"y"),
+        Err(DriverError::NotFound)
+    );
+}
+
+#[test]
+fn rename_across_directories_moves_a_file() {
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"src", NodeKind::Directory)
+        .expect("mkdir src");
+    fs.create(root, b"dst", NodeKind::Directory)
+        .expect("mkdir dst");
+    let src = fs.lookup(root, b"src").unwrap();
+    let dst = fs.lookup(root, b"dst").unwrap();
+    fs.create(src, b"f", NodeKind::RegularFile).expect("create");
+    assert_eq!(fs.write_at(src, b"f", 0, b"data"), Ok(4));
+    fs.rename(src, b"f", dst, b"g").expect("rename across");
+    assert_eq!(fs.lookup(src, b"f"), Err(DriverError::NotFound));
+    let node = fs.lookup(dst, b"g").expect("moved");
+    let mut back = [0u8; 4];
+    assert_eq!(fs.read_at(node, 0, &mut back), Ok(4));
+    assert_eq!(&back, b"data");
+}
+
+#[test]
+fn rename_overwrites_an_existing_regular_file() {
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"a", NodeKind::RegularFile).unwrap();
+    fs.create(root, b"b", NodeKind::RegularFile).unwrap();
+    assert_eq!(fs.write_at(root, b"a", 0, b"AAAA"), Ok(4));
+    assert_eq!(fs.write_at(root, b"b", 0, b"BB"), Ok(2));
+    fs.rename(root, b"a", root, b"b").expect("overwrite");
+    assert_eq!(fs.lookup(root, b"a"), Err(DriverError::NotFound));
+    let node = fs.lookup(root, b"b").unwrap();
+    let mut back = [0u8; 4];
+    assert_eq!(fs.read_at(node, 0, &mut back), Ok(4));
+    assert_eq!(&back, b"AAAA");
+}
+
+#[test]
+fn rename_replaces_an_empty_directory() {
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"a", NodeKind::Directory).unwrap();
+    fs.create(root, b"b", NodeKind::Directory).unwrap();
+    let a = fs.lookup(root, b"a").unwrap();
+    fs.create(a, b"x", NodeKind::RegularFile).unwrap();
+    fs.rename(root, b"a", root, b"b")
+        .expect("dir over empty dir");
+    assert_eq!(fs.lookup(root, b"a"), Err(DriverError::NotFound));
+    let b = fs.lookup(root, b"b").unwrap();
+    assert!(fs.lookup(b, b"x").is_ok());
+}
+
+#[test]
+fn rename_refuses_kind_mismatch_and_nonempty_dir_target() {
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"file", NodeKind::RegularFile).unwrap();
+    fs.create(root, b"dir", NodeKind::Directory).unwrap();
+    assert_eq!(
+        fs.rename(root, b"file", root, b"dir"),
+        Err(DriverError::Unsupported)
+    );
+    assert_eq!(
+        fs.rename(root, b"dir", root, b"file"),
+        Err(DriverError::Unsupported)
+    );
+    fs.create(root, b"dir2", NodeKind::Directory).unwrap();
+    let dir2 = fs.lookup(root, b"dir2").unwrap();
+    fs.create(dir2, b"child", NodeKind::RegularFile).unwrap();
+    assert_eq!(
+        fs.rename(root, b"dir", root, b"dir2"),
+        Err(DriverError::Busy)
+    );
+}
+
+#[test]
+fn rename_moves_a_directory_across_parents_and_repoints_dotdot() {
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"p1", NodeKind::Directory).unwrap();
+    fs.create(root, b"p2", NodeKind::Directory).unwrap();
+    let p1 = fs.lookup(root, b"p1").unwrap();
+    let p2 = fs.lookup(root, b"p2").unwrap();
+    fs.create(p1, b"d", NodeKind::Directory).unwrap();
+    let d = fs.lookup(p1, b"d").unwrap();
+    fs.create(d, b"leaf", NodeKind::RegularFile).unwrap();
+    fs.rename(p1, b"d", p2, b"d").expect("move dir");
+    assert_eq!(fs.lookup(p1, b"d"), Err(DriverError::NotFound));
+    let moved = fs.lookup(p2, b"d").expect("moved dir");
+    assert!(fs.lookup(moved, b"leaf").is_ok());
+    assert_eq!(fs.lookup(moved, b"..").unwrap(), p2);
+}
+
+#[test]
+fn rename_refuses_moving_a_directory_into_its_own_subtree() {
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"a", NodeKind::Directory).unwrap();
+    let a = fs.lookup(root, b"a").unwrap();
+    fs.create(a, b"b", NodeKind::Directory).unwrap();
+    let b = fs.lookup(a, b"b").unwrap();
+    assert_eq!(fs.rename(root, b"a", b, b"a"), Err(DriverError::Busy));
+    assert_eq!(fs.rename(root, b"a", a, b"x"), Err(DriverError::Busy));
+}
+
+#[test]
+fn rename_rejects_bad_destination_name() {
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"a", NodeKind::RegularFile).unwrap();
+    assert_eq!(
+        fs.rename(root, b"a", root, b""),
+        Err(DriverError::LengthOutOfRange)
+    );
+    assert_eq!(
+        fs.rename(root, b"a", root, b".."),
+        Err(DriverError::Unsupported)
+    );
+}

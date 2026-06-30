@@ -1487,3 +1487,136 @@ fn format_spans_multiple_block_groups() {
     assert_eq!(fs.read_at(file, 0, &mut buf), Ok(4096));
     assert!(buf.iter().all(|&b| b == 0xAB));
 }
+
+#[test]
+fn rename_within_directory_preserves_contents() {
+    let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256).expect("format");
+    let root = fs.root();
+    fs.create(root, b"a.txt", NodeKind::RegularFile).unwrap();
+    fs.write_at(root, b"a.txt", 0, b"hello").unwrap();
+    fs.rename(root, b"a.txt", root, b"b.txt").expect("rename");
+    assert_eq!(fs.lookup(root, b"a.txt"), Err(DriverError::NotFound));
+    let node = fs.lookup(root, b"b.txt").expect("dst");
+    let mut buf = [0u8; 8];
+    let n = fs.read_at(node, 0, &mut buf).unwrap();
+    assert_eq!(&buf[..n], b"hello");
+}
+
+#[test]
+fn rename_missing_source_is_not_found() {
+    let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256).expect("format");
+    let root = fs.root();
+    assert_eq!(
+        fs.rename(root, b"nope", root, b"x"),
+        Err(DriverError::NotFound)
+    );
+}
+
+#[test]
+fn rename_across_directories_persists() {
+    let dev = {
+        let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256).expect("format");
+        let root = fs.root();
+        let src = fs.create(root, b"src", NodeKind::Directory).unwrap();
+        let dst = fs.create(root, b"dst", NodeKind::Directory).unwrap();
+        fs.create(src, b"f.bin", NodeKind::RegularFile).unwrap();
+        fs.write_at(src, b"f.bin", 0, b"data").unwrap();
+        fs.rename(src, b"f.bin", dst, b"g.bin").expect("move");
+        fs.into_block()
+    };
+    let mut fs = Ext4::open(dev).expect("reopen");
+    let root = fs.root();
+    let src = fs.lookup(root, b"src").unwrap();
+    let dst = fs.lookup(root, b"dst").unwrap();
+    assert_eq!(fs.lookup(src, b"f.bin"), Err(DriverError::NotFound));
+    let node = fs.lookup(dst, b"g.bin").expect("moved");
+    let mut buf = [0u8; 8];
+    let n = fs.read_at(node, 0, &mut buf).unwrap();
+    assert_eq!(&buf[..n], b"data");
+}
+
+#[test]
+fn rename_overwrites_existing_file() {
+    let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256).expect("format");
+    let root = fs.root();
+    fs.create(root, b"a.txt", NodeKind::RegularFile).unwrap();
+    fs.write_at(root, b"a.txt", 0, b"AAAA").unwrap();
+    fs.create(root, b"b.txt", NodeKind::RegularFile).unwrap();
+    fs.write_at(root, b"b.txt", 0, b"BB").unwrap();
+    fs.rename(root, b"a.txt", root, b"b.txt")
+        .expect("overwrite");
+    assert_eq!(fs.lookup(root, b"a.txt"), Err(DriverError::NotFound));
+    let node = fs.lookup(root, b"b.txt").unwrap();
+    let mut buf = [0u8; 8];
+    let n = fs.read_at(node, 0, &mut buf).unwrap();
+    assert_eq!(&buf[..n], b"AAAA");
+}
+
+#[test]
+fn rename_refuses_kind_mismatch_and_nonempty_dir_target() {
+    let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256).expect("format");
+    let root = fs.root();
+    fs.create(root, b"f.txt", NodeKind::RegularFile).unwrap();
+    fs.create(root, b"d", NodeKind::Directory).unwrap();
+    assert_eq!(
+        fs.rename(root, b"f.txt", root, b"d"),
+        Err(DriverError::Unsupported)
+    );
+    assert_eq!(
+        fs.rename(root, b"d", root, b"f.txt"),
+        Err(DriverError::Unsupported)
+    );
+    let d2 = fs.create(root, b"d2", NodeKind::Directory).unwrap();
+    fs.create(d2, b"child", NodeKind::RegularFile).unwrap();
+    assert_eq!(fs.rename(root, b"d", root, b"d2"), Err(DriverError::Busy));
+}
+
+#[test]
+fn rename_moves_a_directory_across_parents() {
+    let dev = {
+        let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256).expect("format");
+        let root = fs.root();
+        let p1 = fs.create(root, b"p1", NodeKind::Directory).unwrap();
+        let p2 = fs.create(root, b"p2", NodeKind::Directory).unwrap();
+        let d = fs.create(p1, b"d", NodeKind::Directory).unwrap();
+        fs.create(d, b"leaf.bin", NodeKind::RegularFile).unwrap();
+        fs.write_at(d, b"leaf.bin", 0, b"x").unwrap();
+        fs.rename(p1, b"d", p2, b"d").expect("move dir");
+        fs.into_block()
+    };
+    let mut fs = Ext4::open(dev).expect("reopen");
+    let root = fs.root();
+    let p1 = fs.lookup(root, b"p1").unwrap();
+    let p2 = fs.lookup(root, b"p2").unwrap();
+    assert_eq!(fs.lookup(p1, b"d"), Err(DriverError::NotFound));
+    let moved = fs.lookup(p2, b"d").expect("moved");
+    let leaf = fs.lookup(moved, b"leaf.bin").expect("leaf intact");
+    let mut buf = [0u8; 4];
+    let n = fs.read_at(leaf, 0, &mut buf).unwrap();
+    assert_eq!(&buf[..n], b"x");
+}
+
+#[test]
+fn rename_refuses_moving_directory_into_its_subtree() {
+    let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256).expect("format");
+    let root = fs.root();
+    let a = fs.create(root, b"a", NodeKind::Directory).unwrap();
+    let b = fs.create(a, b"b", NodeKind::Directory).unwrap();
+    assert_eq!(fs.rename(root, b"a", b, b"a"), Err(DriverError::Busy));
+    assert_eq!(fs.rename(root, b"a", a, b"x"), Err(DriverError::Busy));
+}
+
+#[test]
+fn rename_rejects_bad_destination_name() {
+    let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256).expect("format");
+    let root = fs.root();
+    fs.create(root, b"a.txt", NodeKind::RegularFile).unwrap();
+    assert_eq!(
+        fs.rename(root, b"a.txt", root, b""),
+        Err(DriverError::LengthOutOfRange)
+    );
+    assert_eq!(
+        fs.rename(root, b"a.txt", root, b".."),
+        Err(DriverError::LengthOutOfRange)
+    );
+}

@@ -419,6 +419,17 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
+    fn fs_rename(
+        &self,
+        _c: &CallerContext<'_>,
+        _src: u64,
+        _src_len: usize,
+        _dst: u64,
+        _dst_len: usize,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
 }
 
 /// The capabilities the `abi-v1` table actually gates on, in ascending id

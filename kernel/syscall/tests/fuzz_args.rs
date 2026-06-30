@@ -417,6 +417,17 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn fs_rename(
+        &self,
+        _c: &CallerContext<'_>,
+        _src: u64,
+        _src_len: usize,
+        _dst: u64,
+        _dst_len: usize,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
 }
 
 /// Silent sink — fuzz output must not pollute test stdout. Capacity

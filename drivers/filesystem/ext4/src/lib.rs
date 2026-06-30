@@ -2254,6 +2254,190 @@ impl<B: Block> Ext4<B> {
             None => Err(DriverError::NotFound),
         }
     }
+
+    /// Add `delta` to inode `ino`'s `i_links_count`, saturating at the
+    /// `u16` bounds. Used to maintain a directory's link count as child
+    /// directories (each contributing a `..` back-link) move in and out.
+    fn adjust_links(&mut self, ino: u32, delta: i16) -> Result<(), DriverError> {
+        let mut raw = [0u8; MAX_BLOCK_SIZE as usize];
+        self.read_inode_raw(ino, &mut raw)?;
+        let links = le16(&raw, INODE_LINKS);
+        let magnitude = delta.unsigned_abs();
+        let new = if delta < 0 {
+            links.saturating_sub(magnitude)
+        } else {
+            links.saturating_add(magnitude)
+        };
+        put_le16(&mut raw, INODE_LINKS, new);
+        self.write_inode_raw(ino, &mut raw)
+    }
+
+    /// Repoint the directory entry named `name` in directory `dir_ino` at
+    /// `new_ino`, leaving its name and record length untouched. Used to
+    /// rewrite a moved directory's `..` link to its new parent.
+    fn set_dirent_inode(
+        &mut self,
+        dir_ino: u32,
+        name: &[u8],
+        new_ino: u32,
+    ) -> Result<(), DriverError> {
+        let end = self.dir_data_end();
+        let seed = self.dir_block_seed(dir_ino)?;
+        let dir = self.read_inode(dir_ino)?;
+        let total_blocks = dir.size.div_ceil(u64::from(self.layout.block_size));
+        let mut block_buf = [0u8; MAX_BLOCK_SIZE as usize];
+        for logical in 0..total_blocks {
+            let Some(phys) = self.map_block(&dir, logical)? else {
+                continue;
+            };
+            self.read_fs_block(phys, &mut block_buf)?;
+            let mut pos = 0usize;
+            while pos + DIRENT_HEADER <= end {
+                let (slot_ino, rec_len, name_len) =
+                    self.read_dirent_header(&block_buf, pos, end)?;
+                if slot_ino != 0 && name_len > 0 && DIRENT_HEADER + name_len <= rec_len {
+                    let slot_name = &block_buf[pos + DIRENT_HEADER..pos + DIRENT_HEADER + name_len];
+                    if slot_name == name {
+                        put_le32(&mut block_buf, pos, new_ino);
+                        self.write_dir_block(seed, phys, &mut block_buf)?;
+                        return Ok(());
+                    }
+                }
+                pos += rec_len;
+            }
+        }
+        Err(DriverError::NotFound)
+    }
+
+    /// The parent inode of directory `dir_ino`, read straight from its
+    /// `..` entry. The directory reader does not surface `.`/`..`, so the
+    /// `..` back-link is read raw here rather than through `lookup_child`.
+    fn dir_parent_ino(&mut self, dir_ino: u32) -> Result<u32, DriverError> {
+        let end = self.dir_data_end();
+        let dir = self.read_inode(dir_ino)?;
+        let total_blocks = dir.size.div_ceil(u64::from(self.layout.block_size));
+        let mut block_buf = [0u8; MAX_BLOCK_SIZE as usize];
+        for logical in 0..total_blocks {
+            let Some(phys) = self.map_block(&dir, logical)? else {
+                continue;
+            };
+            self.read_fs_block(phys, &mut block_buf)?;
+            let mut pos = 0usize;
+            while pos + DIRENT_HEADER <= end {
+                let (slot_ino, rec_len, name_len) =
+                    self.read_dirent_header(&block_buf, pos, end)?;
+                if slot_ino != 0 && name_len > 0 && DIRENT_HEADER + name_len <= rec_len {
+                    let slot_name = &block_buf[pos + DIRENT_HEADER..pos + DIRENT_HEADER + name_len];
+                    if slot_name == b".." {
+                        return Ok(slot_ino);
+                    }
+                }
+                pos += rec_len;
+            }
+        }
+        Err(DriverError::DeviceFault)
+    }
+
+    /// Whether directory `candidate` is `ancestor` itself or lives anywhere
+    /// beneath it, walking `..` links up to the root. Refuses moving a
+    /// directory into its own subtree (which would detach the cycle).
+    fn is_subdir_of(&mut self, mut candidate: u32, ancestor: u32) -> Result<bool, DriverError> {
+        loop {
+            if candidate == ancestor {
+                return Ok(true);
+            }
+            if candidate == ROOT_INODE {
+                return Ok(false);
+            }
+            let parent = self.dir_parent_ino(candidate)?;
+            if parent == candidate {
+                return Ok(false);
+            }
+            candidate = parent;
+        }
+    }
+
+    /// Shared implementation of [`FilesystemWrite::rename`].
+    ///
+    /// The move re-links the source inode under the destination name and
+    /// unlinks the source name, so file data and the inode's identity are
+    /// preserved. An existing destination of a compatible kind is replaced
+    /// (its inode freed); across directories a moved directory's `..` is
+    /// repointed and both parents' link counts adjusted. ext4 here is
+    /// non-journaled, so replacement is best-effort rather than atomic,
+    /// matching the create/remove paths.
+    fn rename_inner(
+        &mut self,
+        src_dir: NodeId,
+        src_name: &[u8],
+        dst_dir: NodeId,
+        dst_name: &[u8],
+    ) -> Result<(), DriverError> {
+        validate_name(dst_name)?;
+        let src_dir_ino = node_inode(src_dir)?;
+        let dst_dir_ino = node_inode(dst_dir)?;
+        if self.read_inode(src_dir_ino)?.kind() != Some(NodeKind::Directory)
+            || self.read_inode(dst_dir_ino)?.kind() != Some(NodeKind::Directory)
+        {
+            return Err(DriverError::Unsupported);
+        }
+
+        if src_dir_ino == dst_dir_ino && src_name == dst_name {
+            return Ok(());
+        }
+
+        let src_ino = self.lookup_child(src_dir_ino, src_name)?;
+        let mut src_raw = [0u8; MAX_BLOCK_SIZE as usize];
+        self.read_inode_raw(src_ino, &mut src_raw)?;
+        let moving_dir = le16(&src_raw, 0) & S_IFMT == S_IFDIR;
+
+        if moving_dir && self.is_subdir_of(dst_dir_ino, src_ino)? {
+            return Err(DriverError::Busy);
+        }
+
+        let dst_existing = match self.lookup_child(dst_dir_ino, dst_name) {
+            Ok(ino) => Some(ino),
+            Err(DriverError::NotFound) => None,
+            Err(e) => return Err(e),
+        };
+        if let Some(dst_ino) = dst_existing {
+            if dst_ino == src_ino {
+                return Ok(());
+            }
+            let mut dst_raw = [0u8; MAX_BLOCK_SIZE as usize];
+            self.read_inode_raw(dst_ino, &mut dst_raw)?;
+            let dst_is_dir = le16(&dst_raw, 0) & S_IFMT == S_IFDIR;
+            if dst_is_dir != moving_dir {
+                return Err(DriverError::Unsupported);
+            }
+            if dst_is_dir && !self.dir_is_empty(dst_ino)? {
+                return Err(DriverError::Busy);
+            }
+            self.truncate_blocks(dst_ino, &mut dst_raw, 0)?;
+            put_le16(&mut dst_raw, INODE_LINKS, 0);
+            put_le32(&mut dst_raw, 0x04, 0);
+            put_le32(&mut dst_raw, 0x6C, 0);
+            put_le32(&mut dst_raw, INODE_BLOCKS_LO, 0);
+            put_le32(&mut dst_raw, INODE_DTIME, DELETED_DTIME);
+            self.write_inode_raw(dst_ino, &mut dst_raw)?;
+            self.remove_dirent(dst_dir_ino, dst_name)?;
+            self.free_inode(dst_ino, dst_is_dir)?;
+            if dst_is_dir {
+                self.adjust_links(dst_dir_ino, -1)?;
+            }
+        }
+
+        let file_type = if moving_dir { FT_DIR } else { FT_REG };
+        self.insert_dirent(dst_dir_ino, dst_name, src_ino, file_type)?;
+        self.remove_dirent(src_dir_ino, src_name)?;
+
+        if moving_dir && src_dir_ino != dst_dir_ino {
+            self.set_dirent_inode(src_ino, b"..", dst_dir_ino)?;
+            self.adjust_links(src_dir_ino, -1)?;
+            self.adjust_links(dst_dir_ino, 1)?;
+        }
+        Ok(())
+    }
 }
 
 impl<B: Block> FilesystemRead for Ext4<B> {
@@ -2820,6 +3004,17 @@ impl<B: Block> FilesystemWrite for Ext4<B> {
             self.write_inode_raw(dir_ino, &mut draw)?;
         }
         Ok(())
+    }
+
+    fn rename(
+        &mut self,
+        src_dir: NodeId,
+        src_name: &[u8],
+        dst_dir: NodeId,
+        dst_name: &[u8],
+    ) -> Result<(), DriverError> {
+        self.ensure_writable()?;
+        self.rename_inner(src_dir, src_name, dst_dir, dst_name)
     }
 
     fn flush(&mut self) -> Result<(), DriverError> {

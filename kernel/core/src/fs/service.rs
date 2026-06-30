@@ -153,6 +153,24 @@ pub trait FilesystemService: Send + Sync {
     /// directory, a read-only mount, a permission denial), or
     /// [`Errno::NotImplemented`] when no filesystem is mounted.
     fn unlink(&self, uid: u32, caps: &dyn CapabilityQuery, path: &str) -> Result<(), Errno>;
+
+    /// Move the file or directory at absolute `src` to absolute `dst`,
+    /// preserving its identity and contents. Both paths must lie under the
+    /// same mounted volume.
+    ///
+    /// # Errors
+    ///
+    /// The stable [`Errno`] for the VFS refusal (a missing source, a
+    /// read-only mount, a permission denial, a non-empty directory
+    /// destination, a cross-mount move), or [`Errno::NotImplemented`] when
+    /// no filesystem is mounted.
+    fn rename(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        src: &str,
+        dst: &str,
+    ) -> Result<(), Errno>;
 }
 
 /// The fail-closed default filesystem service: every operation reports
@@ -230,6 +248,16 @@ impl FilesystemService for NullFilesystemService {
     }
 
     fn unlink(&self, _uid: u32, _caps: &dyn CapabilityQuery, _path: &str) -> Result<(), Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn rename(
+        &self,
+        _uid: u32,
+        _caps: &dyn CapabilityQuery,
+        _src: &str,
+        _dst: &str,
+    ) -> Result<(), Errno> {
         Err(Errno::NotImplemented)
     }
 }

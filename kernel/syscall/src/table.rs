@@ -1147,6 +1147,25 @@ pub trait SyscallHandlers {
     ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
+
+    /// Move the file or directory at absolute `src` (`src_len` bytes) to
+    /// absolute `dst` (`dst_len` bytes) (`PREREQUISITES.md` P-A rename).
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::FS_ACCESS`] and that both `src` and `dst` are
+    /// non-null `UserPtr`s.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn fs_rename(
+        &self,
+        _caller: &CallerContext<'_>,
+        _src: u64,
+        _src_len: usize,
+        _dst: u64,
+        _dst_len: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
 }
 
 /// Architecture-neutral syscall dispatcher.
@@ -1568,6 +1587,12 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             SyscallNumber::FS_UNLINK => {
                 let path_len = decode_len(args.0[1])?;
                 self.handlers.fs_unlink(caller, args.0[0], path_len)
+            }
+            SyscallNumber::FS_RENAME => {
+                let src_len = decode_len(args.0[1])?;
+                let dst_len = decode_len(args.0[3])?;
+                self.handlers
+                    .fs_rename(caller, args.0[0], src_len, args.0[2], dst_len)
             }
             _ => Err(Errno::NotFound),
         }
@@ -2301,6 +2326,18 @@ mod tests {
 
         fn fs_mkdir(&self, _c: &CallerContext<'_>, _path: u64, _path_len: usize) -> SyscallResult {
             self.record("fs_mkdir");
+            Ok(0)
+        }
+
+        fn fs_rename(
+            &self,
+            _c: &CallerContext<'_>,
+            _src: u64,
+            _src_len: usize,
+            _dst: u64,
+            _dst_len: usize,
+        ) -> SyscallResult {
+            self.record("fs_rename");
             Ok(0)
         }
 
