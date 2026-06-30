@@ -205,4 +205,48 @@ fn churn_runs_in_bounded_memory() {
     );
 }
 
+#[test]
+fn over_aligned_request_uses_a_hole_that_is_not_already_over_aligned() {
+    // Regression: a free hole is only ever `ALIGN` (8)-aligned, so an
+    // over-aligned (16-byte) request can find the aligned start sitting a
+    // sub-`MIN_BLOCK` distance above the hole base. The allocator must still
+    // serve the request from such a hole instead of skipping it — otherwise a
+    // single large but 8-aligned hole stranded the whole heap, panicking a
+    // 656-byte/16-align allocation with ~63 MiB free.
+    let mut backing = Backing([0u8; 4096]);
+    let alloc = fixture(&mut backing);
+    // Carve 24 bytes (an odd multiple of `ALIGN`) from the page-aligned base
+    // so the remaining hole begins 8 bytes past a 16-byte boundary: an
+    // 8-aligned-but-not-16-aligned hole.
+    let odd = Layout::from_size_align(24, 8).unwrap();
+    // SAFETY: non-zero layout, fresh allocator.
+    let head = unsafe { alloc.alloc(odd) };
+    assert!(!head.is_null());
+    assert_eq!(alloc.remaining() % 16, 8, "remaining hole must be 8 mod 16");
+    // A 16-aligned request whose aligned start leaves an 8-byte front
+    // remnant. Before the fix this returned null with the rest of the heap
+    // free; it must now succeed and stay 16-aligned.
+    let over = Layout::from_size_align(656, 16).unwrap();
+    // SAFETY: non-zero layout.
+    let p = unsafe { alloc.alloc(over) };
+    assert!(
+        !p.is_null(),
+        "over-aligned request must be served from an 8-aligned hole"
+    );
+    assert_eq!(p as usize % 16, 0);
+    // Disjoint from the first block.
+    assert!(p as usize >= head as usize + 24 || p as usize + 656 <= head as usize);
+    // Freeing both strands nothing: the heap returns fully to empty.
+    // SAFETY: each pointer came from this allocator with its layout.
+    unsafe {
+        alloc.dealloc(p, over);
+        alloc.dealloc(head, odd);
+    }
+    assert_eq!(
+        alloc.used(),
+        0,
+        "no bytes stranded by advancing past the sub-MIN_BLOCK front remnant"
+    );
+}
+
 extern crate alloc;

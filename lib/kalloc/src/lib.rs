@@ -331,18 +331,37 @@ unsafe impl GlobalAlloc for FreeListAllocator {
                     let hole_next = node.as_ref().next;
                     let hole_end = hole_addr + hole_size;
 
-                    // Try to carve exactly `size` bytes at the first aligned
-                    // address in the hole, leaving front/back remnants that
-                    // are each either empty or a representable hole
-                    // (>= `MIN_BLOCK`). A remnant smaller than a hole header
-                    // would be unrepresentable, so rather than absorb it
-                    // (which would leak: `dealloc` reconstructs only `size`
-                    // from the layout, so a carved block larger than `size`
-                    // could never be fully reclaimed) this hole is skipped
-                    // and the search continues. `dealloc` therefore always
-                    // frees the exact `size` that was carved — no leak.
-                    if let Some(start) = align_up(hole_addr, align) {
-                        let front = start - hole_addr;
+                    // Carve exactly `size` bytes at an aligned address inside
+                    // the hole, leaving front/back remnants that are each
+                    // either empty or a representable hole (>= `MIN_BLOCK`), so
+                    // every freed byte stays on the list and `dealloc` frees
+                    // back exactly the `size` carved at the returned pointer —
+                    // no leak.
+                    //
+                    // A hole is only ever `ALIGN`-aligned, so an over-aligned
+                    // request (`align > ALIGN`) can land the aligned start a
+                    // sub-`MIN_BLOCK` distance above the hole base, leaving a
+                    // front remnant too small to be its own free block. Were
+                    // that hole simply skipped, a single large but
+                    // insufficiently-aligned hole could starve every
+                    // over-aligned request even with most of the heap free.
+                    // Instead the start is advanced one alignment stride so the
+                    // front remnant grows into a representable hole: a non-zero
+                    // front only arises when `align > ALIGN`, and `ALIGN >=
+                    // MIN_BLOCK` would make it zero, so `align >= MIN_BLOCK`
+                    // here and one stride always clears `MIN_BLOCK`.
+                    if let Some(mut start) = align_up(hole_addr, align) {
+                        let mut front = start - hole_addr;
+                        if front != 0 && front < MIN_BLOCK {
+                            if let Some(s) = start.checked_add(align) {
+                                start = s;
+                                front += align;
+                            } else {
+                                prev = cur;
+                                cur = hole_next;
+                                continue;
+                            }
+                        }
                         let fits = start.checked_add(size).is_some_and(|end| end <= hole_end);
                         let front_ok = front == 0 || front >= MIN_BLOCK;
                         if fits && front_ok {
