@@ -3540,3 +3540,18 @@ can see *why* a rule exists without diffing the charter's history.
   size or volume count, keeps aggregate I/O fair/bounded (§24.3), and requires the
   §24.5/§7 scalability tests to exercise the conjunction, not each condition in
   isolation. Documentation only.
+
+- **2026-06-30 — Capabilities stay minimal; a new `CAP_*` is a last resort.**
+  Added a §5.2 rule (operator decision): the capability set is deliberately
+  small, and a new capability is added only when it guards a real security
+  boundary for a *group* of resources (never a single file/path/method — that
+  is the per-inode `required_cap` model's job), has a live holder *and*
+  enforcement point in the *same* change (no speculative "for later" caps,
+  §2.3/§2.4), and is not already expressible by an existing capability;
+  renaming/merging/deleting caps is in-place pre-release evolution (§2.13).
+  Prompted by the PREREQUISITES.md P-B writable-`/System/Logs` work: rather than
+  pre-define `CAP_LOG_WRITE`/`CAP_SETTINGS_WRITE`/`CAP_LOG_ROTATE` ahead of any
+  journal/settings service, P-B adds **zero** new caps and gates the writable
+  subtree by the existing inode/mount-flag/`CAP_FS_ACCESS` controls; the named
+  caps arrive with their owning service. §16.2 softened to match. Documentation
+  only.
