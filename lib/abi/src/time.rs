@@ -145,6 +145,147 @@ impl Time64 {
         }
         Self::new(read_i64(bytes, 0), read_u32(bytes, 8))
     }
+
+    /// Add a [`Duration64`] span, saturating the seconds at the `i64`
+    /// bounds rather than wrapping.
+    ///
+    /// The nanosecond fields of both operands are canonical (`0..NANOS_PER_SEC`),
+    /// so their sum is below `2 * NANOS_PER_SEC` and at most one whole second
+    /// is carried into the seconds. This is the arithmetic the kernel wall
+    /// clock uses to project a stored instant forward by an elapsed monotonic
+    /// span; saturating (never wrapping) keeps a runaway span deterministic
+    /// instead of silently rolling the year over.
+    #[must_use]
+    pub fn saturating_add(self, span: Duration64) -> Self {
+        let mut secs = self.secs.saturating_add(span.secs());
+        // Both nanos fields are `< NANOS_PER_SEC`, so the sum is
+        // `< 2 * NANOS_PER_SEC` and fits a `u32` (which tops out above
+        // `4 * NANOS_PER_SEC`); at most one second carries.
+        let mut nanos = self.nanos + span.subsec_nanos();
+        if nanos >= NANOS_PER_SEC {
+            nanos -= NANOS_PER_SEC;
+            secs = secs.saturating_add(1);
+        }
+        Self { secs, nanos }
+    }
+}
+
+/// The kernel's honest assessment of how trustworthy the wall-clock reading
+/// it returns is.
+///
+/// Ordering on disk and in the log stays on the monotonic clock and sequence
+/// numbers; this state is *provenance* metadata so a consumer can tell a
+/// firmware-seeded guess from a network-synchronised time. The kernel attests
+/// it from its own clock state, never from caller-supplied bytes.
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, Default)]
+pub enum WallTimeState {
+    /// No wall time has ever been set this boot; the reading is the Unix
+    /// epoch placeholder and carries no real-world meaning.
+    #[default]
+    Unset = 0,
+    /// Seeded once from firmware / an RTC at boot — plausibly close but not
+    /// independently verified.
+    Firmware = 1,
+    /// Set by a trusted time source (e.g. an authenticated network time
+    /// service).
+    Trusted = 2,
+    /// A previously-set wall time was corrected after the fact (a step
+    /// adjustment); the offset is no longer the original source's.
+    Adjusted = 3,
+}
+
+impl WallTimeState {
+    /// Raw on-wire discriminant.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Decode a [`WallTimeState`] from its wire discriminant.
+    ///
+    /// Returns [`Errno::OutOfRange`] for any value that is not a defined
+    /// variant — never inventing a state (fail closed).
+    pub const fn from_u8(raw: u8) -> Result<Self, Errno> {
+        match raw {
+            0 => Ok(Self::Unset),
+            1 => Ok(Self::Firmware),
+            2 => Ok(Self::Trusted),
+            3 => Ok(Self::Adjusted),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+
+    /// `true` if a real wall time has been established (any state other than
+    /// [`Unset`](Self::Unset)).
+    #[must_use]
+    pub const fn is_set(self) -> bool {
+        !matches!(self, Self::Unset)
+    }
+}
+
+/// A wall-clock reading: the absolute [`Time64`] instant plus the
+/// [`WallTimeState`] describing how trustworthy it is.
+///
+/// This is the value the `wall_time_get` syscall returns and the carrier the
+/// log layer stamps records with. The seconds-and-nanoseconds instant is
+/// 64-bit-native; the state byte is the provenance tag.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub struct WallClockReading {
+    time: Time64,
+    state: WallTimeState,
+}
+
+impl WallClockReading {
+    /// Encoded size on the wire: a [`Time64`] (12 bytes) plus the
+    /// one-byte [`WallTimeState`] discriminant.
+    pub const WIRE_LEN: usize = Time64::WIRE_LEN + 1;
+
+    /// Construct a reading from an instant and its provenance state.
+    #[must_use]
+    pub const fn new(time: Time64, state: WallTimeState) -> Self {
+        Self { time, state }
+    }
+
+    /// The reading with no wall time established: the Unix epoch tagged
+    /// [`WallTimeState::Unset`].
+    pub const UNSET: Self = Self::new(Time64::UNIX_EPOCH, WallTimeState::Unset);
+
+    /// The absolute instant.
+    #[must_use]
+    pub const fn time(&self) -> Time64 {
+        self.time
+    }
+
+    /// The provenance state.
+    #[must_use]
+    pub const fn state(&self) -> WallTimeState {
+        self.state
+    }
+
+    /// Encode `self` little-endian into a fixed-size buffer.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        out[..Time64::WIRE_LEN].copy_from_slice(&self.time.to_le_bytes());
+        out[Time64::WIRE_LEN] = self.state.as_u8();
+        out
+    }
+
+    /// Decode a reading from `bytes`.
+    ///
+    /// Fails closed: [`Errno::BufferTooSmall`] if `bytes` is shorter than
+    /// [`Self::WIRE_LEN`], [`Errno::TimestampOutOfRange`] if the instant's
+    /// nanosecond field is non-canonical, or [`Errno::OutOfRange`] if the
+    /// state byte is not a defined variant.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let time = Time64::from_bytes(&bytes[..Time64::WIRE_LEN])?;
+        let state = WallTimeState::from_u8(bytes[Time64::WIRE_LEN])?;
+        Ok(Self { time, state })
+    }
 }
 
 /// A span of time: signed seconds plus a nanosecond field in
@@ -329,6 +470,92 @@ mod tests {
         assert_eq!(Time64::from_secs(4_294_967_295).secs_u32(), Ok(u32::MAX));
         assert_eq!(
             Time64::from_secs(4_294_967_296).secs_u32(),
+            Err(Errno::TimestampOutOfRange)
+        );
+    }
+
+    #[test]
+    fn saturating_add_carries_a_whole_second() {
+        let base = Time64::new(100, 800_000_000).unwrap();
+        let sum = base.saturating_add(super::Duration64::new(1, 300_000_000).unwrap());
+        assert_eq!(sum.secs(), 102);
+        assert_eq!(sum.subsec_nanos(), 100_000_000);
+    }
+
+    #[test]
+    fn saturating_add_no_carry() {
+        let base = Time64::new(-5, 100).unwrap();
+        let sum = base.saturating_add(super::Duration64::new(2, 200).unwrap());
+        assert_eq!(sum.secs(), -3);
+        assert_eq!(sum.subsec_nanos(), 300);
+    }
+
+    #[test]
+    fn saturating_add_clamps_at_i64_max() {
+        let base = Time64::from_secs(i64::MAX);
+        let sum = base.saturating_add(super::Duration64::from_secs(1_000));
+        assert_eq!(sum.secs(), i64::MAX);
+    }
+
+    #[test]
+    fn wall_time_state_round_trips_and_rejects_unknown() {
+        use super::WallTimeState;
+        for s in [
+            WallTimeState::Unset,
+            WallTimeState::Firmware,
+            WallTimeState::Trusted,
+            WallTimeState::Adjusted,
+        ] {
+            assert_eq!(WallTimeState::from_u8(s.as_u8()), Ok(s));
+        }
+        assert_eq!(WallTimeState::default(), WallTimeState::Unset);
+        assert!(!WallTimeState::Unset.is_set());
+        assert!(WallTimeState::Firmware.is_set());
+        assert!(WallTimeState::Trusted.is_set());
+        assert!(WallTimeState::Adjusted.is_set());
+        assert_eq!(WallTimeState::from_u8(4), Err(Errno::OutOfRange));
+        assert_eq!(WallTimeState::from_u8(0xff), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn wall_clock_reading_round_trips() {
+        use super::{WallClockReading, WallTimeState};
+        let r = WallClockReading::new(
+            Time64::new(1_700_000_000, 123_456_789).unwrap(),
+            WallTimeState::Trusted,
+        );
+        let bytes = r.to_le_bytes();
+        assert_eq!(bytes.len(), WallClockReading::WIRE_LEN);
+        let decoded = WallClockReading::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded, r);
+        assert_eq!(decoded.time().secs(), 1_700_000_000);
+        assert_eq!(decoded.state(), WallTimeState::Trusted);
+    }
+
+    #[test]
+    fn wall_clock_reading_unset_is_epoch_and_unset() {
+        use super::{WallClockReading, WallTimeState};
+        assert_eq!(WallClockReading::UNSET.time(), Time64::UNIX_EPOCH);
+        assert_eq!(WallClockReading::UNSET.state(), WallTimeState::Unset);
+        assert_eq!(WallClockReading::default(), WallClockReading::UNSET);
+    }
+
+    #[test]
+    fn wall_clock_reading_fails_closed() {
+        use super::WallClockReading;
+        assert_eq!(
+            WallClockReading::from_bytes(&[0u8; WallClockReading::WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+        // Bad state byte at the trailing position.
+        let mut bytes = [0u8; WallClockReading::WIRE_LEN];
+        bytes[Time64::WIRE_LEN] = 9;
+        assert_eq!(WallClockReading::from_bytes(&bytes), Err(Errno::OutOfRange));
+        // Non-canonical nanos in the instant.
+        let mut bytes = [0u8; WallClockReading::WIRE_LEN];
+        bytes[8..12].copy_from_slice(&NANOS_PER_SEC.to_le_bytes());
+        assert_eq!(
+            WallClockReading::from_bytes(&bytes),
             Err(Errno::TimestampOutOfRange)
         );
     }

@@ -79,8 +79,8 @@ use rustos_abi::input::KeyInput;
 use rustos_abi::{
     decode_log_record, CapabilityId, DescriptorTable, DirEntry, Errno, FileStat, IrqHandle,
     LimitKind, MapFlags, OpenFlags, ProcId, RandomFlags, ResourceLimit, StreamMode, SyscallNumber,
-    WaitSetOp, WaitSourceKind, CONSOLE_INHERIT, FS_IO_MAX, FS_NAME_MAX, FS_PATH_MAX,
-    LOG_FIELDS_MAX, LOG_RECORD_MAX, RANDOM_REQUEST_MAX_BYTES,
+    Time64, WaitSetOp, WaitSourceKind, WallClockReading, WallTimeState, CONSOLE_INHERIT, FS_IO_MAX,
+    FS_NAME_MAX, FS_PATH_MAX, LOG_FIELDS_MAX, LOG_RECORD_MAX, RANDOM_REQUEST_MAX_BYTES,
 };
 use rustos_caps::CapabilitySet;
 use rustos_kernel_ipc::{
@@ -126,6 +126,7 @@ use crate::spawn::{
     AdmitError, ProcessSpawn, ProgramRegistry, SpawnCtx, EMPTY_PROGRAM_REGISTRY, NULL_PROCESS_SPAWN,
 };
 use crate::users::{UsersDbSource, NULL_USERS_DB};
+use crate::wallclock::{WallClockSource, NULL_WALL_CLOCK};
 
 /// A no-op diagnostic [`Sink`] — the fail-closed default for the
 /// `log_emit` handler's `log_sink` until the boot path installs the real
@@ -330,6 +331,14 @@ where
     /// like the users database, because the mounted filesystem lives for the
     /// lifetime of the running kernel.
     filesystem: &'static (dyn FilesystemService + 'static),
+    /// The kernel wall clock the `wall_time_get` / `wall_time_set` syscalls
+    /// read and drive (`PREREQUISITES.md` P-D). Defaults to the fail-closed
+    /// [`NULL_WALL_CLOCK`] (reads report `Unset`, a set returns
+    /// `NotImplemented`); the boot path installs the production
+    /// [`crate::wallclock::KernelWallClock`] through [`Self::with_wall_clock`].
+    /// Held `'static` because the leaked clock lives for the running kernel's
+    /// lifetime, exactly like the other boot-installed seams.
+    wall_clock: &'static (dyn WallClockSource + 'static),
 }
 
 impl<'a, A> KernelSyscallHandlers<'a, A>
@@ -445,6 +454,11 @@ where
             // (`PREREQUISITES.md` P-A): every `fs_*` syscall fails closed with
             // `NotImplemented`, never fabricating a handle or a read.
             filesystem: &NULL_FILESYSTEM,
+            // The wall clock is unwired until the boot path installs the
+            // production `KernelWallClock` (`PREREQUISITES.md` P-D):
+            // `wall_time_get` reports `Unset` and `wall_time_set` fails closed
+            // with `NotImplemented` through `NULL_WALL_CLOCK`.
+            wall_clock: &NULL_WALL_CLOCK,
         }
     }
 
@@ -464,6 +478,26 @@ where
         filesystem: &'static (dyn FilesystemService + 'static),
     ) -> Self {
         self.filesystem = filesystem;
+        self
+    }
+
+    /// Install the kernel wall clock the `wall_time_get` / `wall_time_set`
+    /// syscalls read and drive, consuming and returning `self`
+    /// (`PREREQUISITES.md` P-D).
+    ///
+    /// Called once by the boot path with the leaked production
+    /// [`crate::wallclock::KernelWallClock`]. Until then the handler holds the
+    /// fail-closed [`NULL_WALL_CLOCK`]: `wall_time_get` reports an `Unset`
+    /// epoch reading and `wall_time_set` returns [`Errno::NotImplemented`].
+    /// The clock must be `'static` because the boot path leaks it alongside
+    /// `KernelState` (no global mutable static; the install is a one-shot
+    /// move).
+    #[must_use]
+    pub const fn with_wall_clock(
+        mut self,
+        wall_clock: &'static (dyn WallClockSource + 'static),
+    ) -> Self {
+        self.wall_clock = wall_clock;
         self
     }
 
@@ -1175,6 +1209,62 @@ where
         } else {
             Ok(rustos_abi::coarsen_clock_ns(ns))
         }
+    }
+
+    fn wall_time_get(&self, caller: &CallerContext<'_>, out: u64, out_cap: usize) -> SyscallResult {
+        // The caller's buffer must hold a whole reading; a short buffer fails
+        // closed rather than truncating it. Unprivileged, like `clock_get`:
+        // the dispatcher attaches no capability gate.
+        if out_cap < WallClockReading::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        // Read the monotonic clock on the issuing CPU — the same source
+        // `clock_get` uses — and project the stored wall instant forward by
+        // the elapsed monotonic time. Ordering never depends on this value.
+        let cpu = SchedulerArch::current_cpu(self.arch);
+        let monotonic_ns = self.arch.monotonic_ns(cpu);
+        let bytes = self.wall_clock.read(monotonic_ns).to_le_bytes();
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_out(space, physmap, VirtAddr::new(out), &bytes)
+        }) {
+            Some(Ok(())) => Ok(bytes.len() as u64),
+            Some(Err(err)) => Err(copy_fault_errno(err)),
+            None => Err(Errno::BadAddress),
+        }
+    }
+
+    fn wall_time_set(
+        &self,
+        caller: &CallerContext<'_>,
+        time: u64,
+        time_len: usize,
+        state: u32,
+    ) -> SyscallResult {
+        // The dispatcher has already checked `CAP_TIME_SET`. Validate the
+        // provenance state first: a value that is not a defined variant, or
+        // the non-settable `Unset`, is rejected before any state is touched
+        // (`WallTimeState::from_u8` rejects the former, the clock the latter).
+        let state = u8::try_from(state)
+            .ok()
+            .map(WallTimeState::from_u8)
+            .ok_or(Errno::OutOfRange)??;
+        // The instant must be a whole `Time64`; a short buffer fails closed.
+        if time_len < Time64::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let mut buf = [0u8; Time64::WIRE_LEN];
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_in(space, physmap, VirtAddr::new(time), &mut buf)
+        }) {
+            Some(Ok(())) => {}
+            Some(Err(err)) => return Err(copy_fault_errno(err)),
+            None => return Err(Errno::BadAddress),
+        }
+        // Reject a non-canonical instant (e.g. nanos >= 1e9) before setting.
+        let wall = Time64::from_bytes(&buf)?;
+        let cpu = SchedulerArch::current_cpu(self.arch);
+        let monotonic_ns = self.arch.monotonic_ns(cpu);
+        self.wall_clock.set(wall, monotonic_ns, state).map(|()| 0)
     }
 
     fn irq_bind(&self, caller: &CallerContext<'_>, line: u32) -> SyscallResult {
@@ -4021,6 +4111,22 @@ where
         filesystem: &'static (dyn FilesystemService + 'static),
     ) -> Self {
         self.handlers = self.handlers.with_filesystem(filesystem);
+        self
+    }
+
+    /// Install the kernel wall clock the `wall_time_get` / `wall_time_set`
+    /// syscalls read and drive, consuming and returning `self`
+    /// (`PREREQUISITES.md` P-D).
+    ///
+    /// The hook-level mirror of [`KernelSyscallHandlers::with_wall_clock`]:
+    /// the boot path passes the leaked production
+    /// [`crate::wallclock::KernelWallClock`]. A boot path that never calls it
+    /// leaves the fail-closed [`crate::wallclock::NULL_WALL_CLOCK`] default
+    /// (`wall_time_get` reports `Unset`, `wall_time_set` returns
+    /// `NotImplemented`).
+    #[must_use]
+    pub fn with_wall_clock(mut self, wall_clock: &'static (dyn WallClockSource + 'static)) -> Self {
+        self.handlers = self.handlers.with_wall_clock(wall_clock);
         self
     }
 
@@ -12316,6 +12422,114 @@ mod tests {
             .holds_cap(CapabilityId::SYSINFO_GLOBAL));
 
         crate::callreg::unregister(EndpointId(id));
+    }
+
+    /// `wall_time_get` / `wall_time_set` round-trip the kernel wall clock
+    /// through the real handlers and the address-space copy paths, and fail
+    /// closed on a short buffer, a non-settable state, and a malformed
+    /// instant (P-D).
+    #[test]
+    fn wall_time_get_and_set_round_trip_and_fail_closed() {
+        use rustos_abi::{Time64, WallClockReading, WallTimeState};
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        // Seed page 3 (`0x3000`) with the `Time64` the set path copies in.
+        // Nanos are 0 so the few-ns monotonic elapsed a later read adds never
+        // carries into the seconds, keeping the assertion deterministic.
+        let wall = Time64::from_secs(1_700_000_000);
+        let (space, physmap) = server_aspace(&wall.to_le_bytes());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(9), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(9, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(9),
+            caps: &caps,
+        };
+        // The boot path leaks the production clock; tests do the same so the
+        // `'static` builder is satisfied and a set persists across reads.
+        let clock: &'static crate::wallclock::KernelWallClock =
+            Box::leak(Box::new(crate::wallclock::KernelWallClock::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_wall_clock(clock);
+
+        // A buffer too small for a whole reading fails closed.
+        assert_eq!(
+            h.wall_time_get(&ctx, 0x1000, WallClockReading::WIRE_LEN - 1),
+            Err(Errno::BufferTooSmall)
+        );
+
+        // Before any set, get reports the Unset epoch reading.
+        let wrote = h.wall_time_get(&ctx, 0x1000, 64).expect("reading written");
+        assert_eq!(wrote, WallClockReading::WIRE_LEN as u64);
+        {
+            let guard = aspaces.read();
+            let (_s, pm) = guard.resolve(SecTaskId(9)).expect("aspace present");
+            let bytes = read_server_page(pm, 1, WallClockReading::WIRE_LEN);
+            let r = WallClockReading::from_bytes(&bytes).expect("valid reading");
+            assert_eq!(r.state(), WallTimeState::Unset);
+            assert_eq!(r.time(), Time64::UNIX_EPOCH);
+        }
+
+        // Setting to `Unset` is rejected (fail closed).
+        assert_eq!(
+            h.wall_time_set(
+                &ctx,
+                0x3000,
+                Time64::WIRE_LEN,
+                u32::from(WallTimeState::Unset.as_u8())
+            ),
+            Err(Errno::OutOfRange)
+        );
+        // An undefined state discriminant is rejected.
+        assert_eq!(
+            h.wall_time_set(&ctx, 0x3000, Time64::WIRE_LEN, 9),
+            Err(Errno::OutOfRange)
+        );
+        // A short instant buffer fails closed.
+        assert_eq!(
+            h.wall_time_set(
+                &ctx,
+                0x3000,
+                Time64::WIRE_LEN - 1,
+                u32::from(WallTimeState::Trusted.as_u8())
+            ),
+            Err(Errno::BufferTooSmall)
+        );
+
+        // The happy path sets the clock to the seeded instant, Trusted.
+        assert_eq!(
+            h.wall_time_set(
+                &ctx,
+                0x3000,
+                Time64::WIRE_LEN,
+                u32::from(WallTimeState::Trusted.as_u8())
+            ),
+            Ok(0)
+        );
+
+        // Now get reflects the set instant and state. The seconds match
+        // exactly; the few-ns monotonic elapsed only touches the nanos.
+        let wrote = h.wall_time_get(&ctx, 0x1000, 64).expect("reading written");
+        assert_eq!(wrote, WallClockReading::WIRE_LEN as u64);
+        let guard = aspaces.read();
+        let (_s, pm) = guard.resolve(SecTaskId(9)).expect("aspace present");
+        let bytes = read_server_page(pm, 1, WallClockReading::WIRE_LEN);
+        let r = WallClockReading::from_bytes(&bytes).expect("valid reading");
+        assert_eq!(r.state(), WallTimeState::Trusted);
+        assert_eq!(r.time().secs(), 1_700_000_000);
+        assert!(r.time().subsec_nanos() < 1_000);
     }
 
     // --- filesystem syscalls (P-A) ----------------

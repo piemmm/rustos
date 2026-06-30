@@ -119,6 +119,8 @@ const NUM_FS_MKDIR: u64 = SyscallNumber::FS_MKDIR.as_u16() as u64;
 const NUM_FS_UNLINK: u64 = SyscallNumber::FS_UNLINK.as_u16() as u64;
 const NUM_FS_RENAME: u64 = SyscallNumber::FS_RENAME.as_u16() as u64;
 const NUM_CALL_PEER_ORIGIN: u64 = SyscallNumber::CALL_PEER_ORIGIN.as_u16() as u64;
+const NUM_WALL_TIME_GET: u64 = SyscallNumber::WALL_TIME_GET.as_u16() as u64;
+const NUM_WALL_TIME_SET: u64 = SyscallNumber::WALL_TIME_SET.as_u16() as u64;
 
 /// Empty argument vector for the no-argument syscalls.
 const NO_ARGS: [u64; SYSCALL_MAX_ARGS] = [0; SYSCALL_MAX_ARGS];
@@ -879,6 +881,45 @@ pub extern "C" fn sys_call_peer_origin(
     }
 }
 
+/// `wall_time_get`: read the kernel wall-clock time and its provenance state
+/// (`SyscallNumber::WALL_TIME_GET`). The current `rustos_abi::WallClockReading`
+/// wire image (a `ros_time64_t` instant plus a one-byte `WallTimeState`) is
+/// written to the `out_cap`-byte buffer at `out` and its byte count returned
+/// (or a `ROS_E_*` code reinterpreted into the result). Unprivileged, like
+/// `ros_sys_clock_get`; before a trusted source sets it the reading is the
+/// Unix epoch tagged `Unset`.
+#[must_use]
+#[export_name = "ros_sys_wall_time_get"]
+pub extern "C" fn sys_wall_time_get(out: *mut c_void, out_cap: usize) -> u64 {
+    // SAFETY: see `sys_call_peer_origin`; the kernel validates the `(ptr, len)`
+    // pair against the caller's address space before writing it.
+    unsafe {
+        raw_syscall(
+            NUM_WALL_TIME_GET,
+            [ptr_arg(out), out_cap as u64, 0, 0, 0, 0],
+        )
+    }
+}
+
+/// `wall_time_set`: set the kernel wall-clock time from a trusted source
+/// (`SyscallNumber::WALL_TIME_SET`). `time` points at a little-endian
+/// `ros_time64_t` of `time_len` bytes; `state` is the `WallTimeState`
+/// discriminant to record (`Firmware`/`Trusted`/`Adjusted` — `Unset` is
+/// rejected). Requires `ROS_CAP_TIME_SET`; the monotonic clock is unaffected.
+/// Returns a `ROS_E_*` code (`0` on success).
+#[must_use]
+#[export_name = "ros_sys_wall_time_set"]
+pub extern "C" fn sys_wall_time_set(time: *mut c_void, time_len: usize, state: u32) -> i32 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates the `(ptr, len)` pair
+    // against the caller's address space before reading it.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_WALL_TIME_SET,
+            [ptr_arg(time), time_len as u64, u64::from(state), 0, 0, 0],
+        ))
+    }
+}
+
 /// `log_emit`: emit one encoded diagnostic record (a `rustos_abi::log`
 /// `LogRecord` wire image of `len` bytes at `record`) to the kernel's
 /// diagnostic log sink (`SyscallNumber::LOG_EMIT`).
@@ -1359,6 +1400,8 @@ mod tests {
         (NUM_FS_UNLINK, "fs_unlink", 2),
         (NUM_FS_RENAME, "fs_rename", 4),
         (NUM_CALL_PEER_ORIGIN, "call_peer_origin", 4),
+        (NUM_WALL_TIME_GET, "wall_time_get", 2),
+        (NUM_WALL_TIME_SET, "wall_time_set", 3),
     ];
 
     #[test]
@@ -1425,6 +1468,33 @@ mod tests {
         assert_eq!(args[0], 0x1234);
         assert_eq!(args[1], ptr as usize as u64);
         assert_eq!(args[2], 16);
+    }
+
+    #[test]
+    fn wall_time_get_marshals_out_pointer_and_capacity() {
+        let mut buf = [0u8; 13];
+        let ptr = buf.as_mut_ptr().cast::<c_void>();
+        let (number, args) = capture(13, || {
+            assert_eq!(sys_wall_time_get(ptr, 13), 13);
+        });
+        assert_eq!(number, NUM_WALL_TIME_GET);
+        assert_eq!(args[0], ptr as usize as u64);
+        assert_eq!(args[1], 13);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn wall_time_set_marshals_time_pointer_len_and_state() {
+        let mut buf = [0u8; 12];
+        let ptr = buf.as_mut_ptr().cast::<c_void>();
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_wall_time_set(ptr, 12, 2), 0);
+        });
+        assert_eq!(number, NUM_WALL_TIME_SET);
+        assert_eq!(args[0], ptr as usize as u64);
+        assert_eq!(args[1], 12);
+        assert_eq!(args[2], 2);
+        assert_eq!(&args[3..], &[0, 0, 0]);
     }
 
     #[test]

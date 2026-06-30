@@ -117,7 +117,10 @@ pub use sysinfo::{
     SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERIES, SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN,
     SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1,
 };
-pub use time::{coarsen_clock_ns, Duration64, Time64, COARSE_CLOCK_GRANULARITY_NS, NANOS_PER_SEC};
+pub use time::{
+    coarsen_clock_ns, Duration64, Time64, WallClockReading, WallTimeState,
+    COARSE_CLOCK_GRANULARITY_NS, NANOS_PER_SEC,
+};
 pub use waitset::{WaitSetOp, WaitSourceKind};
 
 /// ABI version tag for the frozen `abi-v1` interface.

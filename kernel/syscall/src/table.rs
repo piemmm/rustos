@@ -816,6 +816,55 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Read the kernel wall-clock time and its provenance state (P-D).
+    ///
+    /// The dispatcher has already checked `out` is a non-null `UserPtr`; the
+    /// call is unprivileged (like `clock_get`). The implementation reads the
+    /// monotonic clock on the issuing CPU, projects the stored wall instant
+    /// forward by the elapsed monotonic time, and copies the
+    /// [`rustos_abi::WallClockReading`] (a [`rustos_abi::Time64`] plus a
+    /// [`rustos_abi::WallTimeState`] byte) out, returning its byte length. A
+    /// buffer shorter than [`rustos_abi::WallClockReading::WIRE_LEN`] fails
+    /// closed. Before a trusted source has set it the reading is the Unix
+    /// epoch tagged `Unset`.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]; the real handler is installed in
+    /// `kernel/core`.
+    fn wall_time_get(
+        &self,
+        _caller: &CallerContext<'_>,
+        _out: u64,
+        _out_cap: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Set the kernel wall-clock time from a trusted source (P-D).
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::TIME_SET`] and that `time` is a non-null `UserPtr`.
+    /// The implementation validates `state` is a settable
+    /// [`rustos_abi::WallTimeState`] (rejecting `Unset` and any undefined
+    /// discriminant), copies in a [`rustos_abi::Time64`] through the
+    /// validated boundary, rejects a non-canonical instant, and records the
+    /// new wall offset and state — leaving the monotonic clock untouched.
+    /// Returns `Ok(0)`; a malformed instant, a short buffer, or a
+    /// non-settable state fails closed.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]; the real handler is installed in
+    /// `kernel/core`.
+    fn wall_time_set(
+        &self,
+        _caller: &CallerContext<'_>,
+        _time: u64,
+        _time_len: usize,
+        _state: u32,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// Emit a structured diagnostic record to the kernel's diagnostic log
     /// sink.
     ///
@@ -1630,6 +1679,21 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 self.handlers
                     .fs_rename(caller, args.0[0], src_len, args.0[2], dst_len)
             }
+            SyscallNumber::WALL_TIME_GET => {
+                // args[0] is the non-null out `UserPtr` (dispatcher-checked);
+                // args[1] is its capacity in bytes.
+                let out_cap = decode_len(args.0[1])?;
+                self.handlers.wall_time_get(caller, args.0[0], out_cap)
+            }
+            SyscallNumber::WALL_TIME_SET => {
+                // args[0] is the non-null `Time64` `UserPtr` (dispatcher-
+                // checked); args[1] is its byte length; args[2] is the
+                // `WallTimeState` discriminant (validated by the handler).
+                let time_len = decode_len(args.0[1])?;
+                let state = decode_u32(args.0[2]);
+                self.handlers
+                    .wall_time_set(caller, args.0[0], time_len, state)
+            }
             _ => Err(Errno::NotFound),
         }
     }
@@ -2261,6 +2325,31 @@ mod tests {
             Ok(origin_cap as u64)
         }
 
+        fn wall_time_get(
+            &self,
+            _c: &CallerContext<'_>,
+            _out: u64,
+            out_cap: usize,
+        ) -> SyscallResult {
+            self.record("wall_time_get");
+            // Echo the capacity so the reachability test can assert the
+            // dispatcher decoded both arguments without wiring a real clock.
+            Ok(out_cap as u64)
+        }
+
+        fn wall_time_set(
+            &self,
+            _c: &CallerContext<'_>,
+            _time: u64,
+            time_len: usize,
+            _state: u32,
+        ) -> SyscallResult {
+            self.record("wall_time_set");
+            // Echo the length so the reachability test can assert the
+            // dispatcher decoded the arguments without wiring a real clock.
+            Ok(time_len as u64)
+        }
+
         fn log_emit(&self, _c: &CallerContext<'_>, _record: u64, _len: usize) -> SyscallResult {
             self.record("log_emit");
             Ok(0)
@@ -2456,6 +2545,7 @@ mod tests {
                 CapabilityId::HW_EMIT,
                 CapabilityId::SHM,
                 CapabilityId::FS_ACCESS,
+                CapabilityId::TIME_SET,
             ],
             &sink,
         );

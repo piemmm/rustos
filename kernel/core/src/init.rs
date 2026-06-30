@@ -1123,6 +1123,11 @@ fn run_phases<A: KernelArch>(
         // default `NULL_FILESYSTEM` keeps every `fs_*` syscall fail-closed
         // when no volume was mounted.
         .with_filesystem(filesystem)
+        // Serve `wall_time_get` / `wall_time_set` through the production
+        // wall clock (`PREREQUISITES.md` P-D). It boots `Unset`; a trusted
+        // time source drives it via `wall_time_set` under `CAP_TIME_SET`.
+        // `Box::leak`'d for the same one-shot-publish reason as the hook.
+        .with_wall_clock(Box::leak(Box::new(crate::wallclock::KernelWallClock::new())))
         // Serve `log_emit` through the kernel diagnostic sink; the audit sink
         // stays kernel-only.
         .with_log_sink(log_sink)

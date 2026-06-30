@@ -1375,6 +1375,47 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: None,
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::WALL_TIME_GET,
+        name: "wall_time_get",
+        arg_count: 2,
+        args: [
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `U64` carries the bytes-written-or-`-errno` convention, like
+        // `call_peer_origin` / `call_recv`.
+        ret: AbiType::U64,
+        // Reading the wall clock is unprivileged, like `clock_get`: any task
+        // may ask what time it is. Not audited — a pure observer, and a
+        // high-volume one for a time-stamping caller.
+        required_capability: None,
+        audit: false,
+    },
+    SyscallSpec {
+        number: SyscallNumber::WALL_TIME_SET,
+        name: "wall_time_set",
+        arg_count: 3,
+        args: [
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::U32,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // Driving the system clock is a privileged, security-relevant act
+        // (it can move timestamps and certificate-validity windows), so it
+        // is gated by `CAP_TIME_SET` and audited per call. The setter is
+        // low-volume (a boot seed, occasional re-syncs).
+        required_capability: Some(CapabilityId::TIME_SET),
+        audit: true,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in
@@ -1744,6 +1785,20 @@ mod tests {
                 spec_for(n).unwrap().name
             );
         }
+    }
+
+    #[test]
+    fn wall_time_capability_requirements_are_frozen() {
+        // wall_time_get is a pure, unprivileged observer (like clock_get):
+        // any task may read the wall clock, and it is not audited per call.
+        let get = spec_for(SyscallNumber::WALL_TIME_GET).unwrap();
+        assert_eq!(get.required_capability, None);
+        assert!(!get.audit, "wall_time_get must not audit per call");
+        // wall_time_set drives the system clock, so it is gated on
+        // CAP_TIME_SET and audited per call.
+        let set = spec_for(SyscallNumber::WALL_TIME_SET).unwrap();
+        assert_eq!(set.required_capability, Some(CapabilityId::TIME_SET));
+        assert!(set.audit, "wall_time_set must be audited");
     }
 
     #[test]

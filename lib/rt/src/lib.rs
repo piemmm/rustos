@@ -57,8 +57,8 @@
 use rustos_abi::input::KeyInput;
 use rustos_abi::waitset::{WaitSetOp, WaitSourceKind};
 use rustos_abi::{
-    FileStat, HwNode, LimitKind, MapFlags, OpenFlags, ResourceLimit, SyscallNumber,
-    CONSOLE_INHERIT, STDERR, STDIN, STDINFO, STDOUT,
+    FileStat, HwNode, LimitKind, MapFlags, OpenFlags, ResourceLimit, SyscallNumber, Time64,
+    WallClockReading, WallTimeState, CONSOLE_INHERIT, STDERR, STDIN, STDINFO, STDOUT,
 };
 use rustos_abi_trap::raw_syscall;
 
@@ -237,6 +237,12 @@ const NUM_FS_RENAME: u64 = SyscallNumber::FS_RENAME.as_u16() as u64;
 
 /// `call_peer_origin` syscall number (as above).
 const NUM_CALL_PEER_ORIGIN: u64 = SyscallNumber::CALL_PEER_ORIGIN.as_u16() as u64;
+
+/// `wall_time_get` syscall number (as above).
+const NUM_WALL_TIME_GET: u64 = SyscallNumber::WALL_TIME_GET.as_u16() as u64;
+
+/// `wall_time_set` syscall number (as above).
+const NUM_WALL_TIME_SET: u64 = SyscallNumber::WALL_TIME_SET.as_u16() as u64;
 
 /// Marshal a 32-bit signed argument into its register value following the
 /// `abi-v1` `I32` convention (sign-extend through `i64`).
@@ -1532,6 +1538,77 @@ pub fn call_peer_origin(endpoint: u64, ticket: u64, out: &mut [u8]) -> Result<us
     #[allow(clippy::cast_possible_truncation)]
     #[allow(clippy::cast_sign_loss)]
     Ok((ret as usize).min(out.len()))
+}
+
+/// Read the kernel's wall-clock time and its provenance state
+/// (`SyscallNumber::WALL_TIME_GET`; P-D).
+///
+/// Returns a [`WallClockReading`] — an absolute [`Time64`] instant plus a
+/// [`WallTimeState`] saying how trustworthy it is. Unprivileged, like
+/// [`clock_get`]. Before a trusted source has set the clock the reading is
+/// the Unix epoch tagged [`WallTimeState::Unset`]; ordering must always rest
+/// on the monotonic [`clock_get`], never on this value.
+///
+/// # Errors
+///
+/// Returns the raw negative kernel result (`-errno`): the kernel writes the
+/// reading into a stack buffer here, so the only failures are a clock that is
+/// not wired (`NotImplemented`) or a malformed decode (`OutOfRange` /
+/// `BufferTooSmall`, which a correct kernel never produces). The wrapper
+/// hides no error.
+pub fn wall_time() -> Result<WallClockReading, i64> {
+    let mut buf = [0u8; WallClockReading::WIRE_LEN];
+    let out_ptr = buf.as_mut_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
+    // `(ptr, len)` pair against the caller's address space before writing.
+    // `buf` is a live exclusive local for the duration of the call.
+    #[allow(clippy::cast_possible_wrap)]
+    // The kernel guarantees the i64 count-result encoding (count ≥ 0, else -errno).
+    let ret =
+        unsafe { raw_syscall(NUM_WALL_TIME_GET, [out_ptr, buf.len() as u64, 0, 0, 0, 0]) } as i64;
+    if ret < 0 {
+        return Err(ret);
+    }
+    // The kernel returns the wire length; decode it (fail closed on a
+    // malformed image — never inventing a time).
+    WallClockReading::from_bytes(&buf).map_err(|e| -i64::from(e.as_i32()))
+}
+
+/// Set the kernel's wall-clock time from a trusted source
+/// (`SyscallNumber::WALL_TIME_SET`; P-D).
+///
+/// `time` is the absolute [`Time64`] instant and `state` is the provenance to
+/// record — [`WallTimeState::Firmware`], [`WallTimeState::Trusted`], or
+/// [`WallTimeState::Adjusted`] (passing [`WallTimeState::Unset`] is rejected).
+/// The monotonic clock is unaffected; only the wall offset and state change.
+/// Carries `CAP_TIME_SET` (enforced kernel-side).
+///
+/// Returns `0` on success, or the raw negative kernel result (`-errno`): a
+/// missing capability (`PermissionDenied`), a non-settable state
+/// (`OutOfRange`), or a clock that is not wired (`NotImplemented`). The
+/// wrapper hides no error.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
+pub fn wall_time_set(time: Time64, state: WallTimeState) -> i64 {
+    let bytes = time.to_le_bytes();
+    let time_ptr = bytes.as_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
+    // `(ptr, len)` pair against the caller's address space before reading.
+    // `bytes` is a live local for the duration of the call.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_WALL_TIME_SET,
+            [
+                time_ptr,
+                bytes.len() as u64,
+                u64::from(state.as_u8()),
+                0,
+                0,
+                0,
+            ],
+        )
+    };
+    ret as i64
 }
 
 /// Create a kernel-owned, zeroed, cross-process shared-memory region and map

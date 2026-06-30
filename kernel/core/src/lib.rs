@@ -102,6 +102,7 @@ pub mod syscalls;
 pub mod users;
 pub mod waitq;
 pub mod waitset;
+pub mod wallclock;
 
 #[cfg(any(test, feature = "test-arch"))]
 pub mod test_arch;
@@ -172,3 +173,4 @@ pub use waitq::{
     WaitQueue, WaitQueueArch, CALL_WAITQ, CONSOLE_WAITQ, HW_TREE_WAITQ, IRQ_WAITQ, NO_DEADLINE,
     PROCWAIT_WAITQ, SERVE_WAITQ,
 };
+pub use wallclock::{KernelWallClock, NullWallClock, WallClockSource, NULL_WALL_CLOCK};

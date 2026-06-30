@@ -105,6 +105,8 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  56 | `dma_free`     | `Handle handle`, `u64 cpu_va`           | `errno`       | `CAP_MEM_DMA`   | yes   |
 |  57 | `fs_rename`    | `user_ptr` (src), `len`, `user_ptr` (dst), `len` | `errno` | `CAP_FS_ACCESS` | yes |
 |  58 | `call_peer_origin` | `IpcEndpoint`, `Handle` (ticket), `user_ptr` (origin out), `len` | `u64` (bytes) | — | no |
+|  59 | `wall_time_get` | `user_ptr` (out), `len`                | `u64` (bytes) | — | no |
+|  60 | `wall_time_set` | `user_ptr` (time), `len`, `u32 state`  | `errno` | `CAP_TIME_SET` | yes |
 
 (Syscall numbers 39–45 — `msi_alloc`, `shm_create`/`shm_map`/`shm_unmap`,
 `waitset_create`/`waitset_ctl`/`waitset_wait` — are defined in
@@ -133,6 +135,7 @@ is exhaustive — anything not listed below is ungated:
 | `CAP_LOG_EMIT`     | `log_emit`                 |
 | `CAP_HW_EMIT`      | `hw_emit_node`, `hw_remove_node` |
 | `CAP_FS_ACCESS`    | `fs_open`, `fs_close`, `fs_read`, `fs_write`, `fs_readdir`, `fs_stat`, `fs_truncate`, `fs_sync`, `fs_mkdir`, `fs_unlink`, `fs_rename` |
+| `CAP_TIME_SET`     | `wall_time_set`            |
 
 The `CAP_IRQ_BIND` rationale, the wake-up contract, and the failure
 modes are documented in
@@ -397,6 +400,29 @@ It is the foundation a capability-gated user-space service builds on to learn
 who called it — its first consumer is `sysinfod`'s self-scoped
 `PROCESS_IDENTITY` query (`AGENTS.md` §16.6). The first-party Rust wrapper is
 `rustos_rt::call_peer_origin`; the C stub is `ros_sys_call_peer_origin`.
+
+`wall_time_get` (no. 59) and `wall_time_set` (no. 60) are the wall-clock
+pair (`PREREQUISITES.md` P-D). The kernel keeps an absolute wall-clock time
+beside the per-CPU monotonic clock: `wall_time_get` returns a
+`rustos_abi::WallClockReading` — a `Time64` instant plus a
+`rustos_abi::WallTimeState` byte (`Unset` / `Firmware` / `Trusted` /
+`Adjusted`) saying how trustworthy that time is. It is **ungated** and
+unaudited, the same unprivileged observer baseline as `clock_get`; before a
+trusted source sets the clock the reading is the Unix epoch tagged `Unset`.
+Event **ordering** never rests on this value — the monotonic `clock_get` and
+sequence numbers remain the ordering authority; the wall time is provenance
+metadata for stamping records. `wall_time_set` records a new wall instant
+and its provenance `state`, capturing the monotonic reading at that moment so
+a later `wall_time_get` projects the instant forward by the elapsed monotonic
+time (the monotonic clock itself is never touched). It is gated on
+**`CAP_TIME_SET`** — driving the system clock is privileged and security-
+relevant — and **audited**; a malformed instant, a short buffer, or a
+non-settable `state` (`Unset`, or any undefined discriminant) fails closed,
+and the kernel attests the state itself so a caller cannot mislabel it. The
+clock boots `Unset`; until a trusted time source drives it, `wall_time_get`
+reports the epoch. The first-party Rust wrappers are `rustos_rt::wall_time` /
+`rustos_rt::wall_time_set`; the C stubs are `ros_sys_wall_time_get` /
+`ros_sys_wall_time_set`.
 
 `mem_map` / `mem_unmap` are deliberately **ungated** (no row above). They
 grow and shrink the caller's *own* hardware-isolated address space with

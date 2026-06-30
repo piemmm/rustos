@@ -973,6 +973,39 @@ impl SyscallNumber {
     /// [`crate::ORIGIN_WIRE_LEN`] fails closed. The summary it carries is the
     /// caller's capability *membership* bitmap, never any capability token.
     pub const CALL_PEER_ORIGIN: Self = Self(58);
+    /// Read the kernel's wall-clock time and its provenance state
+    /// (`PREREQUISITES.md` P-D).
+    ///
+    /// Arguments: `out: *mut u8` (user buffer), `out_cap: usize` (its
+    /// capacity, at least [`crate::WallClockReading::WIRE_LEN`]). On success
+    /// the current [`WallClockReading`](crate::WallClockReading) — a
+    /// [`Time64`](crate::Time64) instant plus a
+    /// [`WallTimeState`](crate::WallTimeState) byte — is written
+    /// little-endian to `out` and its byte length returned. A buffer shorter
+    /// than the wire length fails closed.
+    ///
+    /// Unprivileged: any task may read the wall clock. Before a trusted
+    /// source has set it the reading is the Unix epoch tagged
+    /// [`WallTimeState::Unset`](crate::WallTimeState::Unset); ordering of
+    /// events never relies on this value (the monotonic clock and sequence
+    /// numbers are the ordering authority).
+    pub const WALL_TIME_GET: Self = Self(59);
+    /// Set the kernel's wall-clock time from a trusted source
+    /// (`PREREQUISITES.md` P-D).
+    ///
+    /// Arguments: `time: *const u8` (a little-endian
+    /// [`Time64`](crate::Time64), [`crate::Time64::WIRE_LEN`] bytes),
+    /// `time_len: usize`, `state: u32` (the
+    /// [`WallTimeState`](crate::WallTimeState) discriminant to record —
+    /// `Firmware`, `Trusted`, or `Adjusted`). Returns `0`, or `-errno`.
+    ///
+    /// Gated by [`crate::CapabilityId::TIME_SET`]: only a principal trusted
+    /// to drive the clock may call it. A malformed instant, a short buffer,
+    /// or a `state` that is not a settable variant
+    /// ([`Unset`](crate::WallTimeState::Unset) is rejected) fails closed.
+    /// The monotonic clock is unaffected; only the wall-time offset and
+    /// state change.
+    pub const WALL_TIME_SET: Self = Self(60);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
@@ -1107,6 +1140,8 @@ mod tests {
         assert_eq!(SyscallNumber::DMA_FREE.as_u16(), 56);
         assert_eq!(SyscallNumber::FS_RENAME.as_u16(), 57);
         assert_eq!(SyscallNumber::CALL_PEER_ORIGIN.as_u16(), 58);
+        assert_eq!(SyscallNumber::WALL_TIME_GET.as_u16(), 59);
+        assert_eq!(SyscallNumber::WALL_TIME_SET.as_u16(), 60);
     }
 
     #[test]

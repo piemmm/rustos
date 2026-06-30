@@ -304,6 +304,20 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
+    fn wall_time_get(&self, _c: &CallerContext<'_>, _out: u64, _out_cap: usize) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn wall_time_set(
+        &self,
+        _c: &CallerContext<'_>,
+        _time: u64,
+        _time_len: usize,
+        _state: u32,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
     fn log_emit(&self, _c: &CallerContext<'_>, _record: u64, _len: usize) -> SyscallResult {
         self.bump();
         Ok(0)
