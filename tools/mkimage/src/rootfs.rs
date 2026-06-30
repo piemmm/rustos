@@ -2,8 +2,14 @@
 //!
 //! The root partition is a genuine encrypted `RustFS` volume laid down by
 //! the real driver (`rustos-drv-fs-rustfs`) and pre-populated with the
-//! authoritative top-level layout: exactly `/System`,
-//! `/Users`, `/Apps`, and `/Storage`, plus the fixed `/System` subtree.
+//! authoritative top-level layout: exactly `/System`, `/Users`, `/Apps`,
+//! and `/Storage`. It is the **writable** volume mounted as `/`, so under
+//! `/System` it carries **only** the writable-state subtree
+//! ([`WRITABLE_SYSTEM_SUBDIRS`]: `Logs`, `Settings`, and `Security`) — the
+//! immutable `/System` content (`Kernel`, `Drivers`, `Libraries`, …) lives on
+//! the separate read-only `RustFsSystem` volume that is mounted *over* this
+//! one at `/System`, so duplicating it here would be dead weight and a second
+//! copy that could drift.
 //! The user and group databases under `/System/Security`, the first user's
 //! home, and the mount policies are the installer's first-boot job —
 //! the image ships the skeleton the installer fills in. A **debug** image
@@ -31,10 +37,10 @@ use crate::MkimageError;
 /// other top-level name on a RustOS volume is a defect.
 pub const TOP_LEVEL_DIRS: [&str; 4] = ["System", "Users", "Apps", "Storage"];
 
-/// The `/System` subtree the image ships. `Security`
-/// additionally carries its fixed `Keys` and `Policy` subdirectories; the
-/// `Users`/`Groups` databases inside it are installer-authored data, not
-/// image content.
+/// The full `/System` subtree the **read-only** `RustFsSystem` volume ships
+/// (`build_system_partition`). `Security` additionally carries its fixed
+/// `Keys` and `Policy` subdirectories; the `Users`/`Groups` databases inside
+/// it are installer-authored data, not image content.
 pub const SYSTEM_SUBDIRS: [&str; 12] = [
     "Kernel",
     "Drivers",
@@ -49,6 +55,17 @@ pub const SYSTEM_SUBDIRS: [&str; 12] = [
     "Settings",
     "Services",
 ];
+
+/// The writable-state `/System` subtree the **encrypted root** volume ships
+/// (`build_root_partition`). These are the only `/System` paths that resolve
+/// to the writable root volume at runtime: `Logs` and `Settings` are the
+/// writable exceptions mounted over the read-only `/System`, and `Security`
+/// holds the encrypted user/group databases (read by the boot-time
+/// `/System/Security` reader off this volume, where the secret belongs — it
+/// is never placed on the well-known-keyed `RustFsSystem` volume). The
+/// immutable subdirectories in [`SYSTEM_SUBDIRS`] are deliberately absent
+/// here; they live only on `RustFsSystem`.
+pub const WRITABLE_SYSTEM_SUBDIRS: [&str; 3] = ["Logs", "Settings", "Security"];
 
 /// Number of inodes the root volume is formatted with: ample for the
 /// skeleton plus the installer's first-boot output, while trivial against
@@ -141,18 +158,27 @@ pub fn build_system_partition(
     Ok(fs.into_block().into_bytes())
 }
 
-/// Lay the `/System` subtree under `system` on the
-/// encrypted data root: the [`SYSTEM_SUBDIRS`], `Security/{Keys,Policy}`,
-/// and — for a debug image — the seeded users database and matching group
-/// registry. Shared with [`build_root_partition`] so the encrypted root and
-/// the `/System` volume agree on the subtree shape.
+/// Lay the **writable-state** `/System` subtree under `system` on the
+/// encrypted data root: the [`WRITABLE_SYSTEM_SUBDIRS`] (`Logs`, `Settings`,
+/// and `Security` with its `Keys`/`Policy`), and — for a debug image — the
+/// seeded users database and matching group registry under `Security`. The
+/// immutable `/System` content is **not** authored here (it lives on the
+/// read-only `RustFsSystem` volume); only what the writable root volume
+/// actually backs at runtime is laid down.
 fn populate_system_subtree(
     fs: &mut RustFs<MemBlock>,
     system: NodeId,
     users_db: Option<&str>,
     groups_db: Option<&str>,
 ) -> Result<(), MkimageError> {
-    create_system_subdirs(fs, system, MkimageError::RootPartition)?;
+    for sub in WRITABLE_SYSTEM_SUBDIRS {
+        let node = fs
+            .create(system, sub.as_bytes(), NodeKind::Directory)
+            .map_err(MkimageError::RootPartition)?;
+        if sub == "Security" {
+            create_security_subdirs(fs, node, MkimageError::RootPartition)?;
+        }
+    }
     if users_db.is_some() || groups_db.is_some() {
         let security = fs
             .lookup(system, b"Security")
@@ -181,11 +207,25 @@ fn create_system_subdirs(
             .create(system, sub.as_bytes(), NodeKind::Directory)
             .map_err(wrap)?;
         if sub == "Security" {
-            for sec in ["Keys", "Policy"] {
-                fs.create(sub_node, sec.as_bytes(), NodeKind::Directory)
-                    .map_err(wrap)?;
-            }
+            create_security_subdirs(fs, sub_node, wrap)?;
         }
+    }
+    Ok(())
+}
+
+/// Create the fixed `Keys` and `Policy` subdirectories under a `Security`
+/// node. The one definition both the read-only `/System` volume and the
+/// encrypted root's writable-state subtree author their `Security/{Keys,
+/// Policy}` through, so the two cannot drift; `wrap` tags the failure with
+/// the partition the caller is authoring.
+fn create_security_subdirs(
+    fs: &mut RustFs<MemBlock>,
+    security: NodeId,
+    wrap: fn(rustos_abi::DriverError) -> MkimageError,
+) -> Result<(), MkimageError> {
+    for sec in ["Keys", "Policy"] {
+        fs.create(security, sec.as_bytes(), NodeKind::Directory)
+            .map_err(wrap)?;
     }
     Ok(())
 }
@@ -241,7 +281,7 @@ mod tests {
     }
 
     #[test]
-    fn lays_out_the_section_16_skeleton() {
+    fn lays_out_the_writable_state_skeleton_only() {
         let bytes = build();
         assert_eq!(
             bytes.len(),
@@ -256,7 +296,9 @@ mod tests {
                 .unwrap_or_else(|_| panic!("/{name} exists"));
         }
         let system = fs.lookup(root, b"System").expect("/System exists");
-        for sub in SYSTEM_SUBDIRS {
+        // The encrypted root carries ONLY the writable-state /System subtree;
+        // the immutable content lives on the read-only RustFsSystem volume.
+        for sub in WRITABLE_SYSTEM_SUBDIRS {
             fs.lookup(system, sub.as_bytes())
                 .unwrap_or_else(|_| panic!("/System/{sub} exists"));
         }
@@ -264,6 +306,17 @@ mod tests {
         fs.lookup(security, b"Keys").expect("Security/Keys exists");
         fs.lookup(security, b"Policy")
             .expect("Security/Policy exists");
+
+        // The immutable subdirectories are deliberately absent on the
+        // writable root — duplicating them here is the "two /System folders"
+        // defect this layering removes. They are reached at `/System` through
+        // the read-only RustFsSystem volume mounted over `/`.
+        for immutable in ["Kernel", "Drivers", "Libraries", "Fonts", "Services"] {
+            assert!(
+                fs.lookup(system, immutable.as_bytes()).is_err(),
+                "/System/{immutable} must NOT exist on the writable root volume"
+            );
+        }
     }
 
     #[test]

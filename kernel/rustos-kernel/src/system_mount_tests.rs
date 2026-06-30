@@ -107,32 +107,96 @@ impl FilesystemSecurity for SentinelFs {
 }
 
 #[test]
-fn system_vfs_mounts_system_read_only_and_driver_backed() {
-    // The production `/System` mount: a path under `/System` resolves to a
-    // read-only, driver-backed mount, so the secured VFS delegates reads to
-    // the live volume and refuses writes.
-    let vfs = system_vfs().expect("the production /System VFS builds");
+fn system_vfs_mounts_the_writable_volume_as_root() {
+    // The corrected layering: the encrypted, writable root volume *is* `/`,
+    // so `/` itself and the persistent top-level trees (`/Users`, `/Apps`,
+    // `/Storage`) resolve to a writable, driver-backed mount — not the
+    // volatile in-RAM tree, and not the read-only `/System` volume. This is
+    // the regression guard for the "writes outside /System/{Logs,Settings}
+    // were non-persistent" defect.
+    let vfs = system_vfs().expect("the production VFS builds");
+    let root = vfs.mounts().resolve(&Path::parse("/").expect("valid"));
+    assert_eq!(root.path(), &Path::parse("/").expect("valid"));
+    assert!(!root.is_read_only(), "/ is writable");
+    let root_handle = root
+        .backing()
+        .expect("/ is driver-backed by the writable root volume");
+    // The whole-volume root mount roots at the volume's own root.
+    assert!(
+        root.backing_subtree().is_empty(),
+        "/ is a whole-volume mount (no rebasing)"
+    );
+
+    for top in ["/Users", "/Apps", "/Storage"] {
+        let under = Path::parse(&alloc::format!("{top}/alice/file")).expect("valid path");
+        let mount = vfs.mounts().resolve(&under);
+        assert_eq!(
+            mount.path(),
+            &Path::parse(top).expect("valid"),
+            "{top} is its own mount"
+        );
+        assert!(!mount.is_read_only(), "{top} is writable (persistent)");
+        assert_eq!(
+            mount.backing(),
+            Some(root_handle),
+            "{top} is backed by the one writable root volume"
+        );
+        // Rebased onto the volume's own same-named directory so the one
+        // driver resolves from its own root.
+        assert_eq!(
+            mount.backing_subtree(),
+            &[alloc::string::String::from(top.trim_start_matches('/'))],
+            "{top} is rebased onto the volume's own {top}"
+        );
+    }
+}
+
+#[test]
+fn system_vfs_shadows_root_with_the_read_only_system_volume() {
+    // The read-only `/System` volume is mounted *over* the writable root at
+    // `/System`: a path under `/System` resolves to a read-only,
+    // driver-backed mount on a *different* volume from `/`, so reads delegate
+    // to the immutable volume and writes are refused.
+    let vfs = system_vfs().expect("the production VFS builds");
+    let root_handle = vfs
+        .mounts()
+        .resolve(&Path::parse("/").expect("valid"))
+        .backing()
+        .expect("/ is driver-backed");
+
     let under_system = Path::parse("/System/Drivers/x").expect("valid path");
     let mount = vfs.mounts().resolve(&under_system);
     assert_eq!(mount.path(), &Path::parse("/System").expect("valid"));
     assert!(mount.is_read_only(), "/System is mounted read-only");
+    let system_handle = mount
+        .backing()
+        .expect("/System is driver-backed so the VFS delegates to the live volume");
     assert!(
-        mount.backing().is_some(),
-        "/System is driver-backed so the VFS delegates to the live volume"
+        mount.backing_subtree().is_empty(),
+        "/System is a whole-volume mount (its content is the volume root)"
+    );
+    assert_ne!(
+        system_handle, root_handle,
+        "/System is a different volume from the writable root"
     );
 }
 
 #[test]
-fn system_vfs_mounts_logs_and_settings_writable_and_rebased() {
+fn system_vfs_carves_logs_and_settings_back_to_the_writable_volume() {
     use rustos_abi::driver::filesystem::MountFlags;
 
     // `/System/Logs` and `/System/Settings` are the only writable paths
-    // beneath `/System` (P-B): each is a `nosuid,nodev,noexec` writable
-    // sub-mount of the encrypted root volume, rebased onto that volume's own
-    // `/System/<name>` directory, and shares one backing handle distinct from
-    // the read-only `/System`. `MountTable` longest-prefix resolution makes
-    // the writable child shadow the read-only parent.
-    let vfs = system_vfs().expect("the production /System VFS builds");
+    // beneath `/System`: each is a `nosuid,nodev,noexec` writable sub-mount of
+    // the *writable root volume* (the same handle that backs `/`), rebased
+    // onto that volume's own `/System/<name>` directory. `MountTable`
+    // longest-prefix resolution makes the writable child shadow the read-only
+    // `/System`.
+    let vfs = system_vfs().expect("the production VFS builds");
+    let root_handle = vfs
+        .mounts()
+        .resolve(&Path::parse("/").expect("valid"))
+        .backing()
+        .expect("/ is driver-backed");
     let system_handle = vfs
         .mounts()
         .resolve(&Path::parse("/System/Drivers/x").expect("valid"))
@@ -142,7 +206,6 @@ fn system_vfs_mounts_logs_and_settings_writable_and_rebased() {
     let nosuid_nodev_noexec = MountFlags::NOSUID
         .union(MountFlags::NODEV)
         .union(MountFlags::NOEXEC);
-    let mut writable_handle = None;
     for name in ["Logs", "Settings"] {
         let under = Path::parse(&alloc::format!("/System/{name}/file")).expect("valid path");
         let mount = vfs.mounts().resolve(&under);
@@ -160,16 +223,14 @@ fn system_vfs_mounts_logs_and_settings_writable_and_rebased() {
         let handle = mount
             .backing()
             .expect("the writable sub-mount is driver-backed");
+        assert_eq!(
+            handle, root_handle,
+            "the writable {name} subtree is the one writable root volume"
+        );
         assert_ne!(
             handle, system_handle,
             "the writable backing is a different volume from read-only /System"
         );
-        // The two writable subtrees share one backing (the one encrypted root
-        // volume).
-        match writable_handle {
-            None => writable_handle = Some(handle),
-            Some(prev) => assert_eq!(prev, handle, "Logs and Settings share one backing volume"),
-        }
         // Rebased onto the backing volume's own `/System/<name>` directory.
         assert_eq!(
             mount.backing_subtree(),

@@ -773,17 +773,20 @@ fn emmc2_unlock<'a>(
 ///
 /// The live [`WritableRootSink`]: on a successful unlock it opens a second,
 /// independent `'static` read-write [`RustFs`] window onto the `RustFsRoot`
-/// partition under the just-derived key and registers it as the writable
-/// `/System/Logs` + `/System/Settings` backing
+/// partition under the just-derived key and registers it as the **writable
+/// root volume** backing — `/` itself and every writable sub-mount of it
+/// (`/Users`, `/Apps`, `/Storage`, `/System/Logs`, `/System/Settings`),
+/// which all resolve to this one volume
 /// (`crate::system_mount::register_writable_state`).
 ///
 /// This is the only path that can mount the writable state: the encrypted
 /// root is the one writable partition, so its key — live only at the moment
-/// of a successful unlock — is required. The read window the unlock used for
+/// of a successful unlock — is required, and until it lands every write to
+/// `/` and its subtrees fails closed. The read window the unlock used for
 /// `/System/Security` is already dropped, so this read-write view is the
 /// sole writer of the volume. Fail-soft and audited: any partition/window/
-/// mount refusal leaves the writable subtrees failing closed and never
-/// disturbs the users/identity install.
+/// mount refusal leaves the writable tree failing closed and never disturbs
+/// the users/identity install.
 struct WritableStateSink<'a, B: Block + 'static> {
     store: &'static DriverStoreService<B>,
     audit: &'a dyn Sink,
@@ -910,10 +913,11 @@ fn finish_unlock<B: Block + 'static>(
         // the defect that wedged both the keyboard and serial `login` after a
         // good unlock (a failed unlock still installs no
         // database, so `login` keeps refusing).
-        // Publish the writable `/System/Logs` + `/System/Settings` backing on
-        // a successful unlock, from a second `'static` read-write window onto
-        // the same `'static`-leaked disk (park-safe via the device
-        // `SleepLock`), under the just-derived key.
+        // Publish the writable root volume backing (`/` and its writable
+        // subtrees — `/Users`, `/Apps`, `/Storage`, `/System/Logs`,
+        // `/System/Settings`) on a successful unlock, from a second `'static`
+        // read-write window onto the same `'static`-leaked disk (park-safe via
+        // the device `SleepLock`), under the just-derived key.
         let writable = WritableStateSink { store, audit };
         match unlock_root_disk_interactively(
             store.window(),

@@ -521,6 +521,16 @@ impl Vfs {
         if src_mount.path() != dst_mount.path() {
             return Err(VfsError::InvalidPath);
         }
+        // A rename must not be a back door to creating a reserved legacy
+        // POSIX top-level name on the writable root volume that a direct
+        // create/mkdir refuses.
+        if dst.depth() == 1 {
+            if let Some(name) = dst.file_name() {
+                if is_reserved_top_level(name) {
+                    return Err(VfsError::ReservedPath);
+                }
+            }
+        }
         let mount_depth = src_mount.path().depth();
         let mount_path = src_mount.path().clone();
         // A sub-mount roots its content at `backing_subtree` on the backing
@@ -562,8 +572,23 @@ impl Vfs {
         if mount.backing().is_none() {
             return Err(VfsError::NotFound);
         }
-        if require_writable && mount.is_read_only() {
-            return Err(VfsError::ReadOnly);
+        if require_writable {
+            // The reserved legacy POSIX top-level names are refused on a
+            // driver-backed mount exactly as on the in-RAM tree: with the
+            // writable root volume backing `/`, a delegated create/mkdir must
+            // not be able to lay down `/etc`, `/home`, … on the volume. The
+            // ban is a structural layout rule, not a permission, so it fails
+            // closed before any driver write.
+            if path.depth() == 1 {
+                if let Some(name) = path.file_name() {
+                    if is_reserved_top_level(name) {
+                        return Err(VfsError::ReservedPath);
+                    }
+                }
+            }
+            if mount.is_read_only() {
+                return Err(VfsError::ReadOnly);
+            }
         }
         let mount_depth = mount.path().depth();
         let mount_path = mount.path().clone();

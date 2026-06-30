@@ -576,6 +576,64 @@ fn delegated_mutation_of_mount_root_is_invalid() {
     );
 }
 
+/// A VFS whose **root** mount is driver-backed (the production shape once
+/// the writable root volume backs `/`), so a delegated create at `/<name>`
+/// lands a top-level directory on the volume.
+fn root_backed_rw_vfs() -> Vfs {
+    let mut vfs = Vfs::with_default_layout(UserId(ADMIN_UID), GroupId(ADMIN_GID));
+    let handle = DriverHandle::from_raw(9).expect("non-zero handle");
+    vfs.mounts_mut()
+        .back_root(handle)
+        .expect("back the root mount");
+    vfs
+}
+
+#[test]
+fn delegated_create_of_reserved_top_level_name_is_refused() {
+    // With the writable root volume backing `/`, a delegated mkdir/create
+    // must still refuse the reserved legacy POSIX top-level names (§16.1) —
+    // the structural layout ban, not a permission, applied before any
+    // driver write.
+    let vfs = root_backed_rw_vfs();
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let mut fs = RwMockFs::new();
+
+    for reserved in ["/etc", "/home", "/usr", "/bin", "/tmp", "/dev", "/proc"] {
+        assert_eq!(
+            vfs.mkdir_via(&admin, &p(reserved), &mut fs),
+            Err(VfsError::ReservedPath),
+            "delegated mkdir of {reserved} is refused"
+        );
+        assert_eq!(
+            vfs.create_via(&admin, &p(reserved), &mut fs),
+            Err(VfsError::ReservedPath),
+            "delegated create of {reserved} is refused"
+        );
+    }
+
+    // A non-reserved top-level directory is allowed (the four-name layout
+    // and mounted volumes are created this way).
+    vfs.mkdir_via(&admin, &p("/Workspace"), &mut fs)
+        .expect("a non-reserved top-level directory is allowed");
+}
+
+#[test]
+fn delegated_rename_into_reserved_top_level_name_is_refused() {
+    // Renaming an existing entry to a reserved top-level name must be
+    // refused too, so rename is not a back door around the create ban.
+    let vfs = root_backed_rw_vfs();
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let mut fs = RwMockFs::new();
+    vfs.mkdir_via(&admin, &p("/Scratch"), &mut fs)
+        .expect("create a renameable source");
+    assert_eq!(
+        vfs.rename_via(&admin, &p("/Scratch"), &p("/etc"), &mut fs),
+        Err(VfsError::ReservedPath)
+    );
+}
+
 // ---------------------------------------------------------------------
 // Per-inode (`FilesystemSecurity`) delegation tests.
 //

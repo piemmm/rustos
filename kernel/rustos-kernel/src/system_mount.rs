@@ -1,5 +1,5 @@
-//! Boot-time install of the read-only `/System` volume as the userland
-//! `fs_*` filesystem mount (`PREREQUISITES.md` P-A).
+//! Boot-time install of the userland `fs_*` filesystem mount table
+//! (`PREREQUISITES.md` P-A).
 //!
 //! The `fs_*` syscalls route through a single
 //! [`MountedFilesystemService`] the dispatch hook holds from boot (installed
@@ -10,14 +10,40 @@
 //! path installs both, every `fs_*` syscall fails closed
 //! ([`Errno::NotImplemented`](rustos_abi::Errno::NotImplemented)).
 //!
-//! This module owns the mount half: it opens a second, independent
-//! `'static` read-only window onto the `/System` volume on the one
-//! bootstrap-floor disk (the driver-store serve loop keeps its own window
-//! over the same [`SharedBlock`](crate::shared_block::SharedBlock), and
-//! concurrent windows are already park-safe through the device's
-//! `SleepLock`), mounts it through the real `RustFs` driver, and publishes it
-//! into [`LATE_FILESYSTEM`]. The identity half is published by the
-//! encrypted-root unlock step (`crate::root_mount`, [`LATE_IDENTITY`]).
+//! # The mount layering: writable root, read-only `/System` shadow
+//!
+//! The system has two `RustFs` volumes on the one bootstrap-floor disk:
+//!
+//! * the **encrypted, writable root volume** (`RustFsRoot`) — the persistent
+//!   home of every writable path: `/` itself, `/Users`, `/Apps`, `/Storage`,
+//!   and the two writable `/System` exceptions `/System/Logs` and
+//!   `/System/Settings`; and
+//! * the **read-only, well-known-keyed `/System` volume** (`RustFsSystem`) —
+//!   the immutable kernel image, drivers, and libraries.
+//!
+//! The writable volume is mounted as `/` (`MountTable::back_root`); the
+//! read-only `/System` volume is mounted *over* it at `/System`, and the
+//! writable `/System` exceptions are carved back out as rebased sub-mounts of
+//! the writable volume. `MountTable` longest-prefix resolution stitches the
+//! two into one tree with **no path served by both volumes** — a read of
+//! `/System/Drivers/...` resolves to the read-only volume, a write under
+//! `/Users`, `/Apps`, `/Storage`, `/System/Logs`, or `/System/Settings`
+//! resolves to the writable volume, and everything else resolves to `/` on
+//! the writable volume. This is disjoint sub-mounting, never a union/overlay
+//! "merge" of two `/System` trees (which would need whiteouts, copy-up, and
+//! ambiguous write targets — the opposite of the charter's fail-closed,
+//! deterministic resolution).
+//!
+//! This module owns the mount half: it opens an independent `'static`
+//! read-only window onto the `/System` volume (the driver-store serve loop
+//! keeps its own window over the same
+//! [`SharedBlock`](crate::shared_block::SharedBlock), and concurrent windows
+//! are already park-safe through the device's `SleepLock`), publishes the
+//! mount-table layout into [`LATE_FILESYSTEM`], and registers the read-only
+//! `/System` driver against it. The writable root driver is registered
+//! separately by [`register_writable_state`] once the encrypted root is
+//! unlocked; the identity half is published by the encrypted-root unlock step
+//! (`crate::root_mount`, [`LATE_IDENTITY`]).
 //!
 //! # Why the driver type is erased
 //!
@@ -31,21 +57,19 @@
 //! `FilesystemRead + FilesystemWrite + FilesystemSecurity + Send` bound the
 //! service requires.
 //!
-//! Writes to `/System` itself stay closed (it is read-only); the writable
-//! `/System/Logs` and `/System/Settings` subtrees are backed by the
-//! **encrypted root volume** through a second driver registered by
-//! [`register_writable_state`] once the root is unlocked. Until that driver
-//! is registered, operations on those subtrees fail closed `NotImplemented`,
-//! never a silent fallback to the read-only `/System`.
+//! Until the writable root driver is registered (after the encrypted root is
+//! unlocked), every operation on `/` and its writable subtrees fails closed
+//! `NotImplemented`, never a silent fallback to the read-only `/System`. The
+//! read-only `/System` volume itself never accepts a write through its
+//! handle.
 
 use alloc::boxed::Box;
-use alloc::string::ToString;
-use alloc::vec;
+use alloc::vec::Vec;
 
 use rustos_abi::driver::block::Block;
 use rustos_abi::driver::filesystem::{
-    DirEntry, FilesystemRead, FilesystemSecurity, FilesystemWrite, MountFlags, NodeId, NodeInfo,
-    NodeKind, NodeSecurity,
+    DirEntry, FilesystemRead, FilesystemSecurity, FilesystemWrite, NodeId, NodeInfo, NodeKind,
+    NodeSecurity,
 };
 use rustos_abi::{DriverError, DriverHandle};
 use rustos_drv_fs_rustfs::{RustFs, SYSTEM_VOLUME_KEY};
@@ -160,17 +184,18 @@ pub static FS_SERVICE: MountedFilesystemService<Box<dyn KernelFs>> =
 /// driver-backed; its concrete value is never resolved against a registry.
 const SYSTEM_MOUNT_HANDLE: u64 = 0x5959_5359; // "YYSY"
 
-/// Opaque driver handle the writable `/System/Logs` and `/System/Settings`
-/// sub-mounts carry in the mount table.
+/// Opaque driver handle the **writable root volume** carries in the mount
+/// table — the root mount `/` and every writable sub-mount of it (`/Users`,
+/// `/Apps`, `/Storage`, `/System/Logs`, `/System/Settings`).
 ///
-/// Both writable subtrees are backed by the **one** encrypted root volume
-/// (the existing writable partition), so they share a single handle — the
-/// per-mount [`SleepLock`](rustos_kernel_core) serialises the one driver
-/// across both. The driver is registered by [`register_writable_state`]
-/// after the encrypted root is unlocked; until then `/System/Logs` and
-/// `/System/Settings` resolve to no driver and every write/read fails closed
-/// (`NotImplemented`), never a silent fallback to the read-only `/System`.
-const SYSTEM_WRITABLE_HANDLE: u64 = 0x574C_4F47; // "WLOG"
+/// All of these are the *one* encrypted root volume (the persistent writable
+/// partition), so they share a single handle — one driver, one per-mount
+/// [`SleepLock`](rustos_kernel_core) serialising every operation on the
+/// volume. The driver is registered by [`register_writable_state`] after the
+/// encrypted root is unlocked; until then `/` and its writable subtrees
+/// resolve to no driver and every write/read fails closed (`NotImplemented`),
+/// never a silent fallback to the read-only `/System`.
+const ROOT_VOLUME_HANDLE: u64 = 0x524F_4F54; // "ROOT"
 
 /// Audit event: the read-only `/System` volume was published as the `fs_*`
 /// mount, so userland file reads under `/System` now resolve to a live
@@ -178,8 +203,9 @@ const SYSTEM_WRITABLE_HANDLE: u64 = 0x574C_4F47; // "WLOG"
 const SYSTEM_FS_MOUNTED: EventId = EventId(4143);
 
 /// Audit event: the writable encrypted-root driver was registered as the
-/// `/System/Logs` + `/System/Settings` backing, so userland writes under
-/// those subtrees now resolve to a live volume.
+/// backing for `/` and its writable subtrees (`/Users`, `/Apps`,
+/// `/Storage`, `/System/Logs`, `/System/Settings`), so userland writes to
+/// the persistent volume now resolve to a live driver.
 const SYSTEM_FS_WRITABLE_MOUNTED: EventId = EventId(4145);
 
 /// Audit event: no read-only `/System` volume could be published as the
@@ -189,63 +215,63 @@ const SYSTEM_FS_WRITABLE_MOUNTED: EventId = EventId(4145);
 /// check that declined, secret-free.
 const SYSTEM_FS_UNAVAILABLE: EventId = EventId(4144);
 
-/// Build the production VFS policy layer for the read-only `/System` mount.
+/// Build the production VFS policy layer: the writable root volume mounted
+/// as `/`, the read-only `/System` volume shadowing it, and the writable
+/// `/System` exceptions plus the flag-bearing top-level subtrees carved back
+/// out of the writable volume.
 ///
 /// Starts from the shared default layout (the four top-level directories and
-/// the §16.2 / §16.3 mount policy, one definition) and replaces the in-RAM
-/// `/System` subtree mounts with **driver-backed** ones:
+/// the §16.2 / §16.3 mount policy — one definition of the paths *and* their
+/// `ro`/`nosuid`/`nodev`/`noexec` flags) and attaches a backing volume to
+/// each mount, leaving the layout's flags untouched:
 ///
-/// * `/System` itself — read-only, backed by the `RustFsSystem` volume
-///   ([`SYSTEM_MOUNT_HANDLE`]); drivers, libraries, and the kernel image are
-///   immutable at runtime.
-/// * `/System/Logs` and `/System/Settings` — the only writable paths beneath
-///   `/System`, mounted `nosuid,nodev,noexec` and backed by the **encrypted
-///   root volume's own** `/System/Logs` / `/System/Settings` directories
-///   ([`SYSTEM_WRITABLE_HANDLE`], rebased via the mount's backing-subtree).
-///   `MountTable` longest-prefix resolution makes these writable child
-///   mounts shadow the read-only `/System`. Their backing driver is
-///   registered by [`register_writable_state`] only after the encrypted root
-///   is unlocked; until then operations on them fail closed `NotImplemented`,
-///   never a silent fallback to the read-only `/System`.
+/// * `/` — the encrypted, writable root volume ([`ROOT_VOLUME_HANDLE`]): the
+///   persistent home of `/Users`, `/Apps`, `/Storage`, and `/` itself.
+/// * `/System` — read-only, the `RustFsSystem` volume
+///   ([`SYSTEM_MOUNT_HANDLE`], whole-volume so no rebasing): the kernel
+///   image, drivers, and libraries are immutable at runtime and shadow the
+///   writable root at `/System` (longest-prefix resolution).
+/// * `/System/Logs`, `/System/Settings`, `/Users`, `/Apps`, `/Storage` — the
+///   *same* writable root volume ([`ROOT_VOLUME_HANDLE`]), each rebased onto
+///   its own same-named path on that volume so the one driver resolves from
+///   its own root. They exist as their own mounts only to carry stricter
+///   flags than `/` and, for `/System/Logs` / `/System/Settings`, to shadow
+///   the read-only `/System` (the only writable paths beneath it).
+///
+/// The writable root driver is registered by [`register_writable_state`]
+/// only after the encrypted root is unlocked; until then `/` and its
+/// writable subtrees fail closed `NotImplemented`, never a silent fallback
+/// to the read-only `/System`.
 ///
 /// # Errors
 ///
-/// A [`VfsError`] if a fixed path fails to parse, a default-layout submount
-/// is unexpectedly absent, or a mount cannot be registered — all of which
-/// are wiring defects, surfaced (fail closed) rather than panicked.
+/// A [`VfsError`] if a fixed path fails to parse or a mount cannot be backed
+/// (a default-layout mount unexpectedly absent, or a refused double-backing)
+/// — all wiring defects, surfaced (fail closed) rather than panicked.
 fn system_vfs() -> Result<Vfs, VfsError> {
     let mut vfs = Vfs::with_default_layout(UserId(0), GroupId(0));
-    let system = Path::parse("/System")?;
-    let logs = Path::parse("/System/Logs")?;
-    let settings = Path::parse("/System/Settings")?;
     let system_handle = DriverHandle::from_raw(SYSTEM_MOUNT_HANDLE).map_err(|_| VfsError::Io)?;
-    let writable_handle =
-        DriverHandle::from_raw(SYSTEM_WRITABLE_HANDLE).map_err(|_| VfsError::Io)?;
-    let writable_flags = MountFlags::NOSUID
-        .union(MountFlags::NODEV)
-        .union(MountFlags::NOEXEC);
+    let root_handle = DriverHandle::from_raw(ROOT_VOLUME_HANDLE).map_err(|_| VfsError::Io)?;
     let mounts = vfs.mounts_mut();
-    // Swap the in-RAM default-layout mounts for driver-backed ones.
-    mounts.unmount(&logs)?;
-    mounts.unmount(&settings)?;
-    mounts.unmount(&system)?;
-    mounts.mount(system, MountFlags::READ_ONLY, Some(system_handle))?;
-    // The writable subtrees live at the *same* paths on the encrypted root
-    // volume, so each is rebased onto its own `/System/<name>` directory
-    // there — the delegated walk prepends these components so the one root
-    // driver resolves from its own root.
-    mounts.mount_rebased(
-        logs,
-        writable_flags,
-        Some(writable_handle),
-        vec!["System".to_string(), "Logs".to_string()],
-    )?;
-    mounts.mount_rebased(
-        settings,
-        writable_flags,
-        Some(writable_handle),
-        vec!["System".to_string(), "Settings".to_string()],
-    )?;
+    // The encrypted, writable root volume *is* `/`.
+    mounts.back_root(root_handle)?;
+    // The read-only `/System` volume shadows `/` at `/System`; its content is
+    // the volume's own root, so it is a whole-volume mount (no rebasing).
+    mounts.set_backing(&Path::parse("/System")?, system_handle, Vec::new())?;
+    // The writable `/System` exceptions and the flag-bearing top-level
+    // subtrees are the *same* writable root volume, each rebased onto its own
+    // same-named path there so the one driver resolves from its own root.
+    for sub in [
+        "/System/Logs",
+        "/System/Settings",
+        "/Users",
+        "/Apps",
+        "/Storage",
+    ] {
+        let path = Path::parse(sub)?;
+        let subtree = path.components().to_vec();
+        mounts.set_backing(&path, root_handle, subtree)?;
+    }
     Ok(vfs)
 }
 
@@ -305,9 +331,10 @@ pub fn install_system_mount<B: Block + 'static>(
         return;
     };
     // Publish the shared VFS layout once, then register the read-only
-    // `/System` driver against its handle. The writable `/System/Logs` /
-    // `/System/Settings` driver (the encrypted root volume) is registered
-    // later by `register_writable_state`, once the root is unlocked.
+    // `/System` driver against its handle. The writable root driver (the
+    // encrypted root volume backing `/` and its writable subtrees) is
+    // registered later by `register_writable_state`, once the root is
+    // unlocked.
     if LATE_FILESYSTEM.install_vfs(vfs).is_err() {
         unavailable(audit, "already_installed");
         return;
@@ -330,23 +357,24 @@ pub fn install_system_mount<B: Block + 'static>(
 }
 
 /// Register the live, writable encrypted-root driver as the backing for the
-/// `/System/Logs` and `/System/Settings` sub-mounts (the writable-state mount
-/// handle).
+/// writable root volume — the root mount `/` and every writable sub-mount of
+/// it (`/Users`, `/Apps`, `/Storage`, `/System/Logs`, `/System/Settings`),
+/// which all share the one `ROOT_VOLUME_HANDLE`.
 ///
 /// Called once by the encrypted-root unlock path after the root volume is
 /// unlocked, with a read-write [`KernelFs`] over that volume (a second,
 /// independent `'static` window, park-safe through the device `SleepLock`,
 /// distinct from the unlock task's own read window). Until this lands, every
-/// write/read under `/System/Logs` or `/System/Settings` fails closed
+/// write/read under `/` and its writable subtrees fails closed
 /// `NotImplemented` — never a silent fallback to the read-only `/System`.
 ///
-/// Fail-soft and audited: a refusal (the writable mount was already
-/// registered, a logic error since this runs once) leaves the writable
-/// subtrees failing closed and never aborts the boot. The VFS itself is
-/// published by [`install_system_mount`]; this only attaches the driver, so
-/// it is safe to call after that step regardless of ordering.
+/// Fail-soft and audited: a refusal (the writable volume was already
+/// registered, a logic error since this runs once) leaves the writable tree
+/// failing closed and never aborts the boot. The VFS itself is published by
+/// [`install_system_mount`]; this only attaches the driver, so it is safe to
+/// call after that step regardless of ordering.
 pub fn register_writable_state(driver: Box<dyn KernelFs>, audit: &dyn Sink) {
-    let Ok(handle) = DriverHandle::from_raw(SYSTEM_WRITABLE_HANDLE) else {
+    let Ok(handle) = DriverHandle::from_raw(ROOT_VOLUME_HANDLE) else {
         unavailable(audit, "writable_handle_invalid");
         return;
     };
@@ -359,7 +387,7 @@ pub fn register_writable_state(driver: Box<dyn KernelFs>, audit: &dyn Sink) {
         &Event {
             level: Level::Info,
             id: SYSTEM_FS_WRITABLE_MOUNTED,
-            message: "system-mount: writable /System/Logs + /System/Settings backing registered",
+            message: "system-mount: writable root volume backing registered",
             fields: &[],
         },
     );

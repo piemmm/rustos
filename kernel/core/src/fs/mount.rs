@@ -169,6 +169,45 @@ impl MountTable {
         Ok(())
     }
 
+    /// Attach a backing filesystem driver to the **existing** mount at
+    /// exactly `path`, rooting its content at `backing_subtree` within that
+    /// volume, without changing the mount's permission flags.
+    ///
+    /// This turns a policy-only mount of the default layout (the §16.2/§16.3
+    /// `ro`/`nosuid`/… mount points [`Vfs::with_default_layout`](super::Vfs::with_default_layout)
+    /// lays down) into a driver-backed one once the boot path knows which
+    /// volume backs it: the flags come from the layout, the backing volume
+    /// and its sub-path from the wiring. A whole-volume mount (the backing
+    /// volume's own root is the mount's content) passes an empty
+    /// `backing_subtree`; a sub-mount of a larger volume passes the path its
+    /// content lives at on that volume (e.g. `["System", "Logs"]` for
+    /// `/System/Logs` carved out of the root volume).
+    ///
+    /// # Errors
+    ///
+    /// * [`VfsError::NotFound`] if no mount covers exactly `path`.
+    /// * [`VfsError::AlreadyExists`] if that mount already has a backing
+    ///   driver — a mount is backed once, never silently re-backed (fail
+    ///   closed).
+    pub fn set_backing(
+        &mut self,
+        path: &Path,
+        backing: DriverHandle,
+        backing_subtree: Vec<String>,
+    ) -> Result<(), VfsError> {
+        let mount = self
+            .mounts
+            .iter_mut()
+            .find(|m| &m.path == path)
+            .ok_or(VfsError::NotFound)?;
+        if mount.backing.is_some() {
+            return Err(VfsError::AlreadyExists);
+        }
+        mount.backing = Some(backing);
+        mount.backing_subtree = backing_subtree;
+        Ok(())
+    }
+
     /// Remove the mount at exactly `path`.
     ///
     /// # Errors
@@ -279,6 +318,55 @@ mod tests {
         let other = DriverHandle::from_raw(0x5EC1).expect("non-zero handle");
         assert_eq!(table.back_root(other), Err(VfsError::AlreadyExists));
         assert_eq!(table.resolve(&p("/System")).backing(), Some(handle));
+    }
+
+    #[test]
+    fn set_backing_attaches_a_driver_and_subtree_preserving_flags() {
+        let mut table = MountTable::new(MountFlags::default());
+        table
+            .mount(
+                p("/Users"),
+                MountFlags::NOSUID.union(MountFlags::NODEV),
+                None,
+            )
+            .expect("mount /Users");
+
+        let handle = DriverHandle::from_raw(0x5701).expect("non-zero handle");
+        table
+            .set_backing(&p("/Users"), handle, alloc::vec!["Users".into()])
+            .expect("first backing attaches");
+
+        let mount = table.resolve(&p("/Users/alice"));
+        assert_eq!(mount.backing(), Some(handle));
+        // The §16.3 flags are untouched by attaching a backing volume.
+        assert_eq!(mount.flags(), MountFlags::NOSUID.union(MountFlags::NODEV));
+        // The sub-mount is rooted at the volume's own `/Users` directory.
+        assert_eq!(mount.backing_subtree(), &[String::from("Users")]);
+    }
+
+    #[test]
+    fn set_backing_is_refused_for_an_unknown_mount_or_a_second_backing() {
+        let mut table = MountTable::new(MountFlags::default());
+        let handle = DriverHandle::from_raw(0x5702).expect("non-zero handle");
+        // No mount covers exactly `/Storage` yet.
+        assert_eq!(
+            table.set_backing(&p("/Storage"), handle, Vec::new()),
+            Err(VfsError::NotFound)
+        );
+
+        table
+            .mount(p("/Storage"), MountFlags::default(), None)
+            .expect("mount /Storage");
+        table
+            .set_backing(&p("/Storage"), handle, Vec::new())
+            .expect("first backing attaches");
+        // A second backing is refused, and the first stays attached.
+        let other = DriverHandle::from_raw(0x5703).expect("non-zero handle");
+        assert_eq!(
+            table.set_backing(&p("/Storage"), other, Vec::new()),
+            Err(VfsError::AlreadyExists)
+        );
+        assert_eq!(table.resolve(&p("/Storage")).backing(), Some(handle));
     }
 
     #[test]

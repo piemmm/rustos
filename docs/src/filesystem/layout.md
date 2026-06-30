@@ -29,10 +29,15 @@ sbin opt   root tmp  dev   mnt  media run    boot
 ```
 
 `Vfs::mkdir` (and `create_file`) refuse to create any of them directly
-under the root, returning `VfsError::ReservedPath`. The reservation is
-**top-level only**: `/Users/tmp` is fine; `/tmp` is not. There is no
-`/proc` and no `/sys`; live system information is exposed exclusively
-through the System Information API (`AGENTS.md` §16.6, Stage 6).
+under the root, returning `VfsError::ReservedPath`. The same refusal
+applies on the **driver-backed** create/mkdir/rename path, so once the
+writable root volume backs `/` (see below) a delegated operation cannot
+lay a reserved name onto the volume either — the ban is a structural
+layout rule, not a permission, enforced before any driver write. The
+reservation is **top-level only**: `/Users/tmp` is fine; `/tmp` is not.
+There is no `/proc` and no `/sys`; live system information is exposed
+exclusively through the System Information API (`AGENTS.md` §16.6,
+Stage 6).
 
 ## Read-only `/System`
 
@@ -69,3 +74,44 @@ flags:
 | `/Users`            | `nosuid,nodev`            |
 | `/Apps`             | `nosuid,nodev`            |
 | `/Storage`          | `nosuid,nodev,noexec`     |
+
+## Boot-time volume layering: writable root, read-only `/System` shadow
+
+`with_default_layout` is the in-RAM shape before any disk is mounted. At
+boot the production `fs_*` mount table (`kernel/rustos-kernel`'s
+`system_mount`) wires two on-disk `RustFs` volumes into that layout:
+
+- the **encrypted, writable root volume** (`RustFsRoot`) is mounted as
+  `/` (`MountTable::back_root`). It is the persistent home of `/`,
+  `/Users`, `/Apps`, `/Storage`, and the writable `/System` exceptions;
+- the **read-only, well-known-keyed `/System` volume** (`RustFsSystem`)
+  is mounted *over* it at `/System`, carrying the immutable kernel image,
+  drivers, and libraries.
+
+The writable `/System/Logs` and `/System/Settings`, and the flag-bearing
+`/Users` / `/Apps` / `/Storage`, are then attached to the *same* writable
+root volume (`MountTable::set_backing`), each rebased onto its own
+same-named path on that volume. They exist as their own mounts only to
+carry stricter flags than `/` and, under `/System`, to shadow the
+read-only volume. Longest-prefix resolution gives every path exactly one
+covering volume:
+
+| Path                    | Resolves to        | Writable? |
+| ----------------------- | ------------------ | --------- |
+| `/Users/alice/notes`    | `RustFsRoot` (`/`) | yes       |
+| `/Apps/Example.app/Run` | `RustFsRoot`       | yes       |
+| `/System/Drivers/vesa`  | `RustFsSystem`     | no        |
+| `/System/Logs/boot`     | `RustFsRoot`       | yes       |
+
+This is **disjoint sub-mounting**, never a union/overlay "merge" of two
+`/System` trees: no path is served by both volumes, so resolution stays
+deterministic and fail-closed. Consequently the two volumes carry
+**non-overlapping** content — the immutable `/System` subtree lives only
+on `RustFsRoot`'s read-only sibling, and the encrypted root authors only
+the writable-state subtree (`/System/Logs`, `/System/Settings`,
+`/System/Security`) plus the four top-level directories.
+
+Until the encrypted root is unlocked, the writable root driver is not yet
+registered and every operation on `/` and its writable subtrees fails
+closed (`Errno::NotImplemented`), never a silent fallback to the
+read-only `/System`.
