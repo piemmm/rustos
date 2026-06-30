@@ -79,6 +79,7 @@ extern "C" {
 #define ROS_SYS_FS_SYNC 53u
 #define ROS_SYS_FS_MKDIR 54u
 #define ROS_SYS_FS_UNLINK 55u
+#define ROS_SYS_DMA_FREE 56u
 
 /* Syscall entry points, implemented by the user-space stub library. */
 void ros_sys_yield(void);
@@ -137,6 +138,7 @@ int32_t ros_sys_fs_truncate(uint32_t a0, uint64_t a1);
 int32_t ros_sys_fs_sync(uint32_t a0);
 int32_t ros_sys_fs_mkdir(void * a0, uintptr_t a1);
 int32_t ros_sys_fs_unlink(void * a0, uintptr_t a1);
+int32_t ros_sys_dma_free(uint64_t a0, uint64_t a1);
 
 #ifdef __cplusplus
 } /* extern "C" */
