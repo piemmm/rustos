@@ -16,3 +16,14 @@ workspace = true
 # `lib/crypto` (`AGENTS.md` §2.12 / §16.4 — no hand-rolled cryptography);
 # this crate never names an upstream crypto crate directly.
 rustos-crypto = { path = "../crypto", version = "=0.0.0" }
+# The typed-field value model reuses the canonical ABI scalar types
+# (`Time64`/`Duration64`, the kernel error code, and the capability id) so a
+# logged value and its ABI form cannot drift apart (no duplication).
+rustos-abi = { path = "../abi", version = "=0.0.0" }
+
+[dev-dependencies]
+# The §19.6 fuzz harness for the value decoder draws its inputs through the
+# shared seed/budget seam (`rustos_fuzzseed`): one place picks the per-run
+# seed, logs it, and bounds the smoke/soak loop (`AGENTS.md` §2.2). Test
+# scaffolding only; never in a RustOS build.
+rustos-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

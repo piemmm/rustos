@@ -47,6 +47,44 @@ The module is payload-format agnostic: the persisted-log writer reduces
 each serialized record to a `rustos-crypto` SHA-256 digest, so this
 crate pulls in no payload codec and stays allocation-free.
 
+## Typed-field value model (`field`)
+
+The `field` module is the foundational, reusable data model the RustOS system
+log (`plans/SYSLOG.md`) builds its record schema on. It does **not** define the
+framed record or on-disk segment format — that is the journal service's job —
+only the closed set of value types a field may hold and how a single value is
+named, validated, and encoded.
+
+* `FieldName` — a validated caller field name. The grammar is the
+  case-sensitive ASCII identifier `[a-z][a-z0-9_]{0,63}`. Because the `.`
+  separator is not in the grammar, a caller name can never collide with a
+  reserved journal namespace; `reserved_prefix` screens *qualified* names
+  (`record.` / `origin.` / `source.` / `integrity.` / `sys.`) at the layer
+  that can contain a dot.
+* `FieldValue` — the *closed* value set: null, bool, signed/unsigned 64-bit
+  integer, fixed-point `Decimal`, `Time64`, `Duration64`, bounded UTF-8 string,
+  bounded bytes, `Uuid`, `IpAddr`, `MacAddr`, kernel error code, capability id
+  (only the public numeric id — never a raw token), and a same-type bounded
+  `FieldList` of scalars. Records are flat: nested maps and nested lists are
+  forbidden so search, indexing, and rendering stay cheap. The scalar ABI types
+  (`Time64`, `Duration64`, `Errno`, `CapabilityId`) are reused from `rustos-abi`
+  so a logged value and its ABI form cannot drift apart.
+* `FieldValue::encode` / `FieldValue::decode` — a compact little-endian codec
+  for a single value (a tag byte plus payload). Decoding borrows variable-length
+  data from the buffer, so the model stays allocation-free. Every length, tag,
+  UTF-8, and range constraint is checked and fails closed with an `Errno`;
+  nothing partial is written on an encode error. `encode_list` builds a list
+  value from a slice of same-type scalar elements; `FieldList` iterates the
+  decoded elements lazily.
+* `ToFieldValue` — the only gate between application data and the log. A
+  secret-bearing wrapper type (a key, password, or capability token)
+  deliberately does **not** implement it, so a secret cannot be logged by
+  construction: there is no blanket impl and no `Display`/`Debug` fallback.
+
+This model and the audit `chain` above share one SHA-256 hash chain; the log
+service layers its record and segment encoders on top of these values and that
+chain, never a second value model or a second chain.
+
 ## What this crate is not
 
 It is not a re-implementation of `tracing` or `log`. The API is small on

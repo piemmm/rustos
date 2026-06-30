@@ -24,9 +24,14 @@
 #![deny(missing_docs)]
 
 pub mod chain;
+pub mod field;
 
 pub use chain::{
     verify_chain, verify_fresh_chain, ChainError, ChainedEntry, LogChain, GENESIS_ANCHOR,
+};
+pub use field::{
+    reserved_prefix, Decimal, FieldList, FieldName, FieldValue, IpAddr, MacAddr, ScalarType,
+    ToFieldValue, Uuid, RESERVED_PREFIXES,
 };
 
 use core::sync::atomic::{AtomicU8, Ordering};

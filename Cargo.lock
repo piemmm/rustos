@@ -1169,7 +1169,9 @@ dependencies = [
 name = "rustos-log"
 version = "0.0.0"
 dependencies = [
+ "rustos-abi",
  "rustos-crypto",
+ "rustos-fuzzseed",
 ]
 
 [[package]]
