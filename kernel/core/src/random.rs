@@ -92,6 +92,47 @@ impl EntropySource for NullEntropy {
 /// the unseeded [`NullEntropy`] source.
 pub type BootReserve = OutputReserve<NullEntropy>;
 
+/// Adapts an Arch HAL platform-entropy handle into an [`EntropySource`] so it
+/// can seed (and, for forward secrecy, reseed) the kernel CSPRNG output
+/// reserve.
+///
+/// The wrapped `&'static dyn PlatformEntropy` is the per-port hardware-RNG
+/// handle (x86 `RDSEED`/`RDRAND`, ARMv8.5 `RNDR`, …). The boot path installs
+/// a [`SeededReserve`] built from it only when a draw actually produces bytes;
+/// a port with no usable source fails the draw closed and the kernel reserve
+/// stays unseeded, exactly as it boots — never weakened to predictable bytes.
+///
+/// This is the kernel's one entropy input today. The charter forbids trusting
+/// a single source alone, so additional software inputs (boot-time timing
+/// jitter, an interrupt-arrival pool) mixed via `rustos_rng::CombinedSource`
+/// are a tracked follow-up; until then the hardware source feeds the DRBG,
+/// whose output is what callers actually receive.
+pub struct ArchEntropy {
+    source: &'static dyn rustos_arch_api::PlatformEntropy,
+}
+
+impl ArchEntropy {
+    /// Wrap a platform-entropy handle as an entropy source.
+    #[must_use]
+    pub fn new(source: &'static dyn rustos_arch_api::PlatformEntropy) -> Self {
+        Self { source }
+    }
+}
+
+impl EntropySource for ArchEntropy {
+    fn fill(&mut self, out: &mut [u8]) -> Result<(), EntropyError> {
+        // The handle's `try_fill` already retries a momentarily-underfull
+        // hardware source a bounded number of times and fails closed; there
+        // is no extra retry or fallback here (no weakening).
+        self.source.try_fill(out)
+    }
+}
+
+/// The reserve type the kernel installs once a platform entropy source is
+/// available, type-matched (default capacity) to [`BootReserve`] so both
+/// share the one `Box<dyn RandomReserve>` field type.
+pub type SeededReserve = OutputReserve<ArchEntropy>;
+
 /// Map a reserve failure onto the stable random ABI errno.
 ///
 /// Both the pre-seed [`ReserveError::NotReady`] and a reseed-time
@@ -175,5 +216,70 @@ mod tests {
             reserve_errno(ReserveError::Entropy(EntropyError::Unavailable)),
             Errno::EntropyNotReady
         );
+    }
+
+    /// A stub Arch HAL platform-entropy handle for the `ArchEntropy` tests:
+    /// either fills with a deterministic non-zero pattern or fails closed.
+    struct StubPort {
+        fills: bool,
+    }
+
+    impl rustos_arch_api::PlatformEntropy for StubPort {
+        fn profile(&self) -> rustos_arch_api::EntropyProfile {
+            rustos_arch_api::EntropyProfile {
+                hardware_rng: rustos_arch_api::EntropySupport::Supported,
+            }
+        }
+    }
+
+    impl rustos_rng::HardwareRng for StubPort {
+        fn try_fill(&self, out: &mut [u8]) -> Result<(), EntropyError> {
+            if self.fills {
+                // Deterministic non-zero pattern via a wrapping `u8` counter
+                // (no `usize`-to-`u8` cast); not real entropy, just enough for
+                // the DRBG to seed and produce distinct output in the test.
+                let mut acc: u8 = 7;
+                for b in out.iter_mut() {
+                    *b = acc;
+                    acc = acc.wrapping_mul(31).wrapping_add(13);
+                }
+                Ok(())
+            } else {
+                Err(EntropyError::Unavailable)
+            }
+        }
+    }
+
+    static FILLING_PORT: StubPort = StubPort { fills: true };
+    static DEAD_PORT: StubPort = StubPort { fills: false };
+
+    #[test]
+    fn arch_entropy_forwards_to_the_platform_handle() {
+        use super::ArchEntropy;
+        let mut src = ArchEntropy::new(&FILLING_PORT);
+        let mut out = [0u8; 32];
+        src.fill(&mut out).expect("the filling stub supplies bytes");
+        assert_ne!(out, [0u8; 32]);
+
+        let mut dead = ArchEntropy::new(&DEAD_PORT);
+        assert_eq!(dead.fill(&mut out), Err(EntropyError::Unavailable));
+    }
+
+    #[test]
+    fn seeded_reserve_over_arch_entropy_serves_then_fails_closed_when_dead() {
+        use super::{ArchEntropy, SeededReserve};
+        // A working source seeds the reserve and it serves cryptographic bytes.
+        let mut reserve = SeededReserve::new();
+        reserve
+            .seed(ArchEntropy::new(&FILLING_PORT))
+            .expect("a working platform source seeds the reserve");
+        let mut out = [0u8; 16];
+        RandomReserve::draw(&mut reserve, &mut out, true).expect("a seeded reserve serves");
+        assert_ne!(out, [0u8; 16]);
+
+        // A dead source cannot seed: the reserve stays unseeded (fail closed).
+        let mut unseeded = SeededReserve::new();
+        assert!(unseeded.seed(ArchEntropy::new(&DEAD_PORT)).is_err());
+        assert!(!unseeded.is_ready());
     }
 }

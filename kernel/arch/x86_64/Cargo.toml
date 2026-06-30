@@ -57,6 +57,7 @@ sched-arch = []
 [dependencies]
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 rustos-arch-api = { path = "../api", version = "=0.0.0" }
+rustos-rng = { path = "../../../lib/rng", version = "=0.0.0" }
 
 # `kernel/mem` is a **dev-dependency** so the host-side unit tests can
 # round-trip our `bootmemory::RegionKind` mirror against the canonical

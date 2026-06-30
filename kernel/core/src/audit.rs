@@ -161,6 +161,25 @@ pub enum AuditEvent {
     /// (no input-content/timing noise on the log;
     /// — secret hygiene).
     InputDelivered,
+    /// The kernel CSPRNG output reserve was seeded from the platform
+    /// entropy source ([`rustos_arch_api::PlatformEntropy`]).
+    ///
+    /// Emitted once at boot by [`crate::init`] when the arch port's
+    /// hardware entropy source produced enough bytes to seed the reserve.
+    /// After this, `random_get` serves cryptographic output. The record
+    /// carries no entropy — only that the decision was taken (a
+    /// security-relevant state change).
+    EntropyReserveSeeded,
+    /// The kernel CSPRNG output reserve could **not** be seeded at boot
+    /// and stays unseeded (`random_get` keeps failing closed with
+    /// `EntropyNotReady`).
+    ///
+    /// Emitted once at boot by [`crate::init`] when the arch port exposes
+    /// no usable entropy source, or its source could not produce bytes
+    /// (the feature is absent, or every bounded draw was exhausted). The
+    /// kernel never weakens to predictable output; it fails closed. The
+    /// record carries a `cause` field naming why.
+    EntropyReserveUnseeded,
 }
 
 impl AuditEvent {
@@ -186,6 +205,8 @@ impl AuditEvent {
             Self::GroupsDbRejected => 4044,
             Self::DriverStoreScanned => 4042,
             Self::InputDelivered => 4050,
+            Self::EntropyReserveSeeded => 4060,
+            Self::EntropyReserveUnseeded => 4061,
         })
     }
 
@@ -213,6 +234,8 @@ impl AuditEvent {
             Self::GroupsDbRejected => "groups database rejected",
             Self::DriverStoreScanned => "driver store scanned",
             Self::InputDelivered => "first input delivered to focus arbiter",
+            Self::EntropyReserveSeeded => "entropy reserve seeded",
+            Self::EntropyReserveUnseeded => "entropy reserve unseeded",
         }
     }
 }
@@ -255,6 +278,8 @@ mod tests {
             AuditEvent::GroupsDbRejected,
             AuditEvent::DriverStoreScanned,
             AuditEvent::InputDelivered,
+            AuditEvent::EntropyReserveSeeded,
+            AuditEvent::EntropyReserveUnseeded,
         ] {
             let id = ev.id().0;
             assert!(
@@ -285,6 +310,8 @@ mod tests {
             AuditEvent::GroupsDbRejected.id().0,
             AuditEvent::DriverStoreScanned.id().0,
             AuditEvent::InputDelivered.id().0,
+            AuditEvent::EntropyReserveSeeded.id().0,
+            AuditEvent::EntropyReserveUnseeded.id().0,
         ];
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {

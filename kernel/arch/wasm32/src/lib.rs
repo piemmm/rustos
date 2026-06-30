@@ -64,6 +64,10 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+/// wasm32 implementation of the Arch HAL platform-entropy surface
+/// ([`rustos_arch_api::PlatformEntropy`]): the host CSPRNG, honestly
+/// `Pending` on the host entropy import (see the module docs).
+pub mod entropy;
 pub mod isolation;
 pub mod kernel_arch;
 /// wasm32 implementation of the Arch HAL memory-tagging surface

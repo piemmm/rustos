@@ -115,10 +115,48 @@ output in fixed kernel-staging chunks, and copies each chunk into the
 caller's buffer through the `copy_to_user` boundary, wiping the staging
 afterwards (§22). The reserve boots **unseeded** over a `NullEntropy`
 source, so a draw fails closed with `Errno::EntropyNotReady` until the
-platform-RNG `EntropySource` (§17.2 — still pending) re-seeds it; a
-faulting buffer maps to `BadAddress`. With D.4 in, every consumer of the
+platform-RNG `EntropySource` re-seeds it at boot (next section); a
+faulting buffer maps to `BadAddress`. Every consumer of the
 staged copy path (`ipc_send`, `ipc_recv`, `cap_delegate`, `random_get`)
 is wired.
+
+## Platform entropy: the Arch HAL seam and boot seeding
+
+The reserve is only useful once it is **seeded**, and the raw entropy that
+seeds it is an architecture resource. The Arch HAL exposes it as a closed
+slice, `rustos_arch_api::entropy` (modelled on the memory-tagging and
+side-channel slices, §17.2): a port implements `PlatformEntropy` — a
+`HardwareRng` plus an honest `EntropyProfile` declaring its hardware-RNG
+source `Supported`, `Unsupported`, or `Pending` (with a justification, like
+the memory-tagging profile). Each port runs the slice's `conformance`
+vertical, which checks the profile is honest and that a port claiming **no**
+source fails a draw closed (never returns predictable bytes).
+
+The per-target sources, all runtime-detected and fail-closed:
+
+| Target  | Source | Profile |
+|---------|--------|---------|
+| x86_64  | `RDSEED` (preferred) / `RDRAND`, via `CPUID` detection | `Supported` |
+| aarch64 | ARMv8.5 `FEAT_RNG` `RNDR`, via `ID_AA64ISAR0_EL1` detection | `Supported` |
+| riscv64 | `Zkr` `seed` CSR | `Pending` (needs the M-mode `mseccfg.sseed` delegation) |
+| wasm32  | host `crypto.getRandomValues` | `Pending` (needs the host entropy import) |
+
+The bare-metal instruction sequences are `cfg`-gated to `target_os = "none"`
+(the host build fails the draw closed, like the memory-tagging `stg`), so the
+real path is exercised by the QEMU verticals. Each draw retries a
+momentarily-underfull generator a **bounded** number of times, then fails
+closed — never an unbounded spin (§2.1).
+
+At boot, `kernel/core` reaches the source through `KernelArch::platform_entropy`
+and seeds the reserve once: it wraps the handle as an `EntropySource`
+(`ArchEntropy`), builds a `SeededReserve` (`OutputReserve<ArchEntropy>`), and
+swaps it in for the `NullEntropy` boot reserve. The decision is audited
+(`EntropyReserveSeeded` / `EntropyReserveUnseeded` with a cause). A port with
+no usable source leaves the reserve unseeded and `random_get` keeps failing
+closed — the kernel never weakens to predictable output. The hardware source
+is one input today; the charter forbids trusting a single source alone, so
+additional software inputs (boot-time timing jitter, an interrupt-arrival
+pool) mixed via `CombinedSource` are a tracked follow-up.
 
 ## Fast, non-cryptographic generator
 

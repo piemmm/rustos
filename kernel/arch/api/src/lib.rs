@@ -95,6 +95,7 @@
 
 pub mod conformance;
 pub mod context;
+pub mod entropy;
 pub mod frames;
 pub mod irq;
 pub mod memtag;
@@ -114,6 +115,10 @@ pub use sidechannel::{
     ProfileError, SideChannelMitigation,
 };
 
+pub use entropy::{
+    conformance as entropy_conformance, EntropyEntry, EntropyProfile, EntropySupport,
+    PlatformEntropy,
+};
 pub use memtag::{
     conformance as memtag_conformance, next_free_tag, MemTag, MemoryTagging, Tagging, TaggingEntry,
     TaggingProfile, TAG_COUNT,

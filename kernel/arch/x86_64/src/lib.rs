@@ -85,6 +85,14 @@ pub mod context;
 /// underlying `context` primitive itself carries no such gate.
 #[cfg(feature = "sched-arch")]
 pub mod context_hal;
+/// x86_64 implementation of the Arch HAL platform-entropy surface
+/// ([`rustos_arch_api::PlatformEntropy`]): the `RDSEED`/`RDRAND` on-die
+/// random source the kernel seeds its CSPRNG reserve from.
+///
+/// Gated on `sched-arch` — the feature that pulls in the
+/// `rustos-arch-api` dependency this module's trait lives in.
+#[cfg(feature = "sched-arch")]
+pub mod entropy;
 /// x86_64 page-fault (`#PF`, vector 14) entry + settable fault hook: the
 /// dedicated, error-code-aware page-fault ISR the production IDT installs
 /// on vector 14 and the set-once fault observer the kernel reaches it

@@ -24,7 +24,7 @@
 
 use alloc::sync::Arc;
 
-use rustos_arch_api::ContextSwitch;
+use rustos_arch_api::{ContextSwitch, PlatformEntropy};
 
 use crate::sched::{CpuId, SchedulerArch, SchedulerConfig};
 use rustos_kernel_irq::{IrqController, IrqTable, UNSUPPORTED_CONTROLLER};
@@ -216,6 +216,28 @@ pub trait KernelArch: SchedulerArch {
     /// [`rustos_abi::Errno::NotImplemented`].
     #[must_use]
     fn direct_phys_map(&self) -> Option<&'static (dyn rustos_kernel_mem::PhysMap + Sync)> {
+        None
+    }
+
+    /// Hand the kernel core the architecture's **platform entropy source** —
+    /// the per-port hardware random-number handle (x86 `RDSEED`/`RDRAND`,
+    /// ARMv8.5 `RNDR`, the RISC-V `Zkr` `seed` CSR) — so the boot path can
+    /// seed the kernel CSPRNG output reserve from it. Without it the reserve
+    /// stays unseeded and `random_get` fails closed.
+    ///
+    /// The source is irreducibly architecture-specific (only the port can
+    /// issue the instruction), so — like [`Self::direct_phys_map`] — the port
+    /// supplies the handle and the kernel core conditions its output through
+    /// the `lib/rng` DRBG before any caller sees it. The reference must be
+    /// `'static` and is read once, at boot.
+    ///
+    /// # Default
+    ///
+    /// The default returns [`None`]: a port that wires no source (the
+    /// `TestArch` mock) leaves the reserve unseeded, so `random_get` keeps
+    /// failing closed with [`rustos_abi::Errno::EntropyNotReady`].
+    #[must_use]
+    fn platform_entropy(&self) -> Option<&'static dyn PlatformEntropy> {
         None
     }
 

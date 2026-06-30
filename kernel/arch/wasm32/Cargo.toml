@@ -31,6 +31,7 @@ path = "src/lib.rs"
 # its unit tests run under `cargo test` (`AGENTS.md` §7).
 [dependencies]
 rustos-arch-api = { path = "../api", version = "=0.0.0" }
+rustos-rng = { path = "../../../lib/rng", version = "=0.0.0" }
 # `rustos-abi` provides the frozen `SYSCALL_MAX_ARGS = 6` constant the
 # syscall entry path marshals user arguments into — the same `lib/*`
 # dependency the other arch ports take (`AGENTS.md` §17.4).

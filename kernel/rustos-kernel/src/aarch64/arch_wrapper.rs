@@ -26,8 +26,9 @@
 //! default (no `VolatileGicMmio` exists off the bare-metal target).
 
 use rustos_arch_aarch64::context_hal::ContextSwitchHal;
+use rustos_arch_aarch64::entropy::PlatformRng as Aarch64PlatformEntropy;
 use rustos_arch_aarch64::{halt_current_cpu, serial, Aarch64Arch};
-use rustos_arch_api::{CpuId, SchedulerArch};
+use rustos_arch_api::{CpuId, PlatformEntropy, SchedulerArch};
 use rustos_kernel_core::{ConsoleRead, ConsoleWrite, InputFocus, IrqRouting, KernelArch};
 use rustos_kernel_irq::IrqTable;
 
@@ -89,6 +90,11 @@ impl SchedulerArch for Aarch64BinArch {
     }
 }
 
+/// The `'static` aarch64 platform-entropy handle the kernel seeds its CSPRNG
+/// reserve from. Zero-sized; the `FEAT_RNG` `RNDR` register is addressed
+/// directly, so no per-instance state is needed.
+static AARCH64_PLATFORM_ENTROPY: Aarch64PlatformEntropy = Aarch64PlatformEntropy::new();
+
 impl KernelArch for Aarch64BinArch {
     type Cs = ContextSwitchHal;
 
@@ -98,6 +104,13 @@ impl KernelArch for Aarch64BinArch {
 
     fn halt(&self) -> ! {
         halt_current_cpu()
+    }
+
+    fn platform_entropy(&self) -> Option<&'static dyn PlatformEntropy> {
+        // aarch64 seeds the kernel CSPRNG reserve from the ARMv8.5 `RNDR`
+        // register. The handle is zero-sized; whether `FEAT_RNG` is present
+        // is decided at runtime by the port.
+        Some(&AARCH64_PLATFORM_ENTROPY)
     }
 
     fn monotonic_ns(&self, _cpu: CpuId) -> u64 {

@@ -397,6 +397,77 @@ fn publish_wait_queue_arch<A: KernelArch + 'static>(state: &'static KernelState<
     let _ = crate::waitq::install_wait_arch(wait_arch);
 }
 
+/// Seed the kernel CSPRNG output reserve from the arch port's platform
+/// entropy source, replacing the unseeded `NullEntropy` boot reserve.
+///
+/// Fail-soft and audited (a security-relevant state change is logged): when
+/// the port exposes a usable source and a draw produces bytes, a
+/// [`crate::random::SeededReserve`] is installed and `random_get` begins
+/// serving cryptographic output; otherwise the reserve is left unseeded so
+/// every draw keeps failing closed with
+/// [`rustos_abi::Errno::EntropyNotReady`] — never weakened to predictable
+/// bytes. There is no panic and no busy-wait: a momentarily-underfull source
+/// is the port's bounded-retry concern, and a hard failure simply leaves the
+/// reserve unseeded.
+fn seed_entropy_reserve<A: KernelArch + 'static>(state: &'static KernelState<A>) {
+    use crate::random::{ArchEntropy, SeededReserve};
+
+    let Some(source) = state.arch.platform_entropy() else {
+        emit(
+            state.audit_sink,
+            Level::Info,
+            AuditEvent::EntropyReserveUnseeded,
+            &[Field {
+                key: "cause",
+                value: "no_source",
+            }],
+        );
+        return;
+    };
+    if !source.profile().provides_hardware_entropy() {
+        // The port declares a tracked `Pending` / `Unsupported` source; do
+        // not attempt a draw that will fail, just record the fail-closed
+        // state.
+        emit(
+            state.audit_sink,
+            Level::Info,
+            AuditEvent::EntropyReserveUnseeded,
+            &[Field {
+                key: "cause",
+                value: "source_pending",
+            }],
+        );
+        return;
+    }
+
+    let mut reserve = SeededReserve::new();
+    match reserve.seed(ArchEntropy::new(source)) {
+        Ok(()) => {
+            // Swap the seeded reserve in for the unseeded boot reserve.
+            *state.rng.write() = Box::new(reserve);
+            emit(
+                state.audit_sink,
+                Level::Info,
+                AuditEvent::EntropyReserveSeeded,
+                &[],
+            );
+        }
+        Err(_) => {
+            // The source is enumerated but could not produce bytes (every
+            // bounded draw was exhausted). Leave the reserve unseeded.
+            emit(
+                state.audit_sink,
+                Level::Info,
+                AuditEvent::EntropyReserveUnseeded,
+                &[Field {
+                    key: "cause",
+                    value: "draw_failed",
+                }],
+            );
+        }
+    }
+}
+
 /// The production [`InitSpawnCtx`] [`kernel_main`] hands the arch
 /// [`crate::InitSpawn`] seam to spawn PID 1 (`plans/PI.md` P6c-3) and the
 /// bin crate's driver autoloader drives to spawn user-space drivers
@@ -1015,6 +1086,15 @@ fn run_phases<A: KernelArch>(
     // ports (x86_64) override it to publish the reference into the
     // arch crate's dispatcher slot (set-once per boot).
     state.arch.install_irq_dispatch(&state.irq);
+
+    // Seed the kernel CSPRNG output reserve from the platform entropy source
+    // now that the arch handle is live. Until this point the reserve is the
+    // unseeded `NullEntropy` boot reserve and every draw fails closed; after a
+    // successful seed `random_get` serves cryptographic output and minted
+    // `ProcId`s gain their unpredictable half. Fail-soft: a port with no
+    // usable source leaves the reserve unseeded (still fail-closed), never
+    // weakened to predictable bytes.
+    seed_entropy_reserve(state);
 
     // Build the scheduler-side process-wait producer the `wait` syscall
     // drives (`plans/SPAWN.md` SP6b). It owns the parent/child + exit-status

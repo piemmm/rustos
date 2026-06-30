@@ -2572,8 +2572,12 @@ transfer, landed in increments:
   `PortName`s so `IpcInputChannel`'s `MessagePort` resolves to a live
   `ipc_recv`; relay the theme switch over live IPC; wire the two default apps to
   live VFS/shell channels + WM-presented windows.
-- The platform-RNG `EntropySource` (§17.2) that re-seeds the reserve (shared
-  with the encrypted-swap key, Stage 8).
+- The platform-RNG `EntropySource` that seeds the reserve — **DONE**
+  (`.junie/PREREQUISITES.md` P-0): the Arch-HAL `rustos_arch_api::entropy`
+  slice (x86_64 `RDSEED`/`RDRAND`, aarch64 `RNDR` `Supported`; riscv64 `Zkr` /
+  wasm32 host-import honest `Pending`) seeds the kernel reserve at boot via
+  `KernelArch::platform_entropy`. The encrypted-swap key (Stage 8) and the
+  mixed-in software sources (timing jitter, §22) consume/extend the same seam.
 
 ---
 
@@ -2607,7 +2611,8 @@ transfer, landed in increments:
     the caller's buffer on every failure. 16 unit tests + a §19.6 fuzz
     harness (`tests/fuzz_swap.rs`); `lib/crypto` gains 7 AEAD tests incl.
     the RFC 8439 vector. **Still pending:** the pager that calls
-    `store`/`load`, the real platform-RNG `EntropySource`, the swap-device
+    `store`/`load`, wiring the now-landed platform-RNG `EntropySource`
+    (`.junie/PREREQUISITES.md` P-0) to the ephemeral swap key, the swap-device
     backend driver, and the `CAP`-gated activation syscall — all Stage 8.
 - `tools/mkimage` producing:
   - `images/rustos-x86_64.iso` (hybrid BIOS/UEFI).

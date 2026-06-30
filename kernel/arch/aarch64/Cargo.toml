@@ -28,6 +28,7 @@ path = "src/lib.rs"
 # tests run under `cargo test`.
 [dependencies]
 rustos-arch-api = { path = "../api", version = "=0.0.0" }
+rustos-rng = { path = "../../../lib/rng", version = "=0.0.0" }
 # `rustos-abi` provides the frozen `SYSCALL_MAX_ARGS = 6` constant the
 # `svc` entry path marshals user arguments into — the same dependency
 # the x86_64 and riscv64 ports take. It is a `lib/*` crate, so this edge

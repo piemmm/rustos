@@ -19,8 +19,10 @@
 //! transitively force a `#[global_allocator]` into the two pre-existing
 //! freestanding Stage-2 QEMU test bins.
 
+use rustos_arch_api::PlatformEntropy;
 use rustos_arch_x86_64::apic_timer::{Calibration, Rdtsc, TscReader};
 use rustos_arch_x86_64::context_hal::ContextSwitchHal;
+use rustos_arch_x86_64::entropy::PlatformRng as X86PlatformEntropy;
 use rustos_arch_x86_64::kernel_arch::{halt as arch_halt, X86_64Arch};
 use rustos_kernel_core::{reschedule_current, IrqRouting, KernelArch, RescheduleAction};
 use rustos_kernel_irq::{IrqController, IrqTable};
@@ -314,6 +316,11 @@ impl SchedulerArch for BinArch {
     }
 }
 
+/// The `'static` x86_64 platform-entropy handle the kernel seeds its CSPRNG
+/// reserve from. Zero-sized; the RDSEED/RDRAND instructions are addressed
+/// directly, so no per-instance state is needed.
+static X86_PLATFORM_ENTROPY: X86PlatformEntropy = X86PlatformEntropy::new();
+
 impl KernelArch for BinArch {
     type Cs = ContextSwitchHal;
 
@@ -323,6 +330,13 @@ impl KernelArch for BinArch {
 
     fn halt(&self) -> ! {
         arch_halt()
+    }
+
+    fn platform_entropy(&self) -> Option<&'static dyn PlatformEntropy> {
+        // x86_64 seeds the kernel CSPRNG reserve from RDSEED/RDRAND. The
+        // handle is zero-sized, so a `'static` instance suffices; whether
+        // the instructions are enumerated is decided at runtime by the port.
+        Some(&X86_PLATFORM_ENTROPY)
     }
 
     fn irq_routing(&self) -> IrqRouting {

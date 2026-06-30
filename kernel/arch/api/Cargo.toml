@@ -27,5 +27,12 @@ path = "src/lib.rs"
 #   ABI (`rustos_abi::hwtree`) rather than re-defining the node types
 #   (§2.2). The edge `kernel/arch/api -> lib/abi` is permitted by §17.4
 #   and pulls no kernel dependency or `#[global_allocator]` in.
+#
+# - `rustos-rng` is a `lib/*` crate (no_std, audited-crypto-backed). It is
+#   named here so the `entropy` slice (`AGENTS.md` §17.2 / §22) can speak in
+#   the single `EntropySource`/`HardwareRng` seam every entropy consumer
+#   shares (§2.2) rather than re-defining the trait. The edge
+#   `kernel/arch/api -> lib/rng` is permitted by §17.4.
 [dependencies]
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+rustos-rng = { path = "../../../lib/rng", version = "=0.0.0" }

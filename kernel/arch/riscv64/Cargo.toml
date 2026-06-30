@@ -38,6 +38,7 @@ test-harness = []
 # the host so their unit tests run under `cargo test`.
 [dependencies]
 rustos-arch-api = { path = "../api", version = "=0.0.0" }
+rustos-rng = { path = "../../../lib/rng", version = "=0.0.0" }
 # `rustos-abi` provides the frozen `SYSCALL_MAX_ARGS = 6` constant the
 # ecall entry path marshals user arguments into — the same dependency
 # `kernel/arch/x86_64` takes for its `syscall`/`sysret` stub. It is a

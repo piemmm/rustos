@@ -110,6 +110,10 @@ pub mod context;
 /// architecture-neutral first-frame seeding + task switch over the
 /// bare-metal primitive in [`context`].
 pub mod context_hal;
+/// riscv64 implementation of the Arch HAL platform-entropy surface
+/// ([`rustos_arch_api::PlatformEntropy`]): the `Zkr` `seed` CSR source,
+/// honestly `Pending` on the M-mode delegation (see the module docs).
+pub mod entropy;
 pub mod fault;
 pub mod fdt;
 pub mod kernel_arch;

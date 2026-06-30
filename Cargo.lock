@@ -486,6 +486,7 @@ dependencies = [
  "rustos-fdt",
  "rustos-font",
  "rustos-log",
+ "rustos-rng",
  "rustos-vcmailbox",
 ]
 
@@ -494,6 +495,7 @@ name = "rustos-arch-api"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-rng",
 ]
 
 [[package]]
@@ -504,6 +506,7 @@ dependencies = [
  "rustos-arch-api",
  "rustos-fdt",
  "rustos-log",
+ "rustos-rng",
 ]
 
 [[package]]
@@ -513,6 +516,7 @@ dependencies = [
  "rustos-abi",
  "rustos-arch-api",
  "rustos-log",
+ "rustos-rng",
 ]
 
 [[package]]
@@ -523,6 +527,7 @@ dependencies = [
  "rustos-arch-api",
  "rustos-arch-x86_64",
  "rustos-kernel-mem",
+ "rustos-rng",
 ]
 
 [[package]]

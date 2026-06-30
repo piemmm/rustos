@@ -104,6 +104,10 @@ pub mod context_hal;
 /// dropping to EL1 — the EL2 reset state is architecturally UNKNOWN on
 /// real silicon and an UNKNOWN `HCR_EL2.TVM` hangs the MMU switch.
 pub mod el2;
+/// aarch64 implementation of the Arch HAL platform-entropy surface
+/// ([`rustos_arch_api::PlatformEntropy`]): the ARMv8.5 `FEAT_RNG` `RNDR`
+/// system register the kernel seeds its CSPRNG reserve from.
+pub mod entropy;
 pub mod exceptions;
 pub mod fault;
 /// aarch64 device-tree access: the aarch64-specific `virt`-board queries
