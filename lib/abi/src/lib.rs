@@ -30,6 +30,7 @@ pub mod log;
 pub mod mailbox_ipc;
 pub mod manifest;
 pub mod memory;
+pub mod origin;
 pub mod process;
 pub mod random;
 pub mod rlimit;
@@ -81,6 +82,7 @@ pub use manifest::{
     decode_capability_ids, ManifestHeader, MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES,
 };
 pub use memory::MapFlags;
+pub use origin::{ProcId, PROC_ID_HEX_LEN, PROC_ID_LEN};
 pub use process::{
     encoded_len as process_start_encoded_len, write_into as process_start_write_into,
     DescriptorTable, ProcessStart, ProcessStartHeader, StreamMode, StringSlot, CONSOLE_INDEX_MAX,

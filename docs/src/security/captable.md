@@ -13,6 +13,35 @@
   has named the caller. This is Stage 2.7 follow-up (f2) and is
   described below.
 
+## Process-instance identity (`ProcId`)
+
+Each `TaskCapabilities` record also carries a kernel-generated
+**process-instance identity**, `rustos_abi::ProcId` — a 128-bit value
+distinct from the reusable numeric `TaskId` / PID. The kernel hands out
+task ids from a recycled space, so two process lifetimes can reuse a
+numeric id; they never share a `ProcId`. Security attribution can
+therefore distinguish "the login that ran as PID 42 this morning" from "the
+shell that reused PID 42 this afternoon".
+
+The id is minted entirely kernel-side (`kernel/core::proc_id`) at the two
+process-admit paths — the `spawn` syscall (drawing from the single kernel
+CSPRNG output reserve) and the early-boot bootstrap principals, PID 1 and
+the storage-floor drivers (the per-boot monotonic counter alone, since the
+reserve is not yet seeded that early). The monotonic counter guarantees
+uniqueness within a boot independently of entropy; the random half adds
+unpredictability and cross-boot distinctness. User space never supplies or
+influences the value, so a task can neither forge another instance's
+identity nor predict its own. Records that are not a distinct user process
+instance — kernel threads, IPC-binder and device-host capability records —
+keep the reserved all-zero `ProcId::KERNEL` sentinel.
+
+Because the record is the per-syscall caller context the dispatcher
+consults (`CallerContext::caps`), every security-relevant audit record the
+dispatcher emits carries the caller's attested `proc` field beside the
+numeric `task` field, so the hash-chained log attributes each decision to
+the exact instance that took it. The attestation is the kernel's, never the
+caller's.
+
 ## Per-task registry
 
 `CapTable` owns a flat `BTreeMap<TaskId, TaskCapabilities>`. It carries

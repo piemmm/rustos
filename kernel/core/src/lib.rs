@@ -87,6 +87,7 @@ pub mod kthread_irq;
 pub mod live_producer;
 pub mod memmap;
 pub mod panic;
+pub mod proc_id;
 pub mod procwait;
 pub mod random;
 pub mod rlimit;
@@ -147,6 +148,7 @@ pub use kthread_irq::{CooperativeYield, KthreadIrqWaiter};
 pub use live_producer::{LiveDmaAlloc, LiveMemMap, LiveMmioMap, LiveSharedMem};
 pub use memmap::{MemMap, NullMemMap, NULL_MEM_MAP};
 pub use panic::{handle_panic, panic_dump, PanicContext};
+pub use proc_id::{mint_proc_id, mint_proc_id_bootstrap};
 pub use procwait::{
     KernelProcessWait, NullProcessWait, ProcessTable, ProcessWait, Reap, ReapedChild,
     NULL_PROCESS_WAIT,

@@ -589,7 +589,12 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // request; the boot path passes the system grant, so use it for both
         // bounds (uid 0 — the system user).
         let sec_id = SecTaskId(task_id);
-        let record = TaskCapabilities::derive(sec_id, UserId(0), caps, caps, self.audit);
+        // Attach PID 1's process-instance identity (a kernel-trusted bootstrap
+        // principal minted from the shared per-boot counter), so its syscalls
+        // are attributed to this instance distinctly from any task that later
+        // reuses the numeric id.
+        let record = TaskCapabilities::derive(sec_id, UserId(0), caps, caps, self.audit)
+            .with_proc_id(crate::proc_id::mint_proc_id_bootstrap());
         self.caps.write().insert(record);
 
         // Register PID 1's frozen address space + direct map under the same
@@ -778,6 +783,11 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
             DescriptorTable::closed(),
             grants,
             node_id,
+            // A boot-floor driver is a kernel-trusted bootstrap principal
+            // admitted before any untrusted code runs; mint its
+            // process-instance identity from the shared per-boot counter
+            // (the entropy reserve is not seeded this early).
+            crate::proc_id::mint_proc_id_bootstrap(),
         );
         spawn.spawn_with(rxe, &ctx, caps, args)
     }

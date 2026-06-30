@@ -10,7 +10,7 @@
 
 use rustos_abi::{
     spec_for, AbiType, CapabilityId, Errno, IrqHandle, MapFlags, OpenFlags, RandomFlags,
-    SyscallNumber, SyscallSpec, ENCODED_TABLE, SYSCALL_MAX_ARGS,
+    SyscallNumber, SyscallSpec, ENCODED_TABLE, PROC_ID_HEX_LEN, SYSCALL_MAX_ARGS,
 };
 use rustos_crypto::{sha256, Sha256Digest};
 use rustos_kernel_sec::{TaskCapabilities, TaskId};
@@ -1600,6 +1600,7 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
 
     fn audit_unknown(&self, caller: &CallerContext<'_>, number: u16) {
         let mut t = [0u8; 16];
+        let mut p = [0u8; PROC_ID_HEX_LEN];
         let mut n = [0u8; 12];
         // The number always fits in `u32` (it is a `u16`); `format_usize`
         // saturates above `i32::MAX` which never trips for a `u16`.
@@ -1612,6 +1613,10 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                     value: format_hex_u64(caller.task_id.0, &mut t),
                 },
                 Field {
+                    key: "proc",
+                    value: caller.caps.proc_id().write_hex(&mut p),
+                },
+                Field {
                     key: "no",
                     value: rustos_util::fmt::format_usize(usize::from(number), &mut n),
                 },
@@ -1621,6 +1626,7 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
 
     fn audit_denied(&self, caller: &CallerContext<'_>, spec: &SyscallSpec) {
         let mut t = [0u8; 16];
+        let mut p = [0u8; PROC_ID_HEX_LEN];
         record(
             self.audit,
             AuditEvent::SyscallPermissionDenied,
@@ -1628,6 +1634,10 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 Field {
                     key: "task",
                     value: format_hex_u64(caller.task_id.0, &mut t),
+                },
+                Field {
+                    key: "proc",
+                    value: caller.caps.proc_id().write_hex(&mut p),
                 },
                 Field {
                     key: "sc",
@@ -1639,6 +1649,7 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
 
     fn audit_bad_args(&self, caller: &CallerContext<'_>, spec: &SyscallSpec) {
         let mut t = [0u8; 16];
+        let mut p = [0u8; PROC_ID_HEX_LEN];
         record(
             self.audit,
             AuditEvent::SyscallBadArguments,
@@ -1646,6 +1657,10 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 Field {
                     key: "task",
                     value: format_hex_u64(caller.task_id.0, &mut t),
+                },
+                Field {
+                    key: "proc",
+                    value: caller.caps.proc_id().write_hex(&mut p),
                 },
                 Field {
                     key: "sc",
@@ -1657,6 +1672,7 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
 
     fn audit_invoked(&self, caller: &CallerContext<'_>, spec: &SyscallSpec) {
         let mut t = [0u8; 16];
+        let mut p = [0u8; PROC_ID_HEX_LEN];
         record(
             self.audit,
             AuditEvent::SyscallInvoked,
@@ -1664,6 +1680,10 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 Field {
                     key: "task",
                     value: format_hex_u64(caller.task_id.0, &mut t),
+                },
+                Field {
+                    key: "proc",
+                    value: caller.caps.proc_id().write_hex(&mut p),
                 },
                 Field {
                     key: "sc",
@@ -1675,6 +1695,7 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
 
     fn audit_would_block(&self, caller: &CallerContext<'_>, spec: &SyscallSpec) {
         let mut t = [0u8; 16];
+        let mut p = [0u8; PROC_ID_HEX_LEN];
         record(
             self.audit,
             AuditEvent::SyscallHandlerWouldBlock,
@@ -1682,6 +1703,10 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 Field {
                     key: "task",
                     value: format_hex_u64(caller.task_id.0, &mut t),
+                },
+                Field {
+                    key: "proc",
+                    value: caller.caps.proc_id().write_hex(&mut p),
                 },
                 Field {
                     key: "sc",
@@ -1698,6 +1723,7 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             Some(e_ref) => format_i32(e_ref.as_i32(), &mut e),
             None => "?",
         };
+        let mut p = [0u8; PROC_ID_HEX_LEN];
         record(
             self.audit,
             AuditEvent::SyscallHandlerRejected,
@@ -1705,6 +1731,10 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 Field {
                     key: "task",
                     value: format_hex_u64(caller.task_id.0, &mut t),
+                },
+                Field {
+                    key: "proc",
+                    value: caller.caps.proc_id().write_hex(&mut p),
                 },
                 Field {
                     key: "sc",
@@ -2425,6 +2455,67 @@ mod tests {
         assert_eq!(h.last(), None);
         // Exactly one denied event.
         assert_eq!(sink.ids(), [AuditEvent::SyscallPermissionDenied.id().0]);
+    }
+
+    #[test]
+    fn audit_records_carry_the_callers_attested_proc_id() {
+        use rustos_abi::{ProcId, PROC_ID_HEX_LEN};
+
+        /// Sink that captures the value of the `proc` field of each event.
+        struct ProcFieldSink {
+            seen: RefCell<Vec<alloc::string::String>>,
+        }
+        impl Sink for ProcFieldSink {
+            fn write_event(&self, event: &Event<'_>) {
+                for f in event.fields {
+                    if f.key == "proc" {
+                        self.seen.borrow_mut().push(f.value.into());
+                    }
+                }
+            }
+        }
+        set_max_level(Level::Trace);
+        let sink = ProcFieldSink {
+            seen: RefCell::new(Vec::new()),
+        };
+
+        // The attested identity lives on the capability record, minted
+        // kernel-side; it is unrelated to the numeric task id.
+        let minted = ProcId::from_raw([0xAB; 16]);
+        let caps = TaskCapabilities::derive(
+            TaskId(7),
+            UserId(1000),
+            CapabilitySet::empty(),
+            CapabilitySet::empty(),
+            &sink,
+        )
+        .with_proc_id(minted);
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers::default();
+        let d = Dispatcher::new(&h, &sink);
+
+        // A capability-gated syscall the empty set cannot satisfy → denied,
+        // which emits an audited record carrying the `proc` field.
+        let mut args = RawArgs::ZERO;
+        args.0[0] = 1;
+        args.0[1] = u64::from(CapabilityId::FS_MOUNT.as_u16());
+        assert_eq!(
+            d.dispatch(&ctx, SyscallNumber::CAP_REVOKE.as_u16(), args),
+            Err(Errno::PermissionDenied)
+        );
+
+        let mut expected = [0u8; PROC_ID_HEX_LEN];
+        let expected = minted.write_hex(&mut expected);
+        let seen = sink.seen.borrow();
+        assert_eq!(seen.len(), 1, "exactly the one denied record");
+        assert_eq!(seen[0], expected);
+        // The attestation comes from the caps record, not the task id: a
+        // record whose numeric task id is 7 still carries the minted id, not
+        // a value derived from `7`.
+        assert_ne!(seen[0], "0000000000000007");
     }
 
     #[test]

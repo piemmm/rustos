@@ -22,7 +22,7 @@ extern crate alloc;
 
 use alloc::collections::BTreeMap;
 
-use rustos_abi::Errno;
+use rustos_abi::{Errno, ProcId};
 use rustos_caps::{CapabilitySet, CapabilityToken, RevocationEpoch};
 use rustos_crypto::Ed25519PublicKey;
 use rustos_log::{Field, Sink};
@@ -58,6 +58,15 @@ pub struct TaskCapabilities {
     manifest_request: CapabilitySet,
     /// Currently effective set. Always a subset of `user_grant ∩ manifest_request`.
     effective: CapabilitySet,
+    /// Kernel-generated process-instance identity, distinct from the
+    /// reusable scheduler [`TaskId`]. Defaults to [`ProcId::KERNEL`] —
+    /// the sentinel for a schedulable entity that is not a distinct user
+    /// process instance (kernel threads, IPC-binder/device-host records).
+    /// The two process-admit paths replace it with a minted value through
+    /// [`Self::with_proc_id`]; it is set kernel-side and never derived from
+    /// any caller-supplied bytes, so a task can neither forge nor influence
+    /// it.
+    proc_id: ProcId,
 }
 
 impl TaskCapabilities {
@@ -107,7 +116,30 @@ impl TaskCapabilities {
             user_grant,
             manifest_request,
             effective,
+            proc_id: ProcId::KERNEL,
         }
+    }
+
+    /// Attach a minted process-instance identity to this record.
+    ///
+    /// Consumed and returned so the process-admit path can set the identity
+    /// inline before inserting the record into the [`CapTable`]. Only the
+    /// kernel's two process-admit sites call this; every other producer
+    /// leaves the [`ProcId::KERNEL`] sentinel.
+    #[must_use]
+    pub fn with_proc_id(mut self, proc_id: ProcId) -> Self {
+        self.proc_id = proc_id;
+        self
+    }
+
+    /// The task's kernel-generated process-instance identity.
+    ///
+    /// Returns [`ProcId::KERNEL`] for a record that is not a distinct user
+    /// process instance. The value is attested by the kernel — never
+    /// caller-supplied — so an audit or origin consumer may trust it.
+    #[must_use]
+    pub fn proc_id(&self) -> ProcId {
+        self.proc_id
     }
 
     /// Currently effective capability set.
@@ -412,6 +444,25 @@ mod tests {
         assert!(!t.has(CapabilityId::NET_RAW));
         assert!(!t.has(CapabilityId::DRV_LOAD));
         assert_eq!(sink.ids(), [AuditEvent::TaskCapabilitiesDerived.id().0]);
+    }
+
+    #[test]
+    fn proc_id_defaults_to_kernel_sentinel_and_with_proc_id_attaches() {
+        use rustos_abi::ProcId;
+        let grant = caps_of(&[CapabilityId::FS_MOUNT]);
+        let sink = RecordingSink::new();
+        let base = TaskCapabilities::derive(TaskId(7), UserId(1000), grant, grant, &sink);
+        // A freshly-derived record carries the kernel sentinel: it is not a
+        // distinct user process instance until a minted id is attached.
+        assert_eq!(base.proc_id(), ProcId::KERNEL);
+        assert!(base.proc_id().is_kernel());
+
+        let minted = ProcId::from_raw([0xAB; 16]);
+        let admitted = base.with_proc_id(minted);
+        assert_eq!(admitted.proc_id(), minted);
+        assert!(!admitted.proc_id().is_kernel());
+        // Attaching the identity changes nothing about the capability set.
+        assert!(admitted.has(CapabilityId::FS_MOUNT));
     }
 
     #[test]

@@ -78,7 +78,7 @@ use rustos_abi::hwtree::{HwResource, HwResourceKind};
 use rustos_abi::input::KeyInput;
 use rustos_abi::{
     decode_log_record, CapabilityId, DescriptorTable, DirEntry, Errno, FileStat, IrqHandle,
-    LimitKind, MapFlags, OpenFlags, RandomFlags, ResourceLimit, StreamMode, SyscallNumber,
+    LimitKind, MapFlags, OpenFlags, ProcId, RandomFlags, ResourceLimit, StreamMode, SyscallNumber,
     WaitSetOp, WaitSourceKind, CONSOLE_INHERIT, FS_IO_MAX, FS_NAME_MAX, FS_PATH_MAX,
     LOG_FIELDS_MAX, LOG_RECORD_MAX, RANDOM_REQUEST_MAX_BYTES,
 };
@@ -1573,6 +1573,10 @@ where
             // …and it is not a node-matched driver load, so the child has no
             // loaded node and may publish no `hw_emit_node` child.
             None,
+            // Mint the child's process-instance identity from the kernel's
+            // single CSPRNG reserve, attested kernel-side and never
+            // influenced by the spawning caller.
+            crate::proc_id::mint_proc_id(self.rng),
         );
         self.spawn_service.spawn(program, &ctx)
     }
@@ -3521,6 +3525,12 @@ where
     /// child (fail closed). Kernel-sourced (the
     /// matched node the device manager resolved), never caller-supplied.
     node_id: Option<u32>,
+    /// The kernel-minted process-instance identity attached to the admitted
+    /// child's capability record. Minted at the call site from the kernel's
+    /// single CSPRNG reserve (an ordinary `spawn`) or the bootstrap counter
+    /// (a boot-floor driver-spawn); never supplied or influenced by any
+    /// caller, so it cannot be forged.
+    proc_id: ProcId,
 }
 
 impl<'a, A> KernelSpawnCtx<'a, A>
@@ -3558,6 +3568,7 @@ where
         streams: DescriptorTable,
         grants: &'a [HwResource],
         node_id: Option<u32>,
+        proc_id: ProcId,
     ) -> Self {
         Self {
             frames,
@@ -3572,6 +3583,7 @@ where
             streams,
             grants,
             node_id,
+            proc_id,
         }
     }
 }
@@ -3655,7 +3667,12 @@ where
         // the system user; a per-user spawn uid is a
         // later stage.
         let sec_id = SecTaskId(task_id);
-        let record = TaskCapabilities::derive(sec_id, UserId(0), caps, caps, self.audit);
+        // Attach the kernel-minted process-instance identity to the record so
+        // every syscall this child makes is attributed to the exact instance
+        // (the audit log distinguishes it from a later task that reuses the
+        // numeric id). The id is kernel-minted, never caller-supplied.
+        let record = TaskCapabilities::derive(sec_id, UserId(0), caps, caps, self.audit)
+            .with_proc_id(self.proc_id);
         self.caps.write().insert(record);
 
         // Register the child's frozen address space + direct map under the
@@ -6820,6 +6837,9 @@ mod tests {
             &requested,
             // The matched node the driver was loaded for.
             Some(0x55),
+            // A fixed minted identity so the admit path's attestation is
+            // observable.
+            rustos_abi::ProcId::from_raw([0x11; 16]),
         );
 
         let program = EmbeddedProgram {
@@ -6835,6 +6855,13 @@ mod tests {
             .spawn(&program, &ctx)
             .expect("driver child admitted");
         let child = SecTaskId(pid);
+
+        // The minted process-instance identity is attested onto the child's
+        // capability record by `admit_process`, distinct from its numeric id.
+        assert_eq!(
+            table.read().caps_for(child).map(TaskCapabilities::proc_id),
+            Some(rustos_abi::ProcId::from_raw([0x11; 16]))
+        );
 
         // The driver's matched node is recorded against it, so a later
         // `hw_emit_node` parents its published child under exactly this node
