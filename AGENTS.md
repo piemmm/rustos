@@ -755,6 +755,30 @@ an update to this section.
 - Capabilities can be **delegated** (a subset, never a superset) and **revoked**.
 - IPC endpoints declare the capabilities required to call each method. The
   kernel enforces this at dispatch time; the receiver does not need to re-check.
+- **The capability set is deliberately small, and stays small. A new
+  capability is a last resort, not a convenience.** Every `CAP_*` widens the
+  vocabulary every reviewer, manifest author, and audit must reason about, so
+  the set must survive the scrutiny of a senior kernel reviewer (§2.6). Before
+  adding one, all of the following must hold; if any fails, do **not** add it —
+  use the existing controls (the per-inode owner/mode/ACL/`required_cap` model
+  §5.3, mount flags §5.3, an existing coarse capability, or the identity of the
+  calling principal) or stop and ask (§15.7):
+  1. **It guards a real security boundary for a *group* of resources** — a
+     whole class of operations or objects (all raw network access, all driver
+     loading, the entire audit log) — never a single file, path, device
+     instance, or method. "Gate this one thing" is the per-inode/`required_cap`
+     model's job, not a new capability's.
+  2. **It has a live holder and a live enforcement point in the *same* change.**
+     A capability defined "for later", before any principal is granted it or
+     any entry point checks it, is speculative interface (§2.3, §2.4) and is
+     forbidden — it is added with the subsystem that enforces it, not ahead of
+     it.
+  3. **No existing capability already expresses the authority** at an
+     appropriate granularity. Splitting one coarse capability into finer ones
+     is justified only by a demonstrated need to grant one without the other;
+     absent that, the coarse capability stands.
+  Renaming, merging, or deleting a capability is in-place evolution like any
+  other pre-release change (§2.13) — the set is curated, not append-only.
 
 ### 5.3 Filesystem permissions
 
@@ -1328,8 +1352,15 @@ this section and `PLAN.md`. Subdirectories outside this list are a
 defect.
 
 `/System/Logs` and `/System/Settings` are the only writable paths
-beneath `/System`. They are mounted `nosuid,nodev,noexec` and are
-capability-gated (`CAP_LOG_WRITE`, `CAP_SETTINGS_WRITE`).
+beneath `/System`. They are mounted `nosuid,nodev,noexec`; the rest of
+`/System` is read-only. Write access is gated first by the per-inode
+owner/mode/ACL model (§5.3) under the caller's kernel-attested identity —
+these subtrees are owned by the system user with restrictive modes, so
+ordinary principals read but do not write. A *dedicated* write capability
+(a `CAP_LOG_WRITE` for the journal, a `CAP_SETTINGS_WRITE` for the settings
+service) is introduced **with the service that holds and enforces it**, not
+ahead of it — per the capability-minimalism rule (§5.2), a capability with
+no live holder or enforcement point is not added in advance.
 
 Drivers under `/System/Drivers/` are grouped by device class or bus type,
 never by vendor (§8): the namespace is `/System/Drivers/<class>[_<subtype>]/`
