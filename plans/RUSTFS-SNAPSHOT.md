@@ -22,7 +22,7 @@ backup tool can name, diff, stream, and verify.
 
 RustFS is already fully copy-on-write with a superblock ring, retained
 transaction-root history, reflink/shared immutable chunks, refcounts, and a
-reverse-reference tree (rustfs-spec §4, §5, §7, §14). Those are exactly the
+reverse-reference tree (rustfs-spec §4, §9, §14). Those are exactly the
 primitives a snapshot is built from; this brief specifies the user-visible
 snapshot feature on top of them. It does **not** invent a second COW mechanism.
 
@@ -55,7 +55,7 @@ and any retention *policy engine* (the spec provides mechanism, not schedule).
   alluded to in the spec's TRIM reachability list — this brief makes it real.
 - Snapshot metadata is held to the **same integrity, redundancy, encryption,
   and authentication** rules as all other authoritative metadata (rustfs-spec
-  §3, §5, §7): self-identifying, checksummed/authenticated, two physical
+  §5, §7, §8): self-identifying, checksummed/authenticated, two physical
   copies, encrypted, no plaintext.
 - All snapshot operations are **capability-checked and fail closed** (charter
   §5.4): no ambient authority, caller identity is kernel-attested, every input
@@ -140,9 +140,10 @@ must treat as live.
 ### 3.3 Refcounting and reachability
 
 RustFS already refcounts shared chunks and keeps a reverse-reference tree
-(rustfs-spec §7). Snapshots **must not** require bumping a per-block refcount at
-creation time — that would make snapshot creation O(volume), violating the
-metadata-only and scalability invariants (§2, charter §26.6). Instead:
+(rustfs-spec §4, §9). Snapshots **must not** require bumping a per-block
+refcount at creation time — that would make snapshot creation O(volume),
+violating the metadata-only and scalability invariants (§2, charter §26.6).
+Instead:
 
 - A block is **live** iff it is reachable from *any* live root (current,
   retained-history, or snapshot). Reachability — not a single global
@@ -312,7 +313,7 @@ held resident for the whole volume (charter §26.6).
 
 - **COW / transactions** (rustfs-spec §14): every snapshot op is one atomic
   transaction; crash leaves prior-or-new, never torn.
-- **Reflink / dedupe / refcounts** (rustfs-spec §7): snapshots share the same
+- **Reflink / dedupe / refcounts** (rustfs-spec §9): snapshots share the same
   immutable chunks; the reachability rule (§3.3) is the single liveness
   authority, not a duplicated counter.
 - **Sparse** (plans/SPARSE.md §6.1, §15): snapshots preserve ZERO/Hole extents

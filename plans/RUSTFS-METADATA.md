@@ -60,7 +60,7 @@ it).
 
 - Extended attributes are **first-class inode metadata**, held to the same COW,
   integrity, redundancy, encryption, and authentication rules as all other
-  RustFS metadata (rustfs-spec §3, §4, §5, §7): self-identifying,
+  RustFS metadata (rustfs-spec §4, §5, §7, §8): self-identifying,
   checksummed/authenticated, two physical copies, encrypted, no plaintext.
 - Attributes are **namespaced** and the namespace decides the **capability**
   required to read or write them (§5). There is no "open by default" attribute
@@ -166,9 +166,9 @@ and curated, evolved in place (charter §2.13), not open-ended.
 A fork-style payload too large for an attribute value (classic-Mac resource
 fork, an icon, a thumbnail) is stored as a **named stream**: a secondary data
 stream attached to the inode, stored exactly like file data (COW extents,
-checksummed, compressed, encrypted, dedupable, sparse-capable — rustfs-spec §5,
-§6, §7, §19). The primary (unnamed) stream is the file's normal contents; named
-streams are addressed by a `rustos`/`mac`-namespaced key (e.g.
+checksummed, compressed, encrypted, dedupable, sparse-capable — rustfs-spec §6,
+§7, §8, §9, §10, §19). The primary (unnamed) stream is the file's normal
+contents; named streams are addressed by a `rustos`/`mac`-namespaced key (e.g.
 `mac.resourcefork`). This keeps large forks out of the inline attribute set
 while reusing the entire data pipeline (charter §2.2 — no second data path).
 
