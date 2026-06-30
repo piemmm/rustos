@@ -237,6 +237,65 @@ pub struct UnlockedRoot {
     /// [`LateIdentity`] cell and consulted by the `fs_*` syscalls to resolve
     /// a caller's primary and supplementary groups kernel-side.
     pub identity: IdentityTable,
+    /// The passphrase-derived volume key of the just-unlocked root volume,
+    /// held in a zero-on-drop wrapper.
+    ///
+    /// Carried out of the unlock so a [`WritableRootSink`] can open a
+    /// **second**, independent read-write view of the same volume and publish
+    /// it as the writable `/System/Logs` + `/System/Settings` backing
+    /// (`PREREQUISITES.md` P-B) — the encrypted root is the one writable
+    /// partition, so its key is the only way to mount that backing. It is the
+    /// most sensitive value the unlock produces: it lives no longer than the
+    /// publish step and is wiped the instant this struct drops, and the
+    /// redacted [`Debug`] never prints it.
+    pub volume_key: Zeroizing<VolumeKey>,
+}
+
+/// A seam the interactive unlock calls, on success, to publish a writable
+/// view of the just-unlocked root volume as the `/System/Logs` +
+/// `/System/Settings` backing (`PREREQUISITES.md` P-B).
+///
+/// The unlock itself cannot do this: it holds the key but not a second
+/// `'static` block window onto the root partition (it reuses one borrowed
+/// window per passphrase attempt). The live implementation captures the
+/// `'static` driver-store device, opens an independent read-write
+/// [`RustFs`] window onto the `RustFsRoot` partition under the supplied key,
+/// and registers it through `crate::system_mount::register_writable_state`.
+/// It is **fail-soft**: publishing the writable backing is never allowed to
+/// abort an otherwise-successful unlock.
+pub trait WritableRootSink {
+    /// Open a writable view of the just-unlocked root volume under
+    /// `volume_key` and publish it as the writable-state backing.
+    fn publish(&self, volume_key: &VolumeKey);
+}
+
+/// A [`WritableRootSink`] that publishes nothing.
+///
+/// Used by the two-device load path and the host tests, which exercise the
+/// users/identity load without a live driver-store device to open a second
+/// writable window from. The writable `/System/Logs` backing then simply
+/// stays unregistered and its operations fail closed `NotImplemented`.
+pub struct NoWritableRootSink;
+
+impl WritableRootSink for NoWritableRootSink {
+    fn publish(&self, _volume_key: &VolumeKey) {}
+}
+
+/// The set-once destinations a successful unlock publishes into.
+///
+/// Bundled so the unlock policy carries one "install targets" reference
+/// rather than three parallel parameters: the validated users database, the
+/// verified identity table, and the writable-state sink. All three are
+/// published together on a successful unlock.
+pub struct UnlockInstall<'a> {
+    /// The set-once cell the validated `users-v1` text is published into.
+    pub users: &'a LateUsersDb,
+    /// The set-once cell the verified user/group identity table is published
+    /// into (the `fs_*` group-resolution source).
+    pub identity: &'a LateIdentity,
+    /// The sink that publishes the writable `/System/Logs` + `/System/Settings`
+    /// backing from a second read-write view of the just-unlocked volume.
+    pub writable: &'a dyn WritableRootSink,
 }
 
 impl core::fmt::Debug for UnlockedRoot {
@@ -347,7 +406,14 @@ pub fn unlock_root_and_load_users<B: Block>(
     let identity =
         build_identity_table(&users_db, &groups, audit).map_err(RootMountError::Identity)?;
 
-    Ok(UnlockedRoot { users, identity })
+    // Carry the key out so the writable-state sink can open a second,
+    // read-write view of this same volume; it is zeroed when the returned
+    // struct drops.
+    Ok(UnlockedRoot {
+        users,
+        identity,
+        volume_key,
+    })
 }
 
 /// Recover the `root.unlock` descriptor off the FAT boot partition and
@@ -718,22 +784,31 @@ enum PassphraseReadError {
 /// and the rejected holder is zeroed inside `install`.
 fn finish_install(
     unlocked: UnlockedRoot,
-    late_db: &LateUsersDb,
-    late_identity: &LateIdentity,
+    install: &UnlockInstall<'_>,
     audit: &dyn Sink,
 ) -> UnlockOutcome {
-    let UnlockedRoot { users, identity } = unlocked;
+    let UnlockedRoot {
+        users,
+        identity,
+        volume_key,
+    } = unlocked;
+    // Publish the writable `/System/Logs` + `/System/Settings` backing from
+    // a second read-write view of this same volume, while the key is still
+    // live. Fail-soft: a publish refusal leaves those subtrees failing
+    // closed and never blocks the users/identity install below. The key is
+    // wiped when `volume_key` drops at the end of this function.
+    install.writable.publish(&volume_key);
     // Install the authoritative identity table first, so the `fs_*` group
     // resolution is ready before `login` can act on the installed users
     // database. Both cells are set-once; a refusal means something was
     // already published (the kthread runs once, so that is a logic error),
     // and the rejected value is dropped (the identity table carries no
     // secret; the users holder is zeroed inside `install`).
-    if late_identity.install(identity).is_err() {
+    if install.identity.install(identity).is_err() {
         gave_up(audit, "identity_already_installed");
         return UnlockOutcome::GaveUp;
     }
-    if late_db.install(users).is_err() {
+    if install.users.install(users).is_err() {
         gave_up(audit, "already_installed");
         return UnlockOutcome::GaveUp;
     }
@@ -800,10 +875,8 @@ fn finish_install(
 /// * `disk` — the whole-disk [`Block`] device the board brought up.
 /// * `console` — the primary console's byte sink for the prompt.
 /// * `input` — the primary console's (blocking) byte source.
-/// * `late_db` — the set-once cell the loaded database is published into.
-/// * `late_identity` — the set-once cell the verified identity table is
-///   published into (the `fs_*` group-resolution source), installed by the
-///   same trusted step as `late_db`.
+/// * `install` — the set-once publish destinations (users database, identity
+///   table, and writable-state sink) a successful unlock fills together.
 /// * `audit` — the sink every decision is logged through; no passphrase, key, or volume byte is ever logged.
 /// * `on_resolved` — invoked exactly once, after the unlock reaches its
 ///   terminal outcome (installed or gave up) and on every internal return
@@ -822,8 +895,7 @@ pub fn unlock_root_disk_interactively<Disk: Block>(
     disk: Disk,
     console: &dyn ConsoleWrite,
     input: &dyn ConsoleRead,
-    late_db: &LateUsersDb,
-    late_identity: &LateIdentity,
+    install: &UnlockInstall<'_>,
     audit: &dyn Sink,
     on_resolved: &dyn Fn(),
 ) -> UnlockOutcome {
@@ -840,8 +912,7 @@ pub fn unlock_root_disk_interactively<Disk: Block>(
     // fail-closed branches ran it), wedging both the keyboard and serial
     // `login` after a good unlock; threading it through `on_resolved` makes
     // forgetting it impossible.
-    let outcome =
-        unlock_root_disk_interactively_impl(disk, console, input, late_db, late_identity, audit);
+    let outcome = unlock_root_disk_interactively_impl(disk, console, input, install, audit);
     on_resolved();
     outcome
 }
@@ -854,8 +925,7 @@ fn unlock_root_disk_interactively_impl<Disk: Block>(
     disk: Disk,
     console: &dyn ConsoleWrite,
     input: &dyn ConsoleRead,
-    late_db: &LateUsersDb,
-    late_identity: &LateIdentity,
+    install: &UnlockInstall<'_>,
     audit: &dyn Sink,
 ) -> UnlockOutcome {
     // The disk is borrowed mutably for each attempt through the
@@ -873,7 +943,7 @@ fn unlock_root_disk_interactively_impl<Disk: Block>(
     // non-blank simply fails this attempt — the master key never unwraps,
     // exactly like any wrong passphrase, so it is no oracle — and falls through to the interactive prompt below.
     match mount_root_disk_and_load_users(&mut disk, b"", audit) {
-        Ok(unlocked) => return finish_install(unlocked, late_db, late_identity, audit),
+        Ok(unlocked) => return finish_install(unlocked, install, audit),
         Err(RootMountError::Mount(DriverError::PermissionDenied)) => {
             // Non-blank passphrase: prompt the operator interactively.
         }
@@ -913,7 +983,7 @@ fn unlock_root_disk_interactively_impl<Disk: Block>(
         };
 
         match mount_root_disk_and_load_users(&mut disk, &passphrase[..len], audit) {
-            Ok(unlocked) => return finish_install(unlocked, late_db, late_identity, audit),
+            Ok(unlocked) => return finish_install(unlocked, install, audit),
             Err(RootMountError::Mount(DriverError::PermissionDenied)) => {
                 // Wrong passphrase: the master key never unwrapped. Bounded
                 // retry — never an oracle and never an infinite loop. Falls through to the next loop
@@ -1823,8 +1893,11 @@ mod tests {
             success_disk(),
             &AcceptConsole,
             &input,
-            &late,
-            &late_identity,
+            &UnlockInstall {
+                users: &late,
+                identity: &late_identity,
+                writable: &NoWritableRootSink,
+            },
             &sink,
             &|| {},
         );
@@ -1873,8 +1946,11 @@ mod tests {
             disk,
             &AcceptConsole,
             &ScriptInput::failing(),
-            &late,
-            &late_identity,
+            &UnlockInstall {
+                users: &late,
+                identity: &late_identity,
+                writable: &NoWritableRootSink,
+            },
             &sink,
             &|| {},
         );
@@ -1917,8 +1993,11 @@ mod tests {
             success_disk(),
             &AcceptConsole,
             &input,
-            &late,
-            &late_identity,
+            &UnlockInstall {
+                users: &late,
+                identity: &late_identity,
+                writable: &NoWritableRootSink,
+            },
             &sink,
             &|| {},
         );
@@ -1945,8 +2024,11 @@ mod tests {
             success_disk(),
             &AcceptConsole,
             &input,
-            &late,
-            &late_identity,
+            &UnlockInstall {
+                users: &late,
+                identity: &late_identity,
+                writable: &NoWritableRootSink,
+            },
             &sink,
             &|| {},
         );
@@ -1981,8 +2063,11 @@ mod tests {
             FatVecBlock::new(64),
             &AcceptConsole,
             &input,
-            &late,
-            &late_identity,
+            &UnlockInstall {
+                users: &late,
+                identity: &late_identity,
+                writable: &NoWritableRootSink,
+            },
             &sink,
             &|| {},
         );
@@ -2016,8 +2101,11 @@ mod tests {
             success_disk(),
             &AcceptConsole,
             &ScriptInput::new(script(&[PASSPHRASE])),
-            &LateUsersDb::new(),
-            &LateIdentity::new(),
+            &UnlockInstall {
+                users: &LateUsersDb::new(),
+                identity: &LateIdentity::new(),
+                writable: &NoWritableRootSink,
+            },
             &RecordingSink::new(),
             &|| releases.set(releases.get() + 1),
         );
@@ -2034,8 +2122,11 @@ mod tests {
             FatVecBlock::new(64),
             &AcceptConsole,
             &ScriptInput::new(script(&[PASSPHRASE])),
-            &LateUsersDb::new(),
-            &LateIdentity::new(),
+            &UnlockInstall {
+                users: &LateUsersDb::new(),
+                identity: &LateIdentity::new(),
+                writable: &NoWritableRootSink,
+            },
             &RecordingSink::new(),
             &|| releases.set(releases.get() + 1),
         );
@@ -2061,8 +2152,11 @@ mod tests {
             success_disk(),
             &AcceptConsole,
             &input,
-            &late,
-            &late_identity,
+            &UnlockInstall {
+                users: &late,
+                identity: &late_identity,
+                writable: &NoWritableRootSink,
+            },
             &sink,
             &|| {},
         );
@@ -2092,8 +2186,11 @@ mod tests {
             success_disk(),
             &AcceptConsole,
             &input,
-            &late,
-            &late_identity,
+            &UnlockInstall {
+                users: &late,
+                identity: &late_identity,
+                writable: &NoWritableRootSink,
+            },
             &sink,
             &|| {},
         );

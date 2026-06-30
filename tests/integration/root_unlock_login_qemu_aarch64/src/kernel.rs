@@ -17,7 +17,9 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use rustos_abi::driver::virtio::VirtioHost;
 use rustos_abi::Errno;
 use rustos_drv_storage_virtio_blk::{register as virtio_blk_register, VirtioBlk};
-use rustos_kernel::root_mount::{unlock_root_disk_interactively, UnlockOutcome};
+use rustos_kernel::root_mount::{
+    unlock_root_disk_interactively, NoWritableRootSink, UnlockInstall, UnlockOutcome,
+};
 use rustos_kernel_core::{ConsoleRead, LateIdentity, LateUsersDb, NullConsole, UsersDbSource};
 use rustos_test_encrypted_root_image as disk_image;
 use rustos_test_virtio_qemu_support::{
@@ -117,8 +119,14 @@ fn root_unlock_login(
         blk,
         &NullConsole,
         &input,
-        &late,
-        &late_identity,
+        &UnlockInstall {
+            users: &late,
+            identity: &late_identity,
+            // This vertical proves the unlock policy + users/identity install,
+            // not the writable-state mount (no driver-store device here to
+            // open a second window from), so nothing is published.
+            writable: &NoWritableRootSink,
+        },
         env.audit_sink(),
         &|| released.store(true, Ordering::Release),
     );

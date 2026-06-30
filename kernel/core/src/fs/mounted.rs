@@ -36,15 +36,17 @@
 //! account, or a call made before the identity table or the mount is
 //! installed, is denied rather than served.
 
+use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use rustos_abi::driver::filesystem::{
     FilesystemRead, FilesystemSecurity, FilesystemWrite, NodeKind as DriverNodeKind,
 };
+use rustos_abi::driver::DriverHandle;
 use rustos_abi::{CapabilityQuery, Errno, FileKind, FileStat, OpenFlags};
 use rustos_kernel_sec::{IdentityTable, UserId, UserRecord};
-use rustos_sync::OnceCell;
+use rustos_sync::{OnceCell, SpinLock};
 
 use crate::sleeplock::SleepLock;
 
@@ -53,97 +55,153 @@ use super::perm::Credentials;
 use super::service::FilesystemService;
 use super::{Vfs, VfsError};
 
-/// A mounted volume: the root-backed [`Vfs`] policy layer and its filesystem
-/// driver behind the per-mount [`SleepLock`].
+/// One backing filesystem driver registered in a [`LateFilesystem`],
+/// addressed by the [`DriverHandle`] its mount carries in the VFS mount
+/// table.
 ///
-/// The [`Vfs`] is consulted through a shared `&self` reference (its mount
-/// table and resolution structure never mutate after mount), so it sits
-/// outside the lock; only the driver — which needs `&mut self` and may park
-/// across a device completion IRQ — is serialised by the lock.
-struct MountedVolume<F> {
-    /// The policy layer: absolute-path resolution, the mount table, and the
-    /// per-inode permission model, delegating structural I/O below the mount
-    /// point to `fs`.
-    vfs: Vfs,
-    /// The mounted volume's filesystem driver, serialised by a sleeping lock
-    /// because one operation may be held across a block-device completion park.
-    fs: SleepLock<F>,
+/// The driver needs `&mut self` per operation and may **park** across a
+/// block-device completion IRQ, so it is serialised by a sleeping
+/// [`SleepLock`] (never a spin lock — a second contender would busy-spin
+/// while the holder sleeps). The lock is leaked to `'static` so the hot path
+/// copies the reference out of the registry without holding the registry
+/// lock across the (possibly parking) operation.
+struct DriverEntry<F: 'static> {
+    handle: u64,
+    driver: &'static SleepLock<F>,
 }
 
-/// A set-once cell the boot path installs the mounted volume into after the
-/// disk comes online (mirrors [`crate::users::LateUsersDb`]).
+/// A set-once VFS policy layer plus a registry of backing filesystem drivers
+/// the boot path installs after the disk(s) come online (mirrors
+/// [`crate::users::LateUsersDb`]).
 ///
-/// The syscall layer is built before the disk is mounted, so the handlers
-/// hold a `&'static LateFilesystem` from boot; until [`install`](Self::install)
-/// publishes the mount, every operation fails closed with
-/// [`Errno::NotImplemented`] — identical to the hollow
-/// [`NULL_FILESYSTEM`](super::service::NULL_FILESYSTEM). After install the
-/// service routes to the published mount for the life of the system.
+/// The syscall layer is built before any disk is mounted, so the handlers
+/// hold a `&'static LateFilesystem` from boot; until the VFS is published and
+/// the covering mount's driver is registered, every operation fails closed
+/// with [`Errno::NotImplemented`] — identical to the hollow
+/// [`NULL_FILESYSTEM`](super::service::NULL_FILESYSTEM).
 ///
-/// `Sync` (through [`OnceCell`] and the per-mount [`SleepLock`]) so the single
-/// `&'static` instance is shared by the per-CPU syscall handlers.
-pub struct LateFilesystem<F> {
-    mount: OnceCell<MountedVolume<F>>,
+/// One VFS owns the whole mount table; **several** backing volumes can be
+/// registered (e.g. the read-only `/System` volume and the writable
+/// `/System/Logs` subtree of the encrypted root volume). Each `fs_*`
+/// operation resolves its path's covering mount, reads that mount's
+/// [`DriverHandle`], and runs against the matching driver — so operations on
+/// *different* volumes proceed in parallel (each behind its own
+/// [`SleepLock`]) and a slow device never stalls an unrelated one.
+///
+/// `Sync` (through [`OnceCell`], [`SpinLock`], and the per-driver
+/// [`SleepLock`]) so the single `&'static` instance is shared by the per-CPU
+/// syscall handlers.
+pub struct LateFilesystem<F: 'static> {
+    /// The shared policy layer: absolute-path resolution, the mount table,
+    /// and the per-inode permission model, set once when the layout is known.
+    vfs: OnceCell<Vfs>,
+    /// The backing drivers, keyed by mount [`DriverHandle`]. Appended to at
+    /// boot as each volume comes online (rare); read on every `fs_*` call.
+    /// The spin lock is held only for the tiny lookup/append, never across a
+    /// filesystem operation (the `&'static SleepLock` reference is copied
+    /// out first), so it never spins on a parked holder.
+    drivers: SpinLock<Vec<DriverEntry<F>>>,
 }
 
-/// A mount install was refused because a volume is already installed.
+/// An install/registration was refused because the target is already set.
 ///
-/// The cell is immutable after the first successful [`install`](LateFilesystem::install),
-/// so the live mount cannot be replaced by a later code path.
+/// The VFS cell is immutable after the first successful
+/// [`install_vfs`](LateFilesystem::install_vfs), and a [`DriverHandle`] is
+/// registered at most once, so neither the live VFS nor a live driver can be
+/// replaced by a later code path.
 #[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
 pub struct FilesystemAlreadyInstalled;
 
-impl<F> LateFilesystem<F> {
+impl<F: 'static> LateFilesystem<F> {
     /// Construct an empty cell. `const` so a boot path can place it in a
     /// `static` and hand `&LATE_FILESYSTEM` to the handler builder.
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            mount: OnceCell::new(),
+            vfs: OnceCell::new(),
+            drivers: SpinLock::new(Vec::new()),
         }
     }
 
-    /// Publish the mounted volume exactly once: the root-backed `vfs` policy
-    /// layer and its filesystem driver `fs`.
+    /// Publish the shared VFS policy layer exactly once.
     ///
-    /// On success the cell serves operations against `vfs`/`fs` for the rest
-    /// of the kernel's lifetime.
+    /// The VFS mount table already names the [`DriverHandle`] of every
+    /// backing volume; [`register`](Self::register) attaches each live driver
+    /// to its handle (before or after this call — a request for a not-yet-
+    /// registered handle fails closed until it lands).
     ///
     /// # Errors
     ///
-    /// [`FilesystemAlreadyInstalled`] if a volume is already installed — the
-    /// cell is immutable after the first successful install.
-    pub fn install(&self, vfs: Vfs, fs: F) -> Result<(), FilesystemAlreadyInstalled> {
-        self.mount
-            .set(MountedVolume {
-                vfs,
-                fs: SleepLock::new(fs),
-            })
-            .map_err(|_| FilesystemAlreadyInstalled)
+    /// [`FilesystemAlreadyInstalled`] if a VFS is already installed.
+    pub fn install_vfs(&self, vfs: Vfs) -> Result<(), FilesystemAlreadyInstalled> {
+        self.vfs.set(vfs).map_err(|_| FilesystemAlreadyInstalled)
     }
 
-    /// Whether a volume has been installed.
+    /// Register the live driver backing the mount addressed by `handle`.
+    ///
+    /// The driver is wrapped in a [`SleepLock`] and leaked to `'static` (it
+    /// lives for the rest of the kernel's life, like every other boot-leaked
+    /// kernel state), so the hot path can copy the reference out of the
+    /// registry without holding the registry lock across a parking operation.
+    ///
+    /// # Errors
+    ///
+    /// [`FilesystemAlreadyInstalled`] if `handle` is already registered — a
+    /// driver is bound to its handle exactly once (fail closed; never a
+    /// silent re-bind).
+    pub fn register(
+        &self,
+        handle: DriverHandle,
+        driver: F,
+    ) -> Result<(), FilesystemAlreadyInstalled> {
+        let handle = handle.as_u64();
+        let mut drivers = self.drivers.lock();
+        if drivers.iter().any(|e| e.handle == handle) {
+            return Err(FilesystemAlreadyInstalled);
+        }
+        let driver: &'static SleepLock<F> = Box::leak(Box::new(SleepLock::new(driver)));
+        drivers.push(DriverEntry { handle, driver });
+        Ok(())
+    }
+
+    /// Whether the shared VFS has been installed.
     #[must_use]
     pub fn is_installed(&self) -> bool {
-        self.mount.is_initialised()
+        self.vfs.is_initialised()
     }
-}
 
-impl<F> Default for LateFilesystem<F> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<F> LateFilesystem<F> {
-    /// The installed mount, or [`Errno::NotImplemented`] before one is
+    /// The installed VFS, or [`Errno::NotImplemented`] before one is
     /// published (fail closed — a kernel with no mounted volume serves no
     /// `fs_*` syscall).
-    fn mount(&self) -> Result<&MountedVolume<F>, Errno> {
-        match self.mount.get() {
-            Ok(Some(mount)) => Ok(mount),
+    fn vfs(&self) -> Result<&Vfs, Errno> {
+        match self.vfs.get() {
+            Ok(Some(vfs)) => Ok(vfs),
             _ => Err(Errno::NotImplemented),
         }
+    }
+
+    /// The driver registered for `handle`, or [`Errno::NotImplemented`] when
+    /// none is (fail closed — a mount whose backing volume is not yet online,
+    /// or has no driver, serves no operation, never a silent fallback).
+    fn driver(&self, handle: DriverHandle) -> Result<&'static SleepLock<F>, Errno> {
+        let handle = handle.as_u64();
+        let drivers = self.drivers.lock();
+        drivers
+            .iter()
+            .find(|e| e.handle == handle)
+            .map(|e| e.driver)
+            .ok_or(Errno::NotImplemented)
+    }
+
+    /// Every registered driver, for a whole-system `sync`.
+    fn all_drivers(&self) -> Vec<&'static SleepLock<F>> {
+        self.drivers.lock().iter().map(|e| e.driver).collect()
+    }
+}
+
+impl<F: 'static> Default for LateFilesystem<F> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -264,17 +322,38 @@ where
         path: &str,
         op: impl FnOnce(&Vfs, &mut F, &Credentials<'_>, &Path) -> Result<R, VfsError>,
     ) -> Result<R, Errno> {
-        let mount = self.mount.mount()?;
+        let vfs = self.mount.vfs()?;
         let record = self.identity.resolve(uid)?;
         let path = Path::parse(path).map_err(VfsError::to_errno)?;
+        // Route to the driver backing the path's covering mount. A path under
+        // a backing-less mount (the in-RAM default-layout dirs) has no driver
+        // to delegate to — its delegated op would itself fail `NotFound`, so
+        // it fails closed the same way here, never against a guessed volume.
+        let driver = self.resolve_driver(vfs, &path)?;
         let cred = Credentials {
             uid: UserId(uid),
             gid: record.primary_gid,
             supplementary_gids: &record.supplementary_gids,
             caps,
         };
-        let mut fs = mount.fs.lock();
-        op(&mount.vfs, &mut fs, &cred, &path).map_err(VfsError::to_errno)
+        let mut fs = driver.lock();
+        op(vfs, &mut fs, &cred, &path).map_err(VfsError::to_errno)
+    }
+
+    /// The driver backing the mount covering `path`, locked by the caller.
+    ///
+    /// Resolves the covering mount in the shared VFS, reads its
+    /// [`DriverHandle`], and returns the registered driver for it. A
+    /// backing-less covering mount yields [`VfsError::NotFound`] (no volume
+    /// to delegate to); a backed mount whose driver is not yet registered
+    /// yields [`Errno::NotImplemented`] — both fail closed.
+    fn resolve_driver(&self, vfs: &Vfs, path: &Path) -> Result<&'static SleepLock<F>, Errno> {
+        let handle = vfs
+            .mounts()
+            .resolve(path)
+            .backing()
+            .ok_or_else(|| VfsError::NotFound.to_errno())?;
+        self.mount.driver(handle)
     }
 }
 
@@ -427,14 +506,18 @@ where
     }
 
     fn sync(&self, _uid: u32, _caps: &dyn CapabilityQuery) -> Result<(), Errno> {
-        // Flush the mounted volume's buffered writes to its backing device.
-        // This is a whole-mount operation with no per-inode target, gated by
-        // `CAP_FS_ACCESS` at dispatch; a read-through driver flushes as a
-        // no-op. A device fault fails closed.
-        let mount = self.mount.mount()?;
-        // `abi-v1` has no dedicated I/O errno; a device fault collapses onto
-        // the same code the VFS uses for a driver fault.
-        mount.fs.lock().flush().map_err(|_| VfsError::Io.to_errno())
+        // Flush *every* mounted volume's buffered writes to its backing
+        // device. `sync` carries no per-inode (or per-volume) target, so it
+        // is whole-system; gated by `CAP_FS_ACCESS` at dispatch. A
+        // read-through driver flushes as a no-op. Fail closed before any
+        // volume is online (no VFS yet), and on the first device fault.
+        self.mount.vfs()?;
+        for driver in self.mount.all_drivers() {
+            // `abi-v1` has no dedicated I/O errno; a device fault collapses
+            // onto the same code the VFS uses for a driver fault.
+            driver.lock().flush().map_err(|_| VfsError::Io.to_errno())?;
+        }
+        Ok(())
     }
 
     fn mkdir(&self, uid: u32, caps: &dyn CapabilityQuery, path: &str) -> Result<(), Errno> {
@@ -458,21 +541,22 @@ where
     ) -> Result<(), Errno> {
         // Rename names two paths, so it resolves both under one lock rather
         // than through the single-path `with_secured`. Identity is attested
-        // exactly as elsewhere; both paths must lie under the same mount.
-        let mount = self.mount.mount()?;
+        // exactly as elsewhere; both paths must lie under the same mount
+        // (`rename_via_secured` refuses a cross-mount move), so the source
+        // path's covering-mount driver serves the whole operation.
+        let vfs = self.mount.vfs()?;
         let record = self.identity.resolve(uid)?;
         let src = Path::parse(src).map_err(VfsError::to_errno)?;
         let dst = Path::parse(dst).map_err(VfsError::to_errno)?;
+        let driver = self.resolve_driver(vfs, &src)?;
         let cred = Credentials {
             uid: UserId(uid),
             gid: record.primary_gid,
             supplementary_gids: &record.supplementary_gids,
             caps,
         };
-        let mut fs = mount.fs.lock();
-        mount
-            .vfs
-            .rename_via_secured(&cred, &src, &dst, &mut *fs)
+        let mut fs = driver.lock();
+        vfs.rename_via_secured(&cred, &src, &dst, &mut *fs)
             .map_err(VfsError::to_errno)
     }
 }

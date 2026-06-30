@@ -13,7 +13,9 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use rustos_abi::driver::filesystem::{MountFlags, NodeSecurity};
+use rustos_abi::driver::filesystem::{
+    FilesystemRead, FilesystemWrite, MountFlags, NodeKind, NodeSecurity,
+};
 use rustos_abi::driver::DriverHandle;
 use rustos_abi::{Errno, FileKind, OpenFlags};
 use rustos_caps::CapabilitySet;
@@ -96,6 +98,138 @@ fn driver() -> RwMockFs {
     fs
 }
 
+/// A driver owned by the test principal whose created nodes are
+/// world-traversable directories (mode `0o755`), so a rebased mount can walk
+/// the backing-subtree directories it pre-creates.
+fn dir_driver() -> RwMockFs {
+    let mut fs = RwMockFs::new().with_create_owner(TEST_UID, TEST_GID, 0o755);
+    fs.set_root_security(NodeSecurity::new(0o755, TEST_UID, TEST_GID));
+    fs
+}
+
+/// Two rebased sub-mounts that share **one** backing driver (the
+/// `/System/Logs` + `/System/Settings`-on-one-volume shape) route each to
+/// their own backing subtree and stay isolated; a second driver under a
+/// different handle is fully independent.
+#[test]
+fn rebased_submounts_route_to_their_backing_subtree_and_handle() {
+    let nosuid = MountFlags::NOSUID;
+    let h_shared = DriverHandle::from_raw(9).expect("handle");
+    let h_other = DriverHandle::from_raw(10).expect("handle");
+
+    // One driver carrying two backing subtrees, plus an independent second
+    // driver. Both are owned by the test principal.
+    let mut shared = dir_driver();
+    let sroot = shared.root();
+    shared
+        .create(sroot, b"LogsArea", NodeKind::Directory)
+        .expect("logs subtree");
+    shared
+        .create(sroot, b"SettingsArea", NodeKind::Directory)
+        .expect("settings subtree");
+    let other = dir_driver();
+
+    // The VFS: two rebased mounts on the shared driver and one plain mount on
+    // the other, with their in-RAM mount-point directories created so the
+    // delegated walk has a permission template.
+    let mut vfs = Vfs::with_default_layout(UserId(TEST_UID), GroupId(TEST_GID));
+    let caps = caps();
+    let cred = Credentials {
+        uid: UserId(TEST_UID),
+        gid: GroupId(TEST_GID),
+        supplementary_gids: &[],
+        caps: &caps,
+    };
+    for mp in ["/Storage/logs", "/Storage/settings", "/Storage/other"] {
+        vfs.mkdir(
+            &cred,
+            &Path::parse(mp).expect("path"),
+            Mode::from_bits(0o755),
+        )
+        .expect("mount point");
+    }
+    vfs.mounts_mut()
+        .mount_rebased(
+            Path::parse("/Storage/logs").expect("path"),
+            nosuid,
+            Some(h_shared),
+            alloc::vec![alloc::string::String::from("LogsArea")],
+        )
+        .expect("logs mount");
+    vfs.mounts_mut()
+        .mount_rebased(
+            Path::parse("/Storage/settings").expect("path"),
+            nosuid,
+            Some(h_shared),
+            alloc::vec![alloc::string::String::from("SettingsArea")],
+        )
+        .expect("settings mount");
+    vfs.mounts_mut()
+        .mount(
+            Path::parse("/Storage/other").expect("path"),
+            nosuid,
+            Some(h_other),
+        )
+        .expect("other mount");
+
+    let cell: &'static LateFilesystem<RwMockFs> = Box::leak(Box::new(LateFilesystem::new()));
+    cell.install_vfs(vfs).expect("install vfs");
+    cell.register(h_shared, shared).expect("register shared");
+    cell.register(h_other, other).expect("register other");
+    let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
+    identity.install(identity_table()).expect("identity");
+    let svc = MountedFilesystemService::new(cell, identity);
+
+    let create = OpenFlags::CREATE.union(OpenFlags::WRITE);
+    svc.open(TEST_UID, &caps, "/Storage/logs/a", create)
+        .expect("create under logs");
+    svc.write(TEST_UID, &caps, "/Storage/logs/a", 0, false, b"L")
+        .expect("write logs");
+    svc.open(TEST_UID, &caps, "/Storage/settings/b", create)
+        .expect("create under settings");
+    svc.write(TEST_UID, &caps, "/Storage/settings/b", 0, false, b"S")
+        .expect("write settings");
+    svc.open(TEST_UID, &caps, "/Storage/other/c", create)
+        .expect("create under other");
+    svc.write(TEST_UID, &caps, "/Storage/other/c", 0, false, b"O")
+        .expect("write other");
+
+    // Each file reads back through its own mount.
+    let mut buf = [0u8; 1];
+    assert_eq!(
+        svc.read(TEST_UID, &caps, "/Storage/logs/a", 0, &mut buf),
+        Ok(1)
+    );
+    assert_eq!(&buf, b"L");
+    assert_eq!(
+        svc.read(TEST_UID, &caps, "/Storage/settings/b", 0, &mut buf),
+        Ok(1)
+    );
+    assert_eq!(&buf, b"S");
+    assert_eq!(
+        svc.read(TEST_UID, &caps, "/Storage/other/c", 0, &mut buf),
+        Ok(1)
+    );
+    assert_eq!(&buf, b"O");
+
+    // The two rebased mounts are isolated: `a` exists only under the logs
+    // subtree, `b` only under settings.
+    assert_eq!(
+        svc.read(TEST_UID, &caps, "/Storage/settings/a", 0, &mut buf),
+        Err(Errno::NotFound)
+    );
+    assert_eq!(
+        svc.read(TEST_UID, &caps, "/Storage/logs/b", 0, &mut buf),
+        Err(Errno::NotFound)
+    );
+    // The second driver is independent: its file is not visible on the
+    // shared driver's subtrees.
+    assert_eq!(
+        svc.read(TEST_UID, &caps, "/Storage/logs/c", 0, &mut buf),
+        Err(Errno::NotFound)
+    );
+}
+
 /// Build a service over freshly leaked mount + identity cells. `mount` and
 /// `identity` select whether each cell is installed, so a test can exercise
 /// the fail-closed pre-install paths.
@@ -106,8 +240,12 @@ fn service(
 ) -> MountedFilesystemService<RwMockFs> {
     let cell: &'static LateFilesystem<RwMockFs> = Box::leak(Box::new(LateFilesystem::new()));
     if mount_installed {
-        cell.install(vfs(read_only), driver())
-            .expect("install mount");
+        cell.install_vfs(vfs(read_only)).expect("install vfs");
+        // The in-memory driver is mounted at [`MOUNT`] under handle 9 (see
+        // `vfs`); register it under that same handle so the service routes
+        // operations on `/Storage/vol/...` to it.
+        let handle = DriverHandle::from_raw(9).expect("non-zero handle");
+        cell.register(handle, driver()).expect("register driver");
     }
     let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
     if identity_installed {

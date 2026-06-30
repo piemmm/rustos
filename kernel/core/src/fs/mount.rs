@@ -12,6 +12,7 @@
 //! the queried path. The root mount (`/`) covers everything, so resolution
 //! always succeeds.
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use rustos_abi::driver::filesystem::MountFlags;
@@ -26,6 +27,18 @@ pub struct MountPoint {
     path: Path,
     flags: MountFlags,
     backing: Option<DriverHandle>,
+    /// The path *within the backing volume* at which this mount is rooted.
+    ///
+    /// Empty for a mount rooted at its driver's own root directory (the
+    /// common case: a whole volume mounted at its mount point). Non-empty
+    /// for a **sub-mount** — a subtree of a larger volume bound at a mount
+    /// point whose path differs from the subtree's path on the volume. The
+    /// delegated walk prepends these components to the path remainder below
+    /// the mount point, so the driver still resolves from its own
+    /// [`root`](rustos_abi::driver::filesystem::FilesystemRead::root): e.g.
+    /// `/System/Logs` backed by the encrypted root volume's own
+    /// `/System/Logs` directory carries `["System", "Logs"]` here.
+    backing_subtree: Vec<String>,
 }
 
 impl MountPoint {
@@ -46,6 +59,16 @@ impl MountPoint {
     #[must_use]
     pub fn backing(&self) -> Option<DriverHandle> {
         self.backing
+    }
+
+    /// The path components within the backing volume at which this mount is
+    /// rooted. Empty for a mount rooted at its driver's own root directory;
+    /// non-empty for a sub-mount of a larger volume (e.g. `["System",
+    /// "Logs"]` for `/System/Logs` backed by the root volume's own
+    /// `/System/Logs` directory).
+    #[must_use]
+    pub fn backing_subtree(&self) -> &[String] {
+        &self.backing_subtree
     }
 
     /// `true` if this mount is read-only.
@@ -75,6 +98,7 @@ impl MountTable {
                 path: Path::root(),
                 flags: root_flags,
                 backing: None,
+                backing_subtree: Vec::new(),
             }],
         }
     }
@@ -91,6 +115,29 @@ impl MountTable {
         flags: MountFlags,
         backing: Option<DriverHandle>,
     ) -> Result<(), VfsError> {
+        self.mount_rebased(path, flags, backing, Vec::new())
+    }
+
+    /// Add a **sub-mount** at `path` with `flags`, backed by `backing`
+    /// rooted at `backing_subtree` within that backing volume.
+    ///
+    /// `backing_subtree` is the path *on the backing volume* at which the
+    /// mount's content lives, used when the mount-point path differs from the
+    /// content's path on the volume (a subtree of a larger volume bound at a
+    /// `/System/...` mount point). An empty `backing_subtree` is exactly
+    /// [`MountTable::mount`] (the content is at the driver's own root).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VfsError::AlreadyExists`] if a mount already covers exactly
+    /// `path`.
+    pub fn mount_rebased(
+        &mut self,
+        path: Path,
+        flags: MountFlags,
+        backing: Option<DriverHandle>,
+        backing_subtree: Vec<String>,
+    ) -> Result<(), VfsError> {
         if self.mounts.iter().any(|m| m.path == path) {
             return Err(VfsError::AlreadyExists);
         }
@@ -98,6 +145,7 @@ impl MountTable {
             path,
             flags,
             backing,
+            backing_subtree,
         });
         Ok(())
     }

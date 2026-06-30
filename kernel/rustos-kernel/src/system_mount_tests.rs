@@ -123,20 +123,63 @@ fn system_vfs_mounts_system_read_only_and_driver_backed() {
 }
 
 #[test]
-fn system_vfs_removes_the_backingless_logs_and_settings_submounts() {
-    // The default layout's writable `/System/Logs` / `/System/Settings`
-    // submounts carry no backing driver yet (P-B), so they are removed and a
-    // path under them resolves to the one driver-backed `/System` mount
-    // rather than a backing-less shadow that would refuse reads.
+fn system_vfs_mounts_logs_and_settings_writable_and_rebased() {
+    use rustos_abi::driver::filesystem::MountFlags;
+
+    // `/System/Logs` and `/System/Settings` are the only writable paths
+    // beneath `/System` (P-B): each is a `nosuid,nodev,noexec` writable
+    // sub-mount of the encrypted root volume, rebased onto that volume's own
+    // `/System/<name>` directory, and shares one backing handle distinct from
+    // the read-only `/System`. `MountTable` longest-prefix resolution makes
+    // the writable child shadow the read-only parent.
     let vfs = system_vfs().expect("the production /System VFS builds");
-    let logs = Path::parse("/System/Logs/boot").expect("valid path");
-    let mount = vfs.mounts().resolve(&logs);
-    assert_eq!(
-        mount.path(),
-        &Path::parse("/System").expect("valid"),
-        "no backing-less /System/Logs submount shadows the driver-backed /System"
-    );
-    assert!(mount.backing().is_some());
+    let system_handle = vfs
+        .mounts()
+        .resolve(&Path::parse("/System/Drivers/x").expect("valid"))
+        .backing()
+        .expect("/System is driver-backed");
+
+    let nosuid_nodev_noexec = MountFlags::NOSUID
+        .union(MountFlags::NODEV)
+        .union(MountFlags::NOEXEC);
+    let mut writable_handle = None;
+    for name in ["Logs", "Settings"] {
+        let under = Path::parse(&alloc::format!("/System/{name}/file")).expect("valid path");
+        let mount = vfs.mounts().resolve(&under);
+        assert_eq!(
+            mount.path(),
+            &Path::parse(&alloc::format!("/System/{name}")).expect("valid"),
+            "the writable {name} sub-mount shadows the read-only /System"
+        );
+        assert!(!mount.is_read_only(), "/System/{name} is writable");
+        assert_eq!(
+            mount.flags(),
+            nosuid_nodev_noexec,
+            "/System/{name} is mounted nosuid,nodev,noexec"
+        );
+        let handle = mount
+            .backing()
+            .expect("the writable sub-mount is driver-backed");
+        assert_ne!(
+            handle, system_handle,
+            "the writable backing is a different volume from read-only /System"
+        );
+        // The two writable subtrees share one backing (the one encrypted root
+        // volume).
+        match writable_handle {
+            None => writable_handle = Some(handle),
+            Some(prev) => assert_eq!(prev, handle, "Logs and Settings share one backing volume"),
+        }
+        // Rebased onto the backing volume's own `/System/<name>` directory.
+        assert_eq!(
+            mount.backing_subtree(),
+            &[
+                alloc::string::String::from("System"),
+                alloc::string::String::from(name),
+            ],
+            "/System/{name} is rebased onto the volume's own /System/{name}"
+        );
+    }
 }
 
 #[test]

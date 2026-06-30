@@ -523,13 +523,23 @@ impl Vfs {
         }
         let mount_depth = src_mount.path().depth();
         let mount_path = src_mount.path().clone();
+        // A sub-mount roots its content at `backing_subtree` on the backing
+        // volume; both rename paths share the one covering mount (checked
+        // above), so both remainders are re-based by the same prefix so the
+        // driver resolves from its own root.
+        let subtree = src_mount.backing_subtree().to_vec();
         let node = self.resolve(cred, &mount_path)?;
         let NodeKind::Directory(_) = &node.kind else {
             return Err(VfsError::NotADirectory);
         };
         let template = node.meta.clone();
-        let src_rem = src.components()[mount_depth..].to_vec();
-        let dst_rem = dst.components()[mount_depth..].to_vec();
+        let rebase = |path: &Path| {
+            let mut rem = subtree.clone();
+            rem.extend_from_slice(&path.components()[mount_depth..]);
+            rem
+        };
+        let src_rem = rebase(src);
+        let dst_rem = rebase(dst);
         Ok((template, src_rem, dst_rem))
     }
 
@@ -557,12 +567,17 @@ impl Vfs {
         }
         let mount_depth = mount.path().depth();
         let mount_path = mount.path().clone();
+        // A sub-mount roots its content at `backing_subtree` on the backing
+        // volume (empty for a whole-volume mount): prepend it to the path
+        // remainder below the mount point so the delegated walk resolves
+        // from the driver's own root and lands on the volume's real subtree.
+        let mut remainder = mount.backing_subtree().to_vec();
         let node = self.resolve(cred, &mount_path)?;
         let NodeKind::Directory(_) = &node.kind else {
             return Err(VfsError::NotADirectory);
         };
         let template = node.meta.clone();
-        let remainder = path.components()[mount_depth..].to_vec();
+        remainder.extend_from_slice(&path.components()[mount_depth..]);
         Ok((template, remainder))
     }
 

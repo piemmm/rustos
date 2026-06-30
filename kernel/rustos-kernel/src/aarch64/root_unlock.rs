@@ -42,6 +42,7 @@ use rustos_caps::CapabilitySet;
 use rustos_crypto::Ed25519PublicKey;
 use rustos_drv_bus_mmio::virtio_mmio_bus_from_dtb;
 use rustos_drv_bus_virtio::MmioTransport;
+use rustos_drv_fs_rustfs::{RustFs, VolumeKey};
 use rustos_drv_storage_emmc2::CompletionWait;
 use rustos_drv_storage_virtio_blk::{VirtioBlk, VIRTIO_BLK_DEVICE_ID};
 use rustos_fdt::Fdt;
@@ -52,6 +53,7 @@ use rustos_kernel_sec::captable::TaskCapabilities;
 use rustos_kernel_sec::identity::UserId;
 use rustos_kernel_virtio::{provision_virtio_mmio, KernelMmioMapper, KernelVirtioHost};
 use rustos_log::{Level, Sink};
+use rustos_partition::{parse_partition_table, PartitionBlock, PartitionType};
 
 use crate::aarch64::arch_wrapper::{
     UART_CONSOLE, UART_CONSOLE_READ, VIDEO_CONSOLE, VIDEO_KEYBOARD,
@@ -61,9 +63,12 @@ use crate::aarch64::spawn_producer::AARCH64_PROCESS_SPAWN;
 use crate::driver_catalog::{EMMC2_PATH, KERNEL_DRIVER_SIGNER_PUBKEY, VIRTIO_BLK_PATH};
 use crate::driver_loader::KernelDriverLoader;
 use crate::driver_spawn_loader::InitCtxDriverProcessSpawn;
-use crate::root_mount::{unlock_root_disk_interactively, UnlockOutcome, LATE_USERS_DB};
+use crate::root_mount::{
+    unlock_root_disk_interactively, UnlockInstall, UnlockOutcome, WritableRootSink, LATE_USERS_DB,
+};
 use crate::root_storage::RootBlockBinding;
 use crate::shared_block::{DriverStoreService, SharedBlock};
+use crate::system_mount::{register_writable_state, KernelFs};
 use crate::unlock_service::{
     autoload_caps, loader_caps, note, note_stage, service_caps, store_endpoint_binder_caps,
     take_boot, KthreadConsoleRead, CONSOLE0_GATE, UNLOCK_TASK, USERS_DB_INSTALLED_MESSAGE,
@@ -766,6 +771,72 @@ fn emmc2_unlock<'a>(
 /// space *before* the unlock prompt — no chicken-and-egg, and no cooperative
 /// interleaving of the two on one kthread.
 ///
+/// The live [`WritableRootSink`]: on a successful unlock it opens a second,
+/// independent `'static` read-write [`RustFs`] window onto the `RustFsRoot`
+/// partition under the just-derived key and registers it as the writable
+/// `/System/Logs` + `/System/Settings` backing
+/// (`crate::system_mount::register_writable_state`).
+///
+/// This is the only path that can mount the writable state: the encrypted
+/// root is the one writable partition, so its key — live only at the moment
+/// of a successful unlock — is required. The read window the unlock used for
+/// `/System/Security` is already dropped, so this read-write view is the
+/// sole writer of the volume. Fail-soft and audited: any partition/window/
+/// mount refusal leaves the writable subtrees failing closed and never
+/// disturbs the users/identity install.
+struct WritableStateSink<'a, B: Block + 'static> {
+    store: &'static DriverStoreService<B>,
+    audit: &'a dyn Sink,
+}
+
+impl<B: Block + 'static> WritableRootSink for WritableStateSink<'_, B> {
+    fn publish(&self, volume_key: &VolumeKey) {
+        // Locate the RustFsRoot extent on a throwaway probe window, then open
+        // the durable owned `'static` window onto it.
+        let extent = {
+            let mut probe = self.store.window();
+            let Ok(table) = parse_partition_table(&mut probe) else {
+                note(
+                    self.audit,
+                    Level::Error,
+                    "root-unlock: writable-state partition table invalid",
+                );
+                return;
+            };
+            let Some(extent) = table.first_of_type(PartitionType::RustFsRoot) else {
+                note(
+                    self.audit,
+                    Level::Error,
+                    "root-unlock: writable-state no root partition",
+                );
+                return;
+            };
+            extent
+        };
+        let Ok(window) = PartitionBlock::from_partition(self.store.window(), &extent) else {
+            note(
+                self.audit,
+                Level::Error,
+                "root-unlock: writable-state window out of range",
+            );
+            return;
+        };
+        // Re-open the same encrypted volume read-write under the just-derived
+        // key. The driver retains the derived master key for the life of the
+        // mount, exactly as the read mount does.
+        let Ok(fs) = RustFs::open(window, volume_key) else {
+            note(
+                self.audit,
+                Level::Error,
+                "root-unlock: writable-state mount failed",
+            );
+            return;
+        };
+        let driver: alloc::boxed::Box<dyn KernelFs> = alloc::boxed::Box::new(fs);
+        register_writable_state(driver, self.audit);
+    }
+}
+
 /// On success this never returns. Every fallible *setup* step fails closed
 /// with a stable stage string the caller logs.
 fn finish_unlock<B: Block + 'static>(
@@ -839,12 +910,20 @@ fn finish_unlock<B: Block + 'static>(
         // the defect that wedged both the keyboard and serial `login` after a
         // good unlock (a failed unlock still installs no
         // database, so `login` keeps refusing).
+        // Publish the writable `/System/Logs` + `/System/Settings` backing on
+        // a successful unlock, from a second `'static` read-write window onto
+        // the same `'static`-leaked disk (park-safe via the device
+        // `SleepLock`), under the just-derived key.
+        let writable = WritableStateSink { store, audit };
         match unlock_root_disk_interactively(
             store.window(),
             console_write,
             &reader,
-            &LATE_USERS_DB,
-            &crate::root_mount::LATE_IDENTITY,
+            &UnlockInstall {
+                users: &LATE_USERS_DB,
+                identity: &crate::root_mount::LATE_IDENTITY,
+                writable: &writable,
+            },
             audit,
             &release_console0_to_login,
         ) {
