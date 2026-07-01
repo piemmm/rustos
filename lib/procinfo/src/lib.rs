@@ -57,12 +57,20 @@
 
 extern crate alloc;
 
+// The production client seams (`IpcTransport`, `RtOutput`) that back the
+// `sysinfo`/`ps`/`top` `Run` binaries. Compiled only for a freestanding
+// program that opts into the `program` feature (which pulls `rustos-rt`); the
+// pure library and host builds never link the runtime.
+#[cfg(all(freestanding, feature = "program"))]
+pub mod client;
 pub mod list;
 pub mod mount;
 pub mod process;
 pub mod request;
 pub mod transport;
 
+#[cfg(all(freestanding, feature = "program"))]
+pub use client::{args, write_stderr_line, IpcTransport, RtOutput};
 pub use list::ListError;
 pub use mount::{for_each_mount, render_mount, render_options, MOUNT_PAGE};
 pub use process::{for_each_process, render_process, state_char, PROCESS_HEADER, PROCESS_PAGE};

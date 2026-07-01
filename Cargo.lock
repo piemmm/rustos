@@ -1251,6 +1251,7 @@ name = "rustos-procinfo"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-rt",
 ]
 
 [[package]]
@@ -1259,6 +1260,7 @@ version = "0.0.0"
 dependencies = [
  "rustos-abi",
  "rustos-procinfo",
+ "rustos-rt",
 ]
 
 [[package]]
@@ -1335,6 +1337,7 @@ version = "0.0.0"
 dependencies = [
  "rustos-abi",
  "rustos-procinfo",
+ "rustos-rt",
 ]
 
 [[package]]

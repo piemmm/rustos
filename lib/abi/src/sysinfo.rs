@@ -364,9 +364,39 @@ pub const SYSINFO_MAX_PAYLOAD_LEN: u32 = 1 << 20;
 /// framed request here.
 pub const SYSINFO_ENDPOINT: u64 = 0x5953_1001;
 
+/// Maximum request payload, in bytes, the [`SYSINFO_ENDPOINT`] accepts: a
+/// [`SysinfoRequestHeader`] plus the largest typed argument block any query
+/// carries.
+///
+/// One OS-wide contract shared by the `sysinfod` server (which sizes its
+/// endpoint's per-call request capacity by it) and every client (which frames
+/// its request within it), so neither carries a private copy that could drift
+/// from the other.
+pub const SYSINFO_MAX_REQUEST: usize = 64;
+
+/// Maximum reply, in bytes, the [`SYSINFO_ENDPOINT`] delivers: the framed
+/// status word ([`SYSINFO_REPLY_STATUS_LEN`]) plus one page of records.
+///
+/// A client sizes its reply buffer by this bound so a served answer always
+/// fits; the server pages a larger list across successive requests (a query
+/// that would exceed it fails closed with [`Errno::BufferTooSmall`] so the
+/// client shrinks its `limit`/advances its `offset`). One OS-wide contract
+/// shared by the server and every client, so neither keeps a private copy.
+pub const SYSINFO_MAX_REPLY: usize = 8192;
+
 /// Length, in bytes, of the status word every `sysinfo` reply is prefixed
 /// with (see [`encode_reply_ok`] / [`decode_reply`]).
 pub const SYSINFO_REPLY_STATUS_LEN: usize = 4;
+
+// The endpoint's message bounds are self-consistent: a framed reply leaves
+// room past its status word for a payload, the request bound holds a full
+// request header, and both stay within the header's advertised payload
+// ceiling — the one contract the `sysinfod` server and every client size
+// buffers by. Checked at compile time so a future edit that breaks it fails
+// the build rather than a running system.
+const _: () = assert!(SYSINFO_MAX_REPLY > SYSINFO_REPLY_STATUS_LEN);
+const _: () = assert!(SYSINFO_MAX_REQUEST >= SysinfoRequestHeader::WIRE_LEN);
+const _: () = assert!(SYSINFO_MAX_REPLY <= SYSINFO_MAX_PAYLOAD_LEN as usize);
 
 /// Frame a **successful** `sysinfo` reply: a zero status word followed by
 /// `payload`, written into `out`.

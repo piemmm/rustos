@@ -31,6 +31,26 @@ The crate provides:
 Each consuming tool keeps its own argument grammar, usage banner, and error
 enum; this crate owns only the parts they share.
 
+## The `program` feature (production seams)
+
+The default-off `program` feature adds the concrete client implementations
+the `sysinfo` and `ps` `Run` binaries link (and the `top` TUI when its `Run`
+binary lands):
+
+- `IpcTransport` — a `Transport` that carries a framed `sysinfo-v1` request to
+  `/System/Services/sysinfod` over the well-known `SYSINFO_ENDPOINT` IPC call
+  (`rustos_rt::ipc_call`) and unwraps the reply frame (`decode_reply`),
+  surfacing a per-query refusal as the exact `Errno`.
+- `RtOutput` — an `Output` that writes each rendered line to the inherited
+  standard output (fd 1) through `rustos-rt`.
+- `args` / `write_stderr_line` — the shared argument-vector walk and the
+  standard-error diagnostic sink the tool `Run` binaries use, written once
+  here rather than pasted into each (`AGENTS.md` §2.2).
+
+The feature pulls the freestanding userland runtime `rustos-rt` and is enabled
+only for a bare-metal (`target_os = "none"`) program build; the host tooling
+and the pure library never link the runtime.
+
 See the crate-level rustdoc for the full surface.
 
 ## Stability tier

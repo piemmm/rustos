@@ -49,25 +49,17 @@ mod program {
     use rustos_abi::sysinfo::{
         encode_reply_err, encode_reply_ok, IntrospectDomain, KernelMemoryStats, MountRecord,
         ProcessRecord, ResourceLimitRecord, SystemIdentity, Uptime, RESOURCE_LIMITS_REPORT_LEN,
-        SYSINFO_ENDPOINT, SYSINFO_REPLY_STATUS_LEN,
+        SYSINFO_ENDPOINT, SYSINFO_MAX_REPLY, SYSINFO_MAX_REQUEST, SYSINFO_REPLY_STATUS_LEN,
     };
     use rustos_abi::{Errno, LimitKind, Origin, ORIGIN_WIRE_LEN, PROC_ID_LEN};
     use rustos_caps::CapabilitySet;
     use rustos_rt::LogSink;
     use rustos_sysinfod::{serve, Caller, ProcessScope, SysinfoSource};
 
-    /// Maximum request payload the endpoint accepts: a `sysinfo` header plus a
-    /// small typed argument block. No query's request is larger.
-    const MAX_REQUEST: usize = 64;
-    /// Maximum reply the endpoint delivers: the framed status word plus one
-    /// page of records. A client that wants more pages with a smaller
-    /// `offset`/`limit`; a page that would exceed this fails closed with
-    /// `BufferTooSmall` so the client shrinks its `limit`.
-    const MAX_REPLY: usize = 8192;
     /// Outstanding-call capacity of the endpoint (a fail-closed memory bound).
     const CAPACITY: usize = 8;
     /// Payload capacity a framed reply leaves after its status word.
-    const REPLY_PAYLOAD_CAP: usize = MAX_REPLY - SYSINFO_REPLY_STATUS_LEN;
+    const REPLY_PAYLOAD_CAP: usize = SYSINFO_MAX_REPLY - SYSINFO_REPLY_STATUS_LEN;
 
     /// Recover the [`Errno`] a syscall encoded as a negative register
     /// (`-errno`); an unrecognised code fails closed as
@@ -235,8 +227,8 @@ mod program {
             SYSINFO_ENDPOINT,
             &empty,
             &empty,
-            MAX_REQUEST,
-            MAX_REPLY,
+            SYSINFO_MAX_REQUEST,
+            SYSINFO_MAX_REPLY,
             CAPACITY,
         );
         if bound != 0 {
@@ -246,9 +238,9 @@ mod program {
         }
 
         let source = KernelSysinfoSource;
-        let mut request = [0u8; MAX_REQUEST];
+        let mut request = [0u8; SYSINFO_MAX_REQUEST];
         let mut origin_buf = [0u8; ORIGIN_WIRE_LEN];
-        let mut reply = [0u8; MAX_REPLY];
+        let mut reply = [0u8; SYSINFO_MAX_REPLY];
         loop {
             let mut ticket: u64 = 0;
             let request_len =

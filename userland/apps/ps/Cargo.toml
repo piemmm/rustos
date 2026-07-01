@@ -11,6 +11,23 @@ publish.workspace = true
 [lints]
 workspace = true
 
+# The `Run` binary's freestanding userland runtime (`rustos-rt`) is an
+# optional, on-by-default build feature, mirroring `rustos-sysinfod`. `cargo
+# build -p rustos-ps` builds the tool program with it; host tooling builds only
+# the request/render *library*, so the host test build never pulls the userland
+# runtime's `_start` / `#[global_allocator]` / panic handler.
+[features]
+default = ["program"]
+program = ["dep:rustos-rt"]
+
+# The package is both the `rustos-ps` request/render library (below) and the
+# `Run` entry-point binary of the `ps` tool. The binary is a freestanding
+# pure-Rust program on the native Tier-1 targets and an inert host stub
+# elsewhere (see `src/run.rs`).
+[[bin]]
+name = "rustos-ps-run"
+path = "src/run.rs"
+
 [dependencies]
 # The frozen `Errno` plus the `sysinfo-v1` query ids the tool issues; `ps`
 # invents no parallel error set (§2.2) and never links a kernel or driver
@@ -21,3 +38,13 @@ rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # render shared with the `sysinfo` CLI. `ps` consumes these rather than
 # duplicating them (§2.2, §16.6).
 rustos-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0" }
+
+# For the freestanding `Run` binary only: the userland runtime `rustos-rt`
+# (`_start`, canary, panic handler, `mem_map` allocator, syscall/`ipc_call`
+# wrappers) and the production client seams in `lib/procinfo` (`IpcTransport`,
+# `RtOutput`, `args`, `write_stderr_line`), enabled through `rustos-procinfo`'s
+# own `program` feature. Both are pulled in only for the bare-metal targets the
+# program is actually built for; on the host neither is linked.
+[target.'cfg(target_os = "none")'.dependencies]
+rustos-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+rustos-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = ["program"] }

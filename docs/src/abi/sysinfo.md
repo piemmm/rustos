@@ -80,6 +80,27 @@ a defined code. The reply frame is untrusted server output, so its decoder
 (`IntrospectDomain::from_u32`) — is exercised by the `lib/abi` fuzz harness
 (`AGENTS.md` §19.6) alongside the request decoders.
 
+## Endpoint, message bounds, and the client transport
+
+`sysinfod` binds the well-known unrestricted-sender call endpoint
+[`SYSINFO_ENDPOINT`]; any process may post a request, and per-query scope is
+enforced by the service against the caller's kernel-attested origin, not by
+the transport. The endpoint's message sizes are one shared contract:
+[`SYSINFO_MAX_REQUEST`] bounds the request the server accepts, and
+[`SYSINFO_MAX_REPLY`] bounds the framed reply it delivers (one page of
+records past the status word). The server sizes its endpoint by these
+constants and every client sizes its buffers by them, so neither keeps a
+private copy that could drift; a list longer than one page is paged across
+successive requests (a client advancing `offset`/shrinking `limit`).
+
+First-party programs do not hand-roll this call: the `program` feature of
+`lib/procinfo` provides `IpcTransport`, the production `Transport` that posts
+a framed request over [`SYSINFO_ENDPOINT`] with `ipc_call` and unwraps the
+reply frame with [`decode_reply`]. It is what the `sysinfo` and `ps` `Run`
+binaries link (registered at `/Apps/Sysinfo.app/Run` and `/Apps/Ps.app/Run`),
+so a spawned tool queries the live service; the request/render libraries stay
+testable against in-memory fixtures.
+
 ## Typed payloads
 
 - [`ProcessListRequest`] — `offset`/`limit` pagination for the two
@@ -159,6 +180,9 @@ Every payload is `#[repr(C)]`, allocation-free, and exposes a
 [`Errno::OutOfRange`]: ../../rustos_abi/error/enum.Errno.html
 [`Errno::LengthOutOfRange`]: ../../rustos_abi/error/enum.Errno.html
 [`Errno`]: ../../rustos_abi/error/enum.Errno.html
+[`SYSINFO_ENDPOINT`]: ../../rustos_abi/sysinfo/constant.SYSINFO_ENDPOINT.html
+[`SYSINFO_MAX_REQUEST`]: ../../rustos_abi/sysinfo/constant.SYSINFO_MAX_REQUEST.html
+[`SYSINFO_MAX_REPLY`]: ../../rustos_abi/sysinfo/constant.SYSINFO_MAX_REPLY.html
 [`SYSINFO_REPLY_STATUS_LEN`]: ../../rustos_abi/sysinfo/constant.SYSINFO_REPLY_STATUS_LEN.html
 [`encode_reply_ok`]: ../../rustos_abi/sysinfo/fn.encode_reply_ok.html
 [`encode_reply_err`]: ../../rustos_abi/sysinfo/fn.encode_reply_err.html

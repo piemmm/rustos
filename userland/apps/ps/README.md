@@ -50,6 +50,18 @@ the request and writing the terminal — are the injected `Transport` and
 tests they are in-memory fixtures, so every parsing and rendering decision
 is testable without a kernel.
 
+## The `Run` binary
+
+The crate is both this request/render library and the `Run` entry-point
+binary (`rustos-ps-run`, `src/run.rs`) a shell spawns. Built for a Tier-1
+target it is a freestanding pure-Rust program: it links the `rustos-rt`
+runtime, collects its inherited arguments, parses them, and runs the command
+against the production seams shared through `lib/procinfo`
+(`IpcTransport` over the `sysinfo` IPC endpoint, `RtOutput` over fd 1). It is
+registered at `/Apps/Ps.app/Run` and holds only `CAP_CONSOLE_WRITE`; every
+per-query scope is enforced by `sysinfod` against the caller's kernel-attested
+origin. On the host it is an inert stub, so the library stays fully testable.
+
 ## Fail closed
 
 An unknown option or a positional operand is a `PsError::Usage`. A denied

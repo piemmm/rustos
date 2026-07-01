@@ -11,8 +11,10 @@ has no privileged path that bypasses the capability check (`AGENTS.md`
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
-only dependency is the audited `rustos-abi` crate, so it never links a
-kernel or driver crate (`AGENTS.md` §17.4).
+dependencies are the audited `rustos-abi` crate and the shared
+`rustos-procinfo` client helpers (and, for the `Run` binary only, the
+`rustos-rt` userland runtime), so it never links a kernel or driver crate
+(`AGENTS.md` §17.4).
 
 ## Usage
 
@@ -51,6 +53,18 @@ crates:
 On a running system these are IPC- and console-backed; in tests they are
 in-memory fixtures, so every rendering and paging decision is testable
 without a kernel.
+
+## The `Run` binary
+
+The crate is both this request/render library and the `Run` entry-point
+binary (`rustos-sysinfo-run`, `src/run.rs`) a shell spawns. Built for a
+Tier-1 target it is a freestanding pure-Rust program: it links `rustos-rt`,
+collects its inherited arguments, parses them, and runs the query against the
+production seams shared through `lib/procinfo` (`IpcTransport` over the
+`sysinfo` IPC endpoint, `RtOutput` over fd 1). It is registered at
+`/Apps/Sysinfo.app/Run` and holds only `CAP_CONSOLE_WRITE`; every per-query
+scope is enforced by `sysinfod` against the caller's kernel-attested origin.
+On the host it is an inert stub, so the library stays fully testable.
 
 ## Fail closed
 

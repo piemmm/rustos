@@ -140,6 +140,20 @@ const PROGRAMS: &[Program] = &[
         fixture: "sysinfod_rxe.rs",
         prefix: "SYSINFOD",
     },
+    Program {
+        pkg: "rustos-ps",
+        bin: "rustos-ps-run",
+        rel_dir: "../../userland/apps/ps",
+        fixture: "ps_rxe.rs",
+        prefix: "PS",
+    },
+    Program {
+        pkg: "rustos-sysinfo",
+        bin: "rustos-sysinfo-run",
+        rel_dir: "../../userland/shell/sysinfo",
+        fixture: "sysinfo_rxe.rs",
+        prefix: "SYSINFO",
+    },
 ];
 
 fn main() {

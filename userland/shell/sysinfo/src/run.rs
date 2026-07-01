@@ -1,0 +1,78 @@
+//! The `Run` entry-point binary of the `sysinfo` tool — the terminal client a
+//! shell spawns to query the System Information API.
+//!
+//! This is a **pure-Rust** program: RustOS is Rust-only, so it links the Rust
+//! userland runtime `rustos-rt` — never the C ABI, which exists solely for
+//! programs *not* written in Rust. `rustos-rt` provides `_start`, the
+//! per-process stack canary, the panic handler, the `mem_map`-backed global
+//! allocator, and the syscall wrappers; `rustos_rt::entry!` names this
+//! program's `main`.
+//!
+//! `main` collects the inherited argument vector, parses it with the pure
+//! [`rustos_sysinfo`] grammar, and runs the resulting command against the two
+//! production seams shared through `lib/procinfo`: `IpcTransport`, which
+//! carries the framed `sysinfo-v1` request to `/System/Services/sysinfod` over
+//! the well-known IPC call endpoint, and `RtOutput`, which writes each
+//! rendered line to the inherited standard output (fd 1). The tool binds only
+//! to its inherited descriptors, never a console device, and holds no ambient
+//! authority: `sysinfod` gates every query against the caller's kernel-attested
+//! origin.
+//!
+//! On the host it is an inert stub so `cargo build --workspace`, clippy, and
+//! fmt still cover the file.
+
+#![cfg_attr(all(freestanding, feature = "program"), no_std)]
+#![cfg_attr(all(freestanding, feature = "program"), no_main)]
+#![deny(missing_docs)]
+
+// --- Pure-Rust program --------------------------------------------------
+#[cfg(all(freestanding, feature = "program"))]
+mod program {
+    extern crate alloc;
+
+    use alloc::format;
+
+    use rustos_procinfo::{args, write_stderr_line, IpcTransport, RtOutput};
+    use rustos_sysinfo::{parse, run, USAGE};
+
+    /// Program entry point. `rustos-rt`'s `_start` calls it once the runtime
+    /// is set up and routes its return value through the `exit` syscall.
+    ///
+    /// Exit codes: `0` on success, `1` on a service or output failure, `2` on
+    /// a usage error (a malformed argument vector or an unrecognised query).
+    fn main() -> i32 {
+        // A malformed (non-UTF-8) argument vector is a usage error, reported
+        // rather than guessed at.
+        let Some(arguments) = args() else {
+            write_stderr_line(USAGE);
+            return 2;
+        };
+        let command = match parse(&arguments) {
+            Ok(command) => command,
+            Err(_) => {
+                write_stderr_line(USAGE);
+                return 2;
+            }
+        };
+        let transport = IpcTransport;
+        let out = RtOutput;
+        match run(command, &transport, &out) {
+            Ok(()) => 0,
+            Err(err) => {
+                write_stderr_line(&format!("sysinfo: {err}"));
+                1
+            }
+        }
+    }
+
+    rustos_rt::entry!(main);
+}
+
+// --- Host stub ----------------------------------------------------------
+//
+// On the host (`cargo build --workspace`, clippy, fmt) the program's real
+// entry — the freestanding `rustos-rt` `_start` path — is not compiled, so
+// this inert `main` keeps the crate building under the host tooling. It
+// performs no I/O.
+#[cfg(not(all(freestanding, feature = "program")))]
+fn main() {}
