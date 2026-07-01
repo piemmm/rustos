@@ -670,6 +670,19 @@ impl CapTable {
         self.entries.remove(&task)
     }
 
+    /// Iterate every registered task's attested capability record, in
+    /// ascending [`TaskId`] order.
+    ///
+    /// The order is the `BTreeMap` key order, so it is stable across calls
+    /// as long as the registry is unchanged — letting the System Information
+    /// introspection source page a consistent process list. Every field of
+    /// each [`TaskCapabilities`] is kernel-attested (minted at admit), so a
+    /// consumer building a process view reads authoritative identity, never
+    /// a caller claim.
+    pub fn iter(&self) -> impl Iterator<Item = &TaskCapabilities> {
+        self.entries.values()
+    }
+
     /// Number of tasks currently registered. Primarily for tests.
     #[must_use]
     pub fn len(&self) -> usize {

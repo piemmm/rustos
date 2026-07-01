@@ -1058,6 +1058,7 @@ fn run_phases<A: KernelArch>(
         hw_tree,
         filesystem,
         spawn_identity,
+        kernel_heap_bytes,
         ..
     } = boot;
 
@@ -1232,6 +1233,31 @@ fn run_phases<A: KernelArch>(
     let (mem_map, mmio_map_facility, dma_alloc_facility, shared_mem_facility) =
         live_producers(state.arch.as_ref(), &state.frame_allocator);
 
+    // The production wall clock, named so it backs *both* the
+    // `wall_time_get`/`wall_time_set` syscalls and the introspection
+    // uptime domain's boot-instant projection — one clock, no second copy.
+    // `Box::leak`'d for the same one-shot-publish reason as the hook.
+    let wall_clock: &'static crate::wallclock::KernelWallClock =
+        Box::leak(Box::new(crate::wallclock::KernelWallClock::new()));
+
+    // The live introspection source the `sysinfo_introspect` syscall serves
+    // (`PREREQUISITES.md` P-C): built over the leaked `KernelState` (its
+    // `CapTable` / scheduler / frame allocator / per-task limits / arch),
+    // the mounted filesystem service (mount table), the wall clock (uptime),
+    // and the binding kernel's committed heap size. Leaked for the same
+    // one-shot-publish reason as the hook. A boot path that wires no
+    // filesystem still answers every domain truthfully (an empty mount list,
+    // the unprovisioned identity sentinel), so the broker that holds
+    // `CAP_SYSINFO_INTROSPECT` can serve every query.
+    let introspect: &'static (dyn crate::introspect::IntrospectSource + 'static) = Box::leak(
+        Box::new(crate::introspect_source::KernelIntrospectSource::new(
+            state,
+            filesystem,
+            wall_clock,
+            kernel_heap_bytes,
+        )),
+    );
+
     // Phase 6 — Syscall. Publish the production `DispatchHook` into
     // the bin-crate-owned slot. The hook itself is `Box::leak`'d for
     // the same reason as `KernelState`: its borrows reference
@@ -1288,7 +1314,11 @@ fn run_phases<A: KernelArch>(
         // wall clock (`PREREQUISITES.md` P-D). It boots `Unset`; a trusted
         // time source drives it via `wall_time_set` under `CAP_TIME_SET`.
         // `Box::leak`'d for the same one-shot-publish reason as the hook.
-        .with_wall_clock(Box::leak(Box::new(crate::wallclock::KernelWallClock::new())))
+        .with_wall_clock(wall_clock)
+        // Serve `sysinfo_introspect` through the live introspection source
+        // built above (`PREREQUISITES.md` P-C); the default `NULL_INTROSPECT`
+        // keeps the syscall fail-closed `NotImplemented` until wired.
+        .with_introspect(introspect)
         // Serve `boot_id_get` with the per-boot id minted above
         // (`PREREQUISITES.md` P-E). When the reserve could not be seeded this
         // is `BootId::UNSET` and `boot_id_get` fails closed `EntropyNotReady`.

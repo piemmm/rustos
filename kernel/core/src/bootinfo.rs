@@ -703,6 +703,17 @@ where
     /// lifetime.
     pub spawn_identity: &'static LateIdentity,
 
+    /// Committed size, in bytes, of the kernel heap region — reported as
+    /// [`rustos_abi::sysinfo::KernelMemoryStats::kernel_heap_bytes`] by the
+    /// System Information introspection source (`PREREQUISITES.md` P-C).
+    ///
+    /// `kernel/core` does not own the `#[global_allocator]` (the binding
+    /// kernel does, over `rustos_kalloc`), so the boot path threads its
+    /// committed heap size here. Defaults to `0` — a boot path that does not
+    /// set it reports "no kernel heap accounted" rather than a fabricated
+    /// figure.
+    pub kernel_heap_bytes: u64,
+
     // Holds the lifetime parameter (covers `command_line`). The PhantomData
     // is invariant in `'a` so callers cannot accidentally extend the
     // borrow.
@@ -784,8 +795,25 @@ where
             // P-C): a spawn-as-user switch fails closed through
             // `NULL_IDENTITY`.
             spawn_identity: &crate::syscalls::NULL_IDENTITY,
+            // Kernel heap size unaccounted until the binding kernel threads
+            // its committed `rustos_kalloc::HEAP_BYTES` through
+            // `with_kernel_heap_bytes`; reported as `0` until then.
+            kernel_heap_bytes: 0,
             _marker: core::marker::PhantomData,
         }
+    }
+
+    /// Record the committed size, in bytes, of the kernel heap region,
+    /// consuming and returning `self` (`PREREQUISITES.md` P-C).
+    ///
+    /// The binding kernel owns the `#[global_allocator]`, so it passes its
+    /// `rustos_kalloc::HEAP_BYTES` here; `kernel_main` threads it into the
+    /// introspection source so the `KernelMemory` domain reports a truthful
+    /// committed-heap figure. A boot path that never calls it reports `0`.
+    #[must_use]
+    pub const fn with_kernel_heap_bytes(mut self, bytes: u64) -> Self {
+        self.kernel_heap_bytes = bytes;
+        self
     }
 
     /// Install the discovered system console list the stream syscalls

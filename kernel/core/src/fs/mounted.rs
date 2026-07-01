@@ -44,6 +44,7 @@ use rustos_abi::driver::filesystem::{
     FilesystemRead, FilesystemSecurity, FilesystemWrite, NodeKind as DriverNodeKind,
 };
 use rustos_abi::driver::DriverHandle;
+use rustos_abi::sysinfo::MountRecord;
 use rustos_abi::{CapabilityQuery, Errno, FileKind, FileStat, OpenFlags};
 use rustos_kernel_sec::{GroupId, IdentityTable, UserId, UserRecord};
 use rustos_sync::{OnceCell, SpinLock};
@@ -579,6 +580,27 @@ where
         let mut fs = driver.lock();
         vfs.rename_via_secured(&cred, &src, &dst, &mut *fs)
             .map_err(VfsError::to_errno)
+    }
+
+    fn mount_snapshot(&self) -> Vec<MountRecord> {
+        // Before any volume is online there is no VFS; report "no mounts"
+        // truthfully rather than fabricating one (fail closed).
+        let Ok(vfs) = self.mount.vfs() else {
+            return Vec::new();
+        };
+        vfs.mounts()
+            .iter()
+            .filter_map(|mount| {
+                // The mount table records the mount *point* (target) and its
+                // permission flags authoritatively; it does not yet model a
+                // backing-device name or a filesystem-type string, so those
+                // are reported empty rather than guessed. `MountRecord::new`
+                // only fails on an over-long field, which a validated VFS
+                // `Path` cannot produce; a defensive `ok()` drops any such
+                // entry rather than panicking.
+                MountRecord::new(b"", path_str(mount.path()).as_bytes(), b"", mount.flags()).ok()
+            })
+            .collect()
     }
 }
 

@@ -139,7 +139,8 @@ fn dispatch(
     } else if query == SysinfoQueryId::KERNEL_MEMORY_STATS {
         write_bytes(&source.kernel_memory_stats(caller)?.to_le_bytes(), response)
     } else if query == SysinfoQueryId::HARDWARE_TREE {
-        write_bytes(source.hardware_tree(caller)?, response)
+        let tree = source.hardware_tree(caller)?;
+        write_bytes(&tree, response)
     } else if query == SysinfoQueryId::SYSTEM_IDENTITY {
         write_bytes(&source.system_identity(caller)?.to_le_bytes(), response)
     } else if query == SysinfoQueryId::UPTIME {
@@ -406,10 +407,10 @@ mod tests {
             &self,
             _caller: &Caller,
             scope: ProcessScope,
-        ) -> Result<&[ProcessRecord], Errno> {
+        ) -> Result<alloc::vec::Vec<ProcessRecord>, Errno> {
             Ok(match scope {
-                ProcessScope::Caller => &self.own,
-                ProcessScope::Global => &self.global,
+                ProcessScope::Caller => self.own.to_vec(),
+                ProcessScope::Global => self.global.to_vec(),
             })
         }
         fn kernel_memory_stats(&self, _caller: &Caller) -> Result<KernelMemoryStats, Errno> {
@@ -422,8 +423,8 @@ mod tests {
                 reserved: 0,
             })
         }
-        fn hardware_tree(&self, _caller: &Caller) -> Result<&[u8], Errno> {
-            Ok(&self.hwtree)
+        fn hardware_tree(&self, _caller: &Caller) -> Result<alloc::vec::Vec<u8>, Errno> {
+            Ok(self.hwtree.to_vec())
         }
         fn system_identity(&self, _caller: &Caller) -> Result<SystemIdentity, Errno> {
             SystemIdentity::new([9u8; MACHINE_ID_LEN], 1, 0, 0, b"rustos-box")
@@ -434,8 +435,8 @@ mod tests {
                 boot_time: Time64::from_secs(1_700_000_000),
             })
         }
-        fn mount_records(&self, _caller: &Caller) -> Result<&[MountRecord], Errno> {
-            Ok(&self.mounts)
+        fn mount_records(&self, _caller: &Caller) -> Result<alloc::vec::Vec<MountRecord>, Errno> {
+            Ok(self.mounts.to_vec())
         }
         fn resource_limits(
             &self,

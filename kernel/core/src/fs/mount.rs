@@ -246,6 +246,16 @@ impl MountTable {
         self.resolve(path).is_read_only()
     }
 
+    /// Every mount in the table, in insertion order (the permanent root
+    /// mount first).
+    ///
+    /// A read-only view for the System Information introspection feed: the
+    /// order is stable across calls while the table is unchanged, so a broker
+    /// paging the mount list never skips or repeats an entry.
+    pub fn iter(&self) -> impl Iterator<Item = &MountPoint> {
+        self.mounts.iter()
+    }
+
     /// Number of mounts (including the root mount).
     #[must_use]
     pub fn len(&self) -> usize {

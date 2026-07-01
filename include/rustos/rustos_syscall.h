@@ -85,6 +85,7 @@ extern "C" {
 #define ROS_SYS_WALL_TIME_GET 59u
 #define ROS_SYS_WALL_TIME_SET 60u
 #define ROS_SYS_BOOT_ID_GET 61u
+#define ROS_SYS_SYSINFO_INTROSPECT 62u
 
 /* Syscall entry points, implemented by the user-space stub library. */
 void ros_sys_yield(void);
@@ -149,6 +150,7 @@ uint64_t ros_sys_call_peer_origin(uint64_t a0, uint64_t a1, void * a2, uintptr_t
 uint64_t ros_sys_wall_time_get(void * a0, uintptr_t a1);
 int32_t ros_sys_wall_time_set(void * a0, uintptr_t a1, uint32_t a2);
 uint64_t ros_sys_boot_id_get(void * a0, uintptr_t a1);
+uint64_t ros_sys_sysinfo_introspect(uint32_t a0, uint64_t a1, void * a2, uintptr_t a3);
 
 #ifdef __cplusplus
 } /* extern "C" */

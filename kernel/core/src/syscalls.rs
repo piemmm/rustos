@@ -76,12 +76,13 @@
 use crate::sched::{CpuId, SchedError, Scheduler, SchedulerArch};
 use rustos_abi::hwtree::{HwResource, HwResourceKind};
 use rustos_abi::input::KeyInput;
+use rustos_abi::sysinfo::{MountRecord, ProcessRecord};
 use rustos_abi::{
-    decode_log_record, BootId, CapabilityId, DescriptorTable, DirEntry, Errno, FileStat, IrqHandle,
-    LimitKind, MapFlags, OpenFlags, ProcId, RandomFlags, ResourceLimit, StreamMode, SyscallNumber,
-    Time64, WaitSetOp, WaitSourceKind, WallClockReading, WallTimeState, BOOT_ID_LEN,
-    CONSOLE_INHERIT, FS_IO_MAX, FS_NAME_MAX, FS_PATH_MAX, LOG_FIELDS_MAX, LOG_RECORD_MAX,
-    RANDOM_REQUEST_MAX_BYTES, SPAWN_UID_INHERIT,
+    decode_log_record, BootId, CapabilityId, DescriptorTable, DirEntry, Errno, FileStat,
+    IntrospectDomain, IrqHandle, LimitKind, MapFlags, OpenFlags, ProcId, RandomFlags,
+    ResourceLimit, StreamMode, SyscallNumber, Time64, WaitSetOp, WaitSourceKind, WallClockReading,
+    WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, FS_IO_MAX, FS_NAME_MAX, FS_PATH_MAX,
+    LOG_FIELDS_MAX, LOG_RECORD_MAX, PROC_ID_LEN, RANDOM_REQUEST_MAX_BYTES, SPAWN_UID_INHERIT,
 };
 use rustos_caps::CapabilitySet;
 use rustos_kernel_ipc::{
@@ -121,6 +122,7 @@ use crate::dispatch_slot::{DispatchHook, DispatchOutcome, RescheduleAction};
 use crate::fs::{FilesystemService, LateIdentity, NULL_FILESYSTEM};
 use crate::hwtree::{HwTreeSource, NULL_HW_TREE};
 use crate::input_focus::{InputFocus, NULL_INPUT_FOCUS};
+use crate::introspect::{IntrospectSource, NULL_INTROSPECT};
 use crate::memmap::{MemMap, NULL_MEM_MAP};
 use crate::procwait::{ProcessWait, NULL_PROCESS_WAIT};
 use crate::random::{reserve_errno, RandomReserve};
@@ -331,6 +333,16 @@ where
     /// the real store through [`Self::with_hw_tree`] once the inventory is
     /// seeded. Held as a `'static` borrow, exactly like the users database.
     hw_tree: &'static (dyn HwTreeSource + 'static),
+    /// The kernel-held live introspection source the `sysinfo_introspect`
+    /// syscall serves (`PREREQUISITES.md` P-C). Defaults to
+    /// [`NULL_INTROSPECT`] (every domain fails closed with
+    /// [`Errno::NotImplemented`]); the boot path installs the real
+    /// `CapTable`/scheduler/allocator/mount-backed source through
+    /// [`Self::with_introspect`]. Held as a `'static` borrow, exactly like
+    /// the hardware tree. The source always returns the global, unfiltered
+    /// view; the `sysinfod` broker (the sole capability holder) does all
+    /// per-client scoping.
+    introspect: &'static (dyn IntrospectSource + 'static),
     /// The shared-memory producer the `shm_create` / `shm_map` / `shm_unmap`
     /// syscalls drive to allocate, zero, map, and free cross-process
     /// shared-memory regions in the caller's own live address space
@@ -480,6 +492,11 @@ where
             // discovered inventory and installs the holder: `hw_tree_read` / `hw_tree_wait` fail closed with
             // `NotImplemented`.
             hw_tree: &NULL_HW_TREE,
+            // Introspection source unwired until the boot path installs the
+            // real CapTable/scheduler-backed source: an early
+            // `sysinfo_introspect` fails closed with `NotImplemented` rather
+            // than fabricating a system view.
+            introspect: &NULL_INTROSPECT,
             // The shared-memory facility is unwired until the boot path
             // installs the `kernel/mem`-backed producer: `shm_create` /
             // `shm_map` / `shm_unmap` fail closed with `NotImplemented`,
@@ -713,6 +730,23 @@ where
     #[must_use]
     pub const fn with_hw_tree(mut self, hw_tree: &'static (dyn HwTreeSource + 'static)) -> Self {
         self.hw_tree = hw_tree;
+        self
+    }
+
+    /// Install the live introspection source the `sysinfo_introspect` syscall
+    /// serves, consuming and returning `self` (`PREREQUISITES.md` P-C).
+    ///
+    /// Called once by the boot path after it wires the `CapTable`, scheduler,
+    /// allocators, and mount table. Until this is called the handler holds
+    /// [`NULL_INTROSPECT`] and the syscall fails closed with
+    /// [`Errno::NotImplemented`]. The source must be `'static`: it lives for
+    /// the lifetime of the running kernel, exactly like the hardware tree.
+    #[must_use]
+    pub const fn with_introspect(
+        mut self,
+        introspect: &'static (dyn IntrospectSource + 'static),
+    ) -> Self {
+        self.introspect = introspect;
         self
     }
 
@@ -2393,6 +2427,88 @@ where
         // never leaking which case occurred.
         match self.with_caller_aspace(caller, |space, physmap| {
             copy_out(space, physmap, VirtAddr::new(buf), &blob)
+        }) {
+            Some(Ok(())) => Ok(blob.len() as u64),
+            Some(Err(err)) => Err(copy_fault_errno(err)),
+            None => Err(Errno::BadAddress),
+        }
+    }
+
+    fn sysinfo_introspect(
+        &self,
+        caller: &CallerContext<'_>,
+        domain: u32,
+        arg: u64,
+        out: u64,
+        out_cap: usize,
+    ) -> SyscallResult {
+        // The dispatcher already checked `CAP_SYSINFO_INTROSPECT` (held only
+        // by the `sysinfod` broker) and that `out` is a non-null `UserPtr`.
+        // Validate the domain first: an unknown discriminant fails closed
+        // before any state is read.
+        let domain = IntrospectDomain::from_u32(domain)?;
+
+        // Assemble the encoded answer. The list domains page by record: the
+        // kernel knows the fixed stride (from `lib/abi`) and asks the source
+        // for at most as many whole records as fit, so a truncated window is
+        // always a whole number of records the broker can decode. The source
+        // always returns the global, unfiltered view — the broker does all
+        // per-client scoping.
+        let blob = match domain {
+            IntrospectDomain::Processes => {
+                if out_cap < ProcessRecord::WIRE_LEN {
+                    return Err(Errno::BufferTooSmall);
+                }
+                let max_records = out_cap / ProcessRecord::WIRE_LEN;
+                self.introspect.processes(arg, max_records)?
+            }
+            IntrospectDomain::Mounts => {
+                if out_cap < MountRecord::WIRE_LEN {
+                    return Err(Errno::BufferTooSmall);
+                }
+                let max_records = out_cap / MountRecord::WIRE_LEN;
+                self.introspect.mounts(arg, max_records)?
+            }
+            IntrospectDomain::KernelMemory => self.introspect.kernel_memory()?,
+            IntrospectDomain::Identity => self.introspect.identity()?,
+            IntrospectDomain::Uptime => self.introspect.uptime()?,
+            IntrospectDomain::TaskLimits => {
+                // The 128-bit target `ProcId` does not fit in the `u64` `arg`,
+                // so the caller writes it into the output buffer on entry; the
+                // kernel copies it in through the validated boundary and
+                // resolves it against the authoritative `CapTable` (the broker
+                // passes the client's own attested id, so a client reads only
+                // its own limits). A buffer too short to even carry the id
+                // fails closed.
+                if out_cap < PROC_ID_LEN {
+                    return Err(Errno::BufferTooSmall);
+                }
+                let mut id_bytes = [0u8; PROC_ID_LEN];
+                match self.with_caller_aspace(caller, |space, physmap| {
+                    copy_in(space, physmap, VirtAddr::new(out), &mut id_bytes)
+                }) {
+                    Some(Ok(())) => {}
+                    Some(Err(err)) => return Err(copy_fault_errno(err)),
+                    None => return Err(Errno::BadAddress),
+                }
+                let proc_id = ProcId::from_raw(id_bytes);
+                self.introspect.task_limits(proc_id)?
+            }
+        };
+
+        // The whole answer or nothing: the record window is never truncated
+        // mid-record — the list domains already capped it to whole records
+        // that fit, and a scalar domain that cannot fit fails closed so the
+        // broker grows its buffer and retries.
+        if blob.len() > out_cap {
+            return Err(Errno::BufferTooSmall);
+        }
+
+        // Copy the bytes out through the validated boundary. A faulting
+        // pointer — or a caller with no registered address space — fails
+        // closed with `BadAddress`, never leaking which case occurred.
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_out(space, physmap, VirtAddr::new(out), &blob)
         }) {
             Some(Ok(())) => Ok(blob.len() as u64),
             Some(Err(err)) => Err(copy_fault_errno(err)),
@@ -4396,6 +4512,25 @@ where
     #[must_use]
     pub fn with_wall_clock(mut self, wall_clock: &'static (dyn WallClockSource + 'static)) -> Self {
         self.handlers = self.handlers.with_wall_clock(wall_clock);
+        self
+    }
+
+    /// Install the live kernel introspection source the `sysinfo_introspect`
+    /// syscall serves, consuming and returning `self` (`PREREQUISITES.md`
+    /// P-C).
+    ///
+    /// The hook-level mirror of [`KernelSyscallHandlers::with_introspect`]:
+    /// the boot path passes the leaked
+    /// [`crate::introspect_source::KernelIntrospectSource`] built over the
+    /// live kernel state. A boot path that never calls it leaves the
+    /// fail-closed [`NULL_INTROSPECT`] default and `sysinfo_introspect`
+    /// reports `NotImplemented`.
+    #[must_use]
+    pub fn with_introspect(
+        mut self,
+        introspect: &'static (dyn IntrospectSource + 'static),
+    ) -> Self {
+        self.handlers = self.handlers.with_introspect(introspect);
         self
     }
 
@@ -11102,6 +11237,268 @@ mod tests {
             blob.extend_from_slice(&node.to_le_bytes());
         }
         blob
+    }
+
+    /// A test double for the introspection source: it hands back fixed
+    /// encoded bytes per domain (or a configurable error) so the handler's
+    /// paging, copy-out, and fail-closed arms can be driven without a live
+    /// `CapTable`/scheduler.
+    struct StaticIntrospect {
+        processes: alloc::vec::Vec<u8>,
+        kernel_memory: alloc::vec::Vec<u8>,
+        limits: Result<alloc::vec::Vec<u8>, Errno>,
+        /// Records the `(offset, max_records)` the handler passed, so a test
+        /// can assert the record-granular paging arithmetic.
+        processes_call: RwLock<Option<(u64, usize)>>,
+        /// Records the `ProcId` the handler resolved for a `TaskLimits` query.
+        limits_call: RwLock<Option<ProcId>>,
+    }
+
+    impl crate::introspect::IntrospectSource for StaticIntrospect {
+        fn processes(&self, offset: u64, max_records: usize) -> Result<alloc::vec::Vec<u8>, Errno> {
+            *self.processes_call.write() = Some((offset, max_records));
+            Ok(self.processes.clone())
+        }
+        fn kernel_memory(&self) -> Result<alloc::vec::Vec<u8>, Errno> {
+            Ok(self.kernel_memory.clone())
+        }
+        fn mounts(&self, _offset: u64, _max_records: usize) -> Result<alloc::vec::Vec<u8>, Errno> {
+            Ok(alloc::vec::Vec::new())
+        }
+        fn identity(&self) -> Result<alloc::vec::Vec<u8>, Errno> {
+            Err(Errno::NotImplemented)
+        }
+        fn uptime(&self) -> Result<alloc::vec::Vec<u8>, Errno> {
+            Err(Errno::NotImplemented)
+        }
+        fn task_limits(&self, proc_id: ProcId) -> Result<alloc::vec::Vec<u8>, Errno> {
+            *self.limits_call.write() = Some(proc_id);
+            self.limits.clone()
+        }
+    }
+
+    /// `sysinfo_introspect` copies the process window out to the caller,
+    /// caps the record count to what fits the buffer, and returns the exact
+    /// byte length.
+    #[test]
+    fn sysinfo_introspect_processes_copies_out_and_pages_by_record() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::SYSINFO_INTROSPECT], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let rec = ProcessRecord::new(
+            1,
+            0,
+            ProcId::KERNEL,
+            ProcId::KERNEL,
+            0,
+            0,
+            rustos_abi::sysinfo::ProcessState::Running,
+            0,
+            b"init",
+        )
+        .expect("record");
+        let blob = rec.to_le_bytes().to_vec();
+        let source: &'static StaticIntrospect = Box::leak(Box::new(StaticIntrospect {
+            processes: blob.clone(),
+            kernel_memory: alloc::vec::Vec::new(),
+            limits: Ok(alloc::vec::Vec::new()),
+            processes_call: RwLock::new(None),
+            limits_call: RwLock::new(None),
+        }));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_introspect(source);
+
+        // Domain 0 = Processes, arg 5 = record offset, 4096-byte buffer.
+        assert_eq!(
+            h.sysinfo_introspect(&ctx, IntrospectDomain::Processes.as_u32(), 5, 0x1000, 4096),
+            Ok(blob.len() as u64)
+        );
+        // The handler forwarded the offset and capped the record count to
+        // what the buffer holds.
+        assert_eq!(
+            *source.processes_call.read(),
+            Some((5, 4096 / ProcessRecord::WIRE_LEN))
+        );
+        let delivered = h
+            .with_caller_aspace(&ctx, |space, physmap| {
+                let mut buf = alloc::vec![0u8; blob.len()];
+                copy_in(space, physmap, VirtAddr::new(0x1000), &mut buf).expect("readable");
+                buf
+            })
+            .expect("caller has a registered space");
+        assert_eq!(delivered, blob);
+    }
+
+    /// A buffer too small to hold even one process record fails closed with
+    /// `BufferTooSmall` before the source is touched.
+    #[test]
+    fn sysinfo_introspect_undersized_process_buffer_fails_closed() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::SYSINFO_INTROSPECT], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let source: &'static StaticIntrospect = Box::leak(Box::new(StaticIntrospect {
+            processes: alloc::vec::Vec::new(),
+            kernel_memory: alloc::vec::Vec::new(),
+            limits: Ok(alloc::vec::Vec::new()),
+            processes_call: RwLock::new(None),
+            limits_call: RwLock::new(None),
+        }));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_introspect(source);
+        assert_eq!(
+            h.sysinfo_introspect(&ctx, IntrospectDomain::Processes.as_u32(), 0, 0x1000, 8),
+            Err(Errno::BufferTooSmall)
+        );
+        // The source was never consulted (fail closed before touching state).
+        assert_eq!(*source.processes_call.read(), None);
+    }
+
+    /// An unknown domain discriminant fails closed with `OutOfRange`.
+    #[test]
+    fn sysinfo_introspect_unknown_domain_fails_closed() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::SYSINFO_INTROSPECT], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(
+            h.sysinfo_introspect(&ctx, 99, 0, 0x1000, 4096),
+            Err(Errno::OutOfRange)
+        );
+    }
+
+    /// With no source wired the handler keeps `NULL_INTROSPECT` and fails
+    /// closed with `NotImplemented`.
+    #[test]
+    fn sysinfo_introspect_without_source_is_not_implemented() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::SYSINFO_INTROSPECT], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(
+            h.sysinfo_introspect(
+                &ctx,
+                IntrospectDomain::KernelMemory.as_u32(),
+                0,
+                0x1000,
+                4096
+            ),
+            Err(Errno::NotImplemented)
+        );
+    }
+
+    /// `TaskLimits` reads the 16-byte target `ProcId` from the caller's
+    /// buffer on entry and forwards it to the source.
+    #[test]
+    fn sysinfo_introspect_task_limits_reads_proc_id_from_buffer() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::SYSINFO_INTROSPECT], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let report = alloc::vec![7u8; rustos_abi::sysinfo::RESOURCE_LIMITS_REPORT_LEN];
+        let source: &'static StaticIntrospect = Box::leak(Box::new(StaticIntrospect {
+            processes: alloc::vec::Vec::new(),
+            kernel_memory: alloc::vec::Vec::new(),
+            limits: Ok(report.clone()),
+            processes_call: RwLock::new(None),
+            limits_call: RwLock::new(None),
+        }));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_introspect(source);
+
+        // Write the target ProcId into the caller's buffer on entry.
+        let target = ProcId::from_raw([0x5A; PROC_ID_LEN]);
+        h.with_caller_aspace(&ctx, |space, physmap| {
+            copy_out(space, physmap, VirtAddr::new(0x1000), &target.to_le_bytes())
+        })
+        .expect("writable")
+        .expect("copied");
+
+        assert_eq!(
+            h.sysinfo_introspect(&ctx, IntrospectDomain::TaskLimits.as_u32(), 0, 0x1000, 4096),
+            Ok(report.len() as u64)
+        );
+        // The handler resolved exactly the caller-supplied target id.
+        assert_eq!(*source.limits_call.read(), Some(target));
     }
 
     /// `hw_tree_read` copies the wire-encoded snapshot out to the caller

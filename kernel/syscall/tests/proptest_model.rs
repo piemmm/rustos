@@ -323,6 +323,17 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
+    fn sysinfo_introspect(
+        &self,
+        _c: &CallerContext<'_>,
+        _domain: u32,
+        _arg: u64,
+        _out: u64,
+        _out_cap: usize,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
     fn log_emit(&self, _c: &CallerContext<'_>, _record: u64, _len: usize) -> SyscallResult {
         self.bump();
         Ok(0)

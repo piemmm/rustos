@@ -54,8 +54,8 @@ pub const SYSCALL_MAX_ARGS: usize = 6;
 ///
 /// Pinned so that [`ENCODED_TABLE`] uses a fixed stride per record and the
 /// encoding is computable in a `const fn` without an allocator. Sized to fit
-/// the longest `abi-v1` name (`call_peer_origin`, 16 bytes).
-pub const SYSCALL_NAME_MAX: usize = 16;
+/// the longest `abi-v1` name (`sysinfo_introspect`, 18 bytes).
+pub const SYSCALL_NAME_MAX: usize = 18;
 
 /// Stride, in bytes, of one record inside [`ENCODED_TABLE`].
 pub const SYSCALL_ENCODED_RECORD_LEN: usize = 14 + SYSCALL_NAME_MAX;
@@ -1443,6 +1443,31 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: None,
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::SYSINFO_INTROSPECT,
+        name: "sysinfo_introspect",
+        arg_count: 4,
+        args: [
+            // domain, arg (selector/offset), out ptr, out capacity.
+            AbiType::U32,
+            AbiType::U64,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `U64` carries the bytes-written-or-`-errno` register convention
+        // `hw_tree_read` / `users_db_read` use.
+        ret: AbiType::U64,
+        // The unfiltered global system view is privileged and held only by
+        // the `sysinfod` broker, gated exactly like the hardware-tree read.
+        // Not audited per call: the broker re-reads on every client query (it
+        // is the high-volume consumer) and the audited security decision is
+        // the client-facing query the broker records, not this observation;
+        // a capability denial is audited by the dispatcher regardless.
+        required_capability: Some(CapabilityId::SYSINFO_INTROSPECT),
+        audit: false,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in
@@ -1837,6 +1862,22 @@ mod tests {
         let get = spec_for(SyscallNumber::BOOT_ID_GET).unwrap();
         assert_eq!(get.required_capability, None);
         assert!(!get.audit, "boot_id_get must not audit per call");
+    }
+
+    #[test]
+    fn sysinfo_introspect_capability_requirements_are_frozen() {
+        // The unfiltered global system view is privileged and held only by
+        // the sysinfod broker; it is gated on CAP_SYSINFO_INTROSPECT and, like
+        // hw_tree_read, is not audited per call (the broker records the
+        // client-facing query). Lock this down so a refactor cannot loosen
+        // the gate or start auditing the high-volume observation.
+        let spec = spec_for(SyscallNumber::SYSINFO_INTROSPECT).unwrap();
+        assert_eq!(
+            spec.required_capability,
+            Some(CapabilityId::SYSINFO_INTROSPECT)
+        );
+        assert!(!spec.audit, "sysinfo_introspect must not audit per call");
+        assert_eq!(spec.name, "sysinfo_introspect");
     }
 
     #[test]

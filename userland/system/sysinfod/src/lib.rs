@@ -45,6 +45,8 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
+extern crate alloc;
+
 pub mod events;
 pub mod service;
 pub mod source;

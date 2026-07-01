@@ -10,6 +10,8 @@
 //! two keeps the security-relevant code free of any particular kernel
 //! plumbing.
 
+use alloc::vec::Vec;
+
 use rustos_abi::sysinfo::{
     KernelMemoryStats, MountRecord, ProcessRecord, ResourceLimitRecord, SystemIdentity, Uptime,
 };
@@ -76,21 +78,24 @@ pub enum ProcessScope {
 ///
 /// Every method is fallible and returns a [`rustos_abi::Errno`]; a source
 /// must never panic. Methods that answer a query whose
-/// response is a sequence — the process lists — return a borrowed slice and
-/// leave paging to the dispatcher, so the bounds logic lives in exactly one
-/// place.
+/// response is a sequence — the process and mount lists — return an owned
+/// `Vec` and leave paging to the dispatcher, so the bounds logic lives in
+/// exactly one place.
 pub trait SysinfoSource {
     /// Return the records visible to `caller` under `scope`.
     ///
-    /// The slice is returned whole; [`crate::serve`] applies the
+    /// The owned list is returned whole; [`crate::serve`] applies the
     /// `offset`/`limit` paging from the request. Ordering is the source's
     /// responsibility and must be stable across paged calls so a client
-    /// walking the list never skips or repeats a record.
+    /// walking the list never skips or repeats a record. An **owned** `Vec`
+    /// (not a borrowed slice) because a syscall-backed source materialises
+    /// the records freshly on each call — it holds no persistent table to
+    /// lend — and a fixture simply clones its own.
     fn process_records(
         &self,
         caller: &Caller,
         scope: ProcessScope,
-    ) -> Result<&[ProcessRecord], Errno>;
+    ) -> Result<Vec<ProcessRecord>, Errno>;
 
     /// Return kernel memory statistics.
     ///
@@ -102,8 +107,10 @@ pub trait SysinfoSource {
     /// Reached only after the `CAP_SYSINFO_HW` gate has passed. The bytes
     /// are passed through verbatim: the hardware-tree wire format is owned
     /// by `lib/abi`, not by this service, so `sysinfod`
-    /// frames them without interpreting them.
-    fn hardware_tree(&self, caller: &Caller) -> Result<&[u8], Errno>;
+    /// frames them without interpreting them. Returned as an **owned** `Vec`
+    /// for the same reason as [`process_records`](Self::process_records) — a
+    /// syscall-backed source materialises the bytes on each call.
+    fn hardware_tree(&self, caller: &Caller) -> Result<Vec<u8>, Errno>;
 
     /// Return the machine identity (machine ID, OS version, hostname).
     fn system_identity(&self, caller: &Caller) -> Result<SystemIdentity, Errno>;
@@ -116,9 +123,9 @@ pub trait SysinfoSource {
     /// The mount table is system-wide and secret-free, so the query is
     /// ungated: unlike [`process_records`](Self::process_records)
     /// there is no per-principal scope to narrow. As with the process list
-    /// the slice is returned whole and [`crate::serve`] applies the
+    /// the owned list is returned whole and [`crate::serve`] applies the
     /// `offset`/`limit` paging; ordering must be stable across paged calls.
-    fn mount_records(&self, caller: &Caller) -> Result<&[MountRecord], Errno>;
+    fn mount_records(&self, caller: &Caller) -> Result<Vec<MountRecord>, Errno>;
 
     /// Return `caller`'s effective resource limits and current live usage,
     /// one record per [`LimitKind`] in discriminant order. The query is self-scoped — the answer describes the caller's

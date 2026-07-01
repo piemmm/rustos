@@ -248,6 +248,9 @@ const NUM_WALL_TIME_SET: u64 = SyscallNumber::WALL_TIME_SET.as_u16() as u64;
 /// `boot_id_get` syscall number (as above).
 const NUM_BOOT_ID_GET: u64 = SyscallNumber::BOOT_ID_GET.as_u16() as u64;
 
+/// `sysinfo_introspect` syscall number (as above).
+const NUM_SYSINFO_INTROSPECT: u64 = SyscallNumber::SYSINFO_INTROSPECT.as_u16() as u64;
+
 /// Marshal a 32-bit signed argument into its register value following the
 /// `abi-v1` `I32` convention (sign-extend through `i64`).
 #[inline]
@@ -1679,6 +1682,55 @@ pub fn boot_id() -> Result<BootId, i64> {
     // The kernel returns the wire length; decode it (fail closed on a
     // malformed image — never inventing an id).
     BootId::from_bytes(&buf).map_err(|e| -i64::from(e.as_i32()))
+}
+
+/// Read the **unfiltered, global** kernel introspection view
+/// (`SyscallNumber::SYSINFO_INTROSPECT`; P-C).
+///
+/// `domain` is a [`rustos_abi::IntrospectDomain`] discriminant; `arg` is the
+/// domain-specific selector (a record offset for the paged domains, unused
+/// otherwise); `buf` receives the encoded records and returns the byte count
+/// written. For the per-task-limits domain the target task's 128-bit
+/// [`rustos_abi::ProcId`] is written into `buf` on entry (a `u64` `arg` cannot
+/// carry it).
+///
+/// Gated kernel-side on [`rustos_abi::CapabilityId::SYSINFO_INTROSPECT`],
+/// held only by the `sysinfod` broker — the kernel returns the whole system's
+/// state and never narrows by principal; the wrapper adds no authority. The
+/// whole answer or none: an undersized buffer is refused with `BufferTooSmall`
+/// rather than truncated mid-record.
+///
+/// # Errors
+///
+/// Returns the raw negative kernel result (`-errno`): the caller lacks the
+/// capability, no introspection source is wired (`NotImplemented`), the domain
+/// is unknown (`OutOfRange`), the target task does not exist (`NotFound`), or
+/// `buf` is too small (`BufferTooSmall`).
+pub fn sysinfo_introspect(domain: u32, arg: u64, buf: &mut [u8]) -> Result<usize, i64> {
+    let len = buf.len() as u64;
+    let ptr = buf.as_mut_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
+    // `(buf, len)` pair against the caller's address space before touching it.
+    // `buf` is a live exclusive `&mut [u8]` for the duration of the call, so
+    // the pair denotes memory the kernel may read (the target id on entry) and
+    // fill (the encoded answer).
+    #[allow(clippy::cast_possible_wrap)]
+    // The kernel guarantees the i64 count-result encoding (count ≥ 0, else -errno).
+    let ret = unsafe {
+        raw_syscall(
+            NUM_SYSINFO_INTROSPECT,
+            [u64::from(domain), arg, ptr, len, 0, 0],
+        )
+    } as i64;
+    if ret < 0 {
+        return Err(ret);
+    }
+    // Defence in depth: clamp the kernel's count to the buffer so a buggy
+    // count can never drive an out-of-bounds slice in the caller, exactly as
+    // `hw_tree_read` clamps.
+    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_sign_loss)]
+    Ok((ret as usize).min(buf.len()))
 }
 
 /// Create a kernel-owned, zeroed, cross-process shared-memory region and map

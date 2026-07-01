@@ -23,6 +23,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use rustos_abi::sysinfo::MountRecord;
 use rustos_abi::{CapabilityQuery, Errno, FileKind, FileStat, OpenFlags};
 
 /// The set of secured filesystem operations a userland `fs_*` syscall needs.
@@ -171,6 +172,22 @@ pub trait FilesystemService: Send + Sync {
         src: &str,
         dst: &str,
     ) -> Result<(), Errno>;
+
+    /// Snapshot the system mount table as wire-ready [`MountRecord`]s, in a
+    /// stable order (the permanent root mount first), for the System
+    /// Information introspection feed.
+    ///
+    /// This is a read-only, system-wide, secret-free observation — it names
+    /// the mounted volumes and their permission flags, never file contents —
+    /// so it is ungated at this seam (the `sysinfo_introspect` syscall that
+    /// reaches it is itself capability-gated, and the `sysinfod` broker
+    /// applies any per-client policy). The default returns an empty snapshot,
+    /// so a service that owns no mount table (the fail-closed
+    /// [`NullFilesystemService`]) truthfully reports "no mounts" rather than
+    /// fabricating one.
+    fn mount_snapshot(&self) -> Vec<MountRecord> {
+        Vec::new()
+    }
 }
 
 /// The fail-closed default filesystem service: every operation reports

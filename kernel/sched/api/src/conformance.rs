@@ -42,6 +42,7 @@ pub fn run_all<S: SchedulerPolicy<TestArch>>() {
     unpark_before_park_is_not_lost::<S>();
     lifecycle_error_codes::<S>();
     yield_current_semantics::<S>();
+    running_cpu_agrees_with_current_task::<S>();
     no_starvation_under_priority_boost::<S>();
     fairness_no_band_is_starved::<S>();
     smp_stress_four_cores::<S>();
@@ -186,6 +187,44 @@ fn yield_current_semantics<S: SchedulerPolicy<TestArch>>() {
         Err(crate::SchedError::InvalidState),
         "yield a non-running task"
     );
+}
+
+/// [`SchedulerPolicy::running_cpu`] never fabricates a CPU: a task that is
+/// not currently dispatching reports `None`, and whenever a CPU reports a
+/// current task, `running_cpu` points back to exactly that CPU.
+///
+/// This pins the read-only contract the System Information introspection
+/// feed relies on (a truthful current-CPU, never a stale one) through the
+/// public trait surface, for every policy.
+fn running_cpu_agrees_with_current_task<S: SchedulerPolicy<TestArch>>() {
+    let (arch, sched) = make::<S>(2, 64);
+    // A freshly-spawned, not-yet-dispatched task is Ready, so it is on no
+    // CPU; an id no task ever held is likewise on no CPU.
+    let id = sched
+        .spawn(0, Priority::Normal, |_| TaskAction::Yield)
+        .expect("spawn");
+    assert_eq!(
+        sched.running_cpu(id),
+        None,
+        "a Ready (not-running) task is on no CPU"
+    );
+    assert_eq!(sched.running_cpu(999), None, "an unknown task is on no CPU");
+    // The agreement invariant: at every observation point, if a CPU reports
+    // a current task then `running_cpu` of that task is that same CPU.
+    arch.set_current_cpu(0);
+    for _ in 0..4 {
+        let _ = sched.step(0).expect("step");
+        for cpu in 0..sched.cpu_count() {
+            if let Some(current) = sched.current_task(cpu) {
+                assert_eq!(
+                    sched.running_cpu(current),
+                    Some(cpu),
+                    "running_cpu must point back at the CPU running the task"
+                );
+            }
+        }
+        arch.advance_ticks(1);
+    }
 }
 
 /// A Low-priority task that keeps yielding still runs to completion within

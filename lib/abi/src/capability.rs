@@ -364,6 +364,22 @@ impl CapabilityId {
     /// vouches for, so the caller chooses *which* user but never fabricates
     /// the groups or the identity itself.
     pub const SPAWN_AS_USER: Self = Self(31);
+    /// Read the **unfiltered, global** kernel introspection view — the live
+    /// process table, kernel memory accounting, the mount table, machine
+    /// identity, uptime, and any task's resource limits — through the single
+    /// privileged `sysinfo_introspect` syscall.
+    ///
+    /// This gates the one kernel primitive that answers with the *whole*
+    /// system's state, never narrowed by principal. Its sole intended holder
+    /// is the user-space System Information service (`sysinfod`), which is the
+    /// trusted scoping broker: it re-derives every per-client scope (self vs
+    /// global, the `CAP_SYSINFO_GLOBAL`/`CAP_SYSINFO_KERNEL` client gates)
+    /// against each requester's kernel-attested `Origin` before returning any
+    /// subset of the global view. Keeping the kernel primitive minimal and
+    /// global — and the policy in the audited userland broker — holds the
+    /// ring-0 attack surface down while the kernel stays the identity
+    /// authority (no ambient authority; fail closed).
+    pub const SYSINFO_INTROSPECT: Self = Self(32);
 
     /// Every capability assigned a canonical name in `abi-v1`, paired with
     /// that name.
@@ -406,6 +422,7 @@ impl CapabilityId {
         (Self::SHM, "CAP_SHM"),
         (Self::FS_ACCESS, "CAP_FS_ACCESS"),
         (Self::SPAWN_AS_USER, "CAP_SPAWN_AS_USER"),
+        (Self::SYSINFO_INTROSPECT, "CAP_SYSINFO_INTROSPECT"),
     ];
 
     /// The canonical `CAP_*` name of this capability, or [`None`] for an
@@ -531,6 +548,7 @@ mod tests {
         assert_eq!(CapabilityId::SHM.as_u16(), 29);
         assert_eq!(CapabilityId::FS_ACCESS.as_u16(), 30);
         assert_eq!(CapabilityId::SPAWN_AS_USER.as_u16(), 31);
+        assert_eq!(CapabilityId::SYSINFO_INTROSPECT.as_u16(), 32);
     }
 
     #[test]
@@ -562,9 +580,9 @@ mod tests {
 
     #[test]
     fn every_assigned_id_has_a_name() {
-        // Capabilities 1..=31 are assigned in abi-v1; each must carry a
+        // Capabilities 1..=32 are assigned in abi-v1; each must carry a
         // canonical name so `getcap`/`setcap` can render and accept it.
-        for raw in 1..=31 {
+        for raw in 1..=32 {
             let cap = CapabilityId::from_raw(raw).expect("in range");
             assert!(cap.name().is_some(), "capability {raw} has no name");
         }

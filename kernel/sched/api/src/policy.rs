@@ -127,6 +127,22 @@ pub trait SchedulerPolicy<A: SchedulerArch>: Sized {
     /// recover the caller's identity (step 1).
     fn current_task(&self, cpu: CpuId) -> Option<TaskId>;
 
+    /// The [`CpuId`] on which `id` is currently executing, or `None` when it
+    /// is not presently scheduled on any CPU (runnable-but-waiting, blocked,
+    /// or exited).
+    ///
+    /// A read-only observation for the System Information introspection feed.
+    /// It never tracks a task's *last* CPU — only its current one — so the
+    /// answer is always truthful: a task that is not running reports `None`,
+    /// never a stale CPU. The default scans the per-CPU current-task slots via
+    /// [`current_task`](Self::current_task), so every policy shares this one
+    /// definition and none carries its own copy; a policy only overrides it
+    /// if it can answer more cheaply. The `conformance` suite pins the
+    /// contract (`Some(cpu)` iff the task is the current task on `cpu`).
+    fn running_cpu(&self, id: TaskId) -> Option<CpuId> {
+        (0..self.cpu_count()).find(|&cpu| self.current_task(cpu) == Some(id))
+    }
+
     /// Cooperatively yield the currently dispatching task on its CPU.
     ///
     /// Models a voluntary syscall yield (no MLFQ demotion); the task is

@@ -926,7 +926,12 @@ fn enter_kernel_core(
     // accounts into. Until that install a switch fails closed; the default
     // `spawn` (inherit) never consults it, so wiring the hook here changes no
     // boot behaviour until the unlock lands.
-    .with_spawn_identity(&crate::root_mount::LATE_IDENTITY);
+    .with_spawn_identity(&crate::root_mount::LATE_IDENTITY)
+    // Report the committed kernel-heap size to the System Information
+    // `KernelMemory` domain (`PREREQUISITES.md` P-C): the binding kernel owns
+    // the `#[global_allocator]` over `rustos_kalloc`, so it threads its heap
+    // region's fixed committed size here rather than `kernel/core` guessing.
+    .with_kernel_heap_bytes(crate::kalloc::HEAP_BYTES as u64);
     if boot_info.validate().is_err() {
         halt_current_cpu()
     }

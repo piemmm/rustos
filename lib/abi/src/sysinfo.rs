@@ -111,6 +111,63 @@ impl SysinfoQueryId {
     }
 }
 
+/// The slice of the **unfiltered, global** system view a
+/// [`sysinfo_introspect`](crate::SyscallNumber::SYSINFO_INTROSPECT) syscall
+/// selects.
+///
+/// This is the *kernel primitive's* vocabulary, distinct from the userland
+/// [`SysinfoQueryId`] registry: the kernel answers each domain with the whole
+/// system's state and never narrows by principal — the `sysinfod` broker maps
+/// its clients' [`SysinfoQueryId`] queries onto these domains and enforces all
+/// per-client scoping. The set is closed and fail-closed: an unknown
+/// discriminant is rejected rather than guessed.
+#[repr(u32)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum IntrospectDomain {
+    /// The live process table: every task, one packed [`ProcessRecord`], with
+    /// the syscall's `arg` naming the record offset to page from.
+    Processes = 0,
+    /// Kernel memory accounting: a single [`KernelMemoryStats`].
+    KernelMemory = 1,
+    /// The mount table: every mount, one packed [`MountRecord`], with the
+    /// syscall's `arg` naming the record offset to page from.
+    Mounts = 2,
+    /// Machine identity: a single [`SystemIdentity`].
+    Identity = 3,
+    /// System uptime and boot wall-clock time: a single [`Uptime`].
+    Uptime = 4,
+    /// One task's effective resource limits and live usage: the
+    /// [`RESOURCE_LIMITS_REPORT_LEN`]-byte positional
+    /// `[ResourceLimitRecord; LimitKind::COUNT]` array. The target task is
+    /// named by the 128-bit [`ProcId`] the caller writes into the output
+    /// buffer on entry (a `u64` `arg` cannot carry it), which the kernel
+    /// resolves against the capability table so the answer survives PID reuse.
+    TaskLimits = 5,
+}
+
+impl IntrospectDomain {
+    /// Raw on-wire discriminant.
+    #[must_use]
+    pub const fn as_u32(self) -> u32 {
+        self as u32
+    }
+
+    /// Decode a raw discriminant, failing closed on an unknown value.
+    ///
+    /// Returns [`Errno::OutOfRange`] for any value outside the closed set.
+    pub const fn from_u32(raw: u32) -> Result<Self, Errno> {
+        match raw {
+            0 => Ok(Self::Processes),
+            1 => Ok(Self::KernelMemory),
+            2 => Ok(Self::Mounts),
+            3 => Ok(Self::Identity),
+            4 => Ok(Self::Uptime),
+            5 => Ok(Self::TaskLimits),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
 /// Maximum length, in bytes, of the ASCII `name` of any [`SysinfoQuerySpec`].
 ///
 /// Pinned so that [`ENCODED_QUERY_TABLE`] uses a fixed stride per record and
@@ -295,6 +352,85 @@ pub const SYSINFO_REQUEST_MAGIC: u32 = u32::from_le_bytes(*b"SYI1");
 /// Bounded so a caller cannot trick a service into expecting a payload it
 /// cannot represent; far larger than any sensible query argument block.
 pub const SYSINFO_MAX_PAYLOAD_LEN: u32 = 1 << 20;
+
+/// Well-known synchronous call-endpoint id the `sysinfod` service binds and
+/// clients name in [`crate::SyscallNumber::IPC_CALL`].
+///
+/// One OS-wide contract, like [`crate::driver_store::DRIVER_STORE_ENDPOINT`]:
+/// `sysinfod` publishes this endpoint at startup (an unrestricted-sender
+/// endpoint — any process may query, and per-query scoping is enforced by
+/// `sysinfod` against each caller's attested origin), and every `sysinfo`
+/// client (`lib/procinfo`, the `sysinfo` CLI, `ps`, `top`) posts its
+/// framed request here.
+pub const SYSINFO_ENDPOINT: u64 = 0x5953_1001;
+
+/// Length, in bytes, of the status word every `sysinfo` reply is prefixed
+/// with (see [`encode_reply_ok`] / [`decode_reply`]).
+pub const SYSINFO_REPLY_STATUS_LEN: usize = 4;
+
+/// Frame a **successful** `sysinfo` reply: a zero status word followed by
+/// `payload`, written into `out`.
+///
+/// The server (`sysinfod`) frames every reply this way so a client can tell a
+/// served answer from a per-query refusal (e.g. a missing
+/// `CAP_SYSINFO_GLOBAL`), which the synchronous call transport itself cannot
+/// convey — `call_reply` always succeeds at the transport level.
+///
+/// # Errors
+///
+/// [`Errno::BufferTooSmall`] if `out` cannot hold the status word plus
+/// `payload`.
+pub fn encode_reply_ok(payload: &[u8], out: &mut [u8]) -> Result<usize, Errno> {
+    let total = SYSINFO_REPLY_STATUS_LEN
+        .checked_add(payload.len())
+        .ok_or(Errno::LengthOutOfRange)?;
+    if out.len() < total {
+        return Err(Errno::BufferTooSmall);
+    }
+    put_u32(out, 0, 0);
+    out[SYSINFO_REPLY_STATUS_LEN..total].copy_from_slice(payload);
+    Ok(total)
+}
+
+/// Frame an **error** `sysinfo` reply: the non-zero [`Errno`] code as the
+/// status word, no payload, written into `out`.
+///
+/// # Errors
+///
+/// [`Errno::BufferTooSmall`] if `out` is shorter than
+/// [`SYSINFO_REPLY_STATUS_LEN`].
+pub fn encode_reply_err(err: Errno, out: &mut [u8]) -> Result<usize, Errno> {
+    if out.len() < SYSINFO_REPLY_STATUS_LEN {
+        return Err(Errno::BufferTooSmall);
+    }
+    // Every `Errno` code is a positive `i32`, so it round-trips through the
+    // unsigned status word; `0` is reserved for success and is never an
+    // `Errno` code.
+    #[allow(clippy::cast_sign_loss)]
+    put_u32(out, 0, err.as_i32() as u32);
+    Ok(SYSINFO_REPLY_STATUS_LEN)
+}
+
+/// Decode a framed `sysinfo` reply: the payload slice on success, or the
+/// server's per-query [`Errno`] on a non-zero status word.
+///
+/// # Errors
+///
+/// * [`Errno::BufferTooSmall`] if `bytes` is shorter than the status word.
+/// * [`Errno::OutOfRange`] if the status word is a non-zero value that is not
+///   a defined [`Errno`] code (wire corruption — fail closed).
+/// * the server's reported [`Errno`] when the status word names one.
+pub fn decode_reply(bytes: &[u8]) -> Result<&[u8], Errno> {
+    if bytes.len() < SYSINFO_REPLY_STATUS_LEN {
+        return Err(Errno::BufferTooSmall);
+    }
+    let status = read_u32(bytes, 0);
+    if status == 0 {
+        return Ok(&bytes[SYSINFO_REPLY_STATUS_LEN..]);
+    }
+    #[allow(clippy::cast_possible_wrap)]
+    Err(Errno::from_i32(status as i32).unwrap_or(Errno::OutOfRange))
+}
 
 /// Envelope carried in front of every System Information request.
 ///
@@ -1191,6 +1327,59 @@ mod tests {
         assert_eq!(SysinfoQueryId::RESOURCE_LIMITS.as_u16(), 7);
         assert_eq!(SysinfoQueryId::PROCESS_IDENTITY.as_u16(), 8);
         assert_eq!(SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1);
+    }
+
+    #[test]
+    fn reply_frame_round_trips_ok_and_error() {
+        use super::{decode_reply, encode_reply_err, encode_reply_ok, SYSINFO_REPLY_STATUS_LEN};
+        // OK frame: zero status word then the payload verbatim.
+        let payload = [0xAA, 0xBB, 0xCC];
+        let mut buf = [0u8; 16];
+        let n = encode_reply_ok(&payload, &mut buf).unwrap();
+        assert_eq!(n, SYSINFO_REPLY_STATUS_LEN + payload.len());
+        assert_eq!(decode_reply(&buf[..n]), Ok(&payload[..]));
+
+        // Error frame: the errno status word, no payload.
+        let n = encode_reply_err(Errno::PermissionDenied, &mut buf).unwrap();
+        assert_eq!(n, SYSINFO_REPLY_STATUS_LEN);
+        assert_eq!(decode_reply(&buf[..n]), Err(Errno::PermissionDenied));
+
+        // Fail closed: a reply shorter than the status word, and a status
+        // word that is not a defined errno.
+        assert_eq!(decode_reply(&[0u8; 2]), Err(Errno::BufferTooSmall));
+        let mut bogus = [0u8; SYSINFO_REPLY_STATUS_LEN];
+        super::put_u32(&mut bogus, 0, 0xFFFF_FFFF);
+        assert_eq!(decode_reply(&bogus), Err(Errno::OutOfRange));
+
+        // Encoders fail closed on a short output buffer.
+        assert_eq!(
+            encode_reply_ok(&payload, &mut [0u8; 2]),
+            Err(Errno::BufferTooSmall)
+        );
+        assert_eq!(
+            encode_reply_err(Errno::NotFound, &mut [0u8; 2]),
+            Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn introspect_domain_round_trips_and_fails_closed() {
+        use super::IntrospectDomain;
+        // Discriminants are part of abi-v1; do not renumber.
+        for (raw, domain) in [
+            (0u32, IntrospectDomain::Processes),
+            (1, IntrospectDomain::KernelMemory),
+            (2, IntrospectDomain::Mounts),
+            (3, IntrospectDomain::Identity),
+            (4, IntrospectDomain::Uptime),
+            (5, IntrospectDomain::TaskLimits),
+        ] {
+            assert_eq!(domain.as_u32(), raw);
+            assert_eq!(IntrospectDomain::from_u32(raw), Ok(domain));
+        }
+        // Any value outside the closed set is rejected, not guessed.
+        assert_eq!(IntrospectDomain::from_u32(6), Err(Errno::OutOfRange));
+        assert_eq!(IntrospectDomain::from_u32(u32::MAX), Err(Errno::OutOfRange));
     }
 
     #[test]

@@ -64,9 +64,12 @@ pub const MAX_SERVICES: usize = 4;
 /// change.
 pub const DEFAULT_CONFIG: &str = "\
 # RustOS PID 1 startup configuration (plans/PI.md P6b / P11).
-# Open the system console, launch the device-manager service, and start the
-# login service as the session.
+# Open the system console, launch the System Information and device-manager
+# services, and start the login service as the session. `sysinfod` starts
+# first so the introspection endpoint (`AGENTS.md` §16.6) is published before
+# any client queries it.
 console
+service /System/Services/sysinfod
 service /System/Services/devmgr
 session /System/Services/login
 ";
@@ -250,10 +253,15 @@ mod tests {
     use core::fmt::Write as _;
 
     #[test]
-    fn default_config_parses_to_console_login_session_and_the_devmgr_service() {
+    fn default_config_parses_to_console_login_session_and_the_startup_services() {
         let config = StartupConfig::parse(DEFAULT_CONFIG).expect("default config parses");
         assert_eq!(config.session(), "/System/Services/login");
-        assert_eq!(config.services(), &["/System/Services/devmgr"]);
+        // `sysinfod` is launched before `devmgr` so the introspection endpoint
+        // is published before any client queries it.
+        assert_eq!(
+            config.services(),
+            &["/System/Services/sysinfod", "/System/Services/devmgr"],
+        );
     }
 
     #[test]

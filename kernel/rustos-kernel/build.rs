@@ -133,6 +133,13 @@ const PROGRAMS: &[Program] = &[
         fixture: "devmgr_rxe.rs",
         prefix: "DEVMGR",
     },
+    Program {
+        pkg: "rustos-sysinfod",
+        bin: "rustos-sysinfod-run",
+        rel_dir: "../../userland/system/sysinfod",
+        fixture: "sysinfod_rxe.rs",
+        prefix: "SYSINFOD",
+    },
 ];
 
 fn main() {

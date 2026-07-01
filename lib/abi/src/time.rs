@@ -168,6 +168,30 @@ impl Time64 {
         }
         Self { secs, nanos }
     }
+
+    /// Subtract a [`Duration64`] span, saturating the seconds at the `i64`
+    /// bounds rather than wrapping.
+    ///
+    /// The exact complement of [`saturating_add`](Self::saturating_add): both
+    /// nanosecond fields are canonical (`0..NANOS_PER_SEC`), so at most one
+    /// second is borrowed. Its first user is projecting a wall-clock reading
+    /// *back* to the boot instant (`wall_now - since_boot`) for the System
+    /// Information uptime feed; keeping the arithmetic here means the forward
+    /// and backward projections share one tested definition.
+    #[must_use]
+    pub fn saturating_sub(self, span: Duration64) -> Self {
+        let mut secs = self.secs.saturating_sub(span.secs());
+        let mut nanos = self.nanos;
+        if nanos < span.subsec_nanos() {
+            // Borrow one whole second to cover the nanosecond underflow; both
+            // fields are `< NANOS_PER_SEC`, so one borrow always suffices.
+            nanos = nanos + NANOS_PER_SEC - span.subsec_nanos();
+            secs = secs.saturating_sub(1);
+        } else {
+            nanos -= span.subsec_nanos();
+        }
+        Self { secs, nanos }
+    }
 }
 
 /// The kernel's honest assessment of how trustworthy the wall-clock reading
@@ -495,6 +519,38 @@ mod tests {
         let base = Time64::from_secs(i64::MAX);
         let sum = base.saturating_add(super::Duration64::from_secs(1_000));
         assert_eq!(sum.secs(), i64::MAX);
+    }
+
+    #[test]
+    fn saturating_sub_borrows_a_whole_second() {
+        let base = Time64::new(102, 100_000_000).unwrap();
+        let diff = base.saturating_sub(super::Duration64::new(1, 300_000_000).unwrap());
+        assert_eq!(diff.secs(), 100);
+        assert_eq!(diff.subsec_nanos(), 800_000_000);
+    }
+
+    #[test]
+    fn saturating_sub_no_borrow() {
+        let base = Time64::new(-3, 300).unwrap();
+        let diff = base.saturating_sub(super::Duration64::new(2, 200).unwrap());
+        assert_eq!(diff.secs(), -5);
+        assert_eq!(diff.subsec_nanos(), 100);
+    }
+
+    #[test]
+    fn saturating_sub_is_the_inverse_of_add() {
+        // wall_now - since_boot then + since_boot recovers wall_now (the
+        // uptime feed's boot-instant projection is round-trip stable).
+        let wall = Time64::new(1_700_000_000, 250_000_000).unwrap();
+        let span = super::Duration64::new(42, 900_000_000).unwrap();
+        assert_eq!(wall.saturating_sub(span).saturating_add(span), wall);
+    }
+
+    #[test]
+    fn saturating_sub_clamps_at_i64_min() {
+        let base = Time64::from_secs(i64::MIN);
+        let diff = base.saturating_sub(super::Duration64::from_secs(1_000));
+        assert_eq!(diff.secs(), i64::MIN);
     }
 
     #[test]

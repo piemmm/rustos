@@ -122,6 +122,7 @@ const NUM_CALL_PEER_ORIGIN: u64 = SyscallNumber::CALL_PEER_ORIGIN.as_u16() as u6
 const NUM_WALL_TIME_GET: u64 = SyscallNumber::WALL_TIME_GET.as_u16() as u64;
 const NUM_WALL_TIME_SET: u64 = SyscallNumber::WALL_TIME_SET.as_u16() as u64;
 const NUM_BOOT_ID_GET: u64 = SyscallNumber::BOOT_ID_GET.as_u16() as u64;
+const NUM_SYSINFO_INTROSPECT: u64 = SyscallNumber::SYSINFO_INTROSPECT.as_u16() as u64;
 
 /// Empty argument vector for the no-argument syscalls.
 const NO_ARGS: [u64; SYSCALL_MAX_ARGS] = [0; SYSCALL_MAX_ARGS];
@@ -954,6 +955,38 @@ pub extern "C" fn sys_boot_id_get(out: *mut c_void, out_cap: usize) -> u64 {
     unsafe { raw_syscall(NUM_BOOT_ID_GET, [ptr_arg(out), out_cap as u64, 0, 0, 0, 0]) }
 }
 
+/// `sysinfo_introspect`: read the unfiltered, global kernel introspection
+/// view (`SyscallNumber::SYSINFO_INTROSPECT`). `domain` is a
+/// `rustos_abi::IntrospectDomain` discriminant, `arg` is the domain-specific
+/// selector (a record offset for the paged domains), and the encoded records
+/// are written to the `out_cap`-byte buffer at `out`, whose byte count is
+/// returned (or a `ROS_E_*` code reinterpreted into the result). For the
+/// per-task-limits domain the 16-byte target `rustos_abi::ProcId` is supplied
+/// in `out` on entry.
+///
+/// Requires `ROS_CAP_SYSINFO_INTROSPECT`, held only by the `sysinfod` broker:
+/// the kernel returns the whole system's state and never narrows by principal.
+/// The whole answer or none — an undersized buffer fails closed with
+/// `ROS_E_BUFFER_TOO_SMALL`.
+#[must_use]
+#[export_name = "ros_sys_sysinfo_introspect"]
+pub extern "C" fn sys_sysinfo_introspect(
+    domain: u32,
+    arg: u64,
+    out: *mut c_void,
+    out_cap: usize,
+) -> u64 {
+    // SAFETY: see `sys_boot_id_get`; the kernel validates the `(out, out_cap)`
+    // pair against the caller's address space before reading the target id on
+    // entry and writing the encoded answer.
+    unsafe {
+        raw_syscall(
+            NUM_SYSINFO_INTROSPECT,
+            [u64::from(domain), arg, ptr_arg(out), out_cap as u64, 0, 0],
+        )
+    }
+}
+
 /// `log_emit`: emit one encoded diagnostic record (a `rustos_abi::log`
 /// `LogRecord` wire image of `len` bytes at `record`) to the kernel's
 /// diagnostic log sink (`SyscallNumber::LOG_EMIT`).
@@ -1437,6 +1470,7 @@ mod tests {
         (NUM_WALL_TIME_GET, "wall_time_get", 2),
         (NUM_WALL_TIME_SET, "wall_time_set", 3),
         (NUM_BOOT_ID_GET, "boot_id_get", 2),
+        (NUM_SYSINFO_INTROSPECT, "sysinfo_introspect", 4),
     ];
 
     #[test]
@@ -1543,6 +1577,21 @@ mod tests {
         assert_eq!(args[0], ptr as usize as u64);
         assert_eq!(args[1], 16);
         assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn sysinfo_introspect_marshals_domain_arg_pointer_and_capacity() {
+        let mut buf = [0u8; 96];
+        let ptr = buf.as_mut_ptr().cast::<c_void>();
+        let (number, args) = capture(96, || {
+            assert_eq!(sys_sysinfo_introspect(2, 5, ptr, 96), 96);
+        });
+        assert_eq!(number, NUM_SYSINFO_INTROSPECT);
+        assert_eq!(args[0], 2);
+        assert_eq!(args[1], 5);
+        assert_eq!(args[2], ptr as usize as u64);
+        assert_eq!(args[3], 96);
+        assert_eq!(&args[4..], &[0, 0]);
     }
 
     #[test]

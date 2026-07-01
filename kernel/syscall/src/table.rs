@@ -901,6 +901,37 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Read the **unfiltered, global** kernel introspection view (P-C).
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::SYSINFO_INTROSPECT`] and that `out` is a non-null
+    /// `UserPtr`. `domain` is the [`rustos_abi::IntrospectDomain`]
+    /// discriminant the handler validates; `arg` is a domain-specific
+    /// selector (a record offset for the paged domains, or unused). The
+    /// implementation writes the requested records to `out` little-endian
+    /// through the validated boundary and returns the byte count.
+    ///
+    /// The kernel primitive **never narrows by principal**: it always
+    /// answers with the whole system's state and leaves per-client scoping
+    /// to the `sysinfod` broker (the sole holder of the capability). Every
+    /// field is validated and the call fails closed — a bad domain, a short
+    /// buffer, or (for the per-task-limits domain) an unresolvable target
+    /// [`rustos_abi::ProcId`] all deny.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]; the real handler is installed in
+    /// `kernel/core`.
+    fn sysinfo_introspect(
+        &self,
+        _caller: &CallerContext<'_>,
+        _domain: u32,
+        _arg: u64,
+        _out: u64,
+        _out_cap: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// Emit a structured diagnostic record to the kernel's diagnostic log
     /// sink.
     ///
@@ -1740,6 +1771,16 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 let out_cap = decode_len(args.0[1])?;
                 self.handlers.boot_id_get(caller, args.0[0], out_cap)
             }
+            SyscallNumber::SYSINFO_INTROSPECT => {
+                // args[0] is the `IntrospectDomain` discriminant (validated by
+                // the handler); args[1] is the domain-specific selector/offset;
+                // args[2] is the non-null out `UserPtr` (dispatcher-checked);
+                // args[3] is its capacity in bytes.
+                let domain = decode_u32(args.0[0]);
+                let out_cap = decode_len(args.0[3])?;
+                self.handlers
+                    .sysinfo_introspect(caller, domain, args.0[1], args.0[2], out_cap)
+            }
             _ => Err(Errno::NotFound),
         }
     }
@@ -2387,6 +2428,21 @@ mod tests {
             Ok(out_cap as u64)
         }
 
+        fn sysinfo_introspect(
+            &self,
+            _c: &CallerContext<'_>,
+            _domain: u32,
+            _arg: u64,
+            _out: u64,
+            out_cap: usize,
+        ) -> SyscallResult {
+            self.record("sysinfo_introspect");
+            // Echo the capacity so the reachability test can assert the
+            // dispatcher decoded all four arguments without wiring a real
+            // introspection source.
+            Ok(out_cap as u64)
+        }
+
         fn log_emit(&self, _c: &CallerContext<'_>, _record: u64, _len: usize) -> SyscallResult {
             self.record("log_emit");
             Ok(0)
@@ -2583,6 +2639,7 @@ mod tests {
                 CapabilityId::SHM,
                 CapabilityId::FS_ACCESS,
                 CapabilityId::TIME_SET,
+                CapabilityId::SYSINFO_INTROSPECT,
             ],
             &sink,
         );

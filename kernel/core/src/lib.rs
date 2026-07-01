@@ -83,6 +83,8 @@ pub mod groups;
 pub mod hwtree;
 pub mod init;
 pub mod input_focus;
+pub mod introspect;
+pub mod introspect_source;
 pub mod kthread;
 pub mod kthread_irq;
 pub mod live_producer;
@@ -140,6 +142,8 @@ pub use groups::{build_identity_table, load_groups_db, GroupsLoadError, GROUPS_D
 pub use hwtree::{HwTreeSource, NullHwTreeSource, NULL_HW_TREE};
 pub use init::{kernel_main, InitError, KernelInitSpawner, Phase};
 pub use input_focus::{InputFocus, KEYBOARD_CHANNEL_CAPACITY, NULL_INPUT_FOCUS};
+pub use introspect::{IntrospectSource, NullIntrospectSource, NULL_INTROSPECT};
+pub use introspect_source::KernelIntrospectSource;
 pub use kthread::{
     reschedule_current, spawn_kthread, spawn_kthread_with_stack, spawn_user_kthread,
     spawn_user_kthread_with_stack, spawn_user_kthread_with_stack_live, with_current_live_space,

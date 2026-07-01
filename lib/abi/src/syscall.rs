@@ -1022,6 +1022,27 @@ impl SyscallNumber {
     /// [`Errno::EntropyNotReady`] — the kernel never returns the all-zero
     /// [`BootId::UNSET`](crate::BootId::UNSET) sentinel as if it were a real id.
     pub const BOOT_ID_GET: Self = Self(61);
+    /// Read the **unfiltered, global** kernel introspection view
+    /// (`PREREQUISITES.md` P-C).
+    ///
+    /// Arguments: `domain: u32` (an [`IntrospectDomain`](crate::IntrospectDomain)
+    /// discriminant), `arg: u64` (a domain-specific selector — a record
+    /// offset for the paged domains, unused otherwise), `out: *mut u8` (user
+    /// buffer), `out_cap: usize` (its capacity). On success the requested
+    /// records are written to `out` little-endian and the byte length
+    /// returned; otherwise `-errno`.
+    ///
+    /// Gated by [`crate::CapabilityId::SYSINFO_INTROSPECT`], held only by the
+    /// user-space System Information service (`sysinfod`). The kernel primitive
+    /// always returns the whole system's state and **never narrows by
+    /// principal**: all per-client scoping is enforced by `sysinfod` against
+    /// each requester's kernel-attested [`Origin`](crate::Origin). Every field
+    /// is validated and the call fails closed (a bad domain, a short buffer,
+    /// or an unresolvable target task all deny). For the per-task limits
+    /// domain the target task's 128-bit [`ProcId`](crate::ProcId) is supplied
+    /// in `out` on entry (a `u64` arg cannot carry it), which the kernel
+    /// resolves against the capability table so the answer survives PID reuse.
+    pub const SYSINFO_INTROSPECT: Self = Self(62);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
@@ -1159,6 +1180,7 @@ mod tests {
         assert_eq!(SyscallNumber::WALL_TIME_GET.as_u16(), 59);
         assert_eq!(SyscallNumber::WALL_TIME_SET.as_u16(), 60);
         assert_eq!(SyscallNumber::BOOT_ID_GET.as_u16(), 61);
+        assert_eq!(SyscallNumber::SYSINFO_INTROSPECT.as_u16(), 62);
     }
 
     #[test]
