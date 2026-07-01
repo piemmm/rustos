@@ -51,6 +51,8 @@
 #define ROS_PROCESS_STATE_BLOCKED ((uint8_t)2u)
 #define ROS_PROCESS_STATE_ZOMBIE ((uint8_t)3u)
 #define ROS_PROCESS_STATE_STOPPED ((uint8_t)4u)
+/* ros_process_record.cpu sentinel: the process is not currently scheduled. */
+#define ROS_PROCESS_CPU_NONE ((uint8_t)255u)
 
 /* Inline fixed-buffer capacities carried in the record types below. */
 #define ROS_PROCESS_NAME_MAX 32u
@@ -63,7 +65,7 @@
 /* Packed little-endian wire size of each sysinfo record type, in bytes. */
 #define ROS_SYSINFO_REQUEST_HEADER_WIRE_LEN 24u
 #define ROS_PROCESS_LIST_REQUEST_WIRE_LEN 8u
-#define ROS_PROCESS_RECORD_WIRE_LEN 60u
+#define ROS_PROCESS_RECORD_WIRE_LEN 92u
 #define ROS_KERNEL_MEMORY_STATS_WIRE_LEN 40u
 #define ROS_UPTIME_WIRE_LEN 24u
 #define ROS_SYSTEM_IDENTITY_WIRE_LEN 88u
@@ -92,10 +94,16 @@ typedef struct ros_process_list_request {
     uint16_t flags;
 } ros_process_list_request_t;
 
-/* One process entry; the inline name is valid for name_len bytes. */
+/* One process entry. The numeric pid/parent_pid are reused across process
+* lifetimes; proc_id/parent_proc_id are the kernel-attested, never-reused
+* process-instance identities (correlate on those, not the numeric ids).
+* `cpu` is ROS_PROCESS_CPU_NONE when the process is not currently
+* scheduled. The inline name is valid for name_len bytes. */
 typedef struct ros_process_record {
     uint64_t pid;
     uint64_t parent_pid;
+    uint8_t proc_id[16];
+    uint8_t parent_proc_id[16];
     uint32_t uid;
     uint32_t gid;
     uint8_t state;

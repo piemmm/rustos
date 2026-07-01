@@ -117,7 +117,7 @@ mod tests {
     use rustos_abi::sysinfo::{
         ProcessListRequest, ProcessRecord, ProcessState, SysinfoQueryId, SysinfoRequestHeader,
     };
-    use rustos_abi::Errno;
+    use rustos_abi::{Errno, ProcId};
 
     /// An in-memory `sysinfod` stand-in answering process-list queries from a
     /// fixed record set, decoding the request exactly as the real service.
@@ -166,7 +166,18 @@ mod tests {
     }
 
     fn record(pid: u64, name: &[u8], state: ProcessState) -> ProcessRecord {
-        ProcessRecord::new(pid, 1, 1000, 1000, state, 0, name).expect("record")
+        ProcessRecord::new(
+            pid,
+            1,
+            ProcId::KERNEL,
+            ProcId::KERNEL,
+            1000,
+            1000,
+            state,
+            0,
+            name,
+        )
+        .expect("record")
     }
 
     fn collect(all: bool, fixture: &Fixture) -> Result<Vec<ProcessRecord>, ListError> {

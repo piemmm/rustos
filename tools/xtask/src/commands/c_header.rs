@@ -67,13 +67,14 @@ use rustos_abi::{
     LOG_RECORD_MAX, MACHINE_ID_LEN, MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES, MIME_ENTRY_LEN,
     MIME_TYPE_MAX, MOD_ALT, MOD_CTRL, MOD_MASK, MOD_META, MOD_SHIFT, MOUNT_FSTYPE_MAX,
     MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, NANOS_PER_SEC, POINTER_INPUT_MAGIC, PORT_NAME_MAX_LEN,
-    PROCESS_NAME_MAX, PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN,
-    PROCESS_START_MAX_TOTAL_LEN, RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES,
-    RESOURCE_LIMITS_REPORT_LEN, RLIMIT_INFINITY, RXE_PAGE_SIZE, SEG_FLAG_EXEC, SEG_FLAG_READ,
-    SEG_FLAG_WRITE, SPAWN_UID_INHERIT, STDINFO_FD, STDINFO_VERSION_CURRENT, STDINFO_VERSION_V1,
-    SYSCALLS, SYSCALL_MAX_ARGS, SYSCALL_TABLE_HASH_LEN, SYSINFO_MAX_PAYLOAD_LEN,
-    SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC,
-    SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1, SYSTEM_LIBRARIES_DIR,
+    PROCESS_CPU_NONE, PROCESS_NAME_MAX, PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS,
+    PROCESS_START_MAX_STRING_LEN, PROCESS_START_MAX_TOTAL_LEN, RANDOM_REQUEST_MAX_BYTES,
+    RANDOM_RESERVE_DEFAULT_BYTES, RESOURCE_LIMITS_REPORT_LEN, RLIMIT_INFINITY, RXE_PAGE_SIZE,
+    SEG_FLAG_EXEC, SEG_FLAG_READ, SEG_FLAG_WRITE, SPAWN_UID_INHERIT, STDINFO_FD,
+    STDINFO_VERSION_CURRENT, STDINFO_VERSION_V1, SYSCALLS, SYSCALL_MAX_ARGS,
+    SYSCALL_TABLE_HASH_LEN, SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERY_NAME_MAX,
+    SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1,
+    SYSTEM_LIBRARIES_DIR,
 };
 
 /// Default on-disk location of the generated C ABI header set, relative to
@@ -1403,6 +1404,13 @@ fn sysinfo_emit_framing(out: &mut String) {
     for (name, state) in process_states {
         let _ = writeln!(out, "#define {name} ((uint8_t){}u)", state.as_u8());
     }
+    out.push_str(
+        "/* ros_process_record.cpu sentinel: the process is not currently scheduled. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_PROCESS_CPU_NONE ((uint8_t){PROCESS_CPU_NONE}u)"
+    );
     out.push('\n');
 }
 
@@ -1479,10 +1487,16 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
          \x20   uint16_t limit;\n\
          \x20   uint16_t flags;\n\
          } ros_process_list_request_t;\n\n",
-    "/* One process entry; the inline name is valid for name_len bytes. */\n\
+    "/* One process entry. The numeric pid/parent_pid are reused across process\n\
+         * lifetimes; proc_id/parent_proc_id are the kernel-attested, never-reused\n\
+         * process-instance identities (correlate on those, not the numeric ids).\n\
+         * `cpu` is ROS_PROCESS_CPU_NONE when the process is not currently\n\
+         * scheduled. The inline name is valid for name_len bytes. */\n\
          typedef struct ros_process_record {\n\
          \x20   uint64_t pid;\n\
          \x20   uint64_t parent_pid;\n\
+         \x20   uint8_t proc_id[16];\n\
+         \x20   uint8_t parent_proc_id[16];\n\
          \x20   uint32_t uid;\n\
          \x20   uint32_t gid;\n\
          \x20   uint8_t state;\n\
@@ -3001,7 +3015,7 @@ mod tests {
             (
                 "ProcessRecord",
                 core::mem::size_of::<ProcessRecord>(),
-                64,
+                96,
                 core::mem::align_of::<ProcessRecord>(),
                 8,
             ),
@@ -3279,7 +3293,7 @@ mod tests {
             ("rustos_process.h", "} ros_string_slot_t;", size_of::<StringSlot>(), 8, align_of::<StringSlot>(), 4),
             ("rustos_sysinfo.h", "} ros_sysinfo_request_header_t;", size_of::<SysinfoRequestHeader>(), 24, align_of::<SysinfoRequestHeader>(), 8),
             ("rustos_sysinfo.h", "} ros_process_list_request_t;", size_of::<ProcessListRequest>(), 8, align_of::<ProcessListRequest>(), 4),
-            ("rustos_sysinfo.h", "} ros_process_record_t;", size_of::<ProcessRecord>(), 64, align_of::<ProcessRecord>(), 8),
+            ("rustos_sysinfo.h", "} ros_process_record_t;", size_of::<ProcessRecord>(), 96, align_of::<ProcessRecord>(), 8),
             ("rustos_sysinfo.h", "} ros_kernel_memory_stats_t;", size_of::<KernelMemoryStats>(), 40, align_of::<KernelMemoryStats>(), 8),
             ("rustos_sysinfo.h", "} ros_uptime_t;", size_of::<Uptime>(), 32, align_of::<Uptime>(), 8),
             ("rustos_sysinfo.h", "} ros_system_identity_t;", size_of::<SystemIdentity>(), 88, align_of::<SystemIdentity>(), 2),

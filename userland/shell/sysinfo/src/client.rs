@@ -223,7 +223,7 @@ mod tests {
         SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
     };
     use rustos_abi::time::{Duration64, Time64};
-    use rustos_abi::{Errno, LimitKind, ResourceLimit, RLIMIT_INFINITY};
+    use rustos_abi::{Errno, LimitKind, ProcId, ResourceLimit, RLIMIT_INFINITY};
     use rustos_procinfo::{Output, Transport};
 
     /// An in-memory `sysinfod` stand-in: it decodes a request the same way
@@ -356,7 +356,18 @@ mod tests {
     }
 
     fn record(pid: u64, name: &[u8], state: ProcessState) -> ProcessRecord {
-        ProcessRecord::new(pid, 1, 1000, 1000, state, 0, name).unwrap()
+        ProcessRecord::new(
+            pid,
+            1,
+            ProcId::KERNEL,
+            ProcId::KERNEL,
+            1000,
+            1000,
+            state,
+            0,
+            name,
+        )
+        .unwrap()
     }
 
     #[test]

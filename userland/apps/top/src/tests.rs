@@ -9,7 +9,7 @@ use core::cell::RefCell;
 use rustos_abi::sysinfo::{
     ProcessListRequest, ProcessRecord, ProcessState, SysinfoQueryId, SysinfoRequestHeader,
 };
-use rustos_abi::Errno;
+use rustos_abi::{Errno, ProcId};
 use rustos_curses::{Event, Screen, Size, Tty};
 use rustos_procinfo::Transport;
 use rustos_termcap::TermType;
@@ -88,7 +88,18 @@ impl Tty for FakeTty {
 }
 
 fn record(pid: u64, name: &[u8]) -> ProcessRecord {
-    ProcessRecord::new(pid, 1, 1000, 1000, ProcessState::Running, 0, name).expect("record")
+    ProcessRecord::new(
+        pid,
+        1,
+        ProcId::KERNEL,
+        ProcId::KERNEL,
+        1000,
+        1000,
+        ProcessState::Running,
+        0,
+        name,
+    )
+    .expect("record")
 }
 
 fn records(n: u64) -> Vec<ProcessRecord> {

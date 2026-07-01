@@ -19,6 +19,7 @@
 
 use crate::driver::filesystem::MountFlags;
 use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
+use crate::origin::ProcId;
 use crate::rlimit::{LimitKind, ResourceLimit};
 use crate::time::{Duration64, Time64};
 use crate::{CapabilityId, Errno};
@@ -76,7 +77,7 @@ impl SysinfoQueryId {
     /// Read the calling principal's own kernel-attested [`Origin`](crate::Origin).
     ///
     /// Self-scoped and ungated: the answer describes only the caller — its
-    /// trust domain, uid, pid, unforgeable [`ProcId`](crate::ProcId), and a
+    /// trust domain, uid, pid, unforgeable [`ProcId`], and a
     /// non-secret capability summary — all filled by the kernel from the
     /// caller's own task state, never from the request payload. A principal
     /// observing *its own* attested identity exposes no other principal's
@@ -440,6 +441,13 @@ impl ProcessListRequest {
 /// Maximum bytes of a process name carried in a [`ProcessRecord`].
 pub const PROCESS_NAME_MAX: usize = 32;
 
+/// [`ProcessRecord::cpu`] sentinel: the process is not currently executing
+/// on any CPU (it is runnable-but-waiting, blocked, or a zombie).
+///
+/// A truthful record never reports a fabricated CPU for a task that is not
+/// running; it reports this sentinel instead.
+pub const PROCESS_CPU_NONE: u8 = 0xFF;
+
 /// Lifecycle state of a process as reported by [`ProcessRecord`].
 ///
 /// Discriminants are part of `sysinfo-v1` and must not be re-numbered.
@@ -484,20 +492,50 @@ impl ProcessState {
 ///
 /// Allocation-free: the name is stored inline in a fixed buffer and the
 /// valid length is carried alongside it.
+///
+/// Identity is carried on two axes: the numeric [`pid`](Self::pid) /
+/// [`parent_pid`](Self::parent_pid) (the scheduler task ids, familiar and
+/// convenient for a `ps`-style display but *reused* across process
+/// lifetimes) and the kernel-attested, never-reused
+/// [`proc_id`](Self::proc_id) / [`parent_proc_id`](Self::parent_proc_id). A
+/// consumer that must correlate a process across time — or distinguish two
+/// lifetimes that reused a numeric id — keys on the `proc_id` pair, never the
+/// numeric ids. Both axes are attested by the kernel from the task's own
+/// state, never from a caller's claim.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct ProcessRecord {
-    /// Process identifier.
+    /// Numeric process identifier (the scheduler task id).
+    ///
+    /// For human display and convenience only; numeric ids are reused, so
+    /// [`proc_id`](Self::proc_id) is the stable identity.
     pub pid: u64,
-    /// Parent process identifier (`0` for PID 1).
+    /// Numeric parent process identifier (`0` for a kernel-parented process
+    /// such as PID 1).
+    ///
+    /// Display convenience only; [`parent_proc_id`](Self::parent_proc_id) is
+    /// the stable parent link.
     pub parent_pid: u64,
+    /// Kernel-attested, unforgeable process-instance identity.
+    ///
+    /// Never reused, so two lifetimes that reused a numeric [`pid`](Self::pid)
+    /// remain distinguishable.
+    pub proc_id: ProcId,
+    /// Process-instance identity of the parent, or [`ProcId::KERNEL`] for a
+    /// kernel-parented process (PID 1, storage-floor drivers).
+    ///
+    /// Like [`proc_id`](Self::proc_id) it survives numeric PID reuse, so the
+    /// parent link is unambiguous even after the parent's numeric id has been
+    /// recycled.
+    pub parent_proc_id: ProcId,
     /// Owning user identifier.
     pub uid: u32,
-    /// Owning group identifier.
+    /// Owning (primary) group identifier.
     pub gid: u32,
     /// Lifecycle state.
     pub state: ProcessState,
-    /// CPU the process last ran on.
+    /// CPU the process is currently executing on, or [`PROCESS_CPU_NONE`]
+    /// when it is not presently scheduled on any CPU.
     pub cpu: u8,
     /// Valid byte count in the inline name buffer (`<= PROCESS_NAME_MAX`);
     /// read the bytes through [`ProcessRecord::name_bytes`].
@@ -507,16 +545,19 @@ pub struct ProcessRecord {
 
 impl ProcessRecord {
     /// Encoded size on the wire.
-    pub const WIRE_LEN: usize = 28 + PROCESS_NAME_MAX;
+    pub const WIRE_LEN: usize = 60 + PROCESS_NAME_MAX;
 
     /// Construct a record, copying up to [`PROCESS_NAME_MAX`] bytes of
     /// `name`.
     ///
     /// Returns [`Errno::LengthOutOfRange`] if `name` is longer than
     /// [`PROCESS_NAME_MAX`]; the name is never silently truncated.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         pid: u64,
         parent_pid: u64,
+        proc_id: ProcId,
+        parent_proc_id: ProcId,
         uid: u32,
         gid: u32,
         state: ProcessState,
@@ -532,6 +573,8 @@ impl ProcessRecord {
         Ok(Self {
             pid,
             parent_pid,
+            proc_id,
+            parent_proc_id,
             uid,
             gid,
             state,
@@ -553,13 +596,15 @@ impl ProcessRecord {
         let mut out = [0u8; Self::WIRE_LEN];
         put_u64(&mut out, 0, self.pid);
         put_u64(&mut out, 8, self.parent_pid);
-        put_u32(&mut out, 16, self.uid);
-        put_u32(&mut out, 20, self.gid);
-        out[24] = self.state.as_u8();
-        out[25] = self.cpu;
-        out[26] = self.name_len;
-        // out[27] reserved, already zero.
-        out[28..28 + PROCESS_NAME_MAX].copy_from_slice(&self.name);
+        out[16..32].copy_from_slice(&self.proc_id.to_le_bytes());
+        out[32..48].copy_from_slice(&self.parent_proc_id.to_le_bytes());
+        put_u32(&mut out, 48, self.uid);
+        put_u32(&mut out, 52, self.gid);
+        out[56] = self.state.as_u8();
+        out[57] = self.cpu;
+        out[58] = self.name_len;
+        // out[59] reserved, already zero.
+        out[60..60 + PROCESS_NAME_MAX].copy_from_slice(&self.name);
         out
     }
 
@@ -573,20 +618,24 @@ impl ProcessRecord {
         if bytes.len() < Self::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
         }
-        let state = ProcessState::from_u8(bytes[24])?;
-        let name_len = bytes[26];
+        let proc_id = ProcId::from_bytes(&bytes[16..32])?;
+        let parent_proc_id = ProcId::from_bytes(&bytes[32..48])?;
+        let state = ProcessState::from_u8(bytes[56])?;
+        let name_len = bytes[58];
         if name_len as usize > PROCESS_NAME_MAX {
             return Err(Errno::LengthOutOfRange);
         }
         let mut name = [0u8; PROCESS_NAME_MAX];
-        name.copy_from_slice(&bytes[28..28 + PROCESS_NAME_MAX]);
+        name.copy_from_slice(&bytes[60..60 + PROCESS_NAME_MAX]);
         Ok(Self {
             pid: read_u64(bytes, 0),
             parent_pid: read_u64(bytes, 8),
-            uid: read_u32(bytes, 16),
-            gid: read_u32(bytes, 20),
+            proc_id,
+            parent_proc_id,
+            uid: read_u32(bytes, 48),
+            gid: read_u32(bytes, 52),
             state,
-            cpu: bytes[25],
+            cpu: bytes[57],
             name_len,
             name,
         })
@@ -1119,11 +1168,12 @@ mod tests {
         ProcessListRequest, ProcessRecord, ProcessState, ResourceLimitRecord, SysinfoQueryId,
         SysinfoRequestHeader, SystemIdentity, Uptime, ENCODED_QUERY_TABLE, ENCODED_QUERY_TABLE_LEN,
         HOSTNAME_MAX, MACHINE_ID_LEN, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX,
-        PROCESS_NAME_MAX, RESOURCE_LIMITS_REPORT_LEN, SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERIES,
-        SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC,
+        PROCESS_CPU_NONE, PROCESS_NAME_MAX, RESOURCE_LIMITS_REPORT_LEN, SYSINFO_MAX_PAYLOAD_LEN,
+        SYSINFO_QUERIES, SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC,
         SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1,
     };
     use crate::driver::filesystem::MountFlags;
+    use crate::origin::ProcId;
     use crate::rlimit::{LimitKind, ResourceLimit};
     use crate::time::{Duration64, Time64};
     use crate::{CapabilityId, Errno};
@@ -1406,31 +1456,74 @@ mod tests {
 
     #[test]
     fn process_record_round_trips() {
-        let rec = ProcessRecord::new(1, 0, 0, 0, ProcessState::Running, 2, b"init").unwrap();
+        let rec = ProcessRecord::new(
+            7,
+            1,
+            ProcId::from_raw([0x11; 16]),
+            ProcId::from_raw([0x22; 16]),
+            1000,
+            1000,
+            ProcessState::Running,
+            2,
+            b"init",
+        )
+        .unwrap();
         assert_eq!(rec.name_bytes(), b"init");
         let decoded = ProcessRecord::from_bytes(&rec.to_le_bytes()).unwrap();
         assert_eq!(decoded, rec);
         assert_eq!(decoded.name_bytes(), b"init");
+        assert_eq!(decoded.proc_id, ProcId::from_raw([0x11; 16]));
+        assert_eq!(decoded.parent_proc_id, ProcId::from_raw([0x22; 16]));
     }
 
     #[test]
     fn process_record_rejects_overlong_name_and_bad_state() {
         let too_long = [b'x'; PROCESS_NAME_MAX + 1];
         assert_eq!(
-            ProcessRecord::new(1, 0, 0, 0, ProcessState::Runnable, 0, &too_long),
+            ProcessRecord::new(
+                1,
+                0,
+                ProcId::KERNEL,
+                ProcId::KERNEL,
+                0,
+                0,
+                ProcessState::Runnable,
+                PROCESS_CPU_NONE,
+                &too_long,
+            ),
             Err(Errno::LengthOutOfRange)
         );
 
-        let mut bytes = ProcessRecord::new(1, 0, 0, 0, ProcessState::Runnable, 0, b"a")
-            .unwrap()
-            .to_le_bytes();
-        bytes[24] = 0xFF; // invalid state discriminant
+        let mut bytes = ProcessRecord::new(
+            1,
+            0,
+            ProcId::KERNEL,
+            ProcId::KERNEL,
+            0,
+            0,
+            ProcessState::Runnable,
+            PROCESS_CPU_NONE,
+            b"a",
+        )
+        .unwrap()
+        .to_le_bytes();
+        bytes[56] = 0xFF; // invalid state discriminant
         assert_eq!(ProcessRecord::from_bytes(&bytes), Err(Errno::OutOfRange));
 
-        let mut bytes = ProcessRecord::new(1, 0, 0, 0, ProcessState::Runnable, 0, b"a")
-            .unwrap()
-            .to_le_bytes();
-        bytes[26] = u8::try_from(PROCESS_NAME_MAX + 1).unwrap(); // name_len out of range
+        let mut bytes = ProcessRecord::new(
+            1,
+            0,
+            ProcId::KERNEL,
+            ProcId::KERNEL,
+            0,
+            0,
+            ProcessState::Runnable,
+            PROCESS_CPU_NONE,
+            b"a",
+        )
+        .unwrap()
+        .to_le_bytes();
+        bytes[58] = u8::try_from(PROCESS_NAME_MAX + 1).unwrap(); // name_len out of range
         assert_eq!(
             ProcessRecord::from_bytes(&bytes),
             Err(Errno::LengthOutOfRange)

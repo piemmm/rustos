@@ -367,7 +367,18 @@ mod tests {
     impl FixtureSource {
         fn new() -> Self {
             let mk = |pid, uid, name: &[u8]| {
-                ProcessRecord::new(pid, 1, uid, uid, ProcessState::Running, 0, name).unwrap()
+                ProcessRecord::new(
+                    pid,
+                    1,
+                    ProcId::KERNEL,
+                    ProcId::KERNEL,
+                    uid,
+                    uid,
+                    ProcessState::Running,
+                    0,
+                    name,
+                )
+                .unwrap()
             };
             Self {
                 own: [mk(10, 1000, b"shell"), mk(11, 1000, b"editor")],

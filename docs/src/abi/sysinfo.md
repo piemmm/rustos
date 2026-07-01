@@ -69,9 +69,16 @@ fails closed: bad magic or a non-zero reserved field is
 - [`ProcessListRequest`] — `offset`/`limit` pagination for the two
   process-list queries, so a fixed-size transport buffer never has to
   hold every process at once.
-- [`ProcessRecord`] — one process entry: `pid`, `parent_pid`, `uid`,
-  `gid`, [`ProcessState`], last CPU, and an inline (allocation-free)
-  name buffer bounded by [`PROCESS_NAME_MAX`].
+- [`ProcessRecord`] — one process entry. Identity is carried on two axes:
+  the numeric `pid`/`parent_pid` (the scheduler task ids, familiar for a
+  `ps`-style display but *reused* across process lifetimes) and the
+  kernel-attested, never-reused `proc_id`/`parent_proc_id`
+  ([`ProcId`], 16 bytes each) — a consumer that must correlate a process
+  across time, or distinguish two lifetimes that reused a numeric id, keys
+  on the `proc_id` pair. The record also carries `uid`, `gid`,
+  [`ProcessState`], the CPU it is currently running on (or
+  [`PROCESS_CPU_NONE`] when it is not presently scheduled), and an inline
+  (allocation-free) name buffer bounded by [`PROCESS_NAME_MAX`].
 - [`KernelMemoryStats`] — total/free/kernel-heap/user-resident bytes and
   the architecture page size.
 - [`Uptime`] — the monotonic span since boot as a [`Duration64`] and the
@@ -111,6 +118,8 @@ Every payload is `#[repr(C)]`, allocation-free, and exposes a
 [`ProcessRecord`]: ../../rustos_abi/sysinfo/struct.ProcessRecord.html
 [`ProcessState`]: ../../rustos_abi/sysinfo/enum.ProcessState.html
 [`PROCESS_NAME_MAX`]: ../../rustos_abi/sysinfo/constant.PROCESS_NAME_MAX.html
+[`PROCESS_CPU_NONE`]: ../../rustos_abi/sysinfo/constant.PROCESS_CPU_NONE.html
+[`ProcId`]: ../../rustos_abi/origin/struct.ProcId.html
 [`KernelMemoryStats`]: ../../rustos_abi/sysinfo/struct.KernelMemoryStats.html
 [`Uptime`]: ../../rustos_abi/sysinfo/struct.Uptime.html
 [`Time64`]: ../../rustos_abi/time/struct.Time64.html
