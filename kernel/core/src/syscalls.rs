@@ -81,7 +81,7 @@ use rustos_abi::{
     LimitKind, MapFlags, OpenFlags, ProcId, RandomFlags, ResourceLimit, StreamMode, SyscallNumber,
     Time64, WaitSetOp, WaitSourceKind, WallClockReading, WallTimeState, BOOT_ID_LEN,
     CONSOLE_INHERIT, FS_IO_MAX, FS_NAME_MAX, FS_PATH_MAX, LOG_FIELDS_MAX, LOG_RECORD_MAX,
-    RANDOM_REQUEST_MAX_BYTES,
+    RANDOM_REQUEST_MAX_BYTES, SPAWN_UID_INHERIT,
 };
 use rustos_caps::CapabilitySet;
 use rustos_kernel_ipc::{
@@ -94,7 +94,9 @@ use rustos_kernel_mem::{
     copy_in, copy_out, FrameAllocator, PhysMap, UaccessError, UserAddressSpace, VirtAddr, PAGE_SIZE,
 };
 use rustos_kernel_sched_api::Priority;
-use rustos_kernel_sec::{CapTable, ProcName, TaskCapabilities, TaskId as SecTaskId, UserId};
+use rustos_kernel_sec::{
+    CapTable, GroupId, ProcName, TaskCapabilities, TaskId as SecTaskId, UserId,
+};
 use rustos_kernel_syscall::{CallerContext, Dispatcher, RawArgs, SyscallHandlers, SyscallResult};
 use rustos_log::{Event, EventId, Field, Level, Sink};
 use rustos_sync::RwLock;
@@ -116,7 +118,7 @@ use crate::devres::{
     NULL_MSI_ALLOC_FACILITY, NULL_SHARED_MEM_FACILITY,
 };
 use crate::dispatch_slot::{DispatchHook, DispatchOutcome, RescheduleAction};
-use crate::fs::{FilesystemService, NULL_FILESYSTEM};
+use crate::fs::{FilesystemService, LateIdentity, NULL_FILESYSTEM};
 use crate::hwtree::{HwTreeSource, NULL_HW_TREE};
 use crate::input_focus::{InputFocus, NULL_INPUT_FOCUS};
 use crate::memmap::{MemMap, NULL_MEM_MAP};
@@ -146,6 +148,19 @@ impl Sink for NullLogSink {
 /// boot path installs the real one through
 /// [`KernelSyscallHandlers::with_log_sink`].
 static NULL_LOG_SINK: NullLogSink = NullLogSink;
+
+/// The fail-closed default identity table the `spawn` handler resolves a
+/// spawn-as-user switch against until the boot path installs the real one
+/// through [`KernelSyscallHandlers::with_identity`].
+///
+/// With no table installed, [`LateIdentity::resolve_credential`] fails closed
+/// with [`Errno::NotImplemented`], so a switch to any uid is refused before
+/// the disk is unlocked — never resolving a guessed credential. The default
+/// `spawn` (inherit) never consults it.
+///
+/// Public so [`crate::BootInfo`] can use the *same* fail-closed default for
+/// its `spawn_identity` field — one shared empty cell, never a second copy.
+pub static NULL_IDENTITY: LateIdentity = LateIdentity::new();
 
 /// Production [`SyscallHandlers`] implementation.
 ///
@@ -349,6 +364,17 @@ where
     /// a real id. A plain value, not a borrow: it is 16 immutable bytes minted
     /// once, not a live seam.
     boot_id: BootId,
+    /// The authoritative identity table the `spawn` handler resolves a
+    /// spawn-as-user switch against (`PREREQUISITES.md` P-C). Defaults to the
+    /// fail-closed [`NULL_IDENTITY`]; the boot path that unlocks the root
+    /// volume installs the verified table through [`Self::with_identity`]
+    /// (the same `&'static LateIdentity` the filesystem service resolves
+    /// caller groups against — one authoritative table, no second copy).
+    /// Consulted **only** on a switch to a target uid; the default `spawn`
+    /// (inherit) copies the parent's own attested credential and never touches
+    /// it. Held `'static` because the leaked table lives for the running
+    /// kernel's lifetime.
+    identity: &'static LateIdentity,
 }
 
 impl<'a, A> KernelSyscallHandlers<'a, A>
@@ -473,7 +499,29 @@ where
             // CSPRNG reserve and installs it (`PREREQUISITES.md` P-E):
             // `boot_id_get` fails closed with `EntropyNotReady` until then.
             boot_id: BootId::UNSET,
+            // The identity table is unwired until the boot path installs the
+            // verified one (`PREREQUISITES.md` P-C): a spawn-as-user switch
+            // fails closed with `NotImplemented` until then, never resolving
+            // a guessed credential.
+            identity: &NULL_IDENTITY,
         }
+    }
+
+    /// Install the authoritative identity table the `spawn` handler resolves
+    /// a spawn-as-user switch against, consuming and returning `self`
+    /// (`PREREQUISITES.md` P-C).
+    ///
+    /// Called once by the boot path that unlocked the root volume, with the
+    /// **same** `&'static LateIdentity` the filesystem service was built over
+    /// (one authoritative table, no second copy). Until then the handler holds
+    /// the fail-closed [`NULL_IDENTITY`] and a switch to any uid returns
+    /// [`Errno::NotImplemented`]. The default `spawn` (inherit) never consults
+    /// it. The table must be `'static` because the boot path leaks it
+    /// alongside `KernelState`.
+    #[must_use]
+    pub const fn with_identity(mut self, identity: &'static LateIdentity) -> Self {
+        self.identity = identity;
+        self
     }
 
     /// Install the kernel filesystem service the `fs_*` syscalls route
@@ -1629,6 +1677,7 @@ where
         path: u64,
         path_len: usize,
         console: u64,
+        target_uid: u32,
     ) -> SyscallResult {
         // The dispatcher already checked `CAP_PROC_SPAWN` and that `path`
         // is non-null (`UserPtr`). Bound the staged path so a hostile
@@ -1684,6 +1733,43 @@ where
             return Err(Errno::NotFound);
         };
 
+        // Resolve the child's kernel-attested credential (uid + group set),
+        // never a caller-supplied value:
+        //
+        // * `SPAWN_UID_INHERIT` — the child runs as the *same* user as its
+        //   parent: copy the caller's own attested credential from its
+        //   kernel-held record. Running a child as oneself needs no
+        //   capability.
+        // * a concrete uid — a *switch*: privilege drops into a defined user
+        //   at process creation (there is no setuid-self), so it requires the
+        //   caller to hold `CAP_SPAWN_AS_USER` and resolves the target's full
+        //   group set from the authoritative identity table. It fails closed
+        //   on a missing capability, and `resolve_credential` fails closed on
+        //   an unresolvable user or an uninstalled table — never inventing an
+        //   identity.
+        let credential = if target_uid == SPAWN_UID_INHERIT {
+            SpawnCredential::new(
+                caller.caps.owner(),
+                caller.caps.primary_gid(),
+                caller.caps.supplementary_gids().to_vec(),
+            )
+        } else {
+            if !caller.caps.has(CapabilityId::SPAWN_AS_USER) {
+                crate::audit::emit(
+                    self.audit,
+                    Level::Warn,
+                    AuditEvent::ProcessSpawnDenied,
+                    &[Field {
+                        key: "cause",
+                        value: rustos_log::FieldValue::Str("spawn_as_user_denied"),
+                    }],
+                );
+                return Err(Errno::PermissionDenied);
+            }
+            let (primary_gid, supplementary_gids) = self.identity.resolve_credential(target_uid)?;
+            SpawnCredential::new(UserId(target_uid), primary_gid, supplementary_gids)
+        };
+
         // Hand the validated `rxe` to the architecture spawn producer,
         // which builds a fresh hardware-isolated address space and admits
         // it as a runnable process through `ctx`, returning the new PID.
@@ -1725,6 +1811,10 @@ where
             ProcName::from_bytes_truncating(
                 path_buf.rsplit(|&b| b == b'/').next().unwrap_or(&path_buf),
             ),
+            // The child's kernel-attested credential, resolved above
+            // (inherit the caller's own, or a capability-gated switch to a
+            // target user) — never a caller-supplied value.
+            credential,
         );
         self.spawn_service.spawn(program, &ctx)
     }
@@ -3647,6 +3737,62 @@ where
     }
 }
 
+/// The kernel-attested identity a freshly spawned child is admitted under:
+/// its owning user and full group set (`PREREQUISITES.md` P-C, spawn-as-user).
+///
+/// This is the credential the kernel *vouches for* — resolved kernel-side and
+/// snapshotted onto the child's [`TaskCapabilities`] record at admit, never a
+/// value a caller supplied. It is produced one of three ways, all kernel-side:
+///
+/// * **inherit** — copied from the spawning parent's own attested record (the
+///   default `spawn`, no capability required), so a child runs as the same
+///   user as its parent;
+/// * **switch** — resolved from the authoritative identity table for a target
+///   uid by a caller holding [`CapabilityId::SPAWN_AS_USER`] (login starting a
+///   user's shell), so privilege only ever drops into a defined user *at
+///   process creation* — there is no setuid-self;
+/// * **system** — the fixed uid 0 / gid 0 credential for the kernel's own
+///   principals (PID 1, the storage bootstrap-floor drivers).
+///
+/// It carries identity only; capabilities flow separately through the
+/// manifest-bounded effective set. The group set is bounded by the identity
+/// table's verifier, so a task can never carry an unbounded credential.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SpawnCredential {
+    /// Owning user id snapshotted onto the child.
+    uid: UserId,
+    /// Primary group of the credential.
+    primary_gid: GroupId,
+    /// Supplementary groups of the credential (bounded by the identity
+    /// verifier when resolved).
+    supplementary_gids: Vec<GroupId>,
+}
+
+impl SpawnCredential {
+    /// The fixed system credential (uid 0 / gid 0, no supplementary groups)
+    /// the kernel's own principals are admitted under (PID 1, the storage
+    /// bootstrap-floor drivers). uid 0 is the *system* user; it carries **no**
+    /// ambient authority — powers flow only from the capability set.
+    #[must_use]
+    pub const fn system() -> Self {
+        Self {
+            uid: UserId(0),
+            primary_gid: GroupId(0),
+            supplementary_gids: Vec::new(),
+        }
+    }
+
+    /// Build a credential from its resolved parts (a switch or an inherit).
+    #[must_use]
+    pub const fn new(uid: UserId, primary_gid: GroupId, supplementary_gids: Vec<GroupId>) -> Self {
+        Self {
+            uid,
+            primary_gid,
+            supplementary_gids,
+        }
+    }
+}
+
 /// The [`SpawnCtx`] the `spawn` syscall handler hands its architecture
 /// spawn producer (`plans/SPAWN.md` SP3).
 ///
@@ -3734,6 +3880,15 @@ where
     /// a fixed name for a boot principal. Derived kernel-side from resolved
     /// state at the call site, never from caller-supplied bytes.
     name: ProcName,
+    /// The kernel-attested credential (uid + group set) the child is admitted
+    /// under (`PREREQUISITES.md` P-C, spawn-as-user). Resolved kernel-side at
+    /// the call site — inherited from the spawning parent's own record, or
+    /// switched to a target user by a [`CapabilityId::SPAWN_AS_USER`] holder,
+    /// or the fixed system credential for a boot principal — never a
+    /// caller-supplied value. Snapshotted onto the child's capability record
+    /// so its later filesystem checks and its attested [`rustos_abi::Origin`]
+    /// run under an authoritative identity.
+    credential: SpawnCredential,
 }
 
 impl<'a, A> KernelSpawnCtx<'a, A>
@@ -3773,6 +3928,7 @@ where
         node_id: Option<u32>,
         proc_id: ProcId,
         name: ProcName,
+        credential: SpawnCredential,
     ) -> Self {
         Self {
             frames,
@@ -3789,6 +3945,7 @@ where
             node_id,
             proc_id,
             name,
+            credential,
         }
     }
 }
@@ -3888,10 +4045,21 @@ where
             .read()
             .caps_for(self.parent)
             .map_or(ProcId::KERNEL, TaskCapabilities::proc_id);
-        let record = TaskCapabilities::derive(sec_id, UserId(0), caps, caps, self.audit)
+        // Snapshot the child's kernel-attested credential onto its record:
+        // the owning uid plus the full group set the call site resolved
+        // (inherited from the parent, switched to a target user, or the fixed
+        // system credential). The credential is identity for the filesystem
+        // permission model and the attested `Origin`; capabilities are
+        // unchanged — `caps` is the manifest∩user-grant set the producer
+        // derived, passed as both bounds so the effective set is exactly it.
+        let record = TaskCapabilities::derive(sec_id, self.credential.uid, caps, caps, self.audit)
             .with_proc_id(self.proc_id)
             .with_parent_proc_id(parent_proc_id)
-            .with_name(self.name.clone());
+            .with_name(self.name.clone())
+            .with_credential(
+                self.credential.primary_gid,
+                self.credential.supplementary_gids.clone(),
+            );
         self.caps.write().insert(record);
 
         // Register the child's frozen address space + direct map under the
@@ -4162,6 +4330,21 @@ where
     #[must_use]
     pub fn with_users_db(mut self, users_db: &'static (dyn UsersDbSource + 'static)) -> Self {
         self.handlers = self.handlers.with_users_db(users_db);
+        self
+    }
+
+    /// Install the authoritative identity table the `spawn` handler resolves
+    /// a spawn-as-user switch against, consuming and returning `self`
+    /// (`PREREQUISITES.md` P-C).
+    ///
+    /// The hook-level mirror of [`KernelSyscallHandlers::with_identity`]:
+    /// called once by the boot path that unlocked the root volume, with the
+    /// **same** `&'static LateIdentity` the filesystem service resolves caller
+    /// groups against. A boot path with no root volume never calls it and a
+    /// spawn-as-user switch stays fail-closed (`NotImplemented`).
+    #[must_use]
+    pub const fn with_identity(mut self, identity: &'static LateIdentity) -> Self {
+        self.handlers = self.handlers.with_identity(identity);
         self
     }
 
@@ -7030,7 +7213,13 @@ mod tests {
 
         let before = sched.live_task_count();
         let pid = h
-            .spawn(&ctx, 0x1000, SPAWN_PATH.len(), CONSOLE_INHERIT)
+            .spawn(
+                &ctx,
+                0x1000,
+                SPAWN_PATH.len(),
+                CONSOLE_INHERIT,
+                SPAWN_UID_INHERIT,
+            )
             .expect("spawn succeeds");
         assert!(
             sched.live_task_count() > before,
@@ -7094,6 +7283,8 @@ mod tests {
             rustos_abi::ProcId::from_raw([0x11; 16]),
             // A fixed name so the admit path's name attestation is observable.
             ProcName::from_bytes_truncating(b"driverproc"),
+            // A driver-spawn admits under the fixed system credential.
+            SpawnCredential::system(),
         );
 
         let program = EmbeddedProgram {
@@ -7222,6 +7413,7 @@ mod tests {
             None,
             child_proc,
             ProcName::EMPTY,
+            SpawnCredential::system(),
         );
         let pid = RecordingSpawn::new()
             .spawn(&program, &ctx)
@@ -7258,6 +7450,7 @@ mod tests {
             None,
             rustos_abi::ProcId::from_raw([0x33; 16]),
             ProcName::EMPTY,
+            SpawnCredential::system(),
         );
         let orphan_pid = RecordingSpawn::new()
             .spawn(&program, &orphan_ctx)
@@ -7349,7 +7542,13 @@ mod tests {
         .with_spawn(programs, probe);
         // The probe records and returns `NotImplemented`; the recording, not
         // the result, is what proves the wiring.
-        let _ = h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), CONSOLE_INHERIT);
+        let _ = h.spawn(
+            &ctx,
+            0x1000,
+            SPAWN_PATH.len(),
+            CONSOLE_INHERIT,
+            SPAWN_UID_INHERIT,
+        );
         assert!(
             probe
                 .saw_static_allocator
@@ -7365,7 +7564,13 @@ mod tests {
         let h2 = spawn_handler(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs, probe,
         );
-        let _ = h2.spawn(&ctx, 0x1000, SPAWN_PATH.len(), CONSOLE_INHERIT);
+        let _ = h2.spawn(
+            &ctx,
+            0x1000,
+            SPAWN_PATH.len(),
+            CONSOLE_INHERIT,
+            SPAWN_UID_INHERIT,
+        );
         assert!(
             !probe
                 .saw_static_allocator
@@ -7423,7 +7628,13 @@ mod tests {
         );
 
         let pid = h
-            .spawn(&ctx, 0x1000, SPAWN_PATH.len(), CONSOLE_INHERIT)
+            .spawn(
+                &ctx,
+                0x1000,
+                SPAWN_PATH.len(),
+                CONSOLE_INHERIT,
+                SPAWN_UID_INHERIT,
+            )
             .expect("spawn succeeds");
         // The child carries the parent's tighter Processes ceiling and the
         // default policy for every other kind.
@@ -7480,7 +7691,13 @@ mod tests {
         .with_process_wait(wait_producer);
 
         let pid = h
-            .spawn(&ctx, 0x1000, SPAWN_PATH.len(), CONSOLE_INHERIT)
+            .spawn(
+                &ctx,
+                0x1000,
+                SPAWN_PATH.len(),
+                CONSOLE_INHERIT,
+                SPAWN_UID_INHERIT,
+            )
             .expect("spawn succeeds");
         // The child (its returned PID) was registered against parent 2.
         assert_eq!(*wait_producer.last_register.lock(), Some((2, pid)));
@@ -7531,7 +7748,13 @@ mod tests {
         .with_spawn(programs, &NULL_PROCESS_SPAWN);
 
         assert_eq!(
-            h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), CONSOLE_INHERIT),
+            h.spawn(
+                &ctx,
+                0x1000,
+                SPAWN_PATH.len(),
+                CONSOLE_INHERIT,
+                SPAWN_UID_INHERIT
+            ),
             Err(Errno::NotImplemented)
         );
     }
@@ -7561,7 +7784,13 @@ mod tests {
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
         assert_eq!(
-            h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), CONSOLE_INHERIT),
+            h.spawn(
+                &ctx,
+                0x1000,
+                SPAWN_PATH.len(),
+                CONSOLE_INHERIT,
+                SPAWN_UID_INHERIT
+            ),
             Err(Errno::NotImplemented)
         );
     }
@@ -7601,7 +7830,13 @@ mod tests {
         .with_spawn(&EMPTY_PROGRAM_REGISTRY, producer);
 
         assert_eq!(
-            h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), CONSOLE_INHERIT),
+            h.spawn(
+                &ctx,
+                0x1000,
+                SPAWN_PATH.len(),
+                CONSOLE_INHERIT,
+                SPAWN_UID_INHERIT
+            ),
             Err(Errno::NotFound)
         );
         assert!(producer.seen_rxe.lock().is_empty());
@@ -7645,7 +7880,13 @@ mod tests {
         .with_spawn(programs, producer);
 
         assert_eq!(
-            h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), CONSOLE_INHERIT),
+            h.spawn(
+                &ctx,
+                0x1000,
+                SPAWN_PATH.len(),
+                CONSOLE_INHERIT,
+                SPAWN_UID_INHERIT
+            ),
             Err(Errno::BadAddress)
         );
         assert!(producer.seen_rxe.lock().is_empty());
@@ -7681,11 +7922,17 @@ mod tests {
         .with_spawn(&EMPTY_PROGRAM_REGISTRY, producer);
 
         assert_eq!(
-            h.spawn(&ctx, 0x1000, 0, CONSOLE_INHERIT),
+            h.spawn(&ctx, 0x1000, 0, CONSOLE_INHERIT, SPAWN_UID_INHERIT),
             Err(Errno::NotFound)
         );
         assert_eq!(
-            h.spawn(&ctx, 0x1000, SPAWN_PATH_MAX + 1, CONSOLE_INHERIT),
+            h.spawn(
+                &ctx,
+                0x1000,
+                SPAWN_PATH_MAX + 1,
+                CONSOLE_INHERIT,
+                SPAWN_UID_INHERIT
+            ),
             Err(Errno::NotFound)
         );
         assert!(producer.seen_rxe.lock().is_empty());
@@ -8228,7 +8475,7 @@ mod tests {
         // An explicit, installed console: the child's table is the
         // standard shape on exactly that console.
         let pid = h
-            .spawn(&ctx, 0x1000, SPAWN_PATH.len(), 1)
+            .spawn(&ctx, 0x1000, SPAWN_PATH.len(), 1, SPAWN_UID_INHERIT)
             .expect("spawn succeeds");
         assert_eq!(
             aspaces.read().streams(SecTaskId(pid)),
@@ -8238,11 +8485,17 @@ mod tests {
         // An index with no installed console fails closed before any
         // state is touched.
         assert_eq!(
-            h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), 2),
+            h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), 2, SPAWN_UID_INHERIT),
             Err(Errno::NotFound)
         );
         assert_eq!(
-            h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), u64::from(u32::MAX)),
+            h.spawn(
+                &ctx,
+                0x1000,
+                SPAWN_PATH.len(),
+                u64::from(u32::MAX),
+                SPAWN_UID_INHERIT
+            ),
             Err(Errno::NotFound)
         );
     }
@@ -8302,7 +8555,13 @@ mod tests {
             .write()
             .set_streams(SecTaskId(2), DescriptorTable::standard_on(1));
         let pid = h
-            .spawn(&ctx, 0x1000, SPAWN_PATH.len(), CONSOLE_INHERIT)
+            .spawn(
+                &ctx,
+                0x1000,
+                SPAWN_PATH.len(),
+                CONSOLE_INHERIT,
+                SPAWN_UID_INHERIT,
+            )
             .expect("spawn succeeds");
         assert_eq!(
             aspaces.read().streams(SecTaskId(pid)),
@@ -8360,6 +8619,247 @@ mod tests {
         assert_eq!(
             d.dispatch(&ctx, SyscallNumber::SPAWN.as_u16(), args),
             Err(Errno::PermissionDenied)
+        );
+        assert!(producer.seen_rxe.lock().is_empty());
+    }
+
+    /// The default `spawn` (`SPAWN_UID_INHERIT`) snapshots the spawning
+    /// caller's **own** attested credential onto the child — uid, primary
+    /// gid, and supplementary groups — never a caller-supplied value, and
+    /// needs no `CAP_SPAWN_AS_USER` (a child runs as the same user as its
+    /// parent).
+    #[test]
+    fn spawn_inherit_snapshots_the_callers_credential() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, SPAWN_PATH);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        // The caller holds `PROC_SPAWN` (but not `SPAWN_AS_USER`) and carries
+        // an attested credential (uid 1000, primary gid 50, supplementary
+        // 60/70).
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink)
+            .with_credential(GroupId(50), alloc::vec![GroupId(60), GroupId(70)]);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let programs: &'static ProgramRegistry =
+            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+                EmbeddedProgram {
+                    path: SPAWN_PATH,
+                    rxe: SPAWN_RXE,
+                    caps: &[],
+                    args: &[],
+                },
+            ])))));
+        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
+        let h = spawn_handler(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
+            producer,
+        );
+        let pid = h
+            .spawn(
+                &ctx,
+                0x1000,
+                SPAWN_PATH.len(),
+                CONSOLE_INHERIT,
+                SPAWN_UID_INHERIT,
+            )
+            .expect("inherit spawn succeeds");
+        let guard = table.read();
+        let child = guard.caps_for(SecTaskId(pid)).expect("child record");
+        assert_eq!(child.owner(), UserId(1000));
+        assert_eq!(child.primary_gid(), GroupId(50));
+        assert_eq!(child.supplementary_gids(), &[GroupId(60), GroupId(70)]);
+    }
+
+    /// A spawn-as-user *switch* (a concrete `target_uid`) from a caller that
+    /// does **not** hold `CAP_SPAWN_AS_USER` fails closed with
+    /// `PermissionDenied` — before any child is built (the producer is never
+    /// reached). Privilege only ever switches user through a holder of the
+    /// capability.
+    #[test]
+    fn spawn_as_user_without_capability_is_denied() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, SPAWN_PATH);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        // Holds `PROC_SPAWN` (so the dispatcher would admit the call) but not
+        // `SPAWN_AS_USER`.
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let programs: &'static ProgramRegistry =
+            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+                EmbeddedProgram {
+                    path: SPAWN_PATH,
+                    rxe: SPAWN_RXE,
+                    caps: &[],
+                    args: &[],
+                },
+            ])))));
+        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
+        let h = spawn_handler(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
+            producer,
+        );
+        assert_eq!(
+            h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), CONSOLE_INHERIT, 2000),
+            Err(Errno::PermissionDenied)
+        );
+        // Fail closed before building: the producer was never reached.
+        assert!(producer.seen_rxe.lock().is_empty());
+    }
+
+    /// A spawn-as-user switch by a `CAP_SPAWN_AS_USER` holder resolves the
+    /// target user's **full** credential (uid, primary gid, supplementary
+    /// groups) from the authoritative identity table and snapshots it onto
+    /// the child — the kernel resolves the identity, the caller only chooses
+    /// which uid.
+    #[test]
+    fn spawn_as_user_switches_to_the_resolved_credential() {
+        use rustos_kernel_sec::{GroupRecord, IdentityTableBuilder, UserRecord};
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, SPAWN_PATH);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let caps = make_caps_record(
+            2,
+            &[CapabilityId::PROC_SPAWN, CapabilityId::SPAWN_AS_USER],
+            sink,
+        );
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        // An identity table describing the target user 2000: primary gid 88,
+        // supplementary group 99.
+        let mut builder = IdentityTableBuilder::new();
+        builder.push_group(GroupRecord { gid: GroupId(88) });
+        builder.push_group(GroupRecord { gid: GroupId(99) });
+        builder.push_user(UserRecord {
+            uid: UserId(2000),
+            primary_gid: GroupId(88),
+            supplementary_gids: alloc::vec![GroupId(99)],
+            capability_grants: CapabilitySet::empty(),
+        });
+        let id_table = builder.verify(sink).expect("valid identity table");
+        let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
+        identity.install(id_table).expect("identity install");
+
+        let programs: &'static ProgramRegistry =
+            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+                EmbeddedProgram {
+                    path: SPAWN_PATH,
+                    rxe: SPAWN_RXE,
+                    caps: &[],
+                    args: &[],
+                },
+            ])))));
+        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
+        let h = spawn_handler(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
+            producer,
+        )
+        .with_identity(identity);
+        let pid = h
+            .spawn(&ctx, 0x1000, SPAWN_PATH.len(), CONSOLE_INHERIT, 2000)
+            .expect("switch spawn succeeds");
+        let guard = table.read();
+        let child = guard.caps_for(SecTaskId(pid)).expect("child record");
+        // The child runs as the *target* user, not the caller's uid 1000.
+        assert_eq!(child.owner(), UserId(2000));
+        assert_eq!(child.primary_gid(), GroupId(88));
+        assert_eq!(child.supplementary_gids(), &[GroupId(99)]);
+    }
+
+    /// A spawn-as-user switch by a capable caller against an **uninstalled**
+    /// identity table fails closed with `NotImplemented` — a switch before
+    /// the root is unlocked resolves no credential rather than inventing one.
+    #[test]
+    fn spawn_as_user_without_identity_table_fails_closed() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, SPAWN_PATH);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let caps = make_caps_record(
+            2,
+            &[CapabilityId::PROC_SPAWN, CapabilityId::SPAWN_AS_USER],
+            sink,
+        );
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let programs: &'static ProgramRegistry =
+            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+                EmbeddedProgram {
+                    path: SPAWN_PATH,
+                    rxe: SPAWN_RXE,
+                    caps: &[],
+                    args: &[],
+                },
+            ])))));
+        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
+        // No `.with_identity`, so the handler holds the fail-closed
+        // `NULL_IDENTITY`.
+        let h = spawn_handler(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
+            producer,
+        );
+        assert_eq!(
+            h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), CONSOLE_INHERIT, 2000),
+            Err(Errno::NotImplemented)
         );
         assert!(producer.seen_rxe.lock().is_empty());
     }
@@ -12582,9 +13082,11 @@ mod tests {
         );
 
         // Before the server receives the call, the ticket is not in service,
-        // so the origin is not yet readable (fail closed).
+        // so the origin is not yet readable (fail closed). The buffer is
+        // large enough for a whole origin so the in-service check is what
+        // fires, not the size check.
         assert_eq!(
-            h.call_peer_origin(&ctx, id, ticket.0, 0x1000, 64),
+            h.call_peer_origin(&ctx, id, ticket.0, 0x1000, ORIGIN_WIRE_LEN),
             Err(Errno::NotFound)
         );
 
@@ -12612,13 +13114,13 @@ mod tests {
 
         // An unknown ticket fails closed.
         assert_eq!(
-            h.call_peer_origin(&ctx, id, 0xDEAD, 0x1000, 64),
+            h.call_peer_origin(&ctx, id, 0xDEAD, 0x1000, ORIGIN_WIRE_LEN),
             Err(Errno::NotFound)
         );
 
         // The happy path writes the attested origin to page 1.
         let wrote = h
-            .call_peer_origin(&ctx, id, ticket.0, 0x1000, 64)
+            .call_peer_origin(&ctx, id, ticket.0, 0x1000, ORIGIN_WIRE_LEN)
             .expect("origin written");
         assert_eq!(wrote, ORIGIN_WIRE_LEN as u64);
 

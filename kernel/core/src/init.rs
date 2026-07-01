@@ -48,7 +48,7 @@ use crate::dispatch_slot::AlreadyInstalledError;
 use crate::procwait::{KernelProcessWait, ProcessWait};
 use crate::random::{BootReserve, RandomReserve};
 use crate::spawn::{InitSpawnCtx, ProcessSpawn};
-use crate::syscalls::{KernelDispatchHook, KernelSpawnCtx};
+use crate::syscalls::{KernelDispatchHook, KernelSpawnCtx, SpawnCredential};
 
 /// Ordered identifier of every subsystem init phase orchestrated by
 /// [`kernel_main`].
@@ -908,6 +908,12 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
             // kernel-side, so it attests no name rather than trusting the
             // spawner's argv as one (fail closed to the empty name).
             ProcName::EMPTY,
+            // A boot-autoloaded driver is a kernel-trusted system principal:
+            // admit it under the fixed system credential (uid 0 / gid 0), the
+            // spawn-as-user counterpart of the `SecTaskId(0)` supervisor
+            // identity above. uid 0 carries no ambient authority; the driver's
+            // powers flow only from `caps`.
+            SpawnCredential::system(),
         );
         spawn.spawn_with(rxe, &ctx, caps, args)
     }
@@ -1051,6 +1057,7 @@ fn run_phases<A: KernelArch>(
         users_db,
         hw_tree,
         filesystem,
+        spawn_identity,
         ..
     } = boot;
 
@@ -1271,6 +1278,12 @@ fn run_phases<A: KernelArch>(
         // default `NULL_FILESYSTEM` keeps every `fs_*` syscall fail-closed
         // when no volume was mounted.
         .with_filesystem(filesystem)
+        // Resolve a spawn-as-user switch against the authoritative identity
+        // table the boot path installed (`PREREQUISITES.md` P-C) — the same
+        // table the filesystem service resolves caller groups against; the
+        // default `NULL_IDENTITY` keeps a switch fail-closed when no root was
+        // unlocked, and the default `spawn` (inherit) never consults it.
+        .with_identity(spawn_identity)
         // Serve `wall_time_get` / `wall_time_set` through the production
         // wall clock (`PREREQUISITES.md` P-D). It boots `Unset`; a trusted
         // time source drives it via `wall_time_set` under `CAP_TIME_SET`.

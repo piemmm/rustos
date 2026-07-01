@@ -58,7 +58,8 @@ use rustos_abi::input::KeyInput;
 use rustos_abi::waitset::{WaitSetOp, WaitSourceKind};
 use rustos_abi::{
     BootId, FileStat, HwNode, LimitKind, MapFlags, OpenFlags, ResourceLimit, SyscallNumber, Time64,
-    WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, STDERR, STDIN, STDINFO, STDOUT,
+    WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, SPAWN_UID_INHERIT, STDERR,
+    STDIN, STDINFO, STDOUT,
 };
 use rustos_abi_trap::raw_syscall;
 
@@ -725,19 +726,57 @@ impl rustos_abi::Delay for ClockDelay {
 /// the caller decides how to react to a failed spawn — it adds no authority
 /// and hides no error.
 #[must_use]
-#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 spawn-result encoding (PID ≥ 0, else -errno).
 pub fn spawn(path: &[u8]) -> i64 {
+    // Inherit both the caller's console and its attested credential: a
+    // spawned session member runs as the same user, on the same console, as
+    // its parent.
+    spawn_raw(path, CONSOLE_INHERIT, SPAWN_UID_INHERIT)
+}
+
+/// The shared `SyscallNumber::SPAWN` trap the [`spawn`], [`spawn_at`], and
+/// [`spawn_as`] wrappers issue: one raw call site so the argument layout is
+/// defined once (`console` in slot 2, `target_uid` in slot 3).
+///
+/// `console` is [`rustos_abi::CONSOLE_INHERIT`] or an installed console index;
+/// `target_uid` is [`rustos_abi::SPAWN_UID_INHERIT`] (start under the caller's
+/// own credential) or a concrete uid to switch to (which the kernel gates on
+/// `CAP_SPAWN_AS_USER`). The kernel encodes the result as a signed register:
+/// a non-negative value is the new PID, a negative value is `-errno`.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 spawn-result encoding (PID ≥ 0, else -errno).
+fn spawn_raw(path: &[u8], console: u64, target_uid: u32) -> i64 {
     let ptr = path.as_ptr() as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
-    // `(path, len)` against the caller's address space before touching it. `path` is a live shared `&[u8]` for the duration
-    // of the call, so the `(ptr, len)` pair denotes readable memory.
+    // `(path, len)` against the caller's address space before touching it.
+    // `path` is a live shared `&[u8]` for the duration of the call, so the
+    // `(ptr, len)` pair denotes readable memory.
     let ret = unsafe {
         raw_syscall(
             NUM_SPAWN,
-            [ptr, path.len() as u64, CONSOLE_INHERIT, 0, 0, 0],
+            [ptr, path.len() as u64, console, u64::from(target_uid), 0, 0],
         )
     };
     ret as i64
+}
+
+/// Spawn the embedded program at `path` on the installed console `console`
+/// **as the user `target_uid`** (`SyscallNumber::SPAWN`,
+/// `PREREQUISITES.md` P-C, spawn-as-user).
+///
+/// The credential-switching form: the kernel resolves `target_uid`'s full
+/// credential (uid, primary gid, supplementary groups) from the authoritative
+/// identity table and drops the child into it, so the child runs under an
+/// authoritative identity the caller chose but never fabricated. This requires
+/// the caller to hold `CAP_SPAWN_AS_USER` and fails closed with `-errno`
+/// (`PermissionDenied`) otherwise, or when `target_uid` names no account. Its
+/// intended caller is `login`, which authenticates a user and then starts
+/// their shell under the authenticated uid. Pass
+/// [`rustos_abi::CONSOLE_INHERIT`] for `console` to keep the child on the
+/// caller's own console. A running process can never change its *own*
+/// identity (there is no setuid-self).
+#[must_use]
+pub fn spawn_as(path: &[u8], console: u64, target_uid: u32) -> i64 {
+    spawn_raw(path, console, target_uid)
 }
 
 /// Spawn the embedded program registered under the absolute `path` with
@@ -751,20 +790,11 @@ pub fn spawn(path: &[u8]) -> i64 {
 /// session per discovered text console — the video console and the UART
 /// are separate session contexts.
 #[must_use]
-#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 spawn-result encoding (PID ≥ 0, else -errno).
 pub fn spawn_at(path: &[u8], console: u32) -> i64 {
-    let ptr = path.as_ptr() as usize as u64;
-    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
-    // `(path, len)` against the caller's address space and `console`
-    // against the installed console list before touching any state. `path` is a live shared `&[u8]` for the duration
-    // of the call, so the `(ptr, len)` pair denotes readable memory.
-    let ret = unsafe {
-        raw_syscall(
-            NUM_SPAWN,
-            [ptr, path.len() as u64, u64::from(console), 0, 0, 0],
-        )
-    };
-    ret as i64
+    // A specific console, but the caller's own credential (no user switch):
+    // PID 1 launching one login per console runs each as the same principal
+    // it runs as.
+    spawn_raw(path, u64::from(console), SPAWN_UID_INHERIT)
 }
 
 /// Report how many system text consoles are installed
@@ -2439,9 +2469,27 @@ mod tests {
         assert_eq!(number, NUM_SPAWN);
         assert_eq!(args[0], path.as_ptr() as usize as u64);
         assert_eq!(args[1], path.len() as u64);
-        // The plain `spawn` keeps the child on the caller's own console.
+        // The plain `spawn` keeps the child on the caller's own console and
+        // under the caller's own credential (both inherit sentinels).
         assert_eq!(args[2], CONSOLE_INHERIT);
-        assert_eq!(&args[3..], &[0, 0, 0]);
+        assert_eq!(args[3], u64::from(SPAWN_UID_INHERIT));
+        assert_eq!(&args[4..], &[0, 0]);
+    }
+
+    #[test]
+    fn spawn_as_marshals_the_console_and_target_uid() {
+        let path = *b"/Apps/Shell.app/Run";
+        let (number, args) = capture(9, || {
+            // login starting a user's shell on the inherited console under a
+            // switched-to uid.
+            assert_eq!(spawn_as(&path, CONSOLE_INHERIT, 1000), 9);
+        });
+        assert_eq!(number, NUM_SPAWN);
+        assert_eq!(args[0], path.as_ptr() as usize as u64);
+        assert_eq!(args[1], path.len() as u64);
+        assert_eq!(args[2], CONSOLE_INHERIT);
+        assert_eq!(args[3], 1000);
+        assert_eq!(&args[4..], &[0, 0]);
     }
 
     #[test]
@@ -2454,7 +2502,9 @@ mod tests {
         assert_eq!(args[0], path.as_ptr() as usize as u64);
         assert_eq!(args[1], path.len() as u64);
         assert_eq!(args[2], 1);
-        assert_eq!(&args[3..], &[0, 0, 0]);
+        // `spawn_at` switches no user: the caller's own credential (inherit).
+        assert_eq!(args[3], u64::from(SPAWN_UID_INHERIT));
+        assert_eq!(&args[4..], &[0, 0]);
     }
 
     #[test]

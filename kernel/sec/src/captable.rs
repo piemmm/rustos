@@ -21,6 +21,7 @@
 extern crate alloc;
 
 use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
 
 use rustos_abi::{CapabilitySummary, Errno, Origin, ProcId, TrustDomain};
 use rustos_caps::{CapabilitySet, CapabilityToken, RevocationEpoch};
@@ -28,7 +29,7 @@ use rustos_crypto::Ed25519PublicKey;
 use rustos_log::{Field, Sink};
 
 use crate::audit::{record, AuditEvent};
-use crate::identity::{format_hex_u64, format_i32, UserId};
+use crate::identity::{format_hex_u64, format_i32, GroupId, UserId};
 
 /// Numeric task identifier carried by audit records.
 ///
@@ -121,6 +122,24 @@ impl Default for ProcName {
 pub struct TaskCapabilities {
     task: TaskId,
     owner: UserId,
+    /// Primary group of the task's kernel-attested credential.
+    ///
+    /// Snapshotted at process creation from the authoritative identity table
+    /// (a switch to a target user) or inherited from the spawning parent's own
+    /// record; never derived from caller-supplied bytes. Defaults to
+    /// [`GroupId::default`] (gid 0, the system group) for a record built
+    /// before a credential is attached (kernel principals, a plain
+    /// [`Self::derive`]). It is identity used by the filesystem permission
+    /// model and reported in the attested [`Origin`]; it confers no capability
+    /// (capabilities flow only through `effective`).
+    primary_gid: GroupId,
+    /// Supplementary groups of the task's kernel-attested credential.
+    ///
+    /// Bounded by the identity table's verifier when the credential is
+    /// resolved, so a task can never carry an unbounded set. Snapshotted or
+    /// inherited exactly like [`primary_gid`](Self::primary_gid); empty for a
+    /// record with no attached credential.
+    supplementary_gids: Vec<GroupId>,
     /// Maximum the owner's user grant ever allows on this task. Acts as
     /// the *upper bound* for every subsequent operation; nothing in this
     /// module can grow `effective` past this set.
@@ -204,6 +223,8 @@ impl TaskCapabilities {
         Self {
             task,
             owner,
+            primary_gid: GroupId::default(),
+            supplementary_gids: Vec::new(),
             user_grant,
             manifest_request,
             effective,
@@ -211,6 +232,41 @@ impl TaskCapabilities {
             parent_proc_id: ProcId::KERNEL,
             name: ProcName::EMPTY,
         }
+    }
+
+    /// Attach the task's kernel-attested group credential (primary group and
+    /// supplementary groups) to this record.
+    ///
+    /// Consumed and returned so the process-admit path can set the credential
+    /// inline before inserting the record into the [`CapTable`], mirroring
+    /// [`Self::with_proc_id`]. Only the kernel's process-admit sites call it,
+    /// passing groups resolved from the authoritative identity table (a
+    /// spawn-as-user switch) or copied from the spawning parent's own attested
+    /// record (inherit) — never a caller-supplied value. The groups are
+    /// identity for the filesystem permission model; they confer no
+    /// capability. A record with no attached credential keeps gid 0 and an
+    /// empty supplementary set.
+    #[must_use]
+    pub fn with_credential(
+        mut self,
+        primary_gid: GroupId,
+        supplementary_gids: Vec<GroupId>,
+    ) -> Self {
+        self.primary_gid = primary_gid;
+        self.supplementary_gids = supplementary_gids;
+        self
+    }
+
+    /// The primary group of the task's attested credential.
+    #[must_use]
+    pub fn primary_gid(&self) -> GroupId {
+        self.primary_gid
+    }
+
+    /// The supplementary groups of the task's attested credential.
+    #[must_use]
+    pub fn supplementary_gids(&self) -> &[GroupId] {
+        &self.supplementary_gids
     }
 
     /// Attach a minted process-instance identity to this record.
@@ -307,6 +363,7 @@ impl TaskCapabilities {
         Origin::new(
             trust_domain,
             self.owner.0,
+            self.primary_gid.0,
             self.task.0,
             self.proc_id,
             capabilities,
@@ -710,6 +767,36 @@ mod tests {
         // A trailing lone lead byte within the cap is dropped, not stored.
         let truncated = ProcName::from_bytes_truncating(&[b'h', b'i', 0xC3]);
         assert_eq!(truncated.as_str(), "hi");
+    }
+
+    #[test]
+    fn credential_defaults_empty_and_with_credential_attaches() {
+        let grant = caps_of(&[CapabilityId::FS_MOUNT]);
+        let sink = RecordingSink::new();
+        let base = TaskCapabilities::derive(TaskId(13), UserId(1000), grant, grant, &sink);
+        // A freshly-derived record carries the system group and no
+        // supplementary groups until a credential is attached.
+        assert_eq!(base.primary_gid(), GroupId::default());
+        assert!(base.supplementary_gids().is_empty());
+
+        let cred = base
+            .clone()
+            .with_credential(GroupId(50), alloc::vec![GroupId(60), GroupId(70)]);
+        assert_eq!(cred.primary_gid(), GroupId(50));
+        assert_eq!(cred.supplementary_gids(), &[GroupId(60), GroupId(70)]);
+        // Attaching the credential changes nothing about the capability set.
+        assert!(cred.has(CapabilityId::FS_MOUNT));
+    }
+
+    #[test]
+    fn attest_origin_carries_the_attested_primary_gid() {
+        use rustos_abi::ProcId;
+        let grant = caps_of(&[CapabilityId::FS_MOUNT]);
+        let sink = RecordingSink::new();
+        let proc = TaskCapabilities::derive(TaskId(44), UserId(1000), grant, grant, &sink)
+            .with_proc_id(ProcId::from_raw([0x5A; 16]))
+            .with_credential(GroupId(77), alloc::vec![]);
+        assert_eq!(proc.attest_origin().gid(), 77);
     }
 
     #[test]

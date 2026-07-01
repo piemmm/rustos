@@ -83,6 +83,43 @@ ids). One `audit_with_identity` helper in `kernel/syscall` emits this
 attested identity prefix, so the audit sites cannot drift in which fields
 they record. The attestation is the kernel's, never the caller's.
 
+### Group credential (`primary_gid` / supplementary groups) and spawn-as-user
+
+Beyond the owning `uid` the record has always carried, each
+`TaskCapabilities` now also carries the task's **primary group** and
+**supplementary groups** — the rest of its POSIX-style credential. Together
+`(uid, primary gid, supplementary gids)` is the kernel-attested identity the
+filesystem permission model checks against and the attested
+`rustos_abi::Origin` reports (the `Origin` gained a `gid` field alongside its
+`uid`). The groups confer **no** capability — authority still flows only
+through the effective set — they are identity for the per-inode
+owner/mode/ACL checks.
+
+The credential is fixed at process creation and resolved one of three ways,
+all kernel-side (never a caller-supplied value):
+
+* **inherit** — the default `spawn` (`SPAWN_UID_INHERIT`): the child is
+  admitted under a snapshot of the spawning parent's *own* attested
+  credential, so a child runs as the same user as its parent. No capability
+  is required to run a child as oneself.
+* **switch** — a concrete `target_uid` argument: the kernel resolves that
+  user's full credential from the authoritative `IdentityTable` (the same
+  set-once table the filesystem service resolves caller groups against) and
+  drops the child into it. This is the **only** way a task's credential
+  differs from its parent's, and it requires the caller to hold the new
+  `CAP_SPAWN_AS_USER` capability; it fails closed with `PermissionDenied`
+  without it, and `NotImplemented` / `PermissionDenied` when the target is
+  unresolvable. Its sole holder is the `login` session manager, which starts
+  an authenticated user's shell under that user. A running process can never
+  mutate its *own* identity — there is no setuid-self.
+* **system** — the kernel's own bootstrap principals (PID 1, the
+  storage-floor drivers) are admitted under the fixed system credential
+  (uid 0 / gid 0). uid 0 carries no ambient authority.
+
+The credential is snapshotted onto the record by the process-admit path
+(`with_credential`), exactly as `proc_id` / `parent_proc_id` / `comm` are, so
+it is authoritative and immune to caller spoofing.
+
 ## Per-task registry
 
 `CapTable` owns a flat `BTreeMap<TaskId, TaskCapabilities>`. It carries

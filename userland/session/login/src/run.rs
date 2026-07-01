@@ -45,7 +45,7 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
-    use rustos_abi::Errno;
+    use rustos_abi::{Errno, CONSOLE_INHERIT};
     use rustos_login::{
         supervise, AuthenticatedUser, Authenticator, DbLoad, Login, LoginConfig, LoginError,
         Prompt, SessionKind, SessionLauncher, SessionOutcome,
@@ -163,10 +163,19 @@ mod program {
             .unwrap_or(Errno::NotImplemented)
     }
 
-    /// Launches the authenticated record's shell of choice through the
-    /// `spawn` syscall and blocks in `wait` until the session ends
-    /// (`plans/SPAWN.md` SP3/SP6). The child receives only its registered
-    /// program grant — spawning here never widens authority.
+    /// Launches the authenticated record's shell of choice **as the
+    /// authenticated user** through the `spawn` syscall and blocks in `wait`
+    /// until the session ends (`plans/SPAWN.md` SP3/SP6; `PREREQUISITES.md`
+    /// P-C spawn-as-user). Login authenticated the account, so it drops the
+    /// shell into that user's kernel-attested credential (uid, primary gid,
+    /// supplementary groups) via `spawn_as` — privilege only ever switches
+    /// user at process creation, never by a running process mutating its own
+    /// identity (no setuid-self). The kernel resolves the full credential
+    /// from the authoritative identity table, so login chooses *which* user
+    /// but never fabricates the identity; it holds `CAP_SPAWN_AS_USER`, and
+    /// the shell still receives only its own registered program grant
+    /// intersected with that user's ceiling. The child stays on login's own
+    /// console (`CONSOLE_INHERIT`).
     struct RtLauncher;
 
     impl SessionLauncher for RtLauncher {
@@ -175,7 +184,7 @@ mod program {
             user: &AuthenticatedUser,
             kind: SessionKind,
         ) -> Result<SessionOutcome, Errno> {
-            let ret = rustos_rt::spawn(user.shell.as_bytes());
+            let ret = rustos_rt::spawn_as(user.shell.as_bytes(), CONSOLE_INHERIT, user.uid.0);
             if ret < 0 {
                 return Err(errno_from(ret));
             }

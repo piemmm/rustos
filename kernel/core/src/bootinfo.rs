@@ -34,7 +34,7 @@ use rustos_log::{Level, Sink};
 
 use crate::console::{ConsoleDevice, NO_CONSOLES};
 use crate::dispatch_slot::DispatchCallbackSlot;
-use crate::fs::{FilesystemService, NULL_FILESYSTEM};
+use crate::fs::{FilesystemService, LateIdentity, NULL_FILESYSTEM};
 use crate::hwtree::{HwTreeSource, NULL_HW_TREE};
 use crate::input_focus::{InputFocus, NULL_INPUT_FOCUS};
 use crate::spawn::{
@@ -684,6 +684,25 @@ where
     /// exactly like the users database.
     pub filesystem: &'static (dyn FilesystemService + 'static),
 
+    /// The authoritative identity table the `spawn` handler resolves a
+    /// spawn-as-user switch against (`PREREQUISITES.md` P-C).
+    ///
+    /// Distinct from the build-time [`identity`](Self::identity)
+    /// ([`IdentityTableBuilder`]) verified during the `sec` phase: this is the
+    /// **runtime** cell the encrypted-root unlock publishes the on-disk
+    /// accounts into, the *same* `&'static LateIdentity` the filesystem
+    /// service resolves caller groups against — one authoritative table, no
+    /// second copy. Defaults to [`crate::syscalls::NULL_IDENTITY`], whose
+    /// [`LateIdentity::resolve_credential`] fails closed with
+    /// [`rustos_abi::Errno::NotImplemented`]: a boot path with no unlocked
+    /// root leaves this default and a spawn-as-user switch is refused. A boot
+    /// path that unlocked the root installs it through
+    /// [`Self::with_spawn_identity`]; `kernel_main` threads it into the
+    /// production dispatch hook. The default `spawn` (inherit) never consults
+    /// it. Held `'static` because the table lives for the running kernel's
+    /// lifetime.
+    pub spawn_identity: &'static LateIdentity,
+
     // Holds the lifetime parameter (covers `command_line`). The PhantomData
     // is invariant in `'a` so callers cannot accidentally extend the
     // borrow.
@@ -760,6 +779,11 @@ where
             // (`PREREQUISITES.md` P-A): every `fs_*` syscall fails closed
             // through `NULL_FILESYSTEM`.
             filesystem: &NULL_FILESYSTEM,
+            // Identity table unwired until a boot path unlocks the root and
+            // installs it through `with_spawn_identity` (`PREREQUISITES.md`
+            // P-C): a spawn-as-user switch fails closed through
+            // `NULL_IDENTITY`.
+            spawn_identity: &crate::syscalls::NULL_IDENTITY,
             _marker: core::marker::PhantomData,
         }
     }
@@ -892,6 +916,24 @@ where
         filesystem: &'static (dyn FilesystemService + 'static),
     ) -> Self {
         self.filesystem = filesystem;
+        self
+    }
+
+    /// Install the authoritative identity table the `spawn` handler resolves
+    /// a spawn-as-user switch against, consuming and returning `self`
+    /// (`PREREQUISITES.md` P-C).
+    ///
+    /// Called by the boot path that unlocked the encrypted root, handing the
+    /// **same** `&'static LateIdentity` the filesystem service resolves caller
+    /// groups against (one authoritative table, no second copy). Until this is
+    /// called the handover holds [`crate::syscalls::NULL_IDENTITY`] and a
+    /// spawn-as-user switch fails closed with
+    /// [`rustos_abi::Errno::NotImplemented`]; the default `spawn` (inherit)
+    /// never consults it. The table must be `'static`: it lives for the
+    /// lifetime of the running kernel, exactly like the filesystem service.
+    #[must_use]
+    pub const fn with_spawn_identity(mut self, spawn_identity: &'static LateIdentity) -> Self {
+        self.spawn_identity = spawn_identity;
         self
     }
 

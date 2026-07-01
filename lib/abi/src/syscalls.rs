@@ -334,7 +334,7 @@ pub const SYSCALLS: &[SyscallSpec] = &[
     SyscallSpec {
         number: SyscallNumber::SPAWN,
         name: "spawn",
-        arg_count: 3,
+        arg_count: 4,
         args: [
             AbiType::UserPtr,
             AbiType::Len,
@@ -345,7 +345,13 @@ pub const SYSCALLS: &[SyscallSpec] = &[
             // child's stream backing). `U64` so the sentinel is
             // representable; the handler validates the range.
             AbiType::U64,
-            AbiType::Unit,
+            // The target user: `SPAWN_UID_INHERIT` (the all-ones sentinel)
+            // starts the child under the caller's own attested credential,
+            // any other value asks the kernel to resolve that user's full
+            // credential and switch the child into it — which requires the
+            // caller to hold `CAP_SPAWN_AS_USER` and fails closed otherwise
+            // (spawn-as-user, never setuid-self).
+            AbiType::U32,
             AbiType::Unit,
             AbiType::Unit,
         ],

@@ -919,7 +919,14 @@ fn enter_kernel_core(
     // `/System` window (`crate::system_mount::install_system_mount`) and the
     // encrypted-root unlock publishes the identity table, so wiring the hook
     // here changes no boot behaviour until those installs land.
-    .with_filesystem(&crate::system_mount::FS_SERVICE);
+    .with_filesystem(&crate::system_mount::FS_SERVICE)
+    // Resolve a spawn-as-user switch (`PREREQUISITES.md` P-C) against the
+    // same set-once identity cell the filesystem service resolves caller
+    // groups against and the root-unlock kthread publishes the on-disk
+    // accounts into. Until that install a switch fails closed; the default
+    // `spawn` (inherit) never consults it, so wiring the hook here changes no
+    // boot behaviour until the unlock lands.
+    .with_spawn_identity(&crate::root_mount::LATE_IDENTITY);
     if boot_info.validate().is_err() {
         halt_current_cpu()
     }

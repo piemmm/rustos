@@ -346,6 +346,24 @@ impl CapabilityId {
     /// principals (login, the shell, services, apps) hold it; a sandboxed
     /// parser that should reach no filesystem does not.
     pub const FS_ACCESS: Self = Self(30);
+    /// Spawn a new process **as a different user** — drop the child into a
+    /// target `(uid, gid, supplementary groups)` credential resolved by the
+    /// kernel from the authoritative identity table, rather than inheriting
+    /// the caller's own credential.
+    ///
+    /// This gates the one privileged transition in the spawn-as-user model:
+    /// a running process can never mutate its own identity (there is no
+    /// setuid-self), so the *only* way a task's credential changes is at
+    /// process creation, by a holder of this capability asking the kernel to
+    /// start a child under a defined user. Absent it, `spawn` can only ever
+    /// hand the child the caller's own inherited credential — never elevate
+    /// or switch user (no ambient authority; fail closed). Its sole intended
+    /// holder is the privileged session manager (`login`), which authenticates
+    /// a user and then starts their shell under the authenticated identity.
+    /// The kernel resolves the full credential from the identity table it
+    /// vouches for, so the caller chooses *which* user but never fabricates
+    /// the groups or the identity itself.
+    pub const SPAWN_AS_USER: Self = Self(31);
 
     /// Every capability assigned a canonical name in `abi-v1`, paired with
     /// that name.
@@ -387,6 +405,7 @@ impl CapabilityId {
         (Self::IPC_ENDPOINT, "CAP_IPC_ENDPOINT"),
         (Self::SHM, "CAP_SHM"),
         (Self::FS_ACCESS, "CAP_FS_ACCESS"),
+        (Self::SPAWN_AS_USER, "CAP_SPAWN_AS_USER"),
     ];
 
     /// The canonical `CAP_*` name of this capability, or [`None`] for an
@@ -511,6 +530,7 @@ mod tests {
         assert_eq!(CapabilityId::IPC_ENDPOINT.as_u16(), 28);
         assert_eq!(CapabilityId::SHM.as_u16(), 29);
         assert_eq!(CapabilityId::FS_ACCESS.as_u16(), 30);
+        assert_eq!(CapabilityId::SPAWN_AS_USER.as_u16(), 31);
     }
 
     #[test]
@@ -542,9 +562,9 @@ mod tests {
 
     #[test]
     fn every_assigned_id_has_a_name() {
-        // Capabilities 1..=30 are assigned in abi-v1; each must carry a
+        // Capabilities 1..=31 are assigned in abi-v1; each must carry a
         // canonical name so `getcap`/`setcap` can render and accept it.
-        for raw in 1..=30 {
+        for raw in 1..=31 {
             let cap = CapabilityId::from_raw(raw).expect("in range");
             assert!(cap.name().is_some(), "capability {raw} has no name");
         }

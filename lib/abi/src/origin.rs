@@ -220,7 +220,7 @@ impl CapabilityQuery for CapabilitySummary {
 }
 
 /// Length, in bytes, of the [`Origin`] wire encoding.
-pub const ORIGIN_WIRE_LEN: usize = 1 + 4 + 8 + PROC_ID_LEN + CAPABILITY_SUMMARY_LEN;
+pub const ORIGIN_WIRE_LEN: usize = 1 + 4 + 4 + 8 + PROC_ID_LEN + CAPABILITY_SUMMARY_LEN;
 
 /// The kernel-attested identity of a principal that performed an action.
 ///
@@ -233,20 +233,23 @@ pub const ORIGIN_WIRE_LEN: usize = 1 + 4 + 8 + PROC_ID_LEN + CAPABILITY_SUMMARY_
 ///
 /// # Fields
 ///
-/// The record carries only what the kernel can attest correctly today: the
-/// [`trust_domain`](Self::trust_domain), the owning [`uid`](Self::uid), the
-/// reusable numeric [`pid`](Self::pid), the unforgeable
-/// [`proc_id`](Self::proc_id) that distinguishes process instances across PID
-/// reuse, and a non-secret [`capabilities`](Self::capabilities) summary.
-/// Group id, parent pid, start time, and executable identity are deliberately
-/// absent: the kernel does not yet record them per task, and a field without a
-/// live producer would be a speculative surface. They are added in place when
-/// their producer exists (the ABI is not yet frozen), never as a parallel
-/// versioned type.
+/// The record carries what the kernel can attest correctly today: the
+/// [`trust_domain`](Self::trust_domain), the owning [`uid`](Self::uid) and
+/// primary [`gid`](Self::gid), the reusable numeric [`pid`](Self::pid), the
+/// unforgeable [`proc_id`](Self::proc_id) that distinguishes process instances
+/// across PID reuse, and a non-secret [`capabilities`](Self::capabilities)
+/// summary. The `gid` is the primary group of the task's kernel-attested
+/// credential, snapshotted at process creation from the identity table the
+/// kernel vouches for (never caller-supplied). Parent pid, start time, and
+/// executable identity are deliberately absent: the kernel does not yet record
+/// them per task, and a field without a live producer would be a speculative
+/// surface. They are added in place when their producer exists (the ABI is not
+/// yet frozen), never as a parallel versioned type.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Origin {
     trust_domain: TrustDomain,
     uid: u32,
+    gid: u32,
     pid: u64,
     proc_id: ProcId,
     capabilities: CapabilitySummary,
@@ -262,6 +265,7 @@ impl Origin {
     pub const fn new(
         trust_domain: TrustDomain,
         uid: u32,
+        gid: u32,
         pid: u64,
         proc_id: ProcId,
         capabilities: CapabilitySummary,
@@ -269,6 +273,7 @@ impl Origin {
         Self {
             trust_domain,
             uid,
+            gid,
             pid,
             proc_id,
             capabilities,
@@ -285,6 +290,12 @@ impl Origin {
     #[must_use]
     pub const fn uid(&self) -> u32 {
         self.uid
+    }
+
+    /// The primary group identifier of the task's attested credential.
+    #[must_use]
+    pub const fn gid(&self) -> u32 {
+        self.gid
     }
 
     /// The reusable numeric process identifier.
@@ -312,9 +323,10 @@ impl Origin {
         let mut out = [0u8; ORIGIN_WIRE_LEN];
         out[0] = self.trust_domain.as_u8();
         put_u32(&mut out, 1, self.uid);
-        put_u64(&mut out, 5, self.pid);
-        out[13..29].copy_from_slice(self.proc_id.as_bytes());
-        out[29..61].copy_from_slice(self.capabilities.as_bytes());
+        put_u32(&mut out, 5, self.gid);
+        put_u64(&mut out, 9, self.pid);
+        out[17..33].copy_from_slice(self.proc_id.as_bytes());
+        out[33..65].copy_from_slice(self.capabilities.as_bytes());
         out
     }
 
@@ -331,13 +343,15 @@ impl Origin {
         }
         let trust_domain = TrustDomain::from_u8(bytes[0])?;
         let uid = read_u32(bytes, 1);
-        let pid = read_u64(bytes, 5);
-        let proc_id = ProcId::from_bytes(&bytes[13..29])?;
+        let gid = read_u32(bytes, 5);
+        let pid = read_u64(bytes, 9);
+        let proc_id = ProcId::from_bytes(&bytes[17..33])?;
         let mut caps = [0u8; CAPABILITY_SUMMARY_LEN];
-        caps.copy_from_slice(&bytes[29..61]);
+        caps.copy_from_slice(&bytes[33..65]);
         Ok(Self {
             trust_domain,
             uid,
+            gid,
             pid,
             proc_id,
             capabilities: CapabilitySummary::from_raw(caps),
@@ -455,6 +469,7 @@ mod tests {
         Origin::new(
             TrustDomain::User,
             1000,
+            50,
             42,
             ProcId::from_raw([0xAB; PROC_ID_LEN]),
             caps,
@@ -470,6 +485,7 @@ mod tests {
         assert_eq!(decoded, origin);
         assert_eq!(decoded.trust_domain(), TrustDomain::User);
         assert_eq!(decoded.uid(), 1000);
+        assert_eq!(decoded.gid(), 50);
         assert_eq!(decoded.pid(), 42);
         assert_eq!(decoded.proc_id(), ProcId::from_raw([0xAB; PROC_ID_LEN]));
         assert!(decoded
@@ -501,6 +517,7 @@ mod tests {
     fn kernel_origin_carries_the_kernel_sentinel() {
         let origin = Origin::new(
             TrustDomain::Kernel,
+            0,
             0,
             1,
             ProcId::KERNEL,

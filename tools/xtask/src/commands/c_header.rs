@@ -70,10 +70,10 @@ use rustos_abi::{
     PROCESS_NAME_MAX, PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN,
     PROCESS_START_MAX_TOTAL_LEN, RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES,
     RESOURCE_LIMITS_REPORT_LEN, RLIMIT_INFINITY, RXE_PAGE_SIZE, SEG_FLAG_EXEC, SEG_FLAG_READ,
-    SEG_FLAG_WRITE, STDINFO_FD, STDINFO_VERSION_CURRENT, STDINFO_VERSION_V1, SYSCALLS,
-    SYSCALL_MAX_ARGS, SYSCALL_TABLE_HASH_LEN, SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERY_NAME_MAX,
-    SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1,
-    SYSTEM_LIBRARIES_DIR,
+    SEG_FLAG_WRITE, SPAWN_UID_INHERIT, STDINFO_FD, STDINFO_VERSION_CURRENT, STDINFO_VERSION_V1,
+    SYSCALLS, SYSCALL_MAX_ARGS, SYSCALL_TABLE_HASH_LEN, SYSINFO_MAX_PAYLOAD_LEN,
+    SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC,
+    SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1, SYSTEM_LIBRARIES_DIR,
 };
 
 /// Default on-disk location of the generated C ABI header set, relative to
@@ -1228,6 +1228,15 @@ fn generate_process() -> String {
     let _ = writeln!(
         out,
         "#define ROS_CONSOLE_INHERIT ((uint64_t){CONSOLE_INHERIT:#x}ull)"
+    );
+    out.push_str(
+        "/* `target_uid` argument to ros_sys_spawn: start the child under the\n\
+         \x20* caller's own credential (any other value switches to that user, which\n\
+         \x20* requires ROS_CAP_SPAWN_AS_USER). */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_SPAWN_UID_INHERIT ((uint32_t){SPAWN_UID_INHERIT:#x}u)"
     );
     out.push('\n');
 

@@ -130,6 +130,7 @@ impl SyscallHandlers for AcceptingHandlers {
         _path: u64,
         _path_len: usize,
         _console: u64,
+        _target_uid: u32,
     ) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)

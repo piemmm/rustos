@@ -132,6 +132,7 @@ impl SyscallHandlers for CountingHandlers {
         _path: u64,
         _path_len: usize,
         _console: u64,
+        _target_uid: u32,
     ) -> SyscallResult {
         self.bump();
         Ok(0)

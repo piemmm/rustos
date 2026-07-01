@@ -45,7 +45,7 @@ use rustos_abi::driver::filesystem::{
 };
 use rustos_abi::driver::DriverHandle;
 use rustos_abi::{CapabilityQuery, Errno, FileKind, FileStat, OpenFlags};
-use rustos_kernel_sec::{IdentityTable, UserId, UserRecord};
+use rustos_kernel_sec::{GroupId, IdentityTable, UserId, UserRecord};
 use rustos_sync::{OnceCell, SpinLock};
 
 use crate::sleeplock::SleepLock;
@@ -270,6 +270,27 @@ impl LateIdentity {
             Ok(Some(table)) => table.user(UserId(uid)).map_err(|_| Errno::PermissionDenied),
             _ => Err(Errno::NotImplemented),
         }
+    }
+
+    /// Resolve the attested group credential (primary group and supplementary
+    /// groups) for `uid` from the installed identity table.
+    ///
+    /// This is the spawn-as-user resolver: when a privileged spawner switches
+    /// a child into a target user, the kernel snapshots that user's full group
+    /// set onto the child's capability record from the table it vouches for,
+    /// so the child's later filesystem checks run under an authoritative,
+    /// caller-independent credential. The returned set is owned (a snapshot),
+    /// not a borrow into the table, so it can be stored on the task.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed exactly as the internal group resolution does:
+    /// [`Errno::NotImplemented`] before a table is installed and
+    /// [`Errno::PermissionDenied`] for a uid with no account, so a switch to
+    /// an unknown or unresolvable user never invents a credential.
+    pub fn resolve_credential(&self, uid: u32) -> Result<(GroupId, Vec<GroupId>), Errno> {
+        let record = self.resolve(uid)?;
+        Ok((record.primary_gid, record.supplementary_gids.clone()))
     }
 }
 

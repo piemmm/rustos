@@ -70,8 +70,10 @@ pub const DEVMGR_PATH: &[u8] = b"/System/Services/devmgr";
 /// the `Shell` session program login spawns as an authenticated user's shell
 /// of choice (`plans/SPAWN.md` `SP3b`). The `rxe`s are baked at build time
 /// (`build.rs`). Login additionally holds `PROC_SPAWN` (it launches the
-/// shell) and `USERS_READ` (it verifies credentials against the kernel-held
-/// user database); the shell holds only the console pair.
+/// shell), `USERS_READ` (it verifies credentials against the kernel-held
+/// user database), and `SPAWN_AS_USER` (it drops the shell into the
+/// authenticated user's credential — the one privileged spawn-as-user
+/// holder, `PREREQUISITES.md` P-C); the shell holds only the console pair.
 ///
 /// This registry is identical across every port by definition, so it is
 /// defined once here and shared rather than copy-pasted into each port's
@@ -91,6 +93,12 @@ pub static SPAWN_PROGRAMS: [EmbeddedProgram; 3] = [
             CapabilityId::CONSOLE_READ,
             CapabilityId::PROC_SPAWN,
             CapabilityId::USERS_READ,
+            // The one holder of the spawn-as-user switch: after
+            // authenticating an account, login starts that user's shell
+            // under the user's kernel-attested credential (uid/gid/groups),
+            // which the kernel resolves from the authoritative identity
+            // table. A running process never mutates its own identity.
+            CapabilityId::SPAWN_AS_USER,
             // Emit its structured diagnostics through the kernel diagnostic
             // log (serial UART on a debug build) rather than fd 2.
             CapabilityId::LOG_EMIT,

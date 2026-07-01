@@ -152,8 +152,16 @@ supervises (`plans/PI.md` P11). It wires the real seams:
     prompt stays up and every attempt is refused (`AGENTS.md` §5.4.5, never
     an invented account).
 - **`SessionLauncher`** over the `spawn`/`wait` syscalls: the record's
-  shell of choice is spawned (receiving only its registered program grant,
-  `AGENTS.md` §5.2) and waited on; its exit code closes the session.
+  shell of choice is spawned **as the authenticated user** and waited on;
+  its exit code closes the session. Login holds `CAP_SPAWN_AS_USER` and
+  starts the shell through `rustos_rt::spawn_as(shell, CONSOLE_INHERIT,
+  uid)`, so the kernel resolves the user's full credential (uid, primary
+  gid, supplementary groups) from the authoritative identity table and
+  snapshots it onto the child — privilege only ever switches user at
+  process creation, never by a running process mutating its own identity
+  (there is no setuid-self, `PREREQUISITES.md` P-C). The shell still
+  receives only its registered program grant (`AGENTS.md` §5.2); the
+  spawn-as-user switch sets the child's *identity*, not its capabilities.
 
 Each finished session or exhausted attempt budget loops back to a fresh
 prompt; a dead console exits fail-closed and `init` relaunches login. The

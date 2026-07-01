@@ -30,6 +30,10 @@
  * console (any other value names an installed console index, see
  * ros_sys_console_count). */
 #define ROS_CONSOLE_INHERIT ((uint64_t)0xffffffffffffffffull)
+/* `target_uid` argument to ros_sys_spawn: start the child under the
+ * caller's own credential (any other value switches to that user, which
+ * requires ROS_CAP_SPAWN_AS_USER). */
+#define ROS_SPAWN_UID_INHERIT ((uint32_t)0xffffffffu)
 
 /* Packed little-endian wire size of a startup-vector header, in bytes. */
 #define ROS_PROCESS_START_HEADER_WIRE_LEN 32u

@@ -479,6 +479,7 @@ mod tests {
         Caller::new(Origin::new(
             TrustDomain::User,
             1000,
+            100,
             10,
             ProcId::from_raw([0x10; 16]),
             summary,

@@ -530,6 +530,23 @@ pub const STD_STREAM_COUNT: usize = 4;
 /// the backing, the program only ever names fd numbers).
 pub const CONSOLE_INHERIT: u64 = u64::MAX;
 
+/// The `target_uid` argument to [`crate::SyscallNumber::SPAWN`] that starts
+/// the child under the **caller's own** kernel-attested credential (uid,
+/// primary gid, supplementary groups) instead of switching to a different
+/// user.
+///
+/// The all-ones sentinel: no real account bears uid [`u32::MAX`], so it can
+/// never collide with a resolvable user. Inheriting is the default and needs
+/// no capability — the child can only ever receive the credential its parent
+/// already holds. A concrete uid, by contrast, asks the kernel to resolve
+/// that user's full credential from the authoritative identity table and drop
+/// the child into it, which requires the caller to hold
+/// [`crate::CapabilityId::SPAWN_AS_USER`] and fails closed otherwise. A
+/// running process can never change its *own* identity; the credential is
+/// fixed at creation and only ever narrows or switches through a privileged
+/// spawn (there is no setuid-self).
+pub const SPAWN_UID_INHERIT: u32 = u32::MAX;
+
 /// Highest console index a descriptor can record — the inclusive bound of
 /// the [`DescriptorTable`] per-descriptor console field (`u8`).
 ///

@@ -241,12 +241,25 @@ pub trait SyscallHandlers {
     /// [`Errno::NotImplemented`], and a path naming no registered
     /// program with [`Errno::NotFound`], rather than silently doing
     /// nothing.
+    ///
+    /// `target_uid` selects the child's kernel-attested credential
+    /// (`PREREQUISITES.md` P-C, spawn-as-user):
+    /// [`rustos_abi::SPAWN_UID_INHERIT`] starts the child under the caller's
+    /// own attested credential (no capability required), while any other value
+    /// asks the kernel to resolve that user's full credential from the
+    /// authoritative identity table and switch the child into it. A switch
+    /// requires the caller to hold [`CapabilityId::SPAWN_AS_USER`] and must
+    /// fail closed with [`Errno::PermissionDenied`] otherwise; an unresolvable
+    /// target uid fails closed rather than inventing a credential. A running
+    /// process can never change its *own* identity — the credential is fixed
+    /// at creation (there is no setuid-self).
     fn spawn(
         &self,
         caller: &CallerContext<'_>,
         path: u64,
         path_len: usize,
         console: u64,
+        target_uid: u32,
     ) -> SyscallResult;
     /// Read up to `len` bytes from the calling process's standard stream
     /// `fd` into the user buffer at `buf`, returning the number of bytes
@@ -1426,8 +1439,12 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 let len = decode_len(args.0[1])?;
                 // args[2] is the console selector: the `CONSOLE_INHERIT`
                 // sentinel or an installed console index, validated by
-                // the handler against the live console list.
-                self.handlers.spawn(caller, args.0[0], len, args.0[2])
+                // the handler against the live console list. args[3] is the
+                // `target_uid`: the `SPAWN_UID_INHERIT` sentinel (start under
+                // the caller's own credential) or a concrete uid to switch to
+                // (gated by `CAP_SPAWN_AS_USER` in the handler).
+                self.handlers
+                    .spawn(caller, args.0[0], len, args.0[2], decode_u32(args.0[3]))
             }
             SyscallNumber::STREAM_READ => {
                 let len = decode_len(args.0[2])?;
@@ -2077,12 +2094,13 @@ mod tests {
             _path: u64,
             path_len: usize,
             _console: u64,
+            _target_uid: u32,
         ) -> SyscallResult {
             self.record("spawn");
             // Echo the path length back so the reachability test can
             // assert the dispatcher decoded the `(path, path_len,
-            // console)` arguments without wiring a real spawn service
-            // here.
+            // console, target_uid)` arguments without wiring a real spawn
+            // service here.
             Ok(path_len as u64)
         }
         fn stream_read(

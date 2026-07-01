@@ -349,16 +349,33 @@ pub extern "C" fn sys_stream_read(fd: u32, buf: *mut c_void, len: usize) -> u64 
 /// SP3). `console` selects the child's standard-stream attachment: `ROS_CONSOLE_INHERIT` keeps the child on the
 /// caller's own console; any other value names an installed console index
 /// (see `ros_sys_console_count`) and an index with no console fails
-/// closed.
+/// closed. `target_uid` selects the child's credential: `ROS_SPAWN_UID_INHERIT`
+/// starts it under the caller's own attested credential (no capability
+/// required), any other value asks the kernel to resolve that user and switch
+/// the child into it — which requires `ROS_CAP_SPAWN_AS_USER` and fails closed
+/// otherwise. A running process can never change its own identity (there is no
+/// setuid-self).
 #[must_use]
 #[export_name = "ros_sys_spawn"]
-pub extern "C" fn sys_spawn(path: *mut c_void, path_len: usize, console: u64) -> u64 {
-    // SAFETY: see `sys_ipc_send`; the kernel validates `(path, path_len)`
-    // and the console selector.
+pub extern "C" fn sys_spawn(
+    path: *mut c_void,
+    path_len: usize,
+    console: u64,
+    target_uid: u32,
+) -> u64 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates `(path, path_len)`,
+    // the console selector, and the target-uid credential switch.
     unsafe {
         raw_syscall(
             NUM_SPAWN,
-            [ptr_arg(path), path_len as u64, console, 0, 0, 0],
+            [
+                ptr_arg(path),
+                path_len as u64,
+                console,
+                u64::from(target_uid),
+                0,
+                0,
+            ],
         )
     }
 }
@@ -1370,7 +1387,7 @@ mod tests {
         (NUM_IRQ_WAIT, "irq_wait", 2),
         (NUM_RANDOM_GET, "random_get", 3),
         (NUM_STREAM_WRITE, "stream_write", 3),
-        (NUM_SPAWN, "spawn", 3),
+        (NUM_SPAWN, "spawn", 4),
         (NUM_STREAM_READ, "stream_read", 3),
         (NUM_MEM_MAP, "mem_map", 3),
         (NUM_MEM_UNMAP, "mem_unmap", 2),
@@ -1656,17 +1673,26 @@ mod tests {
     }
 
     #[test]
-    fn spawn_marshals_path_pointer_len_and_console() {
+    fn spawn_marshals_path_pointer_len_console_and_target_uid() {
         let mut path = *b"/Apps/Child.app/Run";
         let ptr = path.as_mut_ptr().cast::<c_void>();
         let (number, args) = capture(7, || {
-            assert_eq!(sys_spawn(ptr, path.len(), rustos_abi::CONSOLE_INHERIT), 7);
+            assert_eq!(
+                sys_spawn(
+                    ptr,
+                    path.len(),
+                    rustos_abi::CONSOLE_INHERIT,
+                    rustos_abi::SPAWN_UID_INHERIT,
+                ),
+                7
+            );
         });
         assert_eq!(number, NUM_SPAWN);
         assert_eq!(args[0], ptr as usize as u64);
         assert_eq!(args[1], path.len() as u64);
         assert_eq!(args[2], rustos_abi::CONSOLE_INHERIT);
-        assert_eq!(&args[3..], &[0, 0, 0]);
+        assert_eq!(args[3], u64::from(rustos_abi::SPAWN_UID_INHERIT));
+        assert_eq!(&args[4..], &[0, 0]);
     }
 
     #[test]

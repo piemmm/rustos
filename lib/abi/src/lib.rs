@@ -98,7 +98,8 @@ pub use process::{
     encoded_len as process_start_encoded_len, write_into as process_start_write_into,
     DescriptorTable, ProcessStart, ProcessStartHeader, StreamMode, StringSlot, CONSOLE_INDEX_MAX,
     CONSOLE_INHERIT, PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN,
-    PROCESS_START_MAX_TOTAL_LEN, STDERR, STDIN, STDINFO, STDOUT, STD_STREAM_COUNT,
+    PROCESS_START_MAX_TOTAL_LEN, SPAWN_UID_INHERIT, STDERR, STDIN, STDINFO, STDOUT,
+    STD_STREAM_COUNT,
 };
 pub use random::{RandomFlags, RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES};
 pub use rlimit::{LimitKind, ResourceLimit, RLIMIT_INFINITY};
