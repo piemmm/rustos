@@ -3250,6 +3250,29 @@ the next increment; see `plans/USB.md` for the binding design and staging.
 
 ---
 
+## DISPLAY — seat ownership: the display/console locking model (`plans/DISPLAY.md`)
+
+**Status: planned (D1–D6).** Closes the console/graphics *ownership and
+locking* gap against Linux (DRM master + `logind` seats + tty controlling
+terminal), and improves on it under the charter's fail-closed, no-ambient
+model. Today `display_acquire`/`display_release` are a global `AtomicBool` in
+`kernel/core/src/input_focus.rs` with no owner identity — any `CAP_DISPLAY`
+holder can flip the foreground (last-writer-wins), and the `CAP_DISPLAY`
+rustdoc over-claims a "cannot steal focus" guarantee the code does not enforce.
+The plan makes the **seat** a first-class kernel object with a tracked,
+exclusive, revocable owner (a new arch-neutral `lib/seat` state machine), folds
+the existing `InputFocus` arbiter into a per-seat sink, evolves `CAP_DISPLAY`
+in place (owner-checked acquire/release, no `v2`), derives the framebuffer
+present right from the live lease (coupling scanout to ownership), adds
+per-console controlling-terminal/foreground arbitration without signal races,
+and models multi-head as N independent seats. Exactly one new capability,
+`CAP_SEAT_ADMIN` (the `chvt`/`logind`-equivalent switch/revoke authority),
+introduced alongside its `seatmgr` holder and enforcement point (§5.2). D1
+(the `lib/seat` model) is the first increment; see `plans/DISPLAY.md` for the
+binding design and staging.
+
+---
+
 ## Cache-Aware Scheduling (LLC-aware task aggregation)
 
 **Status: planned.** A scheduler *performance* feature (§2.16): co-locate the
