@@ -108,54 +108,57 @@ impl<'a, 'b> CombinedSource<'a, 'b> {
     }
 }
 
-impl CombinedSource<'_, '_> {
-    /// Shared XOR-combine loop, parameterised by how each source is drawn so
-    /// the non-blocking [`EntropySource::fill`] and blocking
-    /// [`EntropySource::fill_blocking`] paths reuse one implementation
-    /// (no duplicated mixing algebra). `draw_one` returns
-    /// `true` if a source fully satisfied its chunked draw; a source that
-    /// fails is skipped (it contributes the XOR identity rather than
-    /// corrupting the pool).
-    fn combine(
-        &mut self,
-        out: &mut [u8],
-        mut draw_one: impl FnMut(&mut dyn EntropySource, &mut [u8]) -> bool,
-    ) -> Result<(), EntropyError> {
-        for byte in out.iter_mut() {
-            *byte = 0;
-        }
-        let mut any = false;
-        for source in self.sources.iter_mut() {
-            // Draw this source's contribution in fixed-size chunks (no
-            // allocator on the entropy path) and XOR it into `out`.
-            let mut chunk = [0u8; 64];
-            let mut offset = 0;
-            let mut complete = true;
-            while offset < out.len() {
-                let take = core::cmp::min(chunk.len(), out.len() - offset);
-                if !draw_one(&mut **source, &mut chunk[..take]) {
-                    complete = false;
-                    break;
-                }
-                for (dst, src) in out[offset..offset + take].iter_mut().zip(&chunk[..take]) {
-                    *dst ^= *src;
-                }
-                offset += take;
+/// Shared XOR-combine loop, parameterised by how each source is drawn so the
+/// non-blocking [`EntropySource::fill`] and blocking
+/// [`EntropySource::fill_blocking`] paths reuse one implementation (no
+/// duplicated mixing algebra), and so both the borrowing [`CombinedSource`]
+/// and the owning [`MixedPair`] share the single definition.
+///
+/// `draw_one` returns `true` if a source fully satisfied its chunked draw; a
+/// source that fails is skipped (it contributes the XOR identity rather than
+/// corrupting the pool). The result is [`EntropyError::Unavailable`] only when
+/// *every* source failed.
+fn combine_sources(
+    out: &mut [u8],
+    sources: &mut [&mut dyn EntropySource],
+    mut draw_one: impl FnMut(&mut dyn EntropySource, &mut [u8]) -> bool,
+) -> Result<(), EntropyError> {
+    for byte in out.iter_mut() {
+        *byte = 0;
+    }
+    let mut any = false;
+    for source in sources.iter_mut() {
+        // Draw this source's contribution in fixed-size chunks (no
+        // allocator on the entropy path) and XOR it into `out`.
+        let mut chunk = [0u8; 64];
+        let mut offset = 0;
+        let mut complete = true;
+        while offset < out.len() {
+            let take = core::cmp::min(chunk.len(), out.len() - offset);
+            if !draw_one(&mut **source, &mut chunk[..take]) {
+                complete = false;
+                break;
             }
-            chunk.zeroize();
-            any |= complete;
+            for (dst, src) in out[offset..offset + take].iter_mut().zip(&chunk[..take]) {
+                *dst ^= *src;
+            }
+            offset += take;
         }
-        if any {
-            Ok(())
-        } else {
-            Err(EntropyError::Unavailable)
-        }
+        chunk.zeroize();
+        any |= complete;
+    }
+    if any {
+        Ok(())
+    } else {
+        Err(EntropyError::Unavailable)
     }
 }
 
 impl EntropySource for CombinedSource<'_, '_> {
     fn fill(&mut self, out: &mut [u8]) -> Result<(), EntropyError> {
-        self.combine(out, |source, chunk| source.fill(chunk).is_ok())
+        combine_sources(out, self.sources, |source, chunk| {
+            source.fill(chunk).is_ok()
+        })
     }
 
     /// Blocks until at least one source can contribute.
@@ -166,7 +169,56 @@ impl EntropySource for CombinedSource<'_, '_> {
     /// `Unavailable` and is skipped. The combination only reports
     /// [`EntropyError::Unavailable`] when *every* source is hard-dead.
     fn fill_blocking(&mut self, out: &mut [u8]) -> Result<(), EntropyError> {
-        self.combine(out, |source, chunk| source.fill_blocking(chunk).is_ok())
+        combine_sources(out, self.sources, |source, chunk| {
+            source.fill_blocking(chunk).is_ok()
+        })
+    }
+}
+
+/// Two [`EntropySource`]s **owned** together and XOR-combined into one.
+///
+/// [`CombinedSource`] mixes sources it only *borrows*, which suits a one-shot
+/// pool assembled on a stack frame. A long-lived generator that reseeds for
+/// forward secrecy — the kernel's [`crate::OutputReserve`] — must instead
+/// *own* its entropy source for the generator's whole life, and a borrowing
+/// combiner cannot be that owned source. `MixedPair` fills that gap: it owns
+/// both sources and applies the identical XOR-combine loop
+/// (`combine_sources`), so a reseeding [`crate::CsRng`] can be seeded — and
+/// re-seeded — from *both* a hardware RNG and an independent software source
+/// without trusting either alone.
+///
+/// The mix succeeds as long as **either** source satisfied the draw; a source
+/// that fails contributes the XOR identity (nothing) rather than corrupting
+/// the pool, and only a draw where *both* sources fail reports
+/// [`EntropyError::Unavailable`]. XOR is entropy-preserving for independent
+/// inputs, so a stuck, degraded, or even adversarial `secondary` can never
+/// lower the entropy a healthy `primary` contributes, and vice versa — the
+/// charter's "no single source is trusted alone".
+pub struct MixedPair<A: EntropySource, B: EntropySource> {
+    primary: A,
+    secondary: B,
+}
+
+impl<A: EntropySource, B: EntropySource> MixedPair<A, B> {
+    /// Combine two owned entropy sources into one XOR-mixed source.
+    pub fn new(primary: A, secondary: B) -> Self {
+        Self { primary, secondary }
+    }
+}
+
+impl<A: EntropySource, B: EntropySource> EntropySource for MixedPair<A, B> {
+    fn fill(&mut self, out: &mut [u8]) -> Result<(), EntropyError> {
+        let mut sources: [&mut dyn EntropySource; 2] = [&mut self.primary, &mut self.secondary];
+        combine_sources(out, &mut sources, |source, chunk| {
+            source.fill(chunk).is_ok()
+        })
+    }
+
+    fn fill_blocking(&mut self, out: &mut [u8]) -> Result<(), EntropyError> {
+        let mut sources: [&mut dyn EntropySource; 2] = [&mut self.primary, &mut self.secondary];
+        combine_sources(out, &mut sources, |source, chunk| {
+            source.fill_blocking(chunk).is_ok()
+        })
     }
 }
 
@@ -372,5 +424,93 @@ mod tests {
             combined.fill_blocking(&mut out),
             Err(EntropyError::Unavailable)
         );
+    }
+
+    #[test]
+    fn mixed_pair_is_the_xor_of_its_owned_sources() {
+        let a = Counter {
+            state: 0x10,
+            step: 1,
+        };
+        let b = Counter {
+            state: 0xA0,
+            step: 3,
+        };
+        let mut ea = Counter {
+            state: 0x10,
+            step: 1,
+        };
+        let mut eb = Counter {
+            state: 0xA0,
+            step: 3,
+        };
+        let (mut sa, mut sb) = ([0u8; 70], [0u8; 70]);
+        ea.fill(&mut sa).unwrap();
+        eb.fill(&mut sb).unwrap();
+
+        let mut mixed = MixedPair::new(a, b);
+        let mut out = [0u8; 70];
+        mixed.fill(&mut out).unwrap();
+        for i in 0..70 {
+            assert_eq!(out[i], sa[i] ^ sb[i]);
+        }
+    }
+
+    #[test]
+    fn mixed_pair_survives_a_dead_secondary() {
+        // A healthy hardware-like primary plus a dead secondary still yields
+        // the primary's full contribution — the "no single source trusted
+        // alone" mix must not fail when one side is absent.
+        let mut expected = Counter {
+            state: 0x55,
+            step: 7,
+        };
+        let mut exp = [0u8; 40];
+        expected.fill(&mut exp).unwrap();
+
+        let mut mixed = MixedPair::new(
+            Counter {
+                state: 0x55,
+                step: 7,
+            },
+            Dead,
+        );
+        let mut out = [0u8; 40];
+        mixed.fill(&mut out).unwrap();
+        assert_eq!(out, exp, "a dead secondary contributes the XOR identity");
+    }
+
+    #[test]
+    fn mixed_pair_fails_closed_only_when_both_sources_die() {
+        let mut mixed = MixedPair::new(Dead, Dead);
+        let mut out = [0u8; 16];
+        assert_eq!(mixed.fill(&mut out), Err(EntropyError::Unavailable));
+    }
+
+    #[test]
+    fn mixed_pair_blocking_waits_out_a_transient_source() {
+        // Primary momentarily exhausted, secondary dead: the non-blocking mix
+        // fails closed, the blocking mix waits the primary out and succeeds.
+        let mut mixed = MixedPair::new(
+            Parking {
+                blocked_draws: 1,
+                waits: 0,
+            },
+            Dead,
+        );
+        let mut out = [0u8; 16];
+        assert_eq!(mixed.fill(&mut out), Err(EntropyError::Unavailable));
+
+        let mut mixed = MixedPair::new(
+            Parking {
+                blocked_draws: 1,
+                waits: 0,
+            },
+            Dead,
+        );
+        mixed
+            .fill_blocking(&mut out)
+            .expect("blocking mix waits out the transient primary");
+        assert_eq!(out, [0x3C; 16], "only the transient primary contributed");
     }
 }

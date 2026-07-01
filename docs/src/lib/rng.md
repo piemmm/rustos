@@ -148,15 +148,53 @@ momentarily-underfull generator a **bounded** number of times, then fails
 closed — never an unbounded spin (§2.1).
 
 At boot, `kernel/core` reaches the source through `KernelArch::platform_entropy`
-and seeds the reserve once: it wraps the handle as an `EntropySource`
-(`ArchEntropy`), builds a `SeededReserve` (`OutputReserve<ArchEntropy>`), and
-swaps it in for the `NullEntropy` boot reserve. The decision is audited
-(`EntropyReserveSeeded` / `EntropyReserveUnseeded` with a cause). A port with
-no usable source leaves the reserve unseeded and `random_get` keeps failing
-closed — the kernel never weakens to predictable output. The hardware source
-is one input today; the charter forbids trusting a single source alone, so
-additional software inputs (boot-time timing jitter, an interrupt-arrival
-pool) mixed via `CombinedSource` are a tracked follow-up.
+and seeds the reserve once — but **never from the hardware RNG alone**, per
+§22's "no single source is trusted alone". It wraps the hardware handle as an
+`EntropySource` (`ArchEntropy`) and XOR-mixes it with an independent
+CPU-timing-jitter source (next section) through `MixedPair`
+(`KernelEntropy<A> = MixedPair<ArchEntropy, JitterSource<ArchTicks<A>>>`),
+builds a `SeededReserve<A>` over that mix, and swaps it in for the
+`NullEntropy` boot reserve. Because the mix owns both sources, every automatic
+reseed re-draws from *both*, not just the hardware source. The decision is
+audited (`EntropyReserveSeeded` records `sources = hardware+jitter` or, when
+the platform offers no usable timing jitter, `hardware`;
+`EntropyReserveUnseeded` records a cause). XOR is entropy-preserving for
+independent inputs, so a backdoored, stuck, or observable hardware RNG cannot
+lower the seed's quality below the jitter source's contribution, and vice
+versa; only if *both* sources are unavailable does the reserve stay unseeded
+and `random_get` keep failing closed — the kernel never weakens to predictable
+output.
+
+## Timing-jitter entropy: the independent second source
+
+`JitterSource` is the software entropy source mixed with the hardware RNG so
+neither is trusted alone. Its unpredictability is the **variation in execution
+time** of a fixed workload, measured with the platform's high-resolution
+monotonic counter (`TimeSource`, backed in the kernel by `ArchTicks` over the
+Arch HAL `ticks_now` — x86 `RDTSC`, aarch64 `CNTPCT_EL0`, riscv64 `time`).
+This is the well-studied CPU-jitter mechanism (Müller's `jitterentropy`).
+
+The accounting is deliberately conservative and honest — jitter is
+defense-in-depth, not the primary source:
+
+* **Only non-stuck samples are credited.** Each raw timing delta runs through
+  a "stuck" test (its first/second/third discrete derivatives); a sample a
+  deterministic counter could have produced is folded into the conditioner but
+  not counted toward the entropy budget.
+* **Heavy oversampling.** Many credited samples are folded per output *bit*, so
+  the SHA-256-conditioned output is at full entropy even if each sample carries
+  well under one bit of min-entropy. Conditioning uses `lib/crypto`'s SHA-256
+  (never a hand-rolled mixer); the running chain state is kept separate from
+  the emitted block and zeroised on the way out.
+* **Health tests fail closed.** A NIST SP 800-90B §4.4.1 repetition-count test
+  and a bounded attempt budget mean a clock with no usable jitter — an emulator
+  with a lockstep counter, a deterministic host test — returns
+  `EntropyError::Unavailable` rather than manufacturing entropy or looping
+  forever. In the mix that simply falls back to the hardware source.
+
+`lib/rng` stays architecture-neutral: `JitterSource` is generic over
+`TimeSource`, and the target-specific counter read lives behind the Arch HAL in
+`kernel/core`'s `ArchTicks`.
 
 ## Fast, non-cryptographic generator
 
@@ -180,7 +218,16 @@ unbiased bounded integers — once, so no consumer re-derives it (§2.2).
   method, plus a deterministic uniformity histogram.
 * Entropy combination: XOR equivalence, dead-source skipping, and the
   all-sources-failed fail-closed result, plus the blocking combine waiting
-  out a transient source while still skipping a hard-dead one.
+  out a transient source while still skipping a hard-dead one; and the owning
+  `MixedPair` giving the same XOR, surviving a dead secondary, failing closed
+  only when both sources die, and blocking through a transient one.
+* Timing jitter: a varying clock yields non-zero, request-to-request-distinct
+  output that spans multiple SHA-256 blocks; a lockstep (deterministic) clock
+  fails closed rather than manufacturing entropy; the repetition-count health
+  test trips on a constant delta and resets on change. In `kernel/core`, the
+  mixed reserve seeds from hardware alone when jitter is unavailable, from
+  jitter alone when the hardware source is dead, and fails closed when both
+  are dead.
 * Draw styles: the default `fill_blocking` matching `fill`; a fallible draw
   surfacing transient `Reseeding`; a blocking draw and `reseed_blocking`
   waiting through a reseed shortage; and the no-reseed fast path producing

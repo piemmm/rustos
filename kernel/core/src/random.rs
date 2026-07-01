@@ -28,8 +28,13 @@
 //! initialised a non-blocking request fails closed rather than returning
 //! weak randomness). A draw never substitutes predictable bytes.
 
+use alloc::sync::Arc;
+
 use rustos_abi::Errno;
-use rustos_rng::{EntropyError, EntropySource, OutputReserve, ReserveError};
+use rustos_arch_api::SchedulerArch;
+use rustos_rng::{
+    EntropyError, EntropySource, JitterSource, MixedPair, OutputReserve, ReserveError, TimeSource,
+};
 
 /// Object-safe view of the kernel's CSPRNG output reserve.
 ///
@@ -97,16 +102,14 @@ pub type BootReserve = OutputReserve<NullEntropy>;
 /// reserve.
 ///
 /// The wrapped `&'static dyn PlatformEntropy` is the per-port hardware-RNG
-/// handle (x86 `RDSEED`/`RDRAND`, ARMv8.5 `RNDR`, …). The boot path installs
-/// a [`SeededReserve`] built from it only when a draw actually produces bytes;
-/// a port with no usable source fails the draw closed and the kernel reserve
-/// stays unseeded, exactly as it boots — never weakened to predictable bytes.
-///
-/// This is the kernel's one entropy input today. The charter forbids trusting
-/// a single source alone, so additional software inputs (boot-time timing
-/// jitter, an interrupt-arrival pool) mixed via `rustos_rng::CombinedSource`
-/// are a tracked follow-up; until then the hardware source feeds the DRBG,
-/// whose output is what callers actually receive.
+/// handle (x86 `RDSEED`/`RDRAND`, ARMv8.5 `RNDR`, …). It is **not** trusted
+/// alone: the boot path XOR-mixes it with an independent [`ArchTicks`]-driven
+/// timing-jitter source through [`KernelEntropy`] before it ever seeds the
+/// reserve (the charter forbids a single trusted source). A port whose
+/// hardware source produces no bytes contributes the XOR identity and the mix
+/// falls back to whatever the other source supplies; only if *both* are
+/// unavailable does the seed fail closed and the reserve stay unseeded —
+/// never weakened to predictable bytes.
 pub struct ArchEntropy {
     source: &'static dyn rustos_arch_api::PlatformEntropy,
 }
@@ -128,10 +131,44 @@ impl EntropySource for ArchEntropy {
     }
 }
 
-/// The reserve type the kernel installs once a platform entropy source is
-/// available, type-matched (default capacity) to [`BootReserve`] so both
+/// A [`TimeSource`] over the Arch HAL's monotonic high-resolution counter
+/// ([`SchedulerArch::ticks_now`] — x86 `RDTSC`, aarch64 `CNTPCT_EL0`, riscv64
+/// `time`), driving the kernel's CPU-timing-jitter entropy source
+/// ([`rustos_rng::JitterSource`]).
+///
+/// Holds an [`Arc`] of the arch handle (which lives for the whole kernel) so
+/// the jitter source — owned by the reseeding reserve — can read the counter
+/// on every seed and reseed. Architecture-neutral: the target-specific counter
+/// read stays behind the HAL.
+pub struct ArchTicks<A: SchedulerArch> {
+    arch: Arc<A>,
+}
+
+impl<A: SchedulerArch> ArchTicks<A> {
+    /// Build a time source over the shared arch handle.
+    #[must_use]
+    pub fn new(arch: Arc<A>) -> Self {
+        Self { arch }
+    }
+}
+
+impl<A: SchedulerArch> TimeSource for ArchTicks<A> {
+    fn now(&mut self) -> u64 {
+        self.arch.ticks_now()
+    }
+}
+
+/// The kernel's boot entropy: the platform hardware RNG XOR-mixed with an
+/// independent CPU-timing-jitter source, so neither is trusted alone. XOR is
+/// entropy-preserving for independent inputs, so a backdoored, stuck, or
+/// observable hardware source cannot lower the seed's quality below what the
+/// jitter source contributes, and vice versa.
+pub type KernelEntropy<A> = MixedPair<ArchEntropy, JitterSource<ArchTicks<A>>>;
+
+/// The reserve type the kernel installs once seeded, over the mixed
+/// [`KernelEntropy`] source, default-capacity like [`BootReserve`] so both
 /// share the one `Box<dyn RandomReserve>` field type.
-pub type SeededReserve = OutputReserve<ArchEntropy>;
+pub type SeededReserve<A> = OutputReserve<KernelEntropy<A>>;
 
 /// Map a reserve failure onto the stable random ABI errno.
 ///
@@ -265,21 +302,73 @@ mod tests {
         assert_eq!(dead.fill(&mut out), Err(EntropyError::Unavailable));
     }
 
+    /// A varying host clock (an LCG) standing in for a healthy
+    /// high-resolution counter, so the jitter half of the mix is usable in a
+    /// host test. Returned as a boxed `FnMut` so each test owns its own.
+    fn varying_clock(seed: u64) -> impl FnMut() -> u64 {
+        let mut lcg = seed;
+        let mut now: u64 = 0;
+        move || {
+            lcg = lcg.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            now = now.wrapping_add((lcg >> 40) | 1);
+            now
+        }
+    }
+
+    /// A lockstep host clock (constant delta): its jitter fails the health
+    /// tests, modelling a platform with no usable timing jitter.
+    fn lockstep_clock() -> impl FnMut() -> u64 {
+        let mut now: u64 = 0;
+        move || {
+            now = now.wrapping_add(1);
+            now
+        }
+    }
+
     #[test]
-    fn seeded_reserve_over_arch_entropy_serves_then_fails_closed_when_dead() {
-        use super::{ArchEntropy, SeededReserve};
-        // A working source seeds the reserve and it serves cryptographic bytes.
-        let mut reserve = SeededReserve::new();
-        reserve
-            .seed(ArchEntropy::new(&FILLING_PORT))
-            .expect("a working platform source seeds the reserve");
+    fn mixed_reserve_seeds_from_hardware_when_jitter_is_unavailable() {
+        use super::ArchEntropy;
+        use rustos_rng::{JitterSource, MixedPair, OutputReserve};
+
+        // Hardware works, jitter is dead (lockstep clock): the mix must still
+        // seed from the hardware source alone — the fail-fallback direction.
+        let jitter = JitterSource::new(lockstep_clock());
+        let mixed = MixedPair::new(ArchEntropy::new(&FILLING_PORT), jitter);
+        let mut reserve = OutputReserve::<_>::new();
+        reserve.seed(mixed).expect("hardware alone seeds the mix");
         let mut out = [0u8; 16];
         RandomReserve::draw(&mut reserve, &mut out, true).expect("a seeded reserve serves");
         assert_ne!(out, [0u8; 16]);
+    }
 
-        // A dead source cannot seed: the reserve stays unseeded (fail closed).
-        let mut unseeded = SeededReserve::new();
-        assert!(unseeded.seed(ArchEntropy::new(&DEAD_PORT)).is_err());
+    #[test]
+    fn mixed_reserve_seeds_from_jitter_when_hardware_is_dead() {
+        use super::ArchEntropy;
+        use rustos_rng::{JitterSource, MixedPair, OutputReserve};
+
+        // Hardware is dead, jitter is healthy (varying clock): the mix must
+        // still seed from the independent jitter source alone — this is the
+        // defense-in-depth the "never trust one source" rule buys.
+        let jitter = JitterSource::new(varying_clock(0xC0FF_EE00));
+        let mixed = MixedPair::new(ArchEntropy::new(&DEAD_PORT), jitter);
+        let mut reserve = OutputReserve::<_>::new();
+        reserve.seed(mixed).expect("jitter alone seeds the mix");
+        let mut out = [0u8; 16];
+        RandomReserve::draw(&mut reserve, &mut out, true).expect("a seeded reserve serves");
+        assert_ne!(out, [0u8; 16]);
+    }
+
+    #[test]
+    fn mixed_reserve_fails_closed_when_both_sources_are_dead() {
+        use super::ArchEntropy;
+        use rustos_rng::{JitterSource, MixedPair, OutputReserve};
+
+        // Neither source can supply bytes: the seed fails closed and the
+        // reserve stays unseeded (never weakened to predictable bytes).
+        let jitter = JitterSource::new(lockstep_clock());
+        let mixed = MixedPair::new(ArchEntropy::new(&DEAD_PORT), jitter);
+        let mut unseeded = OutputReserve::<_>::new();
+        assert!(unseeded.seed(mixed).is_err());
         assert!(!unseeded.is_ready());
     }
 }

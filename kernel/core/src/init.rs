@@ -410,7 +410,8 @@ fn publish_wait_queue_arch<A: KernelArch + 'static>(state: &'static KernelState<
 /// is the port's bounded-retry concern, and a hard failure simply leaves the
 /// reserve unseeded.
 fn seed_entropy_reserve<A: KernelArch + 'static>(state: &'static KernelState<A>) {
-    use crate::random::{ArchEntropy, SeededReserve};
+    use crate::random::{ArchEntropy, ArchTicks, SeededReserve};
+    use rustos_rng::{EntropySource, JitterSource, MixedPair};
 
     let Some(source) = state.arch.platform_entropy() else {
         emit(
@@ -440,8 +441,29 @@ fn seed_entropy_reserve<A: KernelArch + 'static>(state: &'static KernelState<A>)
         return;
     }
 
-    let mut reserve = SeededReserve::new();
-    match reserve.seed(ArchEntropy::new(source)) {
+    // Never trust the hardware RNG alone: XOR-mix it with an independent
+    // CPU-timing-jitter source before it seeds (and reseeds) the reserve. A
+    // stuck, backdoored, or observable hardware source cannot lower the seed's
+    // quality below the jitter source's contribution, and vice versa.
+    let hardware = ArchEntropy::new(source);
+    let mut jitter = JitterSource::new(ArchTicks::new(state.arch.clone()));
+    // Probe the jitter source once so the audit records honestly whether the
+    // second, independent source is contributing on this platform (a
+    // deterministic/emulated counter fails its health tests and yields, in
+    // which case the mix falls back to the hardware source alone).
+    let jitter_healthy = {
+        let mut probe = [0u8; 8];
+        jitter.fill(&mut probe).is_ok()
+    };
+    let sources = if jitter_healthy {
+        "hardware+jitter"
+    } else {
+        "hardware"
+    };
+
+    let mixed = MixedPair::new(hardware, jitter);
+    let mut reserve: SeededReserve<A> = SeededReserve::new();
+    match reserve.seed(mixed) {
         Ok(()) => {
             // Swap the seeded reserve in for the unseeded boot reserve.
             *state.rng.write() = Box::new(reserve);
@@ -449,7 +471,10 @@ fn seed_entropy_reserve<A: KernelArch + 'static>(state: &'static KernelState<A>)
                 state.audit_sink,
                 Level::Info,
                 AuditEvent::EntropyReserveSeeded,
-                &[],
+                &[Field {
+                    key: "sources",
+                    value: rustos_log::FieldValue::Str(sources),
+                }],
             );
         }
         Err(_) => {

@@ -39,17 +39,10 @@
 //! # Worked wiring
 //!
 //! ```
-//! use rustos_rng::{CombinedSource, CsRng, EntropyError, EntropySource};
+//! use rustos_rng::{CombinedSource, CsRng, EntropyError, EntropySource, JitterSource};
 //! use rustos_rng::hardware::{HardwareEntropy, HardwareRng, PlatformFast};
 //! use rustos_rng::RandU64;
 //!
-//! # struct Jitter;
-//! # impl EntropySource for Jitter {
-//! #     fn fill(&mut self, out: &mut [u8]) -> Result<(), EntropyError> {
-//! #         for (i, b) in out.iter_mut().enumerate() { *b = i as u8 ^ 0x5A; }
-//! #         Ok(())
-//! #     }
-//! # }
 //! # struct Rdrand;
 //! # impl HardwareRng for Rdrand {
 //! #     fn try_fill(&self, out: &mut [u8]) -> Result<(), EntropyError> {
@@ -60,7 +53,14 @@
 //! # fn wire(hw: Option<Rdrand>) -> Result<(), EntropyError> {
 //! // Mix a hardware source (if present) with timing jitter into one pool…
 //! let rdrand = Rdrand;
-//! let mut jitter = Jitter;
+//! // `JitterSource` samples a high-resolution counter; supply the platform's
+//! // (here a stand-in monotonic counter with varying deltas).
+//! let (mut lcg, mut now) = (0x1234_5678u64, 0u64);
+//! let mut jitter = JitterSource::new(move || {
+//!     lcg = lcg.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+//!     now = now.wrapping_add((lcg >> 40) | 1);
+//!     now
+//! });
 //! let mut hw_entropy = HardwareEntropy::new(&rdrand);
 //! let mut sources: [&mut dyn EntropySource; 2] = [&mut hw_entropy, &mut jitter];
 //! let pool = CombinedSource::new(&mut sources);
@@ -86,13 +86,15 @@ pub mod drbg;
 pub mod entropy;
 pub mod fast;
 pub mod hardware;
+pub mod jitter;
 pub mod rand;
 pub mod reserve;
 
 pub use csprng::{CsRng, DEFAULT_RESEED_INTERVAL};
 pub use drbg::{DrbgError, HmacDrbg, DRBG_OUTLEN, RESEED_INTERVAL};
-pub use entropy::{CombinedSource, EntropyError, EntropySource};
+pub use entropy::{CombinedSource, EntropyError, EntropySource, MixedPair};
 pub use fast::FastRng;
 pub use hardware::{HardwareEntropy, HardwareRng, PlatformFast};
+pub use jitter::{JitterSource, TimeSource};
 pub use rand::RandU64;
 pub use reserve::{OutputReserve, ReserveError, DEFAULT_RESERVE_BYTES};
