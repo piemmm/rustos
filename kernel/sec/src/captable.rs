@@ -177,6 +177,18 @@ pub struct TaskCapabilities {
     /// kernel-resolved state, never from caller-supplied bytes, so an audit
     /// consumer may trust it to name the acting process.
     name: ProcName,
+    /// Kernel-attested monotonic timestamp of the task's admission — the
+    /// value the Arch HAL monotonic counter (`ticks_now`) read at the instant
+    /// the process was admitted. Defaults to `0`, the sentinel for a task
+    /// admitted before user-process start tracking runs (PID 1, the storage
+    /// bootstrap-floor drivers, kernel threads — the boot principals), which
+    /// began at boot. The production process-admit path sets it through
+    /// [`Self::with_start_time`] from the kernel's own monotonic clock, never
+    /// from caller-supplied bytes, so an audit or origin consumer may trust it
+    /// to order and age a process instance, and to distinguish two lifetimes
+    /// that reused a numeric id even within one monotonic epoch. It confers no
+    /// capability.
+    start_time: u64,
 }
 
 impl TaskCapabilities {
@@ -231,6 +243,7 @@ impl TaskCapabilities {
             proc_id: ProcId::KERNEL,
             parent_proc_id: ProcId::KERNEL,
             name: ProcName::EMPTY,
+            start_time: 0,
         }
     }
 
@@ -331,6 +344,33 @@ impl TaskCapabilities {
     pub fn with_name(mut self, name: ProcName) -> Self {
         self.name = name;
         self
+    }
+
+    /// Attach the kernel-attested monotonic admission timestamp to this
+    /// record.
+    ///
+    /// Consumed and returned so the process-admit path can set it inline
+    /// before inserting the record into the [`CapTable`], mirroring
+    /// [`Self::with_proc_id`]. Only the kernel's process-admit path calls it,
+    /// passing the value the Arch HAL monotonic counter read at admission —
+    /// never a caller-supplied value. A record with no attested start time
+    /// keeps the `0` boot/kernel-principal sentinel.
+    #[must_use]
+    pub fn with_start_time(mut self, start_time: u64) -> Self {
+        self.start_time = start_time;
+        self
+    }
+
+    /// The task's kernel-attested monotonic admission timestamp.
+    ///
+    /// Returns `0` for a boot or kernel principal admitted before
+    /// user-process start tracking runs. The value is attested by the kernel
+    /// — read from the monotonic clock at admission, never caller-supplied —
+    /// so an audit or origin consumer may trust it to order and age the
+    /// process instance.
+    #[must_use]
+    pub fn start_time(&self) -> u64 {
+        self.start_time
     }
 
     /// The task's kernel-attested process name (empty if none was attested).
@@ -730,6 +770,25 @@ mod tests {
         assert_eq!(named.name(), "sysinfod");
         // Attaching the name changes nothing about the capability set.
         assert!(named.has(CapabilityId::FS_MOUNT));
+    }
+
+    #[test]
+    fn start_time_defaults_to_boot_sentinel_and_with_start_time_attaches() {
+        let grant = caps_of(&[CapabilityId::FS_MOUNT]);
+        let sink = RecordingSink::new();
+        let base = TaskCapabilities::derive(TaskId(15), UserId(1000), grant, grant, &sink);
+        // A freshly-derived record carries the `0` boot/kernel-principal
+        // sentinel until an admission timestamp is attested.
+        assert_eq!(base.start_time(), 0);
+
+        let started = base.with_start_time(0x1234_5678_9abc_def0);
+        assert_eq!(started.start_time(), 0x1234_5678_9abc_def0);
+        // Attaching the start time is identity only: it changes nothing about
+        // the capability set, and it is independent of the other attested
+        // fields (proc_id / name stay at their defaults).
+        assert!(started.has(CapabilityId::FS_MOUNT));
+        assert!(started.proc_id().is_kernel());
+        assert_eq!(started.name(), "");
     }
 
     #[test]

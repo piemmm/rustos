@@ -4052,6 +4052,11 @@ where
         // permission model and the attested `Origin`; capabilities are
         // unchanged — `caps` is the manifest∩user-grant set the producer
         // derived, passed as both bounds so the effective set is exactly it.
+        // Snapshot the kernel's monotonic clock at admission as the child's
+        // attested start time, so an audit or origin consumer can order and
+        // age the instance and tell apart two lifetimes that reused a numeric
+        // id. Read kernel-side from the Arch HAL counter, never caller-supplied.
+        let start_time = SchedulerArch::ticks_now(self.arch);
         let record = TaskCapabilities::derive(sec_id, self.credential.uid, caps, caps, self.audit)
             .with_proc_id(self.proc_id)
             .with_parent_proc_id(parent_proc_id)
@@ -4059,7 +4064,8 @@ where
             .with_credential(
                 self.credential.primary_gid,
                 self.credential.supplementary_gids.clone(),
-            );
+            )
+            .with_start_time(start_time);
         self.caps.write().insert(record);
 
         // Register the child's frozen address space + direct map under the
@@ -7264,6 +7270,12 @@ mod tests {
         let dma = HwResource::dma(0, 0x1000);
         let requested = [regs, dma];
 
+        // Set the arch's monotonic counter to a known value so the admit
+        // path's start-time attestation (read from `ticks_now`) is observable
+        // and distinguishable from the `0` boot sentinel.
+        let admit_ticks: u64 = 0x4242;
+        arch.set_ticks(admit_ticks);
+
         let ctx = KernelSpawnCtx::new(
             &frames,
             None,
@@ -7317,6 +7329,18 @@ mod tests {
                 .caps_for(child)
                 .map(|c| alloc::string::ToString::to_string(c.name())),
             Some(alloc::string::String::from("driverproc"))
+        );
+
+        // The admit path snapshots the kernel's monotonic clock as the
+        // child's attested start time — read from `ticks_now`, never
+        // caller-supplied — so an audit or origin consumer can age and order
+        // the instance.
+        assert_eq!(
+            table
+                .read()
+                .caps_for(child)
+                .map(TaskCapabilities::start_time),
+            Some(admit_ticks)
         );
 
         // The driver's matched node is recorded against it, so a later

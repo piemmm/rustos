@@ -1746,14 +1746,16 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
 
     /// Emit a security-relevant dispatcher audit record carrying the
     /// caller's kernel-attested identity prefix — numeric task id,
-    /// process-instance id, parent process-instance id, and process name
-    /// (`comm`) — followed by the site-specific `extra` fields.
+    /// process-instance id, parent process-instance id, process name
+    /// (`comm`), and monotonic admission time (`start`) — followed by the
+    /// site-specific `extra` fields.
     ///
     /// One definition of the identity prefix, so the audit sites cannot
     /// drift in which attested fields they record or how they render them.
     /// Every prefix field is read from the kernel-attested [`CallerContext`],
     /// never from caller-supplied bytes. `extra` carries at most two fields
-    /// at every call site, which the fixed six-slot buffer accommodates.
+    /// at every call site, which the fixed seven-slot buffer accommodates
+    /// alongside the five identity fields.
     fn audit_with_identity(
         &self,
         event: AuditEvent,
@@ -1766,7 +1768,7 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
         let mut fields = [Field {
             key: "",
             value: rustos_log::FieldValue::Null,
-        }; 6];
+        }; 7];
         fields[0] = Field {
             key: "task",
             value: rustos_log::FieldValue::Str(format_hex_u64(caller.task_id.0, &mut t)),
@@ -1783,8 +1785,12 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             key: "comm",
             value: rustos_log::FieldValue::Str(caller.caps.name()),
         };
-        let n = 4 + extra.len();
-        fields[4..n].copy_from_slice(extra);
+        fields[4] = Field {
+            key: "start",
+            value: rustos_log::FieldValue::UnsignedInt(caller.caps.start_time()),
+        };
+        let n = 5 + extra.len();
+        fields[5..n].copy_from_slice(extra);
         record(self.audit, event, &fields[..n]);
     }
 
@@ -2813,6 +2819,65 @@ mod tests {
         let seen = sink.seen.borrow();
         assert_eq!(seen.len(), 1, "exactly the one denied record");
         assert_eq!(seen[0], "sysinfod");
+    }
+
+    #[test]
+    fn audit_records_carry_the_callers_attested_start_time() {
+        /// Sink that captures the value of the `start` field of each event.
+        struct StartFieldSink {
+            seen: RefCell<Vec<alloc::string::String>>,
+        }
+        impl Sink for StartFieldSink {
+            fn write_event(&self, event: &Event<'_>) {
+                for f in event.fields {
+                    if f.key == "start" {
+                        self.seen
+                            .borrow_mut()
+                            .push(alloc::string::ToString::to_string(&f.value));
+                    }
+                }
+            }
+        }
+        set_max_level(Level::Trace);
+        let sink = StartFieldSink {
+            seen: RefCell::new(Vec::new()),
+        };
+
+        // The admission timestamp lives on the capability record, attested
+        // kernel-side from the monotonic clock; it is not derived from the
+        // numeric task id and cannot be set by the caller.
+        let start = 0x00A1_B2C3_u64;
+        let caps = TaskCapabilities::derive(
+            TaskId(7),
+            UserId(1000),
+            CapabilitySet::empty(),
+            CapabilitySet::empty(),
+            &sink,
+        )
+        .with_start_time(start);
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers::default();
+        let d = Dispatcher::new(&h, &sink);
+
+        // A capability-gated syscall the empty set cannot satisfy → denied,
+        // which emits an audited record carrying the `start` field.
+        let mut args = RawArgs::ZERO;
+        args.0[0] = 1;
+        args.0[1] = u64::from(CapabilityId::FS_MOUNT.as_u16());
+        assert_eq!(
+            d.dispatch(&ctx, SyscallNumber::CAP_REVOKE.as_u16(), args),
+            Err(Errno::PermissionDenied)
+        );
+
+        let seen = sink.seen.borrow();
+        assert_eq!(seen.len(), 1, "exactly the one denied record");
+        // The typed unsigned value renders as its decimal, and it is the
+        // attested record value, not the numeric task id (7).
+        assert_eq!(seen[0], alloc::format!("{start}"));
+        assert_ne!(seen[0], "7");
     }
 
     #[test]

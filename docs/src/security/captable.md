@@ -83,6 +83,26 @@ ids). One `audit_with_identity` helper in `kernel/syscall` emits this
 attested identity prefix, so the audit sites cannot drift in which fields
 they record. The attestation is the kernel's, never the caller's.
 
+### Admission time (`start_time`)
+
+The record also carries a kernel-attested **admission timestamp**: the value
+the Arch HAL monotonic counter (`ticks_now`) read at the instant the process
+was admitted. It is snapshotted kernel-side by the process-admit path
+(`with_start_time`), never supplied or influenced by any caller, so an audit
+or origin consumer may trust it to order and age a process instance — and, in
+particular, to tell apart two lifetimes that reused the same numeric id even
+within one monotonic epoch, complementing the random half of `proc_id`. A task
+admitted before user-process start tracking runs — PID 1, the storage
+bootstrap-floor drivers, kernel threads — keeps the `0` boot sentinel, meaning
+"started at boot", exactly as those principals keep the `ProcId::KERNEL`
+sentinel. The value confers no capability; it is identity only.
+
+Every security-relevant dispatcher audit record therefore carries the caller's
+attested `start` field (a typed unsigned integer) beside `task`, `proc`,
+`pproc`, and `comm`, all emitted through the one `audit_with_identity` helper
+in `kernel/syscall` so the sites cannot drift. The attestation is the
+kernel's, never the caller's.
+
 ### Group credential (`primary_gid` / supplementary groups) and spawn-as-user
 
 Beyond the owning `uid` the record has always carried, each

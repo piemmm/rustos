@@ -168,6 +168,14 @@ impl TestArch {
     pub fn set_monotonic_ns(&self, value: u64) {
         self.monotonic_ns.store(value, Ordering::Relaxed);
     }
+
+    /// Set the value [`SchedulerArch::ticks_now`] reports.
+    ///
+    /// Lets a test drive the process-admit start-time attestation with a
+    /// known monotonic reading.
+    pub fn set_ticks(&self, value: u64) {
+        self.ticks.store(value, Ordering::Relaxed);
+    }
 }
 
 impl SchedulerArch for TestArch {
