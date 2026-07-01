@@ -84,9 +84,18 @@ done items):
   (`BufReader`/`BufWriter`, `read_line`/`read_until`/`lines`), and formatting
   (`write_fmt`) live in `lib/rt/src/io.rs` (module `rustos_rt::io`), with host
   unit tests and rustdoc + `docs/src/lib/rt-io.md`.
-- **NOT STARTED — userland adoption (IO4).** Migrating the in-tree callers off
-  the hand-rolled byte-slice loops onto `rustos_rt::io` and deleting the loops
-  they replace is the remaining stage.
+- **DONE — userland adoption (IO4).** The in-tree callers that hand-rolled a
+  short-write loop over the `lib/rt` byte-slice wrappers now write through
+  `rustos_rt::io::{Stdout, Stderr, Write}`, and the duplicated loops are
+  deleted: `userland/shell/shell` (`RtConsole`), `userland/session/login`
+  (`RtPrompt`), `userland/apps/top` (`RtTty`), `userland/system/init` (the
+  banner write), and `lib/procinfo` (`RtOutput` / `write_stderr_line`, which
+  back `sysinfo` / `ps` / `top`). There is one `Write::write_all` loop in
+  userland. The bounded, edit-aware line readers that are **not** the unbounded
+  `BufReader` — the shell REPL's `MAX_LINE`-capped `LineReader` and login's
+  `push_line_byte` editor — are a deliberate security bound, not the
+  duplication IO4 removes, so they stay as their own readers over the `read`
+  primitive.
 - **DECIDED — no owning/close-on-drop handle yet.** IO1 deliberately ships a
   *non-owning* `Stream` (a view of an fd the process already owns), not an
   owning RAII closer: `abi-v1` has no generic descriptor-close trap (only the
@@ -230,14 +239,19 @@ rustdoc + the relevant `docs/` page, whole-project gate green.
   method that renders through a `core::fmt::Write` adapter capturing the first
   I/O error, so a `fmt::Error` surfaces as `Error::Fmt`, never a panic. Tests
   cover formatted output bytes and the error path.
-- **IO4 — adopt across userland (delete the hand-rolled loops).** Migrate the
+- **IO4 — adopt across userland (delete the hand-rolled loops). DONE.** The
   in-tree callers (`userland/shell/shell`, `userland/system/init`,
-  `userland/apps/*`, `sysinfo`, services) to the new surface and **delete** the
-  open-coded short-write loops and ad-hoc line buffers they replace
-  (`AGENTS.md` §2.14 — no dead code, no parallel I/O paths). This is the stage
-  that proves §2.2: after IO4 there is one I/O vocabulary in userland. Tests:
-  the existing shell/init/utility tests still pass against the new surface; the
-  `spawn_session_qemu_aarch64` vertical still proves a child's fd-1 output.
+  `userland/apps/top`, and the `sysinfo` / `ps` / `top` output path shared
+  through `lib/procinfo`) write through `rustos_rt::io::{Stdout, Stderr,
+  Write}`, and the open-coded short-write loops they carried are **deleted**
+  (no dead code, no parallel I/O paths). After IO4 there is one
+  `Write::write_all` loop in userland — this is the stage that proves §2.2.
+  The bounded/edit-aware line readers (the REPL's `MAX_LINE` `LineReader`,
+  login's `push_line_byte` editor) are retained: they are a security bound
+  (§24.4), not the unbounded `BufReader`, so collapsing them would *lose* a
+  bound rather than remove duplication. Verified by the existing
+  shell/init/utility host tests and the `spawn_session_qemu_aarch64` vertical
+  (a child's fd-1 output).
 
 ## 4. How the siblings plug in (groundwork, no IO.md ABI)
 

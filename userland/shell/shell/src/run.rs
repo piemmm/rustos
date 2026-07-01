@@ -42,48 +42,27 @@ mod program {
     use alloc::string::String;
 
     use rustos_abi::{Errno, LimitKind, ResourceLimit};
+    use rustos_rt::io::{Stderr, Stdout, Write};
     use rustos_shell::{
         Console, LaunchSpec, LimitStore, Pid, ProcessHost, ReplInput, Shell, Signal, WaitOutcome,
     };
 
     /// The shell's output sink, backed by the inherited standard output (fd 1)
-    /// and standard error (fd 2) through `rustos_rt`.
+    /// and standard error (fd 2) through the shared `rustos_rt::io` layer — the
+    /// one `Write::write_all` short-write loop, never a shell-private copy
+    /// (the charter forbids that duplication).
     struct RtConsole;
-
-    /// Write all of `bytes` to standard output, looping over short writes.
-    ///
-    /// A write that accepts zero bytes means the stream will accept no more
-    /// (a closed or full backing); the loop stops rather than spinning. Output is best-effort: a dropped tail does not
-    /// abort the session.
-    fn write_all_stdout(mut bytes: &[u8]) {
-        while !bytes.is_empty() {
-            let written = rustos_rt::stdout(bytes);
-            if written == 0 {
-                break;
-            }
-            bytes = &bytes[written.min(bytes.len())..];
-        }
-    }
-
-    /// Write all of `bytes` to standard error, looping over short writes (see
-    /// [`write_all_stdout`]).
-    fn write_all_stderr(mut bytes: &[u8]) {
-        while !bytes.is_empty() {
-            let written = rustos_rt::stderr(bytes);
-            if written == 0 {
-                break;
-            }
-            bytes = &bytes[written.min(bytes.len())..];
-        }
-    }
 
     impl Console for RtConsole {
         fn write_stdout(&self, text: &str) {
-            write_all_stdout(text.as_bytes());
+            // Output is best-effort: `write_all` loops over short writes and
+            // fails closed if the backing stops accepting bytes, and a dropped
+            // tail must not abort the session, so the result is discarded.
+            let _ = Stdout.write_all(text.as_bytes());
         }
 
         fn write_stderr(&self, text: &str) {
-            write_all_stderr(text.as_bytes());
+            let _ = Stderr.write_all(text.as_bytes());
         }
     }
 

@@ -50,6 +50,7 @@ mod program {
         supervise, AuthenticatedUser, Authenticator, DbLoad, Login, LoginConfig, LoginError,
         Prompt, SessionKind, SessionLauncher, SessionOutcome,
     };
+    use rustos_rt::io::{Stdout, Write};
     use rustos_rt::LogSink;
     use rustos_users::{UsersDb, MAX_DB_LEN};
 
@@ -69,21 +70,6 @@ mod program {
     /// unlock takes yet short enough to recover promptly; the wait parks the
     /// CPU throughout, so a long bound costs nothing.
     const DB_WAIT_TIMEOUT_NS: u64 = 5_000_000_000;
-
-    /// Write all of `bytes` to standard output, looping over short writes.
-    ///
-    /// A write that accepts zero bytes means the stream will accept no more
-    /// (a closed or full backing); the loop stops rather than spinning. Output is best-effort: a dropped tail does not
-    /// abort the prompt.
-    fn write_all_stdout(mut bytes: &[u8]) {
-        while !bytes.is_empty() {
-            let written = rustos_rt::stdout(bytes);
-            if written == 0 {
-                break;
-            }
-            bytes = &bytes[written.min(bytes.len())..];
-        }
-    }
 
     /// Read one edited input line (without its terminator) from standard
     /// input into `buf`, returning the number of bytes filled.
@@ -124,7 +110,11 @@ mod program {
 
     impl Prompt for RtPrompt {
         fn write(&self, text: &str) {
-            write_all_stdout(text.as_bytes());
+            // The shared `rustos_rt::io` short-write loop — no login-private
+            // copy (the charter forbids that duplication). Prompt output is
+            // best-effort (a dropped tail does not abort the prompt), so the
+            // fail-closed result is discarded; `write_all` never spins.
+            let _ = Stdout.write_all(text.as_bytes());
         }
 
         fn read_line(&self, buf: &mut [u8]) -> Result<usize, Errno> {
@@ -148,7 +138,7 @@ mod program {
             // was not echoed (echo was off), so advance the display a line
             // ourselves to match the un-suppressed prompts.
             let _ = rustos_rt::set_echo(true);
-            write_all_stdout(b"\r\n");
+            let _ = Stdout.write_all(b"\r\n");
             result
         }
     }

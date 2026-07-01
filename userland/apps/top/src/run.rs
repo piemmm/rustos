@@ -44,6 +44,7 @@ mod program {
     use rustos_abi::STDOUT;
     use rustos_curses::{CursesError, Result as CursesResult, Screen, Size, Tty};
     use rustos_procinfo::IpcTransport;
+    use rustos_rt::io::{Stdout, Write};
     use rustos_termcap::TermType;
     use rustos_top::{run, Model, Scope};
 
@@ -69,17 +70,11 @@ mod program {
 
     impl Tty for RtTty {
         fn write(&mut self, bytes: &[u8]) -> CursesResult<()> {
-            let mut rest = bytes;
-            while !rest.is_empty() {
-                let written = rustos_rt::stdout(rest);
-                if written == 0 {
-                    // The stream will accept no more bytes (a closed or full
-                    // backing): report it rather than spinning.
-                    return Err(CursesError::Io);
-                }
-                rest = &rest[written.min(rest.len())..];
-            }
-            Ok(())
+            // The shared `rustos_rt::io` short-write loop — no tty-private copy
+            // (the charter forbids that duplication). `write_all` loops over
+            // short writes and fails closed (never spins) if the backing stops
+            // accepting bytes, which the seam reports as an I/O error.
+            Stdout.write_all(bytes).map_err(|_| CursesError::Io)
         }
 
         fn read(&mut self) -> CursesResult<Vec<u8>> {

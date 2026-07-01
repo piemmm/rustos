@@ -18,6 +18,7 @@ use alloc::vec::Vec;
 
 use rustos_abi::sysinfo::{decode_reply, SYSINFO_ENDPOINT, SYSINFO_MAX_REPLY};
 use rustos_abi::Errno;
+use rustos_rt::io::{Stderr, Stdout, Write};
 
 use crate::{Output, Transport};
 
@@ -67,8 +68,13 @@ pub struct RtOutput;
 
 impl Output for RtOutput {
     fn write_line(&self, line: &str) -> Result<(), Errno> {
-        write_all(line.as_bytes(), rustos_rt::stdout);
-        write_all(b"\n", rustos_rt::stdout);
+        // The shared `rustos_rt::io` short-write loop — no procinfo-private
+        // copy (the charter forbids that duplication). Output is best-effort
+        // (a stream that accepts no more ends the write rather than spinning),
+        // so the fail-closed result is discarded.
+        let mut out = Stdout;
+        let _ = out.write_all(line.as_bytes());
+        let _ = out.write_all(b"\n");
         Ok(())
     }
 }
@@ -101,21 +107,9 @@ pub fn args() -> Option<Vec<&'static str>> {
 /// it never contaminates the standard-output data stream. Shared by the `ps`
 /// and `sysinfo` `Run` binaries.
 pub fn write_stderr_line(line: &str) {
-    write_all(line.as_bytes(), rustos_rt::stderr);
-    write_all(b"\n", rustos_rt::stderr);
-}
-
-/// Write all of `bytes` to the stream `sink` writes to, looping over short
-/// writes.
-///
-/// A write that accepts zero bytes means the stream will accept no more (a
-/// closed or full backing); the loop stops rather than spinning.
-fn write_all(mut bytes: &[u8], sink: fn(&[u8]) -> usize) {
-    while !bytes.is_empty() {
-        let written = sink(bytes);
-        if written == 0 {
-            break;
-        }
-        bytes = &bytes[written.min(bytes.len())..];
-    }
+    // The shared `rustos_rt::io` short-write loop, never a procinfo-private
+    // copy (the charter forbids that duplication); best-effort, so discarded.
+    let mut err = Stderr;
+    let _ = err.write_all(line.as_bytes());
+    let _ = err.write_all(b"\n");
 }

@@ -10,8 +10,9 @@
 //! program's `main`.
 //!
 //! `main` parses the compiled-in `startup::DEFAULT_CONFIG`, writes the
-//! first banner line to its inherited standard output (fd 1) through
-//! `rustos_rt::stdout` (the `abi-v1` `stream_write` syscall, `init` binds to the stream, never a device), then **supervises** the
+//! first banner line to its inherited standard output (fd 1) through the
+//! shared `rustos_rt::io` layer over the `abi-v1` `stream_write` syscall
+//! (`init` binds to the stream, never a device), then **supervises** the
 //! user's sessions: one session program per discovered text console
 //! (`console_count` / `spawn_at` — the video console and the UART are
 //! separate session contexts, `plans/PI.md` P11), reaped with wait-any and
@@ -36,6 +37,8 @@ mod supervisor;
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
+    use rustos_rt::io::{Stdout, Write};
+
     use crate::startup::{StartupConfig, BANNER, DEFAULT_CONFIG, MAX_SERVICES};
     use crate::supervisor::{supervise, Outcome, Sessions};
 
@@ -92,20 +95,20 @@ mod program {
     /// discovered text console for the lifetime of PID 1
     /// ([`supervise`] — `plans/PI.md` P11).
     ///
-    /// The banner write is *gated*: `stdout` returns the number of
-    /// bytes the kernel accepted, so a short count means the write did not
-    /// fully land (a missing `CAP_CONSOLE_WRITE`, an unresolved address
-    /// space, an unestablished descriptor, or a closed-fail kernel path).
-    /// PID 1 cannot usefully proceed without the console it was spawned to
-    /// drive, so it parks fail-closed rather than supervising sessions on a
-    /// console it never reached. This is a terminal park,
-    /// not a retry loop.
+    /// The banner write is *gated*: `write_all` loops over benign short writes
+    /// and fails closed only when the backing accepts nothing more (a missing
+    /// `CAP_CONSOLE_WRITE`, an unresolved address space, an unestablished
+    /// descriptor, or a closed-fail kernel path). PID 1 cannot usefully proceed
+    /// without the console it was spawned to drive, so it parks fail-closed
+    /// rather than supervising sessions on a console it never reached. This is
+    /// a terminal park, not a retry loop.
     fn main() -> i32 {
         let Ok(config) = StartupConfig::parse(DEFAULT_CONFIG) else {
             return EXIT_CONFIG_INVALID;
         };
-        let banner = BANNER.as_bytes();
-        if rustos_rt::stdout(banner) != banner.len() {
+        // The shared `rustos_rt::io` short-write loop, never an init-private
+        // copy (the charter forbids that duplication).
+        if Stdout.write_all(BANNER.as_bytes()).is_err() {
             loop {
                 core::hint::spin_loop();
             }

@@ -2481,8 +2481,8 @@ reflink independence, acorn preset round-trip).
 
 ### Stage 6 follow-up — Rust I/O abstraction (`plans/IO.md`)
 
-**Status: in progress — the library (IO1–IO3) is landed; userland adoption
-(IO4) remains.**
+**Status: done — the library (IO1–IO3) and userland adoption (IO4) are
+landed.**
 
 The ergonomic `std::io`-equivalent library lives in `lib/rt/src/io.rs` (module
 `rustos_rt::io`): one fd-generic `Read`/`Write` trait pair with looping
@@ -2501,10 +2501,14 @@ fd through the identical trap path). `StdInfo` (fd 3) writes are best-effort
 owning/close-on-drop handle yet: `abi-v1` has no generic descriptor-close trap,
 so it would be a speculative interface (§2.4) — it lands with the
 descriptor-producing/closing ABI. RustOS builds **no** system-wide C `stdio`
-(§16.4, `plans/CCOMPAT.md`). **Remaining: IO4** — migrate the in-tree callers
-(`userland/shell/shell`, `userland/system/init`, `userland/apps/*`, `sysinfo`,
-services) onto `rustos_rt::io` and delete the hand-rolled byte-slice loops they
-replace (§2.14). See `plans/IO.md` (binding under `AGENTS.md`).
+(§16.4, `plans/CCOMPAT.md`). **IO4 done:** the in-tree callers
+(`userland/shell/shell`, `userland/system/init`, `userland/apps/top`, and the
+`sysinfo`/`ps`/`top` output path shared through `lib/procinfo`) write through
+`rustos_rt::io::{Stdout, Stderr, Write}` and their hand-rolled short-write
+loops are deleted (§2.14) — one `Write::write_all` loop in userland. The
+bounded/edit-aware line readers (the REPL's `MAX_LINE` `LineReader`, login's
+`push_line_byte` editor) are retained as a security bound (§24.4), not the
+unbounded `BufReader`. See `plans/IO.md` (binding under `AGENTS.md`).
 
 ---
 
