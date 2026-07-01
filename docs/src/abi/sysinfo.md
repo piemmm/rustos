@@ -64,6 +64,22 @@ fails closed: bad magic or a non-zero reserved field is
 [`Errno::OutOfRange`], and an over-large payload is
 [`Errno::LengthOutOfRange`].
 
+## Reply framing
+
+The synchronous call transport (`ipc_call`) always succeeds at the
+transport level, so it cannot carry a per-query refusal (a missing
+`CAP_SYSINFO_GLOBAL`, say). `sysinfod` therefore frames every reply with a
+four-byte little-endian status word ([`SYSINFO_REPLY_STATUS_LEN`]): zero
+followed by the typed payload on success ([`encode_reply_ok`]), or the
+non-zero [`Errno`] code alone on a refusal ([`encode_reply_err`]). A client
+decodes it with [`decode_reply`], which returns the payload slice on
+success, the server's reported `Errno` on a named refusal, and fails
+closed with [`Errno::OutOfRange`] on a status word that is neither zero nor
+a defined code. The reply frame is untrusted server output, so its decoder
+— together with the kernel primitive's closed [`IntrospectDomain`] selector
+(`IntrospectDomain::from_u32`) — is exercised by the `lib/abi` fuzz harness
+(`AGENTS.md` §19.6) alongside the request decoders.
+
 ## Typed payloads
 
 - [`ProcessListRequest`] — `offset`/`limit` pagination for the two
@@ -142,3 +158,9 @@ Every payload is `#[repr(C)]`, allocation-free, and exposes a
 [`Errno::AbiVersionUnsupported`]: ../../rustos_abi/error/enum.Errno.html
 [`Errno::OutOfRange`]: ../../rustos_abi/error/enum.Errno.html
 [`Errno::LengthOutOfRange`]: ../../rustos_abi/error/enum.Errno.html
+[`Errno`]: ../../rustos_abi/error/enum.Errno.html
+[`SYSINFO_REPLY_STATUS_LEN`]: ../../rustos_abi/sysinfo/constant.SYSINFO_REPLY_STATUS_LEN.html
+[`encode_reply_ok`]: ../../rustos_abi/sysinfo/fn.encode_reply_ok.html
+[`encode_reply_err`]: ../../rustos_abi/sysinfo/fn.encode_reply_err.html
+[`decode_reply`]: ../../rustos_abi/sysinfo/fn.decode_reply.html
+[`IntrospectDomain`]: ../../rustos_abi/sysinfo/enum.IntrospectDomain.html

@@ -29,8 +29,9 @@ use rustos_abi::input::{KeyInput, PointerInput};
 use rustos_abi::process::{ProcessStart, ProcessStartHeader, StringSlot};
 use rustos_abi::rlimit::ResourceLimit;
 use rustos_abi::sysinfo::{
-    KernelMemoryStats, MountListRequest, MountRecord, ProcessListRequest, ProcessRecord,
-    ResourceLimitRecord, SysinfoRequestHeader, SystemIdentity, Uptime,
+    decode_reply, encode_reply_ok, IntrospectDomain, KernelMemoryStats, MountListRequest,
+    MountRecord, ProcessListRequest, ProcessRecord, ResourceLimitRecord, SysinfoRequestHeader,
+    SystemIdentity, Uptime, SYSINFO_REPLY_STATUS_LEN,
 };
 use rustos_abi::time::{Duration64, Time64};
 use rustos_abi::{
@@ -155,6 +156,37 @@ fn exercise(bytes: &[u8]) {
     exercise_process(bytes);
     exercise_usb_urb(bytes);
     exercise_fs(bytes);
+    exercise_introspect(bytes);
+}
+
+/// Drive the System Information introspection decoders on `bytes`.
+///
+/// Split out of [`exercise`] so each helper stays a single, readable unit;
+/// the contract is identical (must not panic for any input; an accepted
+/// decode round-trips through its matching encoder). These are the decoders a
+/// `sysinfo` client feeds with bytes a possibly-hostile server produced: the
+/// framed reply a client parses off the synchronous call transport, and the
+/// closed introspection-domain selector.
+fn exercise_introspect(bytes: &[u8]) {
+    // The reply frame is untrusted server output. On success the decoder
+    // returns a borrowed payload slice; re-framing that payload must yield
+    // exactly the original bytes (the status word was zero). A non-zero status
+    // is either a defined server `Errno` or a fail-closed `OutOfRange` — never
+    // a panic.
+    if let Ok(payload) = decode_reply(bytes) {
+        let mut buf = vec![0u8; SYSINFO_REPLY_STATUS_LEN + payload.len()];
+        let written =
+            encode_reply_ok(payload, &mut buf).expect("an accepted reply payload must re-frame");
+        assert_eq!(&buf[..written], bytes);
+    }
+    if bytes.len() >= 4 {
+        let raw = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        if let Ok(domain) = IntrospectDomain::from_u32(raw) {
+            // An accepted discriminant round-trips through its raw encoding.
+            assert_eq!(IntrospectDomain::from_u32(domain.as_u32()), Ok(domain));
+            assert_eq!(domain.as_u32(), raw);
+        }
+    }
 }
 
 /// Drive the `fs` wire decoders on `bytes`.
@@ -404,6 +436,26 @@ fn structured_fs_inputs_with_corrupted_fields_never_panic() {
                 exercise(base);
                 base[byte] ^= 1 << bit;
             }
+        }
+    }
+}
+
+#[test]
+fn structured_reply_inputs_with_corrupted_fields_never_panic() {
+    // Walk the accepted/rejected boundary of the untrusted `sysinfo` reply
+    // decoder from a well-formed success frame (a zero status word followed by
+    // a short payload). Bit-flipping the status word drives the success /
+    // server-errno / fail-closed `OutOfRange` branches without ever panicking.
+    let payload = [0x11u8, 0x22, 0x33, 0x44];
+    let mut frame = vec![0u8; SYSINFO_REPLY_STATUS_LEN + payload.len()];
+    let written = encode_reply_ok(&payload, &mut frame).expect("a well-formed reply frame encodes");
+    assert_eq!(written, frame.len());
+
+    for byte in 0..frame.len() {
+        for bit in 0..8u32 {
+            frame[byte] ^= 1 << bit;
+            exercise(&frame);
+            frame[byte] ^= 1 << bit;
         }
     }
 }
