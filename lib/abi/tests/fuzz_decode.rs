@@ -24,6 +24,7 @@
 //! reproducible. The bit-flip harness is an exhaustive boundary sweep, not a
 //! random one, so it does not draw a seed.
 
+use rustos_abi::fs::{DirEntry, FileKind, FileStat, OpenFlags, FS_NAME_MAX};
 use rustos_abi::input::{KeyInput, PointerInput};
 use rustos_abi::process::{ProcessStart, ProcessStartHeader, StringSlot};
 use rustos_abi::rlimit::ResourceLimit;
@@ -153,6 +154,55 @@ fn exercise(bytes: &[u8]) {
     }
     exercise_process(bytes);
     exercise_usb_urb(bytes);
+    exercise_fs(bytes);
+}
+
+/// Drive the `fs` wire decoders on `bytes`.
+///
+/// Split out of [`exercise`] so each helper stays a single, readable unit;
+/// the contract is identical (must not panic for any input; an accepted
+/// decode round-trips through its matching encoder). These are the
+/// filesystem-ABI decoders a userland file client and the `fs_*` reply path
+/// feed with buffers a possibly-hostile peer produced.
+fn exercise_fs(bytes: &[u8]) {
+    if let Ok(stat) = FileStat::decode(bytes) {
+        let mut buf = [0u8; FileStat::WIRE_LEN];
+        let written = stat
+            .encode(&mut buf)
+            .expect("an accepted FileStat must re-encode");
+        assert_eq!(written, FileStat::WIRE_LEN);
+        let redecoded =
+            FileStat::decode(&buf).expect("round-trip of an accepted FileStat must succeed");
+        assert_eq!(stat, redecoded);
+    }
+    if let Ok((entry, consumed)) = DirEntry::decode(bytes) {
+        // The reported consumed length is exactly the record's encoded size,
+        // so a reader walking a packed stream advances correctly.
+        assert_eq!(consumed, entry.encoded_len());
+        let mut buf = [0u8; DirEntry::HEADER_LEN + FS_NAME_MAX];
+        let written = entry
+            .encode_into(&mut buf)
+            .expect("an accepted DirEntry must re-encode");
+        assert_eq!(written, consumed);
+        let (redecoded, reconsumed) =
+            DirEntry::decode(&buf).expect("round-trip of an accepted DirEntry must succeed");
+        assert_eq!(entry, redecoded);
+        assert_eq!(reconsumed, consumed);
+    }
+    // `FileKind`/`OpenFlags` decode from a scalar rather than a slice; derive
+    // the scalar from the fuzz bytes so the boundary between accepted and
+    // rejected values is still walked.
+    if let Some(&raw) = bytes.first() {
+        if let Ok(kind) = FileKind::from_u8(raw) {
+            assert_eq!(FileKind::from_u8(kind.as_u8()), Ok(kind));
+        }
+    }
+    if bytes.len() >= 4 {
+        let raw = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        if let Ok(flags) = OpenFlags::from_bits(raw) {
+            assert_eq!(OpenFlags::from_bits(flags.bits()), Ok(flags));
+        }
+    }
 }
 
 /// Drive the URB transport decoders on `bytes`.
@@ -318,6 +368,42 @@ fn structured_inputs_with_corrupted_fields_never_panic() {
             base[byte] ^= 1 << bit;
             exercise(&base);
             base[byte] ^= 1 << bit;
+        }
+    }
+}
+
+#[test]
+fn structured_fs_inputs_with_corrupted_fields_never_panic() {
+    // Walk the accepted/rejected boundary of the filesystem decoders from
+    // well-formed images: a `FileStat` and a packed `DirEntry`. Bit-flipping
+    // each byte drives the kind/length/reserved-field checks without ever
+    // panicking.
+    let mut stat = [0u8; FileStat::WIRE_LEN];
+    FileStat {
+        kind: FileKind::Regular,
+        size: 0xDEAD_BEEF,
+        mode: 0o644,
+        uid: 1000,
+        gid: 1000,
+    }
+    .encode(&mut stat)
+    .expect("a well-formed FileStat encodes");
+
+    let mut dirent = [0u8; DirEntry::HEADER_LEN + 5];
+    DirEntry {
+        kind: FileKind::Directory,
+        name: b"inbox",
+    }
+    .encode_into(&mut dirent)
+    .expect("a well-formed DirEntry encodes");
+
+    for base in [stat.as_mut_slice(), dirent.as_mut_slice()] {
+        for byte in 0..base.len() {
+            for bit in 0..8u32 {
+                base[byte] ^= 1 << bit;
+                exercise(base);
+                base[byte] ^= 1 << bit;
+            }
         }
     }
 }

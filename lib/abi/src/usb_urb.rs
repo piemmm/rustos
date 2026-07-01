@@ -265,7 +265,12 @@ pub fn decode_completion(reply: &[u8]) -> Result<u32, Errno> {
             }
             Ok(read_u32(reply, COMPLETION_STATUS_LEN))
         }
-        negative => Err(Errno::from_i32(-negative).unwrap_or(Errno::BadMagic)),
+        // `checked_neg` guards `i32::MIN`, whose negation overflows; such a
+        // status is not a valid negated discriminant, so it fails closed.
+        negative => Err(negative
+            .checked_neg()
+            .and_then(Errno::from_i32)
+            .unwrap_or(Errno::BadMagic)),
     }
 }
 
@@ -357,6 +362,15 @@ mod tests {
     fn corrupt_status_fails_closed() {
         let mut buf = [0u8; URB_COMPLETION_LEN];
         put_i32(&mut buf, 0, -9_999);
+        assert_eq!(decode_completion(&buf), Err(Errno::BadMagic));
+    }
+
+    #[test]
+    fn i32_min_status_fails_closed_without_overflow() {
+        // A hostile status word of `i32::MIN` cannot be negated in `i32`;
+        // the decoder must fail closed rather than overflow-panic.
+        let mut buf = [0u8; URB_COMPLETION_LEN];
+        put_i32(&mut buf, 0, i32::MIN);
         assert_eq!(decode_completion(&buf), Err(Errno::BadMagic));
     }
 }
