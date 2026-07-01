@@ -38,6 +38,13 @@ neither re-implements the record format.
   with forward-scan power-loss recovery.
 - **`chain`**: the per-stream SHA-256 record hash chain (`lib/crypto`), the one
   chain the log uses.
+- **`bootring`**: the bounded per-CPU early-boot ring (`BootRing`). Before
+  `/System/Logs` is writable each CPU retains its most recent records — the
+  same logical record body plus the `cpu_seq` and monotonic time import must
+  preserve — in an allocation-free FIFO over a caller-owned arena. A full ring
+  evicts the oldest and accumulates a contiguous `cpu_seq` `LossRange`, so the
+  journal can emit one trusted loss record naming the dropped range rather than
+  leaving an undetectable gap.
 - **`attest`**: machine-id hashing, stream genesis, and the log-attestation key
   (HMAC-SHA256 seal/verify).
 

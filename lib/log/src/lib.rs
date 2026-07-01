@@ -25,6 +25,7 @@
 
 pub mod attest;
 pub mod authority;
+pub mod bootring;
 pub mod chain;
 mod cursor;
 pub mod dict;
@@ -44,6 +45,7 @@ pub use authority::{
     derive_source, reserved_source_prefix, resolve_stream, SourceName, StreamDecision,
     RESERVED_SOURCE_PREFIXES,
 };
+pub use bootring::{BootRing, DrainedRecord, LossRange, FRAME_HEADER_LEN, MAX_BOOT_RECORD_BODY};
 pub use chain::{
     verify_chain, verify_fresh_chain, ChainError, ChainedEntry, LogChain, GENESIS_ANCHOR,
 };

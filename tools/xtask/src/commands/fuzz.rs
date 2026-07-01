@@ -153,6 +153,12 @@ pub const TARGETS: &[Target] = &[
             "lib/log segment string-dictionary codec (untrusted /System/Logs dictionary bytes)",
     },
     Target {
+        package: "rustos-log",
+        test: "fuzz_bootring",
+        description:
+            "lib/log early-boot ring FIFO (push/pop/evict ordering + loss-range accounting)",
+    },
+    Target {
         package: "rustos-glob",
         test: "fuzz_glob",
         description: "lib/glob pattern compiler + match loop (untrusted glob-pattern bytes)",

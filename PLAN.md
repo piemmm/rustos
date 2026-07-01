@@ -2797,8 +2797,12 @@ Landed (done):
   promote-on-repeat, fail-closed, no separate on-disk block) + the authority
   model (`lib/log` `authority.rs`: system-derived `SourceName` from the
   attested `Origin`, reserved-source-prefix spoof screening, and
-  `resolve_stream` effective-stream assignment). The userland journal service +
-  anchors are SYSLOG proper (see `.junie/SYSLOG.md`).
+  `resolve_stream` effective-stream assignment) + the early-boot ring buffers
+  (`lib/log` `bootring.rs`: `BootRing`, a bounded per-CPU allocation-free FIFO
+  holding the same record body plus the `cpu_seq`/monotonic import must
+  preserve, evict-oldest with a contiguous `LossRange` for a trusted loss
+  record). The userland journal service (ingress, boot-ring import, retention)
+  + anchors are SYSLOG proper (see `.junie/SYSLOG.md`).
 - §19.6 fuzzing — `cargo xtask fuzz` over all in-tree harnesses (`--quick`/
   `--soak`), fail-closed.
 - §19.7 verified core — Bronze proptest models for `lib/caps`/`kernel/sec`/

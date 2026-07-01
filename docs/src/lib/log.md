@@ -140,6 +140,43 @@ codec (`rustos_abi::encode_named_field` / `decode_named_field`) that the
 definition, not two. Origin fields the kernel cannot yet attest are absent by
 construction rather than guessed.
 
+## Early-boot ring buffers (`bootring`)
+
+Before `/System/Logs` is writable the kernel still produces the earliest and
+most diagnostic records — memory sizing, hardware discovery, driver bring-up
+(`plans/SYSLOG.md` §8.1). Each CPU owns one `BootRing`: a bounded,
+allocation-free FIFO over a caller-owned byte arena that retains its most
+recent records until the journal can import them into the `boot` stream.
+
+* A ring stores the *same* logical record body the persistent path uses
+  (`record`, above) as an opaque blob, plus the two container-owned facts the
+  body does not carry that import must preserve: the per-CPU record sequence
+  (`cpu_seq`) and the monotonic time the record was produced. The producer
+  supplies `cpu_seq` — it owns the per-CPU counter the encoded body's own
+  `cpu_seq` already reflects — so the ring never invents a sequence that could
+  disagree with the body; it accepts values only strictly increasing and
+  rejects anything else fail-closed.
+* `push` writes one frame at the tail, wrapping the physical end of the arena
+  (frames are never split-padded, so no space is wasted). When the ring is
+  full it evicts the oldest frame(s) to make room: a boot ring keeps *recent*
+  history, never blocks the boot path, and never grows without bound. A body
+  larger than the whole ring, or larger than `MAX_BOOT_RECORD_BODY`, is
+  rejected rather than truncated.
+* Eviction is never silent. The ring accumulates the contiguous `cpu_seq`
+  range of every record dropped before it was drained; `take_loss` returns
+  that `LossRange` (CPU id, first/last sequence, count) so the journal emits
+  one trusted loss record naming the affected CPU and range rather than
+  leaving an undetectable gap.
+* `pop_oldest` drains the oldest record in FIFO order, copying its body into a
+  caller-supplied scratch buffer and returning the preserved `cpu_seq` and
+  monotonic time. The journal calls `take_loss` first, then drains, so the
+  loss record precedes the surviving records.
+
+Like `SegmentWriter`, a `BootRing` is not internally synchronised: it has one
+writer (its own CPU) and is drained once, at import, after that CPU stops
+writing. It reuses `Duration64` and the crate's fail-closed idioms; no
+allocation occurs on the boot path.
+
 ## Authority model (`authority`)
 
 A record has two classes of data: **system-attested** metadata the kernel or
