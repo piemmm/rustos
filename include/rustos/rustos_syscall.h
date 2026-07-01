@@ -87,11 +87,18 @@ extern "C" {
 #define ROS_SYS_BOOT_ID_GET 61u
 #define ROS_SYS_SYSINFO_INTROSPECT 62u
 #define ROS_SYS_TERMINAL_SIZE 63u
+#define ROS_SYS_SIGNAL 64u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns ROS_E_WOULD_BLOCK when a
 * matching child is still running. */
 #define ROS_WAIT_FLAG_NONBLOCK 0x1u
+
+/* signal() control signals (the `signal` argument, uint32_t). 0 is reserved and
+* never valid; a value outside this set is rejected with ROS_E_OUT_OF_RANGE. */
+#define ROS_SIGNAL_CONTINUE 1u
+#define ROS_SIGNAL_TERMINATE 2u
+#define ROS_SIGNAL_KILL 3u
 
 /* Syscall entry points, implemented by the user-space stub library. */
 void ros_sys_yield(void);
@@ -158,6 +165,7 @@ int32_t ros_sys_wall_time_set(void * a0, uintptr_t a1, uint32_t a2);
 uint64_t ros_sys_boot_id_get(void * a0, uintptr_t a1);
 uint64_t ros_sys_sysinfo_introspect(uint32_t a0, uint64_t a1, void * a2, uintptr_t a3);
 uint64_t ros_sys_terminal_size(uint32_t a0, void * a1, uintptr_t a2);
+int32_t ros_sys_signal(int32_t a0, uint32_t a1);
 
 #ifdef __cplusplus
 } /* extern "C" */

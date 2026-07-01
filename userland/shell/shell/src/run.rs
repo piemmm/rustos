@@ -130,10 +130,25 @@ mod program {
             Ok(WaitOutcome::Exited(status))
         }
 
-        fn signal(&self, _pid: Pid, _signal: Signal) -> Result<(), Errno> {
-            // There is no signal-delivery syscall yet (`fg`/`bg` resume is
-            // future work); fail closed rather than pretend it landed.
-            Err(Errno::NotImplemented)
+        fn signal(&self, pid: Pid, signal: Signal) -> Result<(), Errno> {
+            // Map the shell's own job-control signal vocabulary onto the
+            // `abi-v1` signal set (one definition, no shell-private numbering)
+            // and deliver it through the `signal` syscall. The kernel
+            // validates that `pid` is a child the shell spawned and fails
+            // closed; until its signal producer is installed the call surfaces
+            // `NotImplemented` honestly rather than pretending it landed.
+            let abi_signal = match signal {
+                Signal::Continue => rustos_abi::Signal::Continue,
+                Signal::Terminate => rustos_abi::Signal::Terminate,
+                Signal::Kill => rustos_abi::Signal::Kill,
+            };
+            // PIDs fit an `i32` on this ABI; `signal` takes a signed PID.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            let ret = rustos_rt::signal(pid.as_u64() as i32, abi_signal);
+            if ret < 0 {
+                return Err(errno_from(ret));
+            }
+            Ok(())
         }
 
         fn poll(&self) -> Option<(Pid, WaitOutcome)> {

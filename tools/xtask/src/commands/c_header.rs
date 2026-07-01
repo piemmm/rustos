@@ -52,8 +52,8 @@ use rustos_abi::{
     KernelMemoryStats, KeyInput, LibraryScope, LimitKind, LoadHeader, ManifestHeader, MapFlags,
     MountListRequest, MountRecord, NamedKeyCode, NeededLibrary, PointerButtonCode, PointerInput,
     PortName, ProcessListRequest, ProcessRecord, ProcessStartHeader, ProcessState, RandomFlags,
-    ResourceLimit, ResourceLimitRecord, RxePermission, Segment, Severity, StdInfoKind, StringSlot,
-    SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Time64, Uptime, WaitFlags,
+    ResourceLimit, ResourceLimitRecord, RxePermission, Segment, Severity, Signal, StdInfoKind,
+    StringSlot, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Time64, Uptime, WaitFlags,
     ABI_VERSION_V1, APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_ID_MAX,
     BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX, BUTTON_NONE, CAPABILITY_ID_MAX,
     COARSE_CLOCK_GRANULARITY_NS, CONSOLE_INHERIT, DRIVER_MANIFEST_MAGIC,
@@ -2049,6 +2049,23 @@ fn generate_syscall() -> String {
     );
     out.push('\n');
 
+    out.push_str(
+        "/* signal() control signals (the `signal` argument, uint32_t). 0 is reserved and\n\
+         * never valid; a value outside this set is rejected with ROS_E_OUT_OF_RANGE. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_SIGNAL_CONTINUE {}u",
+        Signal::Continue.as_u32()
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_SIGNAL_TERMINATE {}u",
+        Signal::Terminate.as_u32()
+    );
+    let _ = writeln!(out, "#define ROS_SIGNAL_KILL {}u", Signal::Kill.as_u32());
+    out.push('\n');
+
     out.push_str("/* Syscall entry points, implemented by the user-space stub library. */\n");
     for spec in SYSCALLS {
         let _ = writeln!(out, "{}", prototype(spec));
@@ -2344,6 +2361,19 @@ mod tests {
         assert!(
             h.contains("uint64_t ros_sys_wait(int32_t a0, void * a1, uint32_t a2);"),
             "wait prototype carries the flags argument: {h}"
+        );
+        // The signal() control-signal discriminants are read from lib/abi,
+        // never re-typed, and the prototype carries its (pid, signal) args.
+        assert!(
+            h.contains(&format!(
+                "#define ROS_SIGNAL_TERMINATE {}u",
+                Signal::Terminate.as_u32()
+            )),
+            "signal terminate discriminant: {h}"
+        );
+        assert!(
+            h.contains("int32_t ros_sys_signal(int32_t a0, uint32_t a1);"),
+            "signal prototype carries the pid and signal arguments: {h}"
         );
     }
 

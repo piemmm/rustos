@@ -508,6 +508,27 @@ job-control loop never floods the log (`AGENTS.md` §2.1 / §19.4). The
 first-party Rust wrapper is `rustos_rt::try_wait`; the C stub `ros_sys_wait`
 takes the flags argument and the header defines `ROS_WAIT_FLAG_NONBLOCK`.
 
+`signal` (no. 64) delivers a control signal to a child of the calling
+process (`plans/SPAWN.md` SP7) — the job-control primitive the shell's
+`fg`/`bg`/kill drive. Like `wait` it is **ungated**: a process may signal
+only its *own* children, so the parent/child relationship is the authority
+and no capability is required (the §16.6 own-process baseline). It **is**
+audited — delivering a signal is a process-lifecycle decision, exactly as
+`spawn`/`wait`/`exit` are audited (`AGENTS.md` §5.4.4). `pid` names a child
+the caller spawned; `signal` is a closed `rustos_abi::Signal` discriminant
+(`Continue` = 1, `Terminate` = 2, `Kill` = 3), and the reserved `0` or any
+other value fails closed with `OutOfRange` before dispatch (validate every
+input). The handler reaches the scheduler-side deliverer through the
+`kernel/core::procsignal::ProcessSignal` seam, installed at boot like the
+`wait` producer; a `pid` that is not a child of the caller fails closed with
+`NotFound`, and a `signal` issued before the producer is installed fails
+closed with `NotImplemented` through the default `NULL_PROCESS_SIGNAL`,
+never pretending a signal was delivered (`AGENTS.md` §2.9). The concrete
+deliverer that terminates/stops/continues the child lands in a later
+increment (`plans/SPAWN.md` SP7b). The first-party Rust wrapper is
+`rustos_rt::signal`; the C stub is `ros_sys_signal` and the header defines
+`ROS_SIGNAL_CONTINUE` / `ROS_SIGNAL_TERMINATE` / `ROS_SIGNAL_KILL`.
+
 `rlimit_get` (no. 17) and `rlimit_set` (no. 18) are the settable
 `ulimit`/`rlimit`-equivalent (`AGENTS.md` §24.3). Both name a closed
 `rustos_abi::LimitKind` resource via a `u32 kind` and carry a

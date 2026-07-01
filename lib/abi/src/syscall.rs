@@ -1072,6 +1072,25 @@ impl SyscallNumber {
     /// fabricates a size. An `fd` that is not an open stream, or a buffer
     /// shorter than the wire length, also fails closed.
     pub const TERMINAL_SIZE: Self = Self(63);
+    /// Deliver a control signal to a child of the calling process
+    /// (`plans/SPAWN.md` SP7).
+    ///
+    /// Arguments: `pid: i32` (a child the caller spawned) and `signal: u32`
+    /// (a [`crate::Signal`] discriminant). Returns `0`, or `-errno`. The
+    /// kernel identifies the sender from its own per-CPU current-task slot
+    /// (never a caller-supplied identity), validates the parent/child
+    /// relationship — a process may signal only its **own** children — and
+    /// delivers the signal. A `pid` that is not a child of the caller fails
+    /// closed with [`Errno::NotFound`]; a `signal` value that is not a
+    /// defined [`crate::Signal`] fails closed with [`Errno::OutOfRange`]; a
+    /// build with no process-signal service wired fails closed with
+    /// [`Errno::NotImplemented`] rather than pretending the signal landed.
+    ///
+    /// Unprivileged: signalling a child the caller created grants no
+    /// authority over any other principal, so — like [`Self::WAIT`] — no
+    /// capability is required. It is audited per call: delivering a signal is
+    /// a security-relevant process-lifecycle decision.
+    pub const SIGNAL: Self = Self(64);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
@@ -1285,6 +1304,7 @@ mod tests {
         assert_eq!(SyscallNumber::BOOT_ID_GET.as_u16(), 61);
         assert_eq!(SyscallNumber::SYSINFO_INTROSPECT.as_u16(), 62);
         assert_eq!(SyscallNumber::TERMINAL_SIZE.as_u16(), 63);
+        assert_eq!(SyscallNumber::SIGNAL.as_u16(), 64);
     }
 
     #[test]

@@ -59,7 +59,7 @@ extern crate alloc;
 use rustos_abi::input::KeyInput;
 use rustos_abi::waitset::{WaitSetOp, WaitSourceKind};
 use rustos_abi::{
-    BootId, FileStat, HwNode, LimitKind, MapFlags, OpenFlags, ResourceLimit, SyscallNumber,
+    BootId, FileStat, HwNode, LimitKind, MapFlags, OpenFlags, ResourceLimit, Signal, SyscallNumber,
     TerminalSize, Time64, WaitFlags, WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT,
     SPAWN_UID_INHERIT, STDERR, STDIN, STDINFO, STDOUT, TERMINAL_SIZE_WIRE_LEN,
 };
@@ -115,6 +115,9 @@ const NUM_DMA_FREE: u64 = SyscallNumber::DMA_FREE.as_u16() as u64;
 
 /// `wait` syscall number (as above).
 const NUM_WAIT: u64 = SyscallNumber::WAIT.as_u16() as u64;
+
+/// `signal` syscall number (as above).
+const NUM_SIGNAL: u64 = SyscallNumber::SIGNAL.as_u16() as u64;
 
 /// `ipc_send` syscall number (as above).
 const NUM_IPC_SEND: u64 = SyscallNumber::IPC_SEND.as_u16() as u64;
@@ -1133,6 +1136,37 @@ pub fn try_wait(pid: i32, status: &mut i32) -> i64 {
                 0,
                 0,
             ],
+        )
+    };
+    ret as i64
+}
+
+/// Deliver control signal `signal` to a child process `pid`
+/// (`SyscallNumber::SIGNAL`, `plans/SPAWN.md` SP7).
+///
+/// A process may signal only its **own** children; the kernel identifies the
+/// sender from its own current-task slot (never a caller-supplied identity),
+/// validates the parent/child relationship, and fails closed. No capability
+/// is required — signalling a child grants no authority over any other
+/// principal.
+///
+/// The kernel encodes the result as a signed register following the standard
+/// `abi-v1` convention: `0` on success, and a negative value is `-errno`
+/// (recover the [`rustos_abi::Errno`] discriminant as `-ret`) —
+/// `Errno::NotFound` when `pid` is not a child of the caller, and
+/// `Errno::NotImplemented` until the kernel's signal producer is installed.
+/// The wrapper surfaces that raw signed value; it adds no authority and hides
+/// no error.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
+pub fn signal(pid: i32, signal: Signal) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke — the kernel validates
+    // the target child and the signal value on the far side of the trap.
+    // `signal` dereferences no user pointer.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_SIGNAL,
+            [i32_arg(pid), u64::from(signal.as_u32()), 0, 0, 0, 0],
         )
     };
     ret as i64
@@ -2914,6 +2948,28 @@ mod tests {
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(try_wait(9, &mut status), want);
+        });
+    }
+
+    #[test]
+    fn signal_marshals_pid_and_signal_discriminant() {
+        let (number, args) = capture(0, || {
+            assert_eq!(signal(9, Signal::Continue), 0);
+        });
+        assert_eq!(number, NUM_SIGNAL);
+        assert_eq!(args[0], 9);
+        assert_eq!(args[1], u64::from(Signal::Continue.as_u32()));
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn signal_surfaces_negative_errno_encoding() {
+        // `NotImplemented` (no producer installed yet) is encoded as the
+        // two's-complement negation; the wrapper hands it back unchanged.
+        let want = -i64::from(rustos_abi::Errno::NotImplemented.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let (_, _) = capture(neg, || {
+            assert_eq!(signal(9, Signal::Kill), want);
         });
     }
 

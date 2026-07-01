@@ -678,6 +678,64 @@ shared `reap` primitive on hardware.
 
 ---
 
+## SP7 — the `signal` syscall (job-control signal delivery)
+
+Backs `ProcessHost::signal` (`.junie/PREREQUISITES2.md` P2), the seam the
+shell's `fg`/`bg`/kill job control drives. A parent delivers one of a small,
+closed set of control signals to a child it spawned; a process may signal
+only its **own** children, so — like `wait` — the authority is inherent in
+the parent/child relationship and needs no capability (§5.2: no capability
+with no live enforcement point). No cross-process or process-group signalling
+exists yet: that is a later stage with its own capability when a holder and
+an enforcement point exist together.
+
+**Signal set (closed, `rustos_abi::Signal`).** The minimal set job control
+needs, mirroring the shell's own `job::Signal` vocabulary: `Continue`
+(resume a stopped child, discriminant 1), `Terminate` (ask a child to end,
+2), `Kill` (force a child to end, 3). Discriminant 0 is reserved and never
+valid, so a zeroed register fails closed. `Signal::from_u32` rejects any
+other value with `Errno::OutOfRange` (validate every input).
+
+Split into two increments, exactly as SP6 was (surface+seam, then producer):
+
+- **SP7a — abi-v1 surface + fail-closed seam (host-proven).**
+  `lib/abi`: `SyscallNumber::SIGNAL` (**64**) + the closed `Signal` enum
+  (`process.rs`) + the `SyscallSpec` row (`signal(I32 pid, U32 signal) ->
+  Errno`, **unprivileged, audited** — signalling a process is a
+  security-relevant lifecycle decision, and own-children-only grants no
+  authority over another principal) + frozen-number test. `lib/abi-sys`: the
+  `ros_sys_signal` C stub (`#[export_name]`, panic-free) + drift-registry row
+  + marshalling tests; regenerate the C header
+  (`cargo xtask c-header --write`); `abi-check` + `c-header` guards green.
+  `lib/rt`: the `signal(pid, Signal) -> i64` wrapper + marshalling tests.
+  `kernel/syscall`: the `SyscallHandlers::signal` trait method (default
+  `NotImplemented` body, so the test doubles need no churn) + dispatch arm
+  (I32-pid recovery, `Signal::from_u32` validation) + decode tests.
+  `kernel/core`: a fail-closed arch-neutral `procsignal::ProcessSignal` seam
+  (`signal(sender: TaskId, pid, Signal) -> Result<(), Errno>`; default
+  `NULL_PROCESS_SIGNAL` → `NotImplemented`, mirroring `NULL_PROCESS_WAIT`),
+  the `signal` handler (forward → return `Ok(0)`), and a `with_process_signal`
+  builder, so the kernel binary needs no change yet. The shell's
+  `RtProcessHost::signal` is wired to the real `rustos_rt::signal` wrapper
+  (mapping `job::Signal` → `rustos_abi::Signal`), replacing its explicit
+  `NotImplemented` stub with the genuine syscall path (fail-closed until the
+  producer lands). Host-tested (null seam fail-closed; handler forwards;
+  dispatch decodes/validates; marshalling).
+- **SP7b — scheduler-side producer + `-M virt` vertical (remaining).** The
+  concrete `KernelProcessSignal` that reuses the `procwait` parent/child
+  bookkeeping to authorise the target, then delivers the signal by driving
+  the scheduler: `Terminate`/`Kill` force the child to exit with a
+  signalled status the parent's `wait` reports, `Stop`/`Continue` park/unpark
+  it. Installed via `with_process_signal`; proven by an aarch64 `-M virt`
+  vertical. Not part of SP7a's host-only landing.
+
+**Done when (SP7a):** a first-party program can issue `signal` through
+`abi-v1`; the call fails closed with `NotImplemented` until a producer is
+installed; the C header, `abi-check`, `deps-check`, `cfg-check`, and the
+host test matrix stay green.
+
+---
+
 ## 2. Cross-cutting requirements (apply to every stage)
 
 - **No new HAL trait unless deliberate (§17.2).** SP1–SP5 reuse the closed

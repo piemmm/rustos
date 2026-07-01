@@ -9,7 +9,7 @@
 //! (no bloat).
 
 use rustos_abi::{
-    spec_for, AbiType, CapabilityId, Errno, IrqHandle, MapFlags, OpenFlags, RandomFlags,
+    spec_for, AbiType, CapabilityId, Errno, IrqHandle, MapFlags, OpenFlags, RandomFlags, Signal,
     SyscallNumber, SyscallSpec, WaitFlags, ENCODED_TABLE, PROC_ID_HEX_LEN, SYSCALL_MAX_ARGS,
 };
 use rustos_crypto::{sha256, Sha256Digest};
@@ -344,6 +344,26 @@ pub trait SyscallHandlers {
         status: u64,
         flags: WaitFlags,
     ) -> SyscallResult;
+
+    /// Deliver control signal `signal` to a child of the calling process
+    /// (`plans/SPAWN.md` SP7).
+    ///
+    /// The dispatcher has already validated that `pid` is a sign-extended
+    /// `i32` and that `signal` is a defined [`Signal`] (a value outside the
+    /// closed set is rejected before dispatch with [`Errno::OutOfRange`]).
+    /// The implementation identifies the sender from the kernel-provided
+    /// caller identity (never a caller-supplied one), validates the
+    /// parent/child relationship — a process may signal only its **own**
+    /// children — and delivers the signal. A `pid` that is not a child of
+    /// the caller must fail closed with [`Errno::NotFound`]. Returns
+    /// `Ok(0)` on success.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`]:
+    /// a kernel build with no process-signal service wired never pretends the
+    /// signal landed. The producer is installed in `kernel/core`.
+    fn signal(&self, _caller: &CallerContext<'_>, _pid: i32, _signal: Signal) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
 
     /// Read the calling task's effective limit for resource `kind`, writing
     /// the encoded [`rustos_abi::ResourceLimit`] to the user `out` pointer.
@@ -1542,6 +1562,16 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 let flags = WaitFlags::from_bits(decode_u32(args.0[2]))?;
                 self.handlers.wait(caller, pid, args.0[1], flags)
             }
+            SyscallNumber::SIGNAL => {
+                // args[0] is a sign-extended `i32` PID recovered the same way
+                // `WAIT`/`EXIT` recover theirs; args[1] is the `Signal`
+                // discriminant, rejected before dispatch if it is not one of
+                // the closed set (fail closed on an unknown or zeroed value).
+                #[allow(clippy::cast_possible_wrap)]
+                let pid = (args.0[0] & 0xFFFF_FFFF) as i32;
+                let signal = Signal::from_u32(decode_u32(args.0[1]))?;
+                self.handlers.signal(caller, pid, signal)
+            }
             SyscallNumber::RLIMIT_GET => {
                 self.handlers
                     .rlimit_get(caller, decode_u32(args.0[0]), args.0[1])
@@ -2242,6 +2272,14 @@ mod tests {
             // reachability test can assert the dispatcher decoded the
             // `(pid, status, flags)` arguments without wiring a real wait
             // service here. The reachability test passes pid 0 (a valid I32).
+            #[allow(clippy::cast_sign_loss)]
+            Ok(u64::from(pid as u32))
+        }
+        fn signal(&self, _c: &CallerContext<'_>, pid: i32, _signal: Signal) -> SyscallResult {
+            self.record("signal");
+            // Echo the requested pid back so the reachability test can assert
+            // the dispatcher decoded the `(pid, signal)` arguments without
+            // wiring a real signal service here.
             #[allow(clippy::cast_sign_loss)]
             Ok(u64::from(pid as u32))
         }
@@ -3468,6 +3506,59 @@ mod tests {
             Err(Errno::BadAlignment)
         );
         assert_eq!(h2.last(), None);
+    }
+
+    #[test]
+    fn signal_decodes_pid_and_signal_and_is_audited() {
+        // `signal` is ungated (a process signals its own children, no
+        // capability) but audited — delivering a signal is a
+        // process-lifecycle decision. With a well-typed `(pid, signal)` tuple
+        // the dispatcher recovers the `i32` pid, validates the `Signal`,
+        // reaches the handler, and emits exactly one `SyscallInvoked` record
+        // on success.
+        let sink = RecordingSink::new();
+        let caps = build_caps(&[], &sink); // no capability needed
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers::default();
+        let d = Dispatcher::new(&h, &sink);
+
+        let mut args = RawArgs::ZERO;
+        args.0[0] = 5; // pid 5 as a sign-extended `i32`
+        args.0[1] = u64::from(Signal::Terminate.as_u32());
+        let r = d.dispatch(&ctx, SyscallNumber::SIGNAL.as_u16(), args);
+        // The Mock echoes the decoded pid back.
+        assert_eq!(r, Ok(5));
+        assert_eq!(h.last(), Some("signal"));
+        assert_eq!(sink.ids(), [AuditEvent::SyscallInvoked.id().0]);
+    }
+
+    #[test]
+    fn signal_rejects_an_undefined_signal_before_dispatch() {
+        // An out-of-range `Signal` discriminant (including the reserved 0) is
+        // rejected by the dispatcher before the handler is reached, so a
+        // caller cannot smuggle an unknown signal past the closed set.
+        let sink = RecordingSink::new();
+        let caps = build_caps(&[], &sink);
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers::default();
+        let d = Dispatcher::new(&h, &sink);
+
+        for bad in [0u64, 4, u64::from(u32::MAX)] {
+            let mut args = RawArgs::ZERO;
+            args.0[0] = 1; // pid
+            args.0[1] = bad;
+            assert_eq!(
+                d.dispatch(&ctx, SyscallNumber::SIGNAL.as_u16(), args),
+                Err(Errno::OutOfRange)
+            );
+        }
+        assert_eq!(h.last(), None);
     }
 
     #[test]

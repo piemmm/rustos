@@ -177,6 +177,15 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn signal(
+        &self,
+        _c: &CallerContext<'_>,
+        _pid: i32,
+        _signal: rustos_abi::Signal,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
     fn rlimit_get(&self, _c: &CallerContext<'_>, _kind: u32, _out: u64) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
@@ -542,6 +551,16 @@ fn would_accept(spec_idx: usize, raw_number: u16, args: &[u64; SYSCALL_MAX_ARGS]
     if spec.number == SyscallNumber::WAIT {
         let allowed = u64::from(WaitFlags::NONBLOCK.bits());
         if args[2] & !allowed != 0 {
+            return false;
+        }
+    }
+    // `signal`'s signal argument (arg 1) carries an extra semantic check the
+    // per-`AbiType` validator cannot express: the dispatcher runs the raw
+    // `U32` through `Signal::from_u32`, which rejects any value outside the
+    // closed signal set (including the reserved 0). Mirror that here.
+    if spec.number == SyscallNumber::SIGNAL {
+        let raw = u32::try_from(args[1] & 0xFFFF_FFFF).unwrap_or(u32::MAX);
+        if rustos_abi::Signal::from_u32(raw).is_err() {
             return false;
         }
     }

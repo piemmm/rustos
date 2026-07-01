@@ -1494,6 +1494,31 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: None,
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::SIGNAL,
+        name: "signal",
+        arg_count: 2,
+        args: [
+            // The child PID to signal (an `I32`, sign-extended in the
+            // register per the ABI convention), then the `Signal`
+            // discriminant. The handler validates both.
+            AbiType::I32,
+            AbiType::U32,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // Signalling a child the caller spawned is the unprivileged baseline
+        // (like `wait`, the parent/child relationship is the authority): it
+        // grants no authority over any other principal, so no capability is
+        // required. It IS audited per call — delivering a signal is a
+        // security-relevant process-lifecycle decision, exactly as
+        // `spawn`/`wait`/`exit` are audited.
+        required_capability: None,
+        audit: true,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

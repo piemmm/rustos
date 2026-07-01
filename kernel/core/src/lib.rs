@@ -91,6 +91,7 @@ pub mod live_producer;
 pub mod memmap;
 pub mod panic;
 pub mod proc_id;
+pub mod procsignal;
 pub mod procwait;
 pub mod random;
 pub mod rlimit;

@@ -179,6 +179,15 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
+    fn signal(
+        &self,
+        _c: &CallerContext<'_>,
+        _pid: i32,
+        _signal: rustos_abi::Signal,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
     fn rlimit_get(&self, _c: &CallerContext<'_>, _kind: u32, _out: u64) -> SyscallResult {
         self.bump();
         Ok(0)

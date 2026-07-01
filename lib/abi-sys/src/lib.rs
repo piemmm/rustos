@@ -124,6 +124,7 @@ const NUM_WALL_TIME_SET: u64 = SyscallNumber::WALL_TIME_SET.as_u16() as u64;
 const NUM_BOOT_ID_GET: u64 = SyscallNumber::BOOT_ID_GET.as_u16() as u64;
 const NUM_SYSINFO_INTROSPECT: u64 = SyscallNumber::SYSINFO_INTROSPECT.as_u16() as u64;
 const NUM_TERMINAL_SIZE: u64 = SyscallNumber::TERMINAL_SIZE.as_u16() as u64;
+const NUM_SIGNAL: u64 = SyscallNumber::SIGNAL.as_u16() as u64;
 
 /// Empty argument vector for the no-argument syscalls.
 const NO_ARGS: [u64; SYSCALL_MAX_ARGS] = [0; SYSCALL_MAX_ARGS];
@@ -1427,6 +1428,28 @@ pub extern "C" fn sys_fs_rename(
     }
 }
 
+/// `signal`: deliver control signal `signal` (a `ros_signal_t` discriminant)
+/// to child process `pid` (`SyscallNumber::SIGNAL`). Returns a `ROS_E_*`
+/// code.
+///
+/// A process may signal only its **own** children; the kernel identifies the
+/// sender from its own current-task slot, validates the parent/child
+/// relationship and the signal value, and fails closed (`plans/SPAWN.md`
+/// SP7). No capability is required.
+#[must_use]
+#[export_name = "ros_sys_signal"]
+pub extern "C" fn sys_signal(pid: i32, signal: u32) -> i32 {
+    // SAFETY: see `sys_yield`. No user pointer is dereferenced; the kernel
+    // validates the target child and the signal value on the far side of the
+    // trap.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_SIGNAL,
+            [i32_arg(pid), u64::from(signal), 0, 0, 0, 0],
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1505,6 +1528,7 @@ mod tests {
         (NUM_BOOT_ID_GET, "boot_id_get", 2),
         (NUM_SYSINFO_INTROSPECT, "sysinfo_introspect", 4),
         (NUM_TERMINAL_SIZE, "terminal_size", 3),
+        (NUM_SIGNAL, "signal", 2),
     ];
 
     #[test]
@@ -2092,6 +2116,29 @@ mod tests {
         });
         assert_eq!(number, NUM_WAIT);
         // `WAIT_PID_ANY` (-1) sign-extends to all-ones in the argument register.
+        assert_eq!(args[0], u64::MAX);
+    }
+
+    #[test]
+    fn signal_marshals_pid_and_signal() {
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_signal(9, rustos_abi::Signal::Terminate.as_u32()), 0);
+        });
+        assert_eq!(number, NUM_SIGNAL);
+        assert_eq!(args[0], 9);
+        assert_eq!(args[1], u64::from(rustos_abi::Signal::Terminate.as_u32()));
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn signal_sign_extends_a_negative_pid() {
+        // A negative PID sign-extends in the argument register per the I32
+        // convention; the kernel rejects it (no child), but the marshalling
+        // must be faithful.
+        let (number, args) = capture(0, || {
+            let _ = sys_signal(-1, rustos_abi::Signal::Kill.as_u32());
+        });
+        assert_eq!(number, NUM_SIGNAL);
         assert_eq!(args[0], u64::MAX);
     }
 

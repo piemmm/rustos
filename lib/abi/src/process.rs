@@ -556,6 +556,51 @@ pub const SPAWN_UID_INHERIT: u32 = u32::MAX;
 /// closed regardless.
 pub const CONSOLE_INDEX_MAX: u8 = u8::MAX;
 
+/// A control signal delivered to a child process by
+/// [`crate::SyscallNumber::SIGNAL`].
+///
+/// The closed, minimal set job control needs (`plans/SPAWN.md` SP7), one
+/// definition shared by the kernel, the C ABI view, and every first-party
+/// caller so no consumer re-invents a parallel signal vocabulary. The
+/// discriminant is the `u32` carried in the syscall's `signal` register;
+/// `0` is reserved and never valid, so a zeroed register fails closed rather
+/// than resolving to a real signal.
+#[repr(u32)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum Signal {
+    /// Resume a stopped child (the `bg`/`fg` continue).
+    Continue = 1,
+    /// Ask a child to terminate gracefully.
+    Terminate = 2,
+    /// Forcibly kill a child.
+    Kill = 3,
+}
+
+impl Signal {
+    /// The discriminant carried on the wire.
+    #[must_use]
+    pub const fn as_u32(self) -> u32 {
+        self as u32
+    }
+
+    /// Recover a [`Signal`] from its wire discriminant.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Errno::OutOfRange`] for any value that is not a defined
+    /// signal (including the reserved `0`), so an unknown or zeroed register
+    /// fails closed rather than being interpreted as a signal the caller did
+    /// not name.
+    pub const fn from_u32(value: u32) -> Result<Self, Errno> {
+        match value {
+            1 => Ok(Self::Continue),
+            2 => Ok(Self::Terminate),
+            3 => Ok(Self::Kill),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
 /// The access a single inherited descriptor grants its process.
 ///
 /// A descriptor is established at spawn and points at a kernel *stream
@@ -688,12 +733,36 @@ impl Default for DescriptorTable {
 mod tests {
     extern crate alloc;
     use super::{
-        DescriptorTable, ProcessStart, ProcessStartHeader, StreamMode, StringSlot,
+        DescriptorTable, ProcessStart, ProcessStartHeader, Signal, StreamMode, StringSlot,
         PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN,
         PROCESS_START_MAX_TOTAL_LEN, STDERR, STDIN, STDINFO, STDOUT, STD_STREAM_COUNT,
     };
     use crate::{Errno, ABI_VERSION_CURRENT};
     use alloc::vec::Vec;
+
+    #[test]
+    fn signal_discriminants_are_frozen() {
+        // The discriminants are the on-wire signal values; do not renumber.
+        assert_eq!(Signal::Continue.as_u32(), 1);
+        assert_eq!(Signal::Terminate.as_u32(), 2);
+        assert_eq!(Signal::Kill.as_u32(), 3);
+    }
+
+    #[test]
+    fn signal_round_trips_through_its_discriminant() {
+        for signal in [Signal::Continue, Signal::Terminate, Signal::Kill] {
+            assert_eq!(Signal::from_u32(signal.as_u32()), Ok(signal));
+        }
+    }
+
+    #[test]
+    fn signal_rejects_reserved_and_unknown_values() {
+        // 0 is reserved so a zeroed register fails closed, and every value
+        // past the defined set is rejected rather than guessed.
+        assert_eq!(Signal::from_u32(0), Err(Errno::OutOfRange));
+        assert_eq!(Signal::from_u32(4), Err(Errno::OutOfRange));
+        assert_eq!(Signal::from_u32(u32::MAX), Err(Errno::OutOfRange));
+    }
 
     #[test]
     fn standard_fd_numbers_are_frozen() {

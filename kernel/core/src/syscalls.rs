@@ -80,7 +80,7 @@ use rustos_abi::sysinfo::{MountRecord, ProcessRecord};
 use rustos_abi::{
     decode_log_record, BootId, CapabilityId, DescriptorTable, DirEntry, Errno, FileStat,
     IntrospectDomain, IrqHandle, LimitKind, MapFlags, OpenFlags, ProcId, RandomFlags,
-    ResourceLimit, StreamMode, SyscallNumber, Time64, WaitFlags, WaitSetOp, WaitSourceKind,
+    ResourceLimit, Signal, StreamMode, SyscallNumber, Time64, WaitFlags, WaitSetOp, WaitSourceKind,
     WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, FS_IO_MAX, FS_NAME_MAX,
     FS_PATH_MAX, LOG_FIELDS_MAX, LOG_RECORD_MAX, PROC_ID_LEN, RANDOM_REQUEST_MAX_BYTES,
     SPAWN_UID_INHERIT, TERMINAL_SIZE_WIRE_LEN,
@@ -125,6 +125,7 @@ use crate::hwtree::{HwTreeSource, NULL_HW_TREE};
 use crate::input_focus::{InputFocus, NULL_INPUT_FOCUS};
 use crate::introspect::{IntrospectSource, NULL_INTROSPECT};
 use crate::memmap::{MemMap, NULL_MEM_MAP};
+use crate::procsignal::{ProcessSignal, NULL_PROCESS_SIGNAL};
 use crate::procwait::{ProcessWait, NULL_PROCESS_WAIT};
 use crate::random::{reserve_errno, RandomReserve};
 use crate::rlimit::{authorize_set, LimitSet};
@@ -287,6 +288,14 @@ where
     /// through [`Self::with_process_wait`] once `SP6b` lands. Held as a
     /// `'static` borrow, exactly like the console device and spawn producer.
     process_wait: &'static (dyn ProcessWait + 'static),
+    /// The scheduler-side process-signal producer the `signal` syscall drives
+    /// to deliver a control signal to one of the caller's children
+    /// (`plans/SPAWN.md` SP7). Defaults to [`NULL_PROCESS_SIGNAL`] (fail
+    /// closed with [`Errno::NotImplemented`], never pretending the signal
+    /// landed); the boot path installs the concrete producer through
+    /// [`Self::with_process_signal`] once `SP7b` lands. Held as a `'static`
+    /// borrow, exactly like the process-wait producer.
+    process_signal: &'static (dyn ProcessSignal + 'static),
     /// The kernel-held user database the `users_db_read` syscall serves
     /// (`plans/PI.md` P11). Defaults to [`NULL_USERS_DB`] (fail closed
     /// with [`Errno::NotImplemented`]); the boot path
@@ -460,6 +469,11 @@ where
             // scheduler-side producer (`plans/SPAWN.md` SP6b): `wait` fails
             // closed with `NotImplemented`.
             process_wait: &NULL_PROCESS_WAIT,
+            // Process-signal subsystem unwired until the boot path installs
+            // the scheduler-side producer (`plans/SPAWN.md` `SP7b`): `signal`
+            // fails closed with `NotImplemented`, never pretending a signal
+            // was delivered.
+            process_signal: &NULL_PROCESS_SIGNAL,
             // Users-database service unwired until a boot path that mounted
             // the root volume installs the loaded holder (`plans/PI.md`
             // P11): `users_db_read` fails closed with `NotImplemented`.
@@ -845,6 +859,23 @@ where
         process_wait: &'static (dyn ProcessWait + 'static),
     ) -> Self {
         self.process_wait = process_wait;
+        self
+    }
+
+    /// Install the scheduler-side process-signal producer the `signal`
+    /// syscall drives, consuming and returning `self` (`plans/SPAWN.md` SP7).
+    ///
+    /// Until this is called the handler holds [`NULL_PROCESS_SIGNAL`], so
+    /// `signal` fails closed with [`Errno::NotImplemented`], never pretending
+    /// a signal was delivered. The producer must be `'static`: it lives for
+    /// the lifetime of the running kernel, exactly like the process-wait
+    /// producer.
+    #[must_use]
+    pub const fn with_process_signal(
+        mut self,
+        process_signal: &'static (dyn ProcessSignal + 'static),
+    ) -> Self {
+        self.process_signal = process_signal;
         self
     }
 
@@ -2374,6 +2405,20 @@ where
             Some(Err(err)) => Err(copy_fault_errno(err)),
             None => Err(Errno::BadAddress),
         }
+    }
+
+    fn signal(&self, caller: &CallerContext<'_>, pid: i32, signal: Signal) -> SyscallResult {
+        // The dispatcher already validated that `pid` is a sign-extended
+        // `i32` and that `signal` is a defined `Signal`. Hand the request to
+        // the installed scheduler-side producer, which authorises the target
+        // against the sender's own children (a process may signal only
+        // children it spawned, identified by the kernel-trusted
+        // `caller.task_id`, never a caller-supplied id) and delivers the
+        // signal. Until one is installed the default `NULL_PROCESS_SIGNAL`
+        // fails closed with `NotImplemented`, never pretending a signal was
+        // delivered — the process-signal analogue of `NULL_PROCESS_WAIT`.
+        self.process_signal.signal(caller.task_id, pid, signal)?;
+        Ok(0)
     }
 
     fn rlimit_get(&self, caller: &CallerContext<'_>, kind: u32, out: u64) -> SyscallResult {
@@ -10619,6 +10664,123 @@ mod tests {
         );
         assert_eq!(
             h.wait(&ctx, 9, 0x1000, WaitFlags::empty()),
+            Err(Errno::NotImplemented)
+        );
+    }
+
+    /// A `ProcessSignal` producer that records the last `(sender, pid,
+    /// signal)` it was handed and returns a configured result, so the
+    /// handler tests can assert the arguments reached it without a real
+    /// scheduler-side delivery path.
+    struct RecordingProcessSignal {
+        last: rustos_sync::SpinLock<Option<(u64, i32, Signal)>>,
+        result: Result<(), Errno>,
+    }
+    impl RecordingProcessSignal {
+        fn new(result: Result<(), Errno>) -> Self {
+            Self {
+                last: rustos_sync::SpinLock::new(None),
+                result,
+            }
+        }
+    }
+    impl crate::procsignal::ProcessSignal for RecordingProcessSignal {
+        fn signal(&self, sender: SecTaskId, pid: i32, signal: Signal) -> Result<(), Errno> {
+            *self.last.lock() = Some((sender.0, pid, signal));
+            self.result
+        }
+    }
+
+    /// `signal` needs no capability (a process signals its own children): it
+    /// forwards the decoded `(sender, pid, signal)` to the installed producer
+    /// and returns `Ok(0)` on success.
+    #[test]
+    fn signal_forwards_to_producer() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let producer: &'static RecordingProcessSignal =
+            Box::leak(Box::new(RecordingProcessSignal::new(Ok(()))));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_process_signal(producer);
+
+        assert_eq!(h.signal(&ctx, 9, Signal::Terminate), Ok(0));
+        // The producer saw the caller's kernel-attested task id as `sender`
+        // and the requested `(pid, signal)` verbatim.
+        assert_eq!(*producer.last.lock(), Some((2, 9, Signal::Terminate)));
+    }
+
+    /// A producer error (e.g. `pid` is not a child of the caller) propagates
+    /// verbatim from the `signal` handler (fail closed).
+    #[test]
+    fn signal_propagates_producer_error() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let producer: &'static RecordingProcessSignal =
+            Box::leak(Box::new(RecordingProcessSignal::new(Err(Errno::NotFound))));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_process_signal(producer);
+
+        assert_eq!(h.signal(&ctx, 9, Signal::Kill), Err(Errno::NotFound));
+        assert_eq!(*producer.last.lock(), Some((2, 9, Signal::Kill)));
+    }
+
+    /// With no producer installed the handler holds `NULL_PROCESS_SIGNAL` and
+    /// fails closed with `NotImplemented`, never pretending a signal landed.
+    #[test]
+    fn signal_without_producer_is_not_implemented() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(
+            h.signal(&ctx, 9, Signal::Continue),
             Err(Errno::NotImplemented)
         );
     }
