@@ -2576,8 +2576,12 @@ transfer, landed in increments:
   (`.junie/PREREQUISITES.md` P-0): the Arch-HAL `rustos_arch_api::entropy`
   slice (x86_64 `RDSEED`/`RDRAND`, aarch64 `RNDR` `Supported`; riscv64 `Zkr` /
   wasm32 host-import honest `Pending`) seeds the kernel reserve at boot via
-  `KernelArch::platform_entropy`. The encrypted-swap key (Stage 8) and the
-  mixed-in software sources (timing jitter, §22) consume/extend the same seam.
+  `KernelArch::platform_entropy`. The seed is never the hardware RNG alone
+  (§22): it is XOR-mixed with two independent software sources — a CPU
+  timing-jitter source and the asynchronous interrupt-arrival-timing pool
+  (`lib/rng::interrupt`, fed wait-free from `IrqTable::fire` via a set-once
+  observer and folded into every reseed) — so no single source is trusted
+  alone. The encrypted-swap key (Stage 8) consumes the same seam.
 
 ---
 

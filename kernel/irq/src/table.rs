@@ -10,7 +10,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use rustos_abi::IrqHandle;
 use rustos_kernel_sec::TaskId;
-use rustos_sync::RwLock;
+use rustos_sync::{OnceCell, RwLock};
 
 use crate::error::{IrqError, MaskError};
 
@@ -170,6 +170,35 @@ pub struct ReleaseOutcome {
     pub released: usize,
 }
 
+/// An [`IrqTable::set_observer`] call was rejected because an observer was
+/// already installed. The hook is set-once at boot; a second install is a
+/// defect, not a runtime condition.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ObserverAlreadyInstalled;
+
+/// A passive observer notified on every interrupt dispatch.
+///
+/// [`IrqTable::fire`] calls [`Self::on_irq`] at its entry for **every**
+/// interrupt arrival — bound *and* stray — before the controller mask and the
+/// ready-flag store. The kernel installs one implementation whose only job is
+/// to feed the interrupt-arrival *timing* into the kernel entropy pool
+/// (`lib/rng`), turning the physically-unpredictable inter-arrival intervals
+/// of real devices into an independent entropy input.
+///
+/// # Contract
+///
+/// * It runs in **interrupt context**: it must be wait-free and must never
+///   block, take a lock, allocate, or panic.
+/// * It must **not** influence the mask-before-wake path — it is purely
+///   observational, so a slow or absent observer can never weaken the IRQ
+///   security contract (`docs/src/security/irq.md`).
+/// * The [`Sync`] supertrait lets a `&'static dyn IrqDispatchObserver` be
+///   shared across CPUs, which every SMP IRQ path requires.
+pub trait IrqDispatchObserver: Sync {
+    /// Notify the observer that `line` fired. See the trait contract.
+    fn on_irq(&self, line: u32);
+}
+
 /// Kernel IRQ table.
 ///
 /// One per running kernel. Interior synchronisation through a
@@ -177,10 +206,15 @@ pub struct ReleaseOutcome {
 /// lock-ordering policy (no global mutable
 /// static; the table is owned by `KernelState`, which itself lives
 /// for the lifetime of the running kernel).
-#[derive(Debug)]
 pub struct IrqTable {
     inner: RwLock<Inner>,
     max_line: u32,
+    /// Set-once, lock-free-read hook notified on every [`IrqTable::fire`]
+    /// (see [`IrqDispatchObserver`]). Read through [`OnceCell::get`] (an
+    /// `Acquire` load, no lock) so the interrupt-context `fire` path stays
+    /// wait-free; empty until the kernel installs the entropy observer at
+    /// boot, and a no-op when empty.
+    observer: OnceCell<&'static dyn IrqDispatchObserver>,
     /// Per-line "fired since last consume" flags, kept **outside**
     /// [`Inner`]'s [`RwLock`] so [`IrqTable::fire`] — which runs in
     /// interrupt context — can record a wake-up with a single atomic
@@ -195,6 +229,21 @@ pub struct IrqTable {
     /// by [`IrqTable::fire`] so a stray edge on an unbound line is
     /// reported as [`FireOutcome::Stray`] without taking the lock.
     bound: Vec<AtomicBool>,
+}
+
+impl core::fmt::Debug for IrqTable {
+    /// Reports only lock-free fields: it must not take the `Inner` lock (a
+    /// `fire`-context or parked-waiter deadlock hazard) and never reveals
+    /// bindings. The observer is shown by presence only.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("IrqTable")
+            .field("max_line", &self.max_line)
+            .field(
+                "observer_installed",
+                &matches!(self.observer.get(), Ok(Some(_))),
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug)]
@@ -241,9 +290,31 @@ impl IrqTable {
                 by_handle: BTreeMap::new(),
             }),
             max_line,
+            observer: OnceCell::new(),
             ready,
             bound,
         }
+    }
+
+    /// Install the set-once interrupt-dispatch observer (see
+    /// [`IrqDispatchObserver`]).
+    ///
+    /// Called **exactly once** at boot, after the arch entropy source is
+    /// available, to feed interrupt-arrival timing into the kernel entropy
+    /// pool. The observer reference outlives the running kernel (the kernel
+    /// leaks it, like the table itself).
+    ///
+    /// # Errors
+    ///
+    /// [`ObserverAlreadyInstalled`] if an observer is already installed — a
+    /// second install is a defect (set-once), not a runtime condition.
+    pub fn set_observer(
+        &self,
+        observer: &'static dyn IrqDispatchObserver,
+    ) -> Result<(), ObserverAlreadyInstalled> {
+        self.observer
+            .set(observer)
+            .map_err(|_| ObserverAlreadyInstalled)
     }
 
     /// Inclusive upper bound on accepted line numbers.
@@ -415,6 +486,13 @@ impl IrqTable {
     ///   the table's `max_line`. A bug rather than a runtime
     ///   condition, but routed to a stable errno (fail closed, never panic).
     pub fn fire(&self, line: u32, controller: &dyn IrqController) -> Result<FireOutcome, IrqError> {
+        // Feed the interrupt-arrival timing to the entropy observer first, so
+        // the sample is taken as close to arrival as possible. It is purely
+        // observational (wait-free, no lock) and never affects the
+        // mask-before-wake path below. A poisoned or empty cell is a no-op.
+        if let Ok(Some(observer)) = self.observer.get() {
+            observer.on_irq(line);
+        }
         controller.mask(line).map_err(|e| match e {
             MaskError::Unsupported => IrqError::ArchUnsupported,
             MaskError::OutOfRange => IrqError::LineOutOfRange,
@@ -431,8 +509,9 @@ impl IrqTable {
         };
         if !bound.load(Ordering::SeqCst) {
             // No binding — the mask still happened, the stray edge is
-            // contained. Surface to the caller so an arch-port audit
-            // observer can record stray-IRQ rate.
+            // contained (and its arrival timing was already fed to the entropy
+            // observer at the top of `fire`). Surface to the caller so an
+            // arch-port audit observer can record stray-IRQ rate.
             return Ok(FireOutcome::Stray);
         }
         // `mask` issued a `SeqCst` fence before returning; setting
@@ -800,5 +879,70 @@ mod tests {
         t.release_for(TaskId(1));
         let b = t.bind(7, TaskId(1)).unwrap();
         assert_ne!(a.handle, b.handle, "fresh bind must mint a fresh handle");
+    }
+
+    use core::sync::atomic::{AtomicU32, AtomicU64};
+
+    /// Test observer: counts calls and remembers the last line, so a test can
+    /// assert `fire` notified it. Interior-atomic so it is `Sync`, mirroring
+    /// the production entropy observer's shape.
+    struct CountingObserver {
+        calls: AtomicU32,
+        last_line: AtomicU64,
+    }
+
+    impl CountingObserver {
+        fn new() -> Self {
+            Self {
+                calls: AtomicU32::new(0),
+                last_line: AtomicU64::new(u64::MAX),
+            }
+        }
+    }
+
+    impl IrqDispatchObserver for CountingObserver {
+        fn on_irq(&self, line: u32) {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            self.last_line.store(u64::from(line), Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn observer_is_notified_on_every_fire_including_strays() {
+        let t = IrqTable::new(31);
+        let obs: &'static CountingObserver =
+            alloc::boxed::Box::leak(alloc::boxed::Box::new(CountingObserver::new()));
+        t.set_observer(obs).expect("first install succeeds");
+        let ctl = MockController::ok();
+        // Bound line: fire notifies the observer.
+        let _ = t.bind(7, TaskId(1)).unwrap();
+        t.fire(7, &ctl).expect("fire bound line");
+        assert_eq!(obs.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(obs.last_line.load(Ordering::Relaxed), 7);
+        // Stray (unbound) line: still an arrival, still fed to the observer.
+        assert_eq!(t.fire(9, &ctl), Ok(FireOutcome::Stray));
+        assert_eq!(obs.calls.load(Ordering::Relaxed), 2);
+        assert_eq!(obs.last_line.load(Ordering::Relaxed), 9);
+    }
+
+    #[test]
+    fn set_observer_is_set_once() {
+        let t = IrqTable::new(31);
+        let a: &'static CountingObserver =
+            alloc::boxed::Box::leak(alloc::boxed::Box::new(CountingObserver::new()));
+        let b: &'static CountingObserver =
+            alloc::boxed::Box::leak(alloc::boxed::Box::new(CountingObserver::new()));
+        assert_eq!(t.set_observer(a), Ok(()));
+        assert_eq!(t.set_observer(b), Err(ObserverAlreadyInstalled));
+    }
+
+    #[test]
+    fn fire_without_observer_is_a_noop() {
+        // The observer is optional: a table with none installed fires exactly
+        // as before (no panic, correct outcome).
+        let t = IrqTable::new(31);
+        let ctl = MockController::ok();
+        let _ = t.bind(3, TaskId(1)).unwrap();
+        assert_eq!(t.fire(3, &ctl), Ok(FireOutcome::Marked));
     }
 }

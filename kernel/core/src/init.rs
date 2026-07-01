@@ -410,8 +410,10 @@ fn publish_wait_queue_arch<A: KernelArch + 'static>(state: &'static KernelState<
 /// is the port's bounded-retry concern, and a hard failure simply leaves the
 /// reserve unseeded.
 fn seed_entropy_reserve<A: KernelArch + 'static>(state: &'static KernelState<A>) {
-    use crate::random::{ArchEntropy, ArchTicks, SeededReserve};
-    use rustos_rng::{EntropySource, JitterSource, MixedPair};
+    use crate::random::{
+        ArchEntropy, ArchTicks, IrqEntropyObserver, SeededReserve, IRQ_ENTROPY_POOL,
+    };
+    use rustos_rng::{EntropySource, InterruptPoolSource, JitterSource, MixedPair};
 
     let Some(source) = state.arch.platform_entropy() else {
         emit(
@@ -461,12 +463,25 @@ fn seed_entropy_reserve<A: KernelArch + 'static>(state: &'static KernelState<A>)
         "hardware"
     };
 
-    let mixed = MixedPair::new(hardware, jitter);
+    // Add the asynchronous interrupt-arrival-timing pool as a third,
+    // independent source. It contributes nothing at boot (it fails closed
+    // until interrupts have flowed) but folds fresh timing into every reseed
+    // for forward secrecy; the interrupt observer that feeds it is installed
+    // below, only once a seeded reserve exists to drain it.
+    let interrupt = InterruptPoolSource::new(&IRQ_ENTROPY_POOL);
+    let mixed = MixedPair::new(MixedPair::new(hardware, jitter), interrupt);
     let mut reserve: SeededReserve<A> = SeededReserve::new();
     match reserve.seed(mixed) {
         Ok(()) => {
             // Swap the seeded reserve in for the unseeded boot reserve.
             *state.rng.write() = Box::new(reserve);
+            // Now that a seeded, reseeding reserve exists, start feeding
+            // interrupt-arrival timing into the pool it reseeds from. The
+            // observer is set-once and lives for the kernel's lifetime.
+            let observer: &'static IrqEntropyObserver<A> = Box::leak(Box::new(
+                IrqEntropyObserver::new(state.arch.clone(), &IRQ_ENTROPY_POOL),
+            ));
+            let _ = state.irq.set_observer(observer);
             emit(
                 state.audit_sink,
                 Level::Info,

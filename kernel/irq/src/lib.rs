@@ -30,11 +30,18 @@
 //!   [`WaitStep::NotFound`] which the syscall handler translates to
 //!   `Errno::NotFound`; the dispatcher emits the standard
 //!   `SyscallHandlerRejected` audit record.
-//! * **No global mutable state.** The crate exposes one type
-//!   ([`IrqTable`]) which the kernel binary instantiates exactly
-//!   once and holds inside `KernelState`. Interior synchronisation
-//!   is one `kernel/sync::RwLock` mirroring the `CapTable`
-//!   lock-ordering policy.
+//! * **No global mutable state.** The crate's [`IrqTable`] is
+//!   instantiated exactly once by the kernel binary and held inside
+//!   `KernelState`. Interior synchronisation is one
+//!   `kernel/sync::RwLock` mirroring the `CapTable` lock-ordering
+//!   policy, plus a set-once, lock-free `OnceCell` holding the
+//!   optional [`IrqDispatchObserver`] (below) so the interrupt-context
+//!   `fire` path reads it without a lock.
+//! * **Interrupt-dispatch observer.** [`IrqTable::fire`] notifies a
+//!   set-once [`IrqDispatchObserver`] at every interrupt arrival. The
+//!   kernel installs one whose only job is to feed interrupt-arrival
+//!   timing into the entropy pool (`lib/rng`); it is purely
+//!   observational and never influences the mask-before-wake path.
 //!
 //! # Out of scope for this landing
 //!
@@ -66,7 +73,8 @@ mod wait;
 
 pub use error::{IrqError, MaskError};
 pub use table::{
-    BindOutcome, FireOutcome, IrqController, IrqEntry, IrqTable, ReleaseOutcome,
-    UnsupportedController, WaitStep, UNSUPPORTED_CONTROLLER,
+    BindOutcome, FireOutcome, IrqController, IrqDispatchObserver, IrqEntry, IrqTable,
+    ObserverAlreadyInstalled, ReleaseOutcome, UnsupportedController, WaitStep,
+    UNSUPPORTED_CONTROLLER,
 };
 pub use wait::{block_until_ready, IrqWaitAbort, IrqWaiter, WaitOutcome};

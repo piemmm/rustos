@@ -32,8 +32,10 @@ use alloc::sync::Arc;
 
 use rustos_abi::Errno;
 use rustos_arch_api::SchedulerArch;
+use rustos_kernel_irq::IrqDispatchObserver;
 use rustos_rng::{
-    EntropyError, EntropySource, JitterSource, MixedPair, OutputReserve, ReserveError, TimeSource,
+    EntropyError, EntropySource, InterruptEntropyPool, InterruptPoolSource, JitterSource,
+    MixedPair, OutputReserve, ReserveError, TimeSource,
 };
 
 /// Object-safe view of the kernel's CSPRNG output reserve.
@@ -158,12 +160,59 @@ impl<A: SchedulerArch> TimeSource for ArchTicks<A> {
     }
 }
 
-/// The kernel's boot entropy: the platform hardware RNG XOR-mixed with an
-/// independent CPU-timing-jitter source, so neither is trusted alone. XOR is
-/// entropy-preserving for independent inputs, so a backdoored, stuck, or
-/// observable hardware source cannot lower the seed's quality below what the
-/// jitter source contributes, and vice versa.
-pub type KernelEntropy<A> = MixedPair<ArchEntropy, JitterSource<ArchTicks<A>>>;
+/// The one shared interrupt-arrival-timing entropy pool.
+///
+/// Fed a high-resolution timestamp on every interrupt dispatch by
+/// [`IrqEntropyObserver`] (installed on the kernel `IrqTable`), and drained on
+/// each CSPRNG reseed by the [`InterruptPoolSource`] half of
+/// [`KernelEntropy`]. A `static` so the interrupt-context observer and the
+/// reseeding reserve reference the exact same pool without a lock; all its
+/// state is atomic (see [`InterruptEntropyPool`]).
+pub static IRQ_ENTROPY_POOL: InterruptEntropyPool = InterruptEntropyPool::new();
+
+/// The [`IrqDispatchObserver`] that feeds interrupt-arrival timing into
+/// [`IRQ_ENTROPY_POOL`].
+///
+/// On each interrupt dispatch it reads the Arch HAL monotonic high-resolution
+/// counter ([`SchedulerArch::ticks_now`]) and records it. The
+/// physically-unpredictable low bits of successive interrupts' arrival timing
+/// are an independent entropy input, mixed with the hardware RNG and the CPU
+/// jitter source (never trusted alone). Recording is wait-free (one counter
+/// read plus one atomic store), so the interrupt hot path pays only that.
+pub struct IrqEntropyObserver<A: SchedulerArch> {
+    arch: Arc<A>,
+    pool: &'static InterruptEntropyPool,
+}
+
+impl<A: SchedulerArch> IrqEntropyObserver<A> {
+    /// Build the observer over the shared arch handle and the pool it feeds
+    /// (the kernel passes [`IRQ_ENTROPY_POOL`], the same pool the reseeding
+    /// reserve drains).
+    #[must_use]
+    pub fn new(arch: Arc<A>, pool: &'static InterruptEntropyPool) -> Self {
+        Self { arch, pool }
+    }
+}
+
+impl<A: SchedulerArch + Send + Sync> IrqDispatchObserver for IrqEntropyObserver<A> {
+    fn on_irq(&self, _line: u32) {
+        // Only the arrival *timing* is sampled (not the line), so the pool's
+        // repetition-count health test genuinely measures the timing source's
+        // variance. Wait-free: a counter read and one atomic store.
+        self.pool.record(self.arch.ticks_now());
+    }
+}
+
+/// The kernel's entropy: the platform hardware RNG XOR-mixed with an
+/// independent CPU-timing-jitter source *and* the asynchronous
+/// interrupt-arrival-timing pool ([`IRQ_ENTROPY_POOL`]), so no source is
+/// trusted alone. XOR is entropy-preserving for independent inputs, so a
+/// backdoored, stuck, or observable hardware source cannot lower the seed's
+/// quality below what the other two contribute, and vice versa. The interrupt
+/// pool contributes nothing at boot (it fails closed until interrupts have
+/// flowed) and folds in fresh timing on every reseed for forward secrecy.
+pub type KernelEntropy<A> =
+    MixedPair<MixedPair<ArchEntropy, JitterSource<ArchTicks<A>>>, InterruptPoolSource<'static>>;
 
 /// The reserve type the kernel installs once seeded, over the mixed
 /// [`KernelEntropy`] source, default-capacity like [`BootReserve`] so both
@@ -367,6 +416,62 @@ mod tests {
         // reserve stays unseeded (never weakened to predictable bytes).
         let jitter = JitterSource::new(lockstep_clock());
         let mixed = MixedPair::new(ArchEntropy::new(&DEAD_PORT), jitter);
+        let mut unseeded = OutputReserve::<_>::new();
+        assert!(unseeded.seed(mixed).is_err());
+        assert!(!unseeded.is_ready());
+    }
+
+    #[test]
+    fn three_way_mix_seeds_from_the_interrupt_pool_alone() {
+        // The full `KernelEntropy` shape, `MixedPair<MixedPair<hw, jitter>,
+        // interrupt>`, with hardware dead and jitter dead: once enough fresh
+        // interrupt-timing samples have arrived, the interrupt pool alone
+        // seeds the reserve — the third independent source pulling its weight
+        // in the "never trust one source" mix.
+        use super::ArchEntropy;
+        use rustos_rng::{
+            InterruptEntropyPool, InterruptPoolSource, JitterSource, MixedPair, OutputReserve,
+        };
+
+        let pool = InterruptEntropyPool::new();
+        // Build the source first (captures a zero baseline), then feed a full
+        // fresh ring of varying samples so the freshness gate opens.
+        let interrupt = InterruptPoolSource::new(&pool);
+        let mut lcg = 0x1357_9BDFu64;
+        for _ in 0..128 {
+            lcg = lcg.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            pool.record(lcg);
+        }
+        let hw_jitter = MixedPair::new(
+            ArchEntropy::new(&DEAD_PORT),
+            JitterSource::new(lockstep_clock()),
+        );
+        let mixed = MixedPair::new(hw_jitter, interrupt);
+        let mut reserve = OutputReserve::<_>::new();
+        reserve
+            .seed(mixed)
+            .expect("interrupt pool alone seeds the three-way mix");
+        let mut out = [0u8; 16];
+        RandomReserve::draw(&mut reserve, &mut out, true).expect("a seeded reserve serves");
+        assert_ne!(out, [0u8; 16]);
+    }
+
+    #[test]
+    fn three_way_mix_fails_closed_when_all_three_sources_are_dead() {
+        // Hardware dead, jitter dead, and the interrupt pool empty (no fresh
+        // samples): the seed must fail closed and the reserve stay unseeded.
+        use super::ArchEntropy;
+        use rustos_rng::{
+            InterruptEntropyPool, InterruptPoolSource, JitterSource, MixedPair, OutputReserve,
+        };
+
+        let pool = InterruptEntropyPool::new();
+        let interrupt = InterruptPoolSource::new(&pool);
+        let hw_jitter = MixedPair::new(
+            ArchEntropy::new(&DEAD_PORT),
+            JitterSource::new(lockstep_clock()),
+        );
+        let mixed = MixedPair::new(hw_jitter, interrupt);
         let mut unseeded = OutputReserve::<_>::new();
         assert!(unseeded.seed(mixed).is_err());
         assert!(!unseeded.is_ready());

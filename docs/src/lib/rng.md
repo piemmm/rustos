@@ -150,18 +150,21 @@ closed — never an unbounded spin (§2.1).
 At boot, `kernel/core` reaches the source through `KernelArch::platform_entropy`
 and seeds the reserve once — but **never from the hardware RNG alone**, per
 §22's "no single source is trusted alone". It wraps the hardware handle as an
-`EntropySource` (`ArchEntropy`) and XOR-mixes it with an independent
-CPU-timing-jitter source (next section) through `MixedPair`
-(`KernelEntropy<A> = MixedPair<ArchEntropy, JitterSource<ArchTicks<A>>>`),
+`EntropySource` (`ArchEntropy`) and XOR-mixes it with *two* independent
+software sources — a CPU-timing-jitter source (next section)
+and the asynchronous interrupt-arrival-timing pool (the section after) —
+through nested `MixedPair`s (`KernelEntropy<A> = MixedPair<MixedPair<ArchEntropy,
+JitterSource<ArchTicks<A>>>, InterruptPoolSource<'static>>`),
 builds a `SeededReserve<A>` over that mix, and swaps it in for the
-`NullEntropy` boot reserve. Because the mix owns both sources, every automatic
-reseed re-draws from *both*, not just the hardware source. The decision is
-audited (`EntropyReserveSeeded` records `sources = hardware+jitter` or, when
-the platform offers no usable timing jitter, `hardware`;
-`EntropyReserveUnseeded` records a cause). XOR is entropy-preserving for
-independent inputs, so a backdoored, stuck, or observable hardware RNG cannot
-lower the seed's quality below the jitter source's contribution, and vice
-versa; only if *both* sources are unavailable does the reserve stay unseeded
+`NullEntropy` boot reserve. Because the mix owns all three sources, every
+automatic reseed re-draws from *all* of them, not just the hardware source. The
+decision is audited (`EntropyReserveSeeded` records the seed-time contributors
+`sources = hardware+jitter` or, when the platform offers no usable timing
+jitter, `hardware` — the interrupt pool contributes nothing at boot and joins
+at reseed; `EntropyReserveUnseeded` records a cause). XOR is entropy-preserving
+for independent inputs, so a backdoored, stuck, or observable hardware RNG
+cannot lower the seed's quality below the other sources' contribution, and vice
+versa; only if *every* source is unavailable does the reserve stay unseeded
 and `random_get` keep failing closed — the kernel never weakens to predictable
 output.
 
@@ -196,6 +199,41 @@ defense-in-depth, not the primary source:
 `TimeSource`, and the target-specific counter read lives behind the Arch HAL in
 `kernel/core`'s `ArchTicks`.
 
+## Interrupt-arrival-timing entropy: the asynchronous third source
+
+The hardware RNG and the jitter source are both *synchronous* — the kernel
+draws from them when it wants a seed. `InterruptEntropyPool` captures a
+different, *asynchronous* physical process: the exact time at which external
+device interrupts arrive. It is a classic entropy mechanism, kept honest and
+mixed as a third never-sole source.
+
+* **Wait-free recording on the interrupt hot path.** The kernel installs an
+  `IrqDispatchObserver` (`IrqEntropyObserver`) on the `IrqTable`. `IrqTable::fire`
+  notifies it at every interrupt arrival (bound *and* stray), and the observer
+  reads the Arch HAL high-resolution counter (`ticks_now`) and calls
+  `InterruptEntropyPool::record` — a single `Relaxed` atomic store into a
+  fixed ring. No lock, no allocation, no conditioning on the hot path; the pool
+  is a `static` both the interrupt observer and the reseeding reserve reference
+  without a lock. Only the arrival *timing* is sampled (not the line), so the
+  health test genuinely measures the timing source.
+* **Freshness gate.** `InterruptPoolSource` (the `EntropySource` half, owned by
+  the reserve) only contributes once a whole ring of samples *it has not already
+  drained* has arrived, so a drain never re-conditions stale samples and never
+  contributes from a barely-touched ring. Before then it fails closed with
+  `EntropyError::Unavailable` — so at boot, before interrupts have flowed, the
+  mix simply falls back to the hardware RNG and jitter, and the pool folds fresh
+  timing into every later reseed for forward secrecy.
+* **Health test fails closed.** A NIST SP 800-90B §4.4.1 repetition-count test
+  over the snapshot rejects a stuck/emulated counter that offers no timing
+  variance, returning `Unavailable` rather than crediting predictable samples.
+  The snapshot is SHA-256-conditioned via `lib/crypto` (never a hand-rolled
+  mixer); the running chain state is kept separate from the emitted block and
+  zeroised on the way out.
+
+`lib/rng` stays architecture-neutral: the pool and its source name no
+architecture, and the counter read + the one-place feed live behind the Arch
+HAL and the `IrqTable` in `kernel/core`.
+
 ## Fast, non-cryptographic generator
 
 `FastRng` is xoshiro256++ (Blackman & Vigna), seeded via SplitMix64. It is
@@ -228,6 +266,15 @@ unbiased bounded integers — once, so no consumer re-derives it (§2.2).
   mixed reserve seeds from hardware alone when jitter is unavailable, from
   jitter alone when the hardware source is dead, and fails closed when both
   are dead.
+* Interrupt-arrival pool: `record` advances the event count and wraps the
+  ring without panic; the source fails closed before a full fresh ring has
+  arrived, contributes once it has, refuses to re-drain without new samples,
+  produces multi-block output, and fails closed on a stuck (constant-sample)
+  counter. In `kernel/core`, the full three-way `KernelEntropy` mix seeds from
+  the interrupt pool alone when hardware and jitter are both dead, and fails
+  closed when all three are unavailable. The `IrqTable` notifies its set-once
+  dispatch observer on every fire (bound and stray) and rejects a second
+  observer install.
 * Draw styles: the default `fill_blocking` matching `fill`; a fallible draw
   surfacing transient `Reseeding`; a blocking draw and `reseed_blocking`
   waiting through a reseed shortage; and the no-reseed fast path producing

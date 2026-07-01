@@ -192,6 +192,15 @@ implements:
    `release_for` unconditionally before evicting the capability
    record, so a task that holds no IRQ bindings still terminates
    cleanly.
+5. **Observation-only dispatch hook.** `IrqTable::fire` notifies a
+   set-once `IrqDispatchObserver` at its entry (read through a
+   lock-free `OnceCell`, so the interrupt-context path never blocks).
+   The kernel installs one observer that feeds interrupt-arrival
+   timing into the entropy pool (`lib/rng`); it is purely passive and
+   ordered *before* `controller.mask`, so it can neither reorder nor
+   suppress the mask-before-wake sequence and cannot weaken this
+   contract. It is fed on every fire, including strays on unbound
+   lines.
 
 ### Wait semantics
 
