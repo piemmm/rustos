@@ -425,15 +425,15 @@ fn audit_scan(audit: &dyn Sink, store_root: &str, drivers: usize, skipped: usize
         &[
             Field {
                 key: "path",
-                value: store_root,
+                value: rustos_log::FieldValue::Str(store_root),
             },
             Field {
                 key: "drivers",
-                value: format_usize(drivers, &mut drivers_buf),
+                value: rustos_log::FieldValue::Str(format_usize(drivers, &mut drivers_buf)),
             },
             Field {
                 key: "skipped",
-                value: format_usize(skipped, &mut skipped_buf),
+                value: rustos_log::FieldValue::Str(format_usize(skipped, &mut skipped_buf)),
             },
         ],
     );

@@ -2901,12 +2901,13 @@ where
         // `task` field the caller cannot forge — the trusted origin marker. It is prepended to the caller's own
         // fields, which the decoder bounds to `LOG_FIELDS_MAX`, so the
         // fixed array never overflows.
-        let mut task_hex = [0u8; 16];
-        let task_str = format_hex_u64(caller.task_id.0, &mut task_hex);
-        let mut fields_buf = [Field { key: "", value: "" }; LOG_FIELDS_MAX + 1];
+        let mut fields_buf = [Field {
+            key: "",
+            value: rustos_log::FieldValue::Null,
+        }; LOG_FIELDS_MAX + 1];
         fields_buf[0] = Field {
             key: "task",
-            value: task_str,
+            value: rustos_log::FieldValue::UnsignedInt(caller.task_id.0),
         };
         let mut field_count = 1;
         for (key, value) in decoded.fields() {
@@ -4273,11 +4274,14 @@ where
                 fields: &[
                     Field {
                         key: "cpu",
-                        value: format_hex_u64(u64::from(cpu), &mut cpu_buf),
+                        value: rustos_log::FieldValue::Str(format_hex_u64(
+                            u64::from(cpu),
+                            &mut cpu_buf,
+                        )),
                     },
                     Field {
                         key: "cause",
-                        value: cause,
+                        value: rustos_log::FieldValue::Str(cause),
                     },
                 ],
             },
@@ -4774,7 +4778,7 @@ mod tests {
             Level::Info.as_u8(),
             7030,
             "bundle accepted",
-            &[("driver", "vcmailbox")],
+            &[("driver", rustos_abi::FieldValue::Str("vcmailbox"))],
         )
         .expect("encodes within bounds");
 

@@ -281,7 +281,7 @@ fn emit(audit: &dyn Sink, level: Level, id: EventId, message: &str, fields: &[Fi
 fn query_field(name: &'static str) -> Field<'static> {
     Field {
         key: "query",
-        value: name,
+        value: rustos_log::FieldValue::Str(name),
     }
 }
 

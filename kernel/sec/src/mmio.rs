@@ -104,19 +104,19 @@ pub fn map_mmio<P: PageTable, S: Sink + ?Sized>(
             &[
                 Field {
                     key: "task",
-                    value: task_str,
+                    value: rustos_log::FieldValue::Str(task_str),
                 },
                 Field {
                     key: "uid",
-                    value: uid_str,
+                    value: rustos_log::FieldValue::Str(uid_str),
                 },
                 Field {
                     key: "phys",
-                    value: phys_str,
+                    value: rustos_log::FieldValue::Str(phys_str),
                 },
                 Field {
                     key: "len",
-                    value: len_str,
+                    value: rustos_log::FieldValue::Str(len_str),
                 },
             ],
         );
@@ -135,15 +135,15 @@ pub fn map_mmio<P: PageTable, S: Sink + ?Sized>(
         &[
             Field {
                 key: "task",
-                value: task_str,
+                value: rustos_log::FieldValue::Str(task_str),
             },
             Field {
                 key: "phys",
-                value: phys_str,
+                value: rustos_log::FieldValue::Str(phys_str),
             },
             Field {
                 key: "len",
-                value: len_str,
+                value: rustos_log::FieldValue::Str(len_str),
             },
         ],
     );
@@ -175,7 +175,7 @@ pub fn unmap_mmio<P: PageTable, S: Sink + ?Sized>(
             AuditEvent::MmioMapDenied,
             &[Field {
                 key: "task",
-                value: task_str,
+                value: rustos_log::FieldValue::Str(task_str),
             }],
         );
         return Err(MmioGateError::CapabilityMissing);

@@ -226,11 +226,11 @@ mod kernel {
                 message: "aarch64 stack-arena test: read the unmapped guard page (no fault)",
                 fields: &[Field {
                     key: "observed",
-                    value: if observed == SENTINEL {
+                    value: rustos_log::FieldValue::Str(if observed == SENTINEL {
                         "sentinel"
                     } else {
                         "other"
-                    },
+                    }),
                 }],
             },
         );
@@ -268,7 +268,7 @@ mod kernel {
                 message: "aarch64 stack-arena test: setup failed",
                 fields: &[Field {
                     key: "stage",
-                    value: what,
+                    value: rustos_log::FieldValue::Str(what),
                 }],
             },
         );

@@ -364,11 +364,11 @@ impl<'a> Init<'a> {
             &[
                 Field {
                     key: "service",
-                    value: name,
+                    value: rustos_log::FieldValue::Str(name),
                 },
                 Field {
                     key: "reason",
-                    value: reason,
+                    value: rustos_log::FieldValue::Str(reason),
                 },
             ],
         );
@@ -383,15 +383,15 @@ impl<'a> Init<'a> {
             &[
                 Field {
                     key: "service",
-                    value: name,
+                    value: rustos_log::FieldValue::Str(name),
                 },
                 Field {
                     key: "pid",
-                    value: pid_buf.format(i128::from(pid.as_u64())),
+                    value: rustos_log::FieldValue::Str(pid_buf.format(i128::from(pid.as_u64()))),
                 },
                 Field {
                     key: "granted_caps",
-                    value: cap_buf.format(i128::from(granted.len())),
+                    value: rustos_log::FieldValue::Str(cap_buf.format(i128::from(granted.len()))),
                 },
             ],
         );
@@ -406,15 +406,19 @@ impl<'a> Init<'a> {
             &[
                 Field {
                     key: "service",
-                    value: name,
+                    value: rustos_log::FieldValue::Str(name),
                 },
                 Field {
                     key: "pid",
-                    value: pid_buf.format(i128::from(child.pid.as_u64())),
+                    value: rustos_log::FieldValue::Str(
+                        pid_buf.format(i128::from(child.pid.as_u64())),
+                    ),
                 },
                 Field {
                     key: "exit_code",
-                    value: code_buf.format(i128::from(child.exit_code)),
+                    value: rustos_log::FieldValue::Str(
+                        code_buf.format(i128::from(child.exit_code)),
+                    ),
                 },
             ],
         );
@@ -429,11 +433,15 @@ impl<'a> Init<'a> {
             &[
                 Field {
                     key: "pid",
-                    value: pid_buf.format(i128::from(child.pid.as_u64())),
+                    value: rustos_log::FieldValue::Str(
+                        pid_buf.format(i128::from(child.pid.as_u64())),
+                    ),
                 },
                 Field {
                     key: "exit_code",
-                    value: code_buf.format(i128::from(child.exit_code)),
+                    value: rustos_log::FieldValue::Str(
+                        code_buf.format(i128::from(child.exit_code)),
+                    ),
                 },
             ],
         );
@@ -450,7 +458,7 @@ impl<'a> Init<'a> {
             events::GRAPH_REJECTED,
             &[Field {
                 key: "reason",
-                value: reason,
+                value: rustos_log::FieldValue::Str(reason),
             }],
         );
     }

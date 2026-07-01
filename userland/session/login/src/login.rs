@@ -185,7 +185,7 @@ impl<'a> Login<'a> {
             events::AUTH_FAILED,
             &[Field {
                 key: "user",
-                value: username,
+                value: rustos_log::FieldValue::Str(username),
             }],
         );
     }
@@ -197,7 +197,9 @@ impl<'a> Login<'a> {
             events::LOCKED_OUT,
             &[Field {
                 key: "attempts",
-                value: attempts.format(i128::from(self.cfg.max_attempts)),
+                value: rustos_log::FieldValue::Str(
+                    attempts.format(i128::from(self.cfg.max_attempts)),
+                ),
             }],
         );
     }
@@ -211,19 +213,21 @@ impl<'a> Login<'a> {
             &[
                 Field {
                     key: "user",
-                    value: username,
+                    value: rustos_log::FieldValue::Str(username),
                 },
                 Field {
                     key: "uid",
-                    value: uid.format(i128::from(user.uid.0)),
+                    value: rustos_log::FieldValue::Str(uid.format(i128::from(user.uid.0))),
                 },
                 Field {
                     key: "session",
-                    value: kind.label(),
+                    value: rustos_log::FieldValue::Str(kind.label()),
                 },
                 Field {
                     key: "granted_caps",
-                    value: caps.format(i128::from(user.capabilities.len())),
+                    value: rustos_log::FieldValue::Str(
+                        caps.format(i128::from(user.capabilities.len())),
+                    ),
                 },
             ],
         );
@@ -243,19 +247,19 @@ impl<'a> Login<'a> {
             &[
                 Field {
                     key: "user",
-                    value: username,
+                    value: rustos_log::FieldValue::Str(username),
                 },
                 Field {
                     key: "uid",
-                    value: uid.format(i128::from(user.uid.0)),
+                    value: rustos_log::FieldValue::Str(uid.format(i128::from(user.uid.0))),
                 },
                 Field {
                     key: "session",
-                    value: outcome.kind.label(),
+                    value: rustos_log::FieldValue::Str(outcome.kind.label()),
                 },
                 Field {
                     key: "exit_code",
-                    value: code.format(i128::from(outcome.exit_code)),
+                    value: rustos_log::FieldValue::Str(code.format(i128::from(outcome.exit_code))),
                 },
             ],
         );
@@ -269,15 +273,15 @@ impl<'a> Login<'a> {
             &[
                 Field {
                     key: "user",
-                    value: username,
+                    value: rustos_log::FieldValue::Str(username),
                 },
                 Field {
                     key: "uid",
-                    value: uid.format(i128::from(user.uid.0)),
+                    value: rustos_log::FieldValue::Str(uid.format(i128::from(user.uid.0))),
                 },
                 Field {
                     key: "session",
-                    value: kind.label(),
+                    value: rustos_log::FieldValue::Str(kind.label()),
                 },
             ],
         );
@@ -289,7 +293,7 @@ impl<'a> Login<'a> {
             events::CONSOLE_ERROR,
             &[Field {
                 key: "stage",
-                value: stage,
+                value: rustos_log::FieldValue::Str(stage),
             }],
         );
     }

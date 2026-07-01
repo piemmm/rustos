@@ -173,11 +173,17 @@ extern "C" fn on_fault(esr: u64, far: u64, _elr: u64) -> ! {
             fields: &[
                 rustos_log::Field {
                     key: "esr",
-                    value: rustos_util::fmt::format_hex_u64(esr, &mut esr_buf),
+                    value: rustos_log::FieldValue::Str(rustos_util::fmt::format_hex_u64(
+                        esr,
+                        &mut esr_buf,
+                    )),
                 },
                 rustos_log::Field {
                     key: "far",
-                    value: rustos_util::fmt::format_hex_u64(far, &mut far_buf),
+                    value: rustos_log::FieldValue::Str(rustos_util::fmt::format_hex_u64(
+                        far,
+                        &mut far_buf,
+                    )),
                 },
             ],
         },

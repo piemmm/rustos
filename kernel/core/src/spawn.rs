@@ -547,7 +547,7 @@ where
             Level::Error,
             &[Field {
                 key: "cause",
-                value: spawn_error_cause(error),
+                value: rustos_log::FieldValue::Str(spawn_error_cause(error)),
             }],
         );
         SpawnCallerError::Build(error)
@@ -560,7 +560,7 @@ where
         Level::Info,
         &[Field {
             key: "entry",
-            value: format_hex_u64(image.entry, &mut entry_buf),
+            value: rustos_log::FieldValue::Str(format_hex_u64(image.entry, &mut entry_buf)),
         }],
     );
 

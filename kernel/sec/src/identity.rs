@@ -273,7 +273,7 @@ impl IdentityTableBuilder {
                 AuditEvent::IdentityTableRejected,
                 &[Field {
                     key: "errno",
-                    value: cause,
+                    value: rustos_log::FieldValue::Str(cause),
                 }],
             );
             return Err(err);
@@ -289,11 +289,11 @@ impl IdentityTableBuilder {
             &[
                 Field {
                     key: "users",
-                    value: user_count,
+                    value: rustos_log::FieldValue::Str(user_count),
                 },
                 Field {
                     key: "groups",
-                    value: group_count,
+                    value: rustos_log::FieldValue::Str(group_count),
                 },
             ],
         );

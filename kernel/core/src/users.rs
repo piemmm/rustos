@@ -494,11 +494,11 @@ fn audit_load(audit: &dyn Sink, records: Option<usize>, err: Option<UsersLoadErr
             &[
                 Field {
                     key: "path",
-                    value: USERS_DB_PATH,
+                    value: rustos_log::FieldValue::Str(USERS_DB_PATH),
                 },
                 Field {
                     key: "records",
-                    value: records,
+                    value: rustos_log::FieldValue::Str(records),
                 },
             ],
         );
@@ -510,11 +510,11 @@ fn audit_load(audit: &dyn Sink, records: Option<usize>, err: Option<UsersLoadErr
             &[
                 Field {
                     key: "path",
-                    value: USERS_DB_PATH,
+                    value: rustos_log::FieldValue::Str(USERS_DB_PATH),
                 },
                 Field {
                     key: "cause",
-                    value: err.cause(),
+                    value: rustos_log::FieldValue::Str(err.cause()),
                 },
             ],
         );

@@ -273,7 +273,7 @@ mod tests {
         let sink = RecordingSink::new();
         let fields = [Field {
             key: "uid",
-            value: "42",
+            value: rustos_log::FieldValue::Str("42"),
         }];
         record(&sink, AuditEvent::TaskCapabilitiesDerived, &fields);
         assert_eq!(sink.len(), 1);

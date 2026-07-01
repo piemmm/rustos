@@ -123,7 +123,7 @@ impl Port {
         let mut id_buf = [0u8; 16];
         let id_field = Field {
             key: "port",
-            value: format_hex_u64(id.0, &mut id_buf),
+            value: rustos_log::FieldValue::Str(format_hex_u64(id.0, &mut id_buf)),
         };
 
         if max_payload > IPC_MESSAGE_MAX_PAYLOAD_LEN || mailbox_capacity == 0 {
@@ -219,11 +219,11 @@ impl Port {
             &[
                 Field {
                     key: "port",
-                    value: format_hex_u64(self.id.0, &mut id_buf),
+                    value: rustos_log::FieldValue::Str(format_hex_u64(self.id.0, &mut id_buf)),
                 },
                 Field {
                     key: "drained",
-                    value: format_usize(drained, &mut drained_buf),
+                    value: rustos_log::FieldValue::Str(format_usize(drained, &mut drained_buf)),
                 },
             ],
         );
@@ -261,15 +261,15 @@ impl Port {
         let mut len_buf = [0u8; 12];
         let port_field = Field {
             key: "port",
-            value: format_hex_u64(self.id.0, &mut id_buf),
+            value: rustos_log::FieldValue::Str(format_hex_u64(self.id.0, &mut id_buf)),
         };
         let sender_field = Field {
             key: "sender",
-            value: format_hex_u64(sender.task().0, &mut sender_buf),
+            value: rustos_log::FieldValue::Str(format_hex_u64(sender.task().0, &mut sender_buf)),
         };
         let len_field = Field {
             key: "len",
-            value: format_usize(payload.len(), &mut len_buf),
+            value: rustos_log::FieldValue::Str(format_usize(payload.len(), &mut len_buf)),
         };
 
         // 1. Fast path: reject sends to closed ports without locking.

@@ -41,6 +41,10 @@
 
 use std::path::Path;
 
+use rustos_abi::field::{
+    TAG_BOOL, TAG_BYTES, TAG_CAP, TAG_DECIMAL, TAG_DURATION, TAG_ERROR, TAG_IP, TAG_LIST, TAG_MAC,
+    TAG_NULL, TAG_SIGNED, TAG_STR, TAG_TIME, TAG_UNSIGNED, TAG_UUID,
+};
 use rustos_abi::{
     AbiType, AppInfoHeader, BufferClass, BundleEntry, CapabilityId, DriverBindKey, DriverError,
     DriverHandle, DriverKind, DriverManifest, DriverRegisterReply, Duration64, Errno,
@@ -325,8 +329,20 @@ fn generate_log() -> String {
          \x20*   offset 2: uint16_t message_len  (<= ROS_LOG_MESSAGE_MAX)\n\
          \x20*   offset 4: uint32_t event_id\n\
          \x20*   offset 8: message bytes (message_len, UTF-8)\n\
-         \x20*   then field_count records: uint8_t key_len, uint8_t value_len,\n\
-         \x20*        key bytes, value bytes (both UTF-8).\n\
+         \x20*   then field_count records, each:\n\
+         \x20*     uint8_t key_len   (<= ROS_LOG_FIELD_KEY_MAX)\n\
+         \x20*     key bytes         (key_len, UTF-8)\n\
+         \x20*     a typed field value: a 1-byte ROS_FIELD_TAG_* discriminant\n\
+         \x20*       followed by its little-endian payload. The whole encoded\n\
+         \x20*       value is <= ROS_LOG_FIELD_VALUE_MAX bytes. Payloads:\n\
+         \x20*         NULL: none.  BOOL: 1 byte (0|1).\n\
+         \x20*         SIGNED/UNSIGNED: 8 bytes.  TIME/DURATION: 12 bytes.\n\
+         \x20*         DECIMAL: int64 mantissa + uint8 scale (9 bytes).\n\
+         \x20*         STR/BYTES: uint16 len then len bytes.\n\
+         \x20*         UUID: 16 bytes.  MAC: 6 bytes.\n\
+         \x20*         IP: uint8 family (4|6) then 4 or 16 bytes.\n\
+         \x20*         ERROR: int32.  CAP: uint16.\n\
+         \x20*         LIST: uint8 elem-tag, uint16 count, then count payloads.\n\
          \x20*/\n",
     );
 
@@ -347,7 +363,7 @@ fn generate_log() -> String {
         out,
         "#define ROS_LOG_FIELD_KEY_MAX ((uintptr_t){LOG_FIELD_KEY_MAX}u)"
     );
-    out.push_str("/* Maximum field value length, in bytes. */\n");
+    out.push_str("/* Maximum encoded field-value length, in bytes (tag + payload). */\n");
     let _ = writeln!(
         out,
         "#define ROS_LOG_FIELD_VALUE_MAX ((uintptr_t){LOG_FIELD_VALUE_MAX}u)"
@@ -362,6 +378,28 @@ fn generate_log() -> String {
         out,
         "#define ROS_LOG_RECORD_MAX ((uintptr_t){LOG_RECORD_MAX}u)"
     );
+    out.push('\n');
+
+    out.push_str("/* Field-value type tags: the first byte of an encoded field value. */\n");
+    for (name, tag) in [
+        ("NULL", TAG_NULL),
+        ("BOOL", TAG_BOOL),
+        ("SIGNED", TAG_SIGNED),
+        ("UNSIGNED", TAG_UNSIGNED),
+        ("DECIMAL", TAG_DECIMAL),
+        ("TIME", TAG_TIME),
+        ("DURATION", TAG_DURATION),
+        ("STR", TAG_STR),
+        ("BYTES", TAG_BYTES),
+        ("UUID", TAG_UUID),
+        ("IP", TAG_IP),
+        ("MAC", TAG_MAC),
+        ("ERROR", TAG_ERROR),
+        ("CAP", TAG_CAP),
+        ("LIST", TAG_LIST),
+    ] {
+        let _ = writeln!(out, "#define ROS_FIELD_TAG_{name} ((uint8_t){tag}u)");
+    }
     out.push('\n');
 
     out.push_str("#endif /* ROS_LOG_H */\n");

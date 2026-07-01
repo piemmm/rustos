@@ -406,15 +406,19 @@ pub(crate) fn log_guard_arena(
             fields: &[
                 Field {
                     key: "installed",
-                    value: if arena.is_some() { "true" } else { "false" },
+                    value: rustos_log::FieldValue::Str(if arena.is_some() {
+                        "true"
+                    } else {
+                        "false"
+                    }),
                 },
                 Field {
                     key: "base",
-                    value: base_hex,
+                    value: rustos_log::FieldValue::Str(base_hex),
                 },
                 Field {
                     key: "len",
-                    value: len_hex,
+                    value: rustos_log::FieldValue::Str(len_hex),
                 },
             ],
         },

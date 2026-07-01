@@ -105,11 +105,11 @@ impl SharedMemory {
         let mut len_buf = [0u8; 12];
         let id_field = Field {
             key: "shmem",
-            value: format_hex_u64(id.0, &mut id_buf),
+            value: rustos_log::FieldValue::Str(format_hex_u64(id.0, &mut id_buf)),
         };
         let len_field = Field {
             key: "len",
-            value: format_usize(len, &mut len_buf),
+            value: rustos_log::FieldValue::Str(format_usize(len, &mut len_buf)),
         };
 
         if len == 0 || len > SHMEM_MAX_BYTES {
@@ -182,11 +182,11 @@ impl SharedMemory {
         let mut recv_buf = [0u8; 16];
         let id_field = Field {
             key: "shmem",
-            value: format_hex_u64(self.inner.id.0, &mut id_buf),
+            value: rustos_log::FieldValue::Str(format_hex_u64(self.inner.id.0, &mut id_buf)),
         };
         let recv_field = Field {
             key: "recipient",
-            value: format_hex_u64(recipient.task().0, &mut recv_buf),
+            value: rustos_log::FieldValue::Str(format_hex_u64(recipient.task().0, &mut recv_buf)),
         };
 
         if !self.inner.required_caps.is_subset_of(recipient.effective()) {
@@ -214,7 +214,7 @@ impl SharedMemory {
         let mut id_buf = [0u8; 16];
         let id_field = Field {
             key: "shmem",
-            value: format_hex_u64(self.inner.id.0, &mut id_buf),
+            value: rustos_log::FieldValue::Str(format_hex_u64(self.inner.id.0, &mut id_buf)),
         };
         {
             let mut s = self.inner.state.write();

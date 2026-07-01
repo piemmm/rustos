@@ -223,11 +223,11 @@ fn audit_candidate(sink: &dyn Sink, path: &str, bind_key_count: usize) {
     let fields = [
         Field {
             key: "path",
-            value: path,
+            value: rustos_log::FieldValue::Str(path),
         },
         Field {
             key: "bind_keys",
-            value: count_str,
+            value: rustos_log::FieldValue::Str(count_str),
         },
     ];
     log_event(
@@ -245,11 +245,11 @@ fn audit_skip(sink: &dyn Sink, path: &str, reason: &str) {
     let fields = [
         Field {
             key: "path",
-            value: path,
+            value: rustos_log::FieldValue::Str(path),
         },
         Field {
             key: "reason",
-            value: reason,
+            value: rustos_log::FieldValue::Str(reason),
         },
     ];
     log_event(

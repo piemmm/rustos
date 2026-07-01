@@ -380,35 +380,59 @@ pub fn boot(
                 fields: &[
                     Field {
                         key: "regs_base_hex",
-                        value: format_hex_u64(pcie.regs_phys, &mut regs_base_buf),
+                        value: rustos_log::FieldValue::Str(format_hex_u64(
+                            pcie.regs_phys,
+                            &mut regs_base_buf,
+                        )),
                     },
                     Field {
                         key: "regs_len_hex",
-                        value: format_hex_u64(pcie.regs_len, &mut regs_len_buf),
+                        value: rustos_log::FieldValue::Str(format_hex_u64(
+                            pcie.regs_len,
+                            &mut regs_len_buf,
+                        )),
                     },
                     Field {
                         key: "dma_aperture_top_hex",
-                        value: format_hex_u64(pcie.dma_aperture_top, &mut aperture_top_buf),
+                        value: rustos_log::FieldValue::Str(format_hex_u64(
+                            pcie.dma_aperture_top,
+                            &mut aperture_top_buf,
+                        )),
                     },
                     Field {
                         key: "inbound_size_hex",
-                        value: format_hex_u64(pcie.inbound_size, &mut inbound_size_buf),
+                        value: rustos_log::FieldValue::Str(format_hex_u64(
+                            pcie.inbound_size,
+                            &mut inbound_size_buf,
+                        )),
                     },
                     Field {
                         key: "inbound_pcie_base_hex",
-                        value: format_hex_u64(pcie.inbound_pcie_base, &mut inbound_pcie_buf),
+                        value: rustos_log::FieldValue::Str(format_hex_u64(
+                            pcie.inbound_pcie_base,
+                            &mut inbound_pcie_buf,
+                        )),
                     },
                     Field {
                         key: "outbound_cpu_base_hex",
-                        value: format_hex_u64(pcie.outbound_cpu_base, &mut outbound_cpu_buf),
+                        value: rustos_log::FieldValue::Str(format_hex_u64(
+                            pcie.outbound_cpu_base,
+                            &mut outbound_cpu_buf,
+                        )),
                     },
                     Field {
                         key: "outbound_pcie_base_hex",
-                        value: format_hex_u64(pcie.outbound_pcie_base, &mut outbound_pcie_buf),
+                        value: rustos_log::FieldValue::Str(format_hex_u64(
+                            pcie.outbound_pcie_base,
+                            &mut outbound_pcie_buf,
+                        )),
                     },
                     Field {
                         key: "outbound_size_hex",
-                        value: format_hex_u64(pcie.outbound_size, &mut outbound_size_buf),
+                        value: rustos_log::FieldValue::Str(format_hex_u64(
+                            pcie.outbound_size,
+                            &mut outbound_size_buf,
+                        )),
                     },
                 ],
             },
@@ -570,79 +594,79 @@ pub fn boot(
             fields: &[
                 Field {
                     key: "boot_cpu_ok",
-                    value: yes_no(boot_cpu_ok),
+                    value: rustos_log::FieldValue::Str(yes_no(boot_cpu_ok)),
                 },
                 Field {
                     key: "timer_present",
-                    value: yes_no(timer_present),
+                    value: rustos_log::FieldValue::Str(yes_no(timer_present)),
                 },
                 Field {
                     key: "dtb_present",
-                    value: yes_no(dtb != 0),
+                    value: rustos_log::FieldValue::Str(yes_no(dtb != 0)),
                 },
                 Field {
                     key: "console_discovered",
-                    value: yes_no(early.console),
+                    value: rustos_log::FieldValue::Str(yes_no(early.console)),
                 },
                 Field {
                     key: "gic_discovered",
-                    value: yes_no(early.gic),
+                    value: rustos_log::FieldValue::Str(yes_no(early.gic)),
                 },
                 Field {
                     key: "video_console",
-                    value: yes_no(early.video.is_some()),
+                    value: rustos_log::FieldValue::Str(yes_no(early.video.is_some())),
                 },
                 Field {
                     key: "device_gigapages_hex",
-                    value: device_mask_hex,
+                    value: rustos_log::FieldValue::Str(device_mask_hex),
                 },
                 Field {
                     key: "ram_discovered",
-                    value: yes_no(discovered.ram_window.is_some()),
+                    value: rustos_log::FieldValue::Str(yes_no(discovered.ram_window.is_some())),
                 },
                 Field {
                     key: "mem_map_built",
-                    value: yes_no(mem_map_built),
+                    value: rustos_log::FieldValue::Str(yes_no(mem_map_built)),
                 },
                 Field {
                     key: "mem_map_status",
-                    value: mem_status,
+                    value: rustos_log::FieldValue::Str(mem_status),
                 },
                 Field {
                     key: "usable_bytes_hex",
-                    value: usable_hex,
+                    value: rustos_log::FieldValue::Str(usable_hex),
                 },
                 Field {
                     key: "reserved_bytes_hex",
-                    value: reserved_hex,
+                    value: rustos_log::FieldValue::Str(reserved_hex),
                 },
                 Field {
                     key: "timer_hz_from_tree",
-                    value: yes_no(discovered.timer_hz_from_tree),
+                    value: rustos_log::FieldValue::Str(yes_no(discovered.timer_hz_from_tree)),
                 },
                 Field {
                     key: "timer_hz_hex",
-                    value: timer_hz_hex,
+                    value: rustos_log::FieldValue::Str(timer_hz_hex),
                 },
                 Field {
                     key: "psci_conduit_discovered",
-                    value: yes_no(discovered.psci_method.is_some()),
+                    value: rustos_log::FieldValue::Str(yes_no(discovered.psci_method.is_some())),
                 },
                 Field {
                     key: "mmu_enabled",
-                    value: yes_no(mmu_on),
+                    value: rustos_log::FieldValue::Str(yes_no(mmu_on)),
                 },
                 Field {
                     key: "guard_arena_prepared",
-                    value: yes_no(arena_prepared),
+                    value: rustos_log::FieldValue::Str(yes_no(arena_prepared)),
                 },
                 Field {
                     key: "next_stage",
-                    value: "pi_p6c3_spawn_init_el0",
+                    value: rustos_log::FieldValue::Str("pi_p6c3_spawn_init_el0"),
                 },
                 Field {
                     key: "build_id",
-                    value: KERNEL_BUILD_ID,
+                    value: rustos_log::FieldValue::Str(KERNEL_BUILD_ID),
                 },
             ],
         },

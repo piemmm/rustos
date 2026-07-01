@@ -165,7 +165,7 @@ mod kernel {
                 message: "riscv64 stack-guard test: setup failed",
                 fields: &[Field {
                     key: "stage",
-                    value: what,
+                    value: rustos_log::FieldValue::Str(what),
                 }],
             },
         );
@@ -260,11 +260,11 @@ mod kernel {
                 message: "riscv64 stack-guard test: read the unmapped guard page (no fault)",
                 fields: &[Field {
                     key: "observed",
-                    value: if observed == SENTINEL {
+                    value: rustos_log::FieldValue::Str(if observed == SENTINEL {
                         "sentinel"
                     } else {
                         "other"
-                    },
+                    }),
                 }],
             },
         );

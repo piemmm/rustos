@@ -177,7 +177,7 @@ fn fail(what: &'static str) -> ! {
             message: "x86_64 stack-overrun test: setup failed",
             fields: &[Field {
                 key: "stage",
-                value: what,
+                value: rustos_log::FieldValue::Str(what),
             }],
         },
     );
@@ -367,11 +367,11 @@ fn run_overrun_test() -> ! {
             message: "x86_64 stack-overrun test: kthread overran the guard page without faulting",
             fields: &[Field {
                 key: "drained",
-                value: if sched.live_task_count() == 0 {
+                value: rustos_log::FieldValue::Str(if sched.live_task_count() == 0 {
                     "yes"
                 } else {
                     "timeout"
-                },
+                }),
             }],
         },
     );

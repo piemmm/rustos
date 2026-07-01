@@ -231,7 +231,7 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
         AuditEvent::BootStarted,
         &[Field {
             key: "phase_count",
-            value: "7",
+            value: rustos_log::FieldValue::Str("7"),
         }],
     );
 
@@ -267,11 +267,11 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
                 &[
                     Field {
                         key: "phase",
-                        value: phase.as_str(),
+                        value: rustos_log::FieldValue::Str(phase.as_str()),
                     },
                     Field {
                         key: "cause",
-                        value: cause,
+                        value: rustos_log::FieldValue::Str(cause),
                     },
                 ],
             );
@@ -285,7 +285,7 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
         AuditEvent::BootCompleted,
         &[Field {
             key: "next",
-            value: "spawn_init",
+            value: rustos_log::FieldValue::Str("spawn_init"),
         }],
     );
 
@@ -419,7 +419,7 @@ fn seed_entropy_reserve<A: KernelArch + 'static>(state: &'static KernelState<A>)
             AuditEvent::EntropyReserveUnseeded,
             &[Field {
                 key: "cause",
-                value: "no_source",
+                value: rustos_log::FieldValue::Str("no_source"),
             }],
         );
         return;
@@ -434,7 +434,7 @@ fn seed_entropy_reserve<A: KernelArch + 'static>(state: &'static KernelState<A>)
             AuditEvent::EntropyReserveUnseeded,
             &[Field {
                 key: "cause",
-                value: "source_pending",
+                value: rustos_log::FieldValue::Str("source_pending"),
             }],
         );
         return;
@@ -461,7 +461,7 @@ fn seed_entropy_reserve<A: KernelArch + 'static>(state: &'static KernelState<A>)
                 AuditEvent::EntropyReserveUnseeded,
                 &[Field {
                     key: "cause",
-                    value: "draw_failed",
+                    value: rustos_log::FieldValue::Str("draw_failed"),
                 }],
             );
         }
@@ -937,7 +937,7 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
             AuditEvent::DriverUnloaded,
             &[Field {
                 key: "handle",
-                value: format_hex_u64(handle, &mut handle_buf),
+                value: rustos_log::FieldValue::Str(format_hex_u64(handle, &mut handle_buf)),
             }],
         );
         Ok(())
@@ -1409,7 +1409,7 @@ fn phase_started(sink: &(dyn Sink + Sync), phase: Phase) {
         AuditEvent::PhaseStarted,
         &[Field {
             key: "phase",
-            value: phase.as_str(),
+            value: rustos_log::FieldValue::Str(phase.as_str()),
         }],
     );
 }
@@ -1421,7 +1421,7 @@ fn phase_ready(sink: &(dyn Sink + Sync), phase: Phase) {
         AuditEvent::PhaseReady,
         &[Field {
             key: "phase",
-            value: phase.as_str(),
+            value: rustos_log::FieldValue::Str(phase.as_str()),
         }],
     );
 }

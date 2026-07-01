@@ -130,11 +130,17 @@ mod program {
                     fields: &[
                         Field {
                             key: "generation",
-                            value: format_hex_u64(header.generation(), &mut gen),
+                            value: rustos_log::FieldValue::Str(format_hex_u64(
+                                header.generation(),
+                                &mut gen,
+                            )),
                         },
                         Field {
                             key: "nodes",
-                            value: format_usize(header.node_count() as usize, &mut count),
+                            value: rustos_log::FieldValue::Str(format_usize(
+                                header.node_count() as usize,
+                                &mut count,
+                            )),
                         },
                     ],
                 },
@@ -161,19 +167,25 @@ mod program {
                     fields: &[
                         Field {
                             key: "id",
-                            value: format_usize(node.id() as usize, &mut id),
+                            value: rustos_log::FieldValue::Str(format_usize(
+                                node.id() as usize,
+                                &mut id,
+                            )),
                         },
                         Field {
                             key: "parent",
-                            value: parent_str,
+                            value: rustos_log::FieldValue::Str(parent_str),
                         },
                         Field {
                             key: "class",
-                            value: class_name(node.class()),
+                            value: rustos_log::FieldValue::Str(class_name(node.class())),
                         },
                         Field {
                             key: "keys",
-                            value: format_usize(node.match_keys().len(), &mut keys),
+                            value: rustos_log::FieldValue::Str(format_usize(
+                                node.match_keys().len(),
+                                &mut keys,
+                            )),
                         },
                     ],
                 },

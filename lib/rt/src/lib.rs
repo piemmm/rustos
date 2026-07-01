@@ -1355,16 +1355,22 @@ pub struct LogSink;
 impl rustos_log::Sink for LogSink {
     fn write_event(&self, event: &rustos_log::Event<'_>) {
         // Marshal the borrowed fields into the `(key, value)` pairs the
-        // encoder takes, clamping each to its bound and dropping any past
-        // `LOG_FIELDS_MAX` (best-effort).
-        let mut pairs: [(&str, &str); rustos_abi::LOG_FIELDS_MAX] =
-            [("", ""); rustos_abi::LOG_FIELDS_MAX];
+        // encoder takes, clamping keys/strings to their bound and dropping any
+        // field past `LOG_FIELDS_MAX` (best-effort). A `Str` value longer than
+        // the per-field encoded bound is trimmed so the record still encodes
+        // rather than being dropped whole; non-string values are fixed-size.
+        let mut pairs: [(&str, rustos_abi::FieldValue<'_>); rustos_abi::LOG_FIELDS_MAX] =
+            [("", rustos_abi::FieldValue::Null); rustos_abi::LOG_FIELDS_MAX];
         let field_count = event.fields.len().min(rustos_abi::LOG_FIELDS_MAX);
         for (slot, field) in pairs.iter_mut().zip(event.fields.iter()).take(field_count) {
-            *slot = (
-                clamp_utf8(field.key, rustos_abi::LOG_FIELD_KEY_MAX),
-                clamp_utf8(field.value, rustos_abi::LOG_FIELD_VALUE_MAX),
-            );
+            let value = match field.value {
+                // Leave room for the value's tag + length prefix.
+                rustos_abi::FieldValue::Str(s) => {
+                    rustos_abi::FieldValue::Str(clamp_utf8(s, rustos_abi::LOG_FIELD_VALUE_MAX - 3))
+                }
+                other => other,
+            };
+            *slot = (clamp_utf8(field.key, rustos_abi::LOG_FIELD_KEY_MAX), value);
         }
         let message = clamp_utf8(event.message, rustos_abi::LOG_MESSAGE_MAX);
 

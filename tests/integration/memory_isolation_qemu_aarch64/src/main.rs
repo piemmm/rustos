@@ -185,7 +185,7 @@ mod kernel {
                 message: "aarch64 memory-isolation test: setup failed",
                 fields: &[rustos_log::Field {
                     key: "stage",
-                    value: what,
+                    value: rustos_log::FieldValue::Str(what),
                 }],
             },
         );

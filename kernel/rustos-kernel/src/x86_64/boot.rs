@@ -377,7 +377,7 @@ fn log_tsc_invariance(sink: &(dyn Sink + Sync), invariant: bool) {
             message,
             fields: &[Field {
                 key: "invariant_tsc",
-                value: if invariant { "true" } else { "false" },
+                value: rustos_log::FieldValue::Str(if invariant { "true" } else { "false" }),
             }],
         },
     );
@@ -392,7 +392,7 @@ fn log_init_failure(sink: &(dyn Sink + Sync), err: BootError) {
             message: "kernel boot init failed",
             fields: &[Field {
                 key: "cause",
-                value: err.as_str(),
+                value: rustos_log::FieldValue::Str(err.as_str()),
             }],
         },
     );

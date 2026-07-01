@@ -22,6 +22,7 @@ pub mod capability;
 pub mod driver;
 pub mod driver_store;
 pub mod error;
+pub mod field;
 pub mod fs;
 pub mod hwtree;
 pub mod input;
@@ -62,6 +63,11 @@ pub use driver::{
     VIRTIO_PCI_CFG_NOTIFY, VIRTIO_PCI_CFG_PCI, VIRTIO_PCI_VENDOR_ID,
 };
 pub use error::Errno;
+pub use field::{
+    encode_list, reserved_prefix, Decimal, FieldList, FieldListIter, FieldName, FieldValue, IpAddr,
+    MacAddr, ScalarType, ToFieldValue, Uuid, FIELD_BYTES_MAX, FIELD_LIST_MAX, FIELD_NAME_MAX,
+    FIELD_STR_MAX, IPV4_LEN, IPV6_LEN, MAC_LEN, RESERVED_PREFIXES, UUID_LEN,
+};
 pub use fs::{DirEntry, FileKind, FileStat, OpenFlags, FS_IO_MAX, FS_NAME_MAX, FS_PATH_MAX};
 pub use hwtree::{
     HwDeviceClass, HwMatchKey, HwMatchKind, HwNode, HwResource, HwResourceKind, HwTreeHeader,

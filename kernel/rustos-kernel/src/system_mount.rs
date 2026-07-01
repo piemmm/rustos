@@ -405,7 +405,7 @@ fn unavailable(audit: &dyn Sink, cause: &'static str) {
             message: "system-mount: no /System volume published as the fs_* mount",
             fields: &[Field {
                 key: "cause",
-                value: cause,
+                value: rustos_log::FieldValue::Str(cause),
             }],
         },
     );

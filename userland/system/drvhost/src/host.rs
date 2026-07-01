@@ -499,11 +499,11 @@ impl<'h> Host<'h> {
         let fields = [
             Field {
                 key: "path",
-                value: path,
+                value: rustos_log::FieldValue::Str(path),
             },
             Field {
                 key: "handle",
-                value: handle_str,
+                value: rustos_log::FieldValue::Str(handle_str),
             },
         ];
         log_event(
@@ -521,11 +521,11 @@ impl<'h> Host<'h> {
         let fields = [
             Field {
                 key: "path",
-                value: path,
+                value: rustos_log::FieldValue::Str(path),
             },
             Field {
                 key: "reason",
-                value: reason,
+                value: rustos_log::FieldValue::Str(reason),
             },
         ];
         log_event(

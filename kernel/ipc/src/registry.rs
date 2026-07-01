@@ -126,7 +126,7 @@ impl PortRegistry {
         let mut id_buf = [0u8; 16];
         let id_field = Field {
             key: "port",
-            value: format_hex_u64(id.0, &mut id_buf),
+            value: rustos_log::FieldValue::Str(format_hex_u64(id.0, &mut id_buf)),
         };
 
         if self.ports.contains_key(&id) {
@@ -193,7 +193,7 @@ impl PortRegistry {
                 AuditEvent::PortNameWithdrawn,
                 &[Field {
                     key: "name",
-                    value: name.as_str(),
+                    value: rustos_log::FieldValue::Str(name.as_str()),
                 }],
             );
         }
@@ -209,7 +209,7 @@ impl PortRegistry {
             AuditEvent::PortUnregistered,
             &[Field {
                 key: "port",
-                value: format_hex_u64(id.0, &mut id_buf),
+                value: rustos_log::FieldValue::Str(format_hex_u64(id.0, &mut id_buf)),
             }],
         );
         Ok(())
@@ -243,11 +243,11 @@ impl PortRegistry {
         let fields = [
             Field {
                 key: "name",
-                value: name.as_str(),
+                value: rustos_log::FieldValue::Str(name.as_str()),
             },
             Field {
                 key: "port",
-                value: format_hex_u64(id.0, &mut id_buf),
+                value: rustos_log::FieldValue::Str(format_hex_u64(id.0, &mut id_buf)),
             },
         ];
 
@@ -314,7 +314,7 @@ impl PortRegistry {
             AuditEvent::PortNameWithdrawn,
             &[Field {
                 key: "name",
-                value: name.as_str(),
+                value: rustos_log::FieldValue::Str(name.as_str()),
             }],
         );
         Ok(id)

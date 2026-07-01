@@ -686,23 +686,25 @@ fn log_reached(sink: &(dyn Sink + Sync), hartid: u64, dtb: u64, mmu_on: bool) {
             fields: &[
                 Field {
                     key: "boot_hart_ok",
-                    value: yes_no(hartid == u64::from(BOOT_CPU)),
+                    value: rustos_log::FieldValue::Str(yes_no(hartid == u64::from(BOOT_CPU))),
                 },
                 Field {
                     key: "dtb_present",
-                    value: yes_no(dtb != 0),
+                    value: rustos_log::FieldValue::Str(yes_no(dtb != 0)),
                 },
                 Field {
                     key: "mmu_enabled",
-                    value: yes_no(mmu_on),
+                    value: rustos_log::FieldValue::Str(yes_no(mmu_on)),
                 },
                 Field {
                     key: "dispatch_installed",
-                    value: yes_no(syscall_entry::dispatch_callback().is_some()),
+                    value: rustos_log::FieldValue::Str(yes_no(
+                        syscall_entry::dispatch_callback().is_some(),
+                    )),
                 },
                 Field {
                     key: "next_stage",
-                    value: "rv_p3_spawn_init_u_mode",
+                    value: rustos_log::FieldValue::Str("rv_p3_spawn_init_u_mode"),
                 },
             ],
         },
@@ -718,7 +720,7 @@ fn log_init_failure(sink: &(dyn Sink + Sync), err: BootError) {
             message: "kernel boot init failed",
             fields: &[Field {
                 key: "cause",
-                value: err.as_str(),
+                value: rustos_log::FieldValue::Str(err.as_str()),
             }],
         },
     );

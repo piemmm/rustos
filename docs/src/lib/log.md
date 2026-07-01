@@ -5,7 +5,11 @@ Structured, level-filtered, allocation-free logging.
 ## Model
 
 * `Event` — a borrowed record carrying a `Level`, a stable `EventId`, a
-  short message, and an optional slice of `Field` key/value pairs.
+  short message, and an optional slice of `Field`s. A `Field` is a `&str`
+  key plus a typed `FieldValue` — the one field-value model (below), so a
+  caller logs a real integer, error code, capability id, address, or bounded
+  string rather than a pre-formatted string. Console sinks render a value
+  through its `Display` impl.
 * `Sink` — trait implemented by anything that can receive an `Event`
   (a serial port, a kernel ring buffer, an IPC pipe). Sinks must not
   panic and must not allocate on the hot path.
@@ -49,11 +53,14 @@ crate pulls in no payload codec and stays allocation-free.
 
 ## Typed-field value model (`field`)
 
-The `field` module is the foundational, reusable data model the RustOS system
-log (`plans/SYSLOG.md`) builds its record schema on. It does **not** define the
-framed record or on-disk segment format — that is the journal service's job —
-only the closed set of value types a field may hold and how a single value is
-named, validated, and encoded.
+The typed field-value model is defined in `rustos-abi` (`rustos_abi::field`,
+its ABI-schema home) and re-exported as `rustos_log::field` so both the
+`log_emit` record (`rustos_abi::log`) and the RustOS system log
+(`plans/SYSLOG.md`) schema share **one** definition — there is no second
+string-only field encoding. It defines the closed set of value types a field
+may hold and how a single value is named, validated, and encoded; it does
+**not** define the framed record or on-disk segment format — that is the
+journal service's job.
 
 * `FieldName` — a validated caller field name. The grammar is the
   case-sensitive ASCII identifier `[a-z][a-z0-9_]{0,63}`. Because the `.`

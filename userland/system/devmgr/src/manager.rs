@@ -141,7 +141,7 @@ impl<'m> DeviceManager<'m> {
                         node.id(),
                         &[Field {
                             key: "priority",
-                            value: priority_str,
+                            value: rustos_log::FieldValue::Str(priority_str),
                         }],
                     );
                     report.ties_rejected += 1;
@@ -165,11 +165,11 @@ impl<'m> DeviceManager<'m> {
                                     &[
                                         Field {
                                             key: "path",
-                                            value: path,
+                                            value: rustos_log::FieldValue::Str(path),
                                         },
                                         Field {
                                             key: "errno",
-                                            value: errno_str,
+                                            value: rustos_log::FieldValue::Str(errno_str),
                                         },
                                     ],
                                 );
@@ -187,11 +187,11 @@ impl<'m> DeviceManager<'m> {
                         &[
                             Field {
                                 key: "path",
-                                value: path,
+                                value: rustos_log::FieldValue::Str(path),
                             },
                             Field {
                                 key: "handle",
-                                value: handle_str,
+                                value: rustos_log::FieldValue::Str(handle_str),
                             },
                         ],
                     );
@@ -212,7 +212,7 @@ impl<'m> DeviceManager<'m> {
         // two event-specific fields. Sized for the largest emitter.
         let mut fields = [Field {
             key: "node",
-            value: node_str,
+            value: rustos_log::FieldValue::Str(node_str),
         }; 3];
         let mut len = 1;
         for field in extra {

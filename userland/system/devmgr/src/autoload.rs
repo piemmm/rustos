@@ -162,7 +162,7 @@ pub fn match_and_load<C: DriverStoreCall + ?Sized>(
                         id,
                         &[Field {
                             key: "priority",
-                            value: priority_str,
+                            value: rustos_log::FieldValue::Str(priority_str),
                         }],
                     );
                 }
@@ -195,7 +195,7 @@ pub fn match_and_load<C: DriverStoreCall + ?Sized>(
                                     id,
                                     &[Field {
                                         key: "errno",
-                                        value: errno_str,
+                                        value: rustos_log::FieldValue::Str(errno_str),
                                     }],
                                 );
                             }
@@ -219,7 +219,7 @@ pub fn match_and_load<C: DriverStoreCall + ?Sized>(
                         id,
                         &[Field {
                             key: "handle",
-                            value: handle_str,
+                            value: rustos_log::FieldValue::Str(handle_str),
                         }],
                     );
                 }
@@ -292,7 +292,7 @@ pub fn unload_vanished<C: DriverStoreCall + ?Sized>(
                 node_id,
                 &[Field {
                     key: "handle",
-                    value: handle_str,
+                    value: rustos_log::FieldValue::Str(handle_str),
                 }],
             ),
             Err(errno) => {
@@ -310,11 +310,11 @@ pub fn unload_vanished<C: DriverStoreCall + ?Sized>(
                     &[
                         Field {
                             key: "handle",
-                            value: handle_str,
+                            value: rustos_log::FieldValue::Str(handle_str),
                         },
                         Field {
                             key: "errno",
-                            value: errno_str,
+                            value: rustos_log::FieldValue::Str(errno_str),
                         },
                     ],
                 );
@@ -339,7 +339,7 @@ fn audit_node(sink: &dyn Sink, id: EventId, level: Level, node: u32, extra: &[Fi
     let node_str = format_hex_u64(u64::from(node), &mut nbuf);
     let mut fields = [Field {
         key: "node",
-        value: node_str,
+        value: rustos_log::FieldValue::Str(node_str),
     }; 3];
     let mut len = 1;
     for field in extra {

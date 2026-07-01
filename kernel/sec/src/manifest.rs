@@ -222,7 +222,7 @@ pub fn verify_manifest<S: Sink + ?Sized>(
         AuditEvent::ManifestVerified,
         &[Field {
             key: "caps",
-            value: count,
+            value: rustos_log::FieldValue::Str(count),
         }],
     );
 
@@ -243,7 +243,7 @@ fn emit_errno<S: Sink + ?Sized>(audit: &S, event: AuditEvent, err: Errno) {
         event,
         &[Field {
             key: "errno",
-            value: cause,
+            value: rustos_log::FieldValue::Str(cause),
         }],
     );
 }

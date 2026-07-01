@@ -322,11 +322,11 @@ impl<'a> AppLoader<'a> {
                 fields: &[
                     Field {
                         key: "bundle",
-                        value: bundle,
+                        value: rustos_log::FieldValue::Str(bundle),
                     },
                     Field {
                         key: "detail",
-                        value: detail,
+                        value: rustos_log::FieldValue::Str(detail),
                     },
                 ],
             },

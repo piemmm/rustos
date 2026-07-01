@@ -174,7 +174,7 @@ mod program {
                 message,
                 fields: &[Field {
                     key,
-                    value: format_hex_u64(value, &mut value_buf),
+                    value: rustos_log::FieldValue::Str(format_hex_u64(value, &mut value_buf)),
                 }],
             },
         );
@@ -516,7 +516,7 @@ mod program {
                         message: "usb-hcd: controller bring-up failed",
                         fields: &[Field {
                             key: "phase",
-                            value: err.phase.as_str(),
+                            value: rustos_log::FieldValue::Str(err.phase.as_str()),
                         }],
                     },
                 );

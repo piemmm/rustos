@@ -116,15 +116,15 @@ pub fn alloc_dma<P: PageTable, S: Sink + ?Sized>(
             &[
                 Field {
                     key: "task",
-                    value: task_str,
+                    value: rustos_log::FieldValue::Str(task_str),
                 },
                 Field {
                     key: "uid",
-                    value: uid_str,
+                    value: rustos_log::FieldValue::Str(uid_str),
                 },
                 Field {
                     key: "requested",
-                    value: len_str,
+                    value: rustos_log::FieldValue::Str(len_str),
                 },
             ],
         );
@@ -143,15 +143,15 @@ pub fn alloc_dma<P: PageTable, S: Sink + ?Sized>(
         &[
             Field {
                 key: "task",
-                value: task_str,
+                value: rustos_log::FieldValue::Str(task_str),
             },
             Field {
                 key: "len",
-                value: len_str,
+                value: rustos_log::FieldValue::Str(len_str),
             },
             Field {
                 key: "phys",
-                value: phys_str,
+                value: rustos_log::FieldValue::Str(phys_str),
             },
         ],
     );
@@ -184,7 +184,7 @@ pub fn free_dma<P: PageTable, S: Sink + ?Sized>(
             AuditEvent::DmaAllocDenied,
             &[Field {
                 key: "task",
-                value: task_str,
+                value: rustos_log::FieldValue::Str(task_str),
             }],
         );
         return Err(DmaGateError::CapabilityMissing);

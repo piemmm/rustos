@@ -1739,15 +1739,18 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             &[
                 Field {
                     key: "task",
-                    value: format_hex_u64(caller.task_id.0, &mut t),
+                    value: rustos_log::FieldValue::Str(format_hex_u64(caller.task_id.0, &mut t)),
                 },
                 Field {
                     key: "proc",
-                    value: caller.caps.proc_id().write_hex(&mut p),
+                    value: rustos_log::FieldValue::Str(caller.caps.proc_id().write_hex(&mut p)),
                 },
                 Field {
                     key: "no",
-                    value: rustos_util::fmt::format_usize(usize::from(number), &mut n),
+                    value: rustos_log::FieldValue::Str(rustos_util::fmt::format_usize(
+                        usize::from(number),
+                        &mut n,
+                    )),
                 },
             ],
         );
@@ -1762,15 +1765,15 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             &[
                 Field {
                     key: "task",
-                    value: format_hex_u64(caller.task_id.0, &mut t),
+                    value: rustos_log::FieldValue::Str(format_hex_u64(caller.task_id.0, &mut t)),
                 },
                 Field {
                     key: "proc",
-                    value: caller.caps.proc_id().write_hex(&mut p),
+                    value: rustos_log::FieldValue::Str(caller.caps.proc_id().write_hex(&mut p)),
                 },
                 Field {
                     key: "sc",
-                    value: spec.name,
+                    value: rustos_log::FieldValue::Str(spec.name),
                 },
             ],
         );
@@ -1785,15 +1788,15 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             &[
                 Field {
                     key: "task",
-                    value: format_hex_u64(caller.task_id.0, &mut t),
+                    value: rustos_log::FieldValue::Str(format_hex_u64(caller.task_id.0, &mut t)),
                 },
                 Field {
                     key: "proc",
-                    value: caller.caps.proc_id().write_hex(&mut p),
+                    value: rustos_log::FieldValue::Str(caller.caps.proc_id().write_hex(&mut p)),
                 },
                 Field {
                     key: "sc",
-                    value: spec.name,
+                    value: rustos_log::FieldValue::Str(spec.name),
                 },
             ],
         );
@@ -1808,15 +1811,15 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             &[
                 Field {
                     key: "task",
-                    value: format_hex_u64(caller.task_id.0, &mut t),
+                    value: rustos_log::FieldValue::Str(format_hex_u64(caller.task_id.0, &mut t)),
                 },
                 Field {
                     key: "proc",
-                    value: caller.caps.proc_id().write_hex(&mut p),
+                    value: rustos_log::FieldValue::Str(caller.caps.proc_id().write_hex(&mut p)),
                 },
                 Field {
                     key: "sc",
-                    value: spec.name,
+                    value: rustos_log::FieldValue::Str(spec.name),
                 },
             ],
         );
@@ -1831,15 +1834,15 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             &[
                 Field {
                     key: "task",
-                    value: format_hex_u64(caller.task_id.0, &mut t),
+                    value: rustos_log::FieldValue::Str(format_hex_u64(caller.task_id.0, &mut t)),
                 },
                 Field {
                     key: "proc",
-                    value: caller.caps.proc_id().write_hex(&mut p),
+                    value: rustos_log::FieldValue::Str(caller.caps.proc_id().write_hex(&mut p)),
                 },
                 Field {
                     key: "sc",
-                    value: spec.name,
+                    value: rustos_log::FieldValue::Str(spec.name),
                 },
             ],
         );
@@ -1859,19 +1862,19 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             &[
                 Field {
                     key: "task",
-                    value: format_hex_u64(caller.task_id.0, &mut t),
+                    value: rustos_log::FieldValue::Str(format_hex_u64(caller.task_id.0, &mut t)),
                 },
                 Field {
                     key: "proc",
-                    value: caller.caps.proc_id().write_hex(&mut p),
+                    value: rustos_log::FieldValue::Str(caller.caps.proc_id().write_hex(&mut p)),
                 },
                 Field {
                     key: "sc",
-                    value: spec.name,
+                    value: rustos_log::FieldValue::Str(spec.name),
                 },
                 Field {
                     key: "err",
-                    value: err_field,
+                    value: rustos_log::FieldValue::Str(err_field),
                 },
             ],
         );
@@ -2646,7 +2649,9 @@ mod tests {
             fn write_event(&self, event: &Event<'_>) {
                 for f in event.fields {
                     if f.key == "proc" {
-                        self.seen.borrow_mut().push(f.value.into());
+                        self.seen
+                            .borrow_mut()
+                            .push(alloc::string::ToString::to_string(&f.value));
                     }
                 }
             }

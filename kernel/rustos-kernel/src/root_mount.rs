@@ -665,7 +665,7 @@ fn system_volume_unavailable(audit: &dyn Sink, cause: &'static str) {
             message: "root-mount: no read-only /System volume mounted",
             fields: &[Field {
                 key: "cause",
-                value: cause,
+                value: rustos_log::FieldValue::Str(cause),
             }],
         },
     );
@@ -1110,7 +1110,7 @@ fn gave_up(audit: &dyn Sink, cause: &'static str) {
             message: "root-unlock: gave up; no users database installed (reboot required)",
             fields: &[Field {
                 key: "cause",
-                value: cause,
+                value: rustos_log::FieldValue::Str(cause),
             }],
         },
     );
@@ -1164,7 +1164,7 @@ fn reject(audit: &dyn Sink, error: RootMountError) {
             message,
             fields: &[Field {
                 key: "cause",
-                value: error.cause(),
+                value: rustos_log::FieldValue::Str(error.cause()),
             }],
         },
     );

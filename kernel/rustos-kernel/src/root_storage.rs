@@ -209,15 +209,21 @@ impl RootBlockSelection {
                 fields: &[
                     Field {
                         key: "driver",
-                        value: binding.driver_path,
+                        value: rustos_log::FieldValue::Str(binding.driver_path),
                     },
                     Field {
                         key: "node_id_hex",
-                        value: format_hex_u64(u64::from(binding.node.id()), &mut id_buf),
+                        value: rustos_log::FieldValue::Str(format_hex_u64(
+                            u64::from(binding.node.id()),
+                            &mut id_buf,
+                        )),
                     },
                     Field {
                         key: "priority_hex",
-                        value: format_hex_u64(u64::from(binding.priority), &mut prio_buf),
+                        value: rustos_log::FieldValue::Str(format_hex_u64(
+                            u64::from(binding.priority),
+                            &mut prio_buf,
+                        )),
                     },
                 ],
             },

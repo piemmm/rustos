@@ -25,7 +25,10 @@
 
 pub mod attest;
 pub mod chain;
-pub mod field;
+
+/// The typed field-value model. Re-exported from `rustos_abi` (its ABI-schema
+/// home) so `rustos_log::field::*` keeps resolving; there is one definition.
+pub use rustos_abi::field;
 
 pub use attest::{
     machine_id_hash, stream_genesis, LogAttestationKey, LOG_ATTESTATION_KEY_FILE_LEN,
@@ -34,7 +37,7 @@ pub use attest::{
 pub use chain::{
     verify_chain, verify_fresh_chain, ChainError, ChainedEntry, LogChain, GENESIS_ANCHOR,
 };
-pub use field::{
+pub use rustos_abi::field::{
     reserved_prefix, Decimal, FieldList, FieldName, FieldValue, IpAddr, MacAddr, ScalarType,
     ToFieldValue, Uuid, RESERVED_PREFIXES,
 };
@@ -95,14 +98,21 @@ pub struct EventId(pub u32);
 
 /// Structured key/value field carried by an [`Event`].
 ///
-/// Values are `&str` so callers can pass debug-formatted slices written
-/// into stack buffers — no allocation is performed by this crate.
+/// The value is a typed [`FieldValue`] — the one field-value model shared with
+/// the system-log record schema — so callers log a real integer, error code,
+/// capability id, address, or bounded string rather than a pre-formatted
+/// string. No allocation is performed by this crate; the console sinks render
+/// a value through its [`Display`](core::fmt::Display) impl.
+///
+/// The key is a plain `&str` for the diagnostic path; the strict
+/// [`FieldName`] grammar is enforced only where a record enters the journal's
+/// attested namespace.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Field<'a> {
     /// Field name.
     pub key: &'a str,
-    /// Field value rendered as text.
-    pub value: &'a str,
+    /// Typed field value.
+    pub value: FieldValue<'a>,
 }
 
 /// Structured log record.
@@ -170,7 +180,7 @@ pub fn log<S: Sink + ?Sized>(sink: &S, event: &Event<'_>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{log, max_level, set_max_level, Event, EventId, Field, Level, Sink};
+    use super::{log, max_level, set_max_level, Event, EventId, Field, FieldValue, Level, Sink};
     use core::cell::RefCell;
 
     /// Sink that stores received events in a thread-local-equivalent
@@ -264,7 +274,7 @@ mod tests {
                 message: "with fields",
                 fields: &[Field {
                     key: "k",
-                    value: "v",
+                    value: FieldValue::Str("v"),
                 }],
             };
             assert!(log(&sink, &event));

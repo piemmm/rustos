@@ -421,7 +421,7 @@ mod tests {
         let sink = RecordingSink::new();
         let fields = [Field {
             key: "port",
-            value: "1",
+            value: rustos_log::FieldValue::Str("1"),
         }];
         record(&sink, AuditEvent::MessageDelivered, &fields);
         assert_eq!(sink.len(), 1);

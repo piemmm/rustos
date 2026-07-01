@@ -246,7 +246,7 @@ impl CallEndpoint {
         let mut id_buf = [0u8; 16];
         let id_field = Field {
             key: "endpoint",
-            value: format_hex_u64(id.0, &mut id_buf),
+            value: rustos_log::FieldValue::Str(format_hex_u64(id.0, &mut id_buf)),
         };
 
         if max_request > IPC_MESSAGE_MAX_PAYLOAD_LEN
@@ -378,11 +378,11 @@ impl CallEndpoint {
             &[
                 Field {
                     key: "endpoint",
-                    value: format_hex_u64(self.id.0, &mut id_buf),
+                    value: rustos_log::FieldValue::Str(format_hex_u64(self.id.0, &mut id_buf)),
                 },
                 Field {
                     key: "cancelled",
-                    value: format_usize(cancelled, &mut n_buf),
+                    value: rustos_log::FieldValue::Str(format_usize(cancelled, &mut n_buf)),
                 },
             ],
         );
@@ -424,15 +424,15 @@ impl CallEndpoint {
         let mut len_buf = [0u8; 12];
         let id_field = Field {
             key: "endpoint",
-            value: format_hex_u64(self.id.0, &mut id_buf),
+            value: rustos_log::FieldValue::Str(format_hex_u64(self.id.0, &mut id_buf)),
         };
         let sender_field = Field {
             key: "sender",
-            value: format_hex_u64(caller.task().0, &mut sender_buf),
+            value: rustos_log::FieldValue::Str(format_hex_u64(caller.task().0, &mut sender_buf)),
         };
         let len_field = Field {
             key: "len",
-            value: format_usize(request.len(), &mut len_buf),
+            value: rustos_log::FieldValue::Str(format_usize(request.len(), &mut len_buf)),
         };
 
         // 1. Fast path: reject posts to a closed endpoint without locking.
@@ -583,15 +583,15 @@ impl CallEndpoint {
         let mut len_buf = [0u8; 12];
         let id_field = Field {
             key: "endpoint",
-            value: format_hex_u64(self.id.0, &mut id_buf),
+            value: rustos_log::FieldValue::Str(format_hex_u64(self.id.0, &mut id_buf)),
         };
         let ticket_field = Field {
             key: "ticket",
-            value: format_hex_u64(ticket.0, &mut ticket_buf),
+            value: rustos_log::FieldValue::Str(format_hex_u64(ticket.0, &mut ticket_buf)),
         };
         let len_field = Field {
             key: "len",
-            value: format_usize(reply.len(), &mut len_buf),
+            value: rustos_log::FieldValue::Str(format_usize(reply.len(), &mut len_buf)),
         };
 
         let effective_max = u64::from(self.max_reply).min(u64::from(IPC_MESSAGE_MAX_PAYLOAD_LEN));

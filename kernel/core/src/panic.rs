@@ -117,19 +117,19 @@ pub fn panic_dump<A: KernelArch>(
     let fields = [
         Field {
             key: "cpu",
-            value: cpu_str,
+            value: rustos_log::FieldValue::Str(cpu_str),
         },
         Field {
             key: "file",
-            value: file_str,
+            value: rustos_log::FieldValue::Str(file_str),
         },
         Field {
             key: "line",
-            value: line_str,
+            value: rustos_log::FieldValue::Str(line_str),
         },
         Field {
             key: "column",
-            value: col_str,
+            value: rustos_log::FieldValue::Str(col_str),
         },
     ];
 

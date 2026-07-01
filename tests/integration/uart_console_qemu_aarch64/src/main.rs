@@ -140,19 +140,19 @@ mod kernel {
                 fields: &[
                     Field {
                         key: "discovered_pl011",
-                        value: if model == ConsoleModel::Pl011 {
+                        value: rustos_log::FieldValue::Str(if model == ConsoleModel::Pl011 {
                             "true"
                         } else {
                             "false"
-                        },
+                        }),
                     },
                     Field {
                         key: "base_is_default",
-                        value: if base == DEFAULT_CONSOLE_BASE {
+                        value: rustos_log::FieldValue::Str(if base == DEFAULT_CONSOLE_BASE {
                             "true"
                         } else {
                             "false"
-                        },
+                        }),
                     },
                 ],
             },

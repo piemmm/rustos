@@ -152,7 +152,7 @@ mod program {
                 message,
                 fields: &[rustos_log::Field {
                     key,
-                    value: format_hex_u64(value, &mut value_buf),
+                    value: rustos_log::FieldValue::Str(format_hex_u64(value, &mut value_buf)),
                 }],
             },
         );

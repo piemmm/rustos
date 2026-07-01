@@ -457,11 +457,11 @@ pub fn note_stage(
             fields: &[
                 rustos_log::Field {
                     key: "stage",
-                    value: stage,
+                    value: rustos_log::FieldValue::Str(stage),
                 },
                 rustos_log::Field {
                     key: "error",
-                    value: error,
+                    value: rustos_log::FieldValue::Str(error),
                 },
             ],
         },

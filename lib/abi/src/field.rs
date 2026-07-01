@@ -25,7 +25,7 @@
 //! code runs in the kernel, a freestanding driver, and a WebAssembly userland
 //! binary.
 
-use rustos_abi::{CapabilityId, Duration64, Errno, Time64};
+use crate::{CapabilityId, Duration64, Errno, Time64};
 
 /// Maximum length, in bytes, of a [`FieldName`] (`[a-z][a-z0-9_]{0,63}`).
 pub const FIELD_NAME_MAX: usize = 64;
@@ -153,23 +153,41 @@ impl<'a> FieldName<'a> {
     }
 }
 
-// Wire tag bytes. The discriminants are part of the log value format and must
-// not be renumbered once a log consumer relies on them.
-const TAG_NULL: u8 = 0;
-const TAG_BOOL: u8 = 1;
-const TAG_SIGNED: u8 = 2;
-const TAG_UNSIGNED: u8 = 3;
-const TAG_DECIMAL: u8 = 4;
-const TAG_TIME: u8 = 5;
-const TAG_DURATION: u8 = 6;
-const TAG_STR: u8 = 7;
-const TAG_BYTES: u8 = 8;
-const TAG_UUID: u8 = 9;
-const TAG_IP: u8 = 10;
-const TAG_MAC: u8 = 11;
-const TAG_ERROR: u8 = 12;
-const TAG_CAP: u8 = 13;
-const TAG_LIST: u8 = 14;
+// Wire tag bytes. The discriminants are part of the field-value wire format
+// and must not be renumbered once a consumer relies on them. They are public
+// because they are the outward-facing wire contract a non-Rust program encodes
+// against (the `log_emit` record and the generated C header).
+
+/// Wire tag: the explicit absence of a value ([`FieldValue::Null`]).
+pub const TAG_NULL: u8 = 0;
+/// Wire tag: a boolean ([`FieldValue::Bool`]).
+pub const TAG_BOOL: u8 = 1;
+/// Wire tag: a signed 64-bit integer ([`FieldValue::SignedInt`]).
+pub const TAG_SIGNED: u8 = 2;
+/// Wire tag: an unsigned 64-bit integer ([`FieldValue::UnsignedInt`]).
+pub const TAG_UNSIGNED: u8 = 3;
+/// Wire tag: a fixed-point decimal ([`FieldValue::Decimal`]).
+pub const TAG_DECIMAL: u8 = 4;
+/// Wire tag: an absolute [`Time64`] instant ([`FieldValue::Time`]).
+pub const TAG_TIME: u8 = 5;
+/// Wire tag: a [`Duration64`] span ([`FieldValue::Duration`]).
+pub const TAG_DURATION: u8 = 6;
+/// Wire tag: a bounded UTF-8 string ([`FieldValue::Str`]).
+pub const TAG_STR: u8 = 7;
+/// Wire tag: a bounded byte string ([`FieldValue::Bytes`]).
+pub const TAG_BYTES: u8 = 8;
+/// Wire tag: a 128-bit UUID ([`FieldValue::Uuid`]).
+pub const TAG_UUID: u8 = 9;
+/// Wire tag: an IP address ([`FieldValue::Ip`]).
+pub const TAG_IP: u8 = 10;
+/// Wire tag: a MAC address ([`FieldValue::Mac`]).
+pub const TAG_MAC: u8 = 11;
+/// Wire tag: a kernel error code ([`FieldValue::Error`]).
+pub const TAG_ERROR: u8 = 12;
+/// Wire tag: a capability identifier ([`FieldValue::Capability`]).
+pub const TAG_CAP: u8 = 13;
+/// Wire tag: a same-type bounded list of scalars ([`FieldValue::List`]).
+pub const TAG_LIST: u8 = 14;
 
 /// The closed set of scalar value types a list element may hold.
 ///
@@ -692,7 +710,7 @@ fn decode_scalar_payload(
 /// through. The following does not compile, by design:
 ///
 /// ```compile_fail
-/// use rustos_log::field::ToFieldValue;
+/// use rustos_abi::field::ToFieldValue;
 /// struct SecretKey([u8; 32]);
 /// fn record<V: ToFieldValue + ?Sized>(_value: &V) {}
 /// record(&SecretKey([0u8; 32]));
@@ -800,6 +818,115 @@ impl ToFieldValue for Errno {
 impl ToFieldValue for CapabilityId {
     fn to_field_value(&self) -> FieldValue<'_> {
         FieldValue::Capability(*self)
+    }
+}
+
+/// Render `bytes` as lowercase hex into `f`, no separators.
+fn write_hex(f: &mut core::fmt::Formatter<'_>, bytes: &[u8]) -> core::fmt::Result {
+    for &b in bytes {
+        write!(f, "{b:02x}")?;
+    }
+    Ok(())
+}
+
+impl core::fmt::Display for Decimal {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        if self.scale == 0 {
+            return write!(f, "{}", self.mantissa);
+        }
+        // Split into integer and fractional parts without floating point.
+        // A scale that would overflow the `10^scale` divisor is rendered in
+        // scientific-ish `mantissa e-scale` form rather than lying about the
+        // value.
+        if self.scale > 18 {
+            return write!(f, "{}e-{}", self.mantissa, self.scale);
+        }
+        let divisor = 10i128.pow(u32::from(self.scale));
+        let mantissa = i128::from(self.mantissa);
+        let sign = if mantissa < 0 { "-" } else { "" };
+        let magnitude = mantissa.unsigned_abs();
+        let int_part = magnitude / divisor.unsigned_abs();
+        let frac_part = magnitude % divisor.unsigned_abs();
+        write!(
+            f,
+            "{sign}{int_part}.{frac_part:0width$}",
+            width = usize::from(self.scale)
+        )
+    }
+}
+
+impl core::fmt::Display for IpAddr {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::V4(o) => write!(f, "{}.{}.{}.{}", o[0], o[1], o[2], o[3]),
+            Self::V6(octets) => {
+                for group in 0..8 {
+                    if group != 0 {
+                        f.write_str(":")?;
+                    }
+                    let hi = octets[group * 2];
+                    let lo = octets[group * 2 + 1];
+                    write!(f, "{:x}", u16::from(hi) << 8 | u16::from(lo))?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl core::fmt::Display for MacAddr {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        for (i, byte) in self.0.iter().enumerate() {
+            if i != 0 {
+                f.write_str(":")?;
+            }
+            write!(f, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
+
+impl core::fmt::Display for Uuid {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write_hex(f, &self.0)
+    }
+}
+
+impl core::fmt::Display for FieldValue<'_> {
+    /// Render the value as diagnostic text.
+    ///
+    /// This is the one text rendering of a field value, used by the console
+    /// log sinks (they format `key={value}`). It is total and allocation-free:
+    /// every variant renders without a panic. Numbers are decimal, `Bytes` and
+    /// `Uuid` are lowercase hex, addresses use their conventional notation, and
+    /// a list renders as space-separated elements in square brackets.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Null => f.write_str("null"),
+            Self::Bool(b) => write!(f, "{b}"),
+            Self::SignedInt(v) => write!(f, "{v}"),
+            Self::UnsignedInt(v) => write!(f, "{v}"),
+            Self::Decimal(d) => write!(f, "{d}"),
+            Self::Time(t) => write!(f, "{}.{:09}", t.secs(), t.subsec_nanos()),
+            Self::Duration(d) => write!(f, "{}.{:09}s", d.secs(), d.subsec_nanos()),
+            Self::Str(s) => f.write_str(s),
+            Self::Bytes(b) => write_hex(f, b),
+            Self::Uuid(u) => write!(f, "{u}"),
+            Self::Ip(ip) => write!(f, "{ip}"),
+            Self::Mac(m) => write!(f, "{m}"),
+            Self::Error(e) => write!(f, "{e}"),
+            Self::Capability(c) => write!(f, "cap{}", c.as_u16()),
+            Self::List(list) => {
+                f.write_str("[")?;
+                for (i, elem) in list.iter().enumerate() {
+                    if i != 0 {
+                        f.write_str(" ")?;
+                    }
+                    write!(f, "{elem}")?;
+                }
+                f.write_str("]")
+            }
+        }
     }
 }
 

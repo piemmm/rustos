@@ -98,15 +98,15 @@ impl TaskCapabilities {
             &[
                 Field {
                     key: "task",
-                    value: task_field,
+                    value: rustos_log::FieldValue::Str(task_field),
                 },
                 Field {
                     key: "uid",
-                    value: uid_field,
+                    value: rustos_log::FieldValue::Str(uid_field),
                 },
                 Field {
                     key: "caps",
-                    value: len_field,
+                    value: rustos_log::FieldValue::Str(len_field),
                 },
             ],
         );
@@ -235,7 +235,7 @@ impl TaskCapabilities {
                     AuditEvent::TaskCapabilitiesDelegated,
                     &[Field {
                         key: "task",
-                        value: format_hex_u64(self.task.0, &mut buf),
+                        value: rustos_log::FieldValue::Str(format_hex_u64(self.task.0, &mut buf)),
                     }],
                 );
                 Ok(())
@@ -247,7 +247,7 @@ impl TaskCapabilities {
                     AuditEvent::TaskCapabilitiesDelegateWiden,
                     &[Field {
                         key: "task",
-                        value: format_hex_u64(self.task.0, &mut buf),
+                        value: rustos_log::FieldValue::Str(format_hex_u64(self.task.0, &mut buf)),
                     }],
                 );
                 Err(err)
@@ -290,7 +290,7 @@ impl TaskCapabilities {
                     AuditEvent::TaskCapabilitiesDelegated,
                     &[Field {
                         key: "task",
-                        value: format_hex_u64(self.task.0, &mut buf),
+                        value: rustos_log::FieldValue::Str(format_hex_u64(self.task.0, &mut buf)),
                     }],
                 );
                 Ok(())
@@ -302,7 +302,7 @@ impl TaskCapabilities {
                     AuditEvent::TaskCapabilitiesDelegateWiden,
                     &[Field {
                         key: "task",
-                        value: format_hex_u64(self.task.0, &mut buf),
+                        value: rustos_log::FieldValue::Str(format_hex_u64(self.task.0, &mut buf)),
                     }],
                 );
                 Err(err)
@@ -325,11 +325,14 @@ impl TaskCapabilities {
             &[
                 Field {
                     key: "task",
-                    value: format_hex_u64(self.task.0, &mut task_buf),
+                    value: rustos_log::FieldValue::Str(format_hex_u64(self.task.0, &mut task_buf)),
                 },
                 Field {
                     key: "cap",
-                    value: format_i32(i32::from(cap.as_u16()), &mut cap_buf),
+                    value: rustos_log::FieldValue::Str(format_i32(
+                        i32::from(cap.as_u16()),
+                        &mut cap_buf,
+                    )),
                 },
             ],
         );

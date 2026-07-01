@@ -90,7 +90,7 @@ impl NotificationChannel {
         let mut id_buf = [0u8; 16];
         let id_field = Field {
             key: "channel",
-            value: format_hex_u64(id, &mut id_buf),
+            value: rustos_log::FieldValue::Str(format_hex_u64(id, &mut id_buf)),
         };
         if !required_bind_caps.is_subset_of(creator.effective()) {
             record(audit, AuditEvent::NotifySignalDenied, &[id_field]);
@@ -133,11 +133,11 @@ impl NotificationChannel {
         let mut recv_buf = [0u8; 16];
         let id_field = Field {
             key: "channel",
-            value: format_hex_u64(self.id, &mut id_buf),
+            value: rustos_log::FieldValue::Str(format_hex_u64(self.id, &mut id_buf)),
         };
         let recv_field = Field {
             key: "receiver",
-            value: format_hex_u64(receiver.task().0, &mut recv_buf),
+            value: rustos_log::FieldValue::Str(format_hex_u64(receiver.task().0, &mut recv_buf)),
         };
         if !self.required_bind_caps.is_subset_of(receiver.effective()) {
             record(
@@ -175,11 +175,11 @@ impl NotificationChannel {
         let mut sender_buf = [0u8; 16];
         let id_field = Field {
             key: "channel",
-            value: format_hex_u64(self.id, &mut id_buf),
+            value: rustos_log::FieldValue::Str(format_hex_u64(self.id, &mut id_buf)),
         };
         let sender_field = Field {
             key: "sender",
-            value: format_hex_u64(sender.task().0, &mut sender_buf),
+            value: rustos_log::FieldValue::Str(format_hex_u64(sender.task().0, &mut sender_buf)),
         };
         if !self.required_send_caps.is_subset_of(sender.effective()) {
             record(
