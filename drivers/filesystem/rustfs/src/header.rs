@@ -76,6 +76,13 @@ pub enum BlockType {
     /// the scrub-progress record it is reached from the transaction root and
     /// is never required for ordinary crash recovery.
     HealthBaseline = 6,
+    /// An inode's extended-attribute set: the encoded `rustos_fsmeta`
+    /// attribute store, reached from the owning inode. Its payload is
+    /// encrypted at rest under the metadata (filename) key exactly like a
+    /// directory block's entry names, so no plaintext attribute key or value
+    /// leaks on a raw-device read
+    /// (`docs/src/filesystem/rustfs-spec.md` §21).
+    Attr = 7,
 }
 
 impl BlockType {
@@ -94,6 +101,7 @@ impl BlockType {
             4 => Some(Self::Directory),
             5 => Some(Self::ScrubProgress),
             6 => Some(Self::HealthBaseline),
+            7 => Some(Self::Attr),
             _ => None,
         }
     }

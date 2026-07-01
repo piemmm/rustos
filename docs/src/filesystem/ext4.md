@@ -229,3 +229,13 @@ the reference crc matches `mke2fs`) and after a
 wrote correct checksums); the mutated images also pass `e2fsck -f`
 cleanly. A `pjdfstest`-equivalent POSIX suite and an end-to-end QEMU
 vertical remain future work.
+
+## Extended-metadata representability
+
+The ext4 driver does **not** implement the `FilesystemAttrs` ABI, so it cannot
+represent RustFS extended attributes or foreign-filesystem preset metadata
+(`rustfs-spec.md` §21). Under the cross-filesystem preservation contract an
+exact-preservation copy of a file carrying such attributes onto ext4 reports
+`MetadataNotRepresentable`; a best-effort copy drops them only under an
+explicit, documented lossy policy. (ext4 xattr blocks are read today only to
+recover POSIX ACLs, not as a general key/value store.)

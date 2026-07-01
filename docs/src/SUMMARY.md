@@ -76,6 +76,7 @@
 - [FAT32 driver](./filesystem/fat32.md)
 - [rustfs driver](./filesystem/rustfs.md)
 - [rustfs specification](./filesystem/rustfs-spec.md)
+- [Extended-metadata preset registry](./filesystem/metadata-registry.md)
 - [ext4 driver](./filesystem/ext4.md)
 - [POSIX conformance suite](./filesystem/posix_suite.md)
 - [Filesystem soak](./filesystem/soak.md)

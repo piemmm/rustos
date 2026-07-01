@@ -77,6 +77,7 @@ configuration.
 | Rescue | Damaged-volume root discovery and file extraction. |
 | Time | All persistent timestamps use RustOS `Time64`. |
 | Security | POSIX bits + ACLs + capability gates on every inode. |
+| Extended metadata | Every inode has a namespaced extended-attribute store (encrypted, mirrored, COW); foreign per-file metadata (Acorn/Amiga/Atari/Mac) is preserved across copies (§21). |
 
 ---
 
@@ -1066,6 +1067,31 @@ closed `DeviceFault`, never silently repaired. These reuse the existing
 the `verify_everything` scrub/check core (`AGENTS.md` §2.2). With Stage 12
 shipped, **RustFS v1 is complete** (§17).
 
+Stage 13 adds **extended file metadata** (§21): a general-purpose, namespaced
+extended-attribute store on every inode plus the vocabulary to preserve foreign
+per-file metadata across a copy. The on-disk store is a new self-identifying
+`BlockType::Attr` metadata block reached from the inode's `attr_root`,
+encrypted at rest under the metadata (filename) key and mirrored to a companion
+copy exactly like a directory block — so it reuses the Stage-3 authenticated,
+repair-on-read, copy-on-write metadata path with no second integrity or crypto
+path (`AGENTS.md` §2.2). The key grammar, the bounded `AttrSet`/`AttrEntry`
+model with its length-prefixed encoding, and the foreign-metadata preset
+registry (Acorn/RISC OS, Amiga, Atari, classic Mac) live once in the shared
+`lib/fsmeta` crate, consumed identically by RustFS, the foreign-filesystem
+drivers, and the copy tools. The driver implements the versioned
+`FilesystemAttrs` ABI (`get`/`set`/`list`/`remove`), each a single COW
+transaction that validates every key and value against the shared grammar and
+bounds and fails closed. **Delivered in this stage:** the `lib/fsmeta` crate,
+the `FilesystemAttrs` ABI, and the RustFS attribute store with its tests
+(round-trip and remount, case-sensitive keys, unknown-namespace and oversize
+rejection, block-overflow fail-closed, encryption at rest, read-only refusal,
+crash-atomicity replay, free-on-remove with no leak, and reflink independence).
+**Staged (not yet delivered):** the `cp`/`mv`/desktop/archive
+preserve-metadata tooling, the resource-fork *named-stream* content path for
+values above the single-block bound, and the per-family foreign-filesystem
+driver wiring (which lands with those drivers). These remain future work; this
+stage builds the foundation they consume.
+
 ---
 
 ## 19. Sparse files (ZERO/Hole extents)
@@ -1112,3 +1138,123 @@ holes) from allocated data (excludes holes, bar metadata overhead): a 10 MiB
 all-zero file reports a 10 MiB logical size and zero mapped data blocks. Because
 every volume is encrypted, a hole also leaves no plaintext data payload for the
 zero range; only the surrounding metadata is protected, as for any inode.
+
+---
+
+## 21. Extended file metadata
+
+RustFS gives every inode a general-purpose, namespaced `key → value`
+extended-attribute store, and uses it to preserve foreign-filesystem per-file
+metadata (Acorn/RISC OS, Amiga, Atari, classic Mac) that has no POSIX
+equivalent and would otherwise be destroyed by a copy. Preserving another
+system's metadata is interoperability with foreign data, not RustOS
+self-compatibility, and is explicitly permitted (`AGENTS.md` §2.13).
+
+The key grammar, the bounded attribute model, the on-disk encoding, and the
+foreign-metadata conversions live **once** in the shared `lib/fsmeta` crate, so
+RustFS, the foreign-filesystem drivers, and the copy/move/archive tooling share
+one definition (`AGENTS.md` §2.2). RustFS never interprets a value's meaning;
+it stores opaque bytes.
+
+### 21.1 The attribute set
+
+Each inode gains an optional `attr_root`: the physical block of its
+extended-attribute set, `0` when it carries none. The set is one
+self-identifying, mirrored, copy-on-write metadata block
+(`BlockType::Attr`) reached from the inode, held to the same COW, integrity,
+redundancy, encryption, and authentication rules as every other RustFS
+metadata block (§4, §5, §7, §8): it is authenticated by the keyed block
+header, stored in two physical copies (the §8 companion mirror,
+repaired-on-read), and its keys and values are **encrypted at rest** under the
+metadata (filename) key before authentication (encrypt-then-MAC), exactly like
+a directory block's entry names — so no plaintext attribute leaks on a
+raw-device read. Setting an attribute is one atomic transaction; a crash leaves
+the prior-or-new set, never a torn one (§14).
+
+An attribute is `(key, flags, value)`. Keys are namespaced,
+byte-for-byte case-sensitive (matching directory-name comparison, §13), and
+drawn from a **closed, curated** namespace set:
+
+| namespace | meaning | access |
+|---|---|---|
+| `user` | free-form user metadata | file read/write permission |
+| `acorn` | Acorn / RISC OS (ADFS) preset metadata | file read/write permission |
+| `amiga` | AmigaDOS preset metadata | file read/write permission |
+| `atari` | Atari GEMDOS/TOS preset metadata | file read/write permission |
+| `mac` | classic Mac OS / HFS preset metadata | file read/write permission |
+| `rustos` | RustOS-native extended metadata | file read/write permission |
+| `system` | security-sensitive, ACL-adjacent metadata | privileged (VFS capability gate) |
+| `trusted` | metadata only privileged services may set | privileged (VFS capability gate) |
+
+The `user`, foreign, and `rustos` namespaces are ordinary file metadata: they
+need only the file's own read/write permission (the per-inode owner/mode/ACL
+model, `AGENTS.md` §5.3), no new capability. The `system` and `trusted`
+namespaces guard a real security boundary; the VFS gates them with a capability
+introduced **with** its enforcement point, never ahead of it (`AGENTS.md`
+§5.2). An unknown namespace is rejected at set time (fail closed); the set is
+evolved in place, never opened up (`AGENTS.md` §2.13).
+
+### 21.2 Fixed bounds (validation, not capacity)
+
+These are fixed *security* validation bounds on untrusted stored data, not
+growable capacities (`AGENTS.md` §24.4):
+
+```text
+KEY_MAX            255 bytes
+VALUE_MAX          3072 bytes (inline attribute value)
+ATTRS_PER_INODE    32
+TOTAL_ATTR_BYTES   3072 (summed key + value bytes)
+```
+
+`VALUE_MAX` is sized so a full attribute set — every key, value, and the
+self-identifying framing — serialises into a single metadata block on a
+4 KiB-block volume. A value larger than `VALUE_MAX` is **not** an extended
+attribute; it is a *named stream* (a fork — e.g. a classic-Mac resource fork),
+stored through the file-data pipeline (COW extents, checksummed, compressed,
+encrypted, dedupable, sparse-capable) under a `mac`/`rustos`-namespaced key, so
+large forks stay out of the inline set and reuse the whole data path with no
+second data path (§6–§10, §19). *(The named-stream content path is staged
+future work; see §18.)* On a smaller-block volume a set that does not fit one
+metadata block fails closed with `NoSpace` rather than spanning blocks.
+
+### 21.3 Operations and the driver ABI
+
+The driver implements the versioned `abi-v1` `FilesystemAttrs` trait
+(`lib/abi/src/driver/filesystem.rs`), a separate trait alongside
+`FilesystemRead`/`FilesystemWrite`/`FilesystemSecurity`/`FilesystemTimestamps`
+(new behaviour ships as a new trait, never a widening of a shipped one):
+
+- `get_attr(node, key, value_out) -> Option<len>` — reads a value into a
+  caller buffer; a value that does not fit is `BufferTooSmall`, never a
+  truncation.
+- `set_attr(node, key, value)` — inserts or replaces, one COW transaction.
+- `list_attr(node, index, key_out) -> Option<len>` — yields keys in stable
+  on-disk order.
+- `remove_attr(node, key)` — one COW transaction; a missing key is `NotFound`.
+
+Every operation validates the key against the shared grammar and the bounds and
+**fails closed** before touching state; the driver makes no permission
+decision (the VFS authorises against the model first, gating the privileged
+namespaces with a capability). A reflink copies the source's attributes into
+the destination's **own** attribute block, so freeing one inode never frees the
+other's; removing an inode frees its attribute block exactly once. Every
+timestamp a preset carries is a `Time64`, converted to and from the foreign
+format through a **checked** conversion — an instant the foreign format cannot
+represent fails closed with a typed error, never silently truncated
+(`AGENTS.md` §21).
+
+### 21.4 Cross-filesystem preservation and the preset registry
+
+A foreign-filesystem driver exposes its native per-file metadata as normalised
+preset attributes; a copy engine sets those on the destination inode; the
+destination stores them natively if it understands them, else keeps them
+verbatim as RustFS extended attributes (a lossless round-trip). An
+exact-preservation copy to a target that cannot represent an attribute reports
+`MetadataNotRepresentable` and fails closed; a best-effort copy drops it only
+under an explicit, documented lossy policy. The `lib/fsmeta` preset registry is
+the single source of truth for the value encodings (see the registry reference
+page). Indicative v1 entries: `acorn.filetype`/`loadaddr`/`execaddr`/
+`datestamp`, `amiga.protection`/`comment`, `atari.attributes`/`gemdos_date`,
+`mac.type`/`creator`/`finderflags`/`resourcefork`, `rustos.origin`/`mime`.
+*(The `cp`/`mv`/desktop/archive tooling and the per-family driver wiring are
+staged future work; see §18.)*

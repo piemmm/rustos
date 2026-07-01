@@ -771,6 +771,7 @@ dependencies = [
  "rustos-abi",
  "rustos-compress",
  "rustos-crypto",
+ "rustos-fsmeta",
  "rustos-fuzzseed",
  "rustos-log",
 ]
@@ -886,6 +887,14 @@ name = "rustos-font"
 version = "0.0.0"
 dependencies = [
  "rustos-raster",
+]
+
+[[package]]
+name = "rustos-fsmeta"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-fuzzseed",
 ]
 
 [[package]]

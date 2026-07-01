@@ -2260,6 +2260,50 @@ spec §18.
 
 ---
 
+## Stage 5 follow-up — RustFS extended file metadata (`plans/RUSTFS-METADATA.md`)
+
+**Dependencies:** Stage 5 follow-up (RustFS v1) and `lib/crypto`. Design brief:
+`plans/RUSTFS-METADATA.md`; spec: `docs/src/filesystem/rustfs-spec.md` §21 +
+`docs/src/filesystem/metadata-registry.md`.
+
+**Goal.** Give every RustFS inode a general-purpose, namespaced extended-
+attribute store and use it to preserve foreign-filesystem per-file metadata
+(Acorn/RISC OS, Amiga, Atari, classic Mac) across a copy — interoperability
+with foreign data, not RustOS self-compatibility (§2.13). One shared definition
+in `lib/fsmeta` (grammar, `AttrSet`/`AttrEntry`, preset registry with checked
+`Time64` conversions), consumed by RustFS, the foreign-FS drivers, and the
+copy/archive tools (§2.2).
+
+**Design decisions (load-bearing).**
+- Attribute set = one self-identifying, encrypted, mirrored COW metadata block
+  (`BlockType::Attr`) reached from the inode `attr_root`, reusing the Stage-3
+  authenticated repair-on-read path (no second integrity/crypto path).
+- Fixed security bounds (`AGENTS.md` §24.4, not capacities): `KEY_MAX` 255,
+  `VALUE_MAX`/`TOTAL_ATTR_BYTES` 3072, `ATTRS_PER_INODE` 32. `VALUE_MAX` is
+  sized to one 4 KiB metadata block; a larger fork is a *named stream*, not an
+  attribute. A set that overflows a smaller block fails closed (`NoSpace`).
+- Versioned `FilesystemAttrs` ABI (separate trait, never a widening); privileged
+  `system`/`trusted` namespaces gated by the VFS (capability introduced with its
+  enforcement point, §5.2 — none minted here).
+
+**Status: foundation done.** Delivered: `lib/fsmeta` (grammar + AttrSet +
+preset registry + fuzz harness), the `FilesystemAttrs` ABI, and the RustFS
+attribute store (encrypt/decrypt, COW read/write, free-on-remove, free-space
+rebuild accounting, reflink copy) with driver tests (round-trip/remount,
+case-sensitivity, unknown-namespace + oversize + block-overflow fail-closed,
+encryption at rest, read-only refusal, crash-atomicity replay, no-leak,
+reflink independence, acorn preset round-trip).
+
+**Remaining (staged, not yet built):**
+- `cp`/`mv`/desktop/archive preserve-metadata tooling (the §6.2/§6.3 copy
+  contract and a `getattr`/`setattr`-style CLI).
+- The resource-fork *named-stream* content path for values above `VALUE_MAX`.
+- Per-family foreign-FS driver wiring (lands with the ADFS/Amiga/Atari/Mac
+  drivers, which do not yet exist).
+- Snapshot send/receive carrying the attribute set (with `plans/RUSTFS-SNAPSHOT.md`).
+
+---
+
 ## Stage 6 — Userland Foundations
 
 **Dependencies:** Stages 2–5 sufficient for at least one platform.

@@ -111,6 +111,12 @@ pub const TARGETS: &[Target] = &[
         description: "lib/partition MBR + GPT table parsers (untrusted on-disk partition bytes)",
     },
     Target {
+        package: "rustos-fsmeta",
+        test: "fuzz_fsmeta",
+        description:
+            "lib/fsmeta key-grammar parser + attribute-set decoder (untrusted stored/foreign bytes)",
+    },
+    Target {
         package: "rustos-curses",
         test: "fuzz_curses_input",
         description: "lib/curses input decoder (untrusted key/mouse/paste bytes)",

@@ -20,6 +20,11 @@ rustos-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
 # not an external zstd/compression crate (`AGENTS.md` §2.12; this is *not* the
 # crypto carve-out): RustFS must have no external compression dependency.
 rustos-compress = { path = "../../../lib/compress", version = "=0.0.0" }
+# The shared extended-metadata model: the namespaced attribute-key grammar and
+# the bounded AttrSet with its self-identifying encoding, the one definition of
+# the on-disk attribute store RustFS keeps and the foreign-metadata registry
+# the copy tools use (`docs/src/filesystem/rustfs-spec.md` §21; `AGENTS.md` §2.2).
+rustos-fsmeta = { path = "../../../lib/fsmeta", version = "=0.0.0" }
 # Structured, stable-event-id logging for the security-relevant findings the
 # online scrub reports (`docs/src/filesystem/rustfs-spec.md` §12; `AGENTS.md`
 # §5.4 — log security decisions with a stable event ID; §19.4).

@@ -46,6 +46,7 @@ members = [
     "lib/drvrt",
     "lib/fdt",
     "lib/font",
+    "lib/fsmeta",
     "lib/geometry",
     "lib/hid",
     "lib/icon",

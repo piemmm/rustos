@@ -49,8 +49,8 @@ use alloc::vec::Vec;
 
 use rustos_abi::driver::block::Block;
 use rustos_abi::driver::filesystem::{
-    DirEntry, FilesystemRead, FilesystemSecurity, FilesystemTimestamps, FilesystemWrite, NodeId,
-    NodeInfo, NodeKind, NodeTimes,
+    DirEntry, FilesystemAttrs, FilesystemRead, FilesystemSecurity, FilesystemTimestamps,
+    FilesystemWrite, NodeId, NodeInfo, NodeKind, NodeTimes,
 };
 pub use rustos_abi::driver::filesystem::{
     NodeSecurity as Security, SecurityAcl as AclEntry, SecuritySubject as AclSubject,
@@ -58,6 +58,7 @@ pub use rustos_abi::driver::filesystem::{
 use rustos_abi::time::Time64;
 use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 use rustos_crypto::{AeadKey, MacKey};
+use rustos_fsmeta::{AttrFlags, AttrKey, AttrSet};
 
 mod btree;
 mod check;
@@ -288,6 +289,9 @@ const I_ACL_STRIDE: usize = 8;
 /// Physical block of this inode's per-file extent-tree root, or `0` when the
 /// file has no mapped blocks (`btree` module).
 const I_EXTENT_ROOT: usize = 152;
+/// Physical block of this inode's extended-attribute set ([`BlockType::Attr`]),
+/// or `0` when the inode carries no attributes (`docs/src/filesystem/rustfs-spec.md` §21).
+const I_ATTR_ROOT: usize = 160;
 
 /// In-memory image of one on-disk inode.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -300,6 +304,10 @@ struct Inode {
     /// Physical block of this file's copy-on-write extent-tree root, `0` when
     /// the file maps no blocks yet.
     extent_root: u64,
+    /// Physical block of this inode's extended-attribute set, `0` when it
+    /// carries no attributes. Stored as an encrypted, mirrored copy-on-write
+    /// metadata block ([`BlockType::Attr`]).
+    attr_root: u64,
 }
 
 impl Inode {
@@ -316,6 +324,7 @@ impl Inode {
                 changed: now,
             },
             extent_root: 0,
+            attr_root: 0,
         }
     }
 
@@ -371,6 +380,7 @@ impl Inode {
             size: rd_u64(buf, I_SIZE),
             times,
             extent_root: rd_u64(buf, I_EXTENT_ROOT),
+            attr_root: rd_u64(buf, I_ATTR_ROOT),
         }))
     }
 
@@ -407,6 +417,7 @@ impl Inode {
             wr_u32(buf, base + 4, id);
         }
         wr_u64(buf, I_EXTENT_ROOT, self.extent_root);
+        wr_u64(buf, I_ATTR_ROOT, self.attr_root);
     }
 }
 
@@ -761,7 +772,7 @@ impl<B: Block> RustFs<B> {
         buf: &mut [u8],
         phys: u64,
     ) -> Result<(), DriverError> {
-        if block_type != BlockType::Directory {
+        if !matches!(block_type, BlockType::Directory | BlockType::Attr) {
             return Ok(());
         }
         let off = self.crypto_trailer_offset();
@@ -924,12 +935,13 @@ impl<B: Block> RustFs<B> {
         };
         let payload_len = as_u32(self.block_size - HEADER_LEN);
         let next_gen = self.generation.wrapping_add(1);
-        // A directory block's entry names are encrypted at rest under the
-        // filename key before the block is authenticated, so the keyed
-        // authenticator seals the ciphertext (encrypt-then-MAC; the read path
-        // authenticates then decrypts — `docs/src/filesystem/rustfs-spec.md`
-        // §6, §7). Other metadata blocks are authenticated-only.
-        if block_type == BlockType::Directory {
+        // A directory block's entry names and an attribute block's keys and
+        // values are encrypted at rest under the metadata (filename) key
+        // before the block is authenticated, so the keyed authenticator seals
+        // the ciphertext (encrypt-then-MAC; the read path authenticates then
+        // decrypts — `docs/src/filesystem/rustfs-spec.md` §6, §7, §21). Other
+        // metadata blocks are authenticated-only.
+        if matches!(block_type, BlockType::Directory | BlockType::Attr) {
             let off = self.crypto_trailer_offset();
             let (region, trailer) = buf[HEADER_LEN..self.block_size].split_at_mut(off - HEADER_LEN);
             encrypt_region(&self.filename_key, region, trailer, new_phys, next_gen)
@@ -1638,6 +1650,11 @@ impl<B: Block> RustFs<B> {
                 }
             }
         }
+        // The attribute block is a mirrored metadata pair like a directory
+        // block, so account for its companion too.
+        if inode.attr_root != 0 {
+            self.mark_meta_used(inode.attr_root);
+        }
         Ok(())
     }
 
@@ -2218,6 +2235,10 @@ impl<B: Block> RustFs<B> {
         for node in self.btree_collect_nodes(inode.extent_root, spec)? {
             self.free_meta(node);
         }
+        if inode.attr_root != 0 {
+            self.free_meta(inode.attr_root);
+            inode.attr_root = 0;
+        }
         inode.extent_root = 0;
         inode.size = 0;
         Ok(())
@@ -2666,6 +2687,11 @@ impl<B: Block> RustFs<B> {
             self.clone_block_ref(src_ino, &mut dst, dst_ino, bi, src_ptr)?;
         }
         dst.size = src.size;
+        // A reflink is a copy, so it carries the source's extended attributes.
+        // The destination gets its own attribute block (never a shared
+        // pointer), so freeing one inode never frees the other's attributes.
+        let attrs = self.read_attrs(&src)?;
+        self.write_attrs(&mut dst, dst_ino, &attrs)?;
         self.write_inode(dst_ino, &dst)?;
         self.add_entry(&mut dir_inode, dir_ino, dst_ino, dst_name)?;
         dir_inode.times.modified = now;
@@ -2921,6 +2947,105 @@ impl<B: Block> RustFs<B> {
         }
         self.commit()
     }
+
+    /// Bytes available for an encoded attribute set inside one metadata block:
+    /// the block payload between the header and the crypto trailer. An encoded
+    /// set larger than this does not fit a single block and is refused with
+    /// [`DriverError::NoSpace`], the fixed-block-size consequence of the
+    /// `lib/fsmeta` value bound (`docs/src/filesystem/rustfs-spec.md` §21).
+    fn attr_capacity(&self) -> usize {
+        self.crypto_trailer_offset() - HEADER_LEN
+    }
+
+    /// Read `inode`'s extended-attribute set, or an empty set when it carries
+    /// none. The attribute block is authenticated and decrypted through the
+    /// same redundant, repair-on-read metadata path as every other metadata
+    /// block ([`Self::read_meta`]); its decrypted payload is then decoded by
+    /// the shared `lib/fsmeta` decoder, which fails closed on a malformed or
+    /// out-of-bounds encoding.
+    fn read_attrs(&mut self, inode: &Inode) -> Result<AttrSet, DriverError> {
+        if inode.attr_root == 0 {
+            return Ok(AttrSet::new());
+        }
+        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        self.read_meta(inode.attr_root, BlockType::Attr, &mut buf)?;
+        let end = self.crypto_trailer_offset();
+        AttrSet::decode(&buf[HEADER_LEN..end]).map_err(DriverError::from)
+    }
+
+    /// Store `set` as `inode`'s extended-attribute set in one copy-on-write
+    /// transaction, updating `inode.attr_root` in place (the caller persists
+    /// the inode). An empty set frees the attribute block and clears the
+    /// pointer, so an inode with no attributes holds none on disk. Fails
+    /// closed with [`DriverError::NoSpace`] if the encoded set does not fit one
+    /// metadata block ([`Self::attr_capacity`]).
+    fn write_attrs(
+        &mut self,
+        inode: &mut Inode,
+        ino: u32,
+        set: &AttrSet,
+    ) -> Result<(), DriverError> {
+        if set.is_empty() {
+            if inode.attr_root != 0 {
+                self.free_meta(inode.attr_root);
+                inode.attr_root = 0;
+            }
+            return Ok(());
+        }
+        let encoded = set.encode();
+        if encoded.len() > self.attr_capacity() {
+            return Err(DriverError::NoSpace);
+        }
+        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        buf[HEADER_LEN..HEADER_LEN + encoded.len()].copy_from_slice(&encoded);
+        let new = self.cow_meta(
+            inode.attr_root,
+            &mut buf,
+            BlockType::Attr,
+            u64::from(ino),
+            0,
+        )?;
+        inode.attr_root = new;
+        Ok(())
+    }
+
+    /// Set attribute `key` on `node` to `value` in one copy-on-write
+    /// transaction. The `lib/fsmeta` grammar and bounds are validated by
+    /// [`AttrSet::set`]; an unknown namespace, malformed key, oversize value,
+    /// or exhausted per-inode budget is rejected fail-closed before anything
+    /// is written.
+    fn set_attr_inner(
+        &mut self,
+        node: NodeId,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<(), DriverError> {
+        let ino = self.ino_of(node)?;
+        let mut inode = self.read_inode(ino)?;
+        let mut set = self.read_attrs(&inode)?;
+        set.set(key, AttrFlags::empty(), value)
+            .map_err(DriverError::from)?;
+        self.write_attrs(&mut inode, ino, &set)?;
+        inode.times.changed = (self.clock)();
+        self.write_inode(ino, &inode)?;
+        self.commit()
+    }
+
+    /// Remove attribute `key` from `node` in one copy-on-write transaction,
+    /// failing closed with [`DriverError::NotFound`] when the key is absent.
+    fn remove_attr_inner(&mut self, node: NodeId, key: &[u8]) -> Result<(), DriverError> {
+        AttrKey::parse(key).map_err(DriverError::from)?;
+        let ino = self.ino_of(node)?;
+        let mut inode = self.read_inode(ino)?;
+        let mut set = self.read_attrs(&inode)?;
+        if !set.remove(key) {
+            return Err(DriverError::NotFound);
+        }
+        self.write_attrs(&mut inode, ino, &set)?;
+        inode.times.changed = (self.clock)();
+        self.write_inode(ino, &inode)?;
+        self.commit()
+    }
 }
 
 /// Draw a random, non-zero per-volume filesystem UUID from the platform RNG
@@ -3119,5 +3244,72 @@ impl<B: Block> FilesystemTimestamps for RustFs<B> {
     fn times(&mut self, node: NodeId) -> Result<NodeTimes, DriverError> {
         let ino = self.ino_of(node)?;
         Ok(self.read_inode(ino)?.times)
+    }
+}
+
+impl<B: Block> FilesystemAttrs for RustFs<B> {
+    fn get_attr(
+        &mut self,
+        node: NodeId,
+        key: &[u8],
+        value_out: &mut [u8],
+    ) -> Result<Option<usize>, DriverError> {
+        // Reject a malformed or unknown-namespace key up front, so a bad key
+        // is a fail-closed rejection rather than an "absent" result.
+        AttrKey::parse(key).map_err(DriverError::from)?;
+        let ino = self.ino_of(node)?;
+        let inode = self.read_inode(ino)?;
+        let set = self.read_attrs(&inode)?;
+        match set.get(key) {
+            Some(value) => {
+                if value_out.len() < value.len() {
+                    return Err(DriverError::BufferTooSmall);
+                }
+                value_out[..value.len()].copy_from_slice(value);
+                Ok(Some(value.len()))
+            }
+            None => Ok(None),
+        }
+    }
+
+    fn set_attr(&mut self, node: NodeId, key: &[u8], value: &[u8]) -> Result<(), DriverError> {
+        self.deny_if_read_only()?;
+        self.begin();
+        let result = self.set_attr_inner(node, key, value);
+        if result.is_err() {
+            self.rollback();
+        }
+        result
+    }
+
+    fn list_attr(
+        &mut self,
+        node: NodeId,
+        index: u64,
+        key_out: &mut [u8],
+    ) -> Result<Option<usize>, DriverError> {
+        let ino = self.ino_of(node)?;
+        let inode = self.read_inode(ino)?;
+        let set = self.read_attrs(&inode)?;
+        let idx = usize::try_from(index).unwrap_or(usize::MAX);
+        let Some(entry) = set.iter().nth(idx) else {
+            return Ok(None);
+        };
+        let key = entry.key().as_bytes();
+        if key_out.len() < key.len() {
+            return Err(DriverError::BufferTooSmall);
+        }
+        key_out[..key.len()].copy_from_slice(key);
+        Ok(Some(key.len()))
+    }
+
+    fn remove_attr(&mut self, node: NodeId, key: &[u8]) -> Result<(), DriverError> {
+        self.deny_if_read_only()?;
+        self.begin();
+        let result = self.remove_attr_inner(node, key);
+        if result.is_err() {
+            self.rollback();
+        }
+        result
     }
 }

@@ -8,8 +8,10 @@
 use super::*;
 use rustos_abi::driver::block::{DeviceHealth, DiscardCapability, HealthSnapshot};
 use rustos_abi::driver::filesystem::{
-    FilesystemRead, FilesystemSecurity, FilesystemTimestamps, FilesystemWrite, NodeKind,
+    FilesystemAttrs, FilesystemRead, FilesystemSecurity, FilesystemTimestamps, FilesystemWrite,
+    NodeKind,
 };
+use rustos_fsmeta::preset;
 
 /// In-memory block device. Optionally drops writes once a budget is reached,
 /// modelling a power loss mid-commit: a dropped write simply never reaches the
@@ -4709,4 +4711,409 @@ fn rename_rejects_bad_destination_name() {
         fs.rename(root, b"a", root, b".."),
         Err(DriverError::Unsupported)
     );
+}
+
+// ---------------------------------------------------------------------------
+// Extended file metadata (`docs/src/filesystem/rustfs-spec.md` §21).
+// ---------------------------------------------------------------------------
+
+/// Read the whole value of attribute `key` on `node` into an owned vector, or
+/// `None` when the attribute is absent.
+fn get_attr_vec(
+    fs: &mut RustFs<MemBlock>,
+    node: NodeId,
+    key: &[u8],
+) -> Option<alloc::vec::Vec<u8>> {
+    let mut buf = alloc::vec![0u8; MAX_BLOCK_SIZE];
+    fs.get_attr(node, key, &mut buf)
+        .expect("get_attr")
+        .map(|n| buf[..n].to_vec())
+}
+
+/// Every attribute key on `node`, in on-disk order.
+fn list_attr_keys(fs: &mut RustFs<MemBlock>, node: NodeId) -> alloc::vec::Vec<alloc::vec::Vec<u8>> {
+    let mut out = alloc::vec::Vec::new();
+    let mut i = 0u64;
+    let mut buf = alloc::vec![0u8; MAX_BLOCK_SIZE];
+    while let Some(n) = fs.list_attr(node, i, &mut buf).expect("list_attr") {
+        out.push(buf[..n].to_vec());
+        i += 1;
+    }
+    out
+}
+
+/// Whether `haystack` contains `needle` as a contiguous subsequence.
+fn contains_subsequence(haystack: &[u8], needle: &[u8]) -> bool {
+    needle.len() <= haystack.len()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+}
+
+#[test]
+fn attributes_round_trip_across_namespaces_and_remount() {
+    let mut fs = fmt(4096, 512, 64);
+    let root = fs.root();
+    fs.create(root, b"file", NodeKind::RegularFile)
+        .expect("create");
+    let node = fs.lookup(root, b"file").expect("lookup");
+
+    fs.set_attr(node, b"user.comment", b"hello")
+        .expect("set user");
+    fs.set_attr(node, b"acorn.filetype", b"fff")
+        .expect("set acorn");
+    fs.set_attr(node, b"mac.type", b"TEXT").expect("set mac");
+
+    assert_eq!(
+        get_attr_vec(&mut fs, node, b"user.comment").as_deref(),
+        Some(&b"hello"[..])
+    );
+    assert_eq!(
+        get_attr_vec(&mut fs, node, b"acorn.filetype").as_deref(),
+        Some(&b"fff"[..])
+    );
+    assert_eq!(
+        list_attr_keys(&mut fs, node),
+        alloc::vec![
+            b"user.comment".to_vec(),
+            b"acorn.filetype".to_vec(),
+            b"mac.type".to_vec()
+        ]
+    );
+
+    // Attributes survive a remount (they are committed metadata).
+    let bytes = fs.into_block().bytes();
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 4096, 512), &TEST_KEY).expect("reopen");
+    let root = fs.root();
+    let node = fs.lookup(root, b"file").expect("lookup after remount");
+    assert_eq!(
+        get_attr_vec(&mut fs, node, b"mac.type").as_deref(),
+        Some(&b"TEXT"[..])
+    );
+
+    // Replace, then remove; a removed attribute is gone and removing it again
+    // fails closed.
+    fs.set_attr(node, b"user.comment", b"changed")
+        .expect("replace");
+    assert_eq!(
+        get_attr_vec(&mut fs, node, b"user.comment").as_deref(),
+        Some(&b"changed"[..])
+    );
+    fs.remove_attr(node, b"user.comment").expect("remove");
+    assert_eq!(get_attr_vec(&mut fs, node, b"user.comment"), None);
+    assert_eq!(
+        fs.remove_attr(node, b"user.comment"),
+        Err(DriverError::NotFound)
+    );
+}
+
+#[test]
+fn attribute_keys_are_case_sensitive() {
+    let mut fs = fmt(4096, 512, 64);
+    let root = fs.root();
+    fs.create(root, b"f", NodeKind::RegularFile)
+        .expect("create");
+    let node = fs.lookup(root, b"f").expect("lookup");
+    fs.set_attr(node, b"user.Name", b"upper").expect("set");
+    fs.set_attr(node, b"user.name", b"lower").expect("set");
+    assert_eq!(
+        get_attr_vec(&mut fs, node, b"user.Name").as_deref(),
+        Some(&b"upper"[..])
+    );
+    assert_eq!(
+        get_attr_vec(&mut fs, node, b"user.name").as_deref(),
+        Some(&b"lower"[..])
+    );
+}
+
+#[test]
+fn attribute_grammar_and_bounds_fail_closed() {
+    let mut fs = fmt(4096, 512, 64);
+    let root = fs.root();
+    fs.create(root, b"f", NodeKind::RegularFile)
+        .expect("create");
+    let node = fs.lookup(root, b"f").expect("lookup");
+
+    // Unknown namespace and malformed keys are rejected, never stored.
+    assert_eq!(
+        fs.set_attr(node, b"bogus.k", b"v"),
+        Err(DriverError::OutOfRange)
+    );
+    assert_eq!(
+        fs.set_attr(node, b"nodot", b"v"),
+        Err(DriverError::OutOfRange)
+    );
+
+    // A bad key on get/remove is a fail-closed rejection, not "absent".
+    let mut buf = [0u8; 8];
+    assert_eq!(
+        fs.get_attr(node, b"bogus.k", &mut buf),
+        Err(DriverError::OutOfRange)
+    );
+    assert_eq!(
+        fs.remove_attr(node, b"bogus.k"),
+        Err(DriverError::OutOfRange)
+    );
+
+    // An oversize value is rejected.
+    let huge = alloc::vec![b'x'; rustos_fsmeta::VALUE_MAX + 1];
+    assert_eq!(
+        fs.set_attr(node, b"user.k", &huge),
+        Err(DriverError::LengthOutOfRange)
+    );
+
+    // A too-small get buffer fails closed rather than truncating.
+    fs.set_attr(node, b"user.k", b"abcdef").expect("set");
+    let mut tiny = [0u8; 2];
+    assert_eq!(
+        fs.get_attr(node, b"user.k", &mut tiny),
+        Err(DriverError::BufferTooSmall)
+    );
+    // The prior value is intact after every rejected call.
+    assert_eq!(
+        get_attr_vec(&mut fs, node, b"user.k").as_deref(),
+        Some(&b"abcdef"[..])
+    );
+}
+
+#[test]
+fn attribute_set_that_overflows_the_block_fails_closed_and_leaves_prior_intact() {
+    // A 512-byte block leaves a small attribute payload, so a value that fits
+    // the fsmeta bound can still overflow one metadata block: it must fail
+    // closed with NoSpace and leave the previously-stored attribute intact.
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"f", NodeKind::RegularFile)
+        .expect("create");
+    let node = fs.lookup(root, b"f").expect("lookup");
+    fs.set_attr(node, b"user.keep", b"safe").expect("set small");
+
+    let big = alloc::vec![b'x'; 1024];
+    assert_eq!(
+        fs.set_attr(node, b"user.big", &big),
+        Err(DriverError::NoSpace)
+    );
+    // The block-overflow rejection did not disturb the existing attribute.
+    assert_eq!(
+        get_attr_vec(&mut fs, node, b"user.keep").as_deref(),
+        Some(&b"safe"[..])
+    );
+    assert_eq!(get_attr_vec(&mut fs, node, b"user.big"), None);
+}
+
+#[test]
+fn attributes_are_encrypted_at_rest() {
+    let mut fs = fmt(4096, 512, 64);
+    let root = fs.root();
+    fs.create(root, b"f", NodeKind::RegularFile)
+        .expect("create");
+    let node = fs.lookup(root, b"f").expect("lookup");
+    let marker_key = b"user.secretmarkerkey";
+    let marker_value = b"PLAINTEXT-ATTR-MARKER-9F3A";
+    fs.set_attr(node, marker_key, marker_value).expect("set");
+    let bytes = fs.into_block().bytes();
+    // Neither the key nor the value appears in cleartext on the raw device.
+    assert!(
+        !contains_subsequence(&bytes, marker_value),
+        "attribute value leaked in plaintext"
+    );
+    assert!(
+        !contains_subsequence(&bytes, b"secretmarkerkey"),
+        "attribute key leaked in plaintext"
+    );
+}
+
+#[test]
+fn a_read_only_mount_refuses_attribute_mutation() {
+    let mut fs = fmt(4096, 512, 64);
+    let root = fs.root();
+    fs.create(root, b"f", NodeKind::RegularFile)
+        .expect("create");
+    let node = fs.lookup(root, b"f").expect("lookup");
+    fs.set_attr(node, b"user.k", b"v").expect("set");
+    let bytes = fs.into_block().bytes();
+
+    let mut ro = RustFs::open_read_only(MemBlock::from_bytes(bytes, 4096, 512), &TEST_KEY)
+        .expect("read-only mount");
+    let node = ro.lookup(ro.root(), b"f").expect("lookup ro");
+    // Reading an attribute on a read-only mount still works.
+    assert_eq!(
+        get_attr_vec(&mut ro, node, b"user.k").as_deref(),
+        Some(&b"v"[..])
+    );
+    // Mutating one fails closed.
+    assert_eq!(
+        ro.set_attr(node, b"user.k", b"w"),
+        Err(DriverError::PermissionDenied)
+    );
+    assert_eq!(
+        ro.remove_attr(node, b"user.k"),
+        Err(DriverError::PermissionDenied)
+    );
+}
+
+#[test]
+fn setting_an_attribute_is_one_transaction_and_crash_replay_never_tears() {
+    // Baseline: a committed file with one attribute. The crashed trial sets a
+    // second attribute in a single transaction, so a post-crash mount must see
+    // either the prior set {a} or the new set {a,b} — never a torn/undecodable
+    // attribute block.
+    let mut base = fmt(512, 256, 32);
+    let root = base.root();
+    base.create(root, b"f", NodeKind::RegularFile)
+        .expect("create");
+    let node = base.lookup(root, b"f").expect("lookup");
+    base.set_attr(node, b"user.a", b"aaa").expect("set a");
+    let baseline = base.into_block().bytes();
+
+    for budget in 0..48u32 {
+        let mut dev = MemBlock::from_bytes(baseline.clone(), 512, 256);
+        dev.write_budget = Some(budget);
+        let mut fs = RustFs::open(dev, &TEST_KEY).expect("baseline opens");
+        let node = fs.lookup(fs.root(), b"f").expect("lookup");
+        let _ = fs.set_attr(node, b"user.b", b"bbb");
+        let bytes = fs.into_block().bytes();
+
+        let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY)
+            .expect("post-crash mount always succeeds");
+        let node = fs.lookup(fs.root(), b"f").expect("f survives");
+        // The prior attribute is always intact.
+        assert_eq!(
+            get_attr_vec(&mut fs, node, b"user.a").as_deref(),
+            Some(&b"aaa"[..])
+        );
+        // The new attribute is present in full or absent — never partial.
+        if let Some(v) = get_attr_vec(&mut fs, node, b"user.b") {
+            assert_eq!(v, b"bbb");
+        }
+    }
+}
+
+#[test]
+fn removing_a_file_frees_its_attribute_block() {
+    // A file with attributes is removed, then many files are created and
+    // removed in a loop. If the attribute block leaked or double-freed, the
+    // free-space rebuild at remount would diverge and the mount would fail; a
+    // clean remount proves the block was reclaimed exactly once.
+    let mut fs = fmt(4096, 512, 64);
+    let root = fs.root();
+    fs.create(root, b"victim", NodeKind::RegularFile)
+        .expect("create");
+    let node = fs.lookup(root, b"victim").expect("lookup");
+    fs.set_attr(node, b"user.a", b"value").expect("set");
+    fs.set_attr(node, b"acorn.filetype", b"fff").expect("set");
+    fs.remove(root, b"victim").expect("remove");
+
+    for i in 0..32u32 {
+        let name = alloc::format!("t{i}");
+        fs.create(root, name.as_bytes(), NodeKind::RegularFile)
+            .expect("create");
+        let n = fs.lookup(root, name.as_bytes()).expect("lookup");
+        fs.set_attr(n, b"user.tag", b"x").expect("set");
+        fs.remove(root, name.as_bytes()).expect("remove");
+    }
+
+    let bytes = fs.into_block().bytes();
+    let free_before = fs_free_count_after_reopen(bytes.clone());
+    // A second identical cycle must return to the same free-block count: no
+    // slow leak of attribute blocks.
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 4096, 512), &TEST_KEY).expect("reopen");
+    let root = fs.root();
+    fs.create(root, b"again", NodeKind::RegularFile)
+        .expect("create");
+    let n = fs.lookup(root, b"again").expect("lookup");
+    fs.set_attr(n, b"user.a", b"value").expect("set");
+    fs.remove(root, b"again").expect("remove");
+    let after = fs_free_count_after_reopen(fs.into_block().bytes());
+    assert_eq!(
+        free_before, after,
+        "attribute blocks leaked across a create/remove cycle"
+    );
+}
+
+/// Reopen a stored image and report its free-block count (a proxy for "no
+/// blocks leaked").
+fn fs_free_count_after_reopen(bytes: alloc::vec::Vec<u8>) -> u64 {
+    let fs = RustFs::open(MemBlock::from_bytes(bytes, 4096, 512), &TEST_KEY).expect("reopen");
+    fs.free_count
+}
+
+#[test]
+fn reflink_copies_attributes_independently() {
+    let mut fs = fmt(4096, 512, 64);
+    let root = fs.root();
+    fs.create(root, b"src", NodeKind::RegularFile)
+        .expect("create");
+    let src = fs.lookup(root, b"src").expect("lookup");
+    assert_eq!(fs.write_at(root, b"src", 0, b"body"), Ok(4));
+    fs.set_attr(src, b"user.tag", b"orig").expect("set");
+
+    let dst = fs.reflink(root, b"src", b"copy").expect("reflink");
+    // The clone carries the source's attributes.
+    assert_eq!(
+        get_attr_vec(&mut fs, dst, b"user.tag").as_deref(),
+        Some(&b"orig"[..])
+    );
+    // Mutating the clone's attribute does not disturb the source's.
+    fs.set_attr(dst, b"user.tag", b"clone")
+        .expect("set on clone");
+    assert_eq!(
+        get_attr_vec(&mut fs, src, b"user.tag").as_deref(),
+        Some(&b"orig"[..])
+    );
+    assert_eq!(
+        get_attr_vec(&mut fs, dst, b"user.tag").as_deref(),
+        Some(&b"clone"[..])
+    );
+    // Removing the source frees only its own attribute block; the clone keeps
+    // its attributes and the volume remounts cleanly.
+    fs.remove(root, b"src").expect("remove src");
+    assert_eq!(
+        get_attr_vec(&mut fs, dst, b"user.tag").as_deref(),
+        Some(&b"clone"[..])
+    );
+    let bytes = fs.into_block().bytes();
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 4096, 512), &TEST_KEY).expect("reopen");
+    let dst = fs.lookup(fs.root(), b"copy").expect("copy survives");
+    assert_eq!(
+        get_attr_vec(&mut fs, dst, b"user.tag").as_deref(),
+        Some(&b"clone"[..])
+    );
+}
+
+#[test]
+fn acorn_preset_metadata_round_trips_through_the_store() {
+    // A synthetic ADFS Text file (&FFF) with a load/exec-encoded timestamp:
+    // the driver stores the decoded filetype plus the exact raw load/exec, so
+    // a later export reproduces the native fields byte-for-byte.
+    let (load, exec) = preset::acorn::encode_typed(0xFFF, 0x12_3456_789A).expect("encode typed");
+    let mut fs = fmt(4096, 512, 64);
+    let root = fs.root();
+    fs.create(root, b"doc", NodeKind::RegularFile)
+        .expect("create");
+    let node = fs.lookup(root, b"doc").expect("lookup");
+
+    let filetype = preset::acorn::filetype_to_value(0xFFF).expect("filetype");
+    fs.set_attr(node, b"acorn.filetype", &filetype)
+        .expect("set filetype");
+    fs.set_attr(node, b"acorn.loadaddr", &preset::acorn::addr_to_value(load))
+        .expect("set load");
+    fs.set_attr(node, b"acorn.execaddr", &preset::acorn::addr_to_value(exec))
+        .expect("set exec");
+
+    // Read back and reconstruct the native fields exactly.
+    let ft = get_attr_vec(&mut fs, node, b"acorn.filetype").expect("filetype present");
+    assert_eq!(
+        preset::acorn::filetype_from_value(&ft).expect("decode"),
+        0xFFF
+    );
+    let rload = preset::acorn::addr_from_value(
+        &get_attr_vec(&mut fs, node, b"acorn.loadaddr").expect("load present"),
+    )
+    .expect("decode load");
+    let rexec = preset::acorn::addr_from_value(
+        &get_attr_vec(&mut fs, node, b"acorn.execaddr").expect("exec present"),
+    )
+    .expect("decode exec");
+    assert_eq!((rload, rexec), (load, exec));
 }

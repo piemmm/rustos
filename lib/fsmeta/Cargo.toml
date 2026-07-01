@@ -1,0 +1,21 @@
+[package]
+name = "rustos-fsmeta"
+description = "RustOS shared extended-file-metadata model: the namespaced-key grammar, the bounded AttrEntry/AttrSet store with a self-identifying on-disk encoding, and the closed foreign-metadata preset registry (Acorn/RISC OS, Amiga, Atari, classic Mac, RustOS native) with checked Time64 conversions. The one definition RustFS, the foreign-filesystem drivers, and the copy/move/archive tooling share (AGENTS.md §2.2)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+rustos-abi = { path = "../abi", version = "=0.0.0" }
+
+[dev-dependencies]
+rustos-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

@@ -839,3 +839,13 @@ panics and fails closed.
 
 The `pjdfstest`-equivalent POSIX suite remains tracked in
 `.junie/next-session-prompt.md`.
+
+## Extended file metadata
+
+RustFS implements the versioned `FilesystemAttrs` ABI: every inode has a
+namespaced, encrypted, mirrored copy-on-write extended-attribute store, and the
+`lib/fsmeta` preset registry preserves foreign per-file metadata (Acorn, Amiga,
+Atari, classic Mac) across a copy. The on-disk model, the fixed bounds, the
+capability rules, and the cross-filesystem preservation contract are specified
+in `rustfs-spec.md` §21; the value encodings are in the metadata-registry
+reference page.

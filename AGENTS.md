@@ -539,6 +539,13 @@ rustos/
 │   │                    #   aarch64+riscv64 ports build §18.2 discovery on (§2.2).
 │   ├── font/            # Shared text rasterisation: monospace bitmap font +
 │   │                    #   glyph blitter onto a raster Surface (§16.4, §17.4).
+│   ├── fsmeta/          # Shared extended-file-metadata model: the namespaced
+│   │                    #   attribute-key grammar, the bounded AttrSet/AttrEntry
+│   │                    #   store + self-identifying encoding, and the closed
+│   │                    #   foreign-metadata preset registry (Acorn/Amiga/Atari/
+│   │                    #   Mac) with checked Time64 conversions — the one
+│   │                    #   definition RustFS, the foreign-FS drivers, and the
+│   │                    #   copy/archive tools share (§2.2; rustfs-spec §21).
 │   ├── geometry/        # Shared screen geometry (Point/Rect) + the desktop
 │   │                    #   DPI/UI Scale (logical->physical) (§10, §17.4).
 │   ├── hid/             # Arch-neutral HID boot-protocol decode (keyboard +

@@ -623,6 +623,117 @@ pub trait FilesystemTimestamps {
     fn times(&mut self, node: NodeId) -> Result<NodeTimes, DriverError>;
 }
 
+/// Per-node extended-attribute access to a mounted filesystem.
+///
+/// This is a **versioned `abi-v1` extension** — a *separate* trait from
+/// [`FilesystemRead`] / [`FilesystemWrite`] / [`FilesystemSecurity`] /
+/// [`FilesystemTimestamps`], never a widening of any of them nor of the frozen
+/// [`Filesystem`]; new behaviour ships as a new trait. A driver whose on-disk
+/// format can hold a general-purpose, namespaced `key → value` store per inode
+/// implements it so the VFS can offer extended attributes and preserve foreign
+/// per-file metadata (Acorn/Amiga/Atari/Mac) across a copy; a driver whose
+/// format has nowhere to keep them simply does not implement it.
+///
+/// # The key grammar and bounds live in `lib/fsmeta`
+///
+/// A `key` is a namespaced, byte-for-byte case-sensitive
+/// `rustos_fsmeta`-grammar key (`namespace.rest`, e.g. `acorn.filetype`). The
+/// driver validates every key and value against that shared grammar and the
+/// fixed security bounds and **fails closed** on any violation — an unknown
+/// namespace, a malformed key, or an oversize value is rejected, never stored.
+/// Values are opaque bytes; the driver never interprets them.
+///
+/// # No permission decisions
+///
+/// As with the sibling traits, the driver makes **no** permission decision:
+/// the VFS authorises every attribute operation against the model before
+/// calling here. A key's *namespace* decides its access class — the `user`,
+/// `acorn`, `amiga`, `atari`, `mac`, and `rustos` namespaces are ordinary file
+/// metadata governed by the file's own owner/mode/ACL, while the `system` and
+/// `trusted` namespaces guard a security boundary the VFS gates with a
+/// capability before delegating. A caller not permitted a namespace never
+/// reaches the driver for it, and [`list_attr`](FilesystemAttrs::list_attr)
+/// enumerates only keys whose namespace the caller may read.
+///
+/// # Buffers, not allocation
+///
+/// [`get_attr`](FilesystemAttrs::get_attr) and
+/// [`list_attr`](FilesystemAttrs::list_attr) write into a caller-provided
+/// buffer and report the byte count, mirroring
+/// [`read_dir`](FilesystemRead::read_dir); a value or key that does not fit is
+/// [`DriverError::BufferTooSmall`], not a truncation.
+///
+/// # Capabilities
+///
+/// Calls are reached only through the kernel-issued
+/// [`DriverHandle`](crate::driver::DriverHandle) the host minted at load
+/// time ([`CapabilityId::DRV_LOAD`](crate::CapabilityId::DRV_LOAD)), and the
+/// VFS additionally requires the mount to be writable for
+/// [`set_attr`](FilesystemAttrs::set_attr) /
+/// [`remove_attr`](FilesystemAttrs::remove_attr) (a mount carrying
+/// [`MountFlags::READ_ONLY`] is never delegated a mutation).
+pub trait FilesystemAttrs {
+    /// Read the value of attribute `key` on `node` into `value_out`,
+    /// returning the number of bytes written, or `None` if `node` carries no
+    /// such attribute.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::OutOfRange`] if `key` is not a valid namespaced key.
+    /// * [`DriverError::BufferTooSmall`] if the value does not fit `value_out`.
+    /// * [`DriverError::NotFound`] if `node` does not name a live node.
+    /// * [`DriverError::DeviceFault`] on an unrecoverable block read.
+    fn get_attr(
+        &mut self,
+        node: NodeId,
+        key: &[u8],
+        value_out: &mut [u8],
+    ) -> Result<Option<usize>, DriverError>;
+
+    /// Set attribute `key` on `node` to `value`, inserting or replacing it in
+    /// one copy-on-write transaction.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::OutOfRange`] if `key` is not a valid namespaced key
+    ///   (unknown namespace, malformed bytes).
+    /// * [`DriverError::LengthOutOfRange`] if `key` or `value` exceeds its
+    ///   fixed bound.
+    /// * [`DriverError::NoSpace`] if the attribute count, total attribute
+    ///   bytes, or the metadata block would be exceeded.
+    /// * [`DriverError::NotFound`] if `node` does not name a live node.
+    /// * [`DriverError::DeviceFault`] on an unrecoverable block read/write.
+    fn set_attr(&mut self, node: NodeId, key: &[u8], value: &[u8]) -> Result<(), DriverError>;
+
+    /// Yield the `index`-th attribute key of `node`, writing it into
+    /// `key_out` and returning its length. Returns `Ok(None)` once `index` is
+    /// past the last attribute, which is how a caller detects the end.
+    ///
+    /// Iteration order is the stable on-disk order.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::BufferTooSmall`] if the key does not fit `key_out`.
+    /// * [`DriverError::NotFound`] if `node` does not name a live node.
+    /// * [`DriverError::DeviceFault`] on an unrecoverable block read.
+    fn list_attr(
+        &mut self,
+        node: NodeId,
+        index: u64,
+        key_out: &mut [u8],
+    ) -> Result<Option<usize>, DriverError>;
+
+    /// Remove attribute `key` from `node` in one copy-on-write transaction.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::OutOfRange`] if `key` is not a valid namespaced key.
+    /// * [`DriverError::NotFound`] if `node` does not name a live node, or
+    ///   carries no such attribute.
+    /// * [`DriverError::DeviceFault`] on an unrecoverable block read/write.
+    fn remove_attr(&mut self, node: NodeId, key: &[u8]) -> Result<(), DriverError>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1131,5 +1242,142 @@ mod tests {
         let mut fs = MockSecurityFs { sec };
         assert_eq!(fs.security(NodeId::from_raw(1)), Ok(sec));
         assert_eq!(fs.security(NodeId::NONE), Err(DriverError::NotFound));
+    }
+
+    /// A node holding a single extended attribute in fixed buffers, enough to
+    /// exercise the [`FilesystemAttrs`] contract (buffer sizing, `None` for
+    /// absent, `NotFound` for a dead node) without an allocator. The key
+    /// grammar and bounds are validated in `lib/fsmeta` and by the `RustFS`
+    /// integration tests, not here.
+    struct MockAttrsFs {
+        key: [u8; 64],
+        key_len: usize,
+        value: [u8; 64],
+        value_len: usize,
+        present: bool,
+    }
+
+    impl MockAttrsFs {
+        fn empty() -> Self {
+            Self {
+                key: [0u8; 64],
+                key_len: 0,
+                value: [0u8; 64],
+                value_len: 0,
+                present: false,
+            }
+        }
+
+        fn matches(&self, key: &[u8]) -> bool {
+            self.present && &self.key[..self.key_len] == key
+        }
+    }
+
+    impl FilesystemAttrs for MockAttrsFs {
+        fn get_attr(
+            &mut self,
+            node: NodeId,
+            key: &[u8],
+            value_out: &mut [u8],
+        ) -> Result<Option<usize>, DriverError> {
+            if node == NodeId::NONE {
+                return Err(DriverError::NotFound);
+            }
+            if !self.matches(key) {
+                return Ok(None);
+            }
+            if value_out.len() < self.value_len {
+                return Err(DriverError::BufferTooSmall);
+            }
+            value_out[..self.value_len].copy_from_slice(&self.value[..self.value_len]);
+            Ok(Some(self.value_len))
+        }
+
+        fn set_attr(&mut self, node: NodeId, key: &[u8], value: &[u8]) -> Result<(), DriverError> {
+            if node == NodeId::NONE {
+                return Err(DriverError::NotFound);
+            }
+            if key.len() > self.key.len() || value.len() > self.value.len() {
+                return Err(DriverError::NoSpace);
+            }
+            self.key[..key.len()].copy_from_slice(key);
+            self.key_len = key.len();
+            self.value[..value.len()].copy_from_slice(value);
+            self.value_len = value.len();
+            self.present = true;
+            Ok(())
+        }
+
+        fn list_attr(
+            &mut self,
+            node: NodeId,
+            index: u64,
+            key_out: &mut [u8],
+        ) -> Result<Option<usize>, DriverError> {
+            if node == NodeId::NONE {
+                return Err(DriverError::NotFound);
+            }
+            if index != 0 || !self.present {
+                return Ok(None);
+            }
+            if key_out.len() < self.key_len {
+                return Err(DriverError::BufferTooSmall);
+            }
+            key_out[..self.key_len].copy_from_slice(&self.key[..self.key_len]);
+            Ok(Some(self.key_len))
+        }
+
+        fn remove_attr(&mut self, node: NodeId, key: &[u8]) -> Result<(), DriverError> {
+            if node == NodeId::NONE {
+                return Err(DriverError::NotFound);
+            }
+            if !self.matches(key) {
+                return Err(DriverError::NotFound);
+            }
+            self.present = false;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn mock_attrs_fs_round_trips() {
+        let mut fs = MockAttrsFs::empty();
+        let node = NodeId::from_raw(1);
+        assert_eq!(fs.set_attr(node, b"user.comment", b"hi"), Ok(()));
+
+        let mut buf = [0u8; 16];
+        assert_eq!(fs.get_attr(node, b"user.comment", &mut buf), Ok(Some(2)));
+        assert_eq!(&buf[..2], b"hi");
+        assert_eq!(fs.get_attr(node, b"user.absent", &mut buf), Ok(None));
+
+        // A too-small value buffer fails closed rather than truncating.
+        let mut tiny = [0u8; 1];
+        assert_eq!(
+            fs.get_attr(node, b"user.comment", &mut tiny),
+            Err(DriverError::BufferTooSmall)
+        );
+
+        // Listing yields the one key then terminates.
+        let mut key_buf = [0u8; 64];
+        assert_eq!(fs.list_attr(node, 0, &mut key_buf), Ok(Some(12)));
+        assert_eq!(&key_buf[..12], b"user.comment");
+        assert_eq!(fs.list_attr(node, 1, &mut key_buf), Ok(None));
+
+        assert_eq!(fs.remove_attr(node, b"user.comment"), Ok(()));
+        assert_eq!(
+            fs.remove_attr(node, b"user.comment"),
+            Err(DriverError::NotFound)
+        );
+        assert_eq!(fs.get_attr(node, b"user.comment", &mut buf), Ok(None));
+
+        // A dead node fails closed on every operation.
+        assert_eq!(
+            fs.get_attr(NodeId::NONE, b"user.comment", &mut buf),
+            Err(DriverError::NotFound)
+        );
+        assert_eq!(
+            fs.set_attr(NodeId::NONE, b"user.comment", b"x"),
+            Err(DriverError::NotFound)
+        );
     }
 }
