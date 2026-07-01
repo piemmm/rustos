@@ -1,8 +1,11 @@
 # DRIVES.md — RustOS drive, volume, alias, and path namespace brief
 
-This file is an AI-facing design brief for generating a proper RustOS storage
-namespace specification. It is not the final binding spec. Use it as source
-material to produce the final document and the required AGENTS.md amendments.
+This file is the AI-facing design brief that seeded the RustOS storage-namespace
+specification. **The binding spec has been produced: `docs/src/filesystem/
+drives.md`** (with the `AGENTS.md` §16.1 amendment it required). This brief is
+retained only as the source material behind that spec; where the two differ,
+the spec in `docs/src/` wins. The remaining P4 work is the descriptor-producing
+open-a-path ABI (see `.junie/PREREQUISITES2.md`).
 
 The goal is to replace the Unix habit of making every storage device reachable
 only through one persistent root filesystem tree. RustOS should keep Unix-like

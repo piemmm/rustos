@@ -73,6 +73,7 @@
 # Filesystem
 
 - [Overview](./filesystem/overview.md)
+- [Storage namespaces, volume roots, and aliases](./filesystem/drives.md)
 - [On-disk layout enforcement](./filesystem/layout.md)
 - [Permissions](./filesystem/permissions.md)
 - [FAT32 driver](./filesystem/fat32.md)

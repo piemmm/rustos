@@ -3,20 +3,30 @@
 This page mirrors `AGENTS.md` §16. The VFS in `kernel/core::fs` enforces
 it; the installer (Stage 8) lays it out.
 
-## Exactly four top-level directories
+## Exactly four default root-view entries
 
-RustOS has **exactly four** top-level directories:
+The default session root view (`/`) has **exactly four** entries:
 
 ```
 /
 ├── System/    # All OS-provided files. Read-only at runtime.
 ├── Users/     # One subdirectory per user account.
 ├── Apps/      # Installed application bundles.
-└── Storage/   # Mount points for removable / extra volumes.
+└── Storage/   # Catalog/view of published non-core storage roots.
 ```
 
-`Vfs::with_default_layout` provides exactly these and, beneath `/System`,
-the two writable exceptions `Logs` and `Settings` (see below).
+These are synthetic view bindings backed by the first-class aliases
+`System:`, `Users:`, `Apps:`, and `Storage:` — the canonical identity of a
+storage root is its root ID or alias path, not the `/` view path
+(`AGENTS.md` §16.1; the binding model is the storage-namespace spec,
+[Storage namespaces, volume roots, and aliases](./drives.md)). The
+single-root VFS this page describes is the *current realization* of that
+default `/` view; the forest-of-roots model it projects lands with the
+resolver / open-a-path stage tracked in that spec.
+
+`Vfs::with_default_layout` provides exactly these four entries and,
+beneath `/System`, the two writable exceptions `Logs` and `Settings` (see
+below).
 
 ## Legacy POSIX names: the OS never authors them
 

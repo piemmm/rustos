@@ -3313,11 +3313,15 @@ I/O vocabulary. See `.junie/PREREQUISITES2.md` for the full P0–P6 status.
   (`id::`/`fs::`/`<driver>::`/`dev::`/`net::`) with `UnsupportedResolver` — they
   have no consumer yet, so inventing them here would be speculative interface
   (§2.3/§2.4). Unit tests, rustdoc, a docs page, and the `fuzz_path`
-  round-trip harness ship with it. **Still open under P4** (tracked, not
-  stubbed): turning `plans/DRIVES.md` into the final binding storage-namespace
-  spec with its §16.1 amendment, and the descriptor-*producing* open-a-path ABI
-  the resolver/runtime stage adds. Remaining prerequisites (P2, P4 remainder,
-  P5) are tracked in `.junie/PREREQUISITES2.md`.
+  round-trip harness ship with it. The **binding storage-namespace spec** is
+  now landed: `docs/src/filesystem/drives.md` turns `plans/DRIVES.md` into the
+  forest-of-named-roots model (alias/`id::` canonical identity, `/` a generated
+  view), with the §16.1 charter amendment (the four names become synthetic view
+  bindings backed by first-class aliases). **Still open under P4** (tracked, not
+  stubbed): the descriptor-*producing* open-a-path ABI the resolver/runtime
+  stage adds (at which point `lib/path` gains the `id::`/`fs::`/… `Root`
+  variants in place). Remaining prerequisites (P2, P4 remainder, P5) are tracked
+  in `.junie/PREREQUISITES2.md`.
 
 ## CCOMPAT — C-callable `abi-v1` (full `lib/abi` header, syscall stubs, crt0)
 
@@ -3497,6 +3501,20 @@ of how much code was produced.
 
 Amendments to `AGENTS.md` (the binding charter) are logged here so an agent
 can see *why* a rule exists without diffing the charter's history.
+
+- **2026-07-01 — Storage is a forest of named roots; `/` is a view, not
+  identity.** Amended §16.1 (Option B of the `plans/DRIVES.md` brief): the four
+  top-level names become exactly four entries in the *default session root
+  view*, backed by the first-class aliases `System:`/`Users:`/`Apps:`/
+  `Storage:`, and the canonical identity of a storage root becomes its root ID
+  (`id::`) or alias path, never the `/` view path — so a healthy volume stays
+  reachable by `id::` when the `/` view or `System` volume is absent/corrupt.
+  This removes the Unix single-root failure model while preserving the clean
+  four-name user layout, and preserves §16.2/§16.3 as the aliases' policy. The
+  binding model is the new storage-namespace spec (`docs/src/filesystem/
+  drives.md`, prerequisite P4.1); the descriptor-producing open-a-path ABI and
+  the `lib/path` resolver `Root` variants are the remaining, still-open P4 work.
+  Documentation only (no code/interface changed yet).
 
 - **2026-07-01 — "Transient" is not a diagnosis; a load-dependent timeout is a
   flake.** Hardened §7 "No flaky tests" after a QEMU test timeout was wrongly

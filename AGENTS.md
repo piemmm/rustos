@@ -1336,22 +1336,36 @@ source repository (the source layout is §3). It is binding.
 
 ### 16.1 Top-level directories
 
-RustOS has **exactly four** top-level directories. Anything else is a
-defect.
+RustOS exposes **exactly four** entries in the default session root
+view. Anything else in that view is a defect.
 
 ```
-/
+/            # the default session root view — a projection, not storage identity
 ├── System/    # All OS-provided files. Read-only at runtime.
 ├── Users/     # One subdirectory per user account.
 ├── Apps/      # Installed applications. One bundle per app.
-└── Storage/   # Mount points for removable / extra volumes.
+└── Storage/   # Catalog/view of published non-core storage roots.
 ```
 
+These four are synthetic **view bindings** backed by the first-class
+aliases `System:`, `Users:`, `Apps:`, and `Storage:`, not the canonical
+identity of storage. The canonical identity of a storage root is its root
+ID (`id::<volume-id>/…`) or its alias path (`Alias:/…`), never the `/`
+view path: a process holding the authority to open `Backup:/file` can do
+so even when the `/` view or the `Storage:` catalog is absent, corrupt,
+or deliberately hidden. RustOS storage is a forest of independently
+addressable named roots projected into `/` for POSIX-ish convenience —
+`/` is a generated view, not the root of storage. The full model
+(grammar, resolver table, alias policy, capabilities, and lifecycle) is
+the binding storage-namespace spec (`docs/src/filesystem/drives.md`).
+Creating an additional entry in the default root view requires amending
+this section.
+
 The following legacy POSIX names are ones **the OS itself never creates**
-as top-level directories: `/etc`, `/home`, `/usr`, `/var`, `/proc`,
+as top-level view entries: `/etc`, `/home`, `/usr`, `/var`, `/proc`,
 `/sys`, `/lib`, `/lib64`, `/bin`, `/sbin`, `/opt`, `/root`, `/tmp`,
 `/dev`, `/mnt`, `/media`, `/run`, `/boot`. The OS lays out only the four
-directories above: the installer refuses to lay any legacy name out, the
+view entries above: the installer refuses to lay any legacy name out, the
 image builder authors only the four, and any driver or in-tree userland
 code that hard-codes or creates one of these paths is a defect.
 
