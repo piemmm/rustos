@@ -136,6 +136,11 @@ pub const TARGETS: &[Target] = &[
         test: "fuzz_field",
         description: "lib/log typed-field value decoder (untrusted log-record field bytes)",
     },
+    Target {
+        package: "rustos-log",
+        test: "fuzz_segment",
+        description: "lib/log segment decoder (untrusted /System/Logs segment bytes)",
+    },
 ];
 
 /// How long to run each harness.

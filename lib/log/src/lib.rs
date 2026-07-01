@@ -25,6 +25,8 @@
 
 pub mod attest;
 pub mod chain;
+pub mod segment;
+pub mod stream;
 
 /// The typed field-value model. Re-exported from `rustos_abi` (its ABI-schema
 /// home) so `rustos_log::field::*` keeps resolving; there is one definition.
@@ -41,6 +43,12 @@ pub use rustos_abi::field::{
     reserved_prefix, Decimal, FieldList, FieldName, FieldValue, IpAddr, MacAddr, ScalarType,
     ToFieldValue, Uuid, RESERVED_PREFIXES,
 };
+pub use segment::{
+    verify_segment, RecordBlockRef, ScanEnd, SegmentError, SegmentHeader, SegmentReader,
+    SegmentSummary, SegmentWriter, MAX_RECORD_PAYLOAD, SEGMENT_FOOTER_LEN, SEGMENT_FORMAT_VERSION,
+    SEGMENT_HEADER_LEN,
+};
+pub use stream::Stream;
 
 use core::sync::atomic::{AtomicU8, Ordering};
 

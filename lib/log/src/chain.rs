@@ -10,13 +10,17 @@
 //!
 //! # Model
 //!
-//! Each CPU owns one [`LogChain`]. Appending a record produces a
-//! [`ChainedEntry`] whose hash binds:
+//! One [`LogChain`] backs one log *stream*'s append-only record chain. A
+//! stream's records are appended in commit order regardless of which CPU
+//! produced them, so the chain is per-stream, not per-CPU. Appending a
+//! record produces a [`ChainedEntry`] whose hash binds:
 //!
-//! * the hash of the *previous* entry on that CPU's chain (the genesis
-//!   entry binds [`GENESIS_ANCHOR`]),
-//! * a strictly monotonic per-CPU sequence number,
-//! * the owning CPU id, and
+//! * the hash of the *previous* entry in the stream (the first entry binds
+//!   the stream genesis the caller resumes from, or [`GENESIS_ANCHOR`] for a
+//!   plain fresh chain),
+//! * a strictly monotonic, contiguous append sequence number,
+//! * the record's originating CPU id (bound as evidence; it does not make
+//!   the chain per-CPU), and
 //! * a digest of the record payload.
 //!
 //! Because each entry hash feeds into the next, editing or removing any
@@ -70,21 +74,21 @@ fn link_hash(
     sha256(&preimage)
 }
 
-/// One tamper-evident record in a per-CPU audit chain.
+/// One tamper-evident record in a per-stream audit chain.
 ///
 /// A `ChainedEntry` is self-describing: [`Self::recompute_hash`] re-derives
 /// [`Self::entry_hash`] from the other fields, so a verifier never has to
 /// trust a stored hash it did not recompute.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct ChainedEntry {
-    /// CPU that issued this entry. A chain is per-CPU; all entries in one
-    /// chain share this value.
+    /// The record's originating CPU id, bound into [`Self::entry_hash`] as
+    /// evidence. Entries from different CPUs coexist in one stream chain.
     pub cpu: u32,
-    /// Strictly monotonic, contiguous sequence number within the CPU's
-    /// chain. The genesis entry has sequence `0`.
+    /// Strictly monotonic, contiguous append sequence number within the
+    /// stream. The first entry of a fresh chain has sequence `0`.
     pub seq: u64,
-    /// Hash of the previous entry on this CPU's chain, or [`GENESIS_ANCHOR`]
-    /// for the first entry.
+    /// Hash of the previous entry in the stream, or the chain's start hash
+    /// (the stream genesis, or [`GENESIS_ANCHOR`]) for the first entry.
     pub prev_hash: Sha256Digest,
     /// Digest of the record payload supplied by the caller.
     pub payload_digest: Sha256Digest,
@@ -113,48 +117,42 @@ impl ChainedEntry {
     }
 }
 
-/// The growing head of one CPU's tamper-evident audit chain.
+/// The growing head of one log stream's tamper-evident record chain.
 ///
-/// Hold one per CPU ("monotonic per-CPU sequence
-/// number"). [`Self::append`] is the only mutating operation and never
-/// allocates.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+/// Hold one per stream. [`Self::append`] is the only mutating operation and
+/// never allocates.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct LogChain {
-    cpu: u32,
     next_seq: u64,
     head_hash: Sha256Digest,
 }
 
 impl LogChain {
-    /// Start a fresh chain for `cpu`, anchored at [`GENESIS_ANCHOR`].
+    /// Start a fresh chain anchored at [`GENESIS_ANCHOR`].
+    ///
+    /// A stream's *first* segment instead anchors at its stream genesis
+    /// (`rustos_log::stream_genesis`); use [`Self::resume`] with sequence `0`
+    /// and that genesis value for it.
     #[must_use]
-    pub fn new(cpu: u32) -> Self {
+    pub fn new() -> Self {
         Self {
-            cpu,
             next_seq: 0,
             head_hash: GENESIS_ANCHOR,
         }
     }
 
-    /// Resume an existing chain from a persisted head.
+    /// Resume a chain from a persisted (or genesis) head.
     ///
     /// `next_seq` is the sequence number the next appended entry will carry,
     /// and `head_hash` is the [`Self::head_hash`] recorded when the chain was
-    /// last persisted. Used when reopening `/System/Logs` after a clean
-    /// shutdown.
+    /// last persisted (for a stream's first segment, its stream genesis).
+    /// Used when opening or reopening a stream under `/System/Logs`.
     #[must_use]
-    pub fn resume(cpu: u32, next_seq: u64, head_hash: Sha256Digest) -> Self {
+    pub fn resume(next_seq: u64, head_hash: Sha256Digest) -> Self {
         Self {
-            cpu,
             next_seq,
             head_hash,
         }
-    }
-
-    /// CPU this chain belongs to.
-    #[must_use]
-    pub fn cpu(&self) -> u32 {
-        self.cpu
     }
 
     /// Sequence number the next [`Self::append`] will assign.
@@ -172,19 +170,21 @@ impl LogChain {
         self.head_hash
     }
 
-    /// Append a record identified by `payload_digest`, returning its entry.
+    /// Append a record produced on `cpu` and identified by `payload_digest`,
+    /// returning its entry.
     ///
-    /// Advances the chain head and the sequence counter. The caller computes
-    /// `payload_digest` over the serialized record bytes it is about to
-    /// persist (e.g. with [`rustos_crypto::sha256`]).
-    pub fn append(&mut self, payload_digest: &Sha256Digest) -> ChainedEntry {
+    /// Advances the chain head and the sequence counter. `cpu` is the
+    /// record's originating CPU id, bound into the entry hash as evidence.
+    /// The caller computes `payload_digest` over the serialized record bytes
+    /// it is about to persist (e.g. with [`rustos_crypto::sha256`]).
+    pub fn append(&mut self, cpu: u32, payload_digest: &Sha256Digest) -> ChainedEntry {
         let seq = self.next_seq;
         let prev_hash = self.head_hash;
-        let entry_hash = link_hash(&prev_hash, seq, self.cpu, payload_digest);
+        let entry_hash = link_hash(&prev_hash, seq, cpu, payload_digest);
         self.head_hash = entry_hash;
         self.next_seq = seq + 1;
         ChainedEntry {
-            cpu: self.cpu,
+            cpu,
             seq,
             prev_hash,
             payload_digest: *payload_digest,
@@ -218,20 +218,19 @@ pub enum ChainError {
         /// Position of the entry with the unexpected sequence number.
         index: usize,
     },
-    /// The entry belongs to a different CPU than the chain being verified.
-    CpuMismatch {
-        /// Position of the foreign entry.
-        index: usize,
-    },
 }
 
 /// Verify a slice of entries forms an unbroken chain and return its root.
 ///
-/// `cpu`, `start_seq`, and `start_hash` describe the expected state *before*
+/// `start_seq` and `start_hash` describe the expected state *before*
 /// `entries[0]`: for a chain verified from the beginning pass
 /// [`verify_fresh_chain`] instead. On success the returned digest is the
 /// chain head after the last entry (equal to `start_hash` when `entries` is
 /// empty).
+///
+/// A tampered `cpu` field needs no dedicated check: `cpu` is bound into each
+/// entry's hash, so altering it fails the self-consistency check as a
+/// [`ChainError::HashMismatch`].
 ///
 /// # Errors
 ///
@@ -239,16 +238,12 @@ pub enum ChainError {
 /// entry by its index in `entries`.
 pub fn verify_chain(
     entries: &[ChainedEntry],
-    cpu: u32,
     start_seq: u64,
     start_hash: &Sha256Digest,
 ) -> Result<Sha256Digest, ChainError> {
     let mut expected_prev = *start_hash;
     let mut expected_seq = start_seq;
     for (index, entry) in entries.iter().enumerate() {
-        if entry.cpu != cpu {
-            return Err(ChainError::CpuMismatch { index });
-        }
         if entry.seq != expected_seq {
             return Err(ChainError::SequenceGap { index });
         }
@@ -264,13 +259,16 @@ pub fn verify_chain(
     Ok(expected_prev)
 }
 
-/// Verify a chain from its genesis (`cpu`, sequence `0`, [`GENESIS_ANCHOR`]).
+/// Verify a chain from a plain fresh start (sequence `0`, [`GENESIS_ANCHOR`]).
+///
+/// A stream's first segment instead starts at its stream genesis; verify it
+/// with [`verify_chain`]`(entries, 0, &genesis)`.
 ///
 /// # Errors
 ///
 /// Returns the first [`ChainError`] encountered.
-pub fn verify_fresh_chain(entries: &[ChainedEntry], cpu: u32) -> Result<Sha256Digest, ChainError> {
-    verify_chain(entries, cpu, 0, &GENESIS_ANCHOR)
+pub fn verify_fresh_chain(entries: &[ChainedEntry]) -> Result<Sha256Digest, ChainError> {
+    verify_chain(entries, 0, &GENESIS_ANCHOR)
 }
 
 #[cfg(test)]
@@ -281,18 +279,17 @@ mod tests {
     use rustos_crypto::sha256;
 
     fn build(cpu: u32, payloads: &[&[u8]]) -> (LogChain, Vec<ChainedEntry>) {
-        let mut chain = LogChain::new(cpu);
+        let mut chain = LogChain::new();
         let mut entries = Vec::new();
         for payload in payloads {
-            entries.push(chain.append(&sha256(payload)));
+            entries.push(chain.append(cpu, &sha256(payload)));
         }
         (chain, entries)
     }
 
     #[test]
     fn fresh_chain_starts_at_genesis() {
-        let chain = LogChain::new(3);
-        assert_eq!(chain.cpu(), 3);
+        let chain = LogChain::new();
         assert_eq!(chain.next_seq(), 0);
         assert_eq!(chain.head_hash(), GENESIS_ANCHOR);
     }
@@ -322,13 +319,13 @@ mod tests {
     #[test]
     fn verify_accepts_an_honest_chain_and_returns_head() {
         let (chain, entries) = build(2, &[b"x", b"y", b"z"]);
-        let root = verify_fresh_chain(&entries, 2).expect("honest chain verifies");
+        let root = verify_fresh_chain(&entries).expect("honest chain verifies");
         assert_eq!(root, chain.head_hash());
     }
 
     #[test]
     fn verify_accepts_empty_chain() {
-        let root = verify_fresh_chain(&[], 0).expect("empty chain verifies");
+        let root = verify_fresh_chain(&[]).expect("empty chain verifies");
         assert_eq!(root, GENESIS_ANCHOR);
     }
 
@@ -337,7 +334,7 @@ mod tests {
         let (_, mut entries) = build(0, &[b"alpha", b"beta", b"gamma"]);
         entries[1].payload_digest = sha256(b"forged");
         assert_eq!(
-            verify_fresh_chain(&entries, 0),
+            verify_fresh_chain(&entries),
             Err(ChainError::HashMismatch { index: 1 })
         );
     }
@@ -349,7 +346,7 @@ mod tests {
         // Index 1 (formerly "three") now carries seq 2 where seq 1 is
         // expected, so the gap is caught before the link check.
         assert_eq!(
-            verify_fresh_chain(&entries, 0),
+            verify_fresh_chain(&entries),
             Err(ChainError::SequenceGap { index: 1 })
         );
     }
@@ -360,7 +357,7 @@ mod tests {
         entries.swap(0, 1);
         // The first slot now has seq 1 where seq 0 is expected.
         assert_eq!(
-            verify_fresh_chain(&entries, 0),
+            verify_fresh_chain(&entries),
             Err(ChainError::SequenceGap { index: 0 })
         );
     }
@@ -370,17 +367,20 @@ mod tests {
         let (_, mut entries) = build(0, &[b"only"]);
         entries[0].entry_hash = sha256(b"not the real hash");
         assert_eq!(
-            verify_fresh_chain(&entries, 0),
+            verify_fresh_chain(&entries),
             Err(ChainError::HashMismatch { index: 0 })
         );
     }
 
     #[test]
-    fn entry_from_another_cpu_is_rejected() {
-        let (_, entries) = build(7, &[b"p", b"q"]);
+    fn tampering_with_the_cpu_field_is_detected_as_a_hash_mismatch() {
+        // `cpu` is bound into the entry hash, so altering it after issuance
+        // fails self-consistency — no dedicated CPU check is needed.
+        let (_, mut entries) = build(7, &[b"p", b"q"]);
+        entries[0].cpu = 9;
         assert_eq!(
-            verify_fresh_chain(&entries, 9),
-            Err(ChainError::CpuMismatch { index: 0 })
+            verify_fresh_chain(&entries),
+            Err(ChainError::HashMismatch { index: 0 })
         );
     }
 
@@ -395,13 +395,13 @@ mod tests {
     fn resume_continues_an_existing_chain() {
         let (first, entries_a) = build(4, &[b"first", b"second"]);
 
-        let mut resumed = LogChain::resume(4, first.next_seq(), first.head_hash());
-        let cont = resumed.append(&sha256(b"third"));
+        let mut resumed = LogChain::resume(first.next_seq(), first.head_hash());
+        let cont = resumed.append(4, &sha256(b"third"));
         assert_eq!(cont.seq, 2);
         assert_eq!(cont.prev_hash, entries_a[1].entry_hash);
 
         let full = [entries_a[0], entries_a[1], cont];
-        let root = verify_fresh_chain(&full, 4).expect("resumed chain verifies");
+        let root = verify_fresh_chain(&full).expect("resumed chain verifies");
         assert_eq!(root, resumed.head_hash());
     }
 
@@ -409,7 +409,7 @@ mod tests {
     fn verify_chain_can_start_from_a_persisted_midpoint() {
         let (chain, entries) = build(5, &[b"a", b"b", b"c", b"d"]);
         // Verify only the tail, given the state captured after entry 1.
-        let root = verify_chain(&entries[2..], 5, entries[2].seq, &entries[1].entry_hash)
+        let root = verify_chain(&entries[2..], entries[2].seq, &entries[1].entry_hash)
             .expect("tail verifies against the captured midpoint");
         assert_eq!(root, chain.head_hash());
     }
@@ -430,7 +430,7 @@ mod tests {
         assert!(foreign[1].is_self_consistent());
         assert_eq!(foreign[1].seq, 1);
         assert_eq!(
-            verify_fresh_chain(&spliced, 0),
+            verify_fresh_chain(&spliced),
             Err(ChainError::BrokenLink { index: 1 })
         );
     }
@@ -447,7 +447,7 @@ mod tests {
         let signed_anchor = chain.head_hash();
 
         let truncated = &entries[..2];
-        let root = verify_fresh_chain(truncated, 2).expect("truncated slice is self-consistent");
+        let root = verify_fresh_chain(truncated).expect("truncated slice is self-consistent");
         // Self-consistent in isolation, yet detectably short: the root
         // disagrees with the separately-signed anchor.
         assert_ne!(root, signed_anchor);

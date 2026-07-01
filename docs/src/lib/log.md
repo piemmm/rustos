@@ -35,21 +35,40 @@ The `chain` module provides the cryptographic backbone for the
 append-only security log under `/System/Logs` (`AGENTS.md` §19.4). See
 [Audit-log integrity](../security/audit_log.md) for the full model.
 
-* `LogChain` — one per CPU; `append(payload_digest)` issues a
-  `ChainedEntry` binding the previous entry's hash, a monotonic per-CPU
-  sequence number, the CPU id, and the caller-supplied payload digest.
-  The append path hashes a single fixed-size stack buffer and never
-  allocates.
+* `LogChain` — one per stream; `append(cpu, payload_digest)` issues a
+  `ChainedEntry` binding the previous entry's hash, a monotonic append
+  sequence number, the record's originating CPU id (bound as evidence),
+  and the caller-supplied payload digest. The append path hashes a single
+  fixed-size stack buffer and never allocates.
 * `ChainedEntry` — a self-describing record; `recompute_hash` /
   `is_self_consistent` re-derive its hash so a verifier never trusts a
   stored hash it did not recompute.
 * `verify_chain` / `verify_fresh_chain` — walk a slice of entries,
   reporting the first `ChainError` (`HashMismatch`, `BrokenLink`,
-  `SequenceGap`, `CpuMismatch`) and otherwise returning the chain root.
+  `SequenceGap`) and otherwise returning the chain root. A tampered `cpu`
+  is caught as `HashMismatch`, since it is bound into each entry's hash.
 
 The module is payload-format agnostic: the persisted-log writer reduces
 each serialized record to a `rustos-crypto` SHA-256 digest, so this
 crate pulls in no payload codec and stays allocation-free.
+
+## Streams and on-disk segments
+
+* `Stream` — the closed set of log streams (`boot`, `runtime`, `debug`,
+  `security`, `audit`, `journal`). The discriminant is a stable on-disk
+  value; `genesis_label` feeds `stream_genesis`, and audit/security
+  streams `requires_seal`.
+* `segment` — the append-only on-disk container for one stream: a
+  self-checksummed `SegmentHeader`, length-framed records each carrying
+  their `LogChain` link hash, and a `SegmentFooter` with the record /
+  sequence / time bounds, the segment hash, an optional seal MAC
+  (mandatory for audit/security), and a footer checksum. `SegmentWriter`
+  builds one into a caller buffer; `SegmentReader` is a forward-scanning,
+  self-verifying reader that recovers to the last complete chain-valid
+  record after a torn write; `verify_segment` fully checks a closed
+  segment and returns a `SegmentSummary`. The container is
+  payload-agnostic (record bytes are opaque) and every hash is over a
+  contiguous byte range, so no streaming hash is needed.
 
 ## Typed-field value model (`field`)
 

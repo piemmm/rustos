@@ -2785,7 +2785,11 @@ Landed (done):
   `EnterUser` HAL primitive (riscv64 `sret`, aarch64 EL0 `eret`, x86_64 `iretq`).
 - §19.3 supply chain — `cargo xtask sbom` (deterministic CycloneDX, unsigned)
   + `cargo xtask supply-chain` (source-hash allow-list + advisory SLA), in `ci`.
-- §19.4 audit log — no-alloc SHA-256 hash-chain core in `lib/log` (`chain.rs`).
+- §19.4 audit log — SHA-256 hash-chain core (`lib/log` `chain.rs`, per-stream)
+  + the on-disk segment container (`lib/log` `segment.rs`: self-checksummed
+  header, chained records, optionally-sealed footer, forward-scan recovery) +
+  the closed `Stream` set. The userland journal service + anchors are SYSLOG
+  proper (see `.junie/SYSLOG.md`).
 - §19.6 fuzzing — `cargo xtask fuzz` over all in-tree harnesses (`--quick`/
   `--soak`), fail-closed.
 - §19.7 verified core — Bronze proptest models for `lib/caps`/`kernel/sec`/

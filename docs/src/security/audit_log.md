@@ -18,7 +18,7 @@ final bytes.
 
 ## Hash chain
 
-Each CPU owns one `LogChain`. Appending a record produces a
+Each log stream owns one `LogChain`. Appending a record produces a
 `ChainedEntry` whose `entry_hash` is
 
 ```
@@ -27,12 +27,14 @@ SHA-256( prev_hash(32) || seq(8, LE) || cpu(4, LE) || payload_digest(32) )
 
 where:
 
-* `prev_hash` is the `entry_hash` of the previous entry on that CPU's
-  chain, or the all-zero `GENESIS_ANCHOR` for the first entry;
-* `seq` is a strictly monotonic, contiguous per-CPU sequence number
+* `prev_hash` is the `entry_hash` of the previous entry in the stream, or
+  the stream genesis (the all-zero `GENESIS_ANCHOR` for a plain fresh
+  chain) for the first entry;
+* `seq` is a strictly monotonic, contiguous append sequence number
   starting at `0`;
-* `cpu` is the issuing CPU id (a chain is per-CPU, matching the §19.4
-  "monotonic per-CPU sequence number" requirement);
+* `cpu` is the record's originating CPU id, bound into the hash as
+  evidence (the per-CPU sequence the §19.4 model refers to is a separate
+  record field, not this chain);
 * `payload_digest` is the SHA-256 digest of the serialized record bytes,
   computed by the caller.
 
@@ -55,11 +57,10 @@ return the first inconsistency as a `ChainError`:
 | `HashMismatch`  | An entry's stored hash does not match its recomputed contents. |
 | `BrokenLink`    | An entry's `prev_hash` does not match its predecessor.         |
 | `SequenceGap`   | Sequence numbers are not contiguous (drop or duplicate).       |
-| `CpuMismatch`   | An entry belongs to a different CPU than the chain.            |
 
 On success the verifier returns the chain root — the head hash over every
 entry — which is the value a signed anchor attests to. `verify_chain`
-accepts an explicit `(cpu, start_seq, start_hash)`, so a verifier can
+accepts an explicit `(start_seq, start_hash)`, so a verifier can
 check only the tail of a chain against a previously captured midpoint
 (for example, the last signed anchor).
 
@@ -72,8 +73,11 @@ This module is the cryptographic core only. The following §19.4
 requirements build on it and are tracked in the `PLAN.md` "§19 Threat
 Model and Hardening Burn-down":
 
-* **Persistence.** Writing chained entries to `/System/Logs` depends on
-  the filesystem (Stage 5).
+* **Persistence.** The on-disk container is implemented: `rustos_log`'s
+  `segment` module frames chained records into self-verifying,
+  optionally-sealed segments (`SegmentWriter` / `SegmentReader` /
+  `verify_segment`). Wiring a userland journal service to write those
+  segments to `/System/Logs` is the remaining step.
 * **Signed anchors.** Periodically signing the chain root into
   `/System/Logs/Anchors/` depends on a private-key signing API from the
   Stage 2 capability authority (`rustos-crypto` today exposes
