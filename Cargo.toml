@@ -48,6 +48,7 @@ members = [
     "lib/font",
     "lib/fsmeta",
     "lib/geometry",
+    "lib/glob",
     "lib/hid",
     "lib/icon",
     "lib/input",

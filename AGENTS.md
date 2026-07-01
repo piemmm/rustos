@@ -548,6 +548,13 @@ rustos/
 │   │                    #   copy/archive tools share (§2.2; rustfs-spec §21).
 │   ├── geometry/        # Shared screen geometry (Point/Rect) + the desktop
 │   │                    #   DPI/UI Scale (logical->physical) (§10, §17.4).
+│   ├── glob/            # Shared filename-glob matcher: the one first-party
+│   │                    #   definition of shell wildcard patterns (*, ?, [...],
+│   │                    #   \\ escape) the shell's filename generation and
+│   │                    #   completion (and every other consumer) import, never
+│   │                    #   an in-shell matcher. no_std+alloc, fail-closed,
+│   │                    #   bounded, no catastrophic backtracking (§2.2, §2.9,
+│   │                    #   §24.4; plans/SHELL.md, .junie/PREREQUISITES2.md P6).
 │   ├── hid/             # Arch-neutral HID boot-protocol decode (keyboard +
 │   │                    #   mouse), the console-input producer, and the xHCI
 │   │                    #   boot-keyboard orchestration, shared by the in-kernel

@@ -146,6 +146,11 @@ pub const TARGETS: &[Target] = &[
         test: "fuzz_record",
         description: "lib/log logical-record decoder (untrusted /System/Logs record bytes)",
     },
+    Target {
+        package: "rustos-glob",
+        test: "fuzz_glob",
+        description: "lib/glob pattern compiler + match loop (untrusted glob-pattern bytes)",
+    },
 ];
 
 /// How long to run each harness.
@@ -553,6 +558,14 @@ mod tests {
         let chosen = selected(&opts).expect("known target");
         assert_eq!(chosen.len(), 1);
         assert_eq!(chosen[0].package, "rustos-curses");
+    }
+
+    #[test]
+    fn glob_matcher_harness_is_registered() {
+        let opts = parse(&argv(&["--target", "fuzz_glob"])).expect("flag parses");
+        let chosen = selected(&opts).expect("known target");
+        assert_eq!(chosen.len(), 1);
+        assert_eq!(chosen[0].package, "rustos-glob");
     }
 
     #[test]

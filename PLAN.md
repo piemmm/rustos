@@ -3248,6 +3248,26 @@ escape-sequence definition end to end (§2.2).
   consumer `userland/apps/top` (live process TUI over `lib/procinfo` +
   `lib/curses`).
 
+## SHELL prerequisites (`.junie/PREREQUISITES2.md`)
+
+Staged prerequisites the shell (`plans/SHELL.md`) depends on so it stays a pure
+interpreter reaching effects through injected seams, with no second parser or
+I/O vocabulary. See `.junie/PREREQUISITES2.md` for the full P0–P6 status.
+
+- P6 — glob/pattern matching as a shared library: **done.** `lib/glob`
+  (`rustos-glob`) is the one first-party filename-glob matcher (`*`, `?`,
+  `[...]` bracket expressions with ranges/negation, `\` escaping), so the
+  shell's filename generation and completion import it rather than embedding a
+  private matcher (§2.2). It is `no_std`+`alloc`, `#![forbid(unsafe_code)]`,
+  fail-closed on a malformed pattern, and matches with the backtracking-free
+  two-pointer algorithm; pattern length, token count, and bracket size are
+  fixed security bounds (§24.4). Scope decision: **glob, not a full regex
+  engine** — globs are what the shell expands and match in bounded time; a
+  regex dialect (with catastrophic backtracking) would be a separate engine if
+  a consumer ever needs one. Unit tests, rustdoc, and the `fuzz_glob` harness
+  ship with it. Remaining prerequisites (P2–P5) are tracked in
+  `.junie/PREREQUISITES2.md`.
+
 ## CCOMPAT — C-callable `abi-v1` (full `lib/abi` header, syscall stubs, crt0)
 
 Staged build plan: `plans/CCOMPAT.md` (binding). Makes the **whole** of

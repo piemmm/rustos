@@ -1,0 +1,19 @@
+[package]
+name = "rustos-glob"
+description = "RustOS shared filename-glob matcher: the one first-party definition of shell wildcard patterns (`*`, `?`, `[...]` bracket expressions, `\\` escaping) that the shell's filename generation and interactive completion, and every other consumer, import instead of embedding a private matcher. no_std + alloc, forbids unsafe, fail-closed on a malformed pattern, and matches in bounded time with no catastrophic backtracking (it is a matcher of untrusted patterns)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+# The in-tree fuzz harness draws its inputs through the shared seed/budget
+# seam: one place picks the per-run seed, logs it at the start of the test,
+# and bounds the smoke/soak loop. Test scaffolding only; never in a RustOS
+# build.
+rustos-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
