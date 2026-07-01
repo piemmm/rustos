@@ -68,6 +68,21 @@ reusing its own freed bytes is not a security boundary (`AGENTS.md` §2.16). The
 arena and metadata bases are fixed virtual addresses documented in
 `src/heap.rs`.
 
+## I/O abstraction (`io` module)
+
+`rustos_rt::io` is the ergonomic `std::io`-style layer a program programs
+against instead of hand-marshalling byte slices: one fd-generic `Read`/`Write`
+trait pair (with looping `read_exact`/`write_all`/`write_fmt`), the buffering
+built on them (`BufReader` with `read_line`/`read_until`/`lines`, `BufWriter`
+coalescing small writes), and the four well-known standard streams (`Stdin`,
+`Stdout`, `Stderr`, `StdInfo`) plus a non-owning `Stream` over any inherited
+descriptor. It is a pure layer over the existing `stream_read`/`stream_write`
+traps — no new syscall, capability, or `lib/abi` type — so the standard streams
+today and any file / pipe / tty / resource-reference fd a sibling subsystem
+later opens all share one I/O vocabulary (`AGENTS.md` §2.2). `StdInfo` (fd 3)
+writes are best-effort per `AGENTS.md` §20.1; every path is fail-closed, never a
+panic. See `docs/src/lib/rt-io.md` and `plans/IO.md`.
+
 ## Filesystem (`File`, `Dir`)
 
 `rustos-rt` exposes the userland filesystem surface (`PREREQUISITES.md` P-A):

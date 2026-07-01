@@ -54,6 +54,8 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
+extern crate alloc;
+
 use rustos_abi::input::KeyInput;
 use rustos_abi::waitset::{WaitSetOp, WaitSourceKind};
 use rustos_abi::{
@@ -67,6 +69,8 @@ use rustos_abi_trap::raw_syscall;
 mod start;
 
 mod startup;
+
+pub mod io;
 
 pub use startup::{arg, arg_count};
 
@@ -347,18 +351,40 @@ pub fn stdinfo(bytes: &[u8]) -> usize {
 /// clamped to `buf.len()` as defence in depth, so a buggy kernel count can
 /// never drive an out-of-bounds slice in the caller.
 #[must_use]
+pub fn stdin(buf: &mut [u8]) -> usize {
+    stream_read(STDIN, buf)
+}
+
+/// Read up to `buf.len()` bytes from the calling process's standard stream
+/// `fd` (`SyscallNumber::STREAM_READ`) into `buf`, returning the number of
+/// bytes read.
+///
+/// The shared core of [`stdin`] and the fd-generic [`io`] reader: the program
+/// names only an inherited descriptor, never a device, so the same code path
+/// serves fd 0 and any pipe / tty / resource-backed fd a spawner wired in. The
+/// kernel resolves `fd` against the caller's descriptor table and validates
+/// the `(buf, len)` pair against the caller's address space before writing it;
+/// the stream *backing* owns blocking, so a read with no pending input parks
+/// the caller until input arrives. A short read (fewer than `buf.len()`) is
+/// valid, so the caller loops for more.
+///
+/// The kernel encodes a failure as a negative register (`-errno`). A reader
+/// handed a `&mut [u8]` has no way to surface an `Errno`, and an unread stream
+/// is indistinguishable from end-of-input from the program's side, so a
+/// failure is reported as a zero-length read. The count is clamped to
+/// `buf.len()` as defence in depth, so a buggy kernel count can never drive an
+/// out-of-bounds slice in the caller.
 #[allow(clippy::cast_possible_truncation)] // usize == u64 on every native target; the clamped count never exceeds `buf.len()`.
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 stream-read encoding (count ≥ 0, else -errno).
 #[allow(clippy::cast_sign_loss)] // The negative (`-errno`) case returns early above; the cast runs only when `read >= 0`.
-pub fn stdin(buf: &mut [u8]) -> usize {
+fn stream_read(fd: u32, buf: &mut [u8]) -> usize {
     let len = buf.len() as u64;
     let ptr = buf.as_mut_ptr() as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
     // `(buf, len)` against the caller's address space before touching it. `buf` is a live exclusive `&mut [u8]` for the
     // duration of the call, so the `(ptr, len)` pair denotes writable
     // memory the kernel may fill.
-    let read =
-        unsafe { raw_syscall(NUM_STREAM_READ, [u64::from(STDIN), ptr, len, 0, 0, 0]) } as i64;
+    let read = unsafe { raw_syscall(NUM_STREAM_READ, [u64::from(fd), ptr, len, 0, 0, 0]) } as i64;
     if read < 0 {
         return 0;
     }

@@ -2481,33 +2481,30 @@ reflink independence, acorn preset round-trip).
 
 ### Stage 6 follow-up — Rust I/O abstraction (`plans/IO.md`)
 
-**Status: planned (not started).**
+**Status: in progress — the library (IO1–IO3) is landed; userland adoption
+(IO4) remains.**
 
-The §20 standard-stream floor is in place: every text program does I/O over
-inherited fd 0/1/2/3 through the thin `lib/rt` wrappers
-(`stdout`/`stderr`/`stdinfo`/`stdin`), never a device syscall. What is missing
-is the ergonomic *library* on top of those wrappers — the RustOS equivalent of
-a `std::io` surface (`Read`/`Write` traits, buffered reader/writer with line
-reading, and `write!`/`writeln!`-style formatting) — so shells, tools, and
-services program against an abstraction instead of re-implementing the same
-short-write loop and "read until newline" logic (which would be the
-duplication `AGENTS.md` §2.2 forbids). It is a pure layer over the existing
-`abi-v1` stream syscalls: it adds **no** ABI surface, **no** syscall, and
-**no** capability (`AGENTS.md` §5.4), and is `no_std` + fail-closed (§2.9). The
-`Read`/`Write` vocabulary is **fd-generic** — implemented on an owned stream
-descriptor so the four standard streams *and* any file / resource-reference /
-tty / pipe fd a sibling plan later opens (`plans/DRIVES.md`, `plans/ALIAS.md`,
-`plans/SHELL.md`) reuse the one definition (§2.2), with no second I/O surface.
-The layer itself constructs only the four inherited standard streams and never
-a device (§20): opening a *new* fd is a capability-checked operation owned by
-those sibling plans, never invented here. RustOS does
-**not** build a system-wide C `stdio` — the *System runtime / C ABI* class
-stays minimal and a third-party C program brings its own libc in its bundle
-(`AGENTS.md` §16.4, `plans/CCOMPAT.md`). Staged IO1 (traits + the fd-generic
-owned stream handle + the four standard streams) → IO2 (buffering) → IO3
-(formatting) → IO4 (adopt across userland and
-delete the hand-rolled loops, §2.14) in `plans/IO.md`, which is binding under
-`AGENTS.md`.
+The ergonomic `std::io`-equivalent library lives in `lib/rt/src/io.rs` (module
+`rustos_rt::io`): one fd-generic `Read`/`Write` trait pair with looping
+`read_exact`/`write_all`/`write_fmt`, buffering (`BufReader` with
+`read_until`/`read_line`/`lines`, `BufWriter` coalescing small writes over a
+const-generic inline buffer), and the four well-known standard streams
+(`Stdin`/`Stdout`/`Stderr`/`StdInfo`) plus a non-owning `Stream` over any
+inherited descriptor. It is a pure layer over the existing `abi-v1`
+`stream_read`/`stream_write` traps — **no** ABI surface, syscall, or capability
+(`AGENTS.md` §5.4) — `no_std` + fail-closed (§2.9). The standard streams and any
+file / resource-reference / tty / pipe fd a sibling plan later opens share this
+one definition (§2.2, proved by a test exercising a `Stream` over a non-standard
+fd through the identical trap path). `StdInfo` (fd 3) writes are best-effort
+(§20.1); opening a *new* fd stays a capability-checked operation owned by
+`plans/DRIVES.md` / `plans/ALIAS.md`, never invented here. Deliberately **no**
+owning/close-on-drop handle yet: `abi-v1` has no generic descriptor-close trap,
+so it would be a speculative interface (§2.4) — it lands with the
+descriptor-producing/closing ABI. RustOS builds **no** system-wide C `stdio`
+(§16.4, `plans/CCOMPAT.md`). **Remaining: IO4** — migrate the in-tree callers
+(`userland/shell/shell`, `userland/system/init`, `userland/apps/*`, `sysinfo`,
+services) onto `rustos_rt::io` and delete the hand-rolled byte-slice loops they
+replace (§2.14). See `plans/IO.md` (binding under `AGENTS.md`).
 
 ---
 

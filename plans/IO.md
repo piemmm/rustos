@@ -79,9 +79,21 @@ done items):
 - **DONE — `stdinfo` framing.** The `StdInfoRecord` JSONL model lives in
   `lib/abi` (`stdinfo.rs`, `AGENTS.md` §20.1). This layer carries the bytes; it
   does not redefine the record.
-- **NOT STARTED — this plan (IO1–IO4).** The `Read`/`Write` trait layer,
-  buffering, formatting, and userland adoption do not exist yet. `PLAN.md`
-  marks the I/O abstraction "planned (not started)".
+- **DONE — the library (IO1–IO3).** The `Read`/`Write` trait layer, the
+  fd-generic non-owning `Stream`, the four standard streams, buffering
+  (`BufReader`/`BufWriter`, `read_line`/`read_until`/`lines`), and formatting
+  (`write_fmt`) live in `lib/rt/src/io.rs` (module `rustos_rt::io`), with host
+  unit tests and rustdoc + `docs/src/lib/rt-io.md`.
+- **NOT STARTED — userland adoption (IO4).** Migrating the in-tree callers off
+  the hand-rolled byte-slice loops onto `rustos_rt::io` and deleting the loops
+  they replace is the remaining stage.
+- **DECIDED — no owning/close-on-drop handle yet.** IO1 deliberately ships a
+  *non-owning* `Stream` (a view of an fd the process already owns), not an
+  owning RAII closer: `abi-v1` has no generic descriptor-close trap (only the
+  filesystem's `File`, which closes via `fs_close`), so a close-on-drop handle
+  would be a speculative interface bound to a syscall that does not exist
+  (`AGENTS.md` §2.4). It lands with the descriptor-producing/closing ABI that
+  will own it (`plans/DRIVES.md` / `plans/ALIAS.md`).
 - **NOT STARTED, OWNED ELSEWHERE — the descriptor-*producing* ABI.** The
   syscall(s) that resolve a file path or a resource reference to a *new* fd, and
   the closed `sys:` stream-backing enum, are unimplemented and are owned by
@@ -192,33 +204,32 @@ which *is* a curated class — see `plans/CURSES.md`.)
 Each stage is one fully-gated landing (`AGENTS.md` §7 / §2.15): code + tests +
 rustdoc + the relevant `docs/` page, whole-project gate green.
 
-- **IO1 — `Read`/`Write` traits + the owned stream handle + the four standard
-  streams.**
-  Define the `Read` and `Write` traits (short-read/short-write loops handled
-  *inside* `write_all` / `read` helpers so callers stop re-implementing them),
-  an `Error`/`Result` that fails closed, the fd-generic `OwnedStream` handle
-  these traits are implemented on (a thin safe wrapper over a raw `fd` the
-  process already owns — RAII, no ambient open), and the well-known
-  zero-cost accessors `Stdin`/`Stdout`/`Stderr`/`StdInfo` (fd 0/1/2/3) whose
-  impls call the existing `lib/rt` wrappers. `stdinfo`'s `Write` honours §20.1
-  (best-effort, never an error on no consumer). Confirm the §2 placement
-  decision and record it in `AGENTS.md` §3 if a new crate is chosen. Tests:
-  short-write loop reaches full length, EOF/`read` semantics, `stdinfo` never
-  errors on no-consumer, and a `Read`/`Write` over a *non-standard* fd
-  (exercised with a pipe/test backing) uses the identical code path as the
-  standard streams (proves §2.2 — one vocabulary).
-  Docs: `docs/src/lib/rt-io.md` (or `docs/src/lib/io.md`) + the crate
-  `README.md` stability tier (`AGENTS.md` §6).
-- **IO2 — buffering.** `BufWriter` (coalesces small writes, explicit `flush`,
-  flush-on-drop best-effort) and `BufReader` with `read_line` / `lines` for the
-  REPL. Fixed-capacity buffers for the allocation-free path. Tests: buffer
-  fills/flushes at the boundary, partial-line reads accumulate, a write
-  spanning the buffer boundary is not torn.
-- **IO3 — formatting.** `write!` / `writeln!` support by implementing
-  `core::fmt::Write` on the buffered writer (and a `format_args!`-based helper),
-  so a tool emits formatted output without a per-call heap allocation. Tests:
-  formatted output matches expected bytes; a formatting `fmt::Error` surfaces
-  as the crate `Err`, never a panic.
+- **IO1 — `Read`/`Write` traits + the fd-generic stream handle + the four
+  standard streams. DONE.** The `Read`/`Write` traits handle the
+  short-read/short-write loops inside `read_exact` / `write_all`; the
+  `Error`/`Result` fails closed; the fd-generic **non-owning** `Stream` (see
+  the DECIDED note above — not an owning `OwnedStream`, pending a
+  descriptor-close trap) carries the shared read/write path; and the zero-cost
+  `Stdin`/`Stdout`/`Stderr`/`StdInfo` accessors delegate to the crate-private
+  `stream_read` / `stream_write` primitives (so `stdin` and the fd-generic
+  reader share one definition). `StdInfo`'s `Write` honours §20.1 (best-effort,
+  never a short write or error on no consumer). Placement decision confirmed: a
+  module inside `lib/rt` (`rustos_rt::io`), not a new crate. Tests cover the
+  short-write loop reaching full length, `read_exact`/EOF semantics, `stdinfo`
+  never stalling `write_all`, and a `Stream` over a non-standard fd taking the
+  identical trap path as `Stdout` (proves §2.2). Docs: `docs/src/lib/rt-io.md`
+  + the crate `README.md`.
+- **IO2 — buffering. DONE.** `BufWriter` (fixed-capacity inline array, coalesces
+  small writes, explicit `flush`, best-effort flush-on-drop, oversized write
+  passes through untorn) and `BufReader` (`read_until`/`read_line`/`lines` for
+  the REPL). Buffer capacity is a const generic (`CAP`), so the buffer itself
+  needs no heap allocation. Tests cover the overflow-flush boundary, partial
+  line accumulation across short reads, terminator stripping, and invalid-UTF-8
+  rejection.
+- **IO3 — formatting. DONE.** `write!` / `writeln!` via a `write_fmt` provided
+  method that renders through a `core::fmt::Write` adapter capturing the first
+  I/O error, so a `fmt::Error` surfaces as `Error::Fmt`, never a panic. Tests
+  cover formatted output bytes and the error path.
 - **IO4 — adopt across userland (delete the hand-rolled loops).** Migrate the
   in-tree callers (`userland/shell/shell`, `userland/system/init`,
   `userland/apps/*`, `sysinfo`, services) to the new surface and **delete** the
