@@ -24,6 +24,8 @@
 use rustos_abi::field::{decode_named_field, encode_named_field};
 use rustos_abi::{Errno, FieldName, FieldValue, Origin, WallClockReading, ORIGIN_WIRE_LEN};
 
+use crate::cursor::{put_bytes, put_u16, put_u64, put_u8, read_u16, read_u64, read_u8, take};
+use crate::dict::{DictionaryBuilder, DictionaryView};
 use crate::stream::Stream;
 use crate::Level;
 
@@ -114,22 +116,25 @@ pub struct LogRecord<'a> {
 }
 
 impl LogRecord<'_> {
-    /// Serialise this record body into `out`, returning the byte length
-    /// written. Every bound is checked; a record that violates one is rejected
-    /// whole (the caller discards `out` on error).
+    /// Serialise this record body into `out` against the segment `dict`,
+    /// returning the byte length written. Every bound is checked; a record
+    /// that violates one is rejected whole (the caller discards `out` on
+    /// error).
+    ///
+    /// `dict` is the writer-side [`DictionaryBuilder`] for the segment this
+    /// record is appended to. The system-derived source name and the caller's
+    /// component, tag, event id, requested source, and message are encoded
+    /// through it, so a string that repeats across the segment is stored once
+    /// and referenced thereafter. The records of one segment MUST be encoded
+    /// through the same builder, in append order, and decoded through the
+    /// matching [`DictionaryView`] in the same order.
     ///
     /// # Errors
     ///
     /// * [`Errno::LengthOutOfRange`] — a string, the field count, or an encoded
     ///   value exceeds its maximum.
     /// * [`Errno::BufferTooSmall`] — `out` cannot hold the encoded body.
-    pub fn encode(&self, out: &mut [u8]) -> Result<usize, Errno> {
-        if self.source_name.len() > SOURCE_NAME_MAX {
-            return Err(Errno::LengthOutOfRange);
-        }
-        if self.caller.message.len() > CALLER_MESSAGE_MAX {
-            return Err(Errno::LengthOutOfRange);
-        }
+    pub fn encode(&self, out: &mut [u8], dict: &mut DictionaryBuilder) -> Result<usize, Errno> {
         if self.data.len() > MAX_DATA_FIELDS {
             return Err(Errno::LengthOutOfRange);
         }
@@ -140,7 +145,7 @@ impl LogRecord<'_> {
         put_u64(out, &mut pos, self.cpu_seq)?;
         put_bytes(out, &mut pos, &self.wall.to_le_bytes())?;
         put_bytes(out, &mut pos, &self.origin.to_le_bytes())?;
-        put_str8(out, &mut pos, self.source_name, SOURCE_NAME_MAX)?;
+        dict.encode_str(out, &mut pos, self.source_name, SOURCE_NAME_MAX)?;
 
         let flags = self.caller_flags();
         put_u8(out, &mut pos, flags)?;
@@ -151,18 +156,18 @@ impl LogRecord<'_> {
             put_u8(out, &mut pos, stream.as_u8())?;
         }
         if let Some(component) = self.caller.component {
-            put_str8(out, &mut pos, component, CALLER_COMPONENT_MAX)?;
+            dict.encode_str(out, &mut pos, component, CALLER_COMPONENT_MAX)?;
         }
         if let Some(tag) = self.caller.tag {
-            put_str8(out, &mut pos, tag, CALLER_TAG_MAX)?;
+            dict.encode_str(out, &mut pos, tag, CALLER_TAG_MAX)?;
         }
         if let Some(event_id) = self.caller.event_id {
-            put_str8(out, &mut pos, event_id, CALLER_EVENT_ID_MAX)?;
+            dict.encode_str(out, &mut pos, event_id, CALLER_EVENT_ID_MAX)?;
         }
         if let Some(requested_source) = self.caller.requested_source {
-            put_str8(out, &mut pos, requested_source, CALLER_REQUESTED_SOURCE_MAX)?;
+            dict.encode_str(out, &mut pos, requested_source, CALLER_REQUESTED_SOURCE_MAX)?;
         }
-        put_str16(out, &mut pos, self.caller.message)?;
+        dict.encode_str(out, &mut pos, self.caller.message, CALLER_MESSAGE_MAX)?;
 
         // `self.data.len() <= MAX_DATA_FIELDS` (32) fits a `u8`.
         put_u8(
@@ -301,21 +306,31 @@ impl<'a> Iterator for DataFieldIter<'a> {
     }
 }
 
-/// Validate and decode a logical record body from `bytes`, fail-closed.
+/// Validate and decode a logical record body from `bytes` against the segment
+/// `dict`, fail-closed.
 ///
 /// Every length, discriminant, and UTF-8 constraint is checked, and the
 /// `data.*` fields must tile the remainder of `bytes` exactly. Any deviation
 /// is rejected whole.
 ///
+/// `dict` is the reader-side [`DictionaryView`] for the segment. It resolves
+/// this record's dictionary-coded strings against the definitions earlier
+/// records in the segment carried, so the records of one segment MUST be
+/// decoded through the same view, in append order.
+///
 /// # Errors
 ///
 /// * [`Errno::OutOfRange`] — an unsupported format version, an out-of-range
-///   level/stream/flags byte, or a non-UTF-8 string.
-/// * [`Errno::LengthOutOfRange`] — a declared length exceeds its maximum or the
-///   declared fields do not tile the body exactly.
+///   level/stream/flags byte, an unknown string form, or a non-UTF-8 string.
+/// * [`Errno::LengthOutOfRange`] — a declared length exceeds its maximum, a
+///   dictionary reference is undefined, or the declared fields do not tile the
+///   body exactly.
 /// * other [`Errno`] — the wall reading, origin, or a field value fails to
 ///   decode.
-pub fn decode(bytes: &[u8]) -> Result<LogRecordRef<'_>, Errno> {
+pub fn decode<'a>(
+    bytes: &'a [u8],
+    dict: &mut DictionaryView<'a>,
+) -> Result<LogRecordRef<'a>, Errno> {
     let mut pos = 0usize;
     if read_u16(bytes, &mut pos)? != RECORD_FORMAT_VERSION {
         return Err(Errno::OutOfRange);
@@ -324,7 +339,7 @@ pub fn decode(bytes: &[u8]) -> Result<LogRecordRef<'_>, Errno> {
     let cpu_seq = read_u64(bytes, &mut pos)?;
     let wall = WallClockReading::from_bytes(take(bytes, &mut pos, WallClockReading::WIRE_LEN)?)?;
     let origin = Origin::from_bytes(take(bytes, &mut pos, ORIGIN_WIRE_LEN)?)?;
-    let source_name = read_str8(bytes, &mut pos, SOURCE_NAME_MAX)?;
+    let source_name = dict.decode_str(bytes, &mut pos, SOURCE_NAME_MAX)?;
 
     let flags = read_u8(bytes, &mut pos)?;
     if flags & !ALL_CALLER_FLAGS != 0 {
@@ -340,26 +355,27 @@ pub fn decode(bytes: &[u8]) -> Result<LogRecordRef<'_>, Errno> {
     } else {
         None
     };
-    let component = read_opt_str8(
-        bytes,
-        &mut pos,
-        flags & FLAG_COMPONENT != 0,
-        CALLER_COMPONENT_MAX,
-    )?;
-    let tag = read_opt_str8(bytes, &mut pos, flags & FLAG_TAG != 0, CALLER_TAG_MAX)?;
-    let event_id = read_opt_str8(
-        bytes,
-        &mut pos,
-        flags & FLAG_EVENT_ID != 0,
-        CALLER_EVENT_ID_MAX,
-    )?;
-    let requested_source = read_opt_str8(
-        bytes,
-        &mut pos,
-        flags & FLAG_REQUESTED_SOURCE != 0,
-        CALLER_REQUESTED_SOURCE_MAX,
-    )?;
-    let message = read_str16(bytes, &mut pos, CALLER_MESSAGE_MAX)?;
+    let component = if flags & FLAG_COMPONENT != 0 {
+        Some(dict.decode_str(bytes, &mut pos, CALLER_COMPONENT_MAX)?)
+    } else {
+        None
+    };
+    let tag = if flags & FLAG_TAG != 0 {
+        Some(dict.decode_str(bytes, &mut pos, CALLER_TAG_MAX)?)
+    } else {
+        None
+    };
+    let event_id = if flags & FLAG_EVENT_ID != 0 {
+        Some(dict.decode_str(bytes, &mut pos, CALLER_EVENT_ID_MAX)?)
+    } else {
+        None
+    };
+    let requested_source = if flags & FLAG_REQUESTED_SOURCE != 0 {
+        Some(dict.decode_str(bytes, &mut pos, CALLER_REQUESTED_SOURCE_MAX)?)
+    } else {
+        None
+    };
+    let message = dict.decode_str(bytes, &mut pos, CALLER_MESSAGE_MAX)?;
 
     let data_count = read_u8(bytes, &mut pos)? as usize;
     if data_count > MAX_DATA_FIELDS {
@@ -410,123 +426,32 @@ const ALL_CALLER_FLAGS: u8 = FLAG_LEVEL
     | FLAG_REQUESTED_SOURCE
     | FLAG_REQUESTED_STREAM;
 
-// --- Little-endian body cursor helpers (fail-closed, no allocation). ---
-
-fn put_bytes(out: &mut [u8], pos: &mut usize, src: &[u8]) -> Result<(), Errno> {
-    let end = pos.checked_add(src.len()).ok_or(Errno::BufferTooSmall)?;
-    if end > out.len() {
-        return Err(Errno::BufferTooSmall);
-    }
-    out[*pos..end].copy_from_slice(src);
-    *pos = end;
-    Ok(())
-}
-
-fn put_u8(out: &mut [u8], pos: &mut usize, v: u8) -> Result<(), Errno> {
-    put_bytes(out, pos, &[v])
-}
-
-fn put_u16(out: &mut [u8], pos: &mut usize, v: u16) -> Result<(), Errno> {
-    put_bytes(out, pos, &v.to_le_bytes())
-}
-
-fn put_u64(out: &mut [u8], pos: &mut usize, v: u64) -> Result<(), Errno> {
-    put_bytes(out, pos, &v.to_le_bytes())
-}
-
-// A `u8`-length-prefixed string, bounded by `max` (which must be `<= 255`).
-fn put_str8(out: &mut [u8], pos: &mut usize, s: &str, max: usize) -> Result<(), Errno> {
-    if s.len() > max {
-        return Err(Errno::LengthOutOfRange);
-    }
-    put_u8(
-        out,
-        pos,
-        u8::try_from(s.len()).map_err(|_| Errno::LengthOutOfRange)?,
-    )?;
-    put_bytes(out, pos, s.as_bytes())
-}
-
-// A `u16`-length-prefixed string, bounded by [`CALLER_MESSAGE_MAX`].
-fn put_str16(out: &mut [u8], pos: &mut usize, s: &str) -> Result<(), Errno> {
-    if s.len() > CALLER_MESSAGE_MAX {
-        return Err(Errno::LengthOutOfRange);
-    }
-    put_u16(
-        out,
-        pos,
-        u16::try_from(s.len()).map_err(|_| Errno::LengthOutOfRange)?,
-    )?;
-    put_bytes(out, pos, s.as_bytes())
-}
-
-fn take<'a>(bytes: &'a [u8], pos: &mut usize, n: usize) -> Result<&'a [u8], Errno> {
-    let end = pos.checked_add(n).ok_or(Errno::LengthOutOfRange)?;
-    let slice = bytes.get(*pos..end).ok_or(Errno::LengthOutOfRange)?;
-    *pos = end;
-    Ok(slice)
-}
-
-fn read_u8(bytes: &[u8], pos: &mut usize) -> Result<u8, Errno> {
-    Ok(take(bytes, pos, 1)?[0])
-}
-
-fn read_u16(bytes: &[u8], pos: &mut usize) -> Result<u16, Errno> {
-    let s = take(bytes, pos, 2)?;
-    Ok(u16::from_le_bytes([s[0], s[1]]))
-}
-
-fn read_u64(bytes: &[u8], pos: &mut usize) -> Result<u64, Errno> {
-    let s = take(bytes, pos, 8)?;
-    let mut a = [0u8; 8];
-    a.copy_from_slice(s);
-    Ok(u64::from_le_bytes(a))
-}
-
-fn read_str8<'a>(bytes: &'a [u8], pos: &mut usize, max: usize) -> Result<&'a str, Errno> {
-    let len = read_u8(bytes, pos)? as usize;
-    if len > max {
-        return Err(Errno::LengthOutOfRange);
-    }
-    core::str::from_utf8(take(bytes, pos, len)?).map_err(|_| Errno::OutOfRange)
-}
-
-fn read_str16<'a>(bytes: &'a [u8], pos: &mut usize, max: usize) -> Result<&'a str, Errno> {
-    let len = read_u16(bytes, pos)? as usize;
-    if len > max {
-        return Err(Errno::LengthOutOfRange);
-    }
-    core::str::from_utf8(take(bytes, pos, len)?).map_err(|_| Errno::OutOfRange)
-}
-
-fn read_opt_str8<'a>(
-    bytes: &'a [u8],
-    pos: &mut usize,
-    present: bool,
-    max: usize,
-) -> Result<Option<&'a str>, Errno> {
-    if present {
-        Ok(Some(read_str8(bytes, pos, max)?))
-    } else {
-        Ok(None)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        decode, CallerContent, LogRecord, ALL_CALLER_FLAGS, CALLER_MESSAGE_MAX, MAX_DATA_FIELDS,
-        SOURCE_NAME_MAX,
+        decode, CallerContent, LogRecord, LogRecordRef, ALL_CALLER_FLAGS, CALLER_MESSAGE_MAX,
+        MAX_DATA_FIELDS, SOURCE_NAME_MAX,
     };
+    use crate::dict::{DictionaryBuilder, DictionaryView};
     use crate::stream::Stream;
     use crate::Level;
     use rustos_abi::{
-        CapabilitySummary, FieldName, FieldValue, Origin, ProcId, TrustDomain, WallClockReading,
-        WallTimeState,
+        CapabilitySummary, Errno, FieldName, FieldValue, Origin, ProcId, TrustDomain,
+        WallClockReading, WallTimeState,
     };
 
     // A generous fixed scratch buffer; the largest record we build fits.
     const BUF: usize = 4096;
+
+    // A standalone record is encoded/decoded through a fresh single-segment
+    // dictionary; the record layer never touches one without a segment context.
+    fn enc(record: &LogRecord<'_>, buf: &mut [u8]) -> Result<usize, Errno> {
+        record.encode(buf, &mut DictionaryBuilder::new())
+    }
+
+    fn dec(bytes: &[u8]) -> Result<LogRecordRef<'_>, Errno> {
+        decode(bytes, &mut DictionaryView::new())
+    }
 
     fn sample_origin() -> Origin {
         Origin::new(
@@ -577,8 +502,8 @@ mod tests {
             data: &data,
         };
         let mut buf = [0u8; BUF];
-        let len = record.encode(&mut buf).expect("encodes");
-        let view = decode(&buf[..len]).expect("decodes");
+        let len = enc(&record, &mut buf).expect("encodes");
+        let view = dec(&buf[..len]).expect("decodes");
 
         assert_eq!(view.effective_level(), Level::Warn);
         assert_eq!(view.cpu_seq(), 12345);
@@ -627,8 +552,8 @@ mod tests {
             data: &[],
         };
         let mut buf = [0u8; BUF];
-        let len = record.encode(&mut buf).expect("encodes");
-        let view = decode(&buf[..len]).expect("decodes");
+        let len = enc(&record, &mut buf).expect("encodes");
+        let view = dec(&buf[..len]).expect("decodes");
         assert_eq!(view.caller().message, "started");
         assert_eq!(view.caller().level, None);
         assert_eq!(view.caller().requested_stream, None);
@@ -664,7 +589,7 @@ mod tests {
         let mut record = base_record();
         record.source_name = s;
         let mut buf = [0u8; BUF];
-        assert!(record.encode(&mut buf).is_err());
+        assert!(enc(&record, &mut buf).is_err());
     }
 
     #[test]
@@ -674,7 +599,7 @@ mod tests {
         let mut record = base_record();
         record.caller.message = s;
         let mut buf = [0u8; BUF];
-        assert!(record.encode(&mut buf).is_err());
+        assert!(enc(&record, &mut buf).is_err());
     }
 
     #[test]
@@ -685,61 +610,62 @@ mod tests {
         let mut record = base_record();
         record.data = &big;
         let mut buf = [0u8; BUF];
-        assert!(record.encode(&mut buf).is_err());
+        assert!(enc(&record, &mut buf).is_err());
     }
 
     #[test]
     fn encode_into_short_buffer_fails_closed() {
         let record = base_record();
         let mut small = [0u8; 4];
-        assert!(record.encode(&mut small).is_err());
+        assert!(enc(&record, &mut small).is_err());
     }
 
     #[test]
     fn decode_rejects_a_bad_format_version() {
         let record = base_record();
         let mut buf = [0u8; BUF];
-        let len = record.encode(&mut buf).unwrap();
+        let len = enc(&record, &mut buf).unwrap();
         buf[0] = 0xFF; // corrupt the version's low byte
-        assert!(decode(&buf[..len]).is_err());
+        assert!(dec(&buf[..len]).is_err());
     }
 
     #[test]
     fn decode_rejects_unknown_caller_flags() {
         let record = base_record();
         let mut buf = [0u8; BUF];
-        let len = record.encode(&mut buf).unwrap();
+        let len = enc(&record, &mut buf).unwrap();
         // The flags byte sits right after version(2) + level(1) + cpu_seq(8) +
-        // wall + origin + source(1 len + "kernel.core").
+        // wall + origin + source (dict-coded: form(1) + u16 len(2) + bytes).
         let flags_off = 2
             + 1
             + 8
             + WallClockReading::WIRE_LEN
             + rustos_abi::ORIGIN_WIRE_LEN
             + 1
+            + 2
             + "kernel.core".len();
         assert_eq!(buf[flags_off], 0, "base record has no caller flags set");
         buf[flags_off] = ALL_CALLER_FLAGS | 0x80; // a bit outside the defined set
-        assert!(decode(&buf[..len]).is_err());
+        assert!(dec(&buf[..len]).is_err());
     }
 
     #[test]
     fn decode_rejects_trailing_bytes() {
         let record = base_record();
         let mut buf = [0u8; BUF];
-        let len = record.encode(&mut buf).unwrap();
+        let len = enc(&record, &mut buf).unwrap();
         // One extra byte past the declared (zero) data fields must not tile.
-        assert!(decode(&buf[..=len]).is_err());
+        assert!(dec(&buf[..=len]).is_err());
     }
 
     #[test]
     fn decode_rejects_truncated_body() {
         let record = base_record();
         let mut buf = [0u8; BUF];
-        let len = record.encode(&mut buf).unwrap();
+        let len = enc(&record, &mut buf).unwrap();
         for cut in 0..len {
             assert!(
-                decode(&buf[..cut]).is_err(),
+                dec(&buf[..cut]).is_err(),
                 "a truncated body must be rejected (cut = {cut})"
             );
         }

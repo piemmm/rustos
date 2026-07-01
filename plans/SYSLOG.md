@@ -488,10 +488,17 @@ A segment is append-only. It contains:
 
 ```text
 SegmentHeader
-DictionaryBlock...
 Record...
 SegmentFooter
 ```
+
+The segment-local string dictionary (§6.2) is **not** a separate block. It is
+carried inside the records by back-reference: the first record to use a
+repeated string carries it inline and defines a segment-local handle, and later
+records reference the handle. The dictionary is therefore reconstructed by
+reading the records in order and needs no block, offset table, or digest of its
+own — it is already covered by the record hash chain and the segment hash that
+protect those record bytes.
 
 The header contains:
 
@@ -510,7 +517,6 @@ The footer contains:
 - record count;
 - first and last append sequence;
 - first and last monotonic time;
-- final dictionary digest;
 - last record hash;
 - segment hash;
 - previous segment hash;
@@ -522,25 +528,31 @@ checksum-valid committed record.
 
 ### 6.2 Segment-local dictionaries
 
-The physical format MAY encode repeated strings with segment-local dictionaries.
-This is the preferred way to keep logs compact without requiring registration.
+The physical format encodes repeated strings with a segment-local dictionary,
+so a stream of records from `kernel.mem` stores that source name once and
+references it thereafter — compact without any registration.
 
-Dictionary-compressed values include:
+The dictionary is a **back-reference** codec, not a stored table. Each
+dictionary-eligible string is coded as one of three forms: inline-and-forgotten
+(`plain`), inline-and-defines-the-next-handle (`def`), or a reference to an
+earlier definition (`ref`). Because a handle only ever names a string an
+earlier record already carried inline, the writer and reader assign handles in
+lockstep by walking the segment's strings in the same field-and-record order;
+no handle number is stored on the definition, and there is no dictionary block
+or dictionary digest to keep in sync.
 
-- source names;
-- component labels;
-- tags;
-- message strings;
-- event IDs;
-- field names;
-- enum-like field values.
+The strings compressed this way are the low-cardinality provenance and summary
+strings — the system-derived source name and the caller's component, tag, event
+id, requested source, and message. High-cardinality caller `data.*` names and
+values are left inline (§6.3): they rarely repeat and would only churn the
+handle space.
 
 Dictionary handles are private to one segment. They are not public source IDs,
 field IDs, or event IDs. A handle in one segment has no meaning in another.
 
-Search tools resolve query strings against each segment dictionary and MAY use
-segment summaries, hashes, and bloom filters to skip segments that cannot
-match.
+Search tools reconstruct a segment's dictionary by reading its records in order
+and MAY use segment summaries, hashes, and bloom filters to skip segments that
+cannot match.
 
 ### 6.3 High-cardinality strings
 
@@ -868,7 +880,9 @@ or preventing secret logging is preferred to storing a transformed secret.
 - per-CPU sequence monotonicity;
 - stream/source authority consistency;
 - unexpected truncation;
-- dictionary integrity.
+- dictionary resolution (every reference resolves to an in-segment definition;
+  covered by the record chain and segment hash, so it needs no separate
+  dictionary digest).
 
 Verification results are records in the `journal` stream when the journal is
 writable. A verification failure is a security event.

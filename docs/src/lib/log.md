@@ -85,17 +85,53 @@ container-owned field.
   `WallClockReading` (wall time + trust state), the kernel-attested `Origin`,
   the system-derived `source_name`, the `CallerContent`, and the flat set of
   `data.*` `(FieldName, FieldValue)` pairs. `encode` writes a compact
-  little-endian body, checking every bound and rejecting a violating record
-  whole.
+  little-endian body against the segment's `DictionaryBuilder` (below),
+  checking every bound and rejecting a violating record whole.
 * `CallerContent` — the caller-supplied portion the journal stores faithfully
   but never treats as authority: the optional caller `level`, `component`,
   `tag`, `event_id`, `requested_source`, and `requested_stream`, plus the
   required `message`.
 * `decode` / `LogRecordRef` — a fail-closed decoder returning a validated
-  borrowed view. Every length, discriminant, and UTF-8 constraint is checked,
-  each `data.*` key is re-validated against the `FieldName` grammar, and the
-  fields must tile the body exactly (no trailing bytes). `DataFieldIter` walks
-  the validated `data.*` pairs.
+  borrowed view, resolving the record's dictionary-coded strings through the
+  segment's `DictionaryView` (below). Every length, discriminant, and UTF-8
+  constraint is checked, each `data.*` key is re-validated against the
+  `FieldName` grammar, and the fields must tile the body exactly (no trailing
+  bytes). `DataFieldIter` walks the validated `data.*` pairs.
+
+## Segment-local string dictionary (`dict`)
+
+Provenance and message strings repeat heavily within a stream, so `record`
+encodes its low-cardinality strings — the system-derived `source_name` and the
+caller's `component`, `tag`, `event_id`, `requested_source`, and `message` —
+through a per-segment dictionary that stores a repeated string once and
+references it thereafter (`plans/SYSLOG.md` §6.2/§6.3). High-cardinality
+`data.*` names and values stay inline by policy.
+
+The dictionary is a **back-reference** codec, not a stored table: each string
+is coded as inline-and-forgotten, inline-and-defines-the-next-handle, or a
+reference to an earlier definition. The writer and reader assign handles in
+lockstep by walking a segment's strings in the same field-and-record order, so
+no handle number is stored on a definition and there is no dictionary block or
+digest to keep in sync — the strings are already covered by the record hash
+chain and segment hash.
+
+* `DictionaryBuilder` — the writer-side dictionary for one segment. It decides
+  inline vs. promote vs. reference and enforces bounded growth: a string is
+  promoted to a handle only on its **second** sighting (a unique string is
+  never remembered), the entry and candidate tables are fixed-capacity
+  (`MAX_ENTRIES` / `MAX_CANDIDATES`) over a fixed byte arena (`ARENA_BYTES`),
+  and a string longer than `MAX_DICT_STRING` is never interned. Once full,
+  further strings simply stay inline, so a flood of unique short strings cannot
+  exhaust it.
+* `DictionaryView` — the reader-side dictionary. It accumulates the strings
+  definitions carry (borrowed from the segment bytes) and resolves references
+  against them, fail-closed: a definition past `MAX_ENTRIES` or a reference to
+  an undefined handle is rejected.
+
+The records of one segment are encoded through one builder, and decoded through
+one view, in append order. The advancing byte cursors that `record` and `dict`
+share live once in an internal `cursor` module (one definition), distinct from
+`rustos_abi`'s offset-indexed `le` helpers for fixed-`WIRE_LEN` structs.
 
 The body reuses the shared building blocks — `FieldValue`/`FieldName`,
 `Origin`, `WallClockReading`, `Stream`, `Level`, and the shared named-field

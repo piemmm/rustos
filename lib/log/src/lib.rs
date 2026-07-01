@@ -26,6 +26,8 @@
 pub mod attest;
 pub mod authority;
 pub mod chain;
+mod cursor;
+pub mod dict;
 pub mod record;
 pub mod segment;
 pub mod stream;
@@ -44,6 +46,9 @@ pub use authority::{
 };
 pub use chain::{
     verify_chain, verify_fresh_chain, ChainError, ChainedEntry, LogChain, GENESIS_ANCHOR,
+};
+pub use dict::{
+    DictionaryBuilder, DictionaryView, ARENA_BYTES, MAX_CANDIDATES, MAX_DICT_STRING, MAX_ENTRIES,
 };
 pub use record::{
     decode as decode_record, CallerContent, DataFieldIter, LogRecord, LogRecordRef,

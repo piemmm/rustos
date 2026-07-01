@@ -147,6 +147,12 @@ pub const TARGETS: &[Target] = &[
         description: "lib/log logical-record decoder (untrusted /System/Logs record bytes)",
     },
     Target {
+        package: "rustos-log",
+        test: "fuzz_dict",
+        description:
+            "lib/log segment string-dictionary codec (untrusted /System/Logs dictionary bytes)",
+    },
+    Target {
         package: "rustos-glob",
         test: "fuzz_glob",
         description: "lib/glob pattern compiler + match loop (untrusted glob-pattern bytes)",

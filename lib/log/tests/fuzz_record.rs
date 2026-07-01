@@ -17,7 +17,9 @@ use rustos_abi::{
     CapabilitySummary, Duration64, FieldName, FieldValue, Origin, ProcId, Time64, TrustDomain,
     WallClockReading, WallTimeState,
 };
-use rustos_log::{decode_record, CallerContent, Level, LogRecord, Stream};
+use rustos_log::{
+    decode_record, CallerContent, DictionaryBuilder, DictionaryView, Level, LogRecord, Stream,
+};
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 50_000;
@@ -60,12 +62,15 @@ fn base_record(buf: &mut [u8]) -> usize {
         },
         data: &data,
     };
-    record.encode(buf).expect("base record encodes")
+    record
+        .encode(buf, &mut DictionaryBuilder::new())
+        .expect("base record encodes")
 }
 
 /// Drive the record decoder; the contract is "must not panic".
 fn exercise(bytes: &[u8]) {
-    if let Ok(view) = decode_record(bytes) {
+    let mut dict = DictionaryView::new();
+    if let Ok(view) = decode_record(bytes, &mut dict) {
         let mut count = 0usize;
         for (name, _value) in view.data() {
             // A validated field name is never empty and within the grammar.
