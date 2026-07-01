@@ -39,6 +39,78 @@ use crate::identity::{format_hex_u64, format_i32, UserId};
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct TaskId(pub u64);
 
+/// Maximum length, in bytes, of a kernel-attested process name.
+///
+/// Reuses the one process-name bound `rustos_abi` already defines for the
+/// System Information process record, so the attested audit name and any
+/// reported process name can never disagree on length — a single definition.
+pub const PROC_NAME_MAX: usize = rustos_abi::sysinfo::PROCESS_NAME_MAX;
+
+/// A kernel-attested, bounded process name.
+///
+/// Set kernel-side at process admission from trusted state — the resolved
+/// executable path, or a fixed name for the kernel's own principals — and
+/// never from caller-supplied bytes, so an audit consumer may trust it to
+/// name the acting process. Stored inline (no allocation) so it can be read
+/// on the audit path, and it holds only a valid-UTF-8 prefix so
+/// [`as_str`](Self::as_str) is total.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProcName {
+    buf: [u8; PROC_NAME_MAX],
+    len: usize,
+}
+
+impl ProcName {
+    /// The empty name — the default for a record whose admit path attested
+    /// none (kernel threads, in-kernel binder / device-host records).
+    pub const EMPTY: Self = Self {
+        buf: [0u8; PROC_NAME_MAX],
+        len: 0,
+    };
+
+    /// Build a name from `bytes`, keeping the largest valid-UTF-8 prefix that
+    /// fits in [`PROC_NAME_MAX`].
+    ///
+    /// A process name is display/attribution metadata, not a security
+    /// decision, so an over-long or non-UTF-8-boundary input is bounded to
+    /// its largest valid prefix rather than rejected — never storing invalid
+    /// UTF-8 (so [`as_str`](Self::as_str) is total) and never storing a
+    /// caller-trusted value (the sole callers pass kernel-resolved bytes).
+    #[must_use]
+    pub fn from_bytes_truncating(bytes: &[u8]) -> Self {
+        let capped = if bytes.len() > PROC_NAME_MAX {
+            &bytes[..PROC_NAME_MAX]
+        } else {
+            bytes
+        };
+        let valid = match core::str::from_utf8(capped) {
+            Ok(s) => s.len(),
+            Err(e) => e.valid_up_to(),
+        };
+        let mut buf = [0u8; PROC_NAME_MAX];
+        buf[..valid].copy_from_slice(&capped[..valid]);
+        Self { buf, len: valid }
+    }
+
+    /// Borrow the name as a string; always valid UTF-8 by construction.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.buf[..self.len]).unwrap_or("")
+    }
+
+    /// `true` if no name was attested.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+impl Default for ProcName {
+    fn default() -> Self {
+        Self::EMPTY
+    }
+}
+
 /// Per-task capability state.
 ///
 /// The fields are private so callers cannot bypass the intersection
@@ -79,6 +151,13 @@ pub struct TaskCapabilities {
     /// from caller-supplied bytes, so a task cannot forge or influence its
     /// recorded parentage.
     parent_proc_id: ProcId,
+    /// Kernel-attested process name — the resolved executable's basename for
+    /// a spawned process, a fixed name for the kernel's own principals (PID 1,
+    /// the storage bootstrap-floor drivers). Defaults to [`ProcName::EMPTY`].
+    /// The process-admit paths set it through [`Self::with_name`] from
+    /// kernel-resolved state, never from caller-supplied bytes, so an audit
+    /// consumer may trust it to name the acting process.
+    name: ProcName,
 }
 
 impl TaskCapabilities {
@@ -130,6 +209,7 @@ impl TaskCapabilities {
             effective,
             proc_id: ProcId::KERNEL,
             parent_proc_id: ProcId::KERNEL,
+            name: ProcName::EMPTY,
         }
     }
 
@@ -180,6 +260,30 @@ impl TaskCapabilities {
     #[must_use]
     pub fn parent_proc_id(&self) -> ProcId {
         self.parent_proc_id
+    }
+
+    /// Attach the kernel-attested process name to this record.
+    ///
+    /// Consumed and returned so the process-admit path can set the name
+    /// inline before inserting the record into the [`CapTable`], mirroring
+    /// [`Self::with_proc_id`]. Only the kernel's process-admit sites call it,
+    /// passing a name derived from kernel-resolved state (the executable's
+    /// basename, or a fixed name for a kernel principal) — never a
+    /// caller-supplied value. A record with no attested name keeps
+    /// [`ProcName::EMPTY`].
+    #[must_use]
+    pub fn with_name(mut self, name: ProcName) -> Self {
+        self.name = name;
+        self
+    }
+
+    /// The task's kernel-attested process name (empty if none was attested).
+    ///
+    /// Read from this record's own kernel-held state — never caller-supplied
+    /// — so an audit consumer may trust it to name the acting process.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        self.name.as_str()
     }
 
     /// Produce the kernel-attested [`Origin`] of this task.
@@ -555,6 +659,57 @@ mod tests {
         assert_eq!(admitted.parent_proc_id(), parent);
         assert!(!admitted.parent_proc_id().is_kernel());
         assert!(admitted.has(CapabilityId::FS_MOUNT));
+    }
+
+    #[test]
+    fn proc_name_defaults_empty_and_with_name_attaches() {
+        let grant = caps_of(&[CapabilityId::FS_MOUNT]);
+        let sink = RecordingSink::new();
+        let base = TaskCapabilities::derive(TaskId(11), UserId(1000), grant, grant, &sink);
+        // A freshly-derived record has no attested name.
+        assert_eq!(base.name(), "");
+
+        let named = base.with_name(ProcName::from_bytes_truncating(b"sysinfod"));
+        assert_eq!(named.name(), "sysinfod");
+        // Attaching the name changes nothing about the capability set.
+        assert!(named.has(CapabilityId::FS_MOUNT));
+    }
+
+    #[test]
+    fn proc_name_bounds_to_largest_valid_utf8_prefix() {
+        // The empty name is empty and its default matches.
+        assert_eq!(ProcName::EMPTY.as_str(), "");
+        assert!(ProcName::EMPTY.is_empty());
+        assert_eq!(ProcName::default(), ProcName::EMPTY);
+
+        // An over-long input is bounded to PROC_NAME_MAX bytes.
+        let long = [b'a'; PROC_NAME_MAX + 8];
+        let name = ProcName::from_bytes_truncating(&long);
+        assert_eq!(name.as_str().len(), PROC_NAME_MAX);
+        assert!(name.as_str().bytes().all(|b| b == b'a'));
+
+        // A cut that would land inside a multi-byte code point keeps only
+        // the largest valid prefix, so `as_str` never observes invalid UTF-8.
+        // "é" (0xC3 0xA9) repeated fills 2 bytes each; PROC_NAME_MAX (32) is
+        // even, so the boundary lands cleanly, but a trailing lone lead byte
+        // must be dropped:
+        let mut bytes = alloc::vec![0u8; PROC_NAME_MAX];
+        for chunk in bytes.chunks_mut(2) {
+            chunk[0] = 0xC3;
+            if chunk.len() > 1 {
+                chunk[1] = 0xA9;
+            }
+        }
+        // Append a stray lead byte past the cap; it is dropped with the cap.
+        bytes.push(0xC3);
+        let accented = ProcName::from_bytes_truncating(&bytes);
+        // Valid UTF-8 by construction, and every code point is "é".
+        assert!(accented.as_str().chars().all(|c| c == 'é'));
+        assert_eq!(accented.as_str().len(), PROC_NAME_MAX);
+
+        // A trailing lone lead byte within the cap is dropped, not stored.
+        let truncated = ProcName::from_bytes_truncating(&[b'h', b'i', 0xC3]);
+        assert_eq!(truncated.as_str(), "hi");
     }
 
     #[test]

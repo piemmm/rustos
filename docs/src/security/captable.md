@@ -61,6 +61,28 @@ Every security-relevant dispatcher audit record therefore carries the
 caller's attested `pproc` field beside `proc` and `task`, so the
 hash-chained log records the exact parent instance of each acting process.
 
+### Process name (`comm`)
+
+The record also carries a kernel-attested **process name**
+(`rustos_kernel_sec::ProcName`, a bounded inline name reusing the one
+`PROCESS_NAME_MAX` length `rustos_abi` already defines for the System
+Information process record). It is set kernel-side at admit from
+kernel-resolved state — the `spawn` syscall attests the final path
+component of the resolved executable (the registry lookup matched it, so it
+is not the caller's word for its own name), PID 1 records the fixed `init`,
+and the raw-`rxe` driver-spawn path attests no name (it resolves no
+executable path, so it fails closed to the empty name rather than trusting
+the spawner's argv). Kernel threads and in-kernel binder / device-host
+records keep the empty name. The stored value holds only a valid-UTF-8
+prefix, so rendering it never fails.
+
+Every security-relevant dispatcher audit record therefore carries the
+caller's attested `comm` field beside `task`, `proc`, and `pproc`, so the
+hash-chained log names the acting process (not only its numeric and instance
+ids). One `audit_with_identity` helper in `kernel/syscall` emits this
+attested identity prefix, so the audit sites cannot drift in which fields
+they record. The attestation is the kernel's, never the caller's.
+
 ## Per-task registry
 
 `CapTable` owns a flat `BTreeMap<TaskId, TaskCapabilities>`. It carries

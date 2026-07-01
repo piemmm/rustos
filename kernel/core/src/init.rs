@@ -34,7 +34,9 @@ use rustos_kernel_ipc::PortRegistry;
 use rustos_kernel_irq::{IrqController, IrqTable};
 use rustos_kernel_mem::{AllocError, FrameAllocator, PhysMap, UserAddressSpace};
 use rustos_kernel_sched_api::{Priority, StepOutcome};
-use rustos_kernel_sec::{CapTable, IdentityTable, TaskCapabilities, TaskId as SecTaskId, UserId};
+use rustos_kernel_sec::{
+    CapTable, IdentityTable, ProcName, TaskCapabilities, TaskId as SecTaskId, UserId,
+};
 use rustos_log::{set_max_level, Field, Level, Sink};
 use rustos_sync::RwLock;
 use rustos_util::fmt::format_hex_u64;
@@ -705,7 +707,10 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // are attributed to this instance distinctly from any task that later
         // reuses the numeric id.
         let record = TaskCapabilities::derive(sec_id, UserId(0), caps, caps, self.audit)
-            .with_proc_id(crate::proc_id::mint_proc_id_bootstrap());
+            .with_proc_id(crate::proc_id::mint_proc_id_bootstrap())
+            // PID 1 is the init process; its name is kernel-known, not
+            // resolved from any caller.
+            .with_name(ProcName::from_bytes_truncating(b"init"));
         self.caps.write().insert(record);
 
         // Register PID 1's frozen address space + direct map under the same
@@ -899,6 +904,10 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
             // process-instance identity from the shared per-boot counter
             // (the entropy reserve is not seeded this early).
             crate::proc_id::mint_proc_id_bootstrap(),
+            // The raw-`rxe` driver-spawn path resolves no executable path
+            // kernel-side, so it attests no name rather than trusting the
+            // spawner's argv as one (fail closed to the empty name).
+            ProcName::EMPTY,
         );
         spawn.spawn_with(rxe, &ctx, caps, args)
     }

@@ -1727,189 +1727,121 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
         }
     }
 
-    fn audit_unknown(&self, caller: &CallerContext<'_>, number: u16) {
+    /// Emit a security-relevant dispatcher audit record carrying the
+    /// caller's kernel-attested identity prefix — numeric task id,
+    /// process-instance id, parent process-instance id, and process name
+    /// (`comm`) — followed by the site-specific `extra` fields.
+    ///
+    /// One definition of the identity prefix, so the audit sites cannot
+    /// drift in which attested fields they record or how they render them.
+    /// Every prefix field is read from the kernel-attested [`CallerContext`],
+    /// never from caller-supplied bytes. `extra` carries at most two fields
+    /// at every call site, which the fixed six-slot buffer accommodates.
+    fn audit_with_identity(
+        &self,
+        event: AuditEvent,
+        caller: &CallerContext<'_>,
+        extra: &[Field<'_>],
+    ) {
         let mut t = [0u8; 16];
         let mut p = [0u8; PROC_ID_HEX_LEN];
         let mut pp = [0u8; PROC_ID_HEX_LEN];
+        let mut fields = [Field {
+            key: "",
+            value: rustos_log::FieldValue::Null,
+        }; 6];
+        fields[0] = Field {
+            key: "task",
+            value: rustos_log::FieldValue::Str(format_hex_u64(caller.task_id.0, &mut t)),
+        };
+        fields[1] = Field {
+            key: "proc",
+            value: rustos_log::FieldValue::Str(caller.caps.proc_id().write_hex(&mut p)),
+        };
+        fields[2] = Field {
+            key: "pproc",
+            value: rustos_log::FieldValue::Str(caller.caps.parent_proc_id().write_hex(&mut pp)),
+        };
+        fields[3] = Field {
+            key: "comm",
+            value: rustos_log::FieldValue::Str(caller.caps.name()),
+        };
+        let n = 4 + extra.len();
+        fields[4..n].copy_from_slice(extra);
+        record(self.audit, event, &fields[..n]);
+    }
+
+    fn audit_unknown(&self, caller: &CallerContext<'_>, number: u16) {
         let mut n = [0u8; 12];
         // The number always fits in `u32` (it is a `u16`); `format_usize`
         // saturates above `i32::MAX` which never trips for a `u16`.
-        record(
-            self.audit,
+        self.audit_with_identity(
             AuditEvent::SyscallUnknown,
-            &[
-                Field {
-                    key: "task",
-                    value: rustos_log::FieldValue::Str(format_hex_u64(caller.task_id.0, &mut t)),
-                },
-                Field {
-                    key: "proc",
-                    value: rustos_log::FieldValue::Str(caller.caps.proc_id().write_hex(&mut p)),
-                },
-                Field {
-                    key: "pproc",
-                    value: rustos_log::FieldValue::Str(
-                        caller.caps.parent_proc_id().write_hex(&mut pp),
-                    ),
-                },
-                Field {
-                    key: "no",
-                    value: rustos_log::FieldValue::Str(rustos_util::fmt::format_usize(
-                        usize::from(number),
-                        &mut n,
-                    )),
-                },
-            ],
+            caller,
+            &[Field {
+                key: "no",
+                value: rustos_log::FieldValue::Str(rustos_util::fmt::format_usize(
+                    usize::from(number),
+                    &mut n,
+                )),
+            }],
         );
     }
 
     fn audit_denied(&self, caller: &CallerContext<'_>, spec: &SyscallSpec) {
-        let mut t = [0u8; 16];
-        let mut p = [0u8; PROC_ID_HEX_LEN];
-        let mut pp = [0u8; PROC_ID_HEX_LEN];
-        record(
-            self.audit,
+        self.audit_with_identity(
             AuditEvent::SyscallPermissionDenied,
-            &[
-                Field {
-                    key: "task",
-                    value: rustos_log::FieldValue::Str(format_hex_u64(caller.task_id.0, &mut t)),
-                },
-                Field {
-                    key: "proc",
-                    value: rustos_log::FieldValue::Str(caller.caps.proc_id().write_hex(&mut p)),
-                },
-                Field {
-                    key: "pproc",
-                    value: rustos_log::FieldValue::Str(
-                        caller.caps.parent_proc_id().write_hex(&mut pp),
-                    ),
-                },
-                Field {
-                    key: "sc",
-                    value: rustos_log::FieldValue::Str(spec.name),
-                },
-            ],
+            caller,
+            &[Field {
+                key: "sc",
+                value: rustos_log::FieldValue::Str(spec.name),
+            }],
         );
     }
 
     fn audit_bad_args(&self, caller: &CallerContext<'_>, spec: &SyscallSpec) {
-        let mut t = [0u8; 16];
-        let mut p = [0u8; PROC_ID_HEX_LEN];
-        let mut pp = [0u8; PROC_ID_HEX_LEN];
-        record(
-            self.audit,
+        self.audit_with_identity(
             AuditEvent::SyscallBadArguments,
-            &[
-                Field {
-                    key: "task",
-                    value: rustos_log::FieldValue::Str(format_hex_u64(caller.task_id.0, &mut t)),
-                },
-                Field {
-                    key: "proc",
-                    value: rustos_log::FieldValue::Str(caller.caps.proc_id().write_hex(&mut p)),
-                },
-                Field {
-                    key: "pproc",
-                    value: rustos_log::FieldValue::Str(
-                        caller.caps.parent_proc_id().write_hex(&mut pp),
-                    ),
-                },
-                Field {
-                    key: "sc",
-                    value: rustos_log::FieldValue::Str(spec.name),
-                },
-            ],
+            caller,
+            &[Field {
+                key: "sc",
+                value: rustos_log::FieldValue::Str(spec.name),
+            }],
         );
     }
 
     fn audit_invoked(&self, caller: &CallerContext<'_>, spec: &SyscallSpec) {
-        let mut t = [0u8; 16];
-        let mut p = [0u8; PROC_ID_HEX_LEN];
-        let mut pp = [0u8; PROC_ID_HEX_LEN];
-        record(
-            self.audit,
+        self.audit_with_identity(
             AuditEvent::SyscallInvoked,
-            &[
-                Field {
-                    key: "task",
-                    value: rustos_log::FieldValue::Str(format_hex_u64(caller.task_id.0, &mut t)),
-                },
-                Field {
-                    key: "proc",
-                    value: rustos_log::FieldValue::Str(caller.caps.proc_id().write_hex(&mut p)),
-                },
-                Field {
-                    key: "pproc",
-                    value: rustos_log::FieldValue::Str(
-                        caller.caps.parent_proc_id().write_hex(&mut pp),
-                    ),
-                },
-                Field {
-                    key: "sc",
-                    value: rustos_log::FieldValue::Str(spec.name),
-                },
-            ],
+            caller,
+            &[Field {
+                key: "sc",
+                value: rustos_log::FieldValue::Str(spec.name),
+            }],
         );
     }
 
     fn audit_would_block(&self, caller: &CallerContext<'_>, spec: &SyscallSpec) {
-        let mut t = [0u8; 16];
-        let mut p = [0u8; PROC_ID_HEX_LEN];
-        let mut pp = [0u8; PROC_ID_HEX_LEN];
-        record(
-            self.audit,
+        self.audit_with_identity(
             AuditEvent::SyscallHandlerWouldBlock,
-            &[
-                Field {
-                    key: "task",
-                    value: rustos_log::FieldValue::Str(format_hex_u64(caller.task_id.0, &mut t)),
-                },
-                Field {
-                    key: "proc",
-                    value: rustos_log::FieldValue::Str(caller.caps.proc_id().write_hex(&mut p)),
-                },
-                Field {
-                    key: "pproc",
-                    value: rustos_log::FieldValue::Str(
-                        caller.caps.parent_proc_id().write_hex(&mut pp),
-                    ),
-                },
-                Field {
-                    key: "sc",
-                    value: rustos_log::FieldValue::Str(spec.name),
-                },
-            ],
+            caller,
+            &[Field {
+                key: "sc",
+                value: rustos_log::FieldValue::Str(spec.name),
+            }],
         );
     }
 
     fn audit_rejected(&self, caller: &CallerContext<'_>, spec: &SyscallSpec, err: Option<&Errno>) {
-        let mut t = [0u8; 16];
         let mut e = [0u8; 12];
         let err_field = match err {
             Some(e_ref) => format_i32(e_ref.as_i32(), &mut e),
             None => "?",
         };
-        let mut p = [0u8; PROC_ID_HEX_LEN];
-        let mut pp = [0u8; PROC_ID_HEX_LEN];
-        record(
-            self.audit,
+        self.audit_with_identity(
             AuditEvent::SyscallHandlerRejected,
+            caller,
             &[
-                Field {
-                    key: "task",
-                    value: rustos_log::FieldValue::Str(format_hex_u64(caller.task_id.0, &mut t)),
-                },
-                Field {
-                    key: "proc",
-                    value: rustos_log::FieldValue::Str(caller.caps.proc_id().write_hex(&mut p)),
-                },
-                Field {
-                    key: "pproc",
-                    value: rustos_log::FieldValue::Str(
-                        caller.caps.parent_proc_id().write_hex(&mut pp),
-                    ),
-                },
                 Field {
                     key: "sc",
                     value: rustos_log::FieldValue::Str(spec.name),
@@ -2003,7 +1935,7 @@ mod tests {
     use core::cell::RefCell;
     use rustos_abi::{CapabilityId, SyscallNumber};
     use rustos_caps::CapabilitySet;
-    use rustos_kernel_sec::{TaskCapabilities, TaskId, UserId};
+    use rustos_kernel_sec::{ProcName, TaskCapabilities, TaskId, UserId};
     use rustos_log::{set_max_level, Event, Level};
 
     /// Single-threaded sink that records every event identifier.
@@ -2808,6 +2740,61 @@ mod tests {
         assert_ne!(seen[0], "0000000000000007");
         let mut own_hex = [0u8; PROC_ID_HEX_LEN];
         assert_ne!(seen[0], own.write_hex(&mut own_hex));
+    }
+
+    #[test]
+    fn audit_records_carry_the_callers_attested_name() {
+        /// Sink that captures the value of the `comm` field of each event.
+        struct CommFieldSink {
+            seen: RefCell<Vec<alloc::string::String>>,
+        }
+        impl Sink for CommFieldSink {
+            fn write_event(&self, event: &Event<'_>) {
+                for f in event.fields {
+                    if f.key == "comm" {
+                        self.seen
+                            .borrow_mut()
+                            .push(alloc::string::ToString::to_string(&f.value));
+                    }
+                }
+            }
+        }
+        set_max_level(Level::Trace);
+        let sink = CommFieldSink {
+            seen: RefCell::new(Vec::new()),
+        };
+
+        // The name lives on the capability record, attested kernel-side at
+        // admission; it is not derived from the numeric task id and cannot be
+        // set by the caller.
+        let caps = TaskCapabilities::derive(
+            TaskId(7),
+            UserId(1000),
+            CapabilitySet::empty(),
+            CapabilitySet::empty(),
+            &sink,
+        )
+        .with_name(ProcName::from_bytes_truncating(b"sysinfod"));
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers::default();
+        let d = Dispatcher::new(&h, &sink);
+
+        // A capability-gated syscall the empty set cannot satisfy → denied,
+        // which emits an audited record carrying the `comm` field.
+        let mut args = RawArgs::ZERO;
+        args.0[0] = 1;
+        args.0[1] = u64::from(CapabilityId::FS_MOUNT.as_u16());
+        assert_eq!(
+            d.dispatch(&ctx, SyscallNumber::CAP_REVOKE.as_u16(), args),
+            Err(Errno::PermissionDenied)
+        );
+
+        let seen = sink.seen.borrow();
+        assert_eq!(seen.len(), 1, "exactly the one denied record");
+        assert_eq!(seen[0], "sysinfod");
     }
 
     #[test]

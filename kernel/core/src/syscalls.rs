@@ -94,7 +94,7 @@ use rustos_kernel_mem::{
     copy_in, copy_out, FrameAllocator, PhysMap, UaccessError, UserAddressSpace, VirtAddr, PAGE_SIZE,
 };
 use rustos_kernel_sched_api::Priority;
-use rustos_kernel_sec::{CapTable, TaskCapabilities, TaskId as SecTaskId, UserId};
+use rustos_kernel_sec::{CapTable, ProcName, TaskCapabilities, TaskId as SecTaskId, UserId};
 use rustos_kernel_syscall::{CallerContext, Dispatcher, RawArgs, SyscallHandlers, SyscallResult};
 use rustos_log::{Event, EventId, Field, Level, Sink};
 use rustos_sync::RwLock;
@@ -1719,6 +1719,12 @@ where
             // single CSPRNG reserve, attested kernel-side and never
             // influenced by the spawning caller.
             crate::proc_id::mint_proc_id(self.rng),
+            // Attest the child's name from the resolved program path's final
+            // component — a kernel-resolved value (the registry lookup above
+            // matched it), never trusted from the caller as a name.
+            ProcName::from_bytes_truncating(
+                path_buf.rsplit(|&b| b == b'/').next().unwrap_or(&path_buf),
+            ),
         );
         self.spawn_service.spawn(program, &ctx)
     }
@@ -3723,6 +3729,11 @@ where
     /// (a boot-floor driver-spawn); never supplied or influenced by any
     /// caller, so it cannot be forged.
     proc_id: ProcId,
+    /// The kernel-attested process name attached to the admitted child's
+    /// capability record — the resolved executable's basename for a `spawn`,
+    /// a fixed name for a boot principal. Derived kernel-side from resolved
+    /// state at the call site, never from caller-supplied bytes.
+    name: ProcName,
 }
 
 impl<'a, A> KernelSpawnCtx<'a, A>
@@ -3761,6 +3772,7 @@ where
         grants: &'a [HwResource],
         node_id: Option<u32>,
         proc_id: ProcId,
+        name: ProcName,
     ) -> Self {
         Self {
             frames,
@@ -3776,6 +3788,7 @@ where
             grants,
             node_id,
             proc_id,
+            name,
         }
     }
 }
@@ -3877,7 +3890,8 @@ where
             .map_or(ProcId::KERNEL, TaskCapabilities::proc_id);
         let record = TaskCapabilities::derive(sec_id, UserId(0), caps, caps, self.audit)
             .with_proc_id(self.proc_id)
-            .with_parent_proc_id(parent_proc_id);
+            .with_parent_proc_id(parent_proc_id)
+            .with_name(self.name.clone());
         self.caps.write().insert(record);
 
         // Register the child's frozen address space + direct map under the
@@ -7078,6 +7092,8 @@ mod tests {
             // A fixed minted identity so the admit path's attestation is
             // observable.
             rustos_abi::ProcId::from_raw([0x11; 16]),
+            // A fixed name so the admit path's name attestation is observable.
+            ProcName::from_bytes_truncating(b"driverproc"),
         );
 
         let program = EmbeddedProgram {
@@ -7099,6 +7115,17 @@ mod tests {
         assert_eq!(
             table.read().caps_for(child).map(TaskCapabilities::proc_id),
             Some(rustos_abi::ProcId::from_raw([0x11; 16]))
+        );
+
+        // The kernel-attested process name is threaded from the spawn context
+        // onto the child's capability record by `admit_process`, so an audit
+        // consumer can name the acting process.
+        assert_eq!(
+            table
+                .read()
+                .caps_for(child)
+                .map(|c| alloc::string::ToString::to_string(c.name())),
+            Some(alloc::string::String::from("driverproc"))
         );
 
         // The driver's matched node is recorded against it, so a later
@@ -7194,6 +7221,7 @@ mod tests {
             &[],
             None,
             child_proc,
+            ProcName::EMPTY,
         );
         let pid = RecordingSpawn::new()
             .spawn(&program, &ctx)
@@ -7229,6 +7257,7 @@ mod tests {
             &[],
             None,
             rustos_abi::ProcId::from_raw([0x33; 16]),
+            ProcName::EMPTY,
         );
         let orphan_pid = RecordingSpawn::new()
             .spawn(&program, &orphan_ctx)

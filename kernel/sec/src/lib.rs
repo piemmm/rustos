@@ -54,7 +54,7 @@ pub mod manifest;
 pub mod mmio;
 
 pub use audit::AuditEvent;
-pub use captable::{CapTable, TaskCapabilities, TaskId};
+pub use captable::{CapTable, ProcName, TaskCapabilities, TaskId, PROC_NAME_MAX};
 pub use dma::{alloc_dma, free_dma, DmaGateError};
 pub use identity::{
     GroupId, GroupRecord, IdentityTable, IdentityTableBuilder, UserId, UserRecord,
