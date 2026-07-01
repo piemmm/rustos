@@ -94,6 +94,15 @@ runs each test once, still gets a full night). Each job writes its own log under
 `<logdir>/soak-<UTC-stamp>/<job>.log`, and the script exits non-zero if any job
 fails — §7/§19.6/§19.7 fail closed.
 
+The fuzz/proptest/fssoak jobs run at a lowered scheduling priority (`nice`),
+the repeated-test matrix at normal priority. Every job fans out to all cores,
+so running them together oversubscribes the host many-fold; the QEMU verticals
+in the test matrix are the only jobs with a hard, no-retry wall-clock deadline,
+so without this they starve for CPU and time out (a flake) while the
+deadline-free soaks merely run slower. The `nice` split lets the kernel hand
+the timed guests their cores whenever runnable, keeping their deadlines
+reachable under the full parallel fan-out.
+
 ```sh
 tools/ci/soak.sh                 # both fuzz + proptest, parallel (default)
 tools/ci/soak.sh all             # fuzz + proptest + the repeated-test soak
