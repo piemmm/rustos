@@ -30,5 +30,9 @@ rustos-caps = { path = "../../lib/caps", version = "=0.0.0" }
 rustos-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
 rustos-drv-fs-fat32 = { path = "../../drivers/filesystem/fat32", version = "=0.0.0" }
 rustos-drv-fs-rustfs = { path = "../../drivers/filesystem/rustfs", version = "=0.0.0" }
+# The per-installation log-attestation key file is authored through the one
+# `rustos_log::LogAttestationKey` on-disk format, so the image author and the
+# journal principal that later reads it cannot drift (AGENTS.md §2.2).
+rustos-log = { path = "../../lib/log", version = "=0.0.0" }
 rustos-partition = { path = "../../lib/partition", version = "=0.0.0" }
 rustos-users = { path = "../../lib/users", version = "=0.0.0" }

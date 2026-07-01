@@ -1006,6 +1006,22 @@ impl SyscallNumber {
     /// The monotonic clock is unaffected; only the wall-time offset and
     /// state change.
     pub const WALL_TIME_SET: Self = Self(60);
+    /// Read the kernel's per-boot identifier ([`crate::BootId`])
+    /// (`PREREQUISITES.md` P-E).
+    ///
+    /// Arguments: `out: *mut u8` (user buffer), `out_cap: usize` (its
+    /// capacity, at least [`crate::BOOT_ID_LEN`]). On success the 16-byte
+    /// [`BootId`](crate::BootId) the kernel minted for this boot is written to
+    /// `out` and its byte length returned. A buffer shorter than
+    /// [`crate::BOOT_ID_LEN`] fails closed.
+    ///
+    /// Unprivileged: the boot id is a public per-boot nonce, not a secret, so
+    /// any task may read it (like [`Self::CLOCK_GET`] / [`Self::WALL_TIME_GET`]).
+    /// If the kernel's random subsystem was not seeded in time to mint one the
+    /// call fails closed with
+    /// [`Errno::EntropyNotReady`] — the kernel never returns the all-zero
+    /// [`BootId::UNSET`](crate::BootId::UNSET) sentinel as if it were a real id.
+    pub const BOOT_ID_GET: Self = Self(61);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
@@ -1142,6 +1158,7 @@ mod tests {
         assert_eq!(SyscallNumber::CALL_PEER_ORIGIN.as_u16(), 58);
         assert_eq!(SyscallNumber::WALL_TIME_GET.as_u16(), 59);
         assert_eq!(SyscallNumber::WALL_TIME_SET.as_u16(), 60);
+        assert_eq!(SyscallNumber::BOOT_ID_GET.as_u16(), 61);
     }
 
     #[test]

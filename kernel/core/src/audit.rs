@@ -180,6 +180,23 @@ pub enum AuditEvent {
     /// kernel never weakens to predictable output; it fails closed. The
     /// record carries a `cause` field naming why.
     EntropyReserveUnseeded,
+    /// The kernel minted the per-boot identifier ([`rustos_abi::BootId`])
+    /// from the seeded CSPRNG output reserve (`PREREQUISITES.md` P-E).
+    ///
+    /// Emitted once at boot by [`crate::init`] after the reserve is seeded.
+    /// The record carries **neither** the entropy nor the id itself — only
+    /// that the per-boot identity became available (a security-relevant state
+    /// change; the id is a public nonce read through `boot_id_get`).
+    BootIdMinted,
+    /// The kernel could **not** mint the per-boot identifier: the CSPRNG
+    /// output reserve was not seeded in time, so the boot id stays
+    /// [`rustos_abi::BootId::UNSET`] and `boot_id_get` fails closed with
+    /// `EntropyNotReady` (`PREREQUISITES.md` P-E).
+    ///
+    /// Emitted once at boot by [`crate::init`] on a port whose entropy source
+    /// could not seed the reserve. The kernel never substitutes a predictable
+    /// id; it fails closed.
+    BootIdUnavailable,
 }
 
 impl AuditEvent {
@@ -207,6 +224,8 @@ impl AuditEvent {
             Self::InputDelivered => 4050,
             Self::EntropyReserveSeeded => 4060,
             Self::EntropyReserveUnseeded => 4061,
+            Self::BootIdMinted => 4062,
+            Self::BootIdUnavailable => 4063,
         })
     }
 
@@ -236,6 +255,8 @@ impl AuditEvent {
             Self::InputDelivered => "first input delivered to focus arbiter",
             Self::EntropyReserveSeeded => "entropy reserve seeded",
             Self::EntropyReserveUnseeded => "entropy reserve unseeded",
+            Self::BootIdMinted => "per-boot id minted",
+            Self::BootIdUnavailable => "per-boot id unavailable",
         }
     }
 }
@@ -280,6 +301,8 @@ mod tests {
             AuditEvent::InputDelivered,
             AuditEvent::EntropyReserveSeeded,
             AuditEvent::EntropyReserveUnseeded,
+            AuditEvent::BootIdMinted,
+            AuditEvent::BootIdUnavailable,
         ] {
             let id = ev.id().0;
             assert!(
@@ -312,6 +335,8 @@ mod tests {
             AuditEvent::InputDelivered.id().0,
             AuditEvent::EntropyReserveSeeded.id().0,
             AuditEvent::EntropyReserveUnseeded.id().0,
+            AuditEvent::BootIdMinted.id().0,
+            AuditEvent::BootIdUnavailable.id().0,
         ];
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {

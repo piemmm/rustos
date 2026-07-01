@@ -17,6 +17,7 @@
 #![deny(missing_docs)]
 
 pub mod appinfo;
+pub mod boot;
 pub mod capability;
 pub mod driver;
 pub mod driver_store;
@@ -49,6 +50,7 @@ pub use appinfo::{
     APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX,
     MIME_ENTRY_LEN, MIME_TYPE_MAX, SYSTEM_LIBRARIES_DIR,
 };
+pub use boot::{BootId, BOOT_ID_HEX_LEN, BOOT_ID_LEN};
 pub use capability::{CapabilityId, CapabilityQuery, CAPABILITY_ID_MAX};
 pub use driver::{
     decode_bind_keys, BufferClass, Delay, DriverBindKey, DriverError, DriverHandle, DriverHost,

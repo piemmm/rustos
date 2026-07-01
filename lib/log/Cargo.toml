@@ -20,6 +20,10 @@ rustos-crypto = { path = "../crypto", version = "=0.0.0" }
 # (`Time64`/`Duration64`, the kernel error code, and the capability id) so a
 # logged value and its ABI form cannot drift apart (no duplication).
 rustos-abi = { path = "../abi", version = "=0.0.0" }
+# The log-attestation key is a secret: it is scrubbed from memory on drop with
+# the audited `zeroize` crate (§4 zero-on-free; §2.12 — no hand-rolled
+# wiping, and `zeroize`'s volatile writes are not elided by the optimiser).
+zeroize = { version = "1.8.1", default-features = false }
 
 [dev-dependencies]
 # The §19.6 fuzz harness for the value decoder draws its inputs through the

@@ -107,6 +107,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  58 | `call_peer_origin` | `IpcEndpoint`, `Handle` (ticket), `user_ptr` (origin out), `len` | `u64` (bytes) | — | no |
 |  59 | `wall_time_get` | `user_ptr` (out), `len`                | `u64` (bytes) | — | no |
 |  60 | `wall_time_set` | `user_ptr` (time), `len`, `u32 state`  | `errno` | `CAP_TIME_SET` | yes |
+|  61 | `boot_id_get`  | `user_ptr` (out), `len`                | `u64` (bytes) | — | no |
 
 (Syscall numbers 39–45 — `msi_alloc`, `shm_create`/`shm_map`/`shm_unmap`,
 `waitset_create`/`waitset_ctl`/`waitset_wait` — are defined in
@@ -423,6 +424,23 @@ clock boots `Unset`; until a trusted time source drives it, `wall_time_get`
 reports the epoch. The first-party Rust wrappers are `rustos_rt::wall_time` /
 `rustos_rt::wall_time_set`; the C stubs are `ros_sys_wall_time_get` /
 `ros_sys_wall_time_set`.
+
+`boot_id_get` (no. 61) copies the kernel's per-boot identifier — a 128-bit
+`rustos_abi::BootId` — out to the caller's `(out, len)` buffer and returns
+its byte count (`PREREQUISITES.md` P-E). The boot id is a public per-boot
+nonce: it is stable for the lifetime of a boot, fresh across boots, and user
+space can neither supply nor influence it. It is **ungated** and unaudited,
+the same unprivileged observer baseline as `clock_get` / `wall_time_get`,
+because it is not a secret — boot-scoped state (the system log's
+stream-genesis, `plans/SYSLOG.md` §7.1) binds itself to it so a record cannot
+be silently replayed from a different boot. The kernel mints it once at boot
+from the single CSPRNG output reserve (§22), immediately after that reserve is
+seeded; a buffer shorter than `BOOT_ID_LEN` (16) fails closed with
+`BufferTooSmall`, and a boot whose random subsystem could not be seeded in
+time has no id — the call fails closed with `EntropyNotReady` rather than
+return the all-zero `BootId::UNSET` sentinel as if it were real. The
+first-party Rust wrapper is `rustos_rt::boot_id`; the C stub is
+`ros_sys_boot_id_get`.
 
 `mem_map` / `mem_unmap` are deliberately **ungated** (no row above). They
 grow and shrink the caller's *own* hardware-isolated address space with

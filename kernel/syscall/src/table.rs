@@ -865,6 +865,29 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Read the kernel's per-boot identifier (P-E).
+    ///
+    /// The dispatcher has already checked `out` is a non-null `UserPtr`; the
+    /// call is unprivileged (the boot id is a public per-boot nonce, not a
+    /// secret). The implementation copies the 16-byte
+    /// [`rustos_abi::BootId`] minted for this boot out to `out` and returns
+    /// its byte length. A buffer shorter than [`rustos_abi::BOOT_ID_LEN`]
+    /// fails closed, as does a boot whose random subsystem could not be
+    /// seeded in time (the kernel reports `EntropyNotReady` rather than the
+    /// all-zero [`rustos_abi::BootId::UNSET`] sentinel).
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]; the real handler is installed in
+    /// `kernel/core`.
+    fn boot_id_get(
+        &self,
+        _caller: &CallerContext<'_>,
+        _out: u64,
+        _out_cap: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// Emit a structured diagnostic record to the kernel's diagnostic log
     /// sink.
     ///
@@ -1694,6 +1717,12 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 self.handlers
                     .wall_time_set(caller, args.0[0], time_len, state)
             }
+            SyscallNumber::BOOT_ID_GET => {
+                // args[0] is the non-null out `UserPtr` (dispatcher-checked);
+                // args[1] is its capacity in bytes.
+                let out_cap = decode_len(args.0[1])?;
+                self.handlers.boot_id_get(caller, args.0[0], out_cap)
+            }
             _ => Err(Errno::NotFound),
         }
     }
@@ -2348,6 +2377,13 @@ mod tests {
             // Echo the length so the reachability test can assert the
             // dispatcher decoded the arguments without wiring a real clock.
             Ok(time_len as u64)
+        }
+
+        fn boot_id_get(&self, _c: &CallerContext<'_>, _out: u64, out_cap: usize) -> SyscallResult {
+            self.record("boot_id_get");
+            // Echo the capacity so the reachability test can assert the
+            // dispatcher decoded both arguments without wiring a real boot id.
+            Ok(out_cap as u64)
         }
 
         fn log_emit(&self, _c: &CallerContext<'_>, _record: u64, _len: usize) -> SyscallResult {

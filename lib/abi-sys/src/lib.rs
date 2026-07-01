@@ -121,6 +121,7 @@ const NUM_FS_RENAME: u64 = SyscallNumber::FS_RENAME.as_u16() as u64;
 const NUM_CALL_PEER_ORIGIN: u64 = SyscallNumber::CALL_PEER_ORIGIN.as_u16() as u64;
 const NUM_WALL_TIME_GET: u64 = SyscallNumber::WALL_TIME_GET.as_u16() as u64;
 const NUM_WALL_TIME_SET: u64 = SyscallNumber::WALL_TIME_SET.as_u16() as u64;
+const NUM_BOOT_ID_GET: u64 = SyscallNumber::BOOT_ID_GET.as_u16() as u64;
 
 /// Empty argument vector for the no-argument syscalls.
 const NO_ARGS: [u64; SYSCALL_MAX_ARGS] = [0; SYSCALL_MAX_ARGS];
@@ -920,6 +921,22 @@ pub extern "C" fn sys_wall_time_set(time: *mut c_void, time_len: usize, state: u
     }
 }
 
+/// `boot_id_get`: read the kernel's per-boot identifier
+/// (`SyscallNumber::BOOT_ID_GET`). The 16-byte `rustos_abi::BootId` minted
+/// for this boot is written to the `out_cap`-byte buffer at `out` and its
+/// byte count returned (or a `ROS_E_*` code reinterpreted into the result).
+/// Unprivileged, like `ros_sys_clock_get` — the boot id is a public per-boot
+/// nonce, not a secret; if the kernel's random subsystem was not seeded in
+/// time the call fails closed with `ROS_E_ENTROPY_NOT_READY` rather than
+/// return the all-zero sentinel.
+#[must_use]
+#[export_name = "ros_sys_boot_id_get"]
+pub extern "C" fn sys_boot_id_get(out: *mut c_void, out_cap: usize) -> u64 {
+    // SAFETY: see `sys_wall_time_get`; the kernel validates the `(ptr, len)`
+    // pair against the caller's address space before writing it.
+    unsafe { raw_syscall(NUM_BOOT_ID_GET, [ptr_arg(out), out_cap as u64, 0, 0, 0, 0]) }
+}
+
 /// `log_emit`: emit one encoded diagnostic record (a `rustos_abi::log`
 /// `LogRecord` wire image of `len` bytes at `record`) to the kernel's
 /// diagnostic log sink (`SyscallNumber::LOG_EMIT`).
@@ -1402,6 +1419,7 @@ mod tests {
         (NUM_CALL_PEER_ORIGIN, "call_peer_origin", 4),
         (NUM_WALL_TIME_GET, "wall_time_get", 2),
         (NUM_WALL_TIME_SET, "wall_time_set", 3),
+        (NUM_BOOT_ID_GET, "boot_id_get", 2),
     ];
 
     #[test]
@@ -1495,6 +1513,19 @@ mod tests {
         assert_eq!(args[1], 12);
         assert_eq!(args[2], 2);
         assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn boot_id_get_marshals_out_pointer_and_capacity() {
+        let mut buf = [0u8; 16];
+        let ptr = buf.as_mut_ptr().cast::<c_void>();
+        let (number, args) = capture(16, || {
+            assert_eq!(sys_boot_id_get(ptr, 16), 16);
+        });
+        assert_eq!(number, NUM_BOOT_ID_GET);
+        assert_eq!(args[0], ptr as usize as u64);
+        assert_eq!(args[1], 16);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
     }
 
     #[test]

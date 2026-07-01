@@ -85,6 +85,33 @@ This model and the audit `chain` above share one SHA-256 hash chain; the log
 service layers its record and segment encoders on top of these values and that
 chain, never a second value model or a second chain.
 
+## Log attestation (`attest`)
+
+The `attest` module supplies the two cryptographic foundations the system
+log's tamper-evidence rests on, without building the journal or the on-disk
+segment format (those are the log service's job):
+
+* `machine_id_hash` / `stream_genesis` — derive a log stream's hash-chain
+  genesis value, binding it to *this installation* (`machine_id_hash`), the
+  stream, and the kernel's per-boot `BootId` through domain-separated
+  SHA-256 over `lib/crypto`. A first segment chains to this value instead of
+  the all-zero `GENESIS_ANCHOR`, so a segment lifted from another
+  installation, stream, or boot fails verification. The genesis is not
+  secret — every input is public and a verifier recomputes it freely;
+  confidentiality rests on the seal below.
+* `LogAttestationKey` — a per-installation secret (a 256-bit HMAC-SHA256 key)
+  that `seal`s closed audit/security segments and `verify`s them in constant
+  time. It is scrubbed from memory on drop, never implements `ToFieldValue`
+  or any rendering trait (so it cannot be logged), and its raw bytes never
+  leave the type — callers seal and verify *through* it. `to_file_bytes` /
+  `from_file_bytes` are the on-disk key-file image the image builder /
+  installer provisions under `/System/Security/Keys/`, gated by the inode
+  owner/mode model (system-user-owned, `0o600`) until the journal principal
+  exists — no capability is minted ahead of that holder.
+
+All sealing uses the audited HMAC-SHA256 in `lib/crypto`; this module never
+names an upstream crypto crate and never hand-rolls a primitive.
+
 ## What this crate is not
 
 It is not a re-implementation of `tracing` or `log`. The API is small on

@@ -23,9 +23,14 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
+pub mod attest;
 pub mod chain;
 pub mod field;
 
+pub use attest::{
+    machine_id_hash, stream_genesis, LogAttestationKey, LOG_ATTESTATION_KEY_FILE_LEN,
+    LOG_ATTESTATION_KEY_LEN, MACHINE_ID_LEN,
+};
 pub use chain::{
     verify_chain, verify_fresh_chain, ChainError, ChainedEntry, LogChain, GENESIS_ANCHOR,
 };

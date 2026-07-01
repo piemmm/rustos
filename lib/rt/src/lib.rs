@@ -57,8 +57,8 @@
 use rustos_abi::input::KeyInput;
 use rustos_abi::waitset::{WaitSetOp, WaitSourceKind};
 use rustos_abi::{
-    FileStat, HwNode, LimitKind, MapFlags, OpenFlags, ResourceLimit, SyscallNumber, Time64,
-    WallClockReading, WallTimeState, CONSOLE_INHERIT, STDERR, STDIN, STDINFO, STDOUT,
+    BootId, FileStat, HwNode, LimitKind, MapFlags, OpenFlags, ResourceLimit, SyscallNumber, Time64,
+    WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, STDERR, STDIN, STDINFO, STDOUT,
 };
 use rustos_abi_trap::raw_syscall;
 
@@ -243,6 +243,9 @@ const NUM_WALL_TIME_GET: u64 = SyscallNumber::WALL_TIME_GET.as_u16() as u64;
 
 /// `wall_time_set` syscall number (as above).
 const NUM_WALL_TIME_SET: u64 = SyscallNumber::WALL_TIME_SET.as_u16() as u64;
+
+/// `boot_id_get` syscall number (as above).
+const NUM_BOOT_ID_GET: u64 = SyscallNumber::BOOT_ID_GET.as_u16() as u64;
 
 /// Marshal a 32-bit signed argument into its register value following the
 /// `abi-v1` `I32` convention (sign-extend through `i64`).
@@ -1609,6 +1612,37 @@ pub fn wall_time_set(time: Time64, state: WallTimeState) -> i64 {
         )
     };
     ret as i64
+}
+
+/// Read the kernel's per-boot identifier ([`BootId`])
+/// (`SyscallNumber::BOOT_ID_GET`; P-E).
+///
+/// Returns the 16-byte [`BootId`] the kernel minted for this boot — a public
+/// per-boot nonce, stable within a boot and fresh across boots. Unprivileged,
+/// like [`clock_get`].
+///
+/// # Errors
+///
+/// Returns the raw negative kernel result (`-errno`). The notable case is
+/// `EntropyNotReady`: a port whose random subsystem could not be seeded in
+/// time has no boot id, and the kernel fails closed rather than return the
+/// all-zero [`BootId::UNSET`] sentinel. The wrapper hides no error.
+pub fn boot_id() -> Result<BootId, i64> {
+    let mut buf = [0u8; BOOT_ID_LEN];
+    let out_ptr = buf.as_mut_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
+    // `(ptr, len)` pair against the caller's address space before writing.
+    // `buf` is a live exclusive local for the duration of the call.
+    #[allow(clippy::cast_possible_wrap)]
+    // The kernel guarantees the i64 count-result encoding (count ≥ 0, else -errno).
+    let ret =
+        unsafe { raw_syscall(NUM_BOOT_ID_GET, [out_ptr, buf.len() as u64, 0, 0, 0, 0]) } as i64;
+    if ret < 0 {
+        return Err(ret);
+    }
+    // The kernel returns the wire length; decode it (fail closed on a
+    // malformed image — never inventing an id).
+    BootId::from_bytes(&buf).map_err(|e| -i64::from(e.as_i32()))
 }
 
 /// Create a kernel-owned, zeroed, cross-process shared-memory region and map

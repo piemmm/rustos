@@ -334,6 +334,23 @@ fn debug_groups_db() -> Result<String, MkimageError> {
     Ok(db.serialise())
 }
 
+/// Build the debug-profile log-attestation key file image
+/// (`PREREQUISITES.md` P-E): a fresh random [`rustos_log::LogAttestationKey`]
+/// drawn from `entropy`, serialised to its on-disk form. Only a debug image
+/// bakes a key; an installer image's per-installation key is generated at
+/// first boot (baking one common key into every installer image would be a
+/// shared secret, a security hole).
+/// Fails closed if the host entropy source cannot supply the key bytes.
+fn debug_log_attestation_key(entropy: &mut dyn EntropySource) -> Result<Vec<u8>, MkimageError> {
+    let mut key = [0u8; rustos_log::LOG_ATTESTATION_KEY_LEN];
+    entropy
+        .fill(&mut key)
+        .map_err(|e| MkimageError::Entropy(format!("log-attestation key: {e:?}")))?;
+    Ok(rustos_log::LogAttestationKey::from_key(key)
+        .to_file_bytes()
+        .to_vec())
+}
+
 /// The assembled image plus the material the operator must keep.
 pub struct RpiImage {
     /// The flashable image bytes ([`IMAGE_SECTORS`] sectors).
@@ -402,6 +419,14 @@ pub fn build_rpi_image(
         ImageProfile::Debug => Some(debug_groups_db()?),
         ImageProfile::Installer => None,
     };
+    // Only a debug image bakes a log-attestation key; an installer image's
+    // per-installation key is generated at first boot (a common baked key
+    // would be a shared secret, a security hole). When present the bytes are
+    // the `rustos_log::LogAttestationKey` on-disk image.
+    let log_key_file = match profile {
+        ImageProfile::Debug => Some(debug_log_attestation_key(entropy)?),
+        ImageProfile::Installer => None,
+    };
     let kernel8 = elfflat::elf_to_flat(kernel_elf)?;
 
     // Derive the root volume key from the profile's passphrase under a
@@ -431,6 +456,7 @@ pub fn build_rpi_image(
         entropy,
         users_db.as_deref(),
         groups_db.as_deref(),
+        log_key_file.as_deref(),
     )?;
 
     let mbr_sector = mbr::encode(&[

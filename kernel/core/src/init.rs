@@ -1096,6 +1096,25 @@ fn run_phases<A: KernelArch>(
     // weakened to predictable bytes.
     seed_entropy_reserve(state);
 
+    // Mint the per-boot identifier now the reserve is (best-effort) seeded
+    // (`PREREQUISITES.md` P-E). The draw is non-blocking and fail-closed: a
+    // port whose entropy source could not seed the reserve yields
+    // `BootId::UNSET`, and `boot_id_get` then reports `EntropyNotReady` rather
+    // than the all-zero sentinel — never a predictable id. Audited as a
+    // security-relevant state change (the record carries neither entropy nor
+    // the id itself).
+    let boot_id = crate::boot_id::mint_boot_id(&state.rng);
+    emit(
+        audit_sink,
+        Level::Info,
+        if boot_id.is_unset() {
+            AuditEvent::BootIdUnavailable
+        } else {
+            AuditEvent::BootIdMinted
+        },
+        &[],
+    );
+
     // Build the scheduler-side process-wait producer the `wait` syscall
     // drives (`plans/SPAWN.md` SP6b). It owns the parent/child + exit-status
     // bookkeeping and parks a waiting parent back on the scheduler until a
@@ -1208,6 +1227,10 @@ fn run_phases<A: KernelArch>(
         // time source drives it via `wall_time_set` under `CAP_TIME_SET`.
         // `Box::leak`'d for the same one-shot-publish reason as the hook.
         .with_wall_clock(Box::leak(Box::new(crate::wallclock::KernelWallClock::new())))
+        // Serve `boot_id_get` with the per-boot id minted above
+        // (`PREREQUISITES.md` P-E). When the reserve could not be seeded this
+        // is `BootId::UNSET` and `boot_id_get` fails closed `EntropyNotReady`.
+        .with_boot_id(boot_id)
         // Serve `log_emit` through the kernel diagnostic sink; the audit sink
         // stays kernel-only.
         .with_log_sink(log_sink)

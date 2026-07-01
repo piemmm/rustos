@@ -27,7 +27,7 @@
 
 use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeId, NodeKind};
 use rustos_drv_fs_rustfs::{
-    plant_nested_file, EntropySource, RustFs, VolumeKey, SYSTEM_VOLUME_KEY,
+    plant_nested_file, EntropySource, RustFs, Security, VolumeKey, SYSTEM_VOLUME_KEY,
 };
 
 use crate::device::MemBlock;
@@ -78,6 +78,18 @@ pub const USERS_DB_NAME: &str = "Users";
 /// Name of the group registry file under `/System/Security`.
 pub const GROUPS_DB_NAME: &str = "Groups";
 
+/// Name of the per-installation log-attestation key file under
+/// `/System/Security/Keys` (`PREREQUISITES.md` P-E). Its bytes are the
+/// [`rustos_log::LogAttestationKey`] on-disk image.
+pub const LOG_ATTESTATION_KEY_NAME: &str = "LogAttestation";
+
+/// Restrictive mode for the log-attestation key file: owner read/write only
+/// (`0o600`). The key is a secret; together with the system-user ownership
+/// (uid/gid 0) and the read-only-until-a-holder-exists policy, this keeps it
+/// unreadable by any ordinary principal until the journal/attestation
+/// principal exists.
+const LOG_ATTESTATION_KEY_MODE: u32 = 0o600;
+
 /// Author the `RustFS` root partition: format `sectors` sectors under
 /// `volume_key`, create the directory skeleton, and — when `users_db` /
 /// `groups_db` are given — write them to `/System/Security/Users` and
@@ -94,6 +106,7 @@ pub fn build_root_partition(
     entropy: &mut dyn EntropySource,
     users_db: Option<&str>,
     groups_db: Option<&str>,
+    log_attestation_key: Option<&[u8]>,
 ) -> Result<Vec<u8>, MkimageError> {
     let dev = MemBlock::new(sectors).map_err(MkimageError::RootPartition)?;
     let mut fs = RustFs::format(dev, ROOT_INODE_HINT, volume_key, entropy)
@@ -105,7 +118,7 @@ pub fn build_root_partition(
             .create(root, name.as_bytes(), NodeKind::Directory)
             .map_err(MkimageError::RootPartition)?;
         if name == "System" {
-            populate_system_subtree(&mut fs, node, users_db, groups_db)?;
+            populate_system_subtree(&mut fs, node, users_db, groups_db, log_attestation_key)?;
         }
     }
 
@@ -170,6 +183,7 @@ fn populate_system_subtree(
     system: NodeId,
     users_db: Option<&str>,
     groups_db: Option<&str>,
+    log_attestation_key: Option<&[u8]>,
 ) -> Result<(), MkimageError> {
     for sub in WRITABLE_SYSTEM_SUBDIRS {
         let node = fs
@@ -189,6 +203,15 @@ fn populate_system_subtree(
         if let Some(text) = groups_db {
             write_security_file(fs, security, GROUPS_DB_NAME, text)?;
         }
+    }
+    if let Some(key_bytes) = log_attestation_key {
+        let security = fs
+            .lookup(system, b"Security")
+            .map_err(MkimageError::RootPartition)?;
+        let keys = fs
+            .lookup(security, b"Keys")
+            .map_err(MkimageError::RootPartition)?;
+        write_key_file(fs, keys, LOG_ATTESTATION_KEY_NAME, key_bytes)?;
     }
     Ok(())
 }
@@ -253,6 +276,38 @@ fn write_security_file(
     Ok(())
 }
 
+/// Create `/System/Security/Keys/<name>`, write the secret `bytes` into it
+/// whole, and lock it down to system-user-owned, owner-read/write-only
+/// ([`LOG_ATTESTATION_KEY_MODE`]). A short write is a build failure, never a
+/// truncated key. The restrictive security record is the only thing gating
+/// the secret until the journal/attestation principal exists (no new
+/// capability is minted ahead of that holder).
+fn write_key_file(
+    fs: &mut RustFs<MemBlock>,
+    keys: NodeId,
+    name: &str,
+    bytes: &[u8],
+) -> Result<(), MkimageError> {
+    let file = fs
+        .create(keys, name.as_bytes(), NodeKind::RegularFile)
+        .map_err(MkimageError::RootPartition)?;
+    let written = fs
+        .write_at(keys, name.as_bytes(), 0, bytes)
+        .map_err(MkimageError::RootPartition)?;
+    if written != bytes.len() {
+        return Err(MkimageError::RootPartition(
+            rustos_abi::DriverError::DeviceFault,
+        ));
+    }
+    // System-user-owned, owner-read/write-only: an ordinary principal cannot
+    // read the key, and the read-only-`/System` policy plus this mode gate the
+    // secret until the journal/attestation principal exists. The kernel refuses
+    // the record otherwise (fail closed).
+    fs.set_security(file, Security::new(LOG_ATTESTATION_KEY_MODE, 0, 0))
+        .map_err(MkimageError::RootPartition)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,8 +331,15 @@ mod tests {
     }
 
     fn build() -> Vec<u8> {
-        build_root_partition(TEST_SECTORS, &TEST_KEY, &mut TestEntropy(7), None, None)
-            .expect("root partition builds")
+        build_root_partition(
+            TEST_SECTORS,
+            &TEST_KEY,
+            &mut TestEntropy(7),
+            None,
+            None,
+            None,
+        )
+        .expect("root partition builds")
     }
 
     #[test]
@@ -338,7 +400,10 @@ mod tests {
                 Err(DriverError::DeviceFault)
             }
         }
-        assert!(build_root_partition(TEST_SECTORS, &TEST_KEY, &mut NoEntropy, None, None).is_err());
+        assert!(
+            build_root_partition(TEST_SECTORS, &TEST_KEY, &mut NoEntropy, None, None, None)
+                .is_err()
+        );
     }
 
     #[test]
@@ -349,6 +414,7 @@ mod tests {
             &TEST_KEY,
             &mut TestEntropy(7),
             Some(text),
+            None,
             None,
         )
         .expect("root partition builds");
@@ -376,6 +442,7 @@ mod tests {
             &mut TestEntropy(7),
             None,
             Some(text),
+            None,
         )
         .expect("root partition builds");
         let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
@@ -403,5 +470,52 @@ mod tests {
         let security = fs.lookup(system, b"Security").expect("Security exists");
         assert!(fs.lookup(security, USERS_DB_NAME.as_bytes()).is_err());
         assert!(fs.lookup(security, GROUPS_DB_NAME.as_bytes()).is_err());
+        // An unseeded (installer-shaped) root also ships no log-attestation
+        // key: the first-boot installer generates the per-installation key,
+        // never the image.
+        let keys = fs.lookup(security, b"Keys").expect("Keys exists");
+        assert!(fs
+            .lookup(keys, LOG_ATTESTATION_KEY_NAME.as_bytes())
+            .is_err());
+    }
+
+    #[test]
+    fn a_seeded_log_attestation_key_is_written_locked_down_and_parses() {
+        use rustos_abi::driver::filesystem::FilesystemSecurity;
+        use rustos_log::{LogAttestationKey, LOG_ATTESTATION_KEY_FILE_LEN};
+
+        // A debug-shaped key image: a real `LogAttestationKey` on-disk blob.
+        let key_file = LogAttestationKey::from_key([0x5A; rustos_log::LOG_ATTESTATION_KEY_LEN])
+            .to_file_bytes()
+            .to_vec();
+        let bytes = build_root_partition(
+            TEST_SECTORS,
+            &TEST_KEY,
+            &mut TestEntropy(7),
+            None,
+            None,
+            Some(&key_file),
+        )
+        .expect("root partition builds");
+        let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
+        let mut fs = RustFs::open(dev, &TEST_KEY).expect("mounts");
+        let root = fs.root();
+        let system = fs.lookup(root, b"System").expect("/System exists");
+        let security = fs.lookup(system, b"Security").expect("Security exists");
+        let keys = fs.lookup(security, b"Keys").expect("Keys exists");
+        let key_node = fs
+            .lookup(keys, LOG_ATTESTATION_KEY_NAME.as_bytes())
+            .expect("log-attestation key exists");
+        // The bytes read back are the exact on-disk key image and parse.
+        let mut buf = [0u8; LOG_ATTESTATION_KEY_FILE_LEN];
+        let read = fs.read_at(key_node, 0, &mut buf).expect("key reads");
+        assert_eq!(read, LOG_ATTESTATION_KEY_FILE_LEN);
+        assert_eq!(&buf[..], &key_file[..]);
+        assert!(LogAttestationKey::from_file_bytes(&buf).is_ok());
+        // Locked down: system-user-owned, owner-read/write-only.
+        let sec = fs.security(key_node).expect("security present");
+        assert_eq!(sec.mode, LOG_ATTESTATION_KEY_MODE);
+        assert_eq!(sec.uid, 0);
+        assert_eq!(sec.gid, 0);
     }
 }

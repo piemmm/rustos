@@ -316,6 +316,10 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn boot_id_get(&self, _c: &CallerContext<'_>, _out: u64, _out_cap: usize) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
     fn log_emit(&self, _c: &CallerContext<'_>, _record: u64, _len: usize) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)

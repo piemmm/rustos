@@ -71,6 +71,7 @@ extern crate std;
 
 pub mod aspace;
 pub mod audit;
+pub mod boot_id;
 pub mod bootinfo;
 pub mod callreg;
 pub mod console;

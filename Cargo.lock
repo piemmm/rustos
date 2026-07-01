@@ -1172,6 +1172,7 @@ dependencies = [
  "rustos-abi",
  "rustos-crypto",
  "rustos-fuzzseed",
+ "zeroize",
 ]
 
 [[package]]
@@ -1202,6 +1203,7 @@ dependencies = [
  "rustos-crypto",
  "rustos-drv-fs-fat32",
  "rustos-drv-fs-rustfs",
+ "rustos-log",
  "rustos-partition",
  "rustos-users",
 ]

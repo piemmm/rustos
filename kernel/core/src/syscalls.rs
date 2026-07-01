@@ -77,10 +77,11 @@ use crate::sched::{CpuId, SchedError, Scheduler, SchedulerArch};
 use rustos_abi::hwtree::{HwResource, HwResourceKind};
 use rustos_abi::input::KeyInput;
 use rustos_abi::{
-    decode_log_record, CapabilityId, DescriptorTable, DirEntry, Errno, FileStat, IrqHandle,
+    decode_log_record, BootId, CapabilityId, DescriptorTable, DirEntry, Errno, FileStat, IrqHandle,
     LimitKind, MapFlags, OpenFlags, ProcId, RandomFlags, ResourceLimit, StreamMode, SyscallNumber,
-    Time64, WaitSetOp, WaitSourceKind, WallClockReading, WallTimeState, CONSOLE_INHERIT, FS_IO_MAX,
-    FS_NAME_MAX, FS_PATH_MAX, LOG_FIELDS_MAX, LOG_RECORD_MAX, RANDOM_REQUEST_MAX_BYTES,
+    Time64, WaitSetOp, WaitSourceKind, WallClockReading, WallTimeState, BOOT_ID_LEN,
+    CONSOLE_INHERIT, FS_IO_MAX, FS_NAME_MAX, FS_PATH_MAX, LOG_FIELDS_MAX, LOG_RECORD_MAX,
+    RANDOM_REQUEST_MAX_BYTES,
 };
 use rustos_caps::CapabilitySet;
 use rustos_kernel_ipc::{
@@ -339,6 +340,15 @@ where
     /// Held `'static` because the leaked clock lives for the running kernel's
     /// lifetime, exactly like the other boot-installed seams.
     wall_clock: &'static (dyn WallClockSource + 'static),
+    /// The per-boot identifier the `boot_id_get` syscall reports
+    /// (`PREREQUISITES.md` P-E). Defaults to [`BootId::UNSET`]; the boot path
+    /// mints the real value from the seeded CSPRNG reserve and installs it
+    /// through [`Self::with_boot_id`]. While unset (no boot path ran, or the
+    /// reserve could not be seeded in time) `boot_id_get` fails closed with
+    /// [`Errno::EntropyNotReady`] rather than report the all-zero sentinel as
+    /// a real id. A plain value, not a borrow: it is 16 immutable bytes minted
+    /// once, not a live seam.
+    boot_id: BootId,
 }
 
 impl<'a, A> KernelSyscallHandlers<'a, A>
@@ -459,6 +469,10 @@ where
             // `wall_time_get` reports `Unset` and `wall_time_set` fails closed
             // with `NotImplemented` through `NULL_WALL_CLOCK`.
             wall_clock: &NULL_WALL_CLOCK,
+            // No per-boot id until the boot path mints one from the seeded
+            // CSPRNG reserve and installs it (`PREREQUISITES.md` P-E):
+            // `boot_id_get` fails closed with `EntropyNotReady` until then.
+            boot_id: BootId::UNSET,
         }
     }
 
@@ -498,6 +512,20 @@ where
         wall_clock: &'static (dyn WallClockSource + 'static),
     ) -> Self {
         self.wall_clock = wall_clock;
+        self
+    }
+
+    /// Install the per-boot identifier the `boot_id_get` syscall reports,
+    /// consuming and returning `self` (`PREREQUISITES.md` P-E).
+    ///
+    /// Called once by the boot path with the [`BootId`] it minted from the
+    /// seeded CSPRNG reserve. Until then — and on a port whose entropy source
+    /// could not seed the reserve, where the mint yields [`BootId::UNSET`] —
+    /// the handler reports `EntropyNotReady` rather than the all-zero
+    /// sentinel. The value is copied in (16 immutable bytes), not borrowed.
+    #[must_use]
+    pub const fn with_boot_id(mut self, boot_id: BootId) -> Self {
+        self.boot_id = boot_id;
         self
     }
 
@@ -1265,6 +1293,30 @@ where
         let cpu = SchedulerArch::current_cpu(self.arch);
         let monotonic_ns = self.arch.monotonic_ns(cpu);
         self.wall_clock.set(wall, monotonic_ns, state).map(|()| 0)
+    }
+
+    fn boot_id_get(&self, caller: &CallerContext<'_>, out: u64, out_cap: usize) -> SyscallResult {
+        // The caller's buffer must hold the whole id; a short buffer fails
+        // closed rather than truncating it. Unprivileged, like `clock_get`:
+        // the dispatcher attaches no capability gate (the boot id is a public
+        // per-boot nonce, not a secret).
+        if out_cap < BOOT_ID_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        // Fail closed when no real id was minted: a port whose CSPRNG reserve
+        // could not be seeded leaves the boot id `UNSET`, and we must never
+        // hand the all-zero sentinel to a caller as if it were a real id.
+        if self.boot_id.is_unset() {
+            return Err(Errno::EntropyNotReady);
+        }
+        let bytes = self.boot_id.to_le_bytes();
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_out(space, physmap, VirtAddr::new(out), &bytes)
+        }) {
+            Some(Ok(())) => Ok(bytes.len() as u64),
+            Some(Err(err)) => Err(copy_fault_errno(err)),
+            None => Err(Errno::BadAddress),
+        }
     }
 
     fn irq_bind(&self, caller: &CallerContext<'_>, line: u32) -> SyscallResult {
@@ -4127,6 +4179,20 @@ where
     #[must_use]
     pub fn with_wall_clock(mut self, wall_clock: &'static (dyn WallClockSource + 'static)) -> Self {
         self.handlers = self.handlers.with_wall_clock(wall_clock);
+        self
+    }
+
+    /// Install the per-boot identifier the `boot_id_get` syscall reports,
+    /// consuming and returning `self` (`PREREQUISITES.md` P-E).
+    ///
+    /// The hook-level mirror of [`KernelSyscallHandlers::with_boot_id`]: the
+    /// boot path passes the [`BootId`] it minted from the seeded CSPRNG
+    /// reserve. A boot path that never calls it — or a port whose reserve
+    /// could not be seeded, where the mint is [`BootId::UNSET`] — leaves
+    /// `boot_id_get` failing closed with [`Errno::EntropyNotReady`].
+    #[must_use]
+    pub fn with_boot_id(mut self, boot_id: BootId) -> Self {
+        self.handlers = self.handlers.with_boot_id(boot_id);
         self
     }
 
@@ -12530,6 +12596,68 @@ mod tests {
         assert_eq!(r.state(), WallTimeState::Trusted);
         assert_eq!(r.time().secs(), 1_700_000_000);
         assert!(r.time().subsec_nanos() < 1_000);
+    }
+
+    /// `boot_id_get` fails closed with `BufferTooSmall` for a buffer shorter
+    /// than `BOOT_ID_LEN` and with `EntropyNotReady` while the boot id is
+    /// unset — both *before* any address-space access, and even when a real id
+    /// is installed (the short-buffer rejection is unconditional). Once a
+    /// `BootId` is installed and the buffer is large enough the 16 bytes are
+    /// copied out to the caller and the byte count returned.
+    #[test]
+    fn boot_id_get_fails_closed_then_copies_out_the_minted_id() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        // A writable caller page for the copy-out, registered for task 2.
+        let (space, physmap) = send_aspace(MapFlags::WRITE | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        // Unset (default): a short buffer is rejected before anything else,
+        // and a large-enough buffer fails closed `EntropyNotReady` rather than
+        // ever emitting the all-zero sentinel.
+        let unset = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(
+            unset.boot_id_get(&ctx, 0x1000, 0),
+            Err(Errno::BufferTooSmall)
+        );
+        assert_eq!(
+            unset.boot_id_get(&ctx, 0x1000, BOOT_ID_LEN),
+            Err(Errno::EntropyNotReady)
+        );
+
+        // With a real id installed: a short buffer is still rejected, and a
+        // large-enough one copies the 16 bytes out and returns the count.
+        let id = BootId::from_raw([0x5A; BOOT_ID_LEN]);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_boot_id(id);
+        assert_eq!(
+            h.boot_id_get(&ctx, 0x1000, BOOT_ID_LEN - 1),
+            Err(Errno::BufferTooSmall)
+        );
+        assert_eq!(
+            h.boot_id_get(&ctx, 0x1000, BOOT_ID_LEN),
+            Ok(BOOT_ID_LEN as u64)
+        );
     }
 
     // --- filesystem syscalls (P-A) ----------------

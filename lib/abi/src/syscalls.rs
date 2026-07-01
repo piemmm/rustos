@@ -1416,6 +1416,27 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: Some(CapabilityId::TIME_SET),
         audit: true,
     },
+    SyscallSpec {
+        number: SyscallNumber::BOOT_ID_GET,
+        name: "boot_id_get",
+        arg_count: 2,
+        args: [
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `U64` carries the bytes-written-or-`-errno` convention, like
+        // `wall_time_get`.
+        ret: AbiType::U64,
+        // The boot id is a public per-boot nonce, not a secret, so reading it
+        // is unprivileged like `clock_get` / `wall_time_get`. Not audited — a
+        // pure observer.
+        required_capability: None,
+        audit: false,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in
@@ -1799,6 +1820,17 @@ mod tests {
         let set = spec_for(SyscallNumber::WALL_TIME_SET).unwrap();
         assert_eq!(set.required_capability, Some(CapabilityId::TIME_SET));
         assert!(set.audit, "wall_time_set must be audited");
+    }
+
+    #[test]
+    fn boot_id_get_capability_requirements_are_frozen() {
+        // The boot id is a public per-boot nonce, not a secret, so reading it
+        // is a pure, unprivileged observer (like clock_get / wall_time_get)
+        // and is not audited per call. Lock this down so a refactor cannot
+        // gate or audit it.
+        let get = spec_for(SyscallNumber::BOOT_ID_GET).unwrap();
+        assert_eq!(get.required_capability, None);
+        assert!(!get.audit, "boot_id_get must not audit per call");
     }
 
     #[test]
