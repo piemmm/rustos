@@ -334,6 +334,16 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
+    fn terminal_size(
+        &self,
+        _c: &CallerContext<'_>,
+        _fd: u32,
+        _out: u64,
+        _out_cap: usize,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
     fn log_emit(&self, _c: &CallerContext<'_>, _record: u64, _len: usize) -> SyscallResult {
         self.bump();
         Ok(0)

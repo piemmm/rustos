@@ -1468,6 +1468,29 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: Some(CapabilityId::SYSINFO_INTROSPECT),
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::TERMINAL_SIZE,
+        name: "terminal_size",
+        arg_count: 3,
+        args: [
+            // The standard descriptor to query, then the out buffer the
+            // encoded `TerminalSize` is written into, then its capacity.
+            AbiType::U32,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `U64` carries the bytes-written-or-`-errno` register convention
+        // `wall_time_get` / `boot_id_get` use.
+        ret: AbiType::U64,
+        // Asking how big one's own terminal is unprivileged, like
+        // `clock_get` / `wall_time_get`. Not audited — a pure observer a
+        // full-screen program may re-read freely.
+        required_capability: None,
+        audit: false,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

@@ -154,6 +154,13 @@ const PROGRAMS: &[Program] = &[
         fixture: "sysinfo_rxe.rs",
         prefix: "SYSINFO",
     },
+    Program {
+        pkg: "rustos-top",
+        bin: "rustos-top-run",
+        rel_dir: "../../userland/apps/top",
+        fixture: "top_rxe.rs",
+        prefix: "TOP",
+    },
 ];
 
 fn main() {

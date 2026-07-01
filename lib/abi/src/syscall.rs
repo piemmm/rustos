@@ -1043,6 +1043,26 @@ impl SyscallNumber {
     /// in `out` on entry (a `u64` arg cannot carry it), which the kernel
     /// resolves against the capability table so the answer survives PID reuse.
     pub const SYSINFO_INTROSPECT: Self = Self(62);
+    /// Read the character-cell geometry of the text console backing a
+    /// standard stream (`PREREQUISITES.md` P-C — the `top` terminal UI).
+    ///
+    /// Arguments: `fd: u32` (a standard descriptor the caller owns —
+    /// typically [`crate::STDOUT`]), `out: *mut u8` (user buffer), `out_cap:
+    /// usize` (its capacity, at least [`crate::TerminalSize::WIRE_LEN`]). On
+    /// success the console's [`TerminalSize`](crate::TerminalSize) is written
+    /// little-endian to `out` and its byte length returned; otherwise
+    /// `-errno`.
+    ///
+    /// Unprivileged, like [`Self::CLOCK_GET`] / [`Self::WALL_TIME_GET`]: a
+    /// program may always ask how big its own terminal is. The kernel reports
+    /// a size **only** for a console whose geometry it actually knows (a
+    /// framebuffer text console); for a byte-stream console (a UART) the true
+    /// size of the remote terminal is unknowable to the kernel, so the call
+    /// fails closed with [`Errno::NotImplemented`] and the client terminal
+    /// library applies the conventional 80×24 fallback — the kernel never
+    /// fabricates a size. An `fd` that is not an open stream, or a buffer
+    /// shorter than the wire length, also fails closed.
+    pub const TERMINAL_SIZE: Self = Self(63);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
@@ -1181,6 +1201,7 @@ mod tests {
         assert_eq!(SyscallNumber::WALL_TIME_SET.as_u16(), 60);
         assert_eq!(SyscallNumber::BOOT_ID_GET.as_u16(), 61);
         assert_eq!(SyscallNumber::SYSINFO_INTROSPECT.as_u16(), 62);
+        assert_eq!(SyscallNumber::TERMINAL_SIZE.as_u16(), 63);
     }
 
     #[test]

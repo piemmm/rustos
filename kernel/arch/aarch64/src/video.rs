@@ -395,13 +395,21 @@ pub struct DiscoveredVideo {
 }
 
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
-pub use metal::{configure_from_fdt, write_bytes};
+pub use metal::{configure_from_fdt, text_grid, write_bytes};
 
 /// Host stand-in for the freestanding writer: rendering needs the
 /// firmware surface, so on the host this is inert (the renderer itself
 /// is host-tested directly through [`TextConsole`]).
 #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
 pub fn write_bytes(_bytes: &[u8]) {}
+
+/// Host stand-in for the freestanding `text_grid`: no firmware surface exists
+/// on the host, so no video console is active and the grid is unknown.
+#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+#[must_use]
+pub fn text_grid() -> Option<rustos_abi::TerminalSize> {
+    None
+}
 
 /// The freestanding half: the firmware exchange, the identity-mapped
 /// surface, and the cache maintenance. Target-only — every routine here
@@ -640,6 +648,30 @@ mod metal {
                 (row_end - row_start) as usize * stride_bytes,
             );
         }
+    }
+
+    /// The active framebuffer console's character-cell grid, when one is
+    /// configured (`terminal_size` — P-C).
+    ///
+    /// Post-MMU only (the render lock's atomic CAS requires it). Returns
+    /// [`None`] when no video console is active (a UART-only board), so the
+    /// caller reports no size and the client applies its fallback. A grid so
+    /// large a dimension overflows the `u16` wire field also yields [`None`]
+    /// (fail closed) rather than a truncated size.
+    pub fn text_grid() -> Option<rustos_abi::TerminalSize> {
+        if !super::is_active() {
+            return None;
+        }
+        let _guard = RENDER_LOCK.lock();
+        // SAFETY: `VIDEO_ACTIVE` was observed `true` (acquire), so the boot
+        // CPU's release-published initialisation is visible, and the held
+        // render lock serialises this access (see `VideoSlot`). A shared
+        // borrow suffices; the geometry is read, not mutated.
+        let state = (unsafe { (*VIDEO.0.get()).as_ref() })?;
+        let geometry = state.console.geometry();
+        let rows = u16::try_from(geometry.rows()).ok()?;
+        let cols = u16::try_from(geometry.columns()).ok()?;
+        rustos_abi::TerminalSize::new(rows, cols).ok()
     }
 
     /// Clean `[start, start + len)` from the data cache to the point of

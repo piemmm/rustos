@@ -57,9 +57,9 @@
 use rustos_abi::input::KeyInput;
 use rustos_abi::waitset::{WaitSetOp, WaitSourceKind};
 use rustos_abi::{
-    BootId, FileStat, HwNode, LimitKind, MapFlags, OpenFlags, ResourceLimit, SyscallNumber, Time64,
-    WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, SPAWN_UID_INHERIT, STDERR,
-    STDIN, STDINFO, STDOUT,
+    BootId, FileStat, HwNode, LimitKind, MapFlags, OpenFlags, ResourceLimit, SyscallNumber,
+    TerminalSize, Time64, WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT,
+    SPAWN_UID_INHERIT, STDERR, STDIN, STDINFO, STDOUT, TERMINAL_SIZE_WIRE_LEN,
 };
 use rustos_abi_trap::raw_syscall;
 
@@ -250,6 +250,9 @@ const NUM_BOOT_ID_GET: u64 = SyscallNumber::BOOT_ID_GET.as_u16() as u64;
 
 /// `sysinfo_introspect` syscall number (as above).
 const NUM_SYSINFO_INTROSPECT: u64 = SyscallNumber::SYSINFO_INTROSPECT.as_u16() as u64;
+
+/// `terminal_size` syscall number (as above).
+const NUM_TERMINAL_SIZE: u64 = SyscallNumber::TERMINAL_SIZE.as_u16() as u64;
 
 /// Marshal a 32-bit signed argument into its register value following the
 /// `abi-v1` `I32` convention (sign-extend through `i64`).
@@ -1731,6 +1734,44 @@ pub fn sysinfo_introspect(domain: u32, arg: u64, buf: &mut [u8]) -> Result<usize
     #[allow(clippy::cast_possible_truncation)]
     #[allow(clippy::cast_sign_loss)]
     Ok((ret as usize).min(buf.len()))
+}
+
+/// Read the character-cell geometry of the text console backing standard
+/// stream `fd` (`SyscallNumber::TERMINAL_SIZE`; P-C — the `top` terminal UI).
+///
+/// `fd` is a standard descriptor the caller owns (typically [`STDOUT`]).
+/// Unprivileged, like [`clock_get`]: a program may always ask how big its own
+/// terminal is.
+///
+/// # Errors
+///
+/// Returns the raw negative kernel result (`-errno`). The notable case is
+/// `NotImplemented`: the kernel reports a size only for a console whose grid
+/// it actually knows (a framebuffer text console). For a byte-stream console
+/// (a UART), whose remote terminal size the kernel cannot attest, the call
+/// fails closed and the caller applies the conventional fallback — the kernel
+/// never fabricates a size. An `fd` that is not an open stream fails
+/// `NotFound`. The wrapper hides no error.
+pub fn terminal_size(fd: u32) -> Result<TerminalSize, i64> {
+    let mut buf = [0u8; TERMINAL_SIZE_WIRE_LEN];
+    let out_ptr = buf.as_mut_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
+    // `(ptr, len)` pair against the caller's address space before writing.
+    // `buf` is a live exclusive local for the duration of the call.
+    #[allow(clippy::cast_possible_wrap)]
+    // The kernel guarantees the i64 count-result encoding (count ≥ 0, else -errno).
+    let ret = unsafe {
+        raw_syscall(
+            NUM_TERMINAL_SIZE,
+            [u64::from(fd), out_ptr, buf.len() as u64, 0, 0, 0],
+        )
+    } as i64;
+    if ret < 0 {
+        return Err(ret);
+    }
+    // The kernel returns the wire length; decode it (fail closed on a
+    // malformed image — never inventing a size).
+    TerminalSize::from_bytes(&buf).map_err(|e| -i64::from(e.as_i32()))
 }
 
 /// Create a kernel-owned, zeroed, cross-process shared-memory region and map

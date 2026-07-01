@@ -123,6 +123,7 @@ const NUM_WALL_TIME_GET: u64 = SyscallNumber::WALL_TIME_GET.as_u16() as u64;
 const NUM_WALL_TIME_SET: u64 = SyscallNumber::WALL_TIME_SET.as_u16() as u64;
 const NUM_BOOT_ID_GET: u64 = SyscallNumber::BOOT_ID_GET.as_u16() as u64;
 const NUM_SYSINFO_INTROSPECT: u64 = SyscallNumber::SYSINFO_INTROSPECT.as_u16() as u64;
+const NUM_TERMINAL_SIZE: u64 = SyscallNumber::TERMINAL_SIZE.as_u16() as u64;
 
 /// Empty argument vector for the no-argument syscalls.
 const NO_ARGS: [u64; SYSCALL_MAX_ARGS] = [0; SYSCALL_MAX_ARGS];
@@ -987,6 +988,31 @@ pub extern "C" fn sys_sysinfo_introspect(
     }
 }
 
+/// `terminal_size`: read the character-cell geometry of the text console
+/// backing standard stream `fd` (`SyscallNumber::TERMINAL_SIZE`). The encoded
+/// `rustos_abi::TerminalSize` (two little-endian `u16`s: rows, then columns)
+/// is written to the `out_cap`-byte buffer at `out` and its byte count
+/// returned (or a `ROS_E_*` code reinterpreted into the result).
+///
+/// Unprivileged, like `ros_sys_clock_get` — a program may always ask how big
+/// its own terminal is. The kernel reports a size only for a console whose
+/// grid it actually knows (a framebuffer text console); for a byte-stream
+/// console (a UART), whose remote-terminal size the kernel cannot attest, the
+/// call fails closed with `ROS_E_NOT_IMPLEMENTED` and the caller applies the
+/// conventional fallback — the kernel never fabricates a size.
+#[must_use]
+#[export_name = "ros_sys_terminal_size"]
+pub extern "C" fn sys_terminal_size(fd: u32, out: *mut c_void, out_cap: usize) -> u64 {
+    // SAFETY: see `sys_boot_id_get`; the kernel validates the `(out, out_cap)`
+    // pair against the caller's address space before writing it.
+    unsafe {
+        raw_syscall(
+            NUM_TERMINAL_SIZE,
+            [u64::from(fd), ptr_arg(out), out_cap as u64, 0, 0, 0],
+        )
+    }
+}
+
 /// `log_emit`: emit one encoded diagnostic record (a `rustos_abi::log`
 /// `LogRecord` wire image of `len` bytes at `record`) to the kernel's
 /// diagnostic log sink (`SyscallNumber::LOG_EMIT`).
@@ -1471,6 +1497,7 @@ mod tests {
         (NUM_WALL_TIME_SET, "wall_time_set", 3),
         (NUM_BOOT_ID_GET, "boot_id_get", 2),
         (NUM_SYSINFO_INTROSPECT, "sysinfo_introspect", 4),
+        (NUM_TERMINAL_SIZE, "terminal_size", 3),
     ];
 
     #[test]
@@ -1550,6 +1577,20 @@ mod tests {
         assert_eq!(args[0], ptr as usize as u64);
         assert_eq!(args[1], 13);
         assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn terminal_size_marshals_fd_out_pointer_and_capacity() {
+        let mut buf = [0u8; 4];
+        let ptr = buf.as_mut_ptr().cast::<c_void>();
+        let (number, args) = capture(4, || {
+            assert_eq!(sys_terminal_size(1, ptr, 4), 4);
+        });
+        assert_eq!(number, NUM_TERMINAL_SIZE);
+        assert_eq!(args[0], 1);
+        assert_eq!(args[1], ptr as usize as u64);
+        assert_eq!(args[2], 4);
+        assert_eq!(&args[3..], &[0, 0, 0]);
     }
 
     #[test]

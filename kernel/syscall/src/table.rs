@@ -932,6 +932,35 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Read the character-cell geometry of the text console backing a
+    /// standard stream (P-C — the `top` terminal UI).
+    ///
+    /// The dispatcher has already checked `out` is a non-null `UserPtr`; the
+    /// call is unprivileged (a program may always ask how big its own
+    /// terminal is). The implementation resolves `fd` against the caller's
+    /// descriptor table to the backing console, and — only for a console
+    /// whose geometry the kernel actually knows (a framebuffer text console)
+    /// — writes its [`rustos_abi::TerminalSize`] out little-endian through the
+    /// validated boundary and returns its byte length. A byte-stream console
+    /// (a UART), whose remote terminal size is unknowable to the kernel,
+    /// fails closed with [`Errno::NotImplemented`] so the client applies the
+    /// conventional fallback — the kernel never fabricates a size. An `fd`
+    /// that is not an open stream, or a buffer shorter than
+    /// [`rustos_abi::TerminalSize::WIRE_LEN`], also fails closed.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]; the real handler is installed in
+    /// `kernel/core`.
+    fn terminal_size(
+        &self,
+        _caller: &CallerContext<'_>,
+        _fd: u32,
+        _out: u64,
+        _out_cap: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// Emit a structured diagnostic record to the kernel's diagnostic log
     /// sink.
     ///
@@ -1781,6 +1810,14 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 self.handlers
                     .sysinfo_introspect(caller, domain, args.0[1], args.0[2], out_cap)
             }
+            SyscallNumber::TERMINAL_SIZE => {
+                // args[0] is the descriptor to query; args[1] is the non-null
+                // out `UserPtr` (dispatcher-checked); args[2] is its capacity
+                // in bytes.
+                let fd = decode_u32(args.0[0]);
+                let out_cap = decode_len(args.0[2])?;
+                self.handlers.terminal_size(caller, fd, args.0[1], out_cap)
+            }
             _ => Err(Errno::NotFound),
         }
     }
@@ -2440,6 +2477,20 @@ mod tests {
             // Echo the capacity so the reachability test can assert the
             // dispatcher decoded all four arguments without wiring a real
             // introspection source.
+            Ok(out_cap as u64)
+        }
+
+        fn terminal_size(
+            &self,
+            _c: &CallerContext<'_>,
+            _fd: u32,
+            _out: u64,
+            out_cap: usize,
+        ) -> SyscallResult {
+            self.record("terminal_size");
+            // Echo the capacity so the reachability test can assert the
+            // dispatcher decoded all three arguments without wiring a real
+            // console geometry.
             Ok(out_cap as u64)
         }
 

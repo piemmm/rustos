@@ -83,6 +83,7 @@ use rustos_abi::{
     ResourceLimit, StreamMode, SyscallNumber, Time64, WaitSetOp, WaitSourceKind, WallClockReading,
     WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, FS_IO_MAX, FS_NAME_MAX, FS_PATH_MAX,
     LOG_FIELDS_MAX, LOG_RECORD_MAX, PROC_ID_LEN, RANDOM_REQUEST_MAX_BYTES, SPAWN_UID_INHERIT,
+    TERMINAL_SIZE_WIRE_LEN,
 };
 use rustos_caps::CapabilitySet;
 use rustos_kernel_ipc::{
@@ -1392,6 +1393,51 @@ where
             return Err(Errno::EntropyNotReady);
         }
         let bytes = self.boot_id.to_le_bytes();
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_out(space, physmap, VirtAddr::new(out), &bytes)
+        }) {
+            Some(Ok(())) => Ok(bytes.len() as u64),
+            Some(Err(err)) => Err(copy_fault_errno(err)),
+            None => Err(Errno::BadAddress),
+        }
+    }
+
+    fn terminal_size(
+        &self,
+        caller: &CallerContext<'_>,
+        fd: u32,
+        out: u64,
+        out_cap: usize,
+    ) -> SyscallResult {
+        // Resolve `fd` against the caller's per-process descriptor table
+        // first: only an open standard stream names a console. A descriptor
+        // that is not open (an out-of-range fd, a closed one, or an opened
+        // file — which the standard-stream table records as `Closed`) fails
+        // closed with `NotFound`, never leaking which case occurred.
+        let streams = self.aspaces.read().streams(caller.task_id);
+        if streams.mode(fd) == StreamMode::Closed {
+            return Err(Errno::NotFound);
+        }
+        // Resolve the descriptor's backing console. A missing console —
+        // including the empty pre-install list — announces the inert
+        // interface rather than fabricating a geometry.
+        let Some(device) = self.consoles.get(usize::from(streams.console(fd))) else {
+            return Err(Errno::NotImplemented);
+        };
+        // Report a size only for a console whose grid the kernel actually
+        // knows (a framebuffer text console). A byte-stream console (a UART)
+        // reports `None`: the remote terminal's size is unknowable to the
+        // kernel, so fail closed rather than fabricate one — the client
+        // applies the conventional fallback.
+        let Some(geometry) = device.geometry() else {
+            return Err(Errno::NotImplemented);
+        };
+        // The caller's buffer must hold the whole reading; a short buffer
+        // fails closed rather than truncating it.
+        if out_cap < TERMINAL_SIZE_WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let bytes = geometry.to_le_bytes();
         match self.with_caller_aspace(caller, |space, physmap| {
             copy_out(space, physmap, VirtAddr::new(out), &bytes)
         }) {
@@ -6565,6 +6611,20 @@ mod tests {
         fn write(&self, bytes: &[u8]) -> Result<usize, Errno> {
             self.written.lock().extend_from_slice(bytes);
             Ok(bytes.len())
+        }
+    }
+
+    /// A console sink that reports a fixed character-cell grid, standing in
+    /// for a framebuffer text console in the `terminal_size` handler test.
+    struct GridConsole(rustos_abi::TerminalSize);
+
+    impl crate::console::ConsoleWrite for GridConsole {
+        fn write(&self, bytes: &[u8]) -> Result<usize, Errno> {
+            Ok(bytes.len())
+        }
+
+        fn geometry(&self) -> Option<rustos_abi::TerminalSize> {
+            Some(self.0)
         }
     }
 
@@ -13732,6 +13792,91 @@ mod tests {
         assert_eq!(
             h.boot_id_get(&ctx, 0x1000, BOOT_ID_LEN),
             Ok(BOOT_ID_LEN as u64)
+        );
+    }
+
+    /// `terminal_size` copies out the grid of a console whose geometry the
+    /// kernel knows (a framebuffer text console), and fails closed for a
+    /// console with no known geometry (a UART) rather than fabricating one,
+    /// for a short buffer, and for a descriptor that is not an open stream.
+    #[test]
+    fn terminal_size_reports_a_known_console_grid_and_fails_closed_otherwise() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        // A writable caller page (page 1 = `0x1000`) for the copy-out.
+        let (space, physmap) = server_aspace(&[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let grid = rustos_abi::TerminalSize::new(45, 100).expect("valid grid");
+        // Console 0 is a framebuffer text console reporting a known grid;
+        // console 1 is a UART that reports no geometry (a `RecordingConsole`,
+        // which takes the trait's `geometry() -> None` default).
+        let video: &'static GridConsole = Box::leak(Box::new(GridConsole(grid)));
+        let uart: &'static RecordingConsole = Box::leak(Box::new(RecordingConsole::new()));
+        let consoles: &'static [ConsoleDevice] = Box::leak(Box::new([
+            ConsoleDevice::new(video, &crate::console::NULL_CONSOLE_READ),
+            ConsoleDevice::new(uart, &crate::console::NULL_CONSOLE_READ),
+        ]));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_consoles(consoles);
+
+        // Attached to console 0 (the display): the known grid is copied out.
+        aspaces
+            .write()
+            .set_streams(SecTaskId(2), DescriptorTable::standard_on(0));
+        assert_eq!(
+            h.terminal_size(&ctx, STDOUT, 0x1000, TERMINAL_SIZE_WIRE_LEN),
+            Ok(TERMINAL_SIZE_WIRE_LEN as u64)
+        );
+        {
+            let guard = aspaces.read();
+            let (_s, pm) = guard.resolve(SecTaskId(2)).expect("aspace present");
+            let bytes = read_server_page(pm, 1, TERMINAL_SIZE_WIRE_LEN);
+            assert_eq!(rustos_abi::TerminalSize::from_bytes(&bytes), Ok(grid));
+        }
+
+        // A short buffer fails closed rather than truncating the reading.
+        assert_eq!(
+            h.terminal_size(&ctx, STDOUT, 0x1000, TERMINAL_SIZE_WIRE_LEN - 1),
+            Err(Errno::BufferTooSmall)
+        );
+
+        // Attached to console 1 (the UART): the kernel does not know its size,
+        // so it fails closed rather than fabricating one.
+        aspaces
+            .write()
+            .set_streams(SecTaskId(2), DescriptorTable::standard_on(1));
+        assert_eq!(
+            h.terminal_size(&ctx, STDOUT, 0x1000, TERMINAL_SIZE_WIRE_LEN),
+            Err(Errno::NotImplemented)
+        );
+
+        // A descriptor that is not an open stream (an fd beyond the standard
+        // set) fails closed `NotFound`.
+        aspaces
+            .write()
+            .set_streams(SecTaskId(2), DescriptorTable::standard_on(0));
+        assert_eq!(
+            h.terminal_size(&ctx, 9, 0x1000, TERMINAL_SIZE_WIRE_LEN),
+            Err(Errno::NotFound)
         );
     }
 

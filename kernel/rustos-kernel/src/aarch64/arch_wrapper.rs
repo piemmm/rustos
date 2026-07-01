@@ -414,6 +414,14 @@ impl ConsoleWrite for VideoConsole {
         rustos_arch_aarch64::video::write_bytes(bytes);
         Ok(bytes.len())
     }
+
+    fn geometry(&self) -> Option<rustos_abi::TerminalSize> {
+        // The framebuffer console's grid is a function of the firmware
+        // panel resolution and the font, known at runtime; report it so a
+        // full-screen program (`top`) draws to the real display extents. A
+        // UART keeps the trait default (`None`).
+        rustos_arch_aarch64::video::text_grid()
+    }
 }
 
 /// The single `'static` [`VideoConsole`] the boot path lists first when

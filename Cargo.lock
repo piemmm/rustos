@@ -2798,6 +2798,7 @@ dependencies = [
  "rustos-abi",
  "rustos-curses",
  "rustos-procinfo",
+ "rustos-rt",
  "rustos-termcap",
  "rustos-vt",
 ]

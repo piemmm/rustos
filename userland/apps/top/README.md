@@ -46,6 +46,19 @@ gates on `CAP_SYSINFO_GLOBAL`; without it the toggle surfaces
 Both the `sysinfo` transport and the curses tty are object-safe seams, so the
 whole viewer runs against in-memory fixtures with no kernel (`AGENTS.md` §7).
 
+- **`run` (the `Run` binary, `src/run.rs`)** — the freestanding pure-Rust
+  program a shell spawns. It links `rustos-rt` (behind the on-by-default
+  `program` feature) and drives the viewer against two production seams: the
+  shared `lib/procinfo` `IpcTransport` to `sysinfod`, and `RtTty`, a curses
+  channel over the inherited standard streams (writes to fd 1, blocking reads
+  from fd 0, local echo suppressed for raw input). It sizes the screen from the
+  `terminal_size` syscall — the console's real grid when the kernel knows it (a
+  framebuffer console), else the conventional 80×24 fallback the client applies
+  when the size is unknowable (a serial terminal). It binds only its inherited
+  descriptors, never a console device (`AGENTS.md` §20). On the host it is an
+  inert stub. The kernel image bakes it as `/Apps/Top.app/Run` with
+  `CAP_CONSOLE_WRITE` + `CAP_CONSOLE_READ`.
+
 ## Linking
 
 `top` is an OS-bundled app, so it **dynamically links** the OS-provided

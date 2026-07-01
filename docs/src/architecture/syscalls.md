@@ -108,6 +108,8 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  59 | `wall_time_get` | `user_ptr` (out), `len`                | `u64` (bytes) | — | no |
 |  60 | `wall_time_set` | `user_ptr` (time), `len`, `u32 state`  | `errno` | `CAP_TIME_SET` | yes |
 |  61 | `boot_id_get`  | `user_ptr` (out), `len`                | `u64` (bytes) | — | no |
+|  62 | `sysinfo_introspect` | `u32 domain`, `u64 arg`, `user_ptr` (out), `len` | `u64` (bytes) | `CAP_SYSINFO_INTROSPECT` | no |
+|  63 | `terminal_size` | `u32 fd`, `user_ptr` (out), `len`      | `u64` (bytes) | — | no |
 
 (Syscall numbers 39–45 — `msi_alloc`, `shm_create`/`shm_map`/`shm_unmap`,
 `waitset_create`/`waitset_ctl`/`waitset_wait` — are defined in
@@ -133,6 +135,7 @@ is exhaustive — anything not listed below is ungated:
 | `CAP_MMIO_MAP`     | `mmio_map`                 |
 | `CAP_MEM_DMA`      | `dma_alloc`, `dma_free`    |
 | `CAP_SYSINFO_HW`   | `hw_tree_read`, `hw_tree_wait` |
+| `CAP_SYSINFO_INTROSPECT` | `sysinfo_introspect` |
 | `CAP_LOG_EMIT`     | `log_emit`                 |
 | `CAP_HW_EMIT`      | `hw_emit_node`, `hw_remove_node` |
 | `CAP_FS_ACCESS`    | `fs_open`, `fs_close`, `fs_read`, `fs_write`, `fs_readdir`, `fs_stat`, `fs_truncate`, `fs_sync`, `fs_mkdir`, `fs_unlink`, `fs_rename` |
@@ -441,6 +444,27 @@ time has no id — the call fails closed with `EntropyNotReady` rather than
 return the all-zero `BootId::UNSET` sentinel as if it were real. The
 first-party Rust wrapper is `rustos_rt::boot_id`; the C stub is
 `ros_sys_boot_id_get`.
+
+`terminal_size` (no. 63) reports the character-cell grid of the text console
+backing a caller's standard stream — `fd` (typically `STDOUT`), then the
+`(out, len)` buffer the encoded `rustos_abi::TerminalSize` (rows, then columns,
+two little-endian `u16`s) is written to — so a full-screen terminal program
+(`top`) draws to the real display extents (`PREREQUISITES.md` P-C). It is
+**ungated** and unaudited, the same unprivileged observer baseline as
+`clock_get` / `wall_time_get`: asking how big one's own terminal is grants no
+authority. The handler resolves `fd` against the caller's descriptor table
+(a non-open descriptor → `NotFound`), resolves its backing console, and
+reports a size **only** for a console whose geometry the kernel actually
+knows — a framebuffer text console, whose grid is a function of the panel
+resolution and the font (`VideoConsole::geometry` → the live
+`video::text_grid`). For a byte-stream console (a UART) the true size of the
+remote terminal is a property of the far-end emulator, unknowable to the
+kernel: the call fails closed with `NotImplemented` and the client terminal
+library applies the conventional 80×24 fallback — the size policy lives in the
+client, and the kernel never fabricates a size (`AGENTS.md` §5.4). A buffer
+shorter than the wire length fails closed with `BufferTooSmall`. The
+first-party Rust wrapper is `rustos_rt::terminal_size`; the C stub is
+`ros_sys_terminal_size`.
 
 `mem_map` / `mem_unmap` are deliberately **ungated** (no row above). They
 grow and shrink the caller's *own* hardware-isolated address space with

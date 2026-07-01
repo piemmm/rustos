@@ -29,7 +29,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use rustos_abi::Errno;
+use rustos_abi::{Errno, TerminalSize};
 use rustos_kernel_sched_api::SchedulerArch;
 use rustos_sync::SpinLock;
 use rustos_vt::control;
@@ -65,6 +65,20 @@ pub trait ConsoleWrite: Sync {
     /// bytes. The default sink ([`NullConsole`]) returns
     /// [`Errno::NotImplemented`] to mark an inert interface.
     fn write(&self, bytes: &[u8]) -> Result<usize, Errno>;
+
+    /// This console's character-cell grid, when the device knows it
+    /// (`terminal_size`).
+    ///
+    /// A framebuffer text console has a grid that is a function of the panel
+    /// resolution and the font, so it overrides this to report its live
+    /// geometry. A byte-stream console (a UART) keeps the default [`None`]:
+    /// the true size of the remote terminal is a property of whatever
+    /// emulator sits at the far end of the wire, unknowable to the kernel, so
+    /// `terminal_size` fails closed for it and the client applies the
+    /// conventional fallback rather than the kernel fabricating a grid.
+    fn geometry(&self) -> Option<TerminalSize> {
+        None
+    }
 }
 
 /// The console sink installed before any real device exists.
@@ -463,6 +477,17 @@ impl ConsoleDevice {
             echo: AtomicBool::new(true),
             echo_col: AtomicUsize::new(0),
         }
+    }
+
+    /// This console's character-cell geometry, if the backing device knows it
+    /// (`terminal_size`).
+    ///
+    /// Delegates to the console's write device: [`Some`] for a framebuffer
+    /// text console reporting its live grid, [`None`] for a byte-stream
+    /// console (a UART) whose remote-terminal size the kernel cannot attest.
+    #[must_use]
+    pub fn geometry(&self) -> Option<TerminalSize> {
+        self.write.geometry()
     }
 
     /// Whether terminal local echo is currently enabled for this console.
