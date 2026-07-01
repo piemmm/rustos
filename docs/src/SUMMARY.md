@@ -48,6 +48,7 @@
   - [`rustos-keymap`](./lib/keymap.md)
   - [`rustos-log`](./lib/log.md)
   - [`rustos-path`](./lib/path.md)
+  - [`rustos-resref`](./lib/resref.md)
   - [`rustos-rng`](./lib/rng.md)
   - [`rustos-rt` I/O](./lib/rt-io.md)
   - [`rustos-termcap`](./lib/termcap.md)

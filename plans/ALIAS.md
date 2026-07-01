@@ -1,6 +1,12 @@
 # ALIAS.md - RustOS Resource Alias and Selector Specification
 
-Status: normative design input for implementation.
+Status: normative design input for implementation. The single shared
+reference **parser** is landed as `lib/resref` (`rustos-resref`): the one
+definition of how the grammar in §5 is lexed and validated into typed values
+(`ResourceRef` and the §16.2 conceptual types it covers), spelling only —
+resolution, capability checks, and the resolver error model (§19) remain the
+resolver services' concern and are not yet implemented. See
+`.junie/PREREQUISITES2.md` P5.
 
 This document specifies RustOS resource aliases and selector namespaces. It is
 intended to be used together with the RustOS drive/path conventions document.

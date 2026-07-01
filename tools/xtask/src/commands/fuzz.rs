@@ -180,6 +180,12 @@ pub const TARGETS: &[Target] = &[
         test: "fuzz_path",
         description: "lib/path path-string parser + canonical-spelling round-trip (untrusted path bytes)",
     },
+    Target {
+        package: "rustos-resref",
+        test: "fuzz_resref",
+        description:
+            "lib/resref resource-reference parser + canonical-spelling round-trip (untrusted reference bytes)",
+    },
 ];
 
 /// How long to run each harness.

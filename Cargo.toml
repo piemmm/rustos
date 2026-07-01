@@ -59,6 +59,7 @@ members = [
     "lib/pci",
     "lib/procinfo",
     "lib/raster",
+    "lib/resref",
     "lib/rng",
     "lib/rt",
     "lib/svg",

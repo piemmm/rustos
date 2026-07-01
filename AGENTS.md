@@ -600,6 +600,17 @@ rustos/
 │   │                    #   (request seams, process-list paging + render).
 │   ├── raster/          # Shared software rasterisation: premultiplied-alpha
 │   │                    #   Surface (fill_rect, fill_polygon, blit) (§2.2, §17.4).
+│   ├── resref/          # Shared resource-reference parser: the one definition
+│   │                    #   of how a RustOS resource reference
+│   │                    #   (namespace:selector[@guard][::facet][?params], e.g.
+│   │                    #   sys:random, disk:backup@7K2M, stats:net/wan/rx.pps?
+│   │                    #   window=1s) is lexed and validated into a typed
+│   │                    #   ResourceRef + closed namespace registry. The shell
+│   │                    #   (redirection, args, completion, typed values) and
+│   │                    #   the resolver services import it, never a second
+│   │                    #   reference parser (§2.2). no_std+alloc, fail-closed,
+│   │                    #   bounded; spelling only — no resolve/open/capability
+│   │                    #   check (plans/ALIAS.md, .junie/PREREQUISITES2.md P5).
 │   ├── rng/             # RNG: a NIST SP 800-90A HMAC-SHA256 CSPRNG over
 │   │                    #   lib/crypto (§2.12), an entropy seam (§19.2), and a
 │   │                    #   fast non-crypto xoshiro256++ generator.

@@ -3322,6 +3322,28 @@ I/O vocabulary. See `.junie/PREREQUISITES2.md` for the full P0–P6 status.
   stage adds (at which point `lib/path` gains the `id::`/`fs::`/… `Root`
   variants in place). Remaining prerequisites (P2, P4 remainder, P5) are tracked
   in `.junie/PREREQUISITES2.md`.
+- P5 (reference parser) — shared resource-reference parser as a `lib/*` crate:
+  **done.** `lib/resref` (`rustos-resref`) is the one definition of how a RustOS
+  resource reference is lexed and validated into a typed `ResourceRef`, so the
+  shell (redirection targets, command arguments, completion, typed shell values)
+  and the resolver services import it rather than embedding a second reference
+  parser (§2.2). It parses the `plans/ALIAS.md` grammar
+  `namespace:selector[@guard][::facet][?params]` — including the `disk:@7K2M`
+  fingerprint shorthand and the `disk:?…` query-only form — and defines the
+  closed namespace registry (`KnownNamespace`) once. It is `no_std`+`alloc`,
+  `#![forbid(unsafe_code)]`, fail-closed and bounded (ref/namespace/segment/
+  guard/facet/param sizes and counts are fixed security bounds, §24.4), with the
+  reserved delimiters `: / @ :: ? ,` never literal inside the part they delimit
+  (so a rendered reference always re-parses). It is **spelling only**: it never
+  resolves a namespace, opens a resource, verifies a fingerprint, or checks a
+  capability — those resolver-level errors (`UnknownNamespace`,
+  `CapabilityDenied`, `IdentityMismatch`, …) belong to the resolver services
+  (§16.3 of `plans/ALIAS.md`). A string with no `:` is `NotAReference` (a
+  filesystem path, owned by `lib/path`). Unit tests, rustdoc, a docs page, and
+  the `fuzz_resref` round-trip harness ship with it. **Still open under P5**
+  (tracked, not stubbed): the capability-resolved namespace resolver and the
+  resource-backing descriptor path (gated on the same open/descriptor ABI as the
+  P4 remainder), which consume this parser rather than re-inventing it.
 
 ## CCOMPAT — C-callable `abi-v1` (full `lib/abi` header, syscall stubs, crt0)
 

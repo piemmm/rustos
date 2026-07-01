@@ -1,0 +1,19 @@
+[package]
+name = "rustos-resref"
+description = "RustOS shared resource-reference parser: the one first-party definition of how a RustOS resource reference (`namespace:selector[@guard][::facet][?params]`, e.g. `sys:random`, `disk:backup@7K2M`, `stats:net/wan/rx.pps?window=1s`) is lexed and validated into a typed structure. The shell (redirection targets, command arguments, completion, typed values), system services, and any ABI helper that accepts a resource reference import this instead of embedding a second reference parser. no_std + alloc, forbids unsafe, fail-closed on a malformed or over-long reference, with fixed security bounds (it parses untrusted reference strings). Spelling only: it never resolves a namespace, opens a resource, or performs a capability check."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+# The in-tree fuzz harness draws its inputs through the shared seed/budget
+# seam: one place picks the per-run seed, logs it at the start of the test,
+# and bounds the smoke/soak loop. Test scaffolding only; never in a RustOS
+# build.
+rustos-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
