@@ -2807,10 +2807,23 @@ Landed (done):
   combines an attested `Origin` with the caller's stream/source/level requests
   via `resolve_stream` + `derive_source` + reserved-source spoof screening,
   assigns the effective level and one append seq, and returns an `Admission`
-  that builds the record body with the caller requests preserved as claims).
-  The userland journal *service* wrapper (IPC ingress + FS persistence,
-  boot-ring import, retention) + anchors are SYSLOG proper (see
-  `.junie/SYSLOG.md`).
+  that builds the record body with the caller requests preserved as claims) +
+  the architecture-neutral persistence **engine** (`lib/log` `journal.rs`:
+  `Journal<S: SegmentStore>` owns the `Ingress` + per-stream segment state and
+  drives the segment lifecycle — `commit` encodes an admitted record and
+  appends it to its stream's open `SegmentWriter`, rotating
+  close→seal→`store_segment`→reopen a segment chained on the closed one's
+  `segment_hash` when a buffer fills, seeding each segment's `first_seq` with
+  the record's reserved seq so the segment chain and `Ingress` stay in
+  lockstep; `import_boot` drains a `BootRing` into `boot` and authors one
+  trusted `journal`-stream loss record for an evicted `LossRange`; `flush`
+  closes all open segments; fail-closed throughout — an over-cap/invalid
+  record is rejected whole and an audit/security segment cannot close without
+  the seal key; `SegmentWriter::finish` now returns a `FinishedSegment`
+  reclaiming its buffer for reuse). The userland journal *service* wrapper (the
+  IPC ingress endpoint + an FS-backed `SegmentStore` writing
+  `/System/Logs/<stream>/`, per-CPU gap detection, rate-limit/retention, the
+  spoof security record) + anchors are SYSLOG proper (see `.junie/SYSLOG.md`).
 - §19.6 fuzzing — `cargo xtask fuzz` over all in-tree harnesses (`--quick`/
   `--soak`), fail-closed.
 - §19.7 verified core — Bronze proptest models for `lib/caps`/`kernel/sec`/

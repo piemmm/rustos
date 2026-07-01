@@ -249,8 +249,52 @@ caller can neither pick nor skip: the per-stream append sequence.
 
 Ingress deliberately stops at the admission decision: it does not write
 segments, detect per-CPU sequence gaps, rate-limit, apply retention, or emit
-the trusted security record a spoof warrants. Those are the journal service's
-concern and build on top of the `Admission` this returns.
+the trusted security record a spoof warrants. Persistence is the `journal`
+engine below; the remaining service concerns build on top of the `Admission`
+this returns.
+
+## Journal engine (`journal`)
+
+The `journal` engine turns admitted records into durable, hash-chained,
+per-stream segments (`plans/SYSLOG.md` §6–§8). It sits above `Ingress` and
+below the concrete storage: it owns the append-sequence authority and the
+per-stream segment state, and drives the segment lifecycle over a
+caller-supplied sink. It is storage-agnostic — it never names a filesystem
+syscall — so the FS-backed store and the IPC ingress endpoint are the userland
+journal service's concern, layered on top. It is `no_std` and allocation-free,
+and every path fails closed.
+
+* `SegmentStore` — the sink trait. The journal calls `store_segment` once per
+  closed segment, in append order within a stream, passing the whole immutable
+  segment image. The concrete store is a directory under
+  `/System/Logs/<stream>/` reached over the filesystem syscalls.
+* `Journal` — constructed with one working buffer per stream, the
+  installation/boot binding, the log-attestation key (required to close
+  `audit`/`security` segments), and the journal's own attested origin.
+  * `admit` — a pass-through to the owned `Ingress`, so admit and commit are
+    1:1 (each reserves exactly one append sequence).
+  * `commit` — encodes an admitted record and appends it to its stream's open
+    segment, **rotating** — closing, sealing, persisting, and reopening a fresh
+    segment that chains onto the one just closed — when the segment fills. A
+    segment is opened with `first_seq` set to the record's reserved sequence,
+    so the segment's own record chain and the `Ingress` counter stay in
+    lockstep. An invalid or over-cap record is rejected whole (`JournalError`),
+    never partially written, and the segment's dictionary is discarded so it
+    stays consistent with the records the segment actually holds.
+  * `import_boot` — drains a CPU's early-boot `BootRing` into the `boot` stream,
+    appending each retained body verbatim (a boot body is a self-contained,
+    dictionary-free record body, so it needs no re-encoding). If the ring
+    evicted records first, one trusted loss record naming the lost CPU-sequence
+    range is authored on the `journal` stream, so a boot-log reader sees an
+    explicit gap rather than a silent one.
+  * `flush` — closes every open segment (persisting each), keeping each
+    stream's running chain hash so the next record reopens a chained segment.
+    Called on shutdown and before anchoring.
+
+The cross-segment chain uses each closed segment's `segment_hash` as the next
+segment's `prev_segment_hash`; the append sequence is continuous across the
+boundary. Loss/security/rotation self-events are authored on the `journal`
+stream through the same segment path, never a second writer.
 
 ## Typed-field value model (`field`)
 

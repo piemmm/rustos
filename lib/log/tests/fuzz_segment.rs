@@ -53,7 +53,7 @@ fn base_segment(buf: &mut [u8]) -> usize {
         .expect("append");
     w.append_record(1, Duration64::from_secs(11), b"policy changed")
         .expect("append");
-    w.finish(Some(&key())).expect("finish")
+    w.finish(Some(&key())).expect("finish").len
 }
 
 /// Drive every segment-reading path; the contract is "must not panic".

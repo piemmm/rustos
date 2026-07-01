@@ -99,6 +99,22 @@ impl Ingress {
         self.next_seq[stream.as_u8() as usize]
     }
 
+    /// Consume and return the next append sequence for `stream`.
+    ///
+    /// This is the *trusted* author's path: the journal itself reserves a
+    /// sequence for a record it originates (a loss, seal, rotation, or
+    /// verification self-event on the `journal` stream), for which there is no
+    /// untrusted caller to run [`Self::admit`] against. Ordinary records take
+    /// their sequence through `admit`, which reserves one for the stream it
+    /// resolves. The counter is monotonic per stream (a saturating bump; at any
+    /// realizable rate it cannot wrap within a machine's life).
+    pub fn reserve(&mut self, stream: Stream) -> u64 {
+        let index = stream.as_u8() as usize;
+        let seq = self.next_seq[index];
+        self.next_seq[index] = seq.saturating_add(1);
+        seq
+    }
+
     /// Admit one record: resolve its authoritative stream, source, effective
     /// level, and append sequence from the attested `origin` and the caller's
     /// requests.
@@ -134,13 +150,9 @@ impl Ingress {
         let source_spoofed =
             requested_source.is_some_and(|name| reserved_source_prefix(name).is_some());
 
-        let index = decision.effective.as_u8() as usize;
-        let seq = self.next_seq[index];
-        // The append sequence is u64 and monotonic per stream; at any
-        // realizable append rate it cannot wrap within the life of a machine,
-        // so a saturating bump keeps the invariant "seq never repeats" without
-        // a spurious error path.
-        self.next_seq[index] = seq.saturating_add(1);
+        // The append sequence is monotonic per stream (see [`Self::reserve`]),
+        // so admit and the trusted internal author share one counter.
+        let seq = self.reserve(decision.effective);
 
         Admission {
             stream: decision.effective,

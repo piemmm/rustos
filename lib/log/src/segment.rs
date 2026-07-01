@@ -410,16 +410,26 @@ impl<'a> SegmentWriter<'a> {
         self.chain.head_hash()
     }
 
-    /// Close the segment: write the footer and return the total segment
-    /// length. `seal_key` is required for audit/security streams and MACs the
-    /// segment hash; for other streams it is optional.
+    /// Close the segment: write the footer and return the closed segment.
+    ///
+    /// `seal_key` is required for audit/security streams and MACs the segment
+    /// hash; for other streams it is optional.
+    ///
+    /// The returned [`FinishedSegment`] hands the caller-owned backing buffer
+    /// back (the segment image is `buf[..len]`) together with the `segment_hash`
+    /// a successor segment chains from, so a writer of a stream can persist the
+    /// closed bytes and reopen a fresh segment over the same buffer without a
+    /// second allocation.
     ///
     /// # Errors
     ///
     /// [`SegmentError::SealKeyRequired`] if the stream requires a seal but no
     /// key was given; [`SegmentError::BufferTooSmall`] if the footer does not
     /// fit.
-    pub fn finish(self, seal_key: Option<&LogAttestationKey>) -> Result<usize, SegmentError> {
+    pub fn finish(
+        self,
+        seal_key: Option<&LogAttestationKey>,
+    ) -> Result<FinishedSegment<'a>, SegmentError> {
         if self.stream.requires_seal() && seal_key.is_none() {
             return Err(SegmentError::SealKeyRequired);
         }
@@ -449,8 +459,32 @@ impl<'a> SegmentWriter<'a> {
         w.put(&seal_tag)?;
         let footer_checksum = sha256(&w.buf[footer_start..w.pos]);
         w.put(&footer_checksum)?;
-        Ok(w.pos)
+        let len = w.pos;
+        Ok(FinishedSegment {
+            len,
+            segment_hash,
+            next_seq,
+            buf: self.buf,
+        })
     }
+}
+
+/// The result of closing a [`SegmentWriter`].
+///
+/// Carries the reclaimed backing buffer (the closed segment image is
+/// `buf[..len]`), the `segment_hash` a successor segment chains from, and the
+/// stream's next append sequence, so a per-stream writer can persist the bytes
+/// and reopen a fresh segment over the same buffer.
+pub struct FinishedSegment<'a> {
+    /// Total length of the closed segment image within [`Self::buf`].
+    pub len: usize,
+    /// The segment hash: the value a successor segment uses as its
+    /// `prev_segment_hash` to continue the stream's record chain.
+    pub segment_hash: Sha256Digest,
+    /// The stream's next append sequence (this segment's last `seq + 1`).
+    pub next_seq: u64,
+    /// The reclaimed backing buffer; the closed segment occupies `[..len]`.
+    pub buf: &'a mut [u8],
 }
 
 /// A validated, borrowed view of one committed record block.
@@ -854,7 +888,7 @@ mod tests {
                 w.append_record(cpu, Duration64::from_secs(secs), p)
                     .expect("append");
             }
-            w.finish(None).expect("finish")
+            w.finish(None).expect("finish").len
         };
         (buf, len)
     }
@@ -986,14 +1020,17 @@ mod tests {
         let mut w2 = SegmentWriter::begin(&mut buf2, &h2).expect("begin");
         w2.append_record(0, Duration64::from_secs(1), b"login denied")
             .expect("append");
-        assert_eq!(w2.finish(None), Err(SegmentError::SealKeyRequired));
+        assert!(matches!(
+            w2.finish(None),
+            Err(SegmentError::SealKeyRequired)
+        ));
 
         let mut buf3 = alloc::vec![0u8; 8192];
         let h3 = header(Stream::Audit, 0, genesis(Stream::Audit));
         let mut w3 = SegmentWriter::begin(&mut buf3, &h3).expect("begin");
         w3.append_record(0, Duration64::from_secs(1), b"login denied")
             .expect("append");
-        let len = w3.finish(Some(&key())).expect("sealed finish");
+        let len = w3.finish(Some(&key())).expect("sealed finish").len;
 
         let s = verify_segment(&buf3[..len], Some(&key())).expect("sealed verify");
         assert!(s.sealed);
@@ -1024,7 +1061,7 @@ mod tests {
             let mut w = SegmentWriter::begin(&mut buf2, &h).expect("begin2");
             w.append_record(0, Duration64::from_secs(20), b"c")
                 .expect("append");
-            w.finish(None).expect("finish2")
+            w.finish(None).expect("finish2").len
         };
         let s2 = verify_segment(&buf2[..len2], None).expect("seg2");
         assert_eq!(s2.first_seq, s1.next_seq);

@@ -30,6 +30,7 @@ pub mod chain;
 mod cursor;
 pub mod dict;
 pub mod ingress;
+pub mod journal;
 pub mod record;
 pub mod segment;
 pub mod stream;
@@ -54,6 +55,7 @@ pub use dict::{
     DictionaryBuilder, DictionaryView, ARENA_BYTES, MAX_CANDIDATES, MAX_DICT_STRING, MAX_ENTRIES,
 };
 pub use ingress::{Admission, Ingress, DEFAULT_EFFECTIVE_LEVEL, STREAM_COUNT};
+pub use journal::{Journal, JournalError, SegmentStore};
 pub use record::{
     decode as decode_record, CallerContent, DataFieldIter, LogRecord, LogRecordRef,
     CALLER_COMPONENT_MAX, CALLER_EVENT_ID_MAX, CALLER_MESSAGE_MAX, CALLER_REQUESTED_SOURCE_MAX,

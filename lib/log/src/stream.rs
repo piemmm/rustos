@@ -40,6 +40,20 @@ pub enum Stream {
 }
 
 impl Stream {
+    /// Every stream, in discriminant order.
+    ///
+    /// `ALL[i].as_u8() as usize == i`, so this doubles as the canonical
+    /// iteration order for the per-stream state a journal keeps (one slot per
+    /// stream, indexed by [`Self::as_u8`]).
+    pub const ALL: [Stream; 6] = [
+        Stream::Boot,
+        Stream::Runtime,
+        Stream::Debug,
+        Stream::Security,
+        Stream::Audit,
+        Stream::Journal,
+    ];
+
     /// Numeric on-disk discriminant.
     #[must_use]
     pub const fn as_u8(self) -> u8 {
@@ -112,14 +126,7 @@ mod tests {
     use super::Stream;
     use rustos_abi::Errno;
 
-    const ALL: [Stream; 6] = [
-        Stream::Boot,
-        Stream::Runtime,
-        Stream::Debug,
-        Stream::Security,
-        Stream::Audit,
-        Stream::Journal,
-    ];
+    const ALL: [Stream; 6] = Stream::ALL;
 
     #[test]
     fn discriminants_round_trip() {

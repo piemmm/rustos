@@ -165,6 +165,12 @@ pub const TARGETS: &[Target] = &[
             "lib/log record-ingress admission (attested-origin vs caller stream/source spoof + append sequencing)",
     },
     Target {
+        package: "rustos-log",
+        test: "fuzz_journal",
+        description:
+            "lib/log journal engine (admit/commit/import_boot: rotation, chaining, sealing; every persisted segment must verify)",
+    },
+    Target {
         package: "rustos-glob",
         test: "fuzz_glob",
         description: "lib/glob pattern compiler + match loop (untrusted glob-pattern bytes)",

@@ -34,8 +34,17 @@ neither re-implements the record format.
   reserved-namespace source spoof, and assigns the per-stream append `seq`
   (the one authoritative fact a caller cannot pick), then builds the
   `LogRecord` body with the caller's requests preserved as claims. It stops at
-  the decision — segment writing, gap detection, rate-limiting, retention, and
-  the spoof security record are the journal service's job on top of it.
+  the decision; persistence is the `journal` engine below.
+- **`journal`**: the persistence engine (`Journal`/`SegmentStore`). Owns the
+  `Ingress` + per-stream segment state and drives the segment lifecycle over a
+  storage-agnostic sink: `commit` encodes an admitted record and appends it to
+  its stream's open segment, rotating (close, seal, persist, reopen a chained
+  segment) when a buffer fills; `import_boot` drains a `BootRing` into the
+  `boot` stream and authors one trusted loss record for an evicted range;
+  `flush` closes open segments. Fail-closed: an invalid/over-cap record is
+  rejected whole, and an audit/security segment cannot close without the seal
+  key. Per-CPU gap detection, rate-limiting, retention, and the spoof security
+  record are the userland service's job on top of it.
 - **`dict`**: the segment-local string dictionary (`DictionaryBuilder`/
   `DictionaryView`). A back-reference codec that stores a repeated provenance
   or message string once per segment and references it thereafter, with
