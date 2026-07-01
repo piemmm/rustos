@@ -159,6 +159,12 @@ pub const TARGETS: &[Target] = &[
             "lib/log early-boot ring FIFO (push/pop/evict ordering + loss-range accounting)",
     },
     Target {
+        package: "rustos-log",
+        test: "fuzz_ingress",
+        description:
+            "lib/log record-ingress admission (attested-origin vs caller stream/source spoof + append sequencing)",
+    },
+    Target {
         package: "rustos-glob",
         test: "fuzz_glob",
         description: "lib/glob pattern compiler + match loop (untrusted glob-pattern bytes)",

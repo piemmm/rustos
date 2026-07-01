@@ -28,6 +28,14 @@ neither re-implements the record format.
   classes are added in place when their attestation producer exists.
 - **`record`**: the logical record body (`LogRecord`/`LogRecordRef`) — the
   fields the segment container does not already own — with a fail-closed codec.
+- **`ingress`**: the admission decision (`Ingress`/`Admission`). Combines an
+  attested `Origin` with the caller's stream/source/level requests: resolves
+  the effective stream, derives the authoritative source, screens a
+  reserved-namespace source spoof, and assigns the per-stream append `seq`
+  (the one authoritative fact a caller cannot pick), then builds the
+  `LogRecord` body with the caller's requests preserved as claims. It stops at
+  the decision — segment writing, gap detection, rate-limiting, retention, and
+  the spoof security record are the journal service's job on top of it.
 - **`dict`**: the segment-local string dictionary (`DictionaryBuilder`/
   `DictionaryView`). A back-reference codec that stores a repeated provenance
   or message string once per segment and references it thereafter, with

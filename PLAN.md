@@ -2802,8 +2802,15 @@ Landed (done):
   (`lib/log` `bootring.rs`: `BootRing`, a bounded per-CPU allocation-free FIFO
   holding the same record body plus the `cpu_seq`/monotonic import must
   preserve, evict-oldest with a contiguous `LossRange` for a trusted loss
-  record). The userland journal service (ingress, boot-ring import, retention)
-  + anchors are SYSLOG proper (see `.junie/SYSLOG.md`).
+  record) + the record-ingress admission core (`lib/log` `ingress.rs`:
+  `Ingress` owns the per-stream append `seq` and is its single writer; `admit`
+  combines an attested `Origin` with the caller's stream/source/level requests
+  via `resolve_stream` + `derive_source` + reserved-source spoof screening,
+  assigns the effective level and one append seq, and returns an `Admission`
+  that builds the record body with the caller requests preserved as claims).
+  The userland journal *service* wrapper (IPC ingress + FS persistence,
+  boot-ring import, retention) + anchors are SYSLOG proper (see
+  `.junie/SYSLOG.md`).
 - §19.6 fuzzing — `cargo xtask fuzz` over all in-tree harnesses (`--quick`/
   `--soak`), fail-closed.
 - §19.7 verified core — Bronze proptest models for `lib/caps`/`kernel/sec`/

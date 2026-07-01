@@ -216,6 +216,42 @@ early-boot path.
   may legitimately write `security`/`audit`) grows in place when the kernel
   attests that trust domain.
 
+## Record ingress (`ingress`)
+
+Ingress is the point where an untrusted caller's request becomes an
+authoritative record (`plans/SYSLOG.md` §2.1, §5.2). The kernel ingress path
+supplies the facts it alone can attest — the emitter's `Origin`, its per-CPU
+`cpu_seq`, and the monotonic/wall readings — and the caller supplies its
+content and its *requests*. `Ingress::admit` combines them, applying the
+`authority` decisions above and assigning the one authoritative fact the
+caller can neither pick nor skip: the per-stream append sequence.
+
+* `Ingress` — owns the next append `seq` for each of the `STREAM_COUNT`
+  streams and is the single writer of those counters, so a record's `seq` is
+  monotonic within its stream regardless of what a caller requests. `new`
+  starts every counter at zero; `resume` seeds them from each stream's last
+  committed `seq + 1` so a restart or a new segment continues the sequence
+  rather than reusing one. `next_seq` reads a counter without consuming it
+  (for anchoring and segment-header seeding).
+* `admit` — resolves the effective stream (`resolve_stream`), derives the
+  authoritative `SourceName` (`derive_source`), screens the caller's advisory
+  `requested_source` for a reserved-namespace spoof (`reserved_source_prefix`),
+  assigns the effective level (the caller's level, or `Info` when absent — the
+  source and stream, not the level, carry authority, so even a user-labelled
+  `critical` is honoured as the level), and consumes one append sequence for
+  the resolved stream. It returns an `Admission`.
+* `Admission` — the decision: the stream, `seq`, effective level, derived
+  source, and attested origin, plus the `stream_spoofed` / `source_spoofed`
+  flags. `build_record` assembles the `LogRecord` body once the container-owned
+  `cpu_seq`/`wall` are known, carrying the caller's `requested_stream` /
+  `requested_source` through verbatim as claims — so a spoof is preserved as
+  evidence under the authoritative source, never as authority.
+
+Ingress deliberately stops at the admission decision: it does not write
+segments, detect per-CPU sequence gaps, rate-limit, apply retention, or emit
+the trusted security record a spoof warrants. Those are the journal service's
+concern and build on top of the `Admission` this returns.
+
 ## Typed-field value model (`field`)
 
 The typed field-value model is defined in `rustos-abi` (`rustos_abi::field`,
