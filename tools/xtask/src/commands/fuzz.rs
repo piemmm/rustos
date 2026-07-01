@@ -169,6 +169,11 @@ pub const TARGETS: &[Target] = &[
         test: "fuzz_glob",
         description: "lib/glob pattern compiler + match loop (untrusted glob-pattern bytes)",
     },
+    Target {
+        package: "rustos-path",
+        test: "fuzz_path",
+        description: "lib/path path-string parser + canonical-spelling round-trip (untrusted path bytes)",
+    },
 ];
 
 /// How long to run each harness.
@@ -584,6 +589,14 @@ mod tests {
         let chosen = selected(&opts).expect("known target");
         assert_eq!(chosen.len(), 1);
         assert_eq!(chosen[0].package, "rustos-glob");
+    }
+
+    #[test]
+    fn path_parser_harness_is_registered() {
+        let opts = parse(&argv(&["--target", "fuzz_path"])).expect("flag parses");
+        let chosen = selected(&opts).expect("known target");
+        assert_eq!(chosen.len(), 1);
+        assert_eq!(chosen[0].package, "rustos-path");
     }
 
     #[test]

@@ -55,6 +55,7 @@ members = [
     "lib/keymap",
     "lib/log",
     "lib/partition",
+    "lib/path",
     "lib/pci",
     "lib/procinfo",
     "lib/raster",

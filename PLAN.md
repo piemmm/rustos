@@ -3283,8 +3283,28 @@ I/O vocabulary. See `.junie/PREREQUISITES2.md` for the full P0–P6 status.
   engine** — globs are what the shell expands and match in bounded time; a
   regex dialect (with catastrophic backtracking) would be a separate engine if
   a consumer ever needs one. Unit tests, rustdoc, and the `fuzz_glob` harness
-  ship with it. Remaining prerequisites (P2–P5) are tracked in
-  `.junie/PREREQUISITES2.md`.
+  ship with it.
+- P4 (path parser) — shared filesystem path-spelling parser as a `lib/*` crate:
+  **done.** `lib/path` (`rustos-path`) is the one definition of how a RustOS
+  path string is lexed and normalised into a typed `Root` + components, so the
+  shell (`cd`, prompt display, word/tilde expansion, completion) and every other
+  consumer import it rather than embedding a second path parser (§2.2). It
+  parses the forms with present consumers — synthetic view (`/path`), alias
+  shorthand (`Alias:/path`), the expanded internal `alias::Name/path`, and
+  relative paths — and is `no_std`+`alloc`, `#![forbid(unsafe_code)]`,
+  fail-closed and bounded (path/component/count/alias sizes are fixed security
+  bounds, §24.4), with `..` unable to escape a rooted path and `:` reserved as a
+  structural delimiter (so a rendered path always re-parses). Resource-reference
+  shapes (`namespace:selector`) are declined with `NotAPath` (owned by the
+  future ALIAS grammar, P5) and the durable/administrative resolvers
+  (`id::`/`fs::`/`<driver>::`/`dev::`/`net::`) with `UnsupportedResolver` — they
+  have no consumer yet, so inventing them here would be speculative interface
+  (§2.3/§2.4). Unit tests, rustdoc, a docs page, and the `fuzz_path`
+  round-trip harness ship with it. **Still open under P4** (tracked, not
+  stubbed): turning `plans/DRIVES.md` into the final binding storage-namespace
+  spec with its §16.1 amendment, and the descriptor-*producing* open-a-path ABI
+  the resolver/runtime stage adds. Remaining prerequisites (P2, P4 remainder,
+  P5) are tracked in `.junie/PREREQUISITES2.md`.
 
 ## CCOMPAT — C-callable `abi-v1` (full `lib/abi` header, syscall stubs, crt0)
 

@@ -1256,6 +1256,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-path"
+version = "0.0.0"
+dependencies = [
+ "rustos-fuzzseed",
+]
+
+[[package]]
 name = "rustos-pci"
 version = "0.0.0"
 dependencies = [

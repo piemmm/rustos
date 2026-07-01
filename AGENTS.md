@@ -577,6 +577,18 @@ rustos/
 │   │                    #   definition the mkimage author and the kernel
 │   │                    #   root-mount reader share across MBR/GPT on every
 │   │                    #   arch (§2.2, §5.4, §24.4).
+│   ├── path/            # Shared filesystem path-spelling parser: the one
+│   │                    #   definition of how a RustOS path string (a
+│   │                    #   synthetic-view `/path`, an alias shorthand
+│   │                    #   `Alias:/path`, the expanded `alias::Name/path` form,
+│   │                    #   or a relative `path`) is lexed and normalised into a
+│   │                    #   typed root + components, fail-closed and bounded.
+│   │                    #   The shell (cd, prompt, expansion, completion) and
+│   │                    #   every other consumer import it, never a second path
+│   │                    #   parser (§2.2). Resource references (`namespace:sel`)
+│   │                    #   and durable/admin resolvers (`id::`/`fs::`/…) are
+│   │                    #   declined for their own future stages, not invented
+│   │                    #   here (§2.3/§2.4).
 │   ├── pci/             # PCI/PCIe configuration-access mechanism library
 │   │                    #   (mechanism #1 / ECAM / BCM2711-windowed) + the
 │   │                    #   Bus/VirtioPciBus/MsixBus/PciBus seams + the shared

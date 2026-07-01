@@ -1,0 +1,19 @@
+[package]
+name = "rustos-path"
+description = "RustOS shared filesystem path-spelling parser: the one first-party definition of how a RustOS path string (a synthetic-view `/path`, an alias shorthand `Alias:/path`, the expanded `alias::Name/path` form, or a relative `path`) is lexed and normalised into a typed root + component list. The shell (cd, prompt display, word/tilde expansion, completion) and every other consumer import this instead of embedding a second path parser. no_std + alloc, forbids unsafe, fail-closed on a malformed or over-long path, with fixed security bounds (it parses untrusted path strings)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+# The in-tree fuzz harness draws its inputs through the shared seed/budget
+# seam: one place picks the per-run seed, logs it at the start of the test,
+# and bounds the smoke/soak loop. Test scaffolding only; never in a RustOS
+# build.
+rustos-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
