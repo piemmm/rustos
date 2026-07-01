@@ -3454,6 +3454,19 @@ of how much code was produced.
 Amendments to `AGENTS.md` (the binding charter) are logged here so an agent
 can see *why* a rule exists without diffing the charter's history.
 
+- **2026-07-01 — "Transient" is not a diagnosis; a load-dependent timeout is a
+  flake.** Hardened §7 "No flaky tests" after a QEMU test timeout was wrongly
+  waved through as a "transient load flake" and reported done on a clean
+  re-run: the rule now forbids reclassifying an intermittent failure as
+  transient/load-flake/environment-blip to dodge the fix, states a green re-run
+  is not a fix (it only proves the flake), and names a timeout reachable solo
+  but missed under parallel load as a load-dependent flake needing a structural
+  fix. Fixed the concrete instance: removed the developer-only 30 s
+  `DEVELOPER_TIMEOUT_CAP` clamp in `tools/xtask` that halved each QEMU
+  enrolment's reachable budget locally, so developer and CI now enforce one
+  budget sized to the work; deleted the now-dead `in_github_actions` timeout
+  signal (§2.14).
+
 - **2026-06-30 — Legacy POSIX names: the OS never authors them, the kernel
   does not police the user.** Reworded §16.1: the ban is on the *OS* creating
   the reserved legacy top-level names (installer/image-builder/in-tree code),

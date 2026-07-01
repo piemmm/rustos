@@ -911,8 +911,22 @@ an update to this section.
   large to fix now and is escalated (§15.7), the regression test is part of
   that escalated work and is written when the fix lands — a bug is never
   closed without its test.
-- **No flaky tests.** A test that fails intermittently is a bug; fix the test
-  or fix the code, never retry.
+- **No flaky tests, and "transient" is not a diagnosis.** A test that fails
+  intermittently is a bug; fix the test or fix the code, never retry. You may
+  **not** reclassify such a failure as "transient", a "load flake", a "timeout
+  under parallel load", an "environment blip", or any other label that excuses
+  it from the defect-fixing obligation (§2.5, §2.18) — naming a failure to
+  avoid fixing it is itself the §2.1 hack. A green re-run is **not** a fix and
+  is never evidence the defect is gone: it proves only that the failure is
+  intermittent, which is precisely the bug. In particular, a wall-clock timeout
+  that is reachable when a test runs alone but missed under parallel load is a
+  **load-dependent (i.e. flaky) timeout** — fix it structurally (a budget sized
+  to the actual work, bounded concurrency so guests do not oversubscribe the
+  host, or a completion signal), never by retrying and never by declaring the
+  miss transient. If a failure's cause is genuinely not yet understood, that is
+  an open defect to investigate and fix (or escalate, §15.7) — not a
+  "transient" to wave through, and not something a completion report may
+  describe as resolved.
 - **Coverage targets** (enforced by `cargo xtask coverage`):
   - `kernel/sec`, `kernel/mem`, `kernel/ipc`, `lib/caps`, `lib/crypto`: **≥ 95%**
   - All other kernel crates: ≥ 85%

@@ -372,23 +372,6 @@ fn format_bytes(bytes: u64) -> String {
 /// The `userland/gui/*` crates excluded from the headless image.
 const GUI_CRATES: &[&str] = &["rustos-wm", "rustos-taskbar"];
 
-/// The environment variable GitHub Actions sets to `"true"` on every runner.
-///
-/// It is documented as always present (and equal to `"true"`) inside a
-/// GitHub Actions job, and absent on a developer's machine, so it is the
-/// canonical, forge-set signal that we are running in CI rather than
-/// locally.
-const GITHUB_ACTIONS_ENV: &str = "GITHUB_ACTIONS";
-
-/// Whether we are executing inside a GitHub Actions job.
-///
-/// Reads the runner-set [`GITHUB_ACTIONS_ENV`] signal. The QEMU matrix uses
-/// it only to scale per-test timeouts for the slower shared runners; the
-/// test count itself is no longer CI-dependent (`ci` runs the matrix once).
-fn in_github_actions() -> bool {
-    std::env::var_os(GITHUB_ACTIONS_ENV).is_some_and(|v| v == "true")
-}
-
 /// Default wall-clock budget for `cargo xtask test --soak`: 24 h.
 ///
 /// Matches the fuzz/proptest soak floor. The nightly `soak`

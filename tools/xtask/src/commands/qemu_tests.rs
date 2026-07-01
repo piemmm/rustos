@@ -24,28 +24,6 @@ use rustos_qemu::{Outcome, Runner, Spec};
 use super::parallel::{self, Job};
 use crate::Context;
 
-/// Per-test wall-clock ceiling enforced on a developer machine (a
-/// `cargo xtask ci` / `test --qemu` run outside GitHub Actions). The
-/// enrolled budgets (up to 120 s) are sized for the CI runners that carry
-/// the flake-hunting budget; a developer running the matrix from the IDE
-/// instead gets a 30 s ceiling per test, so a hung guest fails fast rather
-/// than stalling the local run. The runners keep the full enrolled budget
-/// (the same developer-vs-runner split as the 20× test repeat).
-const DEVELOPER_TIMEOUT_CAP: Duration = Duration::from_secs(30);
-
-/// The wall-clock budget to enforce for an enrolment on this host: the
-/// enrolment's own [`QemuTest::timeout`] on a CI runner, or that value
-/// clamped to [`DEVELOPER_TIMEOUT_CAP`] on a developer machine. Lowering a
-/// ceiling never extends a budget, so this can only make a local run fail
-/// faster, never hide a slow CI run.
-fn effective_timeout(timeout: Duration, in_github_actions: bool) -> Duration {
-    if in_github_actions {
-        timeout
-    } else {
-        timeout.min(DEVELOPER_TIMEOUT_CAP)
-    }
-}
-
 /// One enrolled QEMU integration test.
 struct QemuTest {
     /// Cargo package name (matches `[package].name`).
@@ -2884,8 +2862,16 @@ fn run_one(target_dir: &Path, t: &QemuTest) -> Result<(), String> {
     } else {
         Spec::for_x86_64_kernel(&kernel)
     };
-    let timeout = effective_timeout(t.timeout, super::in_github_actions());
-    let mut spec = base.with_cpus(t.cpus).with_timeout(timeout);
+    // One budget everywhere: the enrolment's own reachable wall-clock ceiling,
+    // enforced identically on a developer machine and a CI runner. There is no
+    // developer-only clamp — a budget that is reachable running solo but missed
+    // under the parallel matrix would be a load-dependent (flaky) timeout, and
+    // the charter forbids that. Concurrency, not the budget, is what bounds
+    // local run time: the weighted-concurrency runner (`super::parallel`) caps
+    // the sum of concurrently-running guest vCPUs at the host's logical-CPU
+    // count, so no guest is starved of TCG time and every enrolled budget stays
+    // as reachable co-scheduled as it is solo.
+    let mut spec = base.with_cpus(t.cpus).with_timeout(t.timeout);
 
     // Attach a planted raw backing image for storage tests. Sector 0
     // carries the deterministic `byte[i] = i mod 256` pattern the
@@ -3005,8 +2991,20 @@ fn run_one(target_dir: &Path, t: &QemuTest) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_targets, effective_timeout, DEVELOPER_TIMEOUT_CAP, TESTS};
+    use super::{build_targets, TESTS};
     use std::time::Duration;
+
+    /// The smallest wall-clock budget any enrolment may carry.
+    ///
+    /// Every enrolled QEMU test is a boot-then-do-fixed-work vertical whose
+    /// budget is sized to be reachable when the guest runs co-scheduled with
+    /// the rest of the matrix (the weighted-concurrency runner never
+    /// oversubscribes the host's vCPUs), not merely when it runs solo. This
+    /// floor is the reachable minimum the guard below enforces; the runner
+    /// applies each enrolment's own [`super::QemuTest::timeout`] verbatim on
+    /// both a developer machine and a CI runner, with no split that could
+    /// shorten it.
+    const MIN_REACHABLE_BUDGET: Duration = Duration::from_secs(60);
 
     #[test]
     fn build_targets_are_distinct_and_cover_every_enrolment() {
@@ -3027,29 +3025,25 @@ mod tests {
         }
     }
 
+    /// Regression guard for the removed developer-only timeout clamp. Every
+    /// enrolment must carry a budget at least [`MIN_REACHABLE_BUDGET`], and
+    /// that budget is what the runner enforces verbatim — there is no
+    /// developer-vs-CI split that could shorten it. A previous 30 s
+    /// developer cap halved these budgets locally and turned a guest that was
+    /// merely slow under the parallel matrix into a load-dependent (flaky)
+    /// timeout; nothing may re-introduce a budget, or a clamp, below this
+    /// floor.
     #[test]
-    fn developer_machine_clamps_long_budgets_to_the_cap() {
-        for secs in [60, 120] {
-            assert_eq!(
-                effective_timeout(Duration::from_secs(secs), false),
-                DEVELOPER_TIMEOUT_CAP,
+    fn every_enrolment_budget_is_at_least_the_reachable_floor() {
+        for t in TESTS {
+            assert!(
+                t.timeout >= MIN_REACHABLE_BUDGET,
+                "enrolment {} budget {:?} is below the reachable floor {:?}; a \
+                 budget reachable solo but missed under load is a flaky timeout",
+                t.package,
+                t.timeout,
+                MIN_REACHABLE_BUDGET,
             );
         }
-    }
-
-    #[test]
-    fn developer_machine_leaves_short_budgets_untouched() {
-        let short = Duration::from_secs(10);
-        assert_eq!(effective_timeout(short, false), short);
-        assert_eq!(
-            effective_timeout(DEVELOPER_TIMEOUT_CAP, false),
-            DEVELOPER_TIMEOUT_CAP,
-        );
-    }
-
-    #[test]
-    fn ci_runner_keeps_the_full_enrolled_budget() {
-        let full = Duration::from_secs(120);
-        assert_eq!(effective_timeout(full, true), full);
     }
 }
