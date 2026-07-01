@@ -347,7 +347,7 @@ fn generate_log() -> String {
          \x20*/\n",
     );
 
-    out.push_str("/* Highest valid level byte (the Error discriminant). */\n");
+    out.push_str("/* Highest valid level byte (the Critical discriminant). */\n");
     let _ = writeln!(out, "#define ROS_LOG_LEVEL_MAX ((uint8_t){LOG_LEVEL_MAX}u)");
     out.push_str("/* Maximum message length, in bytes. */\n");
     let _ = writeln!(

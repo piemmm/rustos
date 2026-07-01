@@ -25,6 +25,7 @@
 
 pub mod attest;
 pub mod chain;
+pub mod record;
 pub mod segment;
 pub mod stream;
 
@@ -38,6 +39,11 @@ pub use attest::{
 };
 pub use chain::{
     verify_chain, verify_fresh_chain, ChainError, ChainedEntry, LogChain, GENESIS_ANCHOR,
+};
+pub use record::{
+    decode as decode_record, CallerContent, DataFieldIter, LogRecord, LogRecordRef,
+    CALLER_COMPONENT_MAX, CALLER_EVENT_ID_MAX, CALLER_MESSAGE_MAX, CALLER_REQUESTED_SOURCE_MAX,
+    CALLER_TAG_MAX, DATA_FIELD_VALUE_MAX, MAX_DATA_FIELDS, RECORD_FORMAT_VERSION, SOURCE_NAME_MAX,
 };
 pub use rustos_abi::field::{
     reserved_prefix, Decimal, FieldList, FieldName, FieldValue, IpAddr, MacAddr, ScalarType,
@@ -70,6 +76,8 @@ pub enum Level {
     Warn = 3,
     /// Errors that affect correctness or security.
     Error = 4,
+    /// A failure severe enough to threaten system integrity or availability.
+    Critical = 5,
 }
 
 impl Level {
@@ -88,6 +96,7 @@ impl Level {
             2 => Some(Self::Info),
             3 => Some(Self::Warn),
             4 => Some(Self::Error),
+            5 => Some(Self::Critical),
             _ => None,
         }
     }
@@ -233,11 +242,11 @@ mod tests {
 
     #[test]
     fn level_numeric_round_trip() {
-        for raw in 0..=4u8 {
+        for raw in 0..=5u8 {
             let level = Level::from_u8(raw).expect("known level");
             assert_eq!(level.as_u8(), raw);
         }
-        assert!(Level::from_u8(5).is_none());
+        assert!(Level::from_u8(6).is_none());
     }
 
     #[test]
@@ -246,6 +255,7 @@ mod tests {
         assert!(Level::Debug < Level::Info);
         assert!(Level::Info < Level::Warn);
         assert!(Level::Warn < Level::Error);
+        assert!(Level::Error < Level::Critical);
     }
 
     #[test]

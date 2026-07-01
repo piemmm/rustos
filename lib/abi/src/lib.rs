@@ -65,9 +65,10 @@ pub use driver::{
 };
 pub use error::Errno;
 pub use field::{
-    encode_list, reserved_prefix, Decimal, FieldList, FieldListIter, FieldName, FieldValue, IpAddr,
-    MacAddr, ScalarType, ToFieldValue, Uuid, FIELD_BYTES_MAX, FIELD_LIST_MAX, FIELD_NAME_MAX,
-    FIELD_STR_MAX, IPV4_LEN, IPV6_LEN, MAC_LEN, RESERVED_PREFIXES, UUID_LEN,
+    decode_named_field, encode_list, encode_named_field, reserved_prefix, Decimal, FieldList,
+    FieldListIter, FieldName, FieldValue, IpAddr, MacAddr, ScalarType, ToFieldValue, Uuid,
+    FIELD_BYTES_MAX, FIELD_LIST_MAX, FIELD_NAME_MAX, FIELD_STR_MAX, IPV4_LEN, IPV6_LEN, MAC_LEN,
+    NAMED_FIELD_KEY_PREFIX_LEN, RESERVED_PREFIXES, UUID_LEN,
 };
 pub use fs::{DirEntry, FileKind, FileStat, OpenFlags, FS_IO_MAX, FS_NAME_MAX, FS_PATH_MAX};
 pub use hwtree::{

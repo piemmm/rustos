@@ -70,6 +70,40 @@ crate pulls in no payload codec and stays allocation-free.
   payload-agnostic (record bytes are opaque) and every hash is over a
   contiguous byte range, so no streaming hash is needed.
 
+## Logical record model (`record`)
+
+A committed log entry has two layers. The **physical container** (`segment`,
+above) owns the record's stream, append sequence, originating CPU, monotonic
+time, boot id, and the whole integrity group (per-record and per-segment
+hashes, the optional seal). The `record` module owns the **logical record
+body** the container carries as an opaque payload — everything else in the
+`plans/SYSLOG.md` §5 model, encoded once and never duplicating a
+container-owned field.
+
+* `LogRecord` — the borrowed encode input: the authoritative
+  `effective_level` (`Level`), the per-CPU `cpu_seq`, the per-record
+  `WallClockReading` (wall time + trust state), the kernel-attested `Origin`,
+  the system-derived `source_name`, the `CallerContent`, and the flat set of
+  `data.*` `(FieldName, FieldValue)` pairs. `encode` writes a compact
+  little-endian body, checking every bound and rejecting a violating record
+  whole.
+* `CallerContent` — the caller-supplied portion the journal stores faithfully
+  but never treats as authority: the optional caller `level`, `component`,
+  `tag`, `event_id`, `requested_source`, and `requested_stream`, plus the
+  required `message`.
+* `decode` / `LogRecordRef` — a fail-closed decoder returning a validated
+  borrowed view. Every length, discriminant, and UTF-8 constraint is checked,
+  each `data.*` key is re-validated against the `FieldName` grammar, and the
+  fields must tile the body exactly (no trailing bytes). `DataFieldIter` walks
+  the validated `data.*` pairs.
+
+The body reuses the shared building blocks — `FieldValue`/`FieldName`,
+`Origin`, `WallClockReading`, `Stream`, `Level`, and the shared named-field
+codec (`rustos_abi::encode_named_field` / `decode_named_field`) that the
+`log_emit` diagnostic record also builds on — so there is one field-encoding
+definition, not two. Origin fields the kernel cannot yet attest are absent by
+construction rather than guessed.
+
 ## Typed-field value model (`field`)
 
 The typed field-value model is defined in `rustos-abi` (`rustos_abi::field`,

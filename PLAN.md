@@ -2788,8 +2788,11 @@ Landed (done):
 - §19.4 audit log — SHA-256 hash-chain core (`lib/log` `chain.rs`, per-stream)
   + the on-disk segment container (`lib/log` `segment.rs`: self-checksummed
   header, chained records, optionally-sealed footer, forward-scan recovery) +
-  the closed `Stream` set. The userland journal service + anchors are SYSLOG
-  proper (see `.junie/SYSLOG.md`).
+  the closed `Stream` set + the logical record model (`lib/log` `record.rs`:
+  the SYSLOG §5 record body — effective level, per-CPU seq, per-record
+  `WallClockReading`, attested `Origin`, source name, caller content, and
+  `data.*` fields — over the shared named-field codec). The userland journal
+  service + anchors are SYSLOG proper (see `.junie/SYSLOG.md`).
 - §19.6 fuzzing — `cargo xtask fuzz` over all in-tree harnesses (`--quick`/
   `--soak`), fail-closed.
 - §19.7 verified core — Bronze proptest models for `lib/caps`/`kernel/sec`/

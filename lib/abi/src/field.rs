@@ -550,6 +550,89 @@ fn decode_list(rest: &[u8]) -> Result<(FieldList<'_>, usize), Errno> {
     Ok((list, 3 + pos))
 }
 
+/// Per-field key prefix: a single `key_len` byte precedes the key bytes.
+pub const NAMED_FIELD_KEY_PREFIX_LEN: usize = 1;
+
+/// Encode one named `(key, value)` field into `out`: a `key_len` byte, the key
+/// bytes, then the self-describing [`FieldValue`] encoding. Returns the number
+/// of bytes written.
+///
+/// This is the one definition of the named-field wire unit shared by every
+/// record format that carries `(name, value)` pairs — the `log_emit`
+/// diagnostic record and the system-log record model both build on it, so the
+/// two can never drift apart.
+///
+/// `key_max` bounds the key length (and must itself be `<= 255` so the length
+/// fits the prefix byte) and `value_max` bounds the encoded value.
+///
+/// # Errors
+///
+/// * [`Errno::LengthOutOfRange`] — the key exceeds `key_max` or the encoded
+///   value exceeds `value_max`.
+/// * [`Errno::BufferTooSmall`] — `out` cannot hold the encoded field.
+pub fn encode_named_field(
+    out: &mut [u8],
+    key: &str,
+    value: &FieldValue<'_>,
+    key_max: usize,
+    value_max: usize,
+) -> Result<usize, Errno> {
+    if key.len() > key_max {
+        return Err(Errno::LengthOutOfRange);
+    }
+    let key_end = NAMED_FIELD_KEY_PREFIX_LEN + key.len();
+    if out.len() < key_end {
+        return Err(Errno::BufferTooSmall);
+    }
+    // `key.len() <= key_max <= 255` fits the prefix byte.
+    out[0] = u8::try_from(key.len()).map_err(|_| Errno::LengthOutOfRange)?;
+    out[NAMED_FIELD_KEY_PREFIX_LEN..key_end].copy_from_slice(key.as_bytes());
+    let value_len = value.encode(&mut out[key_end..])?;
+    if value_len > value_max {
+        return Err(Errno::LengthOutOfRange);
+    }
+    Ok(key_end + value_len)
+}
+
+/// Decode one named `(key, value)` field from the front of `bytes`, returning
+/// the pair and the number of bytes consumed so a sequence can be walked.
+///
+/// `key_max` and `value_max` bound the key and encoded value; every length is
+/// range-checked and the key is validated as UTF-8. This is the decode half of
+/// [`encode_named_field`] — the shared named-field wire unit.
+///
+/// # Errors
+///
+/// * [`Errno::LengthOutOfRange`] — `bytes` is too short, the key exceeds
+///   `key_max`, or the value exceeds `value_max`.
+/// * [`Errno::OutOfRange`] — the key is not valid UTF-8.
+/// * [`Errno::BadMagic`] / other — the value fails to decode.
+pub fn decode_named_field(
+    bytes: &[u8],
+    key_max: usize,
+    value_max: usize,
+) -> Result<((&str, FieldValue<'_>), usize), Errno> {
+    if bytes.len() < NAMED_FIELD_KEY_PREFIX_LEN {
+        return Err(Errno::LengthOutOfRange);
+    }
+    let key_len = bytes[0] as usize;
+    if key_len > key_max {
+        return Err(Errno::LengthOutOfRange);
+    }
+    let key_start = NAMED_FIELD_KEY_PREFIX_LEN;
+    let value_start = key_start + key_len;
+    if value_start > bytes.len() {
+        return Err(Errno::LengthOutOfRange);
+    }
+    let key =
+        core::str::from_utf8(&bytes[key_start..value_start]).map_err(|_| Errno::OutOfRange)?;
+    let (value, consumed) = FieldValue::decode(&bytes[value_start..])?;
+    if consumed > value_max {
+        return Err(Errno::LengthOutOfRange);
+    }
+    Ok(((key, value), value_start + consumed))
+}
+
 // Encode a variable-length value: tag, u16 length, then the data.
 fn encode_var(tag: u8, data: &[u8], max: usize, out: &mut [u8]) -> Result<usize, Errno> {
     if data.len() > max {

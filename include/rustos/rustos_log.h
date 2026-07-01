@@ -39,8 +39,8 @@
  *         ERROR: int32.  CAP: uint16.
  *         LIST: uint8 elem-tag, uint16 count, then count payloads.
  */
-/* Highest valid level byte (the Error discriminant). */
-#define ROS_LOG_LEVEL_MAX ((uint8_t)4u)
+/* Highest valid level byte (the Critical discriminant). */
+#define ROS_LOG_LEVEL_MAX ((uint8_t)5u)
 /* Maximum message length, in bytes. */
 #define ROS_LOG_MESSAGE_MAX ((uintptr_t)120u)
 /* Maximum number of structured key/value fields. */

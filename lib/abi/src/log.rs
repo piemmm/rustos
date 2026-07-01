@@ -47,12 +47,14 @@
 //! A field's `key_len` is `<= `[`LOG_FIELD_KEY_MAX`]; its encoded value is
 //! `<= `[`LOG_FIELD_VALUE_MAX`] bytes.
 
-use crate::field::FieldValue;
+use crate::field::{
+    decode_named_field, encode_named_field, FieldValue, NAMED_FIELD_KEY_PREFIX_LEN,
+};
 use crate::le::{put_u16, put_u32, read_u16, read_u32};
 use crate::Errno;
 
-/// Highest valid `level` byte — the `rustos_log::Level::Error` discriminant.
-pub const LOG_LEVEL_MAX: u8 = 4;
+/// Highest valid `level` byte — the `rustos_log::Level::Critical` discriminant.
+pub const LOG_LEVEL_MAX: u8 = 5;
 
 /// Maximum length, in bytes, of a record's message (a security bound, fixed).
 pub const LOG_MESSAGE_MAX: usize = 120;
@@ -72,14 +74,11 @@ pub const LOG_FIELD_VALUE_MAX: usize = 256;
 /// Fixed size, in bytes, of the record header that precedes the message.
 pub const LOG_RECORD_HEADER_LEN: usize = 8;
 
-/// Per-field fixed prefix: a `key_len` byte.
-const LOG_FIELD_KEY_PREFIX_LEN: usize = 1;
-
 /// Upper bound, in bytes, on a fully populated encoded record. The kernel
 /// copies at most this many bytes from the caller before decoding.
 pub const LOG_RECORD_MAX: usize = LOG_RECORD_HEADER_LEN
     + LOG_MESSAGE_MAX
-    + LOG_FIELDS_MAX * (LOG_FIELD_KEY_PREFIX_LEN + LOG_FIELD_KEY_MAX + LOG_FIELD_VALUE_MAX);
+    + LOG_FIELDS_MAX * (NAMED_FIELD_KEY_PREFIX_LEN + LOG_FIELD_KEY_MAX + LOG_FIELD_VALUE_MAX);
 
 /// Serialise one diagnostic record into `buf`, returning the byte length
 /// written.
@@ -133,25 +132,13 @@ pub fn encode_record(
 
     let mut offset = header_and_message;
     for (key, value) in fields {
-        // key_len byte + key bytes.
-        if offset + LOG_FIELD_KEY_PREFIX_LEN + key.len() > buf.len() {
-            return Err(Errno::BufferTooSmall);
-        }
-        // `key.len() <= LOG_FIELD_KEY_MAX` (32) fits a `u8`.
-        buf[offset] = key.len() as u8;
-        offset += LOG_FIELD_KEY_PREFIX_LEN;
-        buf[offset..offset + key.len()].copy_from_slice(key.as_bytes());
-        offset += key.len();
-
-        // Encode the value into a bounded scratch buffer so an over-long
-        // value is rejected before it can grow the record.
-        let mut value_buf = [0u8; LOG_FIELD_VALUE_MAX];
-        let value_len = value.encode(&mut value_buf)?;
-        if offset + value_len > buf.len() {
-            return Err(Errno::BufferTooSmall);
-        }
-        buf[offset..offset + value_len].copy_from_slice(&value_buf[..value_len]);
-        offset += value_len;
+        offset += encode_named_field(
+            &mut buf[offset..],
+            key,
+            value,
+            LOG_FIELD_KEY_MAX,
+            LOG_FIELD_VALUE_MAX,
+        )?;
     }
 
     Ok(offset)
@@ -218,15 +205,16 @@ impl<'a> Iterator for LogFieldIter<'a> {
         if self.offset >= self.bytes.len() {
             return None;
         }
-        // `decode_record` validated every field up front, so the reads below
+        // `decode_record` validated every field up front, so this decode
         // cannot fail; stop defensively rather than panic on the (impossible)
         // bad slice.
-        let key_len = *self.bytes.get(self.offset)? as usize;
-        let key_start = self.offset + LOG_FIELD_KEY_PREFIX_LEN;
-        let value_start = key_start + key_len;
-        let key = core::str::from_utf8(self.bytes.get(key_start..value_start)?).ok()?;
-        let (value, consumed) = FieldValue::decode(self.bytes.get(value_start..)?).ok()?;
-        self.offset = value_start + consumed;
+        let ((key, value), consumed) = decode_named_field(
+            self.bytes.get(self.offset..)?,
+            LOG_FIELD_KEY_MAX,
+            LOG_FIELD_VALUE_MAX,
+        )
+        .ok()?;
+        self.offset += consumed;
         Some((key, value))
     }
 }
@@ -277,25 +265,12 @@ pub fn decode_record(bytes: &[u8]) -> Result<LogRecordRef<'_>, Errno> {
     let fields_bytes = &bytes[message_end..];
     let mut offset = 0usize;
     for _ in 0..field_count {
-        if offset + LOG_FIELD_KEY_PREFIX_LEN > fields_bytes.len() {
-            return Err(Errno::LengthOutOfRange);
-        }
-        let key_len = fields_bytes[offset] as usize;
-        if key_len > LOG_FIELD_KEY_MAX {
-            return Err(Errno::LengthOutOfRange);
-        }
-        let key_start = offset + LOG_FIELD_KEY_PREFIX_LEN;
-        let value_start = key_start + key_len;
-        if value_start > fields_bytes.len() {
-            return Err(Errno::LengthOutOfRange);
-        }
-        core::str::from_utf8(&fields_bytes[key_start..value_start])
-            .map_err(|_| Errno::OutOfRange)?;
-        let (_, consumed) = FieldValue::decode(&fields_bytes[value_start..])?;
-        if consumed > LOG_FIELD_VALUE_MAX {
-            return Err(Errno::LengthOutOfRange);
-        }
-        offset = value_start + consumed;
+        let (_, consumed) = decode_named_field(
+            &fields_bytes[offset..],
+            LOG_FIELD_KEY_MAX,
+            LOG_FIELD_VALUE_MAX,
+        )?;
+        offset += consumed;
     }
     // No trailing bytes past the declared fields.
     if offset != fields_bytes.len() {

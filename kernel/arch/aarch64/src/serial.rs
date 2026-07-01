@@ -1044,6 +1044,7 @@ const fn level_str(level: Level) -> &'static str {
         Level::Info => "INFO",
         Level::Warn => "WARN",
         Level::Error => "ERROR",
+        Level::Critical => "CRIT",
     }
 }
 
