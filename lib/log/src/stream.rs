@@ -88,6 +88,23 @@ impl Stream {
     pub const fn requires_seal(self) -> bool {
         matches!(self, Self::Security | Self::Audit)
     }
+
+    /// Whether writing this stream is restricted to a trusted emitter.
+    ///
+    /// `boot` (firmware/kernel bring-up), `security`, `audit`, and `journal`
+    /// carry system authority: an ordinary process must never be able to
+    /// place a record on one of them. `runtime` and `debug` are open to
+    /// non-privileged emitters (debug being rate-limited by the journal).
+    /// The stream-authority resolver ([`crate::resolve_stream`]) uses this to
+    /// downgrade an untrusted caller's privileged request to `runtime` and
+    /// flag it as a spoof attempt.
+    #[must_use]
+    pub const fn requires_trusted_emitter(self) -> bool {
+        matches!(
+            self,
+            Self::Boot | Self::Security | Self::Audit | Self::Journal
+        )
+    }
 }
 
 #[cfg(test)]
@@ -134,5 +151,15 @@ mod tests {
         assert!(!Stream::Runtime.requires_seal());
         assert!(!Stream::Debug.requires_seal());
         assert!(!Stream::Journal.requires_seal());
+    }
+
+    #[test]
+    fn only_runtime_and_debug_are_caller_writable() {
+        assert!(!Stream::Runtime.requires_trusted_emitter());
+        assert!(!Stream::Debug.requires_trusted_emitter());
+        assert!(Stream::Boot.requires_trusted_emitter());
+        assert!(Stream::Security.requires_trusted_emitter());
+        assert!(Stream::Audit.requires_trusted_emitter());
+        assert!(Stream::Journal.requires_trusted_emitter());
     }
 }

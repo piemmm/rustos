@@ -2791,8 +2791,11 @@ Landed (done):
   the closed `Stream` set + the logical record model (`lib/log` `record.rs`:
   the SYSLOG §5 record body — effective level, per-CPU seq, per-record
   `WallClockReading`, attested `Origin`, source name, caller content, and
-  `data.*` fields — over the shared named-field codec). The userland journal
-  service + anchors are SYSLOG proper (see `.junie/SYSLOG.md`).
+  `data.*` fields — over the shared named-field codec) + the authority model
+  (`lib/log` `authority.rs`: system-derived `SourceName` from the attested
+  `Origin`, reserved-source-prefix spoof screening, and `resolve_stream`
+  effective-stream assignment). The userland journal service + anchors are
+  SYSLOG proper (see `.junie/SYSLOG.md`).
 - §19.6 fuzzing — `cargo xtask fuzz` over all in-tree harnesses (`--quick`/
   `--soak`), fail-closed.
 - §19.7 verified core — Bronze proptest models for `lib/caps`/`kernel/sec`/

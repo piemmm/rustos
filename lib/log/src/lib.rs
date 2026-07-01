@@ -24,6 +24,7 @@
 #![deny(missing_docs)]
 
 pub mod attest;
+pub mod authority;
 pub mod chain;
 pub mod record;
 pub mod segment;
@@ -36,6 +37,10 @@ pub use rustos_abi::field;
 pub use attest::{
     machine_id_hash, stream_genesis, LogAttestationKey, LOG_ATTESTATION_KEY_FILE_LEN,
     LOG_ATTESTATION_KEY_LEN, MACHINE_ID_LEN,
+};
+pub use authority::{
+    derive_source, reserved_source_prefix, resolve_stream, SourceName, StreamDecision,
+    RESERVED_SOURCE_PREFIXES,
 };
 pub use chain::{
     verify_chain, verify_fresh_chain, ChainError, ChainedEntry, LogChain, GENESIS_ANCHOR,

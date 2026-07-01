@@ -104,6 +104,45 @@ codec (`rustos_abi::encode_named_field` / `decode_named_field`) that the
 definition, not two. Origin fields the kernel cannot yet attest are absent by
 construction rather than guessed.
 
+## Authority model (`authority`)
+
+A record has two classes of data: **system-attested** metadata the kernel or
+journal vouch for, and **caller content** the emitter chose (`plans/SYSLOG.md`
+§2). The `authority` module owns the two decisions that turn an attested
+`Origin` plus the caller's *requests* into the authoritative values a record
+carries. Both are `no_std` and allocation-free, so they run on the kernel's
+early-boot path.
+
+* `derive_source` — computes the system-derived `SourceName` from the attested
+  `Origin`, never from anything the caller supplied (§3.2). A `Kernel`-domain
+  origin with a valid subsystem label becomes `kernel.<subsystem>`; a
+  `User`-domain origin becomes `user.<uid>.proc.<proc_id_hex>`; a kernel record
+  with no (or a grammar-violating) subsystem falls back to `unknown.kernel`.
+  The subsystem label is trusted kernel input but is still grammar-checked, so
+  it can never smuggle a `.` and synthesise `kernel.audit.…`. `SourceName` is a
+  fixed-capacity inline buffer and there is no constructor that accepts a
+  caller string. The source-derivation order in the specification also names
+  driver / supervised-service / signed-app classes; those need executable-role
+  metadata the kernel does not yet attest (`Origin` distinguishes only
+  `Kernel` from `User` today), so they are added in place here when their
+  attestation producer exists rather than invented ahead of it.
+* `reserved_source_prefix` / `RESERVED_SOURCE_PREFIXES` — screen a caller's
+  advisory `caller.requested_source` for a reserved prefix (`kernel.`,
+  `driver.`, `audit.`, `security.`, `journal.`, `service.`, `system.`). A hit
+  is a spoofing attempt: it is preserved as a caller claim (evidence), never
+  allowed to become the authoritative source (§3.3).
+* `resolve_stream` — assigns the effective `Stream` from the caller's requested
+  stream and the origin's trust (§2.3), returning a `StreamDecision`. A
+  `Kernel`-domain principal is trusted for every stream, so its request is
+  honoured. A `User`-domain principal may write only the caller-writable
+  streams (`runtime`, `debug`); a request for a trusted-emitter stream
+  (`boot` / `security` / `audit` / `journal`, per `Stream::requires_trusted_emitter`)
+  is denied, downgraded to `runtime`, and `spoofed` is set so the ingress can
+  preserve the request as a claim and raise a trusted security record. An
+  absent request defaults to `runtime`. Finer trust (a supervised service that
+  may legitimately write `security`/`audit`) grows in place when the kernel
+  attests that trust domain.
+
 ## Typed-field value model (`field`)
 
 The typed field-value model is defined in `rustos-abi` (`rustos_abi::field`,
