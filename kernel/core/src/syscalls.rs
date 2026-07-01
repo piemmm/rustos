@@ -3863,8 +3863,21 @@ where
         // every syscall this child makes is attributed to the exact instance
         // (the audit log distinguishes it from a later task that reuses the
         // numeric id). The id is kernel-minted, never caller-supplied.
+        //
+        // Also record the child's parentage: the spawning parent's own
+        // attested process-instance identity, read from the parent's
+        // kernel-held capability record (never a caller-supplied value), so
+        // an audit or origin consumer can attribute the child to the exact
+        // parent instance even across PID reuse. A parent whose record is
+        // absent (a kernel-parented admit) leaves the kernel sentinel.
+        let parent_proc_id = self
+            .caps
+            .read()
+            .caps_for(self.parent)
+            .map_or(ProcId::KERNEL, TaskCapabilities::proc_id);
         let record = TaskCapabilities::derive(sec_id, UserId(0), caps, caps, self.audit)
-            .with_proc_id(self.proc_id);
+            .with_proc_id(self.proc_id)
+            .with_parent_proc_id(parent_proc_id);
         self.caps.write().insert(record);
 
         // Register the child's frozen address space + direct map under the
@@ -7122,6 +7135,112 @@ mod tests {
         .expect("second record decodes");
         assert_eq!(second.handle, 2);
         assert_eq!(second.resource, dma);
+    }
+
+    /// The admit path attests the child's **parentage**: it reads the
+    /// spawning parent's own kernel-held [`ProcId`] from the capability
+    /// table and records it on the child, so parentage is authoritative and
+    /// survives PID reuse. A child whose parent has no capability record (a
+    /// kernel-parented admit) records the [`ProcId::KERNEL`] sentinel.
+    #[test]
+    fn admit_attests_the_childs_parent_proc_id_from_the_parents_record() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let frames = spawn_test_frames();
+
+        // Register the spawning parent's own kernel-held record, carrying a
+        // known attested process-instance identity distinct from its numeric
+        // id. This is what the admit path must copy onto the child — never a
+        // caller-supplied value.
+        let parent_task = SecTaskId(3);
+        let parent_proc = rustos_abi::ProcId::from_raw([0x22; 16]);
+        table.write().insert(
+            TaskCapabilities::derive(
+                parent_task,
+                UserId(0),
+                CapabilitySet::empty(),
+                CapabilitySet::empty(),
+                sink,
+            )
+            .with_proc_id(parent_proc),
+        );
+
+        let program = EmbeddedProgram {
+            path: SPAWN_PATH,
+            rxe: SPAWN_RXE,
+            caps: &[],
+            args: &[],
+        };
+
+        // A child spawned by that parent records the parent's attested
+        // identity as its parentage, and its own (distinct) minted identity
+        // as `proc_id`.
+        let child_proc = rustos_abi::ProcId::from_raw([0x11; 16]);
+        let ctx = KernelSpawnCtx::new(
+            &frames,
+            None,
+            sink,
+            &sched,
+            &table,
+            &aspaces,
+            arch.as_ref(),
+            parent_task,
+            &NULL_PROCESS_WAIT,
+            DescriptorTable::standard(),
+            &[],
+            None,
+            child_proc,
+        );
+        let pid = RecordingSpawn::new()
+            .spawn(&program, &ctx)
+            .expect("child admitted");
+        let child = SecTaskId(pid);
+        assert_eq!(
+            table.read().caps_for(child).map(TaskCapabilities::proc_id),
+            Some(child_proc),
+            "child carries its own minted identity"
+        );
+        assert_eq!(
+            table
+                .read()
+                .caps_for(child)
+                .map(TaskCapabilities::parent_proc_id),
+            Some(parent_proc),
+            "child records the parent's attested identity as parentage"
+        );
+
+        // A kernel-parented admit — the parent id names no capability record
+        // — records the kernel sentinel, never a fabricated value.
+        let orphan_ctx = KernelSpawnCtx::new(
+            &frames,
+            None,
+            sink,
+            &sched,
+            &table,
+            &aspaces,
+            arch.as_ref(),
+            SecTaskId(9999),
+            &NULL_PROCESS_WAIT,
+            DescriptorTable::standard(),
+            &[],
+            None,
+            rustos_abi::ProcId::from_raw([0x33; 16]),
+        );
+        let orphan_pid = RecordingSpawn::new()
+            .spawn(&program, &orphan_ctx)
+            .expect("kernel-parented child admitted");
+        assert_eq!(
+            table
+                .read()
+                .caps_for(SecTaskId(orphan_pid))
+                .map(TaskCapabilities::parent_proc_id),
+            Some(rustos_abi::ProcId::KERNEL),
+            "a parent with no record yields the kernel sentinel"
+        );
     }
 
     /// A [`ProcessSpawn`] double that records whether the [`SpawnCtx`] it

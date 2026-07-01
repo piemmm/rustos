@@ -67,6 +67,18 @@ pub struct TaskCapabilities {
     /// any caller-supplied bytes, so a task can neither forge nor influence
     /// it.
     proc_id: ProcId,
+    /// Process-instance identity of the task's **parent** — the process
+    /// that spawned it — distinct from the parent's reusable numeric id, so
+    /// parentage survives PID reuse exactly as [`proc_id`](Self::proc_id)
+    /// does for the task itself. Defaults to [`ProcId::KERNEL`], the
+    /// sentinel for a kernel-parented task with no distinct user-process
+    /// parent (PID 1, the storage bootstrap-floor drivers, kernel threads).
+    /// The spawn admit path replaces it with the spawning parent's attested
+    /// identity through [`Self::with_parent_proc_id`]; like `proc_id` it is
+    /// set kernel-side from the parent's own kernel-held record and never
+    /// from caller-supplied bytes, so a task cannot forge or influence its
+    /// recorded parentage.
+    parent_proc_id: ProcId,
 }
 
 impl TaskCapabilities {
@@ -117,6 +129,7 @@ impl TaskCapabilities {
             manifest_request,
             effective,
             proc_id: ProcId::KERNEL,
+            parent_proc_id: ProcId::KERNEL,
         }
     }
 
@@ -140,6 +153,33 @@ impl TaskCapabilities {
     #[must_use]
     pub fn proc_id(&self) -> ProcId {
         self.proc_id
+    }
+
+    /// Attach the spawning parent's process-instance identity to this record.
+    ///
+    /// Consumed and returned so the process-admit path can set the parentage
+    /// inline before inserting the record into the [`CapTable`], mirroring
+    /// [`Self::with_proc_id`]. Only the kernel's process-admit sites call it,
+    /// passing the parent's *attested* [`proc_id`](Self::proc_id) read from
+    /// the parent's own kernel-held record — never a caller-supplied value.
+    /// A kernel-parented task (PID 1, the storage bootstrap-floor drivers)
+    /// leaves the [`ProcId::KERNEL`] sentinel.
+    #[must_use]
+    pub fn with_parent_proc_id(mut self, parent_proc_id: ProcId) -> Self {
+        self.parent_proc_id = parent_proc_id;
+        self
+    }
+
+    /// The process-instance identity of the task's parent.
+    ///
+    /// Returns [`ProcId::KERNEL`] for a kernel-parented task (no distinct
+    /// user-process parent). The value is attested by the kernel — read from
+    /// the parent's own kernel-held record, never caller-supplied — so an
+    /// audit or origin consumer may trust it to attribute a task to the exact
+    /// parent instance that spawned it, even across PID reuse.
+    #[must_use]
+    pub fn parent_proc_id(&self) -> ProcId {
+        self.parent_proc_id
     }
 
     /// Produce the kernel-attested [`Origin`] of this task.
@@ -492,6 +532,28 @@ mod tests {
         assert_eq!(admitted.proc_id(), minted);
         assert!(!admitted.proc_id().is_kernel());
         // Attaching the identity changes nothing about the capability set.
+        assert!(admitted.has(CapabilityId::FS_MOUNT));
+    }
+
+    #[test]
+    fn parent_proc_id_defaults_to_kernel_sentinel_and_with_parent_attaches() {
+        use rustos_abi::ProcId;
+        let grant = caps_of(&[CapabilityId::FS_MOUNT]);
+        let sink = RecordingSink::new();
+        let base = TaskCapabilities::derive(TaskId(9), UserId(1000), grant, grant, &sink);
+        // A freshly-derived record is kernel-parented until the admit path
+        // attaches the spawning parent's attested identity.
+        assert_eq!(base.parent_proc_id(), ProcId::KERNEL);
+        assert!(base.parent_proc_id().is_kernel());
+
+        let parent = ProcId::from_raw([0xC3; 16]);
+        let child = ProcId::from_raw([0xAB; 16]);
+        let admitted = base.with_proc_id(child).with_parent_proc_id(parent);
+        // The task's own identity and its parentage are independent fields:
+        // attaching one never disturbs the other or the capability set.
+        assert_eq!(admitted.proc_id(), child);
+        assert_eq!(admitted.parent_proc_id(), parent);
+        assert!(!admitted.parent_proc_id().is_kernel());
         assert!(admitted.has(CapabilityId::FS_MOUNT));
     }
 

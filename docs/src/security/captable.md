@@ -42,6 +42,25 @@ numeric `task` field, so the hash-chained log attributes each decision to
 the exact instance that took it. The attestation is the kernel's, never the
 caller's.
 
+### Parentage (`parent_proc_id`)
+
+The record also carries the **parent's** process-instance identity — the
+`ProcId` of the process that spawned this one. Like `proc_id` it is minted
+kernel-side and copied onto the child at admit from the *parent's own*
+kernel-held capability record (`caps_for(parent).proc_id()`), never from a
+caller-supplied value, so a task can neither forge nor influence its
+recorded parentage. Because it is the parent's instance identity rather than
+its recyclable numeric id, parentage survives PID reuse exactly as `proc_id`
+does for the task itself: the log can tell "the shell spawned by *this*
+login instance" from "the shell spawned by a later login that reused the
+numeric id". A task with no distinct user-process parent — PID 1, the
+storage bootstrap-floor drivers, kernel threads — records the reserved
+all-zero `ProcId::KERNEL` sentinel.
+
+Every security-relevant dispatcher audit record therefore carries the
+caller's attested `pproc` field beside `proc` and `task`, so the
+hash-chained log records the exact parent instance of each acting process.
+
 ## Per-task registry
 
 `CapTable` owns a flat `BTreeMap<TaskId, TaskCapabilities>`. It carries
