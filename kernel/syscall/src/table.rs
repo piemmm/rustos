@@ -10,7 +10,7 @@
 
 use rustos_abi::{
     spec_for, AbiType, CapabilityId, Errno, IrqHandle, MapFlags, OpenFlags, RandomFlags,
-    SyscallNumber, SyscallSpec, ENCODED_TABLE, PROC_ID_HEX_LEN, SYSCALL_MAX_ARGS,
+    SyscallNumber, SyscallSpec, WaitFlags, ENCODED_TABLE, PROC_ID_HEX_LEN, SYSCALL_MAX_ARGS,
 };
 use rustos_crypto::{sha256, Sha256Digest};
 use rustos_kernel_sec::{TaskCapabilities, TaskId};
@@ -322,17 +322,28 @@ pub trait SyscallHandlers {
     /// reaped child's PID (`plans/SPAWN.md` SP6).
     ///
     /// The dispatcher has already validated that `pid` is a sign-extended
-    /// `i32` and that `status` is a non-null `UserPtr`. `pid` is either a
-    /// specific child's PID or [`rustos_abi::WAIT_PID_ANY`] (wait for any
-    /// child). The implementation validates the parent/child relationship —
-    /// a process may only reap its **own** children
-    /// — blocks the caller until a child is reapable, and copies the exit
-    /// code out through the validated `copy_to_user` boundary. A `pid` that
-    /// is not a child of the caller must fail closed with
-    /// [`Errno::NotFound`]; a build with no process-wait service wired must
-    /// fail closed with [`Errno::NotImplemented`] rather than fabricating a
-    /// reaped child.
-    fn wait(&self, caller: &CallerContext<'_>, pid: i32, status: u64) -> SyscallResult;
+    /// `i32`, that `status` is a non-null `UserPtr`, and that `flags` carries
+    /// no reserved bit. `pid` is either a specific child's PID or
+    /// [`rustos_abi::WAIT_PID_ANY`] (wait for any child). The implementation
+    /// validates the parent/child relationship — a process may only reap its
+    /// **own** children — and copies the exit code out through the validated
+    /// `copy_to_user` boundary. A `pid` that is not a child of the caller
+    /// must fail closed with [`Errno::NotFound`]; a build with no
+    /// process-wait service wired must fail closed with
+    /// [`Errno::NotImplemented`] rather than fabricating a reaped child.
+    ///
+    /// With [`WaitFlags::NONBLOCK`] clear the call blocks the caller until a
+    /// child is reapable (never busy-polls). With it set the call polls: it
+    /// reaps an already-exited child if one exists, otherwise — when a
+    /// matching child is still running — returns [`Errno::WouldBlock`]
+    /// without parking the caller and leaves `status` untouched.
+    fn wait(
+        &self,
+        caller: &CallerContext<'_>,
+        pid: i32,
+        status: u64,
+        flags: WaitFlags,
+    ) -> SyscallResult;
 
     /// Read the calling task's effective limit for resource `kind`, writing
     /// the encoded [`rustos_abi::ResourceLimit`] to the user `out` pointer.
@@ -1525,10 +1536,11 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 // `validate_arg` guarantees args[0] is a sign-extended
                 // `i32`; recover it by truncating the low 32 bits (the
                 // same recovery `EXIT` uses), and args[1] is a non-null
-                // `UserPtr`.
+                // `UserPtr`. `from_bits` rejects any reserved flag bit.
                 #[allow(clippy::cast_possible_wrap)]
                 let pid = (args.0[0] & 0xFFFF_FFFF) as i32;
-                self.handlers.wait(caller, pid, args.0[1])
+                let flags = WaitFlags::from_bits(decode_u32(args.0[2]))?;
+                self.handlers.wait(caller, pid, args.0[1], flags)
             }
             SyscallNumber::RLIMIT_GET => {
                 self.handlers
@@ -2218,12 +2230,18 @@ mod tests {
             self.record("mem_unmap");
             Ok(0)
         }
-        fn wait(&self, _c: &CallerContext<'_>, pid: i32, _status: u64) -> SyscallResult {
+        fn wait(
+            &self,
+            _c: &CallerContext<'_>,
+            pid: i32,
+            _status: u64,
+            _flags: WaitFlags,
+        ) -> SyscallResult {
             self.record("wait");
             // Echo the requested pid back as a fabricated reaped PID so the
             // reachability test can assert the dispatcher decoded the
-            // `(pid, status)` arguments without wiring a real wait service
-            // here. The reachability test passes pid 0 (a valid I32).
+            // `(pid, status, flags)` arguments without wiring a real wait
+            // service here. The reachability test passes pid 0 (a valid I32).
             #[allow(clippy::cast_sign_loss)]
             Ok(u64::from(pid as u32))
         }

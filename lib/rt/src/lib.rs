@@ -58,7 +58,7 @@ use rustos_abi::input::KeyInput;
 use rustos_abi::waitset::{WaitSetOp, WaitSourceKind};
 use rustos_abi::{
     BootId, FileStat, HwNode, LimitKind, MapFlags, OpenFlags, ResourceLimit, SyscallNumber,
-    TerminalSize, Time64, WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT,
+    TerminalSize, Time64, WaitFlags, WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT,
     SPAWN_UID_INHERIT, STDERR, STDIN, STDINFO, STDOUT, TERMINAL_SIZE_WIRE_LEN,
 };
 use rustos_abi_trap::raw_syscall;
@@ -1051,8 +1051,64 @@ pub fn wait(pid: i32, status: &mut i32) -> i64 {
     // the `status` pointer against the caller's address space before
     // writing the exit code to it. `status` is a live
     // exclusive `&mut i32` for the duration of the call, so the pointer
-    // denotes writable memory the kernel may fill.
-    let ret = unsafe { raw_syscall(NUM_WAIT, [i32_arg(pid), ptr, 0, 0, 0, 0]) };
+    // denotes writable memory the kernel may fill. A blocking wait carries
+    // no flags (`WaitFlags::empty()`).
+    let ret = unsafe {
+        raw_syscall(
+            NUM_WAIT,
+            [
+                i32_arg(pid),
+                ptr,
+                u64::from(WaitFlags::empty().bits()),
+                0,
+                0,
+                0,
+            ],
+        )
+    };
+    ret as i64
+}
+
+/// Poll for a child process without blocking (`SyscallNumber::WAIT` with
+/// [`WaitFlags::NONBLOCK`]) — the non-blocking companion to [`wait`].
+///
+/// This is the reap a shell's job control performs to report finished
+/// background jobs before the next prompt, and PID 1 `init` uses to reap the
+/// session without parking. `pid` is a specific child's PID or
+/// [`rustos_abi::WAIT_PID_ANY`]. If a matching child has already exited it is
+/// reaped: its exit code is written into `status` and its PID returned. If a
+/// matching child is still running the kernel does **not** block; it returns
+/// the raw negative encoding of [`rustos_abi::Errno::WouldBlock`] and leaves
+/// `status` untouched.
+///
+/// The kernel encodes the result as a signed register following the standard
+/// `abi-v1` convention: a non-negative value is the reaped child's PID, and a
+/// negative value is `-errno` (recover the [`rustos_abi::Errno`] discriminant
+/// as `-ret`) — `Errno::WouldBlock` means "no child ready yet", any other
+/// negative value is a genuine failure (e.g. `NotFound`, no such child). The
+/// wrapper surfaces that raw signed value so the caller decides how to react;
+/// it adds no authority and hides no error.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 wait-result encoding (PID ≥ 0, else -errno).
+pub fn try_wait(pid: i32, status: &mut i32) -> i64 {
+    let ptr = (status as *mut i32) as usize as u64;
+    // SAFETY: identical to `wait` — the kernel validates the `status` pointer
+    // owner-side before writing, and only on a successful reap; a `WouldBlock`
+    // leaves it untouched. `status` is a live exclusive `&mut i32` for the
+    // duration of the call.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_WAIT,
+            [
+                i32_arg(pid),
+                ptr,
+                u64::from(WaitFlags::NONBLOCK.bits()),
+                0,
+                0,
+                0,
+            ],
+        )
+    };
     ret as i64
 }
 
@@ -2803,6 +2859,35 @@ mod tests {
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(wait(9, &mut status), want);
+        });
+    }
+
+    #[test]
+    fn try_wait_marshals_the_nonblock_flag() {
+        let mut status = 0i32;
+        let ptr = core::ptr::addr_of_mut!(status) as usize as u64;
+        let (number, args) = capture(5, || {
+            assert_eq!(try_wait(9, &mut status), 5);
+        });
+        assert_eq!(number, NUM_WAIT);
+        assert_eq!(args[0], 9);
+        assert_eq!(args[1], ptr);
+        // The only difference from a blocking `wait` is the NONBLOCK flag in
+        // the third argument slot.
+        assert_eq!(args[2], u64::from(WaitFlags::NONBLOCK.bits()));
+        assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn try_wait_surfaces_would_block_encoding() {
+        // A still-running child is reported as the two's-complement negation
+        // of `WouldBlock`; the wrapper hands that signed value back unchanged
+        // so the caller can retry rather than treating it as a hard failure.
+        let mut status = 0i32;
+        let want = -i64::from(rustos_abi::Errno::WouldBlock.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let (_, _) = capture(neg, || {
+            assert_eq!(try_wait(9, &mut status), want);
         });
     }
 

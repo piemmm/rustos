@@ -177,9 +177,10 @@ impl SyscallNumber {
     /// exit code (`plans/SPAWN.md` SP6).
     ///
     /// Arguments: `pid: i32` (the child to wait for, or [`WAIT_PID_ANY`] to
-    /// wait for any of the caller's children) and `status: *mut i32` (a
+    /// wait for any of the caller's children), `status: *mut i32` (a
     /// non-null user pointer the kernel writes the reaped child's exit
-    /// code into). Returns the reaped child's PID. A process may only wait
+    /// code into), and `flags: u32` (a [`WaitFlags`] set). Returns the
+    /// reaped child's PID. A process may only wait
     /// on its **own** children — waiting reaps a child the caller spawned,
     /// so it grants no authority over anything else and needs no
     /// capability (precedent — "list my own processes");
@@ -187,6 +188,14 @@ impl SyscallNumber {
     /// caller fails closed with [`crate::Errno::NotFound`]; a build with no
     /// process-wait service wired fails closed with
     /// [`crate::Errno::NotImplemented`].
+    ///
+    /// With [`WaitFlags::NONBLOCK`] set the call polls instead of blocking:
+    /// it reaps an already-exited child if one exists, otherwise — when a
+    /// matching child is still running — it returns [`crate::Errno::WouldBlock`]
+    /// (the `abi-v1` "nothing yet, retry" signal) without parking the caller,
+    /// and `status` is left untouched. With the bit clear the call blocks
+    /// until a child becomes reapable (never busy-polls). A reserved flag bit
+    /// fails closed with [`crate::Errno::OutOfRange`].
     pub const WAIT: Self = Self(16);
     /// Read the calling process's effective limit for one resource.
     ///
@@ -1092,6 +1101,80 @@ impl SyscallNumber {
 /// every call site.
 pub const WAIT_PID_ANY: i32 = -1;
 
+/// Flags accepted by [`SyscallNumber::WAIT`].
+///
+/// A `#[repr(transparent)]` newtype over the `u32` flags register so the wire
+/// representation is exactly the integer the syscall trampoline passes,
+/// mirroring [`crate::MapFlags`]. Only the bits named here are defined; every
+/// other bit is reserved and must be zero. [`WaitFlags::from_bits`] rejects a
+/// value with any reserved bit set, so a future flag cannot be silently
+/// ignored by an older kernel (validate every input, fail closed).
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Default)]
+pub struct WaitFlags(u32);
+
+impl WaitFlags {
+    /// Do not block: report the child's status immediately if one is
+    /// reapable, otherwise return [`Errno::WouldBlock`] without parking the
+    /// caller.
+    ///
+    /// This is the non-blocking *poll* the shell's job control uses to report
+    /// finished background jobs before the next prompt: with the bit set,
+    /// [`SyscallNumber::WAIT`] either reaps an already-exited child (returning
+    /// its PID, exactly as the blocking form does) or — when a matching child
+    /// exists but has not exited yet — returns [`Errno::WouldBlock`], the
+    /// established `abi-v1` "nothing yet, retry" signal (the same one
+    /// [`SyscallNumber::USERS_DB_READ`] and the wait-set use). A poll that
+    /// finds no reapable child is not a security decision, so it is recorded
+    /// below the error level and cannot flood the audit log the way a
+    /// per-call error would. With the bit clear, `wait` blocks until a child
+    /// becomes reapable (never busy-polls).
+    pub const NONBLOCK: Self = Self(1 << 0);
+
+    /// The set of all defined flag bits.
+    ///
+    /// Any bit outside this mask is reserved and rejected by
+    /// [`WaitFlags::from_bits`].
+    const DEFINED_BITS: u32 = Self::NONBLOCK.0;
+
+    /// An empty flag set (blocking wait, no options).
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    /// Raw flag bits, as carried on the ABI.
+    #[must_use]
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
+
+    /// Build a flag set from raw bits, rejecting any reserved bit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Errno::OutOfRange`] if `bits` sets any reserved
+    /// (currently-undefined) bit.
+    pub const fn from_bits(bits: u32) -> Result<Self, Errno> {
+        if bits & !Self::DEFINED_BITS != 0 {
+            return Err(Errno::OutOfRange);
+        }
+        Ok(Self(bits))
+    }
+
+    /// Whether every bit set in `other` is also set in `self`.
+    #[must_use]
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    /// Whether the caller asked for a non-blocking poll.
+    #[must_use]
+    pub const fn is_nonblock(self) -> bool {
+        self.contains(Self::NONBLOCK)
+    }
+}
+
 /// Opaque, kernel-issued handle to a bound hardware interrupt line.
 ///
 /// Returned by the `irq_bind` syscall and consumed by `irq_wait`. The
@@ -1132,7 +1215,7 @@ impl IrqHandle {
 
 #[cfg(test)]
 mod tests {
-    use super::{IrqHandle, SyscallNumber, SYSCALL_TABLE_HASH_LEN};
+    use super::{IrqHandle, SyscallNumber, WaitFlags, SYSCALL_TABLE_HASH_LEN};
     use crate::Errno;
 
     #[test]
@@ -1227,5 +1310,27 @@ mod tests {
     #[test]
     fn hash_length_matches_sha256() {
         assert_eq!(SYSCALL_TABLE_HASH_LEN, 32);
+    }
+
+    #[test]
+    fn wait_flags_empty_is_blocking() {
+        let f = WaitFlags::empty();
+        assert_eq!(f.bits(), 0);
+        assert!(!f.is_nonblock());
+    }
+
+    #[test]
+    fn wait_flags_nonblock_round_trips() {
+        let f = WaitFlags::NONBLOCK;
+        assert!(f.is_nonblock());
+        let again = WaitFlags::from_bits(f.bits()).expect("defined bit");
+        assert_eq!(again, f);
+    }
+
+    #[test]
+    fn wait_flags_reserved_bits_are_rejected() {
+        // Bit 1 is reserved today.
+        assert_eq!(WaitFlags::from_bits(1 << 1), Err(Errno::OutOfRange));
+        assert_eq!(WaitFlags::from_bits(u32::MAX), Err(Errno::OutOfRange));
     }
 }

@@ -80,10 +80,10 @@ use rustos_abi::sysinfo::{MountRecord, ProcessRecord};
 use rustos_abi::{
     decode_log_record, BootId, CapabilityId, DescriptorTable, DirEntry, Errno, FileStat,
     IntrospectDomain, IrqHandle, LimitKind, MapFlags, OpenFlags, ProcId, RandomFlags,
-    ResourceLimit, StreamMode, SyscallNumber, Time64, WaitSetOp, WaitSourceKind, WallClockReading,
-    WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, FS_IO_MAX, FS_NAME_MAX, FS_PATH_MAX,
-    LOG_FIELDS_MAX, LOG_RECORD_MAX, PROC_ID_LEN, RANDOM_REQUEST_MAX_BYTES, SPAWN_UID_INHERIT,
-    TERMINAL_SIZE_WIRE_LEN,
+    ResourceLimit, StreamMode, SyscallNumber, Time64, WaitFlags, WaitSetOp, WaitSourceKind,
+    WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, FS_IO_MAX, FS_NAME_MAX,
+    FS_PATH_MAX, LOG_FIELDS_MAX, LOG_RECORD_MAX, PROC_ID_LEN, RANDOM_REQUEST_MAX_BYTES,
+    SPAWN_UID_INHERIT, TERMINAL_SIZE_WIRE_LEN,
 };
 use rustos_caps::CapabilitySet;
 use rustos_kernel_ipc::{
@@ -2331,16 +2331,34 @@ where
         result
     }
 
-    fn wait(&self, caller: &CallerContext<'_>, pid: i32, status: u64) -> SyscallResult {
+    fn wait(
+        &self,
+        caller: &CallerContext<'_>,
+        pid: i32,
+        status: u64,
+        flags: WaitFlags,
+    ) -> SyscallResult {
         // The dispatcher already validated that `pid` is a sign-extended
-        // `i32` and that `status` is a non-null `UserPtr`. Hand the request
-        // to the installed scheduler-side producer, which validates the
-        // parent/child relationship (a process may only reap its own
-        // children), blocks the caller until a child
-        // is reapable, and reports the reaped child. Until one is installed
-        // the default `NULL_PROCESS_WAIT` fails closed with `NotImplemented`, never fabricating a reaped child — the
-        // process-wait analogue of `NULL_MEM_MAP` / `NULL_PROCESS_SPAWN`.
-        let reaped = self.process_wait.wait(caller.task_id, pid)?;
+        // `i32`, that `status` is a non-null `UserPtr`, and that `flags`
+        // carries no reserved bit. Hand the request to the installed
+        // scheduler-side producer, which validates the parent/child
+        // relationship (a process may only reap its own children) and reports
+        // the reaped child. Until one is installed the default
+        // `NULL_PROCESS_WAIT` fails closed with `NotImplemented`, never
+        // fabricating a reaped child — the process-wait analogue of
+        // `NULL_MEM_MAP` / `NULL_PROCESS_SPAWN`.
+        //
+        // `NONBLOCK` selects the poll path: it reaps an already-exited child
+        // or returns `WouldBlock` (a matching child is still running) without
+        // ever parking the caller. Cleared, `wait` blocks the caller until a
+        // child is reapable (never busy-polls). A `WouldBlock` leaves `status`
+        // untouched — the `?` returns before the copy-out below — so a poll
+        // that finds nothing writes nothing.
+        let reaped = if flags.is_nonblock() {
+            self.process_wait.poll(caller.task_id, pid)?
+        } else {
+            self.process_wait.wait(caller.task_id, pid)?
+        };
 
         // Copy the child's exit code out to the caller's `status` pointer
         // through the validated `copy_to_user` boundary
@@ -10410,6 +10428,7 @@ mod tests {
     /// real scheduler-side wait path.
     struct RecordingProcessWait {
         last: rustos_sync::SpinLock<Option<(u64, i32)>>,
+        last_poll: rustos_sync::SpinLock<Option<(u64, i32)>>,
         last_exit: rustos_sync::SpinLock<Option<(u64, i32)>>,
         last_register: rustos_sync::SpinLock<Option<(u64, u64)>>,
         result: Result<crate::procwait::ReapedChild, Errno>,
@@ -10418,6 +10437,7 @@ mod tests {
         fn new(result: Result<crate::procwait::ReapedChild, Errno>) -> Self {
             Self {
                 last: rustos_sync::SpinLock::new(None),
+                last_poll: rustos_sync::SpinLock::new(None),
                 last_exit: rustos_sync::SpinLock::new(None),
                 last_register: rustos_sync::SpinLock::new(None),
                 result,
@@ -10427,6 +10447,13 @@ mod tests {
     impl crate::procwait::ProcessWait for RecordingProcessWait {
         fn wait(&self, parent: SecTaskId, pid: i32) -> Result<crate::procwait::ReapedChild, Errno> {
             *self.last.lock() = Some((parent.0, pid));
+            self.result
+        }
+        fn poll(&self, parent: SecTaskId, pid: i32) -> Result<crate::procwait::ReapedChild, Errno> {
+            // Record the poll arguments in a *separate* slot so a test can
+            // prove the handler took the non-blocking branch (and never the
+            // blocking `wait`) when `WaitFlags::NONBLOCK` is set.
+            *self.last_poll.lock() = Some((parent.0, pid));
             self.result
         }
         fn record_exit(&self, task: SecTaskId, code: i32) {
@@ -10476,8 +10503,90 @@ mod tests {
 
         // Returns the reaped child's PID; the producer saw the caller's
         // task id as `parent` and the requested `pid` verbatim.
-        assert_eq!(h.wait(&ctx, 9, 0x1000), Ok(42));
+        assert_eq!(h.wait(&ctx, 9, 0x1000, WaitFlags::empty()), Ok(42));
         assert_eq!(*producer.last.lock(), Some((2, 9)));
+        // The blocking branch went to `wait`, never the poll path.
+        assert_eq!(*producer.last_poll.lock(), None);
+    }
+
+    /// `WaitFlags::NONBLOCK` routes the handler through the producer's
+    /// non-blocking `poll` (never the blocking `wait`); a reaped child's PID
+    /// and copied-out exit code flow back exactly as the blocking form's do.
+    #[test]
+    fn wait_nonblock_uses_the_poll_path() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let producer: &'static RecordingProcessWait = Box::leak(Box::new(
+            RecordingProcessWait::new(Ok(crate::procwait::ReapedChild { pid: 42, code: 7 })),
+        ));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_process_wait(producer);
+
+        assert_eq!(h.wait(&ctx, 9, 0x1000, WaitFlags::NONBLOCK), Ok(42));
+        // The non-blocking branch used `poll`, never the blocking `wait`.
+        assert_eq!(*producer.last_poll.lock(), Some((2, 9)));
+        assert_eq!(*producer.last.lock(), None);
+    }
+
+    /// A non-blocking `wait` whose matching child is still running surfaces
+    /// the producer's `WouldBlock` verbatim (the "nothing yet, retry" signal)
+    /// without parking the caller.
+    #[test]
+    fn wait_nonblock_would_block_propagates() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let producer: &'static RecordingProcessWait =
+            Box::leak(Box::new(RecordingProcessWait::new(Err(Errno::WouldBlock))));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_process_wait(producer);
+
+        assert_eq!(
+            h.wait(&ctx, 9, 0x1000, WaitFlags::NONBLOCK),
+            Err(Errno::WouldBlock)
+        );
+        assert_eq!(*producer.last_poll.lock(), Some((2, 9)));
     }
 
     /// With no producer installed the handler holds `NULL_PROCESS_WAIT` and
@@ -10508,7 +10617,10 @@ mod tests {
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
-        assert_eq!(h.wait(&ctx, 9, 0x1000), Err(Errno::NotImplemented));
+        assert_eq!(
+            h.wait(&ctx, 9, 0x1000, WaitFlags::empty()),
+            Err(Errno::NotImplemented)
+        );
     }
 
     /// A producer error (e.g. `pid` is not a child of the caller) propagates
@@ -10544,7 +10656,10 @@ mod tests {
         )
         .with_process_wait(producer);
 
-        assert_eq!(h.wait(&ctx, 9, 0x1000), Err(Errno::NotFound));
+        assert_eq!(
+            h.wait(&ctx, 9, 0x1000, WaitFlags::empty()),
+            Err(Errno::NotFound)
+        );
         assert_eq!(*producer.last.lock(), Some((2, 9)));
     }
 
@@ -10579,7 +10694,10 @@ mod tests {
 
         // The child was reaped (the producer ran) but its code cannot be
         // delivered: the unregistered caller fails closed with BadAddress.
-        assert_eq!(h.wait(&ctx, 9, 0x1000), Err(Errno::BadAddress));
+        assert_eq!(
+            h.wait(&ctx, 9, 0x1000, WaitFlags::empty()),
+            Err(Errno::BadAddress)
+        );
     }
 
     /// `exit` hands the caller's task id and exit code to the process-wait

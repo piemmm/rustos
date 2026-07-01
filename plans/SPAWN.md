@@ -660,6 +660,22 @@ a non-child fails closed; `virt` + the headless build stay green. **SP6 is
 complete:** SP6a landed the abi surface + fail-closed seam; SP6b landed the
 scheduler-side blocking producer + the `-M virt` vertical.
 
+**Non-blocking poll (`WaitFlags::NONBLOCK`).** `wait` carries a third
+`flags: u32` argument (a `rustos_abi::WaitFlags` set; the ABI is unfrozen so
+the row was extended in place, no `v2`). With `NONBLOCK` set the call polls:
+it reaps an already-exited child, or returns `Errno::WouldBlock` for a
+still-running child **without parking** — the reap the shell's job control
+performs before each prompt and PID 1 `init` uses to reap the session without
+blocking. The producer serves it through the same single `ProcessTable::reap`
+primitive the blocking loop uses (`ProcessWait::poll`), so the two can never
+diverge; `WouldBlock` is the `abi-v1` "nothing yet, retry" signal the
+dispatcher records below the error level, so a polling loop never floods the
+audit log. First-party wrapper `rustos_rt::try_wait`; C stub `ros_sys_wait`
+(header macro `ROS_WAIT_FLAG_NONBLOCK`). Host-proven end to end (producer
+poll ready/would-block/not-found; handler nonblock-poll + would-block; abi-sys
++ rt marshalling); the blocking-reap `-M virt` vertical already proves the
+shared `reap` primitive on hardware.
+
 ---
 
 ## 2. Cross-cutting requirements (apply to every stage)

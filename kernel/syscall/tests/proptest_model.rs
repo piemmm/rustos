@@ -169,7 +169,13 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
-    fn wait(&self, _c: &CallerContext<'_>, _pid: i32, _status: u64) -> SyscallResult {
+    fn wait(
+        &self,
+        _c: &CallerContext<'_>,
+        _pid: i32,
+        _status: u64,
+        _flags: rustos_abi::WaitFlags,
+    ) -> SyscallResult {
         self.bump();
         Ok(0)
     }

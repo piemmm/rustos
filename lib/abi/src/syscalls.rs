@@ -435,11 +435,11 @@ pub const SYSCALLS: &[SyscallSpec] = &[
     SyscallSpec {
         number: SyscallNumber::WAIT,
         name: "wait",
-        arg_count: 2,
+        arg_count: 3,
         args: [
             AbiType::I32,
             AbiType::UserPtr,
-            AbiType::Unit,
+            AbiType::U32,
             AbiType::Unit,
             AbiType::Unit,
             AbiType::Unit,
@@ -453,8 +453,11 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // the high-volume own-process data movers it IS audited per call:
         // reaping a child is a security-relevant process-lifecycle state
         // change — a principal disappears — exactly as `spawn`/`exit` are
-        // audited; `wait` blocks rather than polls, so
-        // the per-call record does not drown the log.
+        // audited. The `flags` argument selects blocking (the default) or a
+        // non-blocking poll (`WaitFlags::NONBLOCK`); a poll that finds no
+        // reapable child returns `Errno::WouldBlock`, which the dispatcher
+        // records below the error level, so neither the blocking wait nor a
+        // polling job-control loop drowns the log.
         required_capability: None,
         audit: true,
     },

@@ -85,6 +85,27 @@ pub trait ProcessWait: Sync {
     /// [`Errno::NotImplemented`] to mark an inert interface.
     fn wait(&self, parent: TaskId, pid: i32) -> Result<ReapedChild, Errno>;
 
+    /// Non-blocking counterpart to [`Self::wait`]: try to reap a child of
+    /// `parent` selected by `pid` **without ever parking the caller**.
+    ///
+    /// This backs `WaitFlags::NONBLOCK`, the poll the shell's job
+    /// control uses to report finished background jobs before the next
+    /// prompt.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::WouldBlock`] when a matching child exists but has not
+    ///   exited yet — the `abi-v1` "nothing yet, retry" signal, so a polling
+    ///   caller neither blocks nor floods the audit log.
+    /// * [`Errno::NotFound`] when `pid` names no child of `parent`.
+    ///
+    /// The default fails closed with [`Errno::NotImplemented`] so a producer
+    /// that predates the poll path — and the inert [`NullProcessWait`] —
+    /// never fabricates a reaped child; [`KernelProcessWait`] overrides it.
+    fn poll(&self, _parent: TaskId, _pid: i32) -> Result<ReapedChild, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
     /// Record that `child` was spawned by `parent`.
     ///
     /// Called from the `spawn` admit path the instant a child is admitted,
@@ -304,6 +325,19 @@ where
         crate::waitq::procwait_wake();
     }
 
+    fn poll(&self, parent: TaskId, pid: i32) -> Result<ReapedChild, Errno> {
+        // A single non-blocking reap attempt — the same primitive the
+        // blocking `wait` loop uses, so the two can never diverge. A matching
+        // child that has not exited yet is reported as `WouldBlock` (the
+        // caller decides whether to retry) rather than parking; no child at
+        // all fails closed with `NotFound`.
+        match self.table.lock().reap(parent, pid) {
+            Reap::Ready(child) => Ok(child),
+            Reap::Blocked => Err(Errno::WouldBlock),
+            Reap::NoChild => Err(Errno::NotFound),
+        }
+    }
+
     fn wait(&self, parent: TaskId, pid: i32) -> Result<ReapedChild, Errno> {
         loop {
             // Re-poll under the lock, then release it *before* parking so the
@@ -503,5 +537,50 @@ mod tests {
         // busy-spinning forever.
         p.register_child(TaskId(1), TaskId(2));
         assert_eq!(p.wait(TaskId(1), WAIT_PID_ANY), Err(Errno::NotImplemented));
+    }
+
+    #[test]
+    fn producer_poll_reaps_an_exited_child_without_blocking() {
+        let p = producer();
+        p.register_child(TaskId(1), TaskId(2));
+        p.record_exit(TaskId(2), 9);
+        assert_eq!(
+            p.poll(TaskId(1), WAIT_PID_ANY),
+            Ok(ReapedChild { pid: 2, code: 9 })
+        );
+        // The zombie was consumed; a second poll finds no child.
+        assert_eq!(p.poll(TaskId(1), WAIT_PID_ANY), Err(Errno::NotFound));
+    }
+
+    #[test]
+    fn producer_poll_of_a_running_child_would_block_never_parks() {
+        let p = producer();
+        // A registered-but-unexited child: a *blocking* wait here would park
+        // (and fail closed in a host test), but the poll reports `WouldBlock`
+        // immediately without ever touching the scheduler.
+        p.register_child(TaskId(1), TaskId(2));
+        assert_eq!(p.poll(TaskId(1), WAIT_PID_ANY), Err(Errno::WouldBlock));
+        assert_eq!(p.poll(TaskId(1), 2), Err(Errno::WouldBlock));
+    }
+
+    #[test]
+    fn producer_poll_of_a_non_child_fails_closed() {
+        let p = producer();
+        p.register_child(TaskId(1), TaskId(2));
+        p.record_exit(TaskId(2), 0);
+        // Task 9 never spawned child 2, and a caller with no children at all
+        // sees `NotFound` — a poll grants no authority over another principal.
+        assert_eq!(p.poll(TaskId(9), WAIT_PID_ANY), Err(Errno::NotFound));
+        assert_eq!(p.poll(TaskId(9), 2), Err(Errno::NotFound));
+    }
+
+    #[test]
+    fn null_producer_poll_is_not_implemented() {
+        // The inert default announces an unwired interface rather than
+        // fabricating a reaped child.
+        assert_eq!(
+            NULL_PROCESS_WAIT.poll(TaskId(1), WAIT_PID_ANY),
+            Err(Errno::NotImplemented)
+        );
     }
 }

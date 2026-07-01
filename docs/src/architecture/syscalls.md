@@ -69,7 +69,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  13 | `stream_read`  | `u32 fd`, `user_ptr`, `len`             | `u64`   | `CAP_CONSOLE_READ`      | no      |
 |  14 | `mem_map`      | `len`, `u32 flags`, `u64 addr_hint`     | `u64` (base) | —                  | no      |
 |  15 | `mem_unmap`    | `u64 base`, `len`                       | `errno` | —                       | no      |
-|  16 | `wait`         | `i32 pid`, `user_ptr` (status)          | `u64` (pid) | —                   | yes     |
+|  16 | `wait`         | `i32 pid`, `user_ptr` (status), `u32 flags` | `u64` (pid) | —               | yes     |
 |  17 | `rlimit_get`   | `u32 kind`, `user_ptr` (out)            | `errno` | —                       | no      |
 |  18 | `rlimit_set`   | `u32 kind`, `user_ptr` (value)          | `errno` | —                       | yes     |
 |  19 | `users_db_read`| `user_ptr` (buf), `len`                 | `u64` (bytes) | `CAP_USERS_READ`  | yes     |
@@ -477,11 +477,11 @@ stays the capability-checked IPC object (`AGENTS.md` §4).
 *own* children, so reaping one grants no authority over any other
 principal (the same §16.6 baseline). It is, however, *audited* — reaping a
 child is a process-lifecycle state change (a principal disappears), exactly
-as `spawn` and `exit` are audited (`AGENTS.md` §5.4.4); `wait` blocks rather
-than polls, so the per-call record does not drown the log. `pid` is either
+as `spawn` and `exit` are audited (`AGENTS.md` §5.4.4). `pid` is either
 a specific child's PID or `rustos_abi::WAIT_PID_ANY` (`-1`, wait for any child);
 `status` is a non-null user pointer the kernel writes the reaped child's
-exit code to. The handler reaches the scheduler-side reaper through the
+exit code to; `flags` is a `rustos_abi::WaitFlags` set. The handler reaches
+the scheduler-side reaper through the
 `kernel/core::procwait::ProcessWait` seam, which is installed at boot like
 the `spawn` / `mem_map` producers. The boot path installs the real
 `KernelProcessWait` producer (`plans/SPAWN.md` SP6b): it owns the
@@ -492,6 +492,21 @@ scheduler reschedule path) until a matching child is reapable, then reaps
 it. A `wait` issued before that install (or by a non-parkable task) fails
 closed with `NotImplemented` through the default `NULL_PROCESS_WAIT`
 (`AGENTS.md` §2.9). The first-party Rust wrapper is `rustos_rt::wait`.
+
+With `WaitFlags::NONBLOCK` set the call **polls** instead of blocking — the
+reap the shell's job control performs to report finished background jobs
+before the next prompt, and PID 1 `init` uses to reap the session without
+parking. It reaps an already-exited child (returning its PID and copying
+the exit code out, exactly as the blocking form does), or — when a matching
+child is still running — returns `WouldBlock` (the `abi-v1` "nothing yet,
+retry" signal) without parking the caller, leaving `status` untouched. The
+producer serves the poll through the same single `ProcessTable::reap`
+primitive the blocking loop uses, so the two can never diverge, and a
+poll that finds nothing reapable is audited as the benign
+`SYSCALL_HANDLER_WOULD_BLOCK` (Debug), not an ERROR — so a polling
+job-control loop never floods the log (`AGENTS.md` §2.1 / §19.4). The
+first-party Rust wrapper is `rustos_rt::try_wait`; the C stub `ros_sys_wait`
+takes the flags argument and the header defines `ROS_WAIT_FLAG_NONBLOCK`.
 
 `rlimit_get` (no. 17) and `rlimit_set` (no. 18) are the settable
 `ulimit`/`rlimit`-equivalent (`AGENTS.md` §24.3). Both name a closed
@@ -735,7 +750,7 @@ re-validates arguments — the dispatcher does that first.
 | `spawn`         | resolves the `console` argument first (`CONSOLE_INHERIT` → the caller's own descriptor table; else a validated installed-console index → `DescriptorTable::standard_on`), copies the absolute program path in through `copy_from_user` (bounded by `SPAWN_PATH_MAX`), resolves it in the `ProgramRegistry`, then resolves the child's kernel-attested **credential** from `target_uid` (`SPAWN_UID_INHERIT` → snapshot the caller's own credential; else, gated by `CAP_SPAWN_AS_USER`, resolve the target user's uid/gid/groups from the authoritative identity table — spawn-as-user, `PREREQUISITES.md` P-C), and hands the validated `rxe` to the installed `ProcessSpawn` producer (`with_spawn`; default `NULL_PROCESS_SPAWN`) which builds a fresh isolated address space and admits a **Ready** user kthread (established with the resolved descriptor table and credential) through `SpawnCtx::admit_process`, returning the child PID — the caller keeps running (`plans/SPAWN.md` SP3) | Console index with no installed console → `NotFound`. Frame allocator not threaded (`with_frames`) → `NotImplemented`. Empty / over-long path → `NotFound`. Faulting path / no registered address space → `BadAddress`. Unknown path → `NotFound`. A `target_uid` switch without `CAP_SPAWN_AS_USER` → `PermissionDenied`; an unresolvable target (no identity table, or unknown uid) → `NotImplemented` / `PermissionDenied`. No producer wired → `NotImplemented`. Otherwise `Ok(pid)`. |
 | `mem_map`       | rejects a zero `len`, decodes `flags` through `MapFlags::from_bits`, then hands `(len, flags, addr_hint)` to the installed `MemMap` producer (`with_mem_map`; default `NULL_MEM_MAP`) which maps a fresh zeroed `RW` region into the caller's **own** live address space and returns its base (`plans/SPAWN.md` SP5) | `len == 0` → `LengthOutOfRange`. Reserved flag bit → `OutOfRange`. No producer wired → `NotImplemented`. Frame exhaustion → `OutOfMemory`. Otherwise `Ok(base)`. |
 | `mem_unmap`     | rejects a zero `len`, then hands `(base, len)` to the same `MemMap` producer, which zeroes the frames it reclaims (`AGENTS.md` §4) and fails closed when the range does not name a region the caller mapped | `len == 0` → `LengthOutOfRange`. No producer wired → `NotImplemented`. Range not mapped by the caller → producer errno. Otherwise `Ok(0)`. |
-| `wait`          | hands `(caller.task_id, pid)` to the installed `ProcessWait` producer (`with_process_wait`; default `NULL_PROCESS_WAIT`) which validates the parent/child relationship, blocks until a child is reapable, and reaps it; the reaped child's exit code is then copied out to `status` through `copy_to_user` and the child's PID returned (`plans/SPAWN.md` SP6) | No producer wired → `NotImplemented`. `pid` not a child of the caller → `NotFound`. Faulting `status` / no registered address space → `BadAddress`. Otherwise `Ok(pid)`. |
+| `wait`          | decodes `flags` through `WaitFlags::from_bits`, then hands `(caller.task_id, pid)` to the installed `ProcessWait` producer (`with_process_wait`; default `NULL_PROCESS_WAIT`) which validates the parent/child relationship and reaps a reapable child; blocking (`flags` clear) parks until one is reapable, `NONBLOCK` polls via the same `ProcessTable::reap` and returns `WouldBlock` for a still-running child without parking; on a reap the exit code is copied out to `status` through `copy_to_user` and the child's PID returned (`plans/SPAWN.md` SP6) | Reserved flag bit → `OutOfRange`. No producer wired → `NotImplemented`. `pid` not a child of the caller → `NotFound`. `NONBLOCK` with a still-running child → `WouldBlock` (`status` untouched). Faulting `status` / no registered address space → `BadAddress`. Otherwise `Ok(pid)`. |
 | `rlimit_get`    | validates `kind` against `LimitKind`, then reads the caller's effective limit from the installed resource-limit service and copies the encoded `ResourceLimit` out to the user buffer through `copy_to_user` (`AGENTS.md` §24.3). The default trait method fails closed until the L2 enforcement is installed | Unassigned `kind` → `OutOfRange`. No service wired → `NotImplemented`. Faulting buffer / no registered address space → `BadAddress`. Otherwise `Ok(0)`. |
 | `rlimit_set`    | copies the encoded `ResourceLimit` in through `copy_from_user`, validates `kind` + the `soft <= hard` pair, and — when the request raises a hard bound above the inherited ceiling — refuses unless the caller holds `CAP_RLIMIT_RAISE` (`AGENTS.md` §24.3). The default trait method fails closed until L2 | Unassigned `kind` / malformed pair → `OutOfRange`. Raising a hard bound without the capability → `PermissionDenied`. No service wired → `NotImplemented`. Faulting buffer → `BadAddress`. Otherwise `Ok(0)`. |
 | `console_count` | returns the installed console list's length (`with_consoles`) — the index space `spawn`'s `console` argument selects from (`AGENTS.md` §20, `plans/PI.md` P11) | No console list wired → `NotImplemented`. Otherwise `Ok(count)`. |

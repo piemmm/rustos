@@ -28,7 +28,7 @@
 use core::cell::RefCell;
 use rustos_abi::{
     spec_for, AbiType, CapabilityId, Errno, IrqHandle, MapFlags, OpenFlags, RandomFlags,
-    SyscallNumber, ENCODED_TABLE_LEN, SYSCALLS, SYSCALL_MAX_ARGS,
+    SyscallNumber, WaitFlags, ENCODED_TABLE_LEN, SYSCALLS, SYSCALL_MAX_ARGS,
 };
 use rustos_caps::CapabilitySet;
 use rustos_kernel_sec::{TaskCapabilities, TaskId, UserId};
@@ -167,7 +167,13 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
-    fn wait(&self, _c: &CallerContext<'_>, _pid: i32, _status: u64) -> SyscallResult {
+    fn wait(
+        &self,
+        _c: &CallerContext<'_>,
+        _pid: i32,
+        _status: u64,
+        _flags: WaitFlags,
+    ) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
@@ -526,6 +532,16 @@ fn would_accept(spec_idx: usize, raw_number: u16, args: &[u64; SYSCALL_MAX_ARGS]
     if spec.number == SyscallNumber::MEM_MAP {
         let allowed = u64::from(MapFlags::FIXED.bits());
         if args[1] & !allowed != 0 {
+            return false;
+        }
+    }
+    // `wait`'s flags argument (arg 2) carries the same extra semantic check:
+    // the dispatcher runs the raw `U32` through `WaitFlags::from_bits`, which
+    // rejects any reserved bit (the only defined bit today is `NONBLOCK`).
+    // Mirror that here.
+    if spec.number == SyscallNumber::WAIT {
+        let allowed = u64::from(WaitFlags::NONBLOCK.bits());
+        if args[2] & !allowed != 0 {
             return false;
         }
     }

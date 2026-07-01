@@ -621,16 +621,23 @@ pub extern "C" fn sys_mem_unmap(base: u64, len: usize) -> i32 {
 /// reaped child's PID, or a `ROS_E_*` code reinterpreted into the result.
 ///
 /// `pid` is either a specific child's PID or [`rustos_abi::WAIT_PID_ANY`] to
-/// wait for any child. A process may only wait on its **own** children; the
-/// kernel validates the parent/child relationship and the `status` pointer
-/// before writing to it, and fails closed
-/// (`plans/SPAWN.md` SP6).
+/// wait for any child. `flags` is a [`rustos_abi::WaitFlags`] bit set:
+/// `ROS_WAIT_FLAG_NONBLOCK` (bit 0) polls instead of blocking, returning
+/// `ROS_E_WOULD_BLOCK` when a matching child is still running. A process may
+/// only wait on its **own** children; the kernel validates the parent/child
+/// relationship and the `status` pointer before writing to it, and fails
+/// closed (`plans/SPAWN.md` SP6).
 #[must_use]
 #[export_name = "ros_sys_wait"]
-pub extern "C" fn sys_wait(pid: i32, status: *mut c_void) -> u64 {
+pub extern "C" fn sys_wait(pid: i32, status: *mut c_void, flags: u32) -> u64 {
     // SAFETY: see `sys_ipc_send`; the kernel validates the `status` pointer
     // against the caller's address space before writing the exit code to it.
-    unsafe { raw_syscall(NUM_WAIT, [i32_arg(pid), ptr_arg(status), 0, 0, 0, 0]) }
+    unsafe {
+        raw_syscall(
+            NUM_WAIT,
+            [i32_arg(pid), ptr_arg(status), u64::from(flags), 0, 0, 0],
+        )
+    }
 }
 
 /// `rlimit_get`: read the calling process's effective limit for resource
@@ -1450,7 +1457,7 @@ mod tests {
         (NUM_STREAM_READ, "stream_read", 3),
         (NUM_MEM_MAP, "mem_map", 3),
         (NUM_MEM_UNMAP, "mem_unmap", 2),
-        (NUM_WAIT, "wait", 2),
+        (NUM_WAIT, "wait", 3),
         (NUM_RLIMIT_GET, "rlimit_get", 2),
         (NUM_RLIMIT_SET, "rlimit_set", 2),
         (NUM_USERS_DB_READ, "users_db_read", 2),
@@ -2049,17 +2056,31 @@ mod tests {
     }
 
     #[test]
-    fn wait_marshals_pid_and_status_pointer() {
+    fn wait_marshals_pid_status_pointer_and_flags() {
         let mut status = 0i32;
         let ptr = core::ptr::addr_of_mut!(status).cast::<c_void>();
-        // The kernel returns the reaped child's PID.
+        // The kernel returns the reaped child's PID. A blocking wait carries
+        // no flags.
         let (number, args) = capture(5, || {
-            assert_eq!(sys_wait(9, ptr), 5);
+            assert_eq!(sys_wait(9, ptr, 0), 5);
         });
         assert_eq!(number, NUM_WAIT);
         assert_eq!(args[0], 9);
         assert_eq!(args[1], ptr as usize as u64);
-        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+        assert_eq!(args[2], 0);
+        assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn wait_marshals_the_nonblock_flag() {
+        let mut status = 0i32;
+        let ptr = core::ptr::addr_of_mut!(status).cast::<c_void>();
+        let flags = rustos_abi::WaitFlags::NONBLOCK.bits();
+        let (number, args) = capture(0, || {
+            let _ = sys_wait(9, ptr, flags);
+        });
+        assert_eq!(number, NUM_WAIT);
+        assert_eq!(args[2], u64::from(flags));
     }
 
     #[test]
@@ -2067,7 +2088,7 @@ mod tests {
         let mut status = 0i32;
         let ptr = core::ptr::addr_of_mut!(status).cast::<c_void>();
         let (number, args) = capture(3, || {
-            let _ = sys_wait(rustos_abi::WAIT_PID_ANY, ptr);
+            let _ = sys_wait(rustos_abi::WAIT_PID_ANY, ptr, 0);
         });
         assert_eq!(number, NUM_WAIT);
         // `WAIT_PID_ANY` (-1) sign-extends to all-ones in the argument register.
