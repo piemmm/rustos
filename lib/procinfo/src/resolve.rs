@@ -17,13 +17,14 @@
 //! The served set grows in place here as sibling queries land; today it covers
 //! exactly the ungated/self-scoped and kernel-memory `sysinfo-v1` queries that
 //! already exist (`info:system/{hostname,kernel,machine-id,boot-time}`,
-//! `info:process/{pid,uid,gid,proc-id}`, `info:mem/physical`,
+//! `info:process/{pid,uid,gid,proc-id,trust-domain,caps}`,
+//! `info:mem/{physical,page-size}`,
 //! `info:limits/<kind>/{soft,hard}`, `stats:uptime`, `stats:mem/*`, and
 //! `stats:limits/<kind>`).
 
 use alloc::string::{String, ToString};
 
-use rustos_abi::origin::Origin;
+use rustos_abi::origin::{Origin, TrustDomain};
 use rustos_abi::sysinfo::{
     KernelMemoryStats, ResourceLimitRecord, SysinfoQueryId, SystemIdentity, Uptime,
     RESOURCE_LIMITS_REPORT_LEN,
@@ -137,34 +138,51 @@ fn resolve_info_value(
         // The caller's own kernel-attested identity. The self-scoped
         // `PROCESS_IDENTITY` query needs no capability and answers only for the
         // asking principal, so these are public facts about the caller itself,
-        // not a cross-principal disclosure.
-        ["process", leaf @ ("pid" | "uid" | "gid" | "proc-id")] => {
+        // not a cross-principal disclosure. The `trust-domain` and `caps`
+        // leaves ride the same reply (no extra query): the kernel fills the
+        // capability summary as a non-secret bitset, so it is `Public`.
+        ["process", leaf @ ("pid" | "uid" | "gid" | "proc-id" | "trust-domain" | "caps")] => {
             let origin = query_process_identity(transport)?;
-            // The or-pattern fixes `leaf` to one of these four, so the final
-            // arm is `proc-id` and there is no unhandled case.
+            // The or-pattern fixes `leaf` to one of these six, so the final
+            // arm is `caps` and there is no unhandled case.
             let value = match *leaf {
                 "pid" => InfoValue::new_str(Sensitivity::Public, &origin.pid().to_string()),
                 "uid" => InfoValue::new_str(Sensitivity::Public, &origin.uid().to_string()),
                 "gid" => InfoValue::new_str(Sensitivity::Public, &origin.gid().to_string()),
-                _ => {
+                "proc-id" => {
                     InfoValue::new_str(Sensitivity::Public, &hex_lower(origin.proc_id().as_bytes()))
                 }
+                "trust-domain" => InfoValue::new_str(
+                    Sensitivity::Public,
+                    trust_domain_name(origin.trust_domain()),
+                ),
+                _ => InfoValue::new_str(
+                    Sensitivity::Public,
+                    &hex_lower(origin.capabilities().as_bytes()),
+                ),
             };
             (value, Authorization::Unprivileged)
         }
-        // Total physical memory is a stable hardware fact, not a measurement,
-        // so it is an `info:` value. It is carried only by the kernel-memory
-        // query, which the broker gates on `CAP_SYSINFO_KERNEL`; the size
-        // itself is not secret (hence `Public`), but the sole query that
-        // reports it is privileged, so the answer costs that capability and a
-        // denial surfaces below.
-        ["mem", "physical"] => (
-            InfoValue::new_str(
-                Sensitivity::Public,
-                &query_kernel_memory(transport)?.total_bytes.to_string(),
-            ),
-            Authorization::Capability(CapabilityId::SYSINFO_KERNEL),
-        ),
+        // Stable hardware facts (total physical memory, the reporting
+        // architecture's page size), not measurements, so they are `info:`
+        // values. Both are carried only by the kernel-memory query, which the
+        // broker gates on `CAP_SYSINFO_KERNEL`; the sizes themselves are not
+        // secret (hence `Public`), but the sole query that reports them is
+        // privileged, so the answer costs that capability and a denial
+        // surfaces below.
+        ["mem", leaf @ ("physical" | "page-size")] => {
+            let stats = query_kernel_memory(transport)?;
+            // The or-pattern fixes `leaf` to one of these two, so the final
+            // arm is `page-size` and there is no unhandled case.
+            let value = match *leaf {
+                "physical" => stats.total_bytes,
+                _ => u64::from(stats.page_size),
+            };
+            (
+                InfoValue::new_str(Sensitivity::Public, &value.to_string()),
+                Authorization::Capability(CapabilityId::SYSINFO_KERNEL),
+            )
+        }
         // A configured soft/hard bound on one of the caller's own resources.
         // The self-scoped `RESOURCE_LIMITS` query needs no capability and
         // answers only for the asking principal, so its own limits are public
@@ -407,6 +425,15 @@ fn map_call_error(err: CallError) -> ResolveInfoError {
     match err {
         CallError::PermissionDenied => ResolveInfoError::CapabilityDenied,
         CallError::Service(errno) => ResolveInfoError::Service(errno),
+    }
+}
+
+/// The stable name of a [`TrustDomain`], the spelling `info:process/trust-domain`
+/// reports.
+fn trust_domain_name(domain: TrustDomain) -> &'static str {
+    match domain {
+        TrustDomain::Kernel => "kernel",
+        TrustDomain::User => "user",
     }
 }
 
@@ -656,6 +683,13 @@ mod tests {
             ("info:process/uid", "1000"),
             ("info:process/gid", "50"),
             ("info:process/proc-id", "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"),
+            // The fixture's origin is in the user trust domain and holds no
+            // capabilities, so the summary is 32 zero bytes (64 hex zeros).
+            ("info:process/trust-domain", "user"),
+            (
+                "info:process/caps",
+                "0000000000000000000000000000000000000000000000000000000000000000",
+            ),
         ] {
             let r = resolve_str(selector, &fixture).expect("ok");
             assert_eq!(r.authorization, Authorization::Unprivileged);
@@ -674,6 +708,32 @@ mod tests {
             .borrow()
             .iter()
             .all(|q| *q == SysinfoQueryId::PROCESS_IDENTITY));
+    }
+
+    #[test]
+    fn info_process_caps_reflects_held_capabilities() {
+        let mut fixture = Fixture::new();
+        let mut caps = CapabilitySummary::EMPTY;
+        caps.insert(CapabilityId::SYSINFO_KERNEL);
+        fixture.origin = Origin::new(
+            TrustDomain::User,
+            1000,
+            50,
+            42,
+            ProcId::from_raw([0xCD; 16]),
+            caps,
+        );
+        let r = resolve_str("info:process/caps", &fixture).expect("ok");
+        match r.payload {
+            ResponsePayload::Info(v) => {
+                // The full 32-byte summary renders as 64 lowercase hex chars,
+                // and a held capability makes it something other than all-zero.
+                assert_eq!(v.value().len(), 64);
+                assert_ne!(v.value(), "0".repeat(64));
+                assert_eq!(v.sensitivity, Sensitivity::Public);
+            }
+            ResponsePayload::Metric(_) => panic!("expected info value"),
+        }
     }
 
     #[test]
@@ -822,6 +882,27 @@ mod tests {
             resolve_str("info:mem/physical", &fixture),
             Err(ResolveInfoError::CapabilityDenied)
         );
+    }
+
+    #[test]
+    fn info_mem_page_size_is_a_gated_public_fact() {
+        let fixture = Fixture::new();
+        let r = resolve_str("info:mem/page-size", &fixture).expect("ok");
+        // The page size rides the same kernel-memory query as `physical`, so
+        // the answer costs `CAP_SYSINFO_KERNEL` even though the value is public.
+        assert_eq!(
+            r.authorization,
+            Authorization::Capability(CapabilityId::SYSINFO_KERNEL)
+        );
+        assert_eq!(r.query(), "info:mem/page-size");
+        match r.payload {
+            ResponsePayload::Info(v) => {
+                // The fixture reports a 4096-byte page.
+                assert_eq!(v.value(), "4096");
+                assert_eq!(v.sensitivity, Sensitivity::Public);
+            }
+            ResponsePayload::Metric(_) => panic!("expected info value"),
+        }
     }
 
     #[test]

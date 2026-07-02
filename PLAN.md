@@ -3397,18 +3397,25 @@ I/O vocabulary. See `.junie/PREREQUISITES2.md` for the full P0–P6 status.
   `info:system/{hostname,kernel,machine-id,boot-time}` (from `SYSTEM_IDENTITY`,
   machine-id sensitive; `boot-time` from the ungated `UPTIME` reply as a public
   stable fact), `stats:uptime` (from `UPTIME`, boot-reset counter),
-  `info:mem/physical` (total physical RAM, a stable fact carried by the
+  `info:mem/{physical,page-size}` (total physical RAM and the reporting
+  architecture's page size, stable facts carried by the
   `CAP_SYSINFO_KERNEL`-gated `KERNEL_MEMORY_STATS` query), and
   `stats:mem/{used,available,total,kernel-heap,user-resident}` (from
   `KERNEL_MEMORY_STATS`, gated on `CAP_SYSINFO_KERNEL`, gauges); it fails closed
   on an unknown selector, a
   guard/facet/query where none is served, a capability denial, or a malformed
   reply. Ships with host tests and the `fuzz_resinfo` harness (hostile
-  references + hostile broker replies). **Still open under P5** (tracked, not
-  stubbed): grow the userspace resolver in place as more sysinfo queries land,
-  and wire the *kernel-owned* device namespaces into `kernel/core::resource`
-  beside `sys:` via the device manager as their consumers appear — neither
-  changes the `resource_open` contract.
+  references + hostile broker replies). The resolver now exposes **every scalar
+  fact every shipped sysinfo query carries** (system identity, the self-scoped
+  process identity's six attested `Origin` fields, kernel memory, resource
+  limits, and uptime), so its growth no longer blocks the shell. **Still open
+  under P5** (tracked, not stubbed, non-blocking): extend the userspace
+  resolver in place as *new* sysinfo queries land (a selector like `info:cpu/*`
+  needs a new query with a real kernel producer first — inventing that ABI
+  ahead of a live producer would be speculative surface, §2.3/§2.4), and wire
+  the *kernel-owned* device namespaces into `kernel/core::resource` beside
+  `sys:` via the device manager as their consumers appear — neither changes the
+  `resource_open` contract.
 
 ## CCOMPAT — C-callable `abi-v1` (full `lib/abi` header, syscall stubs, crt0)
 
