@@ -306,6 +306,90 @@ impl<'a, S: SegmentStore> Journal<'a, S> {
         Ok(())
     }
 
+    /// Author a trusted `security`-stream record noting a caller's rejected
+    /// spoof attempt.
+    ///
+    /// The journal calls this when an [`Admission`] came back
+    /// [`spoofed`](Admission::spoofed) — the caller asked for a privileged
+    /// stream it was not trusted for, or a source name that impersonates a
+    /// reserved namespace. The authoritative record was already committed
+    /// under the caller's *derived* source and *downgraded* stream (preserving
+    /// the request as a caller claim); this separate trusted record, authored
+    /// under the journal's own origin on the `security` stream, records the
+    /// attempt itself so it is auditable independently of the record it
+    /// concerned. The offending principal's uid and the exact claims are
+    /// preserved as fields.
+    ///
+    /// `cpu`/`cpu_seq` are the journal's own ingest-context facts;
+    /// `monotonic`/`wall` timestamp the note; `scratch` receives the encoded
+    /// body.
+    ///
+    /// # Errors
+    ///
+    /// [`JournalError::Encode`] if the record body is invalid or oversized,
+    /// [`JournalError::Segment`] if a `security` segment cannot be opened or
+    /// sealed (e.g. no seal key — it fails closed, never silently drops), or
+    /// [`JournalError::Store`] if persisting a rotated segment fails.
+    #[allow(clippy::too_many_arguments)]
+    pub fn note_spoof(
+        &mut self,
+        admission: &Admission,
+        requested_stream: Option<Stream>,
+        requested_source: Option<&str>,
+        cpu: u32,
+        cpu_seq: u64,
+        monotonic: Duration64,
+        wall: WallClockReading,
+        scratch: &mut [u8],
+    ) -> Result<(), JournalError<S::Error>> {
+        let seq = self.ingress.reserve(Stream::Security);
+        let data = [
+            (
+                FieldName::new("uid").map_err(JournalError::Encode)?,
+                FieldValue::UnsignedInt(u64::from(admission.origin().uid())),
+            ),
+            (
+                FieldName::new("stream_spoofed").map_err(JournalError::Encode)?,
+                FieldValue::Bool(admission.stream_spoofed()),
+            ),
+            (
+                FieldName::new("source_spoofed").map_err(JournalError::Encode)?,
+                FieldValue::Bool(admission.source_spoofed()),
+            ),
+            (
+                FieldName::new("effective_stream").map_err(JournalError::Encode)?,
+                FieldValue::UnsignedInt(u64::from(admission.stream().as_u8())),
+            ),
+        ];
+        let caller = CallerContent {
+            level: None,
+            component: None,
+            tag: None,
+            event_id: Some("journal.spoof.detected"),
+            // Preserve the caller's exact claims as evidence under this
+            // trusted record.
+            requested_source,
+            requested_stream,
+            message: "caller spoof attempt rejected",
+        };
+        let source = self.own_source;
+        let origin = self.own_origin;
+        self.place(
+            Stream::Security,
+            seq,
+            origin,
+            source.as_str(),
+            Level::Warn,
+            cpu,
+            cpu_seq,
+            monotonic,
+            wall,
+            caller,
+            &data,
+            scratch,
+        )
+    }
+
     /// Encode and append one record, rotating on a full segment.
     #[allow(clippy::too_many_arguments)]
     fn place(
@@ -958,6 +1042,65 @@ mod tests {
         assert_eq!(s.header.stream, Stream::Runtime);
         let decoded = decoded_messages(&segments[0]);
         assert!(decoded[0].1.starts_with("user.1000.proc."));
+        assert_eq!(decoded[0].3, Some(Stream::Audit));
+    }
+
+    #[test]
+    fn note_spoof_authors_a_sealed_security_record_preserving_the_claim() {
+        let key = LogAttestationKey::from_key([0x71; 32]);
+        let scratch = &mut [0u8; 512];
+        let segments = with_journal(Some(LogAttestationKey::from_key([0x71; 32])), 8192, |j| {
+            // A user requests a privileged stream *and* a reserved source: both
+            // spoof attempts, downgraded and preserved on the runtime record.
+            let adm = j.admit(
+                &user_origin(1000),
+                None,
+                Some(Stream::Audit),
+                Some("kernel.mem"),
+                None,
+            );
+            assert!(adm.spoofed());
+            j.commit(
+                &adm,
+                0,
+                0,
+                Duration64::from_secs(1),
+                wall(),
+                simple_caller("audit disabled"),
+                &[],
+                scratch,
+            )
+            .expect("commit downgraded record");
+            // The journal authors a trusted security note about the attempt.
+            j.note_spoof(
+                &adm,
+                Some(Stream::Audit),
+                Some("kernel.mem"),
+                0,
+                0,
+                Duration64::from_secs(1),
+                wall(),
+                scratch,
+            )
+            .expect("note_spoof");
+            j.flush().expect("flush");
+        });
+        // Find the sealed security segment among the persisted segments.
+        let mut security = None;
+        for seg in &segments {
+            let s = verify_segment(seg, Some(&key)).expect("verify");
+            if s.header.stream == Stream::Security {
+                assert!(s.sealed, "the security segment is sealed");
+                security = Some(seg.clone());
+            }
+        }
+        let security = security.expect("a security segment was authored");
+        let decoded = decoded_messages(&security);
+        assert_eq!(decoded.len(), 1);
+        // Authored under the journal's own trusted source, not the caller's.
+        assert_eq!(decoded[0].1, "kernel.journal");
+        assert_eq!(decoded[0].2, "caller spoof attempt rejected");
+        // The caller's stream claim is preserved on the trusted note.
         assert_eq!(decoded[0].3, Some(Stream::Audit));
     }
 

@@ -112,6 +112,7 @@ members = [
     "userland/system/devmgr",
     "userland/system/drvhost",
     "userland/system/sysinfod",
+    "userland/system/journald",
     "userland/system/init",
     "userland/system/appmgr",
     "userland/system/installer",

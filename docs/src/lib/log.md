@@ -287,14 +287,58 @@ and every path fails closed.
     evicted records first, one trusted loss record naming the lost CPU-sequence
     range is authored on the `journal` stream, so a boot-log reader sees an
     explicit gap rather than a silent one.
+  * `note_spoof` — authors a trusted record on the `security` stream when an
+    `Admission` came back spoofed (a caller requested a privileged stream it
+    was not trusted for, or a source impersonating a reserved namespace). The
+    authoritative record was already committed under the caller's *derived*
+    source and *downgraded* stream (preserving the request as a claim); this
+    separate note, authored under the journal's own origin, records the attempt
+    itself with the offending uid and the exact claims, so it is auditable
+    independently of the record it concerned.
   * `flush` — closes every open segment (persisting each), keeping each
     stream's running chain hash so the next record reopens a chained segment.
     Called on shutdown and before anchoring.
 
 The cross-segment chain uses each closed segment's `segment_hash` as the next
 segment's `prev_segment_hash`; the append sequence is continuous across the
-boundary. Loss/security/rotation self-events are authored on the `journal`
-stream through the same segment path, never a second writer.
+boundary. Loss and rotation self-events are authored on the `journal` stream,
+and the spoof note on the `security` stream, through the same segment path —
+never a second writer.
+
+## Journal ingress ABI and service (`rustos_abi::log_ingress`, `journald`)
+
+An ordinary process never appends to a segment: it frames a request and posts
+it to the journal service. The wire contract is `rustos_abi::log_ingress`
+(`no_std`, allocation-free, fail-closed), a sibling of the `sysinfo` and
+driver-store endpoint ABIs rather than part of the C-callable surface:
+
+* `LOG_INGRESS_ENDPOINT` — the well-known synchronous call endpoint the journal
+  service binds (unrestricted-sender: any process may write, since authority is
+  the attested origin, not the transport).
+* `LogIngressRequest` — a caller's message plus its *advisory* level and stream
+  discriminants, an optional trusted-emitter subsystem label, its
+  component/tag/event-id, the source it *requests*, and a flat set of `data.*`
+  fields. The `data.*` pairs reuse the one shared named-field codec, so an
+  ingress field and a persisted record field cannot drift. It carries **no**
+  authoritative fact: origin, source, effective stream/level, sequences, and
+  integrity hashes are all decided by the journal. The caller-field maxima are
+  the single definition the persisted `record` model imports, so a request that
+  validates always persists.
+* `encode_reply` / `decode_reply` — a status-word reply: accepted, or the
+  `Errno` the journal refused it with.
+
+The `rustos-journald` crate (`userland/system/journald`) is the
+architecture-neutral dispatch core over this ABI. `serve` decodes and fully
+validates a request, resolves the advisory stream/level against the closed
+vocabularies (fail-closed on an unknown discriminant), builds the `data.*` set
+(rejecting any name outside the `FieldName` grammar, which structurally forbids
+reserved prefixes), admits under the caller's kernel-attested `Origin` — never
+a caller claim — commits to the injected `Journal`, and calls `note_spoof` for
+any spoof attempt. `store` derives the pure `/System/Logs/<stream>/<id>.seg`
+segment path the production filesystem sink uses. The service *binary* that
+binds the endpoint, reads each caller's peer origin, and drives this core over
+the real filesystem is a staged follow-on, along with boot-ring import,
+retention, and rate-limiting/aggregation (`plans/SYSLOG.md` §10/§11/§15).
 
 ## Typed-field value model (`field`)
 

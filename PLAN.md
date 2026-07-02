@@ -2820,10 +2820,15 @@ Landed (done):
   closes all open segments; fail-closed throughout — an over-cap/invalid
   record is rejected whole and an audit/security segment cannot close without
   the seal key; `SegmentWriter::finish` now returns a `FinishedSegment`
-  reclaiming its buffer for reuse). The userland journal *service* wrapper (the
-  IPC ingress endpoint + an FS-backed `SegmentStore` writing
-  `/System/Logs/<stream>/`, per-CPU gap detection, rate-limit/retention, the
-  spoof security record) + anchors are SYSLOG proper (see `.junie/SYSLOG.md`).
+  reclaiming its buffer for reuse). The journal-ingress wire ABI
+  (`lib/abi/src/log_ingress.rs`: `LOG_INGRESS_ENDPOINT` + `LogIngressRequest` +
+  status-word reply — a service IPC protocol, no C header), the trusted spoof
+  security record (`Journal::note_spoof`), and the architecture-neutral service
+  dispatch core (`userland/system/journald`: `serve` admits an attested
+  request and commits it, `store` derives the `/System/Logs/<stream>/` path)
+  have landed. The service *binary* + FS-backed `SegmentStore` runtime wiring,
+  per-CPU gap detection, rate-limit/retention, and anchors are the remaining
+  SYSLOG work (see `.junie/SYSLOG.md`).
 - §19.6 fuzzing — `cargo xtask fuzz` over all in-tree harnesses (`--quick`/
   `--soak`), fail-closed.
 - §19.7 verified core — Bronze proptest models for `lib/caps`/`kernel/sec`/
