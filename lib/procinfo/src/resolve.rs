@@ -17,10 +17,11 @@
 //! The served set grows in place here as sibling queries land; today it covers
 //! exactly the ungated/self-scoped and kernel-memory `sysinfo-v1` queries that
 //! already exist (`info:system/{hostname,kernel,machine-id,boot-time}`,
-//! `stats:uptime`, and `stats:mem/*`).
+//! `info:process/{pid,uid,gid,proc-id}`, `stats:uptime`, and `stats:mem/*`).
 
 use alloc::string::{String, ToString};
 
+use rustos_abi::origin::Origin;
 use rustos_abi::sysinfo::{KernelMemoryStats, SysinfoQueryId, SystemIdentity, Uptime};
 use rustos_abi::time::Time64;
 use rustos_abi::{CapabilityId, Errno};
@@ -121,6 +122,23 @@ fn resolve_info_value(
             Sensitivity::Public,
             &time_string(query_uptime(transport)?.boot_time),
         ),
+        // The caller's own kernel-attested identity. The self-scoped
+        // `PROCESS_IDENTITY` query needs no capability and answers only for the
+        // asking principal, so these are public facts about the caller itself,
+        // not a cross-principal disclosure.
+        ["process", leaf @ ("pid" | "uid" | "gid" | "proc-id")] => {
+            let origin = query_process_identity(transport)?;
+            // The or-pattern fixes `leaf` to one of these four, so the final
+            // arm is `proc-id` and there is no unhandled case.
+            match *leaf {
+                "pid" => InfoValue::new_str(Sensitivity::Public, &origin.pid().to_string()),
+                "uid" => InfoValue::new_str(Sensitivity::Public, &origin.uid().to_string()),
+                "gid" => InfoValue::new_str(Sensitivity::Public, &origin.gid().to_string()),
+                _ => {
+                    InfoValue::new_str(Sensitivity::Public, &hex_lower(origin.proc_id().as_bytes()))
+                }
+            }
+        }
         _ => return Err(ResolveInfoError::UnknownSelector),
     };
     value.map_err(|_| ResolveInfoError::Malformed)
@@ -243,6 +261,13 @@ fn query_kernel_memory(transport: &dyn Transport) -> Result<KernelMemoryStats, R
     KernelMemoryStats::from_bytes(&reply).map_err(|_| ResolveInfoError::Malformed)
 }
 
+/// Issue [`SysinfoQueryId::PROCESS_IDENTITY`] and decode the caller's own
+/// kernel-attested [`Origin`].
+fn query_process_identity(transport: &dyn Transport) -> Result<Origin, ResolveInfoError> {
+    let reply = call(transport, SysinfoQueryId::PROCESS_IDENTITY, &[]).map_err(map_call_error)?;
+    Origin::from_bytes(&reply).map_err(|_| ResolveInfoError::Malformed)
+}
+
 /// Map a transport [`CallError`] onto the resolver's error vocabulary.
 fn map_call_error(err: CallError) -> ResolveInfoError {
     match err {
@@ -321,6 +346,7 @@ mod tests {
     };
     use alloc::vec::Vec;
     use core::cell::RefCell;
+    use rustos_abi::origin::{CapabilitySummary, Origin, ProcId, TrustDomain};
     use rustos_abi::sysinfo::{
         KernelMemoryStats, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
     };
@@ -328,13 +354,14 @@ mod tests {
     use rustos_abi::{CapabilityId, Errno};
     use rustos_resref::parse;
 
-    /// An in-memory `sysinfod` stand-in that answers the three singleton
-    /// queries this resolver uses, decoding the request exactly as the real
-    /// service and optionally denying a chosen query.
+    /// An in-memory `sysinfod` stand-in that answers the singleton queries
+    /// this resolver uses, decoding the request exactly as the real service
+    /// and optionally denying a chosen query.
     struct Fixture {
         identity: SystemIdentity,
         uptime: Uptime,
         memory: KernelMemoryStats,
+        origin: Origin,
         deny: Option<SysinfoQueryId>,
         seen: RefCell<Vec<SysinfoQueryId>>,
     }
@@ -355,6 +382,14 @@ mod tests {
                     page_size: 4096,
                     reserved: 0,
                 },
+                origin: Origin::new(
+                    TrustDomain::User,
+                    1000,
+                    50,
+                    42,
+                    ProcId::from_raw([0xCD; 16]),
+                    CapabilitySummary::EMPTY,
+                ),
                 deny: None,
                 seen: RefCell::new(Vec::new()),
             }
@@ -372,6 +407,7 @@ mod tests {
                 SysinfoQueryId::SYSTEM_IDENTITY => Ok(self.identity.to_le_bytes().to_vec()),
                 SysinfoQueryId::UPTIME => Ok(self.uptime.to_le_bytes().to_vec()),
                 SysinfoQueryId::KERNEL_MEMORY_STATS => Ok(self.memory.to_le_bytes().to_vec()),
+                SysinfoQueryId::PROCESS_IDENTITY => Ok(self.origin.to_le_bytes().to_vec()),
                 _ => Err(Errno::NotFound),
             }
         }
@@ -443,6 +479,58 @@ mod tests {
             }
             ResponsePayload::Metric(_) => panic!("expected info value"),
         }
+    }
+
+    #[test]
+    fn info_process_identity_fields_are_public_and_self_scoped() {
+        let fixture = Fixture::new();
+        for (selector, expected) in [
+            ("info:process/pid", "42"),
+            ("info:process/uid", "1000"),
+            ("info:process/gid", "50"),
+            ("info:process/proc-id", "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"),
+        ] {
+            let r = resolve_str(selector, &fixture).expect("ok");
+            assert_eq!(r.authorization, Authorization::Unprivileged);
+            assert_eq!(r.query(), selector);
+            match r.payload {
+                ResponsePayload::Info(v) => {
+                    assert_eq!(v.value(), expected);
+                    assert_eq!(v.sensitivity, Sensitivity::Public);
+                }
+                ResponsePayload::Metric(_) => panic!("expected info value"),
+            }
+        }
+        // Every field rode the one self-scoped, ungated identity query.
+        assert!(fixture
+            .seen
+            .borrow()
+            .iter()
+            .all(|q| *q == SysinfoQueryId::PROCESS_IDENTITY));
+    }
+
+    #[test]
+    fn info_process_unknown_leaf_fails_closed() {
+        let fixture = Fixture::new();
+        assert_eq!(
+            resolve_str("info:process/parent", &fixture),
+            Err(ResolveInfoError::UnknownSelector)
+        );
+    }
+
+    #[test]
+    fn info_process_malformed_reply_fails_closed() {
+        struct Short;
+        impl crate::transport::Transport for Short {
+            fn query(&self, _request: &[u8]) -> Result<Vec<u8>, Errno> {
+                Ok(alloc::vec![0u8; 3])
+            }
+        }
+        let reference = parse("info:process/pid").expect("parse");
+        assert_eq!(
+            resolve(&reference, now(), &Short),
+            Err(ResolveInfoError::Malformed)
+        );
     }
 
     #[test]

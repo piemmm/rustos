@@ -23,6 +23,7 @@
 
 use core::cell::Cell;
 
+use rustos_abi::origin::{CapabilitySummary, Origin, ProcId, TrustDomain};
 use rustos_abi::sysinfo::{
     KernelMemoryStats, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
 };
@@ -47,6 +48,11 @@ const TEMPLATES: &[&str] = &[
     "info:system/kernel",
     "info:system/machine-id",
     "info:system/boot-time",
+    "info:process/pid",
+    "info:process/uid",
+    "info:process/gid",
+    "info:process/proc-id",
+    "info:process/parent",
     "stats:uptime",
     "stats:mem/used",
     "stats:mem/available",
@@ -111,6 +117,18 @@ impl HostileBroker {
                     page_size: 4096,
                     reserved: 0,
                 }
+                .to_le_bytes()
+                .to_vec(),
+            ),
+            SysinfoQueryId::PROCESS_IDENTITY => Some(
+                Origin::new(
+                    TrustDomain::User,
+                    1000,
+                    50,
+                    42,
+                    ProcId::from_raw([0x5A; 16]),
+                    CapabilitySummary::EMPTY,
+                )
                 .to_le_bytes()
                 .to_vec(),
             ),

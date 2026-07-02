@@ -77,9 +77,11 @@ never bypass the authority that guards it:
   kind/unit/window/reset). Resolving them in the kernel is forbidden: it would
   bypass the `sysinfod` broker's per-principal scoping, so the kernel resolver
   fails `info:`/`stats:` closed. Today it serves the selectors the shipped
-  queries back — `info:system/{hostname,kernel,machine-id}`, `stats:uptime`,
-  and `stats:mem/{used,available,total}` — and grows in place as more queries
-  land.
+  queries back — `info:system/{hostname,kernel,machine-id,boot-time}`,
+  `info:process/{pid,uid,gid,proc-id}` (the caller's own kernel-attested
+  identity, from the self-scoped `PROCESS_IDENTITY` query), `stats:uptime`, and
+  `stats:mem/{used,available,total,kernel-heap,user-resident}` — and grows in
+  place as more queries land.
 
 Either way this crate only produces the typed spelling; the resolver applies
 the capability check and fails closed on an unknown selector, an unsupported
