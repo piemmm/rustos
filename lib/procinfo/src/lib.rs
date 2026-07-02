@@ -89,9 +89,9 @@ pub use mount::{for_each_mount, render_mount, render_options, MOUNT_PAGE};
 pub use process::{for_each_process, render_process, state_char, PROCESS_HEADER, PROCESS_PAGE};
 pub use request::{call, encode_request, CallError};
 pub use resinfo::{
-    Authorization, InfoValue, Metric, MetricKind, Producer, ResetBehavior, ResourceResponse,
-    ResponsePayload, Sensitivity, Unit, ValueKind, MAX_INFO_VALUE_LEN, MAX_METRIC_NAME_LEN,
-    MAX_QUERY_LEN, RESINFO_VERSION_CURRENT, RESINFO_VERSION_V1,
+    render_limit_bound, Authorization, InfoValue, Metric, MetricKind, Producer, ResetBehavior,
+    ResourceResponse, ResponsePayload, Sensitivity, Unit, ValueKind, MAX_INFO_VALUE_LEN,
+    MAX_METRIC_NAME_LEN, MAX_QUERY_LEN, RESINFO_VERSION_CURRENT, RESINFO_VERSION_V1,
 };
 pub use resolve::{resolve, ResolveInfoError};
 pub use transport::{Output, Transport};

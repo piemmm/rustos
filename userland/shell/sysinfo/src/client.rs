@@ -2,16 +2,18 @@
 //! requests, decode the typed replies, and render human-readable lines.
 
 use alloc::format;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
 
 use rustos_abi::sysinfo::{
     KernelMemoryStats, ResourceLimitRecord, SysinfoQueryId, SystemIdentity, Uptime,
 };
-use rustos_abi::{Errno, LimitKind, RLIMIT_INFINITY};
+use rustos_abi::{Errno, LimitKind};
 
-use rustos_procinfo::{call, for_each_process, render_process, Output, Transport, PROCESS_HEADER};
+use rustos_procinfo::{
+    call, for_each_process, render_limit_bound, render_process, Output, Transport, PROCESS_HEADER,
+};
 
 use crate::command::Command;
 use crate::error::SysinfoError;
@@ -176,22 +178,13 @@ fn run_limits(transport: &dyn Transport, out: &dyn Output) -> Result<(), Sysinfo
             &format!(
                 "{:<20}  {:>11}  {:>11}  {:>11}",
                 record.kind.name(),
-                bound(record.limit.soft),
-                bound(record.limit.hard),
+                render_limit_bound(record.limit.soft),
+                render_limit_bound(record.limit.hard),
                 record.usage,
             ),
         )?;
     }
     Ok(())
-}
-
-/// Render a soft/hard bound, spelling [`RLIMIT_INFINITY`] as `unlimited`.
-fn bound(value: u64) -> String {
-    if value == RLIMIT_INFINITY {
-        "unlimited".to_string()
-    } else {
-        value.to_string()
-    }
 }
 
 /// Render `bytes` as lowercase hex with no separators.

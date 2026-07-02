@@ -25,10 +25,11 @@ use core::cell::Cell;
 
 use rustos_abi::origin::{CapabilitySummary, Origin, ProcId, TrustDomain};
 use rustos_abi::sysinfo::{
-    KernelMemoryStats, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
+    KernelMemoryStats, ResourceLimitRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity,
+    Uptime,
 };
 use rustos_abi::time::{Duration64, Time64};
-use rustos_abi::Errno;
+use rustos_abi::{Errno, LimitKind, ResourceLimit};
 use rustos_procinfo::{
     resolve, Producer, ResponsePayload, Transport, MAX_INFO_VALUE_LEN, MAX_METRIC_NAME_LEN,
     MAX_QUERY_LEN, RESINFO_VERSION_CURRENT,
@@ -59,6 +60,17 @@ const TEMPLATES: &[&str] = &[
     "stats:mem/total",
     "stats:mem/kernel-heap",
     "stats:mem/user-resident",
+    "info:limits/address-space-bytes/soft",
+    "info:limits/open-streams/hard",
+    "info:limits/processes/soft",
+    "info:limits/stack-bytes/hard",
+    "stats:limits/address-space-bytes",
+    "stats:limits/open-streams",
+    "stats:limits/processes",
+    "stats:limits/stack-bytes",
+    "info:limits/nope/soft",
+    "info:limits/processes/median",
+    "stats:limits/nope",
     "info:system/nope",
     "stats:mem/pagefaults",
     "stats:cpu/load",
@@ -132,6 +144,17 @@ impl HostileBroker {
                 .to_le_bytes()
                 .to_vec(),
             ),
+            SysinfoQueryId::RESOURCE_LIMITS => {
+                // The four records in `LimitKind` discriminant order, as the
+                // real service frames them.
+                let mut out = Vec::new();
+                for kind in LimitKind::ALL {
+                    out.extend_from_slice(
+                        &ResourceLimitRecord::new(kind, ResourceLimit::UNLIMITED, 1).to_le_bytes(),
+                    );
+                }
+                Some(out)
+            }
             _ => None,
         }
     }

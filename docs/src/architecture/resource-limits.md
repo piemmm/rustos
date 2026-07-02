@@ -180,6 +180,15 @@ reply of the wrong length fails closed rather than rendering a partial table
 (`AGENTS.md` §2.1). Where `ulimit` *changes* a principal's own limits, the
 `sysinfo limits` query *observes* limits and usage together.
 
+The same query also backs the `info:`/`stats:` resource references
+(`plans/ALIAS.md`, `lib/procinfo::resolve`): `info:limits/<kind>/{soft,hard}`
+resolves to a configured bound (spelling `RLIMIT_INFINITY` as `unlimited`
+through the one shared renderer the CLI uses) and `stats:limits/<kind>`
+resolves to the live usage gauge (`bytes` for the `*Bytes` kinds, a
+dimensionless `count` otherwise). Both are self-scoped and unprivileged, fail
+closed on an unknown resource or a malformed reply, and read the same
+`RESOURCE_LIMITS` reply — no second query and no `/proc`-style file.
+
 ## Discovered-hardware capacity policies
 
 The kthread kernel-stack capacity is the first capacity converted off a

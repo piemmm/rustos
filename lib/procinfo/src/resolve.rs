@@ -17,21 +17,25 @@
 //! The served set grows in place here as sibling queries land; today it covers
 //! exactly the ungated/self-scoped and kernel-memory `sysinfo-v1` queries that
 //! already exist (`info:system/{hostname,kernel,machine-id,boot-time}`,
-//! `info:process/{pid,uid,gid,proc-id}`, `stats:uptime`, and `stats:mem/*`).
+//! `info:process/{pid,uid,gid,proc-id}`, `info:limits/<kind>/{soft,hard}`,
+//! `stats:uptime`, `stats:mem/*`, and `stats:limits/<kind>`).
 
 use alloc::string::{String, ToString};
 
 use rustos_abi::origin::Origin;
-use rustos_abi::sysinfo::{KernelMemoryStats, SysinfoQueryId, SystemIdentity, Uptime};
+use rustos_abi::sysinfo::{
+    KernelMemoryStats, ResourceLimitRecord, SysinfoQueryId, SystemIdentity, Uptime,
+    RESOURCE_LIMITS_REPORT_LEN,
+};
 use rustos_abi::time::Time64;
-use rustos_abi::{CapabilityId, Errno};
+use rustos_abi::{CapabilityId, Errno, LimitKind, ResourceLimit};
 use rustos_resref::{KnownNamespace, ResourceRef};
 
 use crate::list::field_lossy;
 use crate::request::{call, CallError};
 use crate::resinfo::{
-    Authorization, InfoValue, Metric, MetricKind, Producer, ResetBehavior, ResourceResponse,
-    ResponsePayload, Sensitivity, Unit,
+    render_limit_bound, Authorization, InfoValue, Metric, MetricKind, Producer, ResetBehavior,
+    ResourceResponse, ResponsePayload, Sensitivity, Unit,
 };
 use crate::transport::Transport;
 
@@ -139,6 +143,23 @@ fn resolve_info_value(
                 }
             }
         }
+        // A configured soft/hard bound on one of the caller's own resources.
+        // The self-scoped `RESOURCE_LIMITS` query needs no capability and
+        // answers only for the asking principal, so its own limits are public
+        // facts about itself, not a cross-principal disclosure. An unlimited
+        // bound renders as `unlimited`, sharing the one spelling the `limits`
+        // CLI uses.
+        ["limits", kind_name, bound @ ("soft" | "hard")] => {
+            let kind = LimitKind::from_name(kind_name).ok_or(ResolveInfoError::UnknownSelector)?;
+            let limit = limit_for(kind, transport)?;
+            // The or-pattern fixes `bound` to `soft` or `hard`, so the final
+            // arm is `hard` and there is no unhandled case.
+            let rendered = match *bound {
+                "soft" => render_limit_bound(limit.soft),
+                _ => render_limit_bound(limit.hard),
+            };
+            InfoValue::new_str(Sensitivity::Public, &rendered)
+        }
         _ => return Err(ResolveInfoError::UnknownSelector),
     };
     value.map_err(|_| ResolveInfoError::Malformed)
@@ -206,6 +227,33 @@ fn resolve_stats(
                 ResponsePayload::Metric(metric),
             )
         }
+        // The caller's own live usage of one of its limited resources: a
+        // measurement, so a gauge (it rises and falls and never resets over
+        // the life of the process). Byte-denominated resources report
+        // [`Unit::Bytes`]; the rest are a dimensionless [`Unit::Count`]. The
+        // query is ungated and self-scoped, so the usage is unprivileged.
+        ["limits", kind_name] => {
+            let kind = LimitKind::from_name(kind_name).ok_or(ResolveInfoError::UnknownSelector)?;
+            let usage = usage_for(kind, transport)?;
+            let mut name = String::from("limits/");
+            name.push_str(kind_name);
+            let metric = Metric::new(
+                &name,
+                MetricKind::Gauge,
+                unit_for_limit(kind),
+                usage,
+                now,
+                None,
+                ResetBehavior::Never,
+            )
+            .map_err(|_| ResolveInfoError::Malformed)?;
+            envelope(
+                reference,
+                now,
+                Authorization::Unprivileged,
+                ResponsePayload::Metric(metric),
+            )
+        }
         _ => Err(ResolveInfoError::UnknownSelector),
     }
 }
@@ -266,6 +314,64 @@ fn query_kernel_memory(transport: &dyn Transport) -> Result<KernelMemoryStats, R
 fn query_process_identity(transport: &dyn Transport) -> Result<Origin, ResolveInfoError> {
     let reply = call(transport, SysinfoQueryId::PROCESS_IDENTITY, &[]).map_err(map_call_error)?;
     Origin::from_bytes(&reply).map_err(|_| ResolveInfoError::Malformed)
+}
+
+/// Issue [`SysinfoQueryId::RESOURCE_LIMITS`] and decode the caller's own
+/// per-resource limits, indexed by [`LimitKind`] discriminant.
+///
+/// The reply is exactly [`LimitKind::COUNT`] [`ResourceLimitRecord`]s packed
+/// in discriminant order. A reply of any other length, a record that does not
+/// decode, or a record whose self-describing `kind` disagrees with its
+/// position is corrupt and fails closed as [`ResolveInfoError::Malformed`] —
+/// never a partial or mis-attributed answer.
+fn query_resource_limits(
+    transport: &dyn Transport,
+) -> Result<[ResourceLimitRecord; LimitKind::COUNT], ResolveInfoError> {
+    let reply = call(transport, SysinfoQueryId::RESOURCE_LIMITS, &[]).map_err(map_call_error)?;
+    if reply.len() != RESOURCE_LIMITS_REPORT_LEN {
+        return Err(ResolveInfoError::Malformed);
+    }
+    let mut records =
+        [ResourceLimitRecord::new(LimitKind::AddressSpaceBytes, ResourceLimit::UNLIMITED, 0);
+            LimitKind::COUNT];
+    for (index, kind) in LimitKind::ALL.iter().enumerate() {
+        let base = index * ResourceLimitRecord::WIRE_LEN;
+        let record =
+            ResourceLimitRecord::from_bytes(&reply[base..base + ResourceLimitRecord::WIRE_LEN])
+                .map_err(|_| ResolveInfoError::Malformed)?;
+        // Records are positional in discriminant order; the self-describing
+        // kind field must agree with the slot it occupies, or the reply is
+        // corrupt.
+        if record.kind != *kind {
+            return Err(ResolveInfoError::Malformed);
+        }
+        records[index] = record;
+    }
+    Ok(records)
+}
+
+/// The caller's effective soft/hard bound for `kind`.
+fn limit_for(
+    kind: LimitKind,
+    transport: &dyn Transport,
+) -> Result<ResourceLimit, ResolveInfoError> {
+    let records = query_resource_limits(transport)?;
+    Ok(records[kind.as_u32() as usize].limit)
+}
+
+/// The caller's current live usage of `kind`, in its natural unit.
+fn usage_for(kind: LimitKind, transport: &dyn Transport) -> Result<u64, ResolveInfoError> {
+    let records = query_resource_limits(transport)?;
+    Ok(records[kind.as_u32() as usize].usage)
+}
+
+/// The unit a resource's live usage is measured in: bytes for the
+/// byte-denominated resources, a dimensionless count for the rest.
+fn unit_for_limit(kind: LimitKind) -> Unit {
+    match kind {
+        LimitKind::AddressSpaceBytes | LimitKind::StackBytes => Unit::Bytes,
+        LimitKind::OpenStreams | LimitKind::Processes => Unit::Count,
+    }
 }
 
 /// Map a transport [`CallError`] onto the resolver's error vocabulary.
@@ -348,10 +454,11 @@ mod tests {
     use core::cell::RefCell;
     use rustos_abi::origin::{CapabilitySummary, Origin, ProcId, TrustDomain};
     use rustos_abi::sysinfo::{
-        KernelMemoryStats, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
+        KernelMemoryStats, ResourceLimitRecord, SysinfoQueryId, SysinfoRequestHeader,
+        SystemIdentity, Uptime,
     };
     use rustos_abi::time::{Duration64, Time64};
-    use rustos_abi::{CapabilityId, Errno};
+    use rustos_abi::{CapabilityId, Errno, LimitKind, ResourceLimit};
     use rustos_resref::parse;
 
     /// An in-memory `sysinfod` stand-in that answers the singleton queries
@@ -362,6 +469,7 @@ mod tests {
         uptime: Uptime,
         memory: KernelMemoryStats,
         origin: Origin,
+        limits: [ResourceLimitRecord; LimitKind::COUNT],
         deny: Option<SysinfoQueryId>,
         seen: RefCell<Vec<SysinfoQueryId>>,
     }
@@ -390,9 +498,39 @@ mod tests {
                     ProcId::from_raw([0xCD; 16]),
                     CapabilitySummary::EMPTY,
                 ),
+                // One record per `LimitKind`, in discriminant order. `Processes`
+                // is left unlimited so the `unlimited` rendering is exercised.
+                limits: [
+                    ResourceLimitRecord::new(
+                        LimitKind::AddressSpaceBytes,
+                        ResourceLimit::new(1_048_576, 2_097_152).expect("well-formed"),
+                        4096,
+                    ),
+                    ResourceLimitRecord::new(
+                        LimitKind::OpenStreams,
+                        ResourceLimit::new(16, 32).expect("well-formed"),
+                        5,
+                    ),
+                    ResourceLimitRecord::new(LimitKind::Processes, ResourceLimit::UNLIMITED, 3),
+                    ResourceLimitRecord::new(
+                        LimitKind::StackBytes,
+                        ResourceLimit::new(8192, 8192).expect("well-formed"),
+                        2048,
+                    ),
+                ],
                 deny: None,
                 seen: RefCell::new(Vec::new()),
             }
+        }
+
+        /// The `RESOURCE_LIMITS` reply: the four records packed in
+        /// discriminant order, exactly as the real service frames it.
+        fn limits_report(&self) -> Vec<u8> {
+            let mut out = Vec::new();
+            for record in &self.limits {
+                out.extend_from_slice(&record.to_le_bytes());
+            }
+            out
         }
     }
 
@@ -408,6 +546,7 @@ mod tests {
                 SysinfoQueryId::UPTIME => Ok(self.uptime.to_le_bytes().to_vec()),
                 SysinfoQueryId::KERNEL_MEMORY_STATS => Ok(self.memory.to_le_bytes().to_vec()),
                 SysinfoQueryId::PROCESS_IDENTITY => Ok(self.origin.to_le_bytes().to_vec()),
+                SysinfoQueryId::RESOURCE_LIMITS => Ok(self.limits_report()),
                 _ => Err(Errno::NotFound),
             }
         }
@@ -624,6 +763,124 @@ mod tests {
             }
             ResponsePayload::Info(_) => panic!("expected metric"),
         }
+    }
+
+    #[test]
+    fn stats_limits_usage_are_unprivileged_gauges() {
+        let fixture = Fixture::new();
+        // A byte-denominated resource reports its usage in bytes.
+        let addr = resolve_str("stats:limits/address-space-bytes", &fixture).expect("ok");
+        assert_eq!(addr.authorization, Authorization::Unprivileged);
+        match addr.payload {
+            ResponsePayload::Metric(m) => {
+                assert_eq!(m.name(), "limits/address-space-bytes");
+                assert_eq!(m.value, 4096);
+                assert_eq!(m.kind, MetricKind::Gauge);
+                assert_eq!(m.unit, Unit::Bytes);
+                assert_eq!(m.reset_behavior, ResetBehavior::Never);
+                assert_eq!(m.window, None);
+            }
+            ResponsePayload::Info(_) => panic!("expected metric"),
+        }
+        // A countable resource reports a dimensionless count.
+        let procs = resolve_str("stats:limits/processes", &fixture).expect("ok");
+        match procs.payload {
+            ResponsePayload::Metric(m) => {
+                assert_eq!(m.name(), "limits/processes");
+                assert_eq!(m.value, 3);
+                assert_eq!(m.unit, Unit::Count);
+            }
+            ResponsePayload::Info(_) => panic!("expected metric"),
+        }
+    }
+
+    #[test]
+    fn info_limits_bounds_are_public_facts() {
+        let fixture = Fixture::new();
+        let soft = resolve_str("info:limits/open-streams/soft", &fixture).expect("ok");
+        assert_eq!(soft.authorization, Authorization::Unprivileged);
+        assert_eq!(soft.query(), "info:limits/open-streams/soft");
+        match soft.payload {
+            ResponsePayload::Info(v) => {
+                assert_eq!(v.value(), "16");
+                assert_eq!(v.sensitivity, Sensitivity::Public);
+            }
+            ResponsePayload::Metric(_) => panic!("expected info value"),
+        }
+        let hard = resolve_str("info:limits/open-streams/hard", &fixture).expect("ok");
+        match hard.payload {
+            ResponsePayload::Info(v) => assert_eq!(v.value(), "32"),
+            ResponsePayload::Metric(_) => panic!("expected info value"),
+        }
+        // An unlimited bound renders as `unlimited`, not as a raw sentinel.
+        let unlimited = resolve_str("info:limits/processes/soft", &fixture).expect("ok");
+        match unlimited.payload {
+            ResponsePayload::Info(v) => assert_eq!(v.value(), "unlimited"),
+            ResponsePayload::Metric(_) => panic!("expected info value"),
+        }
+    }
+
+    #[test]
+    fn limits_unknown_kind_or_bound_fails_closed() {
+        let fixture = Fixture::new();
+        assert_eq!(
+            resolve_str("stats:limits/nope", &fixture),
+            Err(ResolveInfoError::UnknownSelector)
+        );
+        assert_eq!(
+            resolve_str("info:limits/nope/soft", &fixture),
+            Err(ResolveInfoError::UnknownSelector)
+        );
+        // A known kind but an unknown bound word matches no arm.
+        assert_eq!(
+            resolve_str("info:limits/processes/median", &fixture),
+            Err(ResolveInfoError::UnknownSelector)
+        );
+    }
+
+    #[test]
+    fn limits_reply_wrong_length_fails_closed() {
+        struct Short;
+        impl crate::transport::Transport for Short {
+            fn query(&self, _request: &[u8]) -> Result<Vec<u8>, Errno> {
+                Ok(alloc::vec![0u8; 3])
+            }
+        }
+        let reference = parse("stats:limits/processes").expect("parse");
+        assert_eq!(
+            resolve(&reference, now(), &Short),
+            Err(ResolveInfoError::Malformed)
+        );
+    }
+
+    #[test]
+    fn limits_reply_kind_out_of_order_fails_closed() {
+        // A full-length report whose records are packed in the wrong order:
+        // the self-describing `kind` no longer matches its slot, so the reply
+        // is rejected rather than mis-attributed.
+        struct Scrambled;
+        impl crate::transport::Transport for Scrambled {
+            fn query(&self, _request: &[u8]) -> Result<Vec<u8>, Errno> {
+                let mut out = Vec::new();
+                // `OpenStreams` sits where `AddressSpaceBytes` (slot 0) belongs.
+                for kind in [
+                    LimitKind::OpenStreams,
+                    LimitKind::AddressSpaceBytes,
+                    LimitKind::Processes,
+                    LimitKind::StackBytes,
+                ] {
+                    out.extend_from_slice(
+                        &ResourceLimitRecord::new(kind, ResourceLimit::UNLIMITED, 0).to_le_bytes(),
+                    );
+                }
+                Ok(out)
+            }
+        }
+        let reference = parse("info:limits/open-streams/soft").expect("parse");
+        assert_eq!(
+            resolve(&reference, now(), &Scrambled),
+            Err(ResolveInfoError::Malformed)
+        );
     }
 
     #[test]

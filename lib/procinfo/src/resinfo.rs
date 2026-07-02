@@ -106,6 +106,8 @@ pub enum Unit {
     Bytes,
     /// A span of whole seconds.
     Seconds,
+    /// A dimensionless count of things (open descriptors, live children).
+    Count,
 }
 
 /// When a [`Metric`]'s accumulator resets (`plans/ALIAS.md` §14.3).
@@ -118,6 +120,22 @@ pub enum ResetBehavior {
     Never,
     /// The value resets to zero at each boot (uptime).
     Boot,
+}
+
+/// Render a resource-limit soft/hard bound for display, spelling
+/// [`RLIMIT_INFINITY`](rustos_abi::RLIMIT_INFINITY) as `unlimited` and any
+/// finite bound as its decimal value.
+///
+/// The one definition of that convention, shared by the `sysinfo` CLI's
+/// `limits` table and the `info:limits/*` resolver, so the two can never spell
+/// an unlimited bound differently.
+#[must_use]
+pub fn render_limit_bound(value: u64) -> String {
+    if value == rustos_abi::RLIMIT_INFINITY {
+        String::from("unlimited")
+    } else {
+        value.to_string()
+    }
 }
 
 /// A single `info:` value: one typed, sensitivity-tagged fact

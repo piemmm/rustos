@@ -79,7 +79,10 @@ never bypass the authority that guards it:
   fails `info:`/`stats:` closed. Today it serves the selectors the shipped
   queries back — `info:system/{hostname,kernel,machine-id,boot-time}`,
   `info:process/{pid,uid,gid,proc-id}` (the caller's own kernel-attested
-  identity, from the self-scoped `PROCESS_IDENTITY` query), `stats:uptime`, and
+  identity, from the self-scoped `PROCESS_IDENTITY` query),
+  `info:limits/<kind>/{soft,hard}` and `stats:limits/<kind>` (the caller's own
+  effective bounds and live usage, from the self-scoped `RESOURCE_LIMITS`
+  query), `stats:uptime`, and
   `stats:mem/{used,available,total,kernel-heap,user-resident}` — and grows in
   place as more queries land.
 
