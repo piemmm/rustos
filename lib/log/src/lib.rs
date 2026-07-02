@@ -34,6 +34,7 @@ pub mod journal;
 pub mod ratelimit;
 pub mod record;
 pub mod render;
+pub mod report;
 pub mod segment;
 pub mod stream;
 
@@ -65,6 +66,9 @@ pub use record::{
     CALLER_TAG_MAX, DATA_FIELD_VALUE_MAX, MAX_DATA_FIELDS, RECORD_FORMAT_VERSION, SOURCE_NAME_MAX,
 };
 pub use render::render_line;
+pub use report::{
+    render_json, render_markdown, render_table_header, render_table_row, RecordFrame,
+};
 pub use rustos_abi::field::{
     reserved_prefix, Decimal, FieldList, FieldName, FieldValue, IpAddr, MacAddr, ScalarType,
     ToFieldValue, Uuid, RESERVED_PREFIXES,

@@ -45,7 +45,7 @@ use crate::Level;
 /// distinct from the compact uppercase abbreviations the architecture serial
 /// consoles print for the diagnostic log path; there is only ever one lowercase
 /// definition, and this is it.
-const fn level_label(level: Level) -> &'static str {
+pub(crate) const fn level_label(level: Level) -> &'static str {
     match level {
         Level::Trace => "trace",
         Level::Debug => "debug",
@@ -64,8 +64,8 @@ const fn level_label(level: Level) -> &'static str {
 /// code point is `<= 0x9F`). The backslash itself is doubled so the escaping is
 /// unambiguous. All other characters, including printable multi-byte UTF-8,
 /// pass through unchanged, and unbroken runs of them are forwarded in one call.
-struct EscapeWriter<'w, W: Write + ?Sized> {
-    inner: &'w mut W,
+pub(crate) struct EscapeWriter<'w, W: Write + ?Sized> {
+    pub(crate) inner: &'w mut W,
 }
 
 impl<W: Write + ?Sized> Write for EscapeWriter<'_, W> {
@@ -94,14 +94,14 @@ impl<W: Write + ?Sized> Write for EscapeWriter<'_, W> {
 }
 
 /// Write `text` to `out` with control characters and backslashes neutralised.
-fn write_escaped<W: Write + ?Sized>(out: &mut W, text: &str) -> fmt::Result {
+pub(crate) fn write_escaped<W: Write + ?Sized>(out: &mut W, text: &str) -> fmt::Result {
     EscapeWriter { inner: out }.write_str(text)
 }
 
 /// Render `value` to `out`, neutralising control characters in any string it
 /// contains (a `Str`, or a `Str` inside a `List`); numeric, address, hex, and
 /// enumerated renderings are already control-free.
-fn write_value<W: Write + ?Sized>(out: &mut W, value: &FieldValue<'_>) -> fmt::Result {
+pub(crate) fn write_value<W: Write + ?Sized>(out: &mut W, value: &FieldValue<'_>) -> fmt::Result {
     write!(EscapeWriter { inner: out }, "{value}")
 }
 

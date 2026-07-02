@@ -183,6 +183,12 @@ pub const TARGETS: &[Target] = &[
             "lib/log boot-console renderer (hostile caller text/fields: rendered line is always control-byte-free, never panics)",
     },
     Target {
+        package: "rustos-log",
+        test: "fuzz_report",
+        description:
+            "lib/log rich renderers (JSON/Markdown/table over hostile records: output is always control-byte-free, JSON is valid, never panics)",
+    },
+    Target {
         package: "rustos-glob",
         test: "fuzz_glob",
         description: "lib/glob pattern compiler + match loop (untrusted glob-pattern bytes)",

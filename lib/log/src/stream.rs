@@ -78,20 +78,33 @@ impl Stream {
         }
     }
 
+    /// The stream's canonical lowercase name.
+    ///
+    /// This is the single spelling of a stream used everywhere a stream is
+    /// named as text: the on-disk `/System/Logs/<stream>/` directory, the
+    /// genesis derivation ([`genesis_label`](Self::genesis_label) is these
+    /// same bytes), and the rich renderers. Because it feeds the genesis
+    /// derivation it must not change.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Boot => "boot",
+            Self::Runtime => "runtime",
+            Self::Debug => "debug",
+            Self::Security => "security",
+            Self::Audit => "audit",
+            Self::Journal => "journal",
+        }
+    }
+
     /// The stream's identifying label, fed to [`crate::stream_genesis`] so a
     /// segment lifted onto a different stream fails verification.
     ///
-    /// These bytes are part of the genesis derivation and must not change.
+    /// These are [`name`](Self::name)'s bytes — one definition — and are part
+    /// of the genesis derivation, so they must not change.
     #[must_use]
     pub const fn genesis_label(self) -> &'static [u8] {
-        match self {
-            Self::Boot => b"boot",
-            Self::Runtime => b"runtime",
-            Self::Debug => b"debug",
-            Self::Security => b"security",
-            Self::Audit => b"audit",
-            Self::Journal => b"journal",
-        }
+        self.name().as_bytes()
     }
 
     /// Whether a *closed* segment of this stream must be cryptographically

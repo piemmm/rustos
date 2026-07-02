@@ -374,6 +374,50 @@ registry.
   `FieldName` grammar and non-string values render as control-free text, so
   both pass through unchanged.
 
+## Rich renderers (`report`)
+
+The `report` module adds the structured *report* views the `log` tools render
+beyond the single boot line (`plans/SYSLOG.md` §8.3): a JSON object, a Markdown
+fragment, and an aligned terminal-table row. All three are **views** — the
+segment files and anchors stay the authority (`plans/SYSLOG.md` §17), so
+editing a rendered report never changes the log. Like `render_line` they are
+`no_std`, allocation-free formatters over any `core::fmt::Write` sink.
+
+* `RecordFrame` — the container-owned facts a renderer pairs with a decoded
+  `LogRecordRef`: the `stream` and `boot_id` from the segment header, and the
+  `cpu_id`/`seq`/`monotonic` from the record block. A reader fills it from a
+  `SegmentReader`/`RecordBlockRef`, so a stored record renders complete without
+  a side channel.
+* `render_json(out, frame, record)` — one single-line JSON object with three
+  provenance groups: the top-level **system-attested** fields (stream, seq,
+  cpu, boot id, monotonic and wall time, effective level, system-derived
+  source, attested origin), a `"caller"` object holding the caller's own
+  content (message, optional level/component/tag/event-id, and the source and
+  stream it merely *requested*), and a `"data"` object of the typed `data.*`
+  fields. Booleans and 64-bit integers render as JSON literals; every other
+  value renders as its canonical string. A dedicated JSON escaper backslash-
+  escapes `"`/`\`, uses the short `\n`/`\r`/`\t`/`\b`/`\f` forms, and emits
+  every other control byte as `\u00xx`, so the output is valid JSON and free of
+  raw control bytes.
+* `render_markdown(out, frame, record)` — a Markdown bullet block whose header
+  line carries the system-attested facts and whose indented sub-bullets carry
+  the caller's own content and `data.*`, so the provenance boundary is visible.
+  The system-derived source uses an inline-code span; caller text is
+  double-quoted and control-neutralised, so a caller can neither forge a new
+  bullet/line nor break a code span.
+* `render_table_header(out)` / `render_table_row(out, frame, record)` — an
+  aligned `SEQ | TIME | LEVEL | STREAM | SOURCE | MESSAGE` view. The source and
+  message are escaped, so a row can never inject a terminal escape or a forged
+  column; over-wide values push the message right rather than being truncated
+  (truncation would hide provenance).
+* **Provenance and injection defence.** Every view separates system-attested
+  metadata from caller content and shows a caller's *requested* privileged
+  source/stream inertly as a claim, never as the real one. The JSON object and
+  the table row are control-byte-free for any input; the Markdown fragment is
+  control-byte-free apart from the renderer's own structural newlines (caller
+  text can contribute none — it is escaped). All three are asserted by the
+  `fuzz_report` harness, which never panics on any decoded or hostile record.
+
 ## Journal ingress ABI and service (`rustos_abi::log_ingress`, `journald`)
 
 An ordinary process never appends to a segment: it frames a request and posts

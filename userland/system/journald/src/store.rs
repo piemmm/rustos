@@ -58,14 +58,12 @@ pub fn segment_placement_for(bytes: &[u8]) -> Result<(String, String), SegmentEr
 
 /// The per-stream subdirectory name.
 ///
-/// This reuses the stream's canonical label (the same bytes fed to the stream
-/// genesis), so the on-disk directory name and the integrity label are one
-/// definition and cannot drift.
+/// This is the stream's canonical name (the same spelling fed to the stream
+/// genesis and used by the rich renderers), so the on-disk directory name and
+/// the integrity label are one definition and cannot drift.
 #[must_use]
 pub fn stream_dir(stream: Stream) -> &'static str {
-    // `genesis_label` is a fixed ASCII label per closed stream, so it is always
-    // valid UTF-8; the fallback is unreachable and keeps this total.
-    core::str::from_utf8(stream.genesis_label()).unwrap_or("unknown")
+    stream.name()
 }
 
 /// The path a segment of `stream` with id `segment_id` is written to:

@@ -72,6 +72,13 @@ neither re-implements the record format.
   headed by the *system-derived* source, and a downgraded `requested_source`
   spoof is shown as inert evidence. `no_std`, writes into any
   `core::fmt::Write` sink.
+- **`report`**: the rich record views (`render_json` / `render_markdown` /
+  `render_table_header` / `render_table_row` over a `RecordFrame` + decoded
+  record) the `log` tools render for `show`/`report`/`export`. Each separates
+  system-attested metadata from caller content and shows a caller's *requested*
+  privileged source/stream inertly as a claim; caller text is escaped, so the
+  JSON object and table row are control-byte-free and the JSON is valid. `no_std`,
+  writes into any `core::fmt::Write` sink.
 - **`chain`**: the per-stream SHA-256 record hash chain (`lib/crypto`), the one
   chain the log uses.
 - **`bootring`**: the bounded per-CPU early-boot ring (`BootRing`). Before

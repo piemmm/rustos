@@ -2844,12 +2844,20 @@ Landed (done):
   monotonic time into the canonical `[monotonic] level source[component]:
   message key=value` line, escaping every control character in caller-controlled
   text so it cannot inject terminal escapes or forge lines (control-byte-free
-  output proven by the `fuzz_render` harness). Remaining SYSLOG work: boot-ring
+  output proven by the `fuzz_render` harness). The **rich renderers**
+  (`lib/log` `report.rs`, §8.3) have landed on top of it: `render_json` /
+  `render_markdown` / `render_table_row` (over a `RecordFrame` a reader fills
+  from a segment header + record block) are the structured views the `log`
+  tools render, each separating system-attested metadata from caller content
+  and showing a caller's *requested* privileged source/stream inertly as a
+  claim; caller text is escaped so the JSON is valid and the JSON/table output
+  is control-byte-free (proven by the `fuzz_report` harness). The one stream
+  string spelling is now `Stream::name()`. Remaining SYSLOG work: boot-ring
   import (needs a kernel-side boot ring + drain syscall that do not exist yet;
   per-CPU gap detection lands with that producer, since `journald` assigns
   `cpu_seq` contiguously and cannot gap in steady state), retention, the QEMU
   vertical (launch journald under `init`), the kernel `SystemIdentity`↔machine-id
-  unification, the rich (Markdown/JSON) renderers + `log` CLI, and anchors (see
+  unification, the `log` CLI over the segment files, and anchors (see
   `.junie/SYSLOG.md`).
 - §19.6 fuzzing — `cargo xtask fuzz` over all in-tree harnesses (`--quick`/
   `--soak`), fail-closed.
