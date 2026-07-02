@@ -984,6 +984,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-journald"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-log",
+]
+
+[[package]]
 name = "rustos-kalloc"
 version = "0.0.0"
 
