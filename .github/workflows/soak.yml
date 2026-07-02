@@ -105,6 +105,13 @@ jobs:
           rustc --version
           cargo --version
 
+      # Start every run from a clean slate: the self-hosted runner persists
+      # `CARGO_TARGET_DIR` across runs, so wipe prior build artefacts before
+      # the soak builds so it compiles from scratch and stale outputs can
+      # never mask a breakage.
+      - name: cargo xtask clean
+        run: cargo xtask clean
+
       - name: Run soak window (parallel)
         env:
           # Keep soak logs out of the tracked tree (AGENTS.md §3); upload them

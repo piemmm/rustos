@@ -79,6 +79,13 @@ jobs:
           command -v cargo-deny >/dev/null || cargo install --locked cargo-deny
           command -v mdbook     >/dev/null || cargo install --locked mdbook
 
+      # Start every run from a clean slate: the self-hosted runner persists
+      # `CARGO_TARGET_DIR` across runs, so wipe prior build artefacts before
+      # building so `cargo xtask ci` compiles from scratch and stale outputs
+      # can never mask a breakage.
+      - name: cargo xtask clean
+        run: cargo xtask clean
+
       - name: cargo xtask ci
         run: cargo xtask ci
 
