@@ -56,6 +56,7 @@ pub mod line;
 pub mod mouse;
 pub mod op;
 pub mod parse;
+pub mod secret;
 
 #[cfg(test)]
 mod tests;
@@ -65,7 +66,8 @@ pub use cell::Cell;
 pub use color::{BasicColor, Color};
 pub use emit::{encode, encode_all, encode_into};
 pub use key::Key;
-pub use line::{push_line_byte, LineFeed};
+pub use line::{EraseSeq, LineEditor, LineFeed};
 pub use mouse::{MouseButton, MouseMode, MouseReport};
 pub use op::{EraseMode, Op};
 pub use parse::Parser;
+pub use secret::{SecretIndicator, SecretInput, SECRET_TICK_NS};

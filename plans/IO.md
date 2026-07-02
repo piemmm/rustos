@@ -94,7 +94,7 @@ done items):
   userland. The bounded, edit-aware line readers that are **not** the unbounded
   `BufReader` — the shell REPL's `MAX_LINE`-capped `LineReader` and login's
   byte-wise prompt reads, both running the one shared
-  `rustos_vt::line::push_line_byte` editor — are a deliberate security bound,
+  `rustos_vt::line::LineEditor` — are a deliberate security bound,
   not the duplication IO4 removes, so they stay as their own readers over the
   `read` primitive.
 - **DECIDED — no owning/close-on-drop handle yet.** IO1 deliberately ships a
@@ -248,8 +248,8 @@ rustdoc + the relevant `docs/` page, whole-project gate green.
   (no dead code, no parallel I/O paths). After IO4 there is one
   `Write::write_all` loop in userland — this is the stage that proves §2.2.
   The bounded/edit-aware line readers (the REPL's `MAX_LINE` `LineReader` and
-  login's prompt reads, both over the shared `rustos_vt::line::push_line_byte`
-  editor) are retained: they are a security bound
+  login's prompt reads, both over the shared `rustos_vt::line::LineEditor`)
+  are retained: they are a security bound
   (§24.4), not the unbounded `BufReader`, so collapsing them would *lose* a
   bound rather than remove duplication. Verified by the existing
   shell/init/utility host tests and the `spawn_session_qemu_aarch64` vertical

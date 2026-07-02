@@ -4271,27 +4271,48 @@ two users — or the same user twice — can be logged in concurrently.
   CR/LF translation, `stream_echo` disabling echo, fail-closed on a
   non-read fd), console.rs `echo_bytes` unit tests, and lib/rt +
   abi-sys marshalling tests.
-- **Read-line editing (Backspace rub-out) — LANDED.** The read line
-  discipline now edits the line, not just echoes it. The erase vocabulary
-  is one shared `lib/vt` definition (`control::is_line_erase` — Backspace
-  `BS` or Delete `DEL` — plus the `ERASE_ECHO` `BS SP BS` rub-out, §2.2), so
-  the kernel echo and the reader's buffer can never disagree on which byte
-  erases. Kernel **echo** half (`ConsoleDevice::echo_bytes`): an erase rubs
-  out the previous character instead of painting a stray control glyph,
-  bounded by a per-console column (`echo_col`, reset on CR/LF and on every
-  `set_echo` toggle) so a Backspace at the start of the input line never
-  walks back over the prompt; the column persists across the many per-byte
-  `stream_read` drains one logical input line spans. Reader **buffer** half
-  (`rustos_vt::line::push_line_byte`, a host-tested allocation-free helper
-  shared by login's prompt reads and the shell REPL's line reader):
-  CR/LF completes the line, an erase pops the last byte (zeroed on removal,
-  §4) and is never stored, any other byte appends or fails closed
-  `TooLong`; `login::run::read_line_raw` drives it. Proven by `lib/vt`
-  control tests, six new `console.rs` erase tests (rub-out, BS-as-erase,
-  no-op at line start, column persistence across calls, CR/LF reset,
-  `set_echo` reset), and nine `rustos_vt::line` tests. Docs:
+- **Read-line editing (erase rub-out) — LANDED.** The read line
+  discipline edits the line, not just echoes it. The erase vocabulary is
+  one shared `lib/vt` definition (`control::is_line_erase` — Backspace
+  `BS` or Delete `DEL` — plus the Delete key's `CSI 3 ~` escape sequence
+  via the `line::EraseSeq` recogniser held across split reads, and the
+  `ERASE_ECHO` `BS SP BS` rub-out, §2.2), so the kernel echo and the
+  reader's buffer can never disagree on what erased. Kernel **echo** half
+  (`ConsoleDevice::echo_bytes`): an erase rubs out the previous character
+  instead of painting stray control glyphs, bounded by a per-console line
+  state (`EchoLine` — column + held sequence prefix, reset on CR/LF and on
+  every `set_echo` toggle) so an erase at the start of the input line
+  never walks back over the prompt; the state persists across the many
+  per-byte `stream_read` drains one logical input line spans. Reader
+  **buffer** half (`rustos_vt::line::LineEditor`, a host-tested
+  allocation-free editor shared by the root-unlock passphrase prompt,
+  login's prompt reads, and the shell REPL's line reader): CR/LF completes
+  the line, an erase pops the last byte (zeroed on removal, §4) and is
+  never stored, any other byte appends or fails closed `TooLong`;
+  `login::run::read_line_raw` drives it. Proven by the `lib/vt` control +
+  `line` tests and the `console.rs` erase tests (rub-out, BS-as-erase,
+  Delete-sequence rub-out incl. split reads, no-op at line start,
+  persistence across calls, CR/LF reset, `set_echo` reset). Docs:
   `docs/src/architecture/syscalls.md`, `docs/src/lib/vt.md`,
   `docs/src/userland/login.md`.
+- **Secret-entry feedback (`[input active...]`) — LANDED.** Every
+  echo-suppressed (password) prompt shows the shared activity marker: the
+  pure `rustos_vt::secret::SecretIndicator` state machine (show on first
+  typed character, dots animating `.`/`..`/`...` on a one-second cadence
+  while typing continues, dots paused after a second of silence, whole
+  marker removed on Enter or when the input is erased back to empty),
+  hosted per console as the kernel `SecretFeedback` (`kernel/core`
+  console). `set_echo(false)` arms it (login's password read), the
+  root-unlock kthread arms its own instance around the passphrase prompt,
+  and the blocking console readers (`BlockingConsoleRead`,
+  `KthreadConsoleRead`) feed it the consumed bytes and drive its one-shot
+  animation deadline through the `CONSOLE_WAITQ` timed park
+  (`rearm_timed_wakeup` / `wait_now_ns`) — armed only while the marker is
+  animating, so an idle prompt takes no timer wake-ups (tickless, §17.1).
+  Only the typed-character *count* is tracked; no secret byte is stored or
+  rendered. Proven by `rustos_vt::secret` tests and the `console.rs`
+  feedback tests (inert until armed, marker show/remove, tick
+  advance/pause, `set_echo` arm/disarm).
 - **Keyboard input for the video console — kernel-side delivery seam
   LANDED.** The video console's read half is now a kernel-side type-ahead
   queue a keyboard-input driver feeds, not the inert `Ok(0)` poll a

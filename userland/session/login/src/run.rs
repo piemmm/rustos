@@ -75,12 +75,12 @@ mod program {
     /// input into `buf`, returning the number of bytes filled.
     ///
     /// The read line discipline is shared with the kernel console echo: this
-    /// runs the **buffer** half ([`rustos_vt::line::push_line_byte`]) while the
+    /// runs the **buffer** half ([`rustos_vt::line::LineEditor`]) while the
     /// kernel console runs the matching **echo** half, both keyed off the one
-    /// `lib/vt` erase definition. So a Backspace rubs out
-    /// the last character both on screen and in `buf`; CR and LF both
-    /// terminate (UART terminals commonly send CR); a line longer than `buf`
-    /// is refused, never truncated.
+    /// `lib/vt` erase definition. So a Backspace — or the Delete key's
+    /// `CSI 3 ~` sequence — rubs out the last character both on screen and
+    /// in `buf`; CR and LF both terminate (UART terminals commonly send CR);
+    /// a line longer than `buf` is refused, never truncated.
     ///
     /// **Allocation-free by design**: every byte lands in the caller's
     /// stack buffer, because the `mem_map`-backed userland heap is not
@@ -90,6 +90,7 @@ mod program {
     /// zero-length read means the stream failed or closed — reported as
     /// a console failure the login loop fails closed on, never spun on.
     fn read_line_raw(buf: &mut [u8]) -> Result<usize, Errno> {
+        let mut editor = rustos_vt::line::LineEditor::new();
         let mut len = 0;
         let mut byte = [0u8; 1];
         loop {
@@ -97,7 +98,7 @@ mod program {
             if read == 0 {
                 return Err(Errno::NotFound);
             }
-            match rustos_vt::line::push_line_byte(buf, &mut len, byte[0]) {
+            match editor.push(buf, &mut len, byte[0]) {
                 rustos_vt::line::LineFeed::Pending => {}
                 rustos_vt::line::LineFeed::Complete => return Ok(len),
                 rustos_vt::line::LineFeed::TooLong => return Err(Errno::LengthOutOfRange),

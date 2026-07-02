@@ -27,12 +27,14 @@
 //! state before discovery) therefore announces an intentionally inert
 //! interface instead of pretending the write succeeded.
 
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use rustos_abi::{Errno, TerminalSize};
 use rustos_kernel_sched_api::SchedulerArch;
 use rustos_sync::SpinLock;
 use rustos_vt::control;
+use rustos_vt::line::EraseSeq;
+use rustos_vt::secret::{SecretIndicator, SecretInput};
 
 use crate::dispatch_slot::RescheduleAction;
 use crate::kthread::reschedule_current;
@@ -427,17 +429,36 @@ pub struct ConsoleDevice {
     /// around a password read so a credential is never rendered). Interior mutability because the single
     /// installed console is shared `&'static`.
     echo: AtomicBool,
-    /// Column of the line-discipline cursor since the last line terminator
-    /// (or echo toggle): the count of characters the user has typed and the
-    /// echo has rendered on the current input line. Bounds the **erase**
-    /// (rub-out): a Backspace rubs out one rendered character only while this
-    /// is non-zero, so a Backspace at the start of the input line never walks
-    /// the cursor back into the prompt the program wrote.
-    /// Reset to zero on a `CR`/`LF` echo and on every [`Self::set_echo`]
-    /// toggle (each starts a fresh edited line). Relaxed ordering for the same
-    /// reason as [`Self::echo`]: a single console carries a single session
-    /// (`plans/PI.md` P11), so there is no cross-CPU race to order against.
-    echo_col: AtomicUsize,
+    /// The echo half's per-line editing state (see [`EchoLine`]): the
+    /// rendered-column bound for the erase rub-out and the held Delete
+    /// escape-sequence prefix. One lock per console; a single console
+    /// carries a single session (`plans/PI.md` P11), so the lock is
+    /// uncontended and held only across one `echo_bytes` call.
+    line: SpinLock<EchoLine>,
+    /// The secret-entry activity feedback for this console
+    /// ([`SecretFeedback`]), armed while echo is suppressed so a password
+    /// read still gives the operator visible progress. [`None`] on a
+    /// console built without one (host tests of unrelated paths).
+    secret: Option<&'static SecretFeedback>,
+}
+
+/// The kernel echo half's per-line editing state.
+///
+/// `col` is the column of the line-discipline cursor since the last line
+/// terminator (or echo toggle): the count of characters the user has typed
+/// and the echo has rendered on the current input line. It bounds the
+/// **erase** (rub-out): an erase rubs out one rendered character only while
+/// this is non-zero, so a Backspace at the start of the input line never
+/// walks the cursor back into the prompt the program wrote. Reset on a
+/// `CR`/`LF` echo and on every [`ConsoleDevice::set_echo`] toggle (each
+/// starts a fresh edited line).
+///
+/// `seq` is the held Delete escape-sequence prefix ([`EraseSeq`]) — the
+/// echo half of the same recogniser every reader's `LineEditor` runs, so
+/// screen and buffer agree about what the Delete key erased.
+struct EchoLine {
+    col: usize,
+    seq: EraseSeq,
 }
 
 impl ConsoleDevice {
@@ -475,8 +496,21 @@ impl ConsoleDevice {
             read,
             input,
             echo: AtomicBool::new(true),
-            echo_col: AtomicUsize::new(0),
+            line: SpinLock::new(EchoLine {
+                col: 0,
+                seq: EraseSeq::new(),
+            }),
+            secret: None,
         }
+    }
+
+    /// Attach the console's [`SecretFeedback`], so [`Self::set_echo`] arms
+    /// it around a suppressed (password) read. Builder-style, for the init
+    /// pipeline that assembles the installed console list.
+    #[must_use]
+    pub const fn with_secret(mut self, secret: &'static SecretFeedback) -> Self {
+        self.secret = Some(secret);
+        self
     }
 
     /// This console's character-cell geometry, if the backing device knows it
@@ -502,13 +536,30 @@ impl ConsoleDevice {
     /// it, and a single console carries a single session (`plans/PI.md`
     /// P11).
     ///
-    /// Toggling echo also resets the line-discipline column to zero: a
-    /// suppressed password read (`login` disables echo around it) and the prompt that follows it start a fresh edited
-    /// line, so a later Backspace must not rub out into a line the column was
+    /// Toggling echo also resets the line-discipline state (column and held
+    /// Delete prefix): a suppressed password read (`login` disables echo
+    /// around it) and the prompt that follows it start a fresh edited line,
+    /// so a later Backspace must not rub out into a line the column was
     /// last counting before the toggle.
+    ///
+    /// Disabling echo **arms** the console's [`SecretFeedback`] (when one is
+    /// attached): a no-echo read is a secret read, and the feedback marker
+    /// is the visible progress it shows instead of the characters.
+    /// Re-enabling echo disarms it, removing any marker still on screen.
     pub fn set_echo(&self, enabled: bool) {
         self.echo.store(enabled, Ordering::Relaxed);
-        self.echo_col.store(0, Ordering::Relaxed);
+        {
+            let mut line = self.line.lock();
+            line.col = 0;
+            line.seq = EraseSeq::new();
+        }
+        if let Some(secret) = self.secret {
+            if enabled {
+                secret.disarm();
+            } else {
+                secret.arm();
+            }
+        }
     }
 
     /// Echo `bytes` (the bytes a `stream_read` just consumed) back to the
@@ -518,18 +569,20 @@ impl ConsoleDevice {
     /// A carriage return or line feed is echoed as the CR-LF pair so the
     /// cursor both returns to column zero *and* advances a line — a bare
     /// CR (what a serial terminal sends for the Return key) would
-    /// otherwise overwrite the current line. An **erase** (rub-out) byte —
-    /// Backspace or Delete, [`control::is_line_erase`] — is *not* echoed
-    /// verbatim (that would paint a stray control glyph); instead it rubs
-    /// out the previous character with the `BS SP BS`
-    /// [`control::ERASE_ECHO`] sequence, but only while a character on the
-    /// current input line remains to erase (the per-console `echo_col`
-    /// column). A Backspace at the start of the line is a no-op,
-    /// so it never walks the cursor back over the prompt. This is the echo
-    /// half of the read line discipline; the reader's line buffer applies
-    /// the matching erase to the bytes it keeps (`plans/PI.md` P11). Echo is
-    /// part of the kernel's read line discipline, so it does not require the
-    /// reader to also hold `CAP_CONSOLE_WRITE`.
+    /// otherwise overwrite the current line. An **erase** (rub-out) — the
+    /// single-byte Backspace/Delete ([`control::is_line_erase`]) or the
+    /// Delete key's `CSI 3 ~` escape sequence (the shared [`EraseSeq`]
+    /// recogniser, so a Delete keypress never paints raw escape glyphs) —
+    /// is *not* echoed verbatim; instead it rubs out the previous character
+    /// with the `BS SP BS` [`control::ERASE_ECHO`] sequence, but only while
+    /// a character on the current input line remains to erase (the
+    /// per-console line-state column). An erase at the start of the line
+    /// is a no-op, so it never walks the cursor back over the prompt. This
+    /// is the echo half of the read line discipline; the reader's line
+    /// buffer (`rustos_vt::line::LineEditor`) applies the matching erase to
+    /// the bytes it keeps (`plans/PI.md` P11). Echo is part of the kernel's
+    /// read line discipline, so it does not require the reader to also hold
+    /// `CAP_CONSOLE_WRITE`.
     ///
     /// Echo is purely cosmetic, so it is **best-effort**: a short write or
     /// a device error is swallowed rather than failing the read the user
@@ -540,47 +593,217 @@ impl ConsoleDevice {
         if !self.echo_enabled() {
             return;
         }
-        // The column persists across calls because the reader drains the
-        // console a byte (or a few) at a time: one logical input line spans
-        // many `echo_bytes` calls, so the rub-out bound must be carried in
+        // The line state persists across calls because the reader drains
+        // the console a byte (or a few) at a time: one logical input line —
+        // and one Delete escape sequence — spans many `echo_bytes` calls,
+        // so the rub-out bound and the held sequence prefix are carried in
         // the console, not recomputed per call.
-        let mut col = self.echo_col.load(Ordering::Relaxed);
+        let mut line = self.line.lock();
         // Batch consecutive printable bytes into one device write (fewer
-        // device round-trips); flush the pending run when
-        // a control byte needs separate handling.
-        let mut run_start = 0;
-        for i in 0..bytes.len() {
-            let byte = bytes[i];
-            if byte == control::CR || byte == control::LF {
-                self.echo_run(&bytes[run_start..i]);
-                let _ = self.write.write(b"\r\n");
-                col = 0;
-                run_start = i + 1;
-            } else if control::is_line_erase(byte) {
-                self.echo_run(&bytes[run_start..i]);
-                col += i - run_start;
-                if col > 0 {
-                    let _ = self.write.write(&control::ERASE_ECHO);
-                    col -= 1;
+        // device round-trips); flush the pending run when a control needs
+        // separate handling. The run buffer also carries a released
+        // sequence prefix, which is not contiguous with `bytes`.
+        let mut run = [0u8; 64];
+        let mut run_len = 0usize;
+        for &byte in bytes {
+            let step = line.seq.feed(byte);
+            if step.erase() {
+                flush_run(self.write, &run, &mut run_len);
+                if line.col > 0 {
+                    write_best_effort(self.write, &control::ERASE_ECHO);
+                    line.col -= 1;
                 }
-                run_start = i + 1;
+                continue;
+            }
+            for &literal in step.literal() {
+                if literal == control::CR || literal == control::LF {
+                    flush_run(self.write, &run, &mut run_len);
+                    write_best_effort(self.write, b"\r\n");
+                    line.col = 0;
+                } else if control::is_line_erase(literal) {
+                    flush_run(self.write, &run, &mut run_len);
+                    if line.col > 0 {
+                        write_best_effort(self.write, &control::ERASE_ECHO);
+                        line.col -= 1;
+                    }
+                } else {
+                    if run_len == run.len() {
+                        flush_run(self.write, &run, &mut run_len);
+                    }
+                    run[run_len] = literal;
+                    run_len += 1;
+                    line.col += 1;
+                }
             }
         }
-        self.echo_run(&bytes[run_start..]);
-        col += bytes.len() - run_start;
-        self.echo_col.store(col, Ordering::Relaxed);
+        flush_run(self.write, &run, &mut run_len);
+    }
+}
+
+/// Write the accumulated printable run (if any) and reset its length.
+/// Best-effort, for the echo half.
+fn flush_run(write: &dyn ConsoleWrite, run: &[u8], run_len: &mut usize) {
+    if *run_len > 0 {
+        write_best_effort(write, &run[..*run_len]);
+        *run_len = 0;
+    }
+}
+
+/// Write every byte of `bytes` to the console output, looping over short
+/// writes and stopping on a closed/erroring device (never spin).
+/// Best-effort: echo and secret feedback are cosmetic, so a device error is
+/// swallowed rather than failing the read the user asked for.
+fn write_best_effort(write: &dyn ConsoleWrite, mut bytes: &[u8]) {
+    while !bytes.is_empty() {
+        match write.write(bytes) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => bytes = &bytes[n.min(bytes.len())..],
+        }
+    }
+}
+
+/// The secret-entry activity feedback of one console: the kernel-side host
+/// of the shared [`SecretIndicator`] marker (`rustos_vt::secret`), giving
+/// the operator visible progress while a password is typed with echo
+/// suppressed.
+///
+/// One per console, created beside the console's blocking read adapter by
+/// the init pipeline. It is **armed** by [`ConsoleDevice::set_echo`]
+/// whenever echo is disabled (a no-echo read is a secret read) — or
+/// directly by an in-kernel secret prompt such as the root-unlock
+/// passphrase read — and disarmed when echo returns. While armed, the
+/// console's blocking reader feeds it every consumed byte
+/// ([`Self::consumed`]) and drives its one-shot animation deadline
+/// ([`Self::deadline_ns`] / [`Self::tick`]) from its park loop.
+///
+/// It tracks the secret line's length itself, through the same
+/// [`EraseSeq`]-based classification every reader's `LineEditor` applies to
+/// the same bytes, so "the input was erased back to empty" is decided
+/// exactly as the reader's buffer decides it. Only the *count* is tracked —
+/// no secret byte is ever stored or rendered.
+pub struct SecretFeedback {
+    /// The console output the marker is drawn to.
+    write: &'static (dyn ConsoleWrite + 'static),
+    /// Whether a secret read is in progress (echo suppressed). Feeding and
+    /// ticking are no-ops while disarmed, so an echoed (non-secret) read
+    /// never draws the marker.
+    armed: AtomicBool,
+    /// The marker state machine plus the line-length tracking that drives
+    /// its events. Uncontended (one console carries one session); held only
+    /// across one feed/tick.
+    state: SpinLock<SecretState>,
+}
+
+/// The [`SecretFeedback`] state: the shared marker state machine, the held
+/// Delete-sequence prefix, and the secret line's current length.
+struct SecretState {
+    indicator: SecretIndicator,
+    seq: EraseSeq,
+    len: usize,
+}
+
+impl SecretFeedback {
+    /// A fresh, disarmed feedback for the console whose output is `write`.
+    #[must_use]
+    pub const fn new(write: &'static (dyn ConsoleWrite + 'static)) -> Self {
+        Self {
+            write,
+            armed: AtomicBool::new(false),
+            state: SpinLock::new(SecretState {
+                indicator: SecretIndicator::new(),
+                seq: EraseSeq::new(),
+                len: 0,
+            }),
+        }
     }
 
-    /// Write one run of non-line-break bytes to the console output,
-    /// looping over short writes and stopping on a closed/erroring device
-    /// (never spin). Best-effort, for [`Self::echo_bytes`].
-    fn echo_run(&self, mut bytes: &[u8]) {
-        while !bytes.is_empty() {
-            match self.write.write(bytes) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => bytes = &bytes[n.min(bytes.len())..],
+    /// Arm the feedback for one secret read, starting from a fresh line.
+    pub fn arm(&self) {
+        let mut state = self.state.lock();
+        state.indicator = SecretIndicator::new();
+        state.seq = EraseSeq::new();
+        state.len = 0;
+        drop(state);
+        self.armed.store(true, Ordering::Release);
+    }
+
+    /// Disarm the feedback (the secret read is over), removing any marker
+    /// still on screen — an aborted secret read must not leave the marker
+    /// painted over the next prompt.
+    pub fn disarm(&self) {
+        self.armed.store(false, Ordering::Release);
+        let mut state = self.state.lock();
+        let render = state.indicator.input(SecretInput::Submitted, 0);
+        state.seq = EraseSeq::new();
+        state.len = 0;
+        write_best_effort(self.write, render.bytes());
+    }
+
+    /// Feed the bytes a blocking console read just consumed, at monotonic
+    /// time `now_ns`, rendering whatever marker transitions they cause.
+    /// A no-op while disarmed.
+    pub fn consumed(&self, bytes: &[u8], now_ns: u64) {
+        if !self.armed.load(Ordering::Acquire) {
+            return;
+        }
+        let mut state = self.state.lock();
+        for &byte in bytes {
+            let step = state.seq.feed(byte);
+            if step.erase() {
+                let render = state.erase(now_ns);
+                write_best_effort(self.write, render.bytes());
+                continue;
+            }
+            for &literal in step.literal() {
+                let render = if literal == control::CR || literal == control::LF {
+                    state.len = 0;
+                    state.indicator.input(SecretInput::Submitted, now_ns)
+                } else if control::is_line_erase(literal) {
+                    state.erase(now_ns)
+                } else {
+                    state.len += 1;
+                    state.indicator.input(SecretInput::Typed, now_ns)
+                };
+                write_best_effort(self.write, render.bytes());
             }
         }
+    }
+
+    /// The one-shot deadline the marker animation currently needs, or
+    /// [`None`] while disarmed, hidden, or paused. The console's blocking
+    /// reader parks with this deadline and calls [`Self::tick`] when it
+    /// passes.
+    #[must_use]
+    pub fn deadline_ns(&self) -> Option<u64> {
+        if !self.armed.load(Ordering::Acquire) {
+            return None;
+        }
+        self.state.lock().indicator.deadline_ns()
+    }
+
+    /// The armed animation deadline passed: advance (or pause) the marker.
+    /// A no-op while disarmed.
+    pub fn tick(&self, now_ns: u64) {
+        if !self.armed.load(Ordering::Acquire) {
+            return;
+        }
+        let mut state = self.state.lock();
+        let render = state.indicator.tick(now_ns);
+        write_best_effort(self.write, render.bytes());
+    }
+}
+
+impl SecretState {
+    /// Apply one erase to the tracked line length and feed the resulting
+    /// event to the marker.
+    fn erase(&mut self, now_ns: u64) -> rustos_vt::secret::Render {
+        self.len = self.len.saturating_sub(1);
+        self.indicator.input(
+            SecretInput::Erased {
+                line_empty: self.len == 0,
+            },
+            now_ns,
+        )
     }
 }
 
@@ -624,19 +847,33 @@ where
 {
     arch: &'static A,
     inner: &'static (dyn ConsoleRead + Sync + 'static),
+    /// The console's secret-entry feedback: fed the consumed bytes while a
+    /// secret read is armed, and ticked from the park loop when its
+    /// animation deadline passes. [`None`] on a console built without one.
+    secret: Option<&'static SecretFeedback>,
 }
 
 impl<A> BlockingConsoleRead<A>
 where
     A: SchedulerArch + Send + Sync + 'static,
 {
-    /// Wrap `inner` so empty polls park the caller until input arrives.
+    /// Wrap `inner` so empty polls park the caller until input arrives,
+    /// feeding and ticking the console's `secret` feedback while a secret
+    /// read is armed.
     ///
     /// `arch` supplies the current-CPU read the park needs, exactly as it
     /// does for [`KernelProcessWait`](crate::procwait::KernelProcessWait).
     #[must_use]
-    pub const fn new(arch: &'static A, inner: &'static (dyn ConsoleRead + Sync + 'static)) -> Self {
-        Self { arch, inner }
+    pub const fn new(
+        arch: &'static A,
+        inner: &'static (dyn ConsoleRead + Sync + 'static),
+        secret: Option<&'static SecretFeedback>,
+    ) -> Self {
+        Self {
+            arch,
+            inner,
+            secret,
+        }
     }
 }
 
@@ -660,6 +897,14 @@ where
         // closed rather than busy-spinning, since it cannot park, exactly as the process-wait producer does.
         let parkable: Option<_> = crate::waitq::wait_arch().and_then(|hook| hook.current_task(cpu));
         loop {
+            // The secret feedback's one-shot animation deadline, when a
+            // secret read is armed and its marker is animating. `None` the
+            // rest of the time, so an ordinary read parks with no deadline
+            // and takes no timer wake-ups at all (tickless).
+            let deadline = self
+                .secret
+                .and_then(SecretFeedback::deadline_ns)
+                .unwrap_or(crate::waitq::NO_DEADLINE);
             // Register **before** polling so a push arriving in the window
             // between the empty poll and the park is not lost: the producer's
             // [`crate::waitq::console_wake`] then `unpark`s this task and the
@@ -671,7 +916,7 @@ where
             // the reader's last empty poll and its park), wedging the
             // line-oriented reader; registering first closes that race.
             if let Some(task) = parkable {
-                crate::waitq::CONSOLE_WAITQ.register(task, crate::waitq::NO_DEADLINE);
+                crate::waitq::CONSOLE_WAITQ.register(task, deadline);
             }
             let read = match self.inner.read(buf) {
                 Ok(read) => read,
@@ -680,14 +925,23 @@ where
                     // closed; leave the wait set first so
                     // no stale registration lingers.
                     if let Some(task) = parkable {
-                        crate::waitq::CONSOLE_WAITQ.deregister(task);
+                        crate::waitq::console_deregister(task, deadline);
                     }
                     return Err(e);
                 }
             };
             if read > 0 {
                 if let Some(task) = parkable {
-                    crate::waitq::CONSOLE_WAITQ.deregister(task);
+                    crate::waitq::console_deregister(task, deadline);
+                }
+                // Feed the consumed bytes to the armed secret feedback so
+                // the operator sees typing progress on a no-echo read; a
+                // no-op while disarmed. The clock is zero before the wait
+                // hook is installed, but such a build cannot park, so no
+                // animation deadline is ever awaited against it.
+                if let Some(secret) = self.secret {
+                    let now = crate::waitq::wait_now_ns().unwrap_or(0);
+                    secret.consumed(&buf[..read.min(buf.len())], now);
                 }
                 return Ok(read);
             }
@@ -699,29 +953,44 @@ where
             // whose edge *produces* this console's next byte) would be
             // starved.
             //
-            // The wait is **event-driven, with no timed re-poll**: a
-            // [`crate::waitq::console_wake`] from a keyboard- or UART-backed
-            // console's input push unparks the reader the instant a byte
-            // lands. A bounded timed re-poll was deliberately *not* used:
-            // arming the per-CPU one-shot here perturbs the transitional
-            // in-kernel block waiter's `wfi` (`crate::aarch64::root_unlock` —
-            // it re-arms its GIC line on every wake and a spurious timer wake
-            // corrupts a multi-block read), which livelocked the one-time
-            // driver-store bundle read. Registering with [`NO_DEADLINE`] arms
-            // no one-shot.
+            // The wait is **event-driven**: a [`crate::waitq::console_wake`]
+            // from a keyboard- or UART-backed console's input push unparks
+            // the reader the instant a byte lands. There is no timed re-poll
+            // of the *device*; the only finite deadline ever registered here
+            // is the secret feedback's animation tick above, armed solely
+            // while a password marker is animating (a bounded, user-driven
+            // window), so an ordinary read still arms no one-shot at all.
             //
             // With no waker hook there is no scheduler to park on, so fail
             // closed rather than busy-spin.
             let Some(task) = parkable else {
                 return Err(Errno::NotImplemented);
             };
+            // Arm the timed-wake one-shot to the nearest pending deadline so
+            // the animation tick fires even on an otherwise-idle CPU (the
+            // nearest armed wakeup). Only an animated wait pays this; an
+            // untimed read parks with no arming work at all.
+            if deadline != crate::waitq::NO_DEADLINE {
+                crate::waitq::rearm_timed_wakeup();
+            }
             let parked = reschedule_current(cpu, RescheduleAction::Park);
-            crate::waitq::CONSOLE_WAITQ.deregister(task);
+            crate::waitq::console_deregister(task, deadline);
             // A `false` means no resumable user kthread is published on this
             // CPU — fail closed rather than busy-spin, as the process-wait
             // producer does.
             if !parked {
                 return Err(Errno::NotImplemented);
+            }
+            // A timed wake for the animation: let the marker advance (or
+            // pause), then loop back to re-poll and re-park. Input arriving
+            // concurrently is handled by the re-poll, never lost.
+            if let Some(secret) = self.secret {
+                if let Some(tick) = secret.deadline_ns() {
+                    let now = crate::waitq::wait_now_ns().unwrap_or(0);
+                    if now >= tick {
+                        secret.tick(now);
+                    }
+                }
             }
             // Loop: re-register, then re-poll. A push in the narrow window
             // between this `deregister` and the next `register` is not lost —
@@ -794,7 +1063,7 @@ mod tests {
     #[test]
     fn blocking_read_returns_pending_bytes_without_parking() {
         static INNER: ScriptedRead = ScriptedRead::with_bytes(b"hi");
-        let blocking = BlockingConsoleRead::new(leaked_arch(), &INNER);
+        let blocking = BlockingConsoleRead::new(leaked_arch(), &INNER, None);
         let mut buf = [0u8; 8];
         assert_eq!(blocking.read(&mut buf), Ok(2));
         assert_eq!(&buf[..2], b"hi");
@@ -809,7 +1078,7 @@ mod tests {
         // the park is refused and the adapter must fail closed rather
         // than busy-spin on the empty device.
         static INNER: ScriptedRead = ScriptedRead::with_bytes(&[]);
-        let blocking = BlockingConsoleRead::new(leaked_arch(), &INNER);
+        let blocking = BlockingConsoleRead::new(leaked_arch(), &INNER, None);
         let mut buf = [0u8; 8];
         assert_eq!(blocking.read(&mut buf), Err(Errno::NotImplemented));
         assert_eq!(INNER.polls.load(Ordering::Relaxed), 1);
@@ -818,7 +1087,7 @@ mod tests {
     #[test]
     fn blocking_read_propagates_inner_errors_without_parking() {
         static INNER: ScriptedRead = ScriptedRead::with_error(Errno::PermissionDenied);
-        let blocking = BlockingConsoleRead::new(leaked_arch(), &INNER);
+        let blocking = BlockingConsoleRead::new(leaked_arch(), &INNER, None);
         let mut buf = [0u8; 8];
         assert_eq!(blocking.read(&mut buf), Err(Errno::PermissionDenied));
         assert_eq!(INNER.polls.load(Ordering::Relaxed), 1);
@@ -827,7 +1096,7 @@ mod tests {
     #[test]
     fn blocking_read_reports_an_empty_request_without_touching_the_device() {
         static INNER: ScriptedRead = ScriptedRead::with_bytes(b"unseen");
-        let blocking = BlockingConsoleRead::new(leaked_arch(), &INNER);
+        let blocking = BlockingConsoleRead::new(leaked_arch(), &INNER, None);
         // No byte could ever satisfy a zero-length destination; the
         // adapter reports the empty read without polling or parking.
         assert_eq!(blocking.read(&mut []), Ok(0));
@@ -983,6 +1252,152 @@ mod tests {
         device.set_echo(true);
         device.echo_bytes(b"\x7f");
         assert_eq!(W.taken(), b"ab");
+    }
+
+    #[test]
+    fn echo_bytes_rubs_out_on_the_delete_key_sequence() {
+        static W: EchoRecorder = EchoRecorder::new();
+        let device = echo_device(&W);
+        // The Delete key arrives as `CSI 3 ~`: it must rub out the previous
+        // glyph exactly like a Backspace, never paint the raw escape bytes
+        // (the "weird control codes" defect).
+        device.echo_bytes(b"ab\x1b[3~");
+        assert_eq!(W.taken(), b"ab\x08 \x08");
+    }
+
+    #[test]
+    fn echo_bytes_delete_sequence_survives_split_reads() {
+        static W: EchoRecorder = EchoRecorder::new();
+        let device = echo_device(&W);
+        // The reader drains a byte at a time, so the sequence spans four
+        // `echo_bytes` calls; the held prefix must carry across them.
+        device.echo_bytes(b"x");
+        for &byte in b"\x1b[3~" {
+            device.echo_bytes(&[byte]);
+        }
+        assert_eq!(W.taken(), b"x\x08 \x08");
+    }
+
+    #[test]
+    fn echo_bytes_delete_at_line_start_is_a_no_op() {
+        static W: EchoRecorder = EchoRecorder::new();
+        let device = echo_device(&W);
+        // A Delete with nothing typed must not rub out into the prompt.
+        device.echo_bytes(b"\x1b[3~");
+        assert!(W.taken().is_empty());
+    }
+
+    #[test]
+    fn echo_bytes_a_broken_delete_prefix_echoes_literally() {
+        static W: EchoRecorder = EchoRecorder::new();
+        let device = echo_device(&W);
+        // `ESC [ 4 ~` (End) is not Delete: the held prefix is released and
+        // echoed as ordinary bytes, exactly what the reader's line buffer
+        // stored, so screen and buffer agree.
+        device.echo_bytes(b"\x1b[4~");
+        assert_eq!(W.taken(), b"\x1b[4~");
+    }
+
+    #[test]
+    fn secret_feedback_is_inert_until_armed() {
+        static W: EchoRecorder = EchoRecorder::new();
+        let feedback = SecretFeedback::new(&W);
+        // An echoed (non-secret) read must never draw the marker.
+        feedback.consumed(b"abc", 0);
+        assert!(W.taken().is_empty());
+        assert_eq!(feedback.deadline_ns(), None);
+    }
+
+    #[test]
+    fn secret_feedback_shows_the_marker_on_the_first_typed_byte() {
+        static W: EchoRecorder = EchoRecorder::new();
+        let feedback = SecretFeedback::new(&W);
+        feedback.arm();
+        feedback.consumed(b"s", 0);
+        assert_eq!(W.taken(), b"[input active.]");
+        // The animation wants its one-second tick.
+        assert_eq!(
+            feedback.deadline_ns(),
+            Some(rustos_vt::secret::SECRET_TICK_NS)
+        );
+    }
+
+    #[test]
+    fn secret_feedback_removes_the_marker_on_enter() {
+        static W: EchoRecorder = EchoRecorder::new();
+        let feedback = SecretFeedback::new(&W);
+        feedback.arm();
+        feedback.consumed(b"pw\r", 0);
+        let written = W.taken();
+        // The marker was drawn once and fully rubbed out again: the last
+        // 45 bytes are fifteen `BS SP BS` erases.
+        assert!(written.starts_with(b"[input active.]"));
+        assert!(written.ends_with(&[0x08, b' ', 0x08].repeat(15)));
+        assert_eq!(feedback.deadline_ns(), None);
+    }
+
+    #[test]
+    fn secret_feedback_removes_the_marker_when_the_line_is_fully_erased() {
+        static W: EchoRecorder = EchoRecorder::new();
+        let feedback = SecretFeedback::new(&W);
+        feedback.arm();
+        // One character typed, then erased with the Delete key sequence:
+        // the whole marker goes away.
+        feedback.consumed(b"s\x1b[3~", 0);
+        let written = W.taken();
+        assert!(written.starts_with(b"[input active.]"));
+        assert!(written.ends_with(&[0x08, b' ', 0x08].repeat(15)));
+        assert_eq!(feedback.deadline_ns(), None);
+    }
+
+    #[test]
+    fn secret_feedback_ticks_animate_and_pause() {
+        static W: EchoRecorder = EchoRecorder::new();
+        let feedback = SecretFeedback::new(&W);
+        feedback.arm();
+        feedback.consumed(b"s", 0);
+        // Typing continued before the tick: the dots advance and the next
+        // tick is armed.
+        feedback.consumed(b"e", 100);
+        feedback.tick(rustos_vt::secret::SECRET_TICK_NS);
+        assert_eq!(
+            feedback.deadline_ns(),
+            Some(2 * rustos_vt::secret::SECRET_TICK_NS)
+        );
+        // No typing before the next tick: the dots pause and no further
+        // wake-up is wanted.
+        feedback.tick(2 * rustos_vt::secret::SECRET_TICK_NS);
+        assert_eq!(feedback.deadline_ns(), None);
+    }
+
+    #[test]
+    fn set_echo_arms_and_disarms_the_attached_feedback() {
+        static W: EchoRecorder = EchoRecorder::new();
+        static FEEDBACK: SecretFeedback = SecretFeedback::new(&W);
+        let device = echo_device(&W).with_secret(&FEEDBACK);
+        // Suppressing echo (a password read) arms the feedback…
+        device.set_echo(false);
+        FEEDBACK.consumed(b"s", 0);
+        assert_eq!(W.taken(), b"[input active.]");
+        // …and restoring echo disarms it, rubbing out a marker an aborted
+        // read left behind.
+        device.set_echo(true);
+        assert!(W.taken().ends_with(&[0x08, b' ', 0x08].repeat(15)));
+        FEEDBACK.consumed(b"x", 0);
+        assert_eq!(feedback_tail_after_disarm(&W.taken()), 0);
+    }
+
+    /// How many bytes were written after the disarm rub-out — zero proves a
+    /// disarmed feedback stays inert.
+    fn feedback_tail_after_disarm(written: &[u8]) -> usize {
+        let erase = [0x08, b' ', 0x08].repeat(15);
+        match written
+            .windows(erase.len())
+            .rposition(|window| window == erase.as_slice())
+        {
+            Some(pos) => written.len() - (pos + erase.len()),
+            None => written.len(),
+        }
     }
 
     #[test]

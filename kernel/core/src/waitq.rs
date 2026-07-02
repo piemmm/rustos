@@ -494,6 +494,41 @@ pub fn drain_pending_wakes() -> bool {
     woke
 }
 
+/// The installed arch hook's monotonic clock, for a consumer that times a
+/// wait (the console readers' secret-feedback animation ticks), or [`None`]
+/// before the hook is installed — on such a build nothing can park, so no
+/// deadline is ever awaited against a missing clock.
+#[must_use]
+pub fn wait_now_ns() -> Option<u64> {
+    wait_arch().map(WaitQueueArch::now_ns)
+}
+
+/// Re-point the timed-wake one-shot at the soonest deadline any waiter
+/// still needs (or clear it when none does). Called by a park site after
+/// registering a finite deadline — so the wake fires even on an
+/// otherwise-idle CPU — and after deregistering one, so a finished timed
+/// wait never leaves a stale arming behind. A fail-safe no-op before the
+/// arch hook is installed.
+pub fn rearm_timed_wakeup() {
+    if let Some(arch) = wait_arch() {
+        arch.set_wakeup(nearest_timed_deadline());
+    }
+}
+
+/// Deregister `task` from [`CONSOLE_WAITQ`] and — only when its wait had
+/// registered a finite `deadline_ns` — re-point the timed one-shot at
+/// whatever any remaining waiter needs, so a finished animated console wait
+/// (a secret-feedback tick) never leaves a stale arming behind while an
+/// ordinary untimed read pays nothing extra. The one definition both
+/// blocking console readers (`BlockingConsoleRead` and the unlock
+/// kthread's reader) share.
+pub fn console_deregister(task: TaskId, deadline_ns: u64) {
+    CONSOLE_WAITQ.deregister(task);
+    if deadline_ns != NO_DEADLINE {
+        rearm_timed_wakeup();
+    }
+}
+
 /// The soonest finite deadline pending across **every** timed wait-queue
 /// (`HW_TREE_WAITQ`, `IRQ_WAITQ`, `CONSOLE_WAITQ`, `USERS_DB_WAITQ`), or
 /// [`None`] if none has one. A park site arms the one-shot to this so

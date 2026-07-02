@@ -119,8 +119,8 @@ pub use audit::AuditEvent;
 pub use bootinfo::{BootInfo, BootInfoError, IrqRouting, KernelArch, MAX_COMMAND_LINE_BYTES};
 pub use console::{
     BlockingConsoleRead, ConsoleDevice, ConsoleInput, ConsoleInputQueue, ConsoleRead, ConsoleWrite,
-    NullConsole, NullConsoleInput, NullConsoleRead, CONSOLE_INPUT_QUEUE_CAPACITY, NO_CONSOLES,
-    NULL_CONSOLE, NULL_CONSOLE_INPUT, NULL_CONSOLE_READ,
+    NullConsole, NullConsoleInput, NullConsoleRead, SecretFeedback, CONSOLE_INPUT_QUEUE_CAPACITY,
+    NO_CONSOLES, NULL_CONSOLE, NULL_CONSOLE_INPUT, NULL_CONSOLE_READ,
 };
 pub use devres::{
     dma_constraint, mappable_subwindow, translate_device_addr, DmaAllocFacility, DmaCarve,
@@ -176,9 +176,9 @@ pub use users::{
     UsersDbAlreadyInstalled, UsersDbSource, UsersLoadError, NULL_USERS_DB, USERS_DB_PATH,
 };
 pub use waitq::{
-    call_wake, console_wake, drain_pending_wakes, hw_tree_wake, install_wait_arch, irq_wake,
-    nearest_timed_deadline, procwait_wake, serve_wake, timed_wake_sweep, WaitArchAlreadyInstalled,
-    WaitQueue, WaitQueueArch, CALL_WAITQ, CONSOLE_WAITQ, HW_TREE_WAITQ, IRQ_WAITQ, NO_DEADLINE,
-    PROCWAIT_WAITQ, SERVE_WAITQ,
+    call_wake, console_deregister, console_wake, drain_pending_wakes, hw_tree_wake,
+    install_wait_arch, irq_wake, nearest_timed_deadline, procwait_wake, rearm_timed_wakeup,
+    serve_wake, timed_wake_sweep, wait_now_ns, WaitArchAlreadyInstalled, WaitQueue, WaitQueueArch,
+    CALL_WAITQ, CONSOLE_WAITQ, HW_TREE_WAITQ, IRQ_WAITQ, NO_DEADLINE, PROCWAIT_WAITQ, SERVE_WAITQ,
 };
 pub use wallclock::{KernelWallClock, NullWallClock, WallClockSource, NULL_WALL_CLOCK};

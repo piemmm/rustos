@@ -78,6 +78,12 @@ rustos-kernel-sec = { path = "../sec", version = "=0.0.0" }
 rustos-kernel-sched-api = { path = "../sched/api", version = "=0.0.0" }
 rustos-sync = { path = "../../lib/sync", version = "=0.0.0" }
 rustos-kernel-syscall = { path = "../syscall", version = "=0.0.0" }
+# The read line discipline's shared buffer half: the root-unlock passphrase
+# reader edits its line through the one `rustos_vt::line::LineEditor`
+# definition every console reader (login, the shell REPL) and the kernel
+# console echo key off, so a Backspace or Delete can never disagree between
+# screen and buffer.
+rustos-vt = { path = "../../lib/vt", version = "=0.0.0" }
 # The architecture-neutral virtio factory + provisioning walks (shared
 # with the riscv64 / aarch64 `virt`-board MMIO verticals) live here so
 # no architecture port duplicates them (`AGENTS.md` §2.2).

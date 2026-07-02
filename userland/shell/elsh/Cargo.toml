@@ -38,10 +38,11 @@ rustos-resref = { path = "../../../lib/resref", version = "=0.0.0" }
 
 # The single ANSI/VT terminal-control vocabulary (`AGENTS.md` §2.2): the
 # REPL's line reader runs the read line discipline's buffer half
-# (`rustos_vt::line::push_line_byte`) — CR and LF both terminate a line
-# (a serial terminal sends CR for Return) and the erase (rub-out) control
-# edits the kept bytes — from the one definition the kernel console echo
-# also keys off, so screen and buffer can never disagree.
+# (`rustos_vt::line::LineEditor`) — CR and LF both terminate a line
+# (a serial terminal sends CR for Return) and an erase (the rub-out
+# controls or the Delete key's `CSI 3 ~` sequence) edits the kept bytes —
+# from the one definition the kernel console echo also keys off, so screen
+# and buffer can never disagree.
 rustos-vt = { path = "../../../lib/vt", version = "=0.0.0" }
 
 # The pure-Rust userland runtime (`AGENTS.md` §1): `rustos-rt` provides the

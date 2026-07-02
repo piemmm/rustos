@@ -43,7 +43,7 @@ use alloc::vec::Vec;
 
 use rustos_abi::{Human, Severity, StdInfoKind, StdInfoRecord};
 use rustos_vt::control;
-use rustos_vt::line::{push_line_byte, LineFeed};
+use rustos_vt::line::{LineEditor, LineFeed};
 
 use crate::host::Console;
 use crate::parser::CommandList;
@@ -125,6 +125,10 @@ struct LineReader {
     /// spurious empty line. Carried in the reader because the pair can be
     /// split across two reads.
     skip_lf: bool,
+    /// The line under edit's discipline state (the held Delete
+    /// escape-sequence prefix). Carried in the reader because the sequence
+    /// can be split across reads; reset with the line buffer.
+    editor: LineEditor,
 }
 
 impl LineReader {
@@ -137,6 +141,7 @@ impl LineReader {
             eof: false,
             discarding: false,
             skip_lf: false,
+            editor: LineEditor::new(),
         }
     }
 
@@ -160,6 +165,7 @@ impl LineReader {
         let line = String::from_utf8_lossy(&self.line[..self.len]).into_owned();
         self.line[..self.len].fill(0);
         self.len = 0;
+        self.editor = LineEditor::new();
         line
     }
 
@@ -179,7 +185,7 @@ impl LineReader {
                     }
                     continue;
                 }
-                match push_line_byte(&mut self.line, &mut self.len, byte) {
+                match self.editor.push(&mut self.line, &mut self.len, byte) {
                     LineFeed::Pending => {}
                     LineFeed::Complete => {
                         self.skip_lf = byte == control::CR;
@@ -191,6 +197,7 @@ impl LineReader {
                     LineFeed::TooLong => {
                         self.line[..self.len].fill(0);
                         self.len = 0;
+                        self.editor = LineEditor::new();
                         self.discarding = true;
                         return LineEvent::Truncated;
                     }

@@ -1221,21 +1221,27 @@ fn run_phases<A: KernelArch>(
     let consoles: &'static [crate::console::ConsoleDevice] = {
         let mut wrapped = alloc::vec::Vec::with_capacity(consoles.len());
         for device in consoles {
+            // Each console gets its own secret-entry feedback over its own
+            // output: `stream_echo(false)` (a password read) arms it, the
+            // blocking reader feeds and animates it, so every text-console
+            // password prompt shows the shared `[input active...]` marker.
+            let secret: &'static crate::console::SecretFeedback =
+                Box::leak(Box::new(crate::console::SecretFeedback::new(device.write)));
             let blocking: &'static (dyn crate::console::ConsoleRead + Sync + 'static) =
                 Box::leak(Box::new(crate::console::BlockingConsoleRead::new(
                     state.arch.as_ref(),
                     device.read,
+                    Some(secret),
                 )));
             // Preserve the console's injected-input half across the
             // wrap: a keyboard-backed console keeps the same
             // `ConsoleInputQueue` the blocking `read` adapter now drains,
             // so an input-focus arbiter push still reaches the parked
             // reader (`plans/PI.md` P11).
-            wrapped.push(crate::console::ConsoleDevice::with_input(
-                device.write,
-                blocking,
-                device.input,
-            ));
+            wrapped.push(
+                crate::console::ConsoleDevice::with_input(device.write, blocking, device.input)
+                    .with_secret(secret),
+            );
         }
         Box::leak(wrapped.into_boxed_slice())
     };

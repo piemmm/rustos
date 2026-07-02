@@ -46,7 +46,9 @@ use rustos_drv_fs_rustfs::{RustFs, VolumeKey};
 use rustos_drv_storage_emmc2::CompletionWait;
 use rustos_drv_storage_virtio_blk::{VirtioBlk, VIRTIO_BLK_DEVICE_ID};
 use rustos_fdt::Fdt;
-use rustos_kernel_core::{ConsoleRead, ConsoleWrite, CooperativeYield, InitSpawnCtx, YieldHandle};
+use rustos_kernel_core::{
+    ConsoleRead, ConsoleWrite, CooperativeYield, InitSpawnCtx, SecretFeedback, YieldHandle,
+};
 use rustos_kernel_irq::{IrqTable, IrqWaitAbort, IrqWaiter};
 use rustos_kernel_mem::{AddressSpace, DirectPhysMap, DmaPool, FrameAllocator, MmioMap, VirtAddr};
 use rustos_kernel_sec::captable::TaskCapabilities;
@@ -892,6 +894,14 @@ fn finish_unlock<B: Block + 'static>(
             crate::aarch64::gic_irq::enable_uart_console_irq();
             (&UART_CONSOLE, &UART_CONSOLE_READ)
         };
+        // The passphrase prompt's secret-entry feedback: the same
+        // `[input active...]` marker a user-space password read shows,
+        // drawn to this console's own output. Armed for the whole unlock
+        // window — the marker only ever appears while a passphrase line is
+        // partially typed (it hides on Enter and on a full erase), so the
+        // silent blank probe and the mount attempts render nothing.
+        let secret = SecretFeedback::new(console_write);
+        secret.arm();
         // The kthread's own scheduler id (published at admission), so the
         // reader registers on `CONSOLE_WAITQ` and the RX interrupt unparks it
         // by id.
@@ -899,6 +909,7 @@ fn finish_unlock<B: Block + 'static>(
             raw_read,
             &coop,
             crate::unlock_service::unlock_console_task(),
+            Some(&secret),
         );
         // The unlock owns console 0 for the passphrase prompt (its
         // `GatedConsoleRead` keeps `login` parked). The moment it resolves —

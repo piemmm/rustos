@@ -26,7 +26,7 @@
 
 use rustos_abi::{CapabilityId, Errno, HwNode};
 use rustos_caps::CapabilitySet;
-use rustos_kernel_core::{ConsoleRead, CooperativeYield};
+use rustos_kernel_core::{ConsoleRead, CooperativeYield, SecretFeedback};
 use rustos_kernel_sec::captable::TaskId;
 use rustos_log::{log, Event, EventId, Level, Sink};
 use rustos_sync::SpinLock;
@@ -498,6 +498,11 @@ pub struct KthreadConsoleRead<'a> {
     inner: &'static (dyn ConsoleRead + Sync + 'static),
     yielder: &'a CooperativeYield<'a>,
     task: Option<rustos_kernel_sched_api::TaskId>,
+    /// The passphrase prompt's secret-entry feedback: fed the consumed
+    /// bytes while armed, and ticked from the park loop when its animation
+    /// deadline passes — the kthread mirror of the same behaviour
+    /// `BlockingConsoleRead` gives a user-space password read.
+    secret: Option<&'a SecretFeedback>,
 }
 
 impl<'a> KthreadConsoleRead<'a> {
@@ -507,17 +512,20 @@ impl<'a> KthreadConsoleRead<'a> {
     /// it. `task` is the kthread's scheduler id from
     /// [`unlock_console_task`]; [`None`] (the id not yet published) degrades
     /// to a cooperative yield rather than parking a task no wake could
-    /// reach.
+    /// reach. `secret` is the passphrase prompt's activity feedback, fed
+    /// and animated while armed.
     #[must_use]
     pub fn new(
         inner: &'static (dyn ConsoleRead + Sync + 'static),
         yielder: &'a CooperativeYield<'a>,
         task: Option<rustos_kernel_sched_api::TaskId>,
+        secret: Option<&'a SecretFeedback>,
     ) -> Self {
         Self {
             inner,
             yielder,
             task,
+            secret,
         }
     }
 }
@@ -528,11 +536,18 @@ impl ConsoleRead for KthreadConsoleRead<'_> {
             return Ok(0);
         }
         loop {
+            // The secret feedback's one-shot animation deadline, when the
+            // passphrase marker is animating; `NO_DEADLINE` the rest of the
+            // time, so an ordinary wait takes no timer wake-ups (tickless).
+            let deadline = self
+                .secret
+                .and_then(SecretFeedback::deadline_ns)
+                .unwrap_or(rustos_kernel_core::NO_DEADLINE);
             // Register before polling so a `console_wake` arriving between an
             // empty poll and the park is not lost (the register-before-poll
             // interlock).
             if let Some(task) = self.task {
-                rustos_kernel_core::CONSOLE_WAITQ.register(task, rustos_kernel_core::NO_DEADLINE);
+                rustos_kernel_core::CONSOLE_WAITQ.register(task, deadline);
             }
             let read = match self.inner.read(buf) {
                 Ok(read) => read,
@@ -540,24 +555,46 @@ impl ConsoleRead for KthreadConsoleRead<'_> {
                     // Leave the wait set first so no stale registration
                     // lingers, then propagate fail-closed.
                     if let Some(task) = self.task {
-                        rustos_kernel_core::CONSOLE_WAITQ.deregister(task);
+                        rustos_kernel_core::console_deregister(task, deadline);
                     }
                     return Err(e);
                 }
             };
             if read > 0 {
                 if let Some(task) = self.task {
-                    rustos_kernel_core::CONSOLE_WAITQ.deregister(task);
+                    rustos_kernel_core::console_deregister(task, deadline);
+                }
+                // Feed the consumed bytes to the armed feedback so the
+                // operator sees the passphrase marker; a no-op while
+                // disarmed.
+                if let Some(secret) = self.secret {
+                    let now = rustos_kernel_core::wait_now_ns().unwrap_or(0);
+                    secret.consumed(&buf[..read.min(buf.len())], now);
                 }
                 return Ok(read);
             }
             match self.task {
                 // Genuine park: suspend off the run queue until the RX
-                // interrupt's `console_wake` unparks this id, then re-poll.
+                // interrupt's `console_wake` unparks this id — or, while the
+                // passphrase marker is animating, until the timed sweep
+                // releases the registered deadline — then re-poll.
                 // The CPU idles meanwhile.
                 Some(task) => {
+                    if deadline != rustos_kernel_core::NO_DEADLINE {
+                        rustos_kernel_core::rearm_timed_wakeup();
+                    }
                     self.yielder.park();
-                    rustos_kernel_core::CONSOLE_WAITQ.deregister(task);
+                    rustos_kernel_core::console_deregister(task, deadline);
+                    // A timed wake: advance (or pause) the marker, then
+                    // loop back to re-poll and re-park.
+                    if let Some(secret) = self.secret {
+                        if let Some(tick) = secret.deadline_ns() {
+                            let now = rustos_kernel_core::wait_now_ns().unwrap_or(0);
+                            if now >= tick {
+                                secret.tick(now);
+                            }
+                        }
+                    }
                 }
                 // The kthread's scheduler id was not published (a degenerate
                 // build that did not go through admission). A parked task
@@ -844,7 +881,7 @@ mod tests {
         let mut yielder = ParkCountingYielder { parks: 0 };
         {
             let coop = CooperativeYield::new(&mut yielder);
-            let reader = KthreadConsoleRead::new(&INNER, &coop, Some(reader_task()));
+            let reader = KthreadConsoleRead::new(&INNER, &coop, Some(reader_task()), None);
             let mut buf = [0u8; 4];
             // Parks across the three empty polls (registered on
             // `CONSOLE_WAITQ`, unparked by the RX interrupt in production)
@@ -867,7 +904,7 @@ mod tests {
         let mut yielder = ParkCountingYielder { parks: 0 };
         {
             let coop = CooperativeYield::new(&mut yielder);
-            let reader = KthreadConsoleRead::new(&INNER, &coop, Some(reader_task()));
+            let reader = KthreadConsoleRead::new(&INNER, &coop, Some(reader_task()), None);
             let mut empty: [u8; 0] = [];
             assert_eq!(reader.read(&mut empty), Ok(0));
         }

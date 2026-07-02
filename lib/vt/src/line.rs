@@ -3,29 +3,36 @@
 //!
 //! A console read returns raw input bytes; turning a stream of keystrokes
 //! into a finished line is the read line discipline. The kernel console owns
-//! the **echo** half — rendering each character and rubbing one out on a
-//! Backspace (`kernel/core::console`, `plans/PI.md` P11). This module is the
+//! the **echo** half — rendering each character and rubbing one out on an
+//! erase (`kernel/core::console`, `plans/PI.md` P11). This module is the
 //! matching **buffer** half every console reader runs (login's prompt reads,
 //! the shell REPL): it keeps the line the user is building and applies the
 //! same edits to it, so the bytes the reader keeps always match what the
 //! screen shows. It lives here, beside the [`control`] vocabulary both halves
 //! key off, so there is exactly one definition of which byte terminates a
-//! line and which byte rubs one out — a reader with a private copy could
+//! line and which input rubs one out — a reader with a private copy could
 //! silently disagree with the kernel echo.
+//!
+//! An erase is not always a single byte: the Delete key arrives as the
+//! multi-byte `CSI 3 ~` sequence ([`crate::Key::Delete`]), which may be split across
+//! reads. [`EraseSeq`] is the incremental recogniser for it, and
+//! [`LineEditor`] carries that state across bytes — one editor per line being
+//! read. Both halves of the discipline run the same recogniser, so screen and
+//! buffer can never disagree about what the Delete key did.
 //!
 //! It is deliberately tiny and seam-free so it is exhaustively testable on
 //! the host. It is **allocation-free** — every byte lands in the caller's
 //! buffer, because the userland heap is not required to read a keystroke
-//! (`plans/SPAWN.md` `SP5b`) — and it recognises the erase control from the
-//! one shared [`control`] definition, so it can never disagree with the
-//! kernel echo about which byte rubs out.
+//! (`plans/SPAWN.md` `SP5b`) — and it recognises the erase controls from the
+//! one shared [`control`] / [`crate::Key`] definition.
 
 use crate::control;
 
 /// What feeding one input byte to the read line discipline did.
 ///
-/// The reader loops, calling [`push_line_byte`] for each byte it reads, until
-/// it sees a terminal outcome ([`LineFeed::Complete`] or [`LineFeed::TooLong`]).
+/// The reader loops, calling [`LineEditor::push`] for each byte it reads,
+/// until it sees a terminal outcome ([`LineFeed::Complete`] or
+/// [`LineFeed::TooLong`]).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum LineFeed {
     /// The line is still being edited; read another byte.
@@ -34,40 +41,177 @@ pub enum LineFeed {
     /// is the finished line; the terminator itself is not stored.
     Complete,
     /// The byte would have grown the line past the caller's buffer. The read
-    /// fails closed rather than truncating a too-long line; the buffer is left holding the bytes accepted so far.
+    /// fails closed rather than truncating a too-long line; the buffer is
+    /// left holding the bytes accepted so far.
     TooLong,
 }
 
-/// Feed one input `byte` into the line being edited in `buf`, with `*len`
-/// bytes already accumulated, and report what happened.
+/// The escape sequence the Delete key sends (`CSI 3 ~`), spelled from the
+/// shared [`control`] introducers — the one encoding `lib/vt`'s emitter,
+/// parser ([`crate::Key::Delete`]), and `lib/keymap` all share. The parser
+/// round-trip test pins this spelling to the key vocabulary, so the
+/// recogniser can never silently drift from it.
+const DELETE_SEQ: [u8; 4] = [control::ESC, control::CSI, b'3', control::TILDE];
+
+/// What feeding one byte to the [`EraseSeq`] recogniser produced.
 ///
-/// The read line discipline this implements:
+/// `literal` holds the bytes the caller must now treat as ordinary input: a
+/// previously-held sequence prefix that failed to complete, and (unless the
+/// byte re-opened a match) the byte just fed. `erase` reports that the full
+/// Delete sequence completed — exactly one rub-out, with no literal bytes.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct SeqFeed {
+    literal: [u8; DELETE_SEQ.len()],
+    literal_len: u8,
+    erase: bool,
+}
+
+impl SeqFeed {
+    /// The bytes to treat as ordinary (non-erase) input, in arrival order.
+    #[must_use]
+    pub fn literal(&self) -> &[u8] {
+        &self.literal[..usize::from(self.literal_len)]
+    }
+
+    /// Whether the full Delete sequence completed: rub out one character.
+    #[must_use]
+    pub const fn erase(&self) -> bool {
+        self.erase
+    }
+}
+
+/// Incremental recogniser for the Delete key's `CSI 3 ~` escape sequence,
+/// byte at a time.
 ///
-/// * **CR or LF** ([`control::CR`] / [`control::LF`]) ends the line —
-///   [`LineFeed::Complete`]; `*len` is the finished line length and the
-///   terminator is not stored (a serial terminal sends CR for Return, a
-///   network or local terminal LF, so either terminates).
-/// * **Erase** ([`control::is_line_erase`] — Backspace or Delete) rubs out the
-///   last accepted byte: `*len` drops by one if the line is non-empty, and the
-///   vacated slot is zeroed so a transited credential is not retained. An erase on an empty line is ignored. Either way it is
-///   [`LineFeed::Pending`] — an erase never ends the line.
-/// * **Any other byte** is appended: it is stored at `buf[*len]` and `*len`
-///   grows by one ([`LineFeed::Pending`]) unless the buffer is already full,
-///   in which case nothing is stored and the result is [`LineFeed::TooLong`].
+/// The sequence may be split across console reads, so the recogniser holds
+/// the matched prefix between calls. A byte that breaks the match releases
+/// the held prefix as literal input (never silently dropped) and — when the
+/// breaking byte is itself `ESC` — immediately re-opens a fresh match, so
+/// `ESC ESC [ 3 ~` still erases once and passes one literal `ESC` through.
 ///
-/// The matching echo (showing the character, or the `BS SP BS` rub-out) is the
-/// kernel console's job, so this function performs no I/O; it only edits the
-/// buffer. UTF-8 validation of the finished line is the caller's, done once
-/// over the whole line.
-pub fn push_line_byte(buf: &mut [u8], len: &mut usize, byte: u8) -> LineFeed {
+/// Both halves of the read line discipline run one of these (the kernel echo
+/// and every [`LineEditor`]), fed the same bytes in the same order, so they
+/// agree by construction about which bytes were an erase.
+#[derive(Debug, Default)]
+pub struct EraseSeq {
+    /// How many leading bytes of [`DELETE_SEQ`] are currently held.
+    matched: u8,
+}
+
+impl EraseSeq {
+    /// A fresh recogniser holding no prefix.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { matched: 0 }
+    }
+
+    /// Feed one input byte; see [`SeqFeed`] for what the caller must do.
+    pub fn feed(&mut self, byte: u8) -> SeqFeed {
+        let mut out = SeqFeed {
+            literal: [0; DELETE_SEQ.len()],
+            literal_len: 0,
+            erase: false,
+        };
+        let matched = usize::from(self.matched);
+        if byte == DELETE_SEQ[matched] {
+            if matched + 1 == DELETE_SEQ.len() {
+                self.matched = 0;
+                out.erase = true;
+            } else {
+                self.matched = self.matched.wrapping_add(1);
+            }
+            return out;
+        }
+        // The match broke: release the held prefix as literal input, then
+        // either re-open on a fresh `ESC` or pass the byte through too.
+        out.literal[..matched].copy_from_slice(&DELETE_SEQ[..matched]);
+        out.literal_len = self.matched;
+        if byte == DELETE_SEQ[0] {
+            self.matched = 1;
+        } else {
+            out.literal[matched] = byte;
+            out.literal_len = out.literal_len.wrapping_add(1);
+            self.matched = 0;
+        }
+        out
+    }
+}
+
+/// The read line discipline's buffer half, with the [`EraseSeq`] state one
+/// edited line needs. Create one per line read; drop it when the line
+/// completes.
+#[derive(Debug, Default)]
+pub struct LineEditor {
+    seq: EraseSeq,
+}
+
+impl LineEditor {
+    /// A fresh editor for one line.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            seq: EraseSeq::new(),
+        }
+    }
+
+    /// Feed one input `byte` into the line being edited in `buf`, with
+    /// `*len` bytes already accumulated, and report what happened.
+    ///
+    /// The read line discipline this implements:
+    ///
+    /// * **CR or LF** ([`control::CR`] / [`control::LF`]) ends the line —
+    ///   [`LineFeed::Complete`]; `*len` is the finished line length and the
+    ///   terminator is not stored (a serial terminal sends CR for Return, a
+    ///   network or local terminal LF, so either terminates).
+    /// * **Erase** — Backspace or Delete as a single byte
+    ///   ([`control::is_line_erase`]), or the Delete key's `CSI 3 ~`
+    ///   sequence ([`EraseSeq`]) — rubs out the last accepted byte: `*len`
+    ///   drops by one if the line is non-empty, and the vacated slot is
+    ///   zeroed so a transited credential is not retained. An erase on an
+    ///   empty line is ignored. Either way it is [`LineFeed::Pending`] — an
+    ///   erase never ends the line.
+    /// * **Any other byte** is appended: it is stored at `buf[*len]` and
+    ///   `*len` grows by one ([`LineFeed::Pending`]) unless the buffer is
+    ///   already full, in which case nothing is stored and the result is
+    ///   [`LineFeed::TooLong`].
+    ///
+    /// The matching echo (showing the character, or the `BS SP BS` rub-out)
+    /// is the kernel console's job, so this function performs no I/O; it
+    /// only edits the buffer. UTF-8 validation of the finished line is the
+    /// caller's, done once over the whole line.
+    pub fn push(&mut self, buf: &mut [u8], len: &mut usize, byte: u8) -> LineFeed {
+        let step = self.seq.feed(byte);
+        if step.erase() {
+            erase_last(buf, len);
+            return LineFeed::Pending;
+        }
+        for &literal in step.literal() {
+            match push_literal(buf, len, literal) {
+                LineFeed::Pending => {}
+                terminal => return terminal,
+            }
+        }
+        LineFeed::Pending
+    }
+}
+
+/// Rub out the last accepted byte of the line, zeroing the vacated slot so a
+/// transited credential is not retained. A no-op on an empty line.
+fn erase_last(buf: &mut [u8], len: &mut usize) {
+    if *len > 0 {
+        *len -= 1;
+        buf[*len] = 0;
+    }
+}
+
+/// Apply one already-disambiguated byte to the line (the per-byte core the
+/// sequence layer feeds).
+fn push_literal(buf: &mut [u8], len: &mut usize, byte: u8) -> LineFeed {
     if byte == control::CR || byte == control::LF {
         return LineFeed::Complete;
     }
     if control::is_line_erase(byte) {
-        if *len > 0 {
-            *len -= 1;
-            buf[*len] = 0;
-        }
+        erase_last(buf, len);
         return LineFeed::Pending;
     }
     if *len == buf.len() {
@@ -80,16 +224,17 @@ pub fn push_line_byte(buf: &mut [u8], len: &mut usize, byte: u8) -> LineFeed {
 
 #[cfg(test)]
 mod tests {
-    use super::{push_line_byte, LineFeed};
+    use super::{EraseSeq, LineEditor, LineFeed, DELETE_SEQ};
 
     /// Drive the discipline over a whole byte string, returning the final
     /// outcome and the accumulated line.
     fn feed(bytes: &[u8], cap: usize) -> (LineFeed, alloc::vec::Vec<u8>) {
+        let mut editor = LineEditor::new();
         let mut buf = alloc::vec![0u8; cap];
         let mut len = 0;
         let mut last = LineFeed::Pending;
         for &b in bytes {
-            last = push_line_byte(&mut buf, &mut len, b);
+            last = editor.push(&mut buf, &mut len, b);
             if matches!(last, LineFeed::Complete | LineFeed::TooLong) {
                 break;
             }
@@ -136,6 +281,63 @@ mod tests {
     }
 
     #[test]
+    fn the_delete_key_sequence_erases_like_backspace() {
+        // The Delete key arrives as `CSI 3 ~`, not a single byte; it must
+        // rub out exactly one character, never land in the line as raw
+        // escape bytes.
+        let (outcome, line) = feed(b"roox\x1b[3~t\n", 16);
+        assert_eq!(outcome, LineFeed::Complete);
+        assert_eq!(line, b"root");
+    }
+
+    #[test]
+    fn the_delete_key_sequence_erases_across_split_reads() {
+        // A console reader drains a byte at a time, so the sequence is
+        // always split; the editor's held state must survive the splits.
+        let mut editor = LineEditor::new();
+        let mut buf = [0u8; 8];
+        let mut len = 0;
+        for &b in b"ab" {
+            assert_eq!(editor.push(&mut buf, &mut len, b), LineFeed::Pending);
+        }
+        for &b in &DELETE_SEQ {
+            assert_eq!(editor.push(&mut buf, &mut len, b), LineFeed::Pending);
+        }
+        assert_eq!(len, 1);
+        assert_eq!(&buf[..len], b"a");
+        // The vacated slot is zeroed.
+        assert_eq!(buf[1], 0);
+    }
+
+    #[test]
+    fn delete_on_an_empty_line_is_ignored() {
+        let (outcome, line) = feed(b"\x1b[3~ok\n", 16);
+        assert_eq!(outcome, LineFeed::Complete);
+        assert_eq!(line, b"ok");
+    }
+
+    #[test]
+    fn a_broken_delete_prefix_lands_as_literal_bytes() {
+        // `ESC [ 4 ~` is the End key, not Delete: the held prefix and the
+        // breaking bytes pass through as ordinary input (the discipline
+        // does not interpret other sequences), never a silent drop.
+        let (outcome, line) = feed(b"\x1b[4~\n", 16);
+        assert_eq!(outcome, LineFeed::Complete);
+        assert_eq!(line, b"\x1b[4~");
+    }
+
+    #[test]
+    fn an_esc_that_breaks_a_prefix_reopens_the_match() {
+        // `ESC ESC [ 3 ~`: the first ESC is released as a literal into the
+        // line, and the second still completes a Delete — which then rubs
+        // that literal ESC back out, exactly as Delete erases any last
+        // character.
+        let (outcome, line) = feed(b"ab\x1b\x1b[3~\n", 16);
+        assert_eq!(outcome, LineFeed::Complete);
+        assert_eq!(line, b"ab");
+    }
+
+    #[test]
     fn backspace_on_an_empty_line_is_ignored() {
         // Rubbing out nothing leaves an empty line; it must not underflow.
         let (outcome, line) = feed(b"\x7f\x7fok\n", 16);
@@ -165,11 +367,38 @@ mod tests {
     fn the_erased_slot_is_zeroed() {
         // A transited credential byte must not linger in the buffer after an
         // erase.
+        let mut editor = LineEditor::new();
         let mut buf = [0u8; 8];
         let mut len = 0;
-        assert_eq!(push_line_byte(&mut buf, &mut len, b's'), LineFeed::Pending);
-        assert_eq!(push_line_byte(&mut buf, &mut len, 0x7f), LineFeed::Pending);
+        assert_eq!(editor.push(&mut buf, &mut len, b's'), LineFeed::Pending);
+        assert_eq!(editor.push(&mut buf, &mut len, 0x7f), LineFeed::Pending);
         assert_eq!(len, 0);
         assert_eq!(buf[0], 0);
+    }
+
+    #[test]
+    fn the_delete_sequence_matches_the_shared_key_vocabulary() {
+        // The recogniser's spelling and the emitter/parser vocabulary must
+        // be one definition: the sequence parses back to `Key::Delete`.
+        let mut parser = crate::Parser::new();
+        let mut seen = alloc::vec::Vec::new();
+        parser.feed(&DELETE_SEQ, |op| seen.push(op));
+        assert_eq!(seen, alloc::vec![crate::Op::Key(crate::Key::Delete)]);
+    }
+
+    #[test]
+    fn a_bare_erase_seq_reports_erase_with_no_literals() {
+        let mut seq = EraseSeq::new();
+        let mut outcomes = alloc::vec::Vec::new();
+        for &b in &DELETE_SEQ {
+            outcomes.push(seq.feed(b));
+        }
+        for step in &outcomes[..DELETE_SEQ.len() - 1] {
+            assert!(!step.erase());
+            assert!(step.literal().is_empty());
+        }
+        let last = &outcomes[DELETE_SEQ.len() - 1];
+        assert!(last.erase());
+        assert!(last.literal().is_empty());
     }
 }

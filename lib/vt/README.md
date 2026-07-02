@@ -13,11 +13,17 @@ RustOS's text stack. It is the single source of truth (`AGENTS.md` §2.2) for:
 - a shared [`Cell`] / [`Attributes`] representation reused by both the
   *consumer* (the terminal emulator's `Grid`) and the *emitter* (the curses
   renderer),
-- the read line discipline's **buffer** half (`line::push_line_byte`): CR or
-  LF completes a line, the erase control (Backspace / Delete) rubs out the
-  last kept byte, and an over-long line fails closed — the one editor every
-  console reader runs (login's prompt reads, the shell REPL), matching the
-  kernel console's echo half byte for byte.
+- the read line discipline's **buffer** half (`line::LineEditor`): CR or LF
+  completes a line, an erase — the single-byte Backspace/Delete controls or
+  the Delete key's `CSI 3 ~` sequence (`line::EraseSeq`, held across split
+  reads) — rubs out the last kept byte (zeroing its slot), and an over-long
+  line fails closed. It is the one editor every console reader runs (the
+  boot passphrase prompt, login's prompt reads, the shell REPL), matching
+  the kernel console's echo half byte for byte,
+- the secret-entry activity indicator (`secret::SecretIndicator`): the
+  `[input active...]` marker every echo-suppressed (password) prompt shows,
+  with its one-second dot animation, idle pause, and one-shot deadline
+  timing — a pure state machine its kernel host renders.
 
 It ships **both** an emitter (`Op` → bytes) and a streaming parser (bytes →
 `Op` events) built over the *same* tables, so the two provably agree: every

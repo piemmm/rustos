@@ -160,7 +160,7 @@ over the program's **inherited standard streams** (`AGENTS.md` §20):
 
 - It reads command lines from **standard input** (fd 0) through
   `rustos_rt::stdin`, reassembling lines across reads with the read line
-  discipline's shared **buffer** half (`rustos_vt::line::push_line_byte`,
+  discipline's shared **buffer** half (`rustos_vt::line::LineEditor`,
   the same editor login's prompt reads run and the kernel console echo
   mirrors): CR and LF both terminate a line (a serial terminal sends CR for
   the Return key, a pipe or script LF, and a CRLF pair counts once), and the

@@ -1047,6 +1047,7 @@ dependencies = [
  "rustos-users",
  "rustos-util",
  "rustos-virtio-input",
+ "rustos-vt",
  "zeroize",
 ]
 

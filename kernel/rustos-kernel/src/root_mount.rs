@@ -1025,10 +1025,12 @@ fn write_all(console: &dyn ConsoleWrite, mut bytes: &[u8]) {
 /// Read one passphrase line from `input` into `buf`, returning its length.
 ///
 /// Reads byte by byte so the read never consumes past the line terminator
-/// (`CR` or `LF`), which a one-shot prompt could not put back. A
-/// `Backspace`/`Delete` (`0x08` / `0x7f`) rubs out the previous byte, so a
-/// mistyped passphrase can be corrected without a fresh attempt. A line
-/// that fills `buf` before a terminator is drained to the newline and
+/// (`CR` or `LF`), which a one-shot prompt could not put back. Line editing
+/// is the shared read line discipline (`rustos_vt::line::LineEditor` — the
+/// one definition login and the shell also run): a Backspace or the Delete
+/// key's `CSI 3 ~` sequence rubs out the previous byte (zeroing its slot),
+/// so a mistyped passphrase can be corrected without a fresh attempt. A
+/// line that fills `buf` before a terminator is drained to the newline and
 /// reported as [`PassphraseReadError::TooLong`] rather than truncated.
 ///
 /// # Errors
@@ -1040,6 +1042,7 @@ fn read_passphrase_line(
     input: &dyn ConsoleRead,
     buf: &mut [u8],
 ) -> Result<usize, PassphraseReadError> {
+    let mut editor = rustos_vt::line::LineEditor::new();
     let mut len = 0usize;
     loop {
         let mut byte = [0u8; 1];
@@ -1056,16 +1059,12 @@ fn read_passphrase_line(
                 Ok(len)
             };
         }
-        match byte[0] {
-            b'\n' | b'\r' => return Ok(len),
-            0x08 | 0x7f => len = len.saturating_sub(1),
-            b => {
-                if len == buf.len() {
-                    drain_to_newline(input);
-                    return Err(PassphraseReadError::TooLong);
-                }
-                buf[len] = b;
-                len += 1;
+        match editor.push(buf, &mut len, byte[0]) {
+            rustos_vt::line::LineFeed::Pending => {}
+            rustos_vt::line::LineFeed::Complete => return Ok(len),
+            rustos_vt::line::LineFeed::TooLong => {
+                drain_to_newline(input);
+                return Err(PassphraseReadError::TooLong);
             }
         }
     }

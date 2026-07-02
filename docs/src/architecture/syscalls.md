@@ -698,12 +698,29 @@ CR/LF is rendered as CR-LF so the cursor advances a line), so it needs no
 separate `CAP_CONSOLE_WRITE` — `stream_echo` shares `stream_read`'s
 `CAP_CONSOLE_READ` gate and, as low-volume terminal configuration, is
 unaudited. The line discipline also handles **erase** (rub-out): a
-Backspace or Delete (the one `lib/vt` `control::is_line_erase` definition,
-§2.2) is not echoed as a stray control glyph but rubs out the previous
-character with a `BS SP BS` sequence, bounded by a per-console column so a
-Backspace at the start of the input line never walks back over the prompt.
-The reader's line buffer applies the matching erase to the bytes it keeps
-(`rustos_vt::line::push_line_byte`), so screen and buffer stay in step. An
+Backspace or Delete — the single-byte controls (the one `lib/vt`
+`control::is_line_erase` definition, §2.2) or the Delete key's `CSI 3 ~`
+escape sequence (the shared `rustos_vt::line::EraseSeq` recogniser, held
+across split reads) — is not echoed as stray control glyphs but rubs out
+the previous character with a `BS SP BS` sequence, bounded by a
+per-console column so an erase at the start of the input line never walks
+back over the prompt. The reader's line buffer applies the matching erase
+to the bytes it keeps (`rustos_vt::line::LineEditor`), so screen and
+buffer stay in step.
+
+Disabling echo also arms the console's **secret-entry feedback**
+(`rustos_vt::secret`, hosted as the kernel `SecretFeedback`): a no-echo
+read is a password read, so after the first typed character the console
+shows the `[input active...]` marker, its dots animating on a one-second
+cadence while typing continues, pausing after a second of silence, and
+the whole marker removed on Enter or when the input is erased back to
+empty. The console's blocking reader drives the animation with a one-shot
+wait deadline armed only while the marker is animating (tickless — an
+idle prompt takes no timer wake-ups), and only the *count* of typed
+characters is tracked: no secret byte is stored or rendered. Re-enabling
+echo disarms the feedback and removes any marker an aborted read left.
+The in-kernel root-unlock passphrase prompt arms the same feedback
+directly, so every text/terminal password prompt shows one marker. An
 `fd` that is not a readable inherited stream fails closed with `NotFound`;
 a console-less build fails closed with `NotImplemented`. The first-party
 Rust wrapper is `rustos_rt::set_echo`; the C stub is `ros_sys_stream_echo`.

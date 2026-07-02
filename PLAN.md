@@ -2507,8 +2507,8 @@ descriptor-producing/closing ABI. RustOS builds **no** system-wide C `stdio`
 `rustos_rt::io::{Stdout, Stderr, Write}` and their hand-rolled short-write
 loops are deleted (§2.14) — one `Write::write_all` loop in userland. The
 bounded/edit-aware line readers (the REPL's `MAX_LINE` `LineReader` and
-login's prompt reads, both over the shared `rustos_vt::line::push_line_byte`
-editor) are retained as a security bound (§24.4), not the unbounded
+login's prompt reads, both over the shared `rustos_vt::line::LineEditor`)
+are retained as a security bound (§24.4), not the unbounded
 `BufReader`. See `plans/IO.md` (binding under `AGENTS.md`).
 
 ---
