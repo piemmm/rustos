@@ -86,11 +86,12 @@ mod hw {
 
     /// Fill `out` from the on-die RNG, preferring `RDSEED` over `RDRAND`.
     pub(super) fn fill(out: &mut [u8]) -> Result<(), EntropyError> {
-        // CPUID is universal on x86_64 and side-effect-free.
-        let leaf1_ecx = unsafe { core::arch::x86_64::__cpuid(CPUID_LEAF_FEATURES) }.ecx;
-        let max_leaf = unsafe { core::arch::x86_64::__cpuid(0) }.eax;
+        // CPUID is universal on x86_64, side-effect-free, and requires no
+        // target feature, so these intrinsics are safe to call directly.
+        let leaf1_ecx = core::arch::x86_64::__cpuid(CPUID_LEAF_FEATURES).ecx;
+        let max_leaf = core::arch::x86_64::__cpuid(0).eax;
         let leaf7_ebx = if max_leaf >= CPUID_LEAF_EXTENDED_FEATURES {
-            unsafe { core::arch::x86_64::__cpuid_count(CPUID_LEAF_EXTENDED_FEATURES, 0) }.ebx
+            core::arch::x86_64::__cpuid_count(CPUID_LEAF_EXTENDED_FEATURES, 0).ebx
         } else {
             0
         };
@@ -134,9 +135,10 @@ mod hw {
     unsafe fn rdseed_u64() -> Option<u64> {
         let mut val = 0u64;
         for _ in 0..RDSEED_RETRIES {
-            // SAFETY: RDSEED is enumerated (caller obligation); the intrinsic
-            // writes `val` and returns 1 only when a fresh value was produced.
-            if unsafe { core::arch::x86_64::_rdseed64_step(&mut val) } == 1 {
+            // The `#[target_feature(enable = "rdseed")]` gate makes the
+            // intrinsic call safe; it writes `val` and returns 1 only when a
+            // fresh value was produced.
+            if core::arch::x86_64::_rdseed64_step(&mut val) == 1 {
                 return Some(val);
             }
             core::hint::spin_loop();
@@ -154,9 +156,10 @@ mod hw {
     unsafe fn rdrand_u64() -> Option<u64> {
         let mut val = 0u64;
         for _ in 0..RDRAND_RETRIES {
-            // SAFETY: RDRAND is enumerated (caller obligation); the intrinsic
-            // writes `val` and returns 1 only when a fresh value was produced.
-            if unsafe { core::arch::x86_64::_rdrand64_step(&mut val) } == 1 {
+            // The `#[target_feature(enable = "rdrand")]` gate makes the
+            // intrinsic call safe; it writes `val` and returns 1 only when a
+            // fresh value was produced.
+            if core::arch::x86_64::_rdrand64_step(&mut val) == 1 {
                 return Some(val);
             }
             core::hint::spin_loop();
