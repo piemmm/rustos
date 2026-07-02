@@ -15,9 +15,9 @@
 //!   is a documented simplification, not a defect — it keeps argument counts
 //!   predictable and avoids re-quoting surprises.
 //!
-//! Only [`Segment::Expandable`] runs are scanned; [`Segment::Literal`] runs
-//! (single quotes, backslash escapes) are emitted verbatim, so a quoted or
-//! escaped `$` is never expanded.
+//! Only [`Segment::Expandable`] and [`Segment::QuotedExpandable`] runs are
+//! scanned; [`Segment::Literal`] runs (single quotes, backslash escapes) are
+//! emitted verbatim, so a quoted or escaped `$` is never expanded.
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString};
@@ -132,7 +132,9 @@ impl Environment {
         for segment in word {
             match segment {
                 Segment::Literal(s) => out.push_str(s),
-                Segment::Expandable(s) => self.expand_into(s, &mut out)?,
+                Segment::Expandable(s) | Segment::QuotedExpandable(s) => {
+                    self.expand_into(s, &mut out)?;
+                }
             }
         }
         Ok(out)
@@ -249,7 +251,9 @@ mod tests {
         let mut out = String::new();
         for seg in word {
             match seg {
-                Segment::Literal(s) | Segment::Expandable(s) => out.push_str(s),
+                Segment::Literal(s) | Segment::Expandable(s) | Segment::QuotedExpandable(s) => {
+                    out.push_str(s);
+                }
             }
         }
         out
@@ -352,12 +356,17 @@ mod tests {
     fn assignment_split_rejects_non_assignments() {
         assert!(assignment_split(&expandable("notanassignment")).is_none());
         assert!(assignment_split(&expandable("1BAD=x")).is_none());
-        // A quoted name is not an assignment.
+        // A quoted name is not an assignment, whether single- or double-quoted.
         let quoted = vec![
             Segment::Literal("FOO".to_string()),
             Segment::Expandable("=bar".to_string()),
         ];
         assert!(assignment_split(&quoted).is_none());
+        let double_quoted = vec![
+            Segment::QuotedExpandable("FOO".to_string()),
+            Segment::Expandable("=bar".to_string()),
+        ];
+        assert!(assignment_split(&double_quoted).is_none());
     }
 
     #[test]

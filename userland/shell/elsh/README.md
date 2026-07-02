@@ -38,11 +38,16 @@ without a kernel.
 ## Pipeline
 
 1. `lexer::tokenize` — text to a quoting-aware token stream.
-2. `parser::parse` — tokens to a `CommandList` tree.
+2. `parser::parse` — tokens to a `CommandList` tree. A here-document
+   (`<<`, `<<-`) parses *pending*: its body is collected from the following
+   input lines (`CommandList::feed_here_doc_line`, bounded and fail-closed)
+   before the list runs.
 3. `env::Environment::expand_word` — `$`-expansion of each word.
 4. `Shell::run_line` — run each pipeline, honouring connectors and the
    background flag, dispatching builtins or launching through the
-   `ProcessHost`, and tracking jobs in the `JobTable`.
+   `ProcessHost`, and tracking jobs in the `JobTable`. (`Shell::parse_line`
+   and `Shell::run_list` are the two halves the REPL drives separately to
+   collect here-document bodies in between.)
 
 ## Builtins
 
@@ -64,8 +69,9 @@ denial is reported, never hidden (§2.9).
 ## Failure handling
 
 `ParseError` is the only *line-aborting* error: a lexical fault
-(unterminated quote, dangling escape) or a grammatical one (empty
-command, redirection with no target, unterminated `${...}`). A line that
+(unterminated quote, dangling escape), a grammatical one (empty
+command, redirection with no target, unterminated `${...}`), or a
+here-document whose body is unterminated or over-length. A line that
 does not parse or expand runs **nothing** and sets `$?` to `2`.
 
 Everything that goes wrong *after* a line is understood — a program that
@@ -89,7 +95,8 @@ it lives rather than papered over (`AGENTS.md` §2.1, §2.3):
 `cargo test -p rustos-elsh` drives the interpreter against in-memory
 `Console`/`ProcessHost` fixtures, covering the lexer's quoting and escape
 rules, the parser's pipelines/redirections/connectors and its fail-closed
-grammar errors, `$`-expansion, every builtin, foreground status
-propagation, the command-not-found path, background job tracking, the
-`Done`-before-prompt reporting of finished jobs, and connector
-short-circuiting.
+grammar errors, `$`-expansion, here-document collection (quoting, `<<-`
+tab stripping, source order, the size bound, and the fail-closed paths),
+every builtin, foreground status propagation, the command-not-found path,
+background job tracking, the `Done`-before-prompt reporting of finished
+jobs, and connector short-circuiting.

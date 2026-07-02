@@ -25,9 +25,13 @@ pub enum Segment {
     /// Verbatim text — never expanded. Produced by single quotes and by
     /// backslash escapes (including `\$`).
     Literal(String),
-    /// Text subject to `$` variable expansion. Produced by unquoted text and
-    /// by the body of double quotes.
+    /// Unquoted text, subject to `$` variable expansion.
     Expandable(String),
+    /// The body of double quotes: subject to `$` variable expansion like
+    /// [`Segment::Expandable`], but *quoted* — which matters where quoting
+    /// changes meaning, e.g. a here-document delimiter with any quoted part
+    /// takes a literal (unexpanded) body.
+    QuotedExpandable(String),
 }
 
 /// A lexed word: an ordered (possibly empty, e.g. `""`) list of [`Segment`]s.
@@ -72,12 +76,23 @@ pub enum RedirOp {
     },
     /// Feed a here-string (`<<< word`) as the input of `fd` (default 0). The
     /// target word supplies the content; the interpreter appends the trailing
-    /// newline a here-string carries. Distinct from the multi-line here-document
-    /// forms (`<<`, `<<-`), which are not yet supported.
+    /// newline a here-string carries.
     HereString {
         /// The descriptor the here-string feeds (the operator's explicit or
         /// default fd).
         fd: u32,
+    },
+    /// Feed a multi-line here-document (`<< delim`, `<<- delim`) as the input
+    /// of `fd` (default 0). The target word is the *delimiter*; the body is
+    /// collected from the following input lines, up to a line holding only the
+    /// delimiter.
+    HereDoc {
+        /// The descriptor the here-document feeds (the operator's explicit or
+        /// default fd).
+        fd: u32,
+        /// `true` for `<<-`: leading tabs are stripped from every body line
+        /// and from the terminating delimiter line.
+        strip_tabs: bool,
     },
 }
 
@@ -108,10 +123,8 @@ pub enum Token {
 /// # Errors
 ///
 /// Returns [`ParseError::UnterminatedQuote`] for an unclosed quote,
-/// [`ParseError::DanglingEscape`] for a line ending on a lone `\`,
-/// [`ParseError::UnsupportedRedirection`] for a multi-line here-document
-/// (`<<`, `<<-`), and [`ParseError::AmbiguousRedirection`] for a malformed
-/// duplication. The here-string `<<<` is supported.
+/// [`ParseError::DanglingEscape`] for a line ending on a lone `\`, and
+/// [`ParseError::AmbiguousRedirection`] for a malformed duplication.
 pub fn tokenize(line: &str) -> Result<Vec<Token>, ParseError> {
     Lexer::new(line).run()
 }
@@ -140,6 +153,15 @@ impl WordBuilder {
         match self.segments.last_mut() {
             Some(Segment::Literal(s)) => s.push(c),
             _ => self.segments.push(Segment::Literal(String::from(c))),
+        }
+    }
+
+    fn push_quoted_expandable(&mut self, c: char) {
+        match self.segments.last_mut() {
+            Some(Segment::QuotedExpandable(s)) => s.push(c),
+            _ => self
+                .segments
+                .push(Segment::QuotedExpandable(String::from(c))),
         }
     }
 
@@ -244,10 +266,7 @@ impl Lexer {
     ///
     /// # Errors
     ///
-    /// Fails closed for a not-yet-supported operator ([multi-line
-    /// here-documents `<<` / `<<-`](ParseError::UnsupportedRedirection)) and
-    /// for a [malformed duplication](ParseError::AmbiguousRedirection). The
-    /// here-string `<<<` is supported.
+    /// Fails closed for a [malformed duplication](ParseError::AmbiguousRedirection).
     fn lex_redirect(&mut self) -> Result<Option<Token>, ParseError> {
         // Combined stdout+stderr via a leading `&`: `&>`, `&>>`, `&>|`, `&>!`.
         if self.peek() == Some('&') && self.peek2() == Some('>') {
@@ -288,8 +307,8 @@ impl Lexer {
     fn lex_input(&mut self, fd: Option<u32>) -> Result<Token, ParseError> {
         self.pos += 1; // consume '<'
         let op = match self.peek() {
-            // A second `<`: either the here-string `<<<` (supported) or a
-            // here-document `<<` / `<<-` (not yet supported).
+            // A second `<`: the here-string `<<<` or a here-document `<<` /
+            // `<<-` (whose optional `-` selects leading-tab stripping).
             Some('<') => {
                 self.pos += 1; // consume the second '<'
                 if self.peek() == Some('<') {
@@ -298,8 +317,14 @@ impl Lexer {
                         fd: fd.unwrap_or(0),
                     }
                 } else {
-                    // `<<` / `<<-` here-documents are not yet supported.
-                    return Err(ParseError::UnsupportedRedirection);
+                    let strip_tabs = self.peek() == Some('-');
+                    if strip_tabs {
+                        self.pos += 1; // consume the '-'
+                    }
+                    RedirOp::HereDoc {
+                        fd: fd.unwrap_or(0),
+                        strip_tabs,
+                    }
                 }
             }
             // `<>` — open for reading and writing.
@@ -505,7 +530,7 @@ impl Lexer {
                         word.push_literal(other);
                     }
                 },
-                Some(c) => word.push_expandable(c),
+                Some(c) => word.push_quoted_expandable(c),
             }
         }
     }
@@ -606,10 +631,41 @@ mod tests {
     }
 
     #[test]
-    fn here_documents_fail_closed_in_the_lexer() {
-        // Multi-line here-documents (`<<`, `<<-`) are not yet supported.
-        assert_eq!(tokenize("<<EOF"), Err(ParseError::UnsupportedRedirection));
-        assert_eq!(tokenize("<<-EOF"), Err(ParseError::UnsupportedRedirection));
+    fn here_document_lexes_to_its_operator_and_delimiter() {
+        // `<<` is the here-document operator (default fd 0); its delimiter is
+        // an ordinary following word, glued or spaced.
+        assert_eq!(
+            tokenize("<<EOF").unwrap(),
+            vec![
+                Token::Redirect(RedirOp::HereDoc {
+                    fd: 0,
+                    strip_tabs: false,
+                }),
+                expandable("EOF"),
+            ]
+        );
+        // `<<-` selects leading-tab stripping.
+        assert_eq!(
+            tokenize("<<- END").unwrap(),
+            vec![
+                Token::Redirect(RedirOp::HereDoc {
+                    fd: 0,
+                    strip_tabs: true,
+                }),
+                expandable("END"),
+            ]
+        );
+        // An explicit IO number binds the here-document's descriptor.
+        assert_eq!(
+            tokenize("4<<EOF").unwrap(),
+            vec![
+                Token::Redirect(RedirOp::HereDoc {
+                    fd: 4,
+                    strip_tabs: false,
+                }),
+                expandable("EOF"),
+            ]
+        );
     }
 
     #[test]
@@ -650,11 +706,13 @@ mod tests {
 
     #[test]
     fn double_quotes_keep_spaces_and_split_escapes() {
-        // `a `, `b`, ` ` and `c ` are expandable; the escaped `"` and `$`
-        // become literal, so the `$c` stays expandable but `\$` would not.
+        // A double-quoted body is expandable but remembered as quoted, so
+        // `$c` still expands while a here-doc delimiter would count as quoted.
         assert_eq!(
             tokenize(r#""a $c""#).unwrap(),
-            vec![Token::Word(vec![Segment::Expandable("a $c".to_string())])]
+            vec![Token::Word(vec![Segment::QuotedExpandable(
+                "a $c".to_string()
+            )])]
         );
     }
 
@@ -676,7 +734,8 @@ mod tests {
             vec![Token::Word(vec![
                 Segment::Expandable("a".to_string()),
                 Segment::Literal("b".to_string()),
-                Segment::Expandable("cd".to_string()),
+                Segment::QuotedExpandable("c".to_string()),
+                Segment::Expandable("d".to_string()),
             ])]
         );
     }

@@ -1759,9 +1759,26 @@ until the launch ABI grows):
   fd 2 — one definition of the combined meaning), and the here-string `<<<`
   (lowered to a `HereString` action carrying the expanded word plus one
   trailing newline — the one definition of the here-string's shape — on its
-  descriptor, default fd 0). Fail-closed: a file redirection or here-string
-  with no target, an ambiguous duplication (`<&file`, `2>&file`), or a
-  multi-line here-document operator (`<<`, `<<-`) runs nothing.
+  descriptor, default fd 0). Fail-closed: a file redirection, here-string, or
+  here-document with no target/delimiter word, or an ambiguous duplication
+  (`<&file`, `2>&file`), runs nothing.
+- **Implemented and tested** — multi-line here-documents (`<<`, `<<-`). The
+  command line names only the delimiter (quote removal, never expansion; any
+  quoted part — including a double-quoted run, tracked by the lexer's
+  `Segment::QuotedExpandable` — makes the body literal, else the body gets
+  the same `$` expansion as a word). The body is collected afterwards in
+  source order (`CommandList::pending_here_doc` / `feed_here_doc_line`),
+  driven by the REPL under a `> ` continuation prompt; `<<-` strips leading
+  tabs from body and terminator lines. A complete body lowers to the same
+  `HereString` bytes-on-fd action as a here-string — one primitive. Bounded
+  and fail-closed: the body is capped by `MAX_HERE_DOC_BYTES` (64 KiB, a
+  fixed security bound), an over-large or line-loss-poisoned body is
+  discarded yet still consumed to its terminator (so body lines are never
+  misread as commands) and fails the line with `HereDocTooLarge`, and an
+  unterminated document (end of input first) fails with
+  `UnterminatedHereDoc`; either way `$?` is 2 and nothing runs. Any
+  run-stage line abort (failed expansion, missing body) now reports and
+  sets `$?` through the same shared path as a parse error.
 - **Implemented and tested** — redirection-target classification (the
   "Resolution rule" above). Each expanded `Open` target is classified into a
   `RedirTarget` (`Path` or `Resource`) through the single shared
@@ -1775,9 +1792,9 @@ until the launch ABI grows):
   that is not a well-formed reference (`sys:null@`) fails the whole line closed
   (`InvalidResourceTarget`) rather than falling back to creating a file.
 - **Not yet implemented** (deliberately failing closed, tracked here):
-  multi-line here-documents (`<<`, `<<-`), process substitution (`<(…)`,
-  `>(…)`, `=(…)`), zsh multios fan-out, and dynamic descriptor allocation
-  (`{var}>`) — each an increment on top of the model above. A classified
+  process substitution (`<(…)`, `>(…)`, `=(…)`), zsh multios fan-out, and
+  dynamic descriptor allocation (`{var}>`) — each an increment on top of the
+  model above. A classified
   `Resource` target is carried to the host but its *resolution to a kernel
   stream backing* (opening `sys:null`, the capability-checked resolve of any
   other namespace, and the well-known `sys:` stream enum in `lib/abi`) waits on

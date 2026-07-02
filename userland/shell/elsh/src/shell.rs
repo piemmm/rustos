@@ -24,7 +24,10 @@ use crate::host::{
     ResolvedCommand, ResolvedRedirection, NULL_LIMIT_STORE,
 };
 use crate::job::{ExitStatus, JobState, JobTable, WaitOutcome};
-use crate::parser::{parse, Command, ListEntry, OpenMode, Pipeline, Redirection, RunCondition};
+use crate::lexer::Segment;
+use crate::parser::{
+    parse, Command, CommandList, ListEntry, OpenMode, Pipeline, Redirection, RunCondition,
+};
 
 /// Standard output's descriptor — the target of a combined `&>` open.
 const STDOUT_FD: u32 = 1;
@@ -103,26 +106,65 @@ impl<'a> Shell<'a> {
 
     /// Parse and run one command line.
     ///
+    /// A line whose here-documents cannot be satisfied from a single string
+    /// fails closed with [`ParseError::UnterminatedHereDoc`]: collecting the
+    /// body lines is the caller's job ([`Shell::parse_line`] +
+    /// [`CommandList::feed_here_doc_line`] + [`Shell::run_list`]), as the
+    /// REPL does.
+    ///
     /// # Errors
     ///
     /// Returns [`ParseError`] if the line cannot be lexed, parsed, or
-    /// expanded; in that case nothing from the line runs.
+    /// expanded; in that case the error is reported, `$?` becomes 2, and
+    /// nothing from the line runs.
     pub fn run_line(&mut self, line: &str) -> Result<(), ParseError> {
+        let list = self.parse_line(line)?;
+        self.run_list(&list)
+    }
+
+    /// Parse one command line, first reporting any finished background jobs
+    /// (exactly as a shell prints `[1] Done cmd` before its next prompt).
+    ///
+    /// The returned list may still be awaiting here-document bodies
+    /// ([`CommandList::pending_here_doc`]); feed them with
+    /// [`CommandList::feed_here_doc_line`] before [`Shell::run_list`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ParseError`] if the line cannot be lexed or parsed; the
+    /// error is reported and `$?` becomes 2.
+    pub fn parse_line(&mut self, line: &str) -> Result<CommandList, ParseError> {
         self.report_finished_jobs();
-        let list = match parse(line) {
-            Ok(list) => list,
-            Err(err) => {
-                self.console.write_stderr(&format!("shell: {err}\n"));
-                self.env.set_last_status(2);
-                return Err(err);
-            }
-        };
+        parse(line).map_err(|err| self.fail_line(err))
+    }
+
+    /// Run a parsed command list, honouring the `;`/`&&`/`||` connectors and
+    /// the `&` background flag.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ParseError`] if a word cannot be expanded, a redirection
+    /// target is malformed, or a here-document body is missing or was
+    /// discarded as over-length; the error is reported, `$?` becomes 2, and
+    /// nothing further from the line runs.
+    pub fn run_list(&mut self, list: &CommandList) -> Result<(), ParseError> {
         for entry in &list.entries {
             if self.should_run(entry.run_if) {
-                self.run_entry(entry)?;
+                if let Err(err) = self.run_entry(entry) {
+                    return Err(self.fail_line(err));
+                }
             }
         }
         Ok(())
+    }
+
+    /// Report a line-aborting error on standard error and set `$?` to 2 (the
+    /// shell's parse/usage status), returning the error for propagation. One
+    /// definition, so parse-stage and run-stage aborts report identically.
+    fn fail_line(&mut self, err: ParseError) -> ParseError {
+        self.console.write_stderr(&format!("shell: {err}\n"));
+        self.env.set_last_status(2);
+        err
     }
 
     fn should_run(&self, condition: RunCondition) -> bool {
@@ -275,6 +317,23 @@ impl<'a> Shell<'a> {
                 out.push(ResolvedRedirection {
                     fd: *fd,
                     action: RedirAction::HereString { content: bytes },
+                });
+            }
+            Redirection::HereDoc(doc) => {
+                // The collected body is already newline-terminated per line;
+                // it fails closed here when unterminated or discarded as
+                // over-length. A quoted delimiter makes the body literal;
+                // otherwise it undergoes the same `$` expansion as a word.
+                let body = doc.body()?;
+                let content = if doc.is_quoted() {
+                    String::from(body)
+                } else {
+                    self.env
+                        .expand_word(&alloc::vec![Segment::Expandable(String::from(body))])?
+                };
+                out.push(ResolvedRedirection {
+                    fd: doc.fd(),
+                    action: RedirAction::HereString { content },
                 });
             }
         }
@@ -657,6 +716,129 @@ mod tests {
 
         assert!(shell.run_line("ls |").is_err());
         assert_eq!(shell.environment().last_status(), 2);
+        assert!(host.launches().is_empty());
+    }
+
+    #[test]
+    fn expansion_error_is_reported_and_sets_status_2() {
+        use crate::error::ParseError;
+
+        let host = ScriptedHost::new();
+        let console = RecordingConsole::new();
+        let mut shell = Shell::new(&host, &console);
+
+        // Expansion happens after parsing; its failure must be reported and
+        // must set `$?` exactly like a parse failure (this once escaped
+        // unreported, leaving `$?` untouched).
+        assert_eq!(
+            shell.run_line("echo ${OOPS"),
+            Err(ParseError::UnterminatedExpansion)
+        );
+        assert_eq!(shell.environment().last_status(), 2);
+        assert!(console.stderr().contains("unterminated ${...} expansion"));
+        assert!(host.launches().is_empty());
+    }
+
+    #[test]
+    fn here_document_body_is_collected_and_lowered() {
+        use crate::host::RedirAction;
+        use alloc::string::ToString;
+
+        let host = ScriptedHost::new();
+        let console = RecordingConsole::new();
+        let mut shell = Shell::new(&host, &console);
+
+        let mut list = shell.parse_line("run <<EOF").unwrap();
+        list.feed_here_doc_line("line one");
+        list.feed_here_doc_line("line two");
+        list.feed_here_doc_line("EOF");
+        shell.run_list(&list).unwrap();
+
+        let launches = host.launches();
+        assert_eq!(
+            launches[0].commands[0].redirections,
+            [super::ResolvedRedirection {
+                fd: 0,
+                action: RedirAction::HereString {
+                    content: "line one\nline two\n".to_string(),
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn here_document_body_expands_unless_the_delimiter_was_quoted() {
+        use crate::env::Environment;
+        use crate::host::RedirAction;
+        use alloc::string::ToString;
+
+        let host = ScriptedHost::new();
+        let console = RecordingConsole::new();
+        let mut env = Environment::new();
+        env.set("WHO", "world");
+        let mut shell = Shell::with_environment(&host, &console, env);
+
+        // Unquoted delimiter: the body undergoes `$` expansion.
+        let mut list = shell.parse_line("run <<EOF").unwrap();
+        list.feed_here_doc_line("hello $WHO");
+        list.feed_here_doc_line("EOF");
+        shell.run_list(&list).unwrap();
+
+        // Quoted delimiter: the body is literal.
+        let mut list = shell.parse_line("run <<'EOF'").unwrap();
+        list.feed_here_doc_line("hello $WHO");
+        list.feed_here_doc_line("EOF");
+        shell.run_list(&list).unwrap();
+
+        let launches = host.launches();
+        assert_eq!(
+            launches[0].commands[0].redirections[0].action,
+            RedirAction::HereString {
+                content: "hello world\n".to_string(),
+            }
+        );
+        assert_eq!(
+            launches[1].commands[0].redirections[0].action,
+            RedirAction::HereString {
+                content: "hello $WHO\n".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn unterminated_here_document_runs_nothing() {
+        use crate::error::ParseError;
+
+        let host = ScriptedHost::new();
+        let console = RecordingConsole::new();
+        let mut shell = Shell::new(&host, &console);
+
+        // `run_line` cannot collect a body from a single string, so it fails
+        // closed rather than running with empty input.
+        assert_eq!(
+            shell.run_line("run <<EOF"),
+            Err(ParseError::UnterminatedHereDoc)
+        );
+        assert_eq!(shell.environment().last_status(), 2);
+        assert!(console.stderr().contains("missing its terminator"));
+        assert!(host.launches().is_empty());
+    }
+
+    #[test]
+    fn over_length_here_document_runs_nothing() {
+        use crate::error::ParseError;
+
+        let host = ScriptedHost::new();
+        let console = RecordingConsole::new();
+        let mut shell = Shell::new(&host, &console);
+
+        let mut list = shell.parse_line("run <<EOF").unwrap();
+        list.feed_here_doc_line("kept");
+        list.poison_pending_here_doc();
+        list.feed_here_doc_line("EOF");
+        assert_eq!(shell.run_list(&list), Err(ParseError::HereDocTooLarge));
+        assert_eq!(shell.environment().last_status(), 2);
+        assert!(console.stderr().contains("here-document too large"));
         assert!(host.launches().is_empty());
     }
 }

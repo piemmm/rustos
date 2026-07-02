@@ -21,11 +21,16 @@
 //! # Pipeline
 //!
 //! 1. [`lexer::tokenize`] — text to a quoting-aware [`lexer::Token`] stream.
-//! 2. [`parser::parse`] — tokens to a [`parser::CommandList`] tree.
+//! 2. [`parser::parse`] — tokens to a [`parser::CommandList`] tree. A
+//!    here-document (`<<`, `<<-`) parses *pending*: its body is collected from
+//!    the following input lines ([`parser::CommandList::feed_here_doc_line`],
+//!    bounded and fail-closed) before the list runs.
 //! 3. [`env::Environment::expand_word`] — `$`-expansion of each word.
 //! 4. [`Shell::run_line`] — run each pipeline, honouring connectors and the
 //!    background flag, dispatching builtins ([`builtin`]) or launching through
 //!    the [`ProcessHost`], and tracking jobs in the [`job::JobTable`].
+//!    ([`Shell::parse_line`] and [`Shell::run_list`] are the two halves the
+//!    REPL drives separately to collect here-document bodies in between.)
 //!
 //! # Deliberate simplifications
 //!

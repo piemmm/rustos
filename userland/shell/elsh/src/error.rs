@@ -31,11 +31,15 @@ pub enum ParseError {
     /// A file redirection operator (`<`, `>`, `>>`, `<>`, `&>`, …) was not
     /// followed by a target filename.
     MissingRedirectionTarget,
-    /// A redirection operator the shell recognises but does not yet implement:
-    /// a multi-line here-document (`<<`, `<<-`). Failing closed is deliberate —
-    /// the alternative would be to misread the body as commands. (The
-    /// here-string `<<<` is supported.)
-    UnsupportedRedirection,
+    /// A here-document (`<<`, `<<-`) whose body was never terminated by its
+    /// delimiter line before the input ended. Failing closed is deliberate:
+    /// the alternative would be to run the command with a partial body.
+    UnterminatedHereDoc,
+    /// A here-document whose body exceeded the fixed collection bound
+    /// ([`MAX_HERE_DOC_BYTES`](crate::parser::MAX_HERE_DOC_BYTES)) or lost a
+    /// body line to the reader's line-length limit. The body is discarded and
+    /// the line runs nothing, so a truncated body never reaches a command.
+    HereDocTooLarge,
     /// A redirection whose meaning is not well defined: a descriptor-duplication
     /// form with neither a source descriptor nor a `-` close (`<&`, `2>&x`), or
     /// a descriptor number too large to represent.
@@ -59,7 +63,8 @@ impl fmt::Display for ParseError {
             Self::UnterminatedQuote => "unterminated quote",
             Self::DanglingEscape => "trailing backslash with nothing to escape",
             Self::MissingRedirectionTarget => "redirection is missing its target",
-            Self::UnsupportedRedirection => "unsupported redirection operator",
+            Self::UnterminatedHereDoc => "here-document is missing its terminator",
+            Self::HereDocTooLarge => "here-document too large",
             Self::AmbiguousRedirection => "ambiguous redirection",
             Self::InvalidResourceTarget => "malformed resource-reference redirection target",
             Self::MissingCommand => "expected a command",

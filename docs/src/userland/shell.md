@@ -34,7 +34,9 @@ kernel.
 
 ## Run pipeline
 
-`Shell::run_line` is the one entry point. For each line it:
+`Shell::run_line` is the one-shot entry point (it composes `Shell::parse_line`
+and `Shell::run_list`, which callers that must collect here-document bodies —
+the REPL — drive separately). For each line it:
 
 1. **Reports finished background jobs.** It first drains the host's
    background state changes (`ProcessHost::poll`) into the job table and
@@ -49,6 +51,10 @@ kernel.
    satisfies — `&&` runs on success, `||` runs on failure, `;` always —
    expanding each word (`env::Environment::expand_word`) and either
    dispatching a builtin or launching through the `ProcessHost`.
+
+Any line-aborting error — at parse *or* run stage (a failed expansion, a
+missing here-document body) — is reported on standard error and sets `$?`
+to `2` through one shared path, so nothing (further) from the line runs.
 
 ## Redirections
 
@@ -76,13 +82,27 @@ IO number, e.g. `2>`, `3>>`, `0<`):
   newline as the input of its descriptor (default fd 0). It lowers to a
   `HereString` action carrying those bytes — the single definition of the
   here-string's shape — so the host supplies them verbatim as a read backing.
-  (The multi-line here-documents `<<` / `<<-` are not yet supported.)
+- **Here-document:** `<< delim` (and `<<- delim`, which strips leading tabs
+  from body and terminator lines) feeds the following input lines, up to a
+  line holding only the delimiter, as the input of its descriptor (default
+  fd 0). The command line names only the delimiter; the body is collected
+  afterwards (`CommandList::feed_here_doc_line`, driven by the REPL with a
+  `> ` continuation prompt), in source order when a line has several
+  here-documents. If any part of the delimiter was quoted the body is
+  literal; otherwise it undergoes the same `$` expansion as a word. A
+  complete body lowers to the same `HereString` bytes-on-fd action as a
+  here-string — one primitive, not two (`AGENTS.md` §2.2). Collection is
+  bounded (`MAX_HERE_DOC_BYTES`, 64 KiB — a fixed security bound, §24.4):
+  an over-large body, or one that lost a line to the reader's line-length
+  limit, is discarded and fails the line closed, but is still consumed to
+  its terminator so the remaining body lines are never misread as commands.
 
 A descriptor number is an IO number only when it is glued directly to a `<`/`>`
 (so `echo 2` is a plain argument, but `2>err` names fd 2). The parser
 **fails closed** (`AGENTS.md` §5.4, §2.9): a file redirection with no target,
-an ambiguous duplication (`<&file`, `2>&file`), a here-string with no target,
-or an as-yet-unsupported multi-line here-document (`<<`, `<<-`) runs
+an ambiguous duplication (`<&file`, `2>&file`), a here-string or here-document
+with no target/delimiter word, an unterminated here-document (input ended
+before its delimiter line), or an over-length here-document body runs
 **nothing**.
 
 ### Target: resource reference vs. filesystem path
@@ -113,10 +133,10 @@ shell never falls back to creating a file, so a typo cannot silently write junk
 to disk (`AGENTS.md` §5.4).
 
 Not yet implemented (tracked in `plans/SHELL.md`, deliberately failing closed
-rather than misbehaving): multi-line here-documents (`<<`, `<<-`), process
-substitution (`<(…)`, `>(…)`, `=(…)`), zsh multios fan-out, and dynamic
-descriptor allocation (`{var}>`). Classifying a target is done; *resolving* a
-`Resource` target to a kernel stream backing (opening `sys:null`, the
+rather than misbehaving): process substitution (`<(…)`, `>(…)`, `=(…)`), zsh
+multios fan-out, and dynamic descriptor allocation (`{var}>`). Classifying a
+target is done; *resolving* a `Resource` target to a kernel stream backing
+(opening `sys:null`, the
 capability-checked resolve of any other namespace) waits on the same launch
 ABI that gates applying a file redirection. The current runtime process host
 still carries only a program path, so it reports `NotImplemented` for any
@@ -138,7 +158,8 @@ over the program's **inherited standard streams** (`AGENTS.md` §20):
 
 - It reads command lines from **standard input** (fd 0) through
   `rustos_rt::stdin`, reassembling lines across reads and stripping a
-  trailing CRLF.
+  trailing CRLF. A line whose here-documents are pending is completed by
+  reading body lines under a `> ` continuation prompt before anything runs.
 - It writes the prompt and all command output to **standard output** (fd 1)
   and **standard error** (fd 2) through the `RtConsole` seam.
 - It emits advisory metadata on the **standard information stream** (fd 3,
@@ -210,7 +231,9 @@ it lives rather than papered over (`AGENTS.md` §2.1, §2.3):
 `cargo test -p rustos-elsh` drives the interpreter against in-memory
 `Console`/`ProcessHost` fixtures, covering the lexer's quoting and escape
 rules, the parser's pipelines/redirections/connectors and its fail-closed
-grammar errors, `$`-expansion, every builtin, foreground status
-propagation, the command-not-found path, background job tracking, the
-`Done`-before-prompt reporting of finished jobs, and connector
-short-circuiting.
+grammar errors, `$`-expansion, here-document collection (quoted/unquoted
+delimiters, `<<-` tab stripping, source-order filling, the size bound, and
+the unterminated/over-length fail-closed paths, including through the REPL),
+every builtin, foreground status propagation, the command-not-found path,
+background job tracking, the `Done`-before-prompt reporting of finished
+jobs, and connector short-circuiting.

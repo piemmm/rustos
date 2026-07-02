@@ -35,10 +35,14 @@ use alloc::vec::Vec;
 use rustos_abi::{Human, Severity, StdInfoKind, StdInfoRecord};
 
 use crate::host::Console;
+use crate::parser::CommandList;
 use crate::shell::Shell;
 
 /// The interactive prompt written to standard output before each line.
 const PROMPT: &str = "elsh$ ";
+
+/// The continuation prompt written while collecting here-document body lines.
+const HERE_DOC_PROMPT: &str = "> ";
 
 /// Maximum length of a single command line, in bytes. A line longer than this
 /// is discarded rather than buffered without bound, so untrusted input cannot
@@ -207,6 +211,33 @@ fn report_truncated_line(input: &mut dyn ReplInput) {
     }
 }
 
+/// Collect the pending here-document bodies of a parsed line, prompting with
+/// the continuation prompt for each body line.
+///
+/// A truncated (over-length) body line is reported on `stdinfo` and poisons
+/// the document: its body can no longer be trusted, so the line will fail
+/// closed, but collection still runs to the terminator so the remaining body
+/// lines are never misread as commands. End of input leaves the document
+/// unterminated, and running the list then fails it closed.
+fn collect_here_docs(
+    list: &mut CommandList,
+    console: &dyn Console,
+    input: &mut dyn ReplInput,
+    reader: &mut LineReader,
+) {
+    while list.pending_here_doc().is_some() {
+        console.write_stdout(HERE_DOC_PROMPT);
+        match reader.next_line(input) {
+            LineEvent::Line(line) => list.feed_here_doc_line(&line),
+            LineEvent::Truncated => {
+                report_truncated_line(input);
+                list.poison_pending_here_doc();
+            }
+            LineEvent::Eof => return,
+        }
+    }
+}
+
 /// Run the read-eval-print loop until the shell requests exit or input ends,
 /// returning the session's exit code.
 ///
@@ -223,7 +254,10 @@ pub fn run(shell: &mut Shell<'_>, console: &dyn Console, input: &mut dyn ReplInp
         console.write_stdout(PROMPT);
         match reader.next_line(input) {
             LineEvent::Line(line) => {
-                let _ = shell.run_line(&line);
+                if let Ok(mut list) = shell.parse_line(&line) {
+                    collect_here_docs(&mut list, console, input, &mut reader);
+                    let _ = shell.run_list(&list);
+                }
                 if let Some(code) = shell.exit_request() {
                     return code;
                 }
@@ -355,6 +389,67 @@ mod tests {
         // Exactly one `omission` advisory was emitted on fd 3.
         assert_eq!(input.info.len(), 1);
         assert!(input.info[0].contains("\"kind\":\"omission\""));
+        assert!(input.info[0].contains("shell.line_truncated"));
+    }
+
+    #[test]
+    fn here_document_body_is_collected_across_lines() {
+        use crate::host::RedirAction;
+        use alloc::string::ToString;
+
+        let host = ScriptedHost::new();
+        let console = RecordingConsole::new();
+        let mut shell = Shell::new(&host, &console);
+        let mut input = ScriptedInput::new("cat <<EOF\nhello\nworld\nEOF\n");
+        assert_eq!(run(&mut shell, &console, &mut input), 0);
+
+        let launches = host.launches();
+        assert_eq!(launches.len(), 1);
+        assert_eq!(
+            launches[0].commands[0].redirections[0].action,
+            RedirAction::HereString {
+                content: "hello\nworld\n".to_string(),
+            }
+        );
+        // The continuation prompt precedes each of the three body reads.
+        assert_eq!(console.stdout().matches(super::HERE_DOC_PROMPT).count(), 3);
+    }
+
+    #[test]
+    fn here_document_hitting_end_of_input_fails_closed() {
+        let host = ScriptedHost::new();
+        let console = RecordingConsole::new();
+        let mut shell = Shell::new(&host, &console);
+        // The input ends before the `EOF` terminator line.
+        let mut input = ScriptedInput::new("cat <<EOF\npartial body\n");
+        assert_eq!(run(&mut shell, &console, &mut input), 0);
+
+        assert!(host.launches().is_empty(), "nothing runs");
+        assert!(console.stderr().contains("missing its terminator"));
+    }
+
+    #[test]
+    fn here_document_with_a_truncated_body_line_fails_closed() {
+        let host = ScriptedHost::new();
+        let console = RecordingConsole::new();
+        let mut shell = Shell::new(&host, &console);
+        // One body line exceeds the line limit and is dropped; the body can
+        // no longer be trusted, so the command must not run — but collection
+        // still finds the terminator and the following line still runs.
+        let mut transcript = String::from("cat <<EOF\n");
+        transcript.push_str(&"y".repeat(MAX_LINE + 50));
+        transcript.push_str("\nEOF\necho after\n");
+        let mut input = ScriptedInput::new(&transcript);
+        assert_eq!(run(&mut shell, &console, &mut input), 0);
+
+        assert!(
+            host.launches().is_empty(),
+            "the here-doc command never runs"
+        );
+        assert!(console.stderr().contains("here-document too large"));
+        assert!(console.stdout().contains("after\n"), "the next line runs");
+        // The dropped line was reported on fd 3.
+        assert_eq!(input.info.len(), 1);
         assert!(input.info[0].contains("shell.line_truncated"));
     }
 
