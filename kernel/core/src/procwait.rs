@@ -274,6 +274,27 @@ impl ProcessTable {
             Reap::NoChild
         }
     }
+
+    /// The task id of a **live** (not-yet-exited) child of `parent` selected
+    /// by `pid`, or `None`.
+    ///
+    /// This is the authorisation lookup the signal path uses: a process may
+    /// signal only a child it spawned that is still running. `pid` must name
+    /// a specific child (the `signal` syscall has no wildcard); a child that
+    /// has already exited — a zombie awaiting reap — is **not** signallable
+    /// and reports `None`, so a signal to a dead process fails closed rather
+    /// than pretending to reach it. A negative or otherwise non-representable
+    /// `pid` names no child.
+    #[must_use]
+    pub fn live_child(&self, parent: TaskId, pid: i32) -> Option<TaskId> {
+        let want = u64::try_from(pid).ok()?;
+        let entry = self.children.get(&want)?;
+        if entry.parent == parent.0 && entry.exit.is_none() {
+            Some(TaskId(want))
+        } else {
+            None
+        }
+    }
 }
 
 /// The scheduler-side `wait` producer the boot path installs (`plans/SPAWN.md`
@@ -306,6 +327,41 @@ where
             arch,
             table: SpinLock::new(ProcessTable::new()),
         }
+    }
+
+    /// Authorise `sender` to signal the child selected by `pid`, returning the
+    /// child's task id.
+    ///
+    /// The one bookkeeping lookup the signal producer
+    /// ([`KernelProcessSignal`](crate::procsignal::KernelProcessSignal))
+    /// shares with `wait`, so the parent/child relationship has a single
+    /// definition and the two paths can never disagree on who owns whom. A
+    /// process may signal only a **live** child it spawned.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Errno::NotFound`] when `pid` does not name a live child of
+    /// `sender` (never spawned by it, already exited, or not representable),
+    /// so a signal to a non-child or a dead process fails closed.
+    pub fn authorise_child(&self, sender: TaskId, pid: i32) -> Result<TaskId, Errno> {
+        self.table
+            .lock()
+            .live_child(sender, pid)
+            .ok_or(Errno::NotFound)
+    }
+
+    /// Record that `child` was terminated by a signal, carrying `status`, and
+    /// wake any parent parked in [`ProcessWait::wait`].
+    ///
+    /// Reuses the same table mutation and wake `record_exit` performs for a
+    /// self-exiting child, so a signalled child is reaped through the one
+    /// [`ProcessTable::reap`] primitive exactly like one that called `exit`
+    /// itself — the parent cannot tell the two apart except by the `128 + n`
+    /// status the signal producer records here.
+    pub fn record_signalled_exit(&self, child: TaskId, status: i32) {
+        self.table.lock().record_exit(child, status);
+        // Release the lock above before waking a parent parked in `wait`.
+        crate::waitq::procwait_wake();
     }
 }
 
@@ -490,6 +546,58 @@ mod tests {
         table.record_exit(TaskId(2), 0);
         // -2 is not WAIT_PID_ANY and not a valid child id: fail closed.
         assert_eq!(table.reap(TaskId(1), -2), Reap::NoChild);
+    }
+
+    #[test]
+    fn live_child_finds_only_a_running_child_of_the_asker() {
+        let mut table = ProcessTable::new();
+        table.register(TaskId(1), TaskId(2));
+        // A live child of the real parent resolves.
+        assert_eq!(table.live_child(TaskId(1), 2), Some(TaskId(2)));
+        // Another task is not the parent, so it cannot signal the child.
+        assert_eq!(table.live_child(TaskId(9), 2), None);
+        // An unknown pid, WAIT_PID_ANY (no wildcard for signal), and a
+        // negative pid all name no child.
+        assert_eq!(table.live_child(TaskId(1), 5), None);
+        assert_eq!(table.live_child(TaskId(1), WAIT_PID_ANY), None);
+        assert_eq!(table.live_child(TaskId(1), -2), None);
+    }
+
+    #[test]
+    fn live_child_does_not_find_a_zombie() {
+        let mut table = ProcessTable::new();
+        table.register(TaskId(1), TaskId(2));
+        table.record_exit(TaskId(2), 0);
+        // A child that already exited is a zombie awaiting reap, not a
+        // signallable process — fail closed.
+        assert_eq!(table.live_child(TaskId(1), 2), None);
+    }
+
+    #[test]
+    fn authorise_child_gates_the_signal_path() {
+        let p = producer();
+        p.register_child(TaskId(1), TaskId(2));
+        // The parent may signal its live child.
+        assert_eq!(p.authorise_child(TaskId(1), 2), Ok(TaskId(2)));
+        // A non-parent, an unknown pid, and (after exit) a zombie all fail
+        // closed with `NotFound`.
+        assert_eq!(p.authorise_child(TaskId(9), 2), Err(Errno::NotFound));
+        assert_eq!(p.authorise_child(TaskId(1), 3), Err(Errno::NotFound));
+        p.record_exit(TaskId(2), 0);
+        assert_eq!(p.authorise_child(TaskId(1), 2), Err(Errno::NotFound));
+    }
+
+    #[test]
+    fn record_signalled_exit_makes_the_child_reapable_with_its_status() {
+        let p = producer();
+        p.register_child(TaskId(1), TaskId(2));
+        // A signalled child becomes a reapable zombie carrying the signal's
+        // termination status, indistinguishable from a self-exit to `reap`.
+        p.record_signalled_exit(TaskId(2), 130);
+        assert_eq!(
+            p.wait(TaskId(1), WAIT_PID_ANY),
+            Ok(ReapedChild { pid: 2, code: 130 })
+        );
     }
 
     /// Build a `'static` [`KernelProcessWait`] over a fresh single-CPU

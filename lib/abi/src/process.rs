@@ -599,6 +599,29 @@ impl Signal {
             _ => Err(Errno::OutOfRange),
         }
     }
+
+    /// The exit status a [`wait`](crate::SyscallNumber::WAIT) reports for a
+    /// child *terminated* by this signal, or `None` for a signal that does
+    /// not end the child ([`Continue`](Self::Continue)).
+    ///
+    /// One definition shared by the kernel's signal producer (which records
+    /// it as the terminated child's status) and every caller that reaps a
+    /// signalled child (which recognises it), so the two can never disagree.
+    /// It follows the long-standing Unix convention of reporting a
+    /// signal-terminated process as `128 + signal number`, so
+    /// [`Terminate`](Self::Terminate) (2) surfaces as `130` and
+    /// [`Kill`](Self::Kill) (3) as `131` — distinguishable from the small
+    /// non-negative codes a program chooses for its own `exit`.
+    #[must_use]
+    pub const fn termination_status(self) -> Option<i32> {
+        // `128 + n`, spelled out per arm so the `i32` result needs no
+        // `u32 as i32` cast: Terminate (2) -> 130, Kill (3) -> 131.
+        match self {
+            Self::Continue => None,
+            Self::Terminate => Some(130),
+            Self::Kill => Some(131),
+        }
+    }
 }
 
 /// The access a single inherited descriptor grants its process.
@@ -762,6 +785,20 @@ mod tests {
         assert_eq!(Signal::from_u32(0), Err(Errno::OutOfRange));
         assert_eq!(Signal::from_u32(4), Err(Errno::OutOfRange));
         assert_eq!(Signal::from_u32(u32::MAX), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn termination_status_follows_the_128_plus_signal_convention() {
+        // A terminating signal reports `128 + n`; `Continue` does not end
+        // the child, so it has no termination status.
+        assert_eq!(Signal::Continue.termination_status(), None);
+        assert_eq!(Signal::Terminate.termination_status(), Some(130));
+        assert_eq!(Signal::Kill.termination_status(), Some(131));
+        // The reported statuses sit above the small exit codes a program
+        // chooses, so a reaper can tell a signalled death from a normal one.
+        for signal in [Signal::Terminate, Signal::Kill] {
+            assert!(signal.termination_status().expect("terminating") > 128);
+        }
     }
 
     #[test]

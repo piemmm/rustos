@@ -678,7 +678,14 @@ shared `reap` primitive on hardware.
 
 ---
 
-## SP7 — the `signal` syscall (job-control signal delivery)
+## SP7 — the `signal` syscall (job-control signal delivery) `[x]`
+
+**SP7a + SP7b are landed, so SP7 is complete on aarch64.** A first-party
+program can deliver a control signal to its own child through `abi-v1`; the
+signal producer authorises the target against the sender's own children and
+delivers it by driving the live scheduler. The x86_64 + riscv64 sibling
+verticals follow when convenient (the producer is arch-neutral; only the
+`-M virt` proof is per-arch).
 
 Backs `ProcessHost::signal` (`.junie/PREREQUISITES2.md` P2), the seam the
 shell's `fg`/`bg`/kill job control drives. A parent delivers one of a small,
@@ -721,18 +728,37 @@ Split into two increments, exactly as SP6 was (surface+seam, then producer):
   `NotImplemented` stub with the genuine syscall path (fail-closed until the
   producer lands). Host-tested (null seam fail-closed; handler forwards;
   dispatch decodes/validates; marshalling).
-- **SP7b — scheduler-side producer + `-M virt` vertical (remaining).** The
-  concrete `KernelProcessSignal` that reuses the `procwait` parent/child
-  bookkeeping to authorise the target, then delivers the signal by driving
-  the scheduler: `Terminate`/`Kill` force the child to exit with a
-  signalled status the parent's `wait` reports, `Stop`/`Continue` park/unpark
-  it. Installed via `with_process_signal`; proven by an aarch64 `-M virt`
-  vertical. Not part of SP7a's host-only landing.
+- **SP7b — scheduler-side producer + `-M virt` vertical `[x]`.** **Landed.**
+  `kernel/core::procsignal::KernelProcessSignal<A, P>` is the concrete
+  producer: it composes over the `KernelProcessWait` producer (the one owner
+  of the parent/child + exit-status bookkeeping — no second copy, §2.2) and a
+  `&'static P: SchedulerPolicy`. It authorises the target through the new
+  `KernelProcessWait::authorise_child` (a live child of the sender, else
+  fail-closed `NotFound`; a zombie is not signallable), then delivers:
+  `Continue` → `SchedulerPolicy::unpark` (a continue to a non-stopped child is
+  a harmless no-op — `InvalidState` is folded to `Ok`); `Terminate` / `Kill` →
+  `SchedulerPolicy::exit` + `KernelProcessWait::record_signalled_exit`, which
+  records the signal's `128 + n` status (the shared `Signal::termination_status`
+  in `lib/abi`, so kernel and program agree) so the parent's `wait` reaps it.
+  Installed in `init.rs::run_phases` over the concrete wait producer +
+  `state.scheduler` and threaded through a hook-level `with_process_signal`
+  forwarder. Six host tests cover it over a real `Scheduler<TestArch>`
+  (non-child fail-closed, Terminate/Kill status, Continue no-op, no
+  double-signal). The aarch64 `-M virt` vertical
+  (`tests/integration/signal_qemu_aarch64` + the two-role
+  `tests/integration/signal_program` fixture) builds an isolated child + parent
+  EL0 space, admits the child, threads its scheduler-assigned PID into the
+  parent's startup arguments, installs the wait + signal producers, and drives
+  the cooperative `step` loop: the child yields forever, the parent
+  `signal`s it `Terminate`, `wait`s to reap it, verifies the `130` status, and
+  exits 0 — **verified green under QEMU on `-M virt`** (PASS id 4302).
 
-**Done when (SP7a):** a first-party program can issue `signal` through
-`abi-v1`; the call fails closed with `NotImplemented` until a producer is
-installed; the C header, `abi-check`, `deps-check`, `cfg-check`, and the
-host test matrix stay green.
+**Done when (SP7):** a first-party program can issue `signal` through `abi-v1`
+and terminate its own child under the live scheduler on aarch64 `-M virt`;
+signalling a non-child fails closed; the C header, `abi-check`, `deps-check`,
+`cfg-check`, the host test matrix, and the QEMU matrix stay green. **SP7a
+landed the surface + fail-closed seam; SP7b landed the scheduler-side producer
++ the `-M virt` vertical.**
 
 ---
 

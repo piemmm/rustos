@@ -156,6 +156,7 @@ pub use live_producer::{LiveDmaAlloc, LiveMemMap, LiveMmioMap, LiveSharedMem};
 pub use memmap::{MemMap, NullMemMap, NULL_MEM_MAP};
 pub use panic::{handle_panic, panic_dump, PanicContext};
 pub use proc_id::{mint_proc_id, mint_proc_id_bootstrap};
+pub use procsignal::{KernelProcessSignal, NullProcessSignal, ProcessSignal, NULL_PROCESS_SIGNAL};
 pub use procwait::{
     KernelProcessWait, NullProcessWait, ProcessTable, ProcessWait, Reap, ReapedChild,
     NULL_PROCESS_WAIT,

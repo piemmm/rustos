@@ -2286,6 +2286,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-signal"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-rt",
+]
+
+[[package]]
+name = "rustos-test-signal-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-arch-aarch64",
+ "rustos-arch-api",
+ "rustos-fdt",
+ "rustos-itest-harness",
+ "rustos-kalloc",
+ "rustos-kernel-core",
+ "rustos-kernel-mem",
+ "rustos-kernel-sched-eevdf",
+ "rustos-kernel-sec",
+ "rustos-kernel-syscall",
+ "rustos-log",
+ "rustos-sync",
+]
+
+[[package]]
 name = "rustos-test-spawn-el0-resume-qemu-riscv64"
 version = "0.0.0"
 dependencies = [

@@ -520,12 +520,19 @@ the caller spawned; `signal` is a closed `rustos_abi::Signal` discriminant
 other value fails closed with `OutOfRange` before dispatch (validate every
 input). The handler reaches the scheduler-side deliverer through the
 `kernel/core::procsignal::ProcessSignal` seam, installed at boot like the
-`wait` producer; a `pid` that is not a child of the caller fails closed with
-`NotFound`, and a `signal` issued before the producer is installed fails
+`wait` producer; a `pid` that is not a live child of the caller fails closed
+with `NotFound`, and a `signal` issued before the producer is installed fails
 closed with `NotImplemented` through the default `NULL_PROCESS_SIGNAL`,
 never pretending a signal was delivered (`AGENTS.md` §2.9). The concrete
-deliverer that terminates/stops/continues the child lands in a later
-increment (`plans/SPAWN.md` SP7b). The first-party Rust wrapper is
+deliverer is `kernel/core::procsignal::KernelProcessSignal` (`plans/SPAWN.md`
+SP7b): it composes over the `KernelProcessWait` producer — the one owner of
+the parent/child + exit-status bookkeeping, so authorisation and the reaped
+status share a single definition — and the live scheduler, and delivers by
+driving it: `Continue` resumes a stopped child (`SchedulerPolicy::unpark`, a
+no-op for a running one), and `Terminate` / `Kill` terminate the child
+(`SchedulerPolicy::exit`) and record the signal's `128 + n` termination
+status (`Signal::termination_status`) so the parent's `wait` reaps it —
+distinguishable from a self-`exit`. The first-party Rust wrapper is
 `rustos_rt::signal`; the C stub is `ros_sys_signal` and the header defines
 `ROS_SIGNAL_CONTINUE` / `ROS_SIGNAL_TERMINATE` / `ROS_SIGNAL_KILL`.
 

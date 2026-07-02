@@ -2192,6 +2192,41 @@ const TESTS: &[QemuTest] = &[
         keyboard: None,
         serial: &[],
     },
+    // SPAWN Stage SP7b (`plans/SPAWN.md` §1): the aarch64 `signal` vertical —
+    // the proof that a parent process can deliver a control signal
+    // (`Signal::Terminate`) to its own child under the live scheduler on the
+    // `virt` board. It reads the GICv2 base + timer rate from the embedded
+    // `virt` DTB (P3/P4), brings up the EL1 vectors + GICv2, and builds **two**
+    // hardware-isolated EL0 address spaces — a child and a parent — from the
+    // pure-Rust `rustos-test-signal` fixture (built PIE in both roles +
+    // converted to `rxe` by `build.rs`) through the capability-checked, audited
+    // `kernel_core::spawn_image`. It admits the child, threads its
+    // scheduler-assigned PID into the parent's startup arguments, records the
+    // parent/child link with a `kernel_core::KernelProcessWait` producer,
+    // installs a `kernel_core::KernelProcessSignal` producer over that
+    // bookkeeping + the live scheduler, admits the parent as a resumable user
+    // kthread (`spawn_user_kthread`), and routes the child's `yield` and the
+    // parent's `signal`/`wait`/`exit` `svc`s through the producers +
+    // `reschedule_current`: the signal producer terminates the child on the
+    // scheduler and records the 128+n status, then the parent reaps it and the
+    // kernel copies the status out to the parent's `status` pointer. PASS once
+    // the parent terminated the child, read back the signalled status, and
+    // exited 0; a wrong status, a missing reap, an unexpected syscall, or a
+    // stall writes a distinct failure finisher (fail-loud). Single CPU and a
+    // 60-second budget match the other boot-then-do-fixed-work aarch64 tests.
+    QemuTest {
+        package: "rustos-test-signal-qemu-aarch64",
+        binary: "rustos-test-signal-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+        serial: &[],
+    },
     // PI Stage X4 (`plans/PI.md`): the x86_64 `wait` vertical — the cross-port
     // sibling of the aarch64 `wait_qemu_aarch64`, proving a parent ring-3
     // process can block on, reap, and read back the exit code of its own child

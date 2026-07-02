@@ -4709,6 +4709,23 @@ where
         self
     }
 
+    /// Install the scheduler-side process-signal producer the `signal`
+    /// syscall drives, consuming and returning `self` (`plans/SPAWN.md` `SP7b`).
+    ///
+    /// The hook-level mirror of
+    /// [`KernelSyscallHandlers::with_process_signal`]: the boot path passes
+    /// the leaked [`crate::procsignal::KernelProcessSignal`]. A boot path that
+    /// never calls it leaves the fail-closed [`NULL_PROCESS_SIGNAL`] default
+    /// and `signal` returns `NotImplemented`.
+    #[must_use]
+    pub fn with_process_signal(
+        mut self,
+        process_signal: &'static (dyn ProcessSignal + 'static),
+    ) -> Self {
+        self.handlers = self.handlers.with_process_signal(process_signal);
+        self
+    }
+
     /// Borrow the [`KernelSyscallHandlers`] this hook owns.
     ///
     /// Used by the arch-port trap path to reach the [`IrqTable`] +

@@ -1180,8 +1180,27 @@ fn run_phases<A: KernelArch>(
     // `KernelState` and `Box::leak`'d for the same one-shot-publish reason as
     // the hook below. Until this stage the handler held the
     // fail-closed `NULL_PROCESS_WAIT`.
-    let process_wait: &'static (dyn crate::procwait::ProcessWait + 'static) =
+    // Keep the concrete `&'static KernelProcessWait` binding: the signal
+    // producer below composes over it (it owns the shared parent/child +
+    // exit-status bookkeeping both syscalls read), while the handler consumes
+    // it through the `dyn ProcessWait` coercion.
+    let process_wait_concrete: &'static KernelProcessWait<A> =
         Box::leak(Box::new(KernelProcessWait::new(state.arch.as_ref())));
+    let process_wait: &'static (dyn crate::procwait::ProcessWait + 'static) = process_wait_concrete;
+
+    // Build the scheduler-side process-signal producer the `signal` syscall
+    // drives (`plans/SPAWN.md` SP7b). It authorises the target and records a
+    // signalled termination through the same `KernelProcessWait` above (one
+    // source of truth for the parent/child relationship, never a second copy)
+    // and delivers the signal by driving the live scheduler (unpark for
+    // continue, exit for terminate/kill). `Box::leak`'d for the same
+    // one-shot-publish reason as the hook. Until this stage the handler held
+    // the fail-closed `NULL_PROCESS_SIGNAL`.
+    let process_signal: &'static (dyn crate::procsignal::ProcessSignal + 'static) =
+        Box::leak(Box::new(crate::procsignal::KernelProcessSignal::new(
+            process_wait_concrete,
+            &state.scheduler,
+        )));
 
     // Publish the wait-queue arch hook (Design D P-2) so the explicit /
     // timed wake paths reach the live scheduler + arch (factored out to
@@ -1329,7 +1348,11 @@ fn run_phases<A: KernelArch>(
         // Serve `msi_alloc` through the arch MSI controller (`None` is fail-closed).
         .with_msi_alloc_facility(state.arch.as_ref().msi_alloc_facility())
         // Serve `shm_*` through the `kernel/mem`-backed shared-memory producer.
-        .with_shared_mem_facility(shared_mem_facility),
+        .with_shared_mem_facility(shared_mem_facility)
+        // Serve `signal` through the scheduler-side producer built above
+        // (`plans/SPAWN.md` SP7b); the default `NULL_PROCESS_SIGNAL` keeps
+        // `signal` fail-closed `NotImplemented` until this is installed.
+        .with_process_signal(process_signal),
         )))
         .map_err(InitError::DispatcherAlreadyInstalled)?;
     phase_ready(log_sink, Phase::Syscall);
