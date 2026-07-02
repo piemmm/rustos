@@ -45,9 +45,11 @@
 //!
 //! # Layering & safety
 //!
-//! `no_std` (with `alloc`); the only dependency is the audited
-//! `lib/abi` (for [`Errno`](rustos_abi::Errno) on the host seam), so a
-//! userland program never links a kernel or driver crate.
+//! `no_std` (with `alloc`); the only dependencies are the audited `lib/*`
+//! crates `rustos-abi` (for [`Errno`](rustos_abi::Errno) on the host seam),
+//! `rustos-resref` (the one resource-reference spelling parser), and
+//! `rustos-vt` (the shared read line discipline the REPL's line reader
+//! runs), so a userland program never links a kernel or driver crate.
 //! No `unsafe`, and no `unwrap`/`expect`/`panic!` in production paths.
 
 #![no_std]

@@ -19,6 +19,7 @@ Stability tier: **experimental** (the surface grows stage by stage under
 | `color` | `BasicColor` (the 16 ANSI colours, palette index `0..=15`) and `Color` (the default, the 16 basic colours, the 256-colour palette, and 24-bit truecolour). |
 | `attr` | `Sgr` (one Select Graphic Rendition operation), the single `write_params`/`decode_params` SGR table both the emitter and parser use, and `Attributes` (the folded rendition state of a cell). |
 | `cell` | `Cell` — a glyph plus its `Attributes`, the shared screen-cell representation. |
+| `line` | The read line discipline's **buffer** half: `push_line_byte` / `LineFeed` — CR or LF completes the line, the erase control rubs out the last kept byte (zeroed on removal), and a line that outgrows the caller's buffer fails closed `TooLong`. The one editor every console reader runs (login's prompt reads, the shell REPL), matching the kernel console's echo half byte for byte. |
 | `op` | `Op` — the operation vocabulary (print, C0 controls, cursor movement/positioning, erase, scroll region, alt-screen, cursor visibility, save/restore, SGR, window title) and `EraseMode`. |
 | `emit` | `encode` / `encode_into` / `encode_all` — render an `Op` to bytes. |
 | `parse` | `Parser` — the streaming byte → `Op` state machine. |

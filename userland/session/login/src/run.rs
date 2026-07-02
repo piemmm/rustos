@@ -75,7 +75,7 @@ mod program {
     /// input into `buf`, returning the number of bytes filled.
     ///
     /// The read line discipline is shared with the kernel console echo: this
-    /// runs the **buffer** half ([`rustos_login::push_line_byte`]) while the
+    /// runs the **buffer** half ([`rustos_vt::line::push_line_byte`]) while the
     /// kernel console runs the matching **echo** half, both keyed off the one
     /// `lib/vt` erase definition. So a Backspace rubs out
     /// the last character both on screen and in `buf`; CR and LF both
@@ -97,10 +97,10 @@ mod program {
             if read == 0 {
                 return Err(Errno::NotFound);
             }
-            match rustos_login::push_line_byte(buf, &mut len, byte[0]) {
-                rustos_login::LineFeed::Pending => {}
-                rustos_login::LineFeed::Complete => return Ok(len),
-                rustos_login::LineFeed::TooLong => return Err(Errno::LengthOutOfRange),
+            match rustos_vt::line::push_line_byte(buf, &mut len, byte[0]) {
+                rustos_vt::line::LineFeed::Pending => {}
+                rustos_vt::line::LineFeed::Complete => return Ok(len),
+                rustos_vt::line::LineFeed::TooLong => return Err(Errno::LengthOutOfRange),
             }
         }
     }

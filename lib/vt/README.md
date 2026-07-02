@@ -12,7 +12,12 @@ RustOS's text stack. It is the single source of truth (`AGENTS.md` §2.2) for:
   save/restore,
 - a shared [`Cell`] / [`Attributes`] representation reused by both the
   *consumer* (the terminal emulator's `Grid`) and the *emitter* (the curses
-  renderer).
+  renderer),
+- the read line discipline's **buffer** half (`line::push_line_byte`): CR or
+  LF completes a line, the erase control (Backspace / Delete) rubs out the
+  last kept byte, and an over-long line fails closed — the one editor every
+  console reader runs (login's prompt reads, the shell REPL), matching the
+  kernel console's echo half byte for byte.
 
 It ships **both** an emitter (`Op` → bytes) and a streaming parser (bytes →
 `Op` events) built over the *same* tables, so the two provably agree: every

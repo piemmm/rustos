@@ -4282,13 +4282,14 @@ two users — or the same user twice — can be logged in concurrently.
   `set_echo` toggle) so a Backspace at the start of the input line never
   walks back over the prompt; the column persists across the many per-byte
   `stream_read` drains one logical input line spans. Reader **buffer** half
-  (`rustos_login::push_line_byte`, a host-tested allocation-free helper):
+  (`rustos_vt::line::push_line_byte`, a host-tested allocation-free helper
+  shared by login's prompt reads and the shell REPL's line reader):
   CR/LF completes the line, an erase pops the last byte (zeroed on removal,
   §4) and is never stored, any other byte appends or fails closed
   `TooLong`; `login::run::read_line_raw` drives it. Proven by `lib/vt`
   control tests, six new `console.rs` erase tests (rub-out, BS-as-erase,
   no-op at line start, column persistence across calls, CR/LF reset,
-  `set_echo` reset), and nine `rustos_login::line` tests. Docs:
+  `set_echo` reset), and nine `rustos_vt::line` tests. Docs:
   `docs/src/architecture/syscalls.md`, `docs/src/lib/vt.md`,
   `docs/src/userland/login.md`.
 - **Keyboard input for the video console — kernel-side delivery seam

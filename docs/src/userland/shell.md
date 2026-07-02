@@ -10,8 +10,10 @@ background and stopped jobs.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
-only dependency is the audited `lib/abi` — for the stable `Errno`
-carried back by the process-host seam — so a userland program never links
+only dependencies are the audited `lib/*` crates `rustos-abi` (the stable
+`Errno` carried back by the process-host seam), `rustos-resref` (the one
+resource-reference spelling parser), and `rustos-vt` (the shared read line
+discipline the REPL's line reader runs) — so a userland program never links
 a kernel or driver crate (`AGENTS.md` §17.4).
 
 ## A pure interpreter
@@ -157,9 +159,14 @@ syscall wrappers), never the C ABI.
 over the program's **inherited standard streams** (`AGENTS.md` §20):
 
 - It reads command lines from **standard input** (fd 0) through
-  `rustos_rt::stdin`, reassembling lines across reads and stripping a
-  trailing CRLF. A line whose here-documents are pending is completed by
-  reading body lines under a `> ` continuation prompt before anything runs.
+  `rustos_rt::stdin`, reassembling lines across reads with the read line
+  discipline's shared **buffer** half (`rustos_vt::line::push_line_byte`,
+  the same editor login's prompt reads run and the kernel console echo
+  mirrors): CR and LF both terminate a line (a serial terminal sends CR for
+  the Return key, a pipe or script LF, and a CRLF pair counts once), and the
+  erase control (Backspace / Delete) rubs out the last kept byte. A line
+  whose here-documents are pending is completed by reading body lines under
+  a `> ` continuation prompt before anything runs.
 - It writes the prompt and all command output to **standard output** (fd 1)
   and **standard error** (fd 2) through the `RtConsole` seam.
 - It emits advisory metadata on the **standard information stream** (fd 3,

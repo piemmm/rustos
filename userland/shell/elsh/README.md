@@ -10,8 +10,11 @@ background and stopped jobs.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
-only dependency is the audited `lib/abi` (for the stable
-[`Errno`](../../../lib/abi) on the host seam), so the shell never links a
+only dependencies are the audited `lib/*` crates
+[`rustos-abi`](../../../lib/abi) (the stable `Errno` on the host seam),
+[`rustos-resref`](../../../lib/resref) (the one resource-reference spelling
+parser), and [`rustos-vt`](../../../lib/vt) (the shared read line discipline
+the REPL's line reader runs), so the shell never links a
 kernel or driver crate (`AGENTS.md` §17.4).
 
 ## A pure interpreter

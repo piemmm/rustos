@@ -36,6 +36,14 @@ rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # so linking it grants the shell no authority.
 rustos-resref = { path = "../../../lib/resref", version = "=0.0.0" }
 
+# The single ANSI/VT terminal-control vocabulary (`AGENTS.md` §2.2): the
+# REPL's line reader runs the read line discipline's buffer half
+# (`rustos_vt::line::push_line_byte`) — CR and LF both terminate a line
+# (a serial terminal sends CR for Return) and the erase (rub-out) control
+# edits the kept bytes — from the one definition the kernel console echo
+# also keys off, so screen and buffer can never disagree.
+rustos-vt = { path = "../../../lib/vt", version = "=0.0.0" }
+
 # The pure-Rust userland runtime (`AGENTS.md` §1): `rustos-rt` provides the
 # `Run` binary's `_start`, stack canary, panic handler, and syscall wrappers.
 # RustOS is Rust-only, so the shell links this runtime, never the C ABI

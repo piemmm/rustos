@@ -9,6 +9,15 @@
 //! input stream ends. Advisory metadata about the session goes to the
 //! standard information stream (fd 3).
 //!
+//! # Read line discipline
+//!
+//! Line assembly runs the read line discipline's **buffer** half
+//! ([`rustos_vt::line`]), the one shared definition the kernel console echo
+//! and login's prompt reads also key off: CR and LF both terminate a line
+//! (a serial terminal sends CR for the Return key, a pipe or script LF, and
+//! a CRLF pair counts once), and the erase control (Backspace / Delete)
+//! rubs out the last kept byte exactly as the echo rubs it off the screen.
+//!
 //! # Streams, never devices
 //!
 //! The loop reaches the outside world only through the injected [`ReplInput`]
@@ -33,6 +42,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use rustos_abi::{Human, Severity, StdInfoKind, StdInfoRecord};
+use rustos_vt::control;
+use rustos_vt::line::{push_line_byte, LineFeed};
 
 use crate::host::Console;
 use crate::parser::CommandList;
@@ -86,28 +97,50 @@ enum LineEvent {
     Eof,
 }
 
-/// Reassembles newline-terminated command lines from `stdin` reads.
+/// Assembles edited command lines from `stdin` reads by running the read
+/// line discipline's **buffer** half ([`rustos_vt::line`]) over each input
+/// byte — the same shared definition login's prompt reads and the kernel
+/// console echo key off, so what the reader keeps always matches what the
+/// screen shows. CR and LF both terminate a line (a serial terminal sends CR
+/// for the Return key, a pipe or script LF, and CRLF counts once); the erase
+/// control (Backspace / Delete) rubs out the last kept byte.
 struct LineReader {
-    /// Bytes read but not yet returned as a line.
-    buf: Vec<u8>,
+    /// Bytes read from `stdin` but not yet fed to the discipline.
+    raw: Vec<u8>,
+    /// Index of the next unprocessed byte in [`Self::raw`].
+    pos: usize,
+    /// The line under edit: a fixed [`MAX_LINE`]-byte buffer the discipline
+    /// edits in place, with [`Self::len`] bytes accepted so far.
+    line: Vec<u8>,
+    /// Accepted length of the line under edit.
+    len: usize,
     /// Set once a read returned zero: no more input will arrive.
     eof: bool,
     /// Set after an over-length line: bytes are dropped up to and including
-    /// the next newline so the tail of the discarded line is not mistaken for
-    /// a fresh command.
+    /// the next line terminator so the tail of the discarded line is not
+    /// mistaken for a fresh command.
     discarding: bool,
+    /// Set after a CR terminated a line: an immediately following LF is the
+    /// second half of a CRLF pair and is swallowed rather than completing a
+    /// spurious empty line. Carried in the reader because the pair can be
+    /// split across two reads.
+    skip_lf: bool,
 }
 
 impl LineReader {
     fn new() -> Self {
         Self {
-            buf: Vec::new(),
+            raw: Vec::new(),
+            pos: 0,
+            line: alloc::vec![0u8; MAX_LINE],
+            len: 0,
             eof: false,
             discarding: false,
+            skip_lf: false,
         }
     }
 
-    /// Read one more chunk from `input` into [`Self::buf`], setting
+    /// Read one more chunk from `input` into [`Self::raw`], setting
     /// [`Self::eof`] on a zero-length read.
     fn fill(&mut self, input: &mut dyn ReplInput) {
         let mut chunk = [0u8; READ_CHUNK];
@@ -116,72 +149,64 @@ impl LineReader {
         if read == 0 {
             self.eof = true;
         } else {
-            self.buf.extend_from_slice(&chunk[..read]);
+            self.raw.extend_from_slice(&chunk[..read]);
         }
     }
 
-    /// Split off and return the bytes up to the first newline as a line.
-    ///
-    /// `newline` is the index of the `\n`. The newline and a preceding `\r`
-    /// (CRLF) are stripped; the bytes are decoded lossily so invalid UTF-8
-    /// becomes the replacement character rather than aborting the session.
-    fn take_line(&mut self, newline: usize) -> String {
-        let mut line: Vec<u8> = self.buf.drain(..=newline).collect();
-        line.pop(); // the '\n'
-        if line.last() == Some(&b'\r') {
-            line.pop();
-        }
-        String::from_utf8_lossy(&line).into_owned()
+    /// Take the finished line out of the edit buffer, decoding it lossily so
+    /// invalid UTF-8 becomes the replacement character rather than aborting
+    /// the session, and reset the buffer for the next line.
+    fn take_line(&mut self) -> String {
+        let line = String::from_utf8_lossy(&self.line[..self.len]).into_owned();
+        self.line[..self.len].fill(0);
+        self.len = 0;
+        line
     }
 
     /// Return the next complete command line, reading from `input` as needed.
     fn next_line(&mut self, input: &mut dyn ReplInput) -> LineEvent {
         loop {
-            if self.discarding {
-                if let Some(pos) = self.buf.iter().position(|&b| b == b'\n') {
-                    self.buf.drain(..=pos);
-                    self.discarding = false;
-                } else {
-                    self.buf.clear();
-                    if self.eof {
-                        return LineEvent::Eof;
-                    }
-                    self.fill(input);
+            while self.pos < self.raw.len() {
+                let byte = self.raw[self.pos];
+                self.pos += 1;
+                if core::mem::take(&mut self.skip_lf) && byte == control::LF {
                     continue;
                 }
-            }
-
-            match self.buf.iter().position(|&b| b == b'\n') {
-                // A newline within the limit completes a normal line.
-                Some(pos) if pos <= MAX_LINE => return LineEvent::Line(self.take_line(pos)),
-                // A newline beyond the limit: the whole over-length line
-                // (including its newline) is discarded, not run.
-                Some(pos) => {
-                    self.buf.drain(..=pos);
-                    return LineEvent::Truncated;
+                if self.discarding {
+                    if byte == control::CR || byte == control::LF {
+                        self.discarding = false;
+                        self.skip_lf = byte == control::CR;
+                    }
+                    continue;
                 }
-                None => {}
+                match push_line_byte(&mut self.line, &mut self.len, byte) {
+                    LineFeed::Pending => {}
+                    LineFeed::Complete => {
+                        self.skip_lf = byte == control::CR;
+                        return LineEvent::Line(self.take_line());
+                    }
+                    // The line outgrew the limit: drop what was kept and
+                    // discard the remainder up to the next terminator, so the
+                    // tail of the dropped line never runs as a command.
+                    LineFeed::TooLong => {
+                        self.line[..self.len].fill(0);
+                        self.len = 0;
+                        self.discarding = true;
+                        return LineEvent::Truncated;
+                    }
+                }
             }
 
-            // No newline yet. If the buffer has already grown past the limit
-            // there is no point reading further: drop it and discard the
-            // remainder of the line up to the next newline.
-            if self.buf.len() > MAX_LINE {
-                self.buf.clear();
-                self.discarding = true;
-                return LineEvent::Truncated;
-            }
+            // Every read byte is consumed; drop the exhausted backlog.
+            self.raw.clear();
+            self.pos = 0;
 
             if self.eof {
-                if self.buf.is_empty() {
-                    return LineEvent::Eof;
+                if self.len > 0 {
+                    // A final line with no trailing terminator.
+                    return LineEvent::Line(self.take_line());
                 }
-                // A final line with no trailing newline.
-                let mut line = core::mem::take(&mut self.buf);
-                if line.last() == Some(&b'\r') {
-                    line.pop();
-                }
-                return LineEvent::Line(String::from_utf8_lossy(&line).into_owned());
+                return LineEvent::Eof;
             }
 
             self.fill(input);
@@ -284,6 +309,9 @@ mod tests {
         input: Vec<u8>,
         pos: usize,
         info: Vec<String>,
+        /// Upper bound on the bytes one `read` hands out, so a test can force
+        /// a line (or a CRLF pair) to be split across reads.
+        max_chunk: usize,
     }
 
     impl ScriptedInput {
@@ -292,6 +320,15 @@ mod tests {
                 input: input.as_bytes().to_vec(),
                 pos: 0,
                 info: Vec::new(),
+                max_chunk: usize::MAX,
+            }
+        }
+
+        /// A transcript handed out at most `max_chunk` bytes per read.
+        fn chunked(input: &str, max_chunk: usize) -> Self {
+            Self {
+                max_chunk,
+                ..Self::new(input)
             }
         }
     }
@@ -299,7 +336,7 @@ mod tests {
     impl ReplInput for ScriptedInput {
         fn read(&mut self, buf: &mut [u8]) -> usize {
             let remaining = &self.input[self.pos..];
-            let take = remaining.len().min(buf.len());
+            let take = remaining.len().min(buf.len()).min(self.max_chunk);
             buf[..take].copy_from_slice(&remaining[..take]);
             self.pos += take;
             take
@@ -449,6 +486,80 @@ mod tests {
         assert!(console.stderr().contains("here-document too large"));
         assert!(console.stdout().contains("after\n"), "the next line runs");
         // The dropped line was reported on fd 3.
+        assert_eq!(input.info.len(), 1);
+        assert!(input.info[0].contains("shell.line_truncated"));
+    }
+
+    #[test]
+    fn a_cr_terminated_line_runs() {
+        // The regression that motivated the shared read line discipline: a
+        // serial terminal (and the keymap's Enter encoding) sends a bare CR
+        // for the Return key, never an LF, and the shell must still run the
+        // line rather than waiting forever for an LF.
+        let host = ScriptedHost::new();
+        let console = RecordingConsole::new();
+        let mut shell = Shell::new(&host, &console);
+        let mut input = ScriptedInput::new("echo hi\rexit 3\r");
+        assert_eq!(run(&mut shell, &console, &mut input), 3);
+        assert!(console.stdout().contains("hi\n"));
+    }
+
+    #[test]
+    fn a_crlf_pair_counts_as_one_terminator() {
+        let host = ScriptedHost::new();
+        let console = RecordingConsole::new();
+        let mut shell = Shell::new(&host, &console);
+        let mut input = ScriptedInput::new("echo a\r\nexit 5\r\n");
+        assert_eq!(run(&mut shell, &console, &mut input), 5);
+        let out = console.stdout();
+        assert!(out.contains("a\n"));
+        // Two consumed lines mean two prompts: the LF of each CRLF completes
+        // no spurious empty third line.
+        assert_eq!(out.matches(PROMPT).count(), 2);
+    }
+
+    #[test]
+    fn a_crlf_pair_split_across_reads_counts_once() {
+        // One byte per read forces every CR and LF into its own read, so the
+        // pair-collapse state must survive across reads.
+        let host = ScriptedHost::new();
+        let console = RecordingConsole::new();
+        let mut shell = Shell::new(&host, &console);
+        let mut input = ScriptedInput::chunked("echo a\r\nexit 5\r\n", 1);
+        assert_eq!(run(&mut shell, &console, &mut input), 5);
+        let out = console.stdout();
+        assert!(out.contains("a\n"));
+        assert_eq!(out.matches(PROMPT).count(), 2);
+    }
+
+    #[test]
+    fn an_erase_edits_the_kept_line() {
+        // A typo rubbed out with Backspace (DEL) must leave the kept bytes
+        // matching what the kernel echo left on screen.
+        let host = ScriptedHost::new();
+        let console = RecordingConsole::new();
+        let mut shell = Shell::new(&host, &console);
+        let mut input = ScriptedInput::new("echoZ\x7f ok\n");
+        assert_eq!(run(&mut shell, &console, &mut input), 0);
+        assert!(console.stdout().contains("ok\n"));
+    }
+
+    #[test]
+    fn an_over_length_cr_terminated_line_recovers() {
+        // The over-length discard must also end at a CR terminator, so an
+        // interactive session (which never sends LF) recovers at the next
+        // Return.
+        let host = ScriptedHost::new();
+        let console = RecordingConsole::new();
+        let mut shell = Shell::new(&host, &console);
+        let mut transcript = "y".repeat(MAX_LINE + 50);
+        transcript.push('\r');
+        transcript.push_str("echo after\r");
+        let mut input = ScriptedInput::new(&transcript);
+        assert_eq!(run(&mut shell, &console, &mut input), 0);
+        let out = console.stdout();
+        assert!(out.contains("after\n"), "the next line runs: {out:?}");
+        assert!(!out.contains("yyyy"), "the dropped line never runs");
         assert_eq!(input.info.len(), 1);
         assert!(input.info[0].contains("shell.line_truncated"));
     }

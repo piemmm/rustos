@@ -110,7 +110,7 @@ supervises (`plans/PI.md` P11). It wires the real seams:
 
 - **`Prompt`** over the inherited standard streams (`AGENTS.md` §20):
   prompts to fd 1, lines from fd 0, read byte-wise through the shared read
-  line discipline (`rustos_login::push_line_byte`) into the state machine's
+  line discipline (`rustos_vt::line::push_line_byte`) into the state machine's
   stack buffers (`INPUT_LINE_MAX` — an over-long line is refused whole,
   never truncated). The kernel console owns the matching **echo** half:
   each character is echoed, a Backspace/Delete rubs out the previous one,

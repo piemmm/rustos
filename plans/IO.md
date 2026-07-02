@@ -93,9 +93,10 @@ done items):
   back `sysinfo` / `ps` / `top`). There is one `Write::write_all` loop in
   userland. The bounded, edit-aware line readers that are **not** the unbounded
   `BufReader` — the shell REPL's `MAX_LINE`-capped `LineReader` and login's
-  `push_line_byte` editor — are a deliberate security bound, not the
-  duplication IO4 removes, so they stay as their own readers over the `read`
-  primitive.
+  byte-wise prompt reads, both running the one shared
+  `rustos_vt::line::push_line_byte` editor — are a deliberate security bound,
+  not the duplication IO4 removes, so they stay as their own readers over the
+  `read` primitive.
 - **DECIDED — no owning/close-on-drop handle yet.** IO1 deliberately ships a
   *non-owning* `Stream` (a view of an fd the process already owns), not an
   owning RAII closer: `abi-v1` has no generic descriptor-close trap (only the
@@ -246,8 +247,9 @@ rustdoc + the relevant `docs/` page, whole-project gate green.
   Write}`, and the open-coded short-write loops they carried are **deleted**
   (no dead code, no parallel I/O paths). After IO4 there is one
   `Write::write_all` loop in userland — this is the stage that proves §2.2.
-  The bounded/edit-aware line readers (the REPL's `MAX_LINE` `LineReader`,
-  login's `push_line_byte` editor) are retained: they are a security bound
+  The bounded/edit-aware line readers (the REPL's `MAX_LINE` `LineReader` and
+  login's prompt reads, both over the shared `rustos_vt::line::push_line_byte`
+  editor) are retained: they are a security bound
   (§24.4), not the unbounded `BufReader`, so collapsing them would *lose* a
   bound rather than remove duplication. Verified by the existing
   shell/init/utility host tests and the `spawn_session_qemu_aarch64` vertical

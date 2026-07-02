@@ -5,19 +5,22 @@
 //! into a finished line is the read line discipline. The kernel console owns
 //! the **echo** half — rendering each character and rubbing one out on a
 //! Backspace (`kernel/core::console`, `plans/PI.md` P11). This module is the
-//! matching **buffer** half a reader runs: it keeps the line the user is
-//! building and applies the same edits to it, so the bytes the reader keeps
-//! always match what the screen shows.
+//! matching **buffer** half every console reader runs (login's prompt reads,
+//! the shell REPL): it keeps the line the user is building and applies the
+//! same edits to it, so the bytes the reader keeps always match what the
+//! screen shows. It lives here, beside the [`control`] vocabulary both halves
+//! key off, so there is exactly one definition of which byte terminates a
+//! line and which byte rubs one out — a reader with a private copy could
+//! silently disagree with the kernel echo.
 //!
-//! It is deliberately tiny and seam-free so it is exhaustively testable on the
-//! host (the `Run` binary that calls it is a freestanding program built only
-//! for the bare-metal targets, `src/run.rs`). It is **allocation-free** — every
-//! byte lands in the caller's buffer, because the userland heap is not required
-//! to read a keystroke (`plans/SPAWN.md` `SP5b`) — and it
-//! recognises the erase control from the one shared `lib/vt` definition, so it can never disagree with the kernel echo about
-//! which byte rubs out.
+//! It is deliberately tiny and seam-free so it is exhaustively testable on
+//! the host. It is **allocation-free** — every byte lands in the caller's
+//! buffer, because the userland heap is not required to read a keystroke
+//! (`plans/SPAWN.md` `SP5b`) — and it recognises the erase control from the
+//! one shared [`control`] definition, so it can never disagree with the
+//! kernel echo about which byte rubs out.
 
-use rustos_vt::control;
+use crate::control;
 
 /// What feeding one input byte to the read line discipline did.
 ///

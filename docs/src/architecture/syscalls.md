@@ -703,7 +703,7 @@ Backspace or Delete (the one `lib/vt` `control::is_line_erase` definition,
 character with a `BS SP BS` sequence, bounded by a per-console column so a
 Backspace at the start of the input line never walks back over the prompt.
 The reader's line buffer applies the matching erase to the bytes it keeps
-(`rustos_login::push_line_byte`), so screen and buffer stay in step. An
+(`rustos_vt::line::push_line_byte`), so screen and buffer stay in step. An
 `fd` that is not a readable inherited stream fails closed with `NotFound`;
 a console-less build fails closed with `NotImplemented`. The first-party
 Rust wrapper is `rustos_rt::set_echo`; the C stub is `ros_sys_stream_echo`.

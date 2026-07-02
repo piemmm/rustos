@@ -42,9 +42,6 @@
 //!
 //! * [`events`] — stable [`rustos_log::EventId`] constants (`10000` range).
 //! * [`error`] — [`LoginError`], the fail-closed outcomes of [`Login::run`].
-//! * [`line`](mod@line) — the read line discipline's buffer half
-//!   ([`push_line_byte`]): assembling one edited input line, with Backspace
-//!   erase, into a caller buffer.
 //! * [`session`] — the identity types ([`Uid`], [`Gid`],
 //!   [`AuthenticatedUser`], [`SessionKind`]) and the [`Prompt`],
 //!   [`Authenticator`], and [`SessionLauncher`] seams.
@@ -75,14 +72,12 @@ extern crate alloc;
 pub mod auth;
 pub mod error;
 pub mod events;
-pub mod line;
 pub mod login;
 pub mod session;
 pub mod supervise;
 
 pub use auth::{DenyAll, UsersAuthenticator};
 pub use error::LoginError;
-pub use line::{push_line_byte, LineFeed};
 pub use login::{Login, LoginConfig};
 pub use session::{
     AuthenticatedUser, Authenticator, Credentials, Gid, Prompt, SessionKind, SessionLauncher,
