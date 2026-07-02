@@ -118,6 +118,7 @@ members = [
     "userland/system/installer",
     "userland/session/login",
     "userland/shell/elsh",
+    "userland/shell/log",
     "userland/shell/sysinfo",
     "userland/apps/cat",
     "userland/apps/chmod",

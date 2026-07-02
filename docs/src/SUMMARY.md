@@ -94,6 +94,7 @@
 - [Text login](./userland/login.md)
 - [Application bundle loader](./userland/appmgr.md)
 - [Core CLI utilities](./userland/utilities.md)
+- [System-log tool (`log`)](./userland/log.md)
 - [Building a curses TUI (`top`)](./userland/curses-porting.md)
 
 # Desktop

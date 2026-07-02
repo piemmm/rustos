@@ -97,6 +97,25 @@ impl Stream {
         }
     }
 
+    /// Decode a stream from its canonical [`name`](Self::name), failing
+    /// closed.
+    ///
+    /// The exact inverse of [`name`](Self::name) — the single definition of
+    /// the stream-name spelling — so a tool that accepts a stream on its
+    /// command line and the on-disk `/System/Logs/<stream>/` directory agree
+    /// on one set of names.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for any string outside the closed set — never
+    /// guessing at an unknown stream.
+    pub fn from_name(name: &str) -> Result<Self, Errno> {
+        Self::ALL
+            .into_iter()
+            .find(|stream| stream.name() == name)
+            .ok_or(Errno::OutOfRange)
+    }
+
     /// The stream's identifying label, fed to [`crate::stream_genesis`] so a
     /// segment lifted onto a different stream fails verification.
     ///
@@ -166,6 +185,20 @@ mod tests {
     fn from_u8_fails_closed_on_unknown() {
         assert_eq!(Stream::from_u8(6), Err(Errno::OutOfRange));
         assert_eq!(Stream::from_u8(255), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn names_round_trip_through_from_name() {
+        for s in ALL {
+            assert_eq!(Stream::from_name(s.name()), Ok(s));
+        }
+    }
+
+    #[test]
+    fn from_name_fails_closed_on_unknown() {
+        assert_eq!(Stream::from_name("other"), Err(Errno::OutOfRange));
+        assert_eq!(Stream::from_name(""), Err(Errno::OutOfRange));
+        assert_eq!(Stream::from_name("Runtime"), Err(Errno::OutOfRange));
     }
 
     #[test]

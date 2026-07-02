@@ -2852,13 +2852,22 @@ Landed (done):
   and showing a caller's *requested* privileged source/stream inertly as a
   claim; caller text is escaped so the JSON is valid and the JSON/table output
   is control-byte-free (proven by the `fuzz_report` harness). The one stream
-  string spelling is now `Stream::name()`. Remaining SYSLOG work: boot-ring
-  import (needs a kernel-side boot ring + drain syscall that do not exist yet;
-  per-CPU gap detection lands with that producer, since `journald` assigns
-  `cpu_seq` contiguously and cannot gap in steady state), retention, the QEMU
-  vertical (launch journald under `init`), the kernel `SystemIdentity`↔machine-id
-  unification, the `log` CLI over the segment files, and anchors (see
-  `.junie/SYSLOG.md`).
+  string spelling is now `Stream::name()`. The **`log` CLI read/render/verify
+  library** (`userland/shell/log`, crate `rustos-logtool`, §14) has landed on
+  top: a host-tested seam-library (`SegmentSource`/`Output`) with
+  `show`/`report`/`export` (over `render_line`/`render_json`/`render_markdown`/
+  `render_table_*`) and `verify` (over `verify_segment`), reading a stream's
+  segments one image at a time (oldest first, bounded memory), decoding with a
+  per-segment `DictionaryView`, and failing closed on corrupt/tampered
+  segments or a missing seal key for `audit`/`security`; it added
+  `Stream::from_name` in `lib/log` for the stream operand, mirroring the
+  `cat`/`ls` tool-library precedent. Remaining SYSLOG work: the `log`
+  freestanding `Run` binary + QEMU vertical (and `tail`/`find`/`boot`/`expire`),
+  boot-ring import (needs a kernel-side boot ring + drain syscall that do not
+  exist yet; per-CPU gap detection lands with that producer, since `journald`
+  assigns `cpu_seq` contiguously and cannot gap in steady state), retention,
+  the QEMU vertical (launch journald under `init`), the kernel
+  `SystemIdentity`↔machine-id unification, and anchors (see `.junie/SYSLOG.md`).
 - §19.6 fuzzing — `cargo xtask fuzz` over all in-tree harnesses (`--quick`/
   `--soak`), fail-closed.
 - §19.7 verified core — Bronze proptest models for `lib/caps`/`kernel/sec`/
