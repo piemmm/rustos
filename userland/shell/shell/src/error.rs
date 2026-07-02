@@ -28,9 +28,17 @@ pub enum ParseError {
     /// A line ended on a trailing backslash, so the escaped character is
     /// missing.
     DanglingEscape,
-    /// A redirection operator (`<`, `>`, `>>`) was not followed by a target
-    /// filename.
+    /// A file redirection operator (`<`, `>`, `>>`, `<>`, `&>`, …) was not
+    /// followed by a target filename.
     MissingRedirectionTarget,
+    /// A redirection operator the shell recognises but does not yet implement:
+    /// a here-document (`<<`, `<<-`) or here-string (`<<<`). Failing closed is
+    /// deliberate — the alternative would be to misread the body as commands.
+    UnsupportedRedirection,
+    /// A redirection whose meaning is not well defined: a descriptor-duplication
+    /// form with neither a source descriptor nor a `-` close (`<&`, `2>&x`), or
+    /// a descriptor number too large to represent.
+    AmbiguousRedirection,
     /// A pipe (`|`) or sequence/logical operator (`&&`, `||`, `;`, `&`) had
     /// no command on one of its sides.
     MissingCommand,
@@ -44,6 +52,8 @@ impl fmt::Display for ParseError {
             Self::UnterminatedQuote => "unterminated quote",
             Self::DanglingEscape => "trailing backslash with nothing to escape",
             Self::MissingRedirectionTarget => "redirection is missing its target",
+            Self::UnsupportedRedirection => "unsupported redirection operator",
+            Self::AmbiguousRedirection => "ambiguous redirection",
             Self::MissingCommand => "expected a command",
             Self::UnterminatedExpansion => "unterminated ${...} expansion",
         };

@@ -19,15 +19,41 @@ use alloc::vec::Vec;
 use rustos_abi::{Errno, LimitKind, ResourceLimit};
 
 use crate::job::{Pid, Signal, WaitOutcome};
-use crate::parser::RedirectionKind;
+use crate::parser::OpenMode;
 
-/// A redirection with its target path already expanded to a string.
+/// A single primitive descriptor action, applied to one descriptor, in source
+/// order.
+///
+/// The parser's higher-level [`Redirection`](crate::parser::Redirection) forms
+/// are lowered to these primitives before reaching the host: a combined `&>`
+/// becomes an open on fd 1 followed by a duplication of fd 1 onto fd 2, exactly
+/// as a POSIX shell would apply it. The host therefore never has to re-derive
+/// redirection semantics — it just opens, duplicates, or closes descriptors.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RedirAction {
+    /// Open `target` with `mode` on the descriptor.
+    Open {
+        /// How to open the target.
+        mode: OpenMode,
+        /// The expanded target path.
+        target: String,
+    },
+    /// Make the descriptor a duplicate of `source`.
+    Dup {
+        /// The descriptor to alias.
+        source: u32,
+    },
+    /// Close the descriptor.
+    Close,
+}
+
+/// A resolved redirection: the descriptor it acts on and the action to apply.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedRedirection {
-    /// Which stream is redirected, and how.
-    pub kind: RedirectionKind,
-    /// The expanded target path.
-    pub target: String,
+    /// The descriptor this action binds.
+    pub fd: u32,
+    /// What to do to `fd`.
+    pub action: RedirAction,
 }
 
 /// One command of a pipeline, with every word expanded to its final string.
@@ -160,8 +186,8 @@ pub(crate) static NULL_LIMIT_STORE: NullLimitStore = NullLimitStore;
 
 #[cfg(test)]
 mod tests {
-    use super::{LaunchSpec, ResolvedCommand, ResolvedRedirection};
-    use crate::parser::RedirectionKind;
+    use super::{LaunchSpec, RedirAction, ResolvedCommand, ResolvedRedirection};
+    use crate::parser::OpenMode;
     use alloc::string::ToString;
     use alloc::vec;
 
@@ -170,8 +196,11 @@ mod tests {
         let commands = vec![ResolvedCommand {
             argv: vec!["echo".to_string(), "hi".to_string()],
             redirections: vec![ResolvedRedirection {
-                kind: RedirectionKind::OutputTruncate,
-                target: "out".to_string(),
+                fd: 1,
+                action: RedirAction::Open {
+                    mode: OpenMode::Write { clobber: false },
+                    target: "out".to_string(),
+                },
             }],
         }];
         let env = vec![("PATH", "/Apps")];

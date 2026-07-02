@@ -20,11 +20,16 @@ use crate::builtin::{self, is_builtin, BuiltinContext};
 use crate::env::{assignment_split, Environment};
 use crate::error::ParseError;
 use crate::host::{
-    Console, LaunchSpec, LimitStore, ProcessHost, ResolvedCommand, ResolvedRedirection,
-    NULL_LIMIT_STORE,
+    Console, LaunchSpec, LimitStore, ProcessHost, RedirAction, ResolvedCommand,
+    ResolvedRedirection, NULL_LIMIT_STORE,
 };
 use crate::job::{ExitStatus, JobState, JobTable, WaitOutcome};
-use crate::parser::{parse, Command, ListEntry, Pipeline, RunCondition};
+use crate::parser::{parse, Command, ListEntry, OpenMode, Pipeline, Redirection, RunCondition};
+
+/// Standard output's descriptor — the target of a combined `&>` open.
+const STDOUT_FD: u32 = 1;
+/// Standard error's descriptor — duplicated onto stdout by a combined `&>`.
+const STDERR_FD: u32 = 2;
 
 /// Status used when a command cannot be launched (mirrors the POSIX
 /// "command not found" convention).
@@ -207,12 +212,62 @@ impl<'a> Shell<'a> {
         let argv = self.expand_argv(command)?;
         let mut redirections = Vec::with_capacity(command.redirections.len());
         for redirection in &command.redirections {
-            redirections.push(ResolvedRedirection {
-                kind: redirection.kind,
-                target: self.env.expand_word(&redirection.target)?,
-            });
+            self.lower_redirection(redirection, &mut redirections)?;
         }
         Ok(ResolvedCommand { argv, redirections })
+    }
+
+    /// Lower one parsed [`Redirection`] into the primitive descriptor actions
+    /// the host applies, expanding any target word.
+    ///
+    /// A combined `&>` open lowers to two actions — open the target on stdout,
+    /// then duplicate stdout onto stderr — so the host never re-derives the
+    /// combined-redirection meaning (one definition of what `&>` does).
+    fn lower_redirection(
+        &self,
+        redirection: &Redirection,
+        out: &mut Vec<ResolvedRedirection>,
+    ) -> Result<(), ParseError> {
+        match redirection {
+            Redirection::File { fd, mode, target } => out.push(ResolvedRedirection {
+                fd: *fd,
+                action: RedirAction::Open {
+                    mode: *mode,
+                    target: self.env.expand_word(target)?,
+                },
+            }),
+            Redirection::Combined {
+                append,
+                clobber,
+                target,
+            } => {
+                let mode = if *append {
+                    OpenMode::Append { clobber: *clobber }
+                } else {
+                    OpenMode::Write { clobber: *clobber }
+                };
+                out.push(ResolvedRedirection {
+                    fd: STDOUT_FD,
+                    action: RedirAction::Open {
+                        mode,
+                        target: self.env.expand_word(target)?,
+                    },
+                });
+                out.push(ResolvedRedirection {
+                    fd: STDERR_FD,
+                    action: RedirAction::Dup { source: STDOUT_FD },
+                });
+            }
+            Redirection::Dup { fd, source } => out.push(ResolvedRedirection {
+                fd: *fd,
+                action: RedirAction::Dup { source: *source },
+            }),
+            Redirection::Close { fd } => out.push(ResolvedRedirection {
+                fd: *fd,
+                action: RedirAction::Close,
+            }),
+        }
+        Ok(())
     }
 
     fn expand_argv(&self, command: &Command) -> Result<Vec<String>, ParseError> {
@@ -405,6 +460,59 @@ mod tests {
 
         assert!(console.stdout().contains("[1] Done sleep 10\n"));
         assert!(shell.jobs().is_empty());
+    }
+
+    #[test]
+    fn combined_redirection_lowers_to_open_then_dup() {
+        use crate::host::RedirAction;
+        use crate::parser::OpenMode;
+
+        let host = ScriptedHost::new();
+        let console = RecordingConsole::new();
+        let mut shell = Shell::new(&host, &console);
+
+        shell.run_line("run &>both").unwrap();
+
+        let launches = host.launches();
+        assert_eq!(launches.len(), 1);
+        let redirs = &launches[0].commands[0].redirections;
+        // `&>both` lowers to: open `both` on stdout, then dup stdout onto stderr.
+        assert_eq!(
+            redirs,
+            &[
+                super::ResolvedRedirection {
+                    fd: 1,
+                    action: RedirAction::Open {
+                        mode: OpenMode::Write { clobber: false },
+                        target: "both".into(),
+                    },
+                },
+                super::ResolvedRedirection {
+                    fd: 2,
+                    action: RedirAction::Dup { source: 1 },
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn numbered_dup_reaches_the_host_verbatim() {
+        use crate::host::RedirAction;
+
+        let host = ScriptedHost::new();
+        let console = RecordingConsole::new();
+        let mut shell = Shell::new(&host, &console);
+
+        shell.run_line("run 2>&1").unwrap();
+
+        let launches = host.launches();
+        assert_eq!(
+            launches[0].commands[0].redirections,
+            [super::ResolvedRedirection {
+                fd: 2,
+                action: RedirAction::Dup { source: 1 },
+            }]
+        );
     }
 
     #[test]

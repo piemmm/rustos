@@ -49,6 +49,45 @@ kernel.
    expanding each word (`env::Environment::expand_word`) and either
    dispatching a builtin or launching through the `ProcessHost`.
 
+## Redirections
+
+The lexer decodes redirection operators into a `RedirOp` and the parser
+attaches the target word the file-opening forms need, so a redirection is
+understood before anything runs. The shell then *lowers* each parsed
+`Redirection` into primitive `ResolvedRedirection { fd, action }` values — an
+`Open { mode, target }`, a `Dup { source }`, or a `Close` — that the process
+host applies in source order. The host never re-derives redirection meaning;
+it only opens, duplicates, or closes a descriptor.
+
+Supported operators (each may carry an explicit leading descriptor number, an
+IO number, e.g. `2>`, `3>>`, `0<`):
+
+- **File opens:** `<` (read), `>` / `>|` / `>!` (write, truncating; the `|`/`!`
+  spellings override `noclobber`), `>>` / `>>|` / `>>!` (append), `<>`
+  (read-write).
+- **Duplication and close:** `n>&m`, `n<&m`, `2>&1` duplicate a descriptor;
+  `>&-`, `<&-`, `n>&-` close one.
+- **Combined stdout+stderr:** `&>` / `>&file` and the append (`&>>`, `>>&`) and
+  clobber-override (`&>|`, `&>!`) spellings. These lower to an open on fd 1
+  followed by a duplication of fd 1 onto fd 2 — the single definition of what a
+  combined redirection means (`AGENTS.md` §2.2).
+
+A descriptor number is an IO number only when it is glued directly to a `<`/`>`
+(so `echo 2` is a plain argument, but `2>err` names fd 2). The parser
+**fails closed** (`AGENTS.md` §5.4, §2.9): a file redirection with no target,
+an ambiguous duplication (`<&file`, `2>&file`), or an as-yet-unsupported
+here-document/here-string (`<<`, `<<-`, `<<<`) runs **nothing**.
+
+Not yet implemented (tracked in `plans/SHELL.md`, deliberately failing closed
+rather than misbehaving): here-documents and here-strings, process
+substitution (`<(…)`, `>(…)`, `=(…)`), zsh multios fan-out, dynamic
+descriptor allocation (`{var}>`), and resolving a redirection target through
+the storage/resource namespaces (`sys:null`, `Alias:/path`). The current
+runtime process host still carries only a program path, so it reports
+`NotImplemented` for any redirection until the launch ABI is extended; the
+parsing, lowering, and fail-closed semantics above are exercised in full
+against the in-memory fixtures.
+
 ## The session program (`Run`) and its REPL
 
 The crate is both the interpreter library above and the `Run` entry-point

@@ -1742,6 +1742,29 @@ the runtime host may fail closed with `NotImplemented` for external commands
 that need richer launch support. The shell parser and in-process builtins
 should still implement and test the target semantics described here.
 
+Redirection state (interpreter-level; the runtime host still fails closed
+until the launch ABI grows):
+
+- **Implemented and tested** — the fd-aware redirection model. The lexer
+  decodes each operator into a `RedirOp` (carrying its explicit or default
+  descriptor); the parser attaches the file target; and the interpreter lowers
+  each `Redirection` to primitive `ResolvedRedirection { fd, action }` values
+  (`Open`/`Dup`/`Close`) the host applies in order. Supported operators:
+  `<`, `>`, `>>`, `<>`, the clobber-override spellings `>|`/`>!`/`>>|`/`>>!`,
+  an optional glued IO number on any of them (`2>`, `3>>`, `0<`), descriptor
+  duplication (`n>&m`, `n<&m`, `2>&1`), descriptor close (`>&-`, `<&-`,
+  `n>&-`), and the combined stdout+stderr forms `&>`/`>&file`/`&>>`/`>>&` with
+  their clobber spellings (lowered to an open on fd 1 plus a dup of fd 1 onto
+  fd 2 — one definition of the combined meaning). Fail-closed: a file
+  redirection with no target, an ambiguous duplication (`<&file`, `2>&file`),
+  or a here-document/here-string operator runs nothing.
+- **Not yet implemented** (deliberately failing closed, tracked here): here
+  documents/strings (`<<`, `<<-`, `<<<`), process substitution (`<(…)`,
+  `>(…)`, `=(…)`), zsh multios fan-out, dynamic descriptor allocation
+  (`{var}>`), and resolving a redirection target through the storage/resource
+  namespaces (`sys:null`, `Alias:/path`) — each an increment on top of the
+  model above.
+
 ## Tests
 
 `cargo test -p rustos-shell` MUST cover:

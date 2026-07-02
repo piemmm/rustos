@@ -68,7 +68,7 @@ pub(crate) mod test_support;
 pub use env::Environment;
 pub use error::ParseError;
 pub use host::{
-    Console, LaunchSpec, LimitStore, ProcessHost, ResolvedCommand, ResolvedRedirection,
+    Console, LaunchSpec, LimitStore, ProcessHost, RedirAction, ResolvedCommand, ResolvedRedirection,
 };
 pub use job::{ExitStatus, Job, JobId, JobState, JobTable, Pid, Signal, WaitOutcome};
 pub use repl::{run as run_repl, ReplInput};

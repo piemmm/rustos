@@ -4,42 +4,93 @@
 //! first shell needs:
 //!
 //! ```text
-//! list      := pipeline ( (';' | '&' | '&&' | '||') pipeline )* [';' | '&']
-//! pipeline  := command ( '|' command )*
-//! command   := ( word | redirection )+        (at least one word)
-//! redirection := ('<' | '>' | '>>') word
+//! list        := pipeline ( (';' | '&' | '&&' | '||') pipeline )* [';' | '&']
+//! pipeline    := command ( '|' command )*
+//! command     := ( word | redirection )+        (at least one word)
+//! redirection := <a redirection operator> [word]
 //! ```
+//!
+//! A redirection operator is already fully decoded by the
+//! [`lexer`](crate::lexer) into a [`RedirOp`]: it carries the descriptor it
+//! acts on, whether it opens/appends/duplicates/closes, and (for the combined
+//! `&>` forms) that it targets both standard output and standard error. The
+//! parser only attaches the target [`Word`] the file-opening forms need; the
+//! descriptor-duplication (`n>&m`) and close (`n>&-`) forms take no target.
 //!
 //! Words are still [`Segment`](crate::lexer::Segment) lists at this stage:
 //! expansion is deferred to
 //! [`env`](crate::env) so the parser never re-examines quoting. The parser
 //! **fails closed** ([`ParseError`]): an empty command (a dangling `|`, a
-//! leading separator) or a redirection with no target produces no tree, so a
-//! malformed line runs nothing.
+//! leading separator) or a file redirection with no target produces no tree,
+//! so a malformed line runs nothing.
 
 use alloc::vec::Vec;
 
 use crate::error::ParseError;
-use crate::lexer::{tokenize, Token, Word};
+use crate::lexer::{tokenize, RedirOp, Token, Word};
 
-/// What a redirection does to a standard stream.
+/// How a file-opening redirection opens its target.
+///
+/// The clobber flag rides on the two writing modes because it only means
+/// anything there: it records that a clobber-override operator (`>|`, `>!`,
+/// `>>|`, `>>!`) was used, so the open must truncate/create even when the
+/// shell's `noclobber` option is set. Reading modes carry no such flag.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum RedirectionKind {
-    /// `< file` — connect the file to standard input.
-    Input,
-    /// `> file` — connect standard output to the file, truncating it.
-    OutputTruncate,
-    /// `>> file` — connect standard output to the file, appending.
-    OutputAppend,
+pub enum OpenMode {
+    /// `<` — open the target for reading.
+    Read,
+    /// `<>` — open the target for reading and writing.
+    ReadWrite,
+    /// `>` / `>|` / `>!` — open for writing, truncating an existing file.
+    Write {
+        /// `true` for the clobber-override spellings (`>|`, `>!`).
+        clobber: bool,
+    },
+    /// `>>` / `>>|` / `>>!` — open for writing, appending.
+    Append {
+        /// `true` for the clobber-override spellings (`>>|`, `>>!`).
+        clobber: bool,
+    },
 }
 
-/// A single redirection: an operator and its (unexpanded) target word.
+/// A single redirection with its (still unexpanded) target attached.
+///
+/// Modelled as an enum so illegal states are unrepresentable: a file open
+/// always carries a target [`Word`], while a duplication or close never does.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Redirection {
-    /// Which stream is redirected, and how.
-    pub kind: RedirectionKind,
-    /// The redirection target, still a [`Word`] pending expansion.
-    pub target: Word,
+pub enum Redirection {
+    /// Open `target` on descriptor `fd` with `mode`.
+    File {
+        /// The descriptor the open binds (the operator's explicit or default fd).
+        fd: u32,
+        /// How the target is opened.
+        mode: OpenMode,
+        /// The redirection target, still a [`Word`] pending expansion.
+        target: Word,
+    },
+    /// Redirect *both* standard output (fd 1) and standard error (fd 2) to one
+    /// `target` — the `&>` / `>&` (file) family.
+    Combined {
+        /// `true` for the append spellings (`&>>`, `>>&`).
+        append: bool,
+        /// `true` for the clobber-override spellings (`&>|`, `&>!`).
+        clobber: bool,
+        /// The shared target, still a [`Word`] pending expansion.
+        target: Word,
+    },
+    /// Make `fd` a duplicate of the already-open descriptor `source`
+    /// (`n>&m`, `n<&m`, `2>&1`).
+    Dup {
+        /// The descriptor being (re)bound.
+        fd: u32,
+        /// The descriptor it is made to alias.
+        source: u32,
+    },
+    /// Close `fd` (`n>&-`, `<&-`).
+    Close {
+        /// The descriptor to close.
+        fd: u32,
+    },
 }
 
 /// One simple command: its argument words and its redirections, in source
@@ -103,7 +154,7 @@ impl CommandList {
 ///
 /// Returns a [`ParseError`] for any lexical fault (see
 /// [`tokenize`]) or grammatical fault (an empty
-/// command, or a redirection without a target).
+/// command, or a file redirection without a target).
 pub fn parse(line: &str) -> Result<CommandList, ParseError> {
     let tokens = tokenize(line)?;
     Parser { tokens, pos: 0 }.parse_list()
@@ -186,14 +237,11 @@ impl Parser {
                     };
                     words.push(word);
                 }
-                Some(Token::Less) => {
-                    redirections.push(self.parse_redirection(RedirectionKind::Input)?);
-                }
-                Some(Token::Great) => {
-                    redirections.push(self.parse_redirection(RedirectionKind::OutputTruncate)?);
-                }
-                Some(Token::DoubleGreat) => {
-                    redirections.push(self.parse_redirection(RedirectionKind::OutputAppend)?);
+                Some(Token::Redirect(_)) => {
+                    let Some(Token::Redirect(op)) = self.take() else {
+                        unreachable!("peeked a redirection")
+                    };
+                    redirections.push(self.attach_target(op)?);
                 }
                 _ => break,
             }
@@ -207,10 +255,29 @@ impl Parser {
         })
     }
 
-    fn parse_redirection(&mut self, kind: RedirectionKind) -> Result<Redirection, ParseError> {
-        self.pos += 1;
+    /// Turn a lexer [`RedirOp`] into a [`Redirection`], attaching the target
+    /// [`Word`] the file-opening forms need and leaving the duplication/close
+    /// forms target-less.
+    fn attach_target(&mut self, op: RedirOp) -> Result<Redirection, ParseError> {
+        match op {
+            RedirOp::File { fd, mode } => Ok(Redirection::File {
+                fd,
+                mode,
+                target: self.take_target()?,
+            }),
+            RedirOp::Combined { append, clobber } => Ok(Redirection::Combined {
+                append,
+                clobber,
+                target: self.take_target()?,
+            }),
+            RedirOp::Dup { fd, source } => Ok(Redirection::Dup { fd, source }),
+            RedirOp::Close { fd } => Ok(Redirection::Close { fd }),
+        }
+    }
+
+    fn take_target(&mut self) -> Result<Word, ParseError> {
         match self.take() {
-            Some(Token::Word(target)) => Ok(Redirection { kind, target }),
+            Some(Token::Word(target)) => Ok(target),
             _ => Err(ParseError::MissingRedirectionTarget),
         }
     }
@@ -226,10 +293,11 @@ impl Parser {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse, RedirectionKind, RunCondition};
+    use super::{parse, OpenMode, Redirection, RunCondition};
     use crate::error::ParseError;
     use crate::lexer::Segment;
     use alloc::string::String;
+    use alloc::vec;
     use alloc::vec::Vec;
 
     /// Flatten a word's segments back to a plain string (tests only — the
@@ -274,18 +342,179 @@ mod tests {
         assert_eq!(argv(&cmds[2]), ["wc", "-l"]);
     }
 
+    /// The single redirection of a one-command line (tests only).
+    fn only_redirection(line: &str) -> Redirection {
+        let list = parse(line).unwrap();
+        let cmd = &list.entries[0].pipeline.commands[0];
+        assert_eq!(cmd.redirections.len(), 1, "expected one redirection");
+        cmd.redirections[0].clone()
+    }
+
     #[test]
-    fn redirections_are_collected() {
+    fn plain_file_redirections_default_their_fds() {
         let list = parse("sort < in > out >> log").unwrap();
         let cmd = &list.entries[0].pipeline.commands[0];
         assert_eq!(argv(cmd), ["sort"]);
-        assert_eq!(cmd.redirections.len(), 3);
-        assert_eq!(cmd.redirections[0].kind, RedirectionKind::Input);
-        assert_eq!(flat(&cmd.redirections[0].target), "in");
-        assert_eq!(cmd.redirections[1].kind, RedirectionKind::OutputTruncate);
-        assert_eq!(flat(&cmd.redirections[1].target), "out");
-        assert_eq!(cmd.redirections[2].kind, RedirectionKind::OutputAppend);
-        assert_eq!(flat(&cmd.redirections[2].target), "log");
+        assert_eq!(
+            cmd.redirections,
+            [
+                Redirection::File {
+                    fd: 0,
+                    mode: OpenMode::Read,
+                    target: vec![Segment::Expandable("in".into())],
+                },
+                Redirection::File {
+                    fd: 1,
+                    mode: OpenMode::Write { clobber: false },
+                    target: vec![Segment::Expandable("out".into())],
+                },
+                Redirection::File {
+                    fd: 1,
+                    mode: OpenMode::Append { clobber: false },
+                    target: vec![Segment::Expandable("log".into())],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn numbered_fd_prefix_binds_the_named_descriptor() {
+        assert_eq!(
+            only_redirection("cmd 2>errors"),
+            Redirection::File {
+                fd: 2,
+                mode: OpenMode::Write { clobber: false },
+                target: vec![Segment::Expandable("errors".into())],
+            }
+        );
+        assert_eq!(
+            only_redirection("cmd 3>>info.jsonl"),
+            Redirection::File {
+                fd: 3,
+                mode: OpenMode::Append { clobber: false },
+                target: vec![Segment::Expandable("info.jsonl".into())],
+            }
+        );
+    }
+
+    #[test]
+    fn a_leading_digit_word_is_not_an_fd_prefix() {
+        // `2` is a plain argument here — an IO number binds only when glued to
+        // a `<`/`>`. `>bar` still defaults to fd 1.
+        let list = parse("echo 2 >bar").unwrap();
+        let cmd = &list.entries[0].pipeline.commands[0];
+        assert_eq!(argv(cmd), ["echo", "2"]);
+        assert_eq!(
+            cmd.redirections,
+            [Redirection::File {
+                fd: 1,
+                mode: OpenMode::Write { clobber: false },
+                target: vec![Segment::Expandable("bar".into())],
+            }]
+        );
+    }
+
+    #[test]
+    fn clobber_override_operators_set_the_flag() {
+        assert_eq!(
+            only_redirection("cmd >|out"),
+            Redirection::File {
+                fd: 1,
+                mode: OpenMode::Write { clobber: true },
+                target: vec![Segment::Expandable("out".into())],
+            }
+        );
+        assert_eq!(
+            only_redirection("cmd >!out"),
+            Redirection::File {
+                fd: 1,
+                mode: OpenMode::Write { clobber: true },
+                target: vec![Segment::Expandable("out".into())],
+            }
+        );
+        assert!(matches!(
+            only_redirection("cmd >>|log"),
+            Redirection::File {
+                mode: OpenMode::Append { clobber: true },
+                ..
+            }
+        ));
+        assert!(matches!(
+            only_redirection("cmd >>!log"),
+            Redirection::File {
+                mode: OpenMode::Append { clobber: true },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn read_write_redirection() {
+        assert_eq!(
+            only_redirection("cmd <>file"),
+            Redirection::File {
+                fd: 0,
+                mode: OpenMode::ReadWrite,
+                target: vec![Segment::Expandable("file".into())],
+            }
+        );
+    }
+
+    #[test]
+    fn duplication_and_close() {
+        assert_eq!(
+            only_redirection("cmd 2>&1"),
+            Redirection::Dup { fd: 2, source: 1 }
+        );
+        assert_eq!(
+            only_redirection("cmd 1>&2"),
+            Redirection::Dup { fd: 1, source: 2 }
+        );
+        assert_eq!(
+            only_redirection("cmd 0<&3"),
+            Redirection::Dup { fd: 0, source: 3 }
+        );
+        assert_eq!(only_redirection("cmd 3>&-"), Redirection::Close { fd: 3 });
+        // `>&-` defaults to closing stdout, `<&-` to stdin.
+        assert_eq!(only_redirection("cmd >&-"), Redirection::Close { fd: 1 });
+        assert_eq!(only_redirection("cmd <&-"), Redirection::Close { fd: 0 });
+    }
+
+    #[test]
+    fn combined_stdout_stderr_forms() {
+        for line in ["cmd &>both", "cmd >&both"] {
+            assert_eq!(
+                only_redirection(line),
+                Redirection::Combined {
+                    append: false,
+                    clobber: false,
+                    target: vec![Segment::Expandable("both".into())],
+                },
+                "line: {line}"
+            );
+        }
+        for line in ["cmd &>>both", "cmd >>&both"] {
+            assert_eq!(
+                only_redirection(line),
+                Redirection::Combined {
+                    append: true,
+                    clobber: false,
+                    target: vec![Segment::Expandable("both".into())],
+                },
+                "line: {line}"
+            );
+        }
+        for line in ["cmd &>|both", "cmd &>!both"] {
+            assert_eq!(
+                only_redirection(line),
+                Redirection::Combined {
+                    append: false,
+                    clobber: true,
+                    target: vec![Segment::Expandable("both".into())],
+                },
+                "line: {line}"
+            );
+        }
     }
 
     #[test]
@@ -295,7 +524,6 @@ mod tests {
         let cmd = &list.entries[0].pipeline.commands[0];
         assert_eq!(argv(cmd), ["echo", "hello"]);
         assert_eq!(cmd.redirections.len(), 1);
-        assert_eq!(flat(&cmd.redirections[0].target), "out");
     }
 
     #[test]
@@ -331,11 +559,29 @@ mod tests {
     }
 
     #[test]
-    fn redirection_without_target_fails_closed() {
+    fn file_redirection_without_target_fails_closed() {
         assert_eq!(parse("ls >"), Err(ParseError::MissingRedirectionTarget));
         assert_eq!(
             parse("ls > | wc"),
             Err(ParseError::MissingRedirectionTarget)
         );
+        assert_eq!(parse("ls &>"), Err(ParseError::MissingRedirectionTarget));
+    }
+
+    #[test]
+    fn here_documents_and_strings_fail_closed_as_unsupported() {
+        assert_eq!(parse("cmd <<EOF"), Err(ParseError::UnsupportedRedirection));
+        assert_eq!(parse("cmd <<-EOF"), Err(ParseError::UnsupportedRedirection));
+        assert_eq!(
+            parse("cmd <<<word"),
+            Err(ParseError::UnsupportedRedirection)
+        );
+    }
+
+    #[test]
+    fn ambiguous_duplications_fail_closed() {
+        // `<&` with neither a source fd nor `-`, and a numbered dup-to-file.
+        assert_eq!(parse("cmd <&file"), Err(ParseError::AmbiguousRedirection));
+        assert_eq!(parse("cmd 2>&file"), Err(ParseError::AmbiguousRedirection));
     }
 }
