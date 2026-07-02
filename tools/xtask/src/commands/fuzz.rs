@@ -171,6 +171,12 @@ pub const TARGETS: &[Target] = &[
             "lib/log journal engine (admit/commit/import_boot: rotation, chaining, sealing; every persisted segment must verify)",
     },
     Target {
+        package: "rustos-log",
+        test: "fuzz_ratelimit",
+        description:
+            "lib/log ingress rate limiter (token-bucket admit/drop + coalesced loss reporting: every drop is accounted, never panics)",
+    },
+    Target {
         package: "rustos-glob",
         test: "fuzz_glob",
         description: "lib/glob pattern compiler + match loop (untrusted glob-pattern bytes)",

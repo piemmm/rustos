@@ -17,7 +17,8 @@ neither re-implements the record format.
   fast path, a single atomic `Level` threshold, and stable `EventId`s.
 - **`stream`**: the closed `Stream` set (`boot`/`runtime`/`debug`/`security`/
   `audit`/`journal`), its on-disk discriminants, genesis labels, and the
-  `requires_seal` / `requires_trusted_emitter` predicates.
+  `requires_seal` / `requires_trusted_emitter` / `is_rate_limitable`
+  predicates.
 - **`authority`**: the authority model — `derive_source` (the system-derived
   `SourceName` from an attested `Origin`), `reserved_source_prefix` /
   `RESERVED_SOURCE_PREFIXES` (spoof screening of a caller's requested source),
@@ -41,10 +42,19 @@ neither re-implements the record format.
   its stream's open segment, rotating (close, seal, persist, reopen a chained
   segment) when a buffer fills; `import_boot` drains a `BootRing` into the
   `boot` stream and authors one trusted loss record for an evicted range;
-  `flush` closes open segments. Fail-closed: an invalid/over-cap record is
-  rejected whole, and an audit/security segment cannot close without the seal
-  key. Per-CPU gap detection, rate-limiting, retention, and the spoof security
-  record are the userland service's job on top of it.
+  `flush` closes open segments. `admit_limited` applies the rate limit before
+  reserving a sequence, and `emit_rate_loss` authors the coalesced
+  `journal.rate.loss` records; `note_spoof` authors the trusted `security`
+  record for a spoof. Fail-closed: an invalid/over-cap record is rejected
+  whole, and an audit/security segment cannot close without the seal key.
+  Per-CPU gap detection and retention remain the userland service's job on top
+  of it.
+- **`ratelimit`**: the per-stream ingress rate limiter (`RateLimiter`/
+  `RateLimit`/`DropReport`). A `Copy`, allocation-free token bucket (integer
+  nanoseconds, no float) that gates only the rate-limitable `runtime`/`debug`
+  streams and coalesces drops into one trusted loss report per interval per
+  stream; the system-authority streams are never dropped. Protects the machine
+  from a log-driven denial of service.
 - **`dict`**: the segment-local string dictionary (`DictionaryBuilder`/
   `DictionaryView`). A back-reference codec that stores a repeated provenance
   or message string once per segment and references it thereafter, with

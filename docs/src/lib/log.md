@@ -273,6 +273,17 @@ and every path fails closed.
   `audit`/`security` segments), and the journal's own attested origin.
   * `admit` — a pass-through to the owned `Ingress`, so admit and commit are
     1:1 (each reserves exactly one append sequence).
+  * `admit_limited` — the caller-facing admission path: it applies the
+    per-stream rate limit **before** reserving a sequence and returns
+    `Some(Admission)` within the rate or `None` when a `runtime`/`debug`
+    record is over its rate (dropped best-effort, no sequence consumed, no
+    spoof note — so a spoof flood is bounded at the runtime rate rather than
+    amplified into a flood of `security` records). The system-authority
+    streams are never dropped here.
+  * `emit_rate_loss` — drains the rate limiter's matured drop tallies into one
+    coalesced trusted `journal.rate.loss` record per stream per interval, so a
+    flood is never a silent gap and never a second flood of loss records.
+    `with_rate_limit` installs the policy (a journal defaults to no limiting).
   * `commit` — encodes an admitted record and appends it to its stream's open
     segment, **rotating** — closing, sealing, persisting, and reopening a fresh
     segment that chains onto the one just closed — when the segment fills. A
@@ -305,6 +316,34 @@ boundary. Loss and rotation self-events are authored on the `journal` stream,
 and the spoof note on the `security` stream, through the same segment path —
 never a second writer.
 
+## Rate limiting (`ratelimit`)
+
+The `ratelimit` module protects the machine from log-driven denial of service
+(`plans/SYSLOG.md` §11). Only the two non-privileged, high-volume streams —
+`runtime` and `debug` (`Stream::is_rate_limitable`, the one definition of which
+streams are gated) — may be dropped; the four system-authority streams
+(`boot`/`security`/`audit`/`journal`) are never dropped here and fail closed at
+commit instead. It is `Copy`, `no_std`, and allocation-free, so a `Journal`
+holds one directly with no allocator and no lock.
+
+* `RateLimit::per_second(rate, burst)` — a per-stream token-bucket policy: one
+  token is spent per admitted record, a token accrues every `1/rate` seconds,
+  and the bucket holds up to `burst` tokens. The arithmetic is kept in integer
+  nanoseconds (credit accrues at one nanosecond per nanosecond up to a
+  `burst`-scaled cap), so there is no floating point and no accrual-rounding
+  drift.
+* `RateLimiter` — one bucket and one drop tally per gated stream.
+  `RateLimiter::new` takes a policy per stream plus the reporting interval;
+  `RateLimiter::unlimited` (the `Journal` default) never drops. `admit` accrues
+  credit at the supplied monotonic time and returns `Admit` or `Drop`, folding
+  each drop into the stream's tally (recording the window's first-drop time).
+* `take_due_report` — drains a stream's tally into a `DropReport`
+  (`stream`/`count`/`window`) once the reporting interval has elapsed since the
+  first drop, coalescing a whole window of drops into one report and resetting
+  the window; a sustained flood therefore yields at most one loss record per
+  interval per stream. The `Journal` turns each report into one trusted
+  `journal.rate.loss` record via `emit_rate_loss`.
+
 ## Journal ingress ABI and service (`rustos_abi::log_ingress`, `journald`)
 
 An ordinary process never appends to a segment: it frames a request and posts
@@ -330,15 +369,17 @@ driver-store endpoint ABIs rather than part of the C-callable surface:
 The `rustos-journald` crate (`userland/system/journald`) is the
 architecture-neutral dispatch core over this ABI. `serve` decodes and fully
 validates a request, resolves the advisory stream/level against the closed
-vocabularies (fail-closed on an unknown discriminant), builds the `data.*` set
-(rejecting any name outside the `FieldName` grammar, which structurally forbids
-reserved prefixes), admits under the caller's kernel-attested `Origin` — never
-a caller claim — commits to the injected `Journal`, and calls `note_spoof` for
-any spoof attempt. `store` derives the pure `/System/Logs/<stream>/<id>.seg`
-segment path the production filesystem sink uses. The service *binary* that
-binds the endpoint, reads each caller's peer origin, and drives this core over
-the real filesystem is a staged follow-on, along with boot-ring import,
-retention, and rate-limiting/aggregation (`plans/SYSLOG.md` §10/§11/§15).
+vocabularies (fail-closed on an unknown discriminant), rate-limits the record
+via `admit_limited` under the caller's kernel-attested `Origin` — never a
+caller claim — and, for an admitted record, builds the `data.*` set (rejecting
+any name outside the `FieldName` grammar, which structurally forbids reserved
+prefixes), commits to the injected `Journal`, and calls `note_spoof` for any
+spoof attempt; it then drains any matured rate-limit drops via `emit_rate_loss`.
+`store` derives the pure `/System/Logs/<stream>/<id>.seg` segment path the
+production filesystem sink uses. The `Run` binary binds the endpoint, reads
+each caller's peer origin, installs the ingress rate-limit policy, and drives
+this core over the real filesystem. Boot-ring import, retention, and
+aggregation remain staged follow-ons (`plans/SYSLOG.md` §8.1/§10/§11/§15).
 
 ## Typed-field value model (`field`)
 

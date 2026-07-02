@@ -26,7 +26,10 @@
 //! never a caller claim), stamp the record with the journal's own ingest lane
 //! and the current monotonic + wall time, and hand it to the `serve` dispatch
 //! core (`rustos_journald::serve`), which admits it under the attested origin
-//! and commits it.
+//! and commits it. It installs a per-stream rate limit so a log flood on the
+//! caller-writable `runtime`/`debug` streams is bounded (the system-authority
+//! streams are never dropped); dropped records surface as coalesced trusted
+//! loss records on the `journal` stream.
 //!
 //! Every authoritative fact — origin, source, stream, sequence, time — is the
 //! kernel's or the journal's, never the caller's; the caller supplies only its
@@ -65,8 +68,8 @@ mod program {
     };
     use rustos_journald::{serve, Clock, Ingest};
     use rustos_log::{
-        machine_id_hash, Journal, LogAttestationKey, SegmentStore, LOG_ATTESTATION_KEY_FILE_LEN,
-        MAX_RECORD_PAYLOAD, STREAM_COUNT,
+        machine_id_hash, Journal, LogAttestationKey, RateLimit, RateLimiter, SegmentStore,
+        LOG_ATTESTATION_KEY_FILE_LEN, MAX_RECORD_PAYLOAD, STREAM_COUNT,
     };
 
     /// Outstanding-call capacity of the ingress endpoint (a fail-closed memory
@@ -84,6 +87,25 @@ mod program {
     /// originating CPU of their own — SYSLOG §5.2). A single serving task, so a
     /// single lane.
     const INGEST_CPU: u32 = 0;
+
+    /// Sustained records per second admitted on the `runtime` stream before
+    /// dropping, with the burst that may arrive back-to-back. These bound a
+    /// log-driven denial of service (the SYSLOG loss/rate-limit contract); they
+    /// are a fixed security budget, not a hardware-scaled capacity, sized to
+    /// absorb normal service chatter and a reasonable burst while capping a
+    /// runaway emitter.
+    const RUNTIME_RATE_PER_SEC: u32 = 2_000;
+    const RUNTIME_BURST: u32 = 512;
+
+    /// The same budget for the high-volume `debug` stream — a higher sustained
+    /// rate and burst, since diagnostic logs are chattier and short-lived.
+    const DEBUG_RATE_PER_SEC: u32 = 8_000;
+    const DEBUG_BURST: u32 = 2_048;
+
+    /// Minimum spacing between coalesced rate-limit loss records for a stream,
+    /// so a sustained flood yields at most one loss record per interval rather
+    /// than a second flood of loss records.
+    const RATE_LOSS_REPORT_SECS: i64 = 5;
 
     /// Recover the [`Errno`] a syscall encoded as a negative register
     /// (`-errno`); an unrecognised code fails closed as
@@ -226,6 +248,15 @@ mod program {
             b5.as_mut_slice(),
         ];
 
+        // Install the ingress rate limit so a log flood on the caller-writable
+        // `runtime`/`debug` streams is bounded; the four system-authority
+        // streams are never dropped, and dropped records surface as coalesced
+        // trusted loss records.
+        let limiter = RateLimiter::new(
+            RateLimit::per_second(RUNTIME_RATE_PER_SEC, RUNTIME_BURST),
+            RateLimit::per_second(DEBUG_RATE_PER_SEC, DEBUG_BURST),
+            Duration64::from_secs(RATE_LOSS_REPORT_SECS),
+        );
         let mut journal = Journal::new(
             FsSegmentStore,
             machine_hash,
@@ -233,7 +264,8 @@ mod program {
             seal_key,
             own_origin,
             bufs,
-        );
+        )
+        .with_rate_limit(limiter);
         let mut ingest = Ingest::new(INGEST_CPU);
 
         // Publish the endpoint. Unrestricted-sender (empty `send_caps`): any

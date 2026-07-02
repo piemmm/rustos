@@ -65,16 +65,22 @@ pub struct Clock {
 ///    rejects the whole request (`Err`), nothing is partially applied.
 /// 2. Resolve the caller's advisory stream and level *discriminants* against
 ///    the closed [`Stream`]/[`Level`] sets, failing closed on an unknown one.
-/// 3. Build the `data.*` set, validating each key against the strict
-///    [`FieldName`] grammar (which, requiring no `.`, structurally forbids the
-///    reserved `record.`/`origin.`/`source.`/`integrity.`/`sys.` prefixes).
-/// 4. [`admit`](Journal::admit) under the kernel-attested `origin` — never a
-///    caller claim — deriving the authoritative source, stream, and sequence.
-/// 5. [`commit`](Journal::commit) the record with the journal's own ingest
-///    `cpu`/`cpu_seq` and the request's `clock`.
-/// 6. If the admission detected a spoof (a privileged-stream or reserved-source
+/// 3. [`admit_limited`](Journal::admit_limited) under the kernel-attested
+///    `origin` — never a caller claim — deriving the authoritative source,
+///    stream, and sequence, and applying the per-stream rate limit
+///    (SYSLOG §11). A `runtime`/`debug` record over its rate is dropped
+///    (best-effort, `Ok`) with no record committed and no per-record work; the
+///    system-authority streams are never dropped here.
+/// 4. For an admitted record, build the `data.*` set, validating each key
+///    against the strict [`FieldName`] grammar (which, requiring no `.`,
+///    structurally forbids the reserved `record.`/`origin.`/`source.`/
+///    `integrity.`/`sys.` prefixes), then [`commit`](Journal::commit) it with
+///    the journal's own ingest `cpu`/`cpu_seq` and the request's `clock`.
+/// 5. If the admission detected a spoof (a privileged-stream or reserved-source
 ///    request), author a trusted `security` record with
 ///    [`note_spoof`](Journal::note_spoof) preserving the exact claim.
+/// 6. Drain any matured rate-limit drops into one coalesced trusted
+///    `journal`-stream loss record with [`emit_rate_loss`](Journal::emit_rate_loss).
 ///
 /// The caller (the `Run` binary) supplies the kernel-attested `origin` (read
 /// from the peer origin, never the request), the journal's `ingest` lane, and
@@ -108,61 +114,77 @@ pub fn serve<S: SegmentStore>(
         Some(raw) => Some(Level::from_u8(raw).ok_or(Errno::OutOfRange)?),
     };
 
-    // Build the flat `data.*` set. `FieldName::new` enforces the
-    // `[a-z][a-z0-9_]{0,63}` grammar, which — permitting no `.` — cannot spell
-    // a reserved `record.`/`origin.`/`source.`/`integrity.`/`sys.` prefix, so
-    // a spoofed reserved field name is rejected here fail-closed.
-    let mut data: Vec<(FieldName<'_>, FieldValue<'_>)> = Vec::new();
-    for (key, value) in req.data() {
-        data.push((FieldName::new(key)?, value));
-    }
+    let cpu = ingest.cpu();
 
-    let admission = journal.admit(
+    // Offer the record to the rate limiter *before* building its `data.*` set
+    // or reserving a sequence (SYSLOG §11). A caller-writable stream over its
+    // rate is dropped: best-effort on `runtime`/`debug`, so this is not an
+    // error to the caller, no record is committed, and no per-record work is
+    // wasted. The system-authority streams are never dropped here — they fail
+    // closed at commit instead. The accumulated drops surface as a coalesced
+    // trusted loss record, drained below.
+    if let Some(admission) = journal.admit_limited(
         origin,
         req.subsystem(),
         requested_stream,
         req.requested_source(),
         level,
-    );
+        clock.monotonic,
+    ) {
+        // Build the flat `data.*` set only for a record we will commit.
+        // `FieldName::new` enforces the `[a-z][a-z0-9_]{0,63}` grammar, which —
+        // permitting no `.` — cannot spell a reserved `record.`/`origin.`/
+        // `source.`/`integrity.`/`sys.` prefix, so a spoofed reserved field
+        // name is rejected here fail-closed.
+        let mut data: Vec<(FieldName<'_>, FieldValue<'_>)> = Vec::new();
+        for (key, value) in req.data() {
+            data.push((FieldName::new(key)?, value));
+        }
 
-    let caller = CallerContent {
-        level,
-        component: req.component(),
-        tag: req.tag(),
-        event_id: req.event_id(),
-        requested_source: req.requested_source(),
-        requested_stream,
-        message: req.message(),
-    };
+        let caller = CallerContent {
+            level,
+            component: req.component(),
+            tag: req.tag(),
+            event_id: req.event_id(),
+            requested_source: req.requested_source(),
+            requested_stream,
+            message: req.message(),
+        };
 
-    let cpu = ingest.cpu();
-    journal
-        .commit(
-            &admission,
-            cpu,
-            ingest.take(),
-            clock.monotonic,
-            clock.wall,
-            caller,
-            &data,
-            scratch,
-        )
-        .map_err(|e| map_journal_err(&e))?;
-
-    if admission.spoofed() {
         journal
-            .note_spoof(
+            .commit(
                 &admission,
-                requested_stream,
-                req.requested_source(),
                 cpu,
                 ingest.take(),
                 clock.monotonic,
                 clock.wall,
+                caller,
+                &data,
                 scratch,
             )
             .map_err(|e| map_journal_err(&e))?;
+
+        if admission.spoofed() {
+            journal
+                .note_spoof(
+                    &admission,
+                    requested_stream,
+                    req.requested_source(),
+                    cpu,
+                    ingest.take(),
+                    clock.monotonic,
+                    clock.wall,
+                    scratch,
+                )
+                .map_err(|e| map_journal_err(&e))?;
+        }
     }
+
+    // Drain any rate-limit drops that have matured into a coalesced trusted
+    // loss record, on the ingress cadence. A no-op when nothing is due.
+    journal
+        .emit_rate_loss(cpu, || ingest.take(), clock.monotonic, clock.wall, scratch)
+        .map_err(|e| map_journal_err(&e))?;
 
     Ok(())
 }
@@ -405,5 +427,97 @@ mod tests {
         assert_eq!(ingest.take(), 0);
         assert_eq!(ingest.take(), 1);
         assert_eq!(ingest.take(), 2);
+    }
+
+    #[test]
+    fn a_runtime_flood_is_rate_limited_and_a_loss_record_is_authored() {
+        use rustos_log::{Journal, RateLimit, RateLimiter};
+        let scratch = &mut [0u8; 1024];
+        let store = CaptureStore::new();
+        let sink = store.segments.clone();
+        let mut b: [Vec<u8>; STREAM_COUNT] = core::array::from_fn(|_| alloc::vec![0u8; 8192]);
+        let [b0, b1, b2, b3, b4, b5] = &mut b;
+        let bufs: [&mut [u8]; STREAM_COUNT] = [
+            b0.as_mut_slice(),
+            b1.as_mut_slice(),
+            b2.as_mut_slice(),
+            b3.as_mut_slice(),
+            b4.as_mut_slice(),
+            b5.as_mut_slice(),
+        ];
+        // Burst of 3 runtime records, then drops; report after 1s.
+        let mut journal = Journal::new(
+            store,
+            machine_id_hash(&MID),
+            rustos_abi::BootId::from_raw([0x5A; BOOT_ID_LEN]),
+            None,
+            journal_origin(),
+            bufs,
+        )
+        .with_rate_limit(RateLimiter::new(
+            RateLimit::per_second(1000, 3),
+            RateLimit::per_second(1000, 3),
+            Duration64::from_secs(1),
+        ));
+        let mut ingest = Ingest::new(0);
+
+        // Twelve requests at t=0: three admitted, nine dropped (best-effort Ok).
+        let req = request(
+            &LogIngressFields {
+                message: "flood",
+                ..LogIngressFields::default()
+            },
+            &[],
+        );
+        let t0 = Clock {
+            monotonic: Duration64::ZERO,
+            wall: WallClockReading::new(Time64::from_secs(1), WallTimeState::Trusted),
+        };
+        for _ in 0..12 {
+            serve(
+                &mut journal,
+                &user_origin(1000),
+                &mut ingest,
+                t0,
+                &req,
+                scratch,
+            )
+            .expect("dropped records are best-effort Ok, not errors");
+        }
+        // One more request a second later flushes the coalesced loss record.
+        let t1 = Clock {
+            monotonic: Duration64::from_secs(1),
+            wall: WallClockReading::new(Time64::from_secs(2), WallTimeState::Trusted),
+        };
+        serve(
+            &mut journal,
+            &user_origin(1000),
+            &mut ingest,
+            t1,
+            &req,
+            scratch,
+        )
+        .expect("served");
+        journal.flush().expect("flush");
+
+        let segments = sink.borrow();
+        let mut runtime = 0u64;
+        let mut loss = 0u64;
+        for seg in segments.iter() {
+            let s = rustos_log::verify_segment(seg, None).expect("verify");
+            match s.header.stream {
+                Stream::Runtime => runtime += s.record_count,
+                Stream::Journal => {
+                    loss += s.record_count;
+                    let recs = decoded(seg);
+                    assert_eq!(recs[0].0, "kernel.journal");
+                    assert_eq!(recs[0].1, "records dropped by rate limit");
+                }
+                other => panic!("unexpected stream {other:?}"),
+            }
+        }
+        // Burst of 3 admitted at t0, plus the one that flushed the loss at t1.
+        assert_eq!(runtime, 4, "only within-rate records were committed");
+        assert_eq!(loss, 1, "one coalesced loss record for the nine drops");
     }
 }

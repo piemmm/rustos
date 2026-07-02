@@ -23,10 +23,11 @@ use rustos_abi::{BootId, Duration64, Errno, FieldName, FieldValue, Origin, WallC
 use rustos_crypto::Sha256Digest;
 
 use crate::attest::{stream_genesis, LogAttestationKey};
-use crate::authority::{derive_source, SourceName};
+use crate::authority::{derive_source, resolve_stream, SourceName};
 use crate::bootring::{BootRing, LossRange};
 use crate::dict::DictionaryBuilder;
 use crate::ingress::{Admission, Ingress};
+use crate::ratelimit::{DropReport, RateDecision, RateLimiter};
 use crate::record::{CallerContent, LogRecord};
 use crate::segment::{
     SegmentError, SegmentHeader, SegmentWriter, MAX_RECORD_PAYLOAD, SEGMENT_FOOTER_LEN,
@@ -116,6 +117,10 @@ pub struct Journal<'a, S: SegmentStore> {
     own_origin: Origin,
     /// The system-derived source name for the journal's own records.
     own_source: SourceName,
+    /// Per-stream ingress rate limiter (SYSLOG §11). Defaults to
+    /// [`RateLimiter::unlimited`]; the service installs a policy with
+    /// [`Self::with_rate_limit`].
+    limiter: RateLimiter,
     streams: [StreamState<'a>; STREAM_COUNT],
 }
 
@@ -163,8 +168,22 @@ impl<'a, S: SegmentStore> Journal<'a, S> {
             boot_id,
             own_origin: journal_origin,
             own_source,
+            limiter: RateLimiter::unlimited(),
             streams,
         }
+    }
+
+    /// Install a rate-limiting policy for the caller-writable streams
+    /// (SYSLOG §11).
+    ///
+    /// A journal starts with [`RateLimiter::unlimited`] (no dropping); the
+    /// service configures a real policy so a log flood on the `runtime`/`debug`
+    /// streams is bounded. The system-authority streams are never gated. Use
+    /// as a builder: `Journal::new(..).with_rate_limit(limiter)`.
+    #[must_use]
+    pub fn with_rate_limit(mut self, limiter: RateLimiter) -> Self {
+        self.limiter = limiter;
+        self
     }
 
     /// The append-sequence authority, for anchoring and resume.
@@ -195,6 +214,90 @@ impl<'a, S: SegmentStore> Journal<'a, S> {
             requested_source,
             caller_level,
         )
+    }
+
+    /// Admit one record subject to the rate limit (SYSLOG §11).
+    ///
+    /// This is the caller-facing admission path: it resolves the record's
+    /// *effective* stream (the same authority decision [`Self::admit`] makes)
+    /// and offers it to the [`RateLimiter`] **before** reserving an append
+    /// sequence. If the record is within the rate — always, for the
+    /// system-authority streams and under an [`RateLimiter::unlimited`]
+    /// limiter — it is admitted exactly as [`Self::admit`] would and returns
+    /// `Some(Admission)`. If a caller-writable stream (`runtime`/`debug`) is
+    /// over its rate the record is dropped and returns `None`: no append
+    /// sequence is consumed (so the stream's sequence stays gap-free), the drop
+    /// is folded into the stream's tally, and no spoof note is authored — a
+    /// spoof flood is thereby bounded at the runtime rate rather than being
+    /// amplified into a flood of `security` records. Drain the accumulated
+    /// drops with [`Self::emit_rate_loss`].
+    ///
+    /// `now` is the monotonic reading used to drive the token bucket.
+    pub fn admit_limited(
+        &mut self,
+        origin: &Origin,
+        subsystem: Option<&str>,
+        requested_stream: Option<Stream>,
+        requested_source: Option<&str>,
+        caller_level: Option<Level>,
+        now: Duration64,
+    ) -> Option<Admission> {
+        // Gate on the *effective* stream (the resolver's decision), so an
+        // untrusted caller's downgraded-to-`runtime` record is limited by the
+        // runtime bucket. Reserving the append sequence must happen only for an
+        // admitted record, so the rate check precedes `self.ingress.admit`
+        // (which reserves); the extra `resolve_stream` here is a pure,
+        // side-effect-free repeat of the resolution `admit` performs.
+        let effective = resolve_stream(origin, requested_stream).effective;
+        match self.limiter.admit(effective, now) {
+            RateDecision::Drop => None,
+            RateDecision::Admit => Some(self.ingress.admit(
+                origin,
+                subsystem,
+                requested_stream,
+                requested_source,
+                caller_level,
+            )),
+        }
+    }
+
+    /// Author trusted `journal`-stream loss records for any rate-limit drops
+    /// that have matured past the reporting interval (SYSLOG §11).
+    ///
+    /// A drop is never silent: [`Self::admit_limited`] folds each dropped
+    /// record into its stream's tally, and this drains every tally whose
+    /// reporting window has elapsed into one coalesced `journal.rate.loss`
+    /// record naming the stream, the number of records dropped, and the window
+    /// — so a sustained flood produces at most one loss record per interval per
+    /// stream. Call it on the ingress cadence (and before shutdown) with the
+    /// current `now`/`wall`; it is a no-op when nothing is due.
+    ///
+    /// `cpu` is the caller's ingest-lane CPU; `next_cpu_seq` yields the per-CPU
+    /// sequence for each authored record (the caller owns that counter, so a
+    /// loss record leaves a detectable per-CPU gap like any other).
+    ///
+    /// # Errors
+    ///
+    /// [`JournalError::Encode`] if a loss record body is invalid or oversized,
+    /// [`JournalError::Segment`] if a `journal` segment cannot be opened, or
+    /// [`JournalError::Store`] if persisting a rotated segment fails.
+    pub fn emit_rate_loss<F: FnMut() -> u64>(
+        &mut self,
+        cpu: u32,
+        mut next_cpu_seq: F,
+        now: Duration64,
+        wall: WallClockReading,
+        scratch: &mut [u8],
+    ) -> Result<(), JournalError<S::Error>> {
+        // `take_due_report` returns `None` for the four non-rate-limitable
+        // streams, so iterating all streams authors at most one record per
+        // gated stream that has a matured tally.
+        for stream in Stream::ALL {
+            if let Some(report) = self.limiter.take_due_report(stream, now) {
+                self.emit_rate_loss_record(&report, cpu, next_cpu_seq(), now, wall, scratch)?;
+            }
+        }
+        Ok(())
     }
 
     /// Commit one admitted record to durable storage.
@@ -543,6 +646,59 @@ impl<'a, S: SegmentStore> Journal<'a, S> {
             Level::Warn,
             loss.cpu_id,
             loss.last_seq,
+            monotonic,
+            wall,
+            caller,
+            &data,
+            scratch,
+        )
+    }
+
+    /// Author one trusted `journal`-stream loss record for a coalesced
+    /// rate-limit [`DropReport`].
+    fn emit_rate_loss_record(
+        &mut self,
+        report: &DropReport,
+        cpu: u32,
+        cpu_seq: u64,
+        monotonic: Duration64,
+        wall: WallClockReading,
+        scratch: &mut [u8],
+    ) -> Result<(), JournalError<S::Error>> {
+        let seq = self.ingress.reserve(Stream::Journal);
+        let data = [
+            (
+                FieldName::new("stream").map_err(JournalError::Encode)?,
+                FieldValue::UnsignedInt(u64::from(report.stream.as_u8())),
+            ),
+            (
+                FieldName::new("dropped").map_err(JournalError::Encode)?,
+                FieldValue::UnsignedInt(report.count),
+            ),
+            (
+                FieldName::new("window").map_err(JournalError::Encode)?,
+                FieldValue::Duration(report.window),
+            ),
+        ];
+        let caller = CallerContent {
+            level: None,
+            component: None,
+            tag: None,
+            event_id: Some("journal.rate.loss"),
+            requested_source: None,
+            requested_stream: Some(Stream::Journal),
+            message: "records dropped by rate limit",
+        };
+        let source = self.own_source;
+        let origin = self.own_origin;
+        self.place(
+            Stream::Journal,
+            seq,
+            origin,
+            source.as_str(),
+            Level::Warn,
+            cpu,
+            cpu_seq,
             monotonic,
             wall,
             caller,
@@ -1159,5 +1315,101 @@ mod tests {
         }
         assert!(boot_records > 0, "retained boot records were imported");
         assert_eq!(journal_records, 1, "exactly one loss record was authored");
+    }
+
+    /// Build a rate-limited journal over six equal buffers and run `body`,
+    /// returning the persisted segments. Mirrors [`with_journal`] but installs
+    /// a policy.
+    fn with_limited_journal<F>(limiter: RateLimiter, body: F) -> Vec<Vec<u8>>
+    where
+        F: FnOnce(&mut Journal<'_, TestStore>),
+    {
+        let store = TestStore::new();
+        let sink = store.segments.clone();
+        let mut b: [Vec<u8>; STREAM_COUNT] = core::array::from_fn(|_| alloc::vec![0u8; 8192]);
+        let [b0, b1, b2, b3, b4, b5] = &mut b;
+        let bufs: [&mut [u8]; STREAM_COUNT] = [
+            b0.as_mut_slice(),
+            b1.as_mut_slice(),
+            b2.as_mut_slice(),
+            b3.as_mut_slice(),
+            b4.as_mut_slice(),
+            b5.as_mut_slice(),
+        ];
+        let mut journal = Journal::new(
+            store,
+            machine_id_hash(&MID),
+            boot(),
+            None,
+            kernel_origin(),
+            bufs,
+        )
+        .with_rate_limit(limiter);
+        body(&mut journal);
+        let out = sink.borrow().clone();
+        out
+    }
+
+    #[test]
+    fn rate_limit_drops_excess_runtime_and_authors_one_coalesced_loss_record() {
+        use crate::ratelimit::{RateLimit, RateLimiter};
+        let scratch = &mut [0u8; 512];
+        // Burst of 2 runtime records, then drops at the same instant; report
+        // after 1s. `emit_rate_loss` uses a fixed cpu_seq (999) — the value is
+        // opaque to this test, which asserts only the loss record's content.
+        let limiter = RateLimiter::new(
+            RateLimit::per_second(1000, 2),
+            RateLimit::per_second(1000, 2),
+            Duration64::from_secs(1),
+        );
+        let mut admitted = 0u32;
+        let segments = with_limited_journal(limiter, |j| {
+            for _ in 0..10 {
+                if let Some(adm) = j.admit_limited(
+                    &user_origin(1000),
+                    None,
+                    Some(Stream::Runtime),
+                    None,
+                    None,
+                    Duration64::ZERO,
+                ) {
+                    let seq = u64::from(admitted);
+                    j.commit(
+                        &adm,
+                        0,
+                        seq,
+                        Duration64::ZERO,
+                        wall(),
+                        simple_caller("f"),
+                        &[],
+                        scratch,
+                    )
+                    .expect("commit admitted");
+                    admitted += 1;
+                }
+            }
+            j.emit_rate_loss(0, || 999, Duration64::from_secs(1), wall(), scratch)
+                .expect("emit loss");
+            j.flush().expect("flush");
+        });
+        assert_eq!(admitted, 2, "burst of two admitted, the rest dropped");
+
+        let mut runtime_records = 0u64;
+        let mut loss_records = 0u64;
+        for seg in &segments {
+            let s = verify_segment(seg, None).expect("verify");
+            match s.header.stream {
+                Stream::Runtime => runtime_records += s.record_count,
+                Stream::Journal => {
+                    loss_records += s.record_count;
+                    let decoded = decoded_messages(seg);
+                    assert_eq!(decoded[0].2, "records dropped by rate limit");
+                    assert_eq!(decoded[0].1, "kernel.journal");
+                }
+                other => panic!("unexpected stream {other:?}"),
+            }
+        }
+        assert_eq!(runtime_records, 2, "only admitted records were committed");
+        assert_eq!(loss_records, 1, "one coalesced loss record");
     }
 }

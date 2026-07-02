@@ -119,6 +119,20 @@ impl Stream {
             Self::Boot | Self::Security | Self::Audit | Self::Journal
         )
     }
+
+    /// Whether this stream may be rate-limited, sampled, or dropped under
+    /// pressure to protect the machine from log-driven denial of service.
+    ///
+    /// Only the two non-privileged, high-volume streams — `runtime` and
+    /// `debug` — may be dropped. `boot`, `security`, `audit`, and `journal`
+    /// carry system authority and must never be silently dropped: an
+    /// audit/security record that cannot be accepted fails closed to the
+    /// caller instead. This is the single definition of which streams the
+    /// rate limiter gates.
+    #[must_use]
+    pub const fn is_rate_limitable(self) -> bool {
+        matches!(self, Self::Runtime | Self::Debug)
+    }
 }
 
 #[cfg(test)]
@@ -168,5 +182,15 @@ mod tests {
         assert!(Stream::Security.requires_trusted_emitter());
         assert!(Stream::Audit.requires_trusted_emitter());
         assert!(Stream::Journal.requires_trusted_emitter());
+    }
+
+    #[test]
+    fn only_runtime_and_debug_are_rate_limitable() {
+        assert!(Stream::Runtime.is_rate_limitable());
+        assert!(Stream::Debug.is_rate_limitable());
+        assert!(!Stream::Boot.is_rate_limitable());
+        assert!(!Stream::Security.is_rate_limitable());
+        assert!(!Stream::Audit.is_rate_limitable());
+        assert!(!Stream::Journal.is_rate_limitable());
     }
 }
