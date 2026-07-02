@@ -89,10 +89,7 @@ fn resolve_info(
         ["system", "hostname"] => {
             InfoValue::new_str(Sensitivity::Public, &field_lossy(identity.hostname_bytes()))
         }
-        ["system", "kernel"] => InfoValue::new_str(
-            Sensitivity::Public,
-            &version_string(&identity),
-        ),
+        ["system", "kernel"] => InfoValue::new_str(Sensitivity::Public, &version_string(&identity)),
         // Machine identity is identifying, not public (`plans/ALIAS.md` §6.2).
         ["system", "machine-id"] => {
             InfoValue::new_str(Sensitivity::Sensitive, &hex_lower(&identity.machine_id))
@@ -100,7 +97,12 @@ fn resolve_info(
         _ => return Err(ResolveInfoError::UnknownSelector),
     }
     .map_err(|_| ResolveInfoError::Malformed)?;
-    envelope(reference, now, Authorization::Unprivileged, ResponsePayload::Info(value))
+    envelope(
+        reference,
+        now,
+        Authorization::Unprivileged,
+        ResponsePayload::Info(value),
+    )
 }
 
 /// Resolve a `stats:` reference (a measurement) to a single [`Metric`].
@@ -133,16 +135,16 @@ fn resolve_stats(
                 ResponsePayload::Metric(metric),
             )
         }
-        ["mem", leaf @ ("used" | "available" | "total")] => {
+        ["mem", leaf @ ("used" | "available" | "total" | "kernel-heap" | "user-resident")] => {
             let stats = query_kernel_memory(transport)?;
-            // The or-pattern above fixes `leaf` to one of these three, so the
-            // final arm is `total` and there is no unhandled case.
-            let value = if *leaf == "used" {
-                stats.total_bytes.saturating_sub(stats.free_bytes)
-            } else if *leaf == "available" {
-                stats.free_bytes
-            } else {
-                stats.total_bytes
+            // The or-pattern above fixes `leaf` to one of these five, so the
+            // final arm is `user-resident` and there is no unhandled case.
+            let value = match *leaf {
+                "used" => stats.total_bytes.saturating_sub(stats.free_bytes),
+                "available" => stats.free_bytes,
+                "total" => stats.total_bytes,
+                "kernel-heap" => stats.kernel_heap_bytes,
+                _ => stats.user_resident_bytes,
             };
             let mut name = String::from("mem/");
             name.push_str(leaf);
@@ -338,7 +340,10 @@ mod tests {
         Time64::from_secs(5200)
     }
 
-    fn resolve_str(s: &str, fixture: &Fixture) -> Result<super::ResourceResponse, ResolveInfoError> {
+    fn resolve_str(
+        s: &str,
+        fixture: &Fixture,
+    ) -> Result<super::ResourceResponse, ResolveInfoError> {
         let reference = parse(s).expect("parse");
         resolve(&reference, now(), fixture)
     }
@@ -426,6 +431,34 @@ mod tests {
         let total = resolve_str("stats:mem/total", &fixture).expect("ok");
         match total.payload {
             ResponsePayload::Metric(m) => assert_eq!(m.value, 8192),
+            ResponsePayload::Info(_) => panic!("expected metric"),
+        }
+    }
+
+    #[test]
+    fn stats_mem_kernel_heap_and_user_resident_are_gated_gauges() {
+        let fixture = Fixture::new();
+        let heap = resolve_str("stats:mem/kernel-heap", &fixture).expect("ok");
+        assert_eq!(
+            heap.authorization,
+            Authorization::Capability(CapabilityId::SYSINFO_KERNEL)
+        );
+        match heap.payload {
+            ResponsePayload::Metric(m) => {
+                assert_eq!(m.name(), "mem/kernel-heap");
+                assert_eq!(m.value, 512);
+                assert_eq!(m.kind, MetricKind::Gauge);
+                assert_eq!(m.unit, Unit::Bytes);
+                assert_eq!(m.reset_behavior, ResetBehavior::Never);
+            }
+            ResponsePayload::Info(_) => panic!("expected metric"),
+        }
+        let resident = resolve_str("stats:mem/user-resident", &fixture).expect("ok");
+        match resident.payload {
+            ResponsePayload::Metric(m) => {
+                assert_eq!(m.name(), "mem/user-resident");
+                assert_eq!(m.value, 4096);
+            }
             ResponsePayload::Info(_) => panic!("expected metric"),
         }
     }

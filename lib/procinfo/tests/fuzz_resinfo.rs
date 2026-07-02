@@ -50,6 +50,8 @@ const TEMPLATES: &[&str] = &[
     "stats:mem/used",
     "stats:mem/available",
     "stats:mem/total",
+    "stats:mem/kernel-heap",
+    "stats:mem/user-resident",
     "info:system/nope",
     "stats:mem/pagefaults",
     "stats:cpu/load",

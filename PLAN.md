@@ -3385,8 +3385,9 @@ I/O vocabulary. See `.junie/PREREQUISITES2.md` for the full P0–P6 status.
   never free-form text and never a second reference parser (§2.2). It serves
   `info:system/{hostname,kernel,machine-id}` (from `SYSTEM_IDENTITY`,
   machine-id sensitive), `stats:uptime` (from `UPTIME`, boot-reset counter), and
-  `stats:mem/{used,available,total}` (from `KERNEL_MEMORY_STATS`, gated on
-  `CAP_SYSINFO_KERNEL`, gauges); it fails closed on an unknown selector, a
+  `stats:mem/{used,available,total,kernel-heap,user-resident}` (from
+  `KERNEL_MEMORY_STATS`, gated on `CAP_SYSINFO_KERNEL`, gauges); it fails closed
+  on an unknown selector, a
   guard/facet/query where none is served, a capability denial, or a malformed
   reply. Ships with host tests and the `fuzz_resinfo` harness (hostile
   references + hostile broker replies). **Still open under P5** (tracked, not
