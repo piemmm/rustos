@@ -62,7 +62,16 @@ neither re-implements the record format.
   reader. No separate on-disk block: it is carried inside the records and
   covered by the record chain and segment hash.
 - **`segment`**: the append-only, self-checksummed on-disk segment container
-  with forward-scan power-loss recovery.
+  with forward-scan power-loss recovery. Each record block carries its own
+  monotonic ordering time (§5.1), covered by the segment hash.
+- **`render`**: the boot-console renderer (`render_line`). Turns a decoded
+  record plus its monotonic time into the canonical
+  `[monotonic] level source[component]: message key=value` line. Caller text
+  (message, component, requested source, string field values) is escaped so it
+  can never inject a terminal escape, newline, or forged prefix; the line is
+  headed by the *system-derived* source, and a downgraded `requested_source`
+  spoof is shown as inert evidence. `no_std`, writes into any
+  `core::fmt::Write` sink.
 - **`chain`**: the per-stream SHA-256 record hash chain (`lib/crypto`), the one
   chain the log uses.
 - **`bootring`**: the bounded per-CPU early-boot ring (`BootRing`). Before

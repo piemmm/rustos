@@ -177,6 +177,12 @@ pub const TARGETS: &[Target] = &[
             "lib/log ingress rate limiter (token-bucket admit/drop + coalesced loss reporting: every drop is accounted, never panics)",
     },
     Target {
+        package: "rustos-log",
+        test: "fuzz_render",
+        description:
+            "lib/log boot-console renderer (hostile caller text/fields: rendered line is always control-byte-free, never panics)",
+    },
+    Target {
         package: "rustos-glob",
         test: "fuzz_glob",
         description: "lib/glob pattern compiler + match loop (untrusted glob-pattern bytes)",

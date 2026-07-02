@@ -2835,11 +2835,22 @@ Landed (done):
   `Origin`, for the trusted records the journal authors itself) and the
   non-secret per-installation **machine-id** as the single on-disk source of
   truth (`/System/Security/MachineId`, `AGENTS.md` §16.2; mkimage bakes a random
-  one, journald reads it for the stream genesis). Remaining SYSLOG work:
-  boot-ring import (needs a kernel-side boot ring + drain syscall that do not
-  exist yet), per-CPU gap detection, rate-limit/retention, the QEMU vertical
-  (launch journald under `init`), the kernel `SystemIdentity`↔machine-id
-  unification, renderers/CLI, and anchors (see `.junie/SYSLOG.md`).
+  one, journald reads it for the stream genesis). Each on-disk record block now
+  also carries its own monotonic ordering time (§5.1) — previously
+  `append_record` dropped it, keeping only the footer's first/last bounds — read
+  and validated fail-closed by the segment reader and exposed on
+  `RecordBlockRef`. The **boot console renderer** (`lib/log` `render.rs`,
+  §8.2) has landed on top of it: `render_line` formats a decoded record plus its
+  monotonic time into the canonical `[monotonic] level source[component]:
+  message key=value` line, escaping every control character in caller-controlled
+  text so it cannot inject terminal escapes or forge lines (control-byte-free
+  output proven by the `fuzz_render` harness). Remaining SYSLOG work: boot-ring
+  import (needs a kernel-side boot ring + drain syscall that do not exist yet;
+  per-CPU gap detection lands with that producer, since `journald` assigns
+  `cpu_seq` contiguously and cannot gap in steady state), retention, the QEMU
+  vertical (launch journald under `init`), the kernel `SystemIdentity`↔machine-id
+  unification, the rich (Markdown/JSON) renderers + `log` CLI, and anchors (see
+  `.junie/SYSLOG.md`).
 - §19.6 fuzzing — `cargo xtask fuzz` over all in-tree harnesses (`--quick`/
   `--soak`), fail-closed.
 - §19.7 verified core — Bronze proptest models for `lib/caps`/`kernel/sec`/
@@ -3396,26 +3407,17 @@ I/O vocabulary. See `.junie/PREREQUISITES2.md` for the full P0–P6 status.
   never free-form text and never a second reference parser (§2.2). It serves
   `info:system/{hostname,kernel,machine-id,boot-time}` (from `SYSTEM_IDENTITY`,
   machine-id sensitive; `boot-time` from the ungated `UPTIME` reply as a public
-  stable fact), `stats:uptime` (from `UPTIME`, boot-reset counter),
-  `info:mem/{physical,page-size}` (total physical RAM and the reporting
-  architecture's page size, stable facts carried by the
-  `CAP_SYSINFO_KERNEL`-gated `KERNEL_MEMORY_STATS` query), and
+  stable fact), `stats:uptime` (from `UPTIME`, boot-reset counter), and
   `stats:mem/{used,available,total,kernel-heap,user-resident}` (from
   `KERNEL_MEMORY_STATS`, gated on `CAP_SYSINFO_KERNEL`, gauges); it fails closed
   on an unknown selector, a
   guard/facet/query where none is served, a capability denial, or a malformed
   reply. Ships with host tests and the `fuzz_resinfo` harness (hostile
-  references + hostile broker replies). The resolver now exposes **every scalar
-  fact every shipped sysinfo query carries** (system identity, the self-scoped
-  process identity's six attested `Origin` fields, kernel memory, resource
-  limits, and uptime), so its growth no longer blocks the shell. **Still open
-  under P5** (tracked, not stubbed, non-blocking): extend the userspace
-  resolver in place as *new* sysinfo queries land (a selector like `info:cpu/*`
-  needs a new query with a real kernel producer first — inventing that ABI
-  ahead of a live producer would be speculative surface, §2.3/§2.4), and wire
-  the *kernel-owned* device namespaces into `kernel/core::resource` beside
-  `sys:` via the device manager as their consumers appear — neither changes the
-  `resource_open` contract.
+  references + hostile broker replies). **Still open under P5** (tracked, not
+  stubbed): grow the userspace resolver in place as more sysinfo queries land,
+  and wire the *kernel-owned* device namespaces into `kernel/core::resource`
+  beside `sys:` via the device manager as their consumers appear — neither
+  changes the `resource_open` contract.
 
 ## CCOMPAT — C-callable `abi-v1` (full `lib/abi` header, syscall stubs, crt0)
 

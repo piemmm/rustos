@@ -60,8 +60,10 @@ crate pulls in no payload codec and stays allocation-free.
   streams `requires_seal`.
 * `segment` — the append-only on-disk container for one stream: a
   self-checksummed `SegmentHeader`, length-framed records each carrying
-  their `LogChain` link hash, and a `SegmentFooter` with the record /
-  sequence / time bounds, the segment hash, an optional seal MAC
+  their `LogChain` link hash and their own monotonic ordering time
+  (`plans/SYSLOG.md` §5.1; covered by the segment hash, not the per-record
+  chain, exactly like the append sequence), and a `SegmentFooter` with the
+  record / sequence / time bounds, the segment hash, an optional seal MAC
   (mandatory for audit/security), and a footer checksum. `SegmentWriter`
   builds one into a caller buffer; `SegmentReader` is a forward-scanning,
   self-verifying reader that recovers to the last complete chain-valid
@@ -343,6 +345,34 @@ holds one directly with no allocator and no lock.
   the window; a sustained flood therefore yields at most one loss record per
   interval per stream. The `Journal` turns each report into one trusted
   `journal.rate.loss` record via `emit_rate_loss`.
+
+## Boot-console rendering (`render`)
+
+The `render` module turns a committed record into a readable boot-console line
+(`plans/SYSLOG.md` §8.2). It is a pure, `no_std`, allocation-free formatter: the
+kernel boot console renders each trusted record as it is produced, and later
+tooling renders records read back from a segment; either way `render_line`
+writes into any `core::fmt::Write` sink and needs no event templates or
+registry.
+
+* `render_line(out, monotonic, record)` — emits the canonical
+  `[monotonic] level source[component]: message key=value key=value` line (no
+  trailing newline). `monotonic` is the record's container-owned ordering time;
+  `record` is a decoded `LogRecordRef`. The line is headed by the record's
+  effective level and its **system-derived** source name; a caller's downgraded
+  `requested_source` (a spoof the ingress path already rejected) is shown
+  inertly as `requested_source=…` evidence before the colon, never as the real
+  source, and a caller `critical` label never dresses a user record up as a
+  system line.
+* **Terminal-injection defence.** Every attacker-controlled string — the
+  message, component, requested source, and string `data.*` values — is passed
+  through an escaping writer that renders any control character (C0, `DEL`, or
+  C1) as a visible `\xNN` and doubles a backslash, so caller text can never
+  move the cursor, change colour, clear the screen, forge a prefix, or split
+  itself across lines. The emitted line is control-byte-free regardless of
+  input (asserted by the `fuzz_render` harness). Field names obey the
+  `FieldName` grammar and non-string values render as control-free text, so
+  both pass through unchanged.
 
 ## Journal ingress ABI and service (`rustos_abi::log_ingress`, `journald`)
 
