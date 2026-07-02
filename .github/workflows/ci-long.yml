@@ -1,0 +1,118 @@
+name: ci-long
+
+# The long flake hunt. This runs the *same* checks `ci.yml` runs (via
+# `cargo xtask ci-long`), but every test-executing stage — the host test
+# matrix, the release crypto constant-time tests, the QEMU integration tests,
+# the fuzz harnesses, and the proptest models — is run 20 times sequentially
+# and then 20 times concurrently, per test, before moving on to the next test.
+# The deterministic gates (fmt, clippy, deps-check, cfg-check, docs-check,
+# cargo deny, supply-chain, model-check, spec-review, abi-check, c-header, and
+# the image gate) are pass/fail checks whose result cannot change between runs,
+# so they run once — repeating them would burn the runner's time for no signal.
+# All pipeline logic lives in `cargo xtask`, never in the workflow (AGENTS.md
+# §15): a green run here and a green `cargo xtask ci-long` on a builder are
+# equivalent by construction; this workflow adds only scheduling.
+#
+# This is a slow, deliberately exhaustive run (2 × 20 executions of every
+# test), so it is NOT wired to `push`/`pull_request`: it is triggered manually
+# (`workflow_dispatch`) on demand, when a suspected flake needs to be shaken
+# out on a dedicated long-lived runner.
+
+# It runs ONLY on a self-hosted runner carrying the dedicated `long` label
+# (see `runs-on` below). A general `[self-hosted, linux]` runner executes one
+# job at a time, so pinning the hours-long hunt to its own `long`-labelled
+# runner instance keeps it off the runner that `ci.yml` uses for the per-push
+# gate; the two never queue behind each other (register a second runner
+# instance with the extra `long` label — see tools/ci/github-runner/README.md).
+
+# SECURITY (public repo + self-hosted runner): like `ci.yml`/`soak.yml`, this
+# workflow must never run untrusted code on the self-hosted runner. It triggers
+# ONLY on `workflow_dispatch` — never on `pull_request`/`pull_request_target`,
+# so a fork's PR can never execute on the runner — and every job is
+# additionally gated (see the job `if:` below) to the owner (`piemmm`) in the
+# canonical `piemmm/rustos` repo, so a fork or any other actor manually
+# dispatching is refused before any step runs.
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print the planned test set and repetition counts without running anything"
+        type: boolean
+        default: false
+
+# Least privilege: the read-only default token is all `cargo xtask ci-long`
+# needs. No job here writes to the repo, releases, packages, or other state.
+permissions:
+  contents: read
+
+# Never cancel an in-flight hunt just because another dispatch fired; let the
+# running hunt finish and skip the overlap.
+concurrency:
+  group: ci-long
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: 0
+  # Self-hosted runner: persist build outputs in one fixed dir on the runner's
+  # own disk instead of round-tripping a >1 GB `target/` tarball through
+  # GitHub's hosted cache service. `actions/checkout` only wipes the workspace,
+  # so a target dir outside it survives every run, and `~/.cargo/{registry,git,
+  # bin}` already persist on a self-hosted runner. The hunt runs on its *own*
+  # runner instance (the `long` label) so it gets a distinct target dir to
+  # avoid stomping on the `ci.yml` runner's shared `target/`.
+  CARGO_TARGET_DIR: /var/lib/actions-runner/rustos-cache/target-long
+
+jobs:
+  ci-long:
+    name: cargo xtask ci-long
+    # Fail closed: only the owner in the canonical repo may execute on the
+    # self-hosted runner. Refuses forks (different `github.repository`) and any
+    # non-owner actor (e.g. a collaborator's manual dispatch) before checkout.
+    if: github.repository == 'piemmm/rustos' && github.actor == 'piemmm'
+    # Dedicated `long` label so the hunt runs on its own runner instance and
+    # never queues `ci.yml` (which uses the bare `[self-hosted, linux]`) behind
+    # it.
+    runs-on: [self-hosted, linux, long]
+    # A backstop only: the hunt runs 2 × 20 executions of every test, so it is
+    # legitimately long. This ceiling just stops a wedged job running forever;
+    # every QEMU guest still enforces its own strict per-run wall-clock budget.
+    timeout-minutes: 1440
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # `rust-toolchain.toml` pins the channel, components, and cross targets;
+      # rustup picks them up automatically on first invocation.
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup component add clippy rustfmt rust-src llvm-tools-preview
+          rustc --version
+          cargo --version
+
+      # No `actions/cache` step: on this self-hosted runner the cargo caches
+      # (`~/.cargo/registry`, `~/.cargo/git`, `~/.cargo/bin`) and the
+      # `CARGO_TARGET_DIR` above already persist locally between runs.
+      # `ci-long` runs `docs-check` (needs mdbook) and `cargo deny`, so the
+      # same helper tools `ci.yml` installs are needed here too.
+      - name: Install xtask helper tools
+        run: |
+          command -v cargo-deny >/dev/null || cargo install --locked cargo-deny
+          command -v mdbook     >/dev/null || cargo install --locked mdbook
+
+      # Start every run from a clean slate: the self-hosted runner persists
+      # `CARGO_TARGET_DIR` across runs, so wipe prior build artefacts before
+      # building so `cargo xtask ci-long` compiles from scratch and stale
+      # outputs can never mask a breakage.
+      - name: cargo xtask clean
+        run: cargo xtask clean
+
+      - name: cargo xtask ci-long
+        run: |
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            cargo xtask ci-long --dry-run
+          else
+            cargo xtask ci-long
+          fi

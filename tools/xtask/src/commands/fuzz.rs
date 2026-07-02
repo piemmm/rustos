@@ -371,43 +371,61 @@ pub fn run(ctx: &Context, opts: &Options) -> Result<(), String> {
     let jobs: Vec<Job> = targets
         .iter()
         .enumerate()
-        .map(|(i, t)| {
-            let mut cmd = ctx.cargo();
-            // `--test <name>` runs exactly that integration harness; `--exact`
-            // is unnecessary because the test binary contains only fuzz fns.
-            cmd.args([
-                "test",
-                "-p",
-                t.package,
-                "--test",
-                t.test,
-                "--locked",
-                "--",
-                "--nocapture",
-            ]);
-            // A budget turns the harness into a soak loop; `--once` exports
-            // none, so the harness runs its single smoke iteration.
-            if let Some(budget) = budget {
-                cmd.env(
-                    rustos_fuzzseed::FUZZ_BUDGET_ENV,
-                    budget.as_secs().to_string(),
-                );
-            }
-            // Each harness reads this seed instead of its built-in constant,
-            // so a fresh seed (the default) makes every run explore new
-            // inputs while `--seed N` reproduces a logged crash exactly. The seed is in the label so it reaches the log.
-            let job_seed = seed::job_seed(opts.seed, i);
-            cmd.env(seed::FUZZ_SEED_ENV, job_seed.to_string());
-            let budget_desc = match budget {
-                Some(b) => format!("{} s", b.as_secs()),
-                None => "1 iteration".to_string(),
-            };
-            let label = format!("fuzz {} ({budget_desc}, seed {job_seed})", t.test);
-            Job::new(label, cmd)
-        })
+        .map(|(i, t)| job_for(ctx, t, budget, opts.seed, i))
         .collect();
     let concurrency = parallel::default_concurrency(jobs.len());
     parallel::run(jobs, concurrency)
+}
+
+/// Build the `cargo test` [`Job`] that runs one fuzz harness.
+///
+/// `budget` is the wall-clock soak budget exported to the harness (`None`
+/// runs the single fixed-iteration smoke sweep, as `--once` does). `seed` and
+/// `index` pick the per-job PRNG seed (`None` draws a fresh entropy seed each
+/// call, so repeated runs explore new inputs; `Some(base)` reproduces a logged
+/// stream). The chosen seed is baked into the job label so it reaches the log.
+///
+/// Shared by [`run`] and the long-CI flake hunt ([`super::ci_long`]) so both
+/// build a harness job the one way.
+pub(crate) fn job_for(
+    ctx: &Context,
+    target: &Target,
+    budget: Option<Duration>,
+    seed: Option<u64>,
+    index: usize,
+) -> Job {
+    let mut cmd = ctx.cargo();
+    // `--test <name>` runs exactly that integration harness; `--exact`
+    // is unnecessary because the test binary contains only fuzz fns.
+    cmd.args([
+        "test",
+        "-p",
+        target.package,
+        "--test",
+        target.test,
+        "--locked",
+        "--",
+        "--nocapture",
+    ]);
+    // A budget turns the harness into a soak loop; without one the harness
+    // runs its single smoke iteration.
+    if let Some(budget) = budget {
+        cmd.env(
+            rustos_fuzzseed::FUZZ_BUDGET_ENV,
+            budget.as_secs().to_string(),
+        );
+    }
+    // Each harness reads this seed instead of its built-in constant, so a fresh
+    // seed (the default) makes every run explore new inputs while an explicit
+    // seed reproduces a logged crash exactly.
+    let job_seed = seed::job_seed(seed, index);
+    cmd.env(seed::FUZZ_SEED_ENV, job_seed.to_string());
+    let budget_desc = match budget {
+        Some(b) => format!("{} s", b.as_secs()),
+        None => "1 iteration".to_string(),
+    };
+    let label = format!("fuzz {} ({budget_desc}, seed {job_seed})", target.test);
+    Job::new(label, cmd)
 }
 
 #[cfg(test)]

@@ -2883,6 +2883,49 @@ pub fn run_once(ctx: &Context) -> Result<(), String> {
     parallel::run(jobs, budget)
 }
 
+/// One enrolled QEMU integration test exposed for the long-CI flake hunt
+/// ([`super::ci_long`]).
+///
+/// It carries only what the flake hunt needs — a human label, the
+/// emulated-CPU weight the concurrency runner charges against its budget, and
+/// a handle to the enrolment itself — so a single enrolment can be run
+/// repeatedly without re-exposing the private [`QemuTest`] table. Copy so a
+/// per-repetition job factory can capture it freely.
+#[derive(Copy, Clone)]
+pub(crate) struct Enrolment {
+    /// Cargo package name, used to label the flake-hunt jobs.
+    pub package: &'static str,
+    /// Emulated-CPU count; the concurrency runner's per-job weight, so
+    /// concurrent replicas of this test never oversubscribe the host.
+    pub cpus: u32,
+    /// The enrolment to drive; private so callers go through [`Self::run`].
+    test: &'static QemuTest,
+}
+
+impl Enrolment {
+    /// Drive this enrolment to completion once, exactly as [`run_once`] does,
+    /// with no retry. `target_dir` is where the pre-built kernel binaries live
+    /// (see [`build_all`]).
+    pub(crate) fn run(&self, target_dir: &Path) -> Result<(), String> {
+        run_one(target_dir, self.test)
+    }
+}
+
+/// Every enrolled QEMU integration test, in registry order.
+///
+/// The single source of truth for the flake hunt's QEMU set is the same
+/// `TESTS` table [`run_once`] drives, so the two can never diverge.
+pub(crate) fn enrolments() -> Vec<Enrolment> {
+    TESTS
+        .iter()
+        .map(|t| Enrolment {
+            package: t.package,
+            cpus: t.cpus,
+            test: t,
+        })
+        .collect()
+}
+
 fn run_one(target_dir: &Path, t: &QemuTest) -> Result<(), String> {
     let kernel: PathBuf = target_dir.join(t.target).join("debug").join(t.binary);
     // Select the per-arch QEMU `Spec`: the riscv64 enrolments boot the

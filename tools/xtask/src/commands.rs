@@ -13,6 +13,7 @@ use crate::Context;
 mod abi_check;
 mod c_header;
 mod cfg_check;
+mod ci_long;
 mod deps_check;
 mod fssoak;
 mod fuzz;
@@ -52,6 +53,7 @@ pub enum Command {
     ModelCheck,
     SpecReview,
     Ci,
+    CiLong,
     Image,
 }
 
@@ -78,6 +80,7 @@ impl Command {
         Command::ModelCheck,
         Command::SpecReview,
         Command::Ci,
+        Command::CiLong,
         Command::Image,
     ];
 
@@ -103,6 +106,7 @@ impl Command {
             "model-check" => Command::ModelCheck,
             "spec-review" => Command::SpecReview,
             "ci" => Command::Ci,
+            "ci-long" => Command::CiLong,
             "image" => Command::Image,
             _ => return None,
         })
@@ -130,6 +134,7 @@ impl Command {
             Command::ModelCheck => "model-check",
             Command::SpecReview => "spec-review",
             Command::Ci => "ci",
+            Command::CiLong => "ci-long",
             Command::Image => "image",
         }
     }
@@ -168,6 +173,9 @@ impl Command {
             }
             Command::SpecReview => "Reject unreviewed AI draft markers in source (§19.7).",
             Command::Ci => "Run the full pipeline a pull request must pass.",
+            Command::CiLong => {
+                "Run the `ci` checks, repeating every test 20x sequentially then 20x concurrently."
+            }
             Command::Image => "Build platform images via tools/mkimage.",
         }
     }
@@ -194,6 +202,7 @@ impl Command {
             Command::ModelCheck => run_model_check(args),
             Command::SpecReview => run_spec_review(ctx),
             Command::Ci => run_ci(ctx),
+            Command::CiLong => run_ci_long(ctx, args),
             Command::Image => run_image(ctx, args),
         }
     }
@@ -922,6 +931,63 @@ fn run_ci(ctx: &Context) -> Result<(), String> {
     // delivered image platform are assembled end-to-end and written under
     // `images/`; the pinned firmware blobs come from the operator-staged
     // directory or the checksummed `target/pi-firmware` cache.
+    run_image_gate(ctx)?;
+    Ok(())
+}
+
+/// The long-runner flake hunt: the same checks as [`run_ci`], but every
+/// test-executing stage is run [`ci_long::REPS`] times sequentially and then
+/// [`ci_long::REPS`] times concurrently, per test, before the next test.
+///
+/// The deterministic gates (`fmt`, `clippy`, the modularity checks,
+/// `docs-check`, `cargo deny`, `supply-chain`, `model-check`, `spec-review`,
+/// `abi-check`, `c-header`, and the image gate) are pass/fail checks whose
+/// result cannot change between runs, so they run once, exactly as in `ci`.
+/// The repeated stages — the host test matrix, the release crypto
+/// constant-time tests, the QEMU integration tests, the fuzz harnesses, and
+/// the proptest models — are driven by [`ci_long::flake_hunt`], which is why
+/// `run_test`/`run_crypto_constant_time`/`run_fuzz`/`run_proptest` are not
+/// called separately here.
+///
+/// `--dry-run` prints the planned test set and repetition counts without
+/// running anything, so an operator can gauge a run's shape before committing
+/// a long-runner to it.
+fn run_ci_long(ctx: &Context, args: &[OsString]) -> Result<(), String> {
+    if let Some(bad) = args.iter().find(|a| *a != "--dry-run") {
+        return Err(format!(
+            "ci-long: unexpected argument {bad:?}; usage: cargo xtask ci-long [--dry-run]"
+        ));
+    }
+    if args.iter().any(|a| a == "--dry-run") {
+        ci_long::print_plan(ctx);
+        return Ok(());
+    }
+
+    // Deterministic gates first, once, so a non-conforming tree fails fast
+    // before the long repeated-test phase (mirrors `run_ci`'s ordering).
+    run_fmt(ctx, &[])?;
+    run_clippy(ctx, &[])?;
+    run_deps_check(ctx)?;
+    run_cfg_check(ctx)?;
+
+    // Build every QEMU enrolment once so the repeated runs re-execute the
+    // binaries rather than rebuilding them each pass.
+    qemu_tests::build_all(ctx)?;
+
+    // The flake hunt: host tests, QEMU integration tests, fuzz harnesses, and
+    // proptest models, each run REPS× sequentially then REPS× concurrently.
+    // This subsumes `ci`'s single-pass test, crypto-constant-time, fuzz, and
+    // proptest stages.
+    ci_long::flake_hunt(ci_long::all_units(ctx, ci_long::REPS), ci_long::REPS)?;
+
+    // The remaining deterministic gates, once, in `ci` order.
+    run_docs_check(ctx, &[])?;
+    run_deny(ctx)?;
+    run_supply_chain(ctx, &[])?;
+    run_model_check(&[])?;
+    run_spec_review(ctx)?;
+    run_abi_check(ctx, &[])?;
+    run_c_header(ctx, &[])?;
     run_image_gate(ctx)?;
     Ok(())
 }

@@ -247,41 +247,60 @@ pub fn run(ctx: &Context, opts: &Options) -> Result<(), String> {
     let jobs: Vec<Job> = models
         .iter()
         .enumerate()
-        .map(|(i, m)| {
-            let mut cmd = ctx.cargo();
-            cmd.args([
-                "test",
-                "-p",
-                m.package,
-                "--test",
-                m.test,
-                "--locked",
-                "--",
-                "--nocapture",
-            ]);
-            // A budget turns the model into a soak loop; `--once` exports
-            // none, so the model runs its single smoke iteration.
-            if let Some(budget) = budget {
-                cmd.env(
-                    rustos_fuzzseed::PROPTEST_BUDGET_ENV,
-                    budget.as_secs().to_string(),
-                );
-            }
-            // Each model reseeds its proptest RNG from this value instead of a
-            // fixed seed, so a fresh seed (the default) makes every run draw
-            // new programs while `--seed N` reproduces a logged counterexample. The seed is in the label so it reaches the log.
-            let job_seed = seed::job_seed(opts.seed, i);
-            cmd.env(seed::PROPTEST_SEED_ENV, job_seed.to_string());
-            let budget_desc = match budget {
-                Some(b) => format!("{} s", b.as_secs()),
-                None => "1 iteration".to_string(),
-            };
-            let label = format!("proptest {} ({budget_desc}, seed {job_seed})", m.name);
-            Job::new(label, cmd)
-        })
+        .map(|(i, m)| job_for(ctx, m, budget, opts.seed, i))
         .collect();
     let concurrency = parallel::default_concurrency(jobs.len());
     parallel::run(jobs, concurrency)
+}
+
+/// Build the `cargo test` [`Job`] that runs one stateful model.
+///
+/// `budget` is the wall-clock soak budget exported to the model (`None` runs
+/// the single fixed-case smoke sweep, as `--once` does). `seed` and `index`
+/// pick the per-job proptest RNG seed (`None` draws a fresh entropy seed each
+/// call, so repeated runs draw new programs; `Some(base)` reproduces a logged
+/// counterexample). The chosen seed is baked into the label so it reaches the
+/// log.
+///
+/// Shared by [`run`] and the long-CI flake hunt ([`super::ci_long`]) so both
+/// build a model job the one way.
+pub(crate) fn job_for(
+    ctx: &Context,
+    model: &Model,
+    budget: Option<Duration>,
+    seed: Option<u64>,
+    index: usize,
+) -> Job {
+    let mut cmd = ctx.cargo();
+    cmd.args([
+        "test",
+        "-p",
+        model.package,
+        "--test",
+        model.test,
+        "--locked",
+        "--",
+        "--nocapture",
+    ]);
+    // A budget turns the model into a soak loop; without one the model runs
+    // its single smoke iteration.
+    if let Some(budget) = budget {
+        cmd.env(
+            rustos_fuzzseed::PROPTEST_BUDGET_ENV,
+            budget.as_secs().to_string(),
+        );
+    }
+    // Each model reseeds its proptest RNG from this value instead of a fixed
+    // seed, so a fresh seed (the default) makes every run draw new programs
+    // while an explicit seed reproduces a logged counterexample.
+    let job_seed = seed::job_seed(seed, index);
+    cmd.env(seed::PROPTEST_SEED_ENV, job_seed.to_string());
+    let budget_desc = match budget {
+        Some(b) => format!("{} s", b.as_secs()),
+        None => "1 iteration".to_string(),
+    };
+    let label = format!("proptest {} ({budget_desc}, seed {job_seed})", model.name);
+    Job::new(label, cmd)
 }
 
 #[cfg(test)]

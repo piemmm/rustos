@@ -59,6 +59,13 @@
 //!   `ci` is not punishingly slow), `docs-check`, `cargo deny check`,
 //!   `supply-chain`, `fuzz --quick`, `proptest --quick`, `model-check`,
 //!   `spec-review`, `abi-check`, `c-header`
+//! - `ci-long`      — the same checks as `ci`, but for a dedicated long-lived
+//!   runner: every test-executing stage (the host test matrix, the release
+//!   crypto constant-time tests, the QEMU integration tests, the fuzz
+//!   harnesses, and the proptest models) is run 20× sequentially and then 20×
+//!   concurrently, per test, to force out timing- and contention-dependent
+//!   flakes; the deterministic gates run once. `--dry-run` prints the plan
+//!   without running anything
 //! - `image`        — build platform images via `tools/mkimage`
 //!   (`--target aarch64-rpi`: the Raspberry Pi 4 SD image; the pinned
 //!   firmware blobs are staged build inputs, see
