@@ -1004,11 +1004,10 @@ where
     /// `.`/`..` and refuses to let `..` escape the root, so the result the
     /// secured VFS then re-authorises is always a clean absolute path.
     ///
-    /// Fails closed: a malformed path is [`Errno::OutOfRange`] (matching the
-    /// VFS's own invalid-path code), and an alias/resource-reference spelling
-    /// (`Alias:/…`) is [`Errno::NotImplemented`] — the alias/resource
-    /// resolvers are not wired into the VFS yet, so the kernel declines them
-    /// rather than mishandle them.
+    /// Fails closed: a malformed path (including one whose `..` would escape
+    /// its root) is [`Errno::OutOfRange`] (matching the VFS's own invalid-path
+    /// code), and an alias spelling naming a root that does not exist is
+    /// [`Errno::NotFound`].
     fn resolve_against_cwd(&self, caller: &CallerContext<'_>, raw: &str) -> Result<String, Errno> {
         let parsed = rustos_path::parse(raw).map_err(|_| Errno::OutOfRange)?;
         match parsed.root() {
@@ -1030,10 +1029,20 @@ where
                 let abs = rustos_path::parse(&joined).map_err(|_| Errno::OutOfRange)?;
                 Ok(render_view_path(abs.components()))
             }
-            // An alias/resource-reference spelling: the resolver that would
-            // turn it into a mounted location is not wired into the VFS yet,
-            // so decline it rather than mishandle it.
-            rustos_path::Root::Alias(_) => Err(Errno::NotImplemented),
+            // An alias spelling (`Alias:/…` or `alias::Name/…`) names a
+            // first-class storage root; a machine alias is the canonical root
+            // the `/` view projects as `/<Name>`, so it resolves to the same
+            // backing location as that projected view path. `lib/path` has
+            // already refused any `..` that would escape the alias root, so the
+            // inner components sit safely beneath the alias's top-level
+            // component. A name that is not a published root fails closed.
+            rustos_path::Root::Alias(name) => {
+                let base = crate::fs::resolve_machine_alias(name).ok_or(Errno::NotFound)?;
+                let mut components = Vec::with_capacity(parsed.components().len() + 1);
+                components.push(String::from(base));
+                components.extend(parsed.components().iter().cloned());
+                Ok(render_view_path(&components))
+            }
         }
     }
 }
@@ -14962,6 +14971,89 @@ mod tests {
             )],
             "the relative path resolved against the caller's working directory"
         );
+    }
+
+    /// An `Alias:/…` path opens the same backing object as the `/`-view path
+    /// the machine alias projects: `System:/Logs/a` resolves to
+    /// `/System/Logs/a` before the VFS sees it.
+    #[test]
+    fn fs_open_resolves_a_machine_alias_to_its_projected_path() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, b"System:/Logs/a");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(fs);
+
+        h.fs_open(&ctx, 0x1000, "System:/Logs/a".len(), OpenFlags::READ)
+            .expect("open succeeds");
+        assert_eq!(
+            fs.calls(),
+            alloc::vec![alloc::string::String::from(
+                "open uid=1000 path=/System/Logs/a flags=1"
+            )],
+            "the machine alias resolved to the path its `/` view projects"
+        );
+    }
+
+    /// An alias naming no published root fails closed with `NotFound` before
+    /// the VFS is touched, and records no descriptor.
+    #[test]
+    fn fs_open_on_an_unknown_alias_fails_closed() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, b"Nope:/x");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(fs);
+
+        assert_eq!(
+            h.fs_open(&ctx, 0x1000, "Nope:/x".len(), OpenFlags::READ),
+            Err(Errno::NotFound)
+        );
+        assert!(
+            fs.calls().is_empty(),
+            "resolution failed before the VFS was touched"
+        );
+        assert_eq!(aspaces.read().open_file_entry(SecTaskId(2), 4), None);
     }
 
     /// `fs_getcwd` writes the caller's working directory out; an undersized

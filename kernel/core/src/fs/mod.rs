@@ -60,7 +60,9 @@ pub use mounted::{
     FilesystemAlreadyInstalled, IdentityAlreadyInstalled, LateFilesystem, LateIdentity,
     MountedFilesystemService,
 };
-pub use path::{Path, MAX_COMPONENT_LEN, MAX_PATH_COMPONENTS, ROOT_TEMPLATE};
+pub use path::{
+    resolve_machine_alias, Path, MAX_COMPONENT_LEN, MAX_PATH_COMPONENTS, ROOT_TEMPLATE,
+};
 pub use perm::{Access, AclEntry, AclWho, Credentials, Metadata, Mode};
 pub use service::{FilesystemService, NullFilesystemService, NULL_FILESYSTEM};
 pub use vfs::Vfs;
