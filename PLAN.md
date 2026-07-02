@@ -3396,7 +3396,9 @@ I/O vocabulary. See `.junie/PREREQUISITES2.md` for the full P0–P6 status.
   never free-form text and never a second reference parser (§2.2). It serves
   `info:system/{hostname,kernel,machine-id,boot-time}` (from `SYSTEM_IDENTITY`,
   machine-id sensitive; `boot-time` from the ungated `UPTIME` reply as a public
-  stable fact), `stats:uptime` (from `UPTIME`, boot-reset counter), and
+  stable fact), `stats:uptime` (from `UPTIME`, boot-reset counter),
+  `info:mem/physical` (total physical RAM, a stable fact carried by the
+  `CAP_SYSINFO_KERNEL`-gated `KERNEL_MEMORY_STATS` query), and
   `stats:mem/{used,available,total,kernel-heap,user-resident}` (from
   `KERNEL_MEMORY_STATS`, gated on `CAP_SYSINFO_KERNEL`, gauges); it fails closed
   on an unknown selector, a

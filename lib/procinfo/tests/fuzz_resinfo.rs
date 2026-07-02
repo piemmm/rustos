@@ -60,6 +60,8 @@ const TEMPLATES: &[&str] = &[
     "stats:mem/total",
     "stats:mem/kernel-heap",
     "stats:mem/user-resident",
+    "info:mem/physical",
+    "info:mem/used",
     "info:limits/address-space-bytes/soft",
     "info:limits/open-streams/hard",
     "info:limits/processes/soft",

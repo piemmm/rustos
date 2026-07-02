@@ -17,8 +17,9 @@
 //! The served set grows in place here as sibling queries land; today it covers
 //! exactly the ungated/self-scoped and kernel-memory `sysinfo-v1` queries that
 //! already exist (`info:system/{hostname,kernel,machine-id,boot-time}`,
-//! `info:process/{pid,uid,gid,proc-id}`, `info:limits/<kind>/{soft,hard}`,
-//! `stats:uptime`, `stats:mem/*`, and `stats:limits/<kind>`).
+//! `info:process/{pid,uid,gid,proc-id}`, `info:mem/physical`,
+//! `info:limits/<kind>/{soft,hard}`, `stats:uptime`, `stats:mem/*`, and
+//! `stats:limits/<kind>`).
 
 use alloc::string::{String, ToString};
 
@@ -90,13 +91,8 @@ fn resolve_info(
     transport: &dyn Transport,
 ) -> Result<ResourceResponse, ResolveInfoError> {
     reject_decoration(reference)?;
-    let value = resolve_info_value(&selector(reference), transport)?;
-    envelope(
-        reference,
-        now,
-        Authorization::Unprivileged,
-        ResponsePayload::Info(value),
-    )
+    let (value, authorization) = resolve_info_value(&selector(reference), transport)?;
+    envelope(reference, now, authorization, ResponsePayload::Info(value))
 }
 
 /// Map an `info:` `selector` onto its typed value, issuing only the System
@@ -104,27 +100,39 @@ fn resolve_info(
 fn resolve_info_value(
     selector: &[&str],
     transport: &dyn Transport,
-) -> Result<InfoValue, ResolveInfoError> {
-    let value = match selector {
-        ["system", "hostname"] => InfoValue::new_str(
-            Sensitivity::Public,
-            &field_lossy(query_identity(transport)?.hostname_bytes()),
+) -> Result<(InfoValue, Authorization), ResolveInfoError> {
+    let (value, authorization) = match selector {
+        ["system", "hostname"] => (
+            InfoValue::new_str(
+                Sensitivity::Public,
+                &field_lossy(query_identity(transport)?.hostname_bytes()),
+            ),
+            Authorization::Unprivileged,
         ),
-        ["system", "kernel"] => InfoValue::new_str(
-            Sensitivity::Public,
-            &version_string(&query_identity(transport)?),
+        ["system", "kernel"] => (
+            InfoValue::new_str(
+                Sensitivity::Public,
+                &version_string(&query_identity(transport)?),
+            ),
+            Authorization::Unprivileged,
         ),
         // Machine identity is identifying, not public (`plans/ALIAS.md` §6.2).
-        ["system", "machine-id"] => InfoValue::new_str(
-            Sensitivity::Sensitive,
-            &hex_lower(&query_identity(transport)?.machine_id),
+        ["system", "machine-id"] => (
+            InfoValue::new_str(
+                Sensitivity::Sensitive,
+                &hex_lower(&query_identity(transport)?.machine_id),
+            ),
+            Authorization::Unprivileged,
         ),
         // The wall-clock instant of boot is fixed for the life of the boot, so
         // it is a stable fact rather than a measurement; it is not sensitive.
         // It rides the same ungated `UPTIME` query that `stats:uptime` uses.
-        ["system", "boot-time"] => InfoValue::new_str(
-            Sensitivity::Public,
-            &time_string(query_uptime(transport)?.boot_time),
+        ["system", "boot-time"] => (
+            InfoValue::new_str(
+                Sensitivity::Public,
+                &time_string(query_uptime(transport)?.boot_time),
+            ),
+            Authorization::Unprivileged,
         ),
         // The caller's own kernel-attested identity. The self-scoped
         // `PROCESS_IDENTITY` query needs no capability and answers only for the
@@ -134,15 +142,29 @@ fn resolve_info_value(
             let origin = query_process_identity(transport)?;
             // The or-pattern fixes `leaf` to one of these four, so the final
             // arm is `proc-id` and there is no unhandled case.
-            match *leaf {
+            let value = match *leaf {
                 "pid" => InfoValue::new_str(Sensitivity::Public, &origin.pid().to_string()),
                 "uid" => InfoValue::new_str(Sensitivity::Public, &origin.uid().to_string()),
                 "gid" => InfoValue::new_str(Sensitivity::Public, &origin.gid().to_string()),
                 _ => {
                     InfoValue::new_str(Sensitivity::Public, &hex_lower(origin.proc_id().as_bytes()))
                 }
-            }
+            };
+            (value, Authorization::Unprivileged)
         }
+        // Total physical memory is a stable hardware fact, not a measurement,
+        // so it is an `info:` value. It is carried only by the kernel-memory
+        // query, which the broker gates on `CAP_SYSINFO_KERNEL`; the size
+        // itself is not secret (hence `Public`), but the sole query that
+        // reports it is privileged, so the answer costs that capability and a
+        // denial surfaces below.
+        ["mem", "physical"] => (
+            InfoValue::new_str(
+                Sensitivity::Public,
+                &query_kernel_memory(transport)?.total_bytes.to_string(),
+            ),
+            Authorization::Capability(CapabilityId::SYSINFO_KERNEL),
+        ),
         // A configured soft/hard bound on one of the caller's own resources.
         // The self-scoped `RESOURCE_LIMITS` query needs no capability and
         // answers only for the asking principal, so its own limits are public
@@ -158,11 +180,17 @@ fn resolve_info_value(
                 "soft" => render_limit_bound(limit.soft),
                 _ => render_limit_bound(limit.hard),
             };
-            InfoValue::new_str(Sensitivity::Public, &rendered)
+            (
+                InfoValue::new_str(Sensitivity::Public, &rendered),
+                Authorization::Unprivileged,
+            )
         }
         _ => return Err(ResolveInfoError::UnknownSelector),
     };
-    value.map_err(|_| ResolveInfoError::Malformed)
+    Ok((
+        value.map_err(|_| ResolveInfoError::Malformed)?,
+        authorization,
+    ))
 }
 
 /// Resolve a `stats:` reference (a measurement) to a single [`Metric`].
@@ -763,6 +791,46 @@ mod tests {
             }
             ResponsePayload::Info(_) => panic!("expected metric"),
         }
+    }
+
+    #[test]
+    fn info_mem_physical_is_a_gated_public_fact() {
+        let fixture = Fixture::new();
+        let r = resolve_str("info:mem/physical", &fixture).expect("ok");
+        // Total physical memory is carried only by the kernel-memory query, so
+        // the answer costs `CAP_SYSINFO_KERNEL` even though the size is public.
+        assert_eq!(
+            r.authorization,
+            Authorization::Capability(CapabilityId::SYSINFO_KERNEL)
+        );
+        assert_eq!(r.query(), "info:mem/physical");
+        match r.payload {
+            ResponsePayload::Info(v) => {
+                // The fixture reports 8192 bytes of total memory.
+                assert_eq!(v.value(), "8192");
+                assert_eq!(v.sensitivity, Sensitivity::Public);
+            }
+            ResponsePayload::Metric(_) => panic!("expected info value"),
+        }
+    }
+
+    #[test]
+    fn info_mem_physical_denial_maps_to_capability_denied() {
+        let mut fixture = Fixture::new();
+        fixture.deny = Some(SysinfoQueryId::KERNEL_MEMORY_STATS);
+        assert_eq!(
+            resolve_str("info:mem/physical", &fixture),
+            Err(ResolveInfoError::CapabilityDenied)
+        );
+    }
+
+    #[test]
+    fn info_mem_unknown_leaf_fails_closed() {
+        let fixture = Fixture::new();
+        assert_eq!(
+            resolve_str("info:mem/used", &fixture),
+            Err(ResolveInfoError::UnknownSelector)
+        );
     }
 
     #[test]

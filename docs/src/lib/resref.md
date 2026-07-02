@@ -82,7 +82,8 @@ never bypass the authority that guards it:
   identity, from the self-scoped `PROCESS_IDENTITY` query),
   `info:limits/<kind>/{soft,hard}` and `stats:limits/<kind>` (the caller's own
   effective bounds and live usage, from the self-scoped `RESOURCE_LIMITS`
-  query), `stats:uptime`, and
+  query), `info:mem/physical` (total physical RAM as a stable fact, carried by
+  the `CAP_SYSINFO_KERNEL`-gated kernel-memory query), `stats:uptime`, and
   `stats:mem/{used,available,total,kernel-heap,user-resident}` — and grows in
   place as more queries land.
 
