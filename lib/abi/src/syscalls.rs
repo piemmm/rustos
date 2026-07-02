@@ -1179,8 +1179,16 @@ pub const SYSCALLS: &[SyscallSpec] = &[
             AbiType::Unit,
         ],
         ret: AbiType::Errno,
-        required_capability: Some(CapabilityId::FS_ACCESS),
-        // Releasing one's own descriptor is high-volume and not audited.
+        // Ungated at the dispatcher: a descriptor may be backed by a
+        // filesystem path (opened under `CAP_FS_ACCESS`) or by a resource
+        // reference (opened under its namespace's own authority), so the
+        // authority is possession of the descriptor, established at open —
+        // not a blanket filesystem gate re-checked on every operation. The
+        // handler resolves the backing and applies the backing-specific
+        // check (a path-backed descriptor still requires `CAP_FS_ACCESS`),
+        // like `rlimit_set`'s fine-grained handler gate. Releasing one's own
+        // descriptor is high-volume and not audited.
+        required_capability: None,
         audit: false,
     },
     SyscallSpec {
@@ -1197,8 +1205,12 @@ pub const SYSCALLS: &[SyscallSpec] = &[
             AbiType::Unit,
         ],
         ret: AbiType::U64,
-        required_capability: Some(CapabilityId::FS_ACCESS),
-        // Reads are high-volume; not audited per call.
+        // Ungated at the dispatcher: the descriptor's backing decides the
+        // authority (a path-backed descriptor requires `CAP_FS_ACCESS`, a
+        // resource-backed one was authorised by its namespace at open), so
+        // the handler applies the backing-specific check rather than a
+        // blanket filesystem gate. Reads are high-volume; not audited.
+        required_capability: None,
         audit: false,
     },
     SyscallSpec {
@@ -1215,8 +1227,12 @@ pub const SYSCALLS: &[SyscallSpec] = &[
             AbiType::Unit,
         ],
         ret: AbiType::U64,
-        required_capability: Some(CapabilityId::FS_ACCESS),
-        // A write mutates persistent state; audited.
+        // Ungated at the dispatcher: the descriptor's backing decides the
+        // authority (a path-backed descriptor requires `CAP_FS_ACCESS`, a
+        // resource-backed one was authorised by its namespace at open), so
+        // the handler applies the backing-specific check rather than a
+        // blanket filesystem gate. A write mutates state; audited.
+        required_capability: None,
         audit: true,
     },
     SyscallSpec {
@@ -1564,6 +1580,34 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: None,
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::RESOURCE_OPEN,
+        name: "resource_open",
+        arg_count: 3,
+        args: [
+            // Non-null `UserPtr` to the textual resource reference, its
+            // length (at most `RESOURCE_REF_MAX`), then the `OpenFlags` bits.
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::U32,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // Returns the new descriptor; a `Handle` minted against the caller's
+        // per-process descriptor space, exactly as `fs_open` does.
+        ret: AbiType::Handle,
+        // Ungated at the dispatcher: authorisation is per namespace and
+        // selector inside the resolver (an unprivileged resource such as
+        // `sys:random` needs no capability; a privileged namespace is
+        // checked against the kernel-attested caller and fails closed),
+        // mirroring how `ipc_call` / `rlimit_set` carry no blanket gate but
+        // enforce a fine-grained check in the handler. Resolving a resource
+        // to a descriptor is a security-relevant decision, so it IS audited
+        // per call, like `fs_open`.
+        required_capability: None,
+        audit: true,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in
@@ -1878,19 +1922,22 @@ mod tests {
 
     #[test]
     fn fs_capability_requirements_are_frozen() {
-        // The filesystem syscalls share the single coarse CAP_FS_ACCESS
-        // entry gate (the per-path authority is the VFS inode model under
-        // the caller's real credentials, not this capability). State-
+        // The *path-taking* filesystem syscalls share the single coarse
+        // CAP_FS_ACCESS entry gate (the per-path authority is the VFS inode
+        // model under the caller's real credentials, not this capability).
+        // The *descriptor-operating* calls (close, read, write) are ungated
+        // at the dispatcher: a descriptor may be backed by a filesystem path
+        // (opened under CAP_FS_ACCESS) or a resource reference (opened under
+        // its namespace's own authority), so the handler applies the
+        // backing-specific check rather than a blanket filesystem gate — a
+        // path-backed descriptor still requires CAP_FS_ACCESS there. State-
         // mutating calls (open — which may create — write, truncate, mkdir,
-        // unlink) are audited; the pure reads (read, readdir, stat) and the
-        // own-handle lifecycle calls (close, sync) are high-volume and not
-        // audited per call. Lock this down so a refactor cannot loosen the
-        // gate or drop the audit on a mutator.
+        // unlink, rename) are audited; the pure reads (read, readdir, stat)
+        // and the own-handle lifecycle calls (close, sync) are high-volume
+        // and not audited per call. Lock this down so a refactor cannot
+        // loosen a path gate or drop the audit on a mutator.
         for n in [
             SyscallNumber::FS_OPEN,
-            SyscallNumber::FS_CLOSE,
-            SyscallNumber::FS_READ,
-            SyscallNumber::FS_WRITE,
             SyscallNumber::FS_READDIR,
             SyscallNumber::FS_STAT,
             SyscallNumber::FS_TRUNCATE,
@@ -1903,6 +1950,22 @@ mod tests {
                 spec_for(n).unwrap().required_capability,
                 Some(CapabilityId::FS_ACCESS),
                 "{} must be gated on CAP_FS_ACCESS",
+                spec_for(n).unwrap().name
+            );
+        }
+        // The descriptor-operating calls carry no blanket dispatcher gate;
+        // the handler enforces the backing-specific authority (a path-backed
+        // descriptor still requires CAP_FS_ACCESS). Lock that down so a
+        // refactor cannot silently re-impose or drop the coarse gate.
+        for n in [
+            SyscallNumber::FS_CLOSE,
+            SyscallNumber::FS_READ,
+            SyscallNumber::FS_WRITE,
+        ] {
+            assert_eq!(
+                spec_for(n).unwrap().required_capability,
+                None,
+                "{} must be ungated at the dispatcher (backing-specific check in handler)",
                 spec_for(n).unwrap().name
             );
         }
@@ -1933,6 +1996,22 @@ mod tests {
                 spec_for(n).unwrap().name
             );
         }
+    }
+
+    #[test]
+    fn resource_open_capability_requirements_are_frozen() {
+        // resource_open carries no blanket dispatcher gate: authorisation is
+        // per namespace and selector inside the resolver, so an unprivileged
+        // resource (sys:random, sys:null) needs none and a privileged
+        // namespace is checked in the handler and fails closed. It IS audited
+        // per call — resolving a resource to a descriptor is a
+        // security-relevant decision, like fs_open. Lock this down so a
+        // refactor cannot impose a coarse gate or drop the audit.
+        let spec = spec_for(SyscallNumber::RESOURCE_OPEN).unwrap();
+        assert_eq!(spec.required_capability, None);
+        assert!(spec.audit, "resource_open must be audited per call");
+        assert_eq!(spec.name, "resource_open");
+        assert_eq!(spec.arg_count, 3);
     }
 
     #[test]

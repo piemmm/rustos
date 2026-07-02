@@ -93,9 +93,9 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  37 | `hw_emit_node` | `user_ptr` (node), `len`                | `errno` | `CAP_HW_EMIT`     | yes     |
 |  38 | `hw_remove_node` | `u64 node_id`                         | `errno` | `CAP_HW_EMIT`     | yes     |
 |  46 | `fs_open`      | `user_ptr` (path), `len`, `u32 flags`   | `u64` (fd)    | `CAP_FS_ACCESS` | yes   |
-|  47 | `fs_close`     | `u32 fd`                                | `errno`       | `CAP_FS_ACCESS` | no    |
-|  48 | `fs_read`      | `u32 fd`, `u64 offset`, `user_ptr`, `len` | `u64` (bytes) | `CAP_FS_ACCESS` | no  |
-|  49 | `fs_write`     | `u32 fd`, `u64 offset`, `user_ptr`, `len` | `u64` (bytes) | `CAP_FS_ACCESS` | yes |
+|  47 | `fs_close`     | `u32 fd`                                | `errno`       | — (backing)     | no    |
+|  48 | `fs_read`      | `u32 fd`, `u64 offset`, `user_ptr`, `len` | `u64` (bytes) | — (backing)     | no  |
+|  49 | `fs_write`     | `u32 fd`, `u64 offset`, `user_ptr`, `len` | `u64` (bytes) | — (backing)     | yes |
 |  50 | `fs_readdir`   | `u32 fd`, `user_ptr` (buf), `len`       | `u64` (bytes) | `CAP_FS_ACCESS` | no    |
 |  51 | `fs_stat`      | `u32 fd`, `user_ptr` (out), `len`       | `u64` (bytes) | `CAP_FS_ACCESS` | no    |
 |  52 | `fs_truncate`  | `u32 fd`, `u64 size`                    | `errno`       | `CAP_FS_ACCESS` | yes   |
@@ -113,6 +113,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  64 | `signal`       | `i32 pid`, `u32 signal`                 | `errno`       | —               | yes   |
 |  65 | `fs_chdir`     | `user_ptr` (path), `len`                | `errno`       | `CAP_FS_ACCESS` | yes   |
 |  66 | `fs_getcwd`    | `user_ptr` (buf), `len`                 | `u64` (bytes) | —               | no    |
+|  67 | `resource_open` | `user_ptr` (ref), `len`, `u32 flags`   | `u64` (fd)    | —               | yes   |
 
 (Syscall numbers 39–45 — `msi_alloc`, `shm_create`/`shm_map`/`shm_unmap`,
 `waitset_create`/`waitset_ctl`/`waitset_wait` — are defined in
@@ -142,6 +143,34 @@ refuses any `..` that would escape the alias root. A name that is not a
 published root fails closed with `NotFound` before the VFS is touched; session
 and volume aliases are published by their owning services when those land.
 
+`resource_open` (no. 67) is the resource-reference analogue of `fs_open`
+(`plans/ALIAS.md`, `.junie/PREREQUISITES2.md` P5). A resource reference
+(`sys:random`, `sys:null`, …) names a typed *non-filesystem* resource — there
+is no `/dev`, `/proc`, or `/sys` — so the call copies the reference in, parses
+it with the single shared reference parser (`lib/resref`, never a second
+parser), and resolves it through the capability-checked namespace resolver in
+`kernel/core::resource`. Authorisation is per namespace and selector, so the
+call carries **no** blanket dispatcher capability: an unprivileged resource
+(`sys:random`, `sys:null`) needs none, while a privileged namespace is checked
+against the kernel-attested caller inside the resolver and fails closed. Only
+the `sys:` namespace's unprivileged members are served today; every other
+namespace has no resolver wired yet and fails closed (`NotImplemented`) rather
+than fabricating a resource — resolvers are added in place as their consumers
+land. On success the call records a **resource-backed** descriptor in the
+caller's per-process table, drawn from the *same* number space as `fs_open` so
+a resource fd can never collide with a file fd. That descriptor is read and
+written with `fs_read` / `fs_write` and released with `fs_close`, exactly as a
+file handle is; the read/write handler dispatches on the descriptor's backing
+(a path routes through the secured VFS and still requires `CAP_FS_ACCESS`; a
+resource routes to its subsystem — `sys:random` streams the CSPRNG reserve
+`random_get` draws from, `sys:null` reads as end of stream and discards
+writes). `fs_readdir` / `fs_stat` / `fs_truncate` / `fs_sync` on a
+resource-backed descriptor fail closed (`OutOfRange`) — those are filesystem
+operations with no meaning for a resource. Because `fs_read` / `fs_write` /
+`fs_close` must serve either backing, their capability check moved out of the
+dispatcher into the handler (a path-backed descriptor still requires
+`CAP_FS_ACCESS`), so reading `sys:random` never demands filesystem access.
+
 ### Capability matrix
 
 The dispatcher consults `kernel/sec`'s `TaskCapabilities::has` against
@@ -165,7 +194,7 @@ is exhaustive — anything not listed below is ungated:
 | `CAP_SYSINFO_INTROSPECT` | `sysinfo_introspect` |
 | `CAP_LOG_EMIT`     | `log_emit`                 |
 | `CAP_HW_EMIT`      | `hw_emit_node`, `hw_remove_node` |
-| `CAP_FS_ACCESS`    | `fs_open`, `fs_close`, `fs_read`, `fs_write`, `fs_readdir`, `fs_stat`, `fs_truncate`, `fs_sync`, `fs_mkdir`, `fs_unlink`, `fs_rename`, `fs_chdir` |
+| `CAP_FS_ACCESS`    | `fs_open`, `fs_readdir`, `fs_stat`, `fs_truncate`, `fs_sync`, `fs_mkdir`, `fs_unlink`, `fs_rename`, `fs_chdir` (the path-taking calls), and — enforced *in the handler* on a path-backed descriptor — `fs_read`, `fs_write`, `fs_close` |
 | `CAP_TIME_SET`     | `wall_time_set`            |
 
 The `CAP_IRQ_BIND` rationale, the wake-up contract, and the failure

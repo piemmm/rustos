@@ -402,6 +402,34 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Resolve the resource reference at `(reference, reference_len)` and open
+    /// it to a new descriptor with `flags` (`.junie/PREREQUISITES2.md` P5).
+    ///
+    /// The dispatcher has already validated that `reference` is a non-null
+    /// `UserPtr` and rejected any illegal [`OpenFlags`]. The implementation
+    /// copies the reference in through the validated `copy_from_user`
+    /// boundary, parses it with the single shared reference parser, and
+    /// resolves it through the capability-checked namespace resolver under the
+    /// caller's kernel-attested identity — authorisation is per namespace and
+    /// selector, so there is no blanket dispatcher gate. On success it records
+    /// a resource-backed descriptor in the caller's per-process table (the
+    /// same number space as [`Self::fs_open`], so numbers never collide) and
+    /// returns it; a malformed, unknown, unwired, or unauthorised reference
+    /// fails closed without minting a descriptor.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`]:
+    /// a kernel build with no resource resolver wired never fabricates a
+    /// handle. The real handler is installed in `kernel/core`.
+    fn resource_open(
+        &self,
+        _caller: &CallerContext<'_>,
+        _reference: u64,
+        _reference_len: usize,
+        _flags: OpenFlags,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// Read the calling task's effective limit for resource `kind`, writing
     /// the encoded [`rustos_abi::ResourceLimit`] to the user `out` pointer.
     ///
@@ -1870,6 +1898,16 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 let out_cap = decode_len(args.0[1])?;
                 self.handlers.fs_getcwd(caller, args.0[0], out_cap)
             }
+            SyscallNumber::RESOURCE_OPEN => {
+                // args[0] is the non-null reference `UserPtr`
+                // (dispatcher-checked); args[1] is the reference length;
+                // args[2] is the `OpenFlags` bits, rejected here for any
+                // reserved/illegal combination.
+                let reference_len = decode_len(args.0[1])?;
+                let flags = OpenFlags::from_bits(decode_u32(args.0[2]))?;
+                self.handlers
+                    .resource_open(caller, args.0[0], reference_len, flags)
+            }
             SyscallNumber::WALL_TIME_GET => {
                 // args[0] is the non-null out `UserPtr` (dispatcher-checked);
                 // args[1] is its capacity in bytes.
@@ -2768,6 +2806,17 @@ mod tests {
         fn fs_chdir(&self, _c: &CallerContext<'_>, _path: u64, _path_len: usize) -> SyscallResult {
             self.record("fs_chdir");
             Ok(0)
+        }
+
+        fn resource_open(
+            &self,
+            _c: &CallerContext<'_>,
+            _reference: u64,
+            _reference_len: usize,
+            _flags: OpenFlags,
+        ) -> SyscallResult {
+            self.record("resource_open");
+            Ok(5)
         }
 
         fn fs_getcwd(&self, _c: &CallerContext<'_>, _buf: u64, _buf_cap: usize) -> SyscallResult {

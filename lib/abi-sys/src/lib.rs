@@ -127,6 +127,7 @@ const NUM_TERMINAL_SIZE: u64 = SyscallNumber::TERMINAL_SIZE.as_u16() as u64;
 const NUM_SIGNAL: u64 = SyscallNumber::SIGNAL.as_u16() as u64;
 const NUM_FS_CHDIR: u64 = SyscallNumber::FS_CHDIR.as_u16() as u64;
 const NUM_FS_GETCWD: u64 = SyscallNumber::FS_GETCWD.as_u16() as u64;
+const NUM_RESOURCE_OPEN: u64 = SyscallNumber::RESOURCE_OPEN.as_u16() as u64;
 
 /// Empty argument vector for the no-argument syscalls.
 const NO_ARGS: [u64; SYSCALL_MAX_ARGS] = [0; SYSCALL_MAX_ARGS];
@@ -1489,6 +1490,44 @@ pub extern "C" fn sys_fs_getcwd(buf: *mut c_void, buf_len: usize) -> u64 {
     unsafe { raw_syscall(NUM_FS_GETCWD, [ptr_arg(buf), buf_len as u64, 0, 0, 0, 0]) }
 }
 
+/// `resource_open`: resolve the resource reference `(reference,
+/// reference_len)` and open it to a new descriptor
+/// (`SyscallNumber::RESOURCE_OPEN`). Returns a new per-process descriptor (at
+/// or above `ROS_STD_STREAM_COUNT`), or a `ROS_E_*` code reinterpreted into
+/// the result.
+///
+/// A resource reference (e.g. `"sys:random"`) names a typed non-filesystem
+/// resource; there is no `/dev`, `/proc`, or `/sys`. `flags` is the
+/// `ROS_OPEN_*` bit set ([`rustos_abi::OpenFlags`]). Authorisation is per
+/// namespace inside the kernel resolver (an unprivileged resource needs no
+/// capability); the kernel validates the `(reference, reference_len)` pair
+/// against the caller's address space. The returned descriptor is read and
+/// written with `ros_sys_fs_read` / `ros_sys_fs_write` and released with
+/// `ros_sys_fs_close`, exactly as a file descriptor is.
+#[must_use]
+#[export_name = "ros_sys_resource_open"]
+pub extern "C" fn sys_resource_open(
+    reference: *mut c_void,
+    reference_len: usize,
+    flags: u32,
+) -> u64 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates `(reference,
+    // reference_len)`.
+    unsafe {
+        raw_syscall(
+            NUM_RESOURCE_OPEN,
+            [
+                ptr_arg(reference),
+                reference_len as u64,
+                u64::from(flags),
+                0,
+                0,
+                0,
+            ],
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1570,6 +1609,7 @@ mod tests {
         (NUM_SIGNAL, "signal", 2),
         (NUM_FS_CHDIR, "fs_chdir", 2),
         (NUM_FS_GETCWD, "fs_getcwd", 2),
+        (NUM_RESOURCE_OPEN, "resource_open", 3),
     ];
 
     #[test]
@@ -2245,6 +2285,20 @@ mod tests {
         assert_eq!(args[0], ptr as usize as u64);
         assert_eq!(args[1], path.len() as u64);
         assert_eq!(args[2], 0x3);
+        assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn resource_open_marshals_reference_len_and_flags() {
+        let mut reference = *b"sys:random";
+        let ptr = reference.as_mut_ptr().cast::<c_void>();
+        let (number, args) = capture(0x105, || {
+            assert_eq!(sys_resource_open(ptr, reference.len(), 0x1), 0x105);
+        });
+        assert_eq!(number, NUM_RESOURCE_OPEN);
+        assert_eq!(args[0], ptr as usize as u64);
+        assert_eq!(args[1], reference.len() as u64);
+        assert_eq!(args[2], 0x1);
         assert_eq!(&args[3..], &[0, 0, 0]);
     }
 

@@ -83,7 +83,7 @@ use rustos_abi::{
     ResourceLimit, Signal, StreamMode, SyscallNumber, Time64, WaitFlags, WaitSetOp, WaitSourceKind,
     WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, FS_IO_MAX, FS_NAME_MAX,
     FS_PATH_MAX, LOG_FIELDS_MAX, LOG_RECORD_MAX, PROC_ID_LEN, RANDOM_REQUEST_MAX_BYTES,
-    SPAWN_UID_INHERIT, TERMINAL_SIZE_WIRE_LEN,
+    RESOURCE_REF_MAX, SPAWN_UID_INHERIT, TERMINAL_SIZE_WIRE_LEN,
 };
 use rustos_caps::CapabilitySet;
 use rustos_kernel_ipc::{
@@ -110,7 +110,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::aspace::AddressSpaceRegistry;
+use crate::aspace::{AddressSpaceRegistry, OpenBacking};
 use crate::audit::AuditEvent;
 use crate::bootinfo::KernelArch;
 use crate::console::{ConsoleDevice, NO_CONSOLES};
@@ -989,6 +989,109 @@ where
             return Err(Errno::OutOfRange);
         };
         self.resolve_against_cwd(caller, raw)
+    }
+
+    /// Copy a resource reference of `len` bytes from the caller's address
+    /// space at `ptr` and validate it as a UTF-8 string, for the
+    /// `resource_open` handler.
+    ///
+    /// Validates every input before use: an empty reference or one longer
+    /// than [`RESOURCE_REF_MAX`] is refused with [`Errno::LengthOutOfRange`]
+    /// before any allocation; a copy fault — or a caller with no registered
+    /// address space — fails closed with [`Errno::BadAddress`]; non-UTF-8
+    /// bytes are [`Errno::OutOfRange`]. The reference's grammatical validity
+    /// and resolution are the resolver's to judge, not this copy step's.
+    fn copy_reference_in(
+        &self,
+        caller: &CallerContext<'_>,
+        ptr: u64,
+        len: usize,
+    ) -> Result<String, Errno> {
+        if len == 0 || len > RESOURCE_REF_MAX {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let mut buf = vec![0u8; len];
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_in(space, physmap, VirtAddr::new(ptr), &mut buf)
+        }) {
+            Some(Ok(())) => {}
+            Some(Err(err)) => return Err(copy_fault_errno(err)),
+            None => return Err(Errno::BadAddress),
+        }
+        let Ok(raw) = core::str::from_utf8(&buf) else {
+            return Err(Errno::OutOfRange);
+        };
+        Ok(String::from(raw))
+    }
+
+    /// Serve a read from a resource-backed descriptor into the caller's
+    /// buffer.
+    ///
+    /// `sys:random` streams CSPRNG output from the same reserve
+    /// [`Self::random_get`] draws from — never a per-call heap allocation
+    /// whose failure could OOM — wiping the kernel staging on the way out.
+    /// `sys:null` is an empty source: it yields no bytes (end of stream). The
+    /// authority was checked at open, so no capability is re-checked here.
+    fn resource_read(
+        &self,
+        caller: &CallerContext<'_>,
+        backing: crate::resource::ResourceBacking,
+        buf: u64,
+        len: usize,
+    ) -> SyscallResult {
+        use crate::resource::ResourceBacking;
+        match backing {
+            // The discard source reads as an immediately-empty stream.
+            ResourceBacking::Null => Ok(0),
+            ResourceBacking::Random => {
+                let outcome = self.with_caller_aspace(caller, |space, physmap| {
+                    let mut reserve = self.rng.write();
+                    let mut staging = [0u8; RANDOM_STAGE_CHUNK];
+                    let mut offset = 0usize;
+                    while offset < len {
+                        let take = core::cmp::min(staging.len(), len - offset);
+                        let chunk = &mut staging[..take];
+                        // A resource read blocks through a required reseed (the
+                        // blocking draw), matching a steady random source.
+                        if let Err(e) = reserve.draw(chunk, false) {
+                            staging.zeroize();
+                            return Err(reserve_errno(e));
+                        }
+                        let Some(addr) = buf.checked_add(offset as u64) else {
+                            staging.zeroize();
+                            return Err(Errno::BadAddress);
+                        };
+                        if let Err(e) = copy_out(space, physmap, VirtAddr::new(addr), chunk) {
+                            staging.zeroize();
+                            return Err(copy_fault_errno(e));
+                        }
+                        offset += take;
+                    }
+                    staging.zeroize();
+                    Ok(offset as u64)
+                });
+                outcome.unwrap_or(Err(Errno::BadAddress))
+            }
+        }
+    }
+
+    /// Serve a write to a resource-backed descriptor.
+    ///
+    /// `sys:null` is a discard sink: it accepts and drops every byte, so it
+    /// reports the whole request as written without reading the caller's
+    /// buffer (a faulting or unreadable buffer is irrelevant to a discard).
+    /// `sys:random` is never writable — the resolver refuses to open it for
+    /// writing — so a write handle can only ever reach a writable backing;
+    /// any other resource fails closed. The authority was checked at open, so
+    /// no capability is re-checked here.
+    fn resource_write(backing: crate::resource::ResourceBacking, len: usize) -> SyscallResult {
+        use crate::resource::ResourceBacking;
+        match backing {
+            ResourceBacking::Null => Ok(len as u64),
+            // Not reachable through a write handle (open refuses write on a
+            // read-only resource); fail closed rather than silently succeed.
+            ResourceBacking::Random => Err(Errno::PermissionDenied),
+        }
     }
 
     /// Turn a caller-supplied path string into a normalised, absolute
@@ -3782,6 +3885,31 @@ where
         Ok(u64::from(fd))
     }
 
+    fn resource_open(
+        &self,
+        caller: &CallerContext<'_>,
+        reference: u64,
+        reference_len: usize,
+        flags: OpenFlags,
+    ) -> SyscallResult {
+        // The dispatcher already checked that `reference` is a non-null
+        // `UserPtr` and rejected any illegal `OpenFlags`. Copy the reference
+        // in, then parse+resolve it through the shared reference parser and
+        // the capability-checked resolver under the caller's kernel-attested
+        // identity: authorisation is per namespace and selector (there is no
+        // blanket dispatcher gate), and a malformed, unknown, unwired, or
+        // unauthorised reference fails closed *without* minting a descriptor.
+        // Only on a successful resolution is a resource descriptor recorded.
+        let reference = self.copy_reference_in(caller, reference, reference_len)?;
+        let backing = crate::resource::resolve(&reference, flags)
+            .map_err(crate::resource::ResolveError::to_errno)?;
+        let fd = self
+            .aspaces
+            .write()
+            .open_resource(caller.task_id, backing, flags)?;
+        Ok(u64::from(fd))
+    }
+
     fn fs_close(&self, caller: &CallerContext<'_>, fd: u32) -> SyscallResult {
         // Release the caller's own descriptor. `fd` is resolved against the
         // kernel-trusted caller id, so one task cannot close another's
@@ -3818,23 +3946,34 @@ where
         if len == 0 {
             return Ok(0);
         }
-        let uid = caller.caps.owner().0;
-        let mut data = vec![0u8; len];
-        let n = self.filesystem.read(
-            uid,
-            caller.caps.effective(),
-            &handle.path,
-            offset,
-            &mut data,
-        )?;
-        // `n <= len` by the service contract; copy exactly what was read out
-        // through the validated boundary.
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_out(space, physmap, VirtAddr::new(buf), &data[..n])
-        }) {
-            Some(Ok(())) => Ok(n as u64),
-            Some(Err(err)) => Err(copy_fault_errno(err)),
-            None => Err(Errno::BadAddress),
+        match &handle.backing {
+            // A filesystem-backed descriptor: the coarse `CAP_FS_ACCESS` gate
+            // is applied here (it is no longer a blanket dispatcher check, so
+            // a resource read is not forced to hold it), then the read routes
+            // through the secured VFS under the caller's real credentials.
+            OpenBacking::Path(path) => {
+                if !caller.caps.has(CapabilityId::FS_ACCESS) {
+                    return Err(Errno::PermissionDenied);
+                }
+                let uid = caller.caps.owner().0;
+                let mut data = vec![0u8; len];
+                let n =
+                    self.filesystem
+                        .read(uid, caller.caps.effective(), path, offset, &mut data)?;
+                // `n <= len` by the service contract; copy exactly what was
+                // read out through the validated boundary.
+                match self.with_caller_aspace(caller, |space, physmap| {
+                    copy_out(space, physmap, VirtAddr::new(buf), &data[..n])
+                }) {
+                    Some(Ok(())) => Ok(n as u64),
+                    Some(Err(err)) => Err(copy_fault_errno(err)),
+                    None => Err(Errno::BadAddress),
+                }
+            }
+            // A resource-backed descriptor was authorised at open; its read
+            // routes to the named subsystem, ignoring the (meaningless) file
+            // offset since a resource is a sequential stream.
+            OpenBacking::Resource(backing) => self.resource_read(caller, *backing, buf, len),
         }
     }
 
@@ -3858,29 +3997,42 @@ where
         if len == 0 {
             return Ok(0);
         }
-        // Stage the caller's bytes in through the validated boundary *before*
-        // touching the filesystem (a faulting buffer writes nothing).
-        let mut data = vec![0u8; len];
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_in(space, physmap, VirtAddr::new(buf), &mut data)
-        }) {
-            Some(Ok(())) => {}
-            Some(Err(err)) => return Err(copy_fault_errno(err)),
-            None => return Err(Errno::BadAddress),
+        match &handle.backing {
+            OpenBacking::Path(path) => {
+                // The coarse `CAP_FS_ACCESS` gate is applied here (no longer a
+                // blanket dispatcher check).
+                if !caller.caps.has(CapabilityId::FS_ACCESS) {
+                    return Err(Errno::PermissionDenied);
+                }
+                // Stage the caller's bytes in through the validated boundary
+                // *before* touching the filesystem (a faulting buffer writes
+                // nothing).
+                let mut data = vec![0u8; len];
+                match self.with_caller_aspace(caller, |space, physmap| {
+                    copy_in(space, physmap, VirtAddr::new(buf), &mut data)
+                }) {
+                    Some(Ok(())) => {}
+                    Some(Err(err)) => return Err(copy_fault_errno(err)),
+                    None => return Err(Errno::BadAddress),
+                }
+                let uid = caller.caps.owner().0;
+                // An append handle writes at the current end of file, ignoring
+                // the supplied offset (the journal-append posture).
+                let append = handle.flags.contains(OpenFlags::APPEND);
+                let n = self.filesystem.write(
+                    uid,
+                    caller.caps.effective(),
+                    path,
+                    offset,
+                    append,
+                    &data,
+                )?;
+                Ok(n as u64)
+            }
+            // A resource-backed descriptor was authorised at open; its write
+            // routes to the named subsystem.
+            OpenBacking::Resource(backing) => Self::resource_write(*backing, len),
         }
-        let uid = caller.caps.owner().0;
-        // An append handle writes at the current end of file, ignoring the
-        // supplied offset (the journal-append posture).
-        let append = handle.flags.contains(OpenFlags::APPEND);
-        let n = self.filesystem.write(
-            uid,
-            caller.caps.effective(),
-            &handle.path,
-            offset,
-            append,
-            &data,
-        )?;
-        Ok(n as u64)
     }
 
     fn fs_readdir(
@@ -3895,12 +4047,15 @@ where
             .read()
             .open_file_entry(caller.task_id, fd)
             .ok_or(Errno::NotFound)?;
+        // A resource-backed descriptor is not a directory (it has no path to
+        // list); fail closed as an invalid operation for its kind.
+        let path = handle.path().ok_or(Errno::OutOfRange)?;
         let uid = caller.caps.owner().0;
         // The secured VFS enforces that the path is a directory the caller
         // may list; a non-directory fails closed there.
         let entries = self
             .filesystem
-            .readdir(uid, caller.caps.effective(), &handle.path)?;
+            .readdir(uid, caller.caps.effective(), path)?;
         // Pack the listing into the `DirEntry` wire stream. A name the driver
         // reports that is empty or longer than `FS_NAME_MAX` is a structural
         // fault and fails the whole call closed (never a truncated record).
@@ -3943,10 +4098,11 @@ where
             .read()
             .open_file_entry(caller.task_id, fd)
             .ok_or(Errno::NotFound)?;
+        // A resource-backed descriptor has no filesystem metadata to report;
+        // fail closed as an invalid operation for its kind.
+        let path = handle.path().ok_or(Errno::OutOfRange)?;
         let uid = caller.caps.owner().0;
-        let stat = self
-            .filesystem
-            .stat(uid, caller.caps.effective(), &handle.path)?;
+        let stat = self.filesystem.stat(uid, caller.caps.effective(), path)?;
         // The whole record or nothing: an undersized buffer fails closed.
         if out_len < FileStat::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
@@ -3974,9 +4130,12 @@ where
         if !handle.flags.is_write() {
             return Err(Errno::PermissionDenied);
         }
+        // A resource-backed descriptor cannot be truncated; fail closed as an
+        // invalid operation for its kind.
+        let path = handle.path().ok_or(Errno::OutOfRange)?;
         let uid = caller.caps.owner().0;
         self.filesystem
-            .truncate(uid, caller.caps.effective(), &handle.path, size)?;
+            .truncate(uid, caller.caps.effective(), path, size)?;
         Ok(0)
     }
 
@@ -3985,10 +4144,17 @@ where
         // forged or foreign number fails closed); the flush itself is
         // filesystem-wide, so the path is not needed beyond proving the
         // caller holds a live handle on the mounted volume.
-        self.aspaces
+        let handle = self
+            .aspaces
             .read()
             .open_file_entry(caller.task_id, fd)
             .ok_or(Errno::NotFound)?;
+        // Syncing is a filesystem operation; a resource-backed descriptor has
+        // nothing to flush and fails closed as an invalid operation for its
+        // kind.
+        if handle.path().is_none() {
+            return Err(Errno::OutOfRange);
+        }
         let uid = caller.caps.owner().0;
         self.filesystem.sync(uid, caller.caps.effective())?;
         Ok(0)

@@ -3355,10 +3355,29 @@ I/O vocabulary. See `.junie/PREREQUISITES2.md` for the full P0–P6 status.
   `CapabilityDenied`, `IdentityMismatch`, …) belong to the resolver services
   (§16.3 of `plans/ALIAS.md`). A string with no `:` is `NotAReference` (a
   filesystem path, owned by `lib/path`). Unit tests, rustdoc, a docs page, and
-  the `fuzz_resref` round-trip harness ship with it. **Still open under P5**
-  (tracked, not stubbed): the capability-resolved namespace resolver and the
-  resource-backing descriptor path (gated on the same open/descriptor ABI as the
-  P4 remainder), which consume this parser rather than re-inventing it.
+  the `fuzz_resref` round-trip harness ship with it.
+- P5 (resolver + descriptor path, first namespace) — **done for `sys:`.** The
+  `resource_open` `abi-v1` call (no. 67) is the resource-reference analogue of
+  `fs_open`: it copies a reference in, resolves it through
+  `kernel/core::resource` over `lib/resref` (never a second parser), and mints
+  a **resource-backed** descriptor from the *same* per-process number space as
+  `fs_open` (so a resource fd cannot collide with a file fd). The resolver
+  serves `sys:random` (the CSPRNG reserve `random_get` draws from, read-only)
+  and `sys:null` (empty source / discard sink), fail-closed: authorisation is
+  per namespace (both unprivileged), so `resource_open` carries no blanket
+  dispatcher capability, and a malformed/unknown/unwired/unserviceable
+  reference mints no descriptor. Resource fds read/write with `fs_read`/
+  `fs_write` and close with `fs_close` — whose capability check moved from the
+  dispatcher into the handler so a path-backed descriptor still requires
+  `CAP_FS_ACCESS` while a resource read never demands it; `fs_readdir`/
+  `fs_stat`/`fs_truncate`/`fs_sync` fail closed on a resource fd. Ships with
+  the `rustos_rt::resource_open` + `File::open_resource` wrappers, the
+  `ros_sys_resource_open` C stub + regenerated header, and host/proptest/fuzz
+  coverage. **Still open under P5** (tracked, not stubbed): extend the resolver
+  in place to the remaining namespaces (`info:`/`stats:` via the System
+  Information API, device namespaces via the device manager) — each added
+  beside `sys:` in `kernel/core::resource` as its consumer appears, without
+  changing the `resource_open` contract.
 
 ## CCOMPAT — C-callable `abi-v1` (full `lib/abi` header, syscall stubs, crt0)
 

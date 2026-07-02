@@ -3,9 +3,15 @@
 Status: normative design input for implementation. The single shared
 reference **parser** is landed as `lib/resref` (`rustos-resref`): the one
 definition of how the grammar in §5 is lexed and validated into typed values
-(`ResourceRef` and the §16.2 conceptual types it covers), spelling only —
-resolution, capability checks, and the resolver error model (§19) remain the
-resolver services' concern and are not yet implemented. See
+(`ResourceRef` and the §16.2 conceptual types it covers), spelling only. The
+kernel-side **resolver** and the descriptor-producing path are landed for the
+first namespace: the `resource_open` `abi-v1` call resolves a reference through
+`kernel/core::resource` over `lib/resref` and mints a resource-backed
+descriptor (from the same per-process number space as `fs_open`), serving
+`sys:random` and `sys:null` fail-closed and unprivileged. The remaining
+namespace resolvers (`info:`/`stats:` via the System Information API, the
+device namespaces via the device manager) and the richer resolver error model
+(§19) are added in place as their consumers appear. See
 `.junie/PREREQUISITES2.md` P5.
 
 This document specifies RustOS resource aliases and selector namespaces. It is

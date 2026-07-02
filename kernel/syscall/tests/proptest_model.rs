@@ -504,6 +504,16 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
+    fn resource_open(
+        &self,
+        _c: &CallerContext<'_>,
+        _reference: u64,
+        _reference_len: usize,
+        _flags: OpenFlags,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
 }
 
 /// The capabilities the `abi-v1` table actually gates on, in ascending id
