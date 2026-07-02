@@ -128,6 +128,7 @@ const NUM_SIGNAL: u64 = SyscallNumber::SIGNAL.as_u16() as u64;
 const NUM_FS_CHDIR: u64 = SyscallNumber::FS_CHDIR.as_u16() as u64;
 const NUM_FS_GETCWD: u64 = SyscallNumber::FS_GETCWD.as_u16() as u64;
 const NUM_RESOURCE_OPEN: u64 = SyscallNumber::RESOURCE_OPEN.as_u16() as u64;
+const NUM_SELF_ORIGIN: u64 = SyscallNumber::SELF_ORIGIN.as_u16() as u64;
 
 /// Empty argument vector for the no-argument syscalls.
 const NO_ARGS: [u64; SYSCALL_MAX_ARGS] = [0; SYSCALL_MAX_ARGS];
@@ -967,6 +968,21 @@ pub extern "C" fn sys_boot_id_get(out: *mut c_void, out_cap: usize) -> u64 {
     unsafe { raw_syscall(NUM_BOOT_ID_GET, [ptr_arg(out), out_cap as u64, 0, 0, 0, 0]) }
 }
 
+/// `self_origin`: read the calling task's own kernel-attested
+/// `rustos_abi::Origin` (`SyscallNumber::SELF_ORIGIN`). The wire image is
+/// written to the `out_cap`-byte buffer at `out` and its byte count returned
+/// (or a `ROS_E_*` code reinterpreted into the result). Unprivileged, like
+/// `ros_sys_boot_id_get` — a task may always learn its own identity, and the
+/// origin is built from the caller's own kernel-held task record so it cannot
+/// be forged. An undersized buffer fails closed with `ROS_E_BUFFER_TOO_SMALL`.
+#[must_use]
+#[export_name = "ros_sys_self_origin"]
+pub extern "C" fn sys_self_origin(out: *mut c_void, out_cap: usize) -> u64 {
+    // SAFETY: see `sys_boot_id_get`; the kernel validates the `(out, out_cap)`
+    // pair against the caller's address space before writing it.
+    unsafe { raw_syscall(NUM_SELF_ORIGIN, [ptr_arg(out), out_cap as u64, 0, 0, 0, 0]) }
+}
+
 /// `sysinfo_introspect`: read the unfiltered, global kernel introspection
 /// view (`SyscallNumber::SYSINFO_INTROSPECT`). `domain` is a
 /// `rustos_abi::IntrospectDomain` discriminant, `arg` is the domain-specific
@@ -1610,6 +1626,7 @@ mod tests {
         (NUM_FS_CHDIR, "fs_chdir", 2),
         (NUM_FS_GETCWD, "fs_getcwd", 2),
         (NUM_RESOURCE_OPEN, "resource_open", 3),
+        (NUM_SELF_ORIGIN, "self_origin", 2),
     ];
 
     #[test]

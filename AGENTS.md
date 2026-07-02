@@ -1420,11 +1420,12 @@ Authoritative subdirectories:
 │             #   chrome) plus their rasterised caches (§10).
 ├── Audio/       # System audio service assets.
 ├── Network/     # Network stack configuration and service binaries.
-├── Security/    # Users, Groups, capability authority, keys, policy.
-│   ├── Users    # User database (see §5.1).
-│   ├── Groups   # Group database (see §5.1).
-│   ├── Keys/    # Local capability-authority signing material.
-│   └── Policy/  # MAC and capability policy.
+├── Security/    # Users, Groups, machine-id, capability authority, keys, policy.
+│   ├── Users     # User database (see §5.1).
+│   ├── Groups    # Group database (see §5.1).
+│   ├── MachineId # Non-secret per-installation machine-id (§16.2 note below).
+│   ├── Keys/     # Local capability-authority signing material.
+│   └── Policy/   # MAC and capability policy.
 ├── Printing/    # Print spooler and drivers' user-space services.
 ├── Logs/        # Append-only structured logs (writable; nosuid,nodev,noexec).
 ├── Settings/    # Machine-wide settings (writable; nosuid,nodev,noexec).
@@ -1434,6 +1435,17 @@ Authoritative subdirectories:
 Adding a new top-level subdirectory under `/System` requires updating
 this section and `PLAN.md`. Subdirectories outside this list are a
 defect.
+
+`/System/Security/MachineId` is the per-installation **machine-id**: the
+RustOS equivalent of `/etc/machine-id`, a stable public per-installation
+identifier. It is **not a secret** — unlike the material under `Keys/` it is
+world-readable (owner-writable), so any principal may read it while only the
+system user may rewrite it. It is the single on-disk source of truth for the
+machine identity every consumer reads (the system log binds each stream's
+hash-chain genesis to its hash, §7.1/SYSLOG). The installer mints it at
+first boot and the image builder bakes a random one into a debug image; an
+unprovisioned system simply has no file, and a consumer fails closed rather
+than fabricating one.
 
 `/System/Logs` and `/System/Settings` are the only writable paths
 beneath `/System`. They are mounted `nosuid,nodev,noexec`; the rest of

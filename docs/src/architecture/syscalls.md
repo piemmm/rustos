@@ -114,6 +114,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  65 | `fs_chdir`     | `user_ptr` (path), `len`                | `errno`       | `CAP_FS_ACCESS` | yes   |
 |  66 | `fs_getcwd`    | `user_ptr` (buf), `len`                 | `u64` (bytes) | —               | no    |
 |  67 | `resource_open` | `user_ptr` (ref), `len`, `u32 flags`   | `u64` (fd)    | —               | yes   |
+|  68 | `self_origin`  | `user_ptr` (out), `len`                | `u64` (bytes) | —               | no    |
 
 (Syscall numbers 39–45 — `msi_alloc`, `shm_create`/`shm_map`/`shm_unmap`,
 `waitset_create`/`waitset_ctl`/`waitset_wait` — are defined in
@@ -500,6 +501,22 @@ time has no id — the call fails closed with `EntropyNotReady` rather than
 return the all-zero `BootId::UNSET` sentinel as if it were real. The
 first-party Rust wrapper is `rustos_rt::boot_id`; the C stub is
 `ros_sys_boot_id_get`.
+
+`self_origin` (no. 68) is the self-directed twin of `call_peer_origin` (no.
+58): where that lets a server read the kernel-attested identity of the *peer*
+it is servicing, `self_origin` lets a task read its *own*. The kernel builds
+the caller's `Origin` — trust domain, owning uid/gid, task id,
+process-instance `ProcId`, and the non-secret effective-capability summary
+(the membership bitmap, no capability tokens) — entirely from the caller's own
+kernel-held task record (`TaskCapabilities::attest_origin`), never a
+caller-supplied value, so a task can neither forge another principal's
+identity nor inflate its own. It is unprivileged (a task may always learn its
+own identity, like `boot_id_get`) and not audited, and fails closed
+(`BufferTooSmall`) on a buffer shorter than `ORIGIN_WIRE_LEN`. The journal
+service (`journald`) uses it to stamp the trusted records it authors itself
+(the segment self-events and the `security` spoof-notes) with its own attested
+origin rather than a fabricated one. The Rust wrapper is
+`rustos_rt::self_origin`; the C stub is `ros_sys_self_origin`.
 
 `terminal_size` (no. 63) reports the character-cell grid of the text console
 backing a caller's standard stream — `fd` (typically `STDOUT`), then the

@@ -18,21 +18,45 @@ kernel-attested `Origin`, into an admitted, committed system-log record.
   `rustos_log::Journal`, and author a trusted `security` record for any spoof
   attempt (a privileged-stream or reserved-source request), preserving the
   exact claim. Every path fails closed.
-- `store` — the pure `/System/Logs/<stream>/<id>.seg` segment-path derivation
-  the production filesystem sink uses (host-tested independently of any
-  syscall).
+- `store` — the pure segment placement derivation the production filesystem
+  sink uses (`segment_placement_for` → the `/System/Logs/<stream>/` directory
+  and the `<id>.seg` file path, read from the segment's own header), plus the
+  well-known identity paths (`MACHINE_ID_PATH`, `LOG_ATTESTATION_KEY_PATH`).
+  Host-tested independently of any syscall.
 
 The persistence engine (`Journal`/`SegmentStore`), the record model, the
 stream/level vocabulary, and the admission authority all live in `rustos-log`;
 this crate is the thin, exhaustively-testable broker over them.
 
+## The `Run` binary
+
+The package is also the freestanding `Run` binary (`src/run.rs`,
+`rustos-journald-run`) installed at `/System/Services/journald`. It links the
+pure-Rust userland runtime `rustos-rt`, and at startup:
+
+- reads its installation identity — the non-secret machine-id
+  (`/System/Security/MachineId`) and the optional log-attestation key
+  (`/System/Security/Keys/LogAttestation`, which seals `audit`/`security`
+  segments — without it those two streams fail closed at rotation);
+- reads its own attested `Origin` (`self_origin`) and the per-boot `BootId`;
+- builds a `Journal` over an FS-backed `SegmentStore` (`FsSegmentStore`) that
+  writes each closed segment as its own immutable file under
+  `/System/Logs/<stream>/`, deriving the placement from the segment's own
+  header and `fs_sync`-ing it;
+- binds `LOG_INGRESS_ENDPOINT` (unrestricted-sender) and serves: receive a
+  request, attest the peer origin (`call_peer_origin`), stamp the current
+  monotonic + wall time, and hand it to `serve`.
+
+Missing machine-id or boot-id fails the service closed (no logging bound to a
+fabricated genesis). On the host the binary is an inert stub.
+
 ## What it does not do (yet)
 
-The service **binary** — which binds the well-known
-`rustos_abi::log_ingress::LOG_INGRESS_ENDPOINT`, reads each caller's peer
-origin, loads the installation's log-attestation key and identity material,
-and drives this core over the real filesystem — is a staged follow-on, along
-with boot-ring import, retention, and rate-limiting/aggregation.
+Boot-ring import (draining the kernel early-boot rings into the `boot`
+stream — the kernel-side ring + drain syscall do not exist yet), per-CPU
+sequence-gap detection, rate-limiting/aggregation, and retention are staged
+follow-on increments, as is the QEMU integration vertical that launches the
+service under `init` and posts live ingress requests over IPC.
 
 ## Layering
 

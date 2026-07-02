@@ -1608,6 +1608,29 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: None,
         audit: true,
     },
+    SyscallSpec {
+        number: SyscallNumber::SELF_ORIGIN,
+        name: "self_origin",
+        arg_count: 2,
+        args: [
+            // Non-null `UserPtr` to the caller's output buffer, then its
+            // capacity (at least `ORIGIN_WIRE_LEN`).
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `U64` carries the bytes-written-or-`-errno` register convention
+        // `call_peer_origin` / `boot_id_get` use.
+        ret: AbiType::U64,
+        // A task may always read its own kernel-attested identity; doing so
+        // grants no authority over any other principal, so — like `boot_id_get`
+        // — it needs no capability and is not audited (a pure self-observer).
+        required_capability: None,
+        audit: false,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

@@ -988,7 +988,9 @@ name = "rustos-journald"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-caps",
  "rustos-log",
+ "rustos-rt",
 ]
 
 [[package]]

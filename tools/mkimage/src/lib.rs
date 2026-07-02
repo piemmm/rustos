@@ -60,7 +60,7 @@ pub use rustos_drv_fs_rustfs::{
 
 use device::SECTOR_BYTES;
 use firmware::FirmwareFile;
-use rustos_abi::{CapabilityId, DriverError};
+use rustos_abi::{CapabilityId, DriverError, MACHINE_ID_LEN};
 use rustos_caps::CapabilitySet;
 use rustos_partition::mbr::{self, MbrError};
 use rustos_partition::{Partition, PartitionType};
@@ -351,6 +351,23 @@ fn debug_log_attestation_key(entropy: &mut dyn EntropySource) -> Result<Vec<u8>,
         .to_vec())
 }
 
+/// Build the debug-profile per-installation machine-id: [`MACHINE_ID_LEN`]
+/// fresh random bytes drawn from `entropy`. The machine-id is **non-secret**
+/// per-installation identity (the RustOS equivalent of `/etc/machine-id`) that
+/// the system log binds each stream's hash-chain genesis to
+/// (`plans/SYSLOG.md` §7.1); giving each debug image its own random id keeps
+/// two images' logs from sharing a genesis. Only a debug image bakes one; an
+/// installer image mints its machine-id at first boot, exactly as it does the
+/// log-attestation key. Fails closed if the host entropy source cannot supply
+/// the bytes.
+fn debug_machine_id(entropy: &mut dyn EntropySource) -> Result<[u8; MACHINE_ID_LEN], MkimageError> {
+    let mut id = [0u8; MACHINE_ID_LEN];
+    entropy
+        .fill(&mut id)
+        .map_err(|e| MkimageError::Entropy(format!("machine-id: {e:?}")))?;
+    Ok(id)
+}
+
 /// The assembled image plus the material the operator must keep.
 pub struct RpiImage {
     /// The flashable image bytes ([`IMAGE_SECTORS`] sectors).
@@ -427,6 +444,13 @@ pub fn build_rpi_image(
         ImageProfile::Debug => Some(debug_log_attestation_key(entropy)?),
         ImageProfile::Installer => None,
     };
+    // Likewise the non-secret per-installation machine-id: a debug image bakes
+    // a random one (so two debug images do not share a log genesis); an
+    // installer image mints it at first boot.
+    let machine_id = match profile {
+        ImageProfile::Debug => Some(debug_machine_id(entropy)?),
+        ImageProfile::Installer => None,
+    };
     let kernel8 = elfflat::elf_to_flat(kernel_elf)?;
 
     // Derive the root volume key from the profile's passphrase under a
@@ -457,6 +481,7 @@ pub fn build_rpi_image(
         users_db.as_deref(),
         groups_db.as_deref(),
         log_key_file.as_deref(),
+        machine_id.as_ref().map(<[u8; MACHINE_ID_LEN]>::as_slice),
     )?;
 
     let mbr_sector = mbr::encode(&[

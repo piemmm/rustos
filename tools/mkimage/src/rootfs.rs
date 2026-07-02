@@ -78,6 +78,19 @@ pub const USERS_DB_NAME: &str = "Users";
 /// Name of the group registry file under `/System/Security`.
 pub const GROUPS_DB_NAME: &str = "Groups";
 
+/// Name of the per-installation machine-id file under `/System/Security`
+/// (`AGENTS.md` §16.2). Its bytes are the raw [`rustos_abi::MACHINE_ID_LEN`]
+/// machine-id — non-secret per-installation identity (the RustOS equivalent
+/// of `/etc/machine-id`) that the system log binds its stream-genesis to
+/// (`plans/SYSLOG.md` §7.1). The journal service reads it at startup.
+pub const MACHINE_ID_NAME: &str = "MachineId";
+
+/// Mode for the machine-id file: world-readable, owner-writable (`0o644`).
+/// The machine-id is **not** a secret — unlike the log-attestation key it is
+/// public per-installation identity, so any principal may read it while only
+/// the system user (uid/gid 0) may rewrite it.
+const MACHINE_ID_MODE: u32 = 0o644;
+
 /// Name of the per-installation log-attestation key file under
 /// `/System/Security/Keys` (`PREREQUISITES.md` P-E). Its bytes are the
 /// [`rustos_log::LogAttestationKey`] on-disk image.
@@ -107,6 +120,7 @@ pub fn build_root_partition(
     users_db: Option<&str>,
     groups_db: Option<&str>,
     log_attestation_key: Option<&[u8]>,
+    machine_id: Option<&[u8]>,
 ) -> Result<Vec<u8>, MkimageError> {
     let dev = MemBlock::new(sectors).map_err(MkimageError::RootPartition)?;
     let mut fs = RustFs::format(dev, ROOT_INODE_HINT, volume_key, entropy)
@@ -118,7 +132,14 @@ pub fn build_root_partition(
             .create(root, name.as_bytes(), NodeKind::Directory)
             .map_err(MkimageError::RootPartition)?;
         if name == "System" {
-            populate_system_subtree(&mut fs, node, users_db, groups_db, log_attestation_key)?;
+            populate_system_subtree(
+                &mut fs,
+                node,
+                users_db,
+                groups_db,
+                log_attestation_key,
+                machine_id,
+            )?;
         }
     }
 
@@ -184,6 +205,7 @@ fn populate_system_subtree(
     users_db: Option<&str>,
     groups_db: Option<&str>,
     log_attestation_key: Option<&[u8]>,
+    machine_id: Option<&[u8]>,
 ) -> Result<(), MkimageError> {
     for sub in WRITABLE_SYSTEM_SUBDIRS {
         let node = fs
@@ -213,6 +235,39 @@ fn populate_system_subtree(
             .map_err(MkimageError::RootPartition)?;
         write_key_file(fs, keys, LOG_ATTESTATION_KEY_NAME, key_bytes)?;
     }
+    if let Some(id_bytes) = machine_id {
+        let security = fs
+            .lookup(system, b"Security")
+            .map_err(MkimageError::RootPartition)?;
+        write_machine_id_file(fs, security, MACHINE_ID_NAME, id_bytes)?;
+    }
+    Ok(())
+}
+
+/// Create `/System/Security/<name>`, write the non-secret machine-id `bytes`
+/// into it whole, and set it world-readable, system-user-owned
+/// ([`MACHINE_ID_MODE`]). A short write is a build failure, never a truncated
+/// id. Unlike the log-attestation key the machine-id is public identity, so it
+/// is readable by any principal (only the system user may rewrite it).
+fn write_machine_id_file(
+    fs: &mut RustFs<MemBlock>,
+    security: NodeId,
+    name: &str,
+    bytes: &[u8],
+) -> Result<(), MkimageError> {
+    let file = fs
+        .create(security, name.as_bytes(), NodeKind::RegularFile)
+        .map_err(MkimageError::RootPartition)?;
+    let written = fs
+        .write_at(security, name.as_bytes(), 0, bytes)
+        .map_err(MkimageError::RootPartition)?;
+    if written != bytes.len() {
+        return Err(MkimageError::RootPartition(
+            rustos_abi::DriverError::DeviceFault,
+        ));
+    }
+    fs.set_security(file, Security::new(MACHINE_ID_MODE, 0, 0))
+        .map_err(MkimageError::RootPartition)?;
     Ok(())
 }
 
@@ -338,6 +393,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("root partition builds")
     }
@@ -400,10 +456,16 @@ mod tests {
                 Err(DriverError::DeviceFault)
             }
         }
-        assert!(
-            build_root_partition(TEST_SECTORS, &TEST_KEY, &mut NoEntropy, None, None, None)
-                .is_err()
-        );
+        assert!(build_root_partition(
+            TEST_SECTORS,
+            &TEST_KEY,
+            &mut NoEntropy,
+            None,
+            None,
+            None,
+            None
+        )
+        .is_err());
     }
 
     #[test]
@@ -414,6 +476,7 @@ mod tests {
             &TEST_KEY,
             &mut TestEntropy(7),
             Some(text),
+            None,
             None,
             None,
         )
@@ -442,6 +505,7 @@ mod tests {
             &mut TestEntropy(7),
             None,
             Some(text),
+            None,
             None,
         )
         .expect("root partition builds");
@@ -495,6 +559,7 @@ mod tests {
             None,
             None,
             Some(&key_file),
+            None,
         )
         .expect("root partition builds");
         let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
@@ -517,5 +582,54 @@ mod tests {
         assert_eq!(sec.mode, LOG_ATTESTATION_KEY_MODE);
         assert_eq!(sec.uid, 0);
         assert_eq!(sec.gid, 0);
+    }
+
+    #[test]
+    fn a_seeded_machine_id_is_written_world_readable_and_reads_back() {
+        use rustos_abi::driver::filesystem::FilesystemSecurity;
+        use rustos_abi::MACHINE_ID_LEN;
+
+        let id = [0xA7u8; MACHINE_ID_LEN];
+        let bytes = build_root_partition(
+            TEST_SECTORS,
+            &TEST_KEY,
+            &mut TestEntropy(7),
+            None,
+            None,
+            None,
+            Some(&id),
+        )
+        .expect("root partition builds");
+        let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
+        let mut fs = RustFs::open(dev, &TEST_KEY).expect("mounts");
+        let root = fs.root();
+        let system = fs.lookup(root, b"System").expect("/System exists");
+        let security = fs.lookup(system, b"Security").expect("Security exists");
+        let node = fs
+            .lookup(security, MACHINE_ID_NAME.as_bytes())
+            .expect("machine-id exists");
+        // The bytes read back are exactly the provisioned machine-id.
+        let mut buf = [0u8; MACHINE_ID_LEN];
+        let read = fs.read_at(node, 0, &mut buf).expect("machine-id reads");
+        assert_eq!(read, MACHINE_ID_LEN);
+        assert_eq!(&buf[..], &id[..]);
+        // Non-secret public identity: world-readable, system-user-owned.
+        let sec = fs.security(node).expect("security present");
+        assert_eq!(sec.mode, MACHINE_ID_MODE);
+        assert_eq!(sec.uid, 0);
+        assert_eq!(sec.gid, 0);
+    }
+
+    #[test]
+    fn an_unseeded_root_ships_no_machine_id() {
+        let bytes = build();
+        let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
+        let mut fs = RustFs::open(dev, &TEST_KEY).expect("mounts");
+        let root = fs.root();
+        let system = fs.lookup(root, b"System").expect("/System exists");
+        let security = fs.lookup(system, b"Security").expect("Security exists");
+        // An installer-shaped root mints its machine-id at first boot, never
+        // in the image.
+        assert!(fs.lookup(security, MACHINE_ID_NAME.as_bytes()).is_err());
     }
 }

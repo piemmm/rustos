@@ -997,6 +997,30 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Read the calling task's own kernel-attested [`rustos_abi::Origin`].
+    ///
+    /// The dispatcher has already checked `out` is a non-null `UserPtr`; the
+    /// call is unprivileged (a task may always learn its own identity). The
+    /// implementation builds the caller's attested origin from its own
+    /// kernel-held task record — never a caller-supplied value — and copies
+    /// its wire image out, returning its byte length. A buffer shorter than
+    /// [`rustos_abi::ORIGIN_WIRE_LEN`] fails closed. This is the self-directed
+    /// twin of [`Self::call_peer_origin`]: the origin is read from kernel
+    /// state, so a task can neither forge another principal's identity nor
+    /// inflate its own.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]; the real handler is installed in
+    /// `kernel/core`.
+    fn self_origin(
+        &self,
+        _caller: &CallerContext<'_>,
+        _out: u64,
+        _out_cap: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// Read the **unfiltered, global** kernel introspection view (P-C).
     ///
     /// The dispatcher has already checked the caller holds
@@ -1947,6 +1971,12 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 let out_cap = decode_len(args.0[2])?;
                 self.handlers.terminal_size(caller, fd, args.0[1], out_cap)
             }
+            SyscallNumber::SELF_ORIGIN => {
+                // args[0] is the non-null out `UserPtr` (dispatcher-checked);
+                // args[1] is its capacity in bytes.
+                let out_cap = decode_len(args.0[1])?;
+                self.handlers.self_origin(caller, args.0[0], out_cap)
+            }
             _ => Err(Errno::NotFound),
         }
     }
@@ -2605,6 +2635,13 @@ mod tests {
             self.record("boot_id_get");
             // Echo the capacity so the reachability test can assert the
             // dispatcher decoded both arguments without wiring a real boot id.
+            Ok(out_cap as u64)
+        }
+
+        fn self_origin(&self, _c: &CallerContext<'_>, _out: u64, out_cap: usize) -> SyscallResult {
+            self.record("self_origin");
+            // Echo the capacity so the reachability test can assert the
+            // dispatcher decoded both arguments without wiring a real origin.
             Ok(out_cap as u64)
         }
 

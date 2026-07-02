@@ -2826,9 +2826,20 @@ Landed (done):
   security record (`Journal::note_spoof`), and the architecture-neutral service
   dispatch core (`userland/system/journald`: `serve` admits an attested
   request and commits it, `store` derives the `/System/Logs/<stream>/` path)
-  have landed. The service *binary* + FS-backed `SegmentStore` runtime wiring,
-  per-CPU gap detection, rate-limit/retention, and anchors are the remaining
-  SYSLOG work (see `.junie/SYSLOG.md`).
+  have landed. The freestanding **service binary** (`journald` `Run`) + FS-backed
+  `SegmentStore` have also landed: it reads its identity, binds
+  `LOG_INGRESS_ENDPOINT`, and writes each closed segment as its own immutable
+  `/System/Logs/<stream>/<id>.seg` file (placement read from the segment's own
+  header, `fs_sync`'d, fail-closed). Two prerequisites landed with it: the
+  unprivileged **`self_origin`** syscall (no. 68 — a task reads its own attested
+  `Origin`, for the trusted records the journal authors itself) and the
+  non-secret per-installation **machine-id** as the single on-disk source of
+  truth (`/System/Security/MachineId`, `AGENTS.md` §16.2; mkimage bakes a random
+  one, journald reads it for the stream genesis). Remaining SYSLOG work:
+  boot-ring import (needs a kernel-side boot ring + drain syscall that do not
+  exist yet), per-CPU gap detection, rate-limit/retention, the QEMU vertical
+  (launch journald under `init`), the kernel `SystemIdentity`↔machine-id
+  unification, renderers/CLI, and anchors (see `.junie/SYSLOG.md`).
 - §19.6 fuzzing — `cargo xtask fuzz` over all in-tree harnesses (`--quick`/
   `--soak`), fail-closed.
 - §19.7 verified core — Bronze proptest models for `lib/caps`/`kernel/sec`/

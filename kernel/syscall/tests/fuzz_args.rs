@@ -336,6 +336,10 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn self_origin(&self, _c: &CallerContext<'_>, _out: u64, _out_cap: usize) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
     fn sysinfo_introspect(
         &self,
         _c: &CallerContext<'_>,

@@ -59,9 +59,10 @@ extern crate alloc;
 use rustos_abi::input::KeyInput;
 use rustos_abi::waitset::{WaitSetOp, WaitSourceKind};
 use rustos_abi::{
-    BootId, FileStat, HwNode, LimitKind, MapFlags, OpenFlags, ResourceLimit, Signal, SyscallNumber,
-    TerminalSize, Time64, WaitFlags, WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT,
-    SPAWN_UID_INHERIT, STDERR, STDIN, STDINFO, STDOUT, TERMINAL_SIZE_WIRE_LEN,
+    BootId, FileStat, HwNode, LimitKind, MapFlags, OpenFlags, Origin, ResourceLimit, Signal,
+    SyscallNumber, TerminalSize, Time64, WaitFlags, WallClockReading, WallTimeState, BOOT_ID_LEN,
+    CONSOLE_INHERIT, ORIGIN_WIRE_LEN, SPAWN_UID_INHERIT, STDERR, STDIN, STDINFO, STDOUT,
+    TERMINAL_SIZE_WIRE_LEN,
 };
 use rustos_abi_trap::raw_syscall;
 
@@ -157,6 +158,9 @@ const NUM_RESOURCE_GRANTS: u64 = SyscallNumber::RESOURCE_GRANTS.as_u16() as u64;
 
 /// `clock_get` syscall number (as above).
 const NUM_CLOCK_GET: u64 = SyscallNumber::CLOCK_GET.as_u16() as u64;
+
+/// `self_origin` syscall number (as above).
+const NUM_SELF_ORIGIN: u64 = SyscallNumber::SELF_ORIGIN.as_u16() as u64;
 
 /// `hw_tree_read` syscall number (as above).
 const NUM_HW_TREE_READ: u64 = SyscallNumber::HW_TREE_READ.as_u16() as u64;
@@ -1810,6 +1814,42 @@ pub fn boot_id() -> Result<BootId, i64> {
     // The kernel returns the wire length; decode it (fail closed on a
     // malformed image — never inventing an id).
     BootId::from_bytes(&buf).map_err(|e| -i64::from(e.as_i32()))
+}
+
+/// Read the calling task's own kernel-attested [`Origin`]
+/// (`SyscallNumber::SELF_ORIGIN`).
+///
+/// Returns the caller's own [`Origin`] — trust domain, owning uid/gid, task
+/// id, process-instance [`rustos_abi::ProcId`], and the non-secret
+/// effective-capability summary. This is the self-directed twin of
+/// [`call_peer_origin`]: where that lets a server learn the identity of the
+/// *peer* it is servicing, this lets a task learn its *own*. Every field is
+/// built by the kernel from the caller's own task record, so it cannot be
+/// forged. Unprivileged, like [`boot_id`] — a task may always learn its own
+/// identity.
+///
+/// # Errors
+///
+/// Returns the raw negative kernel result (`-errno`): the kernel writes the
+/// origin into a stack buffer here, so the only failures are a malformed
+/// decode (`OutOfRange` / `BufferTooSmall`, which a correct kernel never
+/// produces). The wrapper hides no error.
+pub fn self_origin() -> Result<Origin, i64> {
+    let mut buf = [0u8; ORIGIN_WIRE_LEN];
+    let out_ptr = buf.as_mut_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
+    // `(ptr, len)` pair against the caller's address space before writing.
+    // `buf` is a live exclusive local for the duration of the call.
+    #[allow(clippy::cast_possible_wrap)]
+    // The kernel guarantees the i64 count-result encoding (count ≥ 0, else -errno).
+    let ret =
+        unsafe { raw_syscall(NUM_SELF_ORIGIN, [out_ptr, buf.len() as u64, 0, 0, 0, 0]) } as i64;
+    if ret < 0 {
+        return Err(ret);
+    }
+    // The kernel returns the wire length; decode it (fail closed on a
+    // malformed image — never inventing an identity).
+    Origin::from_bytes(&buf).map_err(|e| -i64::from(e.as_i32()))
 }
 
 /// Read the **unfiltered, global** kernel introspection view

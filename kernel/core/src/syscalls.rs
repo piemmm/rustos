@@ -3365,6 +3365,27 @@ where
         }
     }
 
+    fn self_origin(&self, caller: &CallerContext<'_>, out: u64, out_cap: usize) -> SyscallResult {
+        // The reader's buffer must hold a whole origin; a short buffer fails
+        // closed rather than truncating the record.
+        if out_cap < rustos_abi::ORIGIN_WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+
+        // Build the caller's own attested origin from its kernel-held task
+        // record — every field is read from `caller.caps`, never a
+        // caller-supplied value, so a task cannot forge another principal's
+        // identity nor inflate its own.
+        let bytes = caller.caps.attest_origin().to_le_bytes();
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_out(space, physmap, VirtAddr::new(out), &bytes)
+        }) {
+            Some(Ok(())) => Ok(bytes.len() as u64),
+            Some(Err(err)) => Err(copy_fault_errno(err)),
+            None => Err(Errno::BadAddress),
+        }
+    }
+
     fn log_emit(&self, caller: &CallerContext<'_>, record: u64, len: usize) -> SyscallResult {
         // The dispatcher has already checked `CAP_LOG_EMIT` and that
         // `record` is a non-null `UserPtr`. A valid
@@ -14207,6 +14228,70 @@ mod tests {
             .holds_cap(CapabilityId::SYSINFO_GLOBAL));
 
         crate::callreg::unregister(EndpointId(id));
+    }
+
+    /// `self_origin` copies out the caller's *own* kernel-attested origin,
+    /// built from its own task record (never a caller-supplied value), and
+    /// fails closed on a buffer shorter than a whole origin.
+    #[test]
+    fn self_origin_attests_the_caller_and_fails_closed() {
+        use rustos_abi::{Origin, ProcId, TrustDomain, ORIGIN_WIRE_LEN};
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = server_aspace(b"unused");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(9), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+
+        // The caller (task 9) has a minted process instance and a real
+        // capability, so its attested origin is non-trivial.
+        let caps = make_caps_record(9, &[CapabilityId::SYSINFO_GLOBAL], sink)
+            .with_proc_id(ProcId::from_raw([0x99; 16]));
+        let expected = caps.attest_origin();
+        let ctx = CallerContext {
+            task_id: SecTaskId(9),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+
+        // A buffer too small for a whole origin fails closed, before any copy.
+        assert_eq!(
+            h.self_origin(&ctx, 0x1000, ORIGIN_WIRE_LEN - 1),
+            Err(Errno::BufferTooSmall)
+        );
+
+        // The happy path writes the caller's own attested origin to page 1.
+        let wrote = h
+            .self_origin(&ctx, 0x1000, ORIGIN_WIRE_LEN)
+            .expect("origin written");
+        assert_eq!(wrote, ORIGIN_WIRE_LEN as u64);
+
+        let guard = aspaces.read();
+        let (_space, physmap) = guard.resolve(SecTaskId(9)).expect("aspace present");
+        let bytes = read_server_page(physmap, 1, ORIGIN_WIRE_LEN);
+        let decoded = Origin::from_bytes(&bytes).expect("valid origin");
+        drop(guard);
+
+        // It is exactly what the caller's own record attests — proving the
+        // kernel builds it from task state, never a caller claim.
+        assert_eq!(decoded, expected);
+        assert_eq!(decoded.trust_domain(), TrustDomain::User);
+        assert_eq!(decoded.pid(), 9);
+        assert_eq!(decoded.proc_id(), ProcId::from_raw([0x99; 16]));
+        assert!(decoded
+            .capabilities()
+            .holds_cap(CapabilityId::SYSINFO_GLOBAL));
     }
 
     /// `wall_time_get` / `wall_time_set` round-trip the kernel wall clock

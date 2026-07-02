@@ -11,10 +11,42 @@ publish.workspace = true
 [lints]
 workspace = true
 
+# The `Run` binary's freestanding userland runtime (`rustos-rt`) is an
+# optional, on-by-default build feature, mirroring `rustos-sysinfod`. `cargo
+# build -p rustos-journald` builds the service program with it; host tooling
+# builds only the dispatch-core *library* (`serve`/`store`), so the host test
+# build never pulls the userland runtime's `_start` / `#[global_allocator]` /
+# `panic_impl`.
+[features]
+default = ["program"]
+program = ["dep:rustos-rt"]
+
+# The package is both the `rustos-journald` dispatch-core library and the `Run`
+# entry-point binary of the journal service installed at
+# `/System/Services/journald` (`AGENTS.md` §16.2) — the long-running
+# user-space service PID 1 `init` launches to own authoritative system-log
+# segment writes. The binary is a freestanding pure-Rust program on the native
+# Tier-1 targets and an inert host stub elsewhere (see `src/run.rs`).
+[[bin]]
+name = "rustos-journald-run"
+path = "src/run.rs"
+
 [dependencies]
 # The frozen ingress wire ABI (`log_ingress`), the `Errno` table, the attested
 # `Origin`, and the typed field model the dispatcher decodes.
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The journal persistence engine (`Journal`/`SegmentStore`), the record model,
-# the stream/level vocabulary, and the admission authority all live here.
+# the stream/level vocabulary, the machine-id-hash / attestation-key material,
+# and the admission authority all live here.
 rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+# The `Run` binary's freestanding userland runtime (`AGENTS.md` §1): `rustos-rt`
+# provides `_start`, the stack canary, the panic handler, the
+# `#[global_allocator]`, and the syscall wrappers (`call_create`/`call_recv`/
+# `call_reply`/`call_peer_origin`/`self_origin`/`boot_id`/`clock_get`/
+# `wall_time`/the `fs_*` file API). Both are pulled in only for the bare-metal
+# targets the program is actually built for; on the host the binary is an inert
+# stub and neither is linked.
+[target.'cfg(target_os = "none")'.dependencies]
+rustos-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }

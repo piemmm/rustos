@@ -1151,6 +1151,26 @@ impl SyscallNumber {
     /// reach fails closed without minting a descriptor. Every resolution is
     /// audited — opening a resource is a security-relevant decision.
     pub const RESOURCE_OPEN: Self = Self(67);
+    /// Read the calling task's **own** kernel-attested [`crate::Origin`].
+    ///
+    /// Arguments: `out: *mut u8` (user buffer) and `out_cap: usize` (its
+    /// capacity, at least [`crate::ORIGIN_WIRE_LEN`]). On success the caller's
+    /// own [`Origin`](crate::Origin) — trust domain, owning uid/gid, task id,
+    /// process-instance [`ProcId`](crate::ProcId), and the non-secret
+    /// effective-capability summary — is written little-endian to `out` and
+    /// its byte length returned; a buffer shorter than
+    /// [`crate::ORIGIN_WIRE_LEN`] fails closed.
+    ///
+    /// This is the self-directed twin of [`Self::CALL_PEER_ORIGIN`]: where
+    /// that lets a server learn the identity of the *peer* it is servicing,
+    /// this lets a task learn its *own*. Every field is read from the caller's
+    /// own kernel-held task record (never a caller-supplied value), so a task
+    /// can neither forge another principal's origin nor inflate its own — the
+    /// summary carries the capability *membership* bitmap only, no capability
+    /// tokens. Unprivileged: a task may always learn its own identity (like
+    /// [`Self::CLOCK_GET`] / [`Self::BOOT_ID_GET`]) and doing so grants no
+    /// authority, so no capability is required and the call is not audited.
+    pub const SELF_ORIGIN: Self = Self(68);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
@@ -1379,6 +1399,7 @@ mod tests {
         assert_eq!(SyscallNumber::FS_CHDIR.as_u16(), 65);
         assert_eq!(SyscallNumber::FS_GETCWD.as_u16(), 66);
         assert_eq!(SyscallNumber::RESOURCE_OPEN.as_u16(), 67);
+        assert_eq!(SyscallNumber::SELF_ORIGIN.as_u16(), 68);
     }
 
     #[test]

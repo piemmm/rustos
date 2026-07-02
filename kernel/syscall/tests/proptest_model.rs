@@ -338,6 +338,10 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
+    fn self_origin(&self, _c: &CallerContext<'_>, _out: u64, _out_cap: usize) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
     fn sysinfo_introspect(
         &self,
         _c: &CallerContext<'_>,
