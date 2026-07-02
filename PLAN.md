@@ -3373,11 +3373,27 @@ I/O vocabulary. See `.junie/PREREQUISITES2.md` for the full P0–P6 status.
   `fs_stat`/`fs_truncate`/`fs_sync` fail closed on a resource fd. Ships with
   the `rustos_rt::resource_open` + `File::open_resource` wrappers, the
   `ros_sys_resource_open` C stub + regenerated header, and host/proptest/fuzz
-  coverage. **Still open under P5** (tracked, not stubbed): extend the resolver
-  in place to the remaining namespaces (`info:`/`stats:` via the System
-  Information API, device namespaces via the device manager) — each added
-  beside `sys:` in `kernel/core::resource` as its consumer appears, without
-  changing the `resource_open` contract.
+  coverage. The kernel resolver serves only *kernel-owned* backings; it fails
+  `info:`/`stats:` closed (resolving those in the kernel would bypass the
+  `sysinfod` broker's per-principal scoping — a `plans/ALIAS.md` §2 non-goal).
+- P5 (userspace `info:`/`stats:` resolver) — **done for the shipped sysinfo
+  queries.** `lib/procinfo::resolve` maps a parsed `resref` `ResourceRef` onto a
+  `SysinfoQueryId`, issues it through the same client seam `ps`/`sysinfo` use,
+  and returns the `plans/ALIAS.md` §14 response envelope
+  (`lib/procinfo::resinfo::ResourceResponse` — an `InfoValue` or a `Metric` with
+  producer, authorization, timestamp, and per-metric kind/unit/window/reset),
+  never free-form text and never a second reference parser (§2.2). It serves
+  `info:system/{hostname,kernel,machine-id}` (from `SYSTEM_IDENTITY`,
+  machine-id sensitive), `stats:uptime` (from `UPTIME`, boot-reset counter), and
+  `stats:mem/{used,available,total}` (from `KERNEL_MEMORY_STATS`, gated on
+  `CAP_SYSINFO_KERNEL`, gauges); it fails closed on an unknown selector, a
+  guard/facet/query where none is served, a capability denial, or a malformed
+  reply. Ships with host tests and the `fuzz_resinfo` harness (hostile
+  references + hostile broker replies). **Still open under P5** (tracked, not
+  stubbed): grow the userspace resolver in place as more sysinfo queries land,
+  and wire the *kernel-owned* device namespaces into `kernel/core::resource`
+  beside `sys:` via the device manager as their consumers appear — neither
+  changes the `resource_open` contract.
 
 ## CCOMPAT — C-callable `abi-v1` (full `lib/abi` header, syscall stubs, crt0)
 

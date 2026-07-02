@@ -4,15 +4,23 @@ Status: normative design input for implementation. The single shared
 reference **parser** is landed as `lib/resref` (`rustos-resref`): the one
 definition of how the grammar in §5 is lexed and validated into typed values
 (`ResourceRef` and the §16.2 conceptual types it covers), spelling only. The
-kernel-side **resolver** and the descriptor-producing path are landed for the
-first namespace: the `resource_open` `abi-v1` call resolves a reference through
-`kernel/core::resource` over `lib/resref` and mints a resource-backed
-descriptor (from the same per-process number space as `fs_open`), serving
-`sys:random` and `sys:null` fail-closed and unprivileged. The remaining
-namespace resolvers (`info:`/`stats:` via the System Information API, the
-device namespaces via the device manager) and the richer resolver error model
-(§19) are added in place as their consumers appear. See
-`.junie/PREREQUISITES2.md` P5.
+**resolver** is split by the layer that owns each resource, not lumped behind
+one syscall. The kernel-side resolver and descriptor-producing path
+(`resource_open` over `kernel/core::resource`) serve only *kernel-owned*
+backings: it resolves a reference through `lib/resref` and mints a
+resource-backed descriptor (from the same per-process number space as
+`fs_open`), serving `sys:random` and `sys:null` fail-closed and unprivileged.
+The `info:`/`stats:` namespaces are resolved in **userspace**
+(`lib/procinfo::resolve` + the §14 `resinfo` envelope) over the System
+Information API's typed queries — never by the kernel resolver, which would
+bypass the `sysinfod` broker's per-principal scoping (a §2 non-goal). That
+userspace resolver is landed for the selectors the shipped queries back
+(`info:system/{hostname,kernel,machine-id}`, `stats:uptime`,
+`stats:mem/{used,available,total}`); the kernel resolver fails `info:`/`stats:`
+closed. The remaining breadth (more sysinfo-backed selectors; the device
+namespaces via the device manager) and the richer resolver error model (§19)
+are added in place as their consumers appear. See `.junie/PREREQUISITES2.md`
+P5.
 
 This document specifies RustOS resource aliases and selector namespaces. It is
 intended to be used together with the RustOS drive/path conventions document.
@@ -1001,6 +1009,18 @@ payload
 ```
 
 `timestamp` must use the RustOS canonical time representation.
+
+This envelope is realized as `lib/procinfo::resinfo::ResourceResponse`
+(`version`/`producer`/`authorization`/`timestamp`/`query` + a typed
+`ResponsePayload`), produced by the userspace resolver
+(`lib/procinfo::resolve`) from the System Information API's replies. The
+`query` field doubles as the payload `source` (§14.2/§14.3), so the source is
+not stored twice. It is a userspace record built and consumed in-process
+today, so it carries no wire encoding; a wire form is added only if a response
+crosses a boundary (`version` exists so that shape can be negotiated then).
+The variant sets (`MetricKind`, `Unit`, `ResetBehavior`, `Sensitivity`,
+`ValueKind`, `Producer`) are closed to exactly what a resolver produces, and
+grow in place as producers appear.
 
 ### 14.2 `info:` payloads
 

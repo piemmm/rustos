@@ -597,7 +597,13 @@ rustos/
 │   │                    #   bus driver enumerates/assigns BARs without a
 │   │                    #   drivers/*->drivers/* edge (§2.2/§17.4).
 │   ├── procinfo/        # Shared System Information API client helpers
-│   │                    #   (request seams, process-list paging + render).
+│   │                    #   (request seams, process-list paging + render) plus
+│   │                    #   the userspace info:/stats: resolver: maps a parsed
+│   │                    #   resref ResourceRef onto a SysinfoQueryId over the
+│   │                    #   sysinfod client seam and returns the ALIAS §14
+│   │                    #   resinfo response envelope, so info:/stats: resolve
+│   │                    #   through the System Information API, never a kernel
+│   │                    #   resource_open backing (§2.2, §16.6).
 │   ├── raster/          # Shared software rasterisation: premultiplied-alpha
 │   │                    #   Surface (fill_rect, fill_polygon, blit) (§2.2, §17.4).
 │   ├── resref/          # Shared resource-reference parser: the one definition

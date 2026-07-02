@@ -58,6 +58,33 @@ The closed namespace registry — `sys`, `info`, `stats`, `state`, `disk`,
 namespace still parses; membership is a resolver decision, not a syntax error,
 so classifying it (`Namespace::known`) is separate from parsing it.
 
+## Where references are resolved
+
+Resolution is split by the layer that *owns* each resource, so a resolver can
+never bypass the authority that guards it:
+
+- **Kernel-owned backings** (the `sys:` namespace today, device endpoints
+  later) are resolved in the kernel by `resource_open`
+  (`kernel/core::resource`), which maps the parsed reference to a
+  `ResourceBacking` and mints a descriptor. It serves `sys:random`/`sys:null`
+  fail-closed and refuses everything else.
+- **`info:` and `stats:`** are the System Information API's facts and
+  measurements. They are resolved in **userspace** by `lib/procinfo::resolve`,
+  which maps the parsed `ResourceRef` onto a `SysinfoQueryId`, issues it through
+  the same client seam `ps`/`sysinfo` use, and returns the structured `§14`
+  response envelope (`lib/procinfo::resinfo::ResourceResponse` — an `InfoValue`
+  or a `Metric` with producer, authorization, timestamp, and per-metric
+  kind/unit/window/reset). Resolving them in the kernel is forbidden: it would
+  bypass the `sysinfod` broker's per-principal scoping, so the kernel resolver
+  fails `info:`/`stats:` closed. Today it serves the selectors the shipped
+  queries back — `info:system/{hostname,kernel,machine-id}`, `stats:uptime`,
+  and `stats:mem/{used,available,total}` — and grows in place as more queries
+  land.
+
+Either way this crate only produces the typed spelling; the resolver applies
+the capability check and fails closed on an unknown selector, an unsupported
+guard/facet/query, a capability denial, or a malformed reply.
+
 ## Boundary with filesystem paths
 
 A string with **no** `:` delimiter is refused with `RefError::NotAReference`:

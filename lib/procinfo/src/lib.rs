@@ -31,6 +31,13 @@
 //!   its `source on target type fstype (options)` row rendering.
 //! * [`walk_pages`](list) and the shared [`ListError`], the generic paging
 //!   loop both walks are built on.
+//! * [`resolve()`], the userspace `info:`/`stats:` resource-reference resolver:
+//!   it maps a parsed [`ResourceRef`](rustos_resref::ResourceRef) onto a
+//!   [`SysinfoQueryId`](rustos_abi::sysinfo::SysinfoQueryId), issues it over
+//!   the same [`Transport`], and returns the structured [`ResourceResponse`]
+//!   (`plans/ALIAS.md` §14) — the one place `info:`/`stats:` are resolved, so
+//!   the shell never invents a second resolver or bypasses the System
+//!   Information API.
 //!
 //! Each consuming tool keeps its own argument grammar, usage banner, and
 //! error enum; this crate owns only the parts they would otherwise
@@ -43,13 +50,17 @@
 //! * [`list`] — the generic paged-list walk and the shared [`ListError`].
 //! * [`process`] — the process-list paging walk and row rendering.
 //! * [`mount`] — the mount-table paging walk and row rendering.
+//! * [`resinfo`] — the structured `info:`/`stats:` response records
+//!   ([`ResourceResponse`], [`InfoValue`], [`Metric`]).
+//! * [`mod@resolve`] — the `info:`/`stats:` resource-reference resolver.
 //!
 //! # Layering & safety
 //!
-//! `no_std` (with `alloc`); the only dependency is the
-//! audited `lib/abi` crate, so this helper never links a kernel or driver
-//! crate. No `unsafe`, and no `unwrap`/`expect`/`panic!`
-//! in production paths.
+//! `no_std` (with `alloc`); the only dependencies are the audited `lib/abi`
+//! crate and the shared reference parser `lib/resref` (so the resolver reuses
+//! the one reference grammar rather than embedding a second), and this helper
+//! never links a kernel or driver crate. No `unsafe`, and no
+//! `unwrap`/`expect`/`panic!` in production paths.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -67,6 +78,8 @@ pub mod list;
 pub mod mount;
 pub mod process;
 pub mod request;
+pub mod resinfo;
+pub mod resolve;
 pub mod transport;
 
 #[cfg(all(freestanding, feature = "program"))]
@@ -75,4 +88,10 @@ pub use list::ListError;
 pub use mount::{for_each_mount, render_mount, render_options, MOUNT_PAGE};
 pub use process::{for_each_process, render_process, state_char, PROCESS_HEADER, PROCESS_PAGE};
 pub use request::{call, encode_request, CallError};
+pub use resinfo::{
+    Authorization, InfoValue, Metric, MetricKind, Producer, ResetBehavior, ResourceResponse,
+    ResponsePayload, Sensitivity, Unit, ValueKind, MAX_INFO_VALUE_LEN, MAX_METRIC_NAME_LEN,
+    MAX_QUERY_LEN, RESINFO_VERSION_CURRENT, RESINFO_VERSION_V1,
+};
+pub use resolve::{resolve, ResolveInfoError};
 pub use transport::{Output, Transport};

@@ -186,6 +186,12 @@ pub const TARGETS: &[Target] = &[
         description:
             "lib/resref resource-reference parser + canonical-spelling round-trip (untrusted reference bytes)",
     },
+    Target {
+        package: "rustos-procinfo",
+        test: "fuzz_resinfo",
+        description:
+            "lib/procinfo info:/stats: resolver (untrusted reference bytes + hostile sysinfod replies: never panics, fails closed, envelope invariants hold)",
+    },
 ];
 
 /// How long to run each harness.

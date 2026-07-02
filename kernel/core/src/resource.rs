@@ -1,21 +1,30 @@
 //! Resource-reference resolution for [`resource_open`](crate::syscalls).
 //!
 //! RustOS has no `/dev`, `/proc`, or `/sys`: a typed *non-filesystem*
-//! resource (a random source, a null sink, a statistics feed, a device
-//! endpoint) is named by a resource reference (`plans/ALIAS.md`), e.g.
-//! `sys:random`, not by a pseudo-file. The single shared reference parser
-//! [`rustos_resref`] turns the caller's string into a typed
-//! [`ResourceRef`] (spelling only — it never
+//! resource (a random source, a null sink, a device endpoint) is named by a
+//! resource reference (`plans/ALIAS.md`), e.g. `sys:random`, not by a
+//! pseudo-file. The single shared reference parser [`rustos_resref`] turns
+//! the caller's string into a typed [`ResourceRef`] (spelling only — it never
 //! resolves, opens, or capability-checks). This module is the kernel-side
 //! *resolver*: it maps a parsed reference to a concrete [`ResourceBacking`]
 //! the descriptor layer serves, checking the caller's authority per
 //! namespace and failing closed on anything it does not recognise or serve.
 //!
+//! **This resolver serves only kernel-owned backings.** The `info:` and
+//! `stats:` namespaces are deliberately *not* served here: they are the
+//! System Information API's facts and measurements, which must flow through
+//! the `sysinfod` broker so its per-principal scoping is applied. Resolving
+//! them in the kernel would bypass that broker — the forbidden bypass the
+//! charter and `plans/ALIAS.md` name — so they are resolved in userspace
+//! (`lib/procinfo`) over the sysinfo query API, and this resolver fails them
+//! closed like any other non-kernel namespace.
+//!
 //! Only the `sys:` namespace's unprivileged members (`sys:random`,
-//! `sys:null`) are served today; every other namespace has no resolver wired
-//! yet and fails closed with [`ResolveError::UnsupportedResolver`] rather
-//! than fabricating a resource. Namespaces gain their resolver in place as a
-//! consumer appears — the resolver contract here does not change.
+//! `sys:null`) are served today; every other namespace (including `info:` and
+//! `stats:`) has no kernel resolver and fails closed with
+//! [`ResolveError::UnsupportedResolver`] rather than fabricating a resource.
+//! A kernel-owned namespace (a future device endpoint) gains its resolver in
+//! place as its consumer appears — the resolver contract here does not change.
 
 use rustos_abi::{Errno, OpenFlags};
 use rustos_resref::{parse, KnownNamespace, RefError, ResourceRef};
@@ -135,9 +144,11 @@ pub fn resolve(reference: &str, flags: OpenFlags) -> Result<ResourceBacking, Res
         .ok_or(ResolveError::UnknownNamespace)?;
     let backing = match namespace {
         KnownNamespace::Sys => resolve_sys(&parsed)?,
-        // Every other namespace has no resolver wired yet: fail closed rather
-        // than pretend the resource exists. A resolver is added here in place
-        // when its consumer lands.
+        // Every other namespace is not a kernel-owned backing: fail closed
+        // rather than pretend the resource exists. `info:`/`stats:` in
+        // particular are resolved in userspace over the System Information
+        // API, never here. A kernel-owned namespace gains its resolver in
+        // place when its consumer lands.
         _ => return Err(ResolveError::UnsupportedResolver),
     };
     validate_access(backing, flags)?;
@@ -283,9 +294,15 @@ mod tests {
 
     #[test]
     fn unwired_namespace_fails_closed() {
-        // `stats:` is a defined namespace but has no resolver yet.
+        // `stats:` is resolved in userspace over the System Information API,
+        // never by this kernel resolver: it fails closed here.
         assert_eq!(
             resolve("stats:cpu/load", OpenFlags::READ),
+            Err(ResolveError::UnsupportedResolver)
+        );
+        // `info:` likewise is never a kernel-owned backing.
+        assert_eq!(
+            resolve("info:system/hostname", OpenFlags::READ),
             Err(ResolveError::UnsupportedResolver)
         );
     }
