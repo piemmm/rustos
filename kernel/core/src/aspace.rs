@@ -52,6 +52,7 @@ use rustos_abi::{DescriptorTable, Errno, LimitKind, OpenFlags, ResourceLimit, ST
 use rustos_kernel_mem::{PhysMap, UserAddressSpace};
 use rustos_kernel_sec::TaskId;
 
+use crate::resource::ResourceBacking;
 use crate::rlimit::LimitSet;
 
 /// Why registering a task's address space was refused.
@@ -163,22 +164,62 @@ pub struct AddressSpaceRegistry {
     cwds: BTreeMap<TaskId, String>,
 }
 
-/// One open file or directory handle: the absolute path it was resolved to
-/// and the [`OpenFlags`] it was opened with.
+/// What a descriptor resolves to: a filesystem path or a typed resource.
 ///
-/// The path is stored, not a driver inode pointer, because the filesystem is
-/// owned by the disk-owning service the handle ops route to; the kernel
-/// re-resolves and re-authorises the path through the secured VFS on every
-/// operation under the caller's real credentials (no cached authority). The
-/// flags fix the access the handle permits — a read against a handle opened
-/// without [`OpenFlags::READ`], or a write without [`OpenFlags::WRITE`],
-/// fails closed without ever reaching the filesystem.
+/// A descriptor's number is unique per process regardless of what backs it,
+/// so both filesystem opens ([`SyscallNumber::FS_OPEN`](rustos_abi::SyscallNumber))
+/// and resource opens
+/// ([`SyscallNumber::RESOURCE_OPEN`](rustos_abi::SyscallNumber)) draw from the
+/// single `OpenFileTable` allocator; the backing records which subsystem
+/// serves the handle's reads and writes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OpenBacking {
+    /// A filesystem object at the given absolute path. The path is stored,
+    /// not a driver inode pointer, because the filesystem is owned by the
+    /// disk-owning service the handle ops route to; the kernel re-resolves
+    /// and re-authorises the path through the secured VFS on every operation
+    /// under the caller's real credentials (no cached authority).
+    Path(String),
+    /// A typed non-filesystem resource (`plans/ALIAS.md`), resolved and
+    /// authorised once at open time; its reads and writes route to the named
+    /// kernel subsystem rather than the VFS.
+    Resource(ResourceBacking),
+}
+
+/// One open descriptor: what it resolves to and the [`OpenFlags`] it was
+/// opened with.
+///
+/// The flags fix the access the handle permits — a read against a handle
+/// opened without [`OpenFlags::READ`], or a write without
+/// [`OpenFlags::WRITE`], fails closed without ever reaching the backing.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OpenFile {
-    /// The absolute path the descriptor resolves to.
-    pub path: String,
+    /// What the descriptor resolves to.
+    pub backing: OpenBacking,
     /// The access/behaviour flags the descriptor was opened with.
     pub flags: OpenFlags,
+}
+
+impl OpenFile {
+    /// The absolute filesystem path this descriptor resolves to, or `None`
+    /// when it is backed by a resource rather than a path.
+    #[must_use]
+    pub fn path(&self) -> Option<&str> {
+        match &self.backing {
+            OpenBacking::Path(path) => Some(path),
+            OpenBacking::Resource(_) => None,
+        }
+    }
+
+    /// The resource this descriptor resolves to, or `None` when it is backed
+    /// by a filesystem path.
+    #[must_use]
+    pub fn resource(&self) -> Option<ResourceBacking> {
+        match self.backing {
+            OpenBacking::Resource(backing) => Some(backing),
+            OpenBacking::Path(_) => None,
+        }
+    }
 }
 
 /// One task's open file/directory descriptors.
@@ -604,9 +645,48 @@ impl AddressSpaceRegistry {
         path: String,
         flags: OpenFlags,
     ) -> Result<u32, Errno> {
+        self.open_backed(task, OpenBacking::Path(path), flags)
+    }
+
+    /// Open a descriptor for `task` backed by the resolved resource
+    /// `backing`, recording the `flags` it was opened with, and return the
+    /// freshly allocated descriptor number (at or above [`STD_STREAM_COUNT`]).
+    ///
+    /// Called by the `resource_open` handler *after* it has parsed and
+    /// resolved the reference and confirmed the caller's authority, so this
+    /// records an already-checked handle; it grants no authority of its own.
+    /// It shares the one `OpenFileTable` allocator with [`Self::open_file`]
+    /// so a resource descriptor's number cannot collide with a file's. The
+    /// `task` argument is the kernel-trusted caller id.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] only when `task` already holds every descriptor
+    /// number up to [`u32::MAX`] (genuine exhaustion, fail closed).
+    pub fn open_resource(
+        &mut self,
+        task: TaskId,
+        backing: ResourceBacking,
+        flags: OpenFlags,
+    ) -> Result<u32, Errno> {
+        self.open_backed(task, OpenBacking::Resource(backing), flags)
+    }
+
+    /// Allocate the lowest free descriptor for `task` and record `backing`
+    /// with `flags`.
+    ///
+    /// The single insertion point shared by [`Self::open_file`] and
+    /// [`Self::open_resource`], so every descriptor — whatever backs it —
+    /// comes from one allocator and one number space (: one definition).
+    fn open_backed(
+        &mut self,
+        task: TaskId,
+        backing: OpenBacking,
+        flags: OpenFlags,
+    ) -> Result<u32, Errno> {
         let table = self.open_files.entry(task).or_default();
         let fd = table.alloc_fd()?;
-        table.by_fd.insert(fd, OpenFile { path, flags });
+        table.by_fd.insert(fd, OpenFile { backing, flags });
         Ok(fd)
     }
 
@@ -1002,9 +1082,39 @@ mod tests {
         assert_eq!(
             reg.open_file_entry(TaskId(2), fd),
             Some(OpenFile {
-                path: String::from("/System/Logs/a"),
+                backing: OpenBacking::Path(String::from("/System/Logs/a")),
                 flags: OpenFlags::READ,
             })
+        );
+    }
+
+    #[test]
+    fn a_resource_descriptor_shares_the_one_number_space_with_files() {
+        let mut reg = AddressSpaceRegistry::new();
+        // A file takes the first descriptor after the standard streams.
+        let file = reg
+            .open_file(TaskId(2), String::from("/Storage/x"), OpenFlags::READ)
+            .expect("fits");
+        // A resource open draws the *next* number from the same allocator, so
+        // a resource fd can never collide with a file fd.
+        let res = reg
+            .open_resource(TaskId(2), ResourceBacking::Random, OpenFlags::READ)
+            .expect("fits");
+        assert_eq!((file, res), (4, 5));
+        assert_eq!(
+            reg.open_file_entry(TaskId(2), res).map(|f| f.backing),
+            Some(OpenBacking::Resource(ResourceBacking::Random))
+        );
+        // The resource handle exposes its resource, not a path.
+        assert_eq!(
+            reg.open_file_entry(TaskId(2), res)
+                .and_then(|f| f.resource()),
+            Some(ResourceBacking::Random)
+        );
+        assert_eq!(
+            reg.open_file_entry(TaskId(2), res)
+                .and_then(|f| f.path().map(String::from)),
+            None
         );
     }
 
@@ -1026,7 +1136,8 @@ mod tests {
         // process cannot read another's open file by guessing the descriptor.
         assert_eq!(reg.open_file_entry(TaskId(3), fd), None);
         assert_eq!(
-            reg.open_file_entry(TaskId(2), fd).map(|f| f.path),
+            reg.open_file_entry(TaskId(2), fd)
+                .and_then(|f| f.path().map(String::from)),
             Some(String::from("/Storage/x"))
         );
     }

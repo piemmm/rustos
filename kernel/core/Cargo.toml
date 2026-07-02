@@ -60,6 +60,11 @@ rustos-util = { path = "../../lib/util", version = "=0.0.0" }
 # (relative → absolute, `.`/`..` collapsed, escape blocked) through
 # `rustos_path` rather than a second path normaliser.
 rustos-path = { path = "../../lib/path", version = "=0.0.0" }
+# The single shared resource-reference parser (`AGENTS.md` §2.2): the
+# `resource_open` resolver (`src/resource.rs`) lexes a caller's reference
+# string (`sys:random`, …) through `rustos_resref` rather than a second
+# reference parser, then resolves the typed value to a resource backing.
+rustos-resref = { path = "../../lib/resref", version = "=0.0.0" }
 # The single ANSI/VT terminal-control vocabulary (`AGENTS.md` §2.2): the
 # console read line discipline (`src/console.rs`) echoes line terminators and
 # the erase (rub-out) control through `rustos_vt::control` rather than a second

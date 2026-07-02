@@ -1123,6 +1123,34 @@ impl SyscallNumber {
     /// unlike [`Self::FS_CHDIR`] — no capability is required and the call is
     /// not audited.
     pub const FS_GETCWD: Self = Self(66);
+    /// Resolve a typed resource reference (`plans/ALIAS.md`) and open it to a
+    /// new descriptor (`.junie/PREREQUISITES2.md` P5).
+    ///
+    /// Arguments: `reference: *const u8` (user pointer to the textual
+    /// resource reference, e.g. `sys:random`), `reference_len: usize` (at most
+    /// [`crate::RESOURCE_REF_MAX`]), and the [`crate::OpenFlags`] bits naming
+    /// the access requested. Returns a non-negative descriptor number, or
+    /// `-errno`.
+    ///
+    /// The kernel copies the reference in through the validated
+    /// `copy_from_user` boundary, parses it with the single shared reference
+    /// parser (`lib/resref`) — never a second parser — and resolves it through
+    /// the capability-checked namespace resolver. A reference names a *typed
+    /// non-filesystem resource* (there is no `/dev`, `/proc`, or `/sys`), so
+    /// this is the resource-reference analogue of [`Self::FS_OPEN`]: the
+    /// descriptor it returns is read and written with [`Self::FS_READ`] /
+    /// [`Self::FS_WRITE`] and released with [`Self::FS_CLOSE`], but its
+    /// backing is the resolved resource rather than a filesystem path.
+    ///
+    /// Authorisation is per namespace and selector and is decided from the
+    /// kernel-attested caller identity (never a caller-supplied one), so the
+    /// call carries no blanket dispatch capability: an unprivileged resource
+    /// (`sys:random`, `sys:null`) needs none, while a privileged namespace is
+    /// checked inside the resolver and fails closed. A malformed reference, an
+    /// unknown or not-yet-served namespace, or a selector the caller may not
+    /// reach fails closed without minting a descriptor. Every resolution is
+    /// audited — opening a resource is a security-relevant decision.
+    pub const RESOURCE_OPEN: Self = Self(67);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
@@ -1143,6 +1171,17 @@ impl SyscallNumber {
         self.0
     }
 }
+
+/// Maximum length, in bytes, of the textual resource reference a
+/// [`SyscallNumber::RESOURCE_OPEN`] call may pass.
+///
+/// The wire bound on the reference string the kernel copies in before it
+/// hands the bytes to the single shared reference parser (`lib/resref`),
+/// which enforces its own identical maximum (`rustos_resref::MAX_REF_LEN`) —
+/// so a reference the ABI accepts always fits the parser's bound and the two
+/// cannot drift. A longer reference fails closed with
+/// [`Errno::LengthOutOfRange`] before any resolution work is done.
+pub const RESOURCE_REF_MAX: usize = 1024;
 
 /// The `pid` argument to [`SyscallNumber::WAIT`] that selects "any child".
 ///
@@ -1339,6 +1378,7 @@ mod tests {
         assert_eq!(SyscallNumber::SIGNAL.as_u16(), 64);
         assert_eq!(SyscallNumber::FS_CHDIR.as_u16(), 65);
         assert_eq!(SyscallNumber::FS_GETCWD.as_u16(), 66);
+        assert_eq!(SyscallNumber::RESOURCE_OPEN.as_u16(), 67);
     }
 
     #[test]

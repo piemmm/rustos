@@ -267,6 +267,9 @@ const NUM_FS_CHDIR: u64 = SyscallNumber::FS_CHDIR.as_u16() as u64;
 /// `fs_getcwd` syscall number (as above).
 const NUM_FS_GETCWD: u64 = SyscallNumber::FS_GETCWD.as_u16() as u64;
 
+/// `resource_open` syscall number (as above).
+const NUM_RESOURCE_OPEN: u64 = SyscallNumber::RESOURCE_OPEN.as_u16() as u64;
+
 /// Marshal a 32-bit signed argument into its register value following the
 /// `abi-v1` `I32` convention (sign-extend through `i64`).
 #[inline]
@@ -2108,6 +2111,47 @@ pub fn fs_open(path: &[u8], flags: OpenFlags) -> i64 {
     ret as i64
 }
 
+/// Resolve the resource reference `reference` (e.g. `b"sys:random"`) and open
+/// it to a new descriptor with `flags` (`SyscallNumber::RESOURCE_OPEN`),
+/// returning the new descriptor number.
+///
+/// A resource reference names a typed non-filesystem resource
+/// (`plans/ALIAS.md`) — there is no `/dev`, `/proc`, or `/sys` — so this is
+/// the resource analogue of [`fs_open`]: the kernel parses the reference with
+/// the shared reference parser and resolves it through its capability-checked
+/// namespace resolver under the caller's kernel-attested identity
+/// (authorisation is per namespace, so an unprivileged resource such as
+/// `sys:random` needs no capability). The descriptor it returns is read and
+/// written with [`fs_read`] / [`fs_write`] and released with [`fs_close`],
+/// exactly as a file handle is, but its backing is the resolved resource
+/// rather than a path — so the higher-level [`File`] wrapper drives it too. A
+/// malformed, unknown, or unauthorised reference never produces a descriptor.
+///
+/// Returns the descriptor (≥ 0) or `-errno` (recover the
+/// [`rustos_abi::Errno`] discriminant as `-ret`).
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 fd-result encoding (fd ≥ 0, else -errno).
+pub fn resource_open(reference: &[u8], flags: OpenFlags) -> i64 {
+    let ptr = reference.as_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
+    // `(ptr, len)` pair against the caller's address space before reading it.
+    // `reference` is a live shared `&[u8]` for the duration of the call.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_RESOURCE_OPEN,
+            [
+                ptr,
+                reference.len() as u64,
+                u64::from(flags.bits()),
+                0,
+                0,
+                0,
+            ],
+        )
+    };
+    ret as i64
+}
+
 /// Release the caller's open descriptor `fd` (`SyscallNumber::FS_CLOSE`).
 ///
 /// Idempotent from the program's side only in that closing a number the
@@ -2399,6 +2443,33 @@ impl File {
         // A non-negative `fs_open` result is a descriptor number, which the
         // kernel always reports within `u32` (the descriptor space the
         // per-process table allocates from); the conversion is exact.
+        let fd =
+            u32::try_from(ret).map_err(|_| -i64::from(rustos_abi::Errno::OutOfRange.as_i32()))?;
+        Ok(Self { fd })
+    }
+
+    /// Resolve the resource reference `reference` (e.g. `b"sys:random"`) and
+    /// open it with `flags`, returning the owned handle.
+    ///
+    /// The returned handle reads and writes through the same [`File::read_at`]
+    /// / [`File::write_at`] path a file handle uses; a resource is a
+    /// sequential stream, so the byte offset those pass is ignored by the
+    /// backing (each read of `sys:random` yields fresh bytes; `sys:null` reads
+    /// as end of stream and accepts any write).
+    ///
+    /// # Errors
+    ///
+    /// The raw negative kernel result (`-errno`) the [`resource_open`] syscall
+    /// returns on any refusal (a malformed, unknown, or unauthorised
+    /// reference, or one requesting access the resource does not offer).
+    pub fn open_resource(reference: &[u8], flags: OpenFlags) -> Result<Self, i64> {
+        let ret = resource_open(reference, flags);
+        if ret < 0 {
+            return Err(ret);
+        }
+        // A non-negative `resource_open` result is a descriptor number the
+        // kernel always reports within `u32` (the same per-process table
+        // `fs_open` allocates from); the conversion is exact.
         let fd =
             u32::try_from(ret).map_err(|_| -i64::from(rustos_abi::Errno::OutOfRange.as_i32()))?;
         Ok(Self { fd })
@@ -3364,6 +3435,29 @@ mod tests {
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(fs_open(b"/x", OpenFlags::READ), want);
+        });
+    }
+
+    #[test]
+    fn resource_open_marshals_reference_flags_and_returns_the_descriptor() {
+        let reference = b"sys:random";
+        let flags = OpenFlags::READ;
+        let (number, args) = capture(5, || {
+            assert_eq!(resource_open(reference, flags), 5);
+        });
+        assert_eq!(number, NUM_RESOURCE_OPEN);
+        assert_eq!(args[0], reference.as_ptr() as usize as u64);
+        assert_eq!(args[1], reference.len() as u64);
+        assert_eq!(args[2], u64::from(flags.bits()));
+        assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn resource_open_surfaces_negative_errno_encoding() {
+        let want = -i64::from(rustos_abi::Errno::NotFound.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let (_, _) = capture(neg, || {
+            assert_eq!(resource_open(b"sys:nope", OpenFlags::READ), want);
         });
     }
 

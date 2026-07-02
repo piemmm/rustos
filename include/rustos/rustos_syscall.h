@@ -90,6 +90,7 @@ extern "C" {
 #define ROS_SYS_SIGNAL 64u
 #define ROS_SYS_FS_CHDIR 65u
 #define ROS_SYS_FS_GETCWD 66u
+#define ROS_SYS_RESOURCE_OPEN 67u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns ROS_E_WOULD_BLOCK when a
@@ -170,6 +171,7 @@ uint64_t ros_sys_terminal_size(uint32_t a0, void * a1, uintptr_t a2);
 int32_t ros_sys_signal(int32_t a0, uint32_t a1);
 int32_t ros_sys_fs_chdir(void * a0, uintptr_t a1);
 uint64_t ros_sys_fs_getcwd(void * a0, uintptr_t a1);
+uint64_t ros_sys_resource_open(void * a0, uintptr_t a1, uint32_t a2);
 
 #ifdef __cplusplus
 } /* extern "C" */

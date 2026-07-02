@@ -94,6 +94,7 @@ pub mod proc_id;
 pub mod procsignal;
 pub mod procwait;
 pub mod random;
+pub mod resource;
 pub mod rlimit;
 pub mod sharedreg;
 pub mod sleeplock;

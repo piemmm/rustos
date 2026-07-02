@@ -502,6 +502,16 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn resource_open(
+        &self,
+        _c: &CallerContext<'_>,
+        _reference: u64,
+        _reference_len: usize,
+        _flags: OpenFlags,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(5)
+    }
 }
 
 /// Silent sink — fuzz output must not pollute test stdout. Capacity
@@ -577,7 +587,9 @@ fn would_accept(spec_idx: usize, raw_number: u16, args: &[u64; SYSCALL_MAX_ARGS]
     // (TRUNCATE/APPEND without WRITE, EXCLUSIVE without CREATE, DIRECTORY with
     // WRITE). That decode is canonical ABI logic, so mirror it through the same
     // predicate the dispatcher uses rather than re-deriving the rule set.
-    if spec.number == SyscallNumber::FS_OPEN {
+    // `resource_open`'s flags argument is also arg 2 and runs through the same
+    // `OpenFlags::from_bits` decode.
+    if spec.number == SyscallNumber::FS_OPEN || spec.number == SyscallNumber::RESOURCE_OPEN {
         let raw = u32::try_from(args[2] & 0xFFFF_FFFF).unwrap_or(u32::MAX);
         if OpenFlags::from_bits(raw).is_err() {
             return false;
