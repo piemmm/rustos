@@ -377,10 +377,20 @@ with `TimestampOutOfRange` rather than silently truncating (§22).
 
 The **descriptor-producing open-a-path ABI** — the syscall that opens a
 resolved path to a new file descriptor (consumed by, not invented in,
-`rustos_rt::io`) — is the remaining `lib/abi` deliverable this spec depends on;
-it lands under its own staged increment, at which point `lib/path` gains the
-resolver `Root` variants (§12) and the ergonomic I/O layer opens files over the
-same `Read`/`Write` vocabulary it already defines.
+`rustos_rt::io`) — is landed: `fs_open` and its `fs_close`/`fs_read`/
+`fs_write`/`fs_readdir`/`fs_stat`/`fs_truncate`/`fs_sync`/`fs_mkdir`/
+`fs_unlink`/`fs_rename` family, all gated by `CAP_FS_ACCESS` and fail-closed,
+and the ergonomic I/O layer opens files over the same `Read`/`Write`
+vocabulary. Every path-taking call resolves at the single kernel entry point
+through `lib/path`, and **machine-alias resolution** is wired there:
+`Alias:/path` and the expanded `alias::Name/path` resolve for the four machine
+aliases, which are the canonical roots the `/` view projects as `/<Name>`
+(`kernel/core::fs::resolve_machine_alias`, derived from the one root template
+so the view and the alias namespace cannot drift). The durable `id::`/`fs::`
+resolver `Root` variants (§12) and the multi-root volume forest they address
+remain a future increment; machine aliases then rebind from the single root's
+subtrees to independent `id::` volume roots without changing the resolver
+contract.
 
 ## 22. Error model
 

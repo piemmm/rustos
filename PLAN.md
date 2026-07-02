@@ -3319,14 +3319,24 @@ I/O vocabulary. See `.junie/PREREQUISITES2.md` for the full P0–P6 status.
   have no consumer yet, so inventing them here would be speculative interface
   (§2.3/§2.4). Unit tests, rustdoc, a docs page, and the `fuzz_path`
   round-trip harness ship with it. The **binding storage-namespace spec** is
-  now landed: `docs/src/filesystem/drives.md` turns `plans/DRIVES.md` into the
+  landed: `docs/src/filesystem/drives.md` turns `plans/DRIVES.md` into the
   forest-of-named-roots model (alias/`id::` canonical identity, `/` a generated
   view), with the §16.1 charter amendment (the four names become synthetic view
-  bindings backed by first-class aliases). **Still open under P4** (tracked, not
-  stubbed): the descriptor-*producing* open-a-path ABI the resolver/runtime
-  stage adds (at which point `lib/path` gains the `id::`/`fs::`/… `Root`
-  variants in place). Remaining prerequisites (P2, P4 remainder, P5) are tracked
-  in `.junie/PREREQUISITES2.md`.
+  bindings backed by first-class aliases). The **descriptor-producing
+  open-a-path ABI** is landed (`fs_open` + the `fs_close`/`fs_read`/`fs_write`/
+  `fs_readdir`/`fs_stat`/`fs_truncate`/`fs_sync`/`fs_mkdir`/`fs_unlink`/
+  `fs_rename` family, `CAP_FS_ACCESS`-gated, fail-closed), and **machine-alias
+  resolution** is wired at the single kernel path-resolution entry point:
+  `Alias:/path` / `alias::Name/path` resolve for the four machine aliases,
+  which are the canonical roots the `/` view projects as `/<Name>`
+  (`kernel/core::fs::resolve_machine_alias`, derived from the one `ROOT_TEMPLATE`
+  so the view and alias namespace cannot drift, §2.2), then authorised
+  identically to the projected view path; an unpublished alias fails closed
+  with `NotFound`. **Still open under P4** (tracked, not stubbed, future
+  multi-root work — not a shell blocker): the durable `id::`/`fs::` resolver
+  `Root` variants and the volume forest, at which point machine aliases rebind
+  to independent `id::` roots without changing the resolver contract. Remaining
+  prerequisites (P5) are tracked in `.junie/PREREQUISITES2.md`.
 - P5 (reference parser) — shared resource-reference parser as a `lib/*` crate:
   **done.** `lib/resref` (`rustos-resref`) is the one definition of how a RustOS
   resource reference is lexed and validated into a typed `ResourceRef`, so the

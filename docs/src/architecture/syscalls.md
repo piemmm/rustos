@@ -133,8 +133,14 @@ its spawner's working directory. `fs_getcwd` copies the stored directory out
 and needs no capability (reading one's own directory grants no authority).
 The per-process directory lives beside the task's streams and limits in
 `kernel/core::aspace::AddressSpaceRegistry` and is dropped when the task
-exits. Alias/resource-reference spellings (`Alias:/…`) are declined with
-`NotImplemented` until their resolvers are wired into the VFS.
+exits. An alias spelling (`Alias:/…` or the expanded `alias::Name/…`) names a
+first-class storage root: a *machine alias* (`System:`, `Users:`, `Apps:`,
+`Storage:`) is the canonical root the `/` view projects as `/<Name>`, so
+`System:/Logs/a` resolves to the same object as `/System/Logs/a` and is then
+subject to the identical inode/mount-flag authorisation. `lib/path` already
+refuses any `..` that would escape the alias root. A name that is not a
+published root fails closed with `NotFound` before the VFS is touched; session
+and volume aliases are published by their owning services when those land.
 
 ### Capability matrix
 

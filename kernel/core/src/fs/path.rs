@@ -31,6 +31,23 @@ pub const MAX_PATH_COMPONENTS: usize = 64;
 /// provides exactly these and nothing else.
 pub const ROOT_TEMPLATE: [&str; 4] = ["System", "Users", "Apps", "Storage"];
 
+/// Resolve a machine-alias name to the top-level view component it roots at.
+///
+/// RustOS storage is a forest of named roots (`docs/src/filesystem/drives.md`):
+/// a path names its root explicitly, and `System:` is a canonical first-class
+/// root of which `/System` is merely the synthetic-view *projection*. The four
+/// **machine aliases** are therefore exactly [`ROOT_TEMPLATE`] — one
+/// definition, so the view template and the alias namespace can never drift
+/// apart. `System:/Kernel/x` and `/System/Kernel/x` name the same object.
+///
+/// Session and volume aliases are published by their owning services when
+/// those land, never invented ahead of a live publisher, so an unknown name
+/// resolves to `None` and the caller fails closed.
+#[must_use]
+pub fn resolve_machine_alias(name: &str) -> Option<&'static str> {
+    ROOT_TEMPLATE.iter().copied().find(|root| *root == name)
+}
+
 /// An absolute, normalised filesystem path.
 ///
 /// Invariants, established at [`Path::parse`] and preserved by every
@@ -224,5 +241,20 @@ mod tests {
         assert!(Path::root().is_prefix_of(&logs));
         assert!(!logs.is_prefix_of(&sys));
         assert!(!sys.is_prefix_of(&syslike));
+    }
+
+    #[test]
+    fn every_machine_alias_roots_at_its_own_top_level_component() {
+        for name in ROOT_TEMPLATE {
+            assert_eq!(resolve_machine_alias(name), Some(name));
+        }
+    }
+
+    #[test]
+    fn unknown_machine_alias_fails_closed() {
+        assert_eq!(resolve_machine_alias("Home"), None);
+        assert_eq!(resolve_machine_alias("system"), None);
+        assert_eq!(resolve_machine_alias(""), None);
+        assert_eq!(resolve_machine_alias("Storage2"), None);
     }
 }
