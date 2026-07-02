@@ -38,24 +38,29 @@ pub const RECORD_FORMAT_VERSION: u16 = 1;
 /// bare [`FieldName`] grammar allows.
 pub const SOURCE_NAME_MAX: usize = 128;
 
-/// Maximum length, in bytes, of `caller.component`.
-pub const CALLER_COMPONENT_MAX: usize = 64;
+/// Maximum length, in bytes, of `caller.component`. One shared definition
+/// with the ingress wire ABI, so a request that validates always persists.
+pub const CALLER_COMPONENT_MAX: usize = rustos_abi::LOG_INGRESS_COMPONENT_MAX;
 
-/// Maximum length, in bytes, of `caller.tag`.
-pub const CALLER_TAG_MAX: usize = 64;
+/// Maximum length, in bytes, of `caller.tag`. Shared with the ingress ABI.
+pub const CALLER_TAG_MAX: usize = rustos_abi::LOG_INGRESS_TAG_MAX;
 
 /// Maximum length, in bytes, of `caller.event_id` (a source-local identifier).
-pub const CALLER_EVENT_ID_MAX: usize = 64;
+/// Shared with the ingress ABI.
+pub const CALLER_EVENT_ID_MAX: usize = rustos_abi::LOG_INGRESS_EVENT_ID_MAX;
 
-/// Maximum length, in bytes, of `caller.requested_source`.
-pub const CALLER_REQUESTED_SOURCE_MAX: usize = 128;
+/// Maximum length, in bytes, of `caller.requested_source`. Shared with the
+/// ingress ABI.
+pub const CALLER_REQUESTED_SOURCE_MAX: usize = rustos_abi::LOG_INGRESS_REQUESTED_SOURCE_MAX;
 
 /// Maximum length, in bytes, of `caller.message`. Shared with the diagnostic
-/// record model so a message that fits one channel fits the other.
+/// record model and the ingress ABI so a message that fits one channel fits
+/// the others.
 pub const CALLER_MESSAGE_MAX: usize = rustos_abi::LOG_MESSAGE_MAX;
 
-/// Maximum number of `data.*` fields a record may carry.
-pub const MAX_DATA_FIELDS: usize = 32;
+/// Maximum number of `data.*` fields a record may carry. Shared with the
+/// ingress ABI.
+pub const MAX_DATA_FIELDS: usize = rustos_abi::LOG_INGRESS_MAX_DATA_FIELDS;
 
 /// Maximum length, in bytes, of a single `data.*` field's encoded value.
 pub const DATA_FIELD_VALUE_MAX: usize = rustos_abi::LOG_FIELD_VALUE_MAX;

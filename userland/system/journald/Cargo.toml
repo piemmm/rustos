@@ -1,0 +1,20 @@
+[package]
+name = "rustos-journald"
+description = "RustOS journal service dispatch core: the capability-attested ingress that admits system-log records and commits them to the journal (SYSLOG §12/§15)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The frozen ingress wire ABI (`log_ingress`), the `Errno` table, the attested
+# `Origin`, and the typed field model the dispatcher decodes.
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The journal persistence engine (`Journal`/`SegmentStore`), the record model,
+# the stream/level vocabulary, and the admission authority all live here.
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }

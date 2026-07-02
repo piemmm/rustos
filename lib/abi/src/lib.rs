@@ -29,6 +29,7 @@ pub mod input;
 pub mod ipc;
 pub(crate) mod le;
 pub mod log;
+pub mod log_ingress;
 pub mod mailbox_ipc;
 pub mod manifest;
 pub mod memory;
@@ -87,6 +88,14 @@ pub use log::{
     decode_record as decode_log_record, encode_record as encode_log_record, LogFieldIter,
     LogRecordRef, LOG_FIELDS_MAX, LOG_FIELD_KEY_MAX, LOG_FIELD_VALUE_MAX, LOG_LEVEL_MAX,
     LOG_MESSAGE_MAX, LOG_RECORD_HEADER_LEN, LOG_RECORD_MAX,
+};
+pub use log_ingress::{
+    decode_reply as decode_log_ingress_reply, encode_reply as encode_log_ingress_reply,
+    encode_request as encode_log_ingress_request, LogIngressFieldIter, LogIngressFields,
+    LogIngressRequest, LOG_INGRESS_COMPONENT_MAX, LOG_INGRESS_ENDPOINT, LOG_INGRESS_EVENT_ID_MAX,
+    LOG_INGRESS_MAX_DATA_FIELDS, LOG_INGRESS_MAX_REQUEST, LOG_INGRESS_MESSAGE_MAX,
+    LOG_INGRESS_REPLY_LEN, LOG_INGRESS_REQUESTED_SOURCE_MAX, LOG_INGRESS_REQUEST_MAGIC,
+    LOG_INGRESS_SUBSYSTEM_MAX, LOG_INGRESS_TAG_MAX,
 };
 pub use manifest::{
     decode_capability_ids, ManifestHeader, MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES,
