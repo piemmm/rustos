@@ -1091,6 +1091,38 @@ impl SyscallNumber {
     /// capability is required. It is audited per call: delivering a signal is
     /// a security-relevant process-lifecycle decision.
     pub const SIGNAL: Self = Self(64);
+    /// Change the calling process's working directory to `path`
+    /// (`.junie/PREREQUISITES2.md` P2).
+    ///
+    /// Arguments: `path: *const u8` (user pointer) and `path_len: usize` (at
+    /// most [`crate::FS_PATH_MAX`]). Returns `0`, or `-errno`. The kernel
+    /// copies the path in through the validated `copy_from_user` boundary,
+    /// resolves it — relative to the caller's current working directory when
+    /// it is not absolute — with the shared path parser, and re-authorises it
+    /// as a *searchable directory* through the secured VFS under the caller's
+    /// real [`Credentials`](crate::capability), exactly as
+    /// [`Self::FS_OPEN`] with [`crate::OpenFlags::DIRECTORY`] would. Only on
+    /// success does the resolved, normalised absolute path become the
+    /// process's new working directory, against which later relative paths
+    /// (to [`Self::FS_OPEN`] and friends) resolve. A path that does not name
+    /// a directory, or that the caller may not search, fails closed without
+    /// changing the working directory; a build with no filesystem service
+    /// wired fails closed with [`Errno::NotImplemented`]. Gated by
+    /// [`crate::CapabilityId::FS_ACCESS`].
+    pub const FS_CHDIR: Self = Self(65);
+    /// Report the calling process's working directory into a caller buffer
+    /// (`.junie/PREREQUISITES2.md` P2).
+    ///
+    /// Arguments: `buf: *mut u8` (user pointer) and `buf_cap: usize` (its
+    /// capacity). Returns the number of bytes written — the working
+    /// directory as a normalised absolute path (no trailing slash except the
+    /// root `/`) — or `-errno`. A buffer too small to hold the whole path
+    /// fails closed with [`Errno::BufferTooSmall`] (the path is never
+    /// truncated); the caller grows its buffer and retries. Reading one's own
+    /// working directory grants no authority over any other principal, so —
+    /// unlike [`Self::FS_CHDIR`] — no capability is required and the call is
+    /// not audited.
+    pub const FS_GETCWD: Self = Self(66);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
@@ -1305,6 +1337,8 @@ mod tests {
         assert_eq!(SyscallNumber::SYSINFO_INTROSPECT.as_u16(), 62);
         assert_eq!(SyscallNumber::TERMINAL_SIZE.as_u16(), 63);
         assert_eq!(SyscallNumber::SIGNAL.as_u16(), 64);
+        assert_eq!(SyscallNumber::FS_CHDIR.as_u16(), 65);
+        assert_eq!(SyscallNumber::FS_GETCWD.as_u16(), 66);
     }
 
     #[test]

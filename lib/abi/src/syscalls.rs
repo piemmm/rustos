@@ -1519,6 +1519,51 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: None,
         audit: true,
     },
+    SyscallSpec {
+        number: SyscallNumber::FS_CHDIR,
+        name: "fs_chdir",
+        arg_count: 2,
+        args: [
+            // Non-null `UserPtr` to the (absolute or cwd-relative) path, then
+            // its length.
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // The coarse filesystem-access gate; the per-path authority is the
+        // VFS inode model (search on the target directory) under the caller's
+        // real credentials. Changing the working directory is a
+        // security-relevant resolve+authorise, so it is audited like
+        // `fs_open`.
+        required_capability: Some(CapabilityId::FS_ACCESS),
+        audit: true,
+    },
+    SyscallSpec {
+        number: SyscallNumber::FS_GETCWD,
+        name: "fs_getcwd",
+        arg_count: 2,
+        args: [
+            // Non-null `UserPtr` the working directory is written into, then
+            // its capacity.
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `U64` carries the bytes-written-or-`-errno` register convention
+        // `terminal_size` / `wall_time_get` use.
+        ret: AbiType::U64,
+        // Reading one's own working directory grants no authority, so — like
+        // `terminal_size` — it needs no capability and is not audited.
+        required_capability: None,
+        audit: false,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

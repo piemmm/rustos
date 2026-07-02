@@ -193,8 +193,8 @@ mod tests {
         &'static Scheduler<TestArch>,
     ) {
         let sched_arch = std::sync::Arc::new(TestArch::with_cpus(1));
-        let scheduler = Scheduler::new(SchedulerConfig::defaults_for(1), sched_arch)
-            .expect("scheduler builds");
+        let scheduler =
+            Scheduler::new(SchedulerConfig::defaults_for(1), sched_arch).expect("scheduler builds");
         let scheduler: &'static Scheduler<TestArch> = Box::leak(Box::new(scheduler));
         let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
         let wait: &'static KernelProcessWait<TestArch> =
@@ -251,7 +251,10 @@ mod tests {
         wait.register_child(TaskId(7), TaskId(child));
         let signaller = KernelProcessSignal::new(wait, scheduler);
 
-        assert_eq!(signaller.signal(TaskId(7), child_pid, Signal::Terminate), Ok(()));
+        assert_eq!(
+            signaller.signal(TaskId(7), child_pid, Signal::Terminate),
+            Ok(())
+        );
         // The child was terminated on the scheduler.
         assert_eq!(scheduler.live_task_count(), 0);
         // ... and reaps with Terminate's 128 + 2 = 130 status, exactly as if
@@ -288,10 +291,16 @@ mod tests {
 
         // The child is runnable, not stopped, so Continue succeeds as a no-op
         // (it neither terminates the child nor records an exit).
-        assert_eq!(signaller.signal(TaskId(7), child_pid, Signal::Continue), Ok(()));
+        assert_eq!(
+            signaller.signal(TaskId(7), child_pid, Signal::Continue),
+            Ok(())
+        );
         assert_eq!(scheduler.live_task_count(), 1);
         // The child is still a live, signallable child (no status recorded).
-        assert_eq!(wait.authorise_child(TaskId(7), child_pid), Ok(TaskId(child)));
+        assert_eq!(
+            wait.authorise_child(TaskId(7), child_pid),
+            Ok(TaskId(child))
+        );
     }
 
     #[test]
@@ -301,7 +310,10 @@ mod tests {
         wait.register_child(TaskId(7), TaskId(child));
         let signaller = KernelProcessSignal::new(wait, scheduler);
 
-        assert_eq!(signaller.signal(TaskId(7), child_pid, Signal::Terminate), Ok(()));
+        assert_eq!(
+            signaller.signal(TaskId(7), child_pid, Signal::Terminate),
+            Ok(())
+        );
         // Once terminated the child is a zombie awaiting reap, not a live
         // process: a second signal fails closed rather than re-terminating it.
         assert_eq!(

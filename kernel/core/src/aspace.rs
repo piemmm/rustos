@@ -149,6 +149,18 @@ pub struct AddressSpaceRegistry {
     /// [`withdraw`](Self::withdraw) so a reused id never inherits a dead
     /// task's accounting.
     mapped_anon_bytes: BTreeMap<TaskId, u64>,
+    /// Each live task's current working directory, as a normalised absolute
+    /// path (the `/`-view spelling). Co-located with the address space for
+    /// the same reason as [`Self::streams`]: it shares the exact per-process
+    /// lifecycle — inherited from the spawner at spawn, changed by `fs_chdir`,
+    /// and dropped when the task exits — and is keyed by the same [`TaskId`].
+    /// A task with no entry resolves to the root `/` via [`Self::cwd`], so a
+    /// process whose directory was never established resolves relative paths
+    /// against the root rather than failing (a sensible, fail-safe default;
+    /// the root is the least-privileged starting point). Dropped at
+    /// [`withdraw`](Self::withdraw) so a reused id never inherits a dead
+    /// task's directory.
+    cwds: BTreeMap<TaskId, String>,
 }
 
 /// One open file or directory handle: the absolute path it was resolved to
@@ -242,6 +254,7 @@ impl AddressSpaceRegistry {
             loaded_nodes: BTreeMap::new(),
             open_files: BTreeMap::new(),
             mapped_anon_bytes: BTreeMap::new(),
+            cwds: BTreeMap::new(),
         }
     }
 
@@ -319,6 +332,7 @@ impl AddressSpaceRegistry {
         let had_node = self.loaded_nodes.remove(&task).is_some();
         let had_files = self.open_files.remove(&task).is_some();
         let had_anon = self.mapped_anon_bytes.remove(&task).is_some();
+        let had_cwd = self.cwds.remove(&task).is_some();
         self.tasks.remove(&task).is_some()
             || had_streams
             || had_limits
@@ -326,6 +340,7 @@ impl AddressSpaceRegistry {
             || had_node
             || had_files
             || had_anon
+            || had_cwd
     }
 
     /// Record that the autoloaded driver `task` was loaded for the discovered
@@ -457,6 +472,35 @@ impl AddressSpaceRegistry {
     #[must_use]
     pub fn streams(&self, task: TaskId) -> DescriptorTable {
         self.streams.get(&task).copied().unwrap_or_default()
+    }
+
+    /// Establish `task`'s current working directory, a normalised absolute
+    /// path.
+    ///
+    /// Called by the spawner to inherit the parent's directory into a child,
+    /// and by the `fs_chdir` handler once a target directory has been
+    /// resolved and authorised. Replacing an existing value is permitted, as
+    /// for [`Self::set_streams`]. A task whose directory is never established
+    /// resolves to the root `/` via [`Self::cwd`].
+    pub fn set_cwd(&mut self, task: TaskId, cwd: String) {
+        self.cwds.insert(task, cwd);
+    }
+
+    /// Resolve `task`'s current working directory, or the root `/` when none
+    /// is established.
+    ///
+    /// The `copy_path_in` resolver consults this to turn a caller's relative
+    /// path into an absolute one, and the `fs_getcwd` handler returns it. An
+    /// unregistered task (a kernel task, or one withdrawn on `exit`) resolves
+    /// to the root — a safe default that grants no authority of its own,
+    /// since every subsequent resolution is still authorised against the
+    /// caller's real credentials.
+    #[must_use]
+    pub fn cwd(&self, task: TaskId) -> String {
+        self.cwds
+            .get(&task)
+            .cloned()
+            .unwrap_or_else(|| String::from("/"))
     }
 
     /// Establish `task`'s full effective resource-limit set.
@@ -790,6 +834,33 @@ mod tests {
         // reports the slot was present and clears the table.
         assert!(reg.withdraw(TaskId(4)));
         assert_eq!(reg.streams(TaskId(4)), DescriptorTable::closed());
+    }
+
+    #[test]
+    fn unset_cwd_resolves_to_the_root() {
+        let reg = AddressSpaceRegistry::new();
+        // A task whose working directory was never established resolves to
+        // the root, the safe least-privileged default.
+        assert_eq!(reg.cwd(TaskId(9)), "/");
+    }
+
+    #[test]
+    fn set_cwd_then_resolve_returns_the_directory() {
+        let mut reg = AddressSpaceRegistry::new();
+        reg.set_cwd(TaskId(2), String::from("/Users/bob"));
+        assert_eq!(reg.cwd(TaskId(2)), "/Users/bob");
+        // A different task is unaffected and stays at the root default.
+        assert_eq!(reg.cwd(TaskId(3)), "/");
+    }
+
+    #[test]
+    fn withdraw_clears_the_working_directory() {
+        let mut reg = AddressSpaceRegistry::new();
+        reg.set_cwd(TaskId(4), String::from("/Storage/data"));
+        // Withdrawing a task with a cwd but no address space still reports
+        // the slot was present and resets it to the root.
+        assert!(reg.withdraw(TaskId(4)));
+        assert_eq!(reg.cwd(TaskId(4)), "/");
     }
 
     #[test]

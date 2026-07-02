@@ -157,10 +157,24 @@ mod program {
             None
         }
 
-        fn change_directory(&self, _path: &str) -> Result<String, Errno> {
-            // There is no working-directory syscall yet; fail closed so `cd`
-            // reports an honest error rather than silently doing nothing.
-            Err(Errno::NotImplemented)
+        fn change_directory(&self, path: &str) -> Result<String, Errno> {
+            // The kernel — not the shell — resolves the path (relative to the
+            // process's current working directory), re-authorises it as a
+            // searchable directory, and only then moves the process. A refusal
+            // surfaces as its `Errno`; the shell holds no ambient filesystem
+            // authority of its own.
+            let ret = rustos_rt::fs_chdir(path.as_bytes());
+            if ret < 0 {
+                return Err(errno_from(ret));
+            }
+            // Report the resolved absolute directory the kernel settled on
+            // (for the prompt and `cd`'s echo). A normalised absolute path
+            // never exceeds `FS_PATH_MAX`, so this buffer always holds it.
+            let mut buf = alloc::vec![0u8; rustos_abi::FS_PATH_MAX];
+            let n = rustos_rt::fs_getcwd(&mut buf).map_err(errno_from)?;
+            core::str::from_utf8(&buf[..n])
+                .map(String::from)
+                .map_err(|_| Errno::OutOfRange)
         }
     }
 

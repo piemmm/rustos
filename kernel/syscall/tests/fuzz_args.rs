@@ -494,6 +494,14 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn fs_chdir(&self, _c: &CallerContext<'_>, _path: u64, _path_len: usize) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn fs_getcwd(&self, _c: &CallerContext<'_>, _buf: u64, _buf_cap: usize) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
 }
 
 /// Silent sink — fuzz output must not pollute test stdout. Capacity

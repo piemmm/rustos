@@ -87,8 +87,10 @@ panic. See `docs/src/lib/rt-io.md` and `plans/IO.md`.
 
 `rustos-rt` exposes the userland filesystem surface (`PREREQUISITES.md` P-A):
 thin `fs_open`/`fs_close`/`fs_read`/`fs_write`/`fs_readdir`/`fs_stat_raw`/
-`fs_truncate`/`fs_sync`/`fs_mkdir`/`fs_unlink` wrappers over the `abi-v1`
-syscalls, plus the ergonomic `File` and `Dir` handles a program normally uses.
+`fs_truncate`/`fs_sync`/`fs_mkdir`/`fs_unlink`/`fs_rename` wrappers over the
+`abi-v1` syscalls, the working-directory pair (`fs_chdir`/`fs_getcwd`, against
+which relative paths resolve, `.junie/PREREQUISITES2.md` P2), plus the
+ergonomic `File` and `Dir` handles a program normally uses.
 `File` owns its descriptor and releases it with `fs_close` on `Drop`, so a
 handle is never leaked; `File::read_at` / `write_at` split a transfer larger
 than `rustos_abi::FS_IO_MAX` across successive syscalls. A program names a

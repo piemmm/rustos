@@ -1048,6 +1048,7 @@ dependencies = [
  "rustos-kernel-syscall",
  "rustos-keymap",
  "rustos-log",
+ "rustos-path",
  "rustos-rng",
  "rustos-sync",
  "rustos-users",

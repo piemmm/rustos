@@ -365,6 +365,43 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Change the calling process's working directory to the path at
+    /// `(path, path_len)` (`.junie/PREREQUISITES2.md` P2).
+    ///
+    /// The dispatcher has already checked [`CapabilityId::FS_ACCESS`] and that
+    /// `path` is a non-null `UserPtr`. The implementation copies the path in
+    /// through the validated `copy_from_user` boundary, resolves it (relative
+    /// to the caller's current working directory when it is not absolute) with
+    /// the shared path parser, and re-authorises it as a searchable directory
+    /// through the secured VFS under the caller's real credentials before it
+    /// becomes the new working directory. A path that is not a searchable
+    /// directory fails closed and leaves the working directory unchanged.
+    /// Returns `Ok(0)` on success.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`]:
+    /// a kernel build with no filesystem service wired never pretends the
+    /// working directory changed. The service is installed in `kernel/core`.
+    fn fs_chdir(&self, _caller: &CallerContext<'_>, _path: u64, _path_len: usize) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Write the calling process's working directory — a normalised absolute
+    /// path — to the user buffer at `buf` (`.junie/PREREQUISITES2.md` P2).
+    ///
+    /// The dispatcher has already validated that `buf` is a non-null
+    /// `UserPtr`. The implementation copies the working directory out through
+    /// the validated `copy_to_user` boundary and returns its byte length. A
+    /// buffer smaller than the path must fail closed with
+    /// [`Errno::BufferTooSmall`] — the path is never truncated. Reading one's
+    /// own working directory grants no authority, so no capability is
+    /// required.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`];
+    /// the service is installed in `kernel/core`.
+    fn fs_getcwd(&self, _caller: &CallerContext<'_>, _buf: u64, _buf_cap: usize) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// Read the calling task's effective limit for resource `kind`, writing
     /// the encoded [`rustos_abi::ResourceLimit`] to the user `out` pointer.
     ///
@@ -1821,6 +1858,18 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 self.handlers
                     .fs_rename(caller, args.0[0], src_len, args.0[2], dst_len)
             }
+            SyscallNumber::FS_CHDIR => {
+                // args[0] is the non-null path `UserPtr` (dispatcher-checked);
+                // args[1] is the path length.
+                let path_len = decode_len(args.0[1])?;
+                self.handlers.fs_chdir(caller, args.0[0], path_len)
+            }
+            SyscallNumber::FS_GETCWD => {
+                // args[0] is the non-null out `UserPtr` (dispatcher-checked);
+                // args[1] is its capacity in bytes.
+                let out_cap = decode_len(args.0[1])?;
+                self.handlers.fs_getcwd(caller, args.0[0], out_cap)
+            }
             SyscallNumber::WALL_TIME_GET => {
                 // args[0] is the non-null out `UserPtr` (dispatcher-checked);
                 // args[1] is its capacity in bytes.
@@ -2713,6 +2762,16 @@ mod tests {
 
         fn fs_unlink(&self, _c: &CallerContext<'_>, _path: u64, _path_len: usize) -> SyscallResult {
             self.record("fs_unlink");
+            Ok(0)
+        }
+
+        fn fs_chdir(&self, _c: &CallerContext<'_>, _path: u64, _path_len: usize) -> SyscallResult {
+            self.record("fs_chdir");
+            Ok(0)
+        }
+
+        fn fs_getcwd(&self, _c: &CallerContext<'_>, _buf: u64, _buf_cap: usize) -> SyscallResult {
+            self.record("fs_getcwd");
             Ok(0)
         }
     }

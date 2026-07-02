@@ -261,6 +261,12 @@ const NUM_SYSINFO_INTROSPECT: u64 = SyscallNumber::SYSINFO_INTROSPECT.as_u16() a
 /// `terminal_size` syscall number (as above).
 const NUM_TERMINAL_SIZE: u64 = SyscallNumber::TERMINAL_SIZE.as_u16() as u64;
 
+/// `fs_chdir` syscall number (as above).
+const NUM_FS_CHDIR: u64 = SyscallNumber::FS_CHDIR.as_u16() as u64;
+
+/// `fs_getcwd` syscall number (as above).
+const NUM_FS_GETCWD: u64 = SyscallNumber::FS_GETCWD.as_u16() as u64;
+
 /// Marshal a 32-bit signed argument into its register value following the
 /// `abi-v1` `I32` convention (sign-extend through `i64`).
 #[inline]
@@ -2320,6 +2326,51 @@ pub fn fs_rename(src: &[u8], dst: &[u8]) -> i64 {
     ret as i64
 }
 
+/// Change the calling process's working directory to `path`
+/// (`SyscallNumber::FS_CHDIR`).
+///
+/// `path` may be absolute or relative to the current working directory. The
+/// kernel resolves and normalises it with the shared path parser, then
+/// re-authorises it as a searchable directory through the secured VFS under
+/// the caller's attested identity; only on success does it become the new
+/// working directory (against which later relative [`fs_open`] paths
+/// resolve). A path that is not a searchable directory fails closed and
+/// leaves the working directory unchanged. Gated on
+/// [`rustos_abi::CapabilityId::FS_ACCESS`]. Returns `0` on success or
+/// `-errno`.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
+pub fn fs_chdir(path: &[u8]) -> i64 {
+    let ptr = path.as_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
+    // `(ptr, len)` pair against the caller's address space before reading it.
+    // `path` is a live shared `&[u8]` for the duration of the call.
+    let ret = unsafe { raw_syscall(NUM_FS_CHDIR, [ptr, path.len() as u64, 0, 0, 0, 0]) };
+    ret as i64
+}
+
+/// Read the calling process's working directory — a normalised absolute
+/// path — into `buf` (`SyscallNumber::FS_GETCWD`), returning the number of
+/// bytes written.
+///
+/// The whole path is delivered or none: a `buf` too small to hold it fails
+/// closed with `BufferTooSmall` (the path is never truncated); the caller
+/// grows `buf` and retries. Needs no capability.
+///
+/// # Errors
+///
+/// The raw negative kernel result (`-errno`): the buffer is too small
+/// (`BufferTooSmall`), the buffer pointer faults, or no filesystem is
+/// mounted (`NotImplemented`).
+pub fn fs_getcwd(buf: &mut [u8]) -> Result<usize, i64> {
+    let ptr = buf.as_mut_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
+    // `(buf, len)` pair against the caller's address space before writing it.
+    // `buf` is a live exclusive `&mut [u8]` for the duration of the call.
+    let ret = unsafe { raw_syscall(NUM_FS_GETCWD, [ptr, buf.len() as u64, 0, 0, 0, 0]) };
+    count_result(ret, buf.len())
+}
+
 /// An open file or directory handle: an owned descriptor that issues
 /// [`fs_close`] when dropped, so a handle is never leaked.
 ///
@@ -3469,6 +3520,50 @@ mod tests {
         assert_eq!(args[2], dst.as_ptr() as usize as u64);
         assert_eq!(args[3], dst.len() as u64);
         assert_eq!(&args[4..], &[0, 0]);
+    }
+
+    #[test]
+    fn fs_chdir_marshals_path_pointer_and_len() {
+        let path = b"/Users/bob/Documents";
+        let (number, args) = capture(0, || {
+            assert_eq!(fs_chdir(path), 0);
+        });
+        assert_eq!(number, NUM_FS_CHDIR);
+        assert_eq!(args[0], path.as_ptr() as usize as u64);
+        assert_eq!(args[1], path.len() as u64);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn fs_chdir_surfaces_negative_errno_encoding() {
+        let want = -i64::from(rustos_abi::Errno::NotFound.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let (_, _) = capture(neg, || {
+            assert_eq!(fs_chdir(b"/nope"), want);
+        });
+    }
+
+    #[test]
+    fn fs_getcwd_marshals_buffer_pointer_and_len() {
+        let mut buf = [0u8; 64];
+        let ptr = buf.as_mut_ptr() as usize as u64;
+        let (number, args) = capture(11, || {
+            assert_eq!(fs_getcwd(&mut buf), Ok(11));
+        });
+        assert_eq!(number, NUM_FS_GETCWD);
+        assert_eq!(args[0], ptr);
+        assert_eq!(args[1], 64);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn fs_getcwd_surfaces_buffer_too_small() {
+        let mut buf = [0u8; 2];
+        let want = -i64::from(rustos_abi::Errno::BufferTooSmall.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let (_, _) = capture(neg, || {
+            assert_eq!(fs_getcwd(&mut buf), Err(want));
+        });
     }
 
     #[test]

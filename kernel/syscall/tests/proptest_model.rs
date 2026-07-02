@@ -496,6 +496,14 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
+    fn fs_chdir(&self, _c: &CallerContext<'_>, _path: u64, _path_len: usize) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn fs_getcwd(&self, _c: &CallerContext<'_>, _buf: u64, _buf_cap: usize) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
 }
 
 /// The capabilities the `abi-v1` table actually gates on, in ascending id

@@ -985,11 +985,73 @@ where
             Some(Err(err)) => return Err(copy_fault_errno(err)),
             None => return Err(Errno::BadAddress),
         }
-        match core::str::from_utf8(&buf) {
-            Ok(path) => Ok(String::from(path)),
-            Err(_) => Err(Errno::OutOfRange),
+        let Ok(raw) = core::str::from_utf8(&buf) else {
+            return Err(Errno::OutOfRange);
+        };
+        self.resolve_against_cwd(caller, raw)
+    }
+
+    /// Turn a caller-supplied path string into a normalised, absolute
+    /// `/`-view path, resolving a relative path against the caller's current
+    /// working directory.
+    ///
+    /// This is the single place a filesystem path enters the kernel from a
+    /// caller, so relative-path resolution and `.`/`..` normalisation live
+    /// here once (never a second normaliser). An absolute path (`/…`) stands
+    /// on its own; any other spelling is joined onto the caller's working
+    /// directory (the root `/` when none is established). The joined string
+    /// is normalised through the shared path parser, which collapses
+    /// `.`/`..` and refuses to let `..` escape the root, so the result the
+    /// secured VFS then re-authorises is always a clean absolute path.
+    ///
+    /// Fails closed: a malformed path is [`Errno::OutOfRange`] (matching the
+    /// VFS's own invalid-path code), and an alias/resource-reference spelling
+    /// (`Alias:/…`) is [`Errno::NotImplemented`] — the alias/resource
+    /// resolvers are not wired into the VFS yet, so the kernel declines them
+    /// rather than mishandle them.
+    fn resolve_against_cwd(&self, caller: &CallerContext<'_>, raw: &str) -> Result<String, Errno> {
+        let parsed = rustos_path::parse(raw).map_err(|_| Errno::OutOfRange)?;
+        match parsed.root() {
+            // An absolute `/`-view path is already normalised (`.`/`..`
+            // collapsed, no escape); its components are the answer.
+            rustos_path::Root::View => Ok(render_view_path(parsed.components())),
+            // A relative path is joined onto the caller's current working
+            // directory and re-normalised as one absolute `/`-view string, so
+            // a leading `..` pops the working directory and cannot escape the
+            // root. The joined string always begins with `/`, so it parses as
+            // a view path; its components are the normalised absolute path.
+            rustos_path::Root::Relative => {
+                let cwd = self.aspaces.read().cwd(caller.task_id);
+                let mut joined = cwd;
+                if !joined.ends_with('/') {
+                    joined.push('/');
+                }
+                joined.push_str(raw);
+                let abs = rustos_path::parse(&joined).map_err(|_| Errno::OutOfRange)?;
+                Ok(render_view_path(abs.components()))
+            }
+            // An alias/resource-reference spelling: the resolver that would
+            // turn it into a mounted location is not wired into the VFS yet,
+            // so decline it rather than mishandle it.
+            rustos_path::Root::Alias(_) => Err(Errno::NotImplemented),
         }
     }
+}
+
+/// Render a normalised `/`-view path from its components: `/` for the root,
+/// otherwise `/`-joined component names. Paired with
+/// [`KernelSyscallHandlers::resolve_against_cwd`], which produces the already
+/// normalised components through the shared path parser.
+fn render_view_path(components: &[String]) -> String {
+    if components.is_empty() {
+        return String::from("/");
+    }
+    let mut out = String::new();
+    for component in components {
+        out.push('/');
+        out.push_str(component);
+    }
+    out
 }
 
 /// Collapse every [`UaccessError`] onto the single stable
@@ -3960,6 +4022,46 @@ where
             .rename(uid, caller.caps.effective(), &src, &dst)?;
         Ok(0)
     }
+
+    fn fs_chdir(&self, caller: &CallerContext<'_>, path: u64, path_len: usize) -> SyscallResult {
+        // The dispatcher already checked `CAP_FS_ACCESS` and that `path` is a
+        // non-null `UserPtr`. `copy_path_in` copies the path in and resolves
+        // it (relative to the caller's current working directory) into a
+        // normalised absolute path. Re-authorise it as a *searchable
+        // directory* through the secured VFS under the caller's real
+        // identity — the same resolve-only, directory-required check an
+        // `fs_open` with `DIRECTORY` (and neither read nor write) performs —
+        // before it becomes the new working directory. A path that is not a
+        // searchable directory fails closed here and the working directory is
+        // left unchanged (only a successful authorisation reaches
+        // `set_cwd`).
+        let abs = self.copy_path_in(caller, path, path_len)?;
+        let uid = caller.caps.owner().0;
+        self.filesystem
+            .open(uid, caller.caps.effective(), &abs, OpenFlags::DIRECTORY)?;
+        self.aspaces.write().set_cwd(caller.task_id, abs);
+        Ok(0)
+    }
+
+    fn fs_getcwd(&self, caller: &CallerContext<'_>, buf: u64, buf_cap: usize) -> SyscallResult {
+        // Reading one's own working directory grants no authority, so the
+        // dispatcher required no capability. Resolve the caller's stored cwd
+        // (the root `/` when none was established) and copy it out through
+        // the validated boundary. The whole path is delivered or none: a
+        // buffer too small fails closed rather than truncating the path.
+        let cwd = self.aspaces.read().cwd(caller.task_id);
+        let bytes = cwd.as_bytes();
+        if bytes.len() > buf_cap {
+            return Err(Errno::BufferTooSmall);
+        }
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_out(space, physmap, VirtAddr::new(buf), bytes)
+        }) {
+            Some(Ok(())) => Ok(bytes.len() as u64),
+            Some(Err(err)) => Err(copy_fault_errno(err)),
+            None => Err(Errno::BadAddress),
+        }
+    }
 }
 
 /// The kernel-attested identity a freshly spawned child is admitted under:
@@ -4330,6 +4432,16 @@ where
         // never concurrently mutated by another path.
         let inherited = LimitSet::inherit(&self.aspaces.read().limits(self.parent));
         self.aspaces.write().set_limits(sec_id, inherited);
+
+        // Inherit the parent's current working directory (POSIX: a child
+        // starts in its parent's directory), so a relative path a spawned
+        // program is handed resolves the same way it would for the spawner.
+        // A parent with none established resolves to the root `/` via
+        // `cwd`, so the child starts at the root too. Read and write are
+        // separate acquisitions because a fresh child id is never
+        // concurrently mutated by another path.
+        let parent_cwd = self.aspaces.read().cwd(self.parent);
+        self.aspaces.write().set_cwd(sec_id, parent_cwd);
 
         // Mint the child's device-resource grants:
         // one unforgeable, owner-checked handle per [`HwResource`] the
@@ -14718,5 +14830,189 @@ mod tests {
             h.fs_stat(&ctx, fd, 0x1000, FileStat::WIRE_LEN),
             Err(Errno::NotFound)
         );
+    }
+
+    /// `fs_chdir` re-authorises the target as a searchable directory through
+    /// the VFS and, only on success, records it as the caller's new working
+    /// directory (against which later relative paths resolve).
+    #[test]
+    fn fs_chdir_authorises_a_directory_and_sets_the_cwd() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, b"/Users/bob");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(fs);
+
+        assert_eq!(h.fs_chdir(&ctx, 0x1000, "/Users/bob".len()), Ok(0));
+        assert_eq!(aspaces.read().cwd(SecTaskId(2)), "/Users/bob");
+        // The target was re-authorised as a directory (resolve-only, the
+        // `DIRECTORY` flag, neither read nor write).
+        assert_eq!(
+            fs.calls(),
+            alloc::vec![alloc::format!(
+                "open uid=1000 path=/Users/bob flags={}",
+                OpenFlags::DIRECTORY.bits()
+            )]
+        );
+    }
+
+    /// A refused `fs_chdir` (the target is not a searchable directory) leaves
+    /// the working directory unchanged (fail closed).
+    #[test]
+    fn fs_chdir_on_a_refused_target_leaves_the_cwd_unchanged() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, b"/Storage/x");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        // A directory the caller is already sitting in.
+        aspaces
+            .write()
+            .set_cwd(SecTaskId(2), alloc::string::String::from("/Users"));
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let mut mock = RecordingFs::new();
+        mock.open_err = Some(Errno::PermissionDenied);
+        let fs: &'static RecordingFs = Box::leak(Box::new(mock));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(fs);
+
+        assert_eq!(
+            h.fs_chdir(&ctx, 0x1000, "/Storage/x".len()),
+            Err(Errno::PermissionDenied)
+        );
+        // The refused chdir never reached `set_cwd`.
+        assert_eq!(aspaces.read().cwd(SecTaskId(2)), "/Users");
+    }
+
+    /// A relative path handed to `fs_open` resolves against the caller's
+    /// current working directory before the VFS sees it.
+    #[test]
+    fn fs_open_resolves_a_relative_path_against_the_cwd() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, b"bob/notes");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        aspaces
+            .write()
+            .set_cwd(SecTaskId(2), alloc::string::String::from("/Users"));
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(fs);
+
+        h.fs_open(&ctx, 0x1000, "bob/notes".len(), OpenFlags::READ)
+            .expect("open succeeds");
+        assert_eq!(
+            fs.calls(),
+            alloc::vec![alloc::string::String::from(
+                "open uid=1000 path=/Users/bob/notes flags=1"
+            )],
+            "the relative path resolved against the caller's working directory"
+        );
+    }
+
+    /// `fs_getcwd` writes the caller's working directory out; an undersized
+    /// buffer fails closed without truncating.
+    #[test]
+    fn fs_getcwd_writes_the_directory_and_rejects_a_small_buffer() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(
+            MapFlags::READ | MapFlags::WRITE | MapFlags::USER,
+            b"scratch",
+        );
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        aspaces
+            .write()
+            .set_cwd(SecTaskId(2), alloc::string::String::from("/Users/bob"));
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        // No `CAP_FS_ACCESS`: reading one's own directory needs no capability.
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(fs);
+
+        let n = usize::try_from(h.fs_getcwd(&ctx, 0x1000, 64).expect("getcwd")).unwrap();
+        assert_eq!(n, "/Users/bob".len());
+        let written = h
+            .with_caller_aspace(&ctx, |space, physmap| {
+                let mut buf = alloc::vec![0u8; n];
+                copy_in(space, physmap, VirtAddr::new(0x1000), &mut buf).expect("readable");
+                buf
+            })
+            .expect("caller space");
+        assert_eq!(written.as_slice(), b"/Users/bob");
+
+        // A buffer too small for the whole path fails closed.
+        assert_eq!(h.fs_getcwd(&ctx, 0x1000, 2), Err(Errno::BufferTooSmall));
     }
 }

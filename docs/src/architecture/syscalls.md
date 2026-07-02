@@ -110,10 +110,31 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  61 | `boot_id_get`  | `user_ptr` (out), `len`                | `u64` (bytes) | — | no |
 |  62 | `sysinfo_introspect` | `u32 domain`, `u64 arg`, `user_ptr` (out), `len` | `u64` (bytes) | `CAP_SYSINFO_INTROSPECT` | no |
 |  63 | `terminal_size` | `u32 fd`, `user_ptr` (out), `len`      | `u64` (bytes) | — | no |
+|  64 | `signal`       | `i32 pid`, `u32 signal`                 | `errno`       | —               | yes   |
+|  65 | `fs_chdir`     | `user_ptr` (path), `len`                | `errno`       | `CAP_FS_ACCESS` | yes   |
+|  66 | `fs_getcwd`    | `user_ptr` (buf), `len`                 | `u64` (bytes) | —               | no    |
 
 (Syscall numbers 39–45 — `msi_alloc`, `shm_create`/`shm_map`/`shm_unmap`,
 `waitset_create`/`waitset_ctl`/`waitset_wait` — are defined in
 `lib/abi/src/syscall.rs`; their rows are not yet transcribed into this table.)
+
+`fs_chdir` (no. 65) and `fs_getcwd` (no. 66) give each process a working
+directory. A path handed to any path-taking filesystem call (`fs_open`,
+`fs_mkdir`, `fs_unlink`, `fs_rename`, and `fs_chdir` itself) is resolved at
+the single kernel entry point (`copy_path_in`): an absolute `/`-view path is
+normalised through the shared path parser (`lib/path`), and a relative path
+is first joined onto the caller's current working directory, so `.`/`..` are
+collapsed and `..` can never escape the root. `fs_chdir` re-authorises its
+resolved target as a *searchable directory* through the secured VFS (the same
+resolve-only, `DIRECTORY`-flag check `fs_open` performs) under the caller's
+real credentials and only then records it as the new working directory — a
+refused change leaves the directory untouched (fail closed). A child inherits
+its spawner's working directory. `fs_getcwd` copies the stored directory out
+and needs no capability (reading one's own directory grants no authority).
+The per-process directory lives beside the task's streams and limits in
+`kernel/core::aspace::AddressSpaceRegistry` and is dropped when the task
+exits. Alias/resource-reference spellings (`Alias:/…`) are declined with
+`NotImplemented` until their resolvers are wired into the VFS.
 
 ### Capability matrix
 
@@ -138,7 +159,7 @@ is exhaustive — anything not listed below is ungated:
 | `CAP_SYSINFO_INTROSPECT` | `sysinfo_introspect` |
 | `CAP_LOG_EMIT`     | `log_emit`                 |
 | `CAP_HW_EMIT`      | `hw_emit_node`, `hw_remove_node` |
-| `CAP_FS_ACCESS`    | `fs_open`, `fs_close`, `fs_read`, `fs_write`, `fs_readdir`, `fs_stat`, `fs_truncate`, `fs_sync`, `fs_mkdir`, `fs_unlink`, `fs_rename` |
+| `CAP_FS_ACCESS`    | `fs_open`, `fs_close`, `fs_read`, `fs_write`, `fs_readdir`, `fs_stat`, `fs_truncate`, `fs_sync`, `fs_mkdir`, `fs_unlink`, `fs_rename`, `fs_chdir` |
 | `CAP_TIME_SET`     | `wall_time_set`            |
 
 The `CAP_IRQ_BIND` rationale, the wake-up contract, and the failure

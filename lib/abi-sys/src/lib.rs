@@ -125,6 +125,8 @@ const NUM_BOOT_ID_GET: u64 = SyscallNumber::BOOT_ID_GET.as_u16() as u64;
 const NUM_SYSINFO_INTROSPECT: u64 = SyscallNumber::SYSINFO_INTROSPECT.as_u16() as u64;
 const NUM_TERMINAL_SIZE: u64 = SyscallNumber::TERMINAL_SIZE.as_u16() as u64;
 const NUM_SIGNAL: u64 = SyscallNumber::SIGNAL.as_u16() as u64;
+const NUM_FS_CHDIR: u64 = SyscallNumber::FS_CHDIR.as_u16() as u64;
+const NUM_FS_GETCWD: u64 = SyscallNumber::FS_GETCWD.as_u16() as u64;
 
 /// Empty argument vector for the no-argument syscalls.
 const NO_ARGS: [u64; SYSCALL_MAX_ARGS] = [0; SYSCALL_MAX_ARGS];
@@ -1450,6 +1452,43 @@ pub extern "C" fn sys_signal(pid: i32, signal: u32) -> i32 {
     }
 }
 
+/// `fs_chdir`: change the calling process's working directory to the
+/// (absolute or cwd-relative) path `(path, path_len)`
+/// (`SyscallNumber::FS_CHDIR`). Returns a `ROS_E_*` code.
+///
+/// Requires `ROS_CAP_FS_ACCESS`; the kernel validates `(path, path_len)`
+/// against the caller's address space, resolves it (relative to the caller's
+/// current working directory when it is not absolute), and re-authorises it
+/// as a searchable directory under the caller's real credentials before it
+/// becomes the new working directory. A path that is not a searchable
+/// directory fails closed and leaves the working directory unchanged.
+#[must_use]
+#[export_name = "ros_sys_fs_chdir"]
+pub extern "C" fn sys_fs_chdir(path: *mut c_void, path_len: usize) -> i32 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates `(path, path_len)`.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_FS_CHDIR,
+            [ptr_arg(path), path_len as u64, 0, 0, 0, 0],
+        ))
+    }
+}
+
+/// `fs_getcwd`: write the calling process's working directory — a normalised
+/// absolute path — into `buf` (`SyscallNumber::FS_GETCWD`). Returns the
+/// number of bytes written, or a `ROS_E_*` code reinterpreted into the
+/// result.
+///
+/// A buffer too small to hold the whole path fails closed with
+/// `ROS_E_BUFFER_TOO_SMALL` (the path is never truncated); the caller grows
+/// `buf` and retries. Needs no capability.
+#[must_use]
+#[export_name = "ros_sys_fs_getcwd"]
+pub extern "C" fn sys_fs_getcwd(buf: *mut c_void, buf_len: usize) -> u64 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates `(buf, buf_len)`.
+    unsafe { raw_syscall(NUM_FS_GETCWD, [ptr_arg(buf), buf_len as u64, 0, 0, 0, 0]) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1529,6 +1568,8 @@ mod tests {
         (NUM_SYSINFO_INTROSPECT, "sysinfo_introspect", 4),
         (NUM_TERMINAL_SIZE, "terminal_size", 3),
         (NUM_SIGNAL, "signal", 2),
+        (NUM_FS_CHDIR, "fs_chdir", 2),
+        (NUM_FS_GETCWD, "fs_getcwd", 2),
     ];
 
     #[test]
@@ -2337,5 +2378,31 @@ mod tests {
         assert_eq!(args[2], dst_ptr as usize as u64);
         assert_eq!(args[3], dst.len() as u64);
         assert_eq!(&args[4..], &[0, 0]);
+    }
+
+    #[test]
+    fn fs_chdir_marshals_path_and_len() {
+        let mut path = *b"/Users/bob";
+        let ptr = path.as_mut_ptr().cast::<c_void>();
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_fs_chdir(ptr, path.len()), 0);
+        });
+        assert_eq!(number, NUM_FS_CHDIR);
+        assert_eq!(args[0], ptr as usize as u64);
+        assert_eq!(args[1], path.len() as u64);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn fs_getcwd_marshals_buffer_and_capacity() {
+        let mut buffer = [0u8; 64];
+        let ptr = buffer.as_mut_ptr().cast::<c_void>();
+        let (number, args) = capture(11, || {
+            assert_eq!(sys_fs_getcwd(ptr, 64), 11);
+        });
+        assert_eq!(number, NUM_FS_GETCWD);
+        assert_eq!(args[0], ptr as usize as u64);
+        assert_eq!(args[1], 64);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
     }
 }
