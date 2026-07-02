@@ -70,6 +70,15 @@ pub enum RedirOp {
         /// The descriptor to close.
         fd: u32,
     },
+    /// Feed a here-string (`<<< word`) as the input of `fd` (default 0). The
+    /// target word supplies the content; the interpreter appends the trailing
+    /// newline a here-string carries. Distinct from the multi-line here-document
+    /// forms (`<<`, `<<-`), which are not yet supported.
+    HereString {
+        /// The descriptor the here-string feeds (the operator's explicit or
+        /// default fd).
+        fd: u32,
+    },
 }
 
 /// A single lexical unit of a command line.
@@ -100,8 +109,9 @@ pub enum Token {
 ///
 /// Returns [`ParseError::UnterminatedQuote`] for an unclosed quote,
 /// [`ParseError::DanglingEscape`] for a line ending on a lone `\`,
-/// [`ParseError::UnsupportedRedirection`] for a here-document/here-string, and
-/// [`ParseError::AmbiguousRedirection`] for a malformed duplication.
+/// [`ParseError::UnsupportedRedirection`] for a multi-line here-document
+/// (`<<`, `<<-`), and [`ParseError::AmbiguousRedirection`] for a malformed
+/// duplication. The here-string `<<<` is supported.
 pub fn tokenize(line: &str) -> Result<Vec<Token>, ParseError> {
     Lexer::new(line).run()
 }
@@ -234,9 +244,10 @@ impl Lexer {
     ///
     /// # Errors
     ///
-    /// Fails closed for a not-yet-supported operator ([here-documents and
-    /// here-strings](ParseError::UnsupportedRedirection)) and for a
-    /// [malformed duplication](ParseError::AmbiguousRedirection).
+    /// Fails closed for a not-yet-supported operator ([multi-line
+    /// here-documents `<<` / `<<-`](ParseError::UnsupportedRedirection)) and
+    /// for a [malformed duplication](ParseError::AmbiguousRedirection). The
+    /// here-string `<<<` is supported.
     fn lex_redirect(&mut self) -> Result<Option<Token>, ParseError> {
         // Combined stdout+stderr via a leading `&`: `&>`, `&>>`, `&>|`, `&>!`.
         if self.peek() == Some('&') && self.peek2() == Some('>') {
@@ -277,8 +288,20 @@ impl Lexer {
     fn lex_input(&mut self, fd: Option<u32>) -> Result<Token, ParseError> {
         self.pos += 1; // consume '<'
         let op = match self.peek() {
-            // `<<`, `<<-`, `<<<` — here-documents/strings, not yet supported.
-            Some('<') => return Err(ParseError::UnsupportedRedirection),
+            // A second `<`: either the here-string `<<<` (supported) or a
+            // here-document `<<` / `<<-` (not yet supported).
+            Some('<') => {
+                self.pos += 1; // consume the second '<'
+                if self.peek() == Some('<') {
+                    self.pos += 1; // consume the third '<' — here-string
+                    RedirOp::HereString {
+                        fd: fd.unwrap_or(0),
+                    }
+                } else {
+                    // `<<` / `<<-` here-documents are not yet supported.
+                    return Err(ParseError::UnsupportedRedirection);
+                }
+            }
             // `<>` — open for reading and writing.
             Some('>') => {
                 self.pos += 1;
@@ -584,8 +607,37 @@ mod tests {
 
     #[test]
     fn here_documents_fail_closed_in_the_lexer() {
+        // Multi-line here-documents (`<<`, `<<-`) are not yet supported.
         assert_eq!(tokenize("<<EOF"), Err(ParseError::UnsupportedRedirection));
-        assert_eq!(tokenize("<<<word"), Err(ParseError::UnsupportedRedirection));
+        assert_eq!(tokenize("<<-EOF"), Err(ParseError::UnsupportedRedirection));
+    }
+
+    #[test]
+    fn here_string_lexes_to_its_operator_and_target() {
+        // `<<<` is the here-string operator (default fd 0), and its body is an
+        // ordinary following word, glued or spaced.
+        assert_eq!(
+            tokenize("<<<word").unwrap(),
+            vec![
+                Token::Redirect(RedirOp::HereString { fd: 0 }),
+                expandable("word"),
+            ]
+        );
+        assert_eq!(
+            tokenize("<<< word").unwrap(),
+            vec![
+                Token::Redirect(RedirOp::HereString { fd: 0 }),
+                expandable("word"),
+            ]
+        );
+        // An explicit IO number binds the here-string's descriptor.
+        assert_eq!(
+            tokenize("4<<<x").unwrap(),
+            vec![
+                Token::Redirect(RedirOp::HereString { fd: 4 }),
+                expandable("x"),
+            ]
+        );
     }
 
     #[test]

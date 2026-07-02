@@ -266,6 +266,17 @@ impl<'a> Shell<'a> {
                 fd: *fd,
                 action: RedirAction::Close,
             }),
+            Redirection::HereString { fd, content } => {
+                // A here-string feeds the expanded word followed by a single
+                // newline — the one definition of its shape, so the host reads
+                // the bytes verbatim without re-appending the terminator.
+                let mut bytes = self.env.expand_word(content)?;
+                bytes.push('\n');
+                out.push(ResolvedRedirection {
+                    fd: *fd,
+                    action: RedirAction::HereString { content: bytes },
+                });
+            }
         }
         Ok(())
     }
@@ -572,6 +583,68 @@ mod tests {
             [super::ResolvedRedirection {
                 fd: 2,
                 action: RedirAction::Dup { source: 1 },
+            }]
+        );
+    }
+
+    #[test]
+    fn here_string_lowers_to_its_content_plus_a_newline() {
+        use crate::host::RedirAction;
+        use alloc::string::ToString;
+
+        let host = ScriptedHost::new();
+        let console = RecordingConsole::new();
+        let mut shell = Shell::new(&host, &console);
+
+        // The here-string feeds the expanded word plus one trailing newline as
+        // the input of fd 0.
+        shell.run_line("run <<<hello").unwrap();
+        let launches = host.launches();
+        assert_eq!(
+            launches[0].commands[0].redirections,
+            [super::ResolvedRedirection {
+                fd: 0,
+                action: RedirAction::HereString {
+                    content: "hello\n".to_string(),
+                },
+            }]
+        );
+
+        // An explicit IO number binds the here-string's descriptor.
+        shell.run_line("run 4<<< body").unwrap();
+        let launches = host.launches();
+        assert_eq!(
+            launches[1].commands[0].redirections,
+            [super::ResolvedRedirection {
+                fd: 4,
+                action: RedirAction::HereString {
+                    content: "body\n".to_string(),
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn here_string_expands_its_content() {
+        use crate::env::Environment;
+        use crate::host::RedirAction;
+        use alloc::string::ToString;
+
+        let host = ScriptedHost::new();
+        let console = RecordingConsole::new();
+        let mut env = Environment::new();
+        env.set("WHO", "world");
+        let mut shell = Shell::with_environment(&host, &console, env);
+
+        shell.run_line("run <<<$WHO").unwrap();
+        let launches = host.launches();
+        assert_eq!(
+            launches[0].commands[0].redirections,
+            [super::ResolvedRedirection {
+                fd: 0,
+                action: RedirAction::HereString {
+                    content: "world\n".to_string(),
+                },
             }]
         );
     }

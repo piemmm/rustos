@@ -72,12 +72,18 @@ IO number, e.g. `2>`, `3>>`, `0<`):
   clobber-override (`&>|`, `&>!`) spellings. These lower to an open on fd 1
   followed by a duplication of fd 1 onto fd 2 — the single definition of what a
   combined redirection means (`AGENTS.md` §2.2).
+- **Here-string:** `<<< word` feeds the expanded word plus one trailing
+  newline as the input of its descriptor (default fd 0). It lowers to a
+  `HereString` action carrying those bytes — the single definition of the
+  here-string's shape — so the host supplies them verbatim as a read backing.
+  (The multi-line here-documents `<<` / `<<-` are not yet supported.)
 
 A descriptor number is an IO number only when it is glued directly to a `<`/`>`
 (so `echo 2` is a plain argument, but `2>err` names fd 2). The parser
 **fails closed** (`AGENTS.md` §5.4, §2.9): a file redirection with no target,
-an ambiguous duplication (`<&file`, `2>&file`), or an as-yet-unsupported
-here-document/here-string (`<<`, `<<-`, `<<<`) runs **nothing**.
+an ambiguous duplication (`<&file`, `2>&file`), a here-string with no target,
+or an as-yet-unsupported multi-line here-document (`<<`, `<<-`) runs
+**nothing**.
 
 ### Target: resource reference vs. filesystem path
 
@@ -107,7 +113,7 @@ shell never falls back to creating a file, so a typo cannot silently write junk
 to disk (`AGENTS.md` §5.4).
 
 Not yet implemented (tracked in `plans/SHELL.md`, deliberately failing closed
-rather than misbehaving): here-documents and here-strings, process
+rather than misbehaving): multi-line here-documents (`<<`, `<<-`), process
 substitution (`<(…)`, `>(…)`, `=(…)`), zsh multios fan-out, and dynamic
 descriptor allocation (`{var}>`). Classifying a target is done; *resolving* a
 `Resource` target to a kernel stream backing (opening `sys:null`, the

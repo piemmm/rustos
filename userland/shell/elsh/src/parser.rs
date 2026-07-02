@@ -91,6 +91,15 @@ pub enum Redirection {
         /// The descriptor to close.
         fd: u32,
     },
+    /// Feed a here-string (`<<< word`) as the input of `fd` (default 0). The
+    /// `content` word supplies the here-string body, still pending expansion;
+    /// the interpreter appends the trailing newline.
+    HereString {
+        /// The descriptor the here-string feeds.
+        fd: u32,
+        /// The here-string body, still a [`Word`] pending expansion.
+        content: Word,
+    },
 }
 
 /// One simple command: its argument words and its redirections, in source
@@ -272,6 +281,10 @@ impl Parser {
             }),
             RedirOp::Dup { fd, source } => Ok(Redirection::Dup { fd, source }),
             RedirOp::Close { fd } => Ok(Redirection::Close { fd }),
+            RedirOp::HereString { fd } => Ok(Redirection::HereString {
+                fd,
+                content: self.take_target()?,
+            }),
         }
     }
 
@@ -569,13 +582,33 @@ mod tests {
     }
 
     #[test]
-    fn here_documents_and_strings_fail_closed_as_unsupported() {
+    fn here_documents_fail_closed_as_unsupported() {
+        // Multi-line here-documents (`<<`, `<<-`) are not yet supported; the
+        // here-string `<<<` is (see `here_string_attaches_its_content`).
         assert_eq!(parse("cmd <<EOF"), Err(ParseError::UnsupportedRedirection));
         assert_eq!(parse("cmd <<-EOF"), Err(ParseError::UnsupportedRedirection));
+    }
+
+    #[test]
+    fn here_string_attaches_its_content() {
         assert_eq!(
-            parse("cmd <<<word"),
-            Err(ParseError::UnsupportedRedirection)
+            only_redirection("cmd <<<word"),
+            Redirection::HereString {
+                fd: 0,
+                content: vec![Segment::Expandable("word".into())],
+            }
         );
+        // An explicit IO number binds the here-string's descriptor.
+        assert_eq!(
+            only_redirection("cmd 4<<< body"),
+            Redirection::HereString {
+                fd: 4,
+                content: vec![Segment::Expandable("body".into())],
+            }
+        );
+        // A here-string with no following word fails closed like any other
+        // target-taking redirection.
+        assert_eq!(parse("cmd <<<"), Err(ParseError::MissingRedirectionTarget));
     }
 
     #[test]

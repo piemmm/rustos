@@ -32,8 +32,9 @@ pub enum ParseError {
     /// followed by a target filename.
     MissingRedirectionTarget,
     /// A redirection operator the shell recognises but does not yet implement:
-    /// a here-document (`<<`, `<<-`) or here-string (`<<<`). Failing closed is
-    /// deliberate — the alternative would be to misread the body as commands.
+    /// a multi-line here-document (`<<`, `<<-`). Failing closed is deliberate —
+    /// the alternative would be to misread the body as commands. (The
+    /// here-string `<<<` is supported.)
     UnsupportedRedirection,
     /// A redirection whose meaning is not well defined: a descriptor-duplication
     /// form with neither a source descriptor nor a `-` close (`<&`, `2>&x`), or

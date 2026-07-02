@@ -47,6 +47,14 @@ pub enum RedirAction {
     },
     /// Close the descriptor.
     Close,
+    /// Feed `content` as the descriptor's input (a here-string, `<<< word`).
+    /// `content` is the fully-expanded body with its trailing newline already
+    /// appended, so the host supplies it verbatim as a read backing without
+    /// re-deriving the here-string's shape.
+    HereString {
+        /// The exact bytes the descriptor reads, trailing newline included.
+        content: String,
+    },
 }
 
 /// A redirection's fully-expanded target, classified into the two worlds a

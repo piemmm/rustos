@@ -1756,9 +1756,12 @@ until the launch ABI grows):
   duplication (`n>&m`, `n<&m`, `2>&1`), descriptor close (`>&-`, `<&-`,
   `n>&-`), and the combined stdout+stderr forms `&>`/`>&file`/`&>>`/`>>&` with
   their clobber spellings (lowered to an open on fd 1 plus a dup of fd 1 onto
-  fd 2 — one definition of the combined meaning). Fail-closed: a file
-  redirection with no target, an ambiguous duplication (`<&file`, `2>&file`),
-  or a here-document/here-string operator runs nothing.
+  fd 2 — one definition of the combined meaning), and the here-string `<<<`
+  (lowered to a `HereString` action carrying the expanded word plus one
+  trailing newline — the one definition of the here-string's shape — on its
+  descriptor, default fd 0). Fail-closed: a file redirection or here-string
+  with no target, an ambiguous duplication (`<&file`, `2>&file`), or a
+  multi-line here-document operator (`<<`, `<<-`) runs nothing.
 - **Implemented and tested** — redirection-target classification (the
   "Resolution rule" above). Each expanded `Open` target is classified into a
   `RedirTarget` (`Path` or `Resource`) through the single shared
@@ -1771,8 +1774,8 @@ until the launch ABI grows):
   file whose name contains `:` is ever shadowed. A registered-namespace target
   that is not a well-formed reference (`sys:null@`) fails the whole line closed
   (`InvalidResourceTarget`) rather than falling back to creating a file.
-- **Not yet implemented** (deliberately failing closed, tracked here): here
-  documents/strings (`<<`, `<<-`, `<<<`), process substitution (`<(…)`,
+- **Not yet implemented** (deliberately failing closed, tracked here):
+  multi-line here-documents (`<<`, `<<-`), process substitution (`<(…)`,
   `>(…)`, `=(…)`), zsh multios fan-out, and dynamic descriptor allocation
   (`{var}>`) — each an increment on top of the model above. A classified
   `Resource` target is carried to the host but its *resolution to a kernel
