@@ -737,7 +737,7 @@ on its own before the next.
   syscalls — the session's gated banner+exit is necessarily last).
 - **P6e — real shell REPL + session supervision `[x]`.** The `session`
   program `init` launches is currently a banner+exit `Run` stub in the
-  `Shell` bundle; P6e wires the existing `rustos-shell` interpreter library
+  `Shell` bundle; P6e wires the existing `rustos-elsh` interpreter library
   into it (a real REPL) and has `init` supervise the session across its
   lifetime (restart, reap). **Design correction (binding, AGENTS.md §20):**
   the shell must do its text I/O over its **inherited standard streams
@@ -746,7 +746,7 @@ on its own before the next.
   Binding the REPL to the discovered console hard-codes "whichever console
   the kernel found" into the shell — ambient authority (§4) and hidden
   device coupling (§17.3/§17.4). Reading fd 0 / writing fd 1 makes the same
-  `rustos-shell` binary "just work" whether started on a UART, a
+  `rustos-elsh` binary "just work" whether started on a UART, a
   framebuffer console, a network socket, or a WM terminal surface, with
   **zero** shell-side changes — only the *backing* of its descriptors
   differs. The gap this exposes: `abi-v1`'s startup vector
@@ -827,14 +827,14 @@ on its own before the next.
     Real UART **RX** over fd 0 on silicon remains an on-metal item (no
     deterministic `-M virt` serial-RX injection, consistent with P6e-2).
   - **P6e-3b — shell REPL over its streams + `init` supervision `[x]`.**
-    Wire `rustos-shell` to read fd 0 / write fd 1 (and emit `stdinfo` on
+    Wire `rustos-elsh` to read fd 0 / write fd 1 (and emit `stdinfo` on
     fd 3 per §20) through the `lib/rt` standard-stream wrappers, with
     `init` supervising the session (restart, reap). The shell contains
     **no** reference to `console_*` or to any device. Staged into the REPL
     itself (P6e-3b-i) and `init` supervision (P6e-3b-ii) — **both landed**.
     - **P6e-3b-i — shell REPL over fd 0/1/2/3 `[x]`.** The `Shell` bundle's
-      `Run` binary (`userland/shell/shell/src/run.rs`) no longer prints a
-      banner and exits: it runs the sibling `rustos-shell` interpreter as a
+      `Run` binary (`userland/shell/elsh/src/run.rs`) no longer prints a
+      banner and exits: it runs the sibling `rustos-elsh` interpreter as a
       read-eval-print loop (the new `repl` lib module) over its **inherited
       standard streams** (`AGENTS.md` §20). `repl::run` reads command lines
       from fd 0 (`rustos_rt::stdin`, reassembling lines across reads,
@@ -921,7 +921,7 @@ on its own before the next.
       folded into those ports' user-mode bring-up follow-ons. Docs:
       `docs/src/platform/aarch64.md` (Interrupts).
     - **Prerequisite — `lib/rt` `mem_map`-backed `#[global_allocator]`
-      `[x]`.** The `rustos-shell` interpreter is `no_std + alloc`, but the
+      `[x]`.** The `rustos-elsh` interpreter is `no_std + alloc`, but the
       freestanding userland runtime had no heap, so the shell could not link
       it. `lib/rt` now registers a `#[global_allocator]`
       (`lib/rt/src/heap.rs`): a free-span allocator over a fixed-base virtual

@@ -1,6 +1,7 @@
-# `rustos-shell` — the default RustOS shell
+# `rustos-elsh` — elsh (Element Shell), the default RustOS shell
 
-Stage 6 deliverable (`AGENTS.md` §3 `userland/shell/`). A POSIX-ish
+Stage 6 deliverable (`AGENTS.md` §3 `userland/shell/`). elsh (Element
+Shell) is a POSIX-ish
 command interpreter: it lexes a line with full quoting and escaping,
 parses pipelines and the `;`/`&&`/`||`/`&` connectors, expands
 `$`-variables, runs a small set of builtins in-process, and launches
@@ -15,7 +16,7 @@ kernel or driver crate (`AGENTS.md` §17.4).
 
 ## A pure interpreter
 
-`rustos-shell` decides *what* to run and *with what arguments*; it never
+`rustos-elsh` decides *what* to run and *with what arguments*; it never
 itself touches the kernel or a terminal. The two operations that reach
 the outside world are injected seams:
 
@@ -85,7 +86,7 @@ it lives rather than papered over (`AGENTS.md` §2.1, §2.3):
 
 ## Tests
 
-`cargo test -p rustos-shell` drives the interpreter against in-memory
+`cargo test -p rustos-elsh` drives the interpreter against in-memory
 `Console`/`ProcessHost` fixtures, covering the lexer's quoting and escape
 rules, the parser's pipelines/redirections/connectors and its fail-closed
 grammar errors, `$`-expansion, every builtin, foreground status

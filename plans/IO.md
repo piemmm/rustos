@@ -87,7 +87,7 @@ done items):
 - **DONE — userland adoption (IO4).** The in-tree callers that hand-rolled a
   short-write loop over the `lib/rt` byte-slice wrappers now write through
   `rustos_rt::io::{Stdout, Stderr, Write}`, and the duplicated loops are
-  deleted: `userland/shell/shell` (`RtConsole`), `userland/session/login`
+  deleted: `userland/shell/elsh` (`RtConsole`), `userland/session/login`
   (`RtPrompt`), `userland/apps/top` (`RtTty`), `userland/system/init` (the
   banner write), and `lib/procinfo` (`RtOutput` / `write_stderr_line`, which
   back `sysinfo` / `ps` / `top`). There is one `Write::write_all` loop in
@@ -240,7 +240,7 @@ rustdoc + the relevant `docs/` page, whole-project gate green.
   I/O error, so a `fmt::Error` surfaces as `Error::Fmt`, never a panic. Tests
   cover formatted output bytes and the error path.
 - **IO4 — adopt across userland (delete the hand-rolled loops). DONE.** The
-  in-tree callers (`userland/shell/shell`, `userland/system/init`,
+  in-tree callers (`userland/shell/elsh`, `userland/system/init`,
   `userland/apps/top`, and the `sysinfo` / `ps` / `top` output path shared
   through `lib/procinfo`) write through `rustos_rt::io::{Stdout, Stderr,
   Write}`, and the open-coded short-write loops they carried are **deleted**

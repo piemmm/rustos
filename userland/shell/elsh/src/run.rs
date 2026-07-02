@@ -8,7 +8,7 @@
 //! `rustos-rt` provides `_start`, the per-process stack canary, the panic handler, the `mem_map`-backed global allocator, and the
 //! syscall wrappers; `rustos_rt::entry!` names this program's `main`.
 //!
-//! `main` runs the [`rustos_shell`] interpreter as a read-eval-print loop over
+//! `main` runs the [`rustos_elsh`] interpreter as a read-eval-print loop over
 //! its **inherited standard streams**: it reads command
 //! lines from standard input (fd 0), writes the prompt and command output to
 //! standard output and standard error (fd 1 / fd 2), and emits advisory
@@ -42,10 +42,10 @@ mod program {
     use alloc::string::String;
 
     use rustos_abi::{Errno, LimitKind, ResourceLimit};
-    use rustos_rt::io::{Stderr, Stdout, Write};
-    use rustos_shell::{
+    use rustos_elsh::{
         Console, LaunchSpec, LimitStore, Pid, ProcessHost, ReplInput, Shell, Signal, WaitOutcome,
     };
+    use rustos_rt::io::{Stderr, Stdout, Write};
 
     /// The shell's output sink, backed by the inherited standard output (fd 1)
     /// and standard error (fd 2) through the shared `rustos_rt::io` layer — the
@@ -210,7 +210,7 @@ mod program {
         let limits = RtLimitStore;
         let mut input = RtInput;
         let mut shell = Shell::new(&host, &console).with_limits(&limits);
-        rustos_shell::run_repl(&mut shell, &console, &mut input)
+        rustos_elsh::run_repl(&mut shell, &console, &mut input)
     }
 
     rustos_rt::entry!(main);

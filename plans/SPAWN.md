@@ -385,7 +385,7 @@ to a failed spawn rather than being replaced. `init`'s effective set gained
 `{CAP_CONSOLE_WRITE, CAP_CONSOLE_READ}` (no ambient authority, §4). The
 minimal `session` program is a banner+exit `Run` stub in the `Shell`
 bundle; growing it into a real shell REPL (wiring
-in the `rustos-shell` interpreter library) is `plans/PI.md` P6e. Per the
+in the `rustos-elsh` interpreter library) is `plans/PI.md` P6e. Per the
 binding §20 stream model, the REPL does its text I/O over its **inherited
 standard streams (fd 0/1/2/3 — `stdin`/`stdout`/`stderr`/`stdinfo`)**, never
 the kernel-discovered console (`console_*` is only the bootstrap stream

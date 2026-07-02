@@ -1252,7 +1252,7 @@ lib/path or lib/fsname        no_std path parser and canonicalizer
 lib/caps                     capability IDs and checks
 userland/system/devmgr        storage driver autoload integration
 userland/system/installer     default alias policy creation
-userland/shell/shell          Alias:/ parsing and display
+userland/shell/elsh          Alias:/ parsing and display
 ```
 
 Do not duplicate the parser in shell, kernel, filesystem drivers, and GUI. There

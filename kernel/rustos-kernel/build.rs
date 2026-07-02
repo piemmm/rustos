@@ -113,9 +113,9 @@ const PROGRAMS: &[Program] = &[
         prefix: "INIT",
     },
     Program {
-        pkg: "rustos-shell",
-        bin: "rustos-shell-run",
-        rel_dir: "../../userland/shell/shell",
+        pkg: "rustos-elsh",
+        bin: "rustos-elsh-run",
+        rel_dir: "../../userland/shell/elsh",
         fixture: "shell_rxe.rs",
         prefix: "SHELL",
     },

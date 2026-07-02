@@ -1,6 +1,7 @@
-# Default shell (`userland/shell/shell`)
+# elsh — the default shell (`userland/shell/elsh`)
 
-`rustos-shell` is the default command interpreter: a POSIX-ish shell that
+**elsh** ("Element Shell", crate `rustos-elsh`) is the default RustOS
+command interpreter: a POSIX-ish shell that
 reads a line of text and runs it. It lexes the line with full quoting and
 escaping, parses pipelines and the `;`/`&&`/`||`/`&` connectors, expands
 `$`-variables, runs a small set of builtins in-process, and launches
@@ -78,15 +79,44 @@ A descriptor number is an IO number only when it is glued directly to a `<`/`>`
 an ambiguous duplication (`<&file`, `2>&file`), or an as-yet-unsupported
 here-document/here-string (`<<`, `<<-`, `<<<`) runs **nothing**.
 
+### Target: resource reference vs. filesystem path
+
+RustOS has no `/dev`, so the byte sinks and sources a redirection can name
+(`sys:null`, `sys:zero`, `sys:random`, …) are **resource references**, not
+device files. Each expanded `Open` target is classified into a `RedirTarget` —
+`Path` or `Resource` — through the single shared `lib/resref` parser, never a
+shell-private reference grammar (`AGENTS.md` §2.2). A target is a resource
+reference only when it is a *relative* path whose first path component holds a
+`:` preceded by a registered resource namespace and *not* immediately followed
+by `/`, and whose prefix is neither `.` nor `..`:
+
+| target           | resolves to                                             |
+|------------------|---------------------------------------------------------|
+| `sys:random`     | resource reference (registered namespace)               |
+| `Home:/notes`    | path (alias-path form: `:` immediately followed by `/`) |
+| `/sys:random`    | path (absolute)                                         |
+| `./sys:random`   | path (first component is `.`)                           |
+| `foo/sys:random` | path (first component `foo` has no `:`)                 |
+| `foo:bar`        | path (`foo` is not a registered namespace)              |
+
+The rule reserves nothing on disk: `:` is a legal filename byte on ext/POSIX
+volumes, and a real file named `sys:random` stays reachable as `./sys:random`
+or when quoted. A target whose spelling names a registered namespace but is
+**not** a well-formed reference (`sys:null@`) fails the whole line closed — the
+shell never falls back to creating a file, so a typo cannot silently write junk
+to disk (`AGENTS.md` §5.4).
+
 Not yet implemented (tracked in `plans/SHELL.md`, deliberately failing closed
 rather than misbehaving): here-documents and here-strings, process
-substitution (`<(…)`, `>(…)`, `=(…)`), zsh multios fan-out, dynamic
-descriptor allocation (`{var}>`), and resolving a redirection target through
-the storage/resource namespaces (`sys:null`, `Alias:/path`). The current
-runtime process host still carries only a program path, so it reports
-`NotImplemented` for any redirection until the launch ABI is extended; the
-parsing, lowering, and fail-closed semantics above are exercised in full
-against the in-memory fixtures.
+substitution (`<(…)`, `>(…)`, `=(…)`), zsh multios fan-out, and dynamic
+descriptor allocation (`{var}>`). Classifying a target is done; *resolving* a
+`Resource` target to a kernel stream backing (opening `sys:null`, the
+capability-checked resolve of any other namespace) waits on the same launch
+ABI that gates applying a file redirection. The current runtime process host
+still carries only a program path, so it reports `NotImplemented` for any
+redirection — a `Path` and a `Resource` target alike — until the launch ABI is
+extended; the parsing, classification, lowering, and fail-closed semantics
+above are exercised in full against the in-memory fixtures.
 
 ## The session program (`Run`) and its REPL
 
@@ -171,7 +201,7 @@ it lives rather than papered over (`AGENTS.md` §2.1, §2.3):
 
 ## Tests
 
-`cargo test -p rustos-shell` drives the interpreter against in-memory
+`cargo test -p rustos-elsh` drives the interpreter against in-memory
 `Console`/`ProcessHost` fixtures, covering the lexer's quoting and escape
 rules, the parser's pipelines/redirections/connectors and its fail-closed
 grammar errors, `$`-expansion, every builtin, foreground status

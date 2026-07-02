@@ -38,7 +38,7 @@ use crate::host::Console;
 use crate::shell::Shell;
 
 /// The interactive prompt written to standard output before each line.
-const PROMPT: &str = "rustos$ ";
+const PROMPT: &str = "elsh$ ";
 
 /// Maximum length of a single command line, in bytes. A line longer than this
 /// is discarded rather than buffered without bound, so untrusted input cannot
@@ -51,7 +51,7 @@ const MAX_LINE: usize = 4096;
 const READ_CHUNK: usize = 256;
 
 /// `stdinfo` producer name for the records this loop emits.
-const PRODUCER: &str = "rustos-shell";
+const PRODUCER: &str = "elsh";
 
 /// The loop's standard-input (fd 0) and standard-information (fd 3) seam.
 ///

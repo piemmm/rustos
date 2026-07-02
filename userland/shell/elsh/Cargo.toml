@@ -1,6 +1,6 @@
 [package]
-name = "rustos-shell"
-description = "RustOS default shell: a POSIX-ish command interpreter with quoting, variable expansion, pipelines, redirections, sequencing, and job control (Stage 6 — `PLAN.md`)."
+name = "rustos-elsh"
+description = "elsh (Element Shell): the default RustOS command interpreter — a POSIX-ish shell with quoting, variable expansion, pipelines, redirections, sequencing, and job control (Stage 6 — `PLAN.md`)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,7 +11,7 @@ publish.workspace = true
 [lints]
 workspace = true
 
-# The package is both the `rustos-shell` interpreter library (above) and the
+# The package is both the `rustos-elsh` interpreter library (above) and the
 # `Run` entry-point binary of the `Shell` application bundle (`AGENTS.md`
 # §16.5) — the program PID 1 `init` launches as the user's session
 # (`plans/SPAWN.md` SP3b / `plans/PI.md` P6e). The binary is a freestanding
@@ -19,7 +19,7 @@ workspace = true
 # elsewhere (see `src/run.rs` / `build.rs`); wiring the interpreter library
 # into it (a real REPL over the console) is `plans/PI.md` P6e.
 [[bin]]
-name = "rustos-shell-run"
+name = "rustos-elsh-run"
 path = "src/run.rs"
 
 [dependencies]
@@ -28,6 +28,13 @@ path = "src/run.rs"
 # flows back to the user verbatim — the shell invents no parallel error set
 # (§2.2).
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+
+# The single shared resource-reference spelling parser. The shell classifies a
+# redirection target as a resource reference (`sys:null`) versus a filesystem
+# path through this one parser — it never embeds a second reference grammar.
+# This crate only *parses*; it never resolves, opens, or checks a capability,
+# so linking it grants the shell no authority.
+rustos-resref = { path = "../../../lib/resref", version = "=0.0.0" }
 
 # The pure-Rust userland runtime (`AGENTS.md` §1): `rustos-rt` provides the
 # `Run` binary's `_start`, stack canary, panic handler, and syscall wrappers.

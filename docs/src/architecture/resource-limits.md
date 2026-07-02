@@ -122,10 +122,10 @@ settable but not yet acted on at the descriptor/spawn/stack path.
 
 ## The `ulimit` shell command
 
-The `ulimit` builtin in the default shell (`userland/shell/shell`) is the
+The `ulimit` builtin in the default shell (`userland/shell/elsh`) is the
 command-line face of the facility. It reads and imposes the calling
 process's own limits over the L1 ABI through an injected
-`rustos_shell::LimitStore` seam — backed by `rustos_rt::rlimit_get` /
+`rustos_elsh::LimitStore` seam — backed by `rustos_rt::rlimit_get` /
 `rustos_rt::rlimit_set` in the real `Run` binary, and by an in-memory double
 in tests, so the parsing and policy logic is exercised without a kernel (the
 same `ProcessHost`/`Console` seam pattern the rest of the shell uses). The

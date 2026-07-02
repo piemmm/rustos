@@ -10,7 +10,7 @@
  * image is genuinely PIE). One script serves every native target: it names
  * only architecture-neutral section classes (`AGENTS.md` §2.2). It is the
  * same proven PIE layout `userland/system/init/Run.ld`,
- * `userland/shell/shell/Run.ld`, and `userland/session/login/Run.ld` use; the
+ * `userland/shell/elsh/Run.ld`, and `userland/session/login/Run.ld` use; the
  * section bodies are kept identical so the userland program runtimes share one
  * layout.
  *

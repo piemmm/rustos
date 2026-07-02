@@ -39,6 +39,12 @@ pub enum ParseError {
     /// form with neither a source descriptor nor a `-` close (`<&`, `2>&x`), or
     /// a descriptor number too large to represent.
     AmbiguousRedirection,
+    /// A redirection target whose spelling names a registered resource
+    /// namespace (`sys:null`) but is not a well-formed resource reference
+    /// (`sys:null@`). Failing the whole line closed is deliberate: the shell
+    /// never falls back to opening it as a file, so a typo cannot silently
+    /// create junk on disk.
+    InvalidResourceTarget,
     /// A pipe (`|`) or sequence/logical operator (`&&`, `||`, `;`, `&`) had
     /// no command on one of its sides.
     MissingCommand,
@@ -54,6 +60,7 @@ impl fmt::Display for ParseError {
             Self::MissingRedirectionTarget => "redirection is missing its target",
             Self::UnsupportedRedirection => "unsupported redirection operator",
             Self::AmbiguousRedirection => "ambiguous redirection",
+            Self::InvalidResourceTarget => "malformed resource-reference redirection target",
             Self::MissingCommand => "expected a command",
             Self::UnterminatedExpansion => "unterminated ${...} expansion",
         };

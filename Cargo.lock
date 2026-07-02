@@ -864,6 +864,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-elsh"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-resref",
+ "rustos-rt",
+]
+
+[[package]]
 name = "rustos-fdt"
 version = "0.0.0"
 dependencies = [
@@ -1349,14 +1358,6 @@ name = "rustos-setcap"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
-]
-
-[[package]]
-name = "rustos-shell"
-version = "0.0.0"
-dependencies = [
- "rustos-abi",
- "rustos-rt",
 ]
 
 [[package]]

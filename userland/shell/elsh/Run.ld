@@ -1,5 +1,5 @@
 /* Link script for the `Shell` bundle `Run` binary
- * (`userland/shell/shell/src/run.rs`).
+ * (`userland/shell/elsh/src/run.rs`).
  *
  * The `Run` program is a position-independent **pure-Rust** program whose
  * entry point is the `rustos-rt` runtime's `_start`. It links no architecture

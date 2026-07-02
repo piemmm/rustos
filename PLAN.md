@@ -2311,7 +2311,7 @@ reflink independence, acorn preset round-trip).
 **Deliverables**
 - `userland/system/init` (PID 1): service manager, dependency-ordered start,
   reaper, capability granting from manifests.
-- `userland/shell/shell`: POSIX-ish shell with job control and a small builtin set.
+- `userland/shell/elsh`: POSIX-ish shell with job control and a small builtin set.
 - `userland/session/login`: text login that authenticates against `kernel/sec`
   and spawns a shell or a graphical session. Always starts in text mode;
   offers graphical mode only when a display driver and `userland/gui/wm`
@@ -2351,7 +2351,7 @@ reflink independence, acorn preset round-trip).
   required capability (`CAP_SYSINFO_GLOBAL/KERNEL/HW` added) under the §9
   hash discipline; served by `userland/system/sysinfod`.
 - `userland/system/init` (PID 1, dependency-ordered service manager + reaper +
-  manifest capability granting), `userland/shell/shell` (POSIX-ish, job
+  manifest capability granting), `userland/shell/elsh` (POSIX-ish, job
   control), `userland/session/login` (text-first, graphical only when a
   display driver + wm exist).
 - Core CLI utilities each as their own `userland/apps/` crate (`ls`/`cp`/`mv`/
@@ -2502,7 +2502,7 @@ owning/close-on-drop handle yet: `abi-v1` has no generic descriptor-close trap,
 so it would be a speculative interface (§2.4) — it lands with the
 descriptor-producing/closing ABI. RustOS builds **no** system-wide C `stdio`
 (§16.4, `plans/CCOMPAT.md`). **IO4 done:** the in-tree callers
-(`userland/shell/shell`, `userland/system/init`, `userland/apps/top`, and the
+(`userland/shell/elsh`, `userland/system/init`, `userland/apps/top`, and the
 `sysinfo`/`ps`/`top` output path shared through `lib/procinfo`) write through
 `rustos_rt::io::{Stdout, Stderr, Write}` and their hand-rolled short-write
 loops are deleted (§2.14) — one `Write::write_all` loop in userland. The
@@ -3243,10 +3243,10 @@ and fail-closed (§24.4) — this work must not loosen them.
   §17.2/§4 safety invariants preserved. **No per-arch secondary-bring-up bound
   remains.**
 - L4a — **DONE.** The `ulimit` shell command in the default shell
-  (`userland/shell/shell`) over the L1 ABI. A new `rustos_shell::LimitStore`
+  (`userland/shell/elsh`) over the L1 ABI. A new `rustos_elsh::LimitStore`
   seam (`get`/`set`, fail-closed `NullLimitStore` default + `Shell::with_limits`
   builder) threads through `Shell`/`BuiltinContext`; the `ulimit` builtin
-  (`userland/shell/shell/src/ulimit.rs`) parses `-a`/`-H`/`-S` + a canonical
+  (`userland/shell/elsh/src/ulimit.rs`) parses `-a`/`-H`/`-S` + a canonical
   `LimitKind` name + a decimal/`unlimited` value, reports or imposes the
   process's own limits, preserves the unchanged bound on a one-sided set, and
   fails closed on an unknown flag/resource/value or a `soft > hard` request

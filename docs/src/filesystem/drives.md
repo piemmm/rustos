@@ -373,7 +373,7 @@ with `TimestampOutOfRange` rather than silently truncating (§22).
 | `lib/caps` | Capability IDs and checks. |
 | `userland/system/devmgr` | Storage-driver autoload integration. |
 | `userland/system/installer` | Default alias-policy creation (§17). |
-| `userland/shell/shell` | `Alias:/` consumption and display (§18) — via `lib/path`, no private parser. |
+| `userland/shell/elsh` | `Alias:/` consumption and display (§18) — via `lib/path`, no private parser. |
 
 The **descriptor-producing open-a-path ABI** — the syscall that opens a
 resolved path to a new file descriptor (consumed by, not invented in,

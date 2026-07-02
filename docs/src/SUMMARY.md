@@ -90,7 +90,7 @@
 - [PID 1 service manager](./userland/init.md)
 - [System Information service](./userland/sysinfod.md)
 - [Networking service](./userland/net_icmp.md)
-- [Default shell](./userland/shell.md)
+- [elsh (Element Shell)](./userland/shell.md)
 - [Text login](./userland/login.md)
 - [Application bundle loader](./userland/appmgr.md)
 - [Core CLI utilities](./userland/utilities.md)

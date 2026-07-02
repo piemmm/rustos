@@ -1,9 +1,10 @@
-# RustOS shell (`userland/shell/shell`)
+# elsh (Element Shell) — the RustOS shell (`userland/shell/elsh`)
 
-`rustos-shell` is the default RustOS command interpreter. It should feel
-familiar to users of zsh/POSIX shells while adding structured output
+**elsh** ("Element Shell") is the default RustOS command interpreter; its
+crate is `rustos-elsh` and its `Run` binary is `rustos-elsh-run`. It should
+feel familiar to users of zsh/POSIX shells while adding structured output
 discovery, predictable rendering, and the RustOS standard information stream
-(`stdinfo`, fd 3).
+(`stdinfo`, fd 3). Where this document says "the shell" it means elsh.
 
 The shell has two equally important jobs:
 
@@ -1758,16 +1759,32 @@ until the launch ABI grows):
   fd 2 — one definition of the combined meaning). Fail-closed: a file
   redirection with no target, an ambiguous duplication (`<&file`, `2>&file`),
   or a here-document/here-string operator runs nothing.
+- **Implemented and tested** — redirection-target classification (the
+  "Resolution rule" above). Each expanded `Open` target is classified into a
+  `RedirTarget` (`Path` or `Resource`) through the single shared
+  `lib/resref` parser, never a shell-private reference grammar (`AGENTS.md`
+  §2.2). A relative target whose first path component holds a `:` preceded by a
+  registered resource namespace and not immediately followed by `/`, with a
+  prefix that is neither `.` nor `..`, is a resource reference (`sys:null`);
+  every other spelling — absolute, `./x`, `foo/sys:x`, an unregistered prefix
+  `foo:bar`, or the alias-path form `Home:/x` — stays a path, so no on-disk
+  file whose name contains `:` is ever shadowed. A registered-namespace target
+  that is not a well-formed reference (`sys:null@`) fails the whole line closed
+  (`InvalidResourceTarget`) rather than falling back to creating a file.
 - **Not yet implemented** (deliberately failing closed, tracked here): here
   documents/strings (`<<`, `<<-`, `<<<`), process substitution (`<(…)`,
-  `>(…)`, `=(…)`), zsh multios fan-out, dynamic descriptor allocation
-  (`{var}>`), and resolving a redirection target through the storage/resource
-  namespaces (`sys:null`, `Alias:/path`) — each an increment on top of the
-  model above.
+  `>(…)`, `=(…)`), zsh multios fan-out, and dynamic descriptor allocation
+  (`{var}>`) — each an increment on top of the model above. A classified
+  `Resource` target is carried to the host but its *resolution to a kernel
+  stream backing* (opening `sys:null`, the capability-checked resolve of any
+  other namespace, and the well-known `sys:` stream enum in `lib/abi`) waits on
+  the launch ABI that also gates applying a file redirection: today the runtime
+  host fails closed on every redirection, so a `Path` and a `Resource` target
+  alike run nothing rather than opening.
 
 ## Tests
 
-`cargo test -p rustos-shell` MUST cover:
+`cargo test -p rustos-elsh` MUST cover:
 
 - zsh-style quoting and escapes
 - comments

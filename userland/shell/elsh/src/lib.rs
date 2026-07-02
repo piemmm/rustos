@@ -1,7 +1,7 @@
-//! The default RustOS shell — a POSIX-ish command interpreter (Stage 6,
-//! `PLAN.md`).
+//! elsh (Element Shell) — the default RustOS command interpreter, a POSIX-ish
+//! shell (Stage 6, `PLAN.md`).
 //!
-//! `rustos-shell` reads a line of text and runs it: it lexes the line with
+//! `rustos-elsh` reads a line of text and runs it: it lexes the line with
 //! full quoting and escaping, parses pipelines and `;`/`&&`/`||`/`&`
 //! connectors, expands `$`-variables, runs a small set of builtins in-process,
 //! and launches everything else through an injected process host with job
@@ -68,7 +68,8 @@ pub(crate) mod test_support;
 pub use env::Environment;
 pub use error::ParseError;
 pub use host::{
-    Console, LaunchSpec, LimitStore, ProcessHost, RedirAction, ResolvedCommand, ResolvedRedirection,
+    Console, LaunchSpec, LimitStore, ProcessHost, RedirAction, RedirTarget, ResolvedCommand,
+    ResolvedRedirection,
 };
 pub use job::{ExitStatus, Job, JobId, JobState, JobTable, Pid, Signal, WaitOutcome};
 pub use repl::{run as run_repl, ReplInput};

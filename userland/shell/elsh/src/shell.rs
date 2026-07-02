@@ -20,8 +20,8 @@ use crate::builtin::{self, is_builtin, BuiltinContext};
 use crate::env::{assignment_split, Environment};
 use crate::error::ParseError;
 use crate::host::{
-    Console, LaunchSpec, LimitStore, ProcessHost, RedirAction, ResolvedCommand,
-    ResolvedRedirection, NULL_LIMIT_STORE,
+    classify_redirect_target, Console, LaunchSpec, LimitStore, ProcessHost, RedirAction,
+    ResolvedCommand, ResolvedRedirection, NULL_LIMIT_STORE,
 };
 use crate::job::{ExitStatus, JobState, JobTable, WaitOutcome};
 use crate::parser::{parse, Command, ListEntry, OpenMode, Pipeline, Redirection, RunCondition};
@@ -233,7 +233,7 @@ impl<'a> Shell<'a> {
                 fd: *fd,
                 action: RedirAction::Open {
                     mode: *mode,
-                    target: self.env.expand_word(target)?,
+                    target: classify_redirect_target(self.env.expand_word(target)?)?,
                 },
             }),
             Redirection::Combined {
@@ -250,7 +250,7 @@ impl<'a> Shell<'a> {
                     fd: STDOUT_FD,
                     action: RedirAction::Open {
                         mode,
-                        target: self.env.expand_word(target)?,
+                        target: classify_redirect_target(self.env.expand_word(target)?)?,
                     },
                 });
                 out.push(ResolvedRedirection {
@@ -464,7 +464,7 @@ mod tests {
 
     #[test]
     fn combined_redirection_lowers_to_open_then_dup() {
-        use crate::host::RedirAction;
+        use crate::host::{RedirAction, RedirTarget};
         use crate::parser::OpenMode;
 
         let host = ScriptedHost::new();
@@ -484,7 +484,7 @@ mod tests {
                     fd: 1,
                     action: RedirAction::Open {
                         mode: OpenMode::Write { clobber: false },
-                        target: "both".into(),
+                        target: RedirTarget::Path("both".into()),
                     },
                 },
                 super::ResolvedRedirection {
@@ -493,6 +493,67 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn resource_reference_target_reaches_the_host_as_a_resource() {
+        use crate::host::{RedirAction, RedirTarget};
+        use alloc::string::ToString;
+
+        let host = ScriptedHost::new();
+        let console = RecordingConsole::new();
+        let mut shell = Shell::new(&host, &console);
+
+        shell.run_line("run >sys:null").unwrap();
+
+        let launches = host.launches();
+        let action = &launches[0].commands[0].redirections[0].action;
+        match action {
+            RedirAction::Open {
+                target: RedirTarget::Resource(reference),
+                ..
+            } => assert_eq!(reference.to_string(), "sys:null"),
+            other => panic!("expected a resource target, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ordinary_filename_target_reaches_the_host_as_a_path() {
+        use crate::host::{RedirAction, RedirTarget};
+        use crate::parser::OpenMode;
+
+        let host = ScriptedHost::new();
+        let console = RecordingConsole::new();
+        let mut shell = Shell::new(&host, &console);
+
+        shell.run_line("run >mylisting.txt").unwrap();
+
+        let launches = host.launches();
+        let action = &launches[0].commands[0].redirections[0].action;
+        assert_eq!(
+            action,
+            &RedirAction::Open {
+                mode: OpenMode::Write { clobber: false },
+                target: RedirTarget::Path("mylisting.txt".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn malformed_resource_target_runs_nothing() {
+        use crate::error::ParseError;
+
+        let host = ScriptedHost::new();
+        let console = RecordingConsole::new();
+        let mut shell = Shell::new(&host, &console);
+
+        // A registered namespace with a broken reference aborts the line and
+        // launches nothing — never a fallback file open.
+        assert_eq!(
+            shell.run_line("run >sys:null@"),
+            Err(ParseError::InvalidResourceTarget)
+        );
+        assert!(host.launches().is_empty());
     }
 
     #[test]
