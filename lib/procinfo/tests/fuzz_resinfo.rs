@@ -46,6 +46,7 @@ const TEMPLATES: &[&str] = &[
     "info:system/hostname",
     "info:system/kernel",
     "info:system/machine-id",
+    "info:system/boot-time",
     "stats:uptime",
     "stats:mem/used",
     "stats:mem/available",

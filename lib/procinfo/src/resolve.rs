@@ -16,7 +16,8 @@
 //! [`ResolveInfoError`] and never a fabricated value (`AGENTS.md` §5.4, §2.9).
 //! The served set grows in place here as sibling queries land; today it covers
 //! exactly the ungated/self-scoped and kernel-memory `sysinfo-v1` queries that
-//! already exist.
+//! already exist (`info:system/{hostname,kernel,machine-id,boot-time}`,
+//! `stats:uptime`, and `stats:mem/*`).
 
 use alloc::string::{String, ToString};
 
@@ -84,25 +85,45 @@ fn resolve_info(
     transport: &dyn Transport,
 ) -> Result<ResourceResponse, ResolveInfoError> {
     reject_decoration(reference)?;
-    let identity = query_identity(transport)?;
-    let value = match selector(reference).as_slice() {
-        ["system", "hostname"] => {
-            InfoValue::new_str(Sensitivity::Public, &field_lossy(identity.hostname_bytes()))
-        }
-        ["system", "kernel"] => InfoValue::new_str(Sensitivity::Public, &version_string(&identity)),
-        // Machine identity is identifying, not public (`plans/ALIAS.md` §6.2).
-        ["system", "machine-id"] => {
-            InfoValue::new_str(Sensitivity::Sensitive, &hex_lower(&identity.machine_id))
-        }
-        _ => return Err(ResolveInfoError::UnknownSelector),
-    }
-    .map_err(|_| ResolveInfoError::Malformed)?;
+    let value = resolve_info_value(&selector(reference), transport)?;
     envelope(
         reference,
         now,
         Authorization::Unprivileged,
         ResponsePayload::Info(value),
     )
+}
+
+/// Map an `info:` `selector` onto its typed value, issuing only the System
+/// Information query the matched selector actually needs.
+fn resolve_info_value(
+    selector: &[&str],
+    transport: &dyn Transport,
+) -> Result<InfoValue, ResolveInfoError> {
+    let value = match selector {
+        ["system", "hostname"] => InfoValue::new_str(
+            Sensitivity::Public,
+            &field_lossy(query_identity(transport)?.hostname_bytes()),
+        ),
+        ["system", "kernel"] => InfoValue::new_str(
+            Sensitivity::Public,
+            &version_string(&query_identity(transport)?),
+        ),
+        // Machine identity is identifying, not public (`plans/ALIAS.md` §6.2).
+        ["system", "machine-id"] => InfoValue::new_str(
+            Sensitivity::Sensitive,
+            &hex_lower(&query_identity(transport)?.machine_id),
+        ),
+        // The wall-clock instant of boot is fixed for the life of the boot, so
+        // it is a stable fact rather than a measurement; it is not sensitive.
+        // It rides the same ungated `UPTIME` query that `stats:uptime` uses.
+        ["system", "boot-time"] => InfoValue::new_str(
+            Sensitivity::Public,
+            &time_string(query_uptime(transport)?.boot_time),
+        ),
+        _ => return Err(ResolveInfoError::UnknownSelector),
+    };
+    value.map_err(|_| ResolveInfoError::Malformed)
 }
 
 /// Resolve a `stats:` reference (a measurement) to a single [`Metric`].
@@ -261,6 +282,26 @@ fn push_u16(out: &mut String, value: u16) {
     }
 }
 
+/// The decimal, epoch-relative spelling of an instant, losslessly: whole
+/// seconds, and a nine-digit zero-padded fraction only when the sub-second
+/// field is non-zero (e.g. `1719936000` or `1719936000.000000040`).
+fn time_string(instant: Time64) -> String {
+    let mut s = instant.secs().to_string();
+    let nanos = instant.subsec_nanos();
+    if nanos != 0 {
+        s.push('.');
+        let digits = nanos.to_string();
+        // A canonical sub-second field is `< NANOS_PER_SEC`, so `digits` is at
+        // most nine characters; left-pad the shorter cases to keep the place
+        // value of each digit.
+        for _ in 0..(9 - digits.len()) {
+            s.push('0');
+        }
+        s.push_str(&digits);
+    }
+    s
+}
+
 /// Lowercase-hex encoding of `bytes`.
 fn hex_lower(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
@@ -385,6 +426,40 @@ mod tests {
             }
             ResponsePayload::Metric(_) => panic!("expected info value"),
         }
+    }
+
+    #[test]
+    fn info_boot_time_is_public_epoch_seconds() {
+        let fixture = Fixture::new();
+        let r = resolve_str("info:system/boot-time", &fixture).expect("ok");
+        assert_eq!(r.authorization, Authorization::Unprivileged);
+        assert_eq!(r.query(), "info:system/boot-time");
+        match r.payload {
+            ResponsePayload::Info(v) => {
+                // The fixture's boot instant is 1000 s with a zero sub-second
+                // field, so the fraction is omitted.
+                assert_eq!(v.value(), "1000");
+                assert_eq!(v.sensitivity, Sensitivity::Public);
+            }
+            ResponsePayload::Metric(_) => panic!("expected info value"),
+        }
+    }
+
+    #[test]
+    fn time_string_pads_and_omits_the_sub_second_fraction() {
+        // A zero sub-second field prints no fraction.
+        assert_eq!(super::time_string(Time64::from_secs(1000)), "1000");
+        // A non-zero sub-second field is nine-digit zero-padded, losslessly.
+        assert_eq!(
+            super::time_string(Time64::new(1_719_936_000, 40).expect("instant")),
+            "1719936000.000000040"
+        );
+        assert_eq!(
+            super::time_string(Time64::new(0, 999_999_999).expect("instant")),
+            "0.999999999"
+        );
+        // Instants before the epoch keep their sign.
+        assert_eq!(super::time_string(Time64::from_secs(-5)), "-5");
     }
 
     #[test]
