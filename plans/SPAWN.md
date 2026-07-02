@@ -403,7 +403,7 @@ surface, the C-callable stubs + generated header, the dispatcher arms, the
 fail-closed `kernel/core` seam, the reusable `kernel/mem` live-address-
 space producer, **and** the aarch64 `-M virt` EL0 vertical that wires the
 producer through the `kernel/core` `MemMap` seam are all proven. The
-sibling riscv64 **and x86_64** `-M virt`/OVMF verticals are now landed too
+sibling riscv64 **and x86_64** `-M virt`/QEMU verticals are now landed too
 (the x86_64 one also closed a production ring-3 fault-delivery gap — boot
 now installs the dedicated `#PF` entry and `TSS.RSP0`). The arch-neutral
 **live-address-space retention mechanism** the production `mem_map` producer
@@ -548,7 +548,7 @@ landing):**
   ring-3 selectors, the TSS, and `syscall`/`IA32_LSTAR` entry — boots the
   production `rustos-kernel` pipeline (like `spawn_program_qemu_x86_64`), then
   `iretq`s into the program through `EnterUser::enter_user`; its `fault`
-  observer reports the use-after-unmap `#PF` as PASS on the OVMF/GRUB-ISO boot
+  observer reports the use-after-unmap `#PF` as PASS on the QEMU boot
   (ids 4274–4277, verified green on this host). Reaching it required closing a
   **production x86_64 gap**: a ring-3 CPU exception (or a hardware IRQ that
   preempts a user task) is delivered through the IDT, for which the CPU loads

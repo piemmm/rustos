@@ -2,38 +2,49 @@
 //! trampoline.
 //!
 //! The 32-bit assembly in `boot.s` finishes by `call`ing this symbol with
-//! the multiboot1 magic in `%rdi` and the multiboot info pointer in
-//! `%rsi` (System V AMD64 ABI, see `boot.s` SAFETY-INVARIANT 7).
+//! the boot magic in `%rdi` and the boot-info pointer in `%rsi`
+//! (System V AMD64 ABI, see `boot.s` SAFETY-INVARIANT 7). The magic is
+//! either the multiboot2 bootloader magic (GRUB entered `_start`) or the
+//! PVH start-info magic (QEMU's `-kernel` ELF loader entered
+//! `pvh_start`).
 //!
-//! This function performs the small set of platform-bring-up steps the
-//! Stage-2 tests need and then transfers control to a binary-supplied
-//! `extern "C" fn kernel_main() -> !`. Every test binary defines that
-//! symbol exactly once.
+//! This function validates the magic, records which protocol delivered
+//! the boot info (`crate::bootinfo`), and then transfers control to a
+//! binary-supplied `extern "C" fn kernel_main() -> !`. Every test binary
+//! defines that symbol exactly once.
 
-use crate::{qemu_exit, MULTIBOOT2_BOOTLOADER_MAGIC};
+use crate::{bootinfo, pic, pio, pvh, qemu_exit, MULTIBOOT2_BOOTLOADER_MAGIC};
 
 extern "C" {
     /// Provided by the test binary. Must not return.
     ///
-    /// The single `multiboot_info` parameter carries the verbatim 64-bit
-    /// pointer GRUB/OVMF passed in `%ebx`. A binary that does not need
+    /// The single `boot_info` parameter carries the verbatim 64-bit
+    /// pointer the loader passed in `%ebx`. A binary that does not need
     /// to inspect the boot info (e.g.
     /// `tests/integration/memory_isolation`) can simply ignore it; a
     /// binary that does need it (e.g.
     /// `tests/integration/scheduler_stress_qemu`) parses it via
-    /// `crate::multiboot2::BootInfo::parse` once it has identity-mapped
+    /// `crate::bootinfo::BootData::load` once it has identity-mapped
     /// access to that address — `boot.s` SAFETY-INVARIANT 4 guarantees
     /// the first 4 GiB of physical memory are reachable.
-    fn kernel_main(multiboot_info: u64) -> !;
+    fn kernel_main(boot_info: u64) -> !;
 }
 
 /// The trampoline jumps here. Called *exactly once* on the boot CPU.
 ///
 /// # Behaviour
 ///
-/// 1. Validates the multiboot magic; mismatched magic is a closed-fail
-///    (validate every input).
-/// 2. Transfers to the binary-supplied `kernel_main`.
+/// 1. Validates the boot magic against the two protocols the trampoline
+///    accepts; anything else is a closed-fail (validate every input).
+/// 2. Records the protocol in [`crate::bootinfo`] so
+///    [`crate::bootinfo::BootData::load`] can dispatch without
+///    re-guessing; a second record attempt is a boot-path defect and
+///    also fails closed.
+/// 3. Quiesces the legacy 8259 PICs ([`crate::pic`]): a BIOS-style
+///    hand-off (`SeaBIOS` in front of PVH direct boot, or a real
+///    legacy-boot machine) leaves them unmasked at vector base 8, where
+///    the first PIT tick taken with `IF=1` would be decoded as `#DF`.
+/// 4. Transfers to the binary-supplied `kernel_main`.
 ///
 /// IDT installation is deferred to `kernel_main` because each test
 /// installs its *own* page-fault handler. This avoids the alternative
@@ -46,17 +57,26 @@ extern "C" {
 /// invariants in `boot.s` are upheld. Calling from anywhere else is a
 /// kernel bug.
 #[no_mangle]
-pub extern "C" fn rustos_arch_x86_64_main(magic: u64, multiboot_info: u64) -> ! {
+pub extern "C" fn rustos_arch_x86_64_main(magic: u64, boot_info: u64) -> ! {
     // The magic arrives in `%rdi` zero-extended from the 32-bit value
-    // GRUB places in `%eax`. Only the low 32 bits carry the magic; the
-    // truncation is the documented multiboot2 ABI.
-    if u32::try_from(magic & 0xFFFF_FFFF).unwrap_or(0) != MULTIBOOT2_BOOTLOADER_MAGIC {
-        // Mismatched multiboot magic means we were entered by something
-        // other than a multiboot2 loader; fail closed.
+    // the entry stub placed in `%edi`. Only the low 32 bits carry the
+    // magic; the truncation is the documented 32-bit entry ABI of both
+    // protocols.
+    let magic32 = u32::try_from(magic & 0xFFFF_FFFF).unwrap_or(0);
+    let protocol = match magic32 {
+        MULTIBOOT2_BOOTLOADER_MAGIC => bootinfo::BootProtocol::Multiboot2,
+        pvh::PVH_BOOT_MAGIC => bootinfo::BootProtocol::Pvh,
+        // Entered by something other than the two supported loaders;
+        // fail closed.
+        _ => qemu_exit::exit_failure(),
+    };
+    if bootinfo::record(protocol).is_err() {
+        // The boot path runs exactly once; a second record is a defect.
         qemu_exit::exit_failure();
     }
+    pic::remap_and_mask_all(&pio::x86_port_io8());
     // SAFETY: `kernel_main` is provided by the linked test binary and is
     // documented as `-> !` (see `extern` block above). Calling it once
-    // with the verbatim multiboot info pointer is the entire contract.
-    unsafe { kernel_main(multiboot_info) }
+    // with the verbatim boot-info pointer is the entire contract.
+    unsafe { kernel_main(boot_info) }
 }

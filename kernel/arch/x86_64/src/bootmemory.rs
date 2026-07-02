@@ -1,5 +1,6 @@
 //! Bridge between the platform memory-map sources (Multiboot2 BIOS
-//! mmap, UEFI memory map) and `kernel/mem`'s typed [`BootMemoryMap`].
+//! mmap, UEFI memory map, PVH `hvm_start_info` memmap) and
+//! `kernel/mem`'s typed [`BootMemoryMap`].
 //!
 //! [`BootMemoryMap`]: ../../../mem/src/bootinfo.rs
 //!
@@ -21,6 +22,7 @@
 use crate::multiboot2::{
     EfiMemoryDescriptor, EfiMemoryMap, Mb2MemoryEntry, Mb2MemoryKind, MemoryMap,
 };
+use crate::pvh::{self, PvhMemoryEntry, PvhMemoryKind};
 
 /// Mirror of `rustos_kernel_mem::RegionKind`. Locked by a host-side
 /// round-trip test in the `tests` module (`#[cfg(test)]`-only).
@@ -92,6 +94,30 @@ pub fn from_uefi(desc: EfiMemoryDescriptor) -> MemoryRegionDescriptor {
     }
 }
 
+/// Translate one PVH memory-map entry into a descriptor.
+///
+/// PVH type 1 (RAM) maps to [`RegionKind::Usable`]; every other type —
+/// including `AcpiReclaimable` and `AcpiNvs`, which a strict frame
+/// allocator must keep its hands off until the kernel has explicitly
+/// reclaimed them — maps to [`RegionKind::Reserved`], the same policy
+/// as [`from_multiboot2`].
+#[must_use]
+pub fn from_pvh(entry: PvhMemoryEntry) -> MemoryRegionDescriptor {
+    let kind = match entry.kind {
+        PvhMemoryKind::Ram => RegionKind::Usable,
+        PvhMemoryKind::Reserved
+        | PvhMemoryKind::AcpiReclaimable
+        | PvhMemoryKind::AcpiNvs
+        | PvhMemoryKind::Unusable
+        | PvhMemoryKind::Other(_) => RegionKind::Reserved,
+    };
+    MemoryRegionDescriptor {
+        start: entry.addr,
+        length: entry.size,
+        kind,
+    }
+}
+
 /// Iterator adapter: Multiboot2 BIOS memory-map → descriptors.
 pub fn iter_from_multiboot2<'a>(
     map: &MemoryMap<'a>,
@@ -104,6 +130,13 @@ pub fn iter_from_uefi<'a>(
     map: &EfiMemoryMap<'a>,
 ) -> impl Iterator<Item = MemoryRegionDescriptor> + 'a {
     map.entries().map(from_uefi)
+}
+
+/// Iterator adapter: PVH memory map → descriptors.
+pub fn iter_from_pvh<'a>(
+    map: &pvh::MemoryMap<'a>,
+) -> impl Iterator<Item = MemoryRegionDescriptor> + 'a {
+    map.entries().map(from_pvh)
 }
 
 #[cfg(test)]
@@ -177,6 +210,37 @@ mod tests {
             kind: Mb2MemoryKind::AcpiReclaimable,
         });
         assert_eq!(d.kind, RegionKind::Reserved);
+    }
+
+    #[test]
+    fn from_pvh_maps_ram_to_usable_and_the_rest_to_reserved() {
+        let usable = from_pvh(PvhMemoryEntry {
+            addr: 0x10_0000,
+            size: 0x1000_0000,
+            kind: PvhMemoryKind::Ram,
+        });
+        assert_eq!(
+            usable,
+            MemoryRegionDescriptor {
+                start: 0x10_0000,
+                length: 0x1000_0000,
+                kind: RegionKind::Usable,
+            }
+        );
+        for kind in [
+            PvhMemoryKind::Reserved,
+            PvhMemoryKind::AcpiReclaimable,
+            PvhMemoryKind::AcpiNvs,
+            PvhMemoryKind::Unusable,
+            PvhMemoryKind::Other(9),
+        ] {
+            let d = from_pvh(PvhMemoryEntry {
+                addr: 0,
+                size: 1,
+                kind,
+            });
+            assert_eq!(d.kind, RegionKind::Reserved, "{kind:?}");
+        }
     }
 
     #[test]

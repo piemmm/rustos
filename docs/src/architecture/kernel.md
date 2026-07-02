@@ -20,7 +20,7 @@ The arch port's boot stub (Stage 3) is responsible for:
 
 * zeroing BSS,
 * setting up an initial stack,
-* parsing the platform's boot protocol (multiboot2 / UEFI / DTB /
+* parsing the platform's boot protocol (multiboot2 / PVH / UEFI / DTB /
   `wasm-bindgen`) into a typed `BootMemoryMap` and `IdentityTableBuilder`,
 * constructing a static `log_sink` and `audit_sink`,
 * building an `Arc<A: KernelArch>`,
@@ -514,7 +514,7 @@ feature and never links into a production build.
   IPI).
 
 `tools/qemu` is the audited gateway between the host build and any
-QEMU integration test (multiboot2 ISO via `grub-mkrescue`,
+QEMU integration test (PVH direct boot via `-kernel`,
 `isa-debug-exit` device, strict per-test timeouts, no retries —
 `AGENTS.md` §7).
 
@@ -538,7 +538,7 @@ for the boot pipeline. The bin crate's `BinArch(X86_64Arch)` newtype
 satisfies Rust's orphan rules; `BinArch::halt` forwards to the free
 function `kernel_arch::halt()` and is compile-time-pinned to the
 `-> !` signature by `_BIN_ARCH_HALT_RETURNS_NEVER`. The bin's
-`kernel_main(multiboot_info)` body composes everything: Multiboot2 →
+`kernel_main(boot_info)` body composes everything: boot info →
 ACPI/MADT → `BootMemoryMap`; `X86_64Arch::new`; per-CPU init; the
 fail-closed syscall-dispatch callback installed *before* `syscall` is
 enabled on any CPU; finally `BootInfo::new` + forward to

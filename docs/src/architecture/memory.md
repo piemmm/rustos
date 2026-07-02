@@ -49,7 +49,7 @@ malformed boot maps.
 
 **Bootloader handoff.** The arch crates synthesise a
 [`BootMemoryMap`] from whatever protocol the platform uses (multiboot2,
-UEFI, DTB, WASM) and hand it to `FrameAllocator::new`. Reserved
+PVH, UEFI, DTB, WASM) and hand it to `FrameAllocator::new`. Reserved
 regions are merged into the bitmap as "used" so they can never be
 handed out; usable regions are rounded *inward* to whole-frame
 boundaries.
@@ -444,8 +444,10 @@ by `kernel/mem`. On x86_64 (Stage 3a (a)) the discovery surface lives
 in `kernel/arch/x86_64`:
 
 - `multiboot2` parses the BIOS-derived memory-map tag (Multiboot2
-  type 6) and the EFI memory-map tag (type 17) handed in by GRUB-EFI
-  + OVMF. Both parsers are zero-copy and `no_alloc`.
+  type 6) and the EFI memory-map tag (type 17) a GRUB-EFI boot hands
+  in; `pvh` parses the E820-style `hvm_start_info` memory-map table a
+  QEMU PVH direct boot hands in. All three parsers are zero-copy and
+  `no_alloc`.
 - `bootmemory` bridges those typed entries into
   `MemoryRegionDescriptor`s with a `RegionKind` mirror that is locked
   to `rustos_kernel_mem::RegionKind` by a host-side dev-dep

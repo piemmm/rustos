@@ -1,10 +1,11 @@
 //! Bare-metal boot pipeline for the x86_64 `rustos-kernel` binary.
 //!
 //! [`boot`] is the single entry point. It is called from each
-//! binary's `extern "C" fn kernel_main(multiboot_info: u64)` after the
+//! binary's `extern "C" fn kernel_main(boot_info: u64)` after the
 //! arch crate's [`rustos_arch_x86_64::entry`] trampoline has validated
-//! the Multiboot2 magic. It performs the BSP bring-up
-//! sequence the prompt for Stage 3a (c7-bin) lays out — Multiboot2 →
+//! the boot magic (multiboot2 or PVH) and recorded the protocol. It
+//! performs the BSP bring-up
+//! sequence the prompt for Stage 3a (c7-bin) lays out — boot info →
 //! ACPI/MADT → `BootMemoryMap`; `X86_64Arch::new`; per-CPU
 //! `percpu::init` → `preempt::init_local_preempt` →
 //! `syscall_entry::init_local_syscalls`; install the fail-closed
@@ -29,9 +30,10 @@
 //! * `init_local_preempt`, `init_local_syscalls` and
 //!   `set_cpu_id_for_lapic` run with `cpu_index = 0` on the BSP after
 //!   `percpu::init(0)`, satisfying their per-call SAFETY contracts.
-//! * The Multiboot2 pointer is dereferenced only through the
-//!   audited `multiboot2::BootInfo::parse` validator, which bounds the
-//!   slice by the leading `total_size` field.
+//! * The boot-info pointer is dereferenced only through the audited
+//!   `bootinfo::BootData::load` validator, which bounds every slice
+//!   before parsing (the multiboot2 `total_size`, the PVH stated
+//!   entry count).
 //!
 //! # No `unwrap` / `expect` / `panic!` in production paths
 //!
@@ -50,11 +52,11 @@ use rustos_abi::SYSCALL_MAX_ARGS;
 use rustos_arch_x86_64::acpi::{self, MadtEntry};
 use rustos_arch_x86_64::apic::{IoApic, Lapic, VolatileIoApicMmio, VolatileLapicMmio};
 use rustos_arch_x86_64::apic_timer::{self, PolledPit, Rdtsc};
+use rustos_arch_x86_64::bootinfo::BootData;
 use rustos_arch_x86_64::bootmemory;
 use rustos_arch_x86_64::gdt::PerCpuGdt;
 use rustos_arch_x86_64::irq as arch_irq;
 use rustos_arch_x86_64::kernel_arch::{halt as arch_halt, X86_64Arch, X86_64ArchStorage};
-use rustos_arch_x86_64::multiboot2::BootInfo as Mb2BootInfo;
 use rustos_arch_x86_64::{fault, percpu, preempt, smp, syscall_entry};
 use rustos_kernel_core::{kernel_main, BootInfo, IrqRouting};
 use rustos_kernel_irq::IrqController;
@@ -172,18 +174,17 @@ fn kernel_stack_top(cpu_index: usize) -> u64 {
 /// field.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum BootError {
-    /// The Multiboot2 record at the loader-supplied address could not
-    /// be parsed.
-    Multiboot2Parse,
-    /// The Multiboot2 record contains no memory-map tag (BIOS path)
-    /// and no UEFI memory-map tag.
+    /// The boot-info record (multiboot2 or PVH) at the loader-supplied
+    /// address could not be parsed.
+    BootInfoParse,
+    /// The multiboot2 record contains no memory-map tag (BIOS path)
+    /// and no UEFI memory-map tag. (A PVH record without a memory map
+    /// is already rejected by [`BootData::load`].)
     NoMemoryMap,
-    /// The Multiboot2 record contains no RSDP tag — the boot test
-    /// runs on a UEFI-discovered firmware, which is required to
-    /// publish one through Multiboot2.
+    /// The loader published no RSDP, or the RSDP bytes failed
+    /// [`acpi::Rsdp::validate`] — either way ACPI discovery cannot
+    /// proceed.
     NoRsdp,
-    /// The RSDP bytes failed [`acpi::Rsdp::validate`].
-    BadRsdp,
     /// No MADT was found by walking the (X|R)SDT.
     NoMadt,
     /// The MADT bytes failed [`acpi::Madt::parse`].
@@ -254,10 +255,9 @@ impl BootError {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Multiboot2Parse => "multiboot2_parse",
+            Self::BootInfoParse => "boot_info_parse",
             Self::NoMemoryMap => "no_memory_map",
             Self::NoRsdp => "no_rsdp",
-            Self::BadRsdp => "bad_rsdp",
             Self::NoMadt => "no_madt",
             Self::BadMadt => "bad_madt",
             Self::BspLapicMissing => "bsp_lapic_missing",
@@ -338,16 +338,16 @@ const KTHREAD_ARENA_IDENTITY_LIMIT: u64 = 4 << 30;
 ///
 /// # SAFETY-INVARIANT
 ///
-/// `multiboot_info` must be the verbatim 64-bit pointer the arch
+/// `boot_info` must be the verbatim 64-bit pointer the arch
 /// crate's boot trampoline received in `%ebx`. `boot.s`
 /// SAFETY-INVARIANT 7 documents that the pointer is in the
 /// identity-mapped 0..4 GiB window.
 pub fn boot(
-    multiboot_info: u64,
+    boot_info: u64,
     log_sink: &'static (dyn Sink + Sync),
     audit_sink: &'static (dyn Sink + Sync),
 ) -> ! {
-    match try_boot(multiboot_info, log_sink, audit_sink) {
+    match try_boot(boot_info, log_sink, audit_sink) {
         Ok(boot_info) => kernel_main(boot_info),
         Err(err) => {
             log_init_failure(log_sink, err);
@@ -399,7 +399,7 @@ fn log_init_failure(sink: &(dyn Sink + Sync), err: BootError) {
 }
 
 fn try_boot(
-    multiboot_info: u64,
+    boot_info: u64,
     log_sink: &'static (dyn Sink + Sync),
     audit_sink: &'static (dyn Sink + Sync),
 ) -> Result<BootInfo<'static, BinArch>, BootError> {
@@ -473,10 +473,15 @@ fn try_boot(
     )
     .map_err(|_| BootError::TimerCalibration)?;
 
-    // 4. Multiboot2 parsing — first the memory map, then the RSDP.
-    let mb2 = parse_multiboot2(multiboot_info)?;
+    // 4. Boot-info parsing — first the memory map, then the RSDP.
+    //
+    // SAFETY: `boot_info` is the verbatim trampoline pointer (the
+    // documented invariant of [`boot`]); the blob and every table it
+    // points at sit in the identity-mapped 0..4 GiB window (`boot.s`
+    // SAFETY-INVARIANT 4).
+    let boot_data = unsafe { BootData::load(boot_info) }.map_err(|_| BootError::BootInfoParse)?;
 
-    let mut memory_map = build_memory_map(&mb2)?;
+    let mut memory_map = build_memory_map(&boot_data)?;
 
     // Carve a 2 MiB-aligned kthread-stack guard arena out of the firmware
     // map and install it so the PID 1 spawn seam (`init_spawn_x86_64`) can
@@ -512,8 +517,9 @@ fn try_boot(
         guard_arena.map(|a| (a.base, a.len)),
     );
 
-    let rsdp_bytes = mb2.rsdp().ok_or(BootError::NoRsdp)?;
-    let rsdp = acpi::Rsdp::validate(rsdp_bytes).map_err(|_| BootError::BadRsdp)?;
+    // SAFETY: same identity-window contract as the `BootData::load`
+    // above — the RSDP the loader published sits below 4 GiB.
+    let rsdp = unsafe { boot_data.validated_rsdp() }.ok_or(BootError::NoRsdp)?;
 
     // 5. MADT walk → BSP LAPIC verification.
     //
@@ -760,46 +766,37 @@ fn make_bsp_lapic() -> Lapic<VolatileLapicMmio> {
     Lapic::new(mmio)
 }
 
-fn parse_multiboot2(multiboot_info: u64) -> Result<Mb2BootInfo<'static>, BootError> {
-    // The Multiboot2 record's first 4 bytes are `total_size`. We read
-    // it from the identity-mapped window, then bound the whole slice
-    // by that length before handing it to `BootInfo::parse`, which
-    // re-validates structure.
-    //
-    // SAFETY: `multiboot_info` is the verbatim 64-bit pointer from
-    // `boot.s` SAFETY-INVARIANT 7; the first eight bytes are
-    // accessible through the identity map.
-    let header = unsafe { core::slice::from_raw_parts(multiboot_info as *const u8, 8) };
-    let total_size = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
-    // SAFETY: same as above; `total_size` is the bootloader's stated
-    // length of its own record, which the validator
-    // (`BootInfo::parse`) re-bounds.
-    let bytes = unsafe { core::slice::from_raw_parts(multiboot_info as *const u8, total_size) };
-    Mb2BootInfo::parse(bytes).map_err(|_| BootError::Multiboot2Parse)
-}
-
-fn build_memory_map(mb2: &Mb2BootInfo<'_>) -> Result<BootMemoryMap, BootError> {
+fn build_memory_map(data: &BootData<'_>) -> Result<BootMemoryMap, BootError> {
     let mut map = BootMemoryMap::new();
 
-    if let Some(uefi) = mb2.efi_memory_map() {
-        for desc in bootmemory::iter_from_uefi(&uefi) {
-            push_descriptor(&mut map, desc);
+    match data {
+        BootData::Multiboot2(mb2) => {
+            if let Some(uefi) = mb2.efi_memory_map() {
+                for desc in bootmemory::iter_from_uefi(&uefi) {
+                    push_descriptor(&mut map, desc);
+                }
+            } else if let Some(bios) = mb2.memory_map() {
+                for desc in bootmemory::iter_from_multiboot2(&bios) {
+                    push_descriptor(&mut map, desc);
+                }
+            } else {
+                return Err(BootError::NoMemoryMap);
+            }
         }
-    } else if let Some(bios) = mb2.memory_map() {
-        for desc in bootmemory::iter_from_multiboot2(&bios) {
-            push_descriptor(&mut map, desc);
+        BootData::Pvh { memmap, .. } => {
+            for desc in bootmemory::iter_from_pvh(memmap) {
+                push_descriptor(&mut map, desc);
+            }
         }
-    } else {
-        return Err(BootError::NoMemoryMap);
     }
 
     // Reserve the running kernel image (boot trampoline through the end of
     // .bss, which includes the bump heap) out of the firmware-usable RAM.
     //
-    // GRUB loads this multiboot2 kernel into memory the UEFI map reports as
-    // `EfiLoaderData`/`EfiConventionalMemory` — both of which
-    // `bootmemory::from_uefi` (correctly, post-`ExitBootServices`) classifies
-    // `Usable`. Without this carve-out the frame allocator eventually hands
+    // The loader (GRUB, or QEMU's PVH ELF loader) places this kernel in
+    // memory the boot map reports as usable (`EfiLoaderData`/
+    // `EfiConventionalMemory` on the UEFI path, plain RAM on the PVH
+    // path). Without this carve-out the frame allocator eventually hands
     // out frames overlapping the running kernel's code and heap, and the
     // `spawn` image builder's zero-fill / page-table writes corrupt the live
     // kernel (`plans/PI.md` X4 follow-on). This is the x86_64 sibling of the

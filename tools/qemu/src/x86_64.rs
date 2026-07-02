@@ -5,37 +5,45 @@
 //!
 //! * the default guest RAM size,
 //! * the `isa-debug-exit` I/O-port constants,
-//! * OVMF / UEFI pflash discovery (`crate::iso::find_ovmf`),
-//! * the GRUB BIOS ISO build (`crate::iso::build_grub_iso`),
 //! * the exact QEMU argv the runner emits.
 //!
+//! # Boot protocol: PVH direct boot
+//!
+//! The kernel ELF is booted **directly** via `-kernel`: QEMU's ELF
+//! loader honours the `XEN_ELFNOTE_PHYS32_ENTRY` note the kernel
+//! carries (`kernel/arch/x86_64/src/boot.s`) and enters `pvh_start` in
+//! 32-bit protected mode with the `hvm_start_info` record — no
+//! firmware boot chain, no bootloader, no boot media in the loop. This
+//! keeps every x86_64 guest boot deterministic and fast; the OVMF/GRUB
+//! ISO path this replaced put OVMF's (nondeterministically crashing)
+//! video path between the runner and the kernel's first instruction.
+//! The multiboot2 header stays in the kernel for real bootloaders; the
+//! test runner simply does not need one.
+//!
 //! Splitting this surface out keeps [`crate::Spec`] honest as a
-//! per-arch tagged union and lines the codebase up for the Stage 3b/3c/
-//! 3d modules (`aarch64.rs`, `riscv64.rs`, `wasm32.rs`) without
-//! duplicating any glue (no duplication, no
-//! interface creep).
+//! per-arch tagged union and lines the codebase up with the sibling
+//! modules (`aarch64.rs`, `riscv64.rs`) without duplicating any glue
+//! (no duplication, no interface creep).
 //!
 //! # No `unwrap` / `expect` / `panic!`
 //!
-//! Every fallible call site propagates an `io::Result`. The only `expect`s in this file live inside `#[cfg(test)]`
-//! blocks 's tests carve-out.
+//! The only `expect`s in this file live inside `#[cfg(test)]` blocks —
+//! the charter's tests carve-out.
 
 use std::ffi::OsString;
-use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
-use crate::iso::{self, OvmfPaths};
 use crate::Spec;
 
 /// Default guest RAM size in mebibytes for an x86_64 QEMU integration
 /// test.
 ///
-/// 256 MiB is comfortable headroom for OVMF + GRUB + the test kernel;
-/// smaller values trip OVMF's own minimum-RAM checks on some
-/// distributions. Callers cannot override this today; if a future test
-/// needs more RAM the right move is to add a `with_ram_mib(n)` builder
-/// on [`Spec`] rather than smuggling it through `extra_args`.
+/// 256 MiB is comfortable headroom for the test kernels (the SMP
+/// scheduler-stress vertical sizes its 64 MiB bump heap against this
+/// figure). Callers cannot override this today; if a future test needs
+/// more RAM the right move is to add a `with_ram_mib(n)` builder on
+/// [`Spec`] rather than smuggling it through `extra_args`.
 pub const DEFAULT_RAM_MIB: u32 = 256;
 
 /// I/O port the QEMU `isa-debug-exit` device listens on for x86_64
@@ -54,72 +62,29 @@ pub const ISA_DEBUG_EXIT_IOSIZE: u8 = 0x04;
 /// Name of the `qemu-system-*` binary for x86_64.
 pub const QEMU_BINARY: &str = "qemu-system-x86_64";
 
-/// Build the bootable artifact (a GRUB BIOS ISO containing the
-/// multiboot2 kernel) the QEMU invocation needs.
+/// Push the x86_64 QEMU argv onto `cmd`.
 ///
-/// `staging_dir` and `iso_path` are derived from the kernel's parent
-/// directory, mirroring the previous in-tree behaviour exactly so the
-/// two existing integration tests (`memory_isolation`,
-/// `scheduler_stress_qemu`) see the same on-disk layout under
-/// `target/x86_64-unknown-none/debug/`.
-///
-/// # Errors
-///
-/// * Propagates every error from [`crate::iso::build_grub_iso`].
-pub(crate) fn build_boot_artifact(spec: &Spec) -> io::Result<PathBuf> {
-    let kernel_dir = spec
-        .kernel
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .to_path_buf();
-    let stem = spec.kernel.file_stem().unwrap_or_default().to_owned();
-    let stem = stem.to_string_lossy();
-    let staging = kernel_dir.join(format!("{stem}.grub-staging"));
-    let iso_path = kernel_dir.join(format!("{stem}.iso"));
-    iso::build_grub_iso(&spec.kernel, &staging, &iso_path)
-}
-
-/// Push the x86_64 QEMU argv onto `cmd`, returning the writable OVMF
-/// VARS copy the invocation references.
-///
-/// Discovers OVMF on the host (see [`crate::iso::find_ovmf`]) and emits
-/// the canonical x86_64 invocation: UEFI pflash pair (read-only CODE +
-/// writable VARS copy), headless display, serial over stdio,
-/// `isa-debug-exit` device on [`ISA_DEBUG_EXIT_IOPORT`], `-m
-/// {DEFAULT_RAM_MIB}M`, `-smp {spec.cpus}`, `-no-reboot`, and the boot
-/// ISO as a CD-ROM.
-///
-/// The returned path is the per-run writable VARS copy (unique to this
-/// call, see [`crate::iso::OvmfPaths::vars_copy`]). The caller owns its
-/// lifetime and removes it once the guest has exited, so a long matrix of
-/// concurrent guests does not leave one stray NVRAM image per run behind.
-///
-/// # Errors
-///
-/// * Propagates every error from [`crate::iso::find_ovmf`] (typically
-///   `NotFound` when OVMF is not installed).
-pub(crate) fn push_argv(cmd: &mut Command, spec: &Spec, iso: &Path) -> io::Result<PathBuf> {
-    let ovmf = iso::find_ovmf()?;
-    let vars_copy = ovmf.vars_copy.clone();
-    let argv = build_argv(spec, &ovmf, iso);
-    for arg in argv {
+/// Emits the canonical x86_64 invocation: headless display, serial over
+/// stdio, `isa-debug-exit` device on [`ISA_DEBUG_EXIT_IOPORT`], `-m
+/// {DEFAULT_RAM_MIB}M`, `-smp {spec.cpus}`, `-no-reboot`, and the
+/// kernel ELF PVH-direct-booted via `-kernel` (see the module docs).
+pub(crate) fn push_argv(cmd: &mut Command, spec: &Spec, kernel: &Path) {
+    for arg in build_argv(spec, kernel) {
         cmd.arg(arg);
     }
-    Ok(vars_copy)
 }
 
 /// Pure argv builder used by [`push_argv`] and the host unit tests.
 ///
 /// Splitting the pure builder out keeps the argv-assembly contract
-/// unit-testable on hosts that do not have OVMF installed (CI runners
-/// without the `ovmf` package). The list is intentionally returned as
+/// unit-testable. The list is intentionally returned as
 /// `Vec<OsString>` so callers can inspect it before spawning QEMU.
-fn build_argv(spec: &Spec, ovmf: &OvmfPaths, iso: &Path) -> Vec<OsString> {
+fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
     // Note: `-nographic` is *not* used because it implicitly attaches the
     // monitor and serial 0 to stdio, which collides with our explicit
     // `-serial stdio`. `-display none` gives the headless behaviour we
     // want without that implicit muxing.
-    let mut argv: Vec<OsString> = Vec::with_capacity(20 + spec.extra_args.len());
+    let mut argv: Vec<OsString> = Vec::with_capacity(16 + spec.extra_args.len());
     argv.push("-no-reboot".into());
     argv.push("-display".into());
     argv.push("none".into());
@@ -147,35 +112,15 @@ fn build_argv(spec: &Spec, ovmf: &OvmfPaths, iso: &Path) -> Vec<OsString> {
         argv.push("-device".into());
         argv.push("ramfb".into());
     }
-    argv.push("-drive".into());
-    argv.push(
-        format!(
-            "if=pflash,format=raw,readonly=on,file={}",
-            ovmf.code.display()
-        )
-        .into(),
-    );
-    argv.push("-drive".into());
-    argv.push(format!("if=pflash,format=raw,file={}", ovmf.vars_copy.display()).into());
-    argv.push("-cdrom".into());
-    argv.push(iso.into());
-
-    // Confine all PCI BARs to the 32-bit MMIO hole below 4 GiB. The
-    // kernel's boot trampoline identity-maps only `0..4 GiB`, and the
-    // Stage 4.D `DirectPhysMap` the driver host resolves register
-    // windows through covers the same range; a virtio function whose
-    // 64-bit BAR firmware placed above 4 GiB would be unreachable.
-    //
-    // OVMF performs its own PCI enumeration and ignores the host
-    // bridge's `pci-hole64-size`, so the knob that matters is OVMF's
-    // own `X-PciMmio64Mb` fw_cfg: sizing the 64-bit MMIO window to 0
-    // makes OVMF assign every BAR — including 64-bit ones — inside the
-    // 32-bit hole. Scope it to specs that actually attach a PCI device
-    // so the bring-up-only tests keep the stock firmware configuration.
-    if !spec.block_devices.is_empty() || !spec.net_devices.is_empty() {
-        argv.push("-fw_cfg".into());
-        argv.push("name=opt/ovmf/X-PciMmio64Mb,string=0".into());
-    }
+    // PVH direct boot: QEMU's ELF loader reads the kernel's
+    // XEN_ELFNOTE_PHYS32_ENTRY note and enters `pvh_start` with the
+    // start-info record — no firmware boot chain in the path. SeaBIOS
+    // (the machine default) performs the PCI BAR assignment and keeps
+    // every BAR inside the 32-bit MMIO hole below 4 GiB, which the boot
+    // trampoline's 0..4 GiB identity map and the Stage 4.D
+    // `DirectPhysMap` require.
+    argv.push("-kernel".into());
+    argv.push(kernel.into());
 
     // Attach each backing image as a modern virtio-blk-pci function.
     // `if=none` detaches the drive from any automatic controller so the
@@ -220,6 +165,7 @@ fn build_argv(spec: &Spec, ovmf: &OvmfPaths, iso: &Path) -> Vec<OsString> {
             argv.push(filter);
         }
     }
+
     argv
 }
 
@@ -227,6 +173,7 @@ fn build_argv(spec: &Spec, ovmf: &OvmfPaths, iso: &Path) -> Vec<OsString> {
 mod tests {
     use super::*;
     use crate::Arch;
+    use std::path::PathBuf;
     use std::time::Duration;
 
     fn fixture_spec(cpus: u32) -> Spec {
@@ -244,13 +191,6 @@ mod tests {
         }
     }
 
-    fn fixture_ovmf() -> OvmfPaths {
-        OvmfPaths {
-            code: PathBuf::from("/fake/OVMF_CODE.fd"),
-            vars_copy: PathBuf::from("/fake/OVMF_VARS_copy.fd"),
-        }
-    }
-
     fn render(argv: &[OsString]) -> Vec<String> {
         argv.iter()
             .map(|s| s.to_string_lossy().into_owned())
@@ -259,8 +199,8 @@ mod tests {
 
     #[test]
     fn default_ram_is_two_hundred_fifty_six_mebibytes() {
-        // Pinned at 256 MiB — see the const's docs for why smaller
-        // values trip OVMF's minimum-RAM check on some distros.
+        // Pinned at 256 MiB — the SMP scheduler-stress vertical sizes
+        // its bump heap against this figure (see the const's docs).
         assert_eq!(DEFAULT_RAM_MIB, 256);
     }
 
@@ -282,11 +222,7 @@ mod tests {
     #[test]
     fn argv_contains_documented_invariant_flags() {
         let spec = fixture_spec(1);
-        let argv = render(&build_argv(
-            &spec,
-            &fixture_ovmf(),
-            Path::new("/tmp/out.iso"),
-        ));
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
         // Headless boot — see the comment on `build_argv` for why
         // `-nographic` is forbidden.
         assert!(argv.iter().any(|a| a == "-no-reboot"));
@@ -297,13 +233,29 @@ mod tests {
     }
 
     #[test]
+    fn argv_boots_the_kernel_elf_directly_with_no_boot_media() {
+        // PVH direct boot: the kernel ELF is passed straight to QEMU's
+        // `-kernel` loader. No boot media, no firmware images: the
+        // OVMF pflash pair, the GRUB ISO, and the `-cdrom` flag this
+        // replaced must never reappear (they put nondeterministic
+        // firmware between the runner and the kernel's entry point).
+        let spec = fixture_spec(1);
+        let kernel = Path::new("/tmp/k.elf");
+        let argv = render(&build_argv(&spec, kernel));
+        let pos = argv
+            .iter()
+            .position(|a| a == "-kernel")
+            .expect("argv contains -kernel");
+        assert_eq!(argv[pos + 1], kernel.to_string_lossy().into_owned());
+        assert!(!argv.iter().any(|a| a == "-cdrom"));
+        assert!(!argv.iter().any(|a| a.contains("if=pflash")));
+        assert!(!argv.iter().any(|a| a.contains("X-PciMmio64Mb")));
+    }
+
+    #[test]
     fn argv_encodes_ram_size_in_mebibytes() {
         let spec = fixture_spec(1);
-        let argv = render(&build_argv(
-            &spec,
-            &fixture_ovmf(),
-            Path::new("/tmp/out.iso"),
-        ));
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
         let mem_pos = argv
             .iter()
             .position(|a| a == "-m")
@@ -315,11 +267,7 @@ mod tests {
     fn argv_encodes_cpu_count() {
         for n in [1u32, 4, 8] {
             let spec = fixture_spec(n);
-            let argv = render(&build_argv(
-                &spec,
-                &fixture_ovmf(),
-                Path::new("/tmp/out.iso"),
-            ));
+            let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
             let pos = argv
                 .iter()
                 .position(|a| a == "-smp")
@@ -331,71 +279,25 @@ mod tests {
     #[test]
     fn argv_programs_isa_debug_exit_with_runner_constants() {
         let spec = fixture_spec(1);
-        let argv = render(&build_argv(
-            &spec,
-            &fixture_ovmf(),
-            Path::new("/tmp/out.iso"),
-        ));
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
         let pos = argv
             .iter()
-            .position(|a| a == "-device")
-            .expect("argv contains -device");
-        let device = &argv[pos + 1];
-        assert!(
-            device.starts_with("isa-debug-exit,"),
-            "expected isa-debug-exit device, got {device}"
+            .position(|a| a.starts_with("isa-debug-exit"))
+            .expect("argv contains the isa-debug-exit device");
+        assert_eq!(
+            argv[pos],
+            format!(
+                "isa-debug-exit,iobase=0x{ISA_DEBUG_EXIT_IOPORT:x},\
+                 iosize=0x{ISA_DEBUG_EXIT_IOSIZE:x}"
+            )
         );
-        assert!(
-            device.contains(&format!("iobase=0x{ISA_DEBUG_EXIT_IOPORT:x}")),
-            "device string missing runner ioport: {device}"
-        );
-        assert!(
-            device.contains(&format!("iosize=0x{ISA_DEBUG_EXIT_IOSIZE:x}")),
-            "device string missing runner iosize: {device}"
-        );
-    }
-
-    #[test]
-    fn argv_attaches_ovmf_pflash_pair_in_documented_order() {
-        let spec = fixture_spec(1);
-        let argv = render(&build_argv(
-            &spec,
-            &fixture_ovmf(),
-            Path::new("/tmp/out.iso"),
-        ));
-
-        let mut drives: Vec<&String> = Vec::new();
-        for (i, a) in argv.iter().enumerate() {
-            if a == "-drive" {
-                drives.push(&argv[i + 1]);
-            }
-        }
-        assert_eq!(drives.len(), 2, "expected exactly two -drive entries");
-
-        // First pflash slot is the read-only CODE image; QEMU pairs the
-        // writable VARS image with the second pflash slot. Swapping the
-        // two boots an OVMF instance that immediately faults — encode
-        // the ordering in a test rather than as a comment.
-        assert!(
-            drives[0].contains("readonly=on") && drives[0].contains("OVMF_CODE.fd"),
-            "first -drive must be the read-only CODE image, got {}",
-            drives[0]
-        );
-        assert!(
-            !drives[1].contains("readonly=on") && drives[1].contains("OVMF_VARS_copy.fd"),
-            "second -drive must be the writable VARS copy, got {}",
-            drives[1]
-        );
+        assert_eq!(argv[pos - 1], "-device");
     }
 
     #[test]
     fn argv_without_block_devices_attaches_no_virtio_blk() {
         let spec = fixture_spec(1);
-        let argv = render(&build_argv(
-            &spec,
-            &fixture_ovmf(),
-            Path::new("/tmp/out.iso"),
-        ));
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
         assert!(
             !argv.iter().any(|a| a.starts_with("virtio-blk-pci")),
             "a storage-free spec must not attach a virtio-blk device"
@@ -413,11 +315,7 @@ mod tests {
                 image: PathBuf::from("/tmp/disk1.img"),
             },
         ];
-        let argv = render(&build_argv(
-            &spec,
-            &fixture_ovmf(),
-            Path::new("/tmp/out.iso"),
-        ));
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
 
         // Each device is a detached drive (`if=none`) bound to its own
         // virtio-blk-pci function by a matching id.
@@ -440,11 +338,7 @@ mod tests {
     #[test]
     fn argv_without_ramfb_attaches_no_display_device() {
         let spec = fixture_spec(1);
-        let argv = render(&build_argv(
-            &spec,
-            &fixture_ovmf(),
-            Path::new("/tmp/out.iso"),
-        ));
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
         assert!(
             !argv.iter().any(|a| a == "ramfb"),
             "a display-free spec must not attach a ramfb device"
@@ -455,11 +349,7 @@ mod tests {
     fn argv_attaches_ramfb_when_requested() {
         let mut spec = fixture_spec(1);
         spec.display_ramfb = true;
-        let argv = render(&build_argv(
-            &spec,
-            &fixture_ovmf(),
-            Path::new("/tmp/out.iso"),
-        ));
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
         let pos = argv
             .iter()
             .position(|a| a == "ramfb")
@@ -470,11 +360,7 @@ mod tests {
     #[test]
     fn argv_without_net_devices_attaches_no_virtio_net() {
         let spec = fixture_spec(1);
-        let argv = render(&build_argv(
-            &spec,
-            &fixture_ovmf(),
-            Path::new("/tmp/out.iso"),
-        ));
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
         assert!(
             !argv.iter().any(|a| a.starts_with("virtio-net-pci")),
             "a network-free spec must not attach a virtio-net device"
@@ -494,11 +380,7 @@ mod tests {
                 pcap: Some(PathBuf::from("/tmp/cap1.pcap")),
             },
         ];
-        let argv = render(&build_argv(
-            &spec,
-            &fixture_ovmf(),
-            Path::new("/tmp/out.iso"),
-        ));
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
 
         // Each interface is a user-mode netdev bound to its own modern
         // virtio-net-pci function by a matching id.
@@ -520,34 +402,5 @@ mod tests {
         assert!(argv.iter().any(|a| a.contains("filter-dump")
             && a.contains("netdev=net1")
             && a.contains("/tmp/cap1.pcap")));
-    }
-
-    #[test]
-    fn argv_confines_pci_bars_below_4gib_for_net_only_specs() {
-        // A net-only spec still attaches a PCI function, so the
-        // X-PciMmio64Mb=0 fw_cfg that keeps BARs reachable from the boot
-        // identity map must fire even with no block devices.
-        let mut spec = fixture_spec(1);
-        spec.net_devices = vec![crate::NetDevice::default()];
-        let argv = render(&build_argv(
-            &spec,
-            &fixture_ovmf(),
-            Path::new("/tmp/out.iso"),
-        ));
-        assert!(argv
-            .iter()
-            .any(|a| a == "name=opt/ovmf/X-PciMmio64Mb,string=0"));
-    }
-
-    #[test]
-    fn argv_passes_cdrom_iso_last_among_boot_flags() {
-        let spec = fixture_spec(1);
-        let iso = Path::new("/tmp/out.iso");
-        let argv = render(&build_argv(&spec, &fixture_ovmf(), iso));
-        let pos = argv
-            .iter()
-            .position(|a| a == "-cdrom")
-            .expect("argv contains -cdrom");
-        assert_eq!(argv[pos + 1], iso.to_string_lossy().into_owned());
     }
 }

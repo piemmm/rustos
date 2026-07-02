@@ -1194,7 +1194,7 @@ instead of a next-reschedule detection, is now **landed `[x]`** (G1–G3c):
       arena-backed, hardware-guarded kernel stacks instead of the
       software-canary `BoxStack`. The boot path carves the arena out of the
       *firmware* memory map — `mem_map::carve_guard_arena_from_map(map,
-      ram_bytes, max_addr)` scans the multi-region Multiboot2 map for the
+      ram_bytes, max_addr)` scans the multi-region loader map for the
       first `Usable` region that can host a whole 2 MiB-aligned, §24.2
       policy-sized block below the 4 GiB identity window, `reserve_range`s
       it, and `boot::try_boot` `install`s it into `KTHREAD_STACK_ARENA`
@@ -1568,7 +1568,7 @@ copy is added on the syscall hot path (§2.16).
   `reschedule_current`); the child then runs, exits, and the parent is
   re-dispatched to reap it and copy the reaped code out to its `status` pointer
   — exercising the resume-after-cooperative-park return-state path on the x86_64
-  trap, then exiting 0. PASS verified under QEMU on `-M`/multiboot. The
+  trap, then exiting 0. PASS verified under QEMU. The
   resume-after-park path the X4 note flagged is therefore **proven sound on
   x86_64** (X1/X2's durable user-`%rsp` save + `swapgs` balance cover it). **No
   ABI change.**
@@ -1584,8 +1584,8 @@ copy is added on the syscall hot path (§2.16).
   bug).** The x86_64 `boot::build_memory_map` built the `BootMemoryMap` straight
   from the UEFI map, where `bootmemory::from_uefi` (correctly) classifies
   `EfiLoaderCode`/`EfiLoaderData`/`EfiBootServicesCode`/`Data`/
-  `EfiConventionalMemory` as `Usable` — but GRUB loads *this* kernel into that
-  memory, and **nothing reserved the running kernel image** (unlike aarch64
+  `EfiConventionalMemory` as `Usable` — but the loader places *this* kernel
+  into that memory, and **nothing reserved the running kernel image** (unlike aarch64
   P6c-1's `[ram_base, __kernel_end)`). By the 2nd (relaunch) `spawn`, the low
   usable RAM consumed by boot + PID 1 + the 1st session pushed the allocator
   cursor across 1 MiB into the kernel image; `spawn`'s `build_process_image`

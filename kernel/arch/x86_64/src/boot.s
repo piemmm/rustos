@@ -1,10 +1,21 @@
-// Multiboot2 entry + 32→64 long-mode trampoline.
+// Multiboot2 + PVH boot entries + 32→64 long-mode trampoline.
 //
-// We use multiboot2 (not multiboot1) because QEMU's `-kernel` multiboot1
-// loader refuses to load ELF64, whereas GRUB's multiboot2 loader accepts
-// ELF64 and enters the kernel in 32-bit protected mode at the e_entry
-// symbol. The kernel is therefore booted via `grub-mkrescue` ISO and
-// QEMU `-cdrom`, not `-kernel`.
+// Two boot protocols enter the same trampoline:
+//
+// * **Multiboot2** (GRUB): QEMU's `-kernel` multiboot1 loader refuses to
+//   load ELF64, whereas GRUB's multiboot2 loader accepts ELF64 and enters
+//   the kernel in 32-bit protected mode at `_start`. This is the
+//   real-bootloader path a future installed x86 system uses.
+// * **PVH direct boot** (Xen HVM start-info protocol): QEMU's own ELF
+//   loader honours the `XEN_ELFNOTE_PHYS32_ENTRY` note below and enters
+//   `pvh_start` in 32-bit protected mode with `%ebx` = the physical
+//   address of the `hvm_start_info` record — no firmware or bootloader
+//   in the path. The QEMU integration tests boot this way (it removes
+//   the OVMF/GRUB firmware nondeterminism from the loop entirely).
+//
+// Both entries converge on `boot_common` with `%edi` = boot magic and
+// `%esi` = boot-info physical address; the Rust side (`entry.rs`)
+// re-validates the magic and records which protocol delivered the blob.
 //
 // SAFETY-INVARIANTS (audited per AGENTS.md §10):
 //
@@ -13,11 +24,19 @@
 //     ELF — required by the multiboot2 spec for the loader to find it.
 //  2. `_start` runs in 32-bit protected mode with CR0.PE=1, paging off,
 //     EAX=multiboot2 magic (0x36D76289), EBX=multiboot info pointer,
-//     and a flat 4 GiB code/data segmentation set up by GRUB.
+//     and a flat 4 GiB code/data segmentation set up by GRUB. `pvh_start`
+//     runs under the same CPU state contract (32-bit protected mode,
+//     paging off, flat segments — Xen PVH ABI, xen.git
+//     docs/misc/pvh.pandoc) with EBX=hvm_start_info pointer; it loads
+//     the PVH magic (0x336EC578, the value the start_info record itself
+//     begins with) into EDI so the Rust prologue can tell the protocols
+//     apart, then falls through to the shared `boot_common`.
 //  3. The 4 KiB-aligned `boot_pml4`/`boot_pdpt`/`boot_pdpt_high`/`boot_pds`
 //     tables sit in `.boot.bss` (linked 1:1 in low memory by `linker.ld`)
-//     and are zero-initialised by the multiboot loader (BSS bytes are zero
-//     per the multiboot spec). They live in `.boot.bss` rather than the
+//     and are zero-initialised by the loader (BSS bytes are zero per the
+//     multiboot spec; QEMU's PVH ELF loader zero-fills the
+//     p_memsz - p_filesz tail of its load segments the same way).
+//     They live in `.boot.bss` rather than the
 //     high-half `.bss` so the 32-bit trampoline can name them with absolute
 //     32-bit operands before paging is enabled.
 //  4. We identity-map the full 0..4 GiB physical address window via four
@@ -36,10 +55,10 @@
 //  6. On entry to `long_mode_start` interrupts are disabled (CLI is the
 //     bootloader default) and the IDTR is invalid; the Rust side must
 //     install an IDT before enabling interrupts (`AGENTS.md` §10).
-//  7. `rustos_arch_x86_64_main` receives the multiboot magic in `%rdi`
-//     and the multiboot info pointer in `%rsi` (System V AMD64 ABI).
-//     The Rust prologue re-validates the magic before touching the info
-//     blob (`AGENTS.md` §5.4.3 — validate every input).
+//  7. `rustos_arch_x86_64_main` receives the boot magic (multiboot2 or
+//     PVH) in `%rdi` and the boot-info pointer in `%rsi` (System V
+//     AMD64 ABI). The Rust prologue re-validates the magic before
+//     touching the info blob (validate every input).
 //  8. If `rustos_arch_x86_64_main` ever returns we halt the CPU with
 //     interrupts masked. The Rust contract (`-> !`) makes this branch
 //     unreachable; the `hlt`/`jmp` loop is the belt-and-braces fallback
@@ -73,6 +92,19 @@ multiboot_header_start:
     .long 8
 multiboot_header_end:
 
+// PVH boot note (Xen HVM direct-boot ABI, xen.git
+// xen/include/public/elfnote.h): note type 18 = XEN_ELFNOTE_PHYS32_ENTRY,
+// name "Xen", descriptor = the 32-bit physical entry point. QEMU's
+// `-kernel` ELF loader finds this note in the PT_NOTE segment and enters
+// `pvh_start` in 32-bit protected mode with %ebx = &hvm_start_info.
+.section .note.rustos_pvh, "a", @note
+.align 4
+    .long 4                                         // namesz ("Xen\0")
+    .long 4                                         // descsz
+    .long 18                                        // XEN_ELFNOTE_PHYS32_ENTRY
+    .asciz "Xen"
+    .long pvh_start                                 // entry physical address
+
 .section .boot.text, "ax"
 .code32
 .global _start
@@ -81,7 +113,26 @@ _start:
     cli
     movl %eax, %edi                                 // multiboot magic (preserved via %edi -> %rdi)
     movl %ebx, %esi                                 // multiboot info pointer
+    jmp  boot_common
 
+.size _start, . - _start
+
+// PVH entry (SAFETY-INVARIANT 2): same CPU state contract as `_start`
+// but %ebx points at the `hvm_start_info` record and no magic register
+// is defined by the ABI, so load the PVH start-info magic into the
+// protocol slot ourselves. The Rust prologue re-validates it against
+// the blob's own leading magic field.
+.global pvh_start
+.type pvh_start, @function
+pvh_start:
+    cli
+    movl $0x336EC578, %edi                          // PVH boot magic (hvm_start_info.magic)
+    movl %ebx, %esi                                 // hvm_start_info pointer
+    // fall through to boot_common
+
+.size pvh_start, . - pvh_start
+
+boot_common:
     movl $boot_stack_top, %esp
     xorl %ebp, %ebp
 
@@ -164,7 +215,7 @@ _start:
     lgdt gdt64_ptr
     ljmp $0x08, $long_mode_start
 
-.size _start, . - _start
+.size boot_common, . - boot_common
 
 .code64
 long_mode_start:

@@ -59,7 +59,6 @@ use std::time::{Duration, Instant};
 
 pub mod aarch64;
 pub mod disk;
-pub mod iso;
 pub mod riscv64;
 pub mod x86_64;
 
@@ -514,37 +513,16 @@ impl Runner {
             }
         }
 
-        // Resolve the bootable artifact through the per-arch backend.
-        // x86_64 wraps the kernel ELF in a GRUB BIOS ISO so QEMU's
-        // multiboot2 loader (via GRUB) can boot it (built once per `run`
-        // next to the kernel; rebuilds are cheap). The riscv64 `virt`
-        // board boots the ELF directly through OpenSBI (`-bios default` +
-        // `-kernel`), so the kernel ELF *is* the artifact.
-        let boot_artifact = match spec.arch {
-            Arch::X86_64 => x86_64::build_boot_artifact(spec)?,
-            // The `virt` board boots the ELF directly (riscv64 via
-            // OpenSBI, aarch64 via QEMU's `-kernel` loader), so the
-            // kernel ELF *is* the artifact.
-            Arch::Riscv64 | Arch::Aarch64 => spec.kernel.clone(),
-        };
-
+        // Every port boots the kernel ELF directly — x86_64 via QEMU's
+        // PVH `-kernel` loader, riscv64 via OpenSBI (`-bios default` +
+        // `-kernel`), aarch64 via QEMU's `-kernel` loader — so the
+        // kernel ELF *is* the boot artifact and no boot media is built.
         let mut cmd = Command::new(spec.arch.qemu_binary());
-        // x86_64 boots from a UEFI pflash pair whose writable VARS half is
-        // a per-run temp copy (`iso::find_ovmf`); hold its path in a guard
-        // that removes the file once this run completes, so a long matrix
-        // of guests leaves no stray NVRAM images behind. The other ports
-        // boot the ELF directly and own no such scratch file.
-        let _vars_guard = match spec.arch {
-            Arch::X86_64 => Some(TempFile(x86_64::push_argv(&mut cmd, spec, &boot_artifact)?)),
-            Arch::Riscv64 => {
-                riscv64::push_argv(&mut cmd, spec, &boot_artifact);
-                None
-            }
-            Arch::Aarch64 => {
-                aarch64::push_argv(&mut cmd, spec, &boot_artifact);
-                None
-            }
-        };
+        match spec.arch {
+            Arch::X86_64 => x86_64::push_argv(&mut cmd, spec, &spec.kernel),
+            Arch::Riscv64 => riscv64::push_argv(&mut cmd, spec, &spec.kernel),
+            Arch::Aarch64 => aarch64::push_argv(&mut cmd, spec, &spec.kernel),
+        }
         // Caller-supplied extras are appended *after* the per-arch defaults
         // so a developer can override them ad-hoc (e.g. `-d int,cpu_reset`).
         for a in &spec.extra_args {
@@ -865,22 +843,6 @@ impl Drop for MonitorSocket {
     }
 }
 
-/// Owns a scratch file for the lifetime of a single [`Runner::run`] and
-/// removes it on drop.
-///
-/// Today this is the per-run writable OVMF VARS pflash copy on x86_64
-/// (`iso::find_ovmf`): each run gets its own copy so concurrent guests
-/// never share — or truncate mid-boot — one another's NVRAM store, and
-/// the guard deletes it once the guest has exited so a long matrix of
-/// guests does not accumulate one stray image per run in the tempdir.
-struct TempFile(PathBuf);
-
-impl Drop for TempFile {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
 /// Read one of QEMU's output pipes to EOF, appending every chunk to
 /// `captured` and raising each marker's flag once its substring has
 /// appeared in the stream so far. Best-effort: a read error simply ends
@@ -983,23 +945,6 @@ mod tests {
         let mut serial = String::from("clean serial log\n");
         append_stderr(&mut serial, &Mutex::new(String::from("   \n")));
         assert_eq!(serial, "clean serial log\n");
-    }
-
-    #[test]
-    fn temp_file_guard_removes_its_file_on_drop() {
-        // The per-run writable OVMF VARS copy must not accumulate one
-        // stray image per guest across a long matrix; the guard deletes
-        // it once the run completes.
-        let path = std::env::temp_dir().join(format!(
-            "rustos-qemu-tempfile-test-{}.tmp",
-            std::process::id()
-        ));
-        std::fs::write(&path, b"scratch").expect("write scratch file");
-        assert!(path.is_file());
-        {
-            let _guard = TempFile(path.clone());
-        }
-        assert!(!path.exists(), "TempFile drop must remove the scratch file");
     }
 
     #[test]

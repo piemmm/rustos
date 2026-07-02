@@ -17,11 +17,10 @@
 //!
 //! # Boot model
 //!
-//! The `virt` board has no firmware-image ISO step: `-bios default`
-//! loads the `OpenSBI` firmware bundled with QEMU, which then jumps to the
-//! ELF supplied via `-kernel`. There is therefore no equivalent of the
-//! x86_64 GRUB-ISO build — [`crate::Runner::run`] hands `spec.kernel`
-//! straight to this module's argv builder, which passes it to `-kernel`.
+//! `-bios default` loads the `OpenSBI` firmware bundled with QEMU, which
+//! then jumps to the ELF supplied via `-kernel`. Like every other port,
+//! [`crate::Runner::run`] hands `spec.kernel` straight to this module's
+//! argv builder, which passes it to `-kernel`.
 //!
 //! # Result protocol
 //!

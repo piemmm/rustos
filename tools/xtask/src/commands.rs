@@ -861,8 +861,8 @@ fn run_ci(ctx: &Context) -> Result<(), String> {
     // The pipeline order is deliberate: cheap and deterministic checks run
     // first so a failing PR fails fast. The test phase opts in to `--qemu`
     // so the Stage-2 QEMU integration tests run as part of every PR per
-    // ; CI hosts therefore need QEMU, `grub-mkrescue`,
-    // `xorriso`, and OVMF, all documented under
+    // ; CI hosts therefore need QEMU for every Tier-1 target,
+    // documented under
     // `docs/src/platform/x86_64.md`. The closing image gate additionally
     // needs the pinned Pi firmware blobs: an operator-staged directory
     // (`--firmware`/`$RUSTOS_PI_FIRMWARE`) or `curl` to populate the

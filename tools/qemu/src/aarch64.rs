@@ -17,9 +17,9 @@
 //!
 //! `qemu-system-aarch64 -M virt -kernel <elf>` loads the ELF at its link
 //! address and enters its entry point with the Linux aarch64 boot
-//! protocol hand-off (`x0 = DTB`). There is no firmware-image step
-//! analogous to the x86_64 GRUB ISO — [`crate::Runner::run`] hands
-//! `spec.kernel` straight to this module's argv builder.
+//! protocol hand-off (`x0 = DTB`). Like every other port,
+//! [`crate::Runner::run`] hands `spec.kernel` straight to this module's
+//! argv builder — no boot media is built.
 //!
 //! # Result protocol
 //!

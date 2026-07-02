@@ -63,7 +63,8 @@ mod kernel {
     /// The symbol the arch crate's boot trampoline calls.
     ///
     /// The arch crate's `entry::rustos_arch_x86_64_main` validates the
-    /// Multiboot2 magic and forwards the unmodified `multiboot_info`
+    /// boot magic (multiboot2 or PVH), records the protocol, and
+    /// forwards the unmodified `boot_info`
     /// pointer here. We hand the rest of the pipeline to
     /// [`rustos_kernel::boot`] with the production COM1-backed log
     /// and audit sinks: in production both go to the same serial
@@ -71,8 +72,8 @@ mod kernel {
     /// integration test's bin only — see
     /// `tests/integration/kernel_arch_boot`).
     #[no_mangle]
-    pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
-        boot(multiboot_info, &SERIAL_SINK, &SERIAL_SINK)
+    pub extern "C" fn kernel_main(boot_info: u64) -> ! {
+        boot(boot_info, &SERIAL_SINK, &SERIAL_SINK)
     }
 }
 

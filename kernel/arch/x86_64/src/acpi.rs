@@ -54,6 +54,12 @@ fn checksum_zero(bytes: &[u8]) -> bool {
 /// 8-byte signature at the head of every RSDP.
 pub const RSDP_SIGNATURE: [u8; 8] = *b"RSD PTR ";
 
+/// Byte length of a v2.0+ RSDP (ACPI 6.5 §5.2.5.3) — the widest form,
+/// and therefore the read size a consumer holding only a physical
+/// address (the PVH `rsdp_paddr`) uses to slice the record before
+/// [`Rsdp::validate`] re-checks both checksums.
+pub const RSDP_V2_LEN: usize = 36;
+
 /// Decoded RSDP, both v1 and v2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rsdp {

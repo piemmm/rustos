@@ -11,8 +11,8 @@ use rustos_arch_api::SecondaryBringup;
 use rustos_arch_x86_64::acpi::{self, MadtEntry};
 use rustos_arch_x86_64::apic::{Lapic, VolatileLapicMmio};
 use rustos_arch_x86_64::apic_timer::{self, Calibration, PolledPit, Rdtsc};
+use rustos_arch_x86_64::bootinfo::BootData;
 use rustos_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
-use rustos_arch_x86_64::multiboot2::BootInfo;
 use rustos_arch_x86_64::smp;
 use rustos_arch_x86_64::{percpu, preempt};
 use rustos_arch_x86_64::{qemu_exit, serial};
@@ -337,7 +337,7 @@ impl SchedulerArch for SmpArch {
 /// Entry point: BSP only.
 //
 // The body is long because it sequences every Stage 3a (c) bring-up
-// step in a single linear path — multiboot parse, ACPI/MADT discovery,
+// step in a single linear path — boot-info parse, ACPI/MADT discovery,
 // LAPIC software-enable, PIT calibration, scheduler construction, AP
 // SIPI-SIPI, workload spawn, watchdog, and the per-CPU preemption
 // audit. Splitting it would only push the same `qemu_exit::exit_failure`
@@ -347,7 +347,7 @@ impl SchedulerArch for SmpArch {
 // with rationale.
 #[allow(clippy::too_many_lines)]
 #[no_mangle]
-pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
+pub extern "C" fn kernel_main(boot_info: u64) -> ! {
     let mut com1 = serial::Serial::init(serial::COM1_BASE);
     let _ = writeln!(com1, "[scheduler_stress_qemu] BSP boot");
 
@@ -419,7 +419,7 @@ pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
     preempt::set_cpu_id_for_lapic(bsp_id, 0);
 
     // Discover APs.
-    let Some(ap_ids) = discover_aps(multiboot_info, bsp_id, &mut com1) else {
+    let Some(ap_ids) = discover_aps(boot_info, bsp_id, &mut com1) else {
         let _ = writeln!(com1, "[scheduler_stress_qemu] FAIL: MADT discovery");
         qemu_exit::exit_failure();
     };
@@ -823,23 +823,15 @@ struct ApList {
     count: usize,
 }
 
-fn discover_aps(multiboot_info: u64, bsp_id: u8, com1: &mut serial::Serial) -> Option<ApList> {
-    // SAFETY: `multiboot_info` is the verbatim pointer from `boot.s`
-    // SAFETY-INVARIANT 7. The block is in the identity-mapped 0..4 GiB
-    // window so dereferences are sound; we only inspect the first
-    // 4 bytes (total_size) before bounding the rest of the slice.
-    let header = unsafe { core::slice::from_raw_parts(multiboot_info as *const u8, 8) };
-    let total_size = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
-    let _ = writeln!(
-        com1,
-        "[scheduler_stress_qemu] mb2 total_size = {total_size}"
-    );
-    // SAFETY: same justification as above; we now know the actual length.
-    let mb = unsafe { core::slice::from_raw_parts(multiboot_info as *const u8, total_size) };
-    let info = BootInfo::parse(mb).ok()?;
-
-    let rsdp_bytes = info.rsdp()?;
-    let rsdp = acpi::Rsdp::validate(rsdp_bytes).ok()?;
+fn discover_aps(boot_info: u64, bsp_id: u8, com1: &mut serial::Serial) -> Option<ApList> {
+    // SAFETY: `boot_info` is the verbatim pointer from `boot.s`
+    // SAFETY-INVARIANT 7. The blob and every table it points at sit in
+    // the identity-mapped 0..4 GiB window, the documented contract of
+    // `BootData::load` / `validated_rsdp`, whose parsers bound every
+    // slice before reading it.
+    let data = unsafe { BootData::load(boot_info) }.ok()?;
+    // SAFETY: same identity-window contract as the load above.
+    let rsdp = unsafe { data.validated_rsdp() }?;
     let _ = writeln!(
         com1,
         "[scheduler_stress_qemu] RSDP rev {} rsdt={:#x} xsdt={:#x}",

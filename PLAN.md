@@ -192,8 +192,8 @@ Do **not** begin a stage before all its listed dependencies are complete.
       `cargo xtask abi-check` recomputes the hash against on-disk + linked
       constant (with a desync negative test); fuzz harness mirrors
       accept/reject. Per-arch entry stubs deferred to Stage 3.
-- [x] 2.8 — Stage-2 QEMU integration: `tools/qemu` runner (ISO build, OVMF
-      discovery, `isa-debug-exit`, strict wall-clock budget, no retries) +
+- [x] 2.8 — Stage-2 QEMU integration: `tools/qemu` runner (PVH `-kernel`
+      direct boot, `isa-debug-exit`, strict wall-clock budget, no retries) +
       `cargo xtask test --qemu`; `memory_isolation` (two page tables, CR3
       switch, asserts attacker `#PF`) and `scheduler_stress` tests.
 

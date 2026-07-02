@@ -2,10 +2,8 @@
 //!
 //! A virtio-blk integration test needs a backing image whose contents
 //! are known *before* the guest boots so the kernel-side test can read a
-//! planted sector and assert on it. `grub-mkrescue` (the boot artifact)
-//! and OVMF (firmware) are handled by [`crate::iso`]; this module owns
-//! the orthogonal job of laying down a raw block image with a chosen
-//! pattern in chosen sectors.
+//! planted sector and assert on it. This module owns the job of laying
+//! down a raw block image with a chosen pattern in chosen sectors.
 //!
 //! Raw images (not qcow2) are used deliberately: QEMU attaches them with
 //! `format=raw`, the on-disk byte offset of a logical block is exactly

@@ -73,6 +73,7 @@ core::arch::global_asm!(include_str!("external_irq.s"), options(att_syntax));
 pub mod acpi;
 pub mod apic;
 pub mod apic_timer;
+pub mod bootinfo;
 pub mod bootmemory;
 pub mod context;
 /// x86_64 implementation of the Arch HAL context-switch surface
@@ -139,6 +140,7 @@ pub mod percpu;
 /// `rustos-arch-api` dependency this module's trait lives in.
 #[cfg(feature = "sched-arch")]
 pub mod percpu_hal;
+pub mod pic;
 /// x86_64 implementation of the Arch HAL port-I/O seams: the 32-bit
 /// [`rustos_abi::PortIo`] backend the `lib/pci` PCI mechanism
 /// consumes for PCI configuration access, and the 8-bit
@@ -155,6 +157,7 @@ pub mod pio;
 #[cfg(feature = "sched-arch")]
 pub mod platform;
 pub mod preempt;
+pub mod pvh;
 pub mod qemu_exit;
 pub mod serial;
 /// x86_64 implementation of the Arch HAL side-channel mitigation

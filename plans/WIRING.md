@@ -58,8 +58,8 @@ say — the standing task direction supersedes that language. Changing a
 
 ## 1. Baseline — where the four ports stand today
 
-The reference port (x86_64) ships, in `kernel/arch/x86_64`: Multiboot1/2
-boot + UEFI memory-map hand-off, ACPI (RSDP/MADT) discovery, 16550
+The reference port (x86_64) ships, in `kernel/arch/x86_64`: multiboot2 +
+PVH direct boot with UEFI/E820 memory-map hand-off, ACPI (RSDP/MADT) discovery, 16550
 serial, APIC + IO-APIC + IDT + IRQ routing + interrupt entry/exit, the
 LAPIC-timer + preemption hook, INIT-SIPI-SIPI **SMP** AP bring-up,
 per-CPU storage (`percpu`), the `syscall`-instruction entry, `iretq`
