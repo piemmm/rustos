@@ -19,41 +19,59 @@
 //! It reuses `boot_aarch64::boot` **verbatim** — the same production pipeline,
 //! `InitSpawn` seam, runtime `ProcessSpawn` producer + embedded-program
 //! registry (which carries `devmgr` in `spawn_layout::SPAWN_PROGRAMS`), and
-//! `HwTreeStore` source — and only swaps the audit sink. After
+//! `HwTreeStore` — and only swaps the injected hardware-tree *source* for the
+//! observing `WitnessSource` below (the same dependency-injection seam the
+//! boot path already exposes for the log/audit sinks). After
 //! `kernel_core::kernel_main` emits `BootCompleted`, PID 1 `init` launches
-//! `devmgr` first and then a login session per console;
-//! `devmgr` reads the seeded hardware tree (logging it to fd 2) and blocks in
+//! `devmgr` first and then a login session per console; `devmgr` reads the
+//! seeded hardware tree (logging it to fd 2) and blocks in
 //! `hw_tree_wait(generation, u64::MAX)`, which **registers it on the kernel's
 //! `HW_TREE_WAITQ` and parks it** (Design D P-2).
 //!
-//! ## How the reactive cycle is driven and witnessed
+//! ## How the reactive cycle is driven and witnessed — deterministically
 //!
-//! `hw_tree_read` / `hw_tree_wait` are unaudited (`lib/abi/src/syscalls.rs`,
-//! high-volume reactive consumer), so the sink cannot observe `devmgr`'s read
-//! or wait through audit events. Instead it observes the kernel's own
-//! `HW_TREE_WAITQ` directly — a `devmgr` parked in `hw_tree_wait` is the one
-//! and only waiter it can hold, so a non-empty wait-queue is the unambiguous
-//! "devmgr has truly parked" witness. The sink runs a two-phase state machine
-//! on every audit event (the events come from `init`'s spawns and the scripted
-//! login dialogue below — enough to interleave with the cooperative drain):
+//! The witness is driven by `devmgr`'s **own** syscall activity, never by
+//! incidental audit traffic: the `hw_tree_wait` handler calls
+//! `HwTreeSource::generation` on every loop iteration — in the caller's
+//! (`devmgr`'s) context, *after* it has registered on `HW_TREE_WAITQ` and
+//! immediately before it commits to park. `devmgr` is the one and only
+//! `hw_tree_wait` caller, so at that call a non-empty wait-queue is the
+//! unambiguous "devmgr has registered and is about to park" witness. The
+//! injected `WitnessSource` forwards every read to the authoritative
+//! `HW_TREE_SOURCE` and drives a two-phase machine off that hook:
 //!
-//! 1. **Armed → Bumped:** the first event at which `HW_TREE_WAITQ` is
-//!    non-empty proves `devmgr` parked. The sink then appends a node to the
-//!    authoritative `HW_TREE` store — a **real** mutation that bumps the
-//!    store generation and calls `hw_tree_wake`, exactly a
-//!    hardware hotplug. This unparks `devmgr`.
-//! 2. **Bumped → PASS:** at the next event with `HW_TREE_WAITQ` non-empty,
-//!    `devmgr` has been scheduled by the cooperative drain (login blocks on
-//!    `stream_read` between events, so the drain runs the unparked `devmgr`
-//!    first): its `hw_tree_wait` returned on the generation change, it
-//!    re-read the tree (logging the new generation to fd 2), and it re-parked
-//!    in a fresh `hw_tree_wait` — re-registering on the wait-queue. The sink
+//! 1. **Armed → Bumped:** the first `generation()` call at which
+//!    `HW_TREE_WAITQ` is non-empty proves `devmgr` is about to park. The
+//!    source appends a node to the authoritative `HW_TREE` store — a **real**
+//!    mutation that bumps the generation and calls `hw_tree_wake`, exactly a
+//!    hardware hotplug. `hw_tree_wait` then observes the changed generation
+//!    and returns, so `devmgr` never sleeps through the bump; it re-reads the
+//!    tree and calls `hw_tree_wait` afresh.
+//! 2. **Bumped → PASS:** the next `generation()` call with `HW_TREE_WAITQ`
+//!    non-empty is `devmgr` re-registering for its post-bump wait: it woke on
+//!    the generation change, re-read the tree (logging the new generation to
+//!    fd 2), and re-parked. The full reactive cycle is proven and the source
 //!    reports PASS through the ARM semihosting finisher.
 //!
-//! A regression where `devmgr` never spawns, never reads, never parks, or
-//! never wakes on the bump never reaches the second phase, so the run times
-//! out and the harness reports `Outcome::Timeout` — the documented fail-loud
-//! behaviour.
+//! Because the trigger is `devmgr`'s own read/wait loop, the proof completes
+//! whether or not any other task is producing audit events — there is no
+//! dependence on a login dialogue "keeping events flowing", the race that made
+//! an earlier audit-sink-driven version of this test flaky. A regression where
+//! `devmgr` never spawns, never reads, never parks, or never wakes on the bump
+//! never reaches the second phase, so the run times out and the harness
+//! reports `Outcome::Timeout` — the documented fail-loud behaviour.
+//!
+//! ## Why acting from `generation()` is a safe context
+//!
+//! `generation()` runs inside the `hw_tree_wait` handler **before**
+//! `reschedule_current(Park)`, so no run-queue lock is held — appending to the
+//! store (which takes the store lock, then `hw_tree_wake` → `wake_all` takes
+//! the wait-queue lock, both released before any `unpark`) is the same safe
+//! task-context hand-off an IPC `send` wakes a receiver from, never re-entrant
+//! on a held scheduler lock. Unparking `devmgr` while it is still running the
+//! syscall only records the scheduler's wake-pending token, which the Park
+//! commit consumes — the same lost-wake interlock the wait path already relies
+//! on.
 //!
 //! ## Embedded `virt` device tree
 //!
@@ -70,27 +88,23 @@
 // --- Freestanding test bin (`aarch64-unknown-none`) ----------------
 
 #[cfg(itest_aarch64)]
+extern crate alloc;
+
+#[cfg(itest_aarch64)]
 mod kernel {
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicU8, Ordering};
 
+    use alloc::vec::Vec;
+
     use rustos_abi::hwtree::{HwDeviceClass, HwNode, HW_NODE_ROOT};
-    use rustos_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
+    use rustos_abi::Errno;
+    use rustos_arch_aarch64::{handle_panic_via_serial, qemu_exit, SERIAL_SINK};
     use rustos_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use rustos_kernel::aarch64::boot as boot_aarch64;
-    use rustos_kernel::hwtree_store::HW_TREE;
+    use rustos_kernel::hwtree_store::{HW_TREE, HW_TREE_SOURCE};
     use rustos_kernel_core::waitq::HW_TREE_WAITQ;
-    use rustos_log::{Event, EventId, Sink};
-
-    /// `EventId` the syscall dispatcher emits for an audited syscall
-    /// (`init`'s `spawn`/`wait` and the session's `exit`). Pinned by the
-    /// audit-id test in `kernel/syscall/src/audit.rs`. The sink only acts on
-    /// these: they are emitted by the dispatcher *after* the handler runs,
-    /// outside any scheduler lock, so calling the wake path
-    /// (`HW_TREE.append` → `hw_tree_wake` → `unpark`) from here is the same
-    /// safe context an IPC `send` wakes a receiver from — never re-entrant on
-    /// a held run-queue lock.
-    const SYSCALL_INVOKED_EVENT_ID: EventId = EventId(5000);
+    use rustos_kernel_core::HwTreeSource;
 
     // The canonical QEMU `virt` device tree, dumped and embedded at build
     // time (`build.rs`). The boot pipeline discovers the board from it
@@ -112,71 +126,74 @@ mod kernel {
     static ALLOCATOR: FreeListAllocator =
         unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
 
-    /// Sink state machine: `ARMED` until `devmgr` is observed parked,
-    /// `BUMPED` after the generation bump is delivered, then PASS.
+    /// Witness state machine: `ARMED` until `devmgr` is observed about to
+    /// park, `BUMPED` after the generation bump is delivered, then PASS.
     const ARMED: u8 = 0;
     const BUMPED: u8 = 1;
     static PHASE: AtomicU8 = AtomicU8::new(ARMED);
 
-    /// The node the sink appends as the simulated hardware hotplug. Its
+    /// The node the witness appends as the simulated hardware hotplug. Its
     /// content is irrelevant to the proof — appending *anything* bumps the
-    /// `HwTreeStore` generation and wakes the parked `devmgr`; a distinctive id keeps the serial transcript legible.
+    /// `HwTreeStore` generation and wakes the parked `devmgr`; a distinctive
+    /// id keeps the serial transcript legible.
     fn hotplug_node() -> HwNode {
         HwNode::new(0x7E57, HW_NODE_ROOT, HwDeviceClass::Other)
     }
 
-    /// Sink that replays every event through [`SERIAL_SINK`] (so the QEMU
-    /// transcript records the full boot + spawn + devmgr timeline) and drives
-    /// the two-phase reactive proof off the kernel's [`HW_TREE_WAITQ`] (see
-    /// the module docs): bump the [`HW_TREE`] store the instant `devmgr` is
-    /// seen parked, then report PASS once it has woken, re-read, and
-    /// re-parked.
-    struct DevmgrReactiveSink;
+    /// The injected [`HwTreeSource`]: it forwards every read to the
+    /// authoritative [`HW_TREE_SOURCE`] and drives the deterministic
+    /// two-phase reactive proof off the `hw_tree_wait` handler's own
+    /// [`generation`](HwTreeSource::generation) polls (see the module docs).
+    struct WitnessSource;
 
-    impl Sink for DevmgrReactiveSink {
-        fn write_event(&self, event: &Event<'_>) {
-            SerialSink::new().write_event(event);
-
-            // Act only on audited-syscall events (emitted by the dispatcher
-            // outside any scheduler lock), so the wake path the bump triggers
-            // is never re-entrant on a held run-queue lock. Other events
-            // (spawn/exit audit records, scheduler-internal) only replay to
-            // the serial transcript.
-            if event.id != SYSCALL_INVOKED_EVENT_ID {
-                return;
-            }
-
-            // A `devmgr` parked in `hw_tree_wait` is the sole possible waiter
-            // on this queue, so non-empty == "devmgr has truly parked".
-            let parked = !HW_TREE_WAITQ.is_empty();
-            match PHASE.load(Ordering::Acquire) {
-                ARMED => {
-                    if parked {
-                        // Deliver a real generation bump (simulated hotplug):
-                        // append to the authoritative store, which bumps the
-                        // generation and wakes the parked `devmgr`. Same path the floor bus
-                        // bring-up uses, so this is the production wake, not a
-                        // test back-channel.
+    impl HwTreeSource for WitnessSource {
+        fn generation(&self) -> Result<u64, Errno> {
+            // Called by the `hw_tree_wait` handler on each loop iteration,
+            // in `devmgr`'s context, after it has registered on
+            // `HW_TREE_WAITQ` and just before it commits to park. `devmgr`
+            // is the sole `hw_tree_wait` caller, so a non-empty queue here
+            // means it has registered and is about to park. The fast-path
+            // pre-register `generation()` check sees an empty queue and
+            // takes no action.
+            if !HW_TREE_WAITQ.is_empty() {
+                match PHASE.load(Ordering::Acquire) {
+                    ARMED => {
+                        // First park witnessed: deliver a real generation
+                        // bump (simulated hotplug) via the authoritative
+                        // store — the same wake path the floor bus bring-up
+                        // uses, not a test back-channel. `hw_tree_wait` then
+                        // sees the changed generation and returns, so
+                        // `devmgr` wakes, re-reads, and re-parks.
                         HW_TREE.append(&hotplug_node());
                         PHASE.store(BUMPED, Ordering::Release);
                     }
-                }
-                BUMPED => {
-                    // `devmgr` has been scheduled since the bump (login blocks
-                    // between events, so the cooperative drain ran the
-                    // unparked `devmgr` first): it re-read the tree and
-                    // re-parked, re-registering here. The full reactive cycle
-                    // is proven.
-                    if parked {
+                    BUMPED => {
+                        // `devmgr` woke on the bump, re-read the tree, and is
+                        // re-registering for its next wait: the full
+                        // park → bump → wake → re-read → re-park cycle is
+                        // proven.
                         qemu_exit::exit_success();
                     }
+                    _ => {}
                 }
-                _ => {}
             }
+            HW_TREE_SOURCE.generation()
+        }
+
+        fn snapshot(&self) -> Result<Vec<u8>, Errno> {
+            HW_TREE_SOURCE.snapshot()
+        }
+
+        fn publish(&self, parent_id: u32, node: HwNode) -> Result<u32, Errno> {
+            HW_TREE_SOURCE.publish(parent_id, node)
+        }
+
+        fn remove(&self, parent_id: u32, node_id: u32) -> Result<(), Errno> {
+            HW_TREE_SOURCE.remove(parent_id, node_id)
         }
     }
 
-    static AUDIT_SINK: DevmgrReactiveSink = DevmgrReactiveSink;
+    static WITNESS_SOURCE: WitnessSource = WitnessSource;
 
     /// Forward to the shared aarch64 panic bridge. A panic before the PASS
     /// finisher parks the CPU, the run times out, and the harness reports
@@ -190,12 +207,14 @@ mod kernel {
     /// calls (via `rustos_arch_aarch64_main`).
     ///
     /// QEMU hands no DTB pointer (`_dtb == 0`), so the embedded `virt` blob's
-    /// address is forwarded to the production boot pipeline with the
-    /// audit-observer sink in place.
+    /// address is forwarded to the production boot pipeline with the observing
+    /// [`WitnessSource`] installed as the hardware-tree source. Both the log
+    /// and audit sinks are the production PL011-backed [`SERIAL_SINK`], so the
+    /// QEMU transcript still records the full boot + spawn + devmgr timeline.
     #[no_mangle]
     pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         let dtb = DTB_BLOB.as_ptr() as u64;
-        boot_aarch64::boot(dtb, &SERIAL_SINK, &AUDIT_SINK)
+        boot_aarch64::boot(dtb, &SERIAL_SINK, &SERIAL_SINK, &WITNESS_SOURCE)
     }
 }
 

@@ -223,6 +223,16 @@ fn enable_mmu_and_vectors() -> Option<AddressSpace> {
 /// [`rustos_arch_aarch64::SERIAL_SINK`]; the boot-completed QEMU vertical
 /// substitutes an audit sink that exits QEMU on `AuditEvent::BootCompleted`.
 ///
+/// `hw_tree` is the [`HwTreeSource`] the `hw_tree_read` / `hw_tree_wait`
+/// syscalls serve. In production it is the authoritative
+/// [`crate::hwtree_store::HW_TREE_SOURCE`]; it is injected here — the same
+/// dependency-injection seam the `log_sink`/`audit_sink` use — so the
+/// device-manager reactive vertical can install a source that observes
+/// `devmgr`'s own read/wait activity and drives its proof deterministically
+/// off it, without a compiled-in test back-channel. Only the aarch64 port
+/// takes this seam: it is the only one whose reactive-observe vertical needs
+/// it, so adding it to the other ports would be an unused parameter.
+///
 /// Returns the bottom type. On success it enters
 /// [`rustos_kernel_core::kernel_main`], which drives the init phases and
 /// itself never returns. If the handover cannot be assembled (no usable
@@ -240,6 +250,7 @@ pub fn boot(
     dtb: u64,
     log_sink: &'static (dyn Sink + Sync),
     audit_sink: &'static (dyn Sink + Sync),
+    hw_tree: &'static (dyn rustos_kernel_core::HwTreeSource + 'static),
 ) -> ! {
     // Enable FP/SIMD before the log formatter (which the compiler may
     // lower to NEON) runs. SAFETY: this is the boot CPU, called once,
@@ -684,7 +695,7 @@ pub fn boot(
             // production mount path consumes the binding in the following
             // increment (`plans/PI.md` Chunk B-2).
             audit_root_storage_binding(dtb, log_sink);
-            enter_kernel_core(arch, layout.map, log_sink, audit_sink)
+            enter_kernel_core(arch, layout.map, log_sink, audit_sink, hw_tree)
         }
     }
 
@@ -847,6 +858,7 @@ fn enter_kernel_core(
     memory_map: rustos_kernel_mem::BootMemoryMap,
     log_sink: &'static (dyn Sink + Sync),
     audit_sink: &'static (dyn Sink + Sync),
+    hw_tree: &'static (dyn rustos_kernel_core::HwTreeSource + 'static),
 ) -> ! {
     // The arch port's `svc` trampoline fail-closes if it fires before a
     // callback is installed, so install it before any user thread runs.
@@ -905,12 +917,13 @@ fn enter_kernel_core(
     // fails every read closed, identical to the previous `NULL_USERS_DB`
     // default — so login refuses every attempt until a root is mounted, and the metal-confirmed boot is unaffected.
     .with_users_db(&crate::root_mount::LATE_USERS_DB)
-    // Serve the discovered hardware tree: the
-    // `hw_tree_read` / `hw_tree_wait` syscalls read the one authoritative
-    // `HW_TREE` the boot path seeds and the floor bus bring-up appends to,
-    // so the user-space device manager observes the same inventory the
-    // kernel discovered (Design D).
-    .with_hw_tree(&crate::hwtree_store::HW_TREE_SOURCE)
+    // Serve the discovered hardware tree through the injected `hw_tree`
+    // source: the `hw_tree_read` / `hw_tree_wait` syscalls read the one
+    // authoritative `HW_TREE` the boot path seeds and the floor bus bring-up
+    // appends to (production installs `HW_TREE_SOURCE`), so the user-space
+    // device manager observes the same inventory the kernel discovered
+    // (Design D).
+    .with_hw_tree(hw_tree)
     // Serve the `fs_*` syscalls through the production filesystem service
     // (`PREREQUISITES.md` P-A): it routes each operation through the secured
     // VFS against the late-installed read-only `/System` mount and resolves

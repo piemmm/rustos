@@ -122,14 +122,22 @@ mod kernel {
     }
 
     /// The symbol the aarch64 boot trampoline calls (via
-    /// `rustos_arch_aarch64_main`). Hands the verbatim DTB pointer and
-    /// the production PL011-backed log/audit sinks to the boot pipeline.
-    /// In production both the log and audit streams go to the same serial
-    /// console; the boot-completed QEMU vertical replaces the audit sink
-    /// (see `tests/integration/kernel_arch_boot_aarch64`).
+    /// `rustos_arch_aarch64_main`). Hands the verbatim DTB pointer, the
+    /// production PL011-backed log/audit sinks, and the authoritative
+    /// hardware-tree source to the boot pipeline. In production both the
+    /// log and audit streams go to the same serial console; the
+    /// boot-completed QEMU vertical replaces the audit sink (see
+    /// `tests/integration/kernel_arch_boot_aarch64`) and the device-manager
+    /// vertical replaces the hardware-tree source (see
+    /// `tests/integration/devmgr_hwtree_qemu_aarch64`).
     #[no_mangle]
     pub extern "C" fn kernel_main(dtb: u64) -> ! {
-        boot::boot(dtb, &SERIAL_SINK, &SERIAL_SINK)
+        boot::boot(
+            dtb,
+            &SERIAL_SINK,
+            &SERIAL_SINK,
+            &rustos_kernel::hwtree_store::HW_TREE_SOURCE,
+        )
     }
 }
 

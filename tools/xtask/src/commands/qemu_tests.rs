@@ -1395,17 +1395,22 @@ const TESTS: &[QemuTest] = &[
     // (`/System/Services/devmgr`, in `spawn_layout::SPAWN_PROGRAMS`) before the
     // login session; `devmgr` reads the discovered hardware tree
     // (`hw_tree_read`) and **truly parks** in `hw_tree_wait`, registering on the
-    // kernel's `HW_TREE_WAITQ` (Design D P-2 — no busy poll). The audit sink observes that wait-queue (a parked `devmgr` is its
-    // only possible waiter): the instant it is non-empty the sink appends a node
-    // to the authoritative `HwTreeStore` — a real generation bump / simulated
-    // hotplug that calls `hw_tree_wake` exactly as the floor bus bring-up does — and reports PASS via the ARM semihosting finisher
-    // once `devmgr` has been scheduled past the bump and re-parked. The login
-    // dialogue below is reused verbatim from `spawn-session-qemu-aarch64` only
-    // to keep audit events (and thus drive-loop scheduling rounds) flowing past
-    // `devmgr`'s park so the sink's two-phase witness can advance; the run still
-    // fails if any scripted prompt never appears. `hw_tree_read`/`hw_tree_wait`
-    // are unaudited high-volume reactive syscalls, so the wake's *correctness*
-    // is pinned by the host unit tests (`kernel/core/src/waitq.rs`,
+    // kernel's `HW_TREE_WAITQ` (Design D P-2 — no busy poll). The test injects
+    // an observing `HwTreeSource` (the same dependency-injection seam the boot
+    // path exposes for the log/audit sinks): the `hw_tree_wait` handler calls
+    // its `generation()` in `devmgr`'s own context, after registering and just
+    // before parking, so a non-empty `HW_TREE_WAITQ` there is the "devmgr is
+    // about to park" witness. On the first park the source appends a node to
+    // the authoritative `HwTreeStore` — a real generation bump / simulated
+    // hotplug that calls `hw_tree_wake` exactly as the floor bus bring-up does —
+    // and on the re-park (devmgr woke, re-read, re-registered) it reports PASS
+    // via the ARM semihosting finisher. Because the witness is driven by
+    // `devmgr`'s own read/wait loop it needs **no** login dialogue to keep
+    // events flowing (an earlier audit-sink-driven version was flaky because
+    // that incidental traffic dried up before `devmgr` parked); the run needs
+    // no scripted serial input at all. `hw_tree_read`/`hw_tree_wait` are
+    // unaudited high-volume reactive syscalls, so the wake's *correctness* is
+    // pinned by the host unit tests (`kernel/core/src/waitq.rs`,
     // `kernel/core/src/syscalls.rs`); this vertical proves the integrated
     // boot → spawn → read → park → real-generation-bump → no-starvation path on
     // the production pipeline. Single CPU and a 60-second budget match the other
@@ -1421,14 +1426,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: &[
-            ("Username: ", "root\n"),
-            ("Password: ", "wrong\n"),
-            (
-                "Username: ",
-                "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n",
-            ),
-        ],
+        serial: &[],
     },
     // SPAWN Stage SP2c (`plans/SPAWN.md` §1): the aarch64 EL0↔EL0 timeshare
     // vertical — the first proof that two **user** (EL0) tasks timeshare one
