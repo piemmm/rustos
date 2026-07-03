@@ -552,6 +552,7 @@ mod tests {
                     42,
                     ProcId::from_raw([0xCD; 16]),
                     CapabilitySummary::EMPTY,
+                    rustos_abi::ORIGIN_CONSOLE_NONE,
                 ),
                 // One record per `LimitKind`, in discriminant order. `Processes`
                 // is left unlimited so the `unlimited` rendering is exercised.
@@ -722,6 +723,7 @@ mod tests {
             42,
             ProcId::from_raw([0xCD; 16]),
             caps,
+            rustos_abi::ORIGIN_CONSOLE_NONE,
         );
         let r = resolve_str("info:process/caps", &fixture).expect("ok");
         match r.payload {

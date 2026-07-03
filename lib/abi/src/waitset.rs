@@ -54,9 +54,15 @@ impl WaitSetOp {
     }
 }
 
+/// Sentinel `id` for a [`WaitSourceKind::Child`] member observing **any**
+/// child of the calling task — the wait-set analogue of
+/// [`crate::WAIT_PID_ANY`]. Any other `id` names one specific child by its
+/// PID.
+pub const WAITSET_CHILD_ANY: u64 = u64::MAX;
+
 /// The kind of event source a wait-set member observes.
 ///
-/// Both kinds name a resource the calling task already holds; the kernel
+/// Every kind names a resource the calling task already holds; the kernel
 /// owner-checks the resource named by [`crate::SyscallNumber::WAITSET_CTL`]'s
 /// `id` against the kind when the member is added, so a wait-set can never
 /// observe authority the caller lacks.
@@ -69,6 +75,15 @@ pub enum WaitSourceKind {
     /// A hardware interrupt line the caller bound (its `id` is the
     /// [`crate::IrqHandle`] raw value). Ready when the line has fired.
     Irq = 1,
+    /// A child process of the caller (its `id` is the child's PID, or
+    /// [`WAITSET_CHILD_ANY`] for whichever child exits next). Ready when a
+    /// matching child has exited and is waiting to be reaped; readiness is a
+    /// peek — the caller still reaps through the `wait` syscall (its
+    /// non-blocking `WaitFlags::NONBLOCK` form, so the reap itself never
+    /// parks the serve loop that observed the readiness). A process can only
+    /// ever observe its **own** children: a specific `id` that names no
+    /// child of the caller is refused when the member is added.
+    Child = 2,
 }
 
 impl WaitSourceKind {
@@ -88,6 +103,7 @@ impl WaitSourceKind {
         match value {
             0 => Ok(Self::Endpoint),
             1 => Ok(Self::Irq),
+            2 => Ok(Self::Child),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -108,10 +124,14 @@ mod tests {
 
     #[test]
     fn kind_round_trips_and_rejects_unknown() {
-        for kind in [WaitSourceKind::Endpoint, WaitSourceKind::Irq] {
+        for kind in [
+            WaitSourceKind::Endpoint,
+            WaitSourceKind::Irq,
+            WaitSourceKind::Child,
+        ] {
             assert_eq!(WaitSourceKind::from_u32(kind.as_u32()), Ok(kind));
         }
-        assert_eq!(WaitSourceKind::from_u32(2), Err(Errno::OutOfRange));
+        assert_eq!(WaitSourceKind::from_u32(3), Err(Errno::OutOfRange));
         assert_eq!(WaitSourceKind::from_u32(u32::MAX), Err(Errno::OutOfRange));
     }
 
@@ -121,5 +141,7 @@ mod tests {
         assert_eq!(WaitSetOp::Del.as_u32(), 1);
         assert_eq!(WaitSourceKind::Endpoint.as_u32(), 0);
         assert_eq!(WaitSourceKind::Irq.as_u32(), 1);
+        assert_eq!(WaitSourceKind::Child.as_u32(), 2);
+        assert_eq!(WAITSET_CHILD_ANY, u64::MAX);
     }
 }

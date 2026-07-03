@@ -380,7 +380,7 @@ mod tests {
 
     use rustos_abi::{
         BootId, CapabilitySummary, Duration64, FieldName, FieldValue, Origin, ProcId, Time64,
-        TrustDomain, WallClockReading, WallTimeState, BOOT_ID_LEN,
+        TrustDomain, WallClockReading, WallTimeState, BOOT_ID_LEN, ORIGIN_CONSOLE_NONE,
     };
 
     use super::{render_json, render_markdown, render_table_header, render_table_row, RecordFrame};
@@ -397,6 +397,7 @@ mod tests {
             42,
             ProcId::from_raw([7u8; 16]),
             CapabilitySummary::from_raw([0u8; 32]),
+            ORIGIN_CONSOLE_NONE,
         )
     }
 

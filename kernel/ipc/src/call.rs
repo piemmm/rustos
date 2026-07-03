@@ -214,7 +214,11 @@ impl CallEndpoint {
     /// (no ambient authority), and must additionally hold
     /// [`rustos_abi::CapabilityId::IPC_BIND_PRIVILEGED`] when
     /// `required_send_caps` is non-empty (a restricted-sender endpoint is by
-    /// definition privileged).
+    /// definition privileged) **or** when `id` is a reserved well-known
+    /// service rendezvous ([`rustos_abi::ipc::is_reserved_endpoint`]): even
+    /// an open bind on a reserved id would let an unprivileged squatter
+    /// claim the rendezvous and receive traffic meant for the service (an
+    /// elevation request carries an offered password), so it fails closed.
     ///
     /// `capacity` bounds the number of *outstanding* calls (posted, in
     /// service, or replied-but-unclaimed) so a misbehaving caller or server
@@ -262,7 +266,7 @@ impl CallEndpoint {
             return Err(Errno::PermissionDenied);
         }
 
-        if !required_send_caps.is_empty()
+        if (!required_send_caps.is_empty() || rustos_abi::ipc::is_reserved_endpoint(id.0))
             && !creator.has(rustos_abi::CapabilityId::IPC_BIND_PRIVILEGED)
         {
             record(audit, AuditEvent::CallEndpointCreateDenied, &[id_field]);
@@ -783,6 +787,59 @@ mod tests {
         .err()
         .expect("zero capacity is refused");
         assert_eq!(err, Errno::LengthOutOfRange);
+    }
+
+    #[test]
+    fn create_rejects_reserved_id_squat_without_bind_privilege() {
+        let sink = RecordingSink::new();
+        let squatter = task_with(1, &[]);
+        for id in [
+            rustos_abi::sysinfo::SYSINFO_ENDPOINT,
+            rustos_abi::log_ingress::LOG_INGRESS_ENDPOINT,
+            rustos_abi::elevate::ELEVATE_ENDPOINT_BASE,
+            rustos_abi::elevate::ELEVATE_ENDPOINT_BASE
+                + u64::from(rustos_abi::process::CONSOLE_INDEX_MAX),
+        ] {
+            let err = CallEndpoint::create(
+                EndpointId(id),
+                &squatter,
+                CapabilitySet::empty(),
+                CapabilitySet::empty(),
+                CallEndpointLimits {
+                    max_request: 64,
+                    max_reply: 64,
+                    capacity: 8,
+                },
+                &sink,
+            )
+            .err()
+            .expect("reserved-id squat is refused");
+            assert_eq!(err, Errno::PermissionDenied);
+        }
+        assert!(sink
+            .ids()
+            .contains(&AuditEvent::CallEndpointCreateDenied.id().0));
+    }
+
+    #[test]
+    fn create_allows_reserved_id_with_bind_privilege() {
+        let sink = RecordingSink::new();
+        let service = task_with(1, &[CapabilityId::IPC_BIND_PRIVILEGED]);
+        let ep = CallEndpoint::create(
+            EndpointId(rustos_abi::sysinfo::SYSINFO_ENDPOINT),
+            &service,
+            CapabilitySet::empty(),
+            CapabilitySet::empty(),
+            CallEndpointLimits {
+                max_request: 64,
+                max_reply: 64,
+                capacity: 8,
+            },
+            &sink,
+        )
+        .expect("privileged service binds its reserved rendezvous");
+        assert_eq!(ep.id(), EndpointId(rustos_abi::sysinfo::SYSINFO_ENDPOINT));
+        assert!(sink.ids().contains(&AuditEvent::CallEndpointCreated.id().0));
     }
 
     #[test]

@@ -169,7 +169,7 @@ mod tests {
 
     use rustos_abi::{
         CapabilitySummary, Duration64, FieldName, FieldValue, IpAddr, Origin, ProcId, TrustDomain,
-        WallClockReading,
+        WallClockReading, ORIGIN_CONSOLE_NONE,
     };
 
     use super::render_line;
@@ -186,6 +186,7 @@ mod tests {
             42,
             ProcId::from_raw([7u8; 16]),
             CapabilitySummary::from_raw([0u8; 32]),
+            ORIGIN_CONSOLE_NONE,
         )
     }
 

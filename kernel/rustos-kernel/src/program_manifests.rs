@@ -38,7 +38,10 @@ pub use rustos_users::SESSION_BASELINE;
 /// one privileged identity transition (starting the authenticated
 /// account's shell under that account's kernel-resolved credential and
 /// ceiling), `CAP_USERS_READ` to verify offered credentials against the
-/// kernel-held user database (`users_db_read`/`users_db_wait`), and
+/// kernel-held user database (`users_db_read`/`users_db_wait`),
+/// `CAP_IPC_BIND_PRIVILEGED` to bind its console's reserved elevation
+/// rendezvous (the `elevate_endpoint` id the shell's `elevate` builtin
+/// calls — reserved ids fail closed against squatters), and
 /// `CAP_LOG_EMIT` for its structured audit records. No `CAP_FS_ACCESS`:
 /// login reads the users database through its own gated syscall and never
 /// touches the filesystem.
@@ -48,6 +51,7 @@ pub const LOGIN_MANIFEST: &[CapabilityId] = &[
     CapabilityId::PROC_SPAWN,
     CapabilityId::USERS_READ,
     CapabilityId::SPAWN_AS_USER,
+    CapabilityId::IPC_BIND_PRIVILEGED,
     CapabilityId::LOG_EMIT,
 ];
 
@@ -67,12 +71,15 @@ pub const DEVMGR_MANIFEST: &[CapabilityId] = &[
 /// The System Information service's manifest: `CAP_SYSINFO_INTROSPECT`
 /// (the privileged, unfiltered global introspection primitive it alone
 /// holds and re-scopes per client), `CAP_SYSINFO_HW` for the hardware-tree
-/// query (`hw_tree_read`), and `CAP_LOG_EMIT` for its structured audit
-/// records. Its `call_*` endpoint plumbing is ungated: per-query scoping
-/// is enforced in the broker against each caller's kernel-attested origin.
+/// query (`hw_tree_read`), `CAP_IPC_BIND_PRIVILEGED` to bind the reserved
+/// well-known `SYSINFO_ENDPOINT` rendezvous (reserved ids fail closed
+/// against squatters serving forged system state), and `CAP_LOG_EMIT` for
+/// its structured audit records. Per-query scoping stays in the broker
+/// against each caller's kernel-attested origin.
 pub const SYSINFOD_MANIFEST: &[CapabilityId] = &[
     CapabilityId::SYSINFO_INTROSPECT,
     CapabilityId::SYSINFO_HW,
+    CapabilityId::IPC_BIND_PRIVILEGED,
     CapabilityId::LOG_EMIT,
 ];
 
@@ -165,6 +172,7 @@ mod tests {
                 CapabilityId::PROC_SPAWN,
                 CapabilityId::USERS_READ,
                 CapabilityId::SPAWN_AS_USER,
+                CapabilityId::IPC_BIND_PRIVILEGED,
                 CapabilityId::LOG_EMIT,
             ])
         );
@@ -189,6 +197,7 @@ mod tests {
             set(&[
                 CapabilityId::SYSINFO_INTROSPECT,
                 CapabilityId::SYSINFO_HW,
+                CapabilityId::IPC_BIND_PRIVILEGED,
                 CapabilityId::LOG_EMIT,
             ])
         );

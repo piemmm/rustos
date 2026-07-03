@@ -63,10 +63,20 @@ without a kernel.
 ## Builtins
 
 `cd`, `pwd`, `exit`, `export`, `unset`, `echo`, `jobs`, `fg`, `bg`,
-`ulimit`, `help`. A builtin runs inside the shell process because it
-mutates or reads shell-side state (the environment, the working
-directory, the job table, the exit request, or the process's own resource
-limits); everything else is launched externally.
+`ulimit`, `elevate`, `help`. A builtin runs inside the shell process
+because it mutates or reads shell-side state (the environment, the
+working directory, the job table, the exit request, the process's own
+resource limits, or — for `elevate` — the controlling terminal its
+echo-off password prompt must own); everything else is launched
+externally.
+
+`elevate <user> <program>` (`plans/CAPABILITY_USE.md` CU5) posts one
+synchronous IPC call to this console's login supervisor, which
+re-authenticates the target account and runs the program as it; the exit
+code becomes `$?`. Driven through the fail-closed `Elevator` seam
+(`host.rs`), backed in the `Run` binary by `self_origin` + `ipc_call`;
+the shell itself holds no elevation authority and zeroises the password
+buffer on every path.
 
 `ulimit [-a] [-H | -S] [<resource> [<value>]]` reports and imposes the
 process's own resource limits (`AGENTS.md` §24.3) over the `LimitStore`

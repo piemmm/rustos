@@ -219,10 +219,26 @@ await an ABI extension. The in-process builtins (`echo`, `exit`, `export`,
 ## Builtins
 
 `cd`, `pwd`, `exit`, `export`, `unset`, `echo`, `jobs`, `fg`, `bg`,
-`help`. A builtin runs inside the shell process because it mutates shell
-state — the environment, the working directory, the job table, or the
-`exit` request a read-eval loop watches; everything else is launched as
-an external program.
+`ulimit`, `elevate`, `help`. A builtin runs inside the shell process
+because it mutates or reads shell-side state — the environment, the
+working directory, the job table, the `exit` request a read-eval loop
+watches, the process's own resource limits, or (for `elevate`) the
+controlling terminal a password prompt must own; everything else is
+launched as an external program.
+
+`elevate <user> <program>` is the per-invocation elevation frontend
+(`plans/CAPABILITY_USE.md` CU5): it prompts for the target account's
+password with echo suppressed, posts one synchronous IPC call to this
+console's login supervisor over the reserved per-console rendezvous
+(derived from the shell's **own** kernel-attested console, never a
+claim), and blocks — a foreground elevated command — until the
+re-authenticated program has run as that account; its exit code becomes
+`$?`. The shell holds no elevation authority: authentication, placement
+checking, and the identity switch all happen in the supervisor and the
+kernel, the password buffer is zeroed on every path, and a shell with no
+console-backed streams (a pipe, a network session) has no rendezvous and
+fails closed. The seam is `Elevator` (`host.rs`), fail-closed by default
+and backed in the `Run` binary by `self_origin` + `ipc_call`.
 
 A builtin may carry `NAME=VALUE` prefix assignments; they bind for the
 builtin's duration only and are restored afterwards (the command's

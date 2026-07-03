@@ -18,6 +18,37 @@ pub const IPC_MESSAGE_HEADER_MAGIC: u32 = u32::from_le_bytes(*b"IPC1");
 /// IPC message.
 pub const IPC_MESSAGE_MAX_PAYLOAD_LEN: u32 = 1 << 20;
 
+/// Whether `id` is a **reserved well-known** call-endpoint id — a fixed
+/// rendezvous a system service publishes: the driver-store server
+/// ([`crate::driver_store::DRIVER_STORE_ENDPOINT`]), the log-ingress
+/// journal ([`crate::log_ingress::LOG_INGRESS_ENDPOINT`]), the `VideoCore`
+/// mailbox service ([`crate::mailbox_ipc::MAILBOX_ENDPOINT`]), the System
+/// Information service ([`crate::sysinfo::SYSINFO_ENDPOINT`]), and the
+/// per-console elevation supervisors
+/// ([`crate::elevate::ELEVATE_ENDPOINT_BASE`] through
+/// `ELEVATE_ENDPOINT_BASE + CONSOLE_INDEX_MAX`).
+///
+/// Binding a reserved id requires
+/// [`crate::CapabilityId::IPC_BIND_PRIVILEGED`] even when the endpoint
+/// would otherwise be an open (unrestricted-sender) bind: without the gate
+/// an unprivileged squatter could claim the rendezvous first and receive
+/// traffic meant for the service — an elevation request carries an offered
+/// password, a spoofed sysinfo server could feed forged system state to
+/// privileged tools. The kernel enforces this at `call_create`; the
+/// predicate here is the single shared definition of the reserved set.
+#[must_use]
+pub const fn is_reserved_endpoint(id: u64) -> bool {
+    if id == crate::driver_store::DRIVER_STORE_ENDPOINT
+        || id == crate::log_ingress::LOG_INGRESS_ENDPOINT
+        || id == crate::mailbox_ipc::MAILBOX_ENDPOINT
+        || id == crate::sysinfo::SYSINFO_ENDPOINT
+    {
+        return true;
+    }
+    let elevate_base = crate::elevate::ELEVATE_ENDPOINT_BASE;
+    id >= elevate_base && id <= elevate_base + crate::process::CONSOLE_INDEX_MAX as u64
+}
+
 /// Header carried in front of every IPC message.
 ///
 /// Total wire size is exactly [`IpcMessageHeader::WIRE_LEN`] bytes. The
@@ -300,10 +331,35 @@ impl core::fmt::Debug for PortName {
 #[cfg(test)]
 mod tests {
     use super::{
-        IpcMessageHeader, PortName, IPC_MESSAGE_HEADER_MAGIC, IPC_MESSAGE_MAX_PAYLOAD_LEN,
-        PORT_NAME_MAX_LEN,
+        is_reserved_endpoint, IpcMessageHeader, PortName, IPC_MESSAGE_HEADER_MAGIC,
+        IPC_MESSAGE_MAX_PAYLOAD_LEN, PORT_NAME_MAX_LEN,
     };
     use crate::{Errno, ABI_VERSION_CURRENT};
+
+    #[test]
+    fn reserved_endpoints_cover_every_well_known_id() {
+        assert!(is_reserved_endpoint(
+            crate::driver_store::DRIVER_STORE_ENDPOINT
+        ));
+        assert!(is_reserved_endpoint(
+            crate::log_ingress::LOG_INGRESS_ENDPOINT
+        ));
+        assert!(is_reserved_endpoint(crate::mailbox_ipc::MAILBOX_ENDPOINT));
+        assert!(is_reserved_endpoint(crate::sysinfo::SYSINFO_ENDPOINT));
+        let base = crate::elevate::ELEVATE_ENDPOINT_BASE;
+        let max = u64::from(crate::process::CONSOLE_INDEX_MAX);
+        assert!(is_reserved_endpoint(base));
+        assert!(is_reserved_endpoint(base + max));
+        assert!(!is_reserved_endpoint(base - 1));
+        assert!(!is_reserved_endpoint(base + max + 1));
+    }
+
+    #[test]
+    fn ordinary_endpoint_ids_are_not_reserved() {
+        assert!(!is_reserved_endpoint(0));
+        assert!(!is_reserved_endpoint(1));
+        assert!(!is_reserved_endpoint(u64::MAX));
+    }
 
     fn sample() -> IpcMessageHeader {
         IpcMessageHeader {

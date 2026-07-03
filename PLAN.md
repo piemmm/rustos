@@ -3547,7 +3547,7 @@ binding design and staging.
 
 ## CAPABILITY_USE — the capability lifecycle: login → session → administration (`plans/CAPABILITY_USE.md`)
 
-**Status: CU1–CU4 done; CU5–CU6 planned.** The full capability lifecycle is
+**Status: CU1–CU5 done; CU6 planned.** The full capability lifecycle is
 wired: the kernel computes *effective = user grant ∩ manifest request*
 (`TaskCapabilities::derive`), the runtime spawn path threads the account's
 `capability_grants` ceiling through `SpawnCredential` into that intersection
@@ -3561,16 +3561,23 @@ and a running system administers its accounts through the
 enforcing never-widen grant editing, the last-administrator guard, full
 re-validation, crash-safe persistence to the encrypted root, and
 next-spawn/next-login binding, with the interactive `users` tool as its
-first holder (CU4). The plan binds: where each principal's ceiling comes
-from (system programs = manifest; user sessions = the account grant
+first holder (CU4), and per-invocation elevation is live: the shell's
+`elevate <user> <program>` builtin posts to its console's login supervisor
+over the reserved per-console rendezvous (`lib/abi/src/elevate.rs`), which
+re-authenticates the target account and spawn-as-user runs the program
+while the shell blocks — backed by the `WaitSourceKind::Child` wait-set
+member, the kernel-attested `Origin::console`, and the
+`is_reserved_endpoint` bind gate that keeps squatters off well-known
+service endpoints (CU5). The plan binds: where each principal's ceiling
+comes from (system programs = manifest; user sessions = the account grant
 snapshotted at the switch and inherited by every descendant), the
 interactive **session baseline**, the **administrator** as a grant set (no
 uid-0 power, no wheel group), spawn as the only delegation point (narrowing
 only), next-spawn revocation, and elevation as re-authenticated
 spawn-as-user through the session service — never setuid or a runtime raise.
-Remaining: CU5 (per-invocation `elevate`), CU6 (desktop, blocked on
-`plans/DISPLAY.md`), and the installer first-user flow (with the installer
-work). See `plans/CAPABILITY_USE.md` for the binding design and staging.
+Remaining: CU6 (desktop, blocked on `plans/DISPLAY.md`) and the installer
+first-user flow (with the installer work). See `plans/CAPABILITY_USE.md`
+for the binding design and staging.
 
 ---
 

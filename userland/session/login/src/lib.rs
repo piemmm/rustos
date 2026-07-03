@@ -30,9 +30,10 @@
 //! authentication failure is audited but **never** disclosed to the caller,
 //! so the prompt cannot be used to probe for valid usernames.
 //!
-//! The three operations that touch the outside world — reading/writing the
-//! terminal, verifying a credential, and launching a session — are the
-//! injected [`Prompt`], [`Authenticator`], and [`SessionLauncher`] seams. The
+//! The operations that touch the outside world — reading/writing the
+//! terminal, verifying a credential, launching a session, and running an
+//! elevated command — are the injected [`Prompt`], [`Authenticator`],
+//! [`SessionLauncher`], and [`ElevateLauncher`] seams. The
 //! binary that ships as `/System/Services/login` wires the real kernel- and
 //! `kernel/sec`-backed implementations; tests wire in-memory fixtures. This
 //! mirrors `init`'s `Spawner`/`Reaper` design and keeps the policy logic
@@ -50,6 +51,9 @@
 //!   [`DenyAll`], the fail-closed authenticator wired when no database is
 //!   held.
 //! * [`login`] — the [`Login`] state machine.
+//! * [`elevate`](mod@elevate) — [`handle_elevate_request`], the
+//!   per-invocation elevation broker a running session's shell drives
+//!   (`plans/CAPABILITY_USE.md` CU5), over the same [`Authenticator`].
 //! * [`supervise`](mod@supervise) — [`supervise()`], the per-round
 //!   database-reload loop that keeps a `login` spawned before the encrypted
 //!   root is unlocked from caching a stale "no database" answer.
@@ -70,6 +74,8 @@
 extern crate alloc;
 
 pub mod auth;
+pub(crate) mod decfmt;
+pub mod elevate;
 pub mod error;
 pub mod events;
 pub mod login;
@@ -77,6 +83,7 @@ pub mod session;
 pub mod supervise;
 
 pub use auth::{DenyAll, UsersAuthenticator};
+pub use elevate::{handle_elevate_request, ElevateLauncher};
 pub use error::LoginError;
 pub use login::{Login, LoginConfig};
 pub use session::{

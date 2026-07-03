@@ -6,11 +6,10 @@
 //! can never spin forever. It always starts in text mode and offers the
 //! graphical session only when one is available.
 
-use core::fmt::{self, Write as _};
-
 use rustos_abi::Errno;
 use rustos_log::{log, Event, EventId, Field, Level, Sink};
 
+use crate::decfmt::DecBuf;
 use crate::error::LoginError;
 use crate::events;
 use crate::session::{
@@ -311,49 +310,9 @@ fn event_message(id: EventId) -> &'static str {
     }
 }
 
-/// Fixed-capacity decimal formatter for an `i128`, used to render numeric
-/// audit fields without an allocator. 40 bytes hold the widest `i128`
-/// (39 digits plus a sign). Mirrors the helper in `init`.
-struct DecBuf {
-    bytes: [u8; Self::CAP],
-    len: usize,
-}
-
-impl DecBuf {
-    const CAP: usize = 40;
-
-    fn new() -> Self {
-        Self {
-            bytes: [0; Self::CAP],
-            len: 0,
-        }
-    }
-
-    fn format(&mut self, value: i128) -> &str {
-        self.len = 0;
-        let _ = write!(DecWriter(self), "{value}");
-        core::str::from_utf8(&self.bytes[..self.len]).unwrap_or("?")
-    }
-}
-
-struct DecWriter<'a>(&'a mut DecBuf);
-
-impl fmt::Write for DecWriter<'_> {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        let bytes = s.as_bytes();
-        let end = self.0.len.checked_add(bytes.len()).ok_or(fmt::Error)?;
-        if end > DecBuf::CAP {
-            return Err(fmt::Error);
-        }
-        self.0.bytes[self.0.len..end].copy_from_slice(bytes);
-        self.0.len = end;
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{event_message, DecBuf, Login, LoginConfig};
+    use super::{event_message, Login, LoginConfig};
     use crate::error::LoginError;
     use crate::events;
     use crate::session::{
@@ -766,11 +725,7 @@ mod tests {
     }
 
     #[test]
-    fn dec_buf_and_event_messages() {
-        let mut buf = DecBuf::new();
-        assert_eq!(buf.format(0), "0");
-        assert_eq!(buf.format(-7), "-7");
-        assert_eq!(buf.format(i128::from(u32::MAX)), "4294967295");
+    fn event_messages_are_stable() {
         assert_eq!(event_message(events::SESSION_STARTED), "session started");
         assert_eq!(event_message(EventId(1)), "login event");
     }

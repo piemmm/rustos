@@ -21,6 +21,7 @@ pub mod boot;
 pub mod capability;
 pub mod driver;
 pub mod driver_store;
+pub mod elevate;
 pub mod error;
 pub mod field;
 pub mod fs;
@@ -103,8 +104,8 @@ pub use manifest::{
 };
 pub use memory::MapFlags;
 pub use origin::{
-    CapabilitySummary, Origin, ProcId, TrustDomain, CAPABILITY_SUMMARY_LEN, ORIGIN_WIRE_LEN,
-    PROC_ID_HEX_LEN, PROC_ID_LEN,
+    CapabilitySummary, Origin, ProcId, TrustDomain, CAPABILITY_SUMMARY_LEN, ORIGIN_CONSOLE_NONE,
+    ORIGIN_WIRE_LEN, PROC_ID_HEX_LEN, PROC_ID_LEN,
 };
 pub use process::{
     encoded_len as process_start_encoded_len, write_into as process_start_write_into,
@@ -147,7 +148,7 @@ pub use time::{
     coarsen_clock_ns, Duration64, Time64, WallClockReading, WallTimeState,
     COARSE_CLOCK_GRANULARITY_NS, NANOS_PER_SEC,
 };
-pub use waitset::{WaitSetOp, WaitSourceKind};
+pub use waitset::{WaitSetOp, WaitSourceKind, WAITSET_CHILD_ANY};
 
 /// ABI version tag for the frozen `abi-v1` interface.
 ///

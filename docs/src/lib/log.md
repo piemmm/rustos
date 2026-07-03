@@ -427,7 +427,9 @@ driver-store endpoint ABIs rather than part of the C-callable surface:
 
 * `LOG_INGRESS_ENDPOINT` — the well-known synchronous call endpoint the journal
   service binds (unrestricted-sender: any process may write, since authority is
-  the attested origin, not the transport).
+  the attested origin, not the transport; the id is a reserved rendezvous —
+  `rustos_abi::ipc::is_reserved_endpoint` — so binding it requires
+  `CAP_IPC_BIND_PRIVILEGED` and a squatter can never capture log traffic).
 * `LogIngressRequest` — a caller's message plus its *advisory* level and stream
   discriminants, an optional trusted-emitter subsystem label, its
   component/tag/event-id, the source it *requests*, and a flat set of `data.*`

@@ -495,6 +495,7 @@ mod tests {
             10,
             ProcId::from_raw([0x10; 16]),
             summary,
+            rustos_abi::ORIGIN_CONSOLE_NONE,
         ))
     }
 

@@ -32,21 +32,37 @@ pub const SESSION_LAUNCH_FAILED: EventId = EventId(10_005);
 /// The controlling terminal could not be read or written. Login cannot run
 /// without a console, so it aborts (fail closed).
 pub const CONSOLE_ERROR: EventId = EventId(10_006);
+/// A per-invocation elevation request re-authenticated and its command ran
+/// to completion as the target account (`plans/CAPABILITY_USE.md` CU5).
+pub const ELEVATE_GRANTED: EventId = EventId(10_007);
+/// A per-invocation elevation request was refused — a foreign-console
+/// caller, a malformed request, a failed re-authentication (cause never
+/// disclosed to the caller, only audited), or a spawn refusal.
+pub const ELEVATE_REFUSED: EventId = EventId(10_008);
+/// This console's elevation endpoint could not be bound (no attested
+/// console, the reserved id already taken, or no endpoint registry), so
+/// sessions run without an elevation broker: an `elevate` request fails
+/// closed at the missing rendezvous rather than being served unattested.
+pub const ELEVATE_UNAVAILABLE: EventId = EventId(10_009);
 
 #[cfg(test)]
 mod tests {
     use super::{
-        AUTH_FAILED, CONSOLE_ERROR, LOCKED_OUT, LOGIN_RANGE_END, LOGIN_RANGE_START, SESSION_ENDED,
-        SESSION_LAUNCH_FAILED, SESSION_STARTED,
+        AUTH_FAILED, CONSOLE_ERROR, ELEVATE_GRANTED, ELEVATE_REFUSED, ELEVATE_UNAVAILABLE,
+        LOCKED_OUT, LOGIN_RANGE_END, LOGIN_RANGE_START, SESSION_ENDED, SESSION_LAUNCH_FAILED,
+        SESSION_STARTED,
     };
 
-    const ALL: [u32; 6] = [
+    const ALL: [u32; 9] = [
         SESSION_STARTED.0,
         AUTH_FAILED.0,
         LOCKED_OUT.0,
         SESSION_ENDED.0,
         SESSION_LAUNCH_FAILED.0,
         CONSOLE_ERROR.0,
+        ELEVATE_GRANTED.0,
+        ELEVATE_REFUSED.0,
+        ELEVATE_UNAVAILABLE.0,
     ];
 
     #[test]

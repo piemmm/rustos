@@ -122,6 +122,19 @@ pub trait ProcessWait: Sync {
     /// task — PID 1, a kernel thread — is ignored), so the parent's
     /// [`Self::wait`] can read it back. The default is a no-op.
     fn record_exit(&self, _task: TaskId, _code: i32) {}
+
+    /// Non-consuming readiness peek: classify the child of `parent` selected
+    /// by `pid` **without reaping it** (never parking, never mutating).
+    ///
+    /// The wait-set `Child` source is built on this: the member-add
+    /// owner-check refuses a specific `pid` that reports
+    /// [`ChildPeek::NoChild`], and the readiness scan reports the member
+    /// ready on [`ChildPeek::Reapable`]. The default fails closed with
+    /// [`ChildPeek::NoChild`] so the inert [`NullProcessWait`] (and any
+    /// producer that predates the wait-set) never fabricates a child.
+    fn child_state(&self, _parent: TaskId, _pid: i32) -> ChildPeek {
+        ChildPeek::NoChild
+    }
 }
 
 /// The process-wait producer installed before any real one exists.
@@ -156,6 +169,24 @@ struct ChildEntry {
     /// The child's exit code once it has exited (`Some`), or `None` while it
     /// is still running. A `Some` entry is a reapable zombie.
     exit: Option<i32>,
+}
+
+/// Outcome of a non-consuming [`ProcessTable::peek`] /
+/// [`ProcessWait::child_state`] readiness check.
+///
+/// The peek counterpart of [`Reap`]: it reports the same three-way
+/// classification but never removes the zombie, so a wait-set scan can
+/// observe "a child is reapable" without stealing the reap from the `wait`
+/// syscall that follows.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum ChildPeek {
+    /// A matching child has exited and is waiting to be reaped.
+    Reapable,
+    /// A matching child exists but has not exited yet.
+    Running,
+    /// `pid` names no child of the calling parent (and the parent has no
+    /// children at all, for [`rustos_abi::WAIT_PID_ANY`]).
+    NoChild,
 }
 
 /// Outcome of a single [`ProcessTable::reap`] attempt.
@@ -231,15 +262,55 @@ impl ProcessTable {
     /// names no child and fails closed with [`Reap::NoChild`].
     #[must_use]
     pub fn reap(&mut self, parent: TaskId, pid: i32) -> Reap {
+        let (any_match, reapable) = self.find(parent, pid);
+        if let Some((child_id, code)) = reapable {
+            self.children.remove(&child_id);
+            // Scheduler task ids stay well within `u32` for every supported
+            // configuration; a value that would not fit saturates rather
+            // than wrapping (never silently truncate).
+            let pid = u32::try_from(child_id).unwrap_or(u32::MAX);
+            Reap::Ready(ReapedChild { pid, code })
+        } else if any_match {
+            Reap::Blocked
+        } else {
+            Reap::NoChild
+        }
+    }
+
+    /// Non-consuming readiness peek: classify the child selected by `pid`
+    /// without reaping it.
+    ///
+    /// The wait-set `Child` source scans through this, so observing "a child
+    /// is reapable" never steals the reap from the `wait` syscall that
+    /// follows. It shares the private `find` scan with [`Self::reap`], so
+    /// the two can never disagree on which children match.
+    #[must_use]
+    pub fn peek(&self, parent: TaskId, pid: i32) -> ChildPeek {
+        let (any_match, reapable) = self.find(parent, pid);
+        if reapable.is_some() {
+            ChildPeek::Reapable
+        } else if any_match {
+            ChildPeek::Running
+        } else {
+            ChildPeek::NoChild
+        }
+    }
+
+    /// The one matching scan behind [`Self::reap`] and [`Self::peek`]:
+    /// resolve the `pid` selector (a specific child id, or
+    /// [`rustos_abi::WAIT_PID_ANY`]) and report whether any child of `parent`
+    /// matches and the first (lowest-id, for determinism) matching reapable
+    /// zombie's `(task id, exit code)`.
+    ///
+    /// A negative selector other than [`rustos_abi::WAIT_PID_ANY`] names no
+    /// child and fails closed as no match.
+    fn find(&self, parent: TaskId, pid: i32) -> (bool, Option<(u64, i32)>) {
         let target: Option<u64> = if pid == WAIT_PID_ANY {
             None
         } else {
-            // A specific child id must be a valid non-negative task id; any
-            // other negative selector (not WAIT_PID_ANY) names no child and fails
-            // closed rather than matching anything.
             match u64::try_from(pid) {
                 Ok(id) => Some(id),
-                Err(_) => return Reap::NoChild,
+                Err(_) => return (false, None),
             }
         };
 
@@ -260,19 +331,7 @@ impl ProcessTable {
                 break;
             }
         }
-
-        if let Some((child_id, code)) = reapable {
-            self.children.remove(&child_id);
-            // Scheduler task ids stay well within `u32` for every supported
-            // configuration; a value that would not fit saturates rather
-            // than wrapping (never silently truncate).
-            let pid = u32::try_from(child_id).unwrap_or(u32::MAX);
-            Reap::Ready(ReapedChild { pid, code })
-        } else if any_match {
-            Reap::Blocked
-        } else {
-            Reap::NoChild
-        }
+        (any_match, reapable)
     }
 
     /// The task id of a **live** (not-yet-exited) child of `parent` selected
@@ -394,6 +453,10 @@ where
         }
     }
 
+    fn child_state(&self, parent: TaskId, pid: i32) -> ChildPeek {
+        self.table.lock().peek(parent, pid)
+    }
+
     fn wait(&self, parent: TaskId, pid: i32) -> Result<ReapedChild, Errno> {
         loop {
             // Re-poll under the lock, then release it *before* parking so the
@@ -510,6 +573,55 @@ mod tests {
         assert_eq!(
             table.reap(TaskId(1), 2),
             Reap::Ready(ReapedChild { pid: 2, code: 0 })
+        );
+    }
+
+    #[test]
+    fn peek_classifies_without_consuming() {
+        let mut table = ProcessTable::new();
+        // No children at all: nothing to observe.
+        assert_eq!(table.peek(TaskId(1), WAIT_PID_ANY), ChildPeek::NoChild);
+        assert_eq!(table.peek(TaskId(1), 2), ChildPeek::NoChild);
+
+        table.register(TaskId(1), TaskId(2));
+        assert_eq!(table.peek(TaskId(1), WAIT_PID_ANY), ChildPeek::Running);
+        assert_eq!(table.peek(TaskId(1), 2), ChildPeek::Running);
+
+        table.record_exit(TaskId(2), 7);
+        assert_eq!(table.peek(TaskId(1), WAIT_PID_ANY), ChildPeek::Reapable);
+        assert_eq!(table.peek(TaskId(1), 2), ChildPeek::Reapable);
+        // The peek left the zombie in place: the reap that follows still
+        // finds it.
+        assert_eq!(table.peek(TaskId(1), 2), ChildPeek::Reapable);
+        assert_eq!(
+            table.reap(TaskId(1), 2),
+            Reap::Ready(ReapedChild { pid: 2, code: 7 })
+        );
+        assert_eq!(table.peek(TaskId(1), 2), ChildPeek::NoChild);
+    }
+
+    #[test]
+    fn peek_never_reveals_another_parents_child() {
+        let mut table = ProcessTable::new();
+        table.register(TaskId(1), TaskId(2));
+        table.record_exit(TaskId(2), 0);
+        // Task 9 is not the parent: the peek observes nothing, exactly as
+        // reap matches nothing.
+        assert_eq!(table.peek(TaskId(9), WAIT_PID_ANY), ChildPeek::NoChild);
+        assert_eq!(table.peek(TaskId(9), 2), ChildPeek::NoChild);
+        // A negative selector other than WAIT_PID_ANY names no child.
+        assert_eq!(table.peek(TaskId(1), -7), ChildPeek::NoChild);
+    }
+
+    #[test]
+    fn null_child_state_fails_closed() {
+        assert_eq!(
+            NULL_PROCESS_WAIT.child_state(TaskId(1), WAIT_PID_ANY),
+            ChildPeek::NoChild
+        );
+        assert_eq!(
+            NULL_PROCESS_WAIT.child_state(TaskId(1), 2),
+            ChildPeek::NoChild
         );
     }
 

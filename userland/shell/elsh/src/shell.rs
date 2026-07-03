@@ -20,8 +20,8 @@ use crate::builtin::{self, is_builtin, BuiltinContext};
 use crate::env::{split_prefix_assignments, Environment};
 use crate::error::ParseError;
 use crate::host::{
-    classify_redirect_target, Console, LaunchSpec, LimitStore, ProcessHost, RedirAction,
-    RedirTarget, ResolvedCommand, ResolvedRedirection, NULL_LIMIT_STORE,
+    classify_redirect_target, Console, Elevator, LaunchSpec, LimitStore, ProcessHost, RedirAction,
+    RedirTarget, ResolvedCommand, ResolvedRedirection, NULL_ELEVATOR, NULL_LIMIT_STORE,
 };
 use crate::job::{ExitStatus, JobState, JobTable, WaitOutcome};
 use crate::lexer::{FdSpec, Segment, Word};
@@ -50,6 +50,7 @@ pub struct Shell<'a> {
     host: &'a dyn ProcessHost,
     console: &'a dyn Console,
     limits: &'a dyn LimitStore,
+    elevator: &'a dyn Elevator,
     exit: Option<i32>,
     next_dyn_fd: u32,
 }
@@ -75,6 +76,7 @@ impl<'a> Shell<'a> {
             host,
             console,
             limits: &NULL_LIMIT_STORE,
+            elevator: &NULL_ELEVATOR,
             exit: None,
             next_dyn_fd: FIRST_DYN_FD,
         }
@@ -89,6 +91,17 @@ impl<'a> Shell<'a> {
     #[must_use]
     pub fn with_limits(mut self, limits: &'a dyn LimitStore) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// Install the elevation seam the `elevate` builtin drives.
+    ///
+    /// A shell built without one uses a fail-closed default, so `elevate`
+    /// reports [`rustos_abi::Errno::NotImplemented`] rather than pretending
+    /// a command ran. This mirrors [`Shell::with_limits`].
+    #[must_use]
+    pub fn with_elevator(mut self, elevator: &'a dyn Elevator) -> Self {
+        self.elevator = elevator;
         self
     }
 
@@ -287,6 +300,7 @@ impl<'a> Shell<'a> {
             host: self.host,
             console: self.console,
             limits: self.limits,
+            elevator: self.elevator,
             exit: &mut self.exit,
         };
         builtin::dispatch(&mut ctx, argv).unwrap_or(NOT_FOUND_STATUS)

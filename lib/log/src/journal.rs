@@ -824,7 +824,8 @@ mod tests {
     use alloc::vec::Vec;
     use core::cell::RefCell;
     use rustos_abi::{
-        CapabilitySummary, ProcId, Time64, TrustDomain, WallTimeState, BOOT_ID_LEN, PROC_ID_LEN,
+        CapabilitySummary, ProcId, Time64, TrustDomain, WallTimeState, BOOT_ID_LEN,
+        ORIGIN_CONSOLE_NONE, PROC_ID_LEN,
     };
 
     const MID: [u8; 16] = [0x11; 16];
@@ -865,6 +866,7 @@ mod tests {
             1,
             ProcId::KERNEL,
             CapabilitySummary::EMPTY,
+            ORIGIN_CONSOLE_NONE,
         )
     }
 
@@ -876,6 +878,7 @@ mod tests {
             42,
             ProcId::from_raw([0x5A; PROC_ID_LEN]),
             CapabilitySummary::EMPTY,
+            ORIGIN_CONSOLE_NONE,
         )
     }
 

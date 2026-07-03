@@ -41,9 +41,13 @@ extern crate alloc;
 mod program {
     use alloc::string::String;
 
+    use rustos_abi::elevate::{
+        elevate_endpoint, ElevateReply, ElevateRequest, ELEVATE_MAX_REQUEST, ELEVATE_REPLY_LEN,
+    };
     use rustos_abi::{Errno, LimitKind, ResourceLimit};
     use rustos_elsh::{
-        Console, LaunchSpec, LimitStore, Pid, ProcessHost, ReplInput, Shell, Signal, WaitOutcome,
+        Console, Elevator, LaunchSpec, LimitStore, Pid, ProcessHost, ReplInput, Shell, Signal,
+        WaitOutcome,
     };
     use rustos_rt::io::{Stderr, Stdout, Write};
 
@@ -200,6 +204,90 @@ mod program {
         }
     }
 
+    /// The `elevate` builtin's production seam (`plans/CAPABILITY_USE.md`
+    /// CU5): posts one synchronous request to this console's login
+    /// supervisor and blocks until the re-authenticated command has run.
+    ///
+    /// The shell holds no elevation authority — it derives the rendezvous
+    /// from its **own** kernel-attested console (`self_origin`, never a
+    /// claim), and the supervisor re-authenticates the offered credentials
+    /// before anything runs. A process with no console-backed streams has no
+    /// rendezvous and fails closed before posting.
+    struct RtElevator;
+
+    impl RtElevator {
+        /// Read one edited input line (without its terminator) from standard
+        /// input — the read line discipline's **buffer** half
+        /// ([`rustos_vt::line::LineEditor`]) over `rustos_rt::stdin`, exactly
+        /// as the REPL reads a command line. A zero-length read means the
+        /// stream closed and fails closed; a line longer than `buf` is
+        /// refused, never truncated.
+        fn read_line_raw(buf: &mut [u8]) -> Result<usize, Errno> {
+            let mut editor = rustos_vt::line::LineEditor::new();
+            let mut len = 0;
+            let mut byte = [0u8; 1];
+            loop {
+                if rustos_rt::stdin(&mut byte) == 0 {
+                    return Err(Errno::NotFound);
+                }
+                match editor.push(buf, &mut len, byte[0]) {
+                    rustos_vt::line::LineFeed::Pending => {}
+                    rustos_vt::line::LineFeed::Complete => return Ok(len),
+                    rustos_vt::line::LineFeed::TooLong => return Err(Errno::LengthOutOfRange),
+                }
+            }
+        }
+    }
+
+    impl Elevator for RtElevator {
+        fn read_secret(&self, buf: &mut [u8]) -> Result<usize, Errno> {
+            // A credential must never render: suppress the console echo for
+            // the read and fail closed if it cannot be suppressed.
+            let toggled = rustos_rt::set_echo(false);
+            if toggled < 0 {
+                return Err(errno_from(toggled));
+            }
+            let result = Self::read_line_raw(buf);
+            // Restoring echo is best-effort — it cannot compromise the
+            // secret already read. The un-echoed Return key advanced no
+            // line, so advance one ourselves.
+            let _ = rustos_rt::set_echo(true);
+            let _ = Stdout.write_all(b"\r\n");
+            result
+        }
+
+        fn elevate(&self, username: &str, password: &str, program: &str) -> Result<i32, Errno> {
+            let console = rustos_rt::self_origin().map_err(errno_from)?.console();
+            // `elevate_endpoint` refuses the "no console" sentinel, so a
+            // stream-fed shell (a pipe, a network session) cannot name a
+            // rendezvous it is not sitting on.
+            let endpoint = elevate_endpoint(console)?;
+            let request = ElevateRequest {
+                username,
+                password,
+                program,
+            };
+            let mut request_buf = [0u8; ELEVATE_MAX_REQUEST];
+            let encoded = match request.encode(&mut request_buf) {
+                Ok(len) => len,
+                Err(err) => {
+                    request_buf.fill(0);
+                    return Err(err);
+                }
+            };
+            let mut reply_buf = [0u8; ELEVATE_REPLY_LEN];
+            let posted = rustos_rt::ipc_call(endpoint, &request_buf[..encoded], &mut reply_buf);
+            // The request carries the offered password: zero it as soon as
+            // the exchange resolves, before the reply is even decoded.
+            request_buf.fill(0);
+            let reply_len = posted.map_err(errno_from)?;
+            match ElevateReply::decode(&reply_buf[..reply_len])? {
+                ElevateReply::Completed { exit_code } => Ok(exit_code),
+                ElevateReply::Refused(err) => Err(err),
+            }
+        }
+    }
+
     /// Program entry point. `rustos-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
@@ -211,8 +299,11 @@ mod program {
         let console = RtConsole;
         let host = RtProcessHost;
         let limits = RtLimitStore;
+        let elevator = RtElevator;
         let mut input = RtInput;
-        let mut shell = Shell::new(&host, &console).with_limits(&limits);
+        let mut shell = Shell::new(&host, &console)
+            .with_limits(&limits)
+            .with_elevator(&elevator);
         rustos_elsh::run_repl(&mut shell, &console, &mut input)
     }
 

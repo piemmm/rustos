@@ -1610,7 +1610,9 @@ impl rustos_log::Sink for LogSink {
 /// is the capability a caller must hold to post and `recv_caps` the
 /// capability this task must hold to [`call_recv`]/[`call_reply`];
 /// `max_request`/`max_reply`/`capacity` bound the endpoint. Binding a
-/// restricted-sender endpoint (non-empty `send_caps`) requires
+/// restricted-sender endpoint (non-empty `send_caps`) — or any **reserved**
+/// well-known service id ([`rustos_abi::ipc::is_reserved_endpoint`], which a
+/// squatter could otherwise claim ahead of the service) — requires
 /// `CAP_IPC_BIND_PRIVILEGED`, enforced kernel-side.
 ///
 /// Returns `0` on success, or the raw negative kernel result (`-errno`): a
@@ -2089,9 +2091,11 @@ pub fn waitset_create() -> i64 {
 ///
 /// `set` is the handle [`waitset_create`] minted. `op` is [`WaitSetOp::Add`]
 /// or [`WaitSetOp::Del`]; `kind` selects whether `id` names an IPC call
-/// endpoint the caller serves ([`WaitSourceKind::Endpoint`]) or an
+/// endpoint the caller serves ([`WaitSourceKind::Endpoint`]), an
 /// [`IrqHandle`](rustos_abi::IrqHandle) the caller bound
-/// ([`WaitSourceKind::Irq`]); `token` is the caller's opaque value reported by
+/// ([`WaitSourceKind::Irq`]), or a child of the caller awaiting reap — a
+/// PID or [`rustos_abi::waitset::WAITSET_CHILD_ANY`]
+/// ([`WaitSourceKind::Child`]); `token` is the caller's opaque value reported by
 /// [`waitset_wait`] when this member is ready. On `Add` the kernel resolves
 /// and **owner-checks** the named resource against the calling task before
 /// recording it, so the set can never observe authority the caller lacks.

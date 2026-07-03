@@ -46,25 +46,32 @@
 //!    supervision cycle (`plans/PI.md` X4 follow-on, the cross-port sibling
 //!    of the aarch64 `spawn_session_qemu_aarch64`).
 //!
-//! ## Why the PASS keys on four spawns and five audited syscalls
+//! ## Why the PASS keys on five spawns and six audited syscalls
 //!
-//! The **second** `ProcessSpawned` is the device manager (the first service
-//! `init` launches); the **third** proves the runtime producer authorised the
-//! login `spawn`, built an isolated address space, and admitted it (the X3b
-//! deliverable). The **fourth** `ProcessSpawned` is the supervision-cycle
+//! The second and third `ProcessSpawned` are the boot services `init`
+//! launches first (`sysinfod`, `devmgr`); the **fourth** proves the runtime
+//! producer authorised the login `spawn`, built an isolated address space,
+//! and admitted it (the X3b deliverable). The **fifth** `ProcessSpawned` is
+//! the supervision-cycle
 //! witness: it can only be emitted if `init`'s `wait` reaped the first login,
 //! returned to ring 3, and issued its relaunch `spawn` — so it proves the whole
-//! cycle, not just a single concurrent spawn. The five audited `SyscallInvoked`
-//! records are, in order, `init`'s `spawn` of `devmgr`, `init`'s `spawn` of
-//! login, login's `exit`, `init`'s `wait`, and `init`'s relaunch `spawn`
+//! cycle, not just a single concurrent spawn. The six certain audited
+//! `SyscallInvoked`
+//! records are `init`'s three service `spawn`s, login's `exit`, `init`'s
+//! `wait`, and `init`'s relaunch `spawn`
 //! (`init`'s `wait` only completes after login exits and is reaped, so login's
-//! `exit` necessarily precedes the `wait` record). A regression that never
-//! reaps+relaunches (`< 4` spawns / `< 5` audited syscalls) never reaches the
+//! `exit` necessarily precedes the `wait` record; the audited `call_create`
+//! binds — `sysinfod`'s query endpoint and, when a console is attested,
+//! login's elevation rendezvous — ride on top, absorbed by the `>=`
+//! thresholds). A regression that never
+//! reaps+relaunches (`< 5` spawns / `< 6` certain audited syscalls) never
+//! reaches the
 //! threshold, so the run times out and the harness reports `Outcome::Timeout`
 //! — the documented fail-loud behaviour.
 //! (`stream_write`/`stream_read` and `devmgr`'s `hw_tree_read`/`hw_tree_wait`
 //! are unaudited, and login's refused `users_db_read` audits as a *rejected*
-//! record, so neither `devmgr` after its spawn nor login but its `exit`
+//! record, so neither `devmgr` after its spawn nor login but its `exit` and
+//! its endpoint bind
 //! contributes a `SyscallInvoked`.)
 //!
 //! ## How it differs from the production binary
@@ -112,10 +119,10 @@ mod kernel {
 
     /// `EventId` the spawn caller emits once a ring-3 image is built. Pinned
     /// by the `event_ids_are_unique` test in `kernel/core/src/audit.rs`. PASS
-    /// requires four: PID 1 `init`, the `devmgr` service it launches first,
-    /// the login it then launches, and the login it **relaunches** after
-    /// reaping the first — the fourth is the witness that the
-    /// `wait`→reap→relaunch supervision cycle completed (`plans/PI.md` X4
+    /// requires five: PID 1 `init`, the `sysinfod` and `devmgr` services it
+    /// launches first, the login it then launches, and the login it
+    /// **relaunches** after reaping the first — the fifth is the witness that
+    /// the `wait`→reap→relaunch supervision cycle completed (`plans/PI.md` X4
     /// follow-on).
     const PROCESS_SPAWNED_EVENT_ID: EventId = EventId(4030);
 
@@ -131,8 +138,8 @@ mod kernel {
 
     /// Sink that replays every event through [`SERIAL_SINK`] (so the QEMU
     /// transcript captures the full boot + spawn timeline) and reports PASS to
-    /// QEMU once **four** processes were built and **five** audited syscalls
-    /// have run — proving PID 1 launched the device manager, launched the
+    /// QEMU once **five** processes were built and **six** audited syscalls
+    /// have run — proving PID 1 launched the boot services, launched the
     /// session into its own isolated ring-3 space, the session executed
     /// there, and `init` reaped it and relaunched a fresh session (the full
     /// supervision cycle, `plans/PI.md` X4 follow-on).
@@ -146,7 +153,7 @@ mod kernel {
             } else if event.id == SYSCALL_INVOKED_EVENT_ID {
                 SYSCALLS.fetch_add(1, Ordering::AcqRel);
             }
-            if SPAWNED.load(Ordering::Acquire) >= 4 && SYSCALLS.load(Ordering::Acquire) >= 5 {
+            if SPAWNED.load(Ordering::Acquire) >= 5 && SYSCALLS.load(Ordering::Acquire) >= 6 {
                 qemu_exit::exit_success();
             }
         }

@@ -285,47 +285,33 @@ fn parse_value(text: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::ulimit;
-    use crate::builtin::BuiltinContext;
-    use crate::env::Environment;
-    use crate::job::JobTable;
-    use crate::test_support::{MemoryLimitStore, RecordingConsole, ScriptedHost};
-    use alloc::string::{String, ToString};
+    use crate::test_support::Fixture as SharedFixture;
     use alloc::vec::Vec;
     use rustos_abi::{Errno, LimitKind, ResourceLimit};
 
-    struct Fixture {
-        env: Environment,
-        jobs: JobTable,
-        host: ScriptedHost,
-        console: RecordingConsole,
-        limits: MemoryLimitStore,
-        exit: Option<i32>,
+    /// The shared fixture with `ulimit`'s operand-only calling convention:
+    /// `run` prepends the builtin name and unwraps the dispatch (the name is
+    /// always recognised), so the assertions below read as invocations.
+    struct Fixture(SharedFixture<'static>);
+
+    impl core::ops::Deref for Fixture {
+        type Target = SharedFixture<'static>;
+
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
     }
 
     impl Fixture {
         fn new() -> Self {
-            Self {
-                env: Environment::new(),
-                jobs: JobTable::new(),
-                host: ScriptedHost::new(),
-                console: RecordingConsole::new(),
-                limits: MemoryLimitStore::new(),
-                exit: None,
-            }
+            Self(SharedFixture::new())
         }
 
         fn run(&mut self, words: &[&str]) -> i32 {
-            let args: Vec<String> = words.iter().map(|w| (*w).to_string()).collect();
-            let mut ctx = BuiltinContext {
-                env: &mut self.env,
-                jobs: &mut self.jobs,
-                host: &self.host,
-                console: &self.console,
-                limits: &self.limits,
-                exit: &mut self.exit,
-            };
-            ulimit(&mut ctx, &args)
+            let mut argv = Vec::with_capacity(words.len() + 1);
+            argv.push("ulimit");
+            argv.extend_from_slice(words);
+            self.0.run(&argv).expect("ulimit is a builtin")
         }
     }
 

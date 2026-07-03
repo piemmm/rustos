@@ -43,7 +43,8 @@ pure-Rust userland runtime `rustos-rt`, and at startup:
   writes each closed segment as its own immutable file under
   `/System/Logs/<stream>/`, deriving the placement from the segment's own
   header and `fs_sync`-ing it;
-- binds `LOG_INGRESS_ENDPOINT` (unrestricted-sender) and serves: receive a
+- binds `LOG_INGRESS_ENDPOINT` (unrestricted-sender; the reserved id needs
+  `CAP_IPC_BIND_PRIVILEGED` to bind) and serves: receive a
   request, attest the peer origin (`call_peer_origin`), stamp the current
   monotonic + wall time, and hand it to `serve`.
 

@@ -27,8 +27,18 @@
 //!   so the prompt stays up and **every** login is refused (fail closed, never invent an account).
 //! * [`rustos_login::SessionLauncher`] through the `spawn` syscall: the
 //!   authenticated
-//!   record's **shell of choice** is spawned and `wait`ed on; the session's
+//!   record's **shell of choice** is spawned and supervised; the session's
 //!   exit code is reported back to the login loop.
+//! * [`rustos_login::handle_elevate_request`] over this console's reserved
+//!   elevation call endpoint (`plans/CAPABILITY_USE.md` CU5): while the
+//!   session runs, the supervision wait multiplexes the shell child with the
+//!   endpoint, so an `elevate <user> <program>` request from the session's
+//!   shell is re-authenticated (same authenticator as the prompt,
+//!   timing-equalised, refusals indistinguishable) and its command run as
+//!   the target account while the shell blocks in its `ipc_call`. Binding
+//!   the reserved id requires login's `CAP_IPC_BIND_PRIVILEGED`; when no
+//!   rendezvous can be bound the failure is audited and sessions simply run
+//!   without a broker (requests fail closed at the missing endpoint).
 //!
 //! Each completed session (or exhausted attempt budget) loops back to a
 //! fresh `login:` prompt — login supervises this console's sessions. A dead
@@ -45,10 +55,16 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
-    use rustos_abi::{Errno, CONSOLE_INHERIT};
+    use rustos_abi::elevate::{elevate_endpoint, ELEVATE_MAX_REQUEST, ELEVATE_REPLY_LEN};
+    use rustos_abi::{
+        Errno, Origin, WaitSetOp, WaitSourceKind, CONSOLE_INHERIT, ORIGIN_CONSOLE_NONE,
+        ORIGIN_WIRE_LEN,
+    };
+    use rustos_caps::CapabilitySet;
+    use rustos_login::elevate::ElevateLauncher;
     use rustos_login::{
-        supervise, AuthenticatedUser, Authenticator, DbLoad, Login, LoginConfig, LoginError,
-        Prompt, SessionKind, SessionLauncher, SessionOutcome,
+        events, handle_elevate_request, supervise, AuthenticatedUser, Authenticator, DbLoad, Login,
+        LoginConfig, LoginError, Prompt, SessionKind, SessionLauncher, SessionOutcome,
     };
     use rustos_rt::io::{Stdout, Write};
     use rustos_rt::LogSink;
@@ -154,28 +170,138 @@ mod program {
             .unwrap_or(Errno::NotImplemented)
     }
 
-    /// Launches the authenticated record's shell of choice **as the
-    /// authenticated user** through the `spawn` syscall and blocks in `wait`
-    /// until the session ends (`plans/SPAWN.md` SP3/SP6; `PREREQUISITES.md`
-    /// P-C spawn-as-user). Login authenticated the account, so it drops the
-    /// shell into that user's kernel-attested credential (uid, primary gid,
-    /// supplementary groups) via `spawn_as` — privilege only ever switches
-    /// user at process creation, never by a running process mutating its own
-    /// identity (no setuid-self). The kernel resolves the full credential
-    /// from the authoritative identity table, so login chooses *which* user
-    /// but never fabricates the identity; it holds `CAP_SPAWN_AS_USER`, and
-    /// the shell still receives only its own registered program grant
-    /// intersected with that user's ceiling. The child stays on login's own
-    /// console (`CONSOLE_INHERIT`).
-    struct RtLauncher;
+    /// The waitset token naming this console's elevation call endpoint.
+    const TOKEN_ELEVATE: u64 = 1;
+    /// The waitset token naming the running session's shell child.
+    const TOKEN_CHILD: u64 = 2;
 
-    impl SessionLauncher for RtLauncher {
-        fn launch(
-            &self,
-            user: &AuthenticatedUser,
-            kind: SessionKind,
-        ) -> Result<SessionOutcome, Errno> {
-            let ret = rustos_rt::spawn_as(user.shell.as_bytes(), CONSOLE_INHERIT, user.uid.0);
+    /// This console's bound elevation rendezvous: the call endpoint id the
+    /// session's shell posts `elevate` requests to, and the wait-set that
+    /// multiplexes those requests with the shell child's exit.
+    ///
+    /// Bound **once** at startup ([`ElevationContext::bind`]): a call
+    /// endpoint lives until its owning task exits (there is no destroy
+    /// syscall, exactly as `sysinfod`/`journald` hold theirs), and the one
+    /// wait-set is reused across sessions — only the per-session child
+    /// member is added and removed — so supervision allocates no kernel
+    /// object per round.
+    struct ElevationContext {
+        /// This console's `elevate_endpoint` id, already bound.
+        endpoint: u64,
+        /// The reusable wait-set holding the endpoint member.
+        waitset: u64,
+        /// Login's own kernel-attested console index: the placement every
+        /// requester's attested console is checked against.
+        own_console: u64,
+    }
+
+    impl ElevationContext {
+        /// Derive this console's rendezvous from login's **own** attested
+        /// origin and bind it, wiring the reusable wait-set.
+        ///
+        /// Every failure returns `None` — sessions then run without an
+        /// elevation broker and a shell's request fails closed at the
+        /// missing endpoint — and is audited as
+        /// [`events::ELEVATE_UNAVAILABLE`] by the caller: a process with no
+        /// console-backed streams has no rendezvous to serve, and a bind
+        /// refusal (id squatted ahead of us, no registry) must never be
+        /// "recovered" by serving elsewhere.
+        fn bind() -> Option<Self> {
+            let own_console = rustos_rt::self_origin().ok()?.console();
+            if own_console == ORIGIN_CONSOLE_NONE {
+                return None;
+            }
+            let endpoint = elevate_endpoint(own_console).ok()?;
+            let empty = CapabilitySet::empty();
+            // Unrestricted senders: any process may post — placement and
+            // re-authentication are enforced per request by the broker.
+            // Capacity 1: elevation is serialised per console by design, so
+            // a second concurrent post fails closed instead of queueing.
+            if rustos_rt::call_create(
+                endpoint,
+                &empty,
+                &empty,
+                ELEVATE_MAX_REQUEST,
+                ELEVATE_REPLY_LEN,
+                1,
+            ) != 0
+            {
+                return None;
+            }
+            let waitset = rustos_rt::waitset_create();
+            if waitset < 0 {
+                return None;
+            }
+            #[allow(clippy::cast_sign_loss)] // `waitset >= 0` is the handle encoding.
+            let waitset = waitset as u64;
+            if rustos_rt::waitset_ctl(
+                waitset,
+                WaitSetOp::Add,
+                WaitSourceKind::Endpoint,
+                endpoint,
+                TOKEN_ELEVATE,
+            ) != 0
+            {
+                return None;
+            }
+            Some(Self {
+                endpoint,
+                waitset,
+                own_console,
+            })
+        }
+
+        /// Receive, decide, and answer one posted elevation request.
+        ///
+        /// The request buffer carries an offered password, so it is zeroed
+        /// before this returns on every path. A recv failure is dropped
+        /// (the poster's `ipc_call` observes its error); a reply failure is
+        /// dropped likewise — the decision and its audit record already
+        /// stand.
+        fn serve_one(&self, authenticator: &dyn Authenticator, sink: &LogSink) {
+            let mut request = [0u8; ELEVATE_MAX_REQUEST];
+            let mut ticket = 0u64;
+            let Ok(len) = rustos_rt::call_recv(self.endpoint, &mut request, &mut ticket) else {
+                request.fill(0);
+                return;
+            };
+            // Attest the caller's placement. A failure to read the peer
+            // origin fails closed as "no console", which the broker refuses.
+            let mut origin_buf = [0u8; ORIGIN_WIRE_LEN];
+            let peer_console =
+                match rustos_rt::call_peer_origin(self.endpoint, ticket, &mut origin_buf) {
+                    Ok(n) => match Origin::from_bytes(&origin_buf[..n]) {
+                        Ok(origin) => origin.console(),
+                        Err(_) => ORIGIN_CONSOLE_NONE,
+                    },
+                    Err(_) => ORIGIN_CONSOLE_NONE,
+                };
+            let reply = handle_elevate_request(
+                &request[..len],
+                peer_console,
+                self.own_console,
+                authenticator,
+                &RtElevateLauncher,
+                sink,
+            );
+            request.fill(0);
+            let mut reply_buf = [0u8; ELEVATE_REPLY_LEN];
+            if let Ok(total) = reply.encode(&mut reply_buf) {
+                let _ = rustos_rt::call_reply(self.endpoint, ticket, &reply_buf[..total]);
+            }
+        }
+    }
+
+    /// Runs one re-authenticated elevated command: `spawn_as` the target
+    /// account on this console, then a targeted `wait` for exactly that
+    /// child. The session's shell is blocked in its `ipc_call` for the
+    /// duration (a foreground elevated command, serialised per console), so
+    /// the only child that can exit here is the elevated one.
+    struct RtElevateLauncher;
+
+    impl ElevateLauncher for RtElevateLauncher {
+        fn run_as(&self, program: &str, uid: u32) -> Result<i32, Errno> {
+            let ret = rustos_rt::spawn_as(program.as_bytes(), CONSOLE_INHERIT, uid);
             if ret < 0 {
                 return Err(errno_from(ret));
             }
@@ -187,10 +313,113 @@ mod program {
             if wret < 0 {
                 return Err(errno_from(wret));
             }
-            Ok(SessionOutcome {
-                kind,
-                exit_code: status,
-            })
+            Ok(status)
+        }
+    }
+
+    /// Launches the authenticated record's shell of choice **as the
+    /// authenticated user** through the `spawn` syscall and supervises the
+    /// session until it ends (`plans/SPAWN.md` SP3/SP6; `PREREQUISITES.md`
+    /// P-C spawn-as-user). Login authenticated the account, so it drops the
+    /// shell into that user's kernel-attested credential (uid, primary gid,
+    /// supplementary groups) via `spawn_as` — privilege only ever switches
+    /// user at process creation, never by a running process mutating its own
+    /// identity (no setuid-self). The kernel resolves the full credential
+    /// from the authoritative identity table, so login chooses *which* user
+    /// but never fabricates the identity; it holds `CAP_SPAWN_AS_USER`, and
+    /// the shell still receives only its own registered program grant
+    /// intersected with that user's ceiling. The child stays on login's own
+    /// console (`CONSOLE_INHERIT`).
+    ///
+    /// With an [`ElevationContext`] bound, the wait multiplexes the shell
+    /// child with this console's elevation endpoint (`plans/CAPABILITY_USE.md`
+    /// CU5): a posted request is re-authenticated and served while the shell
+    /// blocks in its `ipc_call`, and the shell's own exit ends the session
+    /// exactly as before. Without one (no console-backed streams, bind
+    /// refused) the launcher degrades to the plain blocking `wait` — the
+    /// session is unaffected; only elevation is unavailable, audited at
+    /// startup.
+    struct RtLauncher<'a> {
+        elevation: Option<&'a ElevationContext>,
+        authenticator: &'a dyn Authenticator,
+        sink: &'a LogSink,
+    }
+
+    impl RtLauncher<'_> {
+        /// Supervise the running shell `pid`: serve elevation requests as
+        /// they arrive and return the shell's exit status when it ends.
+        ///
+        /// Falls back to the plain blocking `wait` when the wait-set cannot
+        /// observe the child (member add or wait failure): supervision
+        /// degrades to exactly the pre-elevation behaviour rather than
+        /// spinning or abandoning the session.
+        fn supervise_session(&self, context: &ElevationContext, pid: i32) -> Result<i32, Errno> {
+            let child_id = u64::from(pid.unsigned_abs());
+            if rustos_rt::waitset_ctl(
+                context.waitset,
+                WaitSetOp::Add,
+                WaitSourceKind::Child,
+                child_id,
+                TOKEN_CHILD,
+            ) != 0
+            {
+                return self.plain_wait(pid);
+            }
+            let status = loop {
+                let mut token = 0u64;
+                let ret = rustos_rt::waitset_wait(context.waitset, u64::MAX, &mut token);
+                if ret != 0 {
+                    // An unexpected wait failure must not wedge the session:
+                    // fall back to the plain blocking wait.
+                    break self.plain_wait(pid);
+                }
+                if token == TOKEN_CHILD {
+                    break self.plain_wait(pid);
+                }
+                context.serve_one(self.authenticator, self.sink);
+            };
+            // Remove the reaped child's member so the reusable set never
+            // carries a stale PID into the next session.
+            let _ = rustos_rt::waitset_ctl(
+                context.waitset,
+                WaitSetOp::Del,
+                WaitSourceKind::Child,
+                child_id,
+                TOKEN_CHILD,
+            );
+            status
+        }
+
+        /// The targeted blocking reap of the session's shell.
+        fn plain_wait(&self, pid: i32) -> Result<i32, Errno> {
+            let mut status = 0i32;
+            let wret = rustos_rt::wait(pid, &mut status);
+            if wret < 0 {
+                return Err(errno_from(wret));
+            }
+            Ok(status)
+        }
+    }
+
+    impl SessionLauncher for RtLauncher<'_> {
+        fn launch(
+            &self,
+            user: &AuthenticatedUser,
+            kind: SessionKind,
+        ) -> Result<SessionOutcome, Errno> {
+            let ret = rustos_rt::spawn_as(user.shell.as_bytes(), CONSOLE_INHERIT, user.uid.0);
+            if ret < 0 {
+                return Err(errno_from(ret));
+            }
+            // `ret >= 0` here, so the cast preserves the PID value; PIDs
+            // fit an `i32` on this ABI.
+            #[allow(clippy::cast_possible_truncation)]
+            let pid = ret as i32;
+            let exit_code = match self.elevation {
+                Some(context) => self.supervise_session(context, pid)?,
+                None => self.plain_wait(pid)?,
+            };
+            Ok(SessionOutcome { kind, exit_code })
         }
     }
 
@@ -243,10 +472,21 @@ mod program {
     /// Run one login round: prompt → authenticate → run the session to
     /// completion against `authenticator`. Returns `true` to open another
     /// round, `false` when the console is dead and the process should exit
-    /// (PID 1 relaunches it).
-    fn login_round(authenticator: &dyn Authenticator, sink: &LogSink) -> bool {
+    /// (PID 1 relaunches it). The session launcher serves this console's
+    /// elevation endpoint (when bound) with the **same** authenticator the
+    /// prompt used, so an elevation re-authenticates against exactly the
+    /// database this round authenticated against.
+    fn login_round(
+        elevation: Option<&ElevationContext>,
+        authenticator: &dyn Authenticator,
+        sink: &LogSink,
+    ) -> bool {
         let prompt = RtPrompt;
-        let launcher = RtLauncher;
+        let launcher = RtLauncher {
+            elevation,
+            authenticator,
+            sink,
+        };
         let login = Login::new(LoginConfig {
             max_attempts: MAX_ATTEMPTS,
             // The graphical session rides the P10 WM work; until a display
@@ -282,6 +522,22 @@ mod program {
         // Route each security-relevant decision through the kernel
         // diagnostic log (the serial UART on a debug build) rather than fd 2. The hash-chained system audit log stays kernel-side; this is the diagnostic channel.
         let sink = LogSink;
+        // Bind this console's elevation rendezvous once for the process's
+        // lifetime (the endpoint dies with the task). Failure is audited and
+        // sessions run without a broker — an `elevate` request then fails
+        // closed at the missing endpoint, never served unattested.
+        let elevation = ElevationContext::bind();
+        if elevation.is_none() {
+            rustos_log::log(
+                &sink,
+                &rustos_log::Event {
+                    level: rustos_log::Level::Warn,
+                    id: events::ELEVATE_UNAVAILABLE,
+                    message: "elevation endpoint unavailable; sessions run without a broker",
+                    fields: &[],
+                },
+            );
+        }
         // While the database read is `Pending` (the encrypted root is still
         // being unlocked) `supervise` calls this to **block** until the
         // database becomes available, so the in-kernel unlock kthread runs
@@ -296,7 +552,7 @@ mod program {
             || {
                 let _ = rustos_rt::users_db_wait(DB_WAIT_TIMEOUT_NS);
             },
-            |authenticator| login_round(authenticator, &sink),
+            |authenticator| login_round(elevation.as_ref(), authenticator, &sink),
         );
         1
     }

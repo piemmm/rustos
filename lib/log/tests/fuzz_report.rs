@@ -19,7 +19,7 @@
 
 use rustos_abi::{
     BootId, CapabilitySummary, Duration64, FieldName, FieldValue, Origin, ProcId, TrustDomain,
-    WallClockReading, BOOT_ID_LEN,
+    WallClockReading, BOOT_ID_LEN, ORIGIN_CONSOLE_NONE,
 };
 use rustos_log::{
     decode_record, render_json, render_markdown, render_table_row, CallerContent,
@@ -131,6 +131,7 @@ fn exercise_hostile(raw: &[u8], frame: &RecordFrame, level: Level) {
             42,
             ProcId::from_raw([7u8; 16]),
             CapabilitySummary::from_raw([0u8; 32]),
+            ORIGIN_CONSOLE_NONE,
         ),
         source_name: "user.1000.proc.0707",
         caller: CallerContent {

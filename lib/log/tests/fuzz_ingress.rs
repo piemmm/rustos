@@ -17,7 +17,7 @@
 
 use rustos_abi::{
     CapabilitySummary, Origin, ProcId, Time64, TrustDomain, WallClockReading, WallTimeState,
-    PROC_ID_LEN,
+    ORIGIN_CONSOLE_NONE, PROC_ID_LEN,
 };
 use rustos_log::{
     reserved_source_prefix, CallerContent, DictionaryBuilder, DictionaryView, Ingress, Level,
@@ -80,6 +80,7 @@ fn exercise(word0: u64, word1: u64, ingress: &mut Ingress) {
             1,
             ProcId::KERNEL,
             CapabilitySummary::EMPTY,
+            ORIGIN_CONSOLE_NONE,
         )
     } else {
         let uid = u32::try_from((word0 >> 1) & 0xFFFF_FFFF).unwrap_or(0);
@@ -90,6 +91,7 @@ fn exercise(word0: u64, word1: u64, ingress: &mut Ingress) {
             42,
             ProcId::from_raw([(word0 >> 8).to_le_bytes()[0]; PROC_ID_LEN]),
             CapabilitySummary::EMPTY,
+            ORIGIN_CONSOLE_NONE,
         )
     };
 

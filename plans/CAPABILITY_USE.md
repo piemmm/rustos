@@ -162,8 +162,8 @@ The life of a capability, from disk to exercise to revocation:
   and seeded as the debug root grant (`tools/mkimage::debug_users_db`)
   and the QEMU users-root fixture account — B3 is fixed (CU3).
 
-All three defects are fixed and user management (CU4) is live; the
-remaining stages extend the lifecycle (elevation CU5, desktop CU6).
+All three defects are fixed; user management (CU4) and per-invocation
+elevation (CU5) are live. The remaining stage is the desktop (CU6).
 
 ---
 
@@ -241,14 +241,14 @@ account, through the one spawn-as-user holder, after re-authentication**:
   account* — on another console, or by exiting the session. The debug image
   has exactly one account and it is the administrator, so bring-up needs
   nothing further.
-- CU5 adds the deliberate per-invocation form: an `elevate <cmd>`-style
-  request the shell forwards to the session service (login), which
-  **re-authenticates the target account's credentials** and spawns `<cmd>`
-  as that account — the same `CAP_SPAWN_AS_USER` + `CAP_USERS_READ` path as
-  a fresh login, one more caller of the existing gates, no new capability
-  and no new kernel surface. The spawned command's set is still
-  `its manifest ∩ the admin ceiling`; the requesting shell gains nothing.
-  Every elevation attempt (grant or refusal) is audited.
+- CU5 adds the deliberate per-invocation form: an `elevate <user> <program>`
+  request the shell forwards to its console's session supervisor (login),
+  which **re-authenticates the target account's credentials** and spawns
+  the program as that account — the same `CAP_SPAWN_AS_USER` +
+  `CAP_USERS_READ` path as a fresh login, one more caller of the existing
+  gates, no new capability. The spawned command's set is still
+  `its manifest ∩ the target account's ceiling`; the requesting shell gains
+  nothing. Every elevation attempt (grant or refusal) is audited.
 
 ### 4.5 Manifests: today's registry, tomorrow's bundles
 
@@ -473,17 +473,54 @@ exist from CU3).
 
 ### CU5 — per-invocation elevation (`elevate`)
 
-**Status: planned.**
+**Status: done.**
 
-- The §4.4 broker path: shell → session service IPC → re-authentication →
-  `CAP_SPAWN_AS_USER` spawn of the requested command under the target
-  account, audited both ways. No new capability, no new kernel primitive;
-  the IPC endpoint is the new surface and is introduced with both ends
-  live (`AGENTS.md` §5.2).
-- Tests: correct password elevates and the child's set is
-  `manifest ∩ admin ceiling`; wrong password / locked account refused
-  indistinguishably; the requesting shell's own set is unchanged; audit
-  entries for both outcomes.
+- The §4.4 broker path is live. The shell's `elevate <user> <program>`
+  builtin (`userland/shell/elsh`: `Elevator` seam, `elevate.rs`, production
+  seam in the `Run` binary) prompts for the password echo-off, posts one
+  synchronous `ipc_call` to its console's login supervisor, and blocks — a
+  foreground elevated command — until the re-authenticated program has run
+  as the target account; its exit code becomes `$?`. The requesting
+  shell's set is untouched; the elevated child's set is derived kernel-side
+  as `its manifest ∩ the target account's ceiling`, exactly as at login.
+- Wire contract: `lib/abi/src/elevate.rs` — `ElevateRequest`/`ElevateReply`
+  (fail-closed decode, version-checked) and the per-console rendezvous
+  `elevate_endpoint(console) = ELEVATE_ENDPOINT_BASE + console`, which
+  refuses the "no console" sentinel. Both ends derive the endpoint from
+  their **own** kernel-attested `Origin::console` (never a claim), and the
+  supervisor additionally refuses any caller whose attested console is not
+  its own — before the request bytes are even parsed.
+- Kernel extensions (the original "no new kernel primitive" clause was
+  unsatisfiable — single-threaded login could not wait on "request posted"
+  and "child exited" at once, and one global endpoint id cannot serve N
+  consoles): the owner-checked `WaitSourceKind::Child` wait-set member (a
+  non-consuming reapable-child peek, PID or `WAITSET_CHILD_ANY`) and the
+  kernel-attested console index on `Origin`. Login supervises a session as
+  waitset{elevate endpoint, shell child}, serving requests while the shell
+  blocks in its call; elevation serialises per console (endpoint capacity
+  1, second concurrent post fails closed) and stays concurrent across
+  consoles. A login without a bindable rendezvous degrades to broker-less
+  sessions and audits `ELEVATE_UNAVAILABLE`.
+- Reserved-rendezvous hardening: `rustos_abi::ipc::is_reserved_endpoint`
+  is the one definition of the reserved well-known call-endpoint ids
+  (driver store, log ingress, mailbox, sysinfo, the elevate range), and
+  `CallEndpoint::create` refuses to bind any of them without
+  `CAP_IPC_BIND_PRIVILEGED` — even as an open bind — so an unprivileged
+  squatter can never receive a service's traffic (an elevation request
+  carries an offered password). `LOGIN_MANIFEST` and `SYSINFOD_MANIFEST`
+  carry the capability; the kernel-side binders already held it.
+- Audit: `ELEVATE_GRANTED` / `ELEVATE_REFUSED` / `ELEVATE_UNAVAILABLE`
+  (login's 10_007–10_009); refusal causes (wrong password, unknown or
+  locked account) are audited but never disclosed — the requester sees one
+  indistinguishable `PermissionDenied`.
+- Tests: abi encode/decode round-trip and fail-closed rejects; the login
+  broker decision table host-tested (grant + audit, foreign console
+  refused before parsing, malformed refused without authentication,
+  indistinguishable auth refusals, spawn refusal reported verbatim); the
+  shell builtin host-tested over the shared fixture (prompt + post +
+  exit-code, refusal reporting, no post after a failed secret read, usage
+  fail-closed, fail-closed default seam); kernel tests for the reserved-id
+  squat denial / privileged allow and the `Child` wait-set member.
 
 ### CU6 — desktop session capabilities
 

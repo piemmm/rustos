@@ -14,7 +14,9 @@
 //!
 //! `sysinfod` is the only server of the `sysinfo` API. At startup it binds the
 //! well-known [`rustos_abi::sysinfo::SYSINFO_ENDPOINT`] (an unrestricted-sender
-//! call endpoint — any process may query) and then blocks in a serve loop:
+//! call endpoint — any process may query, but the id is a reserved rendezvous,
+//! so binding it needs the manifest's `CAP_IPC_BIND_PRIVILEGED`: a squatter
+//! could otherwise serve forged system state) and then blocks in a serve loop:
 //! receive a request, read the caller's kernel-attested `Origin`
 //! (`call_peer_origin`, never a caller claim), run the capability-checked
 //! [`rustos_sysinfod::serve`] dispatcher against the production source that

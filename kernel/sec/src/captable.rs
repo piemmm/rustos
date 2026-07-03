@@ -23,7 +23,7 @@ extern crate alloc;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
-use rustos_abi::{CapabilitySummary, Errno, Origin, ProcId, TrustDomain};
+use rustos_abi::{CapabilitySummary, Errno, Origin, ProcId, TrustDomain, ORIGIN_CONSOLE_NONE};
 use rustos_caps::{CapabilitySet, CapabilityToken, RevocationEpoch};
 use rustos_crypto::Ed25519PublicKey;
 use rustos_log::{Field, Sink};
@@ -198,6 +198,15 @@ pub struct TaskCapabilities {
     /// that reused a numeric id even within one monotonic epoch. It confers no
     /// capability.
     start_time: u64,
+    /// Kernel-attested installed-console index backing the task's standard
+    /// streams. Defaults to [`ORIGIN_CONSOLE_NONE`], the sentinel for a task
+    /// whose streams are not console-backed (a driver process, a kernel
+    /// thread). The production process-admit path sets it through
+    /// [`Self::with_console`] from the console the kernel itself resolved
+    /// for the child's descriptor table — never from caller-supplied bytes —
+    /// so a per-console service may trust the origin to place its caller on
+    /// a console. It confers no capability.
+    console: u64,
 }
 
 impl TaskCapabilities {
@@ -254,6 +263,7 @@ impl TaskCapabilities {
             parent_proc_id: ProcId::KERNEL,
             name: ProcName::EMPTY,
             start_time: 0,
+            console: ORIGIN_CONSOLE_NONE,
         }
     }
 
@@ -390,6 +400,27 @@ impl TaskCapabilities {
         self
     }
 
+    /// Attach the kernel-resolved installed-console index backing this
+    /// task's standard streams, consumed and returned like
+    /// [`Self::with_proc_id`]. Only the kernel's process-admit sites call
+    /// it, passing the console the spawn path itself resolved for the
+    /// child's descriptor table — never a caller-supplied value. A record
+    /// never given one keeps the [`ORIGIN_CONSOLE_NONE`] "not
+    /// console-backed" sentinel.
+    #[must_use]
+    pub fn with_console(mut self, console: u64) -> Self {
+        self.console = console;
+        self
+    }
+
+    /// The task's kernel-attested installed-console index, or
+    /// [`ORIGIN_CONSOLE_NONE`] when its standard streams are not
+    /// console-backed.
+    #[must_use]
+    pub fn console(&self) -> u64 {
+        self.console
+    }
+
     /// The task's kernel-attested monotonic admission timestamp.
     ///
     /// Returns `0` for a boot or kernel principal admitted before
@@ -436,6 +467,7 @@ impl TaskCapabilities {
             self.task.0,
             self.proc_id,
             capabilities,
+            self.console,
         )
     }
 

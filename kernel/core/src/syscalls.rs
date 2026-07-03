@@ -83,7 +83,7 @@ use rustos_abi::{
     ResourceLimit, Signal, StreamMode, SyscallNumber, Time64, WaitFlags, WaitSetOp, WaitSourceKind,
     WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, FS_IO_MAX, FS_NAME_MAX,
     FS_PATH_MAX, LOG_FIELDS_MAX, LOG_RECORD_MAX, PROC_ID_LEN, RANDOM_REQUEST_MAX_BYTES,
-    RESOURCE_REF_MAX, SPAWN_UID_INHERIT, TERMINAL_SIZE_WIRE_LEN,
+    RESOURCE_REF_MAX, SPAWN_UID_INHERIT, TERMINAL_SIZE_WIRE_LEN, WAITSET_CHILD_ANY, WAIT_PID_ANY,
 };
 use rustos_caps::CapabilitySet;
 use rustos_kernel_ipc::{
@@ -126,7 +126,7 @@ use crate::input_focus::{InputFocus, NULL_INPUT_FOCUS};
 use crate::introspect::{IntrospectSource, NULL_INTROSPECT};
 use crate::memmap::{MemMap, NULL_MEM_MAP};
 use crate::procsignal::{ProcessSignal, NULL_PROCESS_SIGNAL};
-use crate::procwait::{ProcessWait, NULL_PROCESS_WAIT};
+use crate::procwait::{ChildPeek, ProcessWait, NULL_PROCESS_WAIT};
 use crate::random::{reserve_errno, RandomReserve};
 use crate::rlimit::{authorize_set, LimitSet};
 use crate::spawn::{
@@ -135,6 +135,18 @@ use crate::spawn::{
 use crate::useradmin::{UsersAdmin, NULL_USERS_ADMIN};
 use crate::users::{UsersDbSource, NULL_USERS_DB};
 use crate::wallclock::{WallClockSource, NULL_WALL_CLOCK};
+
+/// Resolve a wait-set `Child` member `id` into the `wait`-syscall pid
+/// selector it names: the [`WAITSET_CHILD_ANY`] sentinel maps to
+/// [`WAIT_PID_ANY`], any other value must be a representable pid. An
+/// unrepresentable id names no child (fail closed).
+fn child_selector(id: u64) -> Option<i32> {
+    if id == WAITSET_CHILD_ANY {
+        Some(WAIT_PID_ANY)
+    } else {
+        i32::try_from(id).ok()
+    }
+}
 
 /// A no-op diagnostic [`Sink`] — the fail-closed default for the
 /// `log_emit` handler's `log_sink` until the boot path installs the real
@@ -3834,6 +3846,24 @@ where
                             return Err(Errno::NotFound);
                         }
                     }
+                    WaitSourceKind::Child => {
+                        // A wait-set can only ever observe the caller's own
+                        // children, so the ANY sentinel is admitted as-is —
+                        // requiring a child to exist at add time would race
+                        // the spawn that follows (a supervisor adds the
+                        // member once, then spawns). A specific id must name
+                        // a current child (live or zombie) of the caller;
+                        // anything else fails closed `NotFound`, which never
+                        // confirms a foreign task's existence.
+                        let named_child = child_selector(id).is_some_and(|selector| {
+                            selector == WAIT_PID_ANY
+                                || self.process_wait.child_state(caller.task_id, selector)
+                                    != ChildPeek::NoChild
+                        });
+                        if !named_child {
+                            return Err(Errno::NotFound);
+                        }
+                    }
                 }
                 crate::waitset::add(
                     caller.task_id.0,
@@ -3868,13 +3898,16 @@ where
         // value (fail closed) — exactly as `irq_wait` computes it.
         let deadline_ns = self.arch.monotonic_ns(cpu).saturating_add(timeout_ns);
 
-        // Register on both wake channels *before* the first scan so an event
-        // arriving in the register/park window is not lost: `SERVE_WAITQ`
-        // (an IPC request posted to a member endpoint, `NO_DEADLINE`) and
-        // `IRQ_WAITQ` (a member line firing, plus the timed sweep that
-        // enforces the timeout). `register` is idempotent.
+        // Register on all three wake channels *before* the first scan so an
+        // event arriving in the register/park window is not lost:
+        // `SERVE_WAITQ` (an IPC request posted to a member endpoint,
+        // `NO_DEADLINE`), `IRQ_WAITQ` (a member line firing, plus the timed
+        // sweep that enforces the timeout), and `PROCWAIT_WAITQ` (a child
+        // exiting, the same wake `record_exit` sends a parent parked in
+        // `wait`). `register` is idempotent.
         crate::waitq::SERVE_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
         crate::waitq::IRQ_WAITQ.register(sched_task, deadline_ns);
+        crate::waitq::PROCWAIT_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
 
         // `(kind, id, token)` of the ready member; `id`/`kind` drive the
         // post-write IRQ-edge consume.
@@ -3895,6 +3928,13 @@ where
                         self.irq.line_for(handle, caller.task_id).is_some()
                             && self.irq.ready_for(handle)
                     }
+                    // A non-consuming peek: the reapable zombie stays in the
+                    // table for the non-blocking `wait` that follows, so the
+                    // scan can never steal a reap.
+                    WaitSourceKind::Child => child_selector(m.id).is_some_and(|selector| {
+                        self.process_wait.child_state(caller.task_id, selector)
+                            == ChildPeek::Reapable
+                    }),
                 };
                 if is_ready {
                     ready = Some((m.kind, m.id, m.token));
@@ -3941,6 +3981,7 @@ where
 
         crate::waitq::SERVE_WAITQ.deregister(sched_task);
         crate::waitq::IRQ_WAITQ.deregister(sched_task);
+        crate::waitq::PROCWAIT_WAITQ.deregister(sched_task);
         // Re-point the one-shot at whatever deadline any *remaining* waiter
         // needs (or clear it) so a finished wait leaves no stale arming.
         self.arch
@@ -3964,7 +4005,8 @@ where
         // Consume an IRQ winner's edge now (the same `swap` `irq_wait`
         // performs) so the next wait re-arms and parks rather than
         // re-reporting the same fire; an endpoint winner is left for
-        // `call_recv` to drain (the scan only peeked it). A `u64::MAX`
+        // `call_recv` to drain and a child winner for the non-blocking
+        // `wait` to reap (the scan only peeked them). A `u64::MAX`
         // deadline means `try_wait_step` never returns `TimedOut` here; a
         // binding torn down between the scan and now resolves to nothing and
         // consumes nothing (harmless).
@@ -4711,6 +4753,16 @@ where
         // age the instance and tell apart two lifetimes that reused a numeric
         // id. Read kernel-side from the Arch HAL counter, never caller-supplied.
         let start_time = SchedulerArch::ticks_now(self.arch);
+        // Attest which console the child sits on from the descriptor table
+        // the spawn path itself resolved (kernel state, never a
+        // caller-supplied value): the one console backing every attached
+        // standard descriptor, or the "not console-backed" sentinel for a
+        // closed or split table — a per-console service (the session
+        // supervisor's elevation endpoint) trusts this to place a caller.
+        let console = self
+            .streams
+            .session_console()
+            .map_or(rustos_abi::ORIGIN_CONSOLE_NONE, u64::from);
         let record = match self.credential.ceiling {
             Some(ceiling) => {
                 TaskCapabilities::derive(sec_id, self.credential.uid, ceiling, caps, self.audit)
@@ -4725,7 +4777,8 @@ where
             self.credential.primary_gid,
             self.credential.supplementary_gids.clone(),
         )
-        .with_start_time(start_time);
+        .with_start_time(start_time)
+        .with_console(console);
         self.caps.write().insert(record);
 
         // Register the child's frozen address space + direct map under the
@@ -14326,6 +14379,50 @@ mod tests {
     const WS_OP_DEL: u32 = rustos_abi::WaitSetOp::Del as u32;
     const WS_KIND_ENDPOINT: u32 = rustos_abi::WaitSourceKind::Endpoint as u32;
     const WS_KIND_IRQ: u32 = rustos_abi::WaitSourceKind::Irq as u32;
+    const WS_KIND_CHILD: u32 = rustos_abi::WaitSourceKind::Child as u32;
+
+    /// A [`ProcessWait`] test double over the real [`ProcessTable`]
+    /// bookkeeping, so the wait-set `Child` tests exercise the same matcher
+    /// the production producer uses.
+    struct TableWait(rustos_sync::SpinLock<crate::procwait::ProcessTable>);
+
+    impl TableWait {
+        fn leaked() -> &'static Self {
+            Box::leak(Box::new(Self(rustos_sync::SpinLock::new(
+                crate::procwait::ProcessTable::new(),
+            ))))
+        }
+    }
+
+    impl ProcessWait for TableWait {
+        fn wait(
+            &self,
+            _parent: SecTaskId,
+            _pid: i32,
+        ) -> Result<crate::procwait::ReapedChild, Errno> {
+            Err(Errno::NotImplemented)
+        }
+
+        fn poll(&self, parent: SecTaskId, pid: i32) -> Result<crate::procwait::ReapedChild, Errno> {
+            match self.0.lock().reap(parent, pid) {
+                crate::procwait::Reap::Ready(child) => Ok(child),
+                crate::procwait::Reap::Blocked => Err(Errno::WouldBlock),
+                crate::procwait::Reap::NoChild => Err(Errno::NotFound),
+            }
+        }
+
+        fn register_child(&self, parent: SecTaskId, child: SecTaskId) {
+            self.0.lock().register(parent, child);
+        }
+
+        fn record_exit(&self, task: SecTaskId, code: i32) {
+            self.0.lock().record_exit(task, code);
+        }
+
+        fn child_state(&self, parent: SecTaskId, pid: i32) -> ChildPeek {
+            self.0.lock().peek(parent, pid)
+        }
+    }
 
     /// `waitset_create` mints a handle, and `waitset_ctl(Add)` owner-checks the
     /// named resource against the caller before recording it: a bound IRQ line
@@ -14567,6 +14664,154 @@ mod tests {
 
         crate::callreg::unregister(EndpointId(id));
         assert_eq!(crate::waitset::release_owned_by(0x5702), 1);
+    }
+
+    /// `waitset_ctl(Add)` owner-checks a `Child` member: before a producer
+    /// is installed a specific pid fails closed; with one installed, the
+    /// caller's own child is accepted, a pid that is not the caller's child
+    /// (or is unrepresentable) is refused, and the ANY sentinel is admitted
+    /// so a supervisor can register before its first spawn.
+    #[test]
+    fn waitset_ctl_owner_checks_child_members() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(0x5703, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(0x5703),
+            caps: &caps,
+        };
+
+        // No producer installed (`NULL_PROCESS_WAIT`): a specific pid names
+        // no child — fail closed, never fabricate a relationship.
+        let bare = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        let set = bare.waitset_create(&ctx).expect("create");
+        assert_eq!(
+            bare.waitset_ctl(&ctx, set, WS_OP_ADD, WS_KIND_CHILD, 21, 0x11),
+            Err(Errno::NotFound)
+        );
+
+        // With the producer installed and child 21 registered to the caller.
+        let pw = TableWait::leaked();
+        pw.register_child(SecTaskId(0x5703), SecTaskId(21));
+        pw.register_child(SecTaskId(0x9999), SecTaskId(22));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_process_wait(pw);
+        // The caller's own child is an acceptable member.
+        assert_eq!(
+            h.waitset_ctl(&ctx, set, WS_OP_ADD, WS_KIND_CHILD, 21, 0x11),
+            Ok(0)
+        );
+        // Another parent's child is refused without confirming it exists.
+        assert_eq!(
+            h.waitset_ctl(&ctx, set, WS_OP_ADD, WS_KIND_CHILD, 22, 0x22),
+            Err(Errno::NotFound)
+        );
+        // An id no pid can represent names no child.
+        assert_eq!(
+            h.waitset_ctl(&ctx, set, WS_OP_ADD, WS_KIND_CHILD, u64::MAX - 1, 0x33),
+            Err(Errno::NotFound)
+        );
+        // The ANY sentinel is admitted — it can only ever match the
+        // caller's own children, spawned before or after the add.
+        assert_eq!(
+            h.waitset_ctl(
+                &ctx,
+                set,
+                WS_OP_ADD,
+                WS_KIND_CHILD,
+                rustos_abi::WAITSET_CHILD_ANY,
+                0x44
+            ),
+            Ok(0)
+        );
+
+        assert_eq!(crate::waitset::release_owned_by(0x5703), 1);
+    }
+
+    /// A reapable child makes `waitset_wait` report the `Child` member's
+    /// token as a non-consuming peek: the zombie stays reapable (a second
+    /// wait still reports it) until the non-blocking reap drains it, after
+    /// which the wait times out again.
+    #[test]
+    fn waitset_wait_reports_a_reapable_child_without_consuming() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = call_aspace(b"");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(0x5704), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(0x5704, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(0x5704),
+            caps: &caps,
+        };
+        let pw = TableWait::leaked();
+        pw.register_child(SecTaskId(0x5704), SecTaskId(21));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_process_wait(pw);
+        let set = h.waitset_create(&ctx).expect("create");
+        h.waitset_ctl(
+            &ctx,
+            set,
+            WS_OP_ADD,
+            WS_KIND_CHILD,
+            rustos_abi::WAITSET_CHILD_ANY,
+            0x55,
+        )
+        .expect("add child member");
+
+        // The child is still running: nothing is ready.
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
+
+        // The child exits: the member is ready and its token is written.
+        pw.record_exit(SecTaskId(21), 3);
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Ok(0));
+        let token_bytes = read_reply_page(
+            aspaces
+                .read()
+                .resolve(SecTaskId(0x5704))
+                .expect("registered")
+                .1,
+            8,
+        );
+        assert_eq!(
+            u64::from_le_bytes(token_bytes.try_into().expect("8 bytes")),
+            0x55
+        );
+        // The wait did not reap (it only peeked): the member is still ready.
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Ok(0));
+        // The non-blocking reap is what drains readiness — the exact reap
+        // the `wait` syscall's NONBLOCK form performs after the wake.
+        assert_eq!(
+            pw.poll(SecTaskId(0x5704), rustos_abi::WAIT_PID_ANY),
+            Ok(crate::procwait::ReapedChild { pid: 21, code: 3 })
+        );
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
+
+        assert_eq!(crate::waitset::release_owned_by(0x5704), 1);
     }
 
     /// `call_recv` / `call_reply` against an unbound id fail closed with
