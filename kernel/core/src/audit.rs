@@ -31,6 +31,8 @@
 //! | 4040 | Info  | `USERS_DB_LOADED`             | audit  | `/System/Security/Users` was read off the mounted root volume and parsed; the `records` field carries the account count. |
 //! | 4041 | Error | `USERS_DB_REJECTED` | audit | The users database could not be read or failed validation; no `UsersDb` is held and every login refuses (fail closed). The `cause` field names the refusal. |
 //! | 4042 | Info | `DRIVER_STORE_SCANNED` | audit | The `/System/Drivers/` signed-driver store was enumerated for autoload candidates. The `drivers` field carries the count of bundle image paths found; `skipped` the count of entries refused fail-closed during the walk. |
+//! | 4045 | Info | `USER_ADMIN_APPLIED` | audit | A `CAP_USER_ADMIN` account-administration operation was validated, persisted, and made live. The `op`, `target`, and `caller_uid` fields name the operation, the affected account/group, and the kernel-attested caller. |
+//! | 4046 | Warn | `USER_ADMIN_REJECTED` | audit | A `CAP_USER_ADMIN` account-administration operation was refused; nothing changed (fail closed). The `op`, `target`, `caller_uid`, and `errno` fields name the operation, the affected account/group, the caller, and the refusal. |
 //! | 4050 | Info | `INPUT_DELIVERED` | audit | A keyboard driver delivered the **first** key edge to the input-focus arbiter via `key_inject`. Emitted exactly once over the kernel's lifetime, carries no key content or timing — it witnesses that an autoloaded input driver is live, never a per-keystroke record. |
 //!
 //! "audit" events route through the `audit_sink` channel
@@ -147,6 +149,16 @@ pub enum AuditEvent {
     /// walk (`skipped`). A missing store is not an error — it simply
     /// yields zero drivers.
     DriverStoreScanned,
+    /// A `CAP_USER_ADMIN` account-administration operation was applied:
+    /// validated, persisted to the root volume, and made live for the
+    /// next spawn/login (`crate::useradmin`, `plans/CAPABILITY_USE.md`
+    /// CU4). Carries the operation, target, and attested caller uid —
+    /// never any password material.
+    UserAdminApplied,
+    /// A `CAP_USER_ADMIN` account-administration operation was refused
+    /// and nothing changed (fail closed). Carries the operation, target,
+    /// attested caller uid, and the refusing errno.
+    UserAdminRejected,
     /// A keyboard driver delivered the **first** key edge to the
     /// input-focus arbiter (`crate::input_focus`, `plans/PI.md` P11 —
     /// the autoload-by-discovery witness).
@@ -221,6 +233,8 @@ impl AuditEvent {
             Self::GroupsDbLoaded => 4043,
             Self::GroupsDbRejected => 4044,
             Self::DriverStoreScanned => 4042,
+            Self::UserAdminApplied => 4045,
+            Self::UserAdminRejected => 4046,
             Self::InputDelivered => 4050,
             Self::EntropyReserveSeeded => 4060,
             Self::EntropyReserveUnseeded => 4061,
@@ -252,6 +266,8 @@ impl AuditEvent {
             Self::GroupsDbLoaded => "groups database loaded",
             Self::GroupsDbRejected => "groups database rejected",
             Self::DriverStoreScanned => "driver store scanned",
+            Self::UserAdminApplied => "user administration applied",
+            Self::UserAdminRejected => "user administration rejected",
             Self::InputDelivered => "first input delivered to focus arbiter",
             Self::EntropyReserveSeeded => "entropy reserve seeded",
             Self::EntropyReserveUnseeded => "entropy reserve unseeded",
@@ -298,6 +314,8 @@ mod tests {
             AuditEvent::GroupsDbLoaded,
             AuditEvent::GroupsDbRejected,
             AuditEvent::DriverStoreScanned,
+            AuditEvent::UserAdminApplied,
+            AuditEvent::UserAdminRejected,
             AuditEvent::InputDelivered,
             AuditEvent::EntropyReserveSeeded,
             AuditEvent::EntropyReserveUnseeded,
@@ -332,6 +350,8 @@ mod tests {
             AuditEvent::GroupsDbLoaded.id().0,
             AuditEvent::GroupsDbRejected.id().0,
             AuditEvent::DriverStoreScanned.id().0,
+            AuditEvent::UserAdminApplied.id().0,
+            AuditEvent::UserAdminRejected.id().0,
             AuditEvent::InputDelivered.id().0,
             AuditEvent::EntropyReserveSeeded.id().0,
             AuditEvent::EntropyReserveUnseeded.id().0,

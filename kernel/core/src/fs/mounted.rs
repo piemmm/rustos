@@ -47,8 +47,8 @@ use rustos_abi::driver::DriverHandle;
 use rustos_abi::sysinfo::MountRecord;
 use rustos_abi::{CapabilityQuery, Errno, FileKind, FileStat, OpenFlags};
 use rustos_caps::CapabilitySet;
-use rustos_kernel_sec::{GroupId, IdentityTable, UserId, UserRecord};
-use rustos_sync::{OnceCell, SpinLock};
+use rustos_kernel_sec::{GroupId, IdentityTable, UserId};
+use rustos_sync::{OnceCell, RwLock, SpinLock};
 
 use crate::sleeplock::SleepLock;
 
@@ -207,8 +207,8 @@ impl<F: 'static> Default for LateFilesystem<F> {
     }
 }
 
-/// A set-once cell holding the authoritative user/group identity table the
-/// `fs_*` path resolves caller groups against (mirrors
+/// A cell holding the authoritative user/group identity table the `fs_*`
+/// path resolves caller groups against (mirrors
 /// [`crate::users::LateUsersDb`]).
 ///
 /// The on-disk accounts are read only after the encrypted root is unlocked,
@@ -219,11 +219,20 @@ impl<F: 'static> Default for LateFilesystem<F> {
 /// salted password records the `users_db_read` text path serves), so a
 /// long-lived `&'static` copy leaks no secret.
 ///
+/// [`install`](Self::install) is set-once: the boot unlock publishes the
+/// first table and every later install is refused. The only path that
+/// changes the table afterwards is [`replace`](Self::replace), called
+/// exclusively by the `CAP_USER_ADMIN` admin engine after it has
+/// validated, re-verified, and persisted an edited account database
+/// (`plans/CAPABILITY_USE.md` CU4) — an edit binds at the next
+/// resolution/spawn; running tasks keep the credentials they were
+/// admitted with.
+///
 /// Until [`install`](Self::install), resolving a uid fails closed with
 /// [`Errno::NotImplemented`]; an attested uid with no account is denied with
 /// [`Errno::PermissionDenied`]. Neither path ever invents a principal.
 pub struct LateIdentity {
-    table: OnceCell<IdentityTable>,
+    table: RwLock<Option<IdentityTable>>,
 }
 
 /// An identity-table install was refused because one is already installed.
@@ -236,7 +245,7 @@ impl LateIdentity {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            table: OnceCell::new(),
+            table: RwLock::new(None),
         }
     }
 
@@ -244,20 +253,53 @@ impl LateIdentity {
     ///
     /// # Errors
     ///
-    /// [`IdentityAlreadyInstalled`] if a table is already installed — the cell
-    /// is immutable after the first successful install, so no later code path
-    /// can swap the authoritative identity table.
+    /// [`IdentityAlreadyInstalled`] if a table is already installed — the
+    /// boot unlock is the only path that may publish the *first* table;
+    /// later changes go through the audited [`replace`](Self::replace)
+    /// path alone.
     pub fn install(&self, table: IdentityTable) -> Result<(), IdentityAlreadyInstalled> {
-        self.table.set(table).map_err(|_| IdentityAlreadyInstalled)
+        let mut held = self.table.write();
+        if held.is_some() {
+            return Err(IdentityAlreadyInstalled);
+        }
+        *held = Some(table);
+        Ok(())
+    }
+
+    /// Replace the installed table with a re-verified one
+    /// (`plans/CAPABILITY_USE.md` CU4).
+    ///
+    /// Called exclusively by the `CAP_USER_ADMIN` admin engine after the
+    /// edited databases passed the same verifying build as the boot load;
+    /// never a user-reachable install path. An edit binds at the next
+    /// resolution (the next spawn/login); running tasks keep the
+    /// credentials they were admitted with.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotImplemented`] when no table has been installed yet: a
+    /// replacement can never create the first table (fail closed).
+    pub fn replace(&self, table: IdentityTable) -> Result<(), Errno> {
+        let mut held = self.table.write();
+        if held.is_none() {
+            return Err(Errno::NotImplemented);
+        }
+        *held = Some(table);
+        Ok(())
     }
 
     /// Whether an identity table has been installed.
     #[must_use]
     pub fn is_installed(&self) -> bool {
-        self.table.is_initialised()
+        self.table.read().is_some()
     }
 
-    /// Resolve the record for the attested `uid`.
+    /// Resolve the attested `uid`'s group credential as an owned snapshot
+    /// (primary gid, supplementary gids).
+    ///
+    /// Owned rather than borrowed so no read borrow is held across a
+    /// filesystem operation (which may park on device completion) while
+    /// the table stays replaceable underneath.
     ///
     /// # Errors
     ///
@@ -267,10 +309,15 @@ impl LateIdentity {
     ///   `uid` — an unknown principal is denied, never granted a guessed
     ///   identity, and the refusal does not distinguish "unknown uid" so it
     ///   cannot be used to probe for valid ids.
-    fn resolve(&self, uid: u32) -> Result<&UserRecord, Errno> {
-        match self.table.get() {
-            Ok(Some(table)) => table.user(UserId(uid)).map_err(|_| Errno::PermissionDenied),
-            _ => Err(Errno::NotImplemented),
+    fn resolve_groups(&self, uid: u32) -> Result<(GroupId, Vec<GroupId>), Errno> {
+        match &*self.table.read() {
+            Some(table) => {
+                let record = table
+                    .user(UserId(uid))
+                    .map_err(|_| Errno::PermissionDenied)?;
+                Ok((record.primary_gid, record.supplementary_gids.clone()))
+            }
+            None => Err(Errno::NotImplemented),
         }
     }
 
@@ -298,12 +345,19 @@ impl LateIdentity {
         &self,
         uid: u32,
     ) -> Result<(GroupId, Vec<GroupId>, CapabilitySet), Errno> {
-        let record = self.resolve(uid)?;
-        Ok((
-            record.primary_gid,
-            record.supplementary_gids.clone(),
-            record.capability_grants,
-        ))
+        match &*self.table.read() {
+            Some(table) => {
+                let record = table
+                    .user(UserId(uid))
+                    .map_err(|_| Errno::PermissionDenied)?;
+                Ok((
+                    record.primary_gid,
+                    record.supplementary_gids.clone(),
+                    record.capability_grants,
+                ))
+            }
+            None => Err(Errno::NotImplemented),
+        }
     }
 }
 
@@ -357,7 +411,10 @@ where
         op: impl FnOnce(&Vfs, &mut F, &Credentials<'_>, &Path) -> Result<R, VfsError>,
     ) -> Result<R, Errno> {
         let vfs = self.mount.vfs()?;
-        let record = self.identity.resolve(uid)?;
+        // An owned snapshot, so no identity-table borrow is held across the
+        // operation (which may park on device completion) while the table
+        // stays replaceable underneath.
+        let (gid, supplementary_gids) = self.identity.resolve_groups(uid)?;
         let path = Path::parse(path).map_err(VfsError::to_errno)?;
         // Route to the driver backing the path's covering mount. A path under
         // a backing-less mount (the in-RAM default-layout dirs) has no driver
@@ -366,8 +423,8 @@ where
         let driver = self.resolve_driver(vfs, &path)?;
         let cred = Credentials {
             uid: UserId(uid),
-            gid: record.primary_gid,
-            supplementary_gids: &record.supplementary_gids,
+            gid,
+            supplementary_gids: &supplementary_gids,
             caps,
         };
         let mut fs = driver.lock();
@@ -579,14 +636,16 @@ where
         // (`rename_via_secured` refuses a cross-mount move), so the source
         // path's covering-mount driver serves the whole operation.
         let vfs = self.mount.vfs()?;
-        let record = self.identity.resolve(uid)?;
+        // The same owned-snapshot resolution as `with_secured`: no table
+        // borrow is held across the operation.
+        let (gid, supplementary_gids) = self.identity.resolve_groups(uid)?;
         let src = Path::parse(src).map_err(VfsError::to_errno)?;
         let dst = Path::parse(dst).map_err(VfsError::to_errno)?;
         let driver = self.resolve_driver(vfs, &src)?;
         let cred = Credentials {
             uid: UserId(uid),
-            gid: record.primary_gid,
-            supplementary_gids: &record.supplementary_gids,
+            gid,
+            supplementary_gids: &supplementary_gids,
             caps,
         };
         let mut fs = driver.lock();

@@ -200,6 +200,8 @@ record under the `log` phase and halts.
 | 4040 | Info  | `USERS_DB_LOADED`            | audit  |
 | 4041 | Error | `USERS_DB_REJECTED`          | audit  |
 | 4042 | Info  | `DRIVER_STORE_SCANNED`      | audit  |
+| 4045 | Info  | `USER_ADMIN_APPLIED`        | audit  |
+| 4046 | Warn  | `USER_ADMIN_REJECTED`       | audit  |
 | 4050 | Info  | `INPUT_DELIVERED`           | audit  |
 
 `INPUT_DELIVERED` is the one-shot input-path witness (`AGENTS.md` §18.3 /

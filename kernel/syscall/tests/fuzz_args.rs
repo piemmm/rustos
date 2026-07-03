@@ -198,6 +198,17 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn users_admin(
+        &self,
+        _c: &CallerContext<'_>,
+        _req: u64,
+        _req_len: usize,
+        _out: u64,
+        _out_cap: usize,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
     fn key_inject(&self, _c: &CallerContext<'_>, _buf: u64, _len: usize) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)

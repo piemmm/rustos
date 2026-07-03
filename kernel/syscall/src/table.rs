@@ -485,6 +485,33 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Apply one typed user/group administration request
+    /// (`plans/CAPABILITY_USE.md` CU4).
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::USER_ADMIN`] and that `req` and `out` are non-null
+    /// `UserPtr`s. `req`/`req_len` carry one versioned
+    /// `rustos_abi::users_admin::UsersAdminRequest` record;
+    /// `out`/`out_cap` receive a list operation's response (mutating
+    /// operations write nothing and answer `0`). The implementation
+    /// decodes fail-closed, enforces the never-widen and
+    /// last-administrator rules under the caller's kernel-attested
+    /// identity, persists before going live, and audits every outcome.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]: a kernel build with no
+    /// account-administration engine wired refuses every edit.
+    fn users_admin(
+        &self,
+        _caller: &CallerContext<'_>,
+        _req: u64,
+        _req_len: usize,
+        _out: u64,
+        _out_cap: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// Report how many system text consoles are installed (`plans/PI.md` P11).
     ///
     /// The dispatcher has already checked the caller holds
@@ -1675,6 +1702,15 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 let len = decode_len(args.0[1])?;
                 self.handlers.users_db_read(caller, args.0[0], len)
             }
+            SyscallNumber::USERS_ADMIN => {
+                // `validate_arg` guarantees args[0] and args[2] are non-null
+                // `UserPtr`s; args[1] is the request length and args[3] the
+                // response-buffer capacity.
+                let req_len = decode_len(args.0[1])?;
+                let out_cap = decode_len(args.0[3])?;
+                self.handlers
+                    .users_admin(caller, args.0[0], req_len, args.0[2], out_cap)
+            }
             SyscallNumber::CONSOLE_COUNT => self.handlers.console_count(caller),
             SyscallNumber::STREAM_ECHO => {
                 self.handlers
@@ -2417,6 +2453,21 @@ mod tests {
             // the dispatcher decoded `(buf, len)` without wiring a real
             // users-database service here.
             Ok(len as u64)
+        }
+
+        fn users_admin(
+            &self,
+            _c: &CallerContext<'_>,
+            _req: u64,
+            req_len: usize,
+            _out: u64,
+            out_cap: usize,
+        ) -> SyscallResult {
+            self.record("users_admin");
+            // Echo both decoded lengths back so the reachability test can
+            // assert the dispatcher decoded `(req_len, out_cap)` without
+            // wiring a real account-administration engine here.
+            Ok((req_len + out_cap) as u64)
         }
         fn console_count(&self, _c: &CallerContext<'_>) -> SyscallResult {
             self.record("console_count");

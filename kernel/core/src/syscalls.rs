@@ -132,6 +132,7 @@ use crate::rlimit::{authorize_set, LimitSet};
 use crate::spawn::{
     AdmitError, ProcessSpawn, ProgramRegistry, SpawnCtx, EMPTY_PROGRAM_REGISTRY, NULL_PROCESS_SPAWN,
 };
+use crate::useradmin::{UsersAdmin, NULL_USERS_ADMIN};
 use crate::users::{UsersDbSource, NULL_USERS_DB};
 use crate::wallclock::{WallClockSource, NULL_WALL_CLOCK};
 
@@ -303,6 +304,14 @@ where
     /// real holder through [`Self::with_users_db`]. Held as a `'static`
     /// borrow, exactly like the console device.
     users_db: &'static (dyn UsersDbSource + 'static),
+    /// The account-administration engine the `users_admin` syscall
+    /// dispatches into (`plans/CAPABILITY_USE.md` CU4). Defaults to
+    /// [`NULL_USERS_ADMIN`] (fail closed with [`Errno::NotImplemented`]);
+    /// the boot path that unlocks the root hands the late cell its
+    /// unlock step installs the built engine into through
+    /// [`Self::with_users_admin`]. Held as a `'static` borrow, exactly
+    /// like the users database it administers.
+    users_admin: &'static (dyn UsersAdmin + 'static),
     /// The kernel input-focus arbiter the `key_inject` / `display_acquire`
     /// / `display_release` / `keyboard_read` syscalls drive (`plans/PI.md` P11 — input follows the surface
     /// owner). Defaults to [`NULL_INPUT_FOCUS`], whose text sink is the
@@ -478,6 +487,7 @@ where
             // the root volume installs the loaded holder (`plans/PI.md`
             // P11): `users_db_read` fails closed with `NotImplemented`.
             users_db: &NULL_USERS_DB,
+            users_admin: &NULL_USERS_ADMIN,
             // Input-focus arbiter unwired until the boot path installs the
             // real one whose text sink owns the keyboard console
             // (`plans/PI.md` P11): `key_inject` / `keyboard_read` fail
@@ -731,6 +741,24 @@ where
     #[must_use]
     pub const fn with_users_db(mut self, users_db: &'static (dyn UsersDbSource + 'static)) -> Self {
         self.users_db = users_db;
+        self
+    }
+
+    /// Install the account-administration facility the `users_admin`
+    /// syscall dispatches into, consuming and returning `self`
+    /// (`plans/CAPABILITY_USE.md` CU4).
+    ///
+    /// Called once by the boot path that unlocks the encrypted root,
+    /// handing the `&'static LateUsersAdmin` cell its unlock step
+    /// installs the built engine into. Until this is called the handler
+    /// holds [`NULL_USERS_ADMIN`] and `users_admin` fails closed with
+    /// [`Errno::NotImplemented`].
+    #[must_use]
+    pub const fn with_users_admin(
+        mut self,
+        users_admin: &'static (dyn UsersAdmin + 'static),
+    ) -> Self {
+        self.users_admin = users_admin;
         self
     }
 
@@ -2696,12 +2724,66 @@ where
         // registered address space — fails closed with `BadAddress`, never
         // leaking which case occurred.
         match self.with_caller_aspace(caller, |space, physmap| {
-            copy_out(space, physmap, VirtAddr::new(buf), text)
+            copy_out(space, physmap, VirtAddr::new(buf), &text)
         }) {
             Some(Ok(())) => Ok(text.len() as u64),
             Some(Err(err)) => Err(copy_fault_errno(err)),
             None => Err(Errno::BadAddress),
         }
+    }
+
+    fn users_admin(
+        &self,
+        caller: &CallerContext<'_>,
+        req: u64,
+        req_len: usize,
+        out: u64,
+        out_cap: usize,
+    ) -> SyscallResult {
+        // The dispatcher already checked `CAP_USER_ADMIN` and that both
+        // pointers are non-null `UserPtr`s. Bound the request before
+        // copying a byte (validation bound, fail closed).
+        if req_len > rustos_abi::users_admin::USERS_ADMIN_MAX_REQUEST {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let mut req_buf = vec![0u8; req_len];
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_in(space, physmap, VirtAddr::new(req), &mut req_buf)
+        }) {
+            Some(Ok(())) => {}
+            Some(Err(err)) => return Err(copy_fault_errno(err)),
+            None => return Err(Errno::BadAddress),
+        }
+
+        // Decode fail-closed, run the engine under the caller's
+        // kernel-attested identity, and capture the response before the
+        // request bytes are scrubbed (they may carry a password record).
+        let mut out_buf = vec![0u8; out_cap.min(crate::useradmin::USERS_ADMIN_MAX_RESPONSE)];
+        let uid = caller.caps.owner().0;
+        let result = match rustos_abi::users_admin::UsersAdminRequest::decode(&req_buf) {
+            Ok(request) => {
+                self.users_admin
+                    .handle(uid, caller.caps.effective(), &request, &mut out_buf)
+            }
+            Err(err) => Err(err),
+        };
+        req_buf.zeroize();
+
+        let written = result?;
+        // A mutating operation answers zero bytes; a list operation's
+        // response is copied out whole (the engine already refused a
+        // response that did not fit the caller's capacity).
+        if written > 0 {
+            let len = usize::try_from(written).map_err(|_| Errno::LengthOutOfRange)?;
+            match self.with_caller_aspace(caller, |space, physmap| {
+                copy_out(space, physmap, VirtAddr::new(out), &out_buf[..len])
+            }) {
+                Some(Ok(())) => {}
+                Some(Err(err)) => return Err(copy_fault_errno(err)),
+                None => return Err(Errno::BadAddress),
+            }
+        }
+        Ok(written)
     }
 
     fn hw_tree_read(&self, caller: &CallerContext<'_>, buf: u64, len: usize) -> SyscallResult {
@@ -4924,6 +5006,22 @@ where
     #[must_use]
     pub fn with_users_db(mut self, users_db: &'static (dyn UsersDbSource + 'static)) -> Self {
         self.handlers = self.handlers.with_users_db(users_db);
+        self
+    }
+
+    /// Install the account-administration facility the `users_admin`
+    /// syscall dispatches into, consuming and returning `self`
+    /// (`plans/CAPABILITY_USE.md` CU4).
+    ///
+    /// The hook-level mirror of
+    /// [`KernelSyscallHandlers::with_users_admin`]: called once by the
+    /// boot path that unlocks the root volume, with the late cell its
+    /// unlock step installs the built engine into. A boot path with no
+    /// root volume simply never calls it and `users_admin` stays
+    /// fail-closed.
+    #[must_use]
+    pub fn with_users_admin(mut self, users_admin: &'static (dyn UsersAdmin + 'static)) -> Self {
+        self.handlers = self.handlers.with_users_admin(users_admin);
         self
     }
 
@@ -11902,8 +12000,8 @@ mod tests {
     /// A [`UsersDbSource`] double holding a fixed `users-v1` text.
     struct StaticUsersDb(&'static [u8]);
     impl UsersDbSource for StaticUsersDb {
-        fn text(&self) -> Result<&[u8], Errno> {
-            Ok(self.0)
+        fn text(&self) -> Result<crate::users::UsersDbText, Errno> {
+            Ok(crate::users::UsersDbText::new(self.0.to_vec()))
         }
     }
 
@@ -11911,7 +12009,7 @@ mod tests {
     /// no database is held.
     struct AbsentUsersDb;
     impl UsersDbSource for AbsentUsersDb {
-        fn text(&self) -> Result<&[u8], Errno> {
+        fn text(&self) -> Result<crate::users::UsersDbText, Errno> {
             Err(Errno::NotFound)
         }
     }
@@ -11922,7 +12020,7 @@ mod tests {
     /// This is the only state `users_db_wait` blocks on.
     struct PendingUsersDb;
     impl UsersDbSource for PendingUsersDb {
-        fn text(&self) -> Result<&[u8], Errno> {
+        fn text(&self) -> Result<crate::users::UsersDbText, Errno> {
             Err(Errno::WouldBlock)
         }
     }
@@ -11931,6 +12029,166 @@ mod tests {
     /// the held text verbatim (the caller re-parses it), so the double
     /// does not need to be a full valid `users-v1` document.
     static USERS_DB_TEXT: &[u8] = b"users-v1\nroot:0:0::root:/Users/root:/Apps/Shell.app/Run\n";
+
+    /// A recording [`crate::useradmin::UsersAdmin`] double: captures the
+    /// forwarded identity and decoded request, and answers a fixed
+    /// response payload.
+    struct RecordingUsersAdmin {
+        calls: rustos_sync::SpinLock<Vec<(u32, bool, &'static str)>>,
+        response: &'static [u8],
+    }
+
+    impl crate::useradmin::UsersAdmin for RecordingUsersAdmin {
+        fn handle(
+            &self,
+            caller_uid: u32,
+            caller_caps: &dyn rustos_abi::CapabilityQuery,
+            request: &rustos_abi::users_admin::UsersAdminRequest<'_>,
+            out: &mut [u8],
+        ) -> Result<u64, Errno> {
+            let op = match request {
+                rustos_abi::users_admin::UsersAdminRequest::ListUsers => "list_users",
+                rustos_abi::users_admin::UsersAdminRequest::DeleteUser { .. } => "delete_user",
+                _ => "other",
+            };
+            self.calls
+                .lock()
+                .push((caller_uid, caller_caps.holds(CapabilityId::USER_ADMIN), op));
+            if self.response.is_empty() {
+                return Ok(0);
+            }
+            if self.response.len() > out.len() {
+                return Err(Errno::BufferTooSmall);
+            }
+            out[..self.response.len()].copy_from_slice(self.response);
+            Ok(self.response.len() as u64)
+        }
+    }
+
+    /// With no engine wired, `users_admin` fails closed with
+    /// `NotImplemented` after decoding — never a fabricated edit.
+    #[test]
+    fn users_admin_without_engine_is_not_implemented() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        // The encoded ListUsers request planted in the caller's window.
+        let request = [1u8, 0, 9, 0];
+        let (space, physmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &request);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::USER_ADMIN], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(
+            h.users_admin(&ctx, 0x1000, request.len(), 0x1000, 0),
+            Err(Errno::NotImplemented)
+        );
+    }
+
+    /// An oversized request length is refused before a byte is copied
+    /// (validation bound, fail closed).
+    #[test]
+    fn users_admin_bounds_the_request_before_copying() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::USER_ADMIN], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(
+            h.users_admin(
+                &ctx,
+                0x1000,
+                rustos_abi::users_admin::USERS_ADMIN_MAX_REQUEST + 1,
+                0x1000,
+                0,
+            ),
+            Err(Errno::LengthOutOfRange)
+        );
+    }
+
+    /// A well-formed request reaches the engine under the caller's
+    /// kernel-attested identity, a malformed one is refused fail-closed,
+    /// and a list response is copied back whole.
+    #[test]
+    fn users_admin_decodes_dispatches_and_copies_the_response_out() {
+        /// The fixed list response the recording engine serves.
+        static RESPONSE: &[u8] = b"\x01\x00\x00\x00";
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        // The encoded ListUsers request planted in the caller's window.
+        let request = [1u8, 0, 9, 0];
+        let (space, physmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &request);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::USER_ADMIN], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let engine: &'static RecordingUsersAdmin = Box::leak(Box::new(RecordingUsersAdmin {
+            calls: rustos_sync::SpinLock::new(Vec::new()),
+            response: RESPONSE,
+        }));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_users_admin(engine);
+
+        // The list response is written back to the caller's window whole.
+        assert_eq!(
+            h.users_admin(&ctx, 0x1000, request.len(), 0x1000, 64),
+            Ok(RESPONSE.len() as u64)
+        );
+        let calls = engine.calls.lock().clone();
+        assert_eq!(calls, alloc::vec![(1000, true, "list_users")]);
+
+        // A structurally malformed request never reaches the engine.
+        assert_eq!(
+            h.users_admin(&ctx, 0x1000, 3, 0x1000, 0),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert_eq!(engine.calls.lock().len(), 1);
+    }
 
     /// `users_db_read` copies the held database text out to the caller
     /// and returns its exact length (`plans/PI.md` P11).

@@ -3547,29 +3547,30 @@ binding design and staging.
 
 ## CAPABILITY_USE — the capability lifecycle: login → session → administration (`plans/CAPABILITY_USE.md`)
 
-**Status: CU1 done; CU2–CU6 planned.** Fixes the debug-image defect where
-`root`/`root` logs in but every `ls`/`cd`/open/spawn is `PermissionDenied`, by
-specifying — and then wiring — the full capability lifecycle. The kernel
-computes *effective = user grant ∩ manifest request*
-(`TaskCapabilities::derive`) and, since CU1, the runtime spawn path threads
-the account's `capability_grants` ceiling through `SpawnCredential` into that
-intersection (inherit copies the caller's stored ceiling; a
-`CAP_SPAWN_AS_USER` switch resolves the target account's). Still broken: the
-shell manifest omits `CAP_FS_ACCESS`/`CAP_PROC_SPAWN` (CU2) and the seeded
-debug root grant omits `CAP_FS_ACCESS` (CU3). The plan binds: where each
-principal's ceiling comes from
-(system programs = manifest; user sessions = the account grant snapshotted at
-the `CAP_SPAWN_AS_USER` switch and inherited by every descendant), the
-interactive **session baseline** (`FS_ACCESS`, `PROC_SPAWN`, console pair),
-the **administrator** as a grant set (no uid-0 power, no wheel group), spawn
-as the only delegation point (narrowing only), next-spawn revocation, and
-elevation as re-authenticated spawn-as-user through the session service —
-never setuid or a runtime raise. CU1 (thread the user ceiling through spawn)
-→ CU2 (session-baseline manifests) → CU3 (debug admin ceiling + the QEMU
-acceptance vertical) fix the defect; CU4 (user management under
-`CAP_USER_ADMIN`), CU5 (per-invocation `elevate`), and CU6 (desktop, blocked
-on `plans/DISPLAY.md`) follow. See `plans/CAPABILITY_USE.md` for the binding
-design and staging.
+**Status: CU1–CU4 done; CU5–CU6 planned.** The full capability lifecycle is
+wired: the kernel computes *effective = user grant ∩ manifest request*
+(`TaskCapabilities::derive`), the runtime spawn path threads the account's
+`capability_grants` ceiling through `SpawnCredential` into that intersection
+(inherit copies the caller's stored ceiling; a `CAP_SPAWN_AS_USER` switch
+resolves the target account's — CU1), every embedded program carries a
+pinned, exactly-sized manifest with the shell on the session baseline (CU2),
+the debug root account is seeded with the shared `administrator_ceiling()`
+and the whole flow is proven by the `session_ceiling` QEMU vertical (CU3),
+and a running system administers its accounts through the
+`CAP_USER_ADMIN`-gated, audited `users_admin` syscall — a kernel engine
+enforcing never-widen grant editing, the last-administrator guard, full
+re-validation, crash-safe persistence to the encrypted root, and
+next-spawn/next-login binding, with the interactive `users` tool as its
+first holder (CU4). The plan binds: where each principal's ceiling comes
+from (system programs = manifest; user sessions = the account grant
+snapshotted at the switch and inherited by every descendant), the
+interactive **session baseline**, the **administrator** as a grant set (no
+uid-0 power, no wheel group), spawn as the only delegation point (narrowing
+only), next-spawn revocation, and elevation as re-authenticated
+spawn-as-user through the session service — never setuid or a runtime raise.
+Remaining: CU5 (per-invocation `elevate`), CU6 (desktop, blocked on
+`plans/DISPLAY.md`), and the installer first-user flow (with the installer
+work). See `plans/CAPABILITY_USE.md` for the binding design and staging.
 
 ---
 

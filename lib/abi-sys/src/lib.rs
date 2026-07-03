@@ -81,6 +81,7 @@ const NUM_RLIMIT_GET: u64 = SyscallNumber::RLIMIT_GET.as_u16() as u64;
 const NUM_RLIMIT_SET: u64 = SyscallNumber::RLIMIT_SET.as_u16() as u64;
 const NUM_USERS_DB_READ: u64 = SyscallNumber::USERS_DB_READ.as_u16() as u64;
 const NUM_USERS_DB_WAIT: u64 = SyscallNumber::USERS_DB_WAIT.as_u16() as u64;
+const NUM_USERS_ADMIN: u64 = SyscallNumber::USERS_ADMIN.as_u16() as u64;
 const NUM_CONSOLE_COUNT: u64 = SyscallNumber::CONSOLE_COUNT.as_u16() as u64;
 const NUM_STREAM_ECHO: u64 = SyscallNumber::STREAM_ECHO.as_u16() as u64;
 const NUM_KEY_INJECT: u64 = SyscallNumber::KEY_INJECT.as_u16() as u64;
@@ -694,6 +695,44 @@ pub extern "C" fn sys_users_db_read(buf: *mut c_void, len: usize) -> u64 {
     // SAFETY: see `sys_ipc_send`; the kernel validates the `(buf, len)` pair
     // against the caller's address space before writing the text to it.
     unsafe { raw_syscall(NUM_USERS_DB_READ, [ptr_arg(buf), len as u64, 0, 0, 0, 0]) }
+}
+
+/// `users_admin`: apply one typed user/group administration request
+/// (`SyscallNumber::USERS_ADMIN`). `req`/`req_len` carry one versioned
+/// `users_admin` request record; `out`/`out_cap` receive a list
+/// operation's response (mutating operations write nothing). Returns
+/// the response byte count (`0` for a mutating operation), or a
+/// `ROS_E_*` code reinterpreted into the result.
+///
+/// Gated kernel-side on `ROS_CAP_USER_ADMIN` — the account-
+/// administration authority — with the finer never-widen /
+/// last-administrator / format rules enforced in the kernel engine; the
+/// stub adds no authority. Password material crosses only as a ready
+/// salted PBKDF2 record built by the caller, and no operation ever
+/// returns stored password material.
+#[must_use]
+#[export_name = "ros_sys_users_admin"]
+pub extern "C" fn sys_users_admin(
+    req: *mut c_void,
+    req_len: usize,
+    out: *mut c_void,
+    out_cap: usize,
+) -> u64 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates both `(ptr, len)`
+    // pairs against the caller's address space before touching them.
+    unsafe {
+        raw_syscall(
+            NUM_USERS_ADMIN,
+            [
+                ptr_arg(req),
+                req_len as u64,
+                ptr_arg(out),
+                out_cap as u64,
+                0,
+                0,
+            ],
+        )
+    }
 }
 
 /// `hw_tree_read`: copy the discovered hardware tree the kernel built at
@@ -1579,6 +1618,7 @@ mod tests {
         (NUM_RLIMIT_SET, "rlimit_set", 2),
         (NUM_USERS_DB_READ, "users_db_read", 2),
         (NUM_USERS_DB_WAIT, "users_db_wait", 1),
+        (NUM_USERS_ADMIN, "users_admin", 4),
         (NUM_CONSOLE_COUNT, "console_count", 0),
         (NUM_STREAM_ECHO, "stream_echo", 2),
         (NUM_KEY_INJECT, "key_inject", 2),
@@ -2053,6 +2093,24 @@ mod tests {
         assert_eq!(number, NUM_USERS_DB_WAIT);
         assert_eq!(args[0], u64::MAX);
         assert_eq!(&args[1..], &[0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn users_admin_marshals_both_buffers() {
+        let mut req = [1u8, 0, 9, 0];
+        let mut out = [0u8; 32];
+        let req_ptr = req.as_mut_ptr().cast::<c_void>();
+        let out_ptr = out.as_mut_ptr().cast::<c_void>();
+        // `0` is the mutating-operation success return (no response bytes).
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_users_admin(req_ptr, req.len(), out_ptr, out.len()), 0);
+        });
+        assert_eq!(number, NUM_USERS_ADMIN);
+        assert_eq!(args[0], req_ptr as usize as u64);
+        assert_eq!(args[1], req.len() as u64);
+        assert_eq!(args[2], out_ptr as usize as u64);
+        assert_eq!(args[3], out.len() as u64);
+        assert_eq!(&args[4..], &[0, 0]);
     }
 
     #[test]

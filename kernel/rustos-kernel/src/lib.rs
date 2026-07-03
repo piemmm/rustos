@@ -221,6 +221,14 @@ pub mod system_files;
 #[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64"))]
 pub mod system_mount;
 
+// The root-volume storage the `CAP_USER_ADMIN` account-administration
+// engine commits through (`plans/CAPABILITY_USE.md` CU4): the type-erased
+// admin window onto the writable encrypted root, its crash-safe database
+// persistence, and owned home-directory provisioning. Depends only on the
+// rustfs driver and kernel/core seams, so it compiles — and its unit tests
+// run — on the CI host as well as every kernel target.
+pub mod user_admin_backing;
+
 // The kernel-resident `/System` driver-store IPC *server* (Design D
 // D2b-2c): the arch-neutral request→reply translation that drains a
 // `rustos_kernel_ipc::CallEndpoint` and serves each

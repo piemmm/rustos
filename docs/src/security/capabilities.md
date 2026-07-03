@@ -122,3 +122,48 @@ it calls — one shared definition per program in the kernel's
 login, `cd`/`pwd`/`ps` under the seeded ceiling, and a `ulimit`
 hard-bound raise refused because the shell's manifest does not request
 `CAP_RLIMIT_RAISE` even though the account ceiling carries it.
+
+## User management (`users_admin`, CU4)
+
+A running system edits its accounts through one `CAP_USER_ADMIN`-gated,
+audited syscall, `users_admin` (`lib/abi::users_admin`): a versioned,
+typed request per operation — create/modify/delete an account,
+lock/unlock, replace its grant ceiling or stored password record,
+create/delete a group, or list either database's non-secret fields.
+There is no raw-text edit path: the databases' salted password records
+never leave the kernel (`CAP_USERS_READ` stays login's alone), and every
+decision is audited per operation (`USER_ADMIN_APPLIED` /
+`USER_ADMIN_REJECTED`, ids 4045/4046) with the caller's kernel-attested
+uid.
+
+The kernel engine (`kernel/core::useradmin::UserAdminEngine`) applies
+each operation whole-or-not-at-all through one commit path:
+
+- **Delegation narrows.** A grant edit may add only capabilities the
+  *caller's own* effective set holds — an administrator cannot mint an
+  account more powerful than themselves.
+- **User management cannot be bricked.** The last active account holding
+  `CAP_USER_ADMIN` can be neither deleted, locked, nor stripped of that
+  grant.
+- **The boot checks re-run.** Every candidate state passes the same
+  `lib/users` validation and identity-table verification the boot load
+  runs (group referential integrity included), and the serialised texts
+  are bounded by the on-disk format maxima the next boot's parser
+  enforces.
+- **Disk first, then live.** The edited `users-v1`/`groups-v1` texts are
+  persisted crash-safely to `/System/Security` (a temp node carrying the
+  original's security record, renamed over it) through a dedicated
+  writable window onto the encrypted root, and only then are the live
+  users-database text and identity table swapped — so a change binds at
+  the **next** spawn/login while running processes keep the sets they
+  were derived with (the revoke model above). Creating an account also
+  provisions its `/Users/<name>` home, owned by the new account,
+  owner-only.
+
+The first holder is the interactive `users` tool
+(`userland/shell/users`, `/Apps/Users.app/Run`), whose manifest requests
+the console pair plus `CAP_USER_ADMIN` — deliberately above the session
+baseline, so the intersection arms it only for an administrator account
+and leaves it inert for everyone else. Passwords are hashed client-side
+into salted PBKDF2 records (salt from the kernel CSPRNG via
+`sys:random`), so no plaintext crosses the syscall boundary.

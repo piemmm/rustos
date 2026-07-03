@@ -1061,6 +1061,7 @@ fn run_phases<A: KernelArch>(
         spawn_service,
         input_focus,
         users_db,
+        users_admin,
         hw_tree,
         filesystem,
         spawn_identity,
@@ -1326,6 +1327,10 @@ fn run_phases<A: KernelArch>(
         // keeps `users_db_read` fail-closed when no root volume was
         // mounted.
         .with_users_db(users_db)
+        // Serve the account-administration engine the unlock path installs
+        // (`plans/CAPABILITY_USE.md` CU4); the default `NULL_USERS_ADMIN`
+        // keeps `users_admin` fail-closed when no root volume was mounted.
+        .with_users_admin(users_admin)
         // Serve the discovered hardware tree the boot path seeded
         // (Design D); the default `NULL_HW_TREE` keeps `hw_tree_read` /
         // `hw_tree_wait` fail-closed when no inventory was seeded.

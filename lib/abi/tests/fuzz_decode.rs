@@ -34,6 +34,9 @@ use rustos_abi::sysinfo::{
     SystemIdentity, Uptime, SYSINFO_REPLY_STATUS_LEN,
 };
 use rustos_abi::time::{Duration64, Time64};
+use rustos_abi::users_admin::{
+    decode_group_list, decode_user_list, UsersAdminRequest, USERS_ADMIN_MAX_REQUEST,
+};
 use rustos_abi::{
     AppInfoHeader, IpcMessageHeader, LoadImage, ManifestHeader, NeededLibrary, PortName,
     SYSCALL_TABLE_HASH_LEN,
@@ -47,34 +50,36 @@ const FUZZ_CFI_TAG: [u8; SYSCALL_TABLE_HASH_LEN] = [0u8; SYSCALL_TABLE_HASH_LEN]
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 100_000;
 
-/// Drive every ABI decoder on `bytes`.
-///
-/// Returns silently. The contract is "must not panic for any input"; a
-/// successful decode is additionally required to round-trip through its
-/// matching encoder.
-fn exercise(bytes: &[u8]) {
-    if let Ok(header) = IpcMessageHeader::from_bytes(bytes) {
-        let encoded = header.to_le_bytes();
-        let redecoded = IpcMessageHeader::from_bytes(&encoded)
-            .expect("round-trip of an accepted header must succeed");
-        assert_eq!(header, redecoded);
+/// Drive the `users_admin` decoders on `bytes` (one arm of [`exercise`]):
+/// the typed request record round-trips through its encoder, and walking
+/// every list-response entry must refuse cleanly, never panic (a
+/// malformed entry ends the iteration fail-closed).
+fn exercise_users_admin(bytes: &[u8]) {
+    if let Ok(request) = UsersAdminRequest::decode(bytes) {
+        let mut buf = [0u8; USERS_ADMIN_MAX_REQUEST];
+        let len = request
+            .encode_into(&mut buf)
+            .expect("round-trip encode of an accepted request must succeed");
+        let redecoded = UsersAdminRequest::decode(&buf[..len])
+            .expect("round-trip of an accepted request must succeed");
+        assert_eq!(request, redecoded);
     }
-    if let Ok(header) = ManifestHeader::from_bytes(bytes) {
-        let encoded = header.to_le_bytes();
-        let redecoded = ManifestHeader::from_bytes(&encoded)
-            .expect("round-trip of an accepted header must succeed");
-        assert_eq!(header, redecoded);
+    if let Ok(entries) = decode_user_list(bytes) {
+        for entry in entries {
+            let _ = entry;
+        }
     }
-    if let Ok(header) = AppInfoHeader::from_bytes(bytes) {
-        let redecoded = AppInfoHeader::from_bytes(&header.to_le_bytes())
-            .expect("round-trip of an accepted header must succeed");
-        assert_eq!(header, redecoded);
+    if let Ok(entries) = decode_group_list(bytes) {
+        for entry in entries {
+            let _ = entry;
+        }
     }
-    if let Ok(header) = SysinfoRequestHeader::from_bytes(bytes) {
-        let redecoded = SysinfoRequestHeader::from_bytes(&header.to_le_bytes())
-            .expect("round-trip of an accepted header must succeed");
-        assert_eq!(header, redecoded);
-    }
+}
+
+/// Drive the System Information record family on `bytes` (one arm of
+/// [`exercise`]): each accepted request/record round-trips through its
+/// encoder.
+fn exercise_sysinfo_records(bytes: &[u8]) {
     if let Ok(req) = ProcessListRequest::from_bytes(bytes) {
         let redecoded = ProcessListRequest::from_bytes(&req.to_le_bytes())
             .expect("round-trip of an accepted request must succeed");
@@ -110,6 +115,38 @@ fn exercise(bytes: &[u8]) {
             .expect("round-trip of an accepted identity must succeed");
         assert_eq!(id, redecoded);
     }
+}
+
+/// Drive every ABI decoder on `bytes`.
+///
+/// Returns silently. The contract is "must not panic for any input"; a
+/// successful decode is additionally required to round-trip through its
+/// matching encoder.
+fn exercise(bytes: &[u8]) {
+    if let Ok(header) = IpcMessageHeader::from_bytes(bytes) {
+        let encoded = header.to_le_bytes();
+        let redecoded = IpcMessageHeader::from_bytes(&encoded)
+            .expect("round-trip of an accepted header must succeed");
+        assert_eq!(header, redecoded);
+    }
+    if let Ok(header) = ManifestHeader::from_bytes(bytes) {
+        let encoded = header.to_le_bytes();
+        let redecoded = ManifestHeader::from_bytes(&encoded)
+            .expect("round-trip of an accepted header must succeed");
+        assert_eq!(header, redecoded);
+    }
+    if let Ok(header) = AppInfoHeader::from_bytes(bytes) {
+        let redecoded = AppInfoHeader::from_bytes(&header.to_le_bytes())
+            .expect("round-trip of an accepted header must succeed");
+        assert_eq!(header, redecoded);
+    }
+    if let Ok(header) = SysinfoRequestHeader::from_bytes(bytes) {
+        let redecoded = SysinfoRequestHeader::from_bytes(&header.to_le_bytes())
+            .expect("round-trip of an accepted header must succeed");
+        assert_eq!(header, redecoded);
+    }
+    exercise_users_admin(bytes);
+    exercise_sysinfo_records(bytes);
     if let Ok(time) = Time64::from_bytes(bytes) {
         let redecoded = Time64::from_bytes(&time.to_le_bytes())
             .expect("round-trip of an accepted instant must succeed");

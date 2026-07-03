@@ -63,6 +63,8 @@
 //! is wired in the following increment (`plans/PI.md` P11 Chunk B-2);
 //! `virtio-blk` proves it on `-M virt`, EMMC2 on metal (§0.4 / P8).
 
+use alloc::boxed::Box;
+
 use rustos_abi::driver::block::Block;
 use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemSecurity, NodeKind};
 use rustos_abi::{DriverError, Errno};
@@ -72,12 +74,15 @@ use rustos_drv_fs_rustfs::{
 };
 use rustos_kernel_core::{
     build_identity_table, load_groups_db, load_users_db_source, ConsoleRead, ConsoleWrite,
-    GroupsLoadError, HeldUsersDbSource, LateIdentity, LateUsersDb, UsersDbSource, UsersLoadError,
+    GroupsLoadError, HeldUsersDbSource, LateIdentity, LateUsersAdmin, LateUsersDb, UserAdminEngine,
+    UsersDbSource, UsersLoadError,
 };
 use rustos_kernel_sec::IdentityTable;
 use rustos_log::{log, Event, EventId, Field, Level, Sink};
 use rustos_partition::{parse_partition_table, PartitionBlock, PartitionError, PartitionType};
-use rustos_users::UsersDb;
+use rustos_users::{GroupsDb, UsersDb};
+
+use crate::user_admin_backing::{AdminFs, RootAdminBacking};
 use zeroize::Zeroizing;
 
 /// A mounted root volume, viewed as the read + security surface the
@@ -237,6 +242,12 @@ pub struct UnlockedRoot {
     /// [`LateIdentity`] cell and consulted by the `fs_*` syscalls to resolve
     /// a caller's primary and supplementary groups kernel-side.
     pub identity: IdentityTable,
+    /// The parsed user database, retained so the `CAP_USER_ADMIN` engine
+    /// starts from exactly the verified boot state
+    /// (`plans/CAPABILITY_USE.md` CU4).
+    pub users_db: UsersDb,
+    /// The parsed group registry, retained for the same engine.
+    pub groups_db: GroupsDb,
     /// The passphrase-derived volume key of the just-unlocked root volume,
     /// held in a zero-on-drop wrapper.
     ///
@@ -266,7 +277,15 @@ pub struct UnlockedRoot {
 pub trait WritableRootSink {
     /// Open a writable view of the just-unlocked root volume under
     /// `volume_key` and publish it as the writable-state backing.
-    fn publish(&self, volume_key: &VolumeKey);
+    ///
+    /// Additionally returns, when the volume supports it, one more
+    /// independent read-write [`AdminFs`] window onto the same volume for
+    /// the `CAP_USER_ADMIN` account-administration engine's storage
+    /// (`plans/CAPABILITY_USE.md` CU4) — `/System/Security` is shadowed by
+    /// the read-only `/System` mount, so the engine persists through this
+    /// direct window exactly as the boot load read through one. `None`
+    /// leaves account administration failing closed (`NotImplemented`).
+    fn publish(&self, volume_key: &VolumeKey) -> Option<Box<dyn AdminFs>>;
 }
 
 /// A [`WritableRootSink`] that publishes nothing.
@@ -278,7 +297,9 @@ pub trait WritableRootSink {
 pub struct NoWritableRootSink;
 
 impl WritableRootSink for NoWritableRootSink {
-    fn publish(&self, _volume_key: &VolumeKey) {}
+    fn publish(&self, _volume_key: &VolumeKey) -> Option<Box<dyn AdminFs>> {
+        None
+    }
 }
 
 /// The set-once destinations a successful unlock publishes into.
@@ -296,6 +317,32 @@ pub struct UnlockInstall<'a> {
     /// The sink that publishes the writable `/System/Logs` + `/System/Settings`
     /// backing from a second read-write view of the just-unlocked volume.
     pub writable: &'a dyn WritableRootSink,
+    /// The `CAP_USER_ADMIN` engine install targets, when the boot path
+    /// wires account administration (`plans/CAPABILITY_USE.md` CU4).
+    /// `None` (host tests, ports without a writable root) leaves the
+    /// `users_admin` syscall failing closed.
+    pub admin: Option<AdminInstall>,
+}
+
+/// The `'static` targets the account-administration engine is built over
+/// on a successful unlock (`plans/CAPABILITY_USE.md` CU4).
+///
+/// Carried separately from the [`UnlockInstall`] cell borrows because the
+/// engine is stored for the kernel's lifetime and therefore needs the
+/// `'static` form of the same cells; production boot paths hand the same
+/// statics to both.
+pub struct AdminInstall {
+    /// The set-once cell the built engine is published into (the
+    /// `users_admin` dispatch target).
+    pub cell: &'static LateUsersAdmin,
+    /// The live users-database cell the engine swaps on each commit — the
+    /// same cell as [`UnlockInstall::users`], in `'static` form.
+    pub users: &'static LateUsersDb,
+    /// The live identity-table cell the engine swaps on each commit — the
+    /// same cell as [`UnlockInstall::identity`], in `'static` form.
+    pub identity: &'static LateIdentity,
+    /// The audit sink the engine records every operation outcome to.
+    pub audit: &'static (dyn Sink + Sync),
 }
 
 impl core::fmt::Debug for UnlockedRoot {
@@ -394,24 +441,26 @@ pub fn unlock_root_and_load_users<B: Block>(
     //    the identity build cannot fail on well-formed input; a parse
     //    refusal fails the unlock closed rather than installing a partial
     //    identity (no invented principal).
-    let groups = load_groups_db(&mut fs, audit).map_err(RootMountError::Groups)?;
-    let users_text = core::str::from_utf8(
-        users
-            .text()
-            .map_err(|_| RootMountError::Identity(Errno::NotImplemented))?,
-    )
-    .map_err(|_| RootMountError::Identity(Errno::BadMagic))?;
+    let groups_db = load_groups_db(&mut fs, audit).map_err(RootMountError::Groups)?;
+    let users_snapshot = users
+        .text()
+        .map_err(|_| RootMountError::Identity(Errno::NotImplemented))?;
+    let users_text = core::str::from_utf8(&users_snapshot)
+        .map_err(|_| RootMountError::Identity(Errno::BadMagic))?;
     let users_db =
         UsersDb::parse(users_text).map_err(|_| RootMountError::Identity(Errno::BadMagic))?;
     let identity =
-        build_identity_table(&users_db, &groups, audit).map_err(RootMountError::Identity)?;
+        build_identity_table(&users_db, &groups_db, audit).map_err(RootMountError::Identity)?;
 
     // Carry the key out so the writable-state sink can open a second,
-    // read-write view of this same volume; it is zeroed when the returned
-    // struct drops.
+    // read-write view of this same volume, and the parsed databases so the
+    // account-administration engine starts from the verified boot state;
+    // the key is zeroed when the returned struct drops.
     Ok(UnlockedRoot {
         users,
         identity,
+        users_db,
+        groups_db,
         volume_key,
     })
 }
@@ -734,6 +783,13 @@ pub const MAX_PASSPHRASE_LEN: usize = 256;
 /// [`UsersDbSource::text`]: rustos_kernel_core::UsersDbSource::text
 pub static LATE_USERS_DB: LateUsersDb = LateUsersDb::new();
 
+/// The set-once `CAP_USER_ADMIN` engine cell the `users_admin` syscall
+/// dispatches into (`plans/CAPABILITY_USE.md` CU4), installed by the same
+/// trusted unlock step that installs [`LATE_USERS_DB`] and
+/// [`LATE_IDENTITY`]. Until then every `users_admin` call fails closed
+/// with `NotImplemented`.
+pub static LATE_USERS_ADMIN: LateUsersAdmin = LateUsersAdmin::new();
+
 /// The set-once authoritative user/group identity table the `fs_*` syscalls
 /// resolve a caller's groups against (`PREREQUISITES.md` P-A), installed by
 /// the same trusted unlock step that installs [`LATE_USERS_DB`].
@@ -790,14 +846,18 @@ fn finish_install(
     let UnlockedRoot {
         users,
         identity,
+        users_db,
+        groups_db,
         volume_key,
     } = unlocked;
     // Publish the writable `/System/Logs` + `/System/Settings` backing from
     // a second read-write view of this same volume, while the key is still
-    // live. Fail-soft: a publish refusal leaves those subtrees failing
-    // closed and never blocks the users/identity install below. The key is
-    // wiped when `volume_key` drops at the end of this function.
-    install.writable.publish(&volume_key);
+    // live — and receive the account-administration window opened alongside
+    // it. Fail-soft: a publish refusal leaves those subtrees (and account
+    // administration) failing closed and never blocks the users/identity
+    // install below. The key is wiped when `volume_key` drops at the end of
+    // this function.
+    let admin_fs = install.writable.publish(&volume_key);
     // Install the authoritative identity table first, so the `fs_*` group
     // resolution is ready before `login` can act on the installed users
     // database. Both cells are set-once; a refusal means something was
@@ -811,6 +871,27 @@ fn finish_install(
     if install.users.install(users).is_err() {
         gave_up(audit, "already_installed");
         return UnlockOutcome::GaveUp;
+    }
+    // With both live cells installed, build and publish the
+    // `CAP_USER_ADMIN` engine over the same verified state
+    // (`plans/CAPABILITY_USE.md` CU4). Fail-soft: a boot path that wires
+    // no admin targets, or a volume that yielded no admin window, leaves
+    // `users_admin` failing closed — never a partial engine.
+    if let (Some(admin), Some(fs)) = (&install.admin, admin_fs) {
+        let backing: &'static RootAdminBacking =
+            alloc::boxed::Box::leak(alloc::boxed::Box::new(RootAdminBacking::new(fs)));
+        let engine = UserAdminEngine::new(
+            users_db,
+            groups_db,
+            admin.users,
+            admin.identity,
+            backing,
+            admin.audit,
+        );
+        if admin.cell.install(engine).is_err() {
+            gave_up(audit, "users_admin_already_installed");
+            return UnlockOutcome::GaveUp;
+        }
     }
     log(
         audit,
@@ -1328,7 +1409,7 @@ mod tests {
 
         // The served database is usable: it parses and authenticates the
         // planted account but refuses a wrong password (`plans/PI.md` P11).
-        let db = UsersDb::parse(core::str::from_utf8(text).expect("utf-8"))
+        let db = UsersDb::parse(core::str::from_utf8(&text).expect("utf-8"))
             .expect("the served database parses");
         let record = db
             .authenticate(
@@ -1656,7 +1737,7 @@ mod tests {
             .users;
 
         let text = source.text().expect("a loaded holder serves its text");
-        let db = UsersDb::parse(core::str::from_utf8(text).expect("utf-8"))
+        let db = UsersDb::parse(core::str::from_utf8(&text).expect("utf-8"))
             .expect("the served database parses");
         db.authenticate(
             image::USERS_FIXTURE_USERNAME,
@@ -1732,7 +1813,7 @@ mod tests {
             .users;
 
         let text = source.text().expect("a loaded holder serves its text");
-        let db = UsersDb::parse(core::str::from_utf8(text).expect("utf-8"))
+        let db = UsersDb::parse(core::str::from_utf8(&text).expect("utf-8"))
             .expect("the served database parses");
         db.authenticate(disk_image::USERNAME, disk_image::PASSWORD.as_bytes())
             .expect("the planted account authenticates");
@@ -1896,6 +1977,7 @@ mod tests {
                 users: &late,
                 identity: &late_identity,
                 writable: &NoWritableRootSink,
+                admin: None,
             },
             &sink,
             &|| {},
@@ -1906,7 +1988,7 @@ mod tests {
         let text = late
             .text()
             .expect("the cell now serves the loaded database");
-        let db = UsersDb::parse(core::str::from_utf8(text).expect("utf-8"))
+        let db = UsersDb::parse(core::str::from_utf8(&text).expect("utf-8"))
             .expect("the served database parses");
         db.authenticate(
             image::USERS_FIXTURE_USERNAME,
@@ -1949,6 +2031,7 @@ mod tests {
                 users: &late,
                 identity: &late_identity,
                 writable: &NoWritableRootSink,
+                admin: None,
             },
             &sink,
             &|| {},
@@ -1957,7 +2040,7 @@ mod tests {
         assert_eq!(outcome, UnlockOutcome::Installed);
         assert!(late.is_installed(), "the database is published");
         let text = late.text().expect("the cell serves the loaded database");
-        let db = UsersDb::parse(core::str::from_utf8(text).expect("utf-8"))
+        let db = UsersDb::parse(core::str::from_utf8(&text).expect("utf-8"))
             .expect("the served database parses");
         db.authenticate(
             image::USERS_FIXTURE_USERNAME,
@@ -1996,6 +2079,7 @@ mod tests {
                 users: &late,
                 identity: &late_identity,
                 writable: &NoWritableRootSink,
+                admin: None,
             },
             &sink,
             &|| {},
@@ -2027,6 +2111,7 @@ mod tests {
                 users: &late,
                 identity: &late_identity,
                 writable: &NoWritableRootSink,
+                admin: None,
             },
             &sink,
             &|| {},
@@ -2066,6 +2151,7 @@ mod tests {
                 users: &late,
                 identity: &late_identity,
                 writable: &NoWritableRootSink,
+                admin: None,
             },
             &sink,
             &|| {},
@@ -2104,6 +2190,7 @@ mod tests {
                 users: &LateUsersDb::new(),
                 identity: &LateIdentity::new(),
                 writable: &NoWritableRootSink,
+                admin: None,
             },
             &RecordingSink::new(),
             &|| releases.set(releases.get() + 1),
@@ -2125,6 +2212,7 @@ mod tests {
                 users: &LateUsersDb::new(),
                 identity: &LateIdentity::new(),
                 writable: &NoWritableRootSink,
+                admin: None,
             },
             &RecordingSink::new(),
             &|| releases.set(releases.get() + 1),
@@ -2155,6 +2243,7 @@ mod tests {
                 users: &late,
                 identity: &late_identity,
                 writable: &NoWritableRootSink,
+                admin: None,
             },
             &sink,
             &|| {},
@@ -2189,6 +2278,7 @@ mod tests {
                 users: &late,
                 identity: &late_identity,
                 writable: &NoWritableRootSink,
+                admin: None,
             },
             &sink,
             &|| {},

@@ -124,8 +124,10 @@ fn root_unlock_login(
             identity: &late_identity,
             // This vertical proves the unlock policy + users/identity install,
             // not the writable-state mount (no driver-store device here to
-            // open a second window from), so nothing is published.
+            // open a second window from), so nothing is published and no
+            // account-administration engine is wired.
             writable: &NoWritableRootSink,
+            admin: None,
         },
         env.audit_sink(),
         &|| released.store(true, Ordering::Release),
@@ -144,7 +146,7 @@ fn root_unlock_login(
     let text = late
         .text()
         .map_err(|_| "late cell empty after a reported install")?;
-    let db = UsersDb::parse(core::str::from_utf8(text).map_err(|_| "served db is not utf-8")?)
+    let db = UsersDb::parse(core::str::from_utf8(&text).map_err(|_| "served db is not utf-8")?)
         .map_err(|_| "served users database does not parse")?;
     let record = db
         .authenticate(disk_image::USERNAME, disk_image::PASSWORD.as_bytes())

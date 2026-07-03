@@ -917,6 +917,7 @@ fn enter_kernel_core(
     // fails every read closed, identical to the previous `NULL_USERS_DB`
     // default — so login refuses every attempt until a root is mounted, and the metal-confirmed boot is unaffected.
     .with_users_db(&crate::root_mount::LATE_USERS_DB)
+    .with_users_admin(&crate::root_mount::LATE_USERS_ADMIN)
     // Serve the discovered hardware tree through the injected `hw_tree`
     // source: the `hw_tree_read` / `hw_tree_wait` syscalls read the one
     // authoritative `HW_TREE` the boot path seeds and the floor bus bring-up

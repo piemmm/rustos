@@ -28,12 +28,13 @@
 
 use alloc::vec::Vec;
 
+use core::ops::Deref;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemSecurity};
 use rustos_abi::Errno;
 use rustos_log::{Field, Level, Sink};
-use rustos_sync::OnceCell;
+use rustos_sync::RwLock;
 use rustos_users::{ParseError, UsersDb, MAX_DB_LEN};
 use rustos_util::fmt::format_usize;
 
@@ -56,7 +57,15 @@ pub const USERS_DB_PATH: &str = "/System/Security/Users";
 /// `Sync` because the single installed source is shared by the per-CPU
 /// syscall handlers, exactly like [`crate::ConsoleWrite`].
 pub trait UsersDbSource: Sync {
-    /// The held database's exact `users-v1` text.
+    /// The held database's exact `users-v1` text, as an owned,
+    /// zero-on-drop snapshot.
+    ///
+    /// A snapshot rather than a borrow, because the held database is
+    /// replaceable at runtime through the audited `CAP_USER_ADMIN` admin
+    /// path (`plans/CAPABILITY_USE.md` CU4): a borrow could outlive the
+    /// text it points at across a replacement. The copy is cheap on this
+    /// low-volume path (once per login / admin call) and is zeroed on
+    /// drop, so no credential bytes outlive their use.
     ///
     /// # Errors
     ///
@@ -66,7 +75,7 @@ pub trait UsersDbSource: Sync {
     /// inventing one. The default
     /// [`NullUsersDbSource`] returns [`Errno::NotImplemented`] to mark
     /// an inert interface.
-    fn text(&self) -> Result<&[u8], Errno>;
+    fn text(&self) -> Result<UsersDbText, Errno>;
 
     /// Whether the database is still in its *pending* state: a real
     /// holder is being unlocked but has not yet been published or given
@@ -94,8 +103,70 @@ pub trait UsersDbSource: Sync {
 pub struct NullUsersDbSource;
 
 impl UsersDbSource for NullUsersDbSource {
-    fn text(&self) -> Result<&[u8], Errno> {
+    fn text(&self) -> Result<UsersDbText, Errno> {
         Err(Errno::NotImplemented)
+    }
+}
+
+/// An owned copy of the `users-v1` database text, zeroed on drop.
+///
+/// The database carries salted credential records, so every copy handed
+/// out of a [`UsersDbSource`] scrubs itself when released — a consumer
+/// cannot leak the bytes by forgetting to.
+pub struct UsersDbText(Vec<u8>);
+
+impl UsersDbText {
+    /// Wrap `text` in a zero-on-drop snapshot.
+    ///
+    /// Public so a [`UsersDbSource`] outside this crate (a test double, a
+    /// future alternate holder) can serve its text under the same
+    /// scrub-on-release guarantee; wrapping bytes grants no authority.
+    #[must_use]
+    pub fn new(text: Vec<u8>) -> Self {
+        Self(text)
+    }
+}
+
+impl Deref for UsersDbText {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl PartialEq for UsersDbText {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl Eq for UsersDbText {}
+
+impl PartialEq<[u8]> for UsersDbText {
+    fn eq(&self, other: &[u8]) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<&[u8]> for UsersDbText {
+    fn eq(&self, other: &&[u8]) -> bool {
+        self.0 == *other
+    }
+}
+
+impl Drop for UsersDbText {
+    fn drop(&mut self) {
+        self.0.fill(0);
+    }
+}
+
+impl core::fmt::Debug for UsersDbText {
+    /// Redacted: only the length is printed, which carries no secret.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("UsersDbText")
+            .field("len", &self.0.len())
+            .finish_non_exhaustive()
     }
 }
 
@@ -129,21 +200,22 @@ pub struct HeldUsersDbSource {
 impl HeldUsersDbSource {
     /// Wrap already-validated `users-v1` `text`.
     ///
-    /// Private to this module: the only constructor is the audited
-    /// [`load_users_db_source`] read, so a holder cannot exist without
-    /// the bytes having passed the permission check and the
-    /// fail-closed `users-v1` parse.
-    fn new(text: Vec<u8>) -> Self {
+    /// Crate-private: the only constructors are the audited
+    /// [`load_users_db_source`] read and the `CAP_USER_ADMIN` admin
+    /// engine's re-serialisation of an already-validated [`UsersDb`], so
+    /// a holder cannot exist without the bytes having passed the
+    /// fail-closed `users-v1` validation.
+    pub(crate) fn new(text: Vec<u8>) -> Self {
         Self { text }
     }
 }
 
 impl UsersDbSource for HeldUsersDbSource {
-    fn text(&self) -> Result<&[u8], Errno> {
+    fn text(&self) -> Result<UsersDbText, Errno> {
         // A holder only exists for a successfully loaded database, so the
         // text is always present — unlike [`NullUsersDbSource`], which
         // marks the inert "no database" interface.
-        Ok(&self.text)
+        Ok(UsersDbText(self.text.clone()))
     }
 }
 
@@ -226,20 +298,26 @@ pub struct UsersDbAlreadyInstalled;
 ///   (wait, do not authenticate); once resolved without a database it
 ///   returns [`Errno::NotImplemented`], identical to [`NullUsersDbSource`].
 ///   Neither path ever invents an account.
-/// * **Immutable after install.** [`install`](Self::install) is
-///   set-once: the first call publishes the database and every later
-///   call is refused, so no code path that runs after the trusted boot
-///   unlock can swap the live credential database.
-/// * **No user-reachable surface.** [`install`](Self::install) and
-///   [`resolve`](Self::resolve) are internal kernel code the unlock step
-///   calls; neither is exposed as a syscall, so they add no attack
+/// * **Install is set-once; replacement is a separate, audited kernel
+///   path.** [`install`](Self::install) publishes the boot database and
+///   every later call is refused. The only way the held database changes
+///   afterwards is [`replace`](Self::replace), which is called
+///   exclusively by the `CAP_USER_ADMIN` admin engine
+///   (`plans/CAPABILITY_USE.md` CU4) after it has validated, verified,
+///   and persisted the edited database — and which refuses to run before
+///   the boot install has happened, so it can never *create* the first
+///   database.
+/// * **No user-reachable surface.** [`install`](Self::install),
+///   [`resolve`](Self::resolve), and [`replace`](Self::replace) are
+///   internal kernel code (the unlock step and the audited admin
+///   engine); none is exposed as a syscall, so they add no attack
 ///   surface to the ABI.
 ///
-/// `Sync` (through [`OnceCell`] and the resolved flag) so the single
+/// `Sync` (through the lock and the resolved flag) so the single
 /// `&'static` instance is shared by the per-CPU syscall handlers, exactly
 /// like [`NullUsersDbSource`].
 pub struct LateUsersDb {
-    held: OnceCell<HeldUsersDbSource>,
+    held: RwLock<Option<HeldUsersDbSource>>,
     /// Set once the unlock reaches a terminal outcome with **no** database
     /// installed (gave up, or there was no root). It turns a pending read
     /// ([`Errno::WouldBlock`]) into the inert
@@ -257,7 +335,7 @@ impl LateUsersDb {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            held: OnceCell::new(),
+            held: RwLock::new(None),
             resolved: AtomicBool::new(false),
         }
     }
@@ -274,10 +352,15 @@ impl LateUsersDb {
     /// [`UsersDbAlreadyInstalled`] if a database is already installed —
     /// the cell is immutable after the first successful install.
     pub fn install(&self, source: HeldUsersDbSource) -> Result<(), UsersDbAlreadyInstalled> {
-        // `OnceCell::set` hands the rejected value back in its error; drop
-        // it (zeroing the duplicate credential bytes) instead of
-        // surfacing it.
-        self.held.set(source).map_err(|_| UsersDbAlreadyInstalled)?;
+        {
+            let mut held = self.held.write();
+            if held.is_some() {
+                // The rejected `source` is dropped here, zeroing its
+                // duplicate credential bytes, instead of being surfaced.
+                return Err(UsersDbAlreadyInstalled);
+            }
+            *held = Some(source);
+        }
         // Release any task parked in `users_db_wait`: the database left its
         // pending state, so a blocked `login` re-reads and authenticates
         // (the wake that closes the park). A no-op
@@ -287,10 +370,35 @@ impl LateUsersDb {
         Ok(())
     }
 
+    /// Replace the installed database with an edited one
+    /// (`plans/CAPABILITY_USE.md` CU4).
+    ///
+    /// Called exclusively by the `CAP_USER_ADMIN` admin engine after it
+    /// has validated the edit, re-verified the identity table, and
+    /// persisted the new text to the root volume — replacement is never a
+    /// user-reachable install path. The displaced holder is dropped here,
+    /// zeroing its credential bytes. A change binds at the next
+    /// `users_db_read` (the next login); running sessions keep the
+    /// credentials they authenticated with.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotImplemented`] when no database has been installed yet:
+    /// the boot unlock is the only path that may publish the *first*
+    /// database, so a replacement can never create one (fail closed).
+    pub fn replace(&self, source: HeldUsersDbSource) -> Result<(), Errno> {
+        let mut held = self.held.write();
+        if held.is_none() {
+            return Err(Errno::NotImplemented);
+        }
+        *held = Some(source);
+        Ok(())
+    }
+
     /// Whether a database has been installed.
     #[must_use]
     pub fn is_installed(&self) -> bool {
-        self.held.is_initialised()
+        self.held.read().is_some()
     }
 
     /// Mark the unlock terminated with no database to serve.
@@ -327,17 +435,17 @@ impl Default for LateUsersDb {
 }
 
 impl UsersDbSource for LateUsersDb {
-    fn text(&self) -> Result<&[u8], Errno> {
+    fn text(&self) -> Result<UsersDbText, Errno> {
         // A published database always serves its bytes. Otherwise the
         // result depends on whether the unlock has *finished*: while it is
         // still pending return [`Errno::WouldBlock`] so `login` waits
         // without prompting (the unlock owns the console); once it has
         // resolved with no database, fail closed with
         // [`Errno::NotImplemented`] exactly as [`NullUsersDbSource`] does so `login` runs its deny-all prompt.
-        match self.held.get() {
-            Ok(Some(held)) => held.text(),
-            _ if self.resolved.load(Ordering::Acquire) => Err(Errno::NotImplemented),
-            _ => Err(Errno::WouldBlock),
+        match &*self.held.read() {
+            Some(held) => held.text(),
+            None if self.resolved.load(Ordering::Acquire) => Err(Errno::NotImplemented),
+            None => Err(Errno::WouldBlock),
         }
     }
 }

@@ -161,6 +161,13 @@ const PROGRAMS: &[Program] = &[
         fixture: "top_rxe.rs",
         prefix: "TOP",
     },
+    Program {
+        pkg: "rustos-users-cli",
+        bin: "rustos-users-cli-run",
+        rel_dir: "../../userland/shell/users",
+        fixture: "users_cli_rxe.rs",
+        prefix: "USERS_CLI",
+    },
 ];
 
 fn main() {

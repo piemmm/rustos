@@ -1631,6 +1631,34 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: None,
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::USERS_ADMIN,
+        name: "users_admin",
+        arg_count: 4,
+        args: [
+            // Non-null `UserPtr` to the typed request record, its length,
+            // then the non-null `UserPtr` response buffer the list
+            // operations fill and its capacity.
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `U64` carries the bytes-written-or-`-errno` register convention
+        // `hw_tree_read` / `users_db_read` use (mutating operations answer
+        // zero bytes).
+        ret: AbiType::U64,
+        // Editing the account databases is the account-administration
+        // authority, never ambient: gated on `CAP_USER_ADMIN` at dispatch,
+        // with the finer never-widen / last-administrator / format checks
+        // enforced in the handler. Every call IS audited — account
+        // administration is a security-relevant decision and is low-volume,
+        // so the records cannot drown the log.
+        required_capability: Some(CapabilityId::USER_ADMIN),
+        audit: true,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

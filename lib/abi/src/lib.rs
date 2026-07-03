@@ -45,6 +45,7 @@ pub mod sysinfo;
 pub mod terminal;
 pub mod time;
 pub mod usb_urb;
+pub mod users_admin;
 pub mod waitset;
 
 pub use appinfo::{

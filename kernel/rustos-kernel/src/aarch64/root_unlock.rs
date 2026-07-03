@@ -66,7 +66,8 @@ use crate::driver_catalog::{EMMC2_PATH, KERNEL_DRIVER_SIGNER_PUBKEY, VIRTIO_BLK_
 use crate::driver_loader::KernelDriverLoader;
 use crate::driver_spawn_loader::InitCtxDriverProcessSpawn;
 use crate::root_mount::{
-    unlock_root_disk_interactively, UnlockInstall, UnlockOutcome, WritableRootSink, LATE_USERS_DB,
+    unlock_root_disk_interactively, AdminInstall, UnlockInstall, UnlockOutcome, WritableRootSink,
+    LATE_USERS_ADMIN, LATE_USERS_DB,
 };
 use crate::root_storage::RootBlockBinding;
 use crate::shared_block::{DriverStoreService, SharedBlock};
@@ -75,6 +76,7 @@ use crate::unlock_service::{
     autoload_caps, loader_caps, note, note_stage, service_caps, store_endpoint_binder_caps,
     take_boot, KthreadConsoleRead, CONSOLE0_GATE, UNLOCK_TASK, USERS_DB_INSTALLED_MESSAGE,
 };
+use crate::user_admin_backing::AdminFs;
 
 /// Per-device DMA window capacity, in pages, the virtio-blk driver
 /// allocates its request/data buffers from (transient per-request DMA).
@@ -795,7 +797,7 @@ struct WritableStateSink<'a, B: Block + 'static> {
 }
 
 impl<B: Block + 'static> WritableRootSink for WritableStateSink<'_, B> {
-    fn publish(&self, volume_key: &VolumeKey) {
+    fn publish(&self, volume_key: &VolumeKey) -> Option<alloc::boxed::Box<dyn AdminFs>> {
         // Locate the RustFsRoot extent on a throwaway probe window, then open
         // the durable owned `'static` window onto it.
         let extent = {
@@ -806,7 +808,7 @@ impl<B: Block + 'static> WritableRootSink for WritableStateSink<'_, B> {
                     Level::Error,
                     "root-unlock: writable-state partition table invalid",
                 );
-                return;
+                return None;
             };
             let Some(extent) = table.first_of_type(PartitionType::RustFsRoot) else {
                 note(
@@ -814,7 +816,7 @@ impl<B: Block + 'static> WritableRootSink for WritableStateSink<'_, B> {
                     Level::Error,
                     "root-unlock: writable-state no root partition",
                 );
-                return;
+                return None;
             };
             extent
         };
@@ -824,7 +826,7 @@ impl<B: Block + 'static> WritableRootSink for WritableStateSink<'_, B> {
                 Level::Error,
                 "root-unlock: writable-state window out of range",
             );
-            return;
+            return None;
         };
         // Re-open the same encrypted volume read-write under the just-derived
         // key. The driver retains the derived master key for the life of the
@@ -835,10 +837,30 @@ impl<B: Block + 'static> WritableRootSink for WritableStateSink<'_, B> {
                 Level::Error,
                 "root-unlock: writable-state mount failed",
             );
-            return;
+            return None;
         };
         let driver: alloc::boxed::Box<dyn KernelFs> = alloc::boxed::Box::new(fs);
         register_writable_state(driver, self.audit);
+
+        // One more independent read-write window onto the same volume for
+        // the `CAP_USER_ADMIN` account-administration engine's storage
+        // (`plans/CAPABILITY_USE.md` CU4): `/System/Security` is shadowed
+        // by the read-only `/System` mount, so the engine persists through
+        // this direct window exactly as the boot load read through one.
+        // Fail-soft: a refusal leaves `users_admin` failing closed.
+        let Ok(admin_window) = PartitionBlock::from_partition(self.store.window(), &extent) else {
+            note(
+                self.audit,
+                Level::Error,
+                "root-unlock: admin window out of range",
+            );
+            return None;
+        };
+        let Ok(admin_fs) = RustFs::open(admin_window, volume_key) else {
+            note(self.audit, Level::Error, "root-unlock: admin mount failed");
+            return None;
+        };
+        Some(alloc::boxed::Box::new(admin_fs))
     }
 }
 
@@ -938,6 +960,12 @@ fn finish_unlock<B: Block + 'static>(
                 users: &LATE_USERS_DB,
                 identity: &crate::root_mount::LATE_IDENTITY,
                 writable: &writable,
+                admin: Some(AdminInstall {
+                    cell: &LATE_USERS_ADMIN,
+                    users: &LATE_USERS_DB,
+                    identity: &crate::root_mount::LATE_IDENTITY,
+                    audit,
+                }),
             },
             audit,
             &release_console0_to_login,

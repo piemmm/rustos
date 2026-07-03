@@ -135,6 +135,9 @@ const NUM_USERS_DB_READ: u64 = SyscallNumber::USERS_DB_READ.as_u16() as u64;
 /// `users_db_wait` syscall number (as above).
 const NUM_USERS_DB_WAIT: u64 = SyscallNumber::USERS_DB_WAIT.as_u16() as u64;
 
+/// `users_admin` syscall number (as above).
+const NUM_USERS_ADMIN: u64 = SyscallNumber::USERS_ADMIN.as_u16() as u64;
+
 /// `console_count` syscall number (as above).
 const NUM_CONSOLE_COUNT: u64 = SyscallNumber::CONSOLE_COUNT.as_u16() as u64;
 
@@ -1280,6 +1283,51 @@ pub fn users_db_read(buf: &mut [u8]) -> Result<usize, i64> {
     #[allow(clippy::cast_possible_truncation)]
     #[allow(clippy::cast_sign_loss)]
     Ok((ret as usize).min(buf.len()))
+}
+
+/// Apply one typed user/group administration request
+/// (`SyscallNumber::USERS_ADMIN`, `plans/CAPABILITY_USE.md` CU4),
+/// returning the response byte count written into `out` (`0` for a
+/// mutating operation).
+///
+/// `req` carries one encoded
+/// [`rustos_abi::users_admin::UsersAdminRequest`] record (built with
+/// its `encode_into`, so both sides share one layout definition); a
+/// list operation's response is written into `out` and decoded with
+/// the matching `decode_user_list` / `decode_group_list`. Gated
+/// kernel-side on [`rustos_abi::CapabilityId::USER_ADMIN`] — the
+/// account-administration authority — with the finer never-widen /
+/// last-administrator / format rules enforced in the kernel engine;
+/// the wrapper adds no authority.
+///
+/// # Errors
+///
+/// Returns the raw negative kernel result (`-errno`) on failure: the
+/// caller lacks the capability, the request is malformed, a rule
+/// refused the edit, or `out` is too small for a list response.
+pub fn users_admin(req: &[u8], out: &mut [u8]) -> Result<usize, i64> {
+    let req_ptr = req.as_ptr() as usize as u64;
+    let req_len = req.len() as u64;
+    let out_ptr = out.as_mut_ptr() as usize as u64;
+    let out_cap = out.len() as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // both `(ptr, len)` pairs against the caller's address space before
+    // touching them. `req` is a live shared borrow and `out` a live
+    // exclusive borrow for the duration of the call, so the pairs denote
+    // readable and writable memory respectively.
+    #[allow(clippy::cast_possible_wrap)]
+    // The kernel guarantees the i64 count-result encoding (count ≥ 0, else -errno).
+    let ret =
+        unsafe { raw_syscall(NUM_USERS_ADMIN, [req_ptr, req_len, out_ptr, out_cap, 0, 0]) } as i64;
+    if ret < 0 {
+        return Err(ret);
+    }
+    // Defence in depth: clamp the kernel's count to the buffer so a buggy
+    // count can never drive an out-of-bounds slice in the caller, exactly
+    // as `users_db_read` clamps.
+    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_sign_loss)]
+    Ok((ret as usize).min(out.len()))
 }
 
 /// Send `payload` to the IPC endpoint `endpoint`
@@ -3307,6 +3355,36 @@ mod tests {
         assert_eq!(args[0], u64::MAX);
         // No memory operand; the only argument is the scalar timeout.
         assert_eq!(&args[1..], &[0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn users_admin_marshals_both_buffers_and_surfaces_errors() {
+        let req = [1u8, 0, 9, 0];
+        let mut out = [0u8; 32];
+        let req_ptr = req.as_ptr() as usize as u64;
+        let out_ptr = out.as_mut_ptr() as usize as u64;
+        // A list response of 5 bytes comes back as the clamped count.
+        let (number, args) = capture(5, || {
+            assert_eq!(users_admin(&req, &mut out), Ok(5));
+        });
+        assert_eq!(number, NUM_USERS_ADMIN);
+        assert_eq!(args[0], req_ptr);
+        assert_eq!(args[1], req.len() as u64);
+        assert_eq!(args[2], out_ptr);
+        assert_eq!(args[3], out.len() as u64);
+        assert_eq!(&args[4..], &[0, 0]);
+
+        // A refusal surfaces the raw negative errno unchanged.
+        let want = -i64::from(rustos_abi::Errno::PermissionDenied.as_i32());
+        #[allow(clippy::cast_sign_loss)]
+        let (_, _) = capture(want as u64, || {
+            assert_eq!(users_admin(&req, &mut out), Err(want));
+        });
+
+        // Defence in depth: a count past the buffer is clamped.
+        let (_, _) = capture(1_000, || {
+            assert_eq!(users_admin(&req, &mut out), Ok(out.len()));
+        });
     }
 
     #[test]

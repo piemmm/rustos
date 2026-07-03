@@ -1171,6 +1171,32 @@ impl SyscallNumber {
     /// [`Self::CLOCK_GET`] / [`Self::BOOT_ID_GET`]) and doing so grants no
     /// authority, so no capability is required and the call is not audited.
     pub const SELF_ORIGIN: Self = Self(68);
+    /// Administer the user-account and group databases
+    /// (`plans/CAPABILITY_USE.md` CU4).
+    ///
+    /// Arguments: `req: *const u8` + `req_len: usize` — one versioned, typed
+    /// [`crate::users_admin::UsersAdminRequest`] record (create / modify /
+    /// delete / lock / unlock an account, edit its grants, replace its
+    /// stored password record, create / delete a group, or list either
+    /// database's non-secret fields) — and `out: *mut u8` + `out_cap: usize`,
+    /// the response buffer the list operations fill (mutating operations
+    /// write nothing). Returns the response byte length (`0` for a mutating
+    /// operation) or a negative [`Errno`].
+    ///
+    /// Gated on `CAP_USER_ADMIN` at dispatch and audited per call: editing
+    /// the account databases is the account-administration authority and is
+    /// never ambient. The kernel additionally enforces, inside the handler,
+    /// that a grant edit never widens an account beyond the *caller's own*
+    /// effective capability set (delegation narrows), that the last active
+    /// administrator can be neither deleted nor locked nor stripped of
+    /// `CAP_USER_ADMIN` (user management cannot be bricked), and that every
+    /// field passes the same fail-closed `users-v1` validation the on-disk
+    /// format enforces. A change binds at the *next* spawn or login; running
+    /// processes keep the capability record they were derived with. Password
+    /// material crosses this boundary only as a ready salted PBKDF2 record
+    /// built by the caller, and no operation ever returns stored password
+    /// material.
+    pub const USERS_ADMIN: Self = Self(69);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
@@ -1400,6 +1426,7 @@ mod tests {
         assert_eq!(SyscallNumber::FS_GETCWD.as_u16(), 66);
         assert_eq!(SyscallNumber::RESOURCE_OPEN.as_u16(), 67);
         assert_eq!(SyscallNumber::SELF_ORIGIN.as_u16(), 68);
+        assert_eq!(SyscallNumber::USERS_ADMIN.as_u16(), 69);
     }
 
     #[test]

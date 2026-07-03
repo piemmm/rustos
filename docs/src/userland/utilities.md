@@ -1254,3 +1254,37 @@ bad-name refusals), the group-name validator (accepted and rejected
 shapes, including the length bound), and the creation engine (a minimal
 group, a requested gid reaching the database, the already-exists refusal,
 and the lookup / create / taken-gid / help-write fail-closed paths).
+
+## `users` — interactive account administration (`userland/shell/users`)
+
+`rustos-users-cli` (`/Apps/Users.app/Run`) is the first holder of the
+`CAP_USER_ADMIN`-gated `users_admin` syscall
+(`plans/CAPABILITY_USE.md` CU4): an interactive session that lists,
+creates, modifies, locks/unlocks, and deletes accounts, edits their
+capability ceilings, replaces passwords, and manages groups. It is
+interactive (a `users>` prompt over the inherited standard streams)
+because the `spawn` ABI carries no argument vector yet; when it does,
+the staged `useradd`/`groupadd` argv grammars above become thin
+frontends over the same syscall — the operation authority already lives
+in exactly one place, the kernel engine.
+
+Every rule is enforced kernel-side under the caller's attested identity:
+the dispatch gate, never-widen grant editing, the last-administrator
+guard, the `users-v1` format validation, crash-safe persistence, and the
+next-spawn/next-login binding (`docs/src/security/capabilities.md`).
+Passwords are read echo-off and hashed client-side into salted PBKDF2
+records (salt from `sys:random`); the listing responses are secret-free.
+
+The tool's manifest requests only the console pair plus
+`CAP_USER_ADMIN` — deliberately above the session baseline, so the
+`manifest ∩ ceiling` intersection arms it only for an administrator
+account and leaves it inert for everyone else. No `CAP_FS_ACCESS`.
+
+### Tests
+
+`cargo test -p rustos-users-cli` drives scripted sessions through the
+`ToolIo`/`AdminChannel`/`SaltSource` seams: the command grammar and its
+usage refusals, the exact typed requests submitted (decoded and asserted
+field by field), the password-record round trip and the
+mismatched-password refusal, the grant merge/removal flow against a
+served listing, the listing renderers, and the terse errno reporting.

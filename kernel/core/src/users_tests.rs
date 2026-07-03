@@ -190,7 +190,8 @@ fn the_source_load_holds_the_exact_text_and_authenticates() {
 
     // The served text re-parses and authenticates the planted account,
     // proving the login path can use it.
-    let served = core::str::from_utf8(source.text().expect("held text")).expect("utf8");
+    let served_text = source.text().expect("held text");
+    let served = core::str::from_utf8(&served_text).expect("utf8");
     let db = UsersDb::parse(served).expect("served text re-parses");
     assert_eq!(db.records().len(), 1);
     db.authenticate("ada", b"correct horse")
@@ -416,7 +417,8 @@ fn the_late_users_db_serves_the_installed_text() {
     assert!(late.is_installed());
     assert_eq!(late.text().expect("served text"), text.as_bytes());
 
-    let served = core::str::from_utf8(late.text().expect("served text")).expect("utf8");
+    let served_text = late.text().expect("served text");
+    let served = core::str::from_utf8(&served_text).expect("utf8");
     let db = UsersDb::parse(served).expect("served text re-parses");
     db.authenticate("ada", b"correct horse")
         .expect("planted account authenticates against the served database");

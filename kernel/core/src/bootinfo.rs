@@ -40,6 +40,7 @@ use crate::input_focus::{InputFocus, NULL_INPUT_FOCUS};
 use crate::spawn::{
     InitSpawn, ProcessSpawn, ProgramRegistry, EMPTY_PROGRAM_REGISTRY, NULL_PROCESS_SPAWN,
 };
+use crate::useradmin::{UsersAdmin, NULL_USERS_ADMIN};
 use crate::users::{UsersDbSource, NULL_USERS_DB};
 
 /// Architecture-neutral hook the kernel core needs from a Stage 3
@@ -657,6 +658,19 @@ where
     /// move, not a global mutable static).
     pub users_db: &'static (dyn UsersDbSource + 'static),
 
+    /// The account-administration engine the `users_admin` syscall
+    /// dispatches into (`plans/CAPABILITY_USE.md` CU4).
+    ///
+    /// Defaults to [`crate::useradmin::NULL_USERS_ADMIN`], which fails
+    /// closed with [`rustos_abi::Errno::NotImplemented`] — a boot path
+    /// with no unlocked root leaves the default and every `users_admin`
+    /// call is refused. A boot path that unlocked the root hands the
+    /// same `&'static LateUsersAdmin` cell its unlock step later
+    /// installs the built [`crate::useradmin::UserAdminEngine`] into
+    /// through [`Self::with_users_admin`]. Held `'static` like the
+    /// users database it administers.
+    pub users_admin: &'static (dyn UsersAdmin + 'static),
+
     /// The discovered hardware-tree store the `hw_tree_read` (no. 29) /
     /// `hw_tree_wait` (no. 30) syscalls serve (Design D).
     ///
@@ -780,6 +794,7 @@ where
             // `with_users_db` (`plans/PI.md` P11): `users_db_read` fails
             // closed through `NULL_USERS_DB`.
             users_db: &NULL_USERS_DB,
+            users_admin: &NULL_USERS_ADMIN,
             // Hardware-tree store unwired until a boot path seeds the
             // discovered inventory and installs its store through
             // `with_hw_tree` (Design D): `hw_tree_read` / `hw_tree_wait`
@@ -911,6 +926,21 @@ where
     #[must_use]
     pub fn with_users_db(mut self, users_db: &'static (dyn UsersDbSource + 'static)) -> Self {
         self.users_db = users_db;
+        self
+    }
+
+    /// Install the account-administration facility the `users_admin`
+    /// syscall dispatches into, consuming and returning `self`
+    /// (`plans/CAPABILITY_USE.md` CU4).
+    ///
+    /// Called by the boot path that unlocks the encrypted root, handing
+    /// the `&'static LateUsersAdmin` cell its unlock step installs the
+    /// built engine into. Until then the handover holds
+    /// [`crate::useradmin::NULL_USERS_ADMIN`] and every `users_admin`
+    /// call fails closed with [`rustos_abi::Errno::NotImplemented`].
+    #[must_use]
+    pub fn with_users_admin(mut self, users_admin: &'static (dyn UsersAdmin + 'static)) -> Self {
+        self.users_admin = users_admin;
         self
     }
 
@@ -1131,8 +1161,10 @@ mod tests {
         // exactly as a production boot leaks its `HeldUsersDbSource`.
         struct FixedUsersDb;
         impl UsersDbSource for FixedUsersDb {
-            fn text(&self) -> Result<&[u8], Errno> {
-                Ok(b"rustos-users-v1\n")
+            fn text(&self) -> Result<crate::users::UsersDbText, Errno> {
+                Ok(crate::users::UsersDbText::new(
+                    b"rustos-users-v1\n".to_vec(),
+                ))
             }
         }
 
@@ -1144,7 +1176,10 @@ mod tests {
         let held: &'static FixedUsersDb =
             alloc::boxed::Box::leak(alloc::boxed::Box::new(FixedUsersDb));
         let b = fresh_boot_info().with_users_db(held);
-        assert_eq!(b.users_db.text(), Ok(&b"rustos-users-v1\n"[..]));
+        assert_eq!(
+            b.users_db.text().expect("served text"),
+            &b"rustos-users-v1\n"[..]
+        );
     }
 
     #[test]

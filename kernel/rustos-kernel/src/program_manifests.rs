@@ -95,6 +95,23 @@ pub const SYSINFO_MANIFEST: &[CapabilityId] = &[CapabilityId::CONSOLE_WRITE];
 pub const TOP_MANIFEST: &[CapabilityId] =
     &[CapabilityId::CONSOLE_WRITE, CapabilityId::CONSOLE_READ];
 
+/// The `users` account-administration tool's manifest: the console pair
+/// for its interactive prompts (`stream_read`/`stream_write`/`stream_echo`
+/// over its inherited streams — echo off around passwords) plus
+/// `CAP_USER_ADMIN` for the `users_admin` syscall it exists to drive.
+/// Deliberately **above** the session baseline: only an account whose
+/// ceiling carries `CAP_USER_ADMIN` (an administrator, §4.3 of
+/// `plans/CAPABILITY_USE.md`) ends up with a working tool — on any other
+/// account the intersection strips the capability and every operation is
+/// refused at dispatch. No `CAP_FS_ACCESS`: the tool edits accounts
+/// through its own gated syscall and reads its salt through the
+/// unprivileged `sys:random` resource, never the filesystem.
+pub const USERS_TOOL_MANIFEST: &[CapabilityId] = &[
+    CapabilityId::CONSOLE_WRITE,
+    CapabilityId::CONSOLE_READ,
+    CapabilityId::USER_ADMIN,
+];
+
 /// PID 1 `init`'s manifest: `CAP_CONSOLE_WRITE` for its startup banner
 /// (`stream_write`) and `CAP_PROC_SPAWN` to launch the boot services and
 /// the per-console login supervisors. As a system program its manifest is
@@ -196,6 +213,18 @@ mod tests {
     }
 
     #[test]
+    fn users_tool_manifest_is_pinned() {
+        assert_eq!(
+            set(USERS_TOOL_MANIFEST),
+            set(&[
+                CapabilityId::CONSOLE_WRITE,
+                CapabilityId::CONSOLE_READ,
+                CapabilityId::USER_ADMIN,
+            ])
+        );
+    }
+
+    #[test]
     fn init_manifest_is_pinned() {
         assert_eq!(
             set(INIT_MANIFEST),
@@ -206,7 +235,10 @@ mod tests {
     /// Every session tool a shell spawns requests within the session
     /// baseline, so an account granted only the baseline can run the whole
     /// default toolset: each tool's `manifest ∩ ceiling` intersection
-    /// loses nothing.
+    /// loses nothing. The `users` tool is deliberately absent: its
+    /// `CAP_USER_ADMIN` request sits above the baseline, so it works only
+    /// for an administrator account (the administrative set carries it)
+    /// and is inert — not missing — for everyone else.
     #[test]
     fn session_tools_request_within_the_session_baseline() {
         let baseline = set(SESSION_BASELINE);
@@ -215,5 +247,18 @@ mod tests {
                 assert!(baseline.contains(*cap), "{cap:?} exceeds the baseline");
             }
         }
+    }
+
+    /// The `users` tool requests the administrative gate plus the console
+    /// pair and nothing else — in particular no filesystem access — and
+    /// every capability it requests is within the administrator ceiling,
+    /// so an administrator's intersection loses nothing.
+    #[test]
+    fn users_tool_request_is_within_the_administrator_ceiling() {
+        let ceiling = rustos_users::administrator_ceiling();
+        for cap in USERS_TOOL_MANIFEST {
+            assert!(ceiling.contains(*cap), "{cap:?} exceeds the admin ceiling");
+        }
+        assert!(!set(USERS_TOOL_MANIFEST).contains(CapabilityId::FS_ACCESS));
     }
 }

@@ -104,6 +104,7 @@ pub mod sleeplock;
 pub(crate) mod sched;
 pub mod spawn;
 pub mod syscalls;
+pub mod useradmin;
 pub mod users;
 pub mod waitq;
 pub mod waitset;
@@ -171,9 +172,14 @@ pub use spawn::{
     EMPTY_PROGRAM_REGISTRY, NULL_PROCESS_SPAWN,
 };
 pub use syscalls::{KernelDispatchHook, KernelSpawnCtx, KernelSyscallHandlers};
+pub use useradmin::{
+    LateUsersAdmin, NullUsersAdmin, UserAdminBacking, UserAdminEngine, UsersAdmin,
+    UsersAdminAlreadyInstalled, NULL_USERS_ADMIN,
+};
 pub use users::{
     load_users_db, load_users_db_source, HeldUsersDbSource, LateUsersDb, NullUsersDbSource,
-    UsersDbAlreadyInstalled, UsersDbSource, UsersLoadError, NULL_USERS_DB, USERS_DB_PATH,
+    UsersDbAlreadyInstalled, UsersDbSource, UsersDbText, UsersLoadError, NULL_USERS_DB,
+    USERS_DB_PATH,
 };
 pub use waitq::{
     call_wake, console_deregister, console_wake, drain_pending_wakes, hw_tree_wake,

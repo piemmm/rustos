@@ -162,8 +162,8 @@ The life of a capability, from disk to exercise to revocation:
   and seeded as the debug root grant (`tools/mkimage::debug_users_db`)
   and the QEMU users-root fixture account — B3 is fixed (CU3).
 
-All three defects are fixed; the remaining stages extend the lifecycle
-(user management CU4, elevation CU5, desktop CU6).
+All three defects are fixed and user management (CU4) is live; the
+remaining stages extend the lifecycle (elevation CU5, desktop CU6).
 
 ---
 
@@ -419,24 +419,57 @@ authorises it; anything not listed is denied.
 
 ### CU4 — user management under `CAP_USER_ADMIN`
 
-**Status: planned.**
+**Status: done** (except the installer first-user flow, which lands with
+the installer work — the shared `lib/users` grant sets it needs already
+exist from CU3).
 
-- The write path to `/System/Security/Users`/`Groups` for a running system:
-  a `CAP_USER_ADMIN`-gated kernel/service surface (create, modify, delete,
-  lock/unlock, grant editing), designed with — not ahead of — its first
-  holder, a `users` administration tool in `userland/shell/`.
-- **Never widen beyond your own ceiling:** a grant editor can grant at most
-  the capabilities in its *own* effective set — an administrator without
-  `CAP_TIME_SET` cannot mint an account that has it (delegation narrows,
-  §2.3; the kernel enforces this, not the tool).
-- Deleting/locking an account, and the next-spawn revocation semantics of
-  §2.6, are exercised by tests (a locked account's running shell keeps
-  working; its next login is refused indistinguishably from a bad
-  password).
+- **The surface** is one `CAP_USER_ADMIN`-gated, per-call-audited syscall,
+  `users_admin` (no. 69), taking a versioned typed request
+  (`lib/abi/src/users_admin.rs`: create/modify/delete account, lock/unlock,
+  set grants, set password record, create/delete group, list users/groups).
+  No raw-text edit path exists: password records never leave the kernel
+  (`CAP_USERS_READ` stays login's alone), the list responses are
+  secret-free, and a new password crosses only as a client-built salted
+  PBKDF2 record. Wrappers: `rustos_rt::users_admin`,
+  `ros_sys_users_admin`; the decoder is in the shared `lib/abi` fuzz sweep.
+- **The engine** (`kernel/core/src/useradmin.rs`, `UserAdminEngine` behind
+  the `UsersAdmin` seam and the set-once `LateUsersAdmin` cell) applies one
+  operation at a time, whole-or-nothing: never-widen (an added grant must be
+  in the *caller's own* effective set — kernel-enforced), the
+  last-active-administrator guard (cannot delete/lock/strip the last
+  `CAP_USER_ADMIN` holder), full re-validation through `lib/users` and
+  `build_identity_table`, serialised-size bounds, persist-then-swap. Audit
+  events `USER_ADMIN_APPLIED`/`USER_ADMIN_REJECTED` (4045/4046) carry op,
+  target, and attested caller uid.
+- **Live state became replaceable through this path alone:** `LateUsersDb`
+  and `LateIdentity` are installed set-once at boot and swapped only by the
+  engine's commit (`replace` refuses to create a first state), so an edit
+  binds at the next spawn/login (§2.6) — exercised by tests: a locked
+  account's next authentication is refused indistinguishably while its
+  identity row (and any running session) is unaffected.
+  `UsersDbSource::text` now serves an owned zero-on-drop snapshot.
+- **Persistence** is the `UserAdminBacking` seam: production is
+  `RootAdminBacking` (`kernel/rustos-kernel/src/user_admin_backing.rs`)
+  over a dedicated read-write `RustFs` window the unlock's
+  `WritableRootSink::publish` opens (the `/System` VFS mount shadows
+  `/System/Security`, so the engine writes through a direct window exactly
+  as the boot load read). Databases are replaced crash-safely (temp node
+  carrying the original's security record, flushed, renamed); `CreateUser`
+  provisions `/Users/<name>` owner-only under the new identity
+  (idempotent). `finish_install` builds and installs the engine (aarch64
+  wired; other ports gain it with their unlock paths via
+  `UnlockInstall::admin`).
+- **The first holder** is the interactive `users` tool
+  (`userland/shell/users`, `/Apps/Users.app/Run`, registry-enrolled):
+  session logic behind host-tested seams, manifest = console pair +
+  `CAP_USER_ADMIN` (deliberately above the baseline — armed only for an
+  administrator's intersection, no `CAP_FS_ACCESS`), salt from
+  `sys:random`, echo-off zeroised password entry. The staged
+  `useradd`/`groupadd` argv grammars become thin frontends over the same
+  syscall once spawn carries an argument vector.
 - The installer's first-user flow (admin ceiling for the first account,
-  session baseline for subsequent ones) lands here or with the installer
-  work, whichever comes first — one definition of both sets, shared with
-  `tools/mkimage` (`AGENTS.md` §2.2).
+  session baseline for subsequent ones) lands with the installer work —
+  one definition of both sets, shared with `tools/mkimage`.
 
 ### CU5 — per-invocation elevation (`elevate`)
 
