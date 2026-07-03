@@ -18,6 +18,18 @@ virtio 1.1 §5.2 — Stage 4 implements the unextended subset:
   to `DriverError::DeviceFault`, the third to
   `DriverError::Unsupported`.
 
+## DMA staging
+
+The header, data, and status DMA buffers are carved **once at `open`**
+and reused for every request, so the read/write data path never
+re-enters the per-process DMA allocator (and never emits a
+per-request DMA-grant audit record). The data buffer is a fixed
+staging window (`wire::MAX_TRANSFER_LEN`, 32 KiB); a `read_blocks` /
+`write_blocks` call larger than the window is split into block-aligned
+chunks that reuse the same buffers, so the driver's DMA footprint is a
+fixed per-device cost rather than a function of the request length or
+the volume size (`AGENTS.md` §2.16, §24, §26).
+
 ## Supported hardware
 
 | Bus      | Architectures            | Stage 4 status                     |
@@ -67,6 +79,8 @@ zeroed; that scrubbing remains the caller's responsibility.
   fixture.
 - Range validation (`BufferTooSmall`, `LengthOutOfRange`).
 - Multi-sector read concatenation.
+- Steady-state I/O allocates no new DMA (staging is reused).
+- A transfer larger than the staging window chunks and round-trips.
 - `BufferClass::Sensitive` round-trip.
 - `register` capability gate.
 - The `BIND_KEYS` table matches a `virtio-blk` node and rejects a

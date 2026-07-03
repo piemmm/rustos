@@ -90,6 +90,9 @@ impl AutoDrainHost {
             *self.transport.get() = t;
         }
     }
+    fn bytes_allocated(&self) -> usize {
+        self.inner.bytes_allocated()
+    }
 }
 
 impl DmaHost for AutoDrainHost {
@@ -117,11 +120,20 @@ fn auto_host() -> &'static AutoDrainHost {
     Box::leak(Box::new(AutoDrainHost::new()))
 }
 
-fn open_net(t: MockTransport) -> Box<VirtioNet<'static, MockTransport>> {
+fn open_net_with_host(
+    t: MockTransport,
+) -> (
+    Box<VirtioNet<'static, MockTransport>>,
+    &'static AutoDrainHost,
+) {
     let host = auto_host();
     let mut net = Box::new(VirtioNet::open(t, host).expect("open"));
     host.install_transport(net.transport_mut() as *mut MockTransport);
-    net
+    (net, host)
+}
+
+fn open_net(t: MockTransport) -> Box<VirtioNet<'static, MockTransport>> {
+    open_net_with_host(t).0
 }
 
 /// Minimal 14-byte Ethernet frame: dst MAC, src MAC, ethertype.
@@ -216,6 +228,49 @@ fn sensitive_class_round_trip() {
         .receive_with_class(&mut buf, BufferClass::Sensitive)
         .expect("rx");
     assert_eq!(&buf[..n], rx_frame.as_slice());
+}
+
+#[test]
+fn steady_state_traffic_allocates_no_new_dma() {
+    // The staging buffers are carved once at open; idle polls,
+    // delivered frames, and transmits must all reuse them — the
+    // per-poll `dma_alloc`/`dma_free` churn (and its audit-log spam)
+    // is exactly the defect this driver must not reintroduce.
+    let (t, tx_log, rx_queue) = build_device();
+    let (mut net, host) = open_net_with_host(t);
+    let after_open = host.bytes_allocated();
+    let frame = arp_frame();
+    let mut buf = vec![0u8; 1500];
+    for _ in 0..8 {
+        assert_eq!(net.receive(&mut buf).expect("idle receive"), 0);
+        rx_queue.borrow_mut().push_back(frame.clone());
+        let n = net.receive(&mut buf).expect("receive");
+        assert_eq!(n, frame.len());
+        net.transmit(&frame).expect("transmit");
+    }
+    assert_eq!(tx_log.borrow().len(), 8);
+    assert_eq!(
+        host.bytes_allocated(),
+        after_open,
+        "steady-state traffic must not allocate DMA"
+    );
+}
+
+#[test]
+fn receive_rearms_the_chain_after_buffer_too_small() {
+    // A frame larger than the caller's buffer is refused, but the
+    // receive chain must be re-posted so the next frame still lands.
+    let (t, _, rx_queue) = build_device();
+    let mut net = open_net(t);
+    rx_queue.borrow_mut().push_back(vec![0xAB; 200]);
+    let mut small = vec![0u8; 16];
+    assert_eq!(net.receive(&mut small), Err(DriverError::BufferTooSmall));
+    let frame = arp_frame();
+    rx_queue.borrow_mut().push_back(frame.clone());
+    let mut buf = vec![0u8; 1500];
+    let n = net.receive(&mut buf).expect("receive after refusal");
+    assert_eq!(n, frame.len());
+    assert_eq!(&buf[..n], frame.as_slice());
 }
 
 #[test]

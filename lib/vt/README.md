@@ -22,9 +22,10 @@ RustOS's text stack. It is the single source of truth (`AGENTS.md` §2.2) for:
   the kernel console's echo half byte for byte,
 - the secret-entry activity indicator (`secret::SecretIndicator`): the
   `[input active...]` marker every echo-suppressed (password) prompt shows,
-  its dots cycling on a one-second cadence for as long as the marker is
-  shown, with one-shot deadline timing — a pure state machine its kernel
-  host renders.
+  its dots cycling on a one-second cadence for at least three seconds after
+  the most recent keystroke and then freezing (a later keystroke restarts
+  it), replaced in place with `[input complete]` on Enter, with one-shot
+  deadline timing — a pure state machine its kernel host renders.
 
 It ships **both** an emitter (`Op` → bytes) and a streaming parser (bytes →
 `Op` events) built over the *same* tables, so the two provably agree: every

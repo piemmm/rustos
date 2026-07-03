@@ -32,12 +32,23 @@
 //! `receive` additionally require the dispatcher to have verified
 //! [`CapabilityId::NET_RAW`] (see `lib/abi/src/driver/net.rs`).
 //!
+//! # Staging buffers
+//!
+//! DMA staging is allocated **once**, at [`VirtioNet::open`]: one
+//! header + one MTU-sized frame buffer per direction, reused for
+//! every packet. The receive pair is posted as a device-write chain
+//! at open and re-posted after every harvested completion, so the
+//! device always owns a receive buffer and an idle `receive` poll
+//! touches no allocator — no per-packet `dma_alloc`/`dma_free`
+//! round trip, no per-poll audit-log traffic on the hot path.
+//!
 //! # Zero-on-free
 //!
 //! [`Net::transmit_with_class`] and [`Net::receive_with_class`]
 //! honour [`BufferClass::Sensitive`](rustos_abi::driver::BufferClass)
-//! by scrubbing every staging copy through
-//! [`rustos_virtio::BounceBuffer`]'s drop impl.
+//! by scrubbing the persistent staging through
+//! [`rustos_virtio::BounceBuffer::into_slab`] before the buffers are
+//! reused for the next packet.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -48,7 +59,8 @@ use rustos_abi::driver::net::{MacAddress, Net, MAC_ADDRESS_LEN};
 use rustos_abi::driver::BufferClass;
 use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 use rustos_virtio::{
-    BounceBuffer, ChainSegment, Direction, SplitQueue, Status, Transport, VirtioError, VirtioHost,
+    BounceBuffer, ChainSegment, Direction, DmaSlab, SplitQueue, Status, Transport, VirtioError,
+    VirtioHost,
 };
 
 /// Per-driver `DriverHandle` marker returned by [`register`].
@@ -108,6 +120,15 @@ pub struct VirtioNet<'h, T: Transport> {
     host: &'h dyn VirtioHost,
     mac: MacAddress,
     mtu: usize,
+    /// Persistent receive staging (virtio-net header + frame buffer)
+    /// the pre-posted receive chain points at. Carved once at open and
+    /// reused for every frame; `None` only while a `receive` call
+    /// holds the pair in class-aware [`BounceBuffer`] wrappers.
+    rx_header: Option<DmaSlab>,
+    rx_data: Option<DmaSlab>,
+    /// Persistent transmit staging, reused by every `transmit`.
+    tx_header: Option<DmaSlab>,
+    tx_data: Option<DmaSlab>,
 }
 
 impl<'h, T: Transport> VirtioNet<'h, T> {
@@ -145,14 +166,73 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
         // Read MAC from device-config.
         let mut mac = [0u8; MAC_ADDRESS_LEN];
         transport.read_config(wire::CONFIG_MAC_OFFSET, &mut mac);
-        Ok(Self {
+        // Carve the persistent staging once: one header + one
+        // MTU-sized frame buffer per direction, reused for every
+        // packet so the polled receive path never touches the
+        // allocator.
+        let rx_header = host
+            .alloc_dma_zeroed(wire::HEADER_LEN)
+            .map_err(|_| VirtioError::DeviceFault)?;
+        let rx_data = host
+            .alloc_dma_zeroed(wire::DEFAULT_MTU)
+            .map_err(|_| VirtioError::DeviceFault)?;
+        let tx_header = host
+            .alloc_dma_zeroed(wire::HEADER_LEN)
+            .map_err(|_| VirtioError::DeviceFault)?;
+        let tx_data = host
+            .alloc_dma_zeroed(wire::DEFAULT_MTU)
+            .map_err(|_| VirtioError::DeviceFault)?;
+        let mut net = Self {
             transport,
             rx_queue,
             tx_queue,
             host,
             mac: MacAddress::new(mac),
             mtu: wire::DEFAULT_MTU,
-        })
+            rx_header: Some(rx_header),
+            rx_data: Some(rx_data),
+            tx_header: Some(tx_header),
+            tx_data: Some(tx_data),
+        };
+        // Arm the receive path: the device owns a posted buffer from
+        // DRIVER_OK onward, so a frame arriving before the first
+        // `receive` call is captured rather than dropped.
+        net.post_receive_chain()
+            .map_err(|_| VirtioError::DeviceFault)?;
+        Ok(net)
+    }
+
+    /// Post the persistent receive staging pair as the single
+    /// device-write chain the device fills with the next frame, then
+    /// notify the device.
+    ///
+    /// Called at open and again after every harvested completion, so
+    /// exactly one receive chain is outstanding whenever the driver
+    /// is idle — the buffers behind it stay owned by the driver for
+    /// its whole life, never freed while the device can still write
+    /// to them.
+    fn post_receive_chain(&mut self) -> Result<(), DriverError> {
+        let (Some(header), Some(data)) = (self.rx_header.as_ref(), self.rx_data.as_ref()) else {
+            return Err(DriverError::DeviceFault);
+        };
+        let data_len = u32::try_from(data.len()).map_err(|_| DriverError::LengthOutOfRange)?;
+        let segments = [
+            ChainSegment {
+                phys: header.phys(),
+                len: u32::try_from(wire::HEADER_LEN).unwrap_or(0),
+                direction: Direction::DeviceWrite,
+            },
+            ChainSegment {
+                phys: data.phys(),
+                len: data_len,
+                direction: Direction::DeviceWrite,
+            },
+        ];
+        self.rx_queue
+            .add_chain(&segments)
+            .map_err(VirtioError::as_driver_error)?;
+        self.rx_queue.kick(&mut self.transport);
+        Ok(())
     }
 
     /// Tear the device down for unload (sets the status byte to 0).
@@ -186,12 +266,31 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
         if frame.len() > self.mtu {
             return Err(DriverError::LengthOutOfRange);
         }
-        // Allocate header + frame staging. Bounce-buffer wrappers
-        // scrub on drop when `class == Sensitive`.
-        let header_region = self.host.alloc_dma_zeroed(wire::HEADER_LEN)?;
-        let data_region = self.host.alloc_dma_zeroed(frame.len())?;
-        let mut header_bb = BounceBuffer::new(header_region, class);
-        let mut data_bb = BounceBuffer::new(data_region, class);
+        // Stage into the persistent buffers through the class-aware
+        // wrappers; `into_slab` scrubs the staging before it is put
+        // back when the caller declared the payload sensitive.
+        let (Some(header_slab), Some(data_slab)) = (self.tx_header.take(), self.tx_data.take())
+        else {
+            return Err(DriverError::DeviceFault);
+        };
+        let mut header_bb = BounceBuffer::new(header_slab, class);
+        let mut data_bb = BounceBuffer::new(data_slab, class);
+        let result = self.transmit_chain(&mut header_bb, &mut data_bb, frame);
+        self.tx_header = Some(header_bb.into_slab());
+        self.tx_data = Some(data_bb.into_slab());
+        result
+    }
+
+    /// Stage `frame` into the wrapped transmit buffers, publish the
+    /// chain, and wait for the device to consume it. Split out of
+    /// [`Self::run_transmit`] so every early return still puts the
+    /// staging slabs back (the wrappers stay owned by the caller).
+    fn transmit_chain(
+        &mut self,
+        header_bb: &mut BounceBuffer,
+        data_bb: &mut BounceBuffer,
+        frame: &[u8],
+    ) -> Result<(), DriverError> {
         header_bb
             .stage(&Self::build_header())
             .map_err(|()| DriverError::BufferTooSmall)?;
@@ -228,52 +327,51 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
         if buf.is_empty() {
             return Err(DriverError::BufferTooSmall);
         }
-        // The receive path posts a single descriptor chain (header
-        // + data) that the device fills. The header is sized to
-        // `HEADER_LEN`; the data buffer is sized to the caller's
-        // `buf.len()` so the device can deliver up to the caller's
-        // capacity before reporting `BufferTooSmall`.
-        let header_region = self.host.alloc_dma_zeroed(wire::HEADER_LEN)?;
-        let data_region = self.host.alloc_dma_zeroed(buf.len())?;
-        let header_bb = BounceBuffer::new(header_region, class);
-        let mut data_bb = BounceBuffer::new(data_region, class);
-        let buf_len_u32 = u32::try_from(buf.len()).map_err(|_| DriverError::LengthOutOfRange)?;
-        let segments = [
-            ChainSegment {
-                phys: header_bb.phys(),
-                len: u32::try_from(wire::HEADER_LEN).unwrap_or(0),
-                direction: Direction::DeviceWrite,
-            },
-            ChainSegment {
-                phys: data_bb.phys(),
-                len: buf_len_u32,
-                direction: Direction::DeviceWrite,
-            },
-        ];
-        self.rx_queue
-            .add_chain(&segments)
-            .map_err(VirtioError::as_driver_error)?;
-        self.rx_queue.kick(&mut self.transport);
-        self.host.notify_wait(self.rx_queue.index());
+        // Harvest the pre-posted chain. Poll before waiting so a
+        // completion the device published earlier is never missed
+        // (one interrupt can cover several completions); when the
+        // ring is idle, wait once for the device event and re-check.
+        // `NoCompletion` after the wait means no frame yet: the chain
+        // stays posted and the call reports "nothing pending".
         let token = match self.rx_queue.poll_used() {
             Ok(t) => t,
-            Err(VirtioError::NoCompletion) => return Ok(0),
+            Err(VirtioError::NoCompletion) => {
+                self.host.notify_wait(self.rx_queue.index());
+                match self.rx_queue.poll_used() {
+                    Ok(t) => t,
+                    Err(VirtioError::NoCompletion) => return Ok(0),
+                    Err(e) => return Err(e.as_driver_error()),
+                }
+            }
             Err(e) => return Err(e.as_driver_error()),
         };
         // The device reports total bytes written across the chain;
         // header consumes `HEADER_LEN`, the rest is frame payload.
         let total = token.written as usize;
         let frame_len = total.saturating_sub(wire::HEADER_LEN);
-        if frame_len > buf.len() {
-            return Err(DriverError::BufferTooSmall);
-        }
-        if frame_len > 0 {
-            buf[..frame_len].copy_from_slice(&data_bb.full_region_mut()[..frame_len]);
-        }
-        // `header_bb` / `data_bb` are dropped here. When
-        // `class == Sensitive` their drop impl zeroes the staging.
-        let _ = header_bb;
-        Ok(frame_len)
+        // Copy out through the class-aware wrappers; `into_slab`
+        // scrubs the persistent staging before the chain is re-posted
+        // when the caller declared the traffic sensitive.
+        let (Some(header_slab), Some(data_slab)) = (self.rx_header.take(), self.rx_data.take())
+        else {
+            return Err(DriverError::DeviceFault);
+        };
+        let header_bb = BounceBuffer::new(header_slab, class);
+        let mut data_bb = BounceBuffer::new(data_slab, class);
+        let result = if frame_len > buf.len() {
+            Err(DriverError::BufferTooSmall)
+        } else {
+            if frame_len > 0 {
+                buf[..frame_len].copy_from_slice(&data_bb.full_region_mut()[..frame_len]);
+            }
+            Ok(frame_len)
+        };
+        self.rx_header = Some(header_bb.into_slab());
+        self.rx_data = Some(data_bb.into_slab());
+        // Re-arm so the device always owns a receive buffer — even
+        // when the caller's buffer was too small for this frame.
+        self.post_receive_chain()?;
+        result
     }
 }
 

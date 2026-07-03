@@ -29,6 +29,10 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
+// Only the unit tests (`mod tests`) allocate; the driver's data path
+// is `alloc`-free by design (persistent DMA staging, no per-request
+// heap copy), so the crate needs `alloc` in test builds only.
+#[cfg(test)]
 extern crate alloc;
 
 use core::convert::TryFrom;
@@ -36,7 +40,8 @@ use rustos_abi::driver::block::{Block, BlockGeometry, DiscardCapability};
 use rustos_abi::driver::BufferClass;
 use rustos_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey};
 use rustos_virtio::{
-    BounceBuffer, ChainSegment, Direction, SplitQueue, Status, Transport, VirtioError, VirtioHost,
+    BounceBuffer, ChainSegment, Direction, DmaSlab, SplitQueue, Status, Transport, VirtioError,
+    VirtioHost,
 };
 
 /// Per-driver `DriverHandle` marker returned by [`register`].
@@ -99,6 +104,13 @@ mod wire {
     pub const STATUS_LEN: usize = 1;
     pub const STATUS_OK: u8 = 0;
     pub const STATUS_IOERR: u8 = 1;
+    /// Most bytes staged into the persistent data buffer for a single
+    /// virtio transaction. A `read_blocks`/`write_blocks` call larger
+    /// than this is split into block-aligned chunks of at most this
+    /// size, so the driver's DMA footprint is a fixed staging window
+    /// carved once at open rather than a per-request allocation. A
+    /// multiple of [`SECTOR_SIZE`] so every chunk is block-aligned.
+    pub const MAX_TRANSFER_LEN: usize = 32 * 1024;
     /// Device-config byte offset of the capacity (in 512-byte sectors).
     pub const CONFIG_CAPACITY_OFFSET: usize = 0;
     /// Sector size, fixed in `abi-v1` Stage 4. `VIRTIO_BLK_F_BLK_SIZE`
@@ -139,6 +151,16 @@ pub struct VirtioBlk<'h, T: Transport> {
     /// Whether `VIRTIO_BLK_F_DISCARD` was negotiated at `open` and the
     /// device's discard limits read from its config window.
     discard: DiscardLimits,
+    /// Persistent request staging carved once at open and reused by
+    /// every request: the `virtio_blk_req` header, the data buffer
+    /// (sized to [`wire::MAX_TRANSFER_LEN`], the chunk unit), and the
+    /// one-byte status. `None` only while a request holds them in
+    /// class-aware [`BounceBuffer`] wrappers. Reusing them keeps the
+    /// I/O data path off the DMA allocator (no per-request grant, and
+    /// no audit-log entry per request).
+    header: Option<DmaSlab>,
+    data: Option<DmaSlab>,
+    status: Option<DmaSlab>,
 }
 
 /// Negotiated discard limits, or `unsupported` when the device did not
@@ -216,6 +238,18 @@ impl<'h, T: Transport> VirtioBlk<'h, T> {
                 max_blocks_per_request: 0,
             }
         };
+        // Carve the persistent request staging once. Every request
+        // reuses these three buffers, so the block data path never
+        // touches the DMA allocator after open.
+        let header = host
+            .alloc_dma_zeroed(wire::HEADER_LEN)
+            .map_err(|_| VirtioError::DeviceFault)?;
+        let data = host
+            .alloc_dma_zeroed(wire::MAX_TRANSFER_LEN)
+            .map_err(|_| VirtioError::DeviceFault)?;
+        let status = host
+            .alloc_dma_zeroed(wire::STATUS_LEN)
+            .map_err(|_| VirtioError::DeviceFault)?;
         Ok(Self {
             transport,
             queue,
@@ -223,6 +257,9 @@ impl<'h, T: Transport> VirtioBlk<'h, T> {
             block_size: wire::SECTOR_SIZE,
             block_count: capacity_sectors,
             discard,
+            header: Some(header),
+            data: Some(data),
+            status: Some(status),
         })
     }
 
@@ -266,43 +303,102 @@ impl<'h, T: Transport> VirtioBlk<'h, T> {
         Ok(blocks)
     }
 
+    /// Number of blocks a byte length spans. The chunking callers pass
+    /// a block-aligned length ([`wire::MAX_TRANSFER_LEN`] is a multiple
+    /// of the block size and the caller buffer was validated aligned),
+    /// so this divides evenly; it fails closed if the count would not
+    /// fit a `u64`.
+    fn blocks_in(&self, bytes: usize) -> Result<u64, DriverError> {
+        u64::try_from(bytes / self.block_size as usize).map_err(|_| DriverError::LengthOutOfRange)
+    }
+
+    /// Run one virtio-blk request against the device, reusing the
+    /// persistent header/data/status staging carved at open.
+    ///
+    /// The caller guarantees `payload.len()` fits the data staging
+    /// window ([`wire::MAX_TRANSFER_LEN`]); the read/write entry points
+    /// chunk larger transfers before calling in. The staging is always
+    /// put back (even on a faulted request) so the next request reuses
+    /// it — the data path never re-enters the DMA allocator.
     fn run_request(
         &mut self,
         req_type: u32,
         lba: u64,
-        payload: &mut [u8],
-        write_outbound: bool,
+        payload: Payload<'_>,
         class: BufferClass,
     ) -> Result<(), DriverError> {
-        // Allocate three DMA regions: header, data, status. The
-        // `BounceBuffer` wrappers carry the sensitive scrub on drop.
-        let header_region = self.host.alloc_dma_zeroed(wire::HEADER_LEN)?;
-        let data_region = self.host.alloc_dma_zeroed(payload.len())?;
-        let status_region = self.host.alloc_dma_zeroed(wire::STATUS_LEN)?;
-        let mut header_bb = BounceBuffer::new(header_region, class);
-        let mut data_bb = BounceBuffer::new(data_region, class);
-        let mut status_bb = BounceBuffer::new(status_region, class);
+        // Take the persistent staging and wrap it in class-aware
+        // bounce buffers. Only the data buffer carries caller bytes, so
+        // only it inherits `class` (scrubbed on return when sensitive);
+        // the header (request type + LBA) and status byte never hold a
+        // secret.
+        let (Some(header), Some(data), Some(status)) =
+            (self.header.take(), self.data.take(), self.status.take())
+        else {
+            return Err(DriverError::DeviceFault);
+        };
+        let mut header_bb = BounceBuffer::new(header, BufferClass::NonSensitive);
+        let mut data_bb = BounceBuffer::new(data, class);
+        let mut status_bb = BounceBuffer::new(status, BufferClass::NonSensitive);
+        let result = self.exchange(
+            &mut header_bb,
+            &mut data_bb,
+            &mut status_bb,
+            req_type,
+            lba,
+            payload,
+        );
+        // Return the staging regardless of outcome (`into_slab` scrubs
+        // the data buffer first when the class was sensitive).
+        self.header = Some(header_bb.into_slab());
+        self.data = Some(data_bb.into_slab());
+        self.status = Some(status_bb.into_slab());
+        result
+    }
+
+    /// Stage `payload` into the persistent buffers, publish the chain,
+    /// wait for the device, and decode the result. Split out of
+    /// [`Self::run_request`] so every early return still lets the
+    /// caller put the staging slabs back.
+    fn exchange(
+        &mut self,
+        header_bb: &mut BounceBuffer,
+        data_bb: &mut BounceBuffer,
+        status_bb: &mut BounceBuffer,
+        req_type: u32,
+        lba: u64,
+        payload: Payload<'_>,
+    ) -> Result<(), DriverError> {
+        let payload_len = payload.len();
+        let write_outbound = payload.is_write();
         // Stage header.
-        let header = Self::build_header(req_type, lba);
         header_bb
-            .stage(&header)
+            .stage(&Self::build_header(req_type, lba))
             .map_err(|()| DriverError::BufferTooSmall)?;
-        // Stage outbound data for write requests.
-        if write_outbound {
-            data_bb
-                .stage(payload)
-                .map_err(|()| DriverError::BufferTooSmall)?;
+        // Stage outbound data for writes; a read only needs the device
+        // to have a buffer of `payload_len` bytes to fill. Fail closed
+        // if the chunk does not fit the staging window (the chunking
+        // entry points guarantee it does).
+        match &payload {
+            Payload::Write(src) => data_bb
+                .stage(src)
+                .map_err(|()| DriverError::BufferTooSmall)?,
+            Payload::Read(_) => {
+                if payload_len > data_bb.capacity() {
+                    return Err(DriverError::BufferTooSmall);
+                }
+            }
         }
-        // Build the descriptor chain. Header + data are read by
-        // device for writes; for reads only the header is. Status
-        // is always device-write.
+        // Build the descriptor chain. Header + data are read by the
+        // device for writes; for reads only the header is. Status is
+        // always device-write.
         let data_dir = if write_outbound {
             Direction::DeviceRead
         } else {
             Direction::DeviceWrite
         };
         let payload_len_u32 =
-            u32::try_from(payload.len()).map_err(|_| DriverError::LengthOutOfRange)?;
+            u32::try_from(payload_len).map_err(|_| DriverError::LengthOutOfRange)?;
         let segments = [
             ChainSegment {
                 phys: header_bb.phys(),
@@ -339,20 +435,49 @@ impl<'h, T: Transport> VirtioBlk<'h, T> {
         // need no device-side ack (MSI-X PCI, the mock).
         self.transport.ack_interrupt();
         let _token = polled.map_err(VirtioError::as_driver_error)?;
-        // For reads, copy device-written data back to the caller.
-        if !write_outbound {
-            // The mock peer wrote into `data_bb`'s staging through
-            // its phys-mapped slice. `BounceBuffer::full_region_mut`
-            // gives us a CPU view of the same bytes.
-            payload.copy_from_slice(&data_bb.full_region_mut()[..payload.len()]);
-        }
-        // Decode status.
+        // Decode status first, and copy device-written data back to the
+        // caller only on success. The data staging is a persistent
+        // buffer reused across requests, so copying on a faulted or
+        // unsupported request could hand the caller stale bytes left by
+        // an earlier request — fail closed and copy nothing instead.
         let status_byte = status_bb.full_region_mut()[0];
         match status_byte {
-            wire::STATUS_OK => Ok(()),
+            wire::STATUS_OK => {
+                if let Payload::Read(dst) = payload {
+                    // The device wrote `payload_len` bytes into the
+                    // staging through its phys-mapped slice;
+                    // `full_region_mut` gives us a CPU view of them.
+                    dst.copy_from_slice(&data_bb.full_region_mut()[..payload_len]);
+                }
+                Ok(())
+            }
             wire::STATUS_IOERR => Err(DriverError::DeviceFault),
             _ => Err(DriverError::Unsupported),
         }
+    }
+}
+
+/// The caller data a single [`VirtioBlk::run_request`] carries, keeping
+/// the read (device-write) and write (device-read) directions distinct
+/// so the write path stages straight from the caller's `&[u8]` with no
+/// intermediate copy.
+enum Payload<'a> {
+    /// The device writes this many bytes into the caller's buffer.
+    Read(&'a mut [u8]),
+    /// The device reads the caller's bytes.
+    Write(&'a [u8]),
+}
+
+impl Payload<'_> {
+    fn len(&self) -> usize {
+        match self {
+            Payload::Read(b) => b.len(),
+            Payload::Write(b) => b.len(),
+        }
+    }
+
+    fn is_write(&self) -> bool {
+        matches!(self, Payload::Write(_))
     }
 }
 
@@ -376,7 +501,24 @@ impl<T: Transport> Block for VirtioBlk<'_, T> {
         class: BufferClass,
     ) -> Result<(), DriverError> {
         self.validate_block_op(lba, buf.len())?;
-        self.run_request(wire::VIRTIO_BLK_T_IN, lba, buf, false, class)
+        // Split the transfer into staging-window-sized, block-aligned
+        // chunks so the persistent buffers are reused for a request of
+        // any size: the driver's DMA footprint stays fixed rather than
+        // scaling with the request length.
+        let mut cur_lba = lba;
+        let mut off = 0;
+        while off < buf.len() {
+            let chunk = (buf.len() - off).min(wire::MAX_TRANSFER_LEN);
+            self.run_request(
+                wire::VIRTIO_BLK_T_IN,
+                cur_lba,
+                Payload::Read(&mut buf[off..off + chunk]),
+                class,
+            )?;
+            cur_lba += self.blocks_in(chunk)?;
+            off += chunk;
+        }
+        Ok(())
     }
     fn write_blocks_with_class(
         &mut self,
@@ -385,19 +527,25 @@ impl<T: Transport> Block for VirtioBlk<'_, T> {
         class: BufferClass,
     ) -> Result<(), DriverError> {
         self.validate_block_op(lba, buf.len())?;
-        // The trait signature uses `&[u8]`; we copy into a local
-        // mutable buffer because `run_request` needs `&mut` to
-        // double as the read-back path. The local buffer is held
-        // inside the bounce buffer regardless; this extra copy is
-        // unavoidable for the write path because the abi trait
-        // does not allow handing the device a mutable borrow of
-        // the caller's slice.
-        let mut payload: alloc::vec::Vec<u8> = buf.to_vec();
-        let result = self.run_request(wire::VIRTIO_BLK_T_OUT, lba, &mut payload, true, class);
-        if class.is_sensitive() {
-            payload.fill(0);
+        // Stage straight from the caller's slice, one block-aligned
+        // chunk at a time, so the write path neither allocates a
+        // temporary copy nor re-enters the DMA allocator. The sensitive
+        // scrub happens inside the bounce buffer on return, so no
+        // secret bytes outlive the request.
+        let mut cur_lba = lba;
+        let mut off = 0;
+        while off < buf.len() {
+            let chunk = (buf.len() - off).min(wire::MAX_TRANSFER_LEN);
+            self.run_request(
+                wire::VIRTIO_BLK_T_OUT,
+                cur_lba,
+                Payload::Write(&buf[off..off + chunk]),
+                class,
+            )?;
+            cur_lba += self.blocks_in(chunk)?;
+            off += chunk;
         }
-        result
+        Ok(())
     }
     fn discard_capability(&self) -> Result<DiscardCapability, DriverError> {
         Ok(if self.discard.supported {
@@ -438,8 +586,7 @@ impl<T: Transport> Block for VirtioBlk<'_, T> {
         self.run_request(
             wire::VIRTIO_BLK_T_DISCARD,
             0,
-            &mut descriptor,
-            true,
+            Payload::Write(&descriptor),
             BufferClass::NonSensitive,
         )
     }

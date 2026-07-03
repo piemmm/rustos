@@ -6,51 +6,75 @@
 //! definition of the visual feedback every text/terminal password prompt
 //! shows instead: after the first typed character the prompt gains
 //! `[input active.]`, whose trailing dots cycle `.` → `..` → `...` on a
-//! one-second cadence for as long as the marker is shown. The whole marker
-//! is removed when the line is submitted (Enter) or when every typed
-//! character has been erased again.
+//! one-second cadence. The animation is **bounded**: it runs for at least
+//! [`SECRET_ANIMATE_NS`] after the most recent keystroke and then freezes
+//! (the marker stays on screen, showing that input is still open, but the
+//! dots stop moving and no further timer wake-ups are taken). A later
+//! keystroke restarts the bounded animation. When the line is submitted
+//! (Enter) the marker is replaced in place with `[input complete]`; when the
+//! line is erased back to empty the marker is removed entirely, and an
+//! aborted read clears it with [`SecretIndicator::abort`].
 //!
 //! [`SecretIndicator`] is the pure state machine: it performs no I/O and
 //! reads no clock — the caller feeds it input events and tick wake-ups with
 //! the current monotonic time and writes the returned [`Render`] bytes to the
 //! terminal. Timing is **one-shot**: [`SecretIndicator::deadline_ns`] names
-//! the single next animation frame while the marker is shown, or `None`
-//! while it is hidden — the caller arms exactly that deadline and nothing
-//! else, so a prompt with nothing typed yet takes no timer wake-ups at all,
-//! and the animation's wake-ups span only the bounded window from the first
-//! typed character to the line's submission (or full erasure).
+//! the single next animation frame while the animation is running, or `None`
+//! while the marker is hidden, frozen, or complete — the caller arms exactly
+//! that deadline and nothing else, so a prompt with nothing typed yet takes no
+//! timer wake-ups at all, and the animation's wake-ups span only the bounded
+//! window from a keystroke to [`SECRET_ANIMATE_NS`] after the last one.
 //!
-//! The rendering is plain printable text plus the shared
-//! [`control::ERASE_ECHO`] rub-out — no escape sequences — so it draws
-//! correctly on every console backing (UART, framebuffer text console, or a
-//! remote terminal). Nothing about the secret itself is ever rendered: the
-//! marker is the same fixed text regardless of what, or how much, was typed.
+//! The rendering is plain printable text plus backspace/space rub-out — no
+//! escape sequences — so it draws correctly on every console backing (UART,
+//! framebuffer text console, or a remote terminal). Nothing about the secret
+//! itself is ever rendered: the marker is the same fixed text regardless of
+//! what, or how much, was typed.
 
 use crate::control;
 
 /// The animation cadence, in nanoseconds: the dots advance every second
-/// while the marker is shown.
+/// while the animation is running.
 pub const SECRET_TICK_NS: u64 = 1_000_000_000;
 
-/// The marker's fixed head, up to the animated dots.
+/// The minimum time, in nanoseconds, the dots keep animating after the most
+/// recent keystroke before the animation freezes. A later keystroke restarts
+/// this window. Kept a whole number of [`SECRET_TICK_NS`] frames so the
+/// animation freezes cleanly on a frame boundary.
+pub const SECRET_ANIMATE_NS: u64 = 3 * SECRET_TICK_NS;
+
+/// The active marker's fixed head, up to the animated dots.
 const HEAD: &[u8] = b"[input active";
+
+/// The completed marker, shown once the line is submitted (Enter).
+const COMPLETE: &[u8] = b"[input complete]";
 
 /// The most dots the animation shows before wrapping back to one.
 const MAX_DOTS: u8 = 3;
 
-/// The rendered marker width for a given dot count: head + dots + `]`.
-const fn width(dots: u8) -> usize {
+/// The active marker's rendered width for a given dot count: head + dots + `]`.
+const fn active_width(dots: u8) -> usize {
     HEAD.len() + dots as usize + 1
 }
 
+/// The widest marker any transition draws or rubs out.
+const MAX_WIDTH: usize = {
+    let active = active_width(MAX_DOTS);
+    if active > COMPLETE.len() {
+        active
+    } else {
+        COMPLETE.len()
+    }
+};
+
 /// The bytes one indicator transition asks the caller to write.
 ///
-/// Sized for the largest transition (rubbing out the fully-dotted marker,
-/// [`control::ERASE_ECHO`] per character); a transition that renders nothing
-/// is the empty slice.
+/// Sized for the largest transition: rub the widest marker out entirely
+/// (backspace + space + backspace per column). A transition that renders
+/// nothing is the empty slice.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Render {
-    buf: [u8; width(MAX_DOTS) * control::ERASE_ECHO.len()],
+    buf: [u8; MAX_WIDTH * control::ERASE_ECHO.len()],
     len: usize,
 }
 
@@ -58,7 +82,7 @@ impl Render {
     /// An empty render (nothing to write).
     const fn empty() -> Self {
         Self {
-            buf: [0; width(MAX_DOTS) * control::ERASE_ECHO.len()],
+            buf: [0; MAX_WIDTH * control::ERASE_ECHO.len()],
             len: 0,
         }
     }
@@ -87,6 +111,32 @@ impl Render {
     }
 }
 
+/// Replace the marker currently on screen (`old_width` columns wide, the
+/// cursor sitting just past its last column) with `new`: step the cursor back
+/// over the old marker, draw the new one, and blank any columns the new
+/// marker no longer covers when it is shorter. `new` empty rubs the marker
+/// out entirely.
+fn retarget(old_width: usize, new: &[u8]) -> Render {
+    let mut render = Render::empty();
+    render.push_repeat(control::BS, old_width);
+    render.push(new);
+    if old_width > new.len() {
+        let shrink = old_width - new.len();
+        render.push_repeat(b' ', shrink);
+        render.push_repeat(control::BS, shrink);
+    }
+    render
+}
+
+/// The active marker for `dots`: `[input active` + dots + `]`.
+fn active_marker(dots: u8) -> Render {
+    let mut marker = Render::empty();
+    marker.push(HEAD);
+    marker.push_repeat(b'.', usize::from(dots));
+    marker.push(b"]");
+    marker
+}
+
 /// An input event the secret reader feeds to the indicator, derived from the
 /// read line discipline's view of the consumed bytes.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -103,16 +153,30 @@ pub enum SecretInput {
     Submitted,
 }
 
+/// What the indicator is currently showing.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Phase {
+    /// Nothing on screen.
+    Hidden,
+    /// The active marker is on screen with `dots` dots. `animate_until_ns`
+    /// is the time the dots stop moving; `Some` while they are still moving
+    /// (a one-shot frame is armed), `None` once the animation has frozen.
+    Active {
+        /// Dots currently rendered, `1..=MAX_DOTS`.
+        dots: u8,
+        /// The frozen-at time while the animation is running, else `None`.
+        animate_until_ns: Option<u64>,
+    },
+    /// `[input complete]` is on screen; the line was submitted.
+    Complete,
+}
+
 /// The `[input active...]` activity indicator for one suppressed secret
 /// read. See the module docs for the behaviour it renders.
 #[derive(Debug)]
 pub struct SecretIndicator {
-    /// Whether the marker is currently on screen.
-    shown: bool,
-    /// Dots currently rendered: `1..=MAX_DOTS` while shown, `0` while
-    /// hidden.
-    dots: u8,
-    /// The armed one-shot deadline, while the marker is shown.
+    phase: Phase,
+    /// The armed one-shot deadline, while the dots are still moving.
     next_tick_ns: Option<u64>,
 }
 
@@ -127,19 +191,27 @@ impl SecretIndicator {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            shown: false,
-            dots: 0,
+            phase: Phase::Hidden,
             next_tick_ns: None,
         }
     }
 
     /// The single one-shot wake-up the animation currently needs, as an
-    /// absolute monotonic deadline, or `None` while the marker is hidden.
-    /// The caller arms exactly this deadline and calls
+    /// absolute monotonic deadline, or `None` while the marker is hidden,
+    /// frozen, or complete. The caller arms exactly this deadline and calls
     /// [`SecretIndicator::tick`] when it passes.
     #[must_use]
     pub const fn deadline_ns(&self) -> Option<u64> {
         self.next_tick_ns
+    }
+
+    /// The width of the marker currently on screen, `0` when hidden.
+    fn shown_width(&self) -> usize {
+        match self.phase {
+            Phase::Hidden => 0,
+            Phase::Active { dots, .. } => active_width(dots),
+            Phase::Complete => COMPLETE.len(),
+        }
     }
 
     /// Feed one input event at monotonic time `now_ns`, returning the bytes
@@ -149,62 +221,114 @@ impl SecretIndicator {
             SecretInput::Typed => self.activity(now_ns),
             SecretInput::Erased { line_empty } => {
                 if line_empty {
-                    self.hide()
+                    self.abort()
                 } else {
                     self.activity(now_ns)
                 }
             }
-            SecretInput::Submitted => self.hide(),
+            SecretInput::Submitted => self.complete(),
         }
     }
 
     /// The animation deadline passed: advance the dots one frame (wrapping
-    /// `...` back to `.`) and arm the next frame's wake-up. A stale tick
-    /// after the marker was hidden renders nothing and arms nothing.
+    /// `...` back to `.`) and arm the next frame, unless the bounded
+    /// animation window has elapsed, in which case freeze the dots where
+    /// they are and arm nothing further. A stale tick after the marker was
+    /// hidden or completed renders nothing and arms nothing.
     pub fn tick(&mut self, now_ns: u64) -> Render {
-        if !self.shown {
+        let Phase::Active {
+            dots,
+            animate_until_ns: Some(animate_until_ns),
+        } = self.phase
+        else {
+            self.next_tick_ns = None;
+            return Render::empty();
+        };
+        if now_ns >= animate_until_ns {
+            self.phase = Phase::Active {
+                dots,
+                animate_until_ns: None,
+            };
             self.next_tick_ns = None;
             return Render::empty();
         }
-        let from = self.dots;
-        self.dots = if self.dots == MAX_DOTS {
-            1
-        } else {
-            self.dots + 1
+        let from = dots;
+        let to = if dots == MAX_DOTS { 1 } else { dots + 1 };
+        self.phase = Phase::Active {
+            dots: to,
+            animate_until_ns: Some(animate_until_ns),
         };
         self.next_tick_ns = Some(now_ns.saturating_add(SECRET_TICK_NS));
-        redraw_dots(from, self.dots)
+        redraw_dots(from, to)
     }
 
-    /// Input activity: show the marker on the first character; further
-    /// activity renders nothing (the animation is already running) and
-    /// leaves the armed cadence undisturbed.
+    /// Input activity (a character typed, or an erase that left characters):
+    /// show the marker on the first character, and (re)start the bounded
+    /// animation window from `now_ns`. Activity while the animation is
+    /// already running renders nothing and leaves the armed cadence
+    /// undisturbed; activity after the animation has frozen re-arms the next
+    /// frame so the dots resume moving.
     fn activity(&mut self, now_ns: u64) -> Render {
-        if self.shown {
+        let until = now_ns.saturating_add(SECRET_ANIMATE_NS);
+        match self.phase {
+            Phase::Hidden => {
+                self.phase = Phase::Active {
+                    dots: 1,
+                    animate_until_ns: Some(until),
+                };
+                self.next_tick_ns = Some(now_ns.saturating_add(SECRET_TICK_NS));
+                active_marker(1)
+            }
+            Phase::Active {
+                dots,
+                animate_until_ns,
+            } => {
+                let resume = animate_until_ns.is_none();
+                self.phase = Phase::Active {
+                    dots,
+                    animate_until_ns: Some(until),
+                };
+                if resume {
+                    self.next_tick_ns = Some(now_ns.saturating_add(SECRET_TICK_NS));
+                }
+                Render::empty()
+            }
+            // A completed line takes no more input; the marker stays.
+            Phase::Complete => Render::empty(),
+        }
+    }
+
+    /// The line was submitted (Enter): replace whatever marker is on screen
+    /// with `[input complete]` and arm no further wake-up. Submitting while
+    /// the marker is hidden (nothing typed) renders nothing.
+    fn complete(&mut self) -> Render {
+        self.next_tick_ns = None;
+        if self.phase == Phase::Hidden {
             return Render::empty();
         }
-        self.shown = true;
-        self.dots = 1;
-        self.next_tick_ns = Some(now_ns.saturating_add(SECRET_TICK_NS));
-        let mut render = Render::empty();
-        render.push(HEAD);
-        render.push(b".]");
+        let render = retarget(self.shown_width(), COMPLETE);
+        self.phase = Phase::Complete;
         render
     }
 
-    /// Remove the whole marker from the screen (submitted, or the line was
-    /// erased back to empty) and arm no further wake-up.
-    fn hide(&mut self) -> Render {
-        let mut render = Render::empty();
-        if self.shown {
-            for _ in 0..width(self.dots) {
-                render.push(&control::ERASE_ECHO);
-            }
-        }
-        self.shown = false;
-        self.dots = 0;
+    /// Remove an in-progress marker from the screen (the line was erased back
+    /// to empty, or the secret read was aborted before submission) and arm no
+    /// further wake-up.
+    ///
+    /// A *completed* marker is left untouched: once the line was submitted the
+    /// `[input complete]` marker is the final, deliberate feedback and must
+    /// survive the read being torn down (e.g. echo being restored), so it is
+    /// never rubbed out from under the operator.
+    pub fn abort(&mut self) -> Render {
         self.next_tick_ns = None;
-        render
+        match self.phase {
+            Phase::Active { dots, .. } => {
+                let render = retarget(active_width(dots), b"");
+                self.phase = Phase::Hidden;
+                render
+            }
+            Phase::Hidden | Phase::Complete => Render::empty(),
+        }
     }
 }
 
@@ -226,7 +350,9 @@ fn redraw_dots(from: u8, to: u8) -> Render {
 
 #[cfg(test)]
 mod tests {
-    use super::{Render, SecretIndicator, SecretInput, MAX_DOTS, SECRET_TICK_NS};
+    use super::{
+        Render, SecretIndicator, SecretInput, MAX_DOTS, SECRET_ANIMATE_NS, SECRET_TICK_NS,
+    };
 
     /// The rendered bytes as a `Vec` for readable assertions.
     fn bytes(render: &Render) -> alloc::vec::Vec<u8> {
@@ -259,7 +385,7 @@ mod tests {
     }
 
     #[test]
-    fn ticks_cycle_the_dots_while_the_marker_is_shown() {
+    fn ticks_cycle_the_dots_while_the_animation_runs() {
         let mut indicator = SecretIndicator::new();
         let _ = indicator.input(SecretInput::Typed, 0);
         // First frame: back over `.]`, then `..]`.
@@ -270,22 +396,84 @@ mod tests {
         let render = indicator.tick(2 * SECRET_TICK_NS);
         assert_eq!(bytes(&render), b"\x08\x08\x08...]");
         assert_eq!(indicator.deadline_ns(), Some(3 * SECRET_TICK_NS));
-        // Third frame: the wrap back to one dot, blanking the two leftover
-        // columns.
+    }
+
+    #[test]
+    fn the_animation_freezes_after_the_bounded_window() {
+        let mut indicator = SecretIndicator::new();
+        let _ = indicator.input(SecretInput::Typed, 0);
+        // Frames advance until the window (3s) elapses.
+        let _ = indicator.tick(SECRET_TICK_NS);
+        let _ = indicator.tick(2 * SECRET_TICK_NS);
+        assert_eq!(indicator.deadline_ns(), Some(3 * SECRET_TICK_NS));
+        // The frame at the window boundary freezes the dots: nothing drawn,
+        // no further wake-up armed.
+        let render = indicator.tick(SECRET_ANIMATE_NS);
+        assert!(render.bytes().is_empty());
+        assert_eq!(indicator.deadline_ns(), None);
+    }
+
+    #[test]
+    fn typing_after_the_freeze_resumes_the_animation() {
+        let mut indicator = SecretIndicator::new();
+        let _ = indicator.input(SecretInput::Typed, 0);
+        let _ = indicator.tick(SECRET_TICK_NS);
+        let _ = indicator.tick(2 * SECRET_TICK_NS);
+        let _ = indicator.tick(SECRET_ANIMATE_NS);
+        assert_eq!(indicator.deadline_ns(), None);
+        // A later keystroke re-arms the cadence without redrawing anything.
+        let now = SECRET_ANIMATE_NS + 5;
+        let render = indicator.input(SecretInput::Typed, now);
+        assert!(render.bytes().is_empty());
+        assert_eq!(indicator.deadline_ns(), Some(now + SECRET_TICK_NS));
+    }
+
+    #[test]
+    fn typing_extends_the_animation_window() {
+        let mut indicator = SecretIndicator::new();
+        let _ = indicator.input(SecretInput::Typed, 0);
+        // A keystroke at 2s pushes the freeze out to 2s + 3s = 5s.
+        let _ = indicator.input(SecretInput::Typed, 2 * SECRET_TICK_NS);
+        // The frame that would have frozen the old window still advances.
         let render = indicator.tick(3 * SECRET_TICK_NS);
-        assert_eq!(bytes(&render), b"\x08\x08\x08\x08.]  \x08\x08");
+        assert!(!render.bytes().is_empty());
         assert_eq!(indicator.deadline_ns(), Some(4 * SECRET_TICK_NS));
     }
 
     #[test]
-    fn submitting_the_line_removes_the_whole_marker() {
+    fn submitting_the_line_shows_the_complete_marker() {
         let mut indicator = SecretIndicator::new();
         let _ = indicator.input(SecretInput::Typed, 0);
         let render = indicator.input(SecretInput::Submitted, 100);
-        // `[input active.]` is 15 characters; each is rubbed out with the
-        // shared `BS SP BS`.
-        assert_eq!(render.bytes().len(), 15 * 3);
-        assert!(render.bytes().chunks(3).all(|c| c == b"\x08 \x08"));
+        // Step back over `[input active.]` (15 columns), draw
+        // `[input complete]` (16); the new marker is wider, so nothing is
+        // blanked.
+        assert_eq!(
+            bytes(&render),
+            [b"\x08".repeat(15), b"[input complete]".to_vec()].concat()
+        );
+        assert_eq!(indicator.deadline_ns(), None);
+    }
+
+    #[test]
+    fn submitting_a_three_dot_marker_blanks_the_leftover_column() {
+        let mut indicator = SecretIndicator::new();
+        let _ = indicator.input(SecretInput::Typed, 0);
+        let _ = indicator.tick(SECRET_TICK_NS);
+        let _ = indicator.tick(2 * SECRET_TICK_NS);
+        // `[input active...]` is 17 columns; `[input complete]` is 16, so one
+        // trailing column is blanked.
+        let render = indicator.input(SecretInput::Submitted, 100);
+        assert_eq!(
+            bytes(&render),
+            [
+                b"\x08".repeat(17),
+                b"[input complete]".to_vec(),
+                b" ".to_vec(),
+                b"\x08".to_vec(),
+            ]
+            .concat()
+        );
         assert_eq!(indicator.deadline_ns(), None);
     }
 
@@ -294,7 +482,29 @@ mod tests {
         let mut indicator = SecretIndicator::new();
         let _ = indicator.input(SecretInput::Typed, 0);
         let render = indicator.input(SecretInput::Erased { line_empty: true }, 100);
+        // `[input active.]` is 15 columns, each blanked with `BS … SP … BS`.
         assert_eq!(render.bytes().len(), 15 * 3);
+        assert_eq!(indicator.deadline_ns(), None);
+    }
+
+    #[test]
+    fn aborting_removes_the_whole_marker() {
+        let mut indicator = SecretIndicator::new();
+        let _ = indicator.input(SecretInput::Typed, 0);
+        let render = indicator.abort();
+        assert_eq!(render.bytes().len(), 15 * 3);
+        assert_eq!(indicator.deadline_ns(), None);
+    }
+
+    #[test]
+    fn aborting_a_completed_marker_leaves_it_on_screen() {
+        let mut indicator = SecretIndicator::new();
+        let _ = indicator.input(SecretInput::Typed, 0);
+        let _ = indicator.input(SecretInput::Submitted, 100);
+        // Tearing the read down after Enter must not rub out the deliberate
+        // `[input complete]` feedback.
+        let render = indicator.abort();
+        assert!(render.bytes().is_empty());
         assert_eq!(indicator.deadline_ns(), None);
     }
 
@@ -320,7 +530,15 @@ mod tests {
     }
 
     #[test]
-    fn a_stale_tick_after_hiding_renders_nothing() {
+    fn aborting_while_hidden_renders_nothing() {
+        let mut indicator = SecretIndicator::new();
+        let render = indicator.abort();
+        assert!(render.bytes().is_empty());
+        assert_eq!(indicator.deadline_ns(), None);
+    }
+
+    #[test]
+    fn a_stale_tick_after_completion_renders_nothing() {
         let mut indicator = SecretIndicator::new();
         let _ = indicator.input(SecretInput::Typed, 0);
         let _ = indicator.input(SecretInput::Submitted, 100);
@@ -336,8 +554,15 @@ mod tests {
         let _ = indicator.input(SecretInput::Typed, now);
         for _ in 0..10 {
             now += SECRET_TICK_NS;
+            // Keep typing so the window never freezes; the dots must stay
+            // within range regardless of how long the animation runs.
+            let _ = indicator.input(SecretInput::Typed, now);
             let _ = indicator.tick(now);
-            assert!(indicator.dots <= MAX_DOTS && indicator.dots >= 1);
+            if let super::Phase::Active { dots, .. } = indicator.phase {
+                assert!((1..=MAX_DOTS).contains(&dots));
+            } else {
+                panic!("marker should still be active");
+            }
         }
     }
 }

@@ -16,12 +16,19 @@ const SECTORS: u64 = 16;
 /// returned `Rc` shares the backing store with the in-process peer
 /// installed by this fn so tests can plant or read bytes directly.
 fn build_device() -> (MockTransport, Rc<RefCell<Vec<u8>>>) {
+    build_device_with_sectors(SECTORS)
+}
+
+/// [`build_device`] with a caller-chosen sector count, so the
+/// chunking path (a transfer larger than [`wire::MAX_TRANSFER_LEN`])
+/// can be exercised against a device big enough to hold it.
+fn build_device_with_sectors(sectors: u64) -> (MockTransport, Rc<RefCell<Vec<u8>>>) {
     let mut t = MockTransport::new(1, 8, 0, 8);
-    t.set_config(0, &SECTORS.to_le_bytes());
+    t.set_config(0, &sectors.to_le_bytes());
     let backing = Rc::new(RefCell::new(vec![
         0u8;
         SECTOR_SIZE
-            * usize::try_from(SECTORS)
+            * usize::try_from(sectors)
                 .unwrap_or(0)
     ]));
     let backing_for_shim = Rc::clone(&backing);
@@ -111,6 +118,12 @@ impl AutoDrainHost {
             *self.transport.get() = t;
         }
     }
+
+    /// Total DMA bytes the underlying pool has handed out. Used to
+    /// assert the data path reuses its staging rather than re-granting.
+    fn bytes_allocated(&self) -> usize {
+        self.inner.bytes_allocated()
+    }
 }
 
 impl DmaHost for AutoDrainHost {
@@ -141,6 +154,17 @@ fn auto_host() -> &'static AutoDrainHost {
 }
 
 fn open_with_autodrain(t: MockTransport) -> Box<VirtioBlk<'static, MockTransport>> {
+    open_with_autodrain_host(t).0
+}
+
+/// [`open_with_autodrain`] that also returns the leaked host, so a
+/// test can observe its DMA-allocation counter.
+fn open_with_autodrain_host(
+    t: MockTransport,
+) -> (
+    Box<VirtioBlk<'static, MockTransport>>,
+    &'static AutoDrainHost,
+) {
     // Pin the driver behind a `Box` so the raw pointer we hand the
     // host stays valid across the test function's stack frame
     // (`Box` provides a stable heap address that `install_transport`
@@ -148,7 +172,7 @@ fn open_with_autodrain(t: MockTransport) -> Box<VirtioBlk<'static, MockTransport
     let host = auto_host();
     let mut blk = Box::new(VirtioBlk::open(t, host).expect("open"));
     host.install_transport(blk.transport_mut() as *mut MockTransport);
-    blk
+    (blk, host)
 }
 
 #[test]
@@ -242,6 +266,57 @@ fn multi_block_read_concatenates_sectors() {
     blk.read_blocks(0, &mut buf).expect("read");
     assert!(buf[..SECTOR_SIZE].iter().all(|b| *b == 0xAA));
     assert!(buf[SECTOR_SIZE..].iter().all(|b| *b == 0xBB));
+}
+
+#[test]
+fn steady_state_io_allocates_no_new_dma() {
+    // The header/data/status staging is carved once at open; reads and
+    // writes must all reuse it. The per-request `dma_alloc`/`dma_free`
+    // churn (and the audit-log entry it emits every request) is exactly
+    // the defect this driver must not reintroduce.
+    let (t, _backing) = build_device();
+    let (mut blk, host) = open_with_autodrain_host(t);
+    let after_open = host.bytes_allocated();
+    let mut buf = vec![0u8; SECTOR_SIZE];
+    for lba in 0..8u64 {
+        let tag = u8::try_from(lba & 0xff).unwrap_or(0);
+        let payload = vec![tag; SECTOR_SIZE];
+        blk.write_blocks(lba, &payload).expect("write");
+        blk.read_blocks(lba, &mut buf).expect("read");
+        assert!(buf.iter().all(|b| *b == tag));
+    }
+    assert_eq!(
+        host.bytes_allocated(),
+        after_open,
+        "steady-state I/O must not allocate DMA"
+    );
+}
+
+#[test]
+fn transfer_larger_than_staging_window_chunks_and_round_trips() {
+    // A transfer bigger than the fixed staging window is split into
+    // block-aligned chunks that reuse the same buffers; the bytes must
+    // still round-trip end to end and land at the right sectors.
+    let bytes = wire::MAX_TRANSFER_LEN * 2 + SECTOR_SIZE; // 2.5 chunks.
+    let blocks = bytes / SECTOR_SIZE;
+    let sectors = u64::try_from(blocks).unwrap() + 4;
+    let (t, _backing) = build_device_with_sectors(sectors);
+    let (mut blk, host) = open_with_autodrain_host(t);
+    let after_open = host.bytes_allocated();
+    // A recognisable per-block pattern so a mis-chunked copy is caught.
+    let mut payload = vec![0u8; bytes];
+    for (i, byte) in payload.iter_mut().enumerate() {
+        *byte = u8::try_from((i / SECTOR_SIZE) & 0xff).unwrap_or(0);
+    }
+    blk.write_blocks(2, &payload).expect("chunked write");
+    let mut readback = vec![0u8; bytes];
+    blk.read_blocks(2, &mut readback).expect("chunked read");
+    assert_eq!(readback, payload);
+    assert_eq!(
+        host.bytes_allocated(),
+        after_open,
+        "chunked transfers must reuse the staging buffers"
+    );
 }
 
 /// Shared log of the `(sector, num_sectors)` pairs a discard shim records.

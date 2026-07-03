@@ -727,13 +727,15 @@ impl SecretFeedback {
         self.armed.store(true, Ordering::Release);
     }
 
-    /// Disarm the feedback (the secret read is over), removing any marker
-    /// still on screen — an aborted secret read must not leave the marker
-    /// painted over the next prompt.
+    /// Disarm the feedback (the secret read is over), removing an in-progress
+    /// marker still on screen — an aborted secret read must not leave the
+    /// animated marker painted over the next prompt. A *completed* marker
+    /// (the operator pressed Enter, so `[input complete]` is showing) is
+    /// deliberate final feedback and is left in place.
     pub fn disarm(&self) {
         self.armed.store(false, Ordering::Release);
         let mut state = self.state.lock();
-        let render = state.indicator.input(SecretInput::Submitted, 0);
+        let render = state.indicator.abort();
         state.seq = EraseSeq::new();
         state.len = 0;
         write_best_effort(self.write, render.bytes());
@@ -1322,16 +1324,16 @@ mod tests {
     }
 
     #[test]
-    fn secret_feedback_removes_the_marker_on_enter() {
+    fn secret_feedback_shows_input_complete_on_enter() {
         static W: EchoRecorder = EchoRecorder::new();
         let feedback = SecretFeedback::new(&W);
         feedback.arm();
         feedback.consumed(b"pw\r", 0);
         let written = W.taken();
-        // The marker was drawn once and fully rubbed out again: the last
-        // 45 bytes are fifteen `BS SP BS` erases.
+        // The active marker was drawn once, then replaced in place with the
+        // `[input complete]` marker when Enter submitted the line.
         assert!(written.starts_with(b"[input active.]"));
-        assert!(written.ends_with(&[0x08, b' ', 0x08].repeat(15)));
+        assert!(written.ends_with(b"[input complete]"));
         assert_eq!(feedback.deadline_ns(), None);
     }
 
@@ -1345,7 +1347,7 @@ mod tests {
         feedback.consumed(b"s\x1b[3~", 0);
         let written = W.taken();
         assert!(written.starts_with(b"[input active.]"));
-        assert!(written.ends_with(&[0x08, b' ', 0x08].repeat(15)));
+        assert!(written.ends_with(&marker_rubout(15)));
         assert_eq!(feedback.deadline_ns(), None);
     }
 
@@ -1381,15 +1383,25 @@ mod tests {
         // …and restoring echo disarms it, rubbing out a marker an aborted
         // read left behind.
         device.set_echo(true);
-        assert!(W.taken().ends_with(&[0x08, b' ', 0x08].repeat(15)));
+        assert!(W.taken().ends_with(&marker_rubout(15)));
         FEEDBACK.consumed(b"x", 0);
         assert_eq!(feedback_tail_after_disarm(&W.taken()), 0);
+    }
+
+    /// The bytes that rub a `width`-column marker off the screen: step the
+    /// cursor back over it, blank every column, and step back again.
+    fn marker_rubout(width: usize) -> alloc::vec::Vec<u8> {
+        let mut bytes = alloc::vec::Vec::new();
+        bytes.extend(core::iter::repeat(0x08u8).take(width));
+        bytes.extend(core::iter::repeat(b' ').take(width));
+        bytes.extend(core::iter::repeat(0x08u8).take(width));
+        bytes
     }
 
     /// How many bytes were written after the disarm rub-out — zero proves a
     /// disarmed feedback stays inert.
     fn feedback_tail_after_disarm(written: &[u8]) -> usize {
-        let erase = [0x08, b' ', 0x08].repeat(15);
+        let erase = marker_rubout(15);
         match written
             .windows(erase.len())
             .rposition(|window| window == erase.as_slice())

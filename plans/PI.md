@@ -4298,25 +4298,29 @@ two users — or the same user twice — can be logged in concurrently.
 - **Secret-entry feedback (`[input active...]`) — LANDED.** Every
   echo-suppressed (password) prompt shows the shared activity marker: the
   pure `rustos_vt::secret::SecretIndicator` state machine (show on first
-  typed character, dots cycling `.`/`..`/`...` on a one-second cadence for
-  as long as the marker is shown, whole marker removed on Enter or when
-  the input is erased back to empty), hosted per console as the kernel
+  typed character, dots cycling `.`/`..`/`...` on a one-second cadence).
+  The animation is bounded: it runs for at least three seconds
+  (`SECRET_ANIMATE_NS`) after the most recent keystroke and then freezes
+  (marker stays, dots stop), a later keystroke restarts it; on Enter the
+  marker is replaced in place with `[input complete]`, and erasing back to
+  empty (or aborting the read) removes an in-progress marker while a
+  completed one is left on screen. Hosted per console as the kernel
   `SecretFeedback` (`kernel/core` console). `set_echo(false)` arms it
   (login's password read), the root-unlock kthread arms its own instance
   around the passphrase prompt, and the blocking console readers
   (`BlockingConsoleRead`, `KthreadConsoleRead`) feed it the consumed bytes
   and drive its one-shot animation deadline through the `CONSOLE_WAITQ`
   timed park (`rearm_timed_wakeup` / `wait_now_ns`) — armed only while the
-  marker is on screen, a bounded typed-to-submitted window, so a prompt
-  with nothing typed takes no timer wake-ups (tickless, §17.1). Only the
-  typed-character *count* is tracked; no secret byte is stored or
-  rendered. The aarch64 framebuffer text console honours Backspace
-  (cursor back one column, no glyph), so the marker's `BS SP BS`
-  rub-outs and dot redraws render correctly on the HDMI console, not as
-  `?` fallback glyphs. Proven by `rustos_vt::secret` tests
-  and the `console.rs` feedback tests (inert until armed, marker
-  show/remove, ticks keep animating, `set_echo` arm/disarm) plus the
-  `video.rs` backspace tests.
+  dots are moving, so a prompt with nothing typed (and a frozen marker)
+  takes no timer wake-ups (tickless, §17.1). Only the typed-character
+  *count* is tracked; no secret byte is stored or rendered. The aarch64
+  framebuffer text console honours Backspace (cursor back one column, no
+  glyph), so the marker's rub-outs and dot redraws render correctly on the
+  HDMI console, not as `?` fallback glyphs. Proven by `rustos_vt::secret`
+  tests and the `console.rs` feedback tests (inert until armed, marker
+  show, freeze after the window, resume/extend on typing, `[input
+  complete]` on Enter, erase/abort removal, `set_echo` arm/disarm) plus
+  the `video.rs` backspace tests.
 - **Keyboard input for the video console — kernel-side delivery seam
   LANDED.** The video console's read half is now a kernel-side type-ahead
   queue a keyboard-input driver feeds, not the inert `Ok(0)` poll a
