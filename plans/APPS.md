@@ -46,16 +46,15 @@ command's short `-h`/`-?` help, and any graphical help viewer (bundle-local
 app documentation only; the OS source-tree docs under `docs/` are unrelated).
 Landed: deliverable 1 (`BundleEntry::Help` replaced `Documentation` in place,
 `AGENTS.md` §16.5 amended, C header regenerated), deliverable 2 (the
-`lib/help` engine), and deliverable 4 (shell command resolution over the
-`/System/Apps/` system app store, `AGENTS.md` §16.2 amended). The two
-prerequisites `man` needed are also in place: the candidate policy moved to
-the shared `lib/cmdres` crate (so `man` can import the §8 order without a
-userland→userland edge, §17.4), and the `spawn` ABI now carries a child's
-argument vector and environment (`plans/SPAWN.md` SP8), so `man <cmd>` and
-the §5 locale environment variable can actually reach a program. Remaining:
-deliverables 3, 5–7 (the `man` app, `cargo xtask help-lint`, the OS `Help/`
-trees, `stdinfo` adoption) and the per-app `-h`/`-?` short-help convention
-(§4, an app-side obligation served through `lib/help`).
+`lib/help` engine), deliverable 3 (the `man.app` command app, §7, with its
+own six-locale `Help/` tree shipped on the read-only `/System` volume and
+the `LANG` locale variable named in §5), and deliverable 4 (shell command
+resolution over the `/System/Apps/` system app store, `AGENTS.md` §16.2
+amended). Remaining: deliverables 5–7 (`cargo xtask help-lint`, the OS
+`Help/` trees for the other command apps, wider `stdinfo` adoption — `man`'s
+locale-fallback record is live) and the per-app `-h`/`-?` short-help
+convention (§4, an app-side obligation served through `lib/help`; `man`
+itself honours it).
 
 ## 1. Everything is a bundle — including single-binary utilities
 
@@ -213,9 +212,11 @@ absent, it is simply not shown (§2.9, no fabrication).
 
 The active locale is resolved once, by the session/shell, from the user's
 language preference (a per-user setting under `/Users/<u>/Settings/`, surfaced
-to programs as an environment variable — the shell's existing `export`
-mechanism, `plans/SHELL.md`). Programs and the help engine MUST NOT invent a
-second locale source.
+to programs as the **`LANG` environment variable**, a BCP-47 tag such as
+`fr-FR` — the shell's existing `export` mechanism, `plans/SHELL.md`).
+Programs and the help engine MUST NOT invent a second locale source. A
+missing or malformed `LANG` selects the canonical `default/` documents: a
+bad preference degrades to English, it never makes help unreadable.
 
 Given a requested locale `ll-CC`, the help engine selects a document by the
 first hit in this fixed, fail-safe chain:
@@ -471,7 +472,19 @@ both landed; `plans/SHELL.md` command execution):
    harness registered in `cargo xtask fuzz` (§19.6), rustdoc,
    `lib/help/README.md`, `docs/src/lib/help.md`, and the §3 crate list are
    in place.
-3. **`man.app`** — the RustOS `man` command app (§7); its own `Help/` tree.
+3. **`man.app`** — **done.** The RustOS `man` command app (§7):
+   `userland/apps/man` resolves the word over `rustos_cmdres::
+   bundle_candidates` (first existing bundle wins; `NotFound` moves on, any
+   other refusal is final), loads and renders through `lib/help`, reads
+   `LANG`/`PATH` from the inherited environment, pages on a
+   geometry-attested console (space/return/`q`, echo suppressed) and
+   streams otherwise, and emits the §7 `stdinfo` `context` record
+   (`help.locale_fallback`) on a locale fallback. Registered as
+   `/System/Apps/man.app/Run` (manifest: console pair + `CAP_FS_ACCESS`);
+   its own six-locale `Help/` tree lives in the crate (`src/help.rs` embeds
+   it and proves every locale parses) and is planted on the read-only
+   `/System` volume by `tools/mkimage` and the QEMU image fixture; the
+   `session_ceiling` vertical types `man man` end to end.
 4. **Shell command resolution** — **done** (except the per-app `-h`/`-?`
    convention, which lands with each app's `Help/` tree, §4/§8.1):
    system-app-store-then-`PATH` resolution (§8) and `.app`-suffix invocation

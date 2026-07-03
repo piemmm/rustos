@@ -1,6 +1,7 @@
 //! The production client seams that back the `sysinfo`, `ps`, and `top` `Run`
 //! binaries: the real IPC transport to the `sysinfod` service and the
-//! standard-output line sink.
+//! standard-output line sink. (The generic argument-vector and stderr-line
+//! helpers live in `rustos_rt` — the runtime owns them, not this client.)
 //!
 //! These are the concrete implementations of the [`Transport`](crate::Transport)
 //! and [`Output`](crate::Output) seams the tools' request/render logic runs
@@ -18,19 +19,9 @@ use alloc::vec::Vec;
 
 use rustos_abi::sysinfo::{decode_reply, SYSINFO_ENDPOINT, SYSINFO_MAX_REPLY};
 use rustos_abi::Errno;
-use rustos_rt::io::{Stderr, Stdout, Write};
+use rustos_rt::io::{Stdout, Write};
 
 use crate::{Output, Transport};
-
-/// Recover the [`Errno`] a syscall encoded as a negative register (`-errno`,
-/// the standard `abi-v1` convention). An unrecognised code fails closed as
-/// [`Errno::NotImplemented`] rather than being guessed.
-fn errno_from(ret: i64) -> Errno {
-    i32::try_from(-ret)
-        .ok()
-        .and_then(Errno::from_i32)
-        .unwrap_or(Errno::NotImplemented)
-}
 
 /// The production [`Transport`]: carry a framed `sysinfo-v1` request to the
 /// `sysinfod` service over the synchronous
@@ -49,7 +40,8 @@ impl Transport for IpcTransport {
         // A reply buffer sized to the endpoint's contract, so a served answer
         // always fits; the service pages a longer list across requests.
         let mut reply = alloc::vec![0u8; SYSINFO_MAX_REPLY];
-        let n = rustos_rt::ipc_call(SYSINFO_ENDPOINT, request, &mut reply).map_err(errno_from)?;
+        let n = rustos_rt::ipc_call(SYSINFO_ENDPOINT, request, &mut reply)
+            .map_err(Errno::from_syscall)?;
         // Unwrap the status-word frame: a served payload, or the service's
         // per-query Errno. A truncated or corrupt frame fails closed.
         let payload = decode_reply(&reply[..n])?;
@@ -77,39 +69,4 @@ impl Output for RtOutput {
         let _ = out.write_all(b"\n");
         Ok(())
     }
-}
-
-/// Collect the calling program's arguments — argv[1..], excluding the program
-/// name — as UTF-8 string slices, ready for a command parser.
-///
-/// Returns `None` if any argument is not valid UTF-8: a malformed argument
-/// vector is a usage error the caller reports, never something to guess at.
-///
-/// Shared by the `ps` and `sysinfo` `Run` binaries so the argument-vector
-/// walk is written once, not pasted into each.
-#[must_use]
-pub fn args() -> Option<Vec<&'static str>> {
-    let mut out = Vec::new();
-    let count = rustos_rt::arg_count();
-    for index in 1..count {
-        let bytes = rustos_rt::arg(index)?;
-        match core::str::from_utf8(bytes) {
-            Ok(text) => out.push(text),
-            Err(_) => return None,
-        }
-    }
-    Some(out)
-}
-
-/// Write `line` and a trailing newline to standard error (fd 2), best-effort.
-///
-/// A tool routes a diagnostic (a usage banner, a failed-query message) here so
-/// it never contaminates the standard-output data stream. Shared by the `ps`
-/// and `sysinfo` `Run` binaries.
-pub fn write_stderr_line(line: &str) {
-    // The shared `rustos_rt::io` short-write loop, never a procinfo-private
-    // copy (the charter forbids that duplication); best-effort, so discarded.
-    let mut err = Stderr;
-    let _ = err.write_all(line.as_bytes());
-    let _ = err.write_all(b"\n");
 }

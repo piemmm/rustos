@@ -2569,7 +2569,10 @@ const TESTS: &[QemuTest] = &[
     // the move, typing the bare command word `ps` — resolved through the
     // shell's system-app-store search (`plans/APPS.md` §8) to
     // `/System/Apps/ps.app/Run` and spawned under `CAP_PROC_SPAWN` — and
-    // seeing its process-list header, then the negative half — a `ulimit` bound
+    // seeing its process-list header, `man man` rendering the store-shipped
+    // Help document end to end (`plans/APPS.md` §7 — resolution, the
+    // `fs_*` read of the read-only /System volume, and the `lib/help`
+    // render all in one exchange), then the negative half — a `ulimit` bound
     // pair is *lowered* (ungated; both bounds, since the default soft bound
     // is unlimited and a soft bound may never exceed its hard bound) and
     // the hard bound is then *raised*: the raise needs
@@ -2610,7 +2613,15 @@ const TESTS: &[QemuTest] = &[
             // child running under its registered default argv could never
             // produce — proving caller-supplied arguments arrive end to end.
             ("PID  PPID", "ps --bogus\n"),
-            ("usage: ps", "ulimit processes 1000\n"),
+            // `man man` (plans/APPS.md §7): the spawned tool resolves its
+            // own bundle through the shared store-then-PATH policy, reads
+            // `/System/Apps/man.app/Help/default/man.md` off the mounted
+            // read-only /System volume through the `fs_*` syscalls, and
+            // streams the rendered page (a serial console attests no
+            // geometry, so no pager prompt). `SEE ALSO` is the page's final
+            // section heading — seeing it proves the whole document arrived.
+            ("usage: ps", "man man\n"),
+            ("SEE ALSO", "ulimit processes 1000\n"),
             ("elsh$ ", "ulimit -H processes 2000\n"),
             (
                 "cannot raise hard limit (requires CAP_RLIMIT_RAISE)",

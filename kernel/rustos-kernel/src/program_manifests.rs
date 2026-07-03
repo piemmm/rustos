@@ -102,6 +102,18 @@ pub const SYSINFO_MANIFEST: &[CapabilityId] = &[CapabilityId::CONSOLE_WRITE];
 pub const TOP_MANIFEST: &[CapabilityId] =
     &[CapabilityId::CONSOLE_WRITE, CapabilityId::CONSOLE_READ];
 
+/// The `man` help tool's manifest: `CAP_CONSOLE_WRITE` for the rendered
+/// page on fd 1 (and diagnostics on fd 2), `CAP_CONSOLE_READ` for the
+/// pager's keystrokes on fd 0 (also authorising its `stream_echo` echo
+/// suppression, as in `top`), and `CAP_FS_ACCESS` because reading a
+/// bundle's `Help/` documents *is* the tool's job — the secured VFS still
+/// authorises every path per-inode under the caller's attested identity.
+pub const MAN_MANIFEST: &[CapabilityId] = &[
+    CapabilityId::CONSOLE_WRITE,
+    CapabilityId::CONSOLE_READ,
+    CapabilityId::FS_ACCESS,
+];
+
 /// The `users` account-administration tool's manifest: the console pair
 /// for its interactive prompts (`stream_read`/`stream_write`/`stream_echo`
 /// over its inherited streams — echo off around passwords) plus
@@ -218,6 +230,18 @@ mod tests {
         assert_eq!(
             set(TOP_MANIFEST),
             set(&[CapabilityId::CONSOLE_WRITE, CapabilityId::CONSOLE_READ])
+        );
+    }
+
+    #[test]
+    fn man_manifest_is_pinned() {
+        assert_eq!(
+            set(MAN_MANIFEST),
+            set(&[
+                CapabilityId::CONSOLE_WRITE,
+                CapabilityId::CONSOLE_READ,
+                CapabilityId::FS_ACCESS,
+            ])
         );
     }
 

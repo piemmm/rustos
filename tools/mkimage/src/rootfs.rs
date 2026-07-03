@@ -40,9 +40,12 @@ pub const TOP_LEVEL_DIRS: [&str; 4] = ["System", "Users", "Apps", "Storage"];
 /// The full `/System` subtree the **read-only** `RustFsSystem` volume ships
 /// (`build_system_partition`). `Security` additionally carries its fixed
 /// `Keys` and `Policy` subdirectories; the `Users`/`Groups` databases inside
-/// it are installer-authored data, not image content.
-pub const SYSTEM_SUBDIRS: [&str; 12] = [
+/// it are installer-authored data, not image content. `Apps` is the system
+/// app store: the OS-provided command apps' bundle data (today the `man`
+/// app's internationalised `Help/` tree, `rustos_man::help`).
+pub const SYSTEM_SUBDIRS: [&str; 13] = [
     "Kernel",
+    "Apps",
     "Drivers",
     "Libraries",
     "Fonts",
@@ -186,6 +189,22 @@ pub fn build_system_partition(
     // read-only store fails the load gate closed.
     for (components, bytes) in drivers {
         plant_nested_file(&mut fs, root, components, bytes)
+            .map_err(MkimageError::SystemPartition)?;
+    }
+    // The system app store's bundle data ships on every image through the
+    // same planter: today the `man` command app's internationalised `Help/`
+    // tree, embedded in the app crate itself so image and source cannot
+    // drift.
+    for (locale_dir, bytes) in rustos_man::help::HELP_DOCS {
+        let doc_name = rustos_man::help::HELP_DOC_NAME.as_bytes();
+        let components: [&[u8]; 5] = [
+            b"Apps",
+            b"man.app",
+            b"Help",
+            locale_dir.as_bytes(),
+            doc_name,
+        ];
+        plant_nested_file(&mut fs, root, &components, bytes)
             .map_err(MkimageError::SystemPartition)?;
     }
     fs.flush().map_err(MkimageError::SystemPartition)?;

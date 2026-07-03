@@ -73,7 +73,7 @@ mod startup;
 
 pub mod io;
 
-pub use startup::{arg, arg_count, env, env_count, env_var};
+pub use startup::{arg, arg_count, args, env, env_count, env_var};
 
 // The `mem_map`-backed global allocator. Compiled for the native targets that
 // register it as the `#[global_allocator]`, and for host unit tests of its pure

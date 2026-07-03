@@ -32,7 +32,9 @@ mod program {
 
     use alloc::format;
 
-    use rustos_procinfo::{args, write_stderr_line, IpcTransport, RtOutput};
+    use rustos_procinfo::{IpcTransport, RtOutput};
+    use rustos_rt::args;
+    use rustos_rt::io::write_stderr_line;
     use rustos_sysinfo::{parse, run, USAGE};
 
     /// Program entry point. `rustos-rt`'s `_start` calls it once the runtime

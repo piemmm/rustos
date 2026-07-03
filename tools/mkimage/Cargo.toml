@@ -33,5 +33,11 @@ rustos-drv-fs-rustfs = { path = "../../drivers/filesystem/rustfs", version = "=0
 # `rustos_log::LogAttestationKey` on-disk format, so the image author and the
 # journal principal that later reads it cannot drift (AGENTS.md §2.2).
 rustos-log = { path = "../../lib/log", version = "=0.0.0" }
+# The `man` app's embedded Help/ tree (`rustos_man::help`), planted onto the
+# read-only /System volume's app store: one source of truth in the app crate,
+# so the image and the shipped documents cannot drift (AGENTS.md §2.2). The
+# default `program` feature is disabled: the host tool wants the data, never
+# the freestanding runtime.
+rustos-man = { path = "../../userland/apps/man", version = "=0.0.0", default-features = false }
 rustos-partition = { path = "../../lib/partition", version = "=0.0.0" }
 rustos-users = { path = "../../lib/users", version = "=0.0.0" }

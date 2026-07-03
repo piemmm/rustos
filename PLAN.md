@@ -3527,13 +3527,29 @@ argument vector and environment (`plans/SPAWN.md` SP8), and the shell
 passes the typed words plus its exported variables to every launched
 program — the prerequisite `man <cmd>` and the locale variable needed.
 Proven end to end by the session-ceiling QEMU vertical typing the bare
-word `ps` and the argument-carrying `ps --bogus`.
+word `ps` and the argument-carrying `ps --bogus`; (4) **the `man.app`
+command app** (`plans/APPS.md` §7): `userland/apps/man` resolves a word
+over the shared `rustos_cmdres::bundle_candidates` order (first existing
+bundle; `NotFound` moves on, any other refusal final), renders through
+`lib/help`, reads the now-named `LANG` locale variable (`plans/APPS.md`
+§5) and `PATH` from the inherited environment, pages on a
+geometry-attested console and streams otherwise, and emits the
+`help.locale_fallback` `stdinfo` `context` record on a locale fallback.
+It is registered as `/System/Apps/man.app/Run` (manifest: console pair +
+`CAP_FS_ACCESS`), ships its own six-locale `Help/` tree (embedded in
+`rustos_man::help`, planted onto the read-only `/System` volume's `Apps/`
+store by `tools/mkimage` and the QEMU image fixture — the system volume
+skeleton now carries `Apps/` per §16.2), and the session-ceiling vertical
+types `man man` end to end. The generic argv/stderr-line helpers were
+hoisted into `lib/rt` (`args`, `io::write_stderr_line`) and the `-errno`
+decode into `rustos_abi::Errno::from_syscall`, each now one definition.
 
-**Remaining** (staged in `plans/APPS.md` §13): the `man.app` command app; the
-per-app `-h`/`-?` short-help convention (served from `Help/` via `lib/help`);
-`cargo xtask help-lint` (completeness, switch-drift, no foul/derogatory
-content, required locales `fr-FR`/`de-DE`/`es-ES`/`uk-UA`/`it-IT`); `Help/`
-trees for the existing command apps; and `stdinfo` adoption in command apps
+**Remaining** (staged in `plans/APPS.md` §13): the per-app `-h`/`-?`
+short-help convention (served from `Help/` via `lib/help`; `man` itself
+honours it); `cargo xtask help-lint` (completeness, switch-drift, no
+foul/derogatory content, required locales
+`fr-FR`/`de-DE`/`es-ES`/`uk-UA`/`it-IT`); `Help/` trees for the other
+existing command apps; and wider `stdinfo` adoption in command apps
 (advisory-only, §20). A cross-app *shared-library* bundle stays declined —
 §16.4 refuses cross-bundle library references — so a resource-only bundle may
 share **data**, not dynamically-linked code.

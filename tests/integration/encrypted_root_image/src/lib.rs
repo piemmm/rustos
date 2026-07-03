@@ -240,6 +240,20 @@ fn build_system_partition(drivers: &[(&[&[u8]], &[u8])]) -> Result<Vec<u8>, Driv
     for (components, bytes) in drivers {
         root_image::plant_nested_file(&mut fs, root, components, bytes)?;
     }
+    // The system app store's bundle data, exactly as `tools/mkimage` plants
+    // it: the `man` app's embedded Help/ tree, so the session vertical reads
+    // the same bytes a real image ships.
+    for (locale_dir, bytes) in rustos_man::help::HELP_DOCS {
+        let doc_name = rustos_man::help::HELP_DOC_NAME.as_bytes();
+        let components: [&[u8]; 5] = [
+            b"Apps",
+            b"man.app",
+            b"Help",
+            locale_dir.as_bytes(),
+            doc_name,
+        ];
+        root_image::plant_nested_file(&mut fs, root, &components, bytes)?;
+    }
     fs.flush()?;
     Ok(fs.into_block().store)
 }

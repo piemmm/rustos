@@ -254,6 +254,19 @@ impl Write for StdInfo {
     }
 }
 
+/// Write `line` and a trailing newline to standard error (fd 2), best-effort.
+///
+/// A tool routes a diagnostic (a usage banner, a failed-query message) here so
+/// it never contaminates the standard-output data stream. Shared by every
+/// command app's `Run` binary, never re-derived per tool. Best-effort: a
+/// stream that accepts no more bytes ends the write rather than spinning, so
+/// the fail-closed result is discarded.
+pub fn write_stderr_line(line: &str) {
+    let mut err = Stderr;
+    let _ = err.write_all(line.as_bytes());
+    let _ = err.write_all(b"\n");
+}
+
 /// Default fixed capacity of a [`BufReader`] / [`BufWriter`] buffer, in bytes.
 pub const DEFAULT_BUF_CAPACITY: usize = 4096;
 

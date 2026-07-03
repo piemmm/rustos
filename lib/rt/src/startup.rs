@@ -18,6 +18,8 @@
 
 use core::cell::UnsafeCell;
 
+use alloc::vec::Vec;
+
 use rustos_abi::process::ProcessStart;
 
 /// Storage for the validated startup-vector view.
@@ -115,6 +117,30 @@ pub fn env_var(name: &[u8]) -> Option<&'static [u8]> {
         }
     }
     None
+}
+
+/// Collect the calling program's arguments — argv\[1..\], excluding the
+/// program name — as UTF-8 string slices, ready for a command parser.
+///
+/// Returns `None` if any argument is not valid UTF-8: a malformed argument
+/// vector is a usage error the caller reports, never something to guess at.
+/// An empty vector (no validated startup block, or a spawner that passed
+/// only the program name) is `Some(vec![])`, fail closed.
+///
+/// Shared by every command app's `Run` binary so the argument-vector walk
+/// is written once, not pasted into each.
+#[must_use]
+pub fn args() -> Option<Vec<&'static str>> {
+    let mut out = Vec::new();
+    let count = arg_count();
+    for index in 1..count {
+        let bytes = arg(index)?;
+        match core::str::from_utf8(bytes) {
+            Ok(text) => out.push(text),
+            Err(_) => return None,
+        }
+    }
+    Some(out)
 }
 
 #[cfg(test)]

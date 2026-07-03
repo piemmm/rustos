@@ -27,6 +27,9 @@ Every fd backing shares this one vocabulary. The four standard streams
 descriptor go through the **identical** code path — the shared `stream_read` /
 `stream_write` primitives. When files, pipes, tty backings, or resource
 references land, they reuse this layer instead of forcing a second I/O surface.
+The module also carries the one `write_stderr_line` helper every command app's
+`Run` binary reports diagnostics through (best-effort, never the data stream),
+so the line-to-fd-2 loop is written once.
 
 ## fd-generic, non-owning
 

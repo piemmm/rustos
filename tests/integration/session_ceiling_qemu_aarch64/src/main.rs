@@ -29,16 +29,23 @@
 //! 3. `/System/Apps/ps.app/Run` — `CAP_PROC_SPAWN` admits `spawn`; `ps` runs as
 //!    the same user, queries its self-scoped process list through
 //!    `sysinfod`, prints the shared `PID  PPID …` header, and exits.
-//! 4. `ulimit -H processes 1000` — **lowering** a hard bound needs no
+//! 4. `man man` — the spawned `man` tool resolves its own bundle through
+//!    the shared store-then-`PATH` policy, reads the planted
+//!    `/System/Apps/man.app/Help/default/man.md` off the mounted read-only
+//!    `/System` volume through the `fs_*` syscalls (`CAP_FS_ACCESS` from
+//!    its own manifest), and streams the rendered page; the page's final
+//!    `SEE ALSO` heading is the marker that the whole document arrived
+//!    (`plans/APPS.md` §7).
+//! 5. `ulimit -H processes 1000` — **lowering** a hard bound needs no
 //!    capability and succeeds.
-//! 5. `ulimit -H processes 2000` — **raising** the hard bound needs
+//! 6. `ulimit -H processes 2000` — **raising** the hard bound needs
 //!    `CAP_RLIMIT_RAISE`. The administrator *ceiling* carries it, but the
 //!    shell's *manifest* (the session baseline) does not request it, so
 //!    the effective set lacks it: the kernel refuses the `rlimit_set` with
 //!    `PermissionDenied` (fail closed) and the shell prints the denial.
 //!    This is the negative half: holding an administrator account does not
 //!    widen any one program past its own manifest.
-//! 6. `exit` — typed after the denial message appeared, ending the shell.
+//! 7. `exit` — typed after the denial message appeared, ending the shell.
 //!
 //! ## Why the PASS keys on "denial, then exit"
 //!

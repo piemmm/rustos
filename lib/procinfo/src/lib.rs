@@ -83,7 +83,7 @@ pub mod resolve;
 pub mod transport;
 
 #[cfg(all(freestanding, feature = "program"))]
-pub use client::{args, write_stderr_line, IpcTransport, RtOutput};
+pub use client::{IpcTransport, RtOutput};
 pub use list::ListError;
 pub use mount::{for_each_mount, render_mount, render_options, MOUNT_PAGE};
 pub use process::{for_each_process, render_process, state_char, PROCESS_HEADER, PROCESS_PAGE};

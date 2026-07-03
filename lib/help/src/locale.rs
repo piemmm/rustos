@@ -129,6 +129,20 @@ impl Locale {
     }
 }
 
+impl Default for Locale {
+    /// The [`DEFAULT_LOCALE`] sentinel — the canonical en-US tree every
+    /// fallback chain ends at. Constructing it directly (rather than through
+    /// [`Locale::parse`]) lets a caller with no usable locale preference
+    /// reach the canonical documents without handling an impossible parse
+    /// error.
+    fn default() -> Self {
+        Locale {
+            tag: String::from(DEFAULT_LOCALE),
+            language_len: DEFAULT_LOCALE.len(),
+        }
+    }
+}
+
 /// A validated command/topic name: 1–[`MAX_DOCUMENT_NAME_LEN`] bytes of
 /// ASCII letters, digits, `_`, or `-`, starting with a letter or digit.
 ///

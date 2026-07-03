@@ -1,9 +1,9 @@
 # Core CLI utilities (`userland/apps` and `userland/shell`)
 
 Stage 6 ships a set of small command-line utilities, each its own crate.
-This page documents the ones that have landed (`sysinfo`, `ps`, `cat`,
-`ls`, `rm`, `cp`, `mv`, `chmod`, `chown`, `getcap`, and `setcap`) and is
-extended as the others (`mount`, …) arrive.
+This page documents the ones that have landed (`sysinfo`, `ps`, `man`,
+`cat`, `ls`, `rm`, `cp`, `mv`, `chmod`, `chown`, `getcap`, and `setcap`)
+and is extended as the others (`mount`, …) arrive.
 
 ## `sysinfo` — the System Information CLI (`userland/shell/sysinfo`)
 
@@ -1288,3 +1288,72 @@ usage refusals, the exact typed requests submitted (decoded and asserted
 field by field), the password-record round trip and the
 mismatched-password refusal, the grant merge/removal flow against a
 served listing, the listing renderers, and the terse errno reporting.
+
+## `man` — show a command's help document (`userland/apps/man`)
+
+`rustos-man` (`/System/Apps/man.app/Run`) renders the help document a
+command's application bundle ships (`plans/APPS.md` §7). RustOS has no
+troff/roff man pages and no `/usr/share/man`: a bundle's single
+internationalised `Help/` tree is the one documentation source, and `man`
+is its terminal reader.
+
+### Grammar
+
+```
+man [-h | -?] <command> [topic]
+```
+
+`-h`/`-?` render `man`'s own short help (through the same engine); `--`
+ends option parsing; a trailing `.app` names the bundle directly. Exit
+codes: `0` page shown, `1` command/document not found or delivery failed,
+`2` usage error.
+
+### One resolution, one engine
+
+`man <cmd>` walks `rustos_cmdres::bundle_candidates` — the same
+store-then-`PATH` order the shell launches by — and stops at the first
+bundle directory that exists (`NotFound` moves on; any other refusal is
+final, mirroring the shell's launch rule), so the page shown always
+documents the program the shell would run for the same word. The document
+is located, locale-selected, parsed, and rendered by `lib/help`, the one
+shared engine; `man` owns only its argument grammar, the bundle probe, and
+the pager.
+
+### Locale
+
+The requested locale is the `LANG` environment variable (a BCP-47 tag the
+session/shell exports once, `plans/APPS.md` §5). Fallback is the engine's
+deterministic chain (exact → same language → `default/` en-US); a missing
+or malformed `LANG` degrades to the canonical documents. A page served in
+a locale other than the requested one is noted with a `context` record
+(code `help.locale_fallback`) on `stdinfo` (fd 3) — advisory only, never
+affecting output or exit status.
+
+### Paging
+
+Where the kernel attests the console's geometry (`terminal_size`), the
+page is shown a screenful at a time — space for the next screenful,
+return for one line, `q` to stop — with local echo suppressed while the
+pager can prompt. A serial line, pipe, or redirection streams the whole
+page.
+
+### Fail closed
+
+An unresolved word, a bundle with no document, an oversized or malformed
+document (the `lib/help` bounds), and a refused store probe are all typed
+errors reported on standard error — never a panic, never fabricated help
+text. The tool holds no ambient authority: its manifest requests the
+console pair plus `CAP_FS_ACCESS`, and the secured VFS still authorises
+every `Help/` read per-inode under the caller's attested identity.
+
+### Tests
+
+`cargo test -p rustos-man` drives the engine against in-memory
+`BundleStore`/`Console` fixtures: the grammar and its refusals, the
+store-shadows-`PATH` order, the final-refusal rule, `.app`/explicit-path
+words, topics, locale exact/fallback plus the fd-3 advisory, the pager's
+key handling, and the `-h` fallback. `src/help.rs` embeds the bundle's own
+`Help/` tree and proves every shipped locale parses; `tools/mkimage` and
+the QEMU image fixture plant that same table on the read-only `/System`
+volume, and the `session_ceiling` QEMU vertical types `man man` end to
+end.

@@ -145,6 +145,21 @@ impl Errno {
         self as i32
     }
 
+    /// Recover the [`Errno`] a syscall encoded as a negative signed result
+    /// (`-errno`, the standard `abi-v1` convention).
+    ///
+    /// The one definition of that decode, so no caller re-derives it. A
+    /// non-negative `ret` is not an error and an unknown code cannot be
+    /// guessed at: both fail closed as
+    /// [`NotImplemented`](Self::NotImplemented).
+    #[must_use]
+    pub fn from_syscall(ret: i64) -> Self {
+        i32::try_from(-ret)
+            .ok()
+            .and_then(Self::from_i32)
+            .unwrap_or(Self::NotImplemented)
+    }
+
     /// Recover an [`Errno`] from its ABI numeric value, or `None` if `value`
     /// is not a known discriminant.
     ///

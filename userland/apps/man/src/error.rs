@@ -1,0 +1,113 @@
+//! The typed outcomes of running `man`.
+
+use core::fmt;
+
+use alloc::string::String;
+
+use rustos_abi::Errno;
+use rustos_help::{LoadError, NameError};
+
+/// Why a `man` invocation failed.
+///
+/// Every failure is a value the `Run` binary reports on standard error and
+/// maps to an exit status (`2` for [`ManError::Usage`], `1` otherwise) —
+/// no path panics and none is silently swallowed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ManError {
+    /// The command line is outside the `man [-h | -?] <command> [topic]`
+    /// grammar.
+    Usage,
+    /// No candidate bundle exists for the command word: neither the system
+    /// app store nor any `PATH` entry holds `<word>.app` (plans/APPS.md §8).
+    CommandNotFound(String),
+    /// The word spells an explicit path to a bare program, which names no
+    /// bundle and therefore has no `Help/` tree to read.
+    NotABundle(String),
+    /// The command word or topic is not a well-formed help document name, so
+    /// no document can be looked up for it (the spelling grammar is the
+    /// `lib/help` one that makes path traversal unrepresentable).
+    InvalidName(NameError),
+    /// The owning bundle exists but no locale — not even `default/` — holds
+    /// the document: an ordinary "no help" outcome, reported cleanly.
+    NoHelp {
+        /// The command word the bundle was resolved for.
+        word: String,
+        /// The document (command or topic) name that was looked up.
+        name: String,
+    },
+    /// The bundle's `Help/` tree is present but unusable: the backing store
+    /// failed, the tree lists too many locales, or the selected document
+    /// does not parse under the engine's fail-closed bounds.
+    Tree(LoadError),
+    /// Probing a candidate bundle was refused outright (not "no such
+    /// bundle"): the refusal is final, mirroring the shell's launch rule
+    /// that only `NotFound` moves to the next candidate.
+    Store(Errno),
+    /// Writing the rendered page to standard output failed.
+    Output(Errno),
+}
+
+impl fmt::Display for ManError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ManError::Usage => f.write_str("usage error"),
+            ManError::CommandNotFound(word) => write!(f, "no such command: {word}"),
+            ManError::NotABundle(word) => {
+                write!(f, "{word}: not an application bundle (no help to read)")
+            }
+            ManError::InvalidName(err) => write!(f, "invalid help name: {err}"),
+            ManError::NoHelp { word, name } => {
+                if word == name {
+                    write!(f, "no help for {word}")
+                } else {
+                    write!(f, "no help topic {name} for {word}")
+                }
+            }
+            ManError::Tree(err) => write!(f, "help unavailable: {err}"),
+            ManError::Store(err) => write!(f, "cannot read the app store: {err}"),
+            ManError::Output(err) => write!(f, "cannot write the page: {err}"),
+        }
+    }
+}
+
+impl From<NameError> for ManError {
+    fn from(err: NameError) -> Self {
+        ManError::InvalidName(err)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::format;
+    use alloc::string::String;
+
+    use super::ManError;
+
+    #[test]
+    fn messages_name_the_failing_input() {
+        assert_eq!(
+            format!("{}", ManError::CommandNotFound(String::from("nope"))),
+            "no such command: nope"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                ManError::NoHelp {
+                    word: String::from("ps"),
+                    name: String::from("ps"),
+                }
+            ),
+            "no help for ps"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                ManError::NoHelp {
+                    word: String::from("top"),
+                    name: String::from("keys"),
+                }
+            ),
+            "no help topic keys for top"
+        );
+    }
+}
