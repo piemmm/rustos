@@ -454,7 +454,7 @@ mod tests {
             supplementary_gids: supplementary,
             display_name: "Ada Lovelace",
             home: "/Users/ada",
-            shell: "/Apps/Shell.app/Run",
+            shell: "/System/Apps/elsh.app/Run",
             capabilities: caps(&[CapabilityId::FS_MOUNT, CapabilityId::PROC_SPAWN]),
             state: AccountState::Active,
         }
@@ -484,7 +484,7 @@ mod tests {
         assert_eq!(record.supplementary_gids(), &[Gid(4), Gid(7)]);
         assert_eq!(record.display_name(), "Ada Lovelace");
         assert_eq!(record.home(), "/Users/ada");
-        assert_eq!(record.shell(), "/Apps/Shell.app/Run");
+        assert_eq!(record.shell(), "/System/Apps/elsh.app/Run");
         assert!(record.capabilities().contains(CapabilityId::FS_MOUNT));
         assert_eq!(record.state(), AccountState::Active);
         assert!(record.password().verify(b"byron"));

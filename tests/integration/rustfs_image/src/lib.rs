@@ -130,7 +130,7 @@ pub fn users_db_text() -> Result<String, ParseError> {
             supplementary_gids: &[],
             display_name: "System Administrator",
             home: "/Users/root",
-            shell: "/Apps/Shell.app/Run",
+            shell: "/System/Apps/elsh.app/Run",
             capabilities: rustos_users::administrator_ceiling(),
             state: AccountState::Active,
         },

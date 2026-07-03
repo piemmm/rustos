@@ -1257,7 +1257,7 @@ and the lookup / create / taken-gid / help-write fail-closed paths).
 
 ## `users` — interactive account administration (`userland/shell/users`)
 
-`rustos-users-cli` (`/Apps/Users.app/Run`) is the first holder of the
+`rustos-users-cli` (`/System/Apps/users.app/Run`) is the first holder of the
 `CAP_USER_ADMIN`-gated `users_admin` syscall
 (`plans/CAPABILITY_USE.md` CU4): an interactive session that lists,
 creates, modifies, locks/unlocks, and deletes accounts, edits their

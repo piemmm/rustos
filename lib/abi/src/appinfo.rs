@@ -64,6 +64,20 @@ pub const MIME_ENTRY_LEN: usize = 1 + MIME_TYPE_MAX;
 /// else.
 pub const SYSTEM_LIBRARIES_DIR: &str = "/System/Libraries";
 
+/// Absolute path of the **system app store**: the OS-provided, read-only,
+/// system-signed command-app bundles (`ps.app`, `top.app`, …), each named by
+/// the command it serves. The shell resolves a bare command word here
+/// *before* the user's `PATH`, so a user-writable directory can never shadow
+/// a system command with an attacker-supplied bundle of the same name
+/// (`plans/APPS.md` §8). One definition, shared by the kernel's program
+/// registry and the shell's command resolution, so the two cannot drift.
+pub const SYSTEM_APP_STORE: &str = "/System/Apps";
+
+/// The directory-name suffix every application bundle carries
+/// (`<name>.app`). Command resolution appends it to a bare command word and
+/// recognises it on an explicitly-typed bundle name (`plans/APPS.md` §9).
+pub const BUNDLE_SUFFIX: &str = ".app";
+
 /// One of the fixed set of names permitted at the top level of an
 /// application bundle.
 ///

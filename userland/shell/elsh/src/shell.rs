@@ -34,9 +34,14 @@ const STDOUT_FD: u32 = 1;
 /// Standard error's descriptor — duplicated onto stdout by a combined `&>`.
 const STDERR_FD: u32 = 2;
 
-/// Status used when a command cannot be launched (mirrors the POSIX
-/// "command not found" convention).
+/// Status used when a command cannot be resolved anywhere on the search
+/// path (mirrors the POSIX "command not found" convention).
 const NOT_FOUND_STATUS: i32 = 127;
+
+/// Status used when a command resolved but cannot be run — a permission or
+/// capability denial, a malformed image, or a launch feature the host cannot
+/// express (mirrors the POSIX "command not executable" convention).
+const NOT_EXECUTABLE_STATUS: i32 = 126;
 
 /// The first descriptor a `{var}` dynamic redirection may allocate. Numbers
 /// below it are refused: 0–3 are the reserved standard streams and 4–9 stay
@@ -488,9 +493,10 @@ impl<'a> Shell<'a> {
         let pid = match self.host.launch(&spec) {
             Ok(pid) => pid,
             Err(err) => {
+                let (status, reason) = launch_failure(err);
                 self.console
-                    .write_stderr(&format!("shell: {}: {err}\n", program_name(commands)));
-                self.env.set_last_status(NOT_FOUND_STATUS);
+                    .write_stderr(&format!("shell: {}: {reason}\n", program_name(commands)));
+                self.env.set_last_status(status);
                 return;
             }
         };
@@ -534,9 +540,10 @@ impl<'a> Shell<'a> {
                 self.env.set_last_status(0);
             }
             Err(err) => {
+                let (status, reason) = launch_failure(err);
                 self.console
-                    .write_stderr(&format!("shell: {}: {err}\n", program_name(commands)));
-                self.env.set_last_status(NOT_FOUND_STATUS);
+                    .write_stderr(&format!("shell: {}: {reason}\n", program_name(commands)));
+                self.env.set_last_status(status);
             }
         }
     }
@@ -556,6 +563,18 @@ impl<'a> Shell<'a> {
             self.console
                 .write_stdout(&format!("[{}] Done {}\n", job.id.as_u32(), job.command));
         }
+    }
+}
+
+/// Map a launch refusal onto its POSIX-style exit status and report text:
+/// [`rustos_abi::Errno::NotFound`] means the search exhausted every
+/// candidate (`127`, "command not found"); any other refusal means the
+/// command resolved but cannot run (`126`, reported with the host's error).
+fn launch_failure(err: rustos_abi::Errno) -> (i32, String) {
+    if err == rustos_abi::Errno::NotFound {
+        (NOT_FOUND_STATUS, String::from("command not found"))
+    } else {
+        (NOT_EXECUTABLE_STATUS, err.to_string())
     }
 }
 
@@ -692,8 +711,29 @@ mod tests {
         shell.run_line("nope arg").unwrap();
 
         assert_eq!(shell.environment().last_status(), 127);
-        assert!(console.stderr().contains("shell: nope"));
+        assert!(console.stderr().contains("shell: nope: command not found"));
         assert!(host.launches().is_empty());
+    }
+
+    #[test]
+    fn non_executable_command_reports_and_sets_126() {
+        let host = ScriptedHost::new();
+        host.fail_launch_with("secret-tool", rustos_abi::Errno::PermissionDenied);
+        let console = RecordingConsole::new();
+        let mut shell = Shell::new(&host, &console);
+
+        // A command that resolved but is refused (a permission or capability
+        // denial) is the POSIX 126 "found but not executable" case, distinct
+        // from 127 "not found".
+        shell.run_line("secret-tool").unwrap();
+
+        assert_eq!(shell.environment().last_status(), 126);
+        assert!(console.stderr().contains("shell: secret-tool"));
+        assert!(host.launches().is_empty());
+
+        // The background launch path reports through the same mapping.
+        shell.run_line("secret-tool &").unwrap();
+        assert_eq!(shell.environment().last_status(), 126);
     }
 
     #[test]

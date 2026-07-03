@@ -69,7 +69,7 @@ pub(crate) struct LaunchRecord {
 pub(crate) struct ScriptedHost {
     next_pid: RefCell<u64>,
     launches: RefCell<Vec<LaunchRecord>>,
-    fail_launch: RefCell<Option<String>>,
+    fail_launch: RefCell<Option<(String, Errno)>>,
     waits: RefCell<BTreeMap<u64, WaitOutcome>>,
     signals: RefCell<Vec<(Pid, Signal)>>,
     directories: RefCell<Vec<String>>,
@@ -92,7 +92,14 @@ impl ScriptedHost {
     /// Make the next `launch` whose `argv[0]` equals `name` fail with
     /// [`Errno::NotFound`].
     pub(crate) fn fail_launch_of(&self, name: &str) {
-        *self.fail_launch.borrow_mut() = Some(name.to_string());
+        self.fail_launch_with(name, Errno::NotFound);
+    }
+
+    /// Make the next `launch` whose `argv[0]` equals `name` fail with
+    /// `errno` (e.g. [`Errno::PermissionDenied`] for a command that
+    /// resolved but is refused).
+    pub(crate) fn fail_launch_with(&self, name: &str, errno: Errno) {
+        *self.fail_launch.borrow_mut() = Some((name.to_string(), errno));
     }
 
     /// Register the outcome `wait` returns for a given pid.
@@ -121,10 +128,10 @@ impl ScriptedHost {
 
 impl ProcessHost for ScriptedHost {
     fn launch(&self, spec: &LaunchSpec<'_>) -> Result<Pid, Errno> {
-        if let Some(name) = self.fail_launch.borrow().as_ref() {
+        if let Some((name, errno)) = self.fail_launch.borrow().as_ref() {
             let first = spec.commands.first().and_then(|c| c.argv.first());
             if first == Some(name) {
-                return Err(Errno::NotFound);
+                return Err(*errno);
             }
         }
         self.launches.borrow_mut().push(LaunchRecord {

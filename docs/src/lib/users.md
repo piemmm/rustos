@@ -19,7 +19,7 @@ blank, a `#` comment, or one record of ten `:`-separated fields:
 
 ```text
 rustos-users-v1
-root:0:0::System Administrator:/Users/root:/Apps/Shell.app/Run:CAP_USER_ADMIN:active:pbkdf2-sha256$600000$<salt>$<hash>
+root:0:0::System Administrator:/Users/root:/System/Apps/elsh.app/Run:CAP_USER_ADMIN:active:pbkdf2-sha256$600000$<salt>$<hash>
 ```
 
 A record carries the full §5.1 identity: username, uid, primary gid, the

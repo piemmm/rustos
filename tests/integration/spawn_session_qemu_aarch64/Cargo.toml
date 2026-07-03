@@ -18,7 +18,7 @@ workspace = true
 # installs both the `InitSpawn` seam and the runtime `ProcessSpawn` producer
 # + embedded-program registry into the `BootInfo` hand-off. After
 # `kernel_core::kernel_main` emits `AuditEvent::BootCompleted` it spawns PID 1
-# `init`, which writes its banner and then spawns `/Apps/Shell.app/Run`
+# `init`, which writes its banner and then spawns `/System/Apps/elsh.app/Run`
 # through the `spawn` syscall; the producer builds the session a fresh,
 # isolated address space and admits it Ready, and both processes run. This
 # bin only swaps the audit sink: observing two `ProcessSpawned` (4030) and

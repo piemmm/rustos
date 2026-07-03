@@ -141,7 +141,7 @@ fn valid_db_text() -> String {
             supplementary_gids: &[],
             display_name: "Ada Lovelace",
             home: "/Users/ada",
-            shell: "/Apps/Shell.app/Run",
+            shell: "/System/Apps/elsh.app/Run",
             capabilities: rustos_caps::CapabilitySet::empty(),
             state: AccountState::Active,
         },

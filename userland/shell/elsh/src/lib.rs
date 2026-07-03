@@ -67,6 +67,7 @@ pub mod job;
 pub mod lexer;
 pub mod parser;
 pub mod repl;
+pub mod resolve;
 pub mod shell;
 mod ulimit;
 
@@ -81,4 +82,5 @@ pub use host::{
 };
 pub use job::{ExitStatus, Job, JobId, JobState, JobTable, Pid, Signal, WaitOutcome};
 pub use repl::{run as run_repl, ReplInput};
+pub use resolve::resolution_candidates;
 pub use shell::Shell;

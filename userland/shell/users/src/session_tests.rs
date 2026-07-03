@@ -125,7 +125,7 @@ fn user_list_response() -> Vec<u8> {
             supplementary_gids: gids,
             display_name: "Ada",
             home: "/Users/ada",
-            shell: "/Apps/Shell.app/Run",
+            shell: "/System/Apps/elsh.app/Run",
             grants,
             locked: false,
         })
@@ -196,7 +196,7 @@ fn create_builds_a_baseline_account_with_a_verifiable_password_record() {
     assert_eq!(create.primary_gid, 100);
     assert_eq!(create.display_name, "Grace Hopper");
     assert_eq!(create.home, "/Users/grace");
-    assert_eq!(create.shell, "/Apps/Shell.app/Run");
+    assert_eq!(create.shell, "/System/Apps/elsh.app/Run");
     // The new account starts from exactly the shared session baseline.
     let grants: Vec<CapabilityId> = create.grants.iter().collect();
     assert_eq!(grants, SESSION_BASELINE);

@@ -1425,6 +1425,12 @@ Authoritative subdirectories:
 ```
 /System/
 ├── Kernel/      # Kernel image(s) and boot artifacts for the platform.
+├── Apps/        # System app store: the OS-provided command apps, one
+│                #   command-named §16.5 bundle per command (ps.app, …).
+│                #   The shell resolves a bare command word here *before*
+│                #   the user's PATH, so PATH can never shadow a system
+│                #   command (plans/APPS.md). No new capability guards it:
+│                #   the existing file-access and app-load gates apply.
 ├── Drivers/     # Loadable drivers (rxe modules) shipped with the OS.
 ├── Libraries/   # The OS-provided shared libraries (see §16.4).
 ├── Fonts/       # System fonts.

@@ -12081,7 +12081,8 @@ mod tests {
     /// Stand-in database text the handler tests serve. The handler copies
     /// the held text verbatim (the caller re-parses it), so the double
     /// does not need to be a full valid `users-v1` document.
-    static USERS_DB_TEXT: &[u8] = b"users-v1\nroot:0:0::root:/Users/root:/Apps/Shell.app/Run\n";
+    static USERS_DB_TEXT: &[u8] =
+        b"users-v1\nroot:0:0::root:/Users/root:/System/Apps/elsh.app/Run\n";
 
     /// A recording [`crate::useradmin::UsersAdmin`] double: captures the
     /// forwarded identity and decoded request, and answers a fixed

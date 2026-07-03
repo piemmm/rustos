@@ -125,7 +125,7 @@ mod tests {
                 supplementary_gids: &[],
                 display_name: "System Administrator",
                 home: "/Users/root",
-                shell: "/Apps/Shell.app/Run",
+                shell: "/System/Apps/elsh.app/Run",
                 capabilities: CapabilitySet::empty(),
                 state: AccountState::Active,
             },

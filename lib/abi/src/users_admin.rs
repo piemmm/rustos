@@ -868,7 +868,7 @@ mod tests {
             supplementary_gids: gids,
             display_name: "Ada Lovelace",
             home: "/Users/ada",
-            shell: "/Apps/Shell.app/Run",
+            shell: "/System/Apps/elsh.app/Run",
             grants,
             password_record: "pbkdf2-sha256$600000$00$11",
         }));
@@ -878,7 +878,7 @@ mod tests {
             supplementary_gids: gids,
             display_name: "",
             home: "/Users/ada",
-            shell: "/Apps/Shell.app/Run",
+            shell: "/System/Apps/elsh.app/Run",
         }));
         round_trip(&UsersAdminRequest::DeleteUser { username: "ada" });
         round_trip(&UsersAdminRequest::SetAccountState {
@@ -992,7 +992,7 @@ mod tests {
             supplementary_gids: gids,
             display_name: "System Administrator",
             home: "/Users/root",
-            shell: "/Apps/Shell.app/Run",
+            shell: "/System/Apps/elsh.app/Run",
             grants,
             locked: false,
         };

@@ -97,8 +97,22 @@ does not parse or expand runs **nothing** and sets `$?` to `2`.
 
 Everything that goes wrong *after* a line is understood — a program that
 cannot be launched, a `change_directory` denial — is an ordinary non-zero
-status (e.g. `127` for a command that will not launch), never a panic and
-never a line abort, so `;`, `&&`, and `||` behave as POSIX requires.
+status, never a panic and never a line abort, so `;`, `&&`, and `||` behave
+as POSIX requires. A launch refusal follows the POSIX convention: `127`
+("command not found") when resolution exhausted every candidate, `126` for
+a command that resolved but cannot run (a permission or capability denial).
+
+## Command resolution
+
+A command word resolves through the pure candidate policy
+`resolution_candidates` (`src/resolve.rs`, owned by `plans/APPS.md` §8–§9):
+an explicit path (containing `/`) bypasses the search, a trailing `.app`
+names the bundle and runs its `Run` binary, and a bare word searches the
+`/System/Apps/` system app store (spelled once in `lib/abi`) and then the
+alias-aware `:`-split `PATH`, in order. The runtime host attempts the
+candidates in order — the kernel's byte-exact `spawn` answering `NotFound`
+moves to the next — and the kernel authorises every launch; a candidate
+list grants nothing.
 
 ## Deliberate simplifications
 

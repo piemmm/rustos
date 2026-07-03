@@ -64,5 +64,16 @@ reference with a `..` component, an empty reference, or one that points
 anywhere else is refused (`LibraryError`). The bundle directory is tried
 first, so a bundle's private copy shadows the system one.
 
+## The system app store
+
+`SYSTEM_APP_STORE` (`/System/Apps`) and `BUNDLE_SUFFIX` (`.app`) are the one
+definition of where the OS-provided command apps live and how a bundle
+directory is named (`AGENTS.md` §16.2, `plans/APPS.md` §8). The kernel's
+embedded-program registry registers every command app as a command-named
+store bundle (`/System/Apps/<command>.app/Run`), and the shell's command
+resolution builds the same spelling from these constants — searching the
+store *before* the user's `PATH`, so `PATH` can never shadow a system
+command.
+
 The user-space service that applies all of this to a real bundle is
 [`appmgr`](../userland/appmgr.md).

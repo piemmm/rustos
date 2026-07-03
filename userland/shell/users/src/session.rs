@@ -319,7 +319,7 @@ fn create_user(
             supplementary_gids: gids,
             display_name: display_name.trim(),
             home: &home,
-            shell: "/Apps/Shell.app/Run",
+            shell: "/System/Apps/elsh.app/Run",
             grants,
             password_record: &password_record,
         }),

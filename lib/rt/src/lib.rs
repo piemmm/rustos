@@ -2885,7 +2885,7 @@ mod tests {
 
     #[test]
     fn spawn_marshals_path_pointer_len_and_inherit() {
-        let path = *b"/Apps/Shell.app/Run";
+        let path = *b"/System/Apps/elsh.app/Run";
         let (number, args) = capture(7, || {
             assert_eq!(spawn(&path), 7);
         });
@@ -2901,7 +2901,7 @@ mod tests {
 
     #[test]
     fn spawn_as_marshals_the_console_and_target_uid() {
-        let path = *b"/Apps/Shell.app/Run";
+        let path = *b"/System/Apps/elsh.app/Run";
         let (number, args) = capture(9, || {
             // login starting a user's shell on the inherited console under a
             // switched-to uid.

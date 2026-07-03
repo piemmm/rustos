@@ -45,10 +45,12 @@ the single internationalised `Help/` tree serves the CLI `man`, each
 command's short `-h`/`-?` help, and any graphical help viewer (bundle-local
 app documentation only; the OS source-tree docs under `docs/` are unrelated).
 Landed: deliverable 1 (`BundleEntry::Help` replaced `Documentation` in place,
-`AGENTS.md` §16.5 amended, C header regenerated) and deliverable 2 (the
-`lib/help` engine). Remaining: deliverables 3–7 (the `man` app, shell command
-resolution, `cargo xtask help-lint`, the OS `Help/` trees, `stdinfo`
-adoption).
+`AGENTS.md` §16.5 amended, C header regenerated), deliverable 2 (the
+`lib/help` engine), and deliverable 4 (shell command resolution over the
+`/System/Apps/` system app store, `AGENTS.md` §16.2 amended). Remaining:
+deliverables 3, 5–7 (the `man` app, `cargo xtask help-lint`, the OS `Help/`
+trees, `stdinfo` adoption) and the per-app `-h`/`-?` short-help convention
+(§4, an app-side obligation served through `lib/help`).
 
 ## 1. Everything is a bundle — including single-binary utilities
 
@@ -276,18 +278,35 @@ command word (after builtins, functions, and command aliases, per
 `plans/SHELL.md`) in this fixed order:
 
 1. **The system app store first.** The OS-provided command apps. Their store
-   is a dedicated, read-only, system-signed location, proposed as
-   `/System/Apps/` (a new §16.2 subdirectory — see the amendments below),
-   addressed by the `System:` path alias (`plans/DRIVES.md`). The shell looks
-   for `<word>.app` there and, if the manifest permits execution (§9.1), runs
-   its `Run` binary through `appmgr` (signature + capability + interface-hash
-   checks, §16.5).
+   is a dedicated, read-only, system-signed location, `/System/Apps/` (an
+   `AGENTS.md` §16.2 subdirectory — amendment applied, rationale in
+   `PLAN.md` "Charter Amendments"), addressed by the `System:` path alias
+   (`plans/DRIVES.md`). Its path and the bundle suffix are defined **once**
+   in `lib/abi` (`SYSTEM_APP_STORE`, `BUNDLE_SUFFIX`), shared by the kernel's
+   program registry (`kernel/rustos-kernel/src/spawn_paths.rs`, drift-tested)
+   and the shell. The shell looks for `<word>.app` there and, if the manifest
+   permits execution (§9.1), runs its `Run` binary through `appmgr`
+   (signature + capability + interface-hash checks, §16.5).
 2. **User `PATH` next.** The colon-separated directories in the shell's `PATH`
    environment variable (set by `export PATH=…` or a `.profile` in the user's
-   home root), searched left to right. Each entry is resolved through the
-   single shared path parser (`plans/DRIVES.md`), and each candidate is
-   likewise a `<word>.app` bundle launched through `appmgr` — never a raw
-   loose binary (§1).
+   home root), searched left to right. Because an alias path itself contains
+   a `:` (`Home:/tools`), the split is structural and deterministic: a `:`
+   immediately followed by `/` whose preceding text (since the previous
+   separator) is a non-empty name containing no `/` is that entry's alias
+   delimiter, not a separator — so an alias root entry is written `Home:/`,
+   never a bare `Home:`. An empty entry is skipped (never a silent
+   current-directory search). Each entry is resolved through the single
+   shared path parser (`plans/DRIVES.md`), and each candidate is likewise a
+   `<word>.app` bundle launched through `appmgr` — never a raw loose binary
+   (§1).
+
+The candidate *policy* is one pure, exhaustively-tested function,
+`rustos_elsh::resolution_candidates` (`userland/shell/elsh/src/resolve.rs`):
+it computes only the ordered spelling list and grants nothing. The shell's
+`Run` host attempts the candidates in order — the kernel's byte-exact
+`spawn` lookup answering `NotFound` moves to the next candidate (a
+deterministic first-match search, nothing ran), any other refusal is final
+— and the kernel authorises every launch.
 
 Searching the system store **before** `PATH` is a security property, not just
 convenience: a user's `PATH` can never shadow a system command with an
@@ -298,8 +317,10 @@ to `PATH`.
 
 Resolution is deterministic and fails closed: an unresolved name is
 `command not found` (`127`), and a resolved-but-non-executable bundle is
-`command not executable` (`126`), matching `plans/SHELL.md`'s failure model. No
-"try everything until one runs" behaviour (§2.1).
+`command not executable` (`126`), matching `plans/SHELL.md`'s failure model
+(implemented: the interpreter maps a launch `NotFound` onto `127` and every
+other refusal onto `126`). No "try everything until one runs" behaviour
+(§2.1).
 
 ### 8.1 Content and translation policy for OS help
 
@@ -444,9 +465,16 @@ both landed; `plans/SHELL.md` command execution):
    `lib/help/README.md`, `docs/src/lib/help.md`, and the §3 crate list are
    in place.
 3. **`man.app`** — the RustOS `man` command app (§7); its own `Help/` tree.
-4. **Shell command resolution (`plans/SHELL.md`)** — system-app-store-then-
-   `PATH` resolution (§8), `.app`-suffix invocation (§9), the `-h`/`-?`
-   short-help convention (§4).
+4. **Shell command resolution** — **done** (except the per-app `-h`/`-?`
+   convention, which lands with each app's `Help/` tree, §4/§8.1):
+   system-app-store-then-`PATH` resolution (§8) and `.app`-suffix invocation
+   (§9) are live. The store/bundle spellings live once in `lib/abi`
+   (`SYSTEM_APP_STORE`/`BUNDLE_SUFFIX`); every OS command app moved in place
+   to `/System/Apps/{elsh,ps,sysinfo,top,users}.app/Run`
+   (`spawn_paths.rs`, drift-tested); the pure candidate policy
+   (`rustos_elsh::resolution_candidates`, alias-aware `PATH` split) is
+   unit-tested; the interpreter maps launch failures onto `127`/`126`; and
+   the session-ceiling QEMU vertical proves the bare word `ps` end to end.
 5. **`cargo xtask help-lint`** — the §8.1 content/completeness/switch-drift
    check, wired into `cargo xtask ci` (§7).
 6. **`Help/` trees for the existing command apps** (`ps`, `top`, `ls`, `cat`,
@@ -465,8 +493,10 @@ Required `AGENTS.md` amendments (each with a one-line rationale in PLAN.md's
 - **§16.5** — **done**: `Documentation/` replaced by `Help/` in the bundle
   layout (the merge), with the locale-tree role documented; rationale logged
   in PLAN.md "Charter Amendments".
-- **§16.2** — add `Apps/` under `/System` as the read-only, system-signed
-  system app store (§8), and update the §16.2 authoritative subdirectory list.
-- **§16.6/§5.2** — no new capability is introduced for help or command
-  resolution (existing file-access and driver/app-load gates suffice, §5.2
-  minimalism); state this explicitly so none is added speculatively.
+- **§16.2** — **done**: `Apps/` added under `/System` as the read-only,
+  system-signed system app store (§8), in the §16.2 authoritative
+  subdirectory list; rationale logged in `PLAN.md` "Charter Amendments".
+- **§16.6/§5.2** — **done**: no new capability is introduced for help or
+  command resolution (existing file-access and driver/app-load gates
+  suffice, §5.2 minimalism); stated explicitly in the §16.2 `Apps/` entry so
+  none is added speculatively.

@@ -296,7 +296,7 @@ fn debug_users_db(entropy: &mut dyn EntropySource) -> Result<String, MkimageErro
             supplementary_gids: &[],
             display_name: "System Administrator",
             home: "/Users/root",
-            shell: "/Apps/Shell.app/Run",
+            shell: "/System/Apps/elsh.app/Run",
             capabilities: rustos_users::administrator_ceiling(),
             state: AccountState::Active,
         },
@@ -817,7 +817,7 @@ mod tests {
             .authenticate(DEBUG_USERNAME, DEBUG_PASSWORD.as_bytes())
             .expect("root/root authenticates");
         assert_eq!(record.uid(), Uid(0));
-        assert_eq!(record.shell(), "/Apps/Shell.app/Run");
+        assert_eq!(record.shell(), "/System/Apps/elsh.app/Run");
         // The seeded grant is exactly the shared administrator ceiling
         // (session baseline + administrative set) — the B3 regression
         // (`plans/CAPABILITY_USE.md` CU3): a root account without

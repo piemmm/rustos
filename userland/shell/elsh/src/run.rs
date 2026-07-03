@@ -20,11 +20,14 @@
 //! The interpreter is pure: it decides *what* to run but reaches the outside
 //! world only through two injected seams. `RtConsole` carries its output to
 //! fd 1 / fd 2, and `RtProcessHost` launches external commands through the
-//! `spawn` syscall and reaps them through `wait`. The current `spawn` ABI
+//! `spawn` syscall and reaps them through `wait`. A command word is resolved
+//! to a runnable bundle through the shared candidate policy
+//! ([`rustos_elsh::resolution_candidates`]): the system app store first,
+//! then the user's `PATH`, attempted in order. The current `spawn` ABI
 //! carries only a program path (no argument vector, environment, pipe, or
-//! redirection), so `RtProcessHost` launches a single bare-path command and
-//! fails closed on anything it cannot yet express; richer
-//! launches await an ABI extension.
+//! redirection), so `RtProcessHost` launches a single-word command and fails
+//! closed on anything it cannot yet express; richer launches await an ABI
+//! extension.
 //!
 //! On the host it is an inert stub so `cargo build --workspace`, clippy, and
 //! fmt still cover the file.
@@ -96,7 +99,9 @@ mod program {
     }
 
     /// Launches and reaps external commands through the `spawn` and `wait`
-    /// syscalls (`plans/SPAWN.md` SP3 / SP6).
+    /// syscalls (`plans/SPAWN.md` SP3 / SP6), resolving the command word to
+    /// a bundle `Run` path through the shared candidate policy
+    /// (`plans/APPS.md` §8: the system app store first, then `PATH`).
     struct RtProcessHost;
 
     impl ProcessHost for RtProcessHost {
@@ -114,16 +119,36 @@ mod program {
             {
                 return Err(Errno::NotImplemented);
             }
-            let Some(path) = command.argv.first() else {
+            let Some(word) = command.argv.first() else {
                 return Err(Errno::NotImplemented);
             };
-            let ret = rustos_rt::spawn(path.as_bytes());
-            if ret < 0 {
-                return Err(errno_from(ret));
+            // Resolve the word to its candidate program paths (the system
+            // app store, then the exported `PATH`) and attempt each in
+            // order. `spawn`'s `NotFound` is a definitive "no program is
+            // registered at this path, nothing ran", so moving to the next
+            // candidate is a deterministic first-match search, never a
+            // retry; any other refusal (a permission or capability denial,
+            // a malformed image) is final and reported verbatim. The
+            // kernel authorises every attempt — a candidate spelling grants
+            // nothing.
+            let path_var = spec
+                .env
+                .iter()
+                .find(|(name, _)| *name == "PATH")
+                .map(|(_, value)| *value);
+            for candidate in rustos_elsh::resolution_candidates(word, path_var) {
+                let ret = rustos_rt::spawn(candidate.as_bytes());
+                if ret >= 0 {
+                    // `ret >= 0` here, so the cast preserves the PID value.
+                    #[allow(clippy::cast_sign_loss)]
+                    return Ok(Pid::new(ret as u64));
+                }
+                let err = errno_from(ret);
+                if err != Errno::NotFound {
+                    return Err(err);
+                }
             }
-            // `ret >= 0` here, so the cast preserves the PID value.
-            #[allow(clippy::cast_sign_loss)]
-            Ok(Pid::new(ret as u64))
+            Err(Errno::NotFound)
         }
 
         fn wait(&self, pid: Pid) -> Result<WaitOutcome, Errno> {

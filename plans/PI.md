@@ -731,7 +731,7 @@ on its own before the next.
   installed via `BootInfo::with_spawn`; the kernel `build.rs` now embeds both
   `init` and the `Shell` session program through one `elf2rxe` helper. PID 1
   `init` (granted `CAP_PROC_SPAWN`) spawns `config.session()`
-  (`/Apps/Shell.app/Run`) through `rustos_rt::spawn` and keeps running; the
+  (`/System/Apps/elsh.app/Run`) through `rustos_rt::spawn` and keeps running; the
   `tests/integration/spawn_session_qemu_aarch64` vertical proves both
   processes run on `-M virt` (PASS on two `ProcessSpawned` + three audited
   syscalls — the session's gated banner+exit is necessarily last).
@@ -1524,7 +1524,7 @@ copy is added on the syscall hot path (§2.16).
   `BootInfo::with_spawn` (in `boot::try_boot`, beside the X3a `with_init` seam)
   with the shared embedded `spawn_layout::PROGRAM_REGISTRY` (the `Shell` `rxe` `build.rs`
   already bakes for x86_64). On `init`'s `CAP_PROC_SPAWN`-gated `spawn` for
-  `/Apps/Shell.app/Run`, it draws the child's page tables from the kernel's
+  `/System/Apps/elsh.app/Run`, it draws the child's page tables from the kernel's
   live `FrameAllocator` through a boot-cached `kernel/mem` `FrameTableSource`
   (§24.1 — no fixed `.bss` reserve, capacity scales with RAM, fail-closed
   `NoSpace` only on genuine OOM), builds a 4 GiB-identity child PML4 with
@@ -1766,7 +1766,7 @@ riscv64, mirroring the aarch64 P-stage arc.
   drops PID 1 `init` into U-mode (its own Sv39 root, `IDENTITY_GIB = 4`,
   an arena-backed hardware-guarded kernel stack since G3b-2-iv), `init`
   writes its banner through `stream_write` and
-  issues the `CAP_PROC_SPAWN`-gated `spawn` for `/Apps/Shell.app/Run`; the
+  issues the `CAP_PROC_SPAWN`-gated `spawn` for `/System/Apps/elsh.app/Run`; the
   producer builds the session a fresh, hardware-isolated space from the
   allocator-backed `FrameTableSource` (no fixed reserve, §24.1) and admits
   it Ready. The kernel `build.rs` now also builds the embedded `init`/`Shell`

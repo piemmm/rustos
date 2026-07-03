@@ -135,7 +135,7 @@ The canonical storage names become aliases and IDs, not `/` paths:
 ```text
 System:/Kernel/rustos.rxe
 Users:/ian/Documents/design.md
-Apps:/Shell.app/Run
+Apps:/Example.app/Run
 Backup:/snapshots/2026-06-20
 id::b7f2e4e6-8d7a-4ef8-a13e-d3b84d4e8001/snapshots/2026-06-20
 ```

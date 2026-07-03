@@ -398,7 +398,7 @@ mod tests {
                     primary_gid: Gid(1000),
                     supplementary_gids: Vec::new(),
                     capabilities: self.caps,
-                    shell: "/Apps/Shell.app/Run".to_string(),
+                    shell: "/System/Apps/elsh.app/Run".to_string(),
                 })
             } else {
                 Err(Errno::PermissionDenied)

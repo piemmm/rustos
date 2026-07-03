@@ -26,7 +26,7 @@
 //!    grant omitted `CAP_FS_ACCESS` and every filesystem call was denied).
 //! 2. `pwd` — prints `/Users/root`, proving the chdir actually moved the
 //!    process.
-//! 3. `/Apps/Ps.app/Run` — `CAP_PROC_SPAWN` admits `spawn`; `ps` runs as
+//! 3. `/System/Apps/ps.app/Run` — `CAP_PROC_SPAWN` admits `spawn`; `ps` runs as
 //!    the same user, queries its self-scoped process list through
 //!    `sysinfod`, prints the shared `PID  PPID …` header, and exits.
 //! 4. `ulimit -H processes 1000` — **lowering** a hard bound needs no

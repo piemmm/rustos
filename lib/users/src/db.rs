@@ -14,7 +14,7 @@
 //! ```text
 //! rustos-users-v1
 //! # username:uid:gid:supplementary:display name:home:shell:caps:state:password
-//! root:0:0::System Administrator:/Users/root:/Apps/Shell.app/Run:CAP_USER_ADMIN:active:pbkdf2-sha256$600000$…$…
+//! root:0:0::System Administrator:/Users/root:/System/Apps/elsh.app/Run:CAP_USER_ADMIN:active:pbkdf2-sha256$600000$…$…
 //! ```
 
 use core::num::NonZeroU32;
@@ -212,7 +212,7 @@ mod tests {
                 supplementary_gids: &[],
                 display_name: "",
                 home: "/Users/test",
-                shell: "/Apps/Shell.app/Run",
+                shell: "/System/Apps/elsh.app/Run",
                 capabilities,
                 state,
             },

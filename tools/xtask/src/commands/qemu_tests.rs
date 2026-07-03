@@ -2198,7 +2198,7 @@ const TESTS: &[QemuTest] = &[
     // `kernel_main` builds PID 1 `init`'s ring-3 image (`ProcessSpawned`,
     // EventId 4030, #1) and drains the run queue. `init` writes its gated
     // banner, then issues its (audited) `spawn` syscall for
-    // `/Apps/Shell.app/Run`; the producer builds the session a fresh isolated
+    // `/System/Apps/elsh.app/Run`; the producer builds the session a fresh isolated
     // PML4 (`ProcessSpawned` #2) and admits it Ready, then `init` `wait`s on
     // it; the cooperative drain runs the session, which writes its prompt,
     // reads end-of-input (no input backing), and `exit`s; `init`'s `wait` reaps
@@ -2566,8 +2566,10 @@ const TESTS: &[QemuTest] = &[
     // same set `tools/mkimage::debug_users_db` seeds a debug image with),
     // and drives the spawned shell through a real session: `cd` into the
     // account's home (`CAP_FS_ACCESS` — the B3 regression), `pwd` proving
-    // the move, spawning `/Apps/Ps.app/Run` (`CAP_PROC_SPAWN`) and seeing
-    // its process-list header, then the negative half — a `ulimit` bound
+    // the move, typing the bare command word `ps` — resolved through the
+    // shell's system-app-store search (`plans/APPS.md` §8) to
+    // `/System/Apps/ps.app/Run` and spawned under `CAP_PROC_SPAWN` — and
+    // seeing its process-list header, then the negative half — a `ulimit` bound
     // pair is *lowered* (ungated; both bounds, since the default soft bound
     // is unlimited and a soft bound may never exceed its hard bound) and
     // the hard bound is then *raised*: the raise needs
@@ -2601,7 +2603,7 @@ const TESTS: &[QemuTest] = &[
             ("Password: ", SESSION_PASSWORD_LINE),
             ("elsh$ ", "cd /Users/root\n"),
             ("elsh$ ", "pwd\n"),
-            ("/Users/root", "/Apps/Ps.app/Run\n"),
+            ("/Users/root", "ps\n"),
             ("PID  PPID", "ulimit processes 1000\n"),
             ("elsh$ ", "ulimit -H processes 2000\n"),
             (

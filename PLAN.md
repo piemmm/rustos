@@ -3507,19 +3507,30 @@ reported for `man`'s `stdinfo` record), a bounded fail-closed
 structured-Markdown parser (fixed section model, typed `HelpError`,
 fence-aware section walk), and `render_short`/`render_full` over `lib/vt`
 (widths from `lib/curses`); unit-tested, fuzz-hardened (`fuzz_help` in
-`cargo xtask fuzz`), documented (`docs/src/lib/help.md`).
+`cargo xtask fuzz`), documented (`docs/src/lib/help.md`); (3) **shell
+command resolution** (`plans/APPS.md` §8–§9) with the §16.2 `/System/Apps/`
+system app store (charter amended, rationale in "Charter Amendments"): the
+store path and bundle suffix are defined once in `lib/abi`
+(`SYSTEM_APP_STORE`, `BUNDLE_SUFFIX`), every OS command app is registered
+as a command-named store bundle (`/System/Apps/{elsh,ps,sysinfo,top,users}.app/Run`,
+`kernel/rustos-kernel/src/spawn_paths.rs`, host drift-tested against the
+shared definitions), and the shell resolves a command word through the pure
+candidate policy `rustos_elsh::resolution_candidates` (explicit paths bypass
+the search; `.app` names the bundle; bare words search the store then the
+alias-aware `:`-split `PATH`, empty entries skipped) — the `Run` binary's
+host attempts candidates in order (spawn `NotFound` ⇒ next, any other
+refusal final), and the interpreter maps failures onto `127` "command not
+found" / `126` not-executable. Proven end to end by the session-ceiling
+QEMU vertical typing the bare word `ps`.
 
 **Remaining** (staged in `plans/APPS.md` §13): the `man.app` command app; the
-shell's system-app-store-then-`PATH` command resolution with `.app`-suffix
-invocation and the `-h`/`-?` convention; `cargo xtask help-lint`
-(completeness, switch-drift, no foul/derogatory content, required locales
-`fr-FR`/`de-DE`/`es-ES`/`uk-UA`/`it-IT`); `Help/` trees for the existing
-command apps; `stdinfo` adoption in command apps (advisory-only, §20); and
-the remaining charter amendments (a new `/System/Apps/` under §16.2, plus the
-explicit §5.2 note that no new capability is added). A cross-app
-*shared-library* bundle stays declined — §16.4 refuses cross-bundle library
-references — so a resource-only bundle may share **data**, not
-dynamically-linked code.
+per-app `-h`/`-?` short-help convention (served from `Help/` via `lib/help`);
+`cargo xtask help-lint` (completeness, switch-drift, no foul/derogatory
+content, required locales `fr-FR`/`de-DE`/`es-ES`/`uk-UA`/`it-IT`); `Help/`
+trees for the existing command apps; and `stdinfo` adoption in command apps
+(advisory-only, §20). A cross-app *shared-library* bundle stays declined —
+§16.4 refuses cross-bundle library references — so a resource-only bundle may
+share **data**, not dynamically-linked code.
 
 ---
 
@@ -3700,6 +3711,14 @@ of how much code was produced.
 
 Amendments to `AGENTS.md` (the binding charter) are logged here so an agent
 can see *why* a rule exists without diffing the charter's history.
+
+- **2026-07-03 — `/System/Apps/`: the system app store.** Amended §16.2
+  (`plans/APPS.md` §8): `/System` gains an `Apps/` subdirectory holding the
+  OS-provided command apps as command-named bundles; the shell resolves a
+  bare command word there *before* the user's `PATH`, so a user-writable
+  directory can never shadow a system command. No new capability guards the
+  store — the existing file-access and app-load gates apply (§5.2
+  minimalism).
 
 - **2026-07-03 — One bundle help tree: `Documentation/` merged into `Help/`.**
   Amended §16.5 (the merge alternative of `plans/APPS.md`, maintainer-chosen):

@@ -173,7 +173,7 @@ each operation whole-or-not-at-all through one commit path:
   owner-only.
 
 The first holder is the interactive `users` tool
-(`userland/shell/users`, `/Apps/Users.app/Run`), whose manifest requests
+(`userland/shell/users`, `/System/Apps/users.app/Run`), whose manifest requests
 the console pair plus `CAP_USER_ADMIN` — deliberately above the session
 baseline, so the intersection arms it only for an administrator account
 and leaves it inert for everyone else. Passwords are hashed client-side

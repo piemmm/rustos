@@ -1812,6 +1812,17 @@ until the launch ABI grows):
   never fd 0–3) and binds its number to `$var`; `{var}>&-` closes the number
   read back from `$var` and fails closed (`BadDynamicFd`) when the variable
   does not hold an allocated descriptor.
+- **Implemented and tested** — command resolution (`plans/APPS.md` §8–§9,
+  the owning spec). The pure candidate policy
+  (`rustos_elsh::resolution_candidates`) computes the ordered program-path
+  spellings for a command word — explicit paths (containing `/`) bypass the
+  search, a trailing `.app` names the bundle and runs its `Run` binary, and
+  a bare word searches the `/System/Apps/` system app store (spelled once in
+  `lib/abi`) then the alias-aware `:`-split `PATH` (empty entries skipped) —
+  and the runtime host attempts the candidates in order (`spawn`'s
+  `NotFound` moves to the next, any other refusal is final). The interpreter
+  maps a launch `NotFound` onto `127` "command not found" and every other
+  launch refusal onto `126`, on the foreground and background paths alike.
 - **Recognised and failing closed** (tracked here): process substitution —
   `<(…)`/`>(…)` await the pipe/launch plumbing and `=(…)` is permanently
   unsupported (no scratch filesystem, §16.1) — and the compound commands

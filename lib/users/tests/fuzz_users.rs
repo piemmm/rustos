@@ -55,7 +55,7 @@ fn templates() -> Vec<String> {
                 supplementary_gids: &[Gid(4), Gid(100)],
                 display_name: "Fuzz Fixture",
                 home: "/Users/fuzz",
-                shell: "/Apps/Shell.app/Run",
+                shell: "/System/Apps/elsh.app/Run",
                 capabilities,
                 state,
             },

@@ -63,57 +63,13 @@ const _: () = assert!(SYSINFO_USER_BIAS == SHELL_USER_BIAS);
 const _: () = assert!(TOP_USER_BIAS == SHELL_USER_BIAS);
 const _: () = assert!(USERS_CLI_USER_BIAS == SHELL_USER_BIAS);
 
-/// Absolute path the `Shell` session program is registered under
-/// (bundle layout). It must match exactly the shell path
-/// an authenticated account's `/System/Security/Users` record names; the
-/// registry match is byte-for-byte with no alias resolution. One OS-wide path contract, identical on every target, so it lives
-/// here once.
-pub const SHELL_PATH: &[u8] = b"/Apps/Shell.app/Run";
-
-/// Absolute path the login service program is registered under
-/// (`plans/PI.md` P11). It must match exactly the
-/// `session` path PID 1 `init` reads from its startup config and hands to
-/// the `spawn` syscall (`userland/system/init/src/startup.rs`). One OS-wide
-/// path contract, identical on every target.
-pub const LOGIN_PATH: &[u8] = b"/System/Services/login";
-
-/// Absolute path the device-manager service program is registered under. It must match exactly the device-manager
-/// path PID 1 `init` hands to the `spawn` syscall at startup
-/// (`userland/system/init/src/startup.rs`). One OS-wide path contract,
-/// identical on every target.
-pub const DEVMGR_PATH: &[u8] = b"/System/Services/devmgr";
-
-/// Absolute path the System Information service program is registered under
-/// (`AGENTS.md` §16.6). It must match exactly the `sysinfod` path PID 1
-/// `init` hands to the `spawn` syscall at startup
-/// (`userland/system/init/src/startup.rs`). One OS-wide path contract,
-/// identical on every target.
-pub const SYSINFOD_PATH: &[u8] = b"/System/Services/sysinfod";
-
-/// Absolute path the `ps` tool program is registered under (bundle layout,
-/// `AGENTS.md` §16.5). A shell spawns it by this exact path; the registry
-/// match is byte-for-byte with no alias resolution. One OS-wide path
-/// contract, identical on every target.
-pub const PS_PATH: &[u8] = b"/Apps/Ps.app/Run";
-
-/// Absolute path the `sysinfo` tool program is registered under (bundle
-/// layout, `AGENTS.md` §16.5, §16.6). A shell spawns it by this exact path;
-/// the registry match is byte-for-byte with no alias resolution. One OS-wide
-/// path contract, identical on every target.
-pub const SYSINFO_PATH: &[u8] = b"/Apps/Sysinfo.app/Run";
-
-/// Absolute path the `top` tool program is registered under (bundle layout,
-/// `AGENTS.md` §16.5, §16.6). A shell spawns it by this exact path; the
-/// registry match is byte-for-byte with no alias resolution. One OS-wide path
-/// contract, identical on every target.
-pub const TOP_PATH: &[u8] = b"/Apps/Top.app/Run";
-
-/// Absolute path the `users` account-administration tool is registered
-/// under (bundle layout, `plans/CAPABILITY_USE.md` CU4). An
-/// administrator's shell spawns it by this exact path; the registry match
-/// is byte-for-byte with no alias resolution. One OS-wide path contract,
-/// identical on every target.
-pub const USERS_CLI_PATH: &[u8] = b"/Apps/Users.app/Run";
+// The registered program paths live in `spawn_paths` (pure data, so its
+// store-spelling drift test runs on the CI host); this module binds each
+// path to its baked rxe, manifest, and argument vector.
+pub use crate::spawn_paths::{
+    DEVMGR_PATH, LOGIN_PATH, PS_PATH, SHELL_PATH, SYSINFOD_PATH, SYSINFO_PATH, TOP_PATH,
+    USERS_CLI_PATH,
+};
 
 /// The embedded programs the runtime `spawn` syscall can resolve, each
 /// carrying the capability set its manifest requests and its

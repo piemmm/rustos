@@ -281,6 +281,20 @@ pub mod riscv64;
 ))]
 mod spawn_layout;
 
+// The absolute paths the embedded programs are registered under — pure
+// data, free of the rxe-laden registry rows in `spawn_layout` that consume
+// it, so it compiles — and its system-app-store spelling drift test runs —
+// on the CI host as well as on each bare-metal production build, and on no
+// other configuration, so it is never dead code.
+#[cfg(any(
+    all(
+        freestanding,
+        any(kernel_isa = "aarch64", kernel_isa = "x86_64", kernel_isa = "riscv64")
+    ),
+    test
+))]
+mod spawn_paths;
+
 // The manifest-requested capability list of every embedded program (and
 // PID 1 `init`) — the session baseline and each service/tool request
 // (`plans/CAPABILITY_USE.md` CU2). Pure data, free of the rxe-laden

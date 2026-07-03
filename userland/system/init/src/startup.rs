@@ -370,7 +370,7 @@ session /Apps/Shell.app/Run   # the shell
             Err(ConfigError::MissingArgument),
         );
         assert_eq!(
-            StartupConfig::parse("console\nsession Apps/Shell.app/Run\n"),
+            StartupConfig::parse("console\nsession System/Apps/elsh.app/Run\n"),
             Err(ConfigError::NotAbsolutePath),
         );
     }
