@@ -3515,13 +3515,19 @@ store path and bundle suffix are defined once in `lib/abi`
 as a command-named store bundle (`/System/Apps/{elsh,ps,sysinfo,top,users}.app/Run`,
 `kernel/rustos-kernel/src/spawn_paths.rs`, host drift-tested against the
 shared definitions), and the shell resolves a command word through the pure
-candidate policy `rustos_elsh::resolution_candidates` (explicit paths bypass
+candidate policy `rustos_cmdres::resolution_candidates` (hoisted into the
+shared `lib/cmdres` crate, whose `bundle_candidates` view `man`'s bundle
+lookup imports; explicit paths bypass
 the search; `.app` names the bundle; bare words search the store then the
 alias-aware `:`-split `PATH`, empty entries skipped) — the `Run` binary's
 host attempts candidates in order (spawn `NotFound` ⇒ next, any other
 refusal final), and the interpreter maps failures onto `127` "command not
-found" / `126` not-executable. Proven end to end by the session-ceiling
-QEMU vertical typing the bare word `ps`.
+found" / `126` not-executable. The `spawn` ABI now carries a child's
+argument vector and environment (`plans/SPAWN.md` SP8), and the shell
+passes the typed words plus its exported variables to every launched
+program — the prerequisite `man <cmd>` and the locale variable needed.
+Proven end to end by the session-ceiling QEMU vertical typing the bare
+word `ps` and the argument-carrying `ps --bogus`.
 
 **Remaining** (staged in `plans/APPS.md` §13): the `man.app` command app; the
 per-app `-h`/`-?` short-help convention (served from `Help/` via `lib/help`);
@@ -3711,6 +3717,13 @@ of how much code was produced.
 
 Amendments to `AGENTS.md` (the binding charter) are logged here so an agent
 can see *why* a rule exists without diffing the charter's history.
+
+- **2026-07-03 — `lib/cmdres`: the shared command-word resolution policy.**
+  Added to §3 (`plans/APPS.md` §8–§9): the pure store-then-`PATH` candidate
+  policy moved out of the shell crate into its own `lib/*` crate so the
+  `man` command's bundle lookup can import the identical order without a
+  forbidden userland→userland dependency (§17.4) and without a second
+  resolution policy (§2.2).
 
 - **2026-07-03 — `/System/Apps/`: the system app store.** Amended §16.2
   (`plans/APPS.md` §8): `/System` gains an `Apps/` subdirectory holding the

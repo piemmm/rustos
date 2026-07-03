@@ -2604,7 +2604,13 @@ const TESTS: &[QemuTest] = &[
             ("elsh$ ", "cd /Users/root\n"),
             ("elsh$ ", "pwd\n"),
             ("/Users/root", "ps\n"),
-            ("PID  PPID", "ulimit processes 1000\n"),
+            // The typed word `--bogus` must reach the child as `argv[1]`
+            // through the spawn startup-strings block: `ps` refuses the
+            // unknown option and prints its usage line — output that a
+            // child running under its registered default argv could never
+            // produce — proving caller-supplied arguments arrive end to end.
+            ("PID  PPID", "ps --bogus\n"),
+            ("usage: ps", "ulimit processes 1000\n"),
             ("elsh$ ", "ulimit -H processes 2000\n"),
             (
                 "cannot raise hard limit (requires CAP_RLIMIT_RAISE)",

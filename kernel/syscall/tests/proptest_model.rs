@@ -126,6 +126,9 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
+    // Mirrors the trait's register-shaped signature (see the trait's
+    // justification).
+    #[allow(clippy::too_many_arguments)]
     fn spawn(
         &self,
         _c: &CallerContext<'_>,
@@ -133,6 +136,8 @@ impl SyscallHandlers for CountingHandlers {
         _path_len: usize,
         _console: u64,
         _target_uid: u32,
+        _strings: u64,
+        _strings_len: usize,
     ) -> SyscallResult {
         self.bump();
         Ok(0)

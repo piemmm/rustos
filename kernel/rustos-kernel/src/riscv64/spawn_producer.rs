@@ -44,9 +44,10 @@ use rustos_arch_api::mmu::AddressSpace as MmuAddressSpace;
 use rustos_arch_api::EnterUser;
 use rustos_arch_riscv64::paging::{activate_user_root, AddressSpace as ArchAddressSpace};
 use rustos_arch_riscv64::userentry::UserMode;
+use rustos_caps::CapabilitySet;
 use rustos_kernel_core::{
-    spawn_image, AdmitError, BoxStack, EmbeddedProgram, KernelStack, ProcessSpawn,
-    SpawnCallerError, SpawnCtx, SpawnRequest,
+    spawn_image, AdmitError, BoxStack, KernelStack, ProcessSpawn, SpawnCallerError, SpawnCtx,
+    SpawnRequest,
 };
 use rustos_kernel_mem::{
     AddressSpace, DirectPhysMap, FrameAllocator, FrameTableSource, LiveSpace, LiveUserSpace,
@@ -156,7 +157,14 @@ pub struct RiscvProcessSpawn;
 pub static RISCV_PROCESS_SPAWN: RiscvProcessSpawn = RiscvProcessSpawn;
 
 impl ProcessSpawn for RiscvProcessSpawn {
-    fn spawn(&self, program: &EmbeddedProgram, ctx: &dyn SpawnCtx) -> Result<u64, Errno> {
+    fn spawn_with(
+        &self,
+        rxe: &[u8],
+        ctx: &dyn SpawnCtx,
+        caps: CapabilitySet,
+        args: &[&[u8]],
+        env: &[&[u8]],
+    ) -> Result<u64, Errno> {
         // The child's Sv39 hierarchy is drawn from the kernel's live frame
         // allocator: there is no fixed page-table reserve
         // and so no hard cap on how many processes can be spawned — the
@@ -233,20 +241,19 @@ impl ProcessSpawn for RiscvProcessSpawn {
         // syscall CFI tag. A mismatch fails closed; the registry
         // holds bytes that already parsed once at build time, so reaching this
         // is a kernel build defect, surfaced as a stable errno.
-        let image =
-            LoadImage::parse(program.rxe, &SYSCALL_TABLE_HASH).map_err(|_| Errno::BadMagic)?;
+        let image = LoadImage::parse(rxe, &SYSCALL_TABLE_HASH).map_err(|_| Errno::BadMagic)?;
 
         let request = SpawnRequest {
             image: &image,
-            image_bytes: program.rxe,
+            image_bytes: rxe,
             bias: SHELL_USER_BIAS,
             stack: UserStack {
                 base: USER_STACK_BASE,
                 page_count: spawn_layout::USER_STACK_PAGES,
             },
             start_block_base: USER_BLOCK_BASE,
-            args: program.args,
-            env: &[],
+            args,
+            env,
             canary: spawn_layout::CHILD_CANARY,
         };
 
@@ -359,21 +366,11 @@ impl ProcessSpawn for RiscvProcessSpawn {
         // exclusive to this child that stays mapped for the task's lifetime,
         // and `live` retains the same arch space `frozen` was taken from —
         // the `admit_process` contract.
-        // The child receives exactly its registered program's declared
-        // capability set — never the spawning
-        // caller's authority.
-        unsafe {
-            ctx.admit_process(
-                program.capability_set(),
-                frozen,
-                physmap,
-                kernel_stack,
-                pre_resume,
-                live,
-                enter,
-            )
-        }
-        .map_err(admit_errno)
+        // The child receives exactly the capability set the caller already
+        // derived (its manifest request, intersected at admission) — never
+        // the spawning caller's authority.
+        unsafe { ctx.admit_process(caps, frozen, physmap, kernel_stack, pre_resume, live, enter) }
+            .map_err(admit_errno)
     }
 }
 

@@ -118,7 +118,7 @@ uint64_t ros_sys_irq_bind(uint32_t a0);
 int32_t ros_sys_irq_wait(uint64_t a0, uint64_t a1);
 uint64_t ros_sys_random_get(void * a0, uintptr_t a1, uint32_t a2);
 uint64_t ros_sys_stream_write(uint32_t a0, void * a1, uintptr_t a2);
-uint64_t ros_sys_spawn(void * a0, uintptr_t a1, uint64_t a2, uint32_t a3);
+uint64_t ros_sys_spawn(void * a0, uintptr_t a1, uint64_t a2, uint32_t a3, uint64_t a4, uintptr_t a5);
 uint64_t ros_sys_stream_read(uint32_t a0, void * a1, uintptr_t a2);
 uint64_t ros_sys_mem_map(uintptr_t a0, uint32_t a1, uint64_t a2);
 int32_t ros_sys_mem_unmap(uint64_t a0, uintptr_t a1);

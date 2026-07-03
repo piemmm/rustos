@@ -22,12 +22,13 @@
 //! fd 1 / fd 2, and `RtProcessHost` launches external commands through the
 //! `spawn` syscall and reaps them through `wait`. A command word is resolved
 //! to a runnable bundle through the shared candidate policy
-//! ([`rustos_elsh::resolution_candidates`]): the system app store first,
-//! then the user's `PATH`, attempted in order. The current `spawn` ABI
-//! carries only a program path (no argument vector, environment, pipe, or
-//! redirection), so `RtProcessHost` launches a single-word command and fails
-//! closed on anything it cannot yet express; richer launches await an ABI
-//! extension.
+//! ([`rustos_cmdres::resolution_candidates`]): the system app store first,
+//! then the user's `PATH`, attempted in order. The command's words travel
+//! to the child as its argument vector and the shell's exported variables
+//! (with any `NAME=v cmd` prefix overrides) as its environment, through
+//! the `spawn` startup-strings block. Pipes and redirections need
+//! descriptor plumbing the ABI does not yet express, so `RtProcessHost`
+//! fails them closed rather than silently dropping them.
 //!
 //! On the host it is an inert stub so `cargo build --workspace`, clippy, and
 //! fmt still cover the file.
@@ -43,6 +44,7 @@ extern crate alloc;
 #[cfg(freestanding)]
 mod program {
     use alloc::string::String;
+    use alloc::vec::Vec;
 
     use rustos_abi::elevate::{
         elevate_endpoint, ElevateReply, ElevateRequest, ELEVATE_MAX_REQUEST, ELEVATE_REPLY_LEN,
@@ -106,22 +108,41 @@ mod program {
 
     impl ProcessHost for RtProcessHost {
         fn launch(&self, spec: &LaunchSpec<'_>) -> Result<Pid, Errno> {
-            // The current `spawn` ABI carries only a program path: no argument
-            // vector, environment, pipe, or redirection. Anything richer is
-            // refused rather than silently dropped; it
-            // awaits an ABI extension, not a shortcut here.
+            // The `spawn` ABI carries a program path plus the child's
+            // argument vector and environment. Pipes and redirections need
+            // descriptor plumbing the ABI does not yet express; they are
+            // refused rather than silently dropped — an ABI extension, not
+            // a shortcut here.
             let [command] = spec.commands else {
                 return Err(Errno::NotImplemented);
             };
-            if !command.redirections.is_empty()
-                || !command.env_overrides.is_empty()
-                || command.argv.len() != 1
-            {
+            if !command.redirections.is_empty() {
                 return Err(Errno::NotImplemented);
             }
             let Some(word) = command.argv.first() else {
                 return Err(Errno::NotImplemented);
             };
+            // The child's environment: the shell's exported variables with
+            // this command's `NAME=v cmd` prefix assignments layered on top
+            // (an override replaces the export of the same name), each
+            // encoded in the conventional `NAME=value` spelling the child's
+            // runtime splits at the first `=`.
+            let mut env: Vec<(&str, &str)> = spec.env.to_vec();
+            for (name, value) in &command.env_overrides {
+                match env.iter_mut().find(|(seen, _)| *seen == name.as_str()) {
+                    Some(entry) => entry.1 = value.as_str(),
+                    None => env.push((name.as_str(), value.as_str())),
+                }
+            }
+            let env_entries: Vec<String> = env
+                .iter()
+                .map(|(name, value)| alloc::format!("{name}={value}"))
+                .collect();
+            let env_bytes: Vec<&[u8]> = env_entries.iter().map(|entry| entry.as_bytes()).collect();
+            // The child's argument vector is the command's words verbatim
+            // (`argv[0]` is the typed word) — data for the child's own
+            // parser, never authority.
+            let arg_bytes: Vec<&[u8]> = command.argv.iter().map(|word| word.as_bytes()).collect();
             // Resolve the word to its candidate program paths (the system
             // app store, then the exported `PATH`) and attempt each in
             // order. `spawn`'s `NotFound` is a definitive "no program is
@@ -136,8 +157,14 @@ mod program {
                 .iter()
                 .find(|(name, _)| *name == "PATH")
                 .map(|(_, value)| *value);
-            for candidate in rustos_elsh::resolution_candidates(word, path_var) {
-                let ret = rustos_rt::spawn(candidate.as_bytes());
+            for candidate in rustos_cmdres::resolution_candidates(word, path_var) {
+                let ret = rustos_rt::spawn_with(
+                    candidate.as_bytes(),
+                    rustos_abi::CONSOLE_INHERIT,
+                    rustos_abi::SPAWN_UID_INHERIT,
+                    &arg_bytes,
+                    &env_bytes,
+                );
                 if ret >= 0 {
                     // `ret >= 0` here, so the cast preserves the PID value.
                     #[allow(clippy::cast_sign_loss)]

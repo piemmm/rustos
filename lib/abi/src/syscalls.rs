@@ -334,7 +334,7 @@ pub const SYSCALLS: &[SyscallSpec] = &[
     SyscallSpec {
         number: SyscallNumber::SPAWN,
         name: "spawn",
-        arg_count: 4,
+        arg_count: 6,
         args: [
             AbiType::UserPtr,
             AbiType::Len,
@@ -352,8 +352,21 @@ pub const SYSCALLS: &[SyscallSpec] = &[
             // caller to hold `CAP_SPAWN_AS_USER` and fails closed otherwise
             // (spawn-as-user, never setuid-self).
             AbiType::U32,
-            AbiType::Unit,
-            AbiType::Unit,
+            // The child's startup strings: the address of an encoded
+            // `rustos_abi::process` startup-vector block (the same `PSV1`
+            // format the kernel writes into a child's image) carrying the
+            // argument vector and environment the caller chose. Zero means
+            // "no block": the child receives the program's registered
+            // default arguments and an empty environment. `U64` rather than
+            // `UserPtr` so the absent case is representable; the handler
+            // stages and parses a present block fail-closed (the strings
+            // are data — they carry no authority and the kernel mints the
+            // child's canary itself, ignoring the block's).
+            AbiType::U64,
+            // Byte length of the startup-strings block (zero when absent);
+            // bounded by the handler against
+            // `PROCESS_START_MAX_TOTAL_LEN` before staging.
+            AbiType::Len,
         ],
         ret: AbiType::U64,
         // Spawning a process materialises a new principal and hands it

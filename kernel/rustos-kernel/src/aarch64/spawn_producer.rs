@@ -39,8 +39,8 @@ use rustos_arch_api::mmu::AddressSpace as MmuAddressSpace;
 use rustos_arch_api::EnterUser;
 use rustos_caps::CapabilitySet;
 use rustos_kernel_core::{
-    spawn_image, AdmitError, BoxStack, EmbeddedProgram, KernelStack, ProcessSpawn,
-    SpawnCallerError, SpawnCtx, SpawnRequest,
+    spawn_image, AdmitError, BoxStack, KernelStack, ProcessSpawn, SpawnCallerError, SpawnCtx,
+    SpawnRequest,
 };
 use rustos_kernel_mem::{
     AddressSpace, DirectPhysMap, FrameAllocator, FrameTableSource, LiveSpace, LiveUserSpace,
@@ -180,21 +180,16 @@ pub struct Aarch64ProcessSpawn;
 pub static AARCH64_PROCESS_SPAWN: Aarch64ProcessSpawn = Aarch64ProcessSpawn;
 
 impl ProcessSpawn for Aarch64ProcessSpawn {
-    fn spawn(&self, program: &EmbeddedProgram, ctx: &dyn SpawnCtx) -> Result<u64, Errno> {
-        // The `spawn` syscall path: the child receives exactly its
-        // registered program's declared capability set and argument vector — never the spawning caller's
-        // authority.
-        self.spawn_with(program.rxe, ctx, program.capability_set(), program.args)
-    }
-
     /// Build and admit one child process from `rxe`, granting it exactly
-    /// `caps` and handing it `args` as its startup-argument vector.
+    /// `caps` and handing it `args` and `env` as its startup argument
+    /// vector and environment.
     ///
-    /// This is the parameterised core of the aarch64 spawn producer
-    /// (`PLAN.md` Stage 4.HW): the `spawn` syscall path passes the fixed
-    /// session grant ([`child_caps`] + `[b"shell"]`), while a kernel-side
-    /// driver spawn passes the verified driver image's granted set plus
-    /// the reply-endpoint argument the spawned driver reads through
+    /// This is the aarch64 spawn producer's single entry point (`PLAN.md`
+    /// Stage 4.HW): the `spawn` syscall handler passes the registered
+    /// program's image and declared capability set with the effective
+    /// startup strings it resolved, while a kernel-side driver spawn
+    /// passes the verified driver image's granted set plus the
+    /// reply-endpoint argument the spawned driver reads through
     /// `rustos_rt::arg`. `caps` is the manifest∩user-grant set the caller
     /// already derived; this seam never widens it (no ambient authority).
     ///
@@ -211,6 +206,7 @@ impl ProcessSpawn for Aarch64ProcessSpawn {
         ctx: &dyn SpawnCtx,
         caps: CapabilitySet,
         args: &[&[u8]],
+        env: &[&[u8]],
     ) -> Result<u64, Errno> {
         // The child's stage-1 hierarchy is drawn from the kernel's live
         // frame allocator: there is no fixed page-table
@@ -311,7 +307,7 @@ impl ProcessSpawn for Aarch64ProcessSpawn {
             },
             start_block_base: USER_BLOCK_BASE,
             args,
-            env: &[],
+            env,
             canary: spawn_layout::CHILD_CANARY,
         };
 

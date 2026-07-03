@@ -14,11 +14,20 @@
 //!
 //! A word that spells a *path* (it contains `/`) is explicit and is never
 //! searched; a word with a trailing `.app` names the bundle directly and
-//! runs its `Run` binary. This module computes only the candidate *spelling
-//! list* — it performs no I/O and checks no permission, so the policy is
-//! exhaustively testable. The [`ProcessHost`](crate::ProcessHost) attempts
-//! the candidates in order and owns the trusted load pipeline; the kernel
-//! authorises every launch (a candidate list grants nothing).
+//! runs its `Run` binary. This crate computes only the candidate *spelling
+//! lists* — it performs no I/O and checks no permission, so the policy is
+//! exhaustively testable and linking it grants nothing. The shell's process
+//! host attempts [`resolution_candidates`] in order and owns the trusted
+//! load pipeline; the kernel authorises every launch. The `man` command
+//! walks the same order over [`bundle_candidates`] to find the bundle whose
+//! `Help/` tree documents a command — one policy, two views, so the page
+//! `man` shows always belongs to the program the shell would run.
+
+#![no_std]
+#![forbid(unsafe_code)]
+#![deny(missing_docs)]
+
+extern crate alloc;
 
 use alloc::format;
 use alloc::string::String;
@@ -51,12 +60,45 @@ pub fn resolution_candidates(word: &str, path_var: Option<&str>) -> Vec<String> 
         };
         return alloc::vec![candidate];
     }
+    bundle_roots(word, path_var)
+        .into_iter()
+        .map(|root| format!("{root}/{run}"))
+        .collect()
+}
+
+/// Compute the candidate bundle directories for one command word, in the
+/// same order [`resolution_candidates`] attempts their `Run` binaries.
+///
+/// This is the `man` view of the one policy: `man <word>` reads the `Help/`
+/// tree of the first candidate bundle that exists, so the page shown always
+/// documents the program the shell would launch for the same word. An empty
+/// word yields no candidates; an explicit `.app` path names its bundle
+/// directly; an explicit path to a bare program names no bundle at all (it
+/// has no `Help/` tree to read), so it yields the empty list rather than a
+/// guessed sibling directory.
+#[must_use]
+pub fn bundle_candidates(word: &str, path_var: Option<&str>) -> Vec<String> {
+    if word.is_empty() {
+        return Vec::new();
+    }
+    if word.contains('/') {
+        if word.ends_with(BUNDLE_SUFFIX) {
+            return alloc::vec![String::from(word)];
+        }
+        return Vec::new();
+    }
+    bundle_roots(word, path_var)
+}
+
+/// The ordered bundle-directory spellings a bare (searchable) word names:
+/// the system store first, then one per non-empty `PATH` entry.
+fn bundle_roots(word: &str, path_var: Option<&str>) -> Vec<String> {
     let bundle = if word.ends_with(BUNDLE_SUFFIX) {
         String::from(word)
     } else {
         format!("{word}{BUNDLE_SUFFIX}")
     };
-    let mut candidates = alloc::vec![format!("{SYSTEM_APP_STORE}/{bundle}/{run}")];
+    let mut roots = alloc::vec![format!("{SYSTEM_APP_STORE}/{bundle}")];
     if let Some(path) = path_var {
         for dir in split_path_entries(path) {
             if dir.is_empty() {
@@ -66,10 +108,10 @@ pub fn resolution_candidates(word: &str, path_var: Option<&str>) -> Vec<String> 
                 continue;
             }
             let dir = dir.strip_suffix('/').unwrap_or(dir);
-            candidates.push(format!("{dir}/{bundle}/{run}"));
+            roots.push(format!("{dir}/{bundle}"));
         }
     }
-    candidates
+    roots
 }
 
 /// Split a `PATH` value into its entries.
@@ -104,7 +146,7 @@ fn split_path_entries(path: &str) -> Vec<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolution_candidates, split_path_entries};
+    use super::{bundle_candidates, resolution_candidates, split_path_entries};
     use alloc::vec;
     use alloc::vec::Vec;
 
@@ -191,5 +233,54 @@ mod tests {
         // an alias root entry is written `Home:/`.
         assert_eq!(split_path_entries("Home:"), ["Home", ""]);
         assert_eq!(vec!["Home:/"], split_path_entries("Home:/"));
+    }
+
+    #[test]
+    fn bundle_candidates_mirror_the_resolution_order() {
+        assert_eq!(
+            bundle_candidates("ps", Some("/Users/root/tools:Home:/bin")),
+            [
+                "/System/Apps/ps.app",
+                "/Users/root/tools/ps.app",
+                "Home:/bin/ps.app",
+            ]
+        );
+        assert_eq!(bundle_candidates("top", None), ["/System/Apps/top.app"]);
+        assert_eq!(
+            bundle_candidates("top.app", Some("/opt")),
+            ["/System/Apps/top.app", "/opt/top.app"]
+        );
+    }
+
+    #[test]
+    fn explicit_bundle_path_names_its_bundle() {
+        assert_eq!(
+            bundle_candidates("/Apps/Example.app", Some("/opt")),
+            ["/Apps/Example.app"]
+        );
+        assert_eq!(
+            bundle_candidates("Apps:/Example.app", None),
+            ["Apps:/Example.app"]
+        );
+    }
+
+    #[test]
+    fn explicit_bare_program_path_names_no_bundle() {
+        // A raw program path has no bundle directory and therefore no
+        // `Help/` tree; guessing a sibling directory would show help for a
+        // program the word does not name.
+        assert_eq!(
+            bundle_candidates("./tool", Some("/opt")),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            bundle_candidates("/System/Apps/ps.app/Run", None),
+            Vec::<&str>::new()
+        );
+    }
+
+    #[test]
+    fn empty_word_yields_no_bundles() {
+        assert_eq!(bundle_candidates("", Some("/opt")), Vec::<&str>::new());
     }
 }

@@ -73,7 +73,7 @@ mod startup;
 
 pub mod io;
 
-pub use startup::{arg, arg_count};
+pub use startup::{arg, arg_count, env, env_count, env_var};
 
 // The `mem_map`-backed global allocator. Compiled for the native targets that
 // register it as the `#[global_allocator]`, and for host unit tests of its pure
@@ -780,31 +780,90 @@ impl rustos_abi::Delay for ClockDelay {
 pub fn spawn(path: &[u8]) -> i64 {
     // Inherit both the caller's console and its attested credential: a
     // spawned session member runs as the same user, on the same console, as
-    // its parent.
-    spawn_raw(path, CONSOLE_INHERIT, SPAWN_UID_INHERIT)
+    // its parent. No startup-strings block: the child receives its
+    // registered default arguments and an empty environment.
+    spawn_raw(path, CONSOLE_INHERIT, SPAWN_UID_INHERIT, &[])
 }
 
-/// The shared `SyscallNumber::SPAWN` trap the [`spawn`], [`spawn_at`], and
-/// [`spawn_as`] wrappers issue: one raw call site so the argument layout is
-/// defined once (`console` in slot 2, `target_uid` in slot 3).
+/// Spawn the embedded program at `path` handing the child the argument
+/// vector `args` and environment `env` the caller chose
+/// (`SyscallNumber::SPAWN`, `plans/APPS.md` §8 — the shell's launch form).
+///
+/// The strings are encoded into one `rustos_abi::process` startup-vector
+/// block (the `PSV1` format the kernel writes into the child's image) and
+/// handed to the kernel, which bounds, stages, and re-validates the block
+/// before building the child's own copy — the strings are data and carry
+/// no authority, and the kernel mints the child's stack canary itself.
+/// Passing empty `args` and `env` is a deliberate choice: the child then
+/// starts with an empty argument vector and environment, unlike [`spawn`],
+/// whose child receives the program's registered default arguments.
+/// Environment entries follow the conventional `NAME=value` byte spelling
+/// ([`env_var`] splits at the first `=`).
+///
+/// `console` is [`rustos_abi::CONSOLE_INHERIT`] or an installed console
+/// index; `target_uid` is [`rustos_abi::SPAWN_UID_INHERIT`] or a concrete
+/// uid to switch to (kernel-gated on `CAP_SPAWN_AS_USER`), exactly as for
+/// [`spawn_at`] and [`spawn_as`]. Over-long or over-many strings fail
+/// closed with `-errno` from the shared encoder before the kernel is ever
+/// entered.
+#[must_use]
+pub fn spawn_with(
+    path: &[u8],
+    console: u64,
+    target_uid: u32,
+    args: &[&[u8]],
+    env: &[&[u8]],
+) -> i64 {
+    let len = match rustos_abi::process_start_encoded_len(args, env) {
+        Ok(len) => len,
+        Err(err) => return -i64::from(err.as_i32()),
+    };
+    let mut block = alloc::vec![0u8; len];
+    // The canary field is the kernel's to mint for the child; the encoder
+    // requires a value, so carry zero and the kernel ignores it.
+    if let Err(err) = rustos_abi::process_start_write_into(&mut block, args, env, 0) {
+        return -i64::from(err.as_i32());
+    }
+    spawn_raw(path, console, target_uid, &block)
+}
+
+/// The shared `SyscallNumber::SPAWN` trap the [`spawn`], [`spawn_at`],
+/// [`spawn_as`], and [`spawn_with`] wrappers issue: one raw call site so
+/// the argument layout is defined once (`console` in slot 2, `target_uid`
+/// in slot 3, the optional startup-strings block in slots 4/5).
 ///
 /// `console` is [`rustos_abi::CONSOLE_INHERIT`] or an installed console index;
 /// `target_uid` is [`rustos_abi::SPAWN_UID_INHERIT`] (start under the caller's
 /// own credential) or a concrete uid to switch to (which the kernel gates on
-/// `CAP_SPAWN_AS_USER`). The kernel encodes the result as a signed register:
-/// a non-negative value is the new PID, a negative value is `-errno`.
+/// `CAP_SPAWN_AS_USER`); an empty `strings` slice means "no block" (the
+/// zero/zero pair), so the child receives the program's registered default
+/// arguments. The kernel encodes the result as a signed register: a
+/// non-negative value is the new PID, a negative value is `-errno`.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 spawn-result encoding (PID ≥ 0, else -errno).
-fn spawn_raw(path: &[u8], console: u64, target_uid: u32) -> i64 {
+fn spawn_raw(path: &[u8], console: u64, target_uid: u32, strings: &[u8]) -> i64 {
     let ptr = path.as_ptr() as usize as u64;
+    let (strings_ptr, strings_len) = if strings.is_empty() {
+        (0, 0)
+    } else {
+        (strings.as_ptr() as usize as u64, strings.len() as u64)
+    };
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
-    // `(path, len)` against the caller's address space before touching it.
-    // `path` is a live shared `&[u8]` for the duration of the call, so the
-    // `(ptr, len)` pair denotes readable memory.
+    // `(path, len)` and `(strings, strings_len)` against the caller's
+    // address space before touching them. Both slices are live shared
+    // `&[u8]`s for the duration of the call, so each `(ptr, len)` pair
+    // denotes readable memory.
     let ret = unsafe {
         raw_syscall(
             NUM_SPAWN,
-            [ptr, path.len() as u64, console, u64::from(target_uid), 0, 0],
+            [
+                ptr,
+                path.len() as u64,
+                console,
+                u64::from(target_uid),
+                strings_ptr,
+                strings_len,
+            ],
         )
     };
     ret as i64
@@ -827,7 +886,7 @@ fn spawn_raw(path: &[u8], console: u64, target_uid: u32) -> i64 {
 /// identity (there is no setuid-self).
 #[must_use]
 pub fn spawn_as(path: &[u8], console: u64, target_uid: u32) -> i64 {
-    spawn_raw(path, console, target_uid)
+    spawn_raw(path, console, target_uid, &[])
 }
 
 /// Spawn the embedded program registered under the absolute `path` with
@@ -845,7 +904,7 @@ pub fn spawn_at(path: &[u8], console: u32) -> i64 {
     // A specific console, but the caller's own credential (no user switch):
     // PID 1 launching one login per console runs each as the same principal
     // it runs as.
-    spawn_raw(path, u64::from(console), SPAWN_UID_INHERIT)
+    spawn_raw(path, u64::from(console), SPAWN_UID_INHERIT, &[])
 }
 
 /// Report how many system text consoles are installed
@@ -2897,6 +2956,35 @@ mod tests {
         assert_eq!(args[2], CONSOLE_INHERIT);
         assert_eq!(args[3], u64::from(SPAWN_UID_INHERIT));
         assert_eq!(&args[4..], &[0, 0]);
+    }
+
+    #[test]
+    fn spawn_with_marshals_the_encoded_startup_strings_block() {
+        let path = *b"/System/Apps/man.app/Run";
+        let args: [&[u8]; 2] = [b"man", b"ps"];
+        let envs: [&[u8]; 1] = [b"LANG=fr-FR"];
+        let (number, raw) = capture(11, || {
+            assert_eq!(
+                spawn_with(&path, CONSOLE_INHERIT, SPAWN_UID_INHERIT, &args, &envs),
+                11
+            );
+        });
+        assert_eq!(number, NUM_SPAWN);
+        assert_eq!(raw[0], path.as_ptr() as usize as u64);
+        assert_eq!(raw[1], path.len() as u64);
+        assert_eq!(raw[2], CONSOLE_INHERIT);
+        assert_eq!(raw[3], u64::from(SPAWN_UID_INHERIT));
+        // Slots 4/5 carry the encoded `PSV1` block: a live (non-null)
+        // pointer whose length is exactly what the one shared encoder
+        // computes for these strings. The block's own bytes are freed when
+        // `spawn_with` returns (the seam records only the registers), so
+        // content fidelity is the encoder's contract, covered by the
+        // `rustos_abi::process` round-trip tests — asserting the marshalled
+        // shape here is the wrapper's whole obligation.
+        assert_ne!(raw[4], 0);
+        let expected_len =
+            rustos_abi::process_start_encoded_len(&args, &envs).expect("sized") as u64;
+        assert_eq!(raw[5], expected_len);
     }
 
     #[test]

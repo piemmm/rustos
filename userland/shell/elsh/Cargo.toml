@@ -29,6 +29,13 @@ path = "src/run.rs"
 # (§2.2).
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 
+# The single shared command-word resolution policy (`plans/APPS.md` §8–§9):
+# the system app store first, then the alias-aware `PATH` split. The shell's
+# process host attempts the candidates this crate spells; `man` walks the
+# same order to find a command's bundle — one policy, never two (§2.2).
+# Spelling only: it performs no I/O and grants nothing.
+rustos-cmdres = { path = "../../../lib/cmdres", version = "=0.0.0" }
+
 # The single shared resource-reference spelling parser. The shell classifies a
 # redirection target as a resource reference (`sys:null`) versus a filesystem
 # path through this one parser — it never embeds a second reference grammar.

@@ -75,6 +75,48 @@ pub fn arg(index: u32) -> Option<&'static [u8]> {
     view()?.arg(index)
 }
 
+/// Number of environment strings the spawner handed this process.
+///
+/// Zero when no validated startup vector is available (fail closed).
+#[must_use]
+pub fn env_count() -> u32 {
+    view().map_or(0, ProcessStart::env_count)
+}
+
+/// The environment string at `index`, or `None` when out of range or when
+/// no validated startup vector is available (fail closed).
+///
+/// Entries follow the conventional `NAME=value` byte spelling; use
+/// [`env_var`] to look one up by name.
+#[must_use]
+pub fn env(index: u32) -> Option<&'static [u8]> {
+    view()?.env(index)
+}
+
+/// The value of the environment variable `name`, or `None` when the
+/// spawner exported no such variable (or no validated startup vector is
+/// available — fail closed).
+///
+/// The lookup splits each `NAME=value` entry at its first `=` and compares
+/// the name bytes exactly; the first match wins, mirroring the POSIX
+/// convention. An entry with no `=` names no variable and never matches.
+#[must_use]
+pub fn env_var(name: &[u8]) -> Option<&'static [u8]> {
+    let view = view()?;
+    for index in 0..view.env_count() {
+        let entry = view.env(index)?;
+        let mut split = entry.splitn(2, |&byte| byte == b'=');
+        let entry_name = split.next()?;
+        let Some(value) = split.next() else {
+            continue;
+        };
+        if entry_name == name {
+            return Some(value);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,11 +129,15 @@ mod tests {
         // Before `install`: empty vector, no fabricated data.
         assert_eq!(arg_count(), 0);
         assert_eq!(arg(0), None);
+        assert_eq!(env_count(), 0);
+        assert_eq!(env(0), None);
+        assert_eq!(env_var(b"PATH"), None);
 
         let args: [&[u8]; 2] = [b"drvstub", b"42"];
-        let len = rustos_abi::process_start_encoded_len(&args, &[]).expect("sized");
+        let envs: [&[u8]; 3] = [b"PATH=/Users/root/tools", b"LANG=fr-FR", b"noequals"];
+        let len = rustos_abi::process_start_encoded_len(&args, &envs).expect("sized");
         let buf: &'static mut [u8] = alloc_block(len);
-        rustos_abi::process_start_write_into(buf, &args, &[], 7).expect("encoded");
+        rustos_abi::process_start_write_into(buf, &args, &envs, 7).expect("encoded");
         let view = ProcessStart::parse(buf).expect("valid block");
         install(view);
 
@@ -99,6 +145,16 @@ mod tests {
         assert_eq!(arg(0), Some(&b"drvstub"[..]));
         assert_eq!(arg(1), Some(&b"42"[..]));
         assert_eq!(arg(2), None);
+
+        assert_eq!(env_count(), 3);
+        assert_eq!(env(0), Some(&b"PATH=/Users/root/tools"[..]));
+        assert_eq!(env(3), None);
+        // Name lookup splits at the first `=`; an entry with no `=` names
+        // no variable; a missing name is `None`, never fabricated.
+        assert_eq!(env_var(b"PATH"), Some(&b"/Users/root/tools"[..]));
+        assert_eq!(env_var(b"LANG"), Some(&b"fr-FR"[..]));
+        assert_eq!(env_var(b"noequals"), None);
+        assert_eq!(env_var(b"HOME"), None);
     }
 
     /// Leak a zeroed block so the parsed view can be `'static`, mirroring

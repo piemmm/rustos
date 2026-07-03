@@ -815,44 +815,34 @@ pub trait SpawnCtx {
 /// CPU's syscall dispatch path (the handler is held inside the `Sync`
 /// [`crate::DispatchHook`]), exactly like the console device.
 pub trait ProcessSpawn: Sync {
-    /// Build `program`'s `rxe` into a fresh isolated address space and
-    /// admit it as a runnable process through `ctx`, returning its PID.
-    ///
-    /// The child requests exactly `program`'s declared capability set and is
-    /// handed its declared argument vector — per-program authority, never
-    /// the spawning caller's. Its effective set is that request ∩ the spawn
-    /// credential's user ceiling, derived at admission.
-    ///
-    /// # Errors
-    ///
-    /// Fails closed with a stable [`Errno`] on any error — a malformed
-    /// `rxe`, a build failure, an unrunnable context, or an admission
-    /// failure — never a panic or a half-built task.
-    fn spawn(&self, program: &EmbeddedProgram, ctx: &dyn SpawnCtx) -> Result<u64, Errno>;
-
     /// Build `rxe` into a fresh isolated address space and admit it as a
-    /// runnable process granted exactly `caps` and handed `args` as its
-    /// startup-argument vector, returning its PID.
+    /// runnable process granted exactly `caps` and handed `args` and `env`
+    /// as its startup argument vector and environment, returning its PID.
     ///
-    /// This is the parameterised core [`spawn`](Self::spawn) builds on, and
-    /// the seam a *driver* spawn drives: where [`spawn`](Self::spawn) takes a
-    /// registered [`EmbeddedProgram`] and uses its declared capability set
-    /// and arguments, this takes the verified driver image's bytes, the
-    /// manifest∩caller capability set the load gate already derived, and the
-    /// argument vector the driver reads through `rustos_rt::arg`. The matched
-    /// hardware-tree node's device-resource grants ride on `ctx` (the
-    /// production context mints one owner-checked grant per requested
-    /// resource as the child is registered); this seam
-    /// never widens authority beyond `caps` plus those grants (no ambient authority).
+    /// This is the trait's single entry point, driven by two callers. The
+    /// `spawn` syscall handler passes a registered [`EmbeddedProgram`]'s
+    /// image and declared capability set with the effective startup strings
+    /// it resolved (the caller-supplied block, or the program's registered
+    /// defaults) — per-program authority, never the spawning caller's. A
+    /// *driver* spawn passes the verified driver image's bytes, the
+    /// manifest∩caller capability set the load gate already derived, and
+    /// the argument vector the driver reads through `rustos_rt::arg`. The
+    /// matched hardware-tree node's device-resource grants ride on `ctx`
+    /// (the production context mints one owner-checked grant per requested
+    /// resource as the child is registered); this seam never widens
+    /// authority beyond `caps` plus those grants (no ambient authority) —
+    /// `args` and `env` are data, not authority. The child's effective set
+    /// is `caps` ∩ the spawn credential's user ceiling, derived at
+    /// admission.
     ///
-    /// Exposing it on the trait lets a scheduler-agnostic caller (a generic
-    /// `kernel_main` holding `&dyn ProcessSpawn`) spawn a driver into its own
-    /// hardware-isolated process without naming the port's concrete spawn
-    /// mechanism or the selected scheduler.
+    /// Living on the trait lets a scheduler-agnostic caller (a generic
+    /// `kernel_main` holding `&dyn ProcessSpawn`) spawn a process into its
+    /// own hardware-isolated address space without naming the port's
+    /// concrete spawn mechanism or the selected scheduler.
     ///
-    /// The default fails closed with [`Errno::NotImplemented`]: a port that has not wired a driver-spawn mechanism refuses
-    /// rather than pretending to spawn, exactly as [`NullProcessSpawn`] does
-    /// for [`spawn`](Self::spawn).
+    /// The default fails closed with [`Errno::NotImplemented`]: a port that
+    /// has not wired a spawn mechanism ([`NullProcessSpawn`]) refuses
+    /// rather than pretending to spawn.
     ///
     /// # Errors
     ///
@@ -865,8 +855,9 @@ pub trait ProcessSpawn: Sync {
         ctx: &dyn SpawnCtx,
         caps: CapabilitySet,
         args: &[&[u8]],
+        env: &[&[u8]],
     ) -> Result<u64, Errno> {
-        let _ = (rxe, ctx, caps, args);
+        let _ = (rxe, ctx, caps, args, env);
         Err(Errno::NotImplemented)
     }
 }
@@ -876,11 +867,7 @@ pub trait ProcessSpawn: Sync {
 /// `stream_write` syscall.
 pub struct NullProcessSpawn;
 
-impl ProcessSpawn for NullProcessSpawn {
-    fn spawn(&self, _program: &EmbeddedProgram, _ctx: &dyn SpawnCtx) -> Result<u64, Errno> {
-        Err(Errno::NotImplemented)
-    }
-}
+impl ProcessSpawn for NullProcessSpawn {}
 
 /// The shared [`NullProcessSpawn`] the syscall handler defaults to until
 /// an arch port installs a real producer through
@@ -1100,7 +1087,7 @@ mod tests {
         // `&dyn ProcessSpawn`, the path the generic boot wiring uses.
         let ctx = StubCtx::new();
         let producer: &dyn ProcessSpawn = &NULL_PROCESS_SPAWN;
-        let result = producer.spawn_with(b"unused-rxe", &ctx, CapabilitySet::empty(), &[]);
+        let result = producer.spawn_with(b"unused-rxe", &ctx, CapabilitySet::empty(), &[], &[]);
         assert_eq!(result, Err(Errno::NotImplemented));
     }
 

@@ -1737,14 +1737,18 @@ interpreted as policy, or used as instructions.
 
 ## Current implementation note
 
-An early RustOS spawn ABI may carry only a program path, without argv,
-environment, pipes, redirections, or job-control signals. In that environment,
-the runtime host may fail closed with `NotImplemented` for external commands
-that need richer launch support. The shell parser and in-process builtins
-should still implement and test the target semantics described here.
+The `spawn` ABI carries the child's argument vector and environment (the
+caller-encoded, kernel-revalidated startup-strings block), so the runtime
+host passes a command's words and the shell's exported variables (with any
+`NAME=v cmd` prefix overrides layered on top) to every launched program.
+Pipes, redirections, and job-control signal plumbing are not yet
+expressible over the launch ABI; the runtime host fails those closed with
+`NotImplemented` rather than silently dropping them. The shell parser and
+in-process builtins implement and test the target semantics described here
+regardless.
 
 Redirection state (interpreter-level; the runtime host still fails closed
-until the launch ABI grows):
+until the launch ABI grows descriptor plumbing):
 
 - **Implemented and tested** — the fd-aware redirection model. The lexer
   decodes each operator into a `RedirOp` (carrying its explicit or default
@@ -1814,7 +1818,8 @@ until the launch ABI grows):
   does not hold an allocated descriptor.
 - **Implemented and tested** — command resolution (`plans/APPS.md` §8–§9,
   the owning spec). The pure candidate policy
-  (`rustos_elsh::resolution_candidates`) computes the ordered program-path
+  (`rustos_cmdres::resolution_candidates`, the `lib/cmdres` definition the
+  `man` command's bundle lookup also imports) computes the ordered program-path
   spellings for a command word — explicit paths (containing `/`) bypass the
   search, a trailing `.app` names the bundle and runs its `Run` binary, and
   a bare word searches the `/System/Apps/` system app store (spelled once in

@@ -79,11 +79,12 @@ use rustos_abi::input::KeyInput;
 use rustos_abi::sysinfo::{MountRecord, ProcessRecord};
 use rustos_abi::{
     decode_log_record, BootId, CapabilityId, DescriptorTable, DirEntry, Errno, FileStat,
-    IntrospectDomain, IrqHandle, LimitKind, MapFlags, OpenFlags, ProcId, RandomFlags,
+    IntrospectDomain, IrqHandle, LimitKind, MapFlags, OpenFlags, ProcId, ProcessStart, RandomFlags,
     ResourceLimit, Signal, StreamMode, SyscallNumber, Time64, WaitFlags, WaitSetOp, WaitSourceKind,
     WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, FS_IO_MAX, FS_NAME_MAX,
-    FS_PATH_MAX, LOG_FIELDS_MAX, LOG_RECORD_MAX, PROC_ID_LEN, RANDOM_REQUEST_MAX_BYTES,
-    RESOURCE_REF_MAX, SPAWN_UID_INHERIT, TERMINAL_SIZE_WIRE_LEN, WAITSET_CHILD_ANY, WAIT_PID_ANY,
+    FS_PATH_MAX, LOG_FIELDS_MAX, LOG_RECORD_MAX, PROCESS_START_MAX_TOTAL_LEN, PROC_ID_LEN,
+    RANDOM_REQUEST_MAX_BYTES, RESOURCE_REF_MAX, SPAWN_UID_INHERIT, TERMINAL_SIZE_WIRE_LEN,
+    WAITSET_CHILD_ANY, WAIT_PID_ANY,
 };
 use rustos_caps::CapabilitySet;
 use rustos_kernel_ipc::{
@@ -967,6 +968,49 @@ where
         let registry = self.aspaces.read();
         let (space, physmap) = registry.resolve(caller.task_id)?;
         Some(f(space, physmap))
+    }
+
+    /// Validate and stage `spawn`'s optional startup-strings block from the
+    /// caller's address space.
+    ///
+    /// The shape is checked *before* any allocation: a zero address must
+    /// carry a zero length ("no block"), and a present block is bounded by
+    /// the same [`PROCESS_START_MAX_TOTAL_LEN`] ceiling the startup-vector
+    /// format itself enforces, so a hostile length can neither force an
+    /// oversized kernel allocation nor smuggle a block the child-side
+    /// encoder would refuse. A present block is copied in through the
+    /// validated `copy_from_user` boundary. The strings are data: they
+    /// grant nothing, and the kernel mints the child's stack canary itself,
+    /// ignoring the block's.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] on a contradictory or over-long shape;
+    /// the copy fault's stable [`Errno`] (or [`Errno::BadAddress`] for an
+    /// unregistered caller) when staging fails — never a partial block.
+    fn stage_spawn_strings(
+        &self,
+        caller: &CallerContext<'_>,
+        strings: u64,
+        strings_len: usize,
+    ) -> Result<Option<Vec<u8>>, Errno> {
+        if strings == 0 {
+            if strings_len != 0 {
+                return Err(Errno::LengthOutOfRange);
+            }
+            return Ok(None);
+        }
+        if strings_len == 0 || strings_len as u64 > PROCESS_START_MAX_TOTAL_LEN {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let mut buf = alloc::vec![0u8; strings_len];
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_in(space, physmap, VirtAddr::new(strings), &mut buf)
+        }) {
+            Some(Ok(())) => Ok(Some(buf)),
+            Some(Err(err)) => Err(copy_fault_errno(err)),
+            None => Err(Errno::BadAddress),
+        }
     }
 
     /// Re-freeze the calling task's live address space into the registry
@@ -1996,6 +2040,9 @@ where
         }
     }
 
+    // Mirrors the trait's register-shaped signature (see the trait's
+    // justification in `kernel/syscall/src/table.rs`).
+    #[allow(clippy::too_many_arguments)]
     fn spawn(
         &self,
         caller: &CallerContext<'_>,
@@ -2003,6 +2050,8 @@ where
         path_len: usize,
         console: u64,
         target_uid: u32,
+        strings: u64,
+        strings_len: usize,
     ) -> SyscallResult {
         // The dispatcher already checked `CAP_PROC_SPAWN` and that `path`
         // is non-null (`UserPtr`). Bound the staged path so a hostile
@@ -2011,6 +2060,10 @@ where
         if path_len == 0 || path_len > SPAWN_PATH_MAX {
             return Err(Errno::NotFound);
         }
+
+        // Validate and stage the optional startup-strings block *before*
+        // touching any further state (fail closed on a malformed shape).
+        let strings_buf = self.stage_spawn_strings(caller, strings, strings_len)?;
 
         // Resolve the child's standard-stream attachment *before*
         // touching any further state: `CONSOLE_INHERIT`
@@ -2057,6 +2110,26 @@ where
         let Some(program) = self.programs.lookup(&path_buf) else {
             return Err(Errno::NotFound);
         };
+
+        // The child's effective startup strings: a present block carries
+        // the caller's chosen argument vector and environment verbatim
+        // (a shell passing the typed command words and its exported
+        // variables); with no block the child receives the program's
+        // registered default arguments and an empty environment — exactly
+        // what every pre-existing caller expressed.
+        let mut args: Vec<&[u8]> = Vec::new();
+        let mut env: Vec<&[u8]> = Vec::new();
+        if let Some(block) = &strings_buf {
+            let view = ProcessStart::parse(block)?;
+            for index in 0..view.arg_count() {
+                args.push(view.arg(index).ok_or(Errno::OutOfRange)?);
+            }
+            for index in 0..view.env_count() {
+                env.push(view.env(index).ok_or(Errno::OutOfRange)?);
+            }
+        } else {
+            args.extend_from_slice(program.args);
+        }
 
         // Resolve the child's kernel-attested credential (uid + group set +
         // capability ceiling), never a caller-supplied value:
@@ -2155,7 +2228,8 @@ where
             // target user) — never a caller-supplied value.
             credential,
         );
-        self.spawn_service.spawn(program, &ctx)
+        self.spawn_service
+            .spawn_with(program.rxe, &ctx, program.capability_set(), &args, &env)
     }
 
     fn console_count(&self, _caller: &CallerContext<'_>) -> SyscallResult {
@@ -7888,20 +7962,33 @@ mod tests {
     /// without the arch-specific image build (`plans/SPAWN.md` SP3 host
     /// proof; `SP3b` wires the real aarch64 producer).
     struct RecordingSpawn {
-        seen_rxe: rustos_sync::SpinLock<alloc::vec::Vec<u8>>,
+        rxe: rustos_sync::SpinLock<alloc::vec::Vec<u8>>,
+        args: rustos_sync::SpinLock<alloc::vec::Vec<alloc::vec::Vec<u8>>>,
+        env: rustos_sync::SpinLock<alloc::vec::Vec<alloc::vec::Vec<u8>>>,
     }
 
     impl RecordingSpawn {
         fn new() -> Self {
             Self {
-                seen_rxe: rustos_sync::SpinLock::new(alloc::vec::Vec::new()),
+                rxe: rustos_sync::SpinLock::new(alloc::vec::Vec::new()),
+                args: rustos_sync::SpinLock::new(alloc::vec::Vec::new()),
+                env: rustos_sync::SpinLock::new(alloc::vec::Vec::new()),
             }
         }
     }
 
     impl ProcessSpawn for RecordingSpawn {
-        fn spawn(&self, program: &EmbeddedProgram, ctx: &dyn SpawnCtx) -> Result<u64, Errno> {
-            self.seen_rxe.lock().extend_from_slice(program.rxe);
+        fn spawn_with(
+            &self,
+            rxe: &[u8],
+            ctx: &dyn SpawnCtx,
+            caps: CapabilitySet,
+            args: &[&[u8]],
+            env: &[&[u8]],
+        ) -> Result<u64, Errno> {
+            self.rxe.lock().extend_from_slice(rxe);
+            *self.args.lock() = args.iter().map(|arg| arg.to_vec()).collect();
+            *self.env.lock() = env.iter().map(|entry| entry.to_vec()).collect();
             // Build a one-page host user space and freeze it into the
             // registry-storable snapshot, exactly as the real producer
             // freezes its built image.
@@ -7916,10 +8003,11 @@ mod tests {
             let frozen: Box<dyn UserAddressSpace + Send + Sync> = Box::new(space.freeze());
             let physmap: Box<dyn PhysMap + Send + Sync> =
                 Box::new(SimPhysMap::new(PhysAddr::new(0), PAGE_SIZE));
-            // Forward the program's manifest request exactly as the real
-            // producers do, so the admit path's `ceiling ∩ manifest`
-            // derivation is exercised against the registered entry.
-            let child_caps = program.capability_set();
+            // Forward the manifest request the handler derived exactly as
+            // the real producers do, so the admit path's `ceiling ∩
+            // manifest` derivation is exercised against the registered
+            // entry.
+            let child_caps = caps;
             // Inert closures: a host test never enters user mode or
             // reactivates a page-table root.
             let pre_resume: Box<dyn FnMut(u64) + Send> = Box::new(|_stack_top| {});
@@ -8016,6 +8104,8 @@ mod tests {
                 SPAWN_PATH.len(),
                 CONSOLE_INHERIT,
                 SPAWN_UID_INHERIT,
+                0,
+                0,
             )
             .expect("spawn succeeds");
         assert!(
@@ -8030,11 +8120,296 @@ mod tests {
             aspaces.read().contains(SecTaskId(pid)),
             "child address space registered under its pid"
         );
-        assert_eq!(producer.seen_rxe.lock().as_slice(), SPAWN_RXE);
+        assert_eq!(producer.rxe.lock().as_slice(), SPAWN_RXE);
+        // No startup-strings block was supplied, so the child receives the
+        // program's registered default arguments (empty here) and an empty
+        // environment.
+        assert!(producer.args.lock().is_empty());
+        assert!(producer.env.lock().is_empty());
         // A user-driven `spawn` grants the child no device resources: the
         // handler passes an empty grant slice, so the child holds no
         // resolvable handle (no ambient authority).
         assert_eq!(aspaces.read().grant(SecTaskId(pid), 1), None);
+    }
+
+    /// A caller-supplied startup-strings block replaces the program's
+    /// registered default arguments and carries the environment verbatim:
+    /// the producer receives exactly the staged, revalidated strings — a
+    /// shell's typed words and exported variables reach the child.
+    #[test]
+    fn spawn_strings_block_overrides_registry_args_and_carries_env() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        // The caller's page holds the path followed by the encoded block,
+        // built by the same shared encoder userland's `spawn_with` uses.
+        let args: [&[u8]; 2] = [b"man", b"ps"];
+        let env: [&[u8]; 1] = [b"LANG=fr-FR"];
+        let block_len = rustos_abi::process_start_encoded_len(&args, &env).expect("sized");
+        let mut block = alloc::vec![0u8; block_len];
+        rustos_abi::process_start_write_into(&mut block, &args, &env, 0).expect("encoded");
+        let mut payload = SPAWN_PATH.to_vec();
+        payload.extend_from_slice(&block);
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &payload);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let programs: &'static ProgramRegistry =
+            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+                EmbeddedProgram {
+                    path: SPAWN_PATH,
+                    rxe: SPAWN_RXE,
+                    caps: &[],
+                    args: &[b"registry-default"],
+                },
+            ])))));
+        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
+        let h = spawn_handler(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
+            producer,
+        );
+
+        let strings_addr = 0x1000 + SPAWN_PATH.len() as u64;
+        let pid = h
+            .spawn(
+                &ctx,
+                0x1000,
+                SPAWN_PATH.len(),
+                CONSOLE_INHERIT,
+                SPAWN_UID_INHERIT,
+                strings_addr,
+                block.len(),
+            )
+            .expect("spawn with strings succeeds");
+        assert!(pid > 0);
+        // The caller's block governs: the registered default argument is
+        // replaced, and the environment arrives verbatim.
+        assert_eq!(
+            producer.args.lock().as_slice(),
+            &[b"man".to_vec(), b"ps".to_vec()]
+        );
+        assert_eq!(producer.env.lock().as_slice(), &[b"LANG=fr-FR".to_vec()]);
+    }
+
+    /// With no startup-strings block the child receives the program's
+    /// registered default arguments and an empty environment — every
+    /// pre-existing caller's exact behaviour.
+    #[test]
+    fn spawn_without_strings_hands_the_registered_default_args() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, SPAWN_PATH);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let programs: &'static ProgramRegistry =
+            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+                EmbeddedProgram {
+                    path: SPAWN_PATH,
+                    rxe: SPAWN_RXE,
+                    caps: &[],
+                    args: &[b"registry-default"],
+                },
+            ])))));
+        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
+        let h = spawn_handler(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
+            producer,
+        );
+
+        let _pid = h
+            .spawn(
+                &ctx,
+                0x1000,
+                SPAWN_PATH.len(),
+                CONSOLE_INHERIT,
+                SPAWN_UID_INHERIT,
+                0,
+                0,
+            )
+            .expect("spawn succeeds");
+        assert_eq!(
+            producer.args.lock().as_slice(),
+            &[b"registry-default".to_vec()]
+        );
+        assert!(producer.env.lock().is_empty());
+    }
+
+    /// A present block that does not parse as a `PSV1` startup vector is
+    /// rejected fail-closed before the producer is reached — never
+    /// partially applied.
+    #[test]
+    fn spawn_malformed_strings_block_fails_closed() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        // Long enough to clear the length pre-checks, but its magic is not
+        // `PSV1`, so the one shared decoder refuses it.
+        let bogus_block = [0u8; 64];
+        let mut payload = SPAWN_PATH.to_vec();
+        payload.extend_from_slice(&bogus_block);
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &payload);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let programs: &'static ProgramRegistry =
+            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+                EmbeddedProgram {
+                    path: SPAWN_PATH,
+                    rxe: SPAWN_RXE,
+                    caps: &[],
+                    args: &[],
+                },
+            ])))));
+        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
+        let h = spawn_handler(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
+            producer,
+        );
+
+        let strings_addr = 0x1000 + SPAWN_PATH.len() as u64;
+        assert_eq!(
+            h.spawn(
+                &ctx,
+                0x1000,
+                SPAWN_PATH.len(),
+                CONSOLE_INHERIT,
+                SPAWN_UID_INHERIT,
+                strings_addr,
+                bogus_block.len(),
+            ),
+            Err(Errno::BadMagic)
+        );
+        assert!(producer.rxe.lock().is_empty());
+    }
+
+    /// The strings pair's shape is validated before any state is touched:
+    /// a zero address with a non-zero length, a present address with a
+    /// zero length, and a length above the format's own ceiling each fail
+    /// closed without reaching the producer.
+    #[test]
+    fn spawn_strings_shape_violations_fail_closed() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, SPAWN_PATH);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let programs: &'static ProgramRegistry =
+            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+                EmbeddedProgram {
+                    path: SPAWN_PATH,
+                    rxe: SPAWN_RXE,
+                    caps: &[],
+                    args: &[],
+                },
+            ])))));
+        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
+        let h = spawn_handler(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
+            producer,
+        );
+
+        // Zero address with a non-zero length: a contradictory pair.
+        assert_eq!(
+            h.spawn(
+                &ctx,
+                0x1000,
+                SPAWN_PATH.len(),
+                CONSOLE_INHERIT,
+                SPAWN_UID_INHERIT,
+                0,
+                8,
+            ),
+            Err(Errno::LengthOutOfRange)
+        );
+        // Present address with a zero length: no decodable block.
+        assert_eq!(
+            h.spawn(
+                &ctx,
+                0x1000,
+                SPAWN_PATH.len(),
+                CONSOLE_INHERIT,
+                SPAWN_UID_INHERIT,
+                0x2000,
+                0,
+            ),
+            Err(Errno::LengthOutOfRange)
+        );
+        // A length above the startup-vector format's own ceiling: bounded
+        // before any kernel allocation is attempted.
+        let oversized = usize::try_from(PROCESS_START_MAX_TOTAL_LEN).expect("fits") + 1;
+        assert_eq!(
+            h.spawn(
+                &ctx,
+                0x1000,
+                SPAWN_PATH.len(),
+                CONSOLE_INHERIT,
+                SPAWN_UID_INHERIT,
+                0x2000,
+                oversized,
+            ),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert!(producer.rxe.lock().is_empty());
     }
 
     /// The privileged driver-spawn path mints one device-resource grant
@@ -8100,7 +8475,13 @@ mod tests {
         // `ctx.admit_process`, returning the new PID the grants are minted
         // against.
         let pid = RecordingSpawn::new()
-            .spawn(&program, &ctx)
+            .spawn_with(
+                program.rxe,
+                &ctx,
+                program.capability_set(),
+                program.args,
+                &[],
+            )
             .expect("driver child admitted");
         let child = SecTaskId(pid);
 
@@ -8231,7 +8612,13 @@ mod tests {
             SpawnCredential::system(),
         );
         let pid = RecordingSpawn::new()
-            .spawn(&program, &ctx)
+            .spawn_with(
+                program.rxe,
+                &ctx,
+                program.capability_set(),
+                program.args,
+                &[],
+            )
             .expect("child admitted");
         let child = SecTaskId(pid);
         assert_eq!(
@@ -8268,7 +8655,13 @@ mod tests {
             SpawnCredential::system(),
         );
         let orphan_pid = RecordingSpawn::new()
-            .spawn(&program, &orphan_ctx)
+            .spawn_with(
+                program.rxe,
+                &orphan_ctx,
+                program.capability_set(),
+                program.args,
+                &[],
+            )
             .expect("kernel-parented child admitted");
         assert_eq!(
             table
@@ -8297,7 +8690,14 @@ mod tests {
     }
 
     impl ProcessSpawn for PageTableAllocProbeSpawn {
-        fn spawn(&self, _program: &EmbeddedProgram, ctx: &dyn SpawnCtx) -> Result<u64, Errno> {
+        fn spawn_with(
+            &self,
+            _rxe: &[u8],
+            ctx: &dyn SpawnCtx,
+            _caps: CapabilitySet,
+            _args: &[&[u8]],
+            _env: &[&[u8]],
+        ) -> Result<u64, Errno> {
             self.saw_static_allocator.store(
                 ctx.page_table_allocator().is_some(),
                 core::sync::atomic::Ordering::SeqCst,
@@ -8363,6 +8763,8 @@ mod tests {
             SPAWN_PATH.len(),
             CONSOLE_INHERIT,
             SPAWN_UID_INHERIT,
+            0,
+            0,
         );
         assert!(
             probe
@@ -8385,6 +8787,8 @@ mod tests {
             SPAWN_PATH.len(),
             CONSOLE_INHERIT,
             SPAWN_UID_INHERIT,
+            0,
+            0,
         );
         assert!(
             !probe
@@ -8449,6 +8853,8 @@ mod tests {
                 SPAWN_PATH.len(),
                 CONSOLE_INHERIT,
                 SPAWN_UID_INHERIT,
+                0,
+                0,
             )
             .expect("spawn succeeds");
         // The child carries the parent's tighter Processes ceiling and the
@@ -8512,6 +8918,8 @@ mod tests {
                 SPAWN_PATH.len(),
                 CONSOLE_INHERIT,
                 SPAWN_UID_INHERIT,
+                0,
+                0,
             )
             .expect("spawn succeeds");
         // The child (its returned PID) was registered against parent 2.
@@ -8568,7 +8976,9 @@ mod tests {
                 0x1000,
                 SPAWN_PATH.len(),
                 CONSOLE_INHERIT,
-                SPAWN_UID_INHERIT
+                SPAWN_UID_INHERIT,
+                0,
+                0
             ),
             Err(Errno::NotImplemented)
         );
@@ -8604,7 +9014,9 @@ mod tests {
                 0x1000,
                 SPAWN_PATH.len(),
                 CONSOLE_INHERIT,
-                SPAWN_UID_INHERIT
+                SPAWN_UID_INHERIT,
+                0,
+                0
             ),
             Err(Errno::NotImplemented)
         );
@@ -8650,11 +9062,13 @@ mod tests {
                 0x1000,
                 SPAWN_PATH.len(),
                 CONSOLE_INHERIT,
-                SPAWN_UID_INHERIT
+                SPAWN_UID_INHERIT,
+                0,
+                0
             ),
             Err(Errno::NotFound)
         );
-        assert!(producer.seen_rxe.lock().is_empty());
+        assert!(producer.rxe.lock().is_empty());
     }
 
     /// `spawn` from a caller with no registered address space fails closed
@@ -8700,11 +9114,13 @@ mod tests {
                 0x1000,
                 SPAWN_PATH.len(),
                 CONSOLE_INHERIT,
-                SPAWN_UID_INHERIT
+                SPAWN_UID_INHERIT,
+                0,
+                0
             ),
             Err(Errno::BadAddress)
         );
-        assert!(producer.seen_rxe.lock().is_empty());
+        assert!(producer.rxe.lock().is_empty());
     }
 
     /// A zero-length or over-long path cannot name a registered program,
@@ -8737,7 +9153,7 @@ mod tests {
         .with_spawn(&EMPTY_PROGRAM_REGISTRY, producer);
 
         assert_eq!(
-            h.spawn(&ctx, 0x1000, 0, CONSOLE_INHERIT, SPAWN_UID_INHERIT),
+            h.spawn(&ctx, 0x1000, 0, CONSOLE_INHERIT, SPAWN_UID_INHERIT, 0, 0),
             Err(Errno::NotFound)
         );
         assert_eq!(
@@ -8746,11 +9162,13 @@ mod tests {
                 0x1000,
                 SPAWN_PATH_MAX + 1,
                 CONSOLE_INHERIT,
-                SPAWN_UID_INHERIT
+                SPAWN_UID_INHERIT,
+                0,
+                0
             ),
             Err(Errno::NotFound)
         );
-        assert!(producer.seen_rxe.lock().is_empty());
+        assert!(producer.rxe.lock().is_empty());
     }
 
     /// `console_count` reports the installed list's length, and zero on
@@ -9290,7 +9708,7 @@ mod tests {
         // An explicit, installed console: the child's table is the
         // standard shape on exactly that console.
         let pid = h
-            .spawn(&ctx, 0x1000, SPAWN_PATH.len(), 1, SPAWN_UID_INHERIT)
+            .spawn(&ctx, 0x1000, SPAWN_PATH.len(), 1, SPAWN_UID_INHERIT, 0, 0)
             .expect("spawn succeeds");
         assert_eq!(
             aspaces.read().streams(SecTaskId(pid)),
@@ -9300,7 +9718,7 @@ mod tests {
         // An index with no installed console fails closed before any
         // state is touched.
         assert_eq!(
-            h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), 2, SPAWN_UID_INHERIT),
+            h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), 2, SPAWN_UID_INHERIT, 0, 0),
             Err(Errno::NotFound)
         );
         assert_eq!(
@@ -9309,7 +9727,9 @@ mod tests {
                 0x1000,
                 SPAWN_PATH.len(),
                 u64::from(u32::MAX),
-                SPAWN_UID_INHERIT
+                SPAWN_UID_INHERIT,
+                0,
+                0
             ),
             Err(Errno::NotFound)
         );
@@ -9376,6 +9796,8 @@ mod tests {
                 SPAWN_PATH.len(),
                 CONSOLE_INHERIT,
                 SPAWN_UID_INHERIT,
+                0,
+                0,
             )
             .expect("spawn succeeds");
         assert_eq!(
@@ -9435,7 +9857,7 @@ mod tests {
             d.dispatch(&ctx, SyscallNumber::SPAWN.as_u16(), args),
             Err(Errno::PermissionDenied)
         );
-        assert!(producer.seen_rxe.lock().is_empty());
+        assert!(producer.rxe.lock().is_empty());
     }
 
     /// The default `spawn` (`SPAWN_UID_INHERIT`) snapshots the spawning
@@ -9491,6 +9913,8 @@ mod tests {
                 SPAWN_PATH.len(),
                 CONSOLE_INHERIT,
                 SPAWN_UID_INHERIT,
+                0,
+                0,
             )
             .expect("inherit spawn succeeds");
         let guard = table.read();
@@ -9545,11 +9969,11 @@ mod tests {
             producer,
         );
         assert_eq!(
-            h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), CONSOLE_INHERIT, 2000),
+            h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), CONSOLE_INHERIT, 2000, 0, 0),
             Err(Errno::PermissionDenied)
         );
         // Fail closed before building: the producer was never reached.
-        assert!(producer.seen_rxe.lock().is_empty());
+        assert!(producer.rxe.lock().is_empty());
     }
 
     /// A spawn-as-user switch by a `CAP_SPAWN_AS_USER` holder resolves the
@@ -9616,7 +10040,7 @@ mod tests {
         )
         .with_identity(identity);
         let pid = h
-            .spawn(&ctx, 0x1000, SPAWN_PATH.len(), CONSOLE_INHERIT, 2000)
+            .spawn(&ctx, 0x1000, SPAWN_PATH.len(), CONSOLE_INHERIT, 2000, 0, 0)
             .expect("switch spawn succeeds");
         let guard = table.read();
         let child = guard.caps_for(SecTaskId(pid)).expect("child record");
@@ -9700,7 +10124,7 @@ mod tests {
         // fixture-builder records emitted during set-up.
         sink.clear();
         let pid = h
-            .spawn(&ctx, 0x1000, SPAWN_PATH.len(), CONSOLE_INHERIT, 2000)
+            .spawn(&ctx, 0x1000, SPAWN_PATH.len(), CONSOLE_INHERIT, 2000, 0, 0)
             .expect("switch spawn succeeds");
         let guard = table.read();
         let child = guard.caps_for(SecTaskId(pid)).expect("child record");
@@ -9787,6 +10211,8 @@ mod tests {
                 SPAWN_PATH.len(),
                 CONSOLE_INHERIT,
                 SPAWN_UID_INHERIT,
+                0,
+                0,
             )
             .expect("inherit spawn succeeds");
         let guard = table.read();
@@ -9856,6 +10282,8 @@ mod tests {
                 SPAWN_PATH.len(),
                 CONSOLE_INHERIT,
                 SPAWN_UID_INHERIT,
+                0,
+                0,
             )
             .expect("inherit spawn succeeds");
         let guard = table.read();
@@ -9926,10 +10354,10 @@ mod tests {
         )
         .with_identity(identity);
         assert_eq!(
-            h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), CONSOLE_INHERIT, 2000),
+            h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), CONSOLE_INHERIT, 2000, 0, 0),
             Err(Errno::PermissionDenied)
         );
-        assert!(producer.seen_rxe.lock().is_empty());
+        assert!(producer.rxe.lock().is_empty());
     }
 
     /// A spawn-as-user switch by a capable caller against an **uninstalled**
@@ -9979,10 +10407,10 @@ mod tests {
             producer,
         );
         assert_eq!(
-            h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), CONSOLE_INHERIT, 2000),
+            h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), CONSOLE_INHERIT, 2000, 0, 0),
             Err(Errno::NotImplemented)
         );
-        assert!(producer.seen_rxe.lock().is_empty());
+        assert!(producer.rxe.lock().is_empty());
     }
 
     /// A `MemMap` producer that records the last `(len, flags, addr_hint)`

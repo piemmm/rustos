@@ -510,6 +510,13 @@ rustos/
 │   ├── abi-trap/        # The single per-arch user->kernel syscall trap
 │   │                    #   carve-out (§1), shared by abi-sys and lib/rt (§2.2).
 │   ├── caps/            # Capability primitives.
+│   ├── cmdres/          # Shared command-word resolution policy (plans/
+│   │                    #   APPS.md §8–§9): the one pure definition of the
+│   │                    #   ordered bundle candidates a typed command word
+│   │                    #   names (system app store first, then the alias-
+│   │                    #   aware PATH split), imported by the shell's
+│   │                    #   launch path and the man command's bundle lookup
+│   │                    #   (§2.2). Spelling only — no I/O, no authority.
 │   ├── collections/     # no_std collections not in core/alloc.
 │   ├── compress/        # First-party LZ codec; RustFS compresses every record
 │   │                    #   with it, no external dependency (§2.12, §16.4).

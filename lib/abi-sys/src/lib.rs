@@ -363,6 +363,15 @@ pub extern "C" fn sys_stream_read(fd: u32, buf: *mut c_void, len: usize) -> u64 
 /// the child into it — which requires `ROS_CAP_SPAWN_AS_USER` and fails closed
 /// otherwise. A running process can never change its own identity (there is no
 /// setuid-self).
+///
+/// `(strings, strings_len)` optionally carry the child's startup strings: a
+/// non-null `strings` names an encoded `ros_process_start_*` startup-vector
+/// block (the `PSV1` format) holding the argument vector and environment the
+/// caller chose for the child. The kernel bounds, stages, and parses the
+/// block fail-closed; the strings are data and grant nothing, and the kernel
+/// mints the child's stack canary itself, ignoring the block's. Pass NULL
+/// and `0` for "no block": the child then receives the program's registered
+/// default arguments and an empty environment.
 #[must_use]
 #[export_name = "ros_sys_spawn"]
 pub extern "C" fn sys_spawn(
@@ -370,9 +379,12 @@ pub extern "C" fn sys_spawn(
     path_len: usize,
     console: u64,
     target_uid: u32,
+    strings: *mut c_void,
+    strings_len: usize,
 ) -> u64 {
     // SAFETY: see `sys_ipc_send`; the kernel validates `(path, path_len)`,
-    // the console selector, and the target-uid credential switch.
+    // the console selector, the target-uid credential switch, and the
+    // optional `(strings, strings_len)` block.
     unsafe {
         raw_syscall(
             NUM_SPAWN,
@@ -381,8 +393,8 @@ pub extern "C" fn sys_spawn(
                 path_len as u64,
                 console,
                 u64::from(target_uid),
-                0,
-                0,
+                ptr_arg(strings),
+                strings_len as u64,
             ],
         )
     }
@@ -1609,7 +1621,7 @@ mod tests {
         (NUM_IRQ_WAIT, "irq_wait", 2),
         (NUM_RANDOM_GET, "random_get", 3),
         (NUM_STREAM_WRITE, "stream_write", 3),
-        (NUM_SPAWN, "spawn", 4),
+        (NUM_SPAWN, "spawn", 6),
         (NUM_STREAM_READ, "stream_read", 3),
         (NUM_MEM_MAP, "mem_map", 3),
         (NUM_MEM_UNMAP, "mem_unmap", 2),
@@ -1942,6 +1954,8 @@ mod tests {
                     path.len(),
                     rustos_abi::CONSOLE_INHERIT,
                     rustos_abi::SPAWN_UID_INHERIT,
+                    core::ptr::null_mut(),
+                    0,
                 ),
                 7
             );
@@ -1951,7 +1965,32 @@ mod tests {
         assert_eq!(args[1], path.len() as u64);
         assert_eq!(args[2], rustos_abi::CONSOLE_INHERIT);
         assert_eq!(args[3], u64::from(rustos_abi::SPAWN_UID_INHERIT));
+        // A NULL/0 strings pair marshals the "no block" zero/zero shape.
         assert_eq!(&args[4..], &[0, 0]);
+    }
+
+    #[test]
+    fn spawn_marshals_the_startup_strings_block() {
+        let mut path = *b"/Apps/Child.app/Run";
+        let ptr = path.as_mut_ptr().cast::<c_void>();
+        let mut block = *b"opaque-encoded-psv1-bytes";
+        let block_ptr = block.as_mut_ptr().cast::<c_void>();
+        let (number, args) = capture(9, || {
+            assert_eq!(
+                sys_spawn(
+                    ptr,
+                    path.len(),
+                    rustos_abi::CONSOLE_INHERIT,
+                    rustos_abi::SPAWN_UID_INHERIT,
+                    block_ptr,
+                    block.len(),
+                ),
+                9
+            );
+        });
+        assert_eq!(number, NUM_SPAWN);
+        assert_eq!(args[4], block_ptr as usize as u64);
+        assert_eq!(args[5], block.len() as u64);
     }
 
     #[test]

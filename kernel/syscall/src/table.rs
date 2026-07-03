@@ -253,6 +253,25 @@ pub trait SyscallHandlers {
     /// target uid fails closed rather than inventing a credential. A running
     /// process can never change its *own* identity — the credential is fixed
     /// at creation (there is no setuid-self).
+    ///
+    /// `(strings, strings_len)` optionally carry the child's startup
+    /// strings: a non-zero `strings` names an encoded
+    /// `rustos_abi::process` startup-vector block (the `PSV1` format) in
+    /// the caller's address space holding the argument vector and
+    /// environment the caller chose for the child. The implementation
+    /// bounds `strings_len` against
+    /// [`rustos_abi::PROCESS_START_MAX_TOTAL_LEN`], stages the block
+    /// through the validated `copy_from_user` boundary, and parses it
+    /// fail-closed; a malformed block is rejected with the decoder's
+    /// stable [`Errno`], never partially applied. The strings
+    /// are data — they grant nothing, and the kernel mints the child's
+    /// stack canary itself, ignoring the block's. A zero `strings` means
+    /// the child receives the program's registered default arguments and
+    /// an empty environment.
+    // The signature mirrors the syscall's six ABI registers plus the
+    // kernel-attested caller; folding registers into a carrier struct would
+    // only re-spell the ABI's argument order without removing an argument.
+    #[allow(clippy::too_many_arguments)]
     fn spawn(
         &self,
         caller: &CallerContext<'_>,
@@ -260,6 +279,8 @@ pub trait SyscallHandlers {
         path_len: usize,
         console: u64,
         target_uid: u32,
+        strings: u64,
+        strings_len: usize,
     ) -> SyscallResult;
     /// Read up to `len` bytes from the calling process's standard stream
     /// `fd` into the user buffer at `buf`, returning the number of bytes
@@ -1649,9 +1670,20 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 // the handler against the live console list. args[3] is the
                 // `target_uid`: the `SPAWN_UID_INHERIT` sentinel (start under
                 // the caller's own credential) or a concrete uid to switch to
-                // (gated by `CAP_SPAWN_AS_USER` in the handler).
-                self.handlers
-                    .spawn(caller, args.0[0], len, args.0[2], decode_u32(args.0[3]))
+                // (gated by `CAP_SPAWN_AS_USER` in the handler). args[4] and
+                // args[5] are the optional startup-strings block (zero
+                // address = absent); the handler bounds and parses it
+                // fail-closed.
+                let strings_len = decode_len(args.0[5])?;
+                self.handlers.spawn(
+                    caller,
+                    args.0[0],
+                    len,
+                    args.0[2],
+                    decode_u32(args.0[3]),
+                    args.0[4],
+                    strings_len,
+                )
             }
             SyscallNumber::STREAM_READ => {
                 let len = decode_len(args.0[2])?;
@@ -2367,6 +2399,9 @@ mod tests {
             // arguments without wiring a real console here.
             Ok(len as u64)
         }
+        // Mirrors the trait's register-shaped signature (see the trait's
+        // justification).
+        #[allow(clippy::too_many_arguments)]
         fn spawn(
             &self,
             _c: &CallerContext<'_>,
@@ -2374,12 +2409,14 @@ mod tests {
             path_len: usize,
             _console: u64,
             _target_uid: u32,
+            _strings: u64,
+            _strings_len: usize,
         ) -> SyscallResult {
             self.record("spawn");
             // Echo the path length back so the reachability test can
             // assert the dispatcher decoded the `(path, path_len,
-            // console, target_uid)` arguments without wiring a real spawn
-            // service here.
+            // console, target_uid, strings, strings_len)` arguments
+            // without wiring a real spawn service here.
             Ok(path_len as u64)
         }
         fn stream_read(

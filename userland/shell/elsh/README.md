@@ -105,7 +105,8 @@ a command that resolved but cannot run (a permission or capability denial).
 ## Command resolution
 
 A command word resolves through the pure candidate policy
-`resolution_candidates` (`src/resolve.rs`, owned by `plans/APPS.md` §8–§9):
+`rustos_cmdres::resolution_candidates` (`lib/cmdres`, shared with the `man`
+command's bundle lookup and owned by `plans/APPS.md` §8–§9):
 an explicit path (containing `/`) bypasses the search, a trailing `.app`
 names the bundle and runs its `Run` binary, and a bare word searches the
 `/System/Apps/` system app store (spelled once in `lib/abi`) and then the

@@ -47,7 +47,12 @@ app documentation only; the OS source-tree docs under `docs/` are unrelated).
 Landed: deliverable 1 (`BundleEntry::Help` replaced `Documentation` in place,
 `AGENTS.md` §16.5 amended, C header regenerated), deliverable 2 (the
 `lib/help` engine), and deliverable 4 (shell command resolution over the
-`/System/Apps/` system app store, `AGENTS.md` §16.2 amended). Remaining:
+`/System/Apps/` system app store, `AGENTS.md` §16.2 amended). The two
+prerequisites `man` needed are also in place: the candidate policy moved to
+the shared `lib/cmdres` crate (so `man` can import the §8 order without a
+userland→userland edge, §17.4), and the `spawn` ABI now carries a child's
+argument vector and environment (`plans/SPAWN.md` SP8), so `man <cmd>` and
+the §5 locale environment variable can actually reach a program. Remaining:
 deliverables 3, 5–7 (the `man` app, `cargo xtask help-lint`, the OS `Help/`
 trees, `stdinfo` adoption) and the per-app `-h`/`-?` short-help convention
 (§4, an app-side obligation served through `lib/help`).
@@ -301,7 +306,9 @@ command word (after builtins, functions, and command aliases, per
    (§1).
 
 The candidate *policy* is one pure, exhaustively-tested function,
-`rustos_elsh::resolution_candidates` (`userland/shell/elsh/src/resolve.rs`):
+`rustos_cmdres::resolution_candidates` (`lib/cmdres`, the shared crate whose
+`bundle_candidates` view the `man` command's bundle lookup imports — one
+policy, two views, §2.2/§17.4):
 it computes only the ordered spelling list and grants nothing. The shell's
 `Run` host attempts the candidates in order — the kernel's byte-exact
 `spawn` lookup answering `NotFound` moves to the next candidate (a
@@ -472,9 +479,15 @@ both landed; `plans/SHELL.md` command execution):
    (`SYSTEM_APP_STORE`/`BUNDLE_SUFFIX`); every OS command app moved in place
    to `/System/Apps/{elsh,ps,sysinfo,top,users}.app/Run`
    (`spawn_paths.rs`, drift-tested); the pure candidate policy
-   (`rustos_elsh::resolution_candidates`, alias-aware `PATH` split) is
-   unit-tested; the interpreter maps launch failures onto `127`/`126`; and
-   the session-ceiling QEMU vertical proves the bare word `ps` end to end.
+   (`rustos_cmdres::resolution_candidates` in the shared `lib/cmdres`
+   crate, alias-aware `PATH` split, plus the `bundle_candidates` view for
+   `man`'s bundle lookup) is unit-tested; the interpreter maps launch
+   failures onto `127`/`126`; the shell passes the typed words and
+   exported environment to every launched program over the `spawn`
+   startup-strings block (`plans/SPAWN.md` SP8 — the §5 locale variable
+   and `man <cmd>`'s argument now reach a child); and the session-ceiling
+   QEMU vertical proves the bare word `ps` **and** a delivered `ps
+   --bogus` argument end to end.
 5. **`cargo xtask help-lint`** — the §8.1 content/completeness/switch-drift
    check, wired into `cargo xtask ci` (§7).
 6. **`Help/` trees for the existing command apps** (`ps`, `top`, `ls`, `cat`,

@@ -164,11 +164,12 @@ filename and `{`/`(` can never run as a program name. Classifying a
 target is done; *resolving* a `Resource` target to a kernel stream backing
 (opening `sys:null`, the
 capability-checked resolve of any other namespace) waits on the same launch
-ABI that gates applying a file redirection. The current runtime process host
-still carries only a program path, so it reports `NotImplemented` for any
-redirection — a `Path` and a `Resource` target alike — until the launch ABI is
-extended; the parsing, classification, lowering, and fail-closed semantics
-above are exercised in full against the in-memory fixtures.
+ABI that gates applying a file redirection. The `spawn` ABI carries the
+child's argument vector and environment but no descriptor plumbing yet, so
+the runtime process host reports `NotImplemented` for any redirection — a
+`Path` and a `Resource` target alike — until the launch ABI grows pipes and
+redirections; the parsing, classification, lowering, and fail-closed
+semantics above are exercised in full against the in-memory fixtures.
 
 ## The session program (`Run`) and its REPL
 
@@ -208,13 +209,15 @@ program's — kernel-core's `BlockingConsoleRead` parks an empty-handed
 interactive session sits at its prompt waiting for the user to type.
 
 The `RtProcessHost` launches external commands through the `spawn` syscall
-and reaps them through `wait`. The current `spawn` ABI carries only a program
-*path* — no argument vector, environment, pipe, or redirection — so the host
-launches a single bare-path command and fails closed with `NotImplemented`
-on anything it cannot yet express (a pipeline, a redirection, arguments, a
-prefix-assignment environment, `fg`/`bg` signals, or `cd`); richer launches
-await an ABI extension. The in-process builtins (`echo`, `exit`, `export`,
-`pwd`, `help`, …) work regardless.
+and reaps them through `wait`. The command's words travel to the child as
+its argument vector and the shell's exported variables (with any `NAME=v
+cmd` prefix overrides layered on top) as its environment, encoded into the
+`spawn` startup-strings block — strings are data, never authority, and the
+kernel re-validates the block fail-closed before building the child's own
+copy. Pipes and redirections need descriptor plumbing the ABI does not yet
+express, so the host fails a pipeline or redirection closed with
+`NotImplemented` rather than silently dropping it. The in-process builtins
+(`echo`, `exit`, `export`, `pwd`, `help`, …) work regardless.
 
 ## Builtins
 

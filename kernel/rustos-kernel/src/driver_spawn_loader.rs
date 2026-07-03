@@ -621,10 +621,13 @@ mod tests {
     /// producer, so the adapter never reaches it.
     struct UnusedProcessSpawn;
     impl ProcessSpawn for UnusedProcessSpawn {
-        fn spawn(
+        fn spawn_with(
             &self,
-            _program: &rustos_kernel_core::EmbeddedProgram,
+            _rxe: &[u8],
             _ctx: &dyn rustos_kernel_core::SpawnCtx,
+            _caps: rustos_caps::CapabilitySet,
+            _args: &[&[u8]],
+            _env: &[&[u8]],
         ) -> Result<u64, Errno> {
             unreachable!("the recording context does not consult the producer")
         }

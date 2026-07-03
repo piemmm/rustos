@@ -1262,11 +1262,11 @@ and the lookup / create / taken-gid / help-write fail-closed paths).
 (`plans/CAPABILITY_USE.md` CU4): an interactive session that lists,
 creates, modifies, locks/unlocks, and deletes accounts, edits their
 capability ceilings, replaces passwords, and manages groups. It is
-interactive (a `users>` prompt over the inherited standard streams)
-because the `spawn` ABI carries no argument vector yet; when it does,
-the staged `useradd`/`groupadd` argv grammars above become thin
-frontends over the same syscall — the operation authority already lives
-in exactly one place, the kernel engine.
+interactive (a `users>` prompt over the inherited standard streams);
+now that the `spawn` ABI carries an argument vector, the staged
+`useradd`/`groupadd` argv grammars above can become thin frontends over
+the same syscall — the operation authority already lives in exactly one
+place, the kernel engine.
 
 Every rule is enforced kernel-side under the caller's attested identity:
 the dispatch gate, never-widen grant editing, the last-administrator

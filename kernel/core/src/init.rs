@@ -921,7 +921,10 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
             // powers flow only from `caps`.
             SpawnCredential::system(),
         );
-        spawn.spawn_with(rxe, &ctx, caps, args)
+        // A boot-floor driver reads its configuration from its argument
+        // vector alone; it inherits no environment (there is no principal
+        // yet whose exported variables it could meaningfully receive).
+        spawn.spawn_with(rxe, &ctx, caps, args, &[])
     }
 
     fn terminate_driver_process(&self, handle: u64) -> Result<(), Errno> {
@@ -1753,20 +1756,13 @@ mod tests {
     }
 
     impl ProcessSpawn for RecordingSpawn {
-        fn spawn(
-            &self,
-            _program: &crate::spawn::EmbeddedProgram,
-            _ctx: &dyn crate::spawn::SpawnCtx,
-        ) -> Result<u64, Errno> {
-            unreachable!("the driver-spawn seam drives spawn_with, not spawn")
-        }
-
         fn spawn_with(
             &self,
             rxe: &[u8],
             _ctx: &dyn crate::spawn::SpawnCtx,
             caps: CapabilitySet,
             args: &[&[u8]],
+            _env: &[&[u8]],
         ) -> Result<u64, Errno> {
             *self.recorded.write() = Some((
                 rxe.to_vec(),

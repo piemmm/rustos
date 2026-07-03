@@ -464,9 +464,10 @@ exist from CU3).
   session logic behind host-tested seams, manifest = console pair +
   `CAP_USER_ADMIN` (deliberately above the baseline — armed only for an
   administrator's intersection, no `CAP_FS_ACCESS`), salt from
-  `sys:random`, echo-off zeroised password entry. The staged
-  `useradd`/`groupadd` argv grammars become thin frontends over the same
-  syscall once spawn carries an argument vector.
+  `sys:random`, echo-off zeroised password entry. Spawn now carries an
+  argument vector (the startup-strings block), so the staged
+  `useradd`/`groupadd` argv grammars can become thin frontends over the
+  same syscall — planned work, unblocked.
 - The installer's first-user flow (admin ceiling for the first account,
   session baseline for subsequent ones) lands with the installer work —
   one definition of both sets, shared with `tools/mkimage`.

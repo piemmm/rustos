@@ -762,6 +762,48 @@ landed the surface + fail-closed seam; SP7b landed the scheduler-side producer
 
 ---
 
+## SP8 — startup strings: caller-supplied argv + environment `[x]`
+
+The `spawn` syscall carries the child's startup strings (`plans/APPS.md` §8
+— the shell's launch form, and the prerequisite for `man <cmd>` and every
+argv-taking command app):
+
+- **ABI.** `spawn` is a 6-argument syscall: `(path, path_len, console,
+  target_uid, strings, strings_len)`. `strings` (0 = absent) names an
+  encoded `rustos_abi::process` `PSV1` startup-vector block — the **same**
+  format the kernel writes into a child's image, so there is exactly one
+  strings encoding and one fuzz-covered decoder, no second codec. The
+  kernel bounds `strings_len` against `PROCESS_START_MAX_TOTAL_LEN`
+  *before* staging, copies the block in through the validated
+  `copy_from_user` boundary, and parses it fail-closed (`ProcessStart::
+  parse`); the block's canary field is ignored — the kernel mints the
+  child's canary itself. Strings are data: they carry no authority and
+  never influence the child's credential, manifest, or capability set.
+- **Semantics.** A present block governs the child's argument vector and
+  environment verbatim (a shell passing the typed words and its exported
+  variables, `NAME=value` entries split at the first `=`); no block means
+  the program's registered default arguments and an empty environment —
+  every pre-existing caller's exact behaviour. Boot-floor driver spawns
+  pass an empty environment deliberately.
+- **Plumbing.** `ProcessSpawn` was consolidated to the single entry point
+  `spawn_with(rxe, ctx, caps, args, env)` (the old `spawn(program, ctx)`
+  delegator was deleted; the handler resolves the effective strings and
+  calls `spawn_with` directly); all three arch producers thread `env` into
+  the shared `kernel/mem` startup-vector build. Userland:
+  `rustos_rt::spawn_with(path, console, uid, args, env)` encodes the block
+  via the shared `process_start_*` helpers, `rustos_rt::{env, env_count,
+  env_var}` read the child-side environment, `ros_sys_spawn` carries the
+  two new C-ABI parameters, and elsh's `RtProcessHost` passes the
+  command's words plus exported env (with `NAME=v cmd` prefix overrides);
+  pipes/redirections still fail closed pending descriptor plumbing.
+- **Proof.** Kernel host tests cover the override/default/malformed/shape
+  paths (`kernel/core/src/syscalls.rs`); rt marshal + accessor tests cover
+  the userland encoding and env lookup; the session-ceiling QEMU vertical
+  types `ps --bogus` and keys on the resulting usage line — output only a
+  delivered `argv[1]` can produce.
+
+---
+
 ## 2. Cross-cutting requirements (apply to every stage)
 
 - **No new HAL trait unless deliberate (§17.2).** SP1–SP5 reuse the closed

@@ -35,6 +35,7 @@ members = [
     "lib/abi-trap",
     "lib/kalloc",
     "lib/caps",
+    "lib/cmdres",
     "lib/collections",
     "lib/compress",
     "lib/crt0",
