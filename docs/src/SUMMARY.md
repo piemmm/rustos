@@ -45,6 +45,7 @@
   - [`rustos-devmatch`](./lib/devmatch.md)
   - [`rustos-dma-barrier`](./lib/dma_barrier.md)
   - [`rustos-drvrt`](./lib/drvrt.md)
+  - [`rustos-help`](./lib/help.md)
   - [`rustos-hid`](./lib/hid.md)
   - [`rustos-keymap`](./lib/keymap.md)
   - [`rustos-log`](./lib/log.md)

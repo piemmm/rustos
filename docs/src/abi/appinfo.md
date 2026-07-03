@@ -19,11 +19,18 @@ entries are drawn from a **closed** set, modelled by `BundleEntry`:
 | `Libraries`       | directory | no       |
 | `Resources`       | directory | no       |
 | `DefaultSettings` | directory | no       |
-| `Documentation`   | directory | no       |
+| `Help`            | directory | no       |
 
 `validate_bundle_layout(present)` accepts a bundle only if every top-level
 name is one of those, no name repeats, and both `AppInfo` and `Run` are
 present. Any other entry is a packaging defect (`BundleLayoutError`).
+
+`Help/` is the bundle's internationalised help tree (`plans/APPS.md`): one
+structured-Markdown document per command/topic, under one directory per
+BCP-47 locale plus the mandatory `default/` (en-US) canonical source. It is
+the single source the `man` command, each command's short `-h`/`-?` help,
+and any graphical help viewer read from; there is no separate long-form
+documentation entry.
 
 ## `AppInfo` manifest
 

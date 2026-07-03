@@ -39,20 +39,16 @@ are implementation requirements.
 
 ## Status
 
-**Planned.** No code has landed for the `Help/` bundle entry, the `lib/help`
-engine, the `man` command app, or the system-app-store command-resolution
-path. The deliverables and the required `AGENTS.md` amendments are staged at
-the end of this document.
-
-> **Open design question for the maintainer.** This spec *adds* `Help/`
-> alongside the existing `Documentation/` entry, with a crisp role split
-> (§2). An alternative is to *merge* them — retire `Documentation/` and let the
-> one internationalised `Help/` tree serve both the CLI `man` and any GUI help
-> viewer — which is arguably cleaner under the no-duplication rule (§2.2). The
-> spec picks "add" because the issue asks for a help folder in addition to the
-> current structure; if the maintainer prefers the merge, only §2, §2.1, and
-> deliverable 1/amendment §16.5 change (rename `Documentation` → `Help` instead
-> of adding a variant). Flagged rather than silently chosen (§15.7).
+**In progress.** The maintainer decided the once-open design question in
+favour of the **merge**: there is no separate `Documentation/` bundle entry —
+the single internationalised `Help/` tree serves the CLI `man`, each
+command's short `-h`/`-?` help, and any graphical help viewer (bundle-local
+app documentation only; the OS source-tree docs under `docs/` are unrelated).
+Landed: deliverable 1 (`BundleEntry::Help` replaced `Documentation` in place,
+`AGENTS.md` §16.5 amended, C header regenerated) and deliverable 2 (the
+`lib/help` engine). Remaining: deliverables 3–7 (the `man` app, shell command
+resolution, `cargo xtask help-lint`, the OS `Help/` trees, `stdinfo`
+adoption).
 
 ## 1. Everything is a bundle — including single-binary utilities
 
@@ -74,10 +70,10 @@ This applies to every present and future command-line program. A new CLI tool
 is added as its own `<Name>.app` bundle (§16.5), never as a loose binary in a
 shared directory.
 
-## 2. Bundle layout (extends §16.5)
+## 2. Bundle layout (per §16.5)
 
-The fixed top-level layout of `AGENTS.md` §16.5 is extended with one new
-entry, `Help/`:
+The fixed top-level layout of `AGENTS.md` §16.5 carries one documentation
+entry, `Help/` (the former `Documentation/`, merged into it):
 
 ```
 /System/Apps/top.app/            # (or /Apps/Example.app for user apps)
@@ -87,28 +83,23 @@ entry, `Help/`:
 ├── Libraries/         # Private shared libraries used only by this app.
 ├── Resources/         # Images, locales, UI definitions, etc.
 ├── DefaultSettings/   # Read-only defaults copied to the user on first launch.
-├── Documentation/     # Optional long-form bundled manuals/guides (GUI viewer).
-└── Help/              # Internationalised Markdown command help (this doc).
+└── Help/              # Internationalised Markdown help (this doc).
 ```
 
-`Help/` is a **new** top-level entry, distinct from the existing
-`Documentation/`. To keep the two from becoming an overlapping,
-double-maintained documentation mechanism (§2.2, §2.3), their roles are
-separated cleanly and non-overlappingly:
+`Help/` is the bundle's **only** documentation mechanism — one
+internationalised, structured-Markdown tree, so there is no second,
+overlapping documentation entry to double-maintain (§2.2, §2.3). It is the
+modern replacement for Unix man pages and the single source the CLI `man`
+command (§7), each command's short `-h`/`-?` help (§4), and any graphical
+help viewer read from. A bundle that ships longer-form material (a guide, a
+tutorial) ships it as additional named *topics* in the same tree (§2.1),
+rendered by the same engine.
 
-- **`Help/`** — the internationalised, structured-Markdown **command
-  reference**: our modern replacement for Unix man pages. It is the single
-  source both the CLI `man` command (§7) and each command's short `-h`/`-?`
-  help (§4) read from. This is the tree this document specifies.
-- **`Documentation/`** — *optional* long-form bundled documentation (a user
-  manual, tutorials, guides) opened by a graphical help viewer, unchanged from
-  §16.5. It is **not** the source for `man`/`-h`, and `lib/help` never reads
-  it. A bundle that has no long-form manual simply omits it.
-
-Because `abi-v1` is not frozen yet (§9), adding the `Help` entry is a
-straightforward in-place evolution (§2.13): the `BundleEntry` enum gains a
-`Help` variant and `validate_bundle_layout` (`lib/abi/src/appinfo.rs`) accepts
-it, with every caller and fixture updated in the same change.
+Because `abi-v1` is not frozen (§9), the merge was a straightforward in-place
+evolution (§2.13), and it has landed: `BundleEntry::Help` replaced
+`Documentation` (`lib/abi/src/appinfo.rs`), `validate_bundle_layout` accepts
+exactly the new set, every caller and fixture was updated in the same change,
+and the generated C header carries `ROS_BUNDLE_ENTRY_HELP`.
 
 The permitted top-level entry names remain a closed, case-sensitive set
 validated by `validate_bundle_layout`: any entry outside the set still fails
@@ -437,17 +428,21 @@ invocation.
 Staged work (dependencies: the bundle/`appmgr` stack and `plans/CURSES.md`,
 both landed; `plans/SHELL.md` command execution):
 
-1. **`lib/abi` — add a `BundleEntry::Help` variant** (evolve in place, §2.13):
-   extend `as_str`/`ALL`, its rustdoc, the `appinfo` tests, and
-   `docs/src/abi/appinfo.md`; regenerate the C header (`cargo xtask c-header`,
-   §9). `appmgr`'s layout validation and `validate_bundle_layout` follow for
-   free. (If the maintainer chooses the merge alternative in the Status note,
-   this becomes a rename of `Documentation` → `Help` instead.)
-2. **`lib/help` (`rustos-help`)** — the one help engine (§6): `Help/`-tree
-   location + §5 fallback, bounded structured-Markdown parse, short/full
-   render over `lib/vt`/`lib/curses`, injected read seam, unit tests, rustdoc,
-   `docs/src/lib/help.md`, and a `fuzz_help` harness (§19.6). Updates §3/§16.4
-   crate lists.
+1. **`lib/abi` — `BundleEntry::Help`** — **done.** The maintainer chose the
+   merge, so `Documentation` was renamed to `Help` in place (§2.13):
+   enum/`ALL`/`as_str`, rustdoc, the `appinfo` and `appmgr` fixtures,
+   `docs/src/abi/appinfo.md`, and the regenerated C header
+   (`ROS_BUNDLE_ENTRY_HELP`); the retired name now fails
+   `validate_bundle_layout` closed.
+2. **`lib/help` (`rustos-help`)** — **done.** The one help engine (§6):
+   validated `Locale`/`DocumentName` spellings, the injected `HelpSource`
+   read seam, the §5 fallback chain (served locale reported for `stdinfo`),
+   the bounded structured-Markdown parser (fixed §3 section model, typed
+   `HelpError`, fence-aware section walk), and `render_short`/`render_full`
+   over `lib/vt` (widths from `lib/curses`). Unit tests, the `fuzz_help`
+   harness registered in `cargo xtask fuzz` (§19.6), rustdoc,
+   `lib/help/README.md`, `docs/src/lib/help.md`, and the §3 crate list are
+   in place.
 3. **`man.app`** — the RustOS `man` command app (§7); its own `Help/` tree.
 4. **Shell command resolution (`plans/SHELL.md`)** — system-app-store-then-
    `PATH` resolution (§8), `.app`-suffix invocation (§9), the `-h`/`-?`
@@ -467,10 +462,9 @@ both landed; `plans/SHELL.md` command execution):
 Required `AGENTS.md` amendments (each with a one-line rationale in PLAN.md's
 "Charter Amendments" section, §13):
 
-- **§16.5** — add the `Help/` bundle entry beside `Documentation/`, document
-  its role split (§2) and the locale-tree structure (§2.1).
-- **§16.4** — note that the internationalised `Help/` tree is what `man` and
-  the CLI short-help read, distinct from the GUI `Documentation/` viewer.
+- **§16.5** — **done**: `Documentation/` replaced by `Help/` in the bundle
+  layout (the merge), with the locale-tree role documented; rationale logged
+  in PLAN.md "Charter Amendments".
 - **§16.2** — add `Apps/` under `/System` as the read-only, system-signed
   system app store (§8), and update the §16.2 authoritative subdirectory list.
 - **§16.6/§5.2** — no new capability is introduced for help or command

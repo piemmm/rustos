@@ -50,6 +50,7 @@ members = [
     "lib/fwcfg",
     "lib/geometry",
     "lib/glob",
+    "lib/help",
     "lib/hid",
     "lib/icon",
     "lib/input",

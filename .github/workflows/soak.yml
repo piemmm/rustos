@@ -67,11 +67,11 @@ env:
   RUST_BACKTRACE: 1
   CARGO_INCREMENTAL: 0
   # The audited C toolchain wrapper (tools/cc) pins clang/ld.lld at exactly
-  # 18.1.8; the runner's distro clang is older, so the pinned build is
-  # installed from apt.llvm.org (see the "Install pinned C toolchain" step)
-  # and resolved through these overrides.
-  RUSTOS_CC_CLANG: /usr/bin/clang-18
-  RUSTOS_CC_LLD: /usr/bin/ld.lld-18
+  # 22.1.8; no distro package ships that build, so the official llvm.org
+  # release is unpacked once onto the runner's persistent disk (see the
+  # "Install pinned C toolchain" step) and resolved through these overrides.
+  RUSTOS_CC_CLANG: /var/lib/actions-runner/rustos-cache/llvm-22.1.8/bin/clang
+  RUSTOS_CC_LLD: /var/lib/actions-runner/rustos-cache/llvm-22.1.8/bin/ld.lld
   # Self-hosted runner: persist build outputs in one fixed dir on the runner's
   # own disk instead of round-tripping a >1 GB `target/` tarball through
   # GitHub's hosted cache service (no `actions/cache` step is used here).
@@ -112,16 +112,22 @@ jobs:
           cargo --version
 
       # The CCOMPAT C-ABI QEMU tests drive tools/cc, which fails closed unless
-      # clang/ld.lld report exactly 18.1.8 (REQUIRED_CLANG_VERSION /
-      # REQUIRED_LLD_VERSION). The distro's clang-18 is 18.1.3, so install the
-      # 18.1.8 build from apt.llvm.org once; RUSTOS_CC_CLANG / RUSTOS_CC_LLD
-      # (workflow env above) point the wrapper at it.
-      - name: Install pinned C toolchain (clang/lld 18.1.8)
+      # clang/ld.lld report exactly 22.1.8 (REQUIRED_CLANG_VERSION /
+      # REQUIRED_LLD_VERSION). No distro package ships that build, so unpack
+      # the official llvm.org release tarball once onto the runner's
+      # persistent disk; RUSTOS_CC_CLANG / RUSTOS_CC_LLD (workflow env above)
+      # point the wrapper at it, and the wrapper's own exact-version check
+      # re-verifies every build.
+      - name: Install pinned C toolchain (clang/lld 22.1.8)
         run: |
-          if ! "$RUSTOS_CC_CLANG" --version 2>/dev/null | grep -q 'clang version 18\.1\.8'; then
-            wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
-            chmod +x /tmp/llvm.sh
-            sudo /tmp/llvm.sh 18
+          if ! "$RUSTOS_CC_CLANG" --version 2>/dev/null | grep -q 'clang version 22\.1\.8'; then
+            wget -qO /tmp/llvm-22.1.8.tar.xz \
+              https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/LLVM-22.1.8-Linux-X64.tar.xz
+            rm -rf /var/lib/actions-runner/rustos-cache/llvm-22.1.8
+            mkdir -p /var/lib/actions-runner/rustos-cache/llvm-22.1.8
+            tar -xJf /tmp/llvm-22.1.8.tar.xz --strip-components=1 \
+              -C /var/lib/actions-runner/rustos-cache/llvm-22.1.8
+            rm /tmp/llvm-22.1.8.tar.xz
           fi
           "$RUSTOS_CC_CLANG" --version
           "$RUSTOS_CC_LLD" --version

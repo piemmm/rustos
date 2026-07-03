@@ -46,7 +46,7 @@
 #define ROS_BUNDLE_ENTRY_LIBRARIES "Libraries"
 #define ROS_BUNDLE_ENTRY_RESOURCES "Resources"
 #define ROS_BUNDLE_ENTRY_DEFAULTSETTINGS "DefaultSettings"
-#define ROS_BUNDLE_ENTRY_DOCUMENTATION "Documentation"
+#define ROS_BUNDLE_ENTRY_HELP "Help"
 
 /* Which permitted root a shared-library reference resolved against (uint8_t). */
 #define ROS_LIBRARY_SCOPE_BUNDLE ((uint8_t)0u)

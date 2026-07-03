@@ -3487,33 +3487,39 @@ wasm32 (no trap instruction).
 
 ## APPS — application structure, command help, and command resolution (`plans/APPS.md`)
 
-**Status: planned.** Specifies how every program — from a graphical app down
-to a single-binary utility like `ps`/`top`/`cat` — is organised as a
+**Status: in progress.** Specifies how every program — from a graphical app
+down to a single-binary utility like `ps`/`top`/`cat` — is organised as a
 `<Name>.app` bundle (§16.5), how its command-line help is authored and served,
 and how the shell resolves a typed command name to a runnable bundle. Binding
-design lives in `plans/APPS.md`. Key decisions: the §16.5 bundle gains a new
-internationalised `Help/` tree of structured-Markdown "manpages" beside the
-existing `Documentation/` entry, with a crisp role split (`Help/` feeds the
-RustOS `man` command and CLI short-help; `Documentation/` stays the optional
-long-form GUI-viewer manual) — an in-place `abi-v1` addition of a
-`BundleEntry::Help` variant (§2.13); the spec flags the merge alternative
-(retire `Documentation/`) as an open maintainer question (§15.7). One
-shared help engine `lib/help` (`rustos-help`) extracts short `-h`/`-?` help and
-renders full `man` pages over `lib/vt`/`lib/curses`, bounded and fuzzed; command
-switches stay language-neutral while help prose is localised (`default/` =
-en-US plus `fr-FR`/`de-DE`/`es-ES`/`uk-UA`/`it-IT`), enforced by a
-`cargo xtask help-lint` (completeness, switch-drift, no foul/derogatory
-content); the shell resolves a bare command from a read-only system app store
-first, then user `PATH`, launching `<name>.app` through `appmgr` (`top` and
-`top.app` both run, manifest-gated). A cross-app *shared-library* bundle is
-declined — §16.4 refuses cross-bundle library references — so a resource-only
-bundle may share **data**, not dynamically-linked code. Required charter
-amendments (§16.5 `Help/`, §16.4 wording, a new `/System/Apps/` under §16.2,
-and an explicit §5.2 note that no new capability is added) are staged in
-`plans/APPS.md` and to be logged in "Charter Amendments" when implemented.
-Command apps SHOULD also emit the structured advisory `stdinfo` stream (fd 3,
-§20) wherever it is meaningful (e.g. `man`'s locale-fallback record) —
-advisory-only, never affecting exit status or pipeline behaviour.
+design lives in `plans/APPS.md`. The once-open maintainer question was decided
+as the **merge**: the bundle's `Documentation/` entry was retired and renamed
+to `Help/`, the single internationalised structured-Markdown tree that feeds
+the RustOS `man` command, CLI short `-h`/`-?` help, and any GUI help viewer
+(§16.5 amended; rationale in "Charter Amendments").
+
+**Landed:** (1) `BundleEntry::Help` replaced `Documentation` in place (§2.13)
+with every caller/fixture updated, `docs/src/abi/appinfo.md` refreshed, and
+the C header regenerated (`ROS_BUNDLE_ENTRY_HELP`); (2) `lib/help`
+(`rustos-help`) — the one help engine: validated `Locale`/`DocumentName`
+spellings, an injected capability-scoped `HelpSource` read seam, the
+deterministic exact → same-language → `default/` fallback (served locale
+reported for `man`'s `stdinfo` record), a bounded fail-closed
+structured-Markdown parser (fixed section model, typed `HelpError`,
+fence-aware section walk), and `render_short`/`render_full` over `lib/vt`
+(widths from `lib/curses`); unit-tested, fuzz-hardened (`fuzz_help` in
+`cargo xtask fuzz`), documented (`docs/src/lib/help.md`).
+
+**Remaining** (staged in `plans/APPS.md` §13): the `man.app` command app; the
+shell's system-app-store-then-`PATH` command resolution with `.app`-suffix
+invocation and the `-h`/`-?` convention; `cargo xtask help-lint`
+(completeness, switch-drift, no foul/derogatory content, required locales
+`fr-FR`/`de-DE`/`es-ES`/`uk-UA`/`it-IT`); `Help/` trees for the existing
+command apps; `stdinfo` adoption in command apps (advisory-only, §20); and
+the remaining charter amendments (a new `/System/Apps/` under §16.2, plus the
+explicit §5.2 note that no new capability is added). A cross-app
+*shared-library* bundle stays declined — §16.4 refuses cross-bundle library
+references — so a resource-only bundle may share **data**, not
+dynamically-linked code.
 
 ---
 
@@ -3694,6 +3700,17 @@ of how much code was produced.
 
 Amendments to `AGENTS.md` (the binding charter) are logged here so an agent
 can see *why* a rule exists without diffing the charter's history.
+
+- **2026-07-03 — One bundle help tree: `Documentation/` merged into `Help/`.**
+  Amended §16.5 (the merge alternative of `plans/APPS.md`, maintainer-chosen):
+  the bundle's `Documentation/` entry is renamed to `Help/`, the
+  internationalised structured-Markdown tree (one document per command/topic,
+  one directory per BCP-47 locale plus the mandatory `default/` en-US) that is
+  the single source for `man`, short `-h`/`-?` help, and any graphical help
+  viewer — two overlapping documentation entries would be the duplication §2.2
+  forbids. In-place `abi-v1` evolution (§2.13): `BundleEntry::Help` replaces
+  `Documentation` with every caller/fixture updated and the C header
+  regenerated.
 
 - **2026-07-01 — Storage is a forest of named roots; `/` is a view, not
   identity.** Amended §16.1 (Option B of the `plans/DRIVES.md` brief): the four

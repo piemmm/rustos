@@ -84,8 +84,12 @@ pub enum BundleEntry {
     Resources,
     /// Read-only defaults copied into the user's settings on first launch.
     DefaultSettings,
-    /// Bundled documentation opened by the help viewer.
-    Documentation,
+    /// The internationalised help tree: one structured-Markdown document per
+    /// command/topic under one directory per BCP-47 locale, plus the
+    /// mandatory `default/` (en-US) canonical source. It is the single
+    /// source the `man` command, each command's short `-h`/`-?` help, and
+    /// any graphical help viewer read from (`plans/APPS.md`).
+    Help,
 }
 
 impl BundleEntry {
@@ -97,7 +101,7 @@ impl BundleEntry {
         BundleEntry::Libraries,
         BundleEntry::Resources,
         BundleEntry::DefaultSettings,
-        BundleEntry::Documentation,
+        BundleEntry::Help,
     ];
 
     /// The exact on-disk name of this entry.
@@ -110,7 +114,7 @@ impl BundleEntry {
             BundleEntry::Libraries => "Libraries",
             BundleEntry::Resources => "Resources",
             BundleEntry::DefaultSettings => "DefaultSettings",
-            BundleEntry::Documentation => "Documentation",
+            BundleEntry::Help => "Help",
         }
     }
 
@@ -628,6 +632,7 @@ mod tests {
         }
         assert_eq!(BundleEntry::from_name("appinfo"), None);
         assert_eq!(BundleEntry::from_name("Plugins"), None);
+        assert_eq!(BundleEntry::from_name("Documentation"), None);
         assert!(BundleEntry::AppInfo.is_required());
         assert!(BundleEntry::Run.is_required());
         assert!(!BundleEntry::Code.is_required());
@@ -645,7 +650,7 @@ mod tests {
                 "Libraries",
                 "Resources",
                 "DefaultSettings",
-                "Documentation",
+                "Help",
             ]),
             Ok(())
         );

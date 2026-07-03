@@ -479,7 +479,7 @@ mod tests {
             "Libraries",
             "Resources",
             "DefaultSettings",
-            "Documentation",
+            "Help",
         ]
         .iter()
         .map(ToString::to_string)

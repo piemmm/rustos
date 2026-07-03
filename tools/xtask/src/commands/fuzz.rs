@@ -194,6 +194,12 @@ pub const TARGETS: &[Target] = &[
         description: "lib/glob pattern compiler + match loop (untrusted glob-pattern bytes)",
     },
     Target {
+        package: "rustos-help",
+        test: "fuzz_help",
+        description:
+            "lib/help document parser + short/full renderers (untrusted help-document bytes: never panics, fails closed, printed output is control-free)",
+    },
+    Target {
         package: "rustos-path",
         test: "fuzz_path",
         description: "lib/path path-string parser + canonical-spelling round-trip (untrusted path bytes)",

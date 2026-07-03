@@ -560,6 +560,13 @@ rustos/
 │   │                    #   an in-shell matcher. no_std+alloc, fail-closed,
 │   │                    #   bounded, no catastrophic backtracking (§2.2, §2.9,
 │   │                    #   §24.4; plans/SHELL.md, .junie/PREREQUISITES2.md P6).
+│   ├── help/            # Shared command-help engine (plans/APPS.md): the
+│   │                    #   locale-fallback lookup over a bundle's Help/ tree,
+│   │                    #   the bounded structured-Markdown help-document
+│   │                    #   parser, and the short (-h) / full (man) renders
+│   │                    #   over lib/vt — the one engine `man`, every
+│   │                    #   command's short help, and any GUI help viewer
+│   │                    #   share (§2.2, §16.5). no_std+alloc, fail-closed.
 │   ├── hid/             # Arch-neutral HID boot-protocol decode (keyboard +
 │   │                    #   mouse), the console-input producer, and the xHCI
 │   │                    #   boot-keyboard orchestration, shared by the in-kernel
@@ -1542,7 +1549,11 @@ directly under `/Apps/`. The bundle layout is fixed:
 ├── Resources/         # Images, locales, UI definitions, etc.
 ├── DefaultSettings/   # Read-only defaults; copied into the user's
 │                      # /Users/<u>/Settings/<Name>/ on first launch.
-└── Documentation/     # Bundled docs, opened by the help viewer.
+└── Help/              # Internationalised structured-Markdown help: one
+                       # document per command/topic, one directory per
+                       # BCP-47 locale plus the mandatory default/ (en-US).
+                       # The single source for `man`, short `-h`/`-?` help,
+                       # and any graphical help viewer (plans/APPS.md).
 ```
 
 Exactly these names are permitted at the top of a bundle; additional
