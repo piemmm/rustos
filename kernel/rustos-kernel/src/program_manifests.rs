@@ -22,26 +22,15 @@ use rustos_abi::CapabilityId;
 
 /// The session baseline (`plans/CAPABILITY_USE.md` §4.2) — what every
 /// interactive account's shell requests, and the `Shell` program's whole
-/// manifest:
-///
-/// * `CAP_FS_ACCESS` — "may use the filesystem at all" (`fs_chdir` and the
-///   other gated `fs_*` calls); real reach stays per-inode, so a baseline
-///   holder still cannot write `/System`.
-/// * `CAP_PROC_SPAWN` — "may run programs at all" (`spawn`); the child is
-///   bounded by its *own* manifest ∩ the same account ceiling, never by
-///   the shell's set.
-/// * `CAP_CONSOLE_WRITE` / `CAP_CONSOLE_READ` — the session's inherited
-///   standard streams are console-backed (`stream_write` / `stream_read`);
-///   the fine authority stays the inherited descriptor table.
+/// manifest. The set is account policy shared with the users-database
+/// authors (the image builder's seeded grants, the installer), so its one
+/// definition lives beside the account record in `lib/users` and is
+/// re-exported here for the registry rows; the per-capability rationale
+/// lives on that definition.
 ///
 /// Nothing else: `wait`, `signal`, `rlimit_get`/`rlimit_set`, and
 /// `fs_getcwd` — the rest of what the shell calls — are ungated.
-pub const SESSION_BASELINE: &[CapabilityId] = &[
-    CapabilityId::FS_ACCESS,
-    CapabilityId::PROC_SPAWN,
-    CapabilityId::CONSOLE_WRITE,
-    CapabilityId::CONSOLE_READ,
-];
+pub use rustos_users::SESSION_BASELINE;
 
 /// The login service's manifest: the console pair for its prompt
 /// (`stream_read`/`stream_write`/`stream_echo` over its inherited

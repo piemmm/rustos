@@ -147,6 +147,12 @@ const UNLOCK_PASSPHRASE_LINE: &str = "unlock-vertical correct horse battery stap
 /// (inject only once the driver can receive).
 const AUTOLOAD_INPUT_KEY_MARKER: &str = "sc=irq_bind";
 
+/// The username line the session-ceiling vertical types at `Username: `.
+const SESSION_USERNAME_LINE: &str = "root\n";
+
+/// The password line the session-ceiling vertical types at `Password: `.
+const SESSION_PASSWORD_LINE: &str = "root\n";
+
 const _: () = {
     assert!(
         is_line_of(
@@ -154,6 +160,20 @@ const _: () = {
             rustos_test_encrypted_root_image::PASSPHRASE
         ),
         "UNLOCK_PASSPHRASE_LINE drifted from the fixture passphrase"
+    );
+    assert!(
+        is_line_of(
+            SESSION_USERNAME_LINE.as_bytes(),
+            rustos_test_encrypted_root_image::USERNAME.as_bytes()
+        ),
+        "SESSION_USERNAME_LINE drifted from the fixture account"
+    );
+    assert!(
+        is_line_of(
+            SESSION_PASSWORD_LINE.as_bytes(),
+            rustos_test_encrypted_root_image::PASSWORD.as_bytes()
+        ),
+        "SESSION_PASSWORD_LINE drifted from the fixture account"
     );
 };
 
@@ -2428,9 +2448,9 @@ const TESTS: &[QemuTest] = &[
     // mounted the root end to end. The runner types only the fixture
     // passphrase (verified against the shared fixture at compile time,
     // `is_line_of`); the database *content* authenticating
-    // `root`/`root` is proven by `root_unlock_login`, and driving the
-    // per-console `login` to authenticate end to end rides the userland heap
-    // (`plans/SPAWN.md` SP5b, not yet landed), so it is out of this
+    // `root`/`root` is proven by `root_unlock_login`, and the per-console
+    // `login` authenticating end to end into a real shell session is the
+    // session-ceiling vertical's job (below), so both are out of this
     // vertical's scope. A 90-second budget covers the boot + bounded PBKDF2
     // derivation on QEMU TCG; single CPU like the other full-boot verticals.
     QemuTest {
@@ -2445,6 +2465,58 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::EncryptedRootDisk,
         keyboard: None,
         serial: &[("Root passphrase: ", UNLOCK_PASSPHRASE_LINE)],
+    },
+    // `plans/CAPABILITY_USE.md` CU3: the session-ceiling acceptance vertical.
+    // `rustos-test-session-ceiling-qemu-aarch64` boots the *production*
+    // aarch64 pipeline with the planted encrypted-root disk, unlocks the
+    // root at the passphrase prompt, authenticates `root`/`root` at the
+    // console login (the planted account's grant is the shared
+    // administrator ceiling, `rustos_users::administrator_ceiling` — the
+    // same set `tools/mkimage::debug_users_db` seeds a debug image with),
+    // and drives the spawned shell through a real session: `cd` into the
+    // account's home (`CAP_FS_ACCESS` — the B3 regression), `pwd` proving
+    // the move, spawning `/Apps/Ps.app/Run` (`CAP_PROC_SPAWN`) and seeing
+    // its process-list header, then the negative half — a `ulimit` bound
+    // pair is *lowered* (ungated; both bounds, since the default soft bound
+    // is unlimited and a soft bound may never exceed its hard bound) and
+    // the hard bound is then *raised*: the raise needs
+    // `CAP_RLIMIT_RAISE`, which the ceiling carries but the shell's
+    // session-baseline manifest does not request, so the effective
+    // `manifest ∩ ceiling` set lacks it and the kernel refuses the
+    // `rlimit_set` with `PermissionDenied` (an administrator account never
+    // widens a program past its own manifest). Each line is typed only
+    // after its marker appeared (`pwd`'s output and the shell's denial
+    // message are themselves markers), and the guest audit sink reports
+    // PASS only once the audited `rlimit_set` rejection has been seen
+    // *and* the scripted `exit` that follows it dispatches — so the denial
+    // provably reached the transcript before the run ended. A 120-second
+    // budget covers boot + bounded PBKDF2 + the multi-exchange dialogue on
+    // QEMU TCG; single CPU like the other full-boot verticals.
+    QemuTest {
+        package: "rustos-test-session-ceiling-qemu-aarch64",
+        binary: "rustos-test-session-ceiling-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(120),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::EncryptedRootDisk,
+        keyboard: None,
+        serial: &[
+            ("Root passphrase: ", UNLOCK_PASSPHRASE_LINE),
+            ("Username: ", SESSION_USERNAME_LINE),
+            ("Password: ", SESSION_PASSWORD_LINE),
+            ("elsh$ ", "cd /Users/root\n"),
+            ("elsh$ ", "pwd\n"),
+            ("/Users/root", "/Apps/Ps.app/Run\n"),
+            ("PID  PPID", "ulimit processes 1000\n"),
+            ("elsh$ ", "ulimit -H processes 2000\n"),
+            (
+                "cannot raise hard limit (requires CAP_RLIMIT_RAISE)",
+                "exit\n",
+            ),
+        ],
     },
     // `plans/PI.md` design B / B2: the pre-unlock driver-loading-by-discovery
     // autoload vertical. `rustos-test-autoload-input-qemu-aarch64` boots the

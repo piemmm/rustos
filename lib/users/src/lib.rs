@@ -30,11 +30,13 @@
 extern crate alloc;
 
 mod db;
+mod grants;
 mod groups;
 mod password;
 mod record;
 
 pub use db::{UsersDb, FORMAT_HEADER, MAX_DB_LEN, MAX_LINE_LEN, MAX_USERS};
+pub use grants::{administrator_ceiling, session_baseline, ADMINISTRATIVE_SET, SESSION_BASELINE};
 pub use groups::{
     GroupRecord, GroupsDb, GROUPS_FORMAT_HEADER, MAX_GROUPNAME_LEN, MAX_GROUPS, MAX_GROUPS_DB_LEN,
     MAX_GROUP_LINE_LEN,

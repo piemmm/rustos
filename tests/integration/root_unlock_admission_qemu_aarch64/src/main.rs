@@ -54,12 +54,11 @@
 //! The *content* of the installed database — that `root`/`root`
 //! authenticates and a wrong password is refused — is proven over the same
 //! shared fixture by `root_unlock_login` (which inspects the installed cell
-//! directly). Driving the per-console `login` to authenticate end to end
-//! additionally needs the userland heap to parse the served database, which
-//! rides the production `mem_map` producer (`plans/SPAWN.md` `SP5b`, not yet
-//! landed); until then `login` runs allocation-free and refuses every
-//! attempt. This vertical therefore keys on the
-//! install witness, not a `login` success.
+//! directly), and the per-console `login` authenticating end to end into a
+//! real shell session is proven by the session-ceiling vertical
+//! (`rustos-test-session-ceiling-qemu-aarch64`, `plans/CAPABILITY_USE.md`
+//! CU3). This vertical therefore keys on the install witness, not a
+//! `login` success.
 //!
 //! ## Embedded `virt` device tree
 //!

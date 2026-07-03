@@ -35,7 +35,6 @@ use alloc::vec::Vec;
 use rustos_abi::driver::block::{Block, BlockGeometry};
 use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
 use rustos_abi::DriverError;
-use rustos_caps::CapabilitySet;
 use rustos_drv_fs_rustfs::{EntropySource, RustFs, VolumeKey, VOLUME_KEY_LEN};
 use rustos_users::{
     AccountState, Gid, GroupRecord, GroupsDb, Identity, ParseError, Salt, Uid, UserRecord, UsersDb,
@@ -110,8 +109,12 @@ pub const USERS_FIXTURE_ITERATIONS: u32 = rustos_users::MIN_ITERATIONS;
 const USERS_FIXTURE_SALT: Salt = [0xa5; rustos_users::SALT_LEN];
 
 /// Serialise the users-root volume's `/System/Security/Users` database:
-/// the single active [`USERS_FIXTURE_USERNAME`] account with an empty
-/// capability ceiling.
+/// the single active [`USERS_FIXTURE_USERNAME`] account granted the shared
+/// administrator capability ceiling (`rustos_users::administrator_ceiling`
+/// — the session baseline plus the administrative set), exactly as the
+/// real debug image's `tools/mkimage::debug_users_db` seeds it, so the
+/// end-to-end session vertical exercises the same grant the shipped debug
+/// profile carries (`plans/CAPABILITY_USE.md` CU3).
 ///
 /// # Errors
 ///
@@ -128,7 +131,7 @@ pub fn users_db_text() -> Result<String, ParseError> {
             display_name: "System Administrator",
             home: "/Users/root",
             shell: "/Apps/Shell.app/Run",
-            capabilities: CapabilitySet::empty(),
+            capabilities: rustos_users::administrator_ceiling(),
             state: AccountState::Active,
         },
         USERS_FIXTURE_PASSWORD.as_bytes(),
@@ -296,6 +299,11 @@ pub fn build_users_root_image_with_key(volume_key: &VolumeKey) -> Result<Vec<u8>
     let root = fs.root();
     for name in ["System", "Users", "Apps", "Storage"] {
         let node = fs.create(root, name.as_bytes(), NodeKind::Directory)?;
+        if name == "Users" {
+            // The planted account's recorded home directory, so a logged-in
+            // session's `cd /Users/root` resolves against a real inode.
+            fs.create(node, b"root", NodeKind::Directory)?;
+        }
         if name == "System" {
             let security = fs.create(node, b"Security", NodeKind::Directory)?;
             fs.create(security, b"Users", NodeKind::RegularFile)?;
@@ -405,9 +413,17 @@ mod tests {
             .authenticate(USERS_FIXTURE_USERNAME, USERS_FIXTURE_PASSWORD.as_bytes())
             .expect("the planted account authenticates");
         assert_eq!(record.username(), USERS_FIXTURE_USERNAME);
+        // The planted grant round-trips as exactly the shared administrator
+        // ceiling — the same set the debug image seeds — so the end-to-end
+        // session vertical exercises the real CU3 grant.
+        assert_eq!(record.capabilities(), rustos_users::administrator_ceiling());
 
         db.authenticate(USERS_FIXTURE_USERNAME, b"wrong password")
             .expect_err("a wrong password is refused");
+
+        // The account's recorded home directory exists on the volume.
+        let users = fs.lookup(fs.root(), b"Users").expect("/Users present");
+        fs.lookup(users, b"root").expect("/Users/root present");
     }
 
     #[test]

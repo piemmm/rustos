@@ -107,9 +107,18 @@ through the one `CAP_SPAWN_AS_USER` holder (login) after
 re-authentication; there is no setuid and no "enter admin mode" for a
 live process.
 
-The shell's registered manifest **is** the session baseline, and every
-other embedded program's manifest is sized to exactly the gated
-syscalls it calls — one shared definition per program in the kernel's
+The two sets are policy with one definition: `lib/users` (the `grants`
+module) defines `SESSION_BASELINE`, `ADMINISTRATIVE_SET`, and the
+`administrator_ceiling()` union beside the account record that stores a
+grant, and every author imports them — the image builder's debug `root`
+account (`tools/mkimage::debug_users_db`) and the QEMU disk fixtures seed
+exactly `administrator_ceiling()`, and the kernel's shell manifest
+re-exports `SESSION_BASELINE` (`plans/CAPABILITY_USE.md` CU3). Every
+other embedded program's manifest is sized to exactly the gated syscalls
+it calls — one shared definition per program in the kernel's
 `program_manifests` module, each list pinned by an exact-set unit test
-(`plans/CAPABILITY_USE.md` CU2). The debug administrator grant (CU3)
-lands through the same staged plan.
+(CU2). The whole lifecycle is proven end to end by the
+`rustos-test-session-ceiling-qemu-aarch64` QEMU vertical: unlock, root
+login, `cd`/`pwd`/`ps` under the seeded ceiling, and a `ulimit`
+hard-bound raise refused because the shell's manifest does not request
+`CAP_RLIMIT_RAISE` even though the account ceiling carries it.

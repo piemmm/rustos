@@ -16,6 +16,14 @@ types (`Uid`, `Gid`, `UserRecord`), and password verification.
 - `UsersDb::serialise` / `UserRecord::with_password` — the writer the
   installer (`AGENTS.md` §11) and the image builder (`tools/mkimage`) use to
   author the database; `parse(serialise(db))` round-trips exactly.
+- `SESSION_BASELINE` / `ADMINISTRATIVE_SET` / `administrator_ceiling()` —
+  the standard account grant sets (`plans/CAPABILITY_USE.md` §4.2/§4.3):
+  the session baseline every interactive account's ceiling includes (and
+  the shell's whole manifest request), and the administrative set that
+  makes an account an administrator. Account policy is one definition
+  beside the record that stores it, imported by the image builder, the
+  disk-image test fixtures, and the kernel's program manifests — never
+  copy-pasted.
 
 A record carries the full §5.1 account identity: username, uid, primary gid,
 supplementary gids, display name, home directory, the user's shell of

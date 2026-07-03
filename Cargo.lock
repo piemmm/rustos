@@ -1246,7 +1246,6 @@ name = "rustos-mkimage"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
- "rustos-caps",
  "rustos-crypto",
  "rustos-drv-fs-fat32",
  "rustos-drv-fs-rustfs",
@@ -2247,7 +2246,6 @@ name = "rustos-test-rustfs-image"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
- "rustos-caps",
  "rustos-drv-fs-rustfs",
  "rustos-kernel-core",
  "rustos-kernel-sec",
@@ -2307,6 +2305,19 @@ dependencies = [
  "rustos-arch-x86_64",
  "rustos-itest-harness",
  "rustos-kernel-sched-mlfq",
+]
+
+[[package]]
+name = "rustos-test-session-ceiling-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-arch-aarch64",
+ "rustos-itest-harness",
+ "rustos-kalloc",
+ "rustos-kernel",
+ "rustos-log",
+ "rustos-util",
 ]
 
 [[package]]

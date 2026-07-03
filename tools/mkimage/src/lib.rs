@@ -60,8 +60,7 @@ pub use rustos_drv_fs_rustfs::{
 
 use device::SECTOR_BYTES;
 use firmware::FirmwareFile;
-use rustos_abi::{CapabilityId, DriverError, MACHINE_ID_LEN};
-use rustos_caps::CapabilitySet;
+use rustos_abi::{DriverError, MACHINE_ID_LEN};
 use rustos_partition::mbr::{self, MbrError};
 use rustos_partition::{Partition, PartitionType};
 use rustos_users::{
@@ -278,25 +277,16 @@ pub const fn console_baud_for(profile: ImageProfile) -> u32 {
 
 /// Build the debug-profile `/System/Security/Users` text: the single
 /// `root` account, its password salted from `entropy` and hashed at the
-/// default PBKDF2 cost, granted the administrative capability ceiling a
-/// bring-up session needs (powers come from
-/// capabilities, not from `uid 0`).
+/// default PBKDF2 cost, granted the administrator capability ceiling
+/// (`rustos_users::administrator_ceiling` — the session baseline plus the
+/// administrative set) a bring-up session needs. Powers come from
+/// capabilities, not from `uid 0`: the account is an administrator only
+/// because its ceiling says so.
 fn debug_users_db(entropy: &mut dyn EntropySource) -> Result<String, MkimageError> {
     let mut salt: Salt = [0u8; rustos_users::SALT_LEN];
     entropy
         .fill(&mut salt)
         .map_err(|e| MkimageError::Entropy(format!("users salt: {e:?}")))?;
-
-    let mut capabilities = CapabilitySet::empty();
-    for cap in [
-        CapabilityId::USER_ADMIN,
-        CapabilityId::FS_MOUNT,
-        CapabilityId::PROC_SPAWN,
-        CapabilityId::CONSOLE_READ,
-        CapabilityId::CONSOLE_WRITE,
-    ] {
-        capabilities.insert(cap);
-    }
 
     let record = UserRecord::with_password(
         Identity {
@@ -307,7 +297,7 @@ fn debug_users_db(entropy: &mut dyn EntropySource) -> Result<String, MkimageErro
             display_name: "System Administrator",
             home: "/Users/root",
             shell: "/Apps/Shell.app/Run",
-            capabilities,
+            capabilities: rustos_users::administrator_ceiling(),
             state: AccountState::Active,
         },
         DEBUG_PASSWORD.as_bytes(),
@@ -551,6 +541,7 @@ mod tests {
     use super::*;
     use device::MemBlock;
     use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
+    use rustos_abi::CapabilityId;
     use rustos_drv_fs_fat32::Fat32;
     use rustos_drv_fs_rustfs::RustFs;
 
@@ -827,7 +818,13 @@ mod tests {
             .expect("root/root authenticates");
         assert_eq!(record.uid(), Uid(0));
         assert_eq!(record.shell(), "/Apps/Shell.app/Run");
-        assert!(record.capabilities().contains(CapabilityId::USER_ADMIN));
+        // The seeded grant is exactly the shared administrator ceiling
+        // (session baseline + administrative set) — the B3 regression
+        // (`plans/CAPABILITY_USE.md` CU3): a root account without
+        // `CAP_FS_ACCESS` cannot use the filesystem even once the
+        // intersection is wired.
+        assert_eq!(record.capabilities(), rustos_users::administrator_ceiling());
+        assert!(record.capabilities().contains(CapabilityId::FS_ACCESS));
         assert!(db.authenticate(DEBUG_USERNAME, b"wrong").is_err());
     }
 

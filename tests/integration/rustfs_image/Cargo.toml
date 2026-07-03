@@ -24,7 +24,6 @@ path = "src/lib.rs"
 # through the driver on the host.
 [dependencies]
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
 rustos-drv-fs-rustfs = { path = "../../../drivers/filesystem/rustfs", version = "=0.0.0" }
 rustos-users = { path = "../../../lib/users", version = "=0.0.0" }
 

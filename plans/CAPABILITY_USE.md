@@ -30,9 +30,10 @@ useless: every `ls`, `cd`, file open, and program launch fails with
    `CAP_PROC_SPAWN` — so the spawned shell could not touch the filesystem
    or launch anything. The shell now requests the session baseline
    (`kernel/rustos-kernel/src/program_manifests.rs`, CU2).
-3. The debug root account's seeded grant (`tools/mkimage`) omits
-   `CAP_FS_ACCESS`, so even with the intersection wired the shell would
-   still be denied the filesystem.
+3. *(fixed — CU3)* The debug root account's seeded grant (`tools/mkimage`)
+   omitted `CAP_FS_ACCESS`, so even with the intersection wired the shell
+   was still denied the filesystem. The seeded grant is now the shared
+   administrator ceiling (`rustos_users::administrator_ceiling`, CU3).
 
 This plan defines the lifecycle properly, then fixes the defect through it —
 never by widening a check or special-casing `uid 0` (`AGENTS.md` §2.17,
@@ -156,12 +157,13 @@ The life of a capability, from disk to exercise to revocation:
 - The session-baseline shell manifest and audited, pinned per-program
   manifests (`kernel/rustos-kernel/src/program_manifests.rs`, CU2) — B2 is
   fixed.
+- The §4.2/§4.3 sets defined once in `lib/users` (`grants`:
+  `SESSION_BASELINE`, `ADMINISTRATIVE_SET`, `administrator_ceiling()`)
+  and seeded as the debug root grant (`tools/mkimage::debug_users_db`)
+  and the QEMU users-root fixture account — B3 is fixed (CU3).
 
-**Broken (the defect this plan fixes):**
-
-- **B3** — the debug root grant (`tools/mkimage::debug_users_db`) omits
-  `CAP_FS_ACCESS` (and the observability set §4.3 defines), so the seeded
-  administrator cannot use the filesystem even once B1/B2 are fixed.
+All three defects are fixed; the remaining stages extend the lifecycle
+(user management CU4, elevation CU5, desktop CU6).
 
 ---
 
@@ -380,16 +382,40 @@ authorises it; anything not listed is denied.
 
 ### CU3 — the debug administrator ceiling (fixes B3)
 
-**Status: planned.**
+**Status: done.**
 
-- `tools/mkimage::debug_users_db`: seed the root grant as session baseline +
-  administrative set (§4.2 + §4.3), defined once as a named constant beside
-  the profile, not an inline list.
-- End-to-end QEMU vertical (the acceptance test for the whole defect):
-  boot the debug image, authenticate `root`/`root`, then in the spawned
-  shell `ls /`, `cd /Users/root`, write and read back a file, and spawn
-  `ps` — all succeeding; then assert a *negative*: an operation outside the
-  ceiling (e.g. a users-db read from the shell) still fails closed.
+- The §4.2 + §4.3 sets are account policy with one home: `lib/users`
+  (`grants` module) defines `SESSION_BASELINE`, `ADMINISTRATIVE_SET`, and
+  `administrator_ceiling()` beside the record format that stores a grant,
+  with exact-membership pinning tests (including the invariant that no
+  service-/driver-class capability is ever in a ceiling). This goes
+  further than a per-profile named constant: mkimage, the disk fixtures,
+  and the kernel shell manifest (`program_manifests::SESSION_BASELINE`,
+  now a re-export) all import the one definition, so the CU4 "one
+  definition of both sets, shared with `tools/mkimage`" requirement is
+  already satisfied for the installer to reuse.
+- `tools/mkimage::debug_users_db` seeds the root grant as
+  `administrator_ceiling()`; its unit test pins the seeded record to the
+  exact set. The shared users-root QEMU fixture
+  (`rustos_test_rustfs_image`) plants the same ceiling and the account's
+  `/Users/root` home directory, so the fixture cannot drift from the
+  debug profile.
+- End-to-end QEMU acceptance vertical
+  (`tests/integration/session_ceiling_qemu_aarch64`, enrolled in the
+  `cargo xtask test --qemu` matrix): boots the production aarch64
+  pipeline with the encrypted-root disk, unlocks at `Root passphrase: `,
+  authenticates `root`/`root`, and drives the spawned shell —
+  `cd /Users/root` (CAP_FS_ACCESS, the B3 regression), `pwd`, spawning
+  `/Apps/Ps.app/Run` (CAP_PROC_SPAWN) — then the negative: a `ulimit`
+  hard-bound raise is refused with `PermissionDenied` because the
+  shell's baseline manifest does not request `CAP_RLIMIT_RAISE` even
+  though the ceiling carries it (the intersection binds). PASS keys on
+  the audited `rlimit_set` rejection followed by the scripted `exit`.
+  The scripted `ls /` / file write-read steps of the original sketch are
+  deliberately absent: no `ls`/file tool is in the embedded program
+  registry yet (they arrive with the `/Apps` tool enrolment), and `cd`'s
+  kernel-authorised `fs_chdir` + `pwd` already witness the filesystem
+  grant end to end.
 
 ### CU4 — user management under `CAP_USER_ADMIN`
 
