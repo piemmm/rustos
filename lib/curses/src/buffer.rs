@@ -67,9 +67,7 @@ impl Buffer {
 
     /// Reset every cell to `fill`.
     pub fn fill(&mut self, fill: Cell) {
-        for cell in &mut self.cells {
-            *cell = fill;
-        }
+        self.cells.fill(fill);
     }
 
     /// The cells of row `row` as a slice, or `None` if `row` is out of bounds.

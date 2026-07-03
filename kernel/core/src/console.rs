@@ -770,9 +770,8 @@ impl SecretFeedback {
     }
 
     /// The one-shot deadline the marker animation currently needs, or
-    /// [`None`] while disarmed, hidden, or paused. The console's blocking
-    /// reader parks with this deadline and calls [`Self::tick`] when it
-    /// passes.
+    /// [`None`] while disarmed or hidden. The console's blocking reader
+    /// parks with this deadline and calls [`Self::tick`] when it passes.
     #[must_use]
     pub fn deadline_ns(&self) -> Option<u64> {
         if !self.armed.load(Ordering::Acquire) {
@@ -781,8 +780,8 @@ impl SecretFeedback {
         self.state.lock().indicator.deadline_ns()
     }
 
-    /// The armed animation deadline passed: advance (or pause) the marker.
-    /// A no-op while disarmed.
+    /// The armed animation deadline passed: advance the marker's dots one
+    /// frame. A no-op while disarmed.
     pub fn tick(&self, now_ns: u64) {
         if !self.armed.load(Ordering::Acquire) {
             return;
@@ -898,7 +897,7 @@ where
         let parkable: Option<_> = crate::waitq::wait_arch().and_then(|hook| hook.current_task(cpu));
         loop {
             // The secret feedback's one-shot animation deadline, when a
-            // secret read is armed and its marker is animating. `None` the
+            // secret read is armed and its marker is shown. `None` the
             // rest of the time, so an ordinary read parks with no deadline
             // and takes no timer wake-ups at all (tickless).
             let deadline = self
@@ -958,7 +957,7 @@ where
             // the reader the instant a byte lands. There is no timed re-poll
             // of the *device*; the only finite deadline ever registered here
             // is the secret feedback's animation tick above, armed solely
-            // while a password marker is animating (a bounded, user-driven
+            // while a password marker is on screen (a bounded, user-driven
             // window), so an ordinary read still arms no one-shot at all.
             //
             // With no waker hook there is no scheduler to park on, so fail
@@ -981,8 +980,8 @@ where
             if !parked {
                 return Err(Errno::NotImplemented);
             }
-            // A timed wake for the animation: let the marker advance (or
-            // pause), then loop back to re-poll and re-park. Input arriving
+            // A timed wake for the animation: advance the marker's dots one
+            // frame, then loop back to re-poll and re-park. Input arriving
             // concurrently is handled by the re-poll, never lost.
             if let Some(secret) = self.secret {
                 if let Some(tick) = secret.deadline_ns() {
@@ -1351,23 +1350,23 @@ mod tests {
     }
 
     #[test]
-    fn secret_feedback_ticks_animate_and_pause() {
+    fn secret_feedback_ticks_keep_the_animation_running() {
         static W: EchoRecorder = EchoRecorder::new();
         let feedback = SecretFeedback::new(&W);
         feedback.arm();
         feedback.consumed(b"s", 0);
-        // Typing continued before the tick: the dots advance and the next
-        // tick is armed.
-        feedback.consumed(b"e", 100);
+        // Each tick advances the dots and arms the next frame — no
+        // further typing is required to keep the marker animating.
         feedback.tick(rustos_vt::secret::SECRET_TICK_NS);
         assert_eq!(
             feedback.deadline_ns(),
             Some(2 * rustos_vt::secret::SECRET_TICK_NS)
         );
-        // No typing before the next tick: the dots pause and no further
-        // wake-up is wanted.
         feedback.tick(2 * rustos_vt::secret::SECRET_TICK_NS);
-        assert_eq!(feedback.deadline_ns(), None);
+        assert_eq!(
+            feedback.deadline_ns(),
+            Some(3 * rustos_vt::secret::SECRET_TICK_NS)
+        );
     }
 
     #[test]

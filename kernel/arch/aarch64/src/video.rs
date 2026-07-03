@@ -41,6 +41,14 @@ use rustos_vcmailbox::{
     discover_framebuffer, query_display_size, FramebufferRequest, MailboxTransport,
 };
 
+/// The ECMA-48 / ASCII Backspace control byte, as `lib/vt`'s `control::BS`
+/// spells it. Named locally because `rustos-vt` unconditionally links
+/// `alloc`, and feature unification across the single aarch64-none
+/// test-matrix build would force a global allocator into the minimal,
+/// allocator-free QEMU binaries — the same constraint that keeps the
+/// render lock below off `lib/sync`.
+const BS: u8 = 0x08;
+
 /// Compatible string of the BCM283x/BCM2711 firmware mailbox doorbell.
 const MAILBOX_COMPATIBLE: &[u8] = b"brcm,bcm2835-mbox";
 
@@ -259,13 +267,21 @@ impl TextConsole {
     /// Render one byte, returning the pixel-row band it touched.
     ///
     /// `\n` advances to the next (cleared) row, `\r` returns to column
-    /// zero, and any byte outside the printable-ASCII atlas renders the
-    /// `?` glyph rather than being silently dropped.
+    /// zero, and backspace steps the cursor back one column (a no-op at
+    /// column zero, so a rub-out never walks off the line) — the console's
+    /// echo and secret-marker rub-outs are `BS SP BS`, so backspace must
+    /// move the cursor, never paint. Any other byte outside the
+    /// printable-ASCII atlas renders the `?` glyph rather than being
+    /// silently dropped.
     pub fn write_byte(&mut self, pixels: &mut [u32], byte: u8) -> Option<DirtyBand> {
         match byte {
             b'\n' => Some(self.next_row(pixels)),
             b'\r' => {
                 self.column = 0;
+                None
+            }
+            BS => {
+                self.column = self.column.saturating_sub(1);
                 None
             }
             _ => {
@@ -1007,6 +1023,50 @@ mod tests {
         assert_eq!(
             fallback,
             cell(&reference, reference_console.geometry(), 0, 0)
+        );
+    }
+
+    #[test]
+    fn backspace_steps_the_cursor_back_without_painting() {
+        let (mut console, mut pixels) = small_console();
+        console.write_byte(&mut pixels, b'A');
+        // The `BS SP BS` rub-out overwrites the glyph and leaves the
+        // cursor back on the erased cell.
+        assert_eq!(console.write_byte(&mut pixels, 0x08), None);
+        console.write_byte(&mut pixels, b' ');
+        console.write_byte(&mut pixels, 0x08);
+        let geometry = *console.geometry();
+        assert!(
+            cell(&pixels, &geometry, 0, 0)
+                .iter()
+                .all(|&p| p == BACKGROUND),
+            "the rub-out blanked the glyph"
+        );
+        // The next glyph lands on the erased column, not the one after it.
+        console.write_byte(&mut pixels, b'!');
+        assert_ne!(
+            cell(&pixels, &geometry, 0, 0)
+                .iter()
+                .filter(|&&p| p == FOREGROUND)
+                .count(),
+            0,
+            "the cursor stayed on the erased cell"
+        );
+    }
+
+    #[test]
+    fn backspace_at_column_zero_is_a_no_op() {
+        let (mut console, mut pixels) = small_console();
+        assert_eq!(console.write_byte(&mut pixels, 0x08), None);
+        // The cursor did not move: the next glyph renders in column 0.
+        console.write_byte(&mut pixels, b'!');
+        let geometry = *console.geometry();
+        assert_ne!(
+            cell(&pixels, &geometry, 0, 0)
+                .iter()
+                .filter(|&&p| p == FOREGROUND)
+                .count(),
+            0
         );
     }
 

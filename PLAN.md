@@ -52,7 +52,7 @@ Do **not** begin a stage before all its listed dependencies are complete.
 - `docs/src/contributing.md` — points to `AGENTS.md`.
 
 **Status: complete.**
-- Toolchain pinned to `nightly-2026-05-27` (rustc 1.98.0-nightly) with
+- Toolchain pinned to `nightly-2026-07-03` (rustc 1.98.0-nightly) with
   `rust-src`, `llvm-tools-preview`, `clippy`, `rustfmt` and the four Tier-1
   cross targets. Pin requires cargo-deny ≥ 0.19 (CVSS 4.0 advisories).
 - `.cargo/config.toml` declares the `xtask` alias + per-target rustflags;

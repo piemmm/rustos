@@ -676,7 +676,7 @@ deliberately-wrong-expectation FAIL.** **Depended on** CC1–CC4 (all done).
   `#![forbid(unsafe_code)]` wrapper around `clang` + `ld.lld` (`AGENTS.md` §12
   — no unaudited shell-out). It version-pins both tools (fails closed unless
   they report `REQUIRED_CLANG_VERSION` / `REQUIRED_LLD_VERSION`, currently
-  `18.1.8`), SHA-256-checksums each resolved binary with the audited
+  `22.1.8`), SHA-256-checksums each resolved binary with the audited
   `lib/crypto` (recorded for the build transcript; verified against an optional
   `RUSTOS_CC_*_SHA256` pin), and exposes pure, unit-tested argv builders for a
   freestanding/PIC/canary-protected compile and a hardened-PIE

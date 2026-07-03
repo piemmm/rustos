@@ -563,9 +563,7 @@ mod tests {
         ) -> Result<(), DriverError> {
             self.read_blocks(lba, buf)?;
             if class.is_sensitive() {
-                for byte in &mut self.staging {
-                    *byte = 0;
-                }
+                self.staging.fill(0);
                 self.scrubbed_after_last_call = true;
             }
             Ok(())
@@ -578,9 +576,7 @@ mod tests {
         ) -> Result<(), DriverError> {
             self.write_blocks(lba, buf)?;
             if class.is_sensitive() {
-                for byte in &mut self.staging {
-                    *byte = 0;
-                }
+                self.staging.fill(0);
                 self.scrubbed_after_last_call = true;
             }
             Ok(())

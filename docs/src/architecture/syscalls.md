@@ -711,12 +711,13 @@ buffer stay in step.
 Disabling echo also arms the console's **secret-entry feedback**
 (`rustos_vt::secret`, hosted as the kernel `SecretFeedback`): a no-echo
 read is a password read, so after the first typed character the console
-shows the `[input active...]` marker, its dots animating on a one-second
-cadence while typing continues, pausing after a second of silence, and
-the whole marker removed on Enter or when the input is erased back to
-empty. The console's blocking reader drives the animation with a one-shot
-wait deadline armed only while the marker is animating (tickless — an
-idle prompt takes no timer wake-ups), and only the *count* of typed
+shows the `[input active...]` marker, its dots cycling `.` → `..` → `...`
+on a one-second cadence for as long as the marker is shown, and the whole
+marker removed on Enter or when the input is erased back to empty. The
+console's blocking reader drives the animation with a one-shot wait
+deadline armed only while the marker is on screen (tickless — a prompt
+with nothing typed takes no timer wake-ups, and the animation's wake-ups
+span only the bounded typed-to-submitted window), and only the *count* of typed
 characters is tracked: no secret byte is stored or rendered. Re-enabling
 echo disarms the feedback and removes any marker an aborted read left.
 The in-kernel root-unlock passphrase prompt arms the same feedback

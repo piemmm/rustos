@@ -399,9 +399,7 @@ impl Grid {
 
     /// Blank every cell and move the cursor home. The pen is left unchanged.
     pub fn clear(&mut self) {
-        for cell in &mut self.cells {
-            *cell = Cell::BLANK;
-        }
+        self.cells.fill(Cell::BLANK);
         self.cursor_col = 0;
         self.cursor_row = 0;
     }
@@ -419,9 +417,7 @@ impl Grid {
         let start = start.min(len);
         let end = end.min(len);
         if let Some(slice) = self.cells.get_mut(start..end) {
-            for cell in slice {
-                *cell = Cell::BLANK;
-            }
+            slice.fill(Cell::BLANK);
         }
     }
 

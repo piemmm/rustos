@@ -431,7 +431,12 @@ the `fw_cfg`/`ramfb` fallback on the QEMU `virt` board. On the Pi:
   §2.2) at an integer scale chosen from the display height
   (`height / 360`, clamped to 1…4: 480p → 1×, 1080p → 3×). The grid
   is a ring — the cursor wraps to a cleared top row instead of
-  scroll-copying megabytes per log line (`AGENTS.md` §2.16). After the
+  scroll-copying megabytes per log line (`AGENTS.md` §2.16). `\n`
+  advances to the next (cleared) row, `\r` returns to column zero, and
+  Backspace steps the cursor back one column (a no-op at column zero)
+  so the console's `BS SP BS` echo and secret-marker rub-outs render
+  correctly; any other unprintable byte draws the `?` fallback glyph
+  rather than being silently dropped. After the
   MMU and caches come on, each write cleans the touched scanlines to
   the point of coherency (`dc cvac` + `dsb`) so the firmware scan-out
   sees them; rendering is serialised by a private DAIF-masking

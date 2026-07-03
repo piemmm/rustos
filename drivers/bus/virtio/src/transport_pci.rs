@@ -208,9 +208,7 @@ impl Transport for PciTransport {
             }
         }
         self.selected_queue = 0;
-        for slot in &mut self.notify_offsets {
-            *slot = None;
-        }
+        self.notify_offsets.fill(None);
     }
 
     fn status(&self) -> Status {
