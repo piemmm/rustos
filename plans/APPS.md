@@ -1,0 +1,478 @@
+# APPS — Application structure, command help, and command resolution
+
+This document is the normative specification for how a RustOS application is
+**structured on disk**, how its **command-line help is authored and served**,
+and how the shell (`elsh`, `plans/SHELL.md`) **resolves a typed command name**
+to a runnable application. It extends — it does not replace — the fixed `.app`
+bundle contract in `AGENTS.md` §16.5.
+
+`AGENTS.md` is binding and wins over this document wherever they disagree.
+This spec also defers to its companions and MUST stay consistent with them:
+
+- **Application bundles / ABI** — `AGENTS.md` §9, §16.4, §16.5 and
+  `lib/abi/src/appinfo.rs` (`BundleEntry`, `validate_bundle_layout`,
+  `AppInfoHeader`) own the signed manifest, the fixed top-level layout, and the
+  dynamic-loader library policy. `userland/system/appmgr` owns loading.
+- **Shell** — `plans/SHELL.md` owns command parsing, builtins, job control,
+  and the standard-stream model. This document adds command *resolution* and
+  the `man`/`-h` help surface the shell exposes.
+- **Paths / aliases** — `plans/DRIVES.md` (path spelling, `System:`/`Apps:`)
+  and `plans/ALIAS.md` (resource references). No second path or reference
+  parser is defined here (§2.2).
+- **Terminal stack** — `plans/CURSES.md` (`lib/vt`, `lib/termcap`,
+  `lib/curses`). Help rendering to a terminal goes through that one vocabulary.
+
+## Terminology
+
+The keywords **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT**, and **MAY**
+are implementation requirements.
+
+- **App bundle** — a `<Name>.app` directory under an app store (§16.5).
+- **Command app** — an app whose manifest permits command-line execution, so a
+  user can run it by typing its command name at the shell.
+- **System app store** — the OS-provided, read-only, system-signed set of
+  command apps the shell searches first (see "Command resolution").
+- **Help document** — one structured Markdown file describing one command
+  (our modern replacement for a Unix man page).
+- **Locale** — a BCP-47 language tag (e.g. `en-US`, `fr-FR`), plus the
+  sentinel `default` (always en-US).
+
+## Status
+
+**Planned.** No code has landed for the `Help/` bundle entry, the `lib/help`
+engine, the `man` command app, or the system-app-store command-resolution
+path. The deliverables and the required `AGENTS.md` amendments are staged at
+the end of this document.
+
+> **Open design question for the maintainer.** This spec *adds* `Help/`
+> alongside the existing `Documentation/` entry, with a crisp role split
+> (§2). An alternative is to *merge* them — retire `Documentation/` and let the
+> one internationalised `Help/` tree serve both the CLI `man` and any GUI help
+> viewer — which is arguably cleaner under the no-duplication rule (§2.2). The
+> spec picks "add" because the issue asks for a help folder in addition to the
+> current structure; if the maintainer prefers the merge, only §2, §2.1, and
+> deliverable 1/amendment §16.5 change (rename `Documentation` → `Help` instead
+> of adding a variant). Flagged rather than silently chosen (§15.7).
+
+## 1. Everything is a bundle — including single-binary utilities
+
+RustOS does **not** organise programs the Unix way: there is no `/usr/bin/<app>`
+flat binary directory and no `man`-page directory in a separate tree
+(`AGENTS.md` §16.1 forbids the legacy top-level names). Every program the user
+can run — from a large graphical application down to a one-file utility like
+`ps`, `top`, or `cat` — is an **application bundle**, a `<Name>.app` directory
+whose fixed layout §16.5 defines.
+
+A small single-binary utility is a perfectly good bundle: it has an `AppInfo`
+manifest and a `Run` binary and little else. Keeping such tools as single
+binaries inside a bundle is deliberate and is preserved — the bundle is the
+*organisational* unit, not a demand that every tool grow extra machinery. The
+same bundle shape scales up: a larger app adds `Code/`, `Libraries/`,
+`Resources/`, and the internationalised `Help/` tree described below.
+
+This applies to every present and future command-line program. A new CLI tool
+is added as its own `<Name>.app` bundle (§16.5), never as a loose binary in a
+shared directory.
+
+## 2. Bundle layout (extends §16.5)
+
+The fixed top-level layout of `AGENTS.md` §16.5 is extended with one new
+entry, `Help/`:
+
+```
+/System/Apps/top.app/            # (or /Apps/Example.app for user apps)
+├── AppInfo            # Signed manifest. Required.
+├── Run                # Entry-point rxe binary. Required.
+├── Code/              # Additional rxe binaries / plugins.
+├── Libraries/         # Private shared libraries used only by this app.
+├── Resources/         # Images, locales, UI definitions, etc.
+├── DefaultSettings/   # Read-only defaults copied to the user on first launch.
+├── Documentation/     # Optional long-form bundled manuals/guides (GUI viewer).
+└── Help/              # Internationalised Markdown command help (this doc).
+```
+
+`Help/` is a **new** top-level entry, distinct from the existing
+`Documentation/`. To keep the two from becoming an overlapping,
+double-maintained documentation mechanism (§2.2, §2.3), their roles are
+separated cleanly and non-overlappingly:
+
+- **`Help/`** — the internationalised, structured-Markdown **command
+  reference**: our modern replacement for Unix man pages. It is the single
+  source both the CLI `man` command (§7) and each command's short `-h`/`-?`
+  help (§4) read from. This is the tree this document specifies.
+- **`Documentation/`** — *optional* long-form bundled documentation (a user
+  manual, tutorials, guides) opened by a graphical help viewer, unchanged from
+  §16.5. It is **not** the source for `man`/`-h`, and `lib/help` never reads
+  it. A bundle that has no long-form manual simply omits it.
+
+Because `abi-v1` is not frozen yet (§9), adding the `Help` entry is a
+straightforward in-place evolution (§2.13): the `BundleEntry` enum gains a
+`Help` variant and `validate_bundle_layout` (`lib/abi/src/appinfo.rs`) accepts
+it, with every caller and fixture updated in the same change.
+
+The permitted top-level entry names remain a closed, case-sensitive set
+validated by `validate_bundle_layout`: any entry outside the set still fails
+the whole bundle closed (§5.4). `Help/` is a directory and is **optional** — a
+bundle with no help still loads — but every OS-provided command app MUST ship
+a `Help/` tree (§8 content policy).
+
+### 2.1 The `Help/` locale tree
+
+`Help/` contains one subdirectory per locale, plus the mandatory `default`
+sentinel:
+
+```
+top.app/Help/
+├── default/           # ALWAYS en-US. The canonical source; MUST exist.
+│   ├── top.md         # one Help document per command/topic
+│   └── ...
+├── fr-FR/
+├── de-DE/
+├── es-ES/
+├── uk-UA/
+└── it-IT/
+```
+
+- `default/` is the canonical help and is **always en-US**. It MUST exist for
+  any bundle that ships `Help/`; a `Help/` tree without `default/` is a
+  packaging defect and the loader/help engine fails closed (§5.4, §2.9).
+- Each other directory is named by an exact BCP-47 tag and holds the same set
+  of document file names as `default/`, translated.
+- A locale directory MAY omit documents it has not translated yet; the help
+  engine falls back per §5. It MUST NOT contain a document name absent from
+  `default/` (there is nothing to fall back *from*, and it signals drift).
+- One Help document describes one command or topic. A bundle whose `Run` (and
+  `Code/`) expose several command names ships one document per command name,
+  named `<command>.md`. The document for the bundle's primary command shares
+  the command name (e.g. `top.md`).
+
+## 3. Help document format
+
+A Help document is a single UTF-8 Markdown file with a fixed, ordered set of
+level-2 (`##`) sections. The section *keys* are language-neutral and fixed; the
+prose under them is localised. This is what lets the help engine extract a
+short synopsis for `-h` from the same file `man` renders in full, in any
+language, without a per-language parser (§2.2).
+
+Required and optional sections, in order:
+
+| Section       | Required | Purpose                                            |
+|---------------|----------|----------------------------------------------------|
+| `NAME`        | yes      | Command name + one-line summary.                   |
+| `SYNOPSIS`    | yes      | Usage line(s); option/argument grammar.            |
+| `DESCRIPTION` | yes      | Full behaviour (the `man` body).                   |
+| `OPTIONS`     | if any   | One entry per command-line switch (see below).     |
+| `EXAMPLES`    | no       | Worked examples.                                   |
+| `EXIT STATUS` | no       | Meaning of exit codes.                             |
+| `ENVIRONMENT` | no       | Environment variables consulted.                   |
+| `SEE ALSO`    | no       | Related commands (by command name).                |
+
+Section keys are written in the document verbatim (`## NAME`), never
+translated, so the engine locates sections structurally. Only the content is
+localised.
+
+### 3.1 Command switches are language-neutral
+
+A command's **switches never change with the locale.** `top -d 0` is spelled
+`top -d 0` in every language; `-d`, `-h`, `-?` are properties of the program's
+argument parser, not of the help text. The `OPTIONS` section therefore records,
+per switch, a language-neutral **key** (the literal flag, e.g. `-d`,
+`--delay`) followed by localised description prose:
+
+```markdown
+## OPTIONS
+
+- `-d, --delay <seconds>` — <localised description of the delay option>
+- `-h, -?` — <localised description: show short help>
+```
+
+The flag tokens inside backticks are the single source of truth for the
+switch spelling and MUST match the app's argument parser exactly. A CI check
+(§8) verifies that every switch the program accepts appears in `default/`'s
+`OPTIONS`, and vice-versa, so help and code cannot drift (§2.14, §2.18).
+
+## 4. Two help surfaces: short (`-h`/`-?`) and full (`man`)
+
+There are two ways to read a command app's help, both served from the one
+`Help/` tree by the one help engine (§6):
+
+- **Short help — `<cmd> -h` or `<cmd> -?`.** The program prints a concise,
+  localised usage summary to `stdout`: the `NAME` and `SYNOPSIS`, plus the
+  `OPTIONS` list rendered compactly. It fits a screen and is meant for "what
+  are the flags again?". It exits `0`. `-h`/`-?` are reserved command switches
+  every command app SHOULD accept; a program that defines no other meaning for
+  them MUST treat them as short-help.
+- **Full help — `man <cmd>`.** The `man` command app (§7) renders the whole
+  Help document — every section — to the terminal with Markdown richness
+  (headings, emphasis, lists, tables, code blocks), paged like the historical
+  `man`, but from Markdown, in the user's locale.
+
+Both surfaces select the same document for the same command; they differ only
+in how much of it they render. Neither invents help text: if a section is
+absent, it is simply not shown (§2.9, no fabrication).
+
+## 5. Locale selection and fallback
+
+The active locale is resolved once, by the session/shell, from the user's
+language preference (a per-user setting under `/Users/<u>/Settings/`, surfaced
+to programs as an environment variable — the shell's existing `export`
+mechanism, `plans/SHELL.md`). Programs and the help engine MUST NOT invent a
+second locale source.
+
+Given a requested locale `ll-CC`, the help engine selects a document by the
+first hit in this fixed, fail-safe chain:
+
+1. `Help/ll-CC/<cmd>.md` — exact locale.
+2. `Help/ll/<any-CC>/<cmd>.md` — same language, any region (deterministic:
+   the lexicographically first matching directory, so the choice is stable).
+3. `Help/default/<cmd>.md` — the en-US canonical document.
+
+If even `default/<cmd>.md` is absent, the engine reports "no help for `<cmd>`"
+as an ordinary, non-fatal result (a clean message + non-zero status), never a
+crash (§2.9). Falling back never mixes languages *within* a document: a
+document is rendered whole from a single file.
+
+## 6. The help engine — `lib/help`
+
+There is exactly one help engine, the shared crate `lib/help` (`rustos-help`),
+so `man`, every command app's `-h`, and any graphical help viewer share one
+implementation (§2.2). Adding it updates `AGENTS.md` §3 and this plan (§6, §16.4
+list) per the `lib/*` rules (§6).
+
+`lib/help` is `no_std` + `alloc`, `#![forbid(unsafe_code)]`, and contains no
+`unwrap`/`expect`/`panic!` on any path (§2.9). It:
+
+- Locates a bundle's `Help/` tree and applies the §5 selection chain over an
+  injected read-only file seam (it performs no ambient I/O; the caller supplies
+  the capability-scoped reader, mirroring `appmgr`'s `BundleStore`).
+- Parses the structured Markdown into the fixed §3 section model with **hard,
+  fixed security bounds** (maximum document size, section count, nesting depth,
+  line length, table size) that fail closed on violation (§24.4, §19.5). These
+  are validation *bounds*, not growable capacities (§24.4).
+- Extracts the short-help view (`NAME` + `SYNOPSIS` + compact `OPTIONS`) and
+  renders the full view to the terminal through the `plans/CURSES.md` stack
+  (`lib/vt`/`lib/curses`) — never a second escape-sequence vocabulary (§2.2).
+- Treats help content as untrusted enough to be bounded and total even though
+  it is signed (a malformed or hostile document degrades to a clean error, it
+  never escapes its bounds), and ships a fuzz harness for the Markdown parser
+  (§19.6).
+
+`lib/help` is an internal building block, so it is linked **statically** by its
+consumers (§16.4) — it is not one of the curated `/System/Libraries/` classes.
+
+## 7. The `man` command
+
+`man` still exists, but it is RustOS'ised: it does **not** read the historical
+troff/roff man format (RustOS ships none), it renders the `Help/` Markdown.
+
+- `man` is itself a command app, `man.app`, in the system app store (§8) — it
+  is not a shell builtin (it needs no shell-process state, `plans/SHELL.md`).
+- `man <cmd>` resolves `<cmd>` through the **same** command-resolution path the
+  shell uses (§9) to find the owning bundle, then renders that bundle's Help
+  document for `<cmd>` in the active locale (§5) through `lib/help`.
+- `man <cmd> <topic>` selects `Help/<locale>/<topic>.md` within `<cmd>`'s
+  bundle, for bundles that ship more than one topic.
+- `man` emits a `stdinfo` `omission`/`context` record (fd 3, §20) when it falls
+  back to a non-requested locale or to `default`, so a tool or user knows the
+  page was not shown in the requested language. This never affects `man`'s exit
+  status or output correctness (§20).
+
+## 8. Command resolution — system app store then user `PATH`
+
+Core/system command apps (`top`, `ps`, `ls`, `elsh`, `man`, …) MUST be
+reachable simply by typing their command name. The shell resolves a bare
+command word (after builtins, functions, and command aliases, per
+`plans/SHELL.md`) in this fixed order:
+
+1. **The system app store first.** The OS-provided command apps. Their store
+   is a dedicated, read-only, system-signed location, proposed as
+   `/System/Apps/` (a new §16.2 subdirectory — see the amendments below),
+   addressed by the `System:` path alias (`plans/DRIVES.md`). The shell looks
+   for `<word>.app` there and, if the manifest permits execution (§9.1), runs
+   its `Run` binary through `appmgr` (signature + capability + interface-hash
+   checks, §16.5).
+2. **User `PATH` next.** The colon-separated directories in the shell's `PATH`
+   environment variable (set by `export PATH=…` or a `.profile` in the user's
+   home root), searched left to right. Each entry is resolved through the
+   single shared path parser (`plans/DRIVES.md`), and each candidate is
+   likewise a `<word>.app` bundle launched through `appmgr` — never a raw
+   loose binary (§1).
+
+Searching the system store **before** `PATH` is a security property, not just
+convenience: a user's `PATH` can never shadow a system command with an
+attacker-supplied bundle of the same name. User-installed GUI/desktop apps live
+in `/Apps` (§16.3) and are launched by the desktop/`appmgr`; they appear on the
+shell command path only if the user explicitly adds `/Apps` (or a bundle path)
+to `PATH`.
+
+Resolution is deterministic and fails closed: an unresolved name is
+`command not found` (`127`), and a resolved-but-non-executable bundle is
+`command not executable` (`126`), matching `plans/SHELL.md`'s failure model. No
+"try everything until one runs" behaviour (§2.1).
+
+### 8.1 Content and translation policy for OS help
+
+- **Every OS-provided command app MUST ship a complete `Help/` tree**: a
+  `default/` (en-US) document for every command it exposes, plus translations
+  for the standing required locale set: `fr-FR`, `de-DE`, `es-ES`, `uk-UA`,
+  `it-IT`. These documents MUST be generated and kept current; when an AI or a
+  contributor changes a command's behaviour or switches, it updates the
+  `default/` document and the translations in the same change (§2.8, §2.14,
+  §2.18). Adding a language to the required set is data (a new locale
+  directory), not new code.
+- **No foul or derogatory content.** Help documents (all locales) MUST NOT
+  contain profane, obscene, harassing, discriminatory, or otherwise derogatory
+  language. This is a hard rule for generated and human-authored content alike.
+- **Enforced in CI.** A `cargo xtask help-lint` check (run within
+  `cargo xtask ci`, §7) fails closed when, for any OS command app: `default/`
+  is missing or incomplete; a required-locale document is missing; the
+  `OPTIONS` switch keys do not match the program's actual argument parser
+  (§3.1); a document violates the `lib/help` structural bounds (§6); or a
+  content-policy word-list/heuristic flags disallowed language. A lint failure
+  is a defect fixed in the same change (§2.18), never waved through.
+
+## 9. Invocation: `top` and `top.app`, and executability
+
+A command app is runnable **both** by its bare command name and by its bundle
+name:
+
+- `top` — the command name; resolved per §8.
+- `top.app` — the bundle name; the shell recognises a trailing `.app` on a
+  command word, resolves the bundle directly, and runs it identically.
+
+Both forms run the same `Run` binary through `appmgr` and are subject to the
+identical signature and capability checks (§16.5); the `.app` spelling is a
+convenience, never a privileged bypass (§5.4).
+
+### 9.1 The manifest gates executability
+
+Whether a bundle is a command app at all is decided by its **signed
+`AppInfo` manifest**, not by its file name. A bundle is executable as a command
+only if its manifest declares a runnable entry point and the launching user's
+grants intersect the manifest's requested capabilities to a non-empty, valid
+set (§16.5, §5.2). A bundle that declares itself non-executable (a
+resource-only bundle, §10) is refused as a command (`126`) even if a user types
+its name or `<name>.app`.
+
+## 10. Resource-only ("shared-resources") bundles
+
+A bundle MAY declare in its manifest that it is **resource-only**: it has no
+runnable command entry point and exists to hold shared *data* (fonts, icons,
+locale packs, templates, help topics) for a family of apps from one publisher.
+Such a bundle still carries and enforces every §16.5 security guarantee: it is
+signed, its layout is validated, and access to its contents is
+capability-gated (§5.4). Attempting to *execute* it fails closed (§9.1).
+
+**What a resource-only bundle MUST NOT do: provide shared dynamically-linked
+libraries to *other* bundles.** `AGENTS.md` §16.4 is explicit and binding: the
+dynamic loader refuses any shared-library reference outside the requesting
+app's own `Libraries/` or the curated `/System/Libraries/`. A
+"shared-resources.app" that other apps dynamically link against for **code** is
+therefore not permitted, and the loader fails such a reference closed — this
+spec does not carve an exception, because §16.4 wins (§2.13 forbids adding a
+compatibility seam around it).
+
+The compliant ways a single publisher shares code across their own apps are:
+
+1. **Vendor the library into each app's own `Libraries/`** (statically, or as a
+   bundle-private dynamic library the loader already permits, §16.4). One
+   security update per app; the publisher rebuilds and re-signs.
+2. **Promote the code to a curated `/System/Libraries/` class**, if and only if
+   it genuinely belongs to one of that closed set (§16.4) — which requires an
+   `AGENTS.md` §16.4 amendment and is an OS decision, not a third-party one.
+
+Shared **data** (not code) is what a resource-only bundle legitimately
+provides, reached through capability-gated file access (a manifest-declared or
+user-mediated file capability, §16.5), never through the dynamic loader.
+
+## 11. Security summary
+
+Every mechanism here obeys the charter's fail-closed, least-authority model:
+
+- **Signed, verified, capability-gated launch.** Resolving and running a
+  command app — from the store or `PATH`, as `top` or `top.app` — always goes
+  through `appmgr`'s signature, content-hash, interface-hash, and capability
+  intersection checks (§16.5, §5.2). No path bypasses them.
+- **System store precedes `PATH`.** A user cannot shadow a system command
+  (§8).
+- **Help content is bounded and total.** `lib/help` parses Markdown under fixed
+  security bounds and never crashes on malformed input, with a fuzz harness
+  (§6, §19.5, §19.6).
+- **No ambient authority.** `lib/help` and `man` perform I/O only through
+  injected, capability-scoped seams; help never reads outside the target
+  bundle's `Help/` tree (§4, §5.4).
+- **No fabricated content.** Missing sections/documents/locales degrade to
+  clean messages, never invented text (§2.9).
+
+## 12. Structured advisory output (`stdinfo`, fd 3)
+
+Command apps SHOULD support the standard information stream (`stdinfo`, fd 3,
+`AGENTS.md` §20 / §20.1) **wherever it is meaningful**. Whenever a command
+hides, filters, truncates, or summarises its primary `stdout`, or when concise
+non-obvious context would help a human or an AI/tool interpret the output, it
+SHOULD emit the appropriate framed `StdInfoRecord` (`lib/abi/src/stdinfo.rs`,
+via the `lib/rt` `stdinfo` wrapper — never a device syscall, §20) using one of
+the closed canonical `kind` values (`omission`, `summary`, `schema`,
+`suggestion`, `context`). It is optional and ignorable by construction:
+
+- `stdinfo` is **advisory only** and MUST NOT affect correctness, exit status,
+  scripting semantics, or pipeline behaviour (§20.1). A `stdinfo` write
+  failure never changes `$?` (`plans/SHELL.md`).
+- It is emitted best-effort and non-blocking when no consumer is attached
+  (§20.1); a program with no fd 3 attached simply proceeds.
+- The help surfaces here already use it: the `man` command emits an
+  `omission`/`context` record on a locale fallback (§7), and a command's
+  short help (§4) MAY note omitted detail the same way.
+- Records MUST stay terse, actionable, and free of the content §20.1 forbids
+  (progress spam, secrets, capability tokens, security/audit events — those go
+  to `lib/log`, §19.4 — or instructions to AI agents). Consumers treat
+  `stdinfo` as untrusted data about the command, never as authority (§20.1).
+
+Where a command has nothing non-obvious to add, it emits nothing: `stdinfo` is
+a channel for *useful* advisory metadata, not a requirement to speak on every
+invocation.
+
+## 13. Deliverables and required `AGENTS.md` amendments
+
+Staged work (dependencies: the bundle/`appmgr` stack and `plans/CURSES.md`,
+both landed; `plans/SHELL.md` command execution):
+
+1. **`lib/abi` — add a `BundleEntry::Help` variant** (evolve in place, §2.13):
+   extend `as_str`/`ALL`, its rustdoc, the `appinfo` tests, and
+   `docs/src/abi/appinfo.md`; regenerate the C header (`cargo xtask c-header`,
+   §9). `appmgr`'s layout validation and `validate_bundle_layout` follow for
+   free. (If the maintainer chooses the merge alternative in the Status note,
+   this becomes a rename of `Documentation` → `Help` instead.)
+2. **`lib/help` (`rustos-help`)** — the one help engine (§6): `Help/`-tree
+   location + §5 fallback, bounded structured-Markdown parse, short/full
+   render over `lib/vt`/`lib/curses`, injected read seam, unit tests, rustdoc,
+   `docs/src/lib/help.md`, and a `fuzz_help` harness (§19.6). Updates §3/§16.4
+   crate lists.
+3. **`man.app`** — the RustOS `man` command app (§7); its own `Help/` tree.
+4. **Shell command resolution (`plans/SHELL.md`)** — system-app-store-then-
+   `PATH` resolution (§8), `.app`-suffix invocation (§9), the `-h`/`-?`
+   short-help convention (§4).
+5. **`cargo xtask help-lint`** — the §8.1 content/completeness/switch-drift
+   check, wired into `cargo xtask ci` (§7).
+6. **`Help/` trees for the existing command apps** (`ps`, `top`, `ls`, `cat`,
+   `cp`, `mv`, `rm`, `chmod`, `chown`, `mount`, `getcap`, `setcap`, `useradd`,
+   `groupadd`, `elsh`, `sysinfo`, `terminal`, …) in `default/` plus the
+   required locales (§8.1).
+
+7. **`stdinfo` adoption in command apps (§12)** — emit the appropriate
+   `StdInfoRecord` (via the `lib/rt` wrapper) wherever a command omits,
+   summarises, or adds non-obvious context to `stdout`, starting with `man`'s
+   locale-fallback record (§7); advisory-only, never changing exit status.
+
+Required `AGENTS.md` amendments (each with a one-line rationale in PLAN.md's
+"Charter Amendments" section, §13):
+
+- **§16.5** — add the `Help/` bundle entry beside `Documentation/`, document
+  its role split (§2) and the locale-tree structure (§2.1).
+- **§16.4** — note that the internationalised `Help/` tree is what `man` and
+  the CLI short-help read, distinct from the GUI `Documentation/` viewer.
+- **§16.2** — add `Apps/` under `/System` as the read-only, system-signed
+  system app store (§8), and update the §16.2 authoritative subdirectory list.
+- **§16.6/§5.2** — no new capability is introduced for help or command
+  resolution (existing file-access and driver/app-load gates suffice, §5.2
+  minimalism); state this explicitly so none is added speculatively.

@@ -3474,6 +3474,38 @@ wasm32 (no trap instruction).
   targets, exercising `Time64`/ipc/sysinfo + `cap_query`/`clock_get`; the new
   decoders are fuzzed with a regression corpus.
 
+## APPS — application structure, command help, and command resolution (`plans/APPS.md`)
+
+**Status: planned.** Specifies how every program — from a graphical app down
+to a single-binary utility like `ps`/`top`/`cat` — is organised as a
+`<Name>.app` bundle (§16.5), how its command-line help is authored and served,
+and how the shell resolves a typed command name to a runnable bundle. Binding
+design lives in `plans/APPS.md`. Key decisions: the §16.5 bundle gains a new
+internationalised `Help/` tree of structured-Markdown "manpages" beside the
+existing `Documentation/` entry, with a crisp role split (`Help/` feeds the
+RustOS `man` command and CLI short-help; `Documentation/` stays the optional
+long-form GUI-viewer manual) — an in-place `abi-v1` addition of a
+`BundleEntry::Help` variant (§2.13); the spec flags the merge alternative
+(retire `Documentation/`) as an open maintainer question (§15.7). One
+shared help engine `lib/help` (`rustos-help`) extracts short `-h`/`-?` help and
+renders full `man` pages over `lib/vt`/`lib/curses`, bounded and fuzzed; command
+switches stay language-neutral while help prose is localised (`default/` =
+en-US plus `fr-FR`/`de-DE`/`es-ES`/`uk-UA`/`it-IT`), enforced by a
+`cargo xtask help-lint` (completeness, switch-drift, no foul/derogatory
+content); the shell resolves a bare command from a read-only system app store
+first, then user `PATH`, launching `<name>.app` through `appmgr` (`top` and
+`top.app` both run, manifest-gated). A cross-app *shared-library* bundle is
+declined — §16.4 refuses cross-bundle library references — so a resource-only
+bundle may share **data**, not dynamically-linked code. Required charter
+amendments (§16.5 `Help/`, §16.4 wording, a new `/System/Apps/` under §16.2,
+and an explicit §5.2 note that no new capability is added) are staged in
+`plans/APPS.md` and to be logged in "Charter Amendments" when implemented.
+Command apps SHOULD also emit the structured advisory `stdinfo` stream (fd 3,
+§20) wherever it is meaningful (e.g. `man`'s locale-fallback record) —
+advisory-only, never affecting exit status or pipeline behaviour.
+
+---
+
 ## USB — modular USB stack + device hot-removal (`plans/USB.md`)
 
 **Status: planned (U1–U5).** Splits the metal-proven single-process keyboard
