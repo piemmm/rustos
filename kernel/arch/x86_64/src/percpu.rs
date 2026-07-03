@@ -29,7 +29,7 @@
 //! index — they fail closed with [`InitError::CpuIndexOutOfRange`]. This mirrors the aarch64
 //! `smp::SecondaryStackPool` / riscv64 `smp::SecondaryStackPool`
 //! caller-sized secondary-bring-up pools and the crate's own
-//! [`crate::kernel_arch::X86_64ArchStorage`].
+//! `crate::kernel_arch::X86_64ArchStorage`.
 //!
 //! # Why one IDT per CPU?
 //!

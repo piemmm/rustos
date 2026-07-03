@@ -1,5 +1,5 @@
 //! x86_64 I/O-port transport for the shared `fw_cfg` DMA client
-//! ([`rustos_itest_fwcfg`]).
+//! ([`rustos_fwcfg`]).
 //!
 //! The `fw_cfg` DMA protocol itself lives in the shared crate; this
 //! module supplies only the x86_64 half of the [`DmaAddressRegister`]
@@ -22,7 +22,7 @@
 
 use rustos_abi::PortIo;
 use rustos_arch_x86_64::pio::x86_port_io;
-use rustos_itest_fwcfg::DmaAddressRegister;
+use rustos_fwcfg::DmaAddressRegister;
 
 /// I/O port holding the most-significant half of the `fw_cfg` DMA address
 /// register.

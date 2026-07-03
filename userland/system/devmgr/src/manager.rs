@@ -14,7 +14,6 @@
 //! an error), a refused unbroken tie, and a failed
 //! load are all visible to external audit consumers.
 
-use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use rustos_abi::hwtree::HwResource;
@@ -104,8 +103,12 @@ impl<'m> DeviceManager<'m> {
     /// highest-priority matching candidate binds; an unbroken tie
     /// between distinct candidates leaves the node unbound and is
     /// audited as a packaging defect. A node matching no candidate is
-    /// left unbound and logged — never an error. A driver
-    /// matched by several nodes is loaded once and serves them all.
+    /// left unbound and logged — never an error. A driver matched by
+    /// several nodes is loaded once **per node**: each load spawns its
+    /// own instance holding exactly that node's resource grants, so a
+    /// shared instance would leave every node after the first granted
+    /// to no one and silently dead (two identical virtio-input devices
+    /// — a keyboard and a mouse — are the canonical case).
     /// A load refusal fails only that node, closed; the walk
     /// continues so one bad image cannot block the rest of the boot.
     pub fn autoload(
@@ -116,7 +119,6 @@ impl<'m> DeviceManager<'m> {
         loader: &mut dyn DriverLoader,
     ) -> AutoloadReport {
         let mut report = AutoloadReport::default();
-        let mut bound_paths: BTreeMap<&str, DriverHandle> = BTreeMap::new();
         for node in tree {
             if node.is_root() {
                 continue;
@@ -148,35 +150,32 @@ impl<'m> DeviceManager<'m> {
                 }
                 MatchResolution::Winner { candidate, .. } => {
                     let path = candidates[candidate].path;
-                    let handle = match bound_paths.get(path) {
-                        Some(existing) => *existing,
-                        None => match loader.load(path, node.resources(), caller_caps) {
-                            Ok(handle) => {
-                                bound_paths.insert(path, handle);
-                                handle
-                            }
-                            Err(errno) => {
-                                let mut ebuf = [0u8; 12];
-                                let errno_str = format_i32(errno.as_i32(), &mut ebuf);
-                                self.audit_node(
-                                    events::NODE_LOAD_FAILED,
-                                    Level::Warn,
-                                    node.id(),
-                                    &[
-                                        Field {
-                                            key: "path",
-                                            value: rustos_log::FieldValue::Str(path),
-                                        },
-                                        Field {
-                                            key: "errno",
-                                            value: rustos_log::FieldValue::Str(errno_str),
-                                        },
-                                    ],
-                                );
-                                report.load_failures += 1;
-                                continue;
-                            }
-                        },
+                    // One instance per matched node: the loader spawns each
+                    // load into its own process holding exactly this node's
+                    // resource grants, so no cross-node cache is kept.
+                    let handle = match loader.load(path, node.resources(), caller_caps) {
+                        Ok(handle) => handle,
+                        Err(errno) => {
+                            let mut ebuf = [0u8; 12];
+                            let errno_str = format_i32(errno.as_i32(), &mut ebuf);
+                            self.audit_node(
+                                events::NODE_LOAD_FAILED,
+                                Level::Warn,
+                                node.id(),
+                                &[
+                                    Field {
+                                        key: "path",
+                                        value: rustos_log::FieldValue::Str(path),
+                                    },
+                                    Field {
+                                        key: "errno",
+                                        value: rustos_log::FieldValue::Str(errno_str),
+                                    },
+                                ],
+                            );
+                            report.load_failures += 1;
+                            continue;
+                        }
                     };
                     let mut hbuf = [0u8; 16];
                     let handle_str = format_hex_u64(handle.as_u64(), &mut hbuf);
@@ -551,23 +550,55 @@ mod tests {
     }
 
     #[test]
-    fn shared_driver_is_loaded_once_and_serves_every_matched_node() {
+    fn a_driver_matched_by_two_nodes_loads_one_instance_per_node() {
+        // The regression for the QEMU virtio keyboard+mouse pair: two nodes
+        // matching the same driver each need their own loaded instance — the
+        // loader grants each instance exactly its node's resources, so a
+        // shared load would leave the second device granted to no one and
+        // silently dead.
         let uart = [DriverBindKey::new(2, compat(b"arm,pl011"))];
         let candidates = [DriverCandidate {
             path: "/d/uart",
             bind_keys: &uart,
         }];
+        let window_a = HwResource::mmio(0x0900_0000, 0x1000);
+        let window_b = HwResource::mmio(0x0900_1000, 0x1000);
         let tree = [
-            node(2, HwDeviceClass::Serial, &[compat(b"arm,pl011")]),
-            node(3, HwDeviceClass::Serial, &[compat(b"arm,pl011")]),
+            node_with_resources(
+                2,
+                HwDeviceClass::Serial,
+                &[compat(b"arm,pl011")],
+                &[window_a],
+            ),
+            node_with_resources(
+                3,
+                HwDeviceClass::Serial,
+                &[compat(b"arm,pl011")],
+                &[window_b],
+            ),
         ];
         let sink = RecordingSink::new();
         let mut loader = MockLoader::new();
         let report =
             DeviceManager::new(&sink).autoload(&tree, &candidates, &loader_caps(), &mut loader);
-        assert_eq!(loader.calls, ["/d/uart"], "one load serves both nodes");
+        assert_eq!(
+            loader.calls,
+            ["/d/uart", "/d/uart"],
+            "each matched node loads its own instance"
+        );
+        assert_eq!(
+            loader.resources_seen,
+            [
+                ("/d/uart".to_string(), alloc::vec![window_a]),
+                ("/d/uart".to_string(), alloc::vec![window_b]),
+            ],
+            "each instance is granted exactly its own node's resources"
+        );
         assert_eq!(report.bindings.len(), 2);
-        assert_eq!(report.bindings[0].handle, report.bindings[1].handle);
+        assert_ne!(
+            report.bindings[0].handle, report.bindings[1].handle,
+            "each node binds its own instance"
+        );
         let ids = sink.ids();
         assert_eq!(
             ids.iter().filter(|&&id| id == events::NODE_BOUND.0).count(),

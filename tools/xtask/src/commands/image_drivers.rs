@@ -75,6 +75,11 @@ pub const USB_XHCI_STORE_PATH: &[&[u8]] = &[b"Drivers", b"bus_usb", b"xhci", b"R
 /// `usb_kbd` leaf naming the (vendor-neutral) driver.
 pub const USB_KBD_STORE_PATH: &[&[u8]] = &[b"Drivers", b"input", b"usb_kbd", b"Run"];
 
+/// Store path of the virtio-input keyboard/pointer driver bundle: class
+/// `input`, the `virtio_kbd` leaf naming the (vendor-neutral) driver — the
+/// same path the `-M virt` autoload vertical's fixture plants.
+pub const VIRTIO_KBD_STORE_PATH: &[&[u8]] = &[b"Drivers", b"input", b"virtio_kbd", b"Run"];
+
 /// Cross-compile `package` for the freestanding aarch64 target, convert the
 /// linked PIE ELF to a production-biased `rxe`, and wrap it as the signed
 /// payload of a `kind = UserSpace` bundle requesting exactly `caps` and
@@ -247,6 +252,34 @@ pub fn build_usb_kbd_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
     )
 }
 
+/// Build and sign the virtio-input keyboard/pointer driver bundle.
+///
+/// The QEMU `virt` sibling of the USB keyboard: it maps its granted
+/// register window (`CAP_MMIO_MAP`), carves its virtqueue DMA slab
+/// (`CAP_MEM_DMA`), parks on the device's interrupt line (`CAP_IRQ_BIND`),
+/// and injects decoded key edges into the kernel input-focus arbiter
+/// (`CAP_INPUT_INJECT`) — and nothing more. Carries
+/// `rustos_drv_input_virtio_input::BIND_KEYS`, so it autoloads against a
+/// discovered virtio-input node (and stays unbound on the Pi, whose tree
+/// carries none — §18.4).
+///
+/// # Errors
+///
+/// As [`build_vcmailbox_bundle`].
+pub fn build_virtio_kbd_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
+    build_bundle(
+        ctx,
+        "rustos-drv-input-virtio-kbd",
+        &[
+            CapabilityId::MMIO_MAP,
+            CapabilityId::MEM_DMA,
+            CapabilityId::IRQ_BIND,
+            CapabilityId::INPUT_INJECT,
+        ],
+        rustos_drv_input_virtio_input::BIND_KEYS,
+    )
+}
+
 /// Fail-closed sanity check on a freshly composed bundle before it is planted
 /// into the image (never ship a malformed store entry).
 ///
@@ -299,6 +332,7 @@ fn cross_compile_driver(ctx: &Context, package: &str) -> Result<Vec<u8>, String>
         "rustos-drv-bus-usb-vl805" => "drivers/bus/usb/vl805",
         "rustos-drv-bus-usb" => "drivers/bus/usb/xhci",
         "rustos-drv-input-usb-kbd" => "drivers/input/usb_kbd",
+        "rustos-drv-input-virtio-kbd" => "drivers/input/virtio_kbd",
         other => return Err(format!("image: no source dir mapped for driver {other}")),
     };
     let driver_dir = ctx.workspace_root.join(rel_dir);

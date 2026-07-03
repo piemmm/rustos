@@ -18,13 +18,19 @@
 //! to the point of coherency (`clean_dcache_range`) so the HVS
 //! scan-out (which reads physical SDRAM) sees the rendered pixels.
 //!
-//! Fail closed: no mailbox node, a detached display
-//! (`0×0` size), or any failed/malformed firmware answer leaves the
-//! video console unconfigured and the UART keeps the console
-//! (`crate::serial` routes through `write_bytes` only when
-//! `is_active` reports a configured surface). QEMU's `virt` board has
-//! no mailbox node, so the existing UART-backed verticals are
-//! unaffected.
+//! On QEMU's `virt` board there is no firmware mailbox; when the tree
+//! instead carries a `qemu,fw-cfg-mmio` node **and** QEMU was started
+//! with `-device ramfb`, the console programs the `ramfb` scan-out
+//! (over the shared `rustos_fwcfg` client) to a statically-reserved
+//! guest-RAM surface and renders into that — the same renderer, glyph
+//! atlas, and publication discipline as the mailbox path, only the
+//! surface source differs.
+//!
+//! Fail closed: no mailbox node and no ramfb device, a detached
+//! display (`0×0` size), or any failed/malformed firmware answer
+//! leaves the video console unconfigured and the UART keeps the
+//! console (`crate::serial` routes through `write_bytes` only when
+//! `is_active` reports a configured surface).
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -98,6 +104,27 @@ const MAX_SCALE: u32 = 4;
 /// mode (480p → 1×, 720p → 2×, 1080p → 3×, 2160p → 4×): enough boot log
 /// to read, large enough to read it on a TV across a room.
 const ROWS_PER_SCALE: u32 = 360;
+
+/// Fixed scan-out width of the QEMU `virt` ramfb boot console.
+///
+/// `ramfb` exposes no display to probe (there is no EDID): the guest
+/// chooses the geometry and QEMU sizes its window to match. A classic
+/// 4:3 mode is large enough for a useful boot log while keeping the
+/// statically-reserved surface modest (3 MiB of kernel BSS).
+pub const RAMFB_WIDTH_PX: u32 = 1024;
+
+/// Fixed scan-out height of the QEMU `virt` ramfb boot console.
+pub const RAMFB_HEIGHT_PX: u32 = 768;
+
+/// Text geometry of the fixed-size ramfb surface.
+///
+/// The surface is tightly packed (stride == width), so this is a pure
+/// function of the two constants above; host-testable next to
+/// [`Geometry::for_display`].
+#[must_use]
+pub fn ramfb_geometry() -> Option<Geometry> {
+    Geometry::for_display(RAMFB_WIDTH_PX, RAMFB_HEIGHT_PX, RAMFB_WIDTH_PX * 4)
+}
 
 /// Validated framebuffer text geometry: the scan-out extents plus the
 /// glyph scale the policy chose for them.
@@ -424,13 +451,15 @@ mod metal {
 
     use rustos_abi::RegisterWindow;
     use rustos_fdt::Fdt;
+    use rustos_fwcfg::{FwCfg, MmioDma, RamfbConfig, DRM_FORMAT_XRGB8888};
     use rustos_vcmailbox::{
         arm_physical_to_bus, MmioMailbox, DEFAULT_BUS_ALIAS, DEFAULT_POLL_BUDGET,
         MAILBOX_REGS_LEN_BYTES, PROPERTY_LEN_BYTES,
     };
 
     use super::{
-        bring_up, find_mailbox, merge_bands, DirtyBand, DiscoveredVideo, TextConsole, VIDEO_ACTIVE,
+        bring_up, find_mailbox, merge_bands, ramfb_geometry, DirtyBand, DiscoveredMailbox,
+        DiscoveredVideo, Geometry, TextConsole, VIDEO_ACTIVE,
     };
 
     /// Serialises post-MMU rendering (cursor + surface writes) across
@@ -542,8 +571,10 @@ mod metal {
     static PROPERTY_BUFFER: PropertyBuffer =
         PropertyBuffer(UnsafeCell::new([0; PROPERTY_LEN_BYTES]));
 
-    /// Discover the firmware mailbox in `fdt`, probe the display, and
-    /// bring the framebuffer console up.
+    /// Discover the board's display path in `fdt` and bring the
+    /// framebuffer console up: the `VideoCore` firmware mailbox where
+    /// the tree carries one (the Pi), else the QEMU `virt` `fw_cfg` /
+    /// `ramfb` fallback.
     ///
     /// **Boot-CPU, pre-MMU only**: it must run before
     /// `enable_mmu_and_vectors` (with the data caches off the
@@ -551,11 +582,20 @@ mod metal {
     /// maintenance, and the cell writes below need the single-threaded
     /// boot CPU) and before SMP bring-up. On success the console output
     /// switches to the screen ([`super::is_active`]); on any failure —
-    /// no mailbox node (QEMU `virt`), no attached display, a rejected
+    /// no mailbox and no ramfb device, no attached display, a rejected
     /// or malformed firmware answer — the UART keeps the console (fail
     /// closed).
     pub fn configure_from_fdt(fdt: &Fdt<'_>) -> Option<DiscoveredVideo> {
-        let mailbox = find_mailbox(fdt)?;
+        match find_mailbox(fdt) {
+            Some(mailbox) => configure_mailbox(mailbox),
+            None => configure_ramfb(fdt),
+        }
+    }
+
+    /// Bring the Pi's mailbox-allocated framebuffer console up: probe
+    /// the attached display over the firmware property channel and
+    /// publish the firmware-allocated surface.
+    fn configure_mailbox(mailbox: DiscoveredMailbox) -> Option<DiscoveredVideo> {
         if mailbox.len < MAILBOX_REGS_LEN_BYTES as u64 {
             return None;
         }
@@ -580,17 +620,89 @@ mod metal {
         let configured = bring_up(&mut transport)?;
 
         let fb_base = usize::try_from(configured.phys_base).ok()?;
-        let pixel_count = configured.geometry.pixel_count();
-        if pixel_count.checked_mul(4)? > configured.len_bytes as usize {
+        // The firmware allocated `[fb_base, fb_base + len_bytes)`
+        // page-aligned inside the validated `VideoCore` SDRAM aperture
+        // (`bring_up` → `arm_physical_base`); `publish_console` checks
+        // the pixel extent fits before touching it.
+        publish_console(
+            fb_base,
+            u64::from(configured.len_bytes),
+            configured.geometry,
+            mailbox.base,
+        )
+    }
+
+    /// Pixels in the statically-reserved ramfb scan-out surface.
+    const RAMFB_PIXEL_COUNT: usize =
+        super::RAMFB_WIDTH_PX as usize * super::RAMFB_HEIGHT_PX as usize;
+
+    /// The QEMU `virt` ramfb scan-out surface: `ramfb` scans guest RAM
+    /// directly, so the kernel supplies the surface itself. A static
+    /// keeps the pre-heap bring-up allocation-free; it is kernel BSS
+    /// (zero-filled at load, not stored in the image), untouched on a
+    /// board whose tree carries a firmware mailbox instead. Mutation
+    /// discipline is `VideoSlot`'s: the boot CPU points the console at
+    /// it once, pre-publication, and every later access holds the
+    /// render lock.
+    struct RamfbSurface(UnsafeCell<[u32; RAMFB_PIXEL_COUNT]>);
+
+    // SAFETY: cross-thread access is serialised by the `VideoSlot`
+    // discipline above (single-threaded pre-publication writes; render
+    // lock afterwards).
+    unsafe impl Sync for RamfbSurface {}
+
+    static RAMFB_SURFACE: RamfbSurface = RamfbSurface(UnsafeCell::new([0; RAMFB_PIXEL_COUNT]));
+
+    /// Bring the QEMU `virt` ramfb boot console up over `fw_cfg`.
+    ///
+    /// The fallback when the tree carries no firmware mailbox: locate
+    /// the `qemu,fw-cfg-mmio` node, and — only if the `etc/ramfb` item
+    /// exists (QEMU was started with `-device ramfb`) — point the
+    /// device's scan-out at the statically-reserved surface and publish
+    /// the console. Fail closed on any miss (no fw_cfg node, no ramfb
+    /// device, a failed transfer): the UART keeps the console.
+    fn configure_ramfb(fdt: &Fdt<'_>) -> Option<DiscoveredVideo> {
+        let dma = MmioDma::from_dtb(fdt).ok()?;
+        let doorbell_base = dma.base();
+        let geometry = ramfb_geometry()?;
+        let fb_base = RAMFB_SURFACE.0.get() as usize;
+        let fb_len_bytes = (RAMFB_PIXEL_COUNT * 4) as u64;
+        let fwcfg = FwCfg::new(dma);
+        fwcfg
+            .program_ramfb(&RamfbConfig {
+                phys_base: fb_base as u64,
+                drm_format: DRM_FORMAT_XRGB8888,
+                flags: 0,
+                width: geometry.width_px,
+                height: geometry.height_px,
+                stride: geometry.stride_px * 4,
+            })
+            .ok()?;
+        publish_console(fb_base, fb_len_bytes, geometry, doorbell_base)
+    }
+
+    /// Validate the surface extent, render the initial clear, and
+    /// publish the console (the shared tail of both bring-up paths).
+    ///
+    /// **Boot-CPU, pre-publication only** (`VideoSlot` discipline). The
+    /// caller guarantees `[fb_base, fb_base + fb_len_bytes)` is
+    /// identity-addressed RAM it exclusively owns for scan-out.
+    fn publish_console(
+        fb_base: usize,
+        fb_len_bytes: u64,
+        geometry: Geometry,
+        doorbell_base: u64,
+    ) -> Option<DiscoveredVideo> {
+        let pixel_count = geometry.pixel_count();
+        if u64::try_from(pixel_count.checked_mul(4)?).ok()? > fb_len_bytes {
             return None;
         }
-        let mut console = TextConsole::new(configured.geometry);
-        // SAFETY: the firmware allocated `[fb_base, fb_base + len_bytes)`
-        // page-aligned inside the validated `VideoCore` SDRAM aperture
-        // (`bring_up` → `arm_physical_base`), `pixel_count * 4 ≤
-        // len_bytes` (checked above), and boot runs identity-addressed;
-        // no other Rust reference aliases the surface (the cell below is
-        // the only owner and is not yet published).
+        let mut console = TextConsole::new(geometry);
+        // SAFETY: the caller owns `[fb_base, fb_base + fb_len_bytes)` as
+        // identity-addressed scan-out RAM, `pixel_count * 4 ≤
+        // fb_len_bytes` (checked above), and no other Rust reference
+        // aliases the surface (the cell below is the only owner and is
+        // not yet published).
         let pixels = unsafe { core::slice::from_raw_parts_mut(fb_base as *mut u32, pixel_count) };
         console.clear(pixels);
         // SAFETY: single-threaded boot CPU, pre-publication (see
@@ -604,11 +716,11 @@ mod metal {
         }
         VIDEO_ACTIVE.store(true, Ordering::Release);
         Some(DiscoveredVideo {
-            doorbell_base: mailbox.base,
-            fb_base: configured.phys_base,
-            fb_len_bytes: u64::from(configured.len_bytes),
-            width_px: configured.geometry.width_px,
-            height_px: configured.geometry.height_px,
+            doorbell_base,
+            fb_base: fb_base as u64,
+            fb_len_bytes,
+            width_px: geometry.width_px,
+            height_px: geometry.height_px,
         })
     }
 
@@ -797,6 +909,17 @@ mod tests {
             let geometry = Geometry::for_display(1920, height, 1920 * 4).expect("geometry");
             assert_eq!(geometry.scale, scale, "height {height}");
         }
+    }
+
+    #[test]
+    fn ramfb_geometry_is_always_renderable() {
+        let geometry = ramfb_geometry().expect("the fixed ramfb mode is renderable");
+        assert_eq!(geometry.width_px, RAMFB_WIDTH_PX);
+        assert_eq!(geometry.height_px, RAMFB_HEIGHT_PX);
+        assert_eq!(geometry.stride_px, RAMFB_WIDTH_PX, "tightly packed");
+        assert!(geometry.columns() > 0);
+        assert!(geometry.rows() > 0);
+        assert_eq!(geometry.scale, 2, "768 rows select 2× glyphs");
     }
 
     #[test]

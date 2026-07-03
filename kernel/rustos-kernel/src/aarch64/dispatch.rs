@@ -1,6 +1,6 @@
 //! Production syscall-dispatch callback for the aarch64 (Raspberry Pi 4)
 //! `rustos-kernel` binary — the aarch64 sibling of
-//! [`crate::x86_64::dispatch`] (`plans/PI.md` P6c-2).
+//! `crate::x86_64::dispatch` (`plans/PI.md` P6c-2).
 //!
 //! The aarch64 `svc` trampoline shipped by
 //! [`rustos_arch_aarch64::syscall_entry`] forwards each syscall to a
@@ -41,7 +41,7 @@ pub static DISPATCH_SLOT: DispatchCallbackSlot = DispatchCallbackSlot::new();
 /// forever.
 ///
 /// The `extern "C"` signature is locked at compile time by
-/// [`_DISPATCH_SIGNATURE_PINNED`] below.
+/// `_DISPATCH_SIGNATURE_PINNED` below.
 //
 // The function must remain a safe `extern "C" fn` because that is the
 // type the arch port's `SyscallDispatchFn` typedef expects. It is only ever invoked from the `svc`

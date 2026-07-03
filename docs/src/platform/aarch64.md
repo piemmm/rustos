@@ -393,9 +393,10 @@ reap-and-relaunch cycle.
 
 Console **output** defaults to the attached display; the UART is the
 fallback when no video output exists (`plans/PI.md` P7b, `AGENTS.md`
-§10). The `video` module brings the screen console up on boards whose
-display pipeline is owned by the `VideoCore` firmware (the Raspberry
-Pi):
+§10). The `video` module brings the screen console up over whichever
+display path the firmware tree describes: the `VideoCore` mailbox on
+boards whose display pipeline the firmware owns (the Raspberry Pi), or
+the `fw_cfg`/`ramfb` fallback on the QEMU `virt` board. On the Pi:
 
 - **Discovery.** `video::find_mailbox` locates the firmware mailbox
   doorbell (`brcm,bcm2835-mbox`) with the same early-returning,
@@ -414,6 +415,17 @@ Pi):
   UART keeps the console) and then allocates a 32-bit surface at
   exactly that size. The doorbell base joins the Device-gigapage mask
   inputs, and the boot audit line records `video_console=true/false`.
+- **QEMU `virt` fallback (`ramfb`).** A tree with no mailbox is probed
+  for a `qemu,fw-cfg-mmio` node instead. When QEMU was started with
+  `-device ramfb`, `video::configure_ramfb` programs the device's
+  scan-out — over the shared `rustos-fwcfg` DMA client (`AGENTS.md`
+  §2.2), the same protocol definition the display verticals use — to a
+  statically-reserved 1024×768 surface in kernel BSS, and publishes the
+  same text console over it (`publish_console`, the shared tail of both
+  paths). The fw_cfg base stands in as the "doorbell" Device-mask
+  input. No ramfb device (`etc/ramfb` absent), no fw_cfg node, or any
+  failed transfer falls back to the UART (fail closed); the headless
+  UART-backed verticals are unchanged.
 - **Rendering.** A fixed-grid text console draws the shared 5×7 glyph
   atlas (`rustos_font::glyphs` — one font definition, `AGENTS.md`
   §2.2) at an integer scale chosen from the display height
@@ -460,13 +472,37 @@ Pi):
   poll each, recovering the moment the FIFO drains) rather than hanging
   the kernel on its first log line (`AGENTS.md` §2.1).
 
-Fail closed (`AGENTS.md` §2.9): no mailbox node (QEMU `virt` — the
-UART-backed verticals are unchanged), a detached display, or any
-rejected/malformed firmware answer leaves the UART as the console. The
-discovery, bring-up (over the protocol-faithful mock firmware — QEMU
-does not model the `VideoCore`), geometry policy, and renderer are
+Fail closed (`AGENTS.md` §2.9): no mailbox node and no ramfb device, a
+detached display, or any rejected/malformed firmware answer leaves the
+UART as the console. The discovery, bring-up (over the
+protocol-faithful mock firmware — QEMU does not model the `VideoCore`),
+geometry policy (including the fixed ramfb mode), and renderer are
 host-unit-tested; rendering on a real HDMI display is an on-metal
 acceptance item like the rest of the Pi peripherals.
+
+### Interactive QEMU session (`cargo xtask run`)
+
+`cargo xtask run --target aarch64-rpi [--profile debug|installer]
+[--cpus N] [--firmware <dir>]` builds the requested platform image
+(exactly as `cargo xtask image`) and boots it interactively on
+`qemu-system-aarch64 -M virt`. The Pi-linked kernel inside the image
+loads at `0x8_0000` (not RAM on `virt`), and QEMU's ELF `-kernel` path
+passes no DTB, so `run` additionally builds the **`virt`-board form of
+the same production kernel crate** (`RUSTOS_KERNEL_BOARD=virt` →
+`aarch64-virt.ld`) and boots it as an arm64-`Image`-wrapped raw binary
+(`rustos_mkimage::elfflat::build_virt_boot_image`), which QEMU loads at
+the `virt` link address and enters with the generated device tree in
+`x0` — the same hand-off shape as the Pi firmware. The session attaches
+the image as the virtio-blk root disk, `-device ramfb` for the windowed
+display the boot console renders on, and virtio keyboard + mouse
+devices for input from the QEMU window (the autoloaded
+`drivers/input/virtio_kbd` bundle the image ships binds the discovered
+virtio-input nodes and injects decoded keys into the input-focus
+arbiter). The invoking terminal is the guest's serial console: type the
+encrypted-root unlock passphrase there (`root` for the `debug` profile;
+empty — just press Enter — for `installer`). The session has no
+deadline; it ends when the QEMU window is closed or the guest powers
+off.
 
 ## Board-discovered interrupt controller
 
@@ -2570,7 +2606,7 @@ runtime.
 framebuffer display driver end-to-end on the `virt` board — the EL1/GICv2
 + `ramfb` analogue of the riscv64 framebuffer-display vertical. It reuses
 the shared `bring_up_el1_identity_mmu` helper above and the **same**
-shared `fw_cfg` MMIO transport (`rustos-itest-fwcfg`'s `MmioDma`) the
+shared `fw_cfg` MMIO transport (`rustos-fwcfg`'s `MmioDma`) the
 riscv64 vertical uses — the two `virt` boards expose `fw_cfg` identically,
 so there is one transport, not two (`AGENTS.md` §2.2). The vertical
 programs QEMU's `ramfb` over `fw_cfg` so a static guest-RAM surface

@@ -1,0 +1,20 @@
+[package]
+name = "rustos-fwcfg"
+description = "RustOS shared QEMU fw_cfg DMA client and ramfb programming helper: the one fw_cfg protocol definition the aarch64 framebuffer boot console and the display-class QEMU verticals build on (AGENTS.md §2.2)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# `MmioDma::from_dtb` discovers the `virt`-board `qemu,fw-cfg-mmio` node
+# through the one shared device-tree parser (`AGENTS.md` §2.2 / §18.2).
+rustos-fdt = { path = "../fdt", version = "=0.0.0" }

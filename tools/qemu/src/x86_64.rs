@@ -172,7 +172,7 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Arch;
+    use crate::{Arch, SessionKind};
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -187,7 +187,9 @@ mod tests {
             display_ramfb: false,
             extra_args: Vec::new(),
             input_keyboard: None,
+            input_mouse: false,
             serial_input: Vec::new(),
+            session: SessionKind::HeadlessTest,
         }
     }
 

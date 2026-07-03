@@ -103,9 +103,10 @@ through `rustos_drvhost::Host`, decodes the block with
 `rustos_kernel_virtio::KernelMmioMapper`, and `present`s a frame; a
 second independently-mapped window reads the pixels back to confirm they
 reached the scan-out memory QEMU consumes, before and after the reload.
-The `fw_cfg` DMA protocol lives once in the shared `rustos-itest-fwcfg`
-crate; this vertical supplies only the x86_64 IOport transport, the
-deliberate sibling of the riscv64 MMIO transport (`AGENTS.md` §2.2).
+The `fw_cfg` DMA protocol lives once in the shared `lib/fwcfg` crate
+(`rustos-fwcfg`); this vertical supplies only the x86_64 IOport
+transport, the deliberate sibling of the riscv64 MMIO transport
+(`AGENTS.md` §2.2).
 
 ## Public surface
 

@@ -41,6 +41,12 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   CARGO_INCREMENTAL: 0
+  # The audited C toolchain wrapper (tools/cc) pins clang/ld.lld at exactly
+  # 18.1.8; the runner's distro clang is older, so the pinned build is
+  # installed from apt.llvm.org (see the "Install pinned C toolchain" step)
+  # and resolved through these overrides.
+  RUSTOS_CC_CLANG: /usr/bin/clang-18
+  RUSTOS_CC_LLD: /usr/bin/ld.lld-18
   # Self-hosted runner: persist build outputs in one fixed dir on the runner's
   # own disk instead of round-tripping a >1 GB `target/` tarball through
   # GitHub's hosted cache service. `actions/checkout` only wipes the workspace,
@@ -78,6 +84,21 @@ jobs:
         run: |
           command -v cargo-deny >/dev/null || cargo install --locked cargo-deny
           command -v mdbook     >/dev/null || cargo install --locked mdbook
+
+      # The CCOMPAT C-ABI QEMU tests drive tools/cc, which fails closed unless
+      # clang/ld.lld report exactly 18.1.8 (REQUIRED_CLANG_VERSION /
+      # REQUIRED_LLD_VERSION). The distro's clang-18 is 18.1.3, so install the
+      # 18.1.8 build from apt.llvm.org once; RUSTOS_CC_CLANG / RUSTOS_CC_LLD
+      # (workflow env above) point the wrapper at it.
+      - name: Install pinned C toolchain (clang/lld 18.1.8)
+        run: |
+          if ! "$RUSTOS_CC_CLANG" --version 2>/dev/null | grep -q 'clang version 18\.1\.8'; then
+            wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+            chmod +x /tmp/llvm.sh
+            sudo /tmp/llvm.sh 18
+          fi
+          "$RUSTOS_CC_CLANG" --version
+          "$RUSTOS_CC_LLD" --version
 
       # Start every run from a clean slate: the self-hosted runner persists
       # `CARGO_TARGET_DIR` across runs, so wipe prior build artefacts before

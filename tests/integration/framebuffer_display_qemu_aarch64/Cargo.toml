@@ -38,5 +38,5 @@ rustos-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
 rustos-kernel-virtio = { path = "../../../kernel/virtio", version = "=0.0.0" }
 rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
 rustos-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
-rustos-itest-fwcfg = { path = "../fwcfg", version = "=0.0.0" }
+rustos-fwcfg = { path = "../../../lib/fwcfg", version = "=0.0.0" }
 rustos-test-virtio-qemu-support = { path = "../virtio_qemu_support", version = "=0.0.0" }

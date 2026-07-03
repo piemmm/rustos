@@ -168,34 +168,53 @@ impl BootData<'static> {
 
 impl BootData<'_> {
     /// Locate and validate the ACPI RSDP, whichever protocol delivered
-    /// it. `None` when the loader provided no RSDP or the record fails
-    /// validation — fail closed.
+    /// it. A PVH loader that publishes no usable `rsdp_paddr` (QEMU's
+    /// direct-boot start-info stopped carrying one) falls back to the
+    /// ACPI 6.5 §5.2.5.1 scan of the legacy BIOS window the machine
+    /// firmware publishes the RSDP in. `None` when neither source
+    /// yields a record that passes validation — fail closed.
     ///
     /// # Safety
     ///
     /// Same contract as [`BootData::load`]: the loader-published tables
-    /// live below 4 GiB in the identity-mapped window, so reading
-    /// [`acpi::RSDP_V2_LEN`] bytes at the PVH `rsdp_paddr` stays inside
-    /// mapped memory.
+    /// and the legacy BIOS window live below 4 GiB in the
+    /// identity-mapped window, so reading [`acpi::RSDP_V2_LEN`] bytes
+    /// at the PVH `rsdp_paddr` and scanning
+    /// [`acpi::LEGACY_REGION_LEN`] bytes at
+    /// [`acpi::LEGACY_REGION_BASE`] stay inside mapped memory.
     #[must_use]
     pub unsafe fn validated_rsdp(&self) -> Option<acpi::Rsdp> {
         match self {
             BootData::Multiboot2(info) => acpi::Rsdp::validate(info.rsdp()?).ok(),
             BootData::Pvh { start_info, .. } => {
-                if start_info.rsdp_paddr == 0 {
-                    return None;
+                if start_info.rsdp_paddr != 0 {
+                    // SAFETY: `rsdp_paddr` is the loader-published RSDP
+                    // address inside the identity-mapped window (the
+                    // function contract); the v2 length is the widest
+                    // form and `Rsdp::validate` re-checks both
+                    // checksums.
+                    let bytes = unsafe {
+                        core::slice::from_raw_parts(
+                            start_info.rsdp_paddr as *const u8,
+                            acpi::RSDP_V2_LEN,
+                        )
+                    };
+                    if let Ok(rsdp) = acpi::Rsdp::validate(bytes) {
+                        return Some(rsdp);
+                    }
                 }
-                // SAFETY: `rsdp_paddr` is the loader-published RSDP
-                // address inside the identity-mapped window (the
-                // function contract); the v2 length is the widest form
-                // and `Rsdp::validate` re-checks both checksums.
-                let bytes = unsafe {
+                // SAFETY: the legacy BIOS window is firmware-populated
+                // physical memory below 4 GiB inside the same
+                // identity-mapped window (the function contract);
+                // `find_rsdp` checksum-validates every candidate before
+                // accepting it.
+                let region = unsafe {
                     core::slice::from_raw_parts(
-                        start_info.rsdp_paddr as *const u8,
-                        acpi::RSDP_V2_LEN,
+                        acpi::LEGACY_REGION_BASE as *const u8,
+                        acpi::LEGACY_REGION_LEN,
                     )
                 };
-                acpi::Rsdp::validate(bytes).ok()
+                acpi::find_rsdp(region).map(|(_, rsdp)| rsdp)
             }
         }
     }

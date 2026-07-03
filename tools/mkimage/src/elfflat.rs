@@ -19,6 +19,26 @@ use crate::MkimageError;
 /// point it branches to (`docs/src/platform/aarch64.md`, "Boot protocol").
 pub const KERNEL_LOAD_ADDR: u64 = 0x8_0000;
 
+/// Physical address the QEMU `virt` board's kernel links at
+/// (`kernel/arch/aarch64/link/aarch64-virt.ld`): 2 MiB above the
+/// board's RAM base, leaving low RAM for the DTB QEMU generates.
+pub const VIRT_KERNEL_LOAD_ADDR: u64 = 0x4020_0000;
+
+/// RAM base of the QEMU `virt` board — the base the Linux-boot
+/// protocol's `text_offset` is measured from, and where QEMU places the
+/// generated DTB it passes in `x0`.
+const VIRT_RAM_BASE: u64 = 0x4000_0000;
+
+/// Byte length of the arm64 Linux `Image` header
+/// [`build_virt_boot_image`] prepends (Linux
+/// `Documentation/arch/arm64/booting.rst`).
+const IMAGE_HEADER_LEN: usize = 64;
+
+/// `code0` of the emitted `Image` header: the AArch64 `b #64`
+/// instruction, branching over the 64-byte header into the kernel's
+/// first byte (the boot stub's `_start`).
+const IMAGE_HEADER_BRANCH: u32 = 0x1400_0010;
+
 /// Upper bound on the emitted flat image, in bytes. A defence bound against a malformed ELF demanding a huge zero-fill,
 /// not a kernel-size capacity: the kernel is a few MiB; 64 MiB is far
 /// beyond any honest layout.
@@ -38,16 +58,18 @@ struct LoadSeg {
     offset: usize,
 }
 
-/// Convert the freestanding aarch64 kernel ELF `elf` into the flat
-/// `kernel8.img` bytes the Pi firmware loads at [`KERNEL_LOAD_ADDR`].
+/// Convert the freestanding aarch64 kernel ELF `elf` into flat bytes
+/// loaded byte-for-byte at `load_addr` and entered at their first byte
+/// (the Pi image passes [`KERNEL_LOAD_ADDR`]; the QEMU `virt` boot image
+/// passes [`VIRT_KERNEL_LOAD_ADDR`]).
 ///
 /// # Errors
 ///
 /// [`MkimageError::KernelElf`] if `elf` is not a statically-linked
 /// little-endian `ELF64` aarch64 executable whose `PT_LOAD` layout starts
-/// and enters at [`KERNEL_LOAD_ADDR`], or if any segment is truncated,
+/// and enters at `load_addr`, or if any segment is truncated,
 /// overlapping, or beyond [`MAX_FLAT_BYTES`].
-pub fn elf_to_flat(elf: &[u8]) -> Result<Vec<u8>, MkimageError> {
+pub fn elf_to_flat(elf: &[u8], load_addr: u64) -> Result<Vec<u8>, MkimageError> {
     if elf.len() < ELF64_HEADER_LEN {
         return Err(MkimageError::KernelElf(
             "file too short for an ELF64 header",
@@ -80,14 +102,14 @@ pub fn elf_to_flat(elf: &[u8]) -> Result<Vec<u8>, MkimageError> {
     let Some(first) = loads.first() else {
         return Err(MkimageError::KernelElf("no PT_LOAD segments"));
     };
-    if first.paddr != KERNEL_LOAD_ADDR {
+    if first.paddr != load_addr {
         return Err(MkimageError::KernelElf(
-            "kernel is not linked at the Pi load address 0x8_0000",
+            "kernel is not linked at the requested load address",
         ));
     }
-    if entry != KERNEL_LOAD_ADDR {
+    if entry != load_addr {
         return Err(MkimageError::KernelElf(
-            "kernel entry point is not the image start (firmware branches to the first byte)",
+            "kernel entry point is not the image start (the loader branches to the first byte)",
         ));
     }
     for pair in loads.windows(2) {
@@ -102,7 +124,7 @@ pub fn elf_to_flat(elf: &[u8]) -> Result<Vec<u8>, MkimageError> {
 
     let flat_len = loads
         .iter()
-        .map(|s| s.paddr - KERNEL_LOAD_ADDR + s.filesz)
+        .map(|s| s.paddr - load_addr + s.filesz)
         .max()
         .unwrap_or(0);
     if flat_len == 0 {
@@ -118,11 +140,46 @@ pub fn elf_to_flat(elf: &[u8]) -> Result<Vec<u8>, MkimageError> {
     for seg in &loads {
         let filesz = usize::try_from(seg.filesz)
             .map_err(|_| MkimageError::KernelElf("segment too large"))?;
-        let dst = usize::try_from(seg.paddr - KERNEL_LOAD_ADDR)
+        let dst = usize::try_from(seg.paddr - load_addr)
             .map_err(|_| MkimageError::KernelElf("segment too far"))?;
         flat[dst..dst + filesz].copy_from_slice(&elf[seg.offset..seg.offset + filesz]);
     }
     Ok(flat)
+}
+
+/// Convert a QEMU-`virt`-linked kernel ELF into the raw boot image
+/// `qemu-system-aarch64 -M virt -kernel` loads with a DTB pointer in
+/// `x0`.
+///
+/// QEMU's ELF `-kernel` path passes **no** DTB (`x0 = 0`), so the
+/// interactive `cargo xtask run` session boots the *Linux-boot* path
+/// instead: an arm64 `Image` header whose `text_offset` places the
+/// header at `link address − 64` — landing the kernel's first byte
+/// exactly at its [`VIRT_KERNEL_LOAD_ADDR`] link address — and whose
+/// `code0` branches over the header into the boot stub. QEMU then
+/// generates the board's real device tree, places it at the RAM base,
+/// and enters with `x0` pointing at it, exactly like the Pi firmware.
+///
+/// # Errors
+///
+/// As [`elf_to_flat`], against [`VIRT_KERNEL_LOAD_ADDR`].
+pub fn build_virt_boot_image(elf: &[u8]) -> Result<Vec<u8>, MkimageError> {
+    let flat = elf_to_flat(elf, VIRT_KERNEL_LOAD_ADDR)?;
+    let text_offset = VIRT_KERNEL_LOAD_ADDR - VIRT_RAM_BASE - IMAGE_HEADER_LEN as u64;
+    let image_size = (IMAGE_HEADER_LEN + flat.len()) as u64;
+    let mut image = Vec::with_capacity(IMAGE_HEADER_LEN + flat.len());
+    image.extend_from_slice(&IMAGE_HEADER_BRANCH.to_le_bytes()); // code0
+    image.extend_from_slice(&0u32.to_le_bytes()); // code1
+    image.extend_from_slice(&text_offset.to_le_bytes());
+    // A zero image_size makes loaders fall back to the legacy fixed
+    // offset and ignore text_offset, so it must be honest.
+    image.extend_from_slice(&image_size.to_le_bytes());
+    image.extend_from_slice(&0u64.to_le_bytes()); // flags: little-endian
+    image.extend_from_slice(&[0u8; 24]); // res2..res4
+    image.extend_from_slice(b"ARM\x64"); // magic
+    image.extend_from_slice(&[0u8; 4]); // res5
+    image.extend_from_slice(&flat);
+    Ok(image)
 }
 
 /// Decode and bound-check every `PT_LOAD` program header.
@@ -287,8 +344,45 @@ pub(crate) mod tests_support {
 
 #[cfg(test)]
 mod tests {
-    use super::tests_support::{sample_elf, w16, w64, Seg};
+    use super::tests_support::{sample_elf, sample_kernel, w16, w64, Seg};
     use super::*;
+
+    #[test]
+    fn virt_boot_image_carries_a_valid_arm64_image_header() {
+        let code = [0xde, 0xad, 0xbe, 0xef];
+        let elf = sample_elf(
+            VIRT_KERNEL_LOAD_ADDR,
+            &[Seg {
+                paddr: VIRT_KERNEL_LOAD_ADDR,
+                bytes: code.to_vec(),
+                bss: 0,
+            }],
+        );
+        let image = build_virt_boot_image(&elf).expect("valid virt kernel converts");
+        assert_eq!(image.len(), IMAGE_HEADER_LEN + code.len());
+        // code0 branches over the header into the kernel's first byte.
+        assert_eq!(&image[..4], &IMAGE_HEADER_BRANCH.to_le_bytes());
+        // text_offset places the *payload* exactly at the link address.
+        let text_offset = u64::from_le_bytes(image[8..16].try_into().expect("8 bytes"));
+        assert_eq!(
+            VIRT_RAM_BASE + text_offset + IMAGE_HEADER_LEN as u64,
+            VIRT_KERNEL_LOAD_ADDR
+        );
+        // image_size is honest (a zero would make loaders ignore
+        // text_offset).
+        let image_size = u64::from_le_bytes(image[16..24].try_into().expect("8 bytes"));
+        assert_eq!(image_size, image.len() as u64);
+        assert_eq!(&image[56..60], b"ARM\x64");
+        assert_eq!(&image[IMAGE_HEADER_LEN..], &code);
+    }
+
+    #[test]
+    fn virt_boot_image_rejects_a_pi_linked_kernel() {
+        // A kernel linked for the Pi's 0x8_0000 must never be wrapped as
+        // a virt boot image (it would fault at the wrong load address).
+        let elf = sample_kernel(&[0u8; 8]);
+        assert!(build_virt_boot_image(&elf).is_err());
+    }
 
     #[test]
     fn lays_segments_out_at_their_physical_offsets() {
@@ -307,7 +401,7 @@ mod tests {
                 },
             ],
         );
-        let flat = elf_to_flat(&elf).expect("valid kernel converts");
+        let flat = elf_to_flat(&elf, KERNEL_LOAD_ADDR).expect("valid kernel converts");
         // 8 code bytes, an 8-byte zero gap, 4 data bytes; bss not emitted.
         assert_eq!(flat.len(), 20);
         assert_eq!(&flat[..8], &[0x11; 8]);
@@ -317,7 +411,7 @@ mod tests {
 
     #[test]
     fn rejects_non_elf_and_truncated_input() {
-        assert!(elf_to_flat(b"not an elf").is_err());
+        assert!(elf_to_flat(b"not an elf", KERNEL_LOAD_ADDR).is_err());
         let elf = sample_elf(
             KERNEL_LOAD_ADDR,
             &[Seg {
@@ -326,7 +420,7 @@ mod tests {
                 bss: 0,
             }],
         );
-        assert!(elf_to_flat(&elf[..elf.len() - 4]).is_err());
+        assert!(elf_to_flat(&elf[..elf.len() - 4], KERNEL_LOAD_ADDR).is_err());
     }
 
     #[test]
@@ -341,15 +435,15 @@ mod tests {
         );
         let mut wrong_class = good.clone();
         wrong_class[4] = 1;
-        assert!(elf_to_flat(&wrong_class).is_err());
+        assert!(elf_to_flat(&wrong_class, KERNEL_LOAD_ADDR).is_err());
 
         let mut wrong_machine = good.clone();
         w16(&mut wrong_machine, 18, 0x3e); // EM_X86_64
-        assert!(elf_to_flat(&wrong_machine).is_err());
+        assert!(elf_to_flat(&wrong_machine, KERNEL_LOAD_ADDR).is_err());
 
         let mut pie = good;
         w16(&mut pie, 16, 3); // ET_DYN
-        assert!(elf_to_flat(&pie).is_err());
+        assert!(elf_to_flat(&pie, KERNEL_LOAD_ADDR).is_err());
     }
 
     #[test]
@@ -362,7 +456,7 @@ mod tests {
                 bss: 0,
             }],
         );
-        assert!(elf_to_flat(&wrong_base).is_err());
+        assert!(elf_to_flat(&wrong_base, KERNEL_LOAD_ADDR).is_err());
 
         let wrong_entry = sample_elf(
             KERNEL_LOAD_ADDR + 4,
@@ -372,7 +466,7 @@ mod tests {
                 bss: 0,
             }],
         );
-        assert!(elf_to_flat(&wrong_entry).is_err());
+        assert!(elf_to_flat(&wrong_entry, KERNEL_LOAD_ADDR).is_err());
     }
 
     #[test]
@@ -392,7 +486,7 @@ mod tests {
                 },
             ],
         );
-        assert!(elf_to_flat(&elf).is_err());
+        assert!(elf_to_flat(&elf, KERNEL_LOAD_ADDR).is_err());
     }
 
     #[test]
@@ -413,7 +507,7 @@ mod tests {
                 },
             ],
         );
-        assert!(elf_to_flat(&elf).is_err());
+        assert!(elf_to_flat(&elf, KERNEL_LOAD_ADDR).is_err());
     }
 
     #[test]
@@ -428,7 +522,7 @@ mod tests {
         );
         // p_memsz < p_filesz
         w64(&mut bad_sz, ELF64_HEADER_LEN + 40, 4);
-        assert!(elf_to_flat(&bad_sz).is_err());
+        assert!(elf_to_flat(&bad_sz, KERNEL_LOAD_ADDR).is_err());
 
         let mut past_eof = sample_elf(
             KERNEL_LOAD_ADDR,
@@ -441,6 +535,6 @@ mod tests {
         // p_filesz/p_memsz reach past the end of the file.
         w64(&mut past_eof, ELF64_HEADER_LEN + 32, 1 << 20);
         w64(&mut past_eof, ELF64_HEADER_LEN + 40, 1 << 20);
-        assert!(elf_to_flat(&past_eof).is_err());
+        assert!(elf_to_flat(&past_eof, KERNEL_LOAD_ADDR).is_err());
     }
 }

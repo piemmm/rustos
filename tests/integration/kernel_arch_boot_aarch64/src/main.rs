@@ -17,8 +17,13 @@
 //!    `BootMemoryMap`, installs the discovered-UART console + the `svc`
 //!    dispatch callback, and hands a validated `BootInfo` to
 //!    `kernel_core::kernel_main`.
-//! 3. The audit sink observes `BootCompleted` and writes the ARM
-//!    semihosting PASS finisher (`qemu_exit::exit_success`).
+//! 3. The audit sink observes `BootCompleted`, requires the ramfb
+//!    framebuffer boot console to be active (the harness attaches
+//!    `-device ramfb`, so the pre-MMU video bring-up must have found
+//!    the tree's `fw_cfg` node and programmed the scan-out — the
+//!    display path `cargo xtask run` relies on), and writes the ARM
+//!    semihosting PASS finisher (`qemu_exit::exit_success`); an
+//!    inactive video console is reported as FAIL.
 //!
 //! A regression that fails any init phase never reaches the finisher, so
 //! the run times out and the harness reports `Outcome::Timeout` — the
@@ -87,7 +92,15 @@ mod kernel {
     const BOOT_COMPLETED_EVENT_ID: EventId = EventId(4004);
 
     /// Sink that replays every event through [`SERIAL_SINK`] and, on
-    /// [`BOOT_COMPLETED_EVENT_ID`], reports PASS to QEMU.
+    /// [`BOOT_COMPLETED_EVENT_ID`], reports PASS to QEMU — but only if
+    /// the ramfb framebuffer boot console came up.
+    ///
+    /// The harness attaches `-device ramfb`, so the production pre-MMU
+    /// video bring-up must have discovered the `virt` tree's `fw_cfg`
+    /// node, programmed the scan-out, and switched the console to the
+    /// screen (`video::is_active`). A boot that completed with the
+    /// console still on the UART is a display regression reported as
+    /// FAIL, not a pass with a dark screen.
     struct BootCompletedExitSink;
 
     impl Sink for BootCompletedExitSink {
@@ -96,7 +109,10 @@ mod kernel {
             // records the full boot timeline.
             SerialSink::new().write_event(event);
             if event.id == BOOT_COMPLETED_EVENT_ID {
-                qemu_exit::exit_success();
+                if rustos_arch_aarch64::video::is_active() {
+                    qemu_exit::exit_success();
+                }
+                qemu_exit::exit_failure(1);
             }
         }
     }

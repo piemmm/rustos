@@ -362,7 +362,8 @@ deferred to later stages (not stubbed, §15.1).
   (+ in-kernel `KernelVirtioHost` with the owned-`DmaSlab` DMA shape),
   `storage/virtio_blk`, `network/virtio_net`. Each emulable driver has a
   `load → use → unload → reload` QEMU vertical; the shared `fw_cfg`/ramfb DMA
-  protocol lives once in `rustos-itest-fwcfg` (§2.2). The Pi 4 EMMC2
+  protocol lives once in `lib/fwcfg` (`rustos-fwcfg`, §2.2 — also the aarch64
+  framebuffer boot console's QEMU `virt` ramfb backing). The Pi 4 EMMC2
   SD-host driver (`drivers/storage/emmc2`, an Arasan/SDHCI-5.1 SD block
   driver: PIO data transfer, **interrupt-driven completion** — the
   command/transfer waits park on the controller's bound GIC line through a
@@ -2677,7 +2678,17 @@ transfer, landed in increments:
     RustFS root with the §16 skeleton, both laid down by the real
     in-tree drivers. Docs: `docs/src/install/raspberry_pi.md`. The emitted
     image boots a real Pi 4 into user mode (operator metal acceptance,
-    `plans/PI.md` P9).
+    `plans/PI.md` P9). The store also ships the signed virtio-input
+    keyboard/pointer bundle (`drivers/input/virtio_kbd`, unbound on the
+    Pi tree, §18.4), so the same image is interactively testable on QEMU
+    `virt`: **`cargo xtask run --target aarch64-rpi
+    [--profile debug|installer] [--cpus N]`** builds the image and boots
+    it windowed (`-device ramfb` + virtio keyboard/mouse + the image as
+    virtio-blk root; `Runner::run_interactive` in `tools/qemu`). The
+    aarch64 framebuffer boot console renders on `virt` through its
+    fw_cfg/ramfb fallback (`video::configure_ramfb` over `lib/fwcfg`);
+    the invoking terminal is the guest serial console for the
+    encrypted-root unlock (`docs/src/platform/aarch64.md`).
   - `images/rustos-riscv64.img`.
   - `images/rustos-web/` static tree.
 

@@ -96,8 +96,9 @@ consumes, before and after the reload. The `ramfb`/`fw_cfg` bring-up
 is test-harness code, mirroring how the virtio verticals own their
 PLIC/trap bring-up rather than placing it in the production kernel.
 The `fw_cfg` DMA protocol itself lives once in the shared
-`rustos-itest-fwcfg` crate; this vertical supplies only the riscv64
-MMIO transport (`AGENTS.md` §2.2).
+`lib/fwcfg` crate (`rustos-fwcfg`, which also serves the aarch64
+framebuffer boot console's ramfb path); this vertical supplies only
+the riscv64 MMIO transport (`AGENTS.md` §2.2).
 
 `tests/integration/framebuffer_display_qemu_aarch64`
 (`rustos-test-framebuffer-display-qemu-aarch64`, enrolled in `cargo
@@ -106,7 +107,7 @@ vertical, driving the same driver against a **real** emulated `ramfb`
 framebuffer over the EL1/GICv2 path. It reuses the shared aarch64
 bring-up (`rustos-test-virtio-qemu-support`'s FP-enable + 2 GiB identity
 MMU + EL1 vectors) and the **same** shared `fw_cfg` MMIO transport
-(`rustos-itest-fwcfg`'s `MmioDma`) the riscv64 vertical uses — the two
+(`rustos-fwcfg`'s `MmioDma`) the riscv64 vertical uses — the two
 `virt` boards expose `fw_cfg` identically, so there is one transport,
 not two (`AGENTS.md` §2.2). Because QEMU's aarch64 `-kernel <ELF>` path
 passes no DTB pointer, the vertical embeds the canonical `virt` device
@@ -181,9 +182,10 @@ capability-gated `rustos_kernel_virtio::KernelMmioMapper`, and calls
 pixels back to confirm they reached the scan-out memory, before and
 after the reload.
 
-The `fw_cfg` DMA protocol lives once in the shared `rustos-itest-fwcfg`
-crate; this vertical supplies only the x86_64 IOport transport, the
-deliberate sibling of the riscv64 MMIO transport (`AGENTS.md` §2.2).
+The `fw_cfg` DMA protocol lives once in the shared `lib/fwcfg` crate
+(`rustos-fwcfg`); this vertical supplies only the x86_64 IOport
+transport, the deliberate sibling of the riscv64 MMIO transport
+(`AGENTS.md` §2.2).
 
 ### `rustos-drv-display-rpi-hvs`
 

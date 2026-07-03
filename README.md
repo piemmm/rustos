@@ -106,6 +106,9 @@ admin capability holder, compiler bugs) are listed in `AGENTS.md` §19.9.
 cargo xtask ci          # Full pipeline a PR must pass
 cargo xtask test        # Host-side unit and integration tests
 cargo xtask docs-check  # rustdoc + mdBook (with link checking)
+cargo xtask run --target aarch64-rpi --profile debug
+                        # Build the image and boot it in a QEMU window
+                        # (display + keyboard/mouse; also --profile installer)
 cargo xtask --help      # All subcommands
 ```
 

@@ -48,6 +48,10 @@ rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
 # the framebuffer boot console's display probe + surface allocation,
 # also spoken by drivers/display/rpi_hvs.
 rustos-vcmailbox = { path = "../../../lib/vcmailbox", version = "=0.0.0" }
+# The shared QEMU fw_cfg DMA client (`AGENTS.md` §2.2): the framebuffer
+# boot console's `virt`-board ramfb fallback programs the scan-out
+# through it, the same protocol definition the display verticals use.
+rustos-fwcfg = { path = "../../../lib/fwcfg", version = "=0.0.0" }
 
 [dev-dependencies]
 # Enable the shared DTB builder for this port's `fdt`/`platform` host

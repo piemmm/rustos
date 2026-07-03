@@ -353,8 +353,10 @@ mod tests {
                 }
                 StoreRequest::Load { bundle_id, node_id } => {
                     self.loads.borrow_mut().push((bundle_id, node_id));
-                    // A distinct, non-zero handle per bundle.
-                    encode_load_reply(reply, u64::from(bundle_id) + 0x1000)
+                    // A distinct, non-zero handle per load: every load spawns
+                    // its own instance, so handles are per-instance unique.
+                    let seq = self.loads.borrow().len() as u64;
+                    encode_load_reply(reply, 0x1000 + seq)
                 }
                 StoreRequest::Unload { handle } => {
                     self.unloads.borrow_mut().push(handle);
@@ -457,7 +459,7 @@ mod tests {
     }
 
     #[test]
-    fn a_bundle_matched_by_two_nodes_is_loaded_once() {
+    fn a_bundle_matched_by_two_nodes_loads_one_instance_per_node() {
         let key = HwMatchKey::compatible(b"arm,pl011").expect("compatible fits");
         let snapshot = encode(
             1,
@@ -486,9 +488,11 @@ mod tests {
 
         run(&mut tree, &mut store, &sink, &mut reply_buf, Some(0)).expect("the initial cycle runs");
 
-        // The shared bundle 4 is loaded once (for the first matched node),
-        // but both nodes are reported bound.
-        assert_eq!(store.loads.borrow().as_slice(), &[(4, 2)]);
+        // The regression for the QEMU virtio keyboard+mouse pair: bundle 4
+        // is loaded once per matched node — the kernel grants each spawned
+        // instance exactly its own node's resources, so a shared load would
+        // leave the second device granted to no one and silently dead.
+        assert_eq!(store.loads.borrow().as_slice(), &[(4, 2), (4, 3)]);
         assert_eq!(
             sink.ids()
                 .iter()
@@ -564,10 +568,11 @@ mod tests {
 
         run(&mut tree, &mut store, &sink, &mut reply_buf, Some(1)).expect("one reaction");
 
-        // Bundle 7 loaded with handle `0x1000 + 7` on the first cycle, and
-        // that exact handle is unloaded when its node vanished.
+        // Bundle 7 loaded with the first sequential handle (`0x1001`) on the
+        // first cycle, and that exact handle is unloaded when its node
+        // vanished.
         assert_eq!(store.loads.borrow().as_slice(), &[(7, 2)]);
-        assert_eq!(store.unloads.borrow().as_slice(), &[0x1000 + 7]);
+        assert_eq!(store.unloads.borrow().as_slice(), &[0x1001]);
         assert!(sink.ids().contains(&events::NODE_UNLOADED.0));
     }
 
@@ -633,11 +638,11 @@ mod tests {
         run(&mut tree, &mut store, &sink, &mut reply_buf, Some(2)).expect("two reactions");
 
         // Loaded on cycle 1, unloaded on cycle 2 (node gone), loaded again on
-        // cycle 3 (node re-appeared) — the loaded-bundle cache was purged on
-        // the unload so the re-attach reloads rather than reporting a stale
-        // cached handle.
+        // cycle 3 (node re-appeared) — the binding was dropped on the unload
+        // so the re-attach loads a fresh instance rather than reporting a
+        // stale cached handle.
         assert_eq!(store.loads.borrow().as_slice(), &[(7, 2), (7, 2)]);
-        assert_eq!(store.unloads.borrow().as_slice(), &[0x1000 + 7]);
+        assert_eq!(store.unloads.borrow().as_slice(), &[0x1001]);
     }
 
     #[test]

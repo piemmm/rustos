@@ -5,7 +5,7 @@
 //! vectors), the `AArch64QemuEnv` serial/semihosting seam, and the
 //! one-shot boot harness all live in the shared
 //! `rustos-test-virtio-qemu-support` crate; the
-//! `fw_cfg`/`ramfb` DMA client lives in `rustos-itest-fwcfg`. This module
+//! `fw_cfg`/`ramfb` DMA client lives in `rustos-fwcfg`. This module
 //! supplies only what is unique to the aarch64 display vertical: programming
 //! `ramfb` from the embedded `virt` DTB and driving the framebuffer
 //! driver through `load -> use -> unload -> reload`, reading the presented
@@ -31,7 +31,7 @@ use rustos_drvhost::{
     DriverSpawner, Host, HostConfig, ImageSource, SpawnContext, SpawnRegisterError,
 };
 use rustos_fdt::Fdt;
-use rustos_itest_fwcfg::{FwCfg, MmioDma, RamfbConfig, DRM_FORMAT_XRGB8888};
+use rustos_fwcfg::{FwCfg, MmioDma, RamfbConfig, DRM_FORMAT_XRGB8888};
 use rustos_kernel_mem::{AddressSpace, DirectPhysMap, HostPageTable, MmioMap, VirtAddr};
 use rustos_kernel_sec::captable::{TaskCapabilities, TaskId};
 use rustos_kernel_sec::identity::UserId;

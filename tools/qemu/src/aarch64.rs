@@ -34,7 +34,7 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::process::Command;
 
-use crate::{Outcome, Spec};
+use crate::{Outcome, SessionKind, Spec};
 
 /// Default guest RAM size in mebibytes for an aarch64 QEMU integration
 /// test. Matches the x86_64 and riscv64 defaults so all three ports
@@ -100,8 +100,13 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
     argv.push("-cpu".into());
     argv.push(CPU.into());
     argv.push("-no-reboot".into());
-    argv.push("-display".into());
-    argv.push("none".into());
+    // Headless by default (the test runner captures serial only); an
+    // interactive run instead presents QEMU's default windowed display
+    // backend so a human sees the guest's ramfb scan-out.
+    if spec.session == SessionKind::HeadlessTest {
+        argv.push("-display".into());
+        argv.push("none".into());
+    }
     argv.push("-serial".into());
     argv.push("stdio".into());
     // ARM semihosting is how the freestanding kernel reports PASS/FAIL.
@@ -151,12 +156,19 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
         }
     }
 
-    // Attach a virtio-mmio keyboard for the input vertical. The runner
-    // (not this builder) drives the actual key through the QEMU monitor
-    // once the guest signals readiness; here we only present the device.
-    if spec.input_keyboard.is_some() {
+    // Attach a virtio-mmio keyboard for the input vertical (the runner
+    // drives the scripted key through the QEMU monitor once the guest
+    // signals readiness) or for a human typing into the interactive
+    // window; here we only present the device. The interactive session
+    // also gets a virtio-mmio mouse for pointer input from the window.
+    let interactive = spec.session == SessionKind::WindowedInteractive;
+    if spec.input_keyboard.is_some() || interactive {
         argv.push("-device".into());
         argv.push("virtio-keyboard-device".into());
+    }
+    if interactive || spec.input_mouse {
+        argv.push("-device".into());
+        argv.push("virtio-mouse-device".into());
     }
     argv
 }
@@ -179,7 +191,9 @@ mod tests {
             display_ramfb: false,
             extra_args: Vec::new(),
             input_keyboard: None,
+            input_mouse: false,
             serial_input: Vec::new(),
+            session: SessionKind::HeadlessTest,
         }
     }
 
@@ -217,6 +231,27 @@ mod tests {
             }
             other => panic!("expected Fail, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn windowed_interactive_argv_shows_a_display_and_attaches_input_devices() {
+        let mut spec = fixture_spec(1);
+        spec.session = SessionKind::WindowedInteractive;
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
+        assert!(
+            !argv.iter().any(|a| a == "-display"),
+            "windowed run leaves QEMU's default display backend in place"
+        );
+        assert!(argv.iter().any(|a| a == "virtio-keyboard-device"));
+        assert!(argv.iter().any(|a| a == "virtio-mouse-device"));
+    }
+
+    #[test]
+    fn headless_default_argv_attaches_no_human_input_devices() {
+        let spec = fixture_spec(1);
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
+        assert!(!argv.iter().any(|a| a == "virtio-keyboard-device"));
+        assert!(!argv.iter().any(|a| a == "virtio-mouse-device"));
     }
 
     #[test]
@@ -333,8 +368,34 @@ mod tests {
         spec.input_keyboard = Some(crate::KeyInjection {
             ready_marker: "ready".into(),
             key: "a".into(),
+            ready_occurrences: 1,
         });
         let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
         assert!(argv.iter().any(|a| a == "virtio-keyboard-device"));
+    }
+
+    #[test]
+    fn argv_attaches_mouse_after_keyboard_when_pointer_requested() {
+        // The two-identical-virtio-input-nodes topology an interactive
+        // session presents: the pointer sibling rides after the keyboard
+        // on the command line, so a headless vertical reproduces the
+        // exact enumeration order a human-facing run gets.
+        let mut spec = fixture_spec(1);
+        spec.input_keyboard = Some(crate::KeyInjection {
+            ready_marker: "ready".into(),
+            key: "a".into(),
+            ready_occurrences: 1,
+        });
+        spec.input_mouse = true;
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
+        let kbd = argv
+            .iter()
+            .position(|a| a == "virtio-keyboard-device")
+            .expect("keyboard attached");
+        let mouse = argv
+            .iter()
+            .position(|a| a == "virtio-mouse-device")
+            .expect("mouse attached");
+        assert!(kbd < mouse, "mouse rides after the keyboard");
     }
 }

@@ -60,6 +60,16 @@ pub const RSDP_SIGNATURE: [u8; 8] = *b"RSD PTR ";
 /// [`Rsdp::validate`] re-checks both checksums.
 pub const RSDP_V2_LEN: usize = 36;
 
+/// Physical base of the legacy BIOS read-only window the RSDP may live
+/// in when the boot protocol supplies no pointer (ACPI 6.5 §5.2.5.1:
+/// `0xE0000..=0xFFFFF`). `SeaBIOS` publishes its RSDP here, so a PVH
+/// boot whose start-info carries no `rsdp_paddr` recovers it by
+/// scanning this window with [`find_rsdp`].
+pub const LEGACY_REGION_BASE: u64 = 0xE_0000;
+
+/// Byte length of the [`LEGACY_REGION_BASE`] scan window.
+pub const LEGACY_REGION_LEN: usize = 0x2_0000;
+
 /// Decoded RSDP, both v1 and v2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rsdp {
@@ -127,6 +137,29 @@ impl Rsdp {
             xsdt_address,
         })
     }
+}
+
+/// Scan `region` — a mapping (or copy) of a legacy BIOS window such as
+/// [`LEGACY_REGION_BASE`] — for a valid RSDP and return its byte offset
+/// and decoded form.
+///
+/// The RSDP is guaranteed to sit on a 16-byte boundary (ACPI 6.5
+/// §5.2.5.1), so only aligned offsets are considered; every candidate
+/// signature is checksum-validated through [`Rsdp::validate`] before it
+/// is accepted — a corrupt or decoy record is skipped, never trusted.
+#[must_use]
+pub fn find_rsdp(region: &[u8]) -> Option<(usize, Rsdp)> {
+    let mut offset = 0;
+    while offset + 20 <= region.len() {
+        if region[offset..offset + 8] == RSDP_SIGNATURE {
+            let end = (offset + RSDP_V2_LEN).min(region.len());
+            if let Ok(rsdp) = Rsdp::validate(&region[offset..end]) {
+                return Some((offset, rsdp));
+            }
+        }
+        offset += 16;
+    }
+    None
 }
 
 // --- SDT header (ACPI 6.5 §5.2.6) ------------------------------------
@@ -550,6 +583,45 @@ pub(crate) mod tests {
         let s = buf.iter().fold(0u8, |a, b| a.wrapping_add(*b));
         buf[32] = 0u8.wrapping_sub(s);
         buf
+    }
+
+    #[test]
+    fn find_rsdp_locates_an_aligned_record() {
+        let mut region = vec![0u8; 4096];
+        let rsdp = build_rsdp_v1(0, 0x0FFE_22F4);
+        region[0x150..0x150 + 20].copy_from_slice(&rsdp);
+        let (offset, decoded) = find_rsdp(&region).expect("aligned RSDP must be found");
+        assert_eq!(offset, 0x150);
+        assert_eq!(decoded.rsdt_address, 0x0FFE_22F4);
+    }
+
+    #[test]
+    fn find_rsdp_skips_a_corrupt_decoy_before_the_valid_record() {
+        let mut region = vec![0u8; 4096];
+        // A signature with a broken checksum at a lower aligned offset.
+        region[0x100..0x100 + 8].copy_from_slice(&RSDP_SIGNATURE);
+        let rsdp = build_rsdp_v2(0x1234_5678, 0xDEAD_BEEF_0000);
+        region[0x200..0x200 + 36].copy_from_slice(&rsdp);
+        let (offset, decoded) = find_rsdp(&region).expect("valid RSDP must be found");
+        assert_eq!(offset, 0x200);
+        assert_eq!(decoded.xsdt_address, 0xDEAD_BEEF_0000);
+    }
+
+    #[test]
+    fn find_rsdp_ignores_a_misaligned_signature() {
+        let mut region = vec![0u8; 4096];
+        let rsdp = build_rsdp_v1(0, 1);
+        // The spec guarantees 16-byte alignment; an unaligned copy is
+        // not a legal RSDP and must not be returned.
+        region[0x108..0x108 + 20].copy_from_slice(&rsdp);
+        assert_eq!(find_rsdp(&region), None);
+    }
+
+    #[test]
+    fn find_rsdp_is_none_for_an_empty_or_signatureless_region() {
+        assert_eq!(find_rsdp(&[]), None);
+        let region = vec![0xA5u8; 4096];
+        assert_eq!(find_rsdp(&region), None);
     }
 
     #[test]

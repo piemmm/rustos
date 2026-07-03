@@ -485,6 +485,7 @@ dependencies = [
  "rustos-arch-api",
  "rustos-fdt",
  "rustos-font",
+ "rustos-fwcfg",
  "rustos-log",
  "rustos-rng",
  "rustos-vcmailbox",
@@ -915,6 +916,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-fwcfg"
+version = "0.0.0"
+dependencies = [
+ "rustos-fdt",
+]
+
+[[package]]
 name = "rustos-geometry"
 version = "0.0.0"
 
@@ -976,13 +984,6 @@ dependencies = [
 [[package]]
 name = "rustos-installer"
 version = "0.0.0"
-
-[[package]]
-name = "rustos-itest-fwcfg"
-version = "0.0.0"
-dependencies = [
- "rustos-fdt",
-]
 
 [[package]]
 name = "rustos-itest-harness"
@@ -1748,7 +1749,7 @@ dependencies = [
  "rustos-drv-display-framebuffer",
  "rustos-drvhost",
  "rustos-fdt",
- "rustos-itest-fwcfg",
+ "rustos-fwcfg",
  "rustos-itest-harness",
  "rustos-kernel-mem",
  "rustos-kernel-sec",
@@ -1769,7 +1770,7 @@ dependencies = [
  "rustos-drv-display-framebuffer",
  "rustos-drvhost",
  "rustos-fdt",
- "rustos-itest-fwcfg",
+ "rustos-fwcfg",
  "rustos-itest-harness",
  "rustos-kalloc",
  "rustos-kernel-mem",
@@ -2701,7 +2702,7 @@ dependencies = [
  "rustos-crypto",
  "rustos-drv-display-vesa",
  "rustos-drvhost",
- "rustos-itest-fwcfg",
+ "rustos-fwcfg",
  "rustos-itest-harness",
  "rustos-kernel",
  "rustos-kernel-mem",
@@ -2989,6 +2990,7 @@ dependencies = [
  "rustos-drv-bus-usb",
  "rustos-drv-bus-usb-vl805",
  "rustos-drv-input-usb-kbd",
+ "rustos-drv-input-virtio-input",
  "rustos-fuzzseed",
  "rustos-itest-harness",
  "rustos-kernel-syscall",

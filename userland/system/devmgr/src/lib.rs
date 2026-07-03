@@ -53,8 +53,8 @@ pub mod service;
 pub mod store;
 
 pub use autoload::{
-    match_and_load, unload_vanished, AutoloadState, LoadedBundles, NodeBindings, NodeDriver,
-    NodeReport, ReportedNodes,
+    match_and_load, unload_vanished, AutoloadState, NodeBindings, NodeDriver, NodeReport,
+    ReportedNodes,
 };
 pub use manager::{AutoloadReport, DeviceManager, DriverLoader, NodeBinding};
 pub use service::{run, HwTreeService};

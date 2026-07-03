@@ -9,8 +9,12 @@
 //! (signature verification, bundle bytes, grant minting, spawn) in its
 //! trusted base; this module supplies no bytes and no grants.
 //!
-//! A driver matched by several nodes is loaded **once** (keyed by its opaque
-//! `bundle_id`) and serves them all; an unmatched node is left unbound and
+//! Every matched node gets its **own** loaded driver instance: the kernel
+//! mints a fresh process per load with exactly that node's resource grants,
+//! so one loaded process can never see a sibling node's registers — two
+//! identical devices (e.g. a virtio keyboard and a virtio mouse, both
+//! device id 18) each need their own instance or the second is bound in
+//! name only and never driven. An unmatched node is left unbound and
 //! logged — never an error; a load refusal fails only
 //! that node, closed, and the walk continues. Every
 //! outcome is audited through [`rustos_log`] with the stable
@@ -27,11 +31,6 @@ use rustos_util::fmt::{format_hex_u64, format_i32};
 
 use crate::events;
 use crate::store::{load_driver, unload_driver, CatalogueDriver, DriverStoreCall};
-
-/// The set of bundles loaded so far, keyed by opaque `bundle_id` → the
-/// loaded driver's handle, so a bundle matched by several nodes is loaded
-/// once and the cached handle reported for the rest.
-pub type LoadedBundles = BTreeMap<u32, u64>;
 
 /// The last match decision reported for a node, so an unchanged decision is
 /// **not** re-logged when the reactive loop re-evaluates the tree.
@@ -63,16 +62,15 @@ pub enum NodeReport {
 pub type ReportedNodes = BTreeMap<u32, NodeReport>;
 
 /// One bound node's driver: the opaque `bundle_id` it matched and the
-/// `handle` the kernel returned for the loaded driver.
+/// `handle` the kernel returned for the loaded driver instance.
 ///
-/// A bundle matched by several nodes loads once and serves them all, so
-/// several bindings can share one `handle`; the unload-on-removal diff tears
-/// the driver down only when its **last** bound node has vanished
+/// Every load spawns a fresh driver process holding exactly its node's
+/// grants, so each binding names its own instance and `handle`; the
+/// unload-on-removal diff tears an instance down when its node vanishes
 /// ([`unload_vanished`]).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct NodeDriver {
-    /// The opaque `bundle_id` the node matched (the key into
-    /// [`LoadedBundles`]).
+    /// The opaque `bundle_id` the node matched.
     pub bundle_id: u32,
     /// The loaded driver's handle the kernel returned.
     pub handle: u64,
@@ -84,15 +82,12 @@ pub struct NodeDriver {
 pub type NodeBindings = BTreeMap<u32, NodeDriver>;
 
 /// The state the reactive match-and-load loop carries across re-evaluations:
-/// the loaded-bundle cache ([`LoadedBundles`]), the per-node decision
-/// memory ([`ReportedNodes`]), and the per-node driver bindings
-/// ([`NodeBindings`]). Bundling them keeps [`match_and_load`] /
+/// the per-node decision memory ([`ReportedNodes`]) and the per-node driver
+/// bindings ([`NodeBindings`]). Bundling them keeps [`match_and_load`] /
 /// [`crate::service::run`] to a single state argument (no
 /// argument sprawl) while giving each its own clear role.
 #[derive(Default)]
 pub struct AutoloadState {
-    /// Bundles loaded so far, so a bundle matched by several nodes loads once.
-    pub loaded: LoadedBundles,
     /// Each node's last reported decision, so an unchanged one is not
     /// re-logged on re-evaluation (see [`NodeReport`]).
     pub reported: ReportedNodes,
@@ -102,14 +97,20 @@ pub struct AutoloadState {
 }
 
 /// Match every node of `nodes` against `catalogue` and load each winner's
-/// bundle through `store`, recording loaded bundles in `state.loaded` and
-/// auditing every outcome through `sink`.
+/// bundle through `store` — **one instance per matched node** — recording
+/// the bindings in `state.bindings` and auditing every outcome through
+/// `sink`.
 ///
 /// `candidates` is the borrowed [`DriverCandidate`] view of `catalogue`
 /// (built once by the caller); `reply_buf` is the caller-owned buffer each
 /// [`load_driver`] reply is received into. Idempotent across calls: a node
-/// whose winning bundle is already in `state.loaded` is reported bound
-/// without a second load (hotplug re-match).
+/// already bound in `state.bindings` keeps its instance and is reported
+/// bound without a second load (hotplug re-match). A bundle matched by
+/// several nodes loads once **per node**: the kernel spawns each load into
+/// its own process holding exactly that node's resource grants, so a shared
+/// instance would leave every node after the first granted to no one and
+/// silently dead (two identical virtio-input devices — a keyboard and a
+/// mouse — are the canonical case).
 ///
 /// `state.reported` is the per-node dedup memory ([`ReportedNodes`]): each
 /// node's decision is logged only the first time it is reached and again only
@@ -169,8 +170,8 @@ pub fn match_and_load<C: DriverStoreCall + ?Sized>(
             }
             MatchResolution::Winner { candidate, .. } => {
                 let bundle_id = catalogue[candidate].bundle_id;
-                let handle = if let Some(handle) = state.loaded.get(&bundle_id) {
-                    *handle
+                let handle = if let Some(existing) = state.bindings.get(&id) {
+                    existing.handle
                 } else {
                     // A node already recorded load-failed fails the static
                     // load gate identically, so do not re-run the gate (nor
@@ -180,10 +181,7 @@ pub fn match_and_load<C: DriverStoreCall + ?Sized>(
                         continue;
                     }
                     match load_driver(store, bundle_id, id, reply_buf) {
-                        Ok(handle) => {
-                            state.loaded.insert(bundle_id, handle);
-                            handle
-                        }
+                        Ok(handle) => handle,
                         Err(errno) => {
                             if changed(&mut state.reported, id, NodeReport::LoadFailed) {
                                 let mut ebuf = [0u8; 12];
@@ -233,12 +231,11 @@ pub fn match_and_load<C: DriverStoreCall + ?Sized>(
 ///
 /// `present` is the set of node ids in the snapshot just observed. Every
 /// previously-bound node ([`AutoloadState::bindings`]) absent from `present`
-/// is gone: its binding is dropped, and — when no *other* still-present bound
-/// node shares the same driver `handle` (a bundle matched by several nodes is
-/// loaded once) — the kernel is asked to tear that driver down through
-/// [`unload_driver`]. The driver's `bundle_id` is then purged from
-/// `state.loaded` and its `reported` decision cleared, so if the device is
-/// re-attached the driver is loaded afresh (re-plug works with no reboot).
+/// is gone: its binding is dropped and the kernel is asked to tear its
+/// driver instance down through [`unload_driver`] (each node owns its own
+/// instance, so no other binding can share the handle). The node's
+/// `reported` decision is cleared, so if the device is re-attached the
+/// driver is loaded afresh (re-plug works with no reboot).
 ///
 /// Idempotent and fail-soft: an unload that the kernel reports already gone
 /// ([`Errno::NotFound`](rustos_abi::Errno::NotFound)) still drops the local
@@ -267,21 +264,9 @@ pub fn unload_vanished<C: DriverStoreCall + ?Sized>(
         state.bindings.remove(&node_id);
         state.reported.remove(&node_id);
 
-        // A shared driver (one bundle, several nodes) is torn down only when
-        // its *last* bound node is gone: if another live binding still names
-        // the same handle, leave the driver running.
-        if state
-            .bindings
-            .values()
-            .any(|other| other.handle == driver.handle)
-        {
-            continue;
-        }
-
-        // This was the last node the driver served: ask the kernel to tear it
-        // down and purge the loaded-bundle cache so a re-attach reloads it.
+        // The node owned its instance outright, so tear it down; a
+        // re-attach loads a fresh instance.
         let outcome = unload_driver(store, driver.handle, reply_buf);
-        state.loaded.remove(&driver.bundle_id);
         let mut hbuf = [0u8; 16];
         let handle_str = format_hex_u64(driver.handle, &mut hbuf);
         match outcome {
@@ -417,12 +402,11 @@ mod tests {
         state
             .bindings
             .insert(node, NodeDriver { bundle_id, handle });
-        state.loaded.insert(bundle_id, handle);
         state.reported.insert(node, NodeReport::Bound);
     }
 
     #[test]
-    fn a_vanished_bound_node_unloads_its_driver_and_purges_the_cache() {
+    fn a_vanished_bound_node_unloads_its_driver_instance() {
         let mut state = AutoloadState::default();
         bound(&mut state, 2, 7, 0x1007);
         let mut store = UnloadRecorder::new();
@@ -434,10 +418,9 @@ mod tests {
         assert_eq!(store.unloads.borrow().as_slice(), &[0x1007]);
         assert!(state.bindings.is_empty(), "the binding is dropped");
         assert!(
-            !state.loaded.contains_key(&7),
-            "the loaded-bundle cache is purged so a re-attach reloads"
+            !state.reported.contains_key(&2),
+            "the dedup memory is cleared so a re-attach reloads afresh"
         );
-        assert!(!state.reported.contains_key(&2));
     }
 
     #[test]
@@ -452,34 +435,32 @@ mod tests {
 
         assert!(store.unloads.borrow().is_empty());
         assert_eq!(state.bindings.len(), 1);
-        assert!(state.loaded.contains_key(&7));
     }
 
     #[test]
-    fn a_shared_driver_is_unloaded_only_when_its_last_node_vanishes() {
-        // One bundle (and one handle) serves two nodes. Losing one node must
-        // not tear the still-serving driver down; only when the *last* bound
-        // node vanishes is the driver unloaded.
+    fn a_vanished_node_unloads_only_its_own_instance() {
+        // One bundle, two nodes, two instances (each load spawns its own
+        // process holding its node's grants). Losing one node tears down
+        // only that node's instance; the sibling's keeps running.
         let mut state = AutoloadState::default();
         bound(&mut state, 2, 7, 0x1007);
-        bound(&mut state, 3, 7, 0x1007);
+        bound(&mut state, 3, 7, 0x2007);
         let mut store = UnloadRecorder::new();
         let mut reply = [0u8; 64];
 
-        // Node 2 vanishes, node 3 stays: the shared driver keeps running.
+        // Node 2 vanishes, node 3 stays: only node 2's instance is torn down.
         unload_vanished(&|id| id == 3, &mut store, &mut reply, &mut state, &NullSink);
-        assert!(
-            store.unloads.borrow().is_empty(),
-            "a driver still serving a live node is not torn down"
+        assert_eq!(
+            store.unloads.borrow().as_slice(),
+            &[0x1007],
+            "only the vanished node's instance is torn down"
         );
-        assert!(state.loaded.contains_key(&7));
         assert_eq!(state.bindings.len(), 1);
 
-        // Now node 3 vanishes too — its last node is gone, so unload once.
+        // Now node 3 vanishes too — its own instance is unloaded.
         unload_vanished(&|_id| false, &mut store, &mut reply, &mut state, &NullSink);
-        assert_eq!(store.unloads.borrow().as_slice(), &[0x1007]);
+        assert_eq!(store.unloads.borrow().as_slice(), &[0x1007, 0x2007]);
         assert!(state.bindings.is_empty());
-        assert!(!state.loaded.contains_key(&7));
     }
 
     #[test]
@@ -501,6 +482,5 @@ mod tests {
         unload_vanished(&|_id| false, &mut store, &mut reply, &mut state, &NullSink);
 
         assert!(state.bindings.is_empty());
-        assert!(!state.loaded.contains_key(&7));
     }
 }

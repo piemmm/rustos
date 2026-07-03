@@ -91,10 +91,13 @@ fn autoload_at_boot(deps: &mut ServiceDeps) {
 ```
 
 `DeviceManager::autoload` walks the tree in order, resolves each
-non-root node as above, and loads each winning driver exactly once — a
-driver matched by several nodes serves them all through one load. A
-load refusal fails only its node, closed (`AGENTS.md` §5.4); the walk
-continues so one bad image cannot block boot.
+non-root node as above, and loads the winning driver once **per
+node** — each load spawns its own driver instance holding exactly that
+node's resource grants, so two identical devices (a virtio keyboard
+and a virtio mouse, say) each get a live instance rather than the
+second being bound in name only. A load refusal fails only its node,
+closed (`AGENTS.md` §5.4); the walk continues so one bad image cannot
+block boot.
 
 ### The `DriverLoader` seam
 

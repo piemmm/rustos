@@ -55,6 +55,7 @@ pub enum Command {
     Ci,
     CiLong,
     Image,
+    Run,
 }
 
 impl Command {
@@ -82,6 +83,7 @@ impl Command {
         Command::Ci,
         Command::CiLong,
         Command::Image,
+        Command::Run,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -108,6 +110,7 @@ impl Command {
             "ci" => Command::Ci,
             "ci-long" => Command::CiLong,
             "image" => Command::Image,
+            "run" => Command::Run,
             _ => return None,
         })
     }
@@ -136,6 +139,7 @@ impl Command {
             Command::Ci => "ci",
             Command::CiLong => "ci-long",
             Command::Image => "image",
+            Command::Run => "run",
         }
     }
 
@@ -177,6 +181,9 @@ impl Command {
                 "Run the `ci` checks, repeating every test 20x sequentially then 20x concurrently."
             }
             Command::Image => "Build platform images via tools/mkimage.",
+            Command::Run => {
+                "Build a platform image and boot it interactively in QEMU (display + keyboard/mouse)."
+            }
         }
     }
 
@@ -204,6 +211,7 @@ impl Command {
             Command::Ci => run_ci(ctx),
             Command::CiLong => run_ci_long(ctx, args),
             Command::Image => run_image(ctx, args),
+            Command::Run => run_run(ctx, args),
         }
     }
 }
@@ -1211,11 +1219,18 @@ fn kernel_build_profile(
 }
 
 fn run_image(ctx: &Context, args: &[OsString]) -> Result<(), String> {
+    let parsed = parse_image_args(args)?;
+    build_platform_image(ctx, parsed).map(|_| ())
+}
+
+/// Build the platform image and return the written whole-disk image's
+/// path (consumed by `run` to boot the image it just built).
+fn build_platform_image(ctx: &Context, args: ImageArgs) -> Result<PathBuf, String> {
     let ImageArgs {
         firmware_dir,
         profile,
         out,
-    } = parse_image_args(args)?;
+    } = args;
 
     // Reclaim the superseded build-script output an earlier kernel build left
     // behind before rebuilding it; the kernel build script's embedded-program
@@ -1289,12 +1304,14 @@ fn run_image(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     let vl805 = image_drivers::build_vl805_bundle(ctx)?;
     let xhci = image_drivers::build_xhci_bundle(ctx)?;
     let usb_kbd = image_drivers::build_usb_kbd_bundle(ctx)?;
-    let drivers: [(&[&[u8]], &[u8]); 5] = [
+    let virtio_kbd = image_drivers::build_virtio_kbd_bundle(ctx)?;
+    let drivers: [(&[&[u8]], &[u8]); 6] = [
         (image_drivers::VCMAILBOX_STORE_PATH, &vcmailbox),
         (image_drivers::PCIE_BRCM_STORE_PATH, &pcie_brcm),
         (image_drivers::VL805_STORE_PATH, &vl805),
         (image_drivers::USB_XHCI_STORE_PATH, &xhci),
         (image_drivers::USB_KBD_STORE_PATH, &usb_kbd),
+        (image_drivers::VIRTIO_KBD_STORE_PATH, &virtio_kbd),
     ];
 
     let built = rustos_mkimage::build_rpi_image(
@@ -1336,6 +1353,128 @@ fn run_image(ctx: &Context, args: &[OsString]) -> Result<(), String> {
         built.image.len(),
         key_out.display()
     );
+    Ok(out)
+}
+
+/// Default emulated CPU count for an interactive `run` session — enough
+/// to exercise the SMP scheduler while staying cheap under TCG.
+const DEFAULT_RUN_CPUS: u32 = 4;
+
+/// Split `run` arguments into the runner's own `--cpus <n>` and the
+/// argument tail forwarded to the `image` grammar (`--target`,
+/// `--profile`, `--firmware`, `--out`), so the image-building half of
+/// `run` and the `image` subcommand can never drift apart.
+fn parse_run_args(args: &[OsString]) -> Result<(u32, Vec<OsString>), String> {
+    let mut cpus = DEFAULT_RUN_CPUS;
+    let mut image_args = Vec::with_capacity(args.len());
+    let mut it = args.iter();
+    while let Some(flag) = it.next() {
+        if flag == "--cpus" {
+            cpus = it
+                .next()
+                .and_then(|v| v.to_str())
+                .and_then(|s| s.parse::<u32>().ok())
+                .filter(|&n| n >= 1)
+                .ok_or("run: --cpus requires a positive integer")?;
+        } else {
+            image_args.push(flag.clone());
+        }
+    }
+    Ok((cpus, image_args))
+}
+
+/// Build the QEMU-`virt`-board form of the production kernel for
+/// `profile` and wrap it as the raw arm64 boot image the interactive
+/// session loads.
+///
+/// The Pi-linked kernel inside the platform image loads at `0x8_0000`,
+/// which is not RAM on the `virt` board, and QEMU's ELF `-kernel` path
+/// passes no DTB — so `run` builds the same production crate against
+/// the `virt` linker script (`RUSTOS_KERNEL_BOARD=virt`, its own target
+/// directory so the Pi build stays cached) and boots the arm64
+/// `Image`-wrapped flat form, which QEMU loads at the `virt` link
+/// address with the generated device tree in `x0`.
+fn build_virt_run_kernel(
+    ctx: &Context,
+    profile: rustos_mkimage::ImageProfile,
+) -> Result<PathBuf, String> {
+    let (build_profile_args, kernel_profile_dir) = kernel_build_profile(profile);
+    let target_dir = ctx.target_dir().join("virt-kernel");
+    let mut cmd = ctx.cargo();
+    cmd.arg("build").arg("--locked");
+    cmd.args(build_profile_args);
+    cmd.args([
+        "-p",
+        "rustos-kernel",
+        "--target",
+        "aarch64-unknown-none",
+        "--target-dir",
+    ]);
+    cmd.arg(&target_dir);
+    cmd.env("RUSTOS_KERNEL_BOARD", "virt");
+    ctx.run(
+        &format!("run: virt kernel build (aarch64-unknown-none, {kernel_profile_dir})"),
+        cmd,
+    )?;
+    let elf_path = target_dir
+        .join("aarch64-unknown-none")
+        .join(kernel_profile_dir)
+        .join("rustos-kernel");
+    let elf = std::fs::read(&elf_path).map_err(|e| {
+        format!(
+            "run: cannot read virt kernel ELF {}: {e}",
+            elf_path.display()
+        )
+    })?;
+    let boot_image =
+        rustos_mkimage::elfflat::build_virt_boot_image(&elf).map_err(|e| format!("run: {e}"))?;
+    let out = target_dir.join(format!("rustos-kernel-virt-{}.img", profile.label()));
+    std::fs::write(&out, &boot_image)
+        .map_err(|e| format!("run: cannot write {}: {e}", out.display()))?;
+    Ok(out)
+}
+
+/// Build the platform image for the requested profile, then boot it as
+/// an **interactive** QEMU `virt` session: a windowed display driven by
+/// the kernel's ramfb boot console, virtio keyboard + mouse devices for
+/// input from the window, and the image attached as the virtio-blk root
+/// disk (the same encrypted-root unlock → store-scan → driver-autoload
+/// chain the `-M virt` verticals prove). The kernel itself boots as the
+/// `virt`-board build of the same production crate
+/// ([`build_virt_run_kernel`]), so QEMU hands it the real runtime
+/// device tree.
+///
+/// The invoking terminal is the guest's serial console: the encrypted
+/// root's unlock passphrase is typed there (`root` for the `debug`
+/// profile, empty for `installer`). The session runs in the foreground
+/// with no deadline and ends when the user closes the QEMU window or
+/// the guest powers off.
+fn run_run(ctx: &Context, args: &[OsString]) -> Result<(), String> {
+    let (cpus, image_args) = parse_run_args(args)?;
+    let parsed = parse_image_args(&image_args)?;
+    let profile = parsed.profile;
+    let disk_image = build_platform_image(ctx, parsed)?;
+    let virt_kernel = build_virt_run_kernel(ctx, profile)?;
+    let spec = rustos_qemu::Spec::for_aarch64_kernel(&virt_kernel)
+        .with_cpus(cpus)
+        .with_virtio_blk(&disk_image)
+        .with_ramfb()
+        .windowed_interactive();
+    let passphrase_hint = match profile {
+        rustos_mkimage::ImageProfile::Debug => "`root`",
+        rustos_mkimage::ImageProfile::Installer => "empty — press Enter",
+    };
+    eprintln!(
+        "xtask: [run] booting {} ({}) on qemu-system-aarch64 -M virt; this \
+         terminal is the guest serial console (root-unlock passphrase: {})",
+        disk_image.display(),
+        profile.label(),
+        passphrase_hint,
+    );
+    let status = rustos_qemu::Runner::run_interactive(&spec).map_err(|e| format!("run: {e}"))?;
+    if status != 0 {
+        return Err(format!("run: QEMU exited with status {status}"));
+    }
     Ok(())
 }
 
@@ -1375,8 +1514,8 @@ fn relative(base: &Path, path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        cargo_subcommand_available, dir_size, format_bytes, kernel_build_profile,
-        parse_test_options, Command, RunBudget, TEST_SOAK_SECS,
+        cargo_subcommand_available, dir_size, format_bytes, kernel_build_profile, parse_run_args,
+        parse_test_options, Command, RunBudget, DEFAULT_RUN_CPUS, TEST_SOAK_SECS,
     };
     use crate::Context;
     use std::ffi::OsString;
@@ -1395,6 +1534,49 @@ mod tests {
             Command::ALL.iter().any(|c| c.name() == "clean"),
             "`clean` must appear in the closed command set"
         );
+    }
+
+    /// `run` is a first-class, parseable subcommand listed in the closed
+    /// command set, so `cargo xtask run` reaches the interactive QEMU
+    /// session and the generated `--help`/usage lists it.
+    #[test]
+    fn run_is_a_registered_subcommand() {
+        assert!(
+            matches!(Command::parse("run"), Some(Command::Run)),
+            "`run` must parse to the Run subcommand"
+        );
+        assert!(
+            Command::ALL.iter().any(|c| c.name() == "run"),
+            "`run` must appear in the closed command set"
+        );
+    }
+
+    /// `run` consumes only its own `--cpus`; every other argument is
+    /// forwarded verbatim to the shared `image` grammar so the two
+    /// entry points cannot drift apart.
+    #[test]
+    fn run_args_default_the_cpu_count_and_forward_the_rest() {
+        let args = argv(&["--target", "aarch64-rpi", "--profile", "installer"]);
+        let (cpus, rest) = parse_run_args(&args).expect("defaults parse");
+        assert_eq!(cpus, DEFAULT_RUN_CPUS);
+        assert_eq!(rest, args);
+    }
+
+    #[test]
+    fn run_cpus_flag_overrides_the_default() {
+        let args = argv(&["--cpus", "2", "--target", "aarch64-rpi"]);
+        let (cpus, rest) = parse_run_args(&args).expect("--cpus parses");
+        assert_eq!(cpus, 2);
+        assert_eq!(rest, argv(&["--target", "aarch64-rpi"]));
+    }
+
+    /// A missing, non-numeric, or zero `--cpus` value is rejected rather
+    /// than silently defaulted (fail closed).
+    #[test]
+    fn run_cpus_rejects_zero_missing_and_garbage() {
+        assert!(parse_run_args(&argv(&["--cpus", "0"])).is_err());
+        assert!(parse_run_args(&argv(&["--cpus", "many"])).is_err());
+        assert!(parse_run_args(&argv(&["--cpus"])).is_err());
     }
 
     /// `prune` is a first-class, parseable subcommand listed in the closed

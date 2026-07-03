@@ -24,7 +24,7 @@ use rustos_drv_display_vesa::{
 use rustos_drvhost::{
     DriverSpawner, Host, HostConfig, ImageSource, SpawnContext, SpawnRegisterError,
 };
-use rustos_itest_fwcfg::{FwCfg, RamfbConfig, DRM_FORMAT_XRGB8888};
+use rustos_fwcfg::{FwCfg, RamfbConfig, DRM_FORMAT_XRGB8888};
 use rustos_kernel::SERIAL_SINK;
 use rustos_kernel_mem::{AddressSpace, DirectPhysMap, HostPageTable, MmioMap, VirtAddr};
 use rustos_kernel_sec::captable::{TaskCapabilities, TaskId};

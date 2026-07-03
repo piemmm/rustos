@@ -29,7 +29,7 @@ use rustos_kernel_virtio::KernelMmioMapper;
 use rustos_log::{Event, EventId, Level, Sink};
 use rustos_test_riscv64_boot::published_dtb;
 
-use rustos_itest_fwcfg::{FwCfg, MmioDma, RamfbConfig, DRM_FORMAT_XRGB8888};
+use rustos_fwcfg::{FwCfg, MmioDma, RamfbConfig, DRM_FORMAT_XRGB8888};
 
 use crate::fixture::{FB_IMAGE, SYSCALL_TABLE_HASH, TRUSTED_SIGNER_PUBKEY};
 

@@ -546,6 +546,11 @@ rustos/
 │   │                    #   Mac) with checked Time64 conversions — the one
 │   │                    #   definition RustFS, the foreign-FS drivers, and the
 │   │                    #   copy/archive tools share (§2.2; rustfs-spec §21).
+│   ├── fwcfg/           # Shared QEMU fw_cfg DMA client + ramfb programming
+│   │                    #   helper: the one fw_cfg protocol definition the
+│   │                    #   aarch64 framebuffer boot console's QEMU virt ramfb
+│   │                    #   path and the display-class QEMU verticals share
+│   │                    #   (§2.2; the lib/vcmailbox analogue for QEMU).
 │   ├── geometry/        # Shared screen geometry (Point/Rect) + the desktop
 │   │                    #   DPI/UI Scale (logical->physical) (§10, §17.4).
 │   ├── glob/            # Shared filename-glob matcher: the one first-party

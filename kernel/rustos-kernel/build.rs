@@ -198,7 +198,23 @@ fn main() {
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
 
-    if let Some(linker_script) = linker_script_for(&target) {
+    // `RUSTOS_KERNEL_BOARD` selects the per-board boot linker script for
+    // targets with more than one Tier-1 board: the aarch64 image defaults
+    // to the Raspberry Pi 4 layout, and `cargo xtask run` builds the QEMU
+    // `virt` layout (`aarch64-virt.ld`) it boots interactively. Board
+    // selection is build glue, confined to this audited place; an unknown
+    // board fails the build loudly rather than defaulting.
+    println!("cargo:rerun-if-env-changed=RUSTOS_KERNEL_BOARD");
+    let board = std::env::var("RUSTOS_KERNEL_BOARD").ok();
+    let linker_script = match linker_script_for(&target, board.as_deref()) {
+        Ok(script) => script,
+        Err(err) => panic!(
+            "RUSTOS_KERNEL_BOARD={:?} is not a known board for target {} \
+             (expected `rpi4` or, on aarch64, `virt`)",
+            err.board, err.target
+        ),
+    };
+    if let Some(linker_script) = linker_script {
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
         let linker_script = format!("{}/{linker_script}", manifest_dir.trim_end_matches('/'));
         println!("cargo:rustc-link-arg=-T{linker_script}");

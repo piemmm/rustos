@@ -6,7 +6,7 @@
 //! (SPI) can be bound and a task parked on it is woken when the GIC
 //! delivers the line. It is the aarch64 analogue of the x86_64
 //! `IoApicController` + `production_external_irq_dispatch` wiring in
-//! [`crate::x86_64::arch_wrapper`]; before it, the aarch64 port kept the
+//! `crate::x86_64::arch_wrapper`; before it, the aarch64 port kept the
 //! conservative fail-closed [`rustos_kernel_core::IrqRouting::unsupported`]
 //! default and delivered no device interrupts at all.
 //!
@@ -22,12 +22,12 @@
 //!    lives here, in the kernel binary, exactly like the x86_64
 //!    `IoApicController` does. It adds **no** masking policy of its own —
 //!    it delegates to the range-checked, fence-ordered [`GicController`].
-//! 2. [`gic_irq_routing`] — the [`IrqRouting`] the boot path hands
+//! 2. `gic_irq_routing` — the `IrqRouting` the boot path hands
 //!    [`crate::aarch64::arch_wrapper::Aarch64BinArch`], naming the
-//!    `'static` [`GIC_IRQ_CONTROLLER`] and the GICv2 maximum INTID as the
+//!    `'static` `GIC_IRQ_CONTROLLER` and the GICv2 maximum INTID as the
 //!    bind ceiling.
 //! 3. [`install_device_irq_dispatch`] — publishes the live `IrqTable`
-//!    into a set-once slot and registers [`production_device_irq_dispatch`]
+//!    into a set-once slot and registers `production_device_irq_dispatch`
 //!    with the arch crate's EL1 IRQ-vector seam
 //!    ([`rustos_arch_aarch64::exceptions::set_device_irq_dispatch`]). The
 //!    EL1 IRQ handler acknowledges the GIC, forwards every non-timer INTID
@@ -38,7 +38,7 @@
 //!
 //! The wiring is **additive and non-regressing**: no
 //! device SPI is bound or routed until INCREMENT (2)'s unlock kthread does
-//! so, and [`production_device_irq_dispatch`] is only ever reached for a
+//! so, and `production_device_irq_dispatch` is only ever reached for a
 //! non-timer INTID the GIC delivers — which cannot occur until a line is
 //! routed — so the metal-confirmed boot is unaffected.
 
@@ -113,9 +113,9 @@ impl<M: GicMmio + Send + Sync> GicIrqController<M> {
     /// completion queue. Once the driver has handled the completion the
     /// line must be re-enabled for the *next* one, and that re-enable is an
     /// *arch* operation ([`rustos_arch_api::IrqController::unmask`]) the
-    /// kernel-side [`rustos_kernel_irq::IrqController`] trait's [`mask`] half
+    /// kernel-side [`rustos_kernel_irq::IrqController`] trait's `mask` half
     /// deliberately does not expose. The in-kernel block path's
-    /// [`crate::aarch64::root_unlock`] waiter calls this directly (it routes
+    /// `crate::aarch64::root_unlock` waiter calls this directly (it routes
     /// the SPI itself, once, at setup); the user-space `irq_wait` park path
     /// goes through the trait [`rearm`](IrqController::rearm), which *also*
     /// routes. Both delegate to the range-checked [`GicController`].
@@ -182,7 +182,7 @@ impl<M: GicMmio + Send + Sync> IrqController for GicIrqController<M> {
     ///
     /// This is the re-arm the user-space `irq_wait` park path drives on an
     /// interrupt-driven driver's behalf (the driver holds no GIC access): it
-    /// routes the SPI to [`CPU0_TARGET`] (idempotent — re-routing an
+    /// routes the SPI to `CPU0_TARGET` (idempotent — re-routing an
     /// already-targeted line is a plain register write) and then clears its
     /// enable mask through the same range-checked, fence-ordered
     /// [`GicController`] unmask the in-kernel block path uses. An out-of-range line fails closed as [`MaskError::OutOfRange`]
@@ -209,7 +209,7 @@ impl<M: GicMmio + Send + Sync> IrqController for GicIrqController<M> {
 /// `Phase::Irq` and publishes through
 /// [`install_device_irq_dispatch`].
 ///
-/// [`production_device_irq_dispatch`] reads it from interrupt context to
+/// `production_device_irq_dispatch` reads it from interrupt context to
 /// translate an acknowledged GIC INTID into an [`IrqTable::fire`]. The
 /// [`OnceCell`] enforces the one-shot-publish invariant (no global mutable state; this is a publish-once pointer).
 static IRQ_TABLE_SLOT: OnceCell<&'static IrqTable> = OnceCell::new();
@@ -220,8 +220,8 @@ static IRQ_TABLE_SLOT: OnceCell<&'static IrqTable> = OnceCell::new();
 ///
 /// The boot path records it ([`set_uart_console_intid`]) when it parses the
 /// device tree, and the unlock kthread's console handoff
-/// ([`enable_uart_console_irq`]) routes + unmasks it once the passphrase
-/// poll is over. [`production_device_irq_dispatch`] reads it from interrupt
+/// (`enable_uart_console_irq`) routes + unmasks it once the passphrase
+/// poll is over. `production_device_irq_dispatch` reads it from interrupt
 /// context to recognise the console's receive interrupt and feed the bytes
 /// to the login reader rather than the `irq_wait` table. Empty until the
 /// boot path discovers a console interrupt (a UART-less or interrupt-less
@@ -687,7 +687,7 @@ pub fn enable_uart_console_irq() {
     let _ = GIC_IRQ_CONTROLLER.unmask_line(intid);
 }
 
-/// Publish `table` and register [`production_device_irq_dispatch`] with
+/// Publish `table` and register `production_device_irq_dispatch` with
 /// the arch crate's EL1 IRQ-vector seam.
 ///
 /// Called once per boot by
@@ -802,7 +802,7 @@ extern "C" fn production_tick_dispatch(_cpu: rustos_arch_api::CpuId) {
 
 /// Set up tickless timer-driven preemption on the boot CPU: register the
 /// per-CPU preempt storage, install the EL0-preemption callback, record
-/// the per-quantum interval derived from [`PREEMPT_TICK_HZ`], and enable
+/// the per-quantum interval derived from `PREEMPT_TICK_HZ`, and enable
 /// the timer PPI — but leave the generic timer **disarmed**. RustOS is
 /// tickless (`NO_HZ`): the scheduler arms the one-shot to
 /// one quantum only when it dispatches a task onto a contended CPU (via
@@ -819,13 +819,13 @@ extern "C" fn production_tick_dispatch(_cpu: rustos_arch_api::CpuId) {
 /// kthread unmasks at EL1 — the armed timer simply leaves PPI 30 pending
 /// until then, so this is **additive and non-regressing**: a one-shot tick taken in EL1 only disarms (it never preempts —
 /// the kernel is non-preemptible), and a tick taken in EL0 drives
-/// [`production_preempt_dispatch`]; the scheduler re-arms the next
+/// `production_preempt_dispatch`; the scheduler re-arms the next
 /// one-shot on its following dispatch.
 ///
 /// No *scheduler-fairness* tick callback is installed: EEVDF is tickless
 /// (fairness is advanced inside `Scheduler::step`, not by a periodic
 /// count). The per-tick callback that *is* installed
-/// ([`production_tick_dispatch`]) runs only the blocking-wait timed-wake
+/// (`production_tick_dispatch`) runs only the blocking-wait timed-wake
 /// sweep (Design D P-2): it releases any elapsed `hw_tree_wait`-style
 /// waiter and re-arms the one-shot to the next deadline, so the timer is
 /// armed only for a real pending event — a preemption quantum and/or the

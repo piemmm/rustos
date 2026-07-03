@@ -51,14 +51,52 @@ const FREESTANDING_TARGETS: &[(&str, &str)] = &[
 ];
 
 /// The boot linker script (relative to `CARGO_MANIFEST_DIR`) for a
-/// freestanding target triple, or `None` for any other triple (the host
-/// build, which links no kernel image).
-#[must_use]
-pub fn linker_script_for(target: &str) -> Option<&'static str> {
-    FREESTANDING_TARGETS
+/// freestanding target triple and board request, or `None` for any
+/// other triple (the host build, which links no kernel image).
+///
+/// `board` is the `RUSTOS_KERNEL_BOARD` build-glue request: `None` (or
+/// `Some("rpi4")`) selects each target's default board script;
+/// `Some("virt")` selects the aarch64 QEMU `virt` script
+/// (`aarch64-virt.ld`, load `0x4020_0000`) the interactive `cargo xtask
+/// run` kernel links — the other targets have a single Tier-1 board, so
+/// any non-default board request for them fails closed as `Err`.
+///
+/// # Errors
+///
+/// An unknown board name (or a board request the target has no script
+/// for) is a build defect reported as [`UnknownBoard`], never a silent
+/// default.
+pub fn linker_script_for<'a>(
+    target: &'a str,
+    board: Option<&'a str>,
+) -> Result<Option<&'static str>, UnknownBoard<'a>> {
+    let default = FREESTANDING_TARGETS
         .iter()
         .find(|(triple, _)| *triple == target)
-        .map(|(_, script)| *script)
+        .map(|(_, script)| *script);
+    match board {
+        None | Some("rpi4") => Ok(default),
+        Some("virt") if target == "aarch64-unknown-none" => {
+            Ok(Some("../arch/aarch64/link/aarch64-virt.ld"))
+        }
+        Some(other) => Err(UnknownBoard {
+            board: other,
+            target,
+        }),
+    }
+}
+
+/// A board request [`linker_script_for`] rejected: an unknown
+/// `RUSTOS_KERNEL_BOARD` name, or a board the target has no boot script
+/// for. Alloc-free so the shared source compiles in both the `no_std`
+/// crate's host test build and the `std` build script (which formats
+/// the loud build error from it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnknownBoard<'a> {
+    /// The rejected board name.
+    pub board: &'a str,
+    /// The build's target triple.
+    pub target: &'a str,
 }
 
 /// The `kernel_isa` conditional-compilation value for a target
@@ -133,8 +171,8 @@ mod tests {
     #[test]
     fn x86_64_freestanding_selects_the_x86_64_linker_script() {
         assert_eq!(
-            linker_script_for("x86_64-unknown-none"),
-            Some("../arch/x86_64/linker.ld")
+            linker_script_for("x86_64-unknown-none", None),
+            Ok(Some("../arch/x86_64/linker.ld"))
         );
         assert!(is_freestanding("none", "x86_64"));
         assert_eq!(kernel_isa("x86_64"), Some("x86_64"));
@@ -143,11 +181,35 @@ mod tests {
     #[test]
     fn aarch64_freestanding_selects_the_rpi4_linker_script() {
         assert_eq!(
-            linker_script_for("aarch64-unknown-none"),
-            Some("../arch/aarch64/link/aarch64-rpi4.ld")
+            linker_script_for("aarch64-unknown-none", None),
+            Ok(Some("../arch/aarch64/link/aarch64-rpi4.ld"))
         );
         assert!(is_freestanding("none", "aarch64"));
         assert_eq!(kernel_isa("aarch64"), Some("aarch64"));
+    }
+
+    #[test]
+    fn aarch64_virt_board_selects_the_virt_linker_script() {
+        // The interactive `cargo xtask run` form: same production crate,
+        // QEMU `virt` load layout.
+        assert_eq!(
+            linker_script_for("aarch64-unknown-none", Some("virt")),
+            Ok(Some("../arch/aarch64/link/aarch64-virt.ld"))
+        );
+        // The explicit default board spelling matches the default.
+        assert_eq!(
+            linker_script_for("aarch64-unknown-none", Some("rpi4")),
+            Ok(Some("../arch/aarch64/link/aarch64-rpi4.ld"))
+        );
+    }
+
+    #[test]
+    fn unknown_or_mistargeted_boards_fail_closed() {
+        // A typo'd board, or `virt` on a target with a single board, is a
+        // build defect reported loudly — never a silently defaulted script.
+        assert!(linker_script_for("aarch64-unknown-none", Some("virt2")).is_err());
+        assert!(linker_script_for("x86_64-unknown-none", Some("virt")).is_err());
+        assert!(linker_script_for("riscv64gc-unknown-none-elf", Some("virt")).is_err());
     }
 
     #[test]
@@ -156,7 +218,10 @@ mod tests {
         // kernel image, yet still reports its instruction set so the
         // crate's host test build compiles the right architecture's
         // modules.
-        assert_eq!(linker_script_for("x86_64-unknown-linux-gnu"), None);
+        assert_eq!(
+            linker_script_for("x86_64-unknown-linux-gnu", None),
+            Ok(None)
+        );
         assert!(!is_freestanding("linux", "x86_64"));
         assert_eq!(kernel_isa("x86_64"), Some("x86_64"));
     }
@@ -164,8 +229,8 @@ mod tests {
     #[test]
     fn riscv64_freestanding_selects_the_virt_linker_script() {
         assert_eq!(
-            linker_script_for("riscv64gc-unknown-none-elf"),
-            Some("../arch/riscv64/link/riscv64-virt.ld")
+            linker_script_for("riscv64gc-unknown-none-elf", None),
+            Ok(Some("../arch/riscv64/link/riscv64-virt.ld"))
         );
         assert!(is_freestanding("none", "riscv64"));
         assert_eq!(kernel_isa("riscv64"), Some("riscv64"));
@@ -175,7 +240,7 @@ mod tests {
     fn unsupported_instruction_sets_have_no_kernel() {
         assert_eq!(kernel_isa("wasm32"), None);
         assert!(!is_freestanding("none", "wasm32"));
-        assert_eq!(linker_script_for("wasm32-unknown-unknown"), None);
+        assert_eq!(linker_script_for("wasm32-unknown-unknown", None), Ok(None));
     }
 
     #[test]

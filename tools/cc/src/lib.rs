@@ -50,10 +50,10 @@ use rustos_crypto::Sha256Digest;
 
 /// The exact `clang` version the wrapper accepts. Bumping it is a deliberate,
 /// reviewed change.
-pub const REQUIRED_CLANG_VERSION: &str = "18.1.3";
+pub const REQUIRED_CLANG_VERSION: &str = "18.1.8";
 
 /// The exact `ld.lld` version the wrapper accepts.
-pub const REQUIRED_LLD_VERSION: &str = "18.1.3";
+pub const REQUIRED_LLD_VERSION: &str = "18.1.8";
 
 /// The two external tools the wrapper drives.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -124,7 +124,7 @@ pub struct ToolRecord {
 
 impl ToolRecord {
     /// A single audit line, e.g.
-    /// `clang 18.1.3 sha256=… path=/usr/bin/clang`.
+    /// `clang 18.1.8 sha256=… path=/usr/bin/clang`.
     #[must_use]
     pub fn audit_line(&self) -> String {
         format!(
@@ -427,8 +427,8 @@ mod tests {
 
     #[test]
     fn pinned_versions_are_the_expected_release() {
-        assert_eq!(REQUIRED_CLANG_VERSION, "18.1.3");
-        assert_eq!(REQUIRED_LLD_VERSION, "18.1.3");
+        assert_eq!(REQUIRED_CLANG_VERSION, "18.1.8");
+        assert_eq!(REQUIRED_LLD_VERSION, "18.1.8");
         assert_eq!(Tool::Clang.required_version(), REQUIRED_CLANG_VERSION);
         assert_eq!(Tool::Lld.required_version(), REQUIRED_LLD_VERSION);
     }
@@ -446,11 +446,11 @@ mod tests {
         let record = ToolRecord {
             label: "clang",
             path: PathBuf::from("/usr/bin/clang"),
-            version: "18.1.3".to_string(),
+            version: "18.1.8".to_string(),
             sha256: digest(b""),
         };
         let line = record.audit_line();
-        assert!(line.starts_with("clang 18.1.3 sha256="));
+        assert!(line.starts_with("clang 18.1.8 sha256="));
         assert!(line.contains("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"));
         assert!(line.ends_with("path=/usr/bin/clang"));
     }
@@ -469,11 +469,11 @@ mod tests {
     fn version_mismatch_message_mentions_the_pin() {
         let err = CcError::VersionMismatch {
             tool: "clang",
-            expected: "18.1.3",
+            expected: "18.1.8",
             found: "17.0.6".to_string(),
         };
         let text = err.to_string();
         assert!(text.contains("17.0.6"));
-        assert!(text.contains("18.1.3"));
+        assert!(text.contains("18.1.8"));
     }
 }

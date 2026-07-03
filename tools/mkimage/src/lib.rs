@@ -441,7 +441,7 @@ pub fn build_rpi_image(
         ImageProfile::Debug => Some(debug_machine_id(entropy)?),
         ImageProfile::Installer => None,
     };
-    let kernel8 = elfflat::elf_to_flat(kernel_elf)?;
+    let kernel8 = elfflat::elf_to_flat(kernel_elf, elfflat::KERNEL_LOAD_ADDR)?;
 
     // Derive the root volume key from the profile's passphrase under a
     // fresh per-volume descriptor, then lay the (non-secret) descriptor

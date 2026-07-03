@@ -1,5 +1,6 @@
 //! Transport-agnostic QEMU `fw_cfg` DMA client plus the `ramfb`
-//! programming helper the display-class QEMU verticals share.
+//! programming helper shared by the aarch64 framebuffer boot console
+//! (`kernel/arch/aarch64::video`) and the display-class QEMU verticals.
 //!
 //! The `fw_cfg` DMA protocol is identical across platforms — an in-RAM
 //! [`FWCfgDmaAccess`](https://www.qemu.org/docs/master/specs/fw_cfg.html)
@@ -21,18 +22,18 @@
 //!
 //! The client assumes the staging structure and the data buffers live in
 //! identity-mapped RAM, so a buffer's virtual address is the physical
-//! address QEMU's DMA engine reads/writes. Every display vertical runs
-//! under that assumption (riscv64 `virt` boots with paging off; the
-//! aarch64 `virt` vertical brings up a 2 GiB identity MMU; the x86_64
-//! boot identity-maps the bottom 4 GiB).
+//! address QEMU's DMA engine reads/writes. Every consumer runs under
+//! that assumption (the aarch64 boot console runs pre-MMU and the
+//! aarch64 `virt` vertical brings up a 2 GiB identity MMU; riscv64
+//! `virt` boots with paging off; the x86_64 boot identity-maps the
+//! bottom 4 GiB). The crate is allocation-free — every buffer is a
+//! bounded stack or caller-supplied slice — so the pre-heap boot
+//! console can drive it.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
-extern crate alloc;
-
-use alloc::vec;
 use core::ptr;
 use core::sync::atomic::{compiler_fence, Ordering};
 
@@ -66,9 +67,15 @@ const DIR_ENTRY_LEN: usize = 64;
 const DIR_SELECT_OFFSET: usize = 4;
 /// Offset of the null-terminated name within a directory entry.
 const DIR_NAME_OFFSET: usize = 8;
-/// Upper bound on directory entries scanned (keeps the read buffer
-/// bounded; a real directory is far smaller).
+/// Upper bound on directory entries scanned (keeps the scan bounded; a
+/// real directory is far smaller). A validation bound on untrusted
+/// device input, deliberately fixed.
 const MAX_DIR_ENTRIES: usize = 256;
+/// Directory entries read per bounded stack chunk while scanning
+/// (`file_selector` is allocation-free so the pre-heap boot console can
+/// call it; the device's read offset persists across `read_more` calls,
+/// so the directory is walked chunk by chunk).
+const DIR_CHUNK_ENTRIES: usize = 16;
 
 /// Wire length in bytes of a `RAMFBCfg` structure.
 pub const RAMFB_CFG_LEN: usize = 28;
@@ -251,9 +258,18 @@ impl<T: DmaAddressRegister> FwCfg<T> {
         if count == 0 || count > MAX_DIR_ENTRIES {
             return Err(FwCfgError::DirectoryTooLarge);
         }
-        let mut entries = vec![0u8; count * DIR_ENTRY_LEN];
-        self.read_more(&mut entries)?;
-        find_selector(&entries, name).ok_or(FwCfgError::ItemNotFound)
+        let mut chunk = [0u8; DIR_CHUNK_ENTRIES * DIR_ENTRY_LEN];
+        let mut remaining = count;
+        while remaining > 0 {
+            let take = remaining.min(DIR_CHUNK_ENTRIES);
+            let buf = &mut chunk[..take * DIR_ENTRY_LEN];
+            self.read_more(buf)?;
+            if let Some(selector) = find_selector(buf, name) {
+                return Ok(selector);
+            }
+            remaining -= take;
+        }
+        Err(FwCfgError::ItemNotFound)
     }
 
     /// Program QEMU's `ramfb` device to scan out from `cfg`.
@@ -378,6 +394,16 @@ impl MmioDma {
         }
         Err(MmioDmaError::NotFound)
     }
+
+    /// CPU-physical MMIO base of the discovered `fw_cfg` register block.
+    ///
+    /// The identity-map builder needs this fact to type the device's
+    /// gigapage Device, exactly like the UART/GIC bases (the register
+    /// block is written through this base by [`DmaAddressRegister`]).
+    #[must_use]
+    pub fn base(&self) -> u64 {
+        self.base
+    }
 }
 
 impl DmaAddressRegister for MmioDma {
@@ -399,8 +425,15 @@ impl DmaAddressRegister for MmioDma {
 }
 
 #[cfg(test)]
+extern crate alloc;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::borrow::ToOwned;
+    use alloc::format;
+    use alloc::string::String;
+    use alloc::vec;
     use alloc::vec::Vec;
 
     /// Build a single 64-byte file-directory entry naming `name` with
@@ -431,6 +464,123 @@ mod tests {
         // "etc/ramfb-extra" must not match the shorter "etc/ramfb".
         let dir = entry(0x0030, "etc/ramfb-extra");
         assert_eq!(find_selector(&dir, RAMFB_ITEM), None);
+    }
+
+    use core::cell::RefCell;
+
+    /// Host stand-in for the device: serves the `fw_cfg` file directory
+    /// from an in-memory byte stream by decoding each staged
+    /// `FWCfgDmaAccess` the client hands to [`DmaAddressRegister`].
+    ///
+    /// The mock honours the wire contract the real device implements:
+    /// a select restarts the stream, a read copies from the persistent
+    /// offset, and `control` is cleared on success — so the chunked
+    /// `file_selector` walk is exercised end to end on the host.
+    struct MockDma {
+        /// `FW_CFG_FILE_DIR` payload: big-endian count then the entries.
+        directory: Vec<u8>,
+        offset: RefCell<usize>,
+        selected: RefCell<u16>,
+    }
+
+    impl MockDma {
+        fn new(directory: Vec<u8>) -> Self {
+            Self {
+                directory,
+                offset: RefCell::new(0),
+                selected: RefCell::new(0),
+            }
+        }
+    }
+
+    impl DmaAddressRegister for MockDma {
+        fn write_dma_address(&self, dma_phys: u64) {
+            // SAFETY: the client staged a live, 8-byte-aligned
+            // `FWCfgDmaAccess` on its stack and passed its address; the
+            // struct outlives this synchronous call and the field
+            // projections below stay within it.
+            let access = dma_phys as *mut FWCfgDmaAccess;
+            let control =
+                u32::from_be(unsafe { ptr::read_volatile(ptr::addr_of!((*access).control)) });
+            let length =
+                u32::from_be(unsafe { ptr::read_volatile(ptr::addr_of!((*access).length)) })
+                    as usize;
+            let address =
+                u64::from_be(unsafe { ptr::read_volatile(ptr::addr_of!((*access).address)) });
+            if control & CTL_SELECT != 0 {
+                *self.selected.borrow_mut() = (control >> 16) as u16;
+                *self.offset.borrow_mut() = 0;
+            }
+            if control & CTL_READ != 0 {
+                let source: &[u8] = match *self.selected.borrow() {
+                    KEY_SIGNATURE => b"QEMU",
+                    KEY_FILE_DIR => &self.directory,
+                    _ => &[],
+                };
+                let mut offset = self.offset.borrow_mut();
+                let end = (*offset + length).min(source.len());
+                let served = &source[(*offset).min(source.len())..end];
+                // SAFETY: the client's read buffer is `length` bytes at
+                // `address` (its own live slice); `served` never exceeds
+                // `length`.
+                unsafe {
+                    ptr::copy_nonoverlapping(served.as_ptr(), address as *mut u8, served.len());
+                }
+                *offset += length;
+            }
+            // SAFETY: same live staging struct as above; clearing
+            // `control` reports success exactly as the device does.
+            unsafe { ptr::write_volatile(ptr::addr_of_mut!((*access).control), 0) };
+        }
+    }
+
+    /// A directory payload of `names` in order, selectors `1..`.
+    fn directory(names: &[&str]) -> Vec<u8> {
+        let mut dir = Vec::new();
+        dir.extend_from_slice(&u32::try_from(names.len()).unwrap().to_be_bytes());
+        for (i, name) in names.iter().enumerate() {
+            dir.extend_from_slice(&entry(u16::try_from(i + 1).unwrap(), name));
+        }
+        dir
+    }
+
+    #[test]
+    fn file_selector_finds_an_entry_beyond_the_first_chunk() {
+        // 20 entries crosses the 16-entry chunk boundary; the target sits
+        // in the second chunk, proving the persistent-offset walk.
+        let mut names: Vec<String> = (0..19).map(|i| format!("etc/other{i}")).collect();
+        names.push(RAMFB_ITEM.to_owned());
+        let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let fwcfg = FwCfg::new(MockDma::new(directory(&name_refs)));
+        assert_eq!(fwcfg.file_selector(RAMFB_ITEM), Ok(20));
+    }
+
+    #[test]
+    fn file_selector_fails_closed_on_an_empty_directory() {
+        let fwcfg = FwCfg::new(MockDma::new(0u32.to_be_bytes().to_vec()));
+        assert_eq!(
+            fwcfg.file_selector(RAMFB_ITEM),
+            Err(FwCfgError::DirectoryTooLarge)
+        );
+    }
+
+    #[test]
+    fn file_selector_fails_closed_on_an_implausible_count() {
+        let count = u32::try_from(MAX_DIR_ENTRIES + 1).unwrap();
+        let fwcfg = FwCfg::new(MockDma::new(count.to_be_bytes().to_vec()));
+        assert_eq!(
+            fwcfg.file_selector(RAMFB_ITEM),
+            Err(FwCfgError::DirectoryTooLarge)
+        );
+    }
+
+    #[test]
+    fn file_selector_reports_a_missing_item() {
+        let fwcfg = FwCfg::new(MockDma::new(directory(&["etc/other"])));
+        assert_eq!(
+            fwcfg.file_selector(RAMFB_ITEM),
+            Err(FwCfgError::ItemNotFound)
+        );
     }
 
     #[test]

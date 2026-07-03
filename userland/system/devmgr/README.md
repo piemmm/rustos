@@ -19,8 +19,11 @@ fail-closed (`AGENTS.md` §5.4):
    coin-flip (`AGENTS.md` §18.3).
 2. A node matching nothing is left **unbound and logged** — never an
    error and never a panic (`AGENTS.md` §18.4).
-3. Load the winner through the injected `DriverLoader` exactly once —
-   a driver matched by several nodes serves them all through one load.
+3. Load the winner through the injected `DriverLoader` once **per
+   node** — each load spawns its own driver instance holding exactly
+   that node's resource grants, so two identical devices (a virtio
+   keyboard and a virtio mouse, say) each get a live instance rather
+   than the second being bound in name only.
 4. A load refusal fails only that node; the walk continues so one bad
    image cannot block boot.
 5. Emit a `lib/log` audit record for every outcome.

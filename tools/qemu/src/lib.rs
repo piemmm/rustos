@@ -188,6 +188,14 @@ pub struct KeyInjection {
     /// QEMU `QKeyCode` name to send (e.g. `"a"`). QEMU translates it to
     /// the guest-visible evdev keycode the driver decodes.
     pub key: String,
+    /// How many times [`ready_marker`](Self::ready_marker) must appear
+    /// before the key is sent (minimum 1). With a pointer sibling
+    /// attached ([`Spec::with_virtio_mouse`]) the guest arms one driver
+    /// instance per virtio-input node and prints the marker once per
+    /// instance; injecting on the first sighting could race the
+    /// keyboard's own arming (the first-armed instance may be the
+    /// mouse's), losing the keypress against an un-ready device.
+    pub ready_occurrences: u32,
 }
 
 /// One step of a deterministic serial-input script for an interactive
@@ -310,11 +318,34 @@ pub struct Spec {
     /// serial console. `None` attaches no input device. Used by the
     /// aarch64 virtio-input vertical; other arches ignore it today.
     pub input_keyboard: Option<KeyInjection>,
+    /// When `true`, attach a `virtio-mouse-device` after the keyboard —
+    /// the same two-identical-virtio-input-nodes topology an interactive
+    /// session presents — so a vertical can prove the keyboard is still
+    /// driven when a pointer sibling is enumerated beside it. Only the
+    /// aarch64 argv honours it today.
+    pub input_mouse: bool,
     /// When non-empty, pipe QEMU's stdin and replay the steps in order:
     /// each waits for its readiness marker on the serial console (past
     /// the previous step's match) before writing its line. Empty leaves
     /// stdin closed (`null`). Used by the interactive-session verticals.
     pub serial_input: Vec<SerialInjection>,
+    /// How the session presents itself to a human. Only the aarch64
+    /// argv honours it today.
+    pub session: SessionKind,
+}
+
+/// How a QEMU session presents itself to a human.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionKind {
+    /// Headless test run: `-display none`, no human input devices — the
+    /// deterministic [`Runner::run`] shape every vertical uses.
+    HeadlessTest,
+    /// Interactive windowed session: QEMU's default display backend
+    /// (cocoa/gtk/sdl) so the guest's `ramfb` scan-out is visible, plus
+    /// human-driven `virtio-keyboard-device` and `virtio-mouse-device`
+    /// input from the window — the [`Runner::run_interactive`] shape
+    /// `cargo xtask run` launches.
+    WindowedInteractive,
 }
 
 impl Spec {
@@ -333,7 +364,9 @@ impl Spec {
             display_ramfb: false,
             extra_args: Vec::new(),
             input_keyboard: None,
+            input_mouse: false,
             serial_input: Vec::new(),
+            session: SessionKind::HeadlessTest,
         }
     }
 
@@ -367,7 +400,9 @@ impl Spec {
             display_ramfb: false,
             extra_args: Vec::new(),
             input_keyboard: None,
+            input_mouse: false,
             serial_input: Vec::new(),
+            session: SessionKind::HeadlessTest,
         }
     }
 
@@ -386,7 +421,9 @@ impl Spec {
             display_ramfb: false,
             extra_args: Vec::new(),
             input_keyboard: None,
+            input_mouse: false,
             serial_input: Vec::new(),
+            session: SessionKind::HeadlessTest,
         }
     }
 
@@ -448,7 +485,33 @@ impl Spec {
         self.input_keyboard = Some(KeyInjection {
             ready_marker: ready_marker.into(),
             key: key.into(),
+            ready_occurrences: 1,
         });
+        self
+    }
+
+    /// Require the keyboard injection's readiness marker to appear `n`
+    /// times (clamped at `>= 1`) before the key is sent. Used with
+    /// [`Self::with_virtio_mouse`]: each virtio-input node arms its own
+    /// driver instance and prints the marker once, so the injection
+    /// waits until every instance — the keyboard's included — is armed.
+    /// A no-op when no keyboard injection was requested.
+    #[must_use]
+    pub fn with_keyboard_ready_occurrences(mut self, n: u32) -> Self {
+        if let Some(k) = &mut self.input_keyboard {
+            k.ready_occurrences = n.max(1);
+        }
+        self
+    }
+
+    /// Attach a `virtio-mouse-device` after the keyboard — the same
+    /// two-identical-virtio-input-nodes topology an interactive session
+    /// presents. Used by the autoload-input vertical to prove the
+    /// keyboard driver instance is still loaded and delivering when a
+    /// pointer sibling matches the same driver bundle.
+    #[must_use]
+    pub fn with_virtio_mouse(mut self) -> Self {
+        self.input_mouse = true;
         self
     }
 
@@ -472,6 +535,15 @@ impl Spec {
         });
         self
     }
+
+    /// Present QEMU's default windowed display and attach human-driven
+    /// virtio keyboard and mouse devices — the interactive session shape
+    /// [`Runner::run_interactive`] launches for `cargo xtask run`.
+    #[must_use]
+    pub fn windowed_interactive(mut self) -> Self {
+        self.session = SessionKind::WindowedInteractive;
+        self
+    }
 }
 
 /// QEMU runner.
@@ -492,26 +564,7 @@ impl Runner {
     /// [`Outcome`], not through `Err` — that distinction is what lets the
     /// caller print a clean failure report instead of an opaque error.
     pub fn run(spec: &Spec) -> io::Result<Outcome> {
-        if !spec.kernel.is_file() {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("kernel ELF not found: {}", spec.kernel.display()),
-            ));
-        }
-        // Fail closed before spawning QEMU if a backing image is missing:
-        // QEMU would otherwise abort mid-boot with an opaque error that the
-        // runner could only report as a generic failure.
-        for dev in &spec.block_devices {
-            if !dev.image.is_file() {
-                return Err(io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!(
-                        "virtio-blk backing image not found: {}",
-                        dev.image.display()
-                    ),
-                ));
-            }
-        }
+        validate_boot_inputs(spec)?;
 
         // Every port boots the kernel ELF directly — x86_64 via QEMU's
         // PVH `-kernel` loader, riscv64 via OpenSBI (`-bios default` +
@@ -564,6 +617,71 @@ impl Runner {
         let child = cmd.spawn()?;
         supervise(child, spec, monitor.as_ref())
     }
+
+    /// Launch QEMU as an **interactive** session and wait for it to end.
+    ///
+    /// The developer-facing sibling of [`Runner::run`] (`cargo xtask
+    /// run`): stdio is inherited, so the guest's `-serial stdio` console
+    /// is the caller's own terminal; no wall-clock deadline is applied
+    /// and nothing is captured — the session ends when the user closes
+    /// the QEMU window, the guest powers off, or the caller interrupts
+    /// it. Pair with [`Spec::windowed_interactive`] for a visible
+    /// display and human keyboard/mouse input.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if a boot input is missing or QEMU could not be
+    /// spawned. The `Ok` value is QEMU's raw process exit status code
+    /// (`-1` when terminated by a signal); an interactive session has no
+    /// pass/fail protocol, so no [`Outcome`] is decoded.
+    pub fn run_interactive(spec: &Spec) -> io::Result<i32> {
+        validate_boot_inputs(spec)?;
+
+        let mut cmd = Command::new(spec.arch.qemu_binary());
+        match spec.arch {
+            Arch::X86_64 => x86_64::push_argv(&mut cmd, spec, &spec.kernel),
+            Arch::Riscv64 => riscv64::push_argv(&mut cmd, spec, &spec.kernel),
+            Arch::Aarch64 => aarch64::push_argv(&mut cmd, spec, &spec.kernel),
+        }
+        for a in &spec.extra_args {
+            cmd.arg(a);
+        }
+        if std::env::var_os("RUSTOS_QEMU_DEBUG").is_some() {
+            eprintln!("rustos-qemu: {cmd:?}");
+        }
+        // The caller's terminal *is* the guest serial console: inherit
+        // all three stdio streams and simply wait — in the foreground,
+        // with no deadline — for the user to end the session.
+        cmd.stdin(Stdio::inherit());
+        cmd.stdout(Stdio::inherit());
+        cmd.stderr(Stdio::inherit());
+        let status = cmd.status()?;
+        Ok(status.code().unwrap_or(-1))
+    }
+}
+
+/// Fail closed before spawning QEMU if the kernel ELF or a backing image
+/// is missing: QEMU would otherwise abort mid-boot with an opaque error
+/// the caller could only report as a generic failure.
+fn validate_boot_inputs(spec: &Spec) -> io::Result<()> {
+    if !spec.kernel.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("kernel ELF not found: {}", spec.kernel.display()),
+        ));
+    }
+    for dev in &spec.block_devices {
+        if !dev.image.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "virtio-blk backing image not found: {}",
+                    dev.image.display()
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Supervise a spawned QEMU child to completion: drain its serial output
@@ -579,28 +697,11 @@ fn supervise(
 ) -> io::Result<Outcome> {
     let deadline = Instant::now() + spec.timeout;
 
-    // Drain stdout on a background thread. Two reasons: a chatty guest
-    // must not deadlock on a full stdout pipe while we poll, and the
-    // key-injector needs to watch the serial stream for its readiness
-    // marker as it arrives rather than only after exit.
-    let captured = Arc::new(Mutex::new(String::new()));
-    let marker_seen = Arc::new(AtomicBool::new(false));
-    let reader = {
-        let captured = Arc::clone(&captured);
-        let stdout = child.stdout.take();
-        // The key injection watches the serial stream for its readiness
-        // marker; the drain thread flips the flag as the marker arrives.
-        // The serial-input script instead matches against the captured
-        // log in the poll loop below, because its markers are ordered
-        // and positional (each anchors past the previous step's match).
-        let mut markers: Vec<(String, Arc<AtomicBool>)> = Vec::new();
-        if let Some(k) = &spec.input_keyboard {
-            markers.push((k.ready_marker.clone(), Arc::clone(&marker_seen)));
-        }
-        std::thread::spawn(move || {
-            drain_stream(stdout, &captured, &markers);
-        })
-    };
+    let SerialDrain {
+        captured,
+        marker_seen,
+        reader,
+    } = spawn_serial_drain(&mut child, spec);
 
     // The piped stdin handle the serial injection writes through. Held
     // for the rest of the run: dropping it closes the guest's serial
@@ -843,10 +944,59 @@ impl Drop for MonitorSocket {
     }
 }
 
+/// The running background stdout drain of a spawned QEMU child: the
+/// shared captured-serial buffer, the key-injection readiness flag, and
+/// the drain thread's handle ([`spawn_serial_drain`]).
+struct SerialDrain {
+    /// Everything the guest has printed on serial so far.
+    captured: Arc<Mutex<String>>,
+    /// Set once the key injection's readiness marker has appeared the
+    /// required number of times.
+    marker_seen: Arc<AtomicBool>,
+    /// The drain thread, joined once the child has exited.
+    reader: std::thread::JoinHandle<()>,
+}
+
+/// Start the background stdout drain for a spawned QEMU child.
+///
+/// Draining on a background thread serves two needs: a chatty guest must
+/// not deadlock on a full stdout pipe while the caller polls, and the
+/// key injector needs to watch the serial stream for its readiness
+/// marker as it arrives rather than only after exit. The drain thread
+/// flips the flag once the marker has appeared the required number of
+/// times ([`KeyInjection::ready_occurrences`]). The serial-input script
+/// instead matches against the captured log in the caller's poll loop,
+/// because its markers are ordered and positional (each anchors past the
+/// previous step's match).
+fn spawn_serial_drain(child: &mut Child, spec: &Spec) -> SerialDrain {
+    let captured = Arc::new(Mutex::new(String::new()));
+    let marker_seen = Arc::new(AtomicBool::new(false));
+    let reader = {
+        let captured = Arc::clone(&captured);
+        let stdout = child.stdout.take();
+        let mut markers: Vec<(String, u32, Arc<AtomicBool>)> = Vec::new();
+        if let Some(k) = &spec.input_keyboard {
+            markers.push((
+                k.ready_marker.clone(),
+                k.ready_occurrences.max(1),
+                Arc::clone(&marker_seen),
+            ));
+        }
+        std::thread::spawn(move || {
+            drain_stream(stdout, &captured, &markers);
+        })
+    };
+    SerialDrain {
+        captured,
+        marker_seen,
+        reader,
+    }
+}
+
 /// Read one of QEMU's output pipes to EOF, appending every chunk to
 /// `captured` and raising each marker's flag once its substring has
-/// appeared in the stream so far. Best-effort: a read error simply ends
-/// the drain.
+/// appeared the required number of times in the stream so far.
+/// Best-effort: a read error simply ends the drain.
 ///
 /// Used for both stdout (serial, with the key/serial-injection readiness
 /// markers) and stderr (QEMU's own diagnostics, marker-free), so the two
@@ -858,7 +1008,7 @@ impl Drop for MonitorSocket {
 fn drain_stream(
     stream: Option<impl Read>,
     captured: &Mutex<String>,
-    markers: &[(String, Arc<AtomicBool>)],
+    markers: &[(String, u32, Arc<AtomicBool>)],
 ) {
     let Some(mut r) = stream else { return };
     let mut buf = [0u8; 4096];
@@ -871,8 +1021,10 @@ fn drain_stream(
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 guard.push_str(&chunk);
-                for (marker, seen) in markers {
-                    if !seen.load(Ordering::Acquire) && guard.contains(marker.as_str()) {
+                for (marker, needed, seen) in markers {
+                    if !seen.load(Ordering::Acquire)
+                        && guard.matches(marker.as_str()).count() >= *needed as usize
+                    {
                         seen.store(true, Ordering::Release);
                     }
                 }
@@ -1038,8 +1190,8 @@ mod tests {
         let first = Arc::new(AtomicBool::new(false));
         let second = Arc::new(AtomicBool::new(false));
         let markers = [
-            (String::from("queue armed"), Arc::clone(&first)),
-            (String::from("rustos$ "), Arc::clone(&second)),
+            (String::from("queue armed"), 1, Arc::clone(&first)),
+            (String::from("rustos$ "), 1, Arc::clone(&second)),
         ];
         let feed: &[u8] = b"boot ok\nqueue armed\nbanner\nrustos$ ";
         drain_stream(Some(feed), &captured, &markers);
@@ -1052,6 +1204,26 @@ mod tests {
                 .as_str(),
             "boot ok\nqueue armed\nbanner\nrustos$ "
         );
+    }
+
+    #[test]
+    fn drain_stream_waits_for_the_required_marker_occurrence_count() {
+        // Two driver instances each print the same armed marker; a
+        // marker requiring two occurrences must not fire on the first
+        // (the mouse instance arming before the keyboard's), only once
+        // both have appeared.
+        let captured = Mutex::new(String::new());
+        let seen = Arc::new(AtomicBool::new(false));
+        let markers = [(String::from("sc=irq_bind"), 2, Arc::clone(&seen))];
+        let first_only: &[u8] = b"boot\nsc=irq_bind task=5\n";
+        drain_stream(Some(first_only), &captured, &markers);
+        assert!(
+            !seen.load(Ordering::Acquire),
+            "one occurrence must not satisfy a two-occurrence marker"
+        );
+        let second: &[u8] = b"more\nsc=irq_bind task=8\n";
+        drain_stream(Some(second), &captured, &markers);
+        assert!(seen.load(Ordering::Acquire));
     }
 
     #[test]
@@ -1097,7 +1269,9 @@ mod tests {
             display_ramfb: false,
             extra_args: Vec::new(),
             input_keyboard: None,
+            input_mouse: false,
             serial_input: Vec::new(),
+            session: SessionKind::HeadlessTest,
         };
         let err = Runner::run(&s).expect_err("missing backing image should fail");
         assert_eq!(err.kind(), io::ErrorKind::NotFound);

@@ -12,7 +12,7 @@
 //! `Aarch64Arch`, delegates the [`SchedulerArch`] super-trait, and
 //! implements [`KernelArch::halt`] / [`KernelArch::monotonic_ns`] by
 //! forwarding to the arch port — the orphan-rule sibling of the x86_64
-//! [`crate::BinArch`] and the riscv64 `RiscvBinArch` (`plans/PI.md`
+//! `crate::BinArch` and the riscv64 `RiscvBinArch` (`plans/PI.md`
 //! P6c-2).
 //!
 //! The aarch64 port wires the [`KernelArch`] interrupt-routing surface to
@@ -314,7 +314,7 @@ impl ConsoleRead for UartConsole {
 /// The single `'static` [`UartConsole`] the boot path lists as the UART
 /// console's **write** half (and the in-kernel root-unlock kthread's
 /// passphrase **poll** source). Zero-sized, so it has no `.bss`/`.data`
-/// footprint — mirroring [`rustos_arch_aarch64::SERIAL_SINK`].
+/// footprint — mirroring `rustos_arch_aarch64::SERIAL_SINK`.
 pub static UART_CONSOLE: UartConsole = UartConsole;
 
 /// The UART console's receive type-ahead queue — the software RX ring the
@@ -323,8 +323,8 @@ pub static UART_CONSOLE: UartConsole = UartConsole;
 /// The PL011 receive interrupt is unmasked once for the whole interactive
 /// session — by the root-unlock kthread at the start of its passphrase
 /// prompt, and (idempotently) again at the `login` handoff
-/// ([`crate::aarch64::gic_irq::enable_uart_console_irq`]). Its handler
-/// ([`crate::aarch64::gic_irq::production_device_irq_dispatch`]) drains the
+/// (`crate::aarch64::gic_irq::enable_uart_console_irq`). Its handler
+/// (`crate::aarch64::gic_irq::production_device_irq_dispatch`) drains the
 /// hardware FIFO and `push`es the bytes here, which wakes the reader parked
 /// in kernel-core's `BlockingConsoleRead` (the `login` reader) or the
 /// root-unlock kthread's `KthreadConsoleRead` the instant input arrives
@@ -344,7 +344,7 @@ pub static UART_INPUT: rustos_kernel_core::ConsoleInputQueue =
 /// The UART console's **read** half: drains the interrupt-fed [`UART_INPUT`]
 /// queue and, after freeing space, re-enables the receive line if the ISR
 /// masked it on a full queue
-/// ([`crate::aarch64::gic_irq::rearm_uart_rx_if_masked`] — the consumer side
+/// (`crate::aarch64::gic_irq::rearm_uart_rx_if_masked` — the consumer side
 /// of the receive flow control). A zero-sized adapter; the queue's
 /// [`rustos_kernel_core::ConsoleInput`] (push) half stays the raw
 /// [`UART_INPUT`], which the interrupt fills.

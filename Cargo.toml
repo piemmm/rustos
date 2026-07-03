@@ -47,6 +47,7 @@ members = [
     "lib/fdt",
     "lib/font",
     "lib/fsmeta",
+    "lib/fwcfg",
     "lib/geometry",
     "lib/glob",
     "lib/hid",
@@ -270,7 +271,6 @@ members = [
     "tests/integration/cross_cpu_tlb_shootdown_qemu_riscv64",
     "tests/integration/cross_cpu_tlb_shootdown_qemu_aarch64",
     "tests/integration/cross_cpu_tlb_shootdown_qemu_x86_64",
-    "tests/integration/fwcfg",
     "tests/integration/vesa_display_qemu_x86_64",
 ]
 

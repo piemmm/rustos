@@ -6,7 +6,7 @@
 //! visible the initiating CPU must therefore *interrupt* every other
 //! online CPU and have each one run `invlpg` for the affected page —
 //! the classic inter-processor "TLB shootdown". This module owns that
-//! protocol; [`crate::kernel_arch::X86_64Arch`] implements
+//! protocol; `crate::kernel_arch::X86_64Arch` implements
 //! [`rustos_arch_api::CrossCpuTlbShootdown`] over it.
 //!
 //! # Protocol
@@ -39,13 +39,12 @@
 //!
 //! The mailbox, the ISR, and the install helper are gated to
 //! `target_os = "none"`: they reach LAPIC MMIO and the per-CPU IDT.
-//! The host build carries none of them; the [`X86_64Arch`] shootdown
+//! The host build carries none of them; the `X86_64Arch` shootdown
 //! impl is a vacuous no-op there (there is no second CPU and no TLB),
 //! and the conformance vertical asserts only that the call is
 //! total and panic-free. The real cross-CPU round-trip is proven by the
 //! `cross_cpu_tlb_shootdown_qemu_x86_64` QEMU vertical.
 //!
-//! [`X86_64Arch`]: crate::kernel_arch::X86_64Arch
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};

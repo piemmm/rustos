@@ -213,7 +213,7 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Arch;
+    use crate::{Arch, SessionKind};
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -228,7 +228,9 @@ mod tests {
             display_ramfb: false,
             extra_args: Vec::new(),
             input_keyboard: None,
+            input_mouse: false,
             serial_input: Vec::new(),
+            session: SessionKind::HeadlessTest,
         }
     }
 
@@ -440,6 +442,7 @@ mod tests {
         spec.input_keyboard = Some(crate::KeyInjection {
             ready_marker: "ready".into(),
             key: "a".into(),
+            ready_occurrences: 1,
         });
         let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
         assert!(argv.iter().any(|a| a == "virtio-keyboard-device"));

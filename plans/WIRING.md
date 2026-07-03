@@ -738,7 +738,7 @@ stricter `is_release_ready` gate rejects any `Pending`.
   as `AArch64QemuEnv`), reused by both the virtio scenario and the display
   vertical. The `fw_cfg` MMIO transport (`MmioDma`) is byte-identical on
   the riscv64 and aarch64 `virt` boards, so it was moved into the shared
-  `rustos-itest-fwcfg` crate and now serves both display verticals (the
+  `lib/fwcfg` crate (`rustos-fwcfg`) and now serves both display verticals (the
   riscv64 vertical's local copy was deleted); only the x86_64 IOport
   transport stays distinct. The display driver lifecycle is the per-arch
   sibling of the riscv64/x86_64 display scenarios (the established
