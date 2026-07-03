@@ -3515,14 +3515,17 @@ binding design and staging.
 
 ## CAPABILITY_USE — the capability lifecycle: login → session → administration (`plans/CAPABILITY_USE.md`)
 
-**Status: planned (CU1–CU6).** Fixes the debug-image defect where `root`/`root`
-logs in but every `ls`/`cd`/open/spawn is `PermissionDenied`, by specifying —
-and then wiring — the full capability lifecycle. The kernel already computes
-*effective = user grant ∩ manifest request* (`TaskCapabilities::derive`) and
-the `users-v1` record already carries a per-account grant, but every runtime
-spawn passes the program manifest as both sides, the shell manifest omits
-`CAP_FS_ACCESS`/`CAP_PROC_SPAWN`, and the seeded debug root grant omits
-`CAP_FS_ACCESS`. The plan binds: where each principal's ceiling comes from
+**Status: CU1 done; CU2–CU6 planned.** Fixes the debug-image defect where
+`root`/`root` logs in but every `ls`/`cd`/open/spawn is `PermissionDenied`, by
+specifying — and then wiring — the full capability lifecycle. The kernel
+computes *effective = user grant ∩ manifest request*
+(`TaskCapabilities::derive`) and, since CU1, the runtime spawn path threads
+the account's `capability_grants` ceiling through `SpawnCredential` into that
+intersection (inherit copies the caller's stored ceiling; a
+`CAP_SPAWN_AS_USER` switch resolves the target account's). Still broken: the
+shell manifest omits `CAP_FS_ACCESS`/`CAP_PROC_SPAWN` (CU2) and the seeded
+debug root grant omits `CAP_FS_ACCESS` (CU3). The plan binds: where each
+principal's ceiling comes from
 (system programs = manifest; user sessions = the account grant snapshotted at
 the `CAP_SPAWN_AS_USER` switch and inherited by every descendant), the
 interactive **session baseline** (`FS_ACCESS`, `PROC_SPAWN`, console pair),

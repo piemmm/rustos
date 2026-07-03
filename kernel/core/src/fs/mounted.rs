@@ -46,6 +46,7 @@ use rustos_abi::driver::filesystem::{
 use rustos_abi::driver::DriverHandle;
 use rustos_abi::sysinfo::MountRecord;
 use rustos_abi::{CapabilityQuery, Errno, FileKind, FileStat, OpenFlags};
+use rustos_caps::CapabilitySet;
 use rustos_kernel_sec::{GroupId, IdentityTable, UserId, UserRecord};
 use rustos_sync::{OnceCell, SpinLock};
 
@@ -273,15 +274,19 @@ impl LateIdentity {
         }
     }
 
-    /// Resolve the attested group credential (primary group and supplementary
-    /// groups) for `uid` from the installed identity table.
+    /// Resolve the attested credential — primary group, supplementary
+    /// groups, and the account's capability ceiling — for `uid` from the
+    /// installed identity table.
     ///
     /// This is the spawn-as-user resolver: when a privileged spawner switches
     /// a child into a target user, the kernel snapshots that user's full group
-    /// set onto the child's capability record from the table it vouches for,
-    /// so the child's later filesystem checks run under an authoritative,
-    /// caller-independent credential. The returned set is owned (a snapshot),
-    /// not a borrow into the table, so it can be stored on the task.
+    /// set **and** its `capability_grants` ceiling onto the child's capability
+    /// record from the table it vouches for, so the child's later filesystem
+    /// checks run under an authoritative, caller-independent credential and
+    /// its effective capability set is derived as `manifest ∩ ceiling`
+    /// (`plans/CAPABILITY_USE.md` CU1). The returned values are owned (a
+    /// snapshot), not a borrow into the table, so they can be stored on the
+    /// task.
     ///
     /// # Errors
     ///
@@ -289,9 +294,16 @@ impl LateIdentity {
     /// [`Errno::NotImplemented`] before a table is installed and
     /// [`Errno::PermissionDenied`] for a uid with no account, so a switch to
     /// an unknown or unresolvable user never invents a credential.
-    pub fn resolve_credential(&self, uid: u32) -> Result<(GroupId, Vec<GroupId>), Errno> {
+    pub fn resolve_credential(
+        &self,
+        uid: u32,
+    ) -> Result<(GroupId, Vec<GroupId>, CapabilitySet), Errno> {
         let record = self.resolve(uid)?;
-        Ok((record.primary_gid, record.supplementary_gids.clone()))
+        Ok((
+            record.primary_gid,
+            record.supplementary_gids.clone(),
+            record.capability_grants,
+        ))
     }
 }
 

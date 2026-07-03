@@ -19,13 +19,12 @@ On the debug image (`root`/`root`), login succeeds but the session is
 useless: every `ls`, `cd`, file open, and program launch fails with
 `PermissionDenied`. The root cause is threefold (§3 below):
 
-1. The kernel already has the right primitive — `TaskCapabilities::derive`
-   (`kernel/sec/src/captable.rs`) computes *effective = user grant ∩
-   manifest request* — but **every runtime spawn feeds the program manifest
-   as both sides** (`derive(…, caps, caps, …)`), so the per-account grant
-   stored in `/System/Security/Users` (`users-v1` `capabilities` field,
-   `lib/users`) is dead data: it is parsed, verified, installed into the
-   kernel `IdentityTable`… and never consulted again.
+1. *(fixed — CU1)* The kernel already had the right primitive —
+   `TaskCapabilities::derive` (`kernel/sec/src/captable.rs`) computes
+   *effective = user grant ∩ manifest request* — but every runtime spawn fed
+   the program manifest as both sides, so the per-account grant stored in
+   `/System/Security/Users` (`users-v1` `capabilities` field, `lib/users`)
+   was dead data. The ceiling is now threaded through spawn (CU1).
 2. The shell's registered manifest
    (`kernel/rustos-kernel/src/spawn_layout.rs`) requests only
    `CAP_CONSOLE_WRITE` + `CAP_CONSOLE_READ` — no `CAP_FS_ACCESS`, no
@@ -146,17 +145,17 @@ The life of a capability, from disk to exercise to revocation:
   kernel `IdentityTable` (whose `UserRecord.capability_grants` documents
   itself as "the maximum capability set this user may ever exercise").
 - Login as the sole `CAP_SPAWN_AS_USER`/`CAP_USERS_READ` holder;
-  `resolve_credential` resolving the target's groups from the table, fail
-  closed before install / on unknown uid.
+  `resolve_credential` resolving the target's groups **and capability
+  ceiling** from the table, fail closed before install / on unknown uid.
 - Per-inode owner/mode/ACL enforcement under kernel-attested credentials in
   the secured VFS; capability-gated dispatch on every syscall.
+- The user ceiling threaded through spawn (CU1): `SpawnCredential` carries
+  the account's `capability_grants` snapshot and
+  `KernelSpawnCtx::admit_process` derives `ceiling ∩ manifest` — B1 is
+  fixed.
 
 **Broken (the defect this plan fixes):**
 
-- **B1** — the runtime spawn path never consults the user ceiling: every
-  `TaskCapabilities::derive` call site passes the program manifest as both
-  arguments, and `SpawnCredential`/`resolve_credential` carry groups but no
-  grant. The intersection is real code computing `manifest ∩ manifest`.
 - **B2** — the shell manifest (`SPAWN_PROGRAMS`) omits `CAP_FS_ACCESS` and
   `CAP_PROC_SPAWN`, so an interactive session cannot list, open, or run.
 - **B3** — the debug root grant (`tools/mkimage::debug_users_db`) omits
@@ -326,25 +325,33 @@ authorises it; anything not listed is denied.
 
 ### CU1 — thread the user ceiling through spawn (fixes B1)
 
-**Status: planned.**
+**Status: done.**
 
-- Extend the kernel identity resolution so a spawn-as-user switch snapshots
-  the target account's `capability_grants` alongside its groups
-  (`LateIdentity::resolve_credential` returns the ceiling; fail-closed
-  behaviour unchanged).
-- Carry the ceiling on the task's kernel record (`TaskCapabilities` already
-  stores `user_grant` — populate it truthfully): `SpawnCredential` gains the
-  grant, `KernelSpawnCtx::admit_process` derives
-  `program manifest ∩ ceiling`, and an inherit-spawn copies the parent's
-  stored ceiling (not its effective set) as the child's grant side.
-- System programs keep manifest-as-ceiling (§4.1) — the boot-path
-  `derive(caps, caps)` call sites are then the *only* ones, documented as
-  such.
-- Tests: spawn-as-user intersects (a target account lacking `CAP_FS_ACCESS`
-  yields a shell without it even though the manifest requests it);
-  inherit-spawn intersects against the ceiling, not the parent's effective
-  set; unresolvable uid / uninstalled table still fail closed; audit event
-  carries the derived count. Regression test named for B1.
+- `LateIdentity::resolve_credential` returns the target account's
+  `capability_grants` ceiling alongside its groups; fail-closed behaviour
+  unchanged (`NotImplemented` before install, `PermissionDenied` on an
+  unknown uid).
+- `SpawnCredential` carries the ceiling as an immutable kernel-side
+  snapshot (`Option<CapabilitySet>`; `None` is the §4.1 system-principal
+  manifest-as-ceiling shape). The spawn handler populates it: an
+  inherit-spawn copies the caller's stored `TaskCapabilities::user_ceiling()`
+  (never its effective set); a switch takes the resolved account ceiling.
+  `KernelSpawnCtx::admit_process` derives `ceiling ∩ manifest`.
+- System programs keep manifest-as-ceiling (§4.1): the task record carries
+  a `system_principal` marker (`user_ceiling()` answers `None`), set at
+  admit for a ceiling-less credential and on PID 1's boot record, so an
+  inherit-spawn *from* a system principal bounds the child by the child's
+  own registered manifest (init → login/devmgr) and the shape propagates.
+  The boot-path `derive(caps, caps)` call sites (PID 1 in `init.rs`, the
+  driver-spawn paths under a system credential) are documented as such.
+- Tests (`kernel/core/src/syscalls.rs`): the B1 regression
+  (`spawn_as_user_intersects_the_manifest_with_the_account_ceiling`, also
+  asserting the audit event's derived count), inherit-spawn intersecting
+  against the ceiling not the caller's effective set, the system-principal
+  inherit keeping manifest-as-ceiling, and unknown-uid /
+  uninstalled-table fail-closed. The `RecordingSpawn` test double forwards
+  `program.capability_set()` exactly as the production producers do.
+- Docs: `docs/src/security/capabilities.md` (the lifecycle page, §8).
 
 ### CU2 — session-baseline manifests (fixes B2)
 

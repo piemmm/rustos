@@ -149,6 +149,15 @@ pub struct TaskCapabilities {
     manifest_request: CapabilitySet,
     /// Currently effective set. Always a subset of `user_grant ∩ manifest_request`.
     effective: CapabilitySet,
+    /// `true` for the **system principal** — a program the kernel launches
+    /// before or outside an authenticated session. Such a task has no
+    /// users-db account: its registered manifest is its own ceiling, and
+    /// [`Self::user_ceiling`] answers [`None`] so a child it spawns is
+    /// bounded by the *child's* manifest, not a fabricated account grant.
+    /// Set only by the kernel admit paths through
+    /// [`Self::as_system_principal`]; defaults to `false` (a user-session
+    /// task whose ceiling is its account grant).
+    system_principal: bool,
     /// Kernel-generated process-instance identity, distinct from the
     /// reusable scheduler [`TaskId`]. Defaults to [`ProcId::KERNEL`] —
     /// the sentinel for a schedulable entity that is not a distinct user
@@ -240,11 +249,31 @@ impl TaskCapabilities {
             user_grant,
             manifest_request,
             effective,
+            system_principal: false,
             proc_id: ProcId::KERNEL,
             parent_proc_id: ProcId::KERNEL,
             name: ProcName::EMPTY,
             start_time: 0,
         }
+    }
+
+    /// Mark this record as belonging to the **system principal**: a program
+    /// the kernel launches before or outside an authenticated session
+    /// (PID 1 `init`, the boot services, an in-kernel driver host). The
+    /// system principal has no users-db account, so it carries no account
+    /// ceiling — its registered manifest *is* its ceiling — and
+    /// [`user_ceiling`](Self::user_ceiling) then answers [`None`], making a
+    /// child it spawns derive against the *child's own* manifest rather
+    /// than inheriting a fabricated account grant.
+    ///
+    /// Consumed and returned so the process-admit path can set it inline,
+    /// mirroring [`Self::with_proc_id`]. Only the kernel's admit sites call
+    /// it, and only for a credential the kernel itself minted — never from
+    /// any caller-supplied state. It does not alter the effective set.
+    #[must_use]
+    pub fn as_system_principal(mut self) -> Self {
+        self.system_principal = true;
+        self
     }
 
     /// Attach the task's kernel-attested group credential (primary group and
@@ -420,6 +449,25 @@ impl TaskCapabilities {
     #[must_use]
     pub fn user_grant(&self) -> &CapabilitySet {
         &self.user_grant
+    }
+
+    /// The account ceiling this task hands to a child it spawns, or
+    /// [`None`] for the system principal.
+    ///
+    /// A user-session task passes its account's grant on: an inherit-spawned
+    /// child derives `its own manifest ∩ this ceiling`, so delegation only
+    /// narrows. The system principal (see
+    /// [`as_system_principal`](Self::as_system_principal)) has no users-db
+    /// account and answers [`None`]: each system program's registered
+    /// manifest is its own ceiling, so a boot service spawned by PID 1 is
+    /// bounded by *its* manifest, not by PID 1's.
+    #[must_use]
+    pub fn user_ceiling(&self) -> Option<&CapabilitySet> {
+        if self.system_principal {
+            None
+        } else {
+            Some(&self.user_grant)
+        }
     }
 
     /// Original manifest request.

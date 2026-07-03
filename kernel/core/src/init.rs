@@ -697,16 +697,22 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
 
         // Register the task's caps under the *same* numeric id the
         // dispatcher recovers (`SecTaskId(current_task)`), so PID 1's first
-        // syscall resolves a caller context. `init`'s
-        // effective set is the intersection of its user grant and manifest
-        // request; the boot path passes the system grant, so use it for both
-        // bounds (uid 0 — the system user).
+        // syscall resolves a caller context. PID 1 runs as the system
+        // principal (uid 0 — the system user), which has no users-db row:
+        // its registered manifest *is* its ceiling, so it stands as both
+        // derive bounds (`plans/CAPABILITY_USE.md` §4.1, the one legitimate
+        // manifest-as-ceiling shape; a user session's ceiling is its
+        // account grant, threaded through `SpawnCredential`).
         let sec_id = SecTaskId(task_id);
         // Attach PID 1's process-instance identity (a kernel-trusted bootstrap
         // principal minted from the shared per-boot counter), so its syscalls
         // are attributed to this instance distinctly from any task that later
         // reuses the numeric id.
         let record = TaskCapabilities::derive(sec_id, UserId(0), caps, caps, self.audit)
+            // Marked so PID 1's inherit-spawned children (the boot
+            // services) are each bounded by their own registered manifest,
+            // not by PID 1's.
+            .as_system_principal()
             .with_proc_id(crate::proc_id::mint_proc_id_bootstrap())
             // PID 1 is the init process; its name is kernel-known, not
             // resolved from any caller.

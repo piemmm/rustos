@@ -2018,25 +2018,33 @@ where
             return Err(Errno::NotFound);
         };
 
-        // Resolve the child's kernel-attested credential (uid + group set),
-        // never a caller-supplied value:
+        // Resolve the child's kernel-attested credential (uid + group set +
+        // capability ceiling), never a caller-supplied value:
         //
         // * `SPAWN_UID_INHERIT` — the child runs as the *same* user as its
         //   parent: copy the caller's own attested credential from its
-        //   kernel-held record. Running a child as oneself needs no
-        //   capability.
+        //   kernel-held record, including the caller's stored user ceiling —
+        //   never its (narrower) effective set — so a shell that launches a
+        //   tool hands it the user's ceiling and the tool ends up with its
+        //   own manifest ∩ that ceiling. A system-principal caller (PID 1
+        //   spawning the boot services) has no account ceiling; its children
+        //   are system programs too, each bounded by its own registered
+        //   manifest. Running a child as oneself needs no capability, and
+        //   delegation can only narrow: the ceiling is an immutable
+        //   kernel-side snapshot.
         // * a concrete uid — a *switch*: privilege drops into a defined user
         //   at process creation (there is no setuid-self), so it requires the
         //   caller to hold `CAP_SPAWN_AS_USER` and resolves the target's full
-        //   group set from the authoritative identity table. It fails closed
-        //   on a missing capability, and `resolve_credential` fails closed on
-        //   an unresolvable user or an uninstalled table — never inventing an
-        //   identity.
+        //   group set and capability ceiling from the authoritative identity
+        //   table. It fails closed on a missing capability, and
+        //   `resolve_credential` fails closed on an unresolvable user or an
+        //   uninstalled table — never inventing an identity.
         let credential = if target_uid == SPAWN_UID_INHERIT {
             SpawnCredential::new(
                 caller.caps.owner(),
                 caller.caps.primary_gid(),
                 caller.caps.supplementary_gids().to_vec(),
+                caller.caps.user_ceiling().copied(),
             )
         } else {
             if !caller.caps.has(CapabilityId::SPAWN_AS_USER) {
@@ -2051,8 +2059,14 @@ where
                 );
                 return Err(Errno::PermissionDenied);
             }
-            let (primary_gid, supplementary_gids) = self.identity.resolve_credential(target_uid)?;
-            SpawnCredential::new(UserId(target_uid), primary_gid, supplementary_gids)
+            let (primary_gid, supplementary_gids, ceiling) =
+                self.identity.resolve_credential(target_uid)?;
+            SpawnCredential::new(
+                UserId(target_uid),
+                primary_gid,
+                supplementary_gids,
+                Some(ceiling),
+            )
         };
 
         // Hand the validated `rxe` to the architecture spawn producer,
@@ -4277,9 +4291,14 @@ where
 /// * **system** — the fixed uid 0 / gid 0 credential for the kernel's own
 ///   principals (PID 1, the storage bootstrap-floor drivers).
 ///
-/// It carries identity only; capabilities flow separately through the
-/// manifest-bounded effective set. The group set is bounded by the identity
-/// table's verifier, so a task can never carry an unbounded credential.
+/// It carries identity **and the user's capability ceiling**: the account's
+/// `capability_grants` snapshot the admit path intersects with the program's
+/// manifest request to derive the child's effective set
+/// (`plans/CAPABILITY_USE.md` CU1). The ceiling is resolved kernel-side —
+/// from the caller's own stored grant (inherit) or the authoritative
+/// identity table (switch) — never a caller-supplied value, so delegation
+/// can only narrow. The group set is bounded by the identity table's
+/// verifier, so a task can never carry an unbounded credential.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SpawnCredential {
     /// Owning user id snapshotted onto the child.
@@ -4289,6 +4308,14 @@ pub struct SpawnCredential {
     /// Supplementary groups of the credential (bounded by the identity
     /// verifier when resolved).
     supplementary_gids: Vec<GroupId>,
+    /// The account's capability ceiling — the maximum set any process
+    /// running under this credential may ever exercise. [`None`] is the
+    /// system-principal shape (`plans/CAPABILITY_USE.md` §4.1): a program
+    /// the kernel launches before or outside an authenticated session has
+    /// no users-db row, so its manifest *is* its ceiling and the admit path
+    /// derives `manifest ∩ manifest`. Every user-session credential carries
+    /// a real ceiling.
+    ceiling: Option<CapabilitySet>,
 }
 
 impl SpawnCredential {
@@ -4302,16 +4329,33 @@ impl SpawnCredential {
             uid: UserId(0),
             primary_gid: GroupId(0),
             supplementary_gids: Vec::new(),
+            // The system principal has no users-db row; its manifest is its
+            // ceiling, so the admit path derives `manifest ∩ manifest`.
+            ceiling: None,
         }
     }
 
     /// Build a credential from its resolved parts (a switch or an inherit).
+    ///
+    /// `ceiling` is the account's capability ceiling, resolved kernel-side
+    /// and never a caller-supplied value: the spawning caller's own stored
+    /// [`TaskCapabilities::user_ceiling`] for an inherit, or the identity
+    /// table's `capability_grants` snapshot for a switch. [`None`] is the
+    /// system-principal shape and only ever originates from a
+    /// system-principal parent's record (or [`Self::system`]); it makes the
+    /// admit path derive the child's manifest as both bounds.
     #[must_use]
-    pub const fn new(uid: UserId, primary_gid: GroupId, supplementary_gids: Vec<GroupId>) -> Self {
+    pub const fn new(
+        uid: UserId,
+        primary_gid: GroupId,
+        supplementary_gids: Vec<GroupId>,
+        ceiling: Option<CapabilitySet>,
+    ) -> Self {
         Self {
             uid,
             primary_gid,
             supplementary_gids,
+            ceiling,
         }
     }
 }
@@ -4546,11 +4590,7 @@ where
 
         // Register the child's caps under the *same* numeric id the
         // dispatcher recovers (`SecTaskId(task_id)`), so its first syscall
-        // resolves a caller context. `caps` is already
-        // the manifest∩user-grant set the producer derived; pass it as both
-        // bounds so the kernel re-derives the same effective set. uid 0 is
-        // the system user; a per-user spawn uid is a
-        // later stage.
+        // resolves a caller context.
         let sec_id = SecTaskId(task_id);
         // Attach the kernel-minted process-instance identity to the record so
         // every syscall this child makes is attributed to the exact instance
@@ -4572,23 +4612,38 @@ where
         // the owning uid plus the full group set the call site resolved
         // (inherited from the parent, switched to a target user, or the fixed
         // system credential). The credential is identity for the filesystem
-        // permission model and the attested `Origin`; capabilities are
-        // unchanged — `caps` is the manifest∩user-grant set the producer
-        // derived, passed as both bounds so the effective set is exactly it.
+        // permission model and the attested `Origin`.
+        //
+        // The child's effective capability set is derived here as
+        // `user ceiling ∩ manifest request` (`plans/CAPABILITY_USE.md` CU1):
+        // `caps` is the program's manifest request and the ceiling rides on
+        // the credential — the account's `capability_grants` snapshot for a
+        // user-session spawn. A system-principal credential carries no
+        // users-db ceiling; its manifest is its ceiling, so `caps` stands on
+        // both sides (the one legitimate manifest-as-ceiling shape) and the
+        // record is marked so the child's own inherit-spawns stay
+        // manifest-bounded too.
+        //
         // Snapshot the kernel's monotonic clock at admission as the child's
         // attested start time, so an audit or origin consumer can order and
         // age the instance and tell apart two lifetimes that reused a numeric
         // id. Read kernel-side from the Arch HAL counter, never caller-supplied.
         let start_time = SchedulerArch::ticks_now(self.arch);
-        let record = TaskCapabilities::derive(sec_id, self.credential.uid, caps, caps, self.audit)
-            .with_proc_id(self.proc_id)
-            .with_parent_proc_id(parent_proc_id)
-            .with_name(self.name.clone())
-            .with_credential(
-                self.credential.primary_gid,
-                self.credential.supplementary_gids.clone(),
-            )
-            .with_start_time(start_time);
+        let record = match self.credential.ceiling {
+            Some(ceiling) => {
+                TaskCapabilities::derive(sec_id, self.credential.uid, ceiling, caps, self.audit)
+            }
+            None => TaskCapabilities::derive(sec_id, self.credential.uid, caps, caps, self.audit)
+                .as_system_principal(),
+        }
+        .with_proc_id(self.proc_id)
+        .with_parent_proc_id(parent_proc_id)
+        .with_name(self.name.clone())
+        .with_credential(
+            self.credential.primary_gid,
+            self.credential.supplementary_gids.clone(),
+        )
+        .with_start_time(start_time);
         self.caps.write().insert(record);
 
         // Register the child's frozen address space + direct map under the
@@ -7710,8 +7765,10 @@ mod tests {
             let frozen: Box<dyn UserAddressSpace + Send + Sync> = Box::new(space.freeze());
             let physmap: Box<dyn PhysMap + Send + Sync> =
                 Box::new(SimPhysMap::new(PhysAddr::new(0), PAGE_SIZE));
-            let mut child_caps = CapabilitySet::empty();
-            child_caps.insert(CapabilityId::CONSOLE_WRITE);
+            // Forward the program's manifest request exactly as the real
+            // producers do, so the admit path's `ceiling ∩ manifest`
+            // derivation is exercised against the registered entry.
+            let child_caps = program.capability_set();
             // Inert closures: a host test never enters user mode or
             // reactivates a page-table root.
             let pre_resume: Box<dyn FnMut(u64) + Send> = Box::new(|_stack_top| {});
@@ -9416,6 +9473,312 @@ mod tests {
         assert_eq!(child.owner(), UserId(2000));
         assert_eq!(child.primary_gid(), GroupId(88));
         assert_eq!(child.supplementary_gids(), &[GroupId(99)]);
+    }
+
+    /// Regression test for defect B1 (`plans/CAPABILITY_USE.md`): a
+    /// spawn-as-user switch derives the child's effective set as
+    /// `manifest request ∩ the target account's capability ceiling` — the
+    /// `capability_grants` snapshot resolved from the authoritative identity
+    /// table — so a manifest request the account's grant does not cover is
+    /// simply absent from the intersection. Before CU1 the spawn path passed
+    /// the manifest as both derive bounds, leaving the per-account grant
+    /// dead data.
+    #[test]
+    fn spawn_as_user_intersects_the_manifest_with_the_account_ceiling() {
+        use rustos_kernel_sec::{GroupRecord, IdentityTableBuilder, UserRecord};
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, SPAWN_PATH);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let caps = make_caps_record(
+            2,
+            &[CapabilityId::PROC_SPAWN, CapabilityId::SPAWN_AS_USER],
+            sink,
+        );
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        // The target account's ceiling grants the console pair but *not*
+        // `FS_ACCESS`, even though the program's manifest requests it.
+        let ceiling = caps_with(&[CapabilityId::CONSOLE_READ, CapabilityId::CONSOLE_WRITE]);
+        let mut builder = IdentityTableBuilder::new();
+        builder.push_group(GroupRecord { gid: GroupId(88) });
+        builder.push_user(UserRecord {
+            uid: UserId(2000),
+            primary_gid: GroupId(88),
+            supplementary_gids: Vec::new(),
+            capability_grants: ceiling,
+        });
+        let id_table = builder.verify(sink).expect("valid identity table");
+        let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
+        identity.install(id_table).expect("identity install");
+
+        let programs: &'static ProgramRegistry =
+            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+                EmbeddedProgram {
+                    path: SPAWN_PATH,
+                    rxe: SPAWN_RXE,
+                    caps: &[
+                        CapabilityId::FS_ACCESS,
+                        CapabilityId::CONSOLE_READ,
+                        CapabilityId::CONSOLE_WRITE,
+                    ],
+                    args: &[],
+                },
+            ])))));
+        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
+        let h = spawn_handler(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
+            producer,
+        )
+        .with_identity(identity);
+        // Narrow the audit assertions below to the spawn itself: drop the
+        // fixture-builder records emitted during set-up.
+        sink.clear();
+        let pid = h
+            .spawn(&ctx, 0x1000, SPAWN_PATH.len(), CONSOLE_INHERIT, 2000)
+            .expect("switch spawn succeeds");
+        let guard = table.read();
+        let child = guard.caps_for(SecTaskId(pid)).expect("child record");
+        // The effective set is the intersection: the console pair passes,
+        // the uncovered `FS_ACCESS` request does not.
+        assert!(child.has(CapabilityId::CONSOLE_READ));
+        assert!(child.has(CapabilityId::CONSOLE_WRITE));
+        assert!(!child.has(CapabilityId::FS_ACCESS));
+        // The ceiling stored on the child is the account grant, so a later
+        // inherit-spawn below this child intersects against the account's
+        // ceiling, never a fabricated one.
+        assert_eq!(child.user_grant(), &ceiling);
+        // The derive audit event attributes the child and carries the
+        // derived (intersected) count: 2, not the manifest's 3.
+        let derived: alloc::vec::Vec<_> = sink
+            .snapshot()
+            .into_iter()
+            .filter(|e| e.id == rustos_kernel_sec::AuditEvent::TaskCapabilitiesDerived.id())
+            .collect();
+        let child_derive = derived.last().expect("child derive audited");
+        assert!(child_derive
+            .fields
+            .iter()
+            .any(|(k, v)| k == "caps" && v == "2"));
+    }
+
+    /// An inherit spawn intersects the child's manifest against the
+    /// spawning caller's stored **user ceiling**, never the caller's
+    /// (narrower) effective set: a shell whose own manifest requests little
+    /// still hands its children the account's full ceiling, and each child
+    /// ends up with `its own manifest ∩ that ceiling`
+    /// (`plans/CAPABILITY_USE.md` §2.3).
+    #[test]
+    fn spawn_inherit_intersects_against_the_ceiling_not_the_callers_effective_set() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, SPAWN_PATH);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        // The caller's account ceiling covers the filesystem and spawn, but
+        // its own manifest requested only `PROC_SPAWN` — so its *effective*
+        // set holds neither `FS_ACCESS` nor the console pair.
+        let ceiling = caps_with(&[
+            CapabilityId::FS_ACCESS,
+            CapabilityId::PROC_SPAWN,
+            CapabilityId::CONSOLE_WRITE,
+        ]);
+        let manifest = caps_with(&[CapabilityId::PROC_SPAWN]);
+        let caps = TaskCapabilities::derive(SecTaskId(2), UserId(1000), ceiling, manifest, sink);
+        assert!(!caps.has(CapabilityId::FS_ACCESS));
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let programs: &'static ProgramRegistry =
+            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+                EmbeddedProgram {
+                    path: SPAWN_PATH,
+                    rxe: SPAWN_RXE,
+                    caps: &[CapabilityId::FS_ACCESS, CapabilityId::CONSOLE_WRITE],
+                    args: &[],
+                },
+            ])))));
+        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
+        let h = spawn_handler(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
+            producer,
+        );
+        let pid = h
+            .spawn(
+                &ctx,
+                0x1000,
+                SPAWN_PATH.len(),
+                CONSOLE_INHERIT,
+                SPAWN_UID_INHERIT,
+            )
+            .expect("inherit spawn succeeds");
+        let guard = table.read();
+        let child = guard.caps_for(SecTaskId(pid)).expect("child record");
+        // The child's manifest requests are honoured within the *ceiling*,
+        // even though the caller's own effective set never held them…
+        assert!(child.has(CapabilityId::FS_ACCESS));
+        assert!(child.has(CapabilityId::CONSOLE_WRITE));
+        // …and the child never gains what its own manifest did not request.
+        assert!(!child.has(CapabilityId::PROC_SPAWN));
+        // The caller's ceiling travels to the child unchanged.
+        assert_eq!(child.user_grant(), &ceiling);
+    }
+
+    /// An inherit spawn from the **system principal** (PID 1 launching the
+    /// boot services) carries no account ceiling: the child is a system
+    /// program too, bounded by its *own* registered manifest — login gets
+    /// `USERS_READ`/`SPAWN_AS_USER` even though init's manifest holds
+    /// neither — and the child's record stays system-principal so its own
+    /// inherit-spawns behave the same way.
+    #[test]
+    fn spawn_inherit_from_the_system_principal_keeps_manifest_as_ceiling() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, SPAWN_PATH);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        // The PID-1 shape: a system-principal record whose manifest holds
+        // only `PROC_SPAWN` + `CONSOLE_WRITE`.
+        let manifest = caps_with(&[CapabilityId::PROC_SPAWN, CapabilityId::CONSOLE_WRITE]);
+        let caps = TaskCapabilities::derive(SecTaskId(2), UserId(0), manifest, manifest, sink)
+            .as_system_principal();
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        // The login shape: a manifest requesting authority init never held.
+        let programs: &'static ProgramRegistry =
+            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+                EmbeddedProgram {
+                    path: SPAWN_PATH,
+                    rxe: SPAWN_RXE,
+                    caps: &[CapabilityId::USERS_READ, CapabilityId::SPAWN_AS_USER],
+                    args: &[],
+                },
+            ])))));
+        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
+        let h = spawn_handler(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
+            producer,
+        );
+        let pid = h
+            .spawn(
+                &ctx,
+                0x1000,
+                SPAWN_PATH.len(),
+                CONSOLE_INHERIT,
+                SPAWN_UID_INHERIT,
+            )
+            .expect("inherit spawn succeeds");
+        let guard = table.read();
+        let child = guard.caps_for(SecTaskId(pid)).expect("child record");
+        // The child is bounded by its own manifest, not the caller's.
+        assert!(child.has(CapabilityId::USERS_READ));
+        assert!(child.has(CapabilityId::SPAWN_AS_USER));
+        assert!(!child.has(CapabilityId::PROC_SPAWN));
+        // The system-principal shape propagates: the child too hands no
+        // account ceiling to its own inherit-spawns.
+        assert!(child.user_ceiling().is_none());
+    }
+
+    /// A spawn-as-user switch to a uid the installed identity table holds no
+    /// account for fails closed with `PermissionDenied` — the kernel never
+    /// invents a credential or a ceiling — and the producer is never reached.
+    /// (The uninstalled-table case is
+    /// `spawn_as_user_without_identity_table_fails_closed` below.)
+    #[test]
+    fn spawn_as_user_to_an_unknown_uid_is_denied() {
+        use rustos_kernel_sec::IdentityTableBuilder;
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, SPAWN_PATH);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let caps = make_caps_record(
+            2,
+            &[CapabilityId::PROC_SPAWN, CapabilityId::SPAWN_AS_USER],
+            sink,
+        );
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let programs: &'static ProgramRegistry =
+            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+                EmbeddedProgram {
+                    path: SPAWN_PATH,
+                    rxe: SPAWN_RXE,
+                    caps: &[],
+                    args: &[],
+                },
+            ])))));
+        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
+
+        // An installed table that holds no account for the target uid:
+        // denied, never a guessed identity.
+        let id_table = IdentityTableBuilder::new()
+            .verify(sink)
+            .expect("empty identity table verifies");
+        let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
+        identity.install(id_table).expect("identity install");
+        let h = spawn_handler(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
+            producer,
+        )
+        .with_identity(identity);
+        assert_eq!(
+            h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), CONSOLE_INHERIT, 2000),
+            Err(Errno::PermissionDenied)
+        );
+        assert!(producer.seen_rxe.lock().is_empty());
     }
 
     /// A spawn-as-user switch by a capable caller against an **uninstalled**

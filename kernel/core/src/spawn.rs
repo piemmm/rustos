@@ -585,11 +585,14 @@ pub struct EmbeddedProgram {
     pub path: &'static [u8],
     /// The validated `rxe` image bytes.
     pub rxe: &'static [u8],
-    /// The capabilities the program's manifest requests. The spawn producer grants the spawned child exactly
-    /// this set — each program receives only the authority its own entry
-    /// declares (the shell gets the console pair; login additionally
-    /// gets `PROC_SPAWN` + `USERS_READ`), never the spawning caller's
-    /// set (no ambient authority).
+    /// The capabilities the program's manifest **requests**. This is the
+    /// manifest side of the intersection: the admitted child's effective set
+    /// is this request ∩ the spawning credential's user ceiling
+    /// (`plans/CAPABILITY_USE.md` CU1) — each program asks only for the
+    /// authority its own entry declares (the shell gets the console pair;
+    /// login additionally gets `PROC_SPAWN` + `USERS_READ`), never the
+    /// spawning caller's set (no ambient authority), and the account's
+    /// grant bounds what the request can yield.
     pub caps: &'static [CapabilityId],
     /// The startup-argument vector handed to the program
     /// (`rustos_rt::arg`), each entry a NUL-free byte string.
@@ -598,8 +601,9 @@ pub struct EmbeddedProgram {
 
 impl EmbeddedProgram {
     /// The program's manifest-requested capabilities as a
-    /// [`CapabilitySet`] — the grant the spawn producer admits the child
-    /// with.
+    /// [`CapabilitySet`] — the manifest-request side of the
+    /// `ceiling ∩ manifest` intersection the admit path derives the child's
+    /// effective set from.
     #[must_use]
     pub fn capability_set(&self) -> CapabilitySet {
         let mut set = CapabilitySet::empty();
@@ -723,10 +727,16 @@ pub trait SpawnCtx {
 
     /// Register the freshly built process as a runnable (**Ready**) task
     /// with the scheduler (as a resumable user kthread, `plans/SPAWN.md`
-    /// SP2), the capability table (`caps`, the manifest∩user-grant set),
-    /// and the address-space registry (`space` + `physmap`, under the same
-    /// numeric id the dispatcher recovers so the child's first user-memory
-    /// copy resolves its own mappings), and return its PID.
+    /// SP2), the capability table, and the address-space registry (`space` +
+    /// `physmap`, under the same numeric id the dispatcher recovers so the
+    /// child's first user-memory copy resolves its own mappings), and return
+    /// its PID.
+    ///
+    /// `caps` is the program's **manifest request**. The production context
+    /// derives the child's effective set as `caps ∩ the spawn credential's
+    /// user ceiling` (`plans/CAPABILITY_USE.md` CU1); a system-principal
+    /// credential carries no users-db ceiling, so its manifest stands as
+    /// both sides and the effective set is exactly `caps`.
     ///
     /// `enter` is the arch-specific user-mode transition boxed as a
     /// `FnMut()` (it diverges, so its `!` coerces to `()`); it becomes the
@@ -807,9 +817,10 @@ pub trait ProcessSpawn: Sync {
     /// Build `program`'s `rxe` into a fresh isolated address space and
     /// admit it as a runnable process through `ctx`, returning its PID.
     ///
-    /// The child is granted exactly `program`'s declared capability set
-    /// and handed its declared argument vector — per-program authority,
-    /// never the spawning caller's.
+    /// The child requests exactly `program`'s declared capability set and is
+    /// handed its declared argument vector — per-program authority, never
+    /// the spawning caller's. Its effective set is that request ∩ the spawn
+    /// credential's user ceiling, derived at admission.
     ///
     /// # Errors
     ///
