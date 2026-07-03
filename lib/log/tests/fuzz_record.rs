@@ -15,7 +15,7 @@
 
 use rustos_abi::{
     CapabilitySummary, Duration64, FieldName, FieldValue, Origin, ProcId, Time64, TrustDomain,
-    WallClockReading, WallTimeState,
+    WallClockReading, WallTimeState, ORIGIN_CONSOLE_NONE,
 };
 use rustos_log::{
     decode_record, CallerContent, DictionaryBuilder, DictionaryView, Level, LogRecord, Stream,
@@ -33,6 +33,7 @@ fn base_record(buf: &mut [u8]) -> usize {
         42,
         ProcId::from_raw([0x7A; 16]),
         CapabilitySummary::from_raw([0u8; 32]),
+        ORIGIN_CONSOLE_NONE,
     );
     let data = [
         (FieldName::new("iface").unwrap(), FieldValue::Str("net0")),

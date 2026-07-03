@@ -286,6 +286,61 @@ impl LimitStore for NullLimitStore {
 /// The shared fail-closed default limit seam (see [`NullLimitStore`]).
 pub(crate) static NULL_LIMIT_STORE: NullLimitStore = NullLimitStore;
 
+/// The per-invocation elevation seam the `elevate` builtin drives
+/// (`plans/CAPABILITY_USE.md` CU5).
+///
+/// On a running kernel this is backed by this console's login supervisor:
+/// the shell derives the reserved rendezvous from its **own** kernel-attested
+/// console (`self_origin`), posts one `ipc_call` carrying the target
+/// account, the offered password, and the program, and blocks until the
+/// re-authenticated command has run to completion as that account. The shell
+/// itself needs **no** capability: authentication, placement, and the
+/// identity switch all happen in the supervisor and the kernel, so a caller
+/// cannot self-elevate — only ask, with the target account's password. In
+/// tests it is an in-memory fixture.
+pub trait Elevator {
+    /// Read one line of secret input (terminal echo off) into `buf`,
+    /// returning the number of bytes filled. The caller zeroises `buf`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the host's [`Errno`] when echo cannot be suppressed (fail
+    /// closed — a password must never render) or the read fails.
+    fn read_secret(&self, buf: &mut [u8]) -> Result<usize, Errno>;
+
+    /// Run `program` as `username` after the supervisor re-authenticates
+    /// `password`, blocking until it exits; returns its exit code.
+    ///
+    /// # Errors
+    ///
+    /// Returns the supervisor's refusal verbatim: an indistinguishable
+    /// [`Errno::PermissionDenied`] for a failed re-authentication or a
+    /// foreign console, the spawn's [`Errno`] for a launch failure, or
+    /// [`Errno::NotFound`] when this console has no elevation rendezvous.
+    fn elevate(&self, username: &str, password: &str, program: &str) -> Result<i32, Errno>;
+}
+
+/// A fail-closed [`Elevator`]: every operation reports
+/// [`Errno::NotImplemented`].
+///
+/// A [`Shell`](crate::Shell) built without a real elevation seam uses this,
+/// so `elevate` denies rather than pretending a command ran. The real seam
+/// is installed with [`Shell::with_elevator`](crate::Shell::with_elevator).
+pub(crate) struct NullElevator;
+
+impl Elevator for NullElevator {
+    fn read_secret(&self, _buf: &mut [u8]) -> Result<usize, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn elevate(&self, _username: &str, _password: &str, _program: &str) -> Result<i32, Errno> {
+        Err(Errno::NotImplemented)
+    }
+}
+
+/// The shared fail-closed default elevation seam (see [`NullElevator`]).
+pub(crate) static NULL_ELEVATOR: NullElevator = NullElevator;
+
 #[cfg(test)]
 mod tests {
     use super::{

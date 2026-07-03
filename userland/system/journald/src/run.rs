@@ -21,7 +21,9 @@
 //! FS-backed `SegmentStore` that writes each closed segment as its own
 //! immutable file under `/System/Logs/<stream>/`. It then binds the well-known
 //! `LOG_INGRESS_ENDPOINT` (an unrestricted-sender call endpoint — any process
-//! may post a log record) and blocks in a serve loop: receive a framed
+//! may post a log record, but the id is a reserved rendezvous, so binding it
+//! needs `CAP_IPC_BIND_PRIVILEGED`: a squatter could otherwise capture every
+//! process's log traffic) and blocks in a serve loop: receive a framed
 //! request, read the caller's kernel-attested `Origin` (`call_peer_origin`,
 //! never a caller claim), stamp the record with the journal's own ingest lane
 //! and the current monotonic + wall time, and hand it to the `serve` dispatch

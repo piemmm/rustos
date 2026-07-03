@@ -244,6 +244,7 @@ mod tests {
             42,
             ProcId::from_raw([7u8; 16]),
             CapabilitySummary::from_raw([0u8; 32]),
+            rustos_abi::ORIGIN_CONSOLE_NONE,
         )
     }
 

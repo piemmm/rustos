@@ -247,6 +247,7 @@ mod tests {
             42,
             ProcId::from_raw([0x5A; PROC_ID_LEN]),
             CapabilitySummary::EMPTY,
+            rustos_abi::ORIGIN_CONSOLE_NONE,
         )
     }
 
@@ -258,6 +259,7 @@ mod tests {
             1,
             ProcId::KERNEL,
             CapabilitySummary::EMPTY,
+            rustos_abi::ORIGIN_CONSOLE_NONE,
         )
     }
 

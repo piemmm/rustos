@@ -8,15 +8,16 @@
 //!
 //! Each builtin returns an exit status; the caller stores it as `$?`. The
 //! recognised set is intentionally minimal (no bloat):
-//! `cd`, `pwd`, `exit`, `export`, `unset`, `echo`, `jobs`, `fg`, `bg`, and
-//! `help`. A name outside this set is not a builtin and is launched as an
-//! external program instead.
+//! `cd`, `pwd`, `exit`, `export`, `unset`, `echo`, `jobs`, `fg`, `bg`,
+//! `ulimit`, `elevate`, and `help`. A name outside this set is not a
+//! builtin and is launched as an external program instead.
 
 use alloc::format;
 use alloc::string::{String, ToString};
 
+use crate::elevate;
 use crate::env::{is_valid_name, Environment};
-use crate::host::{Console, LimitStore, ProcessHost};
+use crate::host::{Console, Elevator, LimitStore, ProcessHost};
 use crate::job::{JobId, JobState, JobTable, Signal};
 use crate::ulimit;
 
@@ -34,6 +35,7 @@ pub(crate) struct BuiltinContext<'a> {
     pub host: &'a dyn ProcessHost,
     pub console: &'a dyn Console,
     pub limits: &'a dyn LimitStore,
+    pub elevator: &'a dyn Elevator,
     /// Set to `Some(code)` by `exit` to ask the read-eval loop to stop.
     pub exit: &'a mut Option<i32>,
 }
@@ -51,6 +53,7 @@ pub(crate) fn is_builtin(name: &str) -> bool {
             | "fg"
             | "bg"
             | "ulimit"
+            | "elevate"
             | "help"
     )
 }
@@ -72,6 +75,7 @@ pub(crate) fn dispatch(ctx: &mut BuiltinContext<'_>, argv: &[String]) -> Option<
         "fg" => fg(ctx, operands),
         "bg" => bg(ctx, operands),
         "ulimit" => ulimit::ulimit(ctx, operands),
+        "elevate" => elevate::elevate(ctx, operands),
         "help" => help(ctx),
         _ => return None,
     };
@@ -269,56 +273,15 @@ fn bg(ctx: &mut BuiltinContext<'_>, args: &[String]) -> i32 {
 
 fn help(ctx: &mut BuiltinContext<'_>) -> i32 {
     ctx.console
-        .write_stdout("builtins: cd pwd exit export unset echo jobs fg bg ulimit help\n");
+        .write_stdout("builtins: cd pwd exit export unset echo jobs fg bg ulimit elevate help\n");
     OK
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{is_builtin, BuiltinContext};
-    use crate::env::Environment;
-    use crate::job::{JobState, JobTable, Pid, Signal, WaitOutcome};
-    use crate::test_support::{MemoryLimitStore, RecordingConsole, ScriptedHost};
-    use alloc::string::{String, ToString};
-    use alloc::vec::Vec;
-
-    fn argv(words: &[&str]) -> Vec<String> {
-        words.iter().map(|w| (*w).to_string()).collect()
-    }
-
-    struct Fixture {
-        env: Environment,
-        jobs: JobTable,
-        host: ScriptedHost,
-        console: RecordingConsole,
-        limits: MemoryLimitStore,
-        exit: Option<i32>,
-    }
-
-    impl Fixture {
-        fn new() -> Self {
-            Self {
-                env: Environment::new(),
-                jobs: JobTable::new(),
-                host: ScriptedHost::new(),
-                console: RecordingConsole::new(),
-                limits: MemoryLimitStore::new(),
-                exit: None,
-            }
-        }
-
-        fn run(&mut self, words: &[&str]) -> Option<i32> {
-            let mut ctx = BuiltinContext {
-                env: &mut self.env,
-                jobs: &mut self.jobs,
-                host: &self.host,
-                console: &self.console,
-                limits: &self.limits,
-                exit: &mut self.exit,
-            };
-            super::dispatch(&mut ctx, &argv(words))
-        }
-    }
+    use super::is_builtin;
+    use crate::job::{JobState, Pid, Signal, WaitOutcome};
+    use crate::test_support::Fixture;
 
     #[test]
     fn unknown_command_is_not_a_builtin() {

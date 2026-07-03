@@ -1,9 +1,11 @@
 //! In-memory test doubles for the [`Console`] and [`ProcessHost`] seams.
 //!
 //! These fixtures let every unit and integration test drive the real shell
-//! logic without a kernel: the [`RecordingConsole`] captures output, and the
+//! logic without a kernel: the [`RecordingConsole`] captures output, the
 //! [`ScriptedHost`] answers `launch`/`wait`/`signal`/`change_directory` from a
-//! programmable script while recording what it was asked to do.
+//! programmable script while recording what it was asked to do, and the
+//! [`Fixture`] bundles them behind a real [`BuiltinContext`] dispatch — the
+//! one scaffolding every builtin's test module shares.
 
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
@@ -12,8 +14,12 @@ use core::cell::RefCell;
 
 use rustos_abi::{Errno, LimitKind, ResourceLimit};
 
-use crate::host::{Console, LaunchSpec, LimitStore, ProcessHost, ResolvedCommand};
-use crate::job::{Pid, Signal, WaitOutcome};
+use crate::builtin::{dispatch, BuiltinContext};
+use crate::env::Environment;
+use crate::host::{
+    Console, Elevator, LaunchSpec, LimitStore, ProcessHost, ResolvedCommand, NULL_ELEVATOR,
+};
+use crate::job::{JobTable, Pid, Signal, WaitOutcome};
 
 /// A [`Console`] that accumulates everything written to each stream.
 #[derive(Default)]
@@ -227,5 +233,56 @@ impl LimitStore for MemoryLimitStore {
         }
         self.put(kind, value);
         Ok(())
+    }
+}
+
+/// The one builtin test fixture: real [`Environment`] and
+/// [`JobTable`] state over the in-memory seams, dispatching
+/// through the production [`BuiltinContext`] path.
+pub(crate) struct Fixture<'a> {
+    pub env: Environment,
+    pub jobs: JobTable,
+    pub host: ScriptedHost,
+    pub console: RecordingConsole,
+    pub limits: MemoryLimitStore,
+    pub elevator: &'a dyn Elevator,
+    pub exit: Option<i32>,
+}
+
+impl Fixture<'static> {
+    /// A fixture with the fail-closed default [`Elevator`].
+    pub(crate) fn new() -> Self {
+        Self::with_elevator(&NULL_ELEVATOR)
+    }
+}
+
+impl<'a> Fixture<'a> {
+    /// A fixture whose `elevate` builtin drives `elevator`.
+    pub(crate) fn with_elevator(elevator: &'a dyn Elevator) -> Self {
+        Self {
+            env: Environment::new(),
+            jobs: JobTable::new(),
+            host: ScriptedHost::new(),
+            console: RecordingConsole::new(),
+            limits: MemoryLimitStore::new(),
+            elevator,
+            exit: None,
+        }
+    }
+
+    /// Dispatch `words` (the full argv, name first) as a builtin line,
+    /// returning its status — `None` when `words[0]` is not a builtin.
+    pub(crate) fn run(&mut self, words: &[&str]) -> Option<i32> {
+        let argv: Vec<String> = words.iter().map(|w| (*w).to_string()).collect();
+        let mut ctx = BuiltinContext {
+            env: &mut self.env,
+            jobs: &mut self.jobs,
+            host: &self.host,
+            console: &self.console,
+            limits: &self.limits,
+            elevator: self.elevator,
+            exit: &mut self.exit,
+        };
+        dispatch(&mut ctx, &argv)
     }
 }

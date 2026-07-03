@@ -24,6 +24,7 @@
 //! reproducible. The bit-flip harness is an exhaustive boundary sweep, not a
 //! random one, so it does not draw a seed.
 
+use rustos_abi::elevate::{ElevateReply, ElevateRequest, ELEVATE_MAX_REQUEST, ELEVATE_REPLY_LEN};
 use rustos_abi::fs::{DirEntry, FileKind, FileStat, OpenFlags, FS_NAME_MAX};
 use rustos_abi::input::{KeyInput, PointerInput};
 use rustos_abi::process::{ProcessStart, ProcessStartHeader, StringSlot};
@@ -49,6 +50,30 @@ const FUZZ_CFI_TAG: [u8; SYSCALL_TABLE_HASH_LEN] = [0u8; SYSCALL_TABLE_HASH_LEN]
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 100_000;
+
+/// Drive the elevation-protocol decoders on `bytes` (one arm of
+/// [`exercise`]): an accepted request/reply must round-trip through its
+/// encoder; everything else must refuse cleanly, never panic.
+fn exercise_elevate(bytes: &[u8]) {
+    if let Ok(request) = ElevateRequest::decode(bytes) {
+        let mut buf = [0u8; ELEVATE_MAX_REQUEST];
+        let len = request
+            .encode(&mut buf)
+            .expect("round-trip encode of an accepted request must succeed");
+        let redecoded = ElevateRequest::decode(&buf[..len])
+            .expect("round-trip of an accepted request must succeed");
+        assert_eq!(request, redecoded);
+    }
+    if let Ok(reply) = ElevateReply::decode(bytes) {
+        let mut buf = [0u8; ELEVATE_REPLY_LEN];
+        let len = reply
+            .encode(&mut buf)
+            .expect("round-trip encode of an accepted reply must succeed");
+        let redecoded = ElevateReply::decode(&buf[..len])
+            .expect("round-trip of an accepted reply must succeed");
+        assert_eq!(reply, redecoded);
+    }
+}
 
 /// Drive the `users_admin` decoders on `bytes` (one arm of [`exercise`]):
 /// the typed request record round-trips through its encoder, and walking
@@ -147,6 +172,7 @@ fn exercise(bytes: &[u8]) {
     }
     exercise_users_admin(bytes);
     exercise_sysinfo_records(bytes);
+    exercise_elevate(bytes);
     if let Ok(time) = Time64::from_bytes(bytes) {
         let redecoded = Time64::from_bytes(&time.to_le_bytes())
             .expect("round-trip of an accepted instant must succeed");

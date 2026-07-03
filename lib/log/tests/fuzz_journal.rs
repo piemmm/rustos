@@ -19,7 +19,7 @@ use std::rc::Rc;
 
 use rustos_abi::{
     BootId, CapabilitySummary, Duration64, Origin, ProcId, Time64, TrustDomain, WallClockReading,
-    WallTimeState, BOOT_ID_LEN, PROC_ID_LEN,
+    WallTimeState, BOOT_ID_LEN, ORIGIN_CONSOLE_NONE, PROC_ID_LEN,
 };
 use rustos_log::journal::{Journal, SegmentStore};
 use rustos_log::{
@@ -58,6 +58,7 @@ fn kernel_origin() -> Origin {
         1,
         ProcId::KERNEL,
         CapabilitySummary::EMPTY,
+        ORIGIN_CONSOLE_NONE,
     )
 }
 
@@ -69,6 +70,7 @@ fn user_origin(uid: u32) -> Origin {
         42,
         ProcId::from_raw([0x5A; PROC_ID_LEN]),
         CapabilitySummary::EMPTY,
+        ORIGIN_CONSOLE_NONE,
     )
 }
 

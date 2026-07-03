@@ -442,7 +442,7 @@ mod tests {
     use crate::Level;
     use rustos_abi::{
         CapabilitySummary, Errno, FieldName, FieldValue, Origin, ProcId, TrustDomain,
-        WallClockReading, WallTimeState,
+        WallClockReading, WallTimeState, ORIGIN_CONSOLE_NONE,
     };
 
     // A generous fixed scratch buffer; the largest record we build fits.
@@ -466,6 +466,7 @@ mod tests {
             42,
             ProcId::from_raw([7u8; 16]),
             CapabilitySummary::from_raw([0u8; 32]),
+            ORIGIN_CONSOLE_NONE,
         )
     }
 

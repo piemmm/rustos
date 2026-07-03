@@ -245,7 +245,9 @@ pub fn resolve_stream(origin: &Origin, requested: Option<Stream>) -> StreamDecis
 mod tests {
     use super::{derive_source, reserved_source_prefix, resolve_stream, SourceName};
     use crate::stream::Stream;
-    use rustos_abi::{CapabilitySummary, Origin, ProcId, TrustDomain, PROC_ID_LEN};
+    use rustos_abi::{
+        CapabilitySummary, Origin, ProcId, TrustDomain, ORIGIN_CONSOLE_NONE, PROC_ID_LEN,
+    };
 
     fn kernel_origin() -> Origin {
         Origin::new(
@@ -255,6 +257,7 @@ mod tests {
             1,
             ProcId::KERNEL,
             CapabilitySummary::EMPTY,
+            ORIGIN_CONSOLE_NONE,
         )
     }
 
@@ -266,6 +269,7 @@ mod tests {
             42,
             ProcId::from_raw(proc_id),
             CapabilitySummary::EMPTY,
+            ORIGIN_CONSOLE_NONE,
         )
     }
 

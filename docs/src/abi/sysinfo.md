@@ -85,7 +85,11 @@ a defined code. The reply frame is untrusted server output, so its decoder
 `sysinfod` binds the well-known unrestricted-sender call endpoint
 [`SYSINFO_ENDPOINT`]; any process may post a request, and per-query scope is
 enforced by the service against the caller's kernel-attested origin, not by
-the transport. The endpoint's message sizes are one shared contract:
+the transport. The id itself is a **reserved rendezvous**
+(`rustos_abi::ipc::is_reserved_endpoint`): binding it requires
+`CAP_IPC_BIND_PRIVILEGED` (carried by `sysinfod`'s manifest), so an
+unprivileged squatter can never claim the endpoint and serve forged system
+state. The endpoint's message sizes are one shared contract:
 [`SYSINFO_MAX_REQUEST`] bounds the request the server accepts, and
 [`SYSINFO_MAX_REPLY`] bounds the framed reply it delivers (one page of
 records past the status word). The server sizes its endpoint by these

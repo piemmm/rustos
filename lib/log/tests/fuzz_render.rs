@@ -17,7 +17,7 @@
 
 use rustos_abi::{
     CapabilitySummary, Duration64, FieldName, FieldValue, Origin, ProcId, TrustDomain,
-    WallClockReading,
+    WallClockReading, ORIGIN_CONSOLE_NONE,
 };
 use rustos_log::{
     decode_record, render_line, CallerContent, DictionaryBuilder, DictionaryView, Level, LogRecord,
@@ -85,6 +85,7 @@ fn exercise_hostile(raw: &[u8], monotonic: Duration64, level: Level) {
             42,
             ProcId::from_raw([7u8; 16]),
             CapabilitySummary::from_raw([0u8; 32]),
+            ORIGIN_CONSOLE_NONE,
         ),
         source_name: "user.1000.proc.0707",
         caller: CallerContent {

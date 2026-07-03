@@ -145,6 +145,7 @@ impl HostileBroker {
                     42,
                     ProcId::from_raw([0x5A; 16]),
                     CapabilitySummary::EMPTY,
+                    rustos_abi::ORIGIN_CONSOLE_NONE,
                 )
                 .to_le_bytes()
                 .to_vec(),

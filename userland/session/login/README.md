@@ -17,7 +17,7 @@ and `rustos-log`, so it never links a kernel or driver crate
 
 `Login` decides *what* to prompt for, *when* to retry, and *which*
 session to start. It never reads the credential store, hashes a password,
-or speaks to a terminal device. The three operations that reach the
+or speaks to a terminal device. The operations that reach the
 outside world are injected seams, mirroring `init`'s `Spawner`/`Reaper`
 design:
 
@@ -29,6 +29,14 @@ design:
   invents no parallel error vocabulary (`AGENTS.md` §2.2).
 - `SessionLauncher` — starts the chosen `SessionKind` under the user's
   identity and blocks until it ends.
+- `ElevateLauncher` (`elevate.rs`) — runs one re-authenticated
+  `elevate <user> <program>` command as the target account and returns its
+  exit code (`plans/CAPABILITY_USE.md` CU5). The decision logic
+  (`handle_elevate_request`) placement-checks the caller's attested
+  console, decodes fail-closed, re-authenticates through the same
+  `Authenticator` as the prompt, and audits every grant and refusal; the
+  `Run` binary serves it over the console's reserved elevation endpoint
+  while the session runs.
 
 On a running kernel these are syscall- and `kernel/sec`-backed; in tests
 they are in-memory fixtures, so every control-flow decision is testable
@@ -58,7 +66,8 @@ time (`AGENTS.md` §5.2). There is no ambient authority (`AGENTS.md` §4).
 
 Login owns the reserved `EventId` range `10000..11000` (`AGENTS.md` §2.5,
 §19.4): `SESSION_STARTED`, `AUTH_FAILED`, `LOCKED_OUT`, `SESSION_ENDED`,
-`SESSION_LAUNCH_FAILED`, `CONSOLE_ERROR`.
+`SESSION_LAUNCH_FAILED`, `CONSOLE_ERROR`, `ELEVATE_GRANTED`,
+`ELEVATE_REFUSED`, `ELEVATE_UNAVAILABLE`.
 
 ## Tests
 
@@ -68,7 +77,10 @@ sink, covering a successful text login, the graphical option hidden when
 unavailable, an offered graphical session selected and defaulted to text,
 wrong-password retry then success, the lockout and zero-budget paths, a
 dead console, and a refused session launch — plus the session-choice
-parser, the `EventId` invariants, and the numeric audit-field formatter.
+parser, the `EventId` invariants, the numeric audit-field formatter, and
+the elevation broker's decision table (grant + audit, foreign console
+refused before parsing, malformed refused without authentication,
+indistinguishable refusals, spawn refusal reported verbatim).
 
 See [`docs/src/userland/login.md`](../../../docs/src/userland/login.md)
 for the full subsystem documentation.

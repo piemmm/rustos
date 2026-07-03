@@ -220,7 +220,15 @@ impl CapabilityQuery for CapabilitySummary {
 }
 
 /// Length, in bytes, of the [`Origin`] wire encoding.
-pub const ORIGIN_WIRE_LEN: usize = 1 + 4 + 4 + 8 + PROC_ID_LEN + CAPABILITY_SUMMARY_LEN;
+pub const ORIGIN_WIRE_LEN: usize = 1 + 4 + 4 + 8 + PROC_ID_LEN + CAPABILITY_SUMMARY_LEN + 8;
+
+/// Sentinel [`Origin::console`] value for a principal whose standard
+/// streams are not backed by an installed console (a driver process, a
+/// pipeline stage on a pipe, a kernel principal).
+///
+/// The all-ones sentinel mirrors [`crate::CONSOLE_INHERIT`]; a real console
+/// index is always small, so the two can never collide.
+pub const ORIGIN_CONSOLE_NONE: u64 = u64::MAX;
 
 /// The kernel-attested identity of a principal that performed an action.
 ///
@@ -240,7 +248,12 @@ pub const ORIGIN_WIRE_LEN: usize = 1 + 4 + 4 + 8 + PROC_ID_LEN + CAPABILITY_SUMM
 /// across PID reuse, and a non-secret [`capabilities`](Self::capabilities)
 /// summary. The `gid` is the primary group of the task's kernel-attested
 /// credential, snapshotted at process creation from the identity table the
-/// kernel vouches for (never caller-supplied). Parent pid, start time, and
+/// kernel vouches for (never caller-supplied). The
+/// [`console`](Self::console) is the installed console index backing the
+/// task's standard streams, resolved by the kernel at process creation
+/// ([`ORIGIN_CONSOLE_NONE`] when the streams are not console-backed) — it
+/// lets a per-console service verify that a caller genuinely sits on the
+/// console it serves. Parent pid, start time, and
 /// executable identity are deliberately absent: the kernel does not yet record
 /// them per task, and a field without a live producer would be a speculative
 /// surface. They are added in place when their producer exists (the ABI is not
@@ -253,6 +266,7 @@ pub struct Origin {
     pid: u64,
     proc_id: ProcId,
     capabilities: CapabilitySummary,
+    console: u64,
 }
 
 impl Origin {
@@ -269,6 +283,7 @@ impl Origin {
         pid: u64,
         proc_id: ProcId,
         capabilities: CapabilitySummary,
+        console: u64,
     ) -> Self {
         Self {
             trust_domain,
@@ -277,6 +292,7 @@ impl Origin {
             pid,
             proc_id,
             capabilities,
+            console,
         }
     }
 
@@ -317,6 +333,19 @@ impl Origin {
         &self.capabilities
     }
 
+    /// The installed console index backing the principal's standard
+    /// streams, or [`ORIGIN_CONSOLE_NONE`] when they are not
+    /// console-backed.
+    ///
+    /// Attested by the kernel from the task's own descriptor table at
+    /// process creation — never caller-supplied — so a per-console service
+    /// (the session supervisor serving an elevation request) can trust it
+    /// to place the caller on a console.
+    #[must_use]
+    pub const fn console(&self) -> u64 {
+        self.console
+    }
+
     /// Encode the `Origin` little-endian into a fixed-size buffer.
     #[must_use]
     pub fn to_le_bytes(&self) -> [u8; ORIGIN_WIRE_LEN] {
@@ -327,6 +356,7 @@ impl Origin {
         put_u64(&mut out, 9, self.pid);
         out[17..33].copy_from_slice(self.proc_id.as_bytes());
         out[33..65].copy_from_slice(self.capabilities.as_bytes());
+        put_u64(&mut out, 65, self.console);
         out
     }
 
@@ -348,6 +378,7 @@ impl Origin {
         let proc_id = ProcId::from_bytes(&bytes[17..33])?;
         let mut caps = [0u8; CAPABILITY_SUMMARY_LEN];
         caps.copy_from_slice(&bytes[33..65]);
+        let console = read_u64(bytes, 65);
         Ok(Self {
             trust_domain,
             uid,
@@ -355,6 +386,7 @@ impl Origin {
             pid,
             proc_id,
             capabilities: CapabilitySummary::from_raw(caps),
+            console,
         })
     }
 }
@@ -473,6 +505,7 @@ mod tests {
             42,
             ProcId::from_raw([0xAB; PROC_ID_LEN]),
             caps,
+            1,
         )
     }
 
@@ -491,6 +524,7 @@ mod tests {
         assert!(decoded
             .capabilities()
             .holds_cap(CapabilityId::SYSINFO_GLOBAL));
+        assert_eq!(decoded.console(), 1);
     }
 
     #[test]
@@ -522,9 +556,11 @@ mod tests {
             1,
             ProcId::KERNEL,
             CapabilitySummary::EMPTY,
+            super::ORIGIN_CONSOLE_NONE,
         );
         let decoded = Origin::from_bytes(&origin.to_le_bytes()).expect("decodes");
         assert_eq!(decoded.trust_domain(), TrustDomain::Kernel);
         assert!(decoded.proc_id().is_kernel());
+        assert_eq!(decoded.console(), super::ORIGIN_CONSOLE_NONE);
     }
 }

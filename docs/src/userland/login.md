@@ -73,7 +73,7 @@ no ambient authority).
 
 ## The seams
 
-The three operations that touch the outside world are injected, mirroring
+The operations that touch the outside world are injected, mirroring
 [`init`](init.md)'s `Spawner`/`Reaper` split:
 
 - `Prompt` — reads the username and (un-echoed) password and writes
@@ -83,6 +83,10 @@ The three operations that touch the outside world are injected, mirroring
 - `SessionLauncher::launch(&AuthenticatedUser, SessionKind) -> Result<SessionOutcome, Errno>`
   — starts the chosen session under the user's identity and blocks until
   it ends.
+- `ElevateLauncher::run_as(program, uid) -> Result<i32, Errno>` — runs one
+  re-authenticated elevated command as the target account and returns its
+  exit code; `handle_elevate_request` drives it from the elevation broker
+  (`plans/CAPABILITY_USE.md` CU5).
 
 On a running kernel these are syscall- and `kernel/sec`-backed; in tests
 they are in-memory fixtures. Splitting the seams from the state machine
@@ -132,12 +136,14 @@ supervises (`plans/PI.md` P11). It wires the real seams:
     unlocked. Under design B (`plans/PI.md` P11) `init` spawns `login`
     *before* the in-kernel root-unlock kthread mounts the root, and that
     kthread prompts for its passphrase on the **same** console. So while
-    the read is pending `login` **waits** (`rustos_rt::yield_now`) and does
+    the read is pending `login` **parks** in the bounded `users_db_wait`
+    syscall and does
     **not** print `Username:` — the unlock owns the console until it
     resolves, so the two prompts never draw over each other and `login`
     cannot steal the passphrase keystrokes (the kernel also gates
-    console-0 *input* from `login` until then). The wait yields the CPU; it
-    is never a busy spin (`AGENTS.md` §2.1). The instant the unlock
+    console-0 *input* from `login` until then). The kernel takes the task
+    off the run queue and wakes it when the unlock resolves; it is never a
+    busy spin (`AGENTS.md` §2.1). The instant the unlock
     resolves — a database installed **or** a fail-closed give-up — the
     kernel hands console 0 back to `login`: it opens the console-0 input
     gate, arms the UART receive interrupt, and resolves the pending
@@ -155,7 +161,7 @@ supervises (`plans/PI.md` P11). It wires the real seams:
     prompt stays up and every attempt is refused (`AGENTS.md` §5.4.5, never
     an invented account).
 - **`SessionLauncher`** over the `spawn`/`wait` syscalls: the record's
-  shell of choice is spawned **as the authenticated user** and waited on;
+  shell of choice is spawned **as the authenticated user** and supervised;
   its exit code closes the session. Login holds `CAP_SPAWN_AS_USER` and
   starts the shell through `rustos_rt::spawn_as(shell, CONSOLE_INHERIT,
   uid)`, so the kernel resolves the user's full credential (uid, primary
@@ -165,6 +171,23 @@ supervises (`plans/PI.md` P11). It wires the real seams:
   (there is no setuid-self, `PREREQUISITES.md` P-C). The shell still
   receives only its registered program grant (`AGENTS.md` §5.2); the
   spawn-as-user switch sets the child's *identity*, not its capabilities.
+- **The elevation broker** (`plans/CAPABILITY_USE.md` CU5): at startup
+  login binds its console's reserved elevation call endpoint
+  (`rustos_abi::elevate::elevate_endpoint` over its own kernel-attested
+  `Origin::console`; the reserved id needs login's
+  `CAP_IPC_BIND_PRIVILEGED`, so a squatter can never claim it). While a
+  session runs, the supervision wait is a kernel wait-set multiplexing the
+  shell child (`WaitSourceKind::Child`) with the endpoint: an
+  `elevate <user> <program>` request from the session's shell is
+  placement-checked against the caller's attested console, decoded
+  fail-closed, **re-authenticated with the same authenticator as the
+  prompt** (refusals indistinguishable), and its program spawned as the
+  target account and reaped while the shell blocks in its `ipc_call`; the
+  request buffer is zeroed on every path (it carries the offered
+  password). Elevation serialises per console (endpoint capacity 1) and a
+  login that cannot bind a rendezvous audits `ELEVATE_UNAVAILABLE` and
+  runs broker-less sessions — requests then fail closed at the missing
+  endpoint.
 
 Each finished session or exhausted attempt budget loops back to a fresh
 prompt; a dead console exits fail-closed and `init` relaunches login. The
@@ -187,6 +210,9 @@ on fd 2 until a userland audit transport exists.
 | 10004 | `SESSION_ENDED`         | Info  | a launched session returned                       |
 | 10005 | `SESSION_LAUNCH_FAILED` | Error | a user authenticated but their session would not start |
 | 10006 | `CONSOLE_ERROR`         | Error | the controlling terminal could not be read/written |
+| 10007 | `ELEVATE_GRANTED`       | Info  | an elevation re-authenticated and its command ran to completion |
+| 10008 | `ELEVATE_REFUSED`       | Warn  | an elevation was refused (cause audited, never disclosed) |
+| 10009 | `ELEVATE_UNAVAILABLE`   | Warn  | no elevation rendezvous could be bound; sessions run broker-less |
 
 ## Tests
 

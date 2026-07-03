@@ -744,6 +744,31 @@ impl DescriptorTable {
             0
         }
     }
+
+    /// The single installed-console index backing **every attached**
+    /// standard descriptor, or `None` when no descriptor is attached or
+    /// the attached descriptors sit on different consoles.
+    ///
+    /// This is the honest answer to "which console is this process on?":
+    /// the kernel attests it into the process's [`crate::Origin`] at spawn,
+    /// so a per-console service can place a caller. A closed table (no
+    /// streams) and a split table (streams on two consoles) both answer
+    /// `None` — never a guess.
+    #[must_use]
+    pub fn session_console(&self) -> Option<u8> {
+        let mut session: Option<u8> = None;
+        for index in 0..STD_STREAM_COUNT {
+            if self.modes[index] == StreamMode::Closed {
+                continue;
+            }
+            match session {
+                None => session = Some(self.consoles[index]),
+                Some(console) if console == self.consoles[index] => {}
+                Some(_) => return None,
+            }
+        }
+        session
+    }
 }
 
 impl Default for DescriptorTable {
@@ -852,6 +877,19 @@ mod tests {
     fn out_of_range_descriptor_console_defaults_to_zero() {
         let table = DescriptorTable::standard_on(3);
         assert_eq!(table.console(u32::MAX), 0);
+    }
+
+    #[test]
+    fn session_console_answers_the_uniform_console_and_refuses_the_rest() {
+        // Every attached descriptor on one console: that console.
+        assert_eq!(DescriptorTable::standard_on(1).session_console(), Some(1));
+        assert_eq!(DescriptorTable::standard().session_console(), Some(0));
+        // No attached descriptor: no console (fail closed, never a guess).
+        assert_eq!(DescriptorTable::closed().session_console(), None);
+        // Attached descriptors split across consoles: no single answer.
+        let mut split = DescriptorTable::standard_on(0);
+        split.consoles[STDOUT as usize] = 1;
+        assert_eq!(split.session_console(), None);
     }
 
     #[test]

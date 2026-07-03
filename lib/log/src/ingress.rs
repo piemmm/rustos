@@ -278,7 +278,7 @@ mod tests {
     use crate::{DictionaryBuilder, DictionaryView, Level};
     use rustos_abi::{
         CapabilitySummary, Origin, ProcId, Time64, TrustDomain, WallClockReading, WallTimeState,
-        PROC_ID_LEN,
+        ORIGIN_CONSOLE_NONE, PROC_ID_LEN,
     };
 
     fn kernel_origin() -> Origin {
@@ -289,6 +289,7 @@ mod tests {
             1,
             ProcId::KERNEL,
             CapabilitySummary::EMPTY,
+            ORIGIN_CONSOLE_NONE,
         )
     }
 
@@ -300,6 +301,7 @@ mod tests {
             42,
             ProcId::from_raw([0x5A; PROC_ID_LEN]),
             CapabilitySummary::EMPTY,
+            ORIGIN_CONSOLE_NONE,
         )
     }
 
