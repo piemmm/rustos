@@ -3513,6 +3513,31 @@ binding design and staging.
 
 ---
 
+## CAPABILITY_USE — the capability lifecycle: login → session → administration (`plans/CAPABILITY_USE.md`)
+
+**Status: planned (CU1–CU6).** Fixes the debug-image defect where `root`/`root`
+logs in but every `ls`/`cd`/open/spawn is `PermissionDenied`, by specifying —
+and then wiring — the full capability lifecycle. The kernel already computes
+*effective = user grant ∩ manifest request* (`TaskCapabilities::derive`) and
+the `users-v1` record already carries a per-account grant, but every runtime
+spawn passes the program manifest as both sides, the shell manifest omits
+`CAP_FS_ACCESS`/`CAP_PROC_SPAWN`, and the seeded debug root grant omits
+`CAP_FS_ACCESS`. The plan binds: where each principal's ceiling comes from
+(system programs = manifest; user sessions = the account grant snapshotted at
+the `CAP_SPAWN_AS_USER` switch and inherited by every descendant), the
+interactive **session baseline** (`FS_ACCESS`, `PROC_SPAWN`, console pair),
+the **administrator** as a grant set (no uid-0 power, no wheel group), spawn
+as the only delegation point (narrowing only), next-spawn revocation, and
+elevation as re-authenticated spawn-as-user through the session service —
+never setuid or a runtime raise. CU1 (thread the user ceiling through spawn)
+→ CU2 (session-baseline manifests) → CU3 (debug admin ceiling + the QEMU
+acceptance vertical) fix the defect; CU4 (user management under
+`CAP_USER_ADMIN`), CU5 (per-invocation `elevate`), and CU6 (desktop, blocked
+on `plans/DISPLAY.md`) follow. See `plans/CAPABILITY_USE.md` for the binding
+design and staging.
+
+---
+
 ## Cache-Aware Scheduling (LLC-aware task aggregation)
 
 **Status: planned.** A scheduler *performance* feature (§2.16): co-locate the
