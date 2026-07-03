@@ -107,6 +107,50 @@ impl Tool {
             Tool::Lld => parse_lld_version(banner),
         }
     }
+
+    /// The `bin/` directories a packaged LLVM of the pinned `major` version
+    /// installs into, most-specific first. `clang` ships in the `llvm`
+    /// formula/package; `ld.lld` ships in the separate `lld` Homebrew formula
+    /// (and inside `llvm` on Debian), so its list also probes the `lld`
+    /// prefixes. All platforms' paths are listed unconditionally; missing ones
+    /// are skipped by the caller.
+    fn install_bin_dirs(self, major: &str) -> Vec<String> {
+        let mut dirs = Vec::new();
+        if self == Tool::Lld {
+            dirs.push("/opt/homebrew/opt/lld/bin".to_string());
+            dirs.push("/usr/local/opt/lld/bin".to_string());
+        }
+        for base in ["/opt/homebrew/opt", "/usr/local/opt"] {
+            dirs.push(format!("{base}/llvm/bin"));
+            dirs.push(format!("{base}/llvm@{major}/bin"));
+        }
+        dirs.push(format!("/usr/lib/llvm-{major}/bin"));
+        dirs.push(format!("/usr/lib/llvm{major}/bin"));
+        dirs
+    }
+
+    /// A resolution failure message naming what was searched and how to install
+    /// or pin the pinned-version tool, so a build never has to hunt for it.
+    fn install_hint(self, searched: &[String]) -> String {
+        let major = major_of(self.required_version());
+        let (brew, apt) = match self {
+            Tool::Clang => ("brew install llvm", format!("apt install clang-{major}")),
+            Tool::Lld => ("brew install lld", format!("apt install lld-{major}")),
+        };
+        let searched = if searched.is_empty() {
+            "nothing on PATH or in the known LLVM prefixes".to_string()
+        } else {
+            searched.join(", ")
+        };
+        format!(
+            "no {label} {version} found (searched: {searched}); install it \
+             (macOS: `{brew}`, Debian/Ubuntu: `{apt}` from apt.llvm.org) or set \
+             {env} to its path",
+            label = self.label(),
+            version = self.required_version(),
+            env = self.path_env(),
+        )
+    }
 }
 
 /// An audited record of a resolved toolchain binary.
@@ -189,7 +233,7 @@ enum Phase {
 
 /// Resolve, version-check, and checksum a single tool.
 fn resolve_tool(tool: Tool) -> Result<ToolRecord, CcError> {
-    let path = resolve_path(tool)?;
+    let (path, banner) = select_path(tool)?;
 
     let bytes = std::fs::read(&path).map_err(|source| CcError::Io {
         context: format!("reading {} for checksum: {}", tool.label(), path.display()),
@@ -210,7 +254,6 @@ fn resolve_tool(tool: Tool) -> Result<ToolRecord, CcError> {
         }
     }
 
-    let banner = version_banner(tool, &path)?;
     let found = tool
         .parse_version(&banner)
         .ok_or_else(|| CcError::VersionQuery {
@@ -233,38 +276,105 @@ fn resolve_tool(tool: Tool) -> Result<ToolRecord, CcError> {
     })
 }
 
-/// Resolve a tool's binary path from its override variable or `PATH`.
-fn resolve_path(tool: Tool) -> Result<PathBuf, CcError> {
+/// Locate a binary of the tool whose reported version matches the pin, and
+/// return its path together with the `--version` banner selection relied on.
+///
+/// Resolution order — the "priming" that lets a plain `cargo xtask ci` find the
+/// pinned toolchain with no manual configuration:
+///
+/// 1. The explicit override (`RUSTOS_CC_CLANG` / `RUSTOS_CC_LLD`). It is
+///    **authoritative**: if it does not point at a file, or points at the wrong
+///    version, resolution fails closed rather than silently searching elsewhere
+///    — an override exists precisely to be obeyed.
+/// 2. Otherwise, an ordered list of well-known locations for the pinned major
+///    version ([`tool_candidates`]) — the versioned `clang-NN` / `ld.lld-NN`
+///    name on `PATH`, the Homebrew (`/opt/homebrew`, `/usr/local`) and Debian
+///    (`/usr/lib/llvm-NN`) LLVM install prefixes, and finally the bare name on
+///    `PATH`. The first candidate whose reported version is *exactly* the pin
+///    is chosen; every other candidate (e.g. an Apple/system `clang` of the
+///    wrong version) is skipped, not accepted.
+///
+/// If nothing matches, the error names every location searched and how to
+/// install or pin the toolchain, so neither a developer nor an automated build
+/// has to hunt for it.
+fn select_path(tool: Tool) -> Result<(PathBuf, String), CcError> {
     if let Some(override_path) = read_env(tool.path_env()) {
         let p = PathBuf::from(override_path);
-        if p.is_file() {
-            return Ok(p);
+        if !p.is_file() {
+            return Err(CcError::ToolNotFound {
+                tool: tool.label(),
+                hint: format!(
+                    "{} does not point at a file: {}",
+                    tool.path_env(),
+                    p.display()
+                ),
+            });
         }
-        return Err(CcError::ToolNotFound {
-            tool: tool.label(),
-            hint: format!(
-                "{} does not point at a file: {}",
-                tool.path_env(),
-                p.display()
-            ),
-        });
+        let banner = version_banner(tool, &p)?;
+        return Ok((p, banner));
     }
 
-    let binary = tool.default_binary();
-    let path_var = std::env::var_os("PATH").unwrap_or_default();
-    for dir in std::env::split_paths(&path_var) {
-        let candidate = dir.join(binary);
-        if candidate.is_file() {
-            return Ok(candidate);
+    let required = tool.required_version();
+    let mut searched: Vec<String> = Vec::new();
+    for candidate in tool_candidates(tool) {
+        if !candidate.is_file() {
+            continue;
+        }
+        let shown = candidate.display().to_string();
+        if searched.contains(&shown) {
+            continue;
+        }
+        searched.push(shown);
+        let Ok(banner) = version_banner(tool, &candidate) else {
+            continue;
+        };
+        if tool.parse_version(&banner).as_deref() == Some(required) {
+            return Ok((candidate, banner));
         }
     }
+
     Err(CcError::ToolNotFound {
         tool: tool.label(),
-        hint: format!(
-            "`{binary}` not found on PATH; set {} to its path",
-            tool.path_env()
-        ),
+        hint: tool.install_hint(&searched),
     })
+}
+
+/// The ordered, platform-neutral list of places a pinned tool may live.
+///
+/// Every entry for every OS is listed unconditionally; non-existent paths are
+/// simply skipped by [`select_path`], so the crate needs no `cfg(target_os)`
+/// fork (it is not in the target-conditional allow-list).
+fn tool_candidates(tool: Tool) -> Vec<PathBuf> {
+    let major = major_of(tool.required_version());
+    let binary = tool.default_binary();
+    let mut out: Vec<PathBuf> = Vec::new();
+
+    // 1. The versioned name a distro package installs on PATH (clang-22, ld.lld-22).
+    if let Some(p) = find_on_path(&format!("{binary}-{major}")) {
+        out.push(p);
+    }
+    // 2. Well-known versioned install prefixes for the pinned major.
+    for dir in tool.install_bin_dirs(major) {
+        out.push(Path::new(&dir).join(binary));
+    }
+    // 3. The bare name on PATH (may be a system default; version-checked before use).
+    if let Some(p) = find_on_path(binary) {
+        out.push(p);
+    }
+    out
+}
+
+/// The major-version component of a pinned version string (`"22.1.8"` → `"22"`).
+fn major_of(version: &str) -> &str {
+    version.split('.').next().unwrap_or(version)
+}
+
+/// The first directory on `PATH` that holds an executable named `binary`.
+fn find_on_path(binary: &str) -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    std::env::split_paths(&path_var)
+        .map(|dir| dir.join(binary))
+        .find(|candidate| candidate.is_file())
 }
 
 /// Run `<path> --version` and return its combined banner text.
@@ -460,9 +570,70 @@ mod tests {
         // This is the only test that touches this variable, so the
         // set/remove pair cannot race another test's expectations.
         std::env::set_var("RUSTOS_CC_CLANG", "/definitely/not/a/real/clang");
-        let err = resolve_path(Tool::Clang).expect_err("bogus override must fail");
+        let err = select_path(Tool::Clang).expect_err("bogus override must fail");
         std::env::remove_var("RUSTOS_CC_CLANG");
         assert!(matches!(err, CcError::ToolNotFound { .. }));
+    }
+
+    #[test]
+    fn major_of_extracts_leading_component() {
+        assert_eq!(major_of("22.1.8"), "22");
+        assert_eq!(major_of("22"), "22");
+        assert_eq!(major_of(""), "");
+    }
+
+    #[test]
+    fn clang_install_dirs_cover_homebrew_and_debian() {
+        let dirs = Tool::Clang.install_bin_dirs("22");
+        assert!(dirs.iter().any(|d| d == "/opt/homebrew/opt/llvm/bin"));
+        assert!(dirs.iter().any(|d| d == "/opt/homebrew/opt/llvm@22/bin"));
+        assert!(dirs.iter().any(|d| d == "/usr/local/opt/llvm/bin"));
+        assert!(dirs.iter().any(|d| d == "/usr/lib/llvm-22/bin"));
+        // clang is not in the standalone `lld` formula.
+        assert!(!dirs.iter().any(|d| d.contains("/lld/")));
+    }
+
+    #[test]
+    fn lld_install_dirs_also_probe_the_standalone_lld_formula() {
+        let dirs = Tool::Lld.install_bin_dirs("22");
+        // The Homebrew `lld` formula prefix is probed before the `llvm` one.
+        let lld = dirs
+            .iter()
+            .position(|d| d == "/opt/homebrew/opt/lld/bin")
+            .expect("homebrew lld prefix present");
+        let llvm = dirs
+            .iter()
+            .position(|d| d == "/opt/homebrew/opt/llvm/bin")
+            .expect("homebrew llvm prefix present");
+        assert!(lld < llvm, "lld formula prefix must be searched first");
+        assert!(dirs.iter().any(|d| d == "/usr/lib/llvm-22/bin"));
+    }
+
+    #[test]
+    fn candidates_join_the_binary_name_onto_install_dirs() {
+        let candidates = tool_candidates(Tool::Clang);
+        assert!(candidates
+            .iter()
+            .any(|c| c.ends_with("opt/homebrew/opt/llvm/bin/clang")));
+        let lld = tool_candidates(Tool::Lld);
+        assert!(lld
+            .iter()
+            .any(|c| c.ends_with("opt/homebrew/opt/lld/bin/ld.lld")));
+    }
+
+    #[test]
+    fn install_hint_names_the_version_and_how_to_get_it() {
+        let hint = Tool::Clang.install_hint(&["/usr/bin/clang".to_string()]);
+        assert!(hint.contains("clang 22.1.8"));
+        assert!(hint.contains("/usr/bin/clang"));
+        assert!(hint.contains("brew install llvm"));
+        assert!(hint.contains("apt install clang-22"));
+        assert!(hint.contains("RUSTOS_CC_CLANG"));
+
+        let lld_hint = Tool::Lld.install_hint(&[]);
+        assert!(lld_hint.contains("brew install lld"));
+        assert!(lld_hint.contains("apt install lld-22"));
+        assert!(lld_hint.contains("nothing"));
     }
 
     #[test]

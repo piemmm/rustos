@@ -79,8 +79,13 @@ RustOS compiles the C program with `clang` and links it with `ld.lld`, but
 never as an unaudited shell-out (`AGENTS.md` §12). The single gateway is the
 `rustos-cc` crate (`tools/cc`), which:
 
-- resolves `clang` / `ld.lld` (overridable with `RUSTOS_CC_CLANG` /
-  `RUSTOS_CC_LLD`),
+- resolves `clang` / `ld.lld` automatically — no configuration once the pinned
+  LLVM is installed. It searches, in order, the explicit override
+  (`RUSTOS_CC_CLANG` / `RUSTOS_CC_LLD`, authoritative), the versioned name on
+  `PATH` (`clang-NN`), the Homebrew and apt.llvm.org install prefixes, and the
+  bare name on `PATH`, choosing the first whose version matches the pin and
+  skipping a system/Apple `clang` of the wrong version; a resolution failure
+  names where it looked and how to install the toolchain (`tools/cc/README.md`),
 - runs `--version` and fails closed unless the tool reports the pinned
   `rustos_cc::REQUIRED_CLANG_VERSION` / `REQUIRED_LLD_VERSION`,
 - SHA-256-hashes each binary with the audited `lib/crypto` and records it for

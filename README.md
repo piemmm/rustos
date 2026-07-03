@@ -120,6 +120,12 @@ is installed automatically when `rustup` is present. External tools used by
 cargo install --locked cargo-deny mdbook
 ```
 
+The C-ABI conformance tests (`cargo xtask test --qemu`) additionally need the
+pinned `clang` / `ld.lld` (`rustos_cc::REQUIRED_CLANG_VERSION`). Install them
+once and the build finds them automatically — no environment variables — from
+Homebrew (`brew install llvm lld`) or apt.llvm.org (`apt install clang-22
+lld-22`); see [`tools/cc/README.md`](./tools/cc/README.md) for the search order.
+
 ## Licence
 
 Licensed under the [GNU General Public License v2.0 or later](./LICENSE)
