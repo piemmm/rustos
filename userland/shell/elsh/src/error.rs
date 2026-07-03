@@ -55,6 +55,25 @@ pub enum ParseError {
     MissingCommand,
     /// A `$` introducing a `${...}` expansion was not closed by `}`.
     UnterminatedExpansion,
+    /// A compound-command form the shell does not (yet) support: `( list )`
+    /// subshells, `{ list; }` brace groups, or a `function` definition.
+    /// Failing closed is deliberate: silently treating `(` or `{` as an
+    /// ordinary word would run a different command than the user wrote.
+    UnsupportedCompound,
+    /// A process substitution (`<(...)`, `>(...)`, `=(...)`). `=(...)` is
+    /// permanently unsupported (RustOS has no scratch filesystem to back it);
+    /// the stream forms await the launch plumbing. All three fail closed so
+    /// the parenthesised command is never misread as a filename.
+    UnsupportedProcessSubstitution,
+    /// A `{var}` dynamic-descriptor redirection whose variable does not hold
+    /// a previously allocated descriptor number (for the `{var}>&-` /
+    /// `{var}>&m` forms that reuse one).
+    BadDynamicFd,
+    /// A token in a position the grammar gives no meaning — e.g. a `!`
+    /// negation word after the pipeline has begun. Failing closed is
+    /// deliberate: silently dropping the token would run a different command
+    /// than the user wrote.
+    UnexpectedToken,
 }
 
 impl fmt::Display for ParseError {
@@ -69,6 +88,10 @@ impl fmt::Display for ParseError {
             Self::InvalidResourceTarget => "malformed resource-reference redirection target",
             Self::MissingCommand => "expected a command",
             Self::UnterminatedExpansion => "unterminated ${...} expansion",
+            Self::UnsupportedCompound => "compound commands are not supported",
+            Self::UnsupportedProcessSubstitution => "process substitution is not supported",
+            Self::BadDynamicFd => "{var} does not name an allocated descriptor",
+            Self::UnexpectedToken => "unexpected token",
         };
         f.write_str(message)
     }

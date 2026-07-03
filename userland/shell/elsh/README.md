@@ -3,10 +3,15 @@
 Stage 6 deliverable (`AGENTS.md` §3 `userland/shell/`). elsh (Element
 Shell) is a POSIX-ish
 command interpreter: it lexes a line with full quoting and escaping,
-parses pipelines and the `;`/`&&`/`||`/`&` connectors, expands
+parses pipelines (`|`, `|&`, the `!` status negation) with the
+`;`/`&&`/`||`/`&` connectors and `NAME=VALUE` prefix assignments, expands
 `$`-variables, runs a small set of builtins in-process, and launches
 everything else through an injected process host with job control over
-background and stopped jobs.
+background and stopped jobs. Redirections cover the POSIX and zsh operator
+families — including multios fan-out/concatenation and `{var}`
+dynamic-descriptor allocation (≥ 10, never a standard stream); process
+substitution and the `( … )`/`{ …; }` compound commands are recognised and
+fail closed rather than misparsing (tracked in `plans/SHELL.md`).
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
@@ -46,8 +51,11 @@ without a kernel.
    input lines (`CommandList::feed_here_doc_line`, bounded and fail-closed)
    before the list runs.
 3. `env::Environment::expand_word` — `$`-expansion of each word.
-4. `Shell::run_line` — run each pipeline, honouring connectors and the
-   background flag, dispatching builtins or launching through the
+4. `Shell::run_line` — run each pipeline, honouring connectors, `!`
+   negation, and the background flag, splitting prefix assignments into the
+   child's environment (temporary around a builtin), lowering redirections
+   to host primitives (merging zsh multios, allocating `{var}` dynamic
+   descriptors), dispatching builtins or launching through the
    `ProcessHost`, and tracking jobs in the `JobTable`. (`Shell::parse_line`
    and `Shell::run_list` are the two halves the REPL drives separately to
    collect here-document bodies in between.)
@@ -89,9 +97,13 @@ it lives rather than papered over (`AGENTS.md` §2.1, §2.3):
 
 - Expansion does not field-split or remove empty results: each word
   becomes exactly one argument.
-- `NAME=VALUE` is an assignment only when the whole simple command is
-  assignments; it is not a per-command temporary-environment prefix.
-- The supported expansions are `$NAME`, `${NAME}`, and `$?`.
+- The supported expansions are `$NAME`, `${NAME}`, and `$?`. Spellings of
+  unimplemented expansions stay inert word text except where running them
+  would change command meaning — process substitution and compound commands
+  fail closed with a parse error.
+- A redirection on a builtin fails closed with status 1: builtins write
+  through the `Console` seam, and silently sending a redirected stream to
+  the terminal would be worse than refusing.
 
 ## Tests
 
@@ -102,4 +114,7 @@ grammar errors, `$`-expansion, here-document collection (quoting, `<<-`
 tab stripping, source order, the size bound, and the fail-closed paths),
 every builtin, foreground status propagation, the command-not-found path,
 background job tracking, the `Done`-before-prompt reporting of finished
-jobs, and connector short-circuiting.
+jobs, connector short-circuiting, `!` negation, `|&` lowering,
+prefix-assignment scoping, multios merging (and its fail-closed
+mixed-direction case), `{var}` dynamic-descriptor allocation/close, and the
+fail-closed process-substitution and compound-command spellings.

@@ -3,7 +3,8 @@
 **elsh** ("Element Shell", crate `rustos-elsh`) is the default RustOS
 command interpreter: a POSIX-ish shell that
 reads a line of text and runs it. It lexes the line with full quoting and
-escaping, parses pipelines and the `;`/`&&`/`||`/`&` connectors, expands
+escaping, parses pipelines (`|`, `|&`, and the `!` status negation), the
+`;`/`&&`/`||`/`&` connectors, and `NAME=VALUE` prefix assignments, expands
 `$`-variables, runs a small set of builtins in-process, and launches
 everything else through an injected process host with job control over
 background and stopped jobs.
@@ -84,6 +85,25 @@ IO number, e.g. `2>`, `3>>`, `0<`):
   newline as the input of its descriptor (default fd 0). It lowers to a
   `HereString` action carrying those bytes — the single definition of the
   here-string's shape — so the host supplies them verbatim as a read backing.
+- **Pipe-both:** `a |& b` pipes both stdout and stderr; it is lowered once,
+  in the parser, to its POSIX meaning — a `2>&1` duplication appended to the
+  left-hand command — so the interpreter and host never re-derive it
+  (`AGENTS.md` §2.2).
+- **Multios (zsh):** repeating an output redirection for one descriptor fans
+  the stream out to every target (`cmd >a >>b`), and repeating an input
+  redirection reads the targets in order (`cmd <part1 <part2`). The
+  interpreter merges the repeated opens into a single `Multi` action whose
+  targets keep their own modes and are classified independently (a list may
+  mix paths and resource references, `cmd >log >sys:null`). The host must
+  open every target or apply nothing; a descriptor that mixes reading and
+  writing opens (or the bidirectional `<>`) fails the line closed.
+- **Dynamic descriptors (zsh):** `{var}>out` (and any other `<`/`>` operator
+  with a `{name}` glued to it) allocates a fresh descriptor — always ≥ 10,
+  never the reserved standard streams fd 0–3 — performs the redirection on
+  it, and binds the number to the shell parameter `var`; `{var}>&-` closes
+  the previously allocated descriptor read back from `$var`. A variable that
+  does not hold an allocated number fails closed (the shell never closes a
+  standard stream off a stale or mistyped value).
 - **Here-document:** `<< delim` (and `<<- delim`, which strips leading tabs
   from body and terminator lines) feeds the following input lines, up to a
   line holding only the delimiter, as the input of its descriptor (default
@@ -135,8 +155,12 @@ shell never falls back to creating a file, so a typo cannot silently write junk
 to disk (`AGENTS.md` §5.4).
 
 Not yet implemented (tracked in `plans/SHELL.md`, deliberately failing closed
-rather than misbehaving): process substitution (`<(…)`, `>(…)`, `=(…)`), zsh
-multios fan-out, and dynamic descriptor allocation (`{var}>`). Classifying a
+rather than misbehaving): process substitution — the stream forms `<(…)` /
+`>(…)` await the launch plumbing, and the temporary-file form `=(…)` is
+permanently unsupported (RustOS has no scratch filesystem) — and the compound
+commands `( list )` and `{ list; }`. Each is *recognised* and aborts the line
+with a parse error, so a parenthesised command can never be misread as a
+filename and `{`/`(` can never run as a program name. Classifying a
 target is done; *resolving* a `Resource` target to a kernel stream backing
 (opening `sys:null`, the
 capability-checked resolve of any other namespace) waits on the same launch
@@ -187,10 +211,10 @@ The `RtProcessHost` launches external commands through the `spawn` syscall
 and reaps them through `wait`. The current `spawn` ABI carries only a program
 *path* — no argument vector, environment, pipe, or redirection — so the host
 launches a single bare-path command and fails closed with `NotImplemented`
-on anything it cannot yet express (a pipeline, a redirection, arguments,
-`fg`/`bg` signals, or `cd`); richer launches await an ABI extension. The
-in-process builtins (`echo`, `exit`, `export`, `pwd`, `help`, …) work
-regardless.
+on anything it cannot yet express (a pipeline, a redirection, arguments, a
+prefix-assignment environment, `fg`/`bg` signals, or `cd`); richer launches
+await an ABI extension. The in-process builtins (`echo`, `exit`, `export`,
+`pwd`, `help`, …) work regardless.
 
 ## Builtins
 
@@ -199,6 +223,13 @@ regardless.
 state — the environment, the working directory, the job table, or the
 `exit` request a read-eval loop watches; everything else is launched as
 an external program.
+
+A builtin may carry `NAME=VALUE` prefix assignments; they bind for the
+builtin's duration only and are restored afterwards (the command's
+environment, not the shell's). A *redirection* on a builtin fails closed
+with status 1: builtins write through the injected console seam, and
+silently sending a redirected stream to the terminal would be worse than
+refusing (`AGENTS.md` §5.4).
 
 ## Job control
 
@@ -229,9 +260,11 @@ it lives rather than papered over (`AGENTS.md` §2.1, §2.3):
 
 - Expansion does not field-split or remove empty results: each word
   becomes exactly one argument.
-- `NAME=VALUE` is an assignment only when the whole simple command is
-  assignments; it is not a per-command temporary-environment prefix.
-- The supported expansions are `$NAME`, `${NAME}`, and `$?`.
+- The supported expansions are `$NAME`, `${NAME}`, and `$?`. Command
+  substitution, arithmetic expansion, brace expansion, tilde expansion, and
+  filename generation are not implemented yet; their spellings are inert
+  word text except where running them would change command meaning — process
+  substitution and compound commands fail closed with a parse error.
 
 ## Tests
 
@@ -243,4 +276,8 @@ delimiters, `<<-` tab stripping, source-order filling, the size bound, and
 the unterminated/over-length fail-closed paths, including through the REPL),
 every builtin, foreground status propagation, the command-not-found path,
 background job tracking, the `Done`-before-prompt reporting of finished
-jobs, and connector short-circuiting.
+jobs, connector short-circuiting, `!` status negation, `|&` lowering,
+prefix-assignment scoping (child environment only; temporary around a
+builtin), multios fan-out/concatenation and its fail-closed mixed-direction
+case, `{var}` dynamic-descriptor allocation/close, and the fail-closed
+process-substitution and compound-command spellings.

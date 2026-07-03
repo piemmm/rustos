@@ -28,7 +28,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::error::ParseError;
-use crate::lexer::{tokenize, RedirOp, Segment, Token, Word};
+use crate::lexer::{tokenize, FdSpec, RedirOp, Segment, Token, Word};
 
 /// Maximum accumulated size of one here-document body, in bytes.
 ///
@@ -73,7 +73,7 @@ pub enum Redirection {
     /// Open `target` on descriptor `fd` with `mode`.
     File {
         /// The descriptor the open binds (the operator's explicit or default fd).
-        fd: u32,
+        fd: FdSpec,
         /// How the target is opened.
         mode: OpenMode,
         /// The redirection target, still a [`Word`] pending expansion.
@@ -93,21 +93,21 @@ pub enum Redirection {
     /// (`n>&m`, `n<&m`, `2>&1`).
     Dup {
         /// The descriptor being (re)bound.
-        fd: u32,
+        fd: FdSpec,
         /// The descriptor it is made to alias.
         source: u32,
     },
     /// Close `fd` (`n>&-`, `<&-`).
     Close {
         /// The descriptor to close.
-        fd: u32,
+        fd: FdSpec,
     },
     /// Feed a here-string (`<<< word`) as the input of `fd` (default 0). The
     /// `content` word supplies the here-string body, still pending expansion;
     /// the interpreter appends the trailing newline.
     HereString {
         /// The descriptor the here-string feeds.
-        fd: u32,
+        fd: FdSpec,
         /// The here-string body, still a [`Word`] pending expansion.
         content: Word,
     },
@@ -130,7 +130,7 @@ pub enum Redirection {
 /// uncollected body aborts the line rather than running with empty input.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HereDoc {
-    fd: u32,
+    fd: FdSpec,
     strip_tabs: bool,
     delimiter: String,
     quoted: bool,
@@ -161,7 +161,7 @@ impl HereDoc {
     /// later expanded only when no part of the delimiter was quoted, exactly
     /// as POSIX specifies. An empty delimiter can only be written quoted
     /// (`<<""`), so an empty word counts as quoted.
-    fn new(fd: u32, strip_tabs: bool, delimiter_word: &Word) -> Self {
+    fn new(fd: FdSpec, strip_tabs: bool, delimiter_word: &Word) -> Self {
         let quoted = delimiter_word.is_empty()
             || delimiter_word.iter().any(|segment| {
                 matches!(segment, Segment::Literal(_) | Segment::QuotedExpandable(_))
@@ -185,8 +185,8 @@ impl HereDoc {
 
     /// The descriptor the here-document feeds.
     #[must_use]
-    pub fn fd(&self) -> u32 {
-        self.fd
+    pub fn fd(&self) -> &FdSpec {
+        &self.fd
     }
 
     /// The delimiter that terminates the body (after quote removal).
@@ -281,11 +281,17 @@ pub struct Command {
     pub redirections: Vec<Redirection>,
 }
 
-/// One or more commands joined by `|`. `commands` is guaranteed non-empty.
+/// One or more commands joined by `|` / `|&`. `commands` is guaranteed
+/// non-empty. A `|&` join is lowered here, once, to its POSIX meaning — a
+/// `2>&1` duplication appended to the left-hand command — so the interpreter
+/// and host never re-derive it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Pipeline {
     /// The commands of the pipeline, left to right.
     pub commands: Vec<Command>,
+    /// `true` when the pipeline was prefixed with `!`: its exit status is
+    /// negated (0 becomes 1, anything else becomes 0).
+    pub negated: bool,
 }
 
 /// Whether an entry runs, given the previous entry's exit status.
@@ -412,6 +418,12 @@ impl Parser {
                 background,
             });
             if !more {
+                // Anything left over is a token the grammar gave no meaning
+                // (e.g. a `!` after the pipeline began); dropping it silently
+                // would run a different line than the user wrote.
+                if self.peek().is_some() {
+                    return Err(ParseError::UnexpectedToken);
+                }
                 return Ok(CommandList { entries });
             }
             run_if = next_run_if;
@@ -444,13 +456,31 @@ impl Parser {
     }
 
     fn parse_pipeline(&mut self) -> Result<Pipeline, ParseError> {
+        // `!` before the first command negates the pipeline's status; a
+        // second `!` negates it again, as in zsh.
+        let mut negated = false;
+        while matches!(self.peek(), Some(Token::Bang)) {
+            self.pos += 1;
+            negated = !negated;
+        }
         let mut commands = Vec::new();
         commands.push(self.parse_command()?);
-        while matches!(self.peek(), Some(Token::Pipe)) {
+        while let Some(join @ (Token::Pipe | Token::PipeBoth)) = self.peek() {
+            let pipe_both = matches!(join, Token::PipeBoth);
             self.pos += 1;
+            if pipe_both {
+                // `a |& b` means `a 2>&1 | b`: one definition of the combined
+                // pipe, lowered here as a trailing duplication on `a`.
+                if let Some(left) = commands.last_mut() {
+                    left.redirections.push(Redirection::Dup {
+                        fd: FdSpec::Fd(2),
+                        source: 1,
+                    });
+                }
+            }
             commands.push(self.parse_command()?);
         }
-        Ok(Pipeline { commands })
+        Ok(Pipeline { commands, negated })
     }
 
     fn parse_command(&mut self) -> Result<Command, ParseError> {
@@ -531,10 +561,15 @@ impl Parser {
 mod tests {
     use super::{parse, OpenMode, Redirection, RunCondition};
     use crate::error::ParseError;
-    use crate::lexer::Segment;
+    use crate::lexer::{FdSpec, Segment};
     use alloc::string::String;
     use alloc::vec;
     use alloc::vec::Vec;
+
+    /// A fixed-descriptor [`FdSpec`] (tests only — shorthand for literals).
+    fn fd(n: u32) -> FdSpec {
+        FdSpec::Fd(n)
+    }
 
     /// Flatten a word's segments back to a plain string (tests only — the
     /// real path expands through `env`).
@@ -597,17 +632,17 @@ mod tests {
             cmd.redirections,
             [
                 Redirection::File {
-                    fd: 0,
+                    fd: fd(0),
                     mode: OpenMode::Read,
                     target: vec![Segment::Expandable("in".into())],
                 },
                 Redirection::File {
-                    fd: 1,
+                    fd: fd(1),
                     mode: OpenMode::Write { clobber: false },
                     target: vec![Segment::Expandable("out".into())],
                 },
                 Redirection::File {
-                    fd: 1,
+                    fd: fd(1),
                     mode: OpenMode::Append { clobber: false },
                     target: vec![Segment::Expandable("log".into())],
                 },
@@ -620,7 +655,7 @@ mod tests {
         assert_eq!(
             only_redirection("cmd 2>errors"),
             Redirection::File {
-                fd: 2,
+                fd: fd(2),
                 mode: OpenMode::Write { clobber: false },
                 target: vec![Segment::Expandable("errors".into())],
             }
@@ -628,7 +663,7 @@ mod tests {
         assert_eq!(
             only_redirection("cmd 3>>info.jsonl"),
             Redirection::File {
-                fd: 3,
+                fd: fd(3),
                 mode: OpenMode::Append { clobber: false },
                 target: vec![Segment::Expandable("info.jsonl".into())],
             }
@@ -645,7 +680,7 @@ mod tests {
         assert_eq!(
             cmd.redirections,
             [Redirection::File {
-                fd: 1,
+                fd: fd(1),
                 mode: OpenMode::Write { clobber: false },
                 target: vec![Segment::Expandable("bar".into())],
             }]
@@ -657,7 +692,7 @@ mod tests {
         assert_eq!(
             only_redirection("cmd >|out"),
             Redirection::File {
-                fd: 1,
+                fd: fd(1),
                 mode: OpenMode::Write { clobber: true },
                 target: vec![Segment::Expandable("out".into())],
             }
@@ -665,7 +700,7 @@ mod tests {
         assert_eq!(
             only_redirection("cmd >!out"),
             Redirection::File {
-                fd: 1,
+                fd: fd(1),
                 mode: OpenMode::Write { clobber: true },
                 target: vec![Segment::Expandable("out".into())],
             }
@@ -691,7 +726,7 @@ mod tests {
         assert_eq!(
             only_redirection("cmd <>file"),
             Redirection::File {
-                fd: 0,
+                fd: fd(0),
                 mode: OpenMode::ReadWrite,
                 target: vec![Segment::Expandable("file".into())],
             }
@@ -702,20 +737,38 @@ mod tests {
     fn duplication_and_close() {
         assert_eq!(
             only_redirection("cmd 2>&1"),
-            Redirection::Dup { fd: 2, source: 1 }
+            Redirection::Dup {
+                fd: fd(2),
+                source: 1
+            }
         );
         assert_eq!(
             only_redirection("cmd 1>&2"),
-            Redirection::Dup { fd: 1, source: 2 }
+            Redirection::Dup {
+                fd: fd(1),
+                source: 2
+            }
         );
         assert_eq!(
             only_redirection("cmd 0<&3"),
-            Redirection::Dup { fd: 0, source: 3 }
+            Redirection::Dup {
+                fd: fd(0),
+                source: 3
+            }
         );
-        assert_eq!(only_redirection("cmd 3>&-"), Redirection::Close { fd: 3 });
+        assert_eq!(
+            only_redirection("cmd 3>&-"),
+            Redirection::Close { fd: fd(3) }
+        );
         // `>&-` defaults to closing stdout, `<&-` to stdin.
-        assert_eq!(only_redirection("cmd >&-"), Redirection::Close { fd: 1 });
-        assert_eq!(only_redirection("cmd <&-"), Redirection::Close { fd: 0 });
+        assert_eq!(
+            only_redirection("cmd >&-"),
+            Redirection::Close { fd: fd(1) }
+        );
+        assert_eq!(
+            only_redirection("cmd <&-"),
+            Redirection::Close { fd: fd(0) }
+        );
     }
 
     #[test]
@@ -811,7 +864,7 @@ mod tests {
         let mut list = parse("cmd <<EOF").unwrap();
         {
             let doc = list.pending_here_doc().expect("pending here-doc");
-            assert_eq!(doc.fd(), 0);
+            assert_eq!(doc.fd(), &fd(0));
             assert_eq!(doc.delimiter(), "EOF");
             assert!(!doc.is_quoted());
             // An unterminated body fails closed rather than running empty.
@@ -938,7 +991,7 @@ mod tests {
         assert_eq!(
             only_redirection("cmd <<<word"),
             Redirection::HereString {
-                fd: 0,
+                fd: fd(0),
                 content: vec![Segment::Expandable("word".into())],
             }
         );
@@ -946,13 +999,47 @@ mod tests {
         assert_eq!(
             only_redirection("cmd 4<<< body"),
             Redirection::HereString {
-                fd: 4,
+                fd: fd(4),
                 content: vec![Segment::Expandable("body".into())],
             }
         );
         // A here-string with no following word fails closed like any other
         // target-taking redirection.
         assert_eq!(parse("cmd <<<"), Err(ParseError::MissingRedirectionTarget));
+    }
+
+    #[test]
+    fn pipe_both_lowers_to_a_stderr_duplication() {
+        let list = parse("a |& b").unwrap();
+        let cmds = &list.entries[0].pipeline.commands;
+        assert_eq!(cmds.len(), 2);
+        assert_eq!(
+            cmds[0].redirections,
+            [Redirection::Dup {
+                fd: fd(2),
+                source: 1
+            }]
+        );
+        assert!(cmds[1].redirections.is_empty());
+    }
+
+    #[test]
+    fn bang_negates_a_pipeline() {
+        assert!(parse("! cmd").unwrap().entries[0].pipeline.negated);
+        // A second `!` negates again, and an unprefixed pipeline is not
+        // negated.
+        assert!(!parse("! ! cmd").unwrap().entries[0].pipeline.negated);
+        let list = parse("a && ! b").unwrap();
+        assert!(!list.entries[0].pipeline.negated);
+        assert!(list.entries[1].pipeline.negated);
+    }
+
+    #[test]
+    fn a_misplaced_bang_fails_closed() {
+        // `!` is only the negation prefix; after the pipeline has begun the
+        // grammar gives it no meaning, and dropping it silently would run a
+        // different line than the user wrote.
+        assert_eq!(parse("test ! -f x"), Err(ParseError::UnexpectedToken));
     }
 
     #[test]

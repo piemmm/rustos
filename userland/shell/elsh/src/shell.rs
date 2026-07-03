@@ -13,18 +13,18 @@
 //! never a line abort, so the remaining connectors behave as POSIX requires.
 
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::builtin::{self, is_builtin, BuiltinContext};
-use crate::env::{assignment_split, Environment};
+use crate::env::{split_prefix_assignments, Environment};
 use crate::error::ParseError;
 use crate::host::{
     classify_redirect_target, Console, LaunchSpec, LimitStore, ProcessHost, RedirAction,
-    ResolvedCommand, ResolvedRedirection, NULL_LIMIT_STORE,
+    RedirTarget, ResolvedCommand, ResolvedRedirection, NULL_LIMIT_STORE,
 };
 use crate::job::{ExitStatus, JobState, JobTable, WaitOutcome};
-use crate::lexer::Segment;
+use crate::lexer::{FdSpec, Segment, Word};
 use crate::parser::{
     parse, Command, CommandList, ListEntry, OpenMode, Pipeline, Redirection, RunCondition,
 };
@@ -38,6 +38,11 @@ const STDERR_FD: u32 = 2;
 /// "command not found" convention).
 const NOT_FOUND_STATUS: i32 = 127;
 
+/// The first descriptor a `{var}` dynamic redirection may allocate. Numbers
+/// below it are refused: 0–3 are the reserved standard streams and 4–9 stay
+/// free for explicit script use, matching zsh's allocation floor.
+const FIRST_DYN_FD: u32 = 10;
+
 /// The interactive shell interpreter.
 pub struct Shell<'a> {
     env: Environment,
@@ -46,6 +51,7 @@ pub struct Shell<'a> {
     console: &'a dyn Console,
     limits: &'a dyn LimitStore,
     exit: Option<i32>,
+    next_dyn_fd: u32,
 }
 
 impl<'a> Shell<'a> {
@@ -70,6 +76,7 @@ impl<'a> Shell<'a> {
             console,
             limits: &NULL_LIMIT_STORE,
             exit: None,
+            next_dyn_fd: FIRST_DYN_FD,
         }
     }
 
@@ -178,56 +185,99 @@ impl<'a> Shell<'a> {
     fn run_entry(&mut self, entry: &ListEntry) -> Result<(), ParseError> {
         if !entry.background {
             if let Some(status) = self.try_run_special(&entry.pipeline)? {
-                self.env.set_last_status(status);
+                self.env
+                    .set_last_status(negate_if(entry.pipeline.negated, status));
                 return Ok(());
             }
         }
         let commands = self.resolve_pipeline(&entry.pipeline)?;
         if entry.background {
+            // `!` negates a pipeline's *exit status*; a background launch
+            // reports 0 either way, so negation only applies foreground.
             self.launch_background(&commands);
         } else {
             self.launch_foreground(&commands);
+            let status = negate_if(entry.pipeline.negated, self.env.last_status());
+            self.env.set_last_status(status);
         }
         Ok(())
     }
 
     /// Handle the two cases that must run inside the shell process: an
-    /// assignment-only command and a standalone builtin. Returns the status
-    /// if handled, or `None` if the pipeline is an ordinary external one.
+    /// assignment-only command and a standalone builtin (either may carry
+    /// `NAME=VALUE` prefix assignments). Returns the status if handled, or
+    /// `None` if the pipeline is an ordinary external one.
     fn try_run_special(&mut self, pipeline: &Pipeline) -> Result<Option<i32>, ParseError> {
         if pipeline.commands.len() != 1 {
             return Ok(None);
         }
         let command = &pipeline.commands[0];
-        if command.redirections.is_empty() {
-            if let Some(status) = self.try_assignments(command)? {
-                return Ok(Some(status));
+        let (assignments, rest) = split_prefix_assignments(&command.words);
+        if rest.is_empty() {
+            // An assignment-only command mutates the shell's own variables —
+            // but only the plain form: with redirections attached it is left
+            // to the ordinary launch path, exactly as before the split.
+            if !command.redirections.is_empty() {
+                return Ok(None);
             }
-        }
-        let argv = self.expand_argv(command)?;
-        match argv.first() {
-            Some(name) if is_builtin(name) => Ok(Some(self.run_builtin(&argv))),
-            _ => Ok(None),
-        }
-    }
-
-    /// If every word of `command` is a `NAME=VALUE` assignment, apply them to
-    /// the environment and return status 0; otherwise return `None`.
-    fn try_assignments(&mut self, command: &Command) -> Result<Option<i32>, ParseError> {
-        let mut pending = Vec::with_capacity(command.words.len());
-        for word in &command.words {
-            match assignment_split(word) {
-                Some((name, value_word)) => {
-                    let value = self.env.expand_word(&value_word)?;
-                    pending.push((name, value));
-                }
-                None => return Ok(None),
+            let assignments = self.expand_assignments(assignments)?;
+            for (name, value) in assignments {
+                self.env.set(name, value);
             }
+            return Ok(Some(0));
         }
-        for (name, value) in pending {
+        let name = self.env.expand_word(&rest[0])?;
+        if !is_builtin(&name) {
+            return Ok(None);
+        }
+        // Builtins write through the Console seam; a redirection on one
+        // cannot be applied yet. Refusing loudly beats silently sending a
+        // stream the user redirected to the terminal instead.
+        if !command.redirections.is_empty() {
+            self.console
+                .write_stderr("shell: redirections on builtins are not supported\n");
+            return Ok(Some(1));
+        }
+        let mut argv = Vec::with_capacity(rest.len());
+        argv.push(name);
+        for word in &rest[1..] {
+            argv.push(self.env.expand_word(word)?);
+        }
+        // Prefix assignments bind for the builtin's duration only — they are
+        // the command's environment, not the shell's. Argv and values were
+        // expanded above, against the *pre-assignment* environment, as POSIX
+        // orders expansion before assignment.
+        let assignments = self.expand_assignments(assignments)?;
+        let saved: Vec<(String, Option<String>)> = assignments
+            .iter()
+            .map(|(name, _)| (name.clone(), self.env.get(name).map(String::from)))
+            .collect();
+        for (name, value) in assignments {
             self.env.set(name, value);
         }
-        Ok(Some(0))
+        let status = self.run_builtin(&argv);
+        for (name, old) in saved.into_iter().rev() {
+            match old {
+                Some(value) => self.env.set(name, value),
+                None => {
+                    self.env.unset(&name);
+                }
+            }
+        }
+        Ok(Some(status))
+    }
+
+    /// Expand the value word of each pending `NAME=VALUE` assignment against
+    /// the current (pre-assignment) environment.
+    fn expand_assignments(
+        &self,
+        assignments: Vec<(String, Word)>,
+    ) -> Result<Vec<(String, String)>, ParseError> {
+        let mut expanded = Vec::with_capacity(assignments.len());
+        for (name, value_word) in assignments {
+            expanded.push((name, self.env.expand_word(&value_word)?));
+        }
+        Ok(expanded)
     }
 
     fn run_builtin(&mut self, argv: &[String]) -> i32 {
@@ -242,7 +292,10 @@ impl<'a> Shell<'a> {
         builtin::dispatch(&mut ctx, argv).unwrap_or(NOT_FOUND_STATUS)
     }
 
-    fn resolve_pipeline(&self, pipeline: &Pipeline) -> Result<Vec<ResolvedCommand>, ParseError> {
+    fn resolve_pipeline(
+        &mut self,
+        pipeline: &Pipeline,
+    ) -> Result<Vec<ResolvedCommand>, ParseError> {
         let mut commands = Vec::with_capacity(pipeline.commands.len());
         for command in &pipeline.commands {
             commands.push(self.resolve_command(command)?);
@@ -250,13 +303,30 @@ impl<'a> Shell<'a> {
         Ok(commands)
     }
 
-    fn resolve_command(&self, command: &Command) -> Result<ResolvedCommand, ParseError> {
-        let argv = self.expand_argv(command)?;
+    fn resolve_command(&mut self, command: &Command) -> Result<ResolvedCommand, ParseError> {
+        let (assignments, rest) = split_prefix_assignments(&command.words);
+        // A command that is *all* assignments (e.g. `FOO=1 >file`, or the
+        // background `FOO=1 &`) launches verbatim, as it always did — prefix
+        // assignments only bind when a command word follows them.
+        let (env_overrides, argv_words) = if rest.is_empty() {
+            (Vec::new(), &command.words[..])
+        } else {
+            (self.expand_assignments(assignments)?, rest)
+        };
+        let mut argv = Vec::with_capacity(argv_words.len());
+        for word in argv_words {
+            argv.push(self.env.expand_word(word)?);
+        }
         let mut redirections = Vec::with_capacity(command.redirections.len());
         for redirection in &command.redirections {
             self.lower_redirection(redirection, &mut redirections)?;
         }
-        Ok(ResolvedCommand { argv, redirections })
+        let redirections = merge_multios(redirections)?;
+        Ok(ResolvedCommand {
+            argv,
+            env_overrides,
+            redirections,
+        })
     }
 
     /// Lower one parsed [`Redirection`] into the primitive descriptor actions
@@ -266,18 +336,21 @@ impl<'a> Shell<'a> {
     /// then duplicate stdout onto stderr — so the host never re-derives the
     /// combined-redirection meaning (one definition of what `&>` does).
     fn lower_redirection(
-        &self,
+        &mut self,
         redirection: &Redirection,
         out: &mut Vec<ResolvedRedirection>,
     ) -> Result<(), ParseError> {
         match redirection {
-            Redirection::File { fd, mode, target } => out.push(ResolvedRedirection {
-                fd: *fd,
-                action: RedirAction::Open {
-                    mode: *mode,
-                    target: classify_redirect_target(self.env.expand_word(target)?)?,
-                },
-            }),
+            Redirection::File { fd, mode, target } => {
+                let fd = self.resolve_bound_fd(fd)?;
+                out.push(ResolvedRedirection {
+                    fd,
+                    action: RedirAction::Open {
+                        mode: *mode,
+                        target: classify_redirect_target(self.env.expand_word(target)?)?,
+                    },
+                });
+            }
             Redirection::Combined {
                 append,
                 clobber,
@@ -300,22 +373,29 @@ impl<'a> Shell<'a> {
                     action: RedirAction::Dup { source: STDOUT_FD },
                 });
             }
-            Redirection::Dup { fd, source } => out.push(ResolvedRedirection {
-                fd: *fd,
-                action: RedirAction::Dup { source: *source },
-            }),
-            Redirection::Close { fd } => out.push(ResolvedRedirection {
-                fd: *fd,
-                action: RedirAction::Close,
-            }),
+            Redirection::Dup { fd, source } => {
+                let fd = self.resolve_bound_fd(fd)?;
+                out.push(ResolvedRedirection {
+                    fd,
+                    action: RedirAction::Dup { source: *source },
+                });
+            }
+            Redirection::Close { fd } => {
+                let fd = self.resolve_close_fd(fd)?;
+                out.push(ResolvedRedirection {
+                    fd,
+                    action: RedirAction::Close,
+                });
+            }
             Redirection::HereString { fd, content } => {
                 // A here-string feeds the expanded word followed by a single
                 // newline — the one definition of its shape, so the host reads
                 // the bytes verbatim without re-appending the terminator.
+                let fd = self.resolve_bound_fd(fd)?;
                 let mut bytes = self.env.expand_word(content)?;
                 bytes.push('\n');
                 out.push(ResolvedRedirection {
-                    fd: *fd,
+                    fd,
                     action: RedirAction::HereString { content: bytes },
                 });
             }
@@ -331,8 +411,9 @@ impl<'a> Shell<'a> {
                     self.env
                         .expand_word(&alloc::vec![Segment::Expandable(String::from(body))])?
                 };
+                let fd = self.resolve_bound_fd(doc.fd())?;
                 out.push(ResolvedRedirection {
-                    fd: doc.fd(),
+                    fd,
                     action: RedirAction::HereString { content },
                 });
             }
@@ -340,12 +421,47 @@ impl<'a> Shell<'a> {
         Ok(())
     }
 
-    fn expand_argv(&self, command: &Command) -> Result<Vec<String>, ParseError> {
-        let mut argv = Vec::with_capacity(command.words.len());
-        for word in &command.words {
-            argv.push(self.env.expand_word(word)?);
+    /// Resolve the descriptor an opening/duplicating redirection binds. A
+    /// `{var}` spec allocates the next dynamic descriptor — always ≥
+    /// [`FIRST_DYN_FD`], never a standard stream — and binds its number to
+    /// the shell parameter `var`.
+    ///
+    /// # Errors
+    ///
+    /// [`ParseError::BadDynamicFd`] if the allocator is exhausted (the
+    /// counter would overflow), failing closed rather than re-issuing a
+    /// descriptor.
+    fn resolve_bound_fd(&mut self, spec: &FdSpec) -> Result<u32, ParseError> {
+        match spec {
+            FdSpec::Fd(n) => Ok(*n),
+            FdSpec::Var(name) => {
+                let fd = self.next_dyn_fd;
+                self.next_dyn_fd = fd.checked_add(1).ok_or(ParseError::BadDynamicFd)?;
+                self.env.set(name.clone(), fd.to_string());
+                Ok(fd)
+            }
         }
-        Ok(argv)
+    }
+
+    /// Resolve the descriptor a closing redirection acts on. A `{var}` spec
+    /// reads back a number a previous `{var}` redirection allocated; a
+    /// variable that does not hold such a number fails closed — the shell
+    /// never closes a standard stream on a stale or mistyped variable.
+    ///
+    /// # Errors
+    ///
+    /// [`ParseError::BadDynamicFd`] if `var` does not hold an allocated
+    /// descriptor number.
+    fn resolve_close_fd(&self, spec: &FdSpec) -> Result<u32, ParseError> {
+        match spec {
+            FdSpec::Fd(n) => Ok(*n),
+            FdSpec::Var(name) => self
+                .env
+                .get(name)
+                .and_then(|value| value.parse::<u32>().ok())
+                .filter(|fd| *fd >= FIRST_DYN_FD)
+                .ok_or(ParseError::BadDynamicFd),
+        }
     }
 
     fn launch_foreground(&mut self, commands: &[ResolvedCommand]) {
@@ -427,6 +543,94 @@ impl<'a> Shell<'a> {
                 .write_stdout(&format!("[{}] Done {}\n", job.id.as_u32(), job.command));
         }
     }
+}
+
+/// Negate an exit status when `negated` (the `!` pipeline prefix): 0 becomes
+/// 1, any failure becomes 0.
+fn negate_if(negated: bool, status: i32) -> i32 {
+    if negated {
+        i32::from(status == 0)
+    } else {
+        status
+    }
+}
+
+/// The stream direction an [`OpenMode`] opens — `Some(true)` writes,
+/// `Some(false)` reads, `None` for the bidirectional `<>` (which multios
+/// never merges).
+fn open_direction(mode: OpenMode) -> Option<bool> {
+    match mode {
+        OpenMode::Read => Some(false),
+        OpenMode::Write { .. } | OpenMode::Append { .. } => Some(true),
+        OpenMode::ReadWrite => None,
+    }
+}
+
+/// Merge repeated opens on one descriptor into a single
+/// [`RedirAction::Multi`] — zsh multios: repeated output redirections fan
+/// out, repeated input redirections concatenate in order.
+///
+/// # Errors
+///
+/// [`ParseError::AmbiguousRedirection`] when one descriptor mixes reading and
+/// writing opens (or involves the bidirectional `<>`): such a line has no one
+/// meaning, so it runs nothing.
+fn merge_multios(
+    redirections: Vec<ResolvedRedirection>,
+) -> Result<Vec<ResolvedRedirection>, ParseError> {
+    let mut out: Vec<ResolvedRedirection> = Vec::with_capacity(redirections.len());
+    for redirection in redirections {
+        let ResolvedRedirection {
+            fd,
+            action: RedirAction::Open { mode, target },
+        } = redirection
+        else {
+            out.push(redirection);
+            continue;
+        };
+        match out.iter_mut().find(|prior| {
+            prior.fd == fd
+                && matches!(
+                    prior.action,
+                    RedirAction::Open { .. } | RedirAction::Multi { .. }
+                )
+        }) {
+            None => out.push(ResolvedRedirection {
+                fd,
+                action: RedirAction::Open { mode, target },
+            }),
+            Some(prior) => {
+                let previous = core::mem::replace(&mut prior.action, RedirAction::Close);
+                prior.action = merge_open(previous, mode, target)?;
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Fold one more open (`mode`, `target`) into an existing open or multios on
+/// the same descriptor. See [`merge_multios`] for the direction rule.
+fn merge_open(
+    prior: RedirAction,
+    mode: OpenMode,
+    target: RedirTarget,
+) -> Result<RedirAction, ParseError> {
+    let mut targets = match prior {
+        RedirAction::Open {
+            mode: first_mode,
+            target: first_target,
+        } => alloc::vec![(first_mode, first_target)],
+        RedirAction::Multi { targets } => targets,
+        // Unreachable by `merge_multios`'s filter; failing closed keeps the
+        // merge total without ever panicking or dropping an open.
+        _ => return Err(ParseError::AmbiguousRedirection),
+    };
+    let direction = open_direction(targets[0].0);
+    if direction.is_none() || open_direction(mode) != direction {
+        return Err(ParseError::AmbiguousRedirection);
+    }
+    targets.push((mode, target));
+    Ok(RedirAction::Multi { targets })
 }
 
 fn program_name(commands: &[ResolvedCommand]) -> String {
@@ -839,6 +1043,238 @@ mod tests {
         assert_eq!(shell.run_list(&list), Err(ParseError::HereDocTooLarge));
         assert_eq!(shell.environment().last_status(), 2);
         assert!(console.stderr().contains("here-document too large"));
+        assert!(host.launches().is_empty());
+    }
+
+    #[test]
+    fn bang_negates_the_foreground_status() {
+        let host = ScriptedHost::new();
+        host.fail_launch_of("nope");
+        let console = RecordingConsole::new();
+        let mut shell = Shell::new(&host, &console);
+
+        // A succeeding external command (default wait outcome is Exited(0)).
+        shell.run_line("! run").unwrap();
+        assert_eq!(shell.environment().last_status(), 1);
+
+        // A failing launch (127) negates to success.
+        shell.run_line("! nope").unwrap();
+        assert_eq!(shell.environment().last_status(), 0);
+
+        // A builtin negates through the same path.
+        shell.run_line("! echo hi").unwrap();
+        assert_eq!(shell.environment().last_status(), 1);
+    }
+
+    #[test]
+    fn prefix_assignment_reaches_the_child_not_the_shell() {
+        let host = ScriptedHost::new();
+        let console = RecordingConsole::new();
+        let mut shell = Shell::new(&host, &console);
+
+        shell.run_line("FOO=bar run arg").unwrap();
+
+        let launches = host.launches();
+        let command = &launches[0].commands[0];
+        assert_eq!(command.argv, ["run", "arg"]);
+        assert_eq!(command.env_overrides, [("FOO".into(), "bar".into())]);
+        // The shell's own environment is untouched.
+        assert_eq!(shell.environment().get("FOO"), None);
+    }
+
+    #[test]
+    fn prefix_assignment_on_a_builtin_is_temporary() {
+        use crate::env::Environment;
+
+        let host = ScriptedHost::new();
+        let console = RecordingConsole::new();
+        let mut env = Environment::new();
+        env.set("FOO", "old");
+        let mut shell = Shell::with_environment(&host, &console, env);
+
+        // Expansion happens before the assignment binds, so `$FOO` is still
+        // "old" — and afterwards the shell variable is restored.
+        shell.run_line("FOO=new echo $FOO").unwrap();
+        assert_eq!(console.stdout(), "old\n");
+        assert_eq!(shell.environment().get("FOO"), Some("old"));
+
+        // A variable that was unset before is unset again afterwards.
+        shell.run_line("BAR=x echo hi").unwrap();
+        assert_eq!(shell.environment().get("BAR"), None);
+    }
+
+    #[test]
+    fn builtin_with_a_redirection_fails_closed() {
+        let host = ScriptedHost::new();
+        let console = RecordingConsole::new();
+        let mut shell = Shell::new(&host, &console);
+
+        shell.run_line("echo hi >out").unwrap();
+
+        assert_eq!(shell.environment().last_status(), 1);
+        assert!(console
+            .stderr()
+            .contains("redirections on builtins are not supported"));
+        // Nothing was echoed and nothing launched: the stream the user
+        // redirected must never silently land on the terminal instead.
+        assert_eq!(console.stdout(), "");
+        assert!(host.launches().is_empty());
+    }
+
+    #[test]
+    fn repeated_output_redirections_fan_out() {
+        use crate::host::{RedirAction, RedirTarget};
+        use crate::parser::OpenMode;
+
+        let host = ScriptedHost::new();
+        let console = RecordingConsole::new();
+        let mut shell = Shell::new(&host, &console);
+
+        shell.run_line("run >a >>b").unwrap();
+
+        let launches = host.launches();
+        assert_eq!(
+            launches[0].commands[0].redirections,
+            [super::ResolvedRedirection {
+                fd: 1,
+                action: RedirAction::Multi {
+                    targets: alloc::vec![
+                        (
+                            OpenMode::Write { clobber: false },
+                            RedirTarget::Path("a".into())
+                        ),
+                        (
+                            OpenMode::Append { clobber: false },
+                            RedirTarget::Path("b".into())
+                        ),
+                    ],
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn repeated_input_redirections_concatenate() {
+        use crate::host::{RedirAction, RedirTarget};
+        use crate::parser::OpenMode;
+
+        let host = ScriptedHost::new();
+        let console = RecordingConsole::new();
+        let mut shell = Shell::new(&host, &console);
+
+        shell.run_line("run <a <b").unwrap();
+
+        let launches = host.launches();
+        assert_eq!(
+            launches[0].commands[0].redirections,
+            [super::ResolvedRedirection {
+                fd: 0,
+                action: RedirAction::Multi {
+                    targets: alloc::vec![
+                        (OpenMode::Read, RedirTarget::Path("a".into())),
+                        (OpenMode::Read, RedirTarget::Path("b".into())),
+                    ],
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn multios_may_mix_paths_and_resources() {
+        use crate::host::{RedirAction, RedirTarget};
+
+        let host = ScriptedHost::new();
+        let console = RecordingConsole::new();
+        let mut shell = Shell::new(&host, &console);
+
+        shell.run_line("run >log >sys:null").unwrap();
+
+        let launches = host.launches();
+        let action = &launches[0].commands[0].redirections[0].action;
+        let RedirAction::Multi { targets } = action else {
+            panic!("expected a multios action, got {action:?}");
+        };
+        assert!(matches!(targets[0].1, RedirTarget::Path(ref p) if p == "log"));
+        assert!(matches!(targets[1].1, RedirTarget::Resource(_)));
+    }
+
+    #[test]
+    fn mixed_direction_opens_on_one_fd_fail_closed() {
+        use crate::error::ParseError;
+
+        let host = ScriptedHost::new();
+        let console = RecordingConsole::new();
+        let mut shell = Shell::new(&host, &console);
+
+        // Reading and writing opens on the same descriptor have no one
+        // meaning; the line runs nothing.
+        assert_eq!(
+            shell.run_line("run 1<a >b"),
+            Err(ParseError::AmbiguousRedirection)
+        );
+        // The bidirectional `<>` never merges.
+        assert_eq!(
+            shell.run_line("run <>a <>b"),
+            Err(ParseError::AmbiguousRedirection)
+        );
+        assert_eq!(shell.environment().last_status(), 2);
+        assert!(host.launches().is_empty());
+    }
+
+    #[test]
+    fn dynamic_fd_allocates_from_ten_and_binds_the_variable() {
+        let host = ScriptedHost::new();
+        let console = RecordingConsole::new();
+        let mut shell = Shell::new(&host, &console);
+
+        shell.run_line("run {fd}>out {log}>log").unwrap();
+
+        let launches = host.launches();
+        let redirs = &launches[0].commands[0].redirections;
+        // Never a standard stream: allocation starts at 10 and advances.
+        assert_eq!(redirs[0].fd, 10);
+        assert_eq!(redirs[1].fd, 11);
+        assert_eq!(shell.environment().get("fd"), Some("10"));
+        assert_eq!(shell.environment().get("log"), Some("11"));
+    }
+
+    #[test]
+    fn dynamic_fd_close_reuses_the_bound_number() {
+        use crate::host::RedirAction;
+
+        let host = ScriptedHost::new();
+        let console = RecordingConsole::new();
+        let mut shell = Shell::new(&host, &console);
+
+        shell.run_line("run {fd}>out").unwrap();
+        shell.run_line("run {fd}>&-").unwrap();
+
+        let launches = host.launches();
+        assert_eq!(
+            launches[1].commands[0].redirections,
+            [super::ResolvedRedirection {
+                fd: 10,
+                action: RedirAction::Close,
+            }]
+        );
+    }
+
+    #[test]
+    fn dynamic_fd_close_without_an_allocation_fails_closed() {
+        use crate::error::ParseError;
+
+        let host = ScriptedHost::new();
+        let console = RecordingConsole::new();
+        let mut shell = Shell::new(&host, &console);
+
+        // No allocation bound `fd`, so there is no number to close.
+        assert_eq!(shell.run_line("run {fd}>&-"), Err(ParseError::BadDynamicFd));
+
+        // A variable holding a standard-stream number is refused too: the
+        // shell never closes fd 0–3 (or 4–9) off a stale or mistyped value.
+        shell.run_line("fd=1").unwrap();
+        assert_eq!(shell.run_line("run {fd}>&-"), Err(ParseError::BadDynamicFd));
+        assert_eq!(shell.environment().last_status(), 2);
         assert!(host.launches().is_empty());
     }
 }

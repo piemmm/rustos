@@ -217,6 +217,26 @@ pub fn assignment_split(word: &Word) -> Option<(String, Word)> {
     Some((name.to_string(), value))
 }
 
+/// Split a command's words into its leading `NAME=VALUE` prefix assignments
+/// and the remaining words (the command proper).
+///
+/// The split follows POSIX: assignment words bind only while they *lead* the
+/// command — the first non-assignment word ends the prefix, and a later
+/// `NAME=VALUE` is an ordinary argument. Both halves may be empty (an
+/// assignment-only command, or a command with no prefix). Values keep their
+/// segments so the caller expands them exactly like any other word.
+#[must_use]
+pub fn split_prefix_assignments(words: &[Word]) -> (Vec<(String, Word)>, &[Word]) {
+    let mut assignments = Vec::new();
+    for (index, word) in words.iter().enumerate() {
+        match assignment_split(word) {
+            Some(assignment) => assignments.push(assignment),
+            None => return (assignments, &words[index..]),
+        }
+    }
+    (assignments, &[])
+}
+
 /// `true` if `name` is a valid shell variable name (`[A-Za-z_][A-Za-z0-9_]*`).
 #[must_use]
 pub fn is_valid_name(name: &str) -> bool {
@@ -237,7 +257,7 @@ fn is_name_char(c: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{assignment_split, is_valid_name, Environment};
+    use super::{assignment_split, is_valid_name, split_prefix_assignments, Environment};
     use crate::error::ParseError;
     use crate::lexer::{Segment, Word};
     use alloc::string::{String, ToString};
@@ -367,6 +387,34 @@ mod tests {
             Segment::Expandable("=bar".to_string()),
         ];
         assert!(assignment_split(&double_quoted).is_none());
+    }
+
+    #[test]
+    fn prefix_assignments_split_at_the_first_command_word() {
+        let words = vec![
+            expandable("A=1"),
+            expandable("B=2"),
+            expandable("cmd"),
+            expandable("C=3"),
+        ];
+        let (assignments, rest) = split_prefix_assignments(&words);
+        assert_eq!(assignments.len(), 2);
+        assert_eq!(assignments[0].0, "A");
+        assert_eq!(assignments[1].0, "B");
+        // `C=3` follows the command word, so it is an ordinary argument.
+        assert_eq!(rest.len(), 2);
+
+        // Assignment-only: everything splits, nothing remains.
+        let words = vec![expandable("A=1")];
+        let (assignments, rest) = split_prefix_assignments(&words);
+        assert_eq!(assignments.len(), 1);
+        assert!(rest.is_empty());
+
+        // No prefix: the words pass through untouched.
+        let words = vec![expandable("cmd"), expandable("A=1")];
+        let (assignments, rest) = split_prefix_assignments(&words);
+        assert!(assignments.is_empty());
+        assert_eq!(rest.len(), 2);
     }
 
     #[test]

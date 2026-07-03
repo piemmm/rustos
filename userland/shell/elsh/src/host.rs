@@ -56,6 +56,17 @@ pub enum RedirAction {
         /// The exact bytes the descriptor reads, trailing newline included.
         content: String,
     },
+    /// zsh multios: more than one open attached to one descriptor. All-output
+    /// targets fan the stream out to every target (tee-like); all-input
+    /// targets are read in order (concatenation). The interpreter guarantees
+    /// `targets.len() ≥ 2` and that every mode is of one direction. The host
+    /// MUST open every target or apply nothing — a partially-applied multios
+    /// is forbidden (fail closed).
+    Multi {
+        /// Each target with the mode its own operator carried, in source
+        /// order.
+        targets: Vec<(OpenMode, RedirTarget)>,
+    },
 }
 
 /// A redirection's fully-expanded target, classified into the two worlds a
@@ -151,6 +162,10 @@ pub struct ResolvedRedirection {
 pub struct ResolvedCommand {
     /// The program name (`argv[0]`) and its arguments.
     pub argv: Vec<String>,
+    /// `NAME=VALUE` prefix assignments (`FOO=1 cmd`): additions layered over
+    /// [`LaunchSpec::env`] for this command's child environment only — the
+    /// shell's own environment is untouched.
+    pub env_overrides: Vec<(String, String)>,
     /// Redirections to apply, in source order.
     pub redirections: Vec<ResolvedRedirection>,
 }
@@ -287,6 +302,7 @@ mod tests {
     fn launch_spec_borrows_resolved_commands() {
         let commands = vec![ResolvedCommand {
             argv: vec!["echo".to_string(), "hi".to_string()],
+            env_overrides: vec![],
             redirections: vec![ResolvedRedirection {
                 fd: 1,
                 action: RedirAction::Open {

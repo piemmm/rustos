@@ -1791,10 +1791,36 @@ until the launch ABI grows):
   file whose name contains `:` is ever shadowed. A registered-namespace target
   that is not a well-formed reference (`sys:null@`) fails the whole line closed
   (`InvalidResourceTarget`) rather than falling back to creating a file.
-- **Not yet implemented** (deliberately failing closed, tracked here):
-  process substitution (`<(…)`, `>(…)`, `=(…)`), zsh multios fan-out, and
-  dynamic descriptor allocation (`{var}>`) — each an increment on top of the
-  model above. A classified
+- **Implemented and tested** — the required pipeline/command forms beyond the
+  basic connectors: `a |& b` (lowered once, in the parser, to a `2>&1`
+  duplication appended to the left command), the `!` status-negation prefix
+  (`Pipeline::negated`, applied to the foreground `$?`; a doubled `!` negates
+  again), and `NAME=VALUE` prefix assignments (split by the shared
+  `split_prefix_assignments`; expanded against the pre-assignment environment,
+  carried to an external launch as `ResolvedCommand::env_overrides` — the
+  child's environment, never the shell's — and bound temporarily around a
+  builtin). A `!` after the pipeline has begun is an `UnexpectedToken` parse
+  error rather than a silently dropped word.
+- **Implemented and tested** — zsh multios and `{var}` dynamic descriptor
+  allocation. Repeated opens on one descriptor merge into a single
+  `RedirAction::Multi` (targets keep their own modes and are classified
+  independently, so `>log >sys:null` mixes a path and a resource); all-output
+  targets fan out, all-input targets concatenate in order, and a descriptor
+  mixing directions (or the bidirectional `<>`) fails the line closed. The
+  host contract is fail-closed: open every target or apply nothing. A
+  `{var}` glued to any `<`/`>` operator allocates a fresh descriptor (≥ 10,
+  never fd 0–3) and binds its number to `$var`; `{var}>&-` closes the number
+  read back from `$var` and fails closed (`BadDynamicFd`) when the variable
+  does not hold an allocated descriptor.
+- **Recognised and failing closed** (tracked here): process substitution —
+  `<(…)`/`>(…)` await the pipe/launch plumbing and `=(…)` is permanently
+  unsupported (no scratch filesystem, §16.1) — and the compound commands
+  `( list )` / `{ list; }`. Each aborts the line with a parse error
+  (`UnsupportedProcessSubstitution` / `UnsupportedCompound`), so a
+  parenthesised command is never misread as a filename and `{`/`(` never runs
+  as a program name. A redirection on a *builtin* also fails closed (status
+  1): builtins write through the `Console` seam, and silently sending a
+  redirected stream to the terminal would be worse than refusing. A classified
   `Resource` target is carried to the host but its *resolution to a kernel
   stream backing* (opening `sys:null`, the capability-checked resolve of any
   other namespace, and the well-known `sys:` stream enum in `lib/abi`) waits on

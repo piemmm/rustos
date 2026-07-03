@@ -104,7 +104,10 @@ mod program {
             let [command] = spec.commands else {
                 return Err(Errno::NotImplemented);
             };
-            if !command.redirections.is_empty() || command.argv.len() != 1 {
+            if !command.redirections.is_empty()
+                || !command.env_overrides.is_empty()
+                || command.argv.len() != 1
+            {
                 return Err(Errno::NotImplemented);
             }
             let Some(path) = command.argv.first() else {

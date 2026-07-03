@@ -37,6 +37,19 @@ pub enum Segment {
 /// A lexed word: an ordered (possibly empty, e.g. `""`) list of [`Segment`]s.
 pub type Word = Vec<Segment>;
 
+/// The descriptor a redirection acts on.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FdSpec {
+    /// A fixed descriptor number — an explicit IO number (`2>`) or the
+    /// operator's default.
+    Fd(u32),
+    /// A `{var}` dynamic descriptor. For the opening and duplicating forms
+    /// the interpreter allocates a fresh descriptor (≥ 10, never a standard
+    /// stream) and binds its number to the shell parameter `var`; for the
+    /// closing form it reads the previously bound number back from `var`.
+    Var(String),
+}
+
 /// A fully-decoded redirection operator, before its target word (if any) is
 /// attached by the [`parser`](crate::parser).
 ///
@@ -44,13 +57,13 @@ pub type Word = Vec<Segment>;
 /// descriptor it acts on (the explicit IO number or the operator's default),
 /// whether it opens/appends/duplicates/closes, and clobber-override — so the
 /// parser only has to attach the target word the file-opening forms need.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RedirOp {
     /// Open a target file on `fd` with `mode` (`<`, `>`, `>>`, `<>`, and the
     /// clobber-override spellings). Needs a target word.
     File {
         /// The descriptor to bind.
-        fd: u32,
+        fd: FdSpec,
         /// How the target is opened.
         mode: OpenMode,
     },
@@ -65,14 +78,14 @@ pub enum RedirOp {
     /// Duplicate descriptor `source` onto `fd` (`n>&m`, `n<&m`, `2>&1`).
     Dup {
         /// The descriptor being (re)bound.
-        fd: u32,
+        fd: FdSpec,
         /// The descriptor it is made to alias.
         source: u32,
     },
     /// Close `fd` (`n>&-`, `<&-`).
     Close {
         /// The descriptor to close.
-        fd: u32,
+        fd: FdSpec,
     },
     /// Feed a here-string (`<<< word`) as the input of `fd` (default 0). The
     /// target word supplies the content; the interpreter appends the trailing
@@ -80,7 +93,7 @@ pub enum RedirOp {
     HereString {
         /// The descriptor the here-string feeds (the operator's explicit or
         /// default fd).
-        fd: u32,
+        fd: FdSpec,
     },
     /// Feed a multi-line here-document (`<< delim`, `<<- delim`) as the input
     /// of `fd` (default 0). The target word is the *delimiter*; the body is
@@ -89,7 +102,7 @@ pub enum RedirOp {
     HereDoc {
         /// The descriptor the here-document feeds (the operator's explicit or
         /// default fd).
-        fd: u32,
+        fd: FdSpec,
         /// `true` for `<<-`: leading tabs are stripped from every body line
         /// and from the terminating delimiter line.
         strip_tabs: bool,
@@ -103,6 +116,8 @@ pub enum Token {
     Word(Word),
     /// `|` — pipe.
     Pipe,
+    /// `|&` — pipe both stdout and stderr (shorthand for `2>&1 |`).
+    PipeBoth,
     /// `&&` — run the right side only if the left side succeeded.
     AndIf,
     /// `||` — run the right side only if the left side failed.
@@ -111,6 +126,9 @@ pub enum Token {
     Semicolon,
     /// `&` — run the preceding pipeline in the background.
     Ampersand,
+    /// `!` — negate the following pipeline's exit status (a bare `!` word at
+    /// a command position).
+    Bang,
     /// A redirection operator, fully decoded (see [`RedirOp`]).
     Redirect(RedirOp),
 }
@@ -220,7 +238,36 @@ impl Lexer {
             if c == '#' {
                 return Ok(tokens);
             }
-            if let Some(op) = self.lex_redirect()? {
+            // `( list )` subshells are not supported yet. Fail closed: an
+            // unquoted paren must never be read as an ordinary word character,
+            // or `(ls)` would try to run a program literally named "(ls)".
+            if c == '(' || c == ')' {
+                return Err(ParseError::UnsupportedCompound);
+            }
+            // `=(cmd)` process substitution is permanently unsupported (no
+            // scratch filesystem to back it); recognised here so the
+            // parenthesised command is never misread as a filename.
+            if c == '=' && self.peek2() == Some('(') {
+                return Err(ParseError::UnsupportedProcessSubstitution);
+            }
+            // A bare `{` or `}` token is a brace group, which is not supported
+            // yet. Fail closed: reading `{` as an ordinary word would run a
+            // program literally named "{". A `{name}` glued to `<`/`>` is the
+            // dynamic-descriptor prefix instead, and any other `{...}` text
+            // stays word characters (`${NAME}` rides through unharmed).
+            if (c == '{' || c == '}') && self.brace_is_bare() {
+                return Err(ParseError::UnsupportedCompound);
+            }
+            // A bare `!` token negates the pipeline that follows it. `!` glued
+            // to other characters stays an ordinary word character.
+            if c == '!' && matches!(self.peek2(), None | Some(' ' | '\t')) {
+                self.pos += 1;
+                tokens.push(Token::Bang);
+                continue;
+            }
+            if let Some(op) = self.lex_dynamic_fd_redirect()? {
+                tokens.push(op);
+            } else if let Some(op) = self.lex_redirect()? {
                 tokens.push(op);
             } else if let Some(op) = self.lex_operator() {
                 tokens.push(op);
@@ -236,6 +283,48 @@ impl Lexer {
         }
     }
 
+    /// With the cursor on `{` or `}`: `true` when the brace is a *bare* token
+    /// (immediately followed by a token boundary), i.e. the reserved-word
+    /// spelling of a brace group rather than part of a word or a `{name}<`
+    /// dynamic-descriptor prefix.
+    fn brace_is_bare(&self) -> bool {
+        matches!(self.peek2(), None | Some(' ' | '\t' | ';' | '|' | '&'))
+    }
+
+    /// Recognise a `{name}` dynamic-descriptor prefix glued directly to a
+    /// `<`/`>` redirection operator (`{fd}>out`, `{fd}>&-`). Leaves the cursor
+    /// untouched — and lexes nothing — unless the whole shape matches, so
+    /// `{a,b}` and `${NAME}` stay ordinary word text.
+    fn lex_dynamic_fd_redirect(&mut self) -> Result<Option<Token>, ParseError> {
+        if self.peek() != Some('{') {
+            return Ok(None);
+        }
+        let mut i = self.pos + 1;
+        let mut name = String::new();
+        while let Some(&c) = self.chars.get(i) {
+            if c == '}' {
+                break;
+            }
+            name.push(c);
+            i += 1;
+        }
+        if self.chars.get(i) != Some(&'}') || !crate::env::is_valid_name(&name) {
+            return Ok(None);
+        }
+        let spec = Some(FdSpec::Var(name));
+        match self.chars.get(i + 1) {
+            Some('<') => {
+                self.pos = i + 1;
+                self.lex_input(spec).map(Some)
+            }
+            Some('>') => {
+                self.pos = i + 1;
+                self.lex_output(spec).map(Some)
+            }
+            _ => Ok(None),
+        }
+    }
+
     /// Recognise a control operator (`|`, `||`, `&&`, `&`, `;`) at the cursor.
     ///
     /// The redirection spellings (`<`/`>` forms and `&>`) are claimed earlier
@@ -246,6 +335,7 @@ impl Lexer {
         let two = self.peek2();
         let (token, width) = match (c, two) {
             ('|', Some('|')) => (Token::OrIf, 2),
+            ('|', Some('&')) => (Token::PipeBoth, 2),
             ('&', Some('&')) => (Token::AndIf, 2),
             ('|', _) => (Token::Pipe, 1),
             ('&', _) => (Token::Ampersand, 1),
@@ -289,14 +379,14 @@ impl Lexer {
                     return Err(ParseError::AmbiguousRedirection);
                 }
                 self.pos = scan.op_index;
-                self.lex_input(scan.fd).map(Some)
+                self.lex_input(scan.fd.map(FdSpec::Fd)).map(Some)
             }
             Some('>') => {
                 if scan.overflow {
                     return Err(ParseError::AmbiguousRedirection);
                 }
                 self.pos = scan.op_index;
-                self.lex_output(scan.fd).map(Some)
+                self.lex_output(scan.fd.map(FdSpec::Fd)).map(Some)
             }
             _ => Ok(None),
         }
@@ -304,41 +394,40 @@ impl Lexer {
 
     /// Lex an input redirection whose leading `<` is at the cursor. `fd` is the
     /// explicit IO number if one was written, else the operator's default.
-    fn lex_input(&mut self, fd: Option<u32>) -> Result<Token, ParseError> {
+    fn lex_input(&mut self, fd: Option<FdSpec>) -> Result<Token, ParseError> {
         self.pos += 1; // consume '<'
+        let fd = fd.unwrap_or(FdSpec::Fd(0));
         let op = match self.peek() {
+            // `<(cmd)` — process substitution, not yet supported. Fail closed
+            // so the parenthesised command is never misread as a filename.
+            Some('(') => return Err(ParseError::UnsupportedProcessSubstitution),
             // A second `<`: the here-string `<<<` or a here-document `<<` /
             // `<<-` (whose optional `-` selects leading-tab stripping).
             Some('<') => {
                 self.pos += 1; // consume the second '<'
                 if self.peek() == Some('<') {
                     self.pos += 1; // consume the third '<' — here-string
-                    RedirOp::HereString {
-                        fd: fd.unwrap_or(0),
-                    }
+                    RedirOp::HereString { fd }
                 } else {
                     let strip_tabs = self.peek() == Some('-');
                     if strip_tabs {
                         self.pos += 1; // consume the '-'
                     }
-                    RedirOp::HereDoc {
-                        fd: fd.unwrap_or(0),
-                        strip_tabs,
-                    }
+                    RedirOp::HereDoc { fd, strip_tabs }
                 }
             }
             // `<>` — open for reading and writing.
             Some('>') => {
                 self.pos += 1;
                 RedirOp::File {
-                    fd: fd.unwrap_or(0),
+                    fd,
                     mode: OpenMode::ReadWrite,
                 }
             }
             // `<&m` / `<&-` — duplicate or close. `<&` has no combined form.
-            Some('&') => self.lex_dup_or_close(fd.unwrap_or(0), false)?,
+            Some('&') => self.lex_dup_or_close(fd, false)?,
             _ => RedirOp::File {
-                fd: fd.unwrap_or(0),
+                fd,
                 mode: OpenMode::Read,
             },
         };
@@ -347,15 +436,20 @@ impl Lexer {
 
     /// Lex an output redirection whose leading `>` is at the cursor. `fd` is the
     /// explicit IO number if one was written, else the operator's default.
-    fn lex_output(&mut self, fd: Option<u32>) -> Result<Token, ParseError> {
+    fn lex_output(&mut self, fd: Option<FdSpec>) -> Result<Token, ParseError> {
         self.pos += 1; // consume '>'
+        let explicit_fd = fd.is_some();
+        let fd = fd.unwrap_or(FdSpec::Fd(1));
         let op = match self.peek() {
+            // `>(cmd)` — process substitution, not yet supported. Fail closed
+            // so the parenthesised command is never misread as a filename.
+            Some('(') => return Err(ParseError::UnsupportedProcessSubstitution),
             Some('>') => {
                 self.pos += 1; // consume the second '>'
                 if self.peek() == Some('&') {
                     // `>>&file` — combined append (file form). A leading fd
                     // would make it ambiguous with a duplication.
-                    if fd.is_some() {
+                    if explicit_fd {
                         return Err(ParseError::AmbiguousRedirection);
                     }
                     self.pos += 1; // consume '&'
@@ -365,7 +459,7 @@ impl Lexer {
                     }
                 } else {
                     RedirOp::File {
-                        fd: fd.unwrap_or(1),
+                        fd,
                         mode: OpenMode::Append {
                             clobber: self.take_clobber_flag(),
                         },
@@ -373,9 +467,9 @@ impl Lexer {
                 }
             }
             // `>&m` / `>&-` — duplicate or close; `>&file` — combined (file form).
-            Some('&') => self.lex_dup_or_close(fd.unwrap_or(1), fd.is_none())?,
+            Some('&') => self.lex_dup_or_close(fd, !explicit_fd)?,
             _ => RedirOp::File {
-                fd: fd.unwrap_or(1),
+                fd,
                 mode: OpenMode::Write {
                     clobber: self.take_clobber_flag(),
                 },
@@ -389,7 +483,7 @@ impl Lexer {
     /// When `combined_ok` (an unnumbered `>&`), a following filename means the
     /// csh-style "redirect both stdout and stderr" form; otherwise a following
     /// non-descriptor is [ambiguous](ParseError::AmbiguousRedirection).
-    fn lex_dup_or_close(&mut self, fd: u32, combined_ok: bool) -> Result<RedirOp, ParseError> {
+    fn lex_dup_or_close(&mut self, fd: FdSpec, combined_ok: bool) -> Result<RedirOp, ParseError> {
         self.pos += 1; // consume '&'
         match self.peek() {
             Some('-') => {
@@ -538,7 +632,7 @@ impl Lexer {
 
 #[cfg(test)]
 mod tests {
-    use super::{tokenize, RedirOp, Segment, Token};
+    use super::{tokenize, FdSpec, RedirOp, Segment, Token};
     use crate::error::ParseError;
     use crate::parser::OpenMode;
     use alloc::string::ToString;
@@ -582,12 +676,12 @@ mod tests {
             vec![
                 expandable("a"),
                 Token::Redirect(RedirOp::File {
-                    fd: 1,
+                    fd: FdSpec::Fd(1),
                     mode: OpenMode::Append { clobber: false },
                 }),
                 expandable("b"),
                 Token::Redirect(RedirOp::File {
-                    fd: 0,
+                    fd: FdSpec::Fd(0),
                     mode: OpenMode::Read,
                 }),
                 expandable("c"),
@@ -601,7 +695,10 @@ mod tests {
     fn numbered_fd_glues_to_the_operator_but_a_bare_number_is_a_word() {
         assert_eq!(
             tokenize("2>&1").unwrap(),
-            vec![Token::Redirect(RedirOp::Dup { fd: 2, source: 1 })]
+            vec![Token::Redirect(RedirOp::Dup {
+                fd: FdSpec::Fd(2),
+                source: 1
+            })]
         );
         // A digit run not glued to `<`/`>` stays an ordinary word.
         assert_eq!(
@@ -638,7 +735,7 @@ mod tests {
             tokenize("<<EOF").unwrap(),
             vec![
                 Token::Redirect(RedirOp::HereDoc {
-                    fd: 0,
+                    fd: FdSpec::Fd(0),
                     strip_tabs: false,
                 }),
                 expandable("EOF"),
@@ -649,7 +746,7 @@ mod tests {
             tokenize("<<- END").unwrap(),
             vec![
                 Token::Redirect(RedirOp::HereDoc {
-                    fd: 0,
+                    fd: FdSpec::Fd(0),
                     strip_tabs: true,
                 }),
                 expandable("END"),
@@ -660,7 +757,7 @@ mod tests {
             tokenize("4<<EOF").unwrap(),
             vec![
                 Token::Redirect(RedirOp::HereDoc {
-                    fd: 4,
+                    fd: FdSpec::Fd(4),
                     strip_tabs: false,
                 }),
                 expandable("EOF"),
@@ -675,14 +772,14 @@ mod tests {
         assert_eq!(
             tokenize("<<<word").unwrap(),
             vec![
-                Token::Redirect(RedirOp::HereString { fd: 0 }),
+                Token::Redirect(RedirOp::HereString { fd: FdSpec::Fd(0) }),
                 expandable("word"),
             ]
         );
         assert_eq!(
             tokenize("<<< word").unwrap(),
             vec![
-                Token::Redirect(RedirOp::HereString { fd: 0 }),
+                Token::Redirect(RedirOp::HereString { fd: FdSpec::Fd(0) }),
                 expandable("word"),
             ]
         );
@@ -690,7 +787,7 @@ mod tests {
         assert_eq!(
             tokenize("4<<<x").unwrap(),
             vec![
-                Token::Redirect(RedirOp::HereString { fd: 4 }),
+                Token::Redirect(RedirOp::HereString { fd: FdSpec::Fd(4) }),
                 expandable("x"),
             ]
         );
@@ -766,6 +863,119 @@ mod tests {
     #[test]
     fn hash_inside_a_word_is_literal() {
         assert_eq!(tokenize("a#b").unwrap(), vec![expandable("a#b")]);
+    }
+
+    #[test]
+    fn pipe_both_lexes_as_its_own_operator() {
+        assert_eq!(
+            tokenize("a |& b").unwrap(),
+            vec![expandable("a"), Token::PipeBoth, expandable("b")]
+        );
+    }
+
+    #[test]
+    fn bare_bang_is_the_negation_token() {
+        assert_eq!(
+            tokenize("! cmd").unwrap(),
+            vec![Token::Bang, expandable("cmd")]
+        );
+        assert_eq!(tokenize("!").unwrap(), vec![Token::Bang]);
+        // Glued to other characters it stays an ordinary word character
+        // (zsh history expansion is not implemented; the spelling is inert).
+        assert_eq!(tokenize("!x").unwrap(), vec![expandable("!x")]);
+    }
+
+    #[test]
+    fn subshell_parens_fail_closed() {
+        // `(ls)` must never lex as a word: running a program literally named
+        // "(ls)" would be a different command than the user wrote.
+        assert_eq!(tokenize("(ls)"), Err(ParseError::UnsupportedCompound));
+        assert_eq!(tokenize("( ls )"), Err(ParseError::UnsupportedCompound));
+        // Quoted or escaped parens stay ordinary word text.
+        assert_eq!(
+            tokenize("'(ls)'").unwrap(),
+            vec![Token::Word(vec![Segment::Literal("(ls)".to_string())])]
+        );
+    }
+
+    #[test]
+    fn brace_groups_fail_closed_but_brace_words_survive() {
+        assert_eq!(tokenize("{ ls; }"), Err(ParseError::UnsupportedCompound));
+        assert_eq!(tokenize("ls; }"), Err(ParseError::UnsupportedCompound));
+        // `{...}` glued into a word is plain word text (no brace expansion).
+        assert_eq!(tokenize("a{b,c}d").unwrap(), vec![expandable("a{b,c}d")]);
+        assert_eq!(tokenize("${NAME}").unwrap(), vec![expandable("${NAME}")]);
+    }
+
+    #[test]
+    fn process_substitution_fails_closed() {
+        for line in ["diff <(a) <(b)", "cmd > >(consumer)", "cmd >(c)"] {
+            assert_eq!(
+                tokenize(line),
+                Err(ParseError::UnsupportedProcessSubstitution),
+                "line: {line}"
+            );
+        }
+        assert_eq!(
+            tokenize("cmd =(a)"),
+            Err(ParseError::UnsupportedProcessSubstitution)
+        );
+    }
+
+    #[test]
+    fn dynamic_fd_prefix_lexes_to_a_var_descriptor() {
+        assert_eq!(
+            tokenize("{fd}>out").unwrap(),
+            vec![
+                Token::Redirect(RedirOp::File {
+                    fd: FdSpec::Var("fd".to_string()),
+                    mode: OpenMode::Write { clobber: false },
+                }),
+                expandable("out"),
+            ]
+        );
+        assert_eq!(
+            tokenize("{fd}<in").unwrap(),
+            vec![
+                Token::Redirect(RedirOp::File {
+                    fd: FdSpec::Var("fd".to_string()),
+                    mode: OpenMode::Read,
+                }),
+                expandable("in"),
+            ]
+        );
+        assert_eq!(
+            tokenize("{fd}>&-").unwrap(),
+            vec![Token::Redirect(RedirOp::Close {
+                fd: FdSpec::Var("fd".to_string()),
+            })]
+        );
+        assert_eq!(
+            tokenize("{fd}>&1").unwrap(),
+            vec![Token::Redirect(RedirOp::Dup {
+                fd: FdSpec::Var("fd".to_string()),
+                source: 1,
+            })]
+        );
+    }
+
+    #[test]
+    fn a_non_name_brace_prefix_is_not_a_dynamic_fd() {
+        // `{2}` is not a valid variable name, so the braces stay word text
+        // and the `>` is an ordinary stdout redirection.
+        assert_eq!(
+            tokenize("{2}>out").unwrap(),
+            vec![
+                expandable("{2}"),
+                Token::Redirect(RedirOp::File {
+                    fd: FdSpec::Fd(1),
+                    mode: OpenMode::Write { clobber: false },
+                }),
+                expandable("out"),
+            ]
+        );
+        // `{fd}` not glued to `<`/`>` is a plain word.
+        assert_eq!(tokenize("{fd}").unwrap(), vec![expandable("{fd}")]);
     }
 
     #[test]
