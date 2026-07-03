@@ -105,5 +105,11 @@ requests them.
 Elevation is starting a new process under a more-privileged account
 through the one `CAP_SPAWN_AS_USER` holder (login) after
 re-authentication; there is no setuid and no "enter admin mode" for a
-live process. The seeded manifests (`plans/CAPABILITY_USE.md` CU2) and
-the debug administrator grant (CU3) land through the same staged plan.
+live process.
+
+The shell's registered manifest **is** the session baseline, and every
+other embedded program's manifest is sized to exactly the gated
+syscalls it calls — one shared definition per program in the kernel's
+`program_manifests` module, each list pinned by an exact-set unit test
+(`plans/CAPABILITY_USE.md` CU2). The debug administrator grant (CU3)
+lands through the same staged plan.

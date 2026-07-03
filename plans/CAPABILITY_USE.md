@@ -25,11 +25,11 @@ useless: every `ls`, `cd`, file open, and program launch fails with
    the program manifest as both sides, so the per-account grant stored in
    `/System/Security/Users` (`users-v1` `capabilities` field, `lib/users`)
    was dead data. The ceiling is now threaded through spawn (CU1).
-2. The shell's registered manifest
-   (`kernel/rustos-kernel/src/spawn_layout.rs`) requests only
+2. *(fixed — CU2)* The shell's registered manifest requested only
    `CAP_CONSOLE_WRITE` + `CAP_CONSOLE_READ` — no `CAP_FS_ACCESS`, no
-   `CAP_PROC_SPAWN` — so the spawned shell cannot touch the filesystem or
-   launch anything.
+   `CAP_PROC_SPAWN` — so the spawned shell could not touch the filesystem
+   or launch anything. The shell now requests the session baseline
+   (`kernel/rustos-kernel/src/program_manifests.rs`, CU2).
 3. The debug root account's seeded grant (`tools/mkimage`) omits
    `CAP_FS_ACCESS`, so even with the intersection wired the shell would
    still be denied the filesystem.
@@ -153,11 +153,12 @@ The life of a capability, from disk to exercise to revocation:
   the account's `capability_grants` snapshot and
   `KernelSpawnCtx::admit_process` derives `ceiling ∩ manifest` — B1 is
   fixed.
+- The session-baseline shell manifest and audited, pinned per-program
+  manifests (`kernel/rustos-kernel/src/program_manifests.rs`, CU2) — B2 is
+  fixed.
 
 **Broken (the defect this plan fixes):**
 
-- **B2** — the shell manifest (`SPAWN_PROGRAMS`) omits `CAP_FS_ACCESS` and
-  `CAP_PROC_SPAWN`, so an interactive session cannot list, open, or run.
 - **B3** — the debug root grant (`tools/mkimage::debug_users_db`) omits
   `CAP_FS_ACCESS` (and the observability set §4.3 defines), so the seeded
   administrator cannot use the filesystem even once B1/B2 are fixed.
@@ -355,17 +356,27 @@ authorises it; anything not listed is denied.
 
 ### CU2 — session-baseline manifests (fixes B2)
 
-**Status: planned.**
+**Status: done.**
 
-- `SPAWN_PROGRAMS`: the shell's manifest becomes the session baseline
+- Every embedded program's manifest-requested capability list is defined
+  once in `kernel/rustos-kernel/src/program_manifests.rs` (pure data, host-
+  testable) and consumed by the `SPAWN_PROGRAMS` rows and `init_caps` in
+  `spawn_layout.rs`. The shell's manifest is `SESSION_BASELINE`
   (`CAP_FS_ACCESS`, `CAP_PROC_SPAWN`, `CAP_CONSOLE_READ`,
-  `CAP_CONSOLE_WRITE`). Login's manifest gains `CAP_FS_ACCESS` only if it
-  genuinely touches the filesystem (it reads the users db through its own
-  gated syscall, so today it does not — do not add it speculatively).
-- Audit every other registry row against what the program actually calls;
-  size each to its real need (§4.5), neither wider nor narrower.
-- Tests: registry-row assertions pinning each program's manifest, so a
-  manifest change is a reviewed diff, not an accident.
+  `CAP_CONSOLE_WRITE`) — exactly §4.2.
+- Every row was audited against the gated syscalls its program actually
+  issues and left at its real need: login keeps the console pair +
+  `PROC_SPAWN` + `USERS_READ` + `SPAWN_AS_USER` + `LOG_EMIT` (it reads the
+  users db through its own gated syscall, so **no** `CAP_FS_ACCESS`);
+  devmgr, sysinfod, `ps`, `sysinfo`, and `top` were already sized exactly
+  and are unchanged.
+- Tests: one exact-`CapabilitySet` pinning test per manifest (plus the
+  init set), and the invariant that every session tool's request is within
+  the session baseline, so a manifest change is a reviewed diff, not an
+  accident.
+- Docs: `docs/src/security/capabilities.md` records the pinned-manifest
+  state; the `EmbeddedProgram::caps` and `SPAWN_PROGRAMS` rustdoc name the
+  shared lists.
 
 ### CU3 — the debug administrator ceiling (fixes B3)
 

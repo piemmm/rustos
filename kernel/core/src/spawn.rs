@@ -589,8 +589,9 @@ pub struct EmbeddedProgram {
     /// manifest side of the intersection: the admitted child's effective set
     /// is this request ∩ the spawning credential's user ceiling
     /// (`plans/CAPABILITY_USE.md` CU1) — each program asks only for the
-    /// authority its own entry declares (the shell gets the console pair;
-    /// login additionally gets `PROC_SPAWN` + `USERS_READ`), never the
+    /// authority its own entry declares (the shell requests the session
+    /// baseline; login additionally requests `USERS_READ` +
+    /// `SPAWN_AS_USER`, `plans/CAPABILITY_USE.md` CU2), never the
     /// spawning caller's set (no ambient authority), and the account's
     /// grant bounds what the request can yield.
     pub caps: &'static [CapabilityId],
