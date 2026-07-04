@@ -7,7 +7,7 @@ served here, through the typed, versioned `sysinfo-v1` wire surface
 defined in `rustos_abi::sysinfo` (see
 [System Information API (`sysinfo-v1`)](../abi/sysinfo.md)). `sysinfod`
 is the only server of the API and the kernel exposes no path that
-bypasses it; the installed binary lives at `/System/Services/sysinfod`.
+bypasses it; the installed binary lives at `/System/Services/sysinfod.app/Run`.
 
 The crate is `no_std`, has no `unsafe`, and depends only on the audited
 `lib/*` crates `rustos-abi` and `rustos-log`, so a userland service never

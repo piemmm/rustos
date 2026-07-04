@@ -4,7 +4,7 @@ Stage 6 deliverable (`AGENTS.md` §3 `userland/apps/`). `mount` both reports
 and changes the mount table, and the two halves take different paths.
 **Listing** the mounted filesystems is a read of live system state, so —
 like `ps` — it goes through the typed, versioned, capability-checked System
-Information API (`sysinfo-v1`) served by `/System/Services/sysinfod`
+Information API (`sysinfo-v1`) served by `/System/Services/sysinfod.app/Run`
 (`AGENTS.md` §16.6): RustOS has no `/proc` and no mount-table file, so
 `mount` issues the ungated `MOUNT_LIST` query and has no privileged path
 that bypasses the capability check. **Attaching** a filesystem is

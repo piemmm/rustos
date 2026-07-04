@@ -1,5 +1,5 @@
 //! The `Run` entry-point binary of the login service, installed at
-//! `/System/Services/login` (`plans/PI.md` P11) — the
+//! `/System/Services/login.app/Run` (`plans/PI.md` P11) — the
 //! program PID 1 `init` launches as the per-console session supervisor.
 //!
 //! This is a **pure-Rust** program: RustOS is Rust-only, so

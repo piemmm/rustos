@@ -5,7 +5,7 @@
 //! user-space service through the typed, versioned `sysinfo-v1` ABI defined
 //! in [`rustos_abi::sysinfo`]. `sysinfod` is the *only* server of that API,
 //! and the kernel exposes no path that bypasses it; the
-//! installed binary lives at `/System/Services/sysinfod`.
+//! installed binary lives at `/System/Services/sysinfod.app/Run`.
 //!
 //! # What this crate is
 //!

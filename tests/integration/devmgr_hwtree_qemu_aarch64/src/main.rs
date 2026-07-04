@@ -1,7 +1,7 @@
 //! Design D P-3 QEMU integration test (`.junie/next-pi-prompt.md`): boot the
 //! production aarch64 (Raspberry Pi 4) `rustos-kernel` pipeline on the `virt`
 //! board, have PID 1 (`init`) launch the **perpetual device-manager service**
-//! (`/System/Services/devmgr`), and prove the service's
+//! (`/System/Services/devmgr.app/Run`), and prove the service's
 //! reactive observe loop end to end: it reads the discovered hardware tree
 //! (`hw_tree_read`), **truly parks** off the run queue in `hw_tree_wait`
 //! (no busy poll), and, on a **real generation

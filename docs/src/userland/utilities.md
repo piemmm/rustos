@@ -10,7 +10,7 @@ and is extended as the others (`mount`, …) arrive.
 `rustos-sysinfo` is the single command-line tool that exposes the System
 Information API to the terminal (`AGENTS.md` §16.6). RustOS has no
 `/proc` and no `/sys`; every piece of live system information is served
-by `/System/Services/sysinfod` over the typed, versioned, capability-
+by `/System/Services/sysinfod.app/Run` over the typed, versioned, capability-
 checked `sysinfo-v1` wire surface defined in `rustos_abi::sysinfo` (see
 [System Information API (`sysinfo-v1`)](../abi/sysinfo.md) and the
 [System Information service](./sysinfod.md)). `sysinfo` is a *client* of
@@ -114,7 +114,7 @@ truncated, and dead-console fail-closed paths.
 `rustos-ps` is the POSIX-named process lister. Like `sysinfo`, it is a
 *client* of the System Information API (`AGENTS.md` §16.6): there is no
 `/proc`, so `ps` issues the `sysinfo-v1` process-list queries served by
-`/System/Services/sysinfod` and has no privileged path that bypasses the
+`/System/Services/sysinfod.app/Run` and has no privileged path that bypasses the
 capability check. By default it lists the caller's own processes (the
 ungated `SELF_PROCESS_LIST`); `-e`/`-A`/`--all` request every process
 (`GLOBAL_PROCESS_LIST`, which the service gates on `CAP_SYSINFO_GLOBAL`).
@@ -191,7 +191,7 @@ halves take deliberately different paths. **Listing** the mounted
 filesystems is a *read* of live system state, so — like `ps` — it goes
 through the System Information API (`AGENTS.md` §16.6): there is no
 `/proc` and no mount-table file, so `mount` issues the ungated
-`sysinfo-v1` `MOUNT_LIST` query served by `/System/Services/sysinfod`.
+`sysinfo-v1` `MOUNT_LIST` query served by `/System/Services/sysinfod.app/Run`.
 **Attaching** a filesystem is privileged (it needs `CAP_FS_MOUNT`,
 `AGENTS.md` §5.2), and the kernel — not this tool — makes that decision
 (`AGENTS.md` §5.4).

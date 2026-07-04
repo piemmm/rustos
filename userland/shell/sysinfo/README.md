@@ -3,7 +3,7 @@
 Stage 6 deliverable (`AGENTS.md` §3 `userland/shell/`, §16.6). `sysinfo`
 is the single command-line tool that exposes the System Information API
 to the terminal. RustOS has no `/proc` and no `/sys`; every piece of
-live system information is served by `/System/Services/sysinfod` over the
+live system information is served by `/System/Services/sysinfod.app/Run` over the
 typed, versioned, capability-checked `sysinfo-v1` API. `sysinfo` is a
 *client* of that API — it does **not** read a virtual filesystem, and it
 has no privileged path that bypasses the capability check (`AGENTS.md`

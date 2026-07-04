@@ -11,7 +11,7 @@
 //! `main` collects the inherited argument vector, parses it with the pure
 //! [`rustos_sysinfo`] grammar, and runs the resulting command against the two
 //! production seams shared through `lib/procinfo`: `IpcTransport`, which
-//! carries the framed `sysinfo-v1` request to `/System/Services/sysinfod` over
+//! carries the framed `sysinfo-v1` request to `/System/Services/sysinfod.app/Run` over
 //! the well-known IPC call endpoint, and `RtOutput`, which writes each
 //! rendered line to the inherited standard output (fd 1). The tool binds only
 //! to its inherited descriptors, never a console device, and holds no ambient

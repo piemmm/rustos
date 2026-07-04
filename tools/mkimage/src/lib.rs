@@ -406,6 +406,15 @@ pub struct RpiImage {
 /// a tampered read-only store fails closed. An empty slice
 /// produces an image with no autoloaded drivers (every node left unbound).
 ///
+/// `apps` is the set of application-bundle files to plant into the read-only
+/// system app and service stores, each as `(components, bytes)` where
+/// `components` is the file's path relative to the `/System` volume root
+/// (for example `&[b"Apps", b"ls.app", b"AppInfo"]`) — every program's
+/// signed `AppInfo` + `Run` beside its `Help/` tree, so each bundle is a
+/// complete, self-contained on-disk directory (`plans/APPS.md` deliverable
+/// 8). As with `drivers`, the caller composes and signs the files; this
+/// crate only plants them.
+///
 /// # Errors
 ///
 /// Any [`MkimageError`] from the kernel conversion, descriptor
@@ -417,6 +426,7 @@ pub fn build_rpi_image(
     entropy: &mut dyn EntropySource,
     profile: ImageProfile,
     drivers: &[(&[&[u8]], &[u8])],
+    apps: &[(&[&[u8]], &[u8])],
 ) -> Result<RpiImage, MkimageError> {
     let users_db = match profile {
         ImageProfile::Debug => Some(debug_users_db(entropy)?),
@@ -463,7 +473,8 @@ pub fn build_rpi_image(
         &descriptor,
         console_baud_for(profile),
     )?;
-    let system = rootfs::build_system_partition(u64::from(SYSTEM_PART_SECTORS), entropy, drivers)?;
+    let system =
+        rootfs::build_system_partition(u64::from(SYSTEM_PART_SECTORS), entropy, drivers, apps)?;
     let root = rootfs::build_root_partition(
         u64::from(ROOT_PART_SECTORS),
         &root_key,
@@ -608,6 +619,7 @@ mod tests {
             &mut TestEntropy(9),
             ImageProfile::Installer,
             &[],
+            &[],
         )
         .expect("image builds");
         assert_eq!(built.image.len(), IMAGE_SECTORS as usize * SECTOR_BYTES);
@@ -676,6 +688,7 @@ mod tests {
             &mut TestEntropy(9),
             ImageProfile::Installer,
             &[],
+            &[],
         )
         .expect("image builds");
 
@@ -730,6 +743,7 @@ mod tests {
             &mut TestEntropy(9),
             ImageProfile::Installer,
             &[(store_path, BUNDLE)],
+            &[],
         )
         .expect("image builds");
 
@@ -755,12 +769,72 @@ mod tests {
     }
 
     #[test]
+    fn an_installed_app_bundle_reads_back_beside_its_help_tree() {
+        use rustos_drv_fs_rustfs::SYSTEM_VOLUME_KEY;
+        use rustos_partition::{parse_partition_table, PartitionBlock, PartitionType};
+
+        // Synthetic bundle files: this test proves the *planting* of a
+        // complete self-contained bundle (`AppInfo` + `Run` beside the
+        // discovered `Help/` tree), not signature validity — the signed
+        // composition is exercised where it is built. The store paths mirror
+        // the real installs (`Apps/<name>.app/…`, `Services/<name>.app/…`).
+        const APPINFO: &[u8] = b"a signed AppInfo manifest's bytes (synthetic)";
+        const RUN: &[u8] = b"a Run rxe image's bytes (synthetic)";
+        let app_files: [(&[&[u8]], &[u8]); 4] = [
+            (&[b"Apps", b"ls.app", b"AppInfo"], APPINFO),
+            (&[b"Apps", b"ls.app", b"Run"], RUN),
+            (&[b"Services", b"login.app", b"AppInfo"], APPINFO),
+            (&[b"Services", b"login.app", b"Run"], RUN),
+        ];
+
+        let built = build_rpi_image(
+            &test_kernel_elf(),
+            &test_firmware(),
+            &mut TestEntropy(9),
+            ImageProfile::Installer,
+            &[],
+            &app_files,
+        )
+        .expect("image builds");
+
+        let mut disk = MemBlock::from_bytes(built.image).expect("whole sectors");
+        let table = parse_partition_table(&mut disk).expect("the MBR parses");
+        let system = table
+            .first_of_type(PartitionType::RustFsSystem)
+            .expect("a /System partition is present");
+        let window = PartitionBlock::from_partition(disk, &system).expect("the /System window");
+        let mut sys = RustFs::open_read_only(window, &SYSTEM_VOLUME_KEY)
+            .expect("/System mounts read-only under the public key");
+
+        // Every planted bundle file reads back byte-for-byte at its store
+        // path…
+        for (components, bytes) in &app_files {
+            let mut node = sys.root();
+            for component in *components {
+                node = sys.lookup(node, component).expect("store path component");
+            }
+            let mut buf = vec![0u8; bytes.len() + 16];
+            let read = sys.read_at(node, 0, &mut buf).expect("file reads back");
+            assert_eq!(&buf[..read], *bytes);
+        }
+        // …and the command app's bundle directory also carries its
+        // discovered `Help/` tree, so the on-disk bundle is complete.
+        let mut help = sys.root();
+        for component in [b"Apps".as_slice(), b"ls.app", b"Help", b"default"] {
+            help = sys.lookup(help, component).expect("Help path component");
+        }
+        sys.lookup(help, b"ls.md")
+            .expect("the bundle's default help document is planted beside Run");
+    }
+
+    #[test]
     fn the_root_only_mounts_under_the_passphrase_derived_key() {
         let built = build_rpi_image(
             &test_kernel_elf(),
             &test_firmware(),
             &mut TestEntropy(9),
             ImageProfile::Installer,
+            &[],
             &[],
         )
         .expect("image builds");
@@ -787,6 +861,7 @@ mod tests {
             &test_firmware(),
             &mut TestEntropy(9),
             ImageProfile::Debug,
+            &[],
             &[],
         )
         .expect("image builds");
@@ -838,6 +913,7 @@ mod tests {
             &mut TestEntropy(9),
             ImageProfile::Debug,
             &[],
+            &[],
         )
         .expect("image builds");
 
@@ -878,6 +954,7 @@ mod tests {
             &test_firmware(),
             &mut TestEntropy(9),
             ImageProfile::Installer,
+            &[],
             &[],
         )
         .is_err());

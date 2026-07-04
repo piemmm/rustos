@@ -3045,6 +3045,7 @@ dependencies = [
  "rustos-kernel-syscall",
  "rustos-mkimage",
  "rustos-qemu",
+ "rustos-syshelp",
  "rustos-test-autoload-root-image",
  "rustos-test-encrypted-root-image",
  "rustos-test-fat32-image",

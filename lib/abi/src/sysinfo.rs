@@ -14,7 +14,7 @@
 //!
 //! This module defines only the wire types and the frozen registry. The
 //! user-space service that answers the queries lives at
-//! `/System/Services/sysinfod` (`userland/system/sysinfod`); the kernel has
+//! `/System/Services/sysinfod.app/Run` (`userland/system/sysinfod`); the kernel has
 //! no privileged path that bypasses the capability check.
 
 use crate::driver::filesystem::MountFlags;

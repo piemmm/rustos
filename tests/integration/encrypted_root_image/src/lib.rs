@@ -70,12 +70,15 @@ pub const FAT_BOOT_SECTORS: u64 = 131_072;
 /// design-B pre-unlock signed-driver store (`plans/PI.md` B1).
 pub const SYSTEM_LBA: u64 = BOOT_LBA + FAT_BOOT_SECTORS;
 
-/// Sectors in the read-only `RustFS` `/System` partition: 8 MiB. Large
-/// enough to carry the skeleton **and** the design-B signed driver
-/// bundle(s) the pre-unlock autoload reads from its `Drivers/` store
-/// (`plans/PI.md` design B / B2) — a real `.rxe` keyboard driver sits far
-/// below this, and well below the kernel's `MAX_DRIVER_IMAGE_LEN` read bound.
-pub const SYSTEM_SECTORS: u64 = 16_384;
+/// Sectors in the read-only `RustFS` `/System` partition: 32 MiB. Large
+/// enough to carry the skeleton, the design-B signed driver bundle(s) the
+/// pre-unlock autoload reads from its `Drivers/` store (`plans/PI.md`
+/// design B / B2), **and** the full set of self-contained application
+/// bundles — every discovered program's signed `AppInfo` + `Run` rxe beside
+/// its `Help/` tree (`plans/APPS.md` deliverable 8) — with headroom, while
+/// staying trivial against the whole-disk image (only non-zero sectors are
+/// planted on the backing file).
+pub const SYSTEM_SECTORS: u64 = 65_536;
 
 /// First sector of the encrypted `RustFS` root partition: directly after
 /// the `/System` partition.
@@ -223,9 +226,19 @@ fn build_boot_partition(descriptor: &[u8]) -> Result<Vec<u8>, DriverError> {
 /// bundle leaf's path **relative to this `/System` volume's root** (the
 /// volume's root *is* `/System`, so the `/System/Drivers/` store is at
 /// the volume-relative `Drivers/…`, e.g.
-/// `&[b"Drivers", b"input", b"virtio_kbd", b"Run"]`). Returns the partition's
+/// `&[b"Drivers", b"input", b"virtio_kbd", b"Run"]`).
+///
+/// `apps` is the application-bundle file set in the same shape — every
+/// program's signed `AppInfo` + `Run` at its volume-relative store path
+/// (e.g. `&[b"Apps", b"ls.app", b"Run"]`), planted beside the `Help/`
+/// trees below so each on-disk bundle is complete and self-contained
+/// (`plans/APPS.md` deliverable 8). The caller composes and signs the
+/// files; this fixture only plants bytes. Returns the partition's
 /// on-disk bytes.
-fn build_system_partition(drivers: &[(&[&[u8]], &[u8])]) -> Result<Vec<u8>, DriverError> {
+fn build_system_partition(
+    drivers: &[(&[&[u8]], &[u8])],
+    apps: &[(&[&[u8]], &[u8])],
+) -> Result<Vec<u8>, DriverError> {
     let mut fs = RustFs::format(
         MemDisk::new(SYSTEM_SECTORS),
         64,
@@ -255,6 +268,13 @@ fn build_system_partition(drivers: &[(&[&[u8]], &[u8])]) -> Result<Vec<u8>, Driv
         ];
         root_image::plant_nested_file(&mut fs, root, &components, doc.bytes)?;
     }
+    // Each program's signed `AppInfo` + `Run` land beside its `Help/` tree
+    // (`Apps/<name>.app/…`, `Services/<name>.app/…`), exactly as
+    // `tools/mkimage` plants them, so every on-disk bundle the vertical
+    // browses is complete and self-contained.
+    for (components, bytes) in apps {
+        root_image::plant_nested_file(&mut fs, root, components, bytes)?;
+    }
     fs.flush()?;
     Ok(fs.into_block().store)
 }
@@ -269,7 +289,21 @@ fn build_system_partition(drivers: &[(&[&[u8]], &[u8])]) -> Result<Vec<u8>, Driv
 /// panicked so the builder holds to in every path it links
 /// into.
 pub fn build_image() -> Result<Vec<u8>, DriverError> {
-    build_image_with_drivers(&[])
+    build_image_with_contents(&[], &[], PASSPHRASE)
+}
+
+/// Build the whole-disk encrypted-root image with the signed application
+/// bundles `apps` planted into the read-only `/System` app/service stores
+/// beside their `Help/` trees — each `(path_components, bytes)` a
+/// volume-relative bundle file (e.g. `&[b"Apps", b"ls.app", b"AppInfo"]`),
+/// composed and signed by the caller (`plans/APPS.md` deliverable 8).
+///
+/// # Errors
+///
+/// Propagates any [`DriverError`] from the underlying whole-disk assembly
+/// (surfaced rather than panicked).
+pub fn build_image_with_apps(apps: &[(&[&[u8]], &[u8])]) -> Result<Vec<u8>, DriverError> {
+    build_image_with_contents(&[], apps, PASSPHRASE)
 }
 
 /// Build the whole-disk encrypted-root image whose root is encrypted under
@@ -278,14 +312,14 @@ pub fn build_image() -> Result<Vec<u8>, DriverError> {
 /// A **blank** `passphrase` builds the installer-profile image: the
 /// bootstrap unlocks it with no prompt, so this is the
 /// fixture the kernel's silent auto-unlock regression mounts. Delegates to
-/// [`build_image_with_drivers_and_passphrase`] with no drivers (one authoring path).
+/// [`build_image_with_contents`] with empty stores (one authoring path).
 ///
 /// # Errors
 ///
 /// Propagates any [`DriverError`] from descriptor provisioning, FAT/`RustFS`
 /// authoring, or the MBR encode (surfaced rather than panicked).
 pub fn build_image_with_passphrase(passphrase: &[u8]) -> Result<Vec<u8>, DriverError> {
-    build_image_with_drivers_and_passphrase(&[], passphrase)
+    build_image_with_contents(&[], &[], passphrase)
 }
 
 /// Build the whole-disk encrypted-root image, additionally planting a set of
@@ -307,27 +341,30 @@ pub fn build_image_with_passphrase(passphrase: &[u8]) -> Result<Vec<u8>, DriverE
 /// Propagates any [`DriverError`] from descriptor provisioning, FAT/`RustFS`
 /// authoring, or the MBR encode (surfaced rather than panicked).
 pub fn build_image_with_drivers(drivers: &[(&[&[u8]], &[u8])]) -> Result<Vec<u8>, DriverError> {
-    build_image_with_drivers_and_passphrase(drivers, PASSPHRASE)
+    build_image_with_contents(drivers, &[], PASSPHRASE)
 }
 
-/// Build the whole-disk encrypted-root image, planting `drivers` into the
-/// read-only `/System` store and encrypting the root under `passphrase`.
+/// Build the whole-disk encrypted-root image, planting `drivers` and the
+/// application-bundle files `apps` into the read-only `/System` stores and
+/// encrypting the root under `passphrase`.
 ///
 /// The single authoring path behind [`build_image`],
-/// [`build_image_with_drivers`], and [`build_image_with_passphrase`]: they differ only in the driver set and the
-/// passphrase the root volume key is derived from.
+/// [`build_image_with_drivers`], [`build_image_with_apps`], and
+/// [`build_image_with_passphrase`]: they differ only in the planted store
+/// contents and the passphrase the root volume key is derived from.
 ///
 /// # Errors
 ///
 /// Propagates any [`DriverError`] from descriptor provisioning, FAT/`RustFS`
 /// authoring, or the MBR encode (surfaced rather than panicked).
-pub fn build_image_with_drivers_and_passphrase(
+pub fn build_image_with_contents(
     drivers: &[(&[&[u8]], &[u8])],
+    apps: &[(&[&[u8]], &[u8])],
     passphrase: &[u8],
 ) -> Result<Vec<u8>, DriverError> {
     let (descriptor, key) = provision(passphrase)?;
     let boot = build_boot_partition(&descriptor)?;
-    let system = build_system_partition(drivers)?;
+    let system = build_system_partition(drivers, apps)?;
     let root = root_image::build_users_root_image_with_key(&key)?;
 
     let table = mbr::encode(&[
@@ -397,6 +434,49 @@ mod tests {
             .expect("a RustFS root partition is present");
         assert_eq!(root.start_lba, ROOT_LBA);
         assert_eq!(root.block_count, ROOT_SECTORS);
+    }
+
+    /// A planted application-bundle file (`Apps/<name>.app/AppInfo` /
+    /// `Run`) reads back byte-for-byte beside the bundle's discovered
+    /// `Help/` tree, so every on-disk bundle the verticals browse is
+    /// complete and self-contained.
+    #[test]
+    fn planted_app_bundle_files_read_back_beside_the_help_tree() {
+        const APPINFO: &[u8] = b"a signed AppInfo manifest's bytes (synthetic)";
+        const RUN: &[u8] = b"a Run rxe image's bytes (synthetic)";
+        let apps: [(&[&[u8]], &[u8]); 4] = [
+            (&[b"Apps", b"ls.app", b"AppInfo"], APPINFO),
+            (&[b"Apps", b"ls.app", b"Run"], RUN),
+            (&[b"Services", b"login.app", b"AppInfo"], APPINFO),
+            (&[b"Services", b"login.app", b"Run"], RUN),
+        ];
+        let bytes = build_image_with_apps(&apps).expect("the whole-disk image assembles");
+        let mut disk = MemDisk { store: bytes };
+        let table = parse_partition_table(&mut disk).expect("the MBR parses");
+        let system = table
+            .first_of_type(PartitionType::RustFsSystem)
+            .expect("a /System partition is present");
+        let window = PartitionBlock::new(disk, system.start_lba, system.block_count)
+            .expect("the /System window is in range");
+        let mut sys = RustFs::open_read_only(window, &SYSTEM_VOLUME_KEY)
+            .expect("the /System volume mounts read-only under the public key");
+
+        for (components, expected) in &apps {
+            let mut node = sys.root();
+            for component in *components {
+                node = sys.lookup(node, component).expect("store path component");
+            }
+            let mut buf = [0u8; 64];
+            let read = sys.read_at(node, 0, &mut buf).expect("file reads back");
+            assert_eq!(&buf[..read], *expected);
+        }
+        // The command app's bundle also carries its discovered Help/ tree.
+        let mut help = sys.root();
+        for component in [b"Apps".as_slice(), b"ls.app", b"Help", b"default"] {
+            help = sys.lookup(help, component).expect("Help path component");
+        }
+        sys.lookup(help, b"ls.md")
+            .expect("the bundle's default help document is planted beside Run");
     }
 
     /// The `/System` partition mounts read-only under the non-secret

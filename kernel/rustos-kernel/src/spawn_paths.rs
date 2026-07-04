@@ -2,14 +2,16 @@
 //! OS-wide path contract the `spawn` syscall resolves byte-for-byte, with
 //! no prefix or alias resolution.
 //!
-//! Services live under `/System/Services/`; every command app lives in the
-//! system app store as a command-named bundle,
-//! `/System/Apps/<command>.app/Run`, so the shell's bare-word resolution
-//! (`plans/APPS.md` §8, built from the shared `rustos_abi` store
-//! definitions) lands on a registered path. Pure data, free of the
-//! rxe-laden registry rows in `spawn_layout` that consume it, so it
-//! compiles — and its store-spelling drift test runs — on the CI host as
-//! well as on each bare-metal production build.
+//! Every program — command app and service alike — is a `<name>.app`
+//! bundle (a service is an app): a command app lives in the system app
+//! store as `/System/Apps/<command>.app/Run`, so the shell's bare-word
+//! resolution (`plans/APPS.md` §8, built from the shared `rustos_abi`
+//! store definitions) lands on a registered path, and a service lives in
+//! the service store as `/System/Services/<name>.app/Run`, the path PID 1
+//! `init`'s startup config names. Pure data, free of the rxe-laden
+//! registry rows in `spawn_layout` that consume it, so it compiles — and
+//! its store-spelling drift test runs — on the CI host as well as on each
+//! bare-metal production build.
 
 /// Absolute path the `elsh` shell program is registered under: the system
 /// app store's command-named bundle (`plans/APPS.md` §8). It must match
@@ -19,24 +21,26 @@
 pub const SHELL_PATH: &[u8] = b"/System/Apps/elsh.app/Run";
 
 /// Absolute path the login service program is registered under
-/// (`plans/PI.md` P11). It must match exactly the `session` path PID 1
-/// `init` reads from its startup config and hands to the `spawn` syscall
+/// (`plans/PI.md` P11): the service store's `<name>.app` bundle (a service
+/// is an app). It must match exactly the `session` path PID 1 `init` reads
+/// from its startup config and hands to the `spawn` syscall
 /// (`userland/system/init/src/startup.rs`). One OS-wide path contract,
 /// identical on every target.
-pub const LOGIN_PATH: &[u8] = b"/System/Services/login";
+pub const LOGIN_PATH: &[u8] = b"/System/Services/login.app/Run";
 
-/// Absolute path the device-manager service program is registered under. It
-/// must match exactly the device-manager path PID 1 `init` hands to the
-/// `spawn` syscall at startup (`userland/system/init/src/startup.rs`). One
-/// OS-wide path contract, identical on every target.
-pub const DEVMGR_PATH: &[u8] = b"/System/Services/devmgr";
+/// Absolute path the device-manager service program is registered under:
+/// the service store's `<name>.app` bundle. It must match exactly the
+/// device-manager path PID 1 `init` hands to the `spawn` syscall at
+/// startup (`userland/system/init/src/startup.rs`). One OS-wide path
+/// contract, identical on every target.
+pub const DEVMGR_PATH: &[u8] = b"/System/Services/devmgr.app/Run";
 
 /// Absolute path the System Information service program is registered under
-/// (`AGENTS.md` §16.6). It must match exactly the `sysinfod` path PID 1
-/// `init` hands to the `spawn` syscall at startup
-/// (`userland/system/init/src/startup.rs`). One OS-wide path contract,
-/// identical on every target.
-pub const SYSINFOD_PATH: &[u8] = b"/System/Services/sysinfod";
+/// (`AGENTS.md` §16.6): the service store's `<name>.app` bundle. It must
+/// match exactly the `sysinfod` path PID 1 `init` hands to the `spawn`
+/// syscall at startup (`userland/system/init/src/startup.rs`). One OS-wide
+/// path contract, identical on every target.
+pub const SYSINFOD_PATH: &[u8] = b"/System/Services/sysinfod.app/Run";
 
 /// Absolute path the `ps` tool program is registered under: the system app
 /// store's command-named bundle, so the shell resolves the bare word `ps`
@@ -81,19 +85,25 @@ mod tests {
         DEVMGR_PATH, LOGIN_PATH, LS_PATH, MAN_PATH, PS_PATH, SHELL_PATH, SYSINFOD_PATH,
         SYSINFO_PATH, TOP_PATH, USERS_CLI_PATH,
     };
-    use rustos_abi::{BundleEntry, BUNDLE_SUFFIX, SYSTEM_APP_STORE};
+    use rustos_abi::{BundleEntry, BUNDLE_SUFFIX, SYSTEM_APP_STORE, SYSTEM_SERVICE_STORE};
 
-    /// The system services PID 1 spawns are registered under
-    /// `/System/Services/`, never in the app store: they are session/service
-    /// programs, not commands a user types.
+    /// The system services PID 1 spawns are registered under the service
+    /// store as `<service>.app` bundles (a service is an app), never in the
+    /// app store: they are session/service programs, not commands a user
+    /// types. The spelling is built from the shared `rustos_abi` store
+    /// definitions so this registry and the on-disk bundle layout cannot
+    /// drift.
     #[test]
-    fn services_live_under_system_services() {
+    fn services_live_under_system_services_as_bundles() {
         for (path, service) in [
             (LOGIN_PATH, "login"),
             (DEVMGR_PATH, "devmgr"),
             (SYSINFOD_PATH, "sysinfod"),
         ] {
-            let expected = alloc::format!("/System/Services/{service}");
+            let expected = alloc::format!(
+                "{SYSTEM_SERVICE_STORE}/{service}{BUNDLE_SUFFIX}/{}",
+                BundleEntry::Run.as_str()
+            );
             assert_eq!(core::str::from_utf8(path), Ok(expected.as_str()));
         }
     }

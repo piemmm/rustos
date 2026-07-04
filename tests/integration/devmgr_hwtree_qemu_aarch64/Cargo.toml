@@ -1,6 +1,6 @@
 [package]
 name = "rustos-test-devmgr-hwtree-qemu-aarch64"
-description = "QEMU integration test (.junie Design D P-3): boot the production aarch64 rustos-kernel pipeline on the virt board, have PID 1 (init) launch the perpetual device-manager service (/System/Services/devmgr), prove it reads the discovered hardware tree and truly parks in hw_tree_wait, then deliver a real generation bump (a simulated hotplug append to the kernel HwTreeStore) and prove devmgr wakes, re-reads, and re-parks — the reactive observe loop end to end with no starvation."
+description = "QEMU integration test (.junie Design D P-3): boot the production aarch64 rustos-kernel pipeline on the virt board, have PID 1 (init) launch the perpetual device-manager service (/System/Services/devmgr.app/Run), prove it reads the discovered hardware tree and truly parks in hw_tree_wait, then deliver a real generation bump (a simulated hotplug append to the kernel HwTreeStore) and prove devmgr wakes, re-reads, and re-parks — the reactive observe loop end to end with no starvation."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

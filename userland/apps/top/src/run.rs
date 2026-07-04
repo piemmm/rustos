@@ -13,7 +13,7 @@
 //! against two seams: `RtTty`, the curses byte channel over the inherited
 //! standard input/output (fd 0/1), and `IpcTransport` (shared through
 //! `lib/procinfo`), which carries the framed `sysinfo-v1` request to
-//! `/System/Services/sysinfod` over the well-known IPC call endpoint. The tool
+//! `/System/Services/sysinfod.app/Run` over the well-known IPC call endpoint. The tool
 //! binds only to its inherited descriptors, never a console device, and holds
 //! no ambient authority: `sysinfod` gates every query against the caller's
 //! kernel-attested origin.

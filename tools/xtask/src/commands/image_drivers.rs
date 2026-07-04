@@ -20,13 +20,12 @@
 //! re-rolled here. This is host-only build glue; the
 //! production image stays Rust-only.
 
-use std::process::Command;
-
 use rustos_abi::{CapabilityId, DriverKind, DriverManifest, DRIVER_MANIFEST_MAGIC};
 use rustos_itest_harness::driver_image::build_signed_driver_image;
 use rustos_itest_harness::elf2rxe::elf_to_rxe;
 use rustos_itest_harness::USER_IMAGE_BIAS;
 
+use super::pie_build::cross_compile_pie_elf;
 use crate::Context;
 
 /// The single source of the kernel's driver-signing seed:
@@ -43,11 +42,7 @@ use crate::Context;
 // scoped to this included file and silences none of this module's own docs.
 #[allow(dead_code, rustdoc::broken_intra_doc_links)]
 #[path = "../../../../kernel/rustos-kernel/src/build_support.rs"]
-mod build_support;
-
-/// Rust target triple of the freestanding aarch64 driver build — the
-/// architecture the Pi image boots.
-const AARCH64_TARGET: &str = "aarch64-unknown-none";
+pub(crate) mod build_support;
 
 /// Store path of the `VideoCore` mailbox service-driver bundle, **relative to
 /// the `/System` volume root** (whose root *is* `/System`, design B). The
@@ -97,7 +92,21 @@ fn build_bundle(
     caps: &[CapabilityId],
     bind_keys: &[rustos_abi::DriverBindKey],
 ) -> Result<Vec<u8>, String> {
-    let elf = cross_compile_driver(ctx, package)?;
+    // Map the package name to its source directory under `drivers/`. Only
+    // the crates installed into the image are listed; an unknown package is
+    // a programming error in the image pipeline, never a runtime input.
+    let rel_dir = match package {
+        "rustos-drv-bus-mailbox-vcmailbox" => "drivers/bus/mailbox/vcmailbox",
+        "rustos-drv-bus-pcie-brcm" => "drivers/bus/pcie_brcm",
+        "rustos-drv-bus-usb-vl805" => "drivers/bus/usb/vl805",
+        "rustos-drv-bus-usb" => "drivers/bus/usb/xhci",
+        "rustos-drv-input-usb-kbd" => "drivers/input/usb_kbd",
+        "rustos-drv-input-virtio-kbd" => "drivers/input/virtio_kbd",
+        other => return Err(format!("image: no source dir mapped for driver {other}")),
+    };
+    // A driver crate's `Run` binary shares the package name.
+    let crate_dir = ctx.workspace_root.join(rel_dir);
+    let elf = cross_compile_pie_elf(ctx, "image-drivers", package, package, &crate_dir)?;
     let rxe = elf_to_rxe(
         &elf,
         &rustos_kernel_syscall::SYSCALL_TABLE_HASH,
@@ -312,69 +321,4 @@ fn verify_signed_bundle(image: &[u8]) -> Result<(), String> {
         return Err("image: composed driver bundle is unsigned".to_string());
     }
     Ok(())
-}
-
-/// Compile a user-space driver crate's `Run` binary position-independent for
-/// the freestanding aarch64 target (against the crate's own `Run.ld`) and
-/// return the linked ELF bytes.
-///
-/// Mirrors the kernel `build.rs` / autoload-fixture recipe: `core`/`alloc`/`compiler_builtins` are built PIC alongside the
-/// crate (`-Z build-std`); the outer build's `RUSTFLAGS` are cleared so the
-/// target-scoped PIE link recipe wins and applies only to the aarch64 driver
-/// crates, never the driver's own host build script.
-fn cross_compile_driver(ctx: &Context, package: &str) -> Result<Vec<u8>, String> {
-    // Map the package name to its source directory under `drivers/`. Only the
-    // crates installed into the image are listed; an unknown package is a
-    // programming error in the image pipeline, never a runtime input.
-    let rel_dir = match package {
-        "rustos-drv-bus-mailbox-vcmailbox" => "drivers/bus/mailbox/vcmailbox",
-        "rustos-drv-bus-pcie-brcm" => "drivers/bus/pcie_brcm",
-        "rustos-drv-bus-usb-vl805" => "drivers/bus/usb/vl805",
-        "rustos-drv-bus-usb" => "drivers/bus/usb/xhci",
-        "rustos-drv-input-usb-kbd" => "drivers/input/usb_kbd",
-        "rustos-drv-input-virtio-kbd" => "drivers/input/virtio_kbd",
-        other => return Err(format!("image: no source dir mapped for driver {other}")),
-    };
-    let driver_dir = ctx.workspace_root.join(rel_dir);
-    let run_ld = driver_dir.join("Run.ld");
-    let target_dir = ctx.target_dir().join("image-drivers").join(package);
-
-    // Cargo fingerprints the RUSTFLAGS *string* (which names the linker script
-    // by path) but not the script's *content*, so a `Run.ld` edit alone would
-    // not trigger a relink and the converter could read a stale ELF. Wipe the
-    // private target directory to force a clean rebuild against the current
-    // script (this is image authoring, not an incremental dev build).
-    let _ = std::fs::remove_dir_all(&target_dir);
-
-    let mut cmd = Command::new(&ctx.cargo);
-    cmd.current_dir(&ctx.workspace_root)
-        .env_remove("CARGO_ENCODED_RUSTFLAGS")
-        .env_remove("RUSTFLAGS")
-        .env(
-            "CARGO_TARGET_AARCH64_UNKNOWN_NONE_RUSTFLAGS",
-            format!(
-                "-C relocation-model=pie -C link-arg=-pie -C link-arg=-T{}",
-                run_ld.display()
-            ),
-        )
-        .args([
-            "build",
-            "--locked",
-            "-p",
-            package,
-            "--target",
-            AARCH64_TARGET,
-            "-Z",
-            "build-std=core,compiler_builtins,alloc",
-            "--target-dir",
-        ])
-        .arg(&target_dir);
-    ctx.run(
-        &format!("image: driver build ({package}, {AARCH64_TARGET})"),
-        cmd,
-    )?;
-
-    let elf_path = target_dir.join(AARCH64_TARGET).join("debug").join(package);
-    std::fs::read(&elf_path)
-        .map_err(|e| format!("image: cannot read driver ELF {}: {e}", elf_path.display()))
 }

@@ -61,12 +61,14 @@ deliverables 5–7 for the rest of the toolset (`cargo xtask help-lint`,
 the OS `Help/` trees and `-h`/`-?` convention for the other command apps,
 wider `stdinfo` adoption — `man`'s locale-fallback and `ls`'s omission
 records are live), and the **charter-blocking** deliverable 8 —
-self-contained on-disk bundles: today each command app's `Run` rxe is
-baked into the kernel (`spawn_paths.rs`/`SPAWN_PROGRAMS`) with only `Help/`
-on disk, which the amended §16.5 forbids (an app *is* its bundle
-directory); the migration plants each app's signed `Run`/`AppInfo` on the
-`/System/Apps` store, discovers the store from disk, verifies via `appmgr`,
-and deletes the kernel registry. Help documents are authored **only** in each bundle's
+self-contained on-disk bundles: every discovered bundle's signed
+`AppInfo` + `Run` now ships on disk beside its `Help/` (increments 1–3,
+including the `<name>.app/Run` service paths), but the `spawn` syscall
+still dispatches the kernel-baked rxe copies
+(`spawn_paths.rs`/`SPAWN_PROGRAMS`), which the amended §16.5 forbids (an
+app *is* its bundle directory); the remaining migration (increments 4–5)
+verifies and loads the store bundles from the mounted volume and deletes
+the kernel registry. Help documents are authored **only** in each bundle's
 on-disk `Help/` tree and read at runtime through the `lib/help` seam — no app
 embeds its help, and the image builder plants the trees from data discovered
 by `tools/syshelp`, never a hand-maintained per-bundle list (§6.1, `AGENTS.md`
@@ -570,25 +572,29 @@ both landed; `plans/SHELL.md` command execution):
 
 8. **Self-contained on-disk bundles — retire the kernel-baked spawn
    registry (charter-blocking, in progress; §16.5 self-containment and
-   §16.2 services-are-apps amended).** Every program's `Run` rxe — the
+   §16.2 services-are-apps amended).** Every discovered bundle — the
    command apps *and* the `login`/`devmgr`/`sysinfod` services (a service
-   is an app, §16.2) — is today compiled into the kernel image and
-   dispatched by a byte-exact in-kernel path lookup
+   is an app, §16.2) — now ships complete on the read-only `/System`
+   volume: its signed `AppInfo` + `Run` rxe beside its `Help/` tree, at
+   the bundle-form paths (`/System/Apps/<cmd>.app/`,
+   `/System/Services/<name>.app/`) PID 1 `init` and the shell name. But
+   the `spawn` syscall still dispatches the kernel-baked rxe *copies*
    (`kernel/rustos-kernel/src/spawn_paths.rs` + `spawn_layout.rs`'s
-   `include!`-ed `*_rxe.rs` and `SPAWN_PROGRAMS`), while only each bundle's
-   `Help/` tree is planted on disk — so `/System/Apps/ls.app/` shows only
-   `Help/`, no `Run`/`AppInfo` exist on the volume, and the `appmgr`
-   signature + capability + interface-hash path is bypassed. The amended
+   `include!`-ed `*_rxe.rs` and `SPAWN_PROGRAMS`) rather than loading and
+   verifying the on-disk bundles, so the `appmgr` signature + capability +
+   interface-hash path is still bypassed at launch. The amended
    §16.5/§16.2 forbid this. The maintainer decided (2026-07-04) against any
    staged compatibility: the full correct end state lands in dependency
    order — the binding increment list, with per-increment status, lives in
    `PLAN.md` ("Self-contained bundles"): (1) the canonical bundle
-   content-hash framing in `lib/abi`; (2) per-crate `AppInfo.toml` manifest
-   sources + the discovery walk (never a per-bundle list) + the shared
-   composer signing under the dedicated `SYSTEM_APP_SIGNING_SEED`; (3)
-   `tools/mkimage` and the QEMU fixture plant each discovered bundle's
-   signed `AppInfo` + `Run` beside its `Help/` (command apps under
-   `/System/Apps/`, services under `/System/Services/<name>.app/`); (4)
+   content-hash framing in `lib/abi` — done; (2) per-crate `AppInfo.toml`
+   manifest sources + the discovery walk (never a per-bundle list) + the
+   shared composer signing under the dedicated `SYSTEM_APP_SIGNING_SEED`
+   — done; (3) `tools/mkimage` and the QEMU fixture plant each discovered
+   bundle's signed `AppInfo` + `Run` beside its `Help/` (command apps under
+   `/System/Apps/`, services under `/System/Services/<name>.app/`, the
+   service spawn/startup paths bundle-form via
+   `rustos_abi::SYSTEM_SERVICE_STORE`) — done; (4)
    the verification engine hoisted from `appmgr` into a `lib/*` crate and
    `spawn` loading + verifying store bundles from the mounted volume; (5)
    the x86_64/riscv64 storage floor, then deletion of `SPAWN_PROGRAMS`,

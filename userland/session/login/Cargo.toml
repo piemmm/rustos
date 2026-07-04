@@ -13,7 +13,7 @@ workspace = true
 
 # The package is both the `rustos-login` policy library (above) and the `Run`
 # entry-point binary of the login service installed at
-# `/System/Services/login` (`AGENTS.md` §16.2, `plans/PI.md` P11) — the
+# `/System/Services/login.app/Run` (`AGENTS.md` §16.2, `plans/PI.md` P11) — the
 # program PID 1 `init` launches as the per-console session supervisor. The
 # binary is a freestanding pure-Rust program on the native Tier-1 targets and
 # an inert host stub elsewhere (see `src/run.rs` / `build.rs`).

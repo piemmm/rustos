@@ -4142,7 +4142,7 @@ two users — or the same user twice — can be logged in concurrently.
   items.
 - **The login `Run` binary + the `users_db_read` delivery seam**
   (former increment 1): the login service ships at
-  `/System/Services/login` (`userland/session/login/src/run.rs`, a
+  `/System/Services/login.app/Run` (`userland/session/login/src/run.rs`, a
   `rustos-rt` program) and PID 1 `init`'s `session` directive points at
   it. The kernel-held database is delivered through the new `abi-v1`
   syscall **`users_db_read`** (no. 19, gated on the new

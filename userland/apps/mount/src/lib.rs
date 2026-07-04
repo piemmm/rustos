@@ -7,7 +7,7 @@
 //! * **Listing** is a *read* of live system state, so — like `ps` — it goes
 //!   through the System Information API: RustOS has no
 //!   `/proc` and no mount-table file. `mount` issues the typed, versioned
-//!   `sysinfo-v1` `MOUNT_LIST` query served by `/System/Services/sysinfod`
+//!   `sysinfo-v1` `MOUNT_LIST` query served by `/System/Services/sysinfod.app/Run`
 //!   and renders one `source on target type fstype (options)` line per
 //!   mount. The query is ungated; the shared paging and rendering live in
 //!   `lib/procinfo` so `mount`, `ps`, and `sysinfo` never duplicate them.

@@ -53,7 +53,7 @@ pub const MAX_METRIC_NAME_LEN: usize = 64;
 /// the only producer today is the `sysinfod` broker.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum Producer {
-    /// The `/System/Services/sysinfod` System Information API broker.
+    /// The `/System/Services/sysinfod.app/Run` System Information API broker.
     Sysinfod,
 }
 

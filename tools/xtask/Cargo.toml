@@ -36,6 +36,12 @@ path = "src/main.rs"
 rustos-abi = { path = "../../lib/abi", version = "=0.0.0" }
 rustos-kernel-syscall = { path = "../../kernel/syscall", version = "=0.0.0" }
 rustos-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
+# The app-bundle composer (`image_apps`) signs each bundle's `AppInfo`
+# over the exact contents the volume ships; the bundle's `Help/` documents
+# come from the same build-discovered source the image planters plant
+# (`rustos_syshelp`), so the signed content hash and the planted tree
+# cannot drift.
+rustos-syshelp = { path = "../syshelp", version = "=0.0.0" }
 # `test --qemu` (Stage 2 deliverable) drives the bare-metal integration
 # tests through the audited `tools/qemu` runner. Sharing the runner
 # crate keeps the test-execution contract (`isa-debug-exit`, strict
@@ -82,9 +88,13 @@ rustos-mkimage = { path = "../mkimage", version = "=0.0.0" }
 # definition the kernel `build.rs` and the autoload fixtures also use
 # (`AGENTS.md` §2.2) — so `image` reuses them rather than re-rolling the wire
 # layout. Host-only build glue (`AGENTS.md` §1 / §12); the `driver-image`
-# feature pulls in the Ed25519 signer.
+# feature pulls in the Ed25519 signer, and `app-image` the signed
+# application-bundle composer + `AppInfo.toml` discovery the `image_apps`
+# pipeline composes the self-contained `/System/Apps` + `/System/Services`
+# bundles with (`plans/APPS.md` deliverable 8).
 rustos-itest-harness = { path = "../../tests/integration/harness", version = "=0.0.0", features = [
     "driver-image",
+    "app-image",
 ] }
 # The autoloaded `/System/Drivers/` bundles' own canonical §18.3 bind tables,
 # copied verbatim into each signed bundle so the autoload match data never

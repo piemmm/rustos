@@ -57,7 +57,7 @@ impl ServiceSpec {
     /// * `name` — unique identifier used to express dependencies and to
     ///   label audit records.
     /// * `binary_path` — logical path of the service binary handed to the
-    ///   [`Spawner`] (e.g. `/System/Services/sysinfod`).
+    ///   [`Spawner`] (e.g. `/System/Services/sysinfod.app/Run`).
     /// * `manifest` — the service binary's signed manifest bytes.
     /// * `dependencies` — names of services that must be started before
     ///   this one.

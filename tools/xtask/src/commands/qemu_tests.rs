@@ -3042,6 +3042,10 @@ pub fn build_all(ctx: &Context) -> Result<(), String> {
         let label = format!("test --qemu (build {target}: {} pkg)", packages.len());
         ctx.run(&label, cmd)?;
     }
+    // Pre-warm the composed application-bundle store the encrypted-root
+    // plants lay onto their `/System` volume, so the (possibly concurrent)
+    // run passes reuse one composition instead of racing to build it.
+    super::image_apps::app_store_files(ctx)?;
     Ok(())
 }
 
@@ -3076,13 +3080,17 @@ fn build_targets() -> Vec<&'static str> {
 pub fn run_once(ctx: &Context) -> Result<(), String> {
     let target_dir = ctx.target_dir();
     let budget = parallel::host_parallelism();
+    // Resolve the memoised (`'static`) application-bundle store before the
+    // jobs are built, so the `'static` job closures capture a plain slice
+    // reference rather than the borrowed context.
+    let apps = super::image_apps::app_store_files(ctx)?;
     let jobs: Vec<Job> = TESTS
         .iter()
         .map(|t| {
             let label = format!("test --qemu (run {}) cpus={}", t.package, t.cpus);
             let weight = usize::try_from(t.cpus).unwrap_or(1);
             let target_dir = target_dir.clone();
-            Job::closure(label, weight, move || run_one(&target_dir, t))
+            Job::closure(label, weight, move || run_one(&target_dir, t, apps))
         })
         .collect();
     parallel::run(jobs, budget)
@@ -3110,9 +3118,15 @@ pub(crate) struct Enrolment {
 impl Enrolment {
     /// Drive this enrolment to completion once, exactly as [`run_once`] does,
     /// with no retry. `target_dir` is where the pre-built kernel binaries live
-    /// (see [`build_all`]).
-    pub(crate) fn run(&self, target_dir: &Path) -> Result<(), String> {
-        run_one(target_dir, self.test)
+    /// (see [`build_all`]); `apps` is the composed application-bundle store
+    /// the encrypted-root plants lay onto their `/System` volume
+    /// ([`super::image_apps::app_store_files`]).
+    pub(crate) fn run(
+        &self,
+        target_dir: &Path,
+        apps: &'static [super::image_apps::AppStoreFile],
+    ) -> Result<(), String> {
+        run_one(target_dir, self.test, apps)
     }
 }
 
@@ -3131,7 +3145,31 @@ pub(crate) fn enrolments() -> Vec<Enrolment> {
         .collect()
 }
 
-fn run_one(target_dir: &Path, t: &QemuTest) -> Result<(), String> {
+/// The whole-disk encrypted-root image an `EncryptedRootDisk` enrolment
+/// boots: the shared fixture with the complete self-contained application
+/// bundles — each discovered program's signed `AppInfo` + `Run` beside its
+/// `Help/` tree — planted on the read-only `/System` volume, exactly as a
+/// real image ships them (`plans/APPS.md` deliverable 8).
+fn encrypted_root_disk_bytes(
+    t: &QemuTest,
+    apps: &[super::image_apps::AppStoreFile],
+) -> Result<Vec<u8>, String> {
+    super::image_apps::with_plant_refs(apps, |files| {
+        rustos_test_encrypted_root_image::build_image_with_apps(files)
+    })
+    .map_err(|e| {
+        format!(
+            "test --qemu ({}): build encrypted-root image: {e:?}",
+            t.package
+        )
+    })
+}
+
+fn run_one(
+    target_dir: &Path,
+    t: &QemuTest,
+    apps: &[super::image_apps::AppStoreFile],
+) -> Result<(), String> {
     let kernel: PathBuf = target_dir.join(t.target).join("debug").join(t.binary);
     // Select the per-arch QEMU `Spec`: the riscv64 enrolments boot the
     // `virt` board through OpenSBI; everything else uses the x86_64
@@ -3198,12 +3236,7 @@ fn run_one(target_dir: &Path, t: &QemuTest) -> Result<(), String> {
         )),
         FsDisk::EncryptedRootDisk => Some((
             "encrypted-root.img",
-            rustos_test_encrypted_root_image::build_image().map_err(|e| {
-                format!(
-                    "test --qemu ({}): build encrypted-root image: {e:?}",
-                    t.package
-                )
-            })?,
+            encrypted_root_disk_bytes(t, apps)?,
             rustos_test_encrypted_root_image::TOTAL_SECTORS,
         )),
         FsDisk::AutoloadRootDisk => Some((

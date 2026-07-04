@@ -41,9 +41,11 @@ pub const TOP_LEVEL_DIRS: [&str; 4] = ["System", "Users", "Apps", "Storage"];
 /// (`build_system_partition`). `Security` additionally carries its fixed
 /// `Keys` and `Policy` subdirectories; the `Users`/`Groups` databases inside
 /// it are installer-authored data, not image content. `Apps` is the system
-/// app store: the OS-provided command apps' bundle data — each command app's
-/// internationalised `Help/` tree, discovered from the bundle's own on-disk
-/// source and planted from `rustos_syshelp::HELP_FILES`.
+/// app store and `Services` the service store: the OS-provided programs'
+/// self-contained bundles — each bundle's signed `AppInfo` + `Run` (composed
+/// by the image pipeline's caller) planted beside its internationalised
+/// `Help/` tree, discovered from the bundle's own on-disk source and planted
+/// from `rustos_syshelp::HELP_FILES`.
 pub const SYSTEM_SUBDIRS: [&str; 13] = [
     "Kernel",
     "Apps",
@@ -175,6 +177,7 @@ pub fn build_system_partition(
     sectors: u64,
     entropy: &mut dyn EntropySource,
     drivers: &[(&[&[u8]], &[u8])],
+    apps: &[(&[&[u8]], &[u8])],
 ) -> Result<Vec<u8>, MkimageError> {
     let dev = MemBlock::new(sectors).map_err(MkimageError::SystemPartition)?;
     let mut fs = RustFs::format(dev, ROOT_INODE_HINT, &SYSTEM_VOLUME_KEY, entropy)
@@ -207,6 +210,16 @@ pub fn build_system_partition(
             doc.file.as_bytes(),
         ];
         plant_nested_file(&mut fs, root, &components, doc.bytes)
+            .map_err(MkimageError::SystemPartition)?;
+    }
+    // Each program's signed `AppInfo` + `Run` land beside its `Help/` tree
+    // (`Apps/<name>.app/…`, `Services/<name>.app/…`), making every bundle a
+    // complete, self-contained on-disk directory. The files are composed and
+    // signed by the image pipeline's caller (this crate stays a pure
+    // planter); the same discovered set feeds the QEMU fixture, so image and
+    // fixture cannot drift.
+    for (components, bytes) in apps {
+        plant_nested_file(&mut fs, root, components, bytes)
             .map_err(MkimageError::SystemPartition)?;
     }
     fs.flush().map_err(MkimageError::SystemPartition)?;

@@ -1,5 +1,5 @@
 //! The `Run` entry-point binary of the device-manager service, installed
-//! at `/System/Services/devmgr` — the
+//! at `/System/Services/devmgr.app/Run` — the
 //! long-running user-space service PID 1 `init` launches to observe the
 //! discovered hardware tree and react to it.
 //!

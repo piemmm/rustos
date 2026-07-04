@@ -73,6 +73,15 @@ pub const SYSTEM_LIBRARIES_DIR: &str = "/System/Libraries";
 /// registry and the shell's command resolution, so the two cannot drift.
 pub const SYSTEM_APP_STORE: &str = "/System/Apps";
 
+/// Absolute path of the **system service store**: the OS-provided,
+/// read-only, system-signed service bundles (`login.app`, `devmgr.app`,
+/// `sysinfod.app`, …). A service is an app: each ships as the same
+/// self-contained, signed `<name>.app` bundle as a command app, discovered
+/// from disk and loaded through the identical verification gate. One
+/// definition, shared by the kernel's program registry, PID 1 `init`'s
+/// startup config, and the image builds, so they cannot drift.
+pub const SYSTEM_SERVICE_STORE: &str = "/System/Services";
+
 /// The directory-name suffix every application bundle carries
 /// (`<name>.app`). Command resolution appends it to a bare command word and
 /// recognises it on an explicitly-typed bundle name (`plans/APPS.md` §9).

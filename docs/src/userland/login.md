@@ -5,7 +5,7 @@ session on their behalf. It **always starts in text mode** and offers a
 graphical session only when a display driver and the window manager are
 present; when they are not, the graphical option is simply hidden — never
 crashed, never errored (`AGENTS.md` §10). The installed binary lives at
-`/System/Services/login`.
+`/System/Services/login.app/Run`.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and depends only on
 the audited `lib/*` crates `rustos-abi`, `rustos-caps`, `rustos-log`,
@@ -106,7 +106,7 @@ same `Errno::PermissionDenied`, and a success is mapped to the
 including the user's **shell of choice**, which the `SessionLauncher`
 launches as the text session.
 
-## The `Run` binary (`/System/Services/login`)
+## The `Run` binary (`/System/Services/login.app/Run`)
 
 `src/run.rs` is the shipped login service — the pure-Rust (`rustos-rt`,
 `AGENTS.md` §1) program PID 1 `init`'s `session` directive launches and

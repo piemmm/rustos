@@ -6,9 +6,10 @@
 //! `/System` store. Each program crate authors its manifest **source** as
 //! an `AppInfo.toml` beside its `Cargo.toml`; the image builds discover
 //! those files by walking the userland crate roots
-//! ([`discover_app_manifests`]) — never a hand-maintained per-bundle list —
-//! and compose each bundle's signed wire `AppInfo`
-//! ([`compose_signed_appinfo`]): the [`rustos_abi::AppInfoHeader`] plus its
+//! ([`crate::app_image::discover_app_manifests`]) — never a hand-maintained
+//! per-bundle list — and compose each bundle's signed wire `AppInfo`
+//! ([`crate::app_image::compose_signed_appinfo`]): the
+//! [`rustos_abi::AppInfoHeader`] plus its
 //! capability body, content-hashed over the canonical
 //! [`rustos_abi::digest_bundle_contents`] framing and Ed25519-signed over
 //! the header prefix concatenated with the body — exactly the message the

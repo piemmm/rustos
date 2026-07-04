@@ -365,7 +365,7 @@ re-enables interrupts; the armed wakeup one-shot or a device IRQ wakes a
 waiter and the loop re-steps and dispatches it. Masking across the park and
 draining before the `wfi`/`hlt` closes the park/wake race, so no edge is
 lost. PID 1 `init` now launches the perpetual
-`/System/Services/devmgr` service (a `service` directive in its startup
+`/System/Services/devmgr.app/Run` service (a `service` directive in its startup
 config, supervised alongside the per-console login sessions), which reads
 the discovered hardware tree and parks in `hw_tree_wait` for the life of
 the system — the first production caller of this blocking-wait path. The

@@ -163,7 +163,14 @@ fn qemu_units(ctx: &Context) -> Vec<FlakeUnit<'_>> {
             FlakeUnit::new(label, budget, move |_| {
                 let target_dir = target_dir.clone();
                 let job_label = job_label.clone();
-                Job::closure(job_label, weight, move || enrol.run(&target_dir))
+                // Resolve the memoised (`'static`) application-bundle store
+                // per job so the `'static` job closure captures a plain
+                // slice; `build_all` pre-warmed it, so this is a lookup, and
+                // a memoised composition failure fails the job closed.
+                let apps = crate::commands::image_apps::app_store_files(ctx);
+                Job::closure(job_label, weight, move || {
+                    enrol.run(&target_dir, apps.clone()?)
+                })
             })
         })
         .collect()

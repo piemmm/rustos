@@ -2,7 +2,7 @@
 //!
 //! RustOS has no `/proc` and no `/sys`. `ps` does not scrape a virtual
 //! filesystem; it issues the typed, versioned, capability-checked
-//! `sysinfo-v1` process-list queries served by `/System/Services/sysinfod`
+//! `sysinfo-v1` process-list queries served by `/System/Services/sysinfod.app/Run`
 //! and has no privileged path that bypasses the capability check. By default it lists the caller's own processes
 //! (the ungated `SELF_PROCESS_LIST`); `-e`/`-A` request every process
 //! (`GLOBAL_PROCESS_LIST`, which the service gates on `CAP_SYSINFO_GLOBAL`).

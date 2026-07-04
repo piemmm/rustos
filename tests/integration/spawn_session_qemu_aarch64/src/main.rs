@@ -1,7 +1,7 @@
 //! `plans/PI.md` P6e-3b-ii / P11 QEMU integration test: boot the aarch64
 //! (Raspberry Pi 4) `rustos-kernel` pipeline on the `virt` board, spawn
 //! PID 1 (`init`) into EL0, and prove `init` **supervises** the embedded
-//! login session (`/System/Services/login`) — launching it, waiting on and
+//! login session (`/System/Services/login.app/Run`) — launching it, waiting on and
 //! reaping it when it exits, and relaunching it — rather than spawning it
 //! and forgetting it.
 //!
@@ -17,14 +17,14 @@
 //! `init` writes its banner, then runs its supervise loop
 //! (`userland/system/init/src/run.rs`):
 //!
-//! 1. `spawn` for the device-manager service `/System/Services/devmgr`
+//! 1. `spawn` for the device-manager service `/System/Services/devmgr.app/Run`
 //!    (audited `SyscallInvoked`, `EventId(5000)`, #1) — the long-running
 //!    service `init` launches *first*. The producer
 //!    builds it a fresh address space (emitting `ProcessSpawned`, #2);
 //!    `devmgr` reads the discovered hardware tree (unaudited `hw_tree_read`)
 //!    and parks in `hw_tree_wait` (unaudited), contributing no further
 //!    records after its spawn.
-//! 2. `spawn` for `/System/Services/login` (audited `SyscallInvoked` #2) —
+//! 2. `spawn` for `/System/Services/login.app/Run` (audited `SyscallInvoked` #2) —
 //!    the P11 session. The runtime `ProcessSpawn` producer builds login a
 //!    *fresh, hardware-isolated* address space (emitting `ProcessSpawned`,
 //!    #3) and admits it **Ready**.

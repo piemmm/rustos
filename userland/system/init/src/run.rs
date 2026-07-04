@@ -114,7 +114,7 @@ mod program {
             }
         }
         // Launch the configured long-running services (the device manager,
-        // `/System/Services/devmgr`, today) once each, then supervise them
+        // `/System/Services/devmgr.app/Run`, today) once each, then supervise them
         // alongside one login session per console for the life of PID 1
         // ([`supervise`]). `devmgr` observes the discovered hardware tree
         // and blocks reactively in `hw_tree_wait` — a **true**

@@ -17,10 +17,12 @@ mod ci_long;
 mod deps_check;
 mod fssoak;
 mod fuzz;
+mod image_apps;
 mod image_drivers;
 mod linkcheck;
 mod model_check;
 mod parallel;
+mod pie_build;
 mod proptest;
 mod prune;
 mod qemu_tests;
@@ -1314,13 +1316,23 @@ fn build_platform_image(ctx: &Context, args: ImageArgs) -> Result<PathBuf, Strin
         (image_drivers::VIRTIO_KBD_STORE_PATH, &virtio_kbd),
     ];
 
-    let built = rustos_mkimage::build_rpi_image(
-        &kernel_elf,
-        &firmware,
-        &mut rustos_mkimage::HostEntropy,
-        profile,
-        &drivers,
-    )
+    // Compose the self-contained application bundles the read-only system
+    // app/service stores ship — every discovered program's signed `AppInfo`
+    // + `Run` planted beside its `Help/` tree (`plans/APPS.md` deliverable
+    // 8). Discovery walks the userland `AppInfo.toml` sources; no per-bundle
+    // list exists here.
+    let apps = image_apps::app_store_files(ctx)?;
+
+    let built = image_apps::with_plant_refs(apps, |app_files| {
+        rustos_mkimage::build_rpi_image(
+            &kernel_elf,
+            &firmware,
+            &mut rustos_mkimage::HostEntropy,
+            profile,
+            &drivers,
+            app_files,
+        )
+    })
     .map_err(|e| format!("image: {e}"))?;
 
     // 3. Write the image and its root volume key (owner-only) under

@@ -5,7 +5,7 @@ live system information that would have lived under those trees is exposed
 through one versioned, capability-checked API: the **System Information
 API**, whose wire types live in `lib/abi/src/sysinfo.rs`
 (`rustos_abi::sysinfo`). The user-space service that answers the queries is
-`/System/Services/sysinfod` (`userland/system/sysinfod`); the command-line
+`/System/Services/sysinfod.app/Run` (`userland/system/sysinfod`); the command-line
 `sysinfo` tool and the `ps`/`mount` utilities are clients of this API and
 never scrape a virtual filesystem.
 

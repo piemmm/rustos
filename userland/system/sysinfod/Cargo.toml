@@ -23,7 +23,7 @@ program = ["dep:rustos-rt"]
 
 # The package is both the `rustos-sysinfod` dispatcher library (above) and the
 # `Run` entry-point binary of the System Information service installed at
-# `/System/Services/sysinfod` (`AGENTS.md` §16.2, §16.6) — the long-running
+# `/System/Services/sysinfod.app/Run` (`AGENTS.md` §16.2, §16.6) — the long-running
 # user-space service PID 1 `init` launches to serve the `sysinfo` API. The
 # binary is a freestanding pure-Rust program on the native Tier-1 targets and
 # an inert host stub elsewhere (see `src/run.rs`).

@@ -3582,16 +3582,17 @@ share **data**, not dynamically-linked code.
 
 **Self-contained bundles — migrate off the kernel-baked spawn registry
 (charter-blocking, in progress; §16.5 amended 2026-07-04, §16.2
-services-are-apps amended 2026-07-04).** Every program's `Run` rxe (command
-apps *and* the `login`/`devmgr`/`sysinfod` services) is today compiled into
-the kernel image and dispatched by a byte-exact in-kernel path lookup
+services-are-apps amended 2026-07-04).** Every discovered bundle (command
+apps *and* the `login`/`devmgr`/`sysinfod` services) now ships complete on
+the read-only `/System` volume — its signed `AppInfo` + `Run` rxe beside
+its `Help/` tree, at the bundle-form paths PID 1 `init` and the shell name
+— but the `spawn` syscall still dispatches the kernel-baked rxe *copies*
 (`kernel/rustos-kernel/src/spawn_paths.rs` + `spawn_layout.rs`'s
-`include!`-ed `*_rxe.rs` / `SPAWN_PROGRAMS`), and only each bundle's `Help/`
-tree is planted on `/System/Apps/<cmd>.app/`. Browsing `ls.app/` therefore
-shows only `Help/`, no `Run`/`AppInfo` touch the volume, and the signed
-verification path is bypassed — all forbidden by the amended §16.5/§16.2 (an
-app *is* its bundle directory; a service is an app; app code is never baked
-into the kernel/image builder). Maintainer decision 2026-07-04: no staged
+`include!`-ed `*_rxe.rs` / `SPAWN_PROGRAMS`) rather than loading and
+verifying the on-disk bundles, so the signed verification path is still
+bypassed at launch — forbidden by the amended §16.5/§16.2 (an app *is* its
+bundle directory; a service is an app; app code is never baked into the
+kernel/image builder). Maintainer decision 2026-07-04: no staged
 compatibility — the full correct end state, in dependency order, each
 increment landing complete and green:
 
@@ -3619,10 +3620,21 @@ increment landing complete and green:
    capability-id body swappable behind a valid signature — the signed
    message is now the header prefix ‖ body, enforced in `appmgr` with a
    regression test.
-3. **Plant the bundles** — `tools/mkimage` and the QEMU image fixture plant
-   each discovered bundle's signed `AppInfo` + `Run` beside its `Help/`
-   (`/System/Apps/<cmd>.app/`, `/System/Services/<name>.app/`); PID 1
-   `init`'s startup config moves to the `<name>.app/Run` service paths.
+3. **Plant the bundles** — **done**: `tools/xtask`'s `image_apps` pipeline
+   (over the shared `pie_build` PIE cross-compile recipe `image_drivers`
+   also uses) discovers every `AppInfo.toml`, builds each program's `Run`
+   rxe, and composes its signed `AppInfo` whose content hash covers the
+   exact `Run` + `Help/` bytes the planters lay down; `tools/mkimage`
+   (`build_rpi_image`/`build_system_partition`) and the QEMU whole-disk
+   fixture (`build_image_with_contents`/`build_image_with_apps`, /System
+   grown to 32 MiB) plant each bundle's `AppInfo` + `Run` beside its
+   `Help/` (`/System/Apps/<cmd>.app/`, `/System/Services/<name>.app/`) —
+   the Pi image and every `EncryptedRootDisk` vertical carry complete
+   self-contained bundles, composed once per xtask process and memoised.
+   The service paths are bundle-form everywhere: PID 1 `init`'s startup
+   config and the kernel registry name
+   `/System/Services/{login,devmgr,sysinfod}.app/Run`, spelled from the
+   shared `rustos_abi::SYSTEM_SERVICE_STORE` (drift-tested).
 4. **Kernel disk-backed spawn** — the bundle-verification engine is hoisted
    out of `userland/system/appmgr` into a `lib/*` crate the kernel may link
    (§17.4), `appmgr` re-exporting it; `spawn` resolves a store-bundle path

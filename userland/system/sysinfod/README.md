@@ -2,7 +2,7 @@
 
 Stage 6 deliverable (`AGENTS.md` §16.6). The user-space service that
 answers the `sysinfo-v1` API defined in `rustos_abi::sysinfo`. Installed
-to `/System/Services/sysinfod`.
+to `/System/Services/sysinfod.app/Run`.
 
 RustOS has **no `/proc` and no `/sys`**. Every piece of live system
 information those trees would have exposed is served here, through typed,

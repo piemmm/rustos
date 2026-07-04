@@ -3005,7 +3005,7 @@ mod tests {
 
     #[test]
     fn spawn_at_marshals_the_console_index() {
-        let path = *b"/System/Services/login";
+        let path = *b"/System/Services/login.app/Run";
         let (number, args) = capture(8, || {
             assert_eq!(spawn_at(&path, 1), 8);
         });

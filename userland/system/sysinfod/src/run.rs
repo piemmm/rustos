@@ -1,5 +1,5 @@
 //! The `Run` entry-point binary of the System Information service, installed
-//! at `/System/Services/sysinfod` — the long-running user-space service PID 1
+//! at `/System/Services/sysinfod.app/Run` — the long-running user-space service PID 1
 //! `init` launches to answer the `sysinfo` API (`AGENTS.md` §16.6).
 //!
 //! This is a **pure-Rust** program: RustOS is Rust-only, so it links the Rust

@@ -3,7 +3,7 @@
 //!
 //! RustOS has no `/proc` and no `/sys`. Every piece of live system
 //! information is exposed through the typed, versioned, capability-checked
-//! `sysinfo-v1` API served by `/System/Services/sysinfod`. `sysinfo` is the
+//! `sysinfo-v1` API served by `/System/Services/sysinfod.app/Run`. `sysinfo` is the
 //! single command-line tool that exposes that same API to the terminal: it
 //! does **not** open files in a virtual filesystem, and it has no privileged
 //! path that bypasses the capability check.

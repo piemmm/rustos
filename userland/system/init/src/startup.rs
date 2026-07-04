@@ -69,9 +69,9 @@ pub const DEFAULT_CONFIG: &str = "\
 # first so the introspection endpoint (`AGENTS.md` §16.6) is published before
 # any client queries it.
 console
-service /System/Services/sysinfod
-service /System/Services/devmgr
-session /System/Services/login
+service /System/Services/sysinfod.app/Run
+service /System/Services/devmgr.app/Run
+session /System/Services/login.app/Run
 ";
 
 /// The first line `init` writes to the console once it reaches user mode.
@@ -255,12 +255,17 @@ mod tests {
     #[test]
     fn default_config_parses_to_console_login_session_and_the_startup_services() {
         let config = StartupConfig::parse(DEFAULT_CONFIG).expect("default config parses");
-        assert_eq!(config.session(), "/System/Services/login");
+        // Every service is a `<name>.app` bundle in the service store (a
+        // service is an app), so the config names each bundle's `Run` binary.
+        assert_eq!(config.session(), "/System/Services/login.app/Run");
         // `sysinfod` is launched before `devmgr` so the introspection endpoint
         // is published before any client queries it.
         assert_eq!(
             config.services(),
-            &["/System/Services/sysinfod", "/System/Services/devmgr"],
+            &[
+                "/System/Services/sysinfod.app/Run",
+                "/System/Services/devmgr.app/Run",
+            ],
         );
     }
 
@@ -273,12 +278,12 @@ mod tests {
     #[test]
     fn service_directives_are_collected_in_declaration_order() {
         let config = StartupConfig::parse(
-            "console\nservice /System/Services/devmgr\nservice /System/Services/netd\nsession /x\n",
+            "console\nservice /System/Services/devmgr.app/Run\nservice /System/Services/netd\nsession /x\n",
         )
         .expect("config parses");
         assert_eq!(
             config.services(),
-            &["/System/Services/devmgr", "/System/Services/netd"],
+            &["/System/Services/devmgr.app/Run", "/System/Services/netd"],
         );
     }
 

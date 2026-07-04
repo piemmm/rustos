@@ -8,7 +8,7 @@ read live system state.
 
 RustOS has no `/proc` and no `/sys`; the `sysinfo` umbrella command, the
 POSIX-named `ps`, and the `mount` listing all speak the typed API served by
-`/System/Services/sysinfod`. They would otherwise duplicate the request
+`/System/Services/sysinfod.app/Run`. They would otherwise duplicate the request
 envelope, the page walk, and the row render, so that shape lives here in one
 place (`AGENTS.md` §2.2). Sibling userland crates may not depend on each
 other (`AGENTS.md` §17.4); this `lib/*` crate is the permitted shared home.
@@ -38,7 +38,7 @@ the `sysinfo` and `ps` `Run` binaries link (and the `top` TUI when its `Run`
 binary lands):
 
 - `IpcTransport` — a `Transport` that carries a framed `sysinfo-v1` request to
-  `/System/Services/sysinfod` over the well-known `SYSINFO_ENDPOINT` IPC call
+  `/System/Services/sysinfod.app/Run` over the well-known `SYSINFO_ENDPOINT` IPC call
   (`rustos_rt::ipc_call`) and unwraps the reply frame (`decode_reply`),
   surfacing a per-query refusal as the exact `Errno`.
 - `RtOutput` — an `Output` that writes each rendered line to the inherited

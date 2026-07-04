@@ -1,7 +1,7 @@
 //! `plans/PI.md` X3b + X4-follow-on QEMU integration test (x86_64 port): boot
 //! the production `rustos-kernel` pipeline, spawn PID 1 (`init`) into **ring
 //! 3**, and prove `init` launches the embedded login session
-//! (`/System/Services/login`, `plans/PI.md` P11) through the runtime `spawn`
+//! (`/System/Services/login.app/Run`, `plans/PI.md` P11) through the runtime `spawn`
 //! producer (a **hardware-isolated, concurrently-runnable** process under
 //! the live scheduler — X3b) **and** then runs the full
 //! `wait`→reap→relaunch **supervision cycle** (X4 follow-on) — the cross-port
@@ -23,14 +23,14 @@
 //!
 //! 1. Writes its gated banner to fd 1 (`stream_write` over the COM1 backing).
 //! 2. Launches the configured long-running services first — the device
-//!    manager `/System/Services/devmgr` — with an
+//!    manager `/System/Services/devmgr.app/Run` — with an
 //!    (audited) `spawn`, building it a fresh PML4 (emitting `ProcessSpawned`,
 //!    #2). `devmgr` reads the discovered hardware tree (unaudited
 //!    `hw_tree_read`) and parks in `hw_tree_wait` (unaudited), so it adds
 //!    exactly one `ProcessSpawned` and one audited `spawn`, then contributes
 //!    no further records.
 //! 3. Issues the (audited) `spawn` syscall to launch
-//!    `/System/Services/login` (P11). The X3b producer resolves it against
+//!    `/System/Services/login.app/Run` (P11). The X3b producer resolves it against
 //!    the registry and builds login a *fresh, hardware-isolated* PML4
 //!    (emitting `ProcessSpawned`, #3), admits it **Ready**, and returns its
 //!    PID — the X3b deliverable.

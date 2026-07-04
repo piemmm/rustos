@@ -2,7 +2,7 @@
 
 Stage 6 deliverable (`AGENTS.md` §3 `userland/apps/`). `ps` lists running
 processes through the typed, versioned, capability-checked System
-Information API (`sysinfo-v1`) served by `/System/Services/sysinfod`
+Information API (`sysinfo-v1`) served by `/System/Services/sysinfod.app/Run`
 (`AGENTS.md` §16.6). RustOS has no `/proc` and no `/sys`: `ps` issues the
 API's process-list queries and has no privileged path that bypasses the
 capability check. By default it lists the caller's own processes; `-e`/`-A`

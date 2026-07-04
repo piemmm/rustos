@@ -24,7 +24,7 @@ program = ["dep:rustos-rt"]
 
 # The package is both the `rustos-devmgr` match-policy library (above) and the
 # `Run` entry-point binary of the device-manager service installed at
-# `/System/Services/devmgr` (`AGENTS.md` §16.2, §18.3) — the long-running
+# `/System/Services/devmgr.app/Run` (`AGENTS.md` §16.2, §18.3) — the long-running
 # user-space service PID 1 `init` launches to observe the discovered hardware
 # tree and react to it. The binary is a freestanding pure-Rust program on the
 # native Tier-1 targets and an inert host stub elsewhere (see `src/run.rs` /

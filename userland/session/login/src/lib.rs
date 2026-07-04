@@ -5,7 +5,7 @@
 //! graphical session only when a display driver and the window manager are
 //! present; when they are not, the graphical option is simply hidden — never
 //! crashed, never errored. Installed to
-//! `/System/Services/login`.
+//! `/System/Services/login.app/Run`.
 //!
 //! # What this crate is
 //!
@@ -34,7 +34,7 @@
 //! terminal, verifying a credential, launching a session, and running an
 //! elevated command — are the injected [`Prompt`], [`Authenticator`],
 //! [`SessionLauncher`], and [`ElevateLauncher`] seams. The
-//! binary that ships as `/System/Services/login` wires the real kernel- and
+//! binary that ships as `/System/Services/login.app/Run` wires the real kernel- and
 //! `kernel/sec`-backed implementations; tests wire in-memory fixtures. This
 //! mirrors `init`'s `Spawner`/`Reaper` design and keeps the policy logic
 //! independent of kernel plumbing and exhaustively testable.

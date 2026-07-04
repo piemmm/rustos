@@ -5,7 +5,7 @@ authenticates a user against `kernel/sec` and launches a session on their
 behalf. Login **always starts in text mode** and offers a graphical
 session only when a display driver and the window manager are present;
 otherwise the graphical option is hidden — never crashed, never errored
-(`AGENTS.md` §10). The installed binary lives at `/System/Services/login`.
+(`AGENTS.md` §10). The installed binary lives at `/System/Services/login.app/Run`.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). It

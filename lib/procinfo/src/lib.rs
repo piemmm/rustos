@@ -2,7 +2,7 @@
 //!
 //! RustOS has no `/proc` and no `/sys`: every piece of live system
 //! information is read through the typed, versioned, capability-checked
-//! `sysinfo-v1` API served by `/System/Services/sysinfod`. Several terminal tools speak that API — the umbrella `sysinfo`
+//! `sysinfo-v1` API served by `/System/Services/sysinfod.app/Run`. Several terminal tools speak that API — the umbrella `sysinfo`
 //! command, the POSIX-named `ps`, and the `mount` listing — and they share
 //! the same request envelope, the same capability-aware call mapping, and
 //! the same paged-list walk and row rendering. Sibling userland crates may
