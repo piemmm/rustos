@@ -302,9 +302,10 @@ mod program {
             let result = Self::read_line_raw(buf);
             // Restoring echo is best-effort — it cannot compromise the
             // secret already read. The un-echoed Return key advanced no
-            // line, so advance one ourselves.
+            // line, so advance one ourselves with a plain line feed, which
+            // the console line discipline cooks to CR-LF.
             let _ = rustos_rt::set_echo(true);
-            let _ = Stdout.write_all(b"\r\n");
+            let _ = Stdout.write_all(b"\n");
             result
         }
 

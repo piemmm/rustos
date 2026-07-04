@@ -1955,8 +1955,11 @@ where
             None => return Err(Errno::BadAddress),
         }
 
-        // Hand the copied bytes to the descriptor's console device.
-        device.write.write(&payload).map(|n| n as u64)
+        // Hand the copied bytes to the descriptor's console device, cooking
+        // output newlines (LF -> CR LF) through the console line discipline
+        // so a program that writes a bare `\n` has the cursor return to
+        // column zero as it advances a line, on every console and arch.
+        device.write_output(&payload).map(|n| n as u64)
     }
 
     fn stream_read(
@@ -7320,8 +7323,10 @@ mod tests {
         )]))
     }
 
-    /// `stream_write` copies the caller's bytes in and hands the exact
-    /// buffer to the installed console, returning the byte count.
+    /// `stream_write` copies the caller's bytes in and hands them to the
+    /// installed console cooked through the line discipline (a trailing
+    /// `\n` reaches the device as `\r\n`), returning the count of *input*
+    /// bytes consumed — not the larger device count the newline expanded to.
     #[test]
     fn console_write_copies_in_and_emits_to_installed_console() {
         install_trace_filter();
@@ -7359,7 +7364,9 @@ mod tests {
             h.stream_write(&ctx, STDOUT, 0x1000, banner.len()),
             Ok(banner.len() as u64)
         );
-        assert_eq!(console.written.lock().as_slice(), banner);
+        // The trailing line feed was cooked to CR-LF on the way to the
+        // device, while the reported count stays the input length.
+        assert_eq!(console.written.lock().as_slice(), b"RustOS init: hello\r\n");
     }
 
     /// With no console installed the handler holds `NULL_CONSOLE` and

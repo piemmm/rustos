@@ -153,9 +153,11 @@ mod program {
             // failure to re-enable cannot compromise the secret already
             // read, so it is best-effort. The Return key the user pressed
             // was not echoed (echo was off), so advance the display a line
-            // ourselves to match the un-suppressed prompts.
+            // ourselves to match the un-suppressed prompts — a plain line
+            // feed, which the console line discipline cooks to CR-LF so the
+            // cursor returns to column zero.
             let _ = rustos_rt::set_echo(true);
-            let _ = Stdout.write_all(b"\r\n");
+            let _ = Stdout.write_all(b"\n");
             result
         }
     }

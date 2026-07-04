@@ -638,6 +638,85 @@ impl ConsoleDevice {
         }
         flush_run(self.write, &run, &mut run_len);
     }
+
+    /// Write program `bytes` to the console output, cooking output line
+    /// feeds: a bare line feed (`LF`) is emitted as the `CR LF` pair (the
+    /// ONLCR output translation an interactive terminal applies) so the
+    /// cursor returns to column zero as it advances a line, instead of
+    /// dropping a line beneath the current column — the "staircase" a raw
+    /// `LF` produces on a terminal whose line feed is a pure line feed. A
+    /// carriage return passes through unchanged.
+    ///
+    /// Newline cooking is the output half of the console line discipline,
+    /// the counterpart to the input [`Self::echo_bytes`] half (which cooks
+    /// the Return key into `CR LF` the same way), so every program that
+    /// writes `\n` to its standard output — the shell, the login prompts,
+    /// every tool — renders correctly through the one console on every
+    /// architecture, without each program emitting `\r\n` itself.
+    ///
+    /// Returns the number of **input** bytes consumed, which is not the
+    /// count written to the device when a line feed expanded to two bytes:
+    /// a short device write maps back to a short `stream_write` the caller
+    /// loops on, preserving the POSIX short-write contract. A device error
+    /// before any byte is consumed surfaces as `Err`; once some input has
+    /// been consumed, a later device stall reports the partial count so no
+    /// byte is lost or double-written on retry.
+    ///
+    /// # Errors
+    ///
+    /// Returns the backing device's [`Errno`] when it rejects the first
+    /// byte (an inert [`NullConsole`] returns [`Errno::NotImplemented`]).
+    pub fn write_output(&self, bytes: &[u8]) -> Result<usize, Errno> {
+        let mut consumed = 0usize;
+        let mut index = 0usize;
+        while index < bytes.len() {
+            // Emit the next run of pass-through bytes (everything up to the
+            // next line feed) in one device write, so ordinary text still
+            // costs one round-trip per chunk.
+            let run_start = index;
+            while index < bytes.len() && bytes[index] != control::LF {
+                index += 1;
+            }
+            if index > run_start {
+                let run = &bytes[run_start..index];
+                match self.write.write(run) {
+                    Ok(0) => return Ok(consumed),
+                    Ok(written) => {
+                        let written = written.min(run.len());
+                        consumed += written;
+                        if written < run.len() {
+                            return Ok(consumed);
+                        }
+                    }
+                    Err(err) if consumed == 0 => return Err(err),
+                    Err(_) => return Ok(consumed),
+                }
+            }
+            // A line feed becomes `CR LF`. The input byte is counted
+            // consumed only once both bytes have reached the device, so a
+            // retried `stream_write` never re-emits a half-written pair.
+            if index < bytes.len() {
+                match self.write.write(b"\r\n") {
+                    Ok(0) => return Ok(consumed),
+                    Ok(written) if written >= 2 => {
+                        consumed += 1;
+                        index += 1;
+                    }
+                    Ok(written) => {
+                        if write_all_bytes(self.write, &b"\r\n"[written.min(2)..]) {
+                            consumed += 1;
+                            index += 1;
+                        } else {
+                            return Ok(consumed);
+                        }
+                    }
+                    Err(err) if consumed == 0 => return Err(err),
+                    Err(_) => return Ok(consumed),
+                }
+            }
+        }
+        Ok(consumed)
+    }
 }
 
 /// Write the accumulated printable run (if any) and reset its length.
@@ -650,16 +729,23 @@ fn flush_run(write: &dyn ConsoleWrite, run: &[u8], run_len: &mut usize) {
 }
 
 /// Write every byte of `bytes` to the console output, looping over short
-/// writes and stopping on a closed/erroring device (never spin).
-/// Best-effort: echo and secret feedback are cosmetic, so a device error is
-/// swallowed rather than failing the read the user asked for.
-fn write_best_effort(write: &dyn ConsoleWrite, mut bytes: &[u8]) {
+/// writes and stopping on a closed/erroring device (never spin). Returns
+/// whether every byte reached the device.
+fn write_all_bytes(write: &dyn ConsoleWrite, mut bytes: &[u8]) -> bool {
     while !bytes.is_empty() {
         match write.write(bytes) {
-            Ok(0) | Err(_) => break,
+            Ok(0) | Err(_) => return false,
             Ok(n) => bytes = &bytes[n.min(bytes.len())..],
         }
     }
+    true
+}
+
+/// Write every byte of `bytes` to the console output, best-effort: echo and
+/// secret feedback are cosmetic, so a short write or device error is
+/// swallowed rather than failing the read the user asked for.
+fn write_best_effort(write: &dyn ConsoleWrite, bytes: &[u8]) {
+    let _ = write_all_bytes(write, bytes);
 }
 
 /// The secret-entry activity feedback of one console: the kernel-side host
@@ -1140,6 +1226,99 @@ mod tests {
 
     fn echo_device(write: &'static EchoRecorder) -> ConsoleDevice {
         ConsoleDevice::new(write, &NULL_CONSOLE_READ)
+    }
+
+    /// A `ConsoleWrite` that accepts at most `cap` bytes per call (a device
+    /// that short-writes), recording what it took, so the output cooking
+    /// can be tested against a device that does not drain a whole buffer at
+    /// once.
+    struct ShortConsole {
+        cap: usize,
+        written: std::sync::Mutex<std::vec::Vec<u8>>,
+    }
+
+    impl ShortConsole {
+        const fn new(cap: usize) -> Self {
+            Self {
+                cap,
+                written: std::sync::Mutex::new(std::vec::Vec::new()),
+            }
+        }
+
+        fn taken(&self) -> std::vec::Vec<u8> {
+            self.written.lock().unwrap().clone()
+        }
+    }
+
+    impl ConsoleWrite for ShortConsole {
+        fn write(&self, bytes: &[u8]) -> Result<usize, Errno> {
+            let take = bytes.len().min(self.cap);
+            self.written
+                .lock()
+                .unwrap()
+                .extend_from_slice(&bytes[..take]);
+            Ok(take)
+        }
+    }
+
+    #[test]
+    fn write_output_cooks_lf_to_crlf() {
+        static W: EchoRecorder = EchoRecorder::new();
+        let device = echo_device(&W);
+        // A bare line feed reaches the device as CR-LF so the cursor
+        // returns to column zero as it advances a line; the reported count
+        // is the *input* length, not the expanded device length.
+        assert_eq!(device.write_output(b"ab\ncd\n"), Ok(6));
+        assert_eq!(W.taken(), b"ab\r\ncd\r\n");
+    }
+
+    #[test]
+    fn write_output_passes_a_bare_cr_through_unchanged() {
+        static W: EchoRecorder = EchoRecorder::new();
+        let device = echo_device(&W);
+        // Only the line feed is cooked; a carriage return with no following
+        // line feed passes through verbatim (it is not swallowed or paired).
+        assert_eq!(device.write_output(b"x\ry"), Ok(3));
+        assert_eq!(W.taken(), b"x\ry");
+    }
+
+    #[test]
+    fn write_output_cooks_every_lf_even_after_a_cr() {
+        static W: EchoRecorder = EchoRecorder::new();
+        let device = echo_device(&W);
+        // ONLCR maps every line feed to CR-LF unconditionally, so an
+        // already-`\r\n`-terminated write becomes `\r\r\n`. The extra
+        // carriage return is harmless (returning to column zero is
+        // idempotent), which is why producers can simply emit `\n`.
+        assert_eq!(device.write_output(b"x\r\ny"), Ok(4));
+        assert_eq!(W.taken(), b"x\r\r\ny");
+    }
+
+    #[test]
+    fn write_output_cooks_a_leading_and_only_lf() {
+        static W: EchoRecorder = EchoRecorder::new();
+        let device = echo_device(&W);
+        assert_eq!(device.write_output(b"\n"), Ok(1));
+        assert_eq!(W.taken(), b"\r\n");
+    }
+
+    #[test]
+    fn write_output_on_an_inert_device_fails_closed() {
+        // No byte can be written, so the first attempt surfaces the
+        // device's error rather than silently reporting progress.
+        let device = ConsoleDevice::new(&NULL_CONSOLE, &NULL_CONSOLE_READ);
+        assert_eq!(device.write_output(b"hi\n"), Err(Errno::NotImplemented));
+    }
+
+    #[test]
+    fn write_output_maps_a_short_device_write_back_to_input_bytes() {
+        // A device that accepts one byte per call: the run "ab" writes only
+        // "a", so exactly one input byte is reported consumed and the caller
+        // loops for the rest — the newline is never half-emitted.
+        static W: ShortConsole = ShortConsole::new(1);
+        let device = ConsoleDevice::new(&W, &NULL_CONSOLE_READ);
+        assert_eq!(device.write_output(b"ab\n"), Ok(1));
+        assert_eq!(W.taken(), b"a");
     }
 
     #[test]
