@@ -1,0 +1,11 @@
+# Signed-AppInfo manifest source for the `ps` command app
+# (plans/APPS.md deliverable 8). Discovered by the build's app-bundle
+# composer; the capability list is the bundle's request, intersected with
+# the launching user's grants. CAP_CONSOLE_WRITE alone: the listing goes
+# to fd 1 (diagnostics fd 2), and per-query authority is enforced by
+# sysinfod against this process's kernel-attested origin.
+id = "os.rustos.ps"
+name = "ps"
+version = "0.1.0"
+kind = "command"
+capabilities = ["CAP_CONSOLE_WRITE"]

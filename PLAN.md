@@ -3551,10 +3551,11 @@ bundle; `NotFound` moves on, any other refusal final), renders through
 geometry-attested console and streams otherwise, and emits the
 `help.locale_fallback` `stdinfo` `context` record on a locale fallback.
 It is registered as `/System/Apps/man.app/Run` (manifest: console pair +
-`CAP_FS_ACCESS`), ships its own six-locale `Help/` tree (embedded in
-`rustos_man::help`, planted onto the read-only `/System` volume's `Apps/`
-store by `tools/mkimage` and the QEMU image fixture — the system volume
-skeleton now carries `Apps/` per §16.2), and the session-ceiling vertical
+`CAP_FS_ACCESS`), ships its own six-locale `Help/` tree (authored on disk
+in the bundle, discovered by `tools/syshelp`, and planted onto the
+read-only `/System` volume's `Apps/` store by `tools/mkimage` and the QEMU
+image fixture — the system volume skeleton carries `Apps/` per §16.2), and
+the session-ceiling vertical
 types `man man` end to end. The generic argv/stderr-line helpers were
 hoisted into `lib/rt` (`args`, `io::write_stderr_line`) and the `-errno`
 decode into `rustos_abi::Errno::from_syscall`, each now one definition.
@@ -3570,23 +3571,62 @@ existing command apps; and wider `stdinfo` adoption in command apps
 share **data**, not dynamically-linked code.
 
 **Self-contained bundles — migrate off the kernel-baked spawn registry
-(charter-blocking, staged; §16.5 amended 2026-07-04).** The command apps'
-`Run` rxe is currently compiled into the kernel image and dispatched by a
-byte-exact in-kernel path lookup (`kernel/rustos-kernel/src/spawn_paths.rs`
-+ `spawn_layout.rs`'s `include!`-ed `*_rxe.rs` / `SPAWN_PROGRAMS`), and only
-each bundle's `Help/` tree is planted on `/System/Apps/<cmd>.app/`. Browsing
-`ls.app/` therefore shows only `Help/`, the `Run`/`AppInfo` never touch the
-volume, and the `appmgr` signature + capability + interface-hash path is
-bypassed — all now forbidden by the amended §16.5 (an app *is* its bundle
-directory; app code is never baked into the kernel/image builder). The
-migration: `tools/mkimage` (via a `tools/syshelp`-style discovery pass over
-the app crates, never a per-bundle list, §2.2) plants each command app's
-signed `Run` and `AppInfo` onto the read-only `/System/Apps` store beside its
-`Help/`; the store is discovered by scanning those on-disk bundles; `spawn`/
-`appmgr` load and verify `Run` from disk; and the embedded `SPAWN_PROGRAMS`
-registry, the `*_rxe.rs` `include!`s, and `spawn_paths.rs` are deleted (§2.14).
-The stale "embedded in `rustos_man::help`" description above is superseded by
-the same on-disk-bundle rule and is folded into this migration.
+(charter-blocking, in progress; §16.5 amended 2026-07-04, §16.2
+services-are-apps amended 2026-07-04).** Every program's `Run` rxe (command
+apps *and* the `login`/`devmgr`/`sysinfod` services) is today compiled into
+the kernel image and dispatched by a byte-exact in-kernel path lookup
+(`kernel/rustos-kernel/src/spawn_paths.rs` + `spawn_layout.rs`'s
+`include!`-ed `*_rxe.rs` / `SPAWN_PROGRAMS`), and only each bundle's `Help/`
+tree is planted on `/System/Apps/<cmd>.app/`. Browsing `ls.app/` therefore
+shows only `Help/`, no `Run`/`AppInfo` touch the volume, and the signed
+verification path is bypassed — all forbidden by the amended §16.5/§16.2 (an
+app *is* its bundle directory; a service is an app; app code is never baked
+into the kernel/image builder). Maintainer decision 2026-07-04: no staged
+compatibility — the full correct end state, in dependency order, each
+increment landing complete and green:
+
+1. **Canonical bundle content hash** — one framing definition in `lib/abi`
+   (`appinfo`) of the digest over every file the `AppInfo` signature covers
+   (everything in the bundle except `AppInfo` itself, path-sorted,
+   length-framed), shared by the build-time composer and every
+   `BundleStore::content_hash` implementation (§2.2) — **done**:
+   `rustos_abi::digest_bundle_contents` + `BundleFileDigest`, host-tested.
+2. **Per-bundle manifest source + discovery + signing** — each app/service
+   crate authors its own `AppInfo.toml` (id, name, version, kind
+   command/service, capability request); a discovery walk over the userland
+   crate roots (never a per-bundle list, §2.2/§16.5) finds them; the shared
+   host composer (`rustos-itest-harness::app_image`) composes and signs the
+   wire `AppInfo` under `SYSTEM_APP_SIGNING_SEED` (`build_support.rs`, a
+   trust domain distinct from the driver-signing seed) — **done**:
+   `AppInfo.toml` in all ten program crates,
+   `app_image::{discover_app_manifests, compose_signed_appinfo}` with a
+   fail-closed line-based grammar, unit tests verifying a composed
+   manifest against the exact `lib/crypto` verification contract (and that
+   a tampered capability body breaks it), and a `rustos-kernel` drift test
+   pinning every `AppInfo.toml` against `program_manifests.rs` until the
+   registry dies. Landing this surfaced and fixed a real defect: the
+   `AppInfo` signature covered only the fixed header, leaving the
+   capability-id body swappable behind a valid signature — the signed
+   message is now the header prefix ‖ body, enforced in `appmgr` with a
+   regression test.
+3. **Plant the bundles** — `tools/mkimage` and the QEMU image fixture plant
+   each discovered bundle's signed `AppInfo` + `Run` beside its `Help/`
+   (`/System/Apps/<cmd>.app/`, `/System/Services/<name>.app/`); PID 1
+   `init`'s startup config moves to the `<name>.app/Run` service paths.
+4. **Kernel disk-backed spawn** — the bundle-verification engine is hoisted
+   out of `userland/system/appmgr` into a `lib/*` crate the kernel may link
+   (§17.4), `appmgr` re-exporting it; `spawn` resolves a store-bundle path
+   through the mounted VFS, verifies (signature against the kernel's
+   embedded app trust anchor, content hash, ABI/syscall hash), derives the
+   child's capability request from the on-disk manifest, and spawns; the
+   embedded command-app/service rows leave the aarch64 production boot.
+5. **Per-port storage floor, then delete the registry** — x86_64 and riscv64
+   gain their bootstrap-floor disk, image layout, and read-only `/System`
+   mount (their staged `tools/mkimage` builders, §12), after which
+   `SPAWN_PROGRAMS`, the `*_rxe.rs` `include!`s (all but PID 1 `init`),
+   `spawn_paths.rs`, and `program_manifests.rs` are deleted (§2.14). Until
+   that lands, the embedded registry is those ports' explicitly-justified
+   §18.6 boot floor — the only reason it still exists.
 
 ---
 
@@ -3767,6 +3807,16 @@ of how much code was produced.
 
 Amendments to `AGENTS.md` (the binding charter) are logged here so an agent
 can see *why* a rule exists without diffing the charter's history.
+
+- **2026-07-04 — Services are apps.** Amended §16.2 (maintainer decision,
+  `plans/APPS.md` deliverable 8): a long-running system service under
+  `/System/Services/` is not a special program class — it ships as the same
+  self-contained, signed `<name>.app` bundle §16.5 binds every app to,
+  discovered from disk and loaded through the identical signature +
+  capability + interface-hash gate. A second, weaker "service" packaging
+  format would be a second trust path (§2.2); the only compiled-in program
+  is PID 1 `init`, which the boot path enters before any volume is mounted
+  (the §18.6 boot floor).
 
 - **2026-07-04 — App bundles are self-contained; no app code baked into the
   kernel.** Amended §16.5 (and the §16.2 `/System/Apps` note) after command

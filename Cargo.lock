@@ -1016,6 +1016,7 @@ version = "0.0.0"
 dependencies = [
  "ed25519-dalek",
  "rustos-abi",
+ "rustos-crypto",
  "rustos-fdt",
 ]
 

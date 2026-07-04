@@ -569,23 +569,31 @@ both landed; `plans/SHELL.md` command execution):
    advisory-only, never changing exit status.
 
 8. **Self-contained on-disk bundles — retire the kernel-baked spawn
-   registry (charter-blocking; §16.5 amended, self-containment).** Every
-   command app's `Run` rxe is today compiled into the kernel image and
+   registry (charter-blocking, in progress; §16.5 self-containment and
+   §16.2 services-are-apps amended).** Every program's `Run` rxe — the
+   command apps *and* the `login`/`devmgr`/`sysinfod` services (a service
+   is an app, §16.2) — is today compiled into the kernel image and
    dispatched by a byte-exact in-kernel path lookup
    (`kernel/rustos-kernel/src/spawn_paths.rs` + `spawn_layout.rs`'s
    `include!`-ed `*_rxe.rs` and `SPAWN_PROGRAMS`), while only each bundle's
    `Help/` tree is planted on disk — so `/System/Apps/ls.app/` shows only
    `Help/`, no `Run`/`AppInfo` exist on the volume, and the `appmgr`
    signature + capability + interface-hash path is bypassed. The amended
-   §16.5 forbids this: an app *is* its bundle directory and app code is
-   never baked into the kernel/image builder. Migration: `tools/mkimage`
-   (via a `tools/syshelp`-style discovery pass over the app crates, never a
-   per-bundle list, §2.2) plants each command app's signed `Run` and
-   `AppInfo` onto the read-only `/System/Apps` store beside its `Help/`; the
-   store is discovered by scanning those on-disk bundles (§18.3/§18.6-style,
-   for apps); `spawn`/`appmgr` load and verify `Run` from disk; and the
-   embedded `SPAWN_PROGRAMS` registry, the `*_rxe.rs` `include!`s, and
-   `spawn_paths.rs` are deleted (§2.14). All prior deliverables' references
+   §16.5/§16.2 forbid this. The maintainer decided (2026-07-04) against any
+   staged compatibility: the full correct end state lands in dependency
+   order — the binding increment list, with per-increment status, lives in
+   `PLAN.md` ("Self-contained bundles"): (1) the canonical bundle
+   content-hash framing in `lib/abi`; (2) per-crate `AppInfo.toml` manifest
+   sources + the discovery walk (never a per-bundle list) + the shared
+   composer signing under the dedicated `SYSTEM_APP_SIGNING_SEED`; (3)
+   `tools/mkimage` and the QEMU fixture plant each discovered bundle's
+   signed `AppInfo` + `Run` beside its `Help/` (command apps under
+   `/System/Apps/`, services under `/System/Services/<name>.app/`); (4)
+   the verification engine hoisted from `appmgr` into a `lib/*` crate and
+   `spawn` loading + verifying store bundles from the mounted volume; (5)
+   the x86_64/riscv64 storage floor, then deletion of `SPAWN_PROGRAMS`,
+   the `*_rxe.rs` `include!`s (all but PID 1 `init`), `spawn_paths.rs`,
+   and `program_manifests.rs` (§2.14). All prior deliverables' references
    to `/System/Apps/<cmd>.app/Run` being served from `spawn_paths.rs` are
    superseded by this on-disk-bundle model.
 
@@ -610,6 +618,11 @@ Required `AGENTS.md` amendments (each with a one-line rationale in PLAN.md's
   discovers the trees (`tools/syshelp`, added to §3); the per-app embedded
   `help.rs` copies and the mkimage/fixture lists were deleted (§2.2, §2.14).
   Rationale logged in `PLAN.md` "Charter Amendments".
+- **§16.2 (services are apps)** — **done**: a `/System/Services/` service
+  ships as the same self-contained, signed `<name>.app` bundle as any app,
+  discovered from disk and loaded through the identical verification gate;
+  only PID 1 `init` is the compiled-in boot floor. Rationale logged in
+  `PLAN.md` "Charter Amendments".
 - **§16.5 (self-containment) / §16.2 (`/System/Apps`)** — **done** (charter);
   **code migration open (deliverable 8).** Added the binding rule that an
   app *is* its `<Name>.app/` bundle directory: `Run`, `Code/`, `AppInfo`,

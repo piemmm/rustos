@@ -309,4 +309,45 @@ mod tests {
         }
         assert!(!set(USERS_TOOL_MANIFEST).contains(CapabilityId::FS_ACCESS));
     }
+
+    /// Every program crate's on-disk `AppInfo.toml` manifest source
+    /// requests exactly the capability set this registry embeds, and the
+    /// two program inventories are identical (`plans/APPS.md` deliverable
+    /// 8). The on-disk sources are the migration's single authorship
+    /// point; this pin guarantees the still-embedded registry cannot
+    /// silently diverge from them before it is deleted.
+    #[test]
+    fn appinfo_sources_match_the_embedded_registry() {
+        use rustos_itest_harness::app_image::{discover_app_manifests, AppKind};
+
+        let userland = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../userland");
+        let discovered = discover_app_manifests(&userland).expect("discovery walks");
+
+        // name -> (kind, embedded capability list). PID 1 `init` is
+        // deliberately absent: it is the boot floor the boot path enters
+        // directly, never a store bundle.
+        let embedded: &[(&str, AppKind, &[CapabilityId])] = &[
+            ("devmgr", AppKind::Service, DEVMGR_MANIFEST),
+            ("elsh", AppKind::Command, SESSION_BASELINE),
+            ("login", AppKind::Service, LOGIN_MANIFEST),
+            ("ls", AppKind::Command, LS_MANIFEST),
+            ("man", AppKind::Command, MAN_MANIFEST),
+            ("ps", AppKind::Command, PS_MANIFEST),
+            ("sysinfo", AppKind::Command, SYSINFO_MANIFEST),
+            ("sysinfod", AppKind::Service, SYSINFOD_MANIFEST),
+            ("top", AppKind::Command, TOP_MANIFEST),
+            ("users", AppKind::Command, USERS_TOOL_MANIFEST),
+        ];
+
+        assert_eq!(discovered.len(), embedded.len());
+        for ((name, kind, caps), found) in embedded.iter().zip(&discovered) {
+            assert_eq!(found.manifest.name, *name, "inventory drift");
+            assert_eq!(found.manifest.kind, *kind, "{name}: store drift");
+            assert_eq!(
+                set(&found.manifest.capabilities),
+                set(caps),
+                "{name}: capability drift between AppInfo.toml and the registry"
+            );
+        }
+    }
 }

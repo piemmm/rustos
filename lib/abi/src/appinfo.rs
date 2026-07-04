@@ -313,9 +313,11 @@ fn is_within(path: &str, dir: &str) -> bool {
 /// is the requested capability-id list (`capability_count` little-endian
 /// `u16`s, decoded by [`crate::decode_capability_ids`]) immediately followed
 /// by the MIME-type table (`mime_count` entries of [`MIME_ENTRY_LEN`] bytes,
-/// read by [`mime_type_at`]). [`signed_range`](Self::signed_range) is the
-/// byte range the signature covers: the whole header except the signature
-/// itself.
+/// read by [`mime_type_at`]). The Ed25519 signature covers the **whole
+/// manifest except the signature field itself**:
+/// `bytes[signed_range()] ‖ bytes[WIRE_LEN..]` — the header prefix
+/// concatenated with the capability/MIME body — so a tampered capability
+/// request breaks the signature, not merely the signed count.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct AppInfoHeader {
@@ -354,7 +356,8 @@ pub struct AppInfoHeader {
     pub content_hash: [u8; 32],
     /// Ed25519 public key of the signer.
     pub signer_pubkey: [u8; 32],
-    /// Ed25519 signature over [`signed_range`](Self::signed_range).
+    /// Ed25519 signature over the whole manifest except this field:
+    /// `bytes[signed_range()] ‖ bytes[WIRE_LEN..]` (header prefix ‖ body).
     pub signature: [u8; 64],
 }
 
@@ -376,8 +379,13 @@ impl AppInfoHeader {
     /// Encoded size of an [`AppInfoHeader`] on the wire.
     pub const WIRE_LEN: usize = Self::OFF_SIGNATURE + 64;
 
-    /// Byte range, within an encoded manifest, the signature covers — the
-    /// whole header except the trailing `signature` field.
+    /// Byte range of the **header part** of the signed message — the whole
+    /// header except the trailing `signature` field. The full signed
+    /// message is this range concatenated with the variable body that
+    /// follows the header (`bytes[signed_range()] ‖ bytes[WIRE_LEN..]`), so
+    /// the capability-id list and MIME table are authenticated too; a
+    /// verifier or signer that covered the header alone would leave the
+    /// requested-capability ids swappable behind a valid signature.
     #[must_use]
     pub const fn signed_range() -> core::ops::Range<usize> {
         0..(Self::WIRE_LEN - 64)
@@ -597,12 +605,97 @@ fn inline_str(buf: &[u8], len: u8) -> &str {
     core::str::from_utf8(&buf[..len]).unwrap_or("")
 }
 
+/// Domain-separation prefix of the canonical bundle-contents digest
+/// framing ([`digest_bundle_contents`]), so a bundle-contents hash can
+/// never collide with a hash of any other RustOS structure.
+pub const BUNDLE_CONTENT_DIGEST_MAGIC: [u8; 4] = *b"RBC1";
+
+/// One file covered by a bundle's content digest: its bundle-root-relative
+/// path (e.g. `Run`, `Help/default/ls.md`) and its exact bytes.
+#[derive(Clone, Copy, Debug)]
+pub struct BundleFileDigest<'a> {
+    /// Path relative to the bundle root, `/`-separated, never `AppInfo`.
+    pub path: &'a str,
+    /// The file's full contents.
+    pub bytes: &'a [u8],
+}
+
+/// Feed the canonical framing of a bundle's signed contents into `update`
+/// — the **one** definition of what [`AppInfoHeader::content_hash`] is
+/// computed over, shared by the build-time bundle composer and every
+/// `BundleStore::content_hash` implementation so the two can never drift.
+///
+/// The digest covers **every file in the bundle except `AppInfo` itself**
+/// (the manifest cannot cover its own bytes: the hash is inside it). The
+/// framing is injective: a 4-byte domain magic and a little-endian `u32`
+/// file count, then per file its path length (`u32` LE), path bytes, byte
+/// length (`u64` LE), and bytes — so no concatenation of two different
+/// file sets produces the same stream. Callers pass `files` sorted by
+/// path in strictly ascending byte order; the deterministic order is what
+/// makes the digest reproducible across independent store walks.
+///
+/// The caller owns the hash primitive (SHA-256 from `lib/crypto` in
+/// production): `update` is fed the framing bytes in order, so this crate
+/// stays free of any cryptographic dependency.
+///
+/// # Errors
+///
+/// Fails closed with [`Errno::OutOfRange`] — leaving the digest unusable —
+/// if a path is empty, names `AppInfo`, starts or ends with `/`, contains
+/// an empty, `.`, or `..` component or a NUL byte, exceeds
+/// [`crate::FS_PATH_MAX`], or is not strictly greater than its
+/// predecessor (unsorted or duplicate), or if the file count exceeds
+/// `u32::MAX`.
+pub fn digest_bundle_contents(
+    files: &[BundleFileDigest<'_>],
+    update: &mut dyn FnMut(&[u8]),
+) -> Result<(), Errno> {
+    let count = u32::try_from(files.len()).map_err(|_| Errno::OutOfRange)?;
+    update(&BUNDLE_CONTENT_DIGEST_MAGIC);
+    update(&count.to_le_bytes());
+    let mut previous: Option<&str> = None;
+    for file in files {
+        validate_digest_path(file.path)?;
+        if previous.is_some_and(|p| p >= file.path) {
+            return Err(Errno::OutOfRange);
+        }
+        previous = Some(file.path);
+        let path_len = u32::try_from(file.path.len()).map_err(|_| Errno::OutOfRange)?;
+        update(&path_len.to_le_bytes());
+        update(file.path.as_bytes());
+        update(&(file.bytes.len() as u64).to_le_bytes());
+        update(file.bytes);
+    }
+    Ok(())
+}
+
+/// Validate one covered-file path for [`digest_bundle_contents`]: rooted
+/// inside the bundle (no absolute, `.`, `..`, or empty component), no NUL,
+/// bounded, and never the manifest itself.
+fn validate_digest_path(path: &str) -> Result<(), Errno> {
+    if path.is_empty()
+        || path.len() > crate::FS_PATH_MAX
+        || path == BundleEntry::AppInfo.as_str()
+        || path.as_bytes().contains(&0)
+    {
+        return Err(Errno::OutOfRange);
+    }
+    if path
+        .split('/')
+        .any(|component| component.is_empty() || component == "." || component == "..")
+    {
+        return Err(Errno::OutOfRange);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        body_len, mime_type_at, resolve_library, validate_bundle_layout, AppInfoHeader,
-        BundleEntry, BundleLayoutError, LibraryError, LibraryScope, APPINFO_MAGIC,
-        APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_ID_MAX, MIME_ENTRY_LEN, MIME_TYPE_MAX,
+        body_len, digest_bundle_contents, mime_type_at, resolve_library, validate_bundle_layout,
+        AppInfoHeader, BundleEntry, BundleFileDigest, BundleLayoutError, LibraryError,
+        LibraryScope, APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME,
+        BUNDLE_CONTENT_DIGEST_MAGIC, BUNDLE_ID_MAX, MIME_ENTRY_LEN, MIME_TYPE_MAX,
         SYSTEM_LIBRARIES_DIR,
     };
     use crate::syscall::SYSCALL_TABLE_HASH_LEN;
@@ -861,5 +954,153 @@ mod tests {
         body[0] = 1;
         body[1] = 0xFF;
         assert_eq!(mime_type_at(&body, 0, 0), Err(Errno::OutOfRange));
+    }
+
+    /// Collect a digest framing into a fixed buffer for byte-exact
+    /// assertions (the crate is `no_std`, so no `Vec` here).
+    fn collect_framing<'a>(
+        files: &[BundleFileDigest<'_>],
+        buf: &'a mut [u8],
+    ) -> Result<&'a [u8], Errno> {
+        let mut used = 0usize;
+        digest_bundle_contents(files, &mut |chunk| {
+            buf[used..used + chunk.len()].copy_from_slice(chunk);
+            used += chunk.len();
+        })?;
+        Ok(&buf[..used])
+    }
+
+    #[test]
+    fn digest_framing_is_exact_and_ordered() {
+        let files = [
+            BundleFileDigest {
+                path: "Help/default/ls.md",
+                bytes: b"doc",
+            },
+            BundleFileDigest {
+                path: "Run",
+                bytes: b"rxe",
+            },
+        ];
+        let mut buf = [0u8; 128];
+        let framed = collect_framing(&files, &mut buf).expect("valid file set");
+
+        let mut expected = [0u8; 128];
+        let mut at = 0usize;
+        let mut put = |chunk: &[u8]| {
+            expected[at..at + chunk.len()].copy_from_slice(chunk);
+            at += chunk.len();
+        };
+        put(&BUNDLE_CONTENT_DIGEST_MAGIC);
+        put(&2u32.to_le_bytes());
+        put(&(18u32).to_le_bytes());
+        put(b"Help/default/ls.md");
+        put(&3u64.to_le_bytes());
+        put(b"doc");
+        put(&(3u32).to_le_bytes());
+        put(b"Run");
+        put(&3u64.to_le_bytes());
+        put(b"rxe");
+        assert_eq!(framed, &expected[..at]);
+    }
+
+    #[test]
+    fn digest_distinguishes_boundary_shifts() {
+        // Same concatenated bytes, different file split: the length framing
+        // must produce different streams.
+        let a = [
+            BundleFileDigest {
+                path: "Run",
+                bytes: b"ab",
+            },
+            BundleFileDigest {
+                path: "Runb",
+                bytes: b"",
+            },
+        ];
+        let b = [
+            BundleFileDigest {
+                path: "Run",
+                bytes: b"a",
+            },
+            BundleFileDigest {
+                path: "Runb",
+                bytes: b"b",
+            },
+        ];
+        let mut buf_a = [0u8; 64];
+        let mut buf_b = [0u8; 64];
+        let framed_a = collect_framing(&a, &mut buf_a).expect("valid");
+        let framed_b = collect_framing(&b, &mut buf_b).expect("valid");
+        assert_ne!(framed_a, framed_b);
+    }
+
+    #[test]
+    fn digest_rejects_unsorted_duplicate_and_bad_paths() {
+        let mut sink = |_: &[u8]| {};
+        // Unsorted.
+        let unsorted = [
+            BundleFileDigest {
+                path: "Run",
+                bytes: b"",
+            },
+            BundleFileDigest {
+                path: "Help/default/ls.md",
+                bytes: b"",
+            },
+        ];
+        assert_eq!(
+            digest_bundle_contents(&unsorted, &mut sink),
+            Err(Errno::OutOfRange)
+        );
+        // Duplicate.
+        let duplicate = [
+            BundleFileDigest {
+                path: "Run",
+                bytes: b"",
+            },
+            BundleFileDigest {
+                path: "Run",
+                bytes: b"",
+            },
+        ];
+        assert_eq!(
+            digest_bundle_contents(&duplicate, &mut sink),
+            Err(Errno::OutOfRange)
+        );
+        // The manifest itself, absolute/parent/empty components, and NUL.
+        for path in [
+            "AppInfo",
+            "",
+            "/Run",
+            "Run/",
+            "Help//x.md",
+            "Help/../Run",
+            "Help/./x.md",
+            "Run\0",
+        ] {
+            let files = [BundleFileDigest { path, bytes: b"" }];
+            assert_eq!(
+                digest_bundle_contents(&files, &mut sink),
+                Err(Errno::OutOfRange),
+                "path {path:?} must be refused"
+            );
+        }
+        // A nested AppInfo-named file inside a directory is a different
+        // path from the bundle manifest and is legitimately covered.
+        let nested = [BundleFileDigest {
+            path: "Resources/AppInfo",
+            bytes: b"",
+        }];
+        assert_eq!(digest_bundle_contents(&nested, &mut sink), Ok(()));
+    }
+
+    #[test]
+    fn digest_of_no_files_is_the_empty_frame() {
+        let mut buf = [0u8; 8];
+        let framed = collect_framing(&[], &mut buf).expect("empty set is valid");
+        let mut expected = [0u8; 8];
+        expected[..4].copy_from_slice(&BUNDLE_CONTENT_DIGEST_MAGIC);
+        assert_eq!(framed, &expected[..8]);
     }
 }

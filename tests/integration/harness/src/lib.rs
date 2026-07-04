@@ -38,6 +38,14 @@ pub mod elf2rxe;
 #[cfg(feature = "driver-image")]
 pub mod driver_image;
 
+/// The signed application-bundle composer and `AppInfo.toml` manifest
+/// discovery, shared by every build that plants a program bundle onto the
+/// read-only `/System` store (`plans/APPS.md` deliverable 8).
+/// Enabled by the `app-image` feature so the signing/hashing dependencies
+/// are pulled in only where a bundle is actually composed.
+#[cfg(feature = "app-image")]
+pub mod app_image;
+
 /// Virtual base the production aarch64 spawn producer maps every spawned
 /// user image at — the `SHELL_USER_BIAS` (64 GiB) the kernel's `build.rs`
 /// bakes into `spawn_layout`.

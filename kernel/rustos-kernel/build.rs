@@ -30,7 +30,12 @@
 
 // The pure, unit-tested selection logic, shared with the crate's host
 // test build. Pulled in as a module (not a crate dependency) so the
-// build script stays dependency-free.
+// build script stays dependency-free. `dead_code` is allowed because the
+// shared file also defines single-source values this build script does
+// not itself consume (the app-signing seed, signed by the image builds
+// and pinned by the crate's host tests); an unused copy here is the cost
+// of keeping one definition, not dead surface.
+#[allow(dead_code)]
 #[path = "src/build_support.rs"]
 mod build_support;
 

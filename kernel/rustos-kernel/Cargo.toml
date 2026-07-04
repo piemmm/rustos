@@ -273,6 +273,13 @@ rustos-drv-storage-emmc2 = { path = "../../drivers/storage/emmc2", version = "=0
 ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zeroize"] }
 
 [dev-dependencies]
+# The `program_manifests` drift test discovers every program crate's
+# `AppInfo.toml` through the shared composer walk and pins it against the
+# embedded registry's capability lists, so the two sources cannot diverge
+# while the registry still exists (`plans/APPS.md` deliverable 8).
+rustos-itest-harness = { path = "../../tests/integration/harness", version = "=0.0.0", features = [
+    "app-image",
+] }
 # The `virtio_factory` unit tests drive a real `DmaPool` through
 # `kernel/mem`'s in-memory `HostPageTable` test double, gated behind
 # the `host-tests` feature so production builds never link it

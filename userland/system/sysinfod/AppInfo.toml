@@ -1,0 +1,13 @@
+# Signed-AppInfo manifest source for the `sysinfod` System Information
+# service (a service is an app, AGENTS.md §16.2; plans/APPS.md
+# deliverable 8). Discovered by the build's app-bundle composer and
+# planted under /System/Services/. The capability list is the bundle's
+# request: CAP_SYSINFO_INTROSPECT (the privileged global introspection
+# primitive it alone holds and re-scopes per client), CAP_SYSINFO_HW for
+# the hardware-tree query, CAP_IPC_BIND_PRIVILEGED for the reserved
+# well-known endpoint, and CAP_LOG_EMIT for its audit records.
+id = "os.rustos.sysinfod"
+name = "sysinfod"
+version = "0.1.0"
+kind = "service"
+capabilities = ["CAP_SYSINFO_INTROSPECT", "CAP_SYSINFO_HW", "CAP_IPC_BIND_PRIVILEGED", "CAP_LOG_EMIT"]

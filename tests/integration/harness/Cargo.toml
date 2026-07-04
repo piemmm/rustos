@@ -18,6 +18,11 @@ workspace = true
 # consumer (`AGENTS.md` §2.2 / §2.3).
 [features]
 driver-image = ["dep:ed25519-dalek"]
+# `app-image` enables the signed application-bundle composer and the
+# `AppInfo.toml` manifest discovery (`src/app_image.rs`): Ed25519 signing
+# plus the `lib/crypto` SHA-256 the canonical bundle content hash uses.
+# Opt-in for the same reason as `driver-image`.
+app-image = ["dep:ed25519-dalek", "dep:rustos-crypto"]
 
 [dependencies]
 # The single source of truth for the `rxe` load-image wire format, reused so
@@ -30,6 +35,10 @@ rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 ed25519-dalek = { version = "=2.1.1", default-features = false, features = [
     "zeroize",
 ], optional = true }
+# The audited `lib/crypto` SHA-256 the canonical bundle content hash is
+# computed with (`app-image` only), so the composer and every store-side
+# verifier hash through the same wrapped primitive (`AGENTS.md` §2.12).
+rustos-crypto = { path = "../../../lib/crypto", version = "=0.0.0", optional = true }
 
 [dev-dependencies]
 # Build a real flattened device tree (the same fixture the `lib/fdt` unit

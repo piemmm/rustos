@@ -46,14 +46,33 @@ manifest. It is `#[repr(C)]`, allocation-free, little-endian, with
   (§9 / §19.2).
 - `content_hash` — the digest binding the signature to the bundle's contents
   (§16.5).
-- `signer_pubkey` and `signature` (Ed25519). `signed_range()` is the byte
-  range the signature covers (everything except `signature`).
+- `signer_pubkey` and `signature` (Ed25519). The signature covers the whole
+  manifest except the `signature` field itself: the `signed_range()` header
+  prefix concatenated with the capability/MIME body, so a tampered
+  capability request breaks the signature rather than hiding behind a
+  header-only signature.
 
 The variable body that follows the header is the requested capability-id
 list (`capability_count` little-endian `u16`s, decoded by the shared
 `decode_capability_ids`) immediately followed by the MIME-type table
 (`mime_count` fixed-stride entries, read by `mime_type_at`). `body_len`
 gives the exact body size for a given count pair.
+
+## Bundle content digest
+
+`digest_bundle_contents(files, update)` is the **one** definition of what
+`content_hash` is computed over, shared by the build-time bundle composer
+and every `BundleStore::content_hash` implementation so the two can never
+drift. The digest covers every file in the bundle except `AppInfo` itself
+(the manifest cannot cover its own bytes). The framing is injective — the
+`BUNDLE_CONTENT_DIGEST_MAGIC` domain prefix, a little-endian `u32` file
+count, then per file its length-framed path and length-framed bytes — and
+deterministic: callers pass `BundleFileDigest` rows sorted by path in
+strictly ascending byte order. A path that is empty, names `AppInfo`,
+escapes the bundle (absolute, `.`/`..`/empty component), carries a NUL, or
+arrives unsorted/duplicated fails closed. The caller supplies the hash
+primitive (SHA-256 from `lib/crypto` in production) through the `update`
+closure, so `lib/abi` carries no cryptographic dependency.
 
 ## Dynamic-loader policy
 

@@ -1,0 +1,13 @@
+# Signed-AppInfo manifest source for the `users` account-administration
+# command app (plans/APPS.md deliverable 8). Discovered by the build's
+# app-bundle composer; the capability list is the bundle's request,
+# intersected with the launching user's grants. Deliberately above the
+# session baseline: only an account whose ceiling carries CAP_USER_ADMIN
+# ends up with a working tool — on any other account the intersection
+# strips it and every operation is refused at dispatch. No CAP_FS_ACCESS:
+# accounts are edited through the gated users_admin syscall.
+id = "os.rustos.users"
+name = "users"
+version = "0.1.0"
+kind = "command"
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_CONSOLE_READ", "CAP_USER_ADMIN"]

@@ -118,21 +118,7 @@ impl<'a> AppLoader<'a> {
             return Err(AppError::InterfaceHashMismatch);
         }
 
-        let signed = &bytes[AppInfoHeader::signed_range()];
-        if self
-            .cfg
-            .verifier
-            .verify(signed, &header.signature, &header.signer_pubkey)
-            .is_err()
-        {
-            self.audit(
-                events::APP_SIGNATURE_INVALID,
-                Level::Warn,
-                bundle,
-                "signature did not verify",
-            );
-            return Err(AppError::Signature);
-        }
+        self.verify_manifest_signature(bundle, &bytes, &header)?;
 
         let actual = self
             .cfg
@@ -305,6 +291,38 @@ impl<'a> AppLoader<'a> {
             set.insert(*cap);
         }
         Ok(set)
+    }
+
+    /// Verify the manifest's Ed25519 signature over the whole manifest
+    /// except the signature field: the header prefix concatenated with the
+    /// capability/MIME body, so a swapped capability id in the body breaks
+    /// it rather than hiding behind a header-only signature.
+    fn verify_manifest_signature(
+        &self,
+        bundle: &str,
+        bytes: &[u8],
+        header: &AppInfoHeader,
+    ) -> Result<(), AppError> {
+        let mut signed = alloc::vec::Vec::with_capacity(
+            AppInfoHeader::signed_range().end + (bytes.len() - AppInfoHeader::WIRE_LEN),
+        );
+        signed.extend_from_slice(&bytes[AppInfoHeader::signed_range()]);
+        signed.extend_from_slice(&bytes[AppInfoHeader::WIRE_LEN..]);
+        if self
+            .cfg
+            .verifier
+            .verify(&signed, &header.signature, &header.signer_pubkey)
+            .is_err()
+        {
+            self.audit(
+                events::APP_SIGNATURE_INVALID,
+                Level::Warn,
+                bundle,
+                "signature did not verify",
+            );
+            return Err(AppError::Signature);
+        }
+        Ok(())
     }
 
     fn store_error(&self, bundle: &str, err: Errno) -> AppError {
@@ -595,6 +613,42 @@ mod tests {
         assert!(!app.granted().contains(CapabilityId::FS_MOUNT));
         assert_eq!(app.granted().len(), 1);
         assert_eq!(sink.count(events::APP_LOADED), 1);
+    }
+
+    /// Records the exact byte stream the loader asked to be verified, so a
+    /// test can pin what the signature covers.
+    struct CapturingVerifier(core::cell::RefCell<alloc::vec::Vec<u8>>);
+    impl Verifier for CapturingVerifier {
+        fn verify(&self, signed: &[u8], _: &[u8; 64], _: &[u8; 32]) -> Result<(), Errno> {
+            *self.0.borrow_mut() = signed.to_vec();
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn signature_covers_the_capability_body() {
+        // Regression: the signed message must be the header prefix
+        // concatenated with the capability/MIME body — a verifier fed the
+        // header alone would let a tampered store swap capability ids
+        // behind a valid signature.
+        let store = MockStore::good(&[CapabilityId::FS_MOUNT, CapabilityId::NET_RAW]);
+        let verifier = CapturingVerifier(core::cell::RefCell::new(alloc::vec::Vec::new()));
+        let sink = RecordingSink::new();
+        let loader = AppLoader::new(cfg(&store, &verifier, &sink));
+        loader
+            .load("/Apps/Example.app", &cap_set(&[CapabilityId::NET_RAW]))
+            .expect("loads");
+
+        let signed = verifier.0.borrow();
+        let manifest = store.read_appinfo("/Apps/Example.app").expect("manifest");
+        let body = &manifest[AppInfoHeader::WIRE_LEN..];
+        assert!(!body.is_empty(), "fixture must carry a capability body");
+        assert_eq!(signed.len(), AppInfoHeader::signed_range().end + body.len());
+        assert_eq!(
+            &signed[..AppInfoHeader::signed_range().end],
+            &manifest[AppInfoHeader::signed_range()]
+        );
+        assert_eq!(&signed[AppInfoHeader::signed_range().end..], body);
     }
 
     #[test]

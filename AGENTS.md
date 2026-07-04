@@ -1471,7 +1471,14 @@ Authoritative subdirectories:
 ├── Printing/    # Print spooler and drivers' user-space services.
 ├── Logs/        # Append-only structured logs (writable; nosuid,nodev,noexec).
 ├── Settings/    # Machine-wide settings (writable; nosuid,nodev,noexec).
-└── Services/    # Long-running system services (init manifests, etc).
+└── Services/    # Long-running system services. A service is an app:
+                 #   each ships as its own self-contained, signed
+                 #   `<name>.app` bundle (§16.5) under /System/Services/,
+                 #   discovered from disk and loaded through the same
+                 #   signature + capability + interface-hash gate as any
+                 #   other bundle — never baked into the kernel. Only PID 1
+                 #   `init` (entered by the boot path before any volume is
+                 #   mounted) is the compiled-in boot floor (§18.6).
 ```
 
 Adding a new top-level subdirectory under `/System` requires updating

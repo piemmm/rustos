@@ -146,6 +146,21 @@ pub fn is_freestanding(target_os: &str, target_arch: &str) -> bool {
 /// embedded trust anchor.
 pub const KERNEL_DRIVER_SIGNING_SEED: [u8; 32] = *b"rustos-kernel-driver-signing/v1!";
 
+/// Deterministic Ed25519 seed the build signs every system app bundle's
+/// `AppInfo` manifest with (`plans/APPS.md` deliverable 8).
+///
+/// The same trust model as [`KERNEL_DRIVER_SIGNING_SEED`] — the kernel
+/// trusts the app bundles its own reproducible build signed and planted on
+/// the read-only `/System` store, nothing else — but a **distinct trust
+/// domain**: an authority to sign an application bundle must never also be
+/// an authority to sign a driver (a driver runs with device grants an app
+/// can never request), so the two seeds and the two derived trust anchors
+/// are separate values, checked at separate gates. This is the single
+/// source of the app seed: the image build (`tools/mkimage`'s caller) and
+/// every fixture that plants a kernel-trusted bundle onto the
+/// `/System/Apps` or `/System/Services` store signs from this definition.
+pub const SYSTEM_APP_SIGNING_SEED: [u8; 32] = *b"rustos-system-app-signing/v1!\0\0\0";
+
 /// Parse a `SOURCE_DATE_EPOCH` value into whole seconds, or `None` when it is
 /// absent/malformed so the build script falls back to the current wall-clock
 /// second.
@@ -274,5 +289,18 @@ mod tests {
             *b"rustos-kernel-driver-signing/v1!"
         );
         assert_eq!(KERNEL_DRIVER_SIGNING_SEED.len(), 32);
+    }
+
+    #[test]
+    fn the_app_signing_seed_is_pinned_and_distinct_from_the_driver_seed() {
+        // Same rationale as the driver seed pin, plus the trust-domain
+        // separation: an app-signing authority must never verify as a
+        // driver-signing authority, so the two seeds may never converge.
+        assert_eq!(
+            SYSTEM_APP_SIGNING_SEED,
+            *b"rustos-system-app-signing/v1!\0\0\0"
+        );
+        assert_eq!(SYSTEM_APP_SIGNING_SEED.len(), 32);
+        assert_ne!(SYSTEM_APP_SIGNING_SEED, KERNEL_DRIVER_SIGNING_SEED);
     }
 }

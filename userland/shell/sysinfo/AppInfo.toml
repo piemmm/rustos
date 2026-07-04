@@ -1,0 +1,10 @@
+# Signed-AppInfo manifest source for the `sysinfo` command app
+# (plans/APPS.md deliverable 8). Discovered by the build's app-bundle
+# composer; the capability list is the bundle's request, intersected with
+# the launching user's grants. CAP_CONSOLE_WRITE alone, like `ps`:
+# per-query authority stays with sysinfod and the caller's attested origin.
+id = "os.rustos.sysinfo"
+name = "sysinfo"
+version = "0.1.0"
+kind = "command"
+capabilities = ["CAP_CONSOLE_WRITE"]

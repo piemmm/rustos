@@ -20,9 +20,10 @@ kernel only enforces the resulting capability ceiling at exec time.
 3. **Interface** — compares the manifest's declared syscall-table hash
    against the kernel's, in constant time. A mismatch is
    `AppError::InterfaceHashMismatch` (§9 / §19.2).
-4. **Signature** — verifies the Ed25519 signature over the manifest's
-   signed range through the `Verifier` seam. A failure is
-   `AppError::Signature`.
+4. **Signature** — verifies the Ed25519 signature over the whole manifest
+   except the signature field (the header prefix concatenated with the
+   capability/MIME body, so a swapped capability id breaks it) through the
+   `Verifier` seam. A failure is `AppError::Signature`.
 5. **Contents** — compares the bundle's actual content hash (from the
    `BundleStore` seam) against the hash the signature covers, in constant
    time. A mismatch is `AppError::ContentHashMismatch` (§16.5).

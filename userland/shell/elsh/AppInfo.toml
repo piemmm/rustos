@@ -1,0 +1,12 @@
+# Signed-AppInfo manifest source for the `elsh` shell command app
+# (plans/APPS.md deliverable 8). Discovered by the build's app-bundle
+# composer; the capability list is the bundle's request, intersected with
+# the launching user's grants. The request is exactly the session baseline
+# (lib/users SESSION_BASELINE): the console pair for the REPL, spawn for
+# launching commands, and filesystem access for the working-directory and
+# redirection seams.
+id = "os.rustos.elsh"
+name = "elsh"
+version = "0.1.0"
+kind = "command"
+capabilities = ["CAP_FS_ACCESS", "CAP_PROC_SPAWN", "CAP_CONSOLE_WRITE", "CAP_CONSOLE_READ"]
