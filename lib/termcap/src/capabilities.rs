@@ -8,11 +8,10 @@
 //! escape-sequence table. [`Capabilities::referenced_ops`] returns that exact
 //! set so the database can be checked against `lib/vt`.
 
-use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use rustos_vt::{BasicColor, Color, EraseMode, Op, Sgr};
+use rustos_vt::{BasicColor, Color, EraseMode, Op, Sgr, Title};
 
 use crate::term_type::TermType;
 
@@ -287,7 +286,7 @@ impl Capabilities {
             ops.push(Op::HideCursor);
         }
         if self.set_title {
-            ops.push(Op::SetTitle(String::from("rustos")));
+            ops.push(Op::SetTitle(Title::from_text("rustos")));
         }
         for color in self.color.sample_colors() {
             ops.push(Op::Sgr(Sgr::Foreground(color)));

@@ -2,7 +2,14 @@
 
 use alloc::vec::Vec;
 
-use rustos_vt::{encode, Color, Op, Parser};
+use rustos_vt::{encode_into, Color, Op, Parser};
+
+/// Encode one operation into a fresh `Vec` over the sink API.
+fn encode(op: &Op) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_into(op, &mut out);
+    out
+}
 
 use crate::capabilities::MouseReporting;
 use crate::{from_term, ColorDepth, TermType};

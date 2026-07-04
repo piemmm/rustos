@@ -10,8 +10,6 @@
 //! with. It is the shared attribute representation reused by both the consumer
 //! (the terminal `Grid`) and the emitter (the curses renderer).
 
-use alloc::vec::Vec;
-
 use crate::color::{BasicColor, Color};
 
 /// One Select Graphic Rendition operation.
@@ -67,23 +65,25 @@ impl Sgr {
     /// Append this operation's canonical numeric parameters to `out`.
     ///
     /// The emitter joins these with `;` and wraps them in `CSI … m`. The
-    /// encoding is the single SGR table shared with [`decode_params`].
-    pub fn write_params(&self, out: &mut Vec<u16>) {
+    /// encoding is the single SGR table shared with [`decode_params`]. The
+    /// parameters are pushed into a `u16` sink (`Extend`, from `core`), so the
+    /// vocabulary needs no heap.
+    pub fn write_params(&self, out: &mut impl Extend<u16>) {
         match self {
-            Sgr::Reset => out.push(0),
-            Sgr::Bold => out.push(1),
-            Sgr::Dim => out.push(2),
-            Sgr::Italic => out.push(3),
-            Sgr::Underline => out.push(4),
-            Sgr::Blink => out.push(5),
-            Sgr::Reverse => out.push(7),
-            Sgr::Strike => out.push(9),
-            Sgr::ResetIntensity => out.push(22),
-            Sgr::ResetItalic => out.push(23),
-            Sgr::ResetUnderline => out.push(24),
-            Sgr::ResetBlink => out.push(25),
-            Sgr::ResetReverse => out.push(27),
-            Sgr::ResetStrike => out.push(29),
+            Sgr::Reset => out.extend([0]),
+            Sgr::Bold => out.extend([1]),
+            Sgr::Dim => out.extend([2]),
+            Sgr::Italic => out.extend([3]),
+            Sgr::Underline => out.extend([4]),
+            Sgr::Blink => out.extend([5]),
+            Sgr::Reverse => out.extend([7]),
+            Sgr::Strike => out.extend([9]),
+            Sgr::ResetIntensity => out.extend([22]),
+            Sgr::ResetItalic => out.extend([23]),
+            Sgr::ResetUnderline => out.extend([24]),
+            Sgr::ResetBlink => out.extend([25]),
+            Sgr::ResetReverse => out.extend([27]),
+            Sgr::ResetStrike => out.extend([29]),
             Sgr::Foreground(color) => write_color_params(out, *color, false),
             Sgr::Background(color) => write_color_params(out, *color, true),
         }
@@ -92,29 +92,26 @@ impl Sgr {
 
 /// Append the parameters for a foreground (`background == false`) or background
 /// (`background == true`) colour.
-fn write_color_params(out: &mut Vec<u16>, color: Color, background: bool) {
+fn write_color_params(out: &mut impl Extend<u16>, color: Color, background: bool) {
+    let selector = if background {
+        EXTENDED_BACKGROUND
+    } else {
+        EXTENDED_FOREGROUND
+    };
     match color {
-        Color::Default => out.push(if background { 49 } else { 39 }),
-        Color::Basic(basic) => out.push(basic_code(basic, background)),
+        Color::Default => out.extend([if background { 49 } else { 39 }]),
+        Color::Basic(basic) => out.extend([basic_code(basic, background)]),
         Color::Indexed(index) => {
-            out.push(if background {
-                EXTENDED_BACKGROUND
-            } else {
-                EXTENDED_FOREGROUND
-            });
-            out.push(EXTENDED_INDEXED);
-            out.push(u16::from(index));
+            out.extend([selector, EXTENDED_INDEXED, u16::from(index)]);
         }
         Color::Rgb(r, g, b) => {
-            out.push(if background {
-                EXTENDED_BACKGROUND
-            } else {
-                EXTENDED_FOREGROUND
-            });
-            out.push(EXTENDED_RGB);
-            out.push(u16::from(r));
-            out.push(u16::from(g));
-            out.push(u16::from(b));
+            out.extend([
+                selector,
+                EXTENDED_RGB,
+                u16::from(r),
+                u16::from(g),
+                u16::from(b),
+            ]);
         }
     }
 }

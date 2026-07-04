@@ -10,7 +10,7 @@
 //!
 //! # Emitter and parser agree by construction
 //!
-//! [`encode`] turns an [`Op`] into bytes; [`Parser`] turns bytes back into
+//! [`encode_into`] turns an [`Op`] into bytes; [`Parser`] turns bytes back into
 //! [`Op`] events. Both are built over the same tables, so they provably agree:
 //! every operation the emitter writes parses back to the identical operation
 //! (the `emit_parse_round_trip*` tests assert exactly this). There is no second
@@ -27,11 +27,14 @@
 //! ever writes to fd 3 (`stdinfo` is reserved).
 //!
 //! ```
-//! use rustos_vt::{encode, Op, Parser, Sgr, Color};
+//! use rustos_vt::{encode_into, Op, Parser, Sgr, Color};
 //!
-//! // Emit one operation, then parse the bytes back: identity holds.
+//! // Emit one operation into a byte sink, then parse the bytes back: identity
+//! // holds. The emitter writes into any `Extend<u8>` (here a `Vec`), so it
+//! // needs no allocator of its own.
 //! let op = Op::Sgr(Sgr::Foreground(Color::Rgb(0x30, 0x70, 0xf0)));
-//! let bytes = encode(&op);
+//! let mut bytes = alloc::vec::Vec::new();
+//! encode_into(&op, &mut bytes);
 //!
 //! let mut parser = Parser::new();
 //! let mut seen = alloc::vec::Vec::new();
@@ -44,6 +47,11 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+// The vocabulary is allocation-free: the `Parser` uses fixed inline buffers,
+// `Op` owns no heap (the OSC title is a bounded inline `Title`), and the
+// emitter writes into a caller-provided `Extend<u8>` sink. `alloc` is pulled in
+// only for the unit tests, which build `Vec`s to assert against.
+#[cfg(test)]
 extern crate alloc;
 
 pub mod attr;
@@ -64,10 +72,10 @@ mod tests;
 pub use attr::{Attributes, Sgr};
 pub use cell::Cell;
 pub use color::{BasicColor, Color};
-pub use emit::{encode, encode_all, encode_into};
+pub use emit::{encode_all_into, encode_into};
 pub use key::Key;
 pub use line::{EraseSeq, LineEditor, LineFeed};
 pub use mouse::{MouseButton, MouseMode, MouseReport};
-pub use op::{EraseMode, Op};
+pub use op::{EraseMode, Op, Title, MAX_TITLE};
 pub use parse::Parser;
 pub use secret::{SecretIndicator, SecretInput, SECRET_TICK_NS};

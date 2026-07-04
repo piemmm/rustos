@@ -38,13 +38,13 @@ impl Parser {
     /// Feed a slice of shell output, applying each recognised operation to
     /// `grid` in stream order.
     pub fn feed(&mut self, grid: &mut Grid, bytes: &[u8]) {
-        self.inner.feed(bytes, |op| apply(grid, op));
+        self.inner.feed(bytes, |op| apply(grid, &op));
     }
 
     /// Feed one `byte` of shell output, applying any operation it completes to
     /// `grid`.
     pub fn feed_byte(&mut self, grid: &mut Grid, byte: u8) {
-        self.inner.feed_byte(byte, |op| apply(grid, op));
+        self.inner.feed_byte(byte, |op| apply(grid, &op));
     }
 }
 
@@ -53,8 +53,8 @@ impl Parser {
 /// The cursor counts and positions `lib/vt` carries are the 1-based values
 /// ANSI uses on the wire; positions are converted to the [`Grid`]'s 0-based
 /// coordinates here.
-fn apply(grid: &mut Grid, op: Op) {
-    match op {
+fn apply(grid: &mut Grid, op: &Op) {
+    match *op {
         Op::Print(ch) => grid.write_char(ch),
         Op::Backspace => grid.backspace(),
         Op::Tab => grid.tab(),
@@ -85,7 +85,7 @@ fn apply(grid: &mut Grid, op: Op) {
             pen.apply(sgr);
             grid.set_attributes(pen);
         }
-        Op::SetTitle(title) => grid.set_title(title),
+        Op::SetTitle(title) => grid.set_title(title.as_str()),
         // Operations with no effect on the rendered display. The bell carries
         // no screen change we model (no audible bell is wired). The rest are
         // *input* a terminal reports to the program (named keys, mouse reports,

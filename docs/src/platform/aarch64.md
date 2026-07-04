@@ -426,24 +426,48 @@ the `fw_cfg`/`ramfb` fallback on the QEMU `virt` board. On the Pi:
   input. No ramfb device (`etc/ramfb` absent), no fw_cfg node, or any
   failed transfer falls back to the UART (fail closed); the headless
   UART-backed verticals are unchanged.
-- **Rendering.** A fixed-grid text console draws the shared 5×7 glyph
-  atlas (`rustos_font::glyphs` — one font definition, `AGENTS.md`
-  §2.2) at an integer scale chosen from the display height
-  (`height / 360`, clamped to 1…4: 480p → 1×, 1080p → 3×). The grid
-  is a ring — the cursor wraps to a cleared top row instead of
-  scroll-copying megabytes per log line (`AGENTS.md` §2.16). `\n`
-  advances to the next (cleared) row, `\r` returns to column zero, and
-  Backspace steps the cursor back one column (a no-op at column zero)
-  so the console's `BS SP BS` echo and secret-marker rub-outs render
-  correctly; any other unprintable byte draws the `?` fallback glyph
-  rather than being silently dropped. After the
-  MMU and caches come on, each write cleans the touched scanlines to
-  the point of coherency (`dc cvac` + `dsb`) so the firmware scan-out
-  sees them; rendering is serialised by a private DAIF-masking
-  spinlock (deliberately not `lib/sync` — feature unification across
-  the single aarch64-none test-matrix build would compile its
-  alloc-backed `epoch` module into the minimal, allocator-free QEMU
-  binaries; the carve-out is documented at the lock).
+- **Rendering — a real `xterm-256color` terminal, in a shared engine.**
+  The terminal is not this port's own code: it is the shared,
+  architecture-neutral `rustos_fbcon` engine (`lib/fbcon`, `AGENTS.md`
+  §2.2 / §2.20 / §2.21), so every arch port renders its display console
+  through one definition and this port supplies only the board-specific
+  surface discovery above. Shell output is not drawn byte-for-byte: it is
+  fed through the **one** streaming ANSI/VT/xterm parser in the tree
+  (`rustos_vt::Parser` — no second escape parser), and each parsed `Op` is
+  applied straight to the scan-out surface. The console therefore
+  *interprets*
+  escape sequences instead of printing them: SGR rendition with the
+  16-colour, 256-colour (`38;5;n`) and 24-bit truecolour (`38;2;r;g;b`)
+  models, bold (brightens the base colours) and reverse-video, cursor
+  movement and absolute positioning (`CUP`), the erase operations
+  (`ED`/`EL`), the scroll region (`DECSTBM`) and explicit scrolling
+  (`SU`/`SD`), the alternate screen, and the saved cursor. Glyphs are
+  the shared 5×7 atlas (`rustos_font::glyphs` — one font definition) at
+  an integer scale chosen from the display height (`height / 360`,
+  clamped to 1…4: 480p → 1×, 1080p → 3×), packed
+  `0xFF00_0000 | (r<<16) | (g<<8) | b` — correct on both the mailbox
+  (`Bgra8888`) and ramfb (`XRGB8888`) surfaces, whose bytes coincide.
+  There is **no retained cell grid** — the surface is the backing store
+  — so reaching the bottom margin **scrolls the pixels up one line** (a
+  real terminal scroll, `copy_within`), not a ring-wrap. `rustos_fbcon`
+  (and, through it, `lib/vt` and `lib/font`) is depended on
+  `default-features = false`: `lib/vt`'s `Vec`-returning `encode*` helpers
+  ride its default-on `alloc` feature, while `Op` itself owns no heap (the
+  OSC title is a bounded inline `Title`), so the allocator-free parser is
+  all the minimal QEMU test bins link (the same discipline as the
+  `rustos-font` atlas-only dependency). The parser is
+  total, so a malformed or unrecognised sequence is consumed without
+  disturbing the screen; a Unicode scalar the atlas cannot draw renders
+  `?`. Attributes with no bitmap rendering (underline/italic/blink/dim/
+  strike) and the alternate screen (no separate buffer — entering or
+  leaving it clears) are documented degrades; no hardware cursor is
+  drawn. After the MMU and caches come on, each write cleans the touched
+  scanlines to the point of coherency (`dc cvac` + `dsb`) so the
+  firmware scan-out sees them; rendering is serialised by a private
+  DAIF-masking spinlock (deliberately not `lib/sync` — feature
+  unification across the single aarch64-none test-matrix build would
+  compile its alloc-backed `epoch` module into the minimal,
+  allocator-free QEMU binaries; the carve-out is documented at the lock).
 - **Routing.** The **boot-log** path (`serial::ConsoleWriter`, the log
   sink) routes by build profile. A **release build** renders to the
   screen when `video::is_active` and falls back to the UART otherwise.

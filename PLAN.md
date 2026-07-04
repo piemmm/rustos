@@ -3334,6 +3334,21 @@ escape-sequence definition end to end (§2.2).
   timeout input; panels deferred until a consumer needs them) + the first
   consumer `userland/apps/top` (live process TUI over `lib/procinfo` +
   `lib/curses`).
+- C6 — `lib/fbcon` (`rustos-fbcon`): the shared, architecture-neutral
+  framebuffer text-console engine. A full ANSI/VT/xterm-256color terminal
+  (`Geometry` / `TextConsole` / `DirtyBand`, palette, glyph blit over
+  `lib/font`, scroll-up-at-bottom) that renders the shared `lib/vt` `Op`
+  stream straight onto a 32-bit scan-out surface, so every arch port
+  (`x86_64`/`aarch64`/`riscv64`/`wasm32`) drives its display console through
+  one definition rather than re-deriving the emulation per target
+  (§2.2/§2.20/§2.21). Allocator-free, so a freestanding boot console with no
+  global allocator links it with `rustos-vt`/`rustos-font`
+  `default-features = false`; host-unit-tested. The aarch64 port's
+  `video.rs` now consumes it, keeping only board-specific surface discovery
+  (VideoCore mailbox / QEMU ramfb). The `lib/vt` `alloc` feature is now
+  optional (default-on) so the emitter's `Vec`-returning `encode*` helpers
+  stay available to allocator-having consumers while the parser path is
+  taken allocator-free by `fbcon` and the console.
 
 ## SHELL prerequisites (`.junie/PREREQUISITES2.md`)
 

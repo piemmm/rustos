@@ -8,34 +8,31 @@
 //!
 //! Movement counts are clamped up to `1` (ANSI's default), so even a degenerate
 //! `CursorUp(0)` emits the well-formed `CSI 1 A` and round-trips as `CursorUp(1)`.
-
-use alloc::vec::Vec;
+//!
+//! The bytes are written into a caller-provided sink — any `Extend<u8>`, which
+//! `core` implements for the caller's buffer (a `Vec<u8>`, an `ArrayVec`, …).
+//! The emitter therefore owns no heap and needs no allocator: a `no_std`
+//! consumer with a growable buffer drives it, and one without still parses
+//! (the parser is allocation-free too).
 
 use crate::attr::Sgr;
 use crate::control;
 use crate::key::Key;
 use crate::op::Op;
 
-/// Render `op` to bytes.
-#[must_use]
-pub fn encode(op: &Op) -> Vec<u8> {
-    let mut out = Vec::new();
-    encode_into(op, &mut out);
-    out
-}
-
 /// Append the byte encoding of `op` to `out`.
-pub fn encode_into(op: &Op, out: &mut Vec<u8>) {
+pub fn encode_into(op: &Op, out: &mut impl Extend<u8>) {
     match op {
         Op::Print(ch) => {
             let mut buf = [0u8; 4];
-            out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+            let encoded = ch.encode_utf8(&mut buf);
+            out.extend(encoded.bytes());
         }
-        Op::Bell => out.push(control::BEL),
-        Op::Backspace => out.push(control::BS),
-        Op::Tab => out.push(control::HT),
-        Op::LineFeed => out.push(control::LF),
-        Op::CarriageReturn => out.push(control::CR),
+        Op::Bell => byte(out, control::BEL),
+        Op::Backspace => byte(out, control::BS),
+        Op::Tab => byte(out, control::HT),
+        Op::LineFeed => byte(out, control::LF),
+        Op::CarriageReturn => byte(out, control::CR),
         Op::CursorUp(n) => csi_count(out, *n, control::CUU),
         Op::CursorDown(n) => csi_count(out, *n, control::CUD),
         Op::CursorForward(n) => csi_count(out, *n, control::CUF),
@@ -46,9 +43,9 @@ pub fn encode_into(op: &Op, out: &mut Vec<u8>) {
         Op::CursorPosition { row, col } => {
             csi(out);
             push_decimal(out, (*row).max(1));
-            out.push(control::SEPARATOR);
+            byte(out, control::SEPARATOR);
             push_decimal(out, (*col).max(1));
-            out.push(control::CUP);
+            byte(out, control::CUP);
         }
         Op::EraseInDisplay(mode) => csi_value(out, mode.value(), control::ED),
         Op::EraseInLine(mode) => csi_value(out, mode.value(), control::EL),
@@ -57,26 +54,20 @@ pub fn encode_into(op: &Op, out: &mut Vec<u8>) {
         Op::SetScrollRegion { top, bottom } => {
             csi(out);
             push_decimal(out, (*top).max(1));
-            out.push(control::SEPARATOR);
+            byte(out, control::SEPARATOR);
             push_decimal(out, (*bottom).max(1));
-            out.push(control::DECSTBM);
+            byte(out, control::DECSTBM);
         }
         Op::ResetScrollRegion => {
             csi(out);
-            out.push(control::DECSTBM);
+            byte(out, control::DECSTBM);
         }
         Op::EnterAltScreen => private_mode(out, control::MODE_ALT_SCREEN, true),
         Op::LeaveAltScreen => private_mode(out, control::MODE_ALT_SCREEN, false),
         Op::ShowCursor => private_mode(out, control::MODE_CURSOR_VISIBLE, true),
         Op::HideCursor => private_mode(out, control::MODE_CURSOR_VISIBLE, false),
-        Op::SaveCursor => {
-            out.push(control::ESC);
-            out.push(control::SAVE_CURSOR);
-        }
-        Op::RestoreCursor => {
-            out.push(control::ESC);
-            out.push(control::RESTORE_CURSOR);
-        }
+        Op::SaveCursor => out.extend([control::ESC, control::SAVE_CURSOR]),
+        Op::RestoreCursor => out.extend([control::ESC, control::RESTORE_CURSOR]),
         Op::Sgr(sgr) => encode_sgr(out, *sgr),
         Op::SetTitle(title) => encode_title(out, title),
         Op::Key(key) => encode_key(out, *key),
@@ -90,71 +81,97 @@ pub fn encode_into(op: &Op, out: &mut Vec<u8>) {
     }
 }
 
-/// Render every `op` in `ops` to bytes, in order.
-#[must_use]
-pub fn encode_all(ops: &[Op]) -> Vec<u8> {
-    let mut out = Vec::new();
+/// Append the byte encoding of every `op` in `ops` to `out`, in order.
+pub fn encode_all_into(ops: &[Op], out: &mut impl Extend<u8>) {
     for op in ops {
-        encode_into(op, &mut out);
+        encode_into(op, out);
     }
-    out
+}
+
+/// Push one byte into the sink.
+fn byte(out: &mut impl Extend<u8>, value: u8) {
+    out.extend([value]);
 }
 
 /// Write the CSI introducer (`ESC [`).
-fn csi(out: &mut Vec<u8>) {
-    out.push(control::ESC);
-    out.push(control::CSI);
+fn csi(out: &mut impl Extend<u8>) {
+    out.extend([control::ESC, control::CSI]);
 }
 
 /// Write `CSI <count> <final>` with `count` clamped up to `1`.
-fn csi_count(out: &mut Vec<u8>, count: u16, final_byte: u8) {
+fn csi_count(out: &mut impl Extend<u8>, count: u16, final_byte: u8) {
     csi(out);
     push_decimal(out, count.max(1));
-    out.push(final_byte);
+    byte(out, final_byte);
 }
 
 /// Write `CSI <value> <final>` with `value` emitted verbatim (used where `0` is
 /// a meaningful parameter, e.g. erase modes).
-fn csi_value(out: &mut Vec<u8>, value: u16, final_byte: u8) {
+fn csi_value(out: &mut impl Extend<u8>, value: u16, final_byte: u8) {
     csi(out);
     push_decimal(out, value);
-    out.push(final_byte);
+    byte(out, final_byte);
 }
 
 /// Write a DEC private mode set (`CSI ? <mode> h`) or reset
 /// (`CSI ? <mode> l`).
-fn private_mode(out: &mut Vec<u8>, mode: u16, set: bool) {
+fn private_mode(out: &mut impl Extend<u8>, mode: u16, set: bool) {
     csi(out);
-    out.push(control::PRIVATE);
+    byte(out, control::PRIVATE);
     push_decimal(out, mode);
-    out.push(if set {
-        control::SET_MODE
-    } else {
-        control::RESET_MODE
-    });
+    byte(
+        out,
+        if set {
+            control::SET_MODE
+        } else {
+            control::RESET_MODE
+        },
+    );
+}
+
+/// The most numeric parameters any one SGR operation encodes (`38;2;r;g;b` is
+/// five); a fixed inline buffer collects them so the emitter needs no heap.
+const MAX_SGR_PARAMS: usize = 5;
+
+/// A fixed-capacity `u16` sink for the parameters of one SGR operation.
+struct SgrParams {
+    buf: [u16; MAX_SGR_PARAMS],
+    len: usize,
+}
+
+impl Extend<u16> for SgrParams {
+    fn extend<T: IntoIterator<Item = u16>>(&mut self, iter: T) {
+        for value in iter {
+            if self.len < self.buf.len() {
+                self.buf[self.len] = value;
+                self.len += 1;
+            }
+        }
+    }
 }
 
 /// Write `CSI <params> m` for one SGR operation.
-fn encode_sgr(out: &mut Vec<u8>, sgr: Sgr) {
-    let mut params = Vec::new();
+fn encode_sgr(out: &mut impl Extend<u8>, sgr: Sgr) {
+    let mut params = SgrParams {
+        buf: [0; MAX_SGR_PARAMS],
+        len: 0,
+    };
     sgr.write_params(&mut params);
     csi(out);
-    for (i, param) in params.iter().enumerate() {
+    for (i, param) in params.buf[..params.len].iter().enumerate() {
         if i > 0 {
-            out.push(control::SEPARATOR);
+            byte(out, control::SEPARATOR);
         }
         push_decimal(out, *param);
     }
-    out.push(control::SGR);
+    byte(out, control::SGR);
 }
 
 /// Write the canonical encoding of a named [`Key`]: `ESC O <byte>` for the keys
 /// with an `SS3` form (`F1`…`F4`), otherwise `CSI <param> ~`.
-fn encode_key(out: &mut Vec<u8>, key: Key) {
+fn encode_key(out: &mut impl Extend<u8>, key: Key) {
     if let Some(final_byte) = key.ss3_final() {
-        out.push(control::ESC);
-        out.push(control::SS3);
-        out.push(final_byte);
+        out.extend([control::ESC, control::SS3, final_byte]);
     } else if let Some(param) = key.tilde_param() {
         csi_value(out, param, control::TILDE);
     }
@@ -162,34 +179,34 @@ fn encode_key(out: &mut Vec<u8>, key: Key) {
 
 /// Write one SGR mouse report: `CSI < Cb ; Cx ; Cy M` for a press, `… m` for a
 /// release. Coordinates clamp up to `1` so a degenerate `0` round-trips.
-fn encode_mouse(out: &mut Vec<u8>, report: &crate::mouse::MouseReport) {
+fn encode_mouse(out: &mut impl Extend<u8>, report: &crate::mouse::MouseReport) {
     csi(out);
-    out.push(control::MOUSE_SGR);
+    byte(out, control::MOUSE_SGR);
     push_decimal(out, report.encode_button());
-    out.push(control::SEPARATOR);
+    byte(out, control::SEPARATOR);
     push_decimal(out, report.col.max(1));
-    out.push(control::SEPARATOR);
+    byte(out, control::SEPARATOR);
     push_decimal(out, report.row.max(1));
-    out.push(if report.pressed {
-        control::MOUSE_PRESS
-    } else {
-        control::MOUSE_RELEASE
-    });
+    byte(
+        out,
+        if report.pressed {
+            control::MOUSE_PRESS
+        } else {
+            control::MOUSE_RELEASE
+        },
+    );
 }
 
 /// Write `OSC 0 ; <title> ST` (using the `BEL` string terminator xterm
 /// accepts).
-fn encode_title(out: &mut Vec<u8>, title: &str) {
-    out.push(control::ESC);
-    out.push(control::OSC);
-    out.push(b'0');
-    out.push(control::SEPARATOR);
-    out.extend_from_slice(title.as_bytes());
-    out.push(control::BEL);
+fn encode_title(out: &mut impl Extend<u8>, title: &crate::op::Title) {
+    out.extend([control::ESC, control::OSC, b'0', control::SEPARATOR]);
+    out.extend(title.as_bytes().iter().copied());
+    byte(out, control::BEL);
 }
 
 /// Append the decimal ASCII digits of `value` to `out` (no `as` cast).
-fn push_decimal(out: &mut Vec<u8>, value: u16) {
+fn push_decimal(out: &mut impl Extend<u8>, value: u16) {
     // `u16::MAX` is 65535 — five digits at most.
     let mut buf = [0u8; 5];
     let mut remaining = value;
@@ -203,5 +220,5 @@ fn push_decimal(out: &mut Vec<u8>, value: u16) {
             break;
         }
     }
-    out.extend_from_slice(&buf[start..]);
+    out.extend(buf[start..].iter().copied());
 }

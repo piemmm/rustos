@@ -10,7 +10,7 @@
 //! * 24-bit truecolour, selected by `38;2;r;g;b` / `48;2;r;g;b`.
 //!
 //! Each [`Color`] variant has exactly one canonical encoding, so a colour
-//! emitted by [`crate::encode`] parses back to the identical [`Color`].
+//! emitted by [`crate::encode_into`] parses back to the identical [`Color`].
 
 /// One of the sixteen ANSI named colours: the eight base colours and their
 /// eight bright counterparts.

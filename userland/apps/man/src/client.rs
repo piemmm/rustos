@@ -11,7 +11,7 @@ use rustos_cmdres::bundle_candidates;
 use rustos_help::{
     load, render_full, render_short, DocumentName, Fallback, LoadError, Loaded, Locale,
 };
-use rustos_vt::encode_all;
+use rustos_vt::{encode_all_into, Op};
 
 use crate::command::Command;
 use crate::error::ManError;
@@ -82,7 +82,7 @@ fn short_help(
     });
     match loaded {
         Ok(loaded) => {
-            let bytes = encode_all(&render_short(&loaded.doc));
+            let bytes = encode_ops(&render_short(&loaded.doc));
             console.write_all(&bytes).map_err(ManError::Output)
         }
         // The tool's own page being missing must not make `-h` fail: the
@@ -111,8 +111,16 @@ fn page(
     let source = ScopedHelp::new(store, &bundle_dir);
     let loaded = load(&source, &requested, &name).map_err(from_load(word, name_str))?;
     emit_fallback_record(console, &requested, &loaded);
-    let bytes = encode_all(&render_full(&loaded.doc));
+    let bytes = encode_ops(&render_full(&loaded.doc));
     write_paged(&bytes, console)
+}
+
+/// Encode a rendered `Op` sequence to bytes over the allocation-free
+/// [`encode_all_into`] sink API.
+fn encode_ops(ops: &[Op]) -> alloc::vec::Vec<u8> {
+    let mut out = alloc::vec::Vec::new();
+    encode_all_into(ops, &mut out);
+    out
 }
 
 /// The document a command word names inside its bundle: the word itself

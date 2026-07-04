@@ -8,7 +8,7 @@ use core::fmt::Write as _;
 
 use rustos_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
 use rustos_help::{load, render_short, DocumentName, HelpSource, Locale};
-use rustos_vt::encode_all;
+use rustos_vt::encode_all_into;
 
 use crate::command::Command;
 use crate::error::LsError;
@@ -66,7 +66,11 @@ fn short_help(
         .ok()
         .and_then(|name| load(help, &active_locale(locale), &name).ok());
     let bytes = match &loaded {
-        Some(loaded) => encode_all(&render_short(&loaded.doc)),
+        Some(loaded) => {
+            let mut bytes = Vec::new();
+            encode_all_into(&render_short(&loaded.doc), &mut bytes);
+            bytes
+        }
         // The tool's own page being missing must not make `-h` fail: the
         // usage banner is the tool's own text, not fabricated help content.
         None => format!("{USAGE}\n").into_bytes(),

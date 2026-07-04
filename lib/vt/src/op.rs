@@ -2,11 +2,9 @@
 //!
 //! An [`Op`] is one unit of the ANSI / VT / xterm stream: a printed character,
 //! a C0 control, or a recognised escape sequence. It is the shared currency of
-//! the crate — [`crate::encode`] turns an [`Op`] into bytes and [`crate::Parser`]
-//! turns bytes back into [`Op`]s — so the emitter and consumer never disagree
-//! about what a sequence means.
-
-use alloc::string::String;
+//! the crate — [`crate::encode_into`] turns an [`Op`] into bytes and
+//! [`crate::Parser`] turns bytes back into [`Op`]s — so the emitter and
+//! consumer never disagree about what a sequence means.
 
 use crate::attr::Sgr;
 use crate::key::Key;
@@ -54,6 +52,12 @@ impl EraseMode {
 /// 1-based with `1,1` the home cell). The emitter clamps a count up to `1`, so
 /// every [`Op`] the emitter writes parses back unchanged.
 #[derive(Clone, Debug, Eq, PartialEq)]
+// The `SetTitle` payload is a bounded inline title; owning it inline is the
+// only representation that survives the encode/parse round trip, works on the
+// no-allocator console build, and stays a fail-closed bound rather than a heap
+// box. See `SetTitle` for the full rationale. Title operations are rare, so the
+// wider enum does not sit on the character-printing hot path.
+#[allow(clippy::large_enum_variant)]
 pub enum Op {
     /// Print one character at the cursor.
     Print(char),
@@ -120,8 +124,20 @@ pub enum Op {
     RestoreCursor,
     /// One Select Graphic Rendition operation (`CSI … m`).
     Sgr(Sgr),
-    /// Set the window title (`OSC 0 ; title ST`).
-    SetTitle(String),
+    /// Set the window title (`OSC 0 ; title ST`). The title is a bounded,
+    /// allocation-free [`Title`], so `Op` owns no heap and the vocabulary runs
+    /// on a target with no global allocator (the framebuffer boot console).
+    ///
+    /// This is the one large `Op` variant, and it must be: the encode↔parse
+    /// round trip requires the title text to be *owned* by `Op` (a borrowed
+    /// `&str` could not survive being collected into a queue), the no-allocator
+    /// console build rules out boxing it on the heap, and truncation at
+    /// [`MAX_TITLE`] is a fail-closed validation bound rather than a growable
+    /// capacity. Owning the bytes inline is therefore the only representation
+    /// that satisfies all three; the alternative of a heap box is unavailable
+    /// where the vocabulary must run. Title operations are rare, so the wider
+    /// enum does not sit on the character-printing hot path in practice.
+    SetTitle(Title),
     /// A named (function / editing) key (`SS3` or `CSI … ~`). The arrow keys
     /// are *not* here — in normal cursor mode they are the cursor-movement
     /// operations above.
@@ -141,4 +157,89 @@ pub enum Op {
     PasteStart,
     /// The end of a bracketed paste (`CSI 201 ~`).
     PasteEnd,
+}
+
+/// The largest window title retained, in bytes.
+///
+/// A longer title is truncated at a UTF-8 character boundary. This bound is
+/// what keeps [`Title`] — and therefore [`Op`] — allocation-free (`AGENTS.md`
+/// §24.4: a fixed validation bound, not a growable capacity).
+pub const MAX_TITLE: usize = 256;
+
+/// A bounded, allocation-free window title: the payload of [`Op::SetTitle`].
+///
+/// It stores up to [`MAX_TITLE`] bytes of UTF-8 inline, so it owns no heap and
+/// works on a target with no global allocator. Construction truncates an
+/// over-long title at a character boundary (fail-closed), so [`Title::as_str`]
+/// is always valid UTF-8.
+#[derive(Copy, Clone, Eq, PartialEq)]
+pub struct Title {
+    bytes: [u8; MAX_TITLE],
+    len: usize,
+}
+
+impl Title {
+    /// An empty title.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            bytes: [0; MAX_TITLE],
+            len: 0,
+        }
+    }
+
+    /// A title from a string, truncated at a character boundary to at most
+    /// [`MAX_TITLE`] bytes.
+    #[must_use]
+    pub fn from_text(text: &str) -> Self {
+        let mut end = text.len().min(MAX_TITLE);
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        let mut title = Self::new();
+        title.bytes[..end].copy_from_slice(&text.as_bytes()[..end]);
+        title.len = end;
+        title
+    }
+
+    /// A title from raw bytes: the longest valid UTF-8 prefix, truncated to at
+    /// most [`MAX_TITLE`] bytes (fail-closed on invalid encoding).
+    #[must_use]
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        let capped = &bytes[..bytes.len().min(MAX_TITLE)];
+        let valid = match core::str::from_utf8(capped) {
+            Ok(text) => text,
+            Err(error) => {
+                // Keep the valid prefix; drop the malformed tail.
+                core::str::from_utf8(&capped[..error.valid_up_to()]).unwrap_or("")
+            }
+        };
+        Self::from_text(valid)
+    }
+
+    /// The title as a string slice (always valid UTF-8).
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        // The bytes were validated as UTF-8 at construction; fall back to the
+        // empty string rather than ever panicking (`AGENTS.md` §2.9).
+        core::str::from_utf8(&self.bytes[..self.len]).unwrap_or("")
+    }
+
+    /// The title's UTF-8 bytes.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+}
+
+impl Default for Title {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl core::fmt::Debug for Title {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_tuple("Title").field(&self.as_str()).finish()
+    }
 }

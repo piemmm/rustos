@@ -4,7 +4,7 @@
 //! parses straight back. The `*_never_panics`/robustness tests exercise the
 //! fail-closed parser on hostile and partial input.
 
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -12,8 +12,23 @@ use crate::attr::Attributes;
 use crate::color::{BasicColor, Color};
 use crate::key::Key;
 use crate::mouse::{MouseButton, MouseMode, MouseReport};
-use crate::op::EraseMode;
-use crate::{encode, encode_all, Op, Parser, Sgr};
+use crate::op::{EraseMode, Title};
+use crate::{encode_all_into, encode_into, Op, Parser, Sgr};
+
+/// Encode one operation into a fresh `Vec` (test convenience over the
+/// allocation-free [`encode_into`] sink API).
+fn encode(op: &Op) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_into(op, &mut out);
+    out
+}
+
+/// Encode a sequence of operations into a fresh `Vec`.
+fn encode_all(ops: &[Op]) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_all_into(ops, &mut out);
+    out
+}
 
 /// Parse `bytes` to completion, collecting every emitted [`Op`].
 fn parse_all(bytes: &[u8]) -> Vec<Op> {
@@ -268,14 +283,14 @@ fn window_title_round_trips() {
         "semi;colon",
         "café",
     ] {
-        assert_round_trip(Op::SetTitle(title.to_string()));
+        assert_round_trip(Op::SetTitle(Title::from_text(title)));
     }
 }
 
 #[test]
 fn a_whole_program_stream_round_trips() {
     let ops = vec![
-        Op::SetTitle("rustos".to_string()),
+        Op::SetTitle(Title::from_text("rustos")),
         Op::EnterAltScreen,
         Op::HideCursor,
         Op::CursorPosition { row: 1, col: 1 },

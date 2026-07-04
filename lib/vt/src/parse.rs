@@ -12,14 +12,11 @@
 //! ([`MAX_PARAMS`], [`MAX_STRING`]), and an unrecognised, oversized, or
 //! malformed sequence is consumed and dropped rather than corrupting state.
 
-use alloc::string::String;
-use alloc::vec::Vec;
-
 use crate::attr::decode_params;
 use crate::control;
 use crate::key::Key;
 use crate::mouse::{MouseMode, MouseReport};
-use crate::op::{EraseMode, Op};
+use crate::op::{EraseMode, Op, Title};
 
 /// The largest value a numeric CSI parameter accumulates to; further digits
 /// saturate here so a long digit run cannot overflow.
@@ -62,17 +59,25 @@ enum State {
 }
 
 /// A streaming interpreter from terminal bytes to [`Op`] events.
+///
+/// The parameter and string buffers are fixed-size inline arrays bounded by
+/// [`MAX_PARAMS`] and [`MAX_STRING`], so the parser holds no heap allocation
+/// and runs on an allocator-free target (the framebuffer boot console). The
+/// bounds are the same ones that keep the parser total against hostile input:
+/// a parameter or string byte past the bound is consumed and dropped.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Parser {
     state: State,
-    params: Vec<u16>,
+    params: [u16; MAX_PARAMS],
+    params_len: usize,
     accumulator: u32,
     private: bool,
     mouse_sgr: bool,
     utf8_remaining: u8,
     utf8_acc: u32,
     utf8_min: u32,
-    str_buf: Vec<u8>,
+    str_buf: [u8; MAX_STRING],
+    str_len: usize,
     str_esc: bool,
 }
 
@@ -88,16 +93,23 @@ impl Parser {
     pub const fn new() -> Self {
         Self {
             state: State::Ground,
-            params: Vec::new(),
+            params: [0; MAX_PARAMS],
+            params_len: 0,
             accumulator: 0,
             private: false,
             mouse_sgr: false,
             utf8_remaining: 0,
             utf8_acc: 0,
             utf8_min: 0,
-            str_buf: Vec::new(),
+            str_buf: [0; MAX_STRING],
+            str_len: 0,
             str_esc: false,
         }
+    }
+
+    /// The parameters accumulated for the CSI sequence in progress.
+    fn params(&self) -> &[u16] {
+        &self.params[..self.params_len]
     }
 
     /// Feed a slice of bytes, invoking `sink` once per recognised [`Op`] in
@@ -217,7 +229,7 @@ impl Parser {
     /// Enter the CSI state with cleared parameter accumulation.
     fn begin_csi(&mut self) {
         self.state = State::Csi;
-        self.params.clear();
+        self.params_len = 0;
         self.accumulator = 0;
         self.private = false;
         self.mouse_sgr = false;
@@ -252,9 +264,10 @@ impl Parser {
     /// Commit the parameter currently being accumulated, dropping it once the
     /// buffer is full.
     fn push_param(&mut self) {
-        if self.params.len() < MAX_PARAMS {
+        if self.params_len < MAX_PARAMS {
             let value = u16::try_from(self.accumulator).unwrap_or(u16::MAX);
-            self.params.push(value);
+            self.params[self.params_len] = value;
+            self.params_len += 1;
         }
         self.accumulator = 0;
     }
@@ -290,7 +303,7 @@ impl Parser {
             // (`m`) is the same byte as the SGR final.
             control::MOUSE_PRESS if self.mouse_sgr => self.dispatch_mouse(true, sink),
             control::MOUSE_RELEASE if self.mouse_sgr => self.dispatch_mouse(false, sink),
-            control::SGR => decode_params(&self.params, |sgr| sink(Op::Sgr(sgr))),
+            control::SGR => decode_params(self.params(), |sgr| sink(Op::Sgr(sgr))),
             control::SET_MODE => self.dispatch_mode(true, sink),
             control::RESET_MODE => self.dispatch_mode(false, sink),
             control::TILDE => self.dispatch_tilde(sink),
@@ -302,7 +315,7 @@ impl Parser {
     /// function / editing key. An unrecognised parameter fails closed and is
     /// dropped.
     fn dispatch_tilde(&self, sink: &mut impl FnMut(Op)) {
-        match self.params.first().copied() {
+        match self.params().first().copied() {
             Some(control::PASTE_START) => sink(Op::PasteStart),
             Some(control::PASTE_END) => sink(Op::PasteEnd),
             Some(param) => {
@@ -317,9 +330,11 @@ impl Parser {
     /// Dispatch a `CSI < Cb ; Cx ; Cy M` (press) or `… m` (release) SGR mouse
     /// report. A report missing its coordinates is malformed and dropped.
     fn dispatch_mouse(&self, pressed: bool, sink: &mut impl FnMut(Op)) {
-        let (Some(&cb), Some(&col), Some(&row)) =
-            (self.params.first(), self.params.get(1), self.params.get(2))
-        else {
+        let (Some(&cb), Some(&col), Some(&row)) = (
+            self.params().first(),
+            self.params().get(1),
+            self.params().get(2),
+        ) else {
             return;
         };
         sink(Op::Mouse(MouseReport::decode(cb, col, row, pressed)));
@@ -327,7 +342,7 @@ impl Parser {
 
     /// Dispatch `DECSTBM`: two parameters set the region, fewer reset it.
     fn dispatch_scroll_region(&self, sink: &mut impl FnMut(Op)) {
-        if self.params.len() >= 2 {
+        if self.params_len >= 2 {
             sink(Op::SetScrollRegion {
                 top: self.position(0),
                 bottom: self.position(1),
@@ -342,7 +357,7 @@ impl Parser {
         if !self.private {
             return;
         }
-        let op = match self.params.first().copied() {
+        let op = match self.params().first().copied() {
             Some(control::MODE_CURSOR_VISIBLE) => {
                 if set {
                     Op::ShowCursor
@@ -370,7 +385,7 @@ impl Parser {
     /// A movement count: the first parameter, with a missing or zero value
     /// meaning `1` (ANSI's default).
     fn count(&self) -> u16 {
-        self.params
+        self.params()
             .first()
             .copied()
             .filter(|&v| v != 0)
@@ -380,7 +395,7 @@ impl Parser {
     /// A 1-based position parameter at `index`, with a missing or zero value
     /// meaning `1` (the home coordinate).
     fn position(&self, index: usize) -> u16 {
-        self.params
+        self.params()
             .get(index)
             .copied()
             .filter(|&v| v != 0)
@@ -389,13 +404,13 @@ impl Parser {
 
     /// An erase mode value: the first parameter, defaulting to `0`.
     fn mode(&self) -> u16 {
-        self.params.first().copied().unwrap_or(0)
+        self.params().first().copied().unwrap_or(0)
     }
 
     /// Enter a string (OSC/DCS) collection state with an empty buffer.
     fn begin_string(&mut self, kind: StringKind) {
         self.state = State::Str(kind);
-        self.str_buf.clear();
+        self.str_len = 0;
         self.str_esc = false;
     }
 
@@ -418,34 +433,36 @@ impl Parser {
             control::BEL => self.finish_string(kind, sink),
             control::ESC => self.str_esc = true,
             _ => {
-                if self.str_buf.len() < MAX_STRING {
-                    self.str_buf.push(byte);
+                if self.str_len < MAX_STRING {
+                    self.str_buf[self.str_len] = byte;
+                    self.str_len += 1;
                 }
             }
         }
     }
 
-    /// Terminate a string and, for an OSC that set the title, emit it.
+    /// Terminate a string and, for an OSC that set the title, emit it as a
+    /// bounded inline [`Title`] (no heap).
     fn finish_string(&mut self, kind: StringKind, sink: &mut impl FnMut(Op)) {
         self.state = State::Ground;
         if kind == StringKind::Osc {
-            if let Some(title) = title_from_osc(&self.str_buf) {
+            if let Some(title) = title_from_osc(&self.str_buf[..self.str_len]) {
                 sink(Op::SetTitle(title));
             }
         }
-        self.str_buf.clear();
+        self.str_len = 0;
     }
 }
 
 /// Extract a window title from an OSC body of the form `Ps ; text`, accepting
 /// the title-setting commands `0` (icon + title) and `2` (title). Returns
 /// `None` for any other command or a body without a `;` separator.
-fn title_from_osc(body: &[u8]) -> Option<String> {
+fn title_from_osc(body: &[u8]) -> Option<Title> {
     let separator = body.iter().position(|&b| b == control::SEPARATOR)?;
     let (command, rest) = body.split_at(separator);
     let text = rest.get(1..)?;
     if matches!(command, b"0" | b"2") {
-        Some(String::from_utf8_lossy(text).into_owned())
+        Some(Title::from_bytes(text))
     } else {
         None
     }

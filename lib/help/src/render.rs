@@ -1,7 +1,7 @@
 //! Rendering the two help surfaces as `lib/vt` operations.
 //!
 //! Both renderers emit a `Vec<rustos_vt::Op>` the caller encodes with
-//! `rustos_vt::encode_all` and writes to its own stdout stream. Emitting
+//! `rustos_vt::encode_all_into` and writes to its own stdout stream. Emitting
 //! typed operations rather than raw bytes keeps the escape vocabulary the
 //! one `lib/vt` definition, and — because the parser already rejected every
 //! control character — guarantees the output carries no control bytes

@@ -13,7 +13,14 @@ use rustos_geometry::Rect;
 use rustos_raster::Color;
 use rustos_theme::Theme;
 
-use rustos_vt::{encode_all, BasicColor, Color as VtColor, Op, Sgr};
+use rustos_vt::{encode_all_into, BasicColor, Color as VtColor, Op, Sgr};
+
+/// Encode a sequence of operations into a fresh `Vec` over the sink API.
+fn encode_all(ops: &[Op]) -> alloc::vec::Vec<u8> {
+    let mut out = alloc::vec::Vec::new();
+    encode_all_into(ops, &mut out);
+    out
+}
 
 use crate::grid::{Grid, MAX_DIMENSION};
 use crate::parser::Parser;

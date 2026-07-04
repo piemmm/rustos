@@ -1857,10 +1857,17 @@ console".
   `fdt::scan_translated` walk; `bring_up` (over the `lib/vcmailbox`
   `MailboxTransport` seam) queries the display's EDID-derived native
   size (`0×0` = no display → UART keeps the console) and allocates a
-  32-bit surface at exactly that size; `Geometry`/`TextConsole` render
-  the shared `rustos_font::glyphs` 5×7 atlas (§2.2) at an integer
-  scale (`height / 360`, clamped 1…4) on a ring grid (wrap-to-cleared
-  top row — no megabyte scroll copies per log line, §2.16).
+  32-bit surface at exactly that size. `TextConsole` is a full
+  `xterm-256color` terminal: shell output is fed through the one shared
+  streaming parser (`rustos_vt::Parser`, §2.2 — no second escape parser,
+  depended `default-features = false` so only its allocation-free parser
+  view links into the allocator-free QEMU bins) and each `Op` is applied
+  straight to the scan-out surface — SGR 16/256/truecolour, bold/reverse,
+  cursor positioning, erase, scroll region, and explicit scroll. Glyphs
+  are the shared `rustos_font::glyphs` 5×7 atlas (§2.2) at an integer
+  scale (`height / 360`, clamped 1…4). There is no retained cell grid, so
+  reaching the bottom margin scrolls the pixels up one line (a real
+  terminal scroll), not a ring wrap.
 - Bring-up runs in the **pre-MMU** phase of
   `rustos-kernel::boot_aarch64` (caches off ⇒ the property exchange is
   DMA-coherent with no maintenance; the state cell is written by the
@@ -1881,8 +1888,11 @@ console".
 - Host tests: fixture mailbox discovery (translated `0xFE00_B880`),
   mailboxless-tree fallback, mock-firmware bring-up (native mode,
   detached display, inconsistent answer), the geometry scale policy and
-  fail-closed surface validation, and the renderer (glyph rows,
-  `?` fallback, `\n`/`\r`, column wrap, ring-row clear, dirty bands).
+  fail-closed surface validation, and the terminal renderer (glyph
+  rows in the default colours, SGR colour interpreted-not-printed,
+  256-colour/truecolour, reverse video, control-byte drop, `?` fallback,
+  backspace/`\r`, absolute cursor positioning, erase-in-line, upward
+  scroll on reaching the bottom, explicit `SU`, dirty bands).
 
 **Accepted on metal.** The boot log renders on the attached HDMI display
 on a real Pi 4 (`video_console=true`), and a detached-display boot proves

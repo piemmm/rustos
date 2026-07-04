@@ -176,9 +176,10 @@ impl Grid {
         self.cursor_visible = visible;
     }
 
-    /// Set the window title.
-    pub fn set_title(&mut self, title: String) {
-        self.title = title;
+    /// Set the window title from a parsed OSC title.
+    pub fn set_title(&mut self, title: &str) {
+        self.title.clear();
+        self.title.push_str(title);
     }
 
     /// Write `ch` at the cursor with the current pen and advance one column,

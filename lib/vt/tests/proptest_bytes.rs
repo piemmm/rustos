@@ -14,7 +14,15 @@
 
 use proptest::prelude::*;
 
-use rustos_vt::{encode, BasicColor, Color, EraseMode, Op, Parser, Sgr};
+use rustos_vt::{encode_into, BasicColor, Color, EraseMode, Op, Parser, Sgr};
+
+/// Encode one operation into a fresh `Vec` over the allocation-free
+/// [`encode_into`] sink API.
+fn encode(op: &Op) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_into(op, &mut out);
+    out
+}
 
 /// Collect every [`Op`] the parser emits for `bytes`, fed as one slice.
 fn parse_all(bytes: &[u8]) -> Vec<Op> {

@@ -34,8 +34,9 @@ pub struct CursorState {
 /// Produce the operations that transform `previous` into `desired` on a
 /// terminal with capabilities `caps`, leaving the cursor in `cursor`.
 ///
-/// The returned operations are intended to be encoded with [`rustos_vt::encode_all`]
-/// and written to the tty. When `previous == desired` and the cursor is
+/// The returned operations are intended to be encoded with
+/// [`rustos_vt::encode_all_into`] and written to the tty. When
+/// `previous == desired` and the cursor is
 /// already placed, the result is empty — the renderer emits nothing when
 /// nothing changed.
 #[must_use]

@@ -31,10 +31,20 @@ It ships **both** an emitter (`Op` → bytes) and a streaming parser (bytes →
 `Op` events) built over the *same* tables, so the two provably agree: every
 operation the emitter writes parses back to the identical operation.
 
-`no_std` + `alloc`. The parser is total: any byte stream is consumed without
-panic or out-of-bounds access (`AGENTS.md` §2.9); an unrecognised or oversized
-sequence is dropped safely. No `unwrap` / `expect` / `panic!`, and nothing
-ever touches fd 3 (`stdinfo`, §20).
+`no_std`, with an **optional default-on `alloc` feature**. The parser and its
+`Op` / `Cell` / `Attributes` vocabulary are **allocation-free** regardless: the
+`Parser` uses fixed inline buffers bounded by `MAX_PARAMS` / `MAX_STRING`, so it
+holds no heap. The `alloc` feature (on by default) adds the two views that need
+a heap — the byte **emitter** (`encode` / `encode_all` / `encode_into` and
+`Sgr::write_params`) and the OSC window-title operation (`Op::SetTitle`, which
+owns a `String`). A consumer with no global allocator — the aarch64 framebuffer
+boot console — depends on the crate with `default-features = false` and takes
+just the parser; every emitter-side consumer (the curses renderer, `termcap`,
+`man`, the terminal app) keeps the default features and is unchanged. The split
+mirrors `lib/font`'s atlas-only `render` feature. The parser is total: any byte
+stream is consumed without panic or out-of-bounds access (`AGENTS.md` §2.9); an
+unrecognised or oversized sequence is dropped safely. No `unwrap` / `expect` /
+`panic!`, and nothing ever touches fd 3 (`stdinfo`, §20).
 
 ## Layering
 

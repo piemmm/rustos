@@ -45,6 +45,7 @@ members = [
     "lib/devmatch",
     "lib/dma-barrier",
     "lib/drvrt",
+    "lib/fbcon",
     "lib/fdt",
     "lib/font",
     "lib/fsmeta",

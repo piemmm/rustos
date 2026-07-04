@@ -483,8 +483,8 @@ version = "0.0.0"
 dependencies = [
  "rustos-abi",
  "rustos-arch-api",
+ "rustos-fbcon",
  "rustos-fdt",
- "rustos-font",
  "rustos-fwcfg",
  "rustos-log",
  "rustos-rng",
@@ -879,6 +879,14 @@ dependencies = [
  "rustos-cmdres",
  "rustos-resref",
  "rustos-rt",
+ "rustos-vt",
+]
+
+[[package]]
+name = "rustos-fbcon"
+version = "0.0.0"
+dependencies = [
+ "rustos-font",
  "rustos-vt",
 ]
 

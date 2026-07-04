@@ -6,7 +6,14 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use rustos_vt::{encode_all, Op};
+use rustos_vt::{encode_all_into, Op};
+
+/// Encode a sequence of operations into a fresh `Vec` over the sink API.
+fn encode_all(ops: &[Op]) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_all_into(ops, &mut out);
+    out
+}
 
 use crate::{
     load, render_full, render_short, Align, Block, DocumentName, Fallback, HelpDoc, HelpError,

@@ -19,7 +19,7 @@ use alloc::vec::Vec;
 use core::time::Duration;
 
 use rustos_termcap::{Capabilities, TermType};
-use rustos_vt::{encode_all, MouseMode, Op};
+use rustos_vt::{encode_all_into, MouseMode, Op};
 
 use crate::buffer::Buffer;
 use crate::color::{ColorPairs, DEFAULT_PAIR};
@@ -358,7 +358,8 @@ impl<T: Tty> Screen<T> {
         if ops.is_empty() {
             return Ok(());
         }
-        let bytes = encode_all(ops);
+        let mut bytes = Vec::new();
+        encode_all_into(ops, &mut bytes);
         self.tty.write(&bytes)
     }
 }

@@ -5,9 +5,9 @@
 //! last resort). On the Raspberry Pi the display pipeline is owned by
 //! the `VideoCore` firmware, so this module asks it for a scan-out
 //! surface over the shared mailbox property-channel client
-//! (`rustos_vcmailbox`) and renders the kernel log
-//! into that surface with the shared 5×7 glyph atlas
-//! (`rustos_font::glyphs` — one font definition).
+//! (`rustos_vcmailbox`) and renders the kernel log into that surface
+//! with the shared, architecture-neutral framebuffer text-console engine
+//! (`rustos_fbcon` — one terminal definition across every arch port).
 //!
 //! Bring-up runs **before the MMU is enabled** (`configure_from_fdt`
 //! is an early-returning, `ranges`-aware walk like the console/GIC
@@ -35,19 +35,11 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use rustos_abi::driver::display::DisplayFormat;
+use rustos_fbcon::Geometry;
 use rustos_fdt::Fdt;
-use rustos_font::glyphs;
 use rustos_vcmailbox::{
     discover_framebuffer, query_display_size, FramebufferRequest, MailboxTransport,
 };
-
-/// The ECMA-48 / ASCII Backspace control byte, as `lib/vt`'s `control::BS`
-/// spells it. Named locally because `rustos-vt` unconditionally links
-/// `alloc`, and feature unification across the single aarch64-none
-/// test-matrix build would force a global allocator into the minimal,
-/// allocator-free QEMU binaries — the same constraint that keeps the
-/// render lock below off `lib/sync`.
-const BS: u8 = 0x08;
 
 /// Compatible string of the BCM283x/BCM2711 firmware mailbox doorbell.
 const MAILBOX_COMPATIBLE: &[u8] = b"brcm,bcm2835-mbox";
@@ -82,36 +74,13 @@ pub fn find_mailbox(fdt: &Fdt<'_>) -> Option<DiscoveredMailbox> {
     })
 }
 
-// --- Text geometry and renderer -------------------------------------------
-
-/// Glyph cell width in pixels at scale 1: the atlas glyph plus one
-/// column of inter-character spacing.
-const CELL_WIDTH: u32 = glyphs::GLYPH_WIDTH + 1;
-
-/// Glyph cell height in pixels at scale 1: the atlas glyph plus one row
-/// of inter-line spacing.
-const CELL_HEIGHT: u32 = glyphs::GLYPH_HEIGHT + 1;
-
-/// Foreground (text) colour: light grey, opaque (grey is symmetric in
-/// both 32-bit channel orders, so the rendered text is correct whether
-/// the firmware honoured BGRA or RGBA).
-const FOREGROUND: u32 = 0xFFD8_D8D8;
-
-/// Background colour: opaque black.
-const BACKGROUND: u32 = 0xFF00_0000;
-
-/// Largest glyph scale the policy selects.
-///
-/// Beyond 4× the 5×7 atlas looks blocky without gaining legibility, so
-/// the policy caps there even on very tall displays.
-const MAX_SCALE: u32 = 4;
-
-/// Pixel rows of display height per unit of glyph scale.
-///
-/// `height / 360` keeps roughly 45 text rows on screen at every common
-/// mode (480p → 1×, 720p → 2×, 1080p → 3×, 2160p → 4×): enough boot log
-/// to read, large enough to read it on a TV across a room.
-const ROWS_PER_SCALE: u32 = 360;
+// --- Text geometry ---------------------------------------------------------
+//
+// The shared framebuffer text-console engine — the glyph atlas, palette,
+// scrolling, and the `Geometry` / `TextConsole` / `DirtyBand` types — lives in
+// `rustos_fbcon` so every arch port renders through one definition. This module
+// keeps only the board-specific surface discovery below and threads its
+// firmware-confirmed extents into `Geometry::for_display`.
 
 /// Fixed scan-out width of the QEMU `virt` ramfb boot console.
 ///
@@ -132,229 +101,6 @@ pub const RAMFB_HEIGHT_PX: u32 = 768;
 #[must_use]
 pub fn ramfb_geometry() -> Option<Geometry> {
     Geometry::for_display(RAMFB_WIDTH_PX, RAMFB_HEIGHT_PX, RAMFB_WIDTH_PX * 4)
-}
-
-/// Validated framebuffer text geometry: the scan-out extents plus the
-/// glyph scale the policy chose for them.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub struct Geometry {
-    /// Visible width in pixels.
-    pub width_px: u32,
-    /// Visible height in pixels.
-    pub height_px: u32,
-    /// Pixels (not bytes) between consecutive scanlines.
-    pub stride_px: u32,
-    /// Integer glyph scale (`1..=MAX_SCALE`).
-    pub scale: u32,
-}
-
-impl Geometry {
-    /// Derive the text geometry for a firmware-confirmed surface.
-    ///
-    /// Returns `None` when the surface cannot host even one glyph cell,
-    /// the pitch is not whole pixels, or the pitch is narrower than a
-    /// scanline — the caller leaves the video console unconfigured
-    /// rather than rendering out of bounds (fail closed: the geometry is firmware input).
-    #[must_use]
-    pub fn for_display(width_px: u32, height_px: u32, pitch_bytes: u32) -> Option<Self> {
-        if pitch_bytes % 4 != 0 {
-            return None;
-        }
-        let stride_px = pitch_bytes / 4;
-        if width_px == 0 || height_px == 0 || stride_px < width_px {
-            return None;
-        }
-        let scale = (height_px / ROWS_PER_SCALE).clamp(1, MAX_SCALE);
-        let geometry = Self {
-            width_px,
-            height_px,
-            stride_px,
-            scale,
-        };
-        (geometry.columns() != 0 && geometry.rows() != 0).then_some(geometry)
-    }
-
-    /// Text columns the surface holds.
-    #[must_use]
-    pub const fn columns(&self) -> u32 {
-        self.width_px / (CELL_WIDTH * self.scale)
-    }
-
-    /// Text rows the surface holds.
-    #[must_use]
-    pub const fn rows(&self) -> u32 {
-        self.height_px / (CELL_HEIGHT * self.scale)
-    }
-
-    /// Pixel rows one text row occupies.
-    const fn cell_height_px(&self) -> u32 {
-        CELL_HEIGHT * self.scale
-    }
-
-    /// Pixel columns one text column occupies.
-    const fn cell_width_px(&self) -> u32 {
-        CELL_WIDTH * self.scale
-    }
-
-    /// Pixel count of the rendered band (`stride × height`), the slice
-    /// length the renderer draws into.
-    #[must_use]
-    pub const fn pixel_count(&self) -> usize {
-        self.stride_px as usize * self.height_px as usize
-    }
-}
-
-/// The pixel-row band `[start, end)` a rendering call touched, so the
-/// freestanding writer can clean exactly those scanlines to the point
-/// of coherency.
-type DirtyBand = (u32, u32);
-
-/// Merge two optional dirty bands into their union.
-fn merge_bands(a: Option<DirtyBand>, b: Option<DirtyBand>) -> Option<DirtyBand> {
-    match (a, b) {
-        (Some((a0, a1)), Some((b0, b1))) => Some((a0.min(b0), a1.max(b1))),
-        (band, None) | (None, band) => band,
-    }
-}
-
-/// A fixed-grid text console rendering the shared 5×7 atlas
-/// ([`rustos_font::glyphs`]) into a borrowed row-major `u32` pixel
-/// buffer.
-///
-/// The grid is a **ring**: reaching the bottom row wraps the cursor to
-/// the top and clears that row, rather than copying the whole surface
-/// up one line — a scroll would re-write (and re-clean) megabytes per
-/// log line on the boot path.
-///
-/// Pure CPU pixel arithmetic over a borrowed slice, so the renderer is
-/// host-testable; the freestanding side wraps the firmware surface in a
-/// slice and adds the cache maintenance.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub struct TextConsole {
-    geometry: Geometry,
-    column: u32,
-    row: u32,
-}
-
-impl TextConsole {
-    /// A console at the top-left of a `geometry`-sized surface.
-    #[must_use]
-    pub const fn new(geometry: Geometry) -> Self {
-        Self {
-            geometry,
-            column: 0,
-            row: 0,
-        }
-    }
-
-    /// The validated geometry this console renders into.
-    #[must_use]
-    pub const fn geometry(&self) -> &Geometry {
-        &self.geometry
-    }
-
-    /// Clear the whole surface to the background and home the cursor,
-    /// returning the dirty band (the full surface height).
-    pub fn clear(&mut self, pixels: &mut [u32]) -> Option<DirtyBand> {
-        for pixel in pixels.iter_mut() {
-            *pixel = BACKGROUND;
-        }
-        self.column = 0;
-        self.row = 0;
-        Some((0, self.geometry.height_px))
-    }
-
-    /// Render one byte, returning the pixel-row band it touched.
-    ///
-    /// `\n` advances to the next (cleared) row, `\r` returns to column
-    /// zero, and backspace steps the cursor back one column (a no-op at
-    /// column zero, so a rub-out never walks off the line) — the console's
-    /// echo and secret-marker rub-outs are `BS SP BS`, so backspace must
-    /// move the cursor, never paint. Any other byte outside the
-    /// printable-ASCII atlas renders the `?` glyph rather than being
-    /// silently dropped.
-    pub fn write_byte(&mut self, pixels: &mut [u32], byte: u8) -> Option<DirtyBand> {
-        match byte {
-            b'\n' => Some(self.next_row(pixels)),
-            b'\r' => {
-                self.column = 0;
-                None
-            }
-            BS => {
-                self.column = self.column.saturating_sub(1);
-                None
-            }
-            _ => {
-                let printable = if (0x20..=0x7E).contains(&byte) {
-                    byte
-                } else {
-                    b'?'
-                };
-                let mut dirty = Some(self.blit_glyph(pixels, printable));
-                self.column += 1;
-                if self.column == self.geometry.columns() {
-                    dirty = merge_bands(dirty, Some(self.next_row(pixels)));
-                }
-                dirty
-            }
-        }
-    }
-
-    /// Advance to the next text row, wrapping ring-style and clearing
-    /// the row the cursor lands on.
-    fn next_row(&mut self, pixels: &mut [u32]) -> DirtyBand {
-        self.column = 0;
-        self.row = (self.row + 1) % self.geometry.rows();
-        self.clear_text_row(pixels, self.row)
-    }
-
-    /// Fill one text row with the background colour.
-    fn clear_text_row(&self, pixels: &mut [u32], row: u32) -> DirtyBand {
-        let geometry = &self.geometry;
-        let y0 = row * geometry.cell_height_px();
-        let y1 = y0 + geometry.cell_height_px();
-        for y in y0..y1 {
-            let start = y as usize * geometry.stride_px as usize;
-            let end = start + geometry.width_px as usize;
-            if let Some(span) = pixels.get_mut(start..end) {
-                for pixel in span {
-                    *pixel = BACKGROUND;
-                }
-            }
-        }
-        (y0, y1)
-    }
-
-    /// Blit one printable-ASCII glyph cell at the cursor.
-    fn blit_glyph(&self, pixels: &mut [u32], byte: u8) -> DirtyBand {
-        let geometry = &self.geometry;
-        let glyph = &glyphs::GLYPHS[(byte - glyphs::FIRST_CHAR as u8) as usize];
-        let x0 = self.column * geometry.cell_width_px();
-        let y0 = self.row * geometry.cell_height_px();
-        for cell_y in 0..CELL_HEIGHT {
-            let bits = if cell_y < glyphs::GLYPH_HEIGHT {
-                glyph[cell_y as usize]
-            } else {
-                0
-            };
-            for cell_x in 0..CELL_WIDTH {
-                let lit = cell_x < glyphs::GLYPH_WIDTH
-                    && bits & (1 << (glyphs::GLYPH_WIDTH - 1 - cell_x)) != 0;
-                let colour = if lit { FOREGROUND } else { BACKGROUND };
-                for sub_y in 0..geometry.scale {
-                    let y = (y0 + cell_y * geometry.scale + sub_y) as usize;
-                    let x = (x0 + cell_x * geometry.scale) as usize;
-                    let start = y * geometry.stride_px as usize + x;
-                    if let Some(span) = pixels.get_mut(start..start + geometry.scale as usize) {
-                        for pixel in span {
-                            *pixel = colour;
-                        }
-                    }
-                }
-            }
-        }
-        (y0, y0 + geometry.cell_height_px())
-    }
 }
 
 // --- Firmware bring-up ------------------------------------------------------
@@ -442,7 +188,7 @@ pub use metal::{configure_from_fdt, text_grid, write_bytes};
 
 /// Host stand-in for the freestanding writer: rendering needs the
 /// firmware surface, so on the host this is inert (the renderer itself
-/// is host-tested directly through [`TextConsole`]).
+/// is host-tested directly through [`rustos_fbcon::TextConsole`]).
 #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
 pub fn write_bytes(_bytes: &[u8]) {}
 
@@ -466,6 +212,7 @@ mod metal {
     use core::sync::atomic::{AtomicBool, Ordering};
 
     use rustos_abi::RegisterWindow;
+    use rustos_fbcon::TextConsole;
     use rustos_fdt::Fdt;
     use rustos_fwcfg::{FwCfg, MmioDma, RamfbConfig, DRM_FORMAT_XRGB8888};
     use rustos_vcmailbox::{
@@ -474,8 +221,8 @@ mod metal {
     };
 
     use super::{
-        bring_up, find_mailbox, merge_bands, ramfb_geometry, DirtyBand, DiscoveredMailbox,
-        DiscoveredVideo, Geometry, TextConsole, VIDEO_ACTIVE,
+        bring_up, find_mailbox, ramfb_geometry, DiscoveredMailbox, DiscoveredVideo, Geometry,
+        VIDEO_ACTIVE,
     };
 
     /// Serialises post-MMU rendering (cursor + surface writes) across
@@ -765,10 +512,7 @@ mod metal {
         let pixels = unsafe {
             core::slice::from_raw_parts_mut(state.fb_base as *mut u32, state.pixel_count)
         };
-        let mut dirty: Option<DirtyBand> = None;
-        for &byte in bytes {
-            dirty = merge_bands(dirty, state.console.write_byte(pixels, byte));
-        }
+        let dirty = state.console.write_bytes(pixels, bytes);
         if let Some((row_start, row_end)) = dirty {
             let stride_bytes = state.console.geometry().stride_px as usize * 4;
             clean_dcache_range(
@@ -839,10 +583,6 @@ mod metal {
 
 #[cfg(test)]
 mod tests {
-    extern crate alloc;
-    use alloc::vec;
-    use alloc::vec::Vec;
-
     use rustos_fdt::fixture::raspi_like_arm;
     use rustos_fdt::Fdt;
     use rustos_vcmailbox::mock::MockFirmware;
@@ -920,14 +660,6 @@ mod tests {
     // --- Geometry policy ---------------------------------------------
 
     #[test]
-    fn geometry_scale_policy_tracks_display_height() {
-        for (height, scale) in [(480, 1), (720, 2), (1080, 3), (2160, 4), (4320, 4)] {
-            let geometry = Geometry::for_display(1920, height, 1920 * 4).expect("geometry");
-            assert_eq!(geometry.scale, scale, "height {height}");
-        }
-    }
-
-    #[test]
     fn ramfb_geometry_is_always_renderable() {
         let geometry = ramfb_geometry().expect("the fixed ramfb mode is renderable");
         assert_eq!(geometry.width_px, RAMFB_WIDTH_PX);
@@ -936,196 +668,5 @@ mod tests {
         assert!(geometry.columns() > 0);
         assert!(geometry.rows() > 0);
         assert_eq!(geometry.scale, 2, "768 rows select 2× glyphs");
-    }
-
-    #[test]
-    fn geometry_rejects_unusable_surfaces() {
-        // Pitch not whole pixels.
-        assert!(Geometry::for_display(640, 480, 640 * 4 + 2).is_none());
-        // Pitch narrower than a scanline.
-        assert!(Geometry::for_display(640, 480, 639 * 4).is_none());
-        // Degenerate extents.
-        assert!(Geometry::for_display(0, 480, 640 * 4).is_none());
-        assert!(Geometry::for_display(640, 0, 640 * 4).is_none());
-        // Too small for one glyph cell.
-        assert!(Geometry::for_display(4, 4, 4 * 4).is_none());
-    }
-
-    // --- Renderer ------------------------------------------------------
-
-    /// A 2-column × 2-row scale-1 test surface (12×16 px, stride 14 to
-    /// exercise stride ≠ width).
-    fn small_console() -> (TextConsole, Vec<u32>) {
-        let geometry = Geometry {
-            width_px: 12,
-            height_px: 16,
-            stride_px: 14,
-            scale: 1,
-        };
-        assert_eq!((geometry.columns(), geometry.rows()), (2, 2));
-        let mut pixels = vec![0u32; geometry.pixel_count()];
-        let mut console = TextConsole::new(geometry);
-        console.clear(&mut pixels);
-        (console, pixels)
-    }
-
-    /// The pixels of one glyph cell, row-major.
-    fn cell(pixels: &[u32], geometry: &Geometry, column: u32, row: u32) -> Vec<u32> {
-        let mut out = Vec::new();
-        for y in 0..CELL_HEIGHT * geometry.scale {
-            for x in 0..CELL_WIDTH * geometry.scale {
-                let index = (row * CELL_HEIGHT * geometry.scale + y) as usize
-                    * geometry.stride_px as usize
-                    + (column * CELL_WIDTH * geometry.scale + x) as usize;
-                out.push(pixels[index]);
-            }
-        }
-        out
-    }
-
-    #[test]
-    fn clear_paints_the_background_and_homes_the_cursor() {
-        let (_, pixels) = small_console();
-        assert!(pixels.iter().all(|&p| p == BACKGROUND));
-    }
-
-    #[test]
-    fn a_glyph_renders_its_atlas_rows() {
-        let (mut console, mut pixels) = small_console();
-        let dirty = console.write_byte(&mut pixels, b'!');
-        assert_eq!(dirty, Some((0, 8)), "dirty band covers the cell");
-        let rendered = cell(&pixels, console.geometry(), 0, 0);
-        // '!' lights the centre column (atlas row pattern 0b00100) on
-        // rows 0..=4 and 6; row 5 and the padding row/column stay dark.
-        let glyph = &glyphs::GLYPHS[(b'!' - b' ') as usize];
-        for (y, &bits) in glyph.iter().enumerate() {
-            for x in 0..CELL_WIDTH as usize {
-                let lit = x < glyphs::GLYPH_WIDTH as usize
-                    && bits & (1 << (glyphs::GLYPH_WIDTH as usize - 1 - x)) != 0;
-                let expected = if lit { FOREGROUND } else { BACKGROUND };
-                assert_eq!(rendered[y * CELL_WIDTH as usize + x], expected, "({x},{y})");
-            }
-        }
-        // The inter-line padding row is background.
-        for x in 0..CELL_WIDTH as usize {
-            let y = glyphs::GLYPH_HEIGHT as usize;
-            assert_eq!(rendered[y * CELL_WIDTH as usize + x], BACKGROUND);
-        }
-    }
-
-    #[test]
-    fn unprintable_bytes_render_the_question_mark_fallback() {
-        let (mut console, mut pixels) = small_console();
-        console.write_byte(&mut pixels, 0x01);
-        let fallback = cell(&pixels, console.geometry(), 0, 0);
-        let (mut reference_console, mut reference) = small_console();
-        reference_console.write_byte(&mut reference, b'?');
-        assert_eq!(
-            fallback,
-            cell(&reference, reference_console.geometry(), 0, 0)
-        );
-    }
-
-    #[test]
-    fn backspace_steps_the_cursor_back_without_painting() {
-        let (mut console, mut pixels) = small_console();
-        console.write_byte(&mut pixels, b'A');
-        // The `BS SP BS` rub-out overwrites the glyph and leaves the
-        // cursor back on the erased cell.
-        assert_eq!(console.write_byte(&mut pixels, 0x08), None);
-        console.write_byte(&mut pixels, b' ');
-        console.write_byte(&mut pixels, 0x08);
-        let geometry = *console.geometry();
-        assert!(
-            cell(&pixels, &geometry, 0, 0)
-                .iter()
-                .all(|&p| p == BACKGROUND),
-            "the rub-out blanked the glyph"
-        );
-        // The next glyph lands on the erased column, not the one after it.
-        console.write_byte(&mut pixels, b'!');
-        assert_ne!(
-            cell(&pixels, &geometry, 0, 0)
-                .iter()
-                .filter(|&&p| p == FOREGROUND)
-                .count(),
-            0,
-            "the cursor stayed on the erased cell"
-        );
-    }
-
-    #[test]
-    fn backspace_at_column_zero_is_a_no_op() {
-        let (mut console, mut pixels) = small_console();
-        assert_eq!(console.write_byte(&mut pixels, 0x08), None);
-        // The cursor did not move: the next glyph renders in column 0.
-        console.write_byte(&mut pixels, b'!');
-        let geometry = *console.geometry();
-        assert_ne!(
-            cell(&pixels, &geometry, 0, 0)
-                .iter()
-                .filter(|&&p| p == FOREGROUND)
-                .count(),
-            0
-        );
-    }
-
-    #[test]
-    fn newline_and_carriage_return_move_the_cursor() {
-        let (mut console, mut pixels) = small_console();
-        console.write_byte(&mut pixels, b'A');
-        console.write_byte(&mut pixels, b'\n');
-        console.write_byte(&mut pixels, b'B');
-        let geometry = *console.geometry();
-        assert_ne!(
-            cell(&pixels, &geometry, 0, 1)
-                .iter()
-                .filter(|&&p| p == FOREGROUND)
-                .count(),
-            0,
-            "B rendered on row 1"
-        );
-        // `\r` returns to column 0: the next glyph overwrites `B`.
-        console.write_byte(&mut pixels, b'\r');
-        console.write_byte(&mut pixels, b' ');
-        assert!(cell(&pixels, &geometry, 0, 1)
-            .iter()
-            .all(|&p| p == BACKGROUND));
-    }
-
-    #[test]
-    fn the_grid_wraps_columns_and_rings_rows() {
-        let (mut console, mut pixels) = small_console();
-        // Fill row 0 (2 columns): the cursor wraps to row 1.
-        console.write_byte(&mut pixels, b'A');
-        console.write_byte(&mut pixels, b'A');
-        // Fill row 1: the ring wraps back to row 0 and clears it.
-        console.write_byte(&mut pixels, b'B');
-        console.write_byte(&mut pixels, b'B');
-        let geometry = *console.geometry();
-        assert!(
-            cell(&pixels, &geometry, 0, 0)
-                .iter()
-                .all(|&p| p == BACKGROUND),
-            "ring wrap cleared the top row"
-        );
-        assert_ne!(
-            cell(&pixels, &geometry, 0, 1)
-                .iter()
-                .filter(|&&p| p == FOREGROUND)
-                .count(),
-            0,
-            "row 1 still holds its glyphs"
-        );
-        // The next glyph lands on the cleared top row.
-        let dirty = console.write_byte(&mut pixels, b'C');
-        assert_eq!(dirty, Some((0, 8)));
-    }
-
-    #[test]
-    fn dirty_bands_merge_to_their_union() {
-        assert_eq!(merge_bands(None, None), None);
-        assert_eq!(merge_bands(Some((8, 16)), None), Some((8, 16)));
-        assert_eq!(merge_bands(Some((8, 16)), Some((0, 8))), Some((0, 16)));
     }
 }

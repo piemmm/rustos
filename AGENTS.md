@@ -542,6 +542,14 @@ rustos/
 │   │                    #   the rt-backed DriverHost a driver process links,
 │   │                    #   mapping kernel-issued device-resource grants over the
 │   │                    #   mmio_map/dma_alloc syscalls (§4, §5.4, §2.2).
+│   ├── fbcon/           # Shared, arch-neutral framebuffer text-console engine:
+│   │                    #   the full ANSI/VT/xterm-256color terminal (Geometry/
+│   │                    #   TextConsole/DirtyBand, palette, glyph blit over
+│   │                    #   lib/font, scroll-up-at-bottom) rendering the shared
+│   │                    #   lib/vt Op stream onto a 32-bit surface, so every
+│   │                    #   arch port drives its display console through one
+│   │                    #   definition instead of re-deriving it. Allocator-free
+│   │                    #   (§2.2, §2.20, §2.21, §17.4).
 │   ├── fdt/             # Shared FDT/DTB reader: the one device-tree parser the
 │   │                    #   aarch64+riscv64 ports build §18.2 discovery on (§2.2).
 │   ├── font/            # Shared text rasterisation: monospace bitmap font +

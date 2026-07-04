@@ -13,7 +13,23 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use rustos_termcap::TermType;
-use rustos_vt::{encode, encode_all, Attributes, BasicColor, Cell, Color, MouseButton, Op, Parser};
+use rustos_vt::{
+    encode_all_into, encode_into, Attributes, BasicColor, Cell, Color, MouseButton, Op, Parser,
+};
+
+/// Encode one operation into a fresh `Vec` over the sink API.
+fn encode(op: &Op) -> alloc::vec::Vec<u8> {
+    let mut out = alloc::vec::Vec::new();
+    encode_into(op, &mut out);
+    out
+}
+
+/// Encode a sequence of operations into a fresh `Vec`.
+fn encode_all(ops: &[Op]) -> alloc::vec::Vec<u8> {
+    let mut out = alloc::vec::Vec::new();
+    encode_all_into(ops, &mut out);
+    out
+}
 
 use crate::buffer::Buffer;
 use crate::color::{downgrade, ColorPairs};
