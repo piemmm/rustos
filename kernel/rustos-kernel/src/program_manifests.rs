@@ -102,6 +102,13 @@ pub const SYSINFO_MANIFEST: &[CapabilityId] = &[CapabilityId::CONSOLE_WRITE];
 pub const TOP_MANIFEST: &[CapabilityId] =
     &[CapabilityId::CONSOLE_WRITE, CapabilityId::CONSOLE_READ];
 
+/// The `ls` tool's manifest: `CAP_CONSOLE_WRITE` for the listing on fd 1
+/// and diagnostics on fd 2, plus `CAP_FS_ACCESS` because inspecting paths
+/// and reading directories *is* the tool's job — the secured VFS still
+/// authorises every path per-inode under the caller's attested identity.
+/// No `CAP_CONSOLE_READ`: the tool reads nothing from fd 0.
+pub const LS_MANIFEST: &[CapabilityId] = &[CapabilityId::CONSOLE_WRITE, CapabilityId::FS_ACCESS];
+
 /// The `man` help tool's manifest: `CAP_CONSOLE_WRITE` for the rendered
 /// page on fd 1 (and diagnostics on fd 2), `CAP_CONSOLE_READ` for the
 /// pager's keystrokes on fd 0 (also authorising its `stream_echo` echo
@@ -234,6 +241,14 @@ mod tests {
     }
 
     #[test]
+    fn ls_manifest_is_pinned() {
+        assert_eq!(
+            set(LS_MANIFEST),
+            set(&[CapabilityId::CONSOLE_WRITE, CapabilityId::FS_ACCESS])
+        );
+    }
+
+    #[test]
     fn man_manifest_is_pinned() {
         assert_eq!(
             set(MAN_MANIFEST),
@@ -275,7 +290,7 @@ mod tests {
     #[test]
     fn session_tools_request_within_the_session_baseline() {
         let baseline = set(SESSION_BASELINE);
-        for manifest in [PS_MANIFEST, SYSINFO_MANIFEST, TOP_MANIFEST] {
+        for manifest in [LS_MANIFEST, PS_MANIFEST, SYSINFO_MANIFEST, TOP_MANIFEST] {
             for cap in manifest {
                 assert!(baseline.contains(*cap), "{cap:?} exceeds the baseline");
             }

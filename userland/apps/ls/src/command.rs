@@ -19,7 +19,9 @@ pub enum Command {
         /// yields the single path `.`.
         paths: Vec<String>,
     },
-    /// Print the usage banner (`-h`/`--help`).
+    /// Render `ls`'s own short help (`-h`/`-?`/`--help`): the `NAME`,
+    /// `SYNOPSIS`, and compact `OPTIONS` of its Help document, through the
+    /// same engine as any other command's short help (plans/APPS.md §4).
     Help,
 }
 
@@ -30,7 +32,8 @@ pub enum Command {
 ///
 /// * `-a` / `--all` — include entries whose name begins with `.`.
 /// * `-l` / `--long` — render the long format.
-/// * `-h` / `--help` — print the usage banner (wins immediately).
+/// * `-h` / `-?` / `--help` — the reserved short-help switches
+///   (plans/APPS.md §4; they win immediately).
 /// * `--` — end option parsing; every later argument is a path.
 /// * any other `-…` — an [`LsError::Usage`] error (fail closed; never a
 ///   silently ignored token).
@@ -71,7 +74,7 @@ pub fn parse(args: &[&str]) -> Result<Command, LsError> {
                     match letter {
                         'a' => all = true,
                         'l' => long = true,
-                        'h' => return Ok(Command::Help),
+                        'h' | '?' => return Ok(Command::Help),
                         _ => return Err(LsError::Usage),
                     }
                 }
@@ -109,6 +112,7 @@ mod tests {
     #[test]
     fn help_flags_win() {
         assert_eq!(parse(&["-h"]), Ok(Command::Help));
+        assert_eq!(parse(&["-?"]), Ok(Command::Help));
         assert_eq!(parse(&["--help"]), Ok(Command::Help));
         // `-h` wins even from inside a cluster and alongside other arguments.
         assert_eq!(parse(&["-lh", "dir"]), Ok(Command::Help));

@@ -26,11 +26,13 @@ path = "src/lib.rs"
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 rustos-drv-fs-fat32 = { path = "../../../drivers/filesystem/fat32", version = "=0.0.0" }
 rustos-drv-fs-rustfs = { path = "../../../drivers/filesystem/rustfs", version = "=0.0.0" }
-# The `man` app's embedded Help/ tree (`rustos_man::help`), planted onto the
-# fixture's read-only /System volume exactly as `tools/mkimage` plants it on
-# a real image, so the session vertical can type `man man` against the same
-# bytes the crate ships (AGENTS.md §2.2). Default `program` feature off: the
-# fixture wants the data, never the freestanding runtime.
+# Each command app's embedded Help/ tree (`rustos_ls::help`,
+# `rustos_man::help`), planted onto the fixture's read-only /System volume
+# exactly as `tools/mkimage` plants it on a real image, so the session
+# vertical can type `man man` and `ls` against the same bytes the crates
+# ship (AGENTS.md §2.2). Default `program` feature off: the fixture wants
+# the data, never the freestanding runtime.
+rustos-ls = { path = "../../../userland/apps/ls", version = "=0.0.0", default-features = false }
 rustos-man = { path = "../../../userland/apps/man", version = "=0.0.0", default-features = false }
 rustos-partition = { path = "../../../lib/partition", version = "=0.0.0" }
 rustos-test-rustfs-image = { path = "../rustfs_image", version = "=0.0.0" }

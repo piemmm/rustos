@@ -192,20 +192,32 @@ pub fn build_system_partition(
             .map_err(MkimageError::SystemPartition)?;
     }
     // The system app store's bundle data ships on every image through the
-    // same planter: today the `man` command app's internationalised `Help/`
-    // tree, embedded in the app crate itself so image and source cannot
-    // drift.
-    for (locale_dir, bytes) in rustos_man::help::HELP_DOCS {
-        let doc_name = rustos_man::help::HELP_DOC_NAME.as_bytes();
-        let components: [&[u8]; 5] = [
-            b"Apps",
-            b"man.app",
-            b"Help",
-            locale_dir.as_bytes(),
-            doc_name,
-        ];
-        plant_nested_file(&mut fs, root, &components, bytes)
-            .map_err(MkimageError::SystemPartition)?;
+    // same planter: each command app's internationalised `Help/` tree,
+    // embedded in the app crate itself so image and source cannot drift.
+    let help_trees = [
+        (
+            b"ls.app".as_slice(),
+            rustos_ls::help::HELP_DOC_NAME,
+            rustos_ls::help::HELP_DOCS,
+        ),
+        (
+            b"man.app".as_slice(),
+            rustos_man::help::HELP_DOC_NAME,
+            rustos_man::help::HELP_DOCS,
+        ),
+    ];
+    for (bundle, doc_name, docs) in help_trees {
+        for (locale_dir, bytes) in docs {
+            let components: [&[u8]; 5] = [
+                b"Apps",
+                bundle,
+                b"Help",
+                locale_dir.as_bytes(),
+                doc_name.as_bytes(),
+            ];
+            plant_nested_file(&mut fs, root, &components, bytes)
+                .map_err(MkimageError::SystemPartition)?;
+        }
     }
     fs.flush().map_err(MkimageError::SystemPartition)?;
     Ok(fs.into_block().into_bytes())

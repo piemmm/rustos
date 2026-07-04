@@ -2572,7 +2572,10 @@ const TESTS: &[QemuTest] = &[
     // seeing its process-list header, `man man` rendering the store-shipped
     // Help document end to end (`plans/APPS.md` §7 — resolution, the
     // `fs_*` read of the read-only /System volume, and the `lib/help`
-    // render all in one exchange), then the negative half — a `ulimit` bound
+    // render all in one exchange), `ls /System/Apps` listing the system app
+    // store through the `fs_stat`/`fs_readdir` syscalls (`plans/APPS.md`
+    // deliverable 6 — the listing must show `man.app`, an entry only a real
+    // directory read produces), then the negative half — a `ulimit` bound
     // pair is *lowered* (ungated; both bounds, since the default soft bound
     // is unlimited and a soft bound may never exceed its hard bound) and
     // the hard bound is then *raised*: the raise needs
@@ -2621,7 +2624,14 @@ const TESTS: &[QemuTest] = &[
             // geometry, so no pager prompt). `SEE ALSO` is the page's final
             // section heading — seeing it proves the whole document arrived.
             ("usage: ps", "man man\n"),
-            ("SEE ALSO", "ulimit processes 1000\n"),
+            // `ls /System/Apps` (plans/APPS.md deliverable 6): the spawned
+            // tool stats the operand and reads the directory through the
+            // `fs_stat`/`fs_readdir` syscalls under its own manifest's
+            // `CAP_FS_ACCESS`. `man.app` in the output is an entry only a
+            // real directory read of the mounted read-only /System volume
+            // produces.
+            ("SEE ALSO", "ls /System/Apps\n"),
+            ("man.app", "ulimit processes 1000\n"),
             ("elsh$ ", "ulimit -H processes 2000\n"),
             (
                 "cannot raise hard limit (requires CAP_RLIMIT_RAISE)",

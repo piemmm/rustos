@@ -1257,6 +1257,9 @@ name = "rustos-ls"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-help",
+ "rustos-rt",
+ "rustos-vt",
 ]
 
 [[package]]
@@ -1279,6 +1282,7 @@ dependencies = [
  "rustos-drv-fs-fat32",
  "rustos-drv-fs-rustfs",
  "rustos-log",
+ "rustos-ls",
  "rustos-man",
  "rustos-partition",
  "rustos-users",
@@ -1730,6 +1734,7 @@ dependencies = [
  "rustos-abi",
  "rustos-drv-fs-fat32",
  "rustos-drv-fs-rustfs",
+ "rustos-ls",
  "rustos-man",
  "rustos-partition",
  "rustos-test-rustfs-image",

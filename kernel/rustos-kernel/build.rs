@@ -162,6 +162,13 @@ const PROGRAMS: &[Program] = &[
         prefix: "TOP",
     },
     Program {
+        pkg: "rustos-ls",
+        bin: "rustos-ls-run",
+        rel_dir: "../../userland/apps/ls",
+        fixture: "ls_rxe.rs",
+        prefix: "LS",
+    },
+    Program {
         pkg: "rustos-man",
         bin: "rustos-man-run",
         rel_dir: "../../userland/apps/man",

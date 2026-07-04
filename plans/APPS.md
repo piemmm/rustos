@@ -50,11 +50,17 @@ Landed: deliverable 1 (`BundleEntry::Help` replaced `Documentation` in place,
 own six-locale `Help/` tree shipped on the read-only `/System` volume and
 the `LANG` locale variable named in §5), and deliverable 4 (shell command
 resolution over the `/System/Apps/` system app store, `AGENTS.md` §16.2
-amended). Remaining: deliverables 5–7 (`cargo xtask help-lint`, the OS
-`Help/` trees for the other command apps, wider `stdinfo` adoption — `man`'s
-locale-fallback record is live) and the per-app `-h`/`-?` short-help
-convention (§4, an app-side obligation served through `lib/help`; `man`
-itself honours it).
+amended). The first fully-converged command app beyond `man` is **`ls`**
+(deliverable 6): registered at `/System/Apps/ls.app/Run`, wired to the
+real `fs_stat`/`fs_readdir` syscalls, shipping its six-locale `Help/`
+tree (planted by `tools/mkimage` and the QEMU fixture), honouring the
+§4 `-h`/`-?` short-help convention through `lib/help`, and emitting the
+§12 `fs.hidden_entries_omitted` advisory record; the aarch64
+session-ceiling vertical types `ls /System/Apps` end to end. Remaining:
+deliverables 5–7 for the rest of the toolset (`cargo xtask help-lint`,
+the OS `Help/` trees and `-h`/`-?` convention for the other command apps,
+wider `stdinfo` adoption — `man`'s locale-fallback and `ls`'s omission
+records are live).
 
 ## 1. Everything is a bundle — including single-binary utilities
 
@@ -489,8 +495,8 @@ both landed; `plans/SHELL.md` command execution):
    convention, which lands with each app's `Help/` tree, §4/§8.1):
    system-app-store-then-`PATH` resolution (§8) and `.app`-suffix invocation
    (§9) are live. The store/bundle spellings live once in `lib/abi`
-   (`SYSTEM_APP_STORE`/`BUNDLE_SUFFIX`); every OS command app moved in place
-   to `/System/Apps/{elsh,ps,sysinfo,top,users}.app/Run`
+   (`SYSTEM_APP_STORE`/`BUNDLE_SUFFIX`); every OS command app is registered
+   as `/System/Apps/{elsh,ls,man,ps,sysinfo,top,users}.app/Run`
    (`spawn_paths.rs`, drift-tested); the pure candidate policy
    (`rustos_cmdres::resolution_candidates` in the shared `lib/cmdres`
    crate, alias-aware `PATH` split, plus the `bundle_candidates` view for
@@ -503,15 +509,19 @@ both landed; `plans/SHELL.md` command execution):
    --bogus` argument end to end.
 5. **`cargo xtask help-lint`** — the §8.1 content/completeness/switch-drift
    check, wired into `cargo xtask ci` (§7).
-6. **`Help/` trees for the existing command apps** (`ps`, `top`, `ls`, `cat`,
-   `cp`, `mv`, `rm`, `chmod`, `chown`, `mount`, `getcap`, `setcap`, `useradd`,
-   `groupadd`, `elsh`, `sysinfo`, `terminal`, …) in `default/` plus the
-   required locales (§8.1).
+6. **`Help/` trees for the existing command apps** — **`ls` done** (its
+   six-locale tree ships in the crate, is planted at
+   `/System/Apps/ls.app/Help/`, and serves its §4 `-h`/`-?` short help);
+   remaining: `ps`, `top`, `cat`, `cp`, `mv`, `rm`, `chmod`, `chown`,
+   `mount`, `getcap`, `setcap`, `useradd`, `groupadd`, `elsh`, `sysinfo`,
+   `terminal`, … in `default/` plus the required locales (§8.1).
 
 7. **`stdinfo` adoption in command apps (§12)** — emit the appropriate
    `StdInfoRecord` (via the `lib/rt` wrapper) wherever a command omits,
-   summarises, or adds non-obvious context to `stdout`, starting with `man`'s
-   locale-fallback record (§7); advisory-only, never changing exit status.
+   summarises, or adds non-obvious context to `stdout`. Live: `man`'s
+   locale-fallback record (§7) and `ls`'s `fs.hidden_entries_omitted`
+   omission record (the `AGENTS.md` §20.1 canonical example);
+   advisory-only, never changing exit status.
 
 Required `AGENTS.md` amendments (each with a one-line rationale in PLAN.md's
 "Charter Amendments" section, §13):

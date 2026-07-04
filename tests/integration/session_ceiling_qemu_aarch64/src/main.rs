@@ -36,16 +36,21 @@
 //!    its own manifest), and streams the rendered page; the page's final
 //!    `SEE ALSO` heading is the marker that the whole document arrived
 //!    (`plans/APPS.md` §7).
-//! 5. `ulimit -H processes 1000` — **lowering** a hard bound needs no
+//! 5. `ls /System/Apps` — the spawned `ls` tool stats the operand and
+//!    reads the directory through the `fs_stat`/`fs_readdir` syscalls
+//!    (`CAP_FS_ACCESS` from its own manifest); `man.app` in the listing is
+//!    the marker, an entry only a real directory read of the mounted
+//!    read-only `/System` volume produces (`plans/APPS.md` deliverable 6).
+//! 6. `ulimit processes 1000` — **lowering** a bound pair needs no
 //!    capability and succeeds.
-//! 6. `ulimit -H processes 2000` — **raising** the hard bound needs
+//! 7. `ulimit -H processes 2000` — **raising** the hard bound needs
 //!    `CAP_RLIMIT_RAISE`. The administrator *ceiling* carries it, but the
 //!    shell's *manifest* (the session baseline) does not request it, so
 //!    the effective set lacks it: the kernel refuses the `rlimit_set` with
 //!    `PermissionDenied` (fail closed) and the shell prints the denial.
 //!    This is the negative half: holding an administrator account does not
 //!    widen any one program past its own manifest.
-//! 7. `exit` — typed after the denial message appeared, ending the shell.
+//! 8. `exit` — typed after the denial message appeared, ending the shell.
 //!
 //! ## Why the PASS keys on "denial, then exit"
 //!

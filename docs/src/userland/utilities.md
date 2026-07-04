@@ -347,17 +347,27 @@ fail-closed paths.
 
 ## `ls` — list directory contents (`userland/apps/ls`)
 
-`rustos-ls` lists directory contents (`AGENTS.md` §3). It inspects each
-of its path operands in order: a non-directory operand is listed by name,
-and a directory operand has its entries listed, sorted by name. With no
+`rustos-ls` lists directory contents (`AGENTS.md` §3; a `plans/APPS.md`
+command app registered at `/System/Apps/ls.app/Run`, so the shell
+resolves the bare word `ls` to it). It inspects each of its path
+operands in order: a non-directory operand is listed by name, and a
+directory operand has its entries listed, sorted by name. With no
 operand it lists the current directory (`.`). With `-a` it includes
 entries whose name begins with `.`; with `-l` it prints the long format —
 the type and permission bits, the size, then the name — the POSIX model.
+`-h`/`-?` render the tool's own short help from its bundled `Help/` tree
+through the shared `lib/help` engine (`plans/APPS.md` §4), in the locale
+the inherited `LANG` variable names, falling back to the usage banner
+when the tree is unavailable.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
-only dependency is the audited `rustos-abi` crate, so it never links a
-kernel or driver crate (`AGENTS.md` §17.4).
+dependencies are the audited `rustos-abi` vocabulary and the shared
+`rustos-help`/`rustos-vt` engines, so it never links a kernel or driver
+crate (`AGENTS.md` §17.4). Its manifest requests `CAP_CONSOLE_WRITE`
+plus `CAP_FS_ACCESS` — within the session baseline — and the secured VFS
+still authorises every path per-inode under the caller's attested
+identity.
 
 ### Grammar
 
@@ -365,13 +375,13 @@ kernel or driver crate (`AGENTS.md` §17.4).
 ls [-a] [-l] [--] [path...]
 ```
 
-| Token          | Meaning                                            |
-|----------------|----------------------------------------------------|
-| `-a`, `--all`  | include entries whose name begins with `.`         |
-| `-l`, `--long` | long format: type/permission bits, size, then name |
-| `-h`, `--help` | print the usage banner (wins immediately)          |
-| `--`           | end option parsing; every later argument is a path |
-| *path*         | a file or directory to list                        |
+| Token            | Meaning                                            |
+|------------------|----------------------------------------------------|
+| `-a`, `--all`    | include entries whose name begins with `.`         |
+| `-l`, `--long`   | long format: type/permission bits, size, then name |
+| `-h`, `-?`, `--help` | show the tool's short help (wins immediately)  |
+| `--`             | end option parsing; every later argument is a path |
+| *path*           | a file or directory to list                        |
 
 With no `path` operand `ls` lists the current directory. Short options
 may be combined into one argument (e.g. `-la` is `-l -a`); an
@@ -382,17 +392,25 @@ error. The bare `-` is a path named `-`, not an option.
 
 `run` asks the injected filesystem seam for the metadata of each operand
 and the entries of each directory, then writes the sorted, formatted
-listing to the terminal in a single write. The two operations that reach
-the outside world are injected seams, the same discipline as `cat`'s
-`FileSource`/`Output`:
+listing to the terminal in a single write. The operations that reach the
+outside world are injected seams, the same discipline as `cat`'s
+`FileSource`/`Output` and `man`'s `BundleStore`:
 
-- `Listing` — stat a path (to learn whether it is a directory) and read a
-  directory's entries by index until the index runs past the end.
-- `Output` — write the rendered listing to the terminal.
+- `Listing` — stat a path (to learn whether it is a directory) and read
+  a directory's whole listing in one call, mirroring the kernel's
+  one-shot `fs_readdir` contract. An entry's kind is the VFS's own
+  `FileKind` — no parallel kind enum to drift. The long format's mode
+  and size come from a per-entry stat, paid only when `-l` asks for
+  them.
+- `Output` — write the rendered listing to the terminal, and advisory
+  records to the standard information stream (fd 3), best-effort.
+- `rustos_help::HelpSource` — the tool's own `Help/` tree, read by the
+  short-help switches.
 
-On a running system these are syscall- and console-backed; in tests they
-are in-memory fixtures, so every parsing, filtering, sorting, and
-formatting decision is testable without a kernel.
+On a running system these are syscall-backed (`fs_open`/`fs_stat`/
+`fs_readdir` and the inherited standard streams); in tests they are
+in-memory fixtures, so every parsing, filtering, sorting, and formatting
+decision is testable without a kernel.
 
 ### Layout
 
@@ -401,32 +419,55 @@ When several operands are given, non-directory operands are listed first
 preceded by a `path:` header and separated from the previous block by a
 blank line — the POSIX model. A single directory operand is listed
 without a header. The short format prints one name per line; the long
-format prints the ten-character mode string (a type character — `d`,
-`-`, `l`, or `?` — followed by the nine `rwx` permission bits), the
-size right-aligned across the listing, then the name.
+format prints the ten-character mode string (`d` for a directory, `-`
+otherwise, followed by the nine `rwx` permission bits), the size
+right-aligned across the listing, then the name.
+
+### Advisory output (`stdinfo`, fd 3)
+
+When the default dotfile filter hides entries, `ls` emits the canonical
+`fs.hidden_entries_omitted` omission record (`AGENTS.md` §20.1) on the
+standard information stream: a terse human note ("4 hidden files not
+shown." with the `ls -a` suggestion) plus structured data for tools
+(`omitted_count`, `stdout_is_exhaustive`). It is advisory only — emitted
+best-effort after the listing, never affecting output, ordering, or exit
+status — and nothing is emitted under `-a` or when nothing was hidden.
 
 ### Fail closed
 
 - An unrecognised option is a `LsError::Usage` that inspects nothing.
-- An operand that cannot be stat'd surfaces the underlying `Errno` as
-  `LsError::Stat` and stops before any later operand (a missing operand
-  among several aborts rather than skipping silently).
-- A directory that cannot be read is `LsError::Read`.
+- An operand (or, under `-l`, a directory entry) that cannot be stat'd
+  surfaces the underlying `Errno` as `LsError::Stat` and stops before
+  any later operand (a missing operand among several aborts rather than
+  skipping silently).
+- A directory that cannot be read is `LsError::Read`; a directory
+  stream carrying a non-UTF-8 name (an ABI-contract violation) is
+  refused whole rather than silently thinned.
 - A failed terminal write is `LsError::Output`.
+- A missing own-help tree degrades `-h` to the usage banner — never a
+  fabricated page, never a failure.
 
 There is no partial-guess path and no panic (`AGENTS.md` §2.9).
 
 ### Tests
 
 `cargo test -p rustos-ls` drives the parser and the listing engine
-against an in-memory tree and a recording output: the command grammar
-(every option, clustered short flags, `-`/`--`, and the usage-error
-path), sorted directory listing, the hidden-file filter with and without
-`-a`, a non-directory operand, the long format's mode string and
-right-aligned size (across all four entry kinds), single- and
-multi-operand layout (files first, then directory headers), an empty
-directory, and the missing-operand, unreadable-directory, and
-dead-console fail-closed paths.
+against an in-memory tree, an in-memory help tree, and a recording
+output: the command grammar (every option, clustered short flags,
+`-`/`-?`/`--`, and the usage-error path), sorted directory listing, the
+hidden-file filter with and without `-a` (including the advisory record's
+content, its singular/plural message, the across-directories count, and
+its absence when nothing was hidden), a non-directory operand, the long
+format's mode string and right-aligned size, the per-entry stat under a
+slash-terminated operand, single- and multi-operand layout (files first,
+then directory headers), an empty directory, the short-help render and
+its usage-banner fallback, and the missing-operand, unreadable-directory,
+and dead-console fail-closed paths. The embedded `Help/` tree's tests
+prove every shipped locale parses under the engine's bounds, the
+required locale set is complete, and every document records exactly the
+parser's switches. The aarch64 session-ceiling QEMU vertical types
+`ls /System/Apps` in a real session and sees `man.app` in the listing —
+a store read only the mounted read-only `/System` volume produces.
 
 ## `rm` — remove files and directories (`userland/apps/rm`)
 
