@@ -1062,6 +1062,7 @@ fn run_phases<A: KernelArch>(
         consoles,
         programs,
         spawn_service,
+        app_store,
         input_focus,
         users_db,
         users_admin,
@@ -1298,10 +1299,8 @@ fn run_phases<A: KernelArch>(
     // the same reason as `KernelState`: its borrows reference
     // `KernelState` fields and must therefore be `'static`.
     phase_started(log_sink, Phase::Syscall);
-    dispatcher_callback_slot
-        .install_dispatcher(Box::leak(Box::new(
-            KernelDispatchHook::new(
-                &state.scheduler,
+    let hook = KernelDispatchHook::new(
+        &state.scheduler,
             &state.caps,
             state.arch.as_ref(),
             audit_sink,
@@ -1372,8 +1371,17 @@ fn run_phases<A: KernelArch>(
         // Serve `signal` through the scheduler-side producer built above
         // (`plans/SPAWN.md` SP7b); the default `NULL_PROCESS_SIGNAL` keeps
         // `signal` fail-closed `NotImplemented` until this is installed.
-        .with_process_signal(process_signal),
-        )))
+        .with_process_signal(process_signal);
+    // Install the on-disk application store when the boot path provided one
+    // (`plans/APPS.md` deliverable 8): the `spawn` syscall then verifies and
+    // launches `…/<Name>.app/Run` bundles from the mounted volume. With none
+    // installed a store-bundle spawn fails closed, parking nothing.
+    let hook = match app_store {
+        Some(store) => hook.with_app_store(store),
+        None => hook,
+    };
+    dispatcher_callback_slot
+        .install_dispatcher(Box::leak(Box::new(hook)))
         .map_err(InitError::DispatcherAlreadyInstalled)?;
     phase_ready(log_sink, Phase::Syscall);
 

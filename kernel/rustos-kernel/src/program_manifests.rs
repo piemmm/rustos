@@ -30,6 +30,10 @@ use rustos_abi::CapabilityId;
 ///
 /// Nothing else: `wait`, `signal`, `rlimit_get`/`rlimit_set`, and
 /// `fs_getcwd` — the rest of what the shell calls — are ungated.
+// Consumed by the registry rows on the row-bearing targets and by the
+// exact-set pinning tests on the CI host; the aarch64 production build
+// carries no rows and its shell manifest travels in the on-disk bundle.
+#[cfg(any(test, not(all(freestanding, kernel_isa = "aarch64"))))]
 pub use rustos_users::SESSION_BASELINE;
 
 /// The login service's manifest: the console pair for its prompt
@@ -45,6 +49,7 @@ pub use rustos_users::SESSION_BASELINE;
 /// `CAP_LOG_EMIT` for its structured audit records. No `CAP_FS_ACCESS`:
 /// login reads the users database through its own gated syscall and never
 /// touches the filesystem.
+#[cfg(any(test, not(all(freestanding, kernel_isa = "aarch64"))))]
 pub const LOGIN_MANIFEST: &[CapabilityId] = &[
     CapabilityId::CONSOLE_WRITE,
     CapabilityId::CONSOLE_READ,
@@ -62,6 +67,7 @@ pub const LOGIN_MANIFEST: &[CapabilityId] = &[
 /// structured diagnostics. It writes no standard stream (no console pair)
 /// and holds no resource capability: the kernel mints a loaded driver's
 /// grants from its matched node, never from this caller.
+#[cfg(any(test, not(all(freestanding, kernel_isa = "aarch64"))))]
 pub const DEVMGR_MANIFEST: &[CapabilityId] = &[
     CapabilityId::SYSINFO_HW,
     CapabilityId::DRV_LOAD,
@@ -76,6 +82,7 @@ pub const DEVMGR_MANIFEST: &[CapabilityId] = &[
 /// against squatters serving forged system state), and `CAP_LOG_EMIT` for
 /// its structured audit records. Per-query scoping stays in the broker
 /// against each caller's kernel-attested origin.
+#[cfg(any(test, not(all(freestanding, kernel_isa = "aarch64"))))]
 pub const SYSINFOD_MANIFEST: &[CapabilityId] = &[
     CapabilityId::SYSINFO_INTROSPECT,
     CapabilityId::SYSINFO_HW,
@@ -89,6 +96,7 @@ pub const SYSINFOD_MANIFEST: &[CapabilityId] = &[
 /// (which still authorises every path per-inode under the caller's
 /// attested identity). Every per-query scope is enforced by `sysinfod`
 /// against this process's kernel-attested origin.
+#[cfg(any(test, not(all(freestanding, kernel_isa = "aarch64"))))]
 pub const PS_MANIFEST: &[CapabilityId] = &[CapabilityId::CONSOLE_WRITE, CapabilityId::FS_ACCESS];
 
 /// The `sysinfo` tool's manifest: like `ps`, `CAP_CONSOLE_WRITE` for the
@@ -97,6 +105,7 @@ pub const PS_MANIFEST: &[CapabilityId] = &[CapabilityId::CONSOLE_WRITE, Capabili
 /// (which still authorises every path per-inode under the caller's
 /// attested identity); per-query authority stays with `sysinfod` and the
 /// caller's attested origin.
+#[cfg(any(test, not(all(freestanding, kernel_isa = "aarch64"))))]
 pub const SYSINFO_MANIFEST: &[CapabilityId] =
     &[CapabilityId::CONSOLE_WRITE, CapabilityId::FS_ACCESS];
 
@@ -107,6 +116,7 @@ pub const SYSINFO_MANIFEST: &[CapabilityId] =
 /// `Help/` tree through the secured VFS (which still authorises every
 /// path per-inode under the caller's attested identity); `terminal_size`
 /// is ungated and per-query `sysinfo` scope is enforced by `sysinfod`.
+#[cfg(any(test, not(all(freestanding, kernel_isa = "aarch64"))))]
 pub const TOP_MANIFEST: &[CapabilityId] = &[
     CapabilityId::CONSOLE_WRITE,
     CapabilityId::CONSOLE_READ,
@@ -118,6 +128,7 @@ pub const TOP_MANIFEST: &[CapabilityId] = &[
 /// and reading directories *is* the tool's job — the secured VFS still
 /// authorises every path per-inode under the caller's attested identity.
 /// No `CAP_CONSOLE_READ`: the tool reads nothing from fd 0.
+#[cfg(any(test, not(all(freestanding, kernel_isa = "aarch64"))))]
 pub const LS_MANIFEST: &[CapabilityId] = &[CapabilityId::CONSOLE_WRITE, CapabilityId::FS_ACCESS];
 
 /// The `man` help tool's manifest: `CAP_CONSOLE_WRITE` for the rendered
@@ -126,6 +137,7 @@ pub const LS_MANIFEST: &[CapabilityId] = &[CapabilityId::CONSOLE_WRITE, Capabili
 /// suppression, as in `top`), and `CAP_FS_ACCESS` because reading a
 /// bundle's `Help/` documents *is* the tool's job — the secured VFS still
 /// authorises every path per-inode under the caller's attested identity.
+#[cfg(any(test, not(all(freestanding, kernel_isa = "aarch64"))))]
 pub const MAN_MANIFEST: &[CapabilityId] = &[
     CapabilityId::CONSOLE_WRITE,
     CapabilityId::CONSOLE_READ,
@@ -146,6 +158,7 @@ pub const MAN_MANIFEST: &[CapabilityId] = &[
 /// switches can read the bundle's own `Help/` tree through the secured
 /// VFS (which still authorises every path per-inode under the caller's
 /// attested identity).
+#[cfg(any(test, not(all(freestanding, kernel_isa = "aarch64"))))]
 pub const USERS_TOOL_MANIFEST: &[CapabilityId] = &[
     CapabilityId::CONSOLE_WRITE,
     CapabilityId::CONSOLE_READ,

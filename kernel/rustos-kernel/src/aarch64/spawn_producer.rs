@@ -18,7 +18,7 @@
 //! `TTBR0_EL1`, and the child runs when the scheduler next steps it (a true
 //! concurrent spawn, not an `exec`-style hand-off).
 //!
-//! The child's `rxe`, its relocation bias ([`SHELL_USER_BIAS`]), and the
+//! The child's `rxe`, its relocation bias ([`CHILD_USER_BIAS`]), and the
 //! kernel's syscall CFI tag are baked at build time (`build.rs` →
 //! `rustos_itest_harness::elf2rxe`), exactly like PID 1, so there is one
 //! conversion path. Spawning is *not* a privileged
@@ -49,47 +49,47 @@ use rustos_kernel_mem::{
 use rustos_kernel_syscall::SYSCALL_TABLE_HASH;
 use rustos_sync::Once;
 
-use crate::spawn_layout::{self, SHELL_USER_BIAS};
+use crate::spawn_layout::{self, CHILD_USER_BIAS};
 use crate::stack_arena::{FrameArenaGrow, KTHREAD_STACK_ARENA};
 
 /// The user virtual base every child image this producer builds is mapped
-/// at — the build-time [`SHELL_USER_BIAS`] (64 GiB) `build.rs` bakes the
+/// at — the build-time [`CHILD_USER_BIAS`] (64 GiB) `build.rs` bakes the
 /// embedded programs' relocations for. Exported so a consumer handing
 /// [`Aarch64ProcessSpawn::spawn_with`] an *externally* converted `rxe`
 /// (the Stage 4.HW driver-spawn vertical) can verify its image was
 /// relocated for the same bias and fail closed on a mismatch rather than
 /// admit a child whose pointers do not match where it is mapped.
-pub const USER_IMAGE_BIAS: u64 = SHELL_USER_BIAS;
+pub const USER_IMAGE_BIAS: u64 = CHILD_USER_BIAS;
 
 /// User stack base: the shared [`spawn_layout::USER_STACK_OFFSET`] above
 /// this image's bias, mirroring the PID-1 layout (the layout offsets and
 /// sizes are shared across the ports in [`crate::spawn_layout`]).
-const USER_STACK_BASE: u64 = SHELL_USER_BIAS + spawn_layout::USER_STACK_OFFSET;
+const USER_STACK_BASE: u64 = CHILD_USER_BIAS + spawn_layout::USER_STACK_OFFSET;
 /// User virtual address the startup-vector block is written at.
-const USER_BLOCK_BASE: u64 = SHELL_USER_BIAS + spawn_layout::USER_BLOCK_OFFSET;
+const USER_BLOCK_BASE: u64 = CHILD_USER_BIAS + spawn_layout::USER_BLOCK_OFFSET;
 /// Base of a spawned child's device-window virtual region
 /// (`plans/PI.md` 5d-0-ii (b′)): the retained [`LiveSpace`]'s
 /// [`rustos_kernel_mem::MmioWindowMap`] hands each `mmio_map` a
 /// guard-bracketed window out of `[MMIO_WINDOW_BASE, MMIO_WINDOW_BASE +
 /// MMIO_WINDOW_PAGES·4 KiB)`.
-const MMIO_WINDOW_BASE: u64 = SHELL_USER_BIAS + spawn_layout::MMIO_WINDOW_OFFSET;
+const MMIO_WINDOW_BASE: u64 = CHILD_USER_BIAS + spawn_layout::MMIO_WINDOW_OFFSET;
 /// Base of a spawned child's non-`FIXED` anonymous-heap virtual region
 /// (`plans/PI.md` 5d-0-ii (c)): the retained [`LiveSpace`]'s
 /// [`rustos_kernel_mem::AnonWindowMap`] places each non-`FIXED` `mem_map`
 /// out of `[ANON_WINDOW_BASE, ANON_WINDOW_BASE + anon_window_pages·4 KiB)`,
 /// where the page count scales with discovered RAM (the window is the
 /// topmost user region so it has room to grow up to `super::USER_VA_TOP`).
-const ANON_WINDOW_BASE: u64 = SHELL_USER_BIAS + spawn_layout::ANON_WINDOW_OFFSET;
+const ANON_WINDOW_BASE: u64 = CHILD_USER_BIAS + spawn_layout::ANON_WINDOW_OFFSET;
 /// Base of a spawned child's guarded DMA-buffer virtual region
 /// (`plans/PI.md` 5d-0-ii (c) DMA half): the retained [`LiveSpace`]'s
 /// [`rustos_kernel_mem::DmaWindowMap`] carves each `dma_alloc` buffer out of
 /// `[DMA_WINDOW_BASE, DMA_WINDOW_BASE + DMA_WINDOW_PAGES·4 KiB)`.
-const DMA_WINDOW_BASE: u64 = SHELL_USER_BIAS + spawn_layout::DMA_WINDOW_OFFSET;
+const DMA_WINDOW_BASE: u64 = CHILD_USER_BIAS + spawn_layout::DMA_WINDOW_OFFSET;
 /// Base of a spawned child's cross-process shared-memory virtual region:
 /// the retained [`LiveSpace`]'s shared-window allocator maps each granted
 /// `shm_map` region out of `[SHARED_WINDOW_BASE, SHARED_WINDOW_BASE +
 /// SHARED_WINDOW_PAGES * 4 KiB)`.
-const SHARED_WINDOW_BASE: u64 = SHELL_USER_BIAS + spawn_layout::SHARED_WINDOW_OFFSET;
+const SHARED_WINDOW_BASE: u64 = CHILD_USER_BIAS + spawn_layout::SHARED_WINDOW_OFFSET;
 
 /// Identity direct map the page-table frame source translates a freshly
 /// allocated frame's physical address through to a CPU-dereferenceable
@@ -239,9 +239,9 @@ impl ProcessSpawn for Aarch64ProcessSpawn {
         // truncated short of the MMIO gigapage would drop the console and
         // interrupt controller from the active map the moment the
         // scheduler resumes the child. An empty window or one reaching
-        // the user region at `SHELL_USER_BIAS` fails closed.
+        // the user region at `CHILD_USER_BIAS` fails closed.
         let identity_gib = configured_identity_gigapages();
-        if identity_gib == 0 || ((identity_gib as u64) << 30) > SHELL_USER_BIAS {
+        if identity_gib == 0 || ((identity_gib as u64) << 30) > CHILD_USER_BIAS {
             return Err(Errno::NoSpace);
         }
         let mut arch = ArchAddressSpace::new_identity_gigapages(table_frames, identity_gib)
@@ -300,7 +300,7 @@ impl ProcessSpawn for Aarch64ProcessSpawn {
         let request = SpawnRequest {
             image: &image,
             image_bytes: rxe,
-            bias: SHELL_USER_BIAS,
+            bias: CHILD_USER_BIAS,
             stack: UserStack {
                 base: USER_STACK_BASE,
                 page_count: spawn_layout::USER_STACK_PAGES,

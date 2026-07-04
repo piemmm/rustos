@@ -354,6 +354,10 @@ pub fn install_system_mount<B: Block + 'static>(
             fields: &[],
         },
     );
+    // The on-disk application store is now readable: resolve the readiness
+    // latch so a `spawn` parked on a pending store wakes and proceeds
+    // through the load gate (`plans/APPS.md` deliverable 8).
+    crate::app_store::APP_STORE.note_available();
 }
 
 /// Register the live, writable encrypted-root driver as the backing for the
@@ -395,8 +399,11 @@ pub fn register_writable_state(driver: Box<dyn KernelFs>, audit: &dyn Sink) {
 
 /// Audit a declined `/System` `fs_*` mount with a stable, secret-free
 /// `cause`. Fail-soft: the `fs_*` syscalls keep failing closed and the boot
-/// proceeds.
+/// proceeds. Also resolves the application-store readiness latch
+/// *unavailable*, so a `spawn` parked on a pending store wakes and fails
+/// closed rather than waiting forever.
 fn unavailable(audit: &dyn Sink, cause: &'static str) {
+    crate::app_store::APP_STORE.note_unavailable();
     log(
         audit,
         &Event {

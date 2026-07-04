@@ -138,7 +138,7 @@ impl<'a> AppLoader<'a> {
         let requested = self.requested_capabilities(&bytes, &header, bundle)?;
         let granted = requested.intersection(user_grants);
 
-        let libraries = self.validate_run_image(bundle)?;
+        let (run_image, libraries) = self.validate_run_image(bundle)?;
 
         let run_path = join(bundle, "Run");
         self.audit(
@@ -152,6 +152,7 @@ impl<'a> AppLoader<'a> {
             header.bundle_name().into(),
             header.bundle_version().into(),
             run_path,
+            run_image,
             granted,
             libraries,
         ))
@@ -182,7 +183,8 @@ impl<'a> AppLoader<'a> {
     }
 
     /// Read and validate the entry-point `Run` binary and resolve the shared
-    /// libraries it declares it needs.
+    /// libraries it declares it needs, returning the validated bytes so the
+    /// caller spawns exactly what was checked (no re-read).
     ///
     /// `LoadImage::parse` enforces the hardening invariants (PIE, W^X,
     /// and the syscall-hash CFI tag) on the binary; a malformed image or a
@@ -196,7 +198,7 @@ impl<'a> AppLoader<'a> {
     fn validate_run_image(
         &self,
         bundle: &str,
-    ) -> Result<alloc::vec::Vec<ResolvedLibrary>, AppError> {
+    ) -> Result<(alloc::vec::Vec<u8>, alloc::vec::Vec<ResolvedLibrary>), AppError> {
         let run_bytes = self
             .cfg
             .store
@@ -211,7 +213,8 @@ impl<'a> AppLoader<'a> {
             );
             AppError::RunImage(e)
         })?;
-        self.resolve_needed_libraries(bundle, &image)
+        let libraries = self.resolve_needed_libraries(bundle, &image)?;
+        Ok((run_bytes, libraries))
     }
 
     /// Resolve every shared library the entry-point `image` declares it needs
@@ -609,6 +612,12 @@ mod tests {
         assert_eq!(app.name(), "Example");
         assert_eq!(app.version(), "1.0");
         assert_eq!(app.run_path(), "/Apps/Example.app/Run");
+        // The returned image is byte-for-byte the store's validated `Run`,
+        // so a spawner maps exactly what the pipeline checked.
+        assert_eq!(
+            app.run_image(),
+            store.read_run("/Apps/Example.app").expect("run").as_slice()
+        );
         assert!(app.granted().contains(CapabilityId::NET_RAW));
         assert!(!app.granted().contains(CapabilityId::FS_MOUNT));
         assert_eq!(app.granted().len(), 1);

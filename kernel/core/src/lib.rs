@@ -69,6 +69,7 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+pub mod appspawn;
 pub mod aspace;
 pub mod audit;
 pub mod boot_id;
@@ -112,9 +113,18 @@ pub mod wallclock;
 
 #[cfg(any(test, feature = "test-arch"))]
 pub mod test_arch;
+// Shared host-test fixtures for the on-disk bundle spawn path (an
+// in-memory filesystem + the signed-bundle composer), used by both the
+// `appspawn` unit tests and the `spawn` syscall-handler tests so the fake
+// volume is defined once.
+#[cfg(test)]
+pub(crate) mod test_bundle;
 #[cfg(any(test, feature = "test-arch"))]
 pub mod test_sink;
 
+pub use appspawn::{
+    app_error_errno, bundle_run_path, AnchorVerifier, AppStore, BundleRunPath, FsBundleStore,
+};
 pub use aspace::{AddressSpaceRegistry, AspaceError};
 pub use audit::AuditEvent;
 pub use bootinfo::{BootInfo, BootInfoError, IrqRouting, KernelArch, MAX_COMMAND_LINE_BYTES};

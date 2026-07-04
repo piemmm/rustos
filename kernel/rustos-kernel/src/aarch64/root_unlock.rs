@@ -352,6 +352,10 @@ pub fn spawn_if_present(ctx: &'static (dyn InitSpawnCtx + Sync)) -> bool {
             "root-unlock: no root block device bound; root unbound, login refuses (§18.4)",
         );
         release_console0_to_login();
+        // No disk means no on-disk application store this boot: resolve the
+        // readiness latch so a store-bundle spawn fails closed instead of
+        // parking forever.
+        crate::app_store::APP_STORE.note_unavailable();
         return false;
     };
     if binding.driver_path != VIRTIO_BLK_PATH && binding.driver_path != EMMC2_PATH {
@@ -368,6 +372,7 @@ pub fn spawn_if_present(ctx: &'static (dyn InitSpawnCtx + Sync)) -> bool {
             "root-unlock: bound block driver is not a known floor driver; root unbound",
         );
         release_console0_to_login();
+        crate::app_store::APP_STORE.note_unavailable();
         return false;
     }
     let Some(frames) = ctx.static_frames() else {
@@ -377,6 +382,7 @@ pub fn spawn_if_present(ctx: &'static (dyn InitSpawnCtx + Sync)) -> bool {
             "root-unlock: no kernel frame allocator; root unbound, login refuses",
         );
         release_console0_to_login();
+        crate::app_store::APP_STORE.note_unavailable();
         return false;
     };
 
@@ -395,6 +401,11 @@ pub fn spawn_if_present(ctx: &'static (dyn InitSpawnCtx + Sync)) -> bool {
         let Err(stage) = run_unlock(yielder, &binding, dtb, frames, caps, env);
         note(audit, Level::Error, stage);
         release_console0_to_login();
+        // The bring-up failed before the `/System` mount install could run:
+        // resolve the application-store latch so a parked store-bundle
+        // spawn wakes and fails closed (a no-op when the failure happened
+        // after the install already resolved it).
+        crate::app_store::APP_STORE.note_unavailable();
     };
 
     let admitted = ctx.spawn_kernel_service(alloc::boxed::Box::new(body));
@@ -417,8 +428,10 @@ pub fn spawn_if_present(ctx: &'static (dyn InitSpawnCtx + Sync)) -> bool {
     );
     if !started {
         // Admission failed: nothing will open the gate, so do it here or
-        // console-0 `login` would park forever.
+        // console-0 `login` would park forever — and nothing will publish
+        // the `/System` mount, so resolve the application-store latch too.
         release_console0_to_login();
+        crate::app_store::APP_STORE.note_unavailable();
     }
     started
 }

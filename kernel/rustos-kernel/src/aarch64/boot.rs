@@ -927,6 +927,12 @@ fn enter_kernel_core(
         &crate::spawn_layout::PROGRAM_REGISTRY,
         &crate::aarch64::spawn_producer::AARCH64_PROCESS_SPAWN,
     )
+    // Install the on-disk application store (`plans/APPS.md` deliverable 8):
+    // this port embeds no program rows, so every command app and service is
+    // spawned from its verified `/System` store bundle. The storage bring-up
+    // resolves the store's readiness latch on every outcome (mount installed
+    // or given up), so a spawn racing the mount parks and always wakes.
+    .with_app_store(&crate::app_store::APP_STORE)
     // Hand the syscall dispatch hook the shared set-once credential cell
     // (`plans/PI.md` P11 Chunk B-2): `users_db_read` reads it on every
     // call, and the in-kernel root-unlock kthread publishes the mounted

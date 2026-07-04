@@ -623,6 +623,19 @@ where
     /// child receives only its manifest∩user-grant authority. Held as a `'static` borrow, like the console device.
     pub spawn_service: &'static (dyn ProcessSpawn + 'static),
 
+    /// The on-disk application store the `spawn` syscall resolves a
+    /// non-embedded `…/<Name>.app/Run` path against (`plans/APPS.md`
+    /// deliverable 8): the build's embedded app trust anchor plus the
+    /// readiness latch the boot path resolves when the `/System` mount
+    /// reaches a terminal state.
+    ///
+    /// Defaults to `None`: a port with no storage floor leaves it unset and
+    /// a store-bundle spawn fails closed with
+    /// [`rustos_abi::Errno::NotFound`], parking nothing. A port whose boot
+    /// path will publish (or explicitly give up on) the `/System` mount
+    /// installs its store through [`Self::with_app_store`].
+    pub app_store: Option<&'static crate::appspawn::AppStore>,
+
     /// The kernel input-focus arbiter the keyboard syscalls (`key_inject` /
     /// `display_acquire` / `display_release` / `keyboard_read`) drive
     /// (`plans/PI.md` P11 — input follows
@@ -784,6 +797,9 @@ where
             // SP3): `spawn` fails closed (`NotFound` / `NotImplemented`).
             programs: &EMPTY_PROGRAM_REGISTRY,
             spawn_service: &NULL_PROCESS_SPAWN,
+            // No on-disk application store until a boot path with a storage
+            // floor installs one: a store-bundle spawn fails closed.
+            app_store: None,
             // Input-focus arbiter unwired until the arch port installs the
             // real one through `with_input_focus` (`plans/PI.md` P11):
             // `key_inject` / `keyboard_read` fail closed through
@@ -890,6 +906,22 @@ where
     ) -> Self {
         self.programs = programs;
         self.spawn_service = spawn_service;
+        self
+    }
+
+    /// Install the on-disk application store the `spawn` syscall resolves
+    /// non-embedded `…/<Name>.app/Run` paths against, consuming and
+    /// returning `self` (`plans/APPS.md` deliverable 8).
+    ///
+    /// Called by a boot pipeline whose storage floor will publish (or
+    /// explicitly give up on) the `/System` mount and resolve the store's
+    /// readiness latch on every outcome. Until this is called a
+    /// store-bundle spawn fails closed ([`rustos_abi::Errno::NotFound`]),
+    /// parking nothing. The store must be `'static`, exactly like the
+    /// program registry.
+    #[must_use]
+    pub fn with_app_store(mut self, app_store: &'static crate::appspawn::AppStore) -> Self {
+        self.app_store = Some(app_store);
         self
     }
 

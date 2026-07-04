@@ -1,10 +1,12 @@
 //! Hashing primitives.
 //!
 //! The only hash exposed in `abi-v1` is SHA-256 (used by the syscall-table
-//! fingerprint embedded in every manifest). Streaming hashing is not exposed
-//! here because no caller in the workspace needs it; if and when one does,
-//! it should be added with its own audit note rather than smuggled in via
-//! a `Default`/`Update`/`Finalize` trait.
+//! fingerprint embedded in every manifest). Streaming is exposed only as the
+//! narrow [`Sha256Stream`] below — added for the kernel's bundle content
+//! digest, which frames many on-disk files through
+//! `rustos_abi::digest_bundle_contents` and must not buffer the whole
+//! framing in kernel memory — never as a re-export of the upstream
+//! `Default`/`Update`/`Finalize` traits.
 
 use sha2::{Digest, Sha256};
 
@@ -28,9 +30,52 @@ pub fn sha256(data: &[u8]) -> Sha256Digest {
     digest
 }
 
+/// Incremental SHA-256: feed chunks with [`update`](Self::update), then
+/// take the digest with [`finalize`](Self::finalize).
+///
+/// Audit note: this wraps the same audited [`sha2::Sha256`] core as the
+/// one-shot [`sha256`] — the two can never diverge — and exists so a caller
+/// hashing a large, piecewise message (the kernel's bundle content digest
+/// over every file of an on-disk `.app` bundle) streams it instead of
+/// concatenating the whole message in memory first. The upstream `Digest`
+/// traits stay unexported; this type is the whole streaming surface.
+pub struct Sha256Stream {
+    inner: Sha256,
+}
+
+impl Sha256Stream {
+    /// Start a new streaming SHA-256 computation.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            inner: Sha256::new(),
+        }
+    }
+
+    /// Feed the next `chunk` of the message.
+    pub fn update(&mut self, chunk: &[u8]) {
+        self.inner.update(chunk);
+    }
+
+    /// Consume the stream and return the digest of everything fed so far.
+    #[must_use]
+    pub fn finalize(self) -> Sha256Digest {
+        let out = self.inner.finalize();
+        let mut digest = [0u8; SHA256_OUTPUT_LEN];
+        digest.copy_from_slice(out.as_slice());
+        digest
+    }
+}
+
+impl Default for Sha256Stream {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{sha256, SHA256_OUTPUT_LEN};
+    use super::{sha256, Sha256Stream, SHA256_OUTPUT_LEN};
 
     #[test]
     fn empty_string_matches_nist_vector() {
@@ -41,6 +86,35 @@ mod tests {
             0x78, 0x52, 0xb8, 0x55,
         ];
         assert_eq!(sha256(b""), expected);
+    }
+
+    #[test]
+    fn streaming_matches_the_one_shot_across_chunk_boundaries() {
+        // The stream wraps the same core as the one-shot, so any chunking
+        // of the same message must produce the identical digest.
+        let message: alloc_free_msg::Msg = alloc_free_msg::build();
+        let whole = sha256(&message);
+        for split in [0usize, 1, 31, 32, 33, 63, 64, 65, message.len()] {
+            let mut stream = Sha256Stream::new();
+            let (a, b) = message.split_at(split);
+            stream.update(a);
+            stream.update(b);
+            assert_eq!(stream.finalize(), whole, "split at {split}");
+        }
+    }
+
+    /// A deterministic 96-byte test message spanning two SHA-256 blocks,
+    /// built without an allocator so the test stays `no_std`-shaped.
+    mod alloc_free_msg {
+        pub type Msg = [u8; 96];
+        pub fn build() -> Msg {
+            let mut msg = [0u8; 96];
+            for (i, byte) in msg.iter_mut().enumerate() {
+                let i = u8::try_from(i).expect("96-byte test message index fits in u8");
+                *byte = i.wrapping_mul(37).wrapping_add(11);
+            }
+            msg
+        }
     }
 
     #[test]

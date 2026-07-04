@@ -26,7 +26,7 @@ pub use aead::{
     open, seal, AeadError, AeadKey, AeadNonce, AeadTag, AEAD_KEY_LEN, AEAD_NONCE_LEN, AEAD_TAG_LEN,
 };
 pub use constant_time::ct_eq;
-pub use hash::{sha256, Sha256Digest, SHA256_OUTPUT_LEN};
+pub use hash::{sha256, Sha256Digest, Sha256Stream, SHA256_OUTPUT_LEN};
 pub use kdf::{
     derive_key, pbkdf2_sha256, pbkdf2_sha256_verify, DerivedKey, PasswordHash, DERIVED_KEY_LEN,
     PASSWORD_HASH_LEN,

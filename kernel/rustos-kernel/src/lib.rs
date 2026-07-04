@@ -207,6 +207,16 @@ pub mod driver_spawn_loader;
 #[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64"))]
 pub mod system_files;
 
+// The on-disk application store handle (`plans/APPS.md` deliverable 8): the
+// one `'static` `AppStore` carrying the build's embedded app trust anchor
+// (`build.rs`-derived from the dedicated app-signing seed) and the
+// readiness latch the `/System` mount install resolves. A boot path with a
+// storage floor installs it into the syscall layer so the `spawn` syscall
+// verifies and launches `…/<Name>.app/Run` bundles from the mounted volume.
+// Architecture-neutral pure data, so it is un-gated and its trust-domain
+// unit test runs on the CI host.
+pub mod app_store;
+
 // The boot-time install of the read-only `/System` volume as the userland
 // `fs_*` filesystem mount (`PREREQUISITES.md` P-A): the type-erased
 // `KernelFs` mount driver, the `LATE_FILESYSTEM` / `FS_SERVICE` statics the
@@ -284,13 +294,13 @@ mod spawn_layout;
 // The absolute paths the embedded programs are registered under — pure
 // data, free of the rxe-laden registry rows in `spawn_layout` that consume
 // it, so it compiles — and its system-app-store spelling drift test runs —
-// on the CI host as well as on each bare-metal production build, and on no
-// other configuration, so it is never dead code.
+// on the CI host as well as on each row-bearing bare-metal production
+// build, and on no other configuration, so it is never dead code. The
+// aarch64 production build carries no embedded rows (its `spawn` resolves
+// on-disk store bundles), so it has no consumer for the path constants and
+// is excluded.
 #[cfg(any(
-    all(
-        freestanding,
-        any(kernel_isa = "aarch64", kernel_isa = "x86_64", kernel_isa = "riscv64")
-    ),
+    all(freestanding, any(kernel_isa = "x86_64", kernel_isa = "riscv64")),
     test
 ))]
 mod spawn_paths;

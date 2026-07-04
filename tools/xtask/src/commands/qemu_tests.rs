@@ -1415,50 +1415,52 @@ const TESTS: &[QemuTest] = &[
     // `rustos-test-spawn-session-qemu-aarch64` boots the *production*
     // aarch64 `rustos-kernel` pipeline (`boot_aarch64::boot`) on the `virt`
     // board with both the `InitSpawn` seam and the runtime `ProcessSpawn`
-    // producer + embedded-program registry installed. After `kernel_main`
-    // emits `BootCompleted` it spawns PID 1 `init` into EL0 (`ProcessSpawned`,
+    // producer installed. The aarch64 production boot embeds no program
+    // rows (`plans/APPS.md` deliverable 8): every service is spawned from
+    // its verified on-disk `/System` store bundle, so this vertical carries
+    // the shared encrypted-root whole-disk image (whose `/System` volume
+    // ships the complete signed bundles). After `kernel_main` emits
+    // `BootCompleted` it spawns PID 1 `init` into EL0 (`ProcessSpawned`,
     // `EventId(4030)` #1); `init` writes its banner and supervises the
     // session: it issues the audited `spawn` syscall (`SyscallInvoked`,
-    // `EventId(5000)` #1) for `/System/Services/login` (P11) and `wait`s on
-    // it (`SyscallInvoked` #2). The producer builds login a fresh,
-    // hardware-isolated address space (`ProcessSpawned` #2) and admits it
-    // Ready; login's `users_db_read` fails closed (no root volume on this
-    // board, so no database is held), it wires the deny-all authenticator,
-    // writes its `Username: ` prompt and **blocks** in `stream_read` on the
-    // kernel-core `BlockingConsoleRead` backing. The runner then holds the
-    // scripted dialogue below with it: it types `root`, waits for the
-    // `Password: ` prompt (proving login read the username line whole and
-    // re-prompted rather than crashing per keystroke — the regression the
-    // allocation-free prompt path fixed), types a password the deny-all
-    // authenticator refuses (`Login incorrect`), waits for the **second**
-    // `Username: ` prompt of the retry loop, and finally types a 513-byte
-    // line (one byte past login's 512-byte `LINE_MAX` validation bound); login refuses the over-long line whole, records
-    // the console error, and exits fail-closed; `init` reaps it and
-    // relaunches it (`ProcessSpawned` #3). The audit sink reports PASS
-    // through the ARM semihosting finisher once it has seen three
-    // `ProcessSpawned` and four audited syscalls — and the runner fails
-    // the run if the guest exits before every scripted prompt appeared
-    // and every line was sent, so a login that dies mid-dialogue cannot
-    // pass on its relaunch alone. Together that proves the interactive
-    // read path delivered real UART RX bytes to the blocked login across
-    // a full prompt→reply→re-prompt exchange *and* that supervision
-    // (reap + restart) ran. Logging in for real rides the P8/P11
-    // root-volume mount; until then every credential check on this board
-    // fails closed. Single CPU and a 60-second budget match the
-    // other boot-then-do-fixed-work tests.
+    // `EventId(5000)`) for each service bundle and `wait`s on the children.
+    // The script first answers the root-unlock passphrase prompt; the
+    // unlock loads the volume's users database, so `login` — which waits
+    // for that database — writes its `Username: ` prompt and **blocks** in
+    // `stream_read` on the kernel-core `BlockingConsoleRead` backing. The
+    // runner then holds the scripted dialogue below with it: it types
+    // `root`, waits for the `Password: ` prompt (proving login read the
+    // username line whole and re-prompted rather than crashing per
+    // keystroke — the regression the allocation-free prompt path fixed),
+    // types a wrong password the authenticator refuses (`Login incorrect`),
+    // waits for the **second** `Username: ` prompt of the retry loop, and
+    // finally types a 513-byte line (one byte past login's 512-byte
+    // `LINE_MAX` validation bound); login refuses the over-long line whole,
+    // records the console error, and exits fail-closed; `init` reaps it and
+    // relaunches it. The audit sink reports PASS through the ARM
+    // semihosting finisher once it has seen the expected `ProcessSpawned`
+    // and audited-syscall counts — and the runner fails the run if the
+    // guest exits before every scripted prompt appeared and every line was
+    // sent, so a login that dies mid-dialogue cannot pass on its relaunch
+    // alone. Together that proves the disk-backed spawn path (read +
+    // verify + launch off the mounted volume), the interactive read path,
+    // and supervision (reap + restart) end to end. Single CPU; the
+    // 120-second budget covers the unlock's key derivation on top of the
+    // boot-then-do-fixed-work baseline.
     QemuTest {
         package: "rustos-test-spawn-session-qemu-aarch64",
         binary: "rustos-test-spawn-session-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
-        timeout: Duration::from_secs(60),
+        timeout: Duration::from_secs(120),
         disk_sectors: None,
         virtio_net: false,
         ramfb: false,
-        fs_disk: FsDisk::None,
+        fs_disk: FsDisk::EncryptedRootDisk,
         keyboard: None,
         pointer: false,
         serial: &[
+            ("Root filesystem passphrase: ", UNLOCK_PASSPHRASE_LINE),
             ("Username: ", "root\n"),
             ("Password: ", "wrong\n"),
             (
@@ -1493,18 +1495,26 @@ const TESTS: &[QemuTest] = &[
     // pinned by the host unit tests (`kernel/core/src/waitq.rs`,
     // `kernel/core/src/syscalls.rs`); this vertical proves the integrated
     // boot → spawn → read → park → real-generation-bump → no-starvation path on
-    // the production pipeline. Single CPU and a 60-second budget match the other
-    // boot-then-do-fixed-work aarch64 tests.
+    // the production pipeline. The aarch64 production boot embeds no
+    // program rows (`plans/APPS.md` deliverable 8): `devmgr` is spawned
+    // from its verified on-disk `/System` store bundle, so this vertical
+    // carries the shared encrypted-root whole-disk image. The read-only
+    // `/System` volume is mounted under its well-known key *before* any
+    // passphrase dialogue, so the parked service spawns resolve without
+    // touching the console and the run still needs no scripted serial
+    // input (the unanswered unlock prompt is harmless to this vertical's
+    // witness). Single CPU; the 120-second budget covers the disk bring-up
+    // on top of the boot-then-do-fixed-work baseline.
     QemuTest {
         package: "rustos-test-devmgr-hwtree-qemu-aarch64",
         binary: "rustos-test-devmgr-hwtree-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
-        timeout: Duration::from_secs(60),
+        timeout: Duration::from_secs(120),
         disk_sectors: None,
         virtio_net: false,
         ramfb: false,
-        fs_disk: FsDisk::None,
+        fs_disk: FsDisk::EncryptedRootDisk,
         keyboard: None,
         pointer: false,
         serial: &[],

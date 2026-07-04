@@ -76,6 +76,16 @@ rustos-vt = { path = "../../lib/vt", version = "=0.0.0" }
 # rather than a second copy of the layout-to-tty mapping (`plans/PI.md` P11).
 rustos-keymap = { path = "../../lib/keymap", version = "=0.0.0" }
 rustos-caps = { path = "../../lib/caps", version = "=0.0.0" }
+# The one shared application-bundle load gate (`AGENTS.md` §16.5): the
+# `spawn` syscall's store-bundle path judges an on-disk `.app` through the
+# same `rustos_appload` pipeline the user-space `appmgr` re-exports, never a
+# second verifier (`AGENTS.md` §2.2).
+rustos-appload = { path = "../../lib/appload", version = "=0.0.0" }
+# The audited crypto wrappers (`AGENTS.md` §2.12): the store-bundle spawn
+# path verifies the `AppInfo` Ed25519 signature against the build's embedded
+# app trust anchor and streams the bundle content SHA-256 through
+# `Sha256Stream`.
+rustos-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
 # The `/System/Security/Users` database format the boot-time root-volume
 # read path (`src/users.rs`) parses and the login path authenticates
 # against (`AGENTS.md` §5.1, `plans/PI.md` P11).
@@ -107,3 +117,8 @@ rustos-kernel-core = { path = ".", version = "=0.0.0", default-features = false,
 # (`AGENTS.md` §2.3). The normal `[dependencies]` entry above stays
 # feature-free; dev-dependency features apply only to test builds.
 rustos-kernel-mem = { path = "../mem", version = "=0.0.0", features = ["host-tests"] }
+# The host-only signed-bundle composer (`compose_signed_appinfo`): the
+# store-bundle spawn tests sign their fixtures through the same one
+# definition the image build uses, so the kernel verifier and the composer
+# can never drift (`AGENTS.md` §2.2).
+rustos-itest-harness = { path = "../../tests/integration/harness", version = "=0.0.0", features = ["app-image"] }

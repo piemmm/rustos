@@ -30,18 +30,21 @@
 //!    #3) and admits it **Ready**.
 //! 3. `wait` on the children (audited `SyscallInvoked` #3), which parks
 //!    `init` back on the scheduler until a child is reapable.
-//! 4. The cooperative drain loop steps login; its `users_db_read` fails
-//!    closed (this board mounts no root volume, so no database is held), it
-//!    wires the deny-all authenticator, writes its
-//!    `Username: ` prompt, and **blocks** in `stream_read` on the
-//!    kernel-core `BlockingConsoleRead` backing (the
-//!    backing owns blocking). The runner then holds a scripted dialogue
-//!    with it (the xtask enrolment's ordered `serial` script, each line
-//!    typed only after its prompt appeared past the previous exchange):
-//!    `root` at the first `Username: `, a password at the `Password: `
+//! 4. The xtask enrolment's ordered `serial` script first answers the
+//!    root-unlock passphrase prompt (this vertical boots the shared
+//!    encrypted-root whole-disk image: the aarch64 production boot embeds
+//!    no program rows, so every service above is read, verified, and
+//!    spawned from its on-disk `/System` store bundle — `plans/APPS.md`
+//!    deliverable 8 — and the unlock loads the volume's users database
+//!    login waits for). Login then writes its `Username: ` prompt and
+//!    **blocks** in `stream_read` on the kernel-core
+//!    `BlockingConsoleRead` backing (the backing owns blocking). The
+//!    runner holds the scripted dialogue with it (each line typed only
+//!    after its prompt appeared past the previous exchange): `root` at
+//!    the first `Username: `, a wrong password at the `Password: `
 //!    prompt — which prints only if login read the username line whole and
 //!    re-prompted (the per-keystroke-crash regression witness) — then,
-//!    after the deny-all authenticator refuses (`Login incorrect`) and
+//!    after the authenticator refuses (`Login incorrect`) and
 //!    login re-prompts, a 513-byte line — one byte past login's 512-byte
 //!    `LINE_MAX` validation bound — at the **second**
 //!    `Username: ` prompt. Login refuses the over-long line whole, records
@@ -76,9 +79,9 @@
 //! `Outcome::Timeout` — the documented fail-loud behaviour. The runner adds the converse guard: it fails the run if the guest
 //! exits before every scripted prompt appeared and every line was sent, so
 //! a login that crashes mid-dialogue (e.g. per keystroke) cannot pass on
-//! the relaunch's event counts alone. Logging in for real rides the P8/P11
-//! root-volume mount; until then every credential check on this board fails
-//! closed.
+//! the relaunch's event counts alone. The mounted volume's users database
+//! serves the credential checks; the scripted wrong password is refused by
+//! the real authenticator, never a stub.
 //!
 //! ## Embedded `virt` device tree
 //!

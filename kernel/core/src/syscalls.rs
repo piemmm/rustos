@@ -288,6 +288,16 @@ where
     /// path installs the concrete producer through [`Self::with_spawn`].
     /// Held as a `'static` borrow, exactly like the console device.
     spawn_service: &'static (dyn ProcessSpawn + 'static),
+    /// The on-disk application store the `spawn` syscall resolves a
+    /// non-embedded `…/<Name>.app/Run` path against (`plans/APPS.md`
+    /// deliverable 8): the build's embedded app trust anchor plus the
+    /// readiness latch the boot path resolves when the `/System` mount
+    /// reaches a terminal state. `None` (the default) means this build has
+    /// no on-disk store: a store-bundle spawn fails closed with
+    /// [`Errno::NotFound`] immediately, parking nothing. Installed through
+    /// [`Self::with_app_store`] by a boot path whose storage floor will
+    /// publish (or explicitly give up on) the mount.
+    app_store: Option<&'static crate::appspawn::AppStore>,
     /// The architecture-specific anonymous-memory producer the `mem_map` /
     /// `mem_unmap` syscalls drive to map and unmap fresh `RW` regions in the
     /// caller's own live address space (`plans/SPAWN.md` SP5). Defaults to
@@ -483,6 +493,10 @@ where
             page_table_frames: None,
             programs: &EMPTY_PROGRAM_REGISTRY,
             spawn_service: &NULL_PROCESS_SPAWN,
+            // No on-disk application store until a boot path with a storage
+            // floor installs one: a store-bundle spawn fails closed with
+            // `NotFound` immediately, parking nothing.
+            app_store: None,
             // Anonymous-memory subsystem unwired until the boot path installs
             // the `kernel/mem` live-mapping producer (`plans/SPAWN.md` SP5b):
             // `mem_map` / `mem_unmap` fail closed with `NotImplemented`.
@@ -739,6 +753,23 @@ where
     ) -> Self {
         self.programs = programs;
         self.spawn_service = spawn_service;
+        self
+    }
+
+    /// Install the on-disk application store the `spawn` syscall resolves
+    /// non-embedded `…/<Name>.app/Run` paths against, consuming and
+    /// returning `self` (`plans/APPS.md` deliverable 8).
+    ///
+    /// Called once by a boot path whose storage floor will publish (or
+    /// explicitly give up on) the `/System` mount; that path also resolves
+    /// the store's readiness latch on every outcome, so a spawn parked on a
+    /// pending store is always woken. Until this is called a store-bundle
+    /// spawn fails closed with [`Errno::NotFound`], parking nothing. The
+    /// store must be `'static`: it lives for the lifetime of the running
+    /// kernel, exactly like the program registry.
+    #[must_use]
+    pub const fn with_app_store(mut self, store: &'static crate::appspawn::AppStore) -> Self {
+        self.app_store = Some(store);
         self
     }
 
@@ -1231,6 +1262,152 @@ where
                 Ok(render_view_path(&components))
             }
         }
+    }
+
+    /// Resolve, verify, and authorise the on-disk store bundle at `parsed`
+    /// through the one shared `rustos_appload` load gate, returning the
+    /// validated entry-point image and its manifest capability request.
+    ///
+    /// The bundle is read through the secured VFS under the **caller's**
+    /// kernel-attested identity, so every per-inode and mount-flag check
+    /// stays kernel-side; the manifest must be signed by the build's
+    /// embedded app trust anchor. A build with no installed store, a store
+    /// that resolved unavailable, or any gate refusal fails closed. A spawn
+    /// racing the boot kthread that publishes the mount parks (event-woken)
+    /// until the store's readiness latch resolves.
+    fn load_store_bundle(
+        &self,
+        caller: &CallerContext<'_>,
+        parsed: &crate::appspawn::BundleRunPath<'_>,
+    ) -> Result<rustos_appload::LoadedApp, Errno> {
+        let Some(store) = self.app_store else {
+            return Err(Errno::NotFound);
+        };
+        self.wait_app_store(caller, store)?;
+        if !store.is_available() {
+            return Err(Errno::NotFound);
+        }
+        let uid = caller.caps.owner().0;
+        let fs_store =
+            crate::appspawn::FsBundleStore::new(self.filesystem, uid, caller.caps.effective());
+        let verifier = crate::appspawn::AnchorVerifier::new(store.anchor());
+        let loader = rustos_appload::AppLoader::new(rustos_appload::AppLoaderConfig {
+            accepted_abi_version: rustos_abi::ABI_VERSION_CURRENT,
+            syscall_table_hash: rustos_kernel_syscall::SYSCALL_TABLE_HASH,
+            store: &fs_store,
+            verifier: &verifier,
+            sink: self.audit,
+        });
+        // The full-word set is the identity element of the gate's
+        // request∩grants intersection, so the returned ceiling is exactly
+        // the manifest request — the same value an embedded row carries —
+        // and the admit path's single intersection with the spawning
+        // credential's user ceiling stays the one authority bound.
+        let full_grants = CapabilitySet::from_words([u64::MAX; 4]);
+        loader
+            .load(parsed.bundle, &full_grants)
+            .map_err(crate::appspawn::app_error_errno)
+    }
+
+    /// Park the caller while the installed application store's readiness
+    /// latch is still *pending* — the boot kthread that publishes the
+    /// `/System` mount has not reached a terminal state.
+    ///
+    /// The caller parks off the run queue on
+    /// [`crate::waitq::APP_STORE_WAITQ`] (no busy yield) and is woken by
+    /// [`crate::waitq::app_store_wake`] the instant the latch resolves —
+    /// available or unavailable — re-checking the condition after every
+    /// wake. The wait is untimed: the boot path resolves the latch on every
+    /// outcome, so only an explicit wake releases a waiter.
+    fn wait_app_store(
+        &self,
+        caller: &CallerContext<'_>,
+        store: &crate::appspawn::AppStore,
+    ) -> Result<(), Errno> {
+        if !store.is_pending() {
+            return Ok(());
+        }
+        let cpu = SchedulerArch::current_cpu(self.arch);
+        let task = caller.task_id.0;
+        // Register so a waker can find and `unpark` us, then loop check →
+        // park. The scheduler's wake-pending token closes the check/park
+        // race — mirrors `users_db_wait` exactly.
+        crate::waitq::APP_STORE_WAITQ.register(task, crate::waitq::NO_DEADLINE);
+        let result = loop {
+            if !store.is_pending() {
+                break Ok(());
+            }
+            // Park off the run queue until woken. `reschedule_current`
+            // returns `false` only when the caller is not a resumable user
+            // kthread (host tests with no live dispatch loop); fall back to
+            // a cooperative yield then, mirroring `users_db_wait`, so a
+            // degenerate caller never busy-spins.
+            if !crate::kthread::reschedule_current(cpu, RescheduleAction::Park) {
+                match self.sched.yield_current(task) {
+                    Ok(()) | Err(SchedError::InvalidState) => {}
+                    Err(SchedError::NoSuchTask) => break Err(Errno::NotFound),
+                    Err(_) => break Err(Errno::OutOfRange),
+                }
+            }
+        };
+        crate::waitq::APP_STORE_WAITQ.deregister(task);
+        result
+    }
+
+    /// Resolve the child's kernel-attested credential (uid + group set +
+    /// capability ceiling) for `spawn`, never a caller-supplied value.
+    ///
+    /// * `SPAWN_UID_INHERIT` — the child runs as the *same* user as its
+    ///   parent: copy the caller's own attested credential from its
+    ///   kernel-held record, including the caller's stored user ceiling —
+    ///   never its (narrower) effective set — so a shell that launches a
+    ///   tool hands it the user's ceiling and the tool ends up with its
+    ///   own manifest ∩ that ceiling. A system-principal caller (PID 1
+    ///   spawning the boot services) has no account ceiling; its children
+    ///   are system programs too, each bounded by its own registered
+    ///   manifest. Running a child as oneself needs no capability, and
+    ///   delegation can only narrow: the ceiling is an immutable
+    ///   kernel-side snapshot.
+    /// * a concrete uid — a *switch*: privilege drops into a defined user
+    ///   at process creation (there is no setuid-self), so it requires the
+    ///   caller to hold `CAP_SPAWN_AS_USER` and resolves the target's full
+    ///   group set and capability ceiling from the authoritative identity
+    ///   table. It fails closed on a missing capability, and
+    ///   `resolve_credential` fails closed on an unresolvable user or an
+    ///   uninstalled table — never inventing an identity.
+    fn resolve_spawn_credential(
+        &self,
+        caller: &CallerContext<'_>,
+        target_uid: u32,
+    ) -> Result<SpawnCredential, Errno> {
+        if target_uid == SPAWN_UID_INHERIT {
+            return Ok(SpawnCredential::new(
+                caller.caps.owner(),
+                caller.caps.primary_gid(),
+                caller.caps.supplementary_gids().to_vec(),
+                caller.caps.user_ceiling().copied(),
+            ));
+        }
+        if !caller.caps.has(CapabilityId::SPAWN_AS_USER) {
+            crate::audit::emit(
+                self.audit,
+                Level::Warn,
+                AuditEvent::ProcessSpawnDenied,
+                &[Field {
+                    key: "cause",
+                    value: rustos_log::FieldValue::Str("spawn_as_user_denied"),
+                }],
+            );
+            return Err(Errno::PermissionDenied);
+        }
+        let (primary_gid, supplementary_gids, ceiling) =
+            self.identity.resolve_credential(target_uid)?;
+        Ok(SpawnCredential::new(
+            UserId(target_uid),
+            primary_gid,
+            supplementary_gids,
+            Some(ceiling),
+        ))
     }
 }
 
@@ -2107,11 +2284,20 @@ where
             None => return Err(Errno::BadAddress),
         }
 
-        // Resolve the path to a registered embedded program. An unknown
-        // path fails closed with `NotFound` — there is
-        // no prefix or alias resolution.
-        let Some(program) = self.programs.lookup(&path_buf) else {
-            return Err(Errno::NotFound);
+        // Resolve the path: first against the compiled-in boot-floor
+        // registry, otherwise as an on-disk `<Name>.app` store bundle read
+        // through the mounted VFS and judged by the shared load gate. An
+        // unknown path — or one that is not a well-formed bundle entry
+        // point — fails closed with `NotFound`; there is no prefix or alias
+        // resolution.
+        let program = self.programs.lookup(&path_buf);
+        let bundle = match program {
+            Some(_) => None,
+            None => Some(crate::appspawn::bundle_run_path(&path_buf).ok_or(Errno::NotFound)?),
+        };
+        let loaded = match &bundle {
+            Some(parsed) => Some(self.load_store_bundle(caller, parsed)?),
+            None => None,
         };
 
         // The child's effective startup strings: a present block carries
@@ -2130,60 +2316,18 @@ where
             for index in 0..view.env_count() {
                 env.push(view.env(index).ok_or(Errno::OutOfRange)?);
             }
-        } else {
+        } else if let Some(program) = program {
             args.extend_from_slice(program.args);
+        } else if let Some(parsed) = &bundle {
+            // A store bundle's default argument vector is its command name
+            // (the bundle-directory stem) — the same one-word convention
+            // every registered boot-floor row declares.
+            args.push(parsed.command.as_bytes());
         }
 
         // Resolve the child's kernel-attested credential (uid + group set +
-        // capability ceiling), never a caller-supplied value:
-        //
-        // * `SPAWN_UID_INHERIT` — the child runs as the *same* user as its
-        //   parent: copy the caller's own attested credential from its
-        //   kernel-held record, including the caller's stored user ceiling —
-        //   never its (narrower) effective set — so a shell that launches a
-        //   tool hands it the user's ceiling and the tool ends up with its
-        //   own manifest ∩ that ceiling. A system-principal caller (PID 1
-        //   spawning the boot services) has no account ceiling; its children
-        //   are system programs too, each bounded by its own registered
-        //   manifest. Running a child as oneself needs no capability, and
-        //   delegation can only narrow: the ceiling is an immutable
-        //   kernel-side snapshot.
-        // * a concrete uid — a *switch*: privilege drops into a defined user
-        //   at process creation (there is no setuid-self), so it requires the
-        //   caller to hold `CAP_SPAWN_AS_USER` and resolves the target's full
-        //   group set and capability ceiling from the authoritative identity
-        //   table. It fails closed on a missing capability, and
-        //   `resolve_credential` fails closed on an unresolvable user or an
-        //   uninstalled table — never inventing an identity.
-        let credential = if target_uid == SPAWN_UID_INHERIT {
-            SpawnCredential::new(
-                caller.caps.owner(),
-                caller.caps.primary_gid(),
-                caller.caps.supplementary_gids().to_vec(),
-                caller.caps.user_ceiling().copied(),
-            )
-        } else {
-            if !caller.caps.has(CapabilityId::SPAWN_AS_USER) {
-                crate::audit::emit(
-                    self.audit,
-                    Level::Warn,
-                    AuditEvent::ProcessSpawnDenied,
-                    &[Field {
-                        key: "cause",
-                        value: rustos_log::FieldValue::Str("spawn_as_user_denied"),
-                    }],
-                );
-                return Err(Errno::PermissionDenied);
-            }
-            let (primary_gid, supplementary_gids, ceiling) =
-                self.identity.resolve_credential(target_uid)?;
-            SpawnCredential::new(
-                UserId(target_uid),
-                primary_gid,
-                supplementary_gids,
-                Some(ceiling),
-            )
-        };
+        // capability ceiling), never a caller-supplied value.
+        let credential = self.resolve_spawn_credential(caller, target_uid)?;
 
         // Hand the validated `rxe` to the architecture spawn producer,
         // which builds a fresh hardware-isolated address space and admits
@@ -2231,8 +2375,17 @@ where
             // target user) — never a caller-supplied value.
             credential,
         );
+        let (rxe, requested): (&[u8], CapabilitySet) = if let Some(program) = program {
+            (program.rxe, program.capability_set())
+        } else if let Some(app) = &loaded {
+            (app.run_image(), *app.granted())
+        } else {
+            // Unreachable by construction (the resolve step above returned
+            // on every other shape); keep the arm fail-closed.
+            return Err(Errno::NotFound);
+        };
         self.spawn_service
-            .spawn_with(program.rxe, &ctx, program.capability_set(), &args, &env)
+            .spawn_with(rxe, &ctx, requested, &args, &env)
     }
 
     fn console_count(&self, _caller: &CallerContext<'_>) -> SyscallResult {
@@ -5136,6 +5289,21 @@ where
     #[must_use]
     pub fn with_users_db(mut self, users_db: &'static (dyn UsersDbSource + 'static)) -> Self {
         self.handlers = self.handlers.with_users_db(users_db);
+        self
+    }
+
+    /// Install the on-disk application store the `spawn` syscall resolves
+    /// non-embedded `…/<Name>.app/Run` paths against, consuming and
+    /// returning `self` (`plans/APPS.md` deliverable 8).
+    ///
+    /// The hook-level mirror of [`KernelSyscallHandlers::with_app_store`]:
+    /// called once by a boot path whose storage floor will publish (or
+    /// explicitly give up on) the `/System` mount and resolve the store's
+    /// readiness latch. A boot path with no storage floor simply never
+    /// calls it and a store-bundle spawn stays fail-closed (`NotFound`).
+    #[must_use]
+    pub fn with_app_store(mut self, store: &'static crate::appspawn::AppStore) -> Self {
+        self.handlers = self.handlers.with_app_store(store);
         self
     }
 
@@ -8137,6 +8305,265 @@ mod tests {
         // handler passes an empty grant slice, so the child holds no
         // resolvable handle (no ambient authority).
         assert_eq!(aspaces.read().grant(SecTaskId(pid), 1), None);
+    }
+
+    /// Absolute store-bundle entry-point path the disk-spawn tests use.
+    static BUNDLE_PATH: &[u8] = b"/System/Apps/ps.app/Run";
+
+    /// A bundle-shaped path with no installed application store fails
+    /// closed with `NotFound` — immediately, parking nothing.
+    #[test]
+    fn spawn_bundle_path_without_a_store_fails_not_found() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, BUNDLE_PATH);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
+        let h = spawn_handler(
+            &sched,
+            &table,
+            &arch,
+            sink,
+            &irq,
+            &ctl,
+            &ipc,
+            &aspaces,
+            &rng,
+            &frames,
+            &EMPTY_PROGRAM_REGISTRY,
+            producer,
+        );
+        assert_eq!(
+            h.spawn(
+                &ctx,
+                0x1000,
+                BUNDLE_PATH.len(),
+                CONSOLE_INHERIT,
+                SPAWN_UID_INHERIT,
+                0,
+                0
+            ),
+            Err(Errno::NotFound)
+        );
+    }
+
+    /// A store that resolved *unavailable* fails a bundle spawn closed with
+    /// `NotFound` even when the on-disk bundle exists and would verify.
+    #[test]
+    fn spawn_bundle_path_with_an_unavailable_store_fails_not_found() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, BUNDLE_PATH);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let (memfs, anchor, _run) = crate::test_bundle::composed_bundle(alloc::vec![]);
+        let memfs: &'static crate::test_bundle::MemFs = Box::leak(Box::new(memfs));
+        let store: &'static crate::appspawn::AppStore =
+            Box::leak(Box::new(crate::appspawn::AppStore::pending(anchor)));
+        store.note_unavailable();
+        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
+        let h = spawn_handler(
+            &sched,
+            &table,
+            &arch,
+            sink,
+            &irq,
+            &ctl,
+            &ipc,
+            &aspaces,
+            &rng,
+            &frames,
+            &EMPTY_PROGRAM_REGISTRY,
+            producer,
+        )
+        .with_filesystem(memfs)
+        .with_app_store(store);
+        assert_eq!(
+            h.spawn(
+                &ctx,
+                0x1000,
+                BUNDLE_PATH.len(),
+                CONSOLE_INHERIT,
+                SPAWN_UID_INHERIT,
+                0,
+                0
+            ),
+            Err(Errno::NotFound)
+        );
+        assert!(producer.rxe.lock().is_empty(), "nothing may be spawned");
+    }
+
+    /// With an available store, `spawn` reads the bundle off the mounted
+    /// filesystem, verifies it through the shared load gate, and spawns
+    /// exactly the validated `Run` image with the bundle's command name as
+    /// its default argument vector (`plans/APPS.md` deliverable 8).
+    #[test]
+    fn spawn_of_a_verified_store_bundle_spawns_the_validated_image() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, BUNDLE_PATH);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let (memfs, anchor, run) =
+            crate::test_bundle::composed_bundle(alloc::vec![CapabilityId::CONSOLE_WRITE]);
+        let memfs: &'static crate::test_bundle::MemFs = Box::leak(Box::new(memfs));
+        let store: &'static crate::appspawn::AppStore =
+            Box::leak(Box::new(crate::appspawn::AppStore::pending(anchor)));
+        store.note_available();
+        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
+        let h = spawn_handler(
+            &sched,
+            &table,
+            &arch,
+            sink,
+            &irq,
+            &ctl,
+            &ipc,
+            &aspaces,
+            &rng,
+            &frames,
+            &EMPTY_PROGRAM_REGISTRY,
+            producer,
+        )
+        .with_filesystem(memfs)
+        .with_app_store(store);
+        let pid = h
+            .spawn(
+                &ctx,
+                0x1000,
+                BUNDLE_PATH.len(),
+                CONSOLE_INHERIT,
+                SPAWN_UID_INHERIT,
+                0,
+                0,
+            )
+            .expect("disk-backed spawn succeeds");
+        assert!(pid > 0);
+        // The producer received byte-for-byte the validated on-disk image,
+        // and the child's default argument vector is the bundle's command
+        // name.
+        assert_eq!(producer.rxe.lock().as_slice(), run.as_slice());
+        assert_eq!(producer.args.lock().as_slice(), &[b"ps".to_vec()]);
+        assert!(
+            table.read().caps_for(SecTaskId(pid)).is_some(),
+            "child caps registered under its pid"
+        );
+    }
+
+    /// A tampered on-disk `Run` breaks the signed content hash and the
+    /// spawn is refused with `SignatureInvalid` — nothing is launched.
+    #[test]
+    fn spawn_of_a_tampered_store_bundle_is_refused() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, BUNDLE_PATH);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let (mut memfs, anchor, _run) = crate::test_bundle::composed_bundle(alloc::vec![]);
+        memfs
+            .files
+            .get_mut("/System/Apps/ps.app/Run")
+            .expect("run present")
+            .push(0xFF);
+        let memfs: &'static crate::test_bundle::MemFs = Box::leak(Box::new(memfs));
+        let store: &'static crate::appspawn::AppStore =
+            Box::leak(Box::new(crate::appspawn::AppStore::pending(anchor)));
+        store.note_available();
+        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
+        let h = spawn_handler(
+            &sched,
+            &table,
+            &arch,
+            sink,
+            &irq,
+            &ctl,
+            &ipc,
+            &aspaces,
+            &rng,
+            &frames,
+            &EMPTY_PROGRAM_REGISTRY,
+            producer,
+        )
+        .with_filesystem(memfs)
+        .with_app_store(store);
+        assert_eq!(
+            h.spawn(
+                &ctx,
+                0x1000,
+                BUNDLE_PATH.len(),
+                CONSOLE_INHERIT,
+                SPAWN_UID_INHERIT,
+                0,
+                0
+            ),
+            Err(Errno::SignatureInvalid)
+        );
+        assert!(producer.rxe.lock().is_empty(), "nothing may be spawned");
     }
 
     /// A caller-supplied startup-strings block replaces the program's

@@ -1093,8 +1093,11 @@ name = "rustos-kernel-core"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-appload",
  "rustos-arch-api",
  "rustos-caps",
+ "rustos-crypto",
+ "rustos-itest-harness",
  "rustos-kernel-core",
  "rustos-kernel-ipc",
  "rustos-kernel-irq",

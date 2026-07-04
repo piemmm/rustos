@@ -95,19 +95,20 @@ pub trait Verifier {
 }
 
 /// A bundle the loader has accepted: its identity, the validated entry-point
-/// path, and the capability ceiling it may run with.
+/// path and image, and the capability ceiling it may run with.
 ///
 /// Holding a `LoadedApp` is proof that the layout, the manifest
 /// signature, the content hash, and the syscall-interface hash all checked
 /// out, and that `granted` is the manifest request intersected with the
 /// launching user's grants. The caller spawns
-/// [`run_path`](Self::run_path) with **at most** [`granted`](Self::granted).
+/// [`run_image`](Self::run_image) with **at most** [`granted`](Self::granted).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LoadedApp {
     id: String,
     name: String,
     version: String,
     run_path: String,
+    run_image: Vec<u8>,
     granted: CapabilitySet,
     libraries: Vec<ResolvedLibrary>,
 }
@@ -118,6 +119,7 @@ impl LoadedApp {
         name: String,
         version: String,
         run_path: String,
+        run_image: Vec<u8>,
         granted: CapabilitySet,
         libraries: Vec<ResolvedLibrary>,
     ) -> Self {
@@ -126,6 +128,7 @@ impl LoadedApp {
             name,
             version,
             run_path,
+            run_image,
             granted,
             libraries,
         }
@@ -153,6 +156,15 @@ impl LoadedApp {
     #[must_use]
     pub fn run_path(&self) -> &str {
         &self.run_path
+    }
+
+    /// The exact entry-point `rxe` bytes the pipeline validated — the bytes
+    /// [`rustos_abi::LoadImage::parse`] accepted after the content hash
+    /// checked out. A spawner maps **these** bytes, never a re-read of
+    /// [`run_path`](Self::run_path), so what runs is what was verified.
+    #[must_use]
+    pub fn run_image(&self) -> &[u8] {
+        &self.run_image
     }
 
     /// The capability ceiling the app may run with — the manifest request

@@ -404,6 +404,26 @@ pub fn users_db_wake() {
     }
 }
 
+/// The wait-queue holding `spawn` callers whose store-bundle path arrived
+/// while the on-disk application store is still *pending* (the boot kthread
+/// that publishes the `/System` mount has not reached a terminal state).
+/// Woken by [`app_store_wake`] the instant the
+/// [`crate::appspawn::AppStore`] readiness latch resolves — available or
+/// unavailable — whereupon each waiter re-checks the latch and proceeds or
+/// fails closed. The wait is untimed (registered with [`NO_DEADLINE`]): the
+/// boot path always resolves the latch, so only an explicit wake releases a
+/// waiter, never the timed sweep.
+pub static APP_STORE_WAITQ: WaitQueue = WaitQueue::new();
+
+/// Wake every store-bundle `spawn` caller because the application-store
+/// readiness latch resolved; each re-checks the latch and either proceeds
+/// or fails closed. A fail-safe no-op before the arch hook is installed.
+pub fn app_store_wake() {
+    if let Some(arch) = wait_arch() {
+        APP_STORE_WAITQ.wake_all(arch);
+    }
+}
+
 /// The wait-queue holding `ipc_call` callers (Design D D2b). A caller parks
 /// here after posting its request to a [`rustos_kernel_ipc::call::CallEndpoint`]
 /// and is woken by [`call_wake`] when the bound server replies (no busy yield). `ipc_call` carries no timeout, so every waiter
