@@ -50,15 +50,25 @@ pub use rustos_test_encrypted_root_image::{
 pub const STORE_PATH: &[&[u8]] = &[b"Drivers", b"input", b"virtio_kbd", b"Run"];
 
 /// Build the whole-disk encrypted-root image with the signed `virtio_kbd`
-/// bundle planted in its `/System/Drivers/` store.
+/// bundle planted in its `/System/Drivers/` store and the signed
+/// application bundles `apps` planted into the `/System` app/service
+/// stores — each `(path_components, bytes)` a volume-relative bundle file,
+/// composed and signed by the caller (`plans/APPS.md` deliverable 8). The
+/// booted kernel spawns PID 1's services from those on-disk bundles, so an
+/// image without them never reaches the `devmgr` autoload this fixture
+/// exists to prove.
 ///
 /// # Errors
 ///
 /// Propagates any [`DriverError`] from the underlying whole-disk assembly
 /// (descriptor provisioning, FAT/`RustFS` authoring, the MBR encode, or the
 /// bundle plant), surfaced rather than panicked.
-pub fn build_image() -> Result<Vec<u8>, DriverError> {
-    rustos_test_encrypted_root_image::build_image_with_drivers(&[(STORE_PATH, VIRTIO_KBD_BUNDLE)])
+pub fn build_image(apps: &[(&[&[u8]], &[u8])]) -> Result<Vec<u8>, DriverError> {
+    rustos_test_encrypted_root_image::build_image_with_contents(
+        &[(STORE_PATH, VIRTIO_KBD_BUNDLE)],
+        apps,
+        PASSPHRASE,
+    )
 }
 
 #[cfg(test)]
@@ -152,7 +162,7 @@ mod tests {
 
     #[test]
     fn the_image_is_the_advertised_whole_disk_size() {
-        let bytes = build_image().expect("the autoload-root image assembles");
+        let bytes = build_image(&[]).expect("the autoload-root image assembles");
         assert_eq!(
             bytes.len(),
             usize::try_from(TOTAL_SECTORS).expect("sector count fits usize") * SECTOR_BYTES,

@@ -3595,18 +3595,16 @@ adoption in command apps
 share **data**, not dynamically-linked code.
 
 **Self-contained bundles — migrate off the kernel-baked spawn registry
-(charter-blocking, in progress; §16.5 amended 2026-07-04, §16.2
-services-are-apps amended 2026-07-04).** Every discovered bundle (command
-apps *and* the `login`/`devmgr`/`sysinfod` services) now ships complete on
-the read-only `/System` volume — its signed `AppInfo` + `Run` rxe beside
-its `Help/` tree, at the bundle-form paths PID 1 `init` and the shell name
-— but the `spawn` syscall still dispatches the kernel-baked rxe *copies*
-(`kernel/rustos-kernel/src/spawn_paths.rs` + `spawn_layout.rs`'s
-`include!`-ed `*_rxe.rs` / `SPAWN_PROGRAMS`) rather than loading and
-verifying the on-disk bundles, so the signed verification path is still
-bypassed at launch — forbidden by the amended §16.5/§16.2 (an app *is* its
-bundle directory; a service is an app; app code is never baked into the
-kernel/image builder). Maintainer decision 2026-07-04: no staged
+(§16.5 amended 2026-07-04, §16.2 services-are-apps amended 2026-07-04).**
+Every discovered bundle (command apps *and* the
+`login`/`devmgr`/`sysinfod` services) ships complete on the read-only
+`/System` volume — its signed `AppInfo` + `Run` rxe beside its `Help/`
+tree — and on the aarch64 production boot the `spawn` syscall loads and
+verifies those on-disk bundles through the shared `rustos_appload` gate
+(increment 4 below); no kernel-baked rxe copy remains there. The x86_64
+and riscv64 ports still carry the embedded registry as their
+explicitly-justified §18.6 boot floor until increment 5 lands their
+storage bring-up. Maintainer decision 2026-07-04: no staged
 compatibility — the full correct end state, in dependency order, each
 increment landing complete and green:
 
@@ -3649,19 +3647,29 @@ increment landing complete and green:
    config and the kernel registry name
    `/System/Services/{login,devmgr,sysinfod}.app/Run`, spelled from the
    shared `rustos_abi::SYSTEM_SERVICE_STORE` (drift-tested).
-4. **Kernel disk-backed spawn** — the bundle-verification engine is hoisted
-   out of `userland/system/appmgr` into the `lib/appload` crate the kernel
-   may link (§17.4), `appmgr` re-exporting it — **done**: `rustos-appload`
-   holds the `AppLoader` pipeline, the `BundleStore`/`Verifier` seams, the
-   `LoadedApp` result, and the `11000..12000` audit-event range (with the
-   full engine test suite); `userland/system/appmgr` is now the user-space
-   consumer that re-exports it, so the one gate is shared, never
-   re-implemented. **Remaining:** `spawn` resolves a store-bundle path
-   through the mounted VFS, verifies through `rustos_appload` (signature
-   against the kernel's embedded app trust anchor, content hash, ABI/syscall
-   hash), derives the child's capability request from the on-disk manifest,
-   and spawns; the embedded command-app/service rows then leave the aarch64
-   production boot.
+4. **Kernel disk-backed spawn** — **done.** The bundle-verification engine
+   lives in the shared `lib/appload` crate the kernel links (§17.4;
+   `AppLoader` pipeline, `BundleStore`/`Verifier` seams, `LoadedApp`, the
+   `11000..12000` audit-event range), `userland/system/appmgr` re-exporting
+   it as its user-space consumer. The `spawn` syscall resolves an absolute
+   `…/<Name>.app/Run` path as an on-disk store bundle
+   (`kernel/core/src/appspawn.rs`): read through the secured VFS under the
+   **caller's** kernel-attested identity, verified against the build's
+   embedded app trust anchor (`SYSTEM_APP_SIGNER_PUBKEY`, a trust domain
+   distinct from the driver anchor), content-hash + ABI/syscall-hash
+   checked, the child's capability request derived from the on-disk
+   manifest; a spawn racing the boot mount parks on the `AppStore`
+   readiness latch, which the `/System` mount install resolves on every
+   outcome. The embedded command-app/service rows are gone from the aarch64
+   production boot. Load-bearing invariant: the **system principal**
+   (`uid 0`) resolves to the capability-less bootstrap identity (`gid 0`,
+   no supplementary groups) in the secured-VFS group resolution whenever
+   the identity table is absent or holds no `uid 0` record — PID 1 must
+   spawn the boot services off `/System` *before* the encrypted root is
+   unlocked, and an installer image's table never defines `uid 0`; every
+   per-inode/mount check still applies and non-zero uids stay strictly
+   fail-closed (`LateIdentity::resolve_groups`, regression-tested in
+   `kernel/core/src/fs/mounted_tests.rs`).
 5. **Per-port storage floor, then delete the registry** — x86_64 and riscv64
    gain their bootstrap-floor disk, image layout, and read-only `/System`
    mount (their staged `tools/mkimage` builders, §12), after which

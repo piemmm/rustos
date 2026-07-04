@@ -57,20 +57,19 @@ amended), and deliverable 6 for **every store-registered command app**:
 and the QEMU fixture) and honour the §4 `-h`/`-?` short-help convention
 through the one shared `lib/help` render (`own_short_help` + the
 `rt`-feature `BundleHelp` own-bundle source, which every `Run` binary
-reuses instead of a private copy), and deliverable 5 (`cargo xtask
-help-lint`, the §8.1 gate wired into `cargo xtask ci`). Remaining:
-deliverable 7 (wider `stdinfo`
-adoption — `man`'s locale-fallback and `ls`'s omission records are
-live), `Help/` trees for future command apps as each becomes a
-registered bundle, and the **charter-blocking** deliverable 8 —
-self-contained on-disk bundles: every discovered bundle's signed
-`AppInfo` + `Run` now ships on disk beside its `Help/` (increments 1–3,
-including the `<name>.app/Run` service paths), but the `spawn` syscall
-still dispatches the kernel-baked rxe copies
-(`spawn_paths.rs`/`SPAWN_PROGRAMS`), which the amended §16.5 forbids (an
-app *is* its bundle directory); the remaining migration (increments 4–5)
-verifies and loads the store bundles from the mounted volume and deletes
-the kernel registry. Help documents are authored **only** in each bundle's
+reuses instead of a private copy), deliverable 5 (`cargo xtask
+help-lint`, the §8.1 gate wired into `cargo xtask ci`), and deliverable 8
+increments 1–4 — self-contained on-disk bundles: every discovered
+bundle's signed `AppInfo` + `Run` ships on disk beside its `Help/`, and
+on the aarch64 production boot the `spawn` syscall loads and verifies
+the on-disk store bundles through the shared `rustos_appload` gate (no
+kernel-baked rxe rows remain there). Remaining: deliverable 7 (wider
+`stdinfo` adoption — `man`'s locale-fallback and `ls`'s omission records
+are live), `Help/` trees for future command apps as each becomes a
+registered bundle, and deliverable 8 increment 5 (the x86_64/riscv64
+storage floor, then deletion of the embedded registry those ports still
+carry as their §18.6 boot floor). Help documents are authored **only** in
+each bundle's
 on-disk `Help/` tree and read at runtime through the `lib/help` seam — no app
 embeds its help, and the image builder plants the trees from data discovered
 by `tools/syshelp`, never a hand-maintained per-bundle list (§6.1, `AGENTS.md`
@@ -599,39 +598,32 @@ both landed; `plans/SHELL.md` command execution):
    advisory-only, never changing exit status.
 
 8. **Self-contained on-disk bundles — retire the kernel-baked spawn
-   registry (charter-blocking, in progress; §16.5 self-containment and
-   §16.2 services-are-apps amended).** Every discovered bundle — the
-   command apps *and* the `login`/`devmgr`/`sysinfod` services (a service
-   is an app, §16.2) — now ships complete on the read-only `/System`
-   volume: its signed `AppInfo` + `Run` rxe beside its `Help/` tree, at
-   the bundle-form paths (`/System/Apps/<cmd>.app/`,
-   `/System/Services/<name>.app/`) PID 1 `init` and the shell name. But
-   the `spawn` syscall still dispatches the kernel-baked rxe *copies*
-   (`kernel/rustos-kernel/src/spawn_paths.rs` + `spawn_layout.rs`'s
-   `include!`-ed `*_rxe.rs` and `SPAWN_PROGRAMS`) rather than loading and
-   verifying the on-disk bundles, so the `appmgr` signature + capability +
-   interface-hash path is still bypassed at launch. The amended
-   §16.5/§16.2 forbid this. The maintainer decided (2026-07-04) against any
-   staged compatibility: the full correct end state lands in dependency
-   order — the binding increment list, with per-increment status, lives in
-   `PLAN.md` ("Self-contained bundles"): (1) the canonical bundle
-   content-hash framing in `lib/abi` — done; (2) per-crate `AppInfo.toml`
-   manifest sources + the discovery walk (never a per-bundle list) + the
-   shared composer signing under the dedicated `SYSTEM_APP_SIGNING_SEED`
-   — done; (3) `tools/mkimage` and the QEMU fixture plant each discovered
-   bundle's signed `AppInfo` + `Run` beside its `Help/` (command apps under
-   `/System/Apps/`, services under `/System/Services/<name>.app/`, the
-   service spawn/startup paths bundle-form via
-   `rustos_abi::SYSTEM_SERVICE_STORE`) — done; (4a) the verification engine
-   hoisted from `appmgr` into the shared `lib/appload` crate the kernel may
-   link (§17.4), `appmgr` re-exporting it as its user-space consumer — done;
-   (4b) `spawn` loading + verifying store bundles from the mounted volume
-   through `rustos_appload`, deriving caps from the on-disk manifest, and
-   dropping the embedded aarch64 rows; (5)
-   the x86_64/riscv64 storage floor, then deletion of `SPAWN_PROGRAMS`,
-   the `*_rxe.rs` `include!`s (all but PID 1 `init`), `spawn_paths.rs`,
-   and `program_manifests.rs` (§2.14). All prior deliverables' references
-   to `/System/Apps/<cmd>.app/Run` being served from `spawn_paths.rs` are
+   registry (§16.5 self-containment and §16.2 services-are-apps
+   amended).** Every discovered bundle — the command apps *and* the
+   `login`/`devmgr`/`sysinfod` services (a service is an app, §16.2) —
+   ships complete on the read-only `/System` volume: its signed `AppInfo`
+   + `Run` rxe beside its `Help/` tree, at the bundle-form paths
+   (`/System/Apps/<cmd>.app/`, `/System/Services/<name>.app/`) PID 1
+   `init` and the shell name. The binding increment list, with
+   per-increment status and the load-bearing invariants, lives in
+   `PLAN.md` ("Self-contained bundles"). Increments 1–4 are **done**: the
+   canonical bundle content-hash framing (`lib/abi`), the per-crate
+   `AppInfo.toml` discovery walk + composer signing under the dedicated
+   `SYSTEM_APP_SIGNING_SEED`, the image/fixture planting of every signed
+   bundle, the shared `lib/appload` verification engine (`appmgr`
+   re-exports it), and the `spawn` syscall loading + verifying store
+   bundles from the mounted volume through `rustos_appload` — deriving the
+   child's capability request from the on-disk manifest, parking a
+   boot-race spawn on the `AppStore` readiness latch, and dropping every
+   embedded rxe row from the aarch64 production boot (the system
+   principal resolves via the bootstrap identity before the root unlock,
+   so PID 1 can load the service bundles pre-passphrase). **Remaining:**
+   increment 5 — the x86_64/riscv64 storage floor, then deletion of
+   `SPAWN_PROGRAMS`, the `*_rxe.rs` `include!`s (all but PID 1 `init`),
+   `spawn_paths.rs`, and `program_manifests.rs` (§2.14); until then those
+   two ports carry the embedded registry as their explicitly-justified
+   §18.6 boot floor. All prior deliverables' references to
+   `/System/Apps/<cmd>.app/Run` being served from `spawn_paths.rs` are
    superseded by this on-disk-bundle model.
 
 Required `AGENTS.md` amendments (each with a one-line rationale in PLAN.md's

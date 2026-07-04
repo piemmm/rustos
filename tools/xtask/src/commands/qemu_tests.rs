@@ -3336,7 +3336,10 @@ fn run_one(
         )),
         FsDisk::AutoloadRootDisk => Some((
             "autoload-root.img",
-            rustos_test_autoload_root_image::build_image().map_err(|e| {
+            super::image_apps::with_plant_refs(apps, |files| {
+                rustos_test_autoload_root_image::build_image(files)
+            })
+            .map_err(|e| {
                 format!(
                     "test --qemu ({}): build autoload-root image: {e:?}",
                     t.package

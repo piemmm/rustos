@@ -72,6 +72,18 @@ its identity table (`rustos_kernel_core::groups::build_identity_table`): a
 user naming a group with no registry record is refused, fail closed
 (referential integrity, `AGENTS.md` §5.4).
 
+One principal is kernel-defined rather than database-defined: the **system
+principal** (`uid 0`). It exists before any table can be read (PID 1 and
+the boot services load their `/System` store bundles before the encrypted
+root is unlocked) and an installer image's table never defines it, so the
+kernel's filesystem group resolution falls back to the capability-less
+bootstrap identity (`gid 0`, no supplementary groups) whenever the table is
+absent or holds no `uid 0` record — a table record for `uid 0` (the debug
+image's seeded administrator) wins when present. The fallback grants no
+ambient power (`AGENTS.md` §5.1): every per-inode owner/mode/ACL and
+mount-flag check still applies, non-zero uids stay strictly fail-closed,
+and a spawn-as-user *switch* always requires the installed table.
+
 `GroupsDb::parse` is held to the identical fail-closed discipline as the
 user database — it bounds the file (64 KiB), each line (128 bytes), and the
 record count (1024) before reading anything, validates every field,

@@ -301,22 +301,36 @@ impl LateIdentity {
     /// filesystem operation (which may park on device completion) while
     /// the table stays replaceable underneath.
     ///
+    /// The **system principal** (`uid 0`) is kernel-defined, not
+    /// database-defined: it exists before any account table can be read
+    /// (PID 1 and the boot services must load their store bundles off the
+    /// read-only `/System` volume before the encrypted root is unlocked)
+    /// and on an installer image no table ever defines it. It therefore
+    /// resolves to the same capability-less bootstrap identity the boot
+    /// readers use (`gid 0`, no supplementary groups) whenever the table is
+    /// absent or holds no `uid 0` record; a table record for `uid 0` (the
+    /// debug image's seeded administrator) wins when present. The fallback
+    /// grants no ambient power: every per-inode owner/mode/ACL and
+    /// mount-flag check still applies, and `uid 0` tasks exist only through
+    /// kernel-attested spawn.
+    ///
     /// # Errors
     ///
-    /// * [`Errno::NotImplemented`] before a table is installed (the disk has
-    ///   not been unlocked/read yet) — fail closed, never resolve.
-    /// * [`Errno::PermissionDenied`] when the table holds no account for
-    ///   `uid` — an unknown principal is denied, never granted a guessed
-    ///   identity, and the refusal does not distinguish "unknown uid" so it
-    ///   cannot be used to probe for valid ids.
+    /// * [`Errno::NotImplemented`] for a non-zero `uid` before a table is
+    ///   installed (the disk has not been unlocked/read yet) — fail closed,
+    ///   never resolve.
+    /// * [`Errno::PermissionDenied`] when the table holds no account for a
+    ///   non-zero `uid` — an unknown principal is denied, never granted a
+    ///   guessed identity, and the refusal does not distinguish "unknown
+    ///   uid" so it cannot be used to probe for valid ids.
     fn resolve_groups(&self, uid: u32) -> Result<(GroupId, Vec<GroupId>), Errno> {
         match &*self.table.read() {
-            Some(table) => {
-                let record = table
-                    .user(UserId(uid))
-                    .map_err(|_| Errno::PermissionDenied)?;
-                Ok((record.primary_gid, record.supplementary_gids.clone()))
-            }
+            Some(table) => match table.user(UserId(uid)) {
+                Ok(record) => Ok((record.primary_gid, record.supplementary_gids.clone())),
+                Err(_) if uid == 0 => Ok((GroupId(0), Vec::new())),
+                Err(_) => Err(Errno::PermissionDenied),
+            },
+            None if uid == 0 => Ok((GroupId(0), Vec::new())),
             None => Err(Errno::NotImplemented),
         }
     }

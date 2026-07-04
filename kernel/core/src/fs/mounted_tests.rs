@@ -308,6 +308,33 @@ fn an_unknown_principal_is_denied() {
 }
 
 #[test]
+fn the_system_principal_resolves_before_the_identity_table_installs() {
+    // The volume is mounted but the identity table is not installed (the
+    // encrypted root is still locked): the kernel-defined system principal
+    // (uid 0) resolves to the capability-less bootstrap identity, so its
+    // operation reaches the volume and reports the path's real state
+    // (`NotFound` here) instead of the pre-fix `NotImplemented` that killed
+    // every pre-unlock store-bundle spawn.
+    let svc = service(true, false, false);
+    let caps = caps();
+    assert_eq!(svc.stat(0, &caps, &path("x")), Err(Errno::NotFound));
+}
+
+#[test]
+fn an_installed_table_without_uid0_still_resolves_the_system_principal() {
+    // An installed table that defines no uid 0 account (the installer-built
+    // shape) does not strand the system principal: uid 0 falls back to the
+    // bootstrap identity while every other unknown uid stays denied.
+    let svc = ready();
+    let caps = caps();
+    assert_eq!(svc.stat(0, &caps, &path("x")), Err(Errno::NotFound));
+    assert_eq!(
+        svc.stat(4242, &caps, &path("x")),
+        Err(Errno::PermissionDenied)
+    );
+}
+
+#[test]
 fn create_write_read_back_under_attested_identity() {
     let svc = ready();
     let caps = caps();
