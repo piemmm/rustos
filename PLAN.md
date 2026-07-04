@@ -3661,7 +3661,15 @@ increment landing complete and green:
    manifest; a spawn racing the boot mount parks on the `AppStore`
    readiness latch, which the `/System` mount install resolves on every
    outcome. The embedded command-app/service rows are gone from the aarch64
-   production boot. Load-bearing invariant: the **system principal**
+   production boot. Verification runs **once per boot** per read-only
+   store bundle: the accepted `LoadedApp` is cached in the `AppStore`
+   (LRU under a discovered-RAM-fraction byte budget,
+   `APP_CACHE_RAM_DIVISOR`) and a later launch serves the cached image
+   after re-authorising the caller's read of `Run` through the secured
+   VFS — command-launch latency is a designed hot path, and re-verifying
+   an immutable bundle per launch (≈1.2 s per command under QEMU TCG)
+   was the defect this closes; writable-volume bundles (`/Apps`) are
+   never cached. Load-bearing invariant: the **system principal**
    (`uid 0`) resolves to the capability-less bootstrap identity (`gid 0`,
    no supplementary groups) in the secured-VFS group resolution whenever
    the identity table is absent or holds no `uid 0` record — PID 1 must

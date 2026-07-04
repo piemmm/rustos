@@ -14,7 +14,15 @@
 //! * [`AppStore`] — the build's embedded app trust anchor plus a one-way
 //!   readiness latch the boot path resolves once the `/System` mount
 //!   reaches a terminal state, so an early spawn *parks* (event-woken,
-//!   never a poll loop) instead of racing the mount.
+//!   never a poll loop) instead of racing the mount. It also carries the
+//!   per-boot **verified-bundle cache**: the read-only system stores are
+//!   immutable for the life of the boot, so a bundle's whole-tree hash and
+//!   signature are verified once and every later launch of the same bundle
+//!   serves the cached, already-verified image — after re-authorising the
+//!   *caller's* read of the entry point through the secured VFS, so the
+//!   cache never widens authority. Launch latency is a designed hot path;
+//!   re-verifying an immutable bundle on every keystroke-to-output cycle
+//!   is work hoisted off it.
 //! * [`FsBundleStore`] — the [`rustos_appload::BundleStore`] over the
 //!   kernel [`FilesystemService`], with fail-closed size/depth bounds.
 //! * [`AnchorVerifier`] — the [`rustos_appload::Verifier`] pinning the
@@ -28,15 +36,18 @@
 use alloc::borrow::ToOwned;
 use alloc::format;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU8, Ordering};
 
 use rustos_abi::{
     digest_bundle_contents, AppInfoHeader, BundleFileDigest, CapabilityQuery, Errno, FileKind,
-    APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_SUFFIX, MIME_ENTRY_LEN,
+    APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_SUFFIX, MIME_ENTRY_LEN, SYSTEM_APP_STORE,
+    SYSTEM_SERVICE_STORE,
 };
-use rustos_appload::{AppError, BundleStore, Verifier};
+use rustos_appload::{AppError, BundleStore, LoadedApp, Verifier};
 use rustos_crypto::{Ed25519PublicKey, Ed25519Signature, Sha256Stream};
+use rustos_sync::RwLock;
 
 use crate::fs::FilesystemService;
 
@@ -65,7 +76,40 @@ const STORE_UNAVAILABLE: u8 = 2;
 pub struct AppStore {
     state: AtomicU8,
     anchor: [u8; 32],
+    cache: RwLock<BundleCache>,
 }
+
+/// One cached verification result: the bundle root it was verified for,
+/// the accepted [`LoadedApp`], and the LRU stamp of its last use.
+struct CacheEntry {
+    bundle: String,
+    app: Arc<LoadedApp>,
+    last_use: u64,
+}
+
+/// The per-boot verified-bundle cache body: a small set of entries plus
+/// the monotonic use clock the LRU eviction orders by.
+struct BundleCache {
+    entries: Vec<CacheEntry>,
+    clock: u64,
+}
+
+impl BundleCache {
+    /// Total run-image bytes the cache currently holds — the dominant
+    /// memory term of an entry (the manifest strings beside it are noise).
+    fn total_bytes(&self) -> usize {
+        self.entries
+            .iter()
+            .map(|entry| entry.app.run_image().len())
+            .sum()
+    }
+}
+
+/// The verified-bundle cache's share of discovered physical memory: its
+/// byte budget is total RAM divided by this (16 MiB on a 1 GiB machine),
+/// a policy scaled from the discovered hardware rather than a fixed
+/// ceiling a larger machine outgrows or a smaller one cannot afford.
+pub const APP_CACHE_RAM_DIVISOR: usize = 64;
 
 impl AppStore {
     /// A store that starts *pending*, trusting exactly the Ed25519 signer
@@ -75,6 +119,10 @@ impl AppStore {
         Self {
             state: AtomicU8::new(STORE_PENDING),
             anchor,
+            cache: RwLock::new(BundleCache {
+                entries: Vec::new(),
+                clock: 0,
+            }),
         }
     }
 
@@ -120,6 +168,77 @@ impl AppStore {
     pub fn is_available(&self) -> bool {
         self.state.load(Ordering::Acquire) == STORE_AVAILABLE
     }
+
+    /// True when `bundle` lies inside one of the immutable, read-only
+    /// system stores, whose contents cannot change for the life of the
+    /// boot — the only bundles whose verification result may be cached.
+    ///
+    /// A bundle on a writable volume (a user bundle under `/Apps`) is
+    /// never cached: its bytes can change between launches, so every
+    /// launch re-verifies it through the full load gate.
+    #[must_use]
+    pub fn cacheable_bundle(bundle: &str) -> bool {
+        [SYSTEM_APP_STORE, SYSTEM_SERVICE_STORE]
+            .iter()
+            .any(|store| {
+                bundle
+                    .strip_prefix(store)
+                    .is_some_and(|rest| rest.starts_with('/'))
+            })
+    }
+
+    /// The cached verification result for `bundle`, refreshing its LRU
+    /// stamp, or `None` when the bundle has not been verified this boot.
+    ///
+    /// A hit is proof the load gate accepted exactly these bytes earlier
+    /// this boot from the immutable read-only store; it says nothing about
+    /// the *caller*, whose read of the entry point the spawn path still
+    /// authorises through the secured VFS before serving the hit.
+    #[must_use]
+    pub fn cached(&self, bundle: &str) -> Option<Arc<LoadedApp>> {
+        let mut cache = self.cache.write();
+        cache.clock += 1;
+        let clock = cache.clock;
+        let entry = cache
+            .entries
+            .iter_mut()
+            .find(|entry| entry.bundle == bundle)?;
+        entry.last_use = clock;
+        Some(Arc::clone(&entry.app))
+    }
+
+    /// Record `app` as the verified result for `bundle`, keeping the
+    /// cache's total run-image bytes within `budget` by evicting the
+    /// least recently used entries first. An image larger than the whole
+    /// budget is served but not cached; a re-verification of an already
+    /// cached bundle replaces its entry.
+    pub fn cache_verified(&self, bundle: &str, app: &Arc<LoadedApp>, budget: usize) {
+        let bytes = app.run_image().len();
+        if bytes > budget {
+            return;
+        }
+        let mut cache = self.cache.write();
+        cache.clock += 1;
+        let clock = cache.clock;
+        cache.entries.retain(|entry| entry.bundle != bundle);
+        while cache.total_bytes() + bytes > budget {
+            let Some(oldest) = cache
+                .entries
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, entry)| entry.last_use)
+                .map(|(index, _)| index)
+            else {
+                break;
+            };
+            cache.entries.remove(oldest);
+        }
+        cache.entries.push(CacheEntry {
+            bundle: bundle.to_owned(),
+            app: Arc::clone(app),
+            last_use: clock,
+        });
+    }
 }
 
 /// Largest single bundle file the store will read (16 MiB). A validation
@@ -150,9 +269,11 @@ const WALK_DEPTH_MAX: usize = 8;
 /// beyond it is refused closed.
 const WALK_FILES_MAX: usize = 4096;
 
-/// Read chunk size for bundle files: one page per `FilesystemService::read`
-/// round trip.
-const READ_CHUNK: usize = 4096;
+/// Read chunk size for bundle files. Every `FilesystemService::read` is a
+/// full path resolution, permission walk, and per-mount lock round trip,
+/// so bundle bytes are staged through a heap buffer big enough to amortise
+/// that per-call work across a `Run` image instead of paying it per page.
+const READ_CHUNK: usize = 128 << 10;
 
 /// The [`BundleStore`] over the kernel's mounted, secured VFS.
 ///
@@ -178,7 +299,7 @@ impl<'a> FsBundleStore<'a> {
     /// `max_len` rather than allocating without bound.
     fn read_file(&self, path: &str, max_len: usize) -> Result<Vec<u8>, Errno> {
         let mut out = Vec::new();
-        let mut chunk = [0u8; READ_CHUNK];
+        let mut chunk = alloc::vec![0u8; READ_CHUNK.min(max_len)];
         loop {
             let read = self
                 .fs
@@ -532,6 +653,53 @@ mod tests {
         assert!(!dead.is_available());
         dead.note_available();
         assert!(!dead.is_available());
+    }
+
+    #[test]
+    fn only_readonly_system_store_bundles_are_cacheable() {
+        assert!(AppStore::cacheable_bundle("/System/Apps/ps.app"));
+        assert!(AppStore::cacheable_bundle("/System/Services/login.app"));
+        // A writable-volume bundle can change between launches.
+        assert!(!AppStore::cacheable_bundle("/Apps/Example.app"));
+        // A sibling directory sharing the store's prefix is not the store.
+        assert!(!AppStore::cacheable_bundle("/System/AppsEvil/ps.app"));
+        // The store root itself is a directory, not a bundle.
+        assert!(!AppStore::cacheable_bundle("/System/Apps"));
+        assert!(!AppStore::cacheable_bundle(
+            "/Users/mallory/System/Apps/ps.app"
+        ));
+    }
+
+    #[test]
+    fn the_cache_serves_replaces_and_evicts_least_recently_used() {
+        let (fs, anchor, run) = composed_bundle(vec![]);
+        let app = alloc::sync::Arc::new(load(&fs, anchor).expect("loads"));
+        let store = AppStore::pending([1u8; 32]);
+        let image = run.len();
+        // Room for exactly two images.
+        let budget = 2 * image;
+
+        assert!(store.cached("/System/Apps/a.app").is_none());
+        store.cache_verified("/System/Apps/a.app", &app, budget);
+        store.cache_verified("/System/Apps/b.app", &app, budget);
+        assert!(store.cached("/System/Apps/b.app").is_some());
+        // Refresh `a` so `b` becomes the least recently used, then insert
+        // `c`: `b` is evicted, `a` and `c` remain.
+        assert!(store.cached("/System/Apps/a.app").is_some());
+        store.cache_verified("/System/Apps/c.app", &app, budget);
+        assert!(store.cached("/System/Apps/b.app").is_none());
+        assert!(store.cached("/System/Apps/a.app").is_some());
+        assert!(store.cached("/System/Apps/c.app").is_some());
+
+        // A re-verification replaces its own entry instead of doubling it,
+        // so the neighbour is not pushed out.
+        store.cache_verified("/System/Apps/c.app", &app, budget);
+        assert!(store.cached("/System/Apps/a.app").is_some());
+        assert!(store.cached("/System/Apps/c.app").is_some());
+
+        // An image larger than the whole budget is served but never cached.
+        store.cache_verified("/System/Apps/d.app", &app, image - 1);
+        assert!(store.cached("/System/Apps/d.app").is_none());
     }
 
     #[test]

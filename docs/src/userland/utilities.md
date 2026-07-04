@@ -180,6 +180,16 @@ in tests they are in-memory fixtures.
 - A failed terminal write is `PsError::Output`. There is no panic
   (`AGENTS.md` §2.9).
 
+### Advisory output (`stdinfo`, fd 3)
+
+The default self-scope listing emits the `proc.self_scope_only` omission
+record (`AGENTS.md` §20.1) on the standard information stream: a terse
+human note ("Only your own processes are shown." with the `ps -e`
+suggestion) plus structured data for tools (`stdout_is_exhaustive`,
+the widening `argv`). It is advisory only — emitted best-effort after
+the rows, never affecting output, ordering, or exit status — and nothing
+is emitted under `-e`/`-A`/`--all`, whose listing is exhaustive.
+
 ### Tests
 
 `cargo test -p rustos-ps` drives the parser and the request/render engine
@@ -188,9 +198,10 @@ command grammar (default self-listing, the `-e`/`-A`/`--all` selectors,
 `-h`/`-?`/`--help`, unknown-option and positional-operand rejection), the
 Help-document short-help render and its usage-banner fallback, the
 self-vs-global query routing, header + rows rendering, the empty listing,
-the denied-global capability mapping, and the header/row write-failure
-paths. The shared page walk and rendering carry their own unit tests in
-`lib/procinfo` (`cargo test -p rustos-procinfo`).
+the denied-global capability mapping, the self-scope advisory record
+(present by default, absent under `--all`), and the header/row
+write-failure paths. The shared page walk and rendering carry their own
+unit tests in `lib/procinfo` (`cargo test -p rustos-procinfo`).
 
 ## `mount` — list and attach filesystems (`userland/apps/mount`)
 

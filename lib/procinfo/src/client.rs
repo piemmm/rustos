@@ -19,7 +19,7 @@ use alloc::vec::Vec;
 
 use rustos_abi::sysinfo::{decode_reply, SYSINFO_ENDPOINT, SYSINFO_MAX_REPLY};
 use rustos_abi::Errno;
-use rustos_rt::io::{Stdout, Write};
+use rustos_rt::io::{StdInfo, Stdout, Write};
 
 use crate::{Output, Transport};
 
@@ -68,5 +68,11 @@ impl Output for RtOutput {
         let _ = out.write_all(line.as_bytes());
         let _ = out.write_all(b"\n");
         Ok(())
+    }
+
+    fn info(&self, record: &[u8]) {
+        // fd 3 is ignorable by contract: unattached is a no-op and a short
+        // write is never an error a listing depends on.
+        let _ = StdInfo.write_all(record);
     }
 }

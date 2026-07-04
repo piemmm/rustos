@@ -2,6 +2,7 @@
 //! process-list query, page through the reply, and render one row per
 //! process.
 
+use rustos_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
 use rustos_help::{own_short_help, HelpSource};
 use rustos_procinfo::{for_each_process, render_process, Output, Transport, PROCESS_HEADER};
 
@@ -72,13 +73,48 @@ fn short_help(
         .map_err(PsError::Output)
 }
 
-/// Page through the process list and render one row per process.
+/// Page through the process list and render one row per process. The
+/// default self scope also notes on the advisory stream (fd 3) that the
+/// listing is not system-wide, so a tool or user knows stdout is not
+/// exhaustive.
 fn run_list(all: bool, transport: &dyn Transport, out: &dyn Output) -> Result<(), PsError> {
     out.write_line(PROCESS_HEADER).map_err(PsError::Output)?;
     for_each_process(transport, all, |record| {
         out.write_line(&render_process(record))
     })
-    .map_err(PsError::from)
+    .map_err(PsError::from)?;
+    if !all {
+        emit_scope_record(out);
+    }
+    Ok(())
+}
+
+/// Emit the `proc.self_scope_only` advisory (fd 3) for the default listing:
+/// stdout carried only the caller's own processes, and `-e` widens the scope
+/// (a widening `sysinfod` still gates on `CAP_SYSINFO_GLOBAL`). Advisory
+/// only — never affects the rows, the ordering, or the exit status.
+fn emit_scope_record(out: &dyn Output) {
+    const AI: &str = "{\"subject\":\"process_listing\",\
+         \"omission\":{\"reason\":\"self_scope_default\",\
+         \"entry_class\":\"other_processes\",\
+         \"stdout_is_exhaustive\":false},\
+         \"suggestion\":{\"argv\":[\"ps\",\"-e\"],\
+         \"safe_to_autorun\":false,\"requires_confirmation\":true}}";
+    let record = StdInfoRecord::new(
+        OWN_WORD,
+        StdInfoKind::Omission,
+        "proc.self_scope_only",
+        Severity::Info,
+        Human::with_suggestion(
+            "Only your own processes are shown.",
+            "Use `ps -e` to list every process.",
+        ),
+    )
+    .with_ai(AI);
+    let mut buf = [0u8; 512];
+    if let Ok(len) = record.write_jsonl(&mut buf) {
+        out.info(&buf[..len]);
+    }
 }
 
 #[cfg(test)]
@@ -175,9 +211,11 @@ mod tests {
         }
     }
 
-    /// Captures rendered lines; optionally fails on the Nth write.
+    /// Captures rendered lines and advisory records; optionally fails on
+    /// the Nth line write.
     struct Recorder {
         lines: RefCell<Vec<String>>,
+        infos: RefCell<Vec<Vec<u8>>>,
         fail_at: Option<usize>,
     }
 
@@ -185,6 +223,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 lines: RefCell::new(Vec::new()),
+                infos: RefCell::new(Vec::new()),
                 fail_at: None,
             }
         }
@@ -192,12 +231,17 @@ mod tests {
         fn failing_at(index: usize) -> Self {
             Self {
                 lines: RefCell::new(Vec::new()),
+                infos: RefCell::new(Vec::new()),
                 fail_at: Some(index),
             }
         }
 
         fn lines(&self) -> Vec<String> {
             self.lines.borrow().clone()
+        }
+
+        fn infos(&self) -> Vec<Vec<u8>> {
+            self.infos.borrow().clone()
         }
     }
 
@@ -209,6 +253,10 @@ mod tests {
             }
             lines.push(line.to_string());
             Ok(())
+        }
+
+        fn info(&self, record: &[u8]) {
+            self.infos.borrow_mut().push(record.to_vec());
         }
     }
 
@@ -270,6 +318,15 @@ mod tests {
             fixture.seen.borrow().as_slice(),
             &[SysinfoQueryId::SELF_PROCESS_LIST]
         );
+        // The default self scope announces its omission on the advisory
+        // stream: exactly one record, the canonical code, and the widening
+        // suggestion — stdout itself is untouched.
+        let infos = out.infos();
+        assert_eq!(infos.len(), 1);
+        let record = core::str::from_utf8(&infos[0]).unwrap();
+        assert!(record.contains("\"kind\":\"omission\""));
+        assert!(record.contains("proc.self_scope_only"));
+        assert!(record.contains("Only your own processes are shown."));
     }
 
     #[test]
@@ -284,6 +341,8 @@ mod tests {
             fixture.seen.borrow().as_slice(),
             &[SysinfoQueryId::GLOBAL_PROCESS_LIST]
         );
+        // A global listing is exhaustive: nothing to advise.
+        assert!(out.infos().is_empty());
     }
 
     #[test]

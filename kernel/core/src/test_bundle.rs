@@ -70,10 +70,19 @@ impl FilesystemService for MemFs {
         &self,
         _uid: u32,
         _caps: &dyn CapabilityQuery,
-        _path: &str,
-        _flags: OpenFlags,
+        path: &str,
+        flags: OpenFlags,
     ) -> Result<(), Errno> {
-        Err(Errno::NotImplemented)
+        // Read-only fixture: a read open of an existing file resolves, any
+        // mutating open fails closed like every other mutating operation.
+        if flags.contains(OpenFlags::WRITE) || flags.contains(OpenFlags::CREATE) {
+            return Err(Errno::NotImplemented);
+        }
+        if self.files.contains_key(path) {
+            Ok(())
+        } else {
+            Err(Errno::NotFound)
+        }
     }
 
     fn read(

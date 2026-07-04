@@ -64,11 +64,12 @@ bundle's signed `AppInfo` + `Run` ships on disk beside its `Help/`, and
 on the aarch64 production boot the `spawn` syscall loads and verifies
 the on-disk store bundles through the shared `rustos_appload` gate (no
 kernel-baked rxe rows remain there). Remaining: deliverable 7 (wider
-`stdinfo` adoption — `man`'s locale-fallback and `ls`'s omission records
-are live), `Help/` trees for future command apps as each becomes a
-registered bundle, and deliverable 8 increment 5 (the x86_64/riscv64
-storage floor, then deletion of the embedded registry those ports still
-carry as their §18.6 boot floor). Help documents are authored **only** in
+`stdinfo` adoption — `man`'s locale-fallback, `ls`'s hidden-entries
+omission, and `ps`'s self-scope omission records are live), `Help/`
+trees for future command apps as each becomes a registered bundle, and
+deliverable 8 increment 5 (the x86_64/riscv64 storage floor, then
+deletion of the embedded registry those ports still carry as their
+§18.6 boot floor). Help documents are authored **only** in
 each bundle's
 on-disk `Help/` tree and read at runtime through the `lib/help` seam — no app
 embeds its help, and the image builder plants the trees from data discovered
@@ -593,8 +594,11 @@ both landed; `plans/SHELL.md` command execution):
 7. **`stdinfo` adoption in command apps (§12)** — emit the appropriate
    `StdInfoRecord` (via the `lib/rt` wrapper) wherever a command omits,
    summarises, or adds non-obvious context to `stdout`. Live: `man`'s
-   locale-fallback record (§7) and `ls`'s `fs.hidden_entries_omitted`
-   omission record (the `AGENTS.md` §20.1 canonical example);
+   locale-fallback record (§7), `ls`'s `fs.hidden_entries_omitted`
+   omission record (the `AGENTS.md` §20.1 canonical example), and `ps`'s
+   `proc.self_scope_only` omission record (the default listing notes
+   that stdout carries only the caller's own processes and suggests
+   `ps -e`, over the shared `rustos_procinfo::Output::info` fd 3 seam);
    advisory-only, never changing exit status.
 
 8. **Self-contained on-disk bundles — retire the kernel-baked spawn
@@ -617,7 +621,14 @@ both landed; `plans/SHELL.md` command execution):
    boot-race spawn on the `AppStore` readiness latch, and dropping every
    embedded rxe row from the aarch64 production boot (the system
    principal resolves via the bootstrap identity before the root unlock,
-   so PID 1 can load the service bundles pre-passphrase). **Remaining:**
+   so PID 1 can load the service bundles pre-passphrase). Verification
+   runs **once per boot** per read-only store bundle: the accepted
+   result is cached in the `AppStore` (LRU under a
+   discovered-RAM-fraction byte budget) and a later launch serves the
+   cached image after re-authorising the caller's read of `Run` through
+   the secured VFS, so command-launch latency stays off the whole-bundle
+   hash/signature path; writable-volume bundles are never cached.
+   **Remaining:**
    increment 5 — the x86_64/riscv64 storage floor, then deletion of
    `SPAWN_PROGRAMS`, the `*_rxe.rs` `include!`s (all but PID 1 `init`),
    `spawn_paths.rs`, and `program_manifests.rs` (§2.14); until then those

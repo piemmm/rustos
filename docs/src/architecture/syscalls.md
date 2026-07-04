@@ -884,6 +884,18 @@ re-validates arguments — the dispatcher does that first.
 | `dma_alloc`     | resolves `handle` against the caller (same owner-checked per-task grant table), validates the grant is a DMA constraint (`devres::dma_constraint`), rejects a zero / over-the-grant-maximum `len`, then carves a physically-contiguous, zeroed, coherent `RW` buffer bounded by the grant's CPU-side `addr_limit` into the caller's own address space through the installed `DmaAllocFacility` (`with_dma_alloc_facility`; default `NULL_DMA_ALLOC_FACILITY`), resolves the device-visible base via `devres::translate_device_addr` (CPU-physical for a coherent constraint, re-based onto the far side for a translating inbound viewport, `HwResource::dma_translated`), and copies it out to `device_out`, returning the buffer's base virtual address (`plans/PI.md` P10 chunk 5d-0) | Unknown / non-owned handle → `NotFound`. Non-DMA grant → `OutOfRange`. `len == 0` → `LengthOutOfRange`. Over-max / over-limit, or a carve escaping a translating viewport → `OutOfRange`. No DMA facility wired → `NotImplemented`. Frame exhaustion → `OutOfMemory`. Faulting `device_out` → `BadAddress`. Otherwise `Ok(base)`. |
 | `dma_free`      | the symmetric free for `dma_alloc`: resolves `handle` against the caller (same owner-checked per-task grant table), validates the grant is a DMA constraint (`devres::dma_constraint`), then releases the buffer based at `cpu_va` from the caller's own address space through the same `DmaAllocFacility` (`free`), zeroing every backing byte (zero-on-free, `AGENTS.md` §4) before its frames return to the allocator, and re-freezes the caller's address-space snapshot. Only `cpu_va` is taken from the caller; the buffer's extent is the allocator's authoritative record. A long-running driver reclaims each transfer's bounce buffers through this rather than leaking DMA frames until it exits (`plans/PI.md` P10) | Unknown / non-owned handle → `NotFound`. Non-DMA grant → `OutOfRange`. `cpu_va` not the base of a live carve in the caller's DMA window (covers a stale, double, or cross-task free) → `OutOfRange`. No DMA facility wired → `NotImplemented`. Otherwise `Ok(0)`. |
 
+`spawn`'s store-bundle verification runs **once per boot** per
+read-only system-store bundle (`/System/Apps`, `/System/Services` —
+immutable for the life of the boot): the accepted `LoadedApp` is cached
+in the kernel's `AppStore` (keyed by bundle root, LRU-evicted under a
+byte budget of a fixed fraction of discovered RAM,
+`appspawn::APP_CACHE_RAM_DIVISOR`), and a later launch of the same
+bundle serves the cached, already-verified image after re-authorising
+the **caller's** read of the bundle's `Run` through the secured VFS —
+verification is hoisted off the launch hot path (`AGENTS.md` §2.16),
+authorisation never is. Bundles on writable volumes (`/Apps`) are never
+cached and re-verify through the full gate on every launch.
+
 `KernelArch::monotonic_ns` is a new trait method with **no default
 impl**: every architecture port must opt in so an arch that cannot
 ship a monotonic clock cannot silently leak that flaw into the

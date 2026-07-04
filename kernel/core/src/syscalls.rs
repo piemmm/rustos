@@ -1275,11 +1275,19 @@ where
     /// that resolved unavailable, or any gate refusal fails closed. A spawn
     /// racing the boot kthread that publishes the mount parks (event-woken)
     /// until the store's readiness latch resolves.
+    ///
+    /// A bundle on the immutable read-only system stores is fully verified
+    /// **once per boot**: the accepted result is cached in the
+    /// [`AppStore`](crate::appspawn::AppStore) and every later launch
+    /// serves the cached image after re-authorising
+    /// the caller's own read of the entry point through the secured VFS —
+    /// verification is hoisted off the launch hot path, authorisation is
+    /// not. Bundles on writable volumes are never cached.
     fn load_store_bundle(
         &self,
         caller: &CallerContext<'_>,
         parsed: &crate::appspawn::BundleRunPath<'_>,
-    ) -> Result<rustos_appload::LoadedApp, Errno> {
+    ) -> Result<alloc::sync::Arc<rustos_appload::LoadedApp>, Errno> {
         let Some(store) = self.app_store else {
             return Err(Errno::NotFound);
         };
@@ -1288,6 +1296,23 @@ where
             return Err(Errno::NotFound);
         }
         let uid = caller.caps.owner().0;
+        let cacheable = crate::appspawn::AppStore::cacheable_bundle(parsed.bundle);
+        if cacheable {
+            if let Some(app) = store.cached(parsed.bundle) {
+                // The hit skips re-verification of immutable bytes, never
+                // the caller's authority: the caller's read of the entry
+                // point is re-authorised through the secured VFS (per-inode
+                // owner/mode/ACL and mount flags), so a caller who could
+                // not read the bundle cannot launch it from the cache.
+                self.filesystem.open(
+                    uid,
+                    caller.caps.effective(),
+                    app.run_path(),
+                    OpenFlags::READ,
+                )?;
+                return Ok(app);
+            }
+        }
         let fs_store =
             crate::appspawn::FsBundleStore::new(self.filesystem, uid, caller.caps.effective());
         let verifier = crate::appspawn::AnchorVerifier::new(store.anchor());
@@ -1302,11 +1327,25 @@ where
         // request∩grants intersection, so the returned ceiling is exactly
         // the manifest request — the same value an embedded row carries —
         // and the admit path's single intersection with the spawning
-        // credential's user ceiling stays the one authority bound.
+        // credential's user ceiling stays the one authority bound. It also
+        // makes the verified result caller-independent, which is what lets
+        // the cache below serve it to a different caller.
         let full_grants = CapabilitySet::from_words([u64::MAX; 4]);
-        loader
+        let app = loader
             .load(parsed.bundle, &full_grants)
-            .map_err(crate::appspawn::app_error_errno)
+            .map(alloc::sync::Arc::new)
+            .map_err(crate::appspawn::app_error_errno)?;
+        if cacheable {
+            // The cache's byte budget scales with the discovered memory:
+            // a fixed fraction of physical RAM, so a small machine caches
+            // little and a large one is not needlessly capped.
+            let budget = self.frames.map_or(0, |frames| {
+                (frames.total_frames().saturating_mul(PAGE_SIZE))
+                    / crate::appspawn::APP_CACHE_RAM_DIVISOR
+            });
+            store.cache_verified(parsed.bundle, &app, budget);
+        }
+        Ok(app)
     }
 
     /// Park the caller while the installed application store's readiness
@@ -8497,6 +8536,297 @@ mod tests {
             table.read().caps_for(SecTaskId(pid)).is_some(),
             "child caps registered under its pid"
         );
+    }
+
+    /// A [`FilesystemService`] over the shared [`MemFs`] fixture that
+    /// counts data reads and can refuse `open`, so the cache tests can
+    /// prove a cached launch re-reads nothing and still authorises the
+    /// caller (a refused `open` is the secured VFS denying the read).
+    struct InstrumentedFs {
+        inner: crate::test_bundle::MemFs,
+        reads: core::sync::atomic::AtomicUsize,
+        deny_open: bool,
+    }
+
+    impl InstrumentedFs {
+        fn new(inner: crate::test_bundle::MemFs, deny_open: bool) -> Self {
+            Self {
+                inner,
+                reads: core::sync::atomic::AtomicUsize::new(0),
+                deny_open,
+            }
+        }
+
+        fn reads(&self) -> usize {
+            self.reads.load(core::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    impl crate::fs::FilesystemService for InstrumentedFs {
+        fn open(
+            &self,
+            uid: u32,
+            caps: &dyn rustos_abi::CapabilityQuery,
+            path: &str,
+            flags: OpenFlags,
+        ) -> Result<(), Errno> {
+            if self.deny_open {
+                return Err(Errno::PermissionDenied);
+            }
+            self.inner.open(uid, caps, path, flags)
+        }
+
+        fn read(
+            &self,
+            uid: u32,
+            caps: &dyn rustos_abi::CapabilityQuery,
+            path: &str,
+            offset: u64,
+            buf: &mut [u8],
+        ) -> Result<usize, Errno> {
+            self.reads
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            self.inner.read(uid, caps, path, offset, buf)
+        }
+
+        fn write(
+            &self,
+            uid: u32,
+            caps: &dyn rustos_abi::CapabilityQuery,
+            path: &str,
+            offset: u64,
+            append: bool,
+            data: &[u8],
+        ) -> Result<usize, Errno> {
+            self.inner.write(uid, caps, path, offset, append, data)
+        }
+
+        fn readdir(
+            &self,
+            uid: u32,
+            caps: &dyn rustos_abi::CapabilityQuery,
+            path: &str,
+        ) -> Result<alloc::vec::Vec<(rustos_abi::FileKind, alloc::string::String)>, Errno> {
+            self.inner.readdir(uid, caps, path)
+        }
+
+        fn stat(
+            &self,
+            uid: u32,
+            caps: &dyn rustos_abi::CapabilityQuery,
+            path: &str,
+        ) -> Result<FileStat, Errno> {
+            self.inner.stat(uid, caps, path)
+        }
+
+        fn truncate(
+            &self,
+            uid: u32,
+            caps: &dyn rustos_abi::CapabilityQuery,
+            path: &str,
+            size: u64,
+        ) -> Result<(), Errno> {
+            self.inner.truncate(uid, caps, path, size)
+        }
+
+        fn sync(&self, uid: u32, caps: &dyn rustos_abi::CapabilityQuery) -> Result<(), Errno> {
+            self.inner.sync(uid, caps)
+        }
+
+        fn mkdir(
+            &self,
+            uid: u32,
+            caps: &dyn rustos_abi::CapabilityQuery,
+            path: &str,
+        ) -> Result<(), Errno> {
+            self.inner.mkdir(uid, caps, path)
+        }
+
+        fn unlink(
+            &self,
+            uid: u32,
+            caps: &dyn rustos_abi::CapabilityQuery,
+            path: &str,
+        ) -> Result<(), Errno> {
+            self.inner.unlink(uid, caps, path)
+        }
+
+        fn rename(
+            &self,
+            uid: u32,
+            caps: &dyn rustos_abi::CapabilityQuery,
+            src: &str,
+            dst: &str,
+        ) -> Result<(), Errno> {
+            self.inner.rename(uid, caps, src, dst)
+        }
+    }
+
+    /// A second spawn of the same system-store bundle is served from the
+    /// per-boot verified-bundle cache: the same validated image is spawned
+    /// with **zero** further data reads (no whole-bundle re-read, re-hash,
+    /// or re-verify on the launch hot path) — the regression that made
+    /// every command launch re-verify its bundle from disk.
+    #[test]
+    fn a_second_spawn_of_a_store_bundle_is_served_from_the_cache() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, BUNDLE_PATH);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        // The caller sits at task id 9: the two admitted children receive
+        // the scheduler's low ids, which must not collide with the
+        // caller's own aspace registration.
+        aspaces
+            .write()
+            .register(SecTaskId(9), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let caps = make_caps_record(9, &[CapabilityId::PROC_SPAWN], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(9),
+            caps: &caps,
+        };
+        let (memfs, anchor, run) = crate::test_bundle::composed_bundle(alloc::vec![]);
+        let fs: &'static InstrumentedFs = Box::leak(Box::new(InstrumentedFs::new(memfs, false)));
+        let store: &'static crate::appspawn::AppStore =
+            Box::leak(Box::new(crate::appspawn::AppStore::pending(anchor)));
+        store.note_available();
+        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
+        let h = spawn_handler(
+            &sched,
+            &table,
+            &arch,
+            sink,
+            &irq,
+            &ctl,
+            &ipc,
+            &aspaces,
+            &rng,
+            &frames,
+            &EMPTY_PROGRAM_REGISTRY,
+            producer,
+        )
+        .with_filesystem(fs)
+        .with_app_store(store);
+        h.spawn(
+            &ctx,
+            0x1000,
+            BUNDLE_PATH.len(),
+            CONSOLE_INHERIT,
+            SPAWN_UID_INHERIT,
+            0,
+            0,
+        )
+        .expect("first spawn verifies the bundle");
+        let reads_after_first = fs.reads();
+        assert!(reads_after_first > 0, "the first spawn reads the bundle");
+        h.spawn(
+            &ctx,
+            0x1000,
+            BUNDLE_PATH.len(),
+            CONSOLE_INHERIT,
+            SPAWN_UID_INHERIT,
+            0,
+            0,
+        )
+        .expect("second spawn serves the cache");
+        assert_eq!(
+            fs.reads(),
+            reads_after_first,
+            "a cached launch performs no data reads"
+        );
+        // Both spawns handed the producer the same validated image.
+        assert_eq!(producer.rxe.lock().len(), 2 * run.len());
+        assert_eq!(&producer.rxe.lock()[..run.len()], run.as_slice());
+        assert_eq!(&producer.rxe.lock()[run.len()..], run.as_slice());
+    }
+
+    /// A cache hit never bypasses authorisation: when the secured VFS
+    /// refuses the caller's read of the entry point, the cached launch is
+    /// refused too and nothing is spawned.
+    #[test]
+    fn a_cache_hit_still_authorises_the_callers_read() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, BUNDLE_PATH);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        // The caller sits at task id 9: the two admitted children receive
+        // the scheduler's low ids, which must not collide with the
+        // caller's own aspace registration.
+        aspaces
+            .write()
+            .register(SecTaskId(9), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let caps = make_caps_record(9, &[CapabilityId::PROC_SPAWN], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(9),
+            caps: &caps,
+        };
+        let (memfs, anchor, run) = crate::test_bundle::composed_bundle(alloc::vec![]);
+        let fs: &'static InstrumentedFs = Box::leak(Box::new(InstrumentedFs::new(memfs, true)));
+        let store: &'static crate::appspawn::AppStore =
+            Box::leak(Box::new(crate::appspawn::AppStore::pending(anchor)));
+        store.note_available();
+        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
+        let h = spawn_handler(
+            &sched,
+            &table,
+            &arch,
+            sink,
+            &irq,
+            &ctl,
+            &ipc,
+            &aspaces,
+            &rng,
+            &frames,
+            &EMPTY_PROGRAM_REGISTRY,
+            producer,
+        )
+        .with_filesystem(fs)
+        .with_app_store(store);
+        // The first spawn verifies and caches the bundle (its reads are
+        // authorised per-file by the store's own read path).
+        h.spawn(
+            &ctx,
+            0x1000,
+            BUNDLE_PATH.len(),
+            CONSOLE_INHERIT,
+            SPAWN_UID_INHERIT,
+            0,
+            0,
+        )
+        .expect("first spawn verifies the bundle");
+        // The second spawn hits the cache, but the secured VFS refuses the
+        // caller's read of the entry point: the launch fails closed.
+        assert_eq!(
+            h.spawn(
+                &ctx,
+                0x1000,
+                BUNDLE_PATH.len(),
+                CONSOLE_INHERIT,
+                SPAWN_UID_INHERIT,
+                0,
+                0
+            ),
+            Err(Errno::PermissionDenied)
+        );
+        // Only the first, verified launch reached the producer.
+        assert_eq!(producer.rxe.lock().len(), run.len());
     }
 
     /// A tampered on-disk `Run` breaks the signed content hash and the

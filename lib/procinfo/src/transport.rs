@@ -42,4 +42,13 @@ pub trait Transport {
 pub trait Output {
     /// Emit `line` followed by a newline.
     fn write_line(&self, line: &str) -> Result<(), Errno>;
+
+    /// Emit one framed `stdinfo` record on the advisory stream (fd 3),
+    /// best-effort: advisory by contract, so a missing consumer or a short
+    /// write is silently a no-op and never affects the rendered listing or
+    /// the exit status. The default drops the record — the contract's
+    /// "ignorable" form for a sink with no advisory channel.
+    fn info(&self, record: &[u8]) {
+        let _ = record;
+    }
 }
