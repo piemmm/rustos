@@ -1,0 +1,24 @@
+[package]
+name = "rustos-appload"
+description = "RustOS application-bundle load gate: validates a `<Name>.app/` bundle's fixed layout, verifies its signed `AppInfo` manifest and content hash, computes the granted capability set as the user's grants intersected with the manifest request, and enforces the dynamic-loader shared-library policy — the one gate the kernel boot-floor spawn path and the user-space `appmgr` service share (`AGENTS.md` §16.4, §16.5, §17.4)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The frozen `abi-v1` surface: the `appinfo` bundle-layout + `AppInfoHeader`
+# manifest + dynamic-loader library policy, the shared `decode_capability_ids`
+# body decoder, the `CapabilityId` registry, and the `Errno` table.
+rustos-abi = { path = "../abi", version = "=0.0.0" }
+# `CapabilitySet` and its intersection algebra — the one place the §5.2
+# grant rule lives, so the loader never re-implements it (§2.2).
+rustos-caps = { path = "../caps", version = "=0.0.0" }
+# §19.4 structured audit log: every load, refusal, and library decision is
+# recorded through a `rustos_log::Sink`.
+rustos-log = { path = "../log", version = "=0.0.0" }

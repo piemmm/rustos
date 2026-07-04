@@ -38,6 +38,7 @@
 
 - [Overview](./lib/overview.md)
   - [`rustos-abi`](./lib/abi.md)
+  - [`rustos-appload`](./lib/appload.md)
   - [`rustos-caps`](./lib/caps.md)
   - [`rustos-collections`](./lib/collections.md)
   - [`rustos-crypto`](./lib/crypto.md)

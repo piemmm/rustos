@@ -3650,12 +3650,18 @@ increment landing complete and green:
    `/System/Services/{login,devmgr,sysinfod}.app/Run`, spelled from the
    shared `rustos_abi::SYSTEM_SERVICE_STORE` (drift-tested).
 4. **Kernel disk-backed spawn** — the bundle-verification engine is hoisted
-   out of `userland/system/appmgr` into a `lib/*` crate the kernel may link
-   (§17.4), `appmgr` re-exporting it; `spawn` resolves a store-bundle path
-   through the mounted VFS, verifies (signature against the kernel's
-   embedded app trust anchor, content hash, ABI/syscall hash), derives the
-   child's capability request from the on-disk manifest, and spawns; the
-   embedded command-app/service rows leave the aarch64 production boot.
+   out of `userland/system/appmgr` into the `lib/appload` crate the kernel
+   may link (§17.4), `appmgr` re-exporting it — **done**: `rustos-appload`
+   holds the `AppLoader` pipeline, the `BundleStore`/`Verifier` seams, the
+   `LoadedApp` result, and the `11000..12000` audit-event range (with the
+   full engine test suite); `userland/system/appmgr` is now the user-space
+   consumer that re-exports it, so the one gate is shared, never
+   re-implemented. **Remaining:** `spawn` resolves a store-bundle path
+   through the mounted VFS, verifies through `rustos_appload` (signature
+   against the kernel's embedded app trust anchor, content hash, ABI/syscall
+   hash), derives the child's capability request from the on-disk manifest,
+   and spawns; the embedded command-app/service rows then leave the aarch64
+   production boot.
 5. **Per-port storage floor, then delete the registry** — x86_64 and riscv64
    gain their bootstrap-floor disk, image layout, and read-only `/System`
    mount (their staged `tools/mkimage` builders, §12), after which

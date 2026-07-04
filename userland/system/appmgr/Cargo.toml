@@ -1,6 +1,6 @@
 [package]
 name = "rustos-appmgr"
-description = "RustOS application-bundle loader: validates a `/Apps/<Name>.app/` bundle's fixed layout, verifies its signed `AppInfo` manifest and content hash, computes the granted capability set as the user's grants intersected with the manifest request, and enforces the dynamic-loader shared-library policy (Stage 6 — `AGENTS.md` §16.4, §16.5)."
+description = "RustOS application-manager service: loads and launches an installed `/Apps/<Name>.app/` bundle for a user through the shared `lib/appload` load gate (validates the fixed layout, verifies the signed `AppInfo` manifest and content hash, intersects capabilities with the user's grants, enforces the dynamic-loader shared-library policy) — Stage 6, `AGENTS.md` §16.4, §16.5, §17.4."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,13 +12,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-# The frozen `abi-v1` surface: the `appinfo` bundle-layout + `AppInfoHeader`
-# manifest + dynamic-loader library policy, the shared `decode_capability_ids`
-# body decoder, the `CapabilityId` registry, and the `Errno` table.
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-# `CapabilitySet` and its intersection algebra — the one place the §5.2
-# grant rule lives, so the loader never re-implements it (§2.2).
-rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
-# §19.4 structured audit log: every load, refusal, and library decision is
-# recorded through a `rustos_log::Sink`.
-rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+# The shared bundle load gate (`lib/appload`): the one place a bundle is
+# judged, used by both this service and the kernel boot-floor spawn path so
+# the security-relevant layout/signature/capability policy is never
+# re-implemented (§2.2, §17.4). `appmgr` is its user-space consumer.
+rustos-appload = { path = "../../../lib/appload", version = "=0.0.0" }

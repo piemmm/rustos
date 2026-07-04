@@ -622,9 +622,12 @@ both landed; `plans/SHELL.md` command execution):
    bundle's signed `AppInfo` + `Run` beside its `Help/` (command apps under
    `/System/Apps/`, services under `/System/Services/<name>.app/`, the
    service spawn/startup paths bundle-form via
-   `rustos_abi::SYSTEM_SERVICE_STORE`) — done; (4)
-   the verification engine hoisted from `appmgr` into a `lib/*` crate and
-   `spawn` loading + verifying store bundles from the mounted volume; (5)
+   `rustos_abi::SYSTEM_SERVICE_STORE`) — done; (4a) the verification engine
+   hoisted from `appmgr` into the shared `lib/appload` crate the kernel may
+   link (§17.4), `appmgr` re-exporting it as its user-space consumer — done;
+   (4b) `spawn` loading + verifying store bundles from the mounted volume
+   through `rustos_appload`, deriving caps from the on-disk manifest, and
+   dropping the embedded aarch64 rows; (5)
    the x86_64/riscv64 storage floor, then deletion of `SPAWN_PROGRAMS`,
    the `*_rxe.rs` `include!`s (all but PID 1 `init`), `spawn_paths.rs`,
    and `program_manifests.rs` (§2.14). All prior deliverables' references

@@ -469,12 +469,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "rustos-appmgr"
+name = "rustos-appload"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
  "rustos-caps",
  "rustos-log",
+]
+
+[[package]]
+name = "rustos-appmgr"
+version = "0.0.0"
+dependencies = [
+ "rustos-appload",
 ]
 
 [[package]]

@@ -509,6 +509,13 @@ rustos/
 │   │                    #   lib/abi-trap, for NON-Rust programs (§9, §16.4).
 │   ├── abi-trap/        # The single per-arch user->kernel syscall trap
 │   │                    #   carve-out (§1), shared by abi-sys and lib/rt (§2.2).
+│   ├── appload/         # Application-bundle load gate: the one place a
+│   │                    #   <Name>.app bundle is judged (fixed layout, signed
+│   │                    #   AppInfo manifest + content-hash + interface-hash
+│   │                    #   verification, capability intersection, dynamic-
+│   │                    #   loader library policy), shared by the kernel boot-
+│   │                    #   floor spawn path and the user-space appmgr service
+│   │                    #   so it is never re-implemented (§2.2, §16.5, §17.4).
 │   ├── caps/            # Capability primitives.
 │   ├── cmdres/          # Shared command-word resolution policy (plans/
 │   │                    #   APPS.md §8–§9): the one pure definition of the
