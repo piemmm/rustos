@@ -298,7 +298,10 @@ P-1 100 Hz periodic arming).
 The *nearest timed wakeup* half of the one-shot is the provided
 [`SchedulerArch::set_wakeup(deadline_ns)`] hook: a blocking wait with a
 finite timeout (the [blocking wait-queue](#blocking-wait-queue-and-the-wake-pending-token)
-below) records its soonest waiter deadline through it, so the port programs
+below) records the soonest waiter deadline across **every** timed
+wait-queue through it (`nearest_timed_deadline` — never a single queue's
+own view, which would silently drop another queue's pending wake off the
+shared one-shot), so the port programs
 its single physical one-shot to the *earlier* of the quantum arming and the
 wakeup, and a parked waiter fires on time even on an otherwise-idle CPU
 that has no task to preempt (`AGENTS.md` §17.1).
@@ -318,8 +321,9 @@ blocking-wait **timed-wake sweep** (`kernel/core::timed_wake_sweep`) as its
 per-tick timer callback, so every tick — including one taken on an
 otherwise-idle CPU armed solely for a wakeup — releases any elapsed waiter
 and re-arms the one-shot to the next deadline. `set_wakeup` defaults to a
-no-op, so the host `TestArch` and any non-preemptive port inherit the
-explicit-wake path only.
+no-op, so a non-preemptive port inherits the explicit-wake path only; the
+host `TestArch` records each call so the wait syscalls' re-arm epilogues
+are asserted directly.
 
 The dispatch loop runs with **device interrupts enabled** — RustOS is a
 fully preemptive kernel (`AGENTS.md` §17.1). `admit_init` calls

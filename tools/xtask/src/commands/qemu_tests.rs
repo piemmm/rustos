@@ -134,6 +134,27 @@ const fn is_line_of(line: &[u8], value: &[u8]) -> bool {
 /// The passphrase line the admission vertical types at `Root filesystem passphrase: `.
 const UNLOCK_PASSPHRASE_LINE: &str = "unlock-vertical correct horse battery staple\n";
 
+/// A deliberately wrong passphrase *prefix* (no line terminator) the
+/// admission vertical types at the first `Root filesystem passphrase: `
+/// prompt, so the run also proves the two timed-wake behaviours of the
+/// secret prompt end to end:
+///
+/// 1. **Animation ticks fire on the timer.** With the partial line typed and
+///    no further input, the `[input active...]` marker's dots may only
+///    advance when the tickless one-shot wakes the parked reader; the runner
+///    waits for the two-dot frame (`..]`) before pressing Enter, so a run
+///    whose animation only moves on a keystroke times out.
+/// 2. **The wrong-attempt delay park expires on the timer.** After Enter
+///    submits the wrong passphrase the runner sends nothing until the
+///    `Incorrect passphrase` notice appears; the notice is drawn only after
+///    the anti-brute-force timed park, so it appearing unaided proves the
+///    park is woken by the one-shot, not a keystroke.
+///
+/// Both once regressed together: single-queue `set_wakeup` arms in the
+/// blocking-wait syscalls clobbered the console deadline off the shared
+/// one-shot, wedging the re-prompt (and the dots) until a key was pressed.
+const WRONG_UNLOCK_PASSPHRASE_PREFIX: &str = "abc";
+
 /// Serial marker after which the autoload-input vertical injects a key.
 ///
 /// The autoloaded user-space virtio-input keyboard driver is *interrupt
@@ -164,6 +185,22 @@ const SESSION_USERNAME_LINE: &str = "root\n";
 /// The password line the session-ceiling vertical types at `Password: `.
 const SESSION_PASSWORD_LINE: &str = "root\n";
 
+/// `true` if the two byte strings are equal — the compile-time complement of
+/// [`is_line_of`] for asserting a typed line does **not** match the fixture.
+const fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
 const _: () = {
     assert!(
         is_line_of(
@@ -171,6 +208,14 @@ const _: () = {
             rustos_test_encrypted_root_image::PASSPHRASE
         ),
         "UNLOCK_PASSPHRASE_LINE drifted from the fixture passphrase"
+    );
+    assert!(
+        !WRONG_UNLOCK_PASSPHRASE_PREFIX.is_empty()
+            && !bytes_eq(
+                WRONG_UNLOCK_PASSPHRASE_PREFIX.as_bytes(),
+                rustos_test_encrypted_root_image::PASSPHRASE
+            ),
+        "WRONG_UNLOCK_PASSPHRASE_PREFIX must be non-empty and not the fixture passphrase"
     );
     assert!(
         is_line_of(
@@ -2545,27 +2590,51 @@ const TESTS: &[QemuTest] = &[
     // The kernel-side audit sink reports PASS through the ARM semihosting
     // finisher the instant it sees the unlock-service install message
     // (`EventId(4139)`) — the witness that the kthread-admission path
-    // mounted the root end to end. The runner types only the fixture
-    // passphrase (verified against the shared fixture at compile time,
-    // `is_line_of`); the database *content* authenticating
+    // mounted the root end to end. The runner first types a deliberately
+    // wrong passphrase *prefix* and then waits — sending **nothing** — for
+    // the marker's second animation frame (`..]`): the dots advance only
+    // when the tickless one-shot wakes the parked reader, so the frame
+    // appearing unaided proves the animation is timer-driven. It then
+    // presses Enter and again waits, typing nothing, for the `Incorrect
+    // passphrase` notice — drawn only after the anti-brute-force timed
+    // park, so its unaided arrival proves the delay park is woken by the
+    // one-shot (the regression these two steps pin: single-queue
+    // `set_wakeup` arms once dropped the console deadlines off the shared
+    // one-shot and both wedged until a key was pressed). Only then does it
+    // type the fixture passphrase (verified against the shared fixture at
+    // compile time, `is_line_of`);
+    // the database *content* authenticating
     // `root`/`root` is proven by `root_unlock_login`, and the per-console
     // `login` authenticating end to end into a real shell session is the
     // session-ceiling vertical's job (below), so both are out of this
-    // vertical's scope. A 90-second budget covers the boot + bounded PBKDF2
-    // derivation on QEMU TCG; single CPU like the other full-boot verticals.
+    // vertical's scope. A 120-second budget covers the boot + two bounded
+    // PBKDF2 derivations + the wrong-attempt delay on QEMU TCG; single CPU
+    // like the other full-boot verticals.
     QemuTest {
         package: "rustos-test-root-unlock-admission-qemu-aarch64",
         binary: "rustos-test-root-unlock-admission-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
-        timeout: Duration::from_secs(90),
+        timeout: Duration::from_secs(120),
         disk_sectors: None,
         virtio_net: false,
         ramfb: false,
         fs_disk: FsDisk::EncryptedRootDisk,
         keyboard: None,
         pointer: false,
-        serial: &[("Root filesystem passphrase: ", UNLOCK_PASSPHRASE_LINE)],
+        serial: &[
+            (
+                "Root filesystem passphrase: ",
+                WRONG_UNLOCK_PASSPHRASE_PREFIX,
+            ),
+            // Wait-only-then-Enter step: the two-dot frame must arrive with
+            // no further input (the timed wake advances the dots).
+            ("..]", "\n"),
+            // Wait-only step: the notice must arrive with no further input
+            // (the timed wake, not a keystroke, ends the delay park).
+            ("Incorrect passphrase", ""),
+            ("Root filesystem passphrase: ", UNLOCK_PASSPHRASE_LINE),
+        ],
     },
     // `plans/CAPABILITY_USE.md` CU3: the session-ceiling acceptance vertical.
     // `rustos-test-session-ceiling-qemu-aarch64` boots the *production*

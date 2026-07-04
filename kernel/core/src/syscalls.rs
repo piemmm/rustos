@@ -1982,12 +1982,12 @@ where
         let deadline_ns = self.arch.monotonic_ns(cpu).saturating_add(timeout_ns);
         crate::waitq::IRQ_WAITQ.register(task, deadline_ns);
         let outcome = block_until_ready(self.irq, handle, caller.task_id, timeout_ns, &waiter);
-        // Leave the wait set and re-point the one-shot at whatever deadline
-        // any *remaining* waiter needs (or clear it if none) so a finished
-        // wait never leaves a stale arming behind.
+        // Leave the wait set and re-point the one-shot at the nearest
+        // deadline any remaining waiter on *any* timed wait-queue needs (or
+        // clear it if none) so a finished wait never leaves a stale arming
+        // behind and drops no other queue's pending wake.
         crate::waitq::IRQ_WAITQ.deregister(task);
-        self.arch
-            .set_wakeup(crate::waitq::IRQ_WAITQ.earliest_deadline());
+        self.arch.set_wakeup(crate::waitq::nearest_timed_deadline());
 
         match outcome {
             WaitOutcome::Ready => Ok(0),
@@ -3190,11 +3190,11 @@ where
             {
                 break Err(Errno::TimedOut);
             }
-            // Arm the timed-wake one-shot to the nearest pending deadline so
-            // a finite timeout fires even on an otherwise-idle CPU
-            // (the nearest armed wakeup).
-            self.arch
-                .set_wakeup(crate::waitq::HW_TREE_WAITQ.earliest_deadline());
+            // Arm the timed-wake one-shot to the nearest pending deadline
+            // across every timed wait-queue so a finite timeout fires even on
+            // an otherwise-idle CPU without dropping another queue's earlier
+            // wake (the nearest armed wakeup).
+            self.arch.set_wakeup(crate::waitq::nearest_timed_deadline());
             // Park off the run queue until woken. `reschedule_current`
             // returns `false` only when the caller is not a resumable user
             // kthread (host tests with no live dispatch loop); fall back to
@@ -3208,12 +3208,12 @@ where
                 }
             }
         };
-        // Leave the wait set and re-point the one-shot at whatever deadline
-        // any *remaining* waiter needs (or clear it if none) so a finished
-        // wait never leaves a stale arming behind.
+        // Leave the wait set and re-point the one-shot at the nearest
+        // deadline any remaining waiter on *any* timed wait-queue needs (or
+        // clear it if none) so a finished wait never leaves a stale arming
+        // behind and drops no other queue's pending wake.
         crate::waitq::HW_TREE_WAITQ.deregister(task);
-        self.arch
-            .set_wakeup(crate::waitq::HW_TREE_WAITQ.earliest_deadline());
+        self.arch.set_wakeup(crate::waitq::nearest_timed_deadline());
         result
     }
 
@@ -3268,11 +3268,11 @@ where
             {
                 break Err(Errno::TimedOut);
             }
-            // Arm the timed-wake one-shot to the nearest pending deadline so
-            // a finite timeout fires even on an otherwise-idle CPU
-            // (the nearest armed wakeup).
-            self.arch
-                .set_wakeup(crate::waitq::USERS_DB_WAITQ.earliest_deadline());
+            // Arm the timed-wake one-shot to the nearest pending deadline
+            // across every timed wait-queue so a finite timeout fires even on
+            // an otherwise-idle CPU without dropping another queue's earlier
+            // wake (the nearest armed wakeup).
+            self.arch.set_wakeup(crate::waitq::nearest_timed_deadline());
             // Park off the run queue until woken. `reschedule_current`
             // returns `false` only when the caller is not a resumable user
             // kthread (host tests with no live dispatch loop); fall back to
@@ -3286,12 +3286,12 @@ where
                 }
             }
         };
-        // Leave the wait set and re-point the one-shot at whatever deadline
-        // any *remaining* waiter needs (or clear it if none) so a finished
-        // wait never leaves a stale arming behind.
+        // Leave the wait set and re-point the one-shot at the nearest
+        // deadline any remaining waiter on *any* timed wait-queue needs (or
+        // clear it if none) so a finished wait never leaves a stale arming
+        // behind and drops no other queue's pending wake.
         crate::waitq::USERS_DB_WAITQ.deregister(task);
-        self.arch
-            .set_wakeup(crate::waitq::USERS_DB_WAITQ.earliest_deadline());
+        self.arch.set_wakeup(crate::waitq::nearest_timed_deadline());
         result
     }
 
@@ -4192,14 +4192,14 @@ where
                     }
                 }
             }
-            // Arm the one-shot to the nearest pending `IRQ_WAITQ` deadline
-            // (which includes this wait's), then *park* off the run queue until
+            // Arm the one-shot to the nearest pending deadline across every
+            // timed wait-queue (which includes this wait's, and never drops
+            // another queue's earlier wake), then *park* off the run queue until
             // woken by an endpoint post (`serve_wake`), a member line firing
             // (`irq_wake`), or the timed sweep — never a busy spin. The
             // wake-pending token closes the poll/park race exactly as
             // `call_recv` / `irq_wait` rely on.
-            self.arch
-                .set_wakeup(crate::waitq::IRQ_WAITQ.earliest_deadline());
+            self.arch.set_wakeup(crate::waitq::nearest_timed_deadline());
             if !crate::kthread::reschedule_current(cpu, RescheduleAction::Park) {
                 match self.sched.yield_current(sched_task) {
                     Ok(()) | Err(SchedError::InvalidState) => {}
@@ -4212,10 +4212,10 @@ where
         crate::waitq::SERVE_WAITQ.deregister(sched_task);
         crate::waitq::IRQ_WAITQ.deregister(sched_task);
         crate::waitq::PROCWAIT_WAITQ.deregister(sched_task);
-        // Re-point the one-shot at whatever deadline any *remaining* waiter
-        // needs (or clear it) so a finished wait leaves no stale arming.
-        self.arch
-            .set_wakeup(crate::waitq::IRQ_WAITQ.earliest_deadline());
+        // Re-point the one-shot at the nearest deadline any remaining waiter
+        // on *any* timed wait-queue needs (or clear it) so a finished wait
+        // leaves no stale arming and drops no other queue's pending wake.
+        self.arch.set_wakeup(crate::waitq::nearest_timed_deadline());
 
         let (kind, id, token) = outcome?;
 
@@ -5143,16 +5143,16 @@ where
         if let Some(line) = self.line {
             let _ = self.irq_controller.rearm(line);
         }
-        // Arm the timed-wake one-shot to the nearest pending `irq_wait`
-        // deadline so a finite timeout fires even on an otherwise-idle CPU
+        // Arm the timed-wake one-shot to the nearest pending deadline across
+        // every timed wait-queue so a finite timeout fires even on an
+        // otherwise-idle CPU without dropping another queue's earlier wake
         // (the nearest armed wakeup), then *park* off
         // the run queue until woken by `irq_wake` (a fire) or the timed
         // sweep. The caller registered this task on `IRQ_WAITQ` before the
         // first poll, so the park/unpark race is closed by the scheduler's
         // wake-pending token (no busy yield). This
         // mirrors `hw_tree_wait`'s park exactly.
-        self.arch
-            .set_wakeup(crate::waitq::IRQ_WAITQ.earliest_deadline());
+        self.arch.set_wakeup(crate::waitq::nearest_timed_deadline());
         // `reschedule_current` returns `false` only when the caller is not
         // a resumable user kthread (host tests with no live dispatch loop);
         // fall back to a cooperative yield then so a degenerate caller
@@ -13295,6 +13295,131 @@ mod tests {
         // Still pending and a zero deadline: report the timeout rather than
         // parking forever in the host test (no live dispatch loop).
         assert_eq!(h.users_db_wait(&ctx, 0), Err(Errno::TimedOut));
+    }
+
+    /// A [`UsersDbSource`] that is pending exactly once: the first `text`
+    /// probe reports the in-flight `WouldBlock`, every later one the
+    /// resolved `NotFound` — so a `users_db_wait` passes its entry check as
+    /// pending and then resolves on the first loop re-check, driving the
+    /// wait's deregister-and-re-arm epilogue without ever parking.
+    struct PendingOnceUsersDb(core::sync::atomic::AtomicBool);
+
+    impl UsersDbSource for PendingOnceUsersDb {
+        fn text(&self) -> Result<crate::users::UsersDbText, Errno> {
+            if self.0.swap(false, core::sync::atomic::Ordering::Relaxed) {
+                Err(Errno::WouldBlock)
+            } else {
+                Err(Errno::NotFound)
+            }
+        }
+    }
+
+    /// The `users_db_wait` epilogue re-arms the shared one-shot to the
+    /// nearest deadline across **every** timed wait-queue — a finite
+    /// deadline pending on another queue (here `CONSOLE_WAITQ`, the secret
+    /// prompt's animation/delay wakes) survives the wait finishing.
+    ///
+    /// Regression: the epilogue once re-armed from `USERS_DB_WAITQ`'s own
+    /// (now empty) view, clearing the one-shot and dropping the console
+    /// waiter's pending wake — the root-unlock prompt's "Incorrect
+    /// passphrase" delay and `[input active...]` animation then wedged
+    /// until a keystroke arrived.
+    #[test]
+    fn users_db_wait_epilogue_keeps_another_queues_pending_deadline_armed() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::USERS_READ], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        // A console waiter (a distinct task) with a finite deadline pending
+        // for the whole wait — the animation/delay wake the epilogue must
+        // not drop. The global queue is shared across the test binary, so
+        // the assertion below is an upper bound, never an exact match.
+        let console_task = 9_700_001;
+        let console_deadline = u64::MAX - 2;
+        crate::waitq::CONSOLE_WAITQ.register(console_task, console_deadline);
+
+        let pending_once: &'static PendingOnceUsersDb = Box::leak(Box::new(PendingOnceUsersDb(
+            core::sync::atomic::AtomicBool::new(true),
+        )));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_users_db(pending_once);
+        assert_eq!(h.users_db_wait(&ctx, 1_000_000), Ok(0));
+
+        // The epilogue ran (the wait registered a finite deadline) and left
+        // the one-shot pointed at a real pending deadline — never cleared
+        // while another queue still waits.
+        assert!(
+            arch.set_wakeup_count() > 0,
+            "epilogue re-armed the one-shot"
+        );
+        let last = arch.last_set_wakeup();
+        assert!(
+            last.is_some_and(|d| d <= console_deadline),
+            "one-shot must stay armed for the console waiter, got {last:?}"
+        );
+
+        crate::waitq::CONSOLE_WAITQ.deregister(console_task);
+    }
+
+    /// The `irq_wait` epilogue likewise re-arms across every timed
+    /// wait-queue: a finished (here timed-out) IRQ wait must not clear the
+    /// one-shot while a console waiter's finite deadline is still pending.
+    #[test]
+    fn irq_wait_epilogue_keeps_another_queues_pending_deadline_armed() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(8, &[CapabilityId::IRQ_BIND], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(8),
+            caps: &caps,
+        };
+
+        let console_task = 9_700_002;
+        let console_deadline = u64::MAX - 2;
+        crate::waitq::CONSOLE_WAITQ.register(console_task, console_deadline);
+
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        let raw = h.irq_bind(&ctx, 5).expect("bind");
+        assert_eq!(
+            h.irq_wait(&ctx, IrqHandle::from_raw(raw), 0),
+            Err(Errno::TimedOut)
+        );
+
+        assert!(
+            arch.set_wakeup_count() > 0,
+            "epilogue re-armed the one-shot"
+        );
+        let last = arch.last_set_wakeup();
+        assert!(
+            last.is_some_and(|d| d <= console_deadline),
+            "one-shot must stay armed for the console waiter, got {last:?}"
+        );
+
+        crate::waitq::CONSOLE_WAITQ.deregister(console_task);
     }
 
     /// An undersized buffer is refused whole with `BufferTooSmall` — a

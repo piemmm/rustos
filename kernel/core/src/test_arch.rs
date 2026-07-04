@@ -104,6 +104,12 @@ pub struct TestArch {
     /// host tests of `clock_get` get a deterministic, strictly
     /// increasing reading without depending on wall-clock time.
     monotonic_ns: AtomicU64,
+    /// Number of [`SchedulerArch::set_wakeup`] calls observed.
+    wakeup_calls: AtomicU64,
+    /// Last [`SchedulerArch::set_wakeup`] argument, encoded as `0` for
+    /// `None` and `deadline + 1` for `Some(deadline)` (meaningful only
+    /// once `wakeup_calls > 0`).
+    last_wakeup: AtomicU64,
 }
 
 impl TestArch {
@@ -122,6 +128,8 @@ impl TestArch {
             ipis: AtomicU64::new(0),
             pump_tx_calls: AtomicU64::new(0),
             monotonic_ns: AtomicU64::new(0),
+            wakeup_calls: AtomicU64::new(0),
+            last_wakeup: AtomicU64::new(0),
         }
     }
 
@@ -176,11 +184,40 @@ impl TestArch {
     pub fn set_ticks(&self, value: u64) {
         self.ticks.store(value, Ordering::Relaxed);
     }
+
+    /// Number of [`SchedulerArch::set_wakeup`] calls observed.
+    #[must_use]
+    pub fn set_wakeup_count(&self) -> u64 {
+        self.wakeup_calls.load(Ordering::Relaxed)
+    }
+
+    /// The last [`SchedulerArch::set_wakeup`] argument, or `None` when the
+    /// last call cleared the one-shot (meaningful only once
+    /// [`Self::set_wakeup_count`] is non-zero).
+    ///
+    /// Lets a wait-syscall test assert the epilogue re-armed the shared
+    /// one-shot to the nearest deadline across *every* timed wait-queue
+    /// rather than clearing it from its own queue's empty view.
+    #[must_use]
+    pub fn last_set_wakeup(&self) -> Option<u64> {
+        match self.last_wakeup.load(Ordering::Relaxed) {
+            0 => None,
+            encoded => Some(encoded - 1),
+        }
+    }
 }
 
 impl SchedulerArch for TestArch {
     fn current_cpu(&self) -> CpuId {
         self.current.load(Ordering::Relaxed)
+    }
+
+    fn set_wakeup(&self, deadline_ns: Option<u64>) {
+        self.wakeup_calls.fetch_add(1, Ordering::Relaxed);
+        self.last_wakeup.store(
+            deadline_ns.map_or(0, |d| d.saturating_add(1)),
+            Ordering::Relaxed,
+        );
     }
 
     fn ticks_now(&self) -> u64 {
