@@ -359,6 +359,24 @@ pub fn boot(
         "pi-beacon 4/6: mmu enable FAILED (running mmu-off)"
     });
 
+    // The framebuffer console renders through a borrowed character-cell grid
+    // so it can save the primary screen and restore it when a full-screen
+    // program (top, an editor) leaves the alternate screen. Those grids could
+    // not be allocated during the pre-MMU display discovery — the heap needs
+    // the cacheable identity map the MMU just enabled — so attach them now,
+    // sized to the discovered geometry and leaked to `'static` (the console
+    // lives as long as the kernel, exactly like the per-CPU arch storage).
+    // With no display discovered `text_cell_count` is `None`, so this is a
+    // no-op and the UART keeps the console (fail closed).
+    if mmu_on {
+        if let Some(cells) = video::text_cell_count() {
+            let main = alloc::vec![video::Cell::BLANK; cells].into_boxed_slice();
+            let alt = alloc::vec![video::Cell::BLANK; cells].into_boxed_slice();
+            video::attach_console(Box::leak(main), Box::leak(alt));
+            serial::beacon("pi-beacon 4/6a: video console cell grids attached");
+        }
+    }
+
     // Log the discovered PCIe root-complex windows once, post-MMU. The
     // windows themselves reach the autoloaded user-space PCIe bus driver as
     // resource grants on the discovered `brcm,bcm2711-pcie` hardware-tree

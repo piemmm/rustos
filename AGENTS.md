@@ -545,11 +545,18 @@ rustos/
 │   ├── fbcon/           # Shared, arch-neutral framebuffer text-console engine:
 │   │                    #   the full ANSI/VT/xterm-256color terminal (Geometry/
 │   │                    #   TextConsole/DirtyBand, palette, glyph blit over
-│   │                    #   lib/font, scroll-up-at-bottom) rendering the shared
-│   │                    #   lib/vt Op stream onto a 32-bit surface, so every
-│   │                    #   arch port drives its display console through one
-│   │                    #   definition instead of re-deriving it. Allocator-free
-│   │                    #   (§2.2, §2.20, §2.21, §17.4).
+│   │                    #   lib/font, scroll-up-at-bottom, and the alternate
+│   │                    #   screen — CSI ? 1049 h/l — that restores the primary
+│   │                    #   screen a full-screen program like top covered)
+│   │                    #   rendering the shared lib/vt Op stream onto a 32-bit
+│   │                    #   surface over a retained rustos_vt::Cell grid, so
+│   │                    #   every arch port drives its display console through
+│   │                    #   one definition instead of re-deriving it. The two
+│   │                    #   cell grids (primary+alternate) are borrowed &mut
+│   │                    #   [Cell] the caller owns (a static, or a heap buffer
+│   │                    #   leaked & sized to discovered geometry), so the
+│   │                    #   engine stays allocator-free (§2.2, §2.20, §2.21,
+│   │                    #   §17.4, §24.1).
 │   ├── fdt/             # Shared FDT/DTB reader: the one device-tree parser the
 │   │                    #   aarch64+riscv64 ports build §18.2 discovery on (§2.2).
 │   ├── font/            # Shared text rasterisation: monospace bitmap font +

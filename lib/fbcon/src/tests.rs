@@ -35,7 +35,11 @@ fn geometry_rejects_unusable_surfaces() {
 
 /// A scale-1 test surface `cols`×`rows` cells, stride two pixels wider than the
 /// visible width so tests exercise `stride != width`.
-fn console_of(cols: u32, rows: u32) -> (TextConsole, Vec<u32>) {
+///
+/// The two cell grids are leaked to `&'static mut [Cell]` (a host test runs
+/// once and exits, so the leak is harmless) so the returned console borrows
+/// them for `'static`, mirroring how a kernel caller leaks heap grid storage.
+fn console_of(cols: u32, rows: u32) -> (TextConsole<'static>, Vec<u32>) {
     let width_px = cols * CELL_WIDTH;
     let height_px = rows * CELL_HEIGHT;
     let geometry = Geometry {
@@ -46,13 +50,15 @@ fn console_of(cols: u32, rows: u32) -> (TextConsole, Vec<u32>) {
     };
     assert_eq!((geometry.columns(), geometry.rows()), (cols, rows));
     let mut pixels = vec![0u32; geometry.pixel_count()];
-    let mut console = TextConsole::new(geometry);
+    let main: &'static mut [Cell] = vec![Cell::BLANK; geometry.cell_count()].leak();
+    let alt: &'static mut [Cell] = vec![Cell::BLANK; geometry.cell_count()].leak();
+    let mut console = TextConsole::new(geometry, main, alt);
     console.clear(&mut pixels);
     (console, pixels)
 }
 
 /// A 2-column × 2-row scale-1 test surface.
-fn small_console() -> (TextConsole, Vec<u32>) {
+fn small_console() -> (TextConsole<'static>, Vec<u32>) {
     console_of(2, 2)
 }
 
@@ -261,6 +267,119 @@ fn explicit_scroll_up_within_a_region() {
     assert!(cell_has(&pixels, &geometry, 0, 0, DEFAULT_FOREGROUND));
     assert!(cell_blank(&pixels, &geometry, 0, 1));
     assert!(cell_blank(&pixels, &geometry, 0, 2));
+}
+
+#[test]
+fn entering_the_alternate_screen_clears_the_surface() {
+    // A full-screen program (`top`) enters the alternate screen with
+    // `CSI ? 1049 h`: the primary screen's content is hidden and a cleared
+    // alternate screen is shown.
+    let (mut console, mut pixels) = console_of(3, 1);
+    console.write_bytes(&mut pixels, b"abc");
+    let geometry = *console.geometry();
+    assert!(
+        cell_has(&pixels, &geometry, 0, 0, DEFAULT_FOREGROUND),
+        "abc drawn"
+    );
+    let dirty = console.write_bytes(&mut pixels, b"\x1b[?1049h");
+    assert_eq!(
+        dirty,
+        Some((0, geometry.height_px)),
+        "the whole surface cleared"
+    );
+    assert!(
+        cell_blank(&pixels, &geometry, 0, 0),
+        "alternate screen is blank"
+    );
+    assert!(cell_blank(&pixels, &geometry, 1, 0));
+    assert!(cell_blank(&pixels, &geometry, 2, 0));
+}
+
+#[test]
+fn leaving_the_alternate_screen_restores_the_primary_screen() {
+    // The heart of the alternate-screen contract: whatever the program drew
+    // on the alternate screen is discarded on `CSI ? 1049 l`, and the primary
+    // screen is repainted exactly as it was before the program started.
+    let (mut console, mut pixels) = console_of(3, 1);
+    console.write_bytes(&mut pixels, b"AB");
+    let geometry = *console.geometry();
+    let before: Vec<Vec<u32>> = (0..3).map(|c| cell(&pixels, &geometry, c, 0)).collect();
+
+    // Enter the alternate screen and scribble different content on it.
+    console.write_bytes(&mut pixels, b"\x1b[?1049hXYZ");
+    assert!(
+        cell_has(&pixels, &geometry, 0, 0, DEFAULT_FOREGROUND),
+        "X drawn on alt"
+    );
+
+    // Leaving restores the primary screen pixel-for-pixel.
+    let dirty = console.write_bytes(&mut pixels, b"\x1b[?1049l");
+    assert_eq!(
+        dirty,
+        Some((0, geometry.height_px)),
+        "the primary screen is repainted"
+    );
+    let after: Vec<Vec<u32>> = (0..3).map(|c| cell(&pixels, &geometry, c, 0)).collect();
+    assert_eq!(
+        after, before,
+        "the primary screen returned exactly as it was"
+    );
+}
+
+#[test]
+fn the_alternate_screen_does_not_disturb_the_primary_grid() {
+    // Content written while on the alternate screen must not leak into the
+    // primary screen when it is restored — the two grids are independent.
+    let (mut console, mut pixels) = console_of(2, 2);
+    console.write_bytes(&mut pixels, b"P");
+    let geometry = *console.geometry();
+    let primary_p = cell(&pixels, &geometry, 0, 0);
+
+    // On the alternate screen, fill both rows with different glyphs.
+    console.write_bytes(&mut pixels, b"\x1b[?1049hQ\r\nR");
+    // Restore: only the single `P` from the primary screen comes back.
+    console.write_bytes(&mut pixels, b"\x1b[?1049l");
+    assert_eq!(cell(&pixels, &geometry, 0, 0), primary_p, "P restored");
+    assert!(
+        cell_blank(&pixels, &geometry, 1, 0),
+        "no alt content leaked"
+    );
+    assert!(
+        cell_blank(&pixels, &geometry, 0, 1),
+        "no alt content leaked"
+    );
+}
+
+#[test]
+fn leaving_the_alternate_screen_restores_the_saved_cursor() {
+    // Entering saves the primary cursor; leaving restores it, so text written
+    // after the program exits continues where it left off.
+    let (mut console, mut pixels) = console_of(4, 1);
+    console.write_bytes(&mut pixels, b"ab");
+    let geometry = *console.geometry();
+    // Enter, move the alt cursor elsewhere, then leave.
+    console.write_bytes(&mut pixels, b"\x1b[?1049h\x1b[1;4HZ\x1b[?1049l");
+    // The next glyph lands in column 2 (where the primary cursor was), not
+    // column 3 where the alternate cursor ended up.
+    console.write_bytes(&mut pixels, b"c");
+    assert!(
+        cell_has(&pixels, &geometry, 2, 0, DEFAULT_FOREGROUND),
+        "c in column 2"
+    );
+    assert!(cell_blank(&pixels, &geometry, 3, 0), "column 3 untouched");
+}
+
+#[test]
+fn leaving_the_alternate_screen_when_not_on_it_is_a_no_op() {
+    // A stray `CSI ? 1049 l` with no matching enter must not clear or repaint.
+    let (mut console, mut pixels) = console_of(2, 1);
+    console.write_bytes(&mut pixels, b"A");
+    let geometry = *console.geometry();
+    assert_eq!(console.write_bytes(&mut pixels, b"\x1b[?1049l"), None);
+    assert!(
+        cell_has(&pixels, &geometry, 0, 0, DEFAULT_FOREGROUND),
+        "A untouched"
+    );
 }
 
 #[test]

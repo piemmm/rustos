@@ -420,12 +420,28 @@ the `fw_cfg`/`ramfb` fallback on the QEMU `virt` board. On the Pi:
   `-device ramfb`, `video::configure_ramfb` programs the device's
   scan-out — over the shared `rustos-fwcfg` DMA client (`AGENTS.md`
   §2.2), the same protocol definition the display verticals use — to a
-  statically-reserved 1024×768 surface in kernel BSS, and publishes the
-  same text console over it (`publish_console`, the shared tail of both
+  statically-reserved 1024×768 surface in kernel BSS, and records the
+  same surface over it (`publish_console`, the shared tail of both
   paths). The fw_cfg base stands in as the "doorbell" Device-mask
   input. No ramfb device (`etc/ramfb` absent), no fw_cfg node, or any
   failed transfer falls back to the UART (fail closed); the headless
   UART-backed verticals are unchanged.
+- **Cell-grid attach (post-MMU, by design).** The pre-MMU phase only
+  *records* the discovered surface and clears it to a clean background;
+  it does **not** build the renderer, because `rustos_fbcon` keeps a
+  retained cell grid (below) and that grid is leaked from the kernel
+  heap, which is unusable MMU-off (its allocator's atomics are
+  UNPREDICTABLE on the MMU-off Device-typed memory the boot CPU runs).
+  So immediately after `enable_mmu_and_vectors`, `boot` leaks two
+  `[Cell]` grids sized to `video::text_cell_count()` (the discovered
+  `columns × rows`) and hands them to `video::attach_console`, which
+  builds the `TextConsole`, clears the surface through it, and only then
+  publishes `video::is_active` — so console output switches to the
+  screen once the grid is live. This mirrors the per-CPU
+  `Aarch64ArchStorage` pattern: the caller (which has a heap) owns the
+  `'static` storage, the arch crate stays allocator-free. With no
+  display discovered `text_cell_count` is `None` and the UART keeps the
+  console (fail closed).
 - **Rendering — a real `xterm-256color` terminal, in a shared engine.**
   The terminal is not this port's own code: it is the shared,
   architecture-neutral `rustos_fbcon` engine (`lib/fbcon`, `AGENTS.md`
@@ -447,9 +463,13 @@ the `fw_cfg`/`ramfb` fallback on the QEMU `virt` board. On the Pi:
   clamped to 1…4: 480p → 1×, 1080p → 3×), packed
   `0xFF00_0000 | (r<<16) | (g<<8) | b` — correct on both the mailbox
   (`Bgra8888`) and ramfb (`XRGB8888`) surfaces, whose bytes coincide.
-  There is **no retained cell grid** — the surface is the backing store
-  — so reaching the bottom margin **scrolls the pixels up one line** (a
-  real terminal scroll, `copy_within`), not a ring-wrap. `rustos_fbcon`
+  The engine keeps a **retained character-cell grid** (`rustos_vt::Cell`
+  per position): each write updates the grid *and* paints the surface
+  immediately, so reaching the bottom margin **scrolls both the grid and
+  the pixels up one line** (a real terminal scroll, `copy_within`), not a
+  ring-wrap. The grid is what lets the console restore the primary screen
+  when a full-screen program leaves the alternate screen (below).
+  `rustos_fbcon`
   (and, through it, `lib/vt` and `lib/font`) is depended on
   `default-features = false`: `lib/vt`'s `Vec`-returning `encode*` helpers
   ride its default-on `alloc` feature, while `Op` itself owns no heap (the
@@ -459,8 +479,11 @@ the `fw_cfg`/`ramfb` fallback on the QEMU `virt` board. On the Pi:
   total, so a malformed or unrecognised sequence is consumed without
   disturbing the screen; a Unicode scalar the atlas cannot draw renders
   `?`. Attributes with no bitmap rendering (underline/italic/blink/dim/
-  strike) and the alternate screen (no separate buffer — entering or
-  leaving it clears) are documented degrades; no hardware cursor is
+  strike) are documented degrades; the **alternate screen** (`CSI ? 1049
+  h`/`l`) is fully honoured — entering saves the primary-screen cursor and
+  shows a cleared alternate grid, and leaving restores the primary screen
+  from its grid exactly, so quitting `top` or an editor returns the shell
+  screen it covered. No hardware cursor is
   drawn. After the MMU and caches come on, each write cleans the touched
   scanlines to the point of coherency (`dc cvac` + `dsb`) so the
   firmware scan-out sees them; rendering is serialised by a private

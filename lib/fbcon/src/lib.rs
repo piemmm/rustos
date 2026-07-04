@@ -7,10 +7,19 @@
 //! board-specific surface (discovered at runtime) and calls
 //! [`TextConsole::write_bytes`].
 //!
-//! The engine holds no cell grid — the pixels are the state — so reaching the
-//! bottom scrolls the pixels up (a real terminal scroll), not a ring wrap. It
-//! never allocates, so a freestanding boot console with no global allocator
-//! links it directly.
+//! The engine keeps a character-cell grid (the visible screen, one
+//! [`Cell`] per position) so it can honour the alternate-screen buffer a
+//! full-screen program uses: entering the alternate screen (`CSI ? 1049 h`)
+//! preserves the main screen in its own grid and shows a cleared one;
+//! leaving it (`CSI ? 1049 l`) restores the saved main screen exactly, the
+//! way every xterm-family terminal does. Reaching the bottom scrolls both the
+//! grid and the pixels up (a real terminal scroll), not a ring wrap.
+//!
+//! The grid storage is **borrowed**, not owned: the caller passes two
+//! `&mut [Cell]` buffers (main and alternate), so the crate itself never
+//! allocates and a freestanding boot console with no global allocator links
+//! it directly. An allocator-having caller leaks a heap buffer sized to the
+//! discovered geometry; an allocator-free caller supplies a `static`.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -18,6 +27,8 @@
 
 use rustos_font::glyphs;
 use rustos_vt::{Attributes, Color, EraseMode, Op, Parser};
+
+pub use rustos_vt::Cell;
 
 /// Glyph cell width in pixels at scale 1: the atlas glyph plus one column of
 /// inter-character spacing.
@@ -118,6 +129,13 @@ impl Geometry {
     pub const fn pixel_count(&self) -> usize {
         self.stride_px as usize * self.height_px as usize
     }
+
+    /// Character-cell count (`columns × rows`), the length each grid buffer
+    /// ([`TextConsole::new`]'s `main`/`alt`) must have.
+    #[must_use]
+    pub const fn cell_count(&self) -> usize {
+        self.columns() as usize * self.rows() as usize
+    }
 }
 
 /// The pixel-row band `[start, end)` a rendering call touched, so a
@@ -213,6 +231,18 @@ fn background_pixel(color: Color) -> u32 {
     }
 }
 
+/// The (foreground, background) scan-out pixels a cell's `attrs` render with:
+/// bold brightens a dim base foreground, and reverse-video swaps the two.
+fn colors_of(attrs: &Attributes) -> (u32, u32) {
+    let fg = foreground_pixel(attrs.foreground, attrs.bold);
+    let bg = background_pixel(attrs.background);
+    if attrs.reverse {
+        (bg, fg)
+    } else {
+        (fg, bg)
+    }
+}
+
 /// Map a printed character to its atlas byte: printable ASCII renders directly,
 /// and everything else (a control byte that reached here, or a non-Latin scalar
 /// the 5×7 atlas has no glyph for) renders `?` rather than being dropped.
@@ -223,34 +253,60 @@ fn atlas_byte(ch: char) -> u8 {
         .unwrap_or(b'?')
 }
 
-/// The terminal screen state rendered directly onto the scan-out surface: the
-/// cursor, the current rendition pen, a DEC scroll region, and the saved
-/// cursor. It holds no cell grid — the pixels are the state — so every write
-/// paints (or scrolls) the borrowed surface immediately. Pure CPU pixel
-/// arithmetic over a borrowed slice, so it is host-testable.
+/// A saved cursor: position plus the rendition pen, captured by `ESC 7`
+/// (DECSC) or on entering the alternate screen and restored by `ESC 8`
+/// (DECRC) / on leaving it.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+struct SavedCursor {
+    column: u32,
+    row: u32,
+    pen: Attributes,
+}
+
+/// The terminal screen: the cursor, the rendition pen, a DEC scroll region,
+/// the saved cursor, and the **character-cell grid** of the visible screen.
+///
+/// The grid records what each screen position shows, so the engine can honour
+/// the alternate-screen buffer: the `main` grid holds the primary screen and
+/// the `alt` grid the alternate one. Every write updates the active grid *and*
+/// paints (or scrolls) the borrowed pixel surface immediately, so the display
+/// stays live without a separate flush; the grid exists so a screen can be
+/// **repainted from its cells** — which is exactly how leaving the alternate
+/// screen restores the primary one. The grid buffers are borrowed (`&mut
+/// [Cell]`), so the engine never allocates.
 ///
 /// The rendered attributes are colour (16/256/truecolour), bold (brightens the
 /// base colours) and reverse-video (swaps foreground and background);
 /// underline/italic/blink/dim/strike are parsed and folded into the pen but the
-/// 5×7 bitmap atlas does not draw them. The alternate screen has no separate
-/// buffer, so entering or leaving it clears the surface (a documented degrade —
-/// a boot console keeps no scrollback). No hardware cursor is drawn.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub struct Screen {
+/// 5×7 bitmap atlas does not draw them. No hardware cursor is drawn.
+#[derive(Debug)]
+pub struct Screen<'a> {
     geometry: Geometry,
     column: u32,
     row: u32,
     pen: Attributes,
     region_top: u32,
     region_bottom: u32,
-    saved: Option<(u32, u32, Attributes)>,
+    saved: Option<SavedCursor>,
+    /// The primary-screen cell grid (`columns × rows`, row-major).
+    main: &'a mut [Cell],
+    /// The alternate-screen cell grid (`columns × rows`, row-major).
+    alt: &'a mut [Cell],
+    /// Whether the alternate screen is currently shown.
+    on_alt: bool,
+    /// The primary-screen cursor saved on entering the alternate screen,
+    /// restored on leaving it (the `CSI ? 1049` cursor save/restore).
+    alt_saved: Option<SavedCursor>,
 }
 
-impl Screen {
+impl<'a> Screen<'a> {
     /// A screen homed at the top-left of a `geometry`-sized surface with the
-    /// plain pen and a full-height scroll region.
+    /// plain pen, a full-height scroll region, and the two borrowed cell grids
+    /// (`main` and `alt`, each at least [`Geometry::cell_count`] long — a
+    /// shorter buffer simply bounds what the grid can hold; indexing fails
+    /// closed rather than panicking).
     #[must_use]
-    pub const fn new(geometry: Geometry) -> Self {
+    pub fn new(geometry: Geometry, main: &'a mut [Cell], alt: &'a mut [Cell]) -> Self {
         let bottom = geometry.rows() - 1;
         Self {
             geometry,
@@ -260,6 +316,10 @@ impl Screen {
             region_top: 0,
             region_bottom: bottom,
             saved: None,
+            main,
+            alt,
+            on_alt: false,
+            alt_saved: None,
         }
     }
 
@@ -277,6 +337,50 @@ impl Screen {
     /// Text rows the surface holds.
     fn rows(&self) -> u32 {
         self.geometry.rows()
+    }
+
+    /// The cell grid currently shown (the alternate grid while on the
+    /// alternate screen, else the primary grid).
+    fn active_cells(&mut self) -> &mut [Cell] {
+        if self.on_alt {
+            &mut *self.alt
+        } else {
+            &mut *self.main
+        }
+    }
+
+    /// Write `cell` into the active grid at `(col, row)`, ignoring an
+    /// out-of-range coordinate (fail closed, never a panic).
+    fn grid_set(&mut self, col: u32, row: u32, cell: Cell) {
+        let cols = self.cols();
+        let index = row as usize * cols as usize + col as usize;
+        if let Some(slot) = self.active_cells().get_mut(index) {
+            *slot = cell;
+        }
+    }
+
+    /// Fill columns `[from_col, to_col)` of active-grid `row` with `cell`.
+    fn grid_fill_cells(&mut self, from_col: u32, to_col: u32, row: u32, cell: Cell) {
+        let cols = self.cols();
+        let to_col = to_col.min(cols);
+        let base = row as usize * cols as usize;
+        let cells = self.active_cells();
+        for col in from_col..to_col {
+            if let Some(slot) = cells.get_mut(base + col as usize) {
+                *slot = cell;
+            }
+        }
+    }
+
+    /// Fill whole active-grid rows `[from_row, to_row)` with `cell`.
+    fn grid_fill_rows(&mut self, from_row: u32, to_row: u32, cell: Cell) {
+        let cols = self.cols();
+        let start = from_row as usize * cols as usize;
+        let end = to_row as usize * cols as usize;
+        let cells = self.active_cells();
+        if let Some(span) = cells.get_mut(start..end.min(cells.len())) {
+            span.fill(cell);
+        }
     }
 
     /// Apply one parsed [`Op`] to the surface, returning the pixel-row band it
@@ -351,20 +455,23 @@ impl Screen {
                 None
             }
             Op::SaveCursor => {
-                self.saved = Some((self.column, self.row, self.pen));
+                self.saved = Some(SavedCursor {
+                    column: self.column,
+                    row: self.row,
+                    pen: self.pen,
+                });
                 None
             }
             Op::RestoreCursor => {
-                if let Some((col, row, pen)) = self.saved {
-                    self.column = col.min(self.cols().saturating_sub(1));
-                    self.row = row.min(self.rows().saturating_sub(1));
-                    self.pen = pen;
+                if let Some(saved) = self.saved {
+                    self.column = saved.column.min(self.cols().saturating_sub(1));
+                    self.row = saved.row.min(self.rows().saturating_sub(1));
+                    self.pen = saved.pen;
                 }
                 None
             }
-            // No separate alternate-screen buffer: switching either way clears
-            // the surface rather than restoring hidden content.
-            Op::EnterAltScreen | Op::LeaveAltScreen => self.clear(pixels),
+            Op::EnterAltScreen => self.enter_alt_screen(pixels),
+            Op::LeaveAltScreen => self.leave_alt_screen(pixels),
             // Parsed but with no rendered effect on this bitmap console: cursor
             // visibility (no drawn cursor), the bell, and the input-reporting
             // operations that flow program-ward (keys, mouse, paste markers,
@@ -376,25 +483,28 @@ impl Screen {
     /// The (foreground, background) scan-out pixels for the current pen, with
     /// bold brightening applied and reverse-video swapping the two.
     fn colors(&self) -> (u32, u32) {
-        let fg = foreground_pixel(self.pen.foreground, self.pen.bold);
-        let bg = background_pixel(self.pen.background);
-        if self.pen.reverse {
-            (bg, fg)
-        } else {
-            (fg, bg)
-        }
+        colors_of(&self.pen)
     }
 
-    /// Print one character at the cursor with the current pen, advancing the
-    /// cursor and wrapping (scrolling at the bottom margin) at the right edge.
+    /// The cell an erase/scroll writes into vacated positions: a space in the
+    /// current pen, so the erased region keeps the pen's background colour and
+    /// a later repaint reproduces exactly what the immediate pixel fill drew.
+    fn blank_cell(&self) -> Cell {
+        Cell::styled(' ', self.pen)
+    }
+
+    /// Print one character at the cursor with the current pen, recording it in
+    /// the active grid and painting it, advancing the cursor and wrapping
+    /// (scrolling at the bottom margin) at the right edge.
     fn print(&mut self, pixels: &mut [u32], ch: char) -> DirtyBand {
         let mut dirty = None;
         if self.column >= self.cols() {
             self.column = 0;
             dirty = self.line_feed(pixels);
         }
-        let (fg, bg) = self.colors();
-        let glyph_band = self.blit_glyph(pixels, atlas_byte(ch), fg, bg);
+        let (col, row, pen) = (self.column, self.row, self.pen);
+        self.grid_set(col, row, Cell::styled(ch, pen));
+        let glyph_band = self.blit_cell(pixels, col, row, ch, pen);
         self.column += 1;
         merge_bands(dirty, Some(glyph_band)).unwrap_or(glyph_band)
     }
@@ -424,64 +534,147 @@ impl Screen {
         }
     }
 
-    /// Clear the whole surface to the default background and home the cursor.
+    /// Clear the whole surface to the default background, blank the active
+    /// grid, and home the cursor.
     pub fn clear(&mut self, pixels: &mut [u32]) -> Option<DirtyBand> {
         for pixel in pixels.iter_mut() {
             *pixel = DEFAULT_BACKGROUND;
         }
+        self.active_cells().fill(Cell::BLANK);
         self.column = 0;
         self.row = 0;
         Some((0, self.geometry.height_px))
     }
 
-    /// Erase part of the display relative to the cursor, filling with the
-    /// current background, and return the affected pixel-row band.
-    fn erase_display(&self, pixels: &mut [u32], mode: EraseMode) -> DirtyBand {
+    /// Enter the alternate screen (`CSI ? 1049 h`): save the primary-screen
+    /// cursor, switch to the alternate grid, and show it cleared. A second
+    /// request while already on the alternate screen is a no-op.
+    fn enter_alt_screen(&mut self, pixels: &mut [u32]) -> Option<DirtyBand> {
+        if self.on_alt {
+            return None;
+        }
+        self.alt_saved = Some(SavedCursor {
+            column: self.column,
+            row: self.row,
+            pen: self.pen,
+        });
+        self.on_alt = true;
+        self.clear(pixels)
+    }
+
+    /// Leave the alternate screen (`CSI ? 1049 l`): switch back to the primary
+    /// grid, restore its saved cursor, and repaint it from its cells so the
+    /// screen the program covered returns exactly. A request while not on the
+    /// alternate screen is a no-op.
+    fn leave_alt_screen(&mut self, pixels: &mut [u32]) -> Option<DirtyBand> {
+        if !self.on_alt {
+            return None;
+        }
+        self.on_alt = false;
+        if let Some(saved) = self.alt_saved.take() {
+            self.column = saved.column.min(self.cols().saturating_sub(1));
+            self.row = saved.row.min(self.rows().saturating_sub(1));
+            self.pen = saved.pen;
+        }
+        Some(self.repaint(pixels))
+    }
+
+    /// Repaint the whole visible surface from the active grid's cells (used to
+    /// restore the primary screen on leaving the alternate one).
+    fn repaint(&self, pixels: &mut [u32]) -> DirtyBand {
+        for pixel in pixels.iter_mut() {
+            *pixel = DEFAULT_BACKGROUND;
+        }
+        let cols = self.cols();
+        let cells = if self.on_alt { &*self.alt } else { &*self.main };
+        for row in 0..self.rows() {
+            for col in 0..cols {
+                if let Some(cell) = cells.get((row * cols + col) as usize) {
+                    self.blit_cell(pixels, col, row, cell.ch, cell.attrs);
+                }
+            }
+        }
+        (0, self.geometry.height_px)
+    }
+
+    /// Erase part of the display relative to the cursor, filling both the grid
+    /// and the pixels with the current background, and return the affected
+    /// pixel-row band.
+    fn erase_display(&mut self, pixels: &mut [u32], mode: EraseMode) -> DirtyBand {
         let (_, bg) = self.colors();
+        let blank = self.blank_cell();
         let cell_h = self.geometry.cell_height_px();
+        let (col, row, cols, rows) = (self.column, self.row, self.cols(), self.rows());
         match mode {
             EraseMode::ToEnd => {
-                self.fill_cells(pixels, self.column, self.cols(), self.row, bg);
-                let below_y = (self.row + 1) * cell_h;
+                self.grid_fill_cells(col, cols, row, blank);
+                self.grid_fill_rows(row + 1, rows, blank);
+                self.fill_cells(pixels, col, cols, row, bg);
+                let below_y = (row + 1) * cell_h;
                 self.fill_rows(pixels, below_y, self.geometry.height_px, bg);
-                (self.row * cell_h, self.geometry.height_px)
+                (row * cell_h, self.geometry.height_px)
             }
             EraseMode::ToStart => {
-                self.fill_rows(pixels, 0, self.row * cell_h, bg);
-                self.fill_cells(pixels, 0, self.column + 1, self.row, bg);
-                (0, (self.row + 1) * cell_h)
+                self.grid_fill_rows(0, row, blank);
+                self.grid_fill_cells(0, col + 1, row, blank);
+                self.fill_rows(pixels, 0, row * cell_h, bg);
+                self.fill_cells(pixels, 0, col + 1, row, bg);
+                (0, (row + 1) * cell_h)
             }
             EraseMode::All => {
+                self.grid_fill_rows(0, rows, blank);
                 self.fill_rows(pixels, 0, self.geometry.height_px, bg);
                 (0, self.geometry.height_px)
             }
         }
     }
 
-    /// Erase part of the current line relative to the cursor, filling with the
-    /// current background, and return the affected pixel-row band.
-    fn erase_line(&self, pixels: &mut [u32], mode: EraseMode) -> DirtyBand {
+    /// Erase part of the current line relative to the cursor, filling both the
+    /// grid and the pixels with the current background, and return the affected
+    /// pixel-row band.
+    fn erase_line(&mut self, pixels: &mut [u32], mode: EraseMode) -> DirtyBand {
         let (_, bg) = self.colors();
+        let blank = self.blank_cell();
+        let (col, row) = (self.column, self.row);
         let (start, end) = match mode {
-            EraseMode::ToEnd => (self.column, self.cols()),
-            EraseMode::ToStart => (0, self.column + 1),
+            EraseMode::ToEnd => (col, self.cols()),
+            EraseMode::ToStart => (0, col + 1),
             EraseMode::All => (0, self.cols()),
         };
-        self.fill_cells(pixels, start, end, self.row, bg);
-        let y0 = self.row * self.geometry.cell_height_px();
+        self.grid_fill_cells(start, end, row, blank);
+        self.fill_cells(pixels, start, end, row, bg);
+        let y0 = row * self.geometry.cell_height_px();
         (y0, y0 + self.geometry.cell_height_px())
     }
 
-    /// Scroll the scroll region up by `n` text rows, clearing the vacated
-    /// bottom rows to the current background.
-    fn scroll_region_up(&self, pixels: &mut [u32], n: u32) -> DirtyBand {
+    /// Scroll the scroll region up by `n` text rows in both the grid and the
+    /// pixels, clearing the vacated bottom rows to the current background.
+    fn scroll_region_up(&mut self, pixels: &mut [u32], n: u32) -> DirtyBand {
+        let region_rows = self.region_bottom - self.region_top + 1;
+        let n = n.min(region_rows);
+        let blank = self.blank_cell();
+        {
+            let cols = self.cols() as usize;
+            let top = self.region_top as usize * cols;
+            let bottom = (self.region_bottom as usize + 1) * cols;
+            let shift = n as usize * cols;
+            let cells = self.active_cells();
+            let bottom = bottom.min(cells.len());
+            if let Some(region) = cells.get_mut(top..bottom) {
+                let len = region.len();
+                if shift < len {
+                    region.copy_within(shift.., 0);
+                    region[len - shift..].fill(blank);
+                } else {
+                    region.fill(blank);
+                }
+            }
+        }
         let (_, bg) = self.colors();
         let cell_h = self.geometry.cell_height_px();
         let stride = self.geometry.stride_px as usize;
-        let region_rows = self.region_bottom - self.region_top + 1;
         let top_y = self.region_top * cell_h;
         let end_y = (self.region_bottom + 1) * cell_h;
-        let n = n.min(region_rows);
         let shift = n * cell_h;
         if n < region_rows {
             let src = (top_y + shift) as usize * stride;
@@ -495,16 +688,34 @@ impl Screen {
         (top_y, end_y)
     }
 
-    /// Scroll the scroll region down by `n` text rows, clearing the vacated top
-    /// rows to the current background.
-    fn scroll_region_down(&self, pixels: &mut [u32], n: u32) -> DirtyBand {
+    /// Scroll the scroll region down by `n` text rows in both the grid and the
+    /// pixels, clearing the vacated top rows to the current background.
+    fn scroll_region_down(&mut self, pixels: &mut [u32], n: u32) -> DirtyBand {
+        let region_rows = self.region_bottom - self.region_top + 1;
+        let n = n.min(region_rows);
+        let blank = self.blank_cell();
+        {
+            let cols = self.cols() as usize;
+            let top = self.region_top as usize * cols;
+            let bottom = (self.region_bottom as usize + 1) * cols;
+            let shift = n as usize * cols;
+            let cells = self.active_cells();
+            let bottom = bottom.min(cells.len());
+            if let Some(region) = cells.get_mut(top..bottom) {
+                let len = region.len();
+                if shift < len {
+                    region.copy_within(..len - shift, shift);
+                    region[..shift].fill(blank);
+                } else {
+                    region.fill(blank);
+                }
+            }
+        }
         let (_, bg) = self.colors();
         let cell_h = self.geometry.cell_height_px();
         let stride = self.geometry.stride_px as usize;
-        let region_rows = self.region_bottom - self.region_top + 1;
         let top_y = self.region_top * cell_h;
         let end_y = (self.region_bottom + 1) * cell_h;
-        let n = n.min(region_rows);
         let shift = n * cell_h;
         if n < region_rows {
             let src = top_y as usize * stride;
@@ -550,13 +761,23 @@ impl Screen {
         }
     }
 
-    /// Blit one atlas glyph at the cursor, lit pixels in `fg` and the rest
-    /// (including inter-cell padding) in `bg`.
-    fn blit_glyph(&self, pixels: &mut [u32], byte: u8, fg: u32, bg: u32) -> DirtyBand {
+    /// Blit the glyph for `ch` at cell `(col, row)` in the rendition `attrs`:
+    /// lit pixels in the foreground colour and the rest (including inter-cell
+    /// padding) in the background, with bold/reverse resolved by [`colors_of`].
+    fn blit_cell(
+        &self,
+        pixels: &mut [u32],
+        col: u32,
+        row: u32,
+        ch: char,
+        attrs: Attributes,
+    ) -> DirtyBand {
+        let (fg, bg) = colors_of(&attrs);
+        let byte = atlas_byte(ch);
         let geometry = &self.geometry;
         let glyph = &glyphs::GLYPHS[(byte - glyphs::FIRST_CHAR as u8) as usize];
-        let x0 = self.column * geometry.cell_width_px();
-        let y0 = self.row * geometry.cell_height_px();
+        let x0 = col * geometry.cell_width_px();
+        let y0 = row * geometry.cell_height_px();
         for cell_y in 0..CELL_HEIGHT {
             let bits = if cell_y < glyphs::GLYPH_HEIGHT {
                 glyph[cell_y as usize]
@@ -585,25 +806,30 @@ impl Screen {
 /// [`Screen`] that renders each parsed operation straight onto the scan-out
 /// surface. The parser and the screen are separate fields so a write can borrow
 /// the parser (to feed it) and the screen (to apply the ops it yields) at once.
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct TextConsole {
+///
+/// The two cell grids the screen needs are borrowed (`main`/`alt`), so the
+/// console carries the borrow lifetime and never allocates.
+#[derive(Debug)]
+pub struct TextConsole<'a> {
     parser: Parser,
-    screen: Screen,
+    screen: Screen<'a>,
 }
 
-impl TextConsole {
-    /// A console at the top-left of a `geometry`-sized surface.
+impl<'a> TextConsole<'a> {
+    /// A console at the top-left of a `geometry`-sized surface, backed by the
+    /// borrowed `main` and `alt` cell grids (each at least
+    /// [`Geometry::cell_count`] long).
     #[must_use]
-    pub const fn new(geometry: Geometry) -> Self {
+    pub fn new(geometry: Geometry, main: &'a mut [Cell], alt: &'a mut [Cell]) -> Self {
         Self {
             parser: Parser::new(),
-            screen: Screen::new(geometry),
+            screen: Screen::new(geometry, main, alt),
         }
     }
 
     /// The validated geometry this console renders into.
     #[must_use]
-    pub const fn geometry(&self) -> &Geometry {
+    pub fn geometry(&self) -> &Geometry {
         self.screen.geometry()
     }
 

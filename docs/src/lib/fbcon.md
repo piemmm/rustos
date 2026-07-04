@@ -18,17 +18,28 @@ shared `rustos_font` 5×7 atlas. It is a full terminal:
 - Cursor motion (absolute and relative), tab, backspace, carriage return.
 - Erase-in-line and erase-in-display.
 - DEC scroll regions and explicit scroll up/down.
-- **Scroll-up-at-bottom**: reaching the bottom of the screen scrolls the pixels
-  up like a real terminal rather than wrapping ring-style.
+- **Scroll-up-at-bottom**: reaching the bottom of the screen scrolls both the
+  grid and the pixels up like a real terminal rather than wrapping ring-style.
+- **Alternate screen** (`CSI ? 1049 h` / `l`): a full-screen program such as
+  `top` or an editor switches to a cleared alternate screen on entry and, on
+  exit, the primary screen it covered is restored exactly — the xterm-family
+  contract every terminal honours.
 
 ## Design
 
-- **No retained cell grid.** The pixels *are* the state, so a write paints (or
-  scrolls) the surface immediately; the engine holds no per-cell buffer and a
-  boot console keeps no scrollback.
-- **Allocator-free.** The engine is `no_std` and never allocates, so a
-  freestanding boot console with no global allocator links it directly. It
-  depends on `rustos_vt` and `rustos_font` with `default-features = false`.
+- **Retained cell grid.** The engine keeps the visible screen as a grid of
+  `rustos_vt::Cell` (one glyph + its rendition per position). Each write updates
+  the active grid *and* paints the surface immediately, so the display stays
+  live without a separate flush; the grid exists so a screen can be repainted
+  from its cells — which is how leaving the alternate screen restores the
+  primary one. There are two grids (primary and alternate); the primary is left
+  untouched while the alternate is shown.
+- **Borrowed grid storage — allocator-free.** The engine is `no_std` and never
+  allocates: the two grids are passed in as `&mut [Cell]` buffers. A
+  freestanding boot console with no global allocator supplies a `static`; an
+  allocator-having caller leaks a heap buffer sized to the discovered geometry
+  (`Geometry::cell_count`). It depends on `rustos_vt` and `rustos_font` with
+  `default-features = false`.
 - **Host-testable.** Every operation is pure CPU pixel arithmetic over a
   borrowed slice, so the whole engine is unit-tested on the host.
 - **Fail closed.** Firmware-supplied geometry is validated at construction
@@ -40,9 +51,13 @@ shared `rustos_font` 5×7 atlas. It is a full terminal:
 - `Geometry` — validated scan-out extents plus the glyph scale the policy
   chose; `for_display(width, height, pitch_bytes)` fails closed on an unusable
   surface.
-- `TextConsole` — owns the parser and the screen; `write_bytes(pixels, bytes)`
-  interprets an ANSI/VT stream and returns the touched pixel-row band; `clear`
-  paints the background and homes the cursor.
+- `TextConsole::new(geometry, main, alt)` — owns the parser and the screen,
+  borrowing the two `&mut [Cell]` grids (each at least `geometry.cell_count()`
+  long); `write_bytes(pixels, bytes)` interprets an ANSI/VT stream and returns
+  the touched pixel-row band; `clear` paints the background and homes the
+  cursor.
+- `Cell` — the character cell (`rustos_vt::Cell`), re-exported so a caller can
+  size and blank the grid buffers.
 - `DirtyBand` / `merge_bands` — the `(start_y, end_y)` band a render touched, so
   a freestanding consumer can clean exactly those scanlines to coherency.
 
@@ -50,5 +65,6 @@ shared `rustos_font` 5×7 atlas. It is a full terminal:
 
 An architecture port (for example the aarch64 `video.rs` boot console) supplies
 only the board-specific surface — MMIO base, geometry, and pixel format
-discovered at runtime — and calls `TextConsole::write_bytes`. The terminal
-emulation itself is never duplicated in a port.
+discovered at runtime — plus the two cell grids (leaked from the kernel heap,
+sized to the discovered geometry), and calls `TextConsole::write_bytes`. The
+terminal emulation itself is never duplicated in a port.

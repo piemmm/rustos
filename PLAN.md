@@ -3337,18 +3337,28 @@ escape-sequence definition end to end (§2.2).
 - C6 — `lib/fbcon` (`rustos-fbcon`): the shared, architecture-neutral
   framebuffer text-console engine. A full ANSI/VT/xterm-256color terminal
   (`Geometry` / `TextConsole` / `DirtyBand`, palette, glyph blit over
-  `lib/font`, scroll-up-at-bottom) that renders the shared `lib/vt` `Op`
-  stream straight onto a 32-bit scan-out surface, so every arch port
-  (`x86_64`/`aarch64`/`riscv64`/`wasm32`) drives its display console through
-  one definition rather than re-deriving the emulation per target
-  (§2.2/§2.20/§2.21). Allocator-free, so a freestanding boot console with no
-  global allocator links it with `rustos-vt`/`rustos-font`
-  `default-features = false`; host-unit-tested. The aarch64 port's
-  `video.rs` now consumes it, keeping only board-specific surface discovery
-  (VideoCore mailbox / QEMU ramfb). The `lib/vt` `alloc` feature is now
-  optional (default-on) so the emitter's `Vec`-returning `encode*` helpers
-  stay available to allocator-having consumers while the parser path is
-  taken allocator-free by `fbcon` and the console.
+  `lib/font`, scroll-up-at-bottom, and the **alternate screen** — `CSI ?
+  1049 h`/`l`) that renders the shared `lib/vt` `Op` stream onto a 32-bit
+  scan-out surface over a **retained `rustos_vt::Cell` grid**, so every arch
+  port (`x86_64`/`aarch64`/`riscv64`/`wasm32`) drives its display console
+  through one definition rather than re-deriving the emulation per target
+  (§2.2/§2.20/§2.21). The grid lets a full-screen program (`top`, an editor)
+  enter a cleared alternate screen and, on exit, have the primary screen it
+  covered restored exactly — the xterm-family contract. The two cell grids
+  (primary + alternate) are **borrowed** `&mut [Cell]` the caller owns, so
+  the engine stays allocator-free: a freestanding boot console with no global
+  allocator supplies a `static`, an allocator-having caller leaks a heap
+  buffer sized to the discovered geometry (`Geometry::cell_count`, §24.1 — no
+  fixed ceiling). Depends on `rustos-vt`/`rustos-font`
+  `default-features = false`; host-unit-tested (incl. alt-screen restore).
+  The aarch64 port's `video.rs` consumes it two-phase: pre-MMU discovery
+  records the surface and clears it; post-MMU (once the heap is usable)
+  `boot` leaks the grids and calls `video::attach_console`, which builds the
+  console and activates the screen — the per-CPU `Aarch64ArchStorage`
+  storage-ownership pattern applied to the cell grids. The `lib/vt` `alloc`
+  feature is optional (default-on) so the emitter's `Vec`-returning `encode*`
+  helpers stay available to allocator-having consumers while the parser path
+  is taken allocator-free by `fbcon` and the console.
 
 ## SHELL prerequisites (`.junie/PREREQUISITES2.md`)
 

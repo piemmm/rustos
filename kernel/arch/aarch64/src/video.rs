@@ -35,6 +35,10 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use rustos_abi::driver::display::DisplayFormat;
+/// The framebuffer console's character cell, re-exported so the boot caller
+/// can size and blank the grid buffers it leaks into [`attach_console`]
+/// without naming `rustos_fbcon` directly.
+pub use rustos_fbcon::Cell;
 use rustos_fbcon::Geometry;
 use rustos_fdt::Fdt;
 use rustos_vcmailbox::{
@@ -184,7 +188,7 @@ pub struct DiscoveredVideo {
 }
 
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
-pub use metal::{configure_from_fdt, text_grid, write_bytes};
+pub use metal::{attach_console, configure_from_fdt, text_cell_count, text_grid, write_bytes};
 
 /// Host stand-in for the freestanding writer: rendering needs the
 /// firmware surface, so on the host this is inert (the renderer itself
@@ -200,6 +204,23 @@ pub fn text_grid() -> Option<rustos_abi::TerminalSize> {
     None
 }
 
+/// Host stand-in for the freestanding `text_cell_count`: no surface is
+/// discovered on the host, so there is no grid to size.
+#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+#[must_use]
+pub fn text_cell_count() -> Option<usize> {
+    None
+}
+
+/// Host stand-in for the freestanding `attach_console`: no surface exists on
+/// the host, so attaching the cell grids is inert.
+#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+pub fn attach_console(
+    _main: &'static mut [rustos_fbcon::Cell],
+    _alt: &'static mut [rustos_fbcon::Cell],
+) {
+}
+
 /// The freestanding half: the firmware exchange, the identity-mapped
 /// surface, and the cache maintenance. Target-only — every routine here
 /// either touches MMIO/SDRAM through boot-identity addresses or issues
@@ -212,7 +233,7 @@ mod metal {
     use core::sync::atomic::{AtomicBool, Ordering};
 
     use rustos_abi::RegisterWindow;
-    use rustos_fbcon::TextConsole;
+    use rustos_fbcon::{Cell, TextConsole};
     use rustos_fdt::Fdt;
     use rustos_fwcfg::{FwCfg, MmioDma, RamfbConfig, DRM_FORMAT_XRGB8888};
     use rustos_vcmailbox::{
@@ -291,14 +312,22 @@ mod metal {
         }
     }
 
-    /// The configured surface and cursor.
+    /// The discovered surface and, once attached post-MMU, the renderer.
+    ///
+    /// The console is `None` between the pre-MMU discovery (which records the
+    /// surface and its geometry) and [`attach_console`] (which, once the heap
+    /// is usable, builds the [`TextConsole`] over the leaked cell grids and
+    /// publishes [`VIDEO_ACTIVE`]). `geometry` is known from discovery so the
+    /// caller can size those grids before attaching.
     struct VideoState {
         /// Identity-mapped base of the firmware surface.
         fb_base: usize,
         /// Surface length in pixels (`stride × height`).
         pixel_count: usize,
-        /// The renderer (geometry + cursor).
-        console: TextConsole,
+        /// The validated text geometry of the surface.
+        geometry: Geometry,
+        /// The renderer (geometry + cursor + cell grids), once attached.
+        console: Option<TextConsole<'static>>,
     }
 
     /// The video-console slot.
@@ -444,8 +473,21 @@ mod metal {
         publish_console(fb_base, fb_len_bytes, geometry, doorbell_base)
     }
 
-    /// Validate the surface extent, render the initial clear, and
-    /// publish the console (the shared tail of both bring-up paths).
+    /// Opaque black, the background the surface is cleared to before the cell
+    /// grids are attached (matches the renderer's default background so the
+    /// pre-attach clear and the post-attach repaint agree).
+    const FB_CLEAR_PIXEL: u32 = 0xFF00_0000;
+
+    /// Validate the surface extent, clear it to a clean background, and record
+    /// the discovered surface (the shared tail of both bring-up paths).
+    ///
+    /// The renderer is **not** built here: the cell grids it needs are leaked
+    /// from the kernel heap, which is only usable once the identity MMU is on
+    /// (atomic read-modify-write is UNPREDICTABLE on the MMU-off Device-typed
+    /// memory the boot CPU runs, `plans/PI.md` P6c-2). The post-MMU
+    /// [`attach_console`] builds the console and publishes [`VIDEO_ACTIVE`];
+    /// until then the surface shows a clean background rather than firmware
+    /// garbage.
     ///
     /// **Boot-CPU, pre-publication only** (`VideoSlot` discipline). The
     /// caller guarantees `[fb_base, fb_base + fb_len_bytes)` is
@@ -460,24 +502,23 @@ mod metal {
         if u64::try_from(pixel_count.checked_mul(4)?).ok()? > fb_len_bytes {
             return None;
         }
-        let mut console = TextConsole::new(geometry);
         // SAFETY: the caller owns `[fb_base, fb_base + fb_len_bytes)` as
-        // identity-addressed scan-out RAM, `pixel_count * 4 ≤
-        // fb_len_bytes` (checked above), and no other Rust reference
-        // aliases the surface (the cell below is the only owner and is
-        // not yet published).
+        // identity-addressed scan-out RAM, `pixel_count * 4 ≤ fb_len_bytes`
+        // (checked above), and no other Rust reference aliases the surface
+        // (the cell below is the only owner and is not yet published). The
+        // caches are off pre-MMU, so the fill is coherent without a clean.
         let pixels = unsafe { core::slice::from_raw_parts_mut(fb_base as *mut u32, pixel_count) };
-        console.clear(pixels);
+        pixels.fill(FB_CLEAR_PIXEL);
         // SAFETY: single-threaded boot CPU, pre-publication (see
         // `VideoSlot`): no concurrent access can exist yet.
         unsafe {
             *VIDEO.0.get() = Some(VideoState {
                 fb_base,
                 pixel_count,
-                console,
+                geometry,
+                console: None,
             });
         }
-        VIDEO_ACTIVE.store(true, Ordering::Release);
         Some(DiscoveredVideo {
             doorbell_base,
             fb_base: fb_base as u64,
@@ -485,6 +526,53 @@ mod metal {
             width_px: geometry.width_px,
             height_px: geometry.height_px,
         })
+    }
+
+    /// The cell-grid length (`columns × rows`) the discovered surface needs,
+    /// so the post-MMU caller can size the `main`/`alt` buffers it leaks into
+    /// [`attach_console`]. `None` when no surface was discovered (UART-only).
+    ///
+    /// Post-MMU only (the render lock's atomic CAS requires it).
+    pub fn text_cell_count() -> Option<usize> {
+        let _guard = RENDER_LOCK.lock();
+        // SAFETY: post-MMU, render lock held; `VIDEO` was written pre-MMU by
+        // the single-threaded boot CPU (program order makes it visible on the
+        // same CPU). A shared borrow suffices; geometry is read, not mutated.
+        let state = (unsafe { (*VIDEO.0.get()).as_ref() })?;
+        Some(state.geometry.cell_count())
+    }
+
+    /// Attach the borrowed cell grids to the discovered surface and activate
+    /// the console: build the [`TextConsole`], clear the surface through it,
+    /// and publish [`VIDEO_ACTIVE`] so console output switches to the screen.
+    ///
+    /// **Post-MMU only** (the render lock's atomic CAS requires it, and the
+    /// caller leaks `main`/`alt` from the heap, unusable pre-MMU). The caller
+    /// sizes each grid to [`text_cell_count`]. A call with no discovered
+    /// surface is a no-op (UART keeps the console, fail closed).
+    pub fn attach_console(main: &'static mut [Cell], alt: &'static mut [Cell]) {
+        let _guard = RENDER_LOCK.lock();
+        // SAFETY: post-MMU, render lock held; `VIDEO` was written pre-MMU by
+        // the single-threaded boot CPU and is not yet published active.
+        let Some(state) = (unsafe { (*VIDEO.0.get()).as_mut() }) else {
+            return;
+        };
+        let (fb_base, pixel_count, geometry) = (state.fb_base, state.pixel_count, state.geometry);
+        let mut console = TextConsole::new(geometry, main, alt);
+        // SAFETY: `fb_base`/`pixel_count` describe the surface validated in
+        // `publish_console`, identity-mapped RAM; the render lock makes this
+        // the only live reference.
+        let pixels = unsafe { core::slice::from_raw_parts_mut(fb_base as *mut u32, pixel_count) };
+        let dirty = console.clear(pixels);
+        if let Some((row_start, row_end)) = dirty {
+            let stride_bytes = geometry.stride_px as usize * 4;
+            clean_dcache_range(
+                fb_base + row_start as usize * stride_bytes,
+                (row_end - row_start) as usize * stride_bytes,
+            );
+        }
+        state.console = Some(console);
+        VIDEO_ACTIVE.store(true, Ordering::Release);
     }
 
     /// Render `bytes` onto the configured surface and clean the touched
@@ -506,17 +594,19 @@ mod metal {
         let Some(state) = (unsafe { (*VIDEO.0.get()).as_mut() }) else {
             return;
         };
+        let (fb_base, pixel_count) = (state.fb_base, state.pixel_count);
+        let Some(console) = state.console.as_mut() else {
+            return;
+        };
         // SAFETY: `fb_base`/`pixel_count` describe the firmware surface
         // validated at configure time, identity-mapped RAM; the render
         // lock makes this the only live reference.
-        let pixels = unsafe {
-            core::slice::from_raw_parts_mut(state.fb_base as *mut u32, state.pixel_count)
-        };
-        let dirty = state.console.write_bytes(pixels, bytes);
+        let pixels = unsafe { core::slice::from_raw_parts_mut(fb_base as *mut u32, pixel_count) };
+        let dirty = console.write_bytes(pixels, bytes);
         if let Some((row_start, row_end)) = dirty {
-            let stride_bytes = state.console.geometry().stride_px as usize * 4;
+            let stride_bytes = console.geometry().stride_px as usize * 4;
             clean_dcache_range(
-                state.fb_base + row_start as usize * stride_bytes,
+                fb_base + row_start as usize * stride_bytes,
                 (row_end - row_start) as usize * stride_bytes,
             );
         }
@@ -540,9 +630,8 @@ mod metal {
         // render lock serialises this access (see `VideoSlot`). A shared
         // borrow suffices; the geometry is read, not mutated.
         let state = (unsafe { (*VIDEO.0.get()).as_ref() })?;
-        let geometry = state.console.geometry();
-        let rows = u16::try_from(geometry.rows()).ok()?;
-        let cols = u16::try_from(geometry.columns()).ok()?;
+        let rows = u16::try_from(state.geometry.rows()).ok()?;
+        let cols = u16::try_from(state.geometry.columns()).ok()?;
         rustos_abi::TerminalSize::new(rows, cols).ok()
     }
 
