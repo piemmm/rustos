@@ -53,12 +53,14 @@
 //! - `model-check` — exhaustively model-check the Silver capability +
 //!   IPC state machine (an in-tree explicit-state checker; the TLA+
 //!   equivalent), failing closed on any invariant counterexample
-//! - `ci`           — the full pipeline a PR must pass: `fmt --check`,
-//!   `clippy`, `deps-check`, `cfg-check`, `test` (run 20× on a GitHub
-//!   Actions runner to catch flaky tests; once locally so a pre-push
-//!   `ci` is not punishingly slow), `docs-check`, `cargo deny check`,
-//!   `supply-chain`, `fuzz --quick`, `proptest --quick`, `model-check`,
-//!   `spec-review`, `abi-check`, `c-header`
+//! - `ci`           — the full pipeline a PR must pass, ordered cheapest-first
+//!   so a failing PR fails fast: `fmt --check`, `deps-check`, `cfg-check`,
+//!   `docs-check` (rustdoc/link failures are the common first trip and need
+//!   only a doc build, so they run ahead of the compile-heavy stages),
+//!   `clippy`, `test` (run 20× on a GitHub Actions runner to catch flaky
+//!   tests; once locally so a pre-push `ci` is not punishingly slow),
+//!   `cargo deny check`, `supply-chain`, `fuzz --quick`, `proptest --quick`,
+//!   `model-check`, `spec-review`, `abi-check`, `c-header`
 //! - `ci-long`      — the same checks as `ci`, but for a dedicated long-lived
 //!   runner: every test-executing stage (the host test matrix, the release
 //!   crypto constant-time tests, the QEMU integration tests, the fuzz

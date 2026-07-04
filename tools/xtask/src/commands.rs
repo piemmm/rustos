@@ -879,26 +879,32 @@ fn run_spec_review(ctx: &Context) -> Result<(), String> {
 fn run_ci(ctx: &Context) -> Result<(), String> {
     // The pipeline order is deliberate: cheap and deterministic checks run
     // first so a failing PR fails fast. The test phase opts in to `--qemu`
-    // so the Stage-2 QEMU integration tests run as part of every PR per
-    // ; CI hosts therefore need QEMU for every Tier-1 target,
-    // documented under
+    // so the Stage-2 QEMU integration tests run as part of every PR; CI hosts
+    // therefore need QEMU for every Tier-1 target, documented under
     // `docs/src/platform/x86_64.md`. The closing image gate additionally
     // needs the pinned Pi firmware blobs: an operator-staged directory
     // (`--firmware`/`$RUSTOS_PI_FIRMWARE`) or `curl` to populate the
     // checksummed cache (`docs/src/install/raspberry_pi.md`).
     run_fmt(ctx, &[])?;
-    run_clippy(ctx, &[])?;
-    // Modularity gates are static, deterministic, and cheap, so
-    // they run before the test matrix to fail a non-conforming PR fast.
+    // Modularity gates are static, deterministic, and cheap — a `cargo
+    // metadata` walk and a source scan, no compilation — so they run before
+    // any compile-heavy stage to fail a non-conforming PR fast.
     run_deps_check(ctx)?;
     run_cfg_check(ctx)?;
+    // docs-check (rustdoc with warnings denied, mdBook, link check) is the
+    // gate a PR most often trips first, and a broken intra-doc link or a
+    // denied rustdoc warning is cheap to surface: it needs only a doc build,
+    // never the multi-target QEMU test matrix. Run it ahead of clippy and the
+    // test phase so a documentation failure fails the pipeline in minutes
+    // instead of after the whole test matrix has run.
+    run_docs_check(ctx, &[])?;
+    run_clippy(ctx, &[])?;
     // run the whole test matrix exactly once. `ci` runs each test a
     // single time, on a developer machine and on a CI runner alike; the
     // flake-hunting repetition lives in the time-limited GitHub soaks
     // (`tools/ci/soak.sh`, `cargo xtask test --soak`), never in `ci`. The
     // fuzz and proptest gates below likewise run a single iteration here.
     run_test(ctx, &[OsString::from("--qemu")])?;
-    run_docs_check(ctx, &[])?;
     run_deny(ctx)?;
     // supply-chain integrity: the source-hash allow-list and the
     // advisory SLA. Runs right after `cargo deny` (which blocks an
@@ -974,11 +980,16 @@ fn run_ci_long(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     }
 
     // Deterministic gates first, once, so a non-conforming tree fails fast
-    // before the long repeated-test phase (mirrors `run_ci`'s ordering).
+    // before the long repeated-test phase (mirrors `run_ci`'s cheapest-first
+    // ordering: cheap static gates, then docs-check, then clippy).
     run_fmt(ctx, &[])?;
-    run_clippy(ctx, &[])?;
     run_deps_check(ctx)?;
     run_cfg_check(ctx)?;
+    // docs-check needs only a doc build (never the QEMU matrix) and is the
+    // gate most often tripped first, so it runs ahead of clippy and the long
+    // flake-hunt phase, exactly as in `run_ci`.
+    run_docs_check(ctx, &[])?;
+    run_clippy(ctx, &[])?;
 
     // Build every QEMU enrolment once so the repeated runs re-execute the
     // binaries rather than rebuilding them each pass.
@@ -991,7 +1002,6 @@ fn run_ci_long(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     ci_long::flake_hunt(ci_long::all_units(ctx, ci_long::REPS), ci_long::REPS)?;
 
     // The remaining deterministic gates, once, in `ci` order.
-    run_docs_check(ctx, &[])?;
     run_deny(ctx)?;
     run_supply_chain(ctx, &[])?;
     run_model_check(&[])?;
