@@ -58,6 +58,10 @@ pub struct Credentials<'a> {
 /// intersects this ceiling with the binary's signed manifest request. Login never widens it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuthenticatedUser {
+    /// The authenticated account's login name (from the account record, not
+    /// the raw typed line). Exported to the session as `USER`/`LOGNAME` and
+    /// shown in the shell prompt.
+    pub username: String,
     /// The authenticated user's id.
     pub uid: Uid,
     /// The user's primary group.
@@ -66,11 +70,55 @@ pub struct AuthenticatedUser {
     pub supplementary_gids: Vec<Gid>,
     /// The maximum capability set this user may exercise this session.
     pub capabilities: CapabilitySet,
+    /// Absolute path of the user's home directory (from the account record).
+    /// Exported to the session as `HOME` and used as the initial working
+    /// directory and the `~` abbreviation in the shell prompt.
+    pub home: String,
     /// Absolute path of the user's shell of choice —
     /// the program [`SessionLauncher::launch`] starts as the text
     /// session. Comes from the account's `/System/Security/Users`
     /// record; login never substitutes its own default.
     pub shell: String,
+}
+
+/// The default search path exported to a session: the OS command store
+/// first (`/System/Apps`, the system command apps), then installed
+/// applications (`/Apps`). RustOS has no `/usr/bin` (§16), so this is the
+/// analogue of a POSIX login's default `PATH`.
+pub const DEFAULT_PATH: &str = "/System/Apps:/Apps";
+
+/// The default `TERM` exported to a session. The system text console
+/// (`lib/fbcon`) renders the xterm 256-colour repertoire, so a session
+/// starts assuming that terminal type.
+pub const DEFAULT_TERM: &str = "xterm-256color";
+
+/// The default `LANG` exported to a session: RustOS's default locale
+/// (`en-US`), matching the mandatory `default/` help locale (§16.5).
+pub const DEFAULT_LANG: &str = "en-US";
+
+/// Build the environment login hands the session shell, as
+/// `NAME=value` byte-spelled entries (the [`crate::session`] launch form
+/// consumed by `spawn_with`).
+///
+/// These are the identity- and locale-carrying variables a POSIX login sets
+/// (`USER`, `LOGNAME`, `HOME`, `SHELL`, `PWD`, `PATH`, `TERM`, `LANG`),
+/// filled from the authenticated account so the shell's prompt and
+/// `$USER`/`$HOME`/… reflect the real user rather than a guess. Shell-owned
+/// variables (`OLDPWD`, `ELSH_PROMPT`) and the hostname default are the
+/// shell's to fill; login sets only what it authoritatively knows.
+#[must_use]
+pub fn session_environment(user: &AuthenticatedUser) -> Vec<String> {
+    use alloc::format;
+    alloc::vec![
+        format!("USER={}", user.username),
+        format!("LOGNAME={}", user.username),
+        format!("HOME={}", user.home),
+        format!("SHELL={}", user.shell),
+        format!("PWD={}", user.home),
+        format!("PATH={DEFAULT_PATH}"),
+        format!("TERM={DEFAULT_TERM}"),
+        format!("LANG={DEFAULT_LANG}"),
+    ]
 }
 
 /// Which kind of session to launch after a successful authentication.
@@ -205,12 +253,46 @@ pub trait SessionLauncher {
 
 #[cfg(test)]
 mod tests {
-    use super::{Gid, SessionKind, Uid};
+    use super::{
+        session_environment, AuthenticatedUser, Gid, SessionKind, Uid, DEFAULT_LANG, DEFAULT_PATH,
+        DEFAULT_TERM,
+    };
+    use alloc::string::ToString;
+    use alloc::vec::Vec;
+    use rustos_caps::CapabilitySet;
 
     #[test]
     fn id_newtypes_round_trip() {
         assert_eq!(Uid(0).0, 0);
         assert_eq!(Gid(1000).0, 1000);
+    }
+
+    #[test]
+    fn session_environment_carries_the_authenticated_identity() {
+        let user = AuthenticatedUser {
+            username: "ada".to_string(),
+            uid: Uid(1000),
+            primary_gid: Gid(1000),
+            supplementary_gids: Vec::new(),
+            capabilities: CapabilitySet::empty(),
+            home: "/Users/ada".to_string(),
+            shell: "/System/Apps/elsh.app/Run".to_string(),
+        };
+        let env = session_environment(&user);
+        // The identity is drawn from the account, and PWD starts at home.
+        assert!(env.contains(&"USER=ada".to_string()));
+        assert!(env.contains(&"LOGNAME=ada".to_string()));
+        assert!(env.contains(&"HOME=/Users/ada".to_string()));
+        assert!(env.contains(&"SHELL=/System/Apps/elsh.app/Run".to_string()));
+        assert!(env.contains(&"PWD=/Users/ada".to_string()));
+        // The locale/path/term defaults are the documented OS values.
+        assert!(env.contains(&alloc::format!("PATH={DEFAULT_PATH}")));
+        assert!(env.contains(&alloc::format!("TERM={DEFAULT_TERM}")));
+        assert!(env.contains(&alloc::format!("LANG={DEFAULT_LANG}")));
+        // Every entry is a well-formed NAME=value pair (no bare names).
+        for entry in &env {
+            assert!(entry.contains('='), "malformed entry: {entry:?}");
+        }
     }
 
     #[test]

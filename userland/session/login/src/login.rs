@@ -394,10 +394,12 @@ mod tests {
         fn authenticate(&self, c: &Credentials<'_>) -> Result<AuthenticatedUser, Errno> {
             if c.username == self.username && c.password == self.password {
                 Ok(AuthenticatedUser {
+                    username: c.username.to_string(),
                     uid: Uid(1000),
                     primary_gid: Gid(1000),
                     supplementary_gids: Vec::new(),
                     capabilities: self.caps,
+                    home: "/Users/ada".to_string(),
                     shell: "/System/Apps/elsh.app/Run".to_string(),
                 })
             } else {

@@ -49,9 +49,6 @@ use crate::host::Console;
 use crate::parser::CommandList;
 use crate::shell::Shell;
 
-/// The interactive prompt written to standard output before each line.
-const PROMPT: &str = "elsh$ ";
-
 /// The continuation prompt written while collecting here-document body lines.
 const HERE_DOC_PROMPT: &str = "> ";
 
@@ -282,8 +279,14 @@ fn collect_here_docs(
 /// exits `0`.
 pub fn run(shell: &mut Shell<'_>, console: &dyn Console, input: &mut dyn ReplInput) -> i32 {
     let mut reader = LineReader::new();
+    // One blank line separates whatever preceded the session — the login
+    // banner, or the root-unlock prompt — from the first interactive prompt.
+    // The console cooks the bare line feed to CR-LF.
+    console.write_stdout("\n");
     loop {
-        console.write_stdout(PROMPT);
+        // Rendered each iteration so the prompt tracks `cd` and any change to
+        // `ELSH_PROMPT`; `user@host cwd% ` by default.
+        console.write_stdout(&shell.render_prompt());
         match reader.next_line(input) {
             LineEvent::Line(line) => {
                 if let Ok(mut list) = shell.parse_line(&line) {
@@ -304,9 +307,10 @@ pub fn run(shell: &mut Shell<'_>, console: &dyn Console, input: &mut dyn ReplInp
 
 #[cfg(test)]
 mod tests {
-    use super::{run, ReplInput, MAX_LINE, PROMPT};
+    use super::{run, ReplInput, MAX_LINE};
     use crate::test_support::{RecordingConsole, ScriptedHost};
     use crate::Shell;
+    use alloc::format;
     use alloc::string::String;
     use alloc::vec::Vec;
 
@@ -360,9 +364,10 @@ mod tests {
         let console = RecordingConsole::new();
         let mut shell = Shell::new(&host, &console);
         let mut input = ScriptedInput::new("");
-        // No input: the loop writes one prompt, reads end-of-input, and exits 0.
+        // No input: the loop writes one blank line, then one prompt, reads
+        // end-of-input, and exits 0.
         assert_eq!(run(&mut shell, &console, &mut input), 0);
-        assert_eq!(console.stdout(), PROMPT);
+        assert_eq!(console.stdout(), format!("\n{}", shell.render_prompt()));
     }
 
     #[test]
@@ -380,7 +385,7 @@ mod tests {
         );
         // A prompt precedes each of the two consumed lines (echo, exit); the
         // third line is never reached.
-        assert_eq!(out.matches(PROMPT).count(), 2);
+        assert_eq!(out.matches(shell.render_prompt().as_str()).count(), 2);
     }
 
     #[test]
@@ -522,7 +527,7 @@ mod tests {
         assert!(out.contains("a\n"));
         // Two consumed lines mean two prompts: the LF of each CRLF completes
         // no spurious empty third line.
-        assert_eq!(out.matches(PROMPT).count(), 2);
+        assert_eq!(out.matches(shell.render_prompt().as_str()).count(), 2);
     }
 
     #[test]
@@ -536,7 +541,7 @@ mod tests {
         assert_eq!(run(&mut shell, &console, &mut input), 5);
         let out = console.stdout();
         assert!(out.contains("a\n"));
-        assert_eq!(out.matches(PROMPT).count(), 2);
+        assert_eq!(out.matches(shell.render_prompt().as_str()).count(), 2);
     }
 
     #[test]

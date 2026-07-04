@@ -26,6 +26,28 @@ use alloc::vec::Vec;
 use crate::error::ParseError;
 use crate::lexer::{Segment, Word};
 
+/// The default interactive prompt format, stored as `ELSH_PROMPT` when the
+/// session exported none. It renders `user@host working-directory% `; the
+/// backslash escapes are expanded by [`Environment::render_prompt`]:
+/// `\u` → `USER`, `\h` → `HOSTNAME`, `\w` → the working directory with the
+/// user's home abbreviated to `~`.
+pub const DEFAULT_PROMPT: &str = "\\u@\\h \\w% ";
+
+/// The hostname the prompt shows when the session exported no `HOSTNAME`
+/// (the system hostname is still unprovisioned). A fixed, honest default —
+/// the analogue of a POSIX system's `localhost` — not a guess at the real
+/// name.
+pub const DEFAULT_HOSTNAME: &str = "rustos";
+
+/// The user name the prompt shows when the session exported no `USER`.
+const DEFAULT_USER: &str = "user";
+
+/// The shell's own fallback search path when the session exported no `PATH`
+/// (the shell run outside a normal login). A defensive default the shell
+/// owns, exactly as an interactive `bash` supplies its own when `PATH` is
+/// unset; the authoritative value is the one login exports.
+const DEFAULT_PATH: &str = "/System/Apps:/Apps";
+
 /// Mutable shell state: variables, working directory, and `$?`.
 #[derive(Clone, Debug)]
 pub struct Environment {
@@ -188,6 +210,115 @@ impl Environment {
         }
         self.get(name).unwrap_or("").to_string()
     }
+
+    /// Seed the standard interactive-session variables, exporting each so a
+    /// child inherits it, and set the working directory to the user's home.
+    ///
+    /// `inherited(name)` returns the value the spawner (login) exported for
+    /// `name`, or `None`. Identity and locale variables (`USER`, `LOGNAME`,
+    /// `HOME`, `SHELL`, `PATH`, `TERM`, `LANG`) come from the inherited
+    /// environment login built; the shell fills a defensive default only when
+    /// one is absent (a shell run outside a normal login). The shell-owned
+    /// variables — `HOSTNAME` (the prompt host, defaulting to
+    /// [`DEFAULT_HOSTNAME`] until the system hostname is provisioned),
+    /// `PWD`/`OLDPWD`, and the prompt format `ELSH_PROMPT`
+    /// ([`DEFAULT_PROMPT`]) — are filled here. The lookup seam keeps this
+    /// pure and host-testable: production passes a closure over the runtime's
+    /// environment accessor, tests pass a map.
+    pub fn seed_interactive(&mut self, inherited: impl Fn(&str) -> Option<String>) {
+        let take = |name: &str, default: &str| -> String {
+            inherited(name)
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| default.to_string())
+        };
+        let user = take("USER", DEFAULT_USER);
+        let home = take("HOME", "/");
+        let pwd = inherited("PWD")
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| home.clone());
+        let logname = inherited("LOGNAME")
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| user.clone());
+
+        self.export("USER", user);
+        self.export("LOGNAME", logname);
+        self.export("HOME", home);
+        self.export("SHELL", take("SHELL", "/System/Apps/elsh.app/Run"));
+        self.export("PATH", take("PATH", DEFAULT_PATH));
+        self.export("TERM", take("TERM", "xterm-256color"));
+        self.export("LANG", take("LANG", "en-US"));
+        self.export("HOSTNAME", take("HOSTNAME", DEFAULT_HOSTNAME));
+        self.export("PWD", pwd.clone());
+        // OLDPWD is defined from the first prompt (equal to PWD until the
+        // first `cd`), so `$OLDPWD` and `cd -` are never unset surprises.
+        self.export("OLDPWD", pwd.clone());
+        self.set("ELSH_PROMPT", take("ELSH_PROMPT", DEFAULT_PROMPT));
+        self.set_cwd(pwd);
+    }
+
+    /// The `USER` value for the prompt, or [`DEFAULT_USER`] when unset.
+    fn prompt_user(&self) -> &str {
+        self.get("USER")
+            .filter(|v| !v.is_empty())
+            .unwrap_or(DEFAULT_USER)
+    }
+
+    /// The `HOSTNAME` value for the prompt, or [`DEFAULT_HOSTNAME`] when unset.
+    fn prompt_host(&self) -> &str {
+        self.get("HOSTNAME")
+            .filter(|v| !v.is_empty())
+            .unwrap_or(DEFAULT_HOSTNAME)
+    }
+
+    /// The working directory for the prompt, with the user's `HOME`
+    /// abbreviated to `~` (exactly `~` at home, `~/rest` beneath it).
+    fn prompt_cwd(&self) -> String {
+        let cwd = self.cwd();
+        if let Some(home) = self.get("HOME").filter(|h| !h.is_empty()) {
+            if cwd == home {
+                return "~".to_string();
+            }
+            if let Some(rest) = cwd.strip_prefix(home) {
+                if rest.starts_with('/') {
+                    return alloc::format!("~{rest}");
+                }
+            }
+        }
+        cwd.to_string()
+    }
+
+    /// Render the interactive prompt from the `ELSH_PROMPT` format (or
+    /// [`DEFAULT_PROMPT`] when unset), expanding the escapes `\u` (`USER`),
+    /// `\h` (`HOSTNAME`), and `\w` (the working directory with `HOME`
+    /// abbreviated to `~`). `\\` is a literal backslash; any other `\x` is
+    /// left verbatim so an unknown escape is shown, never dropped.
+    #[must_use]
+    pub fn render_prompt(&self) -> String {
+        let format = self
+            .get("ELSH_PROMPT")
+            .map_or_else(|| DEFAULT_PROMPT.to_string(), ToString::to_string);
+        let mut out = String::new();
+        let mut chars = format.chars();
+        while let Some(c) = chars.next() {
+            if c != '\\' {
+                out.push(c);
+                continue;
+            }
+            match chars.next() {
+                Some('u') => out.push_str(self.prompt_user()),
+                Some('h') => out.push_str(self.prompt_host()),
+                Some('w') => out.push_str(&self.prompt_cwd()),
+                // A literal backslash, or a lone trailing backslash at the
+                // end of the format, both render a single `\`.
+                Some('\\') | None => out.push('\\'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+            }
+        }
+        out
+    }
 }
 
 /// Split a word of the form `NAME=VALUE` into its name and its (still
@@ -349,6 +480,76 @@ mod tests {
         assert_eq!(env.get("X"), None);
         assert!(env.exported_vars().is_empty());
         assert!(!env.unset("X"));
+    }
+
+    #[test]
+    fn seed_interactive_takes_inherited_values_and_exports_them() {
+        let mut env = Environment::new();
+        env.seed_interactive(|name| match name {
+            "USER" => Some("ada".to_string()),
+            "HOME" => Some("/Users/ada".to_string()),
+            "SHELL" => Some("/System/Apps/elsh.app/Run".to_string()),
+            "TERM" => Some("xterm-256color".to_string()),
+            _ => None,
+        });
+        assert_eq!(env.get("USER"), Some("ada"));
+        // LOGNAME defaults to USER when not separately inherited.
+        assert_eq!(env.get("LOGNAME"), Some("ada"));
+        assert_eq!(env.get("HOME"), Some("/Users/ada"));
+        // PWD/OLDPWD and the working directory follow HOME.
+        assert_eq!(env.get("PWD"), Some("/Users/ada"));
+        assert_eq!(env.get("OLDPWD"), Some("/Users/ada"));
+        assert_eq!(env.cwd(), "/Users/ada");
+        // The standard variables are exported to children.
+        let exported: alloc::vec::Vec<&str> =
+            env.exported_vars().into_iter().map(|(n, _)| n).collect();
+        for name in ["USER", "LOGNAME", "HOME", "SHELL", "PATH", "TERM", "LANG"] {
+            assert!(exported.contains(&name), "{name} exported: {exported:?}");
+        }
+    }
+
+    #[test]
+    fn seed_interactive_fills_defaults_when_nothing_is_inherited() {
+        let mut env = Environment::new();
+        env.seed_interactive(|_| None);
+        assert_eq!(env.get("USER"), Some(super::DEFAULT_USER));
+        assert_eq!(env.get("HOSTNAME"), Some(super::DEFAULT_HOSTNAME));
+        assert_eq!(env.get("LANG"), Some("en-US"));
+        assert_eq!(env.get("PATH"), Some(super::DEFAULT_PATH));
+        assert_eq!(env.get("ELSH_PROMPT"), Some(super::DEFAULT_PROMPT));
+        // An empty inherited value is treated as absent (fills the default).
+        let mut empty = Environment::new();
+        empty.seed_interactive(|name| (name == "USER").then(String::new));
+        assert_eq!(empty.get("USER"), Some(super::DEFAULT_USER));
+    }
+
+    #[test]
+    fn render_prompt_shows_user_host_and_home_abbreviated_cwd() {
+        let mut env = Environment::new();
+        env.seed_interactive(|name| match name {
+            "USER" => Some("ada".to_string()),
+            "HOSTNAME" => Some("babbage".to_string()),
+            "HOME" => Some("/Users/ada".to_string()),
+            _ => None,
+        });
+        // At home the working directory renders as `~`.
+        assert_eq!(env.render_prompt(), "ada@babbage ~% ");
+        // Beneath home it is `~/rest`.
+        env.set_cwd("/Users/ada/Documents");
+        assert_eq!(env.render_prompt(), "ada@babbage ~/Documents% ");
+        // Outside home the absolute path is shown.
+        env.set_cwd("/Storage/disk");
+        assert_eq!(env.render_prompt(), "ada@babbage /Storage/disk% ");
+    }
+
+    #[test]
+    fn render_prompt_honours_a_custom_format_and_unknown_escapes() {
+        let mut env = Environment::new();
+        env.set("USER", "ada");
+        env.set("HOSTNAME", "babbage");
+        // A custom format with a literal and an unknown escape (kept verbatim).
+        env.set("ELSH_PROMPT", "[\\u@\\h]\\z$ ");
+        assert_eq!(env.render_prompt(), "[ada@babbage]\\z$ ");
     }
 
     #[test]

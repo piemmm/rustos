@@ -51,8 +51,8 @@ mod program {
     };
     use rustos_abi::{Errno, LimitKind, ResourceLimit};
     use rustos_elsh::{
-        parse_invocation, Console, Elevator, Invocation, LaunchSpec, LimitStore, Pid, ProcessHost,
-        ReplInput, Shell, Signal, WaitOutcome, USAGE,
+        parse_invocation, Console, Elevator, Environment, Invocation, LaunchSpec, LimitStore, Pid,
+        ProcessHost, ReplInput, Shell, Signal, WaitOutcome, USAGE,
     };
     use rustos_help::{own_short_help, BundleHelp};
     use rustos_rt::io::{write_stderr_line, Stderr, Stdout, Write};
@@ -386,7 +386,17 @@ mod program {
         let limits = RtLimitStore;
         let elevator = RtElevator;
         let mut input = RtInput;
-        let mut shell = Shell::new(&host, &console)
+        // Seed the interactive session from the environment login exported
+        // (USER, HOME, SHELL, PATH, TERM, LANG, …), filling the shell-owned
+        // defaults (HOSTNAME, PWD/OLDPWD, ELSH_PROMPT) so the prompt shows
+        // `user@host cwd% ` and `$USER`/`$HOME`/… are present from the first
+        // line.
+        let mut env = Environment::new();
+        env.seed_interactive(|name| {
+            rustos_rt::env_var(name.as_bytes())
+                .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+        });
+        let mut shell = Shell::with_environment(&host, &console, env)
             .with_limits(&limits)
             .with_elevator(&elevator);
         rustos_elsh::run_repl(&mut shell, &console, &mut input)

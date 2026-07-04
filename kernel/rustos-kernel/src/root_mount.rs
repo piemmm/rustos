@@ -725,32 +725,24 @@ fn system_volume_unavailable(audit: &dyn Sink, cause: &'static str) {
 /// now authenticate. No secret is logged.
 const ROOT_UNLOCK_INSTALLED: EventId = EventId(4136);
 
-/// Audit event: a wrong passphrase was refused; the unlock will prompt
-/// again because the bounded attempt budget is not yet exhausted
-/// (never loop forever). No passphrase byte is logged.
+/// Audit event: a wrong passphrase was refused; after the anti-brute-force
+/// delay the operator is told and prompted again (the unlock re-prompts a
+/// wrong passphrase indefinitely, since the root cannot mount without the
+/// right one). No passphrase byte is logged.
 const ROOT_UNLOCK_RETRY: EventId = EventId(4137);
 
-/// Audit event: the interactive unlock gave up fail-closed — the attempt
-/// budget was exhausted, the console could not be read, the disk's
-/// structure was wrong, or the late cell was already populated. No
-/// database is installed and the operator must reboot. The `cause` field names which check refused, secret-free.
+/// Audit event: the interactive unlock gave up fail-closed — the console
+/// could not be read, the disk's structure was wrong, or the late cell was
+/// already populated. A wrong passphrase never lands here: it is re-prompted,
+/// not given up on. No database is installed and the operator must reboot.
+/// The `cause` field names which check refused, secret-free.
 const ROOT_UNLOCK_GAVE_UP: EventId = EventId(4138);
-
-/// Maximum passphrase attempts the interactive unlock allows before it
-/// gives up and the system must be rebooted.
-///
-/// A bounded budget, not an infinite prompt loop:
-/// after this many wrong passphrases the unlock fails closed and the late
-/// credential cell stays empty, so every login is refused until the next
-/// boot. The value is the User-chosen policy for the
-/// `plans/PI.md` P11 Chunk B-2 root mount.
-pub const MAX_UNLOCK_ATTEMPTS: u32 = 5;
 
 /// Longest passphrase, in bytes, the console prompt accepts.
 ///
-/// A line longer than this is refused as the current attempt (and counts
-/// against [`MAX_UNLOCK_ATTEMPTS`]) rather than silently truncated to a
-/// shorter — and wrong — secret. It is a fixed input
+/// A line longer than this is refused as the current attempt (treated
+/// exactly like a wrong passphrase — rate-limited and re-prompted) rather
+/// than silently truncated to a shorter — and wrong — secret. It is a fixed input
 /// bound, not a scalable capacity: a passphrase is
 /// operator-typed, so a generous fixed ceiling is correct and the read
 /// buffer is a zeroized on-stack array of exactly this size.
@@ -907,15 +899,16 @@ fn finish_install(
 
 /// Unlock the root disk and publish the loaded database into `late_db`,
 /// prompting for the passphrase only when the root is not unlockable
-/// without one — retrying a wrong typed passphrase up to
-/// [`MAX_UNLOCK_ATTEMPTS`] times before giving up fail-closed
+/// without one — re-prompting a wrong typed passphrase **indefinitely**,
+/// each wrong attempt rate-limited by `delay` and followed by an
+/// `Incorrect passphrase` notice, until the correct one unlocks
 /// (`plans/PI.md` P11 Chunk B-2).
 ///
 /// The **blank** passphrase is tried silently first, before any prompt is
 /// drawn. An installer image is provisioned with a blank root passphrase
 /// (`rustos_mkimage::INSTALLER_PASSPHRASE`) so a fresh
 /// install boots straight into the installer rather than stalling
-/// behind a `Root passphrase:` prompt the operator cannot answer. Only
+/// behind a `Root filesystem passphrase:` prompt the operator cannot answer. Only
 /// when the blank passphrase does **not** unlock the root (a debug or
 /// production image with a non-blank passphrase) is the operator prompted
 /// interactively. A non-blank passphrase failing the silent attempt is no
@@ -936,8 +929,8 @@ fn finish_install(
 ///
 /// Each attempt:
 ///
-/// 1. Writes the `Root passphrase:` prompt to `console` (best effort — a
-///    write error does not by itself abort the attempt).
+/// 1. Writes the `Root filesystem passphrase:` prompt to `console` (best
+///    effort — a write error does not by itself abort the attempt).
 /// 2. Reads one line into a zeroized, fixed-length on-stack buffer
 ///    ([`MAX_PASSPHRASE_LEN`]); the passphrase is never heap-allocated,
 ///    logged, or retained past the attempt.
@@ -947,11 +940,15 @@ fn finish_install(
 /// through [`LateUsersDb::install`] (set-once) and the function returns
 /// [`UnlockOutcome::Installed`]. A wrong passphrase
 /// ([`RootMountError::Mount`]`(`[`DriverError::PermissionDenied`]`)`) is
-/// audited and retried until the budget is spent. Any other error is
-/// structural (no partition table, no boot/root partition, an unreadable
-/// or invalid descriptor, a corrupt database): retrying cannot help, so
-/// the unlock gives up immediately. A console read error also gives up.
-/// Every give-up path leaves `late_db` empty — login stays fail-closed.
+/// audited, rate-limited by `delay`, reported to the operator, and prompted
+/// **again — indefinitely**: the encrypted root holds the only copy of the
+/// user data and login is refused until it mounts, so there is nothing to
+/// advance to without the correct passphrase and no bounded "give up" that
+/// would help. Any other error is structural (no partition table, no
+/// boot/root partition, an unreadable or invalid descriptor, a corrupt
+/// database): retrying cannot help, so the unlock gives up immediately. A
+/// console read error also gives up. Every give-up path leaves `late_db`
+/// empty — login stays fail-closed.
 ///
 /// * `disk` — the whole-disk [`Block`] device the board brought up.
 /// * `console` — the primary console's byte sink for the prompt.
@@ -959,6 +956,10 @@ fn finish_install(
 /// * `install` — the set-once publish destinations (users database, identity
 ///   table, and writable-state sink) a successful unlock fills together.
 /// * `audit` — the sink every decision is logged through; no passphrase, key, or volume byte is ever logged.
+/// * `delay` — the anti-brute-force pause run after each wrong passphrase,
+///   before the operator is told and re-prompted. The production kthread
+///   backs it with a minimum-duration timed park (never a busy-wait); host
+///   tests pass a no-op.
 /// * `on_resolved` — invoked exactly once, after the unlock reaches its
 ///   terminal outcome (installed or gave up) and on every internal return
 ///   path, so the caller can release the console it lent the prompt. The
@@ -978,6 +979,7 @@ pub fn unlock_root_disk_interactively<Disk: Block>(
     input: &dyn ConsoleRead,
     install: &UnlockInstall<'_>,
     audit: &dyn Sink,
+    delay: &dyn Fn(),
     on_resolved: &dyn Fn(),
 ) -> UnlockOutcome {
     // Run the interactive unlock to a terminal outcome, then hand the
@@ -993,7 +995,7 @@ pub fn unlock_root_disk_interactively<Disk: Block>(
     // fail-closed branches ran it), wedging both the keyboard and serial
     // `login` after a good unlock; threading it through `on_resolved` makes
     // forgetting it impossible.
-    let outcome = unlock_root_disk_interactively_impl(disk, console, input, install, audit);
+    let outcome = unlock_root_disk_interactively_impl(disk, console, input, install, audit, delay);
     on_resolved();
     outcome
 }
@@ -1008,6 +1010,7 @@ fn unlock_root_disk_interactively_impl<Disk: Block>(
     input: &dyn ConsoleRead,
     install: &UnlockInstall<'_>,
     audit: &dyn Sink,
+    delay: &dyn Fn(),
 ) -> UnlockOutcome {
     // The disk is borrowed mutably for each attempt through the
     // `impl Block for &mut B` forwarding, so one device is reused across
@@ -1018,11 +1021,12 @@ fn unlock_root_disk_interactively_impl<Disk: Block>(
     // An installer image is provisioned with a **blank** root passphrase
     // (`rustos_mkimage::INSTALLER_PASSPHRASE`): a fresh
     // install must boot straight into the installer, never stall behind
-    // a `Root passphrase:` prompt the operator has no value to answer. So
-    // if the blank passphrase unlocks the root we install and return with
-    // no prompt at all. A debug or production image whose passphrase is
-    // non-blank simply fails this attempt — the master key never unwraps,
-    // exactly like any wrong passphrase, so it is no oracle — and falls through to the interactive prompt below.
+    // a `Root filesystem passphrase:` prompt the operator has no value to
+    // answer. So if the blank passphrase unlocks the root we install and
+    // return with no prompt at all. A debug or production image whose
+    // passphrase is non-blank simply fails this attempt — the master key
+    // never unwraps, exactly like any wrong passphrase, so it is no oracle —
+    // and falls through to the interactive prompt below.
     match mount_root_disk_and_load_users(&mut disk, b"", audit) {
         Ok(unlocked) => return finish_install(unlocked, install, audit),
         Err(RootMountError::Mount(DriverError::PermissionDenied)) => {
@@ -1038,11 +1042,17 @@ fn unlock_root_disk_interactively_impl<Disk: Block>(
         }
     }
 
-    let mut attempt = 0u32;
-    while attempt < MAX_UNLOCK_ATTEMPTS {
-        attempt += 1;
-
-        write_all(console, b"\r\nRoot passphrase: ");
+    // A wrong typed passphrase is asked again, forever: the encrypted root
+    // holds the only copy of the user data and login is refused until it
+    // mounts, so there is no useful state to advance to without it. A wrong
+    // attempt is rate-limited by `delay` (a minimum-duration pause the
+    // production kthread backs with a timed park, never a busy-wait) before
+    // the operator is told and re-prompted, so this is not a brute-force
+    // oracle to spin against. Only a *structural* failure the disk itself
+    // cannot satisfy, or a dead console, fails closed — re-prompting those
+    // could never succeed.
+    loop {
+        write_all(console, b"\r\nRoot filesystem passphrase: ");
 
         // A zeroized, fixed-length buffer: the typed secret never reaches
         // the heap and is wiped when this attempt's buffer drops.
@@ -1051,8 +1061,9 @@ fn unlock_root_disk_interactively_impl<Disk: Block>(
             Ok(len) => len,
             Err(PassphraseReadError::TooLong) => {
                 // An over-long line is a wrong attempt, not a fatal console
-                // fault: count it and prompt again (if budget remains).
-                retry(audit);
+                // fault: treat it exactly like a wrong passphrase and prompt
+                // again after the same delay.
+                reject_and_wait(console, audit, delay);
                 continue;
             }
             Err(PassphraseReadError::Console) => {
@@ -1064,12 +1075,18 @@ fn unlock_root_disk_interactively_impl<Disk: Block>(
         };
 
         match mount_root_disk_and_load_users(&mut disk, &passphrase[..len], audit) {
-            Ok(unlocked) => return finish_install(unlocked, install, audit),
+            Ok(unlocked) => {
+                // The passphrase was accepted: move off the completed-marker
+                // line and leave one blank line so the login `Username:`
+                // prompt that follows is clearly separated from the unlock.
+                write_all(console, b"\r\n\r\n");
+                return finish_install(unlocked, install, audit);
+            }
             Err(RootMountError::Mount(DriverError::PermissionDenied)) => {
-                // Wrong passphrase: the master key never unwrapped. Bounded
-                // retry — never an oracle and never an infinite loop. Falls through to the next loop
-                // iteration; the budget check ends it.
-                retry(audit);
+                // Wrong passphrase: the master key never unwrapped. Never an
+                // oracle; wait out the rate-limit delay, tell the operator,
+                // and ask again.
+                reject_and_wait(console, audit, delay);
             }
             Err(error) => {
                 // A structural failure (no table, no partition, an
@@ -1082,10 +1099,23 @@ fn unlock_root_disk_interactively_impl<Disk: Block>(
             }
         }
     }
+}
 
-    // The attempt budget is spent: fail closed, leave the cell empty.
-    gave_up(audit, "attempts_exhausted");
-    UnlockOutcome::GaveUp
+/// A wrong (or over-long) passphrase was refused: end the completed-marker
+/// line, audit the refusal, wait out the anti-brute-force `delay`, then tell
+/// the operator the passphrase was wrong before the caller re-prompts.
+///
+/// The message is drawn **after** the delay, so a brute-force attacker
+/// scripting the prompt gains no faster signal than the honest operator —
+/// the pause is paid before any feedback appears. No passphrase byte is ever
+/// written or logged.
+fn reject_and_wait(console: &dyn ConsoleWrite, audit: &dyn Sink, delay: &dyn Fn()) {
+    // Return the cursor to the start of a fresh line, off the
+    // `[input complete]` marker the submitted line left on screen.
+    write_all(console, b"\r\n");
+    retry(audit);
+    delay();
+    write_all(console, b"Incorrect passphrase\r\n");
 }
 
 /// Write every byte of `bytes` to `console`, looping over short writes and
@@ -1890,6 +1920,52 @@ mod tests {
         }
     }
 
+    /// A console sink that records every byte written, so a test can assert
+    /// the prompt wording, the `Incorrect passphrase` notice, and the
+    /// carriage-return / blank-line framing the interactive unlock emits.
+    /// `Sync` through a `SpinLock`, as [`ConsoleWrite`] requires.
+    struct RecordingConsole {
+        written: rustos_sync::SpinLock<Vec<u8>>,
+    }
+
+    impl RecordingConsole {
+        fn new() -> Self {
+            Self {
+                written: rustos_sync::SpinLock::new(Vec::new()),
+            }
+        }
+
+        /// The recorded output as an owned byte vector.
+        fn bytes(&self) -> Vec<u8> {
+            self.written.lock().clone()
+        }
+    }
+
+    impl ConsoleWrite for RecordingConsole {
+        fn write(&self, bytes: &[u8]) -> Result<usize, Errno> {
+            self.written.lock().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+    }
+
+    /// Count the non-overlapping occurrences of `needle` in `haystack`.
+    fn count_occurrences(haystack: &[u8], needle: &[u8]) -> usize {
+        if needle.is_empty() || haystack.len() < needle.len() {
+            return 0;
+        }
+        let mut count = 0;
+        let mut i = 0;
+        while i + needle.len() <= haystack.len() {
+            if &haystack[i..i + needle.len()] == needle {
+                count += 1;
+                i += needle.len();
+            } else {
+                i += 1;
+            }
+        }
+        count
+    }
+
     /// A scripted console input source: yields the planted bytes one at a
     /// time (matching the byte-by-byte line reader), reports end of input
     /// (`Ok(0)`) once they are spent, and — if `fail_at` is set — fails the
@@ -1981,6 +2057,7 @@ mod tests {
             },
             &sink,
             &|| {},
+            &|| {},
         );
 
         assert_eq!(outcome, UnlockOutcome::Installed);
@@ -2035,6 +2112,7 @@ mod tests {
             },
             &sink,
             &|| {},
+            &|| {},
         );
 
         assert_eq!(outcome, UnlockOutcome::Installed);
@@ -2062,18 +2140,22 @@ mod tests {
     }
 
     #[test]
-    fn wrong_passphrases_are_retried_then_the_correct_one_unlocks() {
-        // A bounded retry: two wrong passphrases are refused (each audited
-        // `4137`, no oracle) and the third, correct one unlocks and
-        // installs — the same disk is reused across attempts.
+    fn wrong_passphrases_are_reprompted_after_a_delay_then_the_correct_one_unlocks() {
+        // Two wrong passphrases are refused (each audited `4137`, no oracle),
+        // each followed by the anti-brute-force delay and an
+        // `Incorrect passphrase` notice, and the third, correct one unlocks
+        // and installs — the same disk is reused across attempts. The prompt
+        // wording, the delay count, and the notice are all asserted.
         let input = ScriptInput::new(script(&[b"nope", b"still wrong", PASSPHRASE]));
         let late = LateUsersDb::new();
         let late_identity = LateIdentity::new();
         let sink = RecordingSink::new();
+        let console = RecordingConsole::new();
+        let delays = AtomicUsize::new(0);
 
         let outcome = unlock_root_disk_interactively(
             success_disk(),
-            &AcceptConsole,
+            &console,
             &input,
             &UnlockInstall {
                 users: &late,
@@ -2082,6 +2164,9 @@ mod tests {
                 admin: None,
             },
             &sink,
+            &|| {
+                delays.fetch_add(1, Ordering::Relaxed);
+            },
             &|| {},
         );
 
@@ -2090,18 +2175,42 @@ mod tests {
         let retries = sink.ids().iter().filter(|&&id| id == 4137).count();
         assert_eq!(retries, 2, "two wrong attempts retried: {:?}", sink.ids());
         assert!(sink.ids().contains(&4136), "{:?}", sink.ids());
+        // The delay is run once per wrong attempt, before the notice appears.
+        assert_eq!(delays.load(Ordering::Relaxed), 2, "one delay per wrong try");
+        let out = console.bytes();
+        assert_eq!(
+            count_occurrences(&out, b"Root filesystem passphrase: "),
+            3,
+            "three prompts (two wrong + the correct one) with the new wording"
+        );
+        assert_eq!(
+            count_occurrences(&out, b"Incorrect passphrase"),
+            2,
+            "one notice per wrong attempt"
+        );
+        // The successful attempt ends the completed-marker line and leaves a
+        // blank line before login draws its `Username:` prompt.
+        assert!(
+            out.ends_with(b"\r\n\r\n"),
+            "a blank line separates the unlock from login"
+        );
     }
 
     #[test]
-    fn the_attempt_budget_is_bounded_then_gives_up_fail_closed() {
-        // after MAX_UNLOCK_ATTEMPTS wrong passphrases the
-        // unlock gives up rather than looping forever, and the late cell
-        // stays empty so every login is refused until reboot.
-        let lines = alloc::vec![b"wrong" as &[u8]; MAX_UNLOCK_ATTEMPTS as usize];
+    fn a_wrong_passphrase_is_never_given_up_on() {
+        // The unlock never abandons a wrong passphrase: it keeps re-prompting
+        // (each refusal delayed and audited `4137`) for as long as input
+        // keeps arriving. Here the operator "gives up" — the console closes
+        // after several wrong tries — so the unlock fails closed on the
+        // *console* error (`4138`, `console_unreadable`), never on an
+        // attempt budget. The late cell stays empty, so login is refused
+        // until reboot.
+        let lines = alloc::vec![b"wrong" as &[u8]; 8];
         let input = ScriptInput::new(script(&lines));
         let late = LateUsersDb::new();
         let late_identity = LateIdentity::new();
         let sink = RecordingSink::new();
+        let delays = AtomicUsize::new(0);
 
         let outcome = unlock_root_disk_interactively(
             success_disk(),
@@ -2114,21 +2223,27 @@ mod tests {
                 admin: None,
             },
             &sink,
+            &|| {
+                delays.fetch_add(1, Ordering::Relaxed);
+            },
             &|| {},
         );
 
         assert_eq!(outcome, UnlockOutcome::GaveUp);
         assert!(!late.is_installed(), "no database is installed on give-up");
+        // Every one of the eight wrong lines was refused and re-prompted —
+        // no bounded budget cut the retries short.
         let retries = sink.ids().iter().filter(|&&id| id == 4137).count();
         assert_eq!(
             retries,
-            MAX_UNLOCK_ATTEMPTS as usize,
-            "every attempt is a refused retry: {:?}",
+            8,
+            "every wrong attempt is re-prompted: {:?}",
             sink.ids()
         );
+        assert_eq!(delays.load(Ordering::Relaxed), 8, "each refusal is delayed");
         assert!(
             sink.ids().contains(&4138),
-            "give-up audited: {:?}",
+            "the fail-closed give-up is the console closing, not a budget: {:?}",
             sink.ids()
         );
     }
@@ -2154,6 +2269,7 @@ mod tests {
                 admin: None,
             },
             &sink,
+            &|| {},
             &|| {},
         );
 
@@ -2193,6 +2309,7 @@ mod tests {
                 admin: None,
             },
             &RecordingSink::new(),
+            &|| {},
             &|| releases.set(releases.get() + 1),
         );
         assert_eq!(outcome, UnlockOutcome::Installed);
@@ -2215,6 +2332,7 @@ mod tests {
                 admin: None,
             },
             &RecordingSink::new(),
+            &|| {},
             &|| releases.set(releases.get() + 1),
         );
         assert_eq!(outcome, UnlockOutcome::GaveUp);
@@ -2246,6 +2364,7 @@ mod tests {
                 admin: None,
             },
             &sink,
+            &|| {},
             &|| {},
         );
 
@@ -2281,6 +2400,7 @@ mod tests {
                 admin: None,
             },
             &sink,
+            &|| {},
             &|| {},
         );
 

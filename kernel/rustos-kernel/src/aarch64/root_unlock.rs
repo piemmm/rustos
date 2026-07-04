@@ -952,6 +952,17 @@ fn finish_unlock<B: Block + 'static>(
         // read-write window onto the same `'static`-leaked disk (park-safe via
         // the device `SleepLock`), under the just-derived key.
         let writable = WritableStateSink { store, audit };
+        // The anti-brute-force pause after a wrong passphrase: a genuine
+        // timed park (never a busy-wait) for at least three seconds, so a
+        // scripted brute-force gains no faster oracle than the honest
+        // operator, before the "Incorrect passphrase" notice and re-prompt.
+        let retry_delay = || {
+            crate::unlock_service::park_for_ns(
+                &coop,
+                crate::unlock_service::unlock_console_task(),
+                crate::unlock_service::WRONG_PASSPHRASE_RETRY_DELAY_NS,
+            );
+        };
         match unlock_root_disk_interactively(
             store.window(),
             console_write,
@@ -968,6 +979,7 @@ fn finish_unlock<B: Block + 'static>(
                 }),
             },
             audit,
+            &retry_delay,
             &release_console0_to_login,
         ) {
             UnlockOutcome::Installed => note(audit, Level::Info, USERS_DB_INSTALLED_MESSAGE),

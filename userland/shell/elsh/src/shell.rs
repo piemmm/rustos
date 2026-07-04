@@ -110,6 +110,15 @@ impl<'a> Shell<'a> {
         self
     }
 
+    /// The interactive prompt string for the current environment and working
+    /// directory, rendered from `ELSH_PROMPT` (see
+    /// [`Environment::render_prompt`]). Recomputed each time so the prompt
+    /// tracks `cd` and any prompt-format change.
+    #[must_use]
+    pub fn render_prompt(&self) -> String {
+        self.env.render_prompt()
+    }
+
     /// The shell's environment.
     #[must_use]
     pub fn environment(&self) -> &Environment {

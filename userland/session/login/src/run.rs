@@ -55,6 +55,11 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
+    // The session-launch path builds the child environment with the heap,
+    // which is live by then (a successful authentication already parsed the
+    // user database). `rustos-rt` registers the process global allocator.
+    extern crate alloc;
+
     use rustos_abi::elevate::{elevate_endpoint, ELEVATE_MAX_REQUEST, ELEVATE_REPLY_LEN};
     use rustos_abi::{
         Errno, Origin, WaitSetOp, WaitSourceKind, CONSOLE_INHERIT, ORIGIN_CONSOLE_NONE,
@@ -63,8 +68,9 @@ mod program {
     use rustos_caps::CapabilitySet;
     use rustos_login::elevate::ElevateLauncher;
     use rustos_login::{
-        events, handle_elevate_request, supervise, AuthenticatedUser, Authenticator, DbLoad, Login,
-        LoginConfig, LoginError, Prompt, SessionKind, SessionLauncher, SessionOutcome,
+        events, handle_elevate_request, session_environment, supervise, AuthenticatedUser,
+        Authenticator, DbLoad, Login, LoginConfig, LoginError, Prompt, SessionKind,
+        SessionLauncher, SessionOutcome,
     };
     use rustos_rt::io::{Stdout, Write};
     use rustos_rt::LogSink;
@@ -409,7 +415,26 @@ mod program {
             user: &AuthenticatedUser,
             kind: SessionKind,
         ) -> Result<SessionOutcome, Errno> {
-            let ret = rustos_rt::spawn_as(user.shell.as_bytes(), CONSOLE_INHERIT, user.uid.0);
+            // Hand the shell the session environment (USER, LOGNAME, HOME,
+            // SHELL, PWD, PATH, TERM, LANG) built from the authenticated
+            // account, so its prompt and `$USER`/`$HOME`/… reflect the real
+            // user. `spawn_with` carries both the environment and the uid
+            // switch; the env strings are data and grant no authority (every
+            // capability stays kernel-side). Allocating here is safe: a
+            // successful authentication already parsed the database, so the
+            // heap is live well before this launch.
+            let env_owned = session_environment(user);
+            let env: alloc::vec::Vec<&[u8]> = env_owned
+                .iter()
+                .map(alloc::string::String::as_bytes)
+                .collect();
+            let ret = rustos_rt::spawn_with(
+                user.shell.as_bytes(),
+                CONSOLE_INHERIT,
+                user.uid.0,
+                &[],
+                &env,
+            );
             if ret < 0 {
                 return Err(errno_from(ret));
             }

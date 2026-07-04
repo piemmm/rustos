@@ -42,7 +42,7 @@ static SPAWNER: FixedSpawner = FixedSpawner::new(virtio_blk_register);
 /// A scripted console input source: yields the fixture
 /// [`disk_image::PASSPHRASE`] bytes followed by a single line terminator,
 /// then reports end of input — the exact bytes an operator types at the
-/// `Root passphrase:` prompt. `Sync` through an atomic cursor over the
+/// `Root filesystem passphrase:` prompt. `Sync` through an atomic cursor over the
 /// immutable passphrase, as [`ConsoleRead`] requires (its `read` takes
 /// `&self`).
 struct ScriptedPassphrase {
@@ -130,6 +130,9 @@ fn root_unlock_login(
             admin: None,
         },
         env.audit_sink(),
+        // The fixture passphrase is correct on the first try, so the
+        // wrong-passphrase delay is never invoked; a no-op stands in.
+        &|| {},
         &|| released.store(true, Ordering::Release),
     );
     if outcome != UnlockOutcome::Installed {

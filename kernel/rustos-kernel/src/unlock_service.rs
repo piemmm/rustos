@@ -415,6 +415,53 @@ pub fn unlock_console_task() -> Option<rustos_kernel_sched_api::TaskId> {
     *UNLOCK_CONSOLE_TASK.lock()
 }
 
+/// The minimum pause, in nanoseconds, the passphrase policy waits after a
+/// wrong root passphrase before telling the operator and re-prompting.
+///
+/// Three seconds: long enough to rate-limit a scripted brute-force to a
+/// crawl, short enough not to punish an operator who fat-fingered one
+/// character. The pause is a genuine timed park (see [`park_for_ns`]), so it
+/// costs no CPU. Defined here, arch-neutral, so every port's unlock kthread
+/// shares one value rather than each baking its own.
+pub const WRONG_PASSPHRASE_RETRY_DELAY_NS: u64 = 3_000_000_000;
+
+/// Park the calling unlock kthread for at least `min_ns` nanoseconds without
+/// busy-waiting — the anti-brute-force pause the passphrase policy runs after
+/// a wrong attempt (`plans/PI.md` P11).
+///
+/// It registers a timed wakeup on [`rustos_kernel_core::CONSOLE_WAITQ`] at the
+/// deadline, arms the tickless one-shot, and genuinely **parks** off the run
+/// queue so the CPU idles for the whole wait. A wake before the deadline (a
+/// keystroke arriving on the shared console queue) simply re-checks the clock
+/// and re-parks, so the minimum duration always elapses — never a spin, never
+/// a `yield_now` loop.
+///
+/// `task` is the kthread's published scheduler id; without it (a degenerate
+/// build that never went through admission) or without an installed wait
+/// clock, no timed park is possible, so this returns at once. The delay is a
+/// rate limit, not a correctness invariant, and such a build has no monotonic
+/// clock to measure three seconds against.
+pub fn park_for_ns(
+    yielder: &CooperativeYield<'_>,
+    task: Option<rustos_kernel_sched_api::TaskId>,
+    min_ns: u64,
+) {
+    let (Some(task), Some(start)) = (task, rustos_kernel_core::wait_now_ns()) else {
+        return;
+    };
+    let deadline = start.saturating_add(min_ns);
+    loop {
+        let now = rustos_kernel_core::wait_now_ns().unwrap_or(deadline);
+        if now >= deadline {
+            return;
+        }
+        rustos_kernel_core::CONSOLE_WAITQ.register(task, deadline);
+        rustos_kernel_core::rearm_timed_wakeup();
+        yielder.park();
+        rustos_kernel_core::console_deregister(task, deadline);
+    }
+}
+
 /// Log an unlock-service lifecycle decision onto the service's audit sink
 /// under the shared [`UNLOCK_SERVICE`] event id.
 pub fn note(audit: &dyn Sink, level: Level, message: &'static str) {

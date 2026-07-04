@@ -76,9 +76,19 @@ session /System/Services/login.app/Run
 
 /// The first line `init` writes to the console once it reaches user mode.
 ///
-/// A fixed, terse banner (no aimless waffle) that proves the
-/// kernel reached EL0 and `init`'s console write path works end to end.
-pub const BANNER: &str = "RustOS init: reached user mode\n";
+/// A terse banner (no aimless waffle) that proves the kernel reached EL0 and
+/// `init`'s console write path works end to end, and now names *which* build
+/// reached it. The version is the workspace crate version stamped in at
+/// compile time (`env!("CARGO_PKG_VERSION")`), with a `pre-release` marker
+/// because RustOS has not shipped a release. No wall-clock build date or
+/// timestamp is embedded: the images must stay bit-reproducible, and a
+/// build clock would defeat that — the source-fixed version is the honest,
+/// reproducible build identity.
+pub const BANNER: &str = concat!(
+    "RustOS ",
+    env!("CARGO_PKG_VERSION"),
+    " (pre-release): reached user mode\n"
+);
 
 /// Why a startup config text was refused.
 ///

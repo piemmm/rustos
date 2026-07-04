@@ -131,7 +131,7 @@ const fn is_line_of(line: &[u8], value: &[u8]) -> bool {
     line[value.len()] == b'\n'
 }
 
-/// The passphrase line the admission vertical types at `Root passphrase: `.
+/// The passphrase line the admission vertical types at `Root filesystem passphrase: `.
 const UNLOCK_PASSPHRASE_LINE: &str = "unlock-vertical correct horse battery staple\n";
 
 /// Serial marker after which the autoload-input vertical injects a key.
@@ -2530,7 +2530,7 @@ const TESTS: &[QemuTest] = &[
     // and binds the virtio-blk root, the init seam admits the in-kernel
     // unlock kthread (`unlock_service::spawn_if_present`), and the kthread
     // brings the device up over the production device-IRQ path, prompts at
-    // `Root passphrase: `, reads the typed passphrase, mounts the encrypted
+    // `Root filesystem passphrase: `, reads the typed passphrase, mounts the encrypted
     // `RustFS` root, and installs the users database into `LATE_USERS_DB`.
     // The kernel-side audit sink reports PASS through the ARM semihosting
     // finisher the instant it sees the unlock-service install message
@@ -2555,7 +2555,7 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::EncryptedRootDisk,
         keyboard: None,
         pointer: false,
-        serial: &[("Root passphrase: ", UNLOCK_PASSPHRASE_LINE)],
+        serial: &[("Root filesystem passphrase: ", UNLOCK_PASSPHRASE_LINE)],
     },
     // `plans/CAPABILITY_USE.md` CU3: the session-ceiling acceptance vertical.
     // `rustos-test-session-ceiling-qemu-aarch64` boots the *production*
@@ -2604,11 +2604,15 @@ const TESTS: &[QemuTest] = &[
         keyboard: None,
         pointer: false,
         serial: &[
-            ("Root passphrase: ", UNLOCK_PASSPHRASE_LINE),
+            ("Root filesystem passphrase: ", UNLOCK_PASSPHRASE_LINE),
             ("Username: ", SESSION_USERNAME_LINE),
             ("Password: ", SESSION_PASSWORD_LINE),
-            ("elsh$ ", "cd /Users/root\n"),
-            ("elsh$ ", "pwd\n"),
+            // The default prompt is `\u@\h \w% ` (rustos_elsh env.rs): login
+            // spawns the shell as `root` with HOME=/Users/root, and the shell
+            // defaults HOSTNAME to `rustos`, so at home the prompt renders
+            // `root@rustos ~% ` (the home directory abbreviated to `~`).
+            ("root@rustos ~% ", "cd /Users/root\n"),
+            ("root@rustos ~% ", "pwd\n"),
             ("/Users/root", "ps\n"),
             // The typed word `--bogus` must reach the child as `argv[1]`
             // through the spawn startup-strings block: `ps` refuses the
@@ -2632,7 +2636,7 @@ const TESTS: &[QemuTest] = &[
             // produces.
             ("SEE ALSO", "ls /System/Apps\n"),
             ("man.app", "ulimit processes 1000\n"),
-            ("elsh$ ", "ulimit -H processes 2000\n"),
+            ("root@rustos ~% ", "ulimit -H processes 2000\n"),
             (
                 "cannot raise hard limit (requires CAP_RLIMIT_RAISE)",
                 "exit\n",
@@ -2673,7 +2677,7 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::AutoloadRootDisk,
         keyboard: Some((AUTOLOAD_INPUT_KEY_MARKER, "a")),
         pointer: true,
-        serial: &[("Root passphrase: ", UNLOCK_PASSPHRASE_LINE)],
+        serial: &[("Root filesystem passphrase: ", UNLOCK_PASSPHRASE_LINE)],
     },
     // Stage W11 (`plans/WIRING.md` §3):
     // `rustos-test-virtio-net-mmio-aarch64` is the aarch64 `virt`-board

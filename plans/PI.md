@@ -4593,20 +4593,27 @@ two users — or the same user twice — can be logged in concurrently.
        device and the console keyboard is live. Generic over the `Block`
        disk and taking the console halves as the object-safe
        `rustos_kernel_core::{ConsoleWrite, ConsoleRead}` seams, it names no
-       arch or device type (§17.4). Each attempt prompts `Root passphrase:`,
-       reads one line into a zeroized, fixed-length on-stack buffer
+       arch or device type (§17.4). Each attempt prompts
+       `Root filesystem passphrase:`, reads one line into a zeroized,
+       fixed-length on-stack buffer
        (`MAX_PASSPHRASE_LEN`; the secret never reaches the heap, a log, or
        memory beyond the attempt, §4 / §19.4; Backspace edits, an over-long
        line is a refused attempt not a truncated secret, §5.4.3), and runs
        `mount_root_disk_and_load_users`. Success publishes the loaded
-       database into the set-once `LateUsersDb` (`4136`); a wrong passphrase
-       (`Mount(PermissionDenied)`) is audited (`4137`) and retried up to
-       `MAX_UNLOCK_ATTEMPTS` (5, User-chosen) — bounded, never looping
-       (§2.1); a structural failure or a console read fault gives up at once
-       (`4138`), leaving the cell empty so every login is refused until
-       reboot (§2.9 / §5.4.5). Host-proven by 6 `root_mount` tests over a
-       mock console + the same MBR + encrypted-`RustFS` disk fixture
-       `tools/mkimage` writes (§2.2). No `lib/abi`/C-header change.
+       database into the set-once `LateUsersDb` (`4136`) and closes the prompt
+       with a CR + blank line so the login `Username:` is separated; a wrong
+       passphrase (`Mount(PermissionDenied)`) is audited (`4137`),
+       rate-limited by a minimum three-second timed park
+       (`unlock_service::park_for_ns`, injected as a `delay` seam so host
+       tests pass a no-op; never a busy-wait, §2.1/§2.23), reported
+       (`Incorrect passphrase`), and prompted **again — indefinitely**: the
+       root holds the only user data and login is refused until it mounts, so
+       there is nothing to advance to without the correct passphrase. Only a
+       structural failure or a console read fault gives up (`4138`), leaving
+       the cell empty so every login is refused until reboot (§2.9 / §5.4.5).
+       Host-proven by `root_mount` tests over a mock console + the same
+       MBR + encrypted-`RustFS` disk fixture `tools/mkimage` writes (§2.2). No
+       `lib/abi`/C-header change.
      - **Chunk B-2 `&'static LateUsersDb` dispatch-hook wiring — LANDED
        (whole gate green).** The shared set-once cell
        `rustos_kernel::root_mount::LATE_USERS_DB` is the one definition the

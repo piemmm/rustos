@@ -87,7 +87,7 @@ pub use elevate::{handle_elevate_request, ElevateLauncher};
 pub use error::LoginError;
 pub use login::{Login, LoginConfig};
 pub use session::{
-    AuthenticatedUser, Authenticator, Credentials, Gid, Prompt, SessionKind, SessionLauncher,
-    SessionOutcome, Uid,
+    session_environment, AuthenticatedUser, Authenticator, Credentials, Gid, Prompt, SessionKind,
+    SessionLauncher, SessionOutcome, Uid,
 };
 pub use supervise::{supervise, DbLoad};

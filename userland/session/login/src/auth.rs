@@ -36,10 +36,12 @@ impl Authenticator for UsersAuthenticator<'_> {
             .authenticate(credentials.username, credentials.password.as_bytes())
             .map_err(|_| Errno::PermissionDenied)?;
         Ok(AuthenticatedUser {
+            username: record.username().to_string(),
             uid: record.uid(),
             primary_gid: record.primary_gid(),
             supplementary_gids: record.supplementary_gids().to_vec(),
             capabilities: record.capabilities(),
+            home: record.home().to_string(),
             shell: record.shell().to_string(),
         })
     }

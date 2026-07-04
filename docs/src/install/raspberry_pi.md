@@ -120,7 +120,9 @@ profile (`rustos_mkimage::passphrase_for`):
   passphrase.
 - **`debug`** — the passphrase `root` (matching the seeded `root` / `root`
   account). The blank attempt fails, so the bootstrap draws the
-  `Root passphrase:` prompt; type `root` to unlock.
+  `Root filesystem passphrase:` prompt; type `root` to unlock. A wrong entry
+  is refused after a short delay and re-prompted indefinitely (the root
+  cannot mount without the right passphrase), so mistype freely.
 
 Either way the volume is fully encrypted under a real, salt-derived key.
 The `.rootkey` file is that derived key, written for mounting the volume

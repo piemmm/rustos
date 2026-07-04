@@ -204,10 +204,12 @@ mod tests {
             // `UsersAuthenticator` behaves.
             if credentials.username == "root" && credentials.password == "correct" {
                 Ok(AuthenticatedUser {
+                    username: "root".to_string(),
                     uid: Uid(0),
                     primary_gid: Gid(0),
                     supplementary_gids: Vec::new(),
                     capabilities: CapabilitySet::empty(),
+                    home: "/Users/root".to_string(),
                     shell: "/System/Services/shell".to_string(),
                 })
             } else {

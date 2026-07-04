@@ -13,7 +13,10 @@
 //! keystroke restarts the bounded animation. When the line is submitted
 //! (Enter) the marker is replaced in place with `[input complete]`; when the
 //! line is erased back to empty the marker is removed entirely, and an
-//! aborted read clears it with [`SecretIndicator::abort`].
+//! aborted read clears it with [`SecretIndicator::abort`]. One indicator can
+//! be reused across several prompt lines (a wrong passphrase asked again):
+//! after a line completes, the next keystroke begins a fresh marker at the
+//! new prompt's cursor rather than disturbing the completed one.
 //!
 //! [`SecretIndicator`] is the pure state machine: it performs no I/O and
 //! reads no clock — the caller feeds it input events and tick wake-ups with
@@ -268,10 +271,19 @@ impl SecretIndicator {
     /// already running renders nothing and leaves the armed cadence
     /// undisturbed; activity after the animation has frozen re-arms the next
     /// frame so the dots resume moving.
+    ///
+    /// A keystroke *after* a line was completed begins a **fresh** marker at
+    /// the cursor's current position, not a redraw of the old one: the
+    /// completed `[input complete]` belongs to the previous prompt line, and
+    /// the next character is the first of a new secret line (a re-prompt
+    /// after a wrong passphrase reuses one indicator across attempts). Drawing
+    /// a fresh marker forward — never stepping the cursor back over the new
+    /// prompt — is what keeps the marker appearing, and later
+    /// `[input complete]` landing, in the right place on every attempt.
     fn activity(&mut self, now_ns: u64) -> Render {
         let until = now_ns.saturating_add(SECRET_ANIMATE_NS);
         match self.phase {
-            Phase::Hidden => {
+            Phase::Hidden | Phase::Complete => {
                 self.phase = Phase::Active {
                     dots: 1,
                     animate_until_ns: Some(until),
@@ -293,8 +305,6 @@ impl SecretIndicator {
                 }
                 Render::empty()
             }
-            // A completed line takes no more input; the marker stays.
-            Phase::Complete => Render::empty(),
         }
     }
 
@@ -519,6 +529,28 @@ mod tests {
         let render = indicator.tick(SECRET_TICK_NS);
         assert_eq!(bytes(&render), b"\x08\x08..]");
         assert_eq!(indicator.deadline_ns(), Some(2 * SECRET_TICK_NS));
+    }
+
+    #[test]
+    fn typing_after_completion_starts_a_fresh_marker() {
+        // A re-prompt (a wrong passphrase asked again) reuses one indicator:
+        // the first line is submitted, then the next attempt's first
+        // keystroke must draw a brand-new `[input active.]` forward at the
+        // new prompt's cursor — never render nothing (leaving the operator
+        // with no feedback), and never step the cursor back over the prompt.
+        let mut indicator = SecretIndicator::new();
+        let _ = indicator.input(SecretInput::Typed, 0);
+        let _ = indicator.input(SecretInput::Submitted, 10);
+        let render = indicator.input(SecretInput::Typed, 20);
+        assert_eq!(bytes(&render), b"[input active.]");
+        assert_eq!(indicator.deadline_ns(), Some(20 + SECRET_TICK_NS));
+        // Submitting the new line then lands `[input complete]` in place,
+        // stepping back over exactly the fresh marker's 15 columns.
+        let render = indicator.input(SecretInput::Submitted, 30);
+        assert_eq!(
+            bytes(&render),
+            [b"\x08".repeat(15), b"[input complete]".to_vec()].concat()
+        );
     }
 
     #[test]
