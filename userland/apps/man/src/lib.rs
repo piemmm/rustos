@@ -27,8 +27,12 @@
 //! * [`io`] — the [`BundleStore`] / [`Console`] seams.
 //! * [`source`] — [`ScopedHelp`], the engine's per-bundle read seam.
 //! * [`client`] — the [`run`] entry point, resolution, and the pager.
-//! * [`help`] — the bundle's own embedded `Help/` tree, the one source the
-//!   image builder and test fixtures plant on `/System/Apps/man.app/`.
+//!
+//! The bundle's own `Help/` tree is **not** embedded in this crate: it is
+//! authored once in the bundle's on-disk `Help/` directory, planted onto
+//! `/System/Apps/man.app/` by the image builder from that source
+//! (`tools/syshelp`), and read back at runtime through the [`BundleStore`]
+//! seam. Help is never hardcoded into the program (`plans/APPS.md`).
 //!
 //! # Layering & safety
 //!
@@ -49,7 +53,6 @@ extern crate alloc;
 pub mod client;
 pub mod command;
 pub mod error;
-pub mod help;
 pub mod io;
 pub mod source;
 

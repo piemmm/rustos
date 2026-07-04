@@ -1,0 +1,29 @@
+[package]
+name = "rustos-syshelp"
+description = "Build-discovered system app-store Help payload for image authoring: scans the command-app bundles' on-disk `Help/` trees and exposes them as data, so the image builder plants help without a hand-maintained per-bundle list (plans/APPS.md §2.1, AGENTS.md §2.2)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+# `no_std` (data only): the payload is `&'static [u8]` documents embedded at
+# build time, so both the host image builder (`tools/mkimage`) and the
+# freestanding QEMU image fixture (`tests/integration/encrypted_root_image`,
+# which also links into the aarch64 guest tail) can consume it unchanged. No
+# dependency on any app crate: the trees are discovered from the source tree
+# by `build.rs`, never hand-listed (AGENTS.md §2.2).
+[dependencies]
+
+[dev-dependencies]
+# The one help engine: the aggregator's tests parse every discovered document
+# through it under the same fail-closed bounds a running system applies, so a
+# malformed page can never reach an image (plans/APPS.md §6).
+rustos-help = { path = "../../lib/help", version = "=0.0.0" }

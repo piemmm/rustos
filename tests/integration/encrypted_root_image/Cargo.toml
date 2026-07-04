@@ -26,13 +26,14 @@ path = "src/lib.rs"
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 rustos-drv-fs-fat32 = { path = "../../../drivers/filesystem/fat32", version = "=0.0.0" }
 rustos-drv-fs-rustfs = { path = "../../../drivers/filesystem/rustfs", version = "=0.0.0" }
-# Each command app's embedded Help/ tree (`rustos_ls::help`,
-# `rustos_man::help`), planted onto the fixture's read-only /System volume
-# exactly as `tools/mkimage` plants it on a real image, so the session
-# vertical can type `man man` and `ls` against the same bytes the crates
-# ship (AGENTS.md §2.2). Default `program` feature off: the fixture wants
-# the data, never the freestanding runtime.
-rustos-ls = { path = "../../../userland/apps/ls", version = "=0.0.0", default-features = false }
-rustos-man = { path = "../../../userland/apps/man", version = "=0.0.0", default-features = false }
+# The system app store's Help/ trees, discovered from the command-app
+# bundles' own on-disk `Help/` sources and embedded at build time
+# (`rustos_syshelp`), planted onto the fixture's read-only /System volume
+# exactly as `tools/mkimage` plants it on a real image — so the session
+# vertical can type `man man` and `ls` against the same bytes a real image
+# ships, with no hand-maintained per-bundle list and no help hardcoded into
+# an app crate (AGENTS.md §2.2, §16.5). It is `no_std` (data only), so it
+# links into the freestanding guest tail unchanged.
+rustos-syshelp = { path = "../../../tools/syshelp", version = "=0.0.0" }
 rustos-partition = { path = "../../../lib/partition", version = "=0.0.0" }
 rustos-test-rustfs-image = { path = "../rustfs_image", version = "=0.0.0" }

@@ -157,4 +157,30 @@ mod tests {
         // After `--`, a leading-dash argument is a path, not an option.
         assert_eq!(parse(&["--", "-l"]), Ok(list(false, false, &["-l"])));
     }
+
+    /// Every locale's `OPTIONS` section documents exactly the switches this
+    /// parser accepts (`plans/APPS.md` §3.1): the flag tokens are
+    /// language-neutral, so each translated document must carry the same
+    /// keys as the canonical one. The documents are read from the bundle's
+    /// own on-disk `Help/` tree — the single source the image builder plants
+    /// — never a copy embedded in this crate.
+    #[test]
+    fn help_documents_the_parser_switches() {
+        extern crate std;
+        use alloc::format;
+        use std::fs;
+
+        let help_root = format!("{}/Help", env!("CARGO_MANIFEST_DIR"));
+        let locales = ["default", "fr-FR", "de-DE", "es-ES", "uk-UA", "it-IT"];
+        for locale in locales {
+            let path = format!("{help_root}/{locale}/ls.md");
+            let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+            for switch in ["`-a, --all`", "`-l, --long`", "`-h, -?`"] {
+                assert!(
+                    text.contains(switch),
+                    "{locale}/ls.md must document {switch}"
+                );
+            }
+        }
+    }
 }

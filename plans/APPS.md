@@ -60,7 +60,11 @@ session-ceiling vertical types `ls /System/Apps` end to end. Remaining:
 deliverables 5–7 for the rest of the toolset (`cargo xtask help-lint`,
 the OS `Help/` trees and `-h`/`-?` convention for the other command apps,
 wider `stdinfo` adoption — `man`'s locale-fallback and `ls`'s omission
-records are live).
+records are live). Help documents are authored **only** in each bundle's
+on-disk `Help/` tree and read at runtime through the `lib/help` seam — no app
+embeds its help, and the image builder plants the trees from data discovered
+by `tools/syshelp`, never a hand-maintained per-bundle list (§6.1, `AGENTS.md`
+§16.5).
 
 ## 1. Everything is a bundle — including single-binary utilities
 
@@ -264,6 +268,36 @@ list) per the `lib/*` rules (§6).
 
 `lib/help` is an internal building block, so it is linked **statically** by its
 consumers (§16.4) — it is not one of the curated `/System/Libraries/` classes.
+
+### 6.1 Help is authored once in the bundle — never embedded, never hand-listed
+
+Help documents are **data on the volume**, not constants in a program. A
+command's help lives in exactly one place — the bundle's own on-disk
+`Help/<locale>/<doc>.md` files — and is read at runtime through the injected
+`lib/help` `HelpSource` seam, from the running bundle's own `Help/` tree only.
+This is binding under `AGENTS.md` §16.5:
+
+- **No program embeds its own help.** A command app MUST NOT `include_str!` /
+  `include_bytes!` its `Help/` tree into the `Run`/`Code/` binary, bake help
+  strings into the program, or keep any second copy of a document outside the
+  bundle. Short `-h`/`-?` help (§4) and `man` (§7) both read the same on-disk
+  tree through the seam; the `Run` binary carries no help bytes of its own. A
+  hand-written `help.rs` that embeds the documents is the defect this forbids.
+- **The image builder discovers help, it does not list it.** The `Help/` trees
+  are planted onto `/System/Apps/<name>.app/Help/` by `tools/mkimage` (and the
+  QEMU image fixtures) from data discovered at build time by `tools/syshelp`,
+  which scans the command-app bundles' own on-disk `Help/` sources. Adding a
+  command app's help is dropping its `Help/` files under
+  `userland/apps/<name>/Help/<locale>/`; the next build rediscovers them. No
+  per-bundle list exists in the image builder, a fixture, or the kernel that a
+  new bundle would force an edit to — that list would be the duplication §2.2
+  forbids. `tools/syshelp` also fails closed on a document that does not parse
+  under `lib/help`'s bounds or a bundle missing a required locale, so a
+  malformed or partially-translated tree never reaches an image.
+- **Internationalisation is the shared engine's job.** Locale fallback (§5) is
+  the one `lib/help` chain (exact tag → same language any region → `default/`
+  en-US); a missing translation degrades to `default/`, never to fabricated or
+  hardcoded text (§2.9).
 
 ## 7. The `man` command
 
@@ -487,10 +521,11 @@ both landed; `plans/SHELL.md` command execution):
    streams otherwise, and emits the §7 `stdinfo` `context` record
    (`help.locale_fallback`) on a locale fallback. Registered as
    `/System/Apps/man.app/Run` (manifest: console pair + `CAP_FS_ACCESS`);
-   its own six-locale `Help/` tree lives in the crate (`src/help.rs` embeds
-   it and proves every locale parses) and is planted on the read-only
-   `/System` volume by `tools/mkimage` and the QEMU image fixture; the
-   `session_ceiling` vertical types `man man` end to end.
+   its own six-locale `Help/` tree is authored on disk in the bundle and
+   read at runtime through the `BundleStore` seam (no help embedded in the
+   binary, §6.1) — the tree is discovered by `tools/syshelp` and planted on
+   the read-only `/System` volume by `tools/mkimage` and the QEMU image
+   fixture; the `session_ceiling` vertical types `man man` end to end.
 4. **Shell command resolution** — **done** (except the per-app `-h`/`-?`
    convention, which lands with each app's `Help/` tree, §4/§8.1):
    system-app-store-then-`PATH` resolution (§8) and `.app`-suffix invocation
@@ -510,11 +545,15 @@ both landed; `plans/SHELL.md` command execution):
 5. **`cargo xtask help-lint`** — the §8.1 content/completeness/switch-drift
    check, wired into `cargo xtask ci` (§7).
 6. **`Help/` trees for the existing command apps** — **`ls` done** (its
-   six-locale tree ships in the crate, is planted at
-   `/System/Apps/ls.app/Help/`, and serves its §4 `-h`/`-?` short help);
-   remaining: `ps`, `top`, `cat`, `cp`, `mv`, `rm`, `chmod`, `chown`,
-   `mount`, `getcap`, `setcap`, `useradd`, `groupadd`, `elsh`, `sysinfo`,
-   `terminal`, … in `default/` plus the required locales (§8.1).
+   six-locale tree is authored on disk in the bundle, discovered by
+   `tools/syshelp`, planted at `/System/Apps/ls.app/Help/`, and served — at
+   runtime through the `HelpSource` seam, never embedded in the binary
+   (§6.1) — for its §4 `-h`/`-?` short help); remaining: `ps`, `top`, `cat`,
+   `cp`, `mv`, `rm`, `chmod`, `chown`, `mount`, `getcap`, `setcap`,
+   `useradd`, `groupadd`, `elsh`, `sysinfo`, `terminal`, … in `default/`
+   plus the required locales (§8.1). Each new tree ships by dropping its
+   `Help/` files under the bundle — `tools/syshelp` rediscovers them, and no
+   image-builder list is edited (§6.1).
 
 7. **`stdinfo` adoption in command apps (§12)** — emit the appropriate
    `StdInfoRecord` (via the `lib/rt` wrapper) wherever a command omits,
@@ -536,3 +575,11 @@ Required `AGENTS.md` amendments (each with a one-line rationale in PLAN.md's
   command resolution (existing file-access and driver/app-load gates
   suffice, §5.2 minimalism); stated explicitly in the §16.2 `Apps/` entry so
   none is added speculatively.
+- **§16.5 (help authoring)** — **done**: added the binding rule that command
+  help is authored once in the bundle's on-disk `Help/` tree and read at
+  runtime through the `lib/help` seam — never embedded/compiled into a
+  program (`include_str!`/`include_bytes!`/baked strings) and never planted
+  from a hand-maintained per-bundle list in the image builder. The build
+  discovers the trees (`tools/syshelp`, added to §3); the per-app embedded
+  `help.rs` copies and the mkimage/fixture lists were deleted (§2.2, §2.14).
+  Rationale logged in `PLAN.md` "Charter Amendments".

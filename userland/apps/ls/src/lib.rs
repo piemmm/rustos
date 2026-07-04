@@ -53,8 +53,12 @@
 //! * [`io`] — the [`Listing`] and [`Output`] seams and the
 //!   [`Entry`]/[`Metadata`] data they carry.
 //! * [`client`] — the [`run`] entry point and the listing/formatting engine.
-//! * [`help`] — the bundle's own embedded `Help/` documents, the single
-//!   source the image builders plant on `/System`.
+//!
+//! The bundle's `Help/` documents are **not** embedded in this crate: they
+//! are authored once in the bundle's on-disk `Help/` tree, planted onto
+//! `/System` by the image builder from that source (`tools/syshelp`), and read
+//! back at runtime through the injected [`rustos_help::HelpSource`] seam. Help
+//! is never hardcoded into the program (`plans/APPS.md`).
 //!
 //! # Layering & safety
 //!
@@ -72,7 +76,6 @@ extern crate alloc;
 pub mod client;
 pub mod command;
 pub mod error;
-pub mod help;
 pub mod io;
 
 pub use client::{run, USAGE};

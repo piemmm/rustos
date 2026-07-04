@@ -41,8 +41,9 @@ pub const TOP_LEVEL_DIRS: [&str; 4] = ["System", "Users", "Apps", "Storage"];
 /// (`build_system_partition`). `Security` additionally carries its fixed
 /// `Keys` and `Policy` subdirectories; the `Users`/`Groups` databases inside
 /// it are installer-authored data, not image content. `Apps` is the system
-/// app store: the OS-provided command apps' bundle data (today the `man`
-/// app's internationalised `Help/` tree, `rustos_man::help`).
+/// app store: the OS-provided command apps' bundle data — each command app's
+/// internationalised `Help/` tree, discovered from the bundle's own on-disk
+/// source and planted from `rustos_syshelp::HELP_FILES`.
 pub const SYSTEM_SUBDIRS: [&str; 13] = [
     "Kernel",
     "Apps",
@@ -193,31 +194,20 @@ pub fn build_system_partition(
     }
     // The system app store's bundle data ships on every image through the
     // same planter: each command app's internationalised `Help/` tree,
-    // embedded in the app crate itself so image and source cannot drift.
-    let help_trees = [
-        (
-            b"ls.app".as_slice(),
-            rustos_ls::help::HELP_DOC_NAME,
-            rustos_ls::help::HELP_DOCS,
-        ),
-        (
-            b"man.app".as_slice(),
-            rustos_man::help::HELP_DOC_NAME,
-            rustos_man::help::HELP_DOCS,
-        ),
-    ];
-    for (bundle, doc_name, docs) in help_trees {
-        for (locale_dir, bytes) in docs {
-            let components: [&[u8]; 5] = [
-                b"Apps",
-                bundle,
-                b"Help",
-                locale_dir.as_bytes(),
-                doc_name.as_bytes(),
-            ];
-            plant_nested_file(&mut fs, root, &components, bytes)
-                .map_err(MkimageError::SystemPartition)?;
-        }
+    // discovered from the bundle's own on-disk `Help/` source
+    // (`rustos_syshelp`) — never a hand-maintained per-bundle list here, so a
+    // new command app's help ships without editing this file, and image and
+    // source cannot drift.
+    for doc in rustos_syshelp::HELP_FILES {
+        let components: [&[u8]; 5] = [
+            b"Apps",
+            doc.bundle.as_bytes(),
+            b"Help",
+            doc.locale.as_bytes(),
+            doc.file.as_bytes(),
+        ];
+        plant_nested_file(&mut fs, root, &components, doc.bytes)
+            .map_err(MkimageError::SystemPartition)?;
     }
     fs.flush().map_err(MkimageError::SystemPartition)?;
     Ok(fs.into_block().into_bytes())

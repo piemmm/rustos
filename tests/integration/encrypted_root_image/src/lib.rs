@@ -241,31 +241,19 @@ fn build_system_partition(drivers: &[(&[&[u8]], &[u8])]) -> Result<Vec<u8>, Driv
         root_image::plant_nested_file(&mut fs, root, components, bytes)?;
     }
     // The system app store's bundle data, exactly as `tools/mkimage` plants
-    // it: each command app's embedded Help/ tree, so the session vertical
-    // reads the same bytes a real image ships.
-    let help_trees = [
-        (
-            b"ls.app".as_slice(),
-            rustos_ls::help::HELP_DOC_NAME,
-            rustos_ls::help::HELP_DOCS,
-        ),
-        (
-            b"man.app".as_slice(),
-            rustos_man::help::HELP_DOC_NAME,
-            rustos_man::help::HELP_DOCS,
-        ),
-    ];
-    for (bundle, doc_name, docs) in help_trees {
-        for (locale_dir, bytes) in docs {
-            let components: [&[u8]; 5] = [
-                b"Apps",
-                bundle,
-                b"Help",
-                locale_dir.as_bytes(),
-                doc_name.as_bytes(),
-            ];
-            root_image::plant_nested_file(&mut fs, root, &components, bytes)?;
-        }
+    // it: each command app's internationalised Help/ tree, discovered from
+    // the bundle's own on-disk `Help/` source (`rustos_syshelp`) — never a
+    // hand-maintained list here — so the session vertical reads the same
+    // bytes a real image ships.
+    for doc in rustos_syshelp::HELP_FILES {
+        let components: [&[u8]; 5] = [
+            b"Apps",
+            doc.bundle.as_bytes(),
+            b"Help",
+            doc.locale.as_bytes(),
+            doc.file.as_bytes(),
+        ];
+        root_image::plant_nested_file(&mut fs, root, &components, doc.bytes)?;
     }
     fs.flush()?;
     Ok(fs.into_block().store)

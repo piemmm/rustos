@@ -1282,9 +1282,8 @@ dependencies = [
  "rustos-drv-fs-fat32",
  "rustos-drv-fs-rustfs",
  "rustos-log",
- "rustos-ls",
- "rustos-man",
  "rustos-partition",
+ "rustos-syshelp",
  "rustos-users",
 ]
 
@@ -1417,6 +1416,13 @@ version = "0.0.0"
 dependencies = [
  "loom",
  "proptest",
+]
+
+[[package]]
+name = "rustos-syshelp"
+version = "0.0.0"
+dependencies = [
+ "rustos-help",
 ]
 
 [[package]]
@@ -1734,9 +1740,8 @@ dependencies = [
  "rustos-abi",
  "rustos-drv-fs-fat32",
  "rustos-drv-fs-rustfs",
- "rustos-ls",
- "rustos-man",
  "rustos-partition",
+ "rustos-syshelp",
  "rustos-test-rustfs-image",
 ]
 

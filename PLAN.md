@@ -3734,6 +3734,19 @@ of how much code was produced.
 Amendments to `AGENTS.md` (the binding charter) are logged here so an agent
 can see *why* a rule exists without diffing the charter's history.
 
+- **2026-07-04 — Command help is authored in the bundle, never hardcoded.**
+  Amended §16.5 (`plans/APPS.md` §6.1) after `ls`/`man` were found embedding
+  their own `Help/` trees via `include_bytes!` in a per-app `help.rs`, which
+  two hand-maintained lists (in `tools/mkimage` and the QEMU fixture) then
+  planted — so adding a bundle forced edits to central files, the duplication
+  §2.2 forbids. The rule now binds help as *data on the volume*: authored once
+  in the bundle's on-disk `Help/` tree, read at runtime through the `lib/help`
+  seam, never `include_str!`/`include_bytes!`/baked into a program, and never
+  planted from a per-bundle list. Added `tools/syshelp` to §3 — a build-time
+  scan of the command-app bundles' own `Help/` sources — so the image builder
+  and fixtures plant from discovered data; deleted the per-app `help.rs`
+  copies and both mkimage/fixture lists (§2.14).
+
 - **2026-07-03 — `lib/cmdres`: the shared command-word resolution policy.**
   Added to §3 (`plans/APPS.md` §8–§9): the pure store-then-`PATH` candidate
   policy moved out of the shell crate into its own `lib/*` crate so the

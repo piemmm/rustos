@@ -739,6 +739,12 @@ rustos/
 │   ├── xtask/           # Build orchestration (cargo xtask ...).
 │   ├── mkimage/         # Image builders per platform (PLAN.md Stage 8).
 │   │                    #   aarch64-rpi is built; the rest are staged.
+│   ├── syshelp/         # Build-discovered system app-store Help payload:
+│   │                    #   scans the command-app bundles' on-disk Help/
+│   │                    #   trees and exposes them as data (no_std), so the
+│   │                    #   image builder + QEMU fixtures plant help without a
+│   │                    #   hand-maintained per-bundle list and no help is
+│   │                    #   hardcoded into an app (§16.5, §2.2).
 │   ├── cc/              # Audited, version-pinned, checksummed C toolchain
 │   │                    #   wrapper (clang + ld.lld) for the CCOMPAT C-ABI
 │   │                    #   end-to-end test. Host-only build glue (§12);
@@ -1587,6 +1593,34 @@ Apps may not write outside their own per-user state
 (`/Users/<u>/Settings/<Name>/` and an app-scoped `Library/<Name>/`
 cache directory). All other writes require a user-mediated capability
 (e.g. a file picker handing the app a one-shot file capability).
+
+**Command help is authored in the bundle, never hardcoded into the program
+or the image builder.** A command's help — the structured-Markdown documents
+`man` renders, the short `-h`/`-?` surface, and any graphical help viewer
+(plans/APPS.md) — is authored in exactly **one** place: the bundle's own
+on-disk `Help/<locale>/<doc>.md` files. It is consumed at runtime through the
+injected, capability-scoped read seam (`lib/help`'s `HelpSource`), reading only
+the running bundle's own `Help/` tree.
+
+- A program MUST NOT embed, hardcode, or compile-in its own help text: no
+  `include_str!`/`include_bytes!` of the `Help/` tree into the `Run`/`Code/`
+  binary, no help strings baked into the program, no second copy of a document
+  anywhere but the bundle. Help is *data on the volume*, resolved at runtime —
+  never a constant in the executable. A hand-written `help.rs` that embeds the
+  bundle's documents is exactly the defect this rule forbids.
+- The tooling that lays the `Help/` trees onto `/System` (`tools/syshelp`, read
+  by `tools/mkimage` and the QEMU image fixtures) **discovers** them from the
+  bundles' own on-disk sources. Adding a command app's help is dropping its
+  `Help/` files on disk — never editing a central per-bundle list in the image
+  builder, a test fixture, or the kernel. A per-bundle list that a new bundle
+  forces an edit to, or a bundle's help duplicated into the builder, is the
+  duplication §2.2 forbids and a review blocker.
+- Internationalisation is the shared engine's job (§2.2): locale selection
+  falls back deterministically — the exact BCP-47 tag, then the same language
+  in any region, then the mandatory `default/` (en-US) — inside the one
+  `lib/help` engine, never a per-app locale walker. A missing or partial
+  translation degrades to `default/`, never to fabricated or hardcoded text
+  (§2.9).
 
 ### 16.6 System Information API
 

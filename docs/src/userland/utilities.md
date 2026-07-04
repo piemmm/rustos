@@ -462,10 +462,13 @@ format's mode string and right-aligned size, the per-entry stat under a
 slash-terminated operand, single- and multi-operand layout (files first,
 then directory headers), an empty directory, the short-help render and
 its usage-banner fallback, and the missing-operand, unreadable-directory,
-and dead-console fail-closed paths. The embedded `Help/` tree's tests
-prove every shipped locale parses under the engine's bounds, the
-required locale set is complete, and every document records exactly the
-parser's switches. The aarch64 session-ceiling QEMU vertical types
+and dead-console fail-closed paths. `ls`'s help is authored on disk in
+the bundle's own `Help/` tree and read at runtime through the injected
+seam — never embedded in the binary — and a crate test proves every
+locale's document records exactly the parser's switches; the
+`rustos-syshelp` discovery crate's tests prove every shipped locale
+parses under the engine's bounds and the required locale set is complete.
+The aarch64 session-ceiling QEMU vertical types
 `ls /System/Apps` in a real session and sees `man.app` in the listing —
 a store read only the mounted read-only `/System` volume produces.
 
@@ -1393,8 +1396,9 @@ every `Help/` read per-inode under the caller's attested identity.
 `BundleStore`/`Console` fixtures: the grammar and its refusals, the
 store-shadows-`PATH` order, the final-refusal rule, `.app`/explicit-path
 words, topics, locale exact/fallback plus the fd-3 advisory, the pager's
-key handling, and the `-h` fallback. `src/help.rs` embeds the bundle's own
-`Help/` tree and proves every shipped locale parses; `tools/mkimage` and
-the QEMU image fixture plant that same table on the read-only `/System`
-volume, and the `session_ceiling` QEMU vertical types `man man` end to
-end.
+key handling, and the `-h` fallback. `man`'s own `Help/` tree is authored
+on disk in the bundle and read at runtime through the `BundleStore` seam,
+never embedded in the binary; `tools/syshelp` discovers it from that
+source and `tools/mkimage` and the QEMU image fixture plant it on the
+read-only `/System` volume, where the `session_ceiling` QEMU vertical
+types `man man` end to end.

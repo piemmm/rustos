@@ -33,12 +33,11 @@ rustos-drv-fs-rustfs = { path = "../../drivers/filesystem/rustfs", version = "=0
 # `rustos_log::LogAttestationKey` on-disk format, so the image author and the
 # journal principal that later reads it cannot drift (AGENTS.md §2.2).
 rustos-log = { path = "../../lib/log", version = "=0.0.0" }
-# Each command app's embedded Help/ tree (`rustos_ls::help`,
-# `rustos_man::help`), planted onto the read-only /System volume's app store:
-# one source of truth in each app crate, so the image and the shipped
-# documents cannot drift (AGENTS.md §2.2). The default `program` feature is
-# disabled: the host tool wants the data, never the freestanding runtime.
-rustos-ls = { path = "../../userland/apps/ls", version = "=0.0.0", default-features = false }
-rustos-man = { path = "../../userland/apps/man", version = "=0.0.0", default-features = false }
+# The system app store's Help/ trees, discovered from the command-app
+# bundles' own on-disk `Help/` sources and embedded at build time
+# (`rustos_syshelp`), so the image is planted from data — never a
+# hand-maintained per-bundle list here, and no help text is hardcoded into an
+# app crate (AGENTS.md §2.2, §16.5).
+rustos-syshelp = { path = "../syshelp", version = "=0.0.0" }
 rustos-partition = { path = "../../lib/partition", version = "=0.0.0" }
 rustos-users = { path = "../../lib/users", version = "=0.0.0" }
