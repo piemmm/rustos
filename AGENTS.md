@@ -1440,10 +1440,13 @@ Authoritative subdirectories:
 ├── Kernel/      # Kernel image(s) and boot artifacts for the platform.
 ├── Apps/        # System app store: the OS-provided command apps, one
 │                #   command-named §16.5 bundle per command (ps.app, …).
-│                #   The shell resolves a bare command word here *before*
-│                #   the user's PATH, so PATH can never shadow a system
-│                #   command (plans/APPS.md). No new capability guards it:
-│                #   the existing file-access and app-load gates apply.
+│                #   Each is a FULL self-contained on-disk bundle — its own
+│                #   Run rxe, AppInfo, Help/, etc. all inside the folder
+│                #   (§16.5) — discovered by scanning the store, never baked
+│                #   into the kernel. The shell resolves a bare command word
+│                #   here *before* the user's PATH, so PATH can never shadow a
+│                #   system command (plans/APPS.md). No new capability guards
+│                #   it: the existing file-access and app-load gates apply.
 ├── Drivers/     # Loadable drivers (rxe modules) shipped with the OS.
 ├── Libraries/   # The OS-provided shared libraries (see §16.4).
 ├── Fonts/       # System fonts.
@@ -1577,6 +1580,51 @@ directly under `/Apps/`. The bundle layout is fixed:
 
 Exactly these names are permitted at the top of a bundle; additional
 entries are a packaging defect and the loader will refuse the bundle.
+
+**The bundle is self-contained; every part of the app lives inside its
+`<Name>.app/` folder, and nothing that is part of the app lives anywhere
+else.** This is the whole point of the `.app` folder: an application *is*
+its bundle directory. Everything the app is made of — its entry-point `Run`
+binary, any additional `Code/` rxe binaries or plugins, its `AppInfo`
+manifest, its `Resources/`, its `DefaultSettings/`, its `Help/` tree, and any
+static or private shared library unique to *this* app — is a real file on disk
+**inside that folder**. The only things an app legitimately reaches outside its
+own bundle are the OS-provided surfaces every app shares: the curated
+`/System/Libraries/` shared libraries (§16.4, dynamically linked) and the
+kernel syscall/IPC ABI (§9). There is no third place an app's own code, data,
+or help may live.
+
+- **An app's code is NEVER compiled into, embedded in, or served from the
+  kernel, the image builder, or any other component.** The `Run` binary (and
+  every `Code/` binary) is an `rxe` file authored **on the volume inside the
+  bundle**, loaded and launched through `appmgr` with the full signature +
+  capability + interface-hash checks (§9, §18). Baking an application's
+  `rxe` into the kernel image and dispatching it by a byte-exact in-kernel path
+  lookup, embedding an app binary via `include_bytes!` / `include!` into a
+  kernel or tool crate, or shipping a compiled-in registry of "which apps
+  exist", is exactly the defect this rule forbids: it makes the app *not*
+  self-contained, hides it from the on-disk bundle a user browses (a bundle
+  directory that shows only `Help/` because `Run` lives in the kernel is this
+  defect), and bypasses the `appmgr` verification path. An app that is not a
+  complete, launchable, verifiable directory under `/Apps` (or `/System/Apps`
+  for the system app store, §16.2) is a defect, regardless of whether it runs.
+- **The bundle is the only home for the app's own libraries.** A static
+  library or private shared library used *only* by this app is built into the
+  bundle — statically linked into its binaries, or placed in the bundle's
+  `Libraries/` for private dynamic linking (§16.4). It is never installed
+  system-wide, never hoisted into `/System/Libraries/` (the closed, curated OS
+  set, §16.4), and never carried in the kernel. Shared code used by *more than
+  one* first-party component is a `lib/*` crate (§6) linked at build time into
+  each consumer's own bundle binary — not a runtime dependency reached for
+  outside the folder.
+- **The store is discovered from the on-disk bundles, never from a compiled-in
+  list.** The set of apps (including the system command apps under
+  `/System/Apps`, §16.2) is discovered at runtime by scanning the on-disk
+  bundles and reading each `AppInfo`, exactly as drivers are discovered from
+  their signed bundles (§18.3, §18.6). A hand-maintained compiled-in table of
+  apps — in the kernel, `tools/mkimage`, a test fixture, or anywhere else — is
+  the duplication §2.2 forbids and a review blocker; adding an app is dropping
+  its `.app` folder on disk, never editing a central list.
 
 `AppInfo` is the application manifest. It is a signed document (see §9)
 and declares at minimum:

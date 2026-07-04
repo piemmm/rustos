@@ -60,7 +60,13 @@ session-ceiling vertical types `ls /System/Apps` end to end. Remaining:
 deliverables 5–7 for the rest of the toolset (`cargo xtask help-lint`,
 the OS `Help/` trees and `-h`/`-?` convention for the other command apps,
 wider `stdinfo` adoption — `man`'s locale-fallback and `ls`'s omission
-records are live). Help documents are authored **only** in each bundle's
+records are live), and the **charter-blocking** deliverable 8 —
+self-contained on-disk bundles: today each command app's `Run` rxe is
+baked into the kernel (`spawn_paths.rs`/`SPAWN_PROGRAMS`) with only `Help/`
+on disk, which the amended §16.5 forbids (an app *is* its bundle
+directory); the migration plants each app's signed `Run`/`AppInfo` on the
+`/System/Apps` store, discovers the store from disk, verifies via `appmgr`,
+and deletes the kernel registry. Help documents are authored **only** in each bundle's
 on-disk `Help/` tree and read at runtime through the `lib/help` seam — no app
 embeds its help, and the image builder plants the trees from data discovered
 by `tools/syshelp`, never a hand-maintained per-bundle list (§6.1, `AGENTS.md`
@@ -562,6 +568,27 @@ both landed; `plans/SHELL.md` command execution):
    omission record (the `AGENTS.md` §20.1 canonical example);
    advisory-only, never changing exit status.
 
+8. **Self-contained on-disk bundles — retire the kernel-baked spawn
+   registry (charter-blocking; §16.5 amended, self-containment).** Every
+   command app's `Run` rxe is today compiled into the kernel image and
+   dispatched by a byte-exact in-kernel path lookup
+   (`kernel/rustos-kernel/src/spawn_paths.rs` + `spawn_layout.rs`'s
+   `include!`-ed `*_rxe.rs` and `SPAWN_PROGRAMS`), while only each bundle's
+   `Help/` tree is planted on disk — so `/System/Apps/ls.app/` shows only
+   `Help/`, no `Run`/`AppInfo` exist on the volume, and the `appmgr`
+   signature + capability + interface-hash path is bypassed. The amended
+   §16.5 forbids this: an app *is* its bundle directory and app code is
+   never baked into the kernel/image builder. Migration: `tools/mkimage`
+   (via a `tools/syshelp`-style discovery pass over the app crates, never a
+   per-bundle list, §2.2) plants each command app's signed `Run` and
+   `AppInfo` onto the read-only `/System/Apps` store beside its `Help/`; the
+   store is discovered by scanning those on-disk bundles (§18.3/§18.6-style,
+   for apps); `spawn`/`appmgr` load and verify `Run` from disk; and the
+   embedded `SPAWN_PROGRAMS` registry, the `*_rxe.rs` `include!`s, and
+   `spawn_paths.rs` are deleted (§2.14). All prior deliverables' references
+   to `/System/Apps/<cmd>.app/Run` being served from `spawn_paths.rs` are
+   superseded by this on-disk-bundle model.
+
 Required `AGENTS.md` amendments (each with a one-line rationale in PLAN.md's
 "Charter Amendments" section, §13):
 
@@ -583,3 +610,13 @@ Required `AGENTS.md` amendments (each with a one-line rationale in PLAN.md's
   discovers the trees (`tools/syshelp`, added to §3); the per-app embedded
   `help.rs` copies and the mkimage/fixture lists were deleted (§2.2, §2.14).
   Rationale logged in `PLAN.md` "Charter Amendments".
+- **§16.5 (self-containment) / §16.2 (`/System/Apps`)** — **done** (charter);
+  **code migration open (deliverable 8).** Added the binding rule that an
+  app *is* its `<Name>.app/` bundle directory: `Run`, `Code/`, `AppInfo`,
+  `Resources/`, `DefaultSettings/`, `Help/`, and any app-private static or
+  shared library are all real files inside the folder, discovered from disk;
+  app code is never compiled into or served from the kernel/image builder,
+  and the store is never a compiled-in registry. The only outside reach is
+  the curated `/System/Libraries/` set and the syscall ABI. Rationale logged
+  in `PLAN.md` "Charter Amendments"; the code migration off the kernel-baked
+  spawn registry is deliverable 8 above.

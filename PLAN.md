@@ -3554,6 +3554,25 @@ existing command apps; and wider `stdinfo` adoption in command apps
 §16.4 refuses cross-bundle library references — so a resource-only bundle may
 share **data**, not dynamically-linked code.
 
+**Self-contained bundles — migrate off the kernel-baked spawn registry
+(charter-blocking, staged; §16.5 amended 2026-07-04).** The command apps'
+`Run` rxe is currently compiled into the kernel image and dispatched by a
+byte-exact in-kernel path lookup (`kernel/rustos-kernel/src/spawn_paths.rs`
++ `spawn_layout.rs`'s `include!`-ed `*_rxe.rs` / `SPAWN_PROGRAMS`), and only
+each bundle's `Help/` tree is planted on `/System/Apps/<cmd>.app/`. Browsing
+`ls.app/` therefore shows only `Help/`, the `Run`/`AppInfo` never touch the
+volume, and the `appmgr` signature + capability + interface-hash path is
+bypassed — all now forbidden by the amended §16.5 (an app *is* its bundle
+directory; app code is never baked into the kernel/image builder). The
+migration: `tools/mkimage` (via a `tools/syshelp`-style discovery pass over
+the app crates, never a per-bundle list, §2.2) plants each command app's
+signed `Run` and `AppInfo` onto the read-only `/System/Apps` store beside its
+`Help/`; the store is discovered by scanning those on-disk bundles; `spawn`/
+`appmgr` load and verify `Run` from disk; and the embedded `SPAWN_PROGRAMS`
+registry, the `*_rxe.rs` `include!`s, and `spawn_paths.rs` are deleted (§2.14).
+The stale "embedded in `rustos_man::help`" description above is superseded by
+the same on-disk-bundle rule and is folded into this migration.
+
 ---
 
 ## USB — modular USB stack + device hot-removal (`plans/USB.md`)
@@ -3733,6 +3752,19 @@ of how much code was produced.
 
 Amendments to `AGENTS.md` (the binding charter) are logged here so an agent
 can see *why* a rule exists without diffing the charter's history.
+
+- **2026-07-04 — App bundles are self-contained; no app code baked into the
+  kernel.** Amended §16.5 (and the §16.2 `/System/Apps` note) after command
+  apps (`ls`, `ps`, `man`) were found with only `Help/` on disk while their
+  `Run` rxe was compiled into the kernel and dispatched by a byte-exact
+  in-kernel spawn-path lookup — so browsing `ls.app/` showed only `Help/` and
+  bypassed the `appmgr` verification path. The rule now binds an app as *its
+  bundle directory*: every part (Run, Code/, AppInfo, Resources/,
+  DefaultSettings/, Help/, app-private static/shared libs) is a real file
+  inside `<Name>.app/`; app code is never compiled into or served from the
+  kernel/image builder, and the store is discovered by scanning on-disk
+  bundles, never a compiled-in registry (§2.2, §18.3/§18.6). The only outside
+  reach is the curated `/System/Libraries/` set and the syscall ABI.
 
 - **2026-07-04 — Command help is authored in the bundle, never hardcoded.**
   Amended §16.5 (`plans/APPS.md` §6.1) after `ls`/`man` were found embedding
