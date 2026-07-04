@@ -23,7 +23,11 @@ path = "src/lib.rs"
 [dependencies]
 
 [dev-dependencies]
-# The one help engine: the aggregator's tests parse every discovered document
-# through it under the same fail-closed bounds a running system applies, so a
-# malformed page can never reach an image (plans/APPS.md §6).
-rustos-help = { path = "../../lib/help", version = "=0.0.0" }
+# The one help engine and its one help-tree lint (plans/APPS.md §6, §8.1):
+# the aggregator's tests judge every discovered document through the same
+# shared lint `cargo xtask help-lint` gates on, so a malformed, incomplete,
+# drifted, or policy-violating tree can never reach an image and the two
+# judgements can never diverge (AGENTS.md §2.2).
+rustos-help = { path = "../../lib/help", version = "=0.0.0", features = [
+    "lint",
+] }

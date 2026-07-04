@@ -125,11 +125,10 @@ mod rt_source {
     impl HelpSource for BundleHelp {
         fn locale_dirs(&self) -> Result<Vec<String>, SourceError> {
             let path = self.help_root();
-            let dir = match rustos_rt::open_dir(path.as_bytes()) {
-                Ok(dir) => dir,
-                // No tree, no locales: the engine reports "not found" and
-                // the caller falls back to its usage banner.
-                Err(_) => return Ok(Vec::new()),
+            // No tree, no locales: the engine reports "not found" and the
+            // caller falls back to its usage banner.
+            let Ok(dir) = rustos_rt::open_dir(path.as_bytes()) else {
+                return Ok(Vec::new());
             };
             let bytes = Self::read_dir_bytes(&dir)?;
             let mut dirs = Vec::new();

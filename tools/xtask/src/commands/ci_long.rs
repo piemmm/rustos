@@ -15,7 +15,8 @@
 //! `cargo test` matrix, the release-profile crypto constant-time tests, the
 //! QEMU integration tests, the fuzz harnesses, and the proptest models. The
 //! deterministic gates `ci` also runs — `fmt`, `clippy`, `deps-check`,
-//! `cfg-check`, `docs-check`, `cargo deny`, `supply-chain`, `model-check`
+//! `cfg-check`, `help-lint`, `docs-check`, `cargo deny`, `supply-chain`,
+//! `model-check`
 //! (exhaustive by construction), `spec-review`, `abi-check`, `c-header`, and
 //! the image gate — are pass/fail checks whose result cannot change between
 //! runs, so repeating them 2·[`REPS`] times would burn a long-runner's time

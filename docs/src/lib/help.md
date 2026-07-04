@@ -91,3 +91,26 @@ that sequence lives here once rather than per tool:
   where the image builder plants the documents. Only a freestanding `Run`
   binary enables the feature; the engine itself stays seam-injected and
   performs no ambient I/O.
+
+## The help-tree lint (the `lint` cargo feature)
+
+`lint_help_trees` is the one judgement of a set of discovered `Help/` trees
+(`plans/APPS.md` §8.1), shared by the `cargo xtask help-lint` CI gate and the
+`tools/syshelp` aggregator tests so the two can never diverge. It is pure —
+rows of `(bundle, locale, file, bytes)` in, violation messages out, no I/O —
+and checks:
+
+- locale and document-name spellings, and the fail-closed structural parse
+  bounds, on every document;
+- `default/` (en-US) presence, completeness across the standing
+  `REQUIRED_LOCALES` set, and no translation-only documents;
+- cross-locale `OPTIONS` switch-key drift: every item leads with a backticked
+  language-neutral key and each translation's key sequence equals
+  `default/`'s (the per-app unit tests separately pin `default/`'s keys to
+  each program's actual argument parser);
+- the closed content-policy word screen, whole-word and case-insensitive, in
+  every locale.
+
+The feature is host-only tooling; a RustOS program never links it. The
+`help-lint` gate additionally verifies coverage: every command app the
+`AppInfo.toml` discovery walk finds ships a `default/<command>.md` document.

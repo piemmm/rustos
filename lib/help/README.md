@@ -41,6 +41,13 @@ here once and every consumer imports them.
   `rustos-rt` file wrappers, spelled from the shared `lib/abi` store/suffix
   constants. Enabled only by a freestanding `Run` binary; the engine itself
   stays seam-injected and performs no ambient I/O.
+- `lint_help_trees` (the `lint` cargo feature, host-only tooling) — the one
+  help-tree lint (`plans/APPS.md` §8.1) shared by `cargo xtask help-lint` and
+  the `tools/syshelp` aggregator tests: spellings and parse bounds on every
+  discovered document, `default/` presence, `REQUIRED_LOCALES` completeness,
+  no translation-only documents, cross-locale `OPTIONS` switch-key drift, and
+  the closed content-policy word screen. Pure rows-in/violations-out; never
+  linked into a RustOS program.
 
 ## Design
 

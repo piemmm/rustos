@@ -40,6 +40,10 @@
 //!   (layering, concrete-scheduler naming, optional-desktop boundary)
 //! - `cfg-check` — rejects target-conditional compilation
 //!   outside the architecture ports and build glue
+//! - `help-lint` — lints every command app's discovered `Help/` tree
+//!   (plans/APPS.md §8.1): `default/` presence, required-locale completeness,
+//!   structural bounds, cross-locale `OPTIONS` switch-key drift, the
+//!   content-policy screen, and per-command coverage
 //! - `coverage`     — `cargo llvm-cov` report for the host-testable subset
 //! - `sbom` — emit a `CycloneDX` SBOM from `Cargo.lock`:
 //!   every workspace and external crate with its version, source URL,
@@ -55,6 +59,7 @@
 //!   equivalent), failing closed on any invariant counterexample
 //! - `ci`           — the full pipeline a PR must pass, ordered cheapest-first
 //!   so a failing PR fails fast: `fmt --check`, `deps-check`, `cfg-check`,
+//!   `help-lint`,
 //!   `docs-check` (rustdoc/link failures are the common first trip and need
 //!   only a doc build, so they run ahead of the compile-heavy stages),
 //!   `clippy`, `test` (run 20× on a GitHub Actions runner to catch flaky

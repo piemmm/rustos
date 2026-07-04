@@ -3047,6 +3047,7 @@ dependencies = [
  "rustos-drv-input-usb-kbd",
  "rustos-drv-input-virtio-input",
  "rustos-fuzzseed",
+ "rustos-help",
  "rustos-itest-harness",
  "rustos-kernel-syscall",
  "rustos-mkimage",

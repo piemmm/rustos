@@ -57,8 +57,9 @@ amended), and deliverable 6 for **every store-registered command app**:
 and the QEMU fixture) and honour the §4 `-h`/`-?` short-help convention
 through the one shared `lib/help` render (`own_short_help` + the
 `rt`-feature `BundleHelp` own-bundle source, which every `Run` binary
-reuses instead of a private copy). Remaining:
-deliverables 5 and 7 (`cargo xtask help-lint`; wider `stdinfo`
+reuses instead of a private copy), and deliverable 5 (`cargo xtask
+help-lint`, the §8.1 gate wired into `cargo xtask ci`). Remaining:
+deliverable 7 (wider `stdinfo`
 adoption — `man`'s locale-fallback and `ls`'s omission records are
 live), `Help/` trees for future command apps as each becomes a
 registered bundle, and the **charter-blocking** deliverable 8 —
@@ -555,8 +556,24 @@ both landed; `plans/SHELL.md` command execution):
    and `man <cmd>`'s argument now reach a child); and the session-ceiling
    QEMU vertical proves the bare word `ps` **and** a delivered `ps
    --bogus` argument end to end.
-5. **`cargo xtask help-lint`** — the §8.1 content/completeness/switch-drift
-   check, wired into `cargo xtask ci` (§7).
+5. **`cargo xtask help-lint`** — **done.** The §8.1 gate, wired into
+   `cargo xtask ci` (and `ci-long`) among the cheap fail-fast checks. The
+   judgement is one definition, `rustos_help::lint_help_trees` (`lib/help`'s
+   host-only `lint` cargo feature; pure rows-in/violations-out, unit-tested
+   per violation class), shared by the gate and the `tools/syshelp`
+   aggregator tests (§2.2) so the two can never diverge. It checks, over the
+   build-discovered `rustos_syshelp::HELP_FILES` rows (the same data the
+   image planters plant): locale/document spellings and the `lib/help`
+   structural bounds (§6), `default/` presence and completeness across the
+   standing `rustos_help::REQUIRED_LOCALES` set, no translation-only
+   documents (§2.1), per-item backticked switch keys and cross-locale
+   `OPTIONS` key equality against `default/` (§3.1 — the per-app unit tests
+   keep pinning `default/` to each parser, which only the app crate knows),
+   and the closed content-policy word screen (whole-word, case-insensitive,
+   all six locales). The gate additionally verifies coverage: every command
+   app the `AppInfo.toml` discovery walk finds ships its
+   `default/<command>.md` (never a per-bundle list). Any violation fails
+   closed with a message naming the offending `bundle/locale/file`.
 6. **`Help/` trees for the existing command apps** — **done for every
    store-registered command app**: `ls`, `ps`, `top`, `sysinfo`, `users`,
    and `elsh` each author their six-locale tree on disk in the bundle,

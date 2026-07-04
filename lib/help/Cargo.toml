@@ -18,6 +18,13 @@ publish.workspace = true
 # I/O.
 rt = ["dep:rustos-abi", "dep:rustos-rt"]
 
+# The one help-tree lint (plans/APPS.md §8.1): completeness, required-locale
+# coverage, cross-locale OPTIONS switch-key drift, structural bounds, and the
+# content-policy screen over a set of discovered Help/ trees. Enabled only by
+# host-side consumers (`cargo xtask help-lint`, the `tools/syshelp` aggregator
+# tests); never linked into a RustOS program.
+lint = []
+
 [dependencies]
 rustos-vt = { path = "../vt", version = "=0.0.0" }
 rustos-curses = { path = "../curses", version = "=0.0.0" }

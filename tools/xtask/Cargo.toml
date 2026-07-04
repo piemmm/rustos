@@ -36,6 +36,13 @@ path = "src/main.rs"
 rustos-abi = { path = "../../lib/abi", version = "=0.0.0" }
 rustos-kernel-syscall = { path = "../../kernel/syscall", version = "=0.0.0" }
 rustos-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
+# `help-lint` (plans/APPS.md §8.1) judges every discovered Help/ document
+# through the one shared lint in the help engine (`rustos_help::lint_help_trees`,
+# behind its host-only `lint` feature), so the gate and the `tools/syshelp`
+# aggregator tests can never diverge (AGENTS.md §2.2).
+rustos-help = { path = "../../lib/help", version = "=0.0.0", features = [
+    "lint",
+] }
 # The app-bundle composer (`image_apps`) signs each bundle's `AppInfo`
 # over the exact contents the volume ships; the bundle's `Help/` documents
 # come from the same build-discovered source the image planters plant

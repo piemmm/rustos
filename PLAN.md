@@ -3578,10 +3578,17 @@ per-locale switch-drift unit tests pin each tree's `OPTIONS` to its
 parser, and the tools that gained filesystem reach for the help read
 request `CAP_FS_ACCESS` (the man/ls precedent).
 
-**Remaining** (staged in `plans/APPS.md` §13): `cargo xtask help-lint`
-(completeness, switch-drift, no foul/derogatory content, required locales
-`fr-FR`/`de-DE`/`es-ES`/`uk-UA`/`it-IT`); `Help/` trees for future command
-apps as each becomes a registered store bundle; and wider `stdinfo`
+`cargo xtask help-lint` (plans/APPS.md deliverable 5) is live: the one
+shared judgement `rustos_help::lint_help_trees` (`lib/help`'s host-only
+`lint` feature, also run by the `tools/syshelp` aggregator tests) gates
+every discovered `Help/` tree in `cargo xtask ci`/`ci-long` — spellings,
+structural bounds, `default/` presence, required-locale completeness
+(`fr-FR`/`de-DE`/`es-ES`/`uk-UA`/`it-IT`), no translation-only documents,
+cross-locale `OPTIONS` switch-key drift, the content-policy word screen,
+and per-command coverage over the `AppInfo.toml` discovery walk.
+
+**Remaining** (staged in `plans/APPS.md` §13): `Help/` trees for future
+command apps as each becomes a registered store bundle; and wider `stdinfo`
 adoption in command apps
 (advisory-only, §20). A cross-app *shared-library* bundle stays declined —
 §16.4 refuses cross-bundle library references — so a resource-only bundle may

@@ -17,6 +17,7 @@ mod ci_long;
 mod deps_check;
 mod fssoak;
 mod fuzz;
+mod help_lint;
 mod image_apps;
 mod image_drivers;
 mod linkcheck;
@@ -46,6 +47,7 @@ pub enum Command {
     CHeader,
     DepsCheck,
     CfgCheck,
+    HelpLint,
     Coverage,
     Sbom,
     SupplyChain,
@@ -74,6 +76,7 @@ impl Command {
         Command::CHeader,
         Command::DepsCheck,
         Command::CfgCheck,
+        Command::HelpLint,
         Command::Coverage,
         Command::Sbom,
         Command::SupplyChain,
@@ -101,6 +104,7 @@ impl Command {
             "c-header" => Command::CHeader,
             "deps-check" => Command::DepsCheck,
             "cfg-check" => Command::CfgCheck,
+            "help-lint" => Command::HelpLint,
             "coverage" => Command::Coverage,
             "sbom" => Command::Sbom,
             "supply-chain" => Command::SupplyChain,
@@ -130,6 +134,7 @@ impl Command {
             Command::CHeader => "c-header",
             Command::DepsCheck => "deps-check",
             Command::CfgCheck => "cfg-check",
+            Command::HelpLint => "help-lint",
             Command::Coverage => "coverage",
             Command::Sbom => "sbom",
             Command::SupplyChain => "supply-chain",
@@ -162,6 +167,9 @@ impl Command {
             }
             Command::DepsCheck => "Enforce the §17.4 modularity dependency graph.",
             Command::CfgCheck => "Reject target-conditional compilation outside the arch ports.",
+            Command::HelpLint => {
+                "Lint the command apps' Help/ trees: completeness, drift, content policy."
+            }
             Command::Coverage => "Produce a host-side coverage report via cargo-llvm-cov.",
             Command::Sbom => "Emit a CycloneDX SBOM from Cargo.lock (§19.3).",
             Command::SupplyChain => {
@@ -202,6 +210,7 @@ impl Command {
             Command::CHeader => run_c_header(ctx, args),
             Command::DepsCheck => run_deps_check(ctx),
             Command::CfgCheck => run_cfg_check(ctx),
+            Command::HelpLint => help_lint::run(ctx),
             Command::Coverage => run_coverage(ctx, args),
             Command::Sbom => run_sbom(ctx, args),
             Command::SupplyChain => run_supply_chain(ctx, args),
@@ -891,6 +900,10 @@ fn run_ci(ctx: &Context) -> Result<(), String> {
     // any compile-heavy stage to fail a non-conforming PR fast.
     run_deps_check(ctx)?;
     run_cfg_check(ctx)?;
+    // help-lint judges build-embedded data (the discovered Help/ trees) and
+    // the AppInfo.toml discovery walk: static, deterministic, and cheap, so
+    // it runs with the other fail-fast gates (plans/APPS.md §8.1).
+    help_lint::run(ctx)?;
     // docs-check (rustdoc with warnings denied, mdBook, link check) is the
     // gate a PR most often trips first, and a broken intra-doc link or a
     // denied rustdoc warning is cheap to surface: it needs only a doc build,
@@ -956,8 +969,9 @@ fn run_ci(ctx: &Context) -> Result<(), String> {
 /// [`ci_long::REPS`] times concurrently, per test, before the next test.
 ///
 /// The deterministic gates (`fmt`, `clippy`, the modularity checks,
-/// `docs-check`, `cargo deny`, `supply-chain`, `model-check`, `spec-review`,
-/// `abi-check`, `c-header`, and the image gate) are pass/fail checks whose
+/// `help-lint`, `docs-check`, `cargo deny`, `supply-chain`, `model-check`,
+/// `spec-review`, `abi-check`, `c-header`, and the image gate) are
+/// pass/fail checks whose
 /// result cannot change between runs, so they run once, exactly as in `ci`.
 /// The repeated stages — the host test matrix, the release crypto
 /// constant-time tests, the QEMU integration tests, the fuzz harnesses, and
@@ -985,6 +999,7 @@ fn run_ci_long(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     run_fmt(ctx, &[])?;
     run_deps_check(ctx)?;
     run_cfg_check(ctx)?;
+    help_lint::run(ctx)?;
     // docs-check needs only a doc build (never the QEMU matrix) and is the
     // gate most often tripped first, so it runs ahead of clippy and the long
     // flake-hunt phase, exactly as in `run_ci`.

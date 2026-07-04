@@ -61,14 +61,9 @@ mod tests {
     use std::collections::BTreeSet;
     use std::vec::Vec;
 
-    use rustos_help::{DocumentName, HelpDoc, Locale};
+    use rustos_help::{lint_help_trees, LintDoc};
 
     use super::HELP_FILES;
-
-    /// The standing required locale set every OS command app must ship
-    /// (`plans/APPS.md` §8.1): the mandatory `default/` canonical (en-US)
-    /// document plus the standing translations.
-    const REQUIRED_LOCALES: &[&str] = &["default", "fr-FR", "de-DE", "es-ES", "uk-UA", "it-IT"];
 
     /// Discovery finds the command apps that ship help. This anchors the
     /// scan: if the roots or the tree layout regress, at least the known
@@ -83,83 +78,25 @@ mod tests {
         );
     }
 
-    /// Every discovered document parses under the engine's fail-closed
-    /// bounds, so a malformed page can never reach an image; its locale and
-    /// document-name spellings are the ones the running engine validates.
+    /// Every discovered tree passes the one shared help-tree lint
+    /// (`plans/APPS.md` §8.1) — the same judgement `cargo xtask help-lint`
+    /// gates on: spellings and fail-closed parse bounds, `default/` (en-US)
+    /// presence, required-locale completeness, no translation-only
+    /// documents, cross-locale `OPTIONS` switch-key drift, and the content
+    /// policy. A tree this rejects can never reach an image.
     #[test]
-    fn every_discovered_document_is_valid() {
+    fn every_discovered_tree_passes_the_shared_lint() {
         assert!(!HELP_FILES.is_empty(), "at least one help tree must exist");
-        for doc in HELP_FILES {
-            Locale::parse(doc.locale)
-                .unwrap_or_else(|_| panic!("{}/{} bad locale", doc.bundle, doc.locale));
-            let stem = doc
-                .file
-                .strip_suffix(".md")
-                .unwrap_or_else(|| panic!("{} is not a .md document", doc.file));
-            DocumentName::parse(stem).unwrap_or_else(|_| panic!("{} bad document name", doc.file));
-            HelpDoc::parse(doc.bytes).unwrap_or_else(|_| {
-                panic!("{}/{}/{} does not parse", doc.bundle, doc.locale, doc.file)
-            });
-        }
-    }
-
-    /// Each bundle that ships help ships the complete required locale set for
-    /// each of its documents (`plans/APPS.md` §8.1), so an image never carries
-    /// a partially-translated command.
-    #[test]
-    fn every_bundle_ships_the_required_locale_set() {
-        let bundles: BTreeSet<&str> = HELP_FILES.iter().map(|doc| doc.bundle).collect();
-        for bundle in bundles {
-            // The document names this bundle ships (by file name).
-            let files: BTreeSet<&str> = HELP_FILES
-                .iter()
-                .filter(|doc| doc.bundle == bundle && doc.locale == "default")
-                .map(|doc| doc.file)
-                .collect();
-            assert!(
-                !files.is_empty(),
-                "{bundle} must ship a default/ (en-US) document"
-            );
-            for file in files {
-                let locales: BTreeSet<&str> = HELP_FILES
-                    .iter()
-                    .filter(|doc| doc.bundle == bundle && doc.file == file)
-                    .map(|doc| doc.locale)
-                    .collect();
-                let missing: Vec<&str> = REQUIRED_LOCALES
-                    .iter()
-                    .copied()
-                    .filter(|locale| !locales.contains(locale))
-                    .collect();
-                assert!(
-                    missing.is_empty(),
-                    "{bundle} {file} missing locales: {}",
-                    missing.join(", ")
-                );
-            }
-        }
-    }
-
-    /// No bundle carries a document under a translated locale that is absent
-    /// from `default/` (`plans/APPS.md` §2.1): there would be nothing to fall
-    /// back *from*, and it signals a drifted tree.
-    #[test]
-    fn translations_never_introduce_a_document_absent_from_default() {
-        let bundles: BTreeSet<&str> = HELP_FILES.iter().map(|doc| doc.bundle).collect();
-        for bundle in bundles {
-            let default_docs: BTreeSet<&str> = HELP_FILES
-                .iter()
-                .filter(|doc| doc.bundle == bundle && doc.locale == "default")
-                .map(|doc| doc.file)
-                .collect();
-            for doc in HELP_FILES.iter().filter(|doc| doc.bundle == bundle) {
-                assert!(
-                    default_docs.contains(doc.file),
-                    "{bundle} {}/{} has no default/ counterpart",
-                    doc.locale,
-                    doc.file
-                );
-            }
-        }
+        let docs: Vec<LintDoc<'_>> = HELP_FILES
+            .iter()
+            .map(|doc| LintDoc {
+                bundle: doc.bundle,
+                locale: doc.locale,
+                file: doc.file,
+                bytes: doc.bytes,
+            })
+            .collect();
+        let violations = lint_help_trees(&docs);
+        assert!(violations.is_empty(), "{}", violations.join("\n"));
     }
 }

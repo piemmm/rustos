@@ -56,6 +56,8 @@
 extern crate alloc;
 
 mod doc;
+#[cfg(feature = "lint")]
+mod lint;
 mod locale;
 mod own;
 mod render;
@@ -65,6 +67,8 @@ pub use doc::{
     MAX_BLOCKS_PER_SECTION, MAX_DOC_LEN, MAX_LINES, MAX_LINE_LEN, MAX_LIST_ITEMS,
     MAX_TABLE_COLUMNS, MAX_TABLE_ROWS,
 };
+#[cfg(feature = "lint")]
+pub use lint::{lint_help_trees, LintDoc, REQUIRED_LOCALES};
 pub use locale::{
     load, DocumentName, Fallback, HelpSource, LoadError, Loaded, Locale, NameError, Selection,
     SourceError, TagError, DEFAULT_LOCALE, MAX_DOCUMENT_NAME_LEN, MAX_LOCALE_DIRS, MAX_LOCALE_LEN,
