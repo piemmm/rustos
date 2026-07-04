@@ -36,6 +36,13 @@ path = "src/main.rs"
 rustos-abi = { path = "../../lib/abi", version = "=0.0.0" }
 rustos-kernel-syscall = { path = "../../kernel/syscall", version = "=0.0.0" }
 rustos-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
+# `test --qemu` cross-builds the CCOMPAT end-to-end C programs, whose build
+# scripts locate `clang`/`ld.lld` through the audited `rustos-cc` wrapper. xtask
+# resolves that toolchain *once* up front and exports its path so each build
+# script uses the authoritative override instead of re-running the full search
+# per crate/target (AGENTS.md §2.2 — the discovery logic lives only in
+# `rustos-cc`; xtask merely primes it). Host-only build glue (AGENTS.md §12).
+rustos-cc = { path = "../cc", version = "=0.0.0" }
 # `help-lint` (plans/APPS.md §8.1) judges every discovered Help/ document
 # through the one shared lint in the help engine (`rustos_help::lint_help_trees`,
 # behind its host-only `lint` feature), so the gate and the `tools/syshelp`

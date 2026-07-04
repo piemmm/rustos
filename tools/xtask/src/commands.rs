@@ -894,16 +894,15 @@ fn run_ci(ctx: &Context) -> Result<(), String> {
     // needs the pinned Pi firmware blobs: an operator-staged directory
     // (`--firmware`/`$RUSTOS_PI_FIRMWARE`) or `curl` to populate the
     // checksummed cache (`docs/src/install/raspberry_pi.md`).
+    // `fmt --check` is the very first, cheapest gate and streams `cargo fmt`
+    // output live, so it stays a sequential fail-fast step rather than joining
+    // the concurrent group below.
     run_fmt(ctx, &[])?;
-    // Modularity gates are static, deterministic, and cheap — a `cargo
-    // metadata` walk and a source scan, no compilation — so they run before
-    // any compile-heavy stage to fail a non-conforming PR fast.
-    run_deps_check(ctx)?;
-    run_cfg_check(ctx)?;
-    // help-lint judges build-embedded data (the discovered Help/ trees) and
-    // the AppInfo.toml discovery walk: static, deterministic, and cheap, so
-    // it runs with the other fail-fast gates (plans/APPS.md §8.1).
-    help_lint::run(ctx)?;
+    // The deterministic, non-compiling gates run concurrently as one group
+    // before any compile-heavy stage: they still gate the expensive phases
+    // (fail-fast preserved), and their wall-clock costs now overlap instead of
+    // summing. See [`run_static_gates`].
+    run_static_gates(ctx)?;
     // docs-check (rustdoc with warnings denied, mdBook, link check) is the
     // gate a PR most often trips first, and a broken intra-doc link or a
     // denied rustdoc warning is cheap to surface: it needs only a doc build,
@@ -918,12 +917,9 @@ fn run_ci(ctx: &Context) -> Result<(), String> {
     // (`tools/ci/soak.sh`, `cargo xtask test --soak`), never in `ci`. The
     // fuzz and proptest gates below likewise run a single iteration here.
     run_test(ctx, &[OsString::from("--qemu")])?;
+    // `cargo deny check` streams its own summary, so it stays sequential among
+    // the compile-heavy phases rather than joining the concurrent group.
     run_deny(ctx)?;
-    // supply-chain integrity: the source-hash allow-list and the
-    // advisory SLA. Runs right after `cargo deny` (which blocks an
-    // advisory immediately); this gate caps how long one may be accepted
-    // and fails closed when a pin drifts from `Cargo.lock`.
-    run_supply_chain(ctx, &[])?;
     // the per-PR fuzz gate. Runs each in-tree harness for a single
     // iteration with a fresh, logged seed (a crash, hang, or invariant
     // failure fails the gate, fail-closed). `ci` does not budget the
@@ -936,24 +932,12 @@ fn run_ci(ctx: &Context) -> Result<(), String> {
     // (fail-closed). The wall-clock soak is `cargo xtask proptest --soak`,
     // run outside `ci`.
     run_proptest(ctx, &[OsString::from("--once")])?;
-    // Silver: exhaustively model-check the capability + IPC state
-    // machine on every PR. The check is exhaustive (not budgeted) and fast,
-    // so it always runs; a reachable invariant violation fails closed.
-    run_model_check(&[])?;
-    // reject any unreviewed AI-drafted artefact marker that reached
-    // the tree. Static and cheap; fails closed.
-    run_spec_review(ctx)?;
     // re-run `lib/crypto`'s unit tests under release optimisation
     // (`[profile.release]` is `opt-level = 3`). The constant-time
     // comparison guarantee can be broken by the optimiser, so the charter
     // requires the secret-handling tests to pass under `-C opt-level=3`,
     // not only the debug profile the main test phase uses.
     run_crypto_constant_time(ctx)?;
-    run_abi_check(ctx, &[])?;
-    // the C ABI development header is a generated view of `lib/abi`.
-    // Verify the committed copy is in sync so a `lib/abi` change cannot land
-    // without regenerating the header non-Rust programs link against.
-    run_c_header(ctx, &[])?;
     // every shippable image profile is built on every PR, so an
     // image-breaking change (kernel link, firmware manifest, root-volume
     // layout, profile seeding) can never land green. Both profiles of every
@@ -962,6 +946,62 @@ fn run_ci(ctx: &Context) -> Result<(), String> {
     // directory or the checksummed `target/pi-firmware` cache.
     run_image_gate(ctx)?;
     Ok(())
+}
+
+/// Run the deterministic, non-compiling gates concurrently, failing closed.
+///
+/// Every gate here is a read-only source/metadata scan or an in-xtask
+/// cross-check: none compiles the workspace or writes to the cargo build
+/// directory, so they share no mutable state and are safe to run at once.
+/// Driving them through the shared bounded-concurrency runner
+/// ([`parallel::run`]) overlaps their wall-clock costs instead of paying their
+/// sum. Because the whole group runs *before* the compile-heavy phases, a
+/// non-conforming tree still fails fast — and now reports *every* cheap
+/// failure together rather than only the first ([`parallel::run`] runs all
+/// jobs to completion and names each failure).
+///
+/// `fmt` (streams `cargo fmt` output) and `deny` (streams `cargo deny` output)
+/// are deliberately *not* here: they run sequentially so their live output is
+/// never interleaved with a concurrent job's.
+///
+/// This is the single definition of the cheap-gate set; both [`run_ci`] and
+/// [`run_ci_long`] call it rather than re-listing the gates.
+fn run_static_gates(ctx: &Context) -> Result<(), String> {
+    let jobs = vec![
+        // Modularity gates: a workspace dependency-graph walk and a source
+        // scan, no compilation (plans/APPS.md §8.1 for help-lint).
+        static_gate("deps-check", ctx, run_deps_check),
+        static_gate("cfg-check", ctx, run_cfg_check),
+        static_gate("help-lint", ctx, help_lint::run),
+        // Reject any unreviewed AI-drafted artefact marker that reached the
+        // tree; a source scan, fails closed.
+        static_gate("spec-review", ctx, run_spec_review),
+        // Supply-chain integrity: the source-hash allow-list against
+        // `Cargo.lock` and the advisory SLA, fails closed on drift.
+        static_gate("supply-chain", ctx, |c| run_supply_chain(c, &[])),
+        // The syscall-ABI cross-check and the generated C-header drift guard:
+        // both compare against the `lib/abi` source of truth compiled into
+        // xtask itself, so neither needs a workspace build.
+        static_gate("abi-check", ctx, |c| run_abi_check(c, &[])),
+        static_gate("c-header", ctx, |c| run_c_header(c, &[])),
+        // Silver: exhaustively model-check the capability + IPC state machine.
+        // Exhaustive (not budgeted) and fast; a reachable invariant violation
+        // fails closed.
+        static_gate("model-check", ctx, |_| run_model_check(&[])),
+    ];
+    let budget = parallel::default_concurrency(jobs.len());
+    parallel::run(jobs, budget)
+}
+
+/// Wrap one deterministic gate as a concurrency [`parallel::Job`], handing the
+/// worker its own owned [`Context`] so the closure is `'static`.
+fn static_gate(
+    label: &str,
+    ctx: &Context,
+    run: impl FnOnce(&Context) -> Result<(), String> + Send + 'static,
+) -> parallel::Job {
+    let ctx = ctx.clone();
+    parallel::Job::closure(label.to_string(), 1, move || run(&ctx))
 }
 
 /// The long-runner flake hunt: the same checks as [`run_ci`], but every
@@ -995,11 +1035,13 @@ fn run_ci_long(ctx: &Context, args: &[OsString]) -> Result<(), String> {
 
     // Deterministic gates first, once, so a non-conforming tree fails fast
     // before the long repeated-test phase (mirrors `run_ci`'s cheapest-first
-    // ordering: cheap static gates, then docs-check, then clippy).
+    // ordering: `fmt`, then the concurrent static-gate group, then docs-check,
+    // then clippy).
     run_fmt(ctx, &[])?;
-    run_deps_check(ctx)?;
-    run_cfg_check(ctx)?;
-    help_lint::run(ctx)?;
+    // The same concurrent cheap-gate group `run_ci` uses (deps-check,
+    // cfg-check, help-lint, spec-review, supply-chain, abi-check, c-header,
+    // model-check) — one definition, no re-listing.
+    run_static_gates(ctx)?;
     // docs-check needs only a doc build (never the QEMU matrix) and is the
     // gate most often tripped first, so it runs ahead of clippy and the long
     // flake-hunt phase, exactly as in `run_ci`.
@@ -1016,13 +1058,9 @@ fn run_ci_long(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     // proptest stages.
     ci_long::flake_hunt(ci_long::all_units(ctx, ci_long::REPS), ci_long::REPS)?;
 
-    // The remaining deterministic gates, once, in `ci` order.
+    // `cargo deny` streams its own summary, so it stays sequential (not in the
+    // concurrent group), once, after the flake hunt.
     run_deny(ctx)?;
-    run_supply_chain(ctx, &[])?;
-    run_model_check(&[])?;
-    run_spec_review(ctx)?;
-    run_abi_check(ctx, &[])?;
-    run_c_header(ctx, &[])?;
     run_image_gate(ctx)?;
     Ok(())
 }

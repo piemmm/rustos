@@ -3019,6 +3019,10 @@ const AARCH64_TARGET: &str = "aarch64-unknown-none";
 /// re-runs the binaries rather than rebuilding them each pass ('s no-flaky-tests rule: the value of repetition is in the *runs*).
 pub fn build_all(ctx: &Context) -> Result<(), String> {
     eprintln!("xtask: [test --qemu] {} test(s) enrolled", TESTS.len());
+    // Resolve the C toolchain once, up front, and export its path so every
+    // CCOMPAT C-program build script uses the authoritative override rather
+    // than re-running the full `clang`/`ld.lld` search per crate and target.
+    prime_c_toolchain();
     // Group the enrolled packages by target triple and build each triple in a
     // single `cargo build`. One invocation per triple (rather than one per
     // enrolment) lets cargo compile that triple's packages concurrently and
@@ -3047,6 +3051,83 @@ pub fn build_all(ctx: &Context) -> Result<(), String> {
     // run passes reuse one composition instead of racing to build it.
     super::image_apps::app_store_files(ctx)?;
     Ok(())
+}
+
+/// Resolve the audited C toolchain once and export its path to the child
+/// build scripts, so the CCOMPAT C-program builds skip the per-crate search.
+///
+/// Each `c_program_qemu_*` build script calls `rustos_cc::Toolchain::discover`,
+/// which — absent an override — searches `PATH` and every known LLVM install
+/// prefix, running `--version` on each candidate until one reports the pinned
+/// release. Doing that independently in every C build script, for every target
+/// triple, repeats the same subprocess "hunt" many times per run. Resolving it
+/// here once and exporting `RUSTOS_CC_CLANG` / `RUSTOS_CC_LLD` makes each build
+/// script take the authoritative-override fast path (a single `--version` on
+/// the known binary) instead.
+///
+/// The discovery logic itself is not duplicated: this only *calls* the one
+/// definition in `rustos-cc` and records its result. It is best-effort — an
+/// operator override is left untouched, and a discovery failure is not fatal
+/// here (a build script that actually needs the toolchain still fails closed
+/// with the full install hint), so a run that builds no C program is never
+/// blocked by an absent C toolchain.
+fn prime_c_toolchain() {
+    let plan = PrimePlan::from_env(
+        std::env::var_os("RUSTOS_CC_CLANG").is_some(),
+        std::env::var_os("RUSTOS_CC_LLD").is_some(),
+    );
+    if !plan.discover {
+        return;
+    }
+    match rustos_cc::Toolchain::discover() {
+        Ok(toolchain) => {
+            if plan.set_clang {
+                std::env::set_var("RUSTOS_CC_CLANG", &toolchain.clang.path);
+            }
+            if plan.set_lld {
+                std::env::set_var("RUSTOS_CC_LLD", &toolchain.lld.path);
+            }
+            eprintln!(
+                "xtask: [test --qemu] C toolchain primed: clang={} ld.lld={}",
+                toolchain.clang.path.display(),
+                toolchain.lld.path.display(),
+            );
+        }
+        Err(err) => {
+            eprintln!(
+                "xtask: [test --qemu] C toolchain not pre-resolved ({err}); \
+                 each C-program build script will resolve it on demand"
+            );
+        }
+    }
+}
+
+/// What [`prime_c_toolchain`] should do given which override variables the
+/// environment already pins — the pure, testable core of the decision.
+///
+/// An operator override is authoritative and must never be clobbered, so a
+/// variable that is already set is left alone; discovery runs only if at least
+/// one variable still needs a value.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct PrimePlan {
+    /// Whether the toolchain must be resolved at all.
+    discover: bool,
+    /// Whether to export `RUSTOS_CC_CLANG` from the resolved toolchain.
+    set_clang: bool,
+    /// Whether to export `RUSTOS_CC_LLD` from the resolved toolchain.
+    set_lld: bool,
+}
+
+impl PrimePlan {
+    fn from_env(clang_pinned: bool, lld_pinned: bool) -> Self {
+        let set_clang = !clang_pinned;
+        let set_lld = !lld_pinned;
+        Self {
+            discover: set_clang || set_lld,
+            set_clang,
+            set_lld,
+        }
+    }
 }
 
 /// The distinct target triples across the enrolled tests, in first-seen
@@ -3315,8 +3396,36 @@ fn run_one(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_targets, TESTS};
+    use super::{build_targets, PrimePlan, TESTS};
     use std::time::Duration;
+
+    #[test]
+    fn priming_resolves_and_exports_both_when_nothing_is_pinned() {
+        let plan = PrimePlan::from_env(false, false);
+        assert!(plan.discover, "must resolve the toolchain when unset");
+        assert!(plan.set_clang);
+        assert!(plan.set_lld);
+    }
+
+    #[test]
+    fn priming_never_clobbers_an_operator_override() {
+        // Both pinned: nothing to resolve, and neither variable is touched.
+        let both = PrimePlan::from_env(true, true);
+        assert!(!both.discover);
+        assert!(!both.set_clang);
+        assert!(!both.set_lld);
+
+        // One pinned: resolve, but only export the *unpinned* one.
+        let clang_only = PrimePlan::from_env(true, false);
+        assert!(clang_only.discover);
+        assert!(!clang_only.set_clang, "must not overwrite a pinned clang");
+        assert!(clang_only.set_lld);
+
+        let lld_only = PrimePlan::from_env(false, true);
+        assert!(lld_only.discover);
+        assert!(lld_only.set_clang);
+        assert!(!lld_only.set_lld, "must not overwrite a pinned ld.lld");
+    }
 
     /// The smallest wall-clock budget any enrolment may carry.
     ///

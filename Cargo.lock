@@ -3040,6 +3040,7 @@ name = "rustos-xtask"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-cc",
  "rustos-crypto",
  "rustos-drv-bus-pcie-brcm",
  "rustos-drv-bus-usb",

@@ -58,14 +58,16 @@
 //!   IPC state machine (an in-tree explicit-state checker; the TLA+
 //!   equivalent), failing closed on any invariant counterexample
 //! - `ci`           — the full pipeline a PR must pass, ordered cheapest-first
-//!   so a failing PR fails fast: `fmt --check`, `deps-check`, `cfg-check`,
-//!   `help-lint`,
-//!   `docs-check` (rustdoc/link failures are the common first trip and need
-//!   only a doc build, so they run ahead of the compile-heavy stages),
+//!   so a failing PR fails fast: `fmt --check`, then the concurrent
+//!   static-gate group (`deps-check`, `cfg-check`, `help-lint`,
+//!   `spec-review`, `supply-chain`, `abi-check`, `c-header`, `model-check` —
+//!   all read-only, non-compiling checks run at once so their costs overlap),
+//!   then `docs-check` (rustdoc/link failures are the common first trip and
+//!   need only a doc build, so they run ahead of the compile-heavy stages),
 //!   `clippy`, `test` (run 20× on a GitHub Actions runner to catch flaky
 //!   tests; once locally so a pre-push `ci` is not punishingly slow),
-//!   `cargo deny check`, `supply-chain`, `fuzz --quick`, `proptest --quick`,
-//!   `model-check`, `spec-review`, `abi-check`, `c-header`
+//!   `cargo deny check`, `fuzz --quick`, `proptest --quick`,
+//!   the release crypto constant-time tests, and the image gate
 //! - `ci-long`      — the same checks as `ci`, but for a dedicated long-lived
 //!   runner: every test-executing stage (the host test matrix, the release
 //!   crypto constant-time tests, the QEMU integration tests, the fuzz
@@ -141,6 +143,11 @@ fn usage() -> String {
 }
 
 /// Repository-wide paths discovered once per invocation.
+///
+/// `Clone` is derived so a concurrent pipeline stage can hand each worker its
+/// own owned copy (both fields are cheap-to-clone owned values), letting the
+/// worker closures be `'static` for the shared concurrency runner.
+#[derive(Clone)]
 pub struct Context {
     /// Absolute path to the workspace root (the directory containing the
     /// top-level `Cargo.toml`).
