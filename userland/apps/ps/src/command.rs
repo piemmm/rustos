@@ -17,18 +17,21 @@ pub enum Command {
         /// List every process rather than just the caller's own.
         all: bool,
     },
-    /// Print the usage banner (`-h`/`--help`).
+    /// Render `ps`'s own short help (`-h`/`-?`/`--help`): the `NAME`,
+    /// `SYNOPSIS`, and compact `OPTIONS` of its Help document, through the
+    /// same engine as any other command's short help (plans/APPS.md §4).
     Help,
 }
 
 /// Parse `args` (the tool's arguments, excluding the program name) into a
 /// [`Command`].
 ///
-/// The grammar is `ps [-e | -A | --all] [-h]`:
+/// The grammar is `ps [-e | -A | --all] [-h | -?]`:
 ///
 /// * `-e` / `-A` / `--all` — list every process (the POSIX "all" selectors),
 ///   which the service gates on `CAP_SYSINFO_GLOBAL`.
-/// * `-h` / `--help` — print the usage banner (wins immediately).
+/// * `-h` / `-?` / `--help` — the reserved short-help switches
+///   (plans/APPS.md §4; they win immediately).
 /// * `--` — end option parsing.
 ///
 /// `ps` takes no file operands. It **fails closed**: an unknown option, an
@@ -59,7 +62,7 @@ pub fn parse(args: &[&str]) -> Result<Command, PsError> {
                 for letter in letters.chars() {
                     match letter {
                         'e' | 'A' => all = true,
-                        'h' => return Ok(Command::Help),
+                        'h' | '?' => return Ok(Command::Help),
                         _ => return Err(PsError::Usage),
                     }
                 }
@@ -92,6 +95,7 @@ mod tests {
     #[test]
     fn help_flags_win() {
         assert_eq!(parse(&["-h"]), Ok(Command::Help));
+        assert_eq!(parse(&["-?"]), Ok(Command::Help));
         assert_eq!(parse(&["--help"]), Ok(Command::Help));
         assert_eq!(parse(&["-eh"]), Ok(Command::Help));
     }
@@ -112,5 +116,31 @@ mod tests {
     #[test]
     fn double_dash_then_no_operand_is_a_plain_list() {
         assert_eq!(parse(&["-e", "--"]), Ok(Command::List { all: true }));
+    }
+
+    /// Every locale's `OPTIONS` section documents exactly the switches this
+    /// parser accepts (`plans/APPS.md` §3.1): the flag tokens are
+    /// language-neutral, so each translated document must carry the same
+    /// keys as the canonical one. The documents are read from the bundle's
+    /// own on-disk `Help/` tree — the single source the image builder plants
+    /// — never a copy embedded in this crate.
+    #[test]
+    fn help_documents_the_parser_switches() {
+        extern crate std;
+        use alloc::format;
+        use std::fs;
+
+        let help_root = format!("{}/Help", env!("CARGO_MANIFEST_DIR"));
+        let locales = ["default", "fr-FR", "de-DE", "es-ES", "uk-UA", "it-IT"];
+        for locale in locales {
+            let path = format!("{help_root}/{locale}/ps.md");
+            let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+            for switch in ["`-e, -A, --all`", "`-h, -?`"] {
+                assert!(
+                    text.contains(switch),
+                    "{locale}/ps.md must document {switch}"
+                );
+            }
+        }
     }
 }

@@ -7,8 +7,7 @@ use alloc::vec::Vec;
 use core::fmt::Write as _;
 
 use rustos_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
-use rustos_help::{load, render_short, DocumentName, HelpSource, Locale};
-use rustos_vt::encode_all_into;
+use rustos_help::{own_short_help, HelpSource};
 
 use crate::command::Command;
 use crate::error::LsError;
@@ -55,36 +54,18 @@ pub fn run(
 }
 
 /// Render `ls`'s own short help (`NAME` + `SYNOPSIS` + compact `OPTIONS`)
-/// from its own Help tree; when that tree is absent (a build without the
-/// bundle's documents) the usage banner stands in, so `-h` never fails.
+/// from its own Help tree through the one shared engine; when no document
+/// can be served (a build without the bundle's documents) the usage banner
+/// stands in — the tool's own text, not fabricated help content — so `-h`
+/// never fails.
 fn short_help(
     locale: Option<&str>,
     help: &dyn HelpSource,
     out: &dyn Output,
 ) -> Result<(), LsError> {
-    let loaded = DocumentName::parse(OWN_WORD)
-        .ok()
-        .and_then(|name| load(help, &active_locale(locale), &name).ok());
-    let bytes = match &loaded {
-        Some(loaded) => {
-            let mut bytes = Vec::new();
-            encode_all_into(&render_short(&loaded.doc), &mut bytes);
-            bytes
-        }
-        // The tool's own page being missing must not make `-h` fail: the
-        // usage banner is the tool's own text, not fabricated help content.
-        None => format!("{USAGE}\n").into_bytes(),
-    };
+    let bytes =
+        own_short_help(help, locale, OWN_WORD).unwrap_or_else(|| format!("{USAGE}\n").into_bytes());
     out.write_all(&bytes).map_err(LsError::Output)
-}
-
-/// The locale the engine is asked for: the user's preference when it is a
-/// well-formed tag, the canonical `default/` otherwise. A malformed
-/// preference degrades to the canonical documents rather than making the
-/// short help unreadable — the fallback chain itself stays the engine's.
-fn active_locale(tag: Option<&str>) -> Locale {
-    tag.and_then(|tag| Locale::parse(tag).ok())
-        .unwrap_or_default()
 }
 
 /// Inspect every operand, then render the file block followed by each

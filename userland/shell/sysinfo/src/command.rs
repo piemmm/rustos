@@ -28,7 +28,10 @@ pub enum Command {
     /// Read the caller's own effective resource limits and live usage
     /// (`RESOURCE_LIMITS`).
     Limits,
-    /// Print the usage banner. The default when no arguments are given.
+    /// Render `sysinfo`'s own short help (`help`/`-h`/`-?`/`--help`): the
+    /// `NAME`, `SYNOPSIS`, and compact `OPTIONS` of its Help document,
+    /// through the same engine as any other command's short help
+    /// (plans/APPS.md §4). The default when no arguments are given.
     Help,
 }
 
@@ -45,7 +48,7 @@ pub enum Command {
 /// | Subcommand            | Meaning                          |
 /// |-----------------------|----------------------------------|
 /// | (none)                | [`Command::Help`]                |
-/// | `help`, `-h`, `--help`| [`Command::Help`]                |
+/// | `help`, `-h`, `-?`, `--help` | [`Command::Help`]         |
 /// | `processes`, `ps`     | [`Command::Processes`] (`--all`/`-a` for the global view) |
 /// | `memory`, `mem`       | [`Command::Memory`]              |
 /// | `hardware`, `hw`      | [`Command::Hardware`]            |
@@ -61,7 +64,7 @@ pub fn parse(args: &[&str]) -> Result<Command, SysinfoError> {
         return Ok(Command::Help);
     };
     match subcommand {
-        "help" | "-h" | "--help" => no_more(rest).map(|()| Command::Help),
+        "help" | "-h" | "-?" | "--help" => no_more(rest).map(|()| Command::Help),
         "processes" | "ps" => parse_processes(rest),
         "memory" | "mem" => no_more(rest).map(|()| Command::Memory),
         "hardware" | "hw" => no_more(rest).map(|()| Command::Hardware),
@@ -105,7 +108,7 @@ mod tests {
 
     #[test]
     fn help_aliases_parse() {
-        for arg in ["help", "-h", "--help"] {
+        for arg in ["help", "-h", "-?", "--help"] {
             assert_eq!(parse(&[arg]), Ok(Command::Help));
         }
     }
@@ -148,5 +151,31 @@ mod tests {
     fn trailing_argument_is_usage() {
         assert_eq!(parse(&["uptime", "now"]), Err(SysinfoError::Usage));
         assert_eq!(parse(&["memory", "extra"]), Err(SysinfoError::Usage));
+    }
+
+    /// Every locale's `OPTIONS` section documents exactly the switches this
+    /// parser accepts (`plans/APPS.md` §3.1): the flag tokens are
+    /// language-neutral, so each translated document must carry the same
+    /// keys as the canonical one. The documents are read from the bundle's
+    /// own on-disk `Help/` tree — the single source the image builder plants
+    /// — never a copy embedded in this crate.
+    #[test]
+    fn help_documents_the_parser_switches() {
+        extern crate std;
+        use alloc::format;
+        use std::fs;
+
+        let help_root = format!("{}/Help", env!("CARGO_MANIFEST_DIR"));
+        let locales = ["default", "fr-FR", "de-DE", "es-ES", "uk-UA", "it-IT"];
+        for locale in locales {
+            let path = format!("{help_root}/{locale}/sysinfo.md");
+            let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+            for switch in ["`--all, -a`", "`-h, -?`"] {
+                assert!(
+                    text.contains(switch),
+                    "{locale}/sysinfo.md must document {switch}"
+                );
+            }
+        }
     }
 }

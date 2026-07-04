@@ -22,6 +22,9 @@
 //! # Module map
 //!
 //! * [`error`] — [`TopError`], the outcomes of [`run`].
+//! * [`command`] — the [`Command`] shape and its [`parse`]r: the reserved
+//!   `-h`/`-?` short-help switches (plans/APPS.md §4) against running the
+//!   viewer.
 //! * [`model`] — the [`Model`], its [`Scope`], and the [`Action`] an event
 //!   produces.
 //! * [`app`] — [`render`] and the [`run`] input loop.
@@ -42,6 +45,7 @@
 extern crate alloc;
 
 pub mod app;
+pub mod command;
 pub mod error;
 pub mod model;
 
@@ -49,6 +53,7 @@ pub mod model;
 mod tests;
 
 pub use app::{list_capacity, render, run};
+pub use command::{parse, Command, USAGE};
 pub use error::TopError;
 pub use model::{Action, Model, Scope};
 pub use rustos_curses::{Screen, Tty};

@@ -63,7 +63,7 @@
 //! # Layering & safety
 //!
 //! `no_std` (with `alloc`); the dependencies are the audited `lib/abi`
-//! vocabulary and the shared `lib/help`/`lib/vt` engines, so this userland
+//! vocabulary and the shared `lib/help` engine, so this userland
 //! tool never links a kernel or driver crate. No `unsafe`, and no
 //! `unwrap`/`expect`/`panic!` in production paths.
 

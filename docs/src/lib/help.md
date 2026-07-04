@@ -72,3 +72,22 @@ Both emit `rustos_vt::Op` sequences (widths from `rustos_curses`), so the
 escape vocabulary stays the one `lib/vt` definition and the output prints no
 control bytes. Paging and terminal probing belong to the `man` app; the
 active locale is resolved once by the session/shell and passed in.
+
+## A command's own short help, in one place
+
+Every command app answers its reserved `-h`/`-?` switches the same way, so
+that sequence lives here once rather than per tool:
+
+- `own_short_help(source, locale, word)` — the pure helper: parse the raw
+  `LANG` preference (a malformed or missing tag degrades to `default/`),
+  load `word`'s document through the fallback chain, render the short view,
+  and return it as encoded `lib/vt` bytes. `None` when no document can be
+  served — the caller then prints its own usage banner, so `-h` never fails.
+- `BundleHelp` (the `rt` cargo feature) — the production `HelpSource`: the
+  running command app's own `/System/Apps/<word>.app/Help/` tree, read
+  through the `rustos-rt` file wrappers. It adds no authority (every
+  per-inode and mount check stays kernel-side) and spells the bundle path
+  from the shared `lib/abi` store/suffix constants, so it cannot drift from
+  where the image builder plants the documents. Only a freestanding `Run`
+  binary enables the feature; the engine itself stays seam-injected and
+  performs no ambient I/O.

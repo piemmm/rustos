@@ -32,6 +32,7 @@ mod program {
 
     use alloc::format;
 
+    use rustos_help::BundleHelp;
     use rustos_procinfo::{IpcTransport, RtOutput};
     use rustos_rt::args;
     use rustos_rt::io::write_stderr_line;
@@ -56,9 +57,18 @@ mod program {
                 return 2;
             }
         };
+        let locale = rustos_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
         let transport = IpcTransport;
         let out = RtOutput;
-        match run(command, &transport, &out) {
+        // The tool's own bundle's `Help/` tree, read through the shared
+        // syscall-backed source for the short-help switches.
+        match run(
+            command,
+            locale,
+            &transport,
+            &BundleHelp::new("sysinfo"),
+            &out,
+        ) {
             Ok(()) => 0,
             Err(err) => {
                 write_stderr_line(&format!("sysinfo: {err}"));

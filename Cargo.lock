@@ -877,6 +877,7 @@ version = "0.0.0"
 dependencies = [
  "rustos-abi",
  "rustos-cmdres",
+ "rustos-help",
  "rustos-resref",
  "rustos-rt",
  "rustos-vt",
@@ -967,8 +968,10 @@ dependencies = [
 name = "rustos-help"
 version = "0.0.0"
 dependencies = [
+ "rustos-abi",
  "rustos-curses",
  "rustos-fuzzseed",
+ "rustos-rt",
  "rustos-vt",
 ]
 
@@ -1268,7 +1271,6 @@ dependencies = [
  "rustos-abi",
  "rustos-help",
  "rustos-rt",
- "rustos-vt",
 ]
 
 [[package]]
@@ -1356,6 +1358,7 @@ name = "rustos-ps"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-help",
  "rustos-procinfo",
  "rustos-rt",
 ]
@@ -1439,6 +1442,7 @@ name = "rustos-sysinfo"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-help",
  "rustos-procinfo",
  "rustos-rt",
 ]
@@ -2939,6 +2943,7 @@ version = "0.0.0"
 dependencies = [
  "rustos-abi",
  "rustos-curses",
+ "rustos-help",
  "rustos-procinfo",
  "rustos-rt",
  "rustos-termcap",
@@ -2976,6 +2981,7 @@ name = "rustos-users-cli"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-help",
  "rustos-rt",
  "rustos-users",
 ]

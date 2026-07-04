@@ -38,7 +38,11 @@ crate (`AGENTS.md` §17.4).
 
 `processes` accepts the `-a`/`--all` flag; the other subcommands take no
 arguments and `ps`/`mem`/`hw`/`id`/`rlimits` are accepted as short
-aliases. `limits` reports the calling process's *own* effective resource
+aliases. `help` (also `-h`/`-?`/`--help`, and the default with no
+arguments) renders the tool's own short help from its bundle's `Help/`
+tree through the shared `lib/help` engine (`plans/APPS.md` §4), falling
+back to the built-in usage banner when the tree is unavailable.
+`limits` reports the calling process's *own* effective resource
 limits and live usage (`AGENTS.md` §24.3) — the read-only counterpart of
 the `ulimit` shell builtin that *changes* them. The
 capability gate lives in `sysinfod`, not in this tool — `sysinfo` only
@@ -128,16 +132,19 @@ or driver crate (`AGENTS.md` §17.4).
 ### Grammar
 
 ```
-ps [-e | -A | --all]
+ps [-e | -A | --all] [-h | -?]
 
   (default)   list your own processes
   -e, -A      list every process (needs CAP_SYSINFO_GLOBAL)
-  -h, --help  show the usage banner
+  -h, -?      show this help
 ```
 
 `ps` takes no file operands. `--` ends option parsing. An unknown option,
 an unknown letter inside a cluster, or any positional operand is a
-fail-closed `PsError::Usage`.
+fail-closed `PsError::Usage`. The reserved `-h`/`-?` (and `--help`)
+switches render the tool's own short help from its bundle's `Help/` tree
+through the shared `lib/help` engine (`plans/APPS.md` §4), falling back
+to the built-in usage banner when the tree is unavailable.
 
 ### Shared with `sysinfo`
 
@@ -178,7 +185,8 @@ in tests they are in-memory fixtures.
 `cargo test -p rustos-ps` drives the parser and the request/render engine
 against an in-memory `sysinfod` stand-in and a recording output: the
 command grammar (default self-listing, the `-e`/`-A`/`--all` selectors,
-`-h`/`--help`, unknown-option and positional-operand rejection), the
+`-h`/`-?`/`--help`, unknown-option and positional-operand rejection), the
+Help-document short-help render and its usage-banner fallback, the
 self-vs-global query routing, header + rows rendering, the empty listing,
 the denied-global capability mapping, and the header/row write-failure
 paths. The shared page walk and rendering carry their own unit tests in
@@ -1319,10 +1327,15 @@ next-spawn/next-login binding (`docs/src/security/capabilities.md`).
 Passwords are read echo-off and hashed client-side into salted PBKDF2
 records (salt from `sys:random`); the listing responses are secret-free.
 
-The tool's manifest requests only the console pair plus
-`CAP_USER_ADMIN` — deliberately above the session baseline, so the
-`manifest ∩ ceiling` intersection arms it only for an administrator
-account and leaves it inert for everyone else. No `CAP_FS_ACCESS`.
+The tool's manifest requests the console pair, `CAP_USER_ADMIN` —
+deliberately above the session baseline, so the `manifest ∩ ceiling`
+intersection arms it only for an administrator account and leaves it
+inert for everyone else — and `CAP_FS_ACCESS`, held solely so the
+reserved `-h`/`-?` short-help switches (`plans/APPS.md` §4) can read the
+bundle's own `Help/` tree through the secured VFS; accounts themselves
+are edited only through the gated syscall, never the filesystem. Any
+other command-line argument is a fail-closed usage error — the tool is
+administered from inside the session.
 
 ### Tests
 

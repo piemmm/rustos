@@ -11,6 +11,7 @@ use rustos_abi::sysinfo::{
 };
 use rustos_abi::{Errno, LimitKind};
 
+use rustos_help::{own_short_help, HelpSource};
 use rustos_procinfo::{
     call, for_each_process, render_limit_bound, render_process, Output, Transport, PROCESS_HEADER,
 };
@@ -18,7 +19,8 @@ use rustos_procinfo::{
 use crate::command::Command;
 use crate::error::SysinfoError;
 
-/// The usage banner printed by [`Command::Help`] and on a usage error.
+/// The usage banner a usage error is reported with, and the fallback the
+/// short-help switches print when `sysinfo`'s own Help tree is unavailable.
 pub const USAGE: &str = "\
 usage: sysinfo <query>
 
@@ -29,10 +31,16 @@ queries:
   identity            machine identity and OS version
   uptime              time since boot and boot wall-clock time
   limits              your effective resource limits and live usage
-  help                show this message";
+  help, -h, -?        show this help";
+
+/// `sysinfo`'s own command word: the short-help switches render its own
+/// Help document through the same engine as any other command's.
+const OWN_WORD: &str = "sysinfo";
 
 /// Run one [`Command`], issuing its query through `transport` and writing the
-/// rendered result to `out`.
+/// rendered result to `out`. `locale` is the user's `LANG` preference, if
+/// set; `help` is the tool's own `Help/` tree, read by the short-help
+/// switches.
 ///
 /// # Errors
 ///
@@ -43,11 +51,13 @@ queries:
 /// * [`SysinfoError::Output`] — writing the terminal failed.
 pub fn run(
     command: Command,
+    locale: Option<&str>,
     transport: &dyn Transport,
+    help: &dyn HelpSource,
     out: &dyn Output,
 ) -> Result<(), SysinfoError> {
     match command {
-        Command::Help => emit(out, USAGE),
+        Command::Help => short_help(locale, help, out),
         Command::Processes { all } => run_processes(all, transport, out),
         Command::Memory => run_memory(transport, out),
         Command::Hardware => run_hardware(transport, out),
@@ -55,6 +65,25 @@ pub fn run(
         Command::Uptime => run_uptime(transport, out),
         Command::Limits => run_limits(transport, out),
     }
+}
+
+/// Render `sysinfo`'s own short help (`NAME` + `SYNOPSIS` + compact
+/// `OPTIONS`) from its own Help tree through the one shared engine; when no
+/// document can be served (a build without the bundle's documents) the
+/// usage banner stands in — the tool's own text, not fabricated help
+/// content — so `-h` never fails. The rendered page is written as one
+/// multi-line `write_line`; the seam owns the final newline.
+fn short_help(
+    locale: Option<&str>,
+    help: &dyn HelpSource,
+    out: &dyn Output,
+) -> Result<(), SysinfoError> {
+    let bytes = own_short_help(help, locale, OWN_WORD);
+    let text = bytes
+        .as_deref()
+        .and_then(|bytes| core::str::from_utf8(bytes).ok())
+        .unwrap_or(USAGE);
+    emit(out, text.trim_end_matches('\n'))
 }
 
 /// Issue `query` with `payload` through the shared client helper and map a
@@ -205,7 +234,7 @@ fn name_lossy(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{run, USAGE};
+    use super::{run as engine_run, USAGE};
     use crate::command::Command;
     use crate::error::SysinfoError;
     use alloc::string::{String, ToString};
@@ -217,7 +246,57 @@ mod tests {
     };
     use rustos_abi::time::{Duration64, Time64};
     use rustos_abi::{Errno, LimitKind, ProcId, ResourceLimit, RLIMIT_INFINITY};
+    use rustos_help::{HelpSource, SourceError};
     use rustos_procinfo::{Output, Transport};
+
+    /// A Help tree with no documents at all: the short-help fallback path.
+    struct NoHelp;
+
+    impl HelpSource for NoHelp {
+        fn locale_dirs(&self) -> Result<Vec<String>, SourceError> {
+            Ok(Vec::new())
+        }
+
+        fn read(
+            &self,
+            _locale_dir: &str,
+            _file_name: &str,
+        ) -> Result<Option<Vec<u8>>, SourceError> {
+            Ok(None)
+        }
+    }
+
+    /// A Help tree holding one canonical `sysinfo.md` document.
+    struct OneDoc;
+
+    const DOC: &str = "## NAME\n\nsysinfo — query system information\n\n\
+                       ## SYNOPSIS\n\n`sysinfo <query>`\n\n\
+                       ## DESCRIPTION\n\nQueries things.\n";
+
+    impl HelpSource for OneDoc {
+        fn locale_dirs(&self) -> Result<Vec<String>, SourceError> {
+            Ok(alloc::vec![String::from("default")])
+        }
+
+        fn read(&self, locale_dir: &str, file_name: &str) -> Result<Option<Vec<u8>>, SourceError> {
+            if locale_dir == "default" && file_name == "sysinfo.md" {
+                Ok(Some(DOC.as_bytes().to_vec()))
+            } else {
+                Ok(None)
+            }
+        }
+    }
+
+    /// The engine under the fixtures' default seams: no locale preference
+    /// and an empty Help tree, so every existing scenario exercises the
+    /// query paths unchanged.
+    fn run(
+        command: Command,
+        transport: &dyn Transport,
+        out: &dyn Output,
+    ) -> Result<(), SysinfoError> {
+        engine_run(command, None, transport, &NoHelp, out)
+    }
 
     /// An in-memory `sysinfod` stand-in: it decodes a request the same way
     /// the real service does and answers from fixed fixtures.
@@ -364,12 +443,27 @@ mod tests {
     }
 
     #[test]
-    fn help_prints_usage() {
+    fn help_prints_the_usage_fallback() {
         let fixture = Fixture::new(Vec::new());
         let out = Recorder::new();
         assert_eq!(run(Command::Help, &fixture, &out), Ok(()));
         assert_eq!(out.lines(), alloc::vec![USAGE.to_string()]);
         // Help touches no query.
+        assert!(fixture.seen.borrow().is_empty());
+    }
+
+    #[test]
+    fn help_renders_the_short_help_from_the_document() {
+        let fixture = Fixture::new(Vec::new());
+        let out = Recorder::new();
+        assert_eq!(
+            engine_run(Command::Help, None, &fixture, &OneDoc, &out),
+            Ok(())
+        );
+        let lines = out.lines();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("query system information"));
+        assert!(lines[0].contains("sysinfo <query>"));
         assert!(fixture.seen.borrow().is_empty());
     }
 

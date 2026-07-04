@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 /// discovered from `<root>/<name>/Help/`; the planted bundle is
 /// `<name>.app`. Extending this list is a rare structural change, not a
 /// per-bundle edit.
-const APP_ROOTS: &[&str] = &["userland/apps"];
+const APP_ROOTS: &[&str] = &["userland/apps", "userland/shell"];
 
 fn main() {
     let manifest = PathBuf::from(env("CARGO_MANIFEST_DIR"));

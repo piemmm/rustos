@@ -14,7 +14,7 @@ own short help from its bundled `Help/` tree through the shared
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
 dependencies are the audited `rustos-abi` vocabulary and the shared
-`rustos-help`/`rustos-vt` engines, so it never links a kernel or driver
+`rustos-help` engine, so it never links a kernel or driver
 crate (`AGENTS.md` §17.4). Its manifest requests `CAP_CONSOLE_WRITE`
 plus `CAP_FS_ACCESS` — within the session baseline — and the secured VFS
 authorises every path per-inode under the caller's attested identity.

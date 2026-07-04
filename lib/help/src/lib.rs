@@ -57,6 +57,7 @@ extern crate alloc;
 
 mod doc;
 mod locale;
+mod own;
 mod render;
 
 pub use doc::{
@@ -68,6 +69,9 @@ pub use locale::{
     load, DocumentName, Fallback, HelpSource, LoadError, Loaded, Locale, NameError, Selection,
     SourceError, TagError, DEFAULT_LOCALE, MAX_DOCUMENT_NAME_LEN, MAX_LOCALE_DIRS, MAX_LOCALE_LEN,
 };
+pub use own::own_short_help;
+#[cfg(feature = "rt")]
+pub use own::BundleHelp;
 pub use render::{render_full, render_short};
 
 #[cfg(test)]

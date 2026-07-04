@@ -31,6 +31,16 @@ here once and every consumer imports them.
   compact `OPTIONS`) and the whole `man` page, emitted as `lib/vt` operations
   (bold headings/code, underlined emphasis, width-padded tables via
   `lib/curses`) that the caller encodes and writes to its own stdout.
+- `own_short_help` — a command app's own `-h`/`-?` render in one call:
+  parse the raw `LANG` preference (malformed or missing degrades to
+  `default/`), load the app's own document, render the short view, and
+  return encoded `lib/vt` bytes — `None` when no document can be served, so
+  the caller falls back to its own usage banner and `-h` never fails.
+- `BundleHelp` (the `rt` cargo feature) — the production `HelpSource` over
+  the running command app's own `/System/Apps/<word>.app/Help/` tree via the
+  `rustos-rt` file wrappers, spelled from the shared `lib/abi` store/suffix
+  constants. Enabled only by a freestanding `Run` binary; the engine itself
+  stays seam-injected and performs no ambient I/O.
 
 ## Design
 

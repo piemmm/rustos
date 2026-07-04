@@ -13,8 +13,9 @@
 //! exports it; the tool invents no second source), and runs the parsed
 //! command against the production seams: `RtListing`, which stats paths and
 //! reads directories through the kernel-authorised `fs_*` syscalls (every
-//! per-inode and mount check stays kernel-side), `RtHelp`, which reads the
-//! tool's own bundle's `Help/` tree for the short-help switches, and
+//! per-inode and mount check stays kernel-side), the shared
+//! `rustos_help::BundleHelp`, which reads the tool's own bundle's `Help/`
+//! tree for the short-help switches, and
 //! `RtOutput`, which writes the listing to the inherited standard output and
 //! the hidden-entries advisory to fd 3, best-effort. The tool binds only to
 //! its inherited descriptors, never a console device, and holds no ambient
@@ -36,9 +37,9 @@ mod program {
     use alloc::string::String;
     use alloc::vec::Vec;
 
-    use rustos_abi::fs::{DirEntry, FileKind, OpenFlags, FS_IO_MAX};
-    use rustos_abi::{Errno, BUNDLE_SUFFIX, SYSTEM_APP_STORE};
-    use rustos_help::{HelpSource, SourceError, MAX_DOC_LEN};
+    use rustos_abi::fs::{DirEntry, OpenFlags, FS_IO_MAX};
+    use rustos_abi::Errno;
+    use rustos_help::BundleHelp;
     use rustos_ls::{parse, run, Entry, Listing, Metadata, Output, USAGE};
     use rustos_rt::io::{write_stderr_line, StdInfo, Stdout, Write};
     use rustos_rt::File;
@@ -107,91 +108,6 @@ mod program {
         }
     }
 
-    /// The tool's own bundle's `Help/` tree, read through the same
-    /// kernel-authorised `fs_*` view for the short-help switches. The bundle
-    /// directory is the system app store's command-named spelling — the one
-    /// shared `lib/abi` definition, so it cannot drift from where the image
-    /// builder plants the documents.
-    struct RtHelp;
-
-    impl RtHelp {
-        /// `/System/Apps/ls.app/Help/<suffix>`.
-        fn help_path(suffix: &str) -> String {
-            format!("{SYSTEM_APP_STORE}/ls{BUNDLE_SUFFIX}/Help/{suffix}")
-        }
-    }
-
-    impl HelpSource for RtHelp {
-        fn locale_dirs(&self) -> Result<Vec<String>, SourceError> {
-            let path = format!("{SYSTEM_APP_STORE}/ls{BUNDLE_SUFFIX}/Help");
-            let dir = match rustos_rt::open_dir(path.as_bytes()) {
-                Ok(dir) => dir,
-                // A build without the bundle's documents simply has no
-                // locales; the engine then reports "not found" and the
-                // caller falls back to the usage banner.
-                Err(_) => return Ok(Vec::new()),
-            };
-            let mut buf = alloc::vec![0u8; DIR_BUF_INITIAL];
-            let used = loop {
-                match dir.read(&mut buf) {
-                    Ok(used) => break used,
-                    Err(ret) => match Errno::from_syscall(ret) {
-                        Errno::BufferTooSmall if buf.len() < DIR_BUF_MAX => {
-                            buf.resize((buf.len() * 2).min(DIR_BUF_MAX), 0);
-                        }
-                        _ => return Err(SourceError),
-                    },
-                }
-            };
-            let mut dirs = Vec::new();
-            let mut rest = &buf[..used];
-            while !rest.is_empty() {
-                let (entry, consumed) = DirEntry::decode(rest).map_err(|_| SourceError)?;
-                rest = &rest[consumed..];
-                if entry.kind != FileKind::Directory {
-                    continue;
-                }
-                // A non-UTF-8 name can never be a locale directory the
-                // engine validated a spelling for; skipping it loses nothing
-                // and fabricates nothing.
-                if let Ok(name) = core::str::from_utf8(entry.name) {
-                    dirs.push(String::from(name));
-                }
-            }
-            Ok(dirs)
-        }
-
-        fn read(&self, locale_dir: &str, file_name: &str) -> Result<Option<Vec<u8>>, SourceError> {
-            let path = Self::help_path(&format!("{locale_dir}/{file_name}"));
-            let file = match rustos_rt::open(path.as_bytes()) {
-                Ok(file) => file,
-                Err(ret) => {
-                    return match Errno::from_syscall(ret) {
-                        Errno::NotFound => Ok(None),
-                        _ => Err(SourceError),
-                    };
-                }
-            };
-            // Read at most one byte past the engine's limit: the engine's
-            // own document bound then rejects the oversized file, and a
-            // hostile huge file cannot exhaust memory here first.
-            let cap = MAX_DOC_LEN.saturating_add(1);
-            let mut bytes = Vec::new();
-            let mut chunk = [0u8; 4096];
-            while bytes.len() < cap {
-                let want = chunk.len().min(cap - bytes.len());
-                let read = file
-                    .read_at(bytes.len() as u64, &mut chunk[..want])
-                    .map_err(|_| SourceError)?;
-                if read == 0 {
-                    break;
-                }
-                bytes.extend_from_slice(&chunk[..read]);
-            }
-            Ok(Some(bytes))
-        }
-    }
-
     /// The production [`Output`] over the inherited standard streams: the
     /// listing goes to fd 1 and the advisory record to fd 3 (best-effort).
     /// The tool names only descriptors its spawner chose, so the same
@@ -234,7 +150,15 @@ mod program {
             }
         };
         let locale = rustos_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
-        match run(command, locale, &RtListing, &RtHelp, &RtOutput) {
+        // The tool's own bundle's `Help/` tree, read through the shared
+        // syscall-backed source for the short-help switches.
+        match run(
+            command,
+            locale,
+            &RtListing,
+            &BundleHelp::new("ls"),
+            &RtOutput,
+        ) {
             Ok(()) => 0,
             Err(err) => {
                 write_stderr_line(&format!("ls: {err}"));

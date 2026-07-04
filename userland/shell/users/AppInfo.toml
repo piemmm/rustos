@@ -4,10 +4,13 @@
 # intersected with the launching user's grants. Deliberately above the
 # session baseline: only an account whose ceiling carries CAP_USER_ADMIN
 # ends up with a working tool — on any other account the intersection
-# strips it and every operation is refused at dispatch. No CAP_FS_ACCESS:
-# accounts are edited through the gated users_admin syscall.
+# strips it and every operation is refused at dispatch. Accounts are
+# edited through the gated users_admin syscall, never the filesystem;
+# CAP_FS_ACCESS exists solely so the short-help switches can read the
+# bundle's own Help/ tree through the secured VFS, which still authorises
+# every path per-inode under the caller's attested identity.
 id = "os.rustos.users"
 name = "users"
 version = "0.1.0"
 kind = "command"
-capabilities = ["CAP_CONSOLE_WRITE", "CAP_CONSOLE_READ", "CAP_USER_ADMIN"]
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_CONSOLE_READ", "CAP_USER_ADMIN", "CAP_FS_ACCESS"]

@@ -84,23 +84,34 @@ pub const SYSINFOD_MANIFEST: &[CapabilityId] = &[
 ];
 
 /// The `ps` tool's manifest: `CAP_CONSOLE_WRITE` for its listing on fd 1
-/// and diagnostics on fd 2, nothing more — the `sysinfo` endpoint is
-/// unrestricted-sender, and every per-query scope is enforced by
-/// `sysinfod` against this process's kernel-attested origin.
-pub const PS_MANIFEST: &[CapabilityId] = &[CapabilityId::CONSOLE_WRITE];
+/// and diagnostics on fd 2, plus `CAP_FS_ACCESS` because its short-help
+/// switches read the bundle's own `Help/` tree through the secured VFS
+/// (which still authorises every path per-inode under the caller's
+/// attested identity). Every per-query scope is enforced by `sysinfod`
+/// against this process's kernel-attested origin.
+pub const PS_MANIFEST: &[CapabilityId] = &[CapabilityId::CONSOLE_WRITE, CapabilityId::FS_ACCESS];
 
-/// The `sysinfo` tool's manifest: like `ps`, `CAP_CONSOLE_WRITE` only;
-/// per-query authority stays with `sysinfod` and the caller's attested
-/// origin.
-pub const SYSINFO_MANIFEST: &[CapabilityId] = &[CapabilityId::CONSOLE_WRITE];
+/// The `sysinfo` tool's manifest: like `ps`, `CAP_CONSOLE_WRITE` for the
+/// rendered results on fd 1 plus `CAP_FS_ACCESS` because its short-help
+/// switches read the bundle's own `Help/` tree through the secured VFS
+/// (which still authorises every path per-inode under the caller's
+/// attested identity); per-query authority stays with `sysinfod` and the
+/// caller's attested origin.
+pub const SYSINFO_MANIFEST: &[CapabilityId] =
+    &[CapabilityId::CONSOLE_WRITE, CapabilityId::FS_ACCESS];
 
 /// The `top` tool's manifest: `CAP_CONSOLE_WRITE` for its full-screen
-/// display on fd 1 plus `CAP_CONSOLE_READ` for raw-mode keystrokes on fd 0
-/// (the latter also authorises its `stream_echo` echo suppression) —
-/// nothing more; `terminal_size` is ungated and per-query `sysinfo` scope
-/// is enforced by `sysinfod`.
-pub const TOP_MANIFEST: &[CapabilityId] =
-    &[CapabilityId::CONSOLE_WRITE, CapabilityId::CONSOLE_READ];
+/// display on fd 1, `CAP_CONSOLE_READ` for raw-mode keystrokes on fd 0
+/// (the latter also authorises its `stream_echo` echo suppression), and
+/// `CAP_FS_ACCESS` because its short-help switches read the bundle's own
+/// `Help/` tree through the secured VFS (which still authorises every
+/// path per-inode under the caller's attested identity); `terminal_size`
+/// is ungated and per-query `sysinfo` scope is enforced by `sysinfod`.
+pub const TOP_MANIFEST: &[CapabilityId] = &[
+    CapabilityId::CONSOLE_WRITE,
+    CapabilityId::CONSOLE_READ,
+    CapabilityId::FS_ACCESS,
+];
 
 /// The `ls` tool's manifest: `CAP_CONSOLE_WRITE` for the listing on fd 1
 /// and diagnostics on fd 2, plus `CAP_FS_ACCESS` because inspecting paths
@@ -129,13 +140,17 @@ pub const MAN_MANIFEST: &[CapabilityId] = &[
 /// ceiling carries `CAP_USER_ADMIN` (an administrator, §4.3 of
 /// `plans/CAPABILITY_USE.md`) ends up with a working tool — on any other
 /// account the intersection strips the capability and every operation is
-/// refused at dispatch. No `CAP_FS_ACCESS`: the tool edits accounts
-/// through its own gated syscall and reads its salt through the
-/// unprivileged `sys:random` resource, never the filesystem.
+/// refused at dispatch. Accounts are edited through the gated syscall and
+/// the salt is read through the unprivileged `sys:random` resource, never
+/// the filesystem; `CAP_FS_ACCESS` exists solely so the short-help
+/// switches can read the bundle's own `Help/` tree through the secured
+/// VFS (which still authorises every path per-inode under the caller's
+/// attested identity).
 pub const USERS_TOOL_MANIFEST: &[CapabilityId] = &[
     CapabilityId::CONSOLE_WRITE,
     CapabilityId::CONSOLE_READ,
     CapabilityId::USER_ADMIN,
+    CapabilityId::FS_ACCESS,
 ];
 
 /// PID 1 `init`'s manifest: `CAP_CONSOLE_WRITE` for its startup banner
@@ -224,19 +239,29 @@ mod tests {
 
     #[test]
     fn ps_manifest_is_pinned() {
-        assert_eq!(set(PS_MANIFEST), set(&[CapabilityId::CONSOLE_WRITE]));
+        assert_eq!(
+            set(PS_MANIFEST),
+            set(&[CapabilityId::CONSOLE_WRITE, CapabilityId::FS_ACCESS])
+        );
     }
 
     #[test]
     fn sysinfo_manifest_is_pinned() {
-        assert_eq!(set(SYSINFO_MANIFEST), set(&[CapabilityId::CONSOLE_WRITE]));
+        assert_eq!(
+            set(SYSINFO_MANIFEST),
+            set(&[CapabilityId::CONSOLE_WRITE, CapabilityId::FS_ACCESS])
+        );
     }
 
     #[test]
     fn top_manifest_is_pinned() {
         assert_eq!(
             set(TOP_MANIFEST),
-            set(&[CapabilityId::CONSOLE_WRITE, CapabilityId::CONSOLE_READ])
+            set(&[
+                CapabilityId::CONSOLE_WRITE,
+                CapabilityId::CONSOLE_READ,
+                CapabilityId::FS_ACCESS,
+            ])
         );
     }
 
@@ -268,6 +293,7 @@ mod tests {
                 CapabilityId::CONSOLE_WRITE,
                 CapabilityId::CONSOLE_READ,
                 CapabilityId::USER_ADMIN,
+                CapabilityId::FS_ACCESS,
             ])
         );
     }
@@ -297,17 +323,16 @@ mod tests {
         }
     }
 
-    /// The `users` tool requests the administrative gate plus the console
-    /// pair and nothing else — in particular no filesystem access — and
-    /// every capability it requests is within the administrator ceiling,
-    /// so an administrator's intersection loses nothing.
+    /// The `users` tool requests the administrative gate, the console
+    /// pair, and the filesystem gate its short-help read needs — nothing
+    /// else — and every capability it requests is within the administrator
+    /// ceiling, so an administrator's intersection loses nothing.
     #[test]
     fn users_tool_request_is_within_the_administrator_ceiling() {
         let ceiling = rustos_users::administrator_ceiling();
         for cap in USERS_TOOL_MANIFEST {
             assert!(ceiling.contains(*cap), "{cap:?} exceeds the admin ceiling");
         }
-        assert!(!set(USERS_TOOL_MANIFEST).contains(CapabilityId::FS_ACCESS));
     }
 
     /// Every program crate's on-disk `AppInfo.toml` manifest source

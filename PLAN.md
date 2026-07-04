@@ -3570,12 +3570,19 @@ types `man man` end to end. The generic argv/stderr-line helpers were
 hoisted into `lib/rt` (`args`, `io::write_stderr_line`) and the `-errno`
 decode into `rustos_abi::Errno::from_syscall`, each now one definition.
 
-**Remaining** (staged in `plans/APPS.md` §13): the per-app `-h`/`-?`
-short-help convention (served from `Help/` via `lib/help`; `man` itself
-honours it); `cargo xtask help-lint` (completeness, switch-drift, no
-foul/derogatory content, required locales
-`fr-FR`/`de-DE`/`es-ES`/`uk-UA`/`it-IT`); `Help/` trees for the other
-existing command apps; and wider `stdinfo` adoption in command apps
+Every store-registered command app (`ls`, `man`, `ps`, `top`, `sysinfo`,
+`users`, `elsh`) ships its six-locale `Help/` tree and honours the
+`-h`/`-?` short-help convention through the one shared `lib/help` render
+(`own_short_help` + the `rt`-feature `BundleHelp` own-bundle source);
+per-locale switch-drift unit tests pin each tree's `OPTIONS` to its
+parser, and the tools that gained filesystem reach for the help read
+request `CAP_FS_ACCESS` (the man/ls precedent).
+
+**Remaining** (staged in `plans/APPS.md` §13): `cargo xtask help-lint`
+(completeness, switch-drift, no foul/derogatory content, required locales
+`fr-FR`/`de-DE`/`es-ES`/`uk-UA`/`it-IT`); `Help/` trees for future command
+apps as each becomes a registered store bundle; and wider `stdinfo`
+adoption in command apps
 (advisory-only, §20). A cross-app *shared-library* bundle stays declined —
 §16.4 refuses cross-bundle library references — so a resource-only bundle may
 share **data**, not dynamically-linked code.

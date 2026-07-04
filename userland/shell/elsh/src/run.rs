@@ -51,10 +51,11 @@ mod program {
     };
     use rustos_abi::{Errno, LimitKind, ResourceLimit};
     use rustos_elsh::{
-        Console, Elevator, LaunchSpec, LimitStore, Pid, ProcessHost, ReplInput, Shell, Signal,
-        WaitOutcome,
+        parse_invocation, Console, Elevator, Invocation, LaunchSpec, LimitStore, Pid, ProcessHost,
+        ReplInput, Shell, Signal, WaitOutcome, USAGE,
     };
-    use rustos_rt::io::{Stderr, Stdout, Write};
+    use rustos_help::{own_short_help, BundleHelp};
+    use rustos_rt::io::{write_stderr_line, Stderr, Stdout, Write};
 
     /// The shell's output sink, backed by the inherited standard output (fd 1)
     /// and standard error (fd 2) through the shared `rustos_rt::io` layer — the
@@ -341,14 +342,45 @@ mod program {
         }
     }
 
+    /// Render `elsh`'s own short help (`NAME` + `SYNOPSIS` + compact
+    /// `OPTIONS`) from its own bundle's `Help/` tree through the one shared
+    /// engine; when no document can be served (a build without the bundle's
+    /// documents) the usage banner stands in — the shell's own text, not
+    /// fabricated help content — so `-h` never fails.
+    fn short_help() -> i32 {
+        let locale = rustos_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
+        let bytes = own_short_help(&BundleHelp::new("elsh"), locale, "elsh")
+            .unwrap_or_else(|| alloc::format!("{USAGE}\n").into_bytes());
+        match Stdout.write_all(&bytes) {
+            Ok(()) => 0,
+            Err(_) => 1,
+        }
+    }
+
     /// Program entry point. `rustos-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
     /// Runs the interpreter as a read-eval-print loop over the inherited
     /// standard streams and returns the session's exit code (the `exit`
-    /// builtin's code, or `0` when the input stream ends). The loop binds only
-    /// to fd 0/1/2/3, never a device.
+    /// builtin's code, or `0` when the input stream ends). The reserved
+    /// `-h`/`-?` short-help switches render the shell's own Help document
+    /// and exit `0`; any other argument is a usage error and exits `2`.
+    /// The loop binds only to fd 0/1/2/3, never a device.
     fn main() -> i32 {
+        // A malformed (non-UTF-8) argument vector is a usage error, reported
+        // rather than guessed at.
+        let Some(arguments) = rustos_rt::args() else {
+            write_stderr_line(USAGE);
+            return 2;
+        };
+        match parse_invocation(&arguments) {
+            Ok(Invocation::Repl) => {}
+            Ok(Invocation::Help) => return short_help(),
+            Err(_) => {
+                write_stderr_line(USAGE);
+                return 2;
+            }
+        }
         let console = RtConsole;
         let host = RtProcessHost;
         let limits = RtLimitStore;

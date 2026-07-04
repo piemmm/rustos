@@ -8,9 +8,25 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# The production own-bundle `HelpSource` (`BundleHelp`): reads the running
+# command app's own `/System/Apps/<word>.app/Help/` tree through the
+# `rustos-rt` file wrappers, so every `Run` binary shares one syscall-backed
+# source instead of each carrying a private copy (the charter forbids that
+# duplication). Enabled only by a freestanding `Run` binary's target-gated
+# dependency; the engine itself stays seam-injected and performs no ambient
+# I/O.
+rt = ["dep:rustos-abi", "dep:rustos-rt"]
+
 [dependencies]
 rustos-vt = { path = "../vt", version = "=0.0.0" }
 rustos-curses = { path = "../curses", version = "=0.0.0" }
+
+# For the `rt` feature's `BundleHelp` only: the system-app-store/bundle
+# spellings and the `Errno`/`DirEntry` vocabulary (`rustos-abi`), and the
+# kernel-authorised `fs_*` file wrappers (`rustos-rt`).
+rustos-abi = { path = "../abi", version = "=0.0.0", optional = true }
+rustos-rt = { path = "../rt", version = "=0.0.0", optional = true }
 
 [lints]
 workspace = true

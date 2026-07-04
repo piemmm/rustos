@@ -48,19 +48,20 @@ Landed: deliverable 1 (`BundleEntry::Help` replaced `Documentation` in place,
 `AGENTS.md` §16.5 amended, C header regenerated), deliverable 2 (the
 `lib/help` engine), deliverable 3 (the `man.app` command app, §7, with its
 own six-locale `Help/` tree shipped on the read-only `/System` volume and
-the `LANG` locale variable named in §5), and deliverable 4 (shell command
+the `LANG` locale variable named in §5), deliverable 4 (shell command
 resolution over the `/System/Apps/` system app store, `AGENTS.md` §16.2
-amended). The first fully-converged command app beyond `man` is **`ls`**
-(deliverable 6): registered at `/System/Apps/ls.app/Run`, wired to the
-real `fs_stat`/`fs_readdir` syscalls, shipping its six-locale `Help/`
-tree (planted by `tools/mkimage` and the QEMU fixture), honouring the
-§4 `-h`/`-?` short-help convention through `lib/help`, and emitting the
-§12 `fs.hidden_entries_omitted` advisory record; the aarch64
-session-ceiling vertical types `ls /System/Apps` end to end. Remaining:
-deliverables 5–7 for the rest of the toolset (`cargo xtask help-lint`,
-the OS `Help/` trees and `-h`/`-?` convention for the other command apps,
-wider `stdinfo` adoption — `man`'s locale-fallback and `ls`'s omission
-records are live), and the **charter-blocking** deliverable 8 —
+amended), and deliverable 6 for **every store-registered command app**:
+`ls`, `ps`, `top`, `sysinfo`, `users`, and `elsh` each ship a six-locale
+`Help/` tree in their bundle (discovered by `tools/syshelp` from the
+`userland/apps` and `userland/shell` roots, planted by `tools/mkimage`
+and the QEMU fixture) and honour the §4 `-h`/`-?` short-help convention
+through the one shared `lib/help` render (`own_short_help` + the
+`rt`-feature `BundleHelp` own-bundle source, which every `Run` binary
+reuses instead of a private copy). Remaining:
+deliverables 5 and 7 (`cargo xtask help-lint`; wider `stdinfo`
+adoption — `man`'s locale-fallback and `ls`'s omission records are
+live), `Help/` trees for future command apps as each becomes a
+registered bundle, and the **charter-blocking** deliverable 8 —
 self-contained on-disk bundles: every discovered bundle's signed
 `AppInfo` + `Run` now ships on disk beside its `Help/` (increments 1–3,
 including the `<name>.app/Run` service paths), but the `spawn` syscall
@@ -516,7 +517,12 @@ both landed; `plans/SHELL.md` command execution):
    read seam, the §5 fallback chain (served locale reported for `stdinfo`),
    the bounded structured-Markdown parser (fixed §3 section model, typed
    `HelpError`, fence-aware section walk), and `render_short`/`render_full`
-   over `lib/vt` (widths from `lib/curses`). Unit tests, the `fuzz_help`
+   over `lib/vt` (widths from `lib/curses`). It also owns a command's
+   **own** §4 short help in one place: the pure `own_short_help` render
+   (LANG parse, load, short view, `lib/vt` bytes; `None` falls back to the
+   caller's usage banner) and the `rt`-feature `BundleHelp` production
+   source over the app's own store bundle — shared by every `Run` binary,
+   never re-derived per tool. Unit tests, the `fuzz_help`
    harness registered in `cargo xtask fuzz` (§19.6), rustdoc,
    `lib/help/README.md`, `docs/src/lib/help.md`, and the §3 crate list are
    in place.
@@ -534,8 +540,7 @@ both landed; `plans/SHELL.md` command execution):
    binary, §6.1) — the tree is discovered by `tools/syshelp` and planted on
    the read-only `/System` volume by `tools/mkimage` and the QEMU image
    fixture; the `session_ceiling` vertical types `man man` end to end.
-4. **Shell command resolution** — **done** (except the per-app `-h`/`-?`
-   convention, which lands with each app's `Help/` tree, §4/§8.1):
+4. **Shell command resolution** — **done**:
    system-app-store-then-`PATH` resolution (§8) and `.app`-suffix invocation
    (§9) are live. The store/bundle spellings live once in `lib/abi`
    (`SYSTEM_APP_STORE`/`BUNDLE_SUFFIX`); every OS command app is registered
@@ -552,16 +557,22 @@ both landed; `plans/SHELL.md` command execution):
    --bogus` argument end to end.
 5. **`cargo xtask help-lint`** — the §8.1 content/completeness/switch-drift
    check, wired into `cargo xtask ci` (§7).
-6. **`Help/` trees for the existing command apps** — **`ls` done** (its
-   six-locale tree is authored on disk in the bundle, discovered by
-   `tools/syshelp`, planted at `/System/Apps/ls.app/Help/`, and served — at
-   runtime through the `HelpSource` seam, never embedded in the binary
-   (§6.1) — for its §4 `-h`/`-?` short help); remaining: `ps`, `top`, `cat`,
-   `cp`, `mv`, `rm`, `chmod`, `chown`, `mount`, `getcap`, `setcap`,
-   `useradd`, `groupadd`, `elsh`, `sysinfo`, `terminal`, … in `default/`
-   plus the required locales (§8.1). Each new tree ships by dropping its
-   `Help/` files under the bundle — `tools/syshelp` rediscovers them, and no
-   image-builder list is edited (§6.1).
+6. **`Help/` trees for the existing command apps** — **done for every
+   store-registered command app**: `ls`, `ps`, `top`, `sysinfo`, `users`,
+   and `elsh` each author their six-locale tree on disk in the bundle,
+   discovered by `tools/syshelp` (roots `userland/apps` and
+   `userland/shell`), planted at `/System/Apps/<cmd>.app/Help/`, and served
+   at runtime through the `HelpSource` seam — never embedded in the binary
+   (§6.1) — for each tool's §4 `-h`/`-?` short help (a per-locale
+   switch-drift unit test pins each tree's `OPTIONS` to its parser, §3.1).
+   The tools that gained filesystem reach for that read request
+   `CAP_FS_ACCESS` in their manifests (the man/ls precedent — the secured
+   VFS still authorises per-inode). The not-yet-registered utilities
+   (`cat`, `cp`, `mv`, `rm`, `chmod`, `chown`, `mount`, `getcap`,
+   `setcap`, `useradd`, `groupadd`, `terminal`, …) gain their trees in the
+   same change that registers each as a store bundle. Each new tree ships
+   by dropping its `Help/` files under the bundle — `tools/syshelp`
+   rediscovers them, and no image-builder list is edited (§6.1).
 
 7. **`stdinfo` adoption in command apps (§12)** — emit the appropriate
    `StdInfoRecord` (via the `lib/rt` wrapper) wherever a command omits,

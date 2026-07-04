@@ -63,6 +63,7 @@ mod elevate;
 pub mod env;
 pub mod error;
 pub mod host;
+pub mod invocation;
 pub mod job;
 pub mod lexer;
 pub mod parser;
@@ -79,6 +80,7 @@ pub use host::{
     Console, Elevator, LaunchSpec, LimitStore, ProcessHost, RedirAction, RedirTarget,
     ResolvedCommand, ResolvedRedirection,
 };
+pub use invocation::{parse as parse_invocation, Invocation, UsageError, USAGE};
 pub use job::{ExitStatus, Job, JobId, JobState, JobTable, Pid, Signal, WaitOutcome};
 pub use repl::{run as run_repl, ReplInput};
 pub use shell::Shell;

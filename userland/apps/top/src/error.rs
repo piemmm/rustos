@@ -13,6 +13,9 @@ use rustos_procinfo::{CallError, ListError};
 /// wire-level cause so the tool invents no parallel error set.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TopError {
+    /// The command line carried an unrecognised option or an operand. The
+    /// caller should print [`crate::USAGE`]. The viewer never starts.
+    Usage,
     /// The service refused the system-wide process listing because the
     /// caller lacks `CAP_SYSINFO_GLOBAL`. Distinguished
     /// from [`TopError::Service`] so the viewer can show the precise
@@ -55,6 +58,7 @@ impl From<CursesError> for TopError {
 impl fmt::Display for TopError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Usage => f.write_str("invalid usage"),
             Self::PermissionDenied => f.write_str(
                 "permission denied: the system-wide process view requires a capability you do not hold",
             ),

@@ -1,9 +1,11 @@
 //! The `users` account-administration tool's interactive session
 //! (`plans/CAPABILITY_USE.md` CU4).
 //!
-//! This library is the whole behaviour of the `users` CLI — the command
-//! grammar, the typed `users_admin` request encoding, and the response
-//! rendering — behind three seams ([`session::ToolIo`],
+//! This library is the whole behaviour of the `users` CLI — the
+//! command-line grammar ([`command`]: the reserved `-h`/`-?` short-help
+//! switches, plans/APPS.md §4, against running the session), the in-session
+//! command grammar, the typed `users_admin` request encoding, and the
+//! response rendering — behind three seams ([`session::ToolIo`],
 //! [`session::AdminChannel`], [`session::SaltSource`]) so every path is
 //! host-testable without a kernel. The freestanding `Run` binary
 //! (`src/run.rs`) merely binds the seams to the inherited standard
@@ -34,6 +36,8 @@
 
 extern crate alloc;
 
+pub mod command;
 pub mod session;
 
+pub use command::{parse, Command, UsageError, USAGE};
 pub use session::{run_session, AdminChannel, SaltSource, SessionConfig, ToolIo};

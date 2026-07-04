@@ -7,12 +7,13 @@
 //! tree onto the volume they author.
 //!
 //! The source of truth for the help is the bundle's own on-disk `Help/`
-//! directory. This crate's build script walks the command-app source roots,
-//! finds every help document, and embeds each as a row in [`HELP_FILES`], so
+//! directory. This crate's build script walks the command-app source roots
+//! (`userland/apps`, `userland/shell`), finds every help document, and
+//! embeds each as a row in [`HELP_FILES`], so
 //! the image builder plants help by iterating discovered data — **never** a
 //! hand-maintained per-bundle list that a new bundle would force an edit to
 //! (the duplication the charter forbids). Adding a bundle's help is dropping
-//! files under `userland/apps/<name>/Help/<locale>/`; the next build
+//! files under `<root>/<name>/Help/<locale>/`; the next build
 //! rediscovers them. Help documents are therefore authored in exactly one
 //! place — the bundle — and never hardcoded into an app binary or copied into
 //! the image builder.
