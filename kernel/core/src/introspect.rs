@@ -86,6 +86,16 @@ pub trait IntrospectSource: Sync {
     /// [`Errno::NotImplemented`] from the default [`NullIntrospectSource`].
     fn uptime(&self) -> Result<Vec<u8>, Errno>;
 
+    /// The wire image of the current
+    /// [`rustos_abi::sysinfo::LoadAverage`]: the damped 1/5/15-minute
+    /// run-queue averages plus the live runnable/total-task and
+    /// logged-in-user censuses, all read from kernel-attested state.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotImplemented`] from the default [`NullIntrospectSource`].
+    fn load_average(&self) -> Result<Vec<u8>, Errno>;
+
     /// The wire image of the `[ResourceLimitRecord; LimitKind::COUNT]` report
     /// for the task whose kernel-attested process-instance identity is
     /// `proc_id`.
@@ -126,6 +136,10 @@ impl IntrospectSource for NullIntrospectSource {
     }
 
     fn uptime(&self) -> Result<Vec<u8>, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn load_average(&self) -> Result<Vec<u8>, Errno> {
         Err(Errno::NotImplemented)
     }
 

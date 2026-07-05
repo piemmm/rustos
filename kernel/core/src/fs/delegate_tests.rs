@@ -58,14 +58,17 @@ impl FilesystemRead for MockFs {
             ROOT | DOCS => Ok(NodeInfo {
                 kind: NodeKind::Directory,
                 size: 0,
+                allocated: 0,
             }),
             KERNEL => Ok(NodeInfo {
                 kind: NodeKind::RegularFile,
                 size: KERNEL_BODY.len() as u64,
+                allocated: KERNEL_BODY.len() as u64,
             }),
             README => Ok(NodeInfo {
                 kind: NodeKind::RegularFile,
                 size: README_BODY.len() as u64,
+                allocated: README_BODY.len() as u64,
             }),
             _ => Err(DriverError::NotFound),
         }
@@ -153,10 +156,12 @@ impl FilesystemRead for BadFs {
             ROOT => Ok(NodeInfo {
                 kind: NodeKind::Directory,
                 size: 0,
+                allocated: 0,
             }),
             DOCS => Ok(NodeInfo {
                 kind: NodeKind::RegularFile,
                 size: 3,
+                allocated: 3,
             }),
             _ => Err(DriverError::NotFound),
         }
@@ -661,10 +666,12 @@ impl FilesystemRead for SecMockFs {
             ROOT => Ok(NodeInfo {
                 kind: NodeKind::Directory,
                 size: 0,
+                allocated: 0,
             }),
             SECRET_FILE => Ok(NodeInfo {
                 kind: NodeKind::RegularFile,
                 size: SECRET_BODY.len() as u64,
+                allocated: SECRET_BODY.len() as u64,
             }),
             _ => Err(DriverError::NotFound),
         }

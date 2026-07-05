@@ -477,6 +477,7 @@ fn structured_fs_inputs_with_corrupted_fields_never_panic() {
     FileStat {
         kind: FileKind::Regular,
         size: 0xDEAD_BEEF,
+        allocated: 0xF00D_0000,
         mode: 0o644,
         uid: 1000,
         gid: 1000,

@@ -4,7 +4,7 @@
 //! Keeping the filesystem and the terminal behind object-safe traits is what
 //! lets the listing logic in [`crate::client`] run against in-memory fixtures
 //! with no kernel, mirroring the seam design of the other userland crates
-//! (`init`'s `Spawner`/`Reaper`, `login`'s `Prompt`, `sysinfo`'s `Transport`,
+//! (`init`'s `Spawner`/`Reaper`, `login`'s `LoginView`, `sysinfo`'s `Transport`,
 //! `cat`'s `FileSource`, `man`'s `BundleStore`).
 //!
 //! The vocabulary is the frozen `abi-v1` one: an entry's kind is the VFS's
@@ -28,6 +28,10 @@ pub struct Metadata {
     pub mode: u32,
     /// The size of the object in bytes.
     pub size: u64,
+    /// Bytes of on-disk storage the object's data occupies, as the
+    /// filesystem reports it (`-s` and the `total` line render this,
+    /// never a value derived from `size`).
+    pub allocated: u64,
     /// The owning user id, rendered numerically by the long format.
     pub uid: u32,
     /// The owning group id, rendered numerically by the long format.

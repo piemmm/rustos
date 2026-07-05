@@ -4,7 +4,7 @@ ls — lister le contenu des répertoires
 
 ## SYNOPSIS
 
-`ls [-aAdFghlmnopQrRS1] [--] [path...]`
+`ls [-aAdFghlmnopQrRsS1] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -60,6 +60,9 @@ blocs sont séparés par une ligne vide.
   contrôle.
 - `-r, --reverse` — inverser l'ordre de tri.
 - `-R, --recursive` — lister les sous-répertoires récursivement.
+- `-s, --size` — afficher la taille allouée de chaque entrée en blocs de
+  1024 octets (mise à l'échelle avec `-h`), avec une ligne `total` par
+  répertoire listé.
 - `-S` — trier par taille, la plus grande en premier.
 - `-1` — un nom par ligne (le comportement par défaut).
 - `-?` — afficher l'aide courte de cette commande (`--help` est la

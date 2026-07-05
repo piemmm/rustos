@@ -38,6 +38,8 @@ discipline as adding a syscall (`AGENTS.md` §9, §16.6):
 | `UPTIME`                | none                   | no      |
 | `MOUNT_LIST`            | none                   | no      |
 | `RESOURCE_LIMITS`       | none (self-scoped)     | no      |
+| `PROCESS_IDENTITY`      | none (self-scoped)     | no      |
+| `LOAD_AVERAGE`          | none                   | no      |
 
 `CAP_SYSINFO_GLOBAL`, `CAP_SYSINFO_KERNEL`, and `CAP_SYSINFO_HW` are
 [`CapabilityId`] values 13, 14, and 15. Self-scoped observers ("list my
@@ -51,6 +53,12 @@ not part of this read-only API. `RESOURCE_LIMITS` is self-scoped — it
 returns the *caller's own* effective resource limits and live usage
 (`AGENTS.md` §24.3) — so, like `SELF_PROCESS_LIST`, it needs no capability;
 observing another principal's limits would be a separate, gated query.
+`PROCESS_IDENTITY` is likewise self-scoped: it returns the caller's own
+kernel-attested `Origin`. `LOAD_AVERAGE` is ungated for the same reason
+as `UPTIME`: the `LoadAverage` response — the damped 1/5/15-minute
+run-queue averages (fixed-point, `LOAD_FIXED_SHIFT` fractional bits) plus
+the runnable/total-task and logged-in-user censuses — is the classic
+`uptime(1)` line, system-wide and secret-free.
 
 ## Wire framing
 

@@ -13,7 +13,7 @@ use crate::decfmt::DecBuf;
 use crate::error::LoginError;
 use crate::events;
 use crate::session::{
-    AuthenticatedUser, Authenticator, Credentials, Prompt, SessionKind, SessionLauncher,
+    AuthenticatedUser, Authenticator, Credentials, LoginView, SessionKind, SessionLauncher,
     SessionOutcome, INPUT_LINE_MAX,
 };
 
@@ -29,8 +29,8 @@ pub struct LoginConfig<'a> {
     /// driver loaded **and** the window manager is present; otherwise the
     /// graphical option is hidden, never errored.
     pub graphical_available: bool,
-    /// Seam that reads from and writes to the controlling terminal.
-    pub prompt: &'a dyn Prompt,
+    /// Seam that presents the login screen and reads the user's input.
+    pub view: &'a dyn LoginView,
     /// Seam that verifies credentials against `kernel/sec`.
     pub authenticator: &'a dyn Authenticator,
     /// Seam that launches the chosen session.
@@ -64,6 +64,7 @@ impl<'a> Login<'a> {
     /// [`LoginError::SessionLaunch`] if an authenticated user's session could
     /// not be started. Each is a fail-closed outcome that launched no session.
     pub fn run(&self) -> Result<SessionOutcome, LoginError> {
+        self.cfg.view.round_begin();
         let mut remaining = self.cfg.max_attempts;
         while remaining > 0 {
             remaining -= 1;
@@ -79,7 +80,7 @@ impl<'a> Login<'a> {
             password_buf.fill(0);
             match attempt {
                 Ok(Some(outcome)) => return Ok(outcome),
-                Ok(None) => self.cfg.prompt.write("Login incorrect\n"),
+                Ok(None) => self.cfg.view.note_failure(),
                 Err(err) => return Err(err),
             }
         }
@@ -98,10 +99,8 @@ impl<'a> Login<'a> {
         username_buf: &mut [u8],
         password_buf: &mut [u8],
     ) -> Result<Option<SessionOutcome>, LoginError> {
-        self.cfg.prompt.write("Username: ");
-        let username = self.read("username", username_buf, |p, buf| p.read_line(buf))?;
-        self.cfg.prompt.write("Password: ");
-        let password = self.read("password", password_buf, |p, buf| p.read_secret(buf))?;
+        let username = self.read("username", username_buf, |v, buf| v.read_username(buf))?;
+        let password = self.read("password", password_buf, |v, buf| v.read_password(buf))?;
         let credentials = Credentials { username, password };
         if let Ok(user) = self.cfg.authenticator.authenticate(&credentials) {
             return self.start_session(credentials.username, &user).map(Some);
@@ -117,9 +116,9 @@ impl<'a> Login<'a> {
         &self,
         stage: &str,
         buf: &'b mut [u8],
-        op: impl FnOnce(&dyn Prompt, &mut [u8]) -> Result<usize, Errno>,
+        op: impl FnOnce(&dyn LoginView, &mut [u8]) -> Result<usize, Errno>,
     ) -> Result<&'b str, LoginError> {
-        let outcome = match op(self.cfg.prompt, &mut *buf) {
+        let outcome = match op(self.cfg.view, &mut *buf) {
             Ok(len) if len > buf.len() => Err(Errno::OutOfRange),
             Ok(len) => core::str::from_utf8(&buf[..len]).map_err(|_| Errno::OutOfRange),
             Err(err) => Err(err),
@@ -138,6 +137,9 @@ impl<'a> Login<'a> {
     ) -> Result<SessionOutcome, LoginError> {
         let kind = self.choose_session()?;
         self.audit_session_started(username, user, kind);
+        // The screen is the session's now: restore the normal terminal
+        // before the shell starts writing to it.
+        self.cfg.view.session_handoff();
         match self.cfg.launcher.launch(user, kind) {
             Ok(outcome) => {
                 self.audit_session_ended(username, user, outcome);
@@ -158,11 +160,10 @@ impl<'a> Login<'a> {
         if !self.cfg.graphical_available {
             return Ok(SessionKind::Text);
         }
-        self.cfg
-            .prompt
-            .write("Session type — text (default) or graphical? ");
         let mut answer_buf = [0u8; INPUT_LINE_MAX];
-        let answer = self.read("session choice", &mut answer_buf, |p, buf| p.read_line(buf))?;
+        let answer = self.read("session choice", &mut answer_buf, |v, buf| {
+            v.read_session_choice(buf)
+        })?;
         Ok(SessionKind::from_choice(answer))
     }
 
@@ -316,33 +317,39 @@ mod tests {
     use crate::error::LoginError;
     use crate::events;
     use crate::session::{
-        AuthenticatedUser, Authenticator, Credentials, Gid, Prompt, SessionKind, SessionLauncher,
-        SessionOutcome, Uid,
+        AuthenticatedUser, Authenticator, Credentials, Gid, LoginView, SessionKind,
+        SessionLauncher, SessionOutcome, Uid,
     };
     use alloc::collections::VecDeque;
-    use alloc::string::{String, ToString};
+    use alloc::string::ToString;
     use alloc::vec::Vec;
+    use core::cell::Cell;
     use core::cell::RefCell;
     use rustos_abi::{CapabilityId, Errno};
     use rustos_caps::CapabilitySet;
     use rustos_log::{Event, EventId, Level, Sink};
 
-    /// Prompt that replays scripted input lines and records what was written.
+    /// View that replays scripted input lines and records the semantic
+    /// calls the machine makes (rounds begun, failures noted, hand-offs).
     ///
     /// Scripted entries are raw bytes, not `&str`, so tests can replay
-    /// invalid UTF-8 and over-long lines through the same fixture.
-    struct MockPrompt {
+    /// invalid UTF-8 and over-long lines through the same fixture. The
+    /// username and session-choice reads share the `lines` queue, exactly
+    /// as they share the echoed-input channel on a real console.
+    struct MockView {
         lines: RefCell<VecDeque<Result<Vec<u8>, Errno>>>,
         secrets: RefCell<VecDeque<Result<Vec<u8>, Errno>>>,
-        written: RefCell<Vec<String>>,
+        rounds: Cell<u32>,
+        failures: Cell<u32>,
+        handoffs: Cell<u32>,
+        choice_reads: Cell<u32>,
     }
-    impl MockPrompt {
+    impl MockView {
         fn new(lines: &[&str], secrets: &[&str]) -> Self {
-            Self {
-                lines: RefCell::new(lines.iter().map(|s| Ok(s.as_bytes().to_vec())).collect()),
-                secrets: RefCell::new(secrets.iter().map(|s| Ok(s.as_bytes().to_vec())).collect()),
-                written: RefCell::new(Vec::new()),
-            }
+            Self::with_results(
+                lines.iter().map(|s| Ok(s.as_bytes().to_vec())).collect(),
+                secrets.iter().map(|s| Ok(s.as_bytes().to_vec())).collect(),
+            )
         }
         fn with_results(
             lines: Vec<Result<Vec<u8>, Errno>>,
@@ -351,11 +358,11 @@ mod tests {
             Self {
                 lines: RefCell::new(lines.into_iter().collect()),
                 secrets: RefCell::new(secrets.into_iter().collect()),
-                written: RefCell::new(Vec::new()),
+                rounds: Cell::new(0),
+                failures: Cell::new(0),
+                handoffs: Cell::new(0),
+                choice_reads: Cell::new(0),
             }
-        }
-        fn output(&self) -> String {
-            self.written.borrow().concat()
         }
         fn fill(
             queue: &RefCell<VecDeque<Result<Vec<u8>, Errno>>>,
@@ -372,15 +379,25 @@ mod tests {
             Ok(line.len())
         }
     }
-    impl Prompt for MockPrompt {
-        fn write(&self, text: &str) {
-            self.written.borrow_mut().push(text.to_string());
+    impl LoginView for MockView {
+        fn round_begin(&self) {
+            self.rounds.set(self.rounds.get() + 1);
         }
-        fn read_line(&self, buf: &mut [u8]) -> Result<usize, Errno> {
+        fn read_username(&self, buf: &mut [u8]) -> Result<usize, Errno> {
             Self::fill(&self.lines, buf)
         }
-        fn read_secret(&self, buf: &mut [u8]) -> Result<usize, Errno> {
+        fn read_password(&self, buf: &mut [u8]) -> Result<usize, Errno> {
             Self::fill(&self.secrets, buf)
+        }
+        fn read_session_choice(&self, buf: &mut [u8]) -> Result<usize, Errno> {
+            self.choice_reads.set(self.choice_reads.get() + 1);
+            Self::fill(&self.lines, buf)
+        }
+        fn note_failure(&self) {
+            self.failures.set(self.failures.get() + 1);
+        }
+        fn session_handoff(&self) {
+            self.handoffs.set(self.handoffs.get() + 1);
         }
     }
 
@@ -485,14 +502,14 @@ mod tests {
 
     #[test]
     fn successful_text_login_launches_session() {
-        let prompt = MockPrompt::new(&["ada"], &["byron"]);
+        let view = MockView::new(&["ada"], &["byron"]);
         let auth = auth();
         let launcher = MockLauncher::ok(SessionKind::Text);
         let sink = RecordingSink::new();
         let login = Login::new(LoginConfig {
             max_attempts: 3,
             graphical_available: false,
-            prompt: &prompt,
+            view: &view,
             authenticator: &auth,
             launcher: &launcher,
             sink: &sink,
@@ -505,19 +522,23 @@ mod tests {
         assert_eq!(sink.count(events::SESSION_STARTED), 1);
         assert_eq!(sink.count(events::SESSION_ENDED), 1);
         assert_eq!(sink.count(events::AUTH_FAILED), 0);
+        // The view was entered once and handed the terminal to the session.
+        assert_eq!(view.rounds.get(), 1);
+        assert_eq!(view.handoffs.get(), 1);
+        assert_eq!(view.failures.get(), 0);
     }
 
     #[test]
     fn graphical_option_hidden_when_unavailable() {
         // Only one input line (the username); no session-choice line is read.
-        let prompt = MockPrompt::new(&["ada"], &["byron"]);
+        let view = MockView::new(&["ada"], &["byron"]);
         let auth = auth();
         let launcher = MockLauncher::ok(SessionKind::Text);
         let sink = RecordingSink::new();
         let login = Login::new(LoginConfig {
             max_attempts: 3,
             graphical_available: false,
-            prompt: &prompt,
+            view: &view,
             authenticator: &auth,
             launcher: &launcher,
             sink: &sink,
@@ -525,20 +546,21 @@ mod tests {
 
         let outcome = login.run().unwrap();
         assert_eq!(outcome.kind, SessionKind::Text);
-        assert!(!prompt.output().contains("graphical"));
+        // The choice prompt was never presented.
+        assert_eq!(view.choice_reads.get(), 0);
     }
 
     #[test]
     fn graphical_session_chosen_when_offered() {
         // Username, then the session choice "g".
-        let prompt = MockPrompt::new(&["ada", "g"], &["byron"]);
+        let view = MockView::new(&["ada", "g"], &["byron"]);
         let auth = auth();
         let launcher = MockLauncher::ok(SessionKind::Graphical);
         let sink = RecordingSink::new();
         let login = Login::new(LoginConfig {
             max_attempts: 3,
             graphical_available: true,
-            prompt: &prompt,
+            view: &view,
             authenticator: &auth,
             launcher: &launcher,
             sink: &sink,
@@ -547,19 +569,20 @@ mod tests {
         let outcome = login.run().unwrap();
         assert_eq!(outcome.kind, SessionKind::Graphical);
         assert_eq!(launcher.launched.borrow()[0].1, SessionKind::Graphical);
-        assert!(prompt.output().contains("graphical"));
+        // The choice prompt was presented exactly once.
+        assert_eq!(view.choice_reads.get(), 1);
     }
 
     #[test]
     fn offered_but_text_chosen_defaults_to_text() {
-        let prompt = MockPrompt::new(&["ada", ""], &["byron"]);
+        let view = MockView::new(&["ada", ""], &["byron"]);
         let auth = auth();
         let launcher = MockLauncher::ok(SessionKind::Text);
         let sink = RecordingSink::new();
         let login = Login::new(LoginConfig {
             max_attempts: 3,
             graphical_available: true,
-            prompt: &prompt,
+            view: &view,
             authenticator: &auth,
             launcher: &launcher,
             sink: &sink,
@@ -572,14 +595,14 @@ mod tests {
     #[test]
     fn wrong_password_retries_then_succeeds() {
         // First attempt: bad password; second: correct.
-        let prompt = MockPrompt::new(&["ada", "ada"], &["wrong", "byron"]);
+        let view = MockView::new(&["ada", "ada"], &["wrong", "byron"]);
         let auth = auth();
         let launcher = MockLauncher::ok(SessionKind::Text);
         let sink = RecordingSink::new();
         let login = Login::new(LoginConfig {
             max_attempts: 3,
             graphical_available: false,
-            prompt: &prompt,
+            view: &view,
             authenticator: &auth,
             launcher: &launcher,
             sink: &sink,
@@ -589,19 +612,20 @@ mod tests {
         assert_eq!(outcome.exit_code, 0);
         assert_eq!(sink.count(events::AUTH_FAILED), 1);
         assert_eq!(sink.count(events::SESSION_STARTED), 1);
-        assert!(prompt.output().contains("Login incorrect"));
+        // The one rejection surfaced on the view's failure counter.
+        assert_eq!(view.failures.get(), 1);
     }
 
     #[test]
     fn attempts_exhausted_fails_closed() {
-        let prompt = MockPrompt::new(&["x", "y"], &["a", "b"]);
+        let view = MockView::new(&["x", "y"], &["a", "b"]);
         let auth = auth();
         let launcher = MockLauncher::ok(SessionKind::Text);
         let sink = RecordingSink::new();
         let login = Login::new(LoginConfig {
             max_attempts: 2,
             graphical_available: false,
-            prompt: &prompt,
+            view: &view,
             authenticator: &auth,
             launcher: &launcher,
             sink: &sink,
@@ -611,6 +635,10 @@ mod tests {
         assert_eq!(sink.count(events::AUTH_FAILED), 2);
         assert_eq!(sink.count(events::LOCKED_OUT), 1);
         assert!(launcher.launched.borrow().is_empty());
+        // Both rejections surfaced on the failure counter; the terminal
+        // was never handed over.
+        assert_eq!(view.failures.get(), 2);
+        assert_eq!(view.handoffs.get(), 0);
     }
 
     #[test]
@@ -618,15 +646,15 @@ mod tests {
         // A line of non-UTF-8 bytes (terminal line noise) must fail closed
         // as a console error — it is never handed to the authenticator
         // (every input validated).
-        let prompt =
-            MockPrompt::with_results(alloc::vec![Ok(alloc::vec![0xFF, 0xFE, 0xFD])], Vec::new());
+        let view =
+            MockView::with_results(alloc::vec![Ok(alloc::vec![0xFF, 0xFE, 0xFD])], Vec::new());
         let auth = auth();
         let launcher = MockLauncher::ok(SessionKind::Text);
         let sink = RecordingSink::new();
         let login = Login::new(LoginConfig {
             max_attempts: 3,
             graphical_available: false,
-            prompt: &prompt,
+            view: &view,
             authenticator: &auth,
             launcher: &launcher,
             sink: &sink,
@@ -643,14 +671,14 @@ mod tests {
         // (`INPUT_LINE_MAX`) with `LengthOutOfRange`; login surfaces it as
         // a console failure rather than truncating.
         let long = alloc::vec![b'a'; crate::session::INPUT_LINE_MAX + 1];
-        let prompt = MockPrompt::with_results(alloc::vec![Ok(long)], Vec::new());
+        let view = MockView::with_results(alloc::vec![Ok(long)], Vec::new());
         let auth = auth();
         let launcher = MockLauncher::ok(SessionKind::Text);
         let sink = RecordingSink::new();
         let login = Login::new(LoginConfig {
             max_attempts: 3,
             graphical_available: false,
-            prompt: &prompt,
+            view: &view,
             authenticator: &auth,
             launcher: &launcher,
             sink: &sink,
@@ -667,14 +695,14 @@ mod tests {
     #[test]
     fn console_read_failure_fails_closed() {
         // Username read returns an error immediately.
-        let prompt = MockPrompt::with_results(alloc::vec![Err(Errno::TimedOut)], Vec::new());
+        let view = MockView::with_results(alloc::vec![Err(Errno::TimedOut)], Vec::new());
         let auth = auth();
         let launcher = MockLauncher::ok(SessionKind::Text);
         let sink = RecordingSink::new();
         let login = Login::new(LoginConfig {
             max_attempts: 3,
             graphical_available: false,
-            prompt: &prompt,
+            view: &view,
             authenticator: &auth,
             launcher: &launcher,
             sink: &sink,
@@ -687,14 +715,14 @@ mod tests {
 
     #[test]
     fn session_launch_failure_is_reported() {
-        let prompt = MockPrompt::new(&["ada"], &["byron"]);
+        let view = MockView::new(&["ada"], &["byron"]);
         let auth = auth();
         let launcher = MockLauncher::failing();
         let sink = RecordingSink::new();
         let login = Login::new(LoginConfig {
             max_attempts: 3,
             graphical_available: false,
-            prompt: &prompt,
+            view: &view,
             authenticator: &auth,
             launcher: &launcher,
             sink: &sink,
@@ -708,14 +736,14 @@ mod tests {
 
     #[test]
     fn zero_budget_launches_nothing() {
-        let prompt = MockPrompt::new(&[], &[]);
+        let view = MockView::new(&[], &[]);
         let auth = auth();
         let launcher = MockLauncher::ok(SessionKind::Text);
         let sink = RecordingSink::new();
         let login = Login::new(LoginConfig {
             max_attempts: 0,
             graphical_available: false,
-            prompt: &prompt,
+            view: &view,
             authenticator: &auth,
             launcher: &launcher,
             sink: &sink,

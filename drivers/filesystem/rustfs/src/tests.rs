@@ -5117,3 +5117,26 @@ fn acorn_preset_metadata_round_trips_through_the_store() {
     .expect("decode exec");
     assert_eq!((rload, rexec), (load, exec));
 }
+
+// --- Allocated storage (`NodeInfo::allocated` from the extent tree). ---
+
+#[test]
+fn node_info_reports_mapped_extent_allocation() {
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"file", NodeKind::RegularFile)
+        .expect("create");
+    let node = fs.lookup(root, b"file").expect("lookup");
+    // No extent tree yet: nothing is allocated.
+    assert_eq!(fs.node_info(node).expect("info").allocated, 0);
+
+    let body = alloc::vec![7u8; 1500];
+    assert_eq!(fs.write_at(root, b"file", 0, &body), Ok(1500));
+    // Each data block carries the crypto, compression-descriptor, and
+    // integrity trailers, so 1500 bytes span four 512-byte blocks.
+    assert_eq!(fs.node_info(node).expect("info").allocated, 4 * 512);
+
+    fs.truncate(root, b"file", 100).expect("truncate");
+    // The freed tail leaves one mapped block.
+    assert_eq!(fs.node_info(node).expect("info").allocated, 512);
+}

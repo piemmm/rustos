@@ -32,7 +32,7 @@
 //!
 //! The operations that touch the outside world — reading/writing the
 //! terminal, verifying a credential, launching a session, and running an
-//! elevated command — are the injected [`Prompt`], [`Authenticator`],
+//! elevated command — are the injected [`LoginView`], [`Authenticator`],
 //! [`SessionLauncher`], and [`ElevateLauncher`] seams. The
 //! binary that ships as `/System/Services/login.app/Run` wires the real kernel- and
 //! `kernel/sec`-backed implementations; tests wire in-memory fixtures. This
@@ -44,7 +44,7 @@
 //! * [`events`] — stable [`rustos_log::EventId`] constants (`10000` range).
 //! * [`error`] — [`LoginError`], the fail-closed outcomes of [`Login::run`].
 //! * [`session`] — the identity types ([`Uid`], [`Gid`],
-//!   [`AuthenticatedUser`], [`SessionKind`]) and the [`Prompt`],
+//!   [`AuthenticatedUser`], [`SessionKind`]) and the [`LoginView`],
 //!   [`Authenticator`], and [`SessionLauncher`] seams.
 //! * [`auth`] — [`UsersAuthenticator`], the production [`Authenticator`]
 //!   over the `/System/Security/Users` database (`lib/users`), and
@@ -81,13 +81,15 @@ pub mod events;
 pub mod login;
 pub mod session;
 pub mod supervise;
+pub mod view;
 
 pub use auth::{DenyAll, UsersAuthenticator};
 pub use elevate::{handle_elevate_request, ElevateLauncher};
 pub use error::LoginError;
 pub use login::{Login, LoginConfig};
 pub use session::{
-    session_environment, AuthenticatedUser, Authenticator, Credentials, Gid, Prompt, SessionKind,
-    SessionLauncher, SessionOutcome, Uid,
+    session_environment, AuthenticatedUser, Authenticator, Credentials, Gid, LoginView,
+    SessionKind, SessionLauncher, SessionOutcome, Uid,
 };
 pub use supervise::{supervise, DbLoad};
+pub use view::{ConsoleMode, CursesView, LoginStatus, StatusSource};

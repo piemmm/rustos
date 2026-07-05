@@ -591,6 +591,7 @@ where
             Ok(FileStat {
                 kind: file_kind(info.kind),
                 size: info.size,
+                allocated: info.allocated,
                 mode: u32::from(info.meta.mode.bits()),
                 uid: info.meta.owner.0,
                 gid: info.meta.group.0,

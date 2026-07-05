@@ -3909,6 +3909,7 @@ mod tests {
         let stat = FileStat {
             kind: rustos_abi::FileKind::Regular,
             size: 1234,
+            allocated: 4096,
             mode: 0o644,
             uid: 1000,
             gid: 1000,

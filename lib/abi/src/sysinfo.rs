@@ -87,6 +87,14 @@ impl SysinfoQueryId {
     /// query.
     pub const PROCESS_IDENTITY: Self = Self(8);
 
+    /// Read the scheduler load averages and the logged-in-user census.
+    ///
+    /// Ungated: the answer is the classic `uptime(1)` line — three
+    /// exponentially-damped load averages, the runnable/total task counts,
+    /// and the number of distinct logged-in users — system-wide figures
+    /// that expose no per-process secret, exactly like [`Self::UPTIME`].
+    pub const LOAD_AVERAGE: Self = Self(9);
+
     /// Inclusive upper bound on the query identifier space in `sysinfo-v1`.
     ///
     /// Sized identically to the syscall table so a future query explosion
@@ -143,6 +151,9 @@ pub enum IntrospectDomain {
     /// buffer on entry (a `u64` `arg` cannot carry it), which the kernel
     /// resolves against the capability table so the answer survives PID reuse.
     TaskLimits = 5,
+    /// Scheduler load averages and the logged-in-user census: a single
+    /// [`LoadAverage`].
+    LoadAverage = 6,
 }
 
 impl IntrospectDomain {
@@ -163,6 +174,7 @@ impl IntrospectDomain {
             3 => Ok(Self::Identity),
             4 => Ok(Self::Uptime),
             5 => Ok(Self::TaskLimits),
+            6 => Ok(Self::LoadAverage),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -268,6 +280,12 @@ pub const SYSINFO_QUERIES: &[SysinfoQuerySpec] = &[
     SysinfoQuerySpec {
         id: SysinfoQueryId::PROCESS_IDENTITY,
         name: "process_identity",
+        required_capability: None,
+        audit: false,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::LOAD_AVERAGE,
+        name: "load_average",
         required_capability: None,
         audit: false,
     },
@@ -909,6 +927,87 @@ impl Uptime {
     }
 }
 
+/// Binary point of the fixed-point load-average values in [`LoadAverage`]:
+/// a load of 1.00 is `1 << LOAD_FIXED_SHIFT`.
+pub const LOAD_FIXED_SHIFT: u32 = 11;
+
+/// Response payload for [`SysinfoQueryId::LOAD_AVERAGE`] — the `uptime(1)`
+/// figures: exponentially-damped 1/5/15-minute run-queue averages, the
+/// live task census, and the number of distinct logged-in users.
+///
+/// The averages are fixed-point with [`LOAD_FIXED_SHIFT`] fractional bits;
+/// [`LoadAverage::whole`] and [`LoadAverage::centis`] render the
+/// conventional `W.CC` form from one shared definition.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub struct LoadAverage {
+    /// One-minute damped average of the runnable-task count (fixed-point).
+    pub load1: u32,
+    /// Five-minute damped average (fixed-point).
+    pub load5: u32,
+    /// Fifteen-minute damped average (fixed-point).
+    pub load15: u32,
+    /// Tasks currently runnable or running.
+    pub runnable: u32,
+    /// Live (non-zombie) tasks in total.
+    pub total_tasks: u32,
+    /// Distinct non-system uids owning at least one live task — the
+    /// logged-in-user census.
+    pub users: u32,
+}
+
+impl LoadAverage {
+    /// Encoded size on the wire.
+    pub const WIRE_LEN: usize = 24;
+
+    /// Whole part of a fixed-point load value.
+    #[must_use]
+    pub const fn whole(fixed: u32) -> u32 {
+        fixed >> LOAD_FIXED_SHIFT
+    }
+
+    /// Hundredths part of a fixed-point load value, `0..=99`.
+    #[must_use]
+    pub const fn centis(fixed: u32) -> u32 {
+        ((fixed & ((1 << LOAD_FIXED_SHIFT) - 1)) * 100) >> LOAD_FIXED_SHIFT
+    }
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        out[0..4].copy_from_slice(&self.load1.to_le_bytes());
+        out[4..8].copy_from_slice(&self.load5.to_le_bytes());
+        out[8..12].copy_from_slice(&self.load15.to_le_bytes());
+        out[12..16].copy_from_slice(&self.runnable.to_le_bytes());
+        out[16..20].copy_from_slice(&self.total_tasks.to_le_bytes());
+        out[20..24].copy_from_slice(&self.users.to_le_bytes());
+        out
+    }
+
+    /// Decode from `bytes`.
+    ///
+    /// Returns [`Errno::BufferTooSmall`] if `bytes` is shorter than
+    /// [`Self::WIRE_LEN`]. Every field value is representable, so no other
+    /// shape check applies.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let word = |at: usize| {
+            u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+        };
+        Ok(Self {
+            load1: word(0),
+            load5: word(4),
+            load15: word(8),
+            runnable: word(12),
+            total_tasks: word(16),
+            users: word(20),
+        })
+    }
+}
+
 /// Bytes of the per-installation machine identifier.
 pub const MACHINE_ID_LEN: usize = 16;
 
@@ -1330,12 +1429,13 @@ pub const RESOURCE_LIMITS_REPORT_LEN: usize = ResourceLimitRecord::WIRE_LEN * Li
 #[cfg(test)]
 mod tests {
     use super::{
-        encoded_query_table, spec_for, KernelMemoryStats, MountListRequest, MountRecord,
-        ProcessListRequest, ProcessRecord, ProcessState, ResourceLimitRecord, SysinfoQueryId,
-        SysinfoRequestHeader, SystemIdentity, Uptime, ENCODED_QUERY_TABLE, ENCODED_QUERY_TABLE_LEN,
-        HOSTNAME_MAX, MACHINE_ID_LEN, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX,
-        PROCESS_CPU_NONE, PROCESS_NAME_MAX, RESOURCE_LIMITS_REPORT_LEN, SYSINFO_MAX_PAYLOAD_LEN,
-        SYSINFO_QUERIES, SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC,
+        encoded_query_table, spec_for, KernelMemoryStats, LoadAverage, MountListRequest,
+        MountRecord, ProcessListRequest, ProcessRecord, ProcessState, ResourceLimitRecord,
+        SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime, ENCODED_QUERY_TABLE,
+        ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX, LOAD_FIXED_SHIFT, MACHINE_ID_LEN, MOUNT_FSTYPE_MAX,
+        MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, PROCESS_CPU_NONE, PROCESS_NAME_MAX,
+        RESOURCE_LIMITS_REPORT_LEN, SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERIES,
+        SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC,
         SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1,
     };
     use crate::driver::filesystem::MountFlags;
@@ -1403,13 +1503,36 @@ mod tests {
             (3, IntrospectDomain::Identity),
             (4, IntrospectDomain::Uptime),
             (5, IntrospectDomain::TaskLimits),
+            (6, IntrospectDomain::LoadAverage),
         ] {
             assert_eq!(domain.as_u32(), raw);
             assert_eq!(IntrospectDomain::from_u32(raw), Ok(domain));
         }
         // Any value outside the closed set is rejected, not guessed.
-        assert_eq!(IntrospectDomain::from_u32(6), Err(Errno::OutOfRange));
+        assert_eq!(IntrospectDomain::from_u32(7), Err(Errno::OutOfRange));
         assert_eq!(IntrospectDomain::from_u32(u32::MAX), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn load_average_round_trips_and_renders_fixed_point() {
+        let load = LoadAverage {
+            load1: (3 << LOAD_FIXED_SHIFT) + (1 << LOAD_FIXED_SHIFT) / 2,
+            load5: 1 << LOAD_FIXED_SHIFT,
+            load15: 0,
+            runnable: 4,
+            total_tasks: 17,
+            users: 2,
+        };
+        let decoded = LoadAverage::from_bytes(&load.to_le_bytes()).expect("round trip");
+        assert_eq!(decoded, load);
+        assert_eq!(LoadAverage::whole(load.load1), 3);
+        assert_eq!(LoadAverage::centis(load.load1), 50);
+        assert_eq!(LoadAverage::whole(load.load15), 0);
+        assert_eq!(LoadAverage::centis(load.load15), 0);
+        assert_eq!(
+            LoadAverage::from_bytes(&[0u8; LoadAverage::WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
     }
 
     #[test]

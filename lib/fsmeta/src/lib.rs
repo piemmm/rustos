@@ -41,7 +41,7 @@ pub mod attr;
 pub mod key;
 pub mod preset;
 
-mod calendar;
+pub mod calendar;
 
 #[cfg(test)]
 mod tests;

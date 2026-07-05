@@ -1620,3 +1620,71 @@ fn rename_rejects_bad_destination_name() {
         Err(DriverError::LengthOutOfRange)
     );
 }
+
+// --- Allocated storage (`NodeInfo::allocated` from `i_blocks`). ---
+
+#[test]
+fn node_info_reports_allocation_from_i_blocks() {
+    let mut img = build_image();
+    let base = inode_offset(11);
+    // 10 sectors in the low half plus 1 in the osd2 high half:
+    // (1 << 32) + 10 sectors of 512 bytes.
+    set_le32(&mut img, base + 0x1C, 10);
+    set_le16(&mut img, base + 0x74, 1);
+    let mut fs = Ext4::open(MockBlock { data: img }).expect("valid volume");
+    let file = fs.lookup(fs.root(), b"hello.txt").expect("found");
+    let info = fs.node_info(file).expect("info");
+    assert_eq!(info.allocated, ((1u64 << 32) + 10) * 512);
+}
+
+#[test]
+fn node_info_scales_huge_file_allocation_by_the_block_size() {
+    let mut img = build_image();
+    let base = inode_offset(11);
+    set_le32(&mut img, base + 0x1C, 3);
+    set_le32(
+        &mut img,
+        base + 0x20,
+        INODE_FLAG_EXTENTS | INODE_FLAG_HUGE_FILE,
+    );
+    let mut fs = Ext4::open(MockBlock { data: img }).expect("valid volume");
+    let file = fs.lookup(fs.root(), b"hello.txt").expect("found");
+    let info = fs.node_info(file).expect("info");
+    // The huge-file flag makes `i_blocks` count filesystem blocks.
+    assert_eq!(info.allocated, 3 * FS_BLOCK as u64);
+}
+
+#[test]
+fn blocks_high_half_never_leaks_into_file_acl() {
+    // Regression: `l_i_blocks_high` (osd2 offset 0x74) was decoded as the
+    // `i_file_acl` high half, sending the ACL reader to a bogus xattr
+    // block. With `i_file_acl` zero, a non-zero blocks high half must
+    // leave the security record ACL-free and readable.
+    let mut img = build_image();
+    set_le16(&mut img, inode_offset(11) + 0x74, 0x7FFF);
+    let mut fs = Ext4::open(MockBlock { data: img }).expect("valid volume");
+    let file = fs.lookup(fs.root(), b"hello.txt").expect("found");
+    let sec = fs.security(file).expect("security reads cleanly");
+    assert_eq!(sec.mode, 0o644);
+    assert!(sec.acl().is_empty());
+}
+
+#[test]
+fn writing_grows_the_reported_allocation() {
+    let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256).expect("format");
+    let root = fs.root();
+    let file = fs
+        .create(root, b"grow.bin", NodeKind::RegularFile)
+        .expect("create");
+    assert_eq!(fs.node_info(file).expect("info").allocated, 0);
+    let payload = [7u8; FS_BLOCK + 1];
+    fs.write_at(root, b"grow.bin", 0, &payload).expect("write");
+    // Two data blocks were allocated and recorded in `i_blocks`.
+    assert_eq!(
+        fs.node_info(file).expect("info").allocated,
+        2 * FS_BLOCK as u64
+    );
+    fs.truncate(root, b"grow.bin", 1).expect("truncate");
+    // The freed tail block leaves the surviving one accounted.
+    assert_eq!(fs.node_info(file).expect("info").allocated, FS_BLOCK as u64);
+}

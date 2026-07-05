@@ -167,6 +167,7 @@ impl FilesystemRead for MockStore {
         Ok(NodeInfo {
             kind: n.kind,
             size: n.reported_size.unwrap_or(n.content.len() as u64),
+            allocated: n.content.len() as u64,
         })
     }
 

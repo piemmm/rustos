@@ -841,6 +841,33 @@ fn flush_is_a_synchronous_no_op() {
     assert!(fs.flush().is_ok());
 }
 
+// --- Allocated storage (`NodeInfo::allocated` from the FAT chain). ---
+
+#[test]
+fn node_info_reports_the_chain_allocation() {
+    let mut fs = mount();
+    let root = fs.root();
+    // One 512-byte cluster each for the root directory and hello.txt;
+    // deep.bin chains two clusters.
+    assert_eq!(fs.node_info(root).expect("info").allocated, 512);
+    let hello = fs.lookup(root, b"hello.txt").expect("found");
+    assert_eq!(fs.node_info(hello).expect("info").allocated, 512);
+    let sub = fs.lookup(root, b"sub").expect("subdir");
+    let deep = fs.lookup(sub, b"deep.bin").expect("deep");
+    assert_eq!(fs.node_info(deep).expect("info").allocated, 1024);
+}
+
+#[test]
+fn node_info_reports_no_allocation_for_an_empty_file() {
+    let mut fs = mount();
+    let root = fs.root();
+    let file = fs
+        .create(root, b"empty.txt", NodeKind::RegularFile)
+        .expect("create");
+    // A fresh file has no first cluster, so no chain and no allocation.
+    assert_eq!(fs.node_info(file).expect("info").allocated, 0);
+}
+
 /// Tests for [`Fat32::format`]: laying down a genuine, mountable FAT32
 /// volume on a fresh device, sized large enough to be a real FAT32
 /// filesystem, and the data-exhaustion (`NoSpace`) extreme. These use a

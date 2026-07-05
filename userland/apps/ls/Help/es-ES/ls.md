@@ -4,7 +4,7 @@ ls — listar el contenido de los directorios
 
 ## SYNOPSIS
 
-`ls [-aAdFghlmnopQrRS1] [--] [path...]`
+`ls [-aAdFghlmnopQrRsS1] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -57,6 +57,9 @@ se separan con una línea en blanco.
   barras invertidas y caracteres de control.
 - `-r, --reverse` — invertir el orden de clasificación.
 - `-R, --recursive` — listar los subdirectorios recursivamente.
+- `-s, --size` — mostrar el tamaño asignado de cada entrada en bloques
+  de 1024 bytes (escalado con `-h`), con una línea `total` por
+  directorio listado.
 - `-S` — ordenar por tamaño, el mayor primero.
 - `-1` — un nombre por línea (el comportamiento predeterminado).
 - `-?` — mostrar la ayuda corta de este comando (`--help` es la

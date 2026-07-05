@@ -136,6 +136,7 @@ impl FilesystemRead for MockRootFs {
         Ok(NodeInfo {
             kind: n.kind,
             size: n.content.len() as u64,
+            allocated: n.content.len() as u64,
         })
     }
 

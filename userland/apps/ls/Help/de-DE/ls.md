@@ -4,7 +4,7 @@ ls — Verzeichnisinhalte auflisten
 
 ## SYNOPSIS
 
-`ls [-aAdFghlmnopQrRS1] [--] [path...]`
+`ls [-aAdFghlmnopQrRsS1] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -60,6 +60,9 @@ werden durch eine Leerzeile getrennt.
   maskiert.
 - `-r, --reverse` — die Sortierreihenfolge umkehren.
 - `-R, --recursive` — Unterverzeichnisse rekursiv auflisten.
+- `-s, --size` — die belegte Größe jedes Eintrags in 1024-Byte-Blöcken
+  ausgeben (mit `-h` skaliert), mit einer `total`-Zeile je aufgelistetem
+  Verzeichnis.
 - `-S` — nach Größe sortieren, die größte zuerst.
 - `-1` — ein Name pro Zeile (der Standard).
 - `-?` — die Kurzhilfe dieses Befehls anzeigen (`--help` ist die

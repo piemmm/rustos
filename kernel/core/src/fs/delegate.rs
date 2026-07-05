@@ -48,6 +48,9 @@ pub struct DelegatedInfo {
     pub kind: NodeKind,
     /// File length in bytes; `0` for a directory.
     pub size: u64,
+    /// Bytes of on-disk storage the node's data occupies, as the driver
+    /// reports it from the format's own allocation tracking.
+    pub allocated: u64,
     /// The permission metadata applied to the node.
     pub meta: Metadata,
 }
@@ -217,6 +220,7 @@ impl<R: FilesystemRead + ?Sized, P: MetaPolicy<R>> DelegatedFs<'_, R, P> {
         Ok(DelegatedInfo {
             kind: info.kind,
             size: info.size,
+            allocated: info.allocated,
             meta,
         })
     }

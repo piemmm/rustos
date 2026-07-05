@@ -89,6 +89,7 @@ pub mod introspect_source;
 pub mod kthread;
 pub mod kthread_irq;
 pub mod live_producer;
+pub mod loadavg;
 pub mod memmap;
 pub mod panic;
 pub mod proc_id;

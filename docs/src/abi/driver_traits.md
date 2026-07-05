@@ -315,7 +315,10 @@ trait**, `FilesystemRead`, not an added method on the frozen one
 
 The surface is allocation-free: a `NodeId` is an opaque,
 implementation-minted token (`NodeId::NONE` is reserved), `NodeInfo`
-reports `{ kind, size }`, and `read_dir` writes the entry name into a
+reports `{ kind, size, allocated }` — `allocated` being the bytes of
+on-disk storage the node's data really occupies, from the format's own
+allocation tracking (ext4 `i_blocks`, a FAT cluster chain, RustFS mapped
+extents) — and `read_dir` writes the entry name into a
 caller-provided buffer alongside a `DirEntry { node, kind, name_len }`.
 Implementations expose raw structural access only and make **no**
 permission decisions — the VFS authorises every traversal against the

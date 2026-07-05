@@ -33,7 +33,8 @@
 /* Canonical query-registry encoding constants (the hashable registry image). */
 #define ROS_SYSINFO_QUERY_NAME_MAX 20u
 #define ROS_SYSINFO_QUERY_RECORD_LEN 26u
-#define ROS_SYSINFO_ENCODED_QUERY_TABLE_LEN 234u
+#define ROS_SYSINFO_ENCODED_QUERY_TABLE_LEN 260u
+#define ROS_SYSINFO_LOAD_FIXED_SHIFT 11u
 
 /* Well-known sysinfo-v1 query identifiers (uint16_t). Do not renumber. */
 #define ROS_SYSINFO_QUERY_SELF_PROCESS_LIST ((uint16_t)0u)
@@ -44,6 +45,7 @@
 #define ROS_SYSINFO_QUERY_UPTIME ((uint16_t)5u)
 #define ROS_SYSINFO_QUERY_MOUNT_LIST ((uint16_t)6u)
 #define ROS_SYSINFO_QUERY_RESOURCE_LIMITS ((uint16_t)7u)
+#define ROS_SYSINFO_QUERY_LOAD_AVERAGE ((uint16_t)9u)
 
 /* Process lifecycle state carried in a process record (uint8_t). */
 #define ROS_PROCESS_STATE_RUNNABLE ((uint8_t)0u)
@@ -68,6 +70,7 @@
 #define ROS_PROCESS_RECORD_WIRE_LEN 92u
 #define ROS_KERNEL_MEMORY_STATS_WIRE_LEN 40u
 #define ROS_UPTIME_WIRE_LEN 24u
+#define ROS_LOAD_AVERAGE_WIRE_LEN 24u
 #define ROS_SYSTEM_IDENTITY_WIRE_LEN 88u
 #define ROS_MOUNT_LIST_REQUEST_WIRE_LEN 8u
 #define ROS_MOUNT_RECORD_WIRE_LEN 152u
@@ -127,6 +130,17 @@ typedef struct ros_uptime {
     ros_duration64_t since_boot;
     ros_time64_t boot_time;
 } ros_uptime_t;
+
+/* Load-average response; load1/5/15 are fixed-point with
+   ROS_SYSINFO_LOAD_FIXED_SHIFT fractional bits. */
+typedef struct ros_load_average {
+    uint32_t load1;
+    uint32_t load5;
+    uint32_t load15;
+    uint32_t runnable;
+    uint32_t total_tasks;
+    uint32_t users;
+} ros_load_average_t;
 
 /* Machine identity response; the inline hostname is valid for hostname_len bytes. */
 typedef struct ros_system_identity {

@@ -70,6 +70,7 @@ impl FilesystemRead for MockRoot {
             ROOT | SYSTEM | SECURITY => Ok(NodeInfo {
                 kind: NodeKind::Directory,
                 size: 0,
+                allocated: 0,
             }),
             USERS if self.present => Ok(NodeInfo {
                 kind: if self.is_dir {
@@ -78,6 +79,7 @@ impl FilesystemRead for MockRoot {
                     NodeKind::RegularFile
                 },
                 size: self.reported_size,
+                allocated: self.reported_size,
             }),
             _ => Err(DriverError::NotFound),
         }

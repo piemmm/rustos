@@ -15,7 +15,7 @@ use crate::io::{Entry, Listing, Metadata, Output};
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `ls`'s own Help tree is unavailable.
-pub const USAGE: &str = "usage: ls [-aAdFghlmnopQrRS1] [--] [path...]";
+pub const USAGE: &str = "usage: ls [-aAdFghlmnopQrRsS1] [--] [path...]";
 
 /// `ls`'s own command word: the short-help switches render its own Help
 /// document through the same engine as any other command's.
@@ -100,6 +100,8 @@ fn list(
     if !files.is_empty() {
         sort_rows(&mut files, options);
         open_block(&mut buf, &mut first, None);
+        // No `total` line: the GNU tool totals directory listings only,
+        // never the loose file-operand block.
         render_rows(&mut buf, &files, options);
     }
     // A depth-first worklist: operands are pushed reversed so they pop in
@@ -121,6 +123,9 @@ fn list(
         let mut rows = rows_for(&path, &entries, options, fs)?;
         sort_rows(&mut rows, options);
         open_block(&mut buf, &mut first, headered.then_some(path.as_str()));
+        if options.size || options.long {
+            render_total(&mut buf, &rows, options);
+        }
         render_rows(&mut buf, &rows, options);
         if options.recursive {
             // `.`/`..` never recurse — a listing must terminate even when
@@ -142,12 +147,15 @@ fn list(
 
 /// Whether rendering under `options` needs each entry's full metadata.
 ///
-/// The long format renders mode/owner/group/size, a size sort compares
-/// sizes, and `-F` needs the mode's execute bits for `*` — everything else
-/// renders names straight off the one `read_dir`, so the per-entry `stat`
-/// is paid only when asked for.
+/// The long format renders mode/owner/group/size, `-s` renders allocated
+/// blocks, a size sort compares sizes, and `-F` needs the mode's execute
+/// bits for `*` — everything else renders names straight off the one
+/// `read_dir`, so the per-entry `stat` is paid only when asked for.
 fn needs_stat(options: Options) -> bool {
-    options.long || options.sort == Sort::Size || options.indicator == Indicator::Classify
+    options.long
+        || options.size
+        || options.sort == Sort::Size
+        || options.indicator == Indicator::Classify
 }
 
 /// The rendered rows of one directory block: each entry's name, with its
@@ -169,6 +177,7 @@ fn rows_for(
                 kind: entry.kind,
                 mode: 0,
                 size: 0,
+                allocated: 0,
                 uid: 0,
                 gid: 0,
             }
@@ -212,8 +221,38 @@ fn open_block(buf: &mut String, first: &mut bool, header: Option<&str>) {
     }
 }
 
+/// The `-s` blocks cell for one entry: its allocated storage in
+/// 1024-byte units, rounded up (the GNU default block size), or the `-h`
+/// human form of the allocated bytes.
+fn blocks_cell(meta: Metadata, options: Options) -> String {
+    if options.human_readable {
+        human_size(meta.allocated)
+    } else {
+        format!("{}", meta.allocated.div_ceil(1024))
+    }
+}
+
+/// The `total` line of one directory block, printed for every directory
+/// listing under `-l` or `-s` as in the GNU tool. Plain form: the sum of
+/// the entries' individual block counts (each rounded up, exactly as its
+/// `-s` cell renders). `-h` form: the human rendering of the summed
+/// allocated bytes.
+fn render_total(buf: &mut String, rows: &[(String, Metadata)], options: Options) {
+    let rendered = if options.human_readable {
+        human_size(rows.iter().map(|(_, meta)| meta.allocated).sum())
+    } else {
+        let blocks: u64 = rows
+            .iter()
+            .map(|(_, meta)| meta.allocated.div_ceil(1024))
+            .sum();
+        format!("{blocks}")
+    };
+    let _ = writeln!(buf, "total {rendered}");
+}
+
 /// Render `rows` into `buf`: the long format when selected, otherwise one
-/// name per line or the `-m` comma arrangement.
+/// name per line or the `-m` comma arrangement, each prefixed by its
+/// blocks cell under `-s`.
 fn render_rows(buf: &mut String, rows: &[(String, Metadata)], options: Options) {
     if options.long {
         render_long(buf, rows, options);
@@ -221,7 +260,11 @@ fn render_rows(buf: &mut String, rows: &[(String, Metadata)], options: Options) 
     }
     match options.format {
         Format::OnePerLine => {
+            let blocks_width = size_column_width(rows, options);
             for (name, meta) in rows {
+                if options.size {
+                    let _ = write!(buf, "{:>blocks_width$} ", blocks_cell(*meta, options));
+                }
                 buf.push_str(&decorate(name, *meta, options));
                 buf.push('\n');
             }
@@ -234,11 +277,25 @@ fn render_rows(buf: &mut String, rows: &[(String, Metadata)], options: Options) 
                 if index > 0 {
                     buf.push_str(", ");
                 }
+                if options.size {
+                    let _ = write!(buf, "{} ", blocks_cell(*meta, options));
+                }
                 buf.push_str(&decorate(name, *meta, options));
             }
             buf.push('\n');
         }
     }
+}
+
+/// Width of the widest `-s` blocks cell in `rows` (0 when `-s` is off).
+fn size_column_width(rows: &[(String, Metadata)], options: Options) -> usize {
+    if !options.size {
+        return 0;
+    }
+    rows.iter()
+        .map(|(_, meta)| blocks_cell(*meta, options).len())
+        .max()
+        .unwrap_or(1)
 }
 
 /// Render the long format: mode, numeric owner and group (unless hidden by
@@ -271,9 +328,13 @@ fn render_long(buf: &mut String, rows: &[(String, Metadata)], options: Options) 
         .map(|(_, meta)| size_cell(meta).len())
         .max()
         .unwrap_or(1);
+    let blocks_width = size_column_width(rows, options);
     for (name, meta) in rows {
         // Writing into a `String` is infallible, so the `fmt::Result` is
         // discarded deliberately.
+        if options.size {
+            let _ = write!(buf, "{:>blocks_width$} ", blocks_cell(*meta, options));
+        }
         let _ = write!(buf, "{}", mode_string(*meta));
         if !options.hide_owner {
             let _ = write!(buf, " {:>uid_width$}", meta.uid);
@@ -451,6 +512,7 @@ mod tests {
                     kind: FileKind::Regular,
                     mode,
                     size,
+                    allocated: size,
                     uid: UID,
                     gid: GID,
                 },
@@ -465,6 +527,7 @@ mod tests {
                     kind: FileKind::Directory,
                     mode: 0o755,
                     size: 0,
+                    allocated: 0,
                     uid: UID,
                     gid: GID,
                 },
@@ -474,8 +537,25 @@ mod tests {
         }
 
         /// Declare `name` inside `dir` and give the joined path a stat row,
-        /// so the long format's per-entry stat finds it.
-        fn entry(mut self, dir: &str, name: &str, kind: FileKind, mode: u32, size: u64) -> Self {
+        /// so the long format's per-entry stat finds it. Allocation equals
+        /// the byte size; [`entry_alloc`](Self::entry_alloc) sets a
+        /// divergent allocation.
+        fn entry(self, dir: &str, name: &str, kind: FileKind, mode: u32, size: u64) -> Self {
+            self.entry_alloc(dir, name, kind, mode, size, size)
+        }
+
+        /// [`entry`](Self::entry) with an allocation that differs from the
+        /// byte size (a sparse or tail-padded file), so the `-s` tests can
+        /// prove the blocks column renders allocation, never `size`.
+        fn entry_alloc(
+            mut self,
+            dir: &str,
+            name: &str,
+            kind: FileKind,
+            mode: u32,
+            size: u64,
+            allocated: u64,
+        ) -> Self {
             let children = self
                 .dirs
                 .iter_mut()
@@ -492,6 +572,7 @@ mod tests {
                     kind,
                     mode,
                     size,
+                    allocated,
                     uid: UID,
                     gid: GID,
                 },
@@ -528,6 +609,7 @@ mod tests {
                 kind: FileKind::Directory,
                 mode: 0o755,
                 size: 0,
+                allocated: 0,
                 uid: UID,
                 gid: GID,
             })
@@ -774,7 +856,7 @@ mod tests {
         assert_eq!(run_ls(list(false, true, &["."]), &fs, &out), Ok(()));
         assert_eq!(
             out.text(),
-            "drwxr-xr-x 1000 100 4096 d\n-rw-r--r-- 1000 100    7 f\n"
+            "total 5\ndrwxr-xr-x 1000 100 4096 d\n-rw-r--r-- 1000 100    7 f\n"
         );
     }
 
@@ -786,7 +868,7 @@ mod tests {
             .entry("dir/", "f", FileKind::Regular, 0o600, 3);
         let out = Recorder::new();
         assert_eq!(run_ls(list(false, true, &["dir/"]), &fs, &out), Ok(()));
-        assert_eq!(out.text(), "-rw------- 1000 100 3 f\n");
+        assert_eq!(out.text(), "total 1\n-rw------- 1000 100 3 f\n");
     }
 
     #[test]
@@ -1108,7 +1190,8 @@ mod tests {
         );
         assert_eq!(
             out.text(),
-            "-rw-r--r-- 1000 100  500 a\n\
+            "total 11M\n\
+             -rw-r--r-- 1000 100  500 a\n\
              -rw-r--r-- 1000 100 1.1K b\n\
              -rw-r--r-- 1000 100  10M c\n"
         );
@@ -1135,7 +1218,7 @@ mod tests {
             ),
             Ok(())
         );
-        assert_eq!(hidden_owner.text(), "-rw-r--r-- 100 7 f\n");
+        assert_eq!(hidden_owner.text(), "total 1\n-rw-r--r-- 100 7 f\n");
         let hidden_group = Recorder::new();
         assert_eq!(
             run_ls(
@@ -1152,7 +1235,7 @@ mod tests {
             ),
             Ok(())
         );
-        assert_eq!(hidden_group.text(), "-rw-r--r-- 1000 7 f\n");
+        assert_eq!(hidden_group.text(), "total 1\n-rw-r--r-- 1000 7 f\n");
     }
 
     #[test]
@@ -1181,6 +1264,135 @@ mod tests {
         assert_eq!(out.text(), ".hidden\nvis\n");
         // Nothing was hidden *by default filtering*, so no advisory record.
         assert!(out.records().is_empty());
+    }
+
+    #[test]
+    fn size_option_renders_allocation_not_byte_size() {
+        // `sparse` stores fewer bytes than its length; `padded` more. The
+        // blocks column must render the *allocation*, rounded up to
+        // 1024-byte units and right-aligned, under a `total` of the same
+        // units.
+        let fs = TreeFs::new()
+            .dir(".")
+            .entry_alloc(".", "sparse", FileKind::Regular, 0o644, 1_000_000, 4096)
+            .entry_alloc(".", "padded", FileKind::Regular, 0o644, 10, 12_288);
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(
+                list_with(
+                    Options {
+                        size: true,
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
+        assert_eq!(out.text(), "total 16\n12 padded\n 4 sparse\n");
+    }
+
+    #[test]
+    fn size_option_prefixes_the_long_format() {
+        let fs = TreeFs::new()
+            .dir(".")
+            .entry(".", "d", FileKind::Directory, 0o755, 4096)
+            .entry(".", "f", FileKind::Regular, 0o644, 7);
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(
+                list_with(
+                    Options {
+                        long: true,
+                        size: true,
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            out.text(),
+            "total 5\n4 drwxr-xr-x 1000 100 4096 d\n1 -rw-r--r-- 1000 100    7 f\n"
+        );
+    }
+
+    #[test]
+    fn size_option_scales_under_human_readable() {
+        let fs = TreeFs::new()
+            .dir(".")
+            .entry_alloc(".", "a", FileKind::Regular, 0o644, 5, 4096)
+            .entry_alloc(".", "b", FileKind::Regular, 0o644, 5, 1_048_576);
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(
+                list_with(
+                    Options {
+                        size: true,
+                        human_readable: true,
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
+        assert_eq!(out.text(), "total 1.1M\n4.0K a\n1.0M b\n");
+    }
+
+    #[test]
+    fn size_option_joins_the_commas_format() {
+        let fs = TreeFs::new()
+            .dir(".")
+            .entry(".", "a", FileKind::Regular, 0o644, 100)
+            .entry(".", "b", FileKind::Regular, 0o644, 2048);
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(
+                list_with(
+                    Options {
+                        size: true,
+                        format: Format::Commas,
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
+        assert_eq!(out.text(), "total 3\n1 a, 2 b\n");
+    }
+
+    #[test]
+    fn size_option_totals_directories_never_file_operands() {
+        // A loose file operand gets its blocks cell but no `total` line —
+        // the GNU tool totals directory listings only.
+        let fs = TreeFs::new().file("a.txt", 0o644, 3000);
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(
+                list_with(
+                    Options {
+                        size: true,
+                        ..Options::DEFAULT
+                    },
+                    &["a.txt"],
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
+        assert_eq!(out.text(), "3 a.txt\n");
     }
 
     #[test]

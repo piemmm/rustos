@@ -21,8 +21,11 @@ or speaks to a terminal device. The operations that reach the
 outside world are injected seams, mirroring `init`'s `Spawner`/`Reaper`
 design:
 
-- `Prompt` — reads the username (echoed) and password (un-echoed) and
-  writes prompts to the controlling terminal.
+- `LoginView` — presents the full-screen login page (machine name, OS
+  version, and clock in the top bar; the bordered login box; the red
+  running failed-attempt count; memory/tasks/users/load in the bottom
+  bar) and reads the username (echoed in the box) and password (never
+  rendered).
 - `Authenticator` — verifies a `Credentials` pair against `kernel/sec`
   and the credential store, returning the user's identity and capability
   ceiling on success. Failures come back as the stable `Errno`, so login

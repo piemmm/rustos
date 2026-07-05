@@ -205,6 +205,14 @@ const NEW_EXTRA_ISIZE: u16 = 32;
 
 /// `i_flags`: the inode is mapped by an extent tree, not block pointers.
 const INODE_FLAG_EXTENTS: u32 = 0x0008_0000;
+/// `EXT4_HUGE_FILE_FL`: this inode's `i_blocks` counts filesystem blocks
+/// rather than 512-byte sectors (valid only under the `huge_file`
+/// read-only-compat feature).
+const INODE_FLAG_HUGE_FILE: u32 = 0x0004_0000;
+/// osd2 `l_i_blocks_high` byte offset within an inode.
+const INODE_BLOCKS_HI: usize = 0x74;
+/// osd2 `l_i_file_acl_high` byte offset within an inode.
+const INODE_FILE_ACL_HI: usize = 0x76;
 
 /// Extent-tree node header magic (`eh_magic`), little-endian `0xF30A`.
 const EXTENT_MAGIC: u16 = 0xF30A;
@@ -439,6 +447,10 @@ struct Inode {
     size: u64,
     /// `i_flags`.
     flags: u32,
+    /// `i_blocks` (low half combined with the osd2 high half): allocated
+    /// storage in 512-byte sectors, or in filesystem blocks when the
+    /// huge-file inode flag is set.
+    blocks: u64,
     /// External extended-attribute block (`i_file_acl` low half combined
     /// with the osd2 high half); `0` when the inode has none.
     file_acl: u64,
@@ -841,7 +853,10 @@ impl<B: Block> Ext4<B> {
         let size_lo = u64::from(le32(&raw, 0x04));
         let size_hi = u64::from(le32(&raw, 0x6C));
         let flags = le32(&raw, 0x20);
-        let file_acl = u64::from(le32(&raw, 0x68)) | (u64::from(le16(&raw, 0x74)) << 32);
+        let blocks =
+            u64::from(le32(&raw, INODE_BLOCKS_LO)) | (u64::from(le16(&raw, INODE_BLOCKS_HI)) << 32);
+        let file_acl =
+            u64::from(le32(&raw, 0x68)) | (u64::from(le16(&raw, INODE_FILE_ACL_HI)) << 32);
         let mut block = [0u8; I_BLOCK_LEN];
         block.copy_from_slice(&raw[I_BLOCK_OFFSET..I_BLOCK_OFFSET + I_BLOCK_LEN]);
         Ok(Inode {
@@ -850,6 +865,7 @@ impl<B: Block> Ext4<B> {
             gid,
             size: (size_hi << 32) | size_lo,
             flags,
+            blocks,
             file_acl,
             block,
         })
@@ -2453,7 +2469,19 @@ impl<B: Block> FilesystemRead for Ext4<B> {
             NodeKind::Directory => 0,
             NodeKind::RegularFile => inode.size,
         };
-        Ok(NodeInfo { kind, size })
+        // `i_blocks` counts 512-byte sectors, or whole filesystem blocks
+        // for a huge-file inode.
+        let unit = if inode.flags & INODE_FLAG_HUGE_FILE != 0 {
+            u64::from(self.layout.block_size)
+        } else {
+            512
+        };
+        let allocated = inode.blocks.saturating_mul(unit);
+        Ok(NodeInfo {
+            kind,
+            size,
+            allocated,
+        })
     }
 
     fn lookup(&mut self, dir: NodeId, name: &[u8]) -> Result<NodeId, DriverError> {

@@ -49,9 +49,10 @@ mod program {
     use alloc::vec::Vec;
 
     use rustos_abi::sysinfo::{
-        encode_reply_err, encode_reply_ok, IntrospectDomain, KernelMemoryStats, MountRecord,
-        ProcessRecord, ResourceLimitRecord, SystemIdentity, Uptime, RESOURCE_LIMITS_REPORT_LEN,
-        SYSINFO_ENDPOINT, SYSINFO_MAX_REPLY, SYSINFO_MAX_REQUEST, SYSINFO_REPLY_STATUS_LEN,
+        encode_reply_err, encode_reply_ok, IntrospectDomain, KernelMemoryStats, LoadAverage,
+        MountRecord, ProcessRecord, ResourceLimitRecord, SystemIdentity, Uptime,
+        RESOURCE_LIMITS_REPORT_LEN, SYSINFO_ENDPOINT, SYSINFO_MAX_REPLY, SYSINFO_MAX_REQUEST,
+        SYSINFO_REPLY_STATUS_LEN,
     };
     use rustos_abi::{Errno, LimitKind, Origin, ORIGIN_WIRE_LEN, PROC_ID_LEN};
     use rustos_caps::CapabilitySet;
@@ -173,6 +174,10 @@ mod program {
 
         fn uptime(&self, _caller: &Caller) -> Result<Uptime, Errno> {
             Uptime::from_bytes(&read_scalar(IntrospectDomain::Uptime)?)
+        }
+
+        fn load_average(&self, _caller: &Caller) -> Result<LoadAverage, Errno> {
+            LoadAverage::from_bytes(&read_scalar(IntrospectDomain::LoadAverage)?)
         }
 
         fn mount_records(&self, _caller: &Caller) -> Result<Vec<MountRecord>, Errno> {

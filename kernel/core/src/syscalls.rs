@@ -3153,6 +3153,7 @@ where
             IntrospectDomain::KernelMemory => self.introspect.kernel_memory()?,
             IntrospectDomain::Identity => self.introspect.identity()?,
             IntrospectDomain::Uptime => self.introspect.uptime()?,
+            IntrospectDomain::LoadAverage => self.introspect.load_average()?,
             IntrospectDomain::TaskLimits => {
                 // The 128-bit target `ProcId` does not fit in the `u64` `arg`,
                 // so the caller writes it into the output buffer on entry; the
@@ -14029,6 +14030,9 @@ mod tests {
         fn uptime(&self) -> Result<alloc::vec::Vec<u8>, Errno> {
             Err(Errno::NotImplemented)
         }
+        fn load_average(&self) -> Result<alloc::vec::Vec<u8>, Errno> {
+            Err(Errno::NotImplemented)
+        }
         fn task_limits(&self, proc_id: ProcId) -> Result<alloc::vec::Vec<u8>, Errno> {
             *self.limits_call.write() = Some(proc_id);
             self.limits.clone()
@@ -16862,6 +16866,7 @@ mod tests {
                 stat: FileStat {
                     kind: FileKind::Regular,
                     size: 0,
+                    allocated: 0,
                     mode: 0o644,
                     uid: 1000,
                     gid: 1000,
@@ -17331,6 +17336,7 @@ mod tests {
         mock.stat = FileStat {
             kind: FileKind::Regular,
             size: 0x1234,
+            allocated: 0x2000,
             mode: 0o640,
             uid: 1000,
             gid: 1000,

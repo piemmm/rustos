@@ -6,9 +6,12 @@
 # identity transition (starting the authenticated account's shell under
 # that account's kernel-resolved credential), CAP_USERS_READ to verify
 # offered credentials, CAP_IPC_BIND_PRIVILEGED for the reserved elevation
-# rendezvous, and CAP_LOG_EMIT for its audit records. No CAP_FS_ACCESS.
+# rendezvous, CAP_LOG_EMIT for its audit records, and CAP_SYSINFO_KERNEL
+# so the full-screen view's status bar can show the memory figures (a
+# refusal degrades that one figure to a placeholder, never the login).
+# No CAP_FS_ACCESS.
 id = "os.rustos.login"
 name = "login"
 version = "0.1.0"
 kind = "service"
-capabilities = ["CAP_CONSOLE_WRITE", "CAP_CONSOLE_READ", "CAP_PROC_SPAWN", "CAP_USERS_READ", "CAP_SPAWN_AS_USER", "CAP_IPC_BIND_PRIVILEGED", "CAP_LOG_EMIT"]
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_CONSOLE_READ", "CAP_PROC_SPAWN", "CAP_USERS_READ", "CAP_SPAWN_AS_USER", "CAP_IPC_BIND_PRIVILEGED", "CAP_LOG_EMIT", "CAP_SYSINFO_KERNEL"]

@@ -145,6 +145,8 @@ fn dispatch(
         write_bytes(&source.system_identity(caller)?.to_le_bytes(), response)
     } else if query == SysinfoQueryId::UPTIME {
         write_bytes(&source.uptime(caller)?.to_le_bytes(), response)
+    } else if query == SysinfoQueryId::LOAD_AVERAGE {
+        write_bytes(&source.load_average(caller)?.to_le_bytes(), response)
     } else if query == SysinfoQueryId::MOUNT_LIST {
         mount_list(source, caller, payload, response)
     } else if query == SysinfoQueryId::RESOURCE_LIMITS {
@@ -294,10 +296,10 @@ mod tests {
     use core::cell::RefCell;
     use rustos_abi::driver::filesystem::MountFlags;
     use rustos_abi::sysinfo::{
-        KernelMemoryStats, MountListRequest, MountRecord, ProcessListRequest, ProcessRecord,
-        ProcessState, ResourceLimitRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity,
-        Uptime, MACHINE_ID_LEN, RESOURCE_LIMITS_REPORT_LEN, SYSINFO_REQUEST_MAGIC,
-        SYSINFO_VERSION_CURRENT,
+        KernelMemoryStats, LoadAverage, MountListRequest, MountRecord, ProcessListRequest,
+        ProcessRecord, ProcessState, ResourceLimitRecord, SysinfoQueryId, SysinfoRequestHeader,
+        SystemIdentity, Uptime, LOAD_FIXED_SHIFT, MACHINE_ID_LEN, RESOURCE_LIMITS_REPORT_LEN,
+        SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT,
     };
     use rustos_abi::time::{Duration64, Time64};
     use rustos_abi::{
@@ -433,6 +435,16 @@ mod tests {
             Ok(Uptime {
                 since_boot: Duration64::from_nanos(1_000),
                 boot_time: Time64::from_secs(1_700_000_000),
+            })
+        }
+        fn load_average(&self, _caller: &Caller) -> Result<LoadAverage, Errno> {
+            Ok(LoadAverage {
+                load1: 3 << LOAD_FIXED_SHIFT,
+                load5: 2 << LOAD_FIXED_SHIFT,
+                load15: 1 << LOAD_FIXED_SHIFT,
+                runnable: 3,
+                total_tasks: 11,
+                users: 2,
             })
         }
         fn mount_records(&self, _caller: &Caller) -> Result<alloc::vec::Vec<MountRecord>, Errno> {
@@ -639,6 +651,30 @@ mod tests {
         assert_eq!(id.hostname_bytes(), b"rustos-box");
         // Neither query is audited.
         assert!(sink.events.borrow().as_slice().is_empty());
+    }
+
+    #[test]
+    fn load_average_needs_no_capability_and_round_trips() {
+        let source = FixtureSource::new();
+        let caps = Caps(&[]);
+        let sink = RecordingSink::new();
+        let req = request_bytes(SysinfoQueryId::LOAD_AVERAGE, &[]);
+        let mut resp = [0u8; 64];
+        let n = serve(&source, &caller(&caps), &sink, &req, &mut resp).unwrap();
+        let load = LoadAverage::from_bytes(&resp[..n]).unwrap();
+        assert_eq!(LoadAverage::whole(load.load1), 3);
+        assert_eq!(load.runnable, 3);
+        assert_eq!(load.total_tasks, 11);
+        assert_eq!(load.users, 2);
+        // System-wide and secret-free, so unaudited.
+        assert!(sink.events.borrow().as_slice().is_empty());
+
+        // Fails closed when the response buffer cannot hold the record.
+        let mut tiny = [0u8; LoadAverage::WIRE_LEN - 1];
+        assert_eq!(
+            serve(&source, &caller(&caps), &sink, &req, &mut tiny),
+            Err(Errno::BufferTooSmall)
+        );
     }
 
     #[test]

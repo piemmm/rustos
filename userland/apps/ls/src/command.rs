@@ -71,6 +71,9 @@ pub struct Options {
     pub indicator: Indicator,
     /// Double-quote rendered names (`-Q`).
     pub quote: bool,
+    /// Print each entry's allocated size in 1024-byte blocks (`-s`), plus
+    /// a `total` line per directory block.
+    pub size: bool,
     /// Human-readable sizes in the long format (`-h`).
     pub human_readable: bool,
     /// Omit the owner column from the long format (`-g`).
@@ -91,6 +94,7 @@ impl Options {
         format: Format::OnePerLine,
         indicator: Indicator::None,
         quote: false,
+        size: false,
         human_readable: false,
         hide_owner: false,
         hide_group: false,
@@ -118,7 +122,7 @@ pub enum Command {
 /// [`Command`].
 ///
 /// The grammar is the GNU `ls` surface,
-/// `ls [-aAdFghlmnopQrRS1] [--] [path...]`:
+/// `ls [-aAdFghlmnopQrRsS1] [--] [path...]`:
 ///
 /// * `-a` / `--all` — do not hide entries whose name begins with `.`.
 /// * `-A` / `--almost-all` — like `-a`, but never list `.` or `..`.
@@ -138,6 +142,8 @@ pub enum Command {
 /// * `-Q` / `--quote-name` — double-quote each rendered name.
 /// * `-r` / `--reverse` — reverse the sort order.
 /// * `-R` / `--recursive` — list subdirectories recursively.
+/// * `-s` / `--size` — print each entry's allocated size in 1024-byte
+///   blocks (scaled by `-h`), with a `total` line per directory block.
 /// * `-S` — sort by size, largest first.
 /// * `-1` — one name per line (the default).
 /// * `-?` / `--help` — the reserved short-help switches (plans/APPS.md §4;
@@ -177,6 +183,7 @@ pub fn parse(args: &[&str]) -> Result<Command, LsError> {
                     "human-readable" => options.human_readable = true,
                     "numeric-uid-gid" => options.long = true,
                     "quote-name" => options.quote = true,
+                    "size" => options.size = true,
                     "reverse" => options.reverse = true,
                     "recursive" => options.recursive = true,
                     "help" => return Ok(Command::Help),
@@ -210,6 +217,7 @@ pub fn parse(args: &[&str]) -> Result<Command, LsError> {
                         'Q' => options.quote = true,
                         'r' => options.reverse = true,
                         'R' => options.recursive = true,
+                        's' => options.size = true,
                         'S' => options.sort = Sort::Size,
                         '1' => options.format = Format::OnePerLine,
                         '?' => return Ok(Command::Help),
@@ -423,6 +431,34 @@ mod tests {
     }
 
     #[test]
+    fn size_flag_parses_in_both_spellings() {
+        for args in [["-s"], ["--size"]] {
+            assert_eq!(
+                parse(&args),
+                Ok(list(
+                    Options {
+                        size: true,
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                ))
+            );
+        }
+        // `-s` (allocated blocks) and `-S` (sort by size) stay distinct.
+        assert_eq!(
+            parse(&["-sS"]),
+            Ok(list(
+                Options {
+                    size: true,
+                    sort: Sort::Size,
+                    ..Options::DEFAULT
+                },
+                &["."],
+            ))
+        );
+    }
+
+    #[test]
     fn sort_reverse_recursive_and_quote_parse() {
         assert_eq!(
             parse(&["-S", "-r", "-R", "-Q"]),
@@ -528,6 +564,7 @@ mod tests {
                 "`-Q, --quote-name`",
                 "`-r, --reverse`",
                 "`-R, --recursive`",
+                "`-s, --size`",
                 "`-S`",
                 "`-1`",
                 "`-?`",

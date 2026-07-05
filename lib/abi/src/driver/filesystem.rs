@@ -192,6 +192,13 @@ pub struct NodeInfo {
     pub kind: NodeKind,
     /// File length in bytes. Always `0` for a directory.
     pub size: u64,
+    /// Bytes of on-disk storage the node's data occupies — the real
+    /// allocation the format tracks (ext4 `i_blocks`, a FAT cluster
+    /// chain, `RustFS` mapped extents), never a value derived from `size`
+    /// when the format knows better. `0` for a node whose data occupies
+    /// no dedicated blocks (an empty file, or a directory whose entries
+    /// live in shared metadata structures).
+    pub allocated: u64,
 }
 
 /// A single entry yielded by [`FilesystemRead::read_dir`].
@@ -841,11 +848,13 @@ mod tests {
                 Ok(NodeInfo {
                     kind: NodeKind::Directory,
                     size: 0,
+                    allocated: 0,
                 })
             } else if node == FILE {
                 Ok(NodeInfo {
                     kind: NodeKind::RegularFile,
                     size: FILE_BODY.len() as u64,
+                    allocated: FILE_BODY.len() as u64,
                 })
             } else {
                 Err(DriverError::NotFound)

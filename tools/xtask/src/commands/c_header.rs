@@ -49,13 +49,13 @@ use rustos_abi::{
     AbiType, AppInfoHeader, BufferClass, BundleEntry, CapabilityId, DriverBindKey, DriverError,
     DriverHandle, DriverKind, DriverManifest, DriverRegisterReply, Duration64, Errno,
     HwDeviceClass, HwMatchKey, HwMatchKind, HwNode, HwResource, HwResourceKind, IpcMessageHeader,
-    KernelMemoryStats, KeyInput, LibraryScope, LimitKind, LoadHeader, ManifestHeader, MapFlags,
-    MountListRequest, MountRecord, NamedKeyCode, NeededLibrary, PointerButtonCode, PointerInput,
-    PortName, ProcessListRequest, ProcessRecord, ProcessStartHeader, ProcessState, RandomFlags,
-    ResourceLimit, ResourceLimitRecord, RxePermission, Segment, Severity, Signal, StdInfoKind,
-    StringSlot, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Time64, Uptime, WaitFlags,
-    ABI_VERSION_V1, APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_ID_MAX,
-    BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX, BUTTON_NONE, CAPABILITY_ID_MAX,
+    KernelMemoryStats, KeyInput, LibraryScope, LimitKind, LoadAverage, LoadHeader, ManifestHeader,
+    MapFlags, MountListRequest, MountRecord, NamedKeyCode, NeededLibrary, PointerButtonCode,
+    PointerInput, PortName, ProcessListRequest, ProcessRecord, ProcessStartHeader, ProcessState,
+    RandomFlags, ResourceLimit, ResourceLimitRecord, RxePermission, Segment, Severity, Signal,
+    StdInfoKind, StringSlot, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Time64, Uptime,
+    WaitFlags, ABI_VERSION_V1, APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME,
+    BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX, BUTTON_NONE, CAPABILITY_ID_MAX,
     COARSE_CLOCK_GRANULARITY_NS, CONSOLE_INHERIT, DRIVER_MANIFEST_MAGIC,
     DRIVER_MANIFEST_MAX_BIND_KEYS, DRIVER_MANIFEST_MAX_CAPABILITIES, DRIVER_REGISTER_REPLY_MAGIC,
     DRIVER_REGISTER_STATUS_OK, DRIVER_SIGNATURE_LEN, DRIVER_SIGNER_PUBKEY_LEN,
@@ -1358,8 +1358,40 @@ fn sysinfo_emit_framing(out: &mut String) {
         out,
         "#define ROS_SYSINFO_ENCODED_QUERY_TABLE_LEN {ENCODED_QUERY_TABLE_LEN}u"
     );
+    let _ = writeln!(
+        out,
+        "#define ROS_SYSINFO_LOAD_FIXED_SHIFT {}u",
+        rustos_abi::LOAD_FIXED_SHIFT
+    );
     out.push('\n');
 
+    sysinfo_emit_query_ids(out);
+
+    out.push_str("/* Process lifecycle state carried in a process record (uint8_t). */\n");
+    let process_states = [
+        ("ROS_PROCESS_STATE_RUNNABLE", ProcessState::Runnable),
+        ("ROS_PROCESS_STATE_RUNNING", ProcessState::Running),
+        ("ROS_PROCESS_STATE_BLOCKED", ProcessState::Blocked),
+        ("ROS_PROCESS_STATE_ZOMBIE", ProcessState::Zombie),
+        ("ROS_PROCESS_STATE_STOPPED", ProcessState::Stopped),
+    ];
+    for (name, state) in process_states {
+        let _ = writeln!(out, "#define {name} ((uint8_t){}u)", state.as_u8());
+    }
+    out.push_str(
+        "/* ros_process_record.cpu sentinel: the process is not currently scheduled. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_PROCESS_CPU_NONE ((uint8_t){PROCESS_CPU_NONE}u)"
+    );
+    out.push('\n');
+}
+
+/// Emit the well-known `sysinfo-v1` query identifiers (every value read
+/// from `lib/abi`'s [`SysinfoQueryId`] constants).
+fn sysinfo_emit_query_ids(out: &mut String) {
+    use std::fmt::Write as _;
     out.push_str("/* Well-known sysinfo-v1 query identifiers (uint16_t). Do not renumber. */\n");
     let query_ids = [
         (
@@ -1388,30 +1420,14 @@ fn sysinfo_emit_framing(out: &mut String) {
             "ROS_SYSINFO_QUERY_RESOURCE_LIMITS",
             SysinfoQueryId::RESOURCE_LIMITS,
         ),
+        (
+            "ROS_SYSINFO_QUERY_LOAD_AVERAGE",
+            SysinfoQueryId::LOAD_AVERAGE,
+        ),
     ];
     for (name, id) in query_ids {
         let _ = writeln!(out, "#define {name} ((uint16_t){}u)", id.as_u16());
     }
-    out.push('\n');
-
-    out.push_str("/* Process lifecycle state carried in a process record (uint8_t). */\n");
-    let process_states = [
-        ("ROS_PROCESS_STATE_RUNNABLE", ProcessState::Runnable),
-        ("ROS_PROCESS_STATE_RUNNING", ProcessState::Running),
-        ("ROS_PROCESS_STATE_BLOCKED", ProcessState::Blocked),
-        ("ROS_PROCESS_STATE_ZOMBIE", ProcessState::Zombie),
-        ("ROS_PROCESS_STATE_STOPPED", ProcessState::Stopped),
-    ];
-    for (name, state) in process_states {
-        let _ = writeln!(out, "#define {name} ((uint8_t){}u)", state.as_u8());
-    }
-    out.push_str(
-        "/* ros_process_record.cpu sentinel: the process is not currently scheduled. */\n",
-    );
-    let _ = writeln!(
-        out,
-        "#define ROS_PROCESS_CPU_NONE ((uint8_t){PROCESS_CPU_NONE}u)"
-    );
     out.push('\n');
 }
 
@@ -1443,6 +1459,7 @@ fn sysinfo_emit_record_sizes(out: &mut String) {
             KernelMemoryStats::WIRE_LEN,
         ),
         ("ROS_UPTIME_WIRE_LEN", Uptime::WIRE_LEN),
+        ("ROS_LOAD_AVERAGE_WIRE_LEN", LoadAverage::WIRE_LEN),
         ("ROS_SYSTEM_IDENTITY_WIRE_LEN", SystemIdentity::WIRE_LEN),
         (
             "ROS_MOUNT_LIST_REQUEST_WIRE_LEN",
@@ -1519,6 +1536,16 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
          \x20   ros_duration64_t since_boot;\n\
          \x20   ros_time64_t boot_time;\n\
          } ros_uptime_t;\n\n",
+    "/* Load-average response; load1/5/15 are fixed-point with\n\
+         \x20  ROS_SYSINFO_LOAD_FIXED_SHIFT fractional bits. */\n\
+         typedef struct ros_load_average {\n\
+         \x20   uint32_t load1;\n\
+         \x20   uint32_t load5;\n\
+         \x20   uint32_t load15;\n\
+         \x20   uint32_t runnable;\n\
+         \x20   uint32_t total_tasks;\n\
+         \x20   uint32_t users;\n\
+         } ros_load_average_t;\n\n",
     "/* Machine identity response; the inline hostname is valid for hostname_len bytes. */\n\
          typedef struct ros_system_identity {\n\
          \x20   uint8_t machine_id[ROS_MACHINE_ID_LEN];\n\
@@ -1991,6 +2018,7 @@ const DRIVER_SUBMODULE_TYPEDEFS: &str = concat!(
          typedef struct ros_node_info {\n\
          \x20   uint8_t kind;\n\
          \x20   uint64_t size;\n\
+         \x20   uint64_t allocated;\n\
          } ros_node_info_t;\n\n",
     "/* One directory entry; `node` is a NodeId (uint64_t), `kind` a ROS_NODE_KIND_*. */\n\
          typedef struct ros_dir_entry {\n\
@@ -3352,6 +3380,7 @@ mod tests {
             ("rustos_sysinfo.h", "} ros_process_record_t;", size_of::<ProcessRecord>(), 96, align_of::<ProcessRecord>(), 8),
             ("rustos_sysinfo.h", "} ros_kernel_memory_stats_t;", size_of::<KernelMemoryStats>(), 40, align_of::<KernelMemoryStats>(), 8),
             ("rustos_sysinfo.h", "} ros_uptime_t;", size_of::<Uptime>(), 32, align_of::<Uptime>(), 8),
+            ("rustos_sysinfo.h", "} ros_load_average_t;", size_of::<LoadAverage>(), 24, align_of::<LoadAverage>(), 4),
             ("rustos_sysinfo.h", "} ros_system_identity_t;", size_of::<SystemIdentity>(), 88, align_of::<SystemIdentity>(), 2),
             ("rustos_sysinfo.h", "} ros_mount_list_request_t;", size_of::<MountListRequest>(), 8, align_of::<MountListRequest>(), 4),
             ("rustos_sysinfo.h", "} ros_mount_record_t;", size_of::<MountRecord>(), 152, align_of::<MountRecord>(), 4),
@@ -3364,7 +3393,7 @@ mod tests {
             ("rustos_driver.h", "} ros_bus_device_t;", size_of::<BusDevice>(), 24, align_of::<BusDevice>(), 8),
             ("rustos_driver.h", "} ros_display_mode_t;", size_of::<DisplayMode>(), 16, align_of::<DisplayMode>(), 4),
             ("rustos_driver.h", "} ros_accel_caps_t;", size_of::<AccelCaps>(), 16, align_of::<AccelCaps>(), 4),
-            ("rustos_driver.h", "} ros_node_info_t;", size_of::<NodeInfo>(), 16, align_of::<NodeInfo>(), 8),
+            ("rustos_driver.h", "} ros_node_info_t;", size_of::<NodeInfo>(), 24, align_of::<NodeInfo>(), 8),
             ("rustos_driver.h", "} ros_dir_entry_t;", size_of::<DirEntry>(), 24, align_of::<DirEntry>(), 8),
             ("rustos_driver.h", "} ros_node_times_t;", size_of::<NodeTimes>(), 64, align_of::<NodeTimes>(), 8),
             ("rustos_driver.h", "} ros_input_event_t;", size_of::<InputEvent>(), 8, align_of::<InputEvent>(), 4),

@@ -4,7 +4,7 @@
 //! Keeping the request transport and the terminal behind object-safe traits
 //! is what lets the request/render logic that consumes this crate run against
 //! in-memory fixtures with no kernel, mirroring the seam design of the other
-//! userland crates (`init`'s `Spawner`/`Reaper`, `login`'s `Prompt`).
+//! userland crates (`init`'s `Spawner`/`Reaper`, `login`'s `LoginView`).
 
 use alloc::vec::Vec;
 use rustos_abi::Errno;

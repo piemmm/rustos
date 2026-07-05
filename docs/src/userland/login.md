@@ -27,8 +27,9 @@ the stored hash.
 `Login::run` repeats a bounded loop that **fails closed** (`AGENTS.md`
 §5.4.5):
 
-1. **Prompt** for a username (echoed) and a password (un-echoed, via the
-   `Prompt::read_secret` seam — `AGENTS.md` §5).
+1. **Prompt** for a username (echoed in the login box) and a password
+   (never rendered, via the `LoginView::read_password` seam —
+   `AGENTS.md` §5).
 2. **Authenticate** the `Credentials` through the `Authenticator`. A
    rejected attempt is audited and consumes one try; the bounded budget
    means a stuck or hostile console can never spin forever.
@@ -46,15 +47,14 @@ fail-closed.
 
 The `Authenticator` returns the **same** error whether the account is
 unknown or the password is wrong, and `login` never inspects the cause: a
-failed attempt is always reported to the user as `Login incorrect`, so the
+failed attempt is always reported to the user as the running
+`N failed attempts` count under the login box (rendered in red), so the
 prompt cannot be used to probe for valid usernames (`AGENTS.md` §5).
 
-The prompt/credential input path is **allocation-free**: `Prompt`'s reads
-fill caller-provided stack buffers (`INPUT_LINE_MAX`, 512 bytes — a §24.4
-validation bound; an over-long line is refused whole with
-`LengthOutOfRange`, never truncated) and `Credentials` borrows `&str`
-slices of them, so reading a keystroke never touches the userland heap
-(whose production `mem_map` producer is staged, `plans/SPAWN.md` SP5b).
+The credential buffers are **caller-provided stack arrays**
+(`INPUT_LINE_MAX`, 512 bytes — a §24.4 validation bound) that
+`Credentials` borrows `&str` slices of: the view writes each keystroke
+straight into them, so no copy of a credential ever lives on the heap.
 `Login` validates each filled line as UTF-8 itself — line noise fails
 closed as a console error, never reaching the authenticator — and zeroes
 the password buffer after every attempt, success or failure (`AGENTS.md`
@@ -76,8 +76,10 @@ no ambient authority).
 The operations that touch the outside world are injected, mirroring
 [`init`](init.md)'s `Spawner`/`Reaper` split:
 
-- `Prompt` — reads the username and (un-echoed) password and writes
-  prompts to the controlling terminal.
+- `LoginView` — presents the login screen and reads the username, the
+  (never-rendered) password, and the session choice; the machine drives
+  it through semantic calls (`round_begin`, `note_failure`,
+  `session_handoff`), never raw terminal writes.
 - `Authenticator::authenticate(&Credentials) -> Result<AuthenticatedUser, Errno>`
   — verifies credentials against `kernel/sec` and the credential store.
 - `SessionLauncher::launch(&AuthenticatedUser, SessionKind) -> Result<SessionOutcome, Errno>`
@@ -112,21 +114,28 @@ launches as the text session.
 `AGENTS.md` §1) program PID 1 `init`'s `session` directive launches and
 supervises (`plans/PI.md` P11). It wires the real seams:
 
-- **`Prompt`** over the inherited standard streams (`AGENTS.md` §20):
-  prompts to fd 1, lines from fd 0, read byte-wise through the shared read
-  line discipline (`rustos_vt::line::LineEditor`) into the state machine's
-  stack buffers (`INPUT_LINE_MAX` — an over-long line is refused whole,
-  never truncated). The kernel console owns the matching **echo** half:
-  each character is echoed, a Backspace/Delete rubs out the previous one,
-  and the password read selects the secret discipline with
-  `stream_input_mode` (`rustos_rt::set_input_mode`) so the credential is
-  never rendered — failing the read closed if the mode cannot be selected
-  (`AGENTS.md` §5.4). While the secret discipline is
-  active the kernel console shows the shared `[input active...]`
-  secret-entry marker (`rustos_vt::secret`) instead, so the operator still
-  sees typing progress without a byte of the credential. Because both
-  halves key off the one `lib/vt` erase definition (§2.2), the bytes login
-  keeps always match the screen.
+- **`LoginView`** as the full-screen curses view (`view::CursesView`)
+  over the inherited standard streams (`AGENTS.md` §20): rendered bytes
+  to fd 1, keystrokes from fd 0, drawn through the one `lib/curses`
+  screen model (`AGENTS.md` §2.2). The page shows whoever is at the
+  console *which system they are logging in to*: a top bar with the
+  machine name, OS version, and the wall-clock time; the bordered
+  `RustOS Login` box in the middle carrying the `Username:` prompt
+  (which becomes `Password:`); a red, running `N failed attempts` line
+  beneath the box that accumulates until a session launches; and a
+  bottom bar with the memory in use, task count, logged-in users, and
+  the 1/5/15-minute load averages — queried live from `sysinfod`
+  (`SYSTEM_IDENTITY`, `KERNEL_MEMORY_STATS` under login's
+  `CAP_SYSINFO_KERNEL`, and the ungated `LOAD_AVERAGE`) and the kernel
+  wall clock. A refused or unavailable figure renders as a `--`
+  placeholder and never blocks a login (`AGENTS.md` §2.24). The view
+  selects the raw (echo-off) discipline with `stream_input_mode`
+  (`rustos_rt::set_input_mode`) for the whole page: it echoes the
+  username into the box itself, renders nothing for the password, and
+  **refuses** the password read outright if raw mode cannot be selected
+  (a credential must never be rendered, `AGENTS.md` §5.4). On session
+  launch it leaves the alternate screen and restores the cooked
+  discipline; the next round re-enters it.
 - **`UsersAuthenticator`** over the database obtained through the
   capability-gated `users_db_read` syscall (`CAP_USERS_READ`, see
   [`architecture/syscalls.md`](../architecture/syscalls.md)) and re-parsed
@@ -218,7 +227,7 @@ on fd 2 until a userland audit transport exists.
 ## Tests
 
 `cargo test -p rustos-login` drives the state machine against an in-memory
-`Prompt`/`Authenticator`/`SessionLauncher` and a recording log sink,
+`LoginView`/`Authenticator`/`SessionLauncher` and a recording log sink,
 covering a successful text login, the graphical option hidden when
 unavailable, an offered graphical session selected and defaulted to text,
 wrong-password retry then success, the fail-closed lockout and zero-budget

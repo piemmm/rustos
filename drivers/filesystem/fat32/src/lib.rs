@@ -1861,15 +1861,25 @@ impl<B: Block> FilesystemRead for Fat32<B> {
     }
 
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
+        // Allocation is the node's real FAT chain, walked from its first
+        // cluster; an empty file has no chain and so no allocation.
+        let cluster = node_cluster(node);
+        let allocated = if cluster == 0 {
+            0
+        } else {
+            self.chain_len(cluster)?.0 * self.layout.bytes_per_cluster
+        };
         if node_is_dir(node) {
             Ok(NodeInfo {
                 kind: NodeKind::Directory,
                 size: 0,
+                allocated,
             })
         } else {
             Ok(NodeInfo {
                 kind: NodeKind::RegularFile,
                 size: u64::from(node_size(node)),
+                allocated,
             })
         }
     }

@@ -196,7 +196,8 @@ impl OpenFlags {
 /// The structural metadata `fs_stat` reports for an inode.
 ///
 /// Carries only what the userland contract exposes: the node kind, its byte
-/// size, the POSIX mode bits, and the owning uid/gid. The kernel fills it
+/// size, its allocated on-disk bytes, the POSIX mode bits, and the owning
+/// uid/gid. The kernel fills it
 /// from the VFS's authorised view of the node; a program never reads it from
 /// a `/proc`-style file (there is none).
 #[repr(C)]
@@ -206,6 +207,11 @@ pub struct FileStat {
     pub kind: FileKind,
     /// File length in bytes; `0` for a directory.
     pub size: u64,
+    /// Bytes of on-disk storage the node's data occupies — the real
+    /// allocation the mounted format tracks, reported by the filesystem
+    /// driver (never derived from `size` when the format knows better).
+    /// `0` for a node whose data occupies no dedicated blocks.
+    pub allocated: u64,
     /// POSIX mode bits (the low 12 bits are meaningful).
     pub mode: u32,
     /// Owning user id.
@@ -217,9 +223,10 @@ pub struct FileStat {
 impl FileStat {
     /// Encoded size of a [`FileStat`] on the wire.
     ///
-    /// `kind(1)` + `pad(7)` + `size(8)` + `mode(4)` + `uid(4)` + `gid(4)`,
-    /// padded to a multiple of 8 for natural alignment of the `u64` size.
-    pub const WIRE_LEN: usize = 32;
+    /// `kind(1)` + `pad(7)` + `size(8)` + `allocated(8)` + `mode(4)` +
+    /// `uid(4)` + `gid(4)`, padded to a multiple of 8 for natural alignment
+    /// of the `u64` fields.
+    pub const WIRE_LEN: usize = 40;
 
     /// Encode `self` into the first [`FileStat::WIRE_LEN`] bytes of `out`.
     ///
@@ -234,9 +241,10 @@ impl FileStat {
         out[..Self::WIRE_LEN].fill(0);
         out[0] = self.kind.as_u8();
         put_u64(out, 8, self.size);
-        put_u32(out, 16, self.mode);
-        put_u32(out, 20, self.uid);
-        put_u32(out, 24, self.gid);
+        put_u64(out, 16, self.allocated);
+        put_u32(out, 24, self.mode);
+        put_u32(out, 28, self.uid);
+        put_u32(out, 32, self.gid);
         Ok(Self::WIRE_LEN)
     }
 
@@ -256,9 +264,10 @@ impl FileStat {
         Ok(Self {
             kind: FileKind::from_u8(bytes[0])?,
             size: read_u64(bytes, 8),
-            mode: read_u32(bytes, 16),
-            uid: read_u32(bytes, 20),
-            gid: read_u32(bytes, 24),
+            allocated: read_u64(bytes, 16),
+            mode: read_u32(bytes, 24),
+            uid: read_u32(bytes, 28),
+            gid: read_u32(bytes, 32),
         })
     }
 }
@@ -428,6 +437,7 @@ mod tests {
         let stat = FileStat {
             kind: FileKind::Regular,
             size: 0x0123_4567_89AB_CDEF,
+            allocated: 0x0FED_CBA9_8765_4321,
             mode: 0o644,
             uid: 1000,
             gid: 1000,
@@ -442,6 +452,7 @@ mod tests {
         let stat = FileStat {
             kind: FileKind::Directory,
             size: 0,
+            allocated: 0,
             mode: 0o755,
             uid: 0,
             gid: 0,

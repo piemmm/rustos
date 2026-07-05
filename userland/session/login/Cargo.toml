@@ -39,6 +39,15 @@ rustos-users = { path = "../../../lib/users", version = "=0.0.0" }
 # erase (rub-out) control the kernel console echo does, from one shared
 # definition.
 rustos-vt = { path = "../../../lib/vt", version = "=0.0.0" }
+# The first-party curses screen model: the full-screen login view draws
+# through one Window/Screen definition, never hand-rolled escape sequences.
+rustos-curses = { path = "../../../lib/curses", version = "=0.0.0" }
+# The compiled-in terminal-capability database: the view builds its Screen
+# for the console's terminal type.
+rustos-termcap = { path = "../../../lib/termcap", version = "=0.0.0" }
+# The one civil-calendar definition: the view's header clock converts the
+# wall-clock Time64 through the shared day/date arithmetic.
+rustos-fsmeta = { path = "../../../lib/fsmeta", version = "=0.0.0" }
 
 # The pure-Rust userland runtime (`AGENTS.md` §1): `rustos-rt` provides the
 # `Run` binary's `_start`, stack canary, panic handler, allocator, and
@@ -48,3 +57,10 @@ rustos-vt = { path = "../../../lib/vt", version = "=0.0.0" }
 # host the binary is an inert stub.
 [target.'cfg(target_os = "none")'.dependencies]
 rustos-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+# The production System Information transport (`IpcTransport`), enabled
+# through `rustos-procinfo`'s own `program` feature: the full-screen view's
+# status bars query `sysinfod` for the machine identity, memory figures,
+# and the load/task/user censuses.
+rustos-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = [
+    "program",
+] }

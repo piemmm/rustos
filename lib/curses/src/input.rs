@@ -14,7 +14,7 @@
 
 use alloc::string::String;
 
-use rustos_vt::{Key, MouseReport, Op, Parser};
+use rustos_vt::{control, Key, MouseReport, Op, Parser};
 
 /// A decoded input event.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -86,16 +86,34 @@ impl Input {
     /// A bracketed paste emits a single [`Event::Paste`] when its end marker
     /// arrives; characters received between the markers are gathered into that
     /// paste rather than delivered individually.
+    ///
+    /// `DEL` (`0x7f`) is decoded as [`Event::Backspace`]: it is the byte
+    /// xterm-class terminals — and the RustOS keymap — send for the
+    /// Backspace key (the shared rub-out definition in `rustos_vt::control`).
+    /// The screen-op parser deliberately ignores `DEL` because it is a
+    /// no-op on *output*; on the input side it is a keystroke. No escape
+    /// sequence carries a `DEL` byte, so mapping it before the parser is
+    /// sound.
     pub fn feed(&mut self, bytes: &[u8], mut sink: impl FnMut(Event)) {
         // The parser borrows `&mut self.parser` for the call, so the paste
         // state it mutates is captured separately to avoid aliasing.
         let in_paste = &mut self.in_paste;
         let paste = &mut self.paste;
-        self.parser.feed(bytes, |op| {
-            if let Some(event) = translate(&op, in_paste, paste) {
-                sink(event);
+        for &byte in bytes {
+            if byte == control::DEL {
+                // Pasted rub-outs are not content; they are dropped, like
+                // any other non-text key inside a paste run.
+                if !*in_paste {
+                    sink(Event::Backspace);
+                }
+                continue;
             }
-        });
+            self.parser.feed(core::slice::from_ref(&byte), |op| {
+                if let Some(event) = translate(&op, in_paste, paste) {
+                    sink(event);
+                }
+            });
+        }
     }
 }
 

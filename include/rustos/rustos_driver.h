@@ -196,6 +196,7 @@ typedef struct ros_accel_caps {
 typedef struct ros_node_info {
     uint8_t kind;
     uint64_t size;
+    uint64_t allocated;
 } ros_node_info_t;
 
 /* One directory entry; `node` is a NodeId (uint64_t), `kind` a ROS_NODE_KIND_*. */

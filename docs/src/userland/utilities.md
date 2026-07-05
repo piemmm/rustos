@@ -67,7 +67,7 @@ typed reply, through three steps:
 outside world. On a running system they are IPC- and console-backed; in
 tests they are in-memory fixtures, so every rendering and paging
 decision is testable without a kernel — the same seam discipline as
-`init` (`Spawner`/`Reaper`) and `login` (`Prompt`).
+`init` (`Spawner`/`Reaper`) and `login` (`LoginView`).
 
 The `Transport`/`Output` seams, the request framing and capability-aware
 call, and the process-list paging and row rendering are shared with `ps`
@@ -541,8 +541,12 @@ directory operand has its entries listed, sorted by name (or by size
 under `-S`), unless `-d` names the directory itself. With no operand it
 lists the current directory (`.`). The option surface is the GNU `ls`
 set (`AGENTS.md` §16.7): `-a`/`-A` reveal dotfiles, `-l` (and
-`-n`/`-g`/`-o`) select the long format, `-h` scales its sizes, `-R`
-recurses, `-r` reverses, `-F`/`-p` append indicators, `-Q` quotes, and
+`-n`/`-g`/`-o`) select the long format, `-h` scales its sizes, `-s`
+prefixes each entry with its **allocated** size in 1024-byte blocks (the
+real on-disk allocation the filesystem reports through `fs_stat`, never
+a value derived from the byte length) with a `total` line per directory
+listing (printed under `-l` too, as in the GNU tool), `-R` recurses,
+`-r` reverses, `-F`/`-p` append indicators, `-Q` quotes, and
 `-m`/`-1` pick the arrangement. `-?`/`--help` render the tool's own
 short help from its bundled `Help/` tree through the shared `lib/help`
 engine (`plans/APPS.md` §4), in the locale the inherited `LANG` variable
@@ -562,7 +566,7 @@ identity.
 ### Grammar
 
 ```
-ls [-aAdFghlmnopQrRS1] [--] [path...]
+ls [-aAdFghlmnopQrRsS1] [--] [path...]
 ```
 
 | Token            | Meaning                                            |
@@ -581,6 +585,7 @@ ls [-aAdFghlmnopQrRS1] [--] [path...]
 | `-Q`, `--quote-name` | double-quote each rendered name                |
 | `-r`, `--reverse` | reverse the sort order                            |
 | `-R`, `--recursive` | list subdirectories recursively                 |
+| `-s`, `--size`   | allocated size per entry, in 1024-byte blocks      |
 | `-S`             | sort by size, largest first                        |
 | `-1`             | one name per line (the default)                    |
 | `-?`, `--help`   | show the tool's short help (wins immediately)      |

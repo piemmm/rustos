@@ -2442,6 +2442,24 @@ impl<B: Block> RustFs<B> {
         Ok(done)
     }
 
+    /// Bytes of storage `inode`'s mapped extents occupy: the sum of its
+    /// extent-run lengths, in whole blocks. An inode with no extent tree
+    /// maps no blocks and occupies nothing. Walks the (bounded) extent
+    /// tree, so the cost scales with the file's extent count, never its
+    /// byte size.
+    fn allocated_bytes(&mut self, inode: &Inode, ino: u32) -> Result<u64, DriverError> {
+        if inode.extent_root == 0 {
+            return Ok(0);
+        }
+        let entries = self.btree_collect_entries(inode.extent_root, extent_spec(ino))?;
+        let mut blocks = 0u64;
+        for (_, value) in &entries {
+            let (_, len) = decode_extent(value);
+            blocks = blocks.saturating_add(len);
+        }
+        Ok(blocks.saturating_mul(self.block_size as u64))
+    }
+
     /// Copy-on-write `data` into file `inode` (number `ino`) at `offset`.
     fn write_file(
         &mut self,
@@ -3073,15 +3091,18 @@ impl<B: Block> FilesystemRead for RustFs<B> {
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
         let ino = self.ino_of(node)?;
         let inode = self.read_inode(ino)?;
+        let allocated = self.allocated_bytes(&inode, ino)?;
         if inode.is_dir() {
             Ok(NodeInfo {
                 kind: NodeKind::Directory,
                 size: 0,
+                allocated,
             })
         } else {
             Ok(NodeInfo {
                 kind: NodeKind::RegularFile,
                 size: inode.size,
+                allocated,
             })
         }
     }

@@ -4,7 +4,7 @@ ls — elencare il contenuto delle directory
 
 ## SYNOPSIS
 
-`ls [-aAdFghlmnopQrRS1] [--] [path...]`
+`ls [-aAdFghlmnopQrRsS1] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -59,6 +59,9 @@ blocchi sono separati da una riga vuota.
   controllo.
 - `-r, --reverse` — invertire l'ordine di ordinamento.
 - `-R, --recursive` — elencare le sottodirectory ricorsivamente.
+- `-s, --size` — stampare la dimensione allocata di ogni voce in blocchi
+  da 1024 byte (scalata con `-h`), con una riga `total` per ogni
+  directory elencata.
 - `-S` — ordinare per dimensione, la più grande per prima.
 - `-1` — un nome per riga (l'impostazione predefinita).
 - `-?` — mostrare la guida breve di questo comando (`--help` è la

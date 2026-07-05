@@ -44,6 +44,8 @@ a privileged query without first passing its capability gate.
 | `UPTIME`              | none                 | no      | `Uptime`                       |
 | `MOUNT_LIST`          | none                 | no      | packed `MountRecord`s          |
 | `RESOURCE_LIMITS`     | none                 | no      | packed `ResourceLimitRecord`s  |
+| `PROCESS_IDENTITY`    | none                 | no      | the caller's own `Origin`      |
+| `LOAD_AVERAGE`        | none                 | no      | `LoadAverage`                  |
 
 ## Response encoding
 

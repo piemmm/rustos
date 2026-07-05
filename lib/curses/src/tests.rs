@@ -362,6 +362,22 @@ fn ordinary_text_and_control_keys_decode() {
 }
 
 #[test]
+fn del_decodes_as_the_backspace_key() {
+    // Regression: xterm-class terminals (and the RustOS keymap) send DEL
+    // for the Backspace key; the screen-op parser ignores DEL on output,
+    // so the input decoder must map the byte itself.
+    assert_eq!(
+        decode(b"a\x7fb"),
+        vec![Event::Char('a'), Event::Backspace, Event::Char('b')]
+    );
+    // Inside a bracketed paste a rub-out is not content and not a key.
+    assert_eq!(
+        decode(b"\x1b[200~x\x7fy\x1b[201~"),
+        vec![Event::Paste(String::from("xy"))]
+    );
+}
+
+#[test]
 fn a_mouse_report_decodes() {
     let events = decode(b"\x1b[<0;3;4M");
     assert_eq!(events.len(), 1);

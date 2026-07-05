@@ -45,8 +45,11 @@ pub use rustos_users::SESSION_BASELINE;
 /// kernel-held user database (`users_db_read`/`users_db_wait`),
 /// `CAP_IPC_BIND_PRIVILEGED` to bind its console's reserved elevation
 /// rendezvous (the `elevate_endpoint` id the shell's `elevate` builtin
-/// calls — reserved ids fail closed against squatters), and
-/// `CAP_LOG_EMIT` for its structured audit records. No `CAP_FS_ACCESS`:
+/// calls — reserved ids fail closed against squatters),
+/// `CAP_LOG_EMIT` for its structured audit records, and
+/// `CAP_SYSINFO_KERNEL` so the full-screen view's bottom bar can show the
+/// memory figures (a refusal degrades that one figure to a placeholder,
+/// never the login). No `CAP_FS_ACCESS`:
 /// login reads the users database through its own gated syscall and never
 /// touches the filesystem.
 #[cfg(any(test, not(all(freestanding, kernel_isa = "aarch64"))))]
@@ -58,6 +61,7 @@ pub const LOGIN_MANIFEST: &[CapabilityId] = &[
     CapabilityId::SPAWN_AS_USER,
     CapabilityId::IPC_BIND_PRIVILEGED,
     CapabilityId::LOG_EMIT,
+    CapabilityId::SYSINFO_KERNEL,
 ];
 
 /// The device-manager service's manifest: `CAP_SYSINFO_HW` for the
@@ -257,6 +261,7 @@ mod tests {
                 CapabilityId::SPAWN_AS_USER,
                 CapabilityId::IPC_BIND_PRIVILEGED,
                 CapabilityId::LOG_EMIT,
+                CapabilityId::SYSINFO_KERNEL,
             ])
         );
     }

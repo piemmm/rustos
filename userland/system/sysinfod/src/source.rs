@@ -13,7 +13,8 @@
 use alloc::vec::Vec;
 
 use rustos_abi::sysinfo::{
-    KernelMemoryStats, MountRecord, ProcessRecord, ResourceLimitRecord, SystemIdentity, Uptime,
+    KernelMemoryStats, LoadAverage, MountRecord, ProcessRecord, ResourceLimitRecord,
+    SystemIdentity, Uptime,
 };
 use rustos_abi::{CapabilityQuery, Errno, LimitKind, Origin};
 
@@ -117,6 +118,12 @@ pub trait SysinfoSource {
 
     /// Return system uptime and boot wall-clock time.
     fn uptime(&self, caller: &Caller) -> Result<Uptime, Errno>;
+
+    /// Return the scheduler load averages and the logged-in-user census.
+    ///
+    /// System-wide, secret-free figures (the `uptime(1)` line), so the
+    /// query is ungated — exactly like [`uptime`](Self::uptime).
+    fn load_average(&self, caller: &Caller) -> Result<LoadAverage, Errno>;
 
     /// Return the current mount table.
     ///

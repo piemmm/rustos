@@ -6,7 +6,7 @@
 //! never itself talks to the kernel, the credential store, or the terminal.
 //! Three injected traits do that:
 //!
-//! * [`Prompt`] reads the username and password from, and writes prompts to,
+//! * [`LoginView`] presents the login screen and reads the username and password from
 //!   the controlling terminal.
 //! * [`Authenticator`] verifies a [`Credentials`] pair against `kernel/sec`
 //!   and the credential store, returning the [`AuthenticatedUser`] on success.
@@ -29,7 +29,7 @@ pub use rustos_users::{Gid, Uid};
 /// Maximum accepted input-line length, in bytes, for every prompt read —
 /// a validation bound on untrusted console input,
 /// matching the `users-v1` format's own per-line bound. A longer line is
-/// refused by the [`Prompt`] implementation, never silently truncated.
+/// refused by the [`LoginView`] implementation, never silently truncated.
 pub const INPUT_LINE_MAX: usize = 512;
 
 /// A username and the password offered for it.
@@ -173,26 +173,31 @@ pub struct SessionOutcome {
     pub exit_code: i32,
 }
 
-/// The controlling terminal: login's only channel to the user.
+/// The login screen: login's only channel to the user.
 ///
-/// The implementation owns the real device I/O; in particular [`read_secret`]
-/// must read the password **without echoing it** (secrets
-/// are not displayed). Login never performs ambient terminal I/O itself.
+/// The implementation owns the real presentation — the full-screen curses
+/// view ([`crate::view::CursesView`]) on a running system, an in-memory
+/// fixture in tests. The [`Login`](crate::Login) state machine drives it
+/// through *semantic* operations (begin a round, read a credential, note a
+/// failure), never raw terminal writes, so the same machine runs unchanged
+/// over any presentation. In particular [`read_password`] must collect the
+/// secret **without displaying it** (secrets are not rendered). Login never
+/// performs ambient terminal I/O itself.
 ///
-/// Both reads fill a **caller-provided** buffer instead of returning an
-/// owned string, so the prompt path takes no allocator (
-/// — the userland heap is not required to read a keystroke; the buffer is
-/// the caller's stack). Login validates the filled bytes as UTF-8 itself
-/// (every input validated, in one place).
+/// Every read fills a **caller-provided** buffer instead of returning an
+/// owned string, so the credential path takes no allocator (the buffer is
+/// the caller's stack, zeroed by the caller after the attempt). Login
+/// validates the filled bytes as UTF-8 itself (every input validated, in
+/// one place).
 ///
-/// [`read_secret`]: Prompt::read_secret
-pub trait Prompt {
-    /// Write a prompt or message to the terminal.
-    fn write(&self, text: &str);
+/// [`read_password`]: LoginView::read_password
+pub trait LoginView {
+    /// Begin one authentication round: draw (or redraw) the whole view and
+    /// present the username prompt.
+    fn round_begin(&self);
 
-    /// Read one echoed line of input (the username, the session choice)
-    /// into `buf`, returning the number of bytes filled. The line
-    /// terminator is not stored.
+    /// Read the username into `buf`, returning the number of bytes filled.
+    /// The line terminator is not stored.
     ///
     /// # Errors
     ///
@@ -200,18 +205,38 @@ pub trait Prompt {
     /// read (closed, timed out, …) — login treats this as fatal and fails
     /// closed — or [`Errno::LengthOutOfRange`] for a line longer than
     /// `buf`, which is refused rather than truncated.
-    fn read_line(&self, buf: &mut [u8]) -> Result<usize, Errno>;
+    fn read_username(&self, buf: &mut [u8]) -> Result<usize, Errno>;
 
-    /// Read one line of input **without echoing it** (the password) into
-    /// `buf`, returning the number of bytes filled. The line terminator is
-    /// not stored.
+    /// Read the password into `buf` **without displaying it**, returning
+    /// the number of bytes filled. The line terminator is not stored.
     ///
     /// # Errors
     ///
-    /// As [`Prompt::read_line`]: the implementation's [`Errno`] when the
-    /// terminal cannot be read, [`Errno::LengthOutOfRange`] for an
+    /// As [`LoginView::read_username`]: the implementation's [`Errno`] when
+    /// the terminal cannot be read, [`Errno::LengthOutOfRange`] for an
     /// over-long line.
-    fn read_secret(&self, buf: &mut [u8]) -> Result<usize, Errno>;
+    fn read_password(&self, buf: &mut [u8]) -> Result<usize, Errno>;
+
+    /// Read the session choice (text or graphical) into `buf`, returning
+    /// the number of bytes filled.
+    ///
+    /// # Errors
+    ///
+    /// As [`LoginView::read_username`].
+    fn read_session_choice(&self, buf: &mut [u8]) -> Result<usize, Errno>;
+
+    /// Record one rejected authentication attempt and show the running
+    /// failed-attempt count. The count accumulates across rounds until a
+    /// session launches, so whoever is at the console sees every failure
+    /// since the last successful login.
+    fn note_failure(&self);
+
+    /// Hand the terminal over to the launched session: restore the normal
+    /// screen and input discipline. The next [`round_begin`]
+    /// (after the session ends) re-enters the view.
+    ///
+    /// [`round_begin`]: LoginView::round_begin
+    fn session_handoff(&self);
 }
 
 /// Verifies credentials against `kernel/sec` and the credential store.

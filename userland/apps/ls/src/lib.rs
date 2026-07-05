@@ -27,7 +27,7 @@
 //! The binary that ships as `ls` wires the real syscall-backed filesystem and
 //! standard streams; tests wire in-memory fixtures. This is the seam
 //! discipline of the other userland crates (`init`'s `Spawner`/`Reaper`,
-//! `login`'s `Prompt`, `sysinfo`'s `Transport`, `cat`'s `FileSource`, `man`'s
+//! `login`'s `LoginView`, `sysinfo`'s `Transport`, `cat`'s `FileSource`, `man`'s
 //! `BundleStore`), and it keeps every parsing, filtering, sorting, and
 //! formatting decision testable without a kernel.
 //!

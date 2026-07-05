@@ -23,7 +23,7 @@ pub enum LoginError {
     /// nothing.
     TooManyAttempts,
     /// The controlling terminal could not be read or written; the wrapped
-    /// [`Errno`] is the [`Prompt`](crate::Prompt) seam's error verbatim.
+    /// [`Errno`] is the [`LoginView`](crate::LoginView) seam's error verbatim.
     /// Login cannot operate without a console, so it aborts.
     Console(Errno),
     /// A user authenticated, but the [`SessionLauncher`](crate::SessionLauncher)

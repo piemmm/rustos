@@ -179,10 +179,12 @@ const WRONG_UNLOCK_PASSPHRASE_PREFIX: &str = "abc";
 /// (inject only once the driver can receive).
 const AUTOLOAD_INPUT_KEY_MARKER: &str = "sc=irq_bind";
 
-/// The username line the session-ceiling vertical types at `Username: `.
+/// The username line the session-ceiling vertical types at the login
+/// view's `Username:` field.
 const SESSION_USERNAME_LINE: &str = "root\n";
 
-/// The password line the session-ceiling vertical types at `Password: `.
+/// The password line the session-ceiling vertical types at the login
+/// view's `Password` field.
 const SESSION_PASSWORD_LINE: &str = "root\n";
 
 /// `true` if the two byte strings are equal — the compile-time complement of
@@ -1471,27 +1473,29 @@ const TESTS: &[QemuTest] = &[
     // `EventId(5000)`) for each service bundle and `wait`s on the children.
     // The script first answers the root-unlock passphrase prompt; the
     // unlock loads the volume's users database, so `login` — which waits
-    // for that database — writes its `Username: ` prompt and **blocks** in
-    // `stream_read` on the kernel-core `BlockingConsoleRead` backing. The
-    // runner then holds the scripted dialogue below with it: it types
-    // `root`, waits for the `Password: ` prompt (proving login read the
-    // username line whole and re-prompted rather than crashing per
-    // keystroke — the regression the allocation-free prompt path fixed),
-    // types a wrong password the authenticator refuses (`Login incorrect`),
-    // waits for the **second** `Username: ` prompt of the retry loop, and
+    // for that database — draws its full-screen view (the `Username:`
+    // label inside the login box) and **blocks** in `stream_read` on the
+    // kernel-core `BlockingConsoleRead` backing. The runner then holds the
+    // scripted dialogue below with it: it types `root`, waits for the
+    // `Password` label (the minimal-diff renderer repaints only the
+    // changed cells over `Username:`, proving login read the username
+    // whole and advanced rather than crashing per keystroke), types a
+    // wrong password the authenticator refuses — the view then paints the
+    // red `1 failed attempt` line and returns to the username field — and
     // finally types a 513-byte line (one byte past login's 512-byte
-    // `LINE_MAX` validation bound); login refuses the over-long line whole,
-    // records the console error, and exits fail-closed; `init` reaps it and
-    // relaunches it. The audit sink reports PASS through the ARM
-    // semihosting finisher once it has seen the expected `ProcessSpawned`
-    // and audited-syscall counts — and the runner fails the run if the
-    // guest exits before every scripted prompt appeared and every line was
-    // sent, so a login that dies mid-dialogue cannot pass on its relaunch
-    // alone. Together that proves the disk-backed spawn path (read +
-    // verify + launch off the mounted volume), the interactive read path,
-    // and supervision (reap + restart) end to end. Single CPU; the
-    // 120-second budget covers the unlock's key derivation on top of the
-    // boot-then-do-fixed-work baseline.
+    // `INPUT_LINE_MAX` validation bound); the view refuses the over-long
+    // line whole (`LengthOutOfRange`), login records the console error and
+    // exits fail-closed; `init` reaps it and relaunches it. The audit sink
+    // reports PASS through the ARM semihosting finisher once it has seen
+    // the expected `ProcessSpawned` and audited-syscall counts — and the
+    // runner fails the run if the guest exits before every scripted prompt
+    // appeared and every line was sent, so a login that dies mid-dialogue
+    // cannot pass on its relaunch alone. Together that proves the
+    // disk-backed spawn path (read + verify + launch off the mounted
+    // volume), the interactive raw-mode read path, and supervision (reap +
+    // restart) end to end. Single CPU; the 120-second budget covers the
+    // unlock's key derivation on top of the boot-then-do-fixed-work
+    // baseline.
     QemuTest {
         package: "rustos-test-spawn-session-qemu-aarch64",
         binary: "rustos-test-spawn-session-qemu-aarch64",
@@ -1506,11 +1510,11 @@ const TESTS: &[QemuTest] = &[
         pointer: false,
         serial: &[
             ("Root filesystem passphrase: ", UNLOCK_PASSPHRASE_LINE),
-            ("Username: ", "root\n"),
-            ("Password: ", "wrong\n"),
+            ("Username:", "root\n"),
+            ("Password", "wrong\n"),
             (
-                "Username: ",
-                "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n",
+                "1 failed attempt",
+                "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n",
             ),
         ],
     },
@@ -2684,8 +2688,12 @@ const TESTS: &[QemuTest] = &[
         pointer: false,
         serial: &[
             ("Root filesystem passphrase: ", UNLOCK_PASSPHRASE_LINE),
-            ("Username: ", SESSION_USERNAME_LINE),
-            ("Password: ", SESSION_PASSWORD_LINE),
+            // The full-screen login view paints `Username:` once and the
+            // minimal-diff renderer then repaints only the changed label
+            // cells (`Password` over it), so the anchors are the labels
+            // without their trailing blanks.
+            ("Username:", SESSION_USERNAME_LINE),
+            ("Password", SESSION_PASSWORD_LINE),
             // The default prompt is `\u@\h \w% ` (rustos_elsh env.rs): login
             // spawns the shell as `root` with HOME=/Users/root, and the shell
             // defaults HOSTNAME to `rustos`, so at home the prompt renders

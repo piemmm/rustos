@@ -2318,7 +2318,15 @@ reflink independence, acorn preset round-trip).
 - `userland/session/login`: text login that authenticates against `kernel/sec`
   and spawns a shell or a graphical session. Always starts in text mode;
   offers graphical mode only when a display driver and `userland/gui/wm`
-  are available.
+  are available. The console presentation is the full-screen curses view
+  (`rustos_login::view::CursesView` over `lib/curses`): top bar with
+  hostname/OS-version/clock, centred bordered login box, red running
+  failed-attempt count, bottom bar with memory/tasks/users/load figures
+  from `sysinfod` (`LOAD_AVERAGE` — the kernel `LoadTracker` tickless
+  EWMA over the `IntrospectDomain::LoadAverage` primitive — plus
+  `SYSTEM_IDENTITY` and the `CAP_SYSINFO_KERNEL`-gated memory stats); a
+  refused figure renders `--` and never blocks a login, and a raw-mode
+  failure refuses the password read (never echo a credential).
 - Core CLI utilities (`ls`, `cp`, `mv`, `rm`, `cat`, `ps`, `mount`,
   `chmod`, `chown`, `useradd`, `groupadd`, `setcap`, `getcap`,
   `sysinfo`). Each utility is its own small crate under `userland/apps/`.
@@ -3595,6 +3603,15 @@ the session-ceiling vertical
 types `man man` end to end. The generic argv/stderr-line helpers were
 hoisted into `lib/rt` (`args`, `io::write_stderr_line`) and the `-errno`
 decode into `rustos_abi::Errno::from_syscall`, each now one definition.
+
+`ls` implements GNU `-s`/`--size` — the allocated size per entry in
+1024-byte blocks (with `-h` scaling) plus the `total` line every directory
+listing now prints under `-l`/`-s` (GNU parity) — backed by honest
+allocation plumbing: `NodeInfo`/`DelegatedInfo`/`FileStat` carry an
+`allocated`-bytes field filled from each format's real tracking (ext4
+`i_blocks`, huge-file aware — and the osd2 `file_acl` high-half mis-read
+fixed with a regression test; FAT32 cluster-chain walk; RustFS extent-tree
+sum; memfs length), with the C header regenerated.
 
 Every store-registered command app (`cat`, `groupadd`, `ls`, `man`, `ps`,
 `top`, `sysinfo`, `useradd`, `users`, `elsh`) ships its six-locale `Help/`

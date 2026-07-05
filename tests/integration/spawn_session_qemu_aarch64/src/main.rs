@@ -36,21 +36,21 @@
 //!    no program rows, so every service above is read, verified, and
 //!    spawned from its on-disk `/System` store bundle — `plans/APPS.md`
 //!    deliverable 8 — and the unlock loads the volume's users database
-//!    login waits for). Login then writes its `Username: ` prompt and
-//!    **blocks** in `stream_read` on the kernel-core
-//!    `BlockingConsoleRead` backing (the backing owns blocking). The
-//!    runner holds the scripted dialogue with it (each line typed only
-//!    after its prompt appeared past the previous exchange): `root` at
-//!    the first `Username: `, a wrong password at the `Password: `
-//!    prompt — which prints only if login read the username line whole and
-//!    re-prompted (the per-keystroke-crash regression witness) — then,
-//!    after the authenticator refuses (`Login incorrect`) and
-//!    login re-prompts, a 513-byte line — one byte past login's 512-byte
-//!    `LINE_MAX` validation bound — at the **second**
-//!    `Username: ` prompt. Login refuses the over-long line whole, records
-//!    the console error, and exits fail-closed (audited `SyscallInvoked`
-//!    #4 of the supervision chain). `init`'s `wait` then reaps it and
-//!    reads its code.
+//!    login waits for). Login then draws its full-screen view — the
+//!    `Username:` label inside the login box — and **blocks** in
+//!    `stream_read` on the kernel-core `BlockingConsoleRead` backing (the
+//!    backing owns blocking). The runner holds the scripted dialogue with
+//!    it (each line typed only after its anchor appeared past the previous
+//!    exchange): `root` at the `Username:` label, a wrong password once
+//!    the `Password` label repaints it — which happens only if login read
+//!    the username line whole and advanced (the per-keystroke-crash
+//!    regression witness) — then, after the authenticator refuses and the
+//!    view paints the red `1 failed attempt` line, a 513-byte line — one
+//!    byte past login's 512-byte `INPUT_LINE_MAX` validation bound. The
+//!    view refuses the over-long line whole (`LengthOutOfRange`), login
+//!    records the console error, and exits fail-closed (audited
+//!    `SyscallInvoked` #4 of the supervision chain). `init`'s `wait` then
+//!    reaps it and reads its code.
 //! 5. `init` relaunches the session — a second login `spawn` (an audited
 //!    `SyscallInvoked` of the chain) producing a **fifth**
 //!    `ProcessSpawned`. The second login blocks at its own prompt;

@@ -136,10 +136,13 @@ impl FilesystemRead for RwMockFs {
             RwNode::Dir(_) => Ok(NodeInfo {
                 kind: NodeKind::Directory,
                 size: 0,
+                allocated: 0,
             }),
             RwNode::File(data) => Ok(NodeInfo {
                 kind: NodeKind::RegularFile,
                 size: data.len() as u64,
+                // Heap-backed: the bytes held are the storage occupied.
+                allocated: data.len() as u64,
             }),
         }
     }

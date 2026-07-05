@@ -23,8 +23,8 @@
 use alloc::vec::Vec;
 
 use rustos_abi::sysinfo::{
-    KernelMemoryStats, ProcessRecord, ProcessState, ResourceLimitRecord, SystemIdentity, Uptime,
-    PROCESS_CPU_NONE, RESOURCE_LIMITS_REPORT_LEN,
+    KernelMemoryStats, LoadAverage, ProcessRecord, ProcessState, ResourceLimitRecord,
+    SystemIdentity, Uptime, PROCESS_CPU_NONE, RESOURCE_LIMITS_REPORT_LEN,
 };
 use rustos_abi::{Duration64, Errno, LimitKind, ProcId, Time64};
 use rustos_kernel_mem::PAGE_SIZE;
@@ -35,6 +35,7 @@ use crate::bootinfo::KernelArch;
 use crate::fs::FilesystemService;
 use crate::init::KernelState;
 use crate::introspect::IntrospectSource;
+use crate::loadavg::LoadTracker;
 use crate::sched::SchedulerArch;
 use crate::wallclock::WallClockSource;
 
@@ -92,6 +93,9 @@ pub struct KernelIntrospectSource<A: KernelArch + 'static> {
     /// fixed size at boot; the value is threaded from the binding kernel's
     /// `rustos_kalloc::HEAP_BYTES`).
     kernel_heap_bytes: u64,
+    /// The damped run-queue averages, advanced at each load-average read
+    /// (the tickless observation model — see [`crate::loadavg`]).
+    load: LoadTracker,
 }
 
 impl<A: KernelArch + 'static> KernelIntrospectSource<A> {
@@ -112,6 +116,7 @@ impl<A: KernelArch + 'static> KernelIntrospectSource<A> {
             filesystem,
             wall_clock,
             kernel_heap_bytes,
+            load: LoadTracker::new(),
         }
     }
 
@@ -249,6 +254,43 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
             boot_time,
         };
         Ok(uptime.to_le_bytes().to_vec())
+    }
+
+    fn load_average(&self) -> Result<Vec<u8>, Errno> {
+        // One walk of the authoritative CapTable yields all three
+        // censuses: runnable (ready or running), live tasks, and the
+        // distinct non-system uids with at least one live task — the
+        // logged-in-user count.
+        let mut runnable: u32 = 0;
+        let mut total: u32 = 0;
+        let mut uids: Vec<u32> = Vec::new();
+        {
+            let caps = self.state.caps.read();
+            for record in caps.iter() {
+                let state = self.state.scheduler.state_of(record.task().0);
+                if state == TaskState::Exited {
+                    continue;
+                }
+                total = total.saturating_add(1);
+                if matches!(state, TaskState::Ready | TaskState::Running) {
+                    runnable = runnable.saturating_add(1);
+                }
+                let uid = record.owner().0;
+                if uid != 0 && !uids.contains(&uid) {
+                    uids.push(uid);
+                }
+            }
+        }
+        let [one, five, fifteen] = self.load.observe(self.monotonic_ns(), u64::from(runnable));
+        let load = LoadAverage {
+            load1: one,
+            load5: five,
+            load15: fifteen,
+            runnable,
+            total_tasks: total,
+            users: u32::try_from(uids.len()).unwrap_or(u32::MAX),
+        };
+        Ok(load.to_le_bytes().to_vec())
     }
 
     fn task_limits(&self, proc_id: ProcId) -> Result<Vec<u8>, Errno> {

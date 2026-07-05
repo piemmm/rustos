@@ -11,15 +11,16 @@
 //! `main` wires the real seams the [`rustos_login::Login`] state machine
 //! drives and supervises sessions on this console:
 //!
-//! * [`rustos_login::Prompt`] over the **inherited standard streams**:
-//!   prompts go to fd 1, input lines come from fd 0. The console stream
-//!   backing performs terminal local echo in the kernel's read line
-//!   discipline (`plans/PI.md` P11), on by default, so a typed username is
-//!   visible. The password read selects the secret discipline through the
-//!   `stream_input_mode` syscall (`rustos_rt::set_input_mode`) before
-//!   reading and restores the cooked default after, so the secret is never
-//!   rendered (never echo a credential); if the mode cannot be selected the
-//!   read fails closed rather than echoing the password.
+//! * [`rustos_login::LoginView`] as the full-screen curses view
+//!   ([`rustos_login::CursesView`]) over the **inherited standard
+//!   streams**: rendered bytes go to fd 1, keystrokes come from fd 0. The
+//!   view selects the raw (echo-off) discipline through the
+//!   `stream_input_mode` syscall for the whole page — it echoes the
+//!   username itself and renders nothing for the password — and refuses a
+//!   password read outright if raw mode cannot be selected (never echo a
+//!   credential). Its status bars query `sysinfod` (identity, memory,
+//!   load/task/user censuses) and the kernel wall clock; a refused or
+//!   unavailable figure renders as a placeholder and never blocks a login.
 //! * [`rustos_login::UsersAuthenticator`] over the user database obtained
 //!   through the capability-gated `users_db_read` syscall (`CAP_USERS_READ`) and re-parsed with the fail-closed `rustos-users`
 //!   parser. When no database is held — an installer image, or the boot
@@ -60,20 +61,27 @@ mod program {
     // user database). `rustos-rt` registers the process global allocator.
     extern crate alloc;
 
+    use alloc::string::String;
+    use alloc::vec::Vec;
+
     use rustos_abi::elevate::{elevate_endpoint, ELEVATE_MAX_REQUEST, ELEVATE_REPLY_LEN};
+    use rustos_abi::sysinfo::{KernelMemoryStats, LoadAverage, SysinfoQueryId, SystemIdentity};
     use rustos_abi::{
-        Errno, InputMode, Origin, WaitSetOp, WaitSourceKind, CONSOLE_INHERIT, ORIGIN_CONSOLE_NONE,
-        ORIGIN_WIRE_LEN,
+        Errno, InputMode, Origin, Time64, WaitSetOp, WaitSourceKind, CONSOLE_INHERIT,
+        ORIGIN_CONSOLE_NONE, ORIGIN_WIRE_LEN,
     };
     use rustos_caps::CapabilitySet;
+    use rustos_curses::{CursesError, Screen, Size, Tty};
     use rustos_login::elevate::ElevateLauncher;
     use rustos_login::{
         events, handle_elevate_request, session_environment, supervise, AuthenticatedUser,
-        Authenticator, DbLoad, Login, LoginConfig, LoginError, Prompt, SessionKind,
-        SessionLauncher, SessionOutcome,
+        Authenticator, ConsoleMode, CursesView, DbLoad, Login, LoginConfig, LoginError,
+        LoginStatus, LoginView, SessionKind, SessionLauncher, SessionOutcome, StatusSource,
     };
+    use rustos_procinfo::{call, IpcTransport};
     use rustos_rt::io::{Stdout, Write};
     use rustos_rt::LogSink;
+    use rustos_termcap::TermType;
     use rustos_users::{UsersDb, MAX_DB_LEN};
 
     /// Authentication attempts per login round before the round fails
@@ -93,78 +101,102 @@ mod program {
     /// CPU throughout, so a long bound costs nothing.
     const DB_WAIT_TIMEOUT_NS: u64 = 5_000_000_000;
 
-    /// Read one edited input line (without its terminator) from standard
-    /// input into `buf`, returning the number of bytes filled.
-    ///
-    /// The read line discipline is shared with the kernel console echo: this
-    /// runs the **buffer** half ([`rustos_vt::line::LineEditor`]) while the
-    /// kernel console runs the matching **echo** half, both keyed off the one
-    /// `lib/vt` erase definition. So a Backspace — or the Delete key's
-    /// `CSI 3 ~` sequence — rubs out the last character both on screen and
-    /// in `buf`; CR and LF both terminate (UART terminals commonly send CR);
-    /// a line longer than `buf` is refused, never truncated.
-    ///
-    /// **Allocation-free by design**: every byte lands in the caller's
-    /// stack buffer, because the `mem_map`-backed userland heap is not
-    /// available until its production producer lands (`plans/SPAWN.md`
-    /// SP5b) — a heap allocation here would abort the process on the
-    /// first keystroke. The stream *backing* owns blocking: each `stream_read` parks until input arrives, so a
-    /// zero-length read means the stream failed or closed — reported as
-    /// a console failure the login loop fails closed on, never spun on.
-    fn read_line_raw(buf: &mut [u8]) -> Result<usize, Errno> {
-        let mut editor = rustos_vt::line::LineEditor::new();
-        let mut len = 0;
-        let mut byte = [0u8; 1];
-        loop {
-            let read = rustos_rt::stdin(&mut byte);
-            if read == 0 {
-                return Err(Errno::NotFound);
+    /// The console byte channel behind the curses view: rendered bytes go
+    /// to fd 1 through the shared `rustos_rt::io` short-write loop, and
+    /// keystrokes come from fd 0 one byte at a time — the console stream
+    /// backing parks the task until input arrives (never a busy poll), so
+    /// a zero-length read means the stream failed or closed and the view
+    /// fails closed on it.
+    struct RtTty;
+
+    impl Tty for RtTty {
+        fn write(&mut self, bytes: &[u8]) -> rustos_curses::Result<()> {
+            Stdout.write_all(bytes).map_err(|_| CursesError::Io)
+        }
+
+        fn read(&mut self) -> rustos_curses::Result<Vec<u8>> {
+            self.read_blocking()
+        }
+
+        fn read_blocking(&mut self) -> rustos_curses::Result<Vec<u8>> {
+            let mut byte = [0u8; 1];
+            if rustos_rt::stdin(&mut byte) == 0 {
+                return Err(CursesError::Io);
             }
-            match editor.push(buf, &mut len, byte[0]) {
-                rustos_vt::line::LineFeed::Pending => {}
-                rustos_vt::line::LineFeed::Complete => return Ok(len),
-                rustos_vt::line::LineFeed::TooLong => return Err(Errno::LengthOutOfRange),
-            }
+            Ok(alloc::vec![byte[0]])
         }
     }
 
-    /// The controlling terminal over the inherited standard streams. The program binds only fd 0/1, never a device.
-    struct RtPrompt;
+    /// The console line discipline behind the view: the `stream_input_mode`
+    /// syscall. Raw (echo off, per-keystroke) while the view owns the
+    /// screen; cooked restored for the launched session. A failed raw
+    /// toggle reports `false`, and the view then refuses to read a password
+    /// that would echo (fail closed).
+    struct RtConsoleMode;
 
-    impl Prompt for RtPrompt {
-        fn write(&self, text: &str) {
-            // The shared `rustos_rt::io` short-write loop — no login-private
-            // copy (the charter forbids that duplication). Prompt output is
-            // best-effort (a dropped tail does not abort the prompt), so the
-            // fail-closed result is discarded; `write_all` never spins.
-            let _ = Stdout.write_all(text.as_bytes());
+    impl ConsoleMode for RtConsoleMode {
+        fn raw(&self) -> bool {
+            rustos_rt::set_input_mode(InputMode::Raw) >= 0
         }
 
-        fn read_line(&self, buf: &mut [u8]) -> Result<usize, Errno> {
-            read_line_raw(buf)
-        }
-
-        fn read_secret(&self, buf: &mut [u8]) -> Result<usize, Errno> {
-            // Console echo is on by default, so suppress it for the
-            // duration of the password read — a credential must never be
-            // rendered. If echo cannot be disabled (the
-            // toggle failed), fail closed rather than reading a secret that
-            // would echo.
-            let toggled = rustos_rt::set_input_mode(InputMode::Secret);
-            if toggled < 0 {
-                return Err(errno_from(toggled));
-            }
-            let result = read_line_raw(buf);
-            // Restore echo for the subsequent interactive prompts. A
-            // failure to re-enable cannot compromise the secret already
-            // read, so it is best-effort. The Return key the user pressed
-            // was not echoed (echo was off), so advance the display a line
-            // ourselves to match the un-suppressed prompts — a plain line
-            // feed, which the console line discipline cooks to CR-LF so the
-            // cursor returns to column zero.
+        fn cooked(&self) {
             let _ = rustos_rt::set_input_mode(InputMode::Cooked);
-            let _ = Stdout.write_all(b"\n");
-            result
+        }
+    }
+
+    /// The view's status figures, queried live from `sysinfod` and the
+    /// kernel wall clock. Every figure is best-effort: a refused or failed
+    /// query leaves its field `None` and the view renders a placeholder —
+    /// a denied optional query never blocks a login.
+    struct RtStatusSource;
+
+    impl RtStatusSource {
+        /// One payload-free query, `None` on any refusal or failure.
+        fn query(query: SysinfoQueryId) -> Option<Vec<u8>> {
+            call(&IpcTransport, query, &[]).ok()
+        }
+    }
+
+    impl StatusSource for RtStatusSource {
+        fn status(&self) -> LoginStatus {
+            let mut status = LoginStatus::default();
+            if let Some(identity) = Self::query(SysinfoQueryId::SYSTEM_IDENTITY)
+                .and_then(|bytes| SystemIdentity::from_bytes(&bytes).ok())
+            {
+                // An unprovisioned machine has an empty hostname; the view
+                // shows the honest placeholder rather than an invented name.
+                if let Ok(name) = core::str::from_utf8(identity.hostname_bytes()) {
+                    if !name.is_empty() {
+                        status.hostname = Some(String::from(name));
+                    }
+                }
+                status.version = Some((
+                    identity.version_major,
+                    identity.version_minor,
+                    identity.version_patch,
+                ));
+            }
+            if let Some(memory) = Self::query(SysinfoQueryId::KERNEL_MEMORY_STATS)
+                .and_then(|bytes| KernelMemoryStats::from_bytes(&bytes).ok())
+            {
+                status.memory = Some((
+                    memory.total_bytes.saturating_sub(memory.free_bytes),
+                    memory.total_bytes,
+                ));
+            }
+            if let Some(load) = Self::query(SysinfoQueryId::LOAD_AVERAGE)
+                .and_then(|bytes| LoadAverage::from_bytes(&bytes).ok())
+            {
+                status.load = Some([load.load1, load.load5, load.load15]);
+                status.tasks = Some(load.total_tasks);
+                status.users = Some(load.users);
+            }
+            status
+        }
+
+        fn now(&self) -> Option<Time64> {
+            let reading = rustos_rt::wall_time().ok()?;
+            reading.state().is_set().then(|| reading.time())
         }
     }
 
@@ -504,11 +536,11 @@ mod program {
     /// prompt used, so an elevation re-authenticates against exactly the
     /// database this round authenticated against.
     fn login_round(
+        view: &dyn LoginView,
         elevation: Option<&ElevationContext>,
         authenticator: &dyn Authenticator,
         sink: &LogSink,
     ) -> bool {
-        let prompt = RtPrompt;
         let launcher = RtLauncher {
             elevation,
             authenticator,
@@ -519,7 +551,7 @@ mod program {
             // The graphical session rides the P10 WM work; until a display
             // session exists the option is hidden, never errored.
             graphical_available: false,
-            prompt: &prompt,
+            view,
             authenticator,
             launcher: &launcher,
             sink,
@@ -574,12 +606,22 @@ mod program {
         // flooded the boot log with one `users_db_read` rejection per poll. The wait's result is advisory: `supervise`
         // re-reads the database on the next round regardless of whether the
         // wait was woken or timed out.
+        // One view for the process's lifetime: the failed-attempt counter
+        // accumulates across rounds until a session launches, and the
+        // screen is re-entered at each round. The terminal geometry comes
+        // from the console stream; a console that cannot report one gets
+        // the classic 80×25 rather than no login at all.
+        let size = rustos_rt::terminal_size(1)
+            .map(|s| Size::new(s.rows(), s.cols()))
+            .unwrap_or(Size::new(25, 80));
+        let screen = Screen::new(RtTty, TermType::Xterm256Color, size);
+        let view = CursesView::new(screen, RtStatusSource, RtConsoleMode);
         supervise(
             load_users_db,
             || {
                 let _ = rustos_rt::users_db_wait(DB_WAIT_TIMEOUT_NS);
             },
-            |authenticator| login_round(elevation.as_ref(), authenticator, &sink),
+            |authenticator| login_round(&view, elevation.as_ref(), authenticator, &sink),
         );
         1
     }
