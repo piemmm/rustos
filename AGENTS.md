@@ -1469,6 +1469,7 @@ Authoritative subdirectories:
 │                #   here *before* the user's PATH, so PATH can never shadow a
 │                #   system command (plans/APPS.md). No new capability guards
 │                #   it: the existing file-access and app-load gates apply.
+│                #   These commands follow GNU coreutils options/output (§16.7).
 ├── Drivers/     # Loadable drivers (rxe modules) shipped with the OS.
 ├── Libraries/   # The OS-provided shared libraries (see §16.4).
 ├── Fonts/       # System fonts.
@@ -1723,6 +1724,58 @@ capability-checked API: the **System Information API** (`sysinfo`).
 Any in-tree code that needs runtime system data uses this API.
 Fabricating a `/proc`-style virtual filesystem, even "just for
 compatibility", is forbidden.
+
+### 16.7 System command apps follow GNU coreutils
+
+The OS-provided command apps in the system app store (§16.2) — `ls`, `cat`,
+`cp`, `mv`, `rm`, `ps`, `top`, and the rest of the familiar command set — are
+written to match **GNU coreutils** (and, for the process/system tools, the
+established `procps`/coreutils command surface) as closely as possible. A user
+or script that knows the GNU tool must find the RustOS tool's options and
+output already familiar; the burden of proof is on any *deviation*, not on the
+compatibility.
+
+- **Options match coreutils.** Each command implements the GNU tool's option
+  names — the short flags, their `--long` equivalents, argument grammar, and
+  `--` end-of-options handling — with the same meaning. Do not rename a flag,
+  drop a widely-used one, or invent a differently-spelled synonym for an
+  existing coreutils option (`-a`/`--all`, `-l`, `-r`/`-R`, `-n`, `-h`,
+  `-i`, `-f`, `-v`, … keep their coreutils meaning). A command's own `Help/`
+  documents (§16.5) and its `-h`/`-?`/`--help` and `--version` surface follow
+  the same convention.
+- **Output matches coreutils.** Default stdout formatting, column layout,
+  ordering, quoting, sizes/units, and stderr diagnostic wording track the GNU
+  tool closely enough that existing scripts parsing the output keep working.
+  Gratuitous cosmetic divergence is a defect.
+- **Where RustOS genuinely differs, it diverges deliberately — and only
+  there.** RustOS is not Linux, so a tool cannot always be byte-identical:
+  it exposes RustOS concepts (the capability set of §5.2, the storage-forest
+  path model of §16.1, `Time64` of §21, the System Information API of §16.6
+  instead of `/proc`) rather than fabricating a Linux-shaped view (§16.6
+  forbids a fake `/proc`). Such a divergence is confined to the concept that
+  actually differs; it never becomes an excuse to reshape an option or output
+  that *could* have matched coreutils.
+- **RustOS-native surfaces are additive, never a reshaping.** The Standard
+  Information Stream (`stdinfo`, fd 3, §20) is a first-class part of every
+  command app: a tool emits the structured advisory records §20.1 defines on
+  fd 3 *in addition to* its coreutils-compatible stdout/stderr, never by
+  altering stdout. `stdinfo` is optional and ignorable and must never change
+  the primary output, exit status, or pipeline semantics a coreutils user
+  expects (§20.1). New RustOS-only flags a tool needs for a RustOS concept are
+  added alongside the coreutils set, spelled so they cannot collide with it.
+- **Security and correctness still win.** Coreutils compatibility never
+  overrides the charter: a command still capability-checks and fails closed
+  (§5.4), never grants ambient authority (§4), and never adds a `setuid`-style
+  escalation (§16.3) merely to reproduce a legacy behaviour. Where a genuine
+  conflict exists between bug-for-bug coreutils fidelity and a RustOS security
+  or correctness rule, the charter wins and the divergence is documented in
+  the tool's `Help/` and its `docs/src/` page (§13); a mere formatting or
+  option-naming difference is not such a conflict.
+
+The concrete per-command option/output specifications live in `plans/APPS.md`;
+this section binds the principle. A system command app whose options or output
+needlessly diverge from its GNU coreutils counterpart is a defect (§23),
+regardless of whether it compiles and its tests pass.
 
 ---
 

@@ -3866,6 +3866,19 @@ of how much code was produced.
 Amendments to `AGENTS.md` (the binding charter) are logged here so an agent
 can see *why* a rule exists without diffing the charter's history.
 
+- **2026-07-05 — System command apps follow GNU coreutils.** Added §16.7
+  (maintainer decision): the OS-provided command apps (`ls`, `cat`, `cp`,
+  `mv`, `rm`, `ps`, `top`, …) match GNU coreutils option names, argument
+  grammar, and default output as closely as possible, so a user or script that
+  knows the GNU tool finds ours familiar — the burden of proof is on any
+  deviation. RustOS-native concepts (capabilities §5.2, the storage forest
+  §16.1, `Time64` §21, the System Information API §16.6 instead of a fabricated
+  `/proc`) diverge deliberately and only where they genuinely differ, and the
+  `stdinfo` stream (§20) is additive on fd 3 — never a reshaping of the
+  coreutils-compatible stdout/stderr. Security and correctness (§5.4, §4)
+  still win over bug-for-bug fidelity. The per-command specifications stay in
+  `plans/APPS.md`; §16.7 binds the principle.
+
 - **2026-07-04 — Services are apps.** Amended §16.2 (maintainer decision,
   `plans/APPS.md` deliverable 8): a long-running system service under
   `/System/Services/` is not a special program class — it ships as the same

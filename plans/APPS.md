@@ -96,6 +96,22 @@ This applies to every present and future command-line program. A new CLI tool
 is added as its own `<Name>.app` bundle (§16.5), never as a loose binary in a
 shared directory.
 
+### 1.1 Command surface follows GNU coreutils (`AGENTS.md` §16.7)
+
+The OS-provided command apps (`ls`, `cat`, `cp`, `mv`, `rm`, `ps`, `top`, …)
+MUST match **GNU coreutils** option names, argument grammar, and default
+output as closely as possible (`AGENTS.md` §16.7): a user or script that knows
+the GNU tool finds ours familiar, and any deviation carries the burden of
+proof. RustOS-native concepts diverge deliberately and only where they
+genuinely differ — capabilities (§5.2) instead of `setuid`, the storage forest
+(§16.1) instead of Unix single-root paths, `Time64` (§21) timestamps, and the
+System Information API (§16.6) instead of a fabricated `/proc`. The `stdinfo`
+stream (§12, `AGENTS.md` §20) is **additive** on fd 3: a tool emits its
+structured advisory records there in addition to its coreutils-compatible
+stdout/stderr, never by reshaping stdout. Security and correctness (§5.4, §4)
+win over bug-for-bug fidelity. The per-command option/output specifications
+this document adds MUST honour §16.7.
+
 ## 2. Bundle layout (per §16.5)
 
 The fixed top-level layout of `AGENTS.md` §16.5 carries one documentation
