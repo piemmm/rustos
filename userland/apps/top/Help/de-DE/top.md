@@ -18,7 +18,10 @@ der Sitzung gesteuert.
 
 - `q` — beenden.
 - `a` — zwischen den eigenen Prozessen und der systemweiten Sicht
-  umschalten.
+  umschalten. Verweigert der Dienst die systemweite Sicht (sie
+  erfordert `CAP_SYSINFO_GLOBAL`), bleibt der Betrachter bei den
+  eigenen Prozessen und die Statuszeile nennt den Grund; die Sitzung
+  läuft weiter.
 - `r` — die Liste auffrischen.
 - Hoch/Runter, BildAuf/BildAb, Pos1/Ende — die Auswahl bewegen.
 - `h`, `?` — die Tastenübersicht ein- oder ausblenden.
@@ -32,7 +35,8 @@ der Sitzung gesteuert.
 ## EXIT STATUS
 
 - `0` — die Sitzung endete mit `q`, oder die Kurzhilfe wurde angezeigt.
-- `1` — der Dienst oder das Terminal versagte.
+- `1` — der Dienst oder das Terminal versagte; der Grund wird auf der
+  Standardfehlerausgabe ausgegeben.
 - `2` — die Befehlszeile wurde nicht verstanden.
 
 ## ENVIRONMENT

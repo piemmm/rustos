@@ -427,6 +427,28 @@ These are absolute. They override any local convenience.
       through discovery, a wake source is missing), that wiring is part of the
       change; if it is genuinely too large, stop and ask (§15.7) and stage it
       (§2.18/§2.19) — never ship the busy-poll "for now".
+24. **Fail loud, degrade gracefully.** A program never ends abnormally in
+    silence, and never dies over a refused *optional* action.
+    - **Every abnormal exit states its reason.** A process that ends for any
+      reason other than clean completion or the user's own request writes a
+      concise, human-readable reason to `stderr` (§20) before exiting — from
+      the failing program itself when it can still fail gracefully, or from
+      the component that observed the failure (the spawner/shell reporting a
+      load refusal or a fatal signal) when it cannot. An exit code alone is
+      not a diagnosis; a silent non-zero exit is a defect. The message never
+      carries secrets or capability tokens (§23.1) and never substitutes for
+      the §19.4 audit log on a security decision.
+    - **A denied optional action is an answer, not a fatal error.** When a
+      capability-gated or otherwise refusable action that is *incidental* to
+      a program's primary purpose is refused (`top`'s system-wide toggle for
+      want of `CAP_SYSINFO_GLOBAL`, an optional query, a settable option the
+      holder may not set), the program reports the refusal — in its own UI
+      for an interactive session, on `stderr` otherwise — and continues with
+      the authority it has. It neither terminates over it nor fabricates or
+      partially applies the refused result: the *action* still fails closed
+      (§5.4); only the *session* survives. A failure that defeats the
+      program's primary purpose is genuinely fatal and ends it with its
+      reason stated as above.
 
 ---
 

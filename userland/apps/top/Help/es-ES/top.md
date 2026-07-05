@@ -19,7 +19,9 @@ la sesión.
 
 - `q` — salir.
 - `a` — alternar entre sus propios procesos y la vista de todo el
-  sistema.
+  sistema. Si el servicio rechaza la vista de todo el sistema (requiere
+  `CAP_SYSINFO_GLOBAL`), el visor permanece en sus propios procesos y
+  la línea de estado indica el motivo; la sesión continúa.
 - `r` — refrescar la lista.
 - Arriba/Abajo, RePág/AvPág, Inicio/Fin — mover la selección.
 - `h`, `?` — mostrar u ocultar el resumen de teclas.
@@ -32,7 +34,8 @@ la sesión.
 ## EXIT STATUS
 
 - `0` — la sesión terminó con `q`, o se mostró la ayuda corta.
-- `1` — el servicio o el terminal falló.
+- `1` — el servicio o el terminal falló; el motivo se imprime en la
+  salida de error estándar.
 - `2` — la línea de comandos no fue comprendida.
 
 ## ENVIRONMENT

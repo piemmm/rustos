@@ -3896,6 +3896,16 @@ of how much code was produced.
 Amendments to `AGENTS.md` (the binding charter) are logged here so an agent
 can see *why* a rule exists without diffing the charter's history.
 
+- **2026-07-05 — Fail loud, degrade gracefully.** Added §2.24 (maintainer
+  decision) after `top` was found exiting silently (code 1, no message) when
+  the `a` key's system-wide view was refused for want of
+  `CAP_SYSINFO_GLOBAL`. Two duties: every abnormal exit states its reason on
+  `stderr` (from the program, or from the spawner/shell when the program
+  cannot), and a refused *optional* action is reported (UI/status line or
+  `stderr`) and survived with the authority the program has — the action
+  fails closed (§5.4), the session does not die over it. Only a failure of
+  the program's primary purpose is fatal, and then with its reason stated.
+
 - **2026-07-05 — System command apps follow GNU coreutils.** Added §16.7
   (maintainer decision): the OS-provided command apps (`ls`, `cat`, `cp`,
   `mv`, `rm`, `ps`, `top`, …) match GNU coreutils option names, argument

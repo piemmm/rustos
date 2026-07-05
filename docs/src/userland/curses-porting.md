@@ -108,7 +108,12 @@ A TUI is still subject to the capability model. `top` reads processes through
 the `sysinfo-v1` API; the system-wide view requires `CAP_SYSINFO_GLOBAL`, and
 the service — not the app — enforces it. A denied query comes back as an
 error the app surfaces honestly (`TopError::PermissionDenied`) rather than a
-partial or fabricated listing (`AGENTS.md` §5.4). Nothing in a curses app
+partial or fabricated listing (`AGENTS.md` §5.4) — and a refusal of an
+*optional* action degrades gracefully rather than killing the session:
+`top`'s `a` key falls back to the caller's own processes and states the
+reason on its status line (`Model::refresh_recovering`), while a genuinely
+fatal failure ends the session with its reason printed to `stderr`, never a
+silent exit. Nothing in a curses app
 writes to fd 3 (`stdinfo` is reserved, §20), and production paths carry no
 `unwrap`/`expect`/`panic!` (`AGENTS.md` §2.9).
 

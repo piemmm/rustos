@@ -55,6 +55,6 @@ mod tests;
 pub use app::{list_capacity, render, run};
 pub use command::{parse, Command, USAGE};
 pub use error::TopError;
-pub use model::{Action, Model, Scope};
+pub use model::{Action, Model, Scope, ALL_DENIED_NOTICE};
 pub use rustos_curses::{Screen, Tty};
 pub use rustos_procinfo::Transport;

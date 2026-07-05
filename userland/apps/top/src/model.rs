@@ -56,6 +56,10 @@ pub enum Action {
     Quit,
 }
 
+/// The one-line notice shown when the system-wide view was refused and the
+/// viewer fell back to the caller's own processes.
+pub const ALL_DENIED_NOTICE: &str = "all view denied: capability not held";
+
 /// The live `top` view state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Model {
@@ -65,6 +69,7 @@ pub struct Model {
     top: usize,
     viewport: usize,
     show_help: bool,
+    notice: Option<&'static str>,
 }
 
 impl Model {
@@ -79,6 +84,7 @@ impl Model {
             top: 0,
             viewport: 1,
             show_help: false,
+            notice: None,
         }
     }
 
@@ -100,6 +106,37 @@ impl Model {
         self.processes = next;
         self.clamp_selection();
         Ok(())
+    }
+
+    /// Re-query like [`Model::refresh`], but treat a *refused system-wide
+    /// view* as the non-fatal answer it is: fall back to the caller's own
+    /// processes, requery, and post [`ALL_DENIED_NOTICE`] on the status
+    /// line so the user learns why the scope did not change — the viewer
+    /// keeps running. Every other failure (and a refusal of the caller's
+    /// *own* listing, which no capability gates) stays fatal and
+    /// propagates.
+    ///
+    /// # Errors
+    ///
+    /// As [`Model::refresh`], except [`TopError::PermissionDenied`] for the
+    /// system-wide scope, which is absorbed into the fallback.
+    pub fn refresh_recovering(&mut self, transport: &dyn Transport) -> Result<(), TopError> {
+        match self.refresh(transport) {
+            Err(TopError::PermissionDenied) if self.scope.is_all() => {
+                self.scope = Scope::Own;
+                self.refresh(transport)?;
+                self.notice = Some(ALL_DENIED_NOTICE);
+                Ok(())
+            }
+            outcome => outcome,
+        }
+    }
+
+    /// The status-line notice posted by the last recovered refusal, if any.
+    /// Cleared by the next handled key.
+    #[must_use]
+    pub const fn notice(&self) -> Option<&'static str> {
+        self.notice
     }
 
     /// The processes currently held.
@@ -144,7 +181,11 @@ impl Model {
     }
 
     /// Handle one decoded input [`Event`] and report what the loop should do.
+    ///
+    /// Any handled key clears the status-line notice: a notice describes the
+    /// previous action's outcome, and the next action supersedes it.
     pub fn handle_event(&mut self, event: &Event) -> Action {
+        self.notice = None;
         match event {
             Event::Char('q' | 'Q') => Action::Quit,
             Event::Up => self.move_selection(-1),

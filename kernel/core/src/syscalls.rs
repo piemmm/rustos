@@ -2340,13 +2340,13 @@ where
         // point — fails closed with `NotFound`; there is no prefix or alias
         // resolution.
         let program = self.programs.lookup(&path_buf);
-        let bundle = match program {
-            Some(_) => None,
-            None => Some(crate::appspawn::bundle_run_path(&path_buf).ok_or(Errno::NotFound)?),
-        };
-        let loaded = match &bundle {
-            Some(parsed) => Some(self.load_store_bundle(caller, parsed)?),
-            None => None,
+        let bundle = crate::appspawn::bundle_run_path(&path_buf);
+        if program.is_none() && bundle.is_none() {
+            return Err(Errno::NotFound);
+        }
+        let loaded = match (&program, &bundle) {
+            (None, Some(parsed)) => Some(self.load_store_bundle(caller, parsed)?),
+            _ => None,
         };
 
         // The child's effective startup strings: a present block carries
@@ -2413,12 +2413,18 @@ where
             // single CSPRNG reserve, attested kernel-side and never
             // influenced by the spawning caller.
             crate::proc_id::mint_proc_id(self.rng),
-            // Attest the child's name from the resolved program path's final
-            // component — a kernel-resolved value (the registry lookup above
-            // matched it), never trusted from the caller as a name.
-            ProcName::from_bytes_truncating(
-                path_buf.rsplit(|&b| b == b'/').next().unwrap_or(&path_buf),
-            ),
+            // Attest the child's name from the kernel-resolved program path:
+            // the command stem for a `<Name>.app/Run` bundle entry point (so
+            // a process listing names the app — `ps` — never the generic
+            // `Run` leaf every bundle shares), otherwise the path's final
+            // component. Both are kernel-resolved values, never trusted from
+            // the caller as a name.
+            match &bundle {
+                Some(parsed) => ProcName::from_bytes_truncating(parsed.command.as_bytes()),
+                None => ProcName::from_bytes_truncating(
+                    path_buf.rsplit(|&b| b == b'/').next().unwrap_or(&path_buf),
+                ),
+            },
             // The child's kernel-attested credential, resolved above
             // (inherit the caller's own, or a capability-gated switch to a
             // target user) — never a caller-supplied value.
@@ -8392,6 +8398,16 @@ mod tests {
             table.read().caps_for(SecTaskId(pid)).is_some(),
             "child caps registered under its pid"
         );
+        // A registry program at a bundle-shaped path is attested by the
+        // bundle's command stem, never the shared `Run` leaf.
+        assert_eq!(
+            table
+                .read()
+                .caps_for(SecTaskId(pid))
+                .expect("child record")
+                .name(),
+            "Child"
+        );
         assert!(
             aspaces.read().contains(SecTaskId(pid)),
             "child address space registered under its pid"
@@ -8594,10 +8610,13 @@ mod tests {
         // name.
         assert_eq!(producer.rxe.lock().as_slice(), run.as_slice());
         assert_eq!(producer.args.lock().as_slice(), &[b"ps".to_vec()]);
-        assert!(
-            table.read().caps_for(SecTaskId(pid)).is_some(),
-            "child caps registered under its pid"
-        );
+        let guard = table.read();
+        let record = guard
+            .caps_for(SecTaskId(pid))
+            .expect("child caps registered under its pid");
+        // The attested name is the bundle's command stem, never the `Run`
+        // leaf every bundle shares — a process listing must name the app.
+        assert_eq!(record.name(), "ps");
     }
 
     /// A [`FilesystemService`] over the shared [`MemFs`] fixture that

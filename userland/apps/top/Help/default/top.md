@@ -18,6 +18,9 @@ the session.
 
 - `q` — quit.
 - `a` — toggle between your own processes and the system-wide view.
+  If the service refuses the system-wide view (it requires
+  `CAP_SYSINFO_GLOBAL`), the viewer stays on your own processes and the
+  status line says why; the session keeps running.
 - `r` — refresh the listing.
 - Up/Down, PageUp/PageDown, Home/End — move the selection.
 - `h`, `?` — toggle the in-session key overlay.
@@ -30,7 +33,8 @@ the session.
 ## EXIT STATUS
 
 - `0` — the session ended with `q`, or the short help was shown.
-- `1` — the service or the terminal failed.
+- `1` — the service or the terminal failed; the reason is printed on
+  standard error.
 - `2` — the command line was not understood.
 
 ## ENVIRONMENT

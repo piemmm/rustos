@@ -127,7 +127,12 @@ fn drive<T: Transport, Y: Tty>(
         };
         match model.handle_event(&event) {
             Action::Quit => return Ok(()),
-            Action::Refresh => model.refresh(transport)?,
+            // The recovering refresh absorbs a refused system-wide view
+            // (falling back to the caller's own processes with a status
+            // notice) — a capability the user does not hold must never
+            // kill the whole session; only a real service or terminal
+            // failure may end it.
+            Action::Refresh => model.refresh_recovering(transport)?,
             Action::Redraw | Action::Ignore => {}
         }
     }
@@ -136,13 +141,18 @@ fn drive<T: Transport, Y: Tty>(
 /// The footer key hints.
 const FOOTER_HINT: &str = " q quit  a all/own  r refresh  up/down scroll  ? help ";
 
-/// The status line: the process count and the active scope.
+/// The status line: the process count, the active scope, and — when a
+/// refused action was recovered from — the reason it did not take effect.
 fn title_line(model: &Model) -> String {
     let mut line = String::from("RustOS top — ");
     push_usize(&mut line, model.processes().len());
     line.push_str(" processes [");
     line.push_str(model.scope().label());
     line.push(']');
+    if let Some(notice) = model.notice() {
+        line.push_str(" — ");
+        line.push_str(notice);
+    }
     line
 }
 

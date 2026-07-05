@@ -17,7 +17,10 @@ Le visualiseur ne prend aucun opérande : il se pilote avec des touches
 pressées dans la session.
 
 - `q` — quitter.
-- `a` — basculer entre vos propres processus et la vue système.
+- `a` — basculer entre vos propres processus et la vue système. Si le
+  service refuse la vue système (elle exige `CAP_SYSINFO_GLOBAL`), le
+  visualiseur reste sur vos propres processus et la ligne d'état en
+  indique la raison ; la session continue.
 - `r` — rafraîchir la liste.
 - Haut/Bas, PageHaut/PageBas, Début/Fin — déplacer la sélection.
 - `h`, `?` — afficher ou masquer l'aide-mémoire des touches.
@@ -32,7 +35,8 @@ pressées dans la session.
 
 - `0` — la session s'est terminée par `q`, ou l'aide courte a été
   affichée.
-- `1` — le service ou le terminal a échoué.
+- `1` — le service ou le terminal a échoué ; la raison est imprimée
+  sur la sortie d'erreur standard.
 - `2` — la ligne de commande n'a pas été comprise.
 
 ## ENVIRONMENT

@@ -177,6 +177,16 @@ mod program {
 
         let _ = rustos_rt::set_input_mode(InputMode::Cooked);
 
+        // A session that ends for any reason other than the user quitting
+        // states that reason on stderr — after the terminal is restored, so
+        // the message is not torn down with the alternate screen. A silent
+        // abnormal exit tells the user nothing.
+        if let Err(err) = &result {
+            write_stderr_line(&alloc::format!("top: {err}"));
+        } else if entered.is_err() || left.is_err() {
+            write_stderr_line("top: terminal error: the screen could not be switched");
+        }
+
         match (result, entered, left) {
             (Ok(()), Ok(()), Ok(())) => 0,
             _ => 1,

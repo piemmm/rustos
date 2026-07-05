@@ -16,7 +16,7 @@ use rustos_termcap::TermType;
 
 use crate::app::{list_capacity, render, run};
 use crate::error::TopError;
-use crate::model::{Action, Model, Scope};
+use crate::model::{Action, Model, Scope, ALL_DENIED_NOTICE};
 
 // ---- Fixtures --------------------------------------------------------------
 
@@ -233,6 +233,57 @@ fn a_denied_global_refresh_reports_permission_denied() {
     assert_eq!(model.refresh(&service), Err(TopError::PermissionDenied));
 }
 
+#[test]
+fn a_recovering_refresh_falls_back_to_own_and_posts_the_notice() {
+    let mut service = FakeService::new(records(2));
+    service.deny_global = true;
+    let mut model = Model::new(Scope::Own);
+    model.refresh(&service).expect("own view is ungated");
+    // 'a' asks for the system-wide view; the service refuses it, so the
+    // recovering refresh reverts to the caller's own processes and says why
+    // instead of failing the session.
+    assert_eq!(model.handle_event(&Event::Char('a')), Action::Refresh);
+    assert_eq!(model.refresh_recovering(&service), Ok(()));
+    assert_eq!(model.scope(), Scope::Own);
+    assert_eq!(model.notice(), Some(ALL_DENIED_NOTICE));
+    assert_eq!(model.processes().len(), 2);
+    // Both queries reached the service: the refused global one, then the
+    // own-scope fallback.
+    assert!(service
+        .seen
+        .borrow()
+        .contains(&SysinfoQueryId::GLOBAL_PROCESS_LIST));
+}
+
+#[test]
+fn the_next_key_clears_the_notice() {
+    let mut service = FakeService::new(records(2));
+    service.deny_global = true;
+    let mut model = Model::new(Scope::All);
+    model.refresh_recovering(&service).expect("recovers");
+    assert_eq!(model.notice(), Some(ALL_DENIED_NOTICE));
+    model.handle_event(&Event::Down);
+    assert_eq!(model.notice(), None);
+}
+
+#[test]
+fn a_recovering_refresh_propagates_a_service_failure() {
+    // Only the *capability refusal of the global view* is recoverable; a
+    // transport failure is a real error and must end the session.
+    struct FailingService;
+    impl Transport for FailingService {
+        fn query(&self, _request: &[u8]) -> Result<Vec<u8>, Errno> {
+            Err(Errno::NotFound)
+        }
+    }
+    let mut model = Model::new(Scope::All);
+    assert_eq!(
+        model.refresh_recovering(&FailingService),
+        Err(TopError::Service(Errno::NotFound))
+    );
+    assert_eq!(model.notice(), None);
+}
+
 // ---- Rendering -------------------------------------------------------------
 
 #[test]
@@ -334,19 +385,28 @@ fn run_returns_when_input_is_exhausted() {
 }
 
 #[test]
-fn run_toggling_to_a_denied_global_view_surfaces_the_error() {
+fn run_toggling_to_a_denied_global_view_recovers_and_shows_why() {
     let mut service = FakeService::new(records(2));
     service.deny_global = true;
     let mut model = Model::new(Scope::Own);
     // 'a' toggles to the system-wide scope and triggers a refresh, which the
-    // service denies.
+    // service denies. That is not fatal: the viewer falls back to the own
+    // view, keeps running (here until input is exhausted), and the redraw
+    // carries the reason on the status line (an 80-column screen fits the
+    // whole title; a narrower one truncates it like any other line).
     let mut screen = Screen::new(
         FakeTty::with_input(b"a"),
         TermType::Xterm256Color,
-        Size::new(10, 60),
+        Size::new(10, 80),
     );
-    assert_eq!(
-        run(&mut model, &service, &mut screen),
-        Err(TopError::PermissionDenied)
-    );
+    assert_eq!(run(&mut model, &service, &mut screen), Ok(()));
+    assert_eq!(model.scope(), Scope::Own);
+    assert_eq!(model.notice(), Some(ALL_DENIED_NOTICE));
+    // The diff renderer skips cells unchanged since the previous frame (the
+    // spaces between words), so only the notice's contiguous non-space runs
+    // are guaranteed to appear verbatim in the byte stream.
+    let out = screen.into_tty().output;
+    assert!(contains(&out, b"denied:"));
+    assert!(contains(&out, b"capability"));
+    assert!(contains(&out, b"held"));
 }
