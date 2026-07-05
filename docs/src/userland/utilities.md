@@ -104,14 +104,27 @@ and is not built yet, so `sysinfo hardware` honestly reports the byte
 length the service returned rather than pretending to decode it
 (`AGENTS.md` §2.1).
 
+### Advisory output (`stdinfo`, fd 3)
+
+Like `ps`, the default self-scoped `sysinfo processes` listing emits the
+`proc.self_scope_only` omission record (`AGENTS.md` §20.1) on the
+standard information stream, suggesting `sysinfo processes --all` as the
+widening spelling. The record is the one shared `lib/procinfo` definition
+(`emit_self_scope_omission`) both tools emit; it is advisory only —
+emitted best-effort after the rows, never affecting output, ordering, or
+exit status — and nothing is emitted under `--all`, whose listing is
+exhaustive, or when the walk fails.
+
 ### Tests
 
 `cargo test -p rustos-sysinfo` drives the parser and the request/render
 engine against an in-memory `sysinfod` stand-in and a recording output:
 the command grammar (every subcommand, alias, and the usage-error
 paths), every query's rendering, process-list paging across a page
-boundary, self-vs-global query routing, and the denied, malformed,
-truncated, and dead-console fail-closed paths.
+boundary, self-vs-global query routing, the self-scope advisory record
+(present on the default listing, absent under `--all` and on a failed
+walk), and the denied, malformed, truncated, and dead-console
+fail-closed paths.
 
 ## `ps` — list processes (`userland/apps/ps`)
 
@@ -150,12 +163,14 @@ to the built-in usage banner when the tree is unavailable.
 
 `ps` and `sysinfo` read the same process list, so the request seams
 (`Transport`/`Output`), the request framing and capability-aware `call`,
-the `offset`/`limit` page walk, and the fixed-column row rendering
-(`PID PPID UID GID S CPU NAME`, with a single-letter state code) live
-once in the `lib/procinfo` crate rather than being copied (`AGENTS.md`
-§2.2). Because sibling userland crates may not depend on one another
-(`AGENTS.md` §17.4), that shared piece is a `lib/*` crate. `ps` supplies
-only its own argument grammar, usage banner, and `PsError`.
+the `offset`/`limit` page walk, the fixed-column row rendering
+(`PID PPID UID GID S CPU NAME`, with a single-letter state code), and
+the `proc.self_scope_only` advisory emitter
+(`emit_self_scope_omission`) live once in the `lib/procinfo` crate
+rather than being copied (`AGENTS.md` §2.2). Because sibling userland
+crates may not depend on one another (`AGENTS.md` §17.4), that shared
+piece is a `lib/*` crate. `ps` supplies only its own argument grammar,
+usage banner, widening spelling (`ps -e`), and `PsError`.
 
 ### A renderer, not a policy point
 
@@ -186,9 +201,12 @@ The default self-scope listing emits the `proc.self_scope_only` omission
 record (`AGENTS.md` §20.1) on the standard information stream: a terse
 human note ("Only your own processes are shown." with the `ps -e`
 suggestion) plus structured data for tools (`stdout_is_exhaustive`,
-the widening `argv`). It is advisory only — emitted best-effort after
-the rows, never affecting output, ordering, or exit status — and nothing
-is emitted under `-e`/`-A`/`--all`, whose listing is exhaustive.
+the widening `argv`). The record is the one shared `lib/procinfo`
+definition (`emit_self_scope_omission`) that `sysinfo processes` also
+emits, parametrised only by each tool's own widening spelling. It is
+advisory only — emitted best-effort after the rows, never affecting
+output, ordering, or exit status — and nothing is emitted under
+`-e`/`-A`/`--all`, whose listing is exhaustive.
 
 ### Tests
 

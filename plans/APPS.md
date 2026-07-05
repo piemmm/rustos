@@ -65,7 +65,9 @@ on the aarch64 production boot the `spawn` syscall loads and verifies
 the on-disk store bundles through the shared `rustos_appload` gate (no
 kernel-baked rxe rows remain there). Remaining: deliverable 7 (wider
 `stdinfo` adoption — `man`'s locale-fallback, `ls`'s hidden-entries
-omission, and `ps`'s self-scope omission records are live), `Help/`
+omission, and the shared self-scope omission record `ps` and `sysinfo
+processes` both emit are live; the other registered commands have
+nothing non-obvious to add today), `Help/`
 trees for future command apps as each becomes a registered bundle, and
 deliverable 8 increment 5 (the x86_64/riscv64 storage floor, then
 deletion of the embedded registry those ports still carry as their
@@ -611,11 +613,20 @@ both landed; `plans/SHELL.md` command execution):
    `StdInfoRecord` (via the `lib/rt` wrapper) wherever a command omits,
    summarises, or adds non-obvious context to `stdout`. Live: `man`'s
    locale-fallback record (§7), `ls`'s `fs.hidden_entries_omitted`
-   omission record (the `AGENTS.md` §20.1 canonical example), and `ps`'s
-   `proc.self_scope_only` omission record (the default listing notes
-   that stdout carries only the caller's own processes and suggests
-   `ps -e`, over the shared `rustos_procinfo::Output::info` fd 3 seam);
-   advisory-only, never changing exit status.
+   omission record (the `AGENTS.md` §20.1 canonical example), and the
+   `proc.self_scope_only` omission record both `ps` and
+   `sysinfo processes` emit on their default self-scoped listing (one
+   shared definition, `rustos_procinfo::emit_self_scope_omission`,
+   parametrised only by each tool's widening spelling — `ps -e` /
+   `sysinfo processes --all` — over the shared
+   `rustos_procinfo::Output::info` fd 3 seam, fail-closed on an argv
+   token that would break the record's JSON); advisory-only, never
+   changing exit status. The remaining registered commands were surveyed
+   and have nothing non-obvious to add today: `cat` and `users` omit
+   nothing from stdout, and a per-refresh record from full-screen `top`
+   would be the progress spam §20.1 forbids. A future command adds its
+   record in the change that creates the omission/summary, through a
+   shared definition when two tools share the behaviour.
 
 8. **Self-contained on-disk bundles — retire the kernel-baked spawn
    registry (§16.5 self-containment and §16.2 services-are-apps

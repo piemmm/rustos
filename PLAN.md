@@ -3589,8 +3589,12 @@ and per-command coverage over the `AppInfo.toml` discovery walk.
 
 **Remaining** (staged in `plans/APPS.md` §13): `Help/` trees for future
 command apps as each becomes a registered store bundle; and wider `stdinfo`
-adoption in command apps
-(advisory-only, §20). A cross-app *shared-library* bundle stays declined —
+adoption in command apps as future behaviour warrants it (advisory-only,
+§20 — the live records are `man`'s locale-fallback, `ls`'s hidden-entries
+omission, and the shared `proc.self_scope_only` omission `ps` and
+`sysinfo processes` both emit via `rustos_procinfo::emit_self_scope_omission`;
+the other registered commands have nothing non-obvious to add today).
+A cross-app *shared-library* bundle stays declined —
 §16.4 refuses cross-bundle library references — so a resource-only bundle may
 share **data**, not dynamically-linked code.
 

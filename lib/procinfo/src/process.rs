@@ -8,12 +8,13 @@
 use alloc::format;
 use alloc::string::String;
 
+use rustos_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
 use rustos_abi::sysinfo::{ProcessListRequest, ProcessRecord, ProcessState, SysinfoQueryId};
 use rustos_abi::Errno;
 
 use crate::list::{field_lossy, walk_pages, ListError};
 use crate::request::CallError;
-use crate::transport::Transport;
+use crate::transport::{Output, Transport};
 
 /// Number of [`ProcessRecord`]s requested per process-list page.
 ///
@@ -106,12 +107,85 @@ pub fn state_char(state: ProcessState) -> char {
     }
 }
 
+/// Byte budget for one serialised `proc.self_scope_only` JSONL line.
+///
+/// Sized with generous headroom over the longest line either consumer
+/// produces (measured under 500 bytes for `sysinfo processes --all`), so a
+/// wording tweak can never silently start dropping the record; the unit
+/// tests pin that both consumers' parameterisations serialise within it.
+const SELF_SCOPE_RECORD_BYTES: usize = 1024;
+
+/// Emit the `proc.self_scope_only` advisory (fd 3) for a default,
+/// self-scoped process listing: stdout carried only the caller's own
+/// processes, and `widen` is the exact command line that requests the
+/// system-wide view instead (a widening `sysinfod` still gates on
+/// `CAP_SYSINFO_GLOBAL`).
+///
+/// Both `ps` and `sysinfo processes` render the same self-scoped listing by
+/// default, so the advisory announcing it is this one definition,
+/// parametrised only by the emitting `producer` word and its widening
+/// `widen` argv — never re-derived per tool.
+///
+/// Advisory by contract: emitted best-effort through [`Output::info`], never
+/// affecting the rendered rows, their order, or the exit status. The `ai`
+/// payload is embedded verbatim JSON, so the emitter fails closed — emitting
+/// nothing — on an empty `widen` or a `widen` token that would need JSON
+/// escaping (a quote, backslash, or control byte; no real command word does),
+/// rather than ever writing a malformed line.
+pub fn emit_self_scope_omission(out: &dyn Output, producer: &str, widen: &[&str]) {
+    if widen.is_empty() {
+        return;
+    }
+    let mut argv_json = String::new();
+    let mut command = String::new();
+    for (index, word) in widen.iter().enumerate() {
+        if word
+            .bytes()
+            .any(|byte| byte < 0x20 || byte == b'"' || byte == b'\\')
+        {
+            return;
+        }
+        if index > 0 {
+            argv_json.push(',');
+            command.push(' ');
+        }
+        argv_json.push('"');
+        argv_json.push_str(word);
+        argv_json.push('"');
+        command.push_str(word);
+    }
+    let suggestion = format!("Use `{command}` to list every process.");
+    let ai = format!(
+        "{{\"subject\":\"process_listing\",\
+         \"omission\":{{\"reason\":\"self_scope_default\",\
+         \"entry_class\":\"other_processes\",\
+         \"stdout_is_exhaustive\":false}},\
+         \"suggestion\":{{\"argv\":[{argv_json}],\
+         \"safe_to_autorun\":false,\"requires_confirmation\":true}}}}"
+    );
+    let record = StdInfoRecord::new(
+        producer,
+        StdInfoKind::Omission,
+        "proc.self_scope_only",
+        Severity::Info,
+        Human::with_suggestion("Only your own processes are shown.", &suggestion),
+    )
+    .with_ai(&ai);
+    let mut buf = [0u8; SELF_SCOPE_RECORD_BYTES];
+    if let Ok(len) = record.write_jsonl(&mut buf) {
+        out.info(&buf[..len]);
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{for_each_process, render_process, state_char, PROCESS_HEADER, PROCESS_PAGE};
+    use super::{
+        emit_self_scope_omission, for_each_process, render_process, state_char, PROCESS_HEADER,
+        PROCESS_PAGE,
+    };
     use crate::list::ListError;
     use crate::request::CallError;
-    use crate::transport::Transport;
+    use crate::transport::{Output, Transport};
     use alloc::vec::Vec;
     use core::cell::RefCell;
     use rustos_abi::sysinfo::{
@@ -294,5 +368,78 @@ mod tests {
         let r = render_process(&record(1, &[0xFF, 0xFE], ProcessState::Running));
         // Lossy decoding never panics and yields a replacement char.
         assert!(r.contains('\u{FFFD}'));
+    }
+
+    /// An `Output` fixture that captures every advisory record verbatim.
+    struct InfoSink {
+        records: RefCell<Vec<alloc::string::String>>,
+    }
+
+    impl InfoSink {
+        fn new() -> Self {
+            Self {
+                records: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn only(&self) -> alloc::string::String {
+            let records = self.records.borrow();
+            assert_eq!(records.len(), 1, "exactly one advisory record");
+            records[0].clone()
+        }
+    }
+
+    impl Output for InfoSink {
+        fn write_line(&self, _line: &str) -> Result<(), Errno> {
+            Ok(())
+        }
+
+        fn info(&self, record: &[u8]) {
+            let text = core::str::from_utf8(record).expect("JSONL is UTF-8");
+            self.records.borrow_mut().push(text.into());
+        }
+    }
+
+    #[test]
+    fn self_scope_omission_carries_the_ps_parameterisation() {
+        let sink = InfoSink::new();
+        emit_self_scope_omission(&sink, "ps", &["ps", "-e"]);
+        let record = sink.only();
+        assert!(record.ends_with('\n'));
+        assert!(record.contains("\"producer\":\"ps\""));
+        assert!(record.contains("\"kind\":\"omission\""));
+        assert!(record.contains("\"code\":\"proc.self_scope_only\""));
+        assert!(record.contains("\"severity\":\"info\""));
+        assert!(record.contains("Only your own processes are shown."));
+        assert!(record.contains("Use `ps -e` to list every process."));
+        assert!(record.contains("\"argv\":[\"ps\",\"-e\"]"));
+        assert!(record.contains("\"stdout_is_exhaustive\":false"));
+        assert!(record.contains("\"safe_to_autorun\":false"));
+    }
+
+    #[test]
+    fn self_scope_omission_carries_the_sysinfo_parameterisation() {
+        let sink = InfoSink::new();
+        emit_self_scope_omission(&sink, "sysinfo", &["sysinfo", "processes", "--all"]);
+        let record = sink.only();
+        assert!(record.contains("\"producer\":\"sysinfo\""));
+        assert!(record.contains("Use `sysinfo processes --all` to list every process."));
+        assert!(record.contains("\"argv\":[\"sysinfo\",\"processes\",\"--all\"]"));
+    }
+
+    #[test]
+    fn self_scope_omission_fails_closed_on_an_unescapable_widen_token() {
+        for hostile in ["quote\"quote", "back\\slash", "ctl\u{1}"] {
+            let sink = InfoSink::new();
+            emit_self_scope_omission(&sink, "ps", &["ps", hostile]);
+            assert!(sink.records.borrow().is_empty(), "no malformed record");
+        }
+    }
+
+    #[test]
+    fn self_scope_omission_fails_closed_on_an_empty_widen_argv() {
+        let sink = InfoSink::new();
+        emit_self_scope_omission(&sink, "ps", &[]);
+        assert!(sink.records.borrow().is_empty());
     }
 }

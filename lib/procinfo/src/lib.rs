@@ -86,7 +86,10 @@ pub mod transport;
 pub use client::{IpcTransport, RtOutput};
 pub use list::ListError;
 pub use mount::{for_each_mount, render_mount, render_options, MOUNT_PAGE};
-pub use process::{for_each_process, render_process, state_char, PROCESS_HEADER, PROCESS_PAGE};
+pub use process::{
+    emit_self_scope_omission, for_each_process, render_process, state_char, PROCESS_HEADER,
+    PROCESS_PAGE,
+};
 pub use request::{call, encode_request, CallError};
 pub use resinfo::{
     render_limit_bound, Authorization, InfoValue, Metric, MetricKind, Producer, ResetBehavior,

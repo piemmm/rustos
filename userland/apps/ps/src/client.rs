@@ -2,9 +2,10 @@
 //! process-list query, page through the reply, and render one row per
 //! process.
 
-use rustos_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
 use rustos_help::{own_short_help, HelpSource};
-use rustos_procinfo::{for_each_process, render_process, Output, Transport, PROCESS_HEADER};
+use rustos_procinfo::{
+    emit_self_scope_omission, for_each_process, render_process, Output, Transport, PROCESS_HEADER,
+};
 
 use crate::command::Command;
 use crate::error::PsError;
@@ -84,37 +85,12 @@ fn run_list(all: bool, transport: &dyn Transport, out: &dyn Output) -> Result<()
     })
     .map_err(PsError::from)?;
     if !all {
-        emit_scope_record(out);
+        // The default self scope announces its omission on the advisory
+        // stream through the one shared record definition `sysinfo
+        // processes` also emits; `-e` is this tool's widening spelling.
+        emit_self_scope_omission(out, OWN_WORD, &[OWN_WORD, "-e"]);
     }
     Ok(())
-}
-
-/// Emit the `proc.self_scope_only` advisory (fd 3) for the default listing:
-/// stdout carried only the caller's own processes, and `-e` widens the scope
-/// (a widening `sysinfod` still gates on `CAP_SYSINFO_GLOBAL`). Advisory
-/// only — never affects the rows, the ordering, or the exit status.
-fn emit_scope_record(out: &dyn Output) {
-    const AI: &str = "{\"subject\":\"process_listing\",\
-         \"omission\":{\"reason\":\"self_scope_default\",\
-         \"entry_class\":\"other_processes\",\
-         \"stdout_is_exhaustive\":false},\
-         \"suggestion\":{\"argv\":[\"ps\",\"-e\"],\
-         \"safe_to_autorun\":false,\"requires_confirmation\":true}}";
-    let record = StdInfoRecord::new(
-        OWN_WORD,
-        StdInfoKind::Omission,
-        "proc.self_scope_only",
-        Severity::Info,
-        Human::with_suggestion(
-            "Only your own processes are shown.",
-            "Use `ps -e` to list every process.",
-        ),
-    )
-    .with_ai(AI);
-    let mut buf = [0u8; 512];
-    if let Ok(len) = record.write_jsonl(&mut buf) {
-        out.info(&buf[..len]);
-    }
 }
 
 #[cfg(test)]

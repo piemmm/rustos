@@ -13,7 +13,8 @@ use rustos_abi::{Errno, LimitKind};
 
 use rustos_help::{own_short_help, HelpSource};
 use rustos_procinfo::{
-    call, for_each_process, render_limit_bound, render_process, Output, Transport, PROCESS_HEADER,
+    call, emit_self_scope_omission, for_each_process, render_limit_bound, render_process, Output,
+    Transport, PROCESS_HEADER,
 };
 
 use crate::command::Command;
@@ -102,11 +103,15 @@ fn emit(out: &dyn Output, line: &str) -> Result<(), SysinfoError> {
     out.write_line(line).map_err(SysinfoError::Output)
 }
 
-/// Page through the process list and render one row per process.
+/// Page through the process list and render one row per process. The
+/// default self scope also notes on the advisory stream (fd 3) that the
+/// listing is not system-wide, so a tool or user knows stdout is not
+/// exhaustive.
 ///
-/// The page walk and row rendering are the shared helpers from
-/// `lib/procinfo`; the CLI only supplies the column header and the per-row
-/// sink.
+/// The page walk, the row rendering, and the self-scope advisory are the
+/// shared helpers from `lib/procinfo` (the same record definition `ps`
+/// emits); the CLI only supplies the column header, the per-row sink, and
+/// its own widening spelling.
 fn run_processes(
     all: bool,
     transport: &dyn Transport,
@@ -116,7 +121,11 @@ fn run_processes(
     for_each_process(transport, all, |record| {
         out.write_line(&render_process(record))
     })
-    .map_err(SysinfoError::from)
+    .map_err(SysinfoError::from)?;
+    if !all {
+        emit_self_scope_omission(out, OWN_WORD, &[OWN_WORD, "processes", "--all"]);
+    }
+    Ok(())
 }
 
 /// Fetch and render the kernel memory statistics.
@@ -393,6 +402,7 @@ mod tests {
     /// Captures rendered lines; optionally fails on the Nth write.
     struct Recorder {
         lines: RefCell<Vec<String>>,
+        infos: RefCell<Vec<String>>,
         fail_at: Option<usize>,
     }
 
@@ -400,6 +410,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 lines: RefCell::new(Vec::new()),
+                infos: RefCell::new(Vec::new()),
                 fail_at: None,
             }
         }
@@ -407,12 +418,17 @@ mod tests {
         fn failing_at(index: usize) -> Self {
             Self {
                 lines: RefCell::new(Vec::new()),
+                infos: RefCell::new(Vec::new()),
                 fail_at: Some(index),
             }
         }
 
         fn lines(&self) -> Vec<String> {
             self.lines.borrow().clone()
+        }
+
+        fn infos(&self) -> Vec<String> {
+            self.infos.borrow().clone()
         }
     }
 
@@ -424,6 +440,11 @@ mod tests {
             }
             lines.push(line.to_string());
             Ok(())
+        }
+
+        fn info(&self, record: &[u8]) {
+            let text = core::str::from_utf8(record).expect("JSONL is UTF-8");
+            self.infos.borrow_mut().push(text.to_string());
         }
     }
 
@@ -489,6 +510,15 @@ mod tests {
             fixture.seen.borrow().as_slice(),
             &[SysinfoQueryId::SELF_PROCESS_LIST]
         );
+        // The default self scope announces its omission on the advisory
+        // stream (fd 3) through the shared record definition, suggesting
+        // this tool's own widening spelling; stdout is untouched.
+        let infos = out.infos();
+        assert_eq!(infos.len(), 1);
+        assert!(infos[0].contains("\"producer\":\"sysinfo\""));
+        assert!(infos[0].contains("\"kind\":\"omission\""));
+        assert!(infos[0].contains("proc.self_scope_only"));
+        assert!(infos[0].contains("\"argv\":[\"sysinfo\",\"processes\",\"--all\"]"));
     }
 
     #[test]
@@ -503,6 +533,8 @@ mod tests {
             fixture.seen.borrow().as_slice(),
             &[SysinfoQueryId::GLOBAL_PROCESS_LIST]
         );
+        // The global view omits nothing, so no advisory record is emitted.
+        assert!(out.infos().is_empty());
     }
 
     #[test]
@@ -545,6 +577,8 @@ mod tests {
             run(Command::Processes { all: false }, &fixture, &out),
             Err(SysinfoError::Service(Errno::BadMagic))
         );
+        // A failed walk renders no listing, so it announces no omission.
+        assert!(out.infos().is_empty());
     }
 
     #[test]
