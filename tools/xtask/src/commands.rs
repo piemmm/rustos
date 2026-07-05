@@ -171,7 +171,7 @@ impl Command {
                 "Generate/verify the C ABI development header (`--write` to regenerate)."
             }
             Command::FontAtlas => {
-                "Generate/verify the Inconsolata glyph atlas (`--write` to regenerate)."
+                "Generate/verify the Inconsolata EX glyph atlas (`--write` to regenerate)."
             }
             Command::DepsCheck => "Enforce the §17.4 modularity dependency graph.",
             Command::CfgCheck => "Reject target-conditional compilation outside the arch ports.",
@@ -772,7 +772,7 @@ fn run_c_header(ctx: &Context, args: &[OsString]) -> Result<(), String> {
 }
 
 fn run_font_atlas(ctx: &Context, args: &[OsString]) -> Result<(), String> {
-    // The glyph atlas is a generated view of the committed Inconsolata face.
+    // The glyph atlas is a generated view of the committed Inconsolata EX face.
     // With no arguments this verifies the committed atlas is in sync (the
     // `ci` drift guard); `--write` regenerates it, reviewed by diff like the
     // generated C header.

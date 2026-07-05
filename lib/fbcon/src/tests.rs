@@ -167,7 +167,7 @@ fn a_covered_unicode_scalar_renders_its_own_glyph() {
 
 #[test]
 fn an_uncovered_scalar_renders_the_replacement_glyph() {
-    // Inconsolata has no CJK: the scalar renders U+FFFD, visibly wrong rather
+    // Inconsolata EX has no CJK: the scalar renders U+FFFD, visibly wrong rather
     // than dropped. It is double-width, so the lead cell holds the glyph.
     let (mut console, mut pixels) = small_console();
     console.write_bytes(&mut pixels, "一".as_bytes());

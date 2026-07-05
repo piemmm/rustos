@@ -52,8 +52,21 @@ fn coverage_reaches_beyond_ascii() {
 }
 
 #[test]
+fn ukrainian_cyrillic_has_glyphs_with_ink() {
+    // The console-font regression behind LANG=uk-UA: every Ukrainian letter
+    // must resolve to its own glyph with visible ink, never the U+FFFD
+    // fallback.
+    for ch in [
+        'і', 'ї', 'є', 'ґ', 'І', 'Ї', 'Є', 'Ґ', 'а', 'я', 'А', 'Я', 'Щ', 'ь',
+    ] {
+        assert!(lookup(ch).is_some(), "{ch:?} has no glyph");
+        assert!(!lookup_or_fallback(ch).is_blank(), "{ch:?} has no ink");
+    }
+}
+
+#[test]
 fn unmapped_scalars_fall_back_to_the_replacement_glyph() {
-    // CJK, Hangul, and emoji are outside Inconsolata's repertoire.
+    // CJK, Hangul, and emoji are outside Inconsolata EX's repertoire.
     for ch in ['一', '한', '🦀'] {
         assert_eq!(lookup(ch), None);
         assert_eq!(lookup_or_fallback(ch), lookup_or_fallback('\u{FFFD}'));
@@ -73,11 +86,22 @@ fn space_is_blank_and_letters_have_ink() {
 }
 
 #[test]
-fn full_block_is_solid_edge_to_edge() {
+fn full_block_is_solid_with_no_holes() {
+    // U+2588 FULL BLOCK fills the face's exact advance and its exact
+    // ascent-to-descent extent. The cell rounds the advance to whole pixels
+    // and rounds the vertical metrics up to whole rows, so the interior is
+    // fully covered while the outermost column and row carry only their
+    // fractional share of the ink — most of a pixel, never a hole.
     let block = lookup_or_fallback('█');
     for y in 0..atlas::CELL_HEIGHT {
         for x in 0..atlas::CELL_WIDTH {
-            assert_eq!(block.coverage(x, y), 15, "hole at ({x}, {y})");
+            let coverage = block.coverage(x, y);
+            let interior = x < atlas::CELL_WIDTH - 1 && y < atlas::CELL_HEIGHT - 1;
+            if interior {
+                assert_eq!(coverage, 15, "hole at ({x}, {y})");
+            } else {
+                assert!(coverage > 7, "edge too thin at ({x}, {y}): {coverage}");
+            }
         }
     }
 }

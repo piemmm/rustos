@@ -12,9 +12,11 @@ without duplicating a blitter (`AGENTS.md` §17.4, §2.2).
 
 ## The face
 
-The system face is **Inconsolata** (SIL Open Font License 1.1). The TrueType
-source and its licence are committed under `assets/`
-(`Inconsolata-Regular.ttf`, `OFL.txt`); nothing parses TrueType at runtime.
+The system face is **Inconsolata EX** (SIL Open Font License 1.1), the
+Inconsolata-LGC project's extended build of Inconsolata covering Latin,
+Greek, and Cyrillic. The TrueType source and its licence are committed under
+`assets/` (`Inconsolata-EX.ttf`, `OFL.txt`); nothing parses TrueType at
+runtime.
 `cargo xtask font-atlas --write` rasterises every codepoint the face maps into
 the generated atlas (`src/atlas.rs` + `src/atlas_coverage.bin`), and
 `cargo xtask font-atlas` (run by `ci`) fails closed if the committed atlas
@@ -25,15 +27,17 @@ TrueType reader and an anti-aliasing scanline rasteriser in
 
 ## What this crate owns
 
-- `atlas` — the generated data: 12×26-pixel glyph cells (a 24 px em; the
-  face is strictly monospace at half an em), 4-bit coverage packed two pixels
-  per byte, a sorted codepoint→cell range table, and the U+FFFD fallback
-  index. Pure `const`/`static` data with no dependencies.
+- `atlas` — the generated data: 15×28-pixel glyph cells (a 25 px em; the
+  face is strictly monospace, and the cell is its uniform advance rounded to
+  whole pixels), 4-bit coverage packed two pixels per byte, a sorted
+  codepoint→cell range table, and the U+FFFD fallback index. Pure
+  `const`/`static` data with no dependencies.
 - `glyph` — Unicode lookup over the atlas: binary search of the range table,
   the packed-nibble accessor, and the U+FFFD fallback for any scalar the face
   does not map (visibly wrong rather than silently dropped, `AGENTS.md` §2.9).
-  Coverage spans the face's repertoire: Latin and its extensions, box drawing
-  and block elements, arrows, punctuation, currency — 882 codepoints.
+  Coverage spans the face's repertoire: Latin and its extensions, Greek,
+  Cyrillic (including the full Ukrainian alphabet), box drawing and block
+  elements, arrows, punctuation, currency — 3061 codepoints.
 - `font::BitmapFont` — the face's metrics (cell size, pen advance, line
   height) plus the glyph blitter. `draw_text` composites each covered pixel
   onto a `lib/raster` `Surface` through that crate's single

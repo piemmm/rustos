@@ -31,7 +31,7 @@ use rustos_vt::{char_width, Attributes, Color, EraseMode, Op, Parser, CONTINUATI
 
 pub use rustos_vt::Cell;
 
-/// Glyph cell width in pixels at scale 1. The face's half-em advance already
+/// Glyph cell width in pixels at scale 1. The face's uniform advance already
 /// carries the inter-character spacing, so the cell is the atlas cell.
 const CELL_WIDTH: u32 = atlas::CELL_WIDTH;
 

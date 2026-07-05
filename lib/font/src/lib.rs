@@ -1,7 +1,7 @@
 //! Shared text rasterisation primitives (`lib/font`).
 //!
 //! This crate is the single home of the system's text rendering: the
-//! generated Inconsolata glyph atlas ([`atlas`], emitted by
+//! generated Inconsolata EX glyph atlas ([`atlas`], emitted by
 //! `cargo xtask font-atlas --write` from the committed SIL OFL 1.1 face in
 //! `assets/`), the Unicode glyph lookup over it ([`glyph`]), and the blitter
 //! that draws it onto a `lib/raster` `Surface` ([`font`], behind the
@@ -10,9 +10,9 @@
 //! `lib/raster`, it lives in `lib/*` so the taskbar and the default apps can
 //! draw text without depending on the window manager.
 //!
-//! Unicode coverage is the face's: every scalar Inconsolata maps (Latin plus
-//! its extensions, Greek-adjacent symbols, box drawing and block elements,
-//! arrows, common punctuation and currency — 882 codepoints) renders its real
+//! Unicode coverage is the face's: every scalar Inconsolata EX maps (Latin
+//! plus its extensions, Greek, Cyrillic, box drawing and block elements,
+//! arrows, common punctuation and currency — 3061 codepoints) renders its real
 //! glyph; anything else renders the U+FFFD replacement glyph, visibly wrong
 //! rather than silently dropped. The cell model is one scalar per cell — the
 //! same deliberate simplification `lib/vt` / `lib/curses` document — so a

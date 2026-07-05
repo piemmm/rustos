@@ -80,7 +80,7 @@ theme's `Palette`:
   *Notification icons* below), tinted in the **muted** foreground colour.
 
 On top of those fills, the renderer draws **text** with the shared `rustos-font`
-`BitmapFont` (the built-in Inconsolata face): the clock label is centred in
+`BitmapFont` (the built-in Inconsolata EX face): the clock label is centred in
 the clock region, and each task slot shows its window title aligned to the
 leading edge. Each label takes the foreground role that matches its background
 — `on_accent` over a focused (accent) slot, the **muted** foreground over a

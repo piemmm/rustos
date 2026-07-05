@@ -1,8 +1,10 @@
 //! `cargo xtask font-atlas` implementation.
 //!
-//! The system text face is Inconsolata (SIL OFL 1.1), committed as the
-//! TrueType source `lib/font/assets/Inconsolata-Regular.ttf`. The renderers
-//! never parse TrueType at runtime: this command rasterises every glyph the
+//! The system text face is Inconsolata EX (SIL OFL 1.1), the Inconsolata-LGC
+//! project's extended build of Inconsolata covering Latin, Greek, and
+//! Cyrillic, committed as the TrueType source
+//! `lib/font/assets/Inconsolata-EX.ttf`. The renderers never parse TrueType
+//! at runtime: this command rasterises every glyph the
 //! face maps into a fixed-cell, 4-bit-coverage bitmap atlas and emits it as
 //! generated data (`lib/font/src/atlas.rs` + `lib/font/src/atlas_coverage.bin`)
 //! that `lib/font` compiles in. With no arguments the command verifies the
@@ -16,20 +18,21 @@
 //! coverage). Identical input bytes produce identical output bytes on every
 //! host, so the drift guard is meaningful.
 //!
-//! Pixel geometry: the em square is [`EM_PX`] pixels tall. Inconsolata is
-//! strictly monospace at half an em per glyph, so the cell is `EM_PX / 2`
-//! wide; the cell height and baseline derive from the face's ascent and
-//! descent. Zero-advance combining marks rasterise like any other glyph —
-//! Inconsolata draws their outlines inside the half-em cell (GPOS anchor
-//! repositioning is a shaping concern the cell grid deliberately does not
-//! have), so each mark lands in its own cell: the same deliberate
-//! one-scalar-per-cell model `lib/vt` / `lib/curses` document.
+//! Pixel geometry: the em square is [`EM_PX`] pixels tall. The face is
+//! strictly monospace: every spacing glyph advances by one uniform width the
+//! generator reads from the face itself, and the cell is that advance
+//! rounded to whole pixels; the cell height and baseline derive from the
+//! face's ascent and descent. Zero-advance combining marks rasterise like
+//! any other glyph — the face draws their outlines inside the advance-wide
+//! cell (GPOS anchor repositioning is a shaping concern the cell grid
+//! deliberately does not have), so each mark lands in its own cell: the same
+//! deliberate one-scalar-per-cell model `lib/vt` / `lib/curses` document.
 
 use std::fmt::Write as _;
 use std::path::Path;
 
 /// Workspace-relative path of the committed TrueType source.
-pub const DEFAULT_TTF_PATH: &str = "lib/font/assets/Inconsolata-Regular.ttf";
+pub const DEFAULT_TTF_PATH: &str = "lib/font/assets/Inconsolata-EX.ttf";
 /// Workspace-relative path of the generated Rust atlas view.
 pub const DEFAULT_ATLAS_RS_PATH: &str = "lib/font/src/atlas.rs";
 /// Workspace-relative path of the generated coverage payload.
@@ -37,18 +40,20 @@ pub const DEFAULT_ATLAS_BIN_PATH: &str = "lib/font/src/atlas_coverage.bin";
 
 /// Pixels per em square: the one size the atlas is rasterised at.
 ///
-/// 24 px/em puts the half-em advance at exactly 12 whole pixels and yields a
-/// 12×26 cell (ascent 21, descent 5) — large enough that unhinted
-/// anti-aliased strokes stay crisp, small enough that a 1080p console keeps
-/// 41 rows at scale 1.
-const EM_PX: u32 = 24;
+/// 25 px/em puts Inconsolata EX's uniform 613/1024-em advance at 14.97 px,
+/// so the rounded 15-pixel cell distorts the glyph grid by only 0.2% (a
+/// 24 px em would round 14.37 px down to 14, squeezing every glyph by 2.6%).
+/// The resulting 15×28 cell (ascent 23, descent 5) is large enough that
+/// unhinted anti-aliased strokes stay crisp, small enough that a 1080p
+/// console keeps 38 rows at scale 1.
+const EM_PX: u32 = 25;
 
 /// Coverage sample rows per pixel row (vertical supersampling).
 const SAMPLE_ROWS: u32 = 4;
 
 /// Line segments each quadratic Bézier is flattened into.
 ///
-/// At a 24 px em the largest curve spans roughly half the cell; 8 chords keep
+/// At a 25 px em the largest curve spans roughly half the cell; 8 chords keep
 /// the flattening error well under a tenth of a pixel, invisible at 16
 /// coverage levels.
 const QUAD_SEGMENTS: u32 = 8;
@@ -220,6 +225,29 @@ impl<'a> Face<'a> {
         self.r.u16(self.tables.hmtx + 4 * usize::from(index))
     }
 
+    /// The one advance width every mapped spacing glyph shares, in font
+    /// units.
+    ///
+    /// The cell grid only works over a strictly monospace face: every mapped
+    /// glyph must advance by this uniform width or by zero (a combining
+    /// mark). A face mixing two spacing widths would silently break the
+    /// grid, so it fails closed here instead.
+    fn uniform_advance(&self) -> Result<u16, String> {
+        let mut uniform = None;
+        for &(_, glyph) in &self.mapped {
+            let advance = self.advance(glyph)?;
+            if advance == 0 {
+                continue;
+            }
+            match uniform {
+                None => uniform = Some(advance),
+                Some(seen) if seen == advance => {}
+                Some(_) => return Err(parse_err("face is not strictly monospace")),
+            }
+        }
+        uniform.ok_or_else(|| parse_err("face maps no spacing glyphs"))
+    }
+
     /// The `glyf` byte range of `glyph`, or `None` for an empty outline.
     fn glyf_range(&self, glyph: u16) -> Result<Option<(usize, usize)>, String> {
         if glyph >= self.glyph_count {
@@ -308,8 +336,53 @@ struct Segment {
     y1: f64,
 }
 
+/// A font-unit affine transform: maps `(x, y)` to
+/// `(a·x + c·y + dx, b·x + d·y + dy)` — the composite-component transform
+/// shape the `glyf` spec defines.
+#[derive(Copy, Clone)]
+struct Affine {
+    a: f64,
+    b: f64,
+    c: f64,
+    d: f64,
+    dx: f64,
+    dy: f64,
+}
+
+impl Affine {
+    const IDENTITY: Self = Self {
+        a: 1.0,
+        b: 0.0,
+        c: 0.0,
+        d: 1.0,
+        dx: 0.0,
+        dy: 0.0,
+    };
+
+    fn apply(&self, x: f64, y: f64) -> (f64, f64) {
+        (
+            self.a * x + self.c * y + self.dx,
+            self.b * x + self.d * y + self.dy,
+        )
+    }
+
+    /// The transform applying `inner` first, then `self` — how a nested
+    /// composite component composes under its parent.
+    fn then(&self, inner: &Self) -> Self {
+        Self {
+            a: self.a * inner.a + self.c * inner.b,
+            b: self.b * inner.a + self.d * inner.b,
+            c: self.a * inner.c + self.c * inner.d,
+            d: self.b * inner.c + self.d * inner.d,
+            dx: self.a * inner.dx + self.c * inner.dy + self.dx,
+            dy: self.b * inner.dx + self.d * inner.dy + self.dy,
+        }
+    }
+}
+
 /// Collects an outline as segments, flattening quadratics and applying the
-/// font-unit → pixel transform (including the composite translation).
+/// font-unit → pixel transform (including the composite component
+/// transform).
 struct OutlineSink {
     segments: Vec<Segment>,
     /// Pixels per font unit.
@@ -319,16 +392,16 @@ struct OutlineSink {
     /// Pixel y of the baseline (font-unit y = 0); font y grows up, pixel y
     /// grows down.
     baseline_y: f64,
-    /// Composite-glyph translation in font units.
-    dx: f64,
-    dy: f64,
+    /// The composite-glyph component transform, in font units.
+    transform: Affine,
 }
 
 impl OutlineSink {
     fn to_px(&self, x: f64, y: f64) -> (f64, f64) {
+        let (fx, fy) = self.transform.apply(x, y);
         (
-            self.origin_x + (x + self.dx) * self.scale,
-            self.baseline_y - (y + self.dy) * self.scale,
+            self.origin_x + fx * self.scale,
+            self.baseline_y - fy * self.scale,
         )
     }
 
@@ -557,9 +630,9 @@ fn emit_contour(points: &[Point], sink: &mut OutlineSink) {
     }
 }
 
-/// Decode a composite glyph: recurse into each component with its translation
-/// applied. Only the untransformed, XY-offset form Inconsolata uses is
-/// supported; anything else fails closed.
+/// Decode a composite glyph: recurse into each component with its affine
+/// transform (XY offset, plain/xy scale, or 2×2 matrix) composed onto the
+/// sink. Point-matching args and scaled component offsets fail closed.
 fn outline_composite(
     face: &Face<'_>,
     start: usize,
@@ -577,8 +650,12 @@ fn outline_composite(
         if !args_are_xy {
             return Err(parse_err("composite point-matching args unsupported"));
         }
-        if flags & (0x0008 | 0x0040 | 0x0080) != 0 {
-            return Err(parse_err("composite scale/matrix transforms unsupported"));
+        // SCALED_COMPONENT_OFFSET would rescale the offset by the component
+        // transform (the Apple interpretation); the faces this generator
+        // accepts use plain font-unit offsets, so anything else is a wrong
+        // atlas waiting to happen.
+        if flags & 0x0800 != 0 {
+            return Err(parse_err("composite scaled component offset unsupported"));
         }
         let (dx, dy) = if args_are_words {
             let v = (f64::from(r.i16(at)?), f64::from(r.i16(at + 2)?));
@@ -589,11 +666,39 @@ fn outline_composite(
             at += 2;
             v
         };
-        let saved = (sink.dx, sink.dy);
-        sink.dx += dx;
-        sink.dy += dy;
+        // The component's scale terms are F2Dot14 fixed-point values.
+        let f2dot14 = |at_ref: &mut usize| -> Result<f64, String> {
+            let v = f64::from(r.i16(*at_ref)?) / 16384.0;
+            *at_ref += 2;
+            Ok(v)
+        };
+        let (x_scale, scale01, scale10, y_scale) = if flags & 0x0008 != 0 {
+            let scale = f2dot14(&mut at)?;
+            (scale, 0.0, 0.0, scale)
+        } else if flags & 0x0040 != 0 {
+            let x_scale = f2dot14(&mut at)?;
+            let y_scale = f2dot14(&mut at)?;
+            (x_scale, 0.0, 0.0, y_scale)
+        } else if flags & 0x0080 != 0 {
+            let x_scale = f2dot14(&mut at)?;
+            let scale01 = f2dot14(&mut at)?;
+            let scale10 = f2dot14(&mut at)?;
+            let y_scale = f2dot14(&mut at)?;
+            (x_scale, scale01, scale10, y_scale)
+        } else {
+            (1.0, 0.0, 0.0, 1.0)
+        };
+        let saved = sink.transform;
+        sink.transform = saved.then(&Affine {
+            a: x_scale,
+            b: scale01,
+            c: scale10,
+            d: y_scale,
+            dx,
+            dy,
+        });
         outline_glyph(face, component, sink, depth + 1)?;
-        (sink.dx, sink.dy) = saved;
+        sink.transform = saved;
         if flags & 0x0020 == 0 {
             break;
         }
@@ -603,7 +708,8 @@ fn outline_composite(
 
 /// The pixel geometry the atlas is rasterised at, derived from the face.
 struct CellGeometry {
-    /// Cell width in pixels: the face's uniform half-em advance.
+    /// Cell width in pixels: the face's uniform advance, rounded to whole
+    /// pixels.
     width: u32,
     /// Cell height in pixels: ascent rows plus descent rows.
     height: u32,
@@ -614,11 +720,16 @@ struct CellGeometry {
 }
 
 impl CellGeometry {
-    fn derive(face: &Face<'_>) -> Result<Self, String> {
+    fn derive(face: &Face<'_>, advance: u16) -> Result<Self, String> {
         let scale = f64::from(EM_PX) / f64::from(face.units_per_em);
-        let width = EM_PX / 2;
-        // Integer ceiling division keeps the pixel metrics exact.
         let units = i64::from(face.units_per_em);
+        // Round the uniform advance to the nearest whole pixel: the cell grid
+        // needs an integral width, and half-up rounding keeps the distortion
+        // under half a pixel per glyph.
+        let width_px = (i64::from(advance) * i64::from(EM_PX) + units / 2).div_euclid(units);
+        let width =
+            u32::try_from(width_px).map_err(|_| parse_err("advance overflows the cell width"))?;
+        // Integer ceiling division keeps the pixel metrics exact.
         let ceil_px = |value: i32| -> Result<u32, String> {
             let px = (i64::from(value) * i64::from(EM_PX) + units - 1).div_euclid(units);
             u32::try_from(px).map_err(|_| parse_err("negative vertical metric"))
@@ -750,30 +861,22 @@ struct Atlas {
 /// Rasterise every mapped codepoint of `face` into an [`Atlas`].
 fn build_atlas(data: &[u8]) -> Result<Atlas, String> {
     let face = Face::parse(data)?;
-    let geometry = CellGeometry::derive(&face)?;
-    let half_em = face.units_per_em / 2;
+    let advance = face.uniform_advance()?;
+    let geometry = CellGeometry::derive(&face, advance)?;
     let mut ranges: Vec<AtlasRange> = Vec::new();
     let mut cells = Vec::with_capacity(face.mapped.len());
     let mut fallback = None;
     for &(code, glyph) in &face.mapped {
-        let advance = i32::from(face.advance(glyph)?);
-        // The face is strictly monospace: every spacing glyph advances by
-        // exactly half an em, and combining marks by zero. Anything else
-        // would silently break the cell grid, so fail closed.
-        if advance != half_em && advance != 0 {
-            return Err(parse_err("glyph advance is neither half-em nor zero"));
-        }
         // A zero-advance combining mark rasterises like any other glyph: the
-        // face draws mark outlines inside the half-em cell, so each mark
-        // lands in its own cell — the one-scalar-per-cell model the terminal
-        // stack documents.
+        // face draws mark outlines inside the advance-wide cell, so each
+        // mark lands in its own cell — the one-scalar-per-cell model the
+        // terminal stack documents.
         let mut sink = OutlineSink {
             segments: Vec::new(),
             scale: geometry.scale,
             origin_x: 0.0,
             baseline_y: f64::from(geometry.baseline),
-            dx: 0.0,
-            dy: 0.0,
+            transform: Affine::IDENTITY,
         };
         outline_glyph(&face, glyph, &mut sink, 0)?;
         let cell = rasterise(&sink.segments, &geometry);
@@ -834,20 +937,21 @@ impl Atlas {
             "// GENERATED FILE — DO NOT EDIT.\n\
              //\n\
              // Emitted by `cargo xtask font-atlas --write` from the committed face\n\
-             // `lib/font/assets/Inconsolata-Regular.ttf` (SIL OFL 1.1; see\n\
+             // `lib/font/assets/Inconsolata-EX.ttf` (SIL OFL 1.1; see\n\
              // `lib/font/assets/OFL.txt`). `cargo xtask font-atlas` (run by `ci`)\n\
              // fails closed if this file drifts from a fresh generation\n\
              // (AGENTS.md §2.2: generated views are never hand-maintained).\n\n",
         );
         out.push_str(
-            "//! The generated Inconsolata glyph atlas: fixed-cell 4-bit coverage\n\
+            "//! The generated Inconsolata EX glyph atlas: fixed-cell 4-bit coverage\n\
              //! bitmaps for every codepoint the face maps, plus the codepoint →\n\
              //! cell-index range table. Pure data; the lookup and blitting live in\n\
              //! the hand-written modules of this crate.\n\n",
         );
         let _ = writeln!(
             out,
-            "/// Glyph cell width in pixels (the face's uniform half-em advance).\n\
+            "/// Glyph cell width in pixels (the face's uniform advance, rounded to\n\
+             /// whole pixels).\n\
              pub const CELL_WIDTH: u32 = {};\n",
             self.geometry.width
         );
@@ -985,11 +1089,12 @@ mod tests {
     #[test]
     fn geometry_matches_the_face_metrics() {
         let atlas = build_atlas(&committed_face()).expect("atlas builds");
-        // Inconsolata: 1000 upm, ascent 859, descent 190, at a 24 px em.
-        assert_eq!(atlas.geometry.width, 12);
-        assert_eq!(atlas.geometry.height, 26);
-        assert_eq!(atlas.geometry.baseline, 21);
-        assert_eq!(atlas.bytes_per_cell(), 6 * 26);
+        // Inconsolata EX: 1024 upm, ascent 939, descent 198, advance 613,
+        // at a 25 px em.
+        assert_eq!(atlas.geometry.width, 15);
+        assert_eq!(atlas.geometry.height, 28);
+        assert_eq!(atlas.geometry.baseline, 23);
+        assert_eq!(atlas.bytes_per_cell(), 8 * 28);
     }
 
     #[test]
@@ -1052,11 +1157,26 @@ mod tests {
     fn combining_mark_is_rendered_as_a_spacing_glyph() {
         let atlas = build_atlas(&committed_face()).expect("atlas builds");
         // U+0301 COMBINING ACUTE ACCENT: zero advance, but the face draws
-        // its outline inside the half-em cell, so it must have visible ink.
+        // its outline inside the advance-wide cell, so it must have visible
+        // ink.
         assert!(
             cell_of(&atlas, 0x0301).iter().any(|&c| c > 0),
             "combining acute has no ink"
         );
+    }
+
+    #[test]
+    fn cyrillic_is_covered_with_ink() {
+        let atlas = build_atlas(&committed_face()).expect("atlas builds");
+        // The whole Cyrillic block the face maps must rasterise with real
+        // ink, not fall back to U+FFFD — the Ukrainian console regression:
+        // і ї є ґ plus the base alphabet.
+        for ch in [
+            'і', 'ї', 'є', 'ґ', 'І', 'Ї', 'Є', 'Ґ', 'а', 'я', 'А', 'Я', 'Щ', 'ь',
+        ] {
+            let cell = cell_of(&atlas, u32::from(ch));
+            assert!(cell.iter().any(|&c| c > 0), "{ch:?} has no ink");
+        }
     }
 
     #[test]

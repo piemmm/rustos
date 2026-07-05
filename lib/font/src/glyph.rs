@@ -1,4 +1,4 @@
-//! Glyph lookup over the generated Inconsolata atlas.
+//! Glyph lookup over the generated Inconsolata EX atlas.
 //!
 //! [`lookup`] maps any `char` to its atlas cell by binary search over the
 //! generated codepoint ranges ([`crate::atlas::RANGES`]); a scalar the face

@@ -1,7 +1,7 @@
 //! The system bitmap font and the glyph blitter that draws it onto a
 //! [`Surface`].
 //!
-//! [`BitmapFont`] couples the generated Inconsolata atlas with its metrics
+//! [`BitmapFont`] couples the generated Inconsolata EX atlas with its metrics
 //! (cell size, pen advance, line height) and the coverage-aware blitter.
 //! [`BitmapFont::draw_text`] composites each glyph onto a `lib/raster`
 //! [`Surface`] through that crate's single premultiplied-alpha
@@ -15,17 +15,17 @@ use rustos_raster::{Color, Pixel, Surface};
 use crate::atlas;
 use crate::glyph::{lookup_or_fallback, Glyph};
 
-/// The system monospace bitmap font: the generated Inconsolata atlas plus
+/// The system monospace bitmap font: the generated Inconsolata EX atlas plus
 /// its layout metrics.
 ///
-/// The face's half-em advance already carries the inter-glyph side bearings
+/// The face's uniform advance already carries the inter-glyph side bearings
 /// and its ascent + descent carry the line box, so the pen advances by
 /// exactly the cell width and lines by exactly the cell height.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct BitmapFont(());
 
 impl BitmapFont {
-    /// The built-in Inconsolata face.
+    /// The built-in Inconsolata EX face.
     #[must_use]
     pub const fn inconsolata() -> Self {
         Self(())
