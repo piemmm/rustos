@@ -82,8 +82,11 @@ never as an unaudited shell-out (`AGENTS.md` §12). The single gateway is the
 - resolves `clang` / `ld.lld` automatically — no configuration once the pinned
   LLVM is installed. It searches, in order, the explicit override
   (`RUSTOS_CC_CLANG` / `RUSTOS_CC_LLD`, authoritative), the versioned name on
-  `PATH` (`clang-NN`), the Homebrew and apt.llvm.org install prefixes, and the
-  bare name on `PATH`, choosing the first whose version matches the pin and
+  `PATH` (`clang-NN`), unpacked official LLVM release archives of exactly the
+  pinned version (`LLVM-<version>-<OS>-<arch>/bin`, `llvm-<version>/bin` under
+  `~/toolchains`, `~`, `/opt`, `/usr/local`), the Homebrew and apt.llvm.org
+  install prefixes, and the bare name on `PATH`, choosing the first whose
+  version matches the pin and
   skipping a system/Apple `clang` of the wrong version; a resolution failure
   names where it looked and how to install the toolchain (`tools/cc/README.md`),
 - runs `--version` and fails closed unless the tool reports the pinned

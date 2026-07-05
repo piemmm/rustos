@@ -25,8 +25,12 @@ order per tool:
 1. **The explicit override** — `RUSTOS_CC_CLANG` / `RUSTOS_CC_LLD`. Authoritative:
    if set, it must point at a file of the pinned version, else discovery fails
    closed (an override exists to be obeyed).
-2. **Well-known locations for the pinned major version**, in order:
+2. **Well-known locations for the pinned version**, in order:
    - the versioned name on `PATH` (`clang-<major>`, `ld.lld-<major>`);
+   - unpacked official LLVM release archives of exactly the pinned version —
+     `LLVM-<version>-<OS>-<arch>/bin` (the upstream tarball layout, any
+     OS/arch suffix) and `llvm-<version>/bin`, each looked for under
+     `~/toolchains`, `~`, `/opt`, and `/usr/local`;
    - Homebrew prefixes — `/opt/homebrew/opt/{llvm,lld}[@<major>]/bin` (Apple
      silicon) and `/usr/local/opt/{llvm,lld}[@<major>]/bin` (Intel);
    - Debian/apt.llvm.org prefixes — `/usr/lib/llvm-<major>/bin`;

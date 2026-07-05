@@ -286,13 +286,16 @@ fn resolve_tool(tool: Tool) -> Result<ToolRecord, CcError> {
 ///    **authoritative**: if it does not point at a file, or points at the wrong
 ///    version, resolution fails closed rather than silently searching elsewhere
 ///    — an override exists precisely to be obeyed.
-/// 2. Otherwise, an ordered list of well-known locations for the pinned major
+/// 2. Otherwise, an ordered list of well-known locations for the pinned
 ///    version ([`tool_candidates`]) — the versioned `clang-NN` / `ld.lld-NN`
-///    name on `PATH`, the Homebrew (`/opt/homebrew`, `/usr/local`) and Debian
-///    (`/usr/lib/llvm-NN`) LLVM install prefixes, and finally the bare name on
-///    `PATH`. The first candidate whose reported version is *exactly* the pin
-///    is chosen; every other candidate (e.g. an Apple/system `clang` of the
-///    wrong version) is skipped, not accepted.
+///    name on `PATH`, an unpacked official LLVM release archive of exactly the
+///    pinned version (`LLVM-<version>-<OS>-<arch>/bin` or `llvm-<version>/bin`
+///    under `~/toolchains`, `~`, `/opt`, or `/usr/local`), the Homebrew
+///    (`/opt/homebrew`, `/usr/local`) and Debian (`/usr/lib/llvm-NN`) LLVM
+///    install prefixes, and finally the bare name on `PATH`. The first
+///    candidate whose reported version is *exactly* the pin is chosen; every
+///    other candidate (e.g. an Apple/system `clang` of the wrong version) is
+///    skipped, not accepted.
 ///
 /// If nothing matches, the error names every location searched and how to
 /// install or pin the toolchain, so neither a developer nor an automated build
@@ -353,15 +356,71 @@ fn tool_candidates(tool: Tool) -> Vec<PathBuf> {
     if let Some(p) = find_on_path(&format!("{binary}-{major}")) {
         out.push(p);
     }
-    // 2. Well-known versioned install prefixes for the pinned major.
+    // 2. Unpacked official LLVM release archives of exactly the pinned version.
+    for dir in release_bin_dirs(tool.required_version()) {
+        out.push(dir.join(binary));
+    }
+    // 3. Well-known versioned install prefixes for the pinned major.
     for dir in tool.install_bin_dirs(major) {
         out.push(Path::new(&dir).join(binary));
     }
-    // 3. The bare name on PATH (may be a system default; version-checked before use).
+    // 4. The bare name on PATH (may be a system default; version-checked before use).
     if let Some(p) = find_on_path(binary) {
         out.push(p);
     }
     out
+}
+
+/// The base directories an official LLVM release archive is commonly unpacked
+/// into: a per-user `~/toolchains` collection, the home directory itself, and
+/// the machine-wide `/opt` / `/usr/local` prefixes. A missing `HOME` simply
+/// drops the per-user bases; every path is probed and skipped if absent, so no
+/// platform fork is needed.
+fn release_base_dirs() -> Vec<PathBuf> {
+    let mut bases = Vec::new();
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        bases.push(home.join("toolchains"));
+        bases.push(home);
+    }
+    bases.push(PathBuf::from("/opt"));
+    bases.push(PathBuf::from("/usr/local"));
+    bases
+}
+
+/// The `bin/` directories of unpacked official LLVM release archives of
+/// exactly `version` beneath each of `bases`.
+///
+/// Covers the upstream archive layout `LLVM-<version>-<OS>-<arch>/bin`
+/// (e.g. `LLVM-22.1.8-Linux-X64/bin`, matched by directory-name prefix so
+/// every OS/arch suffix is found without naming platforms) and a plain
+/// `llvm-<version>/bin` prefix. Scanned entries are sorted so candidate order
+/// is deterministic; the exact-version match on the binary still gates
+/// selection either way.
+fn release_bin_dirs_under(bases: &[PathBuf], version: &str) -> Vec<PathBuf> {
+    let archive_prefix = format!("LLVM-{version}-");
+    let mut out = Vec::new();
+    for base in bases {
+        let mut unpacked: Vec<PathBuf> = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(base) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let Some(name) = name.to_str() else { continue };
+                if name.starts_with(&archive_prefix) {
+                    unpacked.push(entry.path().join("bin"));
+                }
+            }
+        }
+        unpacked.sort();
+        out.extend(unpacked);
+        out.push(base.join(format!("llvm-{version}")).join("bin"));
+    }
+    out
+}
+
+/// [`release_bin_dirs_under`] over the standard [`release_base_dirs`].
+fn release_bin_dirs(version: &str) -> Vec<PathBuf> {
+    release_bin_dirs_under(&release_base_dirs(), version)
 }
 
 /// The major-version component of a pinned version string (`"22.1.8"` → `"22"`).
@@ -607,6 +666,73 @@ mod tests {
             .expect("homebrew llvm prefix present");
         assert!(lld < llvm, "lld formula prefix must be searched first");
         assert!(dirs.iter().any(|d| d == "/usr/lib/llvm-22/bin"));
+    }
+
+    #[test]
+    fn release_base_dirs_cover_home_and_machine_prefixes() {
+        let bases = release_base_dirs();
+        assert!(bases.iter().any(|b| b == Path::new("/opt")));
+        assert!(bases.iter().any(|b| b == Path::new("/usr/local")));
+        if let Some(home) = std::env::var_os("HOME") {
+            let home = PathBuf::from(home);
+            let toolchains = bases
+                .iter()
+                .position(|b| *b == home.join("toolchains"))
+                .expect("~/toolchains base present");
+            let home_pos = bases
+                .iter()
+                .position(|b| *b == home)
+                .expect("home base present");
+            assert!(toolchains < home_pos, "~/toolchains is searched first");
+        }
+    }
+
+    #[test]
+    fn release_bin_dirs_find_only_the_pinned_version() {
+        let base =
+            std::env::temp_dir().join(format!("rustos-cc-release-bin-dirs-{}", std::process::id()));
+        std::fs::create_dir_all(base.join("LLVM-22.1.8-Linux-X64/bin")).unwrap();
+        std::fs::create_dir_all(base.join("LLVM-21.1.0-Linux-X64/bin")).unwrap();
+
+        let dirs = release_bin_dirs_under(std::slice::from_ref(&base), "22.1.8");
+        let unpacked = base.join("LLVM-22.1.8-Linux-X64").join("bin");
+        let plain = base.join("llvm-22.1.8").join("bin");
+        let scanned = dirs
+            .iter()
+            .position(|d| *d == unpacked)
+            .expect("unpacked official archive bin dir present");
+        let listed = dirs
+            .iter()
+            .position(|d| *d == plain)
+            .expect("plain llvm-<version> bin dir present");
+        assert!(scanned < listed, "scanned archives come first");
+        assert!(
+            !dirs
+                .iter()
+                .any(|d| d.starts_with(base.join("LLVM-21.1.0-Linux-X64"))),
+            "a different version's archive is never a candidate"
+        );
+
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn release_bin_dirs_skip_missing_bases() {
+        let missing = PathBuf::from("/definitely/not/a/real/base");
+        let dirs = release_bin_dirs_under(std::slice::from_ref(&missing), "22.1.8");
+        assert_eq!(dirs, vec![missing.join("llvm-22.1.8").join("bin")]);
+    }
+
+    #[test]
+    fn candidates_include_release_archive_bin_dirs() {
+        let candidates = tool_candidates(Tool::Clang);
+        assert!(candidates
+            .iter()
+            .any(|c| c.ends_with("opt/llvm-22.1.8/bin/clang")));
+        let lld = tool_candidates(Tool::Lld);
+        assert!(lld
+            .iter()
+            .any(|c| c.ends_with("opt/llvm-22.1.8/bin/ld.lld")));
     }
 
     #[test]
