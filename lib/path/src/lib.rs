@@ -283,15 +283,7 @@ pub fn parse(input: &str) -> Result<Path, PathError> {
         });
     }
 
-    // A `:` before the first `/` is a root delimiter (an alias shorthand or a
-    // resolver token). A `:` that appears only *after* a `/` is an ordinary
-    // character inside a relative path component and is not a delimiter.
-    let root_colon = match (input.find(':'), input.find('/')) {
-        (Some(c), Some(s)) if c < s => Some(c),
-        (Some(c), None) => Some(c),
-        _ => None,
-    };
-    if let Some(colon) = root_colon {
+    if let Some(colon) = root_delimiter(input) {
         return parse_rooted(input, colon);
     }
 
@@ -301,6 +293,41 @@ pub fn parse(input: &str) -> Result<Path, PathError> {
         root: Root::Relative,
         components,
     })
+}
+
+/// The byte offset of the root-delimiting `:`, if `input` carries one.
+///
+/// A `:` before the first `/` is a root delimiter (an alias shorthand or a
+/// resolver token). A `:` that appears only *after* a `/` is an ordinary
+/// character inside a relative path component and is not a delimiter.
+fn root_delimiter(input: &str) -> Option<usize> {
+    match (input.find(':'), input.find('/')) {
+        (Some(c), Some(s)) if c < s => Some(c),
+        (Some(c), None) => Some(c),
+        _ => None,
+    }
+}
+
+/// The byte length of a leading alias-root prefix (`Name:/`), if `input`
+/// begins with one — the offset of the first byte after the `/`.
+///
+/// This is the grammar's own root-delimiter rule (a `:` before the first
+/// `/`, followed by `/`, naming a valid alias), exposed for *lexical* text
+/// tools — `basename`/`dirname`-style string surgery that must treat
+/// `Name:/` the way POSIX treats `/` (a root that is never stripped into)
+/// without resolving or normalising the path. It validates only the alias
+/// name; the remainder of the string is untouched, so input `parse` would
+/// reject (an interior `//`, a control character in a component) still
+/// reports its prefix here. Resolver spellings (`Name::…`) and resource
+/// references (`Name:selector`) have no `Name:/` prefix and return `None`.
+#[must_use]
+pub fn alias_root_len(input: &str) -> Option<usize> {
+    let colon = root_delimiter(input)?;
+    if input.as_bytes().get(colon + 1) != Some(&b'/') {
+        return None;
+    }
+    validate_alias(&input[..colon]).ok()?;
+    Some(colon + 2)
 }
 
 /// Parse a path whose first `:` (at byte offset `colon`) is a root delimiter.
@@ -684,5 +711,30 @@ mod tests {
         ] {
             assert!(!e.to_string().is_empty());
         }
+    }
+
+    #[test]
+    fn alias_root_len_reports_a_valid_alias_root_prefix() {
+        assert_eq!(alias_root_len("Home:/"), Some(6));
+        assert_eq!(alias_root_len("Home:/tools/x"), Some(6));
+        // The remainder is untouched lexical text: a spelling `parse` would
+        // reject still reports its prefix.
+        assert_eq!(alias_root_len("Home:/a//b"), Some(6));
+    }
+
+    #[test]
+    fn alias_root_len_refuses_non_alias_roots() {
+        // View, relative, and empty spellings carry no alias root.
+        assert_eq!(alias_root_len("/System/Apps"), None);
+        assert_eq!(alias_root_len("notes/todo"), None);
+        assert_eq!(alias_root_len(""), None);
+        // A resolver spelling and a resource reference are not alias roots.
+        assert_eq!(alias_root_len("alias::Home/x"), None);
+        assert_eq!(alias_root_len("sys:random"), None);
+        // A `:` after the first `/` is an ordinary component character.
+        assert_eq!(alias_root_len("a/b:/c"), None);
+        // An invalid alias name is not a root.
+        assert_eq!(alias_root_len(":/x"), None);
+        assert_eq!(alias_root_len("Ho/me:/x"), None);
     }
 }

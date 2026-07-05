@@ -539,6 +539,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-basename"
+version = "0.0.0"
+dependencies = [
+ "rustos-help",
+ "rustos-path",
+ "rustos-rt",
+]
+
+[[package]]
 name = "rustos-caps"
 version = "0.0.0"
 dependencies = [
@@ -683,6 +692,15 @@ dependencies = [
  "rustos-log",
  "rustos-rt",
  "rustos-util",
+]
+
+[[package]]
+name = "rustos-dirname"
+version = "0.0.0"
+dependencies = [
+ "rustos-help",
+ "rustos-path",
+ "rustos-rt",
 ]
 
 [[package]]
@@ -902,6 +920,14 @@ dependencies = [
  "rustos-resref",
  "rustos-rt",
  "rustos-vt",
+]
+
+[[package]]
+name = "rustos-false"
+version = "0.0.0"
+dependencies = [
+ "rustos-help",
+ "rustos-rt",
 ]
 
 [[package]]
@@ -2993,6 +3019,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-true"
+version = "0.0.0"
+dependencies = [
+ "rustos-help",
+ "rustos-rt",
+]
+
+[[package]]
 name = "rustos-usb"
 version = "0.0.0"
 dependencies = [
@@ -3104,6 +3138,14 @@ dependencies = [
  "rustos-test-fat32-image",
  "rustos-test-rustfs-image",
  "rustos-vcmailbox",
+]
+
+[[package]]
+name = "rustos-yes"
+version = "0.0.0"
+dependencies = [
+ "rustos-help",
+ "rustos-rt",
 ]
 
 [[package]]

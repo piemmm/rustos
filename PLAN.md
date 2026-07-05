@@ -3638,10 +3638,27 @@ with an unusable random password record (the GNU `!`-field equivalent —
 a password is set afterwards via the `users` tool), the
 session-baseline ceiling, and the shared shell/home defaults.
 
+The `plans/APPS.md` §12.1 Stage C coreutils build-out is under way:
+`true`, `false`, `yes`, `basename`, and `dirname` are full
+self-contained store bundles (store-only — the §18.6 boot floor never
+grows, so the inventory drift test pins their `AppInfo.toml` directly;
+console-write + `CAP_FS_ACCESS`, six-locale `Help/` trees with
+switch-drift pins, complete GNU surfaces). `basename`/`dirname` are
+purely lexical and treat a `Name:/` alias root the way POSIX treats `/`
+through the path grammar's own exported rule
+(`rustos_path::alias_root_len` — one definition, no second path
+parser); `false`'s served short help exits `0` per the §4 short-help
+convention (documented divergence from GNU `false --help`). `echo` and
+`pwd` stay `elsh` builtins (the shell resolves builtins first, and
+`pwd` needs the shell's cwd state).
+
 **Remaining** (staged in `plans/APPS.md` §13): the Stage B remainder
 (`chmod`/`chown`/`getcap`/`setcap`/`mount` blocked on their kernel
 syscalls — fs mode/owner set, per-inode capability get/set, mount — each
-registers in the change that lands its syscall); `Help/` trees for future
+registers in the change that lands its syscall); the Stage C remainder
+(the rest of the first batch — `printf`, `mkdir`, `rmdir`, `head`,
+`tail`, `wc`, `seq`, `tee`, `env`, `sleep`, `date`, `whoami`, `id` —
+then the text tools, in further batches); `Help/` trees for future
 command apps as each becomes a registered store bundle; and wider `stdinfo`
 adoption in command apps as future behaviour warrants it (advisory-only,
 §20 — the live records are `man`'s locale-fallback, `ls`'s hidden-entries

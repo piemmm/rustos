@@ -1,0 +1,12 @@
+# Signed-AppInfo manifest source for the `false` command app
+# (plans/APPS.md deliverable 8). Discovered by the build's app-bundle
+# composer; the capability list is the bundle's request, intersected with
+# the launching user's grants. CAP_CONSOLE_WRITE covers the short help
+# written to the inherited standard output; CAP_FS_ACCESS covers the
+# short-help read of the bundle's own Help/ documents through the secured
+# VFS. The tool reads no input, so it requests no CAP_CONSOLE_READ.
+id = "os.rustos.false"
+name = "false"
+version = "0.1.0"
+kind = "command"
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS"]

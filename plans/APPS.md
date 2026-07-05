@@ -71,7 +71,9 @@ nothing non-obvious to add today), `Help/`
 trees for future command apps as each becomes a registered bundle,
 the §12.1 Stage B remainder (`chmod`/`chown`/`getcap`/`setcap`/`mount`
 blocked on their kernel syscalls — `cp`/`mv`/`rm`/`useradd`/`groupadd`
-are registered store bundles), and
+are registered store bundles), the §12.1 Stage C remainder (the first
+batch's `true`/`false`/`yes`/`basename`/`dirname` are registered store
+bundles; the rest land in further batches), and
 deliverable 8 increment 5 (the x86_64/riscv64 storage floor, then
 deletion of the embedded registry those ports still carry as their
 §18.6 boot floor). Help documents are authored **only** in
@@ -579,11 +581,28 @@ behind the floor work below).
   capability-requirement get/set syscalls, and `mount` needs the mount
   syscall — none exists yet, and a stubbed production seam is forbidden;
   each tool registers in the change that lands its syscall.
-- **Stage C — missing coreutils commands (planned; all wanted).** Every
-  GNU coreutils command implementable on the current floor, in prioritised
-  batches (first: `echo`, `printf`, `true`, `false`, `yes`, `pwd`, `mkdir`,
-  `rmdir`, `head`, `tail`, `wc`, `basename`, `dirname`, `seq`, `tee`,
-  `env`, `sleep`, `date`, `whoami`, `id`; then the text tools `sort`,
+- **Stage C — missing coreutils commands (in progress; all wanted).**
+  Every GNU coreutils command implementable on the current floor, in
+  prioritised batches. **Done: `true`, `false`, `yes`, `basename`,
+  `dirname`** — each a full self-contained store bundle (console-write +
+  `CAP_FS_ACCESS` request, store-only: the §18.6 boot floor never grows,
+  so the kernel inventory drift test pins their `AppInfo.toml` directly)
+  with the complete GNU surface, six-locale `Help/` trees, and
+  switch-drift pins. `true`/`false` parse infallibly (only a *first*
+  argument of `-h`/`-?`/`--help` is honoured, the GNU position rule);
+  the one documented divergence is that `false`'s served short help
+  exits `0` per §4, where GNU `false --help` exits `1`. `basename` and
+  `dirname` are purely lexical, with one shared RustOS extension: a
+  `Name:/` alias root plays the role POSIX gives `/`, decided by the
+  path grammar's own exported rule (`rustos_path::alias_root_len`, the
+  §2.2 one-definition seam added for exactly these lexical tools) —
+  never a second path parser. `echo` and `pwd` from the first batch
+  stay `elsh` builtins for now (`pwd` needs the shell's cwd state, and
+  the shell resolves builtins first, so a store bundle of either would
+  be unreachable duplication); moving them out is decided when the
+  builtin/bundle split is revisited. Remaining first batch: `printf`,
+  `mkdir`, `rmdir`, `head`, `tail`, `wc`, `seq`, `tee`, `env`, `sleep`,
+  `date`, `whoami`, `id`; then the text tools `sort`,
   `uniq`, `tr`, `cut`, `paste`, `comm`, `nl`, `tac`, `fold`, `expand`,
   `od`, `split`, `shuf`, `truncate`, `mktemp`, `realpath`, `chgrp`,
   `sha256sum`/`cksum`, `base64`, `df`, `du`). Each is a full self-contained
@@ -670,9 +689,10 @@ both landed; `plans/SHELL.md` command execution):
    `default/<command>.md` (never a per-bundle list). Any violation fails
    closed with a message naming the offending `bundle/locale/file`.
 6. **`Help/` trees for the existing command apps** — **done for every
-   store-registered command app**: `cat`, `clear`, `cp`, `groupadd`, `ls`,
-   `mv`, `ps`, `reset`, `rm`, `top`, `sysinfo`, `useradd`,
-   `users`, and `elsh` each author their six-locale tree on disk in the bundle,
+   store-registered command app**: `basename`, `cat`, `clear`, `cp`,
+   `dirname`, `false`, `groupadd`, `ls`,
+   `mv`, `ps`, `reset`, `rm`, `top`, `true`, `sysinfo`, `useradd`,
+   `users`, `yes`, and `elsh` each author their six-locale tree on disk in the bundle,
    discovered by `tools/syshelp` (roots `userland/apps` and
    `userland/shell`), planted at `/System/Apps/<cmd>.app/Help/`, and served
    at runtime through the `HelpSource` seam — never embedded in the binary

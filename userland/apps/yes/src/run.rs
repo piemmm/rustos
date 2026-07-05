@@ -1,0 +1,98 @@
+//! The `Run` entry-point binary of the `yes` tool — the program a shell
+//! spawns to repeatedly output a line of text.
+//!
+//! This is a **pure-Rust** program: RustOS is Rust-only, so it links the Rust
+//! userland runtime `rustos-rt` — never the C ABI, which exists solely for
+//! programs *not* written in Rust. `rustos-rt` provides `_start`, the
+//! per-process stack canary, the panic handler, the `mem_map`-backed global
+//! allocator, and the syscall wrappers; `rustos_rt::entry!` names this
+//! program's `main`.
+//!
+//! `main` collects the inherited argument vector, builds the repeated
+//! output block, and pumps it to the inherited standard output (fd 1) until
+//! the output stops accepting bytes or the process is terminated. The
+//! reserved `-h`/`-?`/`--help` short-help switches render the tool's own
+//! Help document through the shared engine. The tool binds only to its
+//! inherited descriptors, never a console device.
+//!
+//! On the host it is an inert stub so `cargo build --workspace`, clippy, and
+//! fmt still cover the file.
+
+#![cfg_attr(all(freestanding, feature = "program"), no_std)]
+#![cfg_attr(all(freestanding, feature = "program"), no_main)]
+#![deny(missing_docs)]
+
+// --- Pure-Rust program --------------------------------------------------
+#[cfg(all(freestanding, feature = "program"))]
+mod program {
+    extern crate alloc;
+
+    use rustos_help::{own_short_help, BundleHelp};
+    use rustos_rt::io::{write_stderr_line, Stdout, Write};
+    use rustos_yes::{block, parse, pump, Command, Output, YesError, USAGE};
+
+    /// The production [`Output`] over the inherited standard output (fd 1).
+    struct RtOutput;
+
+    impl Output for RtOutput {
+        fn write_all(&self, bytes: &[u8]) -> Result<(), YesError> {
+            // The shared short-write loop; a stream that stops accepting
+            // bytes fails closed rather than spinning.
+            Stdout.write_all(bytes).map_err(|_| YesError::Output)
+        }
+    }
+
+    /// Render `yes`'s own short help (`NAME` + `SYNOPSIS` + compact
+    /// `OPTIONS`) from its own bundle's `Help/` tree through the one shared
+    /// engine; when no document can be served (a build without the bundle's
+    /// documents) the usage banner stands in — the tool's own text, not
+    /// fabricated help content — so `-h` never fails.
+    fn short_help() -> i32 {
+        let locale = rustos_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
+        let bytes = own_short_help(&BundleHelp::new("yes"), locale, "yes")
+            .unwrap_or_else(|| alloc::format!("{USAGE}\n").into_bytes());
+        match Stdout.write_all(&bytes) {
+            Ok(()) => 0,
+            Err(_) => 1,
+        }
+    }
+
+    /// Program entry point. `rustos-rt`'s `_start` calls it once the runtime
+    /// is set up and routes its return value through the `exit` syscall.
+    ///
+    /// Exit codes: `0` when a requested short help was served; `1` when the
+    /// output stopped accepting bytes (the tool's one stop condition); `2`
+    /// on a usage error. A normal `yes` run never returns on its own — it
+    /// ends when its consumer goes away or the user interrupts it.
+    fn main() -> i32 {
+        // A malformed (non-UTF-8) argument vector is a usage error, reported
+        // rather than guessed at.
+        let Some(arguments) = rustos_rt::args() else {
+            write_stderr_line(USAGE);
+            return 2;
+        };
+        let operands = match parse(&arguments) {
+            Ok(Command::Repeat(operands)) => operands,
+            Ok(Command::Help) => return short_help(),
+            Err(_) => {
+                write_stderr_line(USAGE);
+                return 2;
+            }
+        };
+        // The endless writer: it returns only once a write has failed.
+        pump(&block(&operands), &RtOutput);
+        write_stderr_line("yes: write error");
+        1
+    }
+
+    rustos_rt::entry!(main);
+}
+
+// --- Host stub ----------------------------------------------------------
+//
+// On the host (`cargo build --workspace`, clippy, fmt) the program's real
+// entry — the freestanding `rustos-rt` `_start` path — is not compiled, so
+// this inert `main` keeps the crate building under the host tooling. It
+// performs no I/O.
+#[cfg(not(all(freestanding, feature = "program")))]
+fn main() {}

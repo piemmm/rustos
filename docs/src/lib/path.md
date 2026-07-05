@@ -45,6 +45,14 @@ handles resource references routes a `NotAPath` string to that resolver; this
 crate deliberately does not parse resource references, so the two grammars stay
 one definition each.
 
+For *lexical* text tools — the `basename`/`dirname` command apps, which
+perform POSIX string surgery on a path spelling without resolving or
+normalising it — the crate exports `alias_root_len`: the byte length of a
+leading `Name:/` alias-root prefix, decided by the grammar's own
+root-delimiter rule and alias-name validation, so such a tool treats an alias
+root the way POSIX treats `/` (a root that is never stripped into) without a
+second path parser.
+
 The durable and administrative resolver spellings — `id::<volume-id>/…`,
 `fs::<driver>/<root>/…`, the `<driver>::<root>/…` shorthand, `dev::…`, and
 `net::…` — are refused with `PathError::UnsupportedResolver`. They serve

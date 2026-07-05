@@ -461,6 +461,15 @@ mod tests {
             CapabilityId::FS_ACCESS,
         ];
 
+        // The store-only pure text tools' expected request: console write
+        // for their output and the filesystem gate their short-help read
+        // needs — they touch no operand path and never prompt. They ship
+        // purely as discovered on-disk bundles — the boot floor never
+        // grows — so no `spawn_layout` row or manifest constant exists for
+        // them and their `AppInfo.toml` is pinned here directly.
+        const PURE_TOOL_REQUEST: &[CapabilityId] =
+            &[CapabilityId::CONSOLE_WRITE, CapabilityId::FS_ACCESS];
+
         let userland = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../userland");
         let discovered = discover_app_manifests(&userland).expect("discovery walks");
 
@@ -468,11 +477,14 @@ mod tests {
         // deliberately absent: it is the boot floor the boot path enters
         // directly, never a store bundle.
         let embedded: &[(&str, AppKind, &[CapabilityId])] = &[
+            ("basename", AppKind::Command, PURE_TOOL_REQUEST),
             ("cat", AppKind::Command, CAT_MANIFEST),
             ("clear", AppKind::Command, CLEAR_MANIFEST),
             ("cp", AppKind::Command, FILE_TOOL_REQUEST),
             ("devmgr", AppKind::Service, DEVMGR_MANIFEST),
+            ("dirname", AppKind::Command, PURE_TOOL_REQUEST),
             ("elsh", AppKind::Command, SESSION_BASELINE),
+            ("false", AppKind::Command, PURE_TOOL_REQUEST),
             ("groupadd", AppKind::Command, ADMIN_TOOL_REQUEST),
             ("login", AppKind::Service, LOGIN_MANIFEST),
             ("ls", AppKind::Command, LS_MANIFEST),
@@ -484,8 +496,10 @@ mod tests {
             ("sysinfo", AppKind::Command, SYSINFO_MANIFEST),
             ("sysinfod", AppKind::Service, SYSINFOD_MANIFEST),
             ("top", AppKind::Command, TOP_MANIFEST),
+            ("true", AppKind::Command, PURE_TOOL_REQUEST),
             ("useradd", AppKind::Command, ADMIN_TOOL_REQUEST),
             ("users", AppKind::Command, USERS_TOOL_MANIFEST),
+            ("yes", AppKind::Command, PURE_TOOL_REQUEST),
         ];
 
         assert_eq!(discovered.len(), embedded.len());

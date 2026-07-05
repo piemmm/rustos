@@ -3,8 +3,8 @@
 Stage 6 ships a set of small command-line utilities, each its own crate.
 This page documents the ones that have landed (`sysinfo`, `ps`, `man`,
 `cat`, `clear`, `reset`, `ls`, `rm`, `cp`, `mv`, `chmod`, `chown`,
-`getcap`, and `setcap`) and is extended as the others (`mount`, …)
-arrive.
+`getcap`, `setcap`, `true`, `false`, `yes`, `basename`, and `dirname`)
+and is extended as the others (`mount`, …) arrive.
 
 ## `sysinfo` — the System Information CLI (`userland/shell/sysinfo`)
 
@@ -465,6 +465,71 @@ The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 rustos-reset` drives the parser, the per-terminal restoration sequences
 (xterm full set, VT100 subset, dumb empty), and the locale switch-drift
 pin.
+
+## `true` / `false` — do nothing, with a fixed status (`userland/apps/true`, `userland/apps/false`)
+
+`rustos-true` and `rustos-false` are the GNU coreutils status tools
+(`plans/APPS.md` §12.1 Stage C store bundles): each ignores every
+argument and exits `0` (`true`) or `1` (`false`), giving scripts a
+command that always succeeds or always fails. Parsing is infallible —
+there is no usage error — and only a **first** argument of
+`-h`/`-?`/`--help` (the position GNU honours `--help` in) renders the
+tool's own short help through the shared `lib/help` engine. One
+documented divergence: `false -h` exits `0` (the `plans/APPS.md` §4
+short-help convention), where GNU `false --help` exits `1`.
+
+Both crates are `no_std` (no `alloc` in the library), have no `unsafe`,
+and no `unwrap`/`expect`/`panic!` in production paths. Each manifest
+requests `CAP_CONSOLE_WRITE` and `CAP_FS_ACCESS` (the short-help read) —
+within the session baseline. `cargo test -p rustos-true -p rustos-false`
+drives the ignore-everything and first-argument-help rules and the
+locale switch-drift pins.
+
+## `yes` — repeatedly output a line of text (`userland/apps/yes`)
+
+`rustos-yes` is the GNU coreutils repeater (a `plans/APPS.md` §12.1
+Stage C store bundle): it writes its operands joined by single spaces —
+or `y` when none are given — followed by a newline, until its output
+stops accepting bytes or the process is terminated. Option handling
+matches GNU: an unrecognised option is a usage error, option scanning
+stops at the first operand (`yes a -x` prints `a -x`), and `yes -- -x`
+prints `-x`. The line is repeated into a bounded whole-line block (up to
+4 KiB) so the endless writer pays one write per block, and a full stream
+backing blocks the write kernel-side — the tool never idle-spins.
+
+The crate is `no_std` (with `alloc`), has no `unsafe`, and no
+`unwrap`/`expect`/`panic!` in production paths. Its manifest requests
+`CAP_CONSOLE_WRITE` and `CAP_FS_ACCESS` — within the session baseline.
+`cargo test -p rustos-yes` drives the parser (operand/option rules, the
+`--` spelling), the block builder (default line, whole-line packing, the
+over-long-line floor), the closed-pipe stop condition through an
+injected output, and the locale switch-drift pin.
+
+## `basename` / `dirname` — lexical name surgery (`userland/apps/basename`, `userland/apps/dirname`)
+
+`rustos-basename` and `rustos-dirname` are the POSIX name tools
+(`plans/APPS.md` §12.1 Stage C store bundles): purely lexical string
+surgery — no operand path is resolved, normalised, or touched on disk.
+`basename` prints the final component of each spelling, optionally with
+a trailing suffix removed, with the full GNU surface (`NAME [SUFFIX]`,
+`-a`/`--multiple`, `-s`/`--suffix` implying `-a`, `-z`/`--zero`,
+bundles, permutation); `dirname` prints each spelling with its last
+component removed (`-z`/`--zero`, `NAME...`).
+
+One RustOS extension, shared by both: a `Name:/` alias root
+(`plans/DRIVES.md`) plays the role POSIX gives `/` — it is never
+stripped into, so `dirname Home:/tools` is `Home:/` exactly as
+`dirname /tools` is `/`. Where the root prefix ends is decided by the
+path grammar's own exported rule (`rustos_path::alias_root_len`), so
+neither tool carries a second path parser.
+
+Both crates are `no_std` (with `alloc`), have no `unsafe`, and no
+`unwrap`/`expect`/`panic!` in production paths; each manifest requests
+`CAP_CONSOLE_WRITE` and `CAP_FS_ACCESS` (the short-help read) — within
+the session baseline. `cargo test -p rustos-basename -p rustos-dirname`
+drives the parsers (operand forms, suffix spellings, bundles,
+permutation, refusals), the POSIX algorithms (root, slash-run, empty,
+suffix, and alias-root cases), and the locale switch-drift pins.
 
 ## `ls` — list directory contents (`userland/apps/ls`)
 
