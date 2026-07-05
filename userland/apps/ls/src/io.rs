@@ -28,6 +28,10 @@ pub struct Metadata {
     pub mode: u32,
     /// The size of the object in bytes.
     pub size: u64,
+    /// The owning user id, rendered numerically by the long format.
+    pub uid: u32,
+    /// The owning group id, rendered numerically by the long format.
+    pub gid: u32,
 }
 
 /// One directory entry: a name and its kind — exactly what the kernel's

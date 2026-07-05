@@ -40,6 +40,10 @@ pub enum MvError {
     Remove(Errno),
     /// Writing to the terminal failed. Carries the underlying [`Errno`].
     Output(Errno),
+    /// Asking the interactive confirmation question failed. Carries the
+    /// underlying [`Errno`]. Failing closed: an unanswerable prompt never
+    /// counts as consent.
+    Prompt(Errno),
 }
 
 impl fmt::Display for MvError {
@@ -53,6 +57,7 @@ impl fmt::Display for MvError {
             Self::Write(errno) => write!(f, "cannot write destination: {errno}"),
             Self::Remove(errno) => write!(f, "cannot remove source: {errno}"),
             Self::Output(errno) => write!(f, "terminal write failed: {errno}"),
+            Self::Prompt(errno) => write!(f, "cannot read confirmation: {errno}"),
         }
     }
 }

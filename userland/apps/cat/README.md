@@ -5,11 +5,13 @@ command app registered at `/System/Apps/cat.app/Run` so the shell
 resolves the bare word `cat` to it. `cat` reads each of its sources in
 order and writes the bytes to the terminal. A source is either a path or
 standard input (the `-` operand, and the default when no operand is
-given). With `-n` it numbers the output lines, continuously across every
-source — the POSIX model. `-h`/`-?` render the tool's own short help
-from its bundled `Help/` tree through the shared `lib/help` engine
-(`plans/APPS.md` §4), in the locale the inherited `LANG` variable names,
-falling back to the usage banner when the tree is unavailable.
+given). The option surface is the GNU `cat` set (`AGENTS.md` §16.7):
+numbering (`-n`, non-blank `-b`), blank-line squeezing (`-s`), and the
+visibility markers (`-E`, `-T`, `-v`, plus the combinations `-e`, `-t`,
+`-A`). `-h`/`-?` render the tool's own short help from its bundled
+`Help/` tree through the shared `lib/help` engine (`plans/APPS.md` §4),
+in the locale the inherited `LANG` variable names, falling back to the
+usage banner when the tree is unavailable.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
@@ -23,11 +25,22 @@ per-inode under the caller's attested identity.
 ## Usage
 
 ```
-cat [-n] [--] [file...]
+cat [-AbeEnstTuv] [--] [file...]
 
-  -n, --number   number output lines, continuously across every source
-  -h, -?         show this command's own short help
+  -A, --show-all          equivalent to -vET
+  -b, --number-nonblank   number non-empty output lines; overrides -n
+  -e                      equivalent to -vE
+  -E, --show-ends         print `$` at the end of each line
+  -n, --number            number output lines, continuously across sources
+  -s, --squeeze-blank     suppress repeated adjacent blank lines
+  -t                      equivalent to -vT
+  -T, --show-tabs         print TAB as `^I`
+  -u                      accepted and ignored (output is unbuffered)
+  -v, --show-nonprinting  `^`/`M-` notation for control/non-ASCII bytes
+  -h, -?                  show this command's own short help
 ```
+
+Short options bundle as in the GNU tool (`-nE` is `-n -E`).
 
 With no file operand, or when a file operand is `-`, `cat` reads standard
 input. `--` ends option parsing: every later argument is a file path.
@@ -40,8 +53,8 @@ source (`tools/syshelp`) — never embedded in the binary
 
 ## A stream/render machine, not a data source
 
-`run` pulls bytes from each source in fixed-size chunks and writes them —
-optionally line-numbered — to the terminal. The operations that
+`run` pulls bytes from each source in fixed-size chunks and writes them
+— shaped by the render options — to the terminal. The operations that
 reach the outside world are injected seams, mirroring the other userland
 crates (`init`'s `Spawner`/`Reaper`, `login`'s `Prompt`, `sysinfo`'s
 `Transport`):
@@ -71,9 +84,12 @@ holds is refused rather than indexed out of bounds.
 `cargo test -p rustos-cat` drives the parser and the streaming engine
 against an in-memory filesystem, a buffered standard input, and a
 recording output: the command grammar (every option, `-`/`--`, and the
-usage-error path), single- and multi-file concatenation, standard-input
-streaming, continuous line numbering across files and across a chunk
-boundary, a missing trailing newline, an empty numbered file, chunked
+usage-error path, bundled short flags, and the `-b`-overrides-`-n`
+rule), single- and multi-file concatenation, standard-input streaming,
+continuous line numbering across files and across a chunk boundary,
+non-blank numbering, blank-line squeezing (including across source
+boundaries and its numbering interaction), the `$`/`^I`/`^`/`M-` marker
+renderings, a missing trailing newline, an empty numbered file, chunked
 streaming of a multi-chunk file, the missing-file and dead-console
 fail-closed paths, the short-help render from a Help document with its
 usage-banner fallback, and the switch-drift pin that every locale's

@@ -63,6 +63,6 @@ pub mod error;
 pub mod io;
 
 pub use client::{run, USAGE};
-pub use command::{parse, Command};
+pub use command::{parse, Command, Interactive, Options};
 pub use error::RmError;
-pub use io::{Entry, EntryKind, Output, Removal};
+pub use io::{Entry, EntryKind, Output, Prompt, Removal};

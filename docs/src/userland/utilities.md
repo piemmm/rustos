@@ -314,8 +314,10 @@ tests in `lib/procinfo` (`cargo test -p rustos-procinfo`).
 the shell resolves the bare word `cat` to it). It reads each of its
 sources in order and writes the bytes to the terminal. A source is
 either a path or standard input — the `-` operand, and the default when
-no operand is given. With `-n` it numbers the output lines, continuously
-across every source, the POSIX model. `-h`/`-?` render the tool's own
+no operand is given. The option surface is the GNU `cat` set
+(`AGENTS.md` §16.7): numbering (`-n`, non-blank `-b`), blank-line
+squeezing (`-s`), and the visibility markers (`-E`, `-T`, `-v`, and the
+combinations `-e`, `-t`, `-A`). `-h`/`-?` render the tool's own
 short help from its bundled `Help/` tree through the shared `lib/help`
 engine (`plans/APPS.md` §4), in the locale the inherited `LANG` variable
 names, falling back to the usage banner when the tree is unavailable.
@@ -332,25 +334,35 @@ caller's attested identity.
 ### Grammar
 
 ```
-cat [-n] [--] [file...]
+cat [-AbeEnstTuv] [--] [file...]
 ```
 
 | Token            | Meaning                                            |
 |------------------|----------------------------------------------------|
+| `-A`, `--show-all` | equivalent to `-vET`                             |
+| `-b`, `--number-nonblank` | number non-empty output lines; overrides `-n` |
+| `-e`             | equivalent to `-vE`                                |
+| `-E`, `--show-ends` | print `$` at the end of each line               |
 | `-n`, `--number` | number output lines, continuously across sources   |
+| `-s`, `--squeeze-blank` | suppress repeated adjacent blank lines       |
+| `-t`             | equivalent to `-vT`                                |
+| `-T`, `--show-tabs` | print TAB as `^I`                               |
+| `-u`             | accepted and ignored (output is unbuffered)        |
+| `-v`, `--show-nonprinting` | `^`/`M-` notation for control and non-ASCII bytes |
 | `-h`, `-?`, `--help` | show the tool's short help (wins immediately)  |
 | `--`             | end option parsing; every later argument is a path |
 | `-`              | standard input                                     |
 | *path*           | a file to read                                     |
 
-With no `path` (or `-`) operand the single source is standard input. Any
-other leading-dash argument before `--` is a `CatError::Usage` error,
-never a silently ignored token.
+Short options bundle as in the GNU tool (`-nE` is `-n -E`). With no
+`path` (or `-`) operand the single source is standard input. Any other
+leading-dash argument before `--` is a `CatError::Usage` error, never a
+silently ignored token.
 
 ### A stream/render machine, not a data source
 
-`run` pulls bytes from each source in fixed-size chunks and writes them —
-optionally line-numbered — to the terminal. The operations that
+`run` pulls bytes from each source in fixed-size chunks and writes them
+— shaped by the render options — to the terminal. The operations that
 reach the outside world are injected seams, the same discipline as
 `sysinfo`'s `Transport`/`Output`:
 
@@ -366,12 +378,18 @@ On a running system these are syscall- and console-backed; in tests they
 are in-memory fixtures, so every parsing, streaming, and numbering
 decision is testable without a kernel.
 
-### Numbering
+### Rendering
 
-`-n` numbers each line once, when its first byte appears. The line state
-is carried across read chunks and across sources, so a line that
-straddles a chunk boundary — or a file boundary — is numbered exactly
-once, and numbering is continuous across every source.
+`-n` numbers each line once, when its first byte appears; `-b` numbers
+only non-empty lines and never numbers a blank one. The line state is
+carried across read chunks and across sources, so a line that straddles
+a chunk boundary — or a file boundary — is numbered exactly once, and
+numbering is continuous across every source. `-s` squeezes a run of
+blank lines to one — also across chunk and source boundaries — and a
+squeezed line is neither written nor numbered. `-E` prints `$` before
+each newline, `-T` renders TAB as `^I`, and `-v` renders other control
+bytes as `^X` and non-ASCII bytes in `M-` notation (`M-^@` … `M-^?`),
+leaving line feeds and tabs alone.
 
 ### Fail closed
 
@@ -389,13 +407,16 @@ once, and numbering is continuous across every source.
 `cargo test -p rustos-cat` drives the parser and the streaming engine
 against an in-memory filesystem, a buffered standard input, and a
 recording output: the command grammar (every option, `-`/`--`, and the
-usage-error path), single- and multi-file concatenation, standard-input
-streaming, continuous line numbering across files and across a chunk
-boundary, a missing trailing newline, an empty numbered file, chunked
-streaming of a multi-chunk file, the missing-file and dead-console
-fail-closed paths, the short-help render from a Help document with its
-usage-banner fallback, and the switch-drift pin that every locale's
-`OPTIONS` section documents exactly the parser's switches
+usage-error path, bundled short flags, and the `-b`-overrides-`-n`
+rule), single- and multi-file concatenation, standard-input streaming,
+continuous line numbering across files and across a chunk boundary,
+non-blank numbering, blank-line squeezing (including across source
+boundaries and its interaction with numbering), the `$`/`^I`/`^`/`M-`
+marker renderings, a missing trailing newline, an empty numbered file,
+chunked streaming of a multi-chunk file, the missing-file and
+dead-console fail-closed paths, the short-help render from a Help
+document with its usage-banner fallback, and the switch-drift pin that
+every locale's `OPTIONS` section documents exactly the parser's switches
 (`plans/APPS.md` §3.1).
 
 ## `clear` — clear the terminal screen (`userland/apps/clear`)
@@ -451,14 +472,18 @@ pin.
 command app registered at `/System/Apps/ls.app/Run`, so the shell
 resolves the bare word `ls` to it). It inspects each of its path
 operands in order: a non-directory operand is listed by name, and a
-directory operand has its entries listed, sorted by name. With no
-operand it lists the current directory (`.`). With `-a` it includes
-entries whose name begins with `.`; with `-l` it prints the long format —
-the type and permission bits, the size, then the name — the POSIX model.
-`-h`/`-?` render the tool's own short help from its bundled `Help/` tree
-through the shared `lib/help` engine (`plans/APPS.md` §4), in the locale
-the inherited `LANG` variable names, falling back to the usage banner
-when the tree is unavailable.
+directory operand has its entries listed, sorted by name (or by size
+under `-S`), unless `-d` names the directory itself. With no operand it
+lists the current directory (`.`). The option surface is the GNU `ls`
+set (`AGENTS.md` §16.7): `-a`/`-A` reveal dotfiles, `-l` (and
+`-n`/`-g`/`-o`) select the long format, `-h` scales its sizes, `-R`
+recurses, `-r` reverses, `-F`/`-p` append indicators, `-Q` quotes, and
+`-m`/`-1` pick the arrangement. `-?`/`--help` render the tool's own
+short help from its bundled `Help/` tree through the shared `lib/help`
+engine (`plans/APPS.md` §4), in the locale the inherited `LANG` variable
+names, falling back to the usage banner when the tree is unavailable
+(`-h` keeps its GNU human-readable meaning, so it is not a help switch
+here).
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
@@ -472,14 +497,28 @@ identity.
 ### Grammar
 
 ```
-ls [-a] [-l] [--] [path...]
+ls [-aAdFghlmnopQrRS1] [--] [path...]
 ```
 
 | Token            | Meaning                                            |
 |------------------|----------------------------------------------------|
 | `-a`, `--all`    | include entries whose name begins with `.`         |
-| `-l`, `--long`   | long format: type/permission bits, size, then name |
-| `-h`, `-?`, `--help` | show the tool's short help (wins immediately)  |
+| `-A`, `--almost-all` | like `-a`, but never list `.` or `..`          |
+| `-d`, `--directory` | list directory operands themselves              |
+| `-F`, `--classify` | append `/` to directories, `*` to executables    |
+| `-g`             | long format without the owner column               |
+| `-h`, `--human-readable` | with `-l`, sizes like `1.1K`, `23M`        |
+| `-l`             | long format: mode, owner, group, size, then name   |
+| `-m`             | comma-separated names on one line                  |
+| `-n`, `--numeric-uid-gid` | long format, numeric owner/group (same as `-l`) |
+| `-o`             | long format without the group column               |
+| `-p`             | append `/` to directories                          |
+| `-Q`, `--quote-name` | double-quote each rendered name                |
+| `-r`, `--reverse` | reverse the sort order                            |
+| `-R`, `--recursive` | list subdirectories recursively                 |
+| `-S`             | sort by size, largest first                        |
+| `-1`             | one name per line (the default)                    |
+| `-?`, `--help`   | show the tool's short help (wins immediately)      |
 | `--`             | end option parsing; every later argument is a path |
 | *path*           | a file or directory to list                        |
 
@@ -499,9 +538,9 @@ outside world are injected seams, the same discipline as `cat`'s
 - `Listing` — stat a path (to learn whether it is a directory) and read
   a directory's whole listing in one call, mirroring the kernel's
   one-shot `fs_readdir` contract. An entry's kind is the VFS's own
-  `FileKind` — no parallel kind enum to drift. The long format's mode
-  and size come from a per-entry stat, paid only when `-l` asks for
-  them.
+  `FileKind` — no parallel kind enum to drift. The per-entry stat behind
+  the long format's columns, the `-S` size sort, and `-F`'s execute-bit
+  check is paid only when one of them asks for it.
 - `Output` — write the rendered listing to the terminal, and advisory
   records to the standard information stream (fd 3), best-effort.
 - `rustos_help::HelpSource` — the tool's own `Help/` tree, read by the
@@ -518,10 +557,19 @@ When several operands are given, non-directory operands are listed first
 (sorted by name), then each directory operand has its entries listed,
 preceded by a `path:` header and separated from the previous block by a
 blank line — the POSIX model. A single directory operand is listed
-without a header. The short format prints one name per line; the long
-format prints the ten-character mode string (`d` for a directory, `-`
-otherwise, followed by the nine `rwx` permission bits), the size
-right-aligned across the listing, then the name.
+without a header; under `-R` every directory block is headered and
+subdirectories follow depth-first in rendered order. The short format
+prints one name per line (`-m` joins them with `, `); the long format
+prints the ten-character mode string (`d` for a directory, `-`
+otherwise, followed by the nine `rwx` permission bits), the numeric
+owner and group (omitted under `-g` / `-o`; account-name resolution
+would demand the capability-gated user database, so the GNU numeric
+fallback is the output), the size right-aligned across the block
+(scaled by `-h`), then the name. There is no link-count or timestamp
+column: the filesystem contract carries neither hard links nor
+timestamps yet, and the columns will appear when it does. `-Q` renders
+each name double-quoted with GNU C-style escapes; `-p`/`-F` append the
+indicator suffix after the closing quote.
 
 ### Advisory output (`stdinfo`, fd 3)
 
@@ -536,16 +584,17 @@ status — and nothing is emitted under `-a` or when nothing was hidden.
 ### Fail closed
 
 - An unrecognised option is a `LsError::Usage` that inspects nothing.
-- An operand (or, under `-l`, a directory entry) that cannot be stat'd
-  surfaces the underlying `Errno` as `LsError::Stat` and stops before
-  any later operand (a missing operand among several aborts rather than
-  skipping silently).
+- An operand (or a directory entry, when a per-entry stat is needed)
+  that cannot be stat'd surfaces the underlying `Errno` as
+  `LsError::Stat` and stops before any later operand (a missing operand
+  among several aborts rather than skipping silently).
 - A directory that cannot be read is `LsError::Read`; a directory
   stream carrying a non-UTF-8 name (an ABI-contract violation) is
   refused whole rather than silently thinned.
 - A failed terminal write is `LsError::Output`.
-- A missing own-help tree degrades `-h` to the usage banner — never a
+- A missing own-help tree degrades `-?` to the usage banner — never a
   fabricated page, never a failure.
+- Recursion never follows `.` or `..`, so a listing always terminates.
 
 There is no partial-guess path and no panic (`AGENTS.md` §2.9).
 
@@ -554,13 +603,18 @@ There is no partial-guess path and no panic (`AGENTS.md` §2.9).
 `cargo test -p rustos-ls` drives the parser and the listing engine
 against an in-memory tree, an in-memory help tree, and a recording
 output: the command grammar (every option, clustered short flags,
-`-`/`-?`/`--`, and the usage-error path), sorted directory listing, the
-hidden-file filter with and without `-a` (including the advisory record's
-content, its singular/plural message, the across-directories count, and
-its absence when nothing was hidden), a non-directory operand, the long
-format's mode string and right-aligned size, the per-entry stat under a
-slash-terminated operand, single- and multi-operand layout (files first,
-then directory headers), an empty directory, the short-help render and
+`-`/`-?`/`--`, the `-h`-is-human-readable rule, the retired `--long`
+spelling, and the usage-error path), sorted directory listing, the
+hidden-file filter with and without `-a`/`-A` (including the advisory
+record's content, its singular/plural message, the across-directories
+count, and its absence when nothing was hidden), a non-directory
+operand, the long format's mode string, owner/group columns (and their
+`-g`/`-o` omission), and right-aligned plain and human-readable sizes,
+the per-entry stat under a slash-terminated operand, single- and
+multi-operand layout (files first, then directory headers), recursive
+depth-first traversal with headers, reverse and size sorts, the comma
+arrangement, GNU C-style quoting, the `/` and `*` indicators, the
+human-size rounding table, an empty directory, the short-help render and
 its usage-banner fallback, and the missing-operand, unreadable-directory,
 and dead-console fail-closed paths. `ls`'s help is authored on disk in
 the bundle's own `Help/` tree and read at runtime through the injected
@@ -590,13 +644,19 @@ kernel or driver crate (`AGENTS.md` §17.4).
 ### Grammar
 
 ```
-rm [-r] [-f] [--] file...
+rm [-dfiIrRv] [--] file...
 ```
 
 | Token                   | Meaning                                            |
 |-------------------------|----------------------------------------------------|
 | `-r`, `-R`, `--recursive` | remove directories and their contents            |
 | `-f`, `--force`         | ignore operands that do not exist; never prompt    |
+| `-d`, `--dir`           | remove empty directories without `-r`              |
+| `-i`, `--interactive`   | prompt before every removal                        |
+| `-I`                    | prompt once before removing more than three operands, or before a recursive removal |
+| `-v`, `--verbose`       | report each removal                                |
+| `--preserve-root`       | refuse to remove `/` (the default)                 |
+| `--no-preserve-root`    | allow removing `/`                                 |
 | `-h`, `--help`          | print the usage banner (wins immediately)          |
 | `--`                    | end option parsing; every later argument is a path |
 | *file*                  | a file or directory to remove                      |
@@ -605,7 +665,8 @@ At least one file operand is required unless `-f` is given (an empty
 `rm -f` removes nothing and succeeds). Short options may be combined into
 one argument (e.g. `-rf` is `-r -f`); an unrecognised letter anywhere in
 such a cluster is a `RmError::Usage` error. The bare `-` is a path named
-`-`, not an option.
+`-`, not an option. As in the GNU tool, the later of `-f` / `-i` / `-I`
+wins: `-f` cancels prompting and a prompt flag cancels `-f`.
 
 ### A removal machine, not a data source
 
@@ -616,12 +677,19 @@ discipline as `ls`'s `Listing`/`Output`:
 
 - `Removal` — learn a path's kind, read a directory's entries by index,
   and remove a file or an emptied directory.
-- `Output` — write the usage banner to the terminal (`rm` is silent on
-  success).
+- `Prompt` — ask the `-i`/`-I` confirmation questions; a declined
+  question skips the object (or the whole run for `-I`) without error,
+  and an unanswerable one fails closed — never treated as consent.
+- `Output` — write the usage banner and the `-v` `removed '…'` /
+  `removed directory '…'` reports to the terminal (`rm` is otherwise
+  silent on success).
 
 On a running system these are syscall- and console-backed; in tests they
-are in-memory fixtures, so every parsing, recursion, and force decision
-is testable without a kernel.
+are in-memory fixtures, so every parsing, recursion, prompting, and
+force decision is testable without a kernel. `--preserve-root` (the
+default) refuses the operand `/` outright; `-d` removes an empty
+directory without `-r`, surfacing the filesystem's own refusal of a full
+one.
 
 ### Recursion order
 
@@ -676,25 +744,33 @@ kernel or driver crate (`AGENTS.md` §17.4).
 ### Grammar
 
 ```
-cp [-r] [-f] [--] source... dest
+cp [-finrRvT] [-t dir] [--] source... dest
 ```
 
 | Token                     | Meaning                                            |
 |---------------------------|----------------------------------------------------|
 | `-r`, `-R`, `--recursive` | copy directories and their contents                |
 | `-f`, `--force`           | remove an unwritable destination and retry         |
+| `-i`, `--interactive`     | ask before overwriting an existing file            |
+| `-n`, `--no-clobber`      | never overwrite an existing file                   |
+| `-v`, `--verbose`         | report each copy                                   |
+| `-t dir`, `--target-directory=dir` | copy every source into `dir`              |
+| `-T`, `--no-target-directory` | treat dest as a normal file (one source)      |
 | `-h`, `--help`            | print the usage banner (wins immediately)          |
 | `--`                      | end option parsing; every later argument is a path |
 | *source*                  | a file or directory to copy                        |
 | *dest*                    | the destination path (the last operand)            |
 
 At least one source and a destination are required (fewer than two path
-operands is a `CpError::Usage`). The last path operand is the
-destination; the rest are the sources. With more than one source the
-destination must be a directory. Short options may be combined into one
-argument (e.g. `-rf` is `-r -f`); an unrecognised letter anywhere in such
-a cluster is a `CpError::Usage`. The bare `-` is a path named `-`, not an
-option.
+operands is a `CpError::Usage`). Without `-t` the last path operand is
+the destination and the rest are the sources; with `-t` every operand is
+a source and the `-t` directory must exist. With more than one source
+the destination must be a directory (`-T` refuses more than one source).
+Short options may be combined into one argument (e.g. `-rf` is `-r -f`);
+an unrecognised letter anywhere in such a cluster is a `CpError::Usage`.
+The bare `-` is a path named `-`, not an option. As in the GNU tool, the
+later of `-i` / `-n` wins, `-t` takes its directory attached (`-tdir`)
+or as the next argument, and `-t` with `-T` is a usage error.
 
 ### A copy machine, not a data source
 
@@ -706,12 +782,16 @@ injected seams, the same discipline as `rm`'s `Removal`/`Output`:
 - `FileSystem` — learn a path's kind, read a file's bytes and a
   directory's entries, and create directories, files, and bytes (plus
   remove a destination file for `-f`).
-- `Output` — write the usage banner to the terminal (`cp` is silent on
-  success).
+- `Prompt` — ask the `-i` overwrite question; a declined question skips
+  that copy without error, and an unanswerable one fails closed — never
+  treated as consent.
+- `Output` — write the usage banner and the `-v` `'src' -> 'dst'`
+  reports to the terminal (`cp` is otherwise silent on success).
 
 On a running system these are syscall- and console-backed; in tests they
-are in-memory fixtures, so every parsing, recursion, and force decision
-is testable without a kernel.
+are in-memory fixtures, so every parsing, recursion, clobber, and force
+decision is testable without a kernel. `-n` silently skips an existing
+destination file (a new one still copies).
 
 ### Streaming and recursion
 
@@ -780,17 +860,28 @@ kernel or driver crate (`AGENTS.md` §17.4).
 ### Grammar
 
 ```
-mv [-f] [-n] [--] source... dest
+mv [-finvT] [-t dir] [--] source... dest
 
-  -f, --force        remove a blocking destination and retry the rename
-  -n, --no-clobber   never overwrite an existing destination
-  -h, --help         show the usage banner
+  -f, --force                remove a blocking destination and retry the
+                             rename; never prompt
+  -i, --interactive          ask before overwriting an existing destination
+  -n, --no-clobber           never overwrite an existing destination
+  -v, --verbose              report each move (renamed 'src' -> 'dst')
+  -t dir, --target-directory=dir
+                             move every source into dir
+  -T, --no-target-directory  treat dest as a normal file (one source)
+  -h, --help                 show the usage banner
 ```
 
 At least one source and a destination are required. Short options may be
 combined (e.g. `-fn`). `--` ends option parsing: every later argument is
-a path. With more than one source the destination must be a directory.
-`-h`/`--help` wins immediately.
+a path. With more than one source the destination must be a directory
+(`-T` refuses more than one source; `-t`'s directory must exist).
+`-h`/`--help` wins immediately. As in the GNU tool, the last of `-f` /
+`-i` / `-n` wins; `-i` asks through the injected `Prompt` seam before
+replacing an existing destination — a declined question skips that move
+without error and an unanswerable one fails closed, never treated as
+consent.
 
 ### A move machine, not a data source
 
@@ -881,17 +972,25 @@ kernel or driver crate (`AGENTS.md` §17.4).
 ### Grammar
 
 ```
-chmod [-R] [--] MODE file...
+chmod [-cfRv] [--] MODE file...
 
-  -R, --recursive  change files and directories recursively
-  -h, --help       show the usage banner
+  -R, --recursive       change files and directories recursively
+  -c, --changes         report only files whose mode actually changed
+  -v, --verbose         report every file processed
+  -f, --silent, --quiet suppress most error messages
+  -h, --help            show the usage banner
 ```
 
 A mode and at least one file are required. `--` ends option parsing:
 every later argument is an operand. POSIX `chmod` spells recursive `-R`;
 a bare `-r` is not an option. To set a mode that begins with `-`, write
 it without the dash (`a-w`) or end option parsing first
-(`chmod -- -w file`). `-h`/`--help` wins immediately.
+(`chmod -- -w file`). `-h`/`--help` wins immediately. The later of `-c`
+/ `-v` wins; the reports use the GNU wording (`mode of 'f' changed from
+0644 (rw-r--r--) to 0664 (rw-rw-r--)`, `mode of 'f' retained as …`).
+`-f` suppresses each failing operand's diagnostic and keeps going, then
+fails the whole run with the message-less `ChmodError::Silenced` — the
+exit status still reflects the failure.
 
 ### The mode grammar
 
@@ -972,16 +1071,25 @@ kernel or driver crate (`AGENTS.md` §17.4).
 ### Grammar
 
 ```
-chown [-R] [--] OWNER[:GROUP] file...
+chown [-cfRv] [--] OWNER[:GROUP] file...
 
-  -R, --recursive  change files and directories recursively
-  -h, --help       show the usage banner
+  -R, --recursive       change files and directories recursively
+  -c, --changes         report only files whose ownership actually changed
+  -v, --verbose         report every file processed
+  -f, --silent, --quiet suppress most error messages
+  -h, --help            show the usage banner
 ```
 
 An owner spec and at least one file are required. `--` ends option
 parsing: every later argument is an operand. POSIX `chown` spells
 recursive `-R`; a bare `-r` is not an option. `-h`/`--help` wins
-immediately.
+immediately. The later of `-c` / `-v` wins; the reports use the GNU
+wording shaped by the owner spec (`changed ownership of 'f' from
+1000:100 to 0:0`, `changed group of 'f' from …`, `… retained as …`),
+reading each node's current owner through the seam's `Metadata` stat.
+`-f` suppresses each failing operand's diagnostic and keeps going, then
+fails the whole run with the message-less `ChownError::Silenced` — the
+exit status still reflects the failure.
 
 ### The owner grammar
 

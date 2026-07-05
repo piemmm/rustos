@@ -7,13 +7,13 @@ use alloc::vec::Vec;
 use rustos_abi::Errno;
 use rustos_help::{own_short_help, HelpSource};
 
-use crate::command::{Command, Source};
+use crate::command::{Command, Numbering, Render, Source};
 use crate::error::CatError;
 use crate::io::{FileSource, Input, Output};
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `cat`'s own Help tree is unavailable.
-pub const USAGE: &str = "usage: cat [-n] [--] [file...]";
+pub const USAGE: &str = "usage: cat [-AbeEnstTuv] [--] [file...]";
 
 /// `cat`'s own command word: the short-help switches render its own Help
 /// document through the same engine as any other command's.
@@ -48,8 +48,8 @@ pub fn run(
 ) -> Result<(), CatError> {
     match command {
         Command::Help => short_help(locale, help, out),
-        Command::Concat { number, sources } => {
-            let mut emitter = Emitter::new(number);
+        Command::Concat { render, sources } => {
+            let mut emitter = Emitter::new(render);
             for source in &sources {
                 match source {
                     Source::Stdin => pump(|buf| stdin.read(buf), &mut emitter, out)?,
@@ -108,52 +108,116 @@ where
     }
 }
 
-/// Renders byte chunks to the terminal, optionally prefixing each line with a
-/// continuous line number.
+/// Renders byte chunks to the terminal, applying the [`Render`] options:
+/// line numbering, blank-line squeezing, end-of-line markers, and the
+/// `^`/`M-` visible notation.
 ///
 /// The line state is carried across chunks and across sources, so a line that
 /// straddles a chunk boundary — or a file boundary — is numbered exactly
-/// once, when its first byte appears.
+/// once, when its first byte appears, and a blank-line run that straddles a
+/// boundary squeezes correctly.
 struct Emitter {
-    number: bool,
+    render: Render,
     line_no: u64,
     at_line_start: bool,
+    prev_line_blank: bool,
 }
 
 impl Emitter {
-    fn new(number: bool) -> Self {
+    fn new(render: Render) -> Self {
         Self {
-            number,
+            render,
             line_no: 1,
             at_line_start: true,
+            prev_line_blank: false,
         }
     }
 
-    /// Emit `chunk`, prefixing line numbers when numbering is enabled.
+    /// Emit `chunk` through the render options.
     fn emit(&mut self, chunk: &[u8], out: &dyn Output) -> Result<(), CatError> {
-        if !self.number {
+        if self.render == Render::PLAIN {
             return out.write_all(chunk).map_err(CatError::Output);
         }
         let mut rendered = Vec::with_capacity(chunk.len());
         for &byte in chunk {
+            if byte == b'\n' {
+                let blank = self.at_line_start;
+                self.at_line_start = true;
+                if blank {
+                    if self.render.squeeze_blank && self.prev_line_blank {
+                        continue;
+                    }
+                    self.prev_line_blank = true;
+                    // Only `-n` numbers a blank line; `-b` leaves it bare.
+                    if self.render.numbering == Numbering::All {
+                        self.push_line_number(&mut rendered);
+                    }
+                } else {
+                    self.prev_line_blank = false;
+                }
+                if self.render.show_ends {
+                    rendered.push(b'$');
+                }
+                rendered.push(b'\n');
+                continue;
+            }
             if self.at_line_start {
-                rendered.extend_from_slice(format!("{:>6}\t", self.line_no).as_bytes());
-                self.line_no = self.line_no.saturating_add(1);
+                if self.render.numbering != Numbering::None {
+                    self.push_line_number(&mut rendered);
+                }
                 self.at_line_start = false;
             }
-            rendered.push(byte);
-            if byte == b'\n' {
-                self.at_line_start = true;
-            }
+            self.push_visible(byte, &mut rendered);
         }
         out.write_all(&rendered).map_err(CatError::Output)
+    }
+
+    fn push_line_number(&mut self, rendered: &mut Vec<u8>) {
+        rendered.extend_from_slice(format!("{:>6}\t", self.line_no).as_bytes());
+        self.line_no = self.line_no.saturating_add(1);
+    }
+
+    /// Push one non-newline byte, applying the `-T` tab marker and the `-v`
+    /// `^`/`M-` notation for control and non-ASCII bytes.
+    fn push_visible(&self, byte: u8, rendered: &mut Vec<u8>) {
+        if byte == b'\t' {
+            if self.render.show_tabs {
+                rendered.extend_from_slice(b"^I");
+            } else {
+                rendered.push(b'\t');
+            }
+            return;
+        }
+        if !self.render.show_nonprinting {
+            rendered.push(byte);
+            return;
+        }
+        match byte {
+            0..=31 => {
+                rendered.push(b'^');
+                rendered.push(byte + 64);
+            }
+            127 => rendered.extend_from_slice(b"^?"),
+            128..=255 => {
+                rendered.extend_from_slice(b"M-");
+                match byte - 128 {
+                    low @ 0..=31 => {
+                        rendered.push(b'^');
+                        rendered.push(low + 64);
+                    }
+                    127 => rendered.extend_from_slice(b"^?"),
+                    low => rendered.push(low),
+                }
+            }
+            _ => rendered.push(byte),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{run, USAGE};
-    use crate::command::{Command, Source};
+    use crate::command::{Command, Numbering, Render, Source};
     use crate::error::CatError;
     use crate::io::{FileSource, Input, Output};
     use alloc::string::String;
@@ -306,8 +370,21 @@ mod tests {
         }
     }
 
-    fn concat(number: bool, sources: Vec<Source>) -> Command {
-        Command::Concat { number, sources }
+    fn concat(render: Render, sources: Vec<Source>) -> Command {
+        Command::Concat { render, sources }
+    }
+
+    /// The plain pass-through rendering.
+    fn plain() -> Render {
+        Render::PLAIN
+    }
+
+    /// A rendering with `-n`-style all-lines numbering.
+    fn numbered() -> Render {
+        Render {
+            numbering: Numbering::All,
+            ..Render::PLAIN
+        }
     }
 
     fn path(name: &str) -> Source {
@@ -372,7 +449,7 @@ mod tests {
         let out = Recorder::new();
         assert_eq!(
             run_cat(
-                concat(false, vec![path("a.txt")]),
+                concat(plain(), vec![path("a.txt")]),
                 &fs,
                 &StdinFixture::empty(),
                 &out
@@ -388,7 +465,7 @@ mod tests {
         let out = Recorder::new();
         assert_eq!(
             run_cat(
-                concat(false, vec![path("a"), path("b")]),
+                concat(plain(), vec![path("a"), path("b")]),
                 &fs,
                 &StdinFixture::empty(),
                 &out
@@ -404,7 +481,7 @@ mod tests {
         let out = Recorder::new();
         assert_eq!(
             run_cat(
-                concat(false, vec![Source::Stdin]),
+                concat(plain(), vec![Source::Stdin]),
                 &fs,
                 &StdinFixture::new(b"from stdin\n"),
                 &out
@@ -420,7 +497,7 @@ mod tests {
         let out = Recorder::new();
         assert_eq!(
             run_cat(
-                concat(false, vec![path("a"), Source::Stdin, path("b")]),
+                concat(plain(), vec![path("a"), Source::Stdin, path("b")]),
                 &fs,
                 &StdinFixture::new(b"S\n"),
                 &out
@@ -438,7 +515,7 @@ mod tests {
         let out = Recorder::new();
         assert_eq!(
             run_cat(
-                concat(true, vec![path("a"), path("b")]),
+                concat(numbered(), vec![path("a"), path("b")]),
                 &fs,
                 &StdinFixture::empty(),
                 &out
@@ -454,7 +531,7 @@ mod tests {
         let out = Recorder::new();
         assert_eq!(
             run_cat(
-                concat(true, vec![path("a")]),
+                concat(numbered(), vec![path("a")]),
                 &fs,
                 &StdinFixture::empty(),
                 &out
@@ -474,7 +551,7 @@ mod tests {
         let out = Recorder::new();
         assert_eq!(
             run_cat(
-                concat(true, vec![path("big")]),
+                concat(numbered(), vec![path("big")]),
                 &fs,
                 &StdinFixture::empty(),
                 &out
@@ -494,7 +571,7 @@ mod tests {
         let out = Recorder::new();
         assert_eq!(
             run_cat(
-                concat(true, vec![path("empty")]),
+                concat(numbered(), vec![path("empty")]),
                 &fs,
                 &StdinFixture::empty(),
                 &out
@@ -510,7 +587,7 @@ mod tests {
         let out = Recorder::new();
         assert_eq!(
             run_cat(
-                concat(false, vec![path("absent")]),
+                concat(plain(), vec![path("absent")]),
                 &fs,
                 &StdinFixture::empty(),
                 &out
@@ -526,7 +603,7 @@ mod tests {
         // The missing first file aborts; "a" is never read.
         assert_eq!(
             run_cat(
-                concat(false, vec![path("absent"), path("a")]),
+                concat(plain(), vec![path("absent"), path("a")]),
                 &fs,
                 &StdinFixture::empty(),
                 &out
@@ -542,7 +619,7 @@ mod tests {
         let out = Recorder::failing_at(0);
         assert_eq!(
             run_cat(
-                concat(false, vec![path("a")]),
+                concat(plain(), vec![path("a")]),
                 &fs,
                 &StdinFixture::empty(),
                 &out
@@ -563,7 +640,7 @@ mod tests {
         let out = Recorder::new();
         assert_eq!(
             run_cat(
-                concat(false, vec![path("big")]),
+                concat(plain(), vec![path("big")]),
                 &fs,
                 &StdinFixture::empty(),
                 &out
@@ -571,5 +648,174 @@ mod tests {
             Ok(())
         );
         assert_eq!(out.bytes.borrow().as_slice(), data.as_slice());
+    }
+
+    #[test]
+    fn nonblank_numbering_skips_blank_lines() {
+        let fs = MapFs::new().with("a", b"one\n\ntwo\n\n\nthree\n");
+        let out = Recorder::new();
+        let render = Render {
+            numbering: Numbering::NonBlank,
+            ..Render::PLAIN
+        };
+        assert_eq!(
+            run_cat(
+                concat(render, vec![path("a")]),
+                &fs,
+                &StdinFixture::empty(),
+                &out
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            out.text(),
+            "     1\tone\n\n     2\ttwo\n\n\n     3\tthree\n"
+        );
+    }
+
+    #[test]
+    fn squeeze_blank_collapses_runs_to_one() {
+        let fs = MapFs::new().with("a", b"one\n\n\n\ntwo\n\nthree\n");
+        let out = Recorder::new();
+        let render = Render {
+            squeeze_blank: true,
+            ..Render::PLAIN
+        };
+        assert_eq!(
+            run_cat(
+                concat(render, vec![path("a")]),
+                &fs,
+                &StdinFixture::empty(),
+                &out
+            ),
+            Ok(())
+        );
+        assert_eq!(out.text(), "one\n\ntwo\n\nthree\n");
+    }
+
+    #[test]
+    fn squeeze_blank_spans_source_boundaries() {
+        // A blank-line run split across two files still squeezes to one.
+        let fs = MapFs::new().with("a", b"one\n\n\n").with("b", b"\n\ntwo\n");
+        let out = Recorder::new();
+        let render = Render {
+            squeeze_blank: true,
+            ..Render::PLAIN
+        };
+        assert_eq!(
+            run_cat(
+                concat(render, vec![path("a"), path("b")]),
+                &fs,
+                &StdinFixture::empty(),
+                &out
+            ),
+            Ok(())
+        );
+        assert_eq!(out.text(), "one\n\ntwo\n");
+    }
+
+    #[test]
+    fn squeeze_with_numbering_does_not_number_squeezed_lines() {
+        let fs = MapFs::new().with("a", b"one\n\n\n\ntwo\n");
+        let out = Recorder::new();
+        let render = Render {
+            numbering: Numbering::All,
+            squeeze_blank: true,
+            ..Render::PLAIN
+        };
+        assert_eq!(
+            run_cat(
+                concat(render, vec![path("a")]),
+                &fs,
+                &StdinFixture::empty(),
+                &out
+            ),
+            Ok(())
+        );
+        assert_eq!(out.text(), "     1\tone\n     2\t\n     3\ttwo\n");
+    }
+
+    #[test]
+    fn show_ends_marks_every_line() {
+        let fs = MapFs::new().with("a", b"one\n\ntwo");
+        let out = Recorder::new();
+        let render = Render {
+            show_ends: true,
+            ..Render::PLAIN
+        };
+        assert_eq!(
+            run_cat(
+                concat(render, vec![path("a")]),
+                &fs,
+                &StdinFixture::empty(),
+                &out
+            ),
+            Ok(())
+        );
+        // The final line has no newline, so no `$` is invented for it.
+        assert_eq!(out.text(), "one$\n$\ntwo");
+    }
+
+    #[test]
+    fn show_ends_with_nonblank_numbering_leaves_blank_lines_bare() {
+        let fs = MapFs::new().with("a", b"one\n\ntwo\n");
+        let out = Recorder::new();
+        let render = Render {
+            numbering: Numbering::NonBlank,
+            show_ends: true,
+            ..Render::PLAIN
+        };
+        assert_eq!(
+            run_cat(
+                concat(render, vec![path("a")]),
+                &fs,
+                &StdinFixture::empty(),
+                &out
+            ),
+            Ok(())
+        );
+        assert_eq!(out.text(), "     1\tone$\n$\n     2\ttwo$\n");
+    }
+
+    #[test]
+    fn show_tabs_renders_caret_i() {
+        let fs = MapFs::new().with("a", b"a\tb\n");
+        let out = Recorder::new();
+        let render = Render {
+            show_tabs: true,
+            ..Render::PLAIN
+        };
+        assert_eq!(
+            run_cat(
+                concat(render, vec![path("a")]),
+                &fs,
+                &StdinFixture::empty(),
+                &out
+            ),
+            Ok(())
+        );
+        assert_eq!(out.text(), "a^Ib\n");
+    }
+
+    #[test]
+    fn show_nonprinting_uses_caret_and_meta_notation() {
+        // NUL, BEL, DEL, a meta control byte, a meta printable byte, and
+        // M-DEL, with TAB and LFD left alone (only `-T` marks tabs).
+        let fs = MapFs::new().with("a", &[0x00, 0x07, 0x7f, 0x80, 0xc1, 0xff, b'\t', b'\n']);
+        let out = Recorder::new();
+        let render = Render {
+            show_nonprinting: true,
+            ..Render::PLAIN
+        };
+        assert_eq!(
+            run_cat(
+                concat(render, vec![path("a")]),
+                &fs,
+                &StdinFixture::empty(),
+                &out
+            ),
+            Ok(())
+        );
+        assert_eq!(out.text(), "^@^G^?M-^@M-AM-^?\t\n");
     }
 }

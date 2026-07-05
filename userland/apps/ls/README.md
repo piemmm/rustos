@@ -4,12 +4,14 @@ A `plans/APPS.md` command app (`AGENTS.md` §3 `userland/apps/`),
 registered at `/System/Apps/ls.app/Run` so the shell resolves the bare
 word `ls` to it. `ls` inspects each of its path operands in order. A
 non-directory operand is listed by name; a directory operand has its
-entries listed, sorted by name. With no operand it lists the current
-directory (`.`). With `-a` it includes entries whose name begins with
-`.`; with `-l` it prints the long format — the type and permission bits,
-the size, then the name — the POSIX model. `-h`/`-?` render the tool's
-own short help from its bundled `Help/` tree through the shared
-`lib/help` engine (`plans/APPS.md` §4).
+entries listed, sorted by name (or by size under `-S`), unless `-d`
+names the directory itself. With no operand it lists the current
+directory (`.`). The option surface follows GNU coreutils (`AGENTS.md`
+§16.7): `-a`/`-A` reveal dotfiles, `-l` (and `-n`/`-g`/`-o`) select the
+long format, `-h` scales sizes, `-R` recurses, `-r` reverses, `-F`/`-p`
+append indicators, `-Q` quotes, and `-m`/`-1` pick the arrangement.
+`-?`/`--help` render the tool's own short help from its bundled `Help/`
+tree through the shared `lib/help` engine (`plans/APPS.md` §4).
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
@@ -22,16 +24,33 @@ authorises every path per-inode under the caller's attested identity.
 ## Usage
 
 ```
-ls [-a] [-l] [--] [path...]
+ls [-aAdFghlmnopQrRS1] [--] [path...]
 
-  -a, --all    do not hide entries whose name begins with `.`
-  -l, --long   long format: type and permission bits, size, then name
-  -h, -?       show this command's short help (also `--help`)
+  -a, --all              do not hide entries whose name begins with `.`
+  -A, --almost-all       like -a, but never list `.` or `..`
+  -d, --directory        list directory operands themselves
+  -F, --classify         append `/` to directories, `*` to executables
+  -g                     long format without the owner column
+  -h, --human-readable   with -l, sizes like `1.1K`, `23M`
+  -l                     long format: mode, owner, group, size, name
+  -m                     comma-separated names
+  -n, --numeric-uid-gid  long format, numeric owner/group (same as -l)
+  -o                     long format without the group column
+  -p                     append `/` to directories
+  -Q, --quote-name       double-quote each name
+  -r, --reverse          reverse the sort order
+  -R, --recursive        list subdirectories recursively
+  -S                     sort by size, largest first
+  -1                     one name per line (the default)
+  -?                     show this command's short help (also `--help`)
 ```
 
 With no path operand `ls` lists the current directory. Short options may
 be combined (e.g. `-la`). `--` ends option parsing: every later argument
-is a path.
+is a path. The long format has no link-count or timestamp column (the
+filesystem contract carries neither yet) and renders owner/group as
+numeric ids — the GNU numeric fallback — because name resolution needs
+the capability-gated user database.
 
 ## A render machine, not a data source
 
@@ -44,8 +63,9 @@ injected seams, mirroring the other userland crates (`cat`'s
 - `Listing` — stat a path and read a directory's whole listing in one
   call, mirroring the kernel's one-shot `fs_readdir` contract. An
   entry's kind is the VFS's own `FileKind` (no parallel kind enum); the
-  long format's per-entry mode and size come from a per-entry stat, paid
-  only when `-l` asks for them.
+  per-entry stat behind the long format's columns, the `-S` size sort,
+  and `-F`'s execute-bit check is paid only when one of them asks for
+  it.
 - `Output` — write the rendered listing to the terminal and advisory
   records to the standard information stream (fd 3), best-effort.
 - `rustos_help::HelpSource` — the tool's own `Help/` tree, read by the
@@ -74,25 +94,27 @@ Advisory only — never affecting the listing, ordering, or exit status.
 
 `Help/<locale>/ls.md` carries the canonical `default/` (en-US) document
 plus the required translations (`fr-FR`, `de-DE`, `es-ES`, `uk-UA`,
-`it-IT`, `plans/APPS.md` §8.1). `src/help.rs` embeds the tree; the image
-builder (`tools/mkimage`) and the QEMU image fixture plant those same
-bytes at `/System/Apps/ls.app/Help/`, so image and source cannot drift.
+`it-IT`, `plans/APPS.md` §8.1). The tree is authored on disk only:
+`tools/syshelp` discovers it and the image builder (`tools/mkimage`) and
+the QEMU image fixture plant it at `/System/Apps/ls.app/Help/`; the
+binary embeds no help bytes (`plans/APPS.md` §6.1).
 
 ## Fail closed
 
 An unknown option is a `LsError::Usage` that inspects nothing. An
-operand (or, under `-l`, a directory entry) that cannot be stat'd
-surfaces the underlying `Errno` as `LsError::Stat` and stops before any
-later operand. A directory that cannot be read is `LsError::Read`; a
-directory stream carrying a non-UTF-8 name (an ABI-contract violation)
-is refused whole rather than silently thinned. A failed terminal write
-is `LsError::Output`. A missing own-help tree degrades `-h` to the usage
-banner. There is no partial-guess path and no panic (`AGENTS.md` §2.9).
+operand (or a directory entry, when a per-entry stat is needed) that
+cannot be stat'd surfaces the underlying `Errno` as `LsError::Stat` and
+stops before any later operand. A directory that cannot be read is
+`LsError::Read`; a directory stream carrying a non-UTF-8 name (an
+ABI-contract violation) is refused whole rather than silently thinned. A
+failed terminal write is `LsError::Output`. A missing own-help tree
+degrades `-?` to the usage banner. There is no partial-guess path and no
+panic (`AGENTS.md` §2.9).
 
 ## Tests
 
 `cargo test -p rustos-ls` drives the parser, the listing engine, and the
-embedded help tree against in-memory fixtures; the aarch64
+on-disk help tree against in-memory fixtures; the aarch64
 session-ceiling QEMU vertical types `ls /System/Apps` in a real session
 and sees `man.app` in the listing.
 

@@ -16,11 +16,17 @@ kernel or driver crate (`AGENTS.md` §17.4).
 ## Usage
 
 ```
-mv [-f] [-n] [--] source... dest
+mv [-finvT] [-t dir] [--] source... dest
 
-  -f, --force        remove a blocking destination and retry the rename
-  -n, --no-clobber   never overwrite an existing destination
-  -h, --help         show the usage banner
+  -f, --force                remove a blocking destination and retry the
+                             rename; never prompt
+  -i, --interactive          ask before overwriting an existing destination
+  -n, --no-clobber           never overwrite an existing destination
+  -v, --verbose              report each move (renamed 'src' -> 'dst')
+  -t dir, --target-directory=dir
+                             move every source into dir
+  -T, --no-target-directory  treat dest as a normal file (one source)
+  -h, --help                 show the usage banner
 ```
 
 At least one source and a destination are required. Short options may be
@@ -38,7 +44,9 @@ the outside world are injected seams, mirroring the other userland crates
 - `FileSystem` — learn a path's kind, rename a path, read a file's bytes
   and a directory's entries, create directories/files/bytes, and remove
   files and directories (for the cross-device relocation and for `-f`).
-- `Output` — write the usage banner to the terminal (`mv` is silent on
+- `Prompt` — ask the `-i` overwrite question, fail-closed on an
+  unanswerable prompt (never treated as consent).
+- `Output` — write the usage banner and the `-v` reports (`mv` is otherwise silent on
   success).
 
 On a running system these are syscall- and console-backed; in tests they

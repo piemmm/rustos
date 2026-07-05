@@ -32,6 +32,10 @@ pub enum ChmodError {
     /// Writing the usage banner to the terminal failed. Carries the underlying
     /// [`Errno`].
     Output(Errno),
+    /// One or more operands failed under `-f`: the diagnostics were
+    /// suppressed and the run continued, but the failure still fails the
+    /// run. Carries no message — that is the point of `-f`.
+    Silenced,
 }
 
 impl fmt::Display for ChmodError {
@@ -42,6 +46,7 @@ impl fmt::Display for ChmodError {
             Self::Stat(errno) => write!(f, "cannot access path: {errno}"),
             Self::Apply(errno) => write!(f, "cannot change mode: {errno}"),
             Self::Read(errno) => write!(f, "cannot read directory: {errno}"),
+            Self::Silenced => f.write_str("some operands failed (diagnostics suppressed by -f)"),
             Self::Output(errno) => write!(f, "terminal write failed: {errno}"),
         }
     }

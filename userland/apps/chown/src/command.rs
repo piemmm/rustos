@@ -5,14 +5,47 @@ use alloc::vec::Vec;
 
 use crate::error::ChownError;
 
+/// Which ownership changes are reported on standard output.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Verbosity {
+    /// Report nothing (the default).
+    None,
+    /// Report only files whose ownership actually changed (`-c`).
+    Changes,
+    /// Report every file processed (`-v`).
+    All,
+}
+
+/// The full option set of one `chown` run.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Options {
+    /// Descend into directories and apply the owner to their contents
+    /// (`-R`/`--recursive`).
+    pub recursive: bool,
+    /// The reporting policy (`-c` / `-v`, last one wins).
+    pub verbosity: Verbosity,
+    /// Suppress per-operand error diagnostics and keep going (`-f`); a
+    /// suppressed failure still fails the run as
+    /// [`ChownError::Silenced`].
+    pub quiet: bool,
+}
+
+impl Options {
+    /// The defaults of a bare `chown`.
+    pub const DEFAULT: Self = Self {
+        recursive: false,
+        verbosity: Verbosity::None,
+        quiet: false,
+    };
+}
+
 /// One thing the `chown` tool can do.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Command {
     /// Apply `owner` to each of `files`, in operand order.
     Change {
-        /// Descend into directories and apply the owner to their contents
-        /// (`-R`/`--recursive`).
-        recursive: bool,
+        /// The change options.
+        options: Options,
         /// The owner (user and/or group) to apply.
         owner: Owner,
         /// The files to change, in order. Always at least one.
@@ -46,9 +79,15 @@ pub struct Owner {
 /// Parse `args` (the tool's arguments, excluding the program name) into a
 /// [`Command`].
 ///
-/// The grammar is the familiar `chown [-R] [--] OWNER[:GROUP] file...`:
+/// The grammar is the GNU `chown` surface,
+/// `chown [-cfRv] [--] OWNER[:GROUP] file...`:
 ///
 /// * `-R` / `--recursive` — descend into directories.
+/// * `-c` / `--changes` — report only files whose ownership actually
+///   changed.
+/// * `-v` / `--verbose` — report every file processed.
+/// * `-f` / `--silent` / `--quiet` — suppress per-operand error
+///   diagnostics and keep going (the run still fails).
 /// * `-h` / `--help` — print the usage banner (wins immediately).
 /// * `--` — end option parsing; every later argument is an operand.
 /// * any other `-…` — a [`ChownError::Usage`] error (fail closed; never a
@@ -64,7 +103,7 @@ pub struct Owner {
 /// [`ChownError::BadOwner`] when the owner operand is not a valid
 /// `OWNER`/`OWNER:GROUP`/`:GROUP` spec.
 pub fn parse(args: &[&str]) -> Result<Command, ChownError> {
-    let mut recursive = false;
+    let mut options = Options::DEFAULT;
     let mut operands = Vec::new();
     let mut options_done = false;
     for &arg in args {
@@ -75,7 +114,10 @@ pub fn parse(args: &[&str]) -> Result<Command, ChownError> {
             }
             if let Some(name) = arg.strip_prefix("--") {
                 match name {
-                    "recursive" => recursive = true,
+                    "recursive" => options.recursive = true,
+                    "changes" => options.verbosity = Verbosity::Changes,
+                    "verbose" => options.verbosity = Verbosity::All,
+                    "silent" | "quiet" => options.quiet = true,
                     "help" => return Ok(Command::Help),
                     _ => return Err(ChownError::Usage),
                 }
@@ -84,7 +126,10 @@ pub fn parse(args: &[&str]) -> Result<Command, ChownError> {
             if let Some(letters) = arg.strip_prefix('-').filter(|rest| !rest.is_empty()) {
                 for letter in letters.chars() {
                     match letter {
-                        'R' => recursive = true,
+                        'R' => options.recursive = true,
+                        'c' => options.verbosity = Verbosity::Changes,
+                        'v' => options.verbosity = Verbosity::All,
+                        'f' => options.quiet = true,
                         'h' => return Ok(Command::Help),
                         _ => return Err(ChownError::Usage),
                     }
@@ -103,7 +148,7 @@ pub fn parse(args: &[&str]) -> Result<Command, ChownError> {
     }
     let owner = parse_owner(&owner_spec).ok_or(ChownError::BadOwner)?;
     Ok(Command::Change {
-        recursive,
+        options,
         owner,
         files: operands,
     })
@@ -167,14 +212,17 @@ fn parse_id(text: &str) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse, parse_owner, Command, Owner};
+    use super::{parse, parse_owner, Command, Options, Owner, Verbosity};
     use crate::error::ChownError;
     use alloc::string::String;
     use alloc::vec::Vec;
 
     fn change(recursive: bool, owner: Owner, files: &[&str]) -> Command {
         Command::Change {
-            recursive,
+            options: Options {
+                recursive,
+                ..Options::DEFAULT
+            },
             owner,
             files: files.iter().map(|p| String::from(*p)).collect::<Vec<_>>(),
         }
@@ -185,6 +233,59 @@ mod tests {
     }
 
     // ----- command-line parsing -------------------------------------------
+
+    #[test]
+    fn changes_verbose_and_quiet_parse() {
+        assert_eq!(
+            parse(&["-c", "0:0", "f"]),
+            Ok(Command::Change {
+                options: Options {
+                    verbosity: Verbosity::Changes,
+                    ..Options::DEFAULT
+                },
+                owner: Owner {
+                    uid: Some(0),
+                    gid: Some(0),
+                },
+                files: alloc::vec![String::from("f")],
+            })
+        );
+        // The later of `-c` / `-v` wins, as in the GNU tool.
+        assert_eq!(
+            parse(&["-v", "-c", "0:0", "f"]),
+            Ok(Command::Change {
+                options: Options {
+                    verbosity: Verbosity::Changes,
+                    ..Options::DEFAULT
+                },
+                owner: Owner {
+                    uid: Some(0),
+                    gid: Some(0),
+                },
+                files: alloc::vec![String::from("f")],
+            })
+        );
+        for args in [
+            ["-f", "0:0", "f"],
+            ["--silent", "0:0", "f"],
+            ["--quiet", "0:0", "f"],
+        ] {
+            assert_eq!(
+                parse(&args),
+                Ok(Command::Change {
+                    options: Options {
+                        quiet: true,
+                        ..Options::DEFAULT
+                    },
+                    owner: Owner {
+                        uid: Some(0),
+                        gid: Some(0),
+                    },
+                    files: alloc::vec![String::from("f")],
+                })
+            );
+        }
+    }
 
     #[test]
     fn an_owner_and_one_file_parses() {

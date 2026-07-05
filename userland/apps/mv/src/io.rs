@@ -161,7 +161,8 @@ pub trait FileSystem {
 
 /// Writes rendered bytes to the terminal.
 ///
-/// `mv` is silent on success; this seam carries only the usage banner.
+/// `mv` is silent on success unless `-v` reports each move; this seam also
+/// carries the usage banner.
 pub trait Output {
     /// Write every byte of `bytes` to the terminal.
     ///
@@ -169,4 +170,20 @@ pub trait Output {
     ///
     /// Any [`Errno`] the console raises (e.g. a closed terminal).
     fn write_all(&self, bytes: &[u8]) -> Result<(), Errno>;
+}
+
+/// Asks the interactive confirmation question (`-i`).
+///
+/// The production implementation writes `mv: <question> ` to standard
+/// error and reads one line from standard input, answering `true` only
+/// for an affirmative reply (a leading `y`/`Y`), matching the GNU tool.
+/// A declined question skips the move; an unanswerable one fails closed —
+/// it is never treated as consent.
+pub trait Prompt {
+    /// Ask `question` and return whether the user consented.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the console raises — the caller fails closed.
+    fn confirm(&self, question: &str) -> Result<bool, Errno>;
 }

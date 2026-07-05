@@ -2,12 +2,13 @@
 //! and reproduce each directory `-r` must copy — creating the destination
 //! directory before its contents.
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::command::Command;
+use crate::command::{Clobber, Command, Options, TargetMode};
 use crate::error::CpError;
-use crate::io::{Entry, EntryKind, FileSystem, Output};
+use crate::io::{Entry, EntryKind, FileSystem, Output, Prompt};
 
 /// The fixed-size chunk used to stream a regular file from source to
 /// destination. Matches `cat`'s `READ_CHUNK` so the userland tools share one
@@ -16,11 +17,17 @@ const READ_CHUNK: usize = 4096;
 
 /// The usage banner printed by [`Command::Help`].
 pub const USAGE: &str = "\
-usage: cp [-r] [-f] [--] source... dest
+usage: cp [-finrRvT] [-t dir] [--] source... dest
 
-  -r, -R, --recursive  copy directories and their contents
-  -f, --force          remove an unwritable destination and retry
-  -h, --help           show this message
+  -r, -R, --recursive        copy directories and their contents
+  -f, --force                remove an unwritable destination and retry
+  -i, --interactive          ask before overwriting an existing file
+  -n, --no-clobber           never overwrite an existing file
+  -v, --verbose              report each copy
+  -t dir, --target-directory=dir
+                             copy every source into dir
+  -T, --no-target-directory  treat dest as a normal file (one source)
+  -h, --help                 show this message
 
 With one source and a non-directory dest, the source is copied to dest. When
 dest is an existing directory (always, with more than one source) each source
@@ -32,34 +39,45 @@ argument is a path.
 ///
 /// A non-directory source is streamed to its destination; a directory source
 /// is reproduced only with `-r`. When the destination is an existing
-/// directory — and always with more than one source — each source is copied
-/// into it under its base name. `cp` writes nothing on success; `out` carries
-/// only the [`Command::Help`] banner.
+/// directory — and always with more than one source or `-t` — each source is
+/// copied into it under its base name; `-T` uses the destination exactly as
+/// given. An existing destination file is overwritten by default, skipped
+/// under `-n`, and asked about through `prompt` under `-i` (a declined
+/// question skips that copy without error). `-v` reports each copy on `out`;
+/// otherwise `cp` writes nothing on success beyond the [`Command::Help`]
+/// banner.
 ///
 /// The first failure stops the run before any later operand (fail closed).
 ///
 /// # Errors
 ///
 /// * [`CpError::Usage`] — more than one source aimed at a non-directory
-///   destination.
+///   destination (or at any destination under `-T`).
 /// * [`CpError::IsDirectory`] — a directory source was named without `-r`.
 /// * [`CpError::NotADirectory`] — a directory source's destination already
-///   exists as a non-directory.
+///   exists as a non-directory, or the `-t` operand is not an existing
+///   directory.
 /// * [`CpError::Stat`] — an operand could not be inspected; carries the
 ///   underlying [`Errno`](rustos_abi::Errno).
 /// * [`CpError::Read`] — a source file or directory could not be read.
 /// * [`CpError::Create`] — a destination file or directory could not be made.
 /// * [`CpError::Write`] — writing a destination file's bytes failed.
-/// * [`CpError::Output`] — writing the usage banner failed.
-pub fn run(command: Command, fs: &dyn FileSystem, out: &dyn Output) -> Result<(), CpError> {
+/// * [`CpError::Prompt`] — a confirmation could not be read (never treated
+///   as consent).
+/// * [`CpError::Output`] — writing the usage banner or a `-v` report failed.
+pub fn run(
+    command: Command,
+    fs: &dyn FileSystem,
+    prompt: &dyn Prompt,
+    out: &dyn Output,
+) -> Result<(), CpError> {
     match command {
         Command::Help => out.write_all(USAGE.as_bytes()).map_err(CpError::Output),
         Command::Copy {
-            recursive,
-            force,
+            options,
             sources,
             dest,
-        } => copy_all(&sources, &dest, recursive, force, fs),
+        } => copy_all(&sources, &dest, options, fs, prompt, out),
     }
 }
 
@@ -68,11 +86,27 @@ pub fn run(command: Command, fs: &dyn FileSystem, out: &dyn Output) -> Result<()
 fn copy_all(
     sources: &[String],
     dest: &str,
-    recursive: bool,
-    force: bool,
+    options: Options,
     fs: &dyn FileSystem,
+    prompt: &dyn Prompt,
+    out: &dyn Output,
 ) -> Result<(), CpError> {
-    let dest_is_dir = matches!(stat(dest, fs)?, Some(EntryKind::Directory));
+    let dest_is_dir = match options.target_mode {
+        // `-t`: the destination must be an existing directory.
+        TargetMode::Directory => match stat(dest, fs)? {
+            Some(EntryKind::Directory) => true,
+            Some(EntryKind::File) => return Err(CpError::NotADirectory),
+            None => return Err(CpError::Stat(rustos_abi::Errno::NotFound)),
+        },
+        // `-T`: the destination is a normal file for exactly one source.
+        TargetMode::NoDirectory => {
+            if sources.len() > 1 {
+                return Err(CpError::Usage);
+            }
+            false
+        }
+        TargetMode::Inferred => matches!(stat(dest, fs)?, Some(EntryKind::Directory)),
+    };
     // More than one source can only land inside a directory.
     if sources.len() > 1 && !dest_is_dir {
         return Err(CpError::Usage);
@@ -83,21 +117,19 @@ fn copy_all(
         } else {
             String::from(dest)
         };
-        copy_operand(source, &target, recursive, force, fs)?;
+        let kind = fs.kind(source).map_err(CpError::Stat)?;
+        copy_known(source, kind, &target, options, fs, prompt, out)?;
     }
     Ok(())
 }
 
-/// Copy one named source operand to `target`.
-fn copy_operand(
-    source: &str,
-    target: &str,
-    recursive: bool,
-    force: bool,
-    fs: &dyn FileSystem,
-) -> Result<(), CpError> {
-    let kind = fs.kind(source).map_err(CpError::Stat)?;
-    copy_known(source, kind, target, recursive, force, fs)
+/// Report one copy under `-v`, in the GNU wording.
+fn report(options: Options, out: &dyn Output, source: &str, target: &str) -> Result<(), CpError> {
+    if !options.verbose {
+        return Ok(());
+    }
+    out.write_all(format!("'{source}' -> '{target}'\n").as_bytes())
+        .map_err(CpError::Output)
 }
 
 /// Copy an object whose [`EntryKind`] is already known (from the parent's
@@ -106,20 +138,24 @@ fn copy_known(
     source: &str,
     kind: EntryKind,
     target: &str,
-    recursive: bool,
-    force: bool,
+    options: Options,
     fs: &dyn FileSystem,
+    prompt: &dyn Prompt,
+    out: &dyn Output,
 ) -> Result<(), CpError> {
     match kind {
-        EntryKind::File => copy_file(source, target, force, fs),
+        EntryKind::File => copy_file(source, target, options, fs, prompt, out),
         EntryKind::Directory => {
-            if !recursive {
+            if !options.recursive {
                 return Err(CpError::IsDirectory);
             }
             match stat(target, fs)? {
                 Some(EntryKind::Directory) => {}
                 Some(EntryKind::File) => return Err(CpError::NotADirectory),
-                None => fs.mkdir(target).map_err(CpError::Create)?,
+                None => {
+                    fs.mkdir(target).map_err(CpError::Create)?;
+                    report(options, out, source, target)?;
+                }
             }
             for entry in read_children(source, fs)? {
                 let child_source = join(source, &entry.name);
@@ -128,9 +164,10 @@ fn copy_known(
                     &child_source,
                     entry.kind,
                     &child_target,
-                    recursive,
-                    force,
+                    options,
                     fs,
+                    prompt,
+                    out,
                 )?;
             }
             Ok(())
@@ -138,16 +175,36 @@ fn copy_known(
     }
 }
 
-/// Stream a regular file from `source` to `target`, honouring `-f` by removing
-/// a destination that cannot be created and retrying the create once.
-fn copy_file(source: &str, target: &str, force: bool, fs: &dyn FileSystem) -> Result<(), CpError> {
-    create_destination(target, force, fs)?;
+/// Stream a regular file from `source` to `target`, honouring the
+/// existing-destination policy (`-n` skips, `-i` asks) and `-f` (remove a
+/// destination that cannot be created and retry the create once).
+fn copy_file(
+    source: &str,
+    target: &str,
+    options: Options,
+    fs: &dyn FileSystem,
+    prompt: &dyn Prompt,
+    out: &dyn Output,
+) -> Result<(), CpError> {
+    if stat(target, fs)?.is_some() {
+        match options.clobber {
+            Clobber::Overwrite => {}
+            Clobber::Skip => return Ok(()),
+            Clobber::Prompt => {
+                let question = format!("overwrite '{target}'?");
+                if !prompt.confirm(&question).map_err(CpError::Prompt)? {
+                    return Ok(());
+                }
+            }
+        }
+    }
+    create_destination(target, options.force, fs)?;
     let mut offset: u64 = 0;
     let mut buf = [0_u8; READ_CHUNK];
     loop {
         let read = fs.read(source, offset, &mut buf).map_err(CpError::Read)?;
         if read == 0 {
-            return Ok(());
+            return report(options, out, source, target);
         }
         // A seam reporting more than the buffer holds would index out of
         // bounds; refuse it rather than trust the count.
@@ -224,14 +281,60 @@ fn join(parent: &str, name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{run, USAGE};
-    use crate::command::Command;
+    use super::{run as engine_run, USAGE};
+    use crate::command::{Clobber, Command, Options, TargetMode};
     use crate::error::CpError;
-    use crate::io::{Entry, EntryKind, FileSystem, Output};
+    use crate::io::{Entry, EntryKind, FileSystem, Output, Prompt};
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
     use core::cell::RefCell;
     use rustos_abi::Errno;
+
+    /// A prompt no non-interactive run may ever reach.
+    struct NeverAsked;
+
+    impl Prompt for NeverAsked {
+        fn confirm(&self, question: &str) -> Result<bool, Errno> {
+            panic!("unexpected prompt: {question}");
+        }
+    }
+
+    /// A scripted prompt: answers in order, recording every question; an
+    /// exhausted script fails the read.
+    struct Answers {
+        replies: RefCell<Vec<bool>>,
+        asked: RefCell<Vec<String>>,
+    }
+
+    impl Answers {
+        fn new(replies: &[bool]) -> Self {
+            Self {
+                replies: RefCell::new(replies.to_vec()),
+                asked: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn asked(&self) -> Vec<String> {
+            self.asked.borrow().clone()
+        }
+    }
+
+    impl Prompt for Answers {
+        fn confirm(&self, question: &str) -> Result<bool, Errno> {
+            self.asked.borrow_mut().push(question.to_string());
+            let mut replies = self.replies.borrow_mut();
+            if replies.is_empty() {
+                return Err(Errno::NotFound);
+            }
+            Ok(replies.remove(0))
+        }
+    }
+
+    /// The engine under a prompt that must never be reached — the shape
+    /// every pre-existing non-interactive test uses.
+    fn run(command: Command, fs: &dyn FileSystem, out: &Recorder) -> Result<(), CpError> {
+        engine_run(command, fs, &NeverAsked, out)
+    }
 
     /// An in-memory tree. Regular files carry their bytes; directories are
     /// named so their children can be derived by parent path. Failure
@@ -499,13 +602,24 @@ mod tests {
         }
     }
 
-    fn copy(recursive: bool, force: bool, sources: &[&str], dest: &str) -> Command {
+    fn copy_with(options: Options, sources: &[&str], dest: &str) -> Command {
         Command::Copy {
-            recursive,
-            force,
+            options,
             sources: sources.iter().map(|p| (*p).to_string()).collect::<Vec<_>>(),
             dest: dest.to_string(),
         }
+    }
+
+    fn copy(recursive: bool, force: bool, sources: &[&str], dest: &str) -> Command {
+        copy_with(
+            Options {
+                recursive,
+                force,
+                ..Options::DEFAULT
+            },
+            sources,
+            dest,
+        )
     }
 
     #[test]
@@ -733,5 +847,217 @@ mod tests {
         assert_eq!(run(copy(true, false, &["/d/"], "/dst"), &fs, &out), Ok(()));
         assert!(fs.has_dir("/dst/d"));
         assert_eq!(fs.contents("/dst/d/f").as_deref(), Some(&b"x"[..]));
+    }
+
+    #[test]
+    fn no_clobber_skips_an_existing_destination() {
+        let fs = MemFs::new().file("/a", b"fresh").file("/b", b"stale");
+        let out = Recorder::new();
+        assert_eq!(
+            run(
+                copy_with(
+                    Options {
+                        clobber: Clobber::Skip,
+                        ..Options::DEFAULT
+                    },
+                    &["/a"],
+                    "/b",
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
+        // The destination keeps its bytes; nothing was copied.
+        assert_eq!(fs.contents("/b").as_deref(), Some(&b"stale"[..]));
+    }
+
+    #[test]
+    fn no_clobber_still_copies_to_a_new_destination() {
+        let fs = MemFs::new().file("/a", b"fresh");
+        let out = Recorder::new();
+        assert_eq!(
+            run(
+                copy_with(
+                    Options {
+                        clobber: Clobber::Skip,
+                        ..Options::DEFAULT
+                    },
+                    &["/a"],
+                    "/b",
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
+        assert_eq!(fs.contents("/b").as_deref(), Some(&b"fresh"[..]));
+    }
+
+    #[test]
+    fn interactive_asks_before_overwriting() {
+        let fs = MemFs::new()
+            .file("/a", b"fresh")
+            .file("/b", b"stale")
+            .file("/c", b"old")
+            .dir("/dst")
+            .file("/dst/a", b"blockA")
+            .file("/dst/c", b"blockC");
+        let out = Recorder::new();
+        let prompt = Answers::new(&[true, false]);
+        assert_eq!(
+            engine_run(
+                copy_with(
+                    Options {
+                        clobber: Clobber::Prompt,
+                        ..Options::DEFAULT
+                    },
+                    &["/a", "/c"],
+                    "/dst",
+                ),
+                &fs,
+                &prompt,
+                &out,
+            ),
+            Ok(())
+        );
+        // `/dst/a` was confirmed and overwritten; `/dst/c` was declined and
+        // kept, and the run still succeeds.
+        assert_eq!(fs.contents("/dst/a").as_deref(), Some(&b"fresh"[..]));
+        assert_eq!(fs.contents("/dst/c").as_deref(), Some(&b"blockC"[..]));
+        assert_eq!(
+            prompt.asked(),
+            ["overwrite '/dst/a'?", "overwrite '/dst/c'?"]
+        );
+    }
+
+    #[test]
+    fn an_unanswerable_prompt_fails_closed() {
+        let fs = MemFs::new().file("/a", b"fresh").file("/b", b"stale");
+        let out = Recorder::new();
+        let prompt = Answers::new(&[]);
+        assert_eq!(
+            engine_run(
+                copy_with(
+                    Options {
+                        clobber: Clobber::Prompt,
+                        ..Options::DEFAULT
+                    },
+                    &["/a"],
+                    "/b",
+                ),
+                &fs,
+                &prompt,
+                &out,
+            ),
+            Err(CpError::Prompt(Errno::NotFound))
+        );
+        assert_eq!(fs.contents("/b").as_deref(), Some(&b"stale"[..]));
+    }
+
+    #[test]
+    fn verbose_reports_each_copy_in_gnu_wording() {
+        let fs = MemFs::new().dir("/d").file("/d/f", b"x").dir("/dst");
+        let out = Recorder::new();
+        assert_eq!(
+            run(
+                copy_with(
+                    Options {
+                        recursive: true,
+                        verbose: true,
+                        ..Options::DEFAULT
+                    },
+                    &["/d"],
+                    "/dst",
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
+        assert_eq!(out.text(), "'/d' -> '/dst/d'\n'/d/f' -> '/dst/d/f'\n");
+    }
+
+    #[test]
+    fn target_directory_copies_every_source_into_it() {
+        let fs = MemFs::new()
+            .file("/a", b"one")
+            .file("/b", b"two")
+            .dir("/dst");
+        let out = Recorder::new();
+        assert_eq!(
+            run(
+                copy_with(
+                    Options {
+                        target_mode: TargetMode::Directory,
+                        ..Options::DEFAULT
+                    },
+                    &["/a", "/b"],
+                    "/dst",
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
+        assert_eq!(fs.contents("/dst/a").as_deref(), Some(&b"one"[..]));
+        assert_eq!(fs.contents("/dst/b").as_deref(), Some(&b"two"[..]));
+    }
+
+    #[test]
+    fn target_directory_must_exist_and_be_a_directory() {
+        let fs = MemFs::new().file("/a", b"one").file("/blocker", b"x");
+        let out = Recorder::new();
+        assert_eq!(
+            run(
+                copy_with(
+                    Options {
+                        target_mode: TargetMode::Directory,
+                        ..Options::DEFAULT
+                    },
+                    &["/a"],
+                    "/blocker",
+                ),
+                &fs,
+                &out,
+            ),
+            Err(CpError::NotADirectory)
+        );
+        assert_eq!(
+            run(
+                copy_with(
+                    Options {
+                        target_mode: TargetMode::Directory,
+                        ..Options::DEFAULT
+                    },
+                    &["/a"],
+                    "/absent",
+                ),
+                &fs,
+                &out,
+            ),
+            Err(CpError::Stat(Errno::NotFound))
+        );
+    }
+
+    #[test]
+    fn no_target_directory_refuses_several_sources() {
+        let fs = MemFs::new().file("/a", b"x").file("/b", b"y").dir("/dst");
+        let out = Recorder::new();
+        assert_eq!(
+            run(
+                copy_with(
+                    Options {
+                        target_mode: TargetMode::NoDirectory,
+                        ..Options::DEFAULT
+                    },
+                    &["/a", "/b"],
+                    "/dst",
+                ),
+                &fs,
+                &out,
+            ),
+            Err(CpError::Usage)
+        );
     }
 }

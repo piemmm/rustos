@@ -9,13 +9,13 @@ use core::fmt::Write as _;
 use rustos_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
 use rustos_help::{own_short_help, HelpSource};
 
-use crate::command::Command;
+use crate::command::{Command, Format, Hidden, Indicator, Options, Sort};
 use crate::error::LsError;
 use crate::io::{Entry, Listing, Metadata, Output};
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `ls`'s own Help tree is unavailable.
-pub const USAGE: &str = "usage: ls [-a] [-l] [--] [path...]";
+pub const USAGE: &str = "usage: ls [-aAdFghlmnopQrRS1] [--] [path...]";
 
 /// `ls`'s own command word: the short-help switches render its own Help
 /// document through the same engine as any other command's.
@@ -49,7 +49,7 @@ pub fn run(
 ) -> Result<(), LsError> {
     match command {
         Command::Help => short_help(locale, help, out),
-        Command::List { all, long, paths } => list(all, long, &paths, fs, out),
+        Command::List { options, paths } => list(options, &paths, fs, out),
     }
 }
 
@@ -69,48 +69,68 @@ fn short_help(
 }
 
 /// Inspect every operand, then render the file block followed by each
-/// directory block into one buffer and write it once. Hidden entries
-/// filtered from the listing are counted and noted afterwards on the
-/// advisory stream — never in the listing itself.
+/// directory block (depth-first under `-R`) into one buffer and write it
+/// once. Hidden entries filtered from the listing are counted and noted
+/// afterwards on the advisory stream — never in the listing itself.
 fn list(
-    all: bool,
-    long: bool,
+    options: Options,
     paths: &[String],
     fs: &dyn Listing,
     out: &dyn Output,
 ) -> Result<(), LsError> {
     let mut files: Vec<(String, Metadata)> = Vec::new();
-    let mut dirs: Vec<&String> = Vec::new();
+    let mut dirs: Vec<String> = Vec::new();
     for path in paths {
         let meta = fs.stat(path).map_err(LsError::Stat)?;
-        if meta.kind.is_dir() {
-            dirs.push(path);
+        if meta.kind.is_dir() && !options.directory {
+            dirs.push(path.clone());
         } else {
             files.push((path.clone(), meta));
         }
     }
 
-    let multi = paths.len() > 1;
+    // Directory blocks carry a `path:` header with several operands, and
+    // always when recursing (the reader must know which directory each
+    // block describes).
+    let headered = paths.len() > 1 || options.recursive;
     let mut buf = String::new();
     let mut first = true;
     let mut hidden_omitted: u64 = 0;
 
     if !files.is_empty() {
-        files.sort_by(|a, b| a.0.cmp(&b.0));
+        sort_rows(&mut files, options);
         open_block(&mut buf, &mut first, None);
-        render_rows(&mut buf, &files, long);
+        render_rows(&mut buf, &files, options);
     }
-    for path in dirs {
-        let mut entries = fs.read_dir(path).map_err(LsError::Read)?;
-        if !all {
-            let before = entries.len();
-            entries.retain(|entry| !entry.name.starts_with('.'));
-            hidden_omitted += (before - entries.len()) as u64;
+    // A depth-first worklist: operands are pushed reversed so they pop in
+    // command-line order, and a listed directory's children are pushed
+    // reversed so they pop in rendered order.
+    dirs.reverse();
+    let mut pending = dirs;
+    while let Some(path) = pending.pop() {
+        let mut entries = fs.read_dir(&path).map_err(LsError::Read)?;
+        match options.hidden {
+            Hidden::Skip => {
+                let before = entries.len();
+                entries.retain(|entry| !entry.name.starts_with('.'));
+                hidden_omitted += (before - entries.len()) as u64;
+            }
+            Hidden::AlmostAll => entries.retain(|entry| entry.name != "." && entry.name != ".."),
+            Hidden::All => {}
         }
-        entries.sort_by(|a, b| a.name.cmp(&b.name));
-        let rows = rows_for(path, &entries, long, fs)?;
-        open_block(&mut buf, &mut first, multi.then_some(path.as_str()));
-        render_rows(&mut buf, &rows, long);
+        let mut rows = rows_for(&path, &entries, options, fs)?;
+        sort_rows(&mut rows, options);
+        open_block(&mut buf, &mut first, headered.then_some(path.as_str()));
+        render_rows(&mut buf, &rows, options);
+        if options.recursive {
+            // `.`/`..` never recurse — a listing must terminate even when
+            // `-a` renders them.
+            for (name, meta) in rows.iter().rev() {
+                if meta.kind.is_dir() && name != "." && name != ".." {
+                    pending.push(join(&path, name));
+                }
+            }
+        }
     }
 
     out.write_all(buf.as_bytes()).map_err(LsError::Output)?;
@@ -120,32 +140,54 @@ fn list(
     Ok(())
 }
 
+/// Whether rendering under `options` needs each entry's full metadata.
+///
+/// The long format renders mode/owner/group/size, a size sort compares
+/// sizes, and `-F` needs the mode's execute bits for `*` — everything else
+/// renders names straight off the one `read_dir`, so the per-entry `stat`
+/// is paid only when asked for.
+fn needs_stat(options: Options) -> bool {
+    options.long || options.sort == Sort::Size || options.indicator == Indicator::Classify
+}
+
 /// The rendered rows of one directory block: each entry's name, with its
-/// metadata attached. The per-entry `stat` behind the long format's mode
-/// and size columns is paid only when `-l` asks for them; the short format
-/// renders names straight off the one `read_dir`.
+/// metadata attached.
 fn rows_for(
     dir: &str,
     entries: &[Entry],
-    long: bool,
+    options: Options,
     fs: &dyn Listing,
 ) -> Result<Vec<(String, Metadata)>, LsError> {
     let mut rows = Vec::with_capacity(entries.len());
     for entry in entries {
-        let meta = if long {
+        let meta = if needs_stat(options) {
             fs.stat(&join(dir, &entry.name)).map_err(LsError::Stat)?
         } else {
-            // The short format renders only the name; the kind from the
-            // directory stream stands in and the zeroed fields are unread.
+            // The kind from the directory stream stands in and the zeroed
+            // fields are unread.
             Metadata {
                 kind: entry.kind,
                 mode: 0,
                 size: 0,
+                uid: 0,
+                gid: 0,
             }
         };
         rows.push((entry.name.clone(), meta));
     }
     Ok(rows)
+}
+
+/// Order `rows` by the selected sort key, reversed under `-r`.
+fn sort_rows(rows: &mut [(String, Metadata)], options: Options) {
+    match options.sort {
+        Sort::Name => rows.sort_by(|a, b| a.0.cmp(&b.0)),
+        // Largest first, ties by name — the GNU `-S` order.
+        Sort::Size => rows.sort_by(|a, b| b.1.size.cmp(&a.1.size).then_with(|| a.0.cmp(&b.0))),
+    }
+    if options.reverse {
+        rows.reverse();
+    }
 }
 
 /// `name` under the directory `dir`, without doubling a trailing slash.
@@ -170,25 +212,154 @@ fn open_block(buf: &mut String, first: &mut bool, header: Option<&str>) {
     }
 }
 
-/// Render `rows` into `buf`: one name per line, or the long format when
-/// `long` is set.
-fn render_rows(buf: &mut String, rows: &[(String, Metadata)], long: bool) {
-    if long {
-        let width = rows
-            .iter()
-            .map(|(_, meta)| decimal_width(meta.size))
-            .max()
-            .unwrap_or(1);
-        for (name, meta) in rows {
-            // Writing into a `String` is infallible, so the `fmt::Result` is
-            // discarded deliberately.
-            let _ = writeln!(buf, "{} {:>width$} {}", mode_string(*meta), meta.size, name);
+/// Render `rows` into `buf`: the long format when selected, otherwise one
+/// name per line or the `-m` comma arrangement.
+fn render_rows(buf: &mut String, rows: &[(String, Metadata)], options: Options) {
+    if options.long {
+        render_long(buf, rows, options);
+        return;
+    }
+    match options.format {
+        Format::OnePerLine => {
+            for (name, meta) in rows {
+                buf.push_str(&decorate(name, *meta, options));
+                buf.push('\n');
+            }
         }
-    } else {
-        for (name, _) in rows {
-            buf.push_str(name);
+        Format::Commas => {
+            if rows.is_empty() {
+                return;
+            }
+            for (index, (name, meta)) in rows.iter().enumerate() {
+                if index > 0 {
+                    buf.push_str(", ");
+                }
+                buf.push_str(&decorate(name, *meta, options));
+            }
             buf.push('\n');
         }
+    }
+}
+
+/// Render the long format: mode, numeric owner and group (unless hidden by
+/// `-g` / `-o`), size, then the decorated name, with each numeric column
+/// right-aligned to its block-wide width.
+///
+/// Owner and group are numeric ids: resolving names needs the
+/// capability-gated user database, which a listing must not demand — the
+/// GNU tool falls back to numbers for exactly this case (`-n` renders the
+/// same). There is no link count or timestamp column because the
+/// filesystem contract carries neither yet (see the Help document).
+fn render_long(buf: &mut String, rows: &[(String, Metadata)], options: Options) {
+    let size_cell = |meta: &Metadata| {
+        if options.human_readable {
+            human_size(meta.size)
+        } else {
+            format!("{}", meta.size)
+        }
+    };
+    let width_of = |cell: fn(&Metadata) -> String| {
+        rows.iter()
+            .map(|(_, meta)| cell(meta).len())
+            .max()
+            .unwrap_or(1)
+    };
+    let uid_width = width_of(|meta| format!("{}", meta.uid));
+    let gid_width = width_of(|meta| format!("{}", meta.gid));
+    let size_width = rows
+        .iter()
+        .map(|(_, meta)| size_cell(meta).len())
+        .max()
+        .unwrap_or(1);
+    for (name, meta) in rows {
+        // Writing into a `String` is infallible, so the `fmt::Result` is
+        // discarded deliberately.
+        let _ = write!(buf, "{}", mode_string(*meta));
+        if !options.hide_owner {
+            let _ = write!(buf, " {:>uid_width$}", meta.uid);
+        }
+        if !options.hide_group {
+            let _ = write!(buf, " {:>gid_width$}", meta.gid);
+        }
+        let _ = writeln!(
+            buf,
+            " {:>size_width$} {}",
+            size_cell(meta),
+            decorate(name, *meta, options)
+        );
+    }
+}
+
+/// The rendered form of one name: quoted under `-Q`, with the `-p` / `-F`
+/// indicator suffix appended after the closing quote, as in the GNU tool.
+fn decorate(name: &str, meta: Metadata, options: Options) -> String {
+    let mut rendered = if options.quote {
+        quote_name(name)
+    } else {
+        String::from(name)
+    };
+    match options.indicator {
+        Indicator::None => {}
+        Indicator::Slash => {
+            if meta.kind.is_dir() {
+                rendered.push('/');
+            }
+        }
+        Indicator::Classify => {
+            if meta.kind.is_dir() {
+                rendered.push('/');
+            } else if meta.mode & 0o111 != 0 {
+                rendered.push('*');
+            }
+        }
+    }
+    rendered
+}
+
+/// `name` in the GNU C-style double-quoted form: `\\` and `\"` for the
+/// backslash and quote, C escapes for the common control characters, and
+/// three-digit octal for the rest.
+fn quote_name(name: &str) -> String {
+    let mut quoted = String::with_capacity(name.len() + 2);
+    quoted.push('"');
+    for ch in name.chars() {
+        match ch {
+            '"' => quoted.push_str("\\\""),
+            '\\' => quoted.push_str("\\\\"),
+            '\n' => quoted.push_str("\\n"),
+            '\t' => quoted.push_str("\\t"),
+            '\r' => quoted.push_str("\\r"),
+            _ if (ch as u32) < 0x20 || ch as u32 == 0x7f => {
+                let _ = write!(quoted, "\\{:03o}", ch as u32);
+            }
+            _ => quoted.push(ch),
+        }
+    }
+    quoted.push('"');
+    quoted
+}
+
+/// `size` in the GNU `-h` form: plain bytes below 1024, then powers of
+/// 1024 as `K`, `M`, `G`, …, rounded up — one decimal place below 10, whole
+/// numbers from 10.
+fn human_size(size: u64) -> String {
+    const UNITS: [char; 6] = ['K', 'M', 'G', 'T', 'P', 'E'];
+    if size < 1024 {
+        return format!("{size}");
+    }
+    let mut unit = 0;
+    let mut base: u128 = 1024;
+    let size = u128::from(size);
+    while unit + 1 < UNITS.len() && size >= base * 1024 {
+        base *= 1024;
+        unit += 1;
+    }
+    // Tenths of a unit, rounded up (the GNU ceiling), e.g. 1025 -> `1.1K`.
+    let tenths = (size * 10).div_ceil(base);
+    if tenths < 100 {
+        format!("{}.{}{}", tenths / 10, tenths % 10, UNITS[unit])
+    } else {
+        format!("{}{}", size.div_ceil(base), UNITS[unit])
     }
 }
 
@@ -211,17 +382,6 @@ fn mode_string(meta: Metadata) -> String {
         s.push(if meta.mode & bit != 0 { ch } else { '-' });
     }
     s
-}
-
-/// The number of decimal digits in `value` (at least 1, for `0`).
-fn decimal_width(value: u64) -> usize {
-    let mut width = 1;
-    let mut n = value;
-    while n >= 10 {
-        n /= 10;
-        width += 1;
-    }
-    width
 }
 
 /// Emit the `fs.hidden_entries_omitted` advisory (fd 3) when the default
@@ -259,7 +419,7 @@ fn emit_omission_record(out: &dyn Output, omitted: u64) {
 #[cfg(test)]
 mod tests {
     use super::{run, USAGE};
-    use crate::command::Command;
+    use crate::command::{Command, Format, Hidden, Indicator, Options, Sort};
     use crate::error::LsError;
     use crate::io::{Entry, Listing, Metadata, Output};
     use alloc::string::{String, ToString};
@@ -291,6 +451,8 @@ mod tests {
                     kind: FileKind::Regular,
                     mode,
                     size,
+                    uid: UID,
+                    gid: GID,
                 },
             ));
             self
@@ -303,6 +465,8 @@ mod tests {
                     kind: FileKind::Directory,
                     mode: 0o755,
                     size: 0,
+                    uid: UID,
+                    gid: GID,
                 },
             ));
             self.dirs.push((path.to_string(), Vec::new()));
@@ -322,8 +486,16 @@ mod tests {
                 name: name.to_string(),
                 kind,
             });
-            self.stat
-                .push((super::join(dir, name), Metadata { kind, mode, size }));
+            self.stat.push((
+                super::join(dir, name),
+                Metadata {
+                    kind,
+                    mode,
+                    size,
+                    uid: UID,
+                    gid: GID,
+                },
+            ));
             self
         }
     }
@@ -356,6 +528,8 @@ mod tests {
                 kind: FileKind::Directory,
                 mode: 0o755,
                 size: 0,
+                uid: UID,
+                gid: GID,
             })
         }
 
@@ -454,12 +628,27 @@ mod tests {
         }
     }
 
-    fn list(all: bool, long: bool, paths: &[&str]) -> Command {
+    /// The owning ids every fixture row carries, so long-format
+    /// expectations are explicit about the owner and group columns.
+    const UID: u32 = 1000;
+    const GID: u32 = 100;
+
+    fn list_with(options: Options, paths: &[&str]) -> Command {
         Command::List {
-            all,
-            long,
+            options,
             paths: paths.iter().map(|p| (*p).to_string()).collect::<Vec<_>>(),
         }
+    }
+
+    fn list(all: bool, long: bool, paths: &[&str]) -> Command {
+        list_with(
+            Options {
+                hidden: if all { Hidden::All } else { Hidden::Skip },
+                long,
+                ..Options::DEFAULT
+            },
+            paths,
+        )
     }
 
     fn run_ls(command: Command, fs: &dyn Listing, out: &Recorder) -> Result<(), LsError> {
@@ -583,7 +772,10 @@ mod tests {
             .entry(".", "f", FileKind::Regular, 0o644, 7);
         let out = Recorder::new();
         assert_eq!(run_ls(list(false, true, &["."]), &fs, &out), Ok(()));
-        assert_eq!(out.text(), "drwxr-xr-x 4096 d\n-rw-r--r--    7 f\n");
+        assert_eq!(
+            out.text(),
+            "drwxr-xr-x 1000 100 4096 d\n-rw-r--r-- 1000 100    7 f\n"
+        );
     }
 
     #[test]
@@ -594,7 +786,7 @@ mod tests {
             .entry("dir/", "f", FileKind::Regular, 0o600, 3);
         let out = Recorder::new();
         assert_eq!(run_ls(list(false, true, &["dir/"]), &fs, &out), Ok(()));
-        assert_eq!(out.text(), "-rw------- 3 f\n");
+        assert_eq!(out.text(), "-rw------- 1000 100 3 f\n");
     }
 
     #[test]
@@ -690,5 +882,319 @@ mod tests {
             run_ls(list(false, false, &["."]), &fs, &out),
             Err(LsError::Output(Errno::NotFound))
         );
+    }
+
+    #[test]
+    fn directory_option_lists_the_operand_itself() {
+        let fs = TreeFs::new()
+            .dir("dir")
+            .entry("dir", "x", FileKind::Regular, 0o644, 0);
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(
+                list_with(
+                    Options {
+                        directory: true,
+                        ..Options::DEFAULT
+                    },
+                    &["dir"],
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
+        assert_eq!(out.text(), "dir\n");
+    }
+
+    #[test]
+    fn recursive_descends_depth_first_with_headers() {
+        let fs = TreeFs::new()
+            .dir("top")
+            .entry("top", "z", FileKind::Regular, 0o644, 0)
+            .dir("top/sub")
+            .entry("top/sub", "x", FileKind::Regular, 0o644, 0);
+        // Declare `sub` inside `top` after `top/sub` exists as a directory.
+        let fs = fs.entry("top", "sub", FileKind::Directory, 0o755, 0);
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(
+                list_with(
+                    Options {
+                        recursive: true,
+                        ..Options::DEFAULT
+                    },
+                    &["top"],
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
+        assert_eq!(out.text(), "top:\nsub\nz\n\ntop/sub:\nx\n");
+    }
+
+    #[test]
+    fn reverse_reverses_the_name_order() {
+        let fs = TreeFs::new()
+            .dir(".")
+            .entry(".", "a", FileKind::Regular, 0o644, 0)
+            .entry(".", "b", FileKind::Regular, 0o644, 0)
+            .entry(".", "c", FileKind::Regular, 0o644, 0);
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(
+                list_with(
+                    Options {
+                        reverse: true,
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
+        assert_eq!(out.text(), "c\nb\na\n");
+    }
+
+    #[test]
+    fn size_sort_lists_largest_first_ties_by_name() {
+        let fs = TreeFs::new()
+            .dir(".")
+            .entry(".", "small", FileKind::Regular, 0o644, 1)
+            .entry(".", "big", FileKind::Regular, 0o644, 100)
+            .entry(".", "a-mid", FileKind::Regular, 0o644, 50)
+            .entry(".", "b-mid", FileKind::Regular, 0o644, 50);
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(
+                list_with(
+                    Options {
+                        sort: Sort::Size,
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
+        assert_eq!(out.text(), "big\na-mid\nb-mid\nsmall\n");
+    }
+
+    #[test]
+    fn commas_format_joins_names_on_one_line() {
+        let fs = TreeFs::new()
+            .dir(".")
+            .entry(".", "a", FileKind::Regular, 0o644, 0)
+            .entry(".", "b", FileKind::Regular, 0o644, 0)
+            .entry(".", "c", FileKind::Regular, 0o644, 0);
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(
+                list_with(
+                    Options {
+                        format: Format::Commas,
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
+        assert_eq!(out.text(), "a, b, c\n");
+    }
+
+    #[test]
+    fn quoted_names_escape_quotes_and_controls() {
+        let fs = TreeFs::new()
+            .dir(".")
+            .entry(".", "a\"b", FileKind::Regular, 0o644, 0)
+            .entry(".", "new\nline", FileKind::Regular, 0o644, 0);
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(
+                list_with(
+                    Options {
+                        quote: true,
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
+        assert_eq!(out.text(), "\"a\\\"b\"\n\"new\\nline\"\n");
+    }
+
+    #[test]
+    fn classify_marks_directories_and_executables() {
+        let fs = TreeFs::new()
+            .dir(".")
+            .entry(".", "bin", FileKind::Regular, 0o755, 0)
+            .entry(".", "dir", FileKind::Directory, 0o755, 0)
+            .entry(".", "plain", FileKind::Regular, 0o644, 0);
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(
+                list_with(
+                    Options {
+                        indicator: Indicator::Classify,
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
+        assert_eq!(out.text(), "bin*\ndir/\nplain\n");
+    }
+
+    #[test]
+    fn slash_indicator_marks_directories_only() {
+        let fs = TreeFs::new()
+            .dir(".")
+            .entry(".", "bin", FileKind::Regular, 0o755, 0)
+            .entry(".", "dir", FileKind::Directory, 0o755, 0);
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(
+                list_with(
+                    Options {
+                        indicator: Indicator::Slash,
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
+        assert_eq!(out.text(), "bin\ndir/\n");
+    }
+
+    #[test]
+    fn human_readable_sizes_scale_in_the_long_format() {
+        let fs = TreeFs::new()
+            .dir(".")
+            .entry(".", "a", FileKind::Regular, 0o644, 500)
+            .entry(".", "b", FileKind::Regular, 0o644, 1025)
+            .entry(".", "c", FileKind::Regular, 0o644, 10 * 1024 * 1024);
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(
+                list_with(
+                    Options {
+                        long: true,
+                        human_readable: true,
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            out.text(),
+            "-rw-r--r-- 1000 100  500 a\n\
+             -rw-r--r-- 1000 100 1.1K b\n\
+             -rw-r--r-- 1000 100  10M c\n"
+        );
+    }
+
+    #[test]
+    fn hide_owner_and_hide_group_drop_their_columns() {
+        let fs = TreeFs::new()
+            .dir(".")
+            .entry(".", "f", FileKind::Regular, 0o644, 7);
+        let hidden_owner = Recorder::new();
+        assert_eq!(
+            run_ls(
+                list_with(
+                    Options {
+                        long: true,
+                        hide_owner: true,
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                ),
+                &fs,
+                &hidden_owner,
+            ),
+            Ok(())
+        );
+        assert_eq!(hidden_owner.text(), "-rw-r--r-- 100 7 f\n");
+        let hidden_group = Recorder::new();
+        assert_eq!(
+            run_ls(
+                list_with(
+                    Options {
+                        long: true,
+                        hide_group: true,
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                ),
+                &fs,
+                &hidden_group,
+            ),
+            Ok(())
+        );
+        assert_eq!(hidden_group.text(), "-rw-r--r-- 1000 7 f\n");
+    }
+
+    #[test]
+    fn almost_all_shows_dotfiles_but_never_dot_or_dot_dot() {
+        let fs = TreeFs::new()
+            .dir(".")
+            .entry(".", ".", FileKind::Directory, 0o755, 0)
+            .entry(".", "..", FileKind::Directory, 0o755, 0)
+            .entry(".", ".hidden", FileKind::Regular, 0o644, 0)
+            .entry(".", "vis", FileKind::Regular, 0o644, 0);
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(
+                list_with(
+                    Options {
+                        hidden: Hidden::AlmostAll,
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
+        assert_eq!(out.text(), ".hidden\nvis\n");
+        // Nothing was hidden *by default filtering*, so no advisory record.
+        assert!(out.records().is_empty());
+    }
+
+    #[test]
+    fn human_size_rounds_up_like_the_gnu_tool() {
+        for (size, expected) in [
+            (0u64, "0"),
+            (1023, "1023"),
+            (1024, "1.0K"),
+            (1025, "1.1K"),
+            (10 * 1024, "10K"),
+            (1024 * 1024, "1.0M"),
+            (u64::MAX, "16E"),
+        ] {
+            assert_eq!(super::human_size(size), expected, "{size}");
+        }
     }
 }

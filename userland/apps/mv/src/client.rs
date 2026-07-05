@@ -2,12 +2,13 @@
 //! the rename would cross a filesystem boundary — copy the source to the
 //! destination and then remove the source.
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::command::Command;
+use crate::command::{Clobber, Command, Options, TargetMode};
 use crate::error::MvError;
-use crate::io::{Entry, EntryKind, FileSystem, Output, RenameOutcome};
+use crate::io::{Entry, EntryKind, FileSystem, Output, Prompt, RenameOutcome};
 
 /// The fixed-size chunk used to stream a regular file during the cross-device
 /// fallback. Matches `cat`'s and `cp`'s `READ_CHUNK` so the userland tools
@@ -16,11 +17,17 @@ const READ_CHUNK: usize = 4096;
 
 /// The usage banner printed by [`Command::Help`].
 pub const USAGE: &str = "\
-usage: mv [-f] [-n] [--] source... dest
+usage: mv [-finvT] [-t dir] [--] source... dest
 
-  -f, --force        remove a blocking destination and retry the rename
-  -n, --no-clobber   never overwrite an existing destination
-  -h, --help         show this message
+  -f, --force                remove a blocking destination and retry the
+                             rename; never prompt
+  -i, --interactive          ask before overwriting an existing destination
+  -n, --no-clobber           never overwrite an existing destination
+  -v, --verbose              report each move
+  -t dir, --target-directory=dir
+                             move every source into dir
+  -T, --no-target-directory  treat dest as a normal file (one source)
+  -h, --help                 show this message
 
 With one source and a non-directory dest, the source is moved to dest. When
 dest is an existing directory (always, with more than one source) each source
@@ -33,31 +40,43 @@ argument is a path.
 /// Each source is renamed onto its destination; a rename that would cross a
 /// filesystem boundary falls back to a copy followed by removal of the source.
 /// When the destination is an existing directory — and always with more than
-/// one source — each source is moved into it under its base name. `mv` writes
-/// nothing on success; `out` carries only the [`Command::Help`] banner.
+/// one source or `-t` — each source is moved into it under its base name;
+/// `-T` uses the destination exactly as given. An existing destination is
+/// overwritten by default, skipped under `-n`, and asked about through
+/// `prompt` under `-i` (a declined question skips that move without error).
+/// `-v` reports each move on `out`; otherwise `mv` writes nothing on success
+/// beyond the [`Command::Help`] banner.
 ///
 /// The first failure stops the run before any later operand (fail closed).
 ///
 /// # Errors
 ///
 /// * [`MvError::Usage`] — more than one source aimed at a non-directory
-///   destination.
+///   destination (or at any destination under `-T`), or a `-t` operand
+///   that is not an existing directory.
 /// * [`MvError::Stat`] — an operand could not be inspected; carries the
 ///   underlying [`Errno`](rustos_abi::Errno).
 /// * [`MvError::Rename`] — a rename failed for a non-boundary reason.
 /// * [`MvError::Read`] / [`MvError::Create`] / [`MvError::Write`] — a
 ///   cross-device copy failed.
 /// * [`MvError::Remove`] — the source could not be removed after a copy.
-/// * [`MvError::Output`] — writing the usage banner failed.
-pub fn run(command: Command, fs: &dyn FileSystem, out: &dyn Output) -> Result<(), MvError> {
+/// * [`MvError::Prompt`] — a confirmation could not be read (never treated
+///   as consent).
+/// * [`MvError::Output`] — writing the usage banner or a `-v` report
+///   failed.
+pub fn run(
+    command: Command,
+    fs: &dyn FileSystem,
+    prompt: &dyn Prompt,
+    out: &dyn Output,
+) -> Result<(), MvError> {
     match command {
         Command::Help => out.write_all(USAGE.as_bytes()).map_err(MvError::Output),
         Command::Move {
-            force,
-            no_clobber,
+            options,
             sources,
             dest,
-        } => move_all(&sources, &dest, force, no_clobber, fs),
+        } => move_all(&sources, &dest, options, fs, prompt, out),
     }
 }
 
@@ -66,11 +85,27 @@ pub fn run(command: Command, fs: &dyn FileSystem, out: &dyn Output) -> Result<()
 fn move_all(
     sources: &[String],
     dest: &str,
-    force: bool,
-    no_clobber: bool,
+    options: Options,
     fs: &dyn FileSystem,
+    prompt: &dyn Prompt,
+    out: &dyn Output,
 ) -> Result<(), MvError> {
-    let dest_is_dir = matches!(stat(dest, fs)?, Some(EntryKind::Directory));
+    let dest_is_dir = match options.target_mode {
+        // `-t`: the destination must be an existing directory.
+        TargetMode::Directory => match stat(dest, fs)? {
+            Some(EntryKind::Directory) => true,
+            Some(EntryKind::File) => return Err(MvError::Usage),
+            None => return Err(MvError::Stat(rustos_abi::Errno::NotFound)),
+        },
+        // `-T`: the destination is a normal file for exactly one source.
+        TargetMode::NoDirectory => {
+            if sources.len() > 1 {
+                return Err(MvError::Usage);
+            }
+            false
+        }
+        TargetMode::Inferred => matches!(stat(dest, fs)?, Some(EntryKind::Directory)),
+    };
     // More than one source can only land inside a directory.
     if sources.len() > 1 && !dest_is_dir {
         return Err(MvError::Usage);
@@ -81,7 +116,11 @@ fn move_all(
         } else {
             String::from(dest)
         };
-        move_operand(source, &target, force, no_clobber, fs)?;
+        move_operand(source, &target, options, fs, prompt)?;
+        if options.verbose {
+            out.write_all(format!("renamed '{source}' -> '{target}'\n").as_bytes())
+                .map_err(MvError::Output)?;
+        }
     }
     Ok(())
 }
@@ -90,19 +129,29 @@ fn move_all(
 fn move_operand(
     source: &str,
     target: &str,
-    force: bool,
-    no_clobber: bool,
+    options: Options,
     fs: &dyn FileSystem,
+    prompt: &dyn Prompt,
 ) -> Result<(), MvError> {
     let kind = fs.kind(source).map_err(MvError::Stat)?;
-    // `-n`: an existing destination is left untouched and the source skipped.
-    if no_clobber && stat(target, fs)?.is_some() {
-        return Ok(());
+    if stat(target, fs)?.is_some() {
+        match options.clobber {
+            Clobber::Overwrite => {}
+            // `-n`: an existing destination is left untouched and the
+            // source skipped.
+            Clobber::Skip => return Ok(()),
+            Clobber::Prompt => {
+                let question = format!("overwrite '{target}'?");
+                if !prompt.confirm(&question).map_err(MvError::Prompt)? {
+                    return Ok(());
+                }
+            }
+        }
     }
     match fs.rename(source, target) {
         Ok(RenameOutcome::Renamed) => Ok(()),
         Ok(RenameOutcome::CrossDevice) => relocate(source, kind, target, fs),
-        Err(_) if force => force_retry(source, kind, target, fs),
+        Err(_) if options.force => force_retry(source, kind, target, fs),
         Err(errno) => Err(MvError::Rename(errno)),
     }
 }

@@ -520,6 +520,54 @@ Where a command has nothing non-obvious to add, it emits nothing: `stdinfo` is
 a channel for *useful* advisory metadata, not a requirement to speak on every
 invocation.
 
+## 12.1 GNU coreutils parity — staged plan (§1.1 / `AGENTS.md` §16.7)
+
+The maintainer-approved staging that brings every `/System/Apps` command to
+the GNU coreutils surface and fills in the missing commands. Each stage is
+one properly-gated change; a stage's switch set is bounded by what the
+platform floor can honestly implement (userland `FileStat` carries
+kind/size/mode/uid/gid only — no timestamps, and the VFS has no symbolic or
+hard links — so time- and link-dependent behaviour is deliberately staged
+behind the floor work below).
+
+- **Stage A — GNU switches for the existing tools (done).** On the current
+  floor: `cat` `-A -b -e -E -n -s -t -T -u -v` (bundled short flags, GNU
+  `^`/`M-` notation); `ls` `-a -A -d -F -g -h -l -m -n -o -p -Q -r -R -S -1`
+  (`-h` takes the GNU human-readable meaning — short help is `-?`/`--help` —
+  and the invented `--long` synonym is retired; long format shows numeric
+  owner/group, the GNU numeric fallback, with no link-count/timestamp
+  columns until the floor carries them); `rm` `-d -f -i -I -r -v
+  --preserve-root`/`--no-preserve-root` (prompt seam, GNU `removed …`
+  wording); `cp` `-f -i -n -r -t -T -v`; `mv` `-f -i -n -t -T -v`
+  (`-f`/`-i`/`-n` last-wins, `renamed 'a' -> 'b'` wording); `chmod` and
+  `chown` `-c -f -v` (GNU changed/retained wording; `-f` suppresses
+  per-operand diagnostics, continues, and still fails the run via the
+  message-less `Silenced` error). Each tool's `Prompt`/`Output` seams stay
+  injected and fail closed; registered tools' six-locale `Help/` trees and
+  the switch-drift pins are current.
+- **Stage B — register the orphan utilities as store bundles (planned).**
+  `cp`, `mv`, `rm`, `chmod`, `chown`, `mount`, `getcap`, `setcap`,
+  `useradd`, `groupadd` each gain `AppInfo.toml`/`Run`/`Help/` (six
+  locales) and store registration per §16.5/§6.1, wiring the `Prompt` seam
+  to stderr+stdin (`y`/`Y` affirmative) in each `Run` host.
+- **Stage C — missing coreutils commands (planned; all wanted).** Every
+  GNU coreutils command implementable on the current floor, in prioritised
+  batches (first: `echo`, `printf`, `true`, `false`, `yes`, `pwd`, `mkdir`,
+  `rmdir`, `head`, `tail`, `wc`, `basename`, `dirname`, `seq`, `tee`,
+  `env`, `sleep`, `date`, `whoami`, `id`; then the text tools `sort`,
+  `uniq`, `tr`, `cut`, `paste`, `comm`, `nl`, `tac`, `fold`, `expand`,
+  `od`, `split`, `shuf`, `truncate`, `mktemp`, `realpath`, `chgrp`,
+  `sha256sum`/`cksum`, `base64`, `df`, `du`). Each is a full self-contained
+  bundle (§16.5) with tests and a six-locale `Help/` tree; anything a
+  shell builtin duplicates moves out of `elsh` where applicable.
+- **Stage D — filesystem timestamps (planned).** Plumb the driver-level
+  `NodeTimes` (four `Time64` stamps) through `fs_stat`/`FileStat` (an
+  in-place `abi-v1` evolution), then `touch`, `ls -l` dates and `-t`/`-u`/
+  `-c` sorts, `cp -p`/`-u`, `mv -u`, `date -r`.
+- **Stage E — VFS links (planned; separate design).** Symbolic/hard-link
+  support in the VFS and RustFS, then `ln`, `readlink`, `link`, `unlink`,
+  `ls -L/-H`, `cp -l/-s/-d/-a`, `stat`'s link fields.
+
 ## 13. Deliverables and required `AGENTS.md` amendments
 
 Staged work (dependencies: the bundle/`appmgr` stack and `plans/CURSES.md`,

@@ -1,14 +1,60 @@
 //! Tests for the move engine, driven against an in-memory filesystem and a
 //! recording output.
 
-use super::{run, USAGE};
-use crate::command::Command;
+use super::{run as engine_run, USAGE};
+use crate::command::{Clobber, Command, Options, TargetMode};
 use crate::error::MvError;
-use crate::io::{Entry, EntryKind, FileSystem, Output, RenameOutcome};
+use crate::io::{Entry, EntryKind, FileSystem, Output, Prompt, RenameOutcome};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cell::RefCell;
 use rustos_abi::Errno;
+
+/// A prompt no non-interactive run may ever reach.
+struct NeverAsked;
+
+impl Prompt for NeverAsked {
+    fn confirm(&self, question: &str) -> Result<bool, Errno> {
+        panic!("unexpected prompt: {question}");
+    }
+}
+
+/// A scripted prompt: answers in order, recording every question; an
+/// exhausted script fails the read.
+struct Answers {
+    replies: RefCell<Vec<bool>>,
+    asked: RefCell<Vec<String>>,
+}
+
+impl Answers {
+    fn new(replies: &[bool]) -> Self {
+        Self {
+            replies: RefCell::new(replies.to_vec()),
+            asked: RefCell::new(Vec::new()),
+        }
+    }
+
+    fn asked(&self) -> Vec<String> {
+        self.asked.borrow().clone()
+    }
+}
+
+impl Prompt for Answers {
+    fn confirm(&self, question: &str) -> Result<bool, Errno> {
+        self.asked.borrow_mut().push(question.to_string());
+        let mut replies = self.replies.borrow_mut();
+        if replies.is_empty() {
+            return Err(Errno::NotFound);
+        }
+        Ok(replies.remove(0))
+    }
+}
+
+/// The engine under a prompt that must never be reached — the shape every
+/// pre-existing non-interactive test uses.
+fn run(command: Command, fs: &dyn FileSystem, out: &Recorder) -> Result<(), MvError> {
+    engine_run(command, fs, &NeverAsked, out)
+}
 
 /// An in-memory tree. Regular files carry their bytes; directories are named
 /// so their children can be derived by parent path. Failure injection covers
@@ -350,13 +396,28 @@ impl Output for Recorder {
     }
 }
 
-fn mv(force: bool, no_clobber: bool, sources: &[&str], dest: &str) -> Command {
+fn mv_with(options: Options, sources: &[&str], dest: &str) -> Command {
     Command::Move {
-        force,
-        no_clobber,
+        options,
         sources: sources.iter().map(|p| (*p).to_string()).collect::<Vec<_>>(),
         dest: dest.to_string(),
     }
+}
+
+fn mv(force: bool, no_clobber: bool, sources: &[&str], dest: &str) -> Command {
+    mv_with(
+        Options {
+            force,
+            clobber: if no_clobber {
+                Clobber::Skip
+            } else {
+                Clobber::Overwrite
+            },
+            ..Options::DEFAULT
+        },
+        sources,
+        dest,
+    )
 }
 
 #[test]
@@ -621,4 +682,171 @@ fn a_trailing_slash_source_moves_under_its_basename() {
     assert_eq!(run(mv(false, false, &["/d/"], "/dst"), &fs, &out), Ok(()));
     assert!(fs.has_dir("/dst/d"));
     assert_eq!(fs.contents("/dst/d/f").as_deref(), Some(&b"x"[..]));
+}
+
+#[test]
+fn interactive_asks_before_overwriting() {
+    let fs = MemFs::new()
+        .file("/a", b"fresh")
+        .file("/b", b"stale")
+        .file("/c", b"old")
+        .dir("/dst")
+        .file("/dst/a", b"blockA")
+        .file("/dst/c", b"blockC");
+    let out = Recorder::new();
+    let prompt = Answers::new(&[true, false]);
+    assert_eq!(
+        engine_run(
+            mv_with(
+                Options {
+                    clobber: Clobber::Prompt,
+                    ..Options::DEFAULT
+                },
+                &["/a", "/c"],
+                "/dst",
+            ),
+            &fs,
+            &prompt,
+            &out,
+        ),
+        Ok(())
+    );
+    // `/dst/a` was confirmed and replaced; `/dst/c` was declined and kept
+    // (its source stays put), and the run still succeeds.
+    assert_eq!(fs.contents("/dst/a").as_deref(), Some(&b"fresh"[..]));
+    assert_eq!(fs.contents("/dst/c").as_deref(), Some(&b"blockC"[..]));
+    assert_eq!(fs.contents("/c").as_deref(), Some(&b"old"[..]));
+    assert_eq!(
+        prompt.asked(),
+        ["overwrite '/dst/a'?", "overwrite '/dst/c'?"]
+    );
+}
+
+#[test]
+fn an_unanswerable_prompt_fails_closed() {
+    let fs = MemFs::new().file("/a", b"fresh").file("/b", b"stale");
+    let out = Recorder::new();
+    let prompt = Answers::new(&[]);
+    assert_eq!(
+        engine_run(
+            mv_with(
+                Options {
+                    clobber: Clobber::Prompt,
+                    ..Options::DEFAULT
+                },
+                &["/a"],
+                "/b",
+            ),
+            &fs,
+            &prompt,
+            &out,
+        ),
+        Err(MvError::Prompt(Errno::NotFound))
+    );
+    assert_eq!(fs.contents("/b").as_deref(), Some(&b"stale"[..]));
+}
+
+#[test]
+fn verbose_reports_each_move_in_gnu_wording() {
+    let fs = MemFs::new().file("/a", b"x").dir("/dst");
+    let out = Recorder::new();
+    assert_eq!(
+        run(
+            mv_with(
+                Options {
+                    verbose: true,
+                    ..Options::DEFAULT
+                },
+                &["/a"],
+                "/dst",
+            ),
+            &fs,
+            &out,
+        ),
+        Ok(())
+    );
+    assert_eq!(out.text(), "renamed '/a' -> '/dst/a'\n");
+}
+
+#[test]
+fn target_directory_moves_every_source_into_it() {
+    let fs = MemFs::new()
+        .file("/a", b"one")
+        .file("/b", b"two")
+        .dir("/dst");
+    let out = Recorder::new();
+    assert_eq!(
+        run(
+            mv_with(
+                Options {
+                    target_mode: TargetMode::Directory,
+                    ..Options::DEFAULT
+                },
+                &["/a", "/b"],
+                "/dst",
+            ),
+            &fs,
+            &out,
+        ),
+        Ok(())
+    );
+    assert_eq!(fs.contents("/dst/a").as_deref(), Some(&b"one"[..]));
+    assert_eq!(fs.contents("/dst/b").as_deref(), Some(&b"two"[..]));
+}
+
+#[test]
+fn target_directory_must_exist_and_be_a_directory() {
+    let fs = MemFs::new().file("/a", b"one").file("/blocker", b"x");
+    let out = Recorder::new();
+    assert_eq!(
+        run(
+            mv_with(
+                Options {
+                    target_mode: TargetMode::Directory,
+                    ..Options::DEFAULT
+                },
+                &["/a"],
+                "/blocker",
+            ),
+            &fs,
+            &out,
+        ),
+        Err(MvError::Usage)
+    );
+    assert_eq!(
+        run(
+            mv_with(
+                Options {
+                    target_mode: TargetMode::Directory,
+                    ..Options::DEFAULT
+                },
+                &["/a"],
+                "/absent",
+            ),
+            &fs,
+            &out,
+        ),
+        Err(MvError::Stat(Errno::NotFound))
+    );
+}
+
+#[test]
+fn no_target_directory_refuses_several_sources() {
+    let fs = MemFs::new().file("/a", b"x").file("/b", b"y").dir("/dst");
+    let out = Recorder::new();
+    assert_eq!(
+        run(
+            mv_with(
+                Options {
+                    target_mode: TargetMode::NoDirectory,
+                    ..Options::DEFAULT
+                },
+                &["/a", "/b"],
+                "/dst",
+            ),
+            &fs,
+            &out,
+        ),
+        Err(MvError::Usage)
+    );
 }

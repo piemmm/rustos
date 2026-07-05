@@ -71,6 +71,6 @@ pub mod error;
 pub mod io;
 
 pub use client::{run, USAGE};
-pub use command::{parse, Command};
+pub use command::{parse, Clobber, Command, Options, TargetMode};
 pub use error::MvError;
-pub use io::{Entry, EntryKind, FileSystem, Output, RenameOutcome};
+pub use io::{Entry, EntryKind, FileSystem, Output, Prompt, RenameOutcome};

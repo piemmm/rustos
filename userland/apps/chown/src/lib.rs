@@ -67,6 +67,6 @@ pub mod error;
 pub mod io;
 
 pub use client::{run, USAGE};
-pub use command::{parse, parse_owner, Command, Owner};
+pub use command::{parse, parse_owner, Command, Options, Owner, Verbosity};
 pub use error::ChownError;
-pub use io::{Entry, EntryKind, FileSystem, Output};
+pub use io::{Entry, EntryKind, FileSystem, Metadata, Output};

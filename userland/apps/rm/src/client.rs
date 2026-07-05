@@ -2,19 +2,27 @@
 //! must remove, and unlink every reachable object — depth-first, contents
 //! before the directory that holds them.
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::command::Command;
+use crate::command::{Command, Interactive, Options};
 use crate::error::RmError;
-use crate::io::{Entry, EntryKind, Output, Removal};
+use crate::io::{Entry, EntryKind, Output, Prompt, Removal};
 
 /// The usage banner printed by [`Command::Help`].
 pub const USAGE: &str = "\
-usage: rm [-r] [-f] [--] file...
+usage: rm [-dfiIrRv] [--] file...
 
   -r, -R, --recursive  remove directories and their contents
   -f, --force          ignore operands that do not exist; never prompt
+  -d, --dir            remove empty directories
+  -i, --interactive    prompt before every removal
+  -I                   prompt once before removing more than three
+                       operands, or before a recursive removal
+  -v, --verbose        report each removal
+  --preserve-root      refuse to remove '/' (the default)
+  --no-preserve-root   allow removing '/'
   -h, --help           show this message
 
 At least one file operand is required unless -f is given. `--` ends option
@@ -24,51 +32,100 @@ parsing: every later argument is a path.
 /// Run one [`Command`], removing its operands through `fs`.
 ///
 /// Operands are removed in order. A non-directory operand is unlinked; a
-/// directory operand is removed only with `-r`, which removes its contents
-/// depth-first and then the directory itself. With `-f` an operand that does
-/// not exist is skipped silently. `rm` writes nothing on success; `out`
-/// carries only the [`Command::Help`] banner.
+/// directory operand is removed only with `-r` (which removes its contents
+/// depth-first and then the directory itself) or, when empty, with `-d`.
+/// With `-f` an operand that does not exist is skipped silently. `-i` asks
+/// through `prompt` before every removal and before descending into a
+/// directory; `-I` asks once up front for a large or recursive removal; a
+/// declined question skips the object (or the whole run for `-I`) without
+/// error. `-v` reports each removal on `out`; otherwise `rm` writes nothing
+/// on success beyond the [`Command::Help`] banner. `--preserve-root` (the
+/// default) refuses the operand `/` outright.
 ///
 /// The first failure stops the run before any later operand (fail closed).
 ///
 /// # Errors
 ///
-/// * [`RmError::IsDirectory`] — a directory was named without `-r`.
+/// * [`RmError::IsDirectory`] — a directory was named without `-r` (or
+///   `-d`).
+/// * [`RmError::PreserveRoot`] — the operand `/` under `--preserve-root`.
 /// * [`RmError::Stat`] — an operand could not be inspected; carries the
 ///   underlying [`Errno`](rustos_abi::Errno) (suppressed for
 ///   [`NotFound`](rustos_abi::Errno::NotFound) when `-f` is set).
 /// * [`RmError::Read`] — a directory's entries could not be read.
 /// * [`RmError::Remove`] — unlinking a file or directory failed.
-/// * [`RmError::Output`] — writing the usage banner failed.
-pub fn run(command: Command, fs: &dyn Removal, out: &dyn Output) -> Result<(), RmError> {
+/// * [`RmError::Prompt`] — a confirmation could not be read (never treated
+///   as consent).
+/// * [`RmError::Output`] — writing the usage banner or a `-v` report
+///   failed.
+pub fn run(
+    command: Command,
+    fs: &dyn Removal,
+    prompt: &dyn Prompt,
+    out: &dyn Output,
+) -> Result<(), RmError> {
     match command {
         Command::Help => out.write_all(USAGE.as_bytes()).map_err(RmError::Output),
-        Command::Remove {
-            recursive,
-            force,
-            paths,
-        } => {
+        Command::Remove { options, paths } => {
+            if options.interactive == Interactive::Once && (paths.len() > 3 || options.recursive) {
+                let plural = if paths.len() == 1 { "" } else { "s" };
+                let recursively = if options.recursive {
+                    " recursively"
+                } else {
+                    ""
+                };
+                let question = format!("remove {} argument{plural}{recursively}?", paths.len());
+                if !prompt.confirm(&question).map_err(RmError::Prompt)? {
+                    return Ok(());
+                }
+            }
             for path in &paths {
-                remove_operand(path, recursive, force, fs)?;
+                remove_operand(path, options, fs, prompt, out)?;
             }
             Ok(())
         }
     }
 }
 
-/// Remove one named operand, honouring `-f` for a missing path.
+/// Remove one named operand, honouring `-f` for a missing path and the
+/// `--preserve-root` guard.
 fn remove_operand(
     path: &str,
-    recursive: bool,
-    force: bool,
+    options: Options,
     fs: &dyn Removal,
+    prompt: &dyn Prompt,
+    out: &dyn Output,
 ) -> Result<(), RmError> {
+    if options.preserve_root && path == "/" {
+        return Err(RmError::PreserveRoot);
+    }
     let kind = match fs.kind(path) {
         Ok(kind) => kind,
-        Err(rustos_abi::Errno::NotFound) if force => return Ok(()),
+        Err(rustos_abi::Errno::NotFound) if options.force => return Ok(()),
         Err(errno) => return Err(RmError::Stat(errno)),
     };
-    remove_known(path, kind, recursive, fs)
+    remove_known(path, kind, options, fs, prompt, out)
+}
+
+/// Ask a per-object `-i` question; `Ok(true)` means proceed.
+fn confirmed(options: Options, prompt: &dyn Prompt, question: &str) -> Result<bool, RmError> {
+    if options.interactive != Interactive::Always {
+        return Ok(true);
+    }
+    prompt.confirm(question).map_err(RmError::Prompt)
+}
+
+/// Report one removal under `-v`, in the GNU wording.
+fn report(options: Options, out: &dyn Output, path: &str, directory: bool) -> Result<(), RmError> {
+    if !options.verbose {
+        return Ok(());
+    }
+    let line = if directory {
+        format!("removed directory '{path}'\n")
+    } else {
+        format!("removed '{path}'\n")
+    };
+    out.write_all(line.as_bytes()).map_err(RmError::Output)
 }
 
 /// Remove an object whose [`EntryKind`] is already known (from the parent's
@@ -76,20 +133,48 @@ fn remove_operand(
 fn remove_known(
     path: &str,
     kind: EntryKind,
-    recursive: bool,
+    options: Options,
     fs: &dyn Removal,
+    prompt: &dyn Prompt,
+    out: &dyn Output,
 ) -> Result<(), RmError> {
     match kind {
-        EntryKind::Other => fs.remove_file(path).map_err(RmError::Remove),
+        EntryKind::Other => {
+            if !confirmed(options, prompt, &format!("remove file '{path}'?"))? {
+                return Ok(());
+            }
+            fs.remove_file(path).map_err(RmError::Remove)?;
+            report(options, out, path, false)
+        }
         EntryKind::Directory => {
-            if !recursive {
-                return Err(RmError::IsDirectory);
+            if !options.recursive {
+                if !options.dir {
+                    return Err(RmError::IsDirectory);
+                }
+                // `-d`: remove the (empty) directory itself; a non-empty
+                // one surfaces the filesystem's own refusal.
+                if !confirmed(options, prompt, &format!("remove directory '{path}'?"))? {
+                    return Ok(());
+                }
+                fs.remove_dir(path).map_err(RmError::Remove)?;
+                return report(options, out, path, true);
+            }
+            if !confirmed(
+                options,
+                prompt,
+                &format!("descend into directory '{path}'?"),
+            )? {
+                return Ok(());
             }
             for entry in read_children(path, fs)? {
                 let child = join(path, &entry.name);
-                remove_known(&child, entry.kind, recursive, fs)?;
+                remove_known(&child, entry.kind, options, fs, prompt, out)?;
             }
-            fs.remove_dir(path).map_err(RmError::Remove)
+            if !confirmed(options, prompt, &format!("remove directory '{path}'?"))? {
+                return Ok(());
+            }
+            fs.remove_dir(path).map_err(RmError::Remove)?;
+            report(options, out, path, true)
         }
     }
 }
@@ -120,14 +205,60 @@ fn join(parent: &str, name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{run, USAGE};
-    use crate::command::Command;
+    use super::{run as engine_run, USAGE};
+    use crate::command::{Command, Interactive, Options};
     use crate::error::RmError;
-    use crate::io::{Entry, EntryKind, Output, Removal};
+    use crate::io::{Entry, EntryKind, Output, Prompt, Removal};
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
     use core::cell::RefCell;
     use rustos_abi::Errno;
+
+    /// A prompt no non-interactive run may ever reach.
+    struct NeverAsked;
+
+    impl Prompt for NeverAsked {
+        fn confirm(&self, question: &str) -> Result<bool, Errno> {
+            panic!("unexpected prompt: {question}");
+        }
+    }
+
+    /// A scripted prompt: answers in order, recording every question; an
+    /// exhausted script fails the read.
+    struct Answers {
+        replies: RefCell<Vec<bool>>,
+        asked: RefCell<Vec<String>>,
+    }
+
+    impl Answers {
+        fn new(replies: &[bool]) -> Self {
+            Self {
+                replies: RefCell::new(replies.to_vec()),
+                asked: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn asked(&self) -> Vec<String> {
+            self.asked.borrow().clone()
+        }
+    }
+
+    impl Prompt for Answers {
+        fn confirm(&self, question: &str) -> Result<bool, Errno> {
+            self.asked.borrow_mut().push(question.to_string());
+            let mut replies = self.replies.borrow_mut();
+            if replies.is_empty() {
+                return Err(Errno::NotFound);
+            }
+            Ok(replies.remove(0))
+        }
+    }
+
+    /// The engine under a prompt that must never be reached — the shape
+    /// every pre-existing non-interactive test uses.
+    fn run(command: Command, fs: &dyn Removal, out: &Recorder) -> Result<(), RmError> {
+        engine_run(command, fs, &NeverAsked, out)
+    }
 
     /// An in-memory tree: a kind table keyed by path plus, for directories,
     /// the entries that path's `read_dir` returns. Removals are recorded in
@@ -281,12 +412,22 @@ mod tests {
         }
     }
 
-    fn remove(recursive: bool, force: bool, paths: &[&str]) -> Command {
+    fn remove_with(options: Options, paths: &[&str]) -> Command {
         Command::Remove {
-            recursive,
-            force,
+            options,
             paths: paths.iter().map(|p| (*p).to_string()).collect::<Vec<_>>(),
         }
+    }
+
+    fn remove(recursive: bool, force: bool, paths: &[&str]) -> Command {
+        remove_with(
+            Options {
+                recursive,
+                force,
+                ..Options::DEFAULT
+            },
+            paths,
+        )
     }
 
     #[test]
@@ -470,10 +611,261 @@ mod tests {
 
     #[test]
     fn a_directory_under_a_trailing_slash_parent_joins_cleanly() {
-        // A mount-root style parent ending in `/` must not double the slash.
+        // A mount-root style parent ending in `/` must not double the
+        // slash; removing `/` itself requires --no-preserve-root.
         let fs = TreeFs::new().dir("/").child("/", "f", EntryKind::Other);
         let out = Recorder::new();
-        assert_eq!(run(remove(true, false, &["/"]), &fs, &out), Ok(()));
+        assert_eq!(
+            run(
+                remove_with(
+                    Options {
+                        recursive: true,
+                        preserve_root: false,
+                        ..Options::DEFAULT
+                    },
+                    &["/"],
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
         assert_eq!(fs.removed(), ["/f", "/"]);
+    }
+
+    #[test]
+    fn preserve_root_refuses_the_root_operand() {
+        let fs = TreeFs::new().dir("/").child("/", "f", EntryKind::Other);
+        let out = Recorder::new();
+        assert_eq!(
+            run(remove(true, false, &["/"]), &fs, &out),
+            Err(RmError::PreserveRoot)
+        );
+        assert!(fs.removed().is_empty());
+    }
+
+    #[test]
+    fn dir_option_removes_an_empty_directory_without_recursive() {
+        let fs = TreeFs::new().dir("/empty");
+        let out = Recorder::new();
+        assert_eq!(
+            run(
+                remove_with(
+                    Options {
+                        dir: true,
+                        ..Options::DEFAULT
+                    },
+                    &["/empty"],
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
+        assert_eq!(fs.removed(), ["/empty"]);
+    }
+
+    #[test]
+    fn dir_option_surfaces_the_filesystems_refusal_of_a_full_directory() {
+        let fs = TreeFs::new()
+            .dir("/full")
+            .child("/full", "f", EntryKind::Other)
+            .failing("/full", Errno::PermissionDenied);
+        let out = Recorder::new();
+        assert_eq!(
+            run(
+                remove_with(
+                    Options {
+                        dir: true,
+                        ..Options::DEFAULT
+                    },
+                    &["/full"],
+                ),
+                &fs,
+                &out,
+            ),
+            Err(RmError::Remove(Errno::PermissionDenied))
+        );
+    }
+
+    #[test]
+    fn verbose_reports_each_removal_in_gnu_wording() {
+        let fs = TreeFs::new().dir("/d").child("/d", "f", EntryKind::Other);
+        let out = Recorder::new();
+        assert_eq!(
+            run(
+                remove_with(
+                    Options {
+                        recursive: true,
+                        verbose: true,
+                        ..Options::DEFAULT
+                    },
+                    &["/d"],
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
+        assert_eq!(out.text(), "removed '/d/f'\nremoved directory '/d'\n");
+    }
+
+    #[test]
+    fn interactive_always_asks_before_each_removal() {
+        let fs = TreeFs::new().file("/a").file("/b");
+        let out = Recorder::new();
+        let prompt = Answers::new(&[true, false]);
+        // `/a` is confirmed and removed; `/b` is declined and skipped, and
+        // the run still succeeds.
+        assert_eq!(
+            engine_run(
+                remove_with(
+                    Options {
+                        interactive: Interactive::Always,
+                        ..Options::DEFAULT
+                    },
+                    &["/a", "/b"],
+                ),
+                &fs,
+                &prompt,
+                &out,
+            ),
+            Ok(())
+        );
+        assert_eq!(fs.removed(), ["/a"]);
+        assert_eq!(prompt.asked(), ["remove file '/a'?", "remove file '/b'?"]);
+    }
+
+    #[test]
+    fn interactive_always_declining_the_descent_skips_the_directory() {
+        let fs = TreeFs::new().dir("/d").child("/d", "f", EntryKind::Other);
+        let out = Recorder::new();
+        let prompt = Answers::new(&[false]);
+        assert_eq!(
+            engine_run(
+                remove_with(
+                    Options {
+                        recursive: true,
+                        interactive: Interactive::Always,
+                        ..Options::DEFAULT
+                    },
+                    &["/d"],
+                ),
+                &fs,
+                &prompt,
+                &out,
+            ),
+            Ok(())
+        );
+        assert!(fs.removed().is_empty());
+        assert_eq!(prompt.asked(), ["descend into directory '/d'?"]);
+    }
+
+    #[test]
+    fn interactive_once_asks_once_for_many_operands() {
+        let fs = TreeFs::new().file("/a").file("/b").file("/c").file("/d");
+        let out = Recorder::new();
+        let declined = Answers::new(&[false]);
+        assert_eq!(
+            engine_run(
+                remove_with(
+                    Options {
+                        interactive: Interactive::Once,
+                        ..Options::DEFAULT
+                    },
+                    &["/a", "/b", "/c", "/d"],
+                ),
+                &fs,
+                &declined,
+                &out,
+            ),
+            Ok(())
+        );
+        assert!(fs.removed().is_empty());
+        assert_eq!(declined.asked(), ["remove 4 arguments?"]);
+
+        let accepted = Answers::new(&[true]);
+        assert_eq!(
+            engine_run(
+                remove_with(
+                    Options {
+                        interactive: Interactive::Once,
+                        ..Options::DEFAULT
+                    },
+                    &["/a", "/b", "/c", "/d"],
+                ),
+                &fs,
+                &accepted,
+                &out,
+            ),
+            Ok(())
+        );
+        assert_eq!(fs.removed(), ["/a", "/b", "/c", "/d"]);
+    }
+
+    #[test]
+    fn interactive_once_asks_for_a_recursive_removal_and_not_for_few_files() {
+        let fs = TreeFs::new().dir("/d");
+        let out = Recorder::new();
+        let prompt = Answers::new(&[true]);
+        assert_eq!(
+            engine_run(
+                remove_with(
+                    Options {
+                        recursive: true,
+                        interactive: Interactive::Once,
+                        ..Options::DEFAULT
+                    },
+                    &["/d"],
+                ),
+                &fs,
+                &prompt,
+                &out,
+            ),
+            Ok(())
+        );
+        assert_eq!(prompt.asked(), ["remove 1 argument recursively?"]);
+        assert_eq!(fs.removed(), ["/d"]);
+
+        // Three or fewer plain files ask nothing.
+        let fs = TreeFs::new().file("/a");
+        assert_eq!(
+            run(
+                remove_with(
+                    Options {
+                        interactive: Interactive::Once,
+                        ..Options::DEFAULT
+                    },
+                    &["/a"],
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
+        assert_eq!(fs.removed(), ["/a"]);
+    }
+
+    #[test]
+    fn an_unanswerable_prompt_fails_closed() {
+        let fs = TreeFs::new().file("/a");
+        let out = Recorder::new();
+        let prompt = Answers::new(&[]);
+        assert_eq!(
+            engine_run(
+                remove_with(
+                    Options {
+                        interactive: Interactive::Always,
+                        ..Options::DEFAULT
+                    },
+                    &["/a"],
+                ),
+                &fs,
+                &prompt,
+                &out,
+            ),
+            Err(RmError::Prompt(Errno::NotFound))
+        );
+        assert!(fs.removed().is_empty());
     }
 }

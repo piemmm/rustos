@@ -17,11 +17,17 @@ kernel or driver crate (`AGENTS.md` §17.4).
 ## Usage
 
 ```
-cp [-r] [-f] [--] source... dest
+cp [-finrRvT] [-t dir] [--] source... dest
 
-  -r, -R, --recursive  copy directories and their contents
-  -f, --force          remove an unwritable destination and retry
-  -h, --help           show the usage banner
+  -r, -R, --recursive        copy directories and their contents
+  -f, --force                remove an unwritable destination and retry
+  -i, --interactive          ask before overwriting an existing file
+  -n, --no-clobber           never overwrite an existing file
+  -v, --verbose              report each copy ('src' -> 'dst')
+  -t dir, --target-directory=dir
+                             copy every source into dir
+  -T, --no-target-directory  treat dest as a normal file (one source)
+  -h, --help                 show the usage banner
 ```
 
 At least one source and a destination are required. Short options may be
@@ -40,7 +46,9 @@ injected seams, mirroring the other userland crates (`init`'s
 - `FileSystem` — learn a path's kind, read a file's bytes and a
   directory's entries, and create directories, files, and bytes (plus
   remove a destination file for `-f`).
-- `Output` — write the usage banner to the terminal (`cp` is silent on
+- `Prompt` — ask the `-i` overwrite question, fail-closed on an
+  unanswerable prompt (never treated as consent).
+- `Output` — write the usage banner and the `-v` reports (`cp` is otherwise silent on
   success).
 
 On a running system these are syscall- and console-backed; in tests they

@@ -16,10 +16,13 @@ kernel or driver crate (`AGENTS.md` §17.4).
 ## Usage
 
 ```
-chmod [-R] [--] MODE file...
+chmod [-cfRv] [--] MODE file...
 
-  -R, --recursive  change files and directories recursively
-  -h, --help       show the usage banner
+  -R, --recursive       change files and directories recursively
+  -c, --changes         report only files whose mode actually changed
+  -v, --verbose         report every file processed
+  -f, --silent, --quiet suppress most error messages
+  -h, --help            show the usage banner
 ```
 
 A mode and at least one file are required. `--` ends option parsing:
@@ -52,7 +55,8 @@ injected seams, mirroring the other userland crates (`cat`'s
 
 - `FileSystem` — learn a path's kind and current mode, set its mode, and
   read a directory's entries (for `-R`).
-- `Output` — write the usage banner to the terminal (`chmod` is silent on
+- `Output` — write the usage banner and the `-c`/`-v` change reports
+  (`chmod` is otherwise silent on
   success).
 
 On a running system these are syscall- and console-backed; in tests they

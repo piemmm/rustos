@@ -37,6 +37,10 @@ pub enum CpError {
     Write(Errno),
     /// Writing to the terminal failed. Carries the underlying [`Errno`].
     Output(Errno),
+    /// Asking the interactive confirmation question failed. Carries the
+    /// underlying [`Errno`]. Failing closed: an unanswerable prompt never
+    /// counts as consent.
+    Prompt(Errno),
 }
 
 impl fmt::Display for CpError {
@@ -50,6 +54,7 @@ impl fmt::Display for CpError {
             Self::Create(errno) => write!(f, "cannot create destination: {errno}"),
             Self::Write(errno) => write!(f, "cannot write destination: {errno}"),
             Self::Output(errno) => write!(f, "terminal write failed: {errno}"),
+            Self::Prompt(errno) => write!(f, "cannot read confirmation: {errno}"),
         }
     }
 }

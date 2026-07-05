@@ -24,6 +24,19 @@ pub enum EntryKind {
     File,
 }
 
+/// The metadata `chown` reads for a path: its kind and current ownership
+/// (the [`rustos_abi::fs::FileStat`] fields the tool actually uses — the
+/// old owner backs the `-c`/`-v` reports).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Metadata {
+    /// What kind of object the path is.
+    pub kind: EntryKind,
+    /// The current owning user id.
+    pub uid: u32,
+    /// The current owning group id.
+    pub gid: u32,
+}
+
 /// One directory entry: a name and its [`EntryKind`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Entry {
@@ -44,14 +57,14 @@ pub struct Entry {
 /// calling it with an increasing `index` until it returns [`None`] and
 /// recursing into each child.
 pub trait FileSystem {
-    /// Return the [`EntryKind`] of `path`.
+    /// Return the [`Metadata`] of `path`.
     ///
     /// # Errors
     ///
     /// Any [`Errno`] the filesystem raises — e.g. [`Errno::NotFound`] for a
     /// missing path or [`Errno::PermissionDenied`] when the caller may not
     /// reach it.
-    fn stat(&self, path: &str) -> Result<EntryKind, Errno>;
+    fn stat(&self, path: &str) -> Result<Metadata, Errno>;
 
     /// Set the owning user and/or group of `path`.
     ///
@@ -80,7 +93,8 @@ pub trait FileSystem {
 
 /// Writes rendered bytes to the terminal.
 ///
-/// `chown` is silent on success; this seam carries only the usage banner.
+/// `chown` is silent on success unless `-c`/`-v` report changes; this seam
+/// also carries the usage banner.
 pub trait Output {
     /// Write every byte of `bytes` to the terminal.
     ///

@@ -5,14 +5,47 @@ use alloc::vec::Vec;
 
 use crate::error::ChmodError;
 
+/// Which mode changes are reported on standard output.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Verbosity {
+    /// Report nothing (the default).
+    None,
+    /// Report only files whose mode actually changed (`-c`).
+    Changes,
+    /// Report every file processed (`-v`).
+    All,
+}
+
+/// The full option set of one `chmod` run.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Options {
+    /// Descend into directories and apply the mode to their contents
+    /// (`-R`/`--recursive`).
+    pub recursive: bool,
+    /// The reporting policy (`-c` / `-v`, last one wins).
+    pub verbosity: Verbosity,
+    /// Suppress per-operand error diagnostics and keep going (`-f`); a
+    /// suppressed failure still fails the run as
+    /// [`ChmodError::Silenced`].
+    pub quiet: bool,
+}
+
+impl Options {
+    /// The defaults of a bare `chmod`.
+    pub const DEFAULT: Self = Self {
+        recursive: false,
+        verbosity: Verbosity::None,
+        quiet: false,
+    };
+}
+
 /// One thing the `chmod` tool can do.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Command {
     /// Apply `mode` to each of `files`, in operand order.
     Change {
-        /// Descend into directories and apply the mode to their contents
-        /// (`-R`/`--recursive`).
-        recursive: bool,
+        /// The change options.
+        options: Options,
         /// The mode to apply — either an absolute octal value or a list of
         /// symbolic clauses.
         mode: Mode,
@@ -179,9 +212,14 @@ impl Clause {
 /// Parse `args` (the tool's arguments, excluding the program name) into a
 /// [`Command`].
 ///
-/// The grammar is the familiar `chmod [-R] [--] MODE file...`:
+/// The grammar is the GNU `chmod` surface,
+/// `chmod [-cfRv] [--] MODE file...`:
 ///
 /// * `-R` / `--recursive` — descend into directories.
+/// * `-c` / `--changes` — report only files whose mode actually changed.
+/// * `-v` / `--verbose` — report every file processed.
+/// * `-f` / `--silent` / `--quiet` — suppress per-operand error
+///   diagnostics and keep going (the run still fails).
 /// * `-h` / `--help` — print the usage banner (wins immediately).
 /// * `--` — end option parsing; every later argument is an operand.
 /// * any other `-…` — a [`ChmodError::Usage`] error (fail closed; never a
@@ -199,7 +237,7 @@ impl Clause {
 /// [`ChmodError::BadMode`] when the mode operand parses as neither an octal
 /// nor a symbolic mode.
 pub fn parse(args: &[&str]) -> Result<Command, ChmodError> {
-    let mut recursive = false;
+    let mut options = Options::DEFAULT;
     let mut operands = Vec::new();
     let mut options_done = false;
     for &arg in args {
@@ -210,7 +248,10 @@ pub fn parse(args: &[&str]) -> Result<Command, ChmodError> {
             }
             if let Some(name) = arg.strip_prefix("--") {
                 match name {
-                    "recursive" => recursive = true,
+                    "recursive" => options.recursive = true,
+                    "changes" => options.verbosity = Verbosity::Changes,
+                    "verbose" => options.verbosity = Verbosity::All,
+                    "silent" | "quiet" => options.quiet = true,
                     "help" => return Ok(Command::Help),
                     _ => return Err(ChmodError::Usage),
                 }
@@ -219,7 +260,10 @@ pub fn parse(args: &[&str]) -> Result<Command, ChmodError> {
             if let Some(letters) = arg.strip_prefix('-').filter(|rest| !rest.is_empty()) {
                 for letter in letters.chars() {
                     match letter {
-                        'R' => recursive = true,
+                        'R' => options.recursive = true,
+                        'c' => options.verbosity = Verbosity::Changes,
+                        'v' => options.verbosity = Verbosity::All,
+                        'f' => options.quiet = true,
                         'h' => return Ok(Command::Help),
                         _ => return Err(ChmodError::Usage),
                     }
@@ -238,7 +282,7 @@ pub fn parse(args: &[&str]) -> Result<Command, ChmodError> {
     }
     let mode = parse_mode(&mode_spec).ok_or(ChmodError::BadMode)?;
     Ok(Command::Change {
-        recursive,
+        options,
         mode,
         files: operands,
     })
@@ -325,7 +369,7 @@ fn parse_symbolic(spec: &str) -> Option<Vec<Clause>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse, parse_mode, Command, Mode, Op};
+    use super::{parse, parse_mode, Command, Mode, Op, Options, Verbosity};
     use super::{
         PERM_COND_EXEC, PERM_EXEC, PERM_READ, PERM_SETID, PERM_STICKY, PERM_WRITE, WHO_GROUP,
         WHO_OTHER, WHO_USER,
@@ -337,13 +381,60 @@ mod tests {
 
     fn change(recursive: bool, mode: Mode, files: &[&str]) -> Command {
         Command::Change {
-            recursive,
+            options: Options {
+                recursive,
+                ..Options::DEFAULT
+            },
             mode,
             files: files.iter().map(|p| String::from(*p)).collect::<Vec<_>>(),
         }
     }
 
     // ----- command-line parsing -------------------------------------------
+
+    #[test]
+    fn changes_verbose_and_quiet_parse() {
+        assert_eq!(
+            parse(&["-c", "644", "f"]),
+            Ok(Command::Change {
+                options: Options {
+                    verbosity: Verbosity::Changes,
+                    ..Options::DEFAULT
+                },
+                mode: Mode::Absolute(0o644),
+                files: vec![String::from("f")],
+            })
+        );
+        // The later of `-c` / `-v` wins, as in the GNU tool.
+        assert_eq!(
+            parse(&["-c", "-v", "644", "f"]),
+            Ok(Command::Change {
+                options: Options {
+                    verbosity: Verbosity::All,
+                    ..Options::DEFAULT
+                },
+                mode: Mode::Absolute(0o644),
+                files: vec![String::from("f")],
+            })
+        );
+        for args in [
+            ["-f", "644", "f"],
+            ["--silent", "644", "f"],
+            ["--quiet", "644", "f"],
+        ] {
+            assert_eq!(
+                parse(&args),
+                Ok(Command::Change {
+                    options: Options {
+                        quiet: true,
+                        ..Options::DEFAULT
+                    },
+                    mode: Mode::Absolute(0o644),
+                    files: vec![String::from("f")],
+                })
+            );
+        }
+    }
 
     #[test]
     fn an_octal_mode_and_one_file_parses() {

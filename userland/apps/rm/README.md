@@ -16,10 +16,16 @@ kernel or driver crate (`AGENTS.md` §17.4).
 ## Usage
 
 ```
-rm [-r] [-f] [--] file...
+rm [-dfiIrRv] [--] file...
 
   -r, -R, --recursive  remove directories and their contents
   -f, --force          ignore operands that do not exist; never prompt
+  -d, --dir            remove empty directories
+  -i, --interactive    prompt before every removal
+  -I                   prompt once before removing many or recursively
+  -v, --verbose        report each removal
+  --preserve-root      refuse to remove '/' (the default)
+  --no-preserve-root   allow removing '/'
   -h, --help           show the usage banner
 ```
 
@@ -37,7 +43,9 @@ other userland crates (`init`'s `Spawner`/`Reaper`, `login`'s `Prompt`,
 
 - `Removal` — learn a path's kind, read a directory's entries by index,
   and remove a file or an emptied directory.
-- `Output` — write the usage banner to the terminal (`rm` is silent on
+- `Prompt` — ask the `-i`/`-I` confirmation questions, fail-closed on an
+  unanswerable prompt (never treated as consent).
+- `Output` — write the usage banner and the `-v` reports (`rm` is otherwise silent on
   success).
 
 On a running system these are syscall- and console-backed; in tests they

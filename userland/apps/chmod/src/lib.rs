@@ -66,6 +66,6 @@ pub mod error;
 pub mod io;
 
 pub use client::{run, USAGE};
-pub use command::{parse, Clause, Command, Mode, Op};
+pub use command::{parse, Clause, Command, Mode, Op, Options, Verbosity};
 pub use error::ChmodError;
 pub use io::{Entry, EntryKind, FileSystem, Metadata, Output};

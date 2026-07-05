@@ -71,6 +71,8 @@ mod program {
                 kind: stat.kind,
                 mode: stat.mode,
                 size: stat.size,
+                uid: stat.uid,
+                gid: stat.gid,
             })
         }
 

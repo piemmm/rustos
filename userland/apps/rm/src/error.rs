@@ -29,6 +29,13 @@ pub enum RmError {
     Remove(Errno),
     /// Writing to the terminal failed. Carries the underlying [`Errno`].
     Output(Errno),
+    /// An operand named `/` while `--preserve-root` (the default) is in
+    /// effect. Nothing is removed.
+    PreserveRoot,
+    /// Asking the interactive confirmation question failed. Carries the
+    /// underlying [`Errno`]. Failing closed: an unanswerable prompt never
+    /// counts as consent.
+    Prompt(Errno),
 }
 
 impl fmt::Display for RmError {
@@ -40,6 +47,10 @@ impl fmt::Display for RmError {
             Self::Read(errno) => write!(f, "cannot read directory: {errno}"),
             Self::Remove(errno) => write!(f, "cannot remove path: {errno}"),
             Self::Output(errno) => write!(f, "terminal write failed: {errno}"),
+            Self::PreserveRoot => f.write_str(
+                "it is dangerous to operate recursively on '/' (use --no-preserve-root to override)",
+            ),
+            Self::Prompt(errno) => write!(f, "cannot read confirmation: {errno}"),
         }
     }
 }

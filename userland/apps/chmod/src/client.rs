@@ -1,19 +1,23 @@
 //! The mode-changing engine: stat each operand, compute its new mode, apply
 //! it, and — with `-R` — descend into directories applying the same mode.
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::command::{Command, Mode};
+use crate::command::{Command, Mode, Options, Verbosity};
 use crate::error::ChmodError;
 use crate::io::{Entry, EntryKind, FileSystem, Output};
 
 /// The usage banner printed by [`Command::Help`].
 pub const USAGE: &str = "\
-usage: chmod [-R] [--] MODE file...
+usage: chmod [-cfRv] [--] MODE file...
 
-  -R, --recursive  change files and directories recursively
-  -h, --help       show this message
+  -R, --recursive       change files and directories recursively
+  -c, --changes         report only files whose mode actually changed
+  -v, --verbose         report every file processed
+  -f, --silent, --quiet suppress most error messages
+  -h, --help            show this message
 
 MODE is either an octal value (e.g. 644, 0755) or a comma-separated list of
 symbolic clauses [ugoa]*[-+=][rwxXst]* (e.g. g+w, o-rx, a=rx, u+s). `--` ends
@@ -25,10 +29,15 @@ with `-`, write it without the dash (a-w) or end options first (chmod -- -w f).
 ///
 /// Each file is inspected, its new mode computed from the parsed [`Mode`] and
 /// the file's current mode/kind, and the result applied. With `-R` a directory
-/// is changed and then its contents are changed recursively. `chmod` writes
-/// nothing on success; `out` carries only the [`Command::Help`] banner.
+/// is changed and then its contents are changed recursively. `-v` reports
+/// every file processed on `out` and `-c` only those whose mode actually
+/// changed; otherwise `chmod` writes nothing on success beyond the
+/// [`Command::Help`] banner.
 ///
-/// The first failure stops the run before any later operand (fail closed).
+/// The first failure stops the run before any later operand (fail closed) —
+/// except under `-f`, which suppresses each failing operand's diagnostic,
+/// continues with the remaining operands, and fails the whole run afterwards
+/// as the message-less [`ChmodError::Silenced`].
 ///
 /// # Errors
 ///
@@ -37,37 +46,110 @@ with `-`, write it without the dash (a-w) or end options first (chmod -- -w f).
 /// * [`ChmodError::Apply`] — applying the new mode failed.
 /// * [`ChmodError::Read`] — a directory's entries could not be read during a
 ///   recursive descent.
-/// * [`ChmodError::Output`] — writing the usage banner failed.
+/// * [`ChmodError::Silenced`] — one or more operands failed under `-f`.
+/// * [`ChmodError::Output`] — writing the usage banner or a report failed.
 pub fn run(command: Command, fs: &dyn FileSystem, out: &dyn Output) -> Result<(), ChmodError> {
     match command {
         Command::Help => out.write_all(USAGE.as_bytes()).map_err(ChmodError::Output),
         Command::Change {
-            recursive,
+            options,
             mode,
             files,
         } => {
+            let mut silenced = false;
             for file in &files {
-                change(file, &mode, recursive, fs)?;
+                match change(file, &mode, options, fs, out) {
+                    Ok(()) => {}
+                    // A report that cannot be written is never suppressed:
+                    // `-f` silences filesystem failures, not a dead terminal.
+                    Err(ChmodError::Output(errno)) => return Err(ChmodError::Output(errno)),
+                    Err(_) if options.quiet => silenced = true,
+                    Err(err) => return Err(err),
+                }
+            }
+            if silenced {
+                return Err(ChmodError::Silenced);
             }
             Ok(())
         }
     }
 }
 
-/// Apply `mode` to `path`, then — when `recursive` and `path` is a directory —
-/// to each of its entries in turn.
-fn change(path: &str, mode: &Mode, recursive: bool, fs: &dyn FileSystem) -> Result<(), ChmodError> {
+/// Apply `mode` to `path`, then — when `-R` and `path` is a directory —
+/// to each of its entries in turn, reporting per the verbosity policy.
+fn change(
+    path: &str,
+    mode: &Mode,
+    options: Options,
+    fs: &dyn FileSystem,
+    out: &dyn Output,
+) -> Result<(), ChmodError> {
     let meta = fs.stat(path).map_err(ChmodError::Stat)?;
     let is_dir = meta.kind == EntryKind::Directory;
+    let old_mode = meta.mode & 0o7777;
     let new_mode = mode.resolve(meta.mode, is_dir);
     fs.set_mode(path, new_mode).map_err(ChmodError::Apply)?;
-    if recursive && is_dir {
+    report(path, old_mode, new_mode, options, out)?;
+    if options.recursive && is_dir {
         for entry in read_children(path, fs)? {
             let child = join(path, &entry.name);
-            change(&child, mode, recursive, fs)?;
+            change(&child, mode, options, fs, out)?;
         }
     }
     Ok(())
+}
+
+/// Report one processed file in the GNU wording, per the verbosity policy:
+/// `-v` reports every file, `-c` only an actual change.
+fn report(
+    path: &str,
+    old_mode: u32,
+    new_mode: u32,
+    options: Options,
+    out: &dyn Output,
+) -> Result<(), ChmodError> {
+    let changed = old_mode != new_mode;
+    let wanted = match options.verbosity {
+        Verbosity::None => false,
+        Verbosity::Changes => changed,
+        Verbosity::All => true,
+    };
+    if !wanted {
+        return Ok(());
+    }
+    let line = if changed {
+        format!(
+            "mode of '{path}' changed from {old_mode:04o} ({}) to {new_mode:04o} ({})\n",
+            perm_string(old_mode),
+            perm_string(new_mode)
+        )
+    } else {
+        format!(
+            "mode of '{path}' retained as {old_mode:04o} ({})\n",
+            perm_string(old_mode)
+        )
+    };
+    out.write_all(line.as_bytes()).map_err(ChmodError::Output)
+}
+
+/// The nine-character `rwx` rendering of `mode`'s permission bits.
+fn perm_string(mode: u32) -> String {
+    const PERMISSIONS: [(u32, char); 9] = [
+        (0o400, 'r'),
+        (0o200, 'w'),
+        (0o100, 'x'),
+        (0o040, 'r'),
+        (0o020, 'w'),
+        (0o010, 'x'),
+        (0o004, 'r'),
+        (0o002, 'w'),
+        (0o001, 'x'),
+    ];
+    let mut s = String::with_capacity(9);
+    for (bit, ch) in PERMISSIONS {
+        s.push(if mode & bit != 0 { ch } else { '-' });
+    }
+    s
 }
 
 /// Read all entries of the directory `path` into a vector, so the recursive
@@ -408,5 +490,51 @@ mod tests {
         );
         // The directory itself was changed before the read failed.
         assert_eq!(fs.mode_of("/d"), Some(0o700));
+    }
+
+    #[test]
+    fn verbose_reports_changed_and_retained_in_gnu_wording() {
+        let fs = MemFs::new().file("/f", 0o644);
+        let out = Recorder::new();
+        assert_eq!(run_args(&["-v", "644", "/f"], &fs, &out), Ok(()));
+        assert_eq!(
+            out.written(),
+            b"mode of '/f' retained as 0644 (rw-r--r--)\n"
+        );
+        let out = Recorder::new();
+        assert_eq!(run_args(&["-v", "664", "/f"], &fs, &out), Ok(()));
+        assert_eq!(
+            out.written(),
+            b"mode of '/f' changed from 0644 (rw-r--r--) to 0664 (rw-rw-r--)\n"
+        );
+    }
+
+    #[test]
+    fn changes_reports_only_an_actual_change() {
+        let fs = MemFs::new().file("/f", 0o644);
+        let out = Recorder::new();
+        // The mode is already 644: `-c` reports nothing.
+        assert_eq!(run_args(&["-c", "644", "/f"], &fs, &out), Ok(()));
+        assert!(out.written().is_empty());
+        let out = Recorder::new();
+        assert_eq!(run_args(&["-c", "600", "/f"], &fs, &out), Ok(()));
+        assert_eq!(
+            out.written(),
+            b"mode of '/f' changed from 0644 (rw-r--r--) to 0600 (rw-------)\n"
+        );
+    }
+
+    #[test]
+    fn quiet_suppresses_the_failure_but_still_fails_the_run() {
+        let fs = MemFs::new().file("/b", 0o600);
+        let out = Recorder::new();
+        // `/a` is missing: `-f` keeps going (so `/b` is still changed) and
+        // the run fails afterwards with the message-less error.
+        assert_eq!(
+            run_args(&["-f", "644", "/a", "/b"], &fs, &out),
+            Err(ChmodError::Silenced)
+        );
+        assert_eq!(fs.mode_of("/b"), Some(0o644));
+        assert!(out.written().is_empty());
     }
 }

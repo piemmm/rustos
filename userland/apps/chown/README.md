@@ -16,10 +16,13 @@ kernel or driver crate (`AGENTS.md` §17.4).
 ## Usage
 
 ```
-chown [-R] [--] OWNER[:GROUP] file...
+chown [-cfRv] [--] OWNER[:GROUP] file...
 
-  -R, --recursive  change files and directories recursively
-  -h, --help       show the usage banner
+  -R, --recursive       change files and directories recursively
+  -c, --changes         report only files whose ownership actually changed
+  -v, --verbose         report every file processed
+  -f, --silent, --quiet suppress most error messages
+  -h, --help            show the usage banner
 ```
 
 An owner spec and at least one file are required. `--` ends option
@@ -53,7 +56,8 @@ world are injected seams, mirroring the other userland crates (`cat`'s
 - `FileSystem` — learn a path's kind, set its owner, and read a
   directory's entries (for `-R`). A child's kind is carried in its
   directory entry, so the recursion never re-inspects it.
-- `Output` — write the usage banner to the terminal (`chown` is silent on
+- `Output` — write the usage banner and the `-c`/`-v` change reports
+  (`chown` is otherwise silent on
   success).
 
 On a running system these are syscall- and console-backed; in tests they
