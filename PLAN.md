@@ -32,8 +32,8 @@ Do **not** begin a stage before all its listed dependencies are complete.
 - `.cargo/config.toml` declaring per-target build flags and linker scripts.
 - `rustfmt.toml`, `clippy.toml`, `deny.toml` (license + advisory rules).
 - `tools/xtask/` with subcommands: `build`, `test`, `clippy`, `fmt`,
-  `docs-check`, `abi-check`, `c-header`, `deps-check`, `cfg-check`, `coverage`, `ci`,
-  `image`.
+  `docs-check`, `abi-check`, `c-header`, `font-atlas`, `deps-check`,
+  `cfg-check`, `coverage`, `ci`, `image`.
 - `docs/` mdBook scaffold.
 - CI definition (`.github/workflows/ci.yml` or equivalent) running
   `cargo xtask ci` on every push.
@@ -60,6 +60,8 @@ Do **not** begin a stage before all its listed dependencies are complete.
   (`cargo deny` passes advisories + bans + licenses + sources).
 - `tools/xtask` exposes the closed subcommand set (§7/§14/§17.5): `build`,
   `test`, `clippy`, `fmt`, `docs-check`, `abi-check`, `c-header`,
+  `font-atlas` (generates/verifies the Inconsolata glyph atlas in
+  `lib/font/src/` from the committed OFL face in `lib/font/assets/`),
   `deps-check`, `cfg-check`, `coverage`, `ci`, `image`.
 - CI: `.github/workflows/ci.yml` runs `cargo xtask ci` per push/PR;
   `soak.yml` runs nightly soaks on a self-hosted Linux runner. `tools/ci/`
@@ -2591,7 +2593,10 @@ Shipped (headless-testable, model + renderer over injected seams):
   tracking, window ops; fails closed on bad modes.
 - Shared desktop libs (§2.2, one path each): `lib/raster` (incl. the
   `RasterCache` SVG→scale cache), `lib/theme`, `lib/geometry` (DPI/`Scale`),
-  `lib/font`, `lib/cursor`, `lib/icon`, `lib/svg`, `lib/input`, `lib/procinfo`.
+  `lib/font` (the system Inconsolata face: a generated 12×26 4-bit-coverage
+  atlas of every codepoint the face maps — `cargo xtask font-atlas`, drift
+  gated in `ci` — with binary-search Unicode lookup and a U+FFFD fallback),
+  `lib/cursor`, `lib/icon`, `lib/svg`, `lib/input`, `lib/procinfo`.
 - `userland/gui/taskbar` (start menu + running-task list + clock/notification
   area) and `userland/gui/session` glue (theme registry, taskbar model,
   light/dark switch, `DesktopShell` event loop / `TaskBridge`).
@@ -2734,6 +2739,27 @@ transfer, landed in increments:
 - Upgrade path documentation (`abi-vN` → `abi-vN+1`).
 
 ---
+
+## Open defect — intermittent root-unlock QEMU vertical failure
+
+**Status: open (escalated under §2.18/§15.7; observed once, not yet reproduced
+in isolation).**
+
+Under parallel `cargo xtask ci` load, an aarch64 root-unlock QEMU vertical can
+fail: after the scripted wrong-prefix attempt is refused (expected), the
+*correct* fixture passphrase line is also refused, the prompt re-appears, and
+the run times out. Suspected mechanism: the interactive unlock's timed
+anti-brute-force window is a per-attempt deadline, so a passphrase line whose
+serial bytes are delivered slowly under host load can straddle the window and
+be split into two partial (refused) attempts. Work remaining:
+
+- Reproduce under controlled load; confirm whether the attempt window (or a
+  console-read deadline) can split a mid-flight line.
+- If confirmed, restructure the window so it never truncates an in-progress
+  line (e.g. arm the penalty window only between attempts, or bound the
+  *inter-byte* gap rather than the whole line) — without weakening the
+  anti-brute-force defence (§2.17) — and land the fix with a regression test
+  that types a slowly-delivered line (§7).
 
 ## Cross-cutting Tasks (run continuously alongside the stages)
 

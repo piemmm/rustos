@@ -241,9 +241,10 @@ fn render_highlights_the_selected_entry_with_the_accent() {
     // The path bar (top-left) carries the raised role.
     assert_eq!(surface.get(0, 0), Some(raised));
     // Row 0 of the list (the path bar is row 0) is "System"; row 1 is the
-    // selected "Users", filled with the accent. Each row is glyph_height + 4
-    // = 11 px tall, so the selected fill sits around y = 2 * 11 + 1.
-    let row_height = 11;
+    // selected "Users", filled with the accent. Each row is the shared
+    // font's glyph height plus the renderer's padding, so the selected fill
+    // starts two rows down.
+    let row_height = rustos_font::BitmapFont::inconsolata().glyph_height() + 4;
     let selected_y = row_height * 2 + 1;
     assert_eq!(surface.get(199, selected_y), Some(accent));
 }

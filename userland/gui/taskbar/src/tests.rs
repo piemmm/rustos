@@ -571,13 +571,14 @@ fn focused_task_is_accent_and_others_are_surface() {
     let surface = TaskbarRenderer::new()
         .render(&bar, &theme, Scale::ONE)
         .expect("bar renders");
-    // tasks[0] = (48,760,160,40); tasks[1] = (208,760,160,40).
+    // tasks[0] = (48,760,160,40); tasks[1] = (208,760,160,40). Sample near
+    // each slot's trailing edge, clear of the leading-aligned title glyphs.
     assert_eq!(
-        pixel_at(&surface, layout.bar, 120, 780),
+        pixel_at(&surface, layout.bar, 190, 780),
         role(palette.accent)
     );
     assert_eq!(
-        pixel_at(&surface, layout.bar, 280, 780),
+        pixel_at(&surface, layout.bar, 350, 780),
         role(palette.surface)
     );
 }
@@ -596,8 +597,9 @@ fn minimised_task_recedes_into_the_background() {
     let surface = TaskbarRenderer::new()
         .render(&bar, &theme, Scale::ONE)
         .expect("bar renders");
+    // Sample near the slot's trailing edge, clear of the title glyphs.
     assert_eq!(
-        pixel_at(&surface, layout.bar, 120, 780),
+        pixel_at(&surface, layout.bar, 190, 780),
         role(palette.surface_raised)
     );
 }

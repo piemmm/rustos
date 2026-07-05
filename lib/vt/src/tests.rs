@@ -446,3 +446,27 @@ fn erase_echo_is_backspace_space_backspace() {
     // again so the cursor rests where the glyph was.
     assert_eq!(control::ERASE_ECHO, [control::BS, b' ', control::BS]);
 }
+
+#[test]
+fn ascii_is_one_column_and_cjk_is_two() {
+    use crate::width::{char_width, is_wide};
+    assert_eq!(char_width('A'), 1);
+    assert_eq!(char_width('1'), 1);
+    assert!(!is_wide('A'));
+    // CJK ideograph and a fullwidth digit are double-width.
+    assert_eq!(char_width('世'), 2);
+    assert!(is_wide('界'));
+    assert_eq!(char_width('！'), 2);
+}
+
+#[test]
+fn str_width_sums_glyph_widths_and_truncation_keeps_glyphs_whole() {
+    use crate::width::{str_width, truncate_to_width};
+    assert_eq!(str_width("ab"), 2);
+    assert_eq!(str_width("世界"), 4);
+    assert_eq!(str_width("a世"), 3);
+    // A budget of 2 fits "a" (1) but not the following wide glyph (would be 3).
+    assert_eq!(truncate_to_width("a世b", 2), "a");
+    assert_eq!(truncate_to_width("a世b", 3), "a世");
+    assert_eq!(truncate_to_width("abc", 10), "abc");
+}

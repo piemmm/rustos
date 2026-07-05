@@ -19,7 +19,7 @@ use rustos_vt::{Attributes, Cell, Color};
 use crate::buffer::Buffer;
 use crate::error::{CursesError, Result};
 use crate::geom::{Pos, Size};
-use crate::width::{char_width, CONTINUATION};
+use rustos_vt::{char_width, CONTINUATION};
 
 /// The Unicode box-drawing glyphs a default [`Window::draw_box`] uses.
 ///

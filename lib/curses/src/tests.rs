@@ -38,9 +38,9 @@ use crate::geom::{Pos, Size};
 use crate::input::{Event, Input};
 use crate::render::{render, CursorState};
 use crate::screen::{InputMode, Screen, Tty};
-use crate::width::{char_width, is_wide, str_width, truncate_to_width, CONTINUATION};
 use crate::window::{BorderChars, Window};
 use core::time::Duration;
+use rustos_vt::CONTINUATION;
 
 /// Decode every event from one byte slice.
 fn decode(bytes: &[u8]) -> Vec<Event> {
@@ -460,29 +460,7 @@ fn enabling_mouse_is_a_no_op_on_a_terminal_without_mouse_support() {
     assert_eq!(screen.enable_mouse(rustos_vt::MouseMode::Button), Ok(()));
 }
 
-// ---- Character width / wide cells ------------------------------------------
-
-#[test]
-fn ascii_is_one_column_and_cjk_is_two() {
-    assert_eq!(char_width('A'), 1);
-    assert_eq!(char_width('1'), 1);
-    assert!(!is_wide('A'));
-    // CJK ideograph and a fullwidth digit are double-width.
-    assert_eq!(char_width('世'), 2);
-    assert!(is_wide('界'));
-    assert_eq!(char_width('！'), 2);
-}
-
-#[test]
-fn str_width_sums_glyph_widths_and_truncation_keeps_glyphs_whole() {
-    assert_eq!(str_width("ab"), 2);
-    assert_eq!(str_width("世界"), 4);
-    assert_eq!(str_width("a世"), 3);
-    // A budget of 2 fits "a" (1) but not the following wide glyph (would be 3).
-    assert_eq!(truncate_to_width("a世b", 2), "a");
-    assert_eq!(truncate_to_width("a世b", 3), "a世");
-    assert_eq!(truncate_to_width("abc", 10), "abc");
-}
+// ---- Wide cells --------------------------------------------------------
 
 #[test]
 fn a_wide_glyph_writes_a_lead_and_a_continuation_cell() {

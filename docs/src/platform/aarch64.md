@@ -458,9 +458,9 @@ the `fw_cfg`/`ramfb` fallback on the QEMU `virt` board. On the Pi:
   movement and absolute positioning (`CUP`), the erase operations
   (`ED`/`EL`), the scroll region (`DECSTBM`) and explicit scrolling
   (`SU`/`SD`), the alternate screen, and the saved cursor. Glyphs are
-  the shared 5×7 atlas (`rustos_font::glyphs` — one font definition) at
-  an integer scale chosen from the display height (`height / 360`,
-  clamped to 1…4: 480p → 1×, 1080p → 3×), packed
+  the shared Inconsolata coverage atlas (`rustos_font::atlas` — one font
+  definition) at an integer scale chosen from the display height
+  (`height / 1080`, clamped to 1…4: 1080p → 1×, 2160p → 2×), packed
   `0xFF00_0000 | (r<<16) | (g<<8) | b` — correct on both the mailbox
   (`Bgra8888`) and ramfb (`XRGB8888`) surfaces, whose bytes coincide.
   The engine keeps a **retained character-cell grid** (`rustos_vt::Cell`

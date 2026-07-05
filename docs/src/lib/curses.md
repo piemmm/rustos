@@ -37,9 +37,10 @@ added the first in-tree consumer (`userland/apps/top`).
   `set_input_mode` selects `Blocking`, `NonBlocking` (`nodelay`), or
   `Timeout(..)` waiting.
 - **Character width** (`char_width` / `is_wide` / `str_width` /
-  `truncate_to_width`) is the one place that knows a CJK / fullwidth / emoji
-  glyph occupies two columns. `Window::add_char` stores a double-width glyph as
-  a lead cell plus a `CONTINUATION` cell; the renderer prints it once and steps
+  `truncate_to_width`, re-exported from `lib/vt`'s `width` module — the one
+  definition every cell grid shares) knows a CJK / fullwidth / emoji glyph
+  occupies two columns. `Window::add_char` stores a double-width glyph as a
+  lead cell plus a `CONTINUATION` cell; the renderer prints it once and steps
   the terminal cursor two columns, so wide text never shifts the rest of a row,
   and a glyph that would straddle the right edge wraps whole.
 

@@ -65,6 +65,7 @@ pub mod mouse;
 pub mod op;
 pub mod parse;
 pub mod secret;
+pub mod width;
 
 #[cfg(test)]
 mod tests;
@@ -79,3 +80,4 @@ pub use mouse::{MouseButton, MouseMode, MouseReport};
 pub use op::{EraseMode, Op, Title, MAX_TITLE};
 pub use parse::Parser;
 pub use secret::{SecretIndicator, SecretInput, SECRET_TICK_NS};
+pub use width::{char_width, is_wide, str_width, truncate_to_width, CONTINUATION};

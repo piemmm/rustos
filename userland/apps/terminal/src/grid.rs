@@ -22,7 +22,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use rustos_vt::{Attributes, Cell, EraseMode};
+use rustos_vt::{char_width, Attributes, Cell, EraseMode, CONTINUATION};
 
 /// The largest grid dimension, in cells, the terminal will allocate.
 ///
@@ -182,20 +182,43 @@ impl Grid {
         self.title.push_str(title);
     }
 
-    /// Write `ch` at the cursor with the current pen and advance one column,
-    /// wrapping to the next line (scrolling if at the bottom margin) at the
-    /// right edge.
+    /// Write `ch` at the cursor with the current pen and advance one column
+    /// (two for a double-width glyph), wrapping to the next line (scrolling
+    /// if at the bottom margin) at the right edge.
+    ///
+    /// A double-width glyph (see [`char_width`]) occupies two cells: the lead
+    /// cell and a [`CONTINUATION`] cell to its right — the same layout the
+    /// `lib/curses` window writer and the framebuffer console produce, so a
+    /// TUI's column arithmetic and this grid agree. When only one column
+    /// remains the wide glyph wraps whole, blanking the leftover column.
     pub fn write_char(&mut self, ch: char) {
+        let width = char_width(ch);
         if self.cursor_col >= self.cols {
             self.carriage_return();
             self.line_feed();
         }
-        let index = self.index(self.cursor_col, self.cursor_row);
         let pen = self.pen;
+        if width == 2 && self.cursor_col.saturating_add(1) >= self.cols {
+            let index = self.index(self.cursor_col, self.cursor_row);
+            if let Some(cell) = self.cells.get_mut(index) {
+                *cell = Cell::styled(' ', pen);
+            }
+            self.carriage_return();
+            self.line_feed();
+        }
+        let index = self.index(self.cursor_col, self.cursor_row);
         if let Some(cell) = self.cells.get_mut(index) {
             *cell = Cell::styled(ch, pen);
         }
-        self.cursor_col = self.cursor_col.saturating_add(1);
+        // On a degenerate one-column grid there is no second cell; writing it
+        // anyway would alias the next row (`index` is row-major).
+        if width == 2 && self.cursor_col.saturating_add(1) < self.cols {
+            let index = self.index(self.cursor_col.saturating_add(1), self.cursor_row);
+            if let Some(cell) = self.cells.get_mut(index) {
+                *cell = Cell::styled(CONTINUATION, pen);
+            }
+        }
+        self.cursor_col = self.cursor_col.saturating_add(width);
         if self.cursor_col >= self.cols {
             self.carriage_return();
             self.line_feed();

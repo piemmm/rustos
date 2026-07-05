@@ -36,6 +36,9 @@
 //!   its source of truth in `lib/abi`
 //! - `c-header`     — generates (`--write`) or verifies the C ABI
 //!   development header in `include/` from the `lib/abi` source of truth
+//! - `font-atlas`   — generates (`--write`) or verifies the Inconsolata
+//!   glyph atlas in `lib/font/src/` from the committed face in
+//!   `lib/font/assets/`
 //! - `deps-check` — enforces the modularity dependency graph
 //!   (layering, concrete-scheduler naming, optional-desktop boundary)
 //! - `cfg-check` — rejects target-conditional compilation
@@ -60,7 +63,8 @@
 //! - `ci`           — the full pipeline a PR must pass, ordered cheapest-first
 //!   so a failing PR fails fast: `fmt --check`, then the concurrent
 //!   static-gate group (`deps-check`, `cfg-check`, `help-lint`,
-//!   `spec-review`, `supply-chain`, `abi-check`, `c-header`, `model-check` —
+//!   `spec-review`, `supply-chain`, `abi-check`, `c-header`, `font-atlas`,
+//!   `model-check` —
 //!   all read-only, non-compiling checks run at once so their costs overlap),
 //!   then `docs-check` (rustdoc/link failures are the common first trip and
 //!   need only a doc build, so they run ahead of the compile-heavy stages),

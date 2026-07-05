@@ -64,7 +64,6 @@ pub mod geom;
 pub mod input;
 pub mod render;
 pub mod screen;
-pub mod width;
 pub mod window;
 
 #[cfg(test)]
@@ -76,6 +75,6 @@ pub use error::{CursesError, Result};
 pub use geom::{Pos, Size};
 pub use input::{Event, Input};
 pub use render::{render, CursorState};
+pub use rustos_vt::{char_width, is_wide, str_width, truncate_to_width, CONTINUATION};
 pub use screen::{InputMode, Screen, Tty, DEFAULT_COLOR_PAIR};
-pub use width::{char_width, is_wide, str_width, truncate_to_width, CONTINUATION};
 pub use window::{BorderChars, Window};

@@ -1,12 +1,15 @@
 //! Character display width: how many terminal columns a glyph occupies.
 //!
-//! A curses application that draws non-ASCII text has to know that some
+//! Anything that lays out non-ASCII text in cells has to know that some
 //! glyphs — CJK ideographs, Hangul syllables, fullwidth forms, most emoji —
 //! occupy *two* terminal columns, not one. Getting this wrong shifts every
 //! cell after the glyph by a column. This module is the one place that
-//! answers the question: the [`crate::Window`] writer, the
-//! [renderer], and a consumer laying out columns all measure through
-//! [`char_width`] / [`str_width`], so they agree on where a glyph ends.
+//! answers the question: every cell grid (the `lib/curses` window writer and
+//! renderer, the `lib/fbcon` framebuffer console, the terminal emulator's
+//! grid) and every consumer laying out columns measures through
+//! [`char_width`] / [`str_width`], so they all agree on where a glyph ends.
+//! It lives here, beside [`crate::Cell`], because the width of a glyph is
+//! part of the cell vocabulary itself, not any one screen model's policy.
 //!
 //! The width table is first-party: a small, sorted set of
 //! the Unicode "East Asian Wide / Fullwidth" ranges plus the common emoji
@@ -14,18 +17,14 @@
 //! zero width — the cell model stores one glyph per cell, so a lone combining
 //! mark occupies its own cell; this is a documented, deliberate simplification
 //! rather than a half-built grapheme model.
-//!
-//! [renderer]: mod@crate::render
 
 /// The placeholder glyph stored in the trailing cell of a double-width glyph.
 ///
 /// A wide glyph is written into its left cell; the cell to its right holds
-/// this continuation marker so the grid stays rectangular (one [`rustos_vt::Cell`]
-/// per column). The [renderer] never prints a continuation cell — the wide
-/// glyph to its left already advances the terminal cursor across it — and a
-/// consumer treats it as "covered by the glyph to my left".
-///
-/// [renderer]: mod@crate::render
+/// this continuation marker so the grid stays rectangular (one [`crate::Cell`]
+/// per column). A renderer never prints a continuation cell — the wide
+/// glyph to its left already covers it — and a consumer treats it as
+/// "covered by the glyph to my left".
 pub const CONTINUATION: char = '\u{0}';
 
 /// The sorted, non-overlapping ranges of scalar values that occupy two

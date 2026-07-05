@@ -728,7 +728,10 @@ mod tests {
         let geometry = configured.geometry;
         assert_eq!((geometry.width_px, geometry.height_px), (1920, 1080));
         assert_eq!(geometry.stride_px, 1920);
-        assert_eq!(geometry.scale, 3, "1080p selects 3× glyphs");
+        assert_eq!(
+            geometry.scale, 1,
+            "1080p selects 1× glyphs of the 26-px cell"
+        );
     }
 
     #[test]
@@ -756,6 +759,9 @@ mod tests {
         assert_eq!(geometry.stride_px, RAMFB_WIDTH_PX, "tightly packed");
         assert!(geometry.columns() > 0);
         assert!(geometry.rows() > 0);
-        assert_eq!(geometry.scale, 2, "768 rows select 2× glyphs");
+        assert_eq!(
+            geometry.scale, 1,
+            "768 rows select 1× glyphs of the 26-px cell"
+        );
     }
 }

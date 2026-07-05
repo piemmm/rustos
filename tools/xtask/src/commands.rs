@@ -15,6 +15,7 @@ mod c_header;
 mod cfg_check;
 mod ci_long;
 mod deps_check;
+mod font_atlas;
 mod fssoak;
 mod fuzz;
 mod help_lint;
@@ -45,6 +46,7 @@ pub enum Command {
     DocsCheck,
     AbiCheck,
     CHeader,
+    FontAtlas,
     DepsCheck,
     CfgCheck,
     HelpLint,
@@ -74,6 +76,7 @@ impl Command {
         Command::DocsCheck,
         Command::AbiCheck,
         Command::CHeader,
+        Command::FontAtlas,
         Command::DepsCheck,
         Command::CfgCheck,
         Command::HelpLint,
@@ -102,6 +105,7 @@ impl Command {
             "docs-check" => Command::DocsCheck,
             "abi-check" => Command::AbiCheck,
             "c-header" => Command::CHeader,
+            "font-atlas" => Command::FontAtlas,
             "deps-check" => Command::DepsCheck,
             "cfg-check" => Command::CfgCheck,
             "help-lint" => Command::HelpLint,
@@ -132,6 +136,7 @@ impl Command {
             Command::DocsCheck => "docs-check",
             Command::AbiCheck => "abi-check",
             Command::CHeader => "c-header",
+            Command::FontAtlas => "font-atlas",
             Command::DepsCheck => "deps-check",
             Command::CfgCheck => "cfg-check",
             Command::HelpLint => "help-lint",
@@ -164,6 +169,9 @@ impl Command {
             Command::AbiCheck => "Verify generated ABI artefacts match their source of truth.",
             Command::CHeader => {
                 "Generate/verify the C ABI development header (`--write` to regenerate)."
+            }
+            Command::FontAtlas => {
+                "Generate/verify the Inconsolata glyph atlas (`--write` to regenerate)."
             }
             Command::DepsCheck => "Enforce the §17.4 modularity dependency graph.",
             Command::CfgCheck => "Reject target-conditional compilation outside the arch ports.",
@@ -208,6 +216,7 @@ impl Command {
             Command::DocsCheck => run_docs_check(ctx, args),
             Command::AbiCheck => run_abi_check(ctx, args),
             Command::CHeader => run_c_header(ctx, args),
+            Command::FontAtlas => run_font_atlas(ctx, args),
             Command::DepsCheck => run_deps_check(ctx),
             Command::CfgCheck => run_cfg_check(ctx),
             Command::HelpLint => help_lint::run(ctx),
@@ -762,6 +771,33 @@ fn run_c_header(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     }
 }
 
+fn run_font_atlas(ctx: &Context, args: &[OsString]) -> Result<(), String> {
+    // The glyph atlas is a generated view of the committed Inconsolata face.
+    // With no arguments this verifies the committed atlas is in sync (the
+    // `ci` drift guard); `--write` regenerates it, reviewed by diff like the
+    // generated C header.
+    let mut write = false;
+    for arg in args {
+        if arg == "--write" {
+            write = true;
+        } else {
+            return Err(format!(
+                "font-atlas: unexpected argument {arg:?}; usage: cargo xtask font-atlas [--write]"
+            ));
+        }
+    }
+    if write {
+        eprintln!(
+            "xtask: [font-atlas --write] {}",
+            font_atlas::DEFAULT_ATLAS_RS_PATH
+        );
+        font_atlas::write(&ctx.workspace_root)
+    } else {
+        eprintln!("xtask: [font-atlas] {}", font_atlas::DEFAULT_ATLAS_RS_PATH);
+        font_atlas::check_sync(&ctx.workspace_root)
+    }
+}
+
 fn run_deps_check(ctx: &Context) -> Result<(), String> {
     // walk the workspace dependency graph and reject any
     // layering violation, concrete-scheduler naming outside the sanctioned
@@ -984,6 +1020,10 @@ fn run_static_gates(ctx: &Context) -> Result<(), String> {
         // xtask itself, so neither needs a workspace build.
         static_gate("abi-check", ctx, |c| run_abi_check(c, &[])),
         static_gate("c-header", ctx, |c| run_c_header(c, &[])),
+        // The generated glyph-atlas drift guard: regenerates from the
+        // committed face in-process and compares byte-for-byte, no
+        // workspace build.
+        static_gate("font-atlas", ctx, |c| run_font_atlas(c, &[])),
         // Silver: exhaustively model-check the capability + IPC state machine.
         // Exhaustive (not budgeted) and fast; a reachable invariant violation
         // fails closed.

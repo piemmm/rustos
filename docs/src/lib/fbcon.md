@@ -10,7 +10,11 @@ exactly once instead of being re-derived per target.
 It turns a byte stream into on-screen text by feeding it to the single shared
 `rustos_vt::Parser` and applying each parsed `rustos_vt::Op` straight onto a
 borrowed 32-bit scan-out surface (`&mut [u32]`), rendering glyphs with the
-shared `rustos_font` 5×7 atlas. It is a full terminal:
+shared `rustos_font` Inconsolata coverage atlas: 12×26 cells with 16-level
+anti-aliased coverage, the face's full Unicode repertoire with a U+FFFD
+fallback for anything it does not map, and double-width glyphs occupying a
+lead plus a continuation cell (the same `rustos_vt::char_width` layout the
+curses window writer produces). It is a full terminal:
 
 - SGR colour: the 16 base colours, the 256-colour palette (colour cube + grey
   ramp), and 24-bit truecolour.

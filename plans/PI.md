@@ -1864,10 +1864,11 @@ console".
   view links into the allocator-free QEMU bins) and each `Op` is applied
   straight to the scan-out surface — SGR 16/256/truecolour, bold/reverse,
   cursor positioning, erase, scroll region, and explicit scroll. Glyphs
-  are the shared `rustos_font::glyphs` 5×7 atlas (§2.2) at an integer
-  scale (`height / 360`, clamped 1…4). There is no retained cell grid, so
-  reaching the bottom margin scrolls the pixels up one line (a real
-  terminal scroll), not a ring wrap.
+  are the shared `rustos_font` Inconsolata coverage atlas (§2.2, generated
+  by `cargo xtask font-atlas`) at an integer scale (`height / 1080`,
+  clamped 1…4). Reaching the bottom margin scrolls both the retained cell
+  grid and the pixels up one line (a real terminal scroll), not a ring
+  wrap.
 - Bring-up runs in the **pre-MMU** phase of
   `rustos-kernel::boot_aarch64` (caches off ⇒ the property exchange is
   DMA-coherent with no maintenance; the state cell is written by the

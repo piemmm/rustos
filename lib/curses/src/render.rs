@@ -20,7 +20,7 @@ use rustos_vt::{Attributes, Op, Sgr};
 use crate::buffer::Buffer;
 use crate::color::downgrade;
 use crate::geom::Pos;
-use crate::width::{char_width, CONTINUATION};
+use rustos_vt::{char_width, CONTINUATION};
 
 /// The terminal cursor's desired end state after an update.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

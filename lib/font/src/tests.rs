@@ -1,150 +1,178 @@
-//! Unit tests for the bitmap font and glyph blitter.
+//! Unit tests: atlas integrity, Unicode lookup, and the glyph blitter.
 
-use rustos_raster::{Color, Pixel, Surface};
-
-use crate::font::BitmapFont;
-use crate::glyphs::{FIRST_CHAR, GLYPHS, LAST_CHAR};
-
-fn surface(w: u32, h: u32) -> Surface {
-    Surface::new(w, h).expect("test surface allocates")
-}
+use crate::atlas;
+use crate::glyph::{lookup, lookup_or_fallback, Glyph};
 
 #[test]
-fn atlas_covers_every_printable_ascii_code_point() {
-    let expected = (LAST_CHAR as usize) - (FIRST_CHAR as usize) + 1;
-    assert_eq!(GLYPHS.len(), expected);
-    assert_eq!(FIRST_CHAR, ' ');
-    assert_eq!(LAST_CHAR, '~');
-}
-
-#[test]
-fn mono_face_reports_its_metrics() {
-    let font = BitmapFont::mono5x7();
-    assert_eq!(font.glyph_width(), 5);
-    assert_eq!(font.glyph_height(), 7);
-    assert_eq!(font.advance(), 6);
-    assert_eq!(font.line_height(), 8);
-}
-
-#[test]
-fn text_width_is_the_tight_bounding_width() {
-    let font = BitmapFont::mono5x7();
-    assert_eq!(font.text_width(""), 0);
-    assert_eq!(font.text_width("A"), 5);
-    assert_eq!(font.text_width("AB"), 11);
-    assert_eq!(font.text_width("12:00"), 4 * 6 + 5);
-}
-
-#[test]
-fn truncate_to_width_keeps_what_fits() {
-    let font = BitmapFont::mono5x7();
-    // One glyph needs `glyph_width` (5) pixels; each further glyph adds
-    // `advance` (6). Less than one glyph fits nothing.
-    assert_eq!(font.truncate_to_width("System", 4), "");
-    assert_eq!(font.truncate_to_width("System", 5), "S");
-    // 5 + 6 = 11 fits two glyphs; a third needs 5 + 2*6 = 17.
-    assert_eq!(font.truncate_to_width("System", 11), "Sy");
-    assert_eq!(font.truncate_to_width("System", 16), "Sy");
-    assert_eq!(font.truncate_to_width("System", 17), "Sys");
-    // A string that already fits is returned whole, untouched.
-    assert_eq!(font.truncate_to_width("Sy", 1000), "Sy");
-    assert_eq!(font.truncate_to_width("", 1000), "");
-}
-
-#[test]
-fn truncate_to_width_cuts_on_a_char_boundary() {
-    let font = BitmapFont::mono5x7();
-    // Multi-byte chars must not be split mid-byte.
-    let truncated = font.truncate_to_width("é€ß", 5);
-    assert_eq!(truncated, "é");
-}
-
-#[test]
-fn space_glyph_paints_nothing() {
-    let font = BitmapFont::mono5x7();
-    let mut surface = surface(8, 8);
-    font.draw_text(&mut surface, 0, 0, " ", Color::rgb(255, 255, 255));
-    assert!(surface.pixels().iter().all(|p| *p == Pixel::TRANSPARENT));
-}
-
-#[test]
-fn draws_a_known_glyph_at_the_expected_pixels() {
-    let font = BitmapFont::mono5x7();
-    let mut surface = surface(8, 8);
-    let red = Color::rgb(255, 0, 0);
-    // '-' lights only row 3, all five columns.
-    font.draw_text(&mut surface, 0, 0, "-", red);
-    let lit = red.premultiply();
-    for col in 0..5 {
-        assert_eq!(surface.get(col, 3), Some(lit), "column {col} of the dash");
-    }
-    assert_eq!(surface.get(0, 0), Some(Pixel::TRANSPARENT));
-    assert_eq!(surface.get(0, 6), Some(Pixel::TRANSPARENT));
-}
-
-#[test]
-fn draw_text_returns_the_pen_after_the_last_glyph() {
-    let font = BitmapFont::mono5x7();
-    let mut surface = surface(64, 8);
-    let pen = font.draw_text(&mut surface, 3, 0, "AB", Color::rgb(255, 255, 255));
-    assert_eq!(pen, 3 + 2 * 6);
-}
-
-#[test]
-fn unsupported_character_renders_the_fallback_box() {
-    let font = BitmapFont::mono5x7();
-    let mut surface = surface(8, 8);
-    let white = Color::rgb(255, 255, 255);
-    font.draw_text(&mut surface, 0, 0, "£", white);
-    let lit = white.premultiply();
-    // The fallback box has a fully lit top row.
-    for col in 0..5 {
-        assert_eq!(surface.get(col, 0), Some(lit), "fallback top row col {col}");
-    }
-    // ...and a hollow interior.
-    assert_eq!(surface.get(2, 3), Some(Pixel::TRANSPARENT));
-}
-
-#[test]
-fn off_screen_text_clips_without_panicking() {
-    let font = BitmapFont::mono5x7();
-    let mut surface = surface(8, 8);
-    let white = Color::rgb(255, 255, 255);
-    font.draw_text(&mut surface, -100, -100, "clipped", white);
-    font.draw_text(&mut surface, 1000, 1000, "clipped", white);
-    assert!(surface.pixels().iter().all(|p| *p == Pixel::TRANSPARENT));
-}
-
-#[test]
-fn glyph_partially_off_the_left_edge_keeps_its_visible_columns() {
-    let font = BitmapFont::mono5x7();
-    let mut surface = surface(8, 8);
-    let white = Color::rgb(255, 255, 255);
-    // '-' starting at x = -2 keeps columns 2..5 (mapped to x 0..3).
-    font.draw_text(&mut surface, -2, 0, "-", white);
-    let lit = white.premultiply();
-    assert_eq!(surface.get(0, 3), Some(lit));
-    assert_eq!(surface.get(2, 3), Some(lit));
-    assert_eq!(surface.get(3, 3), Some(Pixel::TRANSPARENT));
-}
-
-#[test]
-fn translucent_text_composites_over_the_background() {
-    let font = BitmapFont::mono5x7();
-    let mut surface = surface(8, 8);
-    surface.fill(Color::rgb(0, 0, 255));
-    // Semi-transparent red dash over opaque blue.
-    font.draw_text(&mut surface, 0, 0, "-", Color::rgba(255, 0, 0, 128));
-    // Porter–Duff over with premultiplied operands (see lib/raster::Pixel).
+fn atlas_payload_matches_its_declared_shape() {
     assert_eq!(
-        surface.get(0, 3),
-        Some(Pixel {
-            r: 128,
-            g: 0,
-            b: 127,
-            a: 255,
-        })
+        atlas::COVERAGE.len(),
+        atlas::CELL_COUNT as usize * atlas::BYTES_PER_CELL,
+        "payload length disagrees with the declared cell count"
     );
-    // A row the dash does not touch keeps the opaque-blue background.
-    assert_eq!(surface.get(0, 0), Some(Color::rgb(0, 0, 255).premultiply()));
+    assert_eq!(
+        atlas::COVERAGE.len()
+            % ((atlas::CELL_WIDTH as usize).div_ceil(2) * atlas::CELL_HEIGHT as usize),
+        0,
+        "payload is not whole packed cells"
+    );
+    assert!(
+        lookup('\u{FFFD}').is_some(),
+        "the declared fallback cell must be a real mapped glyph"
+    );
+}
+
+#[test]
+fn ranges_are_sorted_dense_and_in_cell_order() {
+    let mut previous_end = 0u32;
+    let mut expected_base = 0u32;
+    for &(first, len, base) in atlas::RANGES {
+        assert!(len > 0);
+        assert!(first >= previous_end, "ranges overlap or are unsorted");
+        assert_eq!(base, expected_base, "cells are not in range order");
+        previous_end = first + len;
+        expected_base += len;
+    }
+    assert_eq!(expected_base, atlas::CELL_COUNT);
+}
+
+#[test]
+fn printable_ascii_is_covered() {
+    for code in 0x20..=0x7Eu32 {
+        let ch = char::from_u32(code).expect("printable ASCII");
+        assert!(lookup(ch).is_some(), "U+{code:04X} has no glyph");
+    }
+}
+
+#[test]
+fn coverage_reaches_beyond_ascii() {
+    for ch in ['é', 'ß', 'ő', '─', '┌', '█', '▒', '→', '…', '€', '\u{0301}'] {
+        assert!(lookup(ch).is_some(), "{ch:?} has no glyph");
+    }
+}
+
+#[test]
+fn unmapped_scalars_fall_back_to_the_replacement_glyph() {
+    // CJK, Hangul, and emoji are outside Inconsolata's repertoire.
+    for ch in ['一', '한', '🦀'] {
+        assert_eq!(lookup(ch), None);
+        assert_eq!(lookup_or_fallback(ch), lookup_or_fallback('\u{FFFD}'));
+    }
+    assert!(
+        !lookup_or_fallback('🦀').is_blank(),
+        "the fallback glyph must be visible"
+    );
+}
+
+#[test]
+fn space_is_blank_and_letters_have_ink() {
+    assert!(lookup_or_fallback(' ').is_blank());
+    for ch in ['A', 'g', '0', '#', 'é'] {
+        assert!(!lookup_or_fallback(ch).is_blank(), "{ch:?} has no ink");
+    }
+}
+
+#[test]
+fn full_block_is_solid_edge_to_edge() {
+    let block = lookup_or_fallback('█');
+    for y in 0..atlas::CELL_HEIGHT {
+        for x in 0..atlas::CELL_WIDTH {
+            assert_eq!(block.coverage(x, y), 15, "hole at ({x}, {y})");
+        }
+    }
+}
+
+#[test]
+fn coverage_is_transparent_outside_the_cell() {
+    let glyph = lookup_or_fallback('A');
+    assert_eq!(glyph.coverage(atlas::CELL_WIDTH, 0), 0);
+    assert_eq!(glyph.coverage(0, atlas::CELL_HEIGHT), 0);
+    assert_eq!(glyph.coverage(u32::MAX, u32::MAX), 0);
+}
+
+#[test]
+fn fallback_never_panics_and_is_the_replacement_character() {
+    assert_eq!(Glyph::fallback(), lookup_or_fallback('\u{FFFD}'));
+}
+
+#[cfg(feature = "render")]
+mod render {
+    use rustos_raster::{Color, Surface};
+
+    use crate::atlas;
+    use crate::font::BitmapFont;
+
+    const WHITE: Color = Color::rgb(255, 255, 255);
+
+    fn surface() -> Surface {
+        Surface::new(64, 32).expect("surface")
+    }
+
+    #[test]
+    fn metrics_are_the_atlas_cell() {
+        let font = BitmapFont::inconsolata();
+        assert_eq!(font.glyph_width(), atlas::CELL_WIDTH);
+        assert_eq!(font.glyph_height(), atlas::CELL_HEIGHT);
+        assert_eq!(font.advance(), atlas::CELL_WIDTH);
+        assert_eq!(font.line_height(), atlas::CELL_HEIGHT);
+    }
+
+    #[test]
+    fn text_width_is_cells_times_advance() {
+        let font = BitmapFont::inconsolata();
+        assert_eq!(font.text_width(""), 0);
+        assert_eq!(font.text_width("abc"), 3 * font.advance());
+        // Chars, not bytes: a two-byte UTF-8 scalar is still one cell.
+        assert_eq!(font.text_width("é"), font.advance());
+    }
+
+    #[test]
+    fn truncate_to_width_cuts_on_char_boundaries() {
+        let font = BitmapFont::inconsolata();
+        let advance = font.advance();
+        assert_eq!(font.truncate_to_width("hello", 5 * advance), "hello");
+        assert_eq!(font.truncate_to_width("hello", 3 * advance), "hel");
+        assert_eq!(font.truncate_to_width("hello", advance - 1), "");
+        assert_eq!(font.truncate_to_width("ééé", 2 * advance), "éé");
+    }
+
+    #[test]
+    fn draw_text_advances_the_pen_and_leaves_ink() {
+        let font = BitmapFont::inconsolata();
+        let mut surface = surface();
+        let pen = font.draw_text(&mut surface, 0, 0, "Hi", WHITE);
+        assert_eq!(pen, i32::try_from(2 * font.advance()).expect("fits"));
+        assert!(surface.pixels().iter().any(|p| p.a > 0), "no ink was drawn");
+    }
+
+    #[test]
+    fn full_coverage_keeps_the_callers_colour() {
+        let font = BitmapFont::inconsolata();
+        let mut surface = surface();
+        font.draw_text(&mut surface, 0, 0, "█", WHITE);
+        // The full block covers every cell pixel at 15/15, which must map to
+        // the caller's exact colour, not one rounded down.
+        let px = surface.get(1, 1).expect("in bounds");
+        assert_eq!((px.r, px.g, px.b, px.a), (255, 255, 255, 255));
+    }
+
+    #[test]
+    fn offscreen_text_clips_without_panicking() {
+        let font = BitmapFont::inconsolata();
+        let mut surface = surface();
+        font.draw_text(&mut surface, -1000, -1000, "clip", WHITE);
+        font.draw_text(&mut surface, i32::MAX - 3, i32::MAX - 3, "clip", WHITE);
+        assert!(surface.pixels().iter().all(|p| p.a == 0));
+    }
+
+    #[test]
+    fn unmapped_text_draws_the_replacement_glyph() {
+        let font = BitmapFont::inconsolata();
+        let mut crab = surface();
+        font.draw_text(&mut crab, 0, 0, "🦀", WHITE);
+        let mut replacement = surface();
+        font.draw_text(&mut replacement, 0, 0, "\u{FFFD}", WHITE);
+        assert_eq!(crab.pixels(), replacement.pixels());
+        assert!(crab.pixels().iter().any(|p| p.a > 0));
+    }
 }

@@ -25,18 +25,19 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-use rustos_font::glyphs;
-use rustos_vt::{Attributes, Color, EraseMode, Op, Parser};
+use rustos_font::atlas;
+use rustos_font::glyph::lookup_or_fallback;
+use rustos_vt::{char_width, Attributes, Color, EraseMode, Op, Parser, CONTINUATION};
 
 pub use rustos_vt::Cell;
 
-/// Glyph cell width in pixels at scale 1: the atlas glyph plus one column of
-/// inter-character spacing.
-const CELL_WIDTH: u32 = glyphs::GLYPH_WIDTH + 1;
+/// Glyph cell width in pixels at scale 1. The face's half-em advance already
+/// carries the inter-character spacing, so the cell is the atlas cell.
+const CELL_WIDTH: u32 = atlas::CELL_WIDTH;
 
-/// Glyph cell height in pixels at scale 1: the atlas glyph plus one row of
-/// inter-line spacing.
-const CELL_HEIGHT: u32 = glyphs::GLYPH_HEIGHT + 1;
+/// Glyph cell height in pixels at scale 1. The face's ascent + descent
+/// already carry the line box, so the cell is the atlas cell.
+const CELL_HEIGHT: u32 = atlas::CELL_HEIGHT;
 
 /// What [`Color::Default`] resolves to for text: light grey, opaque.
 ///
@@ -50,16 +51,17 @@ const DEFAULT_BACKGROUND: u32 = 0xFF00_0000;
 
 /// Largest glyph scale the policy selects.
 ///
-/// Beyond 4× the 5×7 atlas looks blocky without gaining legibility, so the
+/// Beyond 4× the atlas looks blocky without gaining legibility, so the
 /// policy caps there even on very tall displays.
 const MAX_SCALE: u32 = 4;
 
 /// Pixel rows of display height per unit of glyph scale.
 ///
-/// `height / 360` keeps roughly 45 text rows on screen at every common mode
-/// (480p → 1×, 720p → 2×, 1080p → 3×, 2160p → 4×): enough log to read, large
-/// enough to read it on a TV across a room.
-const ROWS_PER_SCALE: u32 = 360;
+/// `height / 1080` keeps roughly 41 text rows on screen from 1080p up
+/// (1080p → 1×, 2160p → 2×) with the 26-pixel cell; smaller modes (480p → 18
+/// rows, 720p → 27) simply hold fewer rows at 1× rather than shrinking the
+/// glyphs below legibility.
+const ROWS_PER_SCALE: u32 = 1080;
 
 /// Validated framebuffer text geometry: the scan-out extents plus the glyph
 /// scale the policy chose for them.
@@ -243,14 +245,22 @@ fn colors_of(attrs: &Attributes) -> (u32, u32) {
     }
 }
 
-/// Map a printed character to its atlas byte: printable ASCII renders directly,
-/// and everything else (a control byte that reached here, or a non-Latin scalar
-/// the 5×7 atlas has no glyph for) renders `?` rather than being dropped.
-fn atlas_byte(ch: char) -> u8 {
-    u8::try_from(ch as u32)
-        .ok()
-        .filter(|b| (0x20..=0x7E).contains(b))
-        .unwrap_or(b'?')
+/// The scan-out pixel for each of the 16 glyph coverage levels: the linear
+/// blend of `fg` over `bg` at `level / 15`, computed once per cell blit so
+/// the per-pixel work is a table load.
+fn coverage_ramp(fg: u32, bg: u32) -> [u32; 16] {
+    let channel = |shift: u32, level: u32| -> u32 {
+        let f = (fg >> shift) & 0xFF;
+        let b = (bg >> shift) & 0xFF;
+        // Rounded weighted average; exact at the endpoints (level 0 is `bg`,
+        // level 15 is `fg`) and never overflows (≤ 255 × 15 + 7).
+        ((b * (15 - level) + f * level + 7) / 15) << shift
+    };
+    let mut ramp = [0u32; 16];
+    for (level, slot) in (0u32..).zip(ramp.iter_mut()) {
+        *slot = 0xFF00_0000 | channel(16, level) | channel(8, level) | channel(0, level);
+    }
+    ramp
 }
 
 /// A saved cursor: position plus the rendition pen, captured by `ESC 7`
@@ -277,8 +287,9 @@ struct SavedCursor {
 ///
 /// The rendered attributes are colour (16/256/truecolour), bold (brightens the
 /// base colours) and reverse-video (swaps foreground and background);
-/// underline/italic/blink/dim/strike are parsed and folded into the pen but the
-/// 5×7 bitmap atlas does not draw them. No hardware cursor is drawn.
+/// underline/italic/blink/dim/strike are parsed and folded into the pen but
+/// the bitmap atlas carries no variant glyphs for them. No hardware cursor is
+/// drawn.
 #[derive(Debug)]
 pub struct Screen<'a> {
     geometry: Geometry,
@@ -496,17 +507,41 @@ impl<'a> Screen<'a> {
     /// Print one character at the cursor with the current pen, recording it in
     /// the active grid and painting it, advancing the cursor and wrapping
     /// (scrolling at the bottom margin) at the right edge.
+    ///
+    /// A double-width glyph (see [`char_width`]) occupies two cells: the lead
+    /// cell and a [`CONTINUATION`] cell to its right, exactly the layout the
+    /// `lib/curses` window writer produces, so a TUI's column arithmetic and
+    /// this console agree. When only one column remains the wide glyph wraps
+    /// whole, blanking the leftover column rather than splitting.
     fn print(&mut self, pixels: &mut [u32], ch: char) -> DirtyBand {
+        let width = u32::from(char_width(ch));
         let mut dirty = None;
-        if self.column >= self.cols() {
+        if self.column + width > self.cols() {
+            let (col, row) = (self.column, self.row);
+            if col < self.cols() {
+                // A wide glyph with one column left: blank the leftover cell.
+                let blank = self.blank_cell();
+                self.grid_set(col, row, blank);
+                dirty = Some(self.blit_cell(pixels, col, row, ' ', blank.attrs));
+            }
             self.column = 0;
-            dirty = self.line_feed(pixels);
+            dirty = merge_bands(dirty, self.line_feed(pixels));
         }
         let (col, row, pen) = (self.column, self.row, self.pen);
         self.grid_set(col, row, Cell::styled(ch, pen));
-        let glyph_band = self.blit_cell(pixels, col, row, ch, pen);
-        self.column += 1;
-        merge_bands(dirty, Some(glyph_band)).unwrap_or(glyph_band)
+        let mut band = self.blit_cell(pixels, col, row, ch, pen);
+        // On a degenerate one-column surface there is no second cell; writing
+        // it anyway would alias the next row (the grid is row-major).
+        if width == 2 && col + 1 < self.cols() {
+            self.grid_set(col + 1, row, Cell::styled(CONTINUATION, pen));
+            band = merge_bands(
+                Some(band),
+                Some(self.blit_cell(pixels, col + 1, row, CONTINUATION, pen)),
+            )
+            .unwrap_or(band);
+        }
+        self.column += width;
+        merge_bands(dirty, Some(band)).unwrap_or(band)
     }
 
     /// Advance one line, scrolling the region up when at its bottom margin.
@@ -762,8 +797,11 @@ impl<'a> Screen<'a> {
     }
 
     /// Blit the glyph for `ch` at cell `(col, row)` in the rendition `attrs`:
-    /// lit pixels in the foreground colour and the rest (including inter-cell
-    /// padding) in the background, with bold/reverse resolved by [`colors_of`].
+    /// each pixel is the [`coverage_ramp`] blend of the foreground over the
+    /// background at the glyph's anti-aliased coverage, with bold/reverse
+    /// resolved by [`colors_of`]. A scalar the face does not cover blits the
+    /// U+FFFD replacement glyph; a wide glyph's [`CONTINUATION`] cell blits as
+    /// background (the lead glyph already covers it visually).
     fn blit_cell(
         &self,
         pixels: &mut [u32],
@@ -773,21 +811,15 @@ impl<'a> Screen<'a> {
         attrs: Attributes,
     ) -> DirtyBand {
         let (fg, bg) = colors_of(&attrs);
-        let byte = atlas_byte(ch);
+        let ramp = coverage_ramp(fg, bg);
+        let shown = if ch == CONTINUATION { ' ' } else { ch };
+        let glyph = lookup_or_fallback(shown);
         let geometry = &self.geometry;
-        let glyph = &glyphs::GLYPHS[(byte - glyphs::FIRST_CHAR as u8) as usize];
         let x0 = col * geometry.cell_width_px();
         let y0 = row * geometry.cell_height_px();
         for cell_y in 0..CELL_HEIGHT {
-            let bits = if cell_y < glyphs::GLYPH_HEIGHT {
-                glyph[cell_y as usize]
-            } else {
-                0
-            };
             for cell_x in 0..CELL_WIDTH {
-                let lit = cell_x < glyphs::GLYPH_WIDTH
-                    && bits & (1 << (glyphs::GLYPH_WIDTH - 1 - cell_x)) != 0;
-                let colour = if lit { fg } else { bg };
+                let colour = ramp[usize::from(glyph.coverage(cell_x, cell_y))];
                 for sub_y in 0..geometry.scale {
                     let y = (y0 + cell_y * geometry.scale + sub_y) as usize;
                     let x = (x0 + cell_x * geometry.scale) as usize;

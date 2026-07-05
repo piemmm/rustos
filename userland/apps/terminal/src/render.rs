@@ -15,10 +15,11 @@
 //! theme's `on_surface` / `surface` roles, the 16 [`BasicColor`]s and the
 //! 256-colour palette map through the standard ANSI tables, and truecolour is
 //! used directly; [`Attributes::reverse`] swaps the pair and
-//! [`Attributes::bold`] brightens a basic colour. The 5×7 monospace face
-//! carries no separate bold/italic/underline glyphs, so those parsed
-//! attributes do not change the rendered shape — a renderer limitation, not a
-//! parsing gap.
+//! [`Attributes::bold`] brightens a basic colour. The monospace face carries
+//! no separate bold/italic/underline glyphs, so those parsed attributes do
+//! not change the rendered shape — a renderer limitation, not a parsing gap.
+//! A wide glyph's continuation cell paints background only; the lead glyph
+//! covers it.
 //!
 //! Rows are drawn top to bottom and the cursor cell, when visible, is
 //! highlighted with the accent role. Every length saturates and every blit
@@ -31,7 +32,7 @@ use rustos_font::BitmapFont;
 use rustos_geometry::Rect;
 use rustos_raster::{Color, Surface};
 use rustos_theme::{Palette, Theme};
-use rustos_vt::{Attributes, BasicColor, Color as VtColor};
+use rustos_vt::{Attributes, BasicColor, Color as VtColor, CONTINUATION};
 
 use crate::grid::Grid;
 use crate::shell::ShellSource;
@@ -50,7 +51,7 @@ pub fn render<S: ShellSource>(
     theme: &Theme,
     viewport: Rect,
 ) -> Option<Surface> {
-    let font = BitmapFont::mono5x7();
+    let font = BitmapFont::inconsolata();
     let mut surface = Surface::new(viewport.width, viewport.height)?;
     let palette = theme.palette();
     surface.fill(Color::from(palette.surface));
@@ -59,11 +60,11 @@ pub fn render<S: ShellSource>(
     let cell_width = font.advance();
     let line_height = font.line_height();
 
-    draw_cells(&mut surface, &font, grid, palette, cell_width, line_height);
+    draw_cells(&mut surface, font, grid, palette, cell_width, line_height);
     if grid.cursor_visible() {
         draw_cursor(
             &mut surface,
-            &font,
+            font,
             grid,
             cell_width,
             line_height,
@@ -77,7 +78,7 @@ pub fn render<S: ShellSource>(
 /// Draw every grid cell with its own rendition, top to bottom, left to right.
 fn draw_cells(
     surface: &mut Surface,
-    font: &BitmapFont,
+    font: BitmapFont,
     grid: &Grid,
     palette: &Palette,
     cell_width: u32,
@@ -95,7 +96,11 @@ fn draw_cells(
             if bg != base {
                 surface.fill_rect(x, y, cell_width, line_height, bg);
             }
-            draw_glyph(surface, font, to_i32(x), to_i32(y), cell.ch, fg);
+            // A wide glyph's continuation cell is covered by the lead glyph;
+            // it paints background only, never a glyph of its own.
+            if cell.ch != CONTINUATION {
+                draw_glyph(surface, font, to_i32(x), to_i32(y), cell.ch, fg);
+            }
         }
     }
 }
@@ -103,7 +108,7 @@ fn draw_cells(
 /// Highlight the cursor cell with `fill` and redraw its glyph in `text`.
 fn draw_cursor(
     surface: &mut Surface,
-    font: &BitmapFont,
+    font: BitmapFont,
     grid: &Grid,
     cell_width: u32,
     line_height: u32,
@@ -116,11 +121,13 @@ fn draw_cursor(
     let ch = grid
         .cell(grid.cursor_col(), grid.cursor_row())
         .map_or(' ', |cell| cell.ch);
+    // The cursor over a wide glyph's continuation cell shows covered space.
+    let ch = if ch == CONTINUATION { ' ' } else { ch };
     draw_glyph(surface, font, to_i32(x), to_i32(y), ch, text);
 }
 
 /// Draw a single glyph `ch` at `(x, y)` in `color`.
-fn draw_glyph(surface: &mut Surface, font: &BitmapFont, x: i32, y: i32, ch: char, color: Color) {
+fn draw_glyph(surface: &mut Surface, font: BitmapFont, x: i32, y: i32, ch: char, color: Color) {
     let mut glyph = String::with_capacity(ch.len_utf8());
     glyph.push(ch);
     font.draw_text(surface, x, y, &glyph, color);

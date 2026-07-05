@@ -12,7 +12,14 @@ use super::*;
 
 #[test]
 fn geometry_scale_policy_tracks_display_height() {
-    for (height, scale) in [(480, 1), (720, 2), (1080, 3), (2160, 4), (4320, 4)] {
+    for (height, scale) in [
+        (480, 1),
+        (720, 1),
+        (1080, 1),
+        (2160, 2),
+        (4320, 4),
+        (8640, 4),
+    ] {
         let geometry = Geometry::for_display(1920, height, 1920 * 4).expect("geometry");
         assert_eq!(geometry.scale, scale, "height {height}");
     }
@@ -95,23 +102,42 @@ fn clear_paints_the_background_and_homes_the_cursor() {
 }
 
 #[test]
-fn a_glyph_renders_its_atlas_rows_in_the_default_colours() {
+fn a_glyph_renders_its_atlas_coverage_in_the_default_colours() {
     let (mut console, mut pixels) = small_console();
     let dirty = console.write_bytes(&mut pixels, b"!");
-    assert_eq!(dirty, Some((0, 8)), "dirty band covers the cell");
+    assert_eq!(dirty, Some((0, CELL_HEIGHT)), "dirty band covers the cell");
     let rendered = cell(&pixels, console.geometry(), 0, 0);
-    let glyph = &glyphs::GLYPHS[(b'!' - b' ') as usize];
-    for (y, &bits) in glyph.iter().enumerate() {
-        for x in 0..CELL_WIDTH as usize {
-            let lit = x < glyphs::GLYPH_WIDTH as usize
-                && bits & (1 << (glyphs::GLYPH_WIDTH as usize - 1 - x)) != 0;
-            let expected = if lit {
-                DEFAULT_FOREGROUND
-            } else {
-                DEFAULT_BACKGROUND
-            };
-            assert_eq!(rendered[y * CELL_WIDTH as usize + x], expected, "({x},{y})");
+    let glyph = lookup_or_fallback('!');
+    let ramp = coverage_ramp(DEFAULT_FOREGROUND, DEFAULT_BACKGROUND);
+    for y in 0..CELL_HEIGHT {
+        for x in 0..CELL_WIDTH {
+            let expected = ramp[usize::from(glyph.coverage(x, y))];
+            assert_eq!(
+                rendered[(y * CELL_WIDTH + x) as usize],
+                expected,
+                "({x},{y})"
+            );
         }
+    }
+    assert!(
+        rendered.contains(&DEFAULT_FOREGROUND),
+        "the glyph has at least one fully covered pixel"
+    );
+}
+
+#[test]
+fn the_coverage_ramp_is_exact_at_its_endpoints_and_monotone() {
+    let ramp = coverage_ramp(DEFAULT_FOREGROUND, DEFAULT_BACKGROUND);
+    assert_eq!(ramp[0], DEFAULT_BACKGROUND);
+    assert_eq!(ramp[15], DEFAULT_FOREGROUND);
+    // Dark-on-light must blend just as correctly as light-on-dark.
+    let inverted = coverage_ramp(DEFAULT_BACKGROUND, DEFAULT_FOREGROUND);
+    assert_eq!(inverted[0], DEFAULT_FOREGROUND);
+    assert_eq!(inverted[15], DEFAULT_BACKGROUND);
+    for level in 1..16 {
+        let channel = |p: u32| (p >> 8) & 0xFF;
+        assert!(channel(ramp[level]) >= channel(ramp[level - 1]));
+        assert!(channel(inverted[level]) <= channel(inverted[level - 1]));
     }
 }
 
@@ -126,15 +152,67 @@ fn control_bytes_are_consumed_not_printed() {
 }
 
 #[test]
-fn a_non_atlas_scalar_renders_the_question_mark_fallback() {
-    // A Unicode scalar the 5×7 atlas has no glyph for prints `?`.
+fn a_covered_unicode_scalar_renders_its_own_glyph() {
+    // `é` is in the face's repertoire: it draws its own glyph, distinct from
+    // both a bare `e` and the replacement character.
     let (mut console, mut pixels) = small_console();
     console.write_bytes(&mut pixels, "é".as_bytes());
     let geometry = *console.geometry();
-    let fallback = cell(&pixels, &geometry, 0, 0);
+    let accented = cell(&pixels, &geometry, 0, 0);
+    assert!(accented.contains(&DEFAULT_FOREGROUND), "é has ink");
     let (mut reference, mut ref_pixels) = small_console();
-    reference.write_bytes(&mut ref_pixels, b"?");
-    assert_eq!(fallback, cell(&ref_pixels, reference.geometry(), 0, 0));
+    reference.write_bytes(&mut ref_pixels, b"e");
+    assert_ne!(accented, cell(&ref_pixels, reference.geometry(), 0, 0));
+}
+
+#[test]
+fn an_uncovered_scalar_renders_the_replacement_glyph() {
+    // Inconsolata has no CJK: the scalar renders U+FFFD, visibly wrong rather
+    // than dropped. It is double-width, so the lead cell holds the glyph.
+    let (mut console, mut pixels) = small_console();
+    console.write_bytes(&mut pixels, "一".as_bytes());
+    let geometry = *console.geometry();
+    let lead = cell(&pixels, &geometry, 0, 0);
+    let (mut reference, mut ref_pixels) = small_console();
+    reference.write_bytes(&mut ref_pixels, "\u{FFFD}".as_bytes());
+    assert_eq!(lead, cell(&ref_pixels, reference.geometry(), 0, 0));
+}
+
+#[test]
+fn a_wide_glyph_occupies_two_cells_and_blanks_its_continuation() {
+    let (mut console, mut pixels) = console_of(4, 1);
+    console.write_bytes(&mut pixels, "世a".as_bytes());
+    let geometry = *console.geometry();
+    // The lead cell shows the (replacement) glyph, the continuation cell is
+    // background, and the narrow `a` lands in the third column — the same
+    // two-column layout the curses window writer assumes.
+    assert!(!cell_blank(&pixels, &geometry, 0, 0), "lead glyph drawn");
+    assert!(cell_blank(&pixels, &geometry, 1, 0), "continuation blank");
+    assert!(
+        cell_has(&pixels, &geometry, 2, 0, DEFAULT_FOREGROUND),
+        "a in column 2"
+    );
+}
+
+#[test]
+fn a_wide_glyph_wraps_whole_when_one_column_remains() {
+    let (mut console, mut pixels) = console_of(3, 2);
+    console.write_bytes(&mut pixels, "ab世".as_bytes());
+    let geometry = *console.geometry();
+    // Two narrow glyphs leave one column on row 0: the wide glyph wraps whole
+    // to row 1, and the leftover column stays blank.
+    assert!(
+        cell_blank(&pixels, &geometry, 2, 0),
+        "leftover column blank"
+    );
+    assert!(
+        !cell_blank(&pixels, &geometry, 0, 1),
+        "lead wrapped to row 1"
+    );
+    assert!(
+        cell_blank(&pixels, &geometry, 1, 1),
+        "continuation on row 1"
+    );
 }
 
 #[test]

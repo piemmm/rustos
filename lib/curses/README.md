@@ -24,8 +24,9 @@ vocabulary, and terminal capabilities come from `lib/termcap`.
 - **`ColorPairs`** — the curses colour-pair table (pair `0` is the reserved
   default), with explicit `init_pair` and auto-`alloc_pair`, plus the standalone
   `downgrade` colour reducer.
-- **Character width** (`char_width`/`is_wide`/`str_width`/`truncate_to_width`) —
-  the one place that knows a CJK/fullwidth/emoji glyph occupies two columns.
+- **Character width** (`char_width`/`is_wide`/`str_width`/`truncate_to_width`,
+  re-exported from `lib/vt`'s `width` module — the one definition every cell
+  grid shares) — knows a CJK/fullwidth/emoji glyph occupies two columns.
   `Window::add_char` writes a double-width glyph as a lead cell plus a
   `CONTINUATION` cell and the renderer prints it once and steps the cursor two
   columns, so wide text never shifts the rest of the row.

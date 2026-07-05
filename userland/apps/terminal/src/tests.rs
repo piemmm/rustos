@@ -110,6 +110,41 @@ fn grid_new_rejects_degenerate_sizes() {
 }
 
 #[test]
+fn a_wide_glyph_occupies_a_lead_and_a_continuation_cell() {
+    // The same two-column layout the curses window writer and the framebuffer
+    // console produce, so column arithmetic agrees across the stack.
+    let grid = render_bytes(6, 2, "世a".as_bytes());
+    assert_eq!(glyph(&grid, 0, 0), '世');
+    assert_eq!(glyph(&grid, 1, 0), rustos_vt::CONTINUATION);
+    assert_eq!(glyph(&grid, 2, 0), 'a');
+    assert_eq!((grid.cursor_col(), grid.cursor_row()), (3, 0));
+}
+
+#[test]
+fn a_wide_glyph_wraps_whole_when_one_column_remains() {
+    let grid = render_bytes(3, 2, "ab世".as_bytes());
+    assert_eq!(glyph(&grid, 0, 0), 'a');
+    assert_eq!(glyph(&grid, 1, 0), 'b');
+    // The leftover column was blanked rather than half-filled.
+    assert_eq!(glyph(&grid, 2, 0), ' ');
+    assert_eq!(glyph(&grid, 0, 1), '世');
+    assert_eq!(glyph(&grid, 1, 1), rustos_vt::CONTINUATION);
+}
+
+#[test]
+fn a_wide_glyph_on_a_one_column_grid_never_leaks_into_the_next_row() {
+    // One column can never hold a two-column glyph: the wrap-whole rule
+    // blanks the cell and wraps first, and the continuation is dropped
+    // rather than aliasing the next row's first cell. The trailing eager
+    // wrap then scrolls the blanked first line off the top, leaving the
+    // lead and the following narrow glyph on the first two rows.
+    let grid = render_bytes(1, 3, "世x".as_bytes());
+    assert_eq!(glyph(&grid, 0, 0), '世');
+    assert_eq!(glyph(&grid, 0, 1), 'x');
+    assert_eq!(glyph(&grid, 0, 2), ' ');
+}
+
+#[test]
 fn writing_text_fills_cells_and_advances_cursor() {
     let grid = render_bytes(20, 3, b"hi");
     assert_eq!(row_text(&grid, 0), "hi");

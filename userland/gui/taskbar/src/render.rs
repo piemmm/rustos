@@ -160,7 +160,7 @@ fn paint(
 ) -> Option<Surface> {
     let mut surface = Surface::new(layout.bar.width, layout.bar.height)?;
     let origin = layout.bar.origin;
-    let font = BitmapFont::mono5x7();
+    let font = BitmapFont::inconsolata();
 
     surface.fill(palette.surface_raised.into());
     fill_region(
@@ -184,7 +184,7 @@ fn paint(
             *slot,
             &entry.title,
             task_text(palette, focused, entry.minimised),
-            &font,
+            font,
             Align::Leading,
         );
     }
@@ -206,7 +206,7 @@ fn paint(
         layout.clock,
         clock_label,
         palette.on_surface.into(),
-        &font,
+        font,
         Align::Centre,
     );
 
@@ -220,7 +220,7 @@ fn paint_menu(layout: &MenuLayout, menu: &StartMenu, palette: &Palette) -> Optio
     }
     let mut surface = Surface::new(layout.panel.width, layout.panel.height)?;
     let origin = layout.panel.origin;
-    let font = BitmapFont::mono5x7();
+    let font = BitmapFont::inconsolata();
 
     surface.fill(palette.surface_raised.into());
     for (row, entry) in layout.entries.iter().zip(menu.entries()) {
@@ -230,7 +230,7 @@ fn paint_menu(layout: &MenuLayout, menu: &StartMenu, palette: &Palette) -> Optio
             *row,
             entry.label(),
             palette.on_surface.into(),
-            &font,
+            font,
             Align::Leading,
         );
     }
@@ -283,7 +283,7 @@ fn draw_label(
     rect: Rect,
     text: &str,
     color: Color,
-    font: &BitmapFont,
+    font: BitmapFont,
     align: Align,
 ) {
     if rect.is_empty() || text.is_empty() {

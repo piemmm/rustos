@@ -13,6 +13,11 @@ RustOS's text stack. It is the single source of truth (`AGENTS.md` §2.2) for:
 - a shared [`Cell`] / [`Attributes`] representation reused by both the
   *consumer* (the terminal emulator's `Grid`) and the *emitter* (the curses
   renderer),
+- the character display-width vocabulary (`width::char_width` / `is_wide` /
+  `str_width` / `truncate_to_width` and the wide-glyph `CONTINUATION` cell
+  marker): the one East-Asian-Wide/fullwidth/emoji table every cell grid
+  (`lib/curses`, `lib/fbcon`, the terminal emulator) measures through, so
+  they all agree where a glyph ends,
 - the read line discipline's **buffer** half (`line::LineEditor`): CR or LF
   completes a line, an erase — the single-byte Backspace/Delete controls or
   the Delete key's `CSI 3 ~` sequence (`line::EraseSeq`, held across split

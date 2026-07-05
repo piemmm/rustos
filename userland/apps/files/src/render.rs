@@ -44,7 +44,7 @@ pub fn render<S: DirectorySource>(
     theme: &Theme,
     viewport: Rect,
 ) -> Option<Surface> {
-    let font = BitmapFont::mono5x7();
+    let font = BitmapFont::inconsolata();
     let row_height = font
         .glyph_height()
         .saturating_add(ROW_PADDING.saturating_mul(2));
@@ -52,15 +52,15 @@ pub fn render<S: DirectorySource>(
     let palette = theme.palette();
 
     surface.fill(palette.surface.into());
-    draw_path_bar(&mut surface, &font, palette, &browser.path(), row_height);
-    draw_entries(&mut surface, &font, palette, browser, row_height);
+    draw_path_bar(&mut surface, font, palette, &browser.path(), row_height);
+    draw_entries(&mut surface, font, palette, browser, row_height);
     Some(surface)
 }
 
 /// Fill the top path bar and draw the current directory's path into it.
 fn draw_path_bar(
     surface: &mut Surface,
-    font: &BitmapFont,
+    font: BitmapFont,
     palette: &Palette,
     path: &str,
     row_height: u32,
@@ -86,7 +86,7 @@ fn draw_path_bar(
 /// and scrolling so the selected entry stays on screen.
 fn draw_entries<S: DirectorySource>(
     surface: &mut Surface,
-    font: &BitmapFont,
+    font: BitmapFont,
     palette: &Palette,
     browser: &Browser<S>,
     row_height: u32,
@@ -155,7 +155,7 @@ fn first_visible(selected: Option<usize>, visible_rows: usize) -> usize {
 /// the row is truncated to what fits.
 fn draw_label(
     surface: &mut Surface,
-    font: &BitmapFont,
+    font: BitmapFont,
     y: u32,
     row_height: u32,
     text: &str,

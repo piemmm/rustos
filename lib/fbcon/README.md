@@ -6,7 +6,9 @@ Stability tier: **experimental**.
 tree. It turns a byte stream into on-screen text by feeding it to the single
 shared `rustos_vt::Parser` and applying each parsed `rustos_vt::Op` straight
 onto a borrowed 32-bit scan-out surface (`&mut [u32]`), rendering glyphs with
-the shared `rustos_font` 5×7 atlas. It is a full ANSI/VT/xterm-256color
+the shared `rustos_font` Inconsolata coverage atlas (12×26 cells, 16-level
+anti-aliasing, the face's full Unicode repertoire with a U+FFFD fallback and
+two-cell double-width glyphs). It is a full ANSI/VT/xterm-256color
 terminal: SGR colour (16 / 256 / truecolour), bold, reverse video, cursor
 motion, erase, DEC scroll regions, and — reaching the bottom of the screen —
 scrolling the pixels up like a real terminal rather than wrapping ring-style.
