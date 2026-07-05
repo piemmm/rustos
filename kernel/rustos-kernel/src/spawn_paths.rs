@@ -66,6 +66,12 @@ pub const TOP_PATH: &[u8] = b"/System/Apps/top.app/Run";
 /// every target.
 pub const LS_PATH: &[u8] = b"/System/Apps/ls.app/Run";
 
+/// Absolute path the `cat` tool program is registered under: the system app
+/// store's command-named bundle, so the shell resolves the bare word `cat`
+/// to it (`plans/APPS.md` §8). One OS-wide path contract, identical on
+/// every target.
+pub const CAT_PATH: &[u8] = b"/System/Apps/cat.app/Run";
+
 /// Absolute path the `man` help tool is registered under: the system app
 /// store's command-named bundle, so the shell resolves the bare word `man`
 /// to it (`plans/APPS.md` §7–§8). One OS-wide path contract, identical on
@@ -82,7 +88,7 @@ pub const USERS_CLI_PATH: &[u8] = b"/System/Apps/users.app/Run";
 #[cfg(test)]
 mod tests {
     use super::{
-        DEVMGR_PATH, LOGIN_PATH, LS_PATH, MAN_PATH, PS_PATH, SHELL_PATH, SYSINFOD_PATH,
+        CAT_PATH, DEVMGR_PATH, LOGIN_PATH, LS_PATH, MAN_PATH, PS_PATH, SHELL_PATH, SYSINFOD_PATH,
         SYSINFO_PATH, TOP_PATH, USERS_CLI_PATH,
     };
     use rustos_abi::{BundleEntry, BUNDLE_SUFFIX, SYSTEM_APP_STORE, SYSTEM_SERVICE_STORE};
@@ -118,6 +124,7 @@ mod tests {
     fn command_apps_live_in_the_system_app_store() {
         for (path, command) in [
             (SHELL_PATH, "elsh"),
+            (CAT_PATH, "cat"),
             (LS_PATH, "ls"),
             (MAN_PATH, "man"),
             (PS_PATH, "ps"),

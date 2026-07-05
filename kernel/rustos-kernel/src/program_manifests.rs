@@ -131,6 +131,19 @@ pub const TOP_MANIFEST: &[CapabilityId] = &[
 #[cfg(any(test, not(all(freestanding, kernel_isa = "aarch64"))))]
 pub const LS_MANIFEST: &[CapabilityId] = &[CapabilityId::CONSOLE_WRITE, CapabilityId::FS_ACCESS];
 
+/// The `cat` tool's manifest: `CAP_CONSOLE_WRITE` for the concatenated
+/// stream on fd 1 and diagnostics on fd 2, `CAP_CONSOLE_READ` because the
+/// `-` operand (and the no-operand default) reads standard input on fd 0,
+/// and `CAP_FS_ACCESS` because reading its file operands *is* the tool's
+/// job — the secured VFS still authorises every path per-inode under the
+/// caller's attested identity.
+#[cfg(any(test, not(all(freestanding, kernel_isa = "aarch64"))))]
+pub const CAT_MANIFEST: &[CapabilityId] = &[
+    CapabilityId::CONSOLE_WRITE,
+    CapabilityId::CONSOLE_READ,
+    CapabilityId::FS_ACCESS,
+];
+
 /// The `man` help tool's manifest: `CAP_CONSOLE_WRITE` for the rendered
 /// page on fd 1 (and diagnostics on fd 2), `CAP_CONSOLE_READ` for the
 /// pager's keystrokes on fd 0 (also authorising its `stream_echo` echo
@@ -287,6 +300,18 @@ mod tests {
     }
 
     #[test]
+    fn cat_manifest_is_pinned() {
+        assert_eq!(
+            set(CAT_MANIFEST),
+            set(&[
+                CapabilityId::CONSOLE_WRITE,
+                CapabilityId::CONSOLE_READ,
+                CapabilityId::FS_ACCESS,
+            ])
+        );
+    }
+
+    #[test]
     fn man_manifest_is_pinned() {
         assert_eq!(
             set(MAN_MANIFEST),
@@ -329,7 +354,13 @@ mod tests {
     #[test]
     fn session_tools_request_within_the_session_baseline() {
         let baseline = set(SESSION_BASELINE);
-        for manifest in [LS_MANIFEST, PS_MANIFEST, SYSINFO_MANIFEST, TOP_MANIFEST] {
+        for manifest in [
+            CAT_MANIFEST,
+            LS_MANIFEST,
+            PS_MANIFEST,
+            SYSINFO_MANIFEST,
+            TOP_MANIFEST,
+        ] {
             for cap in manifest {
                 assert!(baseline.contains(*cap), "{cap:?} exceeds the baseline");
             }
@@ -365,6 +396,7 @@ mod tests {
         // deliberately absent: it is the boot floor the boot path enters
         // directly, never a store bundle.
         let embedded: &[(&str, AppKind, &[CapabilityId])] = &[
+            ("cat", AppKind::Command, CAT_MANIFEST),
             ("devmgr", AppKind::Service, DEVMGR_MANIFEST),
             ("elsh", AppKind::Command, SESSION_BASELINE),
             ("login", AppKind::Service, LOGIN_MANIFEST),

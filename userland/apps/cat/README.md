@@ -1,15 +1,24 @@
 # `rustos-cat` — concatenate files to the terminal
 
-Stage 6 deliverable (`AGENTS.md` §3 `userland/apps/`). `cat` reads each
-of its sources in order and writes the bytes to the terminal. A source is
-either a path or standard input (the `-` operand, and the default when no
-operand is given). With `-n` it numbers the output lines, continuously
-across every source — the POSIX model.
+Stage 6 deliverable (`AGENTS.md` §3 `userland/apps/`), a `plans/APPS.md`
+command app registered at `/System/Apps/cat.app/Run` so the shell
+resolves the bare word `cat` to it. `cat` reads each of its sources in
+order and writes the bytes to the terminal. A source is either a path or
+standard input (the `-` operand, and the default when no operand is
+given). With `-n` it numbers the output lines, continuously across every
+source — the POSIX model. `-h`/`-?` render the tool's own short help
+from its bundled `Help/` tree through the shared `lib/help` engine
+(`plans/APPS.md` §4), in the locale the inherited `LANG` variable names,
+falling back to the usage banner when the tree is unavailable.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
-only dependency is the audited `rustos-abi` crate, so it never links a
-kernel or driver crate (`AGENTS.md` §17.4).
+dependencies are the audited `rustos-abi` vocabulary and the shared
+`rustos-help` engine, so it never links a kernel or driver crate
+(`AGENTS.md` §17.4). Its manifest (`AppInfo.toml`) requests
+`CAP_CONSOLE_WRITE`, `CAP_CONSOLE_READ`, and `CAP_FS_ACCESS` — within
+the session baseline — and the secured VFS still authorises every path
+per-inode under the caller's attested identity.
 
 ## Usage
 
@@ -17,16 +26,22 @@ kernel or driver crate (`AGENTS.md` §17.4).
 cat [-n] [--] [file...]
 
   -n, --number   number output lines, continuously across every source
-  -h, --help     show the usage banner
+  -h, -?         show this command's own short help
 ```
 
 With no file operand, or when a file operand is `-`, `cat` reads standard
 input. `--` ends option parsing: every later argument is a file path.
 
+The bundle's six-locale `Help/` tree (`default` en-US plus `fr-FR`,
+`de-DE`, `es-ES`, `uk-UA`, `it-IT`) is authored on disk in this crate and
+planted at `/System/Apps/cat.app/Help/` by the image builder from that
+source (`tools/syshelp`) — never embedded in the binary
+(`plans/APPS.md` §6.1).
+
 ## A stream/render machine, not a data source
 
 `run` pulls bytes from each source in fixed-size chunks and writes them —
-optionally line-numbered — to the terminal. The three operations that
+optionally line-numbered — to the terminal. The operations that
 reach the outside world are injected seams, mirroring the other userland
 crates (`init`'s `Spawner`/`Reaper`, `login`'s `Prompt`, `sysinfo`'s
 `Transport`):
@@ -34,6 +49,8 @@ crates (`init`'s `Spawner`/`Reaper`, `login`'s `Prompt`, `sysinfo`'s
 - `FileSource` — read a byte range of a named file.
 - `Input` — read the next bytes of standard input.
 - `Output` — write rendered bytes to the terminal.
+- `rustos_help::HelpSource` — the tool's own bundled `Help/` tree, read
+  by the short-help switches.
 
 On a running system these are syscall- and console-backed; in tests they
 are in-memory fixtures, so every parsing, streaming, and numbering
@@ -57,8 +74,11 @@ recording output: the command grammar (every option, `-`/`--`, and the
 usage-error path), single- and multi-file concatenation, standard-input
 streaming, continuous line numbering across files and across a chunk
 boundary, a missing trailing newline, an empty numbered file, chunked
-streaming of a multi-chunk file, and the missing-file and dead-console
-fail-closed paths.
+streaming of a multi-chunk file, the missing-file and dead-console
+fail-closed paths, the short-help render from a Help document with its
+usage-banner fallback, and the switch-drift pin that every locale's
+`OPTIONS` section documents exactly the parser's switches
+(`plans/APPS.md` §3.1).
 
 See [`docs/src/userland/utilities.md`](../../../docs/src/userland/utilities.md)
 for the full subsystem documentation.

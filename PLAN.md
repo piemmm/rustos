@@ -3537,7 +3537,7 @@ command resolution** (`plans/APPS.md` §8–§9) with the §16.2 `/System/Apps/`
 system app store (charter amended, rationale in "Charter Amendments"): the
 store path and bundle suffix are defined once in `lib/abi`
 (`SYSTEM_APP_STORE`, `BUNDLE_SUFFIX`), every OS command app is registered
-as a command-named store bundle (`/System/Apps/{elsh,ps,sysinfo,top,users}.app/Run`,
+as a command-named store bundle (`/System/Apps/{cat,elsh,ls,man,ps,sysinfo,top,users}.app/Run`,
 `kernel/rustos-kernel/src/spawn_paths.rs`, host drift-tested against the
 shared definitions), and the shell resolves a command word through the pure
 candidate policy `rustos_cmdres::resolution_candidates` (hoisted into the
@@ -3570,8 +3570,8 @@ types `man man` end to end. The generic argv/stderr-line helpers were
 hoisted into `lib/rt` (`args`, `io::write_stderr_line`) and the `-errno`
 decode into `rustos_abi::Errno::from_syscall`, each now one definition.
 
-Every store-registered command app (`ls`, `man`, `ps`, `top`, `sysinfo`,
-`users`, `elsh`) ships its six-locale `Help/` tree and honours the
+Every store-registered command app (`cat`, `ls`, `man`, `ps`, `top`,
+`sysinfo`, `users`, `elsh`) ships its six-locale `Help/` tree and honours the
 `-h`/`-?` short-help convention through the one shared `lib/help` render
 (`own_short_help` + the `rt`-feature `BundleHelp` own-bundle source);
 per-locale switch-drift unit tests pin each tree's `OPTIONS` to its
@@ -3621,7 +3621,7 @@ increment landing complete and green:
    host composer (`rustos-itest-harness::app_image`) composes and signs the
    wire `AppInfo` under `SYSTEM_APP_SIGNING_SEED` (`build_support.rs`, a
    trust domain distinct from the driver-signing seed) — **done**:
-   `AppInfo.toml` in all ten program crates,
+   `AppInfo.toml` in all eleven program crates,
    `app_image::{discover_app_manifests, compose_signed_appinfo}` with a
    fail-closed line-based grammar, unit tests verifying a composed
    manifest against the exact `lib/crypto` verification contract (and that

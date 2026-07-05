@@ -51,7 +51,7 @@ own six-locale `Help/` tree shipped on the read-only `/System` volume and
 the `LANG` locale variable named in §5), deliverable 4 (shell command
 resolution over the `/System/Apps/` system app store, `AGENTS.md` §16.2
 amended), and deliverable 6 for **every store-registered command app**:
-`ls`, `ps`, `top`, `sysinfo`, `users`, and `elsh` each ship a six-locale
+`cat`, `ls`, `ps`, `top`, `sysinfo`, `users`, and `elsh` each ship a six-locale
 `Help/` tree in their bundle (discovered by `tools/syshelp` from the
 `userland/apps` and `userland/shell` roots, planted by `tools/mkimage`
 and the QEMU fixture) and honour the §4 `-h`/`-?` short-help convention
@@ -545,7 +545,7 @@ both landed; `plans/SHELL.md` command execution):
    system-app-store-then-`PATH` resolution (§8) and `.app`-suffix invocation
    (§9) are live. The store/bundle spellings live once in `lib/abi`
    (`SYSTEM_APP_STORE`/`BUNDLE_SUFFIX`); every OS command app is registered
-   as `/System/Apps/{elsh,ls,man,ps,sysinfo,top,users}.app/Run`
+   as `/System/Apps/{cat,elsh,ls,man,ps,sysinfo,top,users}.app/Run`
    (`spawn_paths.rs`, drift-tested); the pure candidate policy
    (`rustos_cmdres::resolution_candidates` in the shared `lib/cmdres`
    crate, alias-aware `PATH` split, plus the `bundle_candidates` view for
@@ -575,8 +575,8 @@ both landed; `plans/SHELL.md` command execution):
    `default/<command>.md` (never a per-bundle list). Any violation fails
    closed with a message naming the offending `bundle/locale/file`.
 6. **`Help/` trees for the existing command apps** — **done for every
-   store-registered command app**: `ls`, `ps`, `top`, `sysinfo`, `users`,
-   and `elsh` each author their six-locale tree on disk in the bundle,
+   store-registered command app**: `cat`, `ls`, `ps`, `top`, `sysinfo`,
+   `users`, and `elsh` each author their six-locale tree on disk in the bundle,
    discovered by `tools/syshelp` (roots `userland/apps` and
    `userland/shell`), planted at `/System/Apps/<cmd>.app/Help/`, and served
    at runtime through the `HelpSource` seam — never embedded in the binary
@@ -585,7 +585,7 @@ both landed; `plans/SHELL.md` command execution):
    The tools that gained filesystem reach for that read request
    `CAP_FS_ACCESS` in their manifests (the man/ls precedent — the secured
    VFS still authorises per-inode). The not-yet-registered utilities
-   (`cat`, `cp`, `mv`, `rm`, `chmod`, `chown`, `mount`, `getcap`,
+   (`cp`, `mv`, `rm`, `chmod`, `chown`, `mount`, `getcap`,
    `setcap`, `useradd`, `groupadd`, `terminal`, …) gain their trees in the
    same change that registers each as a store bundle. Each new tree ships
    by dropping its `Help/` files under the bundle — `tools/syshelp`

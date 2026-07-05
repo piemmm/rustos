@@ -5,21 +5,19 @@ use alloc::format;
 use alloc::vec::Vec;
 
 use rustos_abi::Errno;
+use rustos_help::{own_short_help, HelpSource};
 
 use crate::command::{Command, Source};
 use crate::error::CatError;
 use crate::io::{FileSource, Input, Output};
 
-/// The usage banner printed by [`Command::Help`].
-pub const USAGE: &str = "\
-usage: cat [-n] [--] [file...]
+/// The usage banner a usage error is reported with, and the fallback the
+/// short-help switches print when `cat`'s own Help tree is unavailable.
+pub const USAGE: &str = "usage: cat [-n] [--] [file...]";
 
-  -n, --number   number output lines, continuously across every source
-  -h, --help     show this message
-
-With no file operand, or when a file operand is `-`, cat reads standard
-input. `--` ends option parsing: every later argument is a file path.
-";
+/// `cat`'s own command word: the short-help switches render its own Help
+/// document through the same engine as any other command's.
+const OWN_WORD: &str = "cat";
 
 /// Bytes pulled from a source per read call.
 ///
@@ -28,7 +26,9 @@ input. `--` ends option parsing: every later argument is a file path.
 const READ_CHUNK: usize = 4096;
 
 /// Run one [`Command`], reading its sources through `files`/`stdin` and
-/// writing the rendered bytes to `out`.
+/// writing the rendered bytes to `out`. `locale` is the user's `LANG`
+/// preference, if set; `help` is the tool's own `Help/` tree, read by the
+/// short-help switches.
 ///
 /// Sources are read in order; numbering (when enabled) is continuous across
 /// every source, exactly like the POSIX tool.
@@ -40,12 +40,14 @@ const READ_CHUNK: usize = 4096;
 /// * [`CatError::Output`] — writing the terminal failed.
 pub fn run(
     command: Command,
+    locale: Option<&str>,
     files: &dyn FileSource,
     stdin: &dyn Input,
+    help: &dyn HelpSource,
     out: &dyn Output,
 ) -> Result<(), CatError> {
     match command {
-        Command::Help => out.write_all(USAGE.as_bytes()).map_err(CatError::Output),
+        Command::Help => short_help(locale, help, out),
         Command::Concat { number, sources } => {
             let mut emitter = Emitter::new(number);
             for source in &sources {
@@ -68,6 +70,21 @@ pub fn run(
             Ok(())
         }
     }
+}
+
+/// Render `cat`'s own short help (`NAME` + `SYNOPSIS` + compact `OPTIONS`)
+/// from its own Help tree through the one shared engine; when no document
+/// can be served (a build without the bundle's documents) the usage banner
+/// stands in — the tool's own text, not fabricated help content — so `-h`
+/// never fails.
+fn short_help(
+    locale: Option<&str>,
+    help: &dyn HelpSource,
+    out: &dyn Output,
+) -> Result<(), CatError> {
+    let bytes =
+        own_short_help(help, locale, OWN_WORD).unwrap_or_else(|| format!("{USAGE}\n").into_bytes());
+    out.write_all(&bytes).map_err(CatError::Output)
 }
 
 /// Drain one source — calling `fill` for successive chunks until it reports
@@ -144,6 +161,45 @@ mod tests {
     use alloc::vec::Vec;
     use core::cell::RefCell;
     use rustos_abi::Errno;
+    use rustos_help::{HelpSource, SourceError};
+
+    /// A Help tree with no documents at all: the short-help fallback path.
+    struct NoHelp;
+
+    impl HelpSource for NoHelp {
+        fn locale_dirs(&self) -> Result<Vec<String>, SourceError> {
+            Ok(Vec::new())
+        }
+
+        fn read(
+            &self,
+            _locale_dir: &str,
+            _file_name: &str,
+        ) -> Result<Option<Vec<u8>>, SourceError> {
+            Ok(None)
+        }
+    }
+
+    /// A Help tree holding one canonical `cat.md` document.
+    struct OneDoc;
+
+    const DOC: &str = "## NAME\n\ncat — concatenate files to standard output\n\n\
+                       ## SYNOPSIS\n\n`cat [-n] [--] [file...]`\n\n\
+                       ## DESCRIPTION\n\nConcatenates things.\n";
+
+    impl HelpSource for OneDoc {
+        fn locale_dirs(&self) -> Result<Vec<String>, SourceError> {
+            Ok(alloc::vec![String::from("default")])
+        }
+
+        fn read(&self, locale_dir: &str, file_name: &str) -> Result<Option<Vec<u8>>, SourceError> {
+            if locale_dir == "default" && file_name == "cat.md" {
+                Ok(Some(DOC.as_bytes().to_vec()))
+            } else {
+                Ok(None)
+            }
+        }
+    }
 
     /// An in-memory filesystem keyed by path.
     struct MapFs {
@@ -258,15 +314,56 @@ mod tests {
         Source::Path(String::from(name))
     }
 
+    fn run_cat(
+        command: Command,
+        files: &dyn FileSource,
+        stdin: &dyn Input,
+        out: &Recorder,
+    ) -> Result<(), CatError> {
+        run(command, None, files, stdin, &NoHelp, out)
+    }
+
     #[test]
-    fn help_writes_usage() {
+    fn help_renders_the_short_help_from_the_document() {
         let fs = MapFs::new();
         let out = Recorder::new();
         assert_eq!(
-            run(Command::Help, &fs, &StdinFixture::empty(), &out),
+            run(
+                Command::Help,
+                None,
+                &fs,
+                &StdinFixture::empty(),
+                &OneDoc,
+                &out
+            ),
             Ok(())
         );
-        assert_eq!(out.text(), USAGE);
+        let text = out.text();
+        assert!(
+            text.contains("cat — concatenate files to standard output"),
+            "{text}"
+        );
+        assert!(text.contains("cat [-n] [--] [file...]"), "{text}");
+    }
+
+    #[test]
+    fn help_falls_back_to_the_usage_banner_without_a_tree() {
+        let fs = MapFs::new();
+        let out = Recorder::new();
+        assert_eq!(
+            run(
+                Command::Help,
+                None,
+                &fs,
+                &StdinFixture::empty(),
+                &NoHelp,
+                &out
+            ),
+            Ok(())
+        );
+        let mut expected = String::from(USAGE);
+        expected.push('\n');
+        assert_eq!(out.text(), expected);
     }
 
     #[test]
@@ -274,7 +371,7 @@ mod tests {
         let fs = MapFs::new().with("a.txt", b"hello world\n");
         let out = Recorder::new();
         assert_eq!(
-            run(
+            run_cat(
                 concat(false, vec![path("a.txt")]),
                 &fs,
                 &StdinFixture::empty(),
@@ -290,7 +387,7 @@ mod tests {
         let fs = MapFs::new().with("a", b"one\n").with("b", b"two\n");
         let out = Recorder::new();
         assert_eq!(
-            run(
+            run_cat(
                 concat(false, vec![path("a"), path("b")]),
                 &fs,
                 &StdinFixture::empty(),
@@ -306,7 +403,7 @@ mod tests {
         let fs = MapFs::new();
         let out = Recorder::new();
         assert_eq!(
-            run(
+            run_cat(
                 concat(false, vec![Source::Stdin]),
                 &fs,
                 &StdinFixture::new(b"from stdin\n"),
@@ -322,7 +419,7 @@ mod tests {
         let fs = MapFs::new().with("a", b"A\n").with("b", b"B\n");
         let out = Recorder::new();
         assert_eq!(
-            run(
+            run_cat(
                 concat(false, vec![path("a"), Source::Stdin, path("b")]),
                 &fs,
                 &StdinFixture::new(b"S\n"),
@@ -340,7 +437,7 @@ mod tests {
             .with("b", b"third\n");
         let out = Recorder::new();
         assert_eq!(
-            run(
+            run_cat(
                 concat(true, vec![path("a"), path("b")]),
                 &fs,
                 &StdinFixture::empty(),
@@ -356,7 +453,7 @@ mod tests {
         let fs = MapFs::new().with("a", b"no newline");
         let out = Recorder::new();
         assert_eq!(
-            run(
+            run_cat(
                 concat(true, vec![path("a")]),
                 &fs,
                 &StdinFixture::empty(),
@@ -376,7 +473,7 @@ mod tests {
         let fs = MapFs::new().with("big", &data);
         let out = Recorder::new();
         assert_eq!(
-            run(
+            run_cat(
                 concat(true, vec![path("big")]),
                 &fs,
                 &StdinFixture::empty(),
@@ -396,7 +493,7 @@ mod tests {
         let fs = MapFs::new().with("empty", b"");
         let out = Recorder::new();
         assert_eq!(
-            run(
+            run_cat(
                 concat(true, vec![path("empty")]),
                 &fs,
                 &StdinFixture::empty(),
@@ -412,7 +509,7 @@ mod tests {
         let fs = MapFs::new();
         let out = Recorder::new();
         assert_eq!(
-            run(
+            run_cat(
                 concat(false, vec![path("absent")]),
                 &fs,
                 &StdinFixture::empty(),
@@ -428,7 +525,7 @@ mod tests {
         let out = Recorder::new();
         // The missing first file aborts; "a" is never read.
         assert_eq!(
-            run(
+            run_cat(
                 concat(false, vec![path("absent"), path("a")]),
                 &fs,
                 &StdinFixture::empty(),
@@ -444,7 +541,7 @@ mod tests {
         let fs = MapFs::new().with("a", b"hello\n");
         let out = Recorder::failing_at(0);
         assert_eq!(
-            run(
+            run_cat(
                 concat(false, vec![path("a")]),
                 &fs,
                 &StdinFixture::empty(),
@@ -465,7 +562,7 @@ mod tests {
         let fs = MapFs::new().with("big", &data);
         let out = Recorder::new();
         assert_eq!(
-            run(
+            run_cat(
                 concat(false, vec![path("big")]),
                 &fs,
                 &StdinFixture::empty(),

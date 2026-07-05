@@ -527,7 +527,10 @@ mod tests {
         let names: Vec<&str> = found.iter().map(|d| d.manifest.name.as_str()).collect();
         assert_eq!(
             names,
-            ["devmgr", "elsh", "login", "ls", "man", "ps", "sysinfo", "sysinfod", "top", "users"]
+            [
+                "cat", "devmgr", "elsh", "login", "ls", "man", "ps", "sysinfo", "sysinfod", "top",
+                "users"
+            ]
         );
         for app in &found {
             assert!(app.crate_dir.join("Cargo.toml").is_file());

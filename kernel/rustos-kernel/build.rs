@@ -178,6 +178,13 @@ const PROGRAMS: &[Program] = &[
         prefix: "LS",
     },
     Program {
+        pkg: "rustos-cat",
+        bin: "rustos-cat-run",
+        rel_dir: "../../userland/apps/cat",
+        fixture: "cat_rxe.rs",
+        prefix: "CAT",
+    },
+    Program {
         pkg: "rustos-man",
         bin: "rustos-man-run",
         rel_dir: "../../userland/apps/man",

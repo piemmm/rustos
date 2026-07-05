@@ -27,7 +27,9 @@ pub enum Command {
         /// yields a single [`Source::Stdin`].
         sources: Vec<Source>,
     },
-    /// Print the usage banner (`-h`/`--help`).
+    /// Render `cat`'s own short help (`-h`/`-?`/`--help`): the `NAME`,
+    /// `SYNOPSIS`, and compact `OPTIONS` of its Help document, through the
+    /// same engine as any other command's short help (plans/APPS.md §4).
     Help,
 }
 
@@ -37,7 +39,8 @@ pub enum Command {
 /// The grammar is the familiar `cat [-n] [--] [file...]`:
 ///
 /// * `-n` / `--number` — number output lines.
-/// * `-h` / `--help` — print the usage banner (wins immediately).
+/// * `-h` / `-?` / `--help` — the reserved short-help switches
+///   (plans/APPS.md §4; they win immediately).
 /// * `--` — end option parsing; every later argument is a path.
 /// * `-` — standard input.
 /// * any other `-…` — an [`CatError::Usage`] error (fail closed; never a
@@ -60,7 +63,7 @@ pub fn parse(args: &[&str]) -> Result<Command, CatError> {
                     options_done = true;
                     continue;
                 }
-                "-h" | "--help" => return Ok(Command::Help),
+                "-h" | "-?" | "--help" => return Ok(Command::Help),
                 "-n" | "--number" => {
                     number = true;
                     continue;
@@ -108,6 +111,7 @@ mod tests {
     #[test]
     fn help_flags_win() {
         assert_eq!(parse(&["-h"]), Ok(Command::Help));
+        assert_eq!(parse(&["-?"]), Ok(Command::Help));
         assert_eq!(parse(&["--help"]), Ok(Command::Help));
         // `--help` is recognised even alongside other arguments.
         assert_eq!(parse(&["-n", "file", "--help"]), Ok(Command::Help));
@@ -169,5 +173,31 @@ mod tests {
                 sources: vec![path("-n")],
             })
         );
+    }
+
+    /// Every locale's `OPTIONS` section documents exactly the switches this
+    /// parser accepts (`plans/APPS.md` §3.1): the flag tokens are
+    /// language-neutral, so each translated document must carry the same
+    /// keys as the canonical one. The documents are read from the bundle's
+    /// own on-disk `Help/` tree — the single source the image builder plants
+    /// — never a copy embedded in this crate.
+    #[test]
+    fn help_documents_the_parser_switches() {
+        extern crate std;
+        use alloc::format;
+        use std::fs;
+
+        let help_root = format!("{}/Help", env!("CARGO_MANIFEST_DIR"));
+        let locales = ["default", "fr-FR", "de-DE", "es-ES", "uk-UA", "it-IT"];
+        for locale in locales {
+            let path = format!("{help_root}/{locale}/cat.md");
+            let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+            for switch in ["`-n, --number`", "`-h, -?`"] {
+                assert!(
+                    text.contains(switch),
+                    "{locale}/cat.md must document {switch}"
+                );
+            }
+        }
     }
 }
