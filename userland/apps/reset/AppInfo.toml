@@ -1,0 +1,14 @@
+# Signed-AppInfo manifest source for the `reset` command app
+# (plans/APPS.md deliverable 8). Discovered by the build's app-bundle
+# composer; the capability list is the bundle's request, intersected with
+# the launching user's grants. CAP_CONSOLE_WRITE covers the restoration
+# sequence written to the inherited standard output; CAP_CONSOLE_READ
+# authorises restoring the cooked input discipline (`stream_input_mode`)
+# a crashed full-screen program may have left off; CAP_FS_ACCESS covers
+# the short-help read of the bundle's own Help/ documents through the
+# secured VFS.
+id = "os.rustos.reset"
+name = "reset"
+version = "0.1.0"
+kind = "command"
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_CONSOLE_READ", "CAP_FS_ACCESS"]
