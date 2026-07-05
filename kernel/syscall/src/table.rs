@@ -299,12 +299,19 @@ pub trait SyscallHandlers {
     /// zero when no input is pending) is valid, so the caller loops. A
     /// build with no backing wired must fail closed with
     /// [`Errno::NotImplemented`] rather than fabricating input.
+    ///
+    /// `timeout_ns` bounds how long a read with no pending input may park:
+    /// `0` waits indefinitely (the interactive default), and a non-zero
+    /// bound fails with [`Errno::TimedOut`] once it elapses with no input,
+    /// so a full-screen program can refresh a clock or status figure
+    /// without a busy poll.
     fn stream_read(
         &self,
         caller: &CallerContext<'_>,
         fd: u32,
         buf: u64,
         len: usize,
+        timeout_ns: u64,
     ) -> SyscallResult;
     /// Map `len` bytes of fresh anonymous `RW` memory into the calling
     /// process's own address space, returning the base address of the new
@@ -1694,7 +1701,7 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             SyscallNumber::STREAM_READ => {
                 let len = decode_len(args.0[2])?;
                 self.handlers
-                    .stream_read(caller, decode_u32(args.0[0]), args.0[1], len)
+                    .stream_read(caller, decode_u32(args.0[0]), args.0[1], len, args.0[3])
             }
             SyscallNumber::MEM_MAP => {
                 let len = decode_len(args.0[0])?;
@@ -2432,6 +2439,7 @@ mod tests {
             _fd: u32,
             _buf: u64,
             len: usize,
+            _timeout_ns: u64,
         ) -> SyscallResult {
             self.record("stream_read");
             // Echo the requested length back as the byte count so the

@@ -374,6 +374,49 @@ pub fn stdin(buf: &mut [u8]) -> usize {
     stream_read(STDIN, buf)
 }
 
+/// Read up to `buf.len()` bytes from standard input (fd 0) into `buf`,
+/// waiting at most `timeout_ns` nanoseconds for input to arrive
+/// (`SyscallNumber::STREAM_READ` with its `timeout_ns` argument).
+///
+/// The bounded companion of [`stdin`]: the stream backing parks the caller
+/// until input arrives or the bound elapses, so a full-screen program can
+/// refresh a clock or status figure on a cadence without a busy poll. A
+/// `timeout_ns` of `0` waits indefinitely, exactly as [`stdin`] does.
+///
+/// # Errors
+///
+/// Returns the raw negative kernel result (`-errno`) on failure —
+/// [`rustos_abi::Errno::TimedOut`] when the bound elapsed with no input,
+/// or the same refusals [`stdin`] folds to a zero-length read (fd 0 not a
+/// readable stream, a faulted buffer, no console backing). Surfacing the
+/// errno lets the caller tell a refresh tick from a dead console.
+pub fn stdin_timeout(buf: &mut [u8], timeout_ns: u64) -> Result<usize, i64> {
+    let len = buf.len() as u64;
+    let ptr = buf.as_mut_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // the `(buf, len)` pair against the caller's address space before
+    // writing to it. `buf` is a live exclusive `&mut [u8]` for the
+    // duration of the call, so the pair denotes writable memory the kernel
+    // may fill.
+    #[allow(clippy::cast_possible_wrap)]
+    // The kernel guarantees the i64 count-result encoding (count ≥ 0, else -errno).
+    let ret = unsafe {
+        raw_syscall(
+            NUM_STREAM_READ,
+            [u64::from(STDIN), ptr, len, timeout_ns, 0, 0],
+        )
+    } as i64;
+    if ret < 0 {
+        return Err(ret);
+    }
+    // Defence in depth: clamp the kernel's count to the buffer so a buggy
+    // count can never drive an out-of-bounds slice in the caller, exactly
+    // as `stdin` clamps.
+    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_sign_loss)]
+    Ok((ret as usize).min(buf.len()))
+}
+
 /// Read up to `buf.len()` bytes from the calling process's standard stream
 /// `fd` (`SyscallNumber::STREAM_READ`) into `buf`, returning the number of
 /// bytes read.

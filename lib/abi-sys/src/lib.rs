@@ -334,14 +334,17 @@ pub extern "C" fn sys_stream_write(fd: u32, buf: *mut c_void, len: usize) -> u64
 /// caller's address space before writing it. The read
 /// counterpart of `stream_write`: a short read (fewer than `len`, possibly
 /// zero when no input is pending) is valid, so the caller loops.
+/// `timeout_ns` bounds how long a read with no pending input may wait:
+/// `0` waits indefinitely, and a non-zero bound fails with
+/// `ROS_E_TIMED_OUT` once it elapses with no input.
 #[must_use]
 #[export_name = "ros_sys_stream_read"]
-pub extern "C" fn sys_stream_read(fd: u32, buf: *mut c_void, len: usize) -> u64 {
+pub extern "C" fn sys_stream_read(fd: u32, buf: *mut c_void, len: usize, timeout_ns: u64) -> u64 {
     // SAFETY: see `sys_ipc_send`; the kernel validates `(buf, len)`.
     unsafe {
         raw_syscall(
             NUM_STREAM_READ,
-            [u64::from(fd), ptr_arg(buf), len as u64, 0, 0, 0],
+            [u64::from(fd), ptr_arg(buf), len as u64, timeout_ns, 0, 0],
         )
     }
 }
@@ -1626,7 +1629,7 @@ mod tests {
         (NUM_RANDOM_GET, "random_get", 3),
         (NUM_STREAM_WRITE, "stream_write", 3),
         (NUM_SPAWN, "spawn", 6),
-        (NUM_STREAM_READ, "stream_read", 3),
+        (NUM_STREAM_READ, "stream_read", 4),
         (NUM_MEM_MAP, "mem_map", 3),
         (NUM_MEM_UNMAP, "mem_unmap", 2),
         (NUM_WAIT, "wait", 3),
@@ -1934,17 +1937,18 @@ mod tests {
     }
 
     #[test]
-    fn stream_read_marshals_fd_pointer_and_len() {
+    fn stream_read_marshals_fd_pointer_len_and_timeout() {
         let mut buffer = [0u8; 8];
         let ptr = buffer.as_mut_ptr().cast::<c_void>();
         let (number, args) = capture(5, || {
-            assert_eq!(sys_stream_read(0, ptr, 8), 5);
+            assert_eq!(sys_stream_read(0, ptr, 8, 7_000_000), 5);
         });
         assert_eq!(number, NUM_STREAM_READ);
         assert_eq!(args[0], 0);
         assert_eq!(args[1], ptr as usize as u64);
         assert_eq!(args[2], 8);
-        assert_eq!(&args[3..], &[0, 0, 0]);
+        assert_eq!(args[3], 7_000_000);
+        assert_eq!(&args[4..], &[0, 0]);
     }
 
     #[test]

@@ -64,6 +64,8 @@ mod program {
     use alloc::string::String;
     use alloc::vec::Vec;
 
+    use core::time::Duration;
+
     use rustos_abi::elevate::{elevate_endpoint, ELEVATE_MAX_REQUEST, ELEVATE_REPLY_LEN};
     use rustos_abi::sysinfo::{KernelMemoryStats, LoadAverage, SysinfoQueryId, SystemIdentity};
     use rustos_abi::{
@@ -106,7 +108,9 @@ mod program {
     /// keystrokes come from fd 0 one byte at a time — the console stream
     /// backing parks the task until input arrives (never a busy poll), so
     /// a zero-length read means the stream failed or closed and the view
-    /// fails closed on it.
+    /// fails closed on it. The timed read parks with the `stream_read`
+    /// timeout and reports an elapsed bound as an empty read (the view's
+    /// refresh tick), keeping a genuine failure a distinct channel error.
     struct RtTty;
 
     impl Tty for RtTty {
@@ -124,6 +128,22 @@ mod program {
                 return Err(CursesError::Io);
             }
             Ok(alloc::vec![byte[0]])
+        }
+
+        fn read_timeout(&mut self, timeout: Duration) -> rustos_curses::Result<Vec<u8>> {
+            let mut byte = [0u8; 1];
+            // A zero bound would wait indefinitely on this syscall; the
+            // shortest expressible bound preserves "return promptly".
+            let timeout_ns = u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX).max(1);
+            match rustos_rt::stdin_timeout(&mut byte, timeout_ns) {
+                Ok(read) if read > 0 => Ok(byte[..read].to_vec()),
+                // A successful zero-length read is the closed stream.
+                Ok(_) => Err(CursesError::Io),
+                // An elapsed bound is not an error: it is the view's
+                // refresh tick.
+                Err(code) if code == -i64::from(Errno::TimedOut.as_i32()) => Ok(Vec::new()),
+                Err(_) => Err(CursesError::Io),
+            }
         }
     }
 

@@ -382,12 +382,17 @@ pub const SYSCALLS: &[SyscallSpec] = &[
     SyscallSpec {
         number: SyscallNumber::STREAM_READ,
         name: "stream_read",
-        arg_count: 3,
+        arg_count: 4,
         args: [
             AbiType::U32,
             AbiType::UserPtr,
             AbiType::Len,
-            AbiType::Unit,
+            // `timeout_ns`: how long a read with no pending input may park,
+            // in nanoseconds. `0` waits indefinitely (the interactive
+            // default); a non-zero bound returns `-TimedOut` when it
+            // elapses with no input, so a full-screen program can refresh
+            // a clock or status figure without a busy poll.
+            AbiType::U64,
             AbiType::Unit,
             AbiType::Unit,
         ],

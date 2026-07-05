@@ -53,7 +53,7 @@ const HEAD: &[u8] = b"[input active";
 const COMPLETE: &[u8] = b"[input complete]";
 
 /// The most dots the animation shows before wrapping back to one.
-const MAX_DOTS: u8 = 3;
+pub const MAX_DOTS: u8 = 3;
 
 /// The active marker's rendered width for a given dot count: head + dots + `]`.
 const fn active_width(dots: u8) -> usize {
@@ -132,10 +132,18 @@ fn retarget(old_width: usize, new: &[u8]) -> Render {
 }
 
 /// The active marker for `dots`: `[input active` + dots + `]`.
-fn active_marker(dots: u8) -> Render {
+///
+/// This is the one definition of the marker's text. Byte-stream consoles
+/// consume it through [`SecretIndicator`], which also emits the rub-out
+/// bytes to redraw in place; a cell-composited screen (a curses view that
+/// repaints its field each keystroke) renders these bytes directly instead.
+/// `dots` outside `1..=`[`MAX_DOTS`] is clamped, so a caller-driven cycle
+/// can never draw a malformed marker.
+#[must_use]
+pub fn active_marker(dots: u8) -> Render {
     let mut marker = Render::empty();
     marker.push(HEAD);
-    marker.push_repeat(b'.', usize::from(dots));
+    marker.push_repeat(b'.', usize::from(dots.clamp(1, MAX_DOTS)));
     marker.push(b"]");
     marker
 }
@@ -361,7 +369,8 @@ fn redraw_dots(from: u8, to: u8) -> Render {
 #[cfg(test)]
 mod tests {
     use super::{
-        Render, SecretIndicator, SecretInput, MAX_DOTS, SECRET_ANIMATE_NS, SECRET_TICK_NS,
+        active_marker, Render, SecretIndicator, SecretInput, MAX_DOTS, SECRET_ANIMATE_NS,
+        SECRET_TICK_NS,
     };
 
     /// The rendered bytes as a `Vec` for readable assertions.
@@ -373,6 +382,19 @@ mod tests {
     fn hidden_until_the_first_character() {
         let indicator = SecretIndicator::new();
         assert_eq!(indicator.deadline_ns(), None);
+    }
+
+    #[test]
+    fn active_marker_renders_plain_text_and_clamps_the_dots() {
+        // The one marker definition a cell-composited consumer renders
+        // directly: fixed text, no control bytes.
+        assert_eq!(active_marker(1).bytes(), b"[input active.]");
+        assert_eq!(active_marker(2).bytes(), b"[input active..]");
+        assert_eq!(active_marker(3).bytes(), b"[input active...]");
+        // Out-of-range dot counts clamp rather than draw a malformed
+        // marker.
+        assert_eq!(active_marker(0).bytes(), b"[input active.]");
+        assert_eq!(active_marker(200).bytes(), b"[input active...]");
     }
 
     #[test]

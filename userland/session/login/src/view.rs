@@ -4,14 +4,16 @@
 //! page drawn through `lib/curses` that tells whoever is at the console
 //! *which system they are logging in to*. The layout is:
 //!
-//! * a top status bar — machine name, OS version/build, and the current
-//!   wall-clock time on the right;
-//! * a bordered login box in the middle of the screen carrying the
-//!   `Username:` prompt (which becomes the `Password:` prompt, unechoed);
+//! * a top status bar (white on blue) — machine name, OS version/build,
+//!   and the current wall-clock time on the right;
+//! * a cyan-bordered login box in the middle of the screen carrying the
+//!   `Username:` prompt (which becomes the `Password:` prompt — unechoed,
+//!   showing the shared `[input active...]` marker instead, exactly as
+//!   every hidden field does);
 //! * a running `N failed attempts` line in red beneath the box after any
 //!   rejected attempt, accumulating until a session launches;
-//! * a bottom status bar — memory in use, task count, logged-in users,
-//!   and the 1/5/15-minute load averages.
+//! * a bottom status bar (white on blue) — memory in use, task count,
+//!   logged-in users, and the 1/5/15-minute load averages.
 //!
 //! The machine identity and figures come through the injected
 //! [`StatusSource`] (on a running system: the `sysinfod` queries and the
@@ -21,10 +23,13 @@
 //! view and the login session carries on (a denied optional query is an
 //! answer, never a fatal error).
 //!
-//! **Refresh model.** The console stream read is blocking (there is no
-//! timed keyboard wait), so the clock and figures refresh at every
-//! interaction point: when a round begins, and before each field read.
-//! The clock renders to the minute, matching that cadence.
+//! **Refresh model.** The console read waits with a bound
+//! (`REFRESH_INTERVAL`): the kernel parks the reader until a keystroke
+//! arrives or the bound elapses (a one-shot deadline, never a poll), and
+//! each elapsed bound re-queries the [`StatusSource`] and repaints, so the
+//! clock and figures stay current while the prompt sits idle. A timed
+//! tick surfaces as an empty [`Screen::getch`]; a dead console surfaces
+//! as a channel error and fails the read closed, exactly as before.
 //!
 //! On [`session_handoff`](LoginView::session_handoff) the view leaves the
 //! alternate screen and restores the cooked input discipline, handing the
@@ -34,11 +39,13 @@ use alloc::format;
 use alloc::string::String;
 
 use core::cell::{Cell, RefCell};
+use core::time::Duration;
 
 use rustos_abi::sysinfo::LoadAverage;
 use rustos_abi::{Errno, Time64};
 use rustos_curses::{str_width, Event, InputMode, Pos, Screen, Size, Tty, Window};
-use rustos_vt::{Attributes, BasicColor, Color};
+use rustos_users::MAX_USERNAME_LEN;
+use rustos_vt::{secret, Attributes, BasicColor, Color};
 
 use crate::session::LoginView;
 
@@ -122,6 +129,46 @@ const BOX_ROWS: u16 = 5;
 const BOX_COLS: u16 = 46;
 /// The title on the box's top border.
 const TITLE: &str = " RustOS Login ";
+
+/// How long an idle field read waits before the status bars and clock are
+/// re-queried and repainted. The wait is a kernel park with a one-shot
+/// deadline (the `stream_read` timeout), never a poll, so an idle prompt
+/// costs one wake-up per interval and nothing else.
+const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Most characters a session-choice answer may carry — a validation bound
+/// well past the longest valid answer (`graphical`), refusing junk whole
+/// before it can run into the field's drawn width.
+const SESSION_CHOICE_MAX: usize = 16;
+
+/// The status bars' style: white on blue — a professional accent that
+/// keeps the reverse-video legibility on monochrome terminals (the
+/// emitter degrades colour to the terminal's capability).
+fn bar_attributes() -> Attributes {
+    Attributes {
+        foreground: Color::Basic(BasicColor::White),
+        background: Color::Basic(BasicColor::Blue),
+        reverse: true,
+        ..Attributes::default()
+    }
+}
+
+/// The login box's border and title style: cyan, the title bold.
+fn box_attributes(bold: bool) -> Attributes {
+    Attributes {
+        foreground: Color::Basic(BasicColor::Cyan),
+        bold,
+        ..Attributes::default()
+    }
+}
+
+/// The field prompt's style: bold, in the default foreground.
+fn label_attributes() -> Attributes {
+    Attributes {
+        bold: true,
+        ..Attributes::default()
+    }
+}
 
 /// Render `t` as a minute-granular clock line, `YYYY-MM-DD HH:MM` (UTC).
 fn format_clock(t: Time64) -> String {
@@ -223,6 +270,25 @@ fn pad_between(left: &str, right: &str, cols: usize) -> String {
     out
 }
 
+/// The trailing slice of `shown` that fits in `cols` columns, so a full
+/// field keeps the cursor end of the text visible and the echo can never
+/// wrap onto the box's border or a second line (the field is one line by
+/// design; the input bounds refuse an over-long line before it gets here,
+/// this is the drawing guarantee).
+fn fit_tail(shown: &str, cols: usize) -> &str {
+    let mut tail = shown;
+    let mut width = str_width(tail);
+    while width > cols {
+        let mut chars = tail.chars();
+        let Some(dropped) = chars.next() else {
+            break;
+        };
+        width -= rustos_curses::char_width(dropped) as usize;
+        tail = chars.as_str();
+    }
+    tail
+}
+
 /// The failed-attempts line, or `None` while no attempt has failed.
 fn failure_line(failures: u32) -> Option<String> {
     match failures {
@@ -265,6 +331,12 @@ impl<T: Tty, S: StatusSource, M: ConsoleMode> CursesView<T, S, M> {
         BOX_COLS.min(size.cols.saturating_sub(2)).max(20)
     }
 
+    /// Columns available to the echoed field text between the end of
+    /// `label` and the box's right border.
+    fn field_cols(size: Size, label: &str) -> usize {
+        (Self::box_cols(size) as usize).saturating_sub(3 + str_width(label))
+    }
+
     /// Draw the whole page: bars, box, prompt field, and failure line.
     ///
     /// `label` is the field prompt (`Username:` …), `shown` the text
@@ -279,11 +351,7 @@ impl<T: Tty, S: StatusSource, M: ConsoleMode> CursesView<T, S, M> {
         // The backdrop: status bars and the failure line.
         let mut page = Window::new(Pos::ORIGIN, size);
         page.erase();
-        let bar_attrs = Attributes {
-            reverse: true,
-            ..Attributes::default()
-        };
-        page.set_attributes(bar_attrs);
+        page.set_attributes(bar_attributes());
         let _ = page.move_add_str(Pos::new(0, 0), &top_line(&status, now, size.cols as usize));
         let _ = page.move_add_str(
             Pos::new(size.rows.saturating_sub(1), 0),
@@ -308,15 +376,19 @@ impl<T: Tty, S: StatusSource, M: ConsoleMode> CursesView<T, S, M> {
 
         // The bordered login box: its own window composited over the
         // backdrop, whose cursor (at the input point) becomes the screen
-        // cursor.
+        // cursor. Cyan border and bold-cyan title over the plain page.
         let box_cols = Self::box_cols(size);
         let mut frame = Window::new(origin, Size::new(BOX_ROWS, box_cols));
+        frame.set_attributes(box_attributes(false));
         frame.draw_box();
+        frame.set_attributes(box_attributes(true));
         let title_width = u16::try_from(str_width(TITLE)).unwrap_or(u16::MAX);
         let title_col = box_cols.saturating_sub(title_width) / 2;
         let _ = frame.move_add_str(Pos::new(0, title_col), TITLE);
+        frame.set_attributes(label_attributes());
         let _ = frame.move_add_str(Pos::new(2, 2), label);
-        frame.add_str(shown);
+        frame.set_attributes(Attributes::default());
+        frame.add_str(fit_tail(shown, Self::field_cols(size, label)));
 
         screen.wnoutrefresh(&page);
         screen.wnoutrefresh(&frame);
@@ -325,21 +397,47 @@ impl<T: Tty, S: StatusSource, M: ConsoleMode> CursesView<T, S, M> {
     }
 
     /// Read one field: draw `label`, collect keystrokes into `buf`
-    /// (echoed when `echo`, hidden otherwise), and return the filled
-    /// length on Enter.
+    /// (echoed when `echo`, otherwise hidden behind the shared
+    /// `[input active...]` marker), and return the filled length on
+    /// Enter.
     ///
-    /// `buf`'s capacity (`INPUT_LINE_MAX`) is a validation bound, not a
-    /// capacity: a line that would exceed it is refused whole with
-    /// [`Errno::LengthOutOfRange`] — never silently truncated — exactly
-    /// as the kernel read line discipline refuses one. Backspace removes
-    /// the last character. Any other special key is ignored.
-    fn read_field(&self, label: &str, echo: bool, buf: &mut [u8]) -> Result<usize, Errno> {
+    /// `max_chars` and `buf`'s capacity (`INPUT_LINE_MAX`) are validation
+    /// bounds, not capacities: a line that would exceed either is refused
+    /// whole with [`Errno::LengthOutOfRange`] — never silently truncated —
+    /// exactly as the kernel read line discipline refuses one. Backspace
+    /// removes the last character. Any other special key is ignored.
+    ///
+    /// A hidden field renders nothing of the secret; every accepted
+    /// keystroke advances the marker's dots instead (the one marker
+    /// definition in `rustos_vt::secret`), so the operator sees typing
+    /// progress without any hint of what — or how much — was typed
+    /// beyond the keystroke that just landed.
+    ///
+    /// An empty timed read (the [`REFRESH_INTERVAL`] tick) re-queries the
+    /// status source and repaints; a channel error is the dead console
+    /// and fails closed.
+    fn read_field(
+        &self,
+        label: &str,
+        echo: bool,
+        max_chars: usize,
+        buf: &mut [u8],
+    ) -> Result<usize, Errno> {
         self.refresh_status();
         let mut len = 0usize;
+        let mut chars = 0usize;
+        // Advanced before each render so the first keystroke shows one dot.
+        let mut dots: u8 = secret::MAX_DOTS;
         loop {
+            let marker;
             let shown = if echo {
                 // Only ever the bytes this loop wrote, which are UTF-8.
                 core::str::from_utf8(&buf[..len]).unwrap_or("")
+            } else if len > 0 {
+                marker = secret::active_marker(dots);
+                // The marker is fixed ASCII text from the shared
+                // definition; it carries nothing typed.
+                core::str::from_utf8(marker.bytes()).unwrap_or("")
             } else {
                 ""
             };
@@ -355,14 +453,19 @@ impl<T: Tty, S: StatusSource, M: ConsoleMode> CursesView<T, S, M> {
                         continue;
                     }
                     let width = ch.len_utf8();
-                    if len + width > buf.len() {
-                        // The buffer bound is a validation bound: an
-                        // over-long line is refused whole, never silently
-                        // truncated.
+                    if chars >= max_chars || len + width > buf.len() {
+                        // Both bounds are validation bounds: an over-long
+                        // line is refused whole, never silently truncated.
                         return Err(Errno::LengthOutOfRange);
                     }
                     ch.encode_utf8(&mut buf[len..len + width]);
                     len += width;
+                    chars += 1;
+                    dots = if dots == secret::MAX_DOTS {
+                        1
+                    } else {
+                        dots + 1
+                    };
                 }
                 Ok(Some(Event::Backspace)) => {
                     // Step back over the previous UTF-8 boundary.
@@ -372,14 +475,19 @@ impl<T: Tty, S: StatusSource, M: ConsoleMode> CursesView<T, S, M> {
                             break;
                         }
                     }
+                    chars = chars.saturating_sub(1);
                 }
                 // Arrows, function keys, pastes, mice: not part of a
                 // credential; ignored.
                 Ok(Some(_)) => {}
-                // A blocking read that yields nothing, or a failed
-                // channel: the console is gone. Fail closed, exactly as
-                // the line-discipline reader reports a closed stream.
-                Ok(None) | Err(_) => return Err(Errno::NotFound),
+                // The bounded wait elapsed with no keystroke: refresh the
+                // figures and repaint (the loop head redraws). Never a
+                // poll — the kernel parked the reader for the whole bound.
+                Ok(None) => self.refresh_status(),
+                // A failed channel: the console is gone. Fail closed,
+                // exactly as the line-discipline reader reports a closed
+                // stream.
+                Err(_) => return Err(Errno::NotFound),
             }
         }
     }
@@ -390,14 +498,16 @@ impl<T: Tty, S: StatusSource, M: ConsoleMode> LoginView for CursesView<T, S, M> 
         self.raw_active.set(self.mode.raw());
         self.refresh_status();
         let mut screen = self.screen.borrow_mut();
-        screen.set_input_mode(InputMode::Blocking);
+        screen.set_input_mode(InputMode::Timeout(REFRESH_INTERVAL));
         let _ = screen.enter_full_screen();
         drop(screen);
         self.draw("Username: ", "");
     }
 
     fn read_username(&self, buf: &mut [u8]) -> Result<usize, Errno> {
-        self.read_field("Username: ", true, buf)
+        // Bounded at the account format's own username maximum, which
+        // also keeps the echo inside the box's one-line field.
+        self.read_field("Username: ", true, MAX_USERNAME_LEN, buf)
     }
 
     fn read_password(&self, buf: &mut [u8]) -> Result<usize, Errno> {
@@ -406,11 +516,17 @@ impl<T: Tty, S: StatusSource, M: ConsoleMode> LoginView for CursesView<T, S, M> 
         if !self.raw_active.get() {
             return Err(Errno::PermissionDenied);
         }
-        self.read_field("Password: ", false, buf)
+        // Hidden, so only the buffer's own validation bound applies.
+        self.read_field("Password: ", false, usize::MAX, buf)
     }
 
     fn read_session_choice(&self, buf: &mut [u8]) -> Result<usize, Errno> {
-        self.read_field("Session [text]/[g]raphical: ", true, buf)
+        self.read_field(
+            "Session [text]/[g]raphical: ",
+            true,
+            SESSION_CHOICE_MAX,
+            buf,
+        )
     }
 
     fn note_failure(&self) {
@@ -431,8 +547,8 @@ impl<T: Tty, S: StatusSource, M: ConsoleMode> LoginView for CursesView<T, S, M> 
 #[cfg(test)]
 mod tests {
     use super::{
-        bottom_line, failure_line, format_clock, format_load, pad_between, top_line, ConsoleMode,
-        CursesView, LoginStatus, StatusSource,
+        bottom_line, failure_line, fit_tail, format_clock, format_load, pad_between, top_line,
+        ConsoleMode, CursesView, LoginStatus, StatusSource,
     };
     use crate::session::LoginView;
     use alloc::collections::VecDeque;
@@ -599,6 +715,15 @@ mod tests {
     }
 
     #[test]
+    fn fit_tail_keeps_the_trailing_columns() {
+        // A full field shows the cursor end of the text, never wrapping.
+        assert_eq!(fit_tail("abcdef", 4), "cdef");
+        assert_eq!(fit_tail("abc", 4), "abc");
+        assert_eq!(fit_tail("", 4), "");
+        assert_eq!(fit_tail("abc", 0), "");
+    }
+
+    #[test]
     fn failure_line_counts_in_english() {
         assert_eq!(failure_line(0), None);
         assert_eq!(failure_line(1).as_deref(), Some("1 failed attempt"));
@@ -617,6 +742,59 @@ mod tests {
         assert!(text.contains("Username:"), "{text}");
         assert!(text.contains("load 0.50 1.00 2.00"), "{text}");
         assert!(mode.raws.get() >= 1);
+        // The page is coloured, not monochrome: the bars carry the blue
+        // background (SGR 44) and the box border the cyan foreground
+        // (SGR 36).
+        assert!(text.contains(";44") || text.contains("[44"), "{text}");
+        assert!(text.contains(";36") || text.contains("[36"), "{text}");
+    }
+
+    /// A status source that counts how often the figures are re-queried.
+    struct CountingSource(alloc::rc::Rc<Cell<u32>>);
+
+    impl StatusSource for CountingSource {
+        fn status(&self) -> LoginStatus {
+            self.0.set(self.0.get() + 1);
+            LoginStatus::default()
+        }
+        fn now(&self) -> Option<Time64> {
+            None
+        }
+    }
+
+    #[test]
+    fn an_idle_tick_requeries_the_status_figures() {
+        // An empty timed read (the refresh tick) re-queries the source and
+        // repaints; the following Enter ends the read. The queries: one at
+        // `round_begin`, one entering the field read, one per tick.
+        let written = alloc::rc::Rc::new(RefCell::new(Vec::new()));
+        let tty = ScriptTty {
+            input: RefCell::new([b"".to_vec(), b"\r".to_vec()].into_iter().collect()),
+            written,
+        };
+        let screen = Screen::new(tty, TermType::Xterm256Color, Size::new(24, 80));
+        let calls = alloc::rc::Rc::new(Cell::new(0));
+        let view = CursesView::new(
+            screen,
+            CountingSource(calls.clone()),
+            alloc::rc::Rc::new(RecordingMode::default()),
+        );
+        view.round_begin();
+        let mut buf = [0u8; 16];
+        assert_eq!(view.read_username(&mut buf), Ok(0));
+        assert_eq!(calls.get(), 3);
+    }
+
+    #[test]
+    fn a_username_beyond_the_account_bound_is_refused_whole() {
+        // 33 characters exceed the account format's 32-character maximum
+        // even though the buffer could hold them: refused whole, exactly
+        // like the buffer bound, so the field can never overflow its
+        // one-line box.
+        let long = [b'a'; 33];
+        let (view, _written, _mode) = view_with(&[&long, b"\r"]);
+        let mut buf = [0u8; 64];
+        assert_eq!(view.read_username(&mut buf), Err(Errno::LengthOutOfRange));
     }
 
     #[test]
@@ -674,6 +852,10 @@ mod tests {
         // The diff repaints only the changed cells, so the shared trailing
         // colon may be kept from the username prompt.
         assert!(text.contains("Password"), "{text}");
+        // The shared activity marker shows in place of the secret, so the
+        // operator sees the keystrokes landing (the diff renderer may
+        // split it into cursor-jump runs, so each word is asserted alone).
+        assert!(text.contains("[input") && text.contains("active"), "{text}");
     }
 
     #[test]

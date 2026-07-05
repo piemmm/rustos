@@ -28,7 +28,7 @@ use rustos_abi::sysinfo::{
 };
 use rustos_abi::{Duration64, Errno, LimitKind, ProcId, Time64};
 use rustos_kernel_mem::PAGE_SIZE;
-use rustos_kernel_sched_api::{SchedulerPolicy, TaskState};
+use rustos_kernel_sched_api::{SchedulerPolicy, TaskId, TaskState};
 use rustos_kernel_sec::TaskId as SecTaskId;
 
 use crate::bootinfo::KernelArch;
@@ -63,6 +63,21 @@ const fn version_component(s: &str) -> u16 {
 const OS_VERSION_MAJOR: u16 = version_component(env!("CARGO_PKG_VERSION_MAJOR"));
 const OS_VERSION_MINOR: u16 = version_component(env!("CARGO_PKG_VERSION_MINOR"));
 const OS_VERSION_PATCH: u16 = version_component(env!("CARGO_PKG_VERSION_PATCH"));
+
+/// Whether `task` in `state` counts toward the runnable census `observer`
+/// is taking.
+///
+/// A task counts when it is ready or running — except the observer itself.
+/// The census is read inside the observing broker's own
+/// `sysinfo_introspect` syscall, so the observer is always `Running` at
+/// the sample *because of* the observation, never because the system has
+/// work; counting it would floor every sample at one runnable task and
+/// drive an idle machine's damped averages toward the size of the
+/// query-wake burst instead of zero (the measurement perturbing the
+/// measured quantity). Every *other* awake task is real load and counts.
+fn counts_toward_load(state: TaskState, task: TaskId, observer: Option<TaskId>) -> bool {
+    matches!(state, TaskState::Ready | TaskState::Running) && Some(task) != observer
+}
 
 /// The unprovisioned machine-id sentinel: all zero, meaning "no per-install
 /// identity has been generated yet".
@@ -261,6 +276,13 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
         // censuses: runnable (ready or running), live tasks, and the
         // distinct non-system uids with at least one live task — the
         // logged-in-user count.
+        //
+        // The observer is excluded from the runnable census — see
+        // [`counts_toward_load`] for why.
+        let observer = self
+            .state
+            .scheduler
+            .current_task(SchedulerArch::current_cpu(&*self.state.arch));
         let mut runnable: u32 = 0;
         let mut total: u32 = 0;
         let mut uids: Vec<u32> = Vec::new();
@@ -272,7 +294,7 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
                     continue;
                 }
                 total = total.saturating_add(1);
-                if matches!(state, TaskState::Ready | TaskState::Running) {
+                if counts_toward_load(state, record.task().0, observer) {
                     runnable = runnable.saturating_add(1);
                 }
                 let uid = record.owner().0;
@@ -317,5 +339,37 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
             out.extend_from_slice(&record.to_le_bytes());
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::counts_toward_load;
+    use rustos_kernel_sched_api::TaskState;
+
+    #[test]
+    fn ready_and_running_tasks_count_toward_load() {
+        for state in [TaskState::Ready, TaskState::Running] {
+            assert!(counts_toward_load(state, 7, None));
+            assert!(counts_toward_load(state, 7, Some(9)));
+        }
+    }
+
+    #[test]
+    fn parked_and_exited_tasks_never_count() {
+        for state in [TaskState::Parked, TaskState::Exited] {
+            assert!(!counts_toward_load(state, 7, None));
+            assert!(!counts_toward_load(state, 7, Some(7)));
+        }
+    }
+
+    #[test]
+    fn the_observer_never_counts_itself() {
+        // The regression this pins: the broker reading the census is
+        // always `Running` inside its own syscall, so counting it floored
+        // every sample at one runnable task and an idle machine's load
+        // crept toward the query burst's size instead of zero.
+        assert!(!counts_toward_load(TaskState::Running, 7, Some(7)));
+        assert!(!counts_toward_load(TaskState::Ready, 7, Some(7)));
     }
 }

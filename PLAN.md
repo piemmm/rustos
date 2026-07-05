@@ -2323,10 +2323,17 @@ reflink independence, acorn preset round-trip).
   hostname/OS-version/clock, centred bordered login box, red running
   failed-attempt count, bottom bar with memory/tasks/users/load figures
   from `sysinfod` (`LOAD_AVERAGE` — the kernel `LoadTracker` tickless
-  EWMA over the `IntrospectDomain::LoadAverage` primitive — plus
-  `SYSTEM_IDENTITY` and the `CAP_SYSINFO_KERNEL`-gated memory stats); a
-  refused figure renders `--` and never blocks a login, and a raw-mode
-  failure refuses the password read (never echo a credential).
+  EWMA over the `IntrospectDomain::LoadAverage` primitive, whose runnable
+  census excludes the observing broker's own task so an idle machine reads
+  ~0.00 — plus `SYSTEM_IDENTITY` and the `CAP_SYSINFO_KERNEL`-gated memory
+  stats); a refused figure renders `--` and never blocks a login, and a
+  raw-mode failure refuses the password read (never echo a credential).
+  The bars and clock refresh every 5 s through the `stream_read`
+  `timeout_ns` bound (a one-shot kernel park, never a poll); the username
+  field is bounded at `rustos_users::MAX_USERNAME_LEN` (32, refused whole
+  beyond it) so it cannot overflow its one-line box; and every hidden
+  field renders the shared `rustos_vt::secret` `[input active...]` marker,
+  its dots advancing per keystroke.
 - Core CLI utilities (`ls`, `cp`, `mv`, `rm`, `cat`, `ps`, `mount`,
   `chmod`, `chown`, `useradd`, `groupadd`, `setcap`, `getcap`,
   `sysinfo`). Each utility is its own small crate under `userland/apps/`.

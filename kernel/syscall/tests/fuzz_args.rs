@@ -154,6 +154,7 @@ impl SyscallHandlers for AcceptingHandlers {
         _fd: u32,
         _buf: u64,
         _len: usize,
+        _timeout_ns: u64,
     ) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)

@@ -2194,6 +2194,7 @@ where
         fd: u32,
         buf: u64,
         len: usize,
+        timeout_ns: u64,
     ) -> SyscallResult {
         // Resolve `fd` against the caller's per-process descriptor table
         // *before* touching any state: an `fd`
@@ -2228,9 +2229,16 @@ where
 
         // Read from the descriptor's console input source into the
         // kernel staging buffer first. A faulting device surfaces its
-        // `Errno` here before any user memory is touched.
+        // `Errno` here before any user memory is touched. A zero
+        // `timeout_ns` waits indefinitely (the interactive default); a
+        // non-zero bound parks at most that long and surfaces the
+        // backing's `TimedOut` when it elapses with no input.
         let mut payload = alloc::vec![0u8; take];
-        let read = device.read.read(&mut payload)?;
+        let read = if timeout_ns == 0 {
+            device.read.read(&mut payload)?
+        } else {
+            device.read.read_timeout(&mut payload, timeout_ns)?
+        };
         // A correct device never reports more than the buffer it was
         // handed; clamp defensively so a buggy source cannot drive an
         // out-of-bounds copy (validate every input,
@@ -7830,7 +7838,7 @@ mod tests {
             .set_streams(SecTaskId(2), DescriptorTable::standard());
 
         assert_eq!(
-            h.stream_read(&ctx, STDIN, 0x1000, 64),
+            h.stream_read(&ctx, STDIN, 0x1000, 64, 0),
             Ok(line.len() as u64)
         );
         // The bytes landed at the caller's pointer.
@@ -7877,7 +7885,7 @@ mod tests {
             .write()
             .set_streams(SecTaskId(2), DescriptorTable::standard());
         assert_eq!(
-            h.stream_read(&ctx, STDIN, 0x1000, 8),
+            h.stream_read(&ctx, STDIN, 0x1000, 8, 0),
             Err(Errno::NotImplemented)
         );
     }
@@ -7917,7 +7925,7 @@ mod tests {
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
         .with_consoles(single_read_console(console));
-        assert_eq!(h.stream_read(&ctx, STDIN, 0x1000, 0), Ok(0));
+        assert_eq!(h.stream_read(&ctx, STDIN, 0x1000, 0, 0), Ok(0));
         // The device was never read.
         assert_eq!(*console.last_buf_len.lock(), None);
 
@@ -7927,7 +7935,7 @@ mod tests {
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
         assert_eq!(
-            bare.stream_read(&ctx, STDIN, 0x1000, 0),
+            bare.stream_read(&ctx, STDIN, 0x1000, 0, 0),
             Err(Errno::NotImplemented)
         );
     }
@@ -7967,7 +7975,7 @@ mod tests {
         aspaces
             .write()
             .set_streams(SecTaskId(2), DescriptorTable::standard());
-        assert_eq!(h.stream_read(&ctx, STDIN, 0x1000, 8), Ok(0));
+        assert_eq!(h.stream_read(&ctx, STDIN, 0x1000, 8, 0), Ok(0));
     }
 
     /// A `len` above `CONSOLE_READ_MAX` hands the device a bounded buffer
@@ -8013,7 +8021,7 @@ mod tests {
         aspaces
             .write()
             .set_streams(SecTaskId(2), DescriptorTable::standard());
-        let r = h.stream_read(&ctx, STDIN, 0x1000, CONSOLE_READ_MAX + 100);
+        let r = h.stream_read(&ctx, STDIN, 0x1000, CONSOLE_READ_MAX + 100, 0);
         assert_eq!(r, Ok(CONSOLE_READ_MAX as u64));
         // The device was handed exactly the capped buffer, never the
         // caller's oversized request.
@@ -8051,7 +8059,7 @@ mod tests {
             .write()
             .set_streams(SecTaskId(2), DescriptorTable::standard());
         assert_eq!(
-            h.stream_read(&ctx, STDIN, 0x1000, 4),
+            h.stream_read(&ctx, STDIN, 0x1000, 4, 0),
             Err(Errno::BadAddress)
         );
     }
@@ -8182,7 +8190,10 @@ mod tests {
         )
         .with_consoles(single_read_console(console));
         // `STDOUT` is write-only here, so a read of it is refused.
-        assert_eq!(h.stream_read(&ctx, STDOUT, 0x1000, 4), Err(Errno::NotFound));
+        assert_eq!(
+            h.stream_read(&ctx, STDOUT, 0x1000, 4, 0),
+            Err(Errno::NotFound)
+        );
         // The device was never read.
         assert_eq!(*console.last_buf_len.lock(), None);
     }
@@ -8215,7 +8226,10 @@ mod tests {
             h.stream_write(&ctx, STDOUT, 0x1000, 4),
             Err(Errno::NotFound)
         );
-        assert_eq!(h.stream_read(&ctx, STDIN, 0x1000, 4), Err(Errno::NotFound));
+        assert_eq!(
+            h.stream_read(&ctx, STDIN, 0x1000, 4, 0),
+            Err(Errno::NotFound)
+        );
     }
 
     /// A live frame allocator over 64 usable frames — enough to pass the
@@ -10158,7 +10172,7 @@ mod tests {
             .write()
             .set_streams(SecTaskId(2), DescriptorTable::standard_on(1));
 
-        assert_eq!(h.stream_read(&ctx, STDIN, 0x1000, 16), Ok(5));
+        assert_eq!(h.stream_read(&ctx, STDIN, 0x1000, 16, 0), Ok(5));
         // The UART console's input was drained; the video console's
         // keyboard source was never touched.
         assert!(uart_rx.last_buf_len.lock().is_some());
@@ -10205,7 +10219,7 @@ mod tests {
             .write()
             .set_streams(SecTaskId(2), DescriptorTable::standard());
 
-        assert_eq!(h.stream_read(&ctx, STDIN, 0x1000, 16), Ok(3));
+        assert_eq!(h.stream_read(&ctx, STDIN, 0x1000, 16, 0), Ok(3));
         // The consumed bytes were echoed back, with the CR rendered as
         // CR-LF.
         assert_eq!(echo.written.lock().as_slice(), b"hi\r\n");
@@ -10256,7 +10270,7 @@ mod tests {
             h.stream_input_mode(&ctx, STDIN, InputMode::Secret.as_u32()),
             Ok(0)
         );
-        assert_eq!(h.stream_read(&ctx, STDIN, 0x1000, 16), Ok(6));
+        assert_eq!(h.stream_read(&ctx, STDIN, 0x1000, 16, 0), Ok(6));
         assert!(echo.written.lock().is_empty());
 
         // The raw discipline suppresses echo the same way (a full-screen
@@ -10265,7 +10279,7 @@ mod tests {
             h.stream_input_mode(&ctx, STDIN, InputMode::Raw.as_u32()),
             Ok(0)
         );
-        assert_eq!(h.stream_read(&ctx, STDIN, 0x1000, 16), Ok(6));
+        assert_eq!(h.stream_read(&ctx, STDIN, 0x1000, 16, 0), Ok(6));
         assert!(echo.written.lock().is_empty());
 
         // The reserved `0` and unknown discriminants fail closed before

@@ -149,6 +149,28 @@ pub trait ConsoleRead {
     /// default source ([`NullConsoleRead`]) returns
     /// [`Errno::NotImplemented`] to mark an inert interface.
     fn read(&self, buf: &mut [u8]) -> Result<usize, Errno>;
+
+    /// Read available console input into `buf`, waiting at most
+    /// `timeout_ns` nanoseconds for input to arrive.
+    ///
+    /// Backs the `stream_read` syscall's non-zero `timeout_ns` argument: a
+    /// full-screen program refreshing a clock or status figure waits on the
+    /// console with a bound instead of a busy poll. Only a backing that can
+    /// park honours the bound — [`BlockingConsoleRead`] parks the caller on
+    /// the console wait queue with a one-shot deadline and reports
+    /// [`Errno::TimedOut`] when it elapses with no input. The default
+    /// delegates to [`ConsoleRead::read`]: a non-blocking device never
+    /// waits at all, so it trivially honours any bound by returning the
+    /// pending bytes (possibly zero) immediately.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::TimedOut`] when a parking backing's bound elapses with no
+    /// input; otherwise exactly as [`ConsoleRead::read`].
+    fn read_timeout(&self, buf: &mut [u8], timeout_ns: u64) -> Result<usize, Errno> {
+        let _ = timeout_ns;
+        self.read(buf)
+    }
 }
 
 /// The console input source installed before any real device exists.
@@ -968,11 +990,15 @@ where
     }
 }
 
-impl<A> ConsoleRead for BlockingConsoleRead<A>
+impl<A> BlockingConsoleRead<A>
 where
     A: SchedulerArch + Send + Sync + 'static,
 {
-    fn read(&self, buf: &mut [u8]) -> Result<usize, Errno> {
+    /// The shared poll-and-park core behind [`ConsoleRead::read`] and
+    /// [`ConsoleRead::read_timeout`]: block until the inner device yields
+    /// bytes, fails, or — when `limit_ns` is `Some` — the caller's absolute
+    /// deadline passes with no input ([`Errno::TimedOut`]).
+    fn read_until(&self, buf: &mut [u8], limit_ns: Option<u64>) -> Result<usize, Errno> {
         // A zero-length destination can never receive a byte; report the
         // empty read instead of parking a caller no input could ever wake
         // (the handler already screens this, defence in
@@ -988,14 +1014,16 @@ where
         // closed rather than busy-spinning, since it cannot park, exactly as the process-wait producer does.
         let parkable: Option<_> = crate::waitq::wait_arch().and_then(|hook| hook.current_task(cpu));
         loop {
-            // The secret feedback's one-shot animation deadline, when a
-            // secret read is armed and its marker is shown. `None` the
-            // rest of the time, so an ordinary read parks with no deadline
-            // and takes no timer wake-ups at all (tickless).
+            // The nearest one-shot wake this wait needs: the secret
+            // feedback's animation frame (armed only while a password
+            // marker is on screen) and/or the caller's own read deadline.
+            // An ordinary unbounded read has neither, parks with no
+            // deadline, and takes no timer wake-ups at all (tickless).
             let deadline = self
                 .secret
                 .and_then(SecretFeedback::deadline_ns)
-                .unwrap_or(crate::waitq::NO_DEADLINE);
+                .unwrap_or(crate::waitq::NO_DEADLINE)
+                .min(limit_ns.unwrap_or(crate::waitq::NO_DEADLINE));
             // Register **before** polling so a push arriving in the window
             // between the empty poll and the park is not lost: the producer's
             // [`crate::waitq::console_wake`] then `unpark`s this task and the
@@ -1036,6 +1064,18 @@ where
                 }
                 return Ok(read);
             }
+            // The caller's bound elapsed with no input: report the timeout
+            // rather than parking again. Checked only against the wait
+            // clock the deadline was computed from; a build with no such
+            // clock has no parkable caller and fails closed below instead.
+            if let Some(limit) = limit_ns {
+                if crate::waitq::wait_now_ns().unwrap_or(0) >= limit {
+                    if let Some(task) = parkable {
+                        crate::waitq::console_deregister(task, deadline);
+                    }
+                    return Err(Errno::TimedOut);
+                }
+            }
             // Empty poll: **park** the caller off the run queue until input
             // arrives (never a busy-yield). A re-enqueuing
             // yield here would loop in EL1 with IRQs masked, so the dispatch
@@ -1047,10 +1087,10 @@ where
             // The wait is **event-driven**: a [`crate::waitq::console_wake`]
             // from a keyboard- or UART-backed console's input push unparks
             // the reader the instant a byte lands. There is no timed re-poll
-            // of the *device*; the only finite deadline ever registered here
-            // is the secret feedback's animation tick above, armed solely
-            // while a password marker is on screen (a bounded, user-driven
-            // window), so an ordinary read still arms no one-shot at all.
+            // of the *device*; the only finite deadlines ever registered
+            // here are the secret feedback's animation tick and the
+            // caller's own read bound, so an ordinary unbounded read still
+            // arms no one-shot at all.
             //
             // With no waker hook there is no scheduler to park on, so fail
             // closed rather than busy-spin.
@@ -1087,6 +1127,25 @@ where
             // between this `deregister` and the next `register` is not lost —
             // the immediate re-poll drains it before any further park.
         }
+    }
+}
+
+impl<A> ConsoleRead for BlockingConsoleRead<A>
+where
+    A: SchedulerArch + Send + Sync + 'static,
+{
+    fn read(&self, buf: &mut [u8]) -> Result<usize, Errno> {
+        self.read_until(buf, None)
+    }
+
+    fn read_timeout(&self, buf: &mut [u8], timeout_ns: u64) -> Result<usize, Errno> {
+        // The absolute deadline on the same monotonic clock the park's
+        // one-shot is armed against, saturating so a hostile bound can
+        // never wrap below `now`. With no wait clock installed there is
+        // no scheduler to park on either; the unbounded core then fails
+        // closed on an empty poll exactly as `read` does.
+        let limit = crate::waitq::wait_now_ns().map(|now| now.saturating_add(timeout_ns));
+        self.read_until(buf, limit)
     }
 }
 
@@ -1192,6 +1251,55 @@ mod tests {
         // adapter reports the empty read without polling or parking.
         assert_eq!(blocking.read(&mut []), Ok(0));
         assert_eq!(INNER.polls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn timed_read_returns_pending_bytes_without_parking() {
+        static INNER: ScriptedRead = ScriptedRead::with_bytes(b"hi");
+        let blocking = BlockingConsoleRead::new(leaked_arch(), &INNER, None);
+        let mut buf = [0u8; 8];
+        assert_eq!(blocking.read_timeout(&mut buf, 1_000), Ok(2));
+        assert_eq!(&buf[..2], b"hi");
+        assert_eq!(INNER.polls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn timed_read_fails_closed_when_caller_cannot_park() {
+        // With no wait clock or scheduler hook installed there is nothing
+        // to park on and no deadline to honour: the bounded read fails
+        // closed exactly as the unbounded one, never busy-spinning until
+        // the bound elapses.
+        static INNER: ScriptedRead = ScriptedRead::with_bytes(&[]);
+        let blocking = BlockingConsoleRead::new(leaked_arch(), &INNER, None);
+        let mut buf = [0u8; 8];
+        assert_eq!(
+            blocking.read_timeout(&mut buf, 1_000),
+            Err(Errno::NotImplemented)
+        );
+        assert_eq!(INNER.polls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn timed_read_propagates_inner_errors() {
+        static INNER: ScriptedRead = ScriptedRead::with_error(Errno::PermissionDenied);
+        let blocking = BlockingConsoleRead::new(leaked_arch(), &INNER, None);
+        let mut buf = [0u8; 8];
+        assert_eq!(
+            blocking.read_timeout(&mut buf, 1_000),
+            Err(Errno::PermissionDenied)
+        );
+    }
+
+    #[test]
+    fn default_timed_read_delegates_to_the_plain_read() {
+        // A non-blocking source never waits, so it honours any bound by
+        // answering immediately with whatever is pending.
+        let queue = ConsoleInputQueue::new();
+        assert_eq!(queue.push(b"ab"), Ok(2));
+        let mut buf = [0u8; 8];
+        assert_eq!(queue.read_timeout(&mut buf, 1), Ok(2));
+        assert_eq!(&buf[..2], b"ab");
+        assert_eq!(queue.read_timeout(&mut buf, 1), Ok(0));
     }
 
     #[test]

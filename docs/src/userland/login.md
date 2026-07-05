@@ -118,23 +118,32 @@ supervises (`plans/PI.md` P11). It wires the real seams:
   over the inherited standard streams (`AGENTS.md` §20): rendered bytes
   to fd 1, keystrokes from fd 0, drawn through the one `lib/curses`
   screen model (`AGENTS.md` §2.2). The page shows whoever is at the
-  console *which system they are logging in to*: a top bar with the
-  machine name, OS version, and the wall-clock time; the bordered
-  `RustOS Login` box in the middle carrying the `Username:` prompt
-  (which becomes `Password:`); a red, running `N failed attempts` line
-  beneath the box that accumulates until a session launches; and a
-  bottom bar with the memory in use, task count, logged-in users, and
-  the 1/5/15-minute load averages — queried live from `sysinfod`
-  (`SYSTEM_IDENTITY`, `KERNEL_MEMORY_STATS` under login's
+  console *which system they are logging in to*: a white-on-blue top bar
+  with the machine name, OS version, and the wall-clock time; the
+  cyan-bordered `RustOS Login` box in the middle carrying the `Username:`
+  prompt (which becomes `Password:`); a red, running `N failed attempts`
+  line beneath the box that accumulates until a session launches; and a
+  white-on-blue bottom bar with the memory in use, task count, logged-in
+  users, and the 1/5/15-minute load averages — queried live from
+  `sysinfod` (`SYSTEM_IDENTITY`, `KERNEL_MEMORY_STATS` under login's
   `CAP_SYSINFO_KERNEL`, and the ungated `LOAD_AVERAGE`) and the kernel
   wall clock. A refused or unavailable figure renders as a `--`
-  placeholder and never blocks a login (`AGENTS.md` §2.24). The view
-  selects the raw (echo-off) discipline with `stream_input_mode`
+  placeholder and never blocks a login (`AGENTS.md` §2.24). While the
+  prompt sits idle the bars refresh every five seconds: the field read
+  waits with the `stream_read` timeout — a kernel park with a one-shot
+  deadline, never a poll — and each elapsed bound re-queries the figures
+  and repaints (`AGENTS.md` §2.23, §17.1 tickless). The view selects the
+  raw (echo-off) discipline with `stream_input_mode`
   (`rustos_rt::set_input_mode`) for the whole page: it echoes the
-  username into the box itself, renders nothing for the password, and
-  **refuses** the password read outright if raw mode cannot be selected
-  (a credential must never be rendered, `AGENTS.md` §5.4). On session
-  launch it leaves the alternate screen and restores the cooked
+  username into the box itself (bounded at the account format's
+  `MAX_USERNAME_LEN`, 32, so the field can never overflow its one-line
+  box — an over-long line is refused whole, never truncated), renders
+  the shared `[input active...]` marker (`rustos_vt::secret`) in place of
+  every hidden field's text — its dots advance with each keystroke, so
+  the operator sees typing progress while nothing of the secret shows —
+  and **refuses** the password read outright if raw mode cannot be
+  selected (a credential must never be rendered, `AGENTS.md` §5.4). On
+  session launch it leaves the alternate screen and restores the cooked
   discipline; the next round re-enters it.
 - **`UsersAuthenticator`** over the database obtained through the
   capability-gated `users_db_read` syscall (`CAP_USERS_READ`, see
