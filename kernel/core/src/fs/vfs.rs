@@ -502,8 +502,9 @@ impl Vfs {
     ///
     /// Both paths must be covered by the same writable driver-backed mount;
     /// a rename that would cross mounts is refused with
-    /// [`VfsError::InvalidPath`] (it cannot preserve the node's identity
-    /// across two independent backings).
+    /// [`VfsError::CrossVolume`] (it cannot preserve the node's identity
+    /// across two independent backings), the dedicated refusal a mover
+    /// falls back to copy-then-remove on.
     fn delegate_rename_context(
         &self,
         cred: &Credentials<'_>,
@@ -519,7 +520,7 @@ impl Vfs {
             return Err(VfsError::ReadOnly);
         }
         if src_mount.path() != dst_mount.path() {
-            return Err(VfsError::InvalidPath);
+            return Err(VfsError::CrossVolume);
         }
         let mount_depth = src_mount.path().depth();
         let mount_path = src_mount.path().clone();

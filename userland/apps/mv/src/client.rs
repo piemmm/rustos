@@ -6,6 +6,8 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use rustos_help::{own_short_help, HelpSource};
+
 use crate::command::{Clobber, Command, Options, TargetMode};
 use crate::error::MvError;
 use crate::io::{Entry, EntryKind, FileSystem, Output, Prompt, RenameOutcome};
@@ -15,7 +17,8 @@ use crate::io::{Entry, EntryKind, FileSystem, Output, Prompt, RenameOutcome};
 /// share one streaming granularity.
 const READ_CHUNK: usize = 4096;
 
-/// The usage banner printed by [`Command::Help`].
+/// The usage banner a usage error is reported with, and the fallback the
+/// short-help switches print when `mv`'s own Help tree is unavailable.
 pub const USAGE: &str = "\
 usage: mv [-finvT] [-t dir] [--] source... dest
 
@@ -27,7 +30,7 @@ usage: mv [-finvT] [-t dir] [--] source... dest
   -t dir, --target-directory=dir
                              move every source into dir
   -T, --no-target-directory  treat dest as a normal file (one source)
-  -h, --help                 show this message
+  -h, -?, --help             show this message
 
 With one source and a non-directory dest, the source is moved to dest. When
 dest is an existing directory (always, with more than one source) each source
@@ -35,7 +38,13 @@ is moved into it under its base name. `--` ends option parsing: every later
 argument is a path.
 ";
 
-/// Run one [`Command`], moving its sources through `fs`.
+/// `mv`'s own command word: the short-help switches render its own Help
+/// document through the same engine as any other command's.
+const OWN_WORD: &str = "mv";
+
+/// Run one [`Command`], moving its sources through `fs`. `locale` is the
+/// user's `LANG` preference, if set; `help` is the tool's own `Help/` tree,
+/// read by the short-help switches.
 ///
 /// Each source is renamed onto its destination; a rename that would cross a
 /// filesystem boundary falls back to a copy followed by removal of the source.
@@ -66,18 +75,35 @@ argument is a path.
 ///   failed.
 pub fn run(
     command: Command,
+    locale: Option<&str>,
     fs: &dyn FileSystem,
     prompt: &dyn Prompt,
+    help: &dyn HelpSource,
     out: &dyn Output,
 ) -> Result<(), MvError> {
     match command {
-        Command::Help => out.write_all(USAGE.as_bytes()).map_err(MvError::Output),
+        Command::Help => short_help(locale, help, out),
         Command::Move {
             options,
             sources,
             dest,
         } => move_all(&sources, &dest, options, fs, prompt, out),
     }
+}
+
+/// Render `mv`'s own short help (`NAME` + `SYNOPSIS` + compact `OPTIONS`)
+/// from its own Help tree through the one shared engine; when no document
+/// can be served (a build without the bundle's documents) the usage banner
+/// stands in — the tool's own text, not fabricated help content — so `-h`
+/// never fails.
+fn short_help(
+    locale: Option<&str>,
+    help: &dyn HelpSource,
+    out: &dyn Output,
+) -> Result<(), MvError> {
+    let bytes =
+        own_short_help(help, locale, OWN_WORD).unwrap_or_else(|| String::from(USAGE).into_bytes());
+    out.write_all(&bytes).map_err(MvError::Output)
 }
 
 /// Move every source to `dest`, deciding per source whether the destination is

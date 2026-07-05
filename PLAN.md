@@ -3613,7 +3613,25 @@ structural bounds, `default/` presence, required-locale completeness
 cross-locale `OPTIONS` switch-key drift, the content-policy word screen,
 and per-command coverage over the `AppInfo.toml` discovery walk.
 
-**Remaining** (staged in `plans/APPS.md` §13): `Help/` trees for future
+The `plans/APPS.md` §12.1 Stage B registrations are under way: `cp`, `mv`,
+and `rm` are full self-contained store bundles (Run host with the
+stderr+stdin `y`/`Y` prompt seam, `AppInfo.toml` requesting the console
+pair + `CAP_FS_ACCESS`, six-locale `Help/` trees with switch-drift pins,
+`-h`/`-?`/`--help` over the shared `own_short_help`/`BundleHelp` render).
+They are store-only — the §18.6 boot floor never grows, so the kernel
+inventory drift test pins their `AppInfo.toml` directly and no
+`spawn_layout`/`spawn_paths` row exists for them. Landing `mv` added the
+missing `EXDEV` equivalent in place: the dedicated `Errno::CrossVolume` /
+`VfsError::CrossVolume` a cross-mount `fs_rename` is refused with
+(regression-tested in `kernel/core`'s delegate tests; C header
+regenerated), so `mv`'s copy-then-remove fallback triggers on exactly
+that condition and no other.
+
+**Remaining** (staged in `plans/APPS.md` §13): the Stage B remainder
+(`chmod`/`chown`/`getcap`/`setcap`/`mount` blocked on their kernel
+syscalls — fs mode/owner set, per-inode capability get/set, mount — each
+registers in the change that lands its syscall; `useradd`/`groupadd`
+next over the existing `users_admin`); `Help/` trees for future
 command apps as each becomes a registered store bundle; and wider `stdinfo`
 adoption in command apps as future behaviour warrants it (advisory-only,
 §20 — the live records are `man`'s locale-fallback, `ls`'s hidden-entries

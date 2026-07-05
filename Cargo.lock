@@ -613,6 +613,8 @@ name = "rustos-cp"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-help",
+ "rustos-rt",
 ]
 
 [[package]]
@@ -1333,6 +1335,8 @@ name = "rustos-mv"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-help",
+ "rustos-rt",
 ]
 
 [[package]]
@@ -1419,6 +1423,8 @@ name = "rustos-rm"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-help",
+ "rustos-rt",
 ]
 
 [[package]]

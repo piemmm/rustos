@@ -9,6 +9,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cell::RefCell;
 use rustos_abi::Errno;
+use rustos_help::{HelpSource, SourceError};
 
 /// A prompt no non-interactive run may ever reach.
 struct NeverAsked;
@@ -50,10 +51,44 @@ impl Prompt for Answers {
     }
 }
 
+/// A Help tree with no documents at all: the short-help fallback path.
+struct NoHelp;
+
+impl HelpSource for NoHelp {
+    fn locale_dirs(&self) -> Result<Vec<String>, SourceError> {
+        Ok(Vec::new())
+    }
+
+    fn read(&self, _locale_dir: &str, _file_name: &str) -> Result<Option<Vec<u8>>, SourceError> {
+        Ok(None)
+    }
+}
+
+/// A Help tree holding one canonical `mv.md` document.
+struct OneDoc;
+
+const DOC: &str = "## NAME\n\nmv — move files and directories\n\n\
+                   ## SYNOPSIS\n\n`mv [-f] [--] source... dest`\n\n\
+                   ## DESCRIPTION\n\nMoves things.\n";
+
+impl HelpSource for OneDoc {
+    fn locale_dirs(&self) -> Result<Vec<String>, SourceError> {
+        Ok(alloc::vec![String::from("default")])
+    }
+
+    fn read(&self, locale_dir: &str, file_name: &str) -> Result<Option<Vec<u8>>, SourceError> {
+        if locale_dir == "default" && file_name == "mv.md" {
+            Ok(Some(DOC.as_bytes().to_vec()))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
 /// The engine under a prompt that must never be reached — the shape every
 /// pre-existing non-interactive test uses.
 fn run(command: Command, fs: &dyn FileSystem, out: &Recorder) -> Result<(), MvError> {
-    engine_run(command, fs, &NeverAsked, out)
+    engine_run(command, None, fs, &NeverAsked, &NoHelp, out)
 }
 
 /// An in-memory tree. Regular files carry their bytes; directories are named
@@ -429,6 +464,19 @@ fn help_writes_usage() {
 }
 
 #[test]
+fn help_renders_the_short_help_from_the_document() {
+    let fs = MemFs::new();
+    let out = Recorder::new();
+    assert_eq!(
+        engine_run(Command::Help, None, &fs, &NeverAsked, &OneDoc, &out),
+        Ok(())
+    );
+    let text = out.text();
+    assert!(text.contains("mv — move files and directories"), "{text}");
+    assert!(text.contains("mv [-f] [--] source... dest"), "{text}");
+}
+
+#[test]
 fn renames_a_file_to_a_new_path() {
     let fs = MemFs::new().file("/a.txt", b"hello");
     let out = Recorder::new();
@@ -705,8 +753,10 @@ fn interactive_asks_before_overwriting() {
                 &["/a", "/c"],
                 "/dst",
             ),
+            None,
             &fs,
             &prompt,
+            &NoHelp,
             &out,
         ),
         Ok(())
@@ -737,8 +787,10 @@ fn an_unanswerable_prompt_fails_closed() {
                 &["/a"],
                 "/b",
             ),
+            None,
             &fs,
             &prompt,
+            &NoHelp,
             &out,
         ),
         Err(MvError::Prompt(Errno::NotFound))

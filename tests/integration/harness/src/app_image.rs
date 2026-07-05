@@ -528,8 +528,8 @@ mod tests {
         assert_eq!(
             names,
             [
-                "cat", "clear", "devmgr", "elsh", "login", "ls", "man", "ps", "reset", "sysinfo",
-                "sysinfod", "top", "users"
+                "cat", "clear", "cp", "devmgr", "elsh", "login", "ls", "man", "mv", "ps", "reset",
+                "rm", "sysinfo", "sysinfod", "top", "users"
             ]
         );
         for app in &found {

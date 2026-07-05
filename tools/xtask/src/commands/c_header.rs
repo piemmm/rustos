@@ -112,6 +112,7 @@ const ERRNO_NAMES: &[(&str, Errno)] = &[
     ("BAD_ADDRESS", Errno::BadAddress),
     ("WOULD_BLOCK", Errno::WouldBlock),
     ("OUT_OF_MEMORY", Errno::OutOfMemory),
+    ("CROSS_VOLUME", Errno::CrossVolume),
 ];
 
 /// One generated C header: its file name (relative to the include directory)
@@ -3410,10 +3411,10 @@ mod tests {
             let expected = i32::try_from(idx + 1).expect("small index");
             assert_eq!(errno.as_i32(), expected, "errno values must be dense 1..=N");
         }
-        // OutOfMemory is the last appended abi-v1 variant (discriminant 20).
+        // CrossVolume is the last appended abi-v1 variant (discriminant 21).
         assert_eq!(
             ERRNO_NAMES.last().map(|(_, e)| e.as_i32()),
-            Some(Errno::OutOfMemory.as_i32()),
+            Some(Errno::CrossVolume.as_i32()),
             "errno table must end at the last frozen variant"
         );
     }

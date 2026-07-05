@@ -136,6 +136,15 @@ pub enum Errno {
     /// [`NoSpace`](Self::NoSpace), which is a *storage* backend running out
     /// of on-disk space.
     OutOfMemory = 20,
+    /// A rename names a source and destination on different mounted volumes.
+    ///
+    /// The RustOS equivalent of POSIX `EXDEV`. Emitted by the `fs_rename`
+    /// syscall when the two paths do not resolve under the same mounted
+    /// volume: a rename preserves the node's identity, which cannot span two
+    /// independent backings. It is deliberately distinct from the generic
+    /// path-validation errnos so a mover (`mv`) can fall back to the POSIX
+    /// copy-then-remove relocation on exactly this condition and no other.
+    CrossVolume = 21,
 }
 
 impl Errno {
@@ -191,6 +200,7 @@ impl Errno {
             18 => Some(Self::BadAddress),
             19 => Some(Self::WouldBlock),
             20 => Some(Self::OutOfMemory),
+            21 => Some(Self::CrossVolume),
             _ => None,
         }
     }
@@ -219,6 +229,7 @@ impl fmt::Display for Errno {
             Self::BadAddress => "bad user-space address",
             Self::WouldBlock => "operation would block",
             Self::OutOfMemory => "out of memory",
+            Self::CrossVolume => "paths on different volumes",
         };
         f.write_str(message)
     }
@@ -251,6 +262,7 @@ mod tests {
         assert_eq!(Errno::BadAddress.as_i32(), 18);
         assert_eq!(Errno::WouldBlock.as_i32(), 19);
         assert_eq!(Errno::OutOfMemory.as_i32(), 20);
+        assert_eq!(Errno::CrossVolume.as_i32(), 21);
     }
 
     #[test]
@@ -278,11 +290,12 @@ mod tests {
             Errno::BadAddress,
             Errno::WouldBlock,
             Errno::OutOfMemory,
+            Errno::CrossVolume,
         ] {
             assert_eq!(Errno::from_i32(errno.as_i32()), Some(errno));
         }
         assert_eq!(Errno::from_i32(0), None);
-        assert_eq!(Errno::from_i32(21), None);
+        assert_eq!(Errno::from_i32(22), None);
         assert_eq!(Errno::from_i32(-1), None);
     }
 

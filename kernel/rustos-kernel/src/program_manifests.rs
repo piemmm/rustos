@@ -434,6 +434,17 @@ mod tests {
     fn appinfo_sources_match_the_embedded_registry() {
         use rustos_itest_harness::app_image::{discover_app_manifests, AppKind};
 
+        // The store-only file tools' expected request: the console pair for
+        // their prompts/diagnostics plus filesystem reach, which *is* their
+        // job. They ship purely as discovered on-disk bundles — the boot
+        // floor never grows — so no `spawn_layout` row or manifest constant
+        // exists for them and their `AppInfo.toml` is pinned here directly.
+        const FILE_TOOL_REQUEST: &[CapabilityId] = &[
+            CapabilityId::CONSOLE_WRITE,
+            CapabilityId::CONSOLE_READ,
+            CapabilityId::FS_ACCESS,
+        ];
+
         let userland = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../userland");
         let discovered = discover_app_manifests(&userland).expect("discovery walks");
 
@@ -443,13 +454,16 @@ mod tests {
         let embedded: &[(&str, AppKind, &[CapabilityId])] = &[
             ("cat", AppKind::Command, CAT_MANIFEST),
             ("clear", AppKind::Command, CLEAR_MANIFEST),
+            ("cp", AppKind::Command, FILE_TOOL_REQUEST),
             ("devmgr", AppKind::Service, DEVMGR_MANIFEST),
             ("elsh", AppKind::Command, SESSION_BASELINE),
             ("login", AppKind::Service, LOGIN_MANIFEST),
             ("ls", AppKind::Command, LS_MANIFEST),
             ("man", AppKind::Command, MAN_MANIFEST),
+            ("mv", AppKind::Command, FILE_TOOL_REQUEST),
             ("ps", AppKind::Command, PS_MANIFEST),
             ("reset", AppKind::Command, RESET_MANIFEST),
+            ("rm", AppKind::Command, FILE_TOOL_REQUEST),
             ("sysinfo", AppKind::Command, SYSINFO_MANIFEST),
             ("sysinfod", AppKind::Service, SYSINFOD_MANIFEST),
             ("top", AppKind::Command, TOP_MANIFEST),

@@ -611,6 +611,29 @@ fn delegated_create_of_legacy_top_level_name_is_allowed() {
         .expect("delegated rename into a legacy top-level name is allowed");
 }
 
+#[test]
+fn delegated_rename_across_two_backed_mounts_is_cross_volume() {
+    // A rename cannot preserve a node's identity across two independent
+    // backings, so it is refused with the dedicated `CrossVolume` error
+    // (the EXDEV-equivalent `mv` falls back to copy-then-remove on) —
+    // never a generic path error a caller could not act on.
+    let mut vfs = root_backed_rw_vfs();
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let handle = DriverHandle::from_raw(11).expect("non-zero handle");
+    let flags = MountFlags::from_bits(0).expect("empty flags");
+    vfs.mounts_mut()
+        .mount(p("/Storage/usb0"), flags, Some(handle))
+        .expect("mount a second backed volume");
+    let mut fs = RwMockFs::new();
+    vfs.mkdir_via(&admin, &p("/Scratch"), &mut fs)
+        .expect("create a renameable source on the root volume");
+    assert_eq!(
+        vfs.rename_via(&admin, &p("/Scratch"), &p("/Storage/usb0/Scratch"), &mut fs),
+        Err(VfsError::CrossVolume)
+    );
+}
+
 // ---------------------------------------------------------------------
 // Per-inode (`FilesystemSecurity`) delegation tests.
 //

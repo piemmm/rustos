@@ -68,7 +68,10 @@ kernel-baked rxe rows remain there). Remaining: deliverable 7 (wider
 omission, and the shared self-scope omission record `ps` and `sysinfo
 processes` both emit are live; the other registered commands have
 nothing non-obvious to add today), `Help/`
-trees for future command apps as each becomes a registered bundle, and
+trees for future command apps as each becomes a registered bundle,
+the §12.1 Stage B remainder (`chmod`/`chown`/`getcap`/`setcap`/`mount`
+blocked on their kernel syscalls; `useradd`/`groupadd` next over
+`users_admin` — `cp`/`mv`/`rm` are registered store bundles), and
 deliverable 8 increment 5 (the x86_64/riscv64 storage floor, then
 deletion of the embedded registry those ports still carry as their
 §18.6 boot floor). Help documents are authored **only** in
@@ -545,11 +548,28 @@ behind the floor work below).
   message-less `Silenced` error). Each tool's `Prompt`/`Output` seams stay
   injected and fail closed; registered tools' six-locale `Help/` trees and
   the switch-drift pins are current.
-- **Stage B — register the orphan utilities as store bundles (planned).**
-  `cp`, `mv`, `rm`, `chmod`, `chown`, `mount`, `getcap`, `setcap`,
-  `useradd`, `groupadd` each gain `AppInfo.toml`/`Run`/`Help/` (six
-  locales) and store registration per §16.5/§6.1, wiring the `Prompt` seam
-  to stderr+stdin (`y`/`Y` affirmative) in each `Run` host.
+- **Stage B — register the orphan utilities as store bundles (in
+  progress).** Each orphan gains `AppInfo.toml`/`Run`/`Help/` (six
+  locales) and store registration per §16.5/§6.1, wiring the `Prompt`
+  seam to stderr+stdin (`y`/`Y` affirmative; end-of-input is a decline,
+  never consent) in each `Run` host. **Done: `cp`, `mv`, `rm`** — each is
+  a full self-contained store bundle (console pair + `CAP_FS_ACCESS`
+  request, store-only: the §18.6 boot floor never grows, so the kernel
+  inventory drift test pins their `AppInfo.toml` directly with no
+  embedded registry row), with `-h`/`-?`/`--help` short help over the
+  shared `own_short_help`/`BundleHelp` render and per-locale switch-drift
+  pins. Landing `mv` added the missing `EXDEV` equivalent in place
+  (`abi-v1` unfrozen): the dedicated `Errno::CrossVolume` /
+  `VfsError::CrossVolume` a cross-mount `fs_rename` is refused with
+  (regression-tested; C header regenerated), so `mv`'s copy-then-remove
+  fallback triggers on exactly that condition and no other. **Remaining,
+  blocked on kernel prerequisites:** `chmod`/`chown` need fs
+  mode/owner-set syscalls, `getcap`/`setcap` need per-inode
+  capability-requirement get/set syscalls, and `mount` needs the mount
+  syscall — none exists yet, and a stubbed production seam is forbidden;
+  each tool registers in the change that lands its syscall.
+  `useradd`/`groupadd` wire over the existing `users_admin` syscall (the
+  `users` tool's precedent) and are the next registrations.
 - **Stage C — missing coreutils commands (planned; all wanted).** Every
   GNU coreutils command implementable on the current floor, in prioritised
   batches (first: `echo`, `printf`, `true`, `false`, `yes`, `pwd`, `mkdir`,
@@ -641,8 +661,8 @@ both landed; `plans/SHELL.md` command execution):
    `default/<command>.md` (never a per-bundle list). Any violation fails
    closed with a message naming the offending `bundle/locale/file`.
 6. **`Help/` trees for the existing command apps** — **done for every
-   store-registered command app**: `cat`, `clear`, `ls`, `ps`, `reset`,
-   `top`, `sysinfo`,
+   store-registered command app**: `cat`, `clear`, `cp`, `ls`, `mv`, `ps`,
+   `reset`, `rm`, `top`, `sysinfo`,
    `users`, and `elsh` each author their six-locale tree on disk in the bundle,
    discovered by `tools/syshelp` (roots `userland/apps` and
    `userland/shell`), planted at `/System/Apps/<cmd>.app/Help/`, and served
@@ -652,9 +672,9 @@ both landed; `plans/SHELL.md` command execution):
    The tools that gained filesystem reach for that read request
    `CAP_FS_ACCESS` in their manifests (the man/ls precedent — the secured
    VFS still authorises per-inode). The not-yet-registered utilities
-   (`cp`, `mv`, `rm`, `chmod`, `chown`, `mount`, `getcap`,
+   (`chmod`, `chown`, `mount`, `getcap`,
    `setcap`, `useradd`, `groupadd`, `terminal`, …) gain their trees in the
-   same change that registers each as a store bundle. Each new tree ships
+   same change that registers each as a store bundle (§12.1 Stage B). Each new tree ships
    by dropping its `Help/` files under the bundle — `tools/syshelp`
    rediscovers them, and no image-builder list is edited (§6.1).
 

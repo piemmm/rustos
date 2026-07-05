@@ -960,9 +960,11 @@ impl SyscallNumber {
     /// [`SyscallNumber::FS_OPEN`]: search + write on both parent
     /// directories (and write on a directory moved to a new parent) are
     /// required, and a missing source, a non-empty directory destination, a
-    /// directory-into-its-own-subtree move, a read-only mount, a
-    /// cross-mount move, or a denied parent fails closed. Gated by
-    /// [`crate::CapabilityId::FS_ACCESS`].
+    /// directory-into-its-own-subtree move, a read-only mount, or a denied
+    /// parent fails closed. A cross-mount move is refused with the
+    /// dedicated [`crate::Errno::CrossVolume`] (the `EXDEV` equivalent), so
+    /// a mover can fall back to copy-then-remove on exactly that condition.
+    /// Gated by [`crate::CapabilityId::FS_ACCESS`].
     pub const FS_RENAME: Self = Self(57);
     /// Read the kernel-attested [`Origin`](crate::Origin) of the caller whose
     /// in-service call this server is currently handling

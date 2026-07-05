@@ -150,7 +150,7 @@ pub fn parse(args: &[&str]) -> Result<Command, RmError> {
                             options.interactive = Interactive::Once;
                             options.force = false;
                         }
-                        'h' => return Ok(Command::Help),
+                        'h' | '?' => return Ok(Command::Help),
                         _ => return Err(RmError::Usage),
                     }
                 }
@@ -317,8 +317,45 @@ mod tests {
     #[test]
     fn help_flags_win() {
         assert_eq!(parse(&["-h"]), Ok(Command::Help));
+        assert_eq!(parse(&["-?"]), Ok(Command::Help));
         assert_eq!(parse(&["--help"]), Ok(Command::Help));
         assert_eq!(parse(&["-rh"]), Ok(Command::Help));
+    }
+
+    /// Every locale's `OPTIONS` section documents exactly the switches this
+    /// parser accepts (`plans/APPS.md` §3.1): the flag tokens are
+    /// language-neutral, so each translated document must carry the same
+    /// keys as the canonical one. The documents are read from the bundle's
+    /// own on-disk `Help/` tree — the single source the image builder plants
+    /// — never a copy embedded in this crate.
+    #[test]
+    fn help_documents_the_parser_switches() {
+        extern crate std;
+        use alloc::format;
+        use std::fs;
+
+        let help_root = format!("{}/Help", env!("CARGO_MANIFEST_DIR"));
+        let locales = ["default", "fr-FR", "de-DE", "es-ES", "uk-UA", "it-IT"];
+        for locale in locales {
+            let path = format!("{help_root}/{locale}/rm.md");
+            let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+            for switch in [
+                "`-r, -R, --recursive`",
+                "`-f, --force`",
+                "`-d, --dir`",
+                "`-i, --interactive`",
+                "`-I`",
+                "`-v, --verbose`",
+                "`--preserve-root`",
+                "`--no-preserve-root`",
+                "`-h, -?, --help`",
+            ] {
+                assert!(
+                    text.contains(switch),
+                    "{locale}/rm.md must document {switch}"
+                );
+            }
+        }
     }
 
     #[test]

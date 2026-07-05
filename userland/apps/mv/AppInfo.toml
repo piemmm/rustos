@@ -1,0 +1,11 @@
+# Signed-AppInfo manifest source for the `mv` command app
+# (plans/APPS.md deliverable 8). Discovered by the build's app-bundle
+# composer, which cross-compiles Run, signs the manifest, and plants the
+# bundle on the read-only /System/Apps store. The capability list is the
+# bundle's request: the launched process receives this set intersected
+# with the launching user's grants, never more.
+id = "os.rustos.mv"
+name = "mv"
+version = "0.1.0"
+kind = "command"
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_CONSOLE_READ", "CAP_FS_ACCESS"]

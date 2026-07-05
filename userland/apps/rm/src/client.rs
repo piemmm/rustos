@@ -6,11 +6,14 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use rustos_help::{own_short_help, HelpSource};
+
 use crate::command::{Command, Interactive, Options};
 use crate::error::RmError;
 use crate::io::{Entry, EntryKind, Output, Prompt, Removal};
 
-/// The usage banner printed by [`Command::Help`].
+/// The usage banner a usage error is reported with, and the fallback the
+/// short-help switches print when `rm`'s own Help tree is unavailable.
 pub const USAGE: &str = "\
 usage: rm [-dfiIrRv] [--] file...
 
@@ -23,13 +26,19 @@ usage: rm [-dfiIrRv] [--] file...
   -v, --verbose        report each removal
   --preserve-root      refuse to remove '/' (the default)
   --no-preserve-root   allow removing '/'
-  -h, --help           show this message
+  -h, -?, --help       show this message
 
 At least one file operand is required unless -f is given. `--` ends option
 parsing: every later argument is a path.
 ";
 
-/// Run one [`Command`], removing its operands through `fs`.
+/// `rm`'s own command word: the short-help switches render its own Help
+/// document through the same engine as any other command's.
+const OWN_WORD: &str = "rm";
+
+/// Run one [`Command`], removing its operands through `fs`. `locale` is the
+/// user's `LANG` preference, if set; `help` is the tool's own `Help/` tree,
+/// read by the short-help switches.
 ///
 /// Operands are removed in order. A non-directory operand is unlinked; a
 /// directory operand is removed only with `-r` (which removes its contents
@@ -60,12 +69,14 @@ parsing: every later argument is a path.
 ///   failed.
 pub fn run(
     command: Command,
+    locale: Option<&str>,
     fs: &dyn Removal,
     prompt: &dyn Prompt,
+    help: &dyn HelpSource,
     out: &dyn Output,
 ) -> Result<(), RmError> {
     match command {
-        Command::Help => out.write_all(USAGE.as_bytes()).map_err(RmError::Output),
+        Command::Help => short_help(locale, help, out),
         Command::Remove { options, paths } => {
             if options.interactive == Interactive::Once && (paths.len() > 3 || options.recursive) {
                 let plural = if paths.len() == 1 { "" } else { "s" };
@@ -85,6 +96,21 @@ pub fn run(
             Ok(())
         }
     }
+}
+
+/// Render `rm`'s own short help (`NAME` + `SYNOPSIS` + compact `OPTIONS`)
+/// from its own Help tree through the one shared engine; when no document
+/// can be served (a build without the bundle's documents) the usage banner
+/// stands in — the tool's own text, not fabricated help content — so `-h`
+/// never fails.
+fn short_help(
+    locale: Option<&str>,
+    help: &dyn HelpSource,
+    out: &dyn Output,
+) -> Result<(), RmError> {
+    let bytes =
+        own_short_help(help, locale, OWN_WORD).unwrap_or_else(|| String::from(USAGE).into_bytes());
+    out.write_all(&bytes).map_err(RmError::Output)
 }
 
 /// Remove one named operand, honouring `-f` for a missing path and the
@@ -213,6 +239,7 @@ mod tests {
     use alloc::vec::Vec;
     use core::cell::RefCell;
     use rustos_abi::Errno;
+    use rustos_help::{HelpSource, SourceError};
 
     /// A prompt no non-interactive run may ever reach.
     struct NeverAsked;
@@ -254,10 +281,48 @@ mod tests {
         }
     }
 
+    /// A Help tree with no documents at all: the short-help fallback path.
+    struct NoHelp;
+
+    impl HelpSource for NoHelp {
+        fn locale_dirs(&self) -> Result<Vec<String>, SourceError> {
+            Ok(Vec::new())
+        }
+
+        fn read(
+            &self,
+            _locale_dir: &str,
+            _file_name: &str,
+        ) -> Result<Option<Vec<u8>>, SourceError> {
+            Ok(None)
+        }
+    }
+
+    /// A Help tree holding one canonical `rm.md` document.
+    struct OneDoc;
+
+    const DOC: &str = "## NAME\n\nrm — remove files and directories\n\n\
+                       ## SYNOPSIS\n\n`rm [-r] [--] file...`\n\n\
+                       ## DESCRIPTION\n\nRemoves things.\n";
+
+    impl HelpSource for OneDoc {
+        fn locale_dirs(&self) -> Result<Vec<String>, SourceError> {
+            Ok(alloc::vec![String::from("default")])
+        }
+
+        fn read(&self, locale_dir: &str, file_name: &str) -> Result<Option<Vec<u8>>, SourceError> {
+            if locale_dir == "default" && file_name == "rm.md" {
+                Ok(Some(DOC.as_bytes().to_vec()))
+            } else {
+                Ok(None)
+            }
+        }
+    }
+
     /// The engine under a prompt that must never be reached — the shape
     /// every pre-existing non-interactive test uses.
     fn run(command: Command, fs: &dyn Removal, out: &Recorder) -> Result<(), RmError> {
-        engine_run(command, fs, &NeverAsked, out)
+        engine_run(command, None, fs, &NeverAsked, &NoHelp, out)
     }
 
     /// An in-memory tree: a kind table keyed by path plus, for directories,
@@ -436,6 +501,19 @@ mod tests {
         let out = Recorder::new();
         assert_eq!(run(Command::Help, &fs, &out), Ok(()));
         assert_eq!(out.text(), USAGE);
+    }
+
+    #[test]
+    fn help_renders_the_short_help_from_the_document() {
+        let fs = TreeFs::new();
+        let out = Recorder::new();
+        assert_eq!(
+            engine_run(Command::Help, None, &fs, &NeverAsked, &OneDoc, &out),
+            Ok(())
+        );
+        let text = out.text();
+        assert!(text.contains("rm — remove files and directories"), "{text}");
+        assert!(text.contains("rm [-r] [--] file..."), "{text}");
     }
 
     #[test]
@@ -726,8 +804,10 @@ mod tests {
                     },
                     &["/a", "/b"],
                 ),
+                None,
                 &fs,
                 &prompt,
+                &NoHelp,
                 &out,
             ),
             Ok(())
@@ -751,8 +831,10 @@ mod tests {
                     },
                     &["/d"],
                 ),
+                None,
                 &fs,
                 &prompt,
+                &NoHelp,
                 &out,
             ),
             Ok(())
@@ -775,8 +857,10 @@ mod tests {
                     },
                     &["/a", "/b", "/c", "/d"],
                 ),
+                None,
                 &fs,
                 &declined,
+                &NoHelp,
                 &out,
             ),
             Ok(())
@@ -794,8 +878,10 @@ mod tests {
                     },
                     &["/a", "/b", "/c", "/d"],
                 ),
+                None,
                 &fs,
                 &accepted,
+                &NoHelp,
                 &out,
             ),
             Ok(())
@@ -818,8 +904,10 @@ mod tests {
                     },
                     &["/d"],
                 ),
+                None,
                 &fs,
                 &prompt,
+                &NoHelp,
                 &out,
             ),
             Ok(())
@@ -860,8 +948,10 @@ mod tests {
                     },
                     &["/a"],
                 ),
+                None,
                 &fs,
                 &prompt,
+                &NoHelp,
                 &out,
             ),
             Err(RmError::Prompt(Errno::NotFound))

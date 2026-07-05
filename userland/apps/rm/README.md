@@ -9,9 +9,14 @@ depth-first and then the directory itself; naming a directory without
 rather than reported. This is the POSIX model.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
-`unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
-only dependency is the audited `rustos-abi` crate, so it never links a
-kernel or driver crate (`AGENTS.md` §17.4).
+`unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). It
+depends only on the audited `rustos-abi` crate and the shared `lib/help`
+engine (plus `rustos-rt` for the freestanding `Run` binary), so it never
+links a kernel or driver crate (`AGENTS.md` §17.4). The package is both
+the removal library and the `rm` command app's `Run` binary
+(`src/run.rs`), registered as the self-contained store bundle
+`/System/Apps/rm.app` with its six-locale `Help/` tree (plans/APPS.md
+§12.1 Stage B).
 
 ## Usage
 
@@ -26,7 +31,7 @@ rm [-dfiIrRv] [--] file...
   -v, --verbose        report each removal
   --preserve-root      refuse to remove '/' (the default)
   --no-preserve-root   allow removing '/'
-  -h, --help           show the usage banner
+  -h, -?, --help       show this command's own short help
 ```
 
 At least one file operand is required unless `-f` is given (an empty

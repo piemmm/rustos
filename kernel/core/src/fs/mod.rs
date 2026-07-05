@@ -216,6 +216,11 @@ pub enum VfsError {
     PermissionDenied,
     /// The covering mount is read-only.
     ReadOnly,
+    /// A rename names a source and destination on different mounted
+    /// volumes. A rename preserves the node's identity, which cannot span
+    /// two independent backings; the mover falls back to copy-then-remove
+    /// on exactly this refusal.
+    CrossVolume,
     /// A driver backing a delegated mount reported an unrecoverable
     /// device fault, or returned a structurally invalid response (e.g. a
     /// directory entry whose name is not valid UTF-8). The in-RAM tree
@@ -245,6 +250,7 @@ impl VfsError {
             | Self::IsADirectory
             | Self::AlreadyExists
             | Self::NotEmpty => Errno::OutOfRange,
+            Self::CrossVolume => Errno::CrossVolume,
             Self::Io => Errno::NotImplemented,
         }
     }
@@ -261,6 +267,7 @@ impl fmt::Display for VfsError {
             Self::NotEmpty => "directory not empty",
             Self::PermissionDenied => "permission denied",
             Self::ReadOnly => "read-only mount",
+            Self::CrossVolume => "paths on different volumes",
             Self::Io => "filesystem driver i/o error",
         };
         f.write_str(message)

@@ -2504,9 +2504,10 @@ pub fn fs_unlink(path: &[u8]) -> i64 {
 /// Both paths must resolve under the same mounted volume. The kernel
 /// authorises the move through the secured VFS under the caller's attested
 /// identity (a missing source, a non-empty directory destination, a
-/// directory-into-its-own-subtree move, a read-only mount, a cross-mount
-/// move, or a permission denial fails closed). Returns `0` on success or
-/// `-errno`.
+/// directory-into-its-own-subtree move, a read-only mount, or a permission
+/// denial fails closed; a cross-mount move is refused with the dedicated
+/// `Errno::CrossVolume`, the `EXDEV` equivalent a mover falls back to
+/// copy-then-remove on). Returns `0` on success or `-errno`.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
 pub fn fs_rename(src: &[u8], dst: &[u8]) -> i64 {

@@ -10,9 +10,14 @@ reproduces the whole subtree; naming a directory without `-r` is an
 error. This is the POSIX model.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
-`unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
-only dependency is the audited `rustos-abi` crate, so it never links a
-kernel or driver crate (`AGENTS.md` §17.4).
+`unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). It
+depends only on the audited `rustos-abi` crate and the shared `lib/help`
+engine (plus `rustos-rt` for the freestanding `Run` binary), so it never
+links a kernel or driver crate (`AGENTS.md` §17.4). The package is both
+the copy library and the `cp` command app's `Run` binary
+(`src/run.rs`), registered as the self-contained store bundle
+`/System/Apps/cp.app` with its six-locale `Help/` tree (plans/APPS.md
+§12.1 Stage B).
 
 ## Usage
 
@@ -27,7 +32,7 @@ cp [-finrRvT] [-t dir] [--] source... dest
   -t dir, --target-directory=dir
                              copy every source into dir
   -T, --no-target-directory  treat dest as a normal file (one source)
-  -h, --help                 show the usage banner
+  -h, -?, --help             show this command's own short help
 ```
 
 At least one source and a destination are required. Short options may be
