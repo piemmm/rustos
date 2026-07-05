@@ -70,8 +70,8 @@ processes` both emit are live; the other registered commands have
 nothing non-obvious to add today), `Help/`
 trees for future command apps as each becomes a registered bundle,
 the §12.1 Stage B remainder (`chmod`/`chown`/`getcap`/`setcap`/`mount`
-blocked on their kernel syscalls; `useradd`/`groupadd` next over
-`users_admin` — `cp`/`mv`/`rm` are registered store bundles), and
+blocked on their kernel syscalls — `cp`/`mv`/`rm`/`useradd`/`groupadd`
+are registered store bundles), and
 deliverable 8 increment 5 (the x86_64/riscv64 storage floor, then
 deletion of the embedded registry those ports still carry as their
 §18.6 boot floor). Help documents are authored **only** in
@@ -562,14 +562,23 @@ behind the floor work below).
   (`abi-v1` unfrozen): the dedicated `Errno::CrossVolume` /
   `VfsError::CrossVolume` a cross-mount `fs_rename` is refused with
   (regression-tested; C header regenerated), so `mv`'s copy-then-remove
-  fallback triggers on exactly that condition and no other. **Remaining,
+  fallback triggers on exactly that condition and no other.
+  **Done: `useradd`, `groupadd`** — store-only bundles over the existing
+  `users_admin` syscall (`CAP_CONSOLE_WRITE` + `CAP_USER_ADMIN` +
+  `CAP_FS_ACCESS`; no console-read — they never prompt), each with a
+  host-tested production `users_admin` client behind injected
+  channel/entropy seams. The shared account-authoring policy
+  (`DEFAULT_SHELL`, `default_home`, `next_id` id auto-allocation) was
+  hoisted into `lib/users` and the `users` session + `tools/mkimage`
+  deduplicated onto it. `useradd` creates the account with an unusable
+  random password record (the GNU `!`-field equivalent — a password is
+  set afterwards via the `users` tool), the session-baseline ceiling,
+  and the shared shell/home defaults. **Remaining,
   blocked on kernel prerequisites:** `chmod`/`chown` need fs
   mode/owner-set syscalls, `getcap`/`setcap` need per-inode
   capability-requirement get/set syscalls, and `mount` needs the mount
   syscall — none exists yet, and a stubbed production seam is forbidden;
   each tool registers in the change that lands its syscall.
-  `useradd`/`groupadd` wire over the existing `users_admin` syscall (the
-  `users` tool's precedent) and are the next registrations.
 - **Stage C — missing coreutils commands (planned; all wanted).** Every
   GNU coreutils command implementable on the current floor, in prioritised
   batches (first: `echo`, `printf`, `true`, `false`, `yes`, `pwd`, `mkdir`,
@@ -661,8 +670,8 @@ both landed; `plans/SHELL.md` command execution):
    `default/<command>.md` (never a per-bundle list). Any violation fails
    closed with a message naming the offending `bundle/locale/file`.
 6. **`Help/` trees for the existing command apps** — **done for every
-   store-registered command app**: `cat`, `clear`, `cp`, `ls`, `mv`, `ps`,
-   `reset`, `rm`, `top`, `sysinfo`,
+   store-registered command app**: `cat`, `clear`, `cp`, `groupadd`, `ls`,
+   `mv`, `ps`, `reset`, `rm`, `top`, `sysinfo`, `useradd`,
    `users`, and `elsh` each author their six-locale tree on disk in the bundle,
    discovered by `tools/syshelp` (roots `userland/apps` and
    `userland/shell`), planted at `/System/Apps/<cmd>.app/Help/`, and served
@@ -673,7 +682,7 @@ both landed; `plans/SHELL.md` command execution):
    `CAP_FS_ACCESS` in their manifests (the man/ls precedent — the secured
    VFS still authorises per-inode). The not-yet-registered utilities
    (`chmod`, `chown`, `mount`, `getcap`,
-   `setcap`, `useradd`, `groupadd`, `terminal`, …) gain their trees in the
+   `setcap`, `terminal`, …) gain their trees in the
    same change that registers each as a store bundle (§12.1 Stage B). Each new tree ships
    by dropping its `Help/` files under the bundle — `tools/syshelp`
    rediscovers them, and no image-builder list is edited (§6.1).

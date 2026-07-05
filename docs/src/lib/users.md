@@ -113,3 +113,13 @@ built in memory. `tools/mkimage` uses exactly this path: a **debug** image
 seeds the single `root`/`root` bring-up account, an **installer** image
 seeds no accounts at all (the §11 installer authors the database on first
 boot).
+
+The shared **account-authoring policy** lives beside the format so every
+author agrees on it (`AGENTS.md` §2.2): `DEFAULT_SHELL` (the default
+shell's store-bundle `Run` binary, drift-pinned to the `lib/abi` store
+spellings), `default_home` (the §16 `/Users/<name>` layout), and
+`next_id` (auto-allocation of a free uid/gid: one above the highest
+existing id, fail closed on exhaustion — ids below the current maximum
+are deliberately not re-used). The interactive `users` session, the
+one-shot `useradd`/`groupadd` command apps, and the image builder all
+import these definitions rather than carrying private copies.

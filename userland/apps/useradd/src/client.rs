@@ -1,11 +1,16 @@
 //! The account-creation engine: refuse a name that is already taken, then
 //! hand the new record to the database.
 
+use alloc::string::String;
+
+use rustos_help::{own_short_help, HelpSource};
+
 use crate::command::Command;
 use crate::error::UseraddError;
 use crate::io::{Output, UserDb, UserSpec};
 
-/// The usage banner printed by [`Command::Help`].
+/// The usage banner a usage error is reported with, and the fallback the
+/// short-help switches print when `useradd`'s own Help tree is unavailable.
 pub const USAGE: &str = "\
 usage: useradd [-u UID] -g GID [-G GID[,GID...]] [-c COMMENT] [-d HOME] [--] NAME
 
@@ -14,18 +19,24 @@ usage: useradd [-u UID] -g GID [-G GID[,GID...]] [-c COMMENT] [-d HOME] [--] NAM
   -G, --groups LIST   comma-separated numeric supplementary group ids
   -c, --comment TEXT  account comment / full name
   -d, --home PATH     home directory
-  -h, --help          show this message
+  -h, -?, --help      show this command's own short help
 
 UID, GID, and the LIST entries are decimal ids. NAME matches [a-z_][a-z0-9_-]*.
 `--` ends option parsing: every later argument is an operand.
 ";
 
-/// Run one [`Command`], creating the account through `db`.
+/// `useradd`'s own command word: the short-help switches render its own
+/// Help document through the same engine as any other command's.
+const OWN_WORD: &str = "useradd";
+
+/// Run one [`Command`], creating the account through `db`. `locale` is the
+/// user's `LANG` preference, if set; `help` is the tool's own `Help/` tree,
+/// read by the short-help switches.
 ///
 /// For a [`Command::Create`] the name is first checked against the database so
 /// a duplicate can be reported precisely, then the new record is written.
 /// `useradd` writes nothing on success; `out` carries only the
-/// [`Command::Help`] banner.
+/// [`Command::Help`] render.
 ///
 /// # Errors
 ///
@@ -34,12 +45,16 @@ UID, GID, and the LIST entries are decimal ids. NAME matches [a-z_][a-z0-9_-]*.
 ///   name; carries the underlying [`Errno`](rustos_abi::Errno).
 /// * [`UseraddError::Create`] — the database refused or failed the creation
 ///   (e.g. a missing `CAP_USER_ADMIN`, a duplicate uid, or an unknown group).
-/// * [`UseraddError::Output`] — writing the usage banner failed.
-pub fn run(command: Command, db: &dyn UserDb, out: &dyn Output) -> Result<(), UseraddError> {
+/// * [`UseraddError::Output`] — writing the short help failed.
+pub fn run(
+    command: Command,
+    locale: Option<&str>,
+    db: &dyn UserDb,
+    help: &dyn HelpSource,
+    out: &dyn Output,
+) -> Result<(), UseraddError> {
     match command {
-        Command::Help => out
-            .write_all(USAGE.as_bytes())
-            .map_err(UseraddError::Output),
+        Command::Help => short_help(locale, help, out),
         Command::Create(user) => {
             if db.name_in_use(&user.name).map_err(UseraddError::Lookup)? {
                 return Err(UseraddError::Exists);
@@ -57,6 +72,21 @@ pub fn run(command: Command, db: &dyn UserDb, out: &dyn Output) -> Result<(), Us
     }
 }
 
+/// Render `useradd`'s own short help (`NAME` + `SYNOPSIS` + compact
+/// `OPTIONS`) from its own Help tree through the one shared engine; when no
+/// document can be served (a build without the bundle's documents) the usage
+/// banner stands in — the tool's own text, not fabricated help content — so
+/// `-h` never fails.
+fn short_help(
+    locale: Option<&str>,
+    help: &dyn HelpSource,
+    out: &dyn Output,
+) -> Result<(), UseraddError> {
+    let bytes =
+        own_short_help(help, locale, OWN_WORD).unwrap_or_else(|| String::from(USAGE).into_bytes());
+    out.write_all(&bytes).map_err(UseraddError::Output)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{run, USAGE};
@@ -67,6 +97,45 @@ mod tests {
     use alloc::vec::Vec;
     use core::cell::RefCell;
     use rustos_abi::Errno;
+    use rustos_help::{HelpSource, SourceError};
+
+    /// A Help tree with no documents at all: the short-help fallback path.
+    struct NoHelp;
+
+    impl HelpSource for NoHelp {
+        fn locale_dirs(&self) -> Result<Vec<String>, SourceError> {
+            Ok(Vec::new())
+        }
+
+        fn read(
+            &self,
+            _locale_dir: &str,
+            _file_name: &str,
+        ) -> Result<Option<Vec<u8>>, SourceError> {
+            Ok(None)
+        }
+    }
+
+    /// A Help tree holding one canonical `useradd.md` document.
+    struct OneDoc;
+
+    const DOC: &str = "## NAME\n\nuseradd — create a user account\n\n\
+                       ## SYNOPSIS\n\n`useradd -g GID [--] NAME`\n\n\
+                       ## DESCRIPTION\n\nCreates an account.\n";
+
+    impl HelpSource for OneDoc {
+        fn locale_dirs(&self) -> Result<Vec<String>, SourceError> {
+            Ok(alloc::vec![String::from("default")])
+        }
+
+        fn read(&self, locale_dir: &str, file_name: &str) -> Result<Option<Vec<u8>>, SourceError> {
+            if locale_dir == "default" && file_name == "useradd.md" {
+                Ok(Some(DOC.as_bytes().to_vec()))
+            } else {
+                Ok(None)
+            }
+        }
+    }
 
     /// An in-memory user database. Holds the existing names, records every
     /// created account, and supports injecting a failure into either seam.
@@ -184,15 +253,32 @@ mod tests {
     }
 
     fn run_args(args: &[&str], db: &MemDb, out: &Recorder) -> Result<(), UseraddError> {
-        run(parse(args).expect("valid command"), db, out)
+        run(parse(args).expect("valid command"), None, db, &NoHelp, out)
     }
 
     #[test]
-    fn help_prints_the_usage_banner() {
+    fn help_without_a_document_falls_back_to_the_usage_banner() {
         let db = MemDb::new();
         let out = Recorder::new();
         assert_eq!(run_args(&["--help"], &db, &out), Ok(()));
         assert_eq!(out.written(), USAGE.as_bytes());
+    }
+
+    #[test]
+    fn help_renders_the_own_document_when_served() {
+        let db = MemDb::new();
+        let out = Recorder::new();
+        assert_eq!(
+            run(parse(&["-h"]).expect("valid"), None, &db, &OneDoc, &out),
+            Ok(())
+        );
+        let text = String::from_utf8(out.written()).expect("utf-8 render");
+        assert!(text.contains("useradd"));
+        assert!(text.contains("create a user account"));
+        assert!(
+            !text.contains("Creates an account."),
+            "short help omits DESCRIPTION"
+        );
     }
 
     #[test]
@@ -294,7 +380,7 @@ mod tests {
         let db = MemDb::new();
         let out = FailingOutput;
         assert_eq!(
-            run(parse(&["--help"]).expect("valid"), &db, &out),
+            run(parse(&["--help"]).expect("valid"), None, &db, &NoHelp, &out),
             Err(UseraddError::Output(Errno::PermissionDenied))
         );
     }

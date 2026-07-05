@@ -19,8 +19,12 @@
 //! outside world are the injected seams:
 //!
 //! * [`UserDb`] — learn whether a login name is already in use and create the
-//!   account record.
-//! * [`Output`] — write the usage banner to the terminal.
+//!   account record. The production implementation is [`db::UsersAdminDb`],
+//!   the `users_admin` client over its own injected [`db::AdminChannel`] and
+//!   [`db::Entropy`] seams.
+//! * [`rustos_help::HelpSource`] — the tool's own bundled `Help/` tree, read
+//!   by the `-h`/`-?` short-help switches through the shared engine.
+//! * [`Output`] — write the short help to the terminal.
 //!
 //! The binary that ships as `useradd` wires the real syscall-backed database
 //! and console output; tests wire in-memory fixtures. This is the seam
@@ -55,14 +59,16 @@
 //! * [`command`] — the [`Command`]/[`NewUser`] shapes and the [`parse`]r.
 //! * [`io`] — the [`UserDb`] and [`Output`] seams and the [`UserSpec`] they
 //!   carry.
+//! * [`db`] — the production [`UserDb`]: the `users_admin` client, its
+//!   account defaults, and the created account's password posture.
 //! * [`client`] — the [`run`] entry point.
 //!
 //! # Layering & safety
 //!
-//! `no_std` (with `alloc`); the only dependency is the
-//! audited `lib/abi` crate, so this userland tool never links a kernel or
-//! driver crate. No `unsafe`, and no
-//! `unwrap`/`expect`/`panic!` in production paths.
+//! `no_std` (with `alloc`); the dependencies are the audited `lib/abi`
+//! vocabulary, the shared `lib/help` engine, and the `lib/users` account
+//! policy, so this userland tool never links a kernel or driver crate. No
+//! `unsafe`, and no `unwrap`/`expect`/`panic!` in production paths.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -72,6 +78,7 @@ extern crate alloc;
 
 pub mod client;
 pub mod command;
+pub mod db;
 pub mod error;
 pub mod io;
 

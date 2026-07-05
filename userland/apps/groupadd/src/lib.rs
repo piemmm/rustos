@@ -20,8 +20,12 @@
 //! world are the injected seams:
 //!
 //! * [`GroupDb`] — learn whether a group name is already in use and create the
-//!   group record.
-//! * [`Output`] — write the usage banner to the terminal.
+//!   group record. The production implementation is [`db::GroupsAdminDb`],
+//!   the `users_admin` client over its own injected [`db::AdminChannel`]
+//!   seam.
+//! * [`rustos_help::HelpSource`] — the tool's own bundled `Help/` tree, read
+//!   by the `-h`/`-?` short-help switches through the shared engine.
+//! * [`Output`] — write the short help to the terminal.
 //!
 //! The binary that ships as `groupadd` wires the real syscall-backed database
 //! and console output; tests wire in-memory fixtures. This is the seam
@@ -56,14 +60,16 @@
 //! * [`command`] — the [`Command`]/[`NewGroup`] shapes and the [`parse`]r.
 //! * [`io`] — the [`GroupDb`] and [`Output`] seams and the [`GroupSpec`] they
 //!   carry.
+//! * [`db`] — the production [`GroupDb`]: the `users_admin` client and its
+//!   gid auto-allocation.
 //! * [`client`] — the [`run`] entry point.
 //!
 //! # Layering & safety
 //!
-//! `no_std` (with `alloc`); the only dependency is the
-//! audited `lib/abi` crate, so this userland tool never links a kernel or
-//! driver crate. No `unsafe`, and no
-//! `unwrap`/`expect`/`panic!` in production paths.
+//! `no_std` (with `alloc`); the dependencies are the audited `lib/abi`
+//! vocabulary, the shared `lib/help` engine, and the `lib/users` account
+//! policy, so this userland tool never links a kernel or driver crate. No
+//! `unsafe`, and no `unwrap`/`expect`/`panic!` in production paths.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -73,6 +79,7 @@ extern crate alloc;
 
 pub mod client;
 pub mod command;
+pub mod db;
 pub mod error;
 pub mod io;
 

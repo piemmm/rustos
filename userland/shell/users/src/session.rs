@@ -12,7 +12,10 @@ use rustos_abi::users_admin::{
     UsersAdminRequest, USERS_ADMIN_MAX_REQUEST,
 };
 use rustos_abi::{CapabilityId, Errno};
-use rustos_users::{PasswordRecord, Salt, DEFAULT_ITERATIONS, MAX_DB_LEN, SESSION_BASELINE};
+use rustos_users::{
+    default_home, PasswordRecord, Salt, DEFAULT_ITERATIONS, DEFAULT_SHELL, MAX_DB_LEN,
+    SESSION_BASELINE,
+};
 
 /// The terminal the session runs over — the inherited standard streams,
 /// never a device.
@@ -308,7 +311,7 @@ fn create_user(
         io.error_line("users: request too large");
         return;
     };
-    let home = format!("/Users/{name}");
+    let home = default_home(name);
     submit_mutation(
         io,
         channel,
@@ -319,7 +322,7 @@ fn create_user(
             supplementary_gids: gids,
             display_name: display_name.trim(),
             home: &home,
-            shell: "/System/Apps/elsh.app/Run",
+            shell: DEFAULT_SHELL,
             grants,
             password_record: &password_record,
         }),

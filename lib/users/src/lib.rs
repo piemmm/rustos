@@ -33,6 +33,7 @@ mod db;
 mod grants;
 mod groups;
 mod password;
+mod policy;
 mod record;
 
 pub use db::{UsersDb, FORMAT_HEADER, MAX_DB_LEN, MAX_LINE_LEN, MAX_USERS};
@@ -45,6 +46,7 @@ pub use password::{
     PasswordRecord, Salt, DEFAULT_ITERATIONS, MAX_ITERATIONS, MAX_PASSWORD_LEN, MIN_ITERATIONS,
     PASSWORD_SCHEME, SALT_LEN,
 };
+pub use policy::{default_home, next_id, DEFAULT_SHELL};
 pub use record::{
     AccountState, Gid, Identity, Uid, UserRecord, MAX_DISPLAY_NAME_LEN, MAX_PATH_LEN,
     MAX_SUPPLEMENTARY_GIDS, MAX_USERNAME_LEN,

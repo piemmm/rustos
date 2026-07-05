@@ -109,8 +109,8 @@ pub fn store_files(bundles: &[BuiltAppBundle]) -> Vec<AppStoreFile> {
 
 /// The composed application-bundle store files, built **once per xtask
 /// process** and shared by every consumer: the Pi image build and every
-/// QEMU enrolment/pass plant the identical bundle set, so composing (ten
-/// cross-compiles plus signing) is paid a single time. The first caller
+/// QEMU enrolment/pass plant the identical bundle set, so composing (one
+/// cross-compile per bundle plus signing) is paid a single time. The first caller
 /// builds; concurrent first callers are serialised by cargo's own build
 /// locking and one result wins. A composition failure is memoised too and
 /// returned to every caller (fail closed, never a partial store).

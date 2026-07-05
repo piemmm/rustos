@@ -983,6 +983,9 @@ name = "rustos-groupadd"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-help",
+ "rustos-rt",
+ "rustos-users",
 ]
 
 [[package]]
@@ -3003,6 +3006,9 @@ name = "rustos-useradd"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-help",
+ "rustos-rt",
+ "rustos-users",
 ]
 
 [[package]]

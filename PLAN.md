@@ -3596,8 +3596,9 @@ types `man man` end to end. The generic argv/stderr-line helpers were
 hoisted into `lib/rt` (`args`, `io::write_stderr_line`) and the `-errno`
 decode into `rustos_abi::Errno::from_syscall`, each now one definition.
 
-Every store-registered command app (`cat`, `ls`, `man`, `ps`, `top`,
-`sysinfo`, `users`, `elsh`) ships its six-locale `Help/` tree and honours the
+Every store-registered command app (`cat`, `groupadd`, `ls`, `man`, `ps`,
+`top`, `sysinfo`, `useradd`, `users`, `elsh`) ships its six-locale `Help/`
+tree and honours the
 `-h`/`-?` short-help convention through the one shared `lib/help` render
 (`own_short_help` + the `rt`-feature `BundleHelp` own-bundle source);
 per-locale switch-drift unit tests pin each tree's `OPTIONS` to its
@@ -3625,13 +3626,22 @@ missing `EXDEV` equivalent in place: the dedicated `Errno::CrossVolume` /
 `VfsError::CrossVolume` a cross-mount `fs_rename` is refused with
 (regression-tested in `kernel/core`'s delegate tests; C header
 regenerated), so `mv`'s copy-then-remove fallback triggers on exactly
-that condition and no other.
+that condition and no other. `useradd` and `groupadd` are likewise
+registered store-only bundles over the existing `users_admin` syscall
+(`CAP_CONSOLE_WRITE` + `CAP_USER_ADMIN` + `CAP_FS_ACCESS`; no
+console-read — they never prompt), each with a host-tested production
+client behind injected channel/entropy seams; the shared
+account-authoring policy (`rustos_users::{DEFAULT_SHELL, default_home,
+next_id}`) was hoisted into `lib/users` and the `users` session +
+`tools/mkimage` deduplicated onto it, and `useradd` creates the account
+with an unusable random password record (the GNU `!`-field equivalent —
+a password is set afterwards via the `users` tool), the
+session-baseline ceiling, and the shared shell/home defaults.
 
 **Remaining** (staged in `plans/APPS.md` §13): the Stage B remainder
 (`chmod`/`chown`/`getcap`/`setcap`/`mount` blocked on their kernel
 syscalls — fs mode/owner set, per-inode capability get/set, mount — each
-registers in the change that lands its syscall; `useradd`/`groupadd`
-next over the existing `users_admin`); `Help/` trees for future
+registers in the change that lands its syscall); `Help/` trees for future
 command apps as each becomes a registered store bundle; and wider `stdinfo`
 adoption in command apps as future behaviour warrants it (advisory-only,
 §20 — the live records are `man`'s locale-fallback, `ls`'s hidden-entries
@@ -3669,7 +3679,7 @@ increment landing complete and green:
    host composer (`rustos-itest-harness::app_image`) composes and signs the
    wire `AppInfo` under `SYSTEM_APP_SIGNING_SEED` (`build_support.rs`, a
    trust domain distinct from the driver-signing seed) — **done**:
-   `AppInfo.toml` in all eleven program crates,
+   `AppInfo.toml` in every program crate,
    `app_image::{discover_app_manifests, compose_signed_appinfo}` with a
    fail-closed line-based grammar, unit tests verifying a composed
    manifest against the exact `lib/crypto` verification contract (and that

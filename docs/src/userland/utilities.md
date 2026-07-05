@@ -1326,19 +1326,25 @@ the directory before its contents, and the missing-operand / stat / apply
 
 ## `useradd` — create a user account (`userland/apps/useradd`)
 
-`rustos-useradd` adds a single account to the user database that persists
-under `/System/Security/Users` (`AGENTS.md` §5.1, §16). It names the new
-account and its numeric identity — a login name, an optional user id
-(auto-allocated by the database when omitted), a **required** primary
+`rustos-useradd` is a `plans/APPS.md` command app registered at
+`/System/Apps/useradd.app/Run`. It adds a single account to the user
+database that persists under `/System/Security/Users` (`AGENTS.md` §5.1,
+§16). It names the new account and its numeric identity — a login name,
+an optional user id (auto-allocated when omitted), a **required** primary
 group id, an optional supplementary-group set, and the textual comment
 and home directory — and hands that record to the database through an
 injected seam. Group and user references are **decimal** ids, the same
-choice `chown` makes.
+choice `chown` makes. `-h`/`-?` render the tool's own short help from its
+bundled six-locale `Help/` tree through the shared `lib/help` engine
+(`plans/APPS.md` §4), falling back to the usage banner when the tree is
+unavailable.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
-only dependency is the audited `rustos-abi` crate, so it never links a
-kernel or driver crate (`AGENTS.md` §17.4).
+dependencies are the audited `rustos-abi` vocabulary, the shared
+`rustos-help` engine, and the `rustos-users` account policy, so it never
+links a kernel or driver crate (`AGENTS.md` §17.4). Its manifest requests
+`CAP_CONSOLE_WRITE`, `CAP_USER_ADMIN`, and `CAP_FS_ACCESS`.
 
 ### Grammar
 
@@ -1350,13 +1356,13 @@ useradd [-u UID] -g GID [-G GID[,GID...]] [-c COMMENT] [-d HOME] [--] NAME
   -G, --groups LIST   comma-separated numeric supplementary group ids
   -c, --comment TEXT  account comment / full name
   -d, --home PATH     home directory
-  -h, --help          show the usage banner
+  -h, -?, --help      show this command's own short help
 ```
 
 Exactly one name operand is required, and `-g` is mandatory. Each
 value-taking option accepts its value attached (`-u0`, `--uid=0`) or as
 the following argument (`-u 0`, `--uid 0`). `--` ends option parsing:
-every later argument is an operand. `-h`/`--help` wins immediately.
+every later argument is an operand. `-h`/`-?`/`--help` wins immediately.
 
 ### The account grammar
 
@@ -1368,9 +1374,22 @@ bound — the portable Unix shape, which admits no name that could be
 confused for a numeric id or an option.
 
 `-g` is required rather than defaulted: there is no default-group policy
-to invent (`AGENTS.md` §2.1). Likewise a missing `-u` and a missing `-d`
-are left to the database's documented defaults (the §16 `/Users/<name>`
-home layout), not guessed here.
+to invent (`AGENTS.md` §2.1). A missing `-u` is allocated by the shared
+`rustos_users::next_id` policy (one above the highest existing id) and a
+missing `-d` is the shared `rustos_users::default_home` layout (the §16
+`/Users/<name>` shape) — both applied by the production database client,
+never guessed in the parser.
+
+### The created account has no usable password
+
+GNU `useradd` creates an account that cannot authenticate until an
+administrator sets a password. The RustOS database requires a well-formed
+password record on creation, so the production client submits one derived
+from a throwaway 256-bit random secret it immediately discards: no
+password matches it, the honest equivalent of the `!` field. The
+administrator then sets a real password with the `users` tool's `passwd`
+command. The created account starts `rustos_users::DEFAULT_SHELL` and the
+`rustos_users::SESSION_BASELINE` capability ceiling.
 
 ### An account-spec parser, not a policy point
 
@@ -1385,8 +1404,13 @@ are injected seams, mirroring `setcap`'s `FileSystem`, `login`'s
 `Authenticator`, and `init`'s `Spawner`/`Reaper`:
 
 - `UserDb` — learn whether a login name is in use and create the account
-  record.
-- `Output` — write the usage banner to the terminal (`useradd` is silent
+  record. The production implementation, `db::UsersAdminDb`, is the
+  `users_admin` client over its own injected `db::AdminChannel` (the
+  syscall) and `db::Entropy` (the kernel CSPRNG through `sys:random`)
+  seams, so the whole client policy is host-tested.
+- `rustos_help::HelpSource` — the tool's own bundled `Help/` tree, read
+  by the short-help switches.
+- `Output` — write the short help to the terminal (`useradd` is silent
   on success).
 
 On a running system these are syscall- and console-backed; in tests they
@@ -1408,32 +1432,44 @@ There is no partial-guess path and no panic (`AGENTS.md` §2.9).
 
 ### Tests
 
-`cargo test -p rustos-useradd` drives the parser and the engine against an
-in-memory database and a recording output: the command grammar (the
+`cargo test -p rustos-useradd` drives the parser, the engine, and the
+production client against in-memory fixtures: the command grammar (the
 minimal name+group form, every option, long `--opt value`/`--opt=value`
-and attached short `-u0` spellings, `-h`/`--help`, the missing-group,
+and attached short `-u0` spellings, `-h`/`-?`/`--help`, the missing-group,
 wrong-operand-count, unknown-option, and missing-value usage refusals,
 `--`, and the bad-id / bad-name refusals), the login-name validator
-(accepted and rejected shapes, including the length bound), and the
+(accepted and rejected shapes, including the length bound), the
 creation engine (a minimal account, every field reaching the database,
 the already-exists refusal, and the lookup / create / unknown-group /
-help-write fail-closed paths).
+help-write fail-closed paths), the short-help render from a Help document
+with its usage-banner fallback, the `users_admin` client (uid allocation
+and pass-through, the shared defaults, the unusable password record
+verifying against no candidate, hostile and overlong replies failing
+closed, a refused entropy draw creating nothing), and the switch-drift
+pin that every locale's `OPTIONS` section documents exactly the parser's
+switches (`plans/APPS.md` §3.1).
 
 ## `groupadd` — create a group (`userland/apps/groupadd`)
 
-`rustos-groupadd` adds a single group to the group database that persists
-under `/System/Security/Groups` (`AGENTS.md` §5.1, §16). It names the new
-group and an optional numeric id (auto-allocated by the database when
-omitted), and hands that record to the database through an injected seam.
-The group id is a **decimal** value, the same choice `chown` and
+`rustos-groupadd` is a `plans/APPS.md` command app registered at
+`/System/Apps/groupadd.app/Run`. It adds a single group to the group
+database that persists under `/System/Security/Groups` (`AGENTS.md` §5.1,
+§16). It names the new group and an optional numeric id (auto-allocated
+when omitted), and hands that record to the database through an injected
+seam. The group id is a **decimal** value, the same choice `chown` and
 `useradd` make. It is the natural sibling of `useradd`: the same
 parser/seam/error discipline, narrowed to the two fields a group record
-carries.
+carries. `-h`/`-?` render the tool's own short help from its bundled
+six-locale `Help/` tree through the shared `lib/help` engine
+(`plans/APPS.md` §4), falling back to the usage banner when the tree is
+unavailable.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
-only dependency is the audited `rustos-abi` crate, so it never links a
-kernel or driver crate (`AGENTS.md` §17.4).
+dependencies are the audited `rustos-abi` vocabulary, the shared
+`rustos-help` engine, and the `rustos-users` account policy, so it never
+links a kernel or driver crate (`AGENTS.md` §17.4). Its manifest requests
+`CAP_CONSOLE_WRITE`, `CAP_USER_ADMIN`, and `CAP_FS_ACCESS`.
 
 ### Grammar
 
@@ -1441,13 +1477,13 @@ kernel or driver crate (`AGENTS.md` §17.4).
 groupadd [-g GID] [--] NAME
 
   -g, --gid GID   numeric group id (auto-allocated if omitted)
-  -h, --help      show the usage banner
+  -h, -?, --help  show this command's own short help
 ```
 
 Exactly one name operand is required. `-g` accepts its value attached
 (`-g0`, `--gid=0`) or as the following argument (`-g 0`). `--` ends
-option parsing: every later argument is an operand. `-h`/`--help` wins
-immediately.
+option parsing: every later argument is an operand. `-h`/`-?`/`--help`
+wins immediately.
 
 ### The group grammar
 
@@ -1458,8 +1494,9 @@ interface creep (`AGENTS.md` §2.4). The group name must match
 which admits no name that could be confused for a numeric id or an
 option.
 
-A missing `-g` is left to the database to allocate rather than guessed
-here (`AGENTS.md` §2.1).
+A missing `-g` is allocated by the shared `rustos_users::next_id` policy
+(one above the highest existing id) in the production database client,
+never guessed in the parser (`AGENTS.md` §2.1).
 
 ### A group-spec parser, not a policy point
 
@@ -1474,8 +1511,12 @@ the outside world are injected seams, mirroring `useradd`'s `UserDb`,
 `Spawner`/`Reaper`:
 
 - `GroupDb` — learn whether a group name is in use and create the group
-  record.
-- `Output` — write the usage banner to the terminal (`groupadd` is silent
+  record. The production implementation, `db::GroupsAdminDb`, is the
+  `users_admin` client over its injected `db::AdminChannel` transport,
+  so the whole client policy is host-tested.
+- `rustos_help::HelpSource` — the tool's own bundled `Help/` tree, read
+  by the short-help switches.
+- `Output` — write the short help to the terminal (`groupadd` is silent
   on success).
 
 On a running system these are syscall- and console-backed; in tests they
@@ -1497,15 +1538,20 @@ There is no partial-guess path and no panic (`AGENTS.md` §2.9).
 
 ### Tests
 
-`cargo test -p rustos-groupadd` drives the parser and the engine against
-an in-memory database and a recording output: the command grammar (the
+`cargo test -p rustos-groupadd` drives the parser, the engine, and the
+production client against in-memory fixtures: the command grammar (the
 bare-name and name+gid forms, long `--gid value`/`--gid=value` and
-attached short `-g0` spellings, `-h`/`--help`, the wrong-operand-count,
-unknown-option, and missing-value usage refusals, `--`, and the bad-id /
-bad-name refusals), the group-name validator (accepted and rejected
-shapes, including the length bound), and the creation engine (a minimal
-group, a requested gid reaching the database, the already-exists refusal,
-and the lookup / create / taken-gid / help-write fail-closed paths).
+attached short `-g0` spellings, `-h`/`-?`/`--help`, the
+wrong-operand-count, unknown-option, and missing-value usage refusals,
+`--`, and the bad-id / bad-name refusals), the group-name validator
+(accepted and rejected shapes, including the length bound), the creation
+engine (a minimal group, a requested gid reaching the database, the
+already-exists refusal, and the lookup / create / taken-gid / help-write
+fail-closed paths), the short-help render from a Help document with its
+usage-banner fallback, the `users_admin` client (gid allocation and
+pass-through, hostile and overlong replies failing closed), and the
+switch-drift pin that every locale's `OPTIONS` section documents exactly
+the parser's switches (`plans/APPS.md` §3.1).
 
 ## `users` — interactive account administration (`userland/shell/users`)
 
@@ -1515,9 +1561,8 @@ and the lookup / create / taken-gid / help-write fail-closed paths).
 creates, modifies, locks/unlocks, and deletes accounts, edits their
 capability ceilings, replaces passwords, and manages groups. It is
 interactive (a `users>` prompt over the inherited standard streams);
-now that the `spawn` ABI carries an argument vector, the staged
-`useradd`/`groupadd` argv grammars above can become thin frontends over
-the same syscall — the operation authority already lives in exactly one
+the one-shot `useradd`/`groupadd` command apps above are thin frontends
+over the same syscall — the operation authority lives in exactly one
 place, the kernel engine.
 
 Every rule is enforced kernel-side under the caller's attested identity:

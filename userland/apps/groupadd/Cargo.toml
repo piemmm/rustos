@@ -1,6 +1,6 @@
 [package]
 name = "rustos-groupadd"
-description = "RustOS `groupadd` CLI: create a group (§3 `userland/apps/` — `PLAN.md` Stage 6)."
+description = "RustOS `groupadd` CLI: create a group (§3 `userland/apps/` — a plans/APPS.md command app)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,9 +11,45 @@ publish.workspace = true
 [lints]
 workspace = true
 
+# The `Run` binary's freestanding userland runtime (`rustos-rt`) is an
+# optional, on-by-default build feature, mirroring `rustos-useradd`.
+# `cargo build -p rustos-groupadd` builds the tool program with it; host
+# tooling builds only the group-creation *library*, so the host test build
+# never pulls the userland runtime's `_start` / `#[global_allocator]` /
+# panic handler.
+[features]
+default = ["program"]
+program = ["dep:rustos-rt"]
+
+# The package is both the `rustos-groupadd` group-creation library (below)
+# and the `Run` entry-point binary of the `groupadd` tool. The binary is a
+# freestanding pure-Rust program on the native Tier-1 targets and an inert
+# host stub elsewhere (see `src/run.rs`).
+[[bin]]
+name = "rustos-groupadd-run"
+path = "src/run.rs"
+
 [dependencies]
-# The stable `Errno` is the only thing `groupadd` needs from the workspace: the
-# tool writes a record to the group database through an injected seam that
+# The stable `Errno` and the `users_admin` request/response vocabulary: the
+# tool writes a record to the group registry through an injected seam that
 # speaks the frozen `Errno`, so it invents no parallel error set (§2.2) and
 # never links a kernel or driver crate (§17.4).
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The one help engine: locale fallback, the bounded structured-Markdown
+# parser, and the shared own-bundle short-help render the `-h`/`-?`
+# switches use (plans/APPS.md §4, §6).
+rustos-help = { path = "../../../lib/help", version = "=0.0.0" }
+# The shared account policy (`next_id`) and the registry size bound the
+# production database client sizes its reply buffer from — one definition,
+# never a private copy (§2.2).
+rustos-users = { path = "../../../lib/users", version = "=0.0.0" }
+
+# For the freestanding `Run` binary only: the userland runtime `rustos-rt`
+# (`_start`, canary, panic handler, `mem_map` allocator, the syscall
+# wrappers, and the standard-stream I/O). Pulled in only for the bare-metal
+# targets the program is actually built for; on the host it is not linked.
+[target.'cfg(target_os = "none")'.dependencies]
+rustos-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+# The freestanding `Run` binary also enables the help engine's syscall-backed
+# own-bundle `HelpSource` (`BundleHelp`), shared by every command app.
+rustos-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }

@@ -412,15 +412,31 @@ mod tests {
         }
     }
 
-    /// The `users` tool requests the administrative gate, the console
-    /// pair, and the filesystem gate its short-help read needs — nothing
-    /// else — and every capability it requests is within the administrator
-    /// ceiling, so an administrator's intersection loses nothing.
+    /// The store-only account-administration tools' expected request:
+    /// console write for their output, the administrative gate the
+    /// `users_admin` syscall demands, and the filesystem gate their
+    /// short-help read needs. No console-read: they never prompt. They
+    /// ship purely as discovered on-disk bundles — the boot floor never
+    /// grows — so no `spawn_layout` row or manifest constant exists for
+    /// them and their `AppInfo.toml` is pinned here directly.
+    const ADMIN_TOOL_REQUEST: &[CapabilityId] = &[
+        CapabilityId::CONSOLE_WRITE,
+        CapabilityId::USER_ADMIN,
+        CapabilityId::FS_ACCESS,
+    ];
+
+    /// The account-administration tools request the administrative gate,
+    /// their console reach, and the filesystem gate their short-help read
+    /// needs — nothing else — and every capability each requests is within
+    /// the administrator ceiling, so an administrator's intersection loses
+    /// nothing.
     #[test]
-    fn users_tool_request_is_within_the_administrator_ceiling() {
+    fn admin_tool_requests_are_within_the_administrator_ceiling() {
         let ceiling = rustos_users::administrator_ceiling();
-        for cap in USERS_TOOL_MANIFEST {
-            assert!(ceiling.contains(*cap), "{cap:?} exceeds the admin ceiling");
+        for manifest in [USERS_TOOL_MANIFEST, ADMIN_TOOL_REQUEST] {
+            for cap in manifest {
+                assert!(ceiling.contains(*cap), "{cap:?} exceeds the admin ceiling");
+            }
         }
     }
 
@@ -457,6 +473,7 @@ mod tests {
             ("cp", AppKind::Command, FILE_TOOL_REQUEST),
             ("devmgr", AppKind::Service, DEVMGR_MANIFEST),
             ("elsh", AppKind::Command, SESSION_BASELINE),
+            ("groupadd", AppKind::Command, ADMIN_TOOL_REQUEST),
             ("login", AppKind::Service, LOGIN_MANIFEST),
             ("ls", AppKind::Command, LS_MANIFEST),
             ("man", AppKind::Command, MAN_MANIFEST),
@@ -467,6 +484,7 @@ mod tests {
             ("sysinfo", AppKind::Command, SYSINFO_MANIFEST),
             ("sysinfod", AppKind::Service, SYSINFOD_MANIFEST),
             ("top", AppKind::Command, TOP_MANIFEST),
+            ("useradd", AppKind::Command, ADMIN_TOOL_REQUEST),
             ("users", AppKind::Command, USERS_TOOL_MANIFEST),
         ];
 
