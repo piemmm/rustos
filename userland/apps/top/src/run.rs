@@ -46,12 +46,12 @@ mod program {
 
     use alloc::vec::Vec;
 
-    use rustos_abi::STDOUT;
+    use rustos_abi::{InputMode, STDOUT};
     use rustos_curses::{CursesError, Result as CursesResult, Screen, Size, Tty};
     use rustos_help::{own_short_help, BundleHelp};
     use rustos_procinfo::IpcTransport;
     use rustos_rt::io::{write_stderr_line, Stdout, Write};
-    use rustos_termcap::TermType;
+    use rustos_termcap::from_term;
     use rustos_top::{parse, run, Command, Model, Scope, USAGE};
 
     /// The conventional fallback terminal grid — 80 columns by 24 rows —
@@ -148,24 +148,38 @@ mod program {
             Err(_) => Size::new(FALLBACK_ROWS, FALLBACK_COLS),
         };
 
-        // Raw input: suppress the console's local echo so keystrokes reach the
-        // viewer verbatim (a full-screen UI paints its own display and must not
-        // have input echoed onto it). Restored on exit so the next program on
-        // this console sees normal cooked echo again.
-        let _ = rustos_rt::set_echo(false);
+        // The raw input discipline: keystrokes reach the viewer verbatim
+        // with neither the local echo nor the secret-entry indicator drawn
+        // over the display the viewer paints. Restored to the cooked
+        // default on exit so the next program on this console sees normal
+        // interactive echo again.
+        let _ = rustos_rt::set_input_mode(InputMode::Raw);
 
-        let mut screen = Screen::new(RtTty, TermType::Vt100, size);
+        // The terminal's capabilities come from the inherited `TERM`
+        // (fail-closed: unknown or absent degrades to the dumb baseline
+        // inside `from_term`), never a hard-coded terminal model — the
+        // session exports the profile its console actually implements.
+        let term = rustos_rt::env_var(b"TERM")
+            .and_then(|raw| core::str::from_utf8(raw).ok())
+            .map_or(rustos_termcap::TermType::Dumb, from_term);
+        let mut screen = Screen::new(RtTty, term, size);
+        // Take over the display for the session: the alternate screen
+        // where the terminal has one (restoring the covered content on
+        // exit), an in-place erase otherwise — either way the viewer never
+        // draws over stale text from the previous command.
+        let entered = screen.enter_full_screen();
         let transport = IpcTransport;
         // Default to the caller's own processes; the `a` key toggles to the
         // global view, which `sysinfod` grants only to an entitled caller.
         let mut model = Model::new(Scope::Own);
         let result = run(&mut model, &transport, &mut screen);
+        let left = screen.leave_full_screen();
 
-        let _ = rustos_rt::set_echo(true);
+        let _ = rustos_rt::set_input_mode(InputMode::Cooked);
 
-        match result {
-            Ok(()) => 0,
-            Err(_) => 1,
+        match (result, entered, left) {
+            (Ok(()), Ok(()), Ok(())) => 0,
+            _ => 1,
         }
     }
 

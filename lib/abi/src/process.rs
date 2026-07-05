@@ -678,32 +678,37 @@ impl DescriptorTable {
     }
 
     /// The standard text-I/O table on the **primary** console (index 0):
-    /// fd 0 readable, fd 1/2/3 writable.
+    /// fd 0 readable, fd 1/2 writable, fd 3 (`stdinfo`) unattached.
     ///
-    /// The shape every bootstrap-session process inherits: `stdin` is the input source, `stdout`/`stderr`/`stdinfo` are
-    /// output sinks. The spawner backs these descriptors with the
-    /// boot path's first installed console (`plans/PI.md` P6e-3a),
-    /// but the program only ever names the fd numbers.
+    /// The shape every bootstrap-session process inherits: `stdin` is the
+    /// input source, `stdout`/`stderr` are output sinks. The spawner backs
+    /// these descriptors with the boot path's first installed console
+    /// (`plans/PI.md` P6e-3a), but the program only ever names the fd
+    /// numbers. `stdinfo` carries structured advisory records for tools
+    /// that opt in — never terminal text — so a console session leaves it
+    /// unattached: an unattached fd 3 write is discarded best-effort by the
+    /// kernel rather than smeared over the terminal (where it would corrupt
+    /// the primary output and every pipeline built on it).
     #[must_use]
     pub const fn standard() -> Self {
         Self::standard_on(0)
     }
 
     /// The standard text-I/O table attached to console `console`: fd 0
-    /// readable, fd 1/2/3 writable, every descriptor backed by the named
-    /// installed console (`plans/PI.md` P11 — one login
-    /// session per discovered text console).
+    /// readable, fd 1/2 writable, fd 3 (`stdinfo`) unattached, every
+    /// attached descriptor backed by the named installed console
+    /// (`plans/PI.md` P11 — one login session per discovered text console).
     ///
     /// The index is recorded verbatim; the kernel validates it against
     /// the installed console list when the table is established at spawn
-    /// and fails closed on an index with no console.
+    /// and fails closed on an index with no console. `stdinfo` is never
+    /// backed by a console (see [`Self::standard`]).
     #[must_use]
     pub const fn standard_on(console: u8) -> Self {
         let mut modes = [StreamMode::Closed; STD_STREAM_COUNT];
         modes[STDIN as usize] = StreamMode::Read;
         modes[STDOUT as usize] = StreamMode::Write;
         modes[STDERR as usize] = StreamMode::Write;
-        modes[STDINFO as usize] = StreamMode::Write;
         Self {
             modes,
             consoles: [console; STD_STREAM_COUNT],
@@ -846,30 +851,34 @@ mod tests {
     }
 
     #[test]
-    fn standard_table_reads_stdin_and_writes_the_rest() {
+    fn standard_table_reads_stdin_and_writes_out_and_err_only() {
         let table = DescriptorTable::standard();
         assert_eq!(table.mode(STDIN), StreamMode::Read);
         assert_eq!(table.mode(STDOUT), StreamMode::Write);
         assert_eq!(table.mode(STDERR), StreamMode::Write);
-        assert_eq!(table.mode(STDINFO), StreamMode::Write);
-        // `standard()` is the primary console: every descriptor backed
-        // by console 0.
-        for fd in [STDIN, STDOUT, STDERR, STDINFO] {
+        // `stdinfo` is advisory metadata, never terminal text: a console
+        // session leaves it unattached so its records cannot smear over
+        // stdout (the kernel discards unattached fd 3 writes best-effort).
+        assert_eq!(table.mode(STDINFO), StreamMode::Closed);
+        // `standard()` is the primary console: every attached descriptor
+        // backed by console 0.
+        for fd in [STDIN, STDOUT, STDERR] {
             assert_eq!(table.console(fd), 0);
         }
         assert_eq!(table, DescriptorTable::standard_on(0));
     }
 
     #[test]
-    fn standard_on_attaches_every_descriptor_to_the_named_console() {
+    fn standard_on_attaches_every_text_descriptor_to_the_named_console() {
         let table = DescriptorTable::standard_on(1);
-        for fd in [STDIN, STDOUT, STDERR, STDINFO] {
+        for fd in [STDIN, STDOUT, STDERR] {
             assert_eq!(table.console(fd), 1);
         }
         // The direction shape is identical to the primary table; only
-        // the backing console differs.
+        // the backing console differs, and `stdinfo` stays unattached.
         assert_eq!(table.mode(STDIN), StreamMode::Read);
         assert_eq!(table.mode(STDOUT), StreamMode::Write);
+        assert_eq!(table.mode(STDINFO), StreamMode::Closed);
         assert_ne!(table, DescriptorTable::standard());
     }
 

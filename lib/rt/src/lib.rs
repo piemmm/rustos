@@ -59,10 +59,10 @@ extern crate alloc;
 use rustos_abi::input::KeyInput;
 use rustos_abi::waitset::{WaitSetOp, WaitSourceKind};
 use rustos_abi::{
-    BootId, FileStat, HwNode, LimitKind, MapFlags, OpenFlags, Origin, ResourceLimit, Signal,
-    SyscallNumber, TerminalSize, Time64, WaitFlags, WallClockReading, WallTimeState, BOOT_ID_LEN,
-    CONSOLE_INHERIT, ORIGIN_WIRE_LEN, SPAWN_UID_INHERIT, STDERR, STDIN, STDINFO, STDOUT,
-    TERMINAL_SIZE_WIRE_LEN,
+    BootId, FileStat, HwNode, InputMode, LimitKind, MapFlags, OpenFlags, Origin, ResourceLimit,
+    Signal, SyscallNumber, TerminalSize, Time64, WaitFlags, WallClockReading, WallTimeState,
+    BOOT_ID_LEN, CONSOLE_INHERIT, ORIGIN_WIRE_LEN, SPAWN_UID_INHERIT, STDERR, STDIN, STDINFO,
+    STDOUT, TERMINAL_SIZE_WIRE_LEN,
 };
 use rustos_abi_trap::raw_syscall;
 
@@ -141,8 +141,8 @@ const NUM_USERS_ADMIN: u64 = SyscallNumber::USERS_ADMIN.as_u16() as u64;
 /// `console_count` syscall number (as above).
 const NUM_CONSOLE_COUNT: u64 = SyscallNumber::CONSOLE_COUNT.as_u16() as u64;
 
-/// `stream_echo` syscall number (as above).
-const NUM_STREAM_ECHO: u64 = SyscallNumber::STREAM_ECHO.as_u16() as u64;
+/// `stream_input_mode` syscall number (as above).
+const NUM_STREAM_INPUT_MODE: u64 = SyscallNumber::STREAM_INPUT_MODE.as_u16() as u64;
 
 /// `key_inject` syscall number (as above).
 const NUM_KEY_INJECT: u64 = SyscallNumber::KEY_INJECT.as_u16() as u64;
@@ -410,30 +410,33 @@ fn stream_read(fd: u32, buf: &mut [u8]) -> usize {
     (read as usize).min(buf.len())
 }
 
-/// Set whether standard input (fd 0) echoes the bytes it reads back to its
-/// console (`SyscallNumber::STREAM_ECHO` — terminal local
-/// echo), returning the raw signed register (`0` on success, else
-/// `-errno`).
+/// Set the read line discipline of standard input (fd 0)
+/// (`SyscallNumber::STREAM_INPUT_MODE`), returning the raw signed register
+/// (`0` on success, else `-errno`).
 ///
-/// Console echo defaults to **on**, so an interactive user sees what they
-/// type at a [`stdin`] read. A program suppresses it around a secret it
-/// must not render — login disables echo before reading a password and
-/// re-enables it afterwards (never echo a credential).
-/// Requires `CAP_CONSOLE_READ`; the kernel performs the echo itself as part
-/// of the read line discipline, so no `CAP_CONSOLE_WRITE` is needed. A
-/// build with no console wired, or an fd 0 that is not a readable stream,
-/// fails closed with `-errno`; the wrapper surfaces it
+/// The console defaults to [`InputMode::Cooked`], so an interactive user
+/// sees what they type at a [`stdin`] read. A program reading a secret it
+/// must not render selects [`InputMode::Secret`] (echo suppressed, the
+/// activity indicator shown instead — login's password read); a full-screen
+/// program that paints its own display selects [`InputMode::Raw`] (echo
+/// suppressed, nothing drawn). Either way the caller restores
+/// [`InputMode::Cooked`] when it is done, so the next program on the console
+/// sees the interactive default.
+/// Requires `CAP_CONSOLE_READ`; the kernel performs the echo/indicator
+/// itself as part of the read line discipline, so no `CAP_CONSOLE_WRITE` is
+/// needed. A build with no console wired, or an fd 0 that is not a readable
+/// stream, fails closed with `-errno`; the wrapper surfaces it
 /// verbatim so the caller decides how to react.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0 on success, else -errno).
-pub fn set_echo(enabled: bool) -> i64 {
+pub fn set_input_mode(mode: InputMode) -> i64 {
     // SAFETY: `raw_syscall` is always safe to invoke; the call carries no
     // pointers and the kernel validates the capability and resolves fd 0
     // before touching any state.
     let ret = unsafe {
         raw_syscall(
-            NUM_STREAM_ECHO,
-            [u64::from(STDIN), u64::from(enabled), 0, 0, 0, 0],
+            NUM_STREAM_INPUT_MODE,
+            [u64::from(STDIN), u64::from(mode.as_u32()), 0, 0, 0, 0],
         )
     };
     ret as i64
@@ -3028,22 +3031,17 @@ mod tests {
     }
 
     #[test]
-    fn set_echo_marshals_stdin_fd_and_the_enabled_flag() {
-        // Enabling echo marshals fd 0 and a non-zero flag.
-        let (number, args) = capture(0, || {
-            assert_eq!(set_echo(true), 0);
-        });
-        assert_eq!(number, NUM_STREAM_ECHO);
-        assert_eq!(args[0], u64::from(STDIN));
-        assert_eq!(args[1], 1);
-        assert_eq!(&args[2..], &[0, 0, 0, 0]);
-
-        // Disabling echo marshals fd 0 and a zero flag.
-        let (_, args) = capture(0, || {
-            assert_eq!(set_echo(false), 0);
-        });
-        assert_eq!(args[0], u64::from(STDIN));
-        assert_eq!(args[1], 0);
+    fn set_input_mode_marshals_stdin_fd_and_the_mode() {
+        // Each mode marshals fd 0 and its own wire discriminant.
+        for mode in [InputMode::Cooked, InputMode::Secret, InputMode::Raw] {
+            let (number, args) = capture(0, || {
+                assert_eq!(set_input_mode(mode), 0);
+            });
+            assert_eq!(number, NUM_STREAM_INPUT_MODE);
+            assert_eq!(args[0], u64::from(STDIN));
+            assert_eq!(args[1], u64::from(mode.as_u32()));
+            assert_eq!(&args[2..], &[0, 0, 0, 0]);
+        }
     }
 
     #[test]
@@ -3109,13 +3107,14 @@ mod tests {
     }
 
     #[test]
-    fn set_echo_surfaces_negative_errno_encoding() {
-        // A console-less build refuses the toggle with `NotImplemented`;
-        // the wrapper surfaces the raw `-errno` register unchanged.
+    fn set_input_mode_surfaces_negative_errno_encoding() {
+        // A console-less build refuses the mode change with
+        // `NotImplemented`; the wrapper surfaces the raw `-errno` register
+        // unchanged.
         let want = -i64::from(rustos_abi::Errno::NotImplemented.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
-            assert_eq!(set_echo(true), want);
+            assert_eq!(set_input_mode(InputMode::Cooked), want);
         });
     }
 

@@ -37,7 +37,7 @@ use rustos_abi::CapabilityId;
 pub use rustos_users::SESSION_BASELINE;
 
 /// The login service's manifest: the console pair for its prompt
-/// (`stream_read`/`stream_write`/`stream_echo` over its inherited
+/// (`stream_read`/`stream_write`/`stream_input_mode` over its inherited
 /// per-console streams), `CAP_PROC_SPAWN` plus `CAP_SPAWN_AS_USER` for the
 /// one privileged identity transition (starting the authenticated
 /// account's shell under that account's kernel-resolved credential and
@@ -111,7 +111,7 @@ pub const SYSINFO_MANIFEST: &[CapabilityId] =
 
 /// The `top` tool's manifest: `CAP_CONSOLE_WRITE` for its full-screen
 /// display on fd 1, `CAP_CONSOLE_READ` for raw-mode keystrokes on fd 0
-/// (the latter also authorises its `stream_echo` echo suppression), and
+/// (the latter also authorises its `stream_input_mode` raw discipline), and
 /// `CAP_FS_ACCESS` because its short-help switches read the bundle's own
 /// `Help/` tree through the secured VFS (which still authorises every
 /// path per-inode under the caller's attested identity); `terminal_size`
@@ -146,8 +146,8 @@ pub const CAT_MANIFEST: &[CapabilityId] = &[
 
 /// The `man` help tool's manifest: `CAP_CONSOLE_WRITE` for the rendered
 /// page on fd 1 (and diagnostics on fd 2), `CAP_CONSOLE_READ` for the
-/// pager's keystrokes on fd 0 (also authorising its `stream_echo` echo
-/// suppression, as in `top`), and `CAP_FS_ACCESS` because reading a
+/// pager's keystrokes on fd 0 (also authorising its `stream_input_mode`
+/// raw discipline, as in `top`), and `CAP_FS_ACCESS` because reading a
 /// bundle's `Help/` documents *is* the tool's job — the secured VFS still
 /// authorises every path per-inode under the caller's attested identity.
 #[cfg(any(test, not(all(freestanding, kernel_isa = "aarch64"))))]
@@ -157,9 +157,32 @@ pub const MAN_MANIFEST: &[CapabilityId] = &[
     CapabilityId::FS_ACCESS,
 ];
 
+/// The `clear` tool's manifest: `CAP_CONSOLE_WRITE` for the clear sequence
+/// on fd 1 and `CAP_FS_ACCESS` because its short-help switches read the
+/// bundle's own `Help/` tree through the secured VFS (which still
+/// authorises every path per-inode under the caller's attested identity).
+/// No `CAP_CONSOLE_READ`: the tool reads no input and leaves the input
+/// discipline alone.
+#[cfg(any(test, not(all(freestanding, kernel_isa = "aarch64"))))]
+pub const CLEAR_MANIFEST: &[CapabilityId] = &[CapabilityId::CONSOLE_WRITE, CapabilityId::FS_ACCESS];
+
+/// The `reset` tool's manifest: `CAP_CONSOLE_WRITE` for the restoration
+/// sequence on fd 1, `CAP_CONSOLE_READ` because restoring the cooked input
+/// discipline (`stream_input_mode`) belongs to the principal that reads
+/// the console, and `CAP_FS_ACCESS` because its short-help switches read
+/// the bundle's own `Help/` tree through the secured VFS (which still
+/// authorises every path per-inode under the caller's attested identity).
+#[cfg(any(test, not(all(freestanding, kernel_isa = "aarch64"))))]
+pub const RESET_MANIFEST: &[CapabilityId] = &[
+    CapabilityId::CONSOLE_WRITE,
+    CapabilityId::CONSOLE_READ,
+    CapabilityId::FS_ACCESS,
+];
+
 /// The `users` account-administration tool's manifest: the console pair
-/// for its interactive prompts (`stream_read`/`stream_write`/`stream_echo`
-/// over its inherited streams — echo off around passwords) plus
+/// for its interactive prompts (`stream_read`/`stream_write`/
+/// `stream_input_mode` over its inherited streams — the secret discipline
+/// around passwords) plus
 /// `CAP_USER_ADMIN` for the `users_admin` syscall it exists to drive.
 /// Deliberately **above** the session baseline: only an account whose
 /// ceiling carries `CAP_USER_ADMIN` (an administrator, §4.3 of
@@ -312,6 +335,26 @@ mod tests {
     }
 
     #[test]
+    fn clear_manifest_is_pinned() {
+        assert_eq!(
+            set(CLEAR_MANIFEST),
+            set(&[CapabilityId::CONSOLE_WRITE, CapabilityId::FS_ACCESS])
+        );
+    }
+
+    #[test]
+    fn reset_manifest_is_pinned() {
+        assert_eq!(
+            set(RESET_MANIFEST),
+            set(&[
+                CapabilityId::CONSOLE_WRITE,
+                CapabilityId::CONSOLE_READ,
+                CapabilityId::FS_ACCESS,
+            ])
+        );
+    }
+
+    #[test]
     fn man_manifest_is_pinned() {
         assert_eq!(
             set(MAN_MANIFEST),
@@ -356,8 +399,10 @@ mod tests {
         let baseline = set(SESSION_BASELINE);
         for manifest in [
             CAT_MANIFEST,
+            CLEAR_MANIFEST,
             LS_MANIFEST,
             PS_MANIFEST,
+            RESET_MANIFEST,
             SYSINFO_MANIFEST,
             TOP_MANIFEST,
         ] {
@@ -397,12 +442,14 @@ mod tests {
         // directly, never a store bundle.
         let embedded: &[(&str, AppKind, &[CapabilityId])] = &[
             ("cat", AppKind::Command, CAT_MANIFEST),
+            ("clear", AppKind::Command, CLEAR_MANIFEST),
             ("devmgr", AppKind::Service, DEVMGR_MANIFEST),
             ("elsh", AppKind::Command, SESSION_BASELINE),
             ("login", AppKind::Service, LOGIN_MANIFEST),
             ("ls", AppKind::Command, LS_MANIFEST),
             ("man", AppKind::Command, MAN_MANIFEST),
             ("ps", AppKind::Command, PS_MANIFEST),
+            ("reset", AppKind::Command, RESET_MANIFEST),
             ("sysinfo", AppKind::Command, SYSINFO_MANIFEST),
             ("sysinfod", AppKind::Service, SYSINFOD_MANIFEST),
             ("top", AppKind::Command, TOP_MANIFEST),

@@ -15,11 +15,11 @@
 //!   prompts go to fd 1, input lines come from fd 0. The console stream
 //!   backing performs terminal local echo in the kernel's read line
 //!   discipline (`plans/PI.md` P11), on by default, so a typed username is
-//!   visible. The password read suppresses echo through the `stream_echo`
-//!   syscall (`rustos_rt::set_echo`) before reading and restores it after,
-//!   so the secret is never rendered (never echo a
-//!   credential); if echo cannot be disabled the read fails closed rather
-//!   than echoing the password.
+//!   visible. The password read selects the secret discipline through the
+//!   `stream_input_mode` syscall (`rustos_rt::set_input_mode`) before
+//!   reading and restores the cooked default after, so the secret is never
+//!   rendered (never echo a credential); if the mode cannot be selected the
+//!   read fails closed rather than echoing the password.
 //! * [`rustos_login::UsersAuthenticator`] over the user database obtained
 //!   through the capability-gated `users_db_read` syscall (`CAP_USERS_READ`) and re-parsed with the fail-closed `rustos-users`
 //!   parser. When no database is held — an installer image, or the boot
@@ -62,7 +62,7 @@ mod program {
 
     use rustos_abi::elevate::{elevate_endpoint, ELEVATE_MAX_REQUEST, ELEVATE_REPLY_LEN};
     use rustos_abi::{
-        Errno, Origin, WaitSetOp, WaitSourceKind, CONSOLE_INHERIT, ORIGIN_CONSOLE_NONE,
+        Errno, InputMode, Origin, WaitSetOp, WaitSourceKind, CONSOLE_INHERIT, ORIGIN_CONSOLE_NONE,
         ORIGIN_WIRE_LEN,
     };
     use rustos_caps::CapabilitySet;
@@ -150,7 +150,7 @@ mod program {
             // rendered. If echo cannot be disabled (the
             // toggle failed), fail closed rather than reading a secret that
             // would echo.
-            let toggled = rustos_rt::set_echo(false);
+            let toggled = rustos_rt::set_input_mode(InputMode::Secret);
             if toggled < 0 {
                 return Err(errno_from(toggled));
             }
@@ -162,7 +162,7 @@ mod program {
             // ourselves to match the un-suppressed prompts — a plain line
             // feed, which the console line discipline cooks to CR-LF so the
             // cursor returns to column zero.
-            let _ = rustos_rt::set_echo(true);
+            let _ = rustos_rt::set_input_mode(InputMode::Cooked);
             let _ = Stdout.write_all(b"\n");
             result
         }

@@ -78,6 +78,18 @@ pub const CAT_PATH: &[u8] = b"/System/Apps/cat.app/Run";
 /// every target.
 pub const MAN_PATH: &[u8] = b"/System/Apps/man.app/Run";
 
+/// Absolute path the `clear` tool program is registered under: the system
+/// app store's command-named bundle, so the shell resolves the bare word
+/// `clear` to it (`plans/APPS.md` §8). One OS-wide path contract, identical
+/// on every target.
+pub const CLEAR_PATH: &[u8] = b"/System/Apps/clear.app/Run";
+
+/// Absolute path the `reset` tool program is registered under: the system
+/// app store's command-named bundle, so the shell resolves the bare word
+/// `reset` to it (`plans/APPS.md` §8). One OS-wide path contract, identical
+/// on every target.
+pub const RESET_PATH: &[u8] = b"/System/Apps/reset.app/Run";
+
 /// Absolute path the `users` account-administration tool is registered
 /// under: the system app store's command-named bundle, so an
 /// administrator's shell resolves the bare word `users` to it
@@ -88,8 +100,8 @@ pub const USERS_CLI_PATH: &[u8] = b"/System/Apps/users.app/Run";
 #[cfg(test)]
 mod tests {
     use super::{
-        CAT_PATH, DEVMGR_PATH, LOGIN_PATH, LS_PATH, MAN_PATH, PS_PATH, SHELL_PATH, SYSINFOD_PATH,
-        SYSINFO_PATH, TOP_PATH, USERS_CLI_PATH,
+        CAT_PATH, CLEAR_PATH, DEVMGR_PATH, LOGIN_PATH, LS_PATH, MAN_PATH, PS_PATH, RESET_PATH,
+        SHELL_PATH, SYSINFOD_PATH, SYSINFO_PATH, TOP_PATH, USERS_CLI_PATH,
     };
     use rustos_abi::{BundleEntry, BUNDLE_SUFFIX, SYSTEM_APP_STORE, SYSTEM_SERVICE_STORE};
 
@@ -125,9 +137,11 @@ mod tests {
         for (path, command) in [
             (SHELL_PATH, "elsh"),
             (CAT_PATH, "cat"),
+            (CLEAR_PATH, "clear"),
             (LS_PATH, "ls"),
             (MAN_PATH, "man"),
             (PS_PATH, "ps"),
+            (RESET_PATH, "reset"),
             (SYSINFO_PATH, "sysinfo"),
             (TOP_PATH, "top"),
             (USERS_CLI_PATH, "users"),

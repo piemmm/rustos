@@ -2,8 +2,9 @@
 
 Stage 6 ships a set of small command-line utilities, each its own crate.
 This page documents the ones that have landed (`sysinfo`, `ps`, `man`,
-`cat`, `ls`, `rm`, `cp`, `mv`, `chmod`, `chown`, `getcap`, and `setcap`)
-and is extended as the others (`mount`, …) arrive.
+`cat`, `clear`, `reset`, `ls`, `rm`, `cp`, `mv`, `chmod`, `chown`,
+`getcap`, and `setcap`) and is extended as the others (`mount`, …)
+arrive.
 
 ## `sysinfo` — the System Information CLI (`userland/shell/sysinfo`)
 
@@ -396,6 +397,53 @@ fail-closed paths, the short-help render from a Help document with its
 usage-banner fallback, and the switch-drift pin that every locale's
 `OPTIONS` section documents exactly the parser's switches
 (`plans/APPS.md` §3.1).
+
+## `clear` — clear the terminal screen (`userland/apps/clear`)
+
+`rustos-clear` writes the byte sequence that moves the cursor home and
+erases the display — the ncurses `clear` model (a `plans/APPS.md`
+command app registered at `/System/Apps/clear.app/Run`, so the shell
+resolves the bare word `clear` to it). Which bytes are written is
+decided by the inherited `TERM` through the compiled-in `lib/termcap`
+capability database, and the sequence is encoded through the one shared
+`lib/vt` vocabulary — never a hand-rolled escape string. Fail-closed: an
+unknown `TERM` degrades to the dumb baseline, which cannot clear, and
+the tool reports that on stderr (exit `1`) instead of printing escape
+garbage. `-x` (the GNU "do not clear the scrollback" switch) is accepted
+for script compatibility; a RustOS console keeps no scrollback, so the
+output is identical with and without it — the divergence is documented
+in the tool's `Help/` documents. `-h`/`-?` render the tool's own short
+help through the shared `lib/help` engine.
+
+The crate is `no_std` (with `alloc`), has no `unsafe`, and no
+`unwrap`/`expect`/`panic!` in production paths. Its manifest requests
+`CAP_CONSOLE_WRITE` and `CAP_FS_ACCESS` — within the session baseline.
+`cargo test -p rustos-clear` drives the parser (every switch and the
+usage-error path), the per-terminal byte selection (xterm/VT100 clear,
+dumb refusal), and the locale switch-drift pin.
+
+## `reset` — restore the terminal to a sane state (`userland/apps/reset`)
+
+`rustos-reset` undoes the state a crashed full-screen program can leave
+behind (a `plans/APPS.md` command app registered at
+`/System/Apps/reset.app/Run`). It first restores the **cooked** input
+discipline through `stream_input_mode` (`rustos_rt::set_input_mode`) — a
+crashed viewer may have left the console raw, with neither echo nor
+indicator — then writes the restoration sequence for the `TERM`-named
+terminal: leave the alternate screen, show the cursor, reset the graphic
+rendition and the scroll region, and finally home + erase. Every
+operation is a `rustos_vt::Op` the terminal's `lib/termcap` profile
+accepts; an operation the terminal lacks is omitted, and the dumb
+baseline gets only the discipline restore. `-h`/`-?` render the tool's
+own short help through the shared `lib/help` engine.
+
+The crate is `no_std` (with `alloc`), has no `unsafe`, and no
+`unwrap`/`expect`/`panic!` in production paths. Its manifest requests
+`CAP_CONSOLE_WRITE`, `CAP_CONSOLE_READ` (the discipline restore), and
+`CAP_FS_ACCESS` — within the session baseline. `cargo test -p
+rustos-reset` drives the parser, the per-terminal restoration sequences
+(xterm full set, VT100 subset, dumb empty), and the locale switch-drift
+pin.
 
 ## `ls` — list directory contents (`userland/apps/ls`)
 

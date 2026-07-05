@@ -78,7 +78,7 @@ use rustos_abi::hwtree::{HwResource, HwResourceKind};
 use rustos_abi::input::KeyInput;
 use rustos_abi::sysinfo::{MountRecord, ProcessRecord};
 use rustos_abi::{
-    decode_log_record, BootId, CapabilityId, DescriptorTable, DirEntry, Errno, FileStat,
+    decode_log_record, BootId, CapabilityId, DescriptorTable, DirEntry, Errno, FileStat, InputMode,
     IntrospectDomain, IrqHandle, LimitKind, MapFlags, OpenFlags, ProcId, ProcessStart, RandomFlags,
     ResourceLimit, Signal, StreamMode, SyscallNumber, Time64, WaitFlags, WaitSetOp, WaitSourceKind,
     WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, FS_IO_MAX, FS_NAME_MAX,
@@ -2131,6 +2131,16 @@ where
         // all-`Closed` default and fails here too.
         let streams = self.aspaces.read().streams(caller.task_id);
         if streams.mode(fd) != StreamMode::Write {
+            // `stdinfo` is the one exception to the fail-closed deny: it is
+            // advisory by contract — best-effort and non-blocking with no
+            // consumer attached — so an unattached fd 3 accepts and discards
+            // the bytes rather than failing the producer or, worse, falling
+            // back to a device. The bytes are reported consumed without
+            // being read: nothing consumes them, so copying them in would
+            // be work paid for no observer.
+            if fd == rustos_abi::STDINFO && streams.mode(fd) == StreamMode::Closed {
+                return Ok(len as u64);
+            }
             return Err(Errno::NotFound);
         }
         // Resolve the descriptor's console index against the installed
@@ -2240,9 +2250,9 @@ where
         // terminal echo is enabled (local echo), so an
         // interactive user sees what they type. The kernel owns the read
         // line discipline, so this needs no separate `CAP_CONSOLE_WRITE`;
-        // it is a no-op while a caller has suppressed echo for a password
-        // read (`stream_echo`). Best-effort and cosmetic — it never fails
-        // the read the caller asked for.
+        // it is a no-op while a caller has selected the secret or raw
+        // discipline (`stream_input_mode`). Best-effort and cosmetic — it
+        // never fails the read the caller asked for.
         device.echo_bytes(&payload[..read]);
 
         // Copy the bytes actually read out to the caller's address space
@@ -2436,13 +2446,17 @@ where
         Ok(self.consoles.len() as u64)
     }
 
-    fn stream_echo(&self, caller: &CallerContext<'_>, fd: u32, enabled: u32) -> SyscallResult {
-        // Resolve `fd` against the caller's per-process descriptor table
-        // *before* touching any state: echo is a
-        // property of an *input* stream's console, so `fd` must be a
-        // readable inherited stream — anything else fails closed with
-        // `NotFound`, never leaking which case occurred. An unregistered
-        // caller resolves to the all-`Closed` default and fails here too.
+    fn stream_input_mode(&self, caller: &CallerContext<'_>, fd: u32, mode: u32) -> SyscallResult {
+        // Decode the mode fail-closed before touching any state: the
+        // reserved `0` and every unknown value are rejected rather than
+        // interpreted as a discipline the caller did not name.
+        let mode = InputMode::from_u32(mode)?;
+        // Resolve `fd` against the caller's per-process descriptor table:
+        // the discipline is a property of an *input* stream's console, so
+        // `fd` must be a readable inherited stream — anything else fails
+        // closed with `NotFound`, never leaking which case occurred. An
+        // unregistered caller resolves to the all-`Closed` default and
+        // fails here too.
         let streams = self.aspaces.read().streams(caller.task_id);
         if streams.mode(fd) != StreamMode::Read {
             return Err(Errno::NotFound);
@@ -2450,15 +2464,16 @@ where
         // Resolve the descriptor's console against the installed list. A
         // missing console — including the empty pre-install list —
         // announces the inert interface rather than
-        // pretending the toggle took effect.
+        // pretending the change took effect.
         let Some(device) = self.consoles.get(usize::from(streams.console(fd))) else {
             return Err(Errno::NotImplemented);
         };
-        // The dispatcher already checked `CAP_CONSOLE_READ`. Any non-zero
-        // value enables echo; zero disables it (the ABI contract). The
-        // toggle is the program's own terminal control — login disables
-        // echo around a password read so the secret is never rendered.
-        device.set_echo(enabled != 0);
+        // The dispatcher already checked `CAP_CONSOLE_READ`. The mode is
+        // the program's own terminal control — login selects secret around
+        // a password read so the credential is never rendered; a
+        // full-screen viewer selects raw so nothing at all is drawn over
+        // the display it paints.
+        device.set_input_mode(mode);
         Ok(0)
     }
 
@@ -8077,6 +8092,53 @@ mod tests {
         assert!(console.written.lock().is_empty());
     }
 
+    /// `stream_write` to an **unattached** `stdinfo` (fd 3) is the one
+    /// advisory exception: the bytes are accepted and discarded —
+    /// best-effort and non-blocking with no consumer attached — so a
+    /// producer never fails and, critically, its records never smear over
+    /// the terminal a standard session runs on.
+    #[test]
+    fn stream_write_to_unattached_stdinfo_discards_the_bytes() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let record = b"{\"version\":1}";
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, record);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        // The standard session table leaves fd 3 unattached (Closed).
+        aspaces
+            .write()
+            .set_streams(SecTaskId(2), DescriptorTable::standard());
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let console: &'static RecordingConsole = Box::leak(Box::new(RecordingConsole::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_consoles(single_write_console(console));
+        // The whole record is reported consumed (the producer never loops
+        // or fails), but nothing reaches any console device.
+        assert_eq!(
+            h.stream_write(&ctx, rustos_abi::STDINFO, 0x1000, record.len()),
+            Ok(record.len() as u64)
+        );
+        assert!(console.written.lock().is_empty());
+    }
+
     /// `stream_read` from a descriptor that is not a readable inherited
     /// stream fails closed with `NotFound` before touching the device: a write-only fd (`STDOUT`) and a closed
     /// (unestablished) caller.
@@ -10129,11 +10191,11 @@ mod tests {
         assert_eq!(echo.written.lock().as_slice(), b"hi\r\n");
     }
 
-    /// `stream_echo` disabling echo on the read descriptor's console
-    /// stops a subsequent `stream_read` from echoing (the password-read
-    /// contract — never render a credential).
+    /// `stream_input_mode` selecting the secret discipline on the read
+    /// descriptor's console stops a subsequent `stream_read` from echoing
+    /// (the password-read contract — never render a credential).
     #[test]
-    fn stream_echo_disables_console_echo_for_the_following_read() {
+    fn stream_input_mode_secret_disables_console_echo_for_the_following_read() {
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -10168,15 +10230,35 @@ mod tests {
             .write()
             .set_streams(SecTaskId(2), DescriptorTable::standard());
 
-        // Disable echo on the input descriptor, then read: nothing is
-        // echoed back.
-        assert_eq!(h.stream_echo(&ctx, STDIN, 0), Ok(0));
+        // Select the secret discipline on the input descriptor, then read:
+        // nothing is echoed back.
+        assert_eq!(
+            h.stream_input_mode(&ctx, STDIN, InputMode::Secret.as_u32()),
+            Ok(0)
+        );
         assert_eq!(h.stream_read(&ctx, STDIN, 0x1000, 16), Ok(6));
         assert!(echo.written.lock().is_empty());
 
-        // A `stream_echo` on a descriptor that is not a readable stream
-        // fails closed rather than toggling another console.
-        assert_eq!(h.stream_echo(&ctx, STDOUT, 1), Err(Errno::NotFound));
+        // The raw discipline suppresses echo the same way (a full-screen
+        // program's keystrokes never paint over its display).
+        assert_eq!(
+            h.stream_input_mode(&ctx, STDIN, InputMode::Raw.as_u32()),
+            Ok(0)
+        );
+        assert_eq!(h.stream_read(&ctx, STDIN, 0x1000, 16), Ok(6));
+        assert!(echo.written.lock().is_empty());
+
+        // The reserved `0` and unknown discriminants fail closed before
+        // any state is touched.
+        assert_eq!(h.stream_input_mode(&ctx, STDIN, 0), Err(Errno::OutOfRange));
+        assert_eq!(h.stream_input_mode(&ctx, STDIN, 99), Err(Errno::OutOfRange));
+
+        // A `stream_input_mode` on a descriptor that is not a readable
+        // stream fails closed rather than changing another console.
+        assert_eq!(
+            h.stream_input_mode(&ctx, STDOUT, InputMode::Cooked.as_u32()),
+            Err(Errno::NotFound)
+        );
     }
 
     /// Build a writable user address space at `0x1000` seeded with one

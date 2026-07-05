@@ -581,6 +581,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-clear"
+version = "0.0.0"
+dependencies = [
+ "rustos-help",
+ "rustos-rt",
+ "rustos-termcap",
+ "rustos-vt",
+]
+
+[[package]]
 name = "rustos-cmdres"
 version = "0.0.0"
 dependencies = [
@@ -1384,6 +1394,17 @@ name = "rustos-raster"
 version = "0.0.0"
 dependencies = [
  "rustos-theme",
+]
+
+[[package]]
+name = "rustos-reset"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-help",
+ "rustos-rt",
+ "rustos-termcap",
+ "rustos-vt",
 ]
 
 [[package]]

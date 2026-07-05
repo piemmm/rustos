@@ -49,7 +49,7 @@ mod program {
     use rustos_abi::elevate::{
         elevate_endpoint, ElevateReply, ElevateRequest, ELEVATE_MAX_REQUEST, ELEVATE_REPLY_LEN,
     };
-    use rustos_abi::{Errno, LimitKind, ResourceLimit};
+    use rustos_abi::{Errno, InputMode, LimitKind, ResourceLimit};
     use rustos_elsh::{
         parse_invocation, Console, Elevator, Environment, Invocation, LaunchSpec, LimitStore, Pid,
         ProcessHost, ReplInput, Shell, Signal, WaitOutcome, USAGE,
@@ -294,18 +294,18 @@ mod program {
 
     impl Elevator for RtElevator {
         fn read_secret(&self, buf: &mut [u8]) -> Result<usize, Errno> {
-            // A credential must never render: suppress the console echo for
-            // the read and fail closed if it cannot be suppressed.
-            let toggled = rustos_rt::set_echo(false);
+            // A credential must never render: select the secret discipline
+            // for the read and fail closed if it cannot be selected.
+            let toggled = rustos_rt::set_input_mode(InputMode::Secret);
             if toggled < 0 {
                 return Err(errno_from(toggled));
             }
             let result = Self::read_line_raw(buf);
-            // Restoring echo is best-effort — it cannot compromise the
-            // secret already read. The un-echoed Return key advanced no
-            // line, so advance one ourselves with a plain line feed, which
-            // the console line discipline cooks to CR-LF.
-            let _ = rustos_rt::set_echo(true);
+            // Restoring the cooked default is best-effort — it cannot
+            // compromise the secret already read. The un-echoed Return key
+            // advanced no line, so advance one ourselves with a plain line
+            // feed, which the console line discipline cooks to CR-LF.
+            let _ = rustos_rt::set_input_mode(InputMode::Cooked);
             let _ = Stdout.write_all(b"\n");
             result
         }

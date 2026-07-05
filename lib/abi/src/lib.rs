@@ -144,7 +144,7 @@ pub use sysinfo::{
     SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERIES, SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN,
     SYSINFO_REPLY_STATUS_LEN, SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1,
 };
-pub use terminal::{TerminalSize, TERMINAL_SIZE_WIRE_LEN};
+pub use terminal::{InputMode, TerminalSize, TERMINAL_SIZE_WIRE_LEN};
 pub use time::{
     coarsen_clock_ns, Duration64, Time64, WallClockReading, WallTimeState,
     COARSE_CLOCK_GRANULARITY_NS, NANOS_PER_SEC,

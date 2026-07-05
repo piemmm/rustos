@@ -256,29 +256,31 @@ impl SyscallNumber {
     /// [`crate::CapabilityId::CONSOLE_WRITE`]: console topology belongs
     /// to the principals that drive consoles, not to every task.
     pub const CONSOLE_COUNT: Self = Self(20);
-    /// Set whether one of the calling process's inherited input streams
-    /// echoes the bytes it reads back to its console (
-    /// `plans/PI.md` P11 — terminal local echo).
+    /// Set the console read line discipline of one of the calling
+    /// process's inherited input streams (`plans/PI.md` P11 — the
+    /// [`crate::InputMode`]: cooked, secret, or raw).
     ///
     /// Arguments: `fd: u32` (the input descriptor — normally
-    /// [`crate::STDIN`]) and `enabled: u32` (`0` disables echo, any other
-    /// value enables it). Returns an error code (`Ok(0)` on success).
-    /// Echo is the line-discipline behaviour of the console *backing*:
-    /// while it is on, every byte a [`SyscallNumber::STREAM_READ`] of `fd`
-    /// consumes is written back to that descriptor's console output so an
-    /// interactive user sees what they type. The kernel performs the echo
-    /// itself (it owns the line discipline), so a reader needs no separate
-    /// [`crate::CapabilityId::CONSOLE_WRITE`] for it; the call is the
-    /// program's contract for suppressing echo — login disables it around
-    /// a password read so the secret is never rendered, then restores it
-    /// (fail closed; never echo a credential). Console
-    /// echo defaults to **on**. Gated by
-    /// [`crate::CapabilityId::CONSOLE_READ`]: terminal echo belongs to the
-    /// principal that reads the console, never to every task. An `fd` that
-    /// is not a readable inherited stream fails closed with
+    /// [`crate::STDIN`]) and `mode: u32` (an [`crate::InputMode`]
+    /// discriminant; the reserved `0` and every unknown value fail closed
+    /// with [`crate::Errno::OutOfRange`]). Returns an error code (`Ok(0)`
+    /// on success). The mode is the line-discipline behaviour of the
+    /// console *backing*: **cooked** (the default) echoes every byte a
+    /// [`SyscallNumber::STREAM_READ`] of `fd` consumes back to that
+    /// descriptor's console output so an interactive user sees what they
+    /// type; **secret** suppresses echo and shows the activity indicator
+    /// instead (login's password read — the secret is never rendered but
+    /// the operator sees progress); **raw** suppresses echo and draws
+    /// nothing (a full-screen curses program paints its own display). The
+    /// kernel performs the echo/indicator itself (it owns the line
+    /// discipline), so a reader needs no separate
+    /// [`crate::CapabilityId::CONSOLE_WRITE`] for it. Gated by
+    /// [`crate::CapabilityId::CONSOLE_READ`]: the input discipline belongs
+    /// to the principal that reads the console, never to every task. An
+    /// `fd` that is not a readable inherited stream fails closed with
     /// [`crate::Errno::NotFound`]; a build with no console wired fails
     /// closed with [`crate::Errno::NotImplemented`].
-    pub const STREAM_ECHO: Self = Self(21);
+    pub const STREAM_INPUT_MODE: Self = Self(21);
     /// Inject one decoded keyboard *key edge* into the kernel input-focus
     /// arbiter (`plans/PI.md` P11 — input follows the
     /// surface owner).
@@ -1378,7 +1380,7 @@ mod tests {
         assert_eq!(SyscallNumber::RLIMIT_SET.as_u16(), 18);
         assert_eq!(SyscallNumber::USERS_DB_READ.as_u16(), 19);
         assert_eq!(SyscallNumber::CONSOLE_COUNT.as_u16(), 20);
-        assert_eq!(SyscallNumber::STREAM_ECHO.as_u16(), 21);
+        assert_eq!(SyscallNumber::STREAM_INPUT_MODE.as_u16(), 21);
         assert_eq!(SyscallNumber::KEY_INJECT.as_u16(), 22);
         assert_eq!(SyscallNumber::DISPLAY_ACQUIRE.as_u16(), 23);
         assert_eq!(SyscallNumber::DISPLAY_RELEASE.as_u16(), 24);

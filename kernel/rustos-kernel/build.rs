@@ -192,6 +192,20 @@ const PROGRAMS: &[Program] = &[
         prefix: "MAN",
     },
     Program {
+        pkg: "rustos-clear",
+        bin: "rustos-clear-run",
+        rel_dir: "../../userland/apps/clear",
+        fixture: "clear_rxe.rs",
+        prefix: "CLEAR",
+    },
+    Program {
+        pkg: "rustos-reset",
+        bin: "rustos-reset-run",
+        rel_dir: "../../userland/apps/reset",
+        fixture: "reset_rxe.rs",
+        prefix: "RESET",
+    },
+    Program {
         pkg: "rustos-users-cli",
         bin: "rustos-users-cli-run",
         rel_dir: "../../userland/shell/users",

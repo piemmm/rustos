@@ -46,7 +46,7 @@ mod program {
     use alloc::vec::Vec;
 
     use rustos_abi::fs::{DirEntry, OpenFlags};
-    use rustos_abi::{Errno, STDOUT};
+    use rustos_abi::{Errno, InputMode, STDOUT};
     use rustos_man::{parse, run, BundleStore, Console, ManError, Request, USAGE};
     use rustos_rt::io::{write_stderr_line, StdInfo, Stdout, Write};
 
@@ -226,16 +226,19 @@ mod program {
         let request = Request { locale, path };
 
         let console = RtConsole;
-        // Suppress local echo only while the pager can actually prompt (an
-        // attested interactive console); restored before exit so the next
-        // program on this console sees normal cooked echo again.
+        // The raw discipline (no echo, no indicator) only while the pager
+        // can actually prompt (an attested interactive console): its
+        // keystrokes are commands, and neither an echoed `q` nor the secret
+        // activity marker may paint over the rendered page. The cooked
+        // default is restored before exit so the next program on this
+        // console sees normal interactive echo again.
         let interactive = console.rows().is_some();
         if interactive {
-            let _ = rustos_rt::set_echo(false);
+            let _ = rustos_rt::set_input_mode(InputMode::Raw);
         }
         let result = run(&command, &request, &RtStore, &console);
         if interactive {
-            let _ = rustos_rt::set_echo(true);
+            let _ = rustos_rt::set_input_mode(InputMode::Cooked);
         }
 
         match result {

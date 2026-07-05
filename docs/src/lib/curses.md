@@ -29,7 +29,13 @@ added the first in-tree consumer (`userland/apps/top`).
   difference. The `Tty` byte channel is the one thing it needs from the outside
   world — the same seam shape as the terminal app's `ShellSource` — so the
   whole driver is host-testable over an in-memory channel without a kernel
-  (`AGENTS.md` §7).
+  (`AGENTS.md` §7). `enter_full_screen` / `leave_full_screen` take over and
+  give back the display for a full-screen session (curses `initscr`/`endwin`,
+  terminfo `smcup`/`rmcup`): the alternate screen where the terminal has one
+  (the covered content is restored on leave), an in-place erase where it can
+  only erase, and a no-op on the dumb baseline — either way the application
+  never draws over stale text from the previous command, and the diff base is
+  reset so the next `doupdate` repaints what the application drew.
 - **`Input` / `Event`** decode the terminal's bytes (through `lib/vt`'s one
   parser) into typed events: characters, the arrow / function / editing keys,
   mouse reports, and bracketed-paste runs delivered as a single `Event::Paste`.

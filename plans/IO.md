@@ -70,11 +70,13 @@ done items):
 - **DONE — per-process descriptor table + per-console sessions.** Each
   descriptor records its kernel stream backing; the spawner establishes a
   child's fd 0/1/2/3 at spawn time (`spawn`'s console selector,
-  `console_count`), and the read line discipline (echo, CR/LF) is the kernel's
-  (`stream_echo`). Current backings are the discovered text consoles
-  (video + UART) only.
+  `console_count`), and the read line discipline (cooked/secret/raw, CR/LF)
+  is the kernel's (`stream_input_mode`). A standard session leaves `stdinfo`
+  (fd 3) unattached and the kernel discards its writes best-effort, so
+  advisory records never reach the terminal. Current backings are the
+  discovered text consoles (video + UART) only.
 - **DONE — `lib/rt` thin wrappers.** `rustos_rt::{stdin, stdout, stderr,
-  stdinfo, set_echo}` marshal byte slices over the traps. `lib/rt` registers
+  stdinfo, set_input_mode}` marshal byte slices over the traps. `lib/rt` registers
   the process heap (`AGENTS.md` §25), so `alloc` is available to this layer.
 - **DONE — `stdinfo` framing.** The `StdInfoRecord` JSONL model lives in
   `lib/abi` (`stdinfo.rs`, `AGENTS.md` §20.1). This layer carries the bytes; it

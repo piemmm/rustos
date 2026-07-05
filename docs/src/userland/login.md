@@ -118,10 +118,11 @@ supervises (`plans/PI.md` P11). It wires the real seams:
   stack buffers (`INPUT_LINE_MAX` — an over-long line is refused whole,
   never truncated). The kernel console owns the matching **echo** half:
   each character is echoed, a Backspace/Delete rubs out the previous one,
-  and the password read disables echo with `stream_echo`
-  (`rustos_rt::set_echo`) so the credential is never rendered — failing the
-  read closed if echo cannot be disabled (`AGENTS.md` §5.4). While echo is
-  suppressed the kernel console shows the shared `[input active...]`
+  and the password read selects the secret discipline with
+  `stream_input_mode` (`rustos_rt::set_input_mode`) so the credential is
+  never rendered — failing the read closed if the mode cannot be selected
+  (`AGENTS.md` §5.4). While the secret discipline is
+  active the kernel console shows the shared `[input active...]`
   secret-entry marker (`rustos_vt::secret`) instead, so the operator still
   sees typing progress without a byte of the credential. Because both
   halves key off the one `lib/vt` erase definition (§2.2), the bytes login

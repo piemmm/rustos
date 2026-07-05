@@ -119,7 +119,7 @@ standard-stream wrappers (`stdout`, `stderr`, `stdinfo`, `stdin`, `AGENTS.md`
 §20), `spawn` / `spawn_at` / `console_count` / `wait` / `yield_now` / `exit`,
 the anonymous-memory pair (`mem_map`, `mem_unmap`) and the `mem_map`-backed
 `#[global_allocator]` they power, the resource-limit pair (`rlimit_get`,
-`rlimit_set`), the session wrappers (`set_echo`, `users_db_read`,
+`rlimit_set`), the session wrappers (`set_input_mode`, `users_db_read`,
 `key_inject`, `keyboard_read`, `display_acquire` / `display_release`,
 `ipc_send`), the user-space-driver wrappers (`mmio_map`, `dma_alloc`,
 `resource_grants`), and the monotonic clock (`clock_get`) plus the

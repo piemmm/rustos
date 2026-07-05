@@ -38,7 +38,7 @@ mod program {
     use alloc::string::String;
     use alloc::vec::Vec;
 
-    use rustos_abi::OpenFlags;
+    use rustos_abi::{InputMode, OpenFlags};
     use rustos_help::{own_short_help, BundleHelp};
     use rustos_rt::io::{write_stderr_line, Stdout, Write};
     use rustos_users::{Salt, SALT_LEN};
@@ -94,13 +94,14 @@ mod program {
 
         fn read_secret(&mut self, prompt: &str) -> Option<Vec<u8>> {
             let _ = rustos_rt::stdout(prompt.as_bytes());
-            // Echo off for the secret; restored regardless of outcome,
-            // and the terminal newline the operator cannot see is
-            // supplied explicitly.
-            let _ = rustos_rt::set_echo(false);
+            // The secret discipline for the credential (echo off, the
+            // activity indicator shown instead); the cooked default is
+            // restored regardless of outcome, and the terminal newline the
+            // operator cannot see is supplied explicitly.
+            let _ = rustos_rt::set_input_mode(InputMode::Secret);
             let mut raw = Vec::new();
             let ok = Self::read_raw_line(&mut raw);
-            let _ = rustos_rt::set_echo(true);
+            let _ = rustos_rt::set_input_mode(InputMode::Cooked);
             let _ = rustos_rt::stdout(b"\n");
             if ok {
                 Some(raw)

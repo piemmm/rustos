@@ -563,7 +563,7 @@ both landed; `plans/SHELL.md` command execution):
    system-app-store-then-`PATH` resolution (§8) and `.app`-suffix invocation
    (§9) are live. The store/bundle spellings live once in `lib/abi`
    (`SYSTEM_APP_STORE`/`BUNDLE_SUFFIX`); every OS command app is registered
-   as `/System/Apps/{cat,elsh,ls,man,ps,sysinfo,top,users}.app/Run`
+   as `/System/Apps/{cat,clear,elsh,ls,man,ps,reset,sysinfo,top,users}.app/Run`
    (`spawn_paths.rs`, drift-tested); the pure candidate policy
    (`rustos_cmdres::resolution_candidates` in the shared `lib/cmdres`
    crate, alias-aware `PATH` split, plus the `bundle_candidates` view for
@@ -593,7 +593,8 @@ both landed; `plans/SHELL.md` command execution):
    `default/<command>.md` (never a per-bundle list). Any violation fails
    closed with a message naming the offending `bundle/locale/file`.
 6. **`Help/` trees for the existing command apps** — **done for every
-   store-registered command app**: `cat`, `ls`, `ps`, `top`, `sysinfo`,
+   store-registered command app**: `cat`, `clear`, `ls`, `ps`, `reset`,
+   `top`, `sysinfo`,
    `users`, and `elsh` each author their six-locale tree on disk in the bundle,
    discovered by `tools/syshelp` (roots `userland/apps` and
    `userland/shell`), planted at `/System/Apps/<cmd>.app/Help/`, and served

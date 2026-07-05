@@ -29,7 +29,7 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use rustos_abi::{Errno, TerminalSize};
+use rustos_abi::{Errno, InputMode, TerminalSize};
 use rustos_kernel_sched_api::SchedulerArch;
 use rustos_sync::SpinLock;
 use rustos_vt::control;
@@ -424,9 +424,11 @@ pub struct ConsoleDevice {
     /// Whether a `stream_read` of this console echoes the bytes it
     /// consumes back to [`Self::write`] — the terminal local-echo of the
     /// console's read line discipline (`plans/PI.md`
-    /// P11). Defaults to **on** so an interactive user sees what they
-    /// type; the `stream_echo` syscall toggles it (login disables it
-    /// around a password read so a credential is never rendered). Interior mutability because the single
+    /// P11). Defaults to **on** (the cooked mode); the `stream_input_mode`
+    /// syscall selects the discipline (login selects the secret mode
+    /// around a password read so a credential is never rendered; a
+    /// full-screen program selects raw so nothing is drawn at all).
+    /// Interior mutability because the single
     /// installed console is shared `&'static`.
     echo: AtomicBool,
     /// The echo half's per-line editing state (see [`EchoLine`]): the
@@ -450,7 +452,7 @@ pub struct ConsoleDevice {
 /// **erase** (rub-out): an erase rubs out one rendered character only while
 /// this is non-zero, so a Backspace at the start of the input line never
 /// walks the cursor back into the prompt the program wrote. Reset on a
-/// `CR`/`LF` echo and on every [`ConsoleDevice::set_echo`] toggle (each
+/// `CR`/`LF` echo and on every [`ConsoleDevice::set_input_mode`] change (each
 /// starts a fresh edited line).
 ///
 /// `seq` is the held Delete escape-sequence prefix ([`EraseSeq`]) — the
@@ -504,8 +506,8 @@ impl ConsoleDevice {
         }
     }
 
-    /// Attach the console's [`SecretFeedback`], so [`Self::set_echo`] arms
-    /// it around a suppressed (password) read. Builder-style, for the init
+    /// Attach the console's [`SecretFeedback`], so [`Self::set_input_mode`]
+    /// arms it around a secret (password) read. Builder-style, for the init
     /// pipeline that assembles the installed console list.
     #[must_use]
     pub const fn with_secret(mut self, secret: &'static SecretFeedback) -> Self {
@@ -530,34 +532,36 @@ impl ConsoleDevice {
         self.echo.load(Ordering::Relaxed)
     }
 
-    /// Enable or disable terminal local echo for this console
-    /// (`stream_echo`). The relaxed ordering is sufficient: echo is a
+    /// Select the read line discipline of this console
+    /// (`stream_input_mode`): cooked echoes, secret suppresses echo and
+    /// shows the activity indicator, raw suppresses echo and draws nothing
+    /// (a full-screen program paints its own display, so even the indicator
+    /// would corrupt it). The relaxed ordering is sufficient: echo is a
     /// per-console interactive flag with no other state ordered against
     /// it, and a single console carries a single session (`plans/PI.md`
     /// P11).
     ///
-    /// Toggling echo also resets the line-discipline state (column and held
-    /// Delete prefix): a suppressed password read (`login` disables echo
-    /// around it) and the prompt that follows it start a fresh edited line,
-    /// so a later Backspace must not rub out into a line the column was
-    /// last counting before the toggle.
+    /// Changing the mode also resets the line-discipline state (column and
+    /// held Delete prefix): a secret password read and the prompt that
+    /// follows it start a fresh edited line, so a later Backspace must not
+    /// rub out into a line the column was last counting before the change.
     ///
-    /// Disabling echo **arms** the console's [`SecretFeedback`] (when one is
-    /// attached): a no-echo read is a secret read, and the feedback marker
-    /// is the visible progress it shows instead of the characters.
-    /// Re-enabling echo disarms it, removing any marker still on screen.
-    pub fn set_echo(&self, enabled: bool) {
-        self.echo.store(enabled, Ordering::Relaxed);
+    /// Only the **secret** mode arms the console's [`SecretFeedback`] (when
+    /// one is attached): the feedback marker is the visible progress a
+    /// password read shows instead of the characters. Every other mode
+    /// disarms it, removing any in-progress marker still on screen.
+    pub fn set_input_mode(&self, mode: InputMode) {
+        self.echo.store(mode.echoes(), Ordering::Relaxed);
         {
             let mut line = self.line.lock();
             line.col = 0;
             line.seq = EraseSeq::new();
         }
         if let Some(secret) = self.secret {
-            if enabled {
-                secret.disarm();
-            } else {
+            if mode == InputMode::Secret {
                 secret.arm();
+            } else {
+                secret.disarm();
             }
         }
     }
@@ -754,10 +758,10 @@ fn write_best_effort(write: &dyn ConsoleWrite, bytes: &[u8]) {
 /// suppressed.
 ///
 /// One per console, created beside the console's blocking read adapter by
-/// the init pipeline. It is **armed** by [`ConsoleDevice::set_echo`]
-/// whenever echo is disabled (a no-echo read is a secret read) — or
+/// the init pipeline. It is **armed** by [`ConsoleDevice::set_input_mode`]
+/// whenever the secret mode is selected (a password read) — or
 /// directly by an in-kernel secret prompt such as the root-unlock
-/// passphrase read — and disarmed when echo returns. While armed, the
+/// passphrase read — and disarmed by every other mode. While armed, the
 /// console's blocking reader feeds it every consumed byte
 /// ([`Self::consumed`]) and drives its one-shot animation deadline
 /// ([`Self::deadline_ns`] / [`Self::tick`]) from its park loop.
@@ -1348,15 +1352,19 @@ mod tests {
     }
 
     #[test]
-    fn echo_bytes_is_a_no_op_when_echo_is_disabled() {
+    fn echo_bytes_is_a_no_op_in_the_secret_and_raw_modes() {
         static W: EchoRecorder = EchoRecorder::new();
         let device = echo_device(&W);
-        device.set_echo(false);
-        // A suppressed password read must not render the secret at all.
+        // A suppressed password read must not render the secret at all…
+        device.set_input_mode(InputMode::Secret);
         device.echo_bytes(b"hunter2");
         assert!(W.taken().is_empty());
-        // Re-enabling restores echo.
-        device.set_echo(true);
+        // …and a full-screen program's raw read draws nothing either.
+        device.set_input_mode(InputMode::Raw);
+        device.echo_bytes(b"q");
+        assert!(W.taken().is_empty());
+        // Restoring the cooked mode restores echo.
+        device.set_input_mode(InputMode::Cooked);
         device.echo_bytes(b"x");
         assert_eq!(W.taken(), b"x");
     }
@@ -1420,16 +1428,16 @@ mod tests {
     }
 
     #[test]
-    fn echo_bytes_set_echo_resets_the_erase_bound() {
+    fn echo_bytes_set_input_mode_resets_the_erase_bound() {
         static W: EchoRecorder = EchoRecorder::new();
         let device = echo_device(&W);
-        // Typing, then a password read (echo off → on), then a Backspace:
-        // the toggle started a fresh line, so the Backspace rubs nothing out
-        // — it can never walk back into the characters typed before the
-        // password.
+        // Typing, then a password read (secret → cooked), then a Backspace:
+        // the mode change started a fresh line, so the Backspace rubs
+        // nothing out — it can never walk back into the characters typed
+        // before the password.
         device.echo_bytes(b"ab");
-        device.set_echo(false);
-        device.set_echo(true);
+        device.set_input_mode(InputMode::Secret);
+        device.set_input_mode(InputMode::Cooked);
         device.echo_bytes(b"\x7f");
         assert_eq!(W.taken(), b"ab");
     }
@@ -1551,20 +1559,39 @@ mod tests {
     }
 
     #[test]
-    fn set_echo_arms_and_disarms_the_attached_feedback() {
+    fn secret_mode_arms_and_cooked_mode_disarms_the_attached_feedback() {
         static W: EchoRecorder = EchoRecorder::new();
         static FEEDBACK: SecretFeedback = SecretFeedback::new(&W);
         let device = echo_device(&W).with_secret(&FEEDBACK);
-        // Suppressing echo (a password read) arms the feedback…
-        device.set_echo(false);
+        // The secret mode (a password read) arms the feedback…
+        device.set_input_mode(InputMode::Secret);
         FEEDBACK.consumed(b"s", 0);
         assert_eq!(W.taken(), b"[input active.]");
-        // …and restoring echo disarms it, rubbing out a marker an aborted
-        // read left behind.
-        device.set_echo(true);
+        // …and restoring the cooked mode disarms it, rubbing out a marker
+        // an aborted read left behind.
+        device.set_input_mode(InputMode::Cooked);
         assert!(W.taken().ends_with(&marker_rubout(15)));
         FEEDBACK.consumed(b"x", 0);
         assert_eq!(feedback_tail_after_disarm(&W.taken()), 0);
+    }
+
+    #[test]
+    fn raw_mode_never_arms_the_attached_feedback() {
+        static W: EchoRecorder = EchoRecorder::new();
+        static FEEDBACK: SecretFeedback = SecretFeedback::new(&W);
+        let device = echo_device(&W).with_secret(&FEEDBACK);
+        // A full-screen program's raw read draws nothing: no echo and no
+        // activity marker — the program owns every cell of the display.
+        device.set_input_mode(InputMode::Raw);
+        FEEDBACK.consumed(b"?", 0);
+        assert!(W.taken().is_empty());
+        // Raw selected while the secret marker is showing removes it: the
+        // mode change disarms an armed feedback exactly as cooked does.
+        device.set_input_mode(InputMode::Secret);
+        FEEDBACK.consumed(b"s", 0);
+        assert_eq!(W.taken(), b"[input active.]");
+        device.set_input_mode(InputMode::Raw);
+        assert!(W.taken().ends_with(&marker_rubout(15)));
     }
 
     /// The bytes that rub a `width`-column marker off the screen: step the

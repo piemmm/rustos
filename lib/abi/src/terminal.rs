@@ -27,6 +27,71 @@
 
 use crate::{Errno, Result};
 
+/// The console read line discipline a program selects for its standard
+/// input (the `stream_input_mode` syscall).
+///
+/// The mode says how the console treats the bytes a `stream_read` consumes
+/// **on screen** — the discipline of the input side, chosen by the program
+/// that owns the read:
+///
+/// * [`Cooked`](Self::Cooked) — the interactive default: the console echoes
+///   what the user types (with the erase rub-out and CR-LF cooking of the
+///   line discipline).
+/// * [`Secret`](Self::Secret) — a credential read: echo is suppressed and
+///   the console shows the shared `[input active...]` activity indicator
+///   instead of the characters, so the operator sees progress but never the
+///   secret (login's password prompt).
+/// * [`Raw`](Self::Raw) — a full-screen program's read: echo is suppressed
+///   and **nothing** is drawn by the console — the program (a curses viewer
+///   such as `top`) paints its own display and a stray echo or indicator
+///   would corrupt it.
+///
+/// The discriminant is the `u32` carried in the syscall's `mode` register;
+/// `0` is reserved and never valid, so a zeroed register fails closed rather
+/// than resolving to a mode the caller did not name.
+#[repr(u32)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum InputMode {
+    /// Echo on: the interactive line-editing default.
+    Cooked = 1,
+    /// Echo off, activity indicator on: a secret (password) read.
+    Secret = 2,
+    /// Echo off, nothing drawn: a full-screen (curses) program's read.
+    Raw = 3,
+}
+
+impl InputMode {
+    /// The discriminant carried on the wire.
+    #[must_use]
+    pub const fn as_u32(self) -> u32 {
+        self as u32
+    }
+
+    /// Recover an [`InputMode`] from its wire discriminant.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Errno::OutOfRange`] for any value that is not a defined
+    /// mode (including the reserved `0`), so an unknown or zeroed register
+    /// fails closed rather than being interpreted as a mode the caller did
+    /// not name.
+    pub const fn from_u32(value: u32) -> Result<Self> {
+        match value {
+            1 => Ok(Self::Cooked),
+            2 => Ok(Self::Secret),
+            3 => Ok(Self::Raw),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+
+    /// Whether the console echoes the bytes a read consumes in this mode.
+    /// Only the cooked (interactive) discipline echoes.
+    #[must_use]
+    pub const fn echoes(self) -> bool {
+        matches!(self, Self::Cooked)
+    }
+}
+
 /// On-wire byte length of a [`TerminalSize`]: two little-endian `u16`s.
 pub const TERMINAL_SIZE_WIRE_LEN: usize = 4;
 
@@ -98,8 +163,39 @@ impl TerminalSize {
 
 #[cfg(test)]
 mod tests {
-    use super::{TerminalSize, TERMINAL_SIZE_WIRE_LEN};
+    use super::{InputMode, TerminalSize, TERMINAL_SIZE_WIRE_LEN};
     use crate::Errno;
+
+    #[test]
+    fn input_mode_discriminants_are_frozen() {
+        // The discriminants are the on-wire mode values; do not renumber.
+        assert_eq!(InputMode::Cooked.as_u32(), 1);
+        assert_eq!(InputMode::Secret.as_u32(), 2);
+        assert_eq!(InputMode::Raw.as_u32(), 3);
+    }
+
+    #[test]
+    fn input_mode_round_trips_through_its_discriminant() {
+        for mode in [InputMode::Cooked, InputMode::Secret, InputMode::Raw] {
+            assert_eq!(InputMode::from_u32(mode.as_u32()), Ok(mode));
+        }
+    }
+
+    #[test]
+    fn input_mode_rejects_reserved_and_unknown_values() {
+        // 0 is reserved so a zeroed register fails closed, and every value
+        // past the defined set is rejected rather than guessed.
+        assert_eq!(InputMode::from_u32(0), Err(Errno::OutOfRange));
+        assert_eq!(InputMode::from_u32(4), Err(Errno::OutOfRange));
+        assert_eq!(InputMode::from_u32(u32::MAX), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn only_the_cooked_mode_echoes() {
+        assert!(InputMode::Cooked.echoes());
+        assert!(!InputMode::Secret.echoes());
+        assert!(!InputMode::Raw.echoes());
+    }
 
     #[test]
     fn round_trips_through_bytes() {

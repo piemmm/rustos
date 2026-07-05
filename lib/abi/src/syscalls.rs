@@ -555,8 +555,8 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         audit: false,
     },
     SyscallSpec {
-        number: SyscallNumber::STREAM_ECHO,
-        name: "stream_echo",
+        number: SyscallNumber::STREAM_INPUT_MODE,
+        name: "stream_input_mode",
         arg_count: 2,
         args: [
             AbiType::U32,
@@ -567,10 +567,10 @@ pub const SYSCALLS: &[SyscallSpec] = &[
             AbiType::Unit,
         ],
         ret: AbiType::Errno,
-        // Terminal echo is a property of the console the reader holds, so
-        // the control shares `stream_read`'s `CAP_CONSOLE_READ` gate —
-        // never ambient. The kernel performs the echo
-        // itself as part of the read line discipline, so toggling it
+        // The input discipline is a property of the console the reader
+        // holds, so the control shares `stream_read`'s `CAP_CONSOLE_READ`
+        // gate — never ambient. The kernel performs the echo/indicator
+        // itself as part of the read line discipline, so setting the mode
         // needs no separate `CAP_CONSOLE_WRITE`. Like the other terminal
         // operations it is low-volume configuration, not a
         // security-relevant state change, so — like `console_count` — it
@@ -1889,15 +1889,16 @@ mod tests {
             Some(CapabilityId::CONSOLE_WRITE)
         );
         assert!(!console_count.audit, "console_count must not audit");
-        // stream_echo controls terminal echo on the console the reader
-        // holds, so it shares stream_read's CAP_CONSOLE_READ gate and, as
-        // low-volume terminal configuration, is not audited.
-        let stream_echo = spec_for(SyscallNumber::STREAM_ECHO).unwrap();
+        // stream_input_mode controls the read line discipline on the
+        // console the reader holds, so it shares stream_read's
+        // CAP_CONSOLE_READ gate and, as low-volume terminal configuration,
+        // is not audited.
+        let stream_input_mode = spec_for(SyscallNumber::STREAM_INPUT_MODE).unwrap();
         assert_eq!(
-            stream_echo.required_capability,
+            stream_input_mode.required_capability,
             Some(CapabilityId::CONSOLE_READ)
         );
-        assert!(!stream_echo.audit, "stream_echo must not audit");
+        assert!(!stream_input_mode.audit, "stream_input_mode must not audit");
         // key_inject feeds one decoded key edge into the input-focus
         // arbiter, so it is gated on the privileged CAP_INPUT_INJECT — the
         // system keyboard stream is never ambient — and,

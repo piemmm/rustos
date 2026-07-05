@@ -83,7 +83,7 @@ const NUM_USERS_DB_READ: u64 = SyscallNumber::USERS_DB_READ.as_u16() as u64;
 const NUM_USERS_DB_WAIT: u64 = SyscallNumber::USERS_DB_WAIT.as_u16() as u64;
 const NUM_USERS_ADMIN: u64 = SyscallNumber::USERS_ADMIN.as_u16() as u64;
 const NUM_CONSOLE_COUNT: u64 = SyscallNumber::CONSOLE_COUNT.as_u16() as u64;
-const NUM_STREAM_ECHO: u64 = SyscallNumber::STREAM_ECHO.as_u16() as u64;
+const NUM_STREAM_INPUT_MODE: u64 = SyscallNumber::STREAM_INPUT_MODE.as_u16() as u64;
 const NUM_KEY_INJECT: u64 = SyscallNumber::KEY_INJECT.as_u16() as u64;
 const NUM_DISPLAY_ACQUIRE: u64 = SyscallNumber::DISPLAY_ACQUIRE.as_u16() as u64;
 const NUM_DISPLAY_RELEASE: u64 = SyscallNumber::DISPLAY_RELEASE.as_u16() as u64;
@@ -415,23 +415,27 @@ pub extern "C" fn sys_console_count() -> u64 {
     unsafe { raw_syscall(NUM_CONSOLE_COUNT, [0, 0, 0, 0, 0, 0]) }
 }
 
-/// `stream_echo`: set whether the input stream `fd` echoes the bytes it
-/// reads back to its console (`SyscallNumber::STREAM_ECHO` — terminal local echo). `enabled` is `0` to disable, non-zero to
-/// enable. Returns a `ROS_E_*` code.
+/// `stream_input_mode`: set the console read line discipline of the input
+/// stream `fd` (`SyscallNumber::STREAM_INPUT_MODE`). `mode` is a
+/// `ros_input_mode_t` discriminant: `1` (cooked — echo on, the interactive
+/// default), `2` (secret — echo off, the activity indicator shown instead),
+/// or `3` (raw — echo off, nothing drawn; a full-screen program paints its
+/// own display). The reserved `0` and every unknown value fail closed.
+/// Returns a `ROS_E_*` code.
 ///
 /// Gated kernel-side on `ROS_CAP_CONSOLE_READ`; the kernel performs the
-/// echo itself as part of the read line discipline, so no
-/// `ROS_CAP_CONSOLE_WRITE` is needed. Console echo defaults to **on**; a
-/// program suppresses it around a secret it must not render (a password
-/// prompt) and restores it afterwards.
+/// echo/indicator itself as part of the read line discipline, so no
+/// `ROS_CAP_CONSOLE_WRITE` is needed. A program that changes the mode
+/// restores cooked before it exits, so the next program on the console sees
+/// the interactive default.
 #[must_use]
-#[export_name = "ros_sys_stream_echo"]
-pub extern "C" fn sys_stream_echo(fd: u32, enabled: u32) -> i32 {
+#[export_name = "ros_sys_stream_input_mode"]
+pub extern "C" fn sys_stream_input_mode(fd: u32, mode: u32) -> i32 {
     // SAFETY: see `sys_yield`. No user pointer is dereferenced here.
     unsafe {
         ret_i32(raw_syscall(
-            NUM_STREAM_ECHO,
-            [u64::from(fd), u64::from(enabled), 0, 0, 0, 0],
+            NUM_STREAM_INPUT_MODE,
+            [u64::from(fd), u64::from(mode), 0, 0, 0, 0],
         ))
     }
 }
@@ -1632,7 +1636,7 @@ mod tests {
         (NUM_USERS_DB_WAIT, "users_db_wait", 1),
         (NUM_USERS_ADMIN, "users_admin", 4),
         (NUM_CONSOLE_COUNT, "console_count", 0),
-        (NUM_STREAM_ECHO, "stream_echo", 2),
+        (NUM_STREAM_INPUT_MODE, "stream_input_mode", 2),
         (NUM_KEY_INJECT, "key_inject", 2),
         (NUM_DISPLAY_ACQUIRE, "display_acquire", 0),
         (NUM_DISPLAY_RELEASE, "display_release", 0),
@@ -2003,20 +2007,18 @@ mod tests {
     }
 
     #[test]
-    fn stream_echo_marshals_fd_and_enabled_flag() {
-        let (number, args) = capture(0, || {
-            assert_eq!(sys_stream_echo(0, 1), 0);
-        });
-        assert_eq!(number, NUM_STREAM_ECHO);
-        assert_eq!(args[0], 0);
-        assert_eq!(args[1], 1);
-        assert_eq!(&args[2..], &[0, 0, 0, 0]);
-
-        // A zero flag disables echo.
-        let (_, args) = capture(0, || {
-            assert_eq!(sys_stream_echo(0, 0), 0);
-        });
-        assert_eq!(args[1], 0);
+    fn stream_input_mode_marshals_fd_and_mode() {
+        // Each defined mode discriminant is marshalled verbatim; the
+        // kernel, not the stub, validates it (the stub only marshals).
+        for mode in [1u32, 2, 3] {
+            let (number, args) = capture(0, || {
+                assert_eq!(sys_stream_input_mode(0, mode), 0);
+            });
+            assert_eq!(number, NUM_STREAM_INPUT_MODE);
+            assert_eq!(args[0], 0);
+            assert_eq!(args[1], u64::from(mode));
+            assert_eq!(&args[2..], &[0, 0, 0, 0]);
+        }
     }
 
     #[test]

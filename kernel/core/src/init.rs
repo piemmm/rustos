@@ -1233,7 +1233,7 @@ fn run_phases<A: KernelArch>(
         let mut wrapped = alloc::vec::Vec::with_capacity(consoles.len());
         for device in consoles {
             // Each console gets its own secret-entry feedback over its own
-            // output: `stream_echo(false)` (a password read) arms it, the
+            // output: `stream_input_mode(Secret)` (a password read) arms it, the
             // blocking reader feeds and animates it, so every text-console
             // password prompt shows the shared `[input active...]` marker.
             let secret: &'static crate::console::SecretFeedback =

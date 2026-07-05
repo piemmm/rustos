@@ -549,23 +549,29 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
-    /// Set whether one of the calling process's inherited input streams
-    /// echoes the bytes it reads back to its console (
-    /// `plans/PI.md` P11 — terminal local echo).
+    /// Set the console read line discipline of one of the calling
+    /// process's inherited input streams (`plans/PI.md` P11 — the
+    /// [`rustos_abi::InputMode`]: cooked, secret, or raw).
     ///
     /// The dispatcher has already checked the caller holds
     /// [`CapabilityId::CONSOLE_READ`]. `fd` must be a readable inherited
-    /// stream and `enabled` is the ABI's `0`-disables/non-zero-enables
-    /// flag. The implementation toggles the resolved console's echo flag;
-    /// login disables echo around a password read so the secret is never
-    /// rendered, then restores it (never echo a
-    /// credential).
+    /// stream and `mode` an [`rustos_abi::InputMode`] discriminant (the
+    /// reserved `0` and every unknown value fail closed). The
+    /// implementation selects the resolved console's discipline: cooked
+    /// echoes, secret suppresses echo and shows the activity indicator (a
+    /// password read never renders the secret), raw suppresses echo and
+    /// draws nothing (a full-screen program paints its own display).
     ///
     /// The default implementation fails closed with
     /// [`Errno::NotImplemented`]: a kernel build with
-    /// no console list wired has no echo to toggle. The real handler is
-    /// installed in `kernel/core`.
-    fn stream_echo(&self, _caller: &CallerContext<'_>, _fd: u32, _enabled: u32) -> SyscallResult {
+    /// no console list wired has no discipline to select. The real handler
+    /// is installed in `kernel/core`.
+    fn stream_input_mode(
+        &self,
+        _caller: &CallerContext<'_>,
+        _fd: u32,
+        _mode: u32,
+    ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
 
@@ -1744,10 +1750,11 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                     .users_admin(caller, args.0[0], req_len, args.0[2], out_cap)
             }
             SyscallNumber::CONSOLE_COUNT => self.handlers.console_count(caller),
-            SyscallNumber::STREAM_ECHO => {
-                self.handlers
-                    .stream_echo(caller, decode_u32(args.0[0]), decode_u32(args.0[1]))
-            }
+            SyscallNumber::STREAM_INPUT_MODE => self.handlers.stream_input_mode(
+                caller,
+                decode_u32(args.0[0]),
+                decode_u32(args.0[1]),
+            ),
             SyscallNumber::KEY_INJECT => {
                 // `validate_arg` guarantees args[0] is a non-null
                 // `UserPtr`; args[1] is the record length.
@@ -2513,10 +2520,10 @@ mod tests {
             // wiring a real console list here.
             Ok(1)
         }
-        fn stream_echo(&self, _c: &CallerContext<'_>, _fd: u32, _enabled: u32) -> SyscallResult {
-            self.record("stream_echo");
+        fn stream_input_mode(&self, _c: &CallerContext<'_>, _fd: u32, _mode: u32) -> SyscallResult {
+            self.record("stream_input_mode");
             // Success so the reachability test can assert the dispatcher
-            // decoded `(fd, enabled)` without wiring a real console here.
+            // decoded `(fd, mode)` without wiring a real console here.
             Ok(0)
         }
         fn key_inject(&self, _c: &CallerContext<'_>, _buf: u64, len: usize) -> SyscallResult {

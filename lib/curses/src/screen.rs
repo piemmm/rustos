@@ -19,7 +19,7 @@ use alloc::vec::Vec;
 use core::time::Duration;
 
 use rustos_termcap::{Capabilities, TermType};
-use rustos_vt::{encode_all_into, MouseMode, Op};
+use rustos_vt::{encode_all_into, EraseMode, MouseMode, Op};
 
 use crate::buffer::Buffer;
 use crate::color::{ColorPairs, DEFAULT_PAIR};
@@ -247,6 +247,60 @@ impl<T: Tty> Screen<T> {
             self.cursor.pos.row.min(max.row),
             self.cursor.pos.col.min(max.col),
         );
+    }
+
+    /// Take over the display for a full-screen session (curses `initscr` /
+    /// terminfo `smcup`): switch to the alternate screen buffer on a
+    /// terminal that has one, or erase the display in place on one that can
+    /// only erase, so stale text from the previous session never shows
+    /// through cells the application leaves blank. A terminal that can do
+    /// neither (the dumb baseline) is left unchanged.
+    ///
+    /// The physical diff base is reset to blank to match the now-empty
+    /// display, so the next [`Screen::doupdate`] paints exactly what the
+    /// application drew.
+    ///
+    /// # Errors
+    ///
+    /// [`CursesError::Io`](crate::CursesError::Io) if the tty write fails.
+    pub fn enter_full_screen(&mut self) -> Result<()> {
+        let mut ops = Vec::new();
+        if self.caps.alt_screen {
+            // Entering the alternate screen presents a cleared buffer and
+            // saves the primary screen for restoration on leave.
+            ops.push(Op::EnterAltScreen);
+        } else if self.caps.erase {
+            // No alternate screen (a VT100-class terminal): erase the
+            // display in place from the home position.
+            ops.push(Op::CursorPosition { row: 1, col: 1 });
+            ops.push(Op::EraseInDisplay(EraseMode::All));
+        } else {
+            return Ok(());
+        }
+        self.write_ops(&ops)?;
+        self.physical = Buffer::new(self.size());
+        Ok(())
+    }
+
+    /// Give the display back after a full-screen session (curses `endwin` /
+    /// terminfo `rmcup`): switch back to the main screen buffer on a
+    /// terminal with an alternate screen, restoring whatever the session
+    /// covered. A terminal without one keeps the session's final frame —
+    /// there is nothing saved to restore it from.
+    ///
+    /// # Errors
+    ///
+    /// [`CursesError::Io`](crate::CursesError::Io) if the tty write fails.
+    pub fn leave_full_screen(&mut self) -> Result<()> {
+        if !self.caps.alt_screen {
+            return Ok(());
+        }
+        self.write_ops(&[Op::LeaveAltScreen])?;
+        // The restored primary content is unknown to the driver: reset the
+        // diff base so a later redraw repaints from blank rather than
+        // trusting stale knowledge of the covered screen.
+        self.physical = Buffer::new(self.size());
+        Ok(())
     }
 
     /// Enable a mouse-tracking `mode` on terminals that report the mouse,

@@ -4271,16 +4271,21 @@ two users — or the same user twice — can be logged in concurrently.
   (§2.2): `ConsoleDevice` carries a per-console `echo` flag (default
   on), and `stream_read` writes the bytes it consumes back to the same
   console's write half, rendering a bare CR/LF as CR-LF, so a typed
-  username is visible. The **echo-control contract** is the new `abi-v1`
-  syscall **`stream_echo`** (no. 21, `CAP_CONSOLE_READ`, unaudited):
-  `stream_echo(fd, enabled)` toggles the resolved input console's echo;
-  `login` disables it around the password read and restores it after, so
-  a credential is never rendered, and fails the read closed if echo
-  cannot be disabled (`AGENTS.md` §5.4). First-party wrapper
-  `rustos_rt::set_echo`; C stub `ros_sys_stream_echo` (header
-  regenerated). Proven by kernel-core tests (echo to the write half +
-  CR/LF translation, `stream_echo` disabling echo, fail-closed on a
-  non-read fd), console.rs `echo_bytes` unit tests, and lib/rt +
+  username is visible. The **discipline-control contract** is the
+  `abi-v1` syscall **`stream_input_mode`** (no. 21, `CAP_CONSOLE_READ`,
+  unaudited): `stream_input_mode(fd, mode)` selects the resolved input
+  console's discipline — cooked (echo on, the default), secret (echo
+  off, activity indicator on — a password read), or raw (echo off,
+  nothing drawn — a full-screen program's read); the reserved `0` and
+  unknown modes fail closed. `login` selects secret around the password
+  read and restores cooked after, so a credential is never rendered, and
+  fails the read closed if the mode cannot be selected (`AGENTS.md`
+  §5.4); `top`/`man` select raw so neither echo nor marker paints over
+  their displays. First-party wrapper `rustos_rt::set_input_mode`; C
+  stub `ros_sys_stream_input_mode` (header regenerated). Proven by
+  kernel-core tests (echo to the write half + CR/LF translation, secret
+  and raw suppressing echo, fail-closed on the reserved/unknown mode and
+  a non-read fd), console.rs `echo_bytes` unit tests, and lib/rt +
   abi-sys marshalling tests.
 - **Read-line editing (erase rub-out) — LANDED.** The read line
   discipline edits the line, not just echoes it. The erase vocabulary is
@@ -4292,7 +4297,7 @@ two users — or the same user twice — can be logged in concurrently.
   (`ConsoleDevice::echo_bytes`): an erase rubs out the previous character
   instead of painting stray control glyphs, bounded by a per-console line
   state (`EchoLine` — column + held sequence prefix, reset on CR/LF and on
-  every `set_echo` toggle) so an erase at the start of the input line
+  every `set_input_mode` change) so an erase at the start of the input line
   never walks back over the prompt; the state persists across the many
   per-byte `stream_read` drains one logical input line spans. Reader
   **buffer** half (`rustos_vt::line::LineEditor`, a host-tested
@@ -4303,7 +4308,7 @@ two users — or the same user twice — can be logged in concurrently.
   `login::run::read_line_raw` drives it. Proven by the `lib/vt` control +
   `line` tests and the `console.rs` erase tests (rub-out, BS-as-erase,
   Delete-sequence rub-out incl. split reads, no-op at line start,
-  persistence across calls, CR/LF reset, `set_echo` reset). Docs:
+  persistence across calls, CR/LF reset, `set_input_mode` reset). Docs:
   `docs/src/architecture/syscalls.md`, `docs/src/lib/vt.md`,
   `docs/src/userland/login.md`.
 - **Secret-entry feedback (`[input active...]`) — LANDED.** Every
@@ -4316,8 +4321,10 @@ two users — or the same user twice — can be logged in concurrently.
   marker is replaced in place with `[input complete]`, and erasing back to
   empty (or aborting the read) removes an in-progress marker while a
   completed one is left on screen. Hosted per console as the kernel
-  `SecretFeedback` (`kernel/core` console). `set_echo(false)` arms it
-  (login's password read), the root-unlock kthread arms its own instance
+  `SecretFeedback` (`kernel/core` console). `set_input_mode(Secret)` arms
+  it (login's password read — the raw mode never does, so a full-screen
+  program's keystrokes draw nothing), the root-unlock kthread arms its
+  own instance
   around the passphrase prompt, and the blocking console readers
   (`BlockingConsoleRead`, `KthreadConsoleRead`) feed it the consumed bytes
   and drive its one-shot animation deadline through the `CONSOLE_WAITQ`
@@ -4330,8 +4337,8 @@ two users — or the same user twice — can be logged in concurrently.
   HDMI console, not as `?` fallback glyphs. Proven by `rustos_vt::secret`
   tests and the `console.rs` feedback tests (inert until armed, marker
   show, freeze after the window, resume/extend on typing, `[input
-  complete]` on Enter, erase/abort removal, `set_echo` arm/disarm) plus
-  the `video.rs` backspace tests.
+  complete]` on Enter, erase/abort removal, secret-mode arm / cooked- and
+  raw-mode disarm) plus the `video.rs` backspace tests.
 - **Keyboard input for the video console — kernel-side delivery seam
   LANDED.** The video console's read half is now a kernel-side type-ahead
   queue a keyboard-input driver feeds, not the inert `Ok(0)` poll a

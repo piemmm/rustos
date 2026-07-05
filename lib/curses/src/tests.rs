@@ -460,6 +460,66 @@ fn enabling_mouse_is_a_no_op_on_a_terminal_without_mouse_support() {
     assert_eq!(screen.enable_mouse(rustos_vt::MouseMode::Button), Ok(()));
 }
 
+#[test]
+fn full_screen_uses_the_alternate_screen_when_the_terminal_has_one() {
+    let mut screen = Screen::new(
+        FakeTty::with_input(b""),
+        TermType::Xterm256Color,
+        Size::new(2, 2),
+    );
+    assert_eq!(screen.enter_full_screen(), Ok(()));
+    assert_eq!(screen.leave_full_screen(), Ok(()));
+    let output = screen.into_tty().output;
+    let want = encode_all(&[Op::EnterAltScreen, Op::LeaveAltScreen]);
+    assert_eq!(output, want);
+}
+
+#[test]
+fn full_screen_erases_the_display_in_place_without_an_alternate_screen() {
+    // `vt100` has no alternate screen but can erase: entering clears the
+    // display from home so stale text never shows through blank cells;
+    // leaving writes nothing (there is no saved screen to restore).
+    let mut screen = Screen::new(FakeTty::with_input(b""), TermType::Vt100, Size::new(2, 2));
+    assert_eq!(screen.enter_full_screen(), Ok(()));
+    assert_eq!(screen.leave_full_screen(), Ok(()));
+    let output = screen.into_tty().output;
+    let want = encode_all(&[
+        Op::CursorPosition { row: 1, col: 1 },
+        Op::EraseInDisplay(rustos_vt::EraseMode::All),
+    ]);
+    assert_eq!(output, want);
+}
+
+#[test]
+fn full_screen_is_a_no_op_on_the_dumb_baseline() {
+    // The dumb terminal can neither switch screens nor erase: both calls
+    // leave the byte stream untouched rather than emitting sequences the
+    // terminal does not understand.
+    let mut screen = Screen::new(FakeTty::with_input(b""), TermType::Dumb, Size::new(2, 2));
+    assert_eq!(screen.enter_full_screen(), Ok(()));
+    assert_eq!(screen.leave_full_screen(), Ok(()));
+    assert!(screen.into_tty().output.is_empty());
+}
+
+#[test]
+fn entering_full_screen_resets_the_diff_base_so_the_next_update_repaints() {
+    // Draw a frame, enter the full screen again (the display was cleared),
+    // and redraw the same frame: the driver must repaint it rather than
+    // diffing against stale knowledge of the pre-clear screen.
+    let size = Size::new(1, 4);
+    let mut screen = Screen::new(FakeTty::with_input(b""), TermType::Xterm256Color, size);
+    let mut win = Window::new(Pos::ORIGIN, size);
+    win.add_str("hi");
+    assert_eq!(screen.refresh(&win), Ok(()));
+    assert_eq!(screen.enter_full_screen(), Ok(()));
+    assert_eq!(screen.refresh(&win), Ok(()));
+    let output = screen.into_tty().output;
+    // The frame's glyphs were painted twice: once before the enter and
+    // once repainted onto the cleared display after it.
+    let painted = output.windows(2).filter(|pair| pair == b"hi").count();
+    assert_eq!(painted, 2);
+}
+
 // ---- Wide cells --------------------------------------------------------
 
 #[test]

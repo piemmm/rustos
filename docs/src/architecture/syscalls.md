@@ -74,7 +74,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  18 | `rlimit_set`   | `u32 kind`, `user_ptr` (value)          | `errno` | —                       | yes     |
 |  19 | `users_db_read`| `user_ptr` (buf), `len`                 | `u64` (bytes) | `CAP_USERS_READ`  | yes     |
 |  20 | `console_count`| —                                       | `u64` (count) | `CAP_CONSOLE_WRITE` | no    |
-|  21 | `stream_echo`  | `u32 fd`, `u32 enabled`                 | `errno` | `CAP_CONSOLE_READ`      | no      |
+|  21 | `stream_input_mode` | `u32 fd`, `u32 mode`               | `errno` | `CAP_CONSOLE_READ`      | no      |
 |  22 | `key_inject`   | `user_ptr` (record), `len`              | `u64` (bytes) | `CAP_INPUT_INJECT` | no    |
 |  23 | `display_acquire` | —                                    | `errno` | `CAP_DISPLAY`           | yes     |
 |  24 | `display_release` | —                                    | `errno` | `CAP_DISPLAY`           | yes     |
@@ -184,7 +184,7 @@ is exhaustive — anything not listed below is ungated:
 | `CAP_IRQ_BIND`     | `irq_bind`, `irq_wait`     |
 | `CAP_CONSOLE_WRITE`| `stream_write`, `console_count` |
 | `CAP_PROC_SPAWN`   | `spawn`                    |
-| `CAP_CONSOLE_READ` | `stream_read`, `stream_echo` |
+| `CAP_CONSOLE_READ` | `stream_read`, `stream_input_mode` |
 | `CAP_USERS_READ`   | `users_db_read`, `users_db_wait` |
 | `CAP_INPUT_INJECT` | `key_inject`               |
 | `CAP_DISPLAY`      | `display_acquire`, `display_release` |
@@ -685,17 +685,22 @@ start one login session per discovered console. The first-party Rust
 wrapper is `rustos_rt::console_count`; the C stub is
 `ros_sys_console_count`.
 
-`stream_echo` (no. 21) sets whether one of the caller's inherited input
-streams echoes the bytes a `stream_read` consumes back to its console —
-terminal **local echo** (`AGENTS.md` §20, `plans/PI.md` P11). `fd` is the
-input descriptor (normally fd 0) and `enabled` is `0` to disable, non-zero
-to enable. Console echo defaults to **on**, so a typed username is visible;
-login disables echo around the password read so the credential is never
-rendered, then restores it (`AGENTS.md` §5.4 — never echo a credential).
+`stream_input_mode` (no. 21) sets the read line discipline of one of the
+caller's inherited input streams (`AGENTS.md` §20, `plans/PI.md` P11).
+`fd` is the input descriptor (normally fd 0) and `mode` is an
+`InputMode` discriminant: `1` — **cooked**, the interactive default,
+echoing what the user types; `2` — **secret**, a password read (echo
+suppressed, the activity indicator shown instead); `3` — **raw**, a
+full-screen program's read (echo suppressed, nothing drawn — the program
+paints its own display, so even the indicator would corrupt it). The
+reserved `0` and every unknown value fail closed with `OutOfRange`.
+Login selects secret around the password read so the credential is never
+rendered, then restores cooked (`AGENTS.md` §5.4 — never echo a
+credential); `top` and `man` select raw for their keystroke commands.
 The echo is the kernel's read line-discipline behaviour: `stream_read`
 writes the consumed bytes back to the resolved console's write half (a bare
 CR/LF is rendered as CR-LF so the cursor advances a line), so it needs no
-separate `CAP_CONSOLE_WRITE` — `stream_echo` shares `stream_read`'s
+separate `CAP_CONSOLE_WRITE` — `stream_input_mode` shares `stream_read`'s
 `CAP_CONSOLE_READ` gate and, as low-volume terminal configuration, is
 unaudited. The line discipline also handles **erase** (rub-out): a
 Backspace or Delete — the single-byte controls (the one `lib/vt`
@@ -708,9 +713,9 @@ back over the prompt. The reader's line buffer applies the matching erase
 to the bytes it keeps (`rustos_vt::line::LineEditor`), so screen and
 buffer stay in step.
 
-Disabling echo also arms the console's **secret-entry feedback**
-(`rustos_vt::secret`, hosted as the kernel `SecretFeedback`): a no-echo
-read is a password read, so after the first typed character the console
+The **secret** mode also arms the console's secret-entry feedback
+(`rustos_vt::secret`, hosted as the kernel `SecretFeedback`): after the
+first typed character of a password read the console
 shows the `[input active...]` marker, its dots cycling `.` → `..` → `...`
 on a one-second cadence. The animation is **bounded**: it runs for at
 least three seconds after the most recent keystroke and then freezes (the
@@ -722,15 +727,17 @@ one-shot wait deadline armed only while the dots are moving (tickless — a
 prompt with nothing typed takes no timer wake-ups, and the animation's
 wake-ups span only the bounded window from a keystroke to three seconds
 after the last one), and only the *count* of typed characters is tracked:
-no secret byte is stored or rendered. Re-enabling echo disarms the
-feedback and removes an in-progress marker an aborted read left, while a
-completed `[input complete]` marker is deliberate final feedback and is
-left in place.
+no secret byte is stored or rendered. Selecting any other mode disarms
+the feedback and removes an in-progress marker an aborted read left,
+while a completed `[input complete]` marker is deliberate final feedback
+and is left in place. The **raw** mode never arms the feedback: a
+full-screen program's keystrokes draw neither an echo nor a marker.
 The in-kernel root-unlock passphrase prompt arms the same feedback
 directly, so every text/terminal password prompt shows one marker. An
 `fd` that is not a readable inherited stream fails closed with `NotFound`;
 a console-less build fails closed with `NotImplemented`. The first-party
-Rust wrapper is `rustos_rt::set_echo`; the C stub is `ros_sys_stream_echo`.
+Rust wrapper is `rustos_rt::set_input_mode`; the C stub is
+`ros_sys_stream_input_mode`.
 
 `console_input` (no. 22) injects decoded keystroke bytes into an
 installed console's kernel-side input queue — the producer counterpart of
@@ -775,13 +782,19 @@ index backing it**. The spawner establishes it when it admits a process
 address space): `spawn`'s `console` argument selects either the caller's
 own table (`CONSOLE_INHERIT` — login's shell stays on login's console) or
 the standard shape (`DescriptorTable::standard_on`: fd 0 readable, fd
-1/2/3 writable) on an explicitly named, validated console index — PID 1
-launching one login per console (`plans/PI.md` P11). The dispatcher's
-handler resolves `fd` against this table **before** any state is touched:
-an `fd` that is not the right direction (or a process whose table was
-never established) fails closed with `NotFound`, so the inherited
-descriptor — not an ambient device — is the authority (`AGENTS.md` §4 /
-§5.4).
+1/2 writable, fd 3 unattached) on an explicitly named, validated console
+index — PID 1 launching one login per console (`plans/PI.md` P11). The
+dispatcher's handler resolves `fd` against this table **before** any
+state is touched: an `fd` that is not the right direction (or a process
+whose table was never established) fails closed with `NotFound`, so the
+inherited descriptor — not an ambient device — is the authority
+(`AGENTS.md` §4 / §5.4). `stdinfo` (fd 3) is the one advisory exception:
+it carries structured records for tools that opt in, never terminal
+text, so a console session leaves it **unattached** and a `stream_write`
+to an unattached fd 3 is accepted and discarded — best-effort and
+non-blocking (`AGENTS.md` §20.1) — rather than denied or smeared over
+the terminal, where it would corrupt the primary output and every
+pipeline built on it.
 
 Every descriptor's kernel *stream backing* is one entry of the discovered
 console list the boot path installed (`BootInfo::with_consoles` — index 0
@@ -870,7 +883,7 @@ re-validates arguments — the dispatcher does that first.
 | `irq_bind`      | `IrqTable::bind(line, caller.task_id)`                                                                        | `LineOutOfRange` / `LineAlreadyBound` → `OutOfRange`; `ArchUnsupported` → `NotImplemented`. |
 | `irq_wait`      | `IrqTable::try_wait_step` polled against `KernelArch::monotonic_ns`, yielding via `Scheduler::yield_current` between iterations | `Ready` → `Ok(0)`; `TimedOut` → `TimedOut`; `NotFound` → `NotFound`; scheduler `NoSuchTask` → `NotFound`. |
 | `random_get`    | draws CSPRNG output from `KernelState.rng` (the `rustos_rng::OutputReserve`, see [the RNG page](../lib/rng.md)) into a fixed kernel staging buffer, each chunk copied out through `copy_to_user` | `len > RANDOM_REQUEST_MAX_BYTES` → `LengthOutOfRange`. `len == 0` → `Ok(0)`. Unseeded reserve / entropy shortage → `EntropyNotReady`. Faulting buffer / no registered address space → `BadAddress`. Otherwise `Ok(len)`. |
-| `stream_write` | resolves `fd` against the caller's per-process descriptor table (`AddressSpaceRegistry::streams`, established at spawn, `AGENTS.md` §20) — direction first, then the descriptor's console index against the installed console list (`with_consoles`) — then copies the caller's bytes in through `copy_from_user` (bounded by `CONSOLE_WRITE_MAX`) and hands them to that console's output line discipline (`ConsoleDevice::write_output`), which cooks a bare line feed to CR-LF (the ONLCR output translation, the counterpart to the input echo half) so a program that writes `\n` has the cursor return to column zero as it drops a line, then writes to the `ConsoleWrite` device | `fd` not a writable inherited stream → `NotFound`. No console installed at the descriptor's index → `NotImplemented`. `len == 0` → `Ok(0)`. Faulting buffer / no registered address space → `BadAddress`. Otherwise `Ok(input_bytes_consumed)` — the input count, not the larger device count a cooked newline expands to. |
+| `stream_write` | resolves `fd` against the caller's per-process descriptor table (`AddressSpaceRegistry::streams`, established at spawn, `AGENTS.md` §20) — direction first, then the descriptor's console index against the installed console list (`with_consoles`) — then copies the caller's bytes in through `copy_from_user` (bounded by `CONSOLE_WRITE_MAX`) and hands them to that console's output line discipline (`ConsoleDevice::write_output`), which cooks a bare line feed to CR-LF (the ONLCR output translation, the counterpart to the input echo half) so a program that writes `\n` has the cursor return to column zero as it drops a line, then writes to the `ConsoleWrite` device | An **unattached** `stdinfo` (fd 3 `Closed`) → `Ok(len)` with the bytes discarded (advisory best-effort, `AGENTS.md` §20.1 — never a device fallback). Any other `fd` not a writable inherited stream → `NotFound`. No console installed at the descriptor's index → `NotImplemented`. `len == 0` → `Ok(0)`. Faulting buffer / no registered address space → `BadAddress`. Otherwise `Ok(input_bytes_consumed)` — the input count, not the larger device count a cooked newline expands to. |
 | `stream_read` | resolves `fd` against the caller's per-process descriptor table — direction first, then the descriptor's console index against the installed console list — then reads from that console's `ConsoleRead` device, wrapped by the init pipeline in kernel-core's `BlockingConsoleRead`, which parks the caller on the scheduler (`reschedule_current`, the `wait`-syscall poll-and-park loop) until the device yields input (`AGENTS.md` §20 — the backing owns blocking; each console's input is its own — the UART never feeds the video console's session, `plans/PI.md` P11) — into a kernel staging buffer (bounded by `CONSOLE_READ_MAX`), then copies the bytes read out through `copy_to_user` | `fd` not a readable inherited stream → `NotFound`. No console installed at the descriptor's index → `NotImplemented`. `len == 0` → `Ok(0)`. No input pending → blocks until input arrives (an unparkable caller → `NotImplemented`). Faulting buffer / no registered address space → `BadAddress`. Otherwise `Ok(bytes_read ≥ 1)`. |
 | `spawn`         | resolves the `console` argument first (`CONSOLE_INHERIT` → the caller's own descriptor table; else a validated installed-console index → `DescriptorTable::standard_on`), copies the absolute program path in through `copy_from_user` (bounded by `SPAWN_PATH_MAX`), resolves it in the `ProgramRegistry` (the x86_64/riscv64 §18.6 boot floor) or — for an absolute `…/<Name>.app/Run` store-bundle path with an installed `AppStore` — loads and verifies the on-disk bundle through the shared `rustos_appload` gate (signature against the embedded app trust anchor, content hash, ABI/syscall hash), the bundle read running through the secured VFS under the caller's kernel-attested identity and a spawn racing the boot mount parking on the store's readiness latch (`plans/APPS.md` deliverable 8), then resolves the child's kernel-attested **credential** from `target_uid` (`SPAWN_UID_INHERIT` → snapshot the caller's own credential; else, gated by `CAP_SPAWN_AS_USER`, resolve the target user's uid/gid/groups from the authoritative identity table — spawn-as-user, `PREREQUISITES.md` P-C), and hands the validated `rxe` to the installed `ProcessSpawn` producer (`with_spawn`; default `NULL_PROCESS_SPAWN`) which builds a fresh isolated address space and admits a **Ready** user kthread (established with the resolved descriptor table and credential) through `SpawnCtx::admit_process`, returning the child PID — the caller keeps running (`plans/SPAWN.md` SP3) | Console index with no installed console → `NotFound`. Frame allocator not threaded (`with_frames`) → `NotImplemented`. Empty / over-long path → `NotFound`. Faulting path / no registered address space → `BadAddress`. Unknown path → `NotFound`. A `target_uid` switch without `CAP_SPAWN_AS_USER` → `PermissionDenied`; an unresolvable target (no identity table, or unknown uid) → `NotImplemented` / `PermissionDenied`. No producer wired → `NotImplemented`. Otherwise `Ok(pid)`. |
 | `mem_map`       | rejects a zero `len`, decodes `flags` through `MapFlags::from_bits`, then hands `(len, flags, addr_hint)` to the installed `MemMap` producer (`with_mem_map`; default `NULL_MEM_MAP`) which maps a fresh zeroed `RW` region into the caller's **own** live address space and returns its base (`plans/SPAWN.md` SP5) | `len == 0` → `LengthOutOfRange`. Reserved flag bit → `OutOfRange`. No producer wired → `NotImplemented`. Frame exhaustion → `OutOfMemory`. Otherwise `Ok(base)`. |
@@ -879,7 +892,7 @@ re-validates arguments — the dispatcher does that first.
 | `rlimit_get`    | validates `kind` against `LimitKind`, then reads the caller's effective limit from the installed resource-limit service and copies the encoded `ResourceLimit` out to the user buffer through `copy_to_user` (`AGENTS.md` §24.3). The default trait method fails closed until the L2 enforcement is installed | Unassigned `kind` → `OutOfRange`. No service wired → `NotImplemented`. Faulting buffer / no registered address space → `BadAddress`. Otherwise `Ok(0)`. |
 | `rlimit_set`    | copies the encoded `ResourceLimit` in through `copy_from_user`, validates `kind` + the `soft <= hard` pair, and — when the request raises a hard bound above the inherited ceiling — refuses unless the caller holds `CAP_RLIMIT_RAISE` (`AGENTS.md` §24.3). The default trait method fails closed until L2 | Unassigned `kind` / malformed pair → `OutOfRange`. Raising a hard bound without the capability → `PermissionDenied`. No service wired → `NotImplemented`. Faulting buffer → `BadAddress`. Otherwise `Ok(0)`. |
 | `console_count` | returns the installed console list's length (`with_consoles`) — the index space `spawn`'s `console` argument selects from (`AGENTS.md` §20, `plans/PI.md` P11) | No console list wired → `NotImplemented`. Otherwise `Ok(count)`. |
-| `stream_echo`   | resolves `fd` against the caller's per-process descriptor table (direction first), then the descriptor's console index against the installed console list, and toggles that console's echo flag (`ConsoleDevice::set_echo`, which also resets the line-discipline column) so a subsequent `stream_read` echoes the consumed bytes back to the console write half (`AGENTS.md` §20 — terminal local echo); `stream_read` performs the echo itself, rendering a bare CR/LF as CR-LF and rubbing out the previous character (column-bounded `BS SP BS`) on a Backspace/Delete | `fd` not a readable inherited stream → `NotFound`. No console installed at the descriptor's index → `NotImplemented`. Otherwise `Ok(0)`. |
+| `stream_input_mode` | decodes the mode fail-closed, resolves `fd` against the caller's per-process descriptor table (direction first), then the descriptor's console index against the installed console list, and selects that console's read discipline (`ConsoleDevice::set_input_mode`, which also resets the line-discipline column): cooked echoes the consumed bytes back to the console write half (`AGENTS.md` §20 — terminal local echo, with CR/LF cooked to CR-LF and the column-bounded `BS SP BS` rub-out), secret suppresses echo and arms the activity indicator, raw suppresses both | Reserved/unknown `mode` → `OutOfRange`. `fd` not a readable inherited stream → `NotFound`. No console installed at the descriptor's index → `NotImplemented`. Otherwise `Ok(0)`. |
 | `mmio_map`      | resolves `handle` against the caller (`AddressSpaceRegistry::grant(caller.task_id, handle)`, owner-checked per-task grant table; a task with no minted grant resolves to nothing), validates the granted resource is a memory window and the `[offset, offset + len)` sub-region lies wholly inside it (`devres::mappable_subwindow` — `Mmio` / `BusWindow`, non-zero `len`, in-bounds, non-overflowing), then maps **only** that sub-region `(grant_base + offset, len)` into the caller's own address space through the installed `MmioMapFacility` (`with_mmio_map_facility`; default `NULL_MMIO_MAP_FACILITY`), returning its base virtual address — so a large outbound bus-window grant maps just one enumerated BAR, not the whole window (`AGENTS.md` §24.1; `plans/PI.md` P10 chunk 5d-0) | Unknown / non-owned handle → `NotFound`. Non-window grant or a sub-region escaping it → `OutOfRange` / `LengthOutOfRange`. No map facility wired → `NotImplemented`. Frame/virtual-window exhaustion → `OutOfMemory`. Otherwise `Ok(base)`. |
 | `dma_alloc`     | resolves `handle` against the caller (same owner-checked per-task grant table), validates the grant is a DMA constraint (`devres::dma_constraint`), rejects a zero / over-the-grant-maximum `len`, then carves a physically-contiguous, zeroed, coherent `RW` buffer bounded by the grant's CPU-side `addr_limit` into the caller's own address space through the installed `DmaAllocFacility` (`with_dma_alloc_facility`; default `NULL_DMA_ALLOC_FACILITY`), resolves the device-visible base via `devres::translate_device_addr` (CPU-physical for a coherent constraint, re-based onto the far side for a translating inbound viewport, `HwResource::dma_translated`), and copies it out to `device_out`, returning the buffer's base virtual address (`plans/PI.md` P10 chunk 5d-0) | Unknown / non-owned handle → `NotFound`. Non-DMA grant → `OutOfRange`. `len == 0` → `LengthOutOfRange`. Over-max / over-limit, or a carve escaping a translating viewport → `OutOfRange`. No DMA facility wired → `NotImplemented`. Frame exhaustion → `OutOfMemory`. Faulting `device_out` → `BadAddress`. Otherwise `Ok(base)`. |
 | `dma_free`      | the symmetric free for `dma_alloc`: resolves `handle` against the caller (same owner-checked per-task grant table), validates the grant is a DMA constraint (`devres::dma_constraint`), then releases the buffer based at `cpu_va` from the caller's own address space through the same `DmaAllocFacility` (`free`), zeroing every backing byte (zero-on-free, `AGENTS.md` §4) before its frames return to the allocator, and re-freezes the caller's address-space snapshot. Only `cpu_va` is taken from the caller; the buffer's extent is the allocator's authoritative record. A long-running driver reclaims each transfer's bounce buffers through this rather than leaking DMA frames until it exits (`plans/PI.md` P10) | Unknown / non-owned handle → `NotFound`. Non-DMA grant → `OutOfRange`. `cpu_va` not the base of a live carve in the caller's DMA window (covers a stale, double, or cross-task free) → `OutOfRange`. No DMA facility wired → `NotImplemented`. Otherwise `Ok(0)`. |
