@@ -26,6 +26,10 @@ use crate::{
 struct CpuState {
     queue: RunQueue,
     last_run_tick: AtomicU64,
+    /// Cumulative ticks this CPU has spent inside task bodies, accumulated
+    /// on the same dispatch bracket that credits the task; the busy half of
+    /// the System Information busy/idle utilisation split.
+    busy_ticks: AtomicU64,
 }
 
 /// Virtual-time request size of a single dispatch for `weight`.
@@ -89,6 +93,7 @@ impl<A: SchedulerArch> Scheduler<A> {
             cpus.push(CpuState {
                 queue,
                 last_run_tick: AtomicU64::new(0),
+                busy_ticks: AtomicU64::new(0),
             });
         }
         let mut preemptions = Vec::with_capacity(config.cpus as usize);
@@ -489,10 +494,11 @@ impl<A: SchedulerArch> Scheduler<A> {
     /// stamp the CPU's last-run tick.
     fn settle_run_accounting(&self, cpu: CpuId, task: &TaskInner, started_tick: u64) {
         task.total_runs.fetch_add(1, Ordering::Relaxed);
-        task.run_ticks.fetch_add(
-            self.arch.ticks_now().saturating_sub(started_tick),
-            Ordering::Relaxed,
-        );
+        let span = self.arch.ticks_now().saturating_sub(started_tick);
+        task.run_ticks.fetch_add(span, Ordering::Relaxed);
+        self.cpus[cpu as usize]
+            .busy_ticks
+            .fetch_add(span, Ordering::Relaxed);
         self.cpus[cpu as usize]
             .last_run_tick
             .store(started_tick, Ordering::Release);
@@ -649,6 +655,18 @@ impl<A: SchedulerArch> Scheduler<A> {
             .ok_or(SchedError::NoSuchTask)
     }
 
+    /// Cumulative ticks `cpu` has spent inside task bodies, in
+    /// [`SchedulerArch::ticks_now`] units.
+    ///
+    /// # Errors
+    /// * [`SchedError::NoSuchCpu`] if `cpu` is out of range.
+    pub fn cpu_busy_ticks(&self, cpu: CpuId) -> SchedResult<u64> {
+        self.cpus
+            .get(cpu as usize)
+            .map(|state| state.busy_ticks.load(Ordering::Acquire))
+            .ok_or(SchedError::NoSuchCpu)
+    }
+
     /// Most recent state of `id` ([`TaskState::Exited`] once drained).
     #[must_use]
     pub fn state_of(&self, id: TaskId) -> TaskState {
@@ -782,6 +800,10 @@ impl<A: SchedulerArch> SchedulerPolicy<A> for Scheduler<A> {
 
     fn cpu_ticks_of(&self, id: TaskId) -> SchedResult<u64> {
         Scheduler::cpu_ticks_of(self, id)
+    }
+
+    fn cpu_busy_ticks(&self, cpu: CpuId) -> SchedResult<u64> {
+        Scheduler::cpu_busy_ticks(self, cpu)
     }
 
     fn state_of(&self, id: TaskId) -> TaskState {

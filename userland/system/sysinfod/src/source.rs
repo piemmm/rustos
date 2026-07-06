@@ -13,7 +13,7 @@
 use alloc::vec::Vec;
 
 use rustos_abi::sysinfo::{
-    KernelMemoryStats, LoadAverage, MountRecord, ProcessRecord, ResourceLimitRecord,
+    CpuTimeRecord, KernelMemoryStats, LoadAverage, MountRecord, ProcessRecord, ResourceLimitRecord,
     SystemIdentity, Uptime, UserDirectoryRecord,
 };
 use rustos_abi::{CapabilityQuery, Errno, LimitKind, Origin};
@@ -156,4 +156,14 @@ pub trait SysinfoSource {
     /// list is returned whole and [`crate::serve`] applies the
     /// `offset`/`limit` paging; ordering must be stable across paged calls.
     fn user_directory(&self, caller: &Caller) -> Result<Vec<UserDirectoryRecord>, Errno>;
+
+    /// Return the per-CPU execution-time accounting, one record per online
+    /// CPU in ascending CPU order.
+    ///
+    /// The aggregate busy/idle split is the `top`-class utilisation figure
+    /// every user may see and exposes strictly less than the ungated
+    /// [`load_average`](Self::load_average) census, so the query is ungated.
+    /// The owned list is returned whole and [`crate::serve`] applies the
+    /// `offset`/`limit` paging; ordering must be stable across paged calls.
+    fn cpu_times(&self, caller: &Caller) -> Result<Vec<CpuTimeRecord>, Errno>;
 }

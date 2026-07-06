@@ -30,6 +30,10 @@ struct CpuState {
     /// Tick at which this CPU last completed a [`Scheduler::step`] that
     /// returned [`StepOutcome::Ran`]. Used by tests to assert progress.
     last_run_tick: AtomicU64,
+    /// Cumulative ticks this CPU has spent inside task bodies, accumulated
+    /// on the same dispatch bracket that credits the task; the busy half of
+    /// the System Information busy/idle utilisation split.
+    busy_ticks: AtomicU64,
 }
 
 impl CpuState {
@@ -38,6 +42,7 @@ impl CpuState {
         Some(Self {
             bands: [band()?, band()?, band()?],
             last_run_tick: AtomicU64::new(0),
+            busy_ticks: AtomicU64::new(0),
         })
     }
 
@@ -648,10 +653,11 @@ impl<A: SchedulerArch> Scheduler<A> {
     /// stamp the CPU's last-run tick.
     fn settle_run_accounting(&self, cpu: CpuId, task: &TaskInner, started_tick: u64) {
         task.total_runs.fetch_add(1, Ordering::Relaxed);
-        task.run_ticks.fetch_add(
-            self.arch.ticks_now().saturating_sub(started_tick),
-            Ordering::Relaxed,
-        );
+        let span = self.arch.ticks_now().saturating_sub(started_tick);
+        task.run_ticks.fetch_add(span, Ordering::Relaxed);
+        self.cpus[cpu as usize]
+            .busy_ticks
+            .fetch_add(span, Ordering::Relaxed);
         self.cpus[cpu as usize]
             .last_run_tick
             .store(started_tick, Ordering::Release);
@@ -822,6 +828,18 @@ impl<A: SchedulerArch> Scheduler<A> {
             .get(&id)
             .map(|t| t.run_ticks.load(Ordering::Acquire))
             .ok_or(SchedError::NoSuchTask)
+    }
+
+    /// Cumulative ticks `cpu` has spent inside task bodies, in
+    /// [`SchedulerArch::ticks_now`] units.
+    ///
+    /// # Errors
+    /// * [`SchedError::NoSuchCpu`] if `cpu` is out of range.
+    pub fn cpu_busy_ticks(&self, cpu: CpuId) -> SchedResult<u64> {
+        self.cpus
+            .get(cpu as usize)
+            .map(|state| state.busy_ticks.load(Ordering::Acquire))
+            .ok_or(SchedError::NoSuchCpu)
     }
 
     /// Returns the most recent state of `id`. Convenience for tests.
@@ -1009,6 +1027,10 @@ impl<A: SchedulerArch> SchedulerPolicy<A> for Scheduler<A> {
 
     fn cpu_ticks_of(&self, id: TaskId) -> SchedResult<u64> {
         Scheduler::cpu_ticks_of(self, id)
+    }
+
+    fn cpu_busy_ticks(&self, cpu: CpuId) -> SchedResult<u64> {
+        Scheduler::cpu_busy_ticks(self, cpu)
     }
 
     fn state_of(&self, id: TaskId) -> TaskState {

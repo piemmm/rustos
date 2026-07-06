@@ -3,7 +3,8 @@
 //!
 //! `top` is the first in-tree consumer of the OS curses library
 //! (`lib/curses`): it draws a scrolling, selectable process list that
-//! refreshes on demand, in the spirit of the Linux `top`. It reads the same
+//! refreshes itself on the `-d`/`--delay` cadence (and on demand), in the
+//! spirit of GNU `top`. It reads the same
 //! `sysinfo-v1` process list as `ps` — there is no `/proc` to scrape — and renders it through the curses screen model
 //! rather than emitting escape sequences by hand.
 //!
@@ -23,8 +24,8 @@
 //!
 //! * [`error`] — [`TopError`], the outcomes of [`run`].
 //! * [`command`] — the [`Command`] shape and its [`parse`]r: the reserved
-//!   `-h`/`-?` short-help switches (plans/APPS.md §4) against running the
-//!   viewer.
+//!   `-h`/`-?` short-help switches (plans/APPS.md §4) and the GNU
+//!   `-d`/`--delay` refresh interval against running the viewer.
 //! * [`model`] — the [`Model`], its [`Scope`], and the [`Action`] an event
 //!   produces.
 //! * [`app`] — [`render`] and the [`run`] input loop.
@@ -53,8 +54,8 @@ pub mod model;
 mod tests;
 
 pub use app::{list_capacity, render, run};
-pub use command::{parse, Command, USAGE};
+pub use command::{parse, Command, DEFAULT_DELAY_TENTHS, MIN_DELAY_TENTHS, USAGE};
 pub use error::TopError;
-pub use model::{Action, Model, Scope, ALL_DENIED_NOTICE};
+pub use model::{Action, CpuSplit, CpuTimes, Model, Scope, ALL_DENIED_NOTICE};
 pub use rustos_curses::{Screen, Tty};
 pub use rustos_procinfo::Transport;

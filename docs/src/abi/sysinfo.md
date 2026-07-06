@@ -41,6 +41,7 @@ discipline as adding a syscall (`AGENTS.md` §9, §16.6):
 | `PROCESS_IDENTITY`      | none (self-scoped)     | no      |
 | `LOAD_AVERAGE`          | none                   | no      |
 | `USER_DIRECTORY`        | none                   | no      |
+| `CPU_TIME_STATS`        | none                   | no      |
 
 `CAP_SYSINFO_GLOBAL`, `CAP_SYSINFO_KERNEL`, and `CAP_SYSINFO_HW` are
 [`CapabilityId`] values 13, 14, and 15. Self-scoped observers ("list my
@@ -64,6 +65,15 @@ ungated for the same reason: each `UserDirectoryRecord` carries only the
 `/etc/passwd`-class public uid + username pairing — never credential
 material, which stays behind the capability-gated `users_db_read`
 syscall — so any task may resolve account names for display.
+`CPU_TIME_STATS` is ungated like `LOAD_AVERAGE`: each `CpuTimeRecord`
+carries one CPU's cumulative busy nanoseconds (accounted on the
+scheduler's dispatch bracket) and the idle remainder of the same
+monotonic sample — the `top`-class busy/idle utilisation figure, which
+exposes strictly less than the load-average census. A consumer derives
+a utilisation percentage from the deltas of two samples; RustOS
+accounts busy and idle time only, never a fabricated
+user/system/nice/iowait split. The list is paged by a
+`CpuTimeListRequest` exactly like the mount list.
 
 ## Wire framing
 

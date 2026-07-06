@@ -23,8 +23,9 @@
 use alloc::vec::Vec;
 
 use rustos_abi::sysinfo::{
-    KernelMemoryStats, LoadAverage, ProcessRecord, ProcessState, ResourceLimitRecord,
-    SystemIdentity, Uptime, UserDirectoryRecord, PROCESS_CPU_NONE, RESOURCE_LIMITS_REPORT_LEN,
+    CpuTimeRecord, KernelMemoryStats, LoadAverage, ProcessRecord, ProcessState,
+    ResourceLimitRecord, SystemIdentity, Uptime, UserDirectoryRecord, PROCESS_CPU_NONE,
+    RESOURCE_LIMITS_REPORT_LEN,
 };
 use rustos_abi::{Duration64, Errno, LimitKind, ProcId, Time64};
 use rustos_kernel_mem::PAGE_SIZE;
@@ -376,6 +377,35 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
         {
             let entry = UserDirectoryRecord::new(record.uid().0, record.username().as_bytes())?;
             out.extend_from_slice(&entry.to_le_bytes());
+        }
+        Ok(out)
+    }
+
+    fn cpu_times(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno> {
+        // One monotonic sample shared by every record so the busy/idle
+        // split of each CPU describes the same instant; idle is the
+        // remainder of uptime the dispatch bracket did not account.
+        let now_ns = self.monotonic_ns();
+        let cpu_count = u64::from(self.state.scheduler.cpu_count());
+        let mut out = Vec::new();
+        let first = offset.min(cpu_count);
+        let last = first.saturating_add(max_records as u64).min(cpu_count);
+        for cpu in first..last {
+            // The CPU index is in range by construction; a scheduler
+            // refusal (a torn-down CPU) truthfully reports zero rather
+            // than erroring the whole page.
+            let cpu_id = u32::try_from(cpu).unwrap_or(u32::MAX);
+            let busy_ns = self
+                .state
+                .arch
+                .ticks_to_ns(self.state.scheduler.cpu_busy_ticks(cpu_id).unwrap_or(0));
+            let record = CpuTimeRecord {
+                cpu: cpu_id,
+                reserved: 0,
+                busy_ns,
+                idle_ns: now_ns.saturating_sub(busy_ns),
+            };
+            out.extend_from_slice(&record.to_le_bytes());
         }
         Ok(out)
     }

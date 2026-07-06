@@ -4,7 +4,7 @@ top — watch the process list live
 
 ## SYNOPSIS
 
-`top [-h | -?]`
+`top [-d secs.tenths] [-h | -?]`
 
 ## DESCRIPTION
 
@@ -12,6 +12,9 @@ Shows a live, full-screen view of the process list through the System
 Information API, in the spirit of GNU `top`. It starts on the
 caller's own processes; the system-wide view is granted by the service
 only to a caller holding `CAP_SYSINFO_GLOBAL`.
+
+The display refreshes itself every delay interval (3.0 seconds unless
+`-d` changes it), and `r` refreshes it immediately.
 
 The viewer takes no operands: it is controlled with keys pressed inside
 the session.
@@ -25,11 +28,17 @@ the session.
 - Up/Down, PageUp/PageDown, Home/End — move the selection.
 - `h`, `?` — toggle the in-session key overlay.
 
-Three summary lines precede the list: the uptime, logged-in-user count,
-and 1/5/15-minute load averages; the task census by state; and the
-memory figures in MiB. The memory line needs `CAP_SYSINFO_KERNEL` — a
-caller without it sees the refusal spelled out and the session
-continues.
+Four summary lines precede the list: the uptime, logged-in-user count,
+and 1/5/15-minute load averages; the task census by state; the
+`%Cpu(s)` utilisation split; and the memory figures in MiB. The memory
+line needs `CAP_SYSINFO_KERNEL` — a caller without it sees the refusal
+spelled out and the session continues.
+
+The `%Cpu(s)` line shows the share of the last interval every CPU
+together spent busy (running tasks) and idle. RustOS accounts busy and
+idle time only, so where GNU `top` breaks the busy share into
+user/system/nice/iowait figures this line deliberately shows the two
+real figures instead.
 
 The rows are sorted by `%CPU`, biggest consumer first, and carry:
 
@@ -51,6 +60,12 @@ The rows are sorted by `%CPU`, biggest consumer first, and carry:
 
 ## OPTIONS
 
+- `-d, --delay <seconds>` — the interval between automatic refreshes,
+  in seconds with an optional fraction (only the first fractional
+  digit, tenths, is kept): `top -d 1.5` refreshes every 1.5 seconds.
+  Defaults to 3.0. GNU `top` accepts a zero delay and refreshes as fast
+  as it can; RustOS never busy-loops, so a zero is clamped to the 0.1 s
+  minimum.
 - `-h, -?` — show this command's own short help and exit. Inside a
   running session the same keys toggle the key overlay instead.
 

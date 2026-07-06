@@ -49,8 +49,8 @@ mod program {
     use alloc::vec::Vec;
 
     use rustos_abi::sysinfo::{
-        encode_reply_err, encode_reply_ok, IntrospectDomain, KernelMemoryStats, LoadAverage,
-        MountRecord, ProcessRecord, ResourceLimitRecord, SystemIdentity, Uptime,
+        encode_reply_err, encode_reply_ok, CpuTimeRecord, IntrospectDomain, KernelMemoryStats,
+        LoadAverage, MountRecord, ProcessRecord, ResourceLimitRecord, SystemIdentity, Uptime,
         UserDirectoryRecord, RESOURCE_LIMITS_REPORT_LEN, SYSINFO_ENDPOINT, SYSINFO_MAX_REPLY,
         SYSINFO_MAX_REQUEST, SYSINFO_REPLY_STATUS_LEN,
     };
@@ -197,6 +197,15 @@ mod program {
             let mut records = Vec::new();
             for chunk in bytes.chunks_exact(UserDirectoryRecord::WIRE_LEN) {
                 records.push(UserDirectoryRecord::from_bytes(chunk)?);
+            }
+            Ok(records)
+        }
+
+        fn cpu_times(&self, _caller: &Caller) -> Result<Vec<CpuTimeRecord>, Errno> {
+            let bytes = read_list(IntrospectDomain::CpuTimes, CpuTimeRecord::WIRE_LEN)?;
+            let mut records = Vec::new();
+            for chunk in bytes.chunks_exact(CpuTimeRecord::WIRE_LEN) {
+                records.push(CpuTimeRecord::from_bytes(chunk)?);
             }
             Ok(records)
         }

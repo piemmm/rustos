@@ -131,6 +131,21 @@ pub trait SchedulerPolicy<A: SchedulerArch>: Sized {
     ///   an exited task whose record has been drained).
     fn cpu_ticks_of(&self, id: TaskId) -> SchedResult<u64>;
 
+    /// Cumulative ticks `cpu` has spent inside task bodies, in
+    /// [`SchedulerArch::ticks_now`] units.
+    ///
+    /// Accounted on the same dispatch bracket that credits the running
+    /// task (`cpu_ticks_of`), so the per-CPU total advances as work
+    /// happens (tickless — no periodic sampling) and survives task exit:
+    /// a reaped task's time stays in its CPU's total. The unit is the
+    /// port's tick; the consumer converts to nanoseconds at read time.
+    /// A read-only observation for the System Information introspection
+    /// feed's busy/idle utilisation split.
+    ///
+    /// # Errors
+    /// * [`crate::SchedError::NoSuchCpu`] if `cpu` is out of range.
+    fn cpu_busy_ticks(&self, cpu: CpuId) -> SchedResult<u64>;
+
     /// Most recent state of `id` ([`TaskState::Exited`] once drained).
     fn state_of(&self, id: TaskId) -> TaskState;
 

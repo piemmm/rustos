@@ -76,7 +76,7 @@
 use crate::sched::{CpuId, SchedError, Scheduler, SchedulerArch};
 use rustos_abi::hwtree::{HwResource, HwResourceKind};
 use rustos_abi::input::KeyInput;
-use rustos_abi::sysinfo::{MountRecord, ProcessRecord, UserDirectoryRecord};
+use rustos_abi::sysinfo::{CpuTimeRecord, MountRecord, ProcessRecord, UserDirectoryRecord};
 use rustos_abi::{
     decode_log_record, BootId, CapabilityId, DescriptorTable, DirEntry, Errno, FileStat, InputMode,
     IntrospectDomain, IrqHandle, LimitKind, MapFlags, OpenFlags, ProcId, ProcessStart, RandomFlags,
@@ -3168,6 +3168,13 @@ where
                 }
                 let max_records = out_cap / UserDirectoryRecord::WIRE_LEN;
                 self.introspect.user_directory(arg, max_records)?
+            }
+            IntrospectDomain::CpuTimes => {
+                if out_cap < CpuTimeRecord::WIRE_LEN {
+                    return Err(Errno::BufferTooSmall);
+                }
+                let max_records = out_cap / CpuTimeRecord::WIRE_LEN;
+                self.introspect.cpu_times(arg, max_records)?
             }
             IntrospectDomain::TaskLimits => {
                 // The 128-bit target `ProcId` does not fit in the `u64` `arg`,
@@ -14059,6 +14066,13 @@ mod tests {
             self.limits.clone()
         }
         fn user_directory(
+            &self,
+            _offset: u64,
+            _max_records: usize,
+        ) -> Result<alloc::vec::Vec<u8>, Errno> {
+            Ok(alloc::vec::Vec::new())
+        }
+        fn cpu_times(
             &self,
             _offset: u64,
             _max_records: usize,

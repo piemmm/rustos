@@ -46,8 +46,12 @@ mod program {
 
     use alloc::vec::Vec;
 
-    use rustos_abi::{InputMode, STDOUT};
-    use rustos_curses::{CursesError, Result as CursesResult, Screen, Size, Tty};
+    use core::time::Duration;
+
+    use rustos_abi::{Errno, InputMode, STDOUT};
+    use rustos_curses::{
+        CursesError, InputMode as CursesInputMode, Result as CursesResult, Screen, Size, Tty,
+    };
     use rustos_help::{own_short_help, BundleHelp};
     use rustos_procinfo::{user_names, IpcTransport};
     use rustos_rt::io::{write_stderr_line, Stdout, Write};
@@ -87,7 +91,7 @@ mod program {
             // The standard-input backing owns blocking and offers no
             // peek/poll, so a non-blocking read cannot know what is pending: it
             // honestly reports "nothing available right now" rather than
-            // blocking or fabricating input. The viewer runs the blocking
+            // blocking or fabricating input. The viewer runs the timed
             // input mode, so this path is never its wait; it exists to satisfy
             // the seam and never lies about available bytes.
             Ok(Vec::new())
@@ -101,6 +105,31 @@ mod program {
             // input, which the seam encodes as an empty vector.
             let read = rustos_rt::stdin(&mut buf);
             Ok(buf[..read.min(buf.len())].to_vec())
+        }
+
+        fn read_timeout(&mut self, timeout: Duration) -> CursesResult<Vec<u8>> {
+            let mut buf = [0u8; INPUT_CHUNK];
+            // The kernel treats a zero bound as "wait indefinitely", so the
+            // (already parser-clamped) delay is floored at one nanosecond —
+            // defence in depth, never the viewer's wait. The backing parks
+            // the task until input arrives or the bound elapses; an elapsed
+            // bound is the auto-refresh tick, reported as "no bytes", while
+            // any other refusal is a real terminal failure.
+            let timeout_ns = u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX).max(1);
+            match rustos_rt::stdin_timeout(&mut buf, timeout_ns) {
+                Ok(read) => Ok(buf[..read.min(buf.len())].to_vec()),
+                Err(err) => {
+                    let timed_out = i32::try_from(-err)
+                        .ok()
+                        .and_then(Errno::from_i32)
+                        .is_some_and(|errno| errno == Errno::TimedOut);
+                    if timed_out {
+                        Ok(Vec::new())
+                    } else {
+                        Err(CursesError::Io)
+                    }
+                }
+            }
         }
     }
 
@@ -132,14 +161,14 @@ mod program {
             write_stderr_line(USAGE);
             return 2;
         };
-        match parse(&arguments) {
-            Ok(Command::Run) => {}
+        let delay_tenths = match parse(&arguments) {
+            Ok(Command::Run { delay_tenths }) => delay_tenths,
             Ok(Command::Help) => return short_help(),
             Err(_) => {
                 write_stderr_line(USAGE);
                 return 2;
             }
-        }
+        };
 
         // Size the screen from the console the kernel gave us, falling back to
         // the conventional 80×24 when the kernel cannot attest the size.
@@ -163,6 +192,12 @@ mod program {
             .and_then(|raw| core::str::from_utf8(raw).ok())
             .map_or(rustos_termcap::TermType::Dumb, from_term);
         let mut screen = Screen::new(RtTty, term, size);
+        // Bound every input wait by the refresh delay (`-d`), so the view
+        // redraws itself on that cadence without a key press — the kernel
+        // parks the read for the interval, never a poll loop.
+        screen.set_input_mode(CursesInputMode::Timeout(Duration::from_millis(
+            u64::from(delay_tenths) * 100,
+        )));
         // Take over the display for the session: the alternate screen
         // where the terminal has one (restoring the covered content on
         // exit), an in-place erase otherwise — either way the viewer never

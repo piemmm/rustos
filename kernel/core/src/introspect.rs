@@ -127,6 +127,21 @@ pub trait IntrospectSource: Sync {
     ///
     /// [`Errno::NotImplemented`] from the default [`NullIntrospectSource`].
     fn user_directory(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno>;
+
+    /// Encode up to `max_records` [`rustos_abi::sysinfo::CpuTimeRecord`]s
+    /// beginning at CPU index `offset`, in ascending CPU order, packed
+    /// little-endian back-to-back.
+    ///
+    /// Each record carries the CPU's cumulative busy time (accounted on
+    /// the scheduler's dispatch bracket) and the idle remainder of the
+    /// same monotonic sample, all from kernel-attested state. An `offset`
+    /// past the last CPU returns an empty `Vec` (the paging terminator),
+    /// never an error.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotImplemented`] from the default [`NullIntrospectSource`].
+    fn cpu_times(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno>;
 }
 
 /// The fail-closed default installed before the binding kernel wires the real
@@ -165,6 +180,10 @@ impl IntrospectSource for NullIntrospectSource {
     }
 
     fn user_directory(&self, _offset: u64, _max_records: usize) -> Result<Vec<u8>, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn cpu_times(&self, _offset: u64, _max_records: usize) -> Result<Vec<u8>, Errno> {
         Err(Errno::NotImplemented)
     }
 }

@@ -4,7 +4,7 @@ top — osservare la lista dei processi dal vivo
 
 ## SYNOPSIS
 
-`top [-h | -?]`
+`top [-d sec.decimi] [-h | -?]`
 
 ## DESCRIPTION
 
@@ -13,6 +13,9 @@ tramite l'API di informazioni di sistema, nello spirito del classico
 `top`. Parte dai processi del chiamante; la vista dell'intero sistema è
 concessa dal servizio solo a un chiamante che detiene
 `CAP_SYSINFO_GLOBAL`.
+
+Lo schermo si aggiorna da solo a ogni intervallo (3,0 secondi salvo che
+`-d` lo cambi), e `r` lo aggiorna immediatamente.
 
 Il visualizzatore non accetta operandi: si controlla con tasti premuti
 dentro la sessione.
@@ -27,11 +30,18 @@ dentro la sessione.
 - Su/Giù, PagSu/PagGiù, Inizio/Fine — spostare la selezione.
 - `h`, `?` — mostrare o nascondere il riepilogo dei tasti.
 
-Tre righe di riepilogo precedono l'elenco: il tempo di attività, il
+Quattro righe di riepilogo precedono l'elenco: il tempo di attività, il
 numero di utenti collegati e i carichi medi a 1/5/15 minuti; il
-censimento dei task per stato; e le cifre di memoria in MiB. La riga
-della memoria richiede `CAP_SYSINFO_KERNEL`: chi non la possiede vede il
-rifiuto spiegato e la sessione continua.
+censimento dei task per stato; la ripartizione di utilizzo `%Cpu(s)`; e
+le cifre di memoria in MiB. La riga della memoria richiede
+`CAP_SYSINFO_KERNEL`: chi non la possiede vede il rifiuto spiegato e la
+sessione continua.
+
+La riga `%Cpu(s)` mostra la quota dell'ultimo intervallo che tutte le
+CPU insieme hanno trascorso occupate (eseguendo task) e inattive. RustOS
+contabilizza solo tempo occupato e inattivo: dove il `top` GNU scompone
+la quota occupata in user/system/nice/iowait, questa riga mostra
+deliberatamente le due cifre reali.
 
 Le righe sono ordinate per `%CPU`, il consumatore maggiore per primo, e
 riportano:
@@ -56,6 +66,12 @@ riportano:
 
 ## OPTIONS
 
+- `-d, --delay <seconds>` — l'intervallo tra gli aggiornamenti
+  automatici, in secondi con frazione facoltativa (si conserva solo la
+  prima cifra decimale, i decimi): `top -d 1.5` aggiorna ogni
+  1,5 secondi. Predefinito 3,0. Il `top` GNU accetta un ritardo zero e
+  aggiorna il più velocemente possibile; RustOS non gira mai a vuoto,
+  quindi uno zero è portato al minimo di 0,1 s.
 - `-h, -?` — mostrare la guida breve di questo comando e uscire. In una
   sessione in corso, gli stessi tasti alternano invece il riepilogo dei
   tasti.

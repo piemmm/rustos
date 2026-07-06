@@ -4,7 +4,7 @@ top — observar la lista de procesos en vivo
 
 ## SYNOPSIS
 
-`top [-h | -?]`
+`top [-d segs.décimas] [-h | -?]`
 
 ## DESCRIPTION
 
@@ -13,6 +13,9 @@ a través de la API de información del sistema, al estilo del `top`
 clásico. Comienza con los procesos del llamante; el servicio concede la
 vista de todo el sistema únicamente a un llamante que posea
 `CAP_SYSINFO_GLOBAL`.
+
+La pantalla se refresca sola en cada intervalo (3,0 segundos salvo que
+`-d` lo cambie), y `r` la refresca de inmediato.
 
 El visor no acepta operandos: se controla con teclas pulsadas dentro de
 la sesión.
@@ -26,11 +29,17 @@ la sesión.
 - Arriba/Abajo, RePág/AvPág, Inicio/Fin — mover la selección.
 - `h`, `?` — mostrar u ocultar el resumen de teclas.
 
-Tres líneas de resumen preceden a la lista: el tiempo de actividad, el
+Cuatro líneas de resumen preceden a la lista: el tiempo de actividad, el
 número de usuarios conectados y las cargas medias de 1/5/15 minutos; el
-censo de tareas por estado; y las cifras de memoria en MiB. La línea de
-memoria exige `CAP_SYSINFO_KERNEL`: quien no lo posea ve el rechazo
-explicado y la sesión continúa.
+censo de tareas por estado; el reparto de uso `%Cpu(s)`; y las cifras de
+memoria en MiB. La línea de memoria exige `CAP_SYSINFO_KERNEL`: quien no
+lo posea ve el rechazo explicado y la sesión continúa.
+
+La línea `%Cpu(s)` muestra la parte del último intervalo que todas las
+CPU juntas pasaron ocupadas (ejecutando tareas) e inactivas. RustOS solo
+contabiliza tiempo ocupado e inactivo: donde el `top` de GNU desglosa la
+parte ocupada en usuario/sistema/nice/iowait, esta línea muestra
+deliberadamente las dos cifras reales.
 
 Las filas se ordenan por `%CPU`, el mayor consumidor primero, y llevan:
 
@@ -53,6 +62,12 @@ Las filas se ordenan por `%CPU`, el mayor consumidor primero, y llevan:
 
 ## OPTIONS
 
+- `-d, --delay <seconds>` — el intervalo entre refrescos automáticos,
+  en segundos con fracción opcional (solo se conserva el primer dígito
+  decimal, las décimas): `top -d 1.5` refresca cada 1,5 segundos. Por
+  defecto 3,0. El `top` de GNU acepta un retardo cero y refresca tan
+  rápido como puede; RustOS nunca entra en un bucle activo, así que un
+  cero se eleva al mínimo de 0,1 s.
 - `-h, -?` — mostrar la ayuda corta de este comando y salir. Dentro de
   una sesión en curso, las mismas teclas alternan el resumen de teclas.
 

@@ -47,6 +47,7 @@ a privileged query without first passing its capability gate.
 | `PROCESS_IDENTITY`    | none                 | no      | the caller's own `Origin`      |
 | `LOAD_AVERAGE`        | none                 | no      | `LoadAverage`                  |
 | `USER_DIRECTORY`      | none                 | no      | packed `UserDirectoryRecord`s  |
+| `CPU_TIME_STATS`      | none                 | no      | packed `CpuTimeRecord`s        |
 
 ## Response encoding
 

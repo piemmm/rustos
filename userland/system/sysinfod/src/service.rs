@@ -2,8 +2,8 @@
 //! capability-checked, audited, and answered.
 
 use rustos_abi::sysinfo::{
-    spec_for, MountListRequest, MountRecord, ProcessListRequest, ProcessRecord,
-    ResourceLimitRecord, SysinfoQueryId, SysinfoRequestHeader, UserDirectoryRecord,
+    spec_for, CpuTimeListRequest, CpuTimeRecord, MountListRequest, MountRecord, ProcessListRequest,
+    ProcessRecord, ResourceLimitRecord, SysinfoQueryId, SysinfoRequestHeader, UserDirectoryRecord,
     UserDirectoryRequest,
 };
 use rustos_abi::{Errno, LimitKind};
@@ -150,6 +150,8 @@ fn dispatch(
         write_bytes(&source.load_average(caller)?.to_le_bytes(), response)
     } else if query == SysinfoQueryId::MOUNT_LIST {
         mount_list(source, caller, payload, response)
+    } else if query == SysinfoQueryId::CPU_TIME_STATS {
+        cpu_time_list(source, caller, payload, response)
     } else if query == SysinfoQueryId::RESOURCE_LIMITS {
         resource_limits(source, caller, response)
     } else if query == SysinfoQueryId::USER_DIRECTORY {
@@ -227,6 +229,26 @@ fn mount_list(
         request.limit as usize,
         records.len(),
         MountRecord::WIRE_LEN,
+        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
+    )
+}
+
+/// Decode the [`CpuTimeListRequest`], apply paging, and pack the selected
+/// [`CpuTimeRecord`]s into `response`.
+fn cpu_time_list(
+    source: &dyn SysinfoSource,
+    caller: &Caller,
+    payload: &[u8],
+    response: &mut [u8],
+) -> Result<usize, Errno> {
+    let request = CpuTimeListRequest::from_bytes(payload)?;
+    let records = source.cpu_times(caller)?;
+    page_records(
+        response,
+        request.offset as usize,
+        request.limit as usize,
+        records.len(),
+        CpuTimeRecord::WIRE_LEN,
         |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
     )
 }
@@ -319,10 +341,11 @@ mod tests {
     use core::cell::RefCell;
     use rustos_abi::driver::filesystem::MountFlags;
     use rustos_abi::sysinfo::{
-        KernelMemoryStats, LoadAverage, MountListRequest, MountRecord, ProcessListRequest,
-        ProcessRecord, ProcessState, ResourceLimitRecord, SysinfoQueryId, SysinfoRequestHeader,
-        SystemIdentity, Uptime, UserDirectoryRecord, UserDirectoryRequest, LOAD_FIXED_SHIFT,
-        MACHINE_ID_LEN, RESOURCE_LIMITS_REPORT_LEN, SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT,
+        CpuTimeListRequest, CpuTimeRecord, KernelMemoryStats, LoadAverage, MountListRequest,
+        MountRecord, ProcessListRequest, ProcessRecord, ProcessState, ResourceLimitRecord,
+        SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime, UserDirectoryRecord,
+        UserDirectoryRequest, LOAD_FIXED_SHIFT, MACHINE_ID_LEN, RESOURCE_LIMITS_REPORT_LEN,
+        SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT,
     };
     use rustos_abi::time::{Duration64, Time64};
     use rustos_abi::{
@@ -484,6 +507,22 @@ mod tests {
         }
         fn mount_records(&self, _caller: &Caller) -> Result<alloc::vec::Vec<MountRecord>, Errno> {
             Ok(self.mounts.to_vec())
+        }
+        fn cpu_times(&self, _caller: &Caller) -> Result<alloc::vec::Vec<CpuTimeRecord>, Errno> {
+            Ok(alloc::vec![
+                CpuTimeRecord {
+                    cpu: 0,
+                    reserved: 0,
+                    busy_ns: 750,
+                    idle_ns: 250,
+                },
+                CpuTimeRecord {
+                    cpu: 1,
+                    reserved: 0,
+                    busy_ns: 100,
+                    idle_ns: 900,
+                },
+            ])
         }
         fn resource_limits(
             &self,
@@ -818,6 +857,40 @@ mod tests {
             flags: 0,
         };
         let req_end = request_bytes(SysinfoQueryId::MOUNT_LIST, &mlr_end.to_le_bytes());
+        assert_eq!(
+            serve(&source, &caller(&caps), &sink, &req_end, &mut resp),
+            Ok(0)
+        );
+    }
+
+    #[test]
+    fn cpu_time_stats_needs_no_capability_and_pages() {
+        let source = FixtureSource::new();
+        let caps = Caps(&[]);
+        let sink = RecordingSink::new();
+        let ctr = CpuTimeListRequest {
+            offset: 0,
+            limit: 10,
+            flags: 0,
+        };
+        let req = request_bytes(SysinfoQueryId::CPU_TIME_STATS, &ctr.to_le_bytes());
+        let mut resp = [0u8; 256];
+        let n = serve(&source, &caller(&caps), &sink, &req, &mut resp).unwrap();
+        assert_eq!(n, 2 * CpuTimeRecord::WIRE_LEN);
+        let first = CpuTimeRecord::from_bytes(&resp[..CpuTimeRecord::WIRE_LEN]).unwrap();
+        assert_eq!(first.cpu, 0);
+        assert_eq!(first.busy_ns, 750);
+        assert_eq!(first.idle_ns, 250);
+        // The utilisation figures are not audited.
+        assert!(sink.events.borrow().as_slice().is_empty());
+
+        // Paging past the end returns an empty page.
+        let ctr_end = CpuTimeListRequest {
+            offset: 5,
+            limit: 4,
+            flags: 0,
+        };
+        let req_end = request_bytes(SysinfoQueryId::CPU_TIME_STATS, &ctr_end.to_le_bytes());
         assert_eq!(
             serve(&source, &caller(&caps), &sink, &req_end, &mut resp),
             Ok(0)

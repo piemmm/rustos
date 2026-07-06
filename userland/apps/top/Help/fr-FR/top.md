@@ -4,7 +4,7 @@ top — observer la liste des processus en direct
 
 ## SYNOPSIS
 
-`top [-h | -?]`
+`top [-d secs.dixièmes] [-h | -?]`
 
 ## DESCRIPTION
 
@@ -12,6 +12,9 @@ Affiche une vue plein écran, en direct, de la liste des processus via
 l'API d'information système, dans l'esprit du `top` classique. Il
 démarre sur les processus de l'appelant ; la vue système n'est accordée
 par le service qu'à un appelant détenant `CAP_SYSINFO_GLOBAL`.
+
+L'affichage se rafraîchit de lui-même à chaque intervalle (3,0 secondes
+sauf si `-d` le change), et `r` le rafraîchit immédiatement.
 
 Le visualiseur ne prend aucun opérande : il se pilote avec des touches
 pressées dans la session.
@@ -25,11 +28,18 @@ pressées dans la session.
 - Haut/Bas, PageHaut/PageBas, Début/Fin — déplacer la sélection.
 - `h`, `?` — afficher ou masquer l'aide-mémoire des touches.
 
-Trois lignes de synthèse précèdent la liste : la durée de fonctionnement,
-le nombre d'utilisateurs connectés et les charges moyennes sur 1/5/15
-minutes ; le recensement des tâches par état ; et les chiffres mémoire en
-MiB. La ligne mémoire exige `CAP_SYSINFO_KERNEL` — un appelant qui ne le
-détient pas voit le refus énoncé et la session continue.
+Quatre lignes de synthèse précèdent la liste : la durée de
+fonctionnement, le nombre d'utilisateurs connectés et les charges
+moyennes sur 1/5/15 minutes ; le recensement des tâches par état ; la
+répartition d'utilisation `%Cpu(s)` ; et les chiffres mémoire en MiB. La
+ligne mémoire exige `CAP_SYSINFO_KERNEL` — un appelant qui ne le détient
+pas voit le refus énoncé et la session continue.
+
+La ligne `%Cpu(s)` montre la part du dernier intervalle que l'ensemble
+des CPU a passée occupée (à exécuter des tâches) et inactive. RustOS ne
+comptabilise que les temps occupé et inactif : là où le `top` GNU
+décompose la part occupée en utilisateur/système/nice/iowait, cette
+ligne montre délibérément les deux chiffres réels.
 
 Les lignes sont triées par `%CPU`, le plus gros consommateur en tête, et
 portent :
@@ -54,6 +64,13 @@ portent :
 
 ## OPTIONS
 
+- `-d, --delay <seconds>` — l'intervalle entre deux rafraîchissements
+  automatiques, en secondes avec une fraction facultative (seul le
+  premier chiffre décimal, les dixièmes, est conservé) : `top -d 1.5`
+  rafraîchit toutes les 1,5 secondes. Par défaut 3,0. Le `top` GNU
+  accepte un délai nul et rafraîchit aussi vite que possible ; RustOS
+  ne boucle jamais à vide, donc un zéro est ramené au minimum de
+  0,1 s.
 - `-h, -?` — afficher l'aide courte de cette commande et quitter. Dans
   une session en cours, les mêmes touches basculent l'aide-mémoire des
   touches.

@@ -136,15 +136,15 @@ pub use syscalls::{
 pub use sysinfo::{
     decode_reply as decode_sysinfo_reply, encode_reply_err as encode_sysinfo_reply_err,
     encode_reply_ok as encode_sysinfo_reply_ok, encoded_query_table, spec_for as sysinfo_spec_for,
-    IntrospectDomain, KernelMemoryStats, LoadAverage, MountListRequest, MountRecord,
-    ProcessListRequest, ProcessRecord, ProcessState, ResourceLimitRecord, SysinfoQueryId,
-    SysinfoQuerySpec, SysinfoRequestHeader, SystemIdentity, Uptime, UserDirectoryRecord,
-    UserDirectoryRequest, ENCODED_QUERY_TABLE, ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX,
-    LOAD_FIXED_SHIFT, MACHINE_ID_LEN, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX,
-    PROCESS_CPU_NONE, PROCESS_NAME_MAX, RESOURCE_LIMITS_REPORT_LEN, SYSINFO_ENDPOINT,
-    SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERIES, SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN,
-    SYSINFO_REPLY_STATUS_LEN, SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1,
-    USER_DIRECTORY_NAME_MAX,
+    CpuTimeListRequest, CpuTimeRecord, IntrospectDomain, KernelMemoryStats, LoadAverage,
+    MountListRequest, MountRecord, ProcessListRequest, ProcessRecord, ProcessState,
+    ResourceLimitRecord, SysinfoQueryId, SysinfoQuerySpec, SysinfoRequestHeader, SystemIdentity,
+    Uptime, UserDirectoryRecord, UserDirectoryRequest, ENCODED_QUERY_TABLE,
+    ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX, LOAD_FIXED_SHIFT, MACHINE_ID_LEN, MOUNT_FSTYPE_MAX,
+    MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, PROCESS_CPU_NONE, PROCESS_NAME_MAX,
+    RESOURCE_LIMITS_REPORT_LEN, SYSINFO_ENDPOINT, SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERIES,
+    SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN, SYSINFO_REPLY_STATUS_LEN,
+    SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1, USER_DIRECTORY_NAME_MAX,
 };
 pub use terminal::{InputMode, TerminalSize, TERMINAL_SIZE_WIRE_LEN};
 pub use time::{

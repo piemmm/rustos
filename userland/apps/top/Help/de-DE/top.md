@@ -4,7 +4,7 @@ top — die Prozessliste live beobachten
 
 ## SYNOPSIS
 
-`top [-h | -?]`
+`top [-d Sek.Zehntel] [-h | -?]`
 
 ## DESCRIPTION
 
@@ -12,6 +12,9 @@ Zeigt eine live aktualisierte Vollbildansicht der Prozessliste über die
 Systeminformations-API, im Geiste des klassischen `top`. Es startet mit
 den Prozessen des Aufrufers; die systemweite Sicht gewährt der Dienst
 nur einem Aufrufer mit `CAP_SYSINFO_GLOBAL`.
+
+Die Anzeige frischt sich in jedem Intervall selbst auf (3,0 Sekunden,
+sofern `-d` nichts anderes bestimmt), und `r` frischt sie sofort auf.
 
 Der Betrachter nimmt keine Operanden an: er wird mit Tasten innerhalb
 der Sitzung gesteuert.
@@ -26,11 +29,18 @@ der Sitzung gesteuert.
 - Hoch/Runter, BildAuf/BildAb, Pos1/Ende — die Auswahl bewegen.
 - `h`, `?` — die Tastenübersicht ein- oder ausblenden.
 
-Drei Übersichtszeilen stehen über der Liste: die Laufzeit, die Zahl der
+Vier Übersichtszeilen stehen über der Liste: die Laufzeit, die Zahl der
 angemeldeten Benutzer und die 1/5/15-Minuten-Lastmittel; die Zählung der
-Tasks nach Zustand; und die Speicherwerte in MiB. Die Speicherzeile
-erfordert `CAP_SYSINFO_KERNEL` — ein Aufrufer ohne diese Berechtigung
-sieht die Ablehnung ausgeschrieben, und die Sitzung läuft weiter.
+Tasks nach Zustand; die `%Cpu(s)`-Auslastungsaufteilung; und die
+Speicherwerte in MiB. Die Speicherzeile erfordert `CAP_SYSINFO_KERNEL` —
+ein Aufrufer ohne diese Berechtigung sieht die Ablehnung ausgeschrieben,
+und die Sitzung läuft weiter.
+
+Die `%Cpu(s)`-Zeile zeigt den Anteil des letzten Intervalls, den alle
+CPUs zusammen beschäftigt (mit dem Ausführen von Tasks) und untätig
+verbracht haben. RustOS verbucht nur Beschäftigt- und Leerlaufzeit: wo
+GNU `top` den beschäftigten Anteil in user/system/nice/iowait
+aufschlüsselt, zeigt diese Zeile bewusst die zwei echten Werte.
 
 Die Zeilen sind nach `%CPU` sortiert, der größte Verbraucher zuerst, und
 tragen:
@@ -55,6 +65,13 @@ tragen:
 
 ## OPTIONS
 
+- `-d, --delay <seconds>` — das Intervall zwischen automatischen
+  Auffrischungen, in Sekunden mit optionalem Bruchteil (nur die erste
+  Nachkommastelle, die Zehntel, wird behalten): `top -d 1.5` frischt
+  alle 1,5 Sekunden auf. Vorgabe ist 3,0. GNU `top` akzeptiert null und
+  frischt so schnell wie möglich auf; RustOS läuft nie in einer
+  Beschäftigungsschleife, daher wird null auf das Minimum von 0,1 s
+  angehoben.
 - `-h, -?` — die Kurzhilfe dieses Befehls anzeigen und beenden. In
   einer laufenden Sitzung schalten dieselben Tasten stattdessen die
   Tastenübersicht um.

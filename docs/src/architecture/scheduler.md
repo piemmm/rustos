@@ -531,6 +531,17 @@ clocks can never diverge. A drained (reaped) task reports
 implement the same contract and the shared conformance suite pins it
 (`cpu_time_is_accounted_per_dispatch`).
 
+The same dispatch bracket also accumulates the span on the dispatching
+CPU (`busy_ticks`), exposed read-only through
+`SchedulerPolicy::cpu_busy_ticks(cpu)`. The per-CPU total survives task
+exit — a reaped task's time stays in its CPU's total — so it is the
+truthful cumulative "busy" half of the System Information busy/idle
+utilisation split (`CPU_TIME_STATS`); the introspect reader derives idle
+as the remainder of the same monotonic sample. An out-of-range CPU
+reports `SchedError::NoSuchCpu`, never a fabricated zero; the same
+conformance case pins that the CPU total equals the sum of the work
+dispatched on it.
+
 ### `yield_current` vs body-returned `TaskAction::Yield`
 
 `Scheduler::yield_current(task_id)` models a **voluntary syscall

@@ -5,11 +5,14 @@
 //! `sysinfo` transport together. Drawing is pure with respect to the model,
 //! so a test renders to an in-memory [`Tty`] and inspects the bytes.
 //!
-//! The layout follows GNU `top`: three summary lines (uptime + load
-//! average, the task census, and the memory figures), a bold column
-//! header, the process rows sorted by `%CPU`, and a key-hint footer. The
-//! single-letter state column is coloured by state on a colour terminal so
-//! a runnable, sleeping, stopped, or zombie process reads at a glance.
+//! The layout follows GNU `top`: four summary lines (uptime + load
+//! average, the task census, the CPU busy/idle split, and the memory
+//! figures), a bold column header, the process rows sorted by `%CPU`, and
+//! a key-hint footer. The single-letter state column is coloured by state
+//! on a colour terminal so a runnable, sleeping, stopped, or zombie
+//! process reads at a glance. The view redraws itself every refresh delay
+//! without a key press: the input wait is bounded by the delay, and an
+//! elapsed wait re-queries exactly as the refresh key does.
 
 use alloc::format;
 use alloc::string::String;
@@ -21,11 +24,11 @@ use rustos_procinfo::{state_char, Transport};
 use rustos_vt::{Attributes, BasicColor, Color};
 
 use crate::error::TopError;
-use crate::model::{Action, Model, Row, Summary};
+use crate::model::{Action, CpuSplit, Model, Row, Summary};
 
-/// Rows reserved above the process list: the three summary lines and the
+/// Rows reserved above the process list: the four summary lines and the
 /// column header.
-const HEADER_ROWS: u16 = 4;
+const HEADER_ROWS: u16 = 5;
 /// Rows reserved below the process list: the key-hint footer.
 const FOOTER_ROWS: u16 = 1;
 
@@ -68,10 +71,13 @@ pub fn render<T: Tty>(model: &Model, screen: &mut Screen<T>) -> Result<(), TopEr
         put_line(&mut win, 1, cols, &tasks_line(model), plain);
     }
     if size.rows > 2 {
-        put_line(&mut win, 2, cols, &memory_line(model.summary()), plain);
+        put_line(&mut win, 2, cols, &cpu_line(model.cpu_split()), plain);
     }
     if size.rows > 3 {
-        put_line(&mut win, 3, cols, COLUMN_HEADER, bold());
+        put_line(&mut win, 3, cols, &memory_line(model.summary()), plain);
+    }
+    if size.rows > 4 {
+        put_line(&mut win, 4, cols, COLUMN_HEADER, bold());
     }
 
     let capacity = list_capacity(size);
@@ -117,14 +123,14 @@ pub fn render<T: Tty>(model: &Model, screen: &mut Screen<T>) -> Result<(), TopEr
     screen.doupdate().map_err(TopError::from)
 }
 
-/// Run the interactive viewer until the user quits or the input channel
-/// closes.
+/// Run the interactive viewer until the user quits.
 ///
-/// The loop refreshes the snapshot once up front, then redraws and waits for
-/// one event at a time. It re-queries only when the model asks
-/// ([`Action::Refresh`], i.e. the scope toggle or the refresh key), so
-/// scrolling never disturbs the listing. The cursor is hidden for the
-/// duration and restored on exit.
+/// The loop refreshes the snapshot once up front, then redraws and waits
+/// for one event at a time. The wait is bounded by the caller-configured
+/// input timeout (the `-d` refresh delay): an elapsed wait auto-refreshes
+/// exactly as the refresh key does, so the display stays live without a
+/// key press, while scrolling and other view changes never disturb the
+/// listing. The cursor is hidden for the duration and restored on exit.
 ///
 /// # Errors
 ///
@@ -154,7 +160,11 @@ fn drive<T: Transport, Y: Tty>(
         model.set_viewport(list_capacity(screen.size()));
         render(model, screen)?;
         let Some(event) = screen.getch().map_err(TopError::from)? else {
-            return Ok(());
+            // No event inside the refresh delay: the auto-refresh tick.
+            // The kernel parks the read until input arrives or the delay
+            // elapses, so this loop never spins.
+            model.refresh_recovering(transport)?;
+            continue;
         };
         match model.handle_event(&event) {
             Action::Quit => return Ok(()),
@@ -238,7 +248,26 @@ fn tasks_line(model: &Model) -> String {
     )
 }
 
-/// The third summary line: the memory figures in MiB, or the honest reason
+/// The third summary line: the aggregate CPU busy/idle split over the last
+/// refresh interval, or its honest absence.
+///
+/// RustOS accounts CPU time as busy (running tasks) and idle only — there
+/// is no user/system/nice/iowait split to report — so the line reads
+/// `%Cpu(s): 12.3 busy, 87.7 idle` where GNU `top` breaks the busy share
+/// down further. A deliberate, documented divergence: the figures shown
+/// are real, never fabricated.
+fn cpu_line(split: Option<CpuSplit>) -> String {
+    match split {
+        Some(split) => format!(
+            "%Cpu(s): {} busy, {} idle",
+            format_tenths(split.busy_tenths),
+            format_tenths(split.idle_tenths)
+        ),
+        None => String::from("%Cpu(s): unavailable"),
+    }
+}
+
+/// The fourth summary line: the memory figures in MiB, or the honest reason
 /// they are absent. A refusal names the missing capability — the query is
 /// optional, so the session continues, but the refusal is reported, never
 /// silently blanked.

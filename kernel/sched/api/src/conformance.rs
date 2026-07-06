@@ -173,6 +173,19 @@ fn cpu_time_is_accounted_per_dispatch<S: SchedulerPolicy<TestArch>>() {
         sched.cpu_ticks_of(u64::MAX).is_err(),
         "an unknown id is refused, not reported as zero"
     );
+    // The same dispatch bracket feeds the per-CPU busy total: everything
+    // the tasks accrued on CPU 0 is in CPU 0's total, and an out-of-range
+    // CPU is a typed refusal, never a fabricated zero.
+    let cpu_busy = sched.cpu_busy_ticks(0).expect("cpu 0 exists");
+    assert_eq!(
+        cpu_busy,
+        busy_ticks + idle_ticks,
+        "the CPU total is the sum of the work dispatched on it"
+    );
+    assert!(
+        sched.cpu_busy_ticks(u32::MAX).is_err(),
+        "an out-of-range CPU is refused, not reported as zero"
+    );
 }
 
 /// Lifecycle entry points report the documented typed errors and are

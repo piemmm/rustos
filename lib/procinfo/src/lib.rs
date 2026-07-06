@@ -74,6 +74,7 @@ extern crate alloc;
 // pure library and host builds never link the runtime.
 #[cfg(all(freestanding, feature = "program"))]
 pub mod client;
+pub mod cputime;
 pub mod list;
 pub mod mount;
 pub mod process;
@@ -85,6 +86,7 @@ pub mod users;
 
 #[cfg(all(freestanding, feature = "program"))]
 pub use client::{IpcTransport, RtOutput};
+pub use cputime::{for_each_cpu_time, CPU_TIME_PAGE};
 pub use list::{field_lossy, ListError};
 pub use mount::{for_each_mount, render_mount, render_options, MOUNT_PAGE};
 pub use process::{

@@ -16,7 +16,7 @@ use alloc::vec::Vec;
 use rustos_abi::sysinfo::{KernelMemoryStats, LoadAverage, ProcessRecord, SysinfoQueryId, Uptime};
 use rustos_abi::ProcId;
 use rustos_curses::Event;
-use rustos_procinfo::{call, for_each_process, CallError, Transport};
+use rustos_procinfo::{call, for_each_cpu_time, for_each_process, CallError, Transport};
 
 use crate::error::TopError;
 
@@ -85,6 +85,33 @@ pub struct Row {
     pub wcpu_tenths: u32,
 }
 
+/// The aggregate CPU-time sample: every CPU's cumulative busy and idle
+/// nanoseconds summed, plus the CPU count.
+///
+/// Two consecutive samples' deltas yield the interval utilisation the
+/// `%Cpu(s)` line shows; the first sample's cumulative ratio is the honest
+/// since-boot figure GNU `top` also shows on its first frame.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub struct CpuTimes {
+    /// Number of CPUs summed into the figures.
+    pub cpus: u32,
+    /// Cumulative busy nanoseconds across every CPU.
+    pub busy_ns: u64,
+    /// Cumulative idle nanoseconds across every CPU.
+    pub idle_ns: u64,
+}
+
+/// The busy/idle utilisation split in tenths of a percent (summing to
+/// 1000 when defined), derived from two [`CpuTimes`] samples.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct CpuSplit {
+    /// Share of the interval the CPUs spent running tasks, in tenths of a
+    /// percent.
+    pub busy_tenths: u32,
+    /// Share of the interval the CPUs sat idle, in tenths of a percent.
+    pub idle_tenths: u32,
+}
+
 /// The sampled system summary drawn above the process list.
 ///
 /// Each figure is independently optional so a query the service refuses or
@@ -104,6 +131,8 @@ pub struct Summary {
     /// `CAP_SYSINFO_KERNEL` (rendered as an explicit refusal, never a
     /// silent blank).
     pub memory_denied: bool,
+    /// The aggregate CPU-time sample, when `CPU_TIME_STATS` answered.
+    pub cpu: Option<CpuTimes>,
 }
 
 /// Per-process carry-over from the previous refresh: the cumulative CPU
@@ -123,6 +152,8 @@ pub struct Model {
     summary: Summary,
     history: Vec<History>,
     prev_uptime_ns: Option<u64>,
+    prev_cpu: Option<CpuTimes>,
+    cpu_split: Option<CpuSplit>,
     users: Vec<(u32, String)>,
     scope: Scope,
     selected: usize,
@@ -142,6 +173,8 @@ impl Model {
             summary: Summary::default(),
             history: Vec::new(),
             prev_uptime_ns: None,
+            prev_cpu: None,
+            cpu_split: None,
             users: Vec::new(),
             scope,
             selected: 0,
@@ -199,6 +232,8 @@ impl Model {
         })?;
 
         self.summary = Self::sample_summary(transport);
+        self.cpu_split = Self::split_cpu(self.prev_cpu, self.summary.cpu);
+        self.prev_cpu = self.summary.cpu.or(self.prev_cpu);
 
         // The wall-clock interval since the previous refresh, from the same
         // monotonic uptime source on both sides. Absent (zero) on the first
@@ -264,6 +299,32 @@ impl Model {
         }
     }
 
+    /// Derive the busy/idle split from the previous and current aggregate
+    /// samples.
+    ///
+    /// With a previous sample the split describes the interval between the
+    /// two (counter deltas, exactly as GNU `top` differences `/proc/stat`);
+    /// the first sample falls back to the cumulative since-boot ratio, and
+    /// an absent or empty sample yields no split at all — the line renders
+    /// its absence, never a fabricated figure.
+    fn split_cpu(prev: Option<CpuTimes>, now: Option<CpuTimes>) -> Option<CpuSplit> {
+        let now = now?;
+        let (busy, idle) = match prev {
+            Some(prev) => (
+                now.busy_ns.saturating_sub(prev.busy_ns),
+                now.idle_ns.saturating_sub(prev.idle_ns),
+            ),
+            None => (now.busy_ns, now.idle_ns),
+        };
+        let total = busy.checked_add(idle).filter(|&t| t > 0)?;
+        let busy_tenths = u32::try_from(u128::from(busy) * 1000 / u128::from(total)).unwrap_or(0);
+        let busy_tenths = busy_tenths.min(1000);
+        Some(CpuSplit {
+            busy_tenths,
+            idle_tenths: 1000 - busy_tenths,
+        })
+    }
+
     /// Sample the summary queries, each degrading independently.
     fn sample_summary(transport: &dyn Transport) -> Summary {
         let uptime_ns = call(transport, SysinfoQueryId::UPTIME, &[])
@@ -283,11 +344,22 @@ impl Model {
                 Err(CallError::PermissionDenied) => (None, true),
                 Err(CallError::Service(_)) => (None, false),
             };
+        let mut totals = CpuTimes::default();
+        let cpu = for_each_cpu_time(transport, |record| {
+            totals.cpus = totals.cpus.saturating_add(1);
+            totals.busy_ns = totals.busy_ns.saturating_add(record.busy_ns);
+            totals.idle_ns = totals.idle_ns.saturating_add(record.idle_ns);
+            Ok(())
+        })
+        .ok()
+        .filter(|()| totals.cpus > 0)
+        .map(|()| totals);
         Summary {
             uptime_ns,
             load,
             memory,
             memory_denied,
+            cpu,
         }
     }
 
@@ -332,6 +404,13 @@ impl Model {
     #[must_use]
     pub const fn summary(&self) -> &Summary {
         &self.summary
+    }
+
+    /// The busy/idle utilisation split derived from the last refresh, when
+    /// the CPU-time query answered.
+    #[must_use]
+    pub const fn cpu_split(&self) -> Option<CpuSplit> {
+        self.cpu_split
     }
 
     /// The current scope.

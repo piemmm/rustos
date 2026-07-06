@@ -106,6 +106,15 @@ impl SysinfoQueryId {
     /// directory, never a fabricated account.
     pub const USER_DIRECTORY: Self = Self(10);
 
+    /// List per-CPU execution-time accounting: one [`CpuTimeRecord`] per
+    /// online CPU, paged by a [`CpuTimeListRequest`].
+    ///
+    /// Ungated: the aggregate busy/idle split is the `top`/`uptime`-class
+    /// utilisation figure every user may see, and it exposes strictly less
+    /// than the ungated [`SysinfoQueryId::LOAD_AVERAGE`] census — no
+    /// per-task, per-user, or kernel-internal detail crosses it.
+    pub const CPU_TIME_STATS: Self = Self(11);
+
     /// Inclusive upper bound on the query identifier space in `sysinfo-v1`.
     ///
     /// Sized identically to the syscall table so a future query explosion
@@ -169,6 +178,10 @@ pub enum IntrospectDomain {
     /// [`UserDirectoryRecord`] (uid + username, no credential material),
     /// with the syscall's `arg` naming the record offset to page from.
     UserDirectory = 7,
+    /// Per-CPU execution-time accounting: every online CPU, one packed
+    /// [`CpuTimeRecord`], with the syscall's `arg` naming the record offset
+    /// to page from.
+    CpuTimes = 8,
 }
 
 impl IntrospectDomain {
@@ -191,6 +204,7 @@ impl IntrospectDomain {
             5 => Ok(Self::TaskLimits),
             6 => Ok(Self::LoadAverage),
             7 => Ok(Self::UserDirectory),
+            8 => Ok(Self::CpuTimes),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -308,6 +322,12 @@ pub const SYSINFO_QUERIES: &[SysinfoQuerySpec] = &[
     SysinfoQuerySpec {
         id: SysinfoQueryId::USER_DIRECTORY,
         name: "user_directory",
+        required_capability: None,
+        audit: false,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::CPU_TIME_STATS,
+        name: "cpu_time_stats",
         required_capability: None,
         audit: false,
     },
@@ -1192,6 +1212,120 @@ impl UserDirectoryRecord {
     }
 }
 
+/// Request payload for [`SysinfoQueryId::CPU_TIME_STATS`].
+///
+/// Structurally parallel to [`MountListRequest`] but a distinct frozen
+/// payload: each `sysinfo-v1` query owns its argument type. The response is
+/// a sequence of [`CpuTimeRecord`]s; the client pages through it with
+/// `offset`/`limit` so a fixed-size transport buffer never bounds how many
+/// CPUs the machine may have.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub struct CpuTimeListRequest {
+    /// Index of the first CPU to return.
+    pub offset: u32,
+    /// Maximum number of [`CpuTimeRecord`]s the caller will accept.
+    pub limit: u16,
+    /// Reserved; must be zero in `sysinfo-v1`.
+    pub flags: u16,
+}
+
+impl CpuTimeListRequest {
+    /// Encoded size of a [`CpuTimeListRequest`] on the wire.
+    pub const WIRE_LEN: usize = 8;
+
+    /// Encode `self` into its little-endian wire representation.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u32(&mut out, 0, self.offset);
+        put_u16(&mut out, 4, self.limit);
+        put_u16(&mut out, 6, self.flags);
+        out
+    }
+
+    /// Decode `bytes` into a [`CpuTimeListRequest`].
+    ///
+    /// Returns:
+    /// * [`Errno::BufferTooSmall`] if `bytes.len() < WIRE_LEN`.
+    /// * [`Errno::BadMagic`] if the reserved `flags` field is non-zero
+    ///   (reserved-must-be-zero violations are wire corruption).
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let flags = read_u16(bytes, 6);
+        if flags != 0 {
+            return Err(Errno::BadMagic);
+        }
+        Ok(Self {
+            offset: read_u32(bytes, 0),
+            limit: read_u16(bytes, 4),
+            flags,
+        })
+    }
+}
+
+/// One CPU's execution-time accounting inside a
+/// [`SysinfoQueryId::CPU_TIME_STATS`] response.
+///
+/// `busy_ns` is the cumulative time this CPU has spent dispatching task
+/// bodies since boot, accounted on the scheduler's dispatch path; `idle_ns`
+/// is the remainder of the same monotonic sample instant, so
+/// `busy_ns + idle_ns` is that CPU's share of uptime at the sample. A
+/// consumer derives a utilisation percentage from the *deltas* of two
+/// samples, exactly as `top` reads `/proc/stat` on Linux; RustOS does not
+/// account a user/system/nice/iowait split, so the honest vocabulary is
+/// busy and idle only.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub struct CpuTimeRecord {
+    /// The CPU index this record describes.
+    pub cpu: u32,
+    /// Reserved; must be zero in `sysinfo-v1`.
+    pub reserved: u32,
+    /// Cumulative nanoseconds this CPU spent running tasks since boot.
+    pub busy_ns: u64,
+    /// Nanoseconds of the sample's uptime this CPU was not running tasks.
+    pub idle_ns: u64,
+}
+
+impl CpuTimeRecord {
+    /// Encoded size on the wire.
+    pub const WIRE_LEN: usize = 24;
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u32(&mut out, 0, self.cpu);
+        put_u32(&mut out, 4, self.reserved);
+        put_u64(&mut out, 8, self.busy_ns);
+        put_u64(&mut out, 16, self.idle_ns);
+        out
+    }
+
+    /// Decode from `bytes`.
+    ///
+    /// Returns [`Errno::BufferTooSmall`] if short, or [`Errno::BadMagic`]
+    /// if the reserved field is non-zero.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let reserved = read_u32(bytes, 4);
+        if reserved != 0 {
+            return Err(Errno::BadMagic);
+        }
+        Ok(Self {
+            cpu: read_u32(bytes, 0),
+            reserved,
+            busy_ns: read_u64(bytes, 8),
+            idle_ns: read_u64(bytes, 16),
+        })
+    }
+}
+
 /// Bytes of the per-installation machine identifier.
 pub const MACHINE_ID_LEN: usize = 16;
 
@@ -1613,13 +1747,14 @@ pub const RESOURCE_LIMITS_REPORT_LEN: usize = ResourceLimitRecord::WIRE_LEN * Li
 #[cfg(test)]
 mod tests {
     use super::{
-        encoded_query_table, spec_for, KernelMemoryStats, LoadAverage, MountListRequest,
-        MountRecord, ProcessListRequest, ProcessRecord, ProcessState, ResourceLimitRecord,
-        SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime, UserDirectoryRecord,
-        UserDirectoryRequest, ENCODED_QUERY_TABLE, ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX,
-        LOAD_FIXED_SHIFT, MACHINE_ID_LEN, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX,
-        PROCESS_CPU_NONE, PROCESS_NAME_MAX, RESOURCE_LIMITS_REPORT_LEN, SYSINFO_MAX_PAYLOAD_LEN,
-        SYSINFO_QUERIES, SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC,
+        encoded_query_table, spec_for, CpuTimeListRequest, CpuTimeRecord, KernelMemoryStats,
+        LoadAverage, MountListRequest, MountRecord, ProcessListRequest, ProcessRecord,
+        ProcessState, ResourceLimitRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity,
+        Uptime, UserDirectoryRecord, UserDirectoryRequest, ENCODED_QUERY_TABLE,
+        ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX, LOAD_FIXED_SHIFT, MACHINE_ID_LEN, MOUNT_FSTYPE_MAX,
+        MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, PROCESS_CPU_NONE, PROCESS_NAME_MAX,
+        RESOURCE_LIMITS_REPORT_LEN, SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERIES,
+        SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC,
         SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1, USER_DIRECTORY_NAME_MAX,
     };
     use crate::driver::filesystem::MountFlags;
@@ -1689,12 +1824,13 @@ mod tests {
             (5, IntrospectDomain::TaskLimits),
             (6, IntrospectDomain::LoadAverage),
             (7, IntrospectDomain::UserDirectory),
+            (8, IntrospectDomain::CpuTimes),
         ] {
             assert_eq!(domain.as_u32(), raw);
             assert_eq!(IntrospectDomain::from_u32(raw), Ok(domain));
         }
         // Any value outside the closed set is rejected, not guessed.
-        assert_eq!(IntrospectDomain::from_u32(8), Err(Errno::OutOfRange));
+        assert_eq!(IntrospectDomain::from_u32(9), Err(Errno::OutOfRange));
         assert_eq!(IntrospectDomain::from_u32(u32::MAX), Err(Errno::OutOfRange));
     }
 
@@ -2154,6 +2290,43 @@ mod tests {
         let decoded = SystemIdentity::from_bytes(&bytes).unwrap();
         assert_eq!(decoded, id);
         assert_eq!(decoded.hostname_bytes(), b"rustos-box");
+    }
+
+    #[test]
+    fn cpu_time_list_request_round_trips_and_rejects_reserved() {
+        let req = CpuTimeListRequest {
+            offset: 2,
+            limit: 64,
+            flags: 0,
+        };
+        assert_eq!(CpuTimeListRequest::WIRE_LEN, 8);
+        assert_eq!(CpuTimeListRequest::from_bytes(&req.to_le_bytes()), Ok(req));
+        let mut bytes = req.to_le_bytes();
+        bytes[6] = 1;
+        assert_eq!(CpuTimeListRequest::from_bytes(&bytes), Err(Errno::BadMagic));
+        assert_eq!(
+            CpuTimeListRequest::from_bytes(&[0u8; 4]),
+            Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn cpu_time_record_round_trips_and_rejects_reserved() {
+        let record = CpuTimeRecord {
+            cpu: 3,
+            reserved: 0,
+            busy_ns: 5_000_000_007,
+            idle_ns: 12_345_678_901,
+        };
+        assert_eq!(CpuTimeRecord::WIRE_LEN, 24);
+        assert_eq!(CpuTimeRecord::from_bytes(&record.to_le_bytes()), Ok(record));
+        let mut bytes = record.to_le_bytes();
+        bytes[4] = 1;
+        assert_eq!(CpuTimeRecord::from_bytes(&bytes), Err(Errno::BadMagic));
+        assert_eq!(
+            CpuTimeRecord::from_bytes(&[0u8; 8]),
+            Err(Errno::BufferTooSmall)
+        );
     }
 
     #[test]
