@@ -45,7 +45,7 @@ use rustos_abi::driver::filesystem::{
 };
 use rustos_abi::driver::DriverHandle;
 use rustos_abi::sysinfo::MountRecord;
-use rustos_abi::{CapabilityQuery, Errno, FileKind, FileStat, OpenFlags};
+use rustos_abi::{CapabilityQuery, Errno, FileKind, FileStat, OpenFlags, UnlinkFlags};
 use rustos_caps::CapabilitySet;
 use rustos_kernel_sec::{GroupId, IdentityTable, UserId};
 use rustos_sync::{OnceCell, RwLock, SpinLock};
@@ -632,9 +632,15 @@ where
         })
     }
 
-    fn unlink(&self, uid: u32, caps: &dyn CapabilityQuery, path: &str) -> Result<(), Errno> {
+    fn unlink(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        path: &str,
+        flags: UnlinkFlags,
+    ) -> Result<(), Errno> {
         self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
-            vfs.remove_via_secured(cred, path, fs)
+            vfs.remove_via_secured(cred, path, fs, flags.is_directory_only())
         })
     }
 

@@ -37,5 +37,7 @@
 #define ROS_E_WOULD_BLOCK 19
 #define ROS_E_OUT_OF_MEMORY 20
 #define ROS_E_CROSS_VOLUME 21
+#define ROS_E_NOT_A_DIRECTORY 22
+#define ROS_E_NOT_EMPTY 23
 
 #endif /* ROS_ERROR_H */

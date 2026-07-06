@@ -145,6 +145,26 @@ pub enum Errno {
     /// path-validation errnos so a mover (`mv`) can fall back to the POSIX
     /// copy-then-remove relocation on exactly this condition and no other.
     CrossVolume = 21,
+    /// A path names a non-directory where a directory is required.
+    ///
+    /// The RustOS equivalent of POSIX `ENOTDIR`. Emitted by the filesystem
+    /// syscalls when an operation that only applies to a directory reaches a
+    /// file — a directory-only `fs_unlink`
+    /// ([`UnlinkFlags::DIRECTORY`](crate::UnlinkFlags::DIRECTORY), the
+    /// `rmdir` guarantee) naming a file, or a path that uses a file as an
+    /// intermediate component. It is deliberately distinct from the generic
+    /// path-validation errno so `rmdir` can report the GNU "Not a
+    /// directory" diagnostic truthfully, never by guessing.
+    NotADirectory = 22,
+    /// A directory cannot be removed because it still has entries.
+    ///
+    /// The RustOS equivalent of POSIX `ENOTEMPTY`. Emitted by `fs_unlink`
+    /// when the named directory is not empty: removal never recurses
+    /// implicitly, so a populated directory fails closed with this code. It
+    /// is deliberately distinct from the generic path-validation errnos so
+    /// `rmdir --ignore-fail-on-non-empty` can tolerate exactly this
+    /// condition and no other.
+    NotEmpty = 23,
 }
 
 impl Errno {
@@ -201,6 +221,8 @@ impl Errno {
             19 => Some(Self::WouldBlock),
             20 => Some(Self::OutOfMemory),
             21 => Some(Self::CrossVolume),
+            22 => Some(Self::NotADirectory),
+            23 => Some(Self::NotEmpty),
             _ => None,
         }
     }
@@ -230,6 +252,8 @@ impl fmt::Display for Errno {
             Self::WouldBlock => "operation would block",
             Self::OutOfMemory => "out of memory",
             Self::CrossVolume => "paths on different volumes",
+            Self::NotADirectory => "not a directory",
+            Self::NotEmpty => "directory not empty",
         };
         f.write_str(message)
     }
@@ -263,6 +287,8 @@ mod tests {
         assert_eq!(Errno::WouldBlock.as_i32(), 19);
         assert_eq!(Errno::OutOfMemory.as_i32(), 20);
         assert_eq!(Errno::CrossVolume.as_i32(), 21);
+        assert_eq!(Errno::NotADirectory.as_i32(), 22);
+        assert_eq!(Errno::NotEmpty.as_i32(), 23);
     }
 
     #[test]
@@ -291,11 +317,13 @@ mod tests {
             Errno::WouldBlock,
             Errno::OutOfMemory,
             Errno::CrossVolume,
+            Errno::NotADirectory,
+            Errno::NotEmpty,
         ] {
             assert_eq!(Errno::from_i32(errno.as_i32()), Some(errno));
         }
         assert_eq!(Errno::from_i32(0), None);
-        assert_eq!(Errno::from_i32(22), None);
+        assert_eq!(Errno::from_i32(24), None);
         assert_eq!(Errno::from_i32(-1), None);
     }
 

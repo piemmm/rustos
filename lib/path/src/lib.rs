@@ -86,7 +86,7 @@
 
 extern crate alloc;
 
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
 
@@ -156,6 +156,29 @@ impl Path {
     #[must_use]
     pub fn is_absolute(&self) -> bool {
         matches!(self.root, Root::View | Root::Alias(_))
+    }
+
+    /// The canonical spelling of this path truncated to its first `len`
+    /// components, or `None` when `len` exceeds the component count.
+    ///
+    /// This is the one definition of the ancestor walk the parent-creating
+    /// and parent-removing tools share: `mkdir -p` spells each prefix
+    /// outermost-first (`prefix(1)`, `prefix(2)`, …) and `rmdir -p` each
+    /// proper ancestor innermost-first, so neither tool re-derives how a
+    /// truncated path is spelled. `prefix(0)` is the bare root (`/`,
+    /// `Name:/`, or `.` for a relative path).
+    #[must_use]
+    pub fn prefix(&self, len: usize) -> Option<String> {
+        if len > self.components.len() {
+            return None;
+        }
+        Some(
+            Self {
+                root: self.root.clone(),
+                components: self.components[..len].to_vec(),
+            }
+            .to_string(),
+        )
     }
 }
 
@@ -469,11 +492,31 @@ fn validate_component(component: &str) -> Result<(), PathError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::string::ToString;
     use alloc::vec;
 
     fn components(p: &Path) -> Vec<String> {
         p.components().to_vec()
+    }
+
+    #[test]
+    fn prefix_spells_each_truncation_and_rejects_overrun() {
+        // A view path: prefixes run from the bare root to the full spelling.
+        let p = parse("/a/b/c").expect("parse");
+        assert_eq!(p.prefix(0).as_deref(), Some("/"));
+        assert_eq!(p.prefix(1).as_deref(), Some("/a"));
+        assert_eq!(p.prefix(2).as_deref(), Some("/a/b"));
+        assert_eq!(p.prefix(3).as_deref(), Some("/a/b/c"));
+        assert_eq!(p.prefix(4), None);
+        // An alias path keeps its root spelling.
+        let p = parse("Home:/tools/bin").expect("parse");
+        assert_eq!(p.prefix(0).as_deref(), Some("Home:/"));
+        assert_eq!(p.prefix(1).as_deref(), Some("Home:/tools"));
+        assert_eq!(p.prefix(2).as_deref(), Some("Home:/tools/bin"));
+        // A relative path's empty prefix is the current directory.
+        let p = parse("x/y").expect("parse");
+        assert_eq!(p.prefix(0).as_deref(), Some("."));
+        assert_eq!(p.prefix(1).as_deref(), Some("x"));
+        assert_eq!(p.prefix(2).as_deref(), Some("x/y"));
     }
 
     #[test]

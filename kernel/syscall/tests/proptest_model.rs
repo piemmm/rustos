@@ -33,7 +33,7 @@ use core::cell::RefCell;
 use proptest::prelude::*;
 use rustos_abi::{
     AbiType, CapabilityId, Errno, IrqHandle, OpenFlags, RandomFlags, SyscallNumber, SyscallSpec,
-    SYSCALLS, SYSCALL_MAX_ARGS,
+    UnlinkFlags, SYSCALLS, SYSCALL_MAX_ARGS,
 };
 use rustos_caps::CapabilitySet;
 use rustos_kernel_sec::{TaskCapabilities, TaskId, UserId};
@@ -502,7 +502,13 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
-    fn fs_unlink(&self, _c: &CallerContext<'_>, _path: u64, _path_len: usize) -> SyscallResult {
+    fn fs_unlink(
+        &self,
+        _c: &CallerContext<'_>,
+        _path: u64,
+        _path_len: usize,
+        _flags: UnlinkFlags,
+    ) -> SyscallResult {
         self.bump();
         Ok(0)
     }

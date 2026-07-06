@@ -232,12 +232,18 @@ pub enum VfsError {
 impl VfsError {
     /// Map to the stable user/kernel [`Errno`].
     ///
-    /// `abi-v1` has no dedicated code for `ENOTDIR`/`EISDIR`/`EEXIST`/
-    /// `ENOTEMPTY`/`EINVAL`, so those collapse onto [`Errno::OutOfRange`];
-    /// the read-only refusal is reported as
-    /// [`Errno::PermissionDenied`]. `abi-v1` likewise has no dedicated
-    /// `EIO`, so [`Self::Io`] collapses onto [`Errno::NotImplemented`],
-    /// mirroring how [`DriverError::DeviceFault`](rustos_abi::driver::DriverError)
+    /// The conditions a userland tool must tell apart carry their own
+    /// dedicated codes: an existing name is [`Errno::AlreadyExists`]
+    /// (`EEXIST` — `mkdir` reports "File exists" and `mkdir -p` tolerates an
+    /// existing directory), a non-directory where a directory is required is
+    /// [`Errno::NotADirectory`] (`ENOTDIR`), and a populated directory is
+    /// [`Errno::NotEmpty`] (`ENOTEMPTY` — `rmdir --ignore-fail-on-non-empty`
+    /// tolerates exactly this). `abi-v1` has no dedicated `EISDIR`/`EINVAL`,
+    /// so those collapse onto [`Errno::OutOfRange`]; the read-only refusal
+    /// is reported as [`Errno::PermissionDenied`]. `abi-v1` likewise has no
+    /// dedicated `EIO`, so [`Self::Io`] collapses onto
+    /// [`Errno::NotImplemented`], mirroring how
+    /// [`DriverError::DeviceFault`](rustos_abi::driver::DriverError)
     /// already maps. The precise [`VfsError`] is retained in-kernel for
     /// logging.
     #[must_use]
@@ -245,11 +251,10 @@ impl VfsError {
         match self {
             Self::NotFound => Errno::NotFound,
             Self::PermissionDenied | Self::ReadOnly => Errno::PermissionDenied,
-            Self::InvalidPath
-            | Self::NotADirectory
-            | Self::IsADirectory
-            | Self::AlreadyExists
-            | Self::NotEmpty => Errno::OutOfRange,
+            Self::InvalidPath | Self::IsADirectory => Errno::OutOfRange,
+            Self::NotADirectory => Errno::NotADirectory,
+            Self::AlreadyExists => Errno::AlreadyExists,
+            Self::NotEmpty => Errno::NotEmpty,
             Self::CrossVolume => Errno::CrossVolume,
             Self::Io => Errno::NotImplemented,
         }
@@ -287,7 +292,11 @@ mod tests {
             Errno::PermissionDenied
         );
         assert_eq!(VfsError::InvalidPath.to_errno(), Errno::OutOfRange);
-        assert_eq!(VfsError::AlreadyExists.to_errno(), Errno::OutOfRange);
+        assert_eq!(VfsError::IsADirectory.to_errno(), Errno::OutOfRange);
+        assert_eq!(VfsError::AlreadyExists.to_errno(), Errno::AlreadyExists);
+        assert_eq!(VfsError::NotADirectory.to_errno(), Errno::NotADirectory);
+        assert_eq!(VfsError::NotEmpty.to_errno(), Errno::NotEmpty);
+        assert_eq!(VfsError::CrossVolume.to_errno(), Errno::CrossVolume);
         assert_eq!(VfsError::Io.to_errno(), Errno::NotImplemented);
     }
 

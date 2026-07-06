@@ -3665,10 +3665,10 @@ a password is set afterwards via the `users` tool), the
 session-baseline ceiling, and the shared shell/home defaults.
 
 The `plans/APPS.md` §12.1 Stage C coreutils build-out is under way:
-`true`, `false`, `yes`, `basename`, and `dirname` are full
-self-contained store bundles (store-only — the §18.6 boot floor never
-grows, so the inventory drift test pins their `AppInfo.toml` directly;
-console-write + `CAP_FS_ACCESS`, six-locale `Help/` trees with
+`true`, `false`, `yes`, `basename`, `dirname`, `mkdir`, and `rmdir` are
+full self-contained store bundles (store-only — the §18.6 boot floor
+never grows, so the inventory drift test pins their `AppInfo.toml`
+directly; console-write + `CAP_FS_ACCESS`, six-locale `Help/` trees with
 switch-drift pins, complete GNU surfaces). `basename`/`dirname` are
 purely lexical and treat a `Name:/` alias root the way POSIX treats `/`
 through the path grammar's own exported rule
@@ -3676,15 +3676,28 @@ through the path grammar's own exported rule
 parser); `false`'s served short help exits `0` per the §4 short-help
 convention (documented divergence from GNU `false --help`). `echo` and
 `pwd` stay `elsh` builtins (the shell resolves builtins first, and
-`pwd` needs the shell's cwd state).
+`pwd` needs the shell's cwd state). Landing `mkdir`/`rmdir` evolved
+`abi-v1` in place (unfrozen, the `mv`/`CrossVolume` precedent): the
+dedicated `Errno::NotADirectory`/`Errno::NotEmpty` codes (with
+`VfsError::{AlreadyExists, NotADirectory, NotEmpty}` now mapping
+precisely instead of collapsing onto `OutOfRange`) and a validated
+`UnlinkFlags` word on `fs_unlink` whose `DIRECTORY` bit is the atomic
+`rmdir(2)`/`unlinkat(AT_REMOVEDIR)` posture, decided by the filesystem
+under its own lock — `rmdir` carries no stat/remove race, and `rm`'s
+own directory removals now pass it too. Both tools' `-p` walks share
+the one ancestor-spelling rule (`rustos_path::Path::prefix`); `mkdir`'s
+GNU `-m` is deliberately staged behind the same mode-set syscall
+`chmod` waits on, never stubbed. The C header carries the new errnos
+plus `ROS_UNLINK_FLAG_DIRECTORY` and the previously-unpublished
+`ROS_OPEN_FLAG_*` bits (regenerated, drift-guarded).
 
 **Remaining** (staged in `plans/APPS.md` §13): the Stage B remainder
 (`chmod`/`chown`/`getcap`/`setcap`/`mount` blocked on their kernel
 syscalls — fs mode/owner set, per-inode capability get/set, mount — each
 registers in the change that lands its syscall); the Stage C remainder
-(the rest of the first batch — `printf`, `mkdir`, `rmdir`, `head`,
-`tail`, `wc`, `seq`, `tee`, `env`, `sleep`, `date`, `whoami`, `id` —
-then the text tools, in further batches); `Help/` trees for future
+(the rest of the first batch — `printf`, `head`, `tail`, `wc`, `seq`,
+`tee`, `env`, `sleep`, `date`, `whoami`, `id` — then the text tools, in
+further batches); `Help/` trees for future
 command apps as each becomes a registered store bundle; and wider `stdinfo`
 adoption in command apps as future behaviour warrants it (advisory-only,
 §20 — the live records are `man`'s locale-fallback, `ls`'s hidden-entries

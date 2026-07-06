@@ -10,7 +10,8 @@
 
 use rustos_abi::{
     spec_for, AbiType, CapabilityId, Errno, IrqHandle, MapFlags, OpenFlags, RandomFlags, Signal,
-    SyscallNumber, SyscallSpec, WaitFlags, ENCODED_TABLE, PROC_ID_HEX_LEN, SYSCALL_MAX_ARGS,
+    SyscallNumber, SyscallSpec, UnlinkFlags, WaitFlags, ENCODED_TABLE, PROC_ID_HEX_LEN,
+    SYSCALL_MAX_ARGS,
 };
 use rustos_crypto::{sha256, Sha256Digest};
 use rustos_kernel_sec::{TaskCapabilities, TaskId};
@@ -1492,12 +1493,20 @@ pub trait SyscallHandlers {
     /// Remove the file or empty directory at the absolute path `path`
     /// (`path_len` bytes) (`PREREQUISITES.md` P-A).
     ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::FS_ACCESS`], that `path` is a non-null `UserPtr`, and
+    /// rejected any reserved [`UnlinkFlags`] bit. With
+    /// [`UnlinkFlags::DIRECTORY`] the removal succeeds only when the name is
+    /// an (empty) directory — the atomic `rmdir` posture, decided by the
+    /// filesystem under its own lock.
+    ///
     /// The default implementation fails closed with [`Errno::NotImplemented`].
     fn fs_unlink(
         &self,
         _caller: &CallerContext<'_>,
         _path: u64,
         _path_len: usize,
+        _flags: UnlinkFlags,
     ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
@@ -1983,8 +1992,12 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 self.handlers.fs_mkdir(caller, args.0[0], path_len)
             }
             SyscallNumber::FS_UNLINK => {
+                // args[0] is the non-null path `UserPtr` (dispatcher-checked);
+                // args[1] is the path length; args[2] is the `UnlinkFlags`
+                // bits, rejected here for any reserved bit.
                 let path_len = decode_len(args.0[1])?;
-                self.handlers.fs_unlink(caller, args.0[0], path_len)
+                let flags = UnlinkFlags::from_bits(decode_u32(args.0[2]))?;
+                self.handlers.fs_unlink(caller, args.0[0], path_len, flags)
             }
             SyscallNumber::FS_RENAME => {
                 let src_len = decode_len(args.0[1])?;
@@ -2938,7 +2951,13 @@ mod tests {
             Ok(0)
         }
 
-        fn fs_unlink(&self, _c: &CallerContext<'_>, _path: u64, _path_len: usize) -> SyscallResult {
+        fn fs_unlink(
+            &self,
+            _c: &CallerContext<'_>,
+            _path: u64,
+            _path_len: usize,
+            _flags: UnlinkFlags,
+        ) -> SyscallResult {
             self.record("fs_unlink");
             Ok(0)
         }

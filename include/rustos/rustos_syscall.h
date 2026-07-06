@@ -99,6 +99,25 @@ extern "C" {
 * matching child is still running. */
 #define ROS_WAIT_FLAG_NONBLOCK 0x1u
 
+/* fs_open() flag bits (uint32_t). Every undefined bit is reserved and rejected
+* with ROS_E_OUT_OF_RANGE, as is a combination the contract forbids (TRUNCATE/
+* APPEND without WRITE, EXCLUSIVE without CREATE, DIRECTORY with WRITE). An open
+* with neither READ nor WRITE is a resolve-only handle. */
+#define ROS_OPEN_FLAG_READ 0x1u
+#define ROS_OPEN_FLAG_WRITE 0x2u
+#define ROS_OPEN_FLAG_CREATE 0x4u
+#define ROS_OPEN_FLAG_TRUNCATE 0x8u
+#define ROS_OPEN_FLAG_APPEND 0x10u
+#define ROS_OPEN_FLAG_DIRECTORY 0x20u
+#define ROS_OPEN_FLAG_EXCLUSIVE 0x40u
+
+/* fs_unlink() flag bits (uint32_t). Every undefined bit is reserved and rejected
+* with ROS_E_OUT_OF_RANGE. 0 removes the named file or (empty) directory; with
+* the DIRECTORY bit the removal succeeds only when the name is an (empty)
+* directory (the atomic rmdir posture) and a non-directory is refused with
+* ROS_E_NOT_A_DIRECTORY. */
+#define ROS_UNLINK_FLAG_DIRECTORY 0x1u
+
 /* signal() control signals (the `signal` argument, uint32_t). 0 is reserved and
 * never valid; a value outside this set is rejected with ROS_E_OUT_OF_RANGE. */
 #define ROS_SIGNAL_CONTINUE 1u
@@ -161,7 +180,7 @@ uint64_t ros_sys_fs_stat(uint32_t a0, void * a1, uintptr_t a2);
 int32_t ros_sys_fs_truncate(uint32_t a0, uint64_t a1);
 int32_t ros_sys_fs_sync(uint32_t a0);
 int32_t ros_sys_fs_mkdir(void * a0, uintptr_t a1);
-int32_t ros_sys_fs_unlink(void * a0, uintptr_t a1);
+int32_t ros_sys_fs_unlink(void * a0, uintptr_t a1, uint32_t a2);
 int32_t ros_sys_dma_free(uint64_t a0, uint64_t a1);
 int32_t ros_sys_fs_rename(void * a0, uintptr_t a1, void * a2, uintptr_t a3);
 uint64_t ros_sys_call_peer_origin(uint64_t a0, uint64_t a1, void * a2, uintptr_t a3);

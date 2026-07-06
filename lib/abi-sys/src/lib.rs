@@ -1455,18 +1455,25 @@ pub extern "C" fn sys_fs_mkdir(path: *mut c_void, path_len: usize) -> i32 {
 /// `fs_unlink`: remove the file or empty directory at the absolute path
 /// `(path, path_len)` (`SyscallNumber::FS_UNLINK`). Returns a `ROS_E_*` code.
 ///
+/// `flags` is the validated `ROS_UNLINK_FLAG_*` word: `0` removes the named
+/// file or (empty) directory; `ROS_UNLINK_FLAG_DIRECTORY` restricts the
+/// removal to an (empty) directory (the atomic `rmdir` posture — a
+/// non-directory is refused with `ROS_E_NOT_A_DIRECTORY`). A reserved bit
+/// fails closed.
+///
 /// Requires `ROS_CAP_FS_ACCESS`; resolution and the permission/mount-flag
 /// model match `ros_sys_fs_open`. A non-empty directory fails closed. The
 /// kernel validates `(path, path_len)` against the caller's address space
 /// before reading it.
 #[must_use]
 #[export_name = "ros_sys_fs_unlink"]
-pub extern "C" fn sys_fs_unlink(path: *mut c_void, path_len: usize) -> i32 {
-    // SAFETY: see `sys_ipc_send`; the kernel validates `(path, path_len)`.
+pub extern "C" fn sys_fs_unlink(path: *mut c_void, path_len: usize, flags: u32) -> i32 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates `(path, path_len)`
+    // and rejects any reserved `flags` bit.
     unsafe {
         ret_i32(raw_syscall(
             NUM_FS_UNLINK,
-            [ptr_arg(path), path_len as u64, 0, 0, 0, 0],
+            [ptr_arg(path), path_len as u64, u64::from(flags), 0, 0, 0],
         ))
     }
 }
@@ -1673,7 +1680,7 @@ mod tests {
         (NUM_FS_TRUNCATE, "fs_truncate", 2),
         (NUM_FS_SYNC, "fs_sync", 1),
         (NUM_FS_MKDIR, "fs_mkdir", 2),
-        (NUM_FS_UNLINK, "fs_unlink", 2),
+        (NUM_FS_UNLINK, "fs_unlink", 3),
         (NUM_FS_RENAME, "fs_rename", 4),
         (NUM_CALL_PEER_ORIGIN, "call_peer_origin", 4),
         (NUM_WALL_TIME_GET, "wall_time_get", 2),
@@ -2525,16 +2532,26 @@ mod tests {
     }
 
     #[test]
-    fn fs_unlink_marshals_path_and_len() {
+    fn fs_unlink_marshals_path_len_and_flags() {
         let mut path = *b"/Storage/old";
         let ptr = path.as_mut_ptr().cast::<c_void>();
         let (number, args) = capture(0, || {
-            assert_eq!(sys_fs_unlink(ptr, path.len()), 0);
+            assert_eq!(sys_fs_unlink(ptr, path.len(), 0), 0);
         });
         assert_eq!(number, NUM_FS_UNLINK);
         assert_eq!(args[0], ptr as usize as u64);
         assert_eq!(args[1], path.len() as u64);
         assert_eq!(&args[2..], &[0, 0, 0, 0]);
+        // The directory-only bit travels in the flags register.
+        let dir_bit = u64::from(rustos_abi::UnlinkFlags::DIRECTORY.bits());
+        let (number, args) = capture(0, || {
+            assert_eq!(
+                sys_fs_unlink(ptr, path.len(), rustos_abi::UnlinkFlags::DIRECTORY.bits()),
+                0
+            );
+        });
+        assert_eq!(number, NUM_FS_UNLINK);
+        assert_eq!(args[2], dir_bit);
     }
 
     #[test]

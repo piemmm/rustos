@@ -50,25 +50,26 @@ use rustos_abi::{
     DriverHandle, DriverKind, DriverManifest, DriverRegisterReply, Duration64, Errno,
     HwDeviceClass, HwMatchKey, HwMatchKind, HwNode, HwResource, HwResourceKind, IpcMessageHeader,
     KernelMemoryStats, KeyInput, LibraryScope, LimitKind, LoadAverage, LoadHeader, ManifestHeader,
-    MapFlags, MountListRequest, MountRecord, NamedKeyCode, NeededLibrary, PointerButtonCode,
-    PointerInput, PortName, ProcessListRequest, ProcessRecord, ProcessStartHeader, ProcessState,
-    RandomFlags, ResourceLimit, ResourceLimitRecord, RxePermission, Segment, Severity, Signal,
-    StdInfoKind, StringSlot, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Time64, Uptime,
-    UserDirectoryRecord, UserDirectoryRequest, WaitFlags, ABI_VERSION_V1, APPINFO_MAGIC,
-    APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX,
-    BUTTON_NONE, CAPABILITY_ID_MAX, COARSE_CLOCK_GRANULARITY_NS, CONSOLE_INHERIT,
-    DRIVER_MANIFEST_MAGIC, DRIVER_MANIFEST_MAX_BIND_KEYS, DRIVER_MANIFEST_MAX_CAPABILITIES,
-    DRIVER_REGISTER_REPLY_MAGIC, DRIVER_REGISTER_STATUS_OK, DRIVER_SIGNATURE_LEN,
-    DRIVER_SIGNER_PUBKEY_LEN, ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX, HWTREE_VERSION_V1,
-    HW_COMPATIBLE_MAX, HW_NODE_MAX_MATCH_KEYS, HW_NODE_MAX_RESOURCES, HW_NODE_ROOT,
-    IPC_MESSAGE_HEADER_MAGIC, KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC, KIND_KEY_PRESSED,
-    KIND_KEY_RELEASED, KIND_MOVED, KIND_PRESSED, KIND_RELEASED, LIBREF_MAX, LOAD_FLAG_PIE,
-    LOAD_MAGIC, LOAD_MAX_NEEDED, LOAD_MAX_SEGMENTS, LOG_FIELDS_MAX, LOG_FIELD_KEY_MAX,
-    LOG_FIELD_VALUE_MAX, LOG_LEVEL_MAX, LOG_MESSAGE_MAX, LOG_RECORD_HEADER_LEN, LOG_RECORD_MAX,
-    MACHINE_ID_LEN, MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES, MIME_ENTRY_LEN, MIME_TYPE_MAX,
-    MOD_ALT, MOD_CTRL, MOD_MASK, MOD_META, MOD_SHIFT, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX,
-    MOUNT_TARGET_MAX, NANOS_PER_SEC, POINTER_INPUT_MAGIC, PORT_NAME_MAX_LEN, PROCESS_CPU_NONE,
-    PROCESS_NAME_MAX, PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN,
+    MapFlags, MountListRequest, MountRecord, NamedKeyCode, NeededLibrary, OpenFlags,
+    PointerButtonCode, PointerInput, PortName, ProcessListRequest, ProcessRecord,
+    ProcessStartHeader, ProcessState, RandomFlags, ResourceLimit, ResourceLimitRecord,
+    RxePermission, Segment, Severity, Signal, StdInfoKind, StringSlot, SysinfoQueryId,
+    SysinfoRequestHeader, SystemIdentity, Time64, UnlinkFlags, Uptime, UserDirectoryRecord,
+    UserDirectoryRequest, WaitFlags, ABI_VERSION_V1, APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES,
+    APPINFO_MAX_MIME, BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX, BUTTON_NONE,
+    CAPABILITY_ID_MAX, COARSE_CLOCK_GRANULARITY_NS, CONSOLE_INHERIT, DRIVER_MANIFEST_MAGIC,
+    DRIVER_MANIFEST_MAX_BIND_KEYS, DRIVER_MANIFEST_MAX_CAPABILITIES, DRIVER_REGISTER_REPLY_MAGIC,
+    DRIVER_REGISTER_STATUS_OK, DRIVER_SIGNATURE_LEN, DRIVER_SIGNER_PUBKEY_LEN,
+    ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX, HWTREE_VERSION_V1, HW_COMPATIBLE_MAX,
+    HW_NODE_MAX_MATCH_KEYS, HW_NODE_MAX_RESOURCES, HW_NODE_ROOT, IPC_MESSAGE_HEADER_MAGIC,
+    KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC, KIND_KEY_PRESSED, KIND_KEY_RELEASED,
+    KIND_MOVED, KIND_PRESSED, KIND_RELEASED, LIBREF_MAX, LOAD_FLAG_PIE, LOAD_MAGIC,
+    LOAD_MAX_NEEDED, LOAD_MAX_SEGMENTS, LOG_FIELDS_MAX, LOG_FIELD_KEY_MAX, LOG_FIELD_VALUE_MAX,
+    LOG_LEVEL_MAX, LOG_MESSAGE_MAX, LOG_RECORD_HEADER_LEN, LOG_RECORD_MAX, MACHINE_ID_LEN,
+    MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES, MIME_ENTRY_LEN, MIME_TYPE_MAX, MOD_ALT, MOD_CTRL,
+    MOD_MASK, MOD_META, MOD_SHIFT, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX,
+    NANOS_PER_SEC, POINTER_INPUT_MAGIC, PORT_NAME_MAX_LEN, PROCESS_CPU_NONE, PROCESS_NAME_MAX,
+    PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN,
     PROCESS_START_MAX_TOTAL_LEN, RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES,
     RESOURCE_LIMITS_REPORT_LEN, RLIMIT_INFINITY, RXE_PAGE_SIZE, SEG_FLAG_EXEC, SEG_FLAG_READ,
     SEG_FLAG_WRITE, SPAWN_UID_INHERIT, STDINFO_FD, STDINFO_VERSION_CURRENT, STDINFO_VERSION_V1,
@@ -113,6 +114,8 @@ const ERRNO_NAMES: &[(&str, Errno)] = &[
     ("WOULD_BLOCK", Errno::WouldBlock),
     ("OUT_OF_MEMORY", Errno::OutOfMemory),
     ("CROSS_VOLUME", Errno::CrossVolume),
+    ("NOT_A_DIRECTORY", Errno::NotADirectory),
+    ("NOT_EMPTY", Errno::NotEmpty),
 ];
 
 /// One generated C header: its file name (relative to the include directory)
@@ -2115,6 +2118,63 @@ fn generate_syscall() -> String {
     out.push('\n');
 
     out.push_str(
+        "/* fs_open() flag bits (uint32_t). Every undefined bit is reserved and rejected\n\
+         * with ROS_E_OUT_OF_RANGE, as is a combination the contract forbids (TRUNCATE/\n\
+         * APPEND without WRITE, EXCLUSIVE without CREATE, DIRECTORY with WRITE). An open\n\
+         * with neither READ nor WRITE is a resolve-only handle. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_OPEN_FLAG_READ {:#x}u",
+        OpenFlags::READ.bits()
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_OPEN_FLAG_WRITE {:#x}u",
+        OpenFlags::WRITE.bits()
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_OPEN_FLAG_CREATE {:#x}u",
+        OpenFlags::CREATE.bits()
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_OPEN_FLAG_TRUNCATE {:#x}u",
+        OpenFlags::TRUNCATE.bits()
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_OPEN_FLAG_APPEND {:#x}u",
+        OpenFlags::APPEND.bits()
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_OPEN_FLAG_DIRECTORY {:#x}u",
+        OpenFlags::DIRECTORY.bits()
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_OPEN_FLAG_EXCLUSIVE {:#x}u",
+        OpenFlags::EXCLUSIVE.bits()
+    );
+    out.push('\n');
+
+    out.push_str(
+        "/* fs_unlink() flag bits (uint32_t). Every undefined bit is reserved and rejected\n\
+         * with ROS_E_OUT_OF_RANGE. 0 removes the named file or (empty) directory; with\n\
+         * the DIRECTORY bit the removal succeeds only when the name is an (empty)\n\
+         * directory (the atomic rmdir posture) and a non-directory is refused with\n\
+         * ROS_E_NOT_A_DIRECTORY. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_UNLINK_FLAG_DIRECTORY {:#x}u",
+        UnlinkFlags::DIRECTORY.bits()
+    );
+    out.push('\n');
+
+    out.push_str(
         "/* signal() control signals (the `signal` argument, uint32_t). 0 is reserved and\n\
          * never valid; a value outside this set is rejected with ROS_E_OUT_OF_RANGE. */\n",
     );
@@ -2426,6 +2486,27 @@ mod tests {
         assert!(
             h.contains("uint64_t ros_sys_wait(int32_t a0, void * a1, uint32_t a2);"),
             "wait prototype carries the flags argument: {h}"
+        );
+        // The fs_open()/fs_unlink() flag bits are read from lib/abi, never
+        // re-typed, and the fs_unlink prototype carries its uint32_t flags
+        // argument.
+        assert!(
+            h.contains(&format!(
+                "#define ROS_OPEN_FLAG_EXCLUSIVE {:#x}u",
+                OpenFlags::EXCLUSIVE.bits()
+            )),
+            "fs_open flag bits: {h}"
+        );
+        assert!(
+            h.contains(&format!(
+                "#define ROS_UNLINK_FLAG_DIRECTORY {:#x}u",
+                UnlinkFlags::DIRECTORY.bits()
+            )),
+            "fs_unlink directory flag bit: {h}"
+        );
+        assert!(
+            h.contains("int32_t ros_sys_fs_unlink(void * a0, uintptr_t a1, uint32_t a2);"),
+            "fs_unlink prototype carries the flags argument: {h}"
         );
         // The signal() control-signal discriminants are read from lib/abi,
         // never re-typed, and the prototype carries its (pid, signal) args.
@@ -3499,10 +3580,10 @@ mod tests {
             let expected = i32::try_from(idx + 1).expect("small index");
             assert_eq!(errno.as_i32(), expected, "errno values must be dense 1..=N");
         }
-        // CrossVolume is the last appended abi-v1 variant (discriminant 21).
+        // NotEmpty is the last appended abi-v1 variant (discriminant 23).
         assert_eq!(
             ERRNO_NAMES.last().map(|(_, e)| e.as_i32()),
-            Some(Errno::CrossVolume.as_i32()),
+            Some(Errno::NotEmpty.as_i32()),
             "errno table must end at the last frozen variant"
         );
     }

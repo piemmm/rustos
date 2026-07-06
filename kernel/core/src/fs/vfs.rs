@@ -297,22 +297,27 @@ impl Vfs {
     /// Unlink a child under a driver-backed mount, delegating to `fs`.
     ///
     /// See [`Vfs::create_via`] for the resolution and permission model.
+    /// With `dir_only` the removal succeeds only when the name is an
+    /// (empty) directory — the atomic `rmdir` posture, decided here under
+    /// the mount's lock, never by a caller-side stat.
     ///
     /// # Errors
     ///
     /// * [`VfsError::ReadOnly`] if the covering mount is read-only.
     /// * [`VfsError::NotEmpty`] if `path` is a non-empty directory.
+    /// * [`VfsError::NotADirectory`] if `dir_only` and `path` is not a
+    ///   directory.
     /// * [`VfsError::NotFound`], [`VfsError::PermissionDenied`],
-    ///   [`VfsError::NotADirectory`], [`VfsError::InvalidPath`], or
-    ///   [`VfsError::Io`].
+    ///   [`VfsError::InvalidPath`], or [`VfsError::Io`].
     pub fn remove_via<F: FilesystemRead + FilesystemWrite + ?Sized>(
         &self,
         cred: &Credentials<'_>,
         path: &Path,
         fs: &mut F,
+        dir_only: bool,
     ) -> Result<(), VfsError> {
         let (template, remainder) = self.delegate_context(cred, path, true)?;
-        DelegatedFs::new(fs, template).remove(cred, &remainder)
+        DelegatedFs::new(fs, template).remove(cred, &remainder, dir_only)
     }
 
     // -----------------------------------------------------------------
@@ -450,9 +455,10 @@ impl Vfs {
         cred: &Credentials<'_>,
         path: &Path,
         fs: &mut F,
+        dir_only: bool,
     ) -> Result<(), VfsError> {
         let (template, remainder) = self.delegate_context(cred, path, true)?;
-        DelegatedFs::new_secured(fs, template).remove(cred, &remainder)
+        DelegatedFs::new_secured(fs, template).remove(cred, &remainder, dir_only)
     }
 
     /// Move `src` to `dst` under a driver-backed mount, delegating to `fs`.
@@ -696,15 +702,27 @@ impl Vfs {
 
     /// Remove the (empty) directory or file at `path`.
     ///
+    /// With `dir_only` the removal succeeds only when the name is an
+    /// (empty) directory — the atomic `rmdir` posture, decided here in the
+    /// same lookup that removes the entry, never by a caller-side stat a
+    /// concurrent rename could invalidate.
+    ///
     /// # Errors
     ///
     /// * [`VfsError::ReadOnly`] if the covering mount is read-only.
     /// * [`VfsError::NotEmpty`] if `path` is a non-empty directory.
+    /// * [`VfsError::NotADirectory`] if `dir_only` and `path` is not a
+    ///   directory.
     /// * [`VfsError::PermissionDenied`] if the caller lacks write
     ///   permission on the parent directory.
     /// * [`VfsError::NotFound`], [`VfsError::NotADirectory`], or
     ///   [`VfsError::InvalidPath`].
-    pub fn remove(&mut self, cred: &Credentials<'_>, path: &Path) -> Result<(), VfsError> {
+    pub fn remove(
+        &mut self,
+        cred: &Credentials<'_>,
+        path: &Path,
+        dir_only: bool,
+    ) -> Result<(), VfsError> {
         let name = path.file_name().ok_or(VfsError::InvalidPath)?.to_string();
         let parent_path = path.parent().ok_or(VfsError::InvalidPath)?;
         // Removal mutates the parent directory, so the parent's covering
@@ -725,6 +743,11 @@ impl Vfs {
                 kind: NodeKind::Directory(children),
                 ..
             }) if !children.is_empty() => return Err(VfsError::NotEmpty),
+            Some(Node {
+                kind: NodeKind::Directory(_),
+                ..
+            }) => {}
+            Some(_) if dir_only => return Err(VfsError::NotADirectory),
             Some(_) => {}
         }
         entries.remove(&name);
