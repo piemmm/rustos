@@ -28,13 +28,16 @@
 //! parks the reader until a keystroke arrives or the bound elapses (a
 //! one-shot deadline, never a poll). While the secret marker is animating
 //! the bound is its next one-second frame (the shared
-//! [`rustos_vt::secret`] cadence — dots advance on the timer alone and
-//! freeze after the bounded idle window); otherwise it is
-//! `REFRESH_INTERVAL`. Each elapsed bound re-queries the [`StatusSource`]
-//! and repaints, so the clock and figures stay current while the prompt
-//! sits idle. A timed tick surfaces as an empty [`Screen::getch`]; a dead
-//! console surfaces as a channel error and fails the read closed, exactly
-//! as before.
+//! [`rustos_vt::secret`] cadence); otherwise it is `REFRESH_INTERVAL`.
+//! The [`StatusSource`]'s monotonic clock is read once after every wait,
+//! and any animation frame whose deadline has passed is advanced before
+//! the event is handled — so the dots keep moving while keystrokes keep
+//! arriving and freeze only once the bounded idle window after the most
+//! recent keystroke elapses. Each elapsed bound re-queries the
+//! [`StatusSource`] and repaints, so the clock and figures stay current
+//! while the prompt sits idle. A timed tick surfaces as an empty
+//! [`Screen::getch`]; a dead console surfaces as a channel error and
+//! fails the read closed, exactly as before.
 //!
 //! On [`session_handoff`](LoginView::session_handoff) the view leaves the
 //! alternate screen and restores the cooked input discipline, handing the
@@ -93,6 +96,14 @@ pub trait StatusSource {
     /// established (the view then shows no clock rather than a fabricated
     /// one).
     fn now(&self) -> Option<Time64>;
+
+    /// The monotonic clock, in nanoseconds; only differences between
+    /// readings are meaningful. It times the secret marker's animation
+    /// (the shared [`rustos_vt::secret`] cadence), so the dots advance on
+    /// real elapsed time whether or not keystrokes keep arriving. On a
+    /// running system this is the `clock_get` syscall; in tests a
+    /// scripted counter.
+    fn monotonic_ns(&self) -> u64;
 }
 
 /// Switches the console line discipline between the view's raw
@@ -419,9 +430,13 @@ impl<T: Tty, S: StatusSource, M: ConsoleMode> CursesView<T, S, M> {
     /// secret prompt renders. A keystroke never moves the dots, so watching
     /// the marker reveals nothing about how much was typed.
     ///
-    /// An empty timed read is either the next animation frame or the
-    /// [`REFRESH_INTERVAL`] tick; both re-query the status source and
-    /// repaint. A channel error is the dead console and fails closed.
+    /// Elapsed time comes from the source's monotonic clock, read once
+    /// after every wait: any animation frame whose deadline has passed is
+    /// advanced before the event is handled, so the dots keep their
+    /// one-second cadence while keystrokes keep arriving and freeze only
+    /// once the idle window after the most recent keystroke elapses. An
+    /// empty timed read additionally re-queries the status source and
+    /// repaints. A channel error is the dead console and fails closed.
     fn read_field(
         &self,
         label: &str,
@@ -432,11 +447,12 @@ impl<T: Tty, S: StatusSource, M: ConsoleMode> CursesView<T, S, M> {
         self.refresh_status();
         let mut len = 0usize;
         let mut chars = 0usize;
-        // The shared secret-marker state machine, driven on tick time: the
-        // view has no clock, so elapsed time is counted in the one-shot
-        // waits it arms — a timed-out read is exactly one elapsed frame.
+        // The shared secret-marker state machine, driven by the source's
+        // monotonic clock. The clock is read once after every wait, so a
+        // frame deadline that passed while keystrokes kept the wait from
+        // timing out is still honoured.
         let mut indicator = secret::SecretIndicator::new();
-        let mut now_ns = 0u64;
+        let mut now_ns = self.source.monotonic_ns();
         loop {
             let marker;
             let shown = if echo {
@@ -462,6 +478,17 @@ impl<T: Tty, S: StatusSource, M: ConsoleMode> CursesView<T, S, M> {
                 screen.set_input_mode(InputMode::Timeout(wait));
                 screen.getch()
             };
+            now_ns = self.source.monotonic_ns();
+            // Advance every animation frame whose deadline has passed —
+            // the dots move on the clock alone, whether the wait ended in
+            // a keystroke or ran out. Each frame is ticked at its own
+            // deadline so the cadence stays anchored to frame boundaries.
+            while let Some(deadline) = indicator.deadline_ns() {
+                if now_ns < deadline {
+                    break;
+                }
+                let _ = indicator.tick(deadline);
+            }
             match event {
                 Ok(Some(Event::Enter)) => return Ok(len),
                 Ok(Some(Event::Char(ch))) => {
@@ -502,17 +529,11 @@ impl<T: Tty, S: StatusSource, M: ConsoleMode> CursesView<T, S, M> {
                 // Arrows, function keys, pastes, mice: not part of a
                 // credential; ignored.
                 Ok(Some(_)) => {}
-                // The bounded wait elapsed with no keystroke: advance the
-                // marker's animation frame when one was armed, refresh the
-                // figures, and repaint (the loop head redraws). Never a
+                // The bounded wait elapsed with no keystroke: any due
+                // animation frame was already advanced above; refresh the
+                // figures and repaint (the loop head redraws). Never a
                 // poll — the kernel parked the reader for the whole bound.
-                Ok(None) => {
-                    if let Some(deadline) = indicator.deadline_ns() {
-                        now_ns = deadline;
-                        let _ = indicator.tick(now_ns);
-                    }
-                    self.refresh_status();
-                }
+                Ok(None) => self.refresh_status(),
                 // A failed channel: the console is gone. Fail closed,
                 // exactly as the line-discipline reader reports a closed
                 // stream.
@@ -588,6 +609,7 @@ mod tests {
     use rustos_abi::{Errno, Time64};
     use rustos_curses::{CursesError, Screen, Size, Tty};
     use rustos_termcap::TermType;
+    use rustos_vt::secret::{SECRET_ANIMATE_NS, SECRET_TICK_NS};
 
     /// A scripted terminal: reads replay queued byte chunks and fail once
     /// the script is exhausted (the closed-console signal); writes append
@@ -610,6 +632,9 @@ mod tests {
     struct FixtureSource {
         status: LoginStatus,
         now: Option<Time64>,
+        /// Scripted monotonic readings, one popped per query; the last is
+        /// sticky, and an empty script reads a clock stuck at zero.
+        monotonic: RefCell<VecDeque<u64>>,
     }
 
     impl StatusSource for FixtureSource {
@@ -618,6 +643,14 @@ mod tests {
         }
         fn now(&self) -> Option<Time64> {
             self.now
+        }
+        fn monotonic_ns(&self) -> u64 {
+            let mut readings = self.monotonic.borrow_mut();
+            if readings.len() > 1 {
+                readings.pop_front().unwrap_or(0)
+            } else {
+                readings.front().copied().unwrap_or(0)
+            }
         }
     }
 
@@ -663,10 +696,26 @@ mod tests {
     }
 
     /// A view over a scripted terminal, returning the shared transcript
-    /// and the recording console-mode switch.
+    /// and the recording console-mode switch. The monotonic clock is
+    /// stuck at zero: no animation frame ever falls due.
     #[allow(clippy::type_complexity)]
     fn view_with(
         script: &[&[u8]],
+    ) -> (
+        CursesView<ScriptTty, FixtureSource, alloc::rc::Rc<RecordingMode>>,
+        alloc::rc::Rc<RefCell<Vec<u8>>>,
+        alloc::rc::Rc<RecordingMode>,
+    ) {
+        view_with_clock(script, &[])
+    }
+
+    /// [`view_with`] with scripted monotonic readings: the field read
+    /// takes one at entry and one after every terminal read, and the
+    /// last reading is sticky once the script runs out.
+    #[allow(clippy::type_complexity)]
+    fn view_with_clock(
+        script: &[&[u8]],
+        clock: &[u64],
     ) -> (
         CursesView<ScriptTty, FixtureSource, alloc::rc::Rc<RecordingMode>>,
         alloc::rc::Rc<RefCell<Vec<u8>>>,
@@ -683,6 +732,7 @@ mod tests {
             status: status(),
             // 2026-07-03 17:44:00 UTC.
             now: Some(Time64::from_secs(1_783_100_640)),
+            monotonic: RefCell::new(clock.iter().copied().collect()),
         };
         (CursesView::new(screen, source, mode.clone()), written, mode)
     }
@@ -785,10 +835,13 @@ mod tests {
     #[test]
     fn secret_marker_dots_advance_on_the_timer_alone() {
         // One keystroke, then two elapsed animation frames (empty timed
-        // reads) with no further input: the dots must walk `.` → `..` →
-        // `...` purely on the timer, exactly as the kernel's own secret
-        // prompt animates.
-        let (view, written, _mode) = view_with(&[b"x", b"", b"", b"\r"]);
+        // reads with the clock at the frame deadlines) and no further
+        // input: the dots must walk `.` → `..` → `...` purely on the
+        // timer, exactly as the kernel's own secret prompt animates.
+        let (view, written, _mode) = view_with_clock(
+            &[b"x", b"", b"", b"\r"],
+            &[0, 0, SECRET_TICK_NS, 2 * SECRET_TICK_NS],
+        );
         view.round_begin();
         let mut buf = [0u8; 32];
         let len = view.read_password(&mut buf).expect("password read");
@@ -817,6 +870,64 @@ mod tests {
         );
         assert!(
             !rows.iter().any(|row| row.contains("[input active..")),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn secret_marker_keeps_animating_while_keys_arrive() {
+        // Keystrokes keep landing, so the timed wait never runs out — the
+        // third arrives past the one-second frame deadline, and the dots
+        // must still advance: the animation runs on the clock, never on
+        // idle waits alone.
+        let (view, written, _mode) = view_with_clock(
+            &[b"x", b"y", b"z", b"\r"],
+            &[
+                0,
+                0,
+                SECRET_TICK_NS / 2,
+                SECRET_TICK_NS + SECRET_TICK_NS / 5,
+            ],
+        );
+        view.round_begin();
+        let mut buf = [0u8; 32];
+        let len = view.read_password(&mut buf).expect("password read");
+        assert_eq!(&buf[..len], b"xyz");
+        let rows = replay(&written);
+        assert!(
+            rows.iter().any(|row| row.contains("[input active..]")),
+            "{rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|row| row.contains("[input active...")),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn secret_marker_freezes_after_the_idle_window() {
+        // Frames at one and two seconds walk the dots to three; the frame
+        // at three seconds falls on the idle-window boundary (three
+        // seconds after the only keystroke) and freezes them, and the
+        // later idle tick must not wrap them back to one dot.
+        let (view, written, _mode) = view_with_clock(
+            &[b"x", b"", b"", b"", b"", b"\r"],
+            &[
+                0,
+                0,
+                SECRET_TICK_NS,
+                2 * SECRET_TICK_NS,
+                SECRET_ANIMATE_NS,
+                SECRET_ANIMATE_NS + SECRET_TICK_NS,
+            ],
+        );
+        view.round_begin();
+        let mut buf = [0u8; 32];
+        let len = view.read_password(&mut buf).expect("password read");
+        assert_eq!(&buf[..len], b"x");
+        let rows = replay(&written);
+        assert!(
+            rows.iter().any(|row| row.contains("[input active...]")),
             "{rows:?}"
         );
     }
@@ -854,6 +965,9 @@ mod tests {
         }
         fn now(&self) -> Option<Time64> {
             None
+        }
+        fn monotonic_ns(&self) -> u64 {
+            0
         }
     }
 
@@ -926,6 +1040,7 @@ mod tests {
         let source = FixtureSource {
             status: status(),
             now: None,
+            monotonic: RefCell::new(VecDeque::new()),
         };
         let view = CursesView::new(screen, source, StuckCookedMode);
         view.round_begin();

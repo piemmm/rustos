@@ -218,6 +218,10 @@ mod program {
             let reading = rustos_rt::wall_time().ok()?;
             reading.state().is_set().then(|| reading.time())
         }
+
+        fn monotonic_ns(&self) -> u64 {
+            rustos_rt::clock_get()
+        }
     }
 
     /// Recover the [`Errno`] a syscall encoded as a negative register
