@@ -168,23 +168,44 @@ when convenient), with one staged follow-up below.
 
 ### I3. `top -d0` crashes the OS after ~1 h on a 180 MiB instance
 
-**Status: planned** (root cause not yet isolated).
+**Status: in progress** (host reproduction landed and green; every
+host-reachable layer of the refresh cycle is exonerated — the remaining step
+is the live/QEMU numeric re-test below).
 
 - **Defect:** a continuous-refresh `top -d0` session on a 180 MiB QEMU
-  instance eventually crashes the OS; suspected out-of-memory.
-- **Ruled out so far:** `top`'s own model (rows/history replaced per refresh),
-  `CallEndpoint` bookkeeping (capacity-bounded; tickets retired on claim),
-  the log/audit sinks (write-through serial), and the I2 leak (no spawns per
-  refresh — unless the session had process churn, in which case I2 explains
-  it).
-- **Next step:** instrumented reproduction. A host regression test hammering
-  the exact refresh cycle (`stream_read` with timeout + `ipc_call` round trip
-  + `sysinfo_introspect` walk) for a large iteration count, asserting stable
-  `FrameAllocator::free_frames()` and kernel-heap occupancy; plus a bounded
-  QEMU soak sampling `KernelMemoryStats.free_bytes` under a scripted
-  `top -d0`. Fix whatever the reproduction exposes; I2 has since landed, so
-  if the session's churn was the cause the leak may already be closed —
-  re-test first.
+  instance eventually crashed the OS; suspected out-of-memory.
+- **Landed — the instrumented host reproduction.** Two standing regression
+  soaks pin the cycle's memory behaviour, instrumented by the test-only
+  opt-in counting allocator `kernel/core/src/test_alloc.rs` (per-measurement
+  `LiveBytes` balances, immune to test parallelism):
+  - `refresh_cycle_soak_retains_no_kernel_memory`
+    (`kernel/core/src/syscalls.rs`) drives the exact per-refresh kernel
+    sequence — timed `stream_read` whose bound elapses, `ipc_call` round
+    trip against a live server thread, `sysinfo_introspect` process walk —
+    for thousands of iterations and asserts zero retained bytes (±1 KiB
+    sampling slack) and every ticket retired.
+  - `refresh_shaped_workload_reaches_a_steady_mapped_extent`
+    (`lib/rt/src/heap.rs`) replays the `top`/`sysinfod` allocation shape
+    (doubling-realloc record vectors, paging scratch, small boxes, mixed
+    frees) against the userland heap bookkeeping and asserts the mapped
+    extent reaches a steady state and fully unmaps — a heap defect here
+    would drain machine frames through `mem_map` from either process.
+- **Findings:** the kernel side of the cycle retains nothing per iteration,
+  and the userland heap is steady under the workload. The one growth the
+  soak initially caught was its own fixture: the per-round-trip
+  `CallPosted`/`CallReplied` audit records are `Level::Debug` **by design**
+  and the production boot's `Info` filter drops them before any sink — only
+  the test-global `Trace` filter plus a recording sink retained them. With
+  the earlier suspects (`top`'s model, `CallEndpoint` bookkeeping, the
+  write-through sinks) this exonerates every layer reachable from the host;
+  the I2 teardown leak (now fixed) remains the prime explanation if the
+  session had login/exit churn.
+- **Remaining:** the live re-test — a bounded QEMU soak sampling
+  `KernelMemoryStats.free_bytes` under a scripted `top -d0` (the same
+  missing `sysinfo_introspect`-reading EL0 fixture the I2 follow-up needs;
+  land them together). If that soak still shows decay, the residue is in a
+  layer the host cannot reach (arch port, UART TX path, timer/IRQ plumbing)
+  and is isolated there.
 
 ### I4. Pi 4B (8 GiB) reports 863 MiB — only the first `/memory` range is used
 

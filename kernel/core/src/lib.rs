@@ -114,6 +114,11 @@ pub mod wallclock;
 
 #[cfg(any(test, feature = "test-arch"))]
 pub mod test_arch;
+// The unit-test binary's counting global allocator: per-measurement net
+// live-byte balances for the host-side leak soaks (`plans/APPS.md` I3).
+// `cfg(test)` only — never a production or integration-test allocator.
+#[cfg(test)]
+pub(crate) mod test_alloc;
 // Shared host-test fixtures for the on-disk bundle spawn path (an
 // in-memory filesystem + the signed-bundle composer), used by both the
 // `appspawn` unit tests and the `spawn` syscall-handler tests so the fake

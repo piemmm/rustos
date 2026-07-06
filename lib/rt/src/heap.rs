@@ -1085,4 +1085,92 @@ mod tests {
         let q = unsafe { heap.realloc(p, l, 32) };
         assert_eq!(q, p, "an in-place shrink keeps the original pointer");
     }
+
+    /// `Heap::realloc`'s strategy at the bookkeeping level, for workload
+    /// tests that must not dereference the unreal arena addresses: resize in
+    /// place where the wrapper would, otherwise allocate-then-free exactly
+    /// as the wrapper's relocation path does (minus the byte copy).
+    fn realloc_bookkeeping(
+        heap: &mut HeapState<VecSpanStore>,
+        pager: &FakePager,
+        addr: usize,
+        old: Layout,
+        new_size: usize,
+    ) -> usize {
+        if heap.resize_in_place(addr, old, new_size, pager) {
+            return addr;
+        }
+        let moved = heap
+            .alloc(layout(new_size, old.align()), pager)
+            .expect("relocating grow succeeds under the live pager");
+        heap.free(addr, old, pager);
+        moved
+    }
+
+    /// `plans/APPS.md` I3 — the userland-heap arm of the `top -d0`
+    /// reproduction. Every process in the refresh loop (`top` and
+    /// `sysinfod`) allocates through this one heap, so a bookkeeping defect
+    /// here (a lost span, a failed coalesce, an ever-growing arena) would
+    /// drain the whole machine's frames through `mem_map`. Each iteration
+    /// mirrors one refresh: record vectors grown by doubling reallocs, a
+    /// paging scratch buffer, small boxed values, all freed in mixed order.
+    /// The mapped extent must reach a steady state, never creep, and unmap
+    /// back to an empty arena once everything is freed.
+    #[test]
+    fn refresh_shaped_workload_reaches_a_steady_mapped_extent() {
+        let pager = FakePager::new();
+        let mut heap = heap_state();
+        let small = layout(24, 8);
+        let mut extents = Vec::new();
+
+        for _ in 0..64 {
+            // The broker's record vector: starts small and doubles as
+            // `extend_from_slice` fills it, exactly the `Vec` growth curve.
+            let mut rows_len = 64usize;
+            let mut rows = heap.alloc(layout(rows_len, 8), &pager).unwrap();
+            while rows_len < 8192 {
+                rows =
+                    realloc_bookkeeping(&mut heap, &pager, rows, layout(rows_len, 8), rows_len * 2);
+                rows_len *= 2;
+            }
+            // The introspect paging scratch and a handful of boxed values.
+            let scratch = heap.alloc(layout(6 * 1024, 8), &pager).unwrap();
+            let smalls: Vec<usize> = (0..8).map(|_| heap.alloc(small, &pager).unwrap()).collect();
+            // Free in mixed order so coalescing is exercised from both
+            // sides, as real drop order interleaves.
+            heap.free(scratch, layout(6 * 1024, 8), &pager);
+            for &addr in smalls.iter().step_by(2) {
+                heap.free(addr, small, &pager);
+            }
+            heap.free(rows, layout(rows_len, 8), &pager);
+            for &addr in smalls.iter().skip(1).step_by(2) {
+                heap.free(addr, small, &pager);
+            }
+            extents.push(heap.mapped_end);
+        }
+
+        // Steady state: after a short warm-up every iteration ends with the
+        // identical mapped extent — any per-iteration creep is the leak the
+        // `top -d0` session would surface as machine-wide frame exhaustion.
+        let steady = extents[4];
+        assert!(
+            extents[4..].iter().all(|&end| end == steady),
+            "the mapped extent crept across iterations: {extents:?}"
+        );
+        // Everything was freed, so the arena has fully unmapped: no page and
+        // no span is left behind.
+        assert_eq!(heap.mapped_end, base(), "all arena pages returned");
+        assert_eq!(heap.count, 0, "no free span left tracked");
+        let (mapped, unmapped) = pager.events.borrow().iter().fold(
+            (0usize, 0usize),
+            |(mapped, unmapped), &(is_map, _, pages)| {
+                if is_map {
+                    (mapped + pages, unmapped)
+                } else {
+                    (mapped, unmapped + pages)
+                }
+            },
+        );
+        assert_eq!(mapped, unmapped, "every mapped page was unmapped");
+    }
 }

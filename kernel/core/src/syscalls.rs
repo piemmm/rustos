@@ -17737,4 +17737,204 @@ mod tests {
         // A buffer too small for the whole path fails closed.
         assert_eq!(h.fs_getcwd(&ctx, 0x1000, 2), Err(Errno::BufferTooSmall));
     }
+
+    /// `plans/APPS.md` I3 — the instrumented host reproduction of the
+    /// `top -d0` refresh cycle. One iteration is exactly what the viewer
+    /// drives per refresh: a timed `stream_read` whose bound elapses with
+    /// no input, an `ipc_call` round trip to the broker's endpoint, and a
+    /// `sysinfo_introspect` process walk. Hammered for thousands of
+    /// iterations against this test's own live-byte balance
+    /// (`crate::test_alloc`), it asserts the kernel side of the cycle
+    /// retains no memory per iteration (any real per-iteration leak, even a
+    /// single byte, dwarfs the fixed slack) and that every ticket is
+    /// retired.
+    ///
+    /// The loop-time sinks are the no-op [`NullLogSink`], modelling the
+    /// production write-through serial sink: the call path's per-round-trip
+    /// `CallPosted`/`CallReplied` records are `Level::Debug` by design
+    /// (below the production `Info` filter, so a live system drops them
+    /// before any sink), but the test binary's global filter is raised to
+    /// `Trace` by unrelated tests, and a *recording* sink here would then
+    /// retain those records and report its own fixture as a kernel leak —
+    /// exactly the false positive this soak's first run produced.
+    // One linear harness build followed by the measured loop; splitting the
+    // set-up into helpers would scatter borrows used by the closure without
+    // making the sequence clearer (the established long-test precedent).
+    #[allow(clippy::too_many_lines)]
+    #[test]
+    fn refresh_cycle_soak_retains_no_kernel_memory() {
+        // The `-d0` console: every timed read's bound elapses with no
+        // input (an idle keyboard under continuous refresh); writes are
+        // accepted and discarded.
+        struct TimedOutRead;
+        impl crate::console::ConsoleRead for TimedOutRead {
+            fn read(&self, _buf: &mut [u8]) -> Result<usize, Errno> {
+                Ok(0)
+            }
+            fn read_timeout(&self, _buf: &mut [u8], _timeout_ns: u64) -> Result<usize, Errno> {
+                Err(Errno::TimedOut)
+            }
+        }
+        struct DiscardWrite;
+        impl crate::console::ConsoleWrite for DiscardWrite {
+            fn write(&self, bytes: &[u8]) -> Result<usize, Errno> {
+                Ok(bytes.len())
+            }
+        }
+
+        const WARMUP: usize = 64;
+        const MEASURED: usize = 4096;
+        // Zero per-iteration budget: the slack only absorbs sampling jitter
+        // (the server thread's in-flight transients at the baseline sample
+        // and one-time wait-queue capacity growth). A real leak of even one
+        // byte per iteration overshoots it four-fold.
+        const SLACK_BYTES: isize = 1024;
+
+        install_trace_filter();
+        let counter: &'static crate::test_alloc::LiveBytes =
+            Box::leak(Box::new(crate::test_alloc::LiveBytes::new()));
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        // A live scheduler task so the `ipc_call` park loop's cooperative
+        // fallback keeps polling (the task is Ready, not Running).
+        let tid = sched
+            .spawn(0, Priority::Normal, |_| TaskAction::Exit)
+            .expect("spawn caller task");
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        // Page 1 carries the request the viewer sends; page 2 receives the
+        // reply and the introspect window.
+        let request = b"sysinfo-req-v1!!";
+        let (space, physmap) = call_aspace(request);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(tid), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(tid, &[CapabilityId::SYSINFO_INTROSPECT], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(tid),
+            caps: &caps,
+        };
+
+        let consoles: &'static [ConsoleDevice] = Box::leak(Box::new([ConsoleDevice::new(
+            Box::leak(Box::new(DiscardWrite)),
+            Box::leak(Box::new(TimedOutRead)),
+        )]));
+
+        // A handful of live process rows, as the broker's introspect walk
+        // pages them.
+        let row = ProcessRecord::new(
+            1,
+            0,
+            ProcId::KERNEL,
+            ProcId::KERNEL,
+            0,
+            0,
+            rustos_abi::sysinfo::ProcessState::Running,
+            0,
+            0,
+            0,
+            b"init",
+        )
+        .expect("record");
+        let mut blob = alloc::vec::Vec::new();
+        for _ in 0..4 {
+            blob.extend_from_slice(&row.to_le_bytes());
+        }
+        let blob_len = blob.len();
+        let source: &'static StaticIntrospect = Box::leak(Box::new(StaticIntrospect {
+            processes: blob,
+            kernel_memory: alloc::vec::Vec::new(),
+            limits: Err(Errno::NotImplemented),
+            processes_call: RwLock::new(None),
+            limits_call: RwLock::new(None),
+        }));
+
+        let h = KernelSyscallHandlers::new(
+            &sched,
+            &table,
+            &arch,
+            &NULL_LOG_SINK,
+            &irq,
+            &ctl,
+            &ipc,
+            &aspaces,
+            &rng,
+        )
+        .with_consoles(consoles)
+        .with_introspect(source);
+        aspaces
+            .write()
+            .set_streams(SecTaskId(tid), DescriptorTable::standard_on(0));
+
+        let reply = b"process-list-reply-frame";
+
+        let id = 0xCA11_50AC;
+        let ep = register_call_endpoint(id, sink);
+        let server_ep = ep.clone();
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                crate::test_alloc::opt_in_current_thread(counter);
+                let mut served = 0usize;
+                while served < WARMUP + MEASURED {
+                    match server_ep.recv_call(usize::MAX) {
+                        RecvCall::Received(call) => {
+                            assert_eq!(call.request, request);
+                            server_ep
+                                .reply(call.ticket, reply, &NULL_LOG_SINK)
+                                .expect("reply");
+                            served += 1;
+                        }
+                        _ => std::thread::yield_now(),
+                    }
+                }
+                crate::test_alloc::opt_out_current_thread();
+            });
+
+            crate::test_alloc::opt_in_current_thread(counter);
+            let cycle = || {
+                // The elapsed refresh bound is the cycle's normal outcome,
+                // not a failure: `top` treats it as "no key pressed".
+                assert_eq!(
+                    h.stream_read(&ctx, STDIN, 0x1000, 16, 1),
+                    Err(Errno::TimedOut)
+                );
+                let replied = h
+                    .ipc_call(&ctx, id, 0x1000, request.len(), 0x2000, 64)
+                    .expect("ipc_call round trip");
+                assert_eq!(replied, reply.len() as u64);
+                let walked = h
+                    .sysinfo_introspect(
+                        &ctx,
+                        IntrospectDomain::Processes.as_u32(),
+                        0,
+                        0x2000,
+                        PAGE_SIZE,
+                    )
+                    .expect("introspect walk");
+                assert_eq!(usize::try_from(walked).expect("fits"), blob_len);
+            };
+            for _ in 0..WARMUP {
+                cycle();
+            }
+            let baseline = counter.net();
+            for _ in 0..MEASURED {
+                cycle();
+            }
+            let grown = counter.net() - baseline;
+            crate::test_alloc::opt_out_current_thread();
+            assert!(
+                grown.abs() <= SLACK_BYTES,
+                "the refresh cycle retained {grown} bytes over {MEASURED} iterations"
+            );
+        });
+
+        assert_eq!(ep.outstanding(), 0, "every ticket is retired");
+        crate::callreg::unregister(EndpointId(id));
+    }
 }
