@@ -2333,7 +2333,9 @@ reflink independence, acorn preset round-trip).
   field is bounded at `rustos_users::MAX_USERNAME_LEN` (32, refused whole
   beyond it) so it cannot overflow its one-line box; and every hidden
   field renders the shared `rustos_vt::secret` `[input active...]` marker,
-  its dots advancing per keystroke.
+  its dots driven by the shared `SecretIndicator` one-second timer cadence
+  (never a keystroke, so the marker reveals nothing about how much was
+  typed).
 - Core CLI utilities (`ls`, `cp`, `mv`, `rm`, `cat`, `ps`, `mount`,
   `chmod`, `chown`, `useradd`, `groupadd`, `setcap`, `getcap`,
   `sysinfo`). Each utility is its own small crate under `userland/apps/`.

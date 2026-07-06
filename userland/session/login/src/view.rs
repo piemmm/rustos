@@ -8,8 +8,9 @@
 //!   and the current wall-clock time on the right;
 //! * a cyan-bordered login box in the middle of the screen carrying the
 //!   `Username:` prompt (which becomes the `Password:` prompt — unechoed,
-//!   showing the shared `[input active...]` marker instead, exactly as
-//!   every hidden field does);
+//!   showing the shared `[input active...]` marker instead, its dots
+//!   animated by the shared [`rustos_vt::secret`] timer cadence, exactly
+//!   as every hidden field does);
 //! * a running `N failed attempts` line in red beneath the box after any
 //!   rejected attempt, accumulating until a session launches;
 //! * a bottom status bar (white on blue) — memory in use, task count,
@@ -23,13 +24,17 @@
 //! view and the login session carries on (a denied optional query is an
 //! answer, never a fatal error).
 //!
-//! **Refresh model.** The console read waits with a bound
-//! (`REFRESH_INTERVAL`): the kernel parks the reader until a keystroke
-//! arrives or the bound elapses (a one-shot deadline, never a poll), and
-//! each elapsed bound re-queries the [`StatusSource`] and repaints, so the
-//! clock and figures stay current while the prompt sits idle. A timed
-//! tick surfaces as an empty [`Screen::getch`]; a dead console surfaces
-//! as a channel error and fails the read closed, exactly as before.
+//! **Refresh model.** The console read waits with a bound: the kernel
+//! parks the reader until a keystroke arrives or the bound elapses (a
+//! one-shot deadline, never a poll). While the secret marker is animating
+//! the bound is its next one-second frame (the shared
+//! [`rustos_vt::secret`] cadence — dots advance on the timer alone and
+//! freeze after the bounded idle window); otherwise it is
+//! `REFRESH_INTERVAL`. Each elapsed bound re-queries the [`StatusSource`]
+//! and repaints, so the clock and figures stay current while the prompt
+//! sits idle. A timed tick surfaces as an empty [`Screen::getch`]; a dead
+//! console surfaces as a channel error and fails the read closed, exactly
+//! as before.
 //!
 //! On [`session_handoff`](LoginView::session_handoff) the view leaves the
 //! alternate screen and restores the cooked input discipline, handing the
@@ -141,14 +146,13 @@ const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 /// before it can run into the field's drawn width.
 const SESSION_CHOICE_MAX: usize = 16;
 
-/// The status bars' style: white on blue — a professional accent that
-/// keeps the reverse-video legibility on monochrome terminals (the
-/// emitter degrades colour to the terminal's capability).
+/// The status bars' style: white text on a blue background. Stated
+/// directly, never through reverse video — a terminal renders reverse by
+/// swapping the pen's colours, which would show the bars blue-on-white.
 fn bar_attributes() -> Attributes {
     Attributes {
         foreground: Color::Basic(BasicColor::White),
         background: Color::Basic(BasicColor::Blue),
-        reverse: true,
         ..Attributes::default()
     }
 }
@@ -407,15 +411,17 @@ impl<T: Tty, S: StatusSource, M: ConsoleMode> CursesView<T, S, M> {
     /// exactly as the kernel read line discipline refuses one. Backspace
     /// removes the last character. Any other special key is ignored.
     ///
-    /// A hidden field renders nothing of the secret; every accepted
-    /// keystroke advances the marker's dots instead (the one marker
-    /// definition in `rustos_vt::secret`), so the operator sees typing
-    /// progress without any hint of what — or how much — was typed
-    /// beyond the keystroke that just landed.
+    /// A hidden field renders nothing of the secret: once anything is
+    /// typed it shows the shared `[input active...]` marker, whose dots
+    /// advance **on the timer alone** — one frame per second until the
+    /// bounded window after the most recent keystroke elapses, exactly the
+    /// [`rustos_vt::secret::SecretIndicator`] cadence the kernel's own
+    /// secret prompt renders. A keystroke never moves the dots, so watching
+    /// the marker reveals nothing about how much was typed.
     ///
-    /// An empty timed read (the [`REFRESH_INTERVAL`] tick) re-queries the
-    /// status source and repaints; a channel error is the dead console
-    /// and fails closed.
+    /// An empty timed read is either the next animation frame or the
+    /// [`REFRESH_INTERVAL`] tick; both re-query the status source and
+    /// repaint. A channel error is the dead console and fails closed.
     fn read_field(
         &self,
         label: &str,
@@ -426,14 +432,17 @@ impl<T: Tty, S: StatusSource, M: ConsoleMode> CursesView<T, S, M> {
         self.refresh_status();
         let mut len = 0usize;
         let mut chars = 0usize;
-        // Advanced before each render so the first keystroke shows one dot.
-        let mut dots: u8 = secret::MAX_DOTS;
+        // The shared secret-marker state machine, driven on tick time: the
+        // view has no clock, so elapsed time is counted in the one-shot
+        // waits it arms — a timed-out read is exactly one elapsed frame.
+        let mut indicator = secret::SecretIndicator::new();
+        let mut now_ns = 0u64;
         loop {
             let marker;
             let shown = if echo {
                 // Only ever the bytes this loop wrote, which are UTF-8.
                 core::str::from_utf8(&buf[..len]).unwrap_or("")
-            } else if len > 0 {
+            } else if let Some(dots) = indicator.dots() {
                 marker = secret::active_marker(dots);
                 // The marker is fixed ASCII text from the shared
                 // definition; it carries nothing typed.
@@ -444,6 +453,13 @@ impl<T: Tty, S: StatusSource, M: ConsoleMode> CursesView<T, S, M> {
             self.draw(label, shown);
             let event = {
                 let mut screen = self.screen.borrow_mut();
+                // While the marker is animating the next wake is its
+                // one-second frame; otherwise the idle status refresh.
+                let wait = match indicator.deadline_ns() {
+                    Some(deadline) => Duration::from_nanos(deadline.saturating_sub(now_ns).max(1)),
+                    None => REFRESH_INTERVAL,
+                };
+                screen.set_input_mode(InputMode::Timeout(wait));
                 screen.getch()
             };
             match event {
@@ -461,11 +477,9 @@ impl<T: Tty, S: StatusSource, M: ConsoleMode> CursesView<T, S, M> {
                     ch.encode_utf8(&mut buf[len..len + width]);
                     len += width;
                     chars += 1;
-                    dots = if dots == secret::MAX_DOTS {
-                        1
-                    } else {
-                        dots + 1
-                    };
+                    if !echo {
+                        let _ = indicator.input(secret::SecretInput::Typed, now_ns);
+                    }
                 }
                 Ok(Some(Event::Backspace)) => {
                     // Step back over the previous UTF-8 boundary.
@@ -476,14 +490,29 @@ impl<T: Tty, S: StatusSource, M: ConsoleMode> CursesView<T, S, M> {
                         }
                     }
                     chars = chars.saturating_sub(1);
+                    if !echo {
+                        let _ = indicator.input(
+                            secret::SecretInput::Erased {
+                                line_empty: len == 0,
+                            },
+                            now_ns,
+                        );
+                    }
                 }
                 // Arrows, function keys, pastes, mice: not part of a
                 // credential; ignored.
                 Ok(Some(_)) => {}
-                // The bounded wait elapsed with no keystroke: refresh the
-                // figures and repaint (the loop head redraws). Never a
+                // The bounded wait elapsed with no keystroke: advance the
+                // marker's animation frame when one was armed, refresh the
+                // figures, and repaint (the loop head redraws). Never a
                 // poll — the kernel parked the reader for the whole bound.
-                Ok(None) => self.refresh_status(),
+                Ok(None) => {
+                    if let Some(deadline) = indicator.deadline_ns() {
+                        now_ns = deadline;
+                        let _ = indicator.tick(now_ns);
+                    }
+                    self.refresh_status();
+                }
                 // A failed channel: the console is gone. Fail closed,
                 // exactly as the line-discipline reader reports a closed
                 // stream.
@@ -730,6 +759,68 @@ mod tests {
         assert_eq!(failure_line(3).as_deref(), Some("3 failed attempts"));
     }
 
+    /// Replay `written` through the shared vt parser onto a 24x80 grid,
+    /// returning the final visible rows.
+    fn replay(written: &RefCell<Vec<u8>>) -> Vec<String> {
+        let mut grid = alloc::vec![alloc::vec![' '; 80]; 24];
+        let mut row = 0usize;
+        let mut col = 0usize;
+        let mut parser = rustos_vt::Parser::new();
+        parser.feed(&written.borrow(), |op| match op {
+            rustos_vt::Op::CursorPosition { row: r, col: c } => {
+                row = usize::from(r.saturating_sub(1)).min(23);
+                col = usize::from(c.saturating_sub(1)).min(79);
+            }
+            rustos_vt::Op::Print(ch) => {
+                grid[row][col] = ch;
+                if col < 79 {
+                    col += 1;
+                }
+            }
+            _ => {}
+        });
+        grid.into_iter().map(|r| r.into_iter().collect()).collect()
+    }
+
+    #[test]
+    fn secret_marker_dots_advance_on_the_timer_alone() {
+        // One keystroke, then two elapsed animation frames (empty timed
+        // reads) with no further input: the dots must walk `.` → `..` →
+        // `...` purely on the timer, exactly as the kernel's own secret
+        // prompt animates.
+        let (view, written, _mode) = view_with(&[b"x", b"", b"", b"\r"]);
+        view.round_begin();
+        let mut buf = [0u8; 32];
+        let len = view.read_password(&mut buf).expect("password read");
+        assert_eq!(&buf[..len], b"x");
+        let rows = replay(&written);
+        assert!(
+            rows.iter().any(|row| row.contains("[input active...]")),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn secret_marker_dots_never_move_on_a_keystroke() {
+        // Three keystrokes and no elapsed frame: the marker must still
+        // show exactly one dot, so watching it reveals nothing about how
+        // many characters were typed.
+        let (view, written, _mode) = view_with(&[b"x", b"y", b"z", b"\r"]);
+        view.round_begin();
+        let mut buf = [0u8; 32];
+        let len = view.read_password(&mut buf).expect("password read");
+        assert_eq!(&buf[..len], b"xyz");
+        let rows = replay(&written);
+        assert!(
+            rows.iter().any(|row| row.contains("[input active.]")),
+            "{rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|row| row.contains("[input active..")),
+            "{rows:?}"
+        );
+    }
+
     #[test]
     fn round_begin_draws_the_chrome_and_selects_raw_input() {
         let (view, written, mode) = view_with(&[]);
@@ -742,11 +833,15 @@ mod tests {
         assert!(text.contains("Username:"), "{text}");
         assert!(text.contains("load 0.50 1.00 2.00"), "{text}");
         assert!(mode.raws.get() >= 1);
-        // The page is coloured, not monochrome: the bars carry the blue
-        // background (SGR 44) and the box border the cyan foreground
-        // (SGR 36).
+        // The page is coloured, not monochrome: the bars carry white text
+        // on the blue background (SGR 37 on 44) and the box border the
+        // cyan foreground (SGR 36).
         assert!(text.contains(";44") || text.contains("[44"), "{text}");
+        assert!(text.contains(";37") || text.contains("[37"), "{text}");
         assert!(text.contains(";36") || text.contains("[36"), "{text}");
+        // Stated directly, never as reverse video (SGR 7), which would
+        // render the bars blue-on-white.
+        assert!(!text.contains("[7m") && !text.contains(";7m"), "{text}");
     }
 
     /// A status source that counts how often the figures are re-queried.

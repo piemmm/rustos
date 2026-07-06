@@ -139,8 +139,11 @@ supervises (`plans/PI.md` P11). It wires the real seams:
   `MAX_USERNAME_LEN`, 32, so the field can never overflow its one-line
   box — an over-long line is refused whole, never truncated), renders
   the shared `[input active...]` marker (`rustos_vt::secret`) in place of
-  every hidden field's text — its dots advance with each keystroke, so
-  the operator sees typing progress while nothing of the secret shows —
+  every hidden field's text — its dots animated by the shared
+  `SecretIndicator` timer cadence (one frame per second, freezing after
+  the bounded window with no input), never by a keystroke, so the
+  operator sees input is live while the marker reveals nothing about how
+  much was typed —
   and **refuses** the password read outright if raw mode cannot be
   selected (a credential must never be rendered, `AGENTS.md` §5.4). On
   session launch it leaves the alternate screen and restores the cooked

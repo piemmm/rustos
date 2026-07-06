@@ -251,10 +251,18 @@ impl<T: Tty> Screen<T> {
 
     /// Take over the display for a full-screen session (curses `initscr` /
     /// terminfo `smcup`): switch to the alternate screen buffer on a
-    /// terminal that has one, or erase the display in place on one that can
-    /// only erase, so stale text from the previous session never shows
+    /// terminal that has one, then erase the display from the home
+    /// position, so stale text from the previous session never shows
     /// through cells the application leaves blank. A terminal that can do
     /// neither (the dumb baseline) is left unchanged.
+    ///
+    /// The erase is emitted even alongside the alternate-screen switch:
+    /// switching only presents a cleared buffer when the terminal was on
+    /// the primary screen. A console a predecessor left on the alternate
+    /// screen (a full-screen program that exited without leaving it) treats
+    /// the switch as a no-op and keeps the predecessor's frame — xterm and
+    /// the framebuffer console alike — so the display is erased explicitly
+    /// rather than assumed blank.
     ///
     /// The physical diff base is reset to blank to match the now-empty
     /// display, so the next [`Screen::doupdate`] paints exactly what the
@@ -266,15 +274,14 @@ impl<T: Tty> Screen<T> {
     pub fn enter_full_screen(&mut self) -> Result<()> {
         let mut ops = Vec::new();
         if self.caps.alt_screen {
-            // Entering the alternate screen presents a cleared buffer and
-            // saves the primary screen for restoration on leave.
+            // Saves the primary screen for restoration on leave.
             ops.push(Op::EnterAltScreen);
-        } else if self.caps.erase {
-            // No alternate screen (a VT100-class terminal): erase the
-            // display in place from the home position.
+        }
+        if self.caps.erase {
             ops.push(Op::CursorPosition { row: 1, col: 1 });
             ops.push(Op::EraseInDisplay(EraseMode::All));
-        } else {
+        }
+        if ops.is_empty() {
             return Ok(());
         }
         self.write_ops(&ops)?;

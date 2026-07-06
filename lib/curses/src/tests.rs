@@ -477,7 +477,12 @@ fn enabling_mouse_is_a_no_op_on_a_terminal_without_mouse_support() {
 }
 
 #[test]
-fn full_screen_uses_the_alternate_screen_when_the_terminal_has_one() {
+fn full_screen_uses_the_alternate_screen_and_erases_it_explicitly() {
+    // The switch alone must never be trusted to present a cleared buffer:
+    // a console a predecessor left on the alternate screen treats
+    // `EnterAltScreen` as a no-op and keeps the predecessor's frame, so
+    // the driver erases the display explicitly after switching (the
+    // stale-login-screen regression).
     let mut screen = Screen::new(
         FakeTty::with_input(b""),
         TermType::Xterm256Color,
@@ -486,7 +491,12 @@ fn full_screen_uses_the_alternate_screen_when_the_terminal_has_one() {
     assert_eq!(screen.enter_full_screen(), Ok(()));
     assert_eq!(screen.leave_full_screen(), Ok(()));
     let output = screen.into_tty().output;
-    let want = encode_all(&[Op::EnterAltScreen, Op::LeaveAltScreen]);
+    let want = encode_all(&[
+        Op::EnterAltScreen,
+        Op::CursorPosition { row: 1, col: 1 },
+        Op::EraseInDisplay(rustos_vt::EraseMode::All),
+        Op::LeaveAltScreen,
+    ]);
     assert_eq!(output, want);
 }
 

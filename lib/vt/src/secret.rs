@@ -216,6 +216,21 @@ impl SecretIndicator {
         self.next_tick_ns
     }
 
+    /// The dot count of the active marker currently on screen, or `None`
+    /// while the marker is hidden or complete.
+    ///
+    /// A cell-composited consumer (a curses view that repaints its whole
+    /// field each frame) drives the indicator for its timing and state and
+    /// renders [`active_marker`]`(dots)` directly instead of the byte-stream
+    /// [`Render`]s, so the dot cadence has exactly one definition.
+    #[must_use]
+    pub const fn dots(&self) -> Option<u8> {
+        match self.phase {
+            Phase::Active { dots, .. } => Some(dots),
+            Phase::Hidden | Phase::Complete => None,
+        }
+    }
+
     /// The width of the marker currently on screen, `0` when hidden.
     fn shown_width(&self) -> usize {
         match self.phase {
@@ -573,6 +588,18 @@ mod tests {
             bytes(&render),
             [b"\x08".repeat(15), b"[input complete]".to_vec()].concat()
         );
+    }
+
+    #[test]
+    fn dots_reports_the_active_marker_only() {
+        let mut indicator = SecretIndicator::new();
+        assert_eq!(indicator.dots(), None);
+        let _ = indicator.input(SecretInput::Typed, 0);
+        assert_eq!(indicator.dots(), Some(1));
+        let _ = indicator.tick(SECRET_TICK_NS);
+        assert_eq!(indicator.dots(), Some(2));
+        let _ = indicator.input(SecretInput::Submitted, 100);
+        assert_eq!(indicator.dots(), None);
     }
 
     #[test]
