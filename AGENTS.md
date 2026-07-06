@@ -3081,5 +3081,59 @@ floor every storage and memory design is held to:
 
 ---
 
+## 27. Foundational Implementations Are Complete, Not Minimal
+
+A **foundational primitive** — a kernel subsystem (§4), a scheduling or
+synchronisation primitive (§17.1, `lib/sync`), an allocator (§4, §25), an
+IPC/capability path (§5), a wait/park primitive, a data structure or
+`lib/*` building block other code builds on — is implemented as the
+*complete, production-grade thing it names*, not as the smallest subset
+its first caller happens to exercise. This is binding and as
+non-negotiable as §2. It is the positive resolution of the tension
+between §2.6 (senior-developer quality) and §2.3/§2.4 (no bloat / no
+interface creep): those rules forbid **speculative** surface, they do
+**not** license shipping an incomplete core.
+
+1. **Implement the abstraction, not the caller's slice.** The test is
+   "what would a senior kernel engineer expect this primitive to *be*?",
+   never "what does the one current call site touch?". A wait-queue that
+   can only `wake_all` is not a wait-queue; a map that only ever appends
+   is not a map. The complete, well-understood operation set of the
+   primitive is present, correct, and tested — even where today only a
+   subset has callers.
+2. **Right data structure and algorithm, from the start.** A foundational
+   primitive uses the structure a real kernel would (an ordered/indexed
+   set, a timer wheel or heap for deadlines, an intrusive list for O(1)
+   removal — never an O(n) linear scan of a `Vec` on a hot or
+   load-bearing path where the workload can grow). "It's fine while the
+   set is tiny" is the §24.1 fixed-ceiling defect wearing a different
+   coat: size and complexity are reasoned about for §26 load, not a
+   developer's laptop.
+3. **Fairness, ordering, and starvation are designed in.** Any primitive
+   on the scheduling or resource path (§17.1, §24) has a *stated*
+   fairness/ordering discipline (FIFO, priority, anti-starvation) and a
+   wake-one path where a wake-all would be a thundering herd — not
+   "wake everyone and let the scheduler sort it out".
+4. **This is not a licence to invent surface (§2.3/§2.4).** Completeness
+   means the operations, correctness, and robustness *intrinsic to the
+   abstraction*, and only those. Do not add methods, versions, or
+   parameters for hypothetical *other* abstractions or unrequested
+   features — that is still creep. The line: fill out the primitive you
+   are building; do not bolt on a different one.
+5. **"Minimal for now" is the §2.19 defect.** Shipping a deliberately
+   thin core meaning to "flesh it out when a second caller needs it" is
+   exactly the deferred-correctness §2.19 forbids. If the complete
+   primitive is genuinely too large for the current change, you do the
+   part you land *completely* and **stop and ask** (§15.7) with the
+   remainder staged in `PLAN.md`/`plans/` — you never quietly ship the
+   thin version and call it done.
+6. **Reviewed under §23.** A foundational primitive that is correct but
+   substantively incomplete — missing an operation the abstraction
+   implies, an O(n) structure where the workload demands better, or an
+   absent fairness/wake-one path — is a §23.2 defect and a review
+   blocker, regardless of a green compile and green tests.
+
+---
+
 Violation of any rule in this document is a defect, regardless of whether
 the code compiles or the tests pass.

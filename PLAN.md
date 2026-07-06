@@ -1887,6 +1887,29 @@ order (one fully-gated increment each):
                    parks is a separate §2.16 efficiency follow-up, not a correctness
                    blocker now that the serial drain no longer depends on the loop
                    idling.
+               - **P-6 — wait-queue §27 completeness rework (staged by the
+                 2026-07-06 charter amendment).** Bring `kernel/core/src/waitq.rs`
+                 up to the §27 bar: the primitive P-2 landed is the thinnest slice
+                 its first callers exercised — an O(n) `Vec` wait set with
+                 `wake_all` as the only wake path (no wake-one, no FIFO/priority
+                 ordering, no fairness/anti-starvation guarantee; O(n)
+                 `register`/`deregister`/`sweep`/`earliest_deadline`, and
+                 `nearest_timed_deadline` re-scans every queue on every arm).
+                 Deliverables: a real wait-set structure with a *stated* FIFO
+                 fairness/ordering discipline and O(1) (or O(log n))
+                 register/deregister — never a linear `Vec` scan on this
+                 load-bearing path (§26 load, §24.1); a deadline-ordered
+                 structure (heap / timer wheel) so the timed sweep and one-shot
+                 arming stop re-scanning every waiter; a `wake_one` path so a
+                 single-resource event (a `CallEndpoint` reply, one console
+                 byte) need not thundering-herd every waiter, with wake_all
+                 retained for genuine broadcast conditions; the lock-free ISR
+                 `request_wake`/deferred-drain shape P-5 landed is preserved.
+                 No surface beyond the abstraction itself (§27.4). Lands with
+                 regression tests (FIFO wake order, wake-one vs wake-all,
+                 deadline ordering, no lost wake) per §7/§23.4, and every
+                 park-site consumer re-audited for which wake primitive it
+                 should use.
                Then the original D2b-2b tail continues: the `CallEndpoint`-served
                `/System` file-read request loop on the parked store-service
                kthread + `driver_store_load`, delete the in-kernel single-pass
@@ -3966,6 +3989,24 @@ of how much code was produced.
 
 Amendments to `AGENTS.md` (the binding charter) are logged here so an agent
 can see *why* a rule exists without diffing the charter's history.
+
+- **2026-07-06 — Foundational implementations are complete, not minimal.**
+  Added §27 (maintainer decision) after kernel building blocks were found
+  implemented as the thinnest slice their first caller needed rather than
+  the real primitive — e.g. `kernel/core/src/waitq.rs`: an O(n) `Vec` of
+  waiters with `wake_all` as the only wake path (no wake-one, no FIFO/
+  priority, no fairness/anti-starvation, O(n) `register`/`deregister`/
+  `sweep`/`earliest_deadline`). §2.3/§2.4 (no bloat / no creep) had been
+  read as licence to ship an incomplete core; §27 resolves the tension:
+  a foundational primitive is built as the complete, production-grade
+  abstraction it names, with the data structure/algorithm a real kernel
+  would use and a stated fairness/ordering discipline, while still adding
+  no speculative surface. "Minimal for now" is the §2.19 defect; too-large
+  work is landed complete-as-far-as-it-goes and escalated (§15.7), never
+  shipped thin. The `waitq.rs` rework itself is too large for this charter
+  change, so it is staged and surfaced as PLAN **P-6** (§2.18/§2.19/§15.7)
+  rather than left silent. Charter + plan only; no code changed in this
+  amendment.
 
 - **2026-07-05 — Fail loud, degrade gracefully.** Added §2.24 (maintainer
   decision) after `top` was found exiting silently (code 1, no message) when
