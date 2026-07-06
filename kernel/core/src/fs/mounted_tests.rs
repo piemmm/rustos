@@ -17,7 +17,7 @@ use rustos_abi::driver::filesystem::{
     FilesystemRead, FilesystemWrite, MountFlags, NodeKind, NodeSecurity,
 };
 use rustos_abi::driver::DriverHandle;
-use rustos_abi::{Errno, FileKind, OpenFlags};
+use rustos_abi::{Errno, FileKind, OpenFlags, UnlinkFlags};
 use rustos_caps::CapabilitySet;
 use rustos_kernel_sec::{
     GroupId, GroupRecord, IdentityTable, IdentityTableBuilder, UserId, UserRecord,
@@ -430,12 +430,41 @@ fn unlink_removes_the_file() {
         OpenFlags::CREATE.union(OpenFlags::WRITE),
     )
     .expect("create");
-    svc.unlink(TEST_UID, &caps, &p).expect("unlink");
+    svc.unlink(TEST_UID, &caps, &p, UnlinkFlags::empty())
+        .expect("unlink");
     let mut buf = [0u8; 4];
     assert_eq!(
         svc.read(TEST_UID, &caps, &p, 0, &mut buf),
         Err(Errno::NotFound)
     );
+}
+
+#[test]
+fn directory_only_unlink_refuses_a_file_and_removes_an_empty_directory() {
+    // The `rmdir` posture through the whole service: `DIRECTORY` reaching a
+    // file is the dedicated `NotADirectory` errno and the file survives; the
+    // same flag removes an (empty) directory.
+    let svc = ready();
+    let caps = caps();
+    let file = path("plain");
+    svc.open(
+        TEST_UID,
+        &caps,
+        &file,
+        OpenFlags::CREATE.union(OpenFlags::WRITE),
+    )
+    .expect("create");
+    assert_eq!(
+        svc.unlink(TEST_UID, &caps, &file, UnlinkFlags::DIRECTORY),
+        Err(Errno::NotADirectory)
+    );
+    svc.stat(TEST_UID, &caps, &file)
+        .expect("file survives the refused dir-only removal");
+    let dir = path("empty");
+    svc.mkdir(TEST_UID, &caps, &dir).expect("mkdir");
+    svc.unlink(TEST_UID, &caps, &dir, UnlinkFlags::DIRECTORY)
+        .expect("dir-only remove of an empty directory");
+    assert_eq!(svc.stat(TEST_UID, &caps, &dir), Err(Errno::NotFound));
 }
 
 #[test]
@@ -471,10 +500,10 @@ fn an_exclusive_create_of_an_existing_path_fails_closed() {
     let exclusive = OpenFlags::CREATE
         .union(OpenFlags::EXCLUSIVE)
         .union(OpenFlags::WRITE);
-    // `AlreadyExists` collapses onto `OutOfRange` at the ABI boundary.
+    // The dedicated `EEXIST` equivalent crosses the ABI boundary intact.
     assert_eq!(
         svc.open(TEST_UID, &caps, &p, exclusive),
-        Err(Errno::OutOfRange)
+        Err(Errno::AlreadyExists)
     );
 }
 
@@ -490,10 +519,10 @@ fn a_directory_open_of_a_regular_file_fails_closed() {
         OpenFlags::CREATE.union(OpenFlags::WRITE),
     )
     .expect("create");
-    // `NotADirectory` collapses onto `OutOfRange` at the ABI boundary.
+    // The dedicated `ENOTDIR` equivalent crosses the ABI boundary intact.
     assert_eq!(
         svc.open(TEST_UID, &caps, &p, OpenFlags::DIRECTORY),
-        Err(Errno::OutOfRange)
+        Err(Errno::NotADirectory)
     );
 }
 

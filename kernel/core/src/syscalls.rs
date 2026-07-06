@@ -80,11 +80,11 @@ use rustos_abi::sysinfo::{CpuTimeRecord, MountRecord, ProcessRecord, UserDirecto
 use rustos_abi::{
     decode_log_record, BootId, CapabilityId, DescriptorTable, DirEntry, Errno, FileStat, InputMode,
     IntrospectDomain, IrqHandle, LimitKind, MapFlags, OpenFlags, ProcId, ProcessStart, RandomFlags,
-    ResourceLimit, Signal, StreamMode, SyscallNumber, Time64, WaitFlags, WaitSetOp, WaitSourceKind,
-    WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, FS_IO_MAX, FS_NAME_MAX,
-    FS_PATH_MAX, LOG_FIELDS_MAX, LOG_RECORD_MAX, PROCESS_START_MAX_TOTAL_LEN, PROC_ID_LEN,
-    RANDOM_REQUEST_MAX_BYTES, RESOURCE_REF_MAX, SPAWN_UID_INHERIT, TERMINAL_SIZE_WIRE_LEN,
-    WAITSET_CHILD_ANY, WAIT_PID_ANY,
+    ResourceLimit, Signal, StreamMode, SyscallNumber, Time64, UnlinkFlags, WaitFlags, WaitSetOp,
+    WaitSourceKind, WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, FS_IO_MAX,
+    FS_NAME_MAX, FS_PATH_MAX, LOG_FIELDS_MAX, LOG_RECORD_MAX, PROCESS_START_MAX_TOTAL_LEN,
+    PROC_ID_LEN, RANDOM_REQUEST_MAX_BYTES, RESOURCE_REF_MAX, SPAWN_UID_INHERIT,
+    TERMINAL_SIZE_WIRE_LEN, WAITSET_CHILD_ANY, WAIT_PID_ANY,
 };
 use rustos_caps::CapabilitySet;
 use rustos_kernel_ipc::{
@@ -4642,11 +4642,21 @@ where
         Ok(0)
     }
 
-    fn fs_unlink(&self, caller: &CallerContext<'_>, path: u64, path_len: usize) -> SyscallResult {
+    fn fs_unlink(
+        &self,
+        caller: &CallerContext<'_>,
+        path: u64,
+        path_len: usize,
+        flags: UnlinkFlags,
+    ) -> SyscallResult {
+        // The dispatcher already checked `CAP_FS_ACCESS`, that `path` is a
+        // non-null `UserPtr`, and rejected any reserved `UnlinkFlags` bit.
+        // With `DIRECTORY` the filesystem removes the name only if it is an
+        // (empty) directory, decided under its own lock.
         let path = self.copy_path_in(caller, path, path_len)?;
         let uid = caller.caps.owner().0;
         self.filesystem
-            .unlink(uid, caller.caps.effective(), &path)?;
+            .unlink(uid, caller.caps.effective(), &path, flags)?;
         Ok(0)
     }
 
@@ -8757,8 +8767,9 @@ mod tests {
             uid: u32,
             caps: &dyn rustos_abi::CapabilityQuery,
             path: &str,
+            flags: UnlinkFlags,
         ) -> Result<(), Errno> {
-            self.inner.unlink(uid, caps, path)
+            self.inner.unlink(uid, caps, path, flags)
         }
 
         fn rename(
@@ -17030,6 +17041,7 @@ mod tests {
             uid: u32,
             _caps: &dyn rustos_abi::CapabilityQuery,
             path: &str,
+            _flags: UnlinkFlags,
         ) -> Result<(), Errno> {
             self.record(alloc::format!("unlink uid={uid} path={path}"));
             Ok(())

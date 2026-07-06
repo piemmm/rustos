@@ -1338,11 +1338,15 @@ pub const SYSCALLS: &[SyscallSpec] = &[
     SyscallSpec {
         number: SyscallNumber::FS_UNLINK,
         name: "fs_unlink",
-        arg_count: 2,
+        arg_count: 3,
         args: [
             AbiType::UserPtr,
             AbiType::Len,
-            AbiType::Unit,
+            // The validated `UnlinkFlags` word: empty removes the named
+            // file or (empty) directory; `DIRECTORY` restricts the removal
+            // to an (empty) directory (the atomic `rmdir` posture). A
+            // reserved bit fails closed at dispatch.
+            AbiType::U32,
             AbiType::Unit,
             AbiType::Unit,
             AbiType::Unit,

@@ -101,7 +101,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  52 | `fs_truncate`  | `u32 fd`, `u64 size`                    | `errno`       | `CAP_FS_ACCESS` | yes   |
 |  53 | `fs_sync`      | `u32 fd`                                | `errno`       | `CAP_FS_ACCESS` | no    |
 |  54 | `fs_mkdir`     | `user_ptr` (path), `len`                | `errno`       | `CAP_FS_ACCESS` | yes   |
-|  55 | `fs_unlink`    | `user_ptr` (path), `len`                | `errno`       | `CAP_FS_ACCESS` | yes   |
+|  55 | `fs_unlink`    | `user_ptr` (path), `len`, `u32 flags`   | `errno`       | `CAP_FS_ACCESS` | yes   |
 |  56 | `dma_free`     | `Handle handle`, `u64 cpu_va`           | `errno`       | `CAP_MEM_DMA`   | yes   |
 |  57 | `fs_rename`    | `user_ptr` (src), `len`, `user_ptr` (dst), `len` | `errno` | `CAP_FS_ACCESS` | yes |
 |  58 | `call_peer_origin` | `IpcEndpoint`, `Handle` (ticket), `user_ptr` (origin out), `len` | `u64` (bytes) | — | no |

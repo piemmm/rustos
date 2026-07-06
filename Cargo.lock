@@ -1342,6 +1342,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-mkdir"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-help",
+ "rustos-path",
+ "rustos-rt",
+]
+
+[[package]]
 name = "rustos-mkimage"
 version = "0.0.0"
 dependencies = [
@@ -1457,6 +1467,16 @@ version = "0.0.0"
 dependencies = [
  "rustos-abi",
  "rustos-help",
+ "rustos-rt",
+]
+
+[[package]]
+name = "rustos-rmdir"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-help",
+ "rustos-path",
  "rustos-rt",
 ]
 

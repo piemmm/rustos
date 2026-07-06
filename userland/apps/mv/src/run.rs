@@ -275,7 +275,7 @@ mod program {
         }
 
         fn remove_file(&self, path: &str) -> Result<(), Errno> {
-            let ret = rustos_rt::fs_unlink(path.as_bytes());
+            let ret = rustos_rt::fs_unlink(path.as_bytes(), rustos_abi::UnlinkFlags::empty());
             if ret != 0 {
                 return Err(Errno::from_syscall(ret));
             }
@@ -284,10 +284,12 @@ mod program {
         }
 
         fn remove_dir(&self, path: &str) -> Result<(), Errno> {
-            // The kernel's unlink removes a directory only when it is
-            // empty, exactly the seam's contract; a non-empty directory
-            // fails closed with the kernel's own errno.
-            let ret = rustos_rt::fs_unlink(path.as_bytes());
+            // The DIRECTORY flag makes the kernel remove the name only when
+            // it is an (empty) directory, decided atomically under the
+            // filesystem's own lock, so a concurrent swap of the directory
+            // for a file fails closed instead of unlinking the file. A
+            // non-empty directory fails closed with the kernel's own errno.
+            let ret = rustos_rt::fs_unlink(path.as_bytes(), rustos_abi::UnlinkFlags::DIRECTORY);
             if ret != 0 {
                 return Err(Errno::from_syscall(ret));
             }

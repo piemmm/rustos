@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 use rustos_abi::rxe::{LoadHeader, RxePermission, Segment, LOAD_FLAG_PIE};
 use rustos_abi::{
     BundleFileDigest, CapabilityId, CapabilityQuery, Errno, FileKind, FileStat, OpenFlags,
-    ABI_VERSION_CURRENT, LOAD_MAGIC,
+    UnlinkFlags, ABI_VERSION_CURRENT, LOAD_MAGIC,
 };
 use rustos_itest_harness::app_image::{compose_signed_appinfo, AppKind, AppManifestSource};
 use rustos_kernel_syscall::SYSCALL_TABLE_HASH;
@@ -150,7 +150,13 @@ impl FilesystemService for MemFs {
         Err(Errno::NotImplemented)
     }
 
-    fn unlink(&self, _uid: u32, _caps: &dyn CapabilityQuery, _path: &str) -> Result<(), Errno> {
+    fn unlink(
+        &self,
+        _uid: u32,
+        _caps: &dyn CapabilityQuery,
+        _path: &str,
+        _flags: UnlinkFlags,
+    ) -> Result<(), Errno> {
         Err(Errno::NotImplemented)
     }
 

@@ -72,8 +72,8 @@ trees for future command apps as each becomes a registered bundle,
 the §12.1 Stage B remainder (`chmod`/`chown`/`getcap`/`setcap`/`mount`
 blocked on their kernel syscalls — `cp`/`mv`/`rm`/`useradd`/`groupadd`
 are registered store bundles), the §12.1 Stage C remainder (the first
-batch's `true`/`false`/`yes`/`basename`/`dirname` are registered store
-bundles; the rest land in further batches), and
+batch's `true`/`false`/`yes`/`basename`/`dirname`/`mkdir`/`rmdir` are
+registered store bundles; the rest land in further batches), and
 deliverable 8 increment 5 (the x86_64/riscv64 storage floor, then
 deletion of the embedded registry those ports still carry as their
 §18.6 boot floor). Help documents are authored **only** in
@@ -584,7 +584,7 @@ behind the floor work below).
 - **Stage C — missing coreutils commands (in progress; all wanted).**
   Every GNU coreutils command implementable on the current floor, in
   prioritised batches. **Done: `true`, `false`, `yes`, `basename`,
-  `dirname`** — each a full self-contained store bundle (console-write +
+  `dirname`, `mkdir`, `rmdir`** — each a full self-contained store bundle (console-write +
   `CAP_FS_ACCESS` request, store-only: the §18.6 boot floor never grows,
   so the kernel inventory drift test pins their `AppInfo.toml` directly)
   with the complete GNU surface, six-locale `Help/` trees, and
@@ -596,12 +596,27 @@ behind the floor work below).
   `Name:/` alias root plays the role POSIX gives `/`, decided by the
   path grammar's own exported rule (`rustos_path::alias_root_len`, the
   §2.2 one-definition seam added for exactly these lexical tools) —
-  never a second path parser. `echo` and `pwd` from the first batch
+  never a second path parser. Landing `mkdir`/`rmdir` evolved `abi-v1`
+  in place (unfrozen, the `mv`/`CrossVolume` precedent): the dedicated
+  `Errno::NotADirectory`/`Errno::NotEmpty` codes (`VfsError` now maps
+  `AlreadyExists`/`NotADirectory`/`NotEmpty` precisely instead of
+  collapsing them onto `OutOfRange`; C header regenerated with the new
+  errnos, `ROS_UNLINK_FLAG_DIRECTORY`, and the previously-unpublished
+  `ROS_OPEN_FLAG_*` bits) and a validated `UnlinkFlags` word on
+  `fs_unlink` whose `DIRECTORY` bit is the atomic
+  `rmdir(2)`/`unlinkat(AT_REMOVEDIR)` posture, decided by the
+  filesystem under its own lock — `rmdir` (and `rm`'s own directory
+  removals, migrated to the flag) carries no stat/remove race, and
+  `--ignore-fail-on-non-empty` tolerates exactly `NotEmpty`. Both
+  tools' `-p` walks share the one ancestor-spelling rule
+  (`rustos_path::Path::prefix`, the §2.2 seam added for exactly these
+  walks); `mkdir`'s GNU `-m` is deliberately staged behind the same
+  mode-set syscall `chmod` waits on (Stage B), never stubbed. `echo` and `pwd` from the first batch
   stay `elsh` builtins for now (`pwd` needs the shell's cwd state, and
   the shell resolves builtins first, so a store bundle of either would
   be unreachable duplication); moving them out is decided when the
   builtin/bundle split is revisited. Remaining first batch: `printf`,
-  `mkdir`, `rmdir`, `head`, `tail`, `wc`, `seq`, `tee`, `env`, `sleep`,
+  `head`, `tail`, `wc`, `seq`, `tee`, `env`, `sleep`,
   `date`, `whoami`, `id`; then the text tools `sort`,
   `uniq`, `tr`, `cut`, `paste`, `comm`, `nl`, `tac`, `fold`, `expand`,
   `od`, `split`, `shuf`, `truncate`, `mktemp`, `realpath`, `chgrp`,
@@ -690,8 +705,8 @@ both landed; `plans/SHELL.md` command execution):
    closed with a message naming the offending `bundle/locale/file`.
 6. **`Help/` trees for the existing command apps** — **done for every
    store-registered command app**: `basename`, `cat`, `clear`, `cp`,
-   `dirname`, `false`, `groupadd`, `ls`,
-   `mv`, `ps`, `reset`, `rm`, `top`, `true`, `sysinfo`, `useradd`,
+   `dirname`, `false`, `groupadd`, `ls`, `mkdir`,
+   `mv`, `ps`, `reset`, `rm`, `rmdir`, `top`, `true`, `sysinfo`, `useradd`,
    `users`, `yes`, and `elsh` each author their six-locale tree on disk in the bundle,
    discovered by `tools/syshelp` (roots `userland/apps` and
    `userland/shell`), planted at `/System/Apps/<cmd>.app/Help/`, and served

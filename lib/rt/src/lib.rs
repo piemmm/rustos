@@ -2561,18 +2561,30 @@ pub fn fs_mkdir(path: &[u8]) -> i64 {
 /// Remove the file or empty directory at the absolute `path`
 /// (`SyscallNumber::FS_UNLINK`).
 ///
+/// With [`UnlinkFlags::DIRECTORY`](rustos_abi::UnlinkFlags::DIRECTORY) the
+/// removal succeeds only when the name is an (empty) directory — the atomic
+/// `rmdir` posture, decided by the filesystem under its own lock; a
+/// non-directory is refused with the dedicated `Errno::NotADirectory`.
+/// [`UnlinkFlags::empty`](rustos_abi::UnlinkFlags::empty) removes the named
+/// file or (empty) directory.
+///
 /// The kernel authorises the removal through the secured VFS under the
 /// caller's attested identity (a missing path, a non-empty directory, a
 /// read-only mount, or a permission denial fails closed). Returns `0` on
 /// success or `-errno`.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
-pub fn fs_unlink(path: &[u8]) -> i64 {
+pub fn fs_unlink(path: &[u8], flags: rustos_abi::UnlinkFlags) -> i64 {
     let ptr = path.as_ptr() as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
     // `(ptr, len)` pair against the caller's address space before reading it.
     // `path` is a live shared `&[u8]` for the duration of the call.
-    let ret = unsafe { raw_syscall(NUM_FS_UNLINK, [ptr, path.len() as u64, 0, 0, 0, 0]) };
+    let ret = unsafe {
+        raw_syscall(
+            NUM_FS_UNLINK,
+            [ptr, path.len() as u64, u64::from(flags.bits()), 0, 0, 0],
+        )
+    };
     ret as i64
 }
 
@@ -3881,12 +3893,28 @@ mod tests {
     fn fs_unlink_marshals_path_pointer_and_len() {
         let path = b"/System/Logs/old";
         let (number, args) = capture(0, || {
-            assert_eq!(fs_unlink(path), 0);
+            assert_eq!(fs_unlink(path, rustos_abi::UnlinkFlags::empty()), 0);
         });
         assert_eq!(number, NUM_FS_UNLINK);
         assert_eq!(args[0], path.as_ptr() as usize as u64);
         assert_eq!(args[1], path.len() as u64);
         assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn fs_unlink_marshals_the_directory_flag() {
+        let path = b"/Users/me/empty";
+        let (number, args) = capture(0, || {
+            assert_eq!(fs_unlink(path, rustos_abi::UnlinkFlags::DIRECTORY), 0);
+        });
+        assert_eq!(number, NUM_FS_UNLINK);
+        assert_eq!(args[0], path.as_ptr() as usize as u64);
+        assert_eq!(args[1], path.len() as u64);
+        assert_eq!(
+            args[2],
+            u64::from(rustos_abi::UnlinkFlags::DIRECTORY.bits())
+        );
+        assert_eq!(&args[3..], &[0, 0, 0]);
     }
 
     #[test]

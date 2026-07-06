@@ -490,7 +490,8 @@ fn delegated_remove_unlinks() {
     let mut fs = RwMockFs::new();
     let path = p("/Storage/usb0/gone.txt");
     vfs.create_via(&admin, &path, &mut fs).expect("create");
-    vfs.remove_via(&admin, &path, &mut fs).expect("remove");
+    vfs.remove_via(&admin, &path, &mut fs, false)
+        .expect("remove");
     let mut buf = [0u8; 4];
     assert_eq!(
         vfs.read_via(&admin, &path, &mut fs, 0, &mut buf),
@@ -537,8 +538,42 @@ fn delegated_remove_non_empty_directory_is_not_empty() {
     vfs.create_via(&admin, &p("/Storage/usb0/d/f"), &mut fs)
         .expect("create child");
     assert_eq!(
-        vfs.remove_via(&admin, &p("/Storage/usb0/d"), &mut fs),
+        vfs.remove_via(&admin, &p("/Storage/usb0/d"), &mut fs, false),
         Err(VfsError::NotEmpty)
+    );
+}
+
+#[test]
+fn delegated_dir_only_remove_of_a_file_is_not_a_directory() {
+    // The atomic `rmdir` posture: a directory-only removal reaching a file
+    // is refused in the same locked walk that would remove it, and the file
+    // survives.
+    let vfs = backed_vfs_rw(0o755);
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let mut fs = RwMockFs::new();
+    let path = p("/Storage/usb0/plain.txt");
+    vfs.create_via(&admin, &path, &mut fs).expect("create");
+    assert_eq!(
+        vfs.remove_via(&admin, &path, &mut fs, true),
+        Err(VfsError::NotADirectory)
+    );
+    vfs.stat_via(&admin, &path, &mut fs).expect("file survives");
+}
+
+#[test]
+fn delegated_dir_only_remove_of_an_empty_directory_succeeds() {
+    let vfs = backed_vfs_rw(0o755);
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let mut fs = RwMockFs::new();
+    vfs.mkdir_via(&admin, &p("/Storage/usb0/d"), &mut fs)
+        .expect("mkdir");
+    vfs.remove_via(&admin, &p("/Storage/usb0/d"), &mut fs, true)
+        .expect("dir-only remove of an empty directory");
+    assert_eq!(
+        vfs.stat_via(&admin, &p("/Storage/usb0/d"), &mut fs),
+        Err(VfsError::NotFound)
     );
 }
 

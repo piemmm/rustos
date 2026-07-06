@@ -24,7 +24,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use rustos_abi::sysinfo::MountRecord;
-use rustos_abi::{CapabilityQuery, Errno, FileKind, FileStat, OpenFlags};
+use rustos_abi::{CapabilityQuery, Errno, FileKind, FileStat, OpenFlags, UnlinkFlags};
 
 /// The set of secured filesystem operations a userland `fs_*` syscall needs.
 ///
@@ -148,12 +148,24 @@ pub trait FilesystemService: Send + Sync {
 
     /// Remove the file or empty directory at the absolute `path`.
     ///
+    /// With [`UnlinkFlags::DIRECTORY`] the removal succeeds only when the
+    /// name is an (empty) directory — decided atomically by the filesystem
+    /// under its own lock (the `rmdir` posture); a non-directory fails
+    /// closed with [`Errno::NotADirectory`].
+    ///
     /// # Errors
     ///
     /// The stable [`Errno`] for the VFS refusal (a missing path, a non-empty
-    /// directory, a read-only mount, a permission denial), or
-    /// [`Errno::NotImplemented`] when no filesystem is mounted.
-    fn unlink(&self, uid: u32, caps: &dyn CapabilityQuery, path: &str) -> Result<(), Errno>;
+    /// directory, a non-directory under [`UnlinkFlags::DIRECTORY`], a
+    /// read-only mount, a permission denial), or [`Errno::NotImplemented`]
+    /// when no filesystem is mounted.
+    fn unlink(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        path: &str,
+        flags: UnlinkFlags,
+    ) -> Result<(), Errno>;
 
     /// Move the file or directory at absolute `src` to absolute `dst`,
     /// preserving its identity and contents. Both paths must lie under the
@@ -264,7 +276,13 @@ impl FilesystemService for NullFilesystemService {
         Err(Errno::NotImplemented)
     }
 
-    fn unlink(&self, _uid: u32, _caps: &dyn CapabilityQuery, _path: &str) -> Result<(), Errno> {
+    fn unlink(
+        &self,
+        _uid: u32,
+        _caps: &dyn CapabilityQuery,
+        _path: &str,
+        _flags: UnlinkFlags,
+    ) -> Result<(), Errno> {
         Err(Errno::NotImplemented)
     }
 

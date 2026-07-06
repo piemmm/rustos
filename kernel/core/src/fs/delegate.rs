@@ -389,17 +389,24 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
 
     /// Unlink the child at `components`.
     ///
+    /// With `dir_only` the removal succeeds only when the child is an
+    /// (empty) directory — the atomic `rmdir` posture, decided in the same
+    /// locked walk that removes the entry, never by a caller-side stat.
+    ///
     /// # Errors
     ///
     /// * [`VfsError::InvalidPath`] if `components` is empty.
     /// * [`VfsError::NotFound`] if the child does not exist.
     /// * [`VfsError::NotEmpty`] if it is a non-empty directory.
+    /// * [`VfsError::NotADirectory`] if `dir_only` and the child is not a
+    ///   directory.
     /// * [`VfsError::PermissionDenied`], [`VfsError::NotADirectory`], or
     ///   [`VfsError::Io`].
     pub fn remove(
         &mut self,
         cred: &Credentials<'_>,
         components: &[String],
+        dir_only: bool,
     ) -> Result<(), VfsError> {
         let parent = self.parent_for_write(cred, components)?;
         let name = components[components.len() - 1].as_bytes();
@@ -416,6 +423,8 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
             {
                 return Err(VfsError::NotEmpty);
             }
+        } else if dir_only {
+            return Err(VfsError::NotADirectory);
         }
         self.fs.remove(parent, name).map_err(map_driver_error)
     }

@@ -251,7 +251,7 @@ mod program {
         }
 
         fn remove_file(&self, path: &str) -> Result<(), Errno> {
-            let ret = rustos_rt::fs_unlink(path.as_bytes());
+            let ret = rustos_rt::fs_unlink(path.as_bytes(), rustos_abi::UnlinkFlags::empty());
             if ret != 0 {
                 return Err(Errno::from_syscall(ret));
             }

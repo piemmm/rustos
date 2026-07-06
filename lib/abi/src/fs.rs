@@ -193,6 +193,64 @@ impl OpenFlags {
     }
 }
 
+/// Flags accepted by [`fs_unlink`](crate::SyscallNumber::FS_UNLINK).
+///
+/// A `#[repr(transparent)]` newtype over the `u32` flags register, mirroring
+/// [`OpenFlags`]: only the bits named here are defined and
+/// [`UnlinkFlags::from_bits`] rejects any reserved bit, so a future flag is
+/// never silently ignored by an older kernel (validate every input, fail
+/// closed).
+///
+/// An empty flag set is the historical `fs_unlink`: it removes the named
+/// file or (empty) directory. [`DIRECTORY`](Self::DIRECTORY) is the
+/// `rmdir`/`unlinkat(AT_REMOVEDIR)` posture: the removal succeeds only when
+/// the name is an (empty) **directory**, decided atomically by the
+/// filesystem under its own lock — never by a caller-side `fs_stat` that a
+/// concurrent rename could invalidate between the check and the removal.
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Default)]
+pub struct UnlinkFlags(u32);
+
+impl UnlinkFlags {
+    /// Remove the name only if it is an (empty) directory; a non-directory
+    /// fails closed with [`Errno::NotADirectory`].
+    pub const DIRECTORY: Self = Self(1 << 0);
+
+    /// The set of all defined flag bits.
+    const DEFINED_BITS: u32 = Self::DIRECTORY.0;
+
+    /// An empty flag set: remove the named file or (empty) directory.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    /// Raw flag bits, as carried on the ABI.
+    #[must_use]
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
+
+    /// Build a flag set from raw bits, rejecting any reserved bit.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] if `bits` sets a reserved bit (an unknown
+    /// request is rejected at the boundary, never silently ignored).
+    pub const fn from_bits(bits: u32) -> Result<Self, Errno> {
+        if bits & !Self::DEFINED_BITS != 0 {
+            return Err(Errno::OutOfRange);
+        }
+        Ok(Self(bits))
+    }
+
+    /// Whether the removal is restricted to an (empty) directory.
+    #[must_use]
+    pub const fn is_directory_only(self) -> bool {
+        self.0 & Self::DIRECTORY.0 != 0
+    }
+}
+
 /// The structural metadata `fs_stat` reports for an inode.
 ///
 /// Carries only what the userland contract exposes: the node kind, its byte
@@ -372,7 +430,7 @@ impl<'a> DirEntry<'a> {
 #[cfg(test)]
 mod tests {
     extern crate alloc;
-    use super::{DirEntry, FileKind, FileStat, OpenFlags, FS_NAME_MAX};
+    use super::{DirEntry, FileKind, FileStat, OpenFlags, UnlinkFlags, FS_NAME_MAX};
     use crate::Errno;
     use alloc::vec;
 
@@ -392,6 +450,19 @@ mod tests {
         assert_eq!(OpenFlags::from_bits(1 << 7), Err(Errno::OutOfRange));
         assert_eq!(OpenFlags::from_bits(u32::MAX), Err(Errno::OutOfRange));
         assert_eq!(OpenFlags::from_bits(0).map(OpenFlags::bits), Ok(0));
+    }
+
+    #[test]
+    fn unlink_flags_reject_reserved_bits_and_decode_directory() {
+        // Only bit 0 (DIRECTORY) is defined; anything else fails closed.
+        assert_eq!(UnlinkFlags::from_bits(1 << 1), Err(Errno::OutOfRange));
+        assert_eq!(UnlinkFlags::from_bits(u32::MAX), Err(Errno::OutOfRange));
+        let plain = UnlinkFlags::from_bits(0).unwrap();
+        assert!(!plain.is_directory_only());
+        assert_eq!(plain, UnlinkFlags::empty());
+        let dir_only = UnlinkFlags::from_bits(UnlinkFlags::DIRECTORY.bits()).unwrap();
+        assert!(dir_only.is_directory_only());
+        assert_eq!(dir_only, UnlinkFlags::DIRECTORY);
     }
 
     #[test]

@@ -531,6 +531,40 @@ drives the parsers (operand forms, suffix spellings, bundles,
 permutation, refusals), the POSIX algorithms (root, slash-run, empty,
 suffix, and alias-root cases), and the locale switch-drift pins.
 
+## `mkdir` / `rmdir` — make and remove directories (`userland/apps/mkdir`, `userland/apps/rmdir`)
+
+`rustos-mkdir` and `rustos-rmdir` are the GNU coreutils directory tools
+(`plans/APPS.md` §12.1 Stage C store bundles). `mkdir` creates each
+operand through `fs_mkdir` (`-p`/`--parents` creates missing ancestors
+and tolerates an operand that is already a directory; `-v`/`--verbose`
+reports `mkdir: created directory 'dir'`); GNU's `-m`/`--mode` is
+deliberately staged behind the mode-set kernel work `chmod` waits on,
+never stubbed. `rmdir` removes each (empty) directory operand through
+the **directory-only** `fs_unlink` (`UnlinkFlags::DIRECTORY`): the
+filesystem decides the node's kind atomically in the same locked walk
+that removes it, so the tool carries no stat/remove race — a file is
+refused with the dedicated `Errno::NotADirectory` and a populated
+directory with `Errno::NotEmpty`, which `--ignore-fail-on-non-empty`
+(and only it) tolerates. `-p` removes ancestors innermost first and
+never asks to remove a bare root; `-v` reports the GNU-worded
+`rmdir: removing directory, 'dir'` attempt line.
+
+Both tools' `-p` walks spell each ancestor through the shared path
+grammar's own rule (`rustos_path::Path::prefix`), so alias-rooted
+operands (`Home:/tools/bin`) walk correctly and neither tool carries a
+second path parser; an operand the grammar cannot parse is handed to
+the kernel whole, which stays the one validator.
+
+Both crates are `no_std` (with `alloc`), have no `unsafe`, and no
+`unwrap`/`expect`/`panic!` in production paths; each manifest requests
+`CAP_CONSOLE_WRITE` and `CAP_FS_ACCESS` — within the session baseline —
+and the secured VFS still authorises every operation per-inode.
+`cargo test -p rustos-mkdir -p rustos-rmdir` drives the parsers
+(switches, clusters, `--`, refusals), the engines over in-memory seams
+(ancestor walks, existing-directory tolerance, the tolerated non-empty
+refusal, first-failure-stops ordering, GNU `-v` wording), and the
+locale switch-drift pins.
+
 ## `ls` — list directory contents (`userland/apps/ls`)
 
 `rustos-ls` lists directory contents (`AGENTS.md` §3; a `plans/APPS.md`

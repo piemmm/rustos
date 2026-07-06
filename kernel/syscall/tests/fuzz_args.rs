@@ -28,7 +28,7 @@
 use core::cell::RefCell;
 use rustos_abi::{
     spec_for, AbiType, CapabilityId, Errno, IrqHandle, MapFlags, OpenFlags, RandomFlags,
-    SyscallNumber, WaitFlags, ENCODED_TABLE_LEN, SYSCALLS, SYSCALL_MAX_ARGS,
+    SyscallNumber, UnlinkFlags, WaitFlags, ENCODED_TABLE_LEN, SYSCALLS, SYSCALL_MAX_ARGS,
 };
 use rustos_caps::CapabilitySet;
 use rustos_kernel_sec::{TaskCapabilities, TaskId, UserId};
@@ -500,7 +500,13 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
-    fn fs_unlink(&self, _c: &CallerContext<'_>, _path: u64, _path_len: usize) -> SyscallResult {
+    fn fs_unlink(
+        &self,
+        _c: &CallerContext<'_>,
+        _path: u64,
+        _path_len: usize,
+        _flags: UnlinkFlags,
+    ) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
@@ -613,6 +619,16 @@ fn would_accept(spec_idx: usize, raw_number: u16, args: &[u64; SYSCALL_MAX_ARGS]
     if spec.number == SyscallNumber::FS_OPEN || spec.number == SyscallNumber::RESOURCE_OPEN {
         let raw = u32::try_from(args[2] & 0xFFFF_FFFF).unwrap_or(u32::MAX);
         if OpenFlags::from_bits(raw).is_err() {
+            return false;
+        }
+    }
+    // `fs_unlink`'s flags argument (arg 2) runs through
+    // `UnlinkFlags::from_bits`, which rejects any reserved bit (the only
+    // defined bit today is `DIRECTORY`). Mirror it through the same
+    // predicate the dispatcher uses.
+    if spec.number == SyscallNumber::FS_UNLINK {
+        let raw = u32::try_from(args[2] & 0xFFFF_FFFF).unwrap_or(u32::MAX);
+        if UnlinkFlags::from_bits(raw).is_err() {
             return false;
         }
     }

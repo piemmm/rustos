@@ -11,7 +11,7 @@ fn unlink_removes_a_file() {
 
     vfs.create_via_secured(&owner, &vol_path("gone"), &mut fs)
         .expect("create");
-    vfs.remove_via_secured(&owner, &vol_path("gone"), &mut fs)
+    vfs.remove_via_secured(&owner, &vol_path("gone"), &mut fs, false)
         .expect("remove");
 
     assert_eq!(
@@ -28,7 +28,7 @@ fn unlink_missing_file_is_not_found() {
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
     assert_eq!(
-        vfs.remove_via_secured(&owner, &vol_path("never"), &mut fs),
+        vfs.remove_via_secured(&owner, &vol_path("never"), &mut fs, false),
         Err(VfsError::NotFound)
     );
 }
@@ -41,7 +41,7 @@ fn the_name_is_reusable_after_unlink() {
 
     vfs.create_via_secured(&owner, &vol_path("recycle"), &mut fs)
         .expect("create");
-    vfs.remove_via_secured(&owner, &vol_path("recycle"), &mut fs)
+    vfs.remove_via_secured(&owner, &vol_path("recycle"), &mut fs, false)
         .expect("remove");
     vfs.create_via_secured(&owner, &vol_path("recycle"), &mut fs)
         .expect("re-create the freed name");
@@ -59,7 +59,7 @@ fn unlink_leaves_sibling_files_intact() {
         .expect("write keep");
     vfs.create_via_secured(&owner, &vol_path("drop"), &mut fs)
         .expect("create drop");
-    vfs.remove_via_secured(&owner, &vol_path("drop"), &mut fs)
+    vfs.remove_via_secured(&owner, &vol_path("drop"), &mut fs, false)
         .expect("remove drop");
 
     let mut buf = [0u8; 6];

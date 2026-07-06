@@ -53,6 +53,13 @@ root-delimiter rule and alias-name validation, so such a tool treats an alias
 root the way POSIX treats `/` (a root that is never stripped into) without a
 second path parser.
 
+For the ancestor-walking tools — `mkdir -p` (create missing parents,
+outermost first) and `rmdir -p` (remove parents, innermost first) — a parsed
+`Path` exports `prefix(len)`: the canonical spelling of the path truncated to
+its first `len` components (`prefix(0)` is the bare root — `/`, `Name:/`, or
+`.`). Both walks import this one rule, so how a truncated path is spelled is
+never re-derived per tool.
+
 The durable and administrative resolver spellings — `id::<volume-id>/…`,
 `fs::<driver>/<root>/…`, the `<driver>::<root>/…` shorthand, `dev::…`, and
 `net::…` — are refused with `PathError::UnsupportedResolver`. They serve

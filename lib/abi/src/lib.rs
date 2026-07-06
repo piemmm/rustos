@@ -74,7 +74,9 @@ pub use field::{
     FIELD_BYTES_MAX, FIELD_LIST_MAX, FIELD_NAME_MAX, FIELD_STR_MAX, IPV4_LEN, IPV6_LEN, MAC_LEN,
     NAMED_FIELD_KEY_PREFIX_LEN, RESERVED_PREFIXES, UUID_LEN,
 };
-pub use fs::{DirEntry, FileKind, FileStat, OpenFlags, FS_IO_MAX, FS_NAME_MAX, FS_PATH_MAX};
+pub use fs::{
+    DirEntry, FileKind, FileStat, OpenFlags, UnlinkFlags, FS_IO_MAX, FS_NAME_MAX, FS_PATH_MAX,
+};
 pub use hwtree::{
     HwDeviceClass, HwMatchKey, HwMatchKind, HwNode, HwResource, HwResourceKind, HwTreeHeader,
     MsiAllocation, HWTREE_VERSION_V1, HW_COMPATIBLE_MAX, HW_NODE_MAX_MATCH_KEYS,

@@ -208,12 +208,21 @@ fn remove_non_empty_directory_is_refused() {
     )
     .expect("file");
     assert_eq!(
-        vfs.remove(&admin, &p("/Users/dir")),
+        vfs.remove(&admin, &p("/Users/dir"), false),
         Err(VfsError::NotEmpty)
     );
-    // Removing the file then the now-empty directory succeeds.
-    vfs.remove(&admin, &p("/Users/dir/f")).expect("remove file");
-    vfs.remove(&admin, &p("/Users/dir"))
+    // A directory-only removal reaching the file is refused atomically
+    // (the `rmdir` posture), and the file survives.
+    assert_eq!(
+        vfs.remove(&admin, &p("/Users/dir/f"), true),
+        Err(VfsError::NotADirectory)
+    );
+    vfs.metadata(&admin, &p("/Users/dir/f"))
+        .expect("file survives the refused dir-only removal");
+    // Removing the file then the now-empty directory (dir-only) succeeds.
+    vfs.remove(&admin, &p("/Users/dir/f"), false)
+        .expect("remove file");
+    vfs.remove(&admin, &p("/Users/dir"), true)
         .expect("remove empty dir");
     assert_eq!(
         vfs.metadata(&admin, &p("/Users/dir")),
@@ -227,7 +236,7 @@ fn remove_under_read_only_mount_is_refused() {
     let caps = CapabilitySet::empty();
     let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
     assert_eq!(
-        vfs.remove(&admin, &p("/System/Logs")),
+        vfs.remove(&admin, &p("/System/Logs"), false),
         Err(VfsError::ReadOnly)
     );
 }

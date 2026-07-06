@@ -1,7 +1,8 @@
 //! Errno conformance: the stable user/kernel [`Errno`] a failed operation
-//! surfaces at the syscall boundary. `abi-v1` has no dedicated code for
-//! several structural refusals, so the mapping is intentionally
-//! many-to-one (documented on `VfsError::to_errno`); this suite pins the
+//! surfaces at the syscall boundary. The refusals a tool must tell apart
+//! carry dedicated codes (`AlreadyExists`, `NotADirectory`, `NotEmpty`);
+//! `abi-v1` still has no dedicated `EISDIR`/`EINVAL`/`EIO`, so those remain
+//! many-to-one (documented on `VfsError::to_errno`). This suite pins the
 //! contract so a future change cannot silently alter it.
 
 use rustos_test_posix_fs_suite::*;
@@ -15,10 +16,11 @@ fn vfs_error_maps_to_the_documented_stable_errno() {
     );
     assert_eq!(VfsError::ReadOnly.to_errno(), Errno::PermissionDenied);
     assert_eq!(VfsError::InvalidPath.to_errno(), Errno::OutOfRange);
-    assert_eq!(VfsError::NotADirectory.to_errno(), Errno::OutOfRange);
+    assert_eq!(VfsError::NotADirectory.to_errno(), Errno::NotADirectory);
     assert_eq!(VfsError::IsADirectory.to_errno(), Errno::OutOfRange);
-    assert_eq!(VfsError::AlreadyExists.to_errno(), Errno::OutOfRange);
-    assert_eq!(VfsError::NotEmpty.to_errno(), Errno::OutOfRange);
+    assert_eq!(VfsError::AlreadyExists.to_errno(), Errno::AlreadyExists);
+    assert_eq!(VfsError::NotEmpty.to_errno(), Errno::NotEmpty);
+    assert_eq!(VfsError::CrossVolume.to_errno(), Errno::CrossVolume);
     assert_eq!(VfsError::Io.to_errno(), Errno::NotImplemented);
 }
 
