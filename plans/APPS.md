@@ -72,8 +72,9 @@ trees for future command apps as each becomes a registered bundle,
 the §12.1 Stage B remainder (`chmod`/`chown`/`getcap`/`setcap`/`mount`
 blocked on their kernel syscalls — `cp`/`mv`/`rm`/`useradd`/`groupadd`
 are registered store bundles), the §12.1 Stage C remainder (the first
-batch's `true`/`false`/`yes`/`basename`/`dirname`/`mkdir`/`rmdir` are
-registered store bundles; the rest land in further batches), and
+batch's `true`/`false`/`yes`/`basename`/`dirname`/`mkdir`/`rmdir`/
+`head`/`wc` are registered store bundles; the rest land in further
+batches), and
 deliverable 8 increment 5 (the x86_64/riscv64 storage floor, then
 deletion of the embedded registry those ports still carry as their
 §18.6 boot floor). Help documents are authored **only** in
@@ -738,8 +739,9 @@ behind the floor work below).
 - **Stage C — missing coreutils commands (in progress; all wanted).**
   Every GNU coreutils command implementable on the current floor, in
   prioritised batches. **Done: `true`, `false`, `yes`, `basename`,
-  `dirname`, `mkdir`, `rmdir`** — each a full self-contained store bundle (console-write +
-  `CAP_FS_ACCESS` request, store-only: the §18.6 boot floor never grows,
+  `dirname`, `mkdir`, `rmdir`, `head`, `wc`** — each a full self-contained store bundle (console-write +
+  `CAP_FS_ACCESS` request — plus console-read for the stdin-reading
+  `head`/`wc` — store-only: the §18.6 boot floor never grows,
   so the kernel inventory drift test pins their `AppInfo.toml` directly)
   with the complete GNU surface, six-locale `Help/` trees, and
   switch-drift pins. `true`/`false` parse infallibly (only a *first*
@@ -765,12 +767,27 @@ behind the floor work below).
   tools' `-p` walks share the one ancestor-spelling rule
   (`rustos_path::Path::prefix`, the §2.2 seam added for exactly these
   walks); `mkdir`'s GNU `-m` is deliberately staged behind the same
-  mode-set syscall `chmod` waits on (Stage B), never stubbed. `echo` and `pwd` from the first batch
+  mode-set syscall `chmod` waits on (Stage B), never stubbed. `head`
+  implements the full GNU surface — `-n`/`-c` with the leading `-`
+  elide form and the multiplier suffix alphabet, `-q`/`-v`/`-z`,
+  bundles/permutation, and the obsolete first-argument
+  `-COUNT[bkm][lqvz]` form (including GNU's quirk that a multiplier
+  letter keeps scaling after a later `l`) — streaming in constant
+  memory (a circular byte ring for `-c -N`; a last-N-lines queue whose
+  unterminated final fragment counts as a line). `wc` implements
+  `-c`/`-m`/`-l`/`-w`/`-L`, `--total` (GNU argmatch prefixes), and
+  `--files0-from` with the exact GNU column-width rule (summed
+  regular-file sizes via the three-way `SizeProbe` seam; 7-column
+  minimum for non-regular inputs; unpadded single-input/single-count,
+  files0, and total-only forms); `-m` decodes UTF-8 incrementally
+  across chunks (an encoding-error byte is a byte, not a character)
+  and `-L` measures columns through the one `rustos_vt::char_width`
+  definition — never a second width table. `echo` and `pwd` from the first batch
   stay `elsh` builtins for now (`pwd` needs the shell's cwd state, and
   the shell resolves builtins first, so a store bundle of either would
   be unreachable duplication); moving them out is decided when the
   builtin/bundle split is revisited. Remaining first batch: `printf`,
-  `head`, `tail`, `wc`, `seq`, `tee`, `env`, `sleep`,
+  `tail`, `seq`, `tee`, `env`, `sleep`,
   `date`, `whoami`, `id`; then the text tools `sort`,
   `uniq`, `tr`, `cut`, `paste`, `comm`, `nl`, `tac`, `fold`, `expand`,
   `od`, `split`, `shuf`, `truncate`, `mktemp`, `realpath`, `chgrp`,
@@ -859,9 +876,9 @@ both landed; `plans/SHELL.md` command execution):
    closed with a message naming the offending `bundle/locale/file`.
 6. **`Help/` trees for the existing command apps** — **done for every
    store-registered command app**: `basename`, `cat`, `clear`, `cp`,
-   `dirname`, `false`, `groupadd`, `ls`, `mkdir`,
+   `dirname`, `false`, `groupadd`, `head`, `ls`, `mkdir`,
    `mv`, `ps`, `reset`, `rm`, `rmdir`, `top`, `true`, `sysinfo`, `useradd`,
-   `users`, `yes`, and `elsh` each author their six-locale tree on disk in the bundle,
+   `users`, `wc`, `yes`, and `elsh` each author their six-locale tree on disk in the bundle,
    discovered by `tools/syshelp` (roots `userland/apps` and
    `userland/shell`), planted at `/System/Apps/<cmd>.app/Help/`, and served
    at runtime through the `HelpSource` seam — never embedded in the binary

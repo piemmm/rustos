@@ -494,6 +494,7 @@ mod tests {
             ("elsh", AppKind::Command, SESSION_BASELINE),
             ("false", AppKind::Command, PURE_TOOL_REQUEST),
             ("groupadd", AppKind::Command, ADMIN_TOOL_REQUEST),
+            ("head", AppKind::Command, FILE_TOOL_REQUEST),
             ("login", AppKind::Service, LOGIN_MANIFEST),
             ("ls", AppKind::Command, LS_MANIFEST),
             ("man", AppKind::Command, MAN_MANIFEST),
@@ -509,6 +510,7 @@ mod tests {
             ("true", AppKind::Command, PURE_TOOL_REQUEST),
             ("useradd", AppKind::Command, ADMIN_TOOL_REQUEST),
             ("users", AppKind::Command, USERS_TOOL_MANIFEST),
+            ("wc", AppKind::Command, FILE_TOOL_REQUEST),
             ("yes", AppKind::Command, PURE_TOOL_REQUEST),
         ];
 

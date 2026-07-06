@@ -3705,11 +3705,21 @@ a password is set afterwards via the `users` tool), the
 session-baseline ceiling, and the shared shell/home defaults.
 
 The `plans/APPS.md` §12.1 Stage C coreutils build-out is under way:
-`true`, `false`, `yes`, `basename`, `dirname`, `mkdir`, and `rmdir` are
+`true`, `false`, `yes`, `basename`, `dirname`, `mkdir`, `rmdir`, `head`,
+and `wc` are
 full self-contained store bundles (store-only — the §18.6 boot floor
 never grows, so the inventory drift test pins their `AppInfo.toml`
-directly; console-write + `CAP_FS_ACCESS`, six-locale `Help/` trees with
-switch-drift pins, complete GNU surfaces). `basename`/`dirname` are
+directly; console-write + `CAP_FS_ACCESS` — plus console-read for the
+stdin-reading `head`/`wc` — six-locale `Help/` trees with
+switch-drift pins, complete GNU surfaces). `head` carries the full GNU
+surface (elide counts with the multiplier-suffix alphabet, `-q`/`-v`/
+`-z`, the obsolete `-COUNT[bkm][lqvz]` first-argument form) streaming
+in constant memory; `wc` carries `-c`/`-m`/`-l`/`-w`/`-L`, `--total`
+(argmatch prefixes), `--files0-from`, and the exact GNU column-width
+rule (summed regular-file sizes, 7-column non-regular minimum,
+unpadded single-input/single-count, files0, and total-only forms),
+measuring `-L` through the one `rustos_vt::char_width` definition and
+decoding UTF-8 incrementally across chunks. `basename`/`dirname` are
 purely lexical and treat a `Name:/` alias root the way POSIX treats `/`
 through the path grammar's own exported rule
 (`rustos_path::alias_root_len` — one definition, no second path
@@ -3735,8 +3745,8 @@ plus `ROS_UNLINK_FLAG_DIRECTORY` and the previously-unpublished
 (`chmod`/`chown`/`getcap`/`setcap`/`mount` blocked on their kernel
 syscalls — fs mode/owner set, per-inode capability get/set, mount — each
 registers in the change that lands its syscall); the Stage C remainder
-(the rest of the first batch — `printf`, `head`, `tail`, `wc`, `seq`,
-`tee`, `env`, `sleep`, `date`, `whoami`, `id` — then the text tools, in
+(the rest of the first batch — `printf`, `tail`, `seq`, `tee`, `env`,
+`sleep`, `date`, `whoami`, `id` — then the text tools, in
 further batches); `Help/` trees for future
 command apps as each becomes a registered store bundle; and wider `stdinfo`
 adoption in command apps as future behaviour warrants it (advisory-only,

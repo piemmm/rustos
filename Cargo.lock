@@ -1015,6 +1015,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-head"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-help",
+ "rustos-rt",
+]
+
+[[package]]
 name = "rustos-help"
 version = "0.0.0"
 dependencies = [
@@ -3124,6 +3133,16 @@ version = "0.0.0"
 dependencies = [
  "proptest",
  "rustos-fuzzseed",
+]
+
+[[package]]
+name = "rustos-wc"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-help",
+ "rustos-rt",
+ "rustos-vt",
 ]
 
 [[package]]

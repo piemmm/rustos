@@ -529,8 +529,8 @@ mod tests {
             names,
             [
                 "basename", "cat", "clear", "cp", "devmgr", "dirname", "elsh", "false", "groupadd",
-                "login", "ls", "man", "mkdir", "mv", "ps", "reset", "rm", "rmdir", "sysinfo",
-                "sysinfod", "top", "true", "useradd", "users", "yes"
+                "head", "login", "ls", "man", "mkdir", "mv", "ps", "reset", "rm", "rmdir",
+                "sysinfo", "sysinfod", "top", "true", "useradd", "users", "wc", "yes"
             ]
         );
         for app in &found {

@@ -565,6 +565,76 @@ and the secured VFS still authorises every operation per-inode.
 refusal, first-failure-stops ordering, GNU `-v` wording), and the
 locale switch-drift pins.
 
+## `head` — output the first part of files (`userland/apps/head`)
+
+`rustos-head` is the GNU coreutils `head` (`plans/APPS.md` §12.1 Stage C
+store bundle): the first 10 lines of each file operand (or standard
+input), or the amount `-n`/`--lines` and `-c`/`--bytes` select — a
+leading `-` on the count means "everything but the last COUNT", and a
+count takes the GNU multiplier suffixes (`b`, `kB`, `K`, `MB`, `M`, …,
+and the `iB` forms; a count beyond `u64` saturates, which is observably
+identical since no input can exceed it). Multi-file output carries the
+`==> file <==` headers (`-q`/`--quiet`/`--silent` and `-v`/`--verbose`
+override; a blank line separates parts), `-z`/`--zero-terminated`
+switches the line delimiter to NUL, and the obsolete first-argument
+`-COUNT[bkm][lqvz]` form is honoured — including GNU's quirk that a
+multiplier letter keeps scaling the count after a later `l`.
+
+The streaming engine is constant-memory per source: the head modes stop
+reading at the count; `-c -N` retains a circular ring of the last `N`
+bytes and emits what ages out; `-n -N` retains a queue of the last `N`
+lines whose unterminated final fragment counts as a line, exactly as in
+the GNU tool. A file that cannot be opened is diagnosed (no header) and
+the run continues; a mid-stream read error is diagnosed after the bytes
+already served; the exit status reflects any failure.
+
+The crate is `no_std` (with `alloc`), has no `unsafe`, and no
+`unwrap`/`expect`/`panic!` in production paths; its manifest requests
+the console pair and `CAP_FS_ACCESS` — within the session baseline —
+and the secured VFS still authorises every operand per-inode.
+`cargo test -p rustos-head` drives the parser (counts, suffixes, the
+obsolete form, clusters, `--`, refusals), the engine over in-memory
+seams (chunked streams, headers, both elide modes including a
+ring-vs-reference chunking matrix, per-file diagnostics), and the
+locale switch-drift pins.
+
+## `wc` — newline, word, and byte counts (`userland/apps/wc`)
+
+`rustos-wc` is the GNU coreutils `wc` (`plans/APPS.md` §12.1 Stage C
+store bundle): the line/word/byte counts of each file operand (or
+standard input), with `-m`/`--chars` (decoded UTF-8 characters — an
+encoding-error byte counts as a byte, not a character) and
+`-L`/`--max-line-length` (display columns through the one OS-wide
+`rustos_vt::char_width` definition, tabs advancing to 8-column stops)
+as the further selectors; counts always print in the fixed
+lines/words/chars/bytes/max-line order. `--total={auto,always,only,
+never}` (GNU `argmatch` prefix matching) controls the `total` row, and
+`--files0-from=F` reads the NUL-separated operand list from a file or
+standard input, refusing file operands alongside it and validating
+each record with its number.
+
+The output width follows the GNU rule exactly: columns are sized from
+the decimal width of the summed regular-file operand sizes (probed
+through the seam's three-way `SizeProbe`), any standard-input or
+non-regular operand forces the 7-column minimum, an unprobeable
+operand contributes nothing, and the single-input/single-count,
+`--files0-from`, and `--total=only` forms print unpadded. Counting is
+constant-memory via an incremental UTF-8 decoder that carries partial
+sequences across chunk boundaries. An unopenable input is diagnosed
+with no row; a mid-stream read error keeps the partial row (which
+still joins the total) and is diagnosed after it, exactly as in the
+GNU tool.
+
+The crate is `no_std` (with `alloc`), has no `unsafe`, and no
+`unwrap`/`expect`/`panic!` in production paths; its manifest requests
+the console pair and `CAP_FS_ACCESS` — within the session baseline —
+and the secured VFS still authorises every operand per-inode.
+`cargo test -p rustos-wc` drives the parser (selectors, `--total`
+argmatch, `--files0-from` conflicts), the counter (chunk-boundary
+invariance, encoding errors, tab stops, wide characters), the client
+(width rules, totals, files0 records, error rows), and the locale
+switch-drift pins.
+
 ## `ls` — list directory contents (`userland/apps/ls`)
 
 `rustos-ls` lists directory contents (`AGENTS.md` §3; a `plans/APPS.md`
