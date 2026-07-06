@@ -143,7 +143,8 @@ pub use context::{
 pub use mmu::{conformance as mmu_conformance, AddressSpace, BlockSplit, MapError, PageFlags};
 
 pub use frames::{
-    conformance as frames_conformance, PageTableFrames, TableFrame, PAGE_TABLE_ENTRIES,
+    conformance as frames_conformance, reclaim_hierarchy, PageTableFrames, TableFrame,
+    PAGE_TABLE_ENTRIES,
 };
 
 pub use tlb::{conformance as tlb_conformance, TlbShootdown};

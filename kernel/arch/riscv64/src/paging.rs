@@ -29,9 +29,9 @@
 //! riscv64 target.
 
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use rustos_arch_api::frames::{PageTableFrames, TableFrame};
+use rustos_arch_api::frames::{reclaim_hierarchy, PageTableFrames, TableFrame};
 use rustos_arch_api::mmu::{AddressSpace as MmuAddressSpace, BlockSplit, MapError, PageFlags};
 use rustos_arch_api::tlb::TlbShootdown;
 
@@ -194,6 +194,15 @@ impl PageTableFrames for PageTablePool {
         // table's virtual address is its physical address (`plans/WIRING.md` W5b-3 — the bootstrap frame source).
         let phys = phys_of(entries);
         Some(TableFrame { phys, entries })
+    }
+
+    fn free_table(&self, phys: u64) {
+        // The boot pool is a bump allocator over permanent kernel-image
+        // `.bss`: its storage is never reclaimable RAM and the boot space
+        // built over it is never torn down, so a returned frame is retired
+        // without reuse. Per-process spaces draw from the allocator-backed
+        // `kernel/mem` source, whose `free_table` genuinely recycles.
+        let _ = phys;
     }
 }
 
@@ -494,6 +503,11 @@ impl AddressSpace {
     /// upholds that by identity-mapping the kernel's gigapages.
     #[cfg(all(target_arch = "riscv64", target_os = "none"))]
     pub unsafe fn switch(&self) {
+        // The first fully-configured space activated on the metal is the
+        // permanent boot space: publish its root, set-once, as the park
+        // root teardown and the dispatcher's suspend path re-install so a
+        // dead user root is never left active (see [`park_kernel_root`]).
+        let _ = PARK_ROOT.compare_exchange(0, self.root_phys, Ordering::AcqRel, Ordering::Relaxed);
         let satp = satp_sv39(self.root_phys);
         // SAFETY: the caller asserts the new mappings cover `pc` and
         // `sp`. Writing `satp` then `sfence.vma` is the documented Sv39
@@ -703,6 +717,41 @@ impl MmuAddressSpace for AddressSpace {
             unreachable!("Sv39 activation is only meaningful on the riscv64 bare-metal target")
         }
     }
+
+    unsafe fn reclaim_table_frames(&mut self) {
+        // Defence in depth: the dispatcher parks a hart off a user root at
+        // every task suspend, so a dead space's root is never the active
+        // translation here — but freeing the walked-from root of a live
+        // regime would be catastrophic, so verify and re-park first. With
+        // no park root published the frames are retired unreclaimed
+        // rather than dismantling the active translation (fail closed).
+        if active_root_phys() == self.root_phys && !park_kernel_root() {
+            return;
+        }
+        let frames = self.frames;
+        // An Sv39 hierarchy rooted at level 2: a valid PTE with R=W=X=0 is
+        // a pointer to the next level; level-0 (depth 2) entries are page
+        // leaves and are never descended into.
+        let child_of = |entry: u64, depth: usize| -> Option<u64> {
+            (depth < 2 && (entry & flags::VALID) != 0 && !pte_is_leaf(entry))
+                .then(|| phys_from_pte(entry))
+        };
+        // Tables are recovered from their physical address through the
+        // kernel identity map — the same round-trip `translate`,
+        // `leaf_present`, and `ensure_child` rely on.
+        let entries_of = |phys: u64| phys as *const [u64; ENTRIES_PER_TABLE];
+        // SAFETY: every phys `child_of` yields was written by
+        // `ensure_child` from a `TableFrame` of `self.frames`, so it names
+        // a live, identity-reachable table this hierarchy owns; the guard
+        // above upholds the not-active contract the caller asserts, and
+        // `self` is borrowed mutably so no other reference walks the
+        // tables.
+        unsafe {
+            reclaim_hierarchy(self.root_phys, &child_of, &entries_of, &mut |phys| {
+                frames.free_table(phys);
+            });
+        }
+    }
 }
 
 impl TlbShootdown for AddressSpace {
@@ -740,6 +789,54 @@ pub(crate) fn invalidate_page_local(vaddr: u64) {
     {
         // The host has no TLB to invalidate; a flush is vacuous.
         let _ = vaddr;
+    }
+}
+
+/// The permanent kernel translation root a hart parks on whenever it must
+/// leave a user root — published set-once by the first
+/// `AddressSpace::switch` (the boot space, whose tables live for the
+/// image's lifetime), read by [`park_kernel_root`]. `0` means "not yet
+/// published" (the boot space's root table is never at physical 0).
+static PARK_ROOT: AtomicU64 = AtomicU64::new(0);
+
+/// Park the calling hart's translation regime on the published boot
+/// kernel root, so no user space's root remains active after its task
+/// suspends or exits. Returns `false`, changing nothing, when no park
+/// root has been published yet (fail closed).
+///
+/// The dispatcher calls this after every switch-back from a user task;
+/// address-space teardown calls it defensively before dismantling a root
+/// that is somehow still active.
+pub fn park_kernel_root() -> bool {
+    let root = PARK_ROOT.load(Ordering::Acquire);
+    if root == 0 {
+        return false;
+    }
+    // SAFETY: the published root is the boot space's, which identity-maps
+    // the kernel window and the board MMIO for the image's lifetime —
+    // exactly `activate_user_root`'s contract (inert on the host, where
+    // the root is never published anyway).
+    unsafe { activate_user_root(root) };
+    true
+}
+
+/// The physical root of the calling hart's active Sv39 translation
+/// regime (`satp`'s PPN shifted back to an address), or `0` on the host,
+/// which has no translation registers.
+fn active_root_phys() -> u64 {
+    #[cfg(all(target_arch = "riscv64", target_os = "none"))]
+    {
+        let satp: u64;
+        // SAFETY: reading `satp` observes the active root without side
+        // effects; no Rust spelling exists for the CSR.
+        unsafe {
+            core::arch::asm!("csrr {v}, satp", v = out(reg) satp, options(nostack, preserves_flags, nomem));
+        }
+        (satp & 0x0FFF_FFFF_FFFF) << 12
+    }
+    #[cfg(not(all(target_arch = "riscv64", target_os = "none")))]
+    {
+        0
     }
 }
 

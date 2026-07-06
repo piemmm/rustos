@@ -389,6 +389,29 @@ impl<P: PageTable> AddressSpace<P> {
         self.live.len()
     }
 
+    /// Iterate over every page this layer currently records as mapped, in
+    /// ascending page order — the enumeration a space teardown walks to
+    /// release each remaining mapping exactly once.
+    pub fn live_pages(&self) -> impl Iterator<Item = Page> + '_ {
+        self.live.keys().copied()
+    }
+
+    /// Return every allocator-drawn page-table frame of the backend to its
+    /// frame source, leaving this space unusable — the forwarding view of
+    /// [`rustos_arch_api::mmu::AddressSpace::reclaim_table_frames`], called
+    /// by a task's live-space teardown after the last mapping is released.
+    ///
+    /// # Safety
+    ///
+    /// As the HAL contract: this space must not be, or ever again become,
+    /// the active translation regime of any CPU, and no other reference
+    /// into its tables may be live. After the call the space translates
+    /// nothing.
+    pub unsafe fn reclaim_table_frames(&mut self) {
+        // SAFETY: forwarded caller contract (see above).
+        unsafe { self.table.reclaim_table_frames() }
+    }
+
     /// Borrow the underlying page table immutably. Provided so arch
     /// code can inspect (e.g. to dump for a crash report). Mutable
     /// access is intentionally not exposed: mapping must go through

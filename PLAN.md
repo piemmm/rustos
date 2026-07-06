@@ -2838,6 +2838,23 @@ binary no longer naming a concrete target, virtio protocol/host relocation off
 the bus driver, and the heterogeneous-CPU `core_class` (Intel + AMD CPUID
 paths). No new violation may be introduced.
 
+**Arch HAL surface record — page-table teardown (the `plans/APPS.md` I2
+reclamation).** Two in-place extensions of existing §17.2 slices (no new
+slice; the closed enumeration in `AGENTS.md` §17.2 is unchanged):
+`rustos_arch_api::frames::PageTableFrames::free_table` is the teardown half
+of the frame-source seam (the allocator-backed `FrameTableSource` recycles;
+the per-port boot pools retire without reuse), with the one shared post-order
+`frames::reclaim_hierarchy` walk every port's teardown drives; and
+`rustos_arch_api::mmu::AddressSpace::reclaim_table_frames` (defaulted no-op
+for backends with no allocator-drawn tables) returns a dead space's root +
+intermediate table frames, overridden by all three paging ports. Each port
+also publishes a set-once **park root** (the permanent boot translation) that
+`park_kernel_root` re-installs; the dispatcher parks a CPU off a user root at
+every task suspend (`KernelArch::park_translation` →
+`kernel/core::install_park_translation`), the invariant that makes teardown
+SMP-safe. Behaviour and tests are recorded in
+`docs/src/architecture/memory.md` and `plans/APPS.md` I2.
+
 ---
 
 ## §19 Threat Model and Hardening Burn-down

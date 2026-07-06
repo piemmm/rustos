@@ -1095,6 +1095,15 @@ fn run_phases<A: KernelArch>(
     phase_started(log_sink, Phase::Sched);
     let scheduler =
         Scheduler::new(scheduler_config, Arc::clone(&arch)).map_err(InitError::Sched)?;
+    // Install the port's park-translation hook before any user task can
+    // be dispatched: every user-task suspend then re-parks the CPU on the
+    // permanent boot root, the invariant a dead task's page-table
+    // reclamation (the live-space drop at reap) relies on. A port with no
+    // hardware user address spaces returns `None` and the dispatcher
+    // skips the park.
+    if let Some(park) = arch.park_translation() {
+        crate::kthread::install_park_translation(park);
+    }
     phase_ready(log_sink, Phase::Sched);
 
     // Phase 5 — Irq. Consult the arch port's

@@ -532,6 +532,113 @@ fn host_leaf_descriptor(root_phys: u64, va: u64) -> Option<u64> {
     None
 }
 
+/// A recording [`PageTableFrames`] double: identity-phys bump storage
+/// (like the boot pool) plus an atomic log of every `free_table` return,
+/// so the reclaim test can assert teardown hands back exactly the frames
+/// the hierarchy drew — no more, no fewer, none twice.
+struct RecordingFrames {
+    storage: [core::cell::UnsafeCell<Table>; Self::CAPACITY],
+    used: core::sync::atomic::AtomicUsize,
+    freed: [AtomicU64; Self::CAPACITY],
+    freed_len: core::sync::atomic::AtomicUsize,
+}
+
+// SAFETY: each storage slot is handed out exactly once via the monotonic
+// `used` counter, so the `&'static mut` views never alias; the freed log
+// is plain atomics.
+unsafe impl Sync for RecordingFrames {}
+
+impl RecordingFrames {
+    const CAPACITY: usize = 8;
+
+    const fn new() -> Self {
+        #[allow(clippy::declare_interior_mutable_const)]
+        const SLOT: core::cell::UnsafeCell<Table> = core::cell::UnsafeCell::new(Table::new());
+        #[allow(clippy::declare_interior_mutable_const)]
+        const FREED: AtomicU64 = AtomicU64::new(0);
+        // `const`, so the pool lives in `.bss` — never a runtime stack
+        // frame (the same discipline as `PageTablePool::new`).
+        #[allow(clippy::large_stack_arrays)]
+        let storage = [SLOT; Self::CAPACITY];
+        Self {
+            storage,
+            used: core::sync::atomic::AtomicUsize::new(0),
+            freed: [FREED; Self::CAPACITY],
+            freed_len: core::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn allocated(&self) -> usize {
+        self.used.load(Ordering::SeqCst).min(Self::CAPACITY)
+    }
+
+    fn freed_phys(&self) -> impl Iterator<Item = u64> + '_ {
+        let len = self.freed_len.load(Ordering::SeqCst);
+        self.freed
+            .iter()
+            .take(len)
+            .map(|a| a.load(Ordering::SeqCst))
+    }
+}
+
+impl PageTableFrames for RecordingFrames {
+    fn alloc_table(&self) -> Option<TableFrame> {
+        let idx = self.used.fetch_add(1, Ordering::SeqCst);
+        if idx >= Self::CAPACITY {
+            self.used.store(Self::CAPACITY, Ordering::SeqCst);
+            return None;
+        }
+        // SAFETY: the monotonic index makes this slot exclusively ours.
+        let table: &'static mut Table = unsafe { &mut *self.storage[idx].get() };
+        let entries = &mut table.0;
+        let phys = phys_of(entries);
+        Some(TableFrame { phys, entries })
+    }
+
+    fn free_table(&self, phys: u64) {
+        let slot = self.freed_len.fetch_add(1, Ordering::SeqCst);
+        assert!(slot < Self::CAPACITY, "more frees than the pool can hold");
+        self.freed[slot].store(phys, Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn reclaim_table_frames_returns_every_drawn_table_exactly_once() {
+    static POOL: RecordingFrames = RecordingFrames::new();
+    let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
+    let root_phys = space.root_phys();
+
+    // Two pages in distinct gigapages far above the identity window, so
+    // the walk draws two independent L2+L3 pairs: 1 root + 4 tables.
+    let va_a: u64 = 64u64 << 30;
+    let va_b: u64 = 65u64 << 30;
+    let pa: u64 = 0x4123_4000;
+    space.map_4k(&POOL, va_a, pa).expect("map A");
+    space
+        .map_4k(&POOL, va_b, pa + PAGE_SIZE as u64)
+        .expect("map B");
+    assert_eq!(POOL.allocated(), 5, "root + two L2/L3 pairs were drawn");
+
+    // SAFETY: the space is no CPU's active translation (host test) and no
+    // other reference into its tables is live.
+    unsafe { rustos_arch_api::mmu::AddressSpace::reclaim_table_frames(&mut space) };
+
+    // Every drawn table frame came back exactly once, the root last, and
+    // no leaf frame (the mapped `pa` pages) was ever freed.
+    let mut count = 0usize;
+    let mut last = 0u64;
+    for phys in POOL.freed_phys() {
+        assert_ne!(phys, pa, "a leaf frame is never freed");
+        assert_ne!(phys, pa + PAGE_SIZE as u64, "a leaf frame is never freed");
+        let mut earlier = POOL.freed_phys().take(count);
+        assert!(earlier.all(|e| e != phys), "no table is freed twice");
+        last = phys;
+        count += 1;
+    }
+    assert_eq!(count, POOL.allocated(), "every drawn table was returned");
+    assert_eq!(last, root_phys, "the root is freed last (post-order)");
+}
+
 #[test]
 fn split_block_shatters_a_gigapage_to_pages_preserving_the_identity_mapping() {
     static POOL: PageTablePool = PageTablePool::new();

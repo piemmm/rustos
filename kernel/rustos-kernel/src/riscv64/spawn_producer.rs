@@ -127,9 +127,11 @@ pub static SPAWN_TABLE_PHYSMAP: DirectPhysMap =
 /// and grows on demand**: each child draws only the handful of Sv39 tables
 /// it needs, and the system spawns processes until physical RAM is genuinely
 /// exhausted, when [`FrameTableSource::alloc_table`] returns `None` and the
-/// build fails closed with [`Errno::NoSpace`] (deterministic OOM, never a panic). The frames are never freed while a
-/// child lives (the monotonic discipline); reclaiming a
-/// dead process's page-table frames is a later stage.
+/// build fails closed with [`Errno::NoSpace`] (deterministic OOM, never a panic). The frames live exactly as long as the child: its
+/// retained live space returns every table frame through
+/// [`FrameTableSource::free_table`] when the task exits and the space is
+/// dropped at reap (`plans/APPS.md` I2), so spawn/exit cycles hold the
+/// allocator steady.
 ///
 /// Initialised on the first `spawn` from the boot-threaded `'static`
 /// allocator and reused thereafter — the source is stateless (its state
@@ -266,10 +268,10 @@ impl ProcessSpawn for RiscvProcessSpawn {
         // build reaches the child's tables + frames through the caller's
         // identity window (the pool and frames are in `[0, 4 GiB)`), so the
         // child's space need not be active to be built (the cross-port
-        // producer discipline). A returning `Err` reclaims nothing
-        // user-visible (the page-table + image frames are handed out
-        // monotonically and not reclaimed this stage) and maps to a stable
-        // errno; the cause is already audited by `spawn_image`.
+        // producer discipline). The retained live space below owns the
+        // whole footprint and returns it (frames zeroed, tables freed)
+        // when the task exits. A returning `Err` maps to a stable errno;
+        // the cause is already audited by `spawn_image`.
         let frames = ctx.frames();
         let entry = unsafe {
             spawn_image(

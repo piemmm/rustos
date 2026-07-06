@@ -34,7 +34,9 @@
 //! producer that calls these — this layer knows only the page table, the
 //! direct map, the frame allocator, and the device-window allocator.
 
-use crate::anon::{map_anonymous, unmap_anonymous, AnonError};
+use alloc::vec::Vec;
+
+use crate::anon::{map_anonymous, unmap_anonymous, zero_frame, AnonError};
 use crate::anon_window::AnonWindowMap;
 use crate::dma::{DmaError, DmaWindowMap};
 use crate::frame::FrameAllocator;
@@ -498,17 +500,56 @@ where
 }
 
 impl<P: PageTable, M: PhysMap> Drop for LiveSpace<P, M> {
+    /// Reclaim the dead task's **entire** memory footprint — the fix for
+    /// the login/logout RAM leak (`plans/APPS.md` I2): before this, exit
+    /// reclaimed the kernel stack, grants, endpoints, and shared regions,
+    /// but every user frame (image, stack, startup block, anonymous heap)
+    /// and every page-table frame leaked.
     fn drop(&mut self) {
-        // Reclaim every live DMA buffer when the task's live space is torn
-        // down: each backing block is zeroed (zero-on-free)
-        // and returned to the frame allocator, so a driver task's exit never
-        // leaks the physical frames its DMA buffers held or leaves their
-        // (possibly secret-bearing) contents recoverable. Anonymous and
-        // device-window mappings live and die with the page-table frames of
-        // the `space` being dropped; the DMA frames come from the shared
-        // global allocator and so must be returned explicitly here.
+        // 1. Reclaim every live DMA buffer: each physically-contiguous
+        //    backing block is zeroed (zero-on-free) and returned to the
+        //    frame allocator, and its pages leave the space's bookkeeping.
         self.dma
             .drain_into(&mut self.space, self.frames, &self.physmap);
+
+        // 2. Release every remaining tracked mapping. A page inside the
+        //    device-window or shared-memory window is only *unmapped* —
+        //    its frame belongs to a device (MMIO registers) or to the
+        //    shared-region registry, which zeroes and frees region frames
+        //    itself once the owner and every grantee have released them.
+        //    Every other page (image segments, user stack, startup block,
+        //    anonymous heap — `FIXED` and placed alike) is backed by a
+        //    frame this task drew from the kernel allocator: it is zeroed
+        //    (no dead process's bytes are ever recycled readable) and
+        //    freed. A frame the direct map cannot reach is leaked rather
+        //    than freed unscrubbed (fail closed; unreachable in practice
+        //    — every allocator frame lies in the direct map).
+        let pages: Vec<_> = self.space.live_pages().collect();
+        for page in pages {
+            let window_only =
+                self.mmio.contains(page.start()) || self.shared.contains(page.start());
+            // The page is recorded live, so the unmap can only fail on a
+            // backend defect; declining to touch the frame is the only
+            // safe recovery (never a panic).
+            let Ok(frame) = self.space.unmap(page) else {
+                continue;
+            };
+            if window_only {
+                continue;
+            }
+            if zero_frame(&self.physmap, frame).is_ok() {
+                let _ = self.frames.free(frame);
+            }
+        }
+
+        // 3. Return the page-table frames themselves — the root and every
+        //    intermediate table — to the source they were drawn from.
+        // SAFETY: the owning task has exited and the dispatcher parked
+        // every CPU that ran it off its root at switch-back (the port's
+        // reclaim additionally re-parks defensively if the calling CPU
+        // still holds this root); `self` is being dropped, so no other
+        // reference into the tables is live.
+        unsafe { self.space.reclaim_table_frames() };
     }
 }
 
@@ -816,6 +857,111 @@ mod tests {
             before,
             "every DMA frame is returned to the allocator on teardown"
         );
+    }
+
+    #[test]
+    fn dropping_the_live_space_reclaims_the_whole_footprint() {
+        // The I2 regression test (`plans/APPS.md`): a task's exit must
+        // return *every* frame it owned — `FIXED` anonymous, placed
+        // anonymous, and DMA alike — while leaving registry-owned shared
+        // frames and device windows untouched, and scrub the freed bytes.
+        use crate::phys::PhysMap;
+
+        /// A `PhysMap` view over one leaked, shared [`SimPhysMap`], so the
+        /// test observes the same simulated physical memory the live space
+        /// scrubs through (each `sim()` owns disjoint storage).
+        struct SharedSim(&'static SimPhysMap);
+        impl PhysMap for SharedSim {
+            fn translate(
+                &self,
+                phys: crate::frame::PhysAddr,
+                len: usize,
+            ) -> Option<core::ptr::NonNull<u8>> {
+                self.0.translate(phys, len)
+            }
+        }
+
+        let frames = leaked_frames();
+        let before = frames.free_frames();
+        let simmap: &'static SimPhysMap = Box::leak(Box::new(sim()));
+
+        // A stand-in shared-region frame owned by "the registry", mapped
+        // into the space but never owned by it.
+        let region_frame = frames.alloc().expect("region frame");
+        let after_region = before - 1;
+
+        let fixed_base: u64 = 0x4000;
+        let fixed_phys;
+        {
+            let mut live = LiveSpace::new(
+                AddressSpace::new(HostPageTable::new()),
+                SharedSim(simmap),
+                frames,
+                VirtAddr::new(MMIO_WINDOW_BASE),
+                MMIO_WINDOW_PAGES,
+                VirtAddr::new(ANON_WINDOW_BASE),
+                ANON_WINDOW_PAGES,
+                VirtAddr::new(DMA_WINDOW_BASE),
+                DMA_WINDOW_PAGES,
+                VirtAddr::new(SHARED_WINDOW_BASE),
+                SHARED_WINDOW_PAGES,
+            )
+            .expect("windows are valid");
+
+            live.map_anonymous(fixed_base, 2).expect("fixed anon");
+            live.map_anonymous_placed(3).expect("placed anon");
+            live.alloc_dma(2 * PAGE_SIZE, 0).expect("dma carve");
+            live.map_device_window(0xFE98_0000, 0x2000)
+                .expect("device window");
+            live.map_shared(region_frame.start().as_u64(), PAGE_SIZE)
+                .expect("shared region");
+
+            // A recognisable secret in a fixed anonymous page, so the
+            // zero-on-free scrub below is observable.
+            copy_out(
+                live.space(),
+                simmap,
+                VirtAddr::new(fixed_base),
+                &[0xA5u8; 32],
+            )
+            .expect("writable user range");
+            fixed_phys = live
+                .space()
+                .translate(crate::vmm::Page::from_addr(VirtAddr::new(fixed_base)).expect("aligned"))
+                .expect("mapped")
+                .0;
+
+            assert!(
+                frames.free_frames() < after_region,
+                "the mappings consumed frames"
+            );
+        }
+
+        // Every frame the task owned returned to the allocator; the
+        // registry-owned region frame did not (its lifecycle belongs to
+        // the shared-region registry).
+        assert_eq!(
+            frames.free_frames(),
+            after_region,
+            "exit reclaims the whole owned footprint and nothing else"
+        );
+
+        // The freed anonymous frame was scrubbed before it returned: the
+        // dead task's bytes are unrecoverable through the direct map.
+        let ptr = simmap
+            .translate(fixed_phys.start(), PAGE_SIZE)
+            .expect("frame in the sim window");
+        // SAFETY: the sim map proved the pointer valid for a page; the
+        // frame is free, so nothing else references it in this test.
+        let bytes = unsafe { core::slice::from_raw_parts(ptr.as_ptr(), 32) };
+        assert!(
+            bytes.iter().all(|&b| b == 0),
+            "freed frames are zeroed on teardown"
+        );
+
+        // Hygiene: return the registry frame so the allocator is whole.
+        let _ = frames.free(region_frame);
+        assert_eq!(frames.free_frames(), before);
     }
 
     #[test]

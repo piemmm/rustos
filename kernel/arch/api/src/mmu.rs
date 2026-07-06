@@ -397,6 +397,36 @@ pub trait AddressSpace {
     /// activation also performs the port's coarse TLB flush so no stale
     /// translation survives the switch.
     unsafe fn activate(&self);
+
+    /// Return every allocator-drawn page-table frame of this space — the
+    /// root table and every intermediate table its walks allocated — to
+    /// the frame source it was drawn from, leaving the space unusable.
+    ///
+    /// This is the teardown half of the page-table frame seam
+    /// ([`crate::frames::PageTableFrames`]): a dead process's stage-1
+    /// hierarchy is walked post-order (children before parents, the root
+    /// last, through the one shared
+    /// [`crate::frames::reclaim_hierarchy`] walk) and each *table* frame
+    /// is handed back through
+    /// [`crate::frames::PageTableFrames::free_table`]. Leaf frames are
+    /// never touched — user RAM, MMIO windows, and shared regions belong
+    /// to their own owners and are reclaimed by the caller before this
+    /// runs.
+    ///
+    /// The default is the honest no-op for a backend with no
+    /// allocator-drawn table frames (a bookkeeping-only host double, the
+    /// wasm32 sandbox); every paging port whose tables come from a
+    /// [`crate::frames::PageTableFrames`] source overrides it.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee this space is not, and can never again
+    /// become, the active translation regime of **any** CPU (the owning
+    /// task has exited and every CPU that ran it has since parked on a
+    /// permanent kernel root), and that no other reference into the
+    /// space's tables is live. After the call the space translates
+    /// nothing; using it in any way is a bug.
+    unsafe fn reclaim_table_frames(&mut self) {}
 }
 
 /// The MMU conformance vertical.

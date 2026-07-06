@@ -426,6 +426,20 @@ impl MmioWindowMap {
             .ok_or(MmioError::DirectMap)
     }
 
+    /// `true` when `va` lies inside this allocator's configured virtual
+    /// window `[base, base + capacity_pages * PAGE_SIZE)` (guard slots
+    /// included) — the classification a space teardown uses to tell a
+    /// window mapping (whose frames belong to a device or a registry and
+    /// are only unmapped) from an owned RAM mapping (whose frame is
+    /// zeroed and freed).
+    #[must_use]
+    pub fn contains(&self, va: VirtAddr) -> bool {
+        let base = self.base.as_u64();
+        // The constructor proved `capacity_pages * PAGE_SIZE` fits.
+        let len = (self.capacity_pages * PAGE_SIZE) as u64;
+        va.as_u64() >= base && va.as_u64() - base < len
+    }
+
     /// Number of live mappings.
     #[must_use]
     pub fn live(&self) -> usize {

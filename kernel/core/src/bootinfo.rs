@@ -141,6 +141,23 @@ pub trait KernelArch: SchedulerArch {
         ticks
     }
 
+    /// The port's "park the calling CPU's translation regime on the
+    /// permanent boot kernel root" primitive, or `None` for a port with
+    /// no hardware user address spaces (the wasm32 sandbox, the host
+    /// test arch).
+    ///
+    /// [`crate::kernel_main`] installs the returned hook set-once into
+    /// the dispatcher, which calls it after every switch-back from a
+    /// user task so no user space's page-table root remains a CPU's
+    /// active translation once its task stops running — the invariant
+    /// that makes a dead task's page-table reclamation (the live-space
+    /// drop at reap) safe on SMP. A paging port returns its
+    /// `paging::park_kernel_root` free function (a plain `fn`, so the
+    /// hook captures nothing and is trivially `Send`).
+    fn park_translation(&self) -> Option<fn()> {
+        None
+    }
+
     /// IRQ routing the architecture port has installed.
     ///
     /// Consulted by [`crate::kernel_main`] during the [`crate::Phase::Irq`]

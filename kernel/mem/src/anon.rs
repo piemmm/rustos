@@ -94,8 +94,10 @@ fn page_at(base_va: u64, page_index: u64) -> Result<Page, AnonError> {
 /// scrubbed at its physical address. Used both before a freshly allocated
 /// frame becomes user-visible and as the zero-on-free scrub
 /// (secret hygiene), mirroring [`crate::spawn`]'s
-/// `fill_frame`.
-fn zero_frame(physmap: &dyn PhysMap, frame: Frame) -> Result<(), AnonError> {
+/// `fill_frame`. Crate-visible so the live-space teardown
+/// ([`crate::live::LiveSpace`]) scrubs a dead task's remaining frames
+/// through the same one definition.
+pub(crate) fn zero_frame(physmap: &dyn PhysMap, frame: Frame) -> Result<(), AnonError> {
     let ptr = physmap
         .translate(frame.start(), PAGE_SIZE)
         .ok_or(AnonError::PhysUnmapped)?;

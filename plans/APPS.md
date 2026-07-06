@@ -87,8 +87,8 @@ by `tools/syshelp`, never a hand-maintained per-bundle list (§6.1, `AGENTS.md`
 
 Four kernel defects observed on the running system MUST be fixed before the
 remaining APPS deliverables continue. Each item records its root cause and
-design (or landed behaviour) so any context can pick it up; I2 and I3 are the
-open remainder. Statuses per `AGENTS.md` §13.
+design (or landed behaviour) so any context can pick it up; I3 is the open
+remainder. Statuses per `AGENTS.md` §13.
 
 ### I1. Idle load average pinned at ~1 — IPC wake-all thundering herd
 
@@ -121,37 +121,50 @@ when convenient).
 
 ### I2. Process memory is never reclaimed on exit — login/logout RAM growth
 
-**Status: planned.**
+**Status: done** (verify the stable login/logout RAM on a live QEMU session
+when convenient), with one staged follow-up below.
 
-- **Defect:** repeated login/logout grows used RAM monotonically; it never
-  returns.
-- **Root cause:** process teardown reclaims the kernel stack (`ArenaStack`),
-  IRQ bindings, endpoints, shared-memory regions, and the capability record —
-  but **no user frames and no page-table frames**. The spawn producers
-  document the gap: image frames, user-stack frames, and the startup block are
-  "handed out monotonically and not reclaimed this stage"
-  (`kernel/rustos-kernel/src/*/spawn_producer.rs`), and `FrameTableSource`'s
-  stage-1 table frames are "never freed … reclaiming a dead process's
-  page-table frames is a later stage" (`kernel/mem`). Every exited process
-  leaks its whole footprint.
-- **Fix design:** teardown owned by the retained live space. `LiveSpace`
-  (`kernel/mem/src/live.rs`) holds the `AddressSpace<P>` (which tracks every
-  page→frame user mapping), the physmap, the `'static` `FrameAllocator`, and
-  the window maps needed to classify mappings. On drop (the scheduler reap
-  drops the kthread control block's `Box<dyn LiveUserSpace>`):
-  unmap every tracked mapping; frames inside the MMIO/shared windows are
-  device- or registry-owned and only unmapped (shared regions are already
-  reclaimed by `exit` via `sharedreg::reclaim_task`); every other frame
-  (image, user stack, startup block, anon heap, DMA) is zeroed through the
-  physmap (zero-on-free, §4) and freed to the allocator. Page-table frames:
-  the arch `AddressSpace` (aarch64/riscv64/x86_64 paging) must track the
-  table frames it drew from its `TableSource` and return them on teardown —
-  one shared discipline across the three ports (§2.21), reached through the
-  Arch HAL paging surface (extending `kernel/arch/api` needs its `PLAN.md`
-  entry per §17.2). A task that exits without a live space (kthreads) reclaims
-  nothing, as today. Tests: host spawn/exit cycle asserting
-  `free_frames` returns to its pre-spawn value; QEMU login/logout vertical
-  asserting stable free-memory across N cycles.
+- **Defect:** repeated login/logout grew used RAM monotonically: teardown
+  reclaimed the kernel stack, IRQ bindings, endpoints, shared regions, and
+  the capability record, but no user frames and no page-table frames.
+- **Landed behaviour:** teardown is owned by the retained live space.
+  `LiveSpace::drop` (`kernel/mem/src/live.rs`, run when the scheduler reap
+  drops the control block's `Box<dyn LiveUserSpace>`) drains every live DMA
+  carve, then releases every remaining tracked mapping — a page inside the
+  MMIO/shared windows is only unmapped (device- or registry-owned frames);
+  every other frame (image, user stack, startup block, anon heap) is zeroed
+  through the physmap (zero-on-free, §4) and freed — and finally returns the
+  page-table hierarchy post-order through the one shared
+  `rustos_arch_api::frames::reclaim_hierarchy` walk each port's
+  `mmu::AddressSpace::reclaim_table_frames` override drives into the new
+  `PageTableFrames::free_table` (allocator-backed `FrameTableSource`
+  recycles; the boot pools retire without reuse). SMP safety is an
+  invariant, not luck: each port publishes a set-once **park root** (the
+  permanent boot translation; aarch64/riscv64 in the boot `switch()`, x86_64
+  from the trampoline `CR3` in `try_boot`), and the dispatcher re-parks a
+  CPU off a user root at every task suspend
+  (`KernelArch::park_translation` → `install_park_translation` →
+  `dispatch_step`), so a dead root is never a CPU's active translation when
+  its tables are freed (the port reclaim re-parks defensively and retires
+  frames unreclaimed rather than dismantling an active regime — fail
+  closed). A task that exits without a live space (kthreads) reclaims
+  nothing, as before. Tests: `LiveSpace` whole-footprint drop test and the
+  `spawn_image` spawn/exit-cycle test (`kernel/core/src/spawn.rs`) assert
+  `free_frames` returns exactly to its pre-spawn value; aarch64/riscv64
+  paging tests assert the walk returns every drawn table exactly once, root
+  last, leaves never; `FrameTableSource` tests pin reuse-after-free and
+  double-free refusal; a `kthread` test pins the park-at-suspend; the
+  spawn/wait/session QEMU verticals (all three ports) execute the real
+  teardown at every child reap. Documented in
+  `docs/src/architecture/memory.md`.
+- **Follow-up (staged):** a QEMU vertical asserting *numeric* free-memory
+  stability across N login/logout cycles. The reap-and-relaunch cycle and
+  the teardown already run end to end on QEMU (`spawn_session_qemu_*`
+  supervises login through exit → reap → respawn), but no existing fixture
+  can observe `KernelMemoryStats` (the audit-sink verticals have no
+  allocator handle; a `sysinfo_introspect`-reading EL0 fixture with a
+  spawn/wait loop is a new vertical). Land it as its own change; the
+  accounting equality is meanwhile pinned by the host layers above.
 
 ### I3. `top -d0` crashes the OS after ~1 h on a 180 MiB instance
 
@@ -169,8 +182,9 @@ when convenient).
   + `sysinfo_introspect` walk) for a large iteration count, asserting stable
   `FrameAllocator::free_frames()` and kernel-heap occupancy; plus a bounded
   QEMU soak sampling `KernelMemoryStats.free_bytes` under a scripted
-  `top -d0`. Fix whatever the reproduction exposes; re-test after I2 lands in
-  case the leak was process churn.
+  `top -d0`. Fix whatever the reproduction exposes; I2 has since landed, so
+  if the session's churn was the cause the leak may already be closed —
+  re-test first.
 
 ### I4. Pi 4B (8 GiB) reports 863 MiB — only the first `/memory` range is used
 

@@ -149,9 +149,11 @@ pub static SPAWN_TABLE_PHYSMAP: ConfiguredIdentityPhysMap = ConfiguredIdentityPh
 /// processes until physical RAM is genuinely exhausted, when
 /// [`FrameTableSource::alloc_table`] returns `None` and the build fails
 /// closed with [`Errno::NoSpace`] (deterministic
-/// OOM, never a panic). The frames are never freed while a child lives
-/// (the monotonic discipline the pool used); reclaiming
-/// a dead process's page-table frames is a later stage.
+/// OOM, never a panic). The frames live exactly as long as the child: its
+/// retained live space returns every table frame through
+/// [`FrameTableSource::free_table`] when the task exits and the space is
+/// dropped at reap (`plans/APPS.md` I2), so spawn/exit cycles hold the
+/// allocator steady.
 ///
 /// Initialised on the first `spawn` from the boot-threaded `'static`
 /// allocator and reused thereafter — the source is stateless (its state
@@ -316,10 +318,10 @@ impl ProcessSpawn for Aarch64ProcessSpawn {
         // is only entered later, once the child is dispatched and its
         // `pre_resume` hook has made `space` active (the `spawn_image`
         // contract). The frame source draws identity-mapped RAM frames from
-        // the kernel's live allocator. A returning `Err` reclaims nothing
-        // user-visible (the page-table + image frames are handed out
-        // monotonically and not reclaimed this stage) and maps to a stable
-        // errno; the cause is already audited by `spawn_image`.
+        // the kernel's live allocator; the retained live space below owns
+        // the whole footprint and returns it (frames zeroed, tables freed)
+        // when the task exits. A returning `Err` maps to a stable errno;
+        // the cause is already audited by `spawn_image`.
         let frames = ctx.frames();
         let entry = unsafe {
             spawn_image(

@@ -453,6 +453,17 @@ fn try_boot(
         enable_nxe();
     }
 
+    // 1d. Publish the trampoline's `CR3` tables as the park root a CPU
+    //     re-installs whenever it leaves a user space's root (task
+    //     suspend, address-space teardown). x86_64 keeps running on the
+    //     `boot.s` tables rather than switching to a Rust-built kernel
+    //     space, so — unlike aarch64/riscv64, where the boot `switch()`
+    //     publishes — the boot path records the active root explicitly,
+    //     before any process space exists to claim the set-once slot.
+    //     (The paging module exists only on the bare-metal target.)
+    #[cfg(all(freestanding, kernel_isa = "x86_64"))]
+    rustos_arch_x86_64::paging::publish_boot_park_root();
+
     // 2. Software-enable the BSP LAPIC and read its ID.
     let mut lapic = make_bsp_lapic();
     lapic.software_enable(0xFF);

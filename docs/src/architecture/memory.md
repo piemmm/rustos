@@ -152,6 +152,37 @@ ceiling (`AGENTS.md` §24.1; see
 [the resource-limits page](./resource-limits.md)). The source is shared
 across CPUs, so its direct-map handle is `Sync`.
 
+**Reclaiming a dead process's whole footprint (`plans/APPS.md` I2).**
+The seam is symmetric: `PageTableFrames::free_table` is the teardown
+half, and a task's exit returns everything it owned. The retained
+per-task `LiveSpace` (the object the `mem_map` / `mmio_map` / `dma_alloc`
+syscalls mutate) is owned by the task's kernel-thread control block and
+dropped when the scheduler reaps the exited task; its `Drop` (1) drains
+every live DMA carve (zero-on-free, frames back to the allocator),
+(2) walks every remaining tracked mapping — a page inside the
+device-window or shared-memory window is only *unmapped* (its frames
+belong to a device or to the shared-region registry), while every other
+page (image segments, user stack, startup block, anonymous heap) is
+unmapped, its frame **zeroed** through the direct map so a dead
+process's bytes are never recycled readable, and freed — and (3) hands
+the page-table hierarchy itself back post-order (children before
+parents, the root last) through the one shared
+`rustos_arch_api::frames::reclaim_hierarchy` walk each port's
+`reclaim_table_frames` drives, so every stage-1 table frame returns to
+the `FrameTableSource` for reuse. Teardown is SMP-safe by an invariant
+the dispatcher maintains: after every switch-back from a user task the
+CPU re-parks its translation on the permanent boot root (published
+set-once at boot; the port's `park_kernel_root`), so a user root is
+active on a CPU only while its task runs there and a dead root can never
+be freed under a live walk (the port's reclaim additionally re-parks
+defensively if the calling CPU still holds the dying root, and retires
+the frames unreclaimed rather than dismantling an active translation —
+fail closed). Host tests pin the whole discipline: the `LiveSpace` drop
+test and the `spawn_image` spawn/exit-cycle test assert
+`free_frames` returns exactly to its pre-spawn value (registry-owned
+shared frames excluded), and the aarch64/riscv64 paging tests assert the
+walk returns every drawn table exactly once, root last, leaves never.
+
 ## 3a. User-memory copy (`uaccess`)
 
 A syscall handler is handed a raw user pointer (`ptr`, `len`) and must

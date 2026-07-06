@@ -475,6 +475,71 @@ fn passes_frames_conformance() {
     assert!(erased.alloc_table().is_some());
 }
 
+/// A recording [`PageTableFrames`] double: identity-phys leaked tables
+/// plus a log of every `free_table` return, so the reclaim test can
+/// assert teardown hands back exactly the frames the hierarchy drew.
+struct RecordingFrames {
+    freed: std::sync::Mutex<std::vec::Vec<u64>>,
+}
+
+impl RecordingFrames {
+    fn new() -> Self {
+        Self {
+            freed: std::sync::Mutex::new(std::vec::Vec::new()),
+        }
+    }
+}
+
+impl PageTableFrames for RecordingFrames {
+    fn alloc_table(&self) -> Option<TableFrame> {
+        let entries: &'static mut [u64; ENTRIES_PER_TABLE] =
+            std::boxed::Box::leak(std::boxed::Box::new([0u64; ENTRIES_PER_TABLE]));
+        let phys = entries.as_ptr() as u64;
+        Some(TableFrame { phys, entries })
+    }
+
+    fn free_table(&self, phys: u64) {
+        self.freed.lock().expect("freed log").push(phys);
+    }
+}
+
+#[test]
+fn reclaim_table_frames_returns_every_drawn_table_exactly_once() {
+    let pool: &'static RecordingFrames =
+        std::boxed::Box::leak(std::boxed::Box::new(RecordingFrames::new()));
+    let mut space = AddressSpace::new_identity_gigapages(pool, 2).expect("identity map");
+    let root_phys = space.root_phys();
+
+    // Two pages in distinct gigapages far above the identity window, so
+    // the walk draws two independent L1+L0 pairs: 1 root + 4 tables.
+    let leaf_flags = flags::READ | flags::WRITE;
+    let pa: u64 = 0x8123_4000;
+    space
+        .map_4k(pool, 64u64 << 30, pa, leaf_flags)
+        .expect("map A");
+    space
+        .map_4k(pool, 65u64 << 30, pa + PAGE_SIZE as u64, leaf_flags)
+        .expect("map B");
+
+    // SAFETY: the space is no hart's active translation (host test) and
+    // no other reference into its tables is live.
+    unsafe { rustos_arch_api::mmu::AddressSpace::reclaim_table_frames(&mut space) };
+
+    // Every drawn table frame came back exactly once, the root last, and
+    // no leaf frame was ever freed.
+    let freed = pool.freed.lock().expect("freed log").clone();
+    assert_eq!(freed.len(), 5, "root + two L1/L0 pairs were returned");
+    assert_eq!(*freed.last().expect("non-empty"), root_phys, "root last");
+    let mut dedup = freed.clone();
+    dedup.sort_unstable();
+    dedup.dedup();
+    assert_eq!(dedup.len(), freed.len(), "no table is freed twice");
+    assert!(
+        !freed.contains(&pa) && !freed.contains(&(pa + PAGE_SIZE as u64)),
+        "a leaf frame is never freed"
+    );
+}
+
 #[test]
 fn map_page_translates_neutral_flags_and_walks() {
     use rustos_arch_api::mmu::{self, PageFlags};

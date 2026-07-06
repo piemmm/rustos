@@ -974,6 +974,81 @@ mod tests {
     }
 
     #[test]
+    fn spawn_exit_cycles_return_every_frame_to_the_allocator() {
+        // The I2 host spawn/exit cycle (`plans/APPS.md`): each cycle builds
+        // a full process image (code, stack, startup block) out of the
+        // kernel allocator, retains it as the task's live space, and drops
+        // it exactly as the reap does — the allocator must return to its
+        // pre-spawn level every time, never marching downward (the
+        // login/logout leak this closes).
+        use rustos_kernel_mem::{LiveSpace, VirtAddr};
+
+        /// A `PhysMap` view over the one leaked [`SimPhysMap`], so the
+        /// image build and the teardown scrub touch the same simulated
+        /// memory (each `sim()` owns disjoint storage).
+        struct SharedSim(&'static SimPhysMap);
+        impl PhysMap for SharedSim {
+            fn translate(&self, phys: PhysAddr, len: usize) -> Option<core::ptr::NonNull<u8>> {
+                self.0.translate(phys, len)
+            }
+        }
+
+        set_max_level(Level::Trace);
+        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let (bytes, image) = tiny_image();
+        let simmap: &'static SimPhysMap = Box::leak(Box::new(sim()));
+        // An allocator over exactly the simulated RAM window, so every
+        // frame the build draws is reachable for the zero-on-free scrub.
+        let mut map = BootMemoryMap::new();
+        map.push(MemoryRegion {
+            kind: RegionKind::Usable,
+            start: PhysAddr::new((PAGE_SIZE * 16) as u64),
+            length: (64 * PAGE_SIZE) as u64,
+        });
+        let frames: &'static FrameAllocator =
+            Box::leak(Box::new(FrameAllocator::new(&map).expect("allocator")));
+        let caps = Granted(&[CapabilityId::PROC_SPAWN]);
+        let before = frames.free_frames();
+
+        for _ in 0..8 {
+            let mut space = host_space();
+            let req = request(&image, &bytes, 2);
+            // SAFETY: building the image is safe; the returned `UserEntry`
+            // is dropped, never entered, on the host.
+            unsafe {
+                spawn_image(&caps, sink, &mut space, simmap, &req, || {
+                    frames.alloc().ok()
+                })
+            }
+            .expect("image builds");
+            assert!(frames.free_frames() < before, "the build consumed frames");
+
+            // Retain the built space exactly as the spawn producers do,
+            // then drop it — the reap-time teardown path.
+            let live = LiveSpace::new(
+                space,
+                SharedSim(simmap),
+                frames,
+                VirtAddr::new(0x4000_0000),
+                8,
+                VirtAddr::new(0x5000_0000),
+                8,
+                VirtAddr::new(0x6000_0000),
+                8,
+                VirtAddr::new(0x7000_0000),
+                8,
+            )
+            .expect("windows are valid");
+            drop(live);
+            assert_eq!(
+                frames.free_frames(),
+                before,
+                "every frame the cycle drew returned to the allocator"
+            );
+        }
+    }
+
+    #[test]
     fn denied_without_proc_spawn_capability_touches_no_state() {
         set_max_level(Level::Trace);
         let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));

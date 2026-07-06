@@ -31,7 +31,7 @@
 //! a strict subset so promotion does not require interface creep.
 
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use rustos_arch_api::frames::{PageTableFrames, TableFrame};
 use rustos_arch_api::mmu::{AddressSpace as MmuAddressSpace, BlockSplit, MapError, PageFlags};
@@ -175,6 +175,15 @@ impl PageTableFrames for PageTablePool {
         // recovers the physical address the MMU needs (`plans/WIRING.md` W5b-3 — the bootstrap frame source).
         let phys = phys_of(entries);
         Some(TableFrame { phys, entries })
+    }
+
+    fn free_table(&self, phys: u64) {
+        // The boot pool is a bump allocator over permanent kernel-image
+        // `.bss`: its storage is never reclaimable RAM and the boot space
+        // built over it is never torn down, so a returned frame is retired
+        // without reuse. Per-process spaces draw from the allocator-backed
+        // `kernel/mem` source, whose `free_table` genuinely recycles.
+        let _ = phys;
     }
 }
 
@@ -645,6 +654,11 @@ impl AddressSpace {
     /// window (where the higher-half-linked code/stack/data live).
     #[cfg(all(target_arch = "x86_64", target_os = "none"))]
     pub unsafe fn switch(&self) {
+        // The first fully-configured space activated on the metal is the
+        // permanent boot space: publish its root, set-once, as the park
+        // root teardown and the dispatcher's suspend path re-install so a
+        // dead user root is never left active (see [`park_kernel_root`]).
+        let _ = PARK_ROOT.compare_exchange(0, self.pml4_phys, Ordering::AcqRel, Ordering::Relaxed);
         // SAFETY: caller asserts the new mappings cover RIP and RSP; see
         // the `# Safety` paragraph above. `mov cr3, _` is otherwise a
         // pure architectural state change.
@@ -663,6 +677,67 @@ impl AddressSpace {
     pub fn pml4_phys(&self) -> u64 {
         self.pml4_phys
     }
+}
+
+/// The permanent kernel translation root a CPU parks on whenever it must
+/// leave a user root — published set-once by the first
+/// `AddressSpace::switch` (the boot space, whose tables live for the
+/// image's lifetime), read by [`park_kernel_root`]. `0` means "not yet
+/// published" (the boot space's PML4 is never at physical 0).
+static PARK_ROOT: AtomicU64 = AtomicU64::new(0);
+
+/// Park the calling CPU's translation regime on the published boot
+/// kernel root, so no user space's root remains active after its task
+/// suspends or exits. Returns `false`, changing nothing, when no park
+/// root has been published yet (fail closed).
+///
+/// The dispatcher calls this after every switch-back from a user task;
+/// address-space teardown calls it defensively before dismantling a root
+/// that is somehow still active.
+pub fn park_kernel_root() -> bool {
+    let root = PARK_ROOT.load(Ordering::Acquire);
+    if root == 0 {
+        return false;
+    }
+    // SAFETY: the published root is the boot space's, which maps the low
+    // identity window and the higher-half kernel window for the image's
+    // lifetime — exactly `activate_user_root`'s contract (inert on the
+    // host, where the root is never published anyway).
+    unsafe { activate_user_root(root) };
+    true
+}
+
+/// Publish the calling CPU's *current* translation root — the boot
+/// trampoline's `CR3` tables, which live in permanent kernel storage
+/// (`boot.s`) — as the park root, set-once.
+///
+/// The x86_64 boot never activates a Rust-built kernel `AddressSpace`
+/// (it keeps running on the trampoline tables), so — unlike
+/// aarch64/riscv64, where the boot space's `switch()` publishes — the
+/// boot path calls this once on the BSP before any user space can be
+/// spawned; a later `switch()` to a per-process space then cannot claim
+/// the slot.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub fn publish_boot_park_root() {
+    let _ = PARK_ROOT.compare_exchange(0, active_root_phys(), Ordering::AcqRel, Ordering::Relaxed);
+}
+
+/// Host substitute: there is no boot trampoline `CR3` on the host; the
+/// park root stays unpublished and [`park_kernel_root`] reports `false`.
+#[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+pub fn publish_boot_park_root() {}
+
+/// The physical root of the calling CPU's active translation regime
+/// (`CR3`'s table base, PCID/flag bits masked off).
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+fn active_root_phys() -> u64 {
+    let cr3: u64;
+    // SAFETY: reading `CR3` observes the active root without side
+    // effects; no Rust spelling exists for the control register.
+    unsafe {
+        core::arch::asm!("mov {v}, cr3", v = out(reg) cr3, options(nostack, preserves_flags, nomem));
+    }
+    cr3 & !0xFFF
 }
 
 /// Reactivate `root_phys` as the active top-level translation root (load
@@ -909,6 +984,57 @@ impl MmuAddressSpace for AddressSpace {
         {
             let _ = (base, len);
             unreachable!("the x86_64 page-table walk is only valid on the bare-metal target")
+        }
+    }
+
+    unsafe fn reclaim_table_frames(&mut self) {
+        // The four-level walk recovers tables through the low identity
+        // map, so — exactly like `map_page` — it is only meaningful on the
+        // bare-metal target; a host space never maps anything to reclaim.
+        #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+        {
+            // Defence in depth: the dispatcher parks a CPU off a user root
+            // at every task suspend, so a dead space's root is never the
+            // active translation here — but freeing the walked-from root
+            // of a live regime would be catastrophic, so verify and
+            // re-park first. With no park root published the frames are
+            // retired unreclaimed rather than dismantling the active
+            // translation (fail closed).
+            if active_root_phys() == self.pml4_phys && !park_kernel_root() {
+                return;
+            }
+            let frames = self.frames;
+            const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+            // A four-level hierarchy rooted at the PML4: a present PML4
+            // entry always points at a PDPT; a present PDPT/PD entry
+            // without `HUGE` points at the next table; PT (depth 3)
+            // entries are page leaves and are never descended into.
+            let child_of = |entry: u64, depth: usize| -> Option<u64> {
+                (depth < 3
+                    && (entry & flags::PRESENT) != 0
+                    && (depth == 0 || (entry & flags::HUGE) == 0))
+                    .then_some(entry & ADDR_MASK)
+            };
+            // Tables are recovered from their physical address through the
+            // low identity map — the same round-trip `leaf_present` and
+            // `ensure_child` rely on.
+            let entries_of = |phys: u64| phys as *const [u64; ENTRIES_PER_TABLE];
+            // SAFETY: every phys `child_of` yields was written by
+            // `ensure_child` / `new_identity` from a `TableFrame` of
+            // `self.frames`, so it names a live, identity-reachable table
+            // this hierarchy owns; the guard above upholds the not-active
+            // contract the caller asserts, and `self` is borrowed mutably
+            // so no other reference walks the tables.
+            unsafe {
+                rustos_arch_api::frames::reclaim_hierarchy(
+                    self.pml4_phys,
+                    &child_of,
+                    &entries_of,
+                    &mut |phys| {
+                        frames.free_table(phys);
+                    },
+                );
+            }
         }
     }
 

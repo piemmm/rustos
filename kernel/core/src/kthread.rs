@@ -66,6 +66,7 @@ use rustos_kernel_mem::LiveUserSpace;
 use rustos_kernel_sched_api::{
     CpuId, Priority, SchedResult, SchedulerArch, SchedulerPolicy, TaskAction, TaskId,
 };
+use rustos_sync::once::OnceCell;
 use rustos_sync::SpinLock;
 
 use crate::dispatch_slot::RescheduleAction;
@@ -1057,6 +1058,18 @@ where
     if is_user {
         clear_resume(cpu);
         clear_live_space(cpu);
+        // Park this CPU's translation off the task's user root before the
+        // action is reported: the invariant "a user root is active on a
+        // CPU only while its task runs there" is what makes a dead task's
+        // page-table teardown (the live-space drop at reap) safe on SMP —
+        // without it a CPU that idled or ran kernel work after this task
+        // would still walk the dead root while another CPU frees its
+        // tables. The park is a single root-register write to the
+        // permanent boot root; the next user resume reprograms the root
+        // anyway, so no extra work lands on the resume path.
+        if let Ok(Some(park)) = PARK_TRANSLATION.get() {
+            park();
+        }
     }
 
     // The task ran on its kernel stack; verify it did not run off the bottom
@@ -1075,6 +1088,21 @@ where
 
     // Report the action the task requested.
     unsafe { (*ctl).action }
+}
+
+/// The port's park-translation hook: re-installs the permanent boot
+/// kernel root on the calling CPU, so no user space's root stays active
+/// after its task suspends (see the [`dispatch_step`] call site).
+/// Installed set-once by [`crate::kernel_main`] from
+/// [`crate::bootinfo::KernelArch::park_translation`]; absent (the host
+/// test arch, a port with no user address spaces) the dispatcher skips
+/// the park and teardown relies on the port's own defensive re-park.
+static PARK_TRANSLATION: OnceCell<fn()> = OnceCell::new();
+
+/// Install the port's park-translation hook (set-once; a later call
+/// changes nothing — one boot installs one hook).
+pub fn install_park_translation(park: fn()) {
+    let _ = PARK_TRANSLATION.set(park);
 }
 
 /// Publish the per-CPU resume handle for the user kthread `ctl`, about to
@@ -1661,6 +1689,42 @@ mod tests {
         let mut control = control_with(RecordingCs(rec), BoxStack::new());
         let _ = dispatch_step(&mut control, cpu);
         assert!(!reschedule_current(cpu, RescheduleAction::Yield));
+    }
+
+    #[test]
+    fn user_dispatch_step_parks_the_translation_after_switch_back() {
+        // The I2 SMP-safety invariant: after a *user* task's step the
+        // dispatcher re-parks the CPU's translation (so a dead task's
+        // page-table teardown can never free a root a CPU still walks); a
+        // kernel kthread's step, which activated no user root, does not.
+        // The hook slot is process-global (set-once), so the assertions
+        // are deltas, robust to sibling tests having installed it first.
+        static PARKS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+        fn count_park() {
+            PARKS.fetch_add(1, Ordering::SeqCst);
+        }
+        install_park_translation(count_park);
+
+        let rec = recorder();
+        let hits = leak_counter();
+        let mut user = user_control_with(RecordingCs(rec), BoxStack::new(), hits);
+        let before = PARKS.load(Ordering::SeqCst);
+        let _ = dispatch_step(&mut user, 63);
+        assert_eq!(
+            PARKS.load(Ordering::SeqCst),
+            before + 1,
+            "a user-task switch-back parks the CPU's translation"
+        );
+
+        let rec = recorder();
+        let mut kernel = control_with(RecordingCs(rec), BoxStack::new());
+        let before = PARKS.load(Ordering::SeqCst);
+        let _ = dispatch_step(&mut kernel, 63);
+        assert_eq!(
+            PARKS.load(Ordering::SeqCst),
+            before,
+            "a kernel kthread's step activates no user root and parks nothing"
+        );
     }
 
     // --- Stack guard page -----------------------

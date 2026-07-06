@@ -156,10 +156,11 @@ pub static SHM_PHYSMAP: DirectPhysMap = DirectPhysMap::new(KERNEL_VMA_BASE, PHYS
 /// [`FrameAllocator`] through [`FrameTableSource`], so the spawn capacity
 /// **scales with discovered RAM and grows on demand**, failing closed with
 /// [`Errno::NoSpace`] only when physical RAM is genuinely exhausted
-/// (deterministic OOM, never a panic). The frames
-/// are never freed while a child lives (the monotonic discipline the pool
-/// used); reclaiming a dead process's page-table frames
-/// is a later stage. Mirrors the aarch64 producer.
+/// (deterministic OOM, never a panic). The frames live exactly as long as
+/// the child: its retained live space returns every table frame through
+/// [`FrameTableSource::free_table`] when the task exits and the space is
+/// dropped at reap (`plans/APPS.md` I2), so spawn/exit cycles hold the
+/// allocator steady. Mirrors the aarch64 producer.
 ///
 /// Initialised on the first `spawn` from the boot-threaded `'static`
 /// allocator and reused thereafter — the source is stateless (its state
@@ -294,10 +295,10 @@ impl ProcessSpawn for X86_64ProcessSpawn {
         // `pre_resume` hook has made `space` active (the `spawn_image`
         // contract). The frame source draws first-GiB RAM frames from the
         // kernel's live allocator, written through the higher-half `physmap`
-        // mapped under the caller's active root. A returning `Err` reclaims
-        // nothing user-visible (the page-table + image frames are handed out
-        // monotonically and not reclaimed this stage) and maps to a stable
-        // errno; the cause is already audited by `spawn_image`.
+        // mapped under the caller's active root. The retained live space
+        // below owns the whole footprint and returns it (frames zeroed,
+        // tables freed) when the task exits. A returning `Err` maps to a
+        // stable errno; the cause is already audited by `spawn_image`.
         let frames = ctx.frames();
         let entry = unsafe {
             spawn_image(

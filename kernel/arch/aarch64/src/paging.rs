@@ -31,7 +31,7 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use rustos_arch_api::frames::{PageTableFrames, TableFrame};
+use rustos_arch_api::frames::{reclaim_hierarchy, PageTableFrames, TableFrame};
 use rustos_arch_api::mmu::{AddressSpace as MmuAddressSpace, BlockSplit, MapError, PageFlags};
 use rustos_arch_api::tlb::TlbShootdown;
 
@@ -846,6 +846,15 @@ impl PageTableFrames for PageTablePool {
         let phys = phys_of(entries);
         Some(TableFrame { phys, entries })
     }
+
+    fn free_table(&self, phys: u64) {
+        // The boot pool is a bump allocator over permanent kernel-image
+        // `.bss`: its storage is never reclaimable RAM and the boot space
+        // built over it is never torn down, so a returned frame is retired
+        // without reuse. Per-process spaces draw from the allocator-backed
+        // `kernel/mem` source, whose `free_table` genuinely recycles.
+        let _ = phys;
+    }
 }
 
 /// A stage-1 address space built on a freshly-allocated L1 root table.
@@ -1244,6 +1253,11 @@ impl AddressSpace {
         // architecturally UNKNOWN EL1 reset bits (`WXN`, `EE`, …) into
         // translated execution, which hangs real silicon (see
         // [`SCTLR_MMU_OFF`]).
+        // The first fully-configured space activated on the metal is the
+        // permanent boot space: publish its root, set-once, as the park
+        // root teardown and the dispatcher's suspend path re-install so a
+        // dead user root is never left active (see [`park_kernel_root`]).
+        let _ = PARK_ROOT.compare_exchange(0, self.root_phys, Ordering::AcqRel, Ordering::Relaxed);
         unsafe {
             core::arch::asm!(
                 "msr MAIR_EL1, {mair}",
@@ -1397,6 +1411,41 @@ impl MmuAddressSpace for AddressSpace {
             unreachable!("stage-1 activation is only meaningful on the aarch64 bare-metal target")
         }
     }
+
+    unsafe fn reclaim_table_frames(&mut self) {
+        // Defence in depth: the dispatcher parks a CPU off a user root at
+        // every task suspend, so a dead space's root is never the active
+        // translation here — but freeing the walked-from root of a live
+        // regime would be catastrophic, so verify and re-park first. With
+        // no park root published the frames are retired unreclaimed
+        // rather than dismantling the active translation (fail closed).
+        if active_root_phys() == self.root_phys && !park_kernel_root() {
+            return;
+        }
+        let frames = self.frames;
+        // A stage-1 hierarchy rooted at L1: an L1/L2 entry that is valid
+        // and not a block is a table pointer; L3 (depth 2) entries are
+        // page leaves and are never descended into.
+        let child_of = |entry: u64, depth: usize| -> Option<u64> {
+            (depth < 2 && (entry & attrs::VALID) != 0 && !is_block(entry))
+                .then(|| phys_from_descriptor(entry))
+        };
+        // Tables are recovered from their physical address through the
+        // kernel identity map — the same round-trip `translate`,
+        // `leaf_present`, and `ensure_child` rely on.
+        let entries_of = |phys: u64| phys as *const [u64; ENTRIES_PER_TABLE];
+        // SAFETY: every phys `child_of` yields was written by
+        // `ensure_child` from a `TableFrame` of `self.frames`, so it names
+        // a live, identity-reachable table this hierarchy owns; the guard
+        // above upholds the not-active contract the caller asserts, and
+        // `self` is borrowed mutably so no other reference walks the
+        // tables.
+        unsafe {
+            reclaim_hierarchy(self.root_phys, &child_of, &entries_of, &mut |phys| {
+                frames.free_table(phys);
+            });
+        }
+    }
 }
 
 impl TlbShootdown for AddressSpace {
@@ -1440,6 +1489,55 @@ pub(crate) fn invalidate_page_inner_shareable(vaddr: u64) {
     {
         // The host has no TLB to invalidate; a flush is vacuous.
         let _ = vaddr;
+    }
+}
+
+/// The permanent kernel translation root a CPU parks on whenever it must
+/// leave a user root — published set-once by the first
+/// `AddressSpace::switch` (the boot space, whose tables live for the
+/// image's lifetime), read by [`park_kernel_root`]. `0` means "not yet
+/// published" (the boot space's root table is never at physical 0).
+static PARK_ROOT: AtomicU64 = AtomicU64::new(0);
+
+/// Park the calling CPU's low translation regime on the published boot
+/// kernel root, so no user space's root remains active after its task
+/// suspends or exits. Returns `false`, changing nothing, when no park
+/// root has been published yet (fail closed).
+///
+/// The dispatcher calls this after every switch-back from a user task;
+/// address-space teardown calls it defensively before dismantling a root
+/// that is somehow still active.
+pub fn park_kernel_root() -> bool {
+    let root = PARK_ROOT.load(Ordering::Acquire);
+    if root == 0 {
+        return false;
+    }
+    // SAFETY: the published root is the boot space's, which identity-maps
+    // the kernel window and the board MMIO for the image's lifetime —
+    // exactly `activate_user_root`'s contract (inert on the host, where
+    // the root is never published anyway).
+    unsafe { activate_user_root(root) };
+    true
+}
+
+/// The physical root of the calling CPU's active low translation regime
+/// (`TTBR0_EL1`'s base address), or `0` on the host, which has no
+/// translation registers.
+fn active_root_phys() -> u64 {
+    #[cfg(all(target_arch = "aarch64", target_os = "none"))]
+    {
+        let ttbr: u64;
+        // SAFETY: reading `TTBR0_EL1` observes the active root without
+        // side effects; no Rust spelling exists for the system register.
+        unsafe {
+            core::arch::asm!("mrs {v}, TTBR0_EL1", v = out(reg) ttbr, options(nostack, preserves_flags, nomem));
+        }
+        // Mask the ASID ([63:48]) and CnP ([0]) fields to the table base.
+        ttbr & 0x0000_FFFF_FFFF_FFFE
+    }
+    #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+    {
+        0
     }
 }
 

@@ -339,6 +339,29 @@ impl KernelArch for BinArch {
         Some(&X86_PLATFORM_ENTROPY)
     }
 
+    fn park_translation(&self) -> Option<fn()> {
+        // Re-installs the trampoline `CR3` root (published by the boot
+        // path's `publish_boot_park_root`) so no user root stays active
+        // after its task suspends — the invariant a dead task's
+        // page-table reclamation relies on. The paging module exists only
+        // on the bare-metal target; a host build has no translation to
+        // park.
+        #[cfg(all(freestanding, kernel_isa = "x86_64"))]
+        {
+            fn park() {
+                // Fire-and-forget from the dispatcher: with no park root
+                // published yet there is nothing to leave (fail closed),
+                // so the `bool` outcome is deliberately discarded.
+                let _ = rustos_arch_x86_64::paging::park_kernel_root();
+            }
+            Some(park)
+        }
+        #[cfg(not(all(freestanding, kernel_isa = "x86_64")))]
+        {
+            None
+        }
+    }
+
     fn irq_routing(&self) -> IrqRouting {
         // The routing was assembled during the bin crate's
         // `try_boot` and captured by `BinArch::new`. Returning a

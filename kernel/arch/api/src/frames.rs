@@ -85,6 +85,114 @@ pub trait PageTableFrames: Sync {
     /// its `entries` view must be zero-initialised, so a port can build
     /// a table without clearing it first.
     fn alloc_table(&self) -> Option<TableFrame>;
+
+    /// Return the table frame at physical address `phys` to this source.
+    ///
+    /// `phys` **must** be the `phys` of a [`TableFrame`] this source
+    /// handed out through [`Self::alloc_table`] and that the caller will
+    /// never touch again — the port calls this from its address-space
+    /// teardown once the frame holds no live translation, and the
+    /// teardown walk only yields frames the hierarchy itself drew, which
+    /// upholds the contract. A source whose backing supports reuse (the
+    /// kernel `FrameAllocator`-backed production source) makes the frame
+    /// allocatable again, so a dead process's page tables return to the
+    /// system; a fixed bump source (the per-port boot `PageTablePool`,
+    /// whose storage is permanent kernel image `.bss` and whose spaces
+    /// are never torn down) retires the frame without reuse. Never
+    /// panics; a double free of a recycled frame is refused by the
+    /// backing allocator, but a source cannot always distinguish a
+    /// *foreign* `phys` from a reserved frame, so passing one is a
+    /// caller bug, not a checked error.
+    fn free_table(&self, phys: u64);
+}
+
+/// Reclaim every table frame of a page-table hierarchy, post-order, and
+/// hand each frame's physical address to `free_table` — the one teardown
+/// walk every port's `AddressSpace` reuses instead of re-deriving its own
+/// (the descriptor predicates and the phys→entries derivation are the only
+/// genuinely per-ISA parts, so they are the closures).
+///
+/// The walk starts at the table at `root_phys` (depth `0`) and descends
+/// through every entry `child_of` classifies as a pointer to a child
+/// table, freeing children before parents and the root last, so no frame
+/// is released while a live descriptor still points at it. Block/leaf
+/// descriptors are never descended into or freed — only *table* frames
+/// are reclaimed; leaf frames (user RAM, MMIO) belong to their own
+/// owners.
+///
+/// * `child_of(entry, depth)` — `Some(child_phys)` when `entry`, read
+///   from a table at `depth`, is a valid pointer to a child table;
+///   `None` for invalid entries and block/page leaves. Returning `None`
+///   at the deepest level is the caller's responsibility (a leaf-level
+///   descriptor must never classify as a table).
+/// * `entries_of(phys)` — the CPU-dereferenceable view of the table at
+///   `phys`, exactly the derivation the port's own mapping walk uses.
+/// * `free_table(phys)` — invoked exactly once per table frame,
+///   post-order, the root included.
+///
+/// Recursion depth is bounded by the architecture's table depth (at most
+/// four levels on every RustOS target).
+///
+/// # Safety
+///
+/// The caller must guarantee, exactly as its own mapping walk does, that
+/// every `phys` reachable through `child_of` (including `root_phys`)
+/// names a live table frame of *this* hierarchy whose entries
+/// `entries_of` can dereference, that the hierarchy is not the active
+/// translation of any CPU, and that no other reference to those tables
+/// is live during the walk.
+pub unsafe fn reclaim_hierarchy<C, E, F>(
+    root_phys: u64,
+    child_of: &C,
+    entries_of: &E,
+    free_table: &mut F,
+) where
+    C: Fn(u64, usize) -> Option<u64>,
+    E: Fn(u64) -> *const [u64; PAGE_TABLE_ENTRIES],
+    F: FnMut(u64),
+{
+    // SAFETY: forwarded caller contract (see above).
+    unsafe { reclaim_at(root_phys, 0, child_of, entries_of, free_table) }
+}
+
+/// Recursive post-order step of [`reclaim_hierarchy`].
+///
+/// # Safety
+///
+/// As [`reclaim_hierarchy`]; `table_phys` names a live table of the
+/// hierarchy at `depth`.
+unsafe fn reclaim_at<C, E, F>(
+    table_phys: u64,
+    depth: usize,
+    child_of: &C,
+    entries_of: &E,
+    free_table: &mut F,
+) where
+    C: Fn(u64, usize) -> Option<u64>,
+    E: Fn(u64) -> *const [u64; PAGE_TABLE_ENTRIES],
+    F: FnMut(u64),
+{
+    // Four levels is the deepest hierarchy any RustOS target walks
+    // (x86_64 PML4→PT); a `child_of` that classifies a leaf-level entry
+    // as a table would otherwise walk leaf frame contents as
+    // descriptors, so the depth is bounded here as well (fail closed).
+    if depth < 4 {
+        // SAFETY: the caller guarantees `table_phys` names a live table
+        // this hierarchy owns, so `entries_of` yields a dereferenceable
+        // view no other reference aliases during the walk.
+        let entries = unsafe { &*entries_of(table_phys) };
+        for &entry in entries {
+            if let Some(child_phys) = child_of(entry, depth) {
+                // SAFETY: `child_of` classified `entry` as a valid child
+                // table pointer of this hierarchy — the caller's contract
+                // extends to it.
+                unsafe {
+                    reclaim_at(child_phys, depth + 1, child_of, entries_of, free_table);
+                }
+            }
+        }
+    }
+    free_table(table_phys);
 }
 
 /// The page-table frame-source conformance vertical.
@@ -177,6 +285,7 @@ pub mod conformance {
         struct BumpFrames {
             storage: [UnsafeCell<Table>; DOUBLE_CAPACITY],
             used: AtomicUsize,
+            freed: AtomicUsize,
         }
 
         // SAFETY: each slot is handed out exactly once via the monotonic
@@ -197,6 +306,65 @@ pub mod conformance {
                 let phys = entries.as_ptr() as u64;
                 Some(TableFrame { phys, entries })
             }
+
+            fn free_table(&self, phys: u64) {
+                // A bump pool retires a returned frame without reuse,
+                // exactly like the per-port boot pools it models; count
+                // the return so the suite can assert the discipline.
+                let _ = phys;
+                self.freed.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        #[test]
+        fn reclaim_hierarchy_frees_every_table_post_order_and_only_tables() {
+            #[allow(clippy::declare_interior_mutable_const)]
+            const ZERO: UnsafeCell<Table> = UnsafeCell::new(Table([0; PAGE_TABLE_ENTRIES]));
+            static POOL: BumpFrames = BumpFrames {
+                storage: [ZERO; DOUBLE_CAPACITY],
+                used: AtomicUsize::new(0),
+                freed: AtomicUsize::new(0),
+            };
+
+            // A synthetic three-level hierarchy over the identity-phys
+            // double: bit 0 marks a table pointer, bit 1 a leaf — the
+            // shape every port's descriptors reduce to for the walk.
+            const TABLE: u64 = 1;
+            const LEAF: u64 = 2;
+            let root = POOL.alloc_table().expect("root");
+            let root_phys = root.phys;
+            let mid = POOL.alloc_table().expect("mid");
+            let mid_phys = mid.phys;
+            let deep = POOL.alloc_table().expect("deep");
+            let deep_phys = deep.phys;
+            root.entries[0] = mid_phys | TABLE;
+            root.entries[1] = LEAF; // a block leaf: never descended, never freed
+            mid.entries[7] = deep_phys | TABLE;
+            deep.entries[3] = LEAF; // deepest level holds only leaves
+
+            let child_of = |entry: u64, _depth: usize| -> Option<u64> {
+                ((entry & TABLE) != 0).then_some(entry & !0xFFF)
+            };
+            let entries_of = |phys: u64| -> *const [u64; PAGE_TABLE_ENTRIES] { phys as *const _ };
+            let mut freed = [0u64; 4];
+            let mut freed_len = 0usize;
+            let mut free = |phys: u64| {
+                assert!(freed_len < freed.len(), "no table is freed twice");
+                freed[freed_len] = phys;
+                freed_len += 1;
+            };
+            // SAFETY: every phys reachable through `child_of` names a live
+            // table of this test hierarchy (identity addresses of the
+            // pool's slots), the hierarchy is no CPU's translation, and no
+            // other reference to the tables is live during the walk.
+            unsafe {
+                super::super::reclaim_hierarchy(root_phys, &child_of, &entries_of, &mut free);
+            }
+
+            // Post-order: the deepest table first, the root last, each
+            // exactly once, and no leaf frame ever freed.
+            assert_eq!(freed_len, 3);
+            assert_eq!(&freed[..3], &[deep_phys, mid_phys, root_phys]);
         }
 
         #[test]
@@ -206,6 +374,7 @@ pub mod conformance {
             static POOL: BumpFrames = BumpFrames {
                 storage: [ZERO; DOUBLE_CAPACITY],
                 used: AtomicUsize::new(0),
+                freed: AtomicUsize::new(0),
             };
             run_all(&POOL, DOUBLE_CAPACITY);
 

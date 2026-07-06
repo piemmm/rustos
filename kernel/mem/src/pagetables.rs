@@ -19,7 +19,7 @@
 //!
 //! # Physical ↔ virtual
 //!
-//! The allocator hands out a [`Frame`](crate::frame::Frame) by
+//! The allocator hands out a [`Frame`] by
 //! *physical* address; a port
 //! needs a CPU-dereferenceable view of that frame's 512 entries to build
 //! a table. That translation is exactly the kernel's direct physical map
@@ -29,7 +29,7 @@
 
 use rustos_arch_api::frames::{PageTableFrames, TableFrame, PAGE_TABLE_ENTRIES};
 
-use crate::frame::{FrameAllocator, PhysAddr, PAGE_SIZE};
+use crate::frame::{Frame, FrameAllocator, PhysAddr, PAGE_SIZE};
 use crate::phys::PhysMap;
 
 /// A [`PageTableFrames`] source backed by the kernel [`FrameAllocator`].
@@ -107,6 +107,20 @@ impl PageTableFrames for FrameTableSource {
         entries.fill(0);
 
         Some(TableFrame { phys, entries })
+    }
+
+    fn free_table(&self, phys: u64) {
+        // The teardown half: a dead process's table frame returns to the
+        // kernel allocator for reuse, so its page tables stop leaking RAM.
+        // The frame held translation descriptors, never user data or
+        // secrets, and every frame is zeroed on the next `alloc_table`
+        // before a port sees it, so no scrub is needed here. Per the
+        // trait contract `phys` came from this source's `alloc_table`
+        // (the teardown walk yields only frames the hierarchy drew); the
+        // allocator refuses a double free of an already-free frame, and
+        // there is no recovery beyond declining, so the result is
+        // dropped (never a panic).
+        let _ = self.frames.free(Frame::containing(PhysAddr::new(phys)));
     }
 }
 
@@ -203,6 +217,64 @@ mod tests {
         assert!(
             source.alloc_table().is_none(),
             "an exhausted allocator yields None, never a panic"
+        );
+    }
+
+    #[test]
+    fn free_table_returns_the_frame_to_the_allocator_for_reuse() {
+        let (source, frames) = fresh_source();
+        let before = frames.free_frames();
+
+        let table = source.alloc_table().expect("a frame");
+        let phys = table.phys;
+        assert_eq!(frames.free_frames(), before - 1);
+
+        source.free_table(phys);
+        assert_eq!(
+            frames.free_frames(),
+            before,
+            "a freed table frame is allocatable again"
+        );
+
+        // The recycled frame comes back zeroed on the next draw, so a
+        // port never sees the dead hierarchy's descriptors.
+        let again = source.alloc_table().expect("the freed frame is reusable");
+        assert!(
+            again.entries.iter().all(|&e| e == 0),
+            "recycled frame is zeroed"
+        );
+    }
+
+    #[test]
+    fn free_table_after_exhaustion_makes_alloc_succeed_again() {
+        let (source, _frames) = fresh_source();
+        let mut last_phys = 0;
+        for _ in 0..USABLE_PAGES {
+            last_phys = source.alloc_table().expect("a frame").phys;
+        }
+        assert!(source.alloc_table().is_none(), "exhausted");
+        source.free_table(last_phys);
+        assert_eq!(
+            source.alloc_table().expect("reuse after free").phys,
+            last_phys,
+            "the returned frame is handed out again"
+        );
+    }
+
+    #[test]
+    fn free_table_twice_is_refused_without_effect() {
+        let (source, frames) = fresh_source();
+        let table = source.alloc_table().expect("a frame");
+        let phys = table.phys;
+        source.free_table(phys);
+        let after_first = frames.free_frames();
+        // A second free of the same (now-free) frame is refused by the
+        // allocator's bitmap check: nothing double-freed, never a panic.
+        source.free_table(phys);
+        assert_eq!(
+            frames.free_frames(),
+            after_first,
+            "a double free changes nothing"
         );
     }
 }
