@@ -39,15 +39,15 @@
 //!
 //! It is a **pure-Rust** program: it links the Rust userland
 //! runtime `rustos-rt` (`_start`, the stack canary, the panic handler,
-//! the syscall wrappers, and `yield_now`), never the C ABI, which exists
+//! the syscall wrappers, and `park_forever`), never the C ABI, which exists
 //! solely for non-Rust programs. It maps no DMA and no
 //! registers, so it supplies no architecture-specific cache shim and names no
 //! board detail (`coherency = None`, keeping the program platform-neutral).
 //!
-//! After publishing the node `main` parks, yielding forever so PID 1 and
-//! every other task keeps running while this driver stays resident
-//! (a genuine yield loop, never a busy spin). A bring-up
-//! failure exits with a reserved fail-closed code, leaving the controller
+//! After publishing the node `main` parks off the run queue for the life of
+//! the system (`rustos_rt::park_forever`) while this driver stays resident —
+//! a real park consuming no CPU, never a yield loop. A bring-up failure
+//! exits with a reserved fail-closed code, leaving the controller
 //! unpublished rather than wedged; the spawning supervisor
 //! decides whether to relaunch.
 //!
@@ -91,6 +91,12 @@ mod program {
     /// gate is the controller driver's `Xhci::open`).
     const EXIT_PUBLISH_FAILED: i32 = 82;
 
+    /// Exit code when the resident park failed — the kernel refused the
+    /// wait-set the lifetime park runs on. Exiting fail-loud beats the
+    /// yield-forever spin a parkless residency would degrade into; the
+    /// spawning supervisor decides whether to relaunch. A reserved value.
+    const EXIT_PARK_FAILED: i32 = 83;
+
     /// The capability set the driver host re-checks up front before issuing an
     /// `ipc_call` (the mailbox) / `hw_emit_node` (the publish) trap, so a
     /// missing grant fails fast without a round trip. It mirrors the authority
@@ -131,13 +137,12 @@ mod program {
         if reload_firmware_and_publish(&host, node).is_err() {
             return EXIT_PUBLISH_FAILED;
         }
-        // The controller node must stay published and this driver resident for
-        // the life of the system; park yielding so PID 1 and every other task
-        // keeps running (a genuine yield loop, never a hard
-        // spin).
-        loop {
-            rustos_rt::yield_now();
-        }
+        // The controller node must stay published and this driver resident
+        // for the life of the system: park off the run queue for good. A
+        // failed park exits fail-loud rather than degrading into a yield
+        // spin.
+        let _ = rustos_rt::park_forever();
+        EXIT_PARK_FAILED
     }
 
     rustos_rt::entry!(main);

@@ -34,15 +34,15 @@
 //!
 //! It is a **pure-Rust** program: it links the Rust userland
 //! runtime `rustos-rt` (`_start`, the stack canary, the panic handler,
-//! the syscall wrappers, the clock-backed `ClockDelay`, and `yield_now`),
+//! the syscall wrappers, the clock-backed `ClockDelay`, and `park_forever`),
 //! never the C ABI, which exists solely for non-Rust programs. It carves no DMA itself, so it supplies no architecture-specific
 //! cache-maintenance shim and names no board detail beyond the discovered
 //! grants (`coherency = None`, keeping the program platform-neutral).
 //!
-//! After publishing the node `main` parks, yielding forever so PID 1 and
-//! every other task keeps running while this driver stays resident holding
-//! the trained root complex (a genuine yield loop, never a
-//! busy spin). A bring-up failure exits with a reserved fail-closed code,
+//! After publishing the node `main` parks off the run queue for the life of
+//! the system (`rustos_rt::park_forever`) while this driver stays resident
+//! holding the trained root complex — a real park consuming no CPU, never a
+//! yield loop. A bring-up failure exits with a reserved fail-closed code,
 //! leaving the bus unbrought-up rather than wedged; the
 //! spawning supervisor decides whether to relaunch.
 //!
@@ -85,6 +85,12 @@ mod program {
     /// mapped, or the node emission was refused). A reserved, fail-closed
     /// value; the bus is left unbrought-up, never wedged.
     const EXIT_BRINGUP_FAILED: i32 = 82;
+
+    /// Exit code when the resident park failed — the kernel refused the
+    /// wait-set the lifetime park runs on. Exiting fail-loud beats the
+    /// yield-forever spin a parkless residency would degrade into; the
+    /// spawning supervisor decides whether to relaunch. A reserved value.
+    const EXIT_PARK_FAILED: i32 = 83;
 
     /// The capability set the driver host re-checks up front before issuing a
     /// `mmio_map` / `msi_alloc` / `hw_emit_node` trap, so a missing grant fails
@@ -129,13 +135,11 @@ mod program {
         if emit_vl805_node(&host, &bringup, &delay).is_err() {
             return EXIT_BRINGUP_FAILED;
         }
-        // The root complex must stay trained and this driver resident for the
-        // life of the system; park yielding so PID 1 and every other task
-        // keeps running (a genuine yield loop, never a hard
-        // spin).
-        loop {
-            rustos_rt::yield_now();
-        }
+        // The root complex must stay trained and this driver resident for
+        // the life of the system: park off the run queue for good. A failed
+        // park exits fail-loud rather than degrading into a yield spin.
+        let _ = rustos_rt::park_forever();
+        EXIT_PARK_FAILED
     }
 
     rustos_rt::entry!(main);

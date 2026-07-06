@@ -100,8 +100,11 @@ mod program {
     /// `CAP_CONSOLE_WRITE`, an unresolved address space, an unestablished
     /// descriptor, or a closed-fail kernel path). PID 1 cannot usefully proceed
     /// without the console it was spawned to drive, so it parks fail-closed
-    /// rather than supervising sessions on a console it never reached. This is
-    /// a terminal park, not a retry loop.
+    /// off the run queue (`rustos_rt::park_forever`) rather than supervising
+    /// sessions on a console it never reached — a terminal park consuming no
+    /// CPU, not a retry loop. Only when even that park is refused does it
+    /// fall to the last-resort halt spin: with no console and no wait-set
+    /// there is nothing left to park on or report to.
     fn main() -> i32 {
         let Ok(config) = StartupConfig::parse(DEFAULT_CONFIG) else {
             return EXIT_CONFIG_INVALID;
@@ -109,6 +112,11 @@ mod program {
         // The shared `rustos_rt::io` short-write loop, never an init-private
         // copy (the charter forbids that duplication).
         if Stdout.write_all(BANNER.as_bytes()).is_err() {
+            // Terminal park off the run queue — a spinning halt would peg a
+            // core for the life of the system. The spin below runs only when
+            // even the park is refused (a doubly-failed boot: no console, no
+            // wait-set), where nothing better remains.
+            let _ = rustos_rt::park_forever();
             loop {
                 core::hint::spin_loop();
             }

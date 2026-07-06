@@ -282,12 +282,21 @@ impl<T: Transport> Input for VirtioInput<'_, T> {
         // Drain whatever the device has already completed; only park the
         // CPU (interrupt-driven, never a busy-spin)
         // when nothing is pending, then drain once more.
-        let mut count = self.drain_ready(events)?;
-        if count == 0 {
+        let mut count = self.drain_ready(events);
+        if matches!(count, Ok(0)) {
             self.host.notify_wait(self.eventq.index());
-            count = self.drain_ready(events)?;
+            count = self.drain_ready(events);
         }
-        Ok(count)
+        // Acknowledge the device's interrupt now that its completions have
+        // been observed, so it de-asserts its line before the next wait
+        // re-arms the kernel IRQ. Without this the asserted line wakes
+        // every subsequent `notify_wait` immediately and the "park" becomes
+        // a busy loop through the kernel. Done regardless of whether the
+        // drain faulted — a faulted drain must still leave the device's
+        // line clear — and a no-op on transports with no device-side ack
+        // (MSI-X PCI, the mock). This mirrors `VirtioBlk::run_request`.
+        self.transport.ack_interrupt();
+        count
     }
 }
 

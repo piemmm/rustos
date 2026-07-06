@@ -2257,6 +2257,41 @@ pub fn waitset_wait(set: u64, timeout_ns: u64, token_out: &mut u64) -> i64 {
     ret as i64
 }
 
+/// Park the calling task off the run queue for the life of the process.
+///
+/// The park a **resident** program with no further work runs — a bus driver
+/// that must stay alive so its grants keep the hardware it brought up
+/// claimed, but which serves no requests and waits on no device event. It
+/// parks on an empty wait-set with no timeout: the kernel holds the task
+/// off the run queue and a spurious wake merely re-parks, so the task
+/// consumes no CPU for the life of the system. A `loop { yield_now() }`
+/// stand-in is the cooperative busy-poll the charter forbids: a
+/// perpetually-runnable task pegs a core and pollutes the run-queue load.
+///
+/// Returns only on failure, with the raw negative kernel result (`-errno`)
+/// from the wait-set call that failed — the caller exits fail-loud with its
+/// reason rather than falling back to a spin.
+#[must_use = "park_forever returning means the park failed; the caller must exit fail-loud"]
+pub fn park_forever() -> i64 {
+    let set = waitset_create();
+    if set < 0 {
+        return set;
+    }
+    #[allow(clippy::cast_sign_loss)] // `set >= 0` checked above; it is a kernel-minted handle.
+    let set = set as u64;
+    let mut token = 0u64;
+    loop {
+        // An empty membership with no timeout parks indefinitely; the kernel
+        // absorbs spurious wakes internally. A `0` return (a ready member on
+        // an empty set) is impossible by construction, so any return at all
+        // is surfaced to the caller as the park having failed.
+        let ret = waitset_wait(set, u64::MAX, &mut token);
+        if ret != 0 {
+            return ret;
+        }
+    }
+}
+
 /// Recover a usable byte count from a raw `abi-v1` count-result register,
 /// clamping to `cap` as defence in depth.
 ///

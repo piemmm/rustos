@@ -209,6 +209,30 @@ fn poll_with_no_pending_event_returns_zero() {
 }
 
 #[test]
+fn poll_acknowledges_the_device_interrupt_each_cycle() {
+    // Regression: `poll` must acknowledge the device once per wait + drain
+    // cycle, or a level-signalled transport (virtio-MMIO) keeps its line
+    // asserted and every subsequent wait wakes immediately — the busy loop
+    // that pegged a core under the curses login screen.
+    let (t, events) = build_device();
+    let mut dev = open_input(t);
+    let mut buf = [InputEvent {
+        kind: InputEventKind::Key,
+        reserved0: 0,
+        code: 0,
+        value: 0,
+    }; 4];
+    // Delivered-event path: one poll, one acknowledge.
+    events.borrow_mut().push_back((wire::EV_KEY, KEY_A, 1));
+    assert_eq!(dev.poll(&mut buf), Ok(1));
+    assert_eq!(dev.transport_mut().ack_interrupts, 1);
+    // Empty wait path (a spurious wake): still exactly one acknowledge,
+    // so a faulted or empty drain never leaves the line asserted.
+    assert_eq!(dev.poll(&mut buf), Ok(0));
+    assert_eq!(dev.transport_mut().ack_interrupts, 2);
+}
+
+#[test]
 fn poll_rejects_empty_buffer() {
     let (t, _events) = build_device();
     let mut dev = open_input(t);

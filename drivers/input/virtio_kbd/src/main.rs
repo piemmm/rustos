@@ -43,9 +43,12 @@
 //!   syscall, which routes it by who holds focus. The
 //!   driver no longer chooses the encoding or the destination.
 //!
-//! After bring-up `main` polls the device forever, yielding between polls so
-//! the rest of the system runs (a cooperative poll loop,
-//! never a hard spin); a `poll` error is non-fatal and the next poll retries.
+//! After bring-up `main` pumps the device forever, **parking on the granted
+//! device interrupt** between events: `VirtioInput::poll` waits through the
+//! host's `notify_wait` (the kernel `irq_wait` park) and acknowledges the
+//! device each cycle, so an idle keyboard costs no CPU — never a yield-poll
+//! loop. The interrupt bind is preflighted at bring-up and a hard poll fault
+//! exits fail-loud; a broken device is never retried in a spin.
 //! A bring-up failure exits with a reserved fail-closed code, leaving the
 //! console without a keyboard rather than wedged; the
 //! spawning supervisor decides whether to relaunch.
@@ -79,10 +82,18 @@ mod program {
     const EXIT_NO_RESOURCES: i32 = 81;
 
     /// Exit code when the device bring-up failed (the register window could
-    /// not be mapped, the window is not a virtio-MMIO device, or the device
-    /// rejected the virtio init sequence). A reserved, fail-closed value; the console is left without a keyboard, never
-    /// wedged.
+    /// not be mapped, the window is not a virtio-MMIO device, the device
+    /// rejected the virtio init sequence, or the granted interrupt line
+    /// could not be bound — the event pump parks on it, so a driver that
+    /// cannot bind it would degrade into the busy re-poll the charter
+    /// forbids). A reserved, fail-closed value; the console is left without
+    /// a keyboard, never wedged.
     const EXIT_BRINGUP_FAILED: i32 = 82;
+
+    /// Exit code when the running device faulted (a corrupted completion or
+    /// descriptor). Structural, never transient: the driver exits fail-loud
+    /// rather than spin retrying a broken device. A reserved value.
+    const EXIT_DEVICE_FAULT: i32 = 83;
 
     /// Events drained from the device per poll. A batch size, not a capacity: undrained events stay queued in the eventq and are
     /// read on the next poll.
@@ -135,6 +146,12 @@ mod program {
         // Map the register window and build the bus-agnostic transport over it,
         // then bring the virtio-input device online. The host is borrowed as
         // the `VirtioHost` the device carves its event buffers from.
+        // Preflight the interrupt bind: the event pump parks on this line
+        // between keystrokes, so a driver that cannot bind it must fail
+        // loud here rather than silently degrade into a busy re-poll.
+        if host.bind_irq().is_err() {
+            return EXIT_BRINGUP_FAILED;
+        }
         let Ok(window) = host.map_window(base, len) else {
             return EXIT_BRINGUP_FAILED;
         };
@@ -146,21 +163,27 @@ mod program {
             return EXIT_BRINGUP_FAILED;
         };
 
-        // Poll the device forever, resolving each decoded key edge into a
-        // `KeyInput` record and injecting it into the input-focus arbiter,
-        // yielding between polls so PID 1 and every other task keeps running. A `poll` error is non-fatal: the next poll
-        // retries rather than dropping the driver.
+        // Pump the device forever, resolving each decoded key edge into a
+        // `KeyInput` record and injecting it into the input-focus arbiter.
+        // `poll` parks on the bound device interrupt while nothing is
+        // pending (and acknowledges the device each cycle), so an idle
+        // keyboard holds the task off the run queue — no yield loop. An
+        // empty return is a spurious wake and simply re-parks; a hard fault
+        // is structural and exits fail-loud rather than spinning on a
+        // broken device.
         let mut console = VirtioKeyboardConsole::new();
         let mut events = [EVENT_ZERO; EVENT_BATCH];
         loop {
-            if let Ok(drained) = input.poll(&mut events) {
-                for event in &events[..drained] {
-                    if let Some(record) = console.feed(*event) {
-                        let _ = rustos_rt::key_inject(&record);
+            match input.poll(&mut events) {
+                Ok(drained) => {
+                    for event in &events[..drained] {
+                        if let Some(record) = console.feed(*event) {
+                            let _ = rustos_rt::key_inject(&record);
+                        }
                     }
                 }
+                Err(_) => return EXIT_DEVICE_FAULT,
             }
-            rustos_rt::yield_now();
         }
     }
 

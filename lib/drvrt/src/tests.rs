@@ -864,6 +864,66 @@ fn notify_wait_does_not_park_when_the_bind_is_refused() {
     assert_eq!(waits.get(), 0, "never parks on an unbound handle");
 }
 
+#[test]
+fn bind_irq_binds_once_and_caches_the_handle() {
+    // The explicit preflight a park-dependent event loop runs: the first
+    // call binds the granted line, the second is answered from the cache.
+    let mock = MockSyscalls::new();
+    let (line, binds, _) = mock.irq_observers();
+    let host =
+        RtDriverHost::new(caps(&[CapabilityId::IRQ_BIND]), mock, &[irq_grant()], None).unwrap();
+
+    assert_eq!(host.bind_irq(), Ok(()));
+    assert_eq!(host.bind_irq(), Ok(()));
+    assert_eq!(line.get(), IRQ_LINE, "binds the node's granted line");
+    assert_eq!(binds.get(), 1, "the line is bound exactly once (cached)");
+}
+
+#[test]
+fn bind_irq_without_the_bind_capability_is_permission_denied() {
+    // Capability before the trap: no `CAP_IRQ_BIND`, no bind syscall, and
+    // the caller learns its interrupt park cannot work (fail loud).
+    let mock = MockSyscalls::new();
+    let (_, binds, _) = mock.irq_observers();
+    let host = RtDriverHost::new(caps(&[]), mock, &[irq_grant()], None).unwrap();
+
+    assert_eq!(host.bind_irq(), Err(DriverError::PermissionDenied));
+    assert_eq!(binds.get(), 0);
+}
+
+#[test]
+fn bind_irq_without_an_irq_grant_is_not_found() {
+    // A mis-provisioned node granted no IRQ line: the preflight reports it
+    // rather than letting the event loop degrade into a busy re-poll.
+    let mock = MockSyscalls::new();
+    let (_, binds, _) = mock.irq_observers();
+    let host = RtDriverHost::new(
+        caps(&[CapabilityId::IRQ_BIND, CapabilityId::MEM_DMA]),
+        mock,
+        &[dma_grant()],
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(host.bind_irq(), Err(DriverError::NotFound));
+    assert_eq!(binds.get(), 0);
+}
+
+#[test]
+fn bind_irq_surfaces_a_refused_bind_and_caches_nothing() {
+    // A kernel-refused bind is surfaced and retried on the next call —
+    // never a cached bogus handle.
+    let mock = MockSyscalls::new();
+    mock.fail_irq_bind(Errno::PermissionDenied);
+    let (_, binds, _) = mock.irq_observers();
+    let host =
+        RtDriverHost::new(caps(&[CapabilityId::IRQ_BIND]), mock, &[irq_grant()], None).unwrap();
+
+    assert_eq!(host.bind_irq(), Err(DriverError::DeviceFault));
+    assert_eq!(host.bind_irq(), Err(DriverError::DeviceFault));
+    assert_eq!(binds.get(), 2, "a refused bind is retried, never cached");
+}
+
 // --- `mailbox`: client-side firmware property exchange over `ipc_call` ---
 
 #[test]

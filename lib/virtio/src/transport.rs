@@ -301,6 +301,9 @@ pub struct MockTransport {
     /// Records of every notify-call (in order), for assertions in
     /// unit tests.
     pub notify_log: RefCell<Vec<u16>>,
+    /// Number of [`Transport::ack_interrupt`] calls, for assertions that
+    /// a driver acknowledges the device once per wait + drain cycle.
+    pub ack_interrupts: u32,
 }
 
 impl MockTransport {
@@ -326,6 +329,7 @@ impl MockTransport {
             queues,
             config: alloc::vec![0u8; config_len],
             notify_log: RefCell::new(Vec::new()),
+            ack_interrupts: 0,
         }
     }
 
@@ -590,6 +594,11 @@ impl Transport for MockTransport {
                 *b = 0;
             }
         }
+    }
+    fn ack_interrupt(&mut self) {
+        // No device line to de-assert; count the call so unit tests can
+        // assert the driver acknowledged once per wait + drain cycle.
+        self.ack_interrupts += 1;
     }
 }
 

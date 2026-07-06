@@ -86,6 +86,12 @@ mod program {
     /// restricted-sender endpoint). A reserved, fail-closed value.
     const EXIT_ENDPOINT_FAILED: i32 = 83;
 
+    /// Exit code when the serve loop's `call_recv` failed — a destroyed
+    /// endpoint or a torn-down task, both terminal. Exiting fail-loud beats
+    /// yield-retrying a dead channel forever, which is a busy spin; the
+    /// spawning supervisor decides whether to relaunch. A reserved value.
+    const EXIT_SERVE_FAILED: i32 = 84;
+
     /// Property-channel poll budget for a single exchange. The main consumer
     /// is the VL805 firmware reload, which the kernel scaffold allowed a
     /// generous budget; mirror that headroom so a slow firmware reply is not
@@ -204,19 +210,24 @@ mod program {
             return EXIT_ENDPOINT_FAILED;
         }
 
-        serve(&channel);
-        // `slab` is intentionally kept alive until here (the serve loop never
-        // returns); naming it silences an "unused" lint without dropping the
-        // buffer the mailbox still references.
+        serve(&channel)
+        // `slab` is intentionally kept alive until here (the serve loop runs
+        // for the life of the service); its drop after `serve` returns is
+        // what releases the buffer the mailbox referenced.
     }
 
-    /// The never-returning serve loop: block in `call_recv`, transform the
-    /// request through the mailbox transport, and answer with `call_reply`.
+    /// The serve loop: block in `call_recv` (a real park between requests),
+    /// transform the request through the mailbox transport, and answer with
+    /// `call_reply`.
     ///
-    /// A `call_recv` error (a transient refusal or a destroyed endpoint)
-    /// yields and retries rather than spinning or exiting. A reply that fails to encode is dropped to a zero-length reply,
-    /// which the client decodes as a fail-closed truncation.
-    fn serve(channel: &ServiceChannel) -> ! {
+    /// A `call_recv` error is terminal — the endpoint is sized so an
+    /// oversize request is refused at send time, leaving only a destroyed
+    /// endpoint or a torn-down task — so it ends the service fail-loud
+    /// (the supervisor decides whether to relaunch) rather than yield-retry
+    /// a dead channel forever, which is a busy spin. A reply that fails to
+    /// encode is dropped to a zero-length reply, which the client decodes
+    /// as a fail-closed truncation.
+    fn serve(channel: &ServiceChannel) -> i32 {
         let mut request = [0u8; mailbox_ipc::REQUEST_LEN];
         let mut reply = [0u8; mailbox_ipc::REPLY_LEN];
         loop {
@@ -227,7 +238,7 @@ mod program {
                         mailbox_ipc::serve_request(channel, &request[..n], &mut reply).unwrap_or(0);
                     let _ = rustos_rt::call_reply(MAILBOX_ENDPOINT, ticket, &reply[..len]);
                 }
-                Err(_) => rustos_rt::yield_now(),
+                Err(_) => return EXIT_SERVE_FAILED,
             }
         }
     }

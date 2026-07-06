@@ -295,6 +295,44 @@ impl<S: GrantSyscalls> RtDriverHost<S> {
         u32::try_from(slot.resource.base()).ok()
     }
 
+    /// Bind the driver's granted device interrupt line, caching the
+    /// kernel-minted handle so the bind syscall runs at most once.
+    ///
+    /// [`VirtioHost::notify_wait`] binds lazily through this same path, but
+    /// a driver whose event loop *depends* on the interrupt park calls this
+    /// up front and fails loud on an error — silently degrading to a
+    /// re-poll loop when the park cannot work is the busy-wait the charter
+    /// forbids.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::PermissionDenied`] — the host was built without
+    ///   `CAP_IRQ_BIND`, so the bind trap would be refused.
+    /// * [`DriverError::NotFound`] — the delivered grants carry no IRQ
+    ///   line (an unbound or mis-provisioned node).
+    /// * [`DriverError::DeviceFault`] — the kernel refused the bind.
+    pub fn bind_irq(&self) -> Result<(), DriverError> {
+        if self.irq_handle.get() != 0 {
+            return Ok(());
+        }
+        // Capability before the trap; the kernel re-checks `CAP_IRQ_BIND`
+        // regardless.
+        if !self.caps.contains(CapabilityId::IRQ_BIND) {
+            return Err(DriverError::PermissionDenied);
+        }
+        let Some(line) = self.irq_line() else {
+            return Err(DriverError::NotFound);
+        };
+        let ret = self.syscalls.irq_bind(line);
+        if ret <= 0 {
+            return Err(DriverError::DeviceFault);
+        }
+        #[allow(clippy::cast_sign_loss)]
+        // `ret > 0` checked above; it is a kernel-minted handle.
+        self.irq_handle.set(ret as u64);
+        Ok(())
+    }
+
     /// The URB-transport call-endpoint id the class driver submits URBs to,
     /// from the single [`HwResourceKind::Endpoint`] grant its matched
     /// interface node carried, or `None` if it holds no such grant.
@@ -484,39 +522,24 @@ impl<S: GrantSyscalls> VirtioHost for RtDriverHost<S> {
         // raises one MSI/MMIO line (not per-queue), so `queue_index` is not
         // part of the wait key: the driver re-scans every used ring on wake.
         //
-        // The line is bound lazily on the first call and cached, so the bind
-        // syscall runs at most once. The kernel re-arms
-        // the line across each park on the driver's behalf — the driver holds
-        // no controller access — so this just `irq_wait`s the bound
-        // handle. A driver granted no IRQ line (or lacking `CAP_IRQ_BIND`)
-        // returns without parking; its caller then re-polls and yields
-        // (fail safe, never a wedged wait).
-        let mut handle = self.irq_handle.get();
-        if handle == 0 {
-            // Capability before the trap; the kernel
-            // re-checks `CAP_IRQ_BIND` regardless.
-            if !self.caps.contains(CapabilityId::IRQ_BIND) {
-                return;
-            }
-            let Some(line) = self.irq_line() else {
-                return;
-            };
-            let ret = self.syscalls.irq_bind(line);
-            if ret <= 0 {
-                return;
-            }
-            #[allow(clippy::cast_sign_loss)]
-            // `ret > 0` checked above; it is a kernel-minted handle.
-            let bound = ret as u64;
-            self.irq_handle.set(bound);
-            handle = bound;
+        // The line is bound lazily on the first call through [`Self::bind_irq`]
+        // and cached, so the bind syscall runs at most once. The kernel
+        // re-arms the line across each park on the driver's behalf — the
+        // driver holds no controller access — so this just `irq_wait`s the
+        // bound handle. A driver granted no IRQ line (or lacking
+        // `CAP_IRQ_BIND`) returns without parking; its caller then re-polls
+        // (fail safe, never a wedged wait). A driver whose event loop
+        // *depends* on the park preflights `bind_irq` and fails loud instead
+        // of relying on this silent fallback.
+        if self.bind_irq().is_err() {
+            return;
         }
         // Unbounded wait: the loop terminates on a fire, a binding release
         // (a spurious wake the caller tolerates by re-scanning), or never —
         // the device is the only thing that completes a virtio request. The
         // terminal outcome is intentionally discarded; the trait returns `()`
         // and the caller re-checks its rings on return.
-        let _ = self.syscalls.irq_wait(handle, u64::MAX);
+        let _ = self.syscalls.irq_wait(self.irq_handle.get(), u64::MAX);
     }
 }
 

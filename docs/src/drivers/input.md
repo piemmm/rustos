@@ -194,9 +194,15 @@ over its kernel-issued grants (coherency `None` — coherent DMA, platform-neutr
 one definition shared with the USB keyboard driver, §2.2 / §2.16), maps it
 through `mmio_map`, builds the bus-agnostic `MmioTransport`, brings the device up
 with `VirtioInput::open`, and loops `poll` → `VirtioKeyboardConsole::feed` →
-`key_inject`, yielding between polls (`AGENTS.md` §2.1). Every capability and
-bound is re-checked kernel-side (`AGENTS.md` §5.4); a bring-up failure exits with
-a reserved fail-closed code (`80`/`81`/`82`). It is a separate crate from the §8
+`key_inject`. The pump is interrupt-driven: bring-up preflights
+`RtDriverHost::bind_irq` on the granted device line, `poll` parks in the kernel
+(`irq_wait` through the host's `notify_wait`) while no event is pending and
+acknowledges the device each cycle (`Transport::ack_interrupt`), so an idle
+keyboard consumes no CPU — never a yield-poll loop (`AGENTS.md` §2.23). Every
+capability and bound is re-checked kernel-side (`AGENTS.md` §5.4); a bring-up
+failure exits with a reserved fail-closed code (`80`/`81`/`82`) and a hard
+device fault exits `83` rather than spinning on a broken device. It is a
+separate crate from the §8
 `rustos-drv-input-virtio-input` identity so it can link `rustos-rt` without
 pulling it into the kernel-linked driver shell (`AGENTS.md` §2.2 — the `usb_kbd`
 analogue).
@@ -322,10 +328,14 @@ over its kernel-issued grants (coherent DMA is carved kernel-side, so no
 architecture-specific cache shim is supplied — platform-neutral, `AGENTS.md`
 §2.20), derives its BAR + DMA aperture from the same grants with
 `rustos_hid::derive_keyboard_resources` (no second `resource_grants` syscall,
-`AGENTS.md` §2.16), runs `rustos_hid::bring_up_boot_keyboard`, and then polls
+`AGENTS.md` §2.16), runs `rustos_hid::bring_up_boot_keyboard`, and then pumps
 the keyboard forever with `rustos_hid::pump_once`, injecting each decoded key
-edge into the kernel input-focus arbiter through the `key_inject` syscall and
-yielding between polls (`AGENTS.md` §2.1). The host adds no authority — every
+edge into the kernel input-focus arbiter through the `key_inject` syscall.
+Each `pump_once` is a blocking URB `ipc_call` the host-controller driver
+answers only when the controller's completion interrupt delivers a report, so
+the driver parks in the kernel between keystrokes — never a busy poll
+(`AGENTS.md` §2.23) — and repeated pump errors exit fail-closed after a
+bounded budget. The host adds no authority — every
 capability and bound is re-checked kernel-side (`AGENTS.md` §5.4) — and a
 bring-up failure exits with a reserved fail-closed code, leaving the console
 without a keyboard rather than wedged (`AGENTS.md` §2.9). This bundle is
