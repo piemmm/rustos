@@ -85,6 +85,12 @@ rustos-test-encrypted-root-image = { path = "../../tests/integration/encrypted_r
 # keyboard driver bundle in `/System/Drivers/`, so the booted kernel discovers,
 # verifies, and spawns it off the very volume it mounts (`AGENTS.md` §2.2).
 rustos-test-autoload-root-image = { path = "../../tests/integration/autoload_root_image", version = "=0.0.0" }
+# The memory-stability vertical's fixture constants: the `MEMSOAK PASS`
+# marker its serial script waits for is pinned against the fixture's own
+# `PASS_MARKER` by a unit test, so the script and the program cannot drift.
+# `default-features = false`: the fixture's `program` feature (its `Run`
+# binary's userland runtime) is for its freestanding cross-compile only.
+rustos-test-memsoak = { path = "../../tests/integration/memsoak_program", version = "=0.0.0", default-features = false }
 # The fuzz/proptest orchestrators and the in-tree harnesses share one
 # per-run seed/budget vocabulary: the orchestrator picks and logs the
 # seed, the harness reads it. Both sides use `rustos-fuzzseed` so the

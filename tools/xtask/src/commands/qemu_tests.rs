@@ -106,6 +106,13 @@ enum FsDisk {
     /// in its `Drivers/` store — the pre-unlock driver-loading-by-discovery
     /// autoload vertical's backing (`plans/PI.md` design B / B2).
     AutoloadRootDisk,
+    /// The [`Self::EncryptedRootDisk`] layout whose **read-only `/System`
+    /// volume** additionally carries the test-only `memsoak` fixture bundle
+    /// ([`super::image_apps::memsoak_store_files`]) — the memory-stability
+    /// vertical's backing (`plans/APPS.md` "Immediate work" I2/I3). The
+    /// fixture crate lives outside the userland discovery walk, so only
+    /// this disk ever carries it; no production image ships it.
+    MemsoakRootDisk,
 }
 
 /// `true` if `line` is exactly `value` followed by a single `\n`.
@@ -186,6 +193,13 @@ const SESSION_USERNAME_LINE: &str = "root\n";
 /// The password line the session-ceiling vertical types at the login
 /// view's `Password` field.
 const SESSION_PASSWORD_LINE: &str = "root\n";
+
+/// Serial marker the memory-stability vertical waits for before typing the
+/// shell `exit` that completes its PASS chain: the leading prefix of the
+/// memsoak fixture's success report line. Pinned to the fixture's own
+/// `rustos_test_memsoak::PASS_MARKER` by a unit test below, so the script
+/// and the program cannot drift.
+const MEMSOAK_PASS_PREFIX: &str = "MEMSOAK PASS baseline=";
 
 /// `true` if the two byte strings are equal — the compile-time complement of
 /// [`is_line_of`] for asserting a typed line does **not** match the fixture.
@@ -2730,6 +2744,52 @@ const TESTS: &[QemuTest] = &[
             ),
         ],
     },
+    // `plans/APPS.md` "Immediate work" I2/I3: the memory-stability vertical.
+    // `rustos-test-memsoak-qemu-aarch64` boots the *production* aarch64
+    // pipeline with the encrypted-root disk that carries the standard
+    // signed store bundles **plus** the test-only `memsoak` fixture bundle
+    // (`FsDisk::MemsoakRootDisk`), unlocks the root, authenticates
+    // `root`/`root` at the console login, and types the bare word `memsoak`
+    // at the shell. The fixture warms up, samples
+    // `KernelMemoryStats.free_bytes` through sysinfod (its manifest's
+    // `CAP_SYSINFO_KERNEL`, enforced against the kernel-attested origin),
+    // drives 32 measured cycles — each a spawn+reap of `true.app` (the full
+    // teardown path), a timed `stream_read` whose bound elapses (the
+    // `top -d0` refresh park), a self-scoped process-list walk, and a live
+    // sysinfod IPC round trip — then requires the final sample to equal the
+    // baseline **exactly**. On a stable soak it prints `MEMSOAK PASS
+    // baseline=… final=…` and exits 0; on any failure it prints the reason
+    // and parks forever (it never exits), so the run times out fail-loud
+    // with the numbers in the transcript. The guest audit sink arms on the
+    // fixture's audited `exit` (`sc=exit`, `comm=memsoak`) and reports PASS
+    // on the next audited `exit` — the shell's, typed only after the
+    // `MEMSOAK PASS` marker appeared — so the numeric verdict provably
+    // reached the transcript before the run ended (the session-ceiling
+    // arm-then-exit discipline). A 300-second budget covers boot + bounded
+    // PBKDF2 + the 36-cycle soak on QEMU TCG (each cycle is a full
+    // spawn/reap plus two sysinfod round trips, on top of the
+    // session-ceiling verticals' 120-second boot-and-dialogue baseline);
+    // single CPU like the other full-boot verticals.
+    QemuTest {
+        package: "rustos-test-memsoak-qemu-aarch64",
+        binary: "rustos-test-memsoak-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::MemsoakRootDisk,
+        keyboard: None,
+        pointer: false,
+        serial: &[
+            ("Root filesystem passphrase: ", UNLOCK_PASSPHRASE_LINE),
+            ("Username:", SESSION_USERNAME_LINE),
+            ("Password", SESSION_PASSWORD_LINE),
+            ("root@rustos ~% ", "memsoak\n"),
+            (MEMSOAK_PASS_PREFIX, "exit\n"),
+        ],
+    },
     // `plans/PI.md` design B / B2: the pre-unlock driver-loading-by-discovery
     // autoload vertical. `rustos-test-autoload-input-qemu-aarch64` boots the
     // *production* aarch64 pipeline on the `virt` board with the
@@ -3138,9 +3198,12 @@ pub fn build_all(ctx: &Context) -> Result<(), String> {
         ctx.run(&label, cmd)?;
     }
     // Pre-warm the composed application-bundle store the encrypted-root
-    // plants lay onto their `/System` volume, so the (possibly concurrent)
-    // run passes reuse one composition instead of racing to build it.
+    // plants lay onto their `/System` volume — and its memsoak-augmented
+    // sibling the memory-stability vertical plants — so the (possibly
+    // concurrent) run passes reuse one composition instead of racing to
+    // build it.
     super::image_apps::app_store_files(ctx)?;
+    super::image_apps::memsoak_store_files(ctx)?;
     Ok(())
 }
 
@@ -3256,13 +3319,16 @@ pub fn run_once(ctx: &Context) -> Result<(), String> {
     // jobs are built, so the `'static` job closures capture a plain slice
     // reference rather than the borrowed context.
     let apps = super::image_apps::app_store_files(ctx)?;
+    let apps_with_memsoak = super::image_apps::memsoak_store_files(ctx)?;
     let jobs: Vec<Job> = TESTS
         .iter()
         .map(|t| {
             let label = format!("test --qemu (run {}) cpus={}", t.package, t.cpus);
             let weight = usize::try_from(t.cpus).unwrap_or(1);
             let target_dir = target_dir.clone();
-            Job::closure(label, weight, move || run_one(&target_dir, t, apps))
+            Job::closure(label, weight, move || {
+                run_one(&target_dir, t, apps, apps_with_memsoak)
+            })
         })
         .collect();
     parallel::run(jobs, budget)
@@ -3292,13 +3358,16 @@ impl Enrolment {
     /// with no retry. `target_dir` is where the pre-built kernel binaries live
     /// (see [`build_all`]); `apps` is the composed application-bundle store
     /// the encrypted-root plants lay onto their `/System` volume
-    /// ([`super::image_apps::app_store_files`]).
+    /// ([`super::image_apps::app_store_files`]), and `apps_with_memsoak` its
+    /// memsoak-augmented sibling the memory-stability vertical plants
+    /// ([`super::image_apps::memsoak_store_files`]).
     pub(crate) fn run(
         &self,
         target_dir: &Path,
         apps: &'static [super::image_apps::AppStoreFile],
+        apps_with_memsoak: &'static [super::image_apps::AppStoreFile],
     ) -> Result<(), String> {
-        run_one(target_dir, self.test, apps)
+        run_one(target_dir, self.test, apps, apps_with_memsoak)
     }
 }
 
@@ -3341,6 +3410,7 @@ fn run_one(
     target_dir: &Path,
     t: &QemuTest,
     apps: &[super::image_apps::AppStoreFile],
+    apps_with_memsoak: &[super::image_apps::AppStoreFile],
 ) -> Result<(), String> {
     let kernel: PathBuf = target_dir.join(t.target).join("debug").join(t.binary);
     // Select the per-arch QEMU `Spec`: the riscv64 enrolments boot the
@@ -3380,40 +3450,75 @@ fn run_one(
     }
 
     // Attach the shared filesystem volume as the backing image, when the
-    // enrolment names one. The bytes come from a single-source-of-truth
-    // image fixture the kernel-side tail also names, so the planted
-    // on-disk layout and the guest's expectations cannot drift: the FAT32 fixture is hand-built; the rustfs
-    // fixture is authored by the real rustfs driver itself (format +
-    // plant). Only the non-zero sectors are planted; the planter
-    // zero-fills the rest, matching a freshly-formatted volume.
-    let fs_image: Option<(&str, Vec<u8>, u64)> = match t.fs_disk {
+    // enrolment names one. Only the non-zero sectors are planted; the
+    // planter zero-fills the rest, matching a freshly-formatted volume.
+    if let Some(fs) = fs_disk_image(t, apps, apps_with_memsoak)? {
+        let image = kernel.with_extension(fs.extension);
+        let sector_bytes = rustos_qemu::disk::SECTOR_BYTES;
+        let planted: Vec<(u64, &[u8])> = fs
+            .bytes
+            .chunks(sector_bytes)
+            .enumerate()
+            .filter(|(_, chunk)| chunk.iter().any(|&b| b != 0))
+            .map(|(lba, chunk)| (lba as u64, chunk))
+            .collect();
+        rustos_qemu::disk::plant_raw_disk(&image, fs.total_sectors, &planted)
+            .map_err(|e| format!("test --qemu ({}): plant filesystem disk: {e}", t.package))?;
+        spec = spec.with_virtio_blk(&image);
+    }
+
+    finish_run(t, &kernel, spec)
+}
+
+/// A filesystem volume to plant on an enrolment's virtio-blk backing image.
+struct FsImage {
+    /// File extension of the backing image planted beside the kernel binary.
+    extension: &'static str,
+    /// The volume bytes the planter lays down (non-zero sectors only).
+    bytes: Vec<u8>,
+    /// The emulated device's total sector count.
+    total_sectors: u64,
+}
+
+/// The filesystem volume `t` plants on its virtio-blk backing image, or
+/// `None` for an enrolment with no filesystem disk. The bytes come from a
+/// single-source-of-truth image fixture the kernel-side tail also names, so
+/// the planted on-disk layout and the guest's expectations cannot drift:
+/// the FAT32 fixture is hand-built; the rustfs fixture is authored by the
+/// real rustfs driver itself (format + plant).
+fn fs_disk_image(
+    t: &QemuTest,
+    apps: &[super::image_apps::AppStoreFile],
+    apps_with_memsoak: &[super::image_apps::AppStoreFile],
+) -> Result<Option<FsImage>, String> {
+    Ok(match t.fs_disk {
         FsDisk::None => None,
-        FsDisk::Fat32 => Some((
-            "fat32.img",
-            rustos_test_fat32_image::build_image(),
-            rustos_test_fat32_image::TOTAL_SECTORS,
-        )),
-        FsDisk::Rustfs => Some((
-            "rustfs.img",
-            rustos_test_rustfs_image::build_image()
+        FsDisk::Fat32 => Some(FsImage {
+            extension: "fat32.img",
+            bytes: rustos_test_fat32_image::build_image(),
+            total_sectors: rustos_test_fat32_image::TOTAL_SECTORS,
+        }),
+        FsDisk::Rustfs => Some(FsImage {
+            extension: "rustfs.img",
+            bytes: rustos_test_rustfs_image::build_image()
                 .map_err(|e| format!("test --qemu ({}): build rustfs image: {e:?}", t.package))?,
-            rustos_test_rustfs_image::TOTAL_SECTORS,
-        )),
-        FsDisk::UsersRoot => Some((
-            "users.img",
-            rustos_test_rustfs_image::build_users_root_image().map_err(|e| {
+            total_sectors: rustos_test_rustfs_image::TOTAL_SECTORS,
+        }),
+        FsDisk::UsersRoot => Some(FsImage {
+            extension: "users.img",
+            bytes: rustos_test_rustfs_image::build_users_root_image().map_err(|e| {
                 format!("test --qemu ({}): build users-root image: {e:?}", t.package)
             })?,
-            rustos_test_rustfs_image::TOTAL_SECTORS,
-        )),
-        FsDisk::EncryptedRootDisk => Some((
-            "encrypted-root.img",
-            encrypted_root_disk_bytes(t, apps)?,
-            rustos_test_encrypted_root_image::TOTAL_SECTORS,
-        )),
-        FsDisk::AutoloadRootDisk => Some((
-            "autoload-root.img",
-            super::image_apps::with_plant_refs(apps, |files| {
+            total_sectors: rustos_test_rustfs_image::TOTAL_SECTORS,
+        }),
+        FsDisk::EncryptedRootDisk => Some(FsImage {
+            extension: "encrypted-root.img",
+            bytes: encrypted_root_disk_bytes(t, apps)?,
+            total_sectors: rustos_test_encrypted_root_image::TOTAL_SECTORS,
+        }),
+        FsDisk::AutoloadRootDisk => Some(FsImage {
+            extension: "autoload-root.img",
+            bytes: super::image_apps::with_plant_refs(apps, |files| {
                 rustos_test_autoload_root_image::build_image(files)
             })
             .map_err(|e| {
@@ -3422,23 +3527,24 @@ fn run_one(
                     t.package
                 )
             })?,
-            rustos_test_autoload_root_image::TOTAL_SECTORS,
-        )),
-    };
-    if let Some((extension, bytes, total_sectors)) = fs_image {
-        let image = kernel.with_extension(extension);
-        let sector_bytes = rustos_qemu::disk::SECTOR_BYTES;
-        let planted: Vec<(u64, &[u8])> = bytes
-            .chunks(sector_bytes)
-            .enumerate()
-            .filter(|(_, chunk)| chunk.iter().any(|&b| b != 0))
-            .map(|(lba, chunk)| (lba as u64, chunk))
-            .collect();
-        rustos_qemu::disk::plant_raw_disk(&image, total_sectors, &planted)
-            .map_err(|e| format!("test --qemu ({}): plant filesystem disk: {e}", t.package))?;
-        spec = spec.with_virtio_blk(&image);
-    }
+            total_sectors: rustos_test_autoload_root_image::TOTAL_SECTORS,
+        }),
+        // The encrypted-root layout with the memsoak-augmented bundle set:
+        // the same builder, planting the same store plus the one test-only
+        // fixture bundle.
+        FsDisk::MemsoakRootDisk => Some(FsImage {
+            extension: "memsoak-root.img",
+            bytes: encrypted_root_disk_bytes(t, apps_with_memsoak)?,
+            total_sectors: rustos_test_encrypted_root_image::TOTAL_SECTORS,
+        }),
+    })
+}
 
+/// Attach `t`'s remaining devices (network capture, display, input, the
+/// scripted serial dialogue) to `spec` and drive the guest to its outcome.
+/// `kernel` is the enrolment's binary path, which names the sibling capture
+/// file.
+fn finish_run(t: &QemuTest, kernel: &Path, mut spec: Spec) -> Result<(), String> {
     // Attach a QEMU user-mode (SLIRP) virtio-net interface for networking
     // tests, dumping every frame to a `<binary>.pcap` capture beside the
     // kernel image so a failing run leaves the on-wire exchange to inspect.
@@ -3490,8 +3596,22 @@ fn run_one(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_targets, PrimePlan, TESTS};
+    use super::{build_targets, PrimePlan, MEMSOAK_PASS_PREFIX, TESTS};
     use std::time::Duration;
+
+    /// The memory-stability vertical's serial-script marker is the leading
+    /// prefix of the memsoak fixture's own success report line: it starts
+    /// with the fixture's `PASS_MARKER` and matches the exact rendering
+    /// `report_line` produces, so the script and the program cannot drift.
+    #[test]
+    fn memsoak_script_marker_matches_the_fixture_report() {
+        assert!(MEMSOAK_PASS_PREFIX.starts_with(rustos_test_memsoak::PASS_MARKER));
+        let pass = rustos_test_memsoak::report_line(rustos_test_memsoak::Verdict::Stable, 7, 7);
+        assert!(
+            pass.starts_with(MEMSOAK_PASS_PREFIX),
+            "fixture PASS line {pass:?} must start with the script marker {MEMSOAK_PASS_PREFIX:?}"
+        );
+    }
 
     #[test]
     fn priming_resolves_and_exports_both_when_nothing_is_pinned() {

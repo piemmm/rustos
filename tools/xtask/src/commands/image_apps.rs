@@ -30,7 +30,8 @@ use std::sync::OnceLock;
 
 use rustos_abi::{AppInfoHeader, BundleEntry, BundleFileDigest, APPINFO_MAGIC};
 use rustos_itest_harness::app_image::{
-    compose_signed_appinfo, discover_app_manifests, DiscoveredApp,
+    compose_signed_appinfo, discover_app_manifests, discover_crate_manifest, DiscoveredApp,
+    APP_MANIFEST_SOURCE,
 };
 use rustos_itest_harness::elf2rxe::elf_to_rxe;
 use rustos_itest_harness::USER_IMAGE_BIAS;
@@ -55,7 +56,10 @@ pub struct BuiltAppBundle {
 }
 
 /// One `/System`-volume-relative file a built bundle plants, as owned path
-/// components plus bytes (e.g. `Apps/ls.app/AppInfo`).
+/// components plus bytes (e.g. `Apps/ls.app/AppInfo`). `Clone` so a
+/// vertical-specific plant list can extend the shared composed set without
+/// re-composing it.
+#[derive(Clone)]
 pub struct AppStoreFile {
     /// The path components relative to the `/System` volume root.
     pub components: Vec<Vec<u8>>,
@@ -122,6 +126,45 @@ pub fn app_store_files(ctx: &Context) -> Result<&'static [AppStoreFile], String>
     static FILES: OnceLock<Result<Vec<AppStoreFile>, String>> = OnceLock::new();
     FILES
         .get_or_init(|| build_app_bundles(ctx).map(|bundles| store_files(&bundles)))
+        .as_ref()
+        .map(Vec::as_slice)
+        .map_err(Clone::clone)
+}
+
+/// Crate directory of the test-only `memsoak` memory-stability fixture
+/// (`plans/APPS.md` "Immediate work" I2/I3), relative to the workspace
+/// root. It lives outside the userland discovery walk deliberately: the
+/// fixture is planted only on the memory-stability vertical's disk, never
+/// on a production image.
+const MEMSOAK_CRATE_DIR: &str = "tests/integration/memsoak_program";
+
+/// The composed store files the memory-stability vertical's disk plants:
+/// the shared [`app_store_files`] set **plus** the test-only `memsoak`
+/// fixture bundle, composed through the same discovery/compose/sign path
+/// as every store bundle and memoised like the shared set.
+///
+/// # Errors
+///
+/// As [`build_app_bundles`], plus a failed fixture-manifest discovery.
+pub fn memsoak_store_files(ctx: &Context) -> Result<&'static [AppStoreFile], String> {
+    static FILES: OnceLock<Result<Vec<AppStoreFile>, String>> = OnceLock::new();
+    FILES
+        .get_or_init(|| {
+            let base = app_store_files(ctx)?;
+            let crate_dir = ctx.workspace_root.join(MEMSOAK_CRATE_DIR);
+            let app = discover_crate_manifest(&crate_dir)
+                .map_err(|e| format!("image: memsoak manifest discovery: {e}"))?
+                .ok_or_else(|| {
+                    format!(
+                        "image: {} has no {APP_MANIFEST_SOURCE}",
+                        crate_dir.display()
+                    )
+                })?;
+            let bundle = build_bundle(ctx, &app)?;
+            let mut files = base.to_vec();
+            files.extend(store_files(&[bundle]));
+            Ok(files)
+        })
         .as_ref()
         .map(Vec::as_slice)
         .map_err(Clone::clone)

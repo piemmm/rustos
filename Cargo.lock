@@ -2239,6 +2239,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-memsoak"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-procinfo",
+ "rustos-rt",
+]
+
+[[package]]
+name = "rustos-test-memsoak-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "rustos-arch-aarch64",
+ "rustos-itest-harness",
+ "rustos-kalloc",
+ "rustos-kernel",
+ "rustos-log",
+ "rustos-test-memsoak",
+]
+
+[[package]]
 name = "rustos-test-mmio-map"
 version = "0.0.0"
 dependencies = [
@@ -3179,6 +3200,7 @@ dependencies = [
  "rustos-test-autoload-root-image",
  "rustos-test-encrypted-root-image",
  "rustos-test-fat32-image",
+ "rustos-test-memsoak",
  "rustos-test-rustfs-image",
  "rustos-vcmailbox",
 ]

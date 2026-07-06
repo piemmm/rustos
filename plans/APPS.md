@@ -88,8 +88,8 @@ by `tools/syshelp`, never a hand-maintained per-bundle list (§6.1, `AGENTS.md`
 
 Four kernel defects observed on the running system MUST be fixed before the
 remaining APPS deliverables continue. Each item records its root cause and
-design (or landed behaviour) so any context can pick it up; I3 is the open
-remainder. Statuses per `AGENTS.md` §13.
+design (or landed behaviour) so any context can pick it up; all four are
+now done. Statuses per `AGENTS.md` §13.
 
 ### I1. Idle load average pinned at ~1 — IPC wake-all thundering herd
 
@@ -158,20 +158,25 @@ when convenient), with one staged follow-up below.
   spawn/wait/session QEMU verticals (all three ports) execute the real
   teardown at every child reap. Documented in
   `docs/src/architecture/memory.md`.
-- **Follow-up (staged):** a QEMU vertical asserting *numeric* free-memory
-  stability across N login/logout cycles. The reap-and-relaunch cycle and
-  the teardown already run end to end on QEMU (`spawn_session_qemu_*`
-  supervises login through exit → reap → respawn), but no existing fixture
-  can observe `KernelMemoryStats` (the audit-sink verticals have no
-  allocator handle; a `sysinfo_introspect`-reading EL0 fixture with a
-  spawn/wait loop is a new vertical). Land it as its own change; the
-  accounting equality is meanwhile pinned by the host layers above.
+- **Follow-up (done):** the numeric free-memory-stability QEMU vertical
+  (`tests/integration/memsoak_qemu_aarch64`, shared with I3 below). The
+  `memsoak` fixture command app (`tests/integration/memsoak_program` —
+  outside the userland discovery walk, so no production image ships it;
+  composed/signed by the same xtask composer and planted only on that
+  vertical's `FsDisk::MemsoakRootDisk` disk) runs from the scripted root
+  shell and drives warmup + 32 measured spawn/wait cycles of `true.app`
+  (the full reap-and-teardown path), asserting the final
+  `KernelMemoryStats.free_bytes` — read through sysinfod's
+  `KERNEL_MEMORY_STATS` query under its manifest's `CAP_SYSINFO_KERNEL` —
+  equals the baseline **exactly** (the host-tested
+  `rustos_test_memsoak::verdict`). On failure it prints `MEMSOAK FAIL
+  baseline=… final=…` and parks forever, so the run times out fail-loud
+  with the numbers in the transcript.
 
 ### I3. `top -d0` crashes the OS after ~1 h on a 180 MiB instance
 
-**Status: in progress** (host reproduction landed and green; every
-host-reachable layer of the refresh cycle is exonerated — the remaining step
-is the live/QEMU numeric re-test below).
+**Status: done** (host reproduction green and every host-reachable layer
+exonerated; the live/QEMU numeric re-test below is landed and green).
 
 - **Defect:** a continuous-refresh `top -d0` session on a 180 MiB QEMU
   instance eventually crashed the OS; suspected out-of-memory.
@@ -201,12 +206,16 @@ is the live/QEMU numeric re-test below).
   write-through sinks) this exonerates every layer reachable from the host;
   the I2 teardown leak (now fixed) remains the prime explanation if the
   session had login/exit churn.
-- **Remaining:** the live re-test — a bounded QEMU soak sampling
-  `KernelMemoryStats.free_bytes` under a scripted `top -d0` (the same
-  missing `sysinfo_introspect`-reading EL0 fixture the I2 follow-up needs;
-  land them together). If that soak still shows decay, the residue is in a
-  layer the host cannot reach (arch port, UART TX path, timer/IRQ plumbing)
-  and is isolated there.
+- **Landed — the live re-test** (`memsoak_qemu_aarch64`, shared with the
+  I2 follow-up above): each measured cycle replays the `top -d0` refresh
+  shape on the live production boot — a timed `stream_read` whose bound
+  elapses (the tickless refresh park), a self-scoped process-list walk,
+  and a `KERNEL_MEMORY_STATS` IPC round trip against the real `sysinfod`
+  — on top of the spawn/reap, and the strict baseline/final `free_bytes`
+  equality passes on QEMU. That reaches the layers the host soaks could
+  not (arch port, UART TX path, timer/IRQ plumbing), so no live decay
+  remains; a regression re-fails the vertical with the numbers in the
+  transcript.
 
 ### I4. Pi 4B (8 GiB) reports 863 MiB — only the first `/memory` range is used
 

@@ -277,33 +277,54 @@ pub fn discover_app_manifests(userland_root: &Path) -> Result<Vec<DiscoveredApp>
     let mut found: Vec<DiscoveredApp> = Vec::new();
     for class_dir in sorted_dirs(userland_root)? {
         for crate_dir in sorted_dirs(&class_dir)? {
-            let manifest_path = crate_dir.join(APP_MANIFEST_SOURCE);
-            if !manifest_path.is_file() {
+            let Some(discovered) = discover_crate_manifest(&crate_dir)? else {
                 continue;
-            }
-            let text = std::fs::read_to_string(&manifest_path)
-                .map_err(|e| AppImageError::new(manifest_path.display(), e))?;
-            let manifest = AppManifestSource::parse(&text)
-                .map_err(|e| AppImageError::new(manifest_path.display(), e))?;
-            let package = read_package_name(&crate_dir)?;
-            if let Some(clash) = found.iter().find(|d| d.manifest.name == manifest.name) {
+            };
+            if let Some(clash) = found
+                .iter()
+                .find(|d| d.manifest.name == discovered.manifest.name)
+            {
                 return Err(AppImageError::new(
-                    manifest_path.display(),
+                    crate_dir.join(APP_MANIFEST_SOURCE).display(),
                     format!(
                         "bundle name `{}` already claimed by package `{}`",
-                        manifest.name, clash.package
+                        discovered.manifest.name, clash.package
                     ),
                 ));
             }
-            found.push(DiscoveredApp {
-                package,
-                crate_dir,
-                manifest,
-            });
+            found.push(discovered);
         }
     }
     found.sort_by(|a, b| a.manifest.name.cmp(&b.manifest.name));
     Ok(found)
+}
+
+/// Parse one crate directory's `AppInfo.toml` manifest source (beside its
+/// `Cargo.toml`), or `None` when the crate authors no manifest. The
+/// per-crate half of [`discover_app_manifests`], shared with consumers that
+/// compose a single out-of-walk bundle (the memory-stability vertical's
+/// test-only fixture), so the parse + package-name resolution has one
+/// definition.
+///
+/// # Errors
+///
+/// Fails closed on an unreadable manifest, a manifest that does not parse,
+/// or a crate whose `Cargo.toml` package name cannot be read.
+pub fn discover_crate_manifest(crate_dir: &Path) -> Result<Option<DiscoveredApp>, AppImageError> {
+    let manifest_path = crate_dir.join(APP_MANIFEST_SOURCE);
+    if !manifest_path.is_file() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(&manifest_path)
+        .map_err(|e| AppImageError::new(manifest_path.display(), e))?;
+    let manifest = AppManifestSource::parse(&text)
+        .map_err(|e| AppImageError::new(manifest_path.display(), e))?;
+    let package = read_package_name(crate_dir)?;
+    Ok(Some(DiscoveredApp {
+        package,
+        crate_dir: crate_dir.to_path_buf(),
+        manifest,
+    }))
 }
 
 /// The immediate subdirectories of `root`, sorted by name so the walk is

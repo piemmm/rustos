@@ -247,6 +247,8 @@ members = [
     "tests/integration/signal_qemu_aarch64",
     "tests/integration/heap_program",
     "tests/integration/heap_qemu_aarch64",
+    "tests/integration/memsoak_program",
+    "tests/integration/memsoak_qemu_aarch64",
     "tests/integration/drvhost_qemu",
     "tests/integration/ps2_input_qemu_x86_64",
     "tests/integration/irq_qemu_x86_64",
