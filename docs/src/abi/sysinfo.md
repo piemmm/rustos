@@ -40,6 +40,7 @@ discipline as adding a syscall (`AGENTS.md` §9, §16.6):
 | `RESOURCE_LIMITS`       | none (self-scoped)     | no      |
 | `PROCESS_IDENTITY`      | none (self-scoped)     | no      |
 | `LOAD_AVERAGE`          | none                   | no      |
+| `USER_DIRECTORY`        | none                   | no      |
 
 `CAP_SYSINFO_GLOBAL`, `CAP_SYSINFO_KERNEL`, and `CAP_SYSINFO_HW` are
 [`CapabilityId`] values 13, 14, and 15. Self-scoped observers ("list my
@@ -58,7 +59,11 @@ kernel-attested `Origin`. `LOAD_AVERAGE` is ungated for the same reason
 as `UPTIME`: the `LoadAverage` response — the damped 1/5/15-minute
 run-queue averages (fixed-point, `LOAD_FIXED_SHIFT` fractional bits) plus
 the runnable/total-task and logged-in-user censuses — is the classic
-`uptime(1)` line, system-wide and secret-free.
+`uptime(1)` line, system-wide and secret-free. `USER_DIRECTORY` is
+ungated for the same reason: each `UserDirectoryRecord` carries only the
+`/etc/passwd`-class public uid + username pairing — never credential
+material, which stays behind the capability-gated `users_db_read`
+syscall — so any task may resolve account names for display.
 
 ## Wire framing
 

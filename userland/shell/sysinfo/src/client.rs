@@ -458,6 +458,8 @@ mod tests {
             1000,
             state,
             0,
+            0,
+            0,
             name,
         )
         .unwrap()
@@ -505,7 +507,7 @@ mod tests {
         assert!(lines[1].contains("init"));
         assert!(lines[1].contains(" R "));
         assert!(lines[2].contains("shell"));
-        assert!(lines[2].contains(" D "));
+        assert!(lines[2].contains(" S "));
         assert_eq!(
             fixture.seen.borrow().as_slice(),
             &[SysinfoQueryId::SELF_PROCESS_LIST]

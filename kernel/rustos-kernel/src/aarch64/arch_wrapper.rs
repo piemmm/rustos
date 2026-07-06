@@ -117,6 +117,13 @@ impl KernelArch for Aarch64BinArch {
         self.arch.monotonic_ns()
     }
 
+    fn ticks_to_ns(&self, ticks: u64) -> u64 {
+        // `ticks_now` is raw `CNTPCT_EL0`, so the identity default would
+        // misreport CPU time; convert against the same discovered timer
+        // frequency `monotonic_ns` uses.
+        self.arch.ticks_to_ns(ticks)
+    }
+
     fn wait_for_interrupt(&self) {
         // The tickless idle park. The dispatch loop
         // calls this with device IRQs already **masked** (it masked them to

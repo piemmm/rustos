@@ -43,6 +43,7 @@ pub fn run_all<S: SchedulerPolicy<TestArch>>() {
     lifecycle_error_codes::<S>();
     yield_current_semantics::<S>();
     running_cpu_agrees_with_current_task::<S>();
+    cpu_time_is_accounted_per_dispatch::<S>();
     no_starvation_under_priority_boost::<S>();
     fairness_no_band_is_starved::<S>();
     smp_stress_four_cores::<S>();
@@ -134,6 +135,43 @@ fn unpark_before_park_is_not_lost<S: SchedulerPolicy<TestArch>>() {
         sched.state_of(id),
         TaskState::Parked,
         "with no pending token, the next park takes effect"
+    );
+}
+
+/// The ticks that elapse while a task's body runs accumulate on that task
+/// (and only that task), observable through `cpu_ticks_of`; an unknown id
+/// is a typed refusal, never a fabricated zero.
+fn cpu_time_is_accounted_per_dispatch<S: SchedulerPolicy<TestArch>>() {
+    let (arch, sched) = make::<S>(1, 64);
+    arch.set_current_cpu(0);
+    let busy_arch = arch.clone();
+    let busy = sched
+        .spawn(0, Priority::Normal, move |_| {
+            // Model 5 ticks of on-CPU work per dispatch.
+            busy_arch.advance_ticks(5);
+            TaskAction::Yield
+        })
+        .expect("spawn busy");
+    let idle = sched
+        .spawn(0, Priority::Normal, |_| TaskAction::Yield)
+        .expect("spawn idle");
+    assert_eq!(sched.cpu_ticks_of(busy), Ok(0), "no run, no time");
+    let mut dispatched = 0;
+    while dispatched < 8 {
+        if matches!(sched.step(0), Ok(StepOutcome::Ran(_))) {
+            dispatched += 1;
+        }
+    }
+    let busy_ticks = sched.cpu_ticks_of(busy).expect("busy is live");
+    let idle_ticks = sched.cpu_ticks_of(idle).expect("idle is live");
+    assert!(busy_ticks >= 5, "the busy task accrued its work");
+    assert!(
+        busy_ticks > idle_ticks,
+        "time accrues to the task that spent it ({busy_ticks} vs {idle_ticks})"
+    );
+    assert!(
+        sched.cpu_ticks_of(u64::MAX).is_err(),
+        "an unknown id is refused, not reported as zero"
     );
 }
 

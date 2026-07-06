@@ -224,6 +224,13 @@ impl KernelArch for RiscvBinArch {
         self.arch.monotonic_ns()
     }
 
+    fn ticks_to_ns(&self, ticks: u64) -> u64 {
+        // `ticks_now` is the raw `time` CSR, so the identity default would
+        // misreport CPU time; convert against the same discovered timebase
+        // frequency `monotonic_ns` uses.
+        self.arch.ticks_to_ns(ticks)
+    }
+
     fn wait_for_interrupt(&self) {
         // The tickless idle park. The dispatch loop
         // calls this with `sstatus.SIE` already cleared (it masked S-mode

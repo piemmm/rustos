@@ -6,7 +6,9 @@
 # also authorises the tool's stream_echo suppression). CAP_FS_ACCESS
 # because the short-help switches read the bundle's own Help/ tree through
 # the secured VFS, which still authorises every path per-inode under the
-# caller's attested identity.
+# caller's attested identity. The USER column's uid -> name map comes from
+# the ungated, secret-free user-directory sysinfo query, so no further
+# capability is requested for it.
 id = "os.rustos.top"
 name = "top"
 version = "0.1.0"

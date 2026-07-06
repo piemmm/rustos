@@ -40,6 +40,9 @@ and is fully testable against an in-memory fixture.
 | `UPTIME`              | none                 | no      | `Uptime`                       |
 | `MOUNT_LIST`          | none                 | no      | packed `MountRecord`s          |
 | `RESOURCE_LIMITS`     | none                 | no      | packed `ResourceLimitRecord`s  |
+| `PROCESS_IDENTITY`    | none                 | no      | the caller's own `Origin`      |
+| `LOAD_AVERAGE`        | none                 | no      | `LoadAverage`                  |
+| `USER_DIRECTORY`      | none                 | no      | packed `UserDirectoryRecord`s  |
 
 ## Response encoding
 

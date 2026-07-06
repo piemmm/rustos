@@ -515,6 +515,22 @@ internally (`AGENTS.md` §2.4 — no interface creep). The slot is
 mutated only by the scheduler's own `dispatch` path, so the
 authoritative copy lives where the writer lives.
 
+### Per-task CPU-time accounting
+
+Each dispatch brackets the task body with two `SchedulerArch::ticks_now`
+reads and accumulates the span on the task (`run_ticks`), so cumulative
+on-CPU time advances exactly as work happens — tickless, no periodic
+sampling, and the hot path pays one subtraction, never a unit
+conversion. The figure is exposed read-only through
+`SchedulerPolicy::cpu_ticks_of(id)` in raw port ticks; the reader (the
+System Information process feed in `kernel/core`) converts to
+nanoseconds at observation time through `KernelArch::ticks_to_ns`, the
+same calibrated frequency the port's `monotonic_ns` uses, so the two
+clocks can never diverge. A drained (reaped) task reports
+`SchedError::NoSuchTask`, never a fabricated zero; both policies
+implement the same contract and the shared conformance suite pins it
+(`cpu_time_is_accounted_per_dispatch`).
+
 ### `yield_current` vs body-returned `TaskAction::Yield`
 
 `Scheduler::yield_current(task_id)` models a **voluntary syscall

@@ -482,6 +482,22 @@ impl<A: SchedulerArch> Scheduler<A> {
         }
     }
 
+    /// Book one finished body run: bump the task's run count, accumulate
+    /// the elapsed ticks (the span between the two tick reads is exactly
+    /// the time the body held this CPU — raw ticks, so the hot path pays a
+    /// subtraction, never a unit conversion; the reader converts), and
+    /// stamp the CPU's last-run tick.
+    fn settle_run_accounting(&self, cpu: CpuId, task: &TaskInner, started_tick: u64) {
+        task.total_runs.fetch_add(1, Ordering::Relaxed);
+        task.run_ticks.fetch_add(
+            self.arch.ticks_now().saturating_sub(started_tick),
+            Ordering::Relaxed,
+        );
+        self.cpus[cpu as usize]
+            .last_run_tick
+            .store(started_tick, Ordering::Release);
+    }
+
     fn dispatch(&self, cpu: CpuId, id: TaskId) -> StepOutcome {
         let Some(task) = self.tasks.read().get(&id).cloned() else {
             return StepOutcome::Idle;
@@ -533,10 +549,7 @@ impl<A: SchedulerArch> Scheduler<A> {
                 None => TaskAction::Exit,
             }
         };
-        task.total_runs.fetch_add(1, Ordering::Relaxed);
-        self.cpus[cpu as usize]
-            .last_run_tick
-            .store(tick, Ordering::Release);
+        self.settle_run_accounting(cpu, &task, tick);
 
         // The task received one unit of service while it was active;
         // advance this CPU's virtual time before settling weight so the
@@ -619,6 +632,20 @@ impl<A: SchedulerArch> Scheduler<A> {
             .read()
             .get(&id)
             .map(|t| t.total_runs.load(Ordering::Acquire))
+            .ok_or(SchedError::NoSuchTask)
+    }
+
+    /// Cumulative ticks `id` has spent running, in
+    /// [`SchedulerArch::ticks_now`] units.
+    ///
+    /// # Errors
+    /// * [`SchedError::NoSuchTask`] if the id is unknown (including an
+    ///   exited task whose record has been drained).
+    pub fn cpu_ticks_of(&self, id: TaskId) -> SchedResult<u64> {
+        self.tasks
+            .read()
+            .get(&id)
+            .map(|t| t.run_ticks.load(Ordering::Acquire))
             .ok_or(SchedError::NoSuchTask)
     }
 
@@ -751,6 +778,10 @@ impl<A: SchedulerArch> SchedulerPolicy<A> for Scheduler<A> {
 
     fn run_count(&self, id: TaskId) -> SchedResult<u64> {
         Scheduler::run_count(self, id)
+    }
+
+    fn cpu_ticks_of(&self, id: TaskId) -> SchedResult<u64> {
+        Scheduler::cpu_ticks_of(self, id)
     }
 
     fn state_of(&self, id: TaskId) -> TaskState {
@@ -1037,6 +1068,30 @@ mod tests {
             .spawn(0, Priority::Normal, |_| TaskAction::Exit)
             .expect("spawn");
         assert_eq!(sched.yield_current(id), Err(SchedError::InvalidState));
+    }
+
+    /// The dispatch loop accumulates the ticks that elapse while a body
+    /// runs, and an unknown id is refused rather than reported as zero.
+    #[test]
+    fn cpu_ticks_accumulate_across_dispatches() {
+        let arch = Arc::new(TestArch::new(1).expect("arch"));
+        let sched =
+            Arc::new(Scheduler::new(SchedulerConfig::defaults_for(1), arch.clone()).unwrap());
+        let a2 = arch.clone();
+        let id = sched
+            .spawn(0, Priority::Normal, move |_| {
+                // Simulate 7 ticks of work inside the body.
+                a2.advance_ticks(7);
+                TaskAction::Yield
+            })
+            .expect("spawn");
+        arch.set_current_cpu(0);
+        assert_eq!(sched.cpu_ticks_of(id), Ok(0), "never ran yet");
+        assert_eq!(sched.step(0), Ok(StepOutcome::Ran(id)));
+        assert_eq!(sched.cpu_ticks_of(id), Ok(7));
+        assert_eq!(sched.step(0), Ok(StepOutcome::Ran(id)));
+        assert_eq!(sched.cpu_ticks_of(id), Ok(14));
+        assert_eq!(sched.cpu_ticks_of(9999), Err(SchedError::NoSuchTask));
     }
 
     #[test]

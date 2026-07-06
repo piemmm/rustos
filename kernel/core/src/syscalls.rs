@@ -76,7 +76,7 @@
 use crate::sched::{CpuId, SchedError, Scheduler, SchedulerArch};
 use rustos_abi::hwtree::{HwResource, HwResourceKind};
 use rustos_abi::input::KeyInput;
-use rustos_abi::sysinfo::{MountRecord, ProcessRecord};
+use rustos_abi::sysinfo::{MountRecord, ProcessRecord, UserDirectoryRecord};
 use rustos_abi::{
     decode_log_record, BootId, CapabilityId, DescriptorTable, DirEntry, Errno, FileStat, InputMode,
     IntrospectDomain, IrqHandle, LimitKind, MapFlags, OpenFlags, ProcId, ProcessStart, RandomFlags,
@@ -3162,6 +3162,13 @@ where
             IntrospectDomain::Identity => self.introspect.identity()?,
             IntrospectDomain::Uptime => self.introspect.uptime()?,
             IntrospectDomain::LoadAverage => self.introspect.load_average()?,
+            IntrospectDomain::UserDirectory => {
+                if out_cap < UserDirectoryRecord::WIRE_LEN {
+                    return Err(Errno::BufferTooSmall);
+                }
+                let max_records = out_cap / UserDirectoryRecord::WIRE_LEN;
+                self.introspect.user_directory(arg, max_records)?
+            }
             IntrospectDomain::TaskLimits => {
                 // The 128-bit target `ProcId` does not fit in the `u64` `arg`,
                 // so the caller writes it into the output buffer on entry; the
@@ -14051,6 +14058,13 @@ mod tests {
             *self.limits_call.write() = Some(proc_id);
             self.limits.clone()
         }
+        fn user_directory(
+            &self,
+            _offset: u64,
+            _max_records: usize,
+        ) -> Result<alloc::vec::Vec<u8>, Errno> {
+            Ok(alloc::vec::Vec::new())
+        }
     }
 
     /// `sysinfo_introspect` copies the process window out to the caller,
@@ -14087,6 +14101,8 @@ mod tests {
             0,
             0,
             rustos_abi::sysinfo::ProcessState::Running,
+            0,
+            0,
             0,
             b"init",
         )

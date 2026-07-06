@@ -54,27 +54,27 @@ use rustos_abi::{
     PointerInput, PortName, ProcessListRequest, ProcessRecord, ProcessStartHeader, ProcessState,
     RandomFlags, ResourceLimit, ResourceLimitRecord, RxePermission, Segment, Severity, Signal,
     StdInfoKind, StringSlot, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Time64, Uptime,
-    WaitFlags, ABI_VERSION_V1, APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME,
-    BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX, BUTTON_NONE, CAPABILITY_ID_MAX,
-    COARSE_CLOCK_GRANULARITY_NS, CONSOLE_INHERIT, DRIVER_MANIFEST_MAGIC,
-    DRIVER_MANIFEST_MAX_BIND_KEYS, DRIVER_MANIFEST_MAX_CAPABILITIES, DRIVER_REGISTER_REPLY_MAGIC,
-    DRIVER_REGISTER_STATUS_OK, DRIVER_SIGNATURE_LEN, DRIVER_SIGNER_PUBKEY_LEN,
-    ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX, HWTREE_VERSION_V1, HW_COMPATIBLE_MAX,
-    HW_NODE_MAX_MATCH_KEYS, HW_NODE_MAX_RESOURCES, HW_NODE_ROOT, IPC_MESSAGE_HEADER_MAGIC,
-    KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC, KIND_KEY_PRESSED, KIND_KEY_RELEASED,
-    KIND_MOVED, KIND_PRESSED, KIND_RELEASED, LIBREF_MAX, LOAD_FLAG_PIE, LOAD_MAGIC,
-    LOAD_MAX_NEEDED, LOAD_MAX_SEGMENTS, LOG_FIELDS_MAX, LOG_FIELD_KEY_MAX, LOG_FIELD_VALUE_MAX,
-    LOG_LEVEL_MAX, LOG_MESSAGE_MAX, LOG_RECORD_HEADER_LEN, LOG_RECORD_MAX, MACHINE_ID_LEN,
-    MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES, MIME_ENTRY_LEN, MIME_TYPE_MAX, MOD_ALT, MOD_CTRL,
-    MOD_MASK, MOD_META, MOD_SHIFT, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX,
-    NANOS_PER_SEC, POINTER_INPUT_MAGIC, PORT_NAME_MAX_LEN, PROCESS_CPU_NONE, PROCESS_NAME_MAX,
-    PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN,
+    UserDirectoryRecord, UserDirectoryRequest, WaitFlags, ABI_VERSION_V1, APPINFO_MAGIC,
+    APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX,
+    BUTTON_NONE, CAPABILITY_ID_MAX, COARSE_CLOCK_GRANULARITY_NS, CONSOLE_INHERIT,
+    DRIVER_MANIFEST_MAGIC, DRIVER_MANIFEST_MAX_BIND_KEYS, DRIVER_MANIFEST_MAX_CAPABILITIES,
+    DRIVER_REGISTER_REPLY_MAGIC, DRIVER_REGISTER_STATUS_OK, DRIVER_SIGNATURE_LEN,
+    DRIVER_SIGNER_PUBKEY_LEN, ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX, HWTREE_VERSION_V1,
+    HW_COMPATIBLE_MAX, HW_NODE_MAX_MATCH_KEYS, HW_NODE_MAX_RESOURCES, HW_NODE_ROOT,
+    IPC_MESSAGE_HEADER_MAGIC, KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC, KIND_KEY_PRESSED,
+    KIND_KEY_RELEASED, KIND_MOVED, KIND_PRESSED, KIND_RELEASED, LIBREF_MAX, LOAD_FLAG_PIE,
+    LOAD_MAGIC, LOAD_MAX_NEEDED, LOAD_MAX_SEGMENTS, LOG_FIELDS_MAX, LOG_FIELD_KEY_MAX,
+    LOG_FIELD_VALUE_MAX, LOG_LEVEL_MAX, LOG_MESSAGE_MAX, LOG_RECORD_HEADER_LEN, LOG_RECORD_MAX,
+    MACHINE_ID_LEN, MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES, MIME_ENTRY_LEN, MIME_TYPE_MAX,
+    MOD_ALT, MOD_CTRL, MOD_MASK, MOD_META, MOD_SHIFT, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX,
+    MOUNT_TARGET_MAX, NANOS_PER_SEC, POINTER_INPUT_MAGIC, PORT_NAME_MAX_LEN, PROCESS_CPU_NONE,
+    PROCESS_NAME_MAX, PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN,
     PROCESS_START_MAX_TOTAL_LEN, RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES,
     RESOURCE_LIMITS_REPORT_LEN, RLIMIT_INFINITY, RXE_PAGE_SIZE, SEG_FLAG_EXEC, SEG_FLAG_READ,
     SEG_FLAG_WRITE, SPAWN_UID_INHERIT, STDINFO_FD, STDINFO_VERSION_CURRENT, STDINFO_VERSION_V1,
     SYSCALLS, SYSCALL_MAX_ARGS, SYSCALL_TABLE_HASH_LEN, SYSINFO_MAX_PAYLOAD_LEN,
     SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC,
-    SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1, SYSTEM_LIBRARIES_DIR,
+    SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1, SYSTEM_LIBRARIES_DIR, USER_DIRECTORY_NAME_MAX,
 };
 
 /// Default on-disk location of the generated C ABI header set, relative to
@@ -1421,8 +1421,16 @@ fn sysinfo_emit_query_ids(out: &mut String) {
             SysinfoQueryId::RESOURCE_LIMITS,
         ),
         (
+            "ROS_SYSINFO_QUERY_PROCESS_IDENTITY",
+            SysinfoQueryId::PROCESS_IDENTITY,
+        ),
+        (
             "ROS_SYSINFO_QUERY_LOAD_AVERAGE",
             SysinfoQueryId::LOAD_AVERAGE,
+        ),
+        (
+            "ROS_SYSINFO_QUERY_USER_DIRECTORY",
+            SysinfoQueryId::USER_DIRECTORY,
         ),
     ];
     for (name, id) in query_ids {
@@ -1441,6 +1449,10 @@ fn sysinfo_emit_record_sizes(out: &mut String) {
     let _ = writeln!(out, "#define ROS_MOUNT_SOURCE_MAX {MOUNT_SOURCE_MAX}u");
     let _ = writeln!(out, "#define ROS_MOUNT_TARGET_MAX {MOUNT_TARGET_MAX}u");
     let _ = writeln!(out, "#define ROS_MOUNT_FSTYPE_MAX {MOUNT_FSTYPE_MAX}u");
+    let _ = writeln!(
+        out,
+        "#define ROS_USER_DIRECTORY_NAME_MAX {USER_DIRECTORY_NAME_MAX}u"
+    );
     out.push('\n');
 
     out.push_str("/* Packed little-endian wire size of each sysinfo record type, in bytes. */\n");
@@ -1470,6 +1482,14 @@ fn sysinfo_emit_record_sizes(out: &mut String) {
             "ROS_RESOURCE_LIMIT_RECORD_WIRE_LEN",
             ResourceLimitRecord::WIRE_LEN,
         ),
+        (
+            "ROS_USER_DIRECTORY_REQUEST_WIRE_LEN",
+            UserDirectoryRequest::WIRE_LEN,
+        ),
+        (
+            "ROS_USER_DIRECTORY_RECORD_WIRE_LEN",
+            UserDirectoryRecord::WIRE_LEN,
+        ),
     ];
     for (name, len) in wire_lens {
         let _ = writeln!(out, "#define {name} {len}u");
@@ -1485,7 +1505,7 @@ fn sysinfo_emit_record_sizes(out: &mut String) {
     out.push('\n');
 }
 
-/// The C struct mirrors of the nine `#[repr(C)]` System Information wire
+/// The C struct mirrors of the eleven `#[repr(C)]` System Information wire
 /// types, as static text (the field names/order are part of the frozen ABI
 /// view; the in-module pinning test checks the layout against `lib/abi`).
 const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
@@ -1509,7 +1529,8 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
          * lifetimes; proc_id/parent_proc_id are the kernel-attested, never-reused\n\
          * process-instance identities (correlate on those, not the numeric ids).\n\
          * `cpu` is ROS_PROCESS_CPU_NONE when the process is not currently\n\
-         * scheduled. The inline name is valid for name_len bytes. */\n\
+         * scheduled; cpu_time_ns is the cumulative on-CPU time and mem_bytes the\n\
+         * mapped address-space size. The inline name is valid for name_len bytes. */\n\
          typedef struct ros_process_record {\n\
          \x20   uint64_t pid;\n\
          \x20   uint64_t parent_pid;\n\
@@ -1519,6 +1540,8 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
          \x20   uint32_t gid;\n\
          \x20   uint8_t state;\n\
          \x20   uint8_t cpu;\n\
+         \x20   uint64_t cpu_time_ns;\n\
+         \x20   uint64_t mem_bytes;\n\
          \x20   uint8_t name_len;\n\
          \x20   uint8_t name[ROS_PROCESS_NAME_MAX];\n\
          } ros_process_record_t;\n\n",
@@ -1582,6 +1605,19 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
          \x20   ros_resource_limit_t limit;\n\
          \x20   uint64_t usage;\n\
          } ros_resource_limit_record_t;\n\n",
+    "/* User-directory request payload (offset/limit paging). */\n\
+         typedef struct ros_user_directory_request {\n\
+         \x20   uint32_t offset;\n\
+         \x20   uint16_t limit;\n\
+         \x20   uint16_t flags;\n\
+         } ros_user_directory_request_t;\n\n",
+    "/* One account entry: the uid + username pairing, and nothing else (no\n\
+         * credential material). The inline name is valid for name_len bytes. */\n\
+         typedef struct ros_user_directory_record {\n\
+         \x20   uint32_t uid;\n\
+         \x20   uint8_t name_len;\n\
+         \x20   uint8_t name[ROS_USER_DIRECTORY_NAME_MAX];\n\
+         } ros_user_directory_record_t;\n\n",
 );
 
 /// Emit the driver-manifest magic / count / key-length / wire-size constants
@@ -3067,21 +3103,23 @@ mod tests {
             "typedef struct ros_mount_list_request {",
             "typedef struct ros_mount_record {",
             "typedef struct ros_resource_limit_record {",
+            "typedef struct ros_user_directory_request {",
+            "typedef struct ros_user_directory_record {",
         ] {
             assert!(h.contains(typedef), "missing `{typedef}` in:\n{h}");
         }
     }
 
-    #[test]
-    fn sysinfo_header_struct_layout_matches_lib_abi() {
+    /// The naturally-aligned `#[repr(C)]` in-memory pins for the sysinfo
+    /// wire types (the separate `*_WIRE_LEN` macros give the packed wire
+    /// size), shared by `sysinfo_header_struct_layout_matches_lib_abi`.
+    fn sysinfo_struct_pins() -> [(&'static str, usize, usize, usize, usize); 11] {
         use rustos_abi::{
             KernelMemoryStats, MountListRequest, MountRecord, ProcessListRequest, ProcessRecord,
-            ProcessState, ResourceLimitRecord, SysinfoQueryId, SysinfoRequestHeader,
-            SystemIdentity, Uptime,
+            ResourceLimitRecord, SysinfoRequestHeader, SystemIdentity, Uptime, UserDirectoryRecord,
+            UserDirectoryRequest,
         };
-        // The C struct mirrors are the naturally-aligned #[repr(C)] in-memory
-        // layout (the separate *_WIRE_LEN macros give the packed wire size).
-        let sizes_aligns = [
+        [
             (
                 "SysinfoRequestHeader",
                 core::mem::size_of::<SysinfoRequestHeader>(),
@@ -3099,7 +3137,7 @@ mod tests {
             (
                 "ProcessRecord",
                 core::mem::size_of::<ProcessRecord>(),
-                96,
+                120,
                 core::mem::align_of::<ProcessRecord>(),
                 8,
             ),
@@ -3145,8 +3183,27 @@ mod tests {
                 core::mem::align_of::<ResourceLimitRecord>(),
                 8,
             ),
-        ];
-        for (name, size, want_size, align, want_align) in sizes_aligns {
+            (
+                "UserDirectoryRequest",
+                core::mem::size_of::<UserDirectoryRequest>(),
+                8,
+                core::mem::align_of::<UserDirectoryRequest>(),
+                4,
+            ),
+            (
+                "UserDirectoryRecord",
+                core::mem::size_of::<UserDirectoryRecord>(),
+                40,
+                core::mem::align_of::<UserDirectoryRecord>(),
+                4,
+            ),
+        ]
+    }
+
+    #[test]
+    fn sysinfo_header_struct_layout_matches_lib_abi() {
+        use rustos_abi::{ProcessState, SysinfoQueryId};
+        for (name, size, want_size, align, want_align) in sysinfo_struct_pins() {
             assert_eq!(size, want_size, "{name} repr(C) size");
             assert_eq!(align, want_align, "{name} repr(C) align");
         }
@@ -3377,7 +3434,7 @@ mod tests {
             ("rustos_process.h", "} ros_string_slot_t;", size_of::<StringSlot>(), 8, align_of::<StringSlot>(), 4),
             ("rustos_sysinfo.h", "} ros_sysinfo_request_header_t;", size_of::<SysinfoRequestHeader>(), 24, align_of::<SysinfoRequestHeader>(), 8),
             ("rustos_sysinfo.h", "} ros_process_list_request_t;", size_of::<ProcessListRequest>(), 8, align_of::<ProcessListRequest>(), 4),
-            ("rustos_sysinfo.h", "} ros_process_record_t;", size_of::<ProcessRecord>(), 96, align_of::<ProcessRecord>(), 8),
+            ("rustos_sysinfo.h", "} ros_process_record_t;", size_of::<ProcessRecord>(), 120, align_of::<ProcessRecord>(), 8),
             ("rustos_sysinfo.h", "} ros_kernel_memory_stats_t;", size_of::<KernelMemoryStats>(), 40, align_of::<KernelMemoryStats>(), 8),
             ("rustos_sysinfo.h", "} ros_uptime_t;", size_of::<Uptime>(), 32, align_of::<Uptime>(), 8),
             ("rustos_sysinfo.h", "} ros_load_average_t;", size_of::<LoadAverage>(), 24, align_of::<LoadAverage>(), 4),
@@ -3400,6 +3457,8 @@ mod tests {
             ("rustos_driver.h", "} ros_mac_address_t;", size_of::<MacAddress>(), 6, align_of::<MacAddress>(), 1),
             ("rustos_rlimit.h", "} ros_resource_limit_t;", size_of::<ResourceLimit>(), 16, align_of::<ResourceLimit>(), 8),
             ("rustos_sysinfo.h", "} ros_resource_limit_record_t;", size_of::<ResourceLimitRecord>(), 32, align_of::<ResourceLimitRecord>(), 8),
+            ("rustos_sysinfo.h", "} ros_user_directory_request_t;", size_of::<UserDirectoryRequest>(), 8, align_of::<UserDirectoryRequest>(), 4),
+            ("rustos_sysinfo.h", "} ros_user_directory_record_t;", size_of::<UserDirectoryRecord>(), 40, align_of::<UserDirectoryRecord>(), 4),
         ];
         for &(header, typedef, size, want_size, align, want_align) in registry {
             let h = body(header);

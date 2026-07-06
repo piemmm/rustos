@@ -470,6 +470,13 @@ impl KernelArch for BinArch {
         self.calibration.tsc_ticks_to_ns(ticks)
     }
 
+    fn ticks_to_ns(&self, ticks: u64) -> u64 {
+        // `ticks_now` is raw RDTSC, so the identity default would
+        // misreport CPU time; convert through the same boot-time TSC
+        // calibration `monotonic_ns` uses.
+        self.calibration.tsc_ticks_to_ns(ticks)
+    }
+
     fn direct_phys_map(&self) -> Option<&'static (dyn rustos_kernel_mem::PhysMap + Sync)> {
         // The higher-half kernel direct map through which the kernel reaches
         // any RAM frame the allocator hands out — the view the shared-memory

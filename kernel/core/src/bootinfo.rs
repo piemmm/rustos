@@ -124,6 +124,23 @@ pub trait KernelArch: SchedulerArch {
     /// not require them to.
     fn monotonic_ns(&self, cpu: CpuId) -> u64;
 
+    /// Convert a span measured in [`SchedulerArch::ticks_now`] units into
+    /// nanoseconds.
+    ///
+    /// The scheduler accounts per-task CPU time in raw ticks so its
+    /// dispatch hot path pays a subtraction, never a division; readers
+    /// (the System Information process feed) convert at observation time
+    /// through this hook. The default is the identity — correct only for
+    /// a port whose tick already is one nanosecond (the wasm32 port and
+    /// the host test arch). A port whose [`SchedulerArch::ticks_now`]
+    /// returns raw counter ticks (`CNTPCT`, `RDTSC`, the `time` CSR) must
+    /// override this with the same frequency its
+    /// [`Self::monotonic_ns`] conversion uses, so the two clocks can
+    /// never diverge.
+    fn ticks_to_ns(&self, ticks: u64) -> u64 {
+        ticks
+    }
+
     /// IRQ routing the architecture port has installed.
     ///
     /// Consulted by [`crate::kernel_main`] during the [`crate::Phase::Irq`]

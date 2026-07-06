@@ -43,6 +43,11 @@ pub(crate) struct TaskInner {
     pub state: AtomicU8,
     /// Total times the body has been invoked. Useful for fairness tests.
     pub total_runs: AtomicU64,
+    /// Cumulative ticks the body has spent running, in
+    /// [`crate::SchedulerArch::ticks_now`] units. Accumulated by the
+    /// dispatch loop around each body invocation; read by the
+    /// `cpu_ticks_of` observation for the System Information feed.
+    pub run_ticks: AtomicU64,
     /// Number of *consecutive* `Yield`s at the current priority. Resets
     /// on demotion, promotion, or park.
     pub yields_at_band: AtomicU64,
@@ -76,6 +81,7 @@ impl TaskInner {
             priority: AtomicU8::new(priority as u8),
             state: AtomicU8::new(TaskState::Ready.as_u8()),
             total_runs: AtomicU64::new(0),
+            run_ticks: AtomicU64::new(0),
             yields_at_band: AtomicU64::new(0),
             last_started: AtomicU64::new(0),
             body: SpinLock::new(Some(body)),

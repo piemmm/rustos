@@ -3,7 +3,8 @@
 
 use rustos_abi::sysinfo::{
     spec_for, MountListRequest, MountRecord, ProcessListRequest, ProcessRecord,
-    ResourceLimitRecord, SysinfoQueryId, SysinfoRequestHeader,
+    ResourceLimitRecord, SysinfoQueryId, SysinfoRequestHeader, UserDirectoryRecord,
+    UserDirectoryRequest,
 };
 use rustos_abi::{Errno, LimitKind};
 use rustos_log::{log, Event, EventId, Field, Level, Sink};
@@ -151,6 +152,8 @@ fn dispatch(
         mount_list(source, caller, payload, response)
     } else if query == SysinfoQueryId::RESOURCE_LIMITS {
         resource_limits(source, caller, response)
+    } else if query == SysinfoQueryId::USER_DIRECTORY {
+        user_directory(source, caller, payload, response)
     } else if query == SysinfoQueryId::PROCESS_IDENTITY {
         // The answer is the caller's own kernel-attested origin, which the
         // dispatcher already holds: it is the attested principal, not state a
@@ -228,6 +231,26 @@ fn mount_list(
     )
 }
 
+/// Decode the [`UserDirectoryRequest`], apply paging, and pack the selected
+/// [`UserDirectoryRecord`]s into `response`.
+fn user_directory(
+    source: &dyn SysinfoSource,
+    caller: &Caller,
+    payload: &[u8],
+    response: &mut [u8],
+) -> Result<usize, Errno> {
+    let request = UserDirectoryRequest::from_bytes(payload)?;
+    let records = source.user_directory(caller)?;
+    page_records(
+        response,
+        request.offset as usize,
+        request.limit as usize,
+        records.len(),
+        UserDirectoryRecord::WIRE_LEN,
+        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
+    )
+}
+
 /// Pack a paged window of fixed-`wire_len` records into `response`.
 ///
 /// Shared by every list query so the paging arithmetic — offset bounds, the
@@ -298,8 +321,8 @@ mod tests {
     use rustos_abi::sysinfo::{
         KernelMemoryStats, LoadAverage, MountListRequest, MountRecord, ProcessListRequest,
         ProcessRecord, ProcessState, ResourceLimitRecord, SysinfoQueryId, SysinfoRequestHeader,
-        SystemIdentity, Uptime, LOAD_FIXED_SHIFT, MACHINE_ID_LEN, RESOURCE_LIMITS_REPORT_LEN,
-        SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT,
+        SystemIdentity, Uptime, UserDirectoryRecord, UserDirectoryRequest, LOAD_FIXED_SHIFT,
+        MACHINE_ID_LEN, RESOURCE_LIMITS_REPORT_LEN, SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT,
     };
     use rustos_abi::time::{Duration64, Time64};
     use rustos_abi::{
@@ -379,6 +402,8 @@ mod tests {
                     uid,
                     ProcessState::Running,
                     0,
+                    0,
+                    0,
                     name,
                 )
                 .unwrap()
@@ -427,6 +452,16 @@ mod tests {
         }
         fn hardware_tree(&self, _caller: &Caller) -> Result<alloc::vec::Vec<u8>, Errno> {
             Ok(self.hwtree.to_vec())
+        }
+        fn user_directory(
+            &self,
+            _caller: &Caller,
+        ) -> Result<alloc::vec::Vec<UserDirectoryRecord>, Errno> {
+            Ok(alloc::vec![
+                UserDirectoryRecord::new(0, b"root").unwrap(),
+                UserDirectoryRecord::new(1000, b"alice").unwrap(),
+                UserDirectoryRecord::new(1001, b"bob").unwrap(),
+            ])
         }
         fn system_identity(&self, _caller: &Caller) -> Result<SystemIdentity, Errno> {
             SystemIdentity::new([9u8; MACHINE_ID_LEN], 1, 0, 0, b"rustos-box")
@@ -707,6 +742,52 @@ mod tests {
         assert_eq!(
             serve(&source, &caller(&caps), &sink, &req, &mut tiny),
             Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn user_directory_needs_no_capability_and_pages() {
+        let source = FixtureSource::new();
+        let caps = Caps(&[]);
+        let sink = RecordingSink::new();
+        let udr = UserDirectoryRequest {
+            offset: 0,
+            limit: 10,
+            flags: 0,
+        };
+        let req = request_bytes(SysinfoQueryId::USER_DIRECTORY, &udr.to_le_bytes());
+        let mut resp = [0u8; 1024];
+        let n = serve(&source, &caller(&caps), &sink, &req, &mut resp).unwrap();
+        assert_eq!(n, 3 * UserDirectoryRecord::WIRE_LEN);
+        let first =
+            UserDirectoryRecord::from_bytes(&resp[..UserDirectoryRecord::WIRE_LEN]).unwrap();
+        assert_eq!(first.uid, 0);
+        assert_eq!(first.name_bytes(), b"root");
+        // Secret-free and self-evidently public, so unaudited.
+        assert!(sink.events.borrow().as_slice().is_empty());
+
+        // Paging: a window starting past the first record returns the tail.
+        let udr_tail = UserDirectoryRequest {
+            offset: 2,
+            limit: 10,
+            flags: 0,
+        };
+        let req_tail = request_bytes(SysinfoQueryId::USER_DIRECTORY, &udr_tail.to_le_bytes());
+        let n = serve(&source, &caller(&caps), &sink, &req_tail, &mut resp).unwrap();
+        assert_eq!(n, UserDirectoryRecord::WIRE_LEN);
+        let tail = UserDirectoryRecord::from_bytes(&resp[..UserDirectoryRecord::WIRE_LEN]).unwrap();
+        assert_eq!(tail.name_bytes(), b"bob");
+
+        // Paging past the end returns an empty page (the terminator).
+        let udr_end = UserDirectoryRequest {
+            offset: 9,
+            limit: 10,
+            flags: 0,
+        };
+        let req_end = request_bytes(SysinfoQueryId::USER_DIRECTORY, &udr_end.to_le_bytes());
+        assert_eq!(
+            serve(&source, &caller(&caps), &sink, &req_end, &mut resp),
+            Ok(0)
         );
     }
 

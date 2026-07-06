@@ -22,10 +22,11 @@ use crate::transport::Transport;
 /// Decode an inline byte field for display, substituting `U+FFFD` for any
 /// invalid byte rather than failing.
 ///
-/// Shared by the process and mount row renderers so neither re-implements
-/// lossy decoding; a display routine never panics on
-/// hostile bytes.
-pub(crate) fn field_lossy(bytes: &[u8]) -> String {
+/// Shared by the process and mount row renderers (and consumers such as
+/// `top`'s own row layout) so none re-implements lossy decoding; a display
+/// routine never panics on hostile bytes.
+#[must_use]
+pub fn field_lossy(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 

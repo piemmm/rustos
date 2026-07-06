@@ -115,11 +115,14 @@ pub const SYSINFO_MANIFEST: &[CapabilityId] =
 
 /// The `top` tool's manifest: `CAP_CONSOLE_WRITE` for its full-screen
 /// display on fd 1, `CAP_CONSOLE_READ` for raw-mode keystrokes on fd 0
-/// (the latter also authorises its `stream_input_mode` raw discipline), and
+/// (the latter also authorises its `stream_input_mode` raw discipline),
 /// `CAP_FS_ACCESS` because its short-help switches read the bundle's own
 /// `Help/` tree through the secured VFS (which still authorises every
-/// path per-inode under the caller's attested identity); `terminal_size`
-/// is ungated and per-query `sysinfo` scope is enforced by `sysinfod`.
+/// path per-inode under the caller's attested identity). The `USER`
+/// column's uid → name map comes from the ungated, secret-free
+/// user-directory `sysinfo` query, so no further capability is requested;
+/// `terminal_size` is ungated and per-query `sysinfo` scope is enforced by
+/// `sysinfod`.
 #[cfg(any(test, not(all(freestanding, kernel_isa = "aarch64"))))]
 pub const TOP_MANIFEST: &[CapabilityId] = &[
     CapabilityId::CONSOLE_WRITE,

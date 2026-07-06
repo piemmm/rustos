@@ -95,6 +95,17 @@ impl SysinfoQueryId {
     /// that expose no per-process secret, exactly like [`Self::UPTIME`].
     pub const LOAD_AVERAGE: Self = Self(9);
 
+    /// List the account directory: every account's uid and username, one
+    /// [`UserDirectoryRecord`] per account.
+    ///
+    /// Ungated: the pairing of a numeric uid with its account name is the
+    /// `/etc/passwd`-class public directory every `ls -l`- or `top`-style
+    /// display needs, and it carries **no** credential material — password
+    /// records stay behind the capability-gated `users_db_read` syscall.
+    /// A system whose user database is not loaded answers with an empty
+    /// directory, never a fabricated account.
+    pub const USER_DIRECTORY: Self = Self(10);
+
     /// Inclusive upper bound on the query identifier space in `sysinfo-v1`.
     ///
     /// Sized identically to the syscall table so a future query explosion
@@ -154,6 +165,10 @@ pub enum IntrospectDomain {
     /// Scheduler load averages and the logged-in-user census: a single
     /// [`LoadAverage`].
     LoadAverage = 6,
+    /// The account directory: every account, one packed
+    /// [`UserDirectoryRecord`] (uid + username, no credential material),
+    /// with the syscall's `arg` naming the record offset to page from.
+    UserDirectory = 7,
 }
 
 impl IntrospectDomain {
@@ -175,6 +190,7 @@ impl IntrospectDomain {
             4 => Ok(Self::Uptime),
             5 => Ok(Self::TaskLimits),
             6 => Ok(Self::LoadAverage),
+            7 => Ok(Self::UserDirectory),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -286,6 +302,12 @@ pub const SYSINFO_QUERIES: &[SysinfoQuerySpec] = &[
     SysinfoQuerySpec {
         id: SysinfoQueryId::LOAD_AVERAGE,
         name: "load_average",
+        required_capability: None,
+        audit: false,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::USER_DIRECTORY,
+        name: "user_directory",
         required_capability: None,
         audit: false,
     },
@@ -721,6 +743,21 @@ pub struct ProcessRecord {
     /// CPU the process is currently executing on, or [`PROCESS_CPU_NONE`]
     /// when it is not presently scheduled on any CPU.
     pub cpu: u8,
+    /// Cumulative on-CPU time of the process, in nanoseconds.
+    ///
+    /// Accounted by the scheduler as the task is dispatched (kernel and
+    /// user execution in the task's context alike) and reported through the
+    /// architecture's monotonic clock; a task that has never run reports
+    /// zero. Consumers derive `%CPU` from the delta between two samples
+    /// and `TIME+` from the value directly.
+    pub cpu_time_ns: u64,
+    /// Bytes of memory currently mapped in the process's address space:
+    /// its image, stack, and every anonymous region it has mapped, in
+    /// whole pages.
+    ///
+    /// Zero when the process has no registered user address space (a pure
+    /// kernel task) — a truthful "nothing mapped", never a guess.
+    pub mem_bytes: u64,
     /// Valid byte count in the inline name buffer (`<= PROCESS_NAME_MAX`);
     /// read the bytes through [`ProcessRecord::name_bytes`].
     pub name_len: u8,
@@ -729,7 +766,7 @@ pub struct ProcessRecord {
 
 impl ProcessRecord {
     /// Encoded size on the wire.
-    pub const WIRE_LEN: usize = 60 + PROCESS_NAME_MAX;
+    pub const WIRE_LEN: usize = 76 + PROCESS_NAME_MAX;
 
     /// Construct a record, copying up to [`PROCESS_NAME_MAX`] bytes of
     /// `name`.
@@ -746,6 +783,8 @@ impl ProcessRecord {
         gid: u32,
         state: ProcessState,
         cpu: u8,
+        cpu_time_ns: u64,
+        mem_bytes: u64,
         name: &[u8],
     ) -> Result<Self, Errno> {
         if name.len() > PROCESS_NAME_MAX {
@@ -763,6 +802,8 @@ impl ProcessRecord {
             gid,
             state,
             cpu,
+            cpu_time_ns,
+            mem_bytes,
             name_len,
             name: buf,
         })
@@ -788,7 +829,9 @@ impl ProcessRecord {
         out[57] = self.cpu;
         out[58] = self.name_len;
         // out[59] reserved, already zero.
-        out[60..60 + PROCESS_NAME_MAX].copy_from_slice(&self.name);
+        put_u64(&mut out, 60, self.cpu_time_ns);
+        put_u64(&mut out, 68, self.mem_bytes);
+        out[76..76 + PROCESS_NAME_MAX].copy_from_slice(&self.name);
         out
     }
 
@@ -810,7 +853,7 @@ impl ProcessRecord {
             return Err(Errno::LengthOutOfRange);
         }
         let mut name = [0u8; PROCESS_NAME_MAX];
-        name.copy_from_slice(&bytes[60..60 + PROCESS_NAME_MAX]);
+        name.copy_from_slice(&bytes[76..76 + PROCESS_NAME_MAX]);
         Ok(Self {
             pid: read_u64(bytes, 0),
             parent_pid: read_u64(bytes, 8),
@@ -820,6 +863,8 @@ impl ProcessRecord {
             gid: read_u32(bytes, 52),
             state,
             cpu: bytes[57],
+            cpu_time_ns: read_u64(bytes, 60),
+            mem_bytes: read_u64(bytes, 68),
             name_len,
             name,
         })
@@ -1009,6 +1054,140 @@ impl LoadAverage {
             runnable: word(12),
             total_tasks: word(16),
             users: word(20),
+        })
+    }
+}
+
+/// Maximum bytes of a username carried in a [`UserDirectoryRecord`] — the
+/// same bound the `users-v1` database enforces on account names.
+pub const USER_DIRECTORY_NAME_MAX: usize = 32;
+
+/// Request payload for [`SysinfoQueryId::USER_DIRECTORY`]: the record
+/// window to return, mirroring the process-list paging shape.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub struct UserDirectoryRequest {
+    /// Zero-based index of the first record to return.
+    pub offset: u32,
+    /// Maximum number of records to return.
+    pub limit: u16,
+    /// Reserved; must be zero in `sysinfo-v1`.
+    pub flags: u16,
+}
+
+impl UserDirectoryRequest {
+    /// Encoded size on the wire.
+    pub const WIRE_LEN: usize = 8;
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u32(&mut out, 0, self.offset);
+        put_u16(&mut out, 4, self.limit);
+        put_u16(&mut out, 6, self.flags);
+        out
+    }
+
+    /// Decode from `bytes`.
+    ///
+    /// Returns [`Errno::BufferTooSmall`] if the slice is short, or
+    /// [`Errno::BadMagic`] if a reserved flag bit is set.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let flags = read_u16(bytes, 6);
+        if flags != 0 {
+            return Err(Errno::BadMagic);
+        }
+        Ok(Self {
+            offset: read_u32(bytes, 0),
+            limit: read_u16(bytes, 4),
+            flags,
+        })
+    }
+}
+
+/// One account entry in a [`SysinfoQueryId::USER_DIRECTORY`] response: the
+/// numeric uid and the account's username, and **nothing else** — no
+/// password material, home, shell, or grant set. The `/etc/passwd`-class
+/// public pairing a `top`/`ls -l`-style display renders.
+///
+/// Allocation-free: the name is stored inline in a fixed buffer with its
+/// valid length alongside.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct UserDirectoryRecord {
+    /// The account's numeric user identifier.
+    pub uid: u32,
+    /// Valid byte count in the inline name buffer
+    /// (`<= USER_DIRECTORY_NAME_MAX`); read the bytes through
+    /// [`UserDirectoryRecord::name_bytes`].
+    pub name_len: u8,
+    name: [u8; USER_DIRECTORY_NAME_MAX],
+}
+
+impl UserDirectoryRecord {
+    /// Encoded size on the wire: uid + name length + three reserved bytes
+    /// + the inline name buffer.
+    pub const WIRE_LEN: usize = 8 + USER_DIRECTORY_NAME_MAX;
+
+    /// Construct a record, copying up to [`USER_DIRECTORY_NAME_MAX`] bytes
+    /// of `name`.
+    ///
+    /// Returns [`Errno::LengthOutOfRange`] if `name` is longer than
+    /// [`USER_DIRECTORY_NAME_MAX`]; the name is never silently truncated.
+    pub fn new(uid: u32, name: &[u8]) -> Result<Self, Errno> {
+        if name.len() > USER_DIRECTORY_NAME_MAX {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let mut buf = [0u8; USER_DIRECTORY_NAME_MAX];
+        buf[..name.len()].copy_from_slice(name);
+        let name_len = u8::try_from(name.len()).map_err(|_| Errno::LengthOutOfRange)?;
+        Ok(Self {
+            uid,
+            name_len,
+            name: buf,
+        })
+    }
+
+    /// Borrow the valid prefix of the name buffer.
+    #[must_use]
+    pub fn name_bytes(&self) -> &[u8] {
+        &self.name[..self.name_len as usize]
+    }
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u32(&mut out, 0, self.uid);
+        out[4] = self.name_len;
+        // out[5..8] reserved, already zero.
+        out[8..8 + USER_DIRECTORY_NAME_MAX].copy_from_slice(&self.name);
+        out
+    }
+
+    /// Decode from `bytes`.
+    ///
+    /// Returns [`Errno::BufferTooSmall`] if the slice is short, or
+    /// [`Errno::LengthOutOfRange`] if `name_len` exceeds
+    /// [`USER_DIRECTORY_NAME_MAX`].
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let name_len = bytes[4];
+        if name_len as usize > USER_DIRECTORY_NAME_MAX {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let mut name = [0u8; USER_DIRECTORY_NAME_MAX];
+        name.copy_from_slice(&bytes[8..8 + USER_DIRECTORY_NAME_MAX]);
+        Ok(Self {
+            uid: read_u32(bytes, 0),
+            name_len,
+            name,
         })
     }
 }
@@ -1436,12 +1615,12 @@ mod tests {
     use super::{
         encoded_query_table, spec_for, KernelMemoryStats, LoadAverage, MountListRequest,
         MountRecord, ProcessListRequest, ProcessRecord, ProcessState, ResourceLimitRecord,
-        SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime, ENCODED_QUERY_TABLE,
-        ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX, LOAD_FIXED_SHIFT, MACHINE_ID_LEN, MOUNT_FSTYPE_MAX,
-        MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, PROCESS_CPU_NONE, PROCESS_NAME_MAX,
-        RESOURCE_LIMITS_REPORT_LEN, SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERIES,
-        SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC,
-        SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1,
+        SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime, UserDirectoryRecord,
+        UserDirectoryRequest, ENCODED_QUERY_TABLE, ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX,
+        LOAD_FIXED_SHIFT, MACHINE_ID_LEN, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX,
+        PROCESS_CPU_NONE, PROCESS_NAME_MAX, RESOURCE_LIMITS_REPORT_LEN, SYSINFO_MAX_PAYLOAD_LEN,
+        SYSINFO_QUERIES, SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC,
+        SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1, USER_DIRECTORY_NAME_MAX,
     };
     use crate::driver::filesystem::MountFlags;
     use crate::origin::ProcId;
@@ -1509,12 +1688,13 @@ mod tests {
             (4, IntrospectDomain::Uptime),
             (5, IntrospectDomain::TaskLimits),
             (6, IntrospectDomain::LoadAverage),
+            (7, IntrospectDomain::UserDirectory),
         ] {
             assert_eq!(domain.as_u32(), raw);
             assert_eq!(IntrospectDomain::from_u32(raw), Ok(domain));
         }
         // Any value outside the closed set is rejected, not guessed.
-        assert_eq!(IntrospectDomain::from_u32(7), Err(Errno::OutOfRange));
+        assert_eq!(IntrospectDomain::from_u32(8), Err(Errno::OutOfRange));
         assert_eq!(IntrospectDomain::from_u32(u32::MAX), Err(Errno::OutOfRange));
     }
 
@@ -1536,6 +1716,51 @@ mod tests {
         assert_eq!(LoadAverage::centis(load.load15), 0);
         assert_eq!(
             LoadAverage::from_bytes(&[0u8; LoadAverage::WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn user_directory_request_and_record_round_trip_and_fail_closed() {
+        let req = UserDirectoryRequest {
+            offset: 3,
+            limit: 16,
+            flags: 0,
+        };
+        assert_eq!(
+            UserDirectoryRequest::from_bytes(&req.to_le_bytes()),
+            Ok(req)
+        );
+        let mut bytes = req.to_le_bytes();
+        bytes[6] = 1; // reserved flag set
+        assert_eq!(
+            UserDirectoryRequest::from_bytes(&bytes),
+            Err(Errno::BadMagic)
+        );
+        assert_eq!(
+            UserDirectoryRequest::from_bytes(&[0u8; 4]),
+            Err(Errno::BufferTooSmall)
+        );
+
+        let rec = UserDirectoryRecord::new(1000, b"alice").expect("record");
+        assert_eq!(rec.name_bytes(), b"alice");
+        let decoded = UserDirectoryRecord::from_bytes(&rec.to_le_bytes()).expect("round trip");
+        assert_eq!(decoded, rec);
+        assert_eq!(decoded.uid, 1000);
+
+        let too_long = [b'x'; USER_DIRECTORY_NAME_MAX + 1];
+        assert_eq!(
+            UserDirectoryRecord::new(0, &too_long),
+            Err(Errno::LengthOutOfRange)
+        );
+        let mut bytes = rec.to_le_bytes();
+        bytes[4] = u8::try_from(USER_DIRECTORY_NAME_MAX + 1).unwrap();
+        assert_eq!(
+            UserDirectoryRecord::from_bytes(&bytes),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert_eq!(
+            UserDirectoryRecord::from_bytes(&[0u8; UserDirectoryRecord::WIRE_LEN - 1]),
             Err(Errno::BufferTooSmall)
         );
     }
@@ -1812,6 +2037,8 @@ mod tests {
             1000,
             ProcessState::Running,
             2,
+            1_234_567_890,
+            5 * 4096,
             b"init",
         )
         .unwrap();
@@ -1821,6 +2048,8 @@ mod tests {
         assert_eq!(decoded.name_bytes(), b"init");
         assert_eq!(decoded.proc_id, ProcId::from_raw([0x11; 16]));
         assert_eq!(decoded.parent_proc_id, ProcId::from_raw([0x22; 16]));
+        assert_eq!(decoded.cpu_time_ns, 1_234_567_890);
+        assert_eq!(decoded.mem_bytes, 5 * 4096);
     }
 
     #[test]
@@ -1836,6 +2065,8 @@ mod tests {
                 0,
                 ProcessState::Runnable,
                 PROCESS_CPU_NONE,
+                0,
+                0,
                 &too_long,
             ),
             Err(Errno::LengthOutOfRange)
@@ -1850,6 +2081,8 @@ mod tests {
             0,
             ProcessState::Runnable,
             PROCESS_CPU_NONE,
+            0,
+            0,
             b"a",
         )
         .unwrap()
@@ -1866,6 +2099,8 @@ mod tests {
             0,
             ProcessState::Runnable,
             PROCESS_CPU_NONE,
+            0,
+            0,
             b"a",
         )
         .unwrap()

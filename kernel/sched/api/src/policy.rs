@@ -115,6 +115,22 @@ pub trait SchedulerPolicy<A: SchedulerArch>: Sized {
     /// * [`crate::SchedError::NoSuchTask`] if the id is unknown.
     fn run_count(&self, id: TaskId) -> SchedResult<u64>;
 
+    /// Cumulative time the given task has spent running, in
+    /// [`SchedulerArch::ticks_now`] units.
+    ///
+    /// Accounted on the dispatch path: each dispatch brackets the task's
+    /// run with two tick reads and accumulates the span, so the figure
+    /// advances as work happens (tickless — no periodic sampling) and a
+    /// task that never ran reports zero. The unit is the port's tick;
+    /// the consumer converts to nanoseconds at read time so the hot path
+    /// pays no division. A read-only observation for the System
+    /// Information introspection feed.
+    ///
+    /// # Errors
+    /// * [`crate::SchedError::NoSuchTask`] if the id is unknown (including
+    ///   an exited task whose record has been drained).
+    fn cpu_ticks_of(&self, id: TaskId) -> SchedResult<u64>;
+
     /// Most recent state of `id` ([`TaskState::Exited`] once drained).
     fn state_of(&self, id: TaskId) -> TaskState;
 

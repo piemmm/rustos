@@ -26,6 +26,33 @@ der Sitzung gesteuert.
 - Hoch/Runter, BildAuf/BildAb, Pos1/Ende — die Auswahl bewegen.
 - `h`, `?` — die Tastenübersicht ein- oder ausblenden.
 
+Drei Übersichtszeilen stehen über der Liste: die Laufzeit, die Zahl der
+angemeldeten Benutzer und die 1/5/15-Minuten-Lastmittel; die Zählung der
+Tasks nach Zustand; und die Speicherwerte in MiB. Die Speicherzeile
+erfordert `CAP_SYSINFO_KERNEL` — ein Aufrufer ohne diese Berechtigung
+sieht die Ablehnung ausgeschrieben, und die Sitzung läuft weiter.
+
+Die Zeilen sind nach `%CPU` sortiert, der größte Verbraucher zuerst, und
+tragen:
+
+- `PID` — die numerische Prozesskennung.
+- `USER` — der Benutzername des besitzenden Kontos, aufgelöst aus dem
+  Kontoverzeichnis des Systems; die numerische uid tritt an die Stelle,
+  wenn der Name nicht aufgelöst werden kann.
+- `SIZE` — der im Adressraum des Prozesses eingeblendete Speicher
+  (Abbild, Stapel und Halde gleichermaßen).
+- `S` — der Zustandsbuchstabe: `R` laufend (grün), `r` lauffähig,
+  wartet auf eine CPU (cyan), `S` schlafend, `T` angehalten (gelb), `Z`
+  Zombie (magenta). Farben erscheinen nur auf einem Farbterminal; der
+  Buchstabe trägt den Zustand immer.
+- `%CPU` — der CPU-Anteil über das Intervall seit der letzten
+  Auffrischung.
+- `WCPU` — der gewichtete (exponentiell geglättete) CPU-Anteil über die
+  Auffrischungen hinweg, ruhiger als die Momentanspalte.
+- `TIME+` — die kumulierte CPU-Zeit als
+  `Minuten:Sekunden.Hundertstel`.
+- `COMMAND` — der Prozessname.
+
 ## OPTIONS
 
 - `-h, -?` — die Kurzhilfe dieses Befehls anzeigen und beenden. In

@@ -1,15 +1,17 @@
 //! Behaviour tests for the `top` viewer: the model's selection/scroll/scope
-//! logic and the renderer/loop driven over in-memory `sysinfo` and tty
-//! channels.
+//! and statistics logic and the renderer/loop driven over in-memory
+//! `sysinfo` and tty channels.
 
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use rustos_abi::sysinfo::{
-    ProcessListRequest, ProcessRecord, ProcessState, SysinfoQueryId, SysinfoRequestHeader,
+    KernelMemoryStats, LoadAverage, ProcessListRequest, ProcessRecord, ProcessState,
+    SysinfoQueryId, SysinfoRequestHeader, Uptime,
 };
-use rustos_abi::{Errno, ProcId};
+use rustos_abi::{Duration64, Errno, ProcId};
 use rustos_curses::{Event, Screen, Size, Tty};
 use rustos_procinfo::Transport;
 use rustos_termcap::TermType;
@@ -20,21 +22,38 @@ use crate::model::{Action, Model, Scope, ALL_DENIED_NOTICE};
 
 // ---- Fixtures --------------------------------------------------------------
 
-/// An in-memory `sysinfod` stand-in answering process-list queries from a
-/// fixed record set, decoding the request exactly as the real service.
+/// An in-memory `sysinfod` stand-in answering the viewer's queries from a
+/// fixed record set plus a settable monotonic clock, decoding each request
+/// exactly as the real service.
 struct FakeService {
-    records: Vec<ProcessRecord>,
+    records: RefCell<Vec<ProcessRecord>>,
     deny_global: bool,
+    /// Monotonic "now" served to `UPTIME`; `None` fails the query.
+    uptime_ns: RefCell<Option<u64>>,
+    load: Option<LoadAverage>,
+    memory: Option<KernelMemoryStats>,
+    deny_memory: bool,
     seen: RefCell<Vec<SysinfoQueryId>>,
 }
 
 impl FakeService {
     fn new(records: Vec<ProcessRecord>) -> Self {
         Self {
-            records,
+            records: RefCell::new(records),
             deny_global: false,
+            uptime_ns: RefCell::new(Some(1_000_000_000)),
+            load: None,
+            memory: None,
+            deny_memory: false,
             seen: RefCell::new(Vec::new()),
         }
+    }
+
+    /// Advance the served monotonic clock and replace the record set, as a
+    /// live system would between two refreshes.
+    fn tick(&self, now_ns: u64, records: Vec<ProcessRecord>) {
+        *self.uptime_ns.borrow_mut() = Some(now_ns);
+        *self.records.borrow_mut() = records;
     }
 }
 
@@ -45,16 +64,42 @@ impl Transport for FakeService {
         if self.deny_global && header.query == SysinfoQueryId::GLOBAL_PROCESS_LIST {
             return Err(Errno::PermissionDenied);
         }
+        if header.query == SysinfoQueryId::UPTIME {
+            let Some(ns) = *self.uptime_ns.borrow() else {
+                return Err(Errno::NotFound);
+            };
+            let uptime = Uptime {
+                since_boot: Duration64::from_nanos(ns),
+                ..Uptime::default()
+            };
+            return Ok(uptime.to_le_bytes().to_vec());
+        }
+        if header.query == SysinfoQueryId::LOAD_AVERAGE {
+            return match &self.load {
+                Some(load) => Ok(load.to_le_bytes().to_vec()),
+                None => Err(Errno::NotFound),
+            };
+        }
+        if header.query == SysinfoQueryId::KERNEL_MEMORY_STATS {
+            if self.deny_memory {
+                return Err(Errno::PermissionDenied);
+            }
+            return match &self.memory {
+                Some(memory) => Ok(memory.to_le_bytes().to_vec()),
+                None => Err(Errno::NotFound),
+            };
+        }
         let payload = &request[SysinfoRequestHeader::WIRE_LEN
             ..SysinfoRequestHeader::WIRE_LEN + header.payload_len as usize];
         let req = ProcessListRequest::from_bytes(payload)?;
+        let records = self.records.borrow();
         let offset = req.offset as usize;
-        if offset >= self.records.len() {
+        if offset >= records.len() {
             return Ok(Vec::new());
         }
-        let take = core::cmp::min(self.records.len() - offset, req.limit as usize);
+        let take = core::cmp::min(records.len() - offset, req.limit as usize);
         let mut out = Vec::with_capacity(take * ProcessRecord::WIRE_LEN);
-        for record in &self.records[offset..offset + take] {
+        for record in &records[offset..offset + take] {
             out.extend_from_slice(&record.to_le_bytes());
         }
         Ok(out)
@@ -87,19 +132,31 @@ impl Tty for FakeTty {
     }
 }
 
-fn record(pid: u64, name: &[u8]) -> ProcessRecord {
+/// A record with the stable fixture identity fields; `proc_id` is derived
+/// from the pid so cross-refresh correlation works the way the kernel's
+/// never-reused ids do.
+fn record_with(pid: u64, name: &[u8], cpu_time_ns: u64, mem_bytes: u64) -> ProcessRecord {
+    let mut raw = [0u8; 16];
+    raw[..8].copy_from_slice(&pid.to_le_bytes());
+    raw[8] = 1;
     ProcessRecord::new(
         pid,
         1,
-        ProcId::KERNEL,
+        ProcId::from_raw(raw),
         ProcId::KERNEL,
         1000,
         1000,
         ProcessState::Running,
         0,
+        cpu_time_ns,
+        mem_bytes,
         name,
     )
     .expect("record")
+}
+
+fn record(pid: u64, name: &[u8]) -> ProcessRecord {
+    record_with(pid, name, 0, 0)
 }
 
 fn records(n: u64) -> Vec<ProcessRecord> {
@@ -117,7 +174,7 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 fn an_empty_model_has_no_selection() {
     let model = Model::new(Scope::Own);
     assert_eq!(model.selected(), None);
-    assert!(model.processes().is_empty());
+    assert!(model.rows().is_empty());
 }
 
 #[test]
@@ -125,12 +182,16 @@ fn refresh_populates_and_selects_the_first_row() {
     let service = FakeService::new(vec![record(1, b"init"), record(2, b"shell")]);
     let mut model = Model::new(Scope::Own);
     model.refresh(&service).expect("ok");
-    assert_eq!(model.processes().len(), 2);
+    assert_eq!(model.rows().len(), 2);
     assert_eq!(model.selected(), Some(0));
-    assert_eq!(
-        service.seen.borrow().as_slice(),
-        &[SysinfoQueryId::SELF_PROCESS_LIST]
-    );
+    assert!(service
+        .seen
+        .borrow()
+        .contains(&SysinfoQueryId::SELF_PROCESS_LIST));
+    assert!(!service
+        .seen
+        .borrow()
+        .contains(&SysinfoQueryId::GLOBAL_PROCESS_LIST));
 }
 
 #[test]
@@ -246,7 +307,7 @@ fn a_recovering_refresh_falls_back_to_own_and_posts_the_notice() {
     assert_eq!(model.refresh_recovering(&service), Ok(()));
     assert_eq!(model.scope(), Scope::Own);
     assert_eq!(model.notice(), Some(ALL_DENIED_NOTICE));
-    assert_eq!(model.processes().len(), 2);
+    assert_eq!(model.rows().len(), 2);
     // Both queries reached the service: the refused global one, then the
     // own-scope fallback.
     assert!(service
@@ -284,33 +345,284 @@ fn a_recovering_refresh_propagates_a_service_failure() {
     assert_eq!(model.notice(), None);
 }
 
+// ---- Statistics ------------------------------------------------------------
+
+#[test]
+fn pct_cpu_is_the_delta_share_between_refreshes() {
+    // First sample at t=1s: both tasks have run 0ns. Second sample at t=2s:
+    // pid 1 consumed 500ms of the 1s interval (50.0%), pid 2 consumed 100ms
+    // (10.0%).
+    let service = FakeService::new(vec![record(1, b"busy"), record(2, b"calm")]);
+    let mut model = Model::new(Scope::Own);
+    model.refresh(&service).expect("first sample");
+    assert!(model.rows().iter().all(|row| row.pct_cpu_tenths == 0));
+
+    service.tick(
+        2_000_000_000,
+        vec![
+            record_with(1, b"busy", 500_000_000, 0),
+            record_with(2, b"calm", 100_000_000, 0),
+        ],
+    );
+    model.refresh(&service).expect("second sample");
+    let busy = model
+        .rows()
+        .iter()
+        .find(|r| r.record.pid == 1)
+        .expect("busy");
+    let calm = model
+        .rows()
+        .iter()
+        .find(|r| r.record.pid == 2)
+        .expect("calm");
+    assert_eq!(busy.pct_cpu_tenths, 500);
+    assert_eq!(calm.pct_cpu_tenths, 100);
+    // The busiest process sorts to the top, GNU-style.
+    assert_eq!(model.rows()[0].record.pid, 1);
+}
+
+#[test]
+fn wcpu_smooths_across_refreshes_and_decays_when_idle() {
+    let service = FakeService::new(vec![record(1, b"burst")]);
+    let mut model = Model::new(Scope::Own);
+    model.refresh(&service).expect("first sample");
+
+    // One busy interval: 100% of the 1s window. WCPU averages the previous
+    // smoothed value (0) with the new sample (1000 tenths).
+    service.tick(
+        2_000_000_000,
+        vec![record_with(1, b"burst", 1_000_000_000, 0)],
+    );
+    model.refresh(&service).expect("second sample");
+    assert_eq!(model.rows()[0].pct_cpu_tenths, 1000);
+    assert_eq!(model.rows()[0].wcpu_tenths, 500);
+
+    // An idle interval: %CPU drops straight to zero, WCPU only halves —
+    // the weighted column decays instead of whipsawing.
+    service.tick(
+        3_000_000_000,
+        vec![record_with(1, b"burst", 1_000_000_000, 0)],
+    );
+    model.refresh(&service).expect("third sample");
+    assert_eq!(model.rows()[0].pct_cpu_tenths, 0);
+    assert_eq!(model.rows()[0].wcpu_tenths, 250);
+}
+
+#[test]
+fn a_reused_pid_with_a_new_proc_id_starts_its_statistics_afresh() {
+    // The first lifetime of numeric pid 1 accrued 900ms; a new lifetime
+    // reusing the number (different proc_id) must not inherit that history
+    // as a negative or giant delta — it starts at zero.
+    let service = FakeService::new(vec![record_with(1, b"old", 900_000_000, 0)]);
+    let mut model = Model::new(Scope::Own);
+    model.refresh(&service).expect("first sample");
+
+    let mut reused = record_with(1, b"new", 50_000_000, 0);
+    let mut raw = [0u8; 16];
+    raw[0] = 0xEE; // a different, never-before-seen instance identity
+    reused.proc_id = ProcId::from_raw(raw);
+    service.tick(2_000_000_000, vec![reused]);
+    model.refresh(&service).expect("second sample");
+    assert_eq!(
+        model.rows()[0].pct_cpu_tenths,
+        0,
+        "no interval observed yet"
+    );
+    assert_eq!(model.rows()[0].wcpu_tenths, 0);
+}
+
+#[test]
+fn summary_records_uptime_and_the_denied_memory_query() {
+    let mut service = FakeService::new(records(1));
+    service.deny_memory = true;
+    let mut model = Model::new(Scope::Own);
+    model.refresh(&service).expect("ok");
+    assert_eq!(model.summary().uptime_ns, Some(1_000_000_000));
+    assert!(model.summary().memory.is_none());
+    assert!(model.summary().memory_denied);
+    assert!(model.summary().load.is_none());
+}
+
+#[test]
+fn summary_carries_load_and_memory_when_served() {
+    let mut service = FakeService::new(records(1));
+    service.load = Some(LoadAverage {
+        load1: 1 << 11, // 1.00 fixed-point
+        load5: 0,
+        load15: 0,
+        runnable: 1,
+        total_tasks: 3,
+        users: 2,
+    });
+    service.memory = Some(KernelMemoryStats {
+        total_bytes: 1024 * 1024 * 1024,
+        free_bytes: 512 * 1024 * 1024,
+        kernel_heap_bytes: 8 * 1024 * 1024,
+        user_resident_bytes: 0,
+        page_size: 4096,
+        reserved: 0,
+    });
+    let mut model = Model::new(Scope::Own);
+    model.refresh(&service).expect("ok");
+    let summary = model.summary();
+    assert_eq!(summary.load.map(|l| l.users), Some(2));
+    assert_eq!(
+        summary.memory.map(|m| m.total_bytes),
+        Some(1024 * 1024 * 1024)
+    );
+    assert!(!summary.memory_denied);
+}
+
+#[test]
+fn user_names_resolve_and_absent_entries_degrade_to_the_uid() {
+    let service = FakeService::new(records(1));
+    let mut model = Model::new(Scope::Own);
+    model.set_user_names(vec![(1000, String::from("alice"))]);
+    model.refresh(&service).expect("ok");
+    assert_eq!(model.user_name(1000), Some("alice"));
+    assert_eq!(model.user_name(1001), None);
+}
+
+// ---- Formatting ------------------------------------------------------------
+
+#[test]
+fn tenths_format_with_one_decimal_and_saturate() {
+    assert_eq!(crate::app::format_tenths(0), "0.0");
+    assert_eq!(crate::app::format_tenths(123), "12.3");
+    assert_eq!(crate::app::format_tenths(1000), "100.0");
+    assert_eq!(crate::app::format_tenths(u32::MAX), "999.9");
+}
+
+#[test]
+fn sizes_format_by_magnitude() {
+    assert_eq!(crate::app::format_size(0), "0");
+    assert_eq!(crate::app::format_size(4096), "4K");
+    assert_eq!(crate::app::format_size(5 * 1024 * 1024), "5120K");
+    assert_eq!(crate::app::format_size(200 * 1024 * 1024), "200.0M");
+    assert_eq!(crate::app::format_size(20 * 1024 * 1024 * 1024), "20.0G");
+}
+
+#[test]
+fn time_plus_formats_minutes_seconds_hundredths() {
+    assert_eq!(crate::app::format_time_plus(0), "0:00.00");
+    assert_eq!(crate::app::format_time_plus(1_230_000_000), "0:01.23");
+    assert_eq!(crate::app::format_time_plus(61_500_000_000), "1:01.50");
+    assert_eq!(crate::app::format_time_plus(3_600_000_000_000), "60:00.00");
+}
+
+#[test]
+fn uptime_formats_hours_minutes_and_days() {
+    assert_eq!(crate::app::format_uptime(0), "0:00");
+    assert_eq!(crate::app::format_uptime(3 * 60_000_000_000), "0:03");
+    assert_eq!(
+        crate::app::format_uptime(26 * 3_600_000_000_000),
+        "1 day, 2:00"
+    );
+    assert_eq!(
+        crate::app::format_uptime(50 * 3_600_000_000_000),
+        "2 days, 2:00"
+    );
+}
+
 // ---- Rendering -------------------------------------------------------------
 
 #[test]
 fn list_capacity_subtracts_header_and_footer() {
-    assert_eq!(list_capacity(Size::new(24, 80)), 21);
+    assert_eq!(list_capacity(Size::new(24, 80)), 19);
     // A screen with no room for the list still reports zero, never underflows.
     assert_eq!(list_capacity(Size::new(2, 80)), 0);
 }
 
 #[test]
-fn render_draws_the_title_header_and_rows() {
-    let service = FakeService::new(vec![record(1, b"init"), record(2, b"shell")]);
+fn render_draws_the_summary_header_and_rows() {
+    let service = FakeService::new(vec![record_with(1, b"init", 0, 4096), record(2, b"shell")]);
     let mut model = Model::new(Scope::Own);
+    model.set_user_names(vec![(1000, String::from("alice"))]);
     model.refresh(&service).expect("ok");
     let mut screen = Screen::new(
         FakeTty::with_input(b""),
         TermType::Xterm256Color,
-        Size::new(10, 60),
+        Size::new(12, 80),
     );
     model.set_viewport(list_capacity(screen.size()));
     render(&model, &mut screen).expect("render ok");
 
     let out = screen.into_tty().output;
-    assert!(contains(&out, b"RustOS top"));
+    assert!(contains(&out, b"top"));
+    assert!(contains(&out, b"Tasks:"));
+    assert!(contains(&out, b"Mem"));
     assert!(contains(&out, b"PID"));
+    assert!(contains(&out, b"USER"));
+    assert!(contains(&out, b"SIZE"));
+    assert!(contains(&out, b"%CPU"));
+    assert!(contains(&out, b"WCPU"));
+    assert!(contains(&out, b"TIME+"));
+    assert!(contains(&out, b"COMMAND"));
     assert!(contains(&out, b"init"));
     assert!(contains(&out, b"shell"));
+    assert!(contains(&out, b"alice"));
+}
+
+#[test]
+fn a_denied_memory_query_renders_the_refusal() {
+    let mut service = FakeService::new(records(1));
+    service.deny_memory = true;
+    let mut model = Model::new(Scope::Own);
+    model.refresh(&service).expect("ok");
+    let mut screen = Screen::new(
+        FakeTty::with_input(b""),
+        TermType::Xterm256Color,
+        Size::new(12, 80),
+    );
+    model.set_viewport(list_capacity(screen.size()));
+    render(&model, &mut screen).expect("render ok");
+    let out = screen.into_tty().output;
+    assert!(contains(&out, b"CAP_SYSINFO_KERNEL"));
+}
+
+#[test]
+fn state_letters_are_coloured_on_a_colour_terminal_only() {
+    let mut colour = Screen::new(
+        FakeTty::with_input(b""),
+        TermType::Xterm256Color,
+        Size::new(12, 80),
+    );
+    let running = crate::app::state_attributes(&mut colour, 'R').expect("coloured");
+    assert!(running.bold, "a running task is emphasised");
+    assert!(crate::app::state_attributes(&mut colour, 'Z').is_some());
+    assert!(crate::app::state_attributes(&mut colour, 'T').is_some());
+    assert!(crate::app::state_attributes(&mut colour, 'r').is_some());
+    // A sleeping task stays plain even in colour.
+    assert!(crate::app::state_attributes(&mut colour, 'S').is_none());
+
+    // A monochrome terminal never colours: the letter itself carries the
+    // information.
+    let mut mono = Screen::new(FakeTty::with_input(b""), TermType::Dumb, Size::new(12, 80));
+    assert!(crate::app::state_attributes(&mut mono, 'R').is_none());
+}
+
+#[test]
+fn process_rows_carry_the_new_columns() {
+    let service = FakeService::new(vec![record_with(7, b"worker", 61_500_000_000, 4096)]);
+    let mut model = Model::new(Scope::Own);
+    model.set_user_names(vec![(1000, String::from("alice"))]);
+    model.refresh(&service).expect("ok");
+    let line = crate::app::process_row(&model, &model.rows()[0]);
+    assert!(line.contains("      7"));
+    assert!(line.contains("alice"));
+    assert!(line.contains("4K"));
+    assert!(line.contains(" R "));
+    assert!(line.contains("1:01.50"));
+    assert!(line.ends_with("worker"));
+}
+
+#[test]
+fn an_unmapped_uid_renders_numerically() {
+    let service = FakeService::new(records(1));
+    let mut model = Model::new(Scope::Own);
+    model.refresh(&service).expect("ok");
+    let line = crate::app::process_row(&model, &model.rows()[0]);
+    assert!(line.contains("1000"), "numeric uid stands in: {line}");
 }
 
 #[test]
@@ -343,7 +655,7 @@ fn a_wide_process_name_does_not_break_rendering() {
     let mut screen = Screen::new(
         FakeTty::with_input(b""),
         TermType::Xterm256Color,
-        Size::new(8, 40),
+        Size::new(8, 60),
     );
     model.set_viewport(list_capacity(screen.size()));
     render(&model, &mut screen).expect("render ok");
@@ -364,7 +676,7 @@ fn run_quits_on_q_after_refreshing() {
     );
     assert_eq!(run(&mut model, &service, &mut screen), Ok(()));
     // It refreshed before drawing, so the snapshot is populated.
-    assert_eq!(model.processes().len(), 1);
+    assert_eq!(model.rows().len(), 1);
     let out = screen.into_tty().output;
     assert!(contains(&out, b"init"));
 }
@@ -392,12 +704,12 @@ fn run_toggling_to_a_denied_global_view_recovers_and_shows_why() {
     // 'a' toggles to the system-wide scope and triggers a refresh, which the
     // service denies. That is not fatal: the viewer falls back to the own
     // view, keeps running (here until input is exhausted), and the redraw
-    // carries the reason on the status line (an 80-column screen fits the
+    // carries the reason on the status line (a 100-column screen fits the
     // whole title; a narrower one truncates it like any other line).
     let mut screen = Screen::new(
         FakeTty::with_input(b"a"),
         TermType::Xterm256Color,
-        Size::new(10, 80),
+        Size::new(10, 100),
     );
     assert_eq!(run(&mut model, &service, &mut screen), Ok(()));
     assert_eq!(model.scope(), Scope::Own);

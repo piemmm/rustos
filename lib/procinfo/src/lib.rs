@@ -81,10 +81,11 @@ pub mod request;
 pub mod resinfo;
 pub mod resolve;
 pub mod transport;
+pub mod users;
 
 #[cfg(all(freestanding, feature = "program"))]
 pub use client::{IpcTransport, RtOutput};
-pub use list::ListError;
+pub use list::{field_lossy, ListError};
 pub use mount::{for_each_mount, render_mount, render_options, MOUNT_PAGE};
 pub use process::{
     emit_self_scope_omission, for_each_process, render_process, state_char, PROCESS_HEADER,
@@ -98,3 +99,4 @@ pub use resinfo::{
 };
 pub use resolve::{resolve, ResolveInfoError};
 pub use transport::{Output, Transport};
+pub use users::{for_each_user, user_names, USER_DIRECTORY_PAGE};

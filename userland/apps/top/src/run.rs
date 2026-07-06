@@ -49,7 +49,7 @@ mod program {
     use rustos_abi::{InputMode, STDOUT};
     use rustos_curses::{CursesError, Result as CursesResult, Screen, Size, Tty};
     use rustos_help::{own_short_help, BundleHelp};
-    use rustos_procinfo::IpcTransport;
+    use rustos_procinfo::{user_names, IpcTransport};
     use rustos_rt::io::{write_stderr_line, Stdout, Write};
     use rustos_termcap::from_term;
     use rustos_top::{parse, run, Command, Model, Scope, USAGE};
@@ -172,6 +172,11 @@ mod program {
         // Default to the caller's own processes; the `a` key toggles to the
         // global view, which `sysinfod` grants only to an entitled caller.
         let mut model = Model::new(Scope::Own);
+        // The USER column's uid → name map from the ungated, secret-free
+        // account directory, resolved once up front (the account database
+        // changes far more rarely than the process list); an empty
+        // directory degrades the column to numeric uids.
+        model.set_user_names(user_names(&transport));
         let result = run(&mut model, &transport, &mut screen);
         let left = screen.leave_full_screen();
 

@@ -33,7 +33,7 @@
 /* Canonical query-registry encoding constants (the hashable registry image). */
 #define ROS_SYSINFO_QUERY_NAME_MAX 20u
 #define ROS_SYSINFO_QUERY_RECORD_LEN 26u
-#define ROS_SYSINFO_ENCODED_QUERY_TABLE_LEN 260u
+#define ROS_SYSINFO_ENCODED_QUERY_TABLE_LEN 286u
 #define ROS_SYSINFO_LOAD_FIXED_SHIFT 11u
 
 /* Well-known sysinfo-v1 query identifiers (uint16_t). Do not renumber. */
@@ -45,7 +45,9 @@
 #define ROS_SYSINFO_QUERY_UPTIME ((uint16_t)5u)
 #define ROS_SYSINFO_QUERY_MOUNT_LIST ((uint16_t)6u)
 #define ROS_SYSINFO_QUERY_RESOURCE_LIMITS ((uint16_t)7u)
+#define ROS_SYSINFO_QUERY_PROCESS_IDENTITY ((uint16_t)8u)
 #define ROS_SYSINFO_QUERY_LOAD_AVERAGE ((uint16_t)9u)
+#define ROS_SYSINFO_QUERY_USER_DIRECTORY ((uint16_t)10u)
 
 /* Process lifecycle state carried in a process record (uint8_t). */
 #define ROS_PROCESS_STATE_RUNNABLE ((uint8_t)0u)
@@ -63,11 +65,12 @@
 #define ROS_MOUNT_SOURCE_MAX 64u
 #define ROS_MOUNT_TARGET_MAX 64u
 #define ROS_MOUNT_FSTYPE_MAX 16u
+#define ROS_USER_DIRECTORY_NAME_MAX 32u
 
 /* Packed little-endian wire size of each sysinfo record type, in bytes. */
 #define ROS_SYSINFO_REQUEST_HEADER_WIRE_LEN 24u
 #define ROS_PROCESS_LIST_REQUEST_WIRE_LEN 8u
-#define ROS_PROCESS_RECORD_WIRE_LEN 92u
+#define ROS_PROCESS_RECORD_WIRE_LEN 108u
 #define ROS_KERNEL_MEMORY_STATS_WIRE_LEN 40u
 #define ROS_UPTIME_WIRE_LEN 24u
 #define ROS_LOAD_AVERAGE_WIRE_LEN 24u
@@ -75,6 +78,8 @@
 #define ROS_MOUNT_LIST_REQUEST_WIRE_LEN 8u
 #define ROS_MOUNT_RECORD_WIRE_LEN 152u
 #define ROS_RESOURCE_LIMIT_RECORD_WIRE_LEN 32u
+#define ROS_USER_DIRECTORY_REQUEST_WIRE_LEN 8u
+#define ROS_USER_DIRECTORY_RECORD_WIRE_LEN 40u
 
 /* Byte length of a full RESOURCE_LIMITS response: one record per LimitKind. */
 #define ROS_SYSINFO_RESOURCE_LIMITS_REPORT_LEN 128u
@@ -101,7 +106,8 @@ typedef struct ros_process_list_request {
 * lifetimes; proc_id/parent_proc_id are the kernel-attested, never-reused
 * process-instance identities (correlate on those, not the numeric ids).
 * `cpu` is ROS_PROCESS_CPU_NONE when the process is not currently
-* scheduled. The inline name is valid for name_len bytes. */
+* scheduled; cpu_time_ns is the cumulative on-CPU time and mem_bytes the
+* mapped address-space size. The inline name is valid for name_len bytes. */
 typedef struct ros_process_record {
     uint64_t pid;
     uint64_t parent_pid;
@@ -111,6 +117,8 @@ typedef struct ros_process_record {
     uint32_t gid;
     uint8_t state;
     uint8_t cpu;
+    uint64_t cpu_time_ns;
+    uint64_t mem_bytes;
     uint8_t name_len;
     uint8_t name[ROS_PROCESS_NAME_MAX];
 } ros_process_record_t;
@@ -181,5 +189,20 @@ typedef struct ros_resource_limit_record {
     ros_resource_limit_t limit;
     uint64_t usage;
 } ros_resource_limit_record_t;
+
+/* User-directory request payload (offset/limit paging). */
+typedef struct ros_user_directory_request {
+    uint32_t offset;
+    uint16_t limit;
+    uint16_t flags;
+} ros_user_directory_request_t;
+
+/* One account entry: the uid + username pairing, and nothing else (no
+* credential material). The inline name is valid for name_len bytes. */
+typedef struct ros_user_directory_record {
+    uint32_t uid;
+    uint8_t name_len;
+    uint8_t name[ROS_USER_DIRECTORY_NAME_MAX];
+} ros_user_directory_record_t;
 
 #endif /* ROS_SYSINFO_H */

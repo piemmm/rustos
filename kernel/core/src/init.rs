@@ -1290,6 +1290,11 @@ fn run_phases<A: KernelArch>(
             state,
             filesystem,
             wall_clock,
+            // The account directory (uid + username, no credential
+            // material) is derived from the same kernel-held database
+            // `users_db_read` serves; with none installed the directory is
+            // truthfully empty.
+            users_db,
             kernel_heap_bytes,
         )),
     );

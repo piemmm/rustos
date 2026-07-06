@@ -373,13 +373,18 @@ impl Aarch64Arch {
     /// `KernelArch` wrapper forwards `monotonic_ns` here.
     #[must_use]
     pub fn monotonic_ns(&self) -> u64 {
-        let ticks = u128::from(read_cntpct());
-        let hz = u128::from(self.timer_hz.max(1));
-        // `ticks * 1e9 / hz` in 128-bit space cannot overflow for any
-        // realistic uptime, and the `max(1)` defends a malformed
-        // frequency from a division trap.
-        let ns = ticks.saturating_mul(1_000_000_000) / hz;
-        u64::try_from(ns).unwrap_or(u64::MAX)
+        self.ticks_to_ns(read_cntpct())
+    }
+
+    /// Convert a `CNTPCT_EL0` tick span into nanoseconds against this
+    /// handle's `timer_hz` — the same frequency [`Self::monotonic_ns`]
+    /// converts through (one conversion definition, shared with the
+    /// riscv64 port via `rustos_arch_api::ticks_to_ns`). The downstream
+    /// `KernelArch` wrapper forwards its `ticks_to_ns` here so the
+    /// scheduler's per-task tick accounting reads in real time.
+    #[must_use]
+    pub fn ticks_to_ns(&self, ticks: u64) -> u64 {
+        rustos_arch_api::ticks_to_ns(ticks, self.timer_hz)
     }
 }
 

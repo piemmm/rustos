@@ -330,6 +330,21 @@ pub trait SchedulerArch: Send + Sync {
     fn set_wakeup(&self, _deadline_ns: Option<u64>) {}
 }
 
+/// Convert a tick span from a counter running at `hz` into nanoseconds.
+///
+/// The one definition of the `ticks * 1e9 / hz` conversion the ports whose
+/// tick source is a raw frequency-known counter (aarch64 `CNTPCT`, riscv64
+/// `time`) build both their `monotonic_ns` and their tick-span conversion
+/// on, so the tick source and the conversion factor can never diverge.
+/// The 128-bit intermediate cannot overflow for any realistic uptime, and
+/// the `max(1)` defends a malformed frequency from a division trap; a
+/// result beyond `u64` saturates rather than wrapping.
+#[must_use]
+pub fn ticks_to_ns(ticks: u64, hz: u64) -> u64 {
+    let ns = u128::from(ticks).saturating_mul(1_000_000_000) / u128::from(hz.max(1));
+    u64::try_from(ns).unwrap_or(u64::MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

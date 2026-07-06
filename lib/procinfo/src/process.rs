@@ -95,13 +95,19 @@ pub fn render_process(record: &ProcessRecord) -> String {
     )
 }
 
-/// A single-letter process-state code, in the spirit of `ps`.
+/// A single-letter process-state code, following the GNU `ps`/`top`
+/// convention where the states correspond: a blocked task awaits an event
+/// (IPC, IRQ, timer) exactly as a sleeping POSIX process does, so it reads
+/// `S`; `Z` and `T` keep their coreutils meaning. RustOS distinguishes
+/// running-on-a-CPU (`R`) from runnable-but-waiting (`r`), a split GNU
+/// folds into one `R` — the lowercase form keeps that extra truth without
+/// stealing a GNU letter.
 #[must_use]
 pub fn state_char(state: ProcessState) -> char {
     match state {
         ProcessState::Runnable => 'r',
         ProcessState::Running => 'R',
-        ProcessState::Blocked => 'D',
+        ProcessState::Blocked => 'S',
         ProcessState::Zombie => 'Z',
         ProcessState::Stopped => 'T',
     }
@@ -249,6 +255,8 @@ mod tests {
             1000,
             state,
             0,
+            0,
+            0,
             name,
         )
         .expect("record")
@@ -354,9 +362,10 @@ mod tests {
         let r = render_process(&record(42, b"daemon", ProcessState::Blocked));
         assert!(r.contains("42"));
         assert!(r.contains("daemon"));
-        assert!(r.contains(" D "));
+        assert!(r.contains(" S "));
         assert_eq!(state_char(ProcessState::Running), 'R');
         assert_eq!(state_char(ProcessState::Runnable), 'r');
+        assert_eq!(state_char(ProcessState::Blocked), 'S');
         assert_eq!(state_char(ProcessState::Zombie), 'Z');
         assert_eq!(state_char(ProcessState::Stopped), 'T');
         assert!(PROCESS_HEADER.contains("PID"));

@@ -1,8 +1,9 @@
 # `rustos-top`
 
-A live process-overview TUI for RustOS, in the spirit of the Linux `top`, and
+A live process-overview TUI for RustOS, in the spirit of GNU `top`, and
 the first in-tree consumer of the OS curses library (`plans/CURSES.md` Stage
-C5). It draws a scrolling, selectable process list that refreshes on demand.
+C5). It draws a scrolling, selectable process list that refreshes on demand,
+sorted by `%CPU` with a GNU-style summary block above it.
 
 `top` reads the same `sysinfo-v1` process list as `ps` — RustOS has no `/proc`
 to scrape (`AGENTS.md` §16.6) — and draws it through `lib/curses`'s screen
@@ -10,10 +11,25 @@ model rather than emitting escape sequences by hand (`AGENTS.md` §2.2).
 
 ## What it shows
 
-- A status line: the process count and the active scope (`own` / `all`).
-- The shared `lib/procinfo` column header and one row per process (PID, PPID,
-  UID, GID, state, CPU, name) — the same columns `ps` prints, rendered once in
-  `lib/procinfo`, not re-implemented here.
+- Three GNU-style summary lines: uptime + logged-in users + 1/5/15-minute
+  load averages (with the active scope, `own` / `all`), the task census by
+  state, and the memory figures in MiB. The memory query is gated on
+  `CAP_SYSINFO_KERNEL`; a refusal is rendered as the refusal it is and the
+  session continues.
+- One row per process — `PID USER SIZE S %CPU WCPU TIME+ COMMAND` — sorted
+  by `%CPU`, biggest consumer first. `%CPU` is the share of the interval
+  between two refreshes (from the record's cumulative `cpu_time_ns`, keyed
+  by the never-reused `proc_id` so a numeric-PID reuse can never inherit
+  another lifetime's statistics); `WCPU` is the exponentially smoothed
+  average of those samples; `TIME+` is the cumulative CPU time; `SIZE` is
+  the memory mapped in the process's address space. `USER` resolves through
+  the ungated, secret-free `USER_DIRECTORY` sysinfo query (uid + username,
+  never credential material), degrading to the numeric uid when the name
+  cannot be resolved.
+- The state letters follow the GNU convention where the states correspond
+  (`S` sleeping, `T` stopped, `Z` zombie) plus RustOS's running/runnable
+  split (`R` / `r`), coloured on a colour terminal (green/cyan/yellow/
+  magenta) — the letter always carries the state; colour is reinforcement.
 - A selection highlight, a scrolling viewport, and a `?` help overlay.
 
 ## Keys
@@ -57,7 +73,7 @@ whole viewer runs against in-memory fixtures with no kernel (`AGENTS.md` §7).
   when the size is unknowable (a serial terminal). It binds only its inherited
   descriptors, never a console device (`AGENTS.md` §20). On the host it is an
   inert stub. The kernel image bakes it as `/System/Apps/top.app/Run` with
-  `CAP_CONSOLE_WRITE` + `CAP_CONSOLE_READ`.
+  `CAP_CONSOLE_WRITE` + `CAP_CONSOLE_READ` + `CAP_FS_ACCESS`.
 
 ## Linking
 

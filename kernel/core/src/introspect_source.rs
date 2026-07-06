@@ -24,7 +24,7 @@ use alloc::vec::Vec;
 
 use rustos_abi::sysinfo::{
     KernelMemoryStats, LoadAverage, ProcessRecord, ProcessState, ResourceLimitRecord,
-    SystemIdentity, Uptime, PROCESS_CPU_NONE, RESOURCE_LIMITS_REPORT_LEN,
+    SystemIdentity, Uptime, UserDirectoryRecord, PROCESS_CPU_NONE, RESOURCE_LIMITS_REPORT_LEN,
 };
 use rustos_abi::{Duration64, Errno, LimitKind, ProcId, Time64};
 use rustos_kernel_mem::PAGE_SIZE;
@@ -37,6 +37,7 @@ use crate::init::KernelState;
 use crate::introspect::IntrospectSource;
 use crate::loadavg::LoadTracker;
 use crate::sched::SchedulerArch;
+use crate::users::UsersDbSource;
 use crate::wallclock::WallClockSource;
 
 /// The OS version reported in the [`SystemIdentity`] domain, taken from the
@@ -108,6 +109,10 @@ pub struct KernelIntrospectSource<A: KernelArch + 'static> {
     /// fixed size at boot; the value is threaded from the binding kernel's
     /// `rustos_kalloc::HEAP_BYTES`).
     kernel_heap_bytes: u64,
+    /// The kernel-held user database the account directory is derived
+    /// from. Only the uid + username pairing is ever exposed; credential
+    /// material stays behind the capability-gated `users_db_read` syscall.
+    users_db: &'static (dyn UsersDbSource + 'static),
     /// The damped run-queue averages, advanced at each load-average read
     /// (the tickless observation model — see [`crate::loadavg`]).
     load: LoadTracker,
@@ -124,12 +129,14 @@ impl<A: KernelArch + 'static> KernelIntrospectSource<A> {
         state: &'static KernelState<A>,
         filesystem: &'static (dyn FilesystemService + 'static),
         wall_clock: &'static (dyn WallClockSource + 'static),
+        users_db: &'static (dyn UsersDbSource + 'static),
         kernel_heap_bytes: u64,
     ) -> Self {
         Self {
             state,
             filesystem,
             wall_clock,
+            users_db,
             kernel_heap_bytes,
             load: LoadTracker::new(),
         }
@@ -180,6 +187,7 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
         // `TaskId` order `CapTable::iter` guarantees. An offset past the end
         // yields an empty answer (the paging terminator), never an error.
         let mut out = Vec::new();
+        let aspaces = self.state.aspaces.read();
         for record in caps
             .iter()
             .skip(usize::try_from(offset).unwrap_or(usize::MAX))
@@ -191,6 +199,22 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
                 Some(cpu) => u8::try_from(cpu).unwrap_or(PROCESS_CPU_NONE),
                 None => PROCESS_CPU_NONE,
             };
+            // The scheduler accounts on-CPU time in raw arch ticks; convert
+            // at this read point through the port's calibrated frequency. A
+            // task the scheduler has already drained (a reaped record)
+            // truthfully reports zero rather than erroring the whole page.
+            let cpu_time_ns = self
+                .state
+                .arch
+                .ticks_to_ns(self.state.scheduler.cpu_ticks_of(task_id).unwrap_or(0));
+            // Whole pages currently mapped in the task's registered address
+            // space (image + stack + anonymous regions; the registry snapshot
+            // is re-frozen on every mutating map syscall). A task with no
+            // registered space (a pure kernel task) truthfully reports zero.
+            let mem_bytes = aspaces
+                .resolve(SecTaskId(task_id))
+                .map_or(0, |(space, _)| space.mapped_pages() as u64)
+                .saturating_mul(PAGE_SIZE as u64);
             let process = ProcessRecord::new(
                 task_id,
                 resolve_parent(record.parent_proc_id()),
@@ -200,6 +224,8 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
                 record.primary_gid().0,
                 state,
                 cpu,
+                cpu_time_ns,
+                mem_bytes,
                 record.name().as_bytes(),
             )?;
             out.extend_from_slice(&process.to_le_bytes());
@@ -319,6 +345,39 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
             users: u32::try_from(uids.len()).unwrap_or(u32::MAX),
         };
         Ok(load.to_le_bytes().to_vec())
+    }
+
+    fn user_directory(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno> {
+        // A kernel holding no database (the root volume is not yet
+        // mounted/unlocked, or none is installed) answers with an empty
+        // directory — a truthful "no accounts known", never an error the
+        // broker would refuse ungated clients over and never a fabricated
+        // account. The held text was validated by the same fail-closed
+        // parser at load, so a re-parse failure is equally an empty answer.
+        let Ok(text) = self.users_db.text() else {
+            return Ok(Vec::new());
+        };
+        let Ok(text) = core::str::from_utf8(&text) else {
+            return Ok(Vec::new());
+        };
+        let Ok(db) = rustos_users::UsersDb::parse(text) else {
+            return Ok(Vec::new());
+        };
+        // Only the uid + username pairing crosses this boundary; password
+        // records, homes, shells, and grants stay behind the capability-
+        // gated `users_db_read` syscall. File order is stable across paged
+        // calls (the held text only changes through the audited admin path).
+        let mut out = Vec::new();
+        for record in db
+            .records()
+            .iter()
+            .skip(usize::try_from(offset).unwrap_or(usize::MAX))
+            .take(max_records)
+        {
+            let entry = UserDirectoryRecord::new(record.uid().0, record.username().as_bytes())?;
+            out.extend_from_slice(&entry.to_le_bytes());
+        }
+        Ok(out)
     }
 
     fn task_limits(&self, proc_id: ProcId) -> Result<Vec<u8>, Errno> {

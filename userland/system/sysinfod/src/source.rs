@@ -14,7 +14,7 @@ use alloc::vec::Vec;
 
 use rustos_abi::sysinfo::{
     KernelMemoryStats, LoadAverage, MountRecord, ProcessRecord, ResourceLimitRecord,
-    SystemIdentity, Uptime,
+    SystemIdentity, Uptime, UserDirectoryRecord,
 };
 use rustos_abi::{CapabilityQuery, Errno, LimitKind, Origin};
 
@@ -146,4 +146,14 @@ pub trait SysinfoSource {
         &self,
         caller: &Caller,
     ) -> Result<[ResourceLimitRecord; LimitKind::COUNT], Errno>;
+
+    /// Return the account directory: every account's uid + username pair,
+    /// and nothing else — no credential material (password records stay
+    /// behind the capability-gated `users_db_read` syscall).
+    ///
+    /// The `/etc/passwd`-class public pairing is secret-free, so the query
+    /// is ungated like [`mount_records`](Self::mount_records). The owned
+    /// list is returned whole and [`crate::serve`] applies the
+    /// `offset`/`limit` paging; ordering must be stable across paged calls.
+    fn user_directory(&self, caller: &Caller) -> Result<Vec<UserDirectoryRecord>, Errno>;
 }

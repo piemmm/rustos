@@ -430,12 +430,11 @@ impl<P: PageTable> AddressSpace<P> {
 /// only `Copy` plain-old-data (`page -> (frame, flags)`), so it is
 /// unconditionally `Send + Sync` and outlives the source space.
 ///
-/// It reflects the mappings present **when it was frozen**. A task whose
-/// mappings never change after spawn — the only kind RustOS spawns today,
-/// as there is no user-driven remap syscall yet — is fully described by
-/// its freeze-time snapshot; when a remap path lands it must re-register
-/// an updated snapshot rather than the registry being widened to a live
-/// mutable view.
+/// It reflects the mappings present **when it was frozen**. Every syscall
+/// that mutates a task's live space (`mem_map` / `mem_unmap` / `mmio_map`
+/// / `dma_alloc`) re-freezes and re-registers a fresh snapshot, so the
+/// registry's view always describes the current mappings — the registry
+/// is never widened to a live mutable view.
 pub struct FrozenAddressSpace {
     mappings: BTreeMap<Page, (Frame, MapFlags)>,
 }
@@ -443,6 +442,10 @@ pub struct FrozenAddressSpace {
 impl UserAddressSpace for FrozenAddressSpace {
     fn translate(&self, page: Page) -> Option<(Frame, MapFlags)> {
         self.mappings.get(&page).copied()
+    }
+
+    fn mapped_pages(&self) -> usize {
+        self.mappings.len()
     }
 }
 
@@ -459,10 +462,11 @@ impl UserAddressSpace for FrozenAddressSpace {
 /// `&dyn UserAddressSpace` to walk (
 /// `tests/SECURITY.md` §5).
 ///
-/// The trait deliberately exposes **only** `translate`: the copy path
-/// must never be able to *mutate* a caller's mappings, and a read-only
-/// translation is all the fail-closed permission checks in
-/// [`crate::uaccess`] require. Mapping and unmapping stay behind
+/// The trait deliberately exposes **only** read-side observations: the
+/// copy path must never be able to *mutate* a caller's mappings, and a
+/// read-only translation is all the fail-closed permission checks in
+/// [`crate::uaccess`] require ([`Self::mapped_pages`] serves the System
+/// Information memory figure). Mapping and unmapping stay behind
 /// [`AddressSpace`]'s own accounted [`AddressSpace::map`] /
 /// [`AddressSpace::unmap`] (no widening of the
 /// interface to "make access easier").
@@ -473,11 +477,24 @@ pub trait UserAddressSpace {
     /// Mirrors [`AddressSpace::translate`] exactly; the blanket impl
     /// forwards to it so there is one translation definition, not two.
     fn translate(&self, page: Page) -> Option<(Frame, MapFlags)>;
+
+    /// Number of pages currently mapped in this space — image, stack, and
+    /// every anonymous region alike.
+    ///
+    /// A read-only observation for the System Information process feed
+    /// (`mem_bytes = mapped_pages * PAGE_SIZE`); mirrors
+    /// [`AddressSpace::mapped_pages`] so there is one counting
+    /// definition, not two.
+    fn mapped_pages(&self) -> usize;
 }
 
 impl<P: PageTable> UserAddressSpace for AddressSpace<P> {
     fn translate(&self, page: Page) -> Option<(Frame, MapFlags)> {
         AddressSpace::translate(self, page)
+    }
+
+    fn mapped_pages(&self) -> usize {
+        AddressSpace::mapped_pages(self)
     }
 }
 

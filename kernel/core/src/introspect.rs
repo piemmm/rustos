@@ -110,6 +110,23 @@ pub trait IntrospectSource: Sync {
     /// * [`Errno::NotImplemented`] from the default [`NullIntrospectSource`].
     /// * [`Errno::NotFound`] if no live task carries `proc_id` (fail closed).
     fn task_limits(&self, proc_id: ProcId) -> Result<Vec<u8>, Errno>;
+
+    /// Encode up to `max_records`
+    /// [`rustos_abi::sysinfo::UserDirectoryRecord`]s beginning at record
+    /// index `offset`, in a stable order, packed little-endian
+    /// back-to-back.
+    ///
+    /// The directory pairs each account's uid with its username and
+    /// carries **no** credential material — password records stay behind
+    /// the capability-gated `users_db_read` syscall. A kernel holding no
+    /// user database answers with an empty directory (never a fabricated
+    /// account); an `offset` past the end returns an empty `Vec` (the
+    /// paging terminator), never an error.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotImplemented`] from the default [`NullIntrospectSource`].
+    fn user_directory(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno>;
 }
 
 /// The fail-closed default installed before the binding kernel wires the real
@@ -144,6 +161,10 @@ impl IntrospectSource for NullIntrospectSource {
     }
 
     fn task_limits(&self, _proc_id: ProcId) -> Result<Vec<u8>, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn user_directory(&self, _offset: u64, _max_records: usize) -> Result<Vec<u8>, Errno> {
         Err(Errno::NotImplemented)
     }
 }
