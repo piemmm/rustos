@@ -101,26 +101,41 @@ impl ColorPairs {
         Ok(())
     }
 
-    /// Define the next free pair as `fg` on `bg` and return its id (curses
+    /// Return the id of the pair `fg` on `bg`, defining it if needed (curses
     /// `alloc_pair`).
     ///
-    /// The lowest id in `1..=MAX_COLOR_PAIRS` that has not been defined is
-    /// chosen, so an application can request pairs without tracking ids
-    /// itself.
+    /// A pair already defined as exactly `fg` on `bg` is reused — its
+    /// existing id is returned — so requesting the same colours on every
+    /// redraw never consumes a fresh slot. Otherwise the lowest undefined id
+    /// in `1..=MAX_COLOR_PAIRS` is defined and returned, so an application
+    /// can request pairs without tracking ids itself.
     ///
     /// # Errors
     ///
-    /// Returns [`CursesError::BadColorPair`] if every allocatable id is
-    /// already defined.
+    /// Returns [`CursesError::BadColorPair`] if the pair is not yet defined
+    /// and every allocatable id is already taken.
     pub fn alloc_pair(&mut self, fg: Color, bg: Color) -> Result<u16> {
+        let wanted = ColorPair::new(fg, bg);
+        let mut free = None;
         for id in 1..=MAX_COLOR_PAIRS {
-            let index = usize::from(id);
-            if index >= self.pairs.len() || self.pairs[index].is_none() {
-                self.init_pair(id, fg, bg)?;
-                return Ok(id);
+            match self.pairs.get(usize::from(id)).copied().flatten() {
+                Some(existing) if existing == wanted => return Ok(id),
+                Some(_) => {}
+                None => {
+                    if free.is_none() {
+                        free = Some(id);
+                    }
+                    // Ids past the table's current length are all undefined,
+                    // so no later id can hold the wanted pair.
+                    if usize::from(id) >= self.pairs.len() {
+                        break;
+                    }
+                }
             }
         }
-        Err(CursesError::BadColorPair)
+        let id = free.ok_or(CursesError::BadColorPair)?;
+        self.init_pair(id, fg, bg)?;
+        Ok(id)
     }
 
     /// The pair defined for `id`.

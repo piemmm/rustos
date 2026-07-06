@@ -70,8 +70,10 @@ the fallback degrades safely rather than emitting sequences it would not honour
 
 `ColorPairs` is the curses colour-pair table; pair `0` is the reserved terminal
 default and cannot be redefined. `init_pair` defines a specific id and
-`alloc_pair` hands out the next free id, so an application can request colours
-without tracking ids itself.
+`alloc_pair` returns the id of the requested colours — reusing an identical
+existing pair, or defining the next free id when the pair is new — so an
+application can request the same colours on every redraw without tracking ids
+itself and without ever filling the table.
 
 ## One vocabulary, fail closed
 

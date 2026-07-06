@@ -65,8 +65,10 @@ a sequence the terminal would misinterpret.
 
 A few patterns `top` uses:
 
-- **Colour pairs.** `Screen::alloc_pair(fg, bg)` hands out the next free pair
-  id so you do not track ids by hand; apply a colour through
+- **Colour pairs.** `Screen::alloc_pair(fg, bg)` returns the pair id for the
+  requested colours — reusing an identical existing pair, or defining the next
+  free id — so you do not track ids by hand and per-redraw requests never fill
+  the table; apply a colour through
   `Window::set_colors` or by setting the `rustos_vt::Attributes` foreground and
   background. `top` allocates a white-on-blue header pair on colour terminals
   and falls back to reverse video on monochrome ones — the renderer's colour

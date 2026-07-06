@@ -163,12 +163,14 @@ impl<T: Tty> Screen<T> {
         self.pairs.init_pair(id, fg, bg)
     }
 
-    /// Define the next free colour pair as `fg` on `bg` and return its id
-    /// (curses `alloc_pair`).
+    /// Return the id of the colour pair `fg` on `bg`, defining it if needed
+    /// (curses `alloc_pair`). An identical existing pair is reused, so
+    /// requesting the same colours on every redraw never fills the table.
     ///
     /// # Errors
     ///
-    /// [`CursesError::BadColorPair`](crate::CursesError::BadColorPair) if the table is full.
+    /// [`CursesError::BadColorPair`](crate::CursesError::BadColorPair) if the
+    /// pair is new and the table is full.
     pub fn alloc_pair(&mut self, fg: rustos_vt::Color, bg: rustos_vt::Color) -> Result<u16> {
         self.pairs.alloc_pair(fg, bg)
     }

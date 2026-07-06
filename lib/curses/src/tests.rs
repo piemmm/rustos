@@ -32,7 +32,7 @@ fn encode_all(ops: &[Op]) -> alloc::vec::Vec<u8> {
 }
 
 use crate::buffer::Buffer;
-use crate::color::{downgrade, ColorPairs};
+use crate::color::{downgrade, ColorPairs, MAX_COLOR_PAIRS};
 use crate::error::CursesError;
 use crate::geom::{Pos, Size};
 use crate::input::{Event, Input};
@@ -637,6 +637,59 @@ fn alloc_pair_skips_explicitly_defined_ids() {
     assert_eq!(next, 2);
     // The explicit definition is untouched.
     assert_eq!(pairs.get(1).fg, Color::Basic(BasicColor::Blue));
+}
+
+#[test]
+fn alloc_pair_reuses_an_identical_existing_pair() {
+    let mut pairs = ColorPairs::new();
+    let first = pairs
+        .alloc_pair(
+            Color::Basic(BasicColor::White),
+            Color::Basic(BasicColor::Blue),
+        )
+        .expect("free id");
+    let again = pairs
+        .alloc_pair(
+            Color::Basic(BasicColor::White),
+            Color::Basic(BasicColor::Blue),
+        )
+        .expect("existing id");
+    assert_eq!(first, again);
+    // An explicitly defined identical pair is reused too.
+    pairs
+        .init_pair(7, Color::Basic(BasicColor::Green), Color::Default)
+        .expect("define id 7");
+    let reused = pairs
+        .alloc_pair(Color::Basic(BasicColor::Green), Color::Default)
+        .expect("existing id");
+    assert_eq!(reused, 7);
+}
+
+#[test]
+fn alloc_pair_never_exhausts_on_repeated_identical_requests() {
+    // The `top -d0` regression: a full-screen refresher requests the same
+    // pairs on every redraw. Far more requests than the table holds slots
+    // must keep resolving to the same ids, never error, and leave the table
+    // no fuller than the number of distinct pairs.
+    let mut pairs = ColorPairs::new();
+    for _ in 0..usize::from(MAX_COLOR_PAIRS) * 4 {
+        let header = pairs
+            .alloc_pair(
+                Color::Basic(BasicColor::White),
+                Color::Basic(BasicColor::Blue),
+            )
+            .expect("header pair");
+        let state = pairs
+            .alloc_pair(Color::Basic(BasicColor::Green), Color::Default)
+            .expect("state pair");
+        assert_eq!(header, 1);
+        assert_eq!(state, 2);
+    }
+    // A genuinely new pair still finds a free slot afterwards.
+    let fresh = pairs
+        .alloc_pair(Color::Basic(BasicColor::Red), Color::Default)
+        .expect("free id");
+    assert_eq!(fresh, 3);
 }
 
 #[test]
