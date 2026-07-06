@@ -193,9 +193,10 @@ pub use users::{
     USERS_DB_PATH,
 };
 pub use waitq::{
-    call_wake, console_deregister, console_wake, drain_pending_wakes, hw_tree_wake,
+    call_wake, call_wake_task, console_deregister, console_wake, drain_pending_wakes, hw_tree_wake,
     install_wait_arch, irq_wake, nearest_timed_deadline, procwait_wake, rearm_timed_wakeup,
-    serve_wake, timed_wake_sweep, wait_now_ns, WaitArchAlreadyInstalled, WaitQueue, WaitQueueArch,
-    CALL_WAITQ, CONSOLE_WAITQ, HW_TREE_WAITQ, IRQ_WAITQ, NO_DEADLINE, PROCWAIT_WAITQ, SERVE_WAITQ,
+    serve_wake, serve_wake_task, timed_wake_sweep, wait_now_ns, WaitArchAlreadyInstalled,
+    WaitQueue, WaitQueueArch, CALL_WAITQ, CONSOLE_WAITQ, HW_TREE_WAITQ, IRQ_WAITQ, NO_DEADLINE,
+    PROCWAIT_WAITQ, SERVE_WAITQ,
 };
 pub use wallclock::{KernelWallClock, NullWallClock, WallClockSource, NULL_WALL_CLOCK};

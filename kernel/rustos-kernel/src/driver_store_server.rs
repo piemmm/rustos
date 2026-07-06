@@ -378,8 +378,11 @@ where
 /// This never blocks: [`CallEndpoint::recv_call`] returns
 /// immediately, and the per-arch kthread loop parks between calls. The wake
 /// is co-located with the reply so a served caller is always re-readied
-/// (`crate::rustos_kernel_core::call_wake`, a no-op before the boot path
-/// installs the wait-queue arch hook).
+/// (a no-op before the boot path installs the wait-queue arch hook), and it
+/// is **targeted**: the reply hands back the poster's scheduler id captured
+/// at post time, so exactly that caller is unparked — never a broadcast
+/// that would spuriously ready every other parked caller (wake-one, not a
+/// thundering herd).
 pub fn serve_pending<F>(
     service: &SystemFileService<'_, F>,
     ctx: &StoreServeContext<'_>,
@@ -398,10 +401,15 @@ where
     };
     let reply = build_reply(service, ctx, store, &call.request, audit);
     // A reply failure (oversize / unknown ticket) is itself fail-closed and
-    // audited inside `CallEndpoint::reply`; the caller is still woken so it
-    // re-checks and abandons rather than parking forever.
-    let _ = endpoint.reply(call.ticket, &reply, audit);
-    rustos_kernel_core::call_wake();
+    // audited inside `CallEndpoint::reply`; the affected caller's own poll
+    // then observes the unanswered ticket fail-closed. On success wake
+    // exactly the poster; a poster with no scheduler identity (`0`) falls
+    // back to the broadcast so it is still released.
+    match endpoint.reply(call.ticket, &reply, audit) {
+        Ok(0) => rustos_kernel_core::call_wake(),
+        Ok(poster) => rustos_kernel_core::call_wake_task(poster),
+        Err(_) => {}
+    }
     true
 }
 
@@ -462,6 +470,14 @@ pub fn serve_system_store(
     );
     rustos_kernel_core::callreg::register(endpoint.clone())
         .map_err(|_| "driver-store: driver-store endpoint id already bound")?;
+    // Record this kthread's scheduler id on the endpoint so a posted
+    // request wakes exactly this server instead of broadcasting to every
+    // parked one (wake-one). The id is published by the admission seam
+    // before the body first runs; a degenerate build without it leaves the
+    // endpoint unrecorded and posts fall back to the broadcast wake.
+    if let Some(task) = crate::unlock_service::store_service_task() {
+        endpoint.record_server_task(task);
+    }
     // The driver store is now reachable. Wake any reactive observer parked
     // on `hw_tree_wait` (the user-space `devmgr`) so it re-attempts its
     // catalogue fetch: the endpoint binds *after* the boot tree settles, so

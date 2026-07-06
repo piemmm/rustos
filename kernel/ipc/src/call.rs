@@ -52,7 +52,7 @@ use rustos_log::{Field, Sink};
 use rustos_util::fmt::{format_hex_u64, format_usize};
 
 use crate::audit::{record, AuditEvent};
-use crate::loom_compat::{AtomicU32, Ordering};
+use crate::loom_compat::{AtomicU32, AtomicU64, Ordering};
 use crate::port::EndpointId;
 
 /// Fixed atomic states a [`CallEndpoint`] can be in, encoded into one
@@ -146,6 +146,12 @@ pub struct CallEndpointLimits {
 struct PendingCall {
     ticket: u64,
     sender: u64,
+    /// The posting task's *scheduler* id, captured at post time so the
+    /// reply path can wake exactly this caller off the run queue instead
+    /// of broadcasting to every parked caller (the wake-one discipline —
+    /// a wake-all here is a thundering herd that keeps unrelated tasks
+    /// runnable and distorts the load census).
+    poster_sched: u64,
     /// The caller's kernel-attested identity, captured at post time so the
     /// server can later retrieve it by ticket through
     /// [`CallEndpoint::peer_origin`]. Snapshotting it at post (rather than
@@ -164,9 +170,11 @@ struct Inner {
     pending: VecDeque<PendingCall>,
     /// Received by the server, awaiting [`CallEndpoint::reply`]. Keyed by
     /// ticket; the value is the posting caller's task id (so only that task
-    /// may later claim the reply) paired with its kernel-attested
-    /// [`Origin`], which [`CallEndpoint::peer_origin`] hands the server.
-    in_service: BTreeMap<u64, (u64, Origin)>,
+    /// may later claim the reply), its kernel-attested [`Origin`] (which
+    /// [`CallEndpoint::peer_origin`] hands the server), and its scheduler
+    /// id (which [`CallEndpoint::reply`] returns so the syscall layer wakes
+    /// exactly the poster).
+    in_service: BTreeMap<u64, (u64, Origin, u64)>,
     /// Replied, awaiting [`CallEndpoint::take_reply`]. Keyed by ticket; the
     /// value is the posting caller's task id and the reply bytes.
     completed: BTreeMap<u64, (u64, Vec<u8>)>,
@@ -201,6 +209,13 @@ pub struct CallEndpoint {
     /// endpoint down when this task exits so in-flight callers are released
     /// fail-closed rather than blocked forever.
     owner: u64,
+    /// The serving task's *scheduler* id, recorded the first time the server
+    /// receives on this endpoint (`0` until then). The post path wakes
+    /// exactly this task instead of broadcasting to every parked server
+    /// (the wake-one discipline); a plain store/load suffices because the
+    /// value is a wake *hint* — correctness is carried by the server's
+    /// register-before-poll park loop, which re-polls after every wake.
+    server_task: AtomicU64,
     /// Liveness read on the post fast path before taking the lock.
     state: AtomicU32,
     inner: rustos_sync::SpinLock<Inner>,
@@ -283,6 +298,7 @@ impl CallEndpoint {
             max_reply,
             capacity,
             owner: creator.task().0,
+            server_task: AtomicU64::new(0),
             state: AtomicU32::new(state::OPEN),
             inner: rustos_sync::SpinLock::new(Inner {
                 next_ticket: 0,
@@ -330,6 +346,33 @@ impl CallEndpoint {
     #[must_use]
     pub fn owner(&self) -> u64 {
         self.owner
+    }
+
+    /// Record the serving task's *scheduler* id so a post can wake exactly
+    /// this server (see the `server_task` field). Called by the receive
+    /// paths (the `call_recv` syscall handler and the in-kernel store serve
+    /// loop) with the kernel-attested current task — never a caller-supplied
+    /// value — after the endpoint-ownership gate has already passed, so it
+    /// can only ever name the endpoint's own server. Idempotent; `0` is
+    /// never a valid scheduler id and is rejected so the "unrecorded"
+    /// sentinel cannot be forged back in.
+    pub fn record_server_task(&self, sched_task: u64) {
+        if sched_task != 0 {
+            self.server_task.store(sched_task, Ordering::Release);
+        }
+    }
+
+    /// The serving task's recorded *scheduler* id, or [`None`] before the
+    /// server's first receive. The post path uses this to wake exactly the
+    /// bound server; `None` falls back to the broadcast wake (fail-safe —
+    /// a server that never received yet drains its queue on its first
+    /// poll regardless).
+    #[must_use]
+    pub fn server_task(&self) -> Option<u64> {
+        match self.server_task.load(Ordering::Acquire) {
+            0 => None,
+            id => Some(id),
+        }
     }
 
     /// `true` once [`Self::destroy`] has run.
@@ -414,12 +457,19 @@ impl CallEndpoint {
     /// returned ticket is later surrendered to [`take_reply`](Self::take_reply)
     /// by the *same* caller task.
     ///
+    /// `poster_sched` is the posting task's kernel-attested *scheduler* id
+    /// (never a caller-supplied value): [`reply`](Self::reply) returns it so
+    /// the syscall layer wakes exactly this caller rather than broadcasting
+    /// to every parked one. An in-kernel poster with no scheduler identity
+    /// passes `0`, and the reply path falls back to the broadcast wake.
+    ///
     /// # Errors
     ///
     /// As enumerated above.
     pub fn post<S: Sink + ?Sized>(
         &self,
         caller: &TaskCapabilities,
+        poster_sched: u64,
         request: &[u8],
         audit: &S,
     ) -> Result<CallTicket, Errno> {
@@ -491,6 +541,7 @@ impl CallEndpoint {
         g.pending.push_back(PendingCall {
             ticket,
             sender,
+            poster_sched,
             origin,
             request: request.to_vec(),
         });
@@ -531,7 +582,8 @@ impl CallEndpoint {
             };
         }
         let call = g.pending.pop_front().expect("front was present");
-        g.in_service.insert(call.ticket, (call.sender, call.origin));
+        g.in_service
+            .insert(call.ticket, (call.sender, call.origin, call.poster_sched));
         RecvCall::Received(ReceivedCall {
             ticket: CallTicket(call.ticket),
             sender: call.sender,
@@ -556,7 +608,7 @@ impl CallEndpoint {
             .lock()
             .in_service
             .get(&ticket.0)
-            .map(|(_, origin)| *origin)
+            .map(|(_, origin, _)| *origin)
     }
 
     /// Deliver `reply` for the in-service call identified by `ticket`.
@@ -566,7 +618,12 @@ impl CallEndpoint {
     /// server is currently servicing (received but not yet replied);
     /// otherwise the reply is refused fail-closed and one
     /// [`AuditEvent::CallReplyDenied`] is emitted. On success the reply is
-    /// buffered for the caller and one [`AuditEvent::CallReplied`] is emitted.
+    /// buffered for the caller, one [`AuditEvent::CallReplied`] is emitted,
+    /// and the poster's *scheduler* id (as captured by [`post`](Self::post))
+    /// is returned so the syscall layer wakes exactly the caller parked on
+    /// this ticket — never a broadcast to every parked caller. A `0` means
+    /// the poster carried no scheduler identity; the waker then falls back
+    /// to the broadcast wake.
     ///
     /// No capability check: the single bound server's authority is fixed at
     /// create time.
@@ -581,7 +638,7 @@ impl CallEndpoint {
         ticket: CallTicket,
         reply: &[u8],
         audit: &S,
-    ) -> Result<(), Errno> {
+    ) -> Result<u64, Errno> {
         let mut id_buf = [0u8; 16];
         let mut ticket_buf = [0u8; 16];
         let mut len_buf = [0u8; 12];
@@ -609,7 +666,7 @@ impl CallEndpoint {
         }
 
         let mut g = self.inner.lock();
-        let Some((sender, _origin)) = g.in_service.remove(&ticket.0) else {
+        let Some((sender, _origin, poster_sched)) = g.in_service.remove(&ticket.0) else {
             drop(g);
             record(
                 audit,
@@ -625,7 +682,7 @@ impl CallEndpoint {
             AuditEvent::CallReplied,
             &[id_field, ticket_field, len_field],
         );
-        Ok(())
+        Ok(poster_sched)
     }
 
     /// Claim the reply for `ticket` on behalf of `claimant` (the task that
@@ -659,7 +716,8 @@ impl CallEndpoint {
         if self.is_closed() {
             return ReplyOutcome::Cancelled;
         }
-        let in_service = g.in_service.get(&ticket.0).map(|(sender, _)| *sender) == Some(claimant);
+        let in_service =
+            g.in_service.get(&ticket.0).map(|(sender, _, _)| *sender) == Some(claimant);
         let pending = g
             .pending
             .iter()
@@ -679,6 +737,10 @@ mod tests {
     use rustos_abi::CapabilityId;
     use rustos_kernel_sec::captable::TaskId;
     use rustos_kernel_sec::identity::UserId;
+
+    /// The scheduler id the tests post under — arbitrary but non-zero, so
+    /// `reply` hands it back verbatim.
+    const POSTER_SCHED: u64 = 0x51;
 
     fn caps_of(items: &[CapabilityId]) -> CapabilitySet {
         let mut s = CapabilitySet::empty();
@@ -941,7 +1003,9 @@ mod tests {
         )
         .expect("authorised");
         let caller = task_with(7, &[]); // lacks NET_RAW
-        let err = ep.post(&caller, b"hi", &sink).expect_err("denied");
+        let err = ep
+            .post(&caller, POSTER_SCHED, b"hi", &sink)
+            .expect_err("denied");
         assert_eq!(err, Errno::PermissionDenied);
         assert!(sink.ids().contains(&AuditEvent::CallPostDenied.id().0));
         assert_eq!(ep.outstanding(), 0);
@@ -966,7 +1030,7 @@ mod tests {
         .expect("ok");
         let caller = task_with(7, &[]);
         let err = ep
-            .post(&caller, b"too many bytes", &sink)
+            .post(&caller, POSTER_SCHED, b"too many bytes", &sink)
             .expect_err("oversize");
         assert_eq!(err, Errno::MessageTooLarge);
         assert!(sink.ids().contains(&AuditEvent::CallRequestTooLarge.id().0));
@@ -978,7 +1042,9 @@ mod tests {
         let ep = open_endpoint(&sink);
         ep.destroy(&sink);
         let caller = task_with(7, &[]);
-        let err = ep.post(&caller, b"x", &sink).expect_err("closed");
+        let err = ep
+            .post(&caller, POSTER_SCHED, b"x", &sink)
+            .expect_err("closed");
         assert_eq!(err, Errno::NotFound);
         assert!(sink
             .ids()
@@ -1004,9 +1070,11 @@ mod tests {
         )
         .expect("ok");
         let caller = task_with(7, &[]);
-        ep.post(&caller, b"a", &sink).expect("1");
-        ep.post(&caller, b"b", &sink).expect("2");
-        let err = ep.post(&caller, b"c", &sink).expect_err("full");
+        ep.post(&caller, POSTER_SCHED, b"a", &sink).expect("1");
+        ep.post(&caller, POSTER_SCHED, b"b", &sink).expect("2");
+        let err = ep
+            .post(&caller, POSTER_SCHED, b"c", &sink)
+            .expect_err("full");
         assert_eq!(err, Errno::LengthOutOfRange);
         assert!(sink.ids().contains(&AuditEvent::CallQueueFull.id().0));
         assert_eq!(ep.outstanding(), 2);
@@ -1018,7 +1086,9 @@ mod tests {
         let ep = open_endpoint(&sink);
         let caller = task_with(7, &[]);
 
-        let ticket = ep.post(&caller, b"ping", &sink).expect("posted");
+        let ticket = ep
+            .post(&caller, POSTER_SCHED, b"ping", &sink)
+            .expect("posted");
         // Before the server receives it, the caller sees Pending.
         assert_eq!(ep.take_reply(7, ticket), ReplyOutcome::Pending);
 
@@ -1052,7 +1122,9 @@ mod tests {
         let minted = ProcId::from_raw([0x9E; 16]);
         caller = caller.with_proc_id(minted);
 
-        let ticket = ep.post(&caller, b"ping", &sink).expect("posted");
+        let ticket = ep
+            .post(&caller, POSTER_SCHED, b"ping", &sink)
+            .expect("posted");
         // A pending (not-yet-received) call exposes no origin: the server
         // only learns a caller's identity while actively servicing it.
         assert_eq!(ep.peer_origin(ticket), None);
@@ -1084,8 +1156,8 @@ mod tests {
         let caller = task_with(7, &[]);
         assert!(recv_one(&ep).is_none());
 
-        let t1 = ep.post(&caller, b"1", &sink).expect("1");
-        let t2 = ep.post(&caller, b"2", &sink).expect("2");
+        let t1 = ep.post(&caller, POSTER_SCHED, b"1", &sink).expect("1");
+        let t2 = ep.post(&caller, POSTER_SCHED, b"2", &sink).expect("2");
         assert_ne!(t1, t2);
         assert_eq!(recv_one(&ep).expect("first").ticket, t1);
         assert_eq!(recv_one(&ep).expect("second").ticket, t2);
@@ -1097,7 +1169,9 @@ mod tests {
         let sink = RecordingSink::new();
         let ep = open_endpoint(&sink);
         let caller = task_with(7, &[]);
-        let ticket = ep.post(&caller, b"four", &sink).expect("posted");
+        let ticket = ep
+            .post(&caller, POSTER_SCHED, b"four", &sink)
+            .expect("posted");
 
         // A buffer too small for the front request reports its size and does
         // not dequeue it (no lost request).
@@ -1143,7 +1217,7 @@ mod tests {
         let sink = RecordingSink::new();
         let ep = open_endpoint(&sink);
         let caller = task_with(7, &[]);
-        let ticket = ep.post(&caller, b"q", &sink).expect("posted");
+        let ticket = ep.post(&caller, POSTER_SCHED, b"q", &sink).expect("posted");
         recv_one(&ep).expect("received");
         ep.reply(ticket, b"r", &sink).expect("replied");
 
@@ -1158,7 +1232,7 @@ mod tests {
         let sink = RecordingSink::new();
         let ep = open_endpoint(&sink);
         let caller = task_with(7, &[]);
-        let ticket = ep.post(&caller, b"q", &sink).expect("posted");
+        let ticket = ep.post(&caller, POSTER_SCHED, b"q", &sink).expect("posted");
         // A non-poster polling the ticket while it is pending learns nothing.
         assert_eq!(ep.take_reply(8, ticket), ReplyOutcome::Unknown);
         recv_one(&ep).expect("received");
@@ -1181,7 +1255,7 @@ mod tests {
         let sink = RecordingSink::new();
         let ep = open_endpoint(&sink);
         let caller = task_with(7, &[]);
-        let ticket = ep.post(&caller, b"q", &sink).expect("posted");
+        let ticket = ep.post(&caller, POSTER_SCHED, b"q", &sink).expect("posted");
         recv_one(&ep).expect("received");
         ep.reply(ticket, b"r", &sink).expect("first reply");
         // The ticket left the in-service table on the first reply.
@@ -1207,7 +1281,7 @@ mod tests {
         )
         .expect("ok");
         let caller = task_with(7, &[]);
-        let ticket = ep.post(&caller, b"q", &sink).expect("posted");
+        let ticket = ep.post(&caller, POSTER_SCHED, b"q", &sink).expect("posted");
         recv_one(&ep).expect("received");
         let err = ep
             .reply(ticket, b"too long", &sink)
@@ -1223,6 +1297,41 @@ mod tests {
     }
 
     #[test]
+    fn reply_returns_the_posters_scheduler_id() {
+        let sink = RecordingSink::new();
+        let ep = open_endpoint(&sink);
+        let caller = task_with(7, &[]);
+        let ticket = ep.post(&caller, 0xBEEF, b"q", &sink).expect("posted");
+        recv_one(&ep).expect("received");
+        // The reply hands back exactly the scheduler id the post captured,
+        // so the syscall layer wakes that one caller and no other.
+        assert_eq!(ep.reply(ticket, b"r", &sink), Ok(0xBEEF));
+    }
+
+    #[test]
+    fn server_task_is_recorded_once_and_zero_is_rejected() {
+        let sink = RecordingSink::new();
+        let ep = open_endpoint(&sink);
+        // Unrecorded until the server's first receive: posts fall back to
+        // the broadcast wake.
+        assert_eq!(ep.server_task(), None);
+        // A zero id is the "unrecorded" sentinel and must not overwrite a
+        // real recording (or be recordable at all).
+        ep.record_server_task(0);
+        assert_eq!(ep.server_task(), None);
+        ep.record_server_task(42);
+        assert_eq!(ep.server_task(), Some(42));
+        // Recording is idempotent for the same server and a later record
+        // (a restarted server task) supersedes the old id.
+        ep.record_server_task(42);
+        ep.record_server_task(43);
+        assert_eq!(ep.server_task(), Some(43));
+        // Zero still cannot forge the sentinel back in.
+        ep.record_server_task(0);
+        assert_eq!(ep.server_task(), Some(43));
+    }
+
+    #[test]
     fn destroy_cancels_in_flight_calls_and_audits_the_count() {
         let sink = RecordingSink::new();
         let ep = open_endpoint(&sink);
@@ -1230,9 +1339,13 @@ mod tests {
         // Post three, then drive them into three distinct states: the first
         // received-and-replied (completed), the second received (in service),
         // the third never received (pending).
-        let t_done = ep.post(&caller, b"d", &sink).expect("done");
-        let t_in_service = ep.post(&caller, b"s", &sink).expect("in service");
-        let t_pending = ep.post(&caller, b"p", &sink).expect("pending");
+        let t_done = ep.post(&caller, POSTER_SCHED, b"d", &sink).expect("done");
+        let t_in_service = ep
+            .post(&caller, POSTER_SCHED, b"s", &sink)
+            .expect("in service");
+        let t_pending = ep
+            .post(&caller, POSTER_SCHED, b"p", &sink)
+            .expect("pending");
         assert_eq!(recv_one(&ep).expect("first").ticket, t_done);
         assert_eq!(recv_one(&ep).expect("second").ticket, t_in_service);
         ep.reply(t_done, b"r", &sink).expect("reply the first");

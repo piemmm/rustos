@@ -1480,6 +1480,25 @@ fn copy_fault_errno(_err: UaccessError) -> Errno {
     Errno::BadAddress
 }
 
+/// Wake the `ipc_call` caller a just-completed `CallEndpoint::reply`
+/// belongs to.
+///
+/// `outcome` is the reply's result: on success it carries the poster's
+/// scheduler id captured at post time, and exactly that task is unparked
+/// off `CALL_WAITQ` — never a broadcast that would spuriously ready every
+/// other parked caller. A `0` id (a poster with no scheduler identity)
+/// falls back to the broadcast so the caller is still released; a failed
+/// reply woke nothing and changes nothing (the ticket is still pending or
+/// already answered, both fail-closed states the caller's own poll
+/// handles).
+fn wake_replied_poster(outcome: Result<u64, Errno>) {
+    match outcome {
+        Ok(0) => crate::waitq::call_wake(),
+        Ok(poster) => crate::waitq::call_wake_task(poster),
+        Err(_) => {}
+    }
+}
+
 /// Size of the kernel staging buffer `random_get` draws CSPRNG output
 /// into before copying it into the caller's buffer.
 ///
@@ -3446,16 +3465,25 @@ where
         // Post the request. `CallEndpoint::post` performs the per-call
         // capability check against the caller's effective set (no ambient authority) and re-checks the size, returning a
         // stable `Errno` for every refusal and otherwise an opaque ticket
-        // correlating this caller with its reply.
-        let ticket = ep.post(caller.caps, &payload, self.audit)?;
+        // correlating this caller with its reply. The caller's kernel-held
+        // scheduler id rides along so the reply wakes exactly this task.
+        let ticket = ep.post(caller.caps, caller.task_id.0, &payload, self.audit)?;
 
-        // Wake the bound server: an in-kernel IPC-server kthread parks off
-        // the run queue on `SERVE_WAITQ` between requests (no busy-yield), so the posted request must unpark it or the
-        // call would block until some unrelated wake. The server re-checks
-        // its endpoint after every wake; the scheduler's wake-pending token
-        // closes the post/park race so a request posted while the server is
+        // Wake the bound server: an IPC server parks off the run queue on
+        // `SERVE_WAITQ` between requests (no busy-yield), so the posted
+        // request must unpark it or the call would block until some
+        // unrelated wake. Wake exactly the endpoint's recorded server — a
+        // broadcast here is a thundering herd that spuriously readies every
+        // other parked server and distorts the load census — falling back to
+        // the broadcast only for an endpoint whose server has never received
+        // (no id recorded yet). The server re-checks its endpoint after
+        // every wake; the scheduler's wake-pending token closes the
+        // post/park race so a request posted while the server is
         // mid-commit-to-park is never lost.
-        crate::waitq::serve_wake();
+        match ep.server_task() {
+            Some(server) => crate::waitq::serve_wake_task(server),
+            None => crate::waitq::serve_wake(),
+        }
 
         // Block until the bound server replies, parking off the run queue
         // (no busy yield). `ipc_call` carries no timeout,
@@ -3641,6 +3669,11 @@ where
         // on `CALL_WAITQ`).
         let cpu = SchedulerArch::current_cpu(self.arch);
         let sched_task = caller.task_id.0;
+        // Record this server's scheduler id on the endpoint (post-gate, so
+        // only the owning task can ever be recorded): from now on a post to
+        // this endpoint wakes exactly this task instead of broadcasting to
+        // every parked server.
+        ep.record_server_task(sched_task);
         crate::waitq::SERVE_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
         let received = loop {
             // The owner was torn down, or the endpoint destroyed: abandon the
@@ -3682,13 +3715,11 @@ where
         }) {
             Some(Ok(())) => Ok(call.request.len() as u64),
             Some(Err(err)) => {
-                let _ = ep.reply(call.ticket, &[], self.audit);
-                crate::waitq::call_wake();
+                wake_replied_poster(ep.reply(call.ticket, &[], self.audit));
                 Err(copy_fault_errno(err))
             }
             None => {
-                let _ = ep.reply(call.ticket, &[], self.audit);
-                crate::waitq::call_wake();
+                wake_replied_poster(ep.reply(call.ticket, &[], self.audit));
                 Err(Errno::BadAddress)
             }
         }
@@ -3730,10 +3761,11 @@ where
         }
 
         // Complete the ticket and wake the caller blocked in `ipc_call` for
-        // it. `reply` re-checks the ticket and size and fails closed on an
-        // unknown/already-answered ticket.
-        ep.reply(CallTicket(ticket), &payload, self.audit)?;
-        crate::waitq::call_wake();
+        // it — exactly that caller, by the poster scheduler id the endpoint
+        // captured at post time. `reply` re-checks the ticket and size and
+        // fails closed on an unknown/already-answered ticket.
+        let poster = ep.reply(CallTicket(ticket), &payload, self.audit)?;
+        wake_replied_poster(Ok(poster));
         Ok(0)
     }
 
@@ -16110,7 +16142,7 @@ mod tests {
         );
         crate::callreg::register(ep.clone()).expect("registered");
         let poster = make_caps_record(99, &[], sink);
-        ep.post(&poster, b"x", sink).expect("post a request");
+        ep.post(&poster, 99, b"x", sink).expect("post a request");
 
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
@@ -16422,7 +16454,7 @@ mod tests {
 
         // A client (task 7) posts a request, awaiting its reply.
         let client_caps = make_caps_record(7, &[], sink);
-        let ticket = ep.post(&client_caps, b"ping", sink).expect("posted");
+        let ticket = ep.post(&client_caps, 7, b"ping", sink).expect("posted");
 
         let ctx = CallerContext {
             task_id: SecTaskId(9),
@@ -16501,7 +16533,7 @@ mod tests {
         let client_caps = make_caps_record(7, &[CapabilityId::SYSINFO_GLOBAL], sink)
             .with_proc_id(ProcId::from_raw([0x71; 16]));
         let expected = client_caps.attest_origin();
-        let ticket = ep.post(&client_caps, b"who-am-i", sink).expect("posted");
+        let ticket = ep.post(&client_caps, 7, b"who-am-i", sink).expect("posted");
 
         let ctx = CallerContext {
             task_id: SecTaskId(9),

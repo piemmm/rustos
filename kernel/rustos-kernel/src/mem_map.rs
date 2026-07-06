@@ -186,10 +186,65 @@ fn carve_guard_arena(usable_start: u64, ram_end: u64, arena_bytes: u64) -> Optio
     })
 }
 
-/// Build the physical-memory map for the discovered RAM window
-/// `[ram_base, ram_base + ram_size)`, reserving everything up to the
-/// page-aligned `kernel_end`, carving a 2 MiB-aligned kthread-stack guard
-/// arena out of the usable remainder, and marking what is left usable.
+/// Split the discovered RAM `windows` into the subranges that lie in
+/// gigapages the identity map types Normal — i.e. drop every byte that
+/// falls in a gigapage `device_mask` claims (bit `g` of
+/// `device_mask[g / 64]` set means gigapage `g` is Device-typed).
+///
+/// The aarch64 identity map types memory at 1 GiB granularity and Device
+/// wins over RAM for a shared gigapage (MMIO must never be cached or
+/// speculated), so RAM that shares a gigapage with a discovered MMIO block
+/// — the Pi 4's window below 4 GiB ends inside the gigapage holding its
+/// UART/GIC/PCIe — would be mapped Device: atomics on it are unpredictable
+/// and the allocator must never hand it out. Such bytes are clipped here,
+/// fail closed; reclaiming them needs 2 MiB-granular identity typing (the
+/// staged follow-up in `plans/APPS.md` I4). A window past the 512 GiB
+/// identity window is likewise clipped (no representable slot).
+#[cfg(any(all(freestanding, kernel_isa = "aarch64"), test))]
+pub(crate) fn clip_windows_to_normal_ram(
+    windows: &[(u64, u64)],
+    device_mask: &[u64],
+) -> alloc::vec::Vec<(u64, u64)> {
+    const GIB: u64 = 1 << 30;
+    let gigapage_is_device = |gigapage: u64| -> bool {
+        usize::try_from(gigapage / 64)
+            .ok()
+            .and_then(|word| device_mask.get(word))
+            .is_some_and(|w| w & (1 << (gigapage % 64)) != 0)
+    };
+    let mut out = alloc::vec::Vec::new();
+    for &(base, size) in windows {
+        let Some(end) = base.checked_add(size) else {
+            continue;
+        };
+        // Walk the window gigapage by gigapage, accumulating maximal
+        // Normal-typed runs.
+        let mut run_start: Option<u64> = None;
+        let mut cursor = base;
+        while cursor < end {
+            let gigapage = cursor / GIB;
+            let gigapage_end = (gigapage + 1).saturating_mul(GIB).min(end);
+            if gigapage_is_device(gigapage) {
+                if let Some(start) = run_start.take() {
+                    out.push((start, cursor - start));
+                }
+            } else if run_start.is_none() {
+                run_start = Some(cursor);
+            }
+            cursor = gigapage_end;
+        }
+        if let Some(start) = run_start {
+            out.push((start, end - start));
+        }
+    }
+    out
+}
+
+/// Build the physical-memory map for the discovered RAM `windows`,
+/// reserving everything up to the page-aligned `kernel_end` inside the
+/// window that holds the kernel image, carving a 2 MiB-aligned
+/// kthread-stack guard arena out of that window's usable remainder, and
+/// marking everything else — including every further window — usable.
 ///
 /// `kernel_end` is the linker-provided one-past-the-end address of the
 /// kernel image including the boot heap (`__kernel_end`). It is rounded
@@ -197,38 +252,57 @@ fn carve_guard_arena(usable_start: u64, ram_end: u64, arena_bytes: u64) -> Optio
 /// receives starts on a frame boundary.
 ///
 /// The returned [`MemoryLayout`] pairs the allocator map with the carved
-/// [`GuardArena`] (when one fits). The map's regions, in physical order,
-/// are: the [`RegionKind::Reserved`] kernel image, an optional
-/// [`RegionKind::Usable`] head below the arena, the
+/// [`GuardArena`] (when one fits the kernel's window). The kernel window's
+/// regions, in physical order, are: the [`RegionKind::Reserved`] kernel
+/// image, an optional [`RegionKind::Usable`] head below the arena, the
 /// [`RegionKind::Reserved`] guard arena, and the [`RegionKind::Usable`]
-/// remainder. Zero-length usable spans are omitted so no degenerate
-/// region reaches the allocator. The arena's frames are reserved so the
-/// allocator never hands them out; the boot path
+/// remainder; every other window contributes one whole
+/// [`RegionKind::Usable`] region (a machine like the Pi 4 describes RAM
+/// above its MMIO hole and above 4 GiB as further windows). Zero-length
+/// windows and usable spans are omitted so no degenerate region reaches
+/// the allocator. The arena policy is sized from the *total* discovered
+/// RAM. The arena's frames are
+/// reserved so the allocator never hands them out; the boot path
 /// re-expresses the arena at 4 KiB granularity so a guard page in it can
 /// later be unmapped (`plans/PI.md` stage G2/G3).
 ///
 /// # Errors
 ///
-/// Returns [`MemoryMapError::AddressOverflow`] if the RAM window or the
+/// Returns [`MemoryMapError::AddressOverflow`] if a window or the
 /// page-aligned kernel end overflows `u64`, or
 /// [`MemoryMapError::UsableRegionEmpty`] if the page-aligned kernel end
-/// is not strictly inside the RAM window (no usable span remains).
+/// is not strictly inside any window (no usable span could bound the
+/// image — including an empty window list).
 #[cfg(any(all(freestanding, kernel_isa = "aarch64"), test))]
 pub(crate) fn build_memory_map(
-    ram_base: u64,
-    ram_size: u64,
+    windows: &[(u64, u64)],
     kernel_end: u64,
 ) -> Result<MemoryLayout, MemoryMapError> {
-    let ram_end = ram_base
-        .checked_add(ram_size)
-        .ok_or(MemoryMapError::AddressOverflow)?;
     let usable_start =
         align_up(kernel_end, PAGE_SIZE as u64).ok_or(MemoryMapError::AddressOverflow)?;
-    if usable_start < ram_base || usable_start >= ram_end {
-        return Err(MemoryMapError::UsableRegionEmpty);
+
+    // Total discovered RAM sizes the arena policy; overflow of the sum is
+    // a malformed discovery and fails closed.
+    let mut total_ram: u64 = 0;
+    for &(base, size) in windows {
+        base.checked_add(size)
+            .ok_or(MemoryMapError::AddressOverflow)?;
+        total_ram = total_ram
+            .checked_add(size)
+            .ok_or(MemoryMapError::AddressOverflow)?;
     }
 
-    let arena = carve_guard_arena(usable_start, ram_end, stack_arena_bytes(ram_size));
+    // The kernel image must sit strictly inside exactly one window; that
+    // window carries the reserve + arena layout.
+    let kernel_window = windows
+        .iter()
+        .copied()
+        .find(|&(base, size)| usable_start >= base && usable_start < base + size)
+        .ok_or(MemoryMapError::UsableRegionEmpty)?;
+    let (ram_base, ram_size) = kernel_window;
+    let ram_end = ram_base + ram_size;
+
+    let arena = carve_guard_arena(usable_start, ram_end, stack_arena_bytes(total_ram));
 
     let mut map = BootMemoryMap::new();
     // The kernel image + boot heap: always reserved, from the RAM base
@@ -269,12 +343,26 @@ pub(crate) fn build_memory_map(
             }
         }
         None => {
-            map.push(MemoryRegion {
-                kind: RegionKind::Usable,
-                start: PhysAddr::new(usable_start),
-                length: ram_end - usable_start,
-            });
+            if usable_start < ram_end {
+                map.push(MemoryRegion {
+                    kind: RegionKind::Usable,
+                    start: PhysAddr::new(usable_start),
+                    length: ram_end - usable_start,
+                });
+            }
         }
+    }
+
+    // Every other discovered window is wholly usable RAM.
+    for &(base, size) in windows {
+        if (base, size) == kernel_window || size == 0 {
+            continue;
+        }
+        map.push(MemoryRegion {
+            kind: RegionKind::Usable,
+            start: PhysAddr::new(base),
+            length: size,
+        });
     }
 
     Ok(MemoryLayout { map, arena })
@@ -442,8 +530,8 @@ mod tests {
     fn kernel_then_head_then_reserved_arena_then_usable() {
         let ram_size = 0x4000_0000; // 1 GiB
         let kernel_end = VIRT_RAM_BASE + 0x10_0000; // 1 MiB image, already aligned
-        let layout =
-            build_memory_map(VIRT_RAM_BASE, ram_size, kernel_end).expect("window is well-formed");
+        let layout = build_memory_map(&[(VIRT_RAM_BASE, ram_size)], kernel_end)
+            .expect("window is well-formed");
         let regions = layout.map.regions();
         // Reserved kernel, usable head (kernel end is not 2 MiB-aligned),
         // reserved arena, usable remainder.
@@ -480,7 +568,8 @@ mod tests {
         // the first usable frame, so there is no head-usable region.
         let ram_size = 0x4000_0000;
         let kernel_end = VIRT_RAM_BASE + TWO_MIB;
-        let layout = build_memory_map(VIRT_RAM_BASE, ram_size, kernel_end).expect("well-formed");
+        let layout =
+            build_memory_map(&[(VIRT_RAM_BASE, ram_size)], kernel_end).expect("well-formed");
         let regions = layout.map.regions();
         assert_eq!(regions.len(), 3, "no usable head when the arena is aligned");
         let arena = layout.arena.expect("arena fits");
@@ -494,7 +583,8 @@ mod tests {
     fn unaligned_kernel_end_rounds_up_to_a_whole_frame() {
         let ram_size = 0x4000_0000;
         let kernel_end = VIRT_RAM_BASE + 0x10_0123; // mid-page
-        let layout = build_memory_map(VIRT_RAM_BASE, ram_size, kernel_end).expect("well-formed");
+        let layout =
+            build_memory_map(&[(VIRT_RAM_BASE, ram_size)], kernel_end).expect("well-formed");
 
         let usable_start = layout.map.regions()[1].start.as_u64();
         assert_eq!(usable_start % PAGE_SIZE as u64, 0);
@@ -510,7 +600,8 @@ mod tests {
     fn byte_totals_count_kernel_and_arena_as_reserved() {
         let ram_size = 0x4000_0000;
         let kernel_end = VIRT_RAM_BASE + TWO_MIB; // 2 MiB, already aligned
-        let layout = build_memory_map(VIRT_RAM_BASE, ram_size, kernel_end).expect("well-formed");
+        let layout =
+            build_memory_map(&[(VIRT_RAM_BASE, ram_size)], kernel_end).expect("well-formed");
         let (usable, reserved) = region_byte_totals(&layout.map);
         // The kernel image (2 MiB) plus the policy-sized reserved arena.
         assert_eq!(reserved, TWO_MIB + stack_arena_bytes(ram_size));
@@ -525,7 +616,8 @@ mod tests {
         // the plain reserved-then-usable split (fail closed, no overlap).
         let ram_size = 0x30_0000; // 3 MiB
         let kernel_end = VIRT_RAM_BASE + 0x10_0000; // 1 MiB
-        let layout = build_memory_map(VIRT_RAM_BASE, ram_size, kernel_end).expect("well-formed");
+        let layout =
+            build_memory_map(&[(VIRT_RAM_BASE, ram_size)], kernel_end).expect("well-formed");
         assert!(layout.arena.is_none(), "no arena fits a 3 MiB window");
         let regions = layout.map.regions();
         assert_eq!(regions.len(), 2);
@@ -551,11 +643,108 @@ mod tests {
     }
 
     #[test]
+    fn further_windows_are_wholly_usable_and_size_the_arena_policy() {
+        // A Pi 4 (8 GiB) shape: the kernel window below the MMIO hole plus
+        // two further windows (1 GiB..~4 GiB and above 4 GiB). Every
+        // non-kernel window arrives as one whole usable region and the
+        // arena policy is sized from the *total* RAM, so an 8 GiB machine
+        // reserves the full 64 MiB arena even though its kernel window is
+        // under 1 GiB.
+        let windows = [
+            (0x0u64, 0x3B40_0000u64),
+            (0x4000_0000, 0x8000_0000),
+            (0x1_0000_0000, 0x1_0000_0000),
+        ];
+        let kernel_end = 0x40_0000; // 4 MiB image in window 0
+        let layout = build_memory_map(&windows, kernel_end).expect("well-formed");
+
+        let total: u64 = windows.iter().map(|&(_, size)| size).sum();
+        let arena = layout.arena.expect("an arena fits window 0");
+        assert_eq!(arena.len, stack_arena_bytes(total));
+        assert!(
+            arena.base + arena.len <= 0x3B40_0000,
+            "arena stays in the kernel window"
+        );
+
+        // The further windows are present, whole, and usable.
+        let regions = layout.map.regions();
+        assert!(regions.iter().any(|r| r.kind == RegionKind::Usable
+            && r.start.as_u64() == 0x4000_0000
+            && r.length == 0x8000_0000));
+        assert!(regions.iter().any(|r| r.kind == RegionKind::Usable
+            && r.start.as_u64() == 0x1_0000_0000
+            && r.length == 0x1_0000_0000));
+
+        let (usable, reserved) = region_byte_totals(&layout.map);
+        assert_eq!(usable + reserved, total, "no byte of any window is lost");
+    }
+
+    #[test]
+    fn a_zero_length_window_contributes_no_region() {
+        let windows = [(VIRT_RAM_BASE, 0x4000_0000u64), (0x2_0000_0000, 0)];
+        let kernel_end = VIRT_RAM_BASE + TWO_MIB;
+        let layout = build_memory_map(&windows, kernel_end).expect("well-formed");
+        assert!(layout
+            .map
+            .regions()
+            .iter()
+            .all(|r| r.start.as_u64() != 0x2_0000_0000));
+    }
+
+    #[test]
+    fn window_list_without_the_kernel_is_rejected() {
+        // The kernel image lies in none of the windows: no window can
+        // bound the reserve, so the build fails closed.
+        assert_eq!(
+            build_memory_map(&[(0x1_0000_0000, 0x4000_0000)], VIRT_RAM_BASE + TWO_MIB).unwrap_err(),
+            MemoryMapError::UsableRegionEmpty,
+        );
+        // As does an empty discovery.
+        assert_eq!(
+            build_memory_map(&[], VIRT_RAM_BASE + TWO_MIB).unwrap_err(),
+            MemoryMapError::UsableRegionEmpty,
+        );
+    }
+
+    #[test]
+    fn clip_drops_ram_inside_device_typed_gigapages() {
+        // Pi 4 shape: gigapage 3 holds the UART/GIC/PCIe, so the below-hole
+        // window's bytes inside it are clipped; the windows outside stay
+        // whole. Device mask bit 3 set.
+        let device_mask = [1u64 << 3];
+        let windows = [
+            (0x0u64, 0x3B40_0000u64),       // gigapage 0 only
+            (0x4000_0000, 0xBC00_0000),     // gigapages 1..=3
+            (0x1_0000_0000, 0x1_0000_0000), // gigapages 4..=7
+        ];
+        let clipped = super::clip_windows_to_normal_ram(&windows, &device_mask);
+        assert_eq!(
+            clipped,
+            alloc::vec![
+                (0x0, 0x3B40_0000),
+                // The middle window loses exactly its gigapage-3 tail.
+                (0x4000_0000, 0x8000_0000),
+                (0x1_0000_0000, 0x1_0000_0000),
+            ]
+        );
+    }
+
+    #[test]
+    fn clip_splits_a_window_around_an_interior_device_gigapage() {
+        // A window spanning gigapages 0..=2 with gigapage 1 Device-typed
+        // splits into its two Normal-typed halves.
+        let device_mask = [1u64 << 1];
+        let windows = [(0x0u64, 3u64 << 30)];
+        let clipped = super::clip_windows_to_normal_ram(&windows, &device_mask);
+        assert_eq!(clipped, alloc::vec![(0x0, 1 << 30), (2 << 30, 1 << 30)]);
+    }
+
+    #[test]
     fn kernel_end_below_ram_base_is_rejected() {
         // A kernel end that precedes the RAM window cannot bound a
         // usable region: fail closed rather than emit a wrapped length.
         assert_eq!(
-            build_memory_map(VIRT_RAM_BASE, 0x4000_0000, VIRT_RAM_BASE - 0x1000).unwrap_err(),
+            build_memory_map(&[(VIRT_RAM_BASE, 0x4000_0000)], VIRT_RAM_BASE - 0x1000).unwrap_err(),
             MemoryMapError::UsableRegionEmpty,
         );
     }
@@ -565,13 +754,16 @@ mod tests {
         let ram_size = 0x10_0000; // 1 MiB
                                   // Kernel image fills the whole window: no usable frames remain.
         assert_eq!(
-            build_memory_map(VIRT_RAM_BASE, ram_size, VIRT_RAM_BASE + ram_size).unwrap_err(),
+            build_memory_map(&[(VIRT_RAM_BASE, ram_size)], VIRT_RAM_BASE + ram_size).unwrap_err(),
             MemoryMapError::UsableRegionEmpty,
         );
         // And strictly past the end is equally refused.
         assert_eq!(
-            build_memory_map(VIRT_RAM_BASE, ram_size, VIRT_RAM_BASE + ram_size + 0x4000)
-                .unwrap_err(),
+            build_memory_map(
+                &[(VIRT_RAM_BASE, ram_size)],
+                VIRT_RAM_BASE + ram_size + 0x4000
+            )
+            .unwrap_err(),
             MemoryMapError::UsableRegionEmpty,
         );
     }
@@ -579,7 +771,7 @@ mod tests {
     #[test]
     fn ram_window_overflow_is_rejected() {
         assert_eq!(
-            build_memory_map(u64::MAX - 0x10, 0x100, u64::MAX - 0x10).unwrap_err(),
+            build_memory_map(&[(u64::MAX - 0x10, 0x100)], u64::MAX - 0x10).unwrap_err(),
             MemoryMapError::AddressOverflow,
         );
     }
@@ -589,7 +781,7 @@ mod tests {
         // A kernel end within a page of u64::MAX cannot be rounded up to
         // a frame boundary without overflowing.
         assert_eq!(
-            build_memory_map(VIRT_RAM_BASE, 0x4000_0000, u64::MAX - 1).unwrap_err(),
+            build_memory_map(&[(VIRT_RAM_BASE, 0x4000_0000)], u64::MAX - 1).unwrap_err(),
             MemoryMapError::AddressOverflow,
         );
     }
@@ -648,7 +840,8 @@ mod tests {
         // proving the carve consumes the policy size, not a fixed 2 MiB.
         let ram_size = 8u64 * 1024 * 1024 * 1024;
         let kernel_end = VIRT_RAM_BASE + TWO_MIB;
-        let layout = build_memory_map(VIRT_RAM_BASE, ram_size, kernel_end).expect("well-formed");
+        let layout =
+            build_memory_map(&[(VIRT_RAM_BASE, ram_size)], kernel_end).expect("well-formed");
         let arena = layout.arena.expect("a large window carves an arena");
         assert_eq!(arena.len, STACK_ARENA_MAX_BYTES);
         assert!(

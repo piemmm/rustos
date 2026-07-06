@@ -193,6 +193,26 @@ impl WaitQueue {
         }
     }
 
+    /// Wake exactly `task` if it is currently registered, returning whether
+    /// it was (the wake-one discipline — an addressed event such as a
+    /// posted request or a ticket's reply wakes its one target, never the
+    /// whole queue; a wake-all there is a thundering herd that keeps
+    /// unrelated tasks runnable and distorts the load census).
+    ///
+    /// An unregistered target is a benign no-op returning `false`: by the
+    /// register-before-poll discipline every waiter registers *before* its
+    /// first poll and stays registered until it is done, so a target absent
+    /// from the queue is running and will observe the event on its own next
+    /// poll. The `unpark` runs after the lock is released, exactly as
+    /// [`Self::wake_all`].
+    pub fn wake_task(&self, arch: &dyn WaitQueueArch, task: TaskId) -> bool {
+        let registered = self.waiters.lock().iter().any(|w| w.task == task);
+        if registered {
+            arch.unpark(task);
+        }
+        registered
+    }
+
     /// Wake every waiter whose finite deadline is at or before `now_ns`
     /// (the timed wake). A [`NO_DEADLINE`] waiter is never released here.
     ///
@@ -278,9 +298,25 @@ pub static SERVE_WAITQ: WaitQueue = WaitQueue::new();
 /// Wake every parked IPC-server kthread because a request was posted to a
 /// registered call endpoint; each re-drains its endpoint and parks again
 /// when empty. A fail-safe no-op before the arch hook is installed.
+///
+/// This broadcast is the **fallback** for an endpoint whose server has not
+/// yet recorded its scheduler id (never received); a post to an endpoint
+/// with a recorded server uses the targeted [`serve_wake_task`] instead, so
+/// unrelated parked servers stay parked (wake-one, not a thundering herd).
 pub fn serve_wake() {
     if let Some(arch) = wait_arch() {
         SERVE_WAITQ.wake_all(arch);
+    }
+}
+
+/// Wake exactly the IPC server `task` parked on [`SERVE_WAITQ`] because a
+/// request was posted to *its* endpoint (the endpoint recorded its server's
+/// scheduler id at first receive). A server that is not parked is running
+/// and will drain the request on its own next poll, so the miss is benign.
+/// A fail-safe no-op before the arch hook is installed.
+pub fn serve_wake_task(task: TaskId) {
+    if let Some(arch) = wait_arch() {
+        let _ = SERVE_WAITQ.wake_task(arch, task);
     }
 }
 
@@ -435,10 +471,28 @@ pub static CALL_WAITQ: WaitQueue = WaitQueue::new();
 /// cancellation) arrived; each re-checks its ticket and either claims the
 /// reply or parks again. A fail-safe no-op before the arch hook is installed.
 ///
+/// This broadcast remains for **cancellation** (endpoint destruction, whose
+/// affected callers are not individually known) and as the fallback for a
+/// poster that carried no scheduler identity; an ordinary reply uses the
+/// targeted [`call_wake_task`] with the poster id the endpoint captured at
+/// post time, so unrelated parked callers stay parked (wake-one, not a
+/// thundering herd).
+///
 /// [`CallEndpoint`]: rustos_kernel_ipc::call::CallEndpoint
 pub fn call_wake() {
     if let Some(arch) = wait_arch() {
         CALL_WAITQ.wake_all(arch);
+    }
+}
+
+/// Wake exactly the `ipc_call` caller `task` parked on [`CALL_WAITQ`]
+/// because *its* ticket was replied (the poster's scheduler id captured at
+/// post time). A caller that is not parked is running and will claim the
+/// reply on its own next poll, so the miss is benign. A fail-safe no-op
+/// before the arch hook is installed.
+pub fn call_wake_task(task: TaskId) {
+    if let Some(arch) = wait_arch() {
+        let _ = CALL_WAITQ.wake_task(arch, task);
     }
 }
 
@@ -640,6 +694,22 @@ mod tests {
         let mut got = arch.unparked.borrow().clone();
         got.sort_unstable();
         assert_eq!(got, alloc::vec![1, 2], "both waiters woken");
+    }
+
+    #[test]
+    fn wake_task_unparks_only_the_named_registered_waiter() {
+        let arch = MockArch::new();
+        let q = WaitQueue::new();
+        q.register(1, NO_DEADLINE);
+        q.register(2, NO_DEADLINE);
+        // The addressed wake releases its one target; the other waiter
+        // stays parked (wake-one, never a thundering herd).
+        assert!(q.wake_task(&arch, 2));
+        assert_eq!(*arch.unparked.borrow(), alloc::vec![2]);
+        // An unregistered target is a benign no-op: the task is running
+        // and will observe the event on its own next poll.
+        assert!(!q.wake_task(&arch, 9));
+        assert_eq!(*arch.unparked.borrow(), alloc::vec![2]);
     }
 
     #[test]

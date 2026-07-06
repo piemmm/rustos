@@ -475,26 +475,39 @@ pub fn boot(
     // incomplete tree leaves the `virt` defaults in place (fail closed).
     let discovered = configure_from_dtb(dtb);
     serial::beacon("pi-beacon 5/6: post-mmu memory/timer/psci discovered");
-    // Widen the RAM gigapage mask with the discovered `/memory` window
+    // Widen the RAM gigapage mask with the discovered `/memory` windows
     // — a walk that is only safe post-MMU — so later-built process
-    // spaces map the whole window, and install the widened gigapages
+    // spaces map every window, and install the widened gigapages
     // into the *live* boot space (an invalid→valid L1 update, no TLB
-    // shootdown needed) before the allocator touches the window.
-    if let Some((ram_base, ram_size)) = discovered.ram_window {
-        let window_mask = identity_ram_mask(&[(ram_base, ram_size)]);
+    // shootdown needed) before the allocator touches the windows.
+    //
+    // The windows are first clipped out of Device-typed gigapages: the
+    // identity map types memory at 1 GiB granularity and Device wins for
+    // a shared gigapage (the Pi 4's below-4 GiB window ends inside the
+    // gigapage holding its UART/GIC/PCIe), so RAM there would be mapped
+    // Device — atomics on it are unpredictable — and must never reach
+    // the mask or the allocator. Reclaiming those bytes needs
+    // 2 MiB-granular identity typing (`plans/APPS.md` I4 follow-up).
+    let ram_windows =
+        crate::mem_map::clip_windows_to_normal_ram(&discovered.ram_windows, &device_mask);
+    if !ram_windows.is_empty() {
+        let window_mask = identity_ram_mask(&ram_windows);
         let mut merged = ram_gigapages();
         for (word, add) in merged.iter_mut().zip(window_mask) {
             *word |= add;
         }
         configure_ram_gigapages(merged);
-        if let (Some(space), Some(last_byte)) = (
-            boot_space.as_mut(),
-            (ram_size > 0).then(|| ram_base.saturating_add(ram_size - 1)),
-        ) {
-            let mut gigapage = ram_base >> 30;
-            while gigapage <= (last_byte >> 30) {
-                space.ensure_identity_gigapage(gigapage << 30);
-                gigapage += 1;
+        if let Some(space) = boot_space.as_mut() {
+            for &(ram_base, ram_size) in &ram_windows {
+                let Some(last_byte) = (ram_size > 0).then(|| ram_base.saturating_add(ram_size - 1))
+                else {
+                    continue;
+                };
+                let mut gigapage = ram_base >> 30;
+                while gigapage <= (last_byte >> 30) {
+                    space.ensure_identity_gigapage(gigapage << 30);
+                    gigapage += 1;
+                }
             }
         }
     }
@@ -530,17 +543,16 @@ pub fn boot(
     let boot_cpu_ok = arch.current_cpu() == BOOT_CPU;
     let timer_present = counter_hz != 0;
 
-    // P6c-1: translate the firmware-discovered `/memory` window into the
+    // P6c-1: translate the firmware-discovered `/memory` windows into the
     // canonical physical-memory map `kernel_core::kernel_main` consumes.
-    // An absent or malformed window fails closed to a status string
+    // An absent or malformed discovery fails closed to a status string
     // rather than a panic; the map is retained (not
     // just measured) so it can be moved into the `BootInfo` hand-off.
     let layout_result: Result<crate::mem_map::MemoryLayout, &'static str> =
-        match discovered.ram_window {
-            None => Err("no_memory_window"),
-            Some((base, size)) => {
-                build_memory_map(base, size, kernel_end_addr()).map_err(|err| err.as_str())
-            }
+        if ram_windows.is_empty() {
+            Err("no_memory_window")
+        } else {
+            build_memory_map(&ram_windows, kernel_end_addr()).map_err(|err| err.as_str())
         };
     let (mem_status, usable_bytes, reserved_bytes) = match &layout_result {
         Ok(layout) => {
@@ -651,7 +663,7 @@ pub fn boot(
                 },
                 Field {
                     key: "ram_discovered",
-                    value: rustos_log::FieldValue::Str(yes_no(discovered.ram_window.is_some())),
+                    value: rustos_log::FieldValue::Str(yes_no(!ram_windows.is_empty())),
                 },
                 Field {
                     key: "mem_map_built",
@@ -1057,10 +1069,14 @@ fn configure_mmio_from_dtb(dtb: u64) -> EarlyDiscovered {
 
 /// What the post-MMU boot phase resolved from the firmware device tree.
 struct Discovered {
-    /// The `/memory` window `(base, size)` discovered from the firmware
-    /// tree, if any — the RAM extent the `BootMemoryMap` (`plans/PI.md`
-    /// P6c-1) reserves the kernel image out of and hands the allocator.
-    ram_window: Option<(u64, u64)>,
+    /// Every `/memory` window `(base, size)` discovered from the firmware
+    /// tree, in tree order — the RAM extents the `BootMemoryMap`
+    /// (`plans/PI.md` P6c-1) reserves the kernel image out of and hands
+    /// the allocator. A machine like the Pi 4 (8 GiB) declares several
+    /// (below the MMIO hole, 1 GiB..4 GiB, and above 4 GiB); reading only
+    /// the first under-reported an 8 GiB board as ~1 GiB. Empty when the
+    /// tree declares none (fail closed — no memory map is built).
+    ram_windows: Vec<(u64, u64)>,
     /// The generic-timer counter frequency (Hz) to seed the handle and
     /// the P4 live timer with: the `/timer` `clock-frequency` override
     /// when the tree declares one, else the `CNTFRQ_EL0` register value.
@@ -1085,7 +1101,7 @@ struct Discovered {
 /// closed).
 fn configure_from_dtb(dtb: u64) -> Discovered {
     let mut out = Discovered {
-        ram_window: None,
+        ram_windows: Vec::new(),
         // With no usable tree the register is the only counter-rate
         // source; P4's tree override (if any) overwrites this below.
         timer_hz: read_cntfrq(),
@@ -1105,7 +1121,23 @@ fn configure_from_dtb(dtb: u64) -> Discovered {
     let Ok(fdt) = (unsafe { Fdt::from_ptr(dtb as *const u8) }) else {
         return out;
     };
-    out.ram_window = fdt.first_memory_region();
+    // Collect every declared RAM range (every `reg` pair of every
+    // `/memory` node), skipping zero-length entries. A malformed tree
+    // discards the partial collection: the boot path then builds no
+    // memory map at all rather than trusting a truncated inventory,
+    // exactly as the former single-window read failed closed to `None`.
+    let mut windows = Vec::new();
+    if fdt
+        .each_memory_region(|base, size| {
+            if size != 0 {
+                windows.push((base, size));
+            }
+        })
+        .is_err()
+    {
+        windows.clear();
+    }
+    out.ram_windows = windows;
     // P4: prefer the board's `/timer` `clock-frequency` over the
     // `CNTFRQ_EL0` register, so the Pi 4's 54 MHz crystal is honoured
     // when the firmware tree declares it (no

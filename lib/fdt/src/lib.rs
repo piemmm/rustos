@@ -180,10 +180,99 @@ impl<'a> Fdt<'a> {
     /// `(base, size)` in bytes.
     ///
     /// Returns `None` if the tree contains no `/memory` node with a
-    /// readable `reg` property.
+    /// readable `reg` property. A machine whose RAM spans several ranges
+    /// (the Raspberry Pi 4 carries windows below the MMIO hole, between
+    /// 1 GiB and 4 GiB, and above 4 GiB) describes them as further `reg`
+    /// pairs and further `/memory` nodes; a boot path that must see the
+    /// machine's whole RAM iterates [`Self::each_memory_region`] instead.
     #[must_use]
     pub fn first_memory_region(&self) -> Option<(u64, u64)> {
-        self.walk().ok().and_then(|w| w.memory)
+        let mut first = None;
+        self.each_memory_region(|base, size| {
+            if first.is_none() {
+                first = Some((base, size));
+            }
+        })
+        .ok()?;
+        first
+    }
+
+    /// Enumerate every RAM range the tree declares, invoking
+    /// `f(base, size)` once per `(address, size)` pair of every top-level
+    /// `/memory` node's `reg` property, in tree order.
+    ///
+    /// The pairs are decoded with the root `#address-cells` /
+    /// `#size-cells` (defaulting to the Devicetree-spec values until the
+    /// root overrides them). Pairs are reported exactly as encoded —
+    /// including a zero `size` — so the caller applies its own usability
+    /// policy; a `reg` whose tail is truncated short of a whole pair, or
+    /// whose cell counts cannot be represented in a `u64`, yields only the
+    /// whole pairs before the defect (fail closed, never an invented
+    /// range).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FdtError::Malformed`] if the structure block is malformed
+    /// (a truncated token, an unterminated name, or unbalanced nesting);
+    /// `f` is not invoked for a malformed tree prefix beyond the point of
+    /// the defect.
+    pub fn each_memory_region<F: FnMut(u64, u64)>(&self, mut f: F) -> Result<(), FdtError> {
+        let struct_end = self.struct_off + self.struct_size;
+        let mut pos = self.struct_off;
+
+        // Root `#address-cells` / `#size-cells` govern the `/memory` `reg`
+        // layout; default to the Devicetree-spec values until the root
+        // node overrides them.
+        let mut addr_cells = DEFAULT_ADDRESS_CELLS;
+        let mut size_cells = DEFAULT_SIZE_CELLS;
+
+        // Per-depth "is this a `/memory` node" flags, restored on
+        // `FDT_END_NODE`.
+        let mut is_memory = [false; MAX_DEPTH];
+        let mut depth: usize = 0;
+
+        while pos < struct_end {
+            let token = be_u32(self.blob, pos).ok_or(FdtError::Malformed)?;
+            pos += 4;
+            match token {
+                FDT_NOP => {}
+                FDT_END => break,
+                FDT_BEGIN_NODE => {
+                    let name = self.read_node_name(&mut pos, struct_end)?;
+                    if depth >= MAX_DEPTH {
+                        return Err(FdtError::Malformed);
+                    }
+                    // A `/memory` node lives directly under root (depth 1
+                    // after this push); its unit name is `memory` or
+                    // `memory@<addr>`.
+                    is_memory[depth] = depth == 1 && name_is_memory(name);
+                    depth += 1;
+                }
+                FDT_END_NODE => {
+                    depth = depth.checked_sub(1).ok_or(FdtError::Malformed)?;
+                }
+                FDT_PROP => {
+                    let (prop_name, value) = self.read_prop(&mut pos, struct_end)?;
+                    // Root props (depth 1) carry the cell counts.
+                    if depth == 1 {
+                        if prop_name == b"#address-cells" {
+                            if let Some(v) = be_u32(value, 0) {
+                                addr_cells = v;
+                            }
+                        } else if prop_name == b"#size-cells" {
+                            if let Some(v) = be_u32(value, 0) {
+                                size_cells = v;
+                            }
+                        }
+                    }
+                    if prop_name == b"reg" && depth >= 1 && is_memory[depth - 1] {
+                        each_reg_pair(value, addr_cells, size_cells, &mut f);
+                    }
+                }
+                _ => return Err(FdtError::Malformed),
+            }
+        }
+        Ok(())
     }
 
     /// Read the `/cpus` `timebase-frequency` (the riscv64 `time` CSR tick
@@ -296,27 +385,15 @@ impl<'a> Fdt<'a> {
         self.property(path, name).and_then(read_int_cells)
     }
 
-    /// Single pass over the structure block collecting the memory region
-    /// and timebase frequency.
+    /// Single pass over the structure block collecting the timebase
+    /// frequency.
     fn walk(&self) -> Result<WalkResult, FdtError> {
         let struct_end = self.struct_off + self.struct_size;
         let mut pos = self.struct_off;
 
-        // Root `#address-cells` / `#size-cells` govern the `/memory` `reg`
-        // layout; default to the Devicetree-spec values until the root
-        // node overrides them.
-        let mut addr_cells = DEFAULT_ADDRESS_CELLS;
-        let mut size_cells = DEFAULT_SIZE_CELLS;
-
-        // Per-depth "is this a `/memory` node" flags, restored on
-        // `FDT_END_NODE`.
-        let mut is_memory = [false; MAX_DEPTH];
         let mut depth: usize = 0;
 
-        let mut result = WalkResult {
-            memory: None,
-            timebase: None,
-        };
+        let mut result = WalkResult { timebase: None };
 
         while pos < struct_end {
             let token = be_u32(self.blob, pos).ok_or(FdtError::Malformed)?;
@@ -325,14 +402,10 @@ impl<'a> Fdt<'a> {
                 FDT_NOP => {}
                 FDT_END => break,
                 FDT_BEGIN_NODE => {
-                    let name = self.read_node_name(&mut pos, struct_end)?;
+                    self.read_node_name(&mut pos, struct_end)?;
                     if depth >= MAX_DEPTH {
                         return Err(FdtError::Malformed);
                     }
-                    // A `/memory` node lives directly under root (depth 1
-                    // after this push); its unit name is `memory` or
-                    // `memory@<addr>`.
-                    is_memory[depth] = depth == 1 && name_is_memory(name);
                     depth += 1;
                 }
                 FDT_END_NODE => {
@@ -340,27 +413,8 @@ impl<'a> Fdt<'a> {
                 }
                 FDT_PROP => {
                     let (prop_name, value) = self.read_prop(&mut pos, struct_end)?;
-                    // Root props (depth 1) carry the cell counts.
-                    if depth == 1 {
-                        if prop_name == b"#address-cells" {
-                            if let Some(v) = be_u32(value, 0) {
-                                addr_cells = v;
-                            }
-                        } else if prop_name == b"#size-cells" {
-                            if let Some(v) = be_u32(value, 0) {
-                                size_cells = v;
-                            }
-                        }
-                    }
                     if result.timebase.is_none() && prop_name == b"timebase-frequency" {
                         result.timebase = read_int_cells(value);
-                    }
-                    if result.memory.is_none()
-                        && prop_name == b"reg"
-                        && depth >= 1
-                        && is_memory[depth - 1]
-                    {
-                        result.memory = read_reg_pair(value, addr_cells, size_cells);
                     }
                 }
                 _ => return Err(FdtError::Malformed),
@@ -778,7 +832,6 @@ impl<'a> Iterator for StringList<'a> {
 
 /// Collected results of one [`Fdt::walk`] pass.
 struct WalkResult {
-    memory: Option<(u64, u64)>,
     timebase: Option<u64>,
 }
 
@@ -828,12 +881,26 @@ pub fn read_cells(value: &[u8], off: usize, cells: u32) -> Option<u64> {
     Some(acc)
 }
 
-/// Read the first `(address, size)` pair from a `reg` property value.
-/// Out-of-range cell counts are rejected by [`read_cells`].
-fn read_reg_pair(value: &[u8], addr_cells: u32, size_cells: u32) -> Option<(u64, u64)> {
-    let base = read_cells(value, 0, addr_cells)?;
-    let size = read_cells(value, (addr_cells as usize) * 4, size_cells)?;
-    Some((base, size))
+/// Invoke `f(address, size)` for every whole `(address, size)` pair in a
+/// `reg` property value. Out-of-range cell counts are rejected by
+/// [`read_cells`] (no pair is reported); a truncated trailing pair is
+/// ignored (fail closed, never an invented range).
+fn each_reg_pair<F: FnMut(u64, u64)>(value: &[u8], addr_cells: u32, size_cells: u32, f: &mut F) {
+    let stride = (addr_cells as usize + size_cells as usize) * 4;
+    if stride == 0 {
+        return;
+    }
+    let mut off = 0;
+    while off + stride <= value.len() {
+        let Some(base) = read_cells(value, off, addr_cells) else {
+            return;
+        };
+        let Some(size) = read_cells(value, off + (addr_cells as usize) * 4, size_cells) else {
+            return;
+        };
+        f(base, size);
+        off += stride;
+    }
 }
 
 /// Read an integer property whose value is one `u32` cell or two (`u64`).
@@ -942,6 +1009,96 @@ mod tests {
         let blob = b.build();
         let fdt = Fdt::new(&blob).expect("valid fdt");
         assert_eq!(fdt.first_memory_region(), Some((0x8000_0000, 0x1000_0000)));
+    }
+
+    /// Collect every region [`Fdt::each_memory_region`] reports.
+    fn all_regions(fdt: &Fdt<'_>) -> Vec<(u64, u64)> {
+        let mut seen = Vec::new();
+        fdt.each_memory_region(|base, size| seen.push((base, size)))
+            .expect("well-formed tree");
+        seen
+    }
+
+    #[test]
+    fn each_memory_region_reports_every_reg_pair_and_every_memory_node() {
+        // Pi 4 (8 GiB) shape: one /memory node whose reg carries the
+        // below-hole window plus the 1 GiB..4 GiB window, and a second
+        // /memory node for the range above 4 GiB.
+        let mut b = DtbBuilder::new();
+        b.begin_node("");
+        b.prop_u32("#address-cells", 2);
+        b.prop_u32("#size-cells", 2);
+        b.begin_node("memory@0");
+        let mut reg = Vec::new();
+        reg.extend_from_slice(&0x0000_0000u64.to_be_bytes());
+        reg.extend_from_slice(&0x3B40_0000u64.to_be_bytes());
+        reg.extend_from_slice(&0x4000_0000u64.to_be_bytes());
+        reg.extend_from_slice(&0xBC00_0000u64.to_be_bytes());
+        b.prop("reg", &reg);
+        b.end_node();
+        b.begin_node("memory@100000000");
+        let mut high = Vec::new();
+        high.extend_from_slice(&0x1_0000_0000u64.to_be_bytes());
+        high.extend_from_slice(&0x1_0000_0000u64.to_be_bytes());
+        b.prop("reg", &high);
+        b.end_node();
+        b.end_node();
+        let blob = b.build();
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        assert_eq!(
+            all_regions(&fdt),
+            alloc::vec![
+                (0x0000_0000, 0x3B40_0000),
+                (0x4000_0000, 0xBC00_0000),
+                (0x1_0000_0000, 0x1_0000_0000),
+            ]
+        );
+        // The single-window reader still reports the first pair.
+        assert_eq!(fdt.first_memory_region(), Some((0x0000_0000, 0x3B40_0000)));
+    }
+
+    #[test]
+    fn each_memory_region_honours_one_cell_layouts() {
+        let mut b = DtbBuilder::new();
+        b.begin_node("");
+        b.prop_u32("#address-cells", 1);
+        b.prop_u32("#size-cells", 1);
+        b.begin_node("memory@80000000");
+        let mut reg = Vec::new();
+        reg.extend_from_slice(&0x8000_0000u32.to_be_bytes());
+        reg.extend_from_slice(&0x0800_0000u32.to_be_bytes());
+        reg.extend_from_slice(&0x9000_0000u32.to_be_bytes());
+        reg.extend_from_slice(&0x0400_0000u32.to_be_bytes());
+        b.prop("reg", &reg);
+        b.end_node();
+        b.end_node();
+        let blob = b.build();
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        assert_eq!(
+            all_regions(&fdt),
+            alloc::vec![(0x8000_0000, 0x0800_0000), (0x9000_0000, 0x0400_0000)]
+        );
+    }
+
+    #[test]
+    fn each_memory_region_ignores_a_truncated_trailing_pair() {
+        // A reg holding one whole pair plus a dangling half pair yields
+        // only the whole pair — never an invented range.
+        let mut b = DtbBuilder::new();
+        b.begin_node("");
+        b.prop_u32("#address-cells", 2);
+        b.prop_u32("#size-cells", 2);
+        b.begin_node("memory@0");
+        let mut reg = Vec::new();
+        reg.extend_from_slice(&0x0u64.to_be_bytes());
+        reg.extend_from_slice(&0x4000_0000u64.to_be_bytes());
+        reg.extend_from_slice(&0x8000_0000u64.to_be_bytes());
+        b.prop("reg", &reg);
+        b.end_node();
+        b.end_node();
+        let blob = b.build();
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        assert_eq!(all_regions(&fdt), alloc::vec![(0x0, 0x4000_0000)]);
     }
 
     #[test]

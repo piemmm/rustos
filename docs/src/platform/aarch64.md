@@ -99,18 +99,25 @@ board uses `0x4000_0000`). The four SKUs and the high-memory window:
 | 8 GiB | `0x0`–`0xBFFF_FFFF` (low 3 GiB) | `0x1_0000_0000`–`0x2_3FFF_FFFF` |
 
 The SoC's 35-bit address space aliases the peripheral and high-RAM windows;
-the firmware DTB's `/memory` node(s) report the SKU's actual extents, which
-`FdtDiscovery::first_memory_region` reads — the allocator must not assume the
-`virt` `0x4000_0000` base. Since **P3** the boot path reads that window from
-the DTB; since **P6c-1** it translates the window (plus the linker
-`__kernel_end`) into the canonical two-region `BootMemoryMap` the live
-allocator hand-off consumes — `[ram_base, __kernel_end)` reserved, the
-page-aligned remainder usable — and logs the resulting split
-(`mem_map_built` / `mem_map_status` / `usable_bytes_hex` /
+the firmware DTB's `/memory` node(s) report the SKU's actual extents — the
+allocator must not assume the `virt` `0x4000_0000` base. The boot path reads
+**every** declared range (`Fdt::each_memory_region`: every `reg` pair of
+every `/memory` node — an 8 GiB Pi 4 declares windows below the MMIO hole,
+between 1 GiB and 4 GiB, and above 4 GiB; reading only the first
+under-reported it as ~1 GiB), clips the windows out of Device-typed
+gigapages (the identity map types memory at 1 GiB granularity and Device
+wins for a shared gigapage, so RAM sharing the UART/GIC/PCIe gigapage would
+be mapped Device — those bytes are dropped fail-closed until 2 MiB-granular
+identity typing lands, `plans/APPS.md` I4), widens the RAM gigapage mask
+and the live identity map to cover them, and translates them (plus the
+linker `__kernel_end`) into the canonical multi-region `BootMemoryMap` the
+live allocator hand-off consumes — `[window base, __kernel_end)` reserved
+in the kernel's window, every other window wholly usable — and logs the
+resulting split (`mem_map_built` / `mem_map_status` / `usable_bytes_hex` /
 `reserved_bytes_hex`), failing closed to a status string (never a panic,
-`AGENTS.md` §2.9) on an absent or malformed window. The arithmetic is the
-host-tested `rustos_kernel::mem_map` module (the analogue of the riscv64
-boot pipeline's `rustos_kernel::boot_riscv64::build_boot_memory_map`).
+`AGENTS.md` §2.9) on an absent or malformed discovery. The arithmetic is
+the host-tested `rustos_kernel::mem_map` module (the analogue of the
+riscv64 boot pipeline's `rustos_kernel::boot_riscv64::build_boot_memory_map`).
 Handing that map to
 `kernel_core::kernel_main` is P6c-2 — it needs the MMU enabled first, since
 the allocator/scheduler atomics are UNPREDICTABLE on the MMU-off

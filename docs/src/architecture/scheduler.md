@@ -431,9 +431,19 @@ A task that must wait for an event it cannot make progress on **parks** off
 the run queue rather than busy-yielding (`AGENTS.md` §2.1). The reusable
 primitive is `kernel/core::waitq::WaitQueue`: a waiter registers (with an
 optional absolute monotonic-ns deadline), then suspends with
-`RescheduleAction::Park`; it is woken either by an **explicit event**
-(`WaitQueue::wake_all`) or, with a deadline, by the **timed sweep**
-(`WaitQueue::sweep`). An interrupt-reachable wake never touches the
+`RescheduleAction::Park`; it is woken either by an **explicit event** or,
+with a deadline, by the **timed sweep** (`WaitQueue::sweep`). An explicit
+event that is **addressed** — a request posted to one endpoint's server, a
+reply for one caller's ticket — wakes exactly its target
+(`WaitQueue::wake_task`, the wake-one discipline of `AGENTS.md` §27): the
+`ipc_call` post wakes the endpoint's recorded server task and a
+`call_reply` wakes the ticket's recorded poster, so unrelated parked
+servers and callers stay parked (a broadcast there is a thundering herd
+that keeps spuriously-woken tasks runnable and floors the idle load
+average at ~1). A **condition broadcast** — endpoint destruction, console
+input, a child exit, a hardware-tree bump — still wakes every registered
+waiter (`WaitQueue::wake_all`), each of which re-checks its own condition
+and re-parks on a miss. An interrupt-reachable wake never touches the
 wait-queue or scheduler locks: the device-IRQ dispatcher and the timer
 one-shot only flag a pending wake (`WaitQueue::request_wake` /
 `timed_wake_sweep`), and the actual `wake_all` / deadline sweep + `unpark`

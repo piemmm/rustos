@@ -6,7 +6,7 @@
 //! model checker can interleave them.
 
 #[cfg(loom)]
-pub(crate) use loom::sync::atomic::{AtomicU32, Ordering};
+pub(crate) use loom::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 #[cfg(not(loom))]
-pub(crate) use core::sync::atomic::{AtomicU32, Ordering};
+pub(crate) use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};

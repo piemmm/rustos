@@ -83,6 +83,125 @@ embeds its help, and the image builder plants the trees from data discovered
 by `tools/syshelp`, never a hand-maintained per-bundle list (§6.1, `AGENTS.md`
 §16.5).
 
+## Immediate work — kernel defects blocking further APPS stages
+
+Four kernel defects observed on the running system MUST be fixed before the
+remaining APPS deliverables continue. Each item records its root cause and
+design (or landed behaviour) so any context can pick it up; I2 and I3 are the
+open remainder. Statuses per `AGENTS.md` §13.
+
+### I1. Idle load average pinned at ~1 — IPC wake-all thundering herd
+
+**Status: done** (verify the idle load on a live single-core QEMU session
+when convenient).
+
+- **Defect:** at idle on a single-core QEMU instance the 1/5/15-minute load
+  averages gravitated to 1, not ~0. Root cause: the `ipc_call` handler woke
+  **every** parked IPC server (`serve_wake` → `SERVE_WAITQ.wake_all`) and
+  `call_reply` woke **every** parked caller — a spuriously-woken server
+  (e.g. the in-kernel driver-store kthread) was `Ready` at the instant the
+  load census sampled the run queue. The `LoadTracker` maths, the observer
+  exclusion, and every park path were verified correct; the herd was the
+  sole cause (the `AGENTS.md` §27.3 wake-one defect).
+- **Landed behaviour:** addressed IPC events wake exactly their target.
+  `CallEndpoint` records the serving task's scheduler id at first receive
+  (`record_server_task`, set by the `call_recv` handler and the in-kernel
+  store serve loop) and each `post` captures the poster's scheduler id;
+  `reply` returns it. `ipc_call` wakes only the recorded server
+  (`waitq::serve_wake_task` over the new `WaitQueue::wake_task`) and every
+  reply site wakes only the ticket's poster (`call_wake_task`), falling back
+  to the broadcast only for an unrecorded server / id-less poster. Endpoint
+  destruction keeps the broadcast so cancelled callers re-poll fail-closed.
+  Covered by unit tests in `kernel/ipc/src/call.rs`
+  (`reply_returns_the_posters_scheduler_id`,
+  `server_task_is_recorded_once_and_zero_is_rejected`) and
+  `kernel/core/src/waitq.rs`
+  (`wake_task_unparks_only_the_named_registered_waiter`); the wake
+  discipline is documented in `docs/src/architecture/scheduler.md`.
+
+### I2. Process memory is never reclaimed on exit — login/logout RAM growth
+
+**Status: planned.**
+
+- **Defect:** repeated login/logout grows used RAM monotonically; it never
+  returns.
+- **Root cause:** process teardown reclaims the kernel stack (`ArenaStack`),
+  IRQ bindings, endpoints, shared-memory regions, and the capability record —
+  but **no user frames and no page-table frames**. The spawn producers
+  document the gap: image frames, user-stack frames, and the startup block are
+  "handed out monotonically and not reclaimed this stage"
+  (`kernel/rustos-kernel/src/*/spawn_producer.rs`), and `FrameTableSource`'s
+  stage-1 table frames are "never freed … reclaiming a dead process's
+  page-table frames is a later stage" (`kernel/mem`). Every exited process
+  leaks its whole footprint.
+- **Fix design:** teardown owned by the retained live space. `LiveSpace`
+  (`kernel/mem/src/live.rs`) holds the `AddressSpace<P>` (which tracks every
+  page→frame user mapping), the physmap, the `'static` `FrameAllocator`, and
+  the window maps needed to classify mappings. On drop (the scheduler reap
+  drops the kthread control block's `Box<dyn LiveUserSpace>`):
+  unmap every tracked mapping; frames inside the MMIO/shared windows are
+  device- or registry-owned and only unmapped (shared regions are already
+  reclaimed by `exit` via `sharedreg::reclaim_task`); every other frame
+  (image, user stack, startup block, anon heap, DMA) is zeroed through the
+  physmap (zero-on-free, §4) and freed to the allocator. Page-table frames:
+  the arch `AddressSpace` (aarch64/riscv64/x86_64 paging) must track the
+  table frames it drew from its `TableSource` and return them on teardown —
+  one shared discipline across the three ports (§2.21), reached through the
+  Arch HAL paging surface (extending `kernel/arch/api` needs its `PLAN.md`
+  entry per §17.2). A task that exits without a live space (kthreads) reclaims
+  nothing, as today. Tests: host spawn/exit cycle asserting
+  `free_frames` returns to its pre-spawn value; QEMU login/logout vertical
+  asserting stable free-memory across N cycles.
+
+### I3. `top -d0` crashes the OS after ~1 h on a 180 MiB instance
+
+**Status: planned** (root cause not yet isolated).
+
+- **Defect:** a continuous-refresh `top -d0` session on a 180 MiB QEMU
+  instance eventually crashes the OS; suspected out-of-memory.
+- **Ruled out so far:** `top`'s own model (rows/history replaced per refresh),
+  `CallEndpoint` bookkeeping (capacity-bounded; tickets retired on claim),
+  the log/audit sinks (write-through serial), and the I2 leak (no spawns per
+  refresh — unless the session had process churn, in which case I2 explains
+  it).
+- **Next step:** instrumented reproduction. A host regression test hammering
+  the exact refresh cycle (`stream_read` with timeout + `ipc_call` round trip
+  + `sysinfo_introspect` walk) for a large iteration count, asserting stable
+  `FrameAllocator::free_frames()` and kernel-heap occupancy; plus a bounded
+  QEMU soak sampling `KernelMemoryStats.free_bytes` under a scripted
+  `top -d0`. Fix whatever the reproduction exposes; re-test after I2 lands in
+  case the leak was process churn.
+
+### I4. Pi 4B (8 GiB) reports 863 MiB — only the first `/memory` range is used
+
+**Status: done** (verify the reported total on the 8 GiB board when
+convenient), with one staged follow-up below.
+
+- **Defect:** on an 8 GiB Raspberry Pi 4B the reported total memory was
+  863 MiB: the aarch64 boot path read only `Fdt::first_memory_region()`, so
+  just the first `/memory` `reg` window (below the BCM2711 MMIO hole)
+  reached the frame allocator.
+- **Landed behaviour:** `lib/fdt` exposes `Fdt::each_memory_region` (every
+  `reg` pair of every top-level `/memory` node, honouring the root
+  `#address-cells`/`#size-cells`, fail-closed on truncated pairs);
+  `first_memory_region` is derived from it. The aarch64 boot collects all
+  non-zero windows, clips them out of Device-typed gigapages
+  (`mem_map::clip_windows_to_normal_ram` — the identity map types memory at
+  1 GiB granularity and Device wins for a shared gigapage, so RAM sharing
+  the UART/GIC/PCIe gigapage is dropped fail-closed), widens the RAM
+  gigapage mask and live identity map per window, and
+  `mem_map::build_memory_map` lays out N windows (kernel reserve + guard
+  arena in the kernel's window, sized from *total* RAM; every other window
+  wholly usable). Host tests cover the Pi 4-shaped multi-window/clip cases
+  in `lib/fdt` and `mem_map`; `docs/src/platform/aarch64.md` describes the
+  behaviour. On the 8 GiB board the reported total should now be ≈7 GiB.
+- **Follow-up (staged):** reclaim the RAM clipped out of the Device-typed
+  gigapage (~1 GiB on a Pi 4: `0xC000_0000..0xFC00_0000`) by typing the
+  identity map at 2 MiB granularity inside a mixed gigapage; and adopt the
+  all-ranges iterator in the riscv64 boot map builder
+  (`riscv64::boot::build_boot_memory_map` still reads the first window —
+  QEMU `virt` declares one, so nothing is currently lost there).
+
 ## 1. Everything is a bundle — including single-binary utilities
 
 RustOS does **not** organise programs the Unix way: there is no `/usr/bin/<app>`
