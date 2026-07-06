@@ -31,7 +31,7 @@
 //!    `sysinfod`, prints the shared `PID  PPID …` header, and exits.
 //! 4. `man man` — the spawned `man` tool resolves its own bundle through
 //!    the shared store-then-`PATH` policy, reads the planted
-//!    `/System/Apps/man.app/Help/default/man.md` off the mounted read-only
+//!    `/System/Apps/man.app/Help/en-US/man.md` off the mounted read-only
 //!    `/System` volume through the `fs_*` syscalls (`CAP_FS_ACCESS` from
 //!    its own manifest), and streams the rendered page; the page's final
 //!    `SEE ALSO` heading is the marker that the whole document arrived

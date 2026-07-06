@@ -44,7 +44,7 @@
 //! - `cfg-check` — rejects target-conditional compilation
 //!   outside the architecture ports and build glue
 //! - `help-lint` — lints every command app's discovered `Help/` tree
-//!   (plans/APPS.md §8.1): `default/` presence, required-locale completeness,
+//!   (plans/APPS.md §8.1): canonical `en-US/` presence, required-locale completeness,
 //!   structural bounds, cross-locale `OPTIONS` switch-key drift, the
 //!   content-policy screen, and per-command coverage
 //! - `coverage`     — `cargo llvm-cov` report for the host-testable subset

@@ -636,7 +636,7 @@ mod tests {
                 bytes: b"",
             },
             BundleFileDigest {
-                path: "Help/default/example.md",
+                path: "Help/en-US/example.md",
                 bytes: b"",
             },
         ];

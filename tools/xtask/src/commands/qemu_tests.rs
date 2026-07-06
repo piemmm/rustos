@@ -2709,7 +2709,7 @@ const TESTS: &[QemuTest] = &[
             ("PID  PPID", "ps --bogus\n"),
             // `man man` (plans/APPS.md §7): the spawned tool resolves its
             // own bundle through the shared store-then-PATH policy, reads
-            // `/System/Apps/man.app/Help/default/man.md` off the mounted
+            // `/System/Apps/man.app/Help/en-US/man.md` off the mounted
             // read-only /System volume through the `fs_*` syscalls, and
             // streams the rendered page (a serial console attests no
             // geometry, so no pager prompt). `SEE ALSO` is the page's final

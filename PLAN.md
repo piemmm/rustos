@@ -3610,7 +3610,7 @@ with every caller/fixture updated, `docs/src/abi/appinfo.md` refreshed, and
 the C header regenerated (`ROS_BUNDLE_ENTRY_HELP`); (2) `lib/help`
 (`rustos-help`) — the one help engine: validated `Locale`/`DocumentName`
 spellings, an injected capability-scoped `HelpSource` read seam, the
-deterministic exact → same-language → `default/` fallback (served locale
+deterministic exact → same-language → canonical `en-US/` fallback (served locale
 reported for `man`'s `stdinfo` record), a bounded fail-closed
 structured-Markdown parser (fixed section model, typed `HelpError`,
 fence-aware section walk), and `render_short`/`render_full` over `lib/vt`
@@ -3675,7 +3675,7 @@ request `CAP_FS_ACCESS` (the man/ls precedent).
 shared judgement `rustos_help::lint_help_trees` (`lib/help`'s host-only
 `lint` feature, also run by the `tools/syshelp` aggregator tests) gates
 every discovered `Help/` tree in `cargo xtask ci`/`ci-long` — spellings,
-structural bounds, `default/` presence, required-locale completeness
+structural bounds, canonical `en-US/` presence, required-locale completeness
 (`fr-FR`/`de-DE`/`es-ES`/`uk-UA`/`it-IT`), no translation-only documents,
 cross-locale `OPTIONS` switch-key drift, the content-policy word screen,
 and per-command coverage over the `AppInfo.toml` discovery walk.
@@ -4126,7 +4126,7 @@ can see *why* a rule exists without diffing the charter's history.
   Amended §16.5 (the merge alternative of `plans/APPS.md`, maintainer-chosen):
   the bundle's `Documentation/` entry is renamed to `Help/`, the
   internationalised structured-Markdown tree (one document per command/topic,
-  one directory per BCP-47 locale plus the mandatory `default/` en-US) that is
+  one directory per BCP-47 locale with the mandatory canonical `en-US/`) that is
   the single source for `man`, short `-h`/`-?` help, and any graphical help
   viewer — two overlapping documentation entries would be the duplication §2.2
   forbids. In-place `abi-v1` evolution (§2.13): `BundleEntry::Help` replaces

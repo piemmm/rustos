@@ -41,7 +41,7 @@ const MORE_ERASE: &[u8] = b"\r        \r";
 pub struct Request<'a> {
     /// The user's locale preference (the `LANG` variable, a BCP-47 tag,
     /// plans/APPS.md §5), if set. A missing or malformed preference falls
-    /// back to the canonical `default/` (en-US) documents — a bad
+    /// back to the canonical `en-US/` documents — a bad
     /// preference must never make help unreadable.
     pub locale: Option<&'a str>,
     /// The `PATH` variable, if set: the user-extendable half of the
@@ -154,7 +154,7 @@ fn resolve(word: &str, path: Option<&str>, store: &dyn BundleStore) -> Result<St
 }
 
 /// The locale the engine is asked for: the user's preference when it is a
-/// well-formed tag, the canonical `default/` otherwise. A malformed
+/// well-formed tag, the canonical `en-US/` otherwise. A malformed
 /// preference degrades to the canonical documents rather than making every
 /// page unreadable — the fallback chain itself stays the engine's.
 fn active_locale(tag: Option<&str>) -> Locale {

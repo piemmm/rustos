@@ -27,7 +27,7 @@ pub enum ManError {
     /// no document can be looked up for it (the spelling grammar is the
     /// `lib/help` one that makes path traversal unrepresentable).
     InvalidName(NameError),
-    /// The owning bundle exists but no locale — not even `default/` — holds
+    /// The owning bundle exists but no locale — not even `en-US/` — holds
     /// the document: an ordinary "no help" outcome, reported cleanly.
     NoHelp {
         /// The command word the bundle was resolved for.

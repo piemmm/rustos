@@ -2,9 +2,9 @@
 //!
 //! Every application bundle may ship a `Help/` tree (`rustos_abi::appinfo`,
 //! `AGENTS.md` §16.5): one structured-Markdown document per command or topic,
-//! under one directory per BCP-47 locale plus the mandatory `default/`
-//! (en-US) canonical source. Three consumers read that tree — the `man`
-//! command, every command's short `-h`/`-?` help, and any graphical help
+//! under one directory per BCP-47 locale, with the mandatory `en-US/`
+//! directory as the canonical source. Three consumers read that tree — the
+//! `man` command, every command's short `-h`/`-?` help, and any graphical help
 //! viewer — and they must not each grow a private locale walker, Markdown
 //! parser, or escape vocabulary. This crate is the one engine they share.
 //!
@@ -16,7 +16,7 @@
 //!   `appmgr` injects its bundle store.
 //! * **Select** the locale by the deterministic fallback chain ([`load`]):
 //!   the exact requested tag, then the lexicographically first directory of
-//!   the same language that holds the document, then `default/`. The served
+//!   the same language that holds the document, then `en-US/`. The served
 //!   locale and how it relates to the request are reported ([`Selection`])
 //!   so a caller such as `man` can surface a locale fallback on `stdinfo`.
 //!   A document is always rendered whole from a single file — falling back

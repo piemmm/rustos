@@ -14,9 +14,12 @@ use core::fmt;
 
 use crate::doc::{HelpDoc, HelpError, MAX_DOC_LEN};
 
-/// The sentinel locale directory that always exists and is always en-US:
-/// the canonical source every fallback chain ends at.
-pub const DEFAULT_LOCALE: &str = "default";
+/// The canonical locale directory that always exists: the en-US source
+/// every fallback chain ends at.
+pub const DEFAULT_LOCALE: &str = "en-US";
+
+/// Byte length of [`DEFAULT_LOCALE`]'s language subtag (`en`).
+const DEFAULT_LANGUAGE_LEN: usize = 2;
 
 /// Maximum byte length of a locale tag this engine accepts
 /// (`language` up to 8 letters, `-`, region up to 3 characters).
@@ -34,8 +37,9 @@ pub const MAX_LOCALE_DIRS: usize = 256;
 /// The suffix a document file name carries on disk.
 const DOCUMENT_SUFFIX: &str = ".md";
 
-/// A validated locale directory name: either the [`DEFAULT_LOCALE`] sentinel
-/// or a BCP-47 `language[-REGION]` tag (`fr`, `fr-FR`, `es-419`).
+/// A validated locale directory name: a BCP-47 `language[-REGION]` tag
+/// (`fr`, `fr-FR`, `es-419`), of which the canonical [`DEFAULT_LOCALE`]
+/// (`en-US`) is one.
 ///
 /// The accepted grammar is deliberately the small subset the `Help/` tree
 /// uses: a primary language subtag of 2–8 ASCII lowercase letters,
@@ -73,19 +77,13 @@ impl fmt::Display for TagError {
 }
 
 impl Locale {
-    /// Parse and validate a locale tag or the [`DEFAULT_LOCALE`] sentinel.
+    /// Parse and validate a locale tag.
     pub fn parse(tag: &str) -> Result<Self, TagError> {
         if tag.is_empty() {
             return Err(TagError::Empty);
         }
         if tag.len() > MAX_LOCALE_LEN {
             return Err(TagError::TooLong);
-        }
-        if tag == DEFAULT_LOCALE {
-            return Ok(Locale {
-                tag: String::from(tag),
-                language_len: tag.len(),
-            });
         }
         let (language, region) = match tag.split_once('-') {
             Some((language, region)) => (language, Some(region)),
@@ -115,14 +113,13 @@ impl Locale {
         &self.tag
     }
 
-    /// The primary language subtag (`fr` of `fr-FR`); the whole sentinel for
-    /// [`DEFAULT_LOCALE`].
+    /// The primary language subtag (`fr` of `fr-FR`).
     #[must_use]
     pub fn language(&self) -> &str {
         self.tag.get(..self.language_len).unwrap_or(&self.tag)
     }
 
-    /// Whether this is the [`DEFAULT_LOCALE`] sentinel.
+    /// Whether this is the canonical [`DEFAULT_LOCALE`] (`en-US`).
     #[must_use]
     pub fn is_default(&self) -> bool {
         self.tag == DEFAULT_LOCALE
@@ -130,15 +127,15 @@ impl Locale {
 }
 
 impl Default for Locale {
-    /// The [`DEFAULT_LOCALE`] sentinel — the canonical en-US tree every
-    /// fallback chain ends at. Constructing it directly (rather than through
+    /// The canonical [`DEFAULT_LOCALE`] (`en-US`) — the tree every fallback
+    /// chain ends at. Constructing it directly (rather than through
     /// [`Locale::parse`]) lets a caller with no usable locale preference
     /// reach the canonical documents without handling an impossible parse
     /// error.
     fn default() -> Self {
         Locale {
             tag: String::from(DEFAULT_LOCALE),
-            language_len: DEFAULT_LOCALE.len(),
+            language_len: DEFAULT_LANGUAGE_LEN,
         }
     }
 }
@@ -247,7 +244,7 @@ pub enum Fallback {
     Exact,
     /// A different region of the requested language served it.
     SameLanguage,
-    /// The `default/` (en-US) canonical document served it.
+    /// The canonical `en-US/` document served it.
     Default,
 }
 
@@ -277,7 +274,7 @@ pub enum LoadError {
     Source(SourceError),
     /// The `Help/` tree lists more than [`MAX_LOCALE_DIRS`] directories.
     TooManyLocales,
-    /// No locale — not even `default/` — holds the document. An ordinary,
+    /// No locale — not even `en-US/` — holds the document. An ordinary,
     /// non-fatal outcome ("no help for this command"), never fabricated
     /// around.
     NotFound,
@@ -314,7 +311,7 @@ impl From<HelpError> for LoadError {
 /// 1. `Help/<requested>/<name>.md` — the exact locale.
 /// 2. The lexicographically first directory of the same language (any
 ///    region) that holds the document, so the choice is stable across runs.
-/// 3. `Help/default/<name>.md` — the en-US canonical document.
+/// 3. `Help/en-US/<name>.md` — the canonical document.
 ///
 /// Requesting [`DEFAULT_LOCALE`] itself is step 3 directly and reports
 /// [`Fallback::Exact`]. A document served by a step later than the request

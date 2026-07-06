@@ -38,7 +38,7 @@ Exactly one name operand is required. `-g` accepts its value attached
 (`-g0`, `--gid=0`) or as the following argument (`-g 0`). `--` ends
 option parsing: every later argument is an operand.
 
-The bundle's six-locale `Help/` tree (`default` en-US plus `fr-FR`,
+The bundle's six-locale `Help/` tree (the canonical `en-US` plus `fr-FR`,
 `de-DE`, `es-ES`, `uk-UA`, `it-IT`) is authored on disk in this crate and
 planted at `/System/Apps/groupadd.app/Help/` by the image builder from
 that source (`tools/syshelp`) — never embedded in the binary

@@ -15,18 +15,18 @@
 //!   (§2.1).
 //! * **Bounds** — every document parses whole under [`HelpDoc::parse`]'s
 //!   fail-closed limits (§6), so a malformed page never reaches an image.
-//! * **Completeness** — a bundle that ships help ships a `default/` (en-US)
+//! * **Completeness** — a bundle that ships help ships a canonical `en-US/`
 //!   document, every document exists in each [`REQUIRED_LOCALES`] directory,
-//!   and no translation carries a document absent from `default/` (§2.1,
+//!   and no translation carries a document absent from `en-US/` (§2.1,
 //!   §8.1).
 //! * **Switch keys** — every `OPTIONS` list item leads with a backticked,
 //!   language-neutral switch key, and each translation's key sequence equals
-//!   `default/`'s exactly (§3.1): the flags are properties of the parser,
+//!   `en-US/`'s exactly (§3.1): the flags are properties of the parser,
 //!   never of the language.
 //! * **Content policy** — no document, in any locale, contains a word from
 //!   the closed [`DISALLOWED_WORDS`] screen (§8.1).
 //!
-//! The per-app unit tests still pin `default/`'s `OPTIONS` to each program's
+//! The per-app unit tests still pin `en-US/`'s `OPTIONS` to each program's
 //! *actual* argument parser (§3.1) — only the app crate knows its parser;
 //! this lint pins every translation to that already-pinned canonical set.
 
@@ -39,7 +39,7 @@ use crate::doc::{Block, HelpDoc, SectionKind, Span};
 use crate::locale::{DocumentName, Locale, DEFAULT_LOCALE};
 
 /// One discovered help document for the lint to judge: its bundle directory
-/// name (`ls.app`), locale directory (`default`, `fr-FR`, …), file name
+/// name (`ls.app`), locale directory (`en-US`, `fr-FR`, …), file name
 /// (`ls.md`), and raw bytes.
 #[derive(Clone, Copy, Debug)]
 pub struct LintDoc<'a> {
@@ -54,10 +54,10 @@ pub struct LintDoc<'a> {
 }
 
 /// The standing locale set every OS command app's help must ship
-/// (`plans/APPS.md` §8.1): the mandatory `default/` canonical (en-US)
-/// tree plus the required translations. Adding a language is extending
-/// this data, not new code.
-pub const REQUIRED_LOCALES: &[&str] = &["default", "fr-FR", "de-DE", "es-ES", "uk-UA", "it-IT"];
+/// (`plans/APPS.md` §8.1): the mandatory canonical `en-US/` tree plus
+/// the required translations. Adding a language is extending this data,
+/// not new code.
+pub const REQUIRED_LOCALES: &[&str] = &["en-US", "fr-FR", "de-DE", "es-ES", "uk-UA", "it-IT"];
 
 /// The closed content-policy screen (`plans/APPS.md` §8.1): profane or
 /// derogatory words, lower-case, matched on whole alphabetic words in any
@@ -160,7 +160,7 @@ pub fn lint_help_trees(docs: &[LintDoc<'_>]) -> Vec<String> {
     violations
 }
 
-/// The per-bundle structural findings: `default/` presence, required-locale
+/// The per-bundle structural findings: `en-US/` presence, required-locale
 /// completeness, no translation-only documents, and cross-locale `OPTIONS`
 /// switch-key drift.
 fn tree_violations(
@@ -179,7 +179,7 @@ fn tree_violations(
     }
     for (bundle, locales) in &bundles {
         let Some(default_files) = locales.get(DEFAULT_LOCALE) else {
-            violations.push(format!("{bundle}: no {DEFAULT_LOCALE}/ (en-US) document"));
+            violations.push(format!("{bundle}: no canonical {DEFAULT_LOCALE}/ document"));
             continue;
         };
         for (locale, files) in locales {
@@ -363,12 +363,12 @@ mod tests {
     #[test]
     fn missing_default_is_flagged() {
         let mut tree = clean_tree(&doc_with_keys(&[]));
-        tree.retain(|(locale, _)| *locale != "default");
+        tree.retain(|(locale, _)| *locale != "en-US");
         let violations = lint_help_trees(&rows(&tree));
-        // One "no default/" finding per bundle; the per-file findings are
+        // One "no en-US/" finding per bundle; the per-file findings are
         // suppressed because there is no canonical set to compare against.
         assert_eq!(violations.len(), 1, "{violations:?}");
-        assert!(violations[0].contains("no default/"));
+        assert!(violations[0].contains("no canonical en-US/"));
     }
 
     #[test]
@@ -384,7 +384,7 @@ mod tests {
         });
         let violations = lint_help_trees(&docs);
         assert_eq!(violations.len(), 1, "{violations:?}");
-        assert!(violations[0].contains("no default/ counterpart"));
+        assert!(violations[0].contains("no en-US/ counterpart"));
     }
 
     #[test]

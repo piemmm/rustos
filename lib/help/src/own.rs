@@ -24,7 +24,7 @@ use crate::render::render_short;
 ///
 /// `locale` is the user's raw `LANG` preference, if any: a well-formed tag
 /// selects that locale through the engine's fallback chain, and a missing
-/// or malformed one degrades to the canonical `default/` documents rather
+/// or malformed one degrades to the canonical `en-US/` documents rather
 /// than making the short help unreadable.
 ///
 /// Returns `None` when no document can be served (an invalid `word`

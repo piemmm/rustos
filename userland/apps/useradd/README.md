@@ -42,7 +42,7 @@ value-taking option accepts its value attached (`-u0`, `--uid=0`) or as
 the following argument (`-u 0`, `--uid 0`). `--` ends option parsing:
 every later argument is an operand.
 
-The bundle's six-locale `Help/` tree (`default` en-US plus `fr-FR`,
+The bundle's six-locale `Help/` tree (the canonical `en-US` plus `fr-FR`,
 `de-DE`, `es-ES`, `uk-UA`, `it-IT`) is authored on disk in this crate and
 planted at `/System/Apps/useradd.app/Help/` by the image builder from
 that source (`tools/syshelp`) — never embedded in the binary

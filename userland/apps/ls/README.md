@@ -92,7 +92,7 @@ Advisory only — never affecting the listing, ordering, or exit status.
 
 ## Help tree
 
-`Help/<locale>/ls.md` carries the canonical `default/` (en-US) document
+`Help/<locale>/ls.md` carries the canonical `en-US/` document
 plus the required translations (`fr-FR`, `de-DE`, `es-ES`, `uk-UA`,
 `it-IT`, `plans/APPS.md` §8.1). The tree is authored on disk only:
 `tools/syshelp` discovers it and the image builder (`tools/mkimage`) and

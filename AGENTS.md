@@ -1625,7 +1625,7 @@ directly under `/Apps/`. The bundle layout is fixed:
 │                      # /Users/<u>/Settings/<Name>/ on first launch.
 └── Help/              # Internationalised structured-Markdown help: one
                        # document per command/topic, one directory per
-                       # BCP-47 locale plus the mandatory default/ (en-US).
+                       # BCP-47 locale; the mandatory canonical one is en-US/.
                        # The single source for `man`, short `-h`/`-?` help,
                        # and any graphical help viewer (plans/APPS.md).
 ```
@@ -1717,9 +1717,9 @@ the running bundle's own `Help/` tree.
   duplication §2.2 forbids and a review blocker.
 - Internationalisation is the shared engine's job (§2.2): locale selection
   falls back deterministically — the exact BCP-47 tag, then the same language
-  in any region, then the mandatory `default/` (en-US) — inside the one
+  in any region, then the mandatory canonical `en-US/` — inside the one
   `lib/help` engine, never a per-app locale walker. A missing or partial
-  translation degrades to `default/`, never to fabricated or hardcoded text
+  translation degrades to `en-US/`, never to fabricated or hardcoded text
   (§2.9).
 
 ### 16.6 System Information API

@@ -93,7 +93,7 @@ pub const DEFAULT_PATH: &str = "/System/Apps:/Apps";
 pub const DEFAULT_TERM: &str = "xterm-256color";
 
 /// The default `LANG` exported to a session: RustOS's default locale
-/// (`en-US`), matching the mandatory `default/` help locale (§16.5).
+/// (`en-US`), the mandatory canonical help locale (§16.5).
 pub const DEFAULT_LANG: &str = "en-US";
 
 /// Build the environment login hands the session shell, as

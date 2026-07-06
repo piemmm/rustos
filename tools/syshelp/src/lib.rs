@@ -38,7 +38,7 @@
 pub struct HelpFile {
     /// The bundle directory name, including the `.app` suffix (e.g. `ls.app`).
     pub bundle: &'static str,
-    /// The BCP-47 locale directory (or the `default` sentinel, always en-US).
+    /// The BCP-47 locale directory (`en-US/` is the mandatory canonical one).
     pub locale: &'static str,
     /// The document file name (e.g. `ls.md`).
     pub file: &'static str,
@@ -80,7 +80,7 @@ mod tests {
 
     /// Every discovered tree passes the one shared help-tree lint
     /// (`plans/APPS.md` §8.1) — the same judgement `cargo xtask help-lint`
-    /// gates on: spellings and fail-closed parse bounds, `default/` (en-US)
+    /// gates on: spellings and fail-closed parse bounds, canonical `en-US/`
     /// presence, required-locale completeness, no translation-only
     /// documents, cross-locale `OPTIONS` switch-key drift, and the content
     /// policy. A tree this rejects can never reach an image.

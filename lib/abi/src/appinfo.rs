@@ -109,7 +109,7 @@ pub enum BundleEntry {
     DefaultSettings,
     /// The internationalised help tree: one structured-Markdown document per
     /// command/topic under one directory per BCP-47 locale, plus the
-    /// mandatory `default/` (en-US) canonical source. It is the single
+    /// mandatory canonical `en-US/` source. It is the single
     /// source the `man` command, each command's short `-h`/`-?` help, and
     /// any graphical help viewer read from (`plans/APPS.md`).
     Help,
@@ -620,7 +620,7 @@ fn inline_str(buf: &[u8], len: u8) -> &str {
 pub const BUNDLE_CONTENT_DIGEST_MAGIC: [u8; 4] = *b"RBC1";
 
 /// One file covered by a bundle's content digest: its bundle-root-relative
-/// path (e.g. `Run`, `Help/default/ls.md`) and its exact bytes.
+/// path (e.g. `Run`, `Help/en-US/ls.md`) and its exact bytes.
 #[derive(Clone, Copy, Debug)]
 pub struct BundleFileDigest<'a> {
     /// Path relative to the bundle root, `/`-separated, never `AppInfo`.
@@ -983,7 +983,7 @@ mod tests {
     fn digest_framing_is_exact_and_ordered() {
         let files = [
             BundleFileDigest {
-                path: "Help/default/ls.md",
+                path: "Help/en-US/ls.md",
                 bytes: b"doc",
             },
             BundleFileDigest {
@@ -1002,8 +1002,8 @@ mod tests {
         };
         put(&BUNDLE_CONTENT_DIGEST_MAGIC);
         put(&2u32.to_le_bytes());
-        put(&(18u32).to_le_bytes());
-        put(b"Help/default/ls.md");
+        put(&(16u32).to_le_bytes());
+        put(b"Help/en-US/ls.md");
         put(&3u64.to_le_bytes());
         put(b"doc");
         put(&(3u32).to_le_bytes());
@@ -1054,7 +1054,7 @@ mod tests {
                 bytes: b"",
             },
             BundleFileDigest {
-                path: "Help/default/ls.md",
+                path: "Help/en-US/ls.md",
                 bytes: b"",
             },
         ];

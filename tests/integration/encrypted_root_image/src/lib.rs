@@ -472,7 +472,7 @@ mod tests {
         }
         // The command app's bundle also carries its discovered Help/ tree.
         let mut help = sys.root();
-        for component in [b"Apps".as_slice(), b"ls.app", b"Help", b"default"] {
+        for component in [b"Apps".as_slice(), b"ls.app", b"Help", b"en-US"] {
             help = sys.lookup(help, component).expect("Help path component");
         }
         sys.lookup(help, b"ls.md")

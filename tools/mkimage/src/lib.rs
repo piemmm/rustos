@@ -820,7 +820,7 @@ mod tests {
         // …and the command app's bundle directory also carries its
         // discovered `Help/` tree, so the on-disk bundle is complete.
         let mut help = sys.root();
-        for component in [b"Apps".as_slice(), b"ls.app", b"Help", b"default"] {
+        for component in [b"Apps".as_slice(), b"ls.app", b"Help", b"en-US"] {
             help = sys.lookup(help, component).expect("Help path component");
         }
         sys.lookup(help, b"ls.md")

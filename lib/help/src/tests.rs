@@ -87,13 +87,15 @@ fn plain(ops: &[Op]) -> String {
 
 #[test]
 fn locale_accepts_the_grammar_and_nothing_else() {
-    for tag in ["fr", "fr-FR", "es-419", "default", "haw-US"] {
+    for tag in ["fr", "fr-FR", "es-419", "en-US", "haw-US"] {
         assert_eq!(locale(tag).as_str(), tag);
     }
     assert_eq!(locale("fr-FR").language(), "fr");
     assert_eq!(locale("es-419").language(), "es");
-    assert!(locale("default").is_default());
+    assert!(locale("en-US").is_default());
+    assert_eq!(Locale::default(), locale("en-US"));
     assert!(!locale("fr").is_default());
+    assert!(!locale("en-GB").is_default());
 
     assert_eq!(Locale::parse(""), Err(TagError::Empty));
     assert_eq!(Locale::parse("verylonglocale"), Err(TagError::TooLong));
@@ -123,7 +125,7 @@ fn document_name_makes_traversal_unrepresentable() {
 
 #[test]
 fn load_serves_the_exact_locale_first() {
-    let source = MapSource::new(&[("fr-FR", "top.md"), ("default", "top.md")]);
+    let source = MapSource::new(&[("fr-FR", "top.md"), ("en-US", "top.md")]);
     let loaded = load(&source, &locale("fr-FR"), &name("top")).expect("loads");
     assert_eq!(loaded.selection.locale_dir, "fr-FR");
     assert_eq!(loaded.selection.fallback, Fallback::Exact);
@@ -136,7 +138,7 @@ fn load_falls_back_to_the_first_same_language_region_with_the_document() {
         ("fr-BE", "other.md"),
         ("fr-FR", "top.md"),
         ("fr-CA", "top.md"),
-        ("default", "top.md"),
+        ("en-US", "top.md"),
     ]);
     let loaded = load(&source, &locale("fr-CH"), &name("top")).expect("loads");
     assert_eq!(loaded.selection.locale_dir, "fr-CA");
@@ -145,28 +147,39 @@ fn load_falls_back_to_the_first_same_language_region_with_the_document() {
 
 #[test]
 fn load_falls_back_to_default_and_reports_it() {
-    let source = MapSource::new(&[("de-DE", "top.md"), ("default", "top.md")]);
+    let source = MapSource::new(&[("de-DE", "top.md"), ("en-US", "top.md")]);
     let loaded = load(&source, &locale("fr-FR"), &name("top")).expect("loads");
-    assert_eq!(loaded.selection.locale_dir, "default");
+    assert_eq!(loaded.selection.locale_dir, "en-US");
     assert_eq!(loaded.selection.fallback, Fallback::Default);
 }
 
 #[test]
 fn load_of_default_is_exact_not_a_fallback() {
-    let source = MapSource::new(&[("default", "top.md")]);
-    let loaded = load(&source, &locale("default"), &name("top")).expect("loads");
+    let source = MapSource::new(&[("en-US", "top.md")]);
+    let loaded = load(&source, &locale("en-US"), &name("top")).expect("loads");
     assert_eq!(loaded.selection.fallback, Fallback::Exact);
 }
 
 #[test]
+fn load_of_another_english_region_reports_the_canonical_fallback() {
+    // en-GB falls through the same-language step (the canonical en-US/ is
+    // deliberately excluded there) to the canonical document, reported as
+    // Fallback::Default so a caller can surface the substitution.
+    let source = MapSource::new(&[("en-US", "top.md"), ("de-DE", "top.md")]);
+    let loaded = load(&source, &locale("en-GB"), &name("top")).expect("loads");
+    assert_eq!(loaded.selection.locale_dir, "en-US");
+    assert_eq!(loaded.selection.fallback, Fallback::Default);
+}
+
+#[test]
 fn load_fails_closed() {
-    let source = MapSource::new(&[("default", "other.md")]);
+    let source = MapSource::new(&[("en-US", "other.md")]);
     assert_eq!(
         load(&source, &locale("fr-FR"), &name("top")).unwrap_err(),
         LoadError::NotFound
     );
 
-    let mut failing = MapSource::new(&[("default", "top.md")]);
+    let mut failing = MapSource::new(&[("en-US", "top.md")]);
     failing.fail = true;
     assert_eq!(
         load(&failing, &locale("fr-FR"), &name("top")).unwrap_err(),
@@ -188,19 +201,19 @@ fn load_fails_closed() {
 
     let mut oversize = MapSource::new(&[]);
     oversize.entries.push((
-        "default".to_owned(),
+        "en-US".to_owned(),
         "top.md".to_owned(),
         vec![b'a'; MAX_DOC_LEN + 1],
     ));
     assert_eq!(
-        load(&oversize, &locale("default"), &name("top")).unwrap_err(),
+        load(&oversize, &locale("en-US"), &name("top")).unwrap_err(),
         LoadError::Document(HelpError::TooLarge)
     );
 }
 
 #[test]
 fn load_ignores_alien_locale_directory_names() {
-    let source = MapSource::new(&[("..", "top.md"), ("fr-FR", "top.md"), ("default", "top.md")]);
+    let source = MapSource::new(&[("..", "top.md"), ("fr-FR", "top.md"), ("en-US", "top.md")]);
     let loaded = load(&source, &locale("fr-CH"), &name("top")).expect("loads");
     assert_eq!(loaded.selection.locale_dir, "fr-FR");
 }

@@ -48,7 +48,7 @@ impl FixtureStore {
         FixtureStore {
             bundles: alloc::vec![Bundle {
                 dir: "/System/Apps/ps.app",
-                docs: alloc::vec![("default", "ps.md", PS_DOC), ("fr-FR", "ps.md", PS_DOC_FR),],
+                docs: alloc::vec![("en-US", "ps.md", PS_DOC), ("fr-FR", "ps.md", PS_DOC_FR),],
             }],
             denied: Vec::new(),
         }
@@ -205,7 +205,7 @@ fn the_store_bundle_shadows_a_path_bundle_of_the_same_name() {
     store.bundles.push(Bundle {
         dir: "/Users/eve/tools/ps.app",
         docs: alloc::vec![(
-            "default",
+            "en-US",
             "ps.md",
             "## NAME\n\nps — evil twin\n\n## SYNOPSIS\n\n`x`\n\n## DESCRIPTION\n\nNot this one.\n",
         )],
@@ -226,7 +226,7 @@ fn a_path_bundle_serves_a_word_the_store_lacks() {
     store.bundles.push(Bundle {
         dir: "/Users/root/tools/mine.app",
         docs: alloc::vec![(
-            "default",
+            "en-US",
             "mine.md",
             "## NAME\n\nmine — my tool\n\n## SYNOPSIS\n\n`mine`\n\n## DESCRIPTION\n\nMine.\n",
         )],
@@ -247,7 +247,7 @@ fn a_final_refusal_stops_the_probe_rather_than_skipping_it() {
     store.bundles.push(Bundle {
         dir: "/Users/root/tools/hidden.app",
         docs: alloc::vec![(
-            "default",
+            "en-US",
             "hidden.md",
             "## NAME\n\nhidden\n\n## SYNOPSIS\n\n`x`\n\n## DESCRIPTION\n\nNever shown.\n",
         )],
@@ -308,11 +308,11 @@ fn a_topic_selects_its_own_document_within_the_bundle() {
         dir: "/System/Apps/top.app",
         docs: alloc::vec![
             (
-                "default",
+                "en-US",
                 "top.md",
                 "## NAME\n\ntop — watch processes\n\n## SYNOPSIS\n\n`top`\n\n## DESCRIPTION\n\nWatches.\n",
             ),
-            ("default", "keys.md", TOP_KEYS_DOC),
+            ("en-US", "keys.md", TOP_KEYS_DOC),
         ],
     });
     let console = FixtureConsole::stream();
@@ -372,7 +372,7 @@ fn a_locale_fallback_serves_default_and_emits_the_advisory() {
     assert!(record.contains("\"kind\":\"context\""), "{record}");
     assert!(record.contains("help.locale_fallback"), "{record}");
     assert!(record.contains("\"requested\":\"de-DE\""), "{record}");
-    assert!(record.contains("\"served\":\"default\""), "{record}");
+    assert!(record.contains("\"served\":\"en-US\""), "{record}");
     assert!(record.ends_with('\n'), "JSONL framing: {record}");
 }
 
@@ -443,7 +443,7 @@ fn short_help_renders_mans_own_document() {
     let mut store = FixtureStore::with_ps();
     store.bundles.push(Bundle {
         dir: "/System/Apps/man.app",
-        docs: alloc::vec![("default", "man.md", MAN_DOC)],
+        docs: alloc::vec![("en-US", "man.md", MAN_DOC)],
     });
     let console = FixtureConsole::stream();
     run(&Command::ShortHelp, &Request::default(), &store, &console).expect("short help renders");

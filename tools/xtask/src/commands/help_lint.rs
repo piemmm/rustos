@@ -9,15 +9,15 @@
 //!    help document (`rustos_syshelp::HELP_FILES` — the same build-discovered
 //!    rows the image planters plant, so the linted set and the shipped set
 //!    cannot drift): locale/document spellings, the fail-closed structural
-//!    bounds, `default/` presence, required-locale completeness, no
+//!    bounds, canonical `en-US/` presence, required-locale completeness, no
 //!    translation-only documents, cross-locale `OPTIONS` switch-key drift,
 //!    and the content-policy screen.
 //! 2. **Coverage**: every *command* app the `AppInfo.toml` discovery walk
 //!    finds (`discover_app_manifests` — never a per-bundle list) must ship a
-//!    `default/<command>.md` document for its own command word. Services are
+//!    `en-US/<command>.md` document for its own command word. Services are
 //!    not commands and ship help only if they expose one.
 //!
-//! The per-app unit tests still pin `default/`'s `OPTIONS` to each program's
+//! The per-app unit tests still pin `en-US/`'s `OPTIONS` to each program's
 //! actual argument parser (`plans/APPS.md` §3.1) — only the app crate knows
 //! its parser; this gate pins everything the parser cannot see.
 //!

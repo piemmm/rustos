@@ -3,8 +3,8 @@
 Shared command-help engine for RustOS (`lib/help`, `plans/APPS.md`).
 
 Every application bundle may ship a `Help/` tree: one structured-Markdown
-document per command or topic, under one directory per BCP-47 locale plus the
-mandatory `default/` (en-US) canonical source. Three consumers read that tree —
+document per command or topic, under one directory per BCP-47 locale with the
+mandatory `en-US/` directory as the canonical source. Three consumers read that tree —
 the `man` command, every command's short `-h`/`-?` help, and any graphical help
 viewer — so the locale walk, the Markdown parse, and the terminal render live
 here once and every consumer imports them.
@@ -19,7 +19,7 @@ here once and every consumer imports them.
   performs no ambient I/O.
 - `load(source, requested, name)` — the deterministic fallback chain: the exact
   locale, then the lexicographically first same-language region holding the
-  document, then `default/`. Reports which locale served (`Selection`) so
+  document, then the canonical `en-US/`. Reports which locale served (`Selection`) so
   `man` can surface a fallback on `stdinfo`; a missing document is a typed
   `NotFound`, never fabricated text.
 - `HelpDoc::parse` — the bounded structured-Markdown parser: the closed,
@@ -32,8 +32,8 @@ here once and every consumer imports them.
   (bold headings/code, underlined emphasis, width-padded tables via
   `lib/curses`) that the caller encodes and writes to its own stdout.
 - `own_short_help` — a command app's own `-h`/`-?` render in one call:
-  parse the raw `LANG` preference (malformed or missing degrades to
-  `default/`), load the app's own document, render the short view, and
+  parse the raw `LANG` preference (malformed or missing degrades to the
+  canonical `en-US/`), load the app's own document, render the short view, and
   return encoded `lib/vt` bytes — `None` when no document can be served, so
   the caller falls back to its own usage banner and `-h` never fails.
 - `BundleHelp` (the `rt` cargo feature) — the production `HelpSource` over
@@ -44,7 +44,7 @@ here once and every consumer imports them.
 - `lint_help_trees` (the `lint` cargo feature, host-only tooling) — the one
   help-tree lint (`plans/APPS.md` §8.1) shared by `cargo xtask help-lint` and
   the `tools/syshelp` aggregator tests: spellings and parse bounds on every
-  discovered document, `default/` presence, `REQUIRED_LOCALES` completeness,
+  discovered document, canonical `en-US/` presence, `REQUIRED_LOCALES` completeness,
   no translation-only documents, cross-locale `OPTIONS` switch-key drift, and
   the closed content-policy word screen. Pure rows-in/violations-out; never
   linked into a RustOS program.

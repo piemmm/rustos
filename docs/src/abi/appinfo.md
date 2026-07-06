@@ -27,7 +27,7 @@ present. Any other entry is a packaging defect (`BundleLayoutError`).
 
 `Help/` is the bundle's internationalised help tree (`plans/APPS.md`): one
 structured-Markdown document per command/topic, under one directory per
-BCP-47 locale plus the mandatory `default/` (en-US) canonical source. It is
+BCP-47 locale with the mandatory canonical `en-US/` source. It is
 the single source the `man` command, each command's short `-h`/`-?` help,
 and any graphical help viewer read from; there is no separate long-form
 documentation entry.

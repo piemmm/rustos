@@ -221,7 +221,7 @@ pub(crate) fn composed_bundle(caps: Vec<CapabilityId>) -> (MemFs, [u8; 32], Vec<
         SYSCALL_TABLE_HASH,
         &[
             BundleFileDigest {
-                path: "Help/default/ps.md",
+                path: "Help/en-US/ps.md",
                 bytes: help,
             },
             BundleFileDigest {
@@ -234,7 +234,7 @@ pub(crate) fn composed_bundle(caps: Vec<CapabilityId>) -> (MemFs, [u8; 32], Vec<
     let fs = MemFs::new(&[
         ("/System/Apps/ps.app/AppInfo", composed.bytes.as_slice()),
         ("/System/Apps/ps.app/Run", run.as_slice()),
-        ("/System/Apps/ps.app/Help/default/ps.md", help.as_slice()),
+        ("/System/Apps/ps.app/Help/en-US/ps.md", help.as_slice()),
     ]);
     (fs, composed.signer_pubkey, run)
 }

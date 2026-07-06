@@ -14,9 +14,9 @@ shell's short-help convention land).
 
 ## The `Help/` tree and locale fallback
 
-`Help/` holds one directory per BCP-47 locale (`fr-FR`, `es-419`, …) plus the
-mandatory `default/` sentinel, which is always en-US and is the canonical
-source. Each directory holds one `<command>.md` per command or topic.
+`Help/` holds one directory per BCP-47 locale (`fr-FR`, `es-419`, …), of
+which the mandatory `en-US/` is the canonical source. Each directory holds
+one `<command>.md` per command or topic.
 
 `load(source, requested, name)` selects a document by the first hit in a
 fixed, deterministic chain:
@@ -24,7 +24,7 @@ fixed, deterministic chain:
 1. `Help/<requested>/<name>.md` — the exact locale.
 2. The lexicographically first same-language directory (any region) that
    holds the document, so the choice is stable across runs.
-3. `Help/default/<name>.md`.
+3. `Help/en-US/<name>.md` — the canonical document.
 
 The result reports which directory served and how it relates to the request
 (`Selection`/`Fallback`), so `man` can emit its locale-fallback `stdinfo`
@@ -79,7 +79,7 @@ Every command app answers its reserved `-h`/`-?` switches the same way, so
 that sequence lives here once rather than per tool:
 
 - `own_short_help(source, locale, word)` — the pure helper: parse the raw
-  `LANG` preference (a malformed or missing tag degrades to `default/`),
+  `LANG` preference (a malformed or missing tag degrades to `en-US/`),
   load `word`'s document through the fallback chain, render the short view,
   and return it as encoded `lib/vt` bytes. `None` when no document can be
   served — the caller then prints its own usage banner, so `-h` never fails.
@@ -102,15 +102,15 @@ and checks:
 
 - locale and document-name spellings, and the fail-closed structural parse
   bounds, on every document;
-- `default/` (en-US) presence, completeness across the standing
+- canonical `en-US/` presence, completeness across the standing
   `REQUIRED_LOCALES` set, and no translation-only documents;
 - cross-locale `OPTIONS` switch-key drift: every item leads with a backticked
   language-neutral key and each translation's key sequence equals
-  `default/`'s (the per-app unit tests separately pin `default/`'s keys to
+  `en-US/`'s (the per-app unit tests separately pin `en-US/`'s keys to
   each program's actual argument parser);
 - the closed content-policy word screen, whole-word and case-insensitive, in
   every locale.
 
 The feature is host-only tooling; a RustOS program never links it. The
 `help-lint` gate additionally verifies coverage: every command app the
-`AppInfo.toml` discovery walk finds ships a `default/<command>.md` document.
+`AppInfo.toml` discovery walk finds ships an `en-US/<command>.md` document.

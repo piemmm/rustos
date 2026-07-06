@@ -45,7 +45,7 @@ Short options bundle as in the GNU tool (`-nE` is `-n -E`).
 With no file operand, or when a file operand is `-`, `cat` reads standard
 input. `--` ends option parsing: every later argument is a file path.
 
-The bundle's six-locale `Help/` tree (`default` en-US plus `fr-FR`,
+The bundle's six-locale `Help/` tree (the canonical `en-US` plus `fr-FR`,
 `de-DE`, `es-ES`, `uk-UA`, `it-IT`) is authored on disk in this crate and
 planted at `/System/Apps/cat.app/Help/` by the image builder from that
 source (`tools/syshelp`) — never embedded in the binary

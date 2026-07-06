@@ -34,8 +34,8 @@ are implementation requirements.
   command apps the shell searches first (see "Command resolution").
 - **Help document** — one structured Markdown file describing one command
   (our modern replacement for a Unix man page).
-- **Locale** — a BCP-47 language tag (e.g. `en-US`, `fr-FR`), plus the
-  sentinel `default` (always en-US).
+- **Locale** — a BCP-47 language tag (e.g. `en-US`, `fr-FR`). `en-US` is
+  the mandatory canonical locale every fallback chain ends at.
 
 ## Status
 
@@ -313,12 +313,12 @@ a `Help/` tree (§8 content policy).
 
 ### 2.1 The `Help/` locale tree
 
-`Help/` contains one subdirectory per locale, plus the mandatory `default`
-sentinel:
+`Help/` contains one subdirectory per locale, of which the canonical
+`en-US/` is mandatory:
 
 ```
 top.app/Help/
-├── default/           # ALWAYS en-US. The canonical source; MUST exist.
+├── en-US/             # The canonical source; MUST exist.
 │   ├── top.md         # one Help document per command/topic
 │   └── ...
 ├── fr-FR/
@@ -328,14 +328,14 @@ top.app/Help/
 └── it-IT/
 ```
 
-- `default/` is the canonical help and is **always en-US**. It MUST exist for
-  any bundle that ships `Help/`; a `Help/` tree without `default/` is a
-  packaging defect and the loader/help engine fails closed (§5.4, §2.9).
+- `en-US/` is the canonical help. It MUST exist for any bundle that ships
+  `Help/`; a `Help/` tree without `en-US/` is a packaging defect and the
+  loader/help engine fails closed (§5.4, §2.9).
 - Each other directory is named by an exact BCP-47 tag and holds the same set
-  of document file names as `default/`, translated.
+  of document file names as `en-US/`, translated.
 - A locale directory MAY omit documents it has not translated yet; the help
   engine falls back per §5. It MUST NOT contain a document name absent from
-  `default/` (there is nothing to fall back *from*, and it signals drift).
+  `en-US/` (there is nothing to fall back *from*, and it signals drift).
 - One Help document describes one command or topic. A bundle whose `Run` (and
   `Code/`) expose several command names ships one document per command name,
   named `<command>.md`. The document for the bundle's primary command shares
@@ -383,7 +383,7 @@ per switch, a language-neutral **key** (the literal flag, e.g. `-d`,
 
 The flag tokens inside backticks are the single source of truth for the
 switch spelling and MUST match the app's argument parser exactly. A CI check
-(§8) verifies that every switch the program accepts appears in `default/`'s
+(§8) verifies that every switch the program accepts appears in `en-US/`'s
 `OPTIONS`, and vice-versa, so help and code cannot drift (§2.14, §2.18).
 
 ## 4. Two help surfaces: short (`-h`/`-?`) and full (`man`)
@@ -413,7 +413,7 @@ language preference (a per-user setting under `/Users/<u>/Settings/`, surfaced
 to programs as the **`LANG` environment variable**, a BCP-47 tag such as
 `fr-FR` — the shell's existing `export` mechanism, `plans/SHELL.md`).
 Programs and the help engine MUST NOT invent a second locale source. A
-missing or malformed `LANG` selects the canonical `default/` documents: a
+missing or malformed `LANG` selects the canonical `en-US/` documents: a
 bad preference degrades to English, it never makes help unreadable.
 
 Given a requested locale `ll-CC`, the help engine selects a document by the
@@ -422,9 +422,9 @@ first hit in this fixed, fail-safe chain:
 1. `Help/ll-CC/<cmd>.md` — exact locale.
 2. `Help/ll/<any-CC>/<cmd>.md` — same language, any region (deterministic:
    the lexicographically first matching directory, so the choice is stable).
-3. `Help/default/<cmd>.md` — the en-US canonical document.
+3. `Help/en-US/<cmd>.md` — the canonical document.
 
-If even `default/<cmd>.md` is absent, the engine reports "no help for `<cmd>`"
+If even `en-US/<cmd>.md` is absent, the engine reports "no help for `<cmd>`"
 as an ordinary, non-fatal result (a clean message + non-zero status), never a
 crash (§2.9). Falling back never mixes languages *within* a document: a
 document is rendered whole from a single file.
@@ -483,9 +483,9 @@ This is binding under `AGENTS.md` §16.5:
   under `lib/help`'s bounds or a bundle missing a required locale, so a
   malformed or partially-translated tree never reaches an image.
 - **Internationalisation is the shared engine's job.** Locale fallback (§5) is
-  the one `lib/help` chain (exact tag → same language any region → `default/`
-  en-US); a missing translation degrades to `default/`, never to fabricated or
-  hardcoded text (§2.9).
+  the one `lib/help` chain (exact tag → same language any region → the
+  canonical `en-US/`); a missing translation degrades to `en-US/`, never to
+  fabricated or hardcoded text (§2.9).
 
 ## 7. The `man` command
 
@@ -500,9 +500,9 @@ troff/roff man format (RustOS ships none), it renders the `Help/` Markdown.
 - `man <cmd> <topic>` selects `Help/<locale>/<topic>.md` within `<cmd>`'s
   bundle, for bundles that ship more than one topic.
 - `man` emits a `stdinfo` `omission`/`context` record (fd 3, §20) when it falls
-  back to a non-requested locale or to `default`, so a tool or user knows the
-  page was not shown in the requested language. This never affects `man`'s exit
-  status or output correctness (§20).
+  back to a non-requested locale or to the canonical `en-US`, so a tool or
+  user knows the page was not shown in the requested language. This never
+  affects `man`'s exit status or output correctness (§20).
 
 ## 8. Command resolution — system app store then user `PATH`
 
@@ -560,19 +560,19 @@ other refusal onto `126`). No "try everything until one runs" behaviour
 
 ### 8.1 Content and translation policy for OS help
 
-- **Every OS-provided command app MUST ship a complete `Help/` tree**: a
-  `default/` (en-US) document for every command it exposes, plus translations
+- **Every OS-provided command app MUST ship a complete `Help/` tree**: an
+  `en-US/` canonical document for every command it exposes, plus translations
   for the standing required locale set: `fr-FR`, `de-DE`, `es-ES`, `uk-UA`,
   `it-IT`. These documents MUST be generated and kept current; when an AI or a
   contributor changes a command's behaviour or switches, it updates the
-  `default/` document and the translations in the same change (§2.8, §2.14,
+  `en-US/` document and the translations in the same change (§2.8, §2.14,
   §2.18). Adding a language to the required set is data (a new locale
   directory), not new code.
 - **No foul or derogatory content.** Help documents (all locales) MUST NOT
   contain profane, obscene, harassing, discriminatory, or otherwise derogatory
   language. This is a hard rule for generated and human-authored content alike.
 - **Enforced in CI.** A `cargo xtask help-lint` check (run within
-  `cargo xtask ci`, §7) fails closed when, for any OS command app: `default/`
+  `cargo xtask ci`, §7) fails closed when, for any OS command app: `en-US/`
   is missing or incomplete; a required-locale document is missing; the
   `OPTIONS` switch keys do not match the program's actual argument parser
   (§3.1); a document violates the `lib/help` structural bounds (§6); or a
@@ -864,15 +864,15 @@ both landed; `plans/SHELL.md` command execution):
    aggregator tests (§2.2) so the two can never diverge. It checks, over the
    build-discovered `rustos_syshelp::HELP_FILES` rows (the same data the
    image planters plant): locale/document spellings and the `lib/help`
-   structural bounds (§6), `default/` presence and completeness across the
+   structural bounds (§6), `en-US/` presence and completeness across the
    standing `rustos_help::REQUIRED_LOCALES` set, no translation-only
    documents (§2.1), per-item backticked switch keys and cross-locale
-   `OPTIONS` key equality against `default/` (§3.1 — the per-app unit tests
-   keep pinning `default/` to each parser, which only the app crate knows),
+   `OPTIONS` key equality against `en-US/` (§3.1 — the per-app unit tests
+   keep pinning `en-US/` to each parser, which only the app crate knows),
    and the closed content-policy word screen (whole-word, case-insensitive,
    all six locales). The gate additionally verifies coverage: every command
    app the `AppInfo.toml` discovery walk finds ships its
-   `default/<command>.md` (never a per-bundle list). Any violation fails
+   `en-US/<command>.md` (never a per-bundle list). Any violation fails
    closed with a message naming the offending `bundle/locale/file`.
 6. **`Help/` trees for the existing command apps** — **done for every
    store-registered command app**: `basename`, `cat`, `clear`, `cp`,

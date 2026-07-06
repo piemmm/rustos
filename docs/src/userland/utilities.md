@@ -1799,7 +1799,7 @@ the pager.
 
 The requested locale is the `LANG` environment variable (a BCP-47 tag the
 session/shell exports once, `plans/APPS.md` §5). Fallback is the engine's
-deterministic chain (exact → same language → `default/` en-US); a missing
+deterministic chain (exact → same language → the canonical `en-US/`); a missing
 or malformed `LANG` degrades to the canonical documents. A page served in
 a locale other than the requested one is noted with a `context` record
 (code `help.locale_fallback`) on `stdinfo` (fd 3) — advisory only, never

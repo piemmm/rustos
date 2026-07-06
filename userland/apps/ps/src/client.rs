@@ -134,11 +134,11 @@ mod tests {
 
     impl HelpSource for OneDoc {
         fn locale_dirs(&self) -> Result<Vec<String>, SourceError> {
-            Ok(alloc::vec![String::from("default")])
+            Ok(alloc::vec![String::from("en-US")])
         }
 
         fn read(&self, locale_dir: &str, file_name: &str) -> Result<Option<Vec<u8>>, SourceError> {
-            if locale_dir == "default" && file_name == "ps.md" {
+            if locale_dir == "en-US" && file_name == "ps.md" {
                 Ok(Some(DOC.as_bytes().to_vec()))
             } else {
                 Ok(None)

@@ -35,8 +35,8 @@ directly (`man top.app` shows `top`'s page). Exit codes: `0` page shown,
 The requested locale is the `LANG` environment variable (a BCP-47 tag, set
 once by the session/shell — `plans/APPS.md` §5). The engine falls back
 deterministically: exact tag → same language, any region → the canonical
-`default/` (en-US) document. A malformed or missing `LANG` degrades to
-`default/` rather than making help unreadable. When the served locale is not
+`en-US/` document. A malformed or missing `LANG` degrades to
+`en-US/` rather than making help unreadable. When the served locale is not
 the requested one, `man` emits a `context` advisory record on `stdinfo`
 (fd 3, code `help.locale_fallback`) — advisory only, never affecting output
 or exit status (`AGENTS.md` §20.1).
@@ -58,7 +58,7 @@ fd 3, rows, keys). The `Run` binary wires them to the kernel-authorised
 per-inode check stays kernel-side (`AGENTS.md` §5.4) and a candidate probe
 mirrors the shell's launch rule — `NotFound` moves on, any other refusal is
 final. Unit tests drive the whole engine against in-memory fixtures;
-`src/help.rs` embeds the bundle's own `Help/` tree (default + the required
+`src/help.rs` embeds the bundle's own `Help/` tree (`en-US` + the required
 locales) and proves every shipped document parses, and the same table is
 what `tools/mkimage` and the QEMU image fixture plant on the read-only
 `/System` volume, so image and source cannot drift (`AGENTS.md` §2.2). The
