@@ -208,11 +208,17 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
     }
 
     fn kernel_memory(&self) -> Result<Vec<u8>, Errno> {
-        let total_frames = self.state.frame_allocator.total_frames() as u64;
+        // Usable frames, not the allocator's address-space extent: the
+        // extent spans from physical address zero to the highest mapped
+        // address, so on a platform whose RAM sits above an MMIO window
+        // (e.g. a 1 GiB hole below the RAM base) it would overstate the
+        // machine's memory and make `total - free` look almost exhausted
+        // on a fresh boot.
+        let usable_frames = self.state.frame_allocator.usable_frames() as u64;
         let free_frames = self.state.frame_allocator.free_frames() as u64;
         let page = PAGE_SIZE as u64;
         let stats = KernelMemoryStats {
-            total_bytes: total_frames.saturating_mul(page),
+            total_bytes: usable_frames.saturating_mul(page),
             free_bytes: free_frames.saturating_mul(page),
             kernel_heap_bytes: self.kernel_heap_bytes,
             // Per-space resident accounting has no live accounter yet; report

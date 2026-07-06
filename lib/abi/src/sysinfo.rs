@@ -830,7 +830,12 @@ impl ProcessRecord {
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
 pub struct KernelMemoryStats {
-    /// Total physical memory managed by the kernel, in bytes.
+    /// Total usable physical memory (RAM) managed by the kernel, in bytes.
+    ///
+    /// Counts only frames the kernel can ever allocate: firmware-reserved
+    /// regions and physical-address holes (MMIO windows, space below the
+    /// RAM base) are excluded, so `total_bytes - free_bytes` is memory
+    /// genuinely in use.
     pub total_bytes: u64,
     /// Currently free physical memory, in bytes.
     pub free_bytes: u64,

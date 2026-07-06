@@ -134,6 +134,12 @@ struct FrameAllocatorState {
     free_lists: Vec<BTreeSet<usize>>,
     /// Cached count of free frames (sum over `free_lists` of 2^order * len).
     free_frames: usize,
+    /// Number of whole frames inside `Usable` boot-map regions — the RAM
+    /// the allocator can ever hand out. Excludes reserved regions and
+    /// physical-address holes (MMIO windows, the space below the RAM base),
+    /// so `usable_frames - free_frames` is real allocation, fixed after
+    /// construction.
+    usable_frames: usize,
 }
 
 impl FrameAllocatorState {
@@ -357,6 +363,7 @@ impl FrameAllocator {
             bitmap,
             free_lists,
             free_frames: 0,
+            usable_frames: 0,
         };
 
         // 3. Detect overlaps by sorting by start and scanning.
@@ -391,6 +398,7 @@ impl FrameAllocator {
             for i in first..last_excl {
                 state.clear_bit(i);
             }
+            state.usable_frames += last_excl - first;
             any_usable = true;
             // Insert as buddy blocks.
             state.populate_run(first, last_excl);
@@ -454,9 +462,23 @@ impl FrameAllocator {
     }
 
     /// Total frames the allocator is aware of (usable + reserved + holes).
+    ///
+    /// This is an *address-space* extent (bitmap size), not a RAM size:
+    /// it spans from physical address zero to the highest mapped address,
+    /// including reserved regions and holes. For the amount of RAM the
+    /// system actually has, use [`Self::usable_frames`].
     #[must_use]
     pub fn total_frames(&self) -> FrameCount {
         self.inner.lock().total_frames
+    }
+
+    /// Number of whole frames of usable RAM the allocator manages —
+    /// frames inside `Usable` boot-map regions, whether currently free or
+    /// handed out. Excludes reserved regions and physical-address holes,
+    /// so `usable_frames() - free_frames()` is the memory genuinely in use.
+    #[must_use]
+    pub fn usable_frames(&self) -> FrameCount {
+        self.inner.lock().usable_frames
     }
 }
 
@@ -630,6 +652,35 @@ mod tests {
             handed.push(f);
         }
         assert_eq!(handed.len(), 12);
+    }
+
+    #[test]
+    fn usable_frames_excludes_holes_and_reserved() {
+        // The QEMU-virt shape that broke the login screen's memory line:
+        // RAM sits above a large MMIO hole, so the address-space extent
+        // (total_frames) dwarfs the actual RAM. usable_frames must count
+        // only the usable regions, and stay fixed across alloc/free.
+        let mut m = BootMemoryMap::new();
+        m.push(MemoryRegion {
+            start: PhysAddr::new((1024 * PAGE_SIZE) as u64),
+            length: (4 * PAGE_SIZE) as u64,
+            kind: RegionKind::Reserved,
+        });
+        m.push(MemoryRegion {
+            start: PhysAddr::new((1028 * PAGE_SIZE) as u64),
+            length: (16 * PAGE_SIZE) as u64,
+            kind: RegionKind::Usable,
+        });
+        let a = FrameAllocator::new(&m).unwrap();
+        assert_eq!(a.total_frames(), 1044);
+        assert_eq!(a.usable_frames(), 16);
+        assert_eq!(a.free_frames(), 16);
+        let f = a.alloc().unwrap();
+        assert_eq!(a.usable_frames(), 16);
+        assert_eq!(a.free_frames(), 15);
+        a.free(f).unwrap();
+        assert_eq!(a.usable_frames(), 16);
+        assert_eq!(a.free_frames(), 16);
     }
 
     #[test]
