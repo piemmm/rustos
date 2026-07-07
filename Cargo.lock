@@ -2860,6 +2860,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-syscall-regs-qemu-x86_64"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-arch-api",
+ "rustos-arch-x86_64",
+ "rustos-itest-harness",
+ "rustos-kernel",
+ "rustos-log",
+]
+
+[[package]]
 name = "rustos-test-timer-preempt-qemu-aarch64"
 version = "0.0.0"
 dependencies = [

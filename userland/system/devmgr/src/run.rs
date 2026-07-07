@@ -232,7 +232,27 @@ mod program {
             None,
         ) {
             Ok(()) => 0,
-            Err(_) => 1,
+            Err(err) => {
+                // Fail loud: state the reason for the abnormal exit through
+                // the kernel diagnostic log (this service has no terminal
+                // consumer), carrying the errno so the refusing seam is
+                // diagnosable, then exit non-zero for `init`'s supervision.
+                let mut code = [0u8; 12];
+                let errno = usize::try_from(err.as_i32()).unwrap_or(0);
+                log(
+                    &LogSink,
+                    &Event {
+                        level: Level::Error,
+                        id: events::TREE_SEAM_FAILED,
+                        message: "hardware-tree seam failed; devmgr exiting for supervision",
+                        fields: &[Field {
+                            key: "errno",
+                            value: rustos_log::FieldValue::Str(format_usize(errno, &mut code)),
+                        }],
+                    },
+                );
+                1
+            }
         }
     }
 

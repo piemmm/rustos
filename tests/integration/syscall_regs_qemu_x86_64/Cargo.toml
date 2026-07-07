@@ -1,0 +1,48 @@
+[package]
+name = "rustos-test-syscall-regs-qemu-x86_64"
+description = "x86_64 syscall register-preservation regression vertical: boot the production rustos-kernel pipeline, drop a sentinel-loading probe to ring 3 through the Arch HAL EnterUser (iretq) primitive, issue a real `syscall`, and assert every argument register (rdi/rsi/rdx/r10/r8/r9), every callee-saved register (rbx/rbp/r12-r15), and the returned rax survive the kernel round-trip unchanged — the regression test for the IA32_LSTAR entry stub dropping (instead of restoring) the argument registers, which both miscompiled callers (the trap stub declares only rax/rcx/r11 clobbered) and leaked kernel dispatch residue to ring 3."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# This bin is the regression vertical for the x86_64 `syscall` return
+# path (`kernel/arch/x86_64/src/syscall_entry.rs`): the entry stub once
+# tore its on-stack argument array down with a bare stack drop instead of
+# popping the values back into rdi/rsi/rdx/r10/r8/r9, so after `sysretq`
+# those registers held kernel dispatch residue while the user-side trap
+# stub (`lib/abi-trap`) had promised the compiler only rax/rcx/r11 change
+# — a call-site-dependent miscompilation of every syscall wrapper *and* a
+# kernel-register information leak into ring 3. A returning `syscall` can
+# only be exercised from ring 3 (`sysretq` always returns to CPL 3), so
+# this test enters ring 3 exactly like `rustos-test-enter-user-qemu-x86_64`
+# and runs a naked-asm probe there: load distinct sentinels into the six
+# argument registers and the six callee-saved registers, `syscall`, then
+# verify every register and the callback-returned rax before reporting
+# the verdict through a second `syscall`.
+#
+# The `test-hooks` feature is on by default for this crate. Release
+# builds that enable it are rejected by the `compile_error!` guard in
+# `src/main.rs`, mirroring `rustos-test-enter-user-qemu-x86_64`.
+[features]
+default = ["test-hooks"]
+test-hooks = []
+
+[[bin]]
+name = "rustos-test-syscall-regs-qemu-x86_64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+rustos-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
+rustos-kernel = { path = "../../../kernel/rustos-kernel", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+rustos-itest-harness = { path = "../harness", version = "=0.0.0" }

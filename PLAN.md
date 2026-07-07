@@ -2801,49 +2801,54 @@ be split into two partial (refused) attempts. Work remaining:
   anti-brute-force defence (§2.17) — and land the fix with a regression test
   that types a slowly-delivered line (§7).
 
-## Open defect — CI-only spawn-session x86_64 failure (user OOM + wrong write count)
+## Defect — spawn-session x86_64 failure (user OOM + wrong write count)
 
-**Status: open (escalated under §2.18/§15.7; observed only on the self-hosted
-CI runner, not reproducible locally — 44/44 oversubscribed pre-fix runs pass,
-same "tsc not invariant" boot path).**
+**Status: root cause found and fixed** (the x86_64 syscall return path); the
+one remaining piece is the ring-3 fault-handler decision below.
 
-On the CI runner, `rustos-test-spawn-session-qemu-x86-64` failed (qemu status
-35) with, in order: devmgr's `ipc_call` catalogue fetch refused (`NotFound`,
-expected bring-up), a user-space "memory allocation of 8 bytes failed" (an
-`rxe` process's `rustos-rt` heap `mem_map` failing), and a cascade of
-`lib/rt/src/io.rs:129` slice panics whose out-of-range indices (181 → 94 →
-93 fixed point) equal the byte lengths of the *preceding* panic reports —
-i.e. at least one `stream_write` returned a positive count larger than the
-written buffer. The status-35 exit is the unhandled ring-3 page fault
-(`fault_handler()` = `None` → `qemu_exit::exit_failure`) the panic recursion
-eventually caused.
+**Root cause.** The x86_64 `IA32_LSTAR` entry stub
+(`kernel/arch/x86_64/src/syscall_entry.rs`) tore its on-stack argument array
+down with a bare stack drop (`addq $48, %rsp`) instead of popping the values
+back into `rdi`/`rsi`/`rdx`/`r10`/`r8`/`r9`, so after `sysretq` those six
+registers held kernel dispatch residue while the user-side trap stub
+(`lib/abi-trap`) declares only `rax`/`rcx`/`r11` clobbered. Consequences:
+a call-site-dependent miscompilation of every syscall wrapper (the compiler
+legitimately re-uses "unchanged" registers — e.g. `hw_tree_read`'s
+`min(ret, buf.len())` computed against residue, observed locally as a
+16-byte snapshot "returning" 0), and a kernel-register information leak into
+ring 3. The residue *values* are environment-dependent kernel state, which
+is why the symptoms differed per machine: on the CI runner they surfaced as
+the "memory allocation of 8 bytes failed" user OOM and `stream_write` counts
+equal to the preceding panic report's length; locally as devmgr's tree read
+appearing to return zero bytes, ending its loop fail-closed after the first
+evaluation (the "devmgr exits instead of parking in `hw_tree_wait`"
+observation — the seam never refused; the *return* was corrupted).
 
-Landed now: `rustos-rt`'s `stream_write` folds a negative (`-errno`) return
-to a zero-length write and clamps the count to the buffer length (the same
-defence `stream_read` already carried), with fail-before/pass-after
-regression tests — so no kernel count, however wrong, can drive an
-out-of-bounds slice or a panic-inside-panic storm in userland again.
+**Fixed.** The stub now restores all six argument registers before
+`sysretq` (`docs/src/platform/x86_64.md`). Regression vertical:
+`rustos-test-syscall-regs-qemu-x86_64` enters ring 3, loads sentinels into
+the six argument registers and the six callee-saved registers, round-trips a
+real `syscall`, and verifies every register plus the returned `rax`
+(fails against the pre-fix stub, passes with it). devmgr additionally now
+states its reason on an abnormal exit — `TREE_SEAM_FAILED` (13_009) with the
+errno through the kernel log — instead of a silent status-1 exit (fail
+loud), so a future tree-seam failure is attributable from the transcript.
+`rustos-rt`'s `stream_write` retains the earlier defence: a negative
+(`-errno`) return folds to a zero-length write and the count is clamped to
+the buffer length, with regression tests.
 
-Work remaining (needs the failing runner's QEMU/SeaBIOS environment):
+Work remaining:
 
-- Reproduce on the CI runner and capture which allocation's `mem_map` fails
-  and with what errno; compare its PVH e820 map shape against the local one
-  (the frame pool derives from it; a differently shaped map is the one
-  environment-specific input on this path).
-- Explain the over-large `stream_write` count with kernel-side evidence. The
-  audited candidates — `write_output` clamping, `encode_result`, dispatch
-  slot/reschedule, preempt ISR + `swapgs` parity, `context.s`, FMASK IF
-  masking — are all correct by inspection and host tests; instrument the CI
-  run rather than guess (§2.16).
 - Decide whether the production x86_64 boot path must install a ring-3 fault
   handler that kills the faulting task (fail closed, log, reap) instead of
-  taking the whole machine down through the arch default; land it with a
-  QEMU regression test if so.
-- Also observed on both machines: devmgr exits after its first evaluation on
-  this slice (a tree-seam `hw_tree_wait`/`hw_tree_read` refusal ends its
-  loop fail-closed) although the vertical's docs describe it parking in
-  `hw_tree_wait`; confirm which seam refuses and whether the slice or the
-  docs are wrong.
+  taking the whole machine down through the arch default (the status-35 exit
+  the CI panic storm ended in); land it with a QEMU regression test if so.
+  The same decision applies to the aarch64/riscv64 ports (their production
+  boots install no fault handler either); the kill path should be one shared
+  kernel/core definition (current-task lookup → recorded exit status →
+  `reschedule_current(cpu, Exit)`), with only the per-port trap plumbing —
+  and the x86_64 swapgs-parity fixup the `#PF` entry needs before it may
+  reschedule — arch-specific.
 
 ## Cross-cutting Tasks (run continuously alongside the stages)
 

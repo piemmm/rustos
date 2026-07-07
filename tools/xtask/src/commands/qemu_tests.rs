@@ -468,6 +468,34 @@ const TESTS: &[QemuTest] = &[
         pointer: false,
         serial: &[],
     },
+    // x86_64 `syscall` register-preservation regression vertical
+    // (`kernel/arch/x86_64/src/syscall_entry.rs`): the IA32_LSTAR entry
+    // stub once tore its on-stack argument array down with a bare stack
+    // drop instead of popping the values back into rdi/rsi/rdx/r10/r8/r9,
+    // so after `sysretq` those registers held kernel dispatch residue —
+    // miscompiling every syscall wrapper (the user-side trap stub declares
+    // only rax/rcx/r11 clobbered) and leaking kernel register contents to
+    // ring 3. This test enters ring 3 like the enter-user vertical, loads
+    // sentinels into the six argument registers and the six callee-saved
+    // registers, issues a real `syscall` whose callback returns a sentinel
+    // rax, verifies every register survived the round-trip, and reports
+    // the verdict through a second `syscall` (exit_success iff clean).
+    // Single CPU and a 60-second budget match the other
+    // boot-then-do-fixed-work x86_64 tests.
+    QemuTest {
+        package: "rustos-test-syscall-regs-qemu-x86_64",
+        binary: "rustos-test-syscall-regs-qemu-x86_64",
+        target: "x86_64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+        pointer: false,
+        serial: &[],
+    },
     // CCOMPAT stage CC3 deliverable (`plans/CCOMPAT.md`): the riscv64
     // crt0-linked-program spawn round-trip. The build script compiles the
     // separate fixture program (`tests/integration/cc3_program`, crt0 +

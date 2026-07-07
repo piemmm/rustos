@@ -50,12 +50,19 @@ pub const NODE_OBSERVED: EventId = EventId(13_007);
 /// kernel to tear its driver down. Carries the unbound `node` and the torn-
 /// down driver `handle`.
 pub const NODE_UNLOADED: EventId = EventId(13_008);
+/// The reactive observe loop ended because a hardware-tree seam operation
+/// (`hw_tree_read` / `hw_tree_wait` / snapshot decode) reported an error the
+/// loop fails closed on. Carries the `errno` so the failing seam is
+/// diagnosable from the log; the service then exits non-zero and PID 1
+/// `init` supervises the relaunch. A silent exit would hide which seam
+/// refused — every abnormal exit states its reason.
+pub const TREE_SEAM_FAILED: EventId = EventId(13_009);
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const ALL: [EventId; 8] = [
+    const ALL: [EventId; 9] = [
         NODE_BOUND,
         NODE_UNBOUND,
         NODE_TIE_REJECTED,
@@ -64,6 +71,7 @@ mod tests {
         TREE_OBSERVED,
         NODE_OBSERVED,
         NODE_UNLOADED,
+        TREE_SEAM_FAILED,
     ];
 
     #[test]

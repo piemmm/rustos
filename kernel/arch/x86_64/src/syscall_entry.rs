@@ -746,7 +746,11 @@ pub fn syscall_entry_addr() -> u64 {
 /// 5. Set up the System V args: `%rdi = syscall number (saved rax)`,
 ///    `%rsi = &args[0]`. Call [`rustos_arch_x86_64_syscall_dispatch`].
 /// 6. The return value is in `%rax` already — leave it.
-/// 7. Pop the arg array + `%r11` + `%rcx` in reverse order.
+/// 7. Pop the arg array back into `rdi`/`rsi`/`rdx`/`r10`/`r8`/`r9`
+///    (restoring the caller's argument registers — the user-side trap
+///    stub declares only `rax`/`rcx`/`r11` clobbered, so handing back
+///    dispatch residue would both miscompile the caller and leak
+///    kernel register contents to ring 3), then pop `%r11` + `%rcx`.
 /// 8. Restore user `%rsp` with a single `popq %rsp` from the frame
 ///    slot, `swapgs`, `sysretq`.
 ///
@@ -783,8 +787,17 @@ pub unsafe extern "C" fn syscall_entry_stub() {
         "movq %rsp, %rsi",
         "movq %rax, %rdi",
         "call {dispatch}",
-        // 7. Tear down args + saved registers.
-        "addq $48, %rsp",   // 6 * 8 = pop args[0..6]
+        // 7. Restore the caller's argument registers from the arg array
+        //    (never a bare stack drop: the user-side trap stub promises
+        //    the compiler only rax/rcx/r11 change across `syscall`, and
+        //    the dispatch residue these registers hold here is kernel
+        //    state that must not leak to ring 3), then r11 + rcx.
+        "popq %rdi",
+        "popq %rsi",
+        "popq %rdx",
+        "popq %r10",
+        "popq %r8",
+        "popq %r9",
         "popq %r11",
         "popq %rcx",
         // 8. Restore user rsp from the frame slot and return to user space.
