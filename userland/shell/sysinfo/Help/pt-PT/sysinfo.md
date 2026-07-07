@@ -25,6 +25,8 @@ As consultas:
 - `uptime` — tempo desde o arranque e a hora de relógio do arranque.
 - `limits`, `rlimits` — os seus limites de recursos efetivos e o uso ao
   vivo.
+- `seats` — o inventário de assentos: o dono de cada ecrã e a sua
+  consola em primeiro plano (necessita de `CAP_SYSINFO_HW`).
 - `help` — a ajuda curta deste próprio comando.
 
 Sem consulta, mostra-se a ajuda curta.

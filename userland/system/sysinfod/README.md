@@ -43,6 +43,8 @@ and is fully testable against an in-memory fixture.
 | `PROCESS_IDENTITY`    | none                 | no      | the caller's own `Origin`      |
 | `LOAD_AVERAGE`        | none                 | no      | `LoadAverage`                  |
 | `USER_DIRECTORY`      | none                 | no      | packed `UserDirectoryRecord`s  |
+| `CPU_TIME_STATS`      | none                 | no      | packed `CpuTimeRecord`s        |
+| `SEAT_LIST`           | `CAP_SYSINFO_HW`     | yes     | packed `SeatRecord`s           |
 
 ## Response encoding
 

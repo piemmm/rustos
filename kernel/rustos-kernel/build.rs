@@ -150,6 +150,13 @@ const PROGRAMS: &[Program] = &[
         prefix: "SYSINFOD",
     },
     Program {
+        pkg: "rustos-seatmgr",
+        bin: "rustos-seatmgr-run",
+        rel_dir: "../../userland/system/seatmgr",
+        fixture: "seatmgr_rxe.rs",
+        prefix: "SEATMGR",
+    },
+    Program {
         pkg: "rustos-ps",
         bin: "rustos-ps-run",
         rel_dir: "../../userland/apps/ps",

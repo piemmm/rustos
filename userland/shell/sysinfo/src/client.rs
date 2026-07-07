@@ -7,7 +7,8 @@ use alloc::vec::Vec;
 use core::fmt::Write;
 
 use rustos_abi::sysinfo::{
-    KernelMemoryStats, ResourceLimitRecord, SysinfoQueryId, SystemIdentity, Uptime,
+    KernelMemoryStats, ResourceLimitRecord, SeatListRequest, SeatRecord, SysinfoQueryId,
+    SystemIdentity, Uptime,
 };
 use rustos_abi::{Errno, LimitKind};
 
@@ -32,6 +33,7 @@ queries:
   identity            machine identity and OS version
   uptime              time since boot and boot wall-clock time
   limits              your effective resource limits and live usage
+  seats               seat inventory: owners and foreground consoles (needs CAP_SYSINFO_HW)
   help, -h, -?        show this help";
 
 /// `sysinfo`'s own command word: the short-help switches render its own
@@ -65,6 +67,7 @@ pub fn run(
         Command::Identity => run_identity(transport, out),
         Command::Uptime => run_uptime(transport, out),
         Command::Limits => run_limits(transport, out),
+        Command::Seats => run_seats(transport, out),
     }
 }
 
@@ -225,6 +228,40 @@ fn run_limits(transport: &dyn Transport, out: &dyn Output) -> Result<(), Sysinfo
     Ok(())
 }
 
+/// Fetch and render the seat inventory, one aligned row per seat.
+///
+/// The reply is whole [`SeatRecord`]s packed back-to-back; a reply that is
+/// not a whole number of records fails closed rather than rendering a
+/// partial row. One page is ample for the seat count a machine has today;
+/// the request's `limit` bounds it explicitly.
+fn run_seats(transport: &dyn Transport, out: &dyn Output) -> Result<(), SysinfoError> {
+    let request = SeatListRequest {
+        offset: 0,
+        limit: 32,
+        flags: 0,
+    };
+    let reply = service_call(transport, SysinfoQueryId::SEAT_LIST, &request.to_le_bytes())?;
+    if reply.len() % SeatRecord::WIRE_LEN != 0 {
+        return Err(SysinfoError::Service(Errno::BufferTooSmall));
+    }
+    emit(out, "seat  owner       generation  foreground")?;
+    for chunk in reply.chunks_exact(SeatRecord::WIRE_LEN) {
+        let record = SeatRecord::from_bytes(chunk).map_err(SysinfoError::Service)?;
+        let owner = match record.owner() {
+            Some(task) => format!("task {task}"),
+            None => String::from("unowned"),
+        };
+        emit(
+            out,
+            &format!(
+                "{:<4}  {:<10}  {:>10}  console {}",
+                record.seat_id, owner, record.generation, record.foreground_console,
+            ),
+        )?;
+    }
+    Ok(())
+}
+
 /// Render `bytes` as lowercase hex with no separators.
 fn hex(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -251,7 +288,8 @@ mod tests {
     use core::cell::RefCell;
     use rustos_abi::sysinfo::{
         KernelMemoryStats, ProcessListRequest, ProcessRecord, ProcessState, ResourceLimitRecord,
-        SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
+        SeatListRequest, SeatRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
+        SEAT_FLAG_OWNED,
     };
     use rustos_abi::time::{Duration64, Time64};
     use rustos_abi::{Errno, LimitKind, ProcId, ResourceLimit, RLIMIT_INFINITY};
@@ -315,6 +353,7 @@ mod tests {
         identity: SystemIdentity,
         uptime: Uptime,
         hardware: Vec<u8>,
+        seats: Vec<SeatRecord>,
         deny: Option<SysinfoQueryId>,
         malformed_process_list: bool,
         short_scalar: bool,
@@ -339,6 +378,7 @@ mod tests {
                     boot_time: Time64::from_secs(1000),
                 },
                 hardware: Vec::new(),
+                seats: Vec::new(),
                 deny: None,
                 malformed_process_list: false,
                 short_scalar: false,
@@ -383,6 +423,18 @@ mod tests {
                 Ok(self.identity.to_le_bytes().to_vec())
             } else if header.query == SysinfoQueryId::UPTIME {
                 Ok(self.uptime.to_le_bytes().to_vec())
+            } else if header.query == SysinfoQueryId::SEAT_LIST {
+                let req = SeatListRequest::from_bytes(payload)?;
+                let offset = req.offset as usize;
+                if offset >= self.seats.len() {
+                    return Ok(Vec::new());
+                }
+                let take = core::cmp::min(self.seats.len() - offset, req.limit as usize);
+                let mut out = Vec::with_capacity(take * SeatRecord::WIRE_LEN);
+                for record in &self.seats[offset..offset + take] {
+                    out.extend_from_slice(&record.to_le_bytes());
+                }
+                Ok(out)
             } else if header.query == SysinfoQueryId::RESOURCE_LIMITS {
                 let mut out = Vec::new();
                 for (index, kind) in LimitKind::ALL.iter().enumerate() {
@@ -625,6 +677,54 @@ mod tests {
         let lines = out.lines();
         assert!(lines[0].contains('9'));
         assert!(lines[1].contains("1000"));
+    }
+
+    #[test]
+    fn seats_render_owner_unowned_and_denial() {
+        // A held seat renders its owner, generation, and foreground.
+        let mut fixture = Fixture::new(Vec::new());
+        fixture.seats = alloc::vec![SeatRecord {
+            seat_id: 0,
+            owner_task: 7,
+            generation: 3,
+            foreground_console: 1,
+            flags: SEAT_FLAG_OWNED,
+        }];
+        let out = Recorder::new();
+        assert_eq!(run(Command::Seats, &fixture, &out), Ok(()));
+        let lines = out.lines();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("seat"));
+        assert!(lines[1].contains("task 7"));
+        assert!(lines[1].contains('3'));
+        assert!(lines[1].contains("console 1"));
+        assert_eq!(
+            fixture.seen.borrow().as_slice(),
+            &[SysinfoQueryId::SEAT_LIST]
+        );
+
+        // An unowned seat is honest about having no owner.
+        let mut fixture = Fixture::new(Vec::new());
+        fixture.seats = alloc::vec![SeatRecord {
+            seat_id: 0,
+            owner_task: 0,
+            generation: 0,
+            foreground_console: 0,
+            flags: 0,
+        }];
+        let out = Recorder::new();
+        assert_eq!(run(Command::Seats, &fixture, &out), Ok(()));
+        assert!(out.lines()[1].contains("unowned"));
+
+        // The service's capability refusal surfaces as the CLI's
+        // permission-denied error, never a fabricated table.
+        let mut fixture = Fixture::new(Vec::new());
+        fixture.deny = Some(SysinfoQueryId::SEAT_LIST);
+        let out = Recorder::new();
+        assert_eq!(
+            run(Command::Seats, &fixture, &out),
+            Err(SysinfoError::PermissionDenied)
+        );
     }
 
     #[test]

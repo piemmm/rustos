@@ -50,9 +50,9 @@ mod program {
 
     use rustos_abi::sysinfo::{
         encode_reply_err, encode_reply_ok, CpuTimeRecord, IntrospectDomain, KernelMemoryStats,
-        LoadAverage, MountRecord, ProcessRecord, ResourceLimitRecord, SystemIdentity, Uptime,
-        UserDirectoryRecord, RESOURCE_LIMITS_REPORT_LEN, SYSINFO_ENDPOINT, SYSINFO_MAX_REPLY,
-        SYSINFO_MAX_REQUEST, SYSINFO_REPLY_STATUS_LEN,
+        LoadAverage, MountRecord, ProcessRecord, ResourceLimitRecord, SeatRecord, SystemIdentity,
+        Uptime, UserDirectoryRecord, RESOURCE_LIMITS_REPORT_LEN, SYSINFO_ENDPOINT,
+        SYSINFO_MAX_REPLY, SYSINFO_MAX_REQUEST, SYSINFO_REPLY_STATUS_LEN,
     };
     use rustos_abi::{Errno, LimitKind, Origin, ORIGIN_WIRE_LEN, PROC_ID_LEN};
     use rustos_caps::CapabilitySet;
@@ -206,6 +206,15 @@ mod program {
             let mut records = Vec::new();
             for chunk in bytes.chunks_exact(CpuTimeRecord::WIRE_LEN) {
                 records.push(CpuTimeRecord::from_bytes(chunk)?);
+            }
+            Ok(records)
+        }
+
+        fn seats(&self, _caller: &Caller) -> Result<Vec<SeatRecord>, Errno> {
+            let bytes = read_list(IntrospectDomain::Seats, SeatRecord::WIRE_LEN)?;
+            let mut records = Vec::new();
+            for chunk in bytes.chunks_exact(SeatRecord::WIRE_LEN) {
+                records.push(SeatRecord::from_bytes(chunk)?);
             }
             Ok(records)
         }

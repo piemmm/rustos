@@ -88,6 +88,8 @@ const NUM_KEY_INJECT: u64 = SyscallNumber::KEY_INJECT.as_u16() as u64;
 const NUM_DISPLAY_ACQUIRE: u64 = SyscallNumber::DISPLAY_ACQUIRE.as_u16() as u64;
 const NUM_DISPLAY_RELEASE: u64 = SyscallNumber::DISPLAY_RELEASE.as_u16() as u64;
 const NUM_KEYBOARD_READ: u64 = SyscallNumber::KEYBOARD_READ.as_u16() as u64;
+const NUM_SEAT_SWITCH: u64 = SyscallNumber::SEAT_SWITCH.as_u16() as u64;
+const NUM_SEAT_REVOKE: u64 = SyscallNumber::SEAT_REVOKE.as_u16() as u64;
 const NUM_MMIO_MAP: u64 = SyscallNumber::MMIO_MAP.as_u16() as u64;
 const NUM_DMA_ALLOC: u64 = SyscallNumber::DMA_ALLOC.as_u16() as u64;
 const NUM_DMA_FREE: u64 = SyscallNumber::DMA_FREE.as_u16() as u64;
@@ -498,6 +500,46 @@ pub extern "C" fn sys_display_release() -> i32 {
     // SAFETY: see `sys_yield`. The call carries no pointers; the kernel
     // validates `CAP_DISPLAY` before touching any state.
     unsafe { ret_i32(raw_syscall(NUM_DISPLAY_RELEASE, NO_ARGS)) }
+}
+
+/// `seat_switch`: switch a seat's foreground session — retarget which
+/// installed text console an unowned seat's input drains to
+/// (`SyscallNumber::SEAT_SWITCH`, `plans/DISPLAY.md` D3). Returns a
+/// `ROS_E_*` code (`0` on success).
+///
+/// The seat manager calls this to move the foreground across sessions —
+/// the `chvt` analogue. Gated kernel-side on `ROS_CAP_SEAT_ADMIN` (the
+/// seat-multiplexing authority); an unknown seat id (one seat today, id
+/// `0`) or console index is refused with `ROS_E_NOT_FOUND` before any
+/// state changes, and every switch is audit-logged.
+#[must_use]
+#[export_name = "ros_sys_seat_switch"]
+pub extern "C" fn sys_seat_switch(seat_id: u64, console: u32) -> i32 {
+    // SAFETY: see `sys_yield`. The call carries no pointers; the kernel
+    // validates `CAP_SEAT_ADMIN` and both indices before touching state.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_SEAT_SWITCH,
+            [seat_id, u64::from(console), 0, 0, 0, 0],
+        ))
+    }
+}
+
+/// `seat_revoke`: forcibly revoke a seat's current lease — evict a wedged
+/// or switched-away owner (`SyscallNumber::SEAT_REVOKE`,
+/// `plans/DISPLAY.md` D3). Returns a `ROS_E_*` code (`0` on success).
+///
+/// Gated kernel-side on `ROS_CAP_SEAT_ADMIN`. An unknown seat is refused
+/// with `ROS_E_NOT_FOUND`, an unowned seat with `ROS_E_SEAT_NOT_OWNER`
+/// (there is no lease to revoke), and every eviction is audit-logged with
+/// the evicted owner's task id. The evicted owner's next owner-gated call
+/// fails closed with the distinct `ROS_E_SEAT_REVOKED`.
+#[must_use]
+#[export_name = "ros_sys_seat_revoke"]
+pub extern "C" fn sys_seat_revoke(seat_id: u64) -> i32 {
+    // SAFETY: see `sys_yield`. The call carries no pointers; the kernel
+    // validates `CAP_SEAT_ADMIN` and the seat id before touching state.
+    unsafe { ret_i32(raw_syscall(NUM_SEAT_REVOKE, [seat_id, 0, 0, 0, 0, 0])) }
 }
 
 /// `keyboard_read`: read one decoded keyboard event from the kernel keyboard
@@ -1659,6 +1701,8 @@ mod tests {
         (NUM_DISPLAY_ACQUIRE, "display_acquire", 0),
         (NUM_DISPLAY_RELEASE, "display_release", 0),
         (NUM_KEYBOARD_READ, "keyboard_read", 2),
+        (NUM_SEAT_SWITCH, "seat_switch", 2),
+        (NUM_SEAT_REVOKE, "seat_revoke", 1),
         (NUM_MMIO_MAP, "mmio_map", 3),
         (NUM_DMA_ALLOC, "dma_alloc", 3),
         (NUM_DMA_FREE, "dma_free", 2),
@@ -2067,6 +2111,21 @@ mod tests {
             assert_eq!(sys_display_release(), 0);
         });
         assert_eq!(number, NUM_DISPLAY_RELEASE);
+        assert_eq!(args, NO_ARGS);
+    }
+
+    #[test]
+    fn seat_switch_and_revoke_marshal_their_arguments() {
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_seat_switch(0, 1), 0);
+        });
+        assert_eq!(number, NUM_SEAT_SWITCH);
+        assert_eq!(args, [0, 1, 0, 0, 0, 0]);
+
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_seat_revoke(0), 0);
+        });
+        assert_eq!(number, NUM_SEAT_REVOKE);
         assert_eq!(args, NO_ARGS);
     }
 

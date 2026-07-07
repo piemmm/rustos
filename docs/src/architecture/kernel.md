@@ -203,6 +203,8 @@ record under the `log` phase and halts.
 | 4045 | Info  | `USER_ADMIN_APPLIED`        | audit  |
 | 4046 | Warn  | `USER_ADMIN_REJECTED`       | audit  |
 | 4050 | Info  | `INPUT_DELIVERED`           | audit  |
+| 4051 | Info  | `SEAT_SWITCHED`             | audit  |
+| 4052 | Warn  | `SEAT_LEASE_REVOKED`        | audit  |
 
 `INPUT_DELIVERED` is the one-shot input-path witness (`AGENTS.md` §18.3 /
 §20, `plans/PI.md` P11). The `key_inject` syscall handler emits it the
@@ -214,6 +216,14 @@ and is routing input. It carries **no** key content, count, or timing: a
 per-keystroke record would leak typed secrets and their cadence and is
 forbidden (`AGENTS.md` §20 — no input-content/timing noise on the log;
 §23.1 — secret hygiene).
+
+The `SEAT_*` pair records the `CAP_SEAT_ADMIN` seat administration
+(`plans/DISPLAY.md` D3): `SEAT_SWITCHED` is emitted by the `seat_switch`
+handler after a validated foreground retarget (fields: `seat`, `console`),
+and `SEAT_LEASE_REVOKED` by the `seat_revoke` handler after a forced
+eviction (fields: `seat`, `evicted` — the evicted owner's task id, so
+every eviction is attributable). Refused calls emit no seat event; the
+dispatcher's own denial records cover them.
 
 The `USERS_DB_*` pair reports the boot-time users-database load
 (`rustos_kernel_core::users::load_users_db`, `plans/PI.md` P11): given the

@@ -156,6 +156,12 @@ const NUM_DISPLAY_RELEASE: u64 = SyscallNumber::DISPLAY_RELEASE.as_u16() as u64;
 /// `keyboard_read` syscall number (as above).
 const NUM_KEYBOARD_READ: u64 = SyscallNumber::KEYBOARD_READ.as_u16() as u64;
 
+/// `seat_switch` syscall number (as above).
+const NUM_SEAT_SWITCH: u64 = SyscallNumber::SEAT_SWITCH.as_u16() as u64;
+
+/// `seat_revoke` syscall number (as above).
+const NUM_SEAT_REVOKE: u64 = SyscallNumber::SEAT_REVOKE.as_u16() as u64;
+
 /// `resource_grants` syscall number (as above).
 const NUM_RESOURCE_GRANTS: u64 = SyscallNumber::RESOURCE_GRANTS.as_u16() as u64;
 
@@ -561,6 +567,48 @@ pub fn display_release() -> i64 {
     // SAFETY: `raw_syscall` is always safe to invoke; the call carries no
     // pointers and the kernel validates `CAP_DISPLAY` before touching state.
     let ret = unsafe { raw_syscall(NUM_DISPLAY_RELEASE, [0, 0, 0, 0, 0, 0]) };
+    ret as i64
+}
+
+/// Switch a seat's foreground session — retarget which installed text
+/// console an unowned seat's input drains to
+/// (`SyscallNumber::SEAT_SWITCH`, `plans/DISPLAY.md` D3), returning `0` on
+/// success or `-errno`.
+///
+/// The seat manager (`seatmgr`) calls this to move the foreground across
+/// sessions — the `chvt` analogue. Requires `CAP_SEAT_ADMIN` (the
+/// seat-multiplexing authority); the kernel validates the seat id (one
+/// seat today, id `0`) and the console index against the installed
+/// topology and refuses an unknown either with `NotFound`, and every
+/// switch is audit-logged. A held seat keeps routing to its owner until
+/// the lease ends.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0 on success, else -errno).
+pub fn seat_switch(seat_id: u64, console: u32) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke; the call carries no
+    // pointers and the kernel validates `CAP_SEAT_ADMIN` and both indices
+    // before touching state.
+    let ret = unsafe { raw_syscall(NUM_SEAT_SWITCH, [seat_id, u64::from(console), 0, 0, 0, 0]) };
+    ret as i64
+}
+
+/// Forcibly revoke a seat's current lease — evict a wedged or
+/// switched-away owner (`SyscallNumber::SEAT_REVOKE`, `plans/DISPLAY.md`
+/// D3), returning `0` on success or `-errno`.
+///
+/// The seat manager (`seatmgr`) calls this to reclaim a seat. Requires
+/// `CAP_SEAT_ADMIN`; the kernel validates the seat id (`NotFound` for an
+/// unknown seat), refuses an unowned seat (`SeatNotOwner` — there is no
+/// lease to revoke), and audit-logs every eviction with the evicted
+/// owner's task id. The evicted owner's next owner-gated call fails
+/// closed with the distinct `SeatRevoked`, so the loss is observable.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0 on success, else -errno).
+pub fn seat_revoke(seat_id: u64) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke; the call carries no
+    // pointers and the kernel validates `CAP_SEAT_ADMIN` and the seat id
+    // before touching state.
+    let ret = unsafe { raw_syscall(NUM_SEAT_REVOKE, [seat_id, 0, 0, 0, 0, 0]) };
     ret as i64
 }
 
@@ -3254,6 +3302,28 @@ mod tests {
         });
         assert_eq!(number, NUM_DISPLAY_RELEASE);
         assert_eq!(args, [0; 6]);
+    }
+
+    #[test]
+    fn seat_switch_and_revoke_marshal_their_arguments() {
+        let (number, args) = capture(0, || {
+            assert_eq!(seat_switch(0, 2), 0);
+        });
+        assert_eq!(number, NUM_SEAT_SWITCH);
+        assert_eq!(args, [0, 2, 0, 0, 0, 0]);
+
+        let (number, args) = capture(0, || {
+            assert_eq!(seat_revoke(0), 0);
+        });
+        assert_eq!(number, NUM_SEAT_REVOKE);
+        assert_eq!(args, [0; 6]);
+
+        // The wrapper surfaces the raw `-errno` register unchanged.
+        let want = -i64::from(rustos_abi::Errno::SeatNotOwner.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let (_, _) = capture(neg, || {
+            assert_eq!(seat_revoke(0), want);
+        });
     }
 
     #[test]

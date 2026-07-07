@@ -42,6 +42,13 @@ pub const DEVMGR_PATH: &[u8] = b"/System/Services/devmgr.app/Run";
 /// path contract, identical on every target.
 pub const SYSINFOD_PATH: &[u8] = b"/System/Services/sysinfod.app/Run";
 
+/// Absolute path the seat-manager service program is registered under
+/// (`plans/DISPLAY.md` D3): the service store's `<name>.app` bundle. It
+/// must match exactly the `seatmgr` path PID 1 `init` hands to the `spawn`
+/// syscall at startup (`userland/system/init/src/startup.rs`). One OS-wide
+/// path contract, identical on every target.
+pub const SEATMGR_PATH: &[u8] = b"/System/Services/seatmgr.app/Run";
+
 /// Absolute path the `ps` tool program is registered under: the system app
 /// store's command-named bundle, so the shell resolves the bare word `ps`
 /// to it (`plans/APPS.md` §8). One OS-wide path contract, identical on
@@ -101,7 +108,7 @@ pub const USERS_CLI_PATH: &[u8] = b"/System/Apps/users.app/Run";
 mod tests {
     use super::{
         CAT_PATH, CLEAR_PATH, DEVMGR_PATH, LOGIN_PATH, LS_PATH, MAN_PATH, PS_PATH, RESET_PATH,
-        SHELL_PATH, SYSINFOD_PATH, SYSINFO_PATH, TOP_PATH, USERS_CLI_PATH,
+        SEATMGR_PATH, SHELL_PATH, SYSINFOD_PATH, SYSINFO_PATH, TOP_PATH, USERS_CLI_PATH,
     };
     use rustos_abi::{BundleEntry, BUNDLE_SUFFIX, SYSTEM_APP_STORE, SYSTEM_SERVICE_STORE};
 
@@ -117,6 +124,7 @@ mod tests {
             (LOGIN_PATH, "login"),
             (DEVMGR_PATH, "devmgr"),
             (SYSINFOD_PATH, "sysinfod"),
+            (SEATMGR_PATH, "seatmgr"),
         ] {
             let expected = alloc::format!(
                 "{SYSTEM_SERVICE_STORE}/{service}{BUNDLE_SUFFIX}/{}",

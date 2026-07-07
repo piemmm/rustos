@@ -1686,6 +1686,55 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: Some(CapabilityId::USER_ADMIN),
         audit: true,
     },
+    SyscallSpec {
+        number: SyscallNumber::SEAT_SWITCH,
+        name: "seat_switch",
+        arg_count: 2,
+        args: [
+            // The seat to retarget (one seat today, id 0), then the index
+            // of the installed text console that becomes its foreground.
+            AbiType::U64,
+            AbiType::U32,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // Retargeting a seat's foreground redirects every subsequent
+        // keystroke of an unowned seat — the console-hijack primitive — so
+        // it is the seat-multiplexing authority's alone (`CAP_SEAT_ADMIN`,
+        // held only by the seat manager), never ambient and never a
+        // `CAP_DISPLAY` power. A security-relevant ownership change, so it
+        // IS audited per call; switches are low-volume (a session
+        // hand-over), so the record cannot drown the log.
+        required_capability: Some(CapabilityId::SEAT_ADMIN),
+        audit: true,
+    },
+    SyscallSpec {
+        number: SyscallNumber::SEAT_REVOKE,
+        name: "seat_revoke",
+        arg_count: 1,
+        args: [
+            // The seat whose current lease is revoked (one seat today, id 0).
+            AbiType::U64,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // Evicting another principal's lease is the seat-multiplexing
+        // authority's alone (`CAP_SEAT_ADMIN`), never ambient: `CAP_DISPLAY`
+        // owns one lease and cannot revoke another's. A security-relevant
+        // ownership change, so it IS audited per call — the handler's record
+        // carries the evicted owner's task id, so every eviction is
+        // attributable — and revocations are low-volume, so the record
+        // cannot drown the log.
+        required_capability: Some(CapabilityId::SEAT_ADMIN),
+        audit: true,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

@@ -39,6 +39,7 @@ pub mod process;
 pub mod random;
 pub mod rlimit;
 pub mod rxe;
+pub mod seat;
 pub mod stdinfo;
 pub mod syscall;
 pub mod syscalls;

@@ -115,6 +115,16 @@ impl SysinfoQueryId {
     /// per-task, per-user, or kernel-internal detail crosses it.
     pub const CPU_TIME_STATS: Self = Self(11);
 
+    /// List the kernel's seats: one [`SeatRecord`] per seat (seat id, live
+    /// owner, lease generation, foreground console), paged by a
+    /// [`SeatListRequest`].
+    ///
+    /// Requires `CAP_SYSINFO_HW` and is audited: like
+    /// [`Self::HARDWARE_TREE`], the seat inventory names which task owns
+    /// each physical display — cross-principal, security-relevant surface
+    /// topology, not a self-scoped observer (`plans/DISPLAY.md` D3).
+    pub const SEAT_LIST: Self = Self(12);
+
     /// Inclusive upper bound on the query identifier space in `sysinfo-v1`.
     ///
     /// Sized identically to the syscall table so a future query explosion
@@ -182,6 +192,9 @@ pub enum IntrospectDomain {
     /// [`CpuTimeRecord`], with the syscall's `arg` naming the record offset
     /// to page from.
     CpuTimes = 8,
+    /// The seat registry: every seat, one packed [`SeatRecord`], with the
+    /// syscall's `arg` naming the record offset to page from.
+    Seats = 9,
 }
 
 impl IntrospectDomain {
@@ -205,6 +218,7 @@ impl IntrospectDomain {
             6 => Ok(Self::LoadAverage),
             7 => Ok(Self::UserDirectory),
             8 => Ok(Self::CpuTimes),
+            9 => Ok(Self::Seats),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -330,6 +344,12 @@ pub const SYSINFO_QUERIES: &[SysinfoQuerySpec] = &[
         name: "cpu_time_stats",
         required_capability: None,
         audit: false,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::SEAT_LIST,
+        name: "seat_list",
+        required_capability: Some(CapabilityId::SYSINFO_HW),
+        audit: true,
     },
 ];
 
@@ -1326,6 +1346,143 @@ impl CpuTimeRecord {
     }
 }
 
+/// Request payload for [`SysinfoQueryId::SEAT_LIST`].
+///
+/// Identical paging shape to [`CpuTimeListRequest`]: `offset` names the
+/// first seat-record index to return and `limit` bounds the page.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub struct SeatListRequest {
+    /// Index of the first seat record to return.
+    pub offset: u32,
+    /// Maximum number of records to return.
+    pub limit: u16,
+    /// Reserved; must be zero in `sysinfo-v1`.
+    pub flags: u16,
+}
+
+impl SeatListRequest {
+    /// Encoded size on the wire.
+    pub const WIRE_LEN: usize = 8;
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u32(&mut out, 0, self.offset);
+        put_u16(&mut out, 4, self.limit);
+        put_u16(&mut out, 6, self.flags);
+        out
+    }
+
+    /// Decode from `bytes`.
+    ///
+    /// Returns [`Errno::BufferTooSmall`] if short, or [`Errno::BadMagic`] if
+    /// a reserved flag bit is set (fail closed on an unknown request shape).
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let flags = read_u16(bytes, 6);
+        if flags != 0 {
+            return Err(Errno::BadMagic);
+        }
+        Ok(Self {
+            offset: read_u32(bytes, 0),
+            limit: read_u16(bytes, 4),
+            flags,
+        })
+    }
+}
+
+/// [`SeatRecord::flags`] bit: the seat is currently held under a lease and
+/// [`SeatRecord::owner_task`] names the owning task.
+pub const SEAT_FLAG_OWNED: u32 = 1 << 0;
+
+/// One seat's state inside a [`SysinfoQueryId::SEAT_LIST`] response
+/// (`plans/DISPLAY.md` D3).
+///
+/// Every field is filled from the kernel's seat registry — the
+/// kernel-attested owner task, never a caller claim. An unowned seat (which
+/// includes one whose lease was just revoked) carries no owner: the
+/// [`SEAT_FLAG_OWNED`] bit is clear and `owner_task` is zero.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub struct SeatRecord {
+    /// The seat this record describes (one seat today, id 0).
+    pub seat_id: u64,
+    /// The task holding the seat's lease; valid only when
+    /// [`SEAT_FLAG_OWNED`] is set, zero otherwise.
+    pub owner_task: u64,
+    /// The seat's monotonic lease-grant counter: the generation of the most
+    /// recently minted lease, `0` if the seat has never been acquired.
+    pub generation: u64,
+    /// Index of the text console an unowned seat's input drains to.
+    pub foreground_console: u32,
+    /// [`SEAT_FLAG_OWNED`] plus reserved bits that must be zero.
+    pub flags: u32,
+}
+
+impl SeatRecord {
+    /// Encoded size on the wire.
+    pub const WIRE_LEN: usize = 32;
+
+    /// `true` when the seat is held under a live lease.
+    #[must_use]
+    pub const fn owned(&self) -> bool {
+        self.flags & SEAT_FLAG_OWNED != 0
+    }
+
+    /// The owning task, if the seat is held.
+    #[must_use]
+    pub const fn owner(&self) -> Option<u64> {
+        if self.owned() {
+            Some(self.owner_task)
+        } else {
+            None
+        }
+    }
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u64(&mut out, 0, self.seat_id);
+        put_u64(&mut out, 8, self.owner_task);
+        put_u64(&mut out, 16, self.generation);
+        put_u32(&mut out, 24, self.foreground_console);
+        put_u32(&mut out, 28, self.flags);
+        out
+    }
+
+    /// Decode from `bytes`.
+    ///
+    /// Returns [`Errno::BufferTooSmall`] if short, or [`Errno::BadMagic`] if
+    /// a reserved flag bit is set or an unowned record carries a non-zero
+    /// owner (fail closed on wire corruption rather than fabricating an
+    /// owner).
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let flags = read_u32(bytes, 28);
+        if flags & !SEAT_FLAG_OWNED != 0 {
+            return Err(Errno::BadMagic);
+        }
+        let owner_task = read_u64(bytes, 8);
+        if flags & SEAT_FLAG_OWNED == 0 && owner_task != 0 {
+            return Err(Errno::BadMagic);
+        }
+        Ok(Self {
+            seat_id: read_u64(bytes, 0),
+            owner_task,
+            generation: read_u64(bytes, 16),
+            foreground_console: read_u32(bytes, 24),
+            flags,
+        })
+    }
+}
+
 /// Bytes of the per-installation machine identifier.
 pub const MACHINE_ID_LEN: usize = 16;
 
@@ -1749,11 +1906,11 @@ mod tests {
     use super::{
         encoded_query_table, spec_for, CpuTimeListRequest, CpuTimeRecord, KernelMemoryStats,
         LoadAverage, MountListRequest, MountRecord, ProcessListRequest, ProcessRecord,
-        ProcessState, ResourceLimitRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity,
-        Uptime, UserDirectoryRecord, UserDirectoryRequest, ENCODED_QUERY_TABLE,
-        ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX, LOAD_FIXED_SHIFT, MACHINE_ID_LEN, MOUNT_FSTYPE_MAX,
-        MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, PROCESS_CPU_NONE, PROCESS_NAME_MAX,
-        RESOURCE_LIMITS_REPORT_LEN, SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERIES,
+        ProcessState, ResourceLimitRecord, SeatListRequest, SeatRecord, SysinfoQueryId,
+        SysinfoRequestHeader, SystemIdentity, Uptime, UserDirectoryRecord, UserDirectoryRequest,
+        ENCODED_QUERY_TABLE, ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX, LOAD_FIXED_SHIFT,
+        MACHINE_ID_LEN, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, PROCESS_CPU_NONE,
+        PROCESS_NAME_MAX, RESOURCE_LIMITS_REPORT_LEN, SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERIES,
         SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC,
         SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1, USER_DIRECTORY_NAME_MAX,
     };
@@ -1775,6 +1932,7 @@ mod tests {
         assert_eq!(SysinfoQueryId::MOUNT_LIST.as_u16(), 6);
         assert_eq!(SysinfoQueryId::RESOURCE_LIMITS.as_u16(), 7);
         assert_eq!(SysinfoQueryId::PROCESS_IDENTITY.as_u16(), 8);
+        assert_eq!(SysinfoQueryId::SEAT_LIST.as_u16(), 12);
         assert_eq!(SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1);
     }
 
@@ -1825,12 +1983,13 @@ mod tests {
             (6, IntrospectDomain::LoadAverage),
             (7, IntrospectDomain::UserDirectory),
             (8, IntrospectDomain::CpuTimes),
+            (9, IntrospectDomain::Seats),
         ] {
             assert_eq!(domain.as_u32(), raw);
             assert_eq!(IntrospectDomain::from_u32(raw), Ok(domain));
         }
         // Any value outside the closed set is rejected, not guessed.
-        assert_eq!(IntrospectDomain::from_u32(9), Err(Errno::OutOfRange));
+        assert_eq!(IntrospectDomain::from_u32(10), Err(Errno::OutOfRange));
         assert_eq!(IntrospectDomain::from_u32(u32::MAX), Err(Errno::OutOfRange));
     }
 
@@ -1985,6 +2144,83 @@ mod tests {
             None
         );
         assert!(!spec_for(SysinfoQueryId::PROCESS_IDENTITY).unwrap().audit);
+        // The seat inventory names which task owns each display: gated like
+        // the hardware tree, and audited.
+        assert_eq!(
+            spec_for(SysinfoQueryId::SEAT_LIST)
+                .unwrap()
+                .required_capability,
+            Some(CapabilityId::SYSINFO_HW)
+        );
+        assert!(spec_for(SysinfoQueryId::SEAT_LIST).unwrap().audit);
+    }
+
+    #[test]
+    fn seat_list_request_round_trips_and_rejects_reserved() {
+        let req = SeatListRequest {
+            offset: 1,
+            limit: 4,
+            flags: 0,
+        };
+        assert_eq!(SeatListRequest::from_bytes(&req.to_le_bytes()), Ok(req));
+        let mut bytes = req.to_le_bytes();
+        bytes[6] = 1;
+        assert_eq!(SeatListRequest::from_bytes(&bytes), Err(Errno::BadMagic));
+        assert_eq!(
+            SeatListRequest::from_bytes(&[0u8; SeatListRequest::WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn seat_record_round_trips_owned_and_unowned() {
+        let held = SeatRecord {
+            seat_id: 0,
+            owner_task: 7,
+            generation: 3,
+            foreground_console: 1,
+            flags: super::SEAT_FLAG_OWNED,
+        };
+        assert_eq!(SeatRecord::WIRE_LEN, 32);
+        assert_eq!(SeatRecord::from_bytes(&held.to_le_bytes()), Ok(held));
+        assert!(held.owned());
+        assert_eq!(held.owner(), Some(7));
+
+        let unowned = SeatRecord {
+            seat_id: 0,
+            owner_task: 0,
+            generation: 4,
+            foreground_console: 0,
+            flags: 0,
+        };
+        assert_eq!(SeatRecord::from_bytes(&unowned.to_le_bytes()), Ok(unowned));
+        assert!(!unowned.owned());
+        assert_eq!(unowned.owner(), None);
+    }
+
+    #[test]
+    fn seat_record_fails_closed_on_corrupt_wire() {
+        let good = SeatRecord {
+            seat_id: 0,
+            owner_task: 7,
+            generation: 1,
+            foreground_console: 0,
+            flags: super::SEAT_FLAG_OWNED,
+        }
+        .to_le_bytes();
+        // A reserved flag bit is wire corruption.
+        let mut reserved = good;
+        reserved[29] = 0x80;
+        assert_eq!(SeatRecord::from_bytes(&reserved), Err(Errno::BadMagic));
+        // An unowned record must not smuggle an owner.
+        let mut phantom_owner = good;
+        phantom_owner[28] = 0;
+        assert_eq!(SeatRecord::from_bytes(&phantom_owner), Err(Errno::BadMagic));
+        // Short buffer.
+        assert_eq!(
+            SeatRecord::from_bytes(&good[..SeatRecord::WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
     }
 
     #[test]

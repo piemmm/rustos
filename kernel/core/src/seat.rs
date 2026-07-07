@@ -31,6 +31,7 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use rustos_abi::input::KeyInput;
+use rustos_abi::sysinfo::{SeatRecord, SEAT_FLAG_OWNED};
 use rustos_abi::Errno;
 use rustos_keymap::{encode_key_input, MAX_KEY_BYTES};
 use rustos_seat::{ConsoleIndex, Route, SeatError, SeatOwner, SeatState};
@@ -128,10 +129,10 @@ impl KeyboardChannel {
 /// Map a typed seat refusal onto its stable ABI error code.
 ///
 /// The one place [`SeatError`] meets [`Errno`], so the syscall handlers and
-/// the owner-gated drain can never diverge. `SeatUnowned` (the admin revoke
-/// of an unowned seat, unreachable until the D3 `seat_revoke` path lands)
-/// maps to the same "you do not hold it" refusal a non-owner sees: the
-/// mapping is total so no future call site can hit an unmapped variant.
+/// the owner-gated drain can never diverge. `SeatUnowned` (a `seat_revoke`
+/// of a seat nobody holds) maps to the same "you do not hold it" refusal a
+/// non-owner sees: there is no lease to revoke, and the mapping is total so
+/// no call site can hit an unmapped variant.
 #[must_use]
 pub fn seat_errno(err: SeatError) -> Errno {
     match err {
@@ -306,6 +307,51 @@ impl SeatRegistry {
     #[must_use]
     pub fn owner(&self) -> Option<SeatOwner> {
         self.seat.lock().owner()
+    }
+
+    /// Retarget the seat's foreground text console (`seat_switch`,
+    /// `plans/DISPLAY.md` D3).
+    ///
+    /// Takes effect immediately for an unowned seat; a held seat keeps
+    /// routing to its owner until the lease ends. The syscall handler
+    /// validates the console index against the installed console list and
+    /// checks `CAP_SEAT_ADMIN` *before* calling this.
+    pub fn switch_foreground(&self, console: ConsoleIndex) {
+        self.seat.lock().set_foreground_console(console);
+    }
+
+    /// Forcibly revoke the current lease (`seat_revoke`, `plans/DISPLAY.md`
+    /// D3), returning the evicted owner for the audit record.
+    ///
+    /// The seat becomes acquirable immediately and input returns to the
+    /// text foreground; the evicted owner's next owner-gated call is
+    /// refused with [`SeatError::SeatRevoked`], so the loss is observable.
+    ///
+    /// # Errors
+    ///
+    /// - [`SeatError::SeatUnowned`] — no lease is held, so there is nothing
+    ///   to revoke.
+    pub fn revoke(&self) -> Result<SeatOwner, SeatError> {
+        self.seat.lock().revoke()
+    }
+
+    /// One wire-encodable snapshot of the seat for the seat inventory
+    /// (`IntrospectDomain::Seats`), taken under the registry lock so the
+    /// owner, generation, and foreground are one consistent observation.
+    #[must_use]
+    pub fn record(&self, seat_id: u64) -> SeatRecord {
+        let seat = self.seat.lock();
+        let (owner_task, flags) = match seat.owner() {
+            Some(SeatOwner(task)) => (task, SEAT_FLAG_OWNED),
+            None => (0, 0),
+        };
+        SeatRecord {
+            seat_id,
+            owner_task,
+            generation: seat.generation(),
+            foreground_console: seat.foreground_console().0,
+            flags,
+        }
     }
 }
 
@@ -487,6 +533,59 @@ mod tests {
         assert_eq!(n, KeyInput::WIRE_LEN);
         let first = KeyInput::from_bytes(&buf).expect("valid record");
         assert_eq!(first, press_char('b'));
+    }
+
+    #[test]
+    fn revoke_evicts_the_owner_and_returns_input_to_text() {
+        let queue = text_queue();
+        let seat = SeatRegistry::new(queue);
+        seat.acquire(WM).expect("fresh seat is acquirable");
+        assert_eq!(seat.revoke(), Ok(WM));
+        assert_eq!(seat.owner(), None);
+        // The evicted owner's next drain observes the distinct refusal, and
+        // only once; afterwards it is a plain non-owner.
+        let mut buf = [0u8; KeyInput::WIRE_LEN];
+        assert_eq!(seat.read_key(WM, &mut buf), Err(Errno::SeatRevoked));
+        // Input routes to the text foreground, never a stale desktop channel.
+        assert_eq!(seat.inject(press_char('z')), Ok(KeyInput::WIRE_LEN));
+        let mut text = [0u8; 8];
+        let n = queue.read(&mut text).expect("queue read");
+        assert_eq!(&text[..n], b"z");
+    }
+
+    #[test]
+    fn revoking_an_unowned_seat_is_refused() {
+        let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
+        assert_eq!(seat.revoke(), Err(SeatError::SeatUnowned));
+    }
+
+    #[test]
+    fn switch_foreground_retargets_the_text_sink_route() {
+        let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
+        seat.switch_foreground(ConsoleIndex(2));
+        assert_eq!(seat.record(0).foreground_console, 2);
+    }
+
+    #[test]
+    fn record_reports_the_live_lease_and_generation() {
+        let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
+        let fresh = seat.record(0);
+        assert_eq!(fresh.seat_id, 0);
+        assert!(!fresh.owned());
+        assert_eq!(fresh.owner(), None);
+        assert_eq!(fresh.generation, 0);
+
+        seat.acquire(WM).expect("fresh seat is acquirable");
+        let held = seat.record(0);
+        assert!(held.owned());
+        assert_eq!(held.owner(), Some(WM.0));
+        assert_eq!(held.generation, 1);
+
+        seat.revoke().expect("held seat revokes");
+        let revoked = seat.record(0);
+        assert!(!revoked.owned());
+        assert_eq!(revoked.owner_task, 0);
+        assert_eq!(revoked.generation, 1);
     }
 
     #[test]

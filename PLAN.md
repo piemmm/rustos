@@ -3971,7 +3971,7 @@ the next increment; see `plans/USB.md` for the binding design and staging.
 
 ## DISPLAY — seat ownership: the display/console locking model (`plans/DISPLAY.md`)
 
-**Status: D1–D2 done; D3–D6 planned.** Closes the console/graphics *ownership
+**Status: D1–D3 done; D4–D6 planned.** Closes the console/graphics *ownership
 and locking* gap against Linux (DRM master + `logind` seats + tty controlling
 terminal), and improves on it under the charter's fail-closed, no-ambient
 model. The plan makes the **seat** a first-class kernel object with a tracked,
@@ -3992,9 +3992,19 @@ and check the kernel-attested owner with the typed refusals
 `Errno::SeatBusy`/`SeatNotOwner`/`SeatRevoked` (new `abi-v1` errnos 24–26,
 generated into the C headers), the desktop `keyboard_read` drain is
 owner-gated through `SeatState::access`, and the `CAP_DISPLAY` /
-`CAP_INPUT_READ` rustdoc states the enforced behaviour. D3
-(`CAP_SEAT_ADMIN`, `seat_switch`/`seat_revoke`, `seatmgr`) is the next
-increment; see `plans/DISPLAY.md` for the binding design and staging.
+`CAP_INPUT_READ` rustdoc states the enforced behaviour. D3 is done: the
+single new capability `CAP_SEAT_ADMIN` (id 33) landed with its two
+audited enforcement points — `seat_switch` (70, foreground retarget with
+fail-closed seat/console validation) and `seat_revoke` (71, forced
+eviction whose record carries the evicted task id; the old owner's next
+owner-gated call sees `SeatRevoked`) — and its sole holder, the
+`userland/system/seatmgr` service (reserved `SEATMGR_ENDPOINT` broker
+requiring each requester's attested `CAP_SEAT_ADMIN`, launched by PID 1,
+headless-safe). Seats are observable through the System Information API
+(`IntrospectDomain::Seats`, the audited `CAP_SYSINFO_HW` `SEAT_LIST`
+query, and `sysinfo seats`). D4 (present right derived from the live
+lease in `drivers/display/*`) is the next increment; see
+`plans/DISPLAY.md` for the binding design and staging.
 
 ---
 

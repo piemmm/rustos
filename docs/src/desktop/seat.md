@@ -10,7 +10,7 @@ describes what is implemented.
 
 `rustos_seat` is the arch-neutral, dependency-free, `no_std` state machine
 behind seat ownership — the single definition the in-kernel seat registry and
-the user-space seat manager will both build on (Stages D2–D6 of
+the user-space seat manager both build on (Stages D2–D6 of
 `plans/DISPLAY.md`).
 
 One seat is a `SeatState`: a **lease** plus a **foreground text console**.
@@ -79,9 +79,55 @@ analogue of a foreground-tty switch), and every refusal is a typed
 `Errno`, mapped from `SeatError` in exactly one place
 (`rustos_kernel_core::seat::seat_errno`).
 
+## Seat administration (Stage D3)
+
+The seat-multiplexing authority — the `chvt`/`logind` analogue — is the
+single new capability **`CAP_SEAT_ADMIN`** (id 33), enforced by two
+audited syscalls and held by exactly one service:
+
+- `seat_switch` (`abi-v1` 70, `CAP_SEAT_ADMIN`) retargets which installed
+  text console an unowned seat's input drains to. The seat id (one seat
+  today, id 0) and the console index are validated against the live
+  topology **before** any state changes — an unknown either fails closed
+  with `Errno::NotFound`, so a typo can never strand input on a console
+  that does not exist. A held seat keeps routing to its owner until the
+  lease ends. Every switch is audited (`SEAT_SWITCHED`, event 4051, with
+  the seat and the new foreground).
+- `seat_revoke` (`abi-v1` 71, `CAP_SEAT_ADMIN`) forcibly evicts the
+  current lease holder through `SeatState::revoke`. An unknown seat fails
+  closed with `Errno::NotFound`; an unowned seat refuses with
+  `Errno::SeatNotOwner` (there is no lease to revoke). On success the seat
+  is immediately acquirable, input returns to the text foreground, and the
+  evicted owner's next owner-gated call fails closed with the distinct
+  `Errno::SeatRevoked`. Every eviction is audited (`SEAT_LEASE_REVOKED`,
+  event 4052) **with the evicted owner's task id**, so every eviction is
+  attributable.
+- **`seatmgr`** (`userland/system/seatmgr`, installed at
+  `/System/Services/seatmgr.app/Run`, launched by PID 1) is the sole
+  manifest holder of `CAP_SEAT_ADMIN`. It binds the reserved
+  `SEATMGR_ENDPOINT` rendezvous (`rustos_abi::seat`, squat-protected by
+  the `CAP_IPC_BIND_PRIVILEGED` gate) and serves the typed
+  `SeatAdminRequest` operations, requiring each *requester's*
+  kernel-attested origin to itself carry `CAP_SEAT_ADMIN` before the
+  syscall is issued — the broker adds audited policy without laundering
+  its own authority onto an unprivileged caller, and the kernel re-checks
+  the capability and every index on each call. Headless-safe: nothing in
+  it depends on a graphical session.
+
+## Observing seats
+
+The seat inventory is exposed through the System Information API — never
+a `/proc`-style file. The `SEAT_LIST` query (`sysinfo-v1` id 12, gated on
+`CAP_SYSINFO_HW` and audited, like the hardware tree) returns one
+`SeatRecord` per seat: seat id, the owning task (with an explicit
+owned/unowned flag — an unowned record carries no owner), the monotonic
+lease generation, and the foreground console. The kernel serves the
+underlying `IntrospectDomain::Seats` snapshot directly from its seat
+registry; the `sysinfod` broker scopes and audits the query, and
+`sysinfo seats` renders the table.
+
 ## What is not yet wired
 
-`CAP_SEAT_ADMIN` with the `seat_switch`/`seat_revoke` syscalls and the
-`seatmgr` service, the lease-derived present right, per-console
-controlling-terminal arbitration, and multi-seat/hotplug are Stages D3–D6
-of `plans/DISPLAY.md`.
+The lease-derived present right, per-console controlling-terminal
+arbitration, and multi-seat/hotplug are Stages D4–D6 of
+`plans/DISPLAY.md`.

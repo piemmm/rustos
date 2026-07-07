@@ -1212,6 +1212,44 @@ impl SyscallNumber {
     /// built by the caller, and no operation ever returns stored password
     /// material.
     pub const USERS_ADMIN: Self = Self(69);
+    /// Switch a seat's foreground session — retarget which text console an
+    /// unowned seat's input drains to (`plans/DISPLAY.md` D3, the
+    /// `chvt`/`VT_ACTIVATE` analogue).
+    ///
+    /// Arguments: `seat_id: u64` (the seat to retarget; the kernel hosts one
+    /// seat today, id `0`) and `console: u32` (the index of the installed
+    /// text console that becomes the seat's foreground). Returns `0` or a
+    /// negative [`Errno`]: an unknown seat or console index fails closed
+    /// with [`Errno::NotFound`] before any state changes, so a typo can
+    /// never strand input on a console that does not exist.
+    ///
+    /// Gated on `CAP_SEAT_ADMIN` at dispatch and audited per call: moving
+    /// the foreground redirects every subsequent keystroke of an unowned
+    /// seat, the classic console-hijack primitive, so it is the
+    /// seat-multiplexing authority's alone — `CAP_DISPLAY` owns one lease
+    /// and cannot re-route a seat. A held seat keeps routing to its owner;
+    /// the new foreground takes effect when the lease ends.
+    pub const SEAT_SWITCH: Self = Self(70);
+    /// Forcibly revoke a seat's current lease — evict a wedged or
+    /// switched-away owner (`plans/DISPLAY.md` D3, the DRM
+    /// `DROP_MASTER`-by-an-administrator analogue).
+    ///
+    /// Argument: `seat_id: u64` (the seat whose lease is revoked; the kernel
+    /// hosts one seat today, id `0`). Returns `0` or a negative [`Errno`]:
+    /// an unknown seat fails closed with [`Errno::NotFound`], and revoking
+    /// an unowned seat refuses with [`Errno::SeatNotOwner`] (there is no
+    /// lease to revoke) rather than reporting a success that changed
+    /// nothing.
+    ///
+    /// Gated on `CAP_SEAT_ADMIN` at dispatch and audited per call — the
+    /// record carries the evicted owner's task id, so every eviction is
+    /// attributable. The seat becomes acquirable immediately and its input
+    /// returns to the text foreground; the evicted owner's next owner-gated
+    /// call (`display_release` / `keyboard_read` / a future present) fails
+    /// closed with the distinct [`Errno::SeatRevoked`], so a well-behaved
+    /// compositor learns it lost the seat rather than scribbling over the
+    /// new foreground.
+    pub const SEAT_REVOKE: Self = Self(71);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;

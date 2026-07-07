@@ -34,6 +34,8 @@
 //! | 4045 | Info | `USER_ADMIN_APPLIED` | audit | A `CAP_USER_ADMIN` account-administration operation was validated, persisted, and made live. The `op`, `target`, and `caller_uid` fields name the operation, the affected account/group, and the kernel-attested caller. |
 //! | 4046 | Warn | `USER_ADMIN_REJECTED` | audit | A `CAP_USER_ADMIN` account-administration operation was refused; nothing changed (fail closed). The `op`, `target`, `caller_uid`, and `errno` fields name the operation, the affected account/group, the caller, and the refusal. |
 //! | 4050 | Info | `INPUT_DELIVERED` | audit | A keyboard driver delivered the **first** key edge to the input-focus arbiter via `key_inject`. Emitted exactly once over the kernel's lifetime, carries no key content or timing — it witnesses that an autoloaded input driver is live, never a per-keystroke record. |
+//! | 4051 | Info | `SEAT_SWITCHED` | audit | A `CAP_SEAT_ADMIN` `seat_switch` retargeted a seat's foreground text console. The `seat` and `console` fields name the seat and the new foreground. |
+//! | 4052 | Warn | `SEAT_LEASE_REVOKED` | audit | A `CAP_SEAT_ADMIN` `seat_revoke` forcibly evicted a seat's lease holder. The `seat` and `evicted` fields name the seat and the evicted owner's task id. |
 //!
 //! "audit" events route through the `audit_sink` channel
 //! (security-relevant decisions); "log" events
@@ -173,6 +175,22 @@ pub enum AuditEvent {
     /// (no input-content/timing noise on the log;
     /// — secret hygiene).
     InputDelivered,
+    /// A `CAP_SEAT_ADMIN` `seat_switch` retargeted a seat's foreground
+    /// text console (`plans/DISPLAY.md` D3).
+    ///
+    /// Emitted by the `seat_switch` syscall handler after the validated
+    /// retarget takes effect. Carries the seat id and the new foreground
+    /// console index — the redirect of every subsequent keystroke of an
+    /// unowned seat is a security-relevant ownership change.
+    SeatSwitched,
+    /// A `CAP_SEAT_ADMIN` `seat_revoke` forcibly evicted a seat's lease
+    /// holder (`plans/DISPLAY.md` D3).
+    ///
+    /// Emitted by the `seat_revoke` syscall handler after the eviction.
+    /// Carries the seat id and the evicted owner's task id, so every
+    /// eviction is attributable; the evicted owner's next owner-gated call
+    /// fails closed with the distinct `SeatRevoked` refusal.
+    SeatLeaseRevoked,
     /// The kernel CSPRNG output reserve was seeded from the platform
     /// entropy source ([`rustos_arch_api::PlatformEntropy`]).
     ///
@@ -236,6 +254,8 @@ impl AuditEvent {
             Self::UserAdminApplied => 4045,
             Self::UserAdminRejected => 4046,
             Self::InputDelivered => 4050,
+            Self::SeatSwitched => 4051,
+            Self::SeatLeaseRevoked => 4052,
             Self::EntropyReserveSeeded => 4060,
             Self::EntropyReserveUnseeded => 4061,
             Self::BootIdMinted => 4062,
@@ -269,6 +289,8 @@ impl AuditEvent {
             Self::UserAdminApplied => "user administration applied",
             Self::UserAdminRejected => "user administration rejected",
             Self::InputDelivered => "first input delivered to focus arbiter",
+            Self::SeatSwitched => "seat foreground switched",
+            Self::SeatLeaseRevoked => "seat lease revoked",
             Self::EntropyReserveSeeded => "entropy reserve seeded",
             Self::EntropyReserveUnseeded => "entropy reserve unseeded",
             Self::BootIdMinted => "per-boot id minted",
@@ -317,6 +339,8 @@ mod tests {
             AuditEvent::UserAdminApplied,
             AuditEvent::UserAdminRejected,
             AuditEvent::InputDelivered,
+            AuditEvent::SeatSwitched,
+            AuditEvent::SeatLeaseRevoked,
             AuditEvent::EntropyReserveSeeded,
             AuditEvent::EntropyReserveUnseeded,
             AuditEvent::BootIdMinted,
@@ -353,6 +377,8 @@ mod tests {
             AuditEvent::UserAdminApplied.id().0,
             AuditEvent::UserAdminRejected.id().0,
             AuditEvent::InputDelivered.id().0,
+            AuditEvent::SeatSwitched.id().0,
+            AuditEvent::SeatLeaseRevoked.id().0,
             AuditEvent::EntropyReserveSeeded.id().0,
             AuditEvent::EntropyReserveUnseeded.id().0,
             AuditEvent::BootIdMinted.id().0,

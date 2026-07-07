@@ -386,6 +386,22 @@ impl CapabilityId {
     /// ring-0 attack surface down while the kernel stays the identity
     /// authority (no ambient authority; fail closed).
     pub const SYSINFO_INTROSPECT: Self = Self(32);
+    /// Administer **all seats**: switch which session is foreground across
+    /// every seat and forcibly revoke another principal's seat lease
+    /// (`seat_switch` / `seat_revoke`, `plans/DISPLAY.md` D3).
+    ///
+    /// This is the seat-multiplexing authority — the `chvt`/`logind`
+    /// equivalent — and it guards a *group* of resources (every seat, every
+    /// session's focus), not one surface: `CAP_DISPLAY` owns a single seat's
+    /// lease, the `CAP_INPUT_*` pair route input, and none of them can evict
+    /// another principal's lease or retarget a seat's foreground console.
+    /// Its sole intended holder is the seat-manager service (`seatmgr`),
+    /// introduced in the same change as the two syscalls that enforce this
+    /// capability. Every switch and revoke is a security-relevant ownership
+    /// change and is audit-logged with a stable event id; the evicted
+    /// owner's next owner-gated call fails closed with the distinct
+    /// `SeatRevoked` refusal, so the loss is observable, never silent.
+    pub const SEAT_ADMIN: Self = Self(33);
 
     /// Every capability assigned a canonical name in `abi-v1`, paired with
     /// that name.
@@ -429,6 +445,7 @@ impl CapabilityId {
         (Self::FS_ACCESS, "CAP_FS_ACCESS"),
         (Self::SPAWN_AS_USER, "CAP_SPAWN_AS_USER"),
         (Self::SYSINFO_INTROSPECT, "CAP_SYSINFO_INTROSPECT"),
+        (Self::SEAT_ADMIN, "CAP_SEAT_ADMIN"),
     ];
 
     /// The canonical `CAP_*` name of this capability, or [`None`] for an
@@ -555,6 +572,7 @@ mod tests {
         assert_eq!(CapabilityId::FS_ACCESS.as_u16(), 30);
         assert_eq!(CapabilityId::SPAWN_AS_USER.as_u16(), 31);
         assert_eq!(CapabilityId::SYSINFO_INTROSPECT.as_u16(), 32);
+        assert_eq!(CapabilityId::SEAT_ADMIN.as_u16(), 33);
     }
 
     #[test]
@@ -576,6 +594,7 @@ mod tests {
         assert_eq!(CapabilityId::INPUT_INJECT.name(), Some("CAP_INPUT_INJECT"));
         assert_eq!(CapabilityId::DISPLAY.name(), Some("CAP_DISPLAY"));
         assert_eq!(CapabilityId::INPUT_READ.name(), Some("CAP_INPUT_READ"));
+        assert_eq!(CapabilityId::SEAT_ADMIN.name(), Some("CAP_SEAT_ADMIN"));
 
         // Every named id round-trips name -> id -> name.
         for &(cap, name) in CapabilityId::NAMED {
@@ -586,9 +605,9 @@ mod tests {
 
     #[test]
     fn every_assigned_id_has_a_name() {
-        // Capabilities 1..=32 are assigned in abi-v1; each must carry a
+        // Capabilities 1..=33 are assigned in abi-v1; each must carry a
         // canonical name so `getcap`/`setcap` can render and accept it.
-        for raw in 1..=32 {
+        for raw in 1..=33 {
             let cap = CapabilityId::from_raw(raw).expect("in range");
             assert!(cap.name().is_some(), "capability {raw} has no name");
         }

@@ -28,6 +28,10 @@ pub enum Command {
     /// Read the caller's own effective resource limits and live usage
     /// (`RESOURCE_LIMITS`).
     Limits,
+    /// List the seats — each display's owner, lease generation, and
+    /// foreground console (`SEAT_LIST`, which the service gates on
+    /// `CAP_SYSINFO_HW`).
+    Seats,
     /// Render `sysinfo`'s own short help (`help`/`-h`/`-?`/`--help`): the
     /// `NAME`, `SYNOPSIS`, and compact `OPTIONS` of its Help document,
     /// through the same engine as any other command's short help
@@ -55,6 +59,7 @@ pub enum Command {
 /// | `identity`, `id`      | [`Command::Identity`]            |
 /// | `uptime`              | [`Command::Uptime`]              |
 /// | `limits`, `rlimits`   | [`Command::Limits`]              |
+/// | `seats`               | [`Command::Seats`]               |
 ///
 /// # Errors
 ///
@@ -71,6 +76,7 @@ pub fn parse(args: &[&str]) -> Result<Command, SysinfoError> {
         "identity" | "id" => no_more(rest).map(|()| Command::Identity),
         "uptime" => no_more(rest).map(|()| Command::Uptime),
         "limits" | "rlimits" => no_more(rest).map(|()| Command::Limits),
+        "seats" => no_more(rest).map(|()| Command::Seats),
         _ => Err(SysinfoError::Usage),
     }
 }
@@ -135,6 +141,7 @@ mod tests {
         assert_eq!(parse(&["uptime"]), Ok(Command::Uptime));
         assert_eq!(parse(&["limits"]), Ok(Command::Limits));
         assert_eq!(parse(&["rlimits"]), Ok(Command::Limits));
+        assert_eq!(parse(&["seats"]), Ok(Command::Seats));
     }
 
     #[test]
@@ -151,6 +158,7 @@ mod tests {
     fn trailing_argument_is_usage() {
         assert_eq!(parse(&["uptime", "now"]), Err(SysinfoError::Usage));
         assert_eq!(parse(&["memory", "extra"]), Err(SysinfoError::Usage));
+        assert_eq!(parse(&["seats", "0"]), Err(SysinfoError::Usage));
     }
 
     /// Every locale's `OPTIONS` section documents exactly the switches this

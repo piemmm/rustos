@@ -93,6 +93,8 @@ extern "C" {
 #define ROS_SYS_RESOURCE_OPEN 67u
 #define ROS_SYS_SELF_ORIGIN 68u
 #define ROS_SYS_USERS_ADMIN 69u
+#define ROS_SYS_SEAT_SWITCH 70u
+#define ROS_SYS_SEAT_REVOKE 71u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns ROS_E_WOULD_BLOCK when a
@@ -195,6 +197,8 @@ uint64_t ros_sys_fs_getcwd(void * a0, uintptr_t a1);
 uint64_t ros_sys_resource_open(void * a0, uintptr_t a1, uint32_t a2);
 uint64_t ros_sys_self_origin(void * a0, uintptr_t a1);
 uint64_t ros_sys_users_admin(void * a0, uintptr_t a1, void * a2, uintptr_t a3);
+int32_t ros_sys_seat_switch(uint64_t a0, uint32_t a1);
+int32_t ros_sys_seat_revoke(uint64_t a0);
 
 #ifdef __cplusplus
 } /* extern "C" */

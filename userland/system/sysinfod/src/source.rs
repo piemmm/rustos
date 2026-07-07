@@ -14,7 +14,7 @@ use alloc::vec::Vec;
 
 use rustos_abi::sysinfo::{
     CpuTimeRecord, KernelMemoryStats, LoadAverage, MountRecord, ProcessRecord, ResourceLimitRecord,
-    SystemIdentity, Uptime, UserDirectoryRecord,
+    SeatRecord, SystemIdentity, Uptime, UserDirectoryRecord,
 };
 use rustos_abi::{CapabilityQuery, Errno, LimitKind, Origin};
 
@@ -166,4 +166,15 @@ pub trait SysinfoSource {
     /// The owned list is returned whole and [`crate::serve`] applies the
     /// `offset`/`limit` paging; ordering must be stable across paged calls.
     fn cpu_times(&self, caller: &Caller) -> Result<Vec<CpuTimeRecord>, Errno>;
+
+    /// Return the seat inventory: one record per seat, in ascending seat-id
+    /// order (`plans/DISPLAY.md` D3).
+    ///
+    /// Reached only after the `CAP_SYSINFO_HW` gate has passed: like
+    /// [`hardware_tree`](Self::hardware_tree), the inventory names which
+    /// task owns each physical display — cross-principal surface topology,
+    /// not a self-scoped observer. The owned list is returned whole and
+    /// [`crate::serve`] applies the `offset`/`limit` paging; ordering must
+    /// be stable across paged calls.
+    fn seats(&self, caller: &Caller) -> Result<Vec<SeatRecord>, Errno>;
 }

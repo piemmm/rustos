@@ -117,6 +117,7 @@ members = [
     # AGENTS.md §3.
     "userland/system/devmgr",
     "userland/system/drvhost",
+    "userland/system/seatmgr",
     "userland/system/sysinfod",
     "userland/system/journald",
     "userland/system/init",

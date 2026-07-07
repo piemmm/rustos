@@ -147,25 +147,27 @@ mod kernel {
     /// audit-id test in `kernel/syscall/src/audit.rs`.
     const SYSCALL_INVOKED_EVENT_ID: EventId = EventId(5000);
 
-    /// Number of `ProcessSpawned` records seen so far. PASS requires five:
-    /// PID 1 `init`, the `sysinfod` and `devmgr` services it launches first,
-    /// and the **two** login instances — the second login launch can only
-    /// happen after `init` reaped the first, so a fifth `ProcessSpawned` is
-    /// the witness that supervision (reap + restart) ran.
+    /// Number of `ProcessSpawned` records seen so far. PASS requires six:
+    /// PID 1 `init`, the `sysinfod`, `devmgr`, and `seatmgr` services it
+    /// launches first, and the **two** login instances — the second login
+    /// launch can only happen after `init` reaped the first, so a sixth
+    /// `ProcessSpawned` is the witness that supervision (reap + restart)
+    /// ran.
     static SPAWNED: AtomicUsize = AtomicUsize::new(0);
 
     /// Number of audited `SyscallInvoked` records seen so far. PASS requires
-    /// six, the certain prefix of `init`'s supervise loop up to the
-    /// relaunch: `init`'s three service `spawn`s (`sysinfod`, `devmgr`,
-    /// login), `init`'s `wait` (which parks it), the first login's
-    /// fail-closed `exit`, and `init`'s second login `spawn` (the relaunch).
-    /// The audited `call_create` binds (`sysinfod`'s query endpoint, login's
-    /// elevation rendezvous) ride on top, absorbed by the `>=` threshold;
-    /// `devmgr`'s `hw_tree_read`/`hw_tree_wait` are unaudited.
+    /// seven, the certain prefix of `init`'s supervise loop up to the
+    /// relaunch: `init`'s four service/session `spawn`s (`sysinfod`,
+    /// `devmgr`, `seatmgr`, login), `init`'s `wait` (which parks it), the
+    /// first login's fail-closed `exit`, and `init`'s second login `spawn`
+    /// (the relaunch). The audited `call_create` binds (`sysinfod`'s query
+    /// endpoint, `seatmgr`'s seat-admin rendezvous, login's elevation
+    /// rendezvous) ride on top, absorbed by the `>=` threshold; `devmgr`'s
+    /// `hw_tree_read`/`hw_tree_wait` are unaudited.
     static SYSCALLS: AtomicUsize = AtomicUsize::new(0);
 
     /// Sink that replays every event through [`SERIAL_SINK`] and reports PASS
-    /// to QEMU once five processes have been built and six audited syscalls
+    /// to QEMU once six processes have been built and seven audited syscalls
     /// have run — proving PID 1 launched the boot services and the session,
     /// waited on and reaped the session when it exited, and relaunched it
     /// (supervision, not spawn-and-forget).
@@ -181,7 +183,7 @@ mod kernel {
             } else if event.id == SYSCALL_INVOKED_EVENT_ID {
                 SYSCALLS.fetch_add(1, Ordering::AcqRel);
             }
-            if SPAWNED.load(Ordering::Acquire) >= 5 && SYSCALLS.load(Ordering::Acquire) >= 6 {
+            if SPAWNED.load(Ordering::Acquire) >= 6 && SYSCALLS.load(Ordering::Acquire) >= 7 {
                 qemu_exit::exit_success();
             }
         }

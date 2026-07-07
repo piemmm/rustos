@@ -76,7 +76,9 @@
 use crate::sched::{CpuId, SchedError, Scheduler, SchedulerArch};
 use rustos_abi::hwtree::{HwResource, HwResourceKind};
 use rustos_abi::input::KeyInput;
-use rustos_abi::sysinfo::{CpuTimeRecord, MountRecord, ProcessRecord, UserDirectoryRecord};
+use rustos_abi::sysinfo::{
+    CpuTimeRecord, MountRecord, ProcessRecord, SeatRecord, UserDirectoryRecord,
+};
 use rustos_abi::{
     decode_log_record, BootId, CapabilityId, DescriptorTable, DirEntry, Errno, FileStat, InputMode,
     IntrospectDomain, IrqHandle, LimitKind, MapFlags, OpenFlags, ProcId, ProcessStart, RandomFlags,
@@ -102,7 +104,7 @@ use rustos_kernel_sec::{
 };
 use rustos_kernel_syscall::{CallerContext, Dispatcher, RawArgs, SyscallHandlers, SyscallResult};
 use rustos_log::{Event, EventId, Field, Level, Sink};
-use rustos_seat::SeatOwner;
+use rustos_seat::{ConsoleIndex, SeatOwner};
 use rustos_sync::RwLock;
 use rustos_util::fmt::format_hex_u64;
 use zeroize::Zeroize;
@@ -2597,6 +2599,80 @@ where
         Ok(0)
     }
 
+    fn seat_switch(
+        &self,
+        _caller: &CallerContext<'_>,
+        seat_id: u64,
+        console: u32,
+    ) -> SyscallResult {
+        // The dispatcher already checked `CAP_SEAT_ADMIN`. Validate the
+        // seat and the target console against the live topology *before*
+        // any state changes: the kernel hosts one seat today (id 0,
+        // `plans/DISPLAY.md` D6 adds more), and the console index must name
+        // an installed console — an unknown seat or console fails closed
+        // with `NotFound`, so a typo can never strand input on a console
+        // that does not exist.
+        if seat_id != 0 {
+            return Err(Errno::NotFound);
+        }
+        let index = usize::try_from(console).map_err(|_| Errno::NotFound)?;
+        if self.consoles.get(index).is_none() {
+            return Err(Errno::NotFound);
+        }
+        self.seat_registry.switch_foreground(ConsoleIndex(console));
+        // Retargeting the foreground redirects every subsequent keystroke
+        // of an unowned seat — a security-relevant ownership change, so the
+        // record names the seat and the new foreground.
+        crate::audit::emit(
+            self.audit,
+            rustos_log::Level::Info,
+            AuditEvent::SeatSwitched,
+            &[
+                Field {
+                    key: "seat",
+                    value: rustos_log::FieldValue::UnsignedInt(seat_id),
+                },
+                Field {
+                    key: "console",
+                    value: rustos_log::FieldValue::UnsignedInt(u64::from(console)),
+                },
+            ],
+        );
+        Ok(0)
+    }
+
+    fn seat_revoke(&self, _caller: &CallerContext<'_>, seat_id: u64) -> SyscallResult {
+        // The dispatcher already checked `CAP_SEAT_ADMIN`. The kernel hosts
+        // one seat today (id 0); an unknown seat fails closed with
+        // `NotFound` before any state is touched. Revoking an unowned seat
+        // surfaces `SeatNotOwner` (there is no lease to revoke) rather than
+        // reporting a success that changed nothing.
+        if seat_id != 0 {
+            return Err(Errno::NotFound);
+        }
+        let evicted = self.seat_registry.revoke().map_err(seat_errno)?;
+        // Every eviction is attributable: the record carries the evicted
+        // owner's task id. The evicted owner's next owner-gated call fails
+        // closed with the distinct `SeatRevoked` refusal, so the loss is
+        // observable, never silent.
+        crate::audit::emit(
+            self.audit,
+            rustos_log::Level::Warn,
+            AuditEvent::SeatLeaseRevoked,
+            &[
+                Field {
+                    key: "seat",
+                    value: rustos_log::FieldValue::UnsignedInt(seat_id),
+                },
+                Field {
+                    key: "evicted",
+                    value: rustos_log::FieldValue::UnsignedInt(evicted.0),
+                },
+            ],
+        );
+        Ok(0)
+    }
+
     fn keyboard_read(&self, caller: &CallerContext<'_>, buf: u64, len: usize) -> SyscallResult {
         // The dispatcher already checked `CAP_INPUT_READ` and that `buf` is
         // non-null (`UserPtr`). A record is fixed-width: a `len` that cannot
@@ -3208,6 +3284,21 @@ where
                 }
                 let max_records = out_cap / CpuTimeRecord::WIRE_LEN;
                 self.introspect.cpu_times(arg, max_records)?
+            }
+            IntrospectDomain::Seats => {
+                if out_cap < SeatRecord::WIRE_LEN {
+                    return Err(Errno::BufferTooSmall);
+                }
+                // Served from the kernel's own seat registry rather than the
+                // introspect seam: the seat state lives in this crate, so the
+                // one definition answers directly. One seat today — the
+                // paging contract still holds: offset 0 returns the single
+                // record, any later offset the empty terminator.
+                if arg == 0 {
+                    self.seat_registry.record(0).to_le_bytes().to_vec()
+                } else {
+                    Vec::new()
+                }
             }
             IntrospectDomain::TaskLimits => {
                 // The 128-bit target `ProcId` does not fit in the `u64` `arg`,
@@ -10685,6 +10776,209 @@ mod tests {
         // Only the owner's release frees the seat for the next claimant.
         assert_eq!(h.display_release(&wm), Ok(0));
         assert_eq!(h.display_acquire(&intruder), Ok(0));
+    }
+
+    /// `seat_switch` validates the seat id and the target console against
+    /// the live topology before any state changes (fail closed with
+    /// `NotFound`), retargets the foreground on success, and emits the
+    /// `SEAT_SWITCHED` audit record (`plans/DISPLAY.md` D3).
+    #[test]
+    fn seat_switch_validates_topology_and_audits() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let seat: &'static SeatRegistry = Box::leak(Box::new(SeatRegistry::new(
+            &crate::console::NULL_CONSOLE_INPUT,
+        )));
+        let consoles: &'static [ConsoleDevice] = Box::leak(Box::new([
+            ConsoleDevice::new(
+                &crate::console::NULL_CONSOLE,
+                &crate::console::NULL_CONSOLE_READ,
+            ),
+            ConsoleDevice::new(
+                &crate::console::NULL_CONSOLE,
+                &crate::console::NULL_CONSOLE_READ,
+            ),
+        ]));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_seat_registry(seat)
+        .with_consoles(consoles);
+
+        // An unknown seat and an uninstalled console index both fail closed
+        // before any state changes; nothing is audited for a refusal.
+        assert_eq!(h.seat_switch(&ctx, 1, 0), Err(Errno::NotFound));
+        assert_eq!(h.seat_switch(&ctx, 0, 2), Err(Errno::NotFound));
+        assert_eq!(seat.record(0).foreground_console, 0);
+        assert!(!sink.event_ids().contains(&AuditEvent::SeatSwitched.id().0));
+
+        // A valid switch retargets the foreground and is audited.
+        assert_eq!(h.seat_switch(&ctx, 0, 1), Ok(0));
+        assert_eq!(seat.record(0).foreground_console, 1);
+        assert!(sink.event_ids().contains(&AuditEvent::SeatSwitched.id().0));
+    }
+
+    /// `seat_revoke` evicts the recorded owner, audits the eviction with
+    /// the evicted task id, and the old owner's subsequent owner-gated
+    /// calls fail closed with the distinct `SeatRevoked`; an unknown seat
+    /// and an unowned seat are refused (`plans/DISPLAY.md` D3).
+    #[test]
+    fn seat_revoke_evicts_audits_and_old_owner_fails_closed() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let wm_caps = make_caps_record(2, &[], sink);
+        let wm = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &wm_caps,
+        };
+        let admin_caps = make_caps_record(9, &[], sink);
+        let admin = CallerContext {
+            task_id: SecTaskId(9),
+            caps: &admin_caps,
+        };
+
+        let seat: &'static SeatRegistry = Box::leak(Box::new(SeatRegistry::new(
+            &crate::console::NULL_CONSOLE_INPUT,
+        )));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_seat_registry(seat);
+
+        // An unknown seat fails closed; an unowned seat has no lease to
+        // revoke and refuses rather than reporting a no-op success.
+        assert_eq!(h.seat_revoke(&admin, 1), Err(Errno::NotFound));
+        assert_eq!(h.seat_revoke(&admin, 0), Err(Errno::SeatNotOwner));
+
+        // The window manager holds the seat; the admin evicts it.
+        assert_eq!(h.display_acquire(&wm), Ok(0));
+        assert_eq!(h.seat_revoke(&admin, 0), Ok(0));
+        assert_eq!(seat.owner(), None);
+
+        // The eviction is audited and attributable: the record carries the
+        // evicted owner's task id.
+        assert!(sink
+            .event_ids()
+            .contains(&AuditEvent::SeatLeaseRevoked.id().0));
+        let revoked = sink
+            .snapshot()
+            .into_iter()
+            .find(|ev| ev.id == AuditEvent::SeatLeaseRevoked.id())
+            .expect("revoke audit record present");
+        assert!(revoked
+            .fields
+            .iter()
+            .any(|(key, value)| key == "evicted" && value == "2"));
+
+        // The evicted owner's next owner-gated calls fail closed with the
+        // distinct refusal: the drain observes it, the release acknowledges
+        // it once, and afterwards the task is a plain non-owner.
+        let mut buf = [0u8; KeyInput::WIRE_LEN];
+        assert_eq!(
+            seat.read_key(SeatOwner(2), &mut buf),
+            Err(Errno::SeatRevoked)
+        );
+        assert_eq!(h.display_release(&wm), Err(Errno::SeatRevoked));
+        assert_eq!(h.display_release(&wm), Err(Errno::SeatNotOwner));
+
+        // The seat is acquirable again after the revoke.
+        assert_eq!(h.display_acquire(&wm), Ok(0));
+    }
+
+    /// The `Seats` introspection domain reports the live seat: id, owner,
+    /// lease generation, and foreground console — and pages with the empty
+    /// terminator past the single seat (`plans/DISPLAY.md` D3).
+    #[test]
+    fn sysinfo_introspect_seats_reports_the_live_seat() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::SYSINFO_INTROSPECT], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let seat: &'static SeatRegistry = Box::leak(Box::new(SeatRegistry::new(
+            &crate::console::NULL_CONSOLE_INPUT,
+        )));
+        seat.acquire(SeatOwner(7))
+            .expect("fresh seat is acquirable");
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_seat_registry(seat);
+
+        // A buffer too small for one record fails closed before any state
+        // is read.
+        assert_eq!(
+            h.sysinfo_introspect(
+                &ctx,
+                IntrospectDomain::Seats.as_u32(),
+                0,
+                0x1000,
+                SeatRecord::WIRE_LEN - 1
+            ),
+            Err(Errno::BufferTooSmall)
+        );
+
+        // Offset 0 returns the single live record.
+        assert_eq!(
+            h.sysinfo_introspect(&ctx, IntrospectDomain::Seats.as_u32(), 0, 0x1000, 4096),
+            Ok(SeatRecord::WIRE_LEN as u64)
+        );
+        let delivered = h
+            .with_caller_aspace(&ctx, |space, physmap| {
+                let mut buf = [0u8; SeatRecord::WIRE_LEN];
+                copy_in(space, physmap, VirtAddr::new(0x1000), &mut buf).expect("readable");
+                buf
+            })
+            .expect("caller has a registered space");
+        let record = SeatRecord::from_bytes(&delivered).expect("valid record");
+        assert_eq!(record.seat_id, 0);
+        assert_eq!(record.owner(), Some(7));
+        assert_eq!(record.generation, 1);
+        assert_eq!(record.foreground_console, 0);
+
+        // Any later offset is the empty paging terminator, never an error.
+        assert_eq!(
+            h.sysinfo_introspect(&ctx, IntrospectDomain::Seats.as_u32(), 1, 0x1000, 4096),
+            Ok(0)
+        );
     }
 
     /// A `spawn` naming an installed console attaches the child's

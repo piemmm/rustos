@@ -93,6 +93,7 @@
 
 - [PID 1 service manager](./userland/init.md)
 - [System Information service](./userland/sysinfod.md)
+- [Seat-manager service](./userland/seatmgr.md)
 - [Networking service](./userland/net_icmp.md)
 - [elsh (Element Shell)](./userland/shell.md)
 - [Text login](./userland/login.md)

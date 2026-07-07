@@ -25,6 +25,8 @@ Le interrogazioni:
 - `uptime` — tempo dall'avvio e l'ora di avvio.
 - `limits`, `rlimits` — i propri limiti di risorse effettivi e il loro
   uso in tempo reale.
+- `seats` — l'inventario dei posti: il proprietario di ogni display e
+  la sua console in primo piano (richiede `CAP_SYSINFO_HW`).
 - `help` — la guida breve di questo comando.
 
 Senza interrogazione viene mostrata la guida breve.

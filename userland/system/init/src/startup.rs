@@ -64,13 +64,15 @@ pub const MAX_SERVICES: usize = 4;
 /// change.
 pub const DEFAULT_CONFIG: &str = "\
 # RustOS PID 1 startup configuration (plans/PI.md P6b / P11).
-# Open the system console, launch the System Information and device-manager
-# services, and start the login service as the session. `sysinfod` starts
-# first so the introspection endpoint (`AGENTS.md` §16.6) is published before
-# any client queries it.
+# Open the system console, launch the System Information, device-manager,
+# and seat-manager services, and start the login service as the session.
+# `sysinfod` starts first so the introspection endpoint (`AGENTS.md` §16.6)
+# is published before any client queries it; `seatmgr` (plans/DISPLAY.md D3)
+# holds the seat-multiplexing authority.
 console
 service /System/Services/sysinfod.app/Run
 service /System/Services/devmgr.app/Run
+service /System/Services/seatmgr.app/Run
 session /System/Services/login.app/Run
 ";
 
@@ -275,6 +277,7 @@ mod tests {
             &[
                 "/System/Services/sysinfod.app/Run",
                 "/System/Services/devmgr.app/Run",
+                "/System/Services/seatmgr.app/Run",
             ],
         );
     }

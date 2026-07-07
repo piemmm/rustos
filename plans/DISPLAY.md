@@ -236,19 +236,42 @@ and wrapper docs (`lib/rt`, `lib/abi-sys`), and
 prove a non-owner cannot steal/release/drain a held seat and a released
 seat returns input to the text foreground.
 
-### Stage D3 — `CAP_SEAT_ADMIN`, `seat_switch` / `seat_revoke`, and `seatmgr` `[ ]`
+### Stage D3 — `CAP_SEAT_ADMIN`, `seat_switch` / `seat_revoke`, and `seatmgr` `[x]`
 
-**Deliverables**
-- Add `CAP_SEAT_ADMIN` **with** the `seat_switch` / `seat_revoke` syscalls
-  that enforce it and the new `userland/system/seatmgr` service that holds it
-  (§5.2 rule 2). Revocation makes the old owner's subsequent present/read
-  fail closed with `SeatRevoked`; every switch/revoke is audit-logged (§19.4).
-- `seat_query` via the System Information API (§16.6); the `sysinfo` tool
-  gains a seats view (no `/proc`, §16.1).
+**Done.** The single new capability `CAP_SEAT_ADMIN` (id 33) landed with
+its two enforcement points and its sole holder in one change (§5.2 rule 2):
 
-**Done when:** tests prove admin-gated switch/revoke, fail-closed old-owner
-access post-revoke, audit events emitted, and unprivileged callers denied;
-gate green.
+- `seat_switch` (`abi-v1` 70) retargets an unowned seat's foreground text
+  console; the seat id (one seat today, id 0) and console index are
+  validated against the live topology before any state changes (`NotFound`
+  otherwise). `seat_revoke` (`abi-v1` 71) drives `SeatState::revoke` on
+  the kernel registry: the seat becomes acquirable, input returns to the
+  text foreground, and the evicted owner's next owner-gated call fails
+  closed with `SeatRevoked`. Both are `CAP_SEAT_ADMIN`-gated at dispatch
+  and audit-logged (`SEAT_SWITCHED` 4051; `SEAT_LEASE_REVOKED` 4052, with
+  the evicted task id). Wrappers in `lib/rt`; `ros_sys_seat_*` stubs in
+  `lib/abi-sys`; C headers regenerated.
+- `userland/system/seatmgr` (installed at
+  `/System/Services/seatmgr.app/Run`, launched by PID 1, headless-safe) is
+  the sole manifest holder. It binds the reserved `SEATMGR_ENDPOINT`
+  (`rustos_abi::seat`, squat-protected) and serves the fixed-width
+  `SeatAdminRequest` (`Switch`/`Revoke`), requiring each requester's
+  attested origin to itself carry `CAP_SEAT_ADMIN` before forwarding — the
+  kernel re-checks the capability and every index on each syscall. Own
+  audit range `14000..15000`; decoders covered by the `lib/abi` fuzz
+  harness.
+- Seat observability is the System Information API (§16.6, never `/proc`):
+  `IntrospectDomain::Seats` (served straight from the kernel seat
+  registry), the `SEAT_LIST` query (id 12, `CAP_SYSINFO_HW`, audited)
+  returning `SeatRecord`s, and the `sysinfo seats` view (Help updated in
+  all locales).
+
+Tests prove admin-gated switch/revoke with fail-closed topology
+validation, unprivileged-requester denial before any state, fail-closed
+old-owner access post-revoke, the audit events (including the evicted
+identity), the introspection paging contract, and the manifest/AppInfo
+pins. `docs/src/desktop/seat.md`, `docs/src/userland/seatmgr.md`, and the
+kernel/sysinfod pages state the enforced behaviour.
 
 ### Stage D4 — present right derived from the live lease `[ ]`
 

@@ -25,6 +25,8 @@ Die Abfragen:
 - `uptime` — Zeit seit dem Start und die Startzeit als Wanduhrzeit.
 - `limits`, `rlimits` — die eigenen wirksamen Ressourcenlimits und ihre
   aktuelle Nutzung.
+- `seats` — das Sitzinventar: der Besitzer jedes Displays und seine
+  Vordergrundkonsole (benötigt `CAP_SYSINFO_HW`).
 - `help` — die Kurzhilfe dieses Befehls.
 
 Ohne Abfrage wird die Kurzhilfe angezeigt.

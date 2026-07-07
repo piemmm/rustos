@@ -23,6 +23,8 @@ The queries:
 - `identity`, `id` — machine identity and OS version.
 - `uptime` — time since boot and the boot wall-clock time.
 - `limits`, `rlimits` — your effective resource limits and live usage.
+- `seats` — the seat inventory: each display's owner and foreground
+  console (needs `CAP_SYSINFO_HW`).
 - `help` — this command's own short help.
 
 With no query, the short help is shown.

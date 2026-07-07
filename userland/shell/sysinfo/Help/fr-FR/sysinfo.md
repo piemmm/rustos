@@ -25,6 +25,8 @@ Les requêtes :
 - `uptime` — temps écoulé depuis le démarrage et heure du démarrage.
 - `limits`, `rlimits` — vos limites de ressources effectives et leur
   usage en direct.
+- `seats` — l'inventaire des sièges : le propriétaire de chaque écran
+  et sa console de premier plan (nécessite `CAP_SYSINFO_HW`).
 - `help` — l'aide courte de cette commande.
 
 Sans requête, l'aide courte est affichée.

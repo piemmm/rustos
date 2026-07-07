@@ -94,6 +94,21 @@ pub const SYSINFOD_MANIFEST: &[CapabilityId] = &[
     CapabilityId::LOG_EMIT,
 ];
 
+/// The seat-manager service's manifest (`plans/DISPLAY.md` D3):
+/// `CAP_SEAT_ADMIN` — the seat-multiplexing authority this service is the
+/// sole holder of, re-checked by the kernel on every `seat_switch` /
+/// `seat_revoke` it forwards — `CAP_IPC_BIND_PRIVILEGED` to bind the
+/// reserved well-known `SEATMGR_ENDPOINT` rendezvous (reserved ids fail
+/// closed against squatters intercepting seat-administration requests),
+/// and `CAP_LOG_EMIT` for its structured audit records. It writes no
+/// standard stream (no console pair) and reads no filesystem.
+#[cfg(any(test, not(all(freestanding, kernel_isa = "aarch64"))))]
+pub const SEATMGR_MANIFEST: &[CapabilityId] = &[
+    CapabilityId::SEAT_ADMIN,
+    CapabilityId::IPC_BIND_PRIVILEGED,
+    CapabilityId::LOG_EMIT,
+];
+
 /// The `ps` tool's manifest: `CAP_CONSOLE_WRITE` for its listing on fd 1
 /// and diagnostics on fd 2, plus `CAP_FS_ACCESS` because its short-help
 /// switches read the bundle's own `Help/` tree through the secured VFS
@@ -288,6 +303,18 @@ mod tests {
             set(&[
                 CapabilityId::SYSINFO_INTROSPECT,
                 CapabilityId::SYSINFO_HW,
+                CapabilityId::IPC_BIND_PRIVILEGED,
+                CapabilityId::LOG_EMIT,
+            ])
+        );
+    }
+
+    #[test]
+    fn seatmgr_manifest_is_pinned() {
+        assert_eq!(
+            set(SEATMGR_MANIFEST),
+            set(&[
+                CapabilityId::SEAT_ADMIN,
                 CapabilityId::IPC_BIND_PRIVILEGED,
                 CapabilityId::LOG_EMIT,
             ])
@@ -505,6 +532,7 @@ mod tests {
             ("reset", AppKind::Command, RESET_MANIFEST),
             ("rm", AppKind::Command, FILE_TOOL_REQUEST),
             ("rmdir", AppKind::Command, PURE_TOOL_REQUEST),
+            ("seatmgr", AppKind::Service, SEATMGR_MANIFEST),
             ("seq", AppKind::Command, PURE_TOOL_REQUEST),
             ("sysinfo", AppKind::Command, SYSINFO_MANIFEST),
             ("sysinfod", AppKind::Service, SYSINFOD_MANIFEST),

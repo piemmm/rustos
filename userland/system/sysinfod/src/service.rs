@@ -3,8 +3,8 @@
 
 use rustos_abi::sysinfo::{
     spec_for, CpuTimeListRequest, CpuTimeRecord, MountListRequest, MountRecord, ProcessListRequest,
-    ProcessRecord, ResourceLimitRecord, SysinfoQueryId, SysinfoRequestHeader, UserDirectoryRecord,
-    UserDirectoryRequest,
+    ProcessRecord, ResourceLimitRecord, SeatListRequest, SeatRecord, SysinfoQueryId,
+    SysinfoRequestHeader, UserDirectoryRecord, UserDirectoryRequest,
 };
 use rustos_abi::{Errno, LimitKind};
 use rustos_log::{log, Event, EventId, Field, Level, Sink};
@@ -152,6 +152,8 @@ fn dispatch(
         mount_list(source, caller, payload, response)
     } else if query == SysinfoQueryId::CPU_TIME_STATS {
         cpu_time_list(source, caller, payload, response)
+    } else if query == SysinfoQueryId::SEAT_LIST {
+        seat_list(source, caller, payload, response)
     } else if query == SysinfoQueryId::RESOURCE_LIMITS {
         resource_limits(source, caller, response)
     } else if query == SysinfoQueryId::USER_DIRECTORY {
@@ -253,6 +255,26 @@ fn cpu_time_list(
     )
 }
 
+/// Decode the [`SeatListRequest`], apply paging, and pack the selected
+/// [`SeatRecord`]s into `response`.
+fn seat_list(
+    source: &dyn SysinfoSource,
+    caller: &Caller,
+    payload: &[u8],
+    response: &mut [u8],
+) -> Result<usize, Errno> {
+    let request = SeatListRequest::from_bytes(payload)?;
+    let records = source.seats(caller)?;
+    page_records(
+        response,
+        request.offset as usize,
+        request.limit as usize,
+        records.len(),
+        SeatRecord::WIRE_LEN,
+        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
+    )
+}
+
 /// Decode the [`UserDirectoryRequest`], apply paging, and pack the selected
 /// [`UserDirectoryRecord`]s into `response`.
 fn user_directory(
@@ -343,9 +365,10 @@ mod tests {
     use rustos_abi::sysinfo::{
         CpuTimeListRequest, CpuTimeRecord, KernelMemoryStats, LoadAverage, MountListRequest,
         MountRecord, ProcessListRequest, ProcessRecord, ProcessState, ResourceLimitRecord,
-        SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime, UserDirectoryRecord,
-        UserDirectoryRequest, LOAD_FIXED_SHIFT, MACHINE_ID_LEN, RESOURCE_LIMITS_REPORT_LEN,
-        SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT,
+        SeatListRequest, SeatRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
+        UserDirectoryRecord, UserDirectoryRequest, LOAD_FIXED_SHIFT, MACHINE_ID_LEN,
+        RESOURCE_LIMITS_REPORT_LEN, SEAT_FLAG_OWNED, SYSINFO_REQUEST_MAGIC,
+        SYSINFO_VERSION_CURRENT,
     };
     use rustos_abi::time::{Duration64, Time64};
     use rustos_abi::{
@@ -523,6 +546,15 @@ mod tests {
                     idle_ns: 900,
                 },
             ])
+        }
+        fn seats(&self, _caller: &Caller) -> Result<alloc::vec::Vec<SeatRecord>, Errno> {
+            Ok(alloc::vec![SeatRecord {
+                seat_id: 0,
+                owner_task: 7,
+                generation: 3,
+                foreground_console: 1,
+                flags: SEAT_FLAG_OWNED,
+            }])
         }
         fn resource_limits(
             &self,
@@ -893,6 +925,57 @@ mod tests {
         let req_end = request_bytes(SysinfoQueryId::CPU_TIME_STATS, &ctr_end.to_le_bytes());
         assert_eq!(
             serve(&source, &caller(&caps), &sink, &req_end, &mut resp),
+            Ok(0)
+        );
+    }
+
+    #[test]
+    fn seat_list_is_gated_audited_and_pages() {
+        let source = FixtureSource::new();
+        let sink = RecordingSink::new();
+        let slr = SeatListRequest {
+            offset: 0,
+            limit: 8,
+            flags: 0,
+        };
+        let req = request_bytes(SysinfoQueryId::SEAT_LIST, &slr.to_le_bytes());
+        let mut resp = [0u8; 256];
+
+        // Denied without `CAP_SYSINFO_HW`; the refusal is logged.
+        let denied = Caps(&[]);
+        assert_eq!(
+            serve(&source, &caller(&denied), &sink, &req, &mut resp),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            sink.events.borrow().as_slice(),
+            &[(Level::Warn, events::QUERY_DENIED)]
+        );
+
+        // Served (and audited) for a `CAP_SYSINFO_HW` holder.
+        let granted = Caps(&[CapabilityId::SYSINFO_HW]);
+        let sink = RecordingSink::new();
+        let n = serve(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
+        assert_eq!(n, SeatRecord::WIRE_LEN);
+        let record = SeatRecord::from_bytes(&resp[..n]).unwrap();
+        assert_eq!(record.seat_id, 0);
+        assert_eq!(record.owner(), Some(7));
+        assert_eq!(record.generation, 3);
+        assert_eq!(record.foreground_console, 1);
+        assert_eq!(
+            sink.events.borrow().as_slice(),
+            &[(Level::Info, events::QUERY_SERVED)]
+        );
+
+        // Paging past the single seat returns the empty terminator.
+        let slr_end = SeatListRequest {
+            offset: 1,
+            limit: 8,
+            flags: 0,
+        };
+        let req_end = request_bytes(SysinfoQueryId::SEAT_LIST, &slr_end.to_le_bytes());
+        assert_eq!(
+            serve(&source, &caller(&granted), &sink, &req_end, &mut resp),
             Ok(0)
         );
     }

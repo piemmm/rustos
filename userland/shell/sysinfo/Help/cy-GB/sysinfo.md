@@ -25,6 +25,8 @@ Yr ymholiadau:
 - `uptime` — yr amser ers cychwyn ac amser cloc wal y cychwyn.
 - `limits`, `rlimits` — eich terfynau adnoddau effeithiol a'r defnydd
   byw.
+- `seats` — rhestr y seddi: perchennog pob dangosydd a'i gonsol
+  blaendir (angen `CAP_SYSINFO_HW`).
 - `help` — cymorth byr y gorchymyn hwn ei hun.
 
 Heb ymholiad, dangosir y cymorth byr.

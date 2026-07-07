@@ -541,6 +541,50 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Switch a seat's foreground session — retarget which text console an
+    /// unowned seat's input drains to (`plans/DISPLAY.md` D3).
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::SEAT_ADMIN`]. `seat_id` names the seat (one seat
+    /// today, id `0`) and `console` the installed text console that becomes
+    /// its foreground. The implementation validates both against the live
+    /// seat registry and console list — an unknown seat or console fails
+    /// closed with [`Errno::NotFound`] before any state changes — then
+    /// retargets the foreground and audits the switch. A held seat keeps
+    /// routing to its owner until the lease ends.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]: a build with no seat registry wired has
+    /// no foreground to switch. The real handler is installed in
+    /// `kernel/core`.
+    fn seat_switch(
+        &self,
+        _caller: &CallerContext<'_>,
+        _seat_id: u64,
+        _console: u32,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Forcibly revoke a seat's current lease — evict a wedged or
+    /// switched-away owner (`plans/DISPLAY.md` D3).
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::SEAT_ADMIN`]. `seat_id` names the seat (one seat
+    /// today, id `0`); an unknown seat fails closed with
+    /// [`Errno::NotFound`] and an unowned seat refuses with
+    /// [`Errno::SeatNotOwner`]. On success the seat becomes acquirable,
+    /// input returns to the text foreground, the evicted owner's next
+    /// owner-gated call sees the distinct [`Errno::SeatRevoked`], and the
+    /// eviction is audited with the evicted owner's task id.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]: a build with no seat registry wired has
+    /// no lease to revoke. The real handler is installed in `kernel/core`.
+    fn seat_revoke(&self, _caller: &CallerContext<'_>, _seat_id: u64) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// Report how many system text consoles are installed (`plans/PI.md` P11).
     ///
     /// The dispatcher has already checked the caller holds
@@ -1775,6 +1819,12 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 self.handlers
                     .users_admin(caller, args.0[0], req_len, args.0[2], out_cap)
             }
+            SyscallNumber::SEAT_SWITCH => {
+                // `validate_arg` guarantees args[1] fits `u32`.
+                self.handlers
+                    .seat_switch(caller, args.0[0], decode_u32(args.0[1]))
+            }
+            SyscallNumber::SEAT_REVOKE => self.handlers.seat_revoke(caller, args.0[0]),
             SyscallNumber::CONSOLE_COUNT => self.handlers.console_count(caller),
             SyscallNumber::STREAM_INPUT_MODE => self.handlers.stream_input_mode(
                 caller,
@@ -2544,6 +2594,19 @@ mod tests {
             // wiring a real account-administration engine here.
             Ok((req_len + out_cap) as u64)
         }
+        fn seat_switch(&self, _c: &CallerContext<'_>, seat_id: u64, console: u32) -> SyscallResult {
+            self.record("seat_switch");
+            // Echo both decoded arguments back so the reachability test can
+            // assert the dispatcher decoded `(seat_id, console)` without
+            // wiring a real seat registry here.
+            Ok(seat_id + u64::from(console))
+        }
+        fn seat_revoke(&self, _c: &CallerContext<'_>, seat_id: u64) -> SyscallResult {
+            self.record("seat_revoke");
+            // Echo the seat id back so the reachability test can assert the
+            // dispatcher decoded it without wiring a real seat registry here.
+            Ok(seat_id)
+        }
         fn console_count(&self, _c: &CallerContext<'_>) -> SyscallResult {
             self.record("console_count");
             // A fabricated single-console topology so the reachability
@@ -3024,6 +3087,7 @@ mod tests {
                 CapabilityId::FS_ACCESS,
                 CapabilityId::TIME_SET,
                 CapabilityId::SYSINFO_INTROSPECT,
+                CapabilityId::SEAT_ADMIN,
             ],
             &sink,
         );

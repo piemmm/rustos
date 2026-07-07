@@ -1,0 +1,14 @@
+# Signed-AppInfo manifest source for the `seatmgr` seat-manager service
+# (a service is an app, AGENTS.md §16.2; plans/DISPLAY.md D3). Discovered
+# by the build's app-bundle composer and planted under /System/Services/.
+# The capability list is the bundle's request: CAP_SEAT_ADMIN — the
+# seat-multiplexing authority this service is the sole holder of (the
+# kernel re-checks it on every seat_switch/seat_revoke) —
+# CAP_IPC_BIND_PRIVILEGED for the reserved well-known seat-admin endpoint,
+# and CAP_LOG_EMIT for its audit records. No console pair: it writes no
+# standard stream.
+id = "os.rustos.seatmgr"
+name = "seatmgr"
+version = "0.1.0"
+kind = "service"
+capabilities = ["CAP_SEAT_ADMIN", "CAP_IPC_BIND_PRIVILEGED", "CAP_LOG_EMIT"]

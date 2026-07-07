@@ -29,10 +29,11 @@ use rustos_abi::fs::{DirEntry, FileKind, FileStat, OpenFlags, FS_NAME_MAX};
 use rustos_abi::input::{KeyInput, PointerInput};
 use rustos_abi::process::{ProcessStart, ProcessStartHeader, StringSlot};
 use rustos_abi::rlimit::ResourceLimit;
+use rustos_abi::seat::{decode_seat_reply, SeatAdminRequest};
 use rustos_abi::sysinfo::{
     decode_reply, encode_reply_ok, IntrospectDomain, KernelMemoryStats, MountListRequest,
-    MountRecord, ProcessListRequest, ProcessRecord, ResourceLimitRecord, SysinfoRequestHeader,
-    SystemIdentity, Uptime, SYSINFO_REPLY_STATUS_LEN,
+    MountRecord, ProcessListRequest, ProcessRecord, ResourceLimitRecord, SeatListRequest,
+    SeatRecord, SysinfoRequestHeader, SystemIdentity, Uptime, SYSINFO_REPLY_STATUS_LEN,
 };
 use rustos_abi::time::{Duration64, Time64};
 use rustos_abi::users_admin::{
@@ -140,6 +141,29 @@ fn exercise_sysinfo_records(bytes: &[u8]) {
             .expect("round-trip of an accepted identity must succeed");
         assert_eq!(id, redecoded);
     }
+    if let Ok(req) = SeatListRequest::from_bytes(bytes) {
+        let redecoded = SeatListRequest::from_bytes(&req.to_le_bytes())
+            .expect("round-trip of an accepted request must succeed");
+        assert_eq!(req, redecoded);
+    }
+    if let Ok(rec) = SeatRecord::from_bytes(bytes) {
+        let redecoded = SeatRecord::from_bytes(&rec.to_le_bytes())
+            .expect("round-trip of an accepted record must succeed");
+        assert_eq!(rec, redecoded);
+    }
+}
+
+/// Drive the seat-manager protocol decoders on `bytes` (one arm of
+/// [`exercise`]): an accepted seat-administration request must round-trip
+/// through its encoder, and the reply-frame decoder must refuse a corrupt
+/// status word cleanly, never panic.
+fn exercise_seatmgr(bytes: &[u8]) {
+    if let Ok(request) = SeatAdminRequest::from_bytes(bytes) {
+        let redecoded = SeatAdminRequest::from_bytes(&request.to_le_bytes())
+            .expect("round-trip of an accepted request must succeed");
+        assert_eq!(request, redecoded);
+    }
+    let _ = decode_seat_reply(bytes);
 }
 
 /// Drive every ABI decoder on `bytes`.
@@ -172,6 +196,7 @@ fn exercise(bytes: &[u8]) {
     }
     exercise_users_admin(bytes);
     exercise_sysinfo_records(bytes);
+    exercise_seatmgr(bytes);
     exercise_elevate(bytes);
     if let Ok(time) = Time64::from_bytes(bytes) {
         let redecoded = Time64::from_bytes(&time.to_le_bytes())

@@ -292,6 +292,15 @@ impl SeatState {
         self.foreground
     }
 
+    /// The generation of the most recently minted lease — the seat's
+    /// monotonic grant counter — or `0` if the seat has never been
+    /// acquired. Observability for the seat inventory; the routing and
+    /// ownership checks always consult the live lease, never this counter.
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.generations
+    }
+
     /// Retarget the seat's foreground text console (the console-switch
     /// half of a foreground handoff). Takes effect immediately for an
     /// unowned seat; a held seat keeps routing to its owner until the
@@ -423,12 +432,14 @@ mod tests {
     #[test]
     fn generations_increase_across_every_grant() {
         let mut seat = SeatState::new(CONSOLE);
+        assert_eq!(seat.generation(), 0);
         let a = seat.acquire(WM).expect("acquire");
         seat.release(WM).expect("release");
         let b = seat.acquire(INTRUDER).expect("acquire");
         seat.revoke().expect("revoke");
         let c = seat.acquire(WM).expect("acquire");
         assert_eq!((a.generation, b.generation, c.generation), (1, 2, 3));
+        assert_eq!(seat.generation(), 3);
     }
 
     #[test]

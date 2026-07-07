@@ -119,11 +119,11 @@ mod kernel {
 
     /// `EventId` the spawn caller emits once a ring-3 image is built. Pinned
     /// by the `event_ids_are_unique` test in `kernel/core/src/audit.rs`. PASS
-    /// requires five: PID 1 `init`, the `sysinfod` and `devmgr` services it
-    /// launches first, the login it then launches, and the login it
-    /// **relaunches** after reaping the first — the fifth is the witness that
-    /// the `wait`→reap→relaunch supervision cycle completed (`plans/PI.md` X4
-    /// follow-on).
+    /// requires six: PID 1 `init`, the `sysinfod`, `devmgr`, and `seatmgr`
+    /// services it launches first, the login it then launches, and the login
+    /// it **relaunches** after reaping the first — the sixth is the witness
+    /// that the `wait`→reap→relaunch supervision cycle completed
+    /// (`plans/PI.md` X4 follow-on).
     const PROCESS_SPAWNED_EVENT_ID: EventId = EventId(4030);
 
     /// `EventId` the syscall dispatcher emits for a successfully dispatched
@@ -138,7 +138,7 @@ mod kernel {
 
     /// Sink that replays every event through [`SERIAL_SINK`] (so the QEMU
     /// transcript captures the full boot + spawn timeline) and reports PASS to
-    /// QEMU once **five** processes were built and **six** audited syscalls
+    /// QEMU once **six** processes were built and **seven** audited syscalls
     /// have run — proving PID 1 launched the boot services, launched the
     /// session into its own isolated ring-3 space, the session executed
     /// there, and `init` reaped it and relaunched a fresh session (the full
@@ -153,7 +153,7 @@ mod kernel {
             } else if event.id == SYSCALL_INVOKED_EVENT_ID {
                 SYSCALLS.fetch_add(1, Ordering::AcqRel);
             }
-            if SPAWNED.load(Ordering::Acquire) >= 5 && SYSCALLS.load(Ordering::Acquire) >= 6 {
+            if SPAWNED.load(Ordering::Acquire) >= 6 && SYSCALLS.load(Ordering::Acquire) >= 7 {
                 qemu_exit::exit_success();
             }
         }
