@@ -503,15 +503,17 @@ the `fw_cfg`/`ramfb` fallback on the QEMU `virt` board. On the Pi:
   sink) routes by build profile. A **release build** renders to the
   screen when `video::is_active` and falls back to the UART otherwise.
   A **debug build** (`cfg(debug_assertions)`) routes the whole
-  log/debug stream to the **UART instead** — even while a login session
-  owns the UART — so a serial capture of a development boot carries the
+  log/debug stream to the **UART instead** — even when the video console
+  is active — so a serial capture of a development boot carries the
   full diagnostic stream while the screen stays clear for the
   user-facing session; with no UART discovered the bounded transmit
   drops the bytes and the screen is never the debug log's sink. The
-  **stream** path is split per console (`plans/PI.md`
-  P11): `boot_aarch64` installs `[VideoConsole, UartConsole]` through
-  `BootInfo::with_consoles` when the framebuffer console is active
-  (else `[UartConsole]`). `VideoConsole` writes through
+  **stream** path installs one console (`plans/PI.md`
+  P11): `boot_aarch64` installs `[VideoConsole]` through
+  `BootInfo::with_consoles` when the framebuffer console is active — the
+  UART is then the debug log line only, with no console and no session
+  that would draw over the log stream — else `[UartConsole]`.
+  `VideoConsole` writes through
   `video::write_bytes`; its input half is the shared `VIDEO_KEYBOARD`
   queue (`rustos_kernel_core::ConsoleInputQueue`), which is both the
   console's `ConsoleRead` half (drained by a video-login `stream_read`)
@@ -524,8 +526,8 @@ the `fw_cfg`/`ramfb` fallback on the QEMU `virt` board. On the Pi:
   USB-HID/xHCI hardware path land on the Pi-metal P10 track; this is the
   kernel-side delivery seam it pushes into.) `UartConsole`
   (`serial::write_console_bytes` / `read_console_bytes`) is the UART's
-  own stream backing with its **own login session** and never touches
-  the display. The UART transmit wait is **bounded**
+  own stream backing — the login console of a serial-only boot — and
+  never touches the display. The UART transmit wait is **bounded**
   (`console::tx_wait`): a transmitter that never drains — e.g. a
   flow-blocked PL011 still attached to the Bluetooth chip — is declared
   wedged after `TX_POLL_BUDGET` polls and bytes are dropped (one cheap

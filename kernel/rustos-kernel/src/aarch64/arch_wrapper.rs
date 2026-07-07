@@ -416,8 +416,9 @@ pub static UART_CONSOLE_READ: UartConsoleRead = UartConsoleRead;
 /// (USB HID / PS-2 — the P10 input wiring), whose decoded key edges the
 /// keyboard-input driver hands to the [`SEAT_REGISTRY`], which (while
 /// the seat is unowned) encodes a press and enqueues it here, never on
-/// the UART, which is its own console with its own login (`plans/PI.md`
-/// P11). Until a keyboard driver injects anything the queue is empty, so
+/// the UART, which is the session-free debug log line while a display is
+/// active (`plans/PI.md` P11). Until a keyboard driver injects anything
+/// the queue is empty, so
 /// kernel-core's `BlockingConsoleRead` parks a reader until a keystroke
 /// arrives — the prompt waits instead of exiting or borrowing the serial
 /// line.
@@ -459,9 +460,9 @@ pub static VIDEO_CONSOLE: VideoConsole = VideoConsole;
 /// *text sink*, into which an injected key press is encoded
 /// while the seat is unowned. The same `'static` backs both
 /// halves, so the registry's push wakes the reader parked in kernel-core's
-/// `BlockingConsoleRead`. The UART console reads its own hardware FIFO
-/// and so carries no such queue — the video login takes input only from
-/// its own keyboard, never the serial line (`plans/PI.md` P11).
+/// `BlockingConsoleRead`. The video login takes input only from its own
+/// keyboard, never the serial line — the UART carries no console at all
+/// while a display is active (`plans/PI.md` P11).
 pub static VIDEO_KEYBOARD: rustos_kernel_core::ConsoleInputQueue =
     rustos_kernel_core::ConsoleInputQueue::new();
 
@@ -471,7 +472,7 @@ pub static VIDEO_KEYBOARD: rustos_kernel_core::ConsoleInputQueue =
 /// surface owner).
 ///
 /// Its *text sink* is the **video console device**
-/// (`VIDEO_AND_UART_CONSOLES[0]`), whose line discipline forwards to
+/// (`VIDEO_ONLY_CONSOLES[0]`), whose line discipline forwards to
 /// [`VIDEO_KEYBOARD`]: while the seat is unowned (the default for a freshly
 /// booted text login) the registry encodes each injected key *press* to the
 /// video console's tty bytes and pushes them through the console's input
@@ -485,7 +486,7 @@ pub static VIDEO_KEYBOARD: rustos_kernel_core::ConsoleInputQueue =
 /// is shared by the in-kernel keyboard driver's `ArbiterConsoleSink` (which
 /// injects key edges) and the `key_inject` / `display_acquire` /
 /// `display_release` / `keyboard_read` syscall handlers.
-pub static SEAT_REGISTRY: SeatRegistry = SeatRegistry::new(&VIDEO_AND_UART_CONSOLES[0]);
+pub static SEAT_REGISTRY: SeatRegistry = SeatRegistry::new(&VIDEO_ONLY_CONSOLES[0]);
 
 /// The console-0 read half of the video console, gated on the in-kernel
 /// root-unlock service's ownership latch (`plans/PI.md` P11 Chunk B-2 item
@@ -514,10 +515,13 @@ static GATED_UART_READ: crate::unlock_service::GatedConsoleRead =
     );
 
 /// The console list installed when the framebuffer boot console is
-/// active: the video console is the primary (index 0, PID 1's banner +
-/// the first login) and the UART is an independent second console with
-/// its own login session (`plans/PI.md` P11).
-pub static VIDEO_AND_UART_CONSOLES: [rustos_kernel_core::ConsoleDevice; 2] = [
+/// active: the video console is the **only** console (index 0, PID 1's
+/// banner + the login session). The UART then carries no session at all —
+/// it is the debug log line (`rustos_arch_aarch64::SERIAL_SINK`), and a
+/// full-screen login drawing over the log stream would garble both — so
+/// no stream backing is installed for it and its receive interrupt is
+/// never enabled (`plans/PI.md` P11).
+pub static VIDEO_ONLY_CONSOLES: [rustos_kernel_core::ConsoleDevice; 1] = [
     // The video console: written to the framebuffer, read (through the
     // unlock ownership gate) from the shared keyboard type-ahead queue,
     // and fed by the input-focus arbiter's text sink into that same queue.
@@ -526,7 +530,6 @@ pub static VIDEO_AND_UART_CONSOLES: [rustos_kernel_core::ConsoleDevice; 2] = [
         &GATED_VIDEO_READ,
         &VIDEO_KEYBOARD,
     ),
-    rustos_kernel_core::ConsoleDevice::with_input(&UART_CONSOLE, &UART_CONSOLE_READ, &UART_INPUT),
 ];
 
 /// The console list installed when no display came up (QEMU `virt`, a
@@ -539,25 +542,18 @@ pub static UART_ONLY_CONSOLES: [rustos_kernel_core::ConsoleDevice; 1] =
         &UART_INPUT,
     )];
 
-/// The **installed** UART console device — the primary console on a
-/// headless boot, the independent second console beside an active video
-/// console — selected by the same `video::is_active()` test the boot path's
-/// `with_consoles` uses, so it is always the very device the
-/// `stream_input_mode` / `console_foreground` syscalls act on.
+/// The **installed** UART console device — the primary (and only) console
+/// on a serial-only boot. With an active video console the UART is the
+/// debug log line and carries no console at all, its receive interrupt is
+/// never enabled, and the RX drain that consumes this device never runs.
 ///
 /// The UART RX drain pushes received bytes through this device rather than
 /// the raw [`UART_INPUT`] queue, so the console's cooked-mode line
 /// discipline sees every byte at arrival time (`plans/SPAWN.md` SP9): a
 /// `^C`/`^Z` typed while a foreground job runs is delivered as a signal
-/// even though no task is reading. Both candidate devices forward to the
-/// same [`UART_INPUT`] queue, so the drain's free-space flow control is
-/// unchanged.
+/// even though no task is reading.
 pub fn uart_console_device() -> &'static rustos_kernel_core::ConsoleDevice {
-    if rustos_arch_aarch64::video::is_active() {
-        &VIDEO_AND_UART_CONSOLES[1]
-    } else {
-        &UART_ONLY_CONSOLES[0]
-    }
+    &UART_ONLY_CONSOLES[0]
 }
 
 #[cfg(test)]

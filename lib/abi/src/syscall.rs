@@ -255,11 +255,13 @@ impl SyscallNumber {
     ///
     /// No arguments. Returns the number of console stream backings the
     /// boot path installed — each one an independent text console (the
-    /// video console, a UART) a spawner may attach a child's standard
-    /// streams to through [`SyscallNumber::SPAWN`]'s `console`
-    /// argument. PID 1 `init` uses it to start one login session per
-    /// discovered console (`plans/PI.md` P11 — the video console and
-    /// the UART are separate session contexts). Gated by
+    /// video console when a display is active, else the discovered UART)
+    /// a spawner may attach a child's standard streams to through
+    /// [`SyscallNumber::SPAWN`]'s `console` argument. PID 1 `init` uses
+    /// it to start one login session per installed console
+    /// (`plans/PI.md` P11). A UART beside an active display is not
+    /// installed as a console at all: it carries only the debug log, so
+    /// no session can draw over the log stream. Gated by
     /// [`crate::CapabilityId::CONSOLE_WRITE`]: console topology belongs
     /// to the principals that drive consoles, not to every task.
     pub const CONSOLE_COUNT: Self = Self(20);

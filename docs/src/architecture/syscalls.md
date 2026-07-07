@@ -800,7 +800,8 @@ keyboard-input driver that has decoded a directly attached keyboard
 (USB-HID / PS-2) pushes the bytes here; the kernel copies them in and
 enqueues them on that console's `ConsoleInputQueue`, which a `stream_read`
 from the console's login then drains — so the video console reads its own
-keyboard rather than the UART (separate session contexts). It is gated on
+keyboard, never the serial line (with a display active the UART carries
+only the debug log and is not installed as a console). It is gated on
 **`CAP_INPUT_INJECT`**: feeding the system console's input is privileged,
 never ambient (`AGENTS.md` §4), so only the keyboard-input driver the
 device manager loaded holds it; like the other per-byte stream operations

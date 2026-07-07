@@ -1014,8 +1014,8 @@ pub fn spawn_as(path: &[u8], console: u64, target_uid: u32) -> i64 {
 /// the kernel's installed console list (its length is reported by
 /// [`console_count`]); an index with no installed console fails closed
 /// with `-errno` (`NotFound`). PID 1 `init` uses this to start one login
-/// session per discovered text console — the video console and the UART
-/// are separate session contexts.
+/// session per installed text console (the video console when a display
+/// is active, else the discovered UART).
 #[must_use]
 pub fn spawn_at(path: &[u8], console: u32) -> i64 {
     // A specific console, but the caller's own credential (no user switch):

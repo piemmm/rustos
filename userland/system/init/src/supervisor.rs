@@ -1,8 +1,9 @@
-//! PID 1's session supervision: one login session per discovered text
+//! PID 1's session supervision: one login session per installed text
 //! console (`plans/PI.md` P11).
 //!
-//! The kernel installs one stream backing per text console — the video
-//! console and the UART are **separate session contexts** — and reports
+//! The kernel installs one stream backing per text console it discovers —
+//! the video console when a display is active (the UART then carries only
+//! the debug log, with no session), else the discovered UART — and reports
 //! how many exist through the `console_count` syscall. PID 1 launches the
 //! configured session program once per console with `spawn`'s explicit
 //! console selector and supervises the whole set with wait-any: whichever
@@ -31,8 +32,8 @@
 /// supervisor.
 ///
 /// A stack-array sizing for the no-heap PID 1, not a system policy: the
-/// kernel's console list is discovered hardware (today at most a display
-/// plus a UART), and the slot table must live on `main`'s stack until the
+/// kernel's console list is discovered hardware (today a single display
+/// or UART console), and the slot table must live on `main`'s stack until the
 /// userland heap lands (`plans/SPAWN.md` `SP5b`), after which the table can
 /// size itself from `console_count` alone (grow when
 /// growth is possible). Consoles beyond the bound are left without a
@@ -321,8 +322,8 @@ mod tests {
     fn one_session_is_launched_per_console() {
         // Two consoles; both sessions then crash-loop to exhaustion. The
         // launch fan-out attaches one session to console 0 and one to
-        // console 1 — the video console and the UART are separate session
-        // contexts (`plans/PI.md` P11).
+        // console 1 — the supervisor covers every console the kernel
+        // reports, whatever its backing (`plans/PI.md` P11).
         let mut sys = ScriptedSessions::new(
             2,
             // budget=3 per console: 2 initial + 2×2 relaunches.

@@ -69,7 +69,7 @@ use rustos_log::{log, Event, EventId, Field, Level, Sink};
 use rustos_util::fmt::format_hex_u64;
 
 use crate::aarch64::arch_wrapper::{
-    Aarch64BinArch, SEAT_REGISTRY, UART_ONLY_CONSOLES, VIDEO_AND_UART_CONSOLES,
+    Aarch64BinArch, SEAT_REGISTRY, UART_ONLY_CONSOLES, VIDEO_ONLY_CONSOLES,
 };
 use crate::aarch64::dispatch::{production_dispatch, DISPATCH_SLOT};
 use crate::mem_map::{build_memory_map, region_byte_totals};
@@ -879,10 +879,10 @@ fn audit_root_storage_binding(dtb: u64, log_sink: &'static (dyn Sink + Sync)) {
 /// hook into [`DISPATCH_SLOT`]), wraps the validated [`Aarch64Arch`] in
 /// the local [`Aarch64BinArch`] `KernelArch`, and installs the discovered
 /// console list: with the framebuffer boot console active the video
-/// console is index 0 and the UART an independent second console (one
-/// login session each, `plans/PI.md` P11); otherwise the UART is the
-/// only console. A hand-off that `BootInfo::validate` rejects parks
-/// fail-closed rather than entering the core.
+/// console is the only console and the UART stays the session-free debug
+/// log line (`plans/PI.md` P11); otherwise the UART is the only console.
+/// A hand-off that `BootInfo::validate` rejects parks fail-closed rather
+/// than entering the core.
 fn enter_kernel_core(
     arch: Aarch64Arch,
     memory_map: rustos_kernel_mem::BootMemoryMap,
@@ -912,12 +912,12 @@ fn enter_kernel_core(
     )
     // Install the discovered console list (`plans/PI.md` P11): when the
     // P7b framebuffer boot console came up, the display (with its
-    // keyboard input seam) is the primary console and the UART is an
-    // independent second console with its own login session; with no
-    // display, the discovered UART is the only console. Each entry is
+    // keyboard input seam) is the only console — the UART then carries
+    // the debug log alone, with no session that would draw over it; with
+    // no display, the discovered UART is the only console. Each entry is
     // a `stream_write`/`stream_read` backing pair.
     .with_consoles(if video::is_active() {
-        &VIDEO_AND_UART_CONSOLES
+        &VIDEO_ONLY_CONSOLES
     } else {
         &UART_ONLY_CONSOLES
     })

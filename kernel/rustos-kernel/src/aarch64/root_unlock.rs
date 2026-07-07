@@ -319,13 +319,17 @@ fn release_console0_to_login() {
     // re-parks).
     rustos_kernel_core::console_wake();
     LATE_USERS_DB.resolve();
-    // The passphrase poll is over, so switch the UART console from polled to
-    // interrupt-driven: a `login` reader now parks off the run queue and the
-    // receive interrupt wakes it. A no-op when the
-    // boot path discovered no console interrupt (the console then stays on the
-    // polled path) or when the console is the video keyboard rather than the
-    // UART (`crate::aarch64::gic_irq::enable_uart_console_irq`).
-    crate::aarch64::gic_irq::enable_uart_console_irq();
+    // The passphrase poll is over: on a serial-only boot, switch the UART
+    // console from polled to interrupt-driven so a `login` reader now parks
+    // off the run queue and the receive interrupt wakes it. A no-op when the
+    // boot path discovered no console interrupt (the console then stays on
+    // the polled path). With an active video console the UART is the
+    // session-free debug log line — no console is installed on it, so its
+    // receive interrupt is left disabled rather than armed for a reader
+    // that can never exist.
+    if !video::is_active() {
+        crate::aarch64::gic_irq::enable_uart_console_irq();
+    }
 }
 
 /// Admit the in-kernel root-unlock kthread if the boot path bound a

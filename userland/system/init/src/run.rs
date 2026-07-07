@@ -13,9 +13,9 @@
 //! first banner line to its inherited standard output (fd 1) through the
 //! shared `rustos_rt::io` layer over the `abi-v1` `stream_write` syscall
 //! (`init` binds to the stream, never a device), then **supervises** the
-//! user's sessions: one session program per discovered text console
-//! (`console_count` / `spawn_at` — the video console and the UART are
-//! separate session contexts, `plans/PI.md` P11), reaped with wait-any and
+//! user's sessions: one session program per installed text console
+//! (`console_count` / `spawn_at` — the video console when a display is
+//! active, else the discovered UART, `plans/PI.md` P11), reaped with wait-any and
 //! relaunched on their own consoles ([`supervisor`]). The runtime routes
 //! `main`'s return value through the `exit` syscall.
 //!

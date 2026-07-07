@@ -2494,8 +2494,10 @@ reflink independence, acorn preset round-trip).
   capability grants and argument vectors (`EmbeddedProgram` — login
   additionally holds `CAP_PROC_SPAWN` + `CAP_USERS_READ`; the shell only
   the console pair). Per-console sessions are wired: the kernel installs
-  one stream backing per discovered text console (`BootInfo::with_consoles`
-  — the video console and the UART are separate session contexts), the
+  one stream backing per installed text console (`BootInfo::with_consoles`
+  — the video console when a display is active, else the discovered UART;
+  a UART beside an active display carries only the debug log and hosts no
+  session), the
   per-process descriptor table records each descriptor's console index,
   `spawn`'s console selector (`CONSOLE_INHERIT` or an explicit validated
   index) plus the `console_count` syscall (no. 20) let PID 1 `init`
@@ -2508,7 +2510,7 @@ reflink independence, acorn preset round-trip).
   keyboard-input driver pushes decoded console bytes into a console's
   kernel-side `ConsoleInputQueue` through the `console_input` syscall
   (no. 22, `CAP_INPUT_INJECT`), which a video-login `stream_read` drains
-  (the UART stays its own session, fail-closed to injection). The
+  (with a display active the UART is the session-free debug log line). The
   keyboard *producer* is now wired host-side: the shared terminal key map
   `lib/keymap` (`encode_key` — `Key`+`Modifiers`→console tty bytes,
   allocation-free, reusing the `lib/vt` escape vocabulary, §2.2) plus the

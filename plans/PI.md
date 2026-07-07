@@ -145,9 +145,11 @@ The work splits into three arcs:
 - **Arc C — Real peripherals + bootable image + desktop (P7–P10).**
   Mailbox/framebuffer, SD, USB-HID, the SD-card image, and finally the
   WM/taskbar on the HVS path. These need real hardware to *fully* prove.
-- **Arc D — Multi-user login (P11).** Every text console sits at a
-  `login:` prompt backed by the `/System/Security/Users` database; the
-  video and UART consoles are separate session contexts.
+- **Arc D — Multi-user login (P11).** Every installed text console sits
+  at a `login:` prompt backed by the `/System/Security/Users` database.
+  With a display active the video console is the only console — the UART
+  then carries the debug log alone, with no session; on a serial-only
+  boot the UART is the console.
 
 Land them in order; each stage's "Done when" gate is binding.
 
@@ -4360,11 +4362,11 @@ two users — or the same user twice — can be logged in concurrently.
   each byte as the consumer drains it (a typed password transits it,
   §4 / §23.1). `ConsoleDevice` gained an `input` half (default
   `NULL_CONSOLE_INPUT`, fail-closed; preserved across the init
-  `BlockingConsoleRead` rebuild); aarch64's `VIDEO_AND_UART_CONSOLES[0]`
-  is backed by the shared `VIDEO_KEYBOARD` queue, while the UART console
-  keeps `NULL_CONSOLE_INPUT` (a `console_input` to it fails closed) so the
+  `BlockingConsoleRead` rebuild); aarch64's `VIDEO_ONLY_CONSOLES[0]`
+  is backed by the shared `VIDEO_KEYBOARD` queue, so the
   video login takes input only from its own keyboard, never the serial
-  line. First-party wrapper `rustos_rt::console_input`; C stub
+  line (with a display active the UART is not installed as a console at
+  all). First-party wrapper `rustos_rt::console_input`; C stub
   `ros_sys_console_input` (header regenerated). Proven by kernel-core
   queue unit tests (FIFO drain, short read, ring wrap, overflow short
   push) + the `console_input` handler tests (push→read round trip;
