@@ -1930,12 +1930,14 @@ Typing inserts (`Insert` toggles overwrite), `Enter` splits, `Backspace`/
 `Delete` join at line ends, `Tab` inserts spaces to the next eight-column
 stop, and the arrows/`Home`/`End`/`PageUp`/`PageDown` move a cursor the
 view follows, horizontally too. `F1` shows the key summary, `F2` saves,
-`F3` repeats the last find, and `F10` opens the menu (`File`: `New`,
-`Open...`, `Save`, `Save As...`, `Exit`; `Search`: `Find...`, `Repeat
-Last Find`). An action that would discard unsaved changes asks first
-(`y` save / `n` discard / `c` or `F10` cancel). The bindings are
-function-key-driven because the shared `lib/vt` vocabulary deliberately
-drops bare `Esc` and C0 control combinations.
+`F3` repeats the last find, and `F10` — or `Alt` plus a title's
+accelerator letter, highlighted on the bar (`Alt-F`, `Alt-S`) — opens
+the menu (`File`: `New`, `Open...`, `Save`, `Save As...`, `Exit`;
+`Search`: `Find...`, `Repeat Last Find`); `Esc` (or `F10`) closes it.
+An action that would discard unsaved changes asks first (`y` save /
+`n` discard / `c` or `Esc` cancel). The Alt chords arrive as the
+"meta sends escape" `ESC`-prefix form (`rustos_vt::Op::Meta`), decoded
+to `Event::Alt` by the shared `lib/curses` input decoder.
 
 ### Honest file handling
 

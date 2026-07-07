@@ -18,15 +18,16 @@ non ancora esistente si apre come buffer vuoto e viene creato al
 primo salvataggio. Avviato senza operando, apre un buffer senza nome
 e chiede un nome al primo salvataggio.
 
-Il menu (si apre con `F10`, si percorre con le frecce, `Enter`
-seleziona, `F10` chiude) offre:
+Il menu (si apre con `F10` o con `Alt` più la lettera evidenziata di
+un titolo — `Alt-F` per `File`, `Alt-S` per `Search` —, si percorre
+con le frecce, `Enter` seleziona, `Esc` o `F10` chiude) offre:
 
 - `File` — `New`, `Open...`, `Save`, `Save As...`, `Exit`.
 - `Search` — `Find...`, `Repeat Last Find`.
 
 Quando un'azione scarterebbe modifiche non salvate (`New`, `Open...`,
 `Exit`), l'editor chiede prima: `y` salva e prosegue, `n` scarta,
-`c` (o `F10`) annulla.
+`c` (o `Esc`) annulla.
 
 Tasti nella sessione:
 
@@ -39,7 +40,7 @@ Tasti nella sessione:
 - `Tab` inserisce spazi fino alla prossima tabulazione di otto
   colonne.
 - `F1` mostra il riepilogo dei tasti, `F2` salva, `F3` ripete
-  l'ultima ricerca, `F10` apre il menu.
+  l'ultima ricerca, `F10` (o `Alt-F` / `Alt-S`) apre il menu.
 
 `Find...` cerca in avanti dal cursore, letteralmente e distinguendo
 maiuscole e minuscole, riprendendo dall'inizio alla fine del buffer;

@@ -288,8 +288,14 @@ struct SavedCursor {
 /// The rendered attributes are colour (16/256/truecolour), bold (brightens the
 /// base colours) and reverse-video (swaps foreground and background);
 /// underline/italic/blink/dim/strike are parsed and folded into the pen but
-/// the bitmap atlas carries no variant glyphs for them. No hardware cursor is
-/// drawn.
+/// the bitmap atlas carries no variant glyphs for them.
+///
+/// The cursor is drawn in software as a reverse-video block over the cell it
+/// rests on — there is no hardware cursor on a dumb scan-out surface — and it
+/// honours the DECTCEM show/hide operations (`CSI ? 25 h` / `l`) a full-screen
+/// program uses. The overlay is painted after a batch of operations and
+/// removed before the next batch, so it never contaminates the grid: the cell
+/// under it repaints exactly from its recorded state.
 #[derive(Debug)]
 pub struct Screen<'a> {
     geometry: Geometry,
@@ -299,6 +305,10 @@ pub struct Screen<'a> {
     region_top: u32,
     region_bottom: u32,
     saved: Option<SavedCursor>,
+    /// Whether the terminal cursor is shown (DECTCEM, default on).
+    cursor_visible: bool,
+    /// The cell the cursor overlay is currently painted over, if any.
+    overlay: Option<(u32, u32)>,
     /// The primary-screen cell grid (`columns × rows`, row-major).
     main: &'a mut [Cell],
     /// The alternate-screen cell grid (`columns × rows`, row-major).
@@ -327,6 +337,8 @@ impl<'a> Screen<'a> {
             region_top: 0,
             region_bottom: bottom,
             saved: None,
+            cursor_visible: true,
+            overlay: None,
             main,
             alt,
             on_alt: false,
@@ -483,12 +495,53 @@ impl<'a> Screen<'a> {
             }
             Op::EnterAltScreen => self.enter_alt_screen(pixels),
             Op::LeaveAltScreen => self.leave_alt_screen(pixels),
-            // Parsed but with no rendered effect on this bitmap console: cursor
-            // visibility (no drawn cursor), the bell, and the input-reporting
-            // operations that flow program-ward (keys, mouse, paste markers,
-            // mode toggles).
+            Op::ShowCursor => {
+                self.cursor_visible = true;
+                None
+            }
+            Op::HideCursor => {
+                self.cursor_visible = false;
+                None
+            }
+            // Parsed but with no rendered effect on this bitmap console: the
+            // bell and the input-reporting operations that flow program-ward
+            // (keys, meta chords, mouse, paste markers, mode toggles).
             _ => None,
         }
+    }
+
+    /// The recorded cell at `(col, row)` of the active grid, or a blank for
+    /// an out-of-range coordinate (fail closed, never a panic).
+    fn cell_at(&self, col: u32, row: u32) -> Cell {
+        let cells = if self.on_alt { &*self.alt } else { &*self.main };
+        let index = row as usize * self.cols() as usize + col as usize;
+        cells.get(index).copied().unwrap_or(Cell::BLANK)
+    }
+
+    /// Remove the drawn cursor overlay, if any, by repainting the cell under
+    /// it from the grid. Called before a batch of operations so the overlay
+    /// never mixes into what the batch paints.
+    fn undraw_cursor(&mut self, pixels: &mut [u32]) -> Option<DirtyBand> {
+        let (col, row) = self.overlay.take()?;
+        let cell = self.cell_at(col, row);
+        Some(self.blit_cell(pixels, col, row, cell.ch, cell.attrs))
+    }
+
+    /// Paint the cursor overlay — the cell at the cursor in reverse video —
+    /// when the cursor is visible. A cursor resting past the last column (the
+    /// pending-wrap position after printing there) is shown clamped onto it,
+    /// as hardware text cursors are.
+    fn draw_cursor(&mut self, pixels: &mut [u32]) -> Option<DirtyBand> {
+        if !self.cursor_visible {
+            return None;
+        }
+        let col = self.column.min(self.cols().saturating_sub(1));
+        let row = self.row.min(self.rows().saturating_sub(1));
+        let cell = self.cell_at(col, row);
+        let mut attrs = cell.attrs;
+        attrs.reverse = !attrs.reverse;
+        self.overlay = Some((col, row));
+        Some(self.blit_cell(pixels, col, row, cell.ch, attrs))
     }
 
     /// The (foreground, background) scan-out pixels for the current pen, with
@@ -570,7 +623,8 @@ impl<'a> Screen<'a> {
     }
 
     /// Clear the whole surface to the default background, blank the active
-    /// grid, and home the cursor.
+    /// grid, and home the cursor. The wipe removes any drawn cursor overlay
+    /// with the rest of the pixels.
     pub fn clear(&mut self, pixels: &mut [u32]) -> Option<DirtyBand> {
         for pixel in pixels.iter_mut() {
             *pixel = DEFAULT_BACKGROUND;
@@ -578,6 +632,7 @@ impl<'a> Screen<'a> {
         self.active_cells().fill(Cell::BLANK);
         self.column = 0;
         self.row = 0;
+        self.overlay = None;
         Some((0, self.geometry.height_px))
     }
 
@@ -866,20 +921,26 @@ impl<'a> TextConsole<'a> {
     }
 
     /// Clear the whole surface to the background and home the cursor, returning
-    /// the dirty band (the full surface height).
+    /// the dirty band (the full surface height). The cursor overlay is redrawn
+    /// at the home position.
     pub fn clear(&mut self, pixels: &mut [u32]) -> Option<DirtyBand> {
-        self.screen.clear(pixels)
+        let dirty = self.screen.clear(pixels);
+        merge_bands(dirty, self.screen.draw_cursor(pixels))
     }
 
     /// Interpret `bytes` as an ANSI/VT/xterm stream, rendering the result onto
     /// `pixels`, and return the union of the pixel-row bands it touched.
+    ///
+    /// The cursor overlay is lifted before the stream is applied and repainted
+    /// at the (possibly new) cursor position afterwards, so the console shows
+    /// a live cursor without the overlay ever mixing into the cell grid.
     pub fn write_bytes(&mut self, pixels: &mut [u32], bytes: &[u8]) -> Option<DirtyBand> {
         let Self { parser, screen } = self;
-        let mut dirty = None;
+        let mut dirty = screen.undraw_cursor(pixels);
         parser.feed(bytes, |op| {
             dirty = merge_bands(dirty, screen.apply(pixels, &op));
         });
-        dirty
+        merge_bands(dirty, screen.draw_cursor(pixels))
     }
 }
 

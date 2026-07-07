@@ -19,15 +19,17 @@ wird beim ersten Speichern angelegt. Ohne Operand gestartet, öffnet
 er einen unbenannten Puffer und fragt beim ersten Speichern nach
 einem Namen.
 
-Das Menü (geöffnet mit `F10`, bewegt mit den Pfeiltasten, `Enter`
-wählt aus, `F10` schließt) bietet:
+Das Menü (geöffnet mit `F10` oder mit `Alt` plus dem hervorgehobenen
+Anfangsbuchstaben eines Titels — `Alt-F` für `File`, `Alt-S` für
+`Search` — bewegt mit den Pfeiltasten, `Enter` wählt aus, `Esc` oder
+`F10` schließt) bietet:
 
 - `File` — `New`, `Open...`, `Save`, `Save As...`, `Exit`.
 - `Search` — `Find...`, `Repeat Last Find`.
 
 Würde eine Aktion ungespeicherte Änderungen verwerfen (`New`,
 `Open...`, `Exit`), fragt der Editor zuerst: `y` speichert und fährt
-fort, `n` verwirft, `c` (oder `F10`) bricht ab.
+fort, `n` verwirft, `c` (oder `Esc`) bricht ab.
 
 Tasten in der Sitzung:
 
@@ -39,7 +41,7 @@ Tasten in der Sitzung:
   Cursor; die Ansicht rollt, auch waagerecht, hinterher.
 - `Tab` fügt Leerzeichen bis zum nächsten Acht-Spalten-Stopp ein.
 - `F1` zeigt die Tastenübersicht, `F2` speichert, `F3` wiederholt die
-  letzte Suche, `F10` öffnet das Menü.
+  letzte Suche, `F10` (oder `Alt-F` / `Alt-S`) öffnet das Menü.
 
 `Find...` sucht vom Cursor aus vorwärts, wörtlich und unter
 Beachtung der Groß-/Kleinschreibung, mit Umbruch am Pufferende; eine

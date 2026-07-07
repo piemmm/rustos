@@ -388,26 +388,38 @@ impl<T: Tty> Screen<T> {
     /// the current [`InputMode`].
     ///
     /// A buffered event from an earlier decode is returned first. Otherwise
-    /// input is read once — blocking, polling, or waiting up to a timeout per
-    /// the mode — and decoded; the first decoded event is returned and any
-    /// further events are buffered for the next call. [`None`] means no event
-    /// was available within the mode's wait (or the channel has closed).
+    /// input is read — blocking, polling, or waiting up to a timeout per the
+    /// mode — and decoded; the first decoded event is returned and any
+    /// further events are buffered for the next call.
+    ///
+    /// In the blocking mode, a read whose bytes decode to no event (an
+    /// unmodelled escape sequence the decoder consumed and dropped) is not
+    /// an answer: the read repeats until an event arrives, so [`None`] means
+    /// exactly one thing — the channel has closed (end of input). In the
+    /// non-blocking and timeout modes [`None`] simply means no event was
+    /// available within the mode's wait.
     ///
     /// # Errors
     ///
     /// [`CursesError::Io`](crate::CursesError::Io) if the tty read fails.
     pub fn getch(&mut self) -> Result<Option<Event>> {
-        if let Some(event) = self.pending.pop_front() {
-            return Ok(Some(event));
+        loop {
+            if let Some(event) = self.pending.pop_front() {
+                return Ok(Some(event));
+            }
+            let bytes = match self.input_mode {
+                InputMode::Blocking => self.tty.read_blocking()?,
+                InputMode::NonBlocking => self.tty.read()?,
+                InputMode::Timeout(timeout) => self.tty.read_timeout(timeout)?,
+            };
+            let pending = &mut self.pending;
+            self.input.feed(&bytes, |event| pending.push_back(event));
+            if pending.is_empty()
+                && (bytes.is_empty() || !matches!(self.input_mode, InputMode::Blocking))
+            {
+                return Ok(None);
+            }
         }
-        let bytes = match self.input_mode {
-            InputMode::Blocking => self.tty.read_blocking()?,
-            InputMode::NonBlocking => self.tty.read()?,
-            InputMode::Timeout(timeout) => self.tty.read_timeout(timeout)?,
-        };
-        let pending = &mut self.pending;
-        self.input.feed(&bytes, |event| pending.push_back(event));
-        Ok(self.pending.pop_front())
     }
 
     /// Read all currently pending input and decode it into [`Event`]s (a

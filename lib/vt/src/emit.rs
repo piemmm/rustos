@@ -71,6 +71,15 @@ pub fn encode_into(op: &Op, out: &mut impl Extend<u8>) {
         Op::Sgr(sgr) => encode_sgr(out, *sgr),
         Op::SetTitle(title) => encode_title(out, title),
         Op::Key(key) => encode_key(out, *key),
+        Op::Meta(ch) => {
+            // The xterm "meta sends escape" input form: `ESC` then the
+            // character. A `Meta` carrying an escape-introducer character
+            // (`[`, `]`, `O`, `P`, `7`, `8`) parses back as that sequence
+            // instead — the wire ambiguity documented on `Op::Meta`.
+            byte(out, control::ESC);
+            let mut buf = [0u8; 4];
+            out.extend(ch.encode_utf8(&mut buf).bytes());
+        }
         Op::SetMouseMode { mode, enable } => private_mode(out, mode.mode_number(), *enable),
         Op::Mouse(report) => encode_mouse(out, report),
         Op::SetBracketedPaste(enable) => {

@@ -346,13 +346,49 @@ fn oversized_parameter_saturates_without_overflow() {
 
 #[test]
 fn unrecognised_sequences_are_dropped_not_panicked() {
-    // An unknown CSI final, an unmodelled escape, and an unknown private mode
-    // each produce no operation but leave the parser usable.
+    // An unknown CSI final, an unmodelled escape (`ESC` + a C0 control), and
+    // an unknown private mode each produce no operation but leave the parser
+    // usable.
     assert_eq!(parse_all(b"\x1b[5Z"), vec![]);
-    assert_eq!(parse_all(b"\x1bZ"), vec![]);
+    assert_eq!(parse_all(b"\x1b\x01"), vec![]);
     assert_eq!(parse_all(b"\x1b[?9999h"), vec![]);
     // ...and a following good sequence still parses.
     assert_eq!(parse_all(b"\x1b[5Z\x1b[A"), vec![Op::CursorUp(1)]);
+}
+
+#[test]
+fn meta_round_trips_for_ascii_and_multibyte_characters() {
+    // The escape-introducer characters are excluded: on the wire `ESC 7`,
+    // `ESC [`, … *are* those sequences, so a `Meta` carrying one cannot
+    // survive a round trip (the ambiguity documented on `Op::Meta`).
+    for ch in ['f', 'F', ' ', 'z', '~', 'é', '€', '你'] {
+        assert_round_trip(Op::Meta(ch));
+    }
+}
+
+#[test]
+fn escape_prefixed_printable_is_a_meta_key() {
+    // Alt-F as `lib/keymap` encodes it: `ESC` then the character.
+    assert_eq!(parse_all(b"\x1bf"), vec![Op::Meta('f')]);
+    assert_eq!(parse_all("\x1bé".as_bytes()), vec![Op::Meta('é')]);
+    // The introducers keep their sequence meanings.
+    assert_eq!(parse_all(b"\x1b7"), vec![Op::SaveCursor]);
+    assert_eq!(parse_all(b"\x1b[A"), vec![Op::CursorUp(1)]);
+}
+
+#[test]
+fn meta_state_survives_split_reads_and_clears_on_truncation() {
+    // `ESC` and its character arriving in separate feeds still decode as one
+    // meta key (the sequence-in-flight rule `take_pending_escape` documents:
+    // nothing resolved the escape between the reads).
+    let mut parser = Parser::new();
+    let mut ops = Vec::new();
+    parser.feed(b"\x1b", |op| ops.push(op));
+    parser.feed("é".as_bytes(), |op| ops.push(op));
+    assert_eq!(ops, vec![Op::Meta('é')]);
+    // A truncated meta scalar drops the meta flag with the scalar: the
+    // following plain character prints, never inherits the modifier.
+    assert_eq!(parse_all(b"\x1b\xc3a"), vec![Op::Print('a')]);
 }
 
 #[test]

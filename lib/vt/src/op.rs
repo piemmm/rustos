@@ -142,6 +142,17 @@ pub enum Op {
     /// are *not* here — in normal cursor mode they are the cursor-movement
     /// operations above.
     Key(Key),
+    /// A printable character typed with the Alt/Meta modifier held: `ESC`
+    /// followed by the character's UTF-8 bytes (the xterm "meta sends
+    /// escape" convention, the encoding `lib/keymap` writes for an
+    /// Alt-chorded key). This is an input-side operation — a screen renderer
+    /// ignores it; an input decoder maps it to its Alt-key event.
+    ///
+    /// The characters that introduce a modelled escape sequence after `ESC`
+    /// (`[`, `]`, `O`, `P`, `7`, `8`) keep their sequence meanings and never
+    /// parse back to `Meta` — the same ambiguity every xterm-family terminal
+    /// has, where Alt-7 is indistinguishable from DECSC on the wire.
+    Meta(char),
     /// Enable (`CSI ? n h`) or disable (`CSI ? n l`) a mouse-tracking mode.
     SetMouseMode {
         /// The tracking protocol.
@@ -162,8 +173,8 @@ pub enum Op {
 /// The largest window title retained, in bytes.
 ///
 /// A longer title is truncated at a UTF-8 character boundary. This bound is
-/// what keeps [`Title`] — and therefore [`Op`] — allocation-free (`AGENTS.md`
-/// §24.4: a fixed validation bound, not a growable capacity).
+/// what keeps [`Title`] — and therefore [`Op`] — allocation-free (a fixed
+/// validation bound on untrusted input, not a growable capacity).
 pub const MAX_TITLE: usize = 256;
 
 /// A bounded, allocation-free window title: the payload of [`Op::SetTitle`].
@@ -221,7 +232,7 @@ impl Title {
     #[must_use]
     pub fn as_str(&self) -> &str {
         // The bytes were validated as UTF-8 at construction; fall back to the
-        // empty string rather than ever panicking (`AGENTS.md` §2.9).
+        // empty string rather than ever panicking.
         core::str::from_utf8(&self.bytes[..self.len]).unwrap_or("")
     }
 

@@ -29,6 +29,10 @@ pub enum Event {
     /// `Ctrl-I` (Tab), `Ctrl-J`/`Ctrl-M` (Enter), `Ctrl-H` (Backspace) —
     /// keep their named events and never arrive here.
     Ctrl(char),
+    /// An Alt-chorded printable character (`Alt-F`, `Alt-é`, …), received as
+    /// `ESC` followed by the character — the xterm "meta sends escape"
+    /// convention the RustOS keymap also writes ([`rustos_vt::Op::Meta`]).
+    Alt(char),
     /// The Enter / Return key (carriage return or line feed).
     Enter,
     /// The Tab key.
@@ -186,6 +190,7 @@ fn translate(op: &Op, in_paste: &mut bool, paste: &mut String) -> Option<Event> 
             None
         }
         Op::Print(ch) => Some(Event::Char(*ch)),
+        Op::Meta(ch) => Some(Event::Alt(*ch)),
         Op::CarriageReturn | Op::LineFeed => Some(Event::Enter),
         Op::Tab => Some(Event::Tab),
         Op::Backspace => Some(Event::Backspace),

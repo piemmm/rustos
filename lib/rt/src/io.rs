@@ -270,6 +270,55 @@ pub fn write_stderr_line(line: &str) {
 /// Default fixed capacity of a [`BufReader`] / [`BufWriter`] buffer, in bytes.
 pub const DEFAULT_BUF_CAPACITY: usize = 4096;
 
+/// A bounded, allocation-free [`core::fmt::Write`] sink over a fixed inline
+/// buffer.
+///
+/// Formatting past the buffer's end truncates at a UTF-8 character boundary
+/// rather than allocating, failing, or tearing a scalar, so a caller with a
+/// fixed byte budget can format safely where the heap may be unavailable.
+/// The runtime's panic handler formats its report through this: a panic may
+/// itself be an out-of-memory condition, so that path must never allocate.
+pub struct FixedFmtBuf<const CAP: usize> {
+    bytes: [u8; CAP],
+    len: usize,
+}
+
+impl<const CAP: usize> FixedFmtBuf<CAP> {
+    /// An empty buffer.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            bytes: [0; CAP],
+            len: 0,
+        }
+    }
+
+    /// The bytes formatted so far (always valid UTF-8).
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+}
+
+impl<const CAP: usize> Default for FixedFmtBuf<CAP> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const CAP: usize> core::fmt::Write for FixedFmtBuf<CAP> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        let room = CAP.saturating_sub(self.len);
+        let mut take = s.len().min(room);
+        while take > 0 && !s.is_char_boundary(take) {
+            take -= 1;
+        }
+        self.bytes[self.len..self.len + take].copy_from_slice(&s.as_bytes()[..take]);
+        self.len += take;
+        Ok(())
+    }
+}
+
 /// A [`Write`] that coalesces many small writes into a single underlying write.
 ///
 /// The buffer is a fixed-capacity inline array (`CAP` bytes, no heap
@@ -724,5 +773,38 @@ mod tests {
         let (number, args) = seam::last_call().expect("one trap");
         assert_eq!(number, crate::NUM_STREAM_WRITE);
         assert_eq!(args[0], u64::from(STDINFO));
+    }
+
+    #[test]
+    fn fixed_fmt_buf_formats_within_its_budget() {
+        use fmt::Write as _;
+        let mut buf = FixedFmtBuf::<32>::new();
+        let (message, line) = ("boom", 7);
+        write!(buf, "panic: {message} at main.rs:{line}").expect("infallible");
+        assert_eq!(buf.as_bytes(), b"panic: boom at main.rs:7");
+    }
+
+    #[test]
+    fn fixed_fmt_buf_truncates_at_capacity_without_failing() {
+        use fmt::Write as _;
+        let mut buf = FixedFmtBuf::<8>::new();
+        // The overflow is truncated, never an error: the panic path must not
+        // turn a long report into a second failure.
+        write!(buf, "0123456789").expect("infallible");
+        assert_eq!(buf.as_bytes(), b"01234567");
+        // A full buffer keeps accepting (and dropping) further writes.
+        write!(buf, "more").expect("infallible");
+        assert_eq!(buf.as_bytes(), b"01234567");
+    }
+
+    #[test]
+    fn fixed_fmt_buf_truncates_on_a_character_boundary() {
+        use fmt::Write as _;
+        // "éé" is four bytes; a 3-byte budget must keep one whole scalar and
+        // drop the torn one, so the report stays valid UTF-8.
+        let mut buf = FixedFmtBuf::<3>::new();
+        write!(buf, "éé").expect("infallible");
+        assert_eq!(buf.as_bytes(), "é".as_bytes());
+        assert!(core::str::from_utf8(buf.as_bytes()).is_ok());
     }
 }

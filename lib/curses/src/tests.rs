@@ -400,9 +400,21 @@ fn a_bare_escape_ending_a_read_is_the_escape_key() {
     // An escape sequence arriving whole in the same read is its key, never
     // a spurious Escape.
     assert_eq!(decode(b"\x1b[A"), vec![Event::Up]);
-    // An escape the parser does not model consumes its final byte and
-    // produces nothing — neither a spurious Escape nor a stray character.
-    assert_eq!(decode(b"\x1bx"), vec![]);
+    // An `ESC`-prefixed printable in the same read is the Alt-chorded key
+    // (the "meta sends escape" convention), never a spurious Escape.
+    assert_eq!(decode(b"\x1bx"), vec![Event::Alt('x')]);
+}
+
+#[test]
+fn alt_chorded_characters_decode() {
+    // Alt-F as the RustOS keymap (and xterm) send it: `ESC` then the
+    // character — the accelerator the editor's menu bar opens on.
+    assert_eq!(decode(b"\x1bf"), vec![Event::Alt('f')]);
+    assert_eq!(decode(b"\x1bF"), vec![Event::Alt('F')]);
+    assert_eq!(decode("\x1bé".as_bytes()), vec![Event::Alt('é')]);
+    // The escape-sequence introducers keep their sequence meanings: `ESC [ A`
+    // is the up arrow, not Alt-[.
+    assert_eq!(decode(b"\x1b[A"), vec![Event::Up]);
 }
 
 #[test]
@@ -512,6 +524,54 @@ fn screen_refresh_writes_the_rendered_bytes() {
 
     // A second refresh with no change emits no printable glyph (minimal diff).
     assert_eq!(screen.refresh(&win), Ok(()));
+}
+
+/// A [`Tty`] whose blocking reads serve pre-queued chunks one per call, so a
+/// test can prove [`Screen::getch`] re-reads across chunk boundaries.
+struct ChunkTty {
+    chunks: VecDeque<Vec<u8>>,
+}
+
+impl Tty for ChunkTty {
+    fn write(&mut self, _bytes: &[u8]) -> crate::Result<()> {
+        Ok(())
+    }
+
+    fn read(&mut self) -> crate::Result<Vec<u8>> {
+        Ok(Vec::new())
+    }
+
+    fn read_blocking(&mut self) -> crate::Result<Vec<u8>> {
+        Ok(self.chunks.pop_front().unwrap_or_default())
+    }
+}
+
+#[test]
+fn blocking_getch_keeps_waiting_past_a_chunk_with_no_event() {
+    // An unmodelled CSI (`CSI 5 Z`) is consumed and dropped by the decoder.
+    // A blocking `getch` must treat that as "nothing yet" and read again —
+    // returning `None` here made a full-screen program mistake an unknown
+    // key for end-of-input and exit (the `edit` Alt-key regression).
+    let chunks = [b"\x1b[5Z".to_vec(), b"a".to_vec()].into_iter().collect();
+    let mut screen = Screen::new(
+        ChunkTty { chunks },
+        TermType::Xterm256Color,
+        Size::new(2, 2),
+    );
+    assert_eq!(screen.getch(), Ok(Some(Event::Char('a'))));
+    // A closed channel (an empty blocking read) is still end of input.
+    assert_eq!(screen.getch(), Ok(None));
+}
+
+#[test]
+fn blocking_getch_returns_an_alt_chorded_key() {
+    // The whole Alt-F byte pair in one read is one event, not end-of-input.
+    let mut screen = Screen::new(
+        FakeTty::with_input(b"\x1bf"),
+        TermType::Xterm256Color,
+        Size::new(2, 2),
+    );
+    assert_eq!(screen.getch(), Ok(Some(Event::Alt('f'))));
 }
 
 #[test]

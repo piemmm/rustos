@@ -58,6 +58,20 @@ enum State {
     Str(StringKind),
 }
 
+/// The in-flight state of one multi-byte UTF-8 scalar.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct Utf8Decode {
+    /// Continuation bytes still expected.
+    remaining: u8,
+    /// The scalar value accumulated so far.
+    acc: u32,
+    /// The smallest value the lead byte may encode (the overlong check).
+    min: u32,
+    /// Whether the scalar was `ESC`-prefixed (an Alt-chorded character), so
+    /// its completion is an [`Op::Meta`] rather than an [`Op::Print`].
+    meta: bool,
+}
+
 /// A streaming interpreter from terminal bytes to [`Op`] events.
 ///
 /// The parameter and string buffers are fixed-size inline arrays bounded by
@@ -73,9 +87,7 @@ pub struct Parser {
     accumulator: u32,
     private: bool,
     mouse_sgr: bool,
-    utf8_remaining: u8,
-    utf8_acc: u32,
-    utf8_min: u32,
+    utf8: Utf8Decode,
     str_buf: [u8; MAX_STRING],
     str_len: usize,
     str_esc: bool,
@@ -98,9 +110,12 @@ impl Parser {
             accumulator: 0,
             private: false,
             mouse_sgr: false,
-            utf8_remaining: 0,
-            utf8_acc: 0,
-            utf8_min: 0,
+            utf8: Utf8Decode {
+                remaining: 0,
+                acc: 0,
+                min: 0,
+                meta: false,
+            },
             str_buf: [0; MAX_STRING],
             str_len: 0,
             str_esc: false,
@@ -183,12 +198,14 @@ impl Parser {
             // Other C0 controls and DEL carry no operation we model.
             0x00..=0x1f | 0x7f => {}
             // A UTF-8 lead byte begins a multi-byte scalar.
-            _ => self.begin_utf8(byte),
+            _ => self.begin_utf8(byte, false),
         }
     }
 
-    /// Begin decoding a multi-byte UTF-8 scalar from its lead byte.
-    fn begin_utf8(&mut self, lead: u8) {
+    /// Begin decoding a multi-byte UTF-8 scalar from its lead byte. `meta`
+    /// records whether the scalar was `ESC`-prefixed (an Alt-chorded
+    /// character).
+    fn begin_utf8(&mut self, lead: u8, meta: bool) {
         let (remaining, acc, min) = match lead {
             0xc0..=0xdf => (1u8, u32::from(lead & 0x1f), 0x80),
             0xe0..=0xef => (2u8, u32::from(lead & 0x0f), 0x800),
@@ -197,32 +214,39 @@ impl Parser {
             // scalar, so drop it and stay in the ground state.
             _ => return,
         };
-        self.utf8_remaining = remaining;
-        self.utf8_acc = acc;
-        self.utf8_min = min;
+        self.utf8 = Utf8Decode {
+            remaining,
+            acc,
+            min,
+            meta,
+        };
         self.state = State::Utf8;
     }
 
     /// Handle a UTF-8 continuation byte.
     fn utf8(&mut self, byte: u8, sink: &mut impl FnMut(Op)) {
         if !matches!(byte, 0x80..=0xbf) {
-            // Not a continuation byte: the scalar is truncated. Drop it and
-            // reprocess this byte from the ground state so an `ESC` (or any
-            // other meaningful byte) is not lost.
+            // Not a continuation byte: the scalar is truncated (its meta flag
+            // dies with it). Drop it and reprocess this byte from the ground
+            // state so an `ESC` (or any other meaningful byte) is not lost.
             self.state = State::Ground;
             self.ground(byte, sink);
             return;
         }
-        self.utf8_acc = (self.utf8_acc << 6) | u32::from(byte & 0x3f);
-        self.utf8_remaining -= 1;
-        if self.utf8_remaining > 0 {
+        self.utf8.acc = (self.utf8.acc << 6) | u32::from(byte & 0x3f);
+        self.utf8.remaining -= 1;
+        if self.utf8.remaining > 0 {
             return;
         }
         self.state = State::Ground;
         // Accept only a correctly-encoded, non-overlong scalar value.
-        if self.utf8_acc >= self.utf8_min {
-            if let Some(ch) = char::from_u32(self.utf8_acc) {
-                sink(Op::Print(ch));
+        if self.utf8.acc >= self.utf8.min {
+            if let Some(ch) = char::from_u32(self.utf8.acc) {
+                sink(if self.utf8.meta {
+                    Op::Meta(ch)
+                } else {
+                    Op::Print(ch)
+                });
             }
         }
     }
@@ -242,9 +266,19 @@ impl Parser {
                 self.state = State::Ground;
                 sink(Op::RestoreCursor);
             }
-            // A fresh `ESC` restarts the escape; anything else is an escape we
-            // do not model, so consume it and return to the ground state.
+            // A fresh `ESC` restarts the escape.
             control::ESC => {}
+            // An `ESC`-prefixed printable character is an Alt-chorded key
+            // (the xterm "meta sends escape" input convention): ASCII
+            // directly, a multi-byte scalar through the UTF-8 state with the
+            // meta flag carried across it.
+            0x20..=0x7e => {
+                self.state = State::Ground;
+                sink(Op::Meta(char::from(byte)));
+            }
+            0xc0..=0xf7 => self.begin_utf8(byte, true),
+            // Anything else is an escape we do not model, so consume it and
+            // return to the ground state.
             _ => self.state = State::Ground,
         }
     }

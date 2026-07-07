@@ -18,15 +18,17 @@ fichier qui n'existe pas encore s'ouvre comme tampon vide et est créé
 au premier enregistrement. Lancé sans opérande, il ouvre un tampon
 sans nom et demande un nom au premier enregistrement.
 
-Le menu (ouvert avec `F10`, parcouru avec les flèches, `Enter`
-sélectionne, `F10` ferme) propose :
+Le menu (ouvert avec `F10` ou avec `Alt` plus la lettre mise en
+évidence d'un titre — `Alt-F` pour `File`, `Alt-S` pour `Search` —,
+parcouru avec les flèches, `Enter` sélectionne, `Esc` ou `F10` ferme)
+propose :
 
 - `File` — `New`, `Open...`, `Save`, `Save As...`, `Exit`.
 - `Search` — `Find...`, `Repeat Last Find`.
 
 Quand une action abandonnerait des modifications non enregistrées
 (`New`, `Open...`, `Exit`), l'éditeur demande d'abord : `y`
-enregistre et continue, `n` abandonne, `c` (ou `F10`) annule.
+enregistre et continue, `n` abandonne, `c` (ou `Esc`) annule.
 
 Touches dans la session :
 
@@ -38,7 +40,7 @@ Touches dans la session :
   curseur ; la vue défile, horizontalement aussi, pour le suivre.
 - `Tab` insère des espaces jusqu'au prochain arrêt de huit colonnes.
 - `F1` affiche le résumé des touches, `F2` enregistre, `F3` répète la
-  dernière recherche, `F10` ouvre le menu.
+  dernière recherche, `F10` (ou `Alt-F` / `Alt-S`) ouvre le menu.
 
 `Find...` cherche vers l'avant depuis le curseur, littéralement et en
 respectant la casse, en reprenant au début à la fin du tampon ; une

@@ -490,8 +490,9 @@ the `fw_cfg`/`ramfb` fallback on the QEMU `virt` board. On the Pi:
   h`/`l`) is fully honoured — entering saves the primary-screen cursor and
   shows a cleared alternate grid, and leaving restores the primary screen
   from its grid exactly, so quitting `top` or an editor returns the shell
-  screen it covered. No hardware cursor is
-  drawn. After the MMU and caches come on, each write cleans the touched
+  screen it covered. The cursor is a software-drawn reverse-video block over
+  its cell (there is no hardware cursor on the scan-out surface), honouring
+  DECTCEM show/hide. After the MMU and caches come on, each write cleans the touched
   scanlines to the point of coherency (`dc cvac` + `dsb`) so the
   firmware scan-out sees them; rendering is serialised by a private
   DAIF-masking spinlock (deliberately not `lib/sync` — feature

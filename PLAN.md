@@ -4092,6 +4092,11 @@ can see *why* a rule exists without diffing the charter's history.
   `stderr`) and survived with the authority the program has — the action
   fails closed (§5.4), the session does not die over it. Only a failure of
   the program's primary purpose is fatal, and then with its reason stated.
+  Extended 2026-07-07 (maintainer decision): where no terminal/stderr
+  consumer can show the reason to a user, the observing component records
+  the termination through the system log (`lib/log`) instead — prompted by
+  the `rustos-rt` panic handler, which discarded its `PanicInfo` and exited
+  silently.
 
 - **2026-07-05 — System command apps follow GNU coreutils.** Added §16.7
   (maintainer decision): the OS-provided command apps (`ls`, `cat`, `cp`,

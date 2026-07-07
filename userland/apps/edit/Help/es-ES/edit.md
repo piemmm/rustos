@@ -18,15 +18,16 @@ archivo que aún no existe se abre como búfer vacío y se crea al
 primer guardado. Iniciado sin operando, abre un búfer sin nombre y
 pide un nombre al guardarlo por primera vez.
 
-El menú (se abre con `F10`, se recorre con las flechas, `Enter`
-selecciona, `F10` cierra) ofrece:
+El menú (se abre con `F10` o con `Alt` más la letra resaltada de un
+título — `Alt-F` para `File`, `Alt-S` para `Search` —, se recorre con
+las flechas, `Enter` selecciona, `Esc` o `F10` cierra) ofrece:
 
 - `File` — `New`, `Open...`, `Save`, `Save As...`, `Exit`.
 - `Search` — `Find...`, `Repeat Last Find`.
 
 Cuando una acción descartaría cambios sin guardar (`New`, `Open...`,
 `Exit`), el editor pregunta primero: `y` guarda y continúa, `n`
-descarta, `c` (o `F10`) cancela.
+descarta, `c` (o `Esc`) cancela.
 
 Teclas dentro de la sesión:
 
@@ -38,7 +39,7 @@ Teclas dentro de la sesión:
   la vista se desplaza, también en horizontal, para seguirlo.
 - `Tab` inserta espacios hasta la siguiente parada de ocho columnas.
 - `F1` muestra el resumen de teclas, `F2` guarda, `F3` repite la
-  última búsqueda, `F10` abre el menú.
+  última búsqueda, `F10` (o `Alt-F` / `Alt-S`) abre el menú.
 
 `Find...` busca hacia delante desde el cursor, literalmente y
 distinguiendo mayúsculas, dando la vuelta al final del búfer; una

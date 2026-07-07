@@ -59,7 +59,10 @@ curses window writer produces). It is a full terminal:
   borrowing the two `&mut [Cell]` grids (each at least `geometry.cell_count()`
   long); `write_bytes(pixels, bytes)` interprets an ANSI/VT stream and returns
   the touched pixel-row band; `clear` paints the background and homes the
-  cursor.
+  cursor. The cursor is drawn in software as a reverse-video block over its
+  cell — lifted before each batch of operations and repainted after, honouring
+  DECTCEM show/hide (`CSI ? 25 h` / `l`) — so a shell prompt or editor shows a
+  live insertion point on the framebuffer console.
 - `Cell` — the character cell (`rustos_vt::Cell`), re-exported so a caller can
   size and blank the grid buffers.
 - `DirtyBand` / `merge_bands` — the `(start_y, end_y)` band a render touched, so

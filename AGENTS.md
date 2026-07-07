@@ -435,9 +435,13 @@ These are absolute. They override any local convenience.
       the failing program itself when it can still fail gracefully, or from
       the component that observed the failure (the spawner/shell reporting a
       load refusal or a fatal signal) when it cannot. An exit code alone is
-      not a diagnosis; a silent non-zero exit is a defect. The message never
-      carries secrets or capability tokens (§23.1) and never substitutes for
-      the §19.4 audit log on a security decision.
+      not a diagnosis; a silent non-zero exit is a defect. Where no
+      terminal/stderr consumer can show the reason to a user (a daemon, a
+      detached session), the observing component records the termination
+      through the system log (`lib/log`) instead — the reason must land
+      somewhere a user can find it, best-effort on both channels. The message
+      never carries secrets or capability tokens (§23.1) and never
+      substitutes for the §19.4 audit log on a security decision.
     - **A denied optional action is an answer, not a fatal error.** When a
       capability-gated or otherwise refusable action that is *incidental* to
       a program's primary purpose is refused (`top`'s system-wide toggle for

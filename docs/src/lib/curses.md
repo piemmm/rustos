@@ -41,10 +41,13 @@ added the first in-tree consumer (`userland/apps/top`).
   the application drew.
 - **`Input` / `Event`** decode the terminal's bytes (through `lib/vt`'s one
   parser) into typed events: characters, the arrow / function / editing keys,
-  mouse reports, and bracketed-paste runs delivered as a single `Event::Paste`.
-  The driver reads them with `getch` (one event) or `read_events` (batched);
-  `set_input_mode` selects `Blocking`, `NonBlocking` (`nodelay`), or
-  `Timeout(..)` waiting.
+  `Ctrl-` and `Alt-`chorded characters (the "meta sends escape" `ESC`-prefix
+  form), mouse reports, and bracketed-paste runs delivered as a single
+  `Event::Paste`. The driver reads them with `getch` (one event) or
+  `read_events` (batched); `set_input_mode` selects `Blocking`, `NonBlocking`
+  (`nodelay`), or `Timeout(..)` waiting. A blocking `getch` re-reads past a
+  chunk that decodes to no event (an unmodelled sequence), so `None` from it
+  means exactly one thing: the channel has closed.
 - **Character width** (`char_width` / `is_wide` / `str_width` /
   `truncate_to_width`, re-exported from `lib/vt`'s `width` module — the one
   definition every cell grid shares) knows a CJK / fullwidth / emoji glyph

@@ -56,10 +56,18 @@ pub fn render<T: Tty>(model: &Model, screen: &mut Screen<T>) -> Result<(), EditE
     let bar_attrs = bar_attributes(screen);
     let text_attrs = text_attributes(screen);
     let selected_attrs = selection_attributes(screen);
+    let accel_attrs = accelerator_attributes(screen);
 
     let mut win = Window::new(Pos::ORIGIN, size);
 
-    draw_menu_bar(&mut win, model, cols, bar_attrs, selected_attrs);
+    draw_menu_bar(
+        &mut win,
+        model,
+        cols,
+        bar_attrs,
+        selected_attrs,
+        accel_attrs,
+    );
 
     for offset in 0..text_rows {
         let row = MENU_ROWS + u16::try_from(offset).unwrap_or(0);
@@ -126,8 +134,17 @@ pub fn run<T: Tty>(
     }
 }
 
-/// Draw the menu bar, highlighting the open menu's title.
-fn draw_menu_bar(win: &mut Window, model: &Model, cols: usize, bar: Attributes, sel: Attributes) {
+/// Draw the menu bar, highlighting the open menu's title and each closed
+/// title's accelerator letter (its first character — the `Alt-<letter>`
+/// that opens it).
+fn draw_menu_bar(
+    win: &mut Window,
+    model: &Model,
+    cols: usize,
+    bar: Attributes,
+    sel: Attributes,
+    accel: Attributes,
+) {
     put_line(win, 0, cols, "", bar);
     let open = match model.mode() {
         Mode::Menu { menu, .. } => Some(*menu),
@@ -136,13 +153,32 @@ fn draw_menu_bar(win: &mut Window, model: &Model, cols: usize, bar: Attributes, 
     let mut col = MENU_GAP;
     for (index, menu) in MENUS.iter().enumerate() {
         let title = format!(" {} ", menu.title);
-        let attrs = if open == Some(index) { sel } else { bar };
         if win
             .move_to(Pos::new(0, u16::try_from(col).unwrap_or(u16::MAX)))
             .is_ok()
         {
-            win.set_attributes(attrs);
-            win.add_str(truncate_to_width(&title, cols.saturating_sub(col)));
+            let visible = truncate_to_width(&title, cols.saturating_sub(col));
+            if open == Some(index) {
+                // The open menu's whole title carries the selection bar.
+                win.set_attributes(sel);
+                win.add_str(visible);
+            } else {
+                // " F" + "ile ": the accelerator letter stands out so the
+                // `Alt-<letter>` shortcut is discoverable at a glance.
+                let mut chars = visible.char_indices();
+                let split = chars.nth(2).map_or(visible.len(), |(at, _)| at);
+                let (head, tail) = visible.split_at(split);
+                win.set_attributes(bar);
+                if let Some(space) = head.get(..1) {
+                    win.add_str(space);
+                }
+                win.set_attributes(accel);
+                if let Some(letter) = head.get(1..) {
+                    win.add_str(letter);
+                }
+                win.set_attributes(bar);
+                win.add_str(tail);
+            }
             win.set_attributes(Attributes::PLAIN);
         }
         col += str_width(&title) + MENU_GAP;
@@ -215,11 +251,11 @@ fn status_line(model: &Model) -> String {
                 Pending::Exit => "exiting",
             };
             format!(
-                " Save changes to {} before {verb}? (Y/N, C or F10 cancels)",
+                " Save changes to {} before {verb}? (Y/N, C or Esc cancels)",
                 display_name(model)
             )
         }
-        Mode::Menu { .. } => String::from(" Arrows choose, Enter selects, F10 closes the menu"),
+        Mode::Menu { .. } => String::from(" Arrows choose, Enter selects, Esc closes the menu"),
         Mode::Edit => {
             if let Some(notice) = model.notice() {
                 return format!(" {notice}");
@@ -376,6 +412,22 @@ fn selection_attributes<T: Tty>(screen: &mut Screen<T>) -> Attributes {
     }
 }
 
+/// The rendition of a menu title's accelerator letter: the Borland-style
+/// red on the white bar where the terminal has colour, bold reverse video
+/// where it does not — either way distinct from the surrounding title.
+fn accelerator_attributes<T: Tty>(screen: &mut Screen<T>) -> Attributes {
+    screen
+        .colored_attributes(
+            Color::Basic(BasicColor::Red),
+            Color::Basic(BasicColor::White),
+        )
+        .unwrap_or_else(|| {
+            let mut attrs = reversed();
+            attrs.bold = true;
+            attrs
+        })
+}
+
 /// Reverse-video attributes (the colourless bar fallback).
 fn reversed() -> Attributes {
     let mut attrs = Attributes::PLAIN;
@@ -387,7 +439,7 @@ fn reversed() -> Attributes {
 const HELP_LINES: &[&str] = &[
     " Keys ",
     "",
-    " F10          open the menu (File, Search)",
+    " F10 / Alt-F  open the menu (File, Search)",
     " F2           save",
     " F3           repeat the last find",
     " arrows       move the cursor",

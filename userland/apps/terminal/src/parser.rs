@@ -96,6 +96,7 @@ fn apply(grid: &mut Grid, op: &Op) {
         // mislabelling them as display operations.
         Op::Bell
         | Op::Key(_)
+        | Op::Meta(_)
         | Op::Mouse(_)
         | Op::SetMouseMode { .. }
         | Op::SetBracketedPaste(_)

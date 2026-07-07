@@ -18,15 +18,16 @@ does not exist yet opens as an empty buffer and is created on the
 first save. Started without an operand, it opens an unnamed buffer and
 asks for a name when it is first saved.
 
-The menu (opened with `F10`, navigated with the arrow keys, `Enter`
-selects, `F10` closes) carries:
+The menu (opened with `F10` or with `Alt` plus a title's highlighted
+letter — `Alt-F` for `File`, `Alt-S` for `Search` — navigated with the
+arrow keys, `Enter` selects, `Esc` or `F10` closes) carries:
 
 - `File` — `New`, `Open...`, `Save`, `Save As...`, `Exit`.
 - `Search` — `Find...`, `Repeat Last Find`.
 
 When an action would discard unsaved changes (`New`, `Open...`,
 `Exit`), the editor asks first: `y` saves and continues, `n` discards,
-`c` (or `F10`) cancels.
+`c` (or `Esc`) cancels.
 
 Keys inside the session:
 
@@ -38,7 +39,7 @@ Keys inside the session:
   view scrolls, horizontally too, to follow it.
 - `Tab` inserts spaces to the next eight-column stop.
 - `F1` shows the key summary, `F2` saves, `F3` repeats the last find,
-  `F10` opens the menu.
+  `F10` (or `Alt-F` / `Alt-S`) opens the menu.
 
 `Find...` searches forward from the cursor, literally and
 case-sensitively, wrapping around at the end of the buffer; an

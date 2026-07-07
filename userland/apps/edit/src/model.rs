@@ -104,6 +104,8 @@ pub struct Menu {
 }
 
 /// The menu bar: `File` and `Search`, in the `QuickBasic` editor's shape.
+/// Each menu's accelerator is the first character of its title: the bar
+/// highlights it and `Alt-<letter>` opens the menu directly.
 pub const MENUS: &[Menu] = &[
     Menu {
         title: "File",
@@ -368,6 +370,11 @@ impl Model {
             Event::Function(2) => return self.save(fs),
             Event::Function(3) => self.find_next(),
             Event::Function(10) => self.mode = Mode::Menu { menu: 0, item: 0 },
+            Event::Alt(ch) => {
+                if let Some(menu) = menu_with_accelerator(*ch) {
+                    self.mode = Mode::Menu { menu, item: 0 };
+                }
+            }
             // Control characters, other function keys, and mouse reports
             // carry no editing meaning here.
             _ => {}
@@ -401,7 +408,19 @@ impl Model {
                 self.mode = Mode::Menu { menu, item };
             }
             Event::Enter => return self.execute_menu_item(fs, menu, item),
-            Event::Function(10) => self.mode = Mode::Edit,
+            Event::Alt(ch) => match menu_with_accelerator(*ch) {
+                // The open menu's own accelerator toggles it closed; a
+                // sibling's switches to that menu.
+                Some(target) if target == menu => self.mode = Mode::Edit,
+                Some(target) => {
+                    self.mode = Mode::Menu {
+                        menu: target,
+                        item: 0,
+                    };
+                }
+                None => {}
+            },
+            Event::Esc | Event::Function(10) => self.mode = Mode::Edit,
             _ => {}
         }
         Action::Continue
@@ -464,7 +483,7 @@ impl Model {
                 self.pending = Some(pending);
                 self.resume_pending()
             }
-            Event::Char('c' | 'C') | Event::Function(10) => {
+            Event::Char('c' | 'C') | Event::Esc | Event::Function(10) => {
                 self.mode = Mode::Edit;
                 self.pending = None;
                 Action::Continue
@@ -504,7 +523,7 @@ impl Model {
                 }
                 return self.commit_prompt(fs, intent, input);
             }
-            Event::Function(10) => {
+            Event::Esc | Event::Function(10) => {
                 self.mode = Mode::Edit;
                 self.pending = None;
             }
@@ -701,6 +720,19 @@ impl Default for Model {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The index of the menu whose accelerator letter is `ch` — the first
+/// character of its title, matched case-insensitively — or `None` when no
+/// menu claims it.
+#[must_use]
+pub fn menu_with_accelerator(ch: char) -> Option<usize> {
+    MENUS.iter().position(|menu| {
+        menu.title
+            .chars()
+            .next()
+            .is_some_and(|first| first.eq_ignore_ascii_case(&ch))
+    })
 }
 
 /// The status notice for the conversions a load applied, or `None` when

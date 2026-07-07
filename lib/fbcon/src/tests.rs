@@ -40,13 +40,14 @@ fn geometry_rejects_unusable_surfaces() {
 
 // --- Renderer / terminal ---------------------------------------------------
 
-/// A scale-1 test surface `cols`×`rows` cells, stride two pixels wider than the
-/// visible width so tests exercise `stride != width`.
+/// A scale-1 test surface `cols`×`rows` cells with the cursor left visible
+/// (the console's default), stride two pixels wider than the visible width so
+/// tests exercise `stride != width`.
 ///
 /// The two cell grids are leaked to `&'static mut [Cell]` (a host test runs
 /// once and exits, so the leak is harmless) so the returned console borrows
 /// them for `'static`, mirroring how a kernel caller leaks heap grid storage.
-fn console_of(cols: u32, rows: u32) -> (TextConsole<'static>, Vec<u32>) {
+fn cursor_console_of(cols: u32, rows: u32) -> (TextConsole<'static>, Vec<u32>) {
     let width_px = cols * CELL_WIDTH;
     let height_px = rows * CELL_HEIGHT;
     let geometry = Geometry {
@@ -61,6 +62,15 @@ fn console_of(cols: u32, rows: u32) -> (TextConsole<'static>, Vec<u32>) {
     let alt: &'static mut [Cell] = vec![Cell::BLANK; geometry.cell_count()].leak();
     let mut console = TextConsole::new(geometry, main, alt);
     console.clear(&mut pixels);
+    (console, pixels)
+}
+
+/// [`cursor_console_of`] with the cursor hidden (`CSI ? 25 l`), so the tests
+/// of glyphs, scrolling, and screens assert their own subject without the
+/// cursor overlay standing on a cell; the overlay has its own test section.
+fn console_of(cols: u32, rows: u32) -> (TextConsole<'static>, Vec<u32>) {
+    let (mut console, mut pixels) = cursor_console_of(cols, rows);
+    console.write_bytes(&mut pixels, b"\x1b[?25l");
     (console, pixels)
 }
 
@@ -458,6 +468,54 @@ fn leaving_the_alternate_screen_when_not_on_it_is_a_no_op() {
         cell_has(&pixels, &geometry, 0, 0, DEFAULT_FOREGROUND),
         "A untouched"
     );
+}
+
+// --- Cursor overlay ----------------------------------------------------------
+
+#[test]
+fn the_cursor_is_drawn_as_a_reverse_video_block() {
+    // A cleared console rests its cursor on the blank home cell: reverse
+    // video fills the whole cell with the default foreground.
+    let (console, pixels) = cursor_console_of(2, 2);
+    let geometry = *console.geometry();
+    assert!(cell(&pixels, &geometry, 0, 0)
+        .iter()
+        .all(|&p| p == DEFAULT_FOREGROUND));
+    assert!(cell_blank(&pixels, &geometry, 1, 0));
+}
+
+#[test]
+fn the_cursor_follows_text_and_restores_the_cell_it_leaves() {
+    let (mut console, mut pixels) = cursor_console_of(3, 1);
+    let geometry = *console.geometry();
+    // After printing `A` the cursor block stands on column 1…
+    console.write_bytes(&mut pixels, b"A");
+    assert!(cell(&pixels, &geometry, 1, 0)
+        .iter()
+        .all(|&p| p == DEFAULT_FOREGROUND));
+    // …and the glyph cell shows the normal (non-reversed) `A`.
+    assert!(cell_has(&pixels, &geometry, 0, 0, DEFAULT_FOREGROUND));
+    assert!(cell_has(&pixels, &geometry, 0, 0, DEFAULT_BACKGROUND));
+    // A carriage return moves the block back over the `A` (reversed), and
+    // the vacated cell repaints to its recorded blank — the overlay never
+    // leaks into the grid.
+    console.write_bytes(&mut pixels, b"\r");
+    assert!(cell_blank(&pixels, &geometry, 1, 0));
+    assert!(cell_has(&pixels, &geometry, 0, 0, DEFAULT_FOREGROUND));
+}
+
+#[test]
+fn hide_and_show_cursor_toggle_the_overlay() {
+    // DECTCEM: a full-screen program hides the cursor while it owns the
+    // screen and shows it again on leave — the block must obey both.
+    let (mut console, mut pixels) = cursor_console_of(2, 1);
+    let geometry = *console.geometry();
+    console.write_bytes(&mut pixels, b"\x1b[?25l");
+    assert!(cell_blank(&pixels, &geometry, 0, 0));
+    console.write_bytes(&mut pixels, b"\x1b[?25h");
+    assert!(cell(&pixels, &geometry, 0, 0)
+        .iter()
+        .all(|&p| p == DEFAULT_FOREGROUND));
 }
 
 #[test]

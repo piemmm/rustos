@@ -90,22 +90,55 @@ fn install_stack_canary(canary: u64) {
 
 /// Called by the compiler-inserted epilogue when a stack canary check fails.
 ///
-/// A detected stack-buffer overflow is unrecoverable; the runtime terminates
-/// the program through the `exit` syscall with a reserved non-zero code rather
-/// than returning to corrupted state (fail closed).
+/// A detected stack-buffer overflow is unrecoverable; the runtime states the
+/// reason on stderr (fail loud — a silent abnormal exit tells the user
+/// nothing) and terminates the program through the `exit` syscall with a
+/// reserved non-zero code rather than returning to corrupted state (fail
+/// closed).
 #[no_mangle]
 extern "C" fn __stack_chk_fail() -> ! {
+    write_stderr_best_effort(b"fatal: stack smashing detected\n");
     exit(EXIT_BAD_STARTUP)
 }
 
+/// Exit code the runtime terminates with on a panic — the same `101` the
+/// hosted Rust runtime uses, distinct from the startup-validation failure.
+const EXIT_PANIC: i32 = 101;
+
+/// The largest panic report written to stderr, in bytes. A fixed bound keeps
+/// the panic path allocation-free (the panic may itself be an out-of-memory
+/// condition); a longer report is truncated, never lost.
+const PANIC_REPORT_BYTES: usize = 512;
+
+/// Write `bytes` to standard error, best-effort: a program dying abnormally
+/// may have no attached stderr consumer, and the report must never turn the
+/// teardown into a second failure.
+fn write_stderr_best_effort(bytes: &[u8]) {
+    let mut err = crate::io::Stderr;
+    let _ = crate::io::Write::write_all(&mut err, bytes);
+}
+
 /// Panic handler: a hosted program has no unwinder, so a panic is an
-/// unrecoverable fault. Terminate through the `exit` syscall rather than
-/// returning to corrupt state (fail closed). Programs are
-/// written to be panic-free; this satisfies the `no_std` contract once and
-/// for all rt programs, so none repeats it.
+/// unrecoverable fault. The runtime states the panic's message and location
+/// on stderr first — an abnormal termination must say why, a silent non-zero
+/// exit is a defect — through a fixed stack buffer ([`FixedFmtBuf`]: the
+/// panic may be an out-of-memory condition, so this path never allocates),
+/// then terminates through the `exit` syscall rather than returning to
+/// corrupt state (fail closed). Programs are written to be panic-free; this
+/// satisfies the `no_std` contract once and for all rt programs, so none
+/// repeats it.
+///
+/// [`FixedFmtBuf`]: crate::io::FixedFmtBuf
 #[panic_handler]
-fn panic(_info: &PanicInfo<'_>) -> ! {
-    exit(EXIT_BAD_STARTUP)
+fn panic(info: &PanicInfo<'_>) -> ! {
+    use core::fmt::Write as _;
+    let mut report = crate::io::FixedFmtBuf::<PANIC_REPORT_BYTES>::new();
+    // `PanicInfo`'s `Display` prints "panicked at <location>:\n<message>" —
+    // everything the report needs, within the workspace MSRV.
+    let _ = write!(report, "{info}");
+    let _ = report.write_str("\n");
+    write_stderr_best_effort(report.as_bytes());
+    exit(EXIT_PANIC)
 }
 
 /// Read the declared total startup-vector length from its header, so the

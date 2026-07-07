@@ -435,6 +435,50 @@ fn f10_opens_the_menu_and_navigation_wraps() {
 }
 
 #[test]
+fn alt_accelerators_open_switch_and_toggle_the_menus() {
+    let fs = MapFs::new();
+    let mut model = Model::new();
+    // Alt-F opens File; case does not matter.
+    feed(&mut model, &fs, &[Event::Alt('f')]);
+    assert_eq!(model.mode(), &Mode::Menu { menu: 0, item: 0 });
+    // Alt-S switches straight to Search.
+    feed(&mut model, &fs, &[Event::Alt('S')]);
+    assert_eq!(model.mode(), &Mode::Menu { menu: 1, item: 0 });
+    // The open menu's own accelerator toggles it closed.
+    feed(&mut model, &fs, &[Event::Alt('s')]);
+    assert_eq!(model.mode(), &Mode::Edit);
+    // An Alt chord no menu claims neither opens a menu nor edits text.
+    feed(&mut model, &fs, &[Event::Alt('q')]);
+    assert_eq!(model.mode(), &Mode::Edit);
+    assert_eq!(model.buffer().line(0), "");
+}
+
+#[test]
+fn escape_closes_the_menu_and_cancels_a_prompt_and_a_confirm() {
+    let fs = MapFs::new();
+    let mut model = Model::new();
+    // Esc closes an open menu without acting.
+    feed(&mut model, &fs, &[Event::Alt('f'), Event::Esc]);
+    assert_eq!(model.mode(), &Mode::Edit);
+    // Esc abandons a Save As prompt: nothing is written, no name is kept.
+    type_str(&mut model, &fs, "x");
+    feed(&mut model, &fs, &[Event::Function(2)]);
+    type_str(&mut model, &fs, "victim.txt");
+    feed(&mut model, &fs, &[Event::Esc]);
+    assert!(matches!(model.mode(), Mode::Edit));
+    assert!(fs.contents("victim.txt").is_none());
+    assert!(model.path().is_none());
+    // Esc cancels a "save changes?" question, keeping the session open.
+    let action = feed(
+        &mut model,
+        &fs,
+        &[Event::Function(10), Event::Up, Event::Enter, Event::Esc],
+    );
+    assert_eq!(action, Action::Continue);
+    assert!(matches!(model.mode(), Mode::Edit));
+}
+
+#[test]
 fn exit_with_a_clean_buffer_quits_at_once() {
     let fs = MapFs::new();
     let mut model = Model::new();
@@ -636,11 +680,29 @@ fn render_draws_the_menu_bar_text_and_status() {
     let mut screen = Screen::new(FakeTty::new(), TermType::Xterm256Color, Size::new(10, 40));
     crate::app::render(&model, &mut screen).expect("renders");
     let output = &screen.into_tty().output;
-    assert!(contains(output, b"File"));
-    assert!(contains(output, b"Search"));
+    // Each closed title's accelerator letter is drawn in its own rendition,
+    // so the title reaches the wire split around an SGR change: the letter,
+    // a rendition switch, then the tail.
+    assert!(contains(output, b"ile"));
+    assert!(contains(output, b"earch"));
     assert!(contains(output, b"hello world"));
     assert!(contains(output, b"f.txt"));
     assert!(contains(output, b"Ln 1, Col 2"));
+}
+
+#[test]
+fn menu_bar_highlights_the_accelerator_letters_in_red() {
+    // Borland-style discoverability: on a colour terminal each menu title's
+    // accelerator letter is red on the white bar (`SGR 31` immediately
+    // before the letter), distinct from the black-on-white title text.
+    let fs = MapFs::new();
+    let mut model = Model::new();
+    feed(&mut model, &fs, &[Event::Right]);
+    let mut screen = Screen::new(FakeTty::new(), TermType::Xterm256Color, Size::new(10, 40));
+    crate::app::render(&model, &mut screen).expect("renders");
+    let output = &screen.into_tty().output;
+    assert!(contains(output, b"31mF"));
+    assert!(contains(output, b"31mS"));
 }
 
 #[test]
