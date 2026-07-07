@@ -717,6 +717,33 @@ argmatch modes, `--`, refusals), the engine over in-memory seams
 the no-output early stop, read errors), and the locale switch-drift
 pins.
 
+## `whoami` — print the current user's account name (`userland/apps/whoami`)
+
+`rustos-whoami` is the GNU coreutils identity tool (a `plans/APPS.md`
+§12.1 Stage C store bundle): it prints the user name associated with
+the caller's identity, followed by a newline, and nothing else. RustOS
+has no `/etc/passwd`, so the uid comes from the caller's kernel-attested
+origin record (the ungated `self_origin` syscall — a pure self-observer)
+and the uid → name pairing from the ungated `USER_DIRECTORY` query
+`sysinfod` serves, walked through the shared `lib/procinfo`
+account-directory helper — the same one `top`'s `USER` column uses,
+never a second copy. The tool takes no operands (`extra operand`) and
+knows no options beyond the reserved `-h`/`-?`/`--help` short-help
+switches; like GNU getopt's permutation, an option is honoured wherever
+it sits (`whoami foo --help` serves the help) and the first bad option
+is diagnosed before the operand complaint. A uid with no directory
+entry is the GNU `cannot find name for user ID` diagnostic; a failed
+directory walk is a service error, never misreported as a missing name.
+
+The crate is `no_std` (with `alloc`), has no `unsafe`, and no
+`unwrap`/`expect`/`panic!` in production paths. Its manifest requests
+`CAP_CONSOLE_WRITE` and `CAP_FS_ACCESS` (the short-help read) — within
+the session baseline. `cargo test -p rustos-whoami` drives the parser
+(operand/option rules, getopt ordering, the `--` spelling), the lookup
+engine against an in-memory directory fixture (found name, missing
+name, failed walk, failed identity read, closed terminal), the
+short-help fallback, and the locale switch-drift pin.
+
 ## `ls` — list directory contents (`userland/apps/ls`)
 
 `rustos-ls` lists directory contents (`AGENTS.md` §3; a `plans/APPS.md`

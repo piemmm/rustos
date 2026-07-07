@@ -3764,11 +3764,11 @@ session-baseline ceiling, and the shared shell/home defaults.
 
 The `plans/APPS.md` §12.1 Stage C coreutils build-out is under way:
 `true`, `false`, `yes`, `basename`, `dirname`, `mkdir`, `rmdir`, `head`,
-`wc`, `tee`, and `seq` are
+`wc`, `tee`, `seq`, and `whoami` are
 full self-contained store bundles (store-only — the §18.6 boot floor
 never grows, so the inventory drift test pins their `AppInfo.toml`
 directly; console-write + `CAP_FS_ACCESS` — plus console-read for the
-stdin-reading `head`/`wc`/`tee` — six-locale `Help/` trees with
+stdin-reading `head`/`wc`/`tee` — thirteen-locale `Help/` trees with
 switch-drift pins, complete GNU surfaces). `head` carries the full GNU
 surface (elide counts with the multiplier-suffix alphabet, `-q`/`-v`/
 `-z`, the obsolete `-COUNT[bkm][lqvz]` first-argument form) streaming
@@ -3785,7 +3785,14 @@ scanning, the spelling-derived default precision/width, a C-locale
 `%e`/`%f`/`%g`/`%a` format engine, the exact decimal fast path
 (arbitrary-size integer runs, `inf` LAST), and the extra-number
 rounding rule — its one documented divergence: the float path computes
-in `f64`, not glibc's `long double`. `basename`/`dirname` are
+in `f64`, not glibc's `long double`; `whoami` reads the caller's uid
+from the kernel-attested origin record (the ungated `self_origin`
+syscall) and pairs it with a name through the ungated `USER_DIRECTORY`
+sysinfod query over the shared `rustos_procinfo` account-directory walk
+(the `top` USER-column helper — one definition), reporting the GNU
+`cannot find name for user ID` diagnostic for an unlisted uid and a
+service error — never a fabricated "missing name" — for a failed walk.
+`basename`/`dirname` are
 purely lexical and treat a `Name:/` alias root the way POSIX treats `/`
 through the path grammar's own exported rule
 (`rustos_path::alias_root_len` — one definition, no second path
@@ -3839,7 +3846,7 @@ swap/vimrc/viminfo, syntax/vimscript) lives in `plans/VIM.md`.
 syscalls — fs mode/owner set, per-inode capability get/set, mount — each
 registers in the change that lands its syscall); the Stage C remainder
 (the rest of the first batch — `printf`, `tail`, `env`,
-`sleep`, `date`, `whoami`, `id` — then the text tools, in
+`sleep`, `date`, `id` — then the text tools, in
 further batches); `Help/` trees for future
 command apps as each becomes a registered store bundle; and wider `stdinfo`
 adoption in command apps as future behaviour warrants it (advisory-only,

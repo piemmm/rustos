@@ -73,8 +73,8 @@ the §12.1 Stage B remainder (`chmod`/`chown`/`getcap`/`setcap`/`mount`
 blocked on their kernel syscalls — `cp`/`mv`/`rm`/`useradd`/`groupadd`
 are registered store bundles), the §12.1 Stage C remainder (the first
 batch's `true`/`false`/`yes`/`basename`/`dirname`/`mkdir`/`rmdir`/
-`head`/`wc`/`tee`/`seq` are registered store bundles; the rest land in
-further batches), and
+`head`/`wc`/`tee`/`seq`/`whoami` are registered store bundles; the rest
+land in further batches), and
 deliverable 8 increment 5 (the x86_64/riscv64 storage floor, then
 deletion of the embedded registry those ports still carry as their
 §18.6 boot floor). Help documents are authored **only** in
@@ -775,7 +775,7 @@ behind the floor work below).
 - **Stage C — missing coreutils commands (in progress; all wanted).**
   Every GNU coreutils command implementable on the current floor, in
   prioritised batches. **Done: `true`, `false`, `yes`, `basename`,
-  `dirname`, `mkdir`, `rmdir`, `head`, `wc`, `tee`, `seq`** — each a
+  `dirname`, `mkdir`, `rmdir`, `head`, `wc`, `tee`, `seq`, `whoami`** — each a
   full self-contained store bundle (console-write +
   `CAP_FS_ACCESS` request — plus console-read for the stdin-reading
   `head`/`wc`/`tee` — store-only: the §18.6 boot floor never grows,
@@ -839,13 +839,21 @@ behind the floor work below).
   runs, `inf` LAST), and the extra-number rounding rule — with one
   documented divergence: the float path computes in `f64`, not glibc's
   `long double` (visibly, `%a` prints the `double` spelling `0x1.8p+0`
-  rather than `%La`'s `0xcp-3`). `echo` and `pwd` from the first batch
+  rather than `%La`'s `0xcp-3`). `whoami` prints the name paired with
+  the caller's uid: the uid comes from the kernel-attested origin
+  record (the ungated `self_origin` syscall) and the name from the
+  ungated `USER_DIRECTORY` sysinfod query over the shared
+  `rustos_procinfo` account-directory walk (the `top` USER-column
+  helper, one definition); a uid with no directory entry is the GNU
+  `cannot find name for user ID` diagnostic, and a failed walk is a
+  service error, never misreported as a missing name. `echo` and `pwd`
+  from the first batch
   stay `elsh` builtins for now (`pwd` needs the shell's cwd state, and
   the shell resolves builtins first, so a store bundle of either would
   be unreachable duplication); moving them out is decided when the
   builtin/bundle split is revisited. Remaining first batch: `printf`,
   `tail`, `env`, `sleep`,
-  `date`, `whoami`, `id`; then the text tools `sort`,
+  `date`, `id`; then the text tools `sort`,
   `uniq`, `tr`, `cut`, `paste`, `comm`, `nl`, `tac`, `fold`, `expand`,
   `od`, `split`, `shuf`, `truncate`, `mktemp`, `realpath`, `chgrp`,
   `sha256sum`/`cksum`, `base64`, `df`, `du`). Each is a full self-contained
@@ -938,7 +946,7 @@ both landed; `plans/SHELL.md` command execution):
    store-registered command app**: `basename`, `cat`, `clear`, `cp`,
    `dirname`, `edit`, `false`, `groupadd`, `head`, `ls`, `mkdir`,
    `mv`, `ps`, `reset`, `rm`, `rmdir`, `seq`, `tee`, `top`, `true`, `sysinfo`, `useradd`,
-   `users`, `wc`, `yes`, and `elsh` each author their thirteen-locale tree on disk in the bundle,
+   `users`, `wc`, `whoami`, `yes`, and `elsh` each author their thirteen-locale tree on disk in the bundle,
    discovered by `tools/syshelp` (roots `userland/apps` and
    `userland/shell`), planted at `/System/Apps/<cmd>.app/Help/`, and served
    at runtime through the `HelpSource` seam — never embedded in the binary

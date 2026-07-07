@@ -3227,6 +3227,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-whoami"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-help",
+ "rustos-procinfo",
+ "rustos-rt",
+]
+
+[[package]]
 name = "rustos-wm"
 version = "0.0.0"
 dependencies = [
