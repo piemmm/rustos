@@ -165,10 +165,14 @@ const WRONG_UNLOCK_PASSPHRASE_PREFIX: &str = "abc";
 /// Serial marker after which the autoload-input vertical injects a key.
 ///
 /// The autoloaded user-space virtio-input keyboard driver is *interrupt
-/// driven*: after `VirtioInput::open` brings the device to `DRIVER_OK` and
-/// posts its event-queue buffers, the driver binds its granted device
-/// interrupt line through the `irq_bind` syscall and parks on `irq_wait`
-/// (`lib/drvrt::RtDriverHost::notify_wait`). `irq_bind` is an audited syscall
+/// driven*: `VirtioInput::open_armed` brings the device to `DRIVER_OK`,
+/// posts its event-queue buffers, and only then runs its *arm* step — the
+/// driver binding its granted device interrupt line through the `irq_bind`
+/// syscall — before the pump parks on `irq_wait`
+/// (`lib/drvrt::RtDriverHost::notify_wait`). A virtio-input device silently
+/// drops events while its eventq has no posted buffers, so arming any
+/// earlier would advertise readiness inside the drop window — the lost
+/// keypress that made this vertical flaky. `irq_bind` is an audited syscall
 /// (`lib/abi` `SyscallSpec { audit: true }`), and **only a user-space driver
 /// issues the `irq_bind` *syscall*** — the in-kernel block path binds its
 /// completion line through `IrqTable::bind` directly — so this dispatch

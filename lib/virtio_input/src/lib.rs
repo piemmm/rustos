@@ -235,6 +235,49 @@ impl<'h, T: Transport> VirtioInput<'h, T> {
         })
     }
 
+    /// Bring the device online ([`Self::open`]) and only then run the
+    /// caller's `arm` step — the driver's externally observable
+    /// readiness action, e.g. binding the granted device interrupt
+    /// (the audited `irq_bind` syscall a test harness or supervisor
+    /// watches for).
+    ///
+    /// The ordering is the point of this constructor. A virtio-input
+    /// device silently discards events while its eventq has no posted
+    /// buffers, so an `arm` step performed *before* [`Self::open`]
+    /// advertises readiness while a keystroke can still be dropped —
+    /// the lost-first-keypress race observed on the autoload input
+    /// vertical. Running `arm` strictly after the eventq is live
+    /// (`DRIVER_OK` set, every buffer posted, the device kicked) makes
+    /// the arm step a truthful readiness witness; an event that
+    /// arrives between the kick and the `arm` return sits in the used
+    /// ring and is collected by [`Input::poll`]'s pre-wait drain, so
+    /// nothing is lost in that window either.
+    ///
+    /// `arm` must not wait for input (it runs before the event pump
+    /// exists); it performs its one readiness action and returns.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`Self::open`]'s errors unchanged. If `arm` fails,
+    /// the device is torn down ([`Self::close`], so a live device is
+    /// never left DMA-writing into a driver that is about to exit)
+    /// and the `arm` error is returned.
+    pub fn open_armed<F>(
+        transport: T,
+        host: &'h dyn VirtioHost,
+        arm: F,
+    ) -> Result<Self, DriverError>
+    where
+        F: FnOnce(&mut Self) -> Result<(), DriverError>,
+    {
+        let mut input = Self::open(transport, host)?;
+        if let Err(e) = arm(&mut input) {
+            input.close();
+            return Err(e);
+        }
+        Ok(input)
+    }
+
     /// Tear the device down for unload (sets the status byte to 0).
     pub fn close(mut self) {
         self.transport.reset();

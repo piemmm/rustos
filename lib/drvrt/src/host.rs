@@ -300,9 +300,14 @@ impl<S: GrantSyscalls> RtDriverHost<S> {
     ///
     /// [`VirtioHost::notify_wait`] binds lazily through this same path, but
     /// a driver whose event loop *depends* on the interrupt park calls this
-    /// up front and fails loud on an error — silently degrading to a
-    /// re-poll loop when the park cannot work is the busy-wait the charter
-    /// forbids.
+    /// explicitly at bring-up and fails loud on an error — silently
+    /// degrading to a re-poll loop when the park cannot work is the
+    /// busy-wait the charter forbids. Because `irq_bind` is an audited
+    /// syscall a harness or supervisor treats as the driver's readiness
+    /// witness, the call belongs *after* the device is live (e.g. as
+    /// `VirtioInput::open_armed`'s arm step): binding before the device can
+    /// accept an event advertises readiness inside the window where the
+    /// event would be silently dropped.
     ///
     /// # Errors
     ///

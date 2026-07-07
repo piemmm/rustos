@@ -193,9 +193,14 @@ over its kernel-issued grants (coherency `None` — coherent DMA, platform-neutr
 `rustos_abi::driver::sole_register_window` over `RtDriverHost::resources()` (the
 one definition shared with the USB keyboard driver, §2.2 / §2.16), maps it
 through `mmio_map`, builds the bus-agnostic `MmioTransport`, brings the device up
-with `VirtioInput::open`, and loops `poll` → `VirtioKeyboardConsole::feed` →
-`key_inject`. The pump is interrupt-driven: bring-up preflights
-`RtDriverHost::bind_irq` on the granted device line, `poll` parks in the kernel
+with `VirtioInput::open_armed`, and loops `poll` → `VirtioKeyboardConsole::feed` →
+`key_inject`. The pump is interrupt-driven: `open_armed` runs
+`RtDriverHost::bind_irq` on the granted device line as its *arm* step, strictly
+after the eventq is live (`DRIVER_OK`, buffers posted, device kicked), so the
+audited `irq_bind` syscall is a truthful "keyboard ready" witness — binding any
+earlier advertised readiness while the device could still silently drop a
+keystroke (the lost keypress that made the autoload-input vertical flaky).
+`poll` parks in the kernel
 (`irq_wait` through the host's `notify_wait`) while no event is pending and
 acknowledges the device each cycle (`Transport::ack_interrupt`), so an idle
 keyboard consumes no CPU — never a yield-poll loop (`AGENTS.md` §2.23). Every

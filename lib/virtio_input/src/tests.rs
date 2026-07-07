@@ -248,3 +248,121 @@ fn close_resets_the_device() {
     // a clean teardown is the unload path.
     dev.close();
 }
+
+#[test]
+fn open_armed_arms_only_after_the_event_queue_is_live() {
+    // Regression: the arm step (the driver's `irq_bind` — the readiness
+    // witness a harness or supervisor watches for) must run only once the
+    // device can already accept an event. Arming first advertised a
+    // keyboard whose eventq had no posted buffers, and a keystroke typed
+    // in that window was silently dropped — the flaky autoload-input
+    // vertical's lost keypress.
+    let (t, events) = build_device();
+    let host = auto_host();
+    // A keystroke is already pending at the device when the arm step runs.
+    events.borrow_mut().push_back((wire::EV_KEY, KEY_A, 1));
+    let armed = core::cell::Cell::new(0u32);
+    let mut dev = VirtioInput::open_armed(t, host, |dev| {
+        armed.set(armed.get() + 1);
+        let t = dev.transport_mut();
+        // The device is live before the arm step runs...
+        assert!(t.status().contains(Status::DRIVER_OK));
+        // ...with every event buffer already posted and device-visible:
+        // the device can deliver the pending keystroke (and complete the
+        // remaining posted buffers) right now.
+        assert_eq!(
+            t.drain_queue(wire::EVENT_QUEUE).expect("posted buffers"),
+            usize::from(wire::EVENT_QUEUE_SIZE)
+        );
+        Ok(())
+    })
+    .expect("open_armed");
+    assert_eq!(armed.get(), 1);
+    // The keystroke delivered while arming is not lost: the first poll's
+    // pre-wait drain collects it.
+    let mut buf = [InputEvent {
+        kind: InputEventKind::Key,
+        reserved0: 0,
+        code: 0,
+        value: 0,
+    }; 4];
+    assert_eq!(dev.poll(&mut buf), Ok(1));
+    assert_eq!(buf[0].code, KEY_A);
+    assert_eq!(buf[0].value, 1);
+}
+
+/// [`Transport`] wrapper that counts device resets while delegating to the
+/// in-process mock, so a test can observe the teardown
+/// [`VirtioInput::open_armed`] performs after a failed arm step even though
+/// the device value is consumed by that teardown.
+struct ResetProbe {
+    inner: MockTransport,
+    resets: Rc<core::cell::Cell<u32>>,
+}
+
+impl Transport for ResetProbe {
+    fn reset(&mut self) {
+        self.resets.set(self.resets.get() + 1);
+        self.inner.reset();
+    }
+    fn status(&self) -> Status {
+        self.inner.status()
+    }
+    fn set_status(&mut self, status: Status) {
+        self.inner.set_status(status);
+    }
+    fn device_features(&self) -> u64 {
+        self.inner.device_features()
+    }
+    fn set_driver_features(&mut self, features: u64) {
+        self.inner.set_driver_features(features);
+    }
+    fn num_queues(&self) -> u16 {
+        self.inner.num_queues()
+    }
+    fn queue_select(&mut self, queue: u16) -> Result<(), VirtioError> {
+        self.inner.queue_select(queue)
+    }
+    fn queue_max_size(&self) -> u16 {
+        self.inner.queue_max_size()
+    }
+    fn queue_set(
+        &mut self,
+        size: u16,
+        desc: u64,
+        avail: u64,
+        used: u64,
+    ) -> Result<(), VirtioError> {
+        self.inner.queue_set(size, desc, avail, used)
+    }
+    fn notify(&mut self, queue: u16) {
+        self.inner.notify(queue);
+    }
+    fn read_config(&self, offset: usize, buf: &mut [u8]) {
+        self.inner.read_config(offset, buf);
+    }
+    fn ack_interrupt(&mut self) {
+        self.inner.ack_interrupt();
+    }
+}
+
+#[test]
+fn open_armed_surfaces_the_arm_error_and_resets_the_device() {
+    // A failed arm step must tear the device down (a live device is never
+    // left DMA-writing into a driver that is about to exit) and surface
+    // the arm error unchanged.
+    let (t, _events) = build_device();
+    let resets = Rc::new(core::cell::Cell::new(0u32));
+    let probe = ResetProbe {
+        inner: t,
+        resets: Rc::clone(&resets),
+    };
+    let host = auto_host();
+    let Err(err) = VirtioInput::open_armed(probe, host, |_| Err(DriverError::PermissionDenied))
+    else {
+        panic!("arm failure must surface");
+    };
+    assert_eq!(err, DriverError::PermissionDenied);
+    // `open`'s initialisation reset plus the arm-failure teardown.
+    assert_eq!(resets.get(), 2);
+}

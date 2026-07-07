@@ -35,8 +35,11 @@
 //! * `sole_register_window` over the delivered grants: the device's register
 //!   window `(base, len)` is read from the grants the kernel delivered, never a
 //!   build-time board constant.
-//! * `MmioTransport::new` over the mapped window, then `VirtioInput::open`:
-//!   brings the virtio-input device online and posts its event queue.
+//! * `MmioTransport::new` over the mapped window, then
+//!   `VirtioInput::open_armed`: brings the virtio-input device online, posts
+//!   its event queue, and only then binds the granted interrupt (the arm
+//!   step), so readiness is never advertised before the device can accept a
+//!   keystroke.
 //! * The poll/feed/inject loop: each decoded `InputEvent` key edge is
 //!   resolved into a `KeyInput` record by `VirtioKeyboardConsole` and
 //!   injected into the kernel input-focus arbiter through the `key_inject`
@@ -47,7 +50,11 @@
 //! device interrupt** between events: `VirtioInput::poll` waits through the
 //! host's `notify_wait` (the kernel `irq_wait` park) and acknowledges the
 //! device each cycle, so an idle keyboard costs no CPU — never a yield-poll
-//! loop. The interrupt bind is preflighted at bring-up and a hard poll fault
+//! loop. The interrupt bind is the `open_armed` arm step, issued only once
+//! the device's eventq is live (buffers posted, device kicked): the audited
+//! `irq_bind` syscall is the kernel-observable readiness witness, and binding
+//! any earlier would advertise a keyboard that can still silently drop a
+//! keystroke. A bind failure or a hard poll fault
 //! exits fail-loud; a broken device is never retried in a spin.
 //! A bring-up failure exits with a reserved fail-closed code, leaving the
 //! console without a keyboard rather than wedged; the
@@ -84,10 +91,10 @@ mod program {
     /// Exit code when the device bring-up failed (the register window could
     /// not be mapped, the window is not a virtio-MMIO device, the device
     /// rejected the virtio init sequence, or the granted interrupt line
-    /// could not be bound — the event pump parks on it, so a driver that
-    /// cannot bind it would degrade into the busy re-poll the charter
-    /// forbids). A reserved, fail-closed value; the console is left without
-    /// a keyboard, never wedged.
+    /// could not be bound after the device came up — the event pump parks
+    /// on it, so a driver that cannot bind it would degrade into the busy
+    /// re-poll the charter forbids). A reserved, fail-closed value; the
+    /// console is left without a keyboard, never wedged.
     const EXIT_BRINGUP_FAILED: i32 = 82;
 
     /// Exit code when the running device faulted (a corrupted completion or
@@ -146,12 +153,15 @@ mod program {
         // Map the register window and build the bus-agnostic transport over it,
         // then bring the virtio-input device online. The host is borrowed as
         // the `VirtioHost` the device carves its event buffers from.
-        // Preflight the interrupt bind: the event pump parks on this line
-        // between keystrokes, so a driver that cannot bind it must fail
-        // loud here rather than silently degrade into a busy re-poll.
-        if host.bind_irq().is_err() {
-            return EXIT_BRINGUP_FAILED;
-        }
+        // The interrupt bind is the *arm* step of `open_armed`, run strictly
+        // after the eventq is live: the audited `irq_bind` syscall is the
+        // kernel-observable "keyboard ready" witness, and binding before the
+        // device has posted buffers advertises readiness while a keystroke
+        // can still be silently dropped against an un-ready device. The bind
+        // stays mandatory and fail-loud — the event pump parks on this line
+        // between keystrokes, so a driver that cannot bind it must exit here
+        // rather than silently degrade into a busy re-poll; on that failure
+        // `open_armed` has already reset the device.
         let Ok(window) = host.map_window(base, len) else {
             return EXIT_BRINGUP_FAILED;
         };
@@ -159,7 +169,7 @@ mod program {
             return EXIT_BRINGUP_FAILED;
         };
         let vhost: &dyn VirtioHost = &host;
-        let Ok(mut input) = VirtioInput::open(transport, vhost) else {
+        let Ok(mut input) = VirtioInput::open_armed(transport, vhost, |_| host.bind_irq()) else {
             return EXIT_BRINGUP_FAILED;
         };
 

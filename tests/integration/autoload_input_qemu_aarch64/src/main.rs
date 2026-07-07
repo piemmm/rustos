@@ -40,8 +40,10 @@
 //!    process** with exactly that node's resource grants (register window, DMA,
 //!    and the IRQ line) plus the delegated `CAP_INPUT_INJECT`.
 //! 4. The spawned driver maps its register window, brings the virtio-input
-//!    device up, **binds its granted interrupt line and parks on `irq_wait`**
-//!    (interrupt-driven, never a busy poll), and on
+//!    device up, **then binds its granted interrupt line and parks on
+//!    `irq_wait`** (interrupt-driven, never a busy poll; the bind is
+//!    `VirtioInput::open_armed`'s arm step, issued only once the eventq is
+//!    live so the audited bind is a truthful readiness witness), and on
 //!    each device interrupt pumps decoded key edges into the arbiter via
 //!    `key_inject`.
 //!
