@@ -4015,6 +4015,24 @@ for the binding design and staging.
 
 ---
 
+## UNIVERSAL — universal app distribution: multi-slice bundles + a Wasm app tier (`plans/UNIVERSAL.md`)
+
+**Status: planned (U1–U2).** One published artifact runs on every RustOS
+architecture: the **`.app` bundle** (never a fat `rxe` file) is the universal
+unit. U1 (small, first) adds the target-architecture dimension to `AppInfo`
+and per-arch slice selection to the single `lib/appload` load gate, with
+install-time thinning of foreign slices — native, per-arch slices remain the
+only correct answer for hot-path code (§2.16). U2 (large, second) adds an
+optional `wasm32` fallback slice compiled by a sandboxed (§19.5) install-time
+AOT service under `CAP_JIT_MAP_EXEC` W^X discipline, so any architecture
+without a native slice — including ones added after publication — runs the
+existing catalogue. Explicitly never built: a bespoke bytecode/VM, a fat
+`rxe` file format, a default in-process runtime JIT, or an in-OS Rust
+compiler as the distribution channel. See `plans/UNIVERSAL.md` for the
+binding design and staging.
+
+---
+
 ## Cache-Aware Scheduling (LLC-aware task aggregation)
 
 **Status: planned.** A scheduler *performance* feature (§2.16): co-locate the
