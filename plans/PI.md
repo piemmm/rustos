@@ -869,8 +869,10 @@ on its own before the next.
       crash-loop guard: a session that blocks on input runs for PID 1's whole
       life and never approaches it, but one that exits instantly (no input
       backing) stops the loop at `EXIT_SESSION_EXHAUSTED` rather than
-      busy-spinning on `spawn` (`AGENTS.md` §2.1), and a failed `spawn`/`wait`
-      is fail-loud (`EXIT_SESSION_FAILED`/`EXIT_WAIT_FAILED`, §2.9). The
+      busy-spinning on `spawn` (`AGENTS.md` §2.1). A refused `spawn` is
+      fail-loud but never boot-fatal (§2.24): the refusal is reported on
+      `stderr` and only that entry's slot abandoned, while a failed `wait`
+      still ends the run (`EXIT_WAIT_FAILED`, §2.9). The
       userland + kernel-bookkeeping pieces were already wired — the production
       aarch64 pipeline wires the `KernelProcessWait` producer
       (`kernel_core::run_phases`), the `spawn` admit path's `register_child`,

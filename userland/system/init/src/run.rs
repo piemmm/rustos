@@ -37,7 +37,7 @@ mod supervisor;
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
-    use rustos_rt::io::{Stdout, Write};
+    use rustos_rt::io::{Stderr, Stdout, Write};
 
     use crate::startup::{StartupConfig, BANNER, DEFAULT_CONFIG, MAX_SERVICES};
     use crate::supervisor::{supervise, Outcome, Sessions};
@@ -47,15 +47,11 @@ mod program {
     /// well-formed, so reaching this is a build defect, not a runtime input.
     const EXIT_CONFIG_INVALID: i32 = 70;
 
-    /// Exit code when launching a session program failed — the `spawn`
-    /// syscall returned a negative `-errno`. A reserved, fail-closed value distinct from [`EXIT_CONFIG_INVALID`] so the cause
-    /// is unambiguous in the audit transcript.
-    const EXIT_SESSION_FAILED: i32 = 71;
-
     /// Exit code when waiting on the sessions failed — the `wait` syscall
     /// returned a negative `-errno` (the supervisor cannot reap the children
     /// it spawned). A reserved, fail-closed value
-    /// distinct from [`EXIT_SESSION_FAILED`] so the cause is unambiguous.
+    /// distinct from [`EXIT_CONFIG_INVALID`] so the cause is unambiguous
+    /// in the audit transcript.
     const EXIT_WAIT_FAILED: i32 = 72;
 
     /// Exit code when no console's session could stay up: every console
@@ -84,6 +80,17 @@ mod program {
         }
         fn wait_any(&mut self, status: &mut i32) -> i64 {
             rustos_rt::wait_exit(rustos_abi::WAIT_PID_ANY, status)
+        }
+        fn report_launch_failure(&mut self, path: &[u8], console: u32, err: i64) {
+            // One terse line on the inherited diagnostic stream, so a
+            // refused service or session is visible at the console instead
+            // of silently absent. Best-effort: PID 1 boots on with the
+            // surviving entries whether or not the write lands, and the
+            // kernel's own audit log already carries the refusal.
+            let shown = core::str::from_utf8(path).unwrap_or("<non-utf8 path>");
+            let _ = Stderr.write_fmt(format_args!(
+                "init: launch of {shown} on console {console} refused (err {err}); continuing without it\n"
+            ));
         }
     }
 
@@ -151,7 +158,6 @@ mod program {
             &service_bytes[..services.len()],
         ) {
             Outcome::NoConsoles => EXIT_NO_CONSOLES,
-            Outcome::SpawnFailed => EXIT_SESSION_FAILED,
             Outcome::WaitFailed => EXIT_WAIT_FAILED,
             Outcome::Exhausted => EXIT_SESSION_EXHAUSTED,
         }
@@ -185,6 +191,7 @@ impl supervisor::Sessions for NoSessions {
     fn wait_any(&mut self, _status: &mut i32) -> i64 {
         -1
     }
+    fn report_launch_failure(&mut self, _path: &[u8], _console: u32, _err: i64) {}
 }
 
 #[cfg(not(freestanding))]

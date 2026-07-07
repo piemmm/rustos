@@ -74,6 +74,13 @@ pub trait Sessions {
     /// `wait` with `WAIT_PID_ANY`: block until any child exits, reap it, and
     /// return its PID (writing the exit code to `status`), or `-errno`.
     fn wait_any(&mut self, status: &mut i32) -> i64;
+    /// State the reason a launch was refused: `spawn_at` for `path` on
+    /// `console` returned the negative `err` (`-errno`). PID 1 abandons the
+    /// entry and boots on, so the refusal must land somewhere a user can
+    /// find it — the production backing writes one terse line to `stderr`
+    /// (fd 2, the inherited diagnostic stream); a silent skip would hide a
+    /// dead service behind a working-looking boot.
+    fn report_launch_failure(&mut self, path: &[u8], console: u32, err: i64);
 }
 
 /// Why [`supervise`] returned (PID 1 never returns while a
@@ -84,9 +91,6 @@ pub enum Outcome {
     /// a session could attach to, so PID 1 reports the system unusable
     /// rather than spawning sessions with no streams.
     NoConsoles,
-    /// A `spawn` failed (`-errno`): an unknown path, an unwired spawn
-    /// subsystem, or an invalid console index — fail-loud, never ignored.
-    SpawnFailed,
     /// `wait` failed (`-errno`): the supervisor cannot reap its own
     /// children — a kernel-state inconsistency it surfaces rather than
     /// continuing blindly.
@@ -138,8 +142,13 @@ impl Slot<'_> {
 ///    `service` on the primary console (index 0, for its fd 2 diagnostics
 ///    ), then `session` on each console (up to
 ///    [`MAX_SUPERVISED_CONSOLES`]). The services are launched first so a
-///    perpetual service (`devmgr`) is up before the sessions. Any launch
-///    failure is [`Outcome::SpawnFailed`].
+///    perpetual service (`devmgr`) is up before the sessions. A refused
+///    launch is reported through [`Sessions::report_launch_failure`] and
+///    its slot abandoned; the remaining entries still launch — one dead
+///    service must not take down the device manager, the other services,
+///    or every login session with it. The refused program itself stays
+///    refused (the kernel's load gate already failed it closed); only the
+///    rest of the boot survives.
 /// 3. Wait-any in a loop: map each reaped PID back to its slot and relaunch
 ///    that slot's program on **its own** console, until the slot's
 ///    [`SESSION_SPAWN_BUDGET`] is consumed (the slot is then abandoned). A
@@ -188,11 +197,16 @@ pub fn supervise<'a, S: Sessions>(
     }
     for slot in &mut slots[..active] {
         let pid = sys.spawn_at(slot.path, slot.console);
+        slot.launches = 1;
         if pid < 0 {
-            return Outcome::SpawnFailed;
+            // Fail loud, degrade gracefully: state the refusal and boot
+            // on with the surviving entries. A launch refusal is
+            // deterministic (the kernel's load gate said no), so a retry
+            // loop would only repeat the answer.
+            sys.report_launch_failure(slot.path, slot.console, pid);
+            continue;
         }
         slot.pid = pid;
-        slot.launches = 1;
     }
 
     loop {
@@ -223,9 +237,15 @@ pub fn supervise<'a, S: Sessions>(
             slot.pid = Slot::ABANDONED;
             continue;
         }
-        let pid = sys.spawn_at(slot.path, slot.console);
+        let path = slot.path;
+        let console = slot.console;
+        let pid = sys.spawn_at(path, console);
         if pid < 0 {
-            return Outcome::SpawnFailed;
+            // Same policy as the initial fan-out: report, abandon this
+            // slot, keep the rest of the system up.
+            slot.pid = Slot::ABANDONED;
+            sys.report_launch_failure(path, console, pid);
+            continue;
         }
         slot.pid = pid;
         slot.launches += 1;
@@ -245,6 +265,7 @@ mod tests {
         spawns: Vec<u32>,
         spawn_paths: Vec<Vec<u8>>,
         waits: Vec<i64>,
+        reports: Vec<(Vec<u8>, u32, i64)>,
         next_spawn: usize,
         next_wait: usize,
     }
@@ -257,6 +278,7 @@ mod tests {
                 spawns: Vec::new(),
                 spawn_paths: Vec::new(),
                 waits,
+                reports: Vec::new(),
                 next_spawn: 0,
                 next_wait: 0,
             }
@@ -278,6 +300,9 @@ mod tests {
             let result = self.waits[self.next_wait];
             self.next_wait += 1;
             result
+        }
+        fn report_launch_failure(&mut self, path: &[u8], console: u32, err: i64) {
+            self.reports.push((path.to_vec(), console, err));
         }
     }
 
@@ -329,18 +354,59 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_launch_is_spawn_failed() {
-        let mut at_start = ScriptedSessions::new(2, vec![10, -3], vec![]);
-        assert_eq!(
-            supervise(&mut at_start, b"login", &[]),
-            Outcome::SpawnFailed
-        );
+    fn a_failed_launch_is_reported_and_the_rest_of_the_boot_survives() {
+        // Two consoles; console 1's session is refused at the fan-out. The
+        // refusal is reported, console 0's session keeps running (the next
+        // wait error ends the run deterministically) — one refused entry
+        // never aborts PID 1.
+        let mut at_start = ScriptedSessions::new(2, vec![10, -3], vec![-7]);
+        assert_eq!(supervise(&mut at_start, b"login", &[]), Outcome::WaitFailed);
+        assert_eq!(at_start.reports, vec![(b"login".to_vec(), 1, -3)]);
 
+        // A refused *relaunch* abandons only that slot: with no other live
+        // entry the supervisor then reports honest exhaustion.
         let mut at_relaunch = ScriptedSessions::new(1, vec![10, -3], vec![10]);
         assert_eq!(
             supervise(&mut at_relaunch, b"login", &[]),
-            Outcome::SpawnFailed
+            Outcome::Exhausted
         );
+        assert_eq!(at_relaunch.reports, vec![(b"login".to_vec(), 0, -3)]);
+    }
+
+    #[test]
+    fn every_launch_refused_is_honest_exhaustion() {
+        // Nothing could be launched at all: every refusal is reported and
+        // the supervisor returns `Exhausted` instead of waiting on
+        // children it never had.
+        let mut sys = ScriptedSessions::new(1, vec![-10, -10], vec![]);
+        let services: [&[u8]; 1] = [b"svc"];
+        assert_eq!(supervise(&mut sys, b"login", &services), Outcome::Exhausted);
+        assert_eq!(sys.reports.len(), 2);
+    }
+
+    #[test]
+    fn a_refused_service_does_not_take_down_the_other_services_or_sessions() {
+        // The Pi 4 boot-log regression: a stale store bundle fails the
+        // load gate (`-errno` from `spawn`) for the *first* configured
+        // service. The refusal must be reported and skipped — the device
+        // manager (which autoloads the USB keyboard chain), the remaining
+        // services, and the login session all still launch.
+        let mut sys = ScriptedSessions::new(1, vec![-10, 20, 30, 40], vec![-7]);
+        let services: [&[u8]; 3] = [b"sysinfod", b"devmgr", b"seatmgr"];
+        assert_eq!(
+            supervise(&mut sys, b"login", &services),
+            Outcome::WaitFailed
+        );
+        assert_eq!(
+            sys.spawn_paths,
+            vec![
+                b"sysinfod".to_vec(),
+                b"devmgr".to_vec(),
+                b"seatmgr".to_vec(),
+                b"login".to_vec(),
+            ]
+        );
+        assert_eq!(sys.reports, vec![(b"sysinfod".to_vec(), 0, -10)]);
     }
 
     #[test]

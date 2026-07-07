@@ -160,7 +160,11 @@ supervise loop:
 1. **launches** the session with the `spawn` syscall — a separate,
    hardware-isolated process (a true `spawn`, not an `exec`-style hand-off,
    `AGENTS.md` §4), so PID 1 keeps running. A negative result is fail-loud
-   (`EXIT_SESSION_FAILED`), never ignored (`AGENTS.md` §2.9);
+   but never fatal to the boot (`AGENTS.md` §2.24): the refusal is written
+   to `stderr` (`Sessions::report_launch_failure`) and only that entry's
+   slot is abandoned — the remaining services and sessions keep running,
+   so one refused bundle cannot take down the device manager or every
+   login session with it;
 2. **blocks** on exactly that child with the `wait` syscall
    (`plans/SPAWN.md` SP6), reaping it when it exits so it never lingers as a
    zombie. A negative `wait` — the supervisor cannot reap its own child — is

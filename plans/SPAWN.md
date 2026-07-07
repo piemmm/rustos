@@ -379,8 +379,10 @@ follow. **SP3a + SP3b are landed.**
 **Landed alongside SP3b.** `init`'s startup config (`session
 /System/Apps/elsh.app/Run`, already parsed, `plans/PI.md` P6b) is now launched
 through the SP3 `spawn` syscall (`rustos_rt::spawn`) as a separate, isolated
-process; `init` keeps running and reacts fail-closed (`EXIT_SESSION_FAILED`)
-to a failed spawn rather than being replaced. `init`'s effective set gained
+process; `init` keeps running when a spawn is refused — the refusal is
+reported on `stderr` (`Sessions::report_launch_failure`) and that entry's
+slot abandoned while the remaining entries boot on (§2.24) — rather than
+being replaced. `init`'s effective set gained
 `CAP_PROC_SPAWN`; the child receives only its own stream authority,
 `{CAP_CONSOLE_WRITE, CAP_CONSOLE_READ}` (no ambient authority, §4). The
 minimal `session` program is a banner+exit `Run` stub in the `Shell`
