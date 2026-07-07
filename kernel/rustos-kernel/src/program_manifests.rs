@@ -504,6 +504,7 @@ mod tests {
             ("reset", AppKind::Command, RESET_MANIFEST),
             ("rm", AppKind::Command, FILE_TOOL_REQUEST),
             ("rmdir", AppKind::Command, PURE_TOOL_REQUEST),
+            ("seq", AppKind::Command, PURE_TOOL_REQUEST),
             ("sysinfo", AppKind::Command, SYSINFO_MANIFEST),
             ("sysinfod", AppKind::Service, SYSINFOD_MANIFEST),
             ("tee", AppKind::Command, FILE_TOOL_REQUEST),
