@@ -102,6 +102,7 @@ use rustos_kernel_sec::{
 };
 use rustos_kernel_syscall::{CallerContext, Dispatcher, RawArgs, SyscallHandlers, SyscallResult};
 use rustos_log::{Event, EventId, Field, Level, Sink};
+use rustos_seat::SeatOwner;
 use rustos_sync::RwLock;
 use rustos_util::fmt::format_hex_u64;
 use zeroize::Zeroize;
@@ -123,13 +124,13 @@ use crate::devres::{
 use crate::dispatch_slot::{DispatchHook, DispatchOutcome, RescheduleAction};
 use crate::fs::{FilesystemService, LateIdentity, NULL_FILESYSTEM};
 use crate::hwtree::{HwTreeSource, NULL_HW_TREE};
-use crate::input_focus::{InputFocus, NULL_INPUT_FOCUS};
 use crate::introspect::{IntrospectSource, NULL_INTROSPECT};
 use crate::memmap::{MemMap, NULL_MEM_MAP};
 use crate::procsignal::{ProcessSignal, NULL_PROCESS_SIGNAL};
 use crate::procwait::{ChildPeek, ProcessWait, NULL_PROCESS_WAIT};
 use crate::random::{reserve_errno, RandomReserve};
 use crate::rlimit::{authorize_set, LimitSet};
+use crate::seat::{seat_errno, SeatRegistry, NULL_SEAT_REGISTRY};
 use crate::spawn::{
     AdmitError, ProcessSpawn, ProgramRegistry, SpawnCtx, EMPTY_PROGRAM_REGISTRY, NULL_PROCESS_SPAWN,
 };
@@ -335,17 +336,18 @@ where
     /// [`Self::with_users_admin`]. Held as a `'static` borrow, exactly
     /// like the users database it administers.
     users_admin: &'static (dyn UsersAdmin + 'static),
-    /// The kernel input-focus arbiter the `key_inject` / `display_acquire`
-    /// / `display_release` / `keyboard_read` syscalls drive (`plans/PI.md` P11 — input follows the surface
-    /// owner). Defaults to [`NULL_INPUT_FOCUS`], whose text sink is the
+    /// The kernel seat registry the `key_inject` / `display_acquire`
+    /// / `display_release` / `keyboard_read` syscalls drive
+    /// (`plans/DISPLAY.md` D2; `plans/PI.md` P11 — input follows the surface
+    /// owner). Defaults to [`NULL_SEAT_REGISTRY`], whose text sink is the
     /// fail-closed [`crate::console::NULL_CONSOLE_INPUT`], so a build with
-    /// no arbiter wired refuses to route a key edge rather than leaking it
+    /// no registry wired refuses to route a key edge rather than leaking it
     /// to a device; the boot path installs the
-    /// real arbiter — its text sink pointed at the console that owns the
-    /// directly attached keyboard — through [`Self::with_input_focus`].
-    /// Held as a `'static` borrow because the arbiter lives for the
+    /// real registry — its text sink pointed at the console that owns the
+    /// directly attached keyboard — through [`Self::with_seat_registry`].
+    /// Held as a `'static` borrow because the registry lives for the
     /// lifetime of the running kernel, exactly like the console device.
-    input_focus: &'static InputFocus,
+    seat_registry: &'static SeatRegistry,
     /// The architecture MMIO-map producer the `mmio_map` syscall drives to
     /// map a granted device window into the caller's own live address space
     /// (`plans/PI.md` P10 chunk 5d-0). Defaults to
@@ -515,12 +517,12 @@ where
             // P11): `users_db_read` fails closed with `NotImplemented`.
             users_db: &NULL_USERS_DB,
             users_admin: &NULL_USERS_ADMIN,
-            // Input-focus arbiter unwired until the boot path installs the
+            // Seat registry unwired until the boot path installs the
             // real one whose text sink owns the keyboard console
-            // (`plans/PI.md` P11): `key_inject` / `keyboard_read` fail
-            // closed (`NotImplemented` / no input) through the shared
-            // `NULL_INPUT_FOCUS`.
-            input_focus: &NULL_INPUT_FOCUS,
+            // (`plans/DISPLAY.md` D2): `key_inject` / `keyboard_read` fail
+            // closed (`NotImplemented` / not the seat owner) through the
+            // shared `NULL_SEAT_REGISTRY`.
+            seat_registry: &NULL_SEAT_REGISTRY,
             // The MMIO-map facility is unwired until the boot path installs
             // the `kernel/mem` map producer (`plans/PI.md` P10 chunk 5d-0):
             // `mmio_map` fails closed (`NotFound` for an ungranted handle,
@@ -685,22 +687,23 @@ where
         self
     }
 
-    /// Install the kernel input-focus arbiter the keyboard syscalls drive,
+    /// Install the kernel seat registry the keyboard syscalls drive,
     /// consuming and returning `self`.
     ///
-    /// Called once by the boot path after it has built the arbiter with its
+    /// Called once by the boot path after it has built the registry with its
     /// text sink pointed at the console that owns the directly attached
-    /// keyboard (on the Pi, the video console's input queue; `plans/PI.md`
-    /// P11). Until this is called the handler holds [`NULL_INPUT_FOCUS`]
-    /// and every `key_inject` in the default text focus fails closed,
-    /// `keyboard_read` returns no input, and `display_acquire` /
-    /// `display_release` toggle an arbiter no driver feeds. The arbiter must be `'static`: the boot path leaks it
+    /// keyboard (on the Pi, the video console's input queue;
+    /// `plans/DISPLAY.md` D2). Until this is called the handler holds
+    /// [`NULL_SEAT_REGISTRY`] and every `key_inject` on the default unowned
+    /// seat fails closed, `keyboard_read` denies for want of ownership, and
+    /// `display_acquire` / `display_release` operate a seat no driver
+    /// feeds. The registry must be `'static`: the boot path leaks it
     /// alongside `KernelState`, which lives for the lifetime of the running
     /// kernel (no global mutable static; the install is
     /// a one-shot move).
     #[must_use]
-    pub const fn with_input_focus(mut self, input_focus: &'static InputFocus) -> Self {
-        self.input_focus = input_focus;
+    pub const fn with_seat_registry(mut self, seat_registry: &'static SeatRegistry) -> Self {
+        self.seat_registry = seat_registry;
         self
     }
 
@@ -2545,13 +2548,13 @@ where
 
         // Decode the record fail-closed: a malformed edge is refused rather
         // than interpreted. The driver no longer
-        // chooses the encoding or destination — the arbiter routes the edge
-        // to the text console or the desktop keyboard channel by who holds
-        // focus (`plans/PI.md` P11).
+        // chooses the encoding or destination — the seat registry routes the
+        // edge to the text console or the desktop keyboard channel by who
+        // holds the seat (`plans/PI.md` P11, `plans/DISPLAY.md` D2).
         let decoded = KeyInput::from_bytes(&record_bytes);
         record_bytes.zeroize();
         let record = decoded?;
-        let consumed = self.input_focus.inject(record)?;
+        let consumed = self.seat_registry.inject(record)?;
         // Witness the first successful delivery exactly once (`plans/PI.md` P11): proof that an (autoloaded)
         // keyboard driver has come up and is routing input through the
         // arbiter. The one-shot latch fires this on the first edge only —
@@ -2559,7 +2562,7 @@ where
         // count, or timing, so a typed secret and its cadence never reach
         // the log (no input-content/timing noise;
         // — secret hygiene).
-        if self.input_focus.note_first_delivery() {
+        if self.seat_registry.note_first_delivery() {
             crate::audit::emit(
                 self.audit,
                 rustos_log::Level::Info,
@@ -2570,21 +2573,28 @@ where
         Ok(consumed as u64)
     }
 
-    fn display_acquire(&self, _caller: &CallerContext<'_>) -> SyscallResult {
-        // The dispatcher already checked `CAP_DISPLAY`. Claiming the display
-        // switches the arbiter's foreground to the desktop keyboard channel
-        // so subsequently injected key edges follow the new surface owner
-        // (`plans/PI.md` P11).
-        self.input_focus.acquire_display();
+    fn display_acquire(&self, caller: &CallerContext<'_>) -> SyscallResult {
+        // The dispatcher already checked `CAP_DISPLAY`. The kernel-attested
+        // caller is recorded as the seat owner: injected key edges now
+        // follow the new surface owner (`plans/PI.md` P11), and a seat held
+        // by another task refuses the claim (`SeatBusy`) rather than
+        // displacing the holder — ownership is exclusive even between two
+        // principals that both hold the capability (`plans/DISPLAY.md` D2).
+        self.seat_registry
+            .acquire(SeatOwner(caller.task_id.0))
+            .map_err(seat_errno)?;
         Ok(0)
     }
 
-    fn display_release(&self, _caller: &CallerContext<'_>) -> SyscallResult {
-        // The dispatcher already checked `CAP_DISPLAY`. Releasing the
-        // display returns the arbiter's foreground to the text console so a
-        // login/shell once again receives the keyboard (
-        // `plans/PI.md` P11).
-        self.input_focus.release_display();
+    fn display_release(&self, caller: &CallerContext<'_>) -> SyscallResult {
+        // The dispatcher already checked `CAP_DISPLAY`. Only the recorded
+        // owner may release: input then returns to the text console so a
+        // login/shell once again receives the keyboard (`plans/PI.md` P11).
+        // A non-owner is refused (`SeatNotOwner`) — a release is never a
+        // global "flip it back" switch (`plans/DISPLAY.md` D2).
+        self.seat_registry
+            .release(SeatOwner(caller.task_id.0))
+            .map_err(seat_errno)?;
         Ok(0)
     }
 
@@ -2595,13 +2605,18 @@ where
         if len < KeyInput::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
         }
-        // Drain one record into a stack buffer first. `read_key` returns
-        // `0` when the channel is momentarily empty (a valid short read the
-        // caller loops on) or one whole record's `WIRE_LEN`. The buffer is
-        // wiped on every exit (a key edge may carry
-        // a typed character).
+        // Drain one record into a stack buffer first. `read_key` owner-gates
+        // the drain against the seat's live lease — only the task that
+        // acquired the seat may take records off the desktop channel
+        // (`plans/DISPLAY.md` D2) — then returns `0` when the channel is
+        // momentarily empty (a valid short read the caller loops on) or one
+        // whole record's `WIRE_LEN`. The buffer is wiped on every exit (a
+        // key edge may carry a typed character).
         let mut record_bytes = [0u8; KeyInput::WIRE_LEN];
-        let read = match self.input_focus.read_key(&mut record_bytes) {
+        let read = match self
+            .seat_registry
+            .read_key(SeatOwner(caller.task_id.0), &mut record_bytes)
+        {
             Ok(read) => read,
             Err(err) => {
                 record_bytes.zeroize();
@@ -5370,7 +5385,7 @@ where
         programs: &'static ProgramRegistry,
         spawn_service: &'static (dyn ProcessSpawn + 'static),
         process_wait: &'static (dyn ProcessWait + 'static),
-        input_focus: &'static InputFocus,
+        seat_registry: &'static SeatRegistry,
         mem_map: &'static (dyn MemMap + 'static),
         mmio_map_facility: &'static (dyn MmioMapFacility + 'static),
         dma_alloc_facility: &'static (dyn DmaAllocFacility + 'static),
@@ -5392,7 +5407,7 @@ where
             .with_page_table_frames(page_table_frames)
             .with_spawn(programs, spawn_service)
             .with_process_wait(process_wait)
-            .with_input_focus(input_focus)
+            .with_seat_registry(seat_registry)
             .with_mem_map(mem_map)
             .with_mmio_map_facility(mmio_map_facility)
             .with_dma_alloc_facility(dma_alloc_facility),
@@ -10397,14 +10412,14 @@ mod tests {
             caps: &caps,
         };
 
-        // The arbiter's text sink is the video console's input queue.
+        // The seat's text sink is the video console's input queue.
         let queue: &'static crate::console::ConsoleInputQueue =
             Box::leak(Box::new(crate::console::ConsoleInputQueue::new()));
-        let focus: &'static InputFocus = Box::leak(Box::new(InputFocus::new(queue)));
+        let seat: &'static SeatRegistry = Box::leak(Box::new(SeatRegistry::new(queue)));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
-        .with_input_focus(focus);
+        .with_seat_registry(seat);
 
         assert_eq!(
             h.key_inject(&ctx, 0x1000, KeyInput::WIRE_LEN),
@@ -10444,11 +10459,11 @@ mod tests {
 
         let queue: &'static crate::console::ConsoleInputQueue =
             Box::leak(Box::new(crate::console::ConsoleInputQueue::new()));
-        let focus: &'static InputFocus = Box::leak(Box::new(InputFocus::new(queue)));
+        let seat: &'static SeatRegistry = Box::leak(Box::new(SeatRegistry::new(queue)));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
-        .with_input_focus(focus);
+        .with_seat_registry(seat);
 
         // Drop the fixture-setup records (e.g. `TaskCapabilitiesDerived`) so
         // the assertion sees only the witness.
@@ -10486,13 +10501,13 @@ mod tests {
         );
     }
 
-    /// `key_inject` fails closed when no arbiter is wired: the default
-    /// `NULL_INPUT_FOCUS` text sink is `NULL_CONSOLE_INPUT`, so a press
+    /// `key_inject` fails closed when no seat registry is wired: the default
+    /// `NULL_SEAT_REGISTRY` text sink is `NULL_CONSOLE_INPUT`, so a press
     /// that would be enqueued there surfaces `NotImplemented` rather than
     /// dropping it. A `len` too small to hold a
     /// record fails closed before any state is touched.
     #[test]
-    fn key_inject_without_arbiter_fails_closed() {
+    fn key_inject_without_seat_registry_fails_closed() {
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -10514,7 +10529,7 @@ mod tests {
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
 
-        // A short buffer is refused before the arbiter is consulted.
+        // A short buffer is refused before the registry is consulted.
         assert_eq!(
             h.key_inject(&ctx, 0x1000, KeyInput::WIRE_LEN - 1),
             Err(Errno::BufferTooSmall)
@@ -10526,10 +10541,11 @@ mod tests {
         );
     }
 
-    /// `display_acquire` switches the arbiter's foreground to the desktop
-    /// keyboard channel, so an injected record is delivered whole to
-    /// `keyboard_read`; `display_release` returns focus to the text
-    /// console (`plans/PI.md` P11 — input follows the surface owner).
+    /// `display_acquire` binds the caller as the seat owner and routes
+    /// injected records whole to the owner's `keyboard_read`;
+    /// `display_release` (owner-checked) returns input to the text
+    /// console, and a second release by the now-ownerless caller is
+    /// refused (`plans/PI.md` P11; `plans/DISPLAY.md` D2).
     #[test]
     fn display_acquire_routes_records_to_keyboard_read() {
         install_trace_filter();
@@ -10552,16 +10568,22 @@ mod tests {
 
         let queue: &'static crate::console::ConsoleInputQueue =
             Box::leak(Box::new(crate::console::ConsoleInputQueue::new()));
-        let focus: &'static InputFocus = Box::leak(Box::new(InputFocus::new(queue)));
+        let seat: &'static SeatRegistry = Box::leak(Box::new(SeatRegistry::new(queue)));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
-        .with_input_focus(focus);
+        .with_seat_registry(seat);
 
         // A short read buffer is refused before the channel is touched.
         assert_eq!(
             h.keyboard_read(&ctx, 0x1000, KeyInput::WIRE_LEN - 1),
             Err(Errno::BufferTooSmall)
+        );
+        // An unowned seat's channel cannot be drained, even by a
+        // `CAP_INPUT_READ` holder: the drain is owner-gated.
+        assert_eq!(
+            h.keyboard_read(&ctx, 0x1000, KeyInput::WIRE_LEN),
+            Err(Errno::SeatNotOwner)
         );
 
         assert_eq!(h.display_acquire(&ctx), Ok(0));
@@ -10580,7 +10602,7 @@ mod tests {
         // The channel is now drained.
         assert_eq!(h.keyboard_read(&ctx, 0x1000, KeyInput::WIRE_LEN), Ok(0));
 
-        // Releasing returns focus to the text console: the next press
+        // Releasing returns input to the text console: the next press
         // routes to the text sink (the buffer still holds the 'z' record).
         assert_eq!(h.display_release(&ctx), Ok(0));
         assert_eq!(
@@ -10590,6 +10612,80 @@ mod tests {
         let mut text = [0u8; 4];
         assert_eq!(crate::console::ConsoleRead::read(queue, &mut text), Ok(1));
         assert_eq!(&text[..1], b"z");
+
+        // The released seat is unowned: a second release by the former
+        // owner is refused rather than silently succeeding.
+        assert_eq!(h.display_release(&ctx), Err(Errno::SeatNotOwner));
+    }
+
+    /// Seat ownership is an enforced kernel fact, not a capability side
+    /// effect (`plans/DISPLAY.md` D2): while one task holds the seat, a
+    /// second task — even one that legitimately holds `CAP_DISPLAY` /
+    /// `CAP_INPUT_READ` — cannot steal the seat (`SeatBusy`), release it
+    /// (`SeatNotOwner`), or drain the owner's keystrokes
+    /// (`SeatNotOwner`); a double acquire by the owner is surfaced as
+    /// `AlreadyExists`; the queued record stays for the owner.
+    #[test]
+    fn display_seat_ownership_is_enforced_against_a_second_task() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let record = press_char('s');
+        key_inject_aspace(&aspaces, record);
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let wm_caps = make_caps_record(2, &[], sink);
+        let wm = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &wm_caps,
+        };
+        let intruder_caps = make_caps_record(3, &[], sink);
+        let intruder = CallerContext {
+            task_id: SecTaskId(3),
+            caps: &intruder_caps,
+        };
+
+        let queue: &'static crate::console::ConsoleInputQueue =
+            Box::leak(Box::new(crate::console::ConsoleInputQueue::new()));
+        let seat: &'static SeatRegistry = Box::leak(Box::new(SeatRegistry::new(queue)));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_seat_registry(seat);
+
+        // The window manager takes the seat; a repeat claim is a surfaced
+        // caller bug, not a silent success.
+        assert_eq!(h.display_acquire(&wm), Ok(0));
+        assert_eq!(h.display_acquire(&wm), Err(Errno::AlreadyExists));
+
+        // A second task can neither steal nor release the held seat, and
+        // the owner keeps it.
+        assert_eq!(h.display_acquire(&intruder), Err(Errno::SeatBusy));
+        assert_eq!(h.display_release(&intruder), Err(Errno::SeatNotOwner));
+
+        // A record injected while the seat is held queues for the owner;
+        // the intruder's drain is refused and takes nothing.
+        assert_eq!(
+            h.key_inject(&wm, 0x1000, KeyInput::WIRE_LEN),
+            Ok(KeyInput::WIRE_LEN as u64)
+        );
+        assert_eq!(
+            h.keyboard_read(&intruder, 0x1000, KeyInput::WIRE_LEN),
+            Err(Errno::SeatNotOwner)
+        );
+        assert_eq!(
+            h.keyboard_read(&wm, 0x1000, KeyInput::WIRE_LEN),
+            Ok(KeyInput::WIRE_LEN as u64)
+        );
+
+        // Only the owner's release frees the seat for the next claimant.
+        assert_eq!(h.display_release(&wm), Ok(0));
+        assert_eq!(h.display_acquire(&intruder), Ok(0));
     }
 
     /// A `spawn` naming an installed console attaches the child's

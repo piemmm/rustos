@@ -1127,12 +1127,12 @@ order (one fully-gated increment each):
              `virtio-keyboard-device`: unlock → enumerate → match the discovered
              virtio-input node → verify against `KERNEL_DRIVER_SIGNER_PUBKEY` →
              spawn into a user-space process → a typed keystroke reaches the
-             input-focus arbiter via `key_inject` (PASS on
+             seat registry via `key_inject` (PASS on
              `AuditEvent::InputDelivered` `EventId(4050)`). The signing/witness
              prerequisites are landed (`KERNEL_DRIVER_SIGNING_SEED`
              single-sources both the kernel build and the fixture, §2.2; the
              one-shot `InputDelivered` witness is the
-             `InputFocus::note_first_delivery` latch, carrying no key
+             `SeatRegistry::note_first_delivery` latch, carrying no key
              content/timing, §20/§23.1). The blocking-wait subsystem this and
              the interactive UART login depend on is landed: the freeing
              `rustos-kalloc` allocator (§4 deterministic OOM), `KernelProcessWait`
@@ -3958,24 +3958,30 @@ the next increment; see `plans/USB.md` for the binding design and staging.
 
 ## DISPLAY — seat ownership: the display/console locking model (`plans/DISPLAY.md`)
 
-**Status: planned (D1–D6).** Closes the console/graphics *ownership and
-locking* gap against Linux (DRM master + `logind` seats + tty controlling
+**Status: D1–D2 done; D3–D6 planned.** Closes the console/graphics *ownership
+and locking* gap against Linux (DRM master + `logind` seats + tty controlling
 terminal), and improves on it under the charter's fail-closed, no-ambient
-model. Today `display_acquire`/`display_release` are a global `AtomicBool` in
-`kernel/core/src/input_focus.rs` with no owner identity — any `CAP_DISPLAY`
-holder can flip the foreground (last-writer-wins), and the `CAP_DISPLAY`
-rustdoc over-claims a "cannot steal focus" guarantee the code does not enforce.
-The plan makes the **seat** a first-class kernel object with a tracked,
-exclusive, revocable owner (a new arch-neutral `lib/seat` state machine), folds
-the existing `InputFocus` arbiter into a per-seat sink, evolves `CAP_DISPLAY`
-in place (owner-checked acquire/release, no `v2`), derives the framebuffer
+model. The plan makes the **seat** a first-class kernel object with a tracked,
+exclusive, revocable owner, derives the framebuffer
 present right from the live lease (coupling scanout to ownership), adds
 per-console controlling-terminal/foreground arbitration without signal races,
 and models multi-head as N independent seats. Exactly one new capability,
 `CAP_SEAT_ADMIN` (the `chvt`/`logind`-equivalent switch/revoke authority),
-introduced alongside its `seatmgr` holder and enforcement point (§5.2). D1
-(the `lib/seat` model) is the first increment; see `plans/DISPLAY.md` for the
-binding design and staging.
+introduced alongside its `seatmgr` holder and enforcement point (§5.2). D1 is
+done: the dependency-free `no_std` `lib/seat` crate is the one owner/lease
+state machine (owner-checked acquire/release, observable revocation with
+generation-counted leases, and the text-vs-desktop input-routing decision),
+host-tested and documented (`docs/src/desktop/seat.md`). D2 is done: the
+kernel seat registry (`kernel/core/src/seat.rs`, replacing the owner-less
+`InputFocus` arbiter) hosts `rustos_seat::SeatState` under its own lock;
+`display_acquire`/`display_release` (numbers 23/24, evolved in place) bind
+and check the kernel-attested owner with the typed refusals
+`Errno::SeatBusy`/`SeatNotOwner`/`SeatRevoked` (new `abi-v1` errnos 24–26,
+generated into the C headers), the desktop `keyboard_read` drain is
+owner-gated through `SeatState::access`, and the `CAP_DISPLAY` /
+`CAP_INPUT_READ` rustdoc states the enforced behaviour. D3
+(`CAP_SEAT_ADMIN`, `seat_switch`/`seat_revoke`, `seatmgr`) is the next
+increment; see `plans/DISPLAY.md` for the binding design and staging.
 
 ---
 

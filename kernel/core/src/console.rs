@@ -206,9 +206,9 @@ pub static NULL_CONSOLE_READ: NullConsoleRead = NullConsoleRead;
 /// key edge injects it through the `key_inject` syscall (`abi-v1` number
 /// 22), which — after checking
 /// [`CapabilityId::INPUT_INJECT`](rustos_abi::CapabilityId::INPUT_INJECT)
-/// — hands it to the kernel input-focus arbiter
-/// ([`crate::input_focus`]). While the desktop does not hold focus the
-/// arbiter encodes a key press to its console (tty) bytes and pushes them
+/// — hands it to the kernel seat registry
+/// ([`crate::seat`]). While the seat is unowned the
+/// registry encodes a key press to its console (tty) bytes and pushes them
 /// here (its *text sink*); the matching [`ConsoleRead`] half then drains
 /// them for a `stream_read` consumer (login), so the video console's
 /// session reads its own keyboard rather than the UART's bytes.
@@ -296,17 +296,17 @@ impl InputRing {
 
 /// A bounded, lock-protected type-ahead queue that is both the
 /// [`ConsoleRead`] half (drained by `stream_read`) and the
-/// [`ConsoleInput`] half (the input-focus arbiter's text sink) of a
+/// [`ConsoleInput`] half (the seat registry's text sink) of a
 /// keyboard-backed console (`plans/PI.md` P11).
 ///
 /// The video console installs one of these so a directly attached
-/// keyboard's decoded bytes — encoded and pushed by the input-focus
-/// arbiter (`crate::input_focus`) while the desktop does not hold focus —
+/// keyboard's decoded bytes — encoded and pushed by the seat
+/// registry (`crate::seat`) while the seat is unowned —
 /// are drained by the login reading that console, instead of the inert
 /// `Ok(0)` poll a display with no keyboard would otherwise return. The
 /// arch port holds it in a `'static` and references it as both halves of
-/// the console's [`ConsoleDevice`] (and as the arbiter's text sink); the
-/// same `'static` is therefore shared by the producer (the arbiter) and
+/// the console's [`ConsoleDevice`] (and as the registry's text sink); the
+/// same `'static` is therefore shared by the producer (the registry) and
 /// the consumer (`stream_read`), so a push wakes a reader parked in
 /// [`BlockingConsoleRead`].
 ///

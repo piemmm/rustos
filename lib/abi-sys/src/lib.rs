@@ -464,14 +464,17 @@ pub extern "C" fn sys_key_inject(buf: *mut c_void, len: usize) -> u64 {
     unsafe { raw_syscall(NUM_KEY_INJECT, [ptr_arg(buf), len as u64, 0, 0, 0, 0]) }
 }
 
-/// `display_acquire`: acquire ownership of the display and claim keyboard
-/// input focus (`SyscallNumber::DISPLAY_ACQUIRE`, `plans/PI.md` P11). Returns a `ROS_E_*` code (`0` on success).
+/// `display_acquire`: acquire ownership of the seat — the display with its
+/// keyboard — as an exclusive, owner-tracked lease
+/// (`SyscallNumber::DISPLAY_ACQUIRE`, `plans/DISPLAY.md`). Returns a `ROS_E_*` code (`0` on success).
 ///
 /// The compositing window manager calls this when it takes over the screen:
-/// the kernel input-focus arbiter switches its foreground to the desktop
-/// keyboard channel, so injected key edges are delivered as records the
-/// manager drains with [`sys_keyboard_read`]. Gated kernel-side on
-/// `ROS_CAP_DISPLAY` (owning the display is privileged).
+/// the kernel records the calling task as the seat owner, so injected key
+/// edges are delivered as records the owner drains with
+/// [`sys_keyboard_read`]. A seat held by another task refuses the claim
+/// (`ROS_E_SEAT_BUSY` — ownership is never displaced) and a repeat acquire
+/// by the holder is refused (`ROS_E_ALREADY_EXISTS`). Gated kernel-side on
+/// `ROS_CAP_DISPLAY` (owning the seat is privileged).
 #[must_use]
 #[export_name = "ros_sys_display_acquire"]
 pub extern "C" fn sys_display_acquire() -> i32 {
@@ -480,12 +483,15 @@ pub extern "C" fn sys_display_acquire() -> i32 {
     unsafe { ret_i32(raw_syscall(NUM_DISPLAY_ACQUIRE, NO_ARGS)) }
 }
 
-/// `display_release`: release the display and return keyboard input focus to
-/// the text console (`SyscallNumber::DISPLAY_RELEASE`, `plans/PI.md` P11). Returns a `ROS_E_*` code (`0` on
+/// `display_release`: release the seat and return keyboard input to
+/// the text console (`SyscallNumber::DISPLAY_RELEASE`, `plans/DISPLAY.md`). Returns a `ROS_E_*` code (`0` on
 /// success).
 ///
 /// The inverse of [`sys_display_acquire`]; gated kernel-side on
-/// `ROS_CAP_DISPLAY`.
+/// `ROS_CAP_DISPLAY` and owner-checked: a caller that does not hold the
+/// seat is refused (`ROS_E_SEAT_NOT_OWNER`; `ROS_E_SEAT_REVOKED` once,
+/// after an administrative eviction) rather than flipping the seat out
+/// from under its owner.
 #[must_use]
 #[export_name = "ros_sys_display_release"]
 pub extern "C" fn sys_display_release() -> i32 {
@@ -500,9 +506,11 @@ pub extern "C" fn sys_display_release() -> i32 {
 /// record, or `0` when the channel is momentarily drained — or a `ROS_E_*`
 /// code reinterpreted into the result.
 ///
-/// The principal that owns the display (the window manager) drains the
-/// records the arbiter routed to it while it held focus. Gated kernel-side
-/// on `ROS_CAP_INPUT_READ`; the kernel validates the capability and the
+/// The task that owns the seat (the window manager) drains the
+/// records the kernel routed to it while it held the seat. Gated
+/// kernel-side on `ROS_CAP_INPUT_READ` **and** owner-gated against the
+/// seat's live lease (a non-owner is refused with `ROS_E_SEAT_NOT_OWNER`
+/// / `ROS_E_SEAT_REVOKED`); the kernel validates the capability and the
 /// `(buf, len)` pair against the caller's address space before writing it, and a buffer too small to hold a record fails closed.
 #[must_use]
 #[export_name = "ros_sys_keyboard_read"]

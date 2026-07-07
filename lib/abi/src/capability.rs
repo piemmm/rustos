@@ -200,39 +200,45 @@ impl CapabilityId {
     /// the producer counterpart of [`CONSOLE_READ`](Self::CONSOLE_READ),
     /// which gates the *consumer* (login) of the same console.
     pub const INPUT_INJECT: Self = Self(22);
-    /// Acquire ownership of the display (the framebuffer seat) and, with
-    /// it, the keyboard input focus (`plans/PI.md`
-    /// P11 — input follows the surface owner).
+    /// Acquire ownership of the seat — the display with its keyboard —
+    /// as an exclusive, owner-tracked lease (`plans/DISPLAY.md`;
+    /// `plans/PI.md` P11 — input follows the surface owner).
     ///
     /// The gate on the `display_acquire` / `display_release` syscalls
     /// (`abi-v1` numbers 23 / 24): the compositing window manager holds
-    /// this capability and acquires the display when it takes over the
-    /// screen. Acquiring claims the kernel input-focus arbiter's
-    /// foreground (decoded key events route to the desktop keyboard
-    /// channel instead of the text console); releasing returns focus to
-    /// the text console, so input follows the surface owner automatically
-    /// — the desktop analogue of "input follows the foreground tty". Owning the display is privileged rather than
-    /// ambient (no ambient authority; — capability
-    /// checks before state touches): only a session's window manager is
-    /// granted it, so an ordinary task cannot seize the screen or steal
-    /// keyboard focus from the active session.
+    /// this capability and acquires the seat when it takes over the
+    /// screen. The kernel records the **kernel-attested caller** as the
+    /// seat owner and checks that owner on every ownership-changing call:
+    /// a `display_acquire` while another task holds the seat is refused
+    /// (`SeatBusy`) rather than displacing the holder — even when both
+    /// principals legitimately hold this capability — and a
+    /// `display_release` by anyone but the owner is refused
+    /// (`SeatNotOwner`), so "cannot steal focus from the active session"
+    /// is an enforced kernel invariant, not a grant-policy side effect.
+    /// While the seat is held, decoded key events route to the owner's
+    /// desktop keyboard channel; the owner's release returns them to the
+    /// text console — the desktop analogue of "input follows the
+    /// foreground tty". The lease is revocable: a seat administrator
+    /// (`plans/DISPLAY.md` D3) can evict a wedged owner, whose next
+    /// owner-gated call then sees the distinct `SeatRevoked` refusal.
     pub const DISPLAY: Self = Self(23);
     /// Read decoded keyboard events from the kernel keyboard channel
     /// (`plans/PI.md` P11 — keyboard input for the
     /// desktop).
     ///
     /// The gate on the `keyboard_read` syscall (`abi-v1` number 25): the
-    /// principal that owns the display (the window manager / desktop
-    /// session) drains framed [`crate::input::KeyInput`] records the
-    /// kernel input-focus arbiter routed to it while it held focus. It is
+    /// task that owns the seat (the window manager / desktop session)
+    /// drains framed [`crate::input::KeyInput`] records the kernel seat
+    /// registry routed to it while it held the seat. It is
     /// the desktop counterpart of [`CONSOLE_READ`](Self::CONSOLE_READ),
-    /// which gates the *text* console's consumer (login): a keyboard
-    /// stream is delivered only to whoever currently owns the surface, and
-    /// reading it is privileged rather than ambient (
-    /// — capability checks before state touches; — bind to streams,
-    /// never to a device). An unattached channel denies rather than
-    /// leaking, so a task without the capability — or one reading when the
-    /// arbiter holds no desktop focus — sees nothing.
+    /// which gates the *text* console's consumer (login). The capability
+    /// alone is not enough: the drain is additionally **owner-gated**
+    /// against the seat's live lease, so a second `CAP_INPUT_READ` holder
+    /// that does not own the seat is refused (`SeatNotOwner`, or
+    /// `SeatRevoked` after an administrative eviction) and can never
+    /// siphon another session's keystrokes (capability and owner checks
+    /// before state touches; bind to streams, never to a device). An
+    /// unattached channel denies rather than leaking.
     pub const INPUT_READ: Self = Self(24);
     /// Call the user-space firmware property-mailbox service
     /// (`plans/PI.md` P10 D3).

@@ -29,7 +29,7 @@ use rustos_arch_aarch64::context_hal::ContextSwitchHal;
 use rustos_arch_aarch64::entropy::PlatformRng as Aarch64PlatformEntropy;
 use rustos_arch_aarch64::{halt_current_cpu, serial, Aarch64Arch};
 use rustos_arch_api::{CpuId, PlatformEntropy, SchedulerArch};
-use rustos_kernel_core::{ConsoleRead, ConsoleWrite, InputFocus, IrqRouting, KernelArch};
+use rustos_kernel_core::{ConsoleRead, ConsoleWrite, IrqRouting, KernelArch, SeatRegistry};
 use rustos_kernel_irq::IrqTable;
 
 /// Local [`KernelArch`] wrapper around the arch port's
@@ -414,8 +414,8 @@ pub static UART_CONSOLE_READ: UartConsoleRead = UartConsoleRead;
 /// **input** half is not this type but the shared [`VIDEO_KEYBOARD`]
 /// queue: the display's session reads a directly attached keyboard
 /// (USB HID / PS-2 — the P10 input wiring), whose decoded key edges the
-/// keyboard-input driver hands to the [`INPUT_FOCUS`] arbiter, which (in
-/// the default text focus) encodes a press and enqueues it here, never on
+/// keyboard-input driver hands to the [`SEAT_REGISTRY`], which (while
+/// the seat is unowned) encodes a press and enqueues it here, never on
 /// the UART, which is its own console with its own login (`plans/PI.md`
 /// P11). Until a keyboard driver injects anything the queue is empty, so
 /// kernel-core's `BlockingConsoleRead` parks a reader until a keystroke
@@ -455,32 +455,33 @@ pub static VIDEO_CONSOLE: VideoConsole = VideoConsole;
 ///
 /// It is both the video console's [`rustos_kernel_core::ConsoleRead`]
 /// half (drained by a `stream_read` from the video login) and its
-/// [`rustos_kernel_core::ConsoleInput`] half — the [`INPUT_FOCUS`]
-/// arbiter's *text sink*, into which an injected key press is encoded
-/// while the desktop does not hold focus. The same `'static` backs both
-/// halves, so the arbiter's push wakes the reader parked in kernel-core's
+/// [`rustos_kernel_core::ConsoleInput`] half — the [`SEAT_REGISTRY`]'s
+/// *text sink*, into which an injected key press is encoded
+/// while the seat is unowned. The same `'static` backs both
+/// halves, so the registry's push wakes the reader parked in kernel-core's
 /// `BlockingConsoleRead`. The UART console reads its own hardware FIFO
 /// and so carries no such queue — the video login takes input only from
 /// its own keyboard, never the serial line (`plans/PI.md` P11).
 pub static VIDEO_KEYBOARD: rustos_kernel_core::ConsoleInputQueue =
     rustos_kernel_core::ConsoleInputQueue::new();
 
-/// The kernel input-focus arbiter the boot path installs through
-/// [`rustos_kernel_core::KernelSyscallHandlers::with_input_focus`]
-/// (`plans/PI.md` P11 — input follows the
+/// The kernel seat registry the boot path installs through
+/// [`rustos_kernel_core::KernelSyscallHandlers::with_seat_registry`]
+/// (`plans/DISPLAY.md` D2; `plans/PI.md` P11 — input follows the
 /// surface owner).
 ///
-/// Its *text sink* is [`VIDEO_KEYBOARD`]: while the desktop does not hold
-/// focus (the default for a freshly booted text login) the arbiter encodes
+/// Its *text sink* is [`VIDEO_KEYBOARD`]: while the seat is unowned
+/// (the default for a freshly booted text login) the registry encodes
 /// each injected key *press* to the video console's tty bytes and enqueues
 /// them there, where the video login's `stream_read` drains them. When the
-/// window manager acquires the display (`display_acquire`) the arbiter
-/// routes whole [`rustos_abi::input::KeyInput`] records to its desktop
-/// keyboard channel instead, drained by `keyboard_read`. The same `'static`
+/// window manager acquires the seat (`display_acquire`, owner-checked) the
+/// registry routes whole [`rustos_abi::input::KeyInput`] records to its
+/// desktop keyboard channel instead, drained by the owner's
+/// `keyboard_read`. The same `'static`
 /// is shared by the in-kernel keyboard driver's `ArbiterConsoleSink` (which
 /// injects key edges) and the `key_inject` / `display_acquire` /
 /// `display_release` / `keyboard_read` syscall handlers.
-pub static INPUT_FOCUS: InputFocus = InputFocus::new(&VIDEO_KEYBOARD);
+pub static SEAT_REGISTRY: SeatRegistry = SeatRegistry::new(&VIDEO_KEYBOARD);
 
 /// The console-0 read half of the video console, gated on the in-kernel
 /// root-unlock service's ownership latch (`plans/PI.md` P11 Chunk B-2 item

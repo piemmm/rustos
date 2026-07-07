@@ -160,12 +160,12 @@ pub enum AuditEvent {
     /// attested caller uid, and the refusing errno.
     UserAdminRejected,
     /// A keyboard driver delivered the **first** key edge to the
-    /// input-focus arbiter (`crate::input_focus`, `plans/PI.md` P11 —
+    /// seat registry (`crate::seat`, `plans/PI.md` P11 —
     /// the autoload-by-discovery witness).
     ///
     /// Emitted by the `key_inject` syscall handler the first time
-    /// [`crate::input_focus::InputFocus::inject`] succeeds, gated by a
-    /// one-shot latch ([`crate::input_focus::InputFocus::note_first_delivery`]),
+    /// [`crate::seat::SeatRegistry::inject`] succeeds, gated by a
+    /// one-shot latch ([`crate::seat::SeatRegistry::note_first_delivery`]),
     /// so it fires exactly once over the kernel's lifetime. It witnesses
     /// that an (autoloaded) input driver has come up and is delivering
     /// input; it carries **no** key content, count, or timing — a

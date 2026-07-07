@@ -12,25 +12,21 @@ yet at parity with Linux (DRM master + `logind` seats + tty controlling
 terminal), and because the charter's fail-closed, capability-first, no-ambient
 model lets us do it **better** than Linux rather than merely copy it. The
 foundations already in the tree — capability-gated framebuffer/input, the
-kernel-arbitrated `InputFocus`, fail-closed streams — are sound; this plan
-adds the missing *arbitration* layer on top of them, evolving the existing
+kernel-arbitrated seat registry, fail-closed streams — are sound; this plan
+adds the missing *arbitration* layers on top of them, evolving the existing
 seams in place (`AGENTS.md` §2.13), never bolting a second model beside them.
 
 ## 0. Scope and decisions (binding for this plan)
 
 - **The seat is a first-class kernel object with a tracked, exclusive owner.**
-  Today `display_acquire` / `display_release` are a global `AtomicBool` in
-  `kernel/core/src/input_focus.rs` with **no owner identity**: any holder of
-  `CAP_DISPLAY` can flip the foreground regardless of who currently holds it
-  (last-writer-wins), and a `release` is not checked against being the
-  acquirer. The `CAP_DISPLAY` rustdoc claims "an ordinary task cannot …
-  steal keyboard focus from the active session," a guarantee the `AtomicBool`
-  does not actually enforce — it rests solely on the coarse fact that exactly
-  one principal is granted the capability. That mismatch between the stated
-  invariant and the enforced behaviour is a defect under the review gate
-  (`AGENTS.md` §5.4 fail-closed / capability-before-state, §23.1 no
-  over-claiming docs) and is **fixed in this plan, not deferred** (§2.17,
-  §2.18): the owner becomes real and the doc becomes true.
+  Since D2 this is enforced: `display_acquire` / `display_release` bind and
+  check the kernel-attested owning task on the kernel seat registry
+  (`kernel/core/src/seat.rs`, which replaced the owner-less `AtomicBool`
+  `InputFocus` arbiter), so a held seat is never displaced
+  (`Errno::SeatBusy`), a release is owner-checked (`Errno::SeatNotOwner`),
+  and the `CAP_DISPLAY` rustdoc states exactly the enforced, owner-checked,
+  revocable behaviour — the doc is true, not an over-claim (`AGENTS.md`
+  §5.4, §23.1).
 
 - **We evolve `CAP_DISPLAY` in place; we do not add a `v2` syscall pair.**
   RustOS has not shipped, so `abi-v1` is still mutable (`AGENTS.md` §9,
@@ -74,8 +70,8 @@ seams in place (`AGENTS.md` §2.13), never bolting a second model beside them.
 
 | Concern | Linux | RustOS today | This plan |
 | --- | --- | --- | --- |
-| Exclusive display owner | DRM master per-`fd`, revocable | global `AtomicBool`, no owner | kernel-tracked owner task id + revocable lease |
-| Steal-focus protection | master check in ioctl | *claimed* in docs, not enforced | owner-checked acquire/release/present, enforced |
+| Exclusive display owner | DRM master per-`fd`, revocable | kernel-tracked owner task id (D2) | + revocable lease enforcement end-to-end |
+| Steal-focus protection | master check in ioctl | owner-checked acquire/release/read (D2) | + owner-checked present |
 | Present ↔ ownership coupling | scanout gated by master | `CAP_MMIO_MAP` decoupled from `CAP_DISPLAY` | present right derived from the live seat lease |
 | Seat multiplexing (VT switch) | `chvt`/`VT_ACTIVATE`, `logind` seats | single text-vs-desktop boolean | `CAP_SEAT_ADMIN` foreground switch across sessions |
 | Controlling terminal / foreground | session leader + fg pgroup + `SIGTTIN/TTOU` | inherited fd table + `CAP_CONSOLE_READ` gate | per-console controlling-owner + fg handoff, capability-gated |
@@ -138,8 +134,8 @@ lib/seat       → lib/abi, lib/* only. The arch-neutral seat model: the owner
                  table, lease grant/revoke state machine, per-seat foreground
                  console set, and the input-routing decision. no_std, host-tested.
 kernel/core    → lib/seat, kernel/* : hosts one seat registry per running
-                 kernel, folds the existing InputFocus arbiter into a per-seat
-                 sink, and wires the display_* / seat_* syscalls.
+                 kernel (src/seat.rs — the folded-in per-seat input-routing
+                 sink) and wires the display_* / seat_* syscalls.
 drivers/display/* → present gated on the caller's live seat lease (via lib/abi
                  seat handle passed through DriverHost); never names a board.
 userland/system/seatmgr (new) → holds CAP_SEAT_ADMIN; switches foreground and
@@ -193,43 +189,52 @@ end of each stage, write the continuation prompt for the next to
 and the exact next work, in the style of the other plans' continuation
 prompts. Plan files state current state, not history (`AGENTS.md` §13).
 
-### Stage D1 — `lib/seat`: the arch-neutral seat model `[ ]`
+### Stage D1 — `lib/seat`: the arch-neutral seat model `[x]`
 
-**Deliverables**
-- New `no_std` crate `lib/seat` (update `AGENTS.md` §3 and `PLAN.md`, §6):
-  - `SeatId`, `SeatState { owner: Option<TaskId>, foreground: ForegroundSink,
-    lease: LeaseState }`.
-  - The lease state machine: `acquire(task)` (fail if owned by another),
-    `release(task)` (fail if not the owner), `revoke()` (admin), with typed
-    outcomes for every illegal transition (illegal states unrepresentable,
-    §23.2).
-  - The input-routing decision folded in from `InputFocus`: given a seat's
-    state, where does a key edge go (text foreground console vs. the owner's
-    desktop channel)?
-- Rustdoc on every public item; `README.md` stability tier `experimental`
-  (§6). `docs/src/desktop/seat.md` page (new) describing the model.
+**Done.** The dependency-free `no_std` crate `lib/seat` (`rustos-seat`,
+registered in `AGENTS.md` §3 and the workspace) is the one seat state
+machine:
 
-**Done when:** `lib/seat` host-tests cover acquire/release/revoke, non-owner
-denial, unowned→text routing, and owned→desktop routing; the whole-project
-gate is green.
+- `SeatId` / `SeatOwner` (the kernel-attested task identity as an opaque
+  newtype — `kernel/core` converts its `TaskId` at the boundary, keeping the
+  §17.4 layering) / `ConsoleIndex` / `Lease { owner, generation }` /
+  `SeatError { SeatBusy, AlreadyOwner, NotOwner, SeatUnowned, SeatRevoked }`.
+- `SeatState { lease, foreground console }` with the total, fail-closed
+  transitions: `acquire` (refuses `SeatBusy`/`AlreadyOwner`, mints a lease
+  with a per-seat monotonic generation), `release` (owner-checked,
+  `NotOwner` otherwise), `revoke` (admin path; returns the evicted owner for
+  the audit log), and the owner-gated `access` check the present/keyboard
+  paths will apply (D2/D4).
+- Revocation is observable and acknowledgeable: the evicted owner's next
+  `access`/`release` sees the distinct `SeatRevoked`; any fresh `acquire`
+  (including the evicted task's explicit reacquire) clears the marker.
+- `route()` is the folded-in input-routing decision: `Desktop(owner)` while
+  held, `Text(foreground console)` while unowned — including immediately
+  after a revoke, never a stale desktop channel.
 
-### Stage D2 — fold `InputFocus` into a per-seat sink; owner-checked `display_*` `[ ]`
+Rustdoc on every public item; README tier `experimental`;
+`docs/src/desktop/seat.md` describes the model. 17 host tests cover
+acquire/release/revoke, non-owner and revoked-owner denial, both routing
+directions, generation monotonicity, and foreground retargeting.
 
-**Deliverables**
-- `kernel/core` hosts a seat registry (one seat per discovered display node;
-  a text-only seat when none). The existing `InputFocus` becomes the seat's
-  input-routing arm driven by `lib/seat` state — no second routing definition
-  (§2.2); the `AtomicBool` foreground is replaced by the seat's owner/lease.
-- `display_acquire` binds `caller.task_id` as the owner (fail `SeatBusy` if
-  already owned by another); `display_release` checks ownership (fail
-  `NotOwner`); both stop ignoring `_caller`.
-- `CAP_DISPLAY` rustdoc rewritten to state the enforced, owner-checked,
-  revocable behaviour (remove the over-claim).
+### Stage D2 — fold `InputFocus` into a per-seat sink; owner-checked `display_*` `[x]`
 
-**Done when:** kernel tests prove a non-owner cannot release/steal a held
-seat, a released seat returns input to the text foreground, and the docs match
-the enforcement; gate green. Any defect surfaced here is fixed in this stage
-(§2.18).
+**Done.** The kernel seat registry (`kernel/core/src/seat.rs`,
+`SeatRegistry`) replaced the owner-less `InputFocus` arbiter: it hosts
+`rustos_seat::SeatState` under its own lock next to the text sink and the
+bounded, zeroing desktop keyboard channel — one routing definition, driven
+by `SeatState::route` (§2.2). `display_acquire` binds `caller.task_id` as
+the owner and `display_release` is owner-checked; the typed refusals are
+the `abi-v1` errnos `SeatBusy` (24), `SeatNotOwner` (25), `SeatRevoked`
+(26) (a double acquire surfaces `AlreadyExists`), mapped from `SeatError`
+in exactly one place (`seat_errno`) and generated into the C headers. The
+desktop `keyboard_read` drain is owner-gated through `SeatState::access`,
+so a non-owner `CAP_INPUT_READ` holder cannot siphon the owner's
+keystrokes. The `CAP_DISPLAY` / `CAP_INPUT_READ` rustdoc, the syscall-table
+and wrapper docs (`lib/rt`, `lib/abi-sys`), and
+`docs/src/desktop/seat.md` state the enforced behaviour. Kernel host tests
+prove a non-owner cannot steal/release/drain a held seat and a released
+seat returns input to the text foreground.
 
 ### Stage D3 — `CAP_SEAT_ADMIN`, `seat_switch` / `seat_revoke`, and `seatmgr` `[ ]`
 

@@ -36,7 +36,7 @@ use crate::console::{ConsoleDevice, NO_CONSOLES};
 use crate::dispatch_slot::DispatchCallbackSlot;
 use crate::fs::{FilesystemService, LateIdentity, NULL_FILESYSTEM};
 use crate::hwtree::{HwTreeSource, NULL_HW_TREE};
-use crate::input_focus::{InputFocus, NULL_INPUT_FOCUS};
+use crate::seat::{SeatRegistry, NULL_SEAT_REGISTRY};
 use crate::spawn::{
     InitSpawn, ProcessSpawn, ProgramRegistry, EMPTY_PROGRAM_REGISTRY, NULL_PROCESS_SPAWN,
 };
@@ -670,20 +670,21 @@ where
     /// installs its store through [`Self::with_app_store`].
     pub app_store: Option<&'static crate::appspawn::AppStore>,
 
-    /// The kernel input-focus arbiter the keyboard syscalls (`key_inject` /
+    /// The kernel seat registry the keyboard syscalls (`key_inject` /
     /// `display_acquire` / `display_release` / `keyboard_read`) drive
-    /// (`plans/PI.md` P11 — input follows
+    /// (`plans/DISPLAY.md` D2, `plans/PI.md` P11 — input follows
     /// the surface owner).
     ///
-    /// Defaults to [`NULL_INPUT_FOCUS`], whose text sink is the fail-closed
+    /// Defaults to [`NULL_SEAT_REGISTRY`], whose text sink is the fail-closed
     /// [`crate::console::NULL_CONSOLE_INPUT`]: an arch port that has wired no
-    /// arbiter leaves this default and a `key_inject` in the text focus fails
-    /// closed rather than leaking a key edge to a device. A port installs its arbiter — its text sink pointed at the
+    /// registry leaves this default and a `key_inject` on the unowned seat
+    /// fails closed rather than leaking a key edge to a device. A port
+    /// installs its registry — its text sink pointed at the
     /// console that owns the directly attached keyboard — through
-    /// [`Self::with_input_focus`]. Held as a `'static` borrow because the
-    /// arbiter lives for the lifetime of the running kernel, exactly like the
+    /// [`Self::with_seat_registry`]. Held as a `'static` borrow because the
+    /// registry lives for the lifetime of the running kernel, exactly like the
     /// console list.
-    pub input_focus: &'static InputFocus,
+    pub seat_registry: &'static SeatRegistry,
 
     /// The users-database holder the `users_db_read` syscall (no. 19,
     /// `CAP_USERS_READ`) serves to the login session (
@@ -834,11 +835,11 @@ where
             // No on-disk application store until a boot path with a storage
             // floor installs one: a store-bundle spawn fails closed.
             app_store: None,
-            // Input-focus arbiter unwired until the arch port installs the
-            // real one through `with_input_focus` (`plans/PI.md` P11):
+            // Seat registry unwired until the arch port installs the
+            // real one through `with_seat_registry` (`plans/DISPLAY.md` D2):
             // `key_inject` / `keyboard_read` fail closed through
-            // `NULL_INPUT_FOCUS`.
-            input_focus: &NULL_INPUT_FOCUS,
+            // `NULL_SEAT_REGISTRY`.
+            seat_registry: &NULL_SEAT_REGISTRY,
             // Users database unwired until a boot path mounts the root
             // volume and installs the loaded holder through
             // `with_users_db` (`plans/PI.md` P11): `users_db_read` fails
@@ -959,20 +960,20 @@ where
         self
     }
 
-    /// Install the kernel input-focus arbiter the keyboard syscalls drive,
-    /// consuming and returning `self` (`plans/PI.md` P11).
+    /// Install the kernel seat registry the keyboard syscalls drive,
+    /// consuming and returning `self` (`plans/DISPLAY.md` D2).
     ///
-    /// Called by an arch port's boot pipeline after it has built the arbiter
+    /// Called by an arch port's boot pipeline after it has built the registry
     /// with its text sink pointed at the console that owns the directly
     /// attached keyboard (on the Pi, the video console's input queue). Until
-    /// this is called the handover holds [`NULL_INPUT_FOCUS`] and a
-    /// `key_inject` in the default text focus fails closed. The arbiter must be `'static`: the boot path leaks it alongside
+    /// this is called the handover holds [`NULL_SEAT_REGISTRY`] and a
+    /// `key_inject` on the default unowned seat fails closed. The registry must be `'static`: the boot path leaks it alongside
     /// the kernel state, which lives for the lifetime of the running kernel
     /// (the install is a one-shot move, not a global
     /// mutable static).
     #[must_use]
-    pub fn with_input_focus(mut self, input_focus: &'static InputFocus) -> Self {
-        self.input_focus = input_focus;
+    pub fn with_seat_registry(mut self, seat_registry: &'static SeatRegistry) -> Self {
+        self.seat_registry = seat_registry;
         self
     }
 

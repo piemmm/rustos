@@ -70,11 +70,17 @@ rustos-resref = { path = "../../lib/resref", version = "=0.0.0" }
 # the erase (rub-out) control through `rustos_vt::control` rather than a second
 # definition of those bytes.
 rustos-vt = { path = "../../lib/vt", version = "=0.0.0" }
-# The single terminal key map (`AGENTS.md` §2.2): the input-focus arbiter's
-# text sink (`src/input_focus.rs`) encodes a decoded `KeyInput` record to the
-# console (tty) bytes a terminal sends through `rustos_keymap::encode_key_input`
+# The single terminal key map (`AGENTS.md` §2.2): the seat registry's text
+# sink (`src/seat.rs`) encodes a decoded `KeyInput` record to the console
+# (tty) bytes a terminal sends through `rustos_keymap::encode_key_input`
 # rather than a second copy of the layout-to-tty mapping (`plans/PI.md` P11).
 rustos-keymap = { path = "../../lib/keymap", version = "=0.0.0" }
+# The one seat owner/lease/routing state machine (`AGENTS.md` §2.2,
+# `plans/DISPLAY.md`): the kernel seat registry (`src/seat.rs`) hosts
+# `rustos_seat::SeatState` for the owner-checked `display_acquire` /
+# `display_release` and the owner-gated desktop keyboard drain, never a
+# second definition of the lease rules.
+rustos-seat = { path = "../../lib/seat", version = "=0.0.0" }
 rustos-caps = { path = "../../lib/caps", version = "=0.0.0" }
 # The one shared application-bundle load gate (`AGENTS.md` §16.5): the
 # `spawn` syscall's store-bundle path judges an on-disk `.app` through the

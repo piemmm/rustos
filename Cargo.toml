@@ -67,6 +67,7 @@ members = [
     "lib/resref",
     "lib/rng",
     "lib/rt",
+    "lib/seat",
     "lib/svg",
     "lib/sync",
     "lib/termcap",

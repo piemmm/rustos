@@ -608,29 +608,36 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
-    /// Acquire ownership of the display and claim keyboard input focus
-    /// (`plans/PI.md` P11 — input follows the
-    /// surface owner).
+    /// Acquire ownership of the seat — the display with its keyboard —
+    /// as an exclusive, owner-tracked lease (`plans/DISPLAY.md`;
+    /// `plans/PI.md` P11 — input follows the surface owner).
     ///
     /// The dispatcher has already checked the caller holds
-    /// [`CapabilityId::DISPLAY`]. The implementation switches the
-    /// input-focus arbiter's foreground to the desktop keyboard channel, so
-    /// subsequently injected key edges ([`Self::key_inject`]) are delivered
-    /// as records the display owner drains with [`Self::keyboard_read`].
+    /// [`CapabilityId::DISPLAY`]. The implementation records the
+    /// kernel-attested caller as the seat owner, so subsequently injected
+    /// key edges ([`Self::key_inject`]) are delivered as records the owner
+    /// drains with [`Self::keyboard_read`]. A seat held by another task
+    /// refuses the claim with [`Errno::SeatBusy`] (ownership is never
+    /// displaced); a repeat acquire by the holder is refused with
+    /// [`Errno::AlreadyExists`].
     ///
     /// The default implementation fails closed with
     /// [`Errno::NotImplemented`]: a build with no
-    /// arbiter wired owns no display to acquire. The real handler is
+    /// seat registry wired owns no seat to acquire. The real handler is
     /// installed in `kernel/core`.
     fn display_acquire(&self, _caller: &CallerContext<'_>) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
 
-    /// Release the display and return keyboard input focus to the text
-    /// console (`plans/PI.md` P11).
+    /// Release the seat and return keyboard input to the text
+    /// console (`plans/DISPLAY.md`; `plans/PI.md` P11).
     ///
     /// The inverse of [`Self::display_acquire`]; the dispatcher has already
-    /// checked the caller holds [`CapabilityId::DISPLAY`]. The default
+    /// checked the caller holds [`CapabilityId::DISPLAY`]. The
+    /// implementation is owner-checked: a caller that does not hold the
+    /// seat is refused with [`Errno::SeatNotOwner`] (or
+    /// [`Errno::SeatRevoked`] once, after an administrative eviction),
+    /// never a global "flip it back" switch. The default
     /// implementation fails closed with [`Errno::NotImplemented`].
     fn display_release(&self, _caller: &CallerContext<'_>) -> SyscallResult {
         Err(Errno::NotImplemented)
@@ -642,16 +649,19 @@ pub trait SyscallHandlers {
     ///
     /// The dispatcher has already checked the caller holds
     /// [`CapabilityId::INPUT_READ`] and that `buf` is a non-null `UserPtr`.
-    /// The implementation drains one [`rustos_abi::input::KeyInput`] record
-    /// the arbiter routed to the channel into `buf` (at least
+    /// The implementation owner-gates the drain against the seat's live
+    /// lease — a caller that does not hold the seat is refused with
+    /// [`Errno::SeatNotOwner`] / [`Errno::SeatRevoked`] — then drains one
+    /// [`rustos_abi::input::KeyInput`] record
+    /// the seat registry routed to the channel into `buf` (at least
     /// [`rustos_abi::input::KeyInput::WIRE_LEN`] bytes), copies it out
     /// through the validated boundary, and returns the
     /// number of bytes written — or `0` when the channel is drained.
     ///
     /// The default implementation fails closed with
     /// [`Errno::NotImplemented`]: a build with no
-    /// arbiter wired has no channel to drain. The real handler is installed
-    /// in `kernel/core`.
+    /// seat registry wired has no channel to drain. The real handler is
+    /// installed in `kernel/core`.
     fn keyboard_read(&self, _caller: &CallerContext<'_>, _buf: u64, _len: usize) -> SyscallResult {
         Err(Errno::NotImplemented)
     }

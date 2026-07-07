@@ -527,15 +527,17 @@ pub fn key_inject(record: &KeyInput) -> i64 {
     ret as i64
 }
 
-/// Acquire ownership of the display and claim keyboard input focus
-/// (`SyscallNumber::DISPLAY_ACQUIRE`,
-/// `plans/PI.md` P11), returning `0` on success or `-errno`.
+/// Acquire ownership of the seat — the display with its keyboard — as an
+/// exclusive, owner-tracked lease (`SyscallNumber::DISPLAY_ACQUIRE`,
+/// `plans/DISPLAY.md`), returning `0` on success or `-errno`.
 ///
 /// The compositing window manager calls this when it takes over the screen:
-/// the kernel input-focus arbiter switches its foreground to the desktop
-/// keyboard channel, so subsequently injected key edges are delivered as
-/// [`KeyInput`] records the manager drains with [`keyboard_read`]. Requires
-/// `CAP_DISPLAY` (owning the display is privileged).
+/// the kernel records the calling task as the seat owner, so subsequently
+/// injected key edges are delivered as [`KeyInput`] records the owner
+/// drains with [`keyboard_read`]. A seat held by another task refuses the
+/// claim (`SeatBusy` — ownership is never displaced) and a repeat acquire
+/// by the holder is refused (`AlreadyExists`). Requires
+/// `CAP_DISPLAY` (owning the seat is privileged).
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0 on success, else -errno).
 pub fn display_acquire() -> i64 {
@@ -545,11 +547,14 @@ pub fn display_acquire() -> i64 {
     ret as i64
 }
 
-/// Release the display and return keyboard input focus to the text console
+/// Release the seat and return keyboard input to the text console
 /// (`SyscallNumber::DISPLAY_RELEASE`,
-/// `plans/PI.md` P11), returning `0` on success or `-errno`.
+/// `plans/DISPLAY.md`), returning `0` on success or `-errno`.
 ///
-/// The inverse of [`display_acquire`]; requires `CAP_DISPLAY`.
+/// The inverse of [`display_acquire`]; requires `CAP_DISPLAY`. The release
+/// is owner-checked: a caller that does not hold the seat is refused
+/// (`SeatNotOwner`; `SeatRevoked` once, after an administrative eviction)
+/// rather than flipping the seat out from under its owner.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0 on success, else -errno).
 pub fn display_release() -> i64 {
@@ -565,9 +570,11 @@ pub fn display_release() -> i64 {
 /// [`KeyInput`] record's [`KeyInput::WIRE_LEN`], or `0` when the channel is
 /// momentarily drained — when non-negative, else `-errno`).
 ///
-/// The principal that owns the display (the window manager) drains the
-/// records the arbiter routed to it while it held focus. The kernel
-/// validates `CAP_INPUT_READ` and the `(buf, len)` pair against the caller's
+/// The task that owns the seat (the window manager) drains the
+/// records the kernel routed to it while it held the seat. The kernel
+/// validates `CAP_INPUT_READ`, owner-gates the drain against the seat's
+/// live lease (a non-owner is refused with `SeatNotOwner` /
+/// `SeatRevoked`), and validates the `(buf, len)` pair against the caller's
 /// address space; a `buf` shorter than
 /// [`KeyInput::WIRE_LEN`] fails closed with `-errno`. A
 /// zero return is a valid empty read, so the caller loops.

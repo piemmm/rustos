@@ -690,6 +690,11 @@ rustos/
 │   ├── rt/              # The pure-Rust userland runtime a first-party program
 │   │                    #   links (§1): _start, stack canary, panic handler,
 │   │                    #   syscall wrappers, entry! macro, over lib/abi-trap.
+│   ├── seat/            # Arch-neutral seat model (plans/DISPLAY.md): the
+│   │                    #   exclusive, owner-tracked, revocable lease on one
+│   │                    #   display + keyboard + pointer and its input-routing
+│   │                    #   decision — the one state machine the kernel seat
+│   │                    #   registry and the user-space seat manager share (§2.2).
 │   ├── svg/             # Shared fail-closed no_std SVG decoder for the
 │   │                    #   WM/desktop SVG-first assets (§2.2, §2.12, §10, §16.4).
 │   ├── sync/            # Synchronisation primitives (locks, epoch, Once).

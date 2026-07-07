@@ -116,6 +116,9 @@ const ERRNO_NAMES: &[(&str, Errno)] = &[
     ("CROSS_VOLUME", Errno::CrossVolume),
     ("NOT_A_DIRECTORY", Errno::NotADirectory),
     ("NOT_EMPTY", Errno::NotEmpty),
+    ("SEAT_BUSY", Errno::SeatBusy),
+    ("SEAT_NOT_OWNER", Errno::SeatNotOwner),
+    ("SEAT_REVOKED", Errno::SeatRevoked),
 ];
 
 /// One generated C header: its file name (relative to the include directory)
@@ -3580,10 +3583,10 @@ mod tests {
             let expected = i32::try_from(idx + 1).expect("small index");
             assert_eq!(errno.as_i32(), expected, "errno values must be dense 1..=N");
         }
-        // NotEmpty is the last appended abi-v1 variant (discriminant 23).
+        // SeatRevoked is the last appended abi-v1 variant (discriminant 26).
         assert_eq!(
             ERRNO_NAMES.last().map(|(_, e)| e.as_i32()),
-            Some(Errno::NotEmpty.as_i32()),
+            Some(Errno::SeatRevoked.as_i32()),
             "errno table must end at the last frozen variant"
         );
     }

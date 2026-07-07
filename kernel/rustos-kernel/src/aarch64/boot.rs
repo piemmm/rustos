@@ -69,7 +69,7 @@ use rustos_log::{log, Event, EventId, Field, Level, Sink};
 use rustos_util::fmt::format_hex_u64;
 
 use crate::aarch64::arch_wrapper::{
-    Aarch64BinArch, INPUT_FOCUS, UART_ONLY_CONSOLES, VIDEO_AND_UART_CONSOLES,
+    Aarch64BinArch, SEAT_REGISTRY, UART_ONLY_CONSOLES, VIDEO_AND_UART_CONSOLES,
 };
 use crate::aarch64::dispatch::{production_dispatch, DISPATCH_SLOT};
 use crate::mem_map::{build_memory_map, region_byte_totals};
@@ -921,12 +921,12 @@ fn enter_kernel_core(
     } else {
         &UART_ONLY_CONSOLES
     })
-    // Install the kernel input-focus arbiter (`plans/PI.md` P11 — input
+    // Install the kernel seat registry (`plans/DISPLAY.md` D2 — input
     // follows the surface owner): its text sink is the video console's
     // keyboard queue, so an injected key press reaches the video login by
-    // default, and the window manager's `display_acquire` later routes whole
-    // records to the desktop keyboard channel instead.
-    .with_input_focus(&INPUT_FOCUS)
+    // default, and the window manager's owner-checked `display_acquire`
+    // later routes whole records to the desktop keyboard channel instead.
+    .with_seat_registry(&SEAT_REGISTRY)
     // Install the PID 1 spawn seam (`plans/PI.md` P6c-3): once every init
     // phase has succeeded and `kernel_main` emits `BootCompleted`, the core
     // invokes it to build `init`'s EL0 image and drop into user mode.

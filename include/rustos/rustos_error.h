@@ -39,5 +39,8 @@
 #define ROS_E_CROSS_VOLUME 21
 #define ROS_E_NOT_A_DIRECTORY 22
 #define ROS_E_NOT_EMPTY 23
+#define ROS_E_SEAT_BUSY 24
+#define ROS_E_SEAT_NOT_OWNER 25
+#define ROS_E_SEAT_REVOKED 26
 
 #endif /* ROS_ERROR_H */

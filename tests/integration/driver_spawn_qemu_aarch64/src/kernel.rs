@@ -35,8 +35,8 @@ use rustos_kernel::driver_spawn_loader::{InitCtxDriverProcessSpawn, SpawnDriverL
 use rustos_kernel_core::AddressSpaceRegistry;
 use rustos_kernel_core::{
     BootReserve, DispatchCallbackSlot, KernelDispatchHook, KernelInitSpawner, RandomReserve,
-    EMPTY_PROGRAM_REGISTRY, NULL_DMA_ALLOC_FACILITY, NULL_INPUT_FOCUS, NULL_MEM_MAP,
-    NULL_MMIO_MAP_FACILITY, NULL_PROCESS_WAIT, NULL_SHARED_MEM_FACILITY,
+    EMPTY_PROGRAM_REGISTRY, NULL_DMA_ALLOC_FACILITY, NULL_MEM_MAP, NULL_MMIO_MAP_FACILITY,
+    NULL_PROCESS_WAIT, NULL_SEAT_REGISTRY, NULL_SHARED_MEM_FACILITY,
 };
 use rustos_kernel_ipc::{EndpointId, Port, PortRegistry};
 use rustos_kernel_irq::{IrqTable, UnsupportedController};
@@ -454,8 +454,8 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
             &AARCH64_PROCESS_SPAWN,
             &NULL_PROCESS_WAIT,
             // This test exercises the driver-spawn / IPC path, not keyboard
-            // input; the arbiter stays fail-closed.
-            &NULL_INPUT_FOCUS,
+            // input; the seat registry stays fail-closed.
+            &NULL_SEAT_REGISTRY,
             // This test exercises the driver-spawn / IPC path, not
             // `mem_map` / `mmio_map` / `dma_alloc`; those producers stay
             // fail-closed.

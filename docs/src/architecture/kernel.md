@@ -206,9 +206,9 @@ record under the `log` phase and halts.
 
 `INPUT_DELIVERED` is the one-shot input-path witness (`AGENTS.md` §18.3 /
 §20, `plans/PI.md` P11). The `key_inject` syscall handler emits it the
-first time a key edge is successfully delivered to the input-focus arbiter
-(`rustos_kernel_core::input_focus`), gated by a one-shot latch
-(`InputFocus::note_first_delivery`) so it fires exactly once over the
+first time a key edge is successfully delivered to the seat registry
+(`rustos_kernel_core::seat`), gated by a one-shot latch
+(`SeatRegistry::note_first_delivery`) so it fires exactly once over the
 kernel's lifetime — proof that an (autoloaded) keyboard driver has come up
 and is routing input. It carries **no** key content, count, or timing: a
 per-keystroke record would leak typed secrets and their cadence and is

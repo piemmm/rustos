@@ -1176,6 +1176,7 @@ dependencies = [
  "rustos-path",
  "rustos-resref",
  "rustos-rng",
+ "rustos-seat",
  "rustos-sync",
  "rustos-users",
  "rustos-util",
@@ -1519,6 +1520,10 @@ dependencies = [
  "rustos-log",
  "rustos-sync",
 ]
+
+[[package]]
+name = "rustos-seat"
+version = "0.0.0"
 
 [[package]]
 name = "rustos-seq"

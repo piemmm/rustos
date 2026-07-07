@@ -105,6 +105,7 @@
 # Desktop
 
 - [Compositing window manager](./desktop/wm.md)
+- [Seat ownership](./desktop/seat.md)
 - [Traditional desktop taskbar](./desktop/taskbar.md)
 - [Desktop session glue](./desktop/session.md)
 - [Desktop theming](./desktop/theming.md)

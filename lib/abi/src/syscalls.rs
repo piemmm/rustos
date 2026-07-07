@@ -613,9 +613,11 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         arg_count: 0,
         args: [AbiType::Unit; SYSCALL_MAX_ARGS],
         ret: AbiType::Errno,
-        // Owning the display (and, with it, keyboard input focus) is
+        // Owning the seat (the display and, with it, the keyboard) is
         // privileged, never ambient: only a session's
-        // window manager holds `CAP_DISPLAY`. Taking the screen and
+        // window manager holds `CAP_DISPLAY`, and the kernel additionally
+        // records and checks the owning task, so a held seat is never
+        // displaced (`plans/DISPLAY.md`). Taking the screen and
         // re-routing the system keyboard stream is a security-relevant
         // ownership change — the analogue of a foreground-tty switch — so
         // unlike the high-volume stream operations it IS audited per call; it is low-volume (once per session
@@ -630,8 +632,9 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         args: [AbiType::Unit; SYSCALL_MAX_ARGS],
         ret: AbiType::Errno,
         // The release half of `display_acquire`; same `CAP_DISPLAY` gate
-        // and same audited posture — returning focus to the text console
-        // is the matching security-relevant ownership change.
+        // (plus the kernel-side owner check — only the recorded owner may
+        // release) and same audited posture — returning input to the text
+        // console is the matching security-relevant ownership change.
         required_capability: Some(CapabilityId::DISPLAY),
         audit: true,
     },
@@ -650,9 +653,11 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // `U64` so the C view carries the bytes-read-or-`-errno` register
         // convention `stream_read` uses.
         ret: AbiType::U64,
-        // Reading the keyboard channel is privileged, never ambient: only the display owner (the window manager)
-        // holds `CAP_INPUT_READ`, so the keyboard stream is delivered only
-        // to whoever owns the surface. Like the other
+        // Reading the keyboard channel is privileged, never ambient: the
+        // capability is `CAP_INPUT_READ`, and the drain is additionally
+        // owner-gated kernel-side against the seat's live lease, so the
+        // keyboard stream is delivered only to the task that owns the
+        // surface (`plans/DISPLAY.md`). Like the other
         // high-volume stream readers (`stream_read`) it fires once per key
         // edge, so it is NOT audited.
         required_capability: Some(CapabilityId::INPUT_READ),

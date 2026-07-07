@@ -96,7 +96,10 @@ pub enum Errno {
     /// to register a [`crate::ipc`] endpoint whose `EndpointId` is
     /// already bound. It is the fail-closed result of a duplicate
     /// registration: the existing live port is never overwritten, and the caller's freshly-created port is
-    /// handed back so it can be torn down.
+    /// handed back so it can be torn down. Also emitted by
+    /// `display_acquire` when the caller already holds the seat lease it
+    /// is asking for: a double acquire is a caller bug, surfaced rather
+    /// than silently succeeding (`plans/DISPLAY.md`).
     AlreadyExists = 17,
     /// A user-space pointer handed to a syscall does not name memory the
     /// caller may access in the direction the call requires.
@@ -165,6 +168,35 @@ pub enum Errno {
     /// `rmdir --ignore-fail-on-non-empty` can tolerate exactly this
     /// condition and no other.
     NotEmpty = 23,
+    /// Another task holds the seat (the display with its keyboard and
+    /// pointer), so the requested acquire is refused rather than
+    /// displacing the holder (`plans/DISPLAY.md`).
+    ///
+    /// Emitted by `display_acquire` when the seat's recorded owner is a
+    /// different task: ownership is exclusive and never stolen, even
+    /// between two principals that both hold `CAP_DISPLAY`. The refused
+    /// caller may retry after the holder releases.
+    SeatBusy = 24,
+    /// The caller is not the recorded owner of the seat it tried to
+    /// operate on (`plans/DISPLAY.md`).
+    ///
+    /// Emitted by `display_release` and the owner-gated seat paths (the
+    /// desktop keyboard drain `keyboard_read`) when the kernel-attested
+    /// caller does not hold the seat's live lease — the seat is unowned,
+    /// or another task holds it. A release is owner-checked, never a
+    /// global "anyone may flip it back" switch.
+    SeatNotOwner = 25,
+    /// The caller's seat lease was forcibly revoked by an administrator
+    /// (`plans/DISPLAY.md`).
+    ///
+    /// The distinct refusal an evicted seat owner sees on its next
+    /// owner-gated call, so a well-behaved compositor learns it lost the
+    /// seat rather than scribbling over the new foreground. Deliberately
+    /// distinct from [`SeatNotOwner`](Self::SeatNotOwner): the lease did
+    /// not lapse by the caller's own action. A fresh `display_acquire`
+    /// (including the evicted task's explicit reacquire) clears the
+    /// condition.
+    SeatRevoked = 26,
 }
 
 impl Errno {
@@ -223,6 +255,9 @@ impl Errno {
             21 => Some(Self::CrossVolume),
             22 => Some(Self::NotADirectory),
             23 => Some(Self::NotEmpty),
+            24 => Some(Self::SeatBusy),
+            25 => Some(Self::SeatNotOwner),
+            26 => Some(Self::SeatRevoked),
             _ => None,
         }
     }
@@ -254,6 +289,9 @@ impl fmt::Display for Errno {
             Self::CrossVolume => "paths on different volumes",
             Self::NotADirectory => "not a directory",
             Self::NotEmpty => "directory not empty",
+            Self::SeatBusy => "seat held by another task",
+            Self::SeatNotOwner => "not the seat owner",
+            Self::SeatRevoked => "seat lease revoked",
         };
         f.write_str(message)
     }
@@ -289,6 +327,9 @@ mod tests {
         assert_eq!(Errno::CrossVolume.as_i32(), 21);
         assert_eq!(Errno::NotADirectory.as_i32(), 22);
         assert_eq!(Errno::NotEmpty.as_i32(), 23);
+        assert_eq!(Errno::SeatBusy.as_i32(), 24);
+        assert_eq!(Errno::SeatNotOwner.as_i32(), 25);
+        assert_eq!(Errno::SeatRevoked.as_i32(), 26);
     }
 
     #[test]
@@ -319,11 +360,14 @@ mod tests {
             Errno::CrossVolume,
             Errno::NotADirectory,
             Errno::NotEmpty,
+            Errno::SeatBusy,
+            Errno::SeatNotOwner,
+            Errno::SeatRevoked,
         ] {
             assert_eq!(Errno::from_i32(errno.as_i32()), Some(errno));
         }
         assert_eq!(Errno::from_i32(0), None);
-        assert_eq!(Errno::from_i32(24), None);
+        assert_eq!(Errno::from_i32(27), None);
         assert_eq!(Errno::from_i32(-1), None);
     }
 

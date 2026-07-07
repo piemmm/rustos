@@ -83,7 +83,6 @@ pub mod fs;
 pub mod groups;
 pub mod hwtree;
 pub mod init;
-pub mod input_focus;
 pub mod introspect;
 pub mod introspect_source;
 pub mod kthread;
@@ -98,6 +97,7 @@ pub mod procwait;
 pub mod random;
 pub mod resource;
 pub mod rlimit;
+pub mod seat;
 pub mod sharedreg;
 pub mod sleeplock;
 // The single scheduler selection point. Internal:
@@ -160,7 +160,6 @@ pub use fs::{
 pub use groups::{build_identity_table, load_groups_db, GroupsLoadError, GROUPS_DB_PATH};
 pub use hwtree::{HwTreeSource, NullHwTreeSource, NULL_HW_TREE};
 pub use init::{kernel_main, InitError, KernelInitSpawner, Phase};
-pub use input_focus::{InputFocus, KEYBOARD_CHANNEL_CAPACITY, NULL_INPUT_FOCUS};
 pub use introspect::{IntrospectSource, NullIntrospectSource, NULL_INTROSPECT};
 pub use introspect_source::KernelIntrospectSource;
 pub use kthread::{
@@ -181,6 +180,7 @@ pub use procwait::{
 };
 pub use random::{reserve_errno, BootReserve, NullEntropy, RandomReserve};
 pub use rlimit::{authorize_set, LimitSet};
+pub use seat::{seat_errno, SeatRegistry, KEYBOARD_CHANNEL_CAPACITY, NULL_SEAT_REGISTRY};
 pub use sleeplock::{SleepGuard, SleepLock};
 pub use spawn::{
     spawn_and_enter, spawn_image, AdmitError, EmbeddedProgram, InitSpawn, InitSpawnCtx,

@@ -311,25 +311,32 @@ impl SyscallNumber {
     ///
     /// No arguments. Returns an error code (`Ok(0)` on success). The
     /// compositing window manager calls this when it takes over the
-    /// screen: the kernel input-focus arbiter switches its foreground from
-    /// the text console to the desktop keyboard channel, so subsequently
+    /// screen: the kernel records the **kernel-attested caller** as the
+    /// seat owner, and subsequently
     /// injected key edges ([`SyscallNumber::KEY_INJECT`]) are delivered as
-    /// [`crate::input::KeyInput`] records the manager drains with
+    /// [`crate::input::KeyInput`] records the owner drains with
     /// [`SyscallNumber::KEYBOARD_READ`] — the same keyboard stream now
     /// following the new surface owner automatically (the desktop analogue
-    /// of "input follows the foreground tty"). Gated by
-    /// [`crate::CapabilityId::DISPLAY`]: owning the display is privileged,
-    /// never ambient.
+    /// of "input follows the foreground tty"). A seat held by another
+    /// task refuses the claim with [`crate::Errno::SeatBusy`] (ownership
+    /// is never displaced), and a repeat acquire by the holder is refused
+    /// with [`crate::Errno::AlreadyExists`]. Gated by
+    /// [`crate::CapabilityId::DISPLAY`]: owning the seat is privileged,
+    /// never ambient (`plans/DISPLAY.md`).
     pub const DISPLAY_ACQUIRE: Self = Self(23);
     /// Release the display and return keyboard input focus to the text
     /// console (`plans/PI.md` P11).
     ///
     /// No arguments. Returns an error code (`Ok(0)` on success). The
-    /// inverse of [`SyscallNumber::DISPLAY_ACQUIRE`]: the window manager
-    /// calls it when it relinquishes the screen, and the kernel input-focus
-    /// arbiter returns its foreground to the text console so a login/shell
-    /// once again receives the keyboard. Gated by
-    /// [`crate::CapabilityId::DISPLAY`].
+    /// inverse of [`SyscallNumber::DISPLAY_ACQUIRE`]: the seat owner
+    /// calls it when it relinquishes the screen, and the kernel returns
+    /// the keyboard to the text console so a login/shell
+    /// once again receives it. The release is owner-checked: a caller
+    /// that does not hold the seat is refused with
+    /// [`crate::Errno::SeatNotOwner`] (or [`crate::Errno::SeatRevoked`]
+    /// once, after an administrative eviction) — never a global "flip it
+    /// back" switch. Gated by [`crate::CapabilityId::DISPLAY`]
+    /// (`plans/DISPLAY.md`).
     pub const DISPLAY_RELEASE: Self = Self(24);
     /// Read one decoded keyboard event from the kernel keyboard channel
     /// (`plans/PI.md` P11 — keyboard input for the
@@ -341,11 +348,15 @@ impl SyscallNumber {
     /// [`crate::input::KeyInput`] record — or `0` when the channel is
     /// momentarily drained; a buffer too small to hold a record fails
     /// closed with [`crate::Errno::BufferTooSmall`]. The
-    /// principal that owns the display (the window manager / desktop
-    /// session) drains the records the arbiter routed to it while it held
-    /// focus. Gated by [`crate::CapabilityId::INPUT_READ`]: a keyboard
-    /// stream is delivered only to whoever currently owns the surface, and
-    /// an unattached channel denies rather than leaking to a device.
+    /// task that owns the seat (the window manager / desktop
+    /// session) drains the records the seat registry routed to it while it
+    /// held the seat. Gated by [`crate::CapabilityId::INPUT_READ`] **and**
+    /// owner-gated against the seat's live lease: a caller that does not
+    /// hold the seat is refused with [`crate::Errno::SeatNotOwner`] (or
+    /// [`crate::Errno::SeatRevoked`] after an administrative eviction), so
+    /// the keyboard stream is delivered only to whoever currently owns the
+    /// surface, and an unattached channel denies rather than leaking to a
+    /// device (`plans/DISPLAY.md`).
     pub const KEYBOARD_READ: Self = Self(25);
     /// Map a granted device MMIO register window into the calling
     /// driver's own address space (`plans/PI.md`
