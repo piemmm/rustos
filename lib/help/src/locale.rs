@@ -18,6 +18,17 @@ use crate::doc::{HelpDoc, HelpError, MAX_DOC_LEN};
 /// every fallback chain ends at.
 pub const DEFAULT_LOCALE: &str = "en-US";
 
+/// The standing locale set every OS command app's help must ship
+/// (`plans/APPS.md` §8.1): the mandatory canonical `en-US/` tree plus
+/// the required translations. Adding a language is extending this data,
+/// not new code. The set gates *authoring* completeness (the help lint and
+/// each app's own switch pins); runtime selection never consults it — a
+/// bundle's `Help/` tree is scanned for whatever locales it actually ships.
+pub const REQUIRED_LOCALES: &[&str] = &[
+    "en-US", "fr-FR", "de-DE", "es-ES", "uk-UA", "it-IT", "pt-PT", "cy-GB", "zh-CN", "ja-JP",
+    "ko-KR", "ar-SA", "he-IL",
+];
+
 /// Byte length of [`DEFAULT_LOCALE`]'s language subtag (`en`).
 const DEFAULT_LANGUAGE_LEN: usize = 2;
 

@@ -1560,12 +1560,19 @@ defect.
 
 - `/Users/<username>/` is the only place user-owned files live. It
   contains at least `Documents/`, `Settings/`, `Library/` (per-user
-  caches/state, **not** shared libraries), and `Desktop/`. The shape is
-  fixed; applications may not invent sibling directories at this level.
-  `/Users` is mounted `nosuid,nodev`.
-- `/Apps/<Name>.app/` is the only place applications live (see §16.5).
-  `/Apps` is mounted `nosuid,nodev`. Apps acquire privilege through
-  capabilities declared in their manifest, never through setuid.
+  caches/state, **not** shared libraries), `Apps/` (the user's own
+  application bundles, organisable in nested plain subdirectories; `man`'s
+  recursive bundle search walks it after `/Apps`), and `Desktop/`. The
+  shape is fixed; applications may not invent sibling directories at this
+  level. `/Users` is mounted `nosuid,nodev`.
+- `/Apps/<Name>.app/` is the only place machine-wide applications live
+  (see §16.5); a user's own bundles live under their `/Users/<u>/Apps/`.
+  Bundles in either store may be filed in nested plain subdirectories
+  (`/Apps/games/chess.app`), and `man`'s recursive bundle search finds
+  their help wherever they are filed — a `.app` directory itself is a
+  sealed unit, never a container of further apps. `/Apps` is mounted
+  `nosuid,nodev`. Apps acquire privilege through capabilities declared
+  in their manifest, never through setuid.
 - `/Storage/<volume>/` is where mounted volumes appear (removable media,
   extra disks, network shares). Default mount flags are
   `nosuid,nodev,noexec`; relaxations require `CAP_FS_MOUNT_RELAX` and

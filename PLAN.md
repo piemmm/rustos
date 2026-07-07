@@ -3638,13 +3638,18 @@ Proven end to end by the session-ceiling QEMU vertical typing the bare
 word `ps` and the argument-carrying `ps --bogus`; (4) **the `man.app`
 command app** (`plans/APPS.md` §7): `userland/apps/man` resolves a word
 over the shared `rustos_cmdres::bundle_candidates` order (first existing
-bundle; `NotFound` moves on, any other refusal final), renders through
+bundle; `NotFound` moves on, any other refusal final) and then, for a bare
+word no candidate matched, over the bounded breadth-first recursive search
+of `/Apps` and `<HOME>/Apps` (`rustos_cmdres::search_roots` over
+`rustos_abi::USER_APP_STORE`; never descends into a `.app`; an exhausted
+directory budget is reported, never silently "not found" — `plans/APPS.md`
+§7), renders through
 `lib/help`, reads the now-named `LANG` locale variable (`plans/APPS.md`
-§5) and `PATH` from the inherited environment, pages on a
+§5), `PATH`, and `HOME` from the inherited environment, pages on a
 geometry-attested console and streams otherwise, and emits the
 `help.locale_fallback` `stdinfo` `context` record on a locale fallback.
 It is registered as `/System/Apps/man.app/Run` (manifest: console pair +
-`CAP_FS_ACCESS`), ships its own six-locale `Help/` tree (authored on disk
+`CAP_FS_ACCESS`), ships its own thirteen-locale `Help/` tree (authored on disk
 in the bundle, discovered by `tools/syshelp`, and planted onto the
 read-only `/System` volume's `Apps/` store by `tools/mkimage` and the QEMU
 image fixture — the system volume skeleton carries `Apps/` per §16.2), and
@@ -3663,7 +3668,7 @@ fixed with a regression test; FAT32 cluster-chain walk; RustFS extent-tree
 sum; memfs length), with the C header regenerated.
 
 Every store-registered command app (`cat`, `groupadd`, `ls`, `man`, `ps`,
-`top`, `sysinfo`, `useradd`, `users`, `elsh`) ships its six-locale `Help/`
+`top`, `sysinfo`, `useradd`, `users`, `elsh`) ships its thirteen-locale `Help/`
 tree and honours the
 `-h`/`-?` short-help convention through the one shared `lib/help` render
 (`own_short_help` + the `rt`-feature `BundleHelp` own-bundle source);
@@ -3676,14 +3681,18 @@ shared judgement `rustos_help::lint_help_trees` (`lib/help`'s host-only
 `lint` feature, also run by the `tools/syshelp` aggregator tests) gates
 every discovered `Help/` tree in `cargo xtask ci`/`ci-long` — spellings,
 structural bounds, canonical `en-US/` presence, required-locale completeness
-(`fr-FR`/`de-DE`/`es-ES`/`uk-UA`/`it-IT`), no translation-only documents,
-cross-locale `OPTIONS` switch-key drift, the content-policy word screen,
+(the standing `rustos_help::REQUIRED_LOCALES` set — `fr-FR`/`de-DE`/`es-ES`/
+`uk-UA`/`it-IT`/`pt-PT`/`cy-GB`/`zh-CN`/`ja-JP`/`ko-KR`/`ar-SA`/`he-IL` —
+the one definition every per-app switch pin also imports), no
+translation-only documents,
+cross-locale `OPTIONS` switch-key drift, the content-policy word screen
+(plus the CJK substring screen for the unsegmented languages),
 and per-command coverage over the `AppInfo.toml` discovery walk.
 
 The `plans/APPS.md` §12.1 Stage B registrations are under way: `cp`, `mv`,
 and `rm` are full self-contained store bundles (Run host with the
 stderr+stdin `y`/`Y` prompt seam, `AppInfo.toml` requesting the console
-pair + `CAP_FS_ACCESS`, six-locale `Help/` trees with switch-drift pins,
+pair + `CAP_FS_ACCESS`, thirteen-locale `Help/` trees with switch-drift pins,
 `-h`/`-?`/`--help` over the shared `own_short_help`/`BundleHelp` render).
 They are store-only — the §18.6 boot floor never grows, so the kernel
 inventory drift test pins their `AppInfo.toml` directly and no
@@ -3760,11 +3769,11 @@ refused); tab→space expansion and CRLF→LF conversion are announced on
 the status line, and final-newline presence round-trips. It draws
 through `lib/curses` (`Screen::colored_attributes` — the colour helper
 hoisted from `top` so both apps share one definition) and ships the
-six-locale `Help/` tree with the switch-drift pin.
+thirteen-locale `Help/` tree with the switch-drift pin.
 
 **The `vim` editor (`plans/VIM.md`).** The modal text editor is a
 registered store-only command bundle (`userland/apps/vim`,
-`vim.app`, console pair + `CAP_FS_ACCESS`, six-locale `Help/`): the
+`vim.app`, console pair + `CAP_FS_ACCESS`, thirteen-locale `Help/`): the
 vim core — normal/insert/replace/visual/command-line modes, counts,
 registers, `d c y` over motions and text objects, undo/redo and
 dot-repeat, `/`/`?` search over a bounded pattern subset, and the ex
@@ -4064,6 +4073,20 @@ of how much code was produced.
 
 Amendments to `AGENTS.md` (the binding charter) are logged here so an agent
 can see *why* a rule exists without diffing the charter's history.
+
+- **2026-07-07 — Per-user `Apps/`, nested bundle filing, and `man`'s
+  recursive help search.** Amended §16.3 (maintainer request): the fixed
+  user-home shape gains `Apps/` (a user's own application bundles), and
+  bundles in `/Apps` or `/Users/<u>/Apps` may be filed in nested plain
+  subdirectories. `man` resolves a bare word through the store-then-`PATH`
+  candidates first and then falls back to a bounded, breadth-first recursive
+  walk of `/Apps` then `<HOME>/Apps` (never descending into a `.app` — a
+  bundle is a sealed unit), so `man moose` finds
+  `/Apps/somefolder/moose.app`'s help wherever it was filed. The roots are
+  spelled once in `lib/cmdres::search_roots` over
+  `rustos_abi::USER_APP_STORE`; the walk fails loud when its directory
+  budget is exhausted rather than masquerading as "not found". Launch is
+  unchanged: the shell still searches only the system store and `PATH`.
 
 - **2026-07-06 — Foundational implementations are complete, not minimal.**
   Added §27 (maintainer decision) after kernel building blocks were found

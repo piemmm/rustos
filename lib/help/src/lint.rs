@@ -36,7 +36,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::doc::{Block, HelpDoc, SectionKind, Span};
-use crate::locale::{DocumentName, Locale, DEFAULT_LOCALE};
+use crate::locale::{DocumentName, Locale, DEFAULT_LOCALE, REQUIRED_LOCALES};
 
 /// One discovered help document for the lint to judge: its bundle directory
 /// name (`ls.app`), locale directory (`en-US`, `fr-FR`, …), file name
@@ -52,12 +52,6 @@ pub struct LintDoc<'a> {
     /// The document's bytes.
     pub bytes: &'a [u8],
 }
-
-/// The standing locale set every OS command app's help must ship
-/// (`plans/APPS.md` §8.1): the mandatory canonical `en-US/` tree plus
-/// the required translations. Adding a language is extending this data,
-/// not new code.
-pub const REQUIRED_LOCALES: &[&str] = &["en-US", "fr-FR", "de-DE", "es-ES", "uk-UA", "it-IT"];
 
 /// The closed content-policy screen (`plans/APPS.md` §8.1): profane or
 /// derogatory words, lower-case, matched on whole alphabetic words in any
@@ -105,6 +99,46 @@ const DISALLOWED_WORDS: &[&str] = &[
     "пізда",
     "підор",
     "курва",
+    // pt-PT
+    "caralho",
+    "foda",
+    "foder",
+    "cabrão",
+    // cy-GB
+    "cachu",
+    "ffwcio",
+    "cont",
+    // ko-KR
+    "씨발",
+    "개새끼",
+    "병신",
+    "지랄",
+    // ar-SA
+    "كس",
+    "طيز",
+    "زبي",
+    "شرموطة",
+    // he-IL
+    "זיון",
+    "כוסית",
+    "זונה",
+];
+
+/// The closed content-policy screen for languages written without word
+/// separators (`plans/APPS.md` §8.1): Chinese and Japanese vulgarities are
+/// matched as substrings of a document's text, because whole-word matching
+/// cannot segment continuous CJK prose. Each entry is long and specific
+/// enough that an innocent embedding is implausible.
+const DISALLOWED_CJK_SUBSTRINGS: &[&str] = &[
+    // zh-CN
+    "他妈的",
+    "操你妈",
+    "傻逼",
+    "混蛋",
+    // ja-JP
+    "くたばれ",
+    "クソ野郎",
+    "ちくしょう",
 ];
 
 /// Lint a set of discovered help documents.
@@ -277,7 +311,9 @@ fn describe_keys(keys: Option<&[String]>) -> String {
 }
 
 /// The content-policy findings for one document's text: every whole
-/// alphabetic word, lower-cased, is matched against [`DISALLOWED_WORDS`].
+/// alphabetic word, lower-cased, is matched against [`DISALLOWED_WORDS`],
+/// and the whole text is screened for the [`DISALLOWED_CJK_SUBSTRINGS`]
+/// entries, which no word split can find in continuous CJK prose.
 /// Whole-word matching keeps an innocent containing word (e.g. a name that
 /// merely embeds a banned spelling) clean.
 fn content_policy_violations(at: &str, text: &str) -> Vec<String> {
@@ -290,6 +326,13 @@ fn content_policy_violations(at: &str, text: &str) -> Vec<String> {
         if DISALLOWED_WORDS.contains(&lowered.as_str()) {
             violations.push(format!(
                 "{at}: disallowed word `{lowered}` (content policy, plans/APPS.md §8.1)"
+            ));
+        }
+    }
+    for banned in DISALLOWED_CJK_SUBSTRINGS {
+        if text.contains(banned) {
+            violations.push(format!(
+                "{at}: disallowed phrase `{banned}` (content policy, plans/APPS.md §8.1)"
             ));
         }
     }
@@ -439,6 +482,20 @@ mod tests {
         assert_eq!(violations.len(), 1, "{violations:?}");
         assert!(violations[0].contains("disallowed word"), "{violations:?}");
         assert!(violations[0].contains(tree[4].0), "{violations:?}");
+    }
+
+    #[test]
+    fn disallowed_cjk_phrase_is_flagged_inside_continuous_prose() {
+        // No word boundary separates the phrase from the surrounding CJK
+        // prose, so only the substring screen can find it.
+        let mut tree = clean_tree(&doc_with_keys(&[]));
+        tree[1].1 = tree[1].1.replace("Does x.", "このツールはクソ野郎だ。");
+        let violations = lint_help_trees(&rows(&tree));
+        assert_eq!(violations.len(), 1, "{violations:?}");
+        assert!(
+            violations[0].contains("disallowed phrase"),
+            "{violations:?}"
+        );
     }
 
     #[test]

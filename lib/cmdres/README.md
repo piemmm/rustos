@@ -24,6 +24,12 @@ second resolution policy.
   shown always documents the program the shell would launch). An explicit
   path to a bare program names no bundle and yields the empty list — never
   a guessed sibling directory.
+- `search_roots(home)` — the app-store roots `man`'s recursive bundle
+  search walks when the ordered candidates find nothing: the machine-wide
+  `/Apps` (`rustos_abi::USER_APP_STORE`), then the user's own
+  `<home>/Apps`. Spelling only — the bounded walk itself lives in the
+  consumer; an unset or empty `home` contributes no per-user root. Launch
+  is unaffected: the shell never consults these roots.
 
 ## Design
 

@@ -93,8 +93,8 @@ Advisory only — never affecting the listing, ordering, or exit status.
 ## Help tree
 
 `Help/<locale>/ls.md` carries the canonical `en-US/` document
-plus the required translations (`fr-FR`, `de-DE`, `es-ES`, `uk-UA`,
-`it-IT`, `plans/APPS.md` §8.1). The tree is authored on disk only:
+plus the required translations (the `rustos_help::REQUIRED_LOCALES`
+set, `plans/APPS.md` §8.1). The tree is authored on disk only:
 `tools/syshelp` discovers it and the image builder (`tools/mkimage`) and
 the QEMU image fixture plant it at `/System/Apps/ls.app/Help/`; the
 binary embeds no help bytes (`plans/APPS.md` §6.1).

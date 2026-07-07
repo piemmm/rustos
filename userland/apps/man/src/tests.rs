@@ -35,11 +35,13 @@ struct Bundle {
     docs: Vec<(&'static str, &'static str, &'static str)>,
 }
 
-/// The in-memory [`BundleStore`]: a set of bundles plus directories whose
-/// probe is refused outright (the final-refusal path).
+/// The in-memory [`BundleStore`]: a set of bundles, plain (bundle-less)
+/// directories the recursive search can walk, and directories whose probe
+/// is refused outright (the final-refusal path).
 #[derive(Default)]
 struct FixtureStore {
     bundles: Vec<Bundle>,
+    dirs: Vec<String>,
     denied: Vec<&'static str>,
 }
 
@@ -50,12 +52,22 @@ impl FixtureStore {
                 dir: "/System/Apps/ps.app",
                 docs: alloc::vec![("en-US", "ps.md", PS_DOC), ("fr-FR", "ps.md", PS_DOC_FR),],
             }],
+            dirs: Vec::new(),
             denied: Vec::new(),
         }
     }
 
     fn bundle(&self, dir: &str) -> Option<&Bundle> {
         self.bundles.iter().find(|bundle| bundle.dir == dir)
+    }
+
+    /// Every path the fixture knows: bundle directories plus the plain
+    /// directories, from whose spellings `subdirs` derives the tree.
+    fn paths(&self) -> impl Iterator<Item = &str> {
+        self.bundles
+            .iter()
+            .map(|bundle| bundle.dir)
+            .chain(self.dirs.iter().map(String::as_str))
     }
 }
 
@@ -78,6 +90,24 @@ impl BundleStore for FixtureStore {
             }
         }
         Ok(dirs)
+    }
+
+    fn subdirs(&self, dir: &str) -> Result<Vec<String>, Errno> {
+        if self.denied.contains(&dir) {
+            return Err(Errno::PermissionDenied);
+        }
+        let prefix = alloc::format!("{dir}/");
+        let mut names: Vec<String> = Vec::new();
+        for path in self.paths() {
+            let Some(rest) = path.strip_prefix(&prefix) else {
+                continue;
+            };
+            let name = rest.split('/').next().unwrap_or(rest);
+            if !name.is_empty() && !names.iter().any(|seen| seen == name) {
+                names.push(String::from(name));
+            }
+        }
+        Ok(names)
     }
 
     fn read_doc(
@@ -214,6 +244,7 @@ fn the_store_bundle_shadows_a_path_bundle_of_the_same_name() {
     let request = Request {
         locale: None,
         path: Some("/Users/eve/tools"),
+        home: None,
     };
     run(&page("ps"), &request, &store, &console).expect("page renders");
     assert!(console.output().contains("list processes"));
@@ -235,6 +266,7 @@ fn a_path_bundle_serves_a_word_the_store_lacks() {
     let request = Request {
         locale: None,
         path: Some("/Users/root/tools"),
+        home: None,
     };
     run(&page("mine"), &request, &store, &console).expect("page renders");
     assert!(console.output().contains("my tool"));
@@ -256,6 +288,7 @@ fn a_final_refusal_stops_the_probe_rather_than_skipping_it() {
     let request = Request {
         locale: None,
         path: Some("/Users/root/tools"),
+        home: None,
     };
     let err = run(&page("hidden"), &request, &store, &console).unwrap_err();
     assert_eq!(err, ManError::Store(Errno::PermissionDenied));
@@ -347,6 +380,7 @@ fn an_exact_locale_serves_its_translation_with_no_advisory() {
     let request = Request {
         locale: Some("fr-FR"),
         path: None,
+        home: None,
     };
     run(&page("ps"), &request, &store, &console).expect("page renders");
     assert!(console.output().contains("lister les processus"));
@@ -363,6 +397,7 @@ fn a_locale_fallback_serves_default_and_emits_the_advisory() {
     let request = Request {
         locale: Some("de-DE"),
         path: None,
+        home: None,
     };
     run(&page("ps"), &request, &store, &console).expect("page renders");
     assert!(console.output().contains("list processes"));
@@ -383,10 +418,136 @@ fn a_malformed_locale_preference_degrades_to_default_silently() {
     let request = Request {
         locale: Some("not a tag"),
         path: None,
+        home: None,
     };
     run(&page("ps"), &request, &store, &console).expect("page renders");
     assert!(console.output().contains("list processes"));
     assert!(console.records().is_empty(), "default request, no advisory");
+}
+
+/// A moose of a fixture: the bundle the recursive-search tests file away in
+/// nested folders.
+const MOOSE_DOC: &str = "## NAME\n\nmoose — a filed-away app\n\n## SYNOPSIS\n\n`moose`\n\n## DESCRIPTION\n\nFound by the recursive search.\n";
+
+#[test]
+fn a_nested_apps_bundle_is_found_by_the_recursive_search() {
+    let mut store = FixtureStore::with_ps();
+    store.bundles.push(Bundle {
+        dir: "/Apps/somefolder/anotherfolder/moose.app",
+        docs: alloc::vec![("en-US", "moose.md", MOOSE_DOC)],
+    });
+    let console = FixtureConsole::stream();
+    run(&page("moose"), &Request::default(), &store, &console).expect("page renders");
+    assert!(console.output().contains("filed-away app"));
+}
+
+#[test]
+fn the_users_own_apps_folder_is_searched_after_the_shared_store() {
+    let mut store = FixtureStore::with_ps();
+    store.bundles.push(Bundle {
+        dir: "/Users/ada/Apps/somefolder/moose.app",
+        docs: alloc::vec![("en-US", "moose.md", MOOSE_DOC)],
+    });
+    let console = FixtureConsole::stream();
+    let request = Request {
+        locale: None,
+        path: None,
+        home: Some("/Users/ada"),
+    };
+    run(&page("moose"), &request, &store, &console).expect("page renders");
+    assert!(console.output().contains("filed-away app"));
+
+    // Without a HOME there is no per-user root to search.
+    let console = FixtureConsole::stream();
+    let err = run(&page("moose"), &Request::default(), &store, &console).unwrap_err();
+    assert_eq!(err, ManError::CommandNotFound(String::from("moose")));
+}
+
+#[test]
+fn a_shared_store_match_wins_over_the_users_own() {
+    let mut store = FixtureStore::with_ps();
+    store.bundles.push(Bundle {
+        dir: "/Apps/moose.app",
+        docs: alloc::vec![("en-US", "moose.md", MOOSE_DOC)],
+    });
+    store.bundles.push(Bundle {
+        dir: "/Users/ada/Apps/moose.app",
+        docs: alloc::vec![(
+            "en-US",
+            "moose.md",
+            "## NAME\n\nmoose — the private copy\n\n## SYNOPSIS\n\n`x`\n\n## DESCRIPTION\n\nNot this one.\n",
+        )],
+    });
+    let console = FixtureConsole::stream();
+    let request = Request {
+        locale: None,
+        path: None,
+        home: Some("/Users/ada"),
+    };
+    run(&page("moose"), &request, &store, &console).expect("page renders");
+    assert!(console.output().contains("filed-away app"));
+    assert!(!console.output().contains("private copy"));
+}
+
+#[test]
+fn a_shallower_bundle_beats_a_deeper_lexicographically_earlier_one() {
+    let mut store = FixtureStore::with_ps();
+    store.bundles.push(Bundle {
+        dir: "/Apps/aaa/deep/moose.app",
+        docs: alloc::vec![(
+            "en-US",
+            "moose.md",
+            "## NAME\n\nmoose — the deep copy\n\n## SYNOPSIS\n\n`x`\n\n## DESCRIPTION\n\nNot this one.\n",
+        )],
+    });
+    store.bundles.push(Bundle {
+        dir: "/Apps/zzz/moose.app",
+        docs: alloc::vec![("en-US", "moose.md", MOOSE_DOC)],
+    });
+    let console = FixtureConsole::stream();
+    run(&page("moose"), &Request::default(), &store, &console).expect("page renders");
+    assert!(console.output().contains("filed-away app"));
+    assert!(!console.output().contains("deep copy"));
+}
+
+#[test]
+fn the_search_never_descends_into_another_bundle() {
+    let mut store = FixtureStore::with_ps();
+    // A bundle filed *inside* another bundle's directory is not installed;
+    // a bundle is a sealed unit, not a container of further apps.
+    store.bundles.push(Bundle {
+        dir: "/Apps/outer.app",
+        docs: alloc::vec![(
+            "en-US",
+            "outer.md",
+            "## NAME\n\nouter — a bundle\n\n## SYNOPSIS\n\n`x`\n\n## DESCRIPTION\n\nOuter.\n",
+        )],
+    });
+    store.bundles.push(Bundle {
+        dir: "/Apps/outer.app/Code/inner.app",
+        docs: alloc::vec![("en-US", "inner.md", MOOSE_DOC)],
+    });
+    let console = FixtureConsole::stream();
+    let err = run(&page("inner"), &Request::default(), &store, &console).unwrap_err();
+    assert_eq!(err, ManError::CommandNotFound(String::from("inner")));
+}
+
+#[test]
+fn an_exhausted_search_budget_is_reported_not_swallowed() {
+    let mut store = FixtureStore::with_ps();
+    // More walkable directories than the whole-invocation budget: the
+    // truncation must surface as its own error, never as "not found".
+    for i in 0..5000usize {
+        store.dirs.push(alloc::format!("/Apps/d{i:04}"));
+    }
+    let console = FixtureConsole::stream();
+    let err = run(&page("moose"), &Request::default(), &store, &console).unwrap_err();
+    assert_eq!(
+        err,
+        ManError::SearchTruncated {
+            root: String::from("/Apps"),
+        }
+    );
 }
 
 #[test]

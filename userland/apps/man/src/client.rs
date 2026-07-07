@@ -2,12 +2,13 @@
 //! its Help document in the active locale, and write the rendered page —
 //! paginated on an interactive terminal — to standard output.
 
+use alloc::collections::VecDeque;
 use alloc::format;
 use alloc::string::String;
 
 use rustos_abi::stdinfo::{Human, StdInfoKind, StdInfoRecord};
 use rustos_abi::{Errno, BUNDLE_SUFFIX};
-use rustos_cmdres::bundle_candidates;
+use rustos_cmdres::{bundle_candidates, search_roots};
 use rustos_help::{
     load, render_full, render_short, DocumentName, Fallback, LoadError, Loaded, Locale,
 };
@@ -26,6 +27,18 @@ pub const USAGE: &str = "usage: man [-h | -?] <command> [topic]";
 /// document through the same engine as any other command's.
 const OWN_WORD: &str = "man";
 
+/// Maximum directory depth of the recursive app-store search, counted from
+/// a store root. Deep nesting past this is a filing error, not a place a
+/// bundle is legitimately kept; the bound also fails a self-referential or
+/// hostile tree closed instead of walking it forever.
+const MAX_SEARCH_DEPTH: usize = 16;
+
+/// Maximum number of directories one invocation's app-store search lists
+/// across all roots. Exhausting it is reported as a truncated search
+/// (never silently as "not found"), so an enormous or hostile tree cannot
+/// stall the tool unboundedly.
+const MAX_SEARCH_DIRS: usize = 4096;
+
 /// The pager prompt shown at the foot of each screenful.
 const MORE_PROMPT: &[u8] = b"--More--";
 
@@ -34,9 +47,9 @@ const MORE_PROMPT: &[u8] = b"--More--";
 const MORE_ERASE: &[u8] = b"\r        \r";
 
 /// The environment the shell resolved once for this invocation: the active
-/// locale preference and the `PATH` search list, both read from the
-/// inherited environment by the `Run` binary and injected here so the
-/// engine itself performs no ambient lookup.
+/// locale preference, the `PATH` search list, and the user's home — all
+/// read from the inherited environment by the `Run` binary and injected
+/// here so the engine itself performs no ambient lookup.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Request<'a> {
     /// The user's locale preference (the `LANG` variable, a BCP-47 tag,
@@ -47,6 +60,9 @@ pub struct Request<'a> {
     /// The `PATH` variable, if set: the user-extendable half of the
     /// store-then-`PATH` bundle search (plans/APPS.md §8).
     pub path: Option<&'a str>,
+    /// The `HOME` variable, if set: names the user's own `<home>/Apps`
+    /// root for the recursive bundle search (plans/APPS.md §7).
+    pub home: Option<&'a str>,
 }
 
 /// Run one [`Command`] against the injected store and console.
@@ -75,7 +91,7 @@ fn short_help(
     store: &dyn BundleStore,
     console: &dyn Console,
 ) -> Result<(), ManError> {
-    let loaded = resolve(OWN_WORD, request.path, store).and_then(|bundle_dir| {
+    let loaded = resolve(OWN_WORD, request, store).and_then(|bundle_dir| {
         let name = DocumentName::parse(OWN_WORD)?;
         let source = ScopedHelp::new(store, &bundle_dir);
         load(&source, &active_locale(request.locale), &name).map_err(from_load(OWN_WORD, OWN_WORD))
@@ -104,7 +120,7 @@ fn page(
     store: &dyn BundleStore,
     console: &dyn Console,
 ) -> Result<(), ManError> {
-    let bundle_dir = resolve(word, request.path, store)?;
+    let bundle_dir = resolve(word, request, store)?;
     let name_str = topic.unwrap_or_else(|| document_word(word));
     let name = DocumentName::parse(name_str)?;
     let requested = active_locale(request.locale);
@@ -137,9 +153,12 @@ fn document_word(word: &str) -> &str {
 /// candidate of the shared store-then-`PATH` order that exists. `NotFound`
 /// moves to the next candidate; any other refusal is final — exactly the
 /// shell's launch rule, so the page shown always documents the program the
-/// shell would run.
-fn resolve(word: &str, path: Option<&str>, store: &dyn BundleStore) -> Result<String, ManError> {
-    let candidates = bundle_candidates(word, path);
+/// shell would run. When every ordered candidate is absent, a bare word
+/// falls back to the recursive app-store search: the machine-wide `/Apps`
+/// store, then the user's own `<home>/Apps`, walked breadth-first so the
+/// shallowest (most visible) copy of a bundle wins.
+fn resolve(word: &str, request: &Request<'_>, store: &dyn BundleStore) -> Result<String, ManError> {
+    let candidates = bundle_candidates(word, request.path);
     if candidates.is_empty() {
         return Err(ManError::NotABundle(String::from(word)));
     }
@@ -150,7 +169,71 @@ fn resolve(word: &str, path: Option<&str>, store: &dyn BundleStore) -> Result<St
             Err(err) => return Err(ManError::Store(err)),
         }
     }
+    if !word.contains('/') {
+        if let Some(found) = search_stores(word, request.home, store)? {
+            return Ok(found);
+        }
+    }
     Err(ManError::CommandNotFound(String::from(word)))
+}
+
+/// Search the app-store roots for `<word>.app`, in root order, sharing one
+/// directory budget across the whole invocation. `Ok(None)` is the clean
+/// "nowhere" answer that lets the caller report `CommandNotFound`.
+fn search_stores(
+    word: &str,
+    home: Option<&str>,
+    store: &dyn BundleStore,
+) -> Result<Option<String>, ManError> {
+    let bundle = if word.ends_with(BUNDLE_SUFFIX) {
+        String::from(word)
+    } else {
+        format!("{word}{BUNDLE_SUFFIX}")
+    };
+    let mut budget = MAX_SEARCH_DIRS;
+    for root in search_roots(home) {
+        if let Some(found) = search_root(&root, &bundle, store, &mut budget)? {
+            return Ok(Some(found));
+        }
+    }
+    Ok(None)
+}
+
+/// Walk one store root breadth-first for a directory named `bundle`.
+///
+/// Listings are consumed in sorted order, so the result is deterministic:
+/// the shallowest match wins, ties resolved lexicographically. The walk
+/// never descends into another bundle's `.app` directory (a bundle is a
+/// sealed unit, not a container of further apps) and never deeper than
+/// [`MAX_SEARCH_DEPTH`]. A missing root or subdirectory simply lists
+/// nothing; any other refusal is final, exactly as in the candidate probe.
+fn search_root(
+    root: &str,
+    bundle: &str,
+    store: &dyn BundleStore,
+    budget: &mut usize,
+) -> Result<Option<String>, ManError> {
+    let mut queue: VecDeque<(String, usize)> = VecDeque::new();
+    queue.push_back((String::from(root), 0));
+    while let Some((dir, depth)) = queue.pop_front() {
+        if *budget == 0 {
+            return Err(ManError::SearchTruncated {
+                root: String::from(root),
+            });
+        }
+        *budget -= 1;
+        let mut names = store.subdirs(&dir).map_err(ManError::Store)?;
+        names.sort_unstable();
+        for name in names {
+            if name == bundle {
+                return Ok(Some(format!("{dir}/{name}")));
+            }
+            if !name.ends_with(BUNDLE_SUFFIX) && depth + 1 < MAX_SEARCH_DEPTH {
+                queue.push_back((format!("{dir}/{name}"), depth + 1));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// The locale the engine is asked for: the user's preference when it is a

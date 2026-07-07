@@ -1582,7 +1582,7 @@ group id, an optional supplementary-group set, and the textual comment
 and home directory — and hands that record to the database through an
 injected seam. Group and user references are **decimal** ids, the same
 choice `chown` makes. `-h`/`-?` render the tool's own short help from its
-bundled six-locale `Help/` tree through the shared `lib/help` engine
+bundled thirteen-locale `Help/` tree through the shared `lib/help` engine
 (`plans/APPS.md` §4), falling back to the usage banner when the tree is
 unavailable.
 
@@ -1707,7 +1707,7 @@ seam. The group id is a **decimal** value, the same choice `chown` and
 `useradd` make. It is the natural sibling of `useradd`: the same
 parser/seam/error discipline, narrowed to the two fields a group record
 carries. `-h`/`-?` render the tool's own short help from its bundled
-six-locale `Help/` tree through the shared `lib/help` engine
+thirteen-locale `Help/` tree through the shared `lib/help` engine
 (`plans/APPS.md` §4), falling back to the usage banner when the tree is
 unavailable.
 
@@ -1863,16 +1863,30 @@ codes: `0` page shown, `1` command/document not found or delivery failed,
 store-then-`PATH` order the shell launches by — and stops at the first
 bundle directory that exists (`NotFound` moves on; any other refusal is
 final, mirroring the shell's launch rule), so the page shown always
-documents the program the shell would run for the same word. The document
-is located, locale-selected, parsed, and rendered by `lib/help`, the one
-shared engine; `man` owns only its argument grammar, the bundle probe, and
-the pager.
+documents the program the shell would run for the same word. When no
+ordered candidate matches a bare word, `man` falls back to a **recursive
+bundle search** of the app stores — the machine-wide `/Apps`, then the
+user's own `<HOME>/Apps` (`rustos_cmdres::search_roots`) — walked
+breadth-first over sorted listings so the shallowest match wins
+deterministically. The walk never descends into another bundle's `.app`
+directory (a bundle is a sealed unit), is bounded in depth and by a
+whole-invocation directory budget (an exhausted budget is reported as a
+truncated search, never silently as "not found"), and a missing root
+simply lists nothing. `man moose` therefore finds
+`/Apps/somefolder/anotherfolder/moose.app`'s help wherever the bundle was
+filed; launching stays the shell's store-then-`PATH` rule, unchanged. The
+document is located, locale-selected, parsed, and rendered by `lib/help`,
+the one shared engine; `man` owns only its argument grammar, the bundle
+probe, and the pager.
 
 ### Locale
 
 The requested locale is the `LANG` environment variable (a BCP-47 tag the
 session/shell exports once, `plans/APPS.md` §5). Fallback is the engine's
-deterministic chain (exact → same language → the canonical `en-US/`); a missing
+deterministic chain (exact → same language → the canonical `en-US/`),
+resolved by scanning the bundle's own `Help/` tree for the locales it
+actually ships — never a compiled-in language list — so a third-party
+bundle carrying only `en-US/` (or any other subset) still serves help; a missing
 or malformed `LANG` degrades to the canonical documents. A page served in
 a locale other than the requested one is noted with a `context` record
 (code `help.locale_fallback`) on `stdinfo` (fd 3) — advisory only, never
@@ -1900,7 +1914,10 @@ every `Help/` read per-inode under the caller's attested identity.
 `cargo test -p rustos-man` drives the engine against in-memory
 `BundleStore`/`Console` fixtures: the grammar and its refusals, the
 store-shadows-`PATH` order, the final-refusal rule, `.app`/explicit-path
-words, topics, locale exact/fallback plus the fd-3 advisory, the pager's
+words, the recursive app-store search (nested finds, `/Apps`-before-home
+order, shallowest-match determinism, the sealed-`.app` rule, and the
+reported budget truncation), topics, locale exact/fallback plus the fd-3
+advisory, the pager's
 key handling, and the `-h` fallback. `man`'s own `Help/` tree is authored
 on disk in the bundle and read at runtime through the `BundleStore` seam,
 never embedded in the binary; `tools/syshelp` discovers it from that
@@ -1966,5 +1983,5 @@ refusal/editing behaviour, the full keystroke state machine (saving,
 save-as, confirm flows, open, wrap-around find, notices) against the
 in-memory filesystem, and the renderer against an in-memory tty,
 including horizontal scrolling over double-width glyphs and a tiny
-screen. The per-locale `OPTIONS` pin keeps the six-locale `Help/` tree
+screen. The per-locale `OPTIONS` pin keeps the thirteen-locale `Help/` tree
 aligned with the parser.

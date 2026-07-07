@@ -21,7 +21,11 @@
 //! load pipeline; the kernel authorises every launch. The `man` command
 //! walks the same order over [`bundle_candidates`] to find the bundle whose
 //! `Help/` tree documents a command — one policy, two views, so the page
-//! `man` shows always belongs to the program the shell would run.
+//! `man` shows always belongs to the program the shell would run. When that
+//! ordered list finds nothing, `man` falls back to a recursive walk of the
+//! app-store roots [`search_roots`] spells — the machine-wide `/Apps` store,
+//! then the user's own `<home>/Apps` — so an installed bundle's help is
+//! found however deeply it was filed (`plans/APPS.md` §7).
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -33,7 +37,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_abi::{BundleEntry, BUNDLE_SUFFIX, SYSTEM_APP_STORE};
+use rustos_abi::{BundleEntry, BUNDLE_SUFFIX, SYSTEM_APP_STORE, USER_APP_STORE};
 
 /// Compute the candidate program paths for one command word, in the order
 /// they are to be attempted. `path_var` is the value of the `PATH`
@@ -88,6 +92,26 @@ pub fn bundle_candidates(word: &str, path_var: Option<&str>) -> Vec<String> {
         return Vec::new();
     }
     bundle_roots(word, path_var)
+}
+
+/// Compute the app-store roots `man`'s recursive bundle search walks, in
+/// order, when the [`bundle_candidates`] list finds nothing: the
+/// machine-wide user app store (`/Apps`), then the calling user's own
+/// `<home>/Apps`. `home` is the inherited `HOME` value, if set.
+///
+/// Spelling only — the walk itself (and every permission check) belongs to
+/// the caller and the kernel. An unset or empty `home` simply contributes
+/// no per-user root; nothing is guessed in its place.
+#[must_use]
+pub fn search_roots(home: Option<&str>) -> Vec<String> {
+    let mut roots = alloc::vec![String::from(USER_APP_STORE)];
+    if let Some(home) = home {
+        let home = home.strip_suffix('/').unwrap_or(home);
+        if !home.is_empty() {
+            roots.push(format!("{home}/Apps"));
+        }
+    }
+    roots
 }
 
 /// The ordered bundle-directory spellings a bare (searchable) word names:
@@ -146,7 +170,7 @@ fn split_path_entries(path: &str) -> Vec<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{bundle_candidates, resolution_candidates, split_path_entries};
+    use super::{bundle_candidates, resolution_candidates, search_roots, split_path_entries};
     use alloc::vec;
     use alloc::vec::Vec;
 
@@ -282,5 +306,25 @@ mod tests {
     #[test]
     fn empty_word_yields_no_bundles() {
         assert_eq!(bundle_candidates("", Some("/opt")), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn search_roots_are_the_shared_store_then_the_users_own() {
+        assert_eq!(
+            search_roots(Some("/Users/ada")),
+            ["/Apps", "/Users/ada/Apps"]
+        );
+        // A trailing slash on HOME must not double the separator.
+        assert_eq!(
+            search_roots(Some("/Users/ada/")),
+            ["/Apps", "/Users/ada/Apps"]
+        );
+    }
+
+    #[test]
+    fn a_missing_or_empty_home_contributes_no_per_user_root() {
+        assert_eq!(search_roots(None), ["/Apps"]);
+        assert_eq!(search_roots(Some("")), ["/Apps"]);
+        assert_eq!(search_roots(Some("/")), ["/Apps"]);
     }
 }

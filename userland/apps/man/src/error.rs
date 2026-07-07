@@ -43,6 +43,14 @@ pub enum ManError {
     /// bundle"): the refusal is final, mirroring the shell's launch rule
     /// that only `NotFound` moves to the next candidate.
     Store(Errno),
+    /// The recursive app-store walk hit its safety bound (directory budget)
+    /// before the word could be resolved. Reported rather than silently
+    /// treated as "not found", so a truncated search never masquerades as
+    /// an exhaustive one.
+    SearchTruncated {
+        /// The store root whose walk exhausted the budget.
+        root: String,
+    },
     /// Writing the rendered page to standard output failed.
     Output(Errno),
 }
@@ -65,6 +73,11 @@ impl fmt::Display for ManError {
             }
             ManError::Tree(err) => write!(f, "help unavailable: {err}"),
             ManError::Store(err) => write!(f, "cannot read the app store: {err}"),
+            ManError::SearchTruncated { root } => write!(
+                f,
+                "app search under {root} stopped at its safety bound; \
+                 name the bundle's path directly"
+            ),
             ManError::Output(err) => write!(f, "cannot write the page: {err}"),
         }
     }

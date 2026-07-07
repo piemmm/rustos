@@ -108,8 +108,10 @@ and checks:
   language-neutral key and each translation's key sequence equals
   `en-US/`'s (the per-app unit tests separately pin `en-US/`'s keys to
   each program's actual argument parser);
-- the closed content-policy word screen, whole-word and case-insensitive, in
-  every locale.
+- the closed content-policy screen, whole-word and case-insensitive, in
+  every locale, plus a substring screen for the unsegmented CJK languages
+  (Chinese and Japanese prose carries no word boundaries a word split can
+  find).
 
 The feature is host-only tooling; a RustOS program never links it. The
 `help-lint` gate additionally verifies coverage: every command app the

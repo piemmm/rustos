@@ -64,3 +64,10 @@ rustos-rt = { path = "../../../lib/rt", version = "=0.0.0" }
 # short-help switches render the shell's own Help document through it
 # (plans/APPS.md §4, §6).
 rustos-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }
+
+[dev-dependencies]
+# The one help engine, for the standing required-locale set
+# (`REQUIRED_LOCALES`) the shell's own Help-tree switch pin iterates —
+# never a second copy of the locale list (plans/APPS.md §8.1). Test-only:
+# the host library never reads help at runtime.
+rustos-help = { path = "../../../lib/help", version = "=0.0.0" }

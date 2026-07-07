@@ -40,6 +40,17 @@ pub trait BundleStore {
     /// Any [`Errno`] the store raises reading the tree.
     fn locale_dirs(&self, bundle_dir: &str) -> Result<Vec<String>, Errno>;
 
+    /// The names of the directories directly inside `dir`, in any order —
+    /// the listing step of the recursive app-store search. A missing `dir`
+    /// has no children: `Ok(vec![])`.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the store raises *other than* absence (absence is the
+    /// empty answer). Such a refusal is final — the caller does not search
+    /// past it.
+    fn subdirs(&self, dir: &str) -> Result<Vec<String>, Errno>;
+
     /// The bytes of `<bundle_dir>/Help/<locale_dir>/<file_name>`, or `None`
     /// if that document does not exist in that locale.
     ///

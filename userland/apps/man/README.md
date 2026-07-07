@@ -6,7 +6,13 @@ single internationalised `Help/` tree holds one structured-Markdown document
 per command or topic (`AGENTS.md` §16.5). `man <cmd>` resolves `<cmd>`
 through the **same** store-then-`PATH` policy the shell launches by
 (`lib/cmdres`), so the page shown always documents the program the shell
-would run, then renders that bundle's document in the active locale through
+would run; when no ordered candidate matches a bare word it falls back to
+the bounded, breadth-first **recursive bundle search** of the app stores —
+the machine-wide `/Apps`, then the user's own `<HOME>/Apps`
+(`rustos_cmdres::search_roots`) — finding a bundle's help however deeply
+it was filed (never descending into another `.app`; an exhausted directory
+budget is reported, never silently "not found"). It then renders that
+bundle's document in the active locale through
 the one shared help engine (`lib/help`).
 
 The crate is `no_std` + `alloc`, forbids `unsafe`, and has no
@@ -35,7 +41,10 @@ directly (`man top.app` shows `top`'s page). Exit codes: `0` page shown,
 The requested locale is the `LANG` environment variable (a BCP-47 tag, set
 once by the session/shell — `plans/APPS.md` §5). The engine falls back
 deterministically: exact tag → same language, any region → the canonical
-`en-US/` document. A malformed or missing `LANG` degrades to
+`en-US/` document — resolved by scanning the bundle's own `Help/` tree for
+the locales it actually ships, never a compiled-in language list, so a
+bundle carrying only `en-US/` still serves help. A malformed or missing
+`LANG` degrades to
 `en-US/` rather than making help unreadable. When the served locale is not
 the requested one, `man` emits a `context` advisory record on `stdinfo`
 (fd 3, code `help.locale_fallback`) — advisory only, never affecting output

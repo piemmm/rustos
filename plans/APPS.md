@@ -47,11 +47,11 @@ app documentation only; the OS source-tree docs under `docs/` are unrelated).
 Landed: deliverable 1 (`BundleEntry::Help` replaced `Documentation` in place,
 `AGENTS.md` §16.5 amended, C header regenerated), deliverable 2 (the
 `lib/help` engine), deliverable 3 (the `man.app` command app, §7, with its
-own six-locale `Help/` tree shipped on the read-only `/System` volume and
+own thirteen-locale `Help/` tree shipped on the read-only `/System` volume and
 the `LANG` locale variable named in §5), deliverable 4 (shell command
 resolution over the `/System/Apps/` system app store, `AGENTS.md` §16.2
 amended), and deliverable 6 for **every store-registered command app**:
-`cat`, `ls`, `ps`, `top`, `sysinfo`, `users`, and `elsh` each ship a six-locale
+`cat`, `ls`, `ps`, `top`, `sysinfo`, `users`, and `elsh` each ship a thirteen-locale
 `Help/` tree in their bundle (discovered by `tools/syshelp` from the
 `userland/apps` and `userland/shell` roots, planted by `tools/mkimage`
 and the QEMU fixture) and honour the §4 `-h`/`-?` short-help convention
@@ -334,7 +334,14 @@ top.app/Help/
 ├── de-DE/
 ├── es-ES/
 ├── uk-UA/
-└── it-IT/
+├── it-IT/
+├── pt-PT/
+├── cy-GB/
+├── zh-CN/
+├── ja-JP/
+├── ko-KR/
+├── ar-SA/
+└── he-IL/
 ```
 
 - `en-US/` is the canonical help. It MUST exist for any bundle that ships
@@ -506,6 +513,20 @@ troff/roff man format (RustOS ships none), it renders the `Help/` Markdown.
 - `man <cmd>` resolves `<cmd>` through the **same** command-resolution path the
   shell uses (§9) to find the owning bundle, then renders that bundle's Help
   document for `<cmd>` in the active locale (§5) through `lib/help`.
+- When the ordered store-then-`PATH` candidates find nothing for a bare word,
+  `man` falls back to a **recursive bundle search** of the app stores: the
+  machine-wide `/Apps`, then the user's own `<HOME>/Apps`
+  (`rustos_cmdres::search_roots` — the roots are spelled once, over
+  `rustos_abi::USER_APP_STORE`). The walk is breadth-first over sorted
+  listings, so the shallowest match wins deterministically; it never
+  descends into another bundle's `.app` directory (a bundle is a sealed
+  unit); a missing root or directory lists nothing while any other refusal
+  is final; and it is bounded (depth and a whole-invocation directory
+  budget) — an exhausted budget is reported as a truncated search, never
+  silently as "command not found". `man moose` therefore finds
+  `/Apps/somefolder/anotherfolder/moose.app` or
+  `/Users/<u>/Apps/somefolder/moose.app`. This search is `man`'s only:
+  the shell's *launch* resolution (§8) is unchanged.
 - `man <cmd> <topic>` selects `Help/<locale>/<topic>.md` within `<cmd>`'s
   bundle, for bundles that ship more than one topic.
 - `man` emits a `stdinfo` `omission`/`context` record (fd 3, §20) when it falls
@@ -572,7 +593,13 @@ other refusal onto `126`). No "try everything until one runs" behaviour
 - **Every OS-provided command app MUST ship a complete `Help/` tree**: an
   `en-US/` canonical document for every command it exposes, plus translations
   for the standing required locale set: `fr-FR`, `de-DE`, `es-ES`, `uk-UA`,
-  `it-IT`. These documents MUST be generated and kept current; when an AI or a
+  `it-IT`, `pt-PT`, `cy-GB`, `zh-CN`, `ja-JP`, `ko-KR`, `ar-SA`, `he-IL`
+  (the one definition is `rustos_help::REQUIRED_LOCALES`; every consumer —
+  the lint and each app's own switch pins — imports it, never a private
+  copy). The set gates *authoring* completeness only: runtime selection
+  scans the bundle's `Help/` tree for whatever locales it actually ships
+  (§5), so a third-party bundle with only `en-US/` still serves help.
+  These documents MUST be generated and kept current; when an AI or a
   contributor changes a command's behaviour or switches, it updates the
   `en-US/` document and the translations in the same change (§2.8, §2.14,
   §2.18). Adding a language to the required set is data (a new locale
@@ -712,11 +739,11 @@ behind the floor work below).
   `chown` `-c -f -v` (GNU changed/retained wording; `-f` suppresses
   per-operand diagnostics, continues, and still fails the run via the
   message-less `Silenced` error). Each tool's `Prompt`/`Output` seams stay
-  injected and fail closed; registered tools' six-locale `Help/` trees and
+  injected and fail closed; registered tools' thirteen-locale `Help/` trees and
   the switch-drift pins are current.
 - **Stage B — register the orphan utilities as store bundles (in
-  progress).** Each orphan gains `AppInfo.toml`/`Run`/`Help/` (six
-  locales) and store registration per §16.5/§6.1, wiring the `Prompt`
+  progress).** Each orphan gains `AppInfo.toml`/`Run`/`Help/` (the §8.1
+  required locales) and store registration per §16.5/§6.1, wiring the `Prompt`
   seam to stderr+stdin (`y`/`Y` affirmative; end-of-input is a decline,
   never consent) in each `Run` host. **Done: `cp`, `mv`, `rm`** — each is
   a full self-contained store bundle (console pair + `CAP_FS_ACCESS`
@@ -753,7 +780,7 @@ behind the floor work below).
   `CAP_FS_ACCESS` request — plus console-read for the stdin-reading
   `head`/`wc`/`tee` — store-only: the §18.6 boot floor never grows,
   so the kernel inventory drift test pins their `AppInfo.toml` directly)
-  with the complete GNU surface, six-locale `Help/` trees, and
+  with the complete GNU surface, thirteen-locale `Help/` trees, and
   switch-drift pins. `true`/`false` parse infallibly (only a *first*
   argument of `-h`/`-?`/`--help` is honoured, the GNU position rule);
   the one documented divergence is that `false`'s served short help
@@ -822,7 +849,7 @@ behind the floor work below).
   `uniq`, `tr`, `cut`, `paste`, `comm`, `nl`, `tac`, `fold`, `expand`,
   `od`, `split`, `shuf`, `truncate`, `mktemp`, `realpath`, `chgrp`,
   `sha256sum`/`cksum`, `base64`, `df`, `du`). Each is a full self-contained
-  bundle (§16.5) with tests and a six-locale `Help/` tree; anything a
+  bundle (§16.5) with tests and a thirteen-locale `Help/` tree; anything a
   shell builtin duplicates moves out of `elsh` where applicable.
 - **Stage D — filesystem timestamps (planned).** Plumb the driver-level
   `NodeTimes` (four `Time64` stamps) through `fs_stat`/`FileStat` (an
@@ -860,13 +887,15 @@ both landed; `plans/SHELL.md` command execution):
 3. **`man.app`** — **done.** The RustOS `man` command app (§7):
    `userland/apps/man` resolves the word over `rustos_cmdres::
    bundle_candidates` (first existing bundle wins; `NotFound` moves on, any
-   other refusal is final), loads and renders through `lib/help`, reads
-   `LANG`/`PATH` from the inherited environment, pages on a
+   other refusal is final) and then, for a bare word no candidate matched,
+   over the §7 bounded recursive search of `/Apps` and `<HOME>/Apps`
+   (`rustos_cmdres::search_roots`), loads and renders through `lib/help`,
+   reads `LANG`/`PATH`/`HOME` from the inherited environment, pages on a
    geometry-attested console (space/return/`q`, echo suppressed) and
    streams otherwise, and emits the §7 `stdinfo` `context` record
    (`help.locale_fallback`) on a locale fallback. Registered as
    `/System/Apps/man.app/Run` (manifest: console pair + `CAP_FS_ACCESS`);
-   its own six-locale `Help/` tree is authored on disk in the bundle and
+   its own thirteen-locale `Help/` tree is authored on disk in the bundle and
    read at runtime through the `BundleStore` seam (no help embedded in the
    binary, §6.1) — the tree is discovered by `tools/syshelp` and planted on
    the read-only `/System` volume by `tools/mkimage` and the QEMU image
@@ -899,8 +928,9 @@ both landed; `plans/SHELL.md` command execution):
    documents (§2.1), per-item backticked switch keys and cross-locale
    `OPTIONS` key equality against `en-US/` (§3.1 — the per-app unit tests
    keep pinning `en-US/` to each parser, which only the app crate knows),
-   and the closed content-policy word screen (whole-word, case-insensitive,
-   all six locales). The gate additionally verifies coverage: every command
+   and the closed content-policy screen (whole-word, case-insensitive, plus
+   the CJK substring screen, over every locale). The gate additionally
+   verifies coverage: every command
    app the `AppInfo.toml` discovery walk finds ships its
    `en-US/<command>.md` (never a per-bundle list). Any violation fails
    closed with a message naming the offending `bundle/locale/file`.
@@ -908,7 +938,7 @@ both landed; `plans/SHELL.md` command execution):
    store-registered command app**: `basename`, `cat`, `clear`, `cp`,
    `dirname`, `edit`, `false`, `groupadd`, `head`, `ls`, `mkdir`,
    `mv`, `ps`, `reset`, `rm`, `rmdir`, `seq`, `tee`, `top`, `true`, `sysinfo`, `useradd`,
-   `users`, `wc`, `yes`, and `elsh` each author their six-locale tree on disk in the bundle,
+   `users`, `wc`, `yes`, and `elsh` each author their thirteen-locale tree on disk in the bundle,
    discovered by `tools/syshelp` (roots `userland/apps` and
    `userland/shell`), planted at `/System/Apps/<cmd>.app/Help/`, and served
    at runtime through the `HelpSource` seam — never embedded in the binary

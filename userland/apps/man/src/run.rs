@@ -9,8 +9,9 @@
 //! program's `main`.
 //!
 //! `main` collects the inherited argument vector, reads the `LANG` locale
-//! preference and `PATH` search list from the inherited environment
-//! (plans/APPS.md §5 and §8 — the shell exports both; the tool invents no
+//! preference, the `PATH` search list, and the `HOME` naming the user's own
+//! `Apps` search root from the inherited environment (plans/APPS.md §5, §7,
+//! and §8 — the shell exports all three; the tool invents no
 //! second source), and runs the parsed command against the two production
 //! seams: `RtStore`, which probes and reads app bundles through the
 //! kernel-authorised `fs_*` syscalls (every per-inode and mount check stays
@@ -51,15 +52,18 @@ mod program {
     use rustos_rt::io::{write_stderr_line, StdInfo, Stdout, Write};
 
     /// Initial byte size of the directory-listing buffer. A `Help/` tree
-    /// lists a handful of locale directories, so one page nearly always
-    /// suffices; `BufferTooSmall` grows it (below).
+    /// lists a handful of locale directories and a store directory a
+    /// handful of bundles, so one page nearly always suffices;
+    /// `BufferTooSmall` grows it (below).
     const DIR_BUF_INITIAL: usize = 4096;
 
-    /// Ceiling for the directory-listing buffer. The engine refuses a tree
-    /// with more locales than its own bound long before this, so a listing
-    /// that cannot fit here is a hostile or corrupt tree, not a capacity to
-    /// grow into.
-    const DIR_BUF_MAX: usize = 64 * 1024;
+    /// Ceiling for the directory-listing buffer — a validation bound, not a
+    /// capacity. The engine refuses a `Help/` tree with more locales than
+    /// its own bound long before this, and the recursive store search is
+    /// budgeted in directories, so a single listing that cannot fit here is
+    /// a hostile or corrupt tree; the read then fails closed rather than
+    /// growing without limit.
+    const DIR_BUF_MAX: usize = 256 * 1024;
 
     /// The production [`BundleStore`]: the kernel-authorised `fs_*` view of
     /// the installed bundles. It adds no authority — every path resolution,
@@ -89,45 +93,13 @@ mod program {
 
         fn locale_dirs(&self, bundle_dir: &str) -> Result<Vec<String>, Errno> {
             let path = format!("{bundle_dir}/Help");
-            let dir = match rustos_rt::open_dir(path.as_bytes()) {
-                Ok(dir) => dir,
-                Err(ret) => {
-                    return match Errno::from_syscall(ret) {
-                        // A bundle without a Help/ tree simply has no
-                        // locales; that is the engine's clean "no help".
-                        Errno::NotFound => Ok(Vec::new()),
-                        other => Err(other),
-                    };
-                }
-            };
-            let mut buf = alloc::vec![0u8; DIR_BUF_INITIAL];
-            let used = loop {
-                match dir.read(&mut buf) {
-                    Ok(used) => break used,
-                    Err(ret) => match Errno::from_syscall(ret) {
-                        Errno::BufferTooSmall if buf.len() < DIR_BUF_MAX => {
-                            buf.resize(buf.len() * 2, 0);
-                        }
-                        other => return Err(other),
-                    },
-                }
-            };
-            let mut dirs = Vec::new();
-            let mut rest = &buf[..used];
-            while !rest.is_empty() {
-                let (entry, consumed) = DirEntry::decode(rest)?;
-                rest = &rest[consumed..];
-                if !entry.kind.is_dir() {
-                    continue;
-                }
-                // A non-UTF-8 name can never be a locale directory the
-                // engine validated a spelling for; skipping it loses nothing
-                // and fabricates nothing.
-                if let Ok(name) = core::str::from_utf8(entry.name) {
-                    dirs.push(String::from(name));
-                }
-            }
-            Ok(dirs)
+            // A bundle without a Help/ tree simply has no locales; that is
+            // the engine's clean "no help".
+            list_dirs(&path)
+        }
+
+        fn subdirs(&self, dir: &str) -> Result<Vec<String>, Errno> {
+            list_dirs(dir)
         }
 
         fn read_doc(
@@ -165,6 +137,49 @@ mod program {
             }
             Ok(Some(bytes))
         }
+    }
+
+    /// List the names of the directories directly inside `path`. A missing
+    /// `path` has no children (`Ok(vec![])`); any other refusal is the
+    /// kernel's own [`Errno`], surfaced verbatim.
+    fn list_dirs(path: &str) -> Result<Vec<String>, Errno> {
+        let dir = match rustos_rt::open_dir(path.as_bytes()) {
+            Ok(dir) => dir,
+            Err(ret) => {
+                return match Errno::from_syscall(ret) {
+                    Errno::NotFound => Ok(Vec::new()),
+                    other => Err(other),
+                };
+            }
+        };
+        let mut buf = alloc::vec![0u8; DIR_BUF_INITIAL];
+        let used = loop {
+            match dir.read(&mut buf) {
+                Ok(used) => break used,
+                Err(ret) => match Errno::from_syscall(ret) {
+                    Errno::BufferTooSmall if buf.len() < DIR_BUF_MAX => {
+                        buf.resize(buf.len() * 2, 0);
+                    }
+                    other => return Err(other),
+                },
+            }
+        };
+        let mut dirs = Vec::new();
+        let mut rest = &buf[..used];
+        while !rest.is_empty() {
+            let (entry, consumed) = DirEntry::decode(rest)?;
+            rest = &rest[consumed..];
+            if !entry.kind.is_dir() {
+                continue;
+            }
+            // A non-UTF-8 name can never be a spelling the engine validated
+            // (a locale directory) or a `<word>.app` a validated command
+            // word names; skipping it loses nothing and fabricates nothing.
+            if let Ok(name) = core::str::from_utf8(entry.name) {
+                dirs.push(String::from(name));
+            }
+        }
+        Ok(dirs)
     }
 
     /// The production [`Console`] over the inherited standard streams: the
@@ -223,7 +238,8 @@ mod program {
         };
         let locale = rustos_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
         let path = rustos_rt::env_var(b"PATH").and_then(|raw| core::str::from_utf8(raw).ok());
-        let request = Request { locale, path };
+        let home = rustos_rt::env_var(b"HOME").and_then(|raw| core::str::from_utf8(raw).ok());
+        let request = Request { locale, path, home };
 
         let console = RtConsole;
         // The raw discipline (no echo, no indicator) only while the pager

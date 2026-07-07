@@ -17,6 +17,12 @@ résout `<command>` exactement comme l'interpréteur de commandes — d'abord
 le magasin d'applications système, puis les répertoires de `PATH` — la
 page affichée documente donc toujours le programme que l'interpréteur
 lancerait pour le même mot. Un suffixe `.app` nomme directement le paquet.
+Quand ni le magasin ni `PATH` ne contiennent le mot, `man` parcourt les
+magasins d'applications récursivement — d'abord `/Apps`, puis le dossier
+`Apps` de votre répertoire personnel — ainsi un paquet rangé dans des
+dossiers imbriqués est tout de même trouvé ; la recherche ne regarde
+jamais à l'intérieur d'un autre paquet, et la correspondance la moins
+profonde l'emporte.
 
 Le document est choisi selon la locale de la variable d'environnement
 `LANG`, avec repli vers la même langue dans une autre région puis vers le
@@ -51,6 +57,8 @@ entière défile.
 - `LANG` — la locale préférée (une étiquette BCP-47 telle que `fr-FR`).
 - `PATH` — les répertoires supplémentaires où chercher les paquets
   `<command>.app`, après le magasin d'applications système.
+- `HOME` — nomme votre propre dossier `Apps` pour la recherche récursive
+  de paquets.
 
 ## SEE ALSO
 

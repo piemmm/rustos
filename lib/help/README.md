@@ -44,10 +44,14 @@ here once and every consumer imports them.
 - `lint_help_trees` (the `lint` cargo feature, host-only tooling) — the one
   help-tree lint (`plans/APPS.md` §8.1) shared by `cargo xtask help-lint` and
   the `tools/syshelp` aggregator tests: spellings and parse bounds on every
-  discovered document, canonical `en-US/` presence, `REQUIRED_LOCALES` completeness,
+  discovered document, canonical `en-US/` presence, `REQUIRED_LOCALES`
+  completeness (the standing authoring set — thirteen locales from `en-US`
+  to `he-IL` — defined once here and imported by every per-app switch pin;
+  runtime selection never consults it, it scans the bundle's own tree),
   no translation-only documents, cross-locale `OPTIONS` switch-key drift, and
-  the closed content-policy word screen. Pure rows-in/violations-out; never
-  linked into a RustOS program.
+  the closed content-policy screen (whole-word matching plus a substring
+  screen for the unsegmented CJK languages). Pure rows-in/violations-out;
+  never linked into a RustOS program.
 
 ## Design
 

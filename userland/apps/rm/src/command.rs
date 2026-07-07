@@ -335,7 +335,7 @@ mod tests {
         use std::fs;
 
         let help_root = format!("{}/Help", env!("CARGO_MANIFEST_DIR"));
-        let locales = ["en-US", "fr-FR", "de-DE", "es-ES", "uk-UA", "it-IT"];
+        let locales = rustos_help::REQUIRED_LOCALES;
         for locale in locales {
             let path = format!("{help_root}/{locale}/rm.md");
             let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));

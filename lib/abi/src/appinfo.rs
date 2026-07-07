@@ -73,6 +73,15 @@ pub const SYSTEM_LIBRARIES_DIR: &str = "/System/Libraries";
 /// registry and the shell's command resolution, so the two cannot drift.
 pub const SYSTEM_APP_STORE: &str = "/System/Apps";
 
+/// Absolute path of the **user app store**: the machine-wide directory for
+/// user-installed application bundles. Unlike the system app store it is
+/// user-writable (never system-signed) and its bundles may be organised in
+/// nested plain subdirectories; `man`'s recursive bundle search walks it —
+/// after the store-then-`PATH` candidates — so an installed app's help is
+/// found wherever its bundle was filed (`plans/APPS.md` §7). Launch stays
+/// explicit: the shell searches it only if the user adds it to `PATH`.
+pub const USER_APP_STORE: &str = "/Apps";
+
 /// Absolute path of the **system service store**: the OS-provided,
 /// read-only, system-signed service bundles (`login.app`, `devmgr.app`,
 /// `sysinfod.app`, …). A service is an app: each ships as the same
