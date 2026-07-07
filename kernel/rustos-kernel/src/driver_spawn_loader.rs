@@ -78,8 +78,13 @@ pub trait DriverProcessSpawn {
     /// for; the kernel records it against the child so a
     /// later `hw_emit_node` parents the published child under exactly that
     /// node and the emitter cannot forge its tree position.
+    ///
+    /// `path` is the kernel-resolved driver-store path the signed load gate
+    /// verified `rxe` from; the kernel attests the child's process name from
+    /// its final component, so a process listing always names the driver.
     fn spawn_driver(
         &self,
+        path: &str,
         rxe: &[u8],
         granted: CapabilitySet,
         grants: &[HwResource],
@@ -142,6 +147,7 @@ impl<'a> InitCtxDriverProcessSpawn<'a> {
 impl DriverProcessSpawn for InitCtxDriverProcessSpawn<'_> {
     fn spawn_driver(
         &self,
+        path: &str,
         rxe: &[u8],
         granted: CapabilitySet,
         grants: &[HwResource],
@@ -149,7 +155,7 @@ impl DriverProcessSpawn for InitCtxDriverProcessSpawn<'_> {
         node_id: Option<u32>,
     ) -> Result<u64, Errno> {
         self.init_ctx
-            .spawn_driver_process(self.producer, rxe, granted, grants, args, node_id)
+            .spawn_driver_process(self.producer, path, rxe, granted, grants, args, node_id)
     }
 
     fn terminate_driver(&self, handle: u64) -> Result<(), Errno> {
@@ -185,6 +191,10 @@ fn spawn_errno_as_driver_error(errno: Errno) -> DriverError {
 /// this for the duration of one `load`); nothing is retained.
 struct SpawningDriverSpawner<'a> {
     spawn: &'a dyn DriverProcessSpawn,
+    /// The kernel-resolved driver-store path the load gate verified the
+    /// image from; the kernel attests the spawned process's name from its
+    /// final component.
+    path: &'a str,
     /// The matched hardware-tree node's resource requests; minted as the new process's device-resource grants.
     grants: &'a [HwResource],
     /// The startup-argument vector handed to the driver process
@@ -217,6 +227,7 @@ impl DriverSpawner for SpawningDriverSpawner<'_> {
         let pid = self
             .spawn
             .spawn_driver(
+                self.path,
                 ctx.payload,
                 ctx.granted,
                 self.grants,
@@ -304,6 +315,7 @@ impl DriverLoader for SpawnDriverLoader<'_> {
         // state).
         let spawner = SpawningDriverSpawner {
             spawn: self.spawn,
+            path,
             grants: resources,
             args: self.args,
             node_id: self.node_id,
@@ -343,9 +355,11 @@ mod tests {
 
     use rustos_abi::{CapabilityId, DriverHost, DriverKind, DriverManifest};
 
-    /// One recorded `spawn_driver` call: the payload bytes, the granted
-    /// capability set, and the node's resource grants the gate forwarded.
+    /// One recorded `spawn_driver` call: the driver-store path, the payload
+    /// bytes, the granted capability set, and the node's resource grants the
+    /// gate forwarded.
     type RecordedSpawn = (
+        alloc::string::String,
         alloc::vec::Vec<u8>,
         CapabilitySet,
         alloc::vec::Vec<HwResource>,
@@ -378,15 +392,19 @@ mod tests {
     impl DriverProcessSpawn for RecordingSpawn {
         fn spawn_driver(
             &self,
+            path: &str,
             rxe: &[u8],
             granted: CapabilitySet,
             grants: &[HwResource],
             _args: &[&[u8]],
             _node_id: Option<u32>,
         ) -> Result<u64, Errno> {
-            self.calls
-                .borrow_mut()
-                .push((rxe.to_vec(), granted, grants.to_vec()));
+            self.calls.borrow_mut().push((
+                alloc::string::String::from(path),
+                rxe.to_vec(),
+                granted,
+                grants.to_vec(),
+            ));
             self.result
         }
 
@@ -444,6 +462,7 @@ mod tests {
         let args: [&[u8]; 2] = [b"drv", b"7"];
         let spawner = SpawningDriverSpawner {
             spawn: &spawn,
+            path: "/System/Drivers/input/usb_kbd",
             grants: &grants,
             args: &args,
             node_id: Some(0x42),
@@ -465,9 +484,10 @@ mod tests {
         assert_eq!(handle.as_u64(), 0x1234);
         let calls = spawn.calls.borrow();
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, b"the-driver-rxe-bytes");
-        assert_eq!(calls[0].1, granted_set());
-        assert_eq!(calls[0].2, alloc::vec![window, dma]);
+        assert_eq!(calls[0].0, "/System/Drivers/input/usb_kbd");
+        assert_eq!(calls[0].1, b"the-driver-rxe-bytes");
+        assert_eq!(calls[0].2, granted_set());
+        assert_eq!(calls[0].3, alloc::vec![window, dma]);
     }
 
     #[test]
@@ -477,6 +497,7 @@ mod tests {
         let spawn = RecordingSpawn::failing(Errno::NoSpace);
         let spawner = SpawningDriverSpawner {
             spawn: &spawn,
+            path: "/System/Drivers/input/usb_kbd",
             grants: &[],
             args: &[],
             node_id: None,
@@ -533,10 +554,12 @@ mod tests {
         fn write_event(&self, _event: &Event<'_>) {}
     }
 
-    /// One recorded [`InitSpawnCtx::spawn_driver_process`] call: the payload
-    /// bytes, whether the forwarded capability set carried `CAP_DRV_LOAD`,
-    /// the node's resource grants, and the startup-argument count.
+    /// One recorded [`InitSpawnCtx::spawn_driver_process`] call: the
+    /// driver-store path, the payload bytes, whether the forwarded
+    /// capability set carried `CAP_DRV_LOAD`, the node's resource grants,
+    /// and the startup-argument count.
     type RecordedDriverProcess = (
+        alloc::string::String,
         alloc::vec::Vec<u8>,
         bool,
         alloc::vec::Vec<HwResource>,
@@ -600,6 +623,7 @@ mod tests {
         fn spawn_driver_process(
             &self,
             _spawn: &dyn ProcessSpawn,
+            path: &str,
             rxe: &[u8],
             caps: CapabilitySet,
             grants: &[HwResource],
@@ -607,6 +631,7 @@ mod tests {
             _node_id: Option<u32>,
         ) -> Result<u64, Errno> {
             *self.recorded.borrow_mut() = Some((
+                alloc::string::String::from(path),
                 rxe.to_vec(),
                 caps.contains(CapabilityId::DRV_LOAD),
                 grants.to_vec(),
@@ -652,13 +677,21 @@ mod tests {
         let args: [&[u8]; 1] = [b"reply-endpoint"];
 
         let pid = adapter
-            .spawn_driver(b"driver-rxe", granted, &grants, &args, Some(3))
+            .spawn_driver(
+                "/System/Drivers/storage/virtio_blk",
+                b"driver-rxe",
+                granted,
+                &grants,
+                &args,
+                Some(3),
+            )
             .expect("the recording seam admits the driver");
         assert_eq!(pid, 0x7fff);
 
         let recorded = init_ctx.recorded.borrow();
-        let (rxe_seen, had_drv_load, grants_seen, arg_count) =
+        let (path_seen, rxe_seen, had_drv_load, grants_seen, arg_count) =
             recorded.as_ref().expect("spawn_driver_process was invoked");
+        assert_eq!(path_seen, "/System/Drivers/storage/virtio_blk");
         assert_eq!(rxe_seen.as_slice(), b"driver-rxe");
         assert!(
             *had_drv_load,

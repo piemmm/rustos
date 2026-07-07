@@ -638,6 +638,7 @@ mod tests {
     impl DriverProcessSpawn for RecordingSpawn {
         fn spawn_driver(
             &self,
+            _path: &str,
             rxe: &[u8],
             granted: CapabilitySet,
             grants: &[HwResource],
@@ -667,6 +668,7 @@ mod tests {
     impl DriverProcessSpawn for NoSpawn {
         fn spawn_driver(
             &self,
+            _path: &str,
             _rxe: &[u8],
             _granted: CapabilitySet,
             _grants: &[HwResource],

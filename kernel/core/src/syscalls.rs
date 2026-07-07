@@ -2447,13 +2447,12 @@ where
             // the command stem for a `<Name>.app/Run` bundle entry point (so
             // a process listing names the app — `ps` — never the generic
             // `Run` leaf every bundle shares), otherwise the path's final
-            // component. Both are kernel-resolved values, never trusted from
-            // the caller as a name.
+            // non-empty component (the shared basename rule every admit
+            // path uses). Both are kernel-resolved values, never trusted
+            // from the caller as a name.
             match &bundle {
                 Some(parsed) => ProcName::from_bytes_truncating(parsed.command.as_bytes()),
-                None => ProcName::from_bytes_truncating(
-                    path_buf.rsplit(|&b| b == b'/').next().unwrap_or(&path_buf),
-                ),
+                None => ProcName::from_path_basename(&path_buf),
             },
             // The child's kernel-attested credential, resolved above
             // (inherit the caller's own, or a capability-gated switch to a

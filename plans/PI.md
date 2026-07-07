@@ -3665,14 +3665,18 @@ table, so a new board is match **data**, not new code. Sub-increments
         untrusted bundle fails the node closed). No `lib/abi`/C-header change.
         Docs: `docs/src/drivers/host.md` ("Autoloading by discovery").
       - **Scheduler-agnostic driver-spawn seam — done (host-proven + `-M
-        virt`).** `InitSpawnCtx::spawn_driver_process(spawn, rxe, caps, grants,
-        args)` (default fail-closed `NotImplemented`, §2.9) is the production
+        virt`).** `InitSpawnCtx::spawn_driver_process(spawn, path, rxe, caps,
+        grants, args, node_id)` (default fail-closed `NotImplemented`, §2.9)
+        is the production
         seam a scheduler-agnostic caller drives to spawn a verified driver
         into its own process: the kernel/core `KernelInitSpawner` impl builds
         the live `KernelSpawnCtx` (the matched node's `grants` minted
         owner-checked, §18.3; the driver established `DescriptorTable::closed`
         — a driver is not a text session, §20; recorded against the kernel
-        boot supervisor `SecTaskId(0)`) and drives the architecture's
+        boot supervisor `SecTaskId(0)`; the child's process name attested
+        from the final component of the kernel-resolved driver-store `path`
+        via `ProcName::from_path_basename`, so `ps`/`top` always name the
+        driver) and drives the architecture's
         `ProcessSpawn::spawn_with`, so the bin crate never names the
         feature-selected scheduler or `KernelSpawnCtx` (§17.1). `KernelInitSpawner`
         is now public + constructible (`new`, holding the leaked-`'static`

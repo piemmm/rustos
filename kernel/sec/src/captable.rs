@@ -93,6 +93,24 @@ impl ProcName {
         Self { buf, len: valid }
     }
 
+    /// Build a name from the final non-empty `/`-separated component of a
+    /// kernel-resolved executable or driver-bundle `path`.
+    ///
+    /// This is the one definition of "name a process after the path it was
+    /// started from", shared by every admit path that resolves a path
+    /// kernel-side (the `spawn` syscall's plain-path arm, the driver-store
+    /// spawn seam). A path with no non-empty component (`"/"`, `""`) keeps
+    /// the whole path bytes rather than attesting an empty name, so a
+    /// process listing always has *something* truthful to display.
+    #[must_use]
+    pub fn from_path_basename(path: &[u8]) -> Self {
+        let basename = path
+            .rsplit(|&b| b == b'/')
+            .find(|component| !component.is_empty())
+            .unwrap_or(path);
+        Self::from_bytes_truncating(basename)
+    }
+
     /// Borrow the name as a string; always valid UTF-8 by construction.
     #[must_use]
     pub fn as_str(&self) -> &str {
@@ -180,8 +198,9 @@ pub struct TaskCapabilities {
     /// recorded parentage.
     parent_proc_id: ProcId,
     /// Kernel-attested process name — the resolved executable's basename for
-    /// a spawned process, a fixed name for the kernel's own principals (PID 1,
-    /// the storage bootstrap-floor drivers). Defaults to [`ProcName::EMPTY`].
+    /// a spawned process, the driver-store path's basename for a spawned
+    /// driver, a fixed name for the kernel's own principals (PID 1).
+    /// Defaults to [`ProcName::EMPTY`].
     /// The process-admit paths set it through [`Self::with_name`] from
     /// kernel-resolved state, never from caller-supplied bytes, so an audit
     /// consumer may trust it to name the acting process.
@@ -919,6 +938,35 @@ mod tests {
         // A trailing lone lead byte within the cap is dropped, not stored.
         let truncated = ProcName::from_bytes_truncating(&[b'h', b'i', 0xC3]);
         assert_eq!(truncated.as_str(), "hi");
+    }
+
+    #[test]
+    fn proc_name_from_path_basename_keeps_the_final_non_empty_component() {
+        // The ordinary case: an absolute path names its final component.
+        let name = ProcName::from_path_basename(b"/System/Drivers/input/usb_kbd");
+        assert_eq!(name.as_str(), "usb_kbd");
+
+        // A trailing slash never attests an empty name: the last non-empty
+        // component still names the process.
+        let trailing = ProcName::from_path_basename(b"/System/Drivers/input/usb_kbd/");
+        assert_eq!(trailing.as_str(), "usb_kbd");
+
+        // A bare name (no separator) is its own basename.
+        let bare = ProcName::from_path_basename(b"virtio_blk");
+        assert_eq!(bare.as_str(), "virtio_blk");
+
+        // A path with no non-empty component keeps the whole path bytes so
+        // a process listing always has something truthful to display.
+        assert_eq!(ProcName::from_path_basename(b"/").as_str(), "/");
+        assert_eq!(ProcName::from_path_basename(b"//").as_str(), "//");
+        assert_eq!(ProcName::from_path_basename(b"").as_str(), "");
+
+        // The basename is bounded exactly like any other attested name.
+        let mut long = alloc::vec![b'/'];
+        long.extend_from_slice(&[b'x'; PROC_NAME_MAX + 8]);
+        let bounded = ProcName::from_path_basename(&long);
+        assert_eq!(bounded.as_str().len(), PROC_NAME_MAX);
+        assert!(bounded.as_str().bytes().all(|b| b == b'x'));
     }
 
     #[test]

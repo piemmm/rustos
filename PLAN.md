@@ -1047,8 +1047,9 @@ order (one fully-gated increment each):
            shared `MockRootFs` fixture: discovered-bundle spawn, empty store,
            untrusted bundle fail-closed). Docs: `docs/src/drivers/host.md`.
          - **Scheduler-agnostic driver-spawn seam — done (host-proven + `-M
-           virt`).** `InitSpawnCtx::spawn_driver_process(spawn, rxe, caps,
-           grants, args)` (default fail-closed `NotImplemented`, §2.9) builds
+           virt`).** `InitSpawnCtx::spawn_driver_process(spawn, path, rxe,
+           caps, grants, args, node_id)` (default fail-closed
+           `NotImplemented`, §2.9) builds
            the live `KernelSpawnCtx` inside kernel/core's now-public,
            constructible `KernelInitSpawner` (grants minted owner-checked §18.3;
            driver established `DescriptorTable::closed` §20; supervisor

@@ -864,6 +864,7 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
     fn spawn_driver_process(
         &self,
         spawn: &dyn ProcessSpawn,
+        path: &str,
         rxe: &[u8],
         caps: CapabilitySet,
         grants: &[HwResource],
@@ -910,10 +911,12 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
             // process-instance identity from the shared per-boot counter
             // (the entropy reserve is not seeded this early).
             crate::proc_id::mint_proc_id_bootstrap(),
-            // The raw-`rxe` driver-spawn path resolves no executable path
-            // kernel-side, so it attests no name rather than trusting the
-            // spawner's argv as one (fail closed to the empty name).
-            ProcName::EMPTY,
+            // Attest the driver's name from the kernel-resolved store path
+            // the signed load gate verified the image from — its final
+            // component names the driver's own bundle directory — so a
+            // process listing and the audit origin always name the driver,
+            // never from the spawner's argv.
+            ProcName::from_path_basename(path.as_bytes()),
             // A boot-autoloaded driver is a kernel-trusted system principal:
             // admit it under the fixed system credential (uid 0 / gid 0), the
             // spawn-as-user counterpart of the `SecTaskId(0)` supervisor
@@ -1828,7 +1831,15 @@ mod tests {
         let args: [&[u8]; 1] = [b"reply-endpoint"];
 
         let pid = ctx
-            .spawn_driver_process(&producer, rxe, caps, &[], &args, Some(7))
+            .spawn_driver_process(
+                &producer,
+                "/System/Drivers/storage/virtio_blk",
+                rxe,
+                caps,
+                &[],
+                &args,
+                Some(7),
+            )
             .expect("the recording producer admits the driver");
         assert_eq!(pid, 0x4242);
 
@@ -1838,6 +1849,98 @@ mod tests {
         assert_eq!(rxe_seen.as_slice(), rxe);
         assert!(had_drv_load, "the gate-derived capability set is forwarded");
         assert_eq!(arg_count, 1);
+    }
+
+    /// A [`ProcessSpawn`] that admits a host-built one-page address space
+    /// through `ctx.admit_process` (mirroring the syscall suite's admitting
+    /// double), so this suite can observe what the production
+    /// `KernelInitSpawner` context attests onto the child's capability
+    /// record.
+    struct AdmittingSpawn;
+
+    impl ProcessSpawn for AdmittingSpawn {
+        fn spawn_with(
+            &self,
+            _rxe: &[u8],
+            ctx: &dyn crate::spawn::SpawnCtx,
+            caps: CapabilitySet,
+            _args: &[&[u8]],
+            _env: &[&[u8]],
+        ) -> Result<u64, Errno> {
+            use rustos_kernel_mem::{
+                AddressSpace, Frame, HostPageTable, MapFlags, Page, SimPhysMap, VirtAddr,
+            };
+            let mut space = AddressSpace::new(HostPageTable::new());
+            space
+                .map(
+                    Page::from_addr(VirtAddr::new(0x1000)).expect("aligned"),
+                    Frame(9),
+                    MapFlags::READ | MapFlags::USER,
+                )
+                .expect("host map");
+            let frozen: Box<dyn UserAddressSpace + Send + Sync> = Box::new(space.freeze());
+            let physmap: Box<dyn PhysMap + Send + Sync> =
+                Box::new(SimPhysMap::new(PhysAddr::new(0), PAGE_SIZE));
+            let pre_resume: Box<dyn FnMut(u64) + Send> = Box::new(|_stack_top| {});
+            let enter: Box<dyn FnMut() + Send> = Box::new(|| {});
+            let stack: Box<dyn crate::kthread::KernelStack + Send> =
+                Box::new(crate::kthread::BoxStack::new());
+            // SAFETY: the host test never dispatches the admitted task, so
+            // the inert `enter`/`pre_resume` closures never run and the
+            // frozen host space need only answer `translate`; it faithfully
+            // describes the one page mapped above.
+            unsafe { ctx.admit_process(caps, frozen, physmap, stack, pre_resume, None, enter) }
+                .map_err(|_| Errno::NoSpace)
+        }
+    }
+
+    #[test]
+    fn spawn_driver_process_attests_the_drivers_name_from_its_store_path() {
+        // Regression: every boot-autoloaded driver used to be admitted with
+        // an empty attested name, so `ps`/`top` showed a blank COMMAND for
+        // it. The seam now derives the child's name from the final component
+        // of the kernel-resolved driver-store path the load gate verified
+        // the image from.
+        let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let boot = bootinfo_with(log_sink, audit_sink, make_memory_map());
+        let (state, process_wait) = run_phases(boot, log_sink, audit_sink).expect("phases succeed");
+
+        let ctx = KernelInitSpawner::new(
+            &state.frame_allocator,
+            audit_sink,
+            &state.scheduler,
+            &state.caps,
+            &state.aspaces,
+            state.arch.as_ref(),
+            process_wait,
+            &state.irq,
+            &crate::devres::NULL_SHARED_MEM_FACILITY,
+        );
+
+        let mut caps = CapabilitySet::empty();
+        caps.insert(rustos_abi::CapabilityId::DRV_LOAD);
+        let pid = ctx
+            .spawn_driver_process(
+                &AdmittingSpawn,
+                "/System/Drivers/storage/virtio_blk",
+                b"driver-image-bytes",
+                caps,
+                &[],
+                &[],
+                None,
+            )
+            .expect("the admitting producer admits the driver");
+
+        let table = state.caps.read();
+        let record = table
+            .caps_for(SecTaskId(pid))
+            .expect("the admitted driver has a capability record");
+        assert_eq!(
+            record.name(),
+            "virtio_blk",
+            "the driver's attested name is its store path's final component"
+        );
     }
 
     #[test]

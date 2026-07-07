@@ -310,16 +310,24 @@ pub trait InitSpawnCtx {
     /// child's later `hw_emit_node` calls parent published children under
     /// exactly that node, and the emitter cannot forge its tree position. [`None`] when the spawn is not a node-matched
     /// driver load.
+    ///
+    /// `path` is the kernel-resolved driver-store path the signed load gate
+    /// verified the image from (e.g. `/System/Drivers/input/usb_kbd`). The
+    /// production implementation attests the child's process name from its
+    /// final component, so a process listing (`ps`, `top`) and the audit
+    /// origin always name the driver — never from caller-supplied bytes.
+    #[allow(clippy::too_many_arguments)]
     fn spawn_driver_process(
         &self,
         spawn: &dyn ProcessSpawn,
+        path: &str,
         rxe: &[u8],
         caps: CapabilitySet,
         grants: &[HwResource],
         args: &[&[u8]],
         node_id: Option<u32>,
     ) -> Result<u64, Errno> {
-        let _ = (spawn, rxe, caps, grants, args, node_id);
+        let _ = (spawn, path, rxe, caps, grants, args, node_id);
         Err(Errno::NotImplemented)
     }
 
@@ -1225,6 +1233,7 @@ mod tests {
         let init: &dyn InitSpawnCtx = &ctx;
         let result = init.spawn_driver_process(
             &NULL_PROCESS_SPAWN,
+            "/System/Drivers/input/usb_kbd",
             b"unused-rxe",
             CapabilitySet::empty(),
             &[],
