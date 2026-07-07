@@ -125,6 +125,39 @@ impl Parser {
         self.process(byte, &mut sink);
     }
 
+    /// Whether the parser is at a byte-stream boundary (the ground state,
+    /// not mid-way through an escape sequence, a UTF-8 scalar, or a string).
+    ///
+    /// An input decoder uses this to tell a C0 control byte that *is* a
+    /// keystroke (a control-chorded key pressed at the keyboard) from one
+    /// that aborts a sequence in progress: only at the ground state is the
+    /// byte an independent key.
+    #[must_use]
+    pub const fn is_ground(&self) -> bool {
+        matches!(self.state, State::Ground)
+    }
+
+    /// Resolve a bare `ESC` left dangling at the end of a read: if the last
+    /// byte fed was an `ESC` that nothing has followed (the escape state
+    /// with no sequence kind decided), return to the ground state and
+    /// report `true`; otherwise leave the parser untouched and report
+    /// `false`.
+    ///
+    /// A terminal sends the Escape *key* as a single `0x1b` byte — the same
+    /// byte that introduces every escape sequence — so a byte-at-a-time
+    /// parser alone cannot tell the key from a sequence still in flight. The
+    /// discriminator is arrival: a sequence's continuation bytes arrive in
+    /// the same read as their introducer, so an `ESC` that ends a read with
+    /// nothing after it was the key. An input decoder calls this once per
+    /// read chunk (the same boundary `ncurses` resolves with `ESCDELAY`).
+    pub fn take_pending_escape(&mut self) -> bool {
+        if matches!(self.state, State::Escape) {
+            self.state = State::Ground;
+            return true;
+        }
+        false
+    }
+
     /// Dispatch one byte to the current state's handler.
     fn process(&mut self, byte: u8, sink: &mut impl FnMut(Op)) {
         match self.state {

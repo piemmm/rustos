@@ -155,6 +155,7 @@ members = [
     "userland/apps/top",
     "userland/apps/true",
     "userland/apps/useradd",
+    "userland/apps/vim",
     "userland/apps/wc",
     "userland/apps/yes",
     "userland/gui/wm",

@@ -21,6 +21,14 @@ use rustos_vt::{control, Key, MouseReport, Op, Parser};
 pub enum Event {
     /// A printable character was typed.
     Char(char),
+    /// The Escape key: a bare `ESC` byte that ended a read with no sequence
+    /// following it (see [`rustos_vt::Parser::take_pending_escape`]).
+    Esc,
+    /// A control-chorded letter key (`Ctrl-A` … `Ctrl-Z`), carried as the
+    /// lowercase letter. The controls that are keys in their own right —
+    /// `Ctrl-I` (Tab), `Ctrl-J`/`Ctrl-M` (Enter), `Ctrl-H` (Backspace) —
+    /// keep their named events and never arrive here.
+    Ctrl(char),
     /// The Enter / Return key (carriage return or line feed).
     Enter,
     /// The Tab key.
@@ -108,12 +116,45 @@ impl Input {
                 }
                 continue;
             }
+            // A C0 control at a stream boundary is a control-chorded key,
+            // not part of a sequence; the ones that are keys in their own
+            // right (Tab, Enter, Backspace) and `ESC` stay with the parser.
+            // Inside a paste a control byte is not content and is dropped.
+            if let Some(letter) = ctrl_letter(byte) {
+                if self.parser.is_ground() {
+                    if !*in_paste {
+                        sink(Event::Ctrl(letter));
+                    }
+                    continue;
+                }
+            }
             self.parser.feed(core::slice::from_ref(&byte), |op| {
                 if let Some(event) = translate(&op, in_paste, paste) {
                     sink(event);
                 }
             });
         }
+        // An `ESC` that ended this read with nothing following it was the
+        // Escape key (the chunk-boundary discrimination documented on
+        // `Parser::take_pending_escape`). Inside a paste the pending `ESC`
+        // is left with the parser: it may be the split start of the paste
+        // end marker arriving in the next read.
+        if !*in_paste && self.parser.take_pending_escape() {
+            sink(Event::Esc);
+        }
+    }
+}
+
+/// The lowercase letter of a control-chorded key byte, or [`None`] for a
+/// byte that is not one. Only `Ctrl-A` … `Ctrl-Z` qualify, minus the
+/// controls that are keys in their own right: `Ctrl-H` (`BS`, Backspace),
+/// `Ctrl-I` (`HT`, Tab), and `Ctrl-J`/`Ctrl-M` (`LF`/`CR`, Enter). `ESC`
+/// (`0x1b`) is outside the range and always reaches the parser.
+const fn ctrl_letter(byte: u8) -> Option<char> {
+    match byte {
+        control::BS | control::HT | control::LF | control::CR => None,
+        0x01..=0x1a => Some((byte + b'a' - 1) as char),
+        _ => None,
     }
 }
 

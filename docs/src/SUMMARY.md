@@ -100,6 +100,7 @@
 - [Core CLI utilities](./userland/utilities.md)
 - [System-log tool (`log`)](./userland/log.md)
 - [Building a curses TUI (`top`)](./userland/curses-porting.md)
+- [The `vim` editor](./userland/vim.md)
 
 # Desktop
 

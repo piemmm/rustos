@@ -362,6 +362,38 @@ fn a_truncated_escape_does_not_lose_the_next_escape() {
 }
 
 #[test]
+fn take_pending_escape_resolves_only_a_bare_escape() {
+    let mut parser = Parser::new();
+    parser.feed(b"\x1b", |_| {});
+    assert!(parser.take_pending_escape());
+    // Resolving it returns the parser to the ground state.
+    assert!(parser.is_ground());
+    assert!(!parser.take_pending_escape());
+    // A sequence in flight (`ESC [` — a CSI without its final byte) is not
+    // a bare escape and is left untouched, so its remainder still parses.
+    parser.feed(b"\x1b[", |_| {});
+    assert!(!parser.take_pending_escape());
+    let mut ops = Vec::new();
+    parser.feed(b"A", |op| ops.push(op));
+    assert_eq!(ops, vec![Op::CursorUp(1)]);
+}
+
+#[test]
+fn is_ground_reports_the_stream_boundary() {
+    let mut parser = Parser::new();
+    assert!(parser.is_ground());
+    parser.feed(b"\x1b", |_| {});
+    assert!(!parser.is_ground());
+    parser.feed(b"[A", |_| {});
+    assert!(parser.is_ground());
+    // Mid-way through a multi-byte UTF-8 scalar is not a boundary either.
+    parser.feed(&[0xc3], |_| {});
+    assert!(!parser.is_ground());
+    parser.feed(&[0xa9], |_| {});
+    assert!(parser.is_ground());
+}
+
+#[test]
 fn split_sequence_across_feeds_round_trips() {
     let bytes = encode(&Op::Sgr(Sgr::Foreground(Color::Rgb(1, 2, 3))));
     let mut parser = Parser::new();

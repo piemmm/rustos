@@ -3762,6 +3762,20 @@ through `lib/curses` (`Screen::colored_attributes` — the colour helper
 hoisted from `top` so both apps share one definition) and ships the
 six-locale `Help/` tree with the switch-drift pin.
 
+**The `vim` editor (`plans/VIM.md`).** The modal text editor is a
+registered store-only command bundle (`userland/apps/vim`,
+`vim.app`, console pair + `CAP_FS_ACCESS`, six-locale `Help/`): the
+vim core — normal/insert/replace/visual/command-line modes, counts,
+registers, `d c y` over motions and text objects, undo/redo and
+dot-repeat, `/`/`?` search over a bounded pattern subset, and the ex
+core (`:w :q :e :r :s` with ranges) — behind host-testable
+`FileIo`/`Tty` seams. Landing it added the modal-editor input events
+every curses consumer now shares: `Event::Esc` (bare-`ESC`-at-read-end
+resolution in `lib/vt`) and `Event::Ctrl` in `lib/curses`. The staged
+road to full vim (wrap/CJK display, marks/macros/visual-block, the
+full pattern engine, `:g` and ex parity, buffers/windows/tabs,
+swap/vimrc/viminfo, syntax/vimscript) lives in `plans/VIM.md`.
+
 **Remaining** (staged in `plans/APPS.md` §13): the Stage B remainder
 (`chmod`/`chown`/`getcap`/`setcap`/`mount` blocked on their kernel
 syscalls — fs mode/owner set, per-inode capability get/set, mount — each

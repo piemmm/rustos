@@ -552,7 +552,7 @@ mod tests {
                 "basename", "cat", "clear", "cp", "devmgr", "dirname", "edit", "elsh", "false",
                 "groupadd", "head", "login", "ls", "man", "mkdir", "mv", "ps", "reset", "rm",
                 "rmdir", "seq", "sysinfo", "sysinfod", "tee", "top", "true", "useradd", "users",
-                "wc", "yes"
+                "vim", "wc", "yes"
             ]
         );
         for app in &found {

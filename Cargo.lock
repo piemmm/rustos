@@ -3160,6 +3160,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-vim"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-curses",
+ "rustos-help",
+ "rustos-rt",
+ "rustos-termcap",
+ "rustos-vt",
+]
+
+[[package]]
 name = "rustos-virtio"
 version = "0.0.0"
 dependencies = [

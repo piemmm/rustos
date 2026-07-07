@@ -393,6 +393,62 @@ fn a_mouse_report_decodes() {
 }
 
 #[test]
+fn a_bare_escape_ending_a_read_is_the_escape_key() {
+    assert_eq!(decode(b"\x1b"), vec![Event::Esc]);
+    // Two dangling escapes in one read collapse to the one pending escape.
+    assert_eq!(decode(b"\x1b\x1b"), vec![Event::Esc]);
+    // An escape sequence arriving whole in the same read is its key, never
+    // a spurious Escape.
+    assert_eq!(decode(b"\x1b[A"), vec![Event::Up]);
+    // An escape the parser does not model consumes its final byte and
+    // produces nothing — neither a spurious Escape nor a stray character.
+    assert_eq!(decode(b"\x1bx"), vec![]);
+}
+
+#[test]
+fn control_chorded_letters_decode() {
+    assert_eq!(decode(b"\x12"), vec![Event::Ctrl('r')]);
+    assert_eq!(
+        decode(b"\x01\x04\x1a"),
+        vec![Event::Ctrl('a'), Event::Ctrl('d'), Event::Ctrl('z')]
+    );
+    // The controls that are keys in their own right keep their named
+    // events: Tab, Enter (CR and LF), and Backspace never become Ctrl.
+    assert_eq!(
+        decode(b"\t\r\n\x08"),
+        vec![Event::Tab, Event::Enter, Event::Enter, Event::Backspace]
+    );
+}
+
+#[test]
+fn a_control_byte_inside_an_escape_sequence_is_not_a_key() {
+    // The byte aborts the CSI sequence at the parser and is consumed; it
+    // was sequence noise, not a keystroke.
+    assert_eq!(decode(b"\x1b[\x12"), vec![]);
+}
+
+#[test]
+fn a_paste_split_after_its_end_markers_escape_survives_the_read_boundary() {
+    // The read ends exactly after the `ESC` that begins the paste end
+    // marker: the pending escape must be left with the parser (it is not
+    // the Escape key), so the marker completes on the next read.
+    let mut input = Input::new();
+    let mut events = Vec::new();
+    input.feed(b"\x1b[200~ab\x1b", |event| events.push(event));
+    assert_eq!(events, vec![]);
+    input.feed(b"[201~", |event| events.push(event));
+    assert_eq!(events, vec![Event::Paste(String::from("ab"))]);
+}
+
+#[test]
+fn control_bytes_inside_a_paste_are_dropped_not_keys() {
+    assert_eq!(
+        decode(b"\x1b[200~a\x12b\x1b[201~"),
+        vec![Event::Paste(String::from("ab"))]
+    );
+}
+
+#[test]
 fn a_bracketed_paste_is_delivered_as_one_event() {
     // The pasted bytes include what would otherwise be a control character;
     // inside the paste they are literal text, not interpreted.

@@ -513,6 +513,7 @@ mod tests {
             ("true", AppKind::Command, PURE_TOOL_REQUEST),
             ("useradd", AppKind::Command, ADMIN_TOOL_REQUEST),
             ("users", AppKind::Command, USERS_TOOL_MANIFEST),
+            ("vim", AppKind::Command, FILE_TOOL_REQUEST),
             ("wc", AppKind::Command, FILE_TOOL_REQUEST),
             ("yes", AppKind::Command, PURE_TOOL_REQUEST),
         ];
