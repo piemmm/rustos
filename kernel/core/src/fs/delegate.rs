@@ -250,8 +250,13 @@ impl<R: FilesystemRead + ?Sized, P: MetaPolicy<R>> DelegatedFs<'_, R, P> {
         self.fs.read_at(node, offset, buf).map_err(map_driver_error)
     }
 
-    /// List the entry names of the directory at `components`, in the
-    /// driver's stable on-disk order.
+    /// List the entries of the directory at `components`, in the driver's
+    /// stable on-disk order, each with the structural kind the driver
+    /// reports for it.
+    ///
+    /// The kind comes from the listing driver itself, so a caller never has
+    /// to re-resolve each child by path — a child whose *path* is shadowed
+    /// by another mount would otherwise be judged against the wrong volume.
     ///
     /// # Errors
     ///
@@ -263,14 +268,14 @@ impl<R: FilesystemRead + ?Sized, P: MetaPolicy<R>> DelegatedFs<'_, R, P> {
         &mut self,
         cred: &Credentials<'_>,
         components: &[String],
-    ) -> Result<Vec<String>, VfsError> {
+    ) -> Result<Vec<(NodeKind, String)>, VfsError> {
         let (node, info, meta) = self.resolve(cred, components)?;
         if info.kind != NodeKind::Directory {
             return Err(VfsError::NotADirectory);
         }
         meta.authorize(cred, Access::Read)?;
 
-        let mut names = Vec::new();
+        let mut entries = Vec::new();
         let mut name_buf = [0u8; MAX_COMPONENT_LEN];
         let mut index: u64 = 0;
         while let Some(entry) = self
@@ -280,10 +285,10 @@ impl<R: FilesystemRead + ?Sized, P: MetaPolicy<R>> DelegatedFs<'_, R, P> {
         {
             let name =
                 core::str::from_utf8(&name_buf[..entry.name_len]).map_err(|_| VfsError::Io)?;
-            names.push(name.to_string());
+            entries.push((entry.kind, name.to_string()));
             index += 1;
         }
-        Ok(names)
+        Ok(entries)
     }
 }
 

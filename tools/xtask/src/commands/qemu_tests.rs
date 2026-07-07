@@ -2657,15 +2657,22 @@ const TESTS: &[QemuTest] = &[
     // `root`/`root` is proven by `root_unlock_login`, and the per-console
     // `login` authenticating end to end into a real shell session is the
     // session-ceiling vertical's job (below), so both are out of this
-    // vertical's scope. A 120-second budget covers the boot + two bounded
-    // PBKDF2 derivations + the wrong-attempt delay on QEMU TCG; single CPU
-    // like the other full-boot verticals.
+    // vertical's scope. The budget is sized to the actual work under a
+    // *fully loaded* host, not the solo run: the boot + two bounded PBKDF2
+    // derivations + the two timed console parks finish in well under a
+    // minute when the guest runs alone, but the deliberately expensive
+    // PBKDF2 work scales with host saturation when every sibling vertical's
+    // guest shares the TCG host, and a 120-second budget was observed to
+    // miss there. 300 seconds bounds that measured worst case with
+    // headroom; it is a ceiling, never a wait — the run still ends the
+    // moment the audit witness fires. Single CPU like the other full-boot
+    // verticals.
     QemuTest {
         package: "rustos-test-root-unlock-admission-qemu-aarch64",
         binary: "rustos-test-root-unlock-admission-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
-        timeout: Duration::from_secs(120),
+        timeout: Duration::from_secs(300),
         disk_sectors: None,
         virtio_net: false,
         ramfb: false,

@@ -565,23 +565,17 @@ where
         path: &str,
     ) -> Result<Vec<(FileKind, String)>, Errno> {
         self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
-            let names = vfs.list_via_secured(cred, path, fs)?;
-            let mut entries = Vec::with_capacity(names.len());
-            for name in names {
-                // Resolve each child's kind under the same authorised
-                // traversal; a child that vanished between the listing and the
-                // stat fails the whole call closed rather than reporting a
-                // guessed kind.
-                let mut child = path_str(path);
-                if !child.ends_with('/') {
-                    child.push('/');
-                }
-                child.push_str(&name);
-                let child = Path::parse(&child)?;
-                let info = vfs.stat_via_secured(cred, &child, fs)?;
-                entries.push((file_kind(info.kind), name));
-            }
-            Ok(entries)
+            // Each entry's kind comes from the listing driver itself, never
+            // from a per-child path re-resolution: a child path can be
+            // covered by a *different* mount (the read-only `/System`
+            // volume's own `Logs`/`Settings` beneath the writable
+            // exceptions), and re-resolving it here would judge it against
+            // the wrong volume and fail the whole listing closed.
+            let entries = vfs.list_via_secured(cred, path, fs)?;
+            Ok(entries
+                .into_iter()
+                .map(|(kind, name)| (file_kind(kind), name))
+                .collect())
         })
     }
 

@@ -2,6 +2,8 @@
 //! under a driver-backed mount through a [`FilesystemRead`] driver, with the
 //! permission template applied at the mount point.
 
+use alloc::string::String;
+
 use crate::fs::{Mode, Path, Vfs, VfsError};
 
 use rustos_abi::driver::filesystem::{
@@ -266,7 +268,13 @@ fn delegated_list_of_mount_point_lists_driver_root() {
     let names = vfs
         .list_via(&admin, &p("/Storage/usb0"), &mut fs)
         .expect("list mount root");
-    assert_eq!(names, ["docs", "kernel.img"]);
+    assert_eq!(
+        names,
+        [
+            (NodeKind::Directory, String::from("docs")),
+            (NodeKind::RegularFile, String::from("kernel.img")),
+        ]
+    );
 }
 
 #[test]
@@ -278,7 +286,7 @@ fn delegated_list_of_subdir() {
     let names = vfs
         .list_via(&admin, &p("/Storage/usb0/docs"), &mut fs)
         .expect("list subdir");
-    assert_eq!(names, ["readme.txt"]);
+    assert_eq!(names, [(NodeKind::RegularFile, String::from("readme.txt"))]);
 }
 
 #[test]
@@ -464,7 +472,7 @@ fn delegated_mkdir_then_create_inside() {
     let names = vfs
         .list_via(&admin, &p("/Storage/usb0/sub"), &mut fs)
         .expect("list");
-    assert_eq!(names, ["inner.bin"]);
+    assert_eq!(names, [(NodeKind::RegularFile, String::from("inner.bin"))]);
 }
 
 #[test]
@@ -837,7 +845,7 @@ fn secured_list_of_mount_root_lists_driver_root() {
     let names = vfs
         .list_via_secured(&admin, &p("/Storage/usb0"), &mut fs)
         .expect("secured list");
-    assert_eq!(names, ["secret.txt"]);
+    assert_eq!(names, [(NodeKind::RegularFile, String::from("secret.txt"))]);
 }
 
 #[test]

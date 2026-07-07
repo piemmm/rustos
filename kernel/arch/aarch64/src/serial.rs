@@ -1,19 +1,19 @@
 //! Console-backed [`rustos_log::Sink`] for the freestanding aarch64 kernel.
 //!
 //! Mirrors the riscv64 SBI-console sink (`kernel/arch/riscv64::serial`)
-//! and the x86_64 COM1 sink: one formatted line per event, in the
-//! canonical format the `kernel/core` audit consumers and the QEMU
-//! serial scraper expect —
+//! and the x86_64 COM1 sink: one formatted line per event, in the one
+//! shared diagnostic format ([`rustos_log::write_diag_line`]) the
+//! `kernel/core` audit consumers and the QEMU serial scraper expect —
 //!
 //! ```text
-//! [t=<ms>ms] [<level>] id=<id> <message> <key>=<value> ...
+//! [<secs>.<millis>] [<LEVEL>] id=<id> <message> <key>=<value> ...
 //! ```
 //!
-//! The leading `[t=<ms>ms]` is a monotonic, `CNTPCT_EL0`-derived
-//! millisecond timestamp (epoch unspecified — only differences matter)
-//! so a serial capture reads off the real wall time between two lines.
-//! Consumers match on the `id=<id>` token, never the line start, so the
-//! prefix does not disturb them.
+//! The leading `[<secs>.<millis>]` is a monotonic, `CNTPCT_EL0`-derived
+//! uptime stamp (epoch unspecified — only differences matter) so a serial
+//! capture reads off the real wall time between two lines. Consumers match
+//! on the `id=<id>` token, never the line start, so neither the stamp nor
+//! the coloured level tag disturbs them.
 //!
 //! # Two consoles: the display and the UART (`plans/PI.md` P7b / P11)
 //!
@@ -144,7 +144,7 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use rustos_log::{Event, Level, Sink};
+use rustos_log::{Event, Sink};
 
 // The console MMIO seam is only reached by the freestanding transmit /
 // receive primitives below; the host build uses inert stubs, so importing
@@ -577,28 +577,15 @@ impl core::fmt::Write for RingWriter<'_> {
     }
 }
 
-/// Format one event into `w` in the canonical serial-log line shape.
+/// Format one event into `w` in the shared diagnostic line shape
+/// ([`rustos_log::write_diag_line`]), stamped with the `CNTPCT_EL0`-derived
+/// uptime and a coloured level tag (both the serial capture and the
+/// framebuffer console render ANSI SGR).
 ///
-/// The single definition shared by the buffered UART path ([`RingWriter`])
-/// and the direct fallback / video path ([`ConsoleWriter`]) so the line
-/// format lives in one place. The leading `[t=<ms>ms]`
-/// is a monotonic `CNTPCT_EL0`-derived timestamp; consumers match on the
-/// `id=<id>` token, never the line start. Write errors are
-/// ignored: the sinks are infallible MMIO/RAM writes and the logging path
-/// must not panic.
+/// Called by the buffered UART path ([`RingWriter`]) and the direct
+/// fallback / video path ([`ConsoleWriter`]) so both emit the one format.
 fn write_formatted<W: core::fmt::Write>(w: &mut W, event: &Event<'_>) {
-    let _ = write!(
-        w,
-        "[t={}ms] [{}] id={} {}",
-        crate::kernel_arch::uptime_ms(),
-        level_str(event.level),
-        event.id.0,
-        event.message
-    );
-    for field in event.fields {
-        let _ = write!(w, " {}={}", field.key, field.value);
-    }
-    let _ = writeln!(w);
+    rustos_log::write_diag_line(w, Some(crate::kernel_arch::uptime_ms()), true, event);
 }
 
 /// Read one byte from the currently-configured console UART **without
@@ -1034,17 +1021,6 @@ impl Sink for SerialSink {
             let mut w = ConsoleWriter;
             write_formatted(&mut w, event);
         }
-    }
-}
-
-const fn level_str(level: Level) -> &'static str {
-    match level {
-        Level::Trace => "TRACE",
-        Level::Debug => "DEBUG",
-        Level::Info => "INFO",
-        Level::Warn => "WARN",
-        Level::Error => "ERROR",
-        Level::Critical => "CRIT",
     }
 }
 

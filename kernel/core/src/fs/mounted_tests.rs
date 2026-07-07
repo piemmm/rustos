@@ -610,6 +610,82 @@ fn rename_before_a_mount_is_installed_fails_closed() {
     );
 }
 
+/// The production `/System` shape: the in-RAM layout and every node of the
+/// read-only volume are owned by the system user (uid 0) at mode `0o755`,
+/// and an ordinary account (uid 1000, no supplementary groups, no
+/// capabilities) lists the mount. The read-only volume also carries `Logs`
+/// and `Settings` entries whose *paths* are covered by the writable root
+/// volume's rebased sub-mounts (the shipped-image shape), so the listing
+/// must not judge those children against the read-only volume's driver.
+/// A refusal here is the "cannot list inside /System as a user" regression.
+#[test]
+fn an_ordinary_user_lists_the_system_owned_read_only_mount() {
+    // The read-only `/System` volume: content at the volume root, including
+    // the same-named `Logs`/`Settings` the writable mounts shadow.
+    let mut system = RwMockFs::new().with_create_owner(0, 0, 0o755);
+    system.set_root_security(NodeSecurity::new(0o755, 0, 0));
+    let root = system.root();
+    for name in [&b"Kernel"[..], b"Drivers", b"Logs", b"Settings"] {
+        system
+            .create(root, name, NodeKind::Directory)
+            .expect("mkdir system subdir");
+    }
+
+    // The writable root volume: carries its own `/System/Logs` and
+    // `/System/Settings` directories the sub-mounts rebase onto.
+    let mut rootvol = RwMockFs::new().with_create_owner(0, 0, 0o755);
+    rootvol.set_root_security(NodeSecurity::new(0o755, 0, 0));
+    let rv_root = rootvol.root();
+    let rv_system = rootvol
+        .create(rv_root, b"System", NodeKind::Directory)
+        .expect("mkdir System");
+    for name in [&b"Logs"[..], b"Settings"] {
+        rootvol
+            .create(rv_system, name, NodeKind::Directory)
+            .expect("mkdir writable exception");
+    }
+
+    // The production mount layout: writable root as `/`, read-only volume
+    // over `/System`, writable exceptions rebased back out of it.
+    let mut vfs = Vfs::with_default_layout(UserId(0), GroupId(0));
+    let system_handle = DriverHandle::from_raw(9).expect("handle");
+    let root_handle = DriverHandle::from_raw(10).expect("handle");
+    vfs.mounts_mut().back_root(root_handle).expect("back /");
+    vfs.mounts_mut()
+        .set_backing(
+            &Path::parse("/System").expect("path"),
+            system_handle,
+            Vec::new(),
+        )
+        .expect("back /System");
+    for sub in ["/System/Logs", "/System/Settings"] {
+        let path = Path::parse(sub).expect("path");
+        let subtree = path.components().to_vec();
+        vfs.mounts_mut()
+            .set_backing(&path, root_handle, subtree)
+            .expect("back writable exception");
+    }
+
+    let cell: &'static LateFilesystem<RwMockFs> = Box::leak(Box::new(LateFilesystem::new()));
+    cell.install_vfs(vfs).expect("install vfs");
+    cell.register(system_handle, system)
+        .expect("register system");
+    cell.register(root_handle, rootvol).expect("register root");
+    let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
+    identity.install(identity_table()).expect("identity");
+    let svc = MountedFilesystemService::new(cell, identity);
+
+    let caps = caps();
+    let entries = svc
+        .readdir(TEST_UID, &caps, "/System")
+        .expect("an ordinary user lists /System");
+    let names: Vec<&str> = entries.iter().map(|(_, name)| name.as_str()).collect();
+    for expected in ["Kernel", "Drivers", "Logs", "Settings"] {
+        assert!(names.contains(&expected), "{expected} listed: {names:?}");
+    }
+    assert!(entries.iter().all(|(kind, _)| *kind == FileKind::Directory));
+}
+
 #[test]
 fn rename_to_a_path_outside_the_mounted_volume_fails_closed() {
     // The destination resolves to a different, backing-less mount, so the

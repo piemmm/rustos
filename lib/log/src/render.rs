@@ -42,9 +42,9 @@ use crate::Level;
 /// The lowercase canonical name of a level (SYSLOG §4.3).
 ///
 /// This is the boot renderer's presentation of a level. It is deliberately
-/// distinct from the compact uppercase abbreviations the architecture serial
-/// consoles print for the diagnostic log path; there is only ever one lowercase
-/// definition, and this is it.
+/// distinct from the compact uppercase tag the architecture serial consoles
+/// print for the diagnostic log path ([`crate::diag::level_tag`]); there is
+/// only ever one lowercase definition, and this is it.
 pub(crate) const fn level_label(level: Level) -> &'static str {
     match level {
         Level::Trace => "trace",

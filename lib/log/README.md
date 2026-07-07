@@ -64,6 +64,12 @@ neither re-implements the record format.
 - **`segment`**: the append-only, self-checksummed on-disk segment container
   with forward-scan power-loss recovery. Each record block carries its own
   monotonic ordering time (§5.1), covered by the segment hash.
+- **`diag`**: the shared boot-console *diagnostic* line format
+  (`write_diag_line` / `level_tag`). The one definition of the
+  `[<secs>.<millis>] [<LEVEL>] id=<id> message key=value` line every
+  architecture port's serial/console sink emits: optional monotonic-uptime
+  stamp, compact uppercase level tags (`WARN`, `CRIT`), and an ANSI-coloured
+  tag where the transport renders SGR. `no_std`, allocation-free.
 - **`render`**: the boot-console renderer (`render_line`). Turns a decoded
   record plus its monotonic time into the canonical
   `[monotonic] level source[component]: message key=value` line. Caller text

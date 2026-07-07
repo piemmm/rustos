@@ -646,7 +646,7 @@ counter is sound; the seconds are code-side, outside the delays.
 
 `4116` alone cannot say *where* in the chain those seconds go, so per-line
 log timestamps were added: `SerialSink::write_event` prefixes every line
-with `[t=<ms>ms]`, a monotonic `CNTPCT_EL0`-derived stamp
+with `[<secs>.<millis>]`, a monotonic `CNTPCT_EL0`-derived stamp
 (`kernel_arch::uptime_ms`, scaled by `CNTFRQ_EL0` — the same counter/rate
 `busy_delay_us` spins against; epoch unspecified, only differences
 matter), and `build.rs` emits a `KERNEL_BUILD_ID` (git short hash +

@@ -19,8 +19,15 @@ fn readdir_lists_created_children() {
     let mut names = vfs
         .list_via_secured(&owner, &path(MOUNT), &mut fs)
         .expect("list mount root");
-    names.sort();
-    assert_eq!(names, ["alpha", "beta", "gamma"]);
+    names.sort_by(|a, b| a.1.cmp(&b.1));
+    assert_eq!(
+        names,
+        [
+            (NodeKind::RegularFile, String::from("alpha")),
+            (NodeKind::RegularFile, String::from("beta")),
+            (NodeKind::Directory, String::from("gamma")),
+        ]
+    );
 }
 
 #[test]

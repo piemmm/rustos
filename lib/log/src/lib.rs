@@ -28,6 +28,7 @@ pub mod authority;
 pub mod bootring;
 pub mod chain;
 mod cursor;
+pub mod diag;
 pub mod dict;
 pub mod ingress;
 pub mod journal;
@@ -54,6 +55,7 @@ pub use bootring::{BootRing, DrainedRecord, LossRange, FRAME_HEADER_LEN, MAX_BOO
 pub use chain::{
     verify_chain, verify_fresh_chain, ChainError, ChainedEntry, LogChain, GENESIS_ANCHOR,
 };
+pub use diag::{level_tag, write_diag_line};
 pub use dict::{
     DictionaryBuilder, DictionaryView, ARENA_BYTES, MAX_CANDIDATES, MAX_DICT_STRING, MAX_ENTRIES,
 };

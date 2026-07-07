@@ -2,11 +2,11 @@
 //!
 //! Mirrors the bare-metal ports' serial sinks (e.g.
 //! `rustos_arch_riscv64::serial`): one formatted line per event, in the
-//! canonical format the `kernel/core` audit consumers and the browser
-//! harness scraper expect —
+//! one shared diagnostic format ([`rustos_log::write_diag_line`]) the
+//! `kernel/core` audit consumers and the browser harness scraper expect —
 //!
 //! ```text
-//! [<level>] id=<id> <message> <key>=<value> ...
+//! [<LEVEL>] id=<id> <message> <key>=<value> ...
 //! ```
 //!
 //! Each formatted chunk is handed straight to the host
@@ -18,7 +18,7 @@
 
 use core::fmt::Write as _;
 
-use rustos_log::{Event, Level, Sink};
+use rustos_log::{Event, Sink};
 
 /// [`core::fmt::Write`] adapter that forwards each formatted chunk to the
 /// host `console.log` import. The host decodes the UTF-8 bytes and joins
@@ -52,32 +52,11 @@ impl Default for ConsoleSink {
 
 impl Sink for ConsoleSink {
     fn write_event(&self, event: &Event<'_>) {
-        let mut w = ConsoleWriter;
-        // Ignore write errors: `ConsoleWriter` is infallible (the host
-        // console call returns no status). The logging path must not
-        // panic.
-        let _ = write!(
-            w,
-            "[{}] id={} {}",
-            level_str(event.level),
-            event.id.0,
-            event.message
-        );
-        for field in event.fields {
-            let _ = write!(w, " {}={}", field.key, field.value);
-        }
-        let _ = writeln!(w);
-    }
-}
-
-const fn level_str(level: Level) -> &'static str {
-    match level {
-        Level::Trace => "TRACE",
-        Level::Debug => "DEBUG",
-        Level::Info => "INFO",
-        Level::Warn => "WARN",
-        Level::Error => "ERROR",
-        Level::Critical => "CRIT",
+        // The host console prints ANSI escapes literally rather than
+        // rendering them, so the level tag stays uncoloured; no
+        // monotonic-uptime seam is wired on this port, so the stamp is
+        // omitted.
+        rustos_log::write_diag_line(&mut ConsoleWriter, None, false, event);
     }
 }
 

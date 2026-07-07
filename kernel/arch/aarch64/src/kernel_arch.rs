@@ -705,7 +705,7 @@ pub fn clean_invalidate_dcache_range(start: usize, len: usize) {
 pub fn clean_invalidate_dcache_range(_start: usize, _len: usize) {}
 
 /// Milliseconds derived from the architectural physical counter, for the
-/// per-line log timestamp the serial sink prefixes (`[t=<ms>]`).
+/// per-line log timestamp the serial sink prefixes (`[<secs>.<millis>]`).
 ///
 /// The epoch is the counter's own (firmware-seeded) zero, left
 /// unspecified; only *differences* between two timestamps are meaningful,

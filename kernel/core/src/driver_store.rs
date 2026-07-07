@@ -164,8 +164,8 @@ fn walk_dir<F>(
     // store that simply does not exist all leave this subtree empty. A non-root listing failure is a skipped entry;
     // a missing store root is the legitimate "no drivers" case and is not
     // counted, because the empty result already says so.
-    let names = match vfs.list_via_secured(cred, &dir_path, fs) {
-        Ok(names) => names,
+    let entries = match vfs.list_via_secured(cred, &dir_path, fs) {
+        Ok(entries) => entries,
         Err(_) if depth == 0 => return,
         Err(_) => {
             *skipped += 1;
@@ -173,7 +173,7 @@ fn walk_dir<F>(
         }
     };
 
-    for name in names {
+    for (kind, name) in entries {
         if drivers.len() >= MAX_STORE_DRIVERS {
             // The store presents more entries than the validation bound
             // permits; the surplus is refused fail-closed rather than growing the scan without limit.
@@ -207,20 +207,19 @@ fn walk_dir<F>(
             continue;
         }
 
-        match vfs.stat_via_secured(cred, &child_path, fs) {
-            Ok(info) => match info.kind {
-                NodeKind::RegularFile => drivers.push(child),
-                NodeKind::Directory => {
-                    if depth >= MAX_STORE_DEPTH {
-                        // Deeper than the validation bound; refuse rather
-                        // than recurse without limit.
-                        *skipped += 1;
-                    } else {
-                        walk_dir(vfs, cred, fs, &child, depth + 1, drivers, skipped);
-                    }
+        // The listing carries each entry's structural kind, so the walk
+        // never re-resolves a child by path.
+        match kind {
+            NodeKind::RegularFile => drivers.push(child),
+            NodeKind::Directory => {
+                if depth >= MAX_STORE_DEPTH {
+                    // Deeper than the validation bound; refuse rather
+                    // than recurse without limit.
+                    *skipped += 1;
+                } else {
+                    walk_dir(vfs, cred, fs, &child, depth + 1, drivers, skipped);
                 }
-            },
-            Err(_) => *skipped += 1,
+            }
         }
     }
 }

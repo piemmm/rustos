@@ -426,7 +426,7 @@ microseconds) read `requested_us_hex≈356 ms` (259 delay calls) yet
 time elapsed with only ≈356 ms in `busy_delay_us`: the counter is sound and
 the seconds are code-side, but `4116` alone cannot split *where* they go.
 Two diagnostics localise it: `SerialSink` prefixes every line with a
-monotonic `CNTPCT_EL0`-derived `[t=<ms>ms]` stamp (`kernel_arch::uptime_ms`,
+monotonic `CNTPCT_EL0`-derived `[<secs>.<millis>]` stamp (`kernel_arch::uptime_ms`,
 so a capture reads the real wall time between any two lines), and `build.rs`
 emits `KERNEL_BUILD_ID` (git short hash + `+dirty` + `SOURCE_DATE_EPOCH`-aware
 build epoch, §19.3), logged as `build_id` on the `4097` line so a capture

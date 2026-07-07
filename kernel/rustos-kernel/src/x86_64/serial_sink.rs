@@ -1,10 +1,11 @@
 //! COM1-backed [`rustos_log::Sink`] for the freestanding kernel.
 //!
-//! The Sink writes one record per call in the canonical format the
-//! `kernel/core` audit consumers expect:
+//! The Sink writes one record per call in the one shared diagnostic
+//! format ([`rustos_log::write_diag_line`]) the `kernel/core` audit
+//! consumers expect:
 //!
 //! ```text
-//! [<level>] id=<id> <message> <key>=<value> <key>=<value> ...
+//! [<LEVEL>] id=<id> <message> <key>=<value> <key>=<value> ...
 //! ```
 //!
 //! The trailing newline is part of the record contract — every
@@ -24,11 +25,9 @@
 //! surface (*"No global mutable static beyond the
 //! per-CPU bootstrap area"*).
 
-use core::fmt::Write as _;
-
 use rustos_arch_x86_64::serial::{self, Serial, COM1_BASE};
 use rustos_kernel_core::ConsoleWrite;
-use rustos_log::{Event, Level, Sink};
+use rustos_log::{Event, Sink};
 
 /// `Sink` implementation that emits one formatted line per event to
 /// the 16550 UART at [`COM1_BASE`].
@@ -58,33 +57,11 @@ impl Sink for SerialSink {
     fn write_event(&self, event: &Event<'_>) {
         // Re-`init` per call is idempotent on the 16550 (the divisor
         // and line-control bits are sticky). Avoids needing a `static
-        // mut` for the writer.
+        // mut` for the writer. A serial capture renders ANSI SGR, so the
+        // level tag is coloured; no monotonic-uptime seam is wired on
+        // this port yet, so the stamp is omitted.
         let mut s = Serial::init(COM1_BASE);
-        // Ignore write errors: `Serial`'s `core::fmt::Write` impl is
-        // infallible in practice (it busy-polls the line-status
-        // register). Logging path must not panic.
-        let _ = write!(
-            s,
-            "[{}] id={} {}",
-            level_str(event.level),
-            event.id.0,
-            event.message
-        );
-        for field in event.fields {
-            let _ = write!(s, " {}={}", field.key, field.value);
-        }
-        let _ = writeln!(s);
-    }
-}
-
-const fn level_str(level: Level) -> &'static str {
-    match level {
-        Level::Trace => "TRACE",
-        Level::Debug => "DEBUG",
-        Level::Info => "INFO",
-        Level::Warn => "WARN",
-        Level::Error => "ERROR",
-        Level::Critical => "CRIT",
+        rustos_log::write_diag_line(&mut s, None, true, event);
     }
 }
 

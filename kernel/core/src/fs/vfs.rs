@@ -168,6 +168,9 @@ impl Vfs {
     }
 
     /// List a directory under a driver-backed mount, delegating to `fs`.
+    /// Each entry carries the structural kind the listing driver reports,
+    /// so a caller never re-resolves a child by path (a child path shadowed
+    /// by another mount would be judged against the wrong volume).
     ///
     /// See [`Vfs::read_via`] for the resolution and permission model. An
     /// empty remainder (i.e. `path` is the mount point itself) lists the
@@ -184,7 +187,7 @@ impl Vfs {
         cred: &Credentials<'_>,
         path: &Path,
         fs: &mut dyn FilesystemRead,
-    ) -> Result<Vec<String>, VfsError> {
+    ) -> Result<Vec<(DriverNodeKind, String)>, VfsError> {
         let (template, remainder) = self.delegate_context(cred, path, false)?;
         DelegatedFs::new(fs, template).list(cred, &remainder)
     }
@@ -360,7 +363,7 @@ impl Vfs {
         cred: &Credentials<'_>,
         path: &Path,
         fs: &mut F,
-    ) -> Result<Vec<String>, VfsError> {
+    ) -> Result<Vec<(DriverNodeKind, String)>, VfsError> {
         let (template, remainder) = self.delegate_context(cred, path, false)?;
         DelegatedFs::new_secured(fs, template).list(cred, &remainder)
     }

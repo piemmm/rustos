@@ -36,7 +36,7 @@ fn mkdir_creates_nested_directories() {
     let names = vfs
         .list_via_secured(&owner, &vol_path("a"), &mut fs)
         .expect("list a");
-    assert_eq!(names, ["b"]);
+    assert_eq!(names, [(NodeKind::Directory, String::from("b"))]);
 }
 
 #[test]

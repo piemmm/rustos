@@ -2,11 +2,12 @@
 //! kernel.
 //!
 //! Mirrors the x86_64 COM1 sink (`rustos_kernel::x86_64::serial_sink`): one
-//! formatted line per event, in the canonical format the `kernel/core`
-//! audit consumers and the QEMU serial scraper expect —
+//! formatted line per event, in the one shared diagnostic format
+//! ([`rustos_log::write_diag_line`]) the `kernel/core` audit consumers and
+//! the QEMU serial scraper expect —
 //!
 //! ```text
-//! [<level>] id=<id> <message> <key>=<value> ...
+//! [<LEVEL>] id=<id> <message> <key>=<value> ...
 //! ```
 //!
 //! The sink is a zero-sized type exposed through the [`SERIAL_SINK`]
@@ -16,9 +17,7 @@
 //! bootstrap area). The underlying shared mutable state is the UART
 //! behind the SBI console, not this wrapper.
 
-use core::fmt::Write as _;
-
-use rustos_log::{Event, Level, Sink};
+use rustos_log::{Event, Sink};
 
 use crate::sbi;
 
@@ -81,32 +80,10 @@ impl Default for SerialSink {
 
 impl Sink for SerialSink {
     fn write_event(&self, event: &Event<'_>) {
-        let mut w = SbiWriter;
-        // Ignore write errors: `SbiWriter` is infallible (the SBI
-        // console call returns no status). The logging path must not
-        // panic.
-        let _ = write!(
-            w,
-            "[{}] id={} {}",
-            level_str(event.level),
-            event.id.0,
-            event.message
-        );
-        for field in event.fields {
-            let _ = write!(w, " {}={}", field.key, field.value);
-        }
-        let _ = writeln!(w);
-    }
-}
-
-const fn level_str(level: Level) -> &'static str {
-    match level {
-        Level::Trace => "TRACE",
-        Level::Debug => "DEBUG",
-        Level::Info => "INFO",
-        Level::Warn => "WARN",
-        Level::Error => "ERROR",
-        Level::Critical => "CRIT",
+        // A serial capture renders ANSI SGR, so the level tag is coloured;
+        // no monotonic-uptime seam is wired on this port yet, so the stamp
+        // is omitted.
+        rustos_log::write_diag_line(&mut SbiWriter, None, true, event);
     }
 }
 
