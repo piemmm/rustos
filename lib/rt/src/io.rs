@@ -752,6 +752,28 @@ mod tests {
     }
 
     #[test]
+    fn write_all_fails_closed_on_a_refused_or_bogus_kernel_count() {
+        // Regression test: a refused write (`-errno`, e.g. a missing
+        // `CAP_CONSOLE_WRITE`) folds to a zero-length write, so `write_all`
+        // reports `WriteZero` instead of slicing out of bounds — previously
+        // the raw negative register became a huge count and `&buf[n..]`
+        // panicked here, turning a panic report into a panic storm.
+        let neg = u64::from_ne_bytes(
+            (-i64::from(rustos_abi::Errno::PermissionDenied.as_i32())).to_ne_bytes(),
+        );
+        seam::arm(neg);
+        assert_eq!(Stderr.write_all(b"report"), Err(Error::WriteZero));
+
+        // A positive count larger than the written buffer (a buggy or
+        // cross-delivered kernel count) is clamped to the buffer length, so
+        // the loop completes instead of panicking.
+        seam::arm(93);
+        Stderr
+            .write_all(b"tail")
+            .expect("a clamped over-count completes the write loop");
+    }
+
+    #[test]
     fn stdin_reads_through_the_shared_read_path() {
         seam::arm(3);
         let mut buf = [0u8; 8];
