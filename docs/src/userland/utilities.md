@@ -635,6 +635,44 @@ invariance, encoding errors, tab stops, wide characters), the client
 (width rules, totals, files0 records, error rows), and the locale
 switch-drift pins.
 
+## `tee` — copy standard input to standard output and files (`userland/apps/tee`)
+
+`rustos-tee` is the GNU coreutils `tee` (`plans/APPS.md` §12.1 Stage C
+store bundle): it copies standard input to standard output and to each
+file operand (created if absent; overwritten, or appended with
+`-a`/`--append`), streaming in constant memory — one 4 KiB chunk fanned
+out to every still-live output — and stopping once no output remains.
+`--output-error[=MODE]` selects how a failed output is treated
+(`warn`, `warn-nopipe`, `exit`, `exit-nopipe`, matched with GNU
+`argmatch` prefixes; the value arrives only attached with `=`, and a
+bare `--output-error` — or `-p` — selects `warn-nopipe`). A failed
+output is diagnosed, dropped, and the run continues (or stops, under an
+`exit` mode), exactly as GNU `tee.c` nulls a failed descriptor; an
+unopenable file is likewise diagnosed and — only under an `exit` mode —
+immediately fatal. A `-` operand names a file called `-`, as in GNU.
+
+Two documented divergences follow from RustOS having no `SIGPIPE` and
+no per-process signal disposition. The "pipe" class of the GNU modes
+maps to the standard-output copy — the one output of this tool that can
+be a pipe — where a consumer going away surfaces as a write error,
+never a signal: without `--output-error` it stops the run with the
+reason stated on standard error (the fail-loud analogue of GNU dying of
+`SIGPIPE`); under a `-nopipe` mode it is dropped silently without
+affecting the exit status. And GNU `tee -i`/`--ignore-interrupts` is
+staged, not stubbed: there is no signal disposition to set today, so
+the switch is refused as unrecognised and registers in the change that
+lands that kernel work (the `mkdir -m` precedent).
+
+The crate is `no_std` (with `alloc`), has no `unsafe`, and no
+`unwrap`/`expect`/`panic!` in production paths; its manifest requests
+the console pair and `CAP_FS_ACCESS` — within the session baseline —
+and the secured VFS still authorises every operand per-inode.
+`cargo test -p rustos-tee` drives the parser (switches, bundles, the
+argmatch modes, `--`, refusals), the engine over in-memory seams
+(fan-out, chunking, append vs overwrite, every mode × failure verdict,
+the no-output early stop, read errors), and the locale switch-drift
+pins.
+
 ## `ls` — list directory contents (`userland/apps/ls`)
 
 `rustos-ls` lists directory contents (`AGENTS.md` §3; a `plans/APPS.md`

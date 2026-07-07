@@ -482,6 +482,16 @@ struct RecordingFrames {
     freed: std::sync::Mutex<std::vec::Vec<u64>>,
 }
 
+/// A page-aligned table for the double to lease out. The alignment is
+/// load-bearing: a PTE's PPN field carries only bits 12 and up of the
+/// physical address, so an unaligned heap allocation would be rounded
+/// down by the encode/decode round trip and the walk would read and
+/// write a *different* heap address than the one leased — silent memory
+/// corruption whose symptoms shift with the heap layout (the flaky
+/// 7-vs-5 reclaim count this replaced).
+#[repr(C, align(4096))]
+struct AlignedTable([u64; ENTRIES_PER_TABLE]);
+
 impl RecordingFrames {
     fn new() -> Self {
         Self {
@@ -492,10 +502,19 @@ impl RecordingFrames {
 
 impl PageTableFrames for RecordingFrames {
     fn alloc_table(&self) -> Option<TableFrame> {
-        let entries: &'static mut [u64; ENTRIES_PER_TABLE] =
-            std::boxed::Box::leak(std::boxed::Box::new([0u64; ENTRIES_PER_TABLE]));
-        let phys = entries.as_ptr() as u64;
-        Some(TableFrame { phys, entries })
+        let table: &'static mut AlignedTable = std::boxed::Box::leak(std::boxed::Box::new(
+            AlignedTable([0u64; ENTRIES_PER_TABLE]),
+        ));
+        let phys = table.0.as_ptr() as u64;
+        assert_eq!(
+            phys % PAGE_SIZE as u64,
+            0,
+            "a leased table must survive the PPN encoding"
+        );
+        Some(TableFrame {
+            phys,
+            entries: &mut table.0,
+        })
     }
 
     fn free_table(&self, phys: u64) {

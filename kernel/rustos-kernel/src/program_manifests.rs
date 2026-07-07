@@ -506,6 +506,7 @@ mod tests {
             ("rmdir", AppKind::Command, PURE_TOOL_REQUEST),
             ("sysinfo", AppKind::Command, SYSINFO_MANIFEST),
             ("sysinfod", AppKind::Service, SYSINFOD_MANIFEST),
+            ("tee", AppKind::Command, FILE_TOOL_REQUEST),
             ("top", AppKind::Command, TOP_MANIFEST),
             ("true", AppKind::Command, PURE_TOOL_REQUEST),
             ("useradd", AppKind::Command, ADMIN_TOOL_REQUEST),

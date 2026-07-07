@@ -148,6 +148,7 @@ members = [
     "userland/apps/rm",
     "userland/apps/rmdir",
     "userland/apps/setcap",
+    "userland/apps/tee",
     "userland/apps/terminal",
     "userland/apps/top",
     "userland/apps/true",

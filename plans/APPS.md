@@ -748,9 +748,9 @@ behind the floor work below).
 - **Stage C — missing coreutils commands (in progress; all wanted).**
   Every GNU coreutils command implementable on the current floor, in
   prioritised batches. **Done: `true`, `false`, `yes`, `basename`,
-  `dirname`, `mkdir`, `rmdir`, `head`, `wc`** — each a full self-contained store bundle (console-write +
+  `dirname`, `mkdir`, `rmdir`, `head`, `wc`, `tee`** — each a full self-contained store bundle (console-write +
   `CAP_FS_ACCESS` request — plus console-read for the stdin-reading
-  `head`/`wc` — store-only: the §18.6 boot floor never grows,
+  `head`/`wc`/`tee` — store-only: the §18.6 boot floor never grows,
   so the kernel inventory drift test pins their `AppInfo.toml` directly)
   with the complete GNU surface, six-locale `Help/` trees, and
   switch-drift pins. `true`/`false` parse infallibly (only a *first*
@@ -791,12 +791,23 @@ behind the floor work below).
   files0, and total-only forms); `-m` decodes UTF-8 incrementally
   across chunks (an encoding-error byte is a byte, not a character)
   and `-L` measures columns through the one `rustos_vt::char_width`
-  definition — never a second width table. `echo` and `pwd` from the first batch
+  definition — never a second width table. `tee` implements
+  `-a`/`--append`, `-p`, and `--output-error[=MODE]` (argmatch
+  prefixes; the value only attached with `=`, a bare `--output-error`
+  selecting `warn-nopipe`) with the GNU `tee.c` failure discipline (a
+  failed output is diagnosed, dropped, and the run continues or stops
+  per mode; reading stops when no output remains). Two documented
+  divergences: RustOS has no `SIGPIPE`, so the modes' "pipe" class maps
+  to the standard-output copy (the one output that can be a pipe; the
+  default mode's stdout failure stops the run fail-loud), and
+  `-i`/`--ignore-interrupts` is staged behind per-process
+  signal-disposition kernel work (nothing exists to set today), never
+  stubbed — the `mkdir -m` precedent. `echo` and `pwd` from the first batch
   stay `elsh` builtins for now (`pwd` needs the shell's cwd state, and
   the shell resolves builtins first, so a store bundle of either would
   be unreachable duplication); moving them out is decided when the
   builtin/bundle split is revisited. Remaining first batch: `printf`,
-  `tail`, `seq`, `tee`, `env`, `sleep`,
+  `tail`, `seq`, `env`, `sleep`,
   `date`, `whoami`, `id`; then the text tools `sort`,
   `uniq`, `tr`, `cut`, `paste`, `comm`, `nl`, `tac`, `fold`, `expand`,
   `od`, `split`, `shuf`, `truncate`, `mktemp`, `realpath`, `chgrp`,
@@ -886,7 +897,7 @@ both landed; `plans/SHELL.md` command execution):
 6. **`Help/` trees for the existing command apps** — **done for every
    store-registered command app**: `basename`, `cat`, `clear`, `cp`,
    `dirname`, `false`, `groupadd`, `head`, `ls`, `mkdir`,
-   `mv`, `ps`, `reset`, `rm`, `rmdir`, `top`, `true`, `sysinfo`, `useradd`,
+   `mv`, `ps`, `reset`, `rm`, `rmdir`, `tee`, `top`, `true`, `sysinfo`, `useradd`,
    `users`, `wc`, `yes`, and `elsh` each author their six-locale tree on disk in the bundle,
    discovered by `tools/syshelp` (roots `userland/apps` and
    `userland/shell`), planted at `/System/Apps/<cmd>.app/Help/`, and served
