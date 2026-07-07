@@ -1907,3 +1907,62 @@ never embedded in the binary; `tools/syshelp` discovers it from that
 source and `tools/mkimage` and the QEMU image fixture plant it on the
 read-only `/System` volume, where the `session_ceiling` QEMU vertical
 types `man man` end to end.
+
+## `edit` — full-screen text editor (`userland/apps/edit`)
+
+A curses text editor in the spirit of the classic QuickBasic / MS-DOS
+editor: a menu bar (`File`, `Search`) across the top, the text area below
+it (white on blue on a colour terminal, degrading honestly on shallower
+ones), and a status line with the file name, cursor position, and key
+hints. It edits one buffer at a time and draws exclusively through
+`lib/curses` — no private escape emission.
+
+### Grammar
+
+`edit [file] [-h | -?]` — at most one operand. A named file that does not
+exist opens as an empty buffer created on the first save; an unnamed
+buffer asks for a name when first saved. `-h`/`-?` render the bundle's own
+`Help/` document through the shared `lib/help` engine.
+
+### Keys and menus
+
+Typing inserts (`Insert` toggles overwrite), `Enter` splits, `Backspace`/
+`Delete` join at line ends, `Tab` inserts spaces to the next eight-column
+stop, and the arrows/`Home`/`End`/`PageUp`/`PageDown` move a cursor the
+view follows, horizontally too. `F1` shows the key summary, `F2` saves,
+`F3` repeats the last find, and `F10` opens the menu (`File`: `New`,
+`Open...`, `Save`, `Save As...`, `Exit`; `Search`: `Find...`, `Repeat
+Last Find`). An action that would discard unsaved changes asks first
+(`y` save / `n` discard / `c` or `F10` cancel). The bindings are
+function-key-driven because the shared `lib/vt` vocabulary deliberately
+drops bare `Esc` and C0 control combinations.
+
+### Honest file handling
+
+Input must be UTF-8 text within a 16 MiB validation bound; a binary file,
+a lone carriage return, or an over-large file is refused with the reason
+stated, never opened as garbage. Tab expansion and CRLF→LF conversion are
+announced on the status line, never silent, and the file's final-newline
+presence is preserved so an untouched buffer round-trips byte for byte. A
+failed initial load aborts before the screen is taken over; a failed load
+or save inside the session posts a notice and keeps the buffer — the
+session never dies over a refused file.
+
+### A seam-injected, host-testable core
+
+The `TextBuffer` (decode/edit primitives) and the `Model` (edit/menu/
+prompt/confirm state machine) are pure; file I/O goes through the `Fs`
+seam (in production the kernel-authorised `fs_*` syscalls via
+`rustos-rt`; in tests an in-memory map) and the display through the
+curses `Tty` seam. The blocking input read is parked by the kernel —
+never a poll loop.
+
+### Tests
+
+`cargo test -p rustos-edit` drives the parser, the buffer's round-trip/
+refusal/editing behaviour, the full keystroke state machine (saving,
+save-as, confirm flows, open, wrap-around find, notices) against the
+in-memory filesystem, and the renderer against an in-memory tty,
+including horizontal scrolling over double-width glyphs and a tiny
+screen. The per-locale `OPTIONS` pin keeps the six-locale `Help/` tree
+aligned with the parser.
