@@ -73,8 +73,8 @@ the §12.1 Stage B remainder (`chmod`/`chown`/`getcap`/`setcap`/`mount`
 blocked on their kernel syscalls — `cp`/`mv`/`rm`/`useradd`/`groupadd`
 are registered store bundles), the §12.1 Stage C remainder (the first
 batch's `true`/`false`/`yes`/`basename`/`dirname`/`mkdir`/`rmdir`/
-`head`/`wc` are registered store bundles; the rest land in further
-batches), and
+`head`/`wc`/`tee`/`seq` are registered store bundles; the rest land in
+further batches), and
 deliverable 8 increment 5 (the x86_64/riscv64 storage floor, then
 deletion of the embedded registry those ports still carry as their
 §18.6 boot floor). Help documents are authored **only** in
@@ -748,7 +748,8 @@ behind the floor work below).
 - **Stage C — missing coreutils commands (in progress; all wanted).**
   Every GNU coreutils command implementable on the current floor, in
   prioritised batches. **Done: `true`, `false`, `yes`, `basename`,
-  `dirname`, `mkdir`, `rmdir`, `head`, `wc`, `tee`** — each a full self-contained store bundle (console-write +
+  `dirname`, `mkdir`, `rmdir`, `head`, `wc`, `tee`, `seq`** — each a
+  full self-contained store bundle (console-write +
   `CAP_FS_ACCESS` request — plus console-read for the stdin-reading
   `head`/`wc`/`tee` — store-only: the §18.6 boot floor never grows,
   so the kernel inventory drift test pins their `AppInfo.toml` directly)
@@ -802,12 +803,21 @@ behind the floor work below).
   default mode's stdout failure stops the run fail-loud), and
   `-i`/`--ignore-interrupts` is staged behind per-process
   signal-disposition kernel work (nothing exists to set today), never
-  stubbed — the `mkdir -m` precedent. `echo` and `pwd` from the first batch
+  stubbed — the `mkdir -m` precedent. `seq` implements the full GNU
+  surface — `-f`/`--format` (a validated one-directive printf float
+  format rendered by a C-locale `%e`/`%f`/`%g`/`%a` engine),
+  `-s`/`--separator`, `-w`/`--equal-width`, GNU operand scanning (no
+  permutation, negative-number operands), the spelling-derived default
+  precision/width, the exact decimal fast path (arbitrary-size integer
+  runs, `inf` LAST), and the extra-number rounding rule — with one
+  documented divergence: the float path computes in `f64`, not glibc's
+  `long double` (visibly, `%a` prints the `double` spelling `0x1.8p+0`
+  rather than `%La`'s `0xcp-3`). `echo` and `pwd` from the first batch
   stay `elsh` builtins for now (`pwd` needs the shell's cwd state, and
   the shell resolves builtins first, so a store bundle of either would
   be unreachable duplication); moving them out is decided when the
   builtin/bundle split is revisited. Remaining first batch: `printf`,
-  `tail`, `seq`, `env`, `sleep`,
+  `tail`, `env`, `sleep`,
   `date`, `whoami`, `id`; then the text tools `sort`,
   `uniq`, `tr`, `cut`, `paste`, `comm`, `nl`, `tac`, `fold`, `expand`,
   `od`, `split`, `shuf`, `truncate`, `mktemp`, `realpath`, `chgrp`,
@@ -897,7 +907,7 @@ both landed; `plans/SHELL.md` command execution):
 6. **`Help/` trees for the existing command apps** — **done for every
    store-registered command app**: `basename`, `cat`, `clear`, `cp`,
    `dirname`, `false`, `groupadd`, `head`, `ls`, `mkdir`,
-   `mv`, `ps`, `reset`, `rm`, `rmdir`, `tee`, `top`, `true`, `sysinfo`, `useradd`,
+   `mv`, `ps`, `reset`, `rm`, `rmdir`, `seq`, `tee`, `top`, `true`, `sysinfo`, `useradd`,
    `users`, `wc`, `yes`, and `elsh` each author their six-locale tree on disk in the bundle,
    discovered by `tools/syshelp` (roots `userland/apps` and
    `userland/shell`), planted at `/System/Apps/<cmd>.app/Help/`, and served

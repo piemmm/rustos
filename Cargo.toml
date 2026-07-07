@@ -147,6 +147,7 @@ members = [
     "userland/apps/reset",
     "userland/apps/rm",
     "userland/apps/rmdir",
+    "userland/apps/seq",
     "userland/apps/setcap",
     "userland/apps/tee",
     "userland/apps/terminal",

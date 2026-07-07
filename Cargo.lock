@@ -1509,6 +1509,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-seq"
+version = "0.0.0"
+dependencies = [
+ "rustos-help",
+ "rustos-rt",
+]
+
+[[package]]
 name = "rustos-setcap"
 version = "0.0.0"
 dependencies = [

@@ -505,6 +505,41 @@ The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 over-long-line floor), the closed-pipe stop condition through an
 injected output, and the locale switch-drift pin.
 
+## `seq` — print a sequence of numbers (`userland/apps/seq`)
+
+`rustos-seq` is the GNU coreutils sequence generator (a `plans/APPS.md`
+§12.1 Stage C store bundle): print the numbers from FIRST to LAST in
+steps of INCREMENT (both defaulting to 1), with the full GNU surface —
+`-f`/`--format` (a printf-style floating-point format with one `%`
+directive of type `e`/`f`/`g`/`a`, validated with the GNU diagnostics),
+`-s`/`--separator`, and `-w`/`--equal-width` (mutually exclusive with
+`-f`) — and the GNU output rules. The default precision and the `-w`
+width are inferred from the operands' spellings exactly as GNU's
+`scan_arg` infers them; plain integer runs (including `1e1`/`0x14`
+spellings and an `inf` LAST) are generated in exact decimal string
+arithmetic, arbitrarily large; and the floating-point path prints the
+value one step past LAST when it renders equal to it (the GNU rounding
+rule). Option scanning matches GNU `seq`: no permutation, a leading
+negative number is an operand, and the operand count, format, and
+`-f`/`-w` conflict are diagnosed in the GNU order. The `-f` renderer
+implements C-locale `%e`/`%f`/`%g`/`%a` semantics (flags `-+#0 '`,
+width, precision) so a format prints what C's `printf` prints for a
+`double`. One deliberate divergence, documented in the crate: GNU
+computes the floating-point path in `long double`, RustOS in `f64` —
+visibly, `%a` prints the C `double` spelling (`0x1.8p+0`) where glibc's
+`%La` normalisation spells the same value `0xcp-3`.
+
+The crate is `no_std` (with `alloc`), has no `unsafe`, and no
+`unwrap`/`expect`/`panic!` in production paths. Its manifest requests
+`CAP_CONSOLE_WRITE` and `CAP_FS_ACCESS` (the short-help read) — within
+the session baseline. `cargo test -p rustos-seq` drives the number scan
+(decimal/hex/inf spellings, the width/precision algebra, single-step
+rounding to the subnormal and overflow edges), the format validation and
+renderer against glibc-verified outputs, the parser (GNU scan rules and
+diagnostic order), the generation engine (fast-path selection, exact
+big-integer runs, separators across the flush boundary, the extra-number
+rule), and the locale switch-drift pin.
+
 ## `basename` / `dirname` — lexical name surgery (`userland/apps/basename`, `userland/apps/dirname`)
 
 `rustos-basename` and `rustos-dirname` are the POSIX name tools
