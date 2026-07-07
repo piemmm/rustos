@@ -2445,17 +2445,14 @@ where
             // single CSPRNG reserve, attested kernel-side and never
             // influenced by the spawning caller.
             crate::proc_id::mint_proc_id(self.rng),
-            // Attest the child's name from the kernel-resolved program path:
-            // the command stem for a `<Name>.app/Run` bundle entry point (so
-            // a process listing names the app — `ps` — never the generic
-            // `Run` leaf every bundle shares), otherwise the path's final
-            // non-empty component (the shared basename rule every admit
-            // path uses). Both are kernel-resolved values, never trusted
-            // from the caller as a name.
-            match &bundle {
-                Some(parsed) => ProcName::from_bytes_truncating(parsed.command.as_bytes()),
-                None => ProcName::from_path_basename(&path_buf),
-            },
+            // Attest the child's name from the kernel-resolved program path
+            // through the one shared naming rule: the bundle-directory stem
+            // for a `<Name>.app/Run` entry point (so a process listing names
+            // the app — `ps` — never the generic `Run` leaf every bundle
+            // shares), otherwise the path's final non-empty component. A
+            // kernel-resolved value, never trusted from the caller as a
+            // name.
+            ProcName::from_path(&path_buf),
             // The child's kernel-attested credential, resolved above
             // (inherit the caller's own, or a capability-gated switch to a
             // target user) — never a caller-supplied value.

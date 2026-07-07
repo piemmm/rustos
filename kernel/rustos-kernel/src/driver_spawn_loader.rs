@@ -81,7 +81,9 @@ pub trait DriverProcessSpawn {
     ///
     /// `path` is the kernel-resolved driver-store path the signed load gate
     /// verified `rxe` from; the kernel attests the child's process name from
-    /// its final component, so a process listing always names the driver.
+    /// it through the shared naming rule (a bundle's generic `Run` entry
+    /// point names its owning driver directory, any other path its final
+    /// component), so a process listing always names the driver.
     fn spawn_driver(
         &self,
         path: &str,
@@ -192,8 +194,9 @@ fn spawn_errno_as_driver_error(errno: Errno) -> DriverError {
 struct SpawningDriverSpawner<'a> {
     spawn: &'a dyn DriverProcessSpawn,
     /// The kernel-resolved driver-store path the load gate verified the
-    /// image from; the kernel attests the spawned process's name from its
-    /// final component.
+    /// image from; the kernel attests the spawned process's name from it
+    /// (a bundle's generic `Run` entry point names its owning driver
+    /// directory, any other path its final component).
     path: &'a str,
     /// The matched hardware-tree node's resource requests; minted as the new process's device-resource grants.
     grants: &'a [HwResource],

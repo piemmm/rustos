@@ -93,22 +93,45 @@ impl ProcName {
         Self { buf, len: valid }
     }
 
-    /// Build a name from the final non-empty `/`-separated component of a
-    /// kernel-resolved executable or driver-bundle `path`.
+    /// Build a name from a kernel-resolved executable or bundle `path`.
     ///
     /// This is the one definition of "name a process after the path it was
     /// started from", shared by every admit path that resolves a path
-    /// kernel-side (the `spawn` syscall's plain-path arm, the driver-store
-    /// spawn seam). A path with no non-empty component (`"/"`, `""`) keeps
-    /// the whole path bytes rather than attesting an empty name, so a
-    /// process listing always has *something* truthful to display.
+    /// kernel-side (the `spawn` syscall, the driver-store spawn seam):
+    ///
+    /// * The generic bundle entry point (a final `Run` component,
+    ///   [`rustos_abi::BundleEntry::Run`]) never names a process — every
+    ///   bundle shares that leaf. The owning bundle directory's stem names
+    ///   it instead, with a [`rustos_abi::BUNDLE_SUFFIX`] (`.app`) suffix
+    ///   stripped, so `/Apps/Example.app/Run` attests `Example` and a
+    ///   driver bundle `/System/Drivers/input/usb_kbd/Run` attests
+    ///   `usb_kbd`.
+    /// * Any other path names its final non-empty `/`-separated component.
+    /// * A path from which no name is derivable (`"/"`, `""`, a bare
+    ///   `Run` with no owning directory) keeps the whole path bytes rather
+    ///   than attesting an empty name, so a process listing always has
+    ///   *something* truthful to display.
     #[must_use]
-    pub fn from_path_basename(path: &[u8]) -> Self {
-        let basename = path
+    pub fn from_path(path: &[u8]) -> Self {
+        let mut components = path
             .rsplit(|&b| b == b'/')
-            .find(|component| !component.is_empty())
-            .unwrap_or(path);
-        Self::from_bytes_truncating(basename)
+            .filter(|component| !component.is_empty());
+        let Some(last) = components.next() else {
+            return Self::from_bytes_truncating(path);
+        };
+        if last != rustos_abi::BundleEntry::Run.as_str().as_bytes() {
+            return Self::from_bytes_truncating(last);
+        }
+        match components.next() {
+            Some(parent) => {
+                let stem = parent
+                    .strip_suffix(rustos_abi::BUNDLE_SUFFIX.as_bytes())
+                    .filter(|stem| !stem.is_empty())
+                    .unwrap_or(parent);
+                Self::from_bytes_truncating(stem)
+            }
+            None => Self::from_bytes_truncating(path),
+        }
     }
 
     /// Borrow the name as a string; always valid UTF-8 by construction.
@@ -941,32 +964,64 @@ mod tests {
     }
 
     #[test]
-    fn proc_name_from_path_basename_keeps_the_final_non_empty_component() {
+    fn proc_name_from_path_keeps_the_final_non_empty_component() {
         // The ordinary case: an absolute path names its final component.
-        let name = ProcName::from_path_basename(b"/System/Drivers/input/usb_kbd");
+        let name = ProcName::from_path(b"/System/Drivers/input/usb_kbd");
         assert_eq!(name.as_str(), "usb_kbd");
 
         // A trailing slash never attests an empty name: the last non-empty
         // component still names the process.
-        let trailing = ProcName::from_path_basename(b"/System/Drivers/input/usb_kbd/");
+        let trailing = ProcName::from_path(b"/System/Drivers/input/usb_kbd/");
         assert_eq!(trailing.as_str(), "usb_kbd");
 
         // A bare name (no separator) is its own basename.
-        let bare = ProcName::from_path_basename(b"virtio_blk");
+        let bare = ProcName::from_path(b"virtio_blk");
         assert_eq!(bare.as_str(), "virtio_blk");
 
         // A path with no non-empty component keeps the whole path bytes so
         // a process listing always has something truthful to display.
-        assert_eq!(ProcName::from_path_basename(b"/").as_str(), "/");
-        assert_eq!(ProcName::from_path_basename(b"//").as_str(), "//");
-        assert_eq!(ProcName::from_path_basename(b"").as_str(), "");
+        assert_eq!(ProcName::from_path(b"/").as_str(), "/");
+        assert_eq!(ProcName::from_path(b"//").as_str(), "//");
+        assert_eq!(ProcName::from_path(b"").as_str(), "");
 
         // The basename is bounded exactly like any other attested name.
         let mut long = alloc::vec![b'/'];
         long.extend_from_slice(&[b'x'; PROC_NAME_MAX + 8]);
-        let bounded = ProcName::from_path_basename(&long);
+        let bounded = ProcName::from_path(&long);
         assert_eq!(bounded.as_str().len(), PROC_NAME_MAX);
         assert!(bounded.as_str().bytes().all(|b| b == b'x'));
+    }
+
+    #[test]
+    fn proc_name_from_path_names_a_bundle_by_its_directory_stem_never_run() {
+        // Regression: a driver-store bundle's entry point is the generic
+        // `Run` leaf every bundle shares, so a process listing showed `Run`
+        // for every autoloaded driver. The owning bundle directory names
+        // the process instead.
+        let driver = ProcName::from_path(b"/System/Drivers/input/usb_kbd/Run");
+        assert_eq!(driver.as_str(), "usb_kbd");
+
+        // An application bundle's `.app` suffix is stripped: the stem is
+        // the command/program name, matching the spawn syscall's bundle
+        // naming.
+        let app = ProcName::from_path(b"/Apps/Example.app/Run");
+        assert_eq!(app.as_str(), "Example");
+        let store = ProcName::from_path(b"/System/Apps/ps.app/Run");
+        assert_eq!(store.as_str(), "ps");
+
+        // Empty components never hide the owning directory.
+        let doubled = ProcName::from_path(b"/System/Drivers//input/usb_kbd//Run/");
+        assert_eq!(doubled.as_str(), "usb_kbd");
+
+        // A directory named exactly `.app` has an empty stem; the suffix is
+        // then kept rather than attesting an empty name.
+        let bare_suffix = ProcName::from_path(b"/Apps/.app/Run");
+        assert_eq!(bare_suffix.as_str(), ".app");
+
+        // A `Run` with no owning directory keeps the whole path bytes so
+        // the listing still shows something truthful.
+        assert_eq!(ProcName::from_path(b"Run").as_str(), "Run");
+        assert_eq!(ProcName::from_path(b"/Run").as_str(), "/Run");
     }
 
     #[test]

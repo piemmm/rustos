@@ -3678,9 +3678,11 @@ table, so a new board is match **data**, not new code. Sub-increments
         owner-checked, §18.3; the driver established `DescriptorTable::closed`
         — a driver is not a text session, §20; recorded against the kernel
         boot supervisor `SecTaskId(0)`; the child's process name attested
-        from the final component of the kernel-resolved driver-store `path`
-        via `ProcName::from_path_basename`, so `ps`/`top` always name the
-        driver) and drives the architecture's
+        from the kernel-resolved driver-store `path` via the shared
+        `ProcName::from_path` rule — a bundle's generic `Run` entry point
+        names its owning driver directory, any other path its final
+        component — so `ps`/`top` always name the driver, never `Run`) and
+        drives the architecture's
         `ProcessSpawn::spawn_with`, so the bin crate never names the
         feature-selected scheduler or `KernelSpawnCtx` (§17.1). `KernelInitSpawner`
         is now public + constructible (`new`, holding the leaked-`'static`

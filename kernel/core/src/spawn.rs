@@ -312,10 +312,13 @@ pub trait InitSpawnCtx {
     /// driver load.
     ///
     /// `path` is the kernel-resolved driver-store path the signed load gate
-    /// verified the image from (e.g. `/System/Drivers/input/usb_kbd`). The
-    /// production implementation attests the child's process name from its
-    /// final component, so a process listing (`ps`, `top`) and the audit
-    /// origin always name the driver — never from caller-supplied bytes.
+    /// verified the image from (a plain `/System/Drivers/input/usb_kbd` or a
+    /// store bundle's `/System/Drivers/input/usb_kbd/Run` entry point). The
+    /// production implementation attests the child's process name from it
+    /// through the one shared naming rule — a bundle's generic `Run` leaf
+    /// names its owning driver directory, any other path its final component
+    /// — so a process listing (`ps`, `top`) and the audit origin always name
+    /// the driver, never from caller-supplied bytes.
     #[allow(clippy::too_many_arguments)]
     fn spawn_driver_process(
         &self,

@@ -67,14 +67,19 @@ The record also carries a kernel-attested **process name**
 (`rustos_kernel_sec::ProcName`, a bounded inline name reusing the one
 `PROCESS_NAME_MAX` length `rustos_abi` already defines for the System
 Information process record). It is set kernel-side at admit from
-kernel-resolved state, through the one shared basename rule
-(`ProcName::from_path_basename`, the final non-empty path component): the
-`spawn` syscall attests the resolved executable's basename (the registry
-lookup matched it, so it is not the caller's word for its own name — a
-`<Name>.app/Run` bundle entry point attests the app's command stem instead
-of the generic `Run` leaf), the driver-spawn seam attests the basename of
-the kernel-resolved driver-store path the signed load gate verified the
-image from (never the spawner's argv), and PID 1 records the fixed `init`.
+kernel-resolved state, through the one shared naming rule
+(`ProcName::from_path`): a bundle's generic `Run` entry point never names a
+process — every bundle shares that leaf — so a final `Run` component attests
+the owning bundle directory's stem instead (`.app` suffix stripped:
+`/Apps/Example.app/Run` → `Example`, a driver bundle
+`/System/Drivers/input/usb_kbd/Run` → `usb_kbd`); any other path attests its
+final non-empty component, and a path from which no name is derivable keeps
+the whole path bytes so a listing always shows something truthful. The
+`spawn` syscall applies the rule to the resolved executable path (the
+registry/store lookup matched it, so it is not the caller's word for its own
+name), the driver-spawn seam applies it to the kernel-resolved driver-store
+path the signed load gate verified the image from (never the spawner's
+argv), and PID 1 records the fixed `init`.
 Every process a listing (`ps`, `top`) shows therefore carries a non-empty
 attested name; only in-kernel binder / device-host records that never enter
 the process table keep the empty name. The stored value holds only a

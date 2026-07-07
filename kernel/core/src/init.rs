@@ -923,11 +923,12 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
             // (the entropy reserve is not seeded this early).
             crate::proc_id::mint_proc_id_bootstrap(),
             // Attest the driver's name from the kernel-resolved store path
-            // the signed load gate verified the image from — its final
-            // component names the driver's own bundle directory — so a
-            // process listing and the audit origin always name the driver,
-            // never from the spawner's argv.
-            ProcName::from_path_basename(path.as_bytes()),
+            // the signed load gate verified the image from, through the one
+            // shared naming rule — a bundle's generic `Run` entry point
+            // names its owning driver directory, any other path its final
+            // component — so a process listing and the audit origin always
+            // name the driver, never from the spawner's argv.
+            ProcName::from_path(path.as_bytes()),
             // A boot-autoloaded driver is a kernel-trusted system principal:
             // admit it under the fixed system credential (uid 0 / gid 0), the
             // spawn-as-user counterpart of the `SecTaskId(0)` supervisor
@@ -1913,11 +1914,12 @@ mod tests {
 
     #[test]
     fn spawn_driver_process_attests_the_drivers_name_from_its_store_path() {
-        // Regression: every boot-autoloaded driver used to be admitted with
-        // an empty attested name, so `ps`/`top` showed a blank COMMAND for
-        // it. The seam now derives the child's name from the final component
-        // of the kernel-resolved driver-store path the load gate verified
-        // the image from.
+        // Regression, twice over: every boot-autoloaded driver used to be
+        // admitted with an empty attested name (a blank `ps`/`top` COMMAND),
+        // and a store bundle spawned from its generic `Run` entry point was
+        // then named `Run`. The seam derives the child's name from the
+        // kernel-resolved driver-store path through the one shared rule, so
+        // both shapes name the driver itself.
         let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
         let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
         let boot = bootinfo_with(log_sink, audit_sink, make_memory_map());
@@ -1956,7 +1958,35 @@ mod tests {
         assert_eq!(
             record.name(),
             "virtio_blk",
-            "the driver's attested name is its store path's final component"
+            "a plain store path names the driver by its final component"
+        );
+        drop(table);
+
+        // The discovered-tier shape: a signed store bundle whose entry
+        // point is the generic `Run` leaf. The owning driver directory
+        // names the process, never `Run`.
+        let mut caps = CapabilitySet::empty();
+        caps.insert(rustos_abi::CapabilityId::DRV_LOAD);
+        let pid = ctx
+            .spawn_driver_process(
+                &AdmittingSpawn,
+                "/System/Drivers/input/usb_kbd/Run",
+                b"driver-image-bytes",
+                caps,
+                &[],
+                &[],
+                None,
+            )
+            .expect("the admitting producer admits the bundled driver");
+
+        let table = state.caps.read();
+        let record = table
+            .caps_for(SecTaskId(pid))
+            .expect("the admitted bundled driver has a capability record");
+        assert_eq!(
+            record.name(),
+            "usb_kbd",
+            "a bundle's `Run` entry point names its owning driver directory"
         );
     }
 
