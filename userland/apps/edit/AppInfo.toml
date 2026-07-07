@@ -1,0 +1,14 @@
+# Signed-AppInfo manifest source for the `edit` command app
+# (plans/APPS.md deliverable 8). Discovered by the build's app-bundle
+# composer; the capability list is the bundle's request, intersected with
+# the launching user's grants. CAP_CONSOLE_WRITE drives the full-screen
+# display on fd 1; CAP_CONSOLE_READ the raw-mode keystrokes on fd 0 (it
+# also authorises the tool's input-mode switch). CAP_FS_ACCESS because
+# loading and saving the edited file — and the short-help switches' read
+# of the bundle's own Help/ tree — go through the secured VFS, which still
+# authorises every path per-inode under the caller's attested identity.
+id = "os.rustos.edit"
+name = "edit"
+version = "0.1.0"
+kind = "command"
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_CONSOLE_READ", "CAP_FS_ACCESS"]

@@ -911,6 +911,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-edit"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-curses",
+ "rustos-help",
+ "rustos-rt",
+ "rustos-termcap",
+ "rustos-vt",
+]
+
+[[package]]
 name = "rustos-elsh"
 version = "0.0.0"
 dependencies = [

@@ -133,6 +133,7 @@ members = [
     "userland/apps/clear",
     "userland/apps/cp",
     "userland/apps/dirname",
+    "userland/apps/edit",
     "userland/apps/false",
     "userland/apps/files",
     "userland/apps/getcap",

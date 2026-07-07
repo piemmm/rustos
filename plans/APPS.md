@@ -906,7 +906,7 @@ both landed; `plans/SHELL.md` command execution):
    closed with a message naming the offending `bundle/locale/file`.
 6. **`Help/` trees for the existing command apps** — **done for every
    store-registered command app**: `basename`, `cat`, `clear`, `cp`,
-   `dirname`, `false`, `groupadd`, `head`, `ls`, `mkdir`,
+   `dirname`, `edit`, `false`, `groupadd`, `head`, `ls`, `mkdir`,
    `mv`, `ps`, `reset`, `rm`, `rmdir`, `seq`, `tee`, `top`, `true`, `sysinfo`, `useradd`,
    `users`, `wc`, `yes`, and `elsh` each author their six-locale tree on disk in the bundle,
    discovered by `tools/syshelp` (roots `userland/apps` and

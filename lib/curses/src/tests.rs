@@ -470,6 +470,43 @@ fn screen_read_events_decodes_queued_input() {
 }
 
 #[test]
+fn colored_attributes_serve_a_colour_terminal_and_refuse_a_monochrome_one() {
+    // A colour terminal gets the requested pair back as attributes (the
+    // shared helper `top` and `edit` colour through)…
+    let mut screen = Screen::new(
+        FakeTty::with_input(b""),
+        TermType::Xterm256Color,
+        Size::new(2, 2),
+    );
+    let attrs = screen
+        .colored_attributes(
+            Color::Basic(BasicColor::White),
+            Color::Basic(BasicColor::Blue),
+        )
+        .expect("a 256-colour terminal renders basic colours");
+    assert_eq!(attrs.foreground, Color::Basic(BasicColor::White));
+    assert_eq!(attrs.background, Color::Basic(BasicColor::Blue));
+
+    // …and asking twice reuses the pair rather than filling the table.
+    let again = screen.colored_attributes(
+        Color::Basic(BasicColor::White),
+        Color::Basic(BasicColor::Blue),
+    );
+    assert_eq!(again, Some(attrs));
+
+    // A monochrome terminal refuses, so the caller falls back to reverse
+    // video instead of emitting colour it cannot show.
+    let mut mono = Screen::new(FakeTty::with_input(b""), TermType::Vt100, Size::new(2, 2));
+    assert_eq!(
+        mono.colored_attributes(
+            Color::Basic(BasicColor::White),
+            Color::Basic(BasicColor::Blue),
+        ),
+        None
+    );
+}
+
+#[test]
 fn enabling_mouse_is_a_no_op_on_a_terminal_without_mouse_support() {
     // `vt100` has no mouse reporting, so enabling it writes nothing.
     let mut screen = Screen::new(FakeTty::with_input(b""), TermType::Vt100, Size::new(2, 2));

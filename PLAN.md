@@ -3749,6 +3749,19 @@ GNU `-m` is deliberately staged behind the same mode-set syscall
 plus `ROS_UNLINK_FLAG_DIRECTORY` and the previously-unpublished
 `ROS_OPEN_FLAG_*` bits (regenerated, drift-guarded).
 
+The `edit` full-screen curses text editor (`userland/apps/edit`) is a
+registered store bundle in the QuickBasic/MS-DOS-editor shape: an
+F10-driven `File`/`Search` menu bar, a status line, insert/overwrite
+editing, wrap-around find, and whole-file load/save through an injected
+`Fs` seam over the kernel-authorised `fs_*` syscalls (console pair +
+`CAP_FS_ACCESS`, the interactive file-tool request). Decoding is
+fail-closed (UTF-8 text only, 16 MiB validation bound, lone-CR/binary
+refused); tab→space expansion and CRLF→LF conversion are announced on
+the status line, and final-newline presence round-trips. It draws
+through `lib/curses` (`Screen::colored_attributes` — the colour helper
+hoisted from `top` so both apps share one definition) and ships the
+six-locale `Help/` tree with the switch-drift pin.
+
 **Remaining** (staged in `plans/APPS.md` §13): the Stage B remainder
 (`chmod`/`chown`/`getcap`/`setcap`/`mount` blocked on their kernel
 syscalls — fs mode/owner set, per-inode capability get/set, mount — each

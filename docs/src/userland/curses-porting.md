@@ -65,14 +65,15 @@ a sequence the terminal would misinterpret.
 
 A few patterns `top` uses:
 
-- **Colour pairs.** `Screen::alloc_pair(fg, bg)` returns the pair id for the
-  requested colours — reusing an identical existing pair, or defining the next
-  free id — so you do not track ids by hand and per-redraw requests never fill
-  the table; apply a colour through
-  `Window::set_colors` or by setting the `rustos_vt::Attributes` foreground and
-  background. `top` allocates a white-on-blue header pair on colour terminals
-  and falls back to reverse video on monochrome ones — the renderer's colour
-  downgrade does the rest.
+- **Colour pairs.** `Screen::colored_attributes(fg, bg)` is the one-call form:
+  it checks the terminal's colour depth, allocates (or reuses) the pair through
+  `Screen::alloc_pair`, and returns ready-to-apply `rustos_vt::Attributes` —
+  or `None` on a terminal that cannot show either colour, so the caller falls
+  back to a monochrome rendition instead of mis-colouring. Per-redraw requests
+  never fill the table (an identical pair is reused). `top` asks for a
+  white-on-blue header pair and falls back to reverse video on monochrome
+  terminals; `edit` colours its menu bar and text area the same way — the
+  renderer's colour downgrade does the rest.
 - **Wide text.** Measure with `rustos_curses::str_width` and clip with
   `truncate_to_width` so a double-width (CJK / fullwidth / emoji) glyph is
   never split across the right edge. `Window::add_char` stores a wide glyph as

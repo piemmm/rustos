@@ -491,6 +491,7 @@ mod tests {
             ("cp", AppKind::Command, FILE_TOOL_REQUEST),
             ("devmgr", AppKind::Service, DEVMGR_MANIFEST),
             ("dirname", AppKind::Command, PURE_TOOL_REQUEST),
+            ("edit", AppKind::Command, FILE_TOOL_REQUEST),
             ("elsh", AppKind::Command, SESSION_BASELINE),
             ("false", AppKind::Command, PURE_TOOL_REQUEST),
             ("groupadd", AppKind::Command, ADMIN_TOOL_REQUEST),

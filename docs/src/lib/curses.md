@@ -73,7 +73,12 @@ default and cannot be redefined. `init_pair` defines a specific id and
 `alloc_pair` returns the id of the requested colours — reusing an identical
 existing pair, or defining the next free id when the pair is new — so an
 application can request the same colours on every redraw without tracking ids
-itself and without ever filling the table.
+itself and without ever filling the table. `Screen::colored_attributes(fg, bg)`
+composes the two steps applications actually want: it checks the terminal's
+colour depth, allocates (or reuses) the pair, and returns ready-to-apply
+`Attributes` — or `None` on a terminal that cannot show either colour, so the
+caller falls back to a monochrome rendition (reverse video, bold, plain)
+instead of mis-colouring. `top` and `edit` colour through it.
 
 ## One vocabulary, fail closed
 

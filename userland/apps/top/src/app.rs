@@ -435,8 +435,7 @@ fn header_attributes<T: Tty>(screen: &mut Screen<T>) -> Attributes {
     // A terminal that can show the 16 ANSI colours gets white-on-blue; a
     // monochrome terminal falls back to reverse video, so the header is
     // always distinct.
-    match colored(
-        screen,
+    match screen.colored_attributes(
         Color::Basic(BasicColor::White),
         Color::Basic(BasicColor::Blue),
     ) {
@@ -460,23 +459,8 @@ pub(crate) fn state_attributes<T: Tty>(screen: &mut Screen<T>, state: char) -> O
         'Z' => (BasicColor::Magenta, false),
         _ => return None,
     };
-    let mut attrs = colored(screen, Color::Basic(fg), Color::Default)?;
+    let mut attrs = screen.colored_attributes(Color::Basic(fg), Color::Default)?;
     attrs.bold = emphasised;
-    Some(attrs)
-}
-
-/// Attributes for `fg` on `bg`, or `None` when the terminal cannot show
-/// them (no colour support, or the pair table is exhausted — either way the
-/// caller falls back rather than mis-colouring).
-fn colored<T: Tty>(screen: &mut Screen<T>, fg: Color, bg: Color) -> Option<Attributes> {
-    if !screen.capabilities().color.supports(fg) {
-        return None;
-    }
-    let pair = screen.alloc_pair(fg, bg).ok()?;
-    let colors = screen.color_pairs().get(pair);
-    let mut attrs = Attributes::PLAIN;
-    attrs.foreground = colors.fg;
-    attrs.background = colors.bg;
     Some(attrs)
 }
 

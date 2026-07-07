@@ -19,7 +19,7 @@ use alloc::vec::Vec;
 use core::time::Duration;
 
 use rustos_termcap::{Capabilities, TermType};
-use rustos_vt::{encode_all_into, EraseMode, MouseMode, Op};
+use rustos_vt::{encode_all_into, Attributes, Color, EraseMode, MouseMode, Op};
 
 use crate::buffer::Buffer;
 use crate::color::{ColorPairs, DEFAULT_PAIR};
@@ -173,6 +173,25 @@ impl<T: Tty> Screen<T> {
     /// pair is new and the table is full.
     pub fn alloc_pair(&mut self, fg: rustos_vt::Color, bg: rustos_vt::Color) -> Result<u16> {
         self.pairs.alloc_pair(fg, bg)
+    }
+
+    /// Attributes for `fg` on `bg` through the colour-pair table, or `None`
+    /// when this terminal cannot show either colour or the pair table is
+    /// exhausted — the caller falls back to a monochrome rendition (reverse
+    /// video, bold, plain) rather than mis-colouring.
+    ///
+    /// An identical existing pair is reused (via [`Screen::alloc_pair`]), so
+    /// requesting the same colours on every redraw never fills the table.
+    pub fn colored_attributes(&mut self, fg: Color, bg: Color) -> Option<Attributes> {
+        if !self.caps.color.supports(fg) || !self.caps.color.supports(bg) {
+            return None;
+        }
+        let pair = self.pairs.alloc_pair(fg, bg).ok()?;
+        let colors = self.pairs.get(pair);
+        let mut attrs = Attributes::PLAIN;
+        attrs.foreground = colors.fg;
+        attrs.background = colors.bg;
+        Some(attrs)
     }
 
     /// Select how [`Screen::getch`] waits for input (curses `nodelay` /
