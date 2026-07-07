@@ -114,15 +114,19 @@ pub fn search_roots(home: Option<&str>) -> Vec<String> {
     roots
 }
 
-/// The ordered bundle-directory spellings a bare (searchable) word names:
-/// the system store first, then one per non-empty `PATH` entry.
-fn bundle_roots(word: &str, path_var: Option<&str>) -> Vec<String> {
-    let bundle = if word.ends_with(BUNDLE_SUFFIX) {
-        String::from(word)
-    } else {
-        format!("{word}{BUNDLE_SUFFIX}")
-    };
-    let mut roots = alloc::vec![format!("{SYSTEM_APP_STORE}/{bundle}")];
+/// The ordered directories a bare (searchable) command word is resolved
+/// against: the system app store first, then one per non-empty `PATH` entry
+/// (alias-aware split, trailing `/` normalised away). `path_var` is the value
+/// of the `PATH` environment variable, if set.
+///
+/// This is the *directory* view of the one search policy
+/// ([`resolution_candidates`] / [`bundle_candidates`] append the
+/// `<word>.app` spelling per directory): a completion engine enumerates
+/// these directories' bundles so the names it offers are exactly the names
+/// the shell would resolve. Spelling only — no I/O, no permission check.
+#[must_use]
+pub fn command_search_dirs(path_var: Option<&str>) -> Vec<String> {
+    let mut dirs = alloc::vec![String::from(SYSTEM_APP_STORE)];
     if let Some(path) = path_var {
         for dir in split_path_entries(path) {
             if dir.is_empty() {
@@ -132,10 +136,24 @@ fn bundle_roots(word: &str, path_var: Option<&str>) -> Vec<String> {
                 continue;
             }
             let dir = dir.strip_suffix('/').unwrap_or(dir);
-            roots.push(format!("{dir}/{bundle}"));
+            dirs.push(String::from(dir));
         }
     }
-    roots
+    dirs
+}
+
+/// The ordered bundle-directory spellings a bare (searchable) word names:
+/// the `<word>.app` bundle in each [`command_search_dirs`] directory.
+fn bundle_roots(word: &str, path_var: Option<&str>) -> Vec<String> {
+    let bundle = if word.ends_with(BUNDLE_SUFFIX) {
+        String::from(word)
+    } else {
+        format!("{word}{BUNDLE_SUFFIX}")
+    };
+    command_search_dirs(path_var)
+        .into_iter()
+        .map(|dir| format!("{dir}/{bundle}"))
+        .collect()
 }
 
 /// Split a `PATH` value into its entries.
@@ -170,7 +188,10 @@ fn split_path_entries(path: &str) -> Vec<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{bundle_candidates, resolution_candidates, search_roots, split_path_entries};
+    use super::{
+        bundle_candidates, command_search_dirs, resolution_candidates, search_roots,
+        split_path_entries,
+    };
     use alloc::vec;
     use alloc::vec::Vec;
 
@@ -326,5 +347,31 @@ mod tests {
         assert_eq!(search_roots(None), ["/Apps"]);
         assert_eq!(search_roots(Some("")), ["/Apps"]);
         assert_eq!(search_roots(Some("/")), ["/Apps"]);
+    }
+
+    /// The directory view agrees with the candidate view: each search
+    /// directory plus the `<word>.app/Run` spelling is exactly the
+    /// resolution-candidate list, so completion enumerates precisely the
+    /// names the shell would resolve.
+    #[test]
+    fn search_dirs_agree_with_resolution_candidates() {
+        let path = Some("/Users/ada/bin:Home:/tools/");
+        let dirs = command_search_dirs(path);
+        assert_eq!(dirs, ["/System/Apps", "/Users/ada/bin", "Home:/tools"]);
+        let expected: alloc::vec::Vec<_> = dirs
+            .iter()
+            .map(|dir| alloc::format!("{dir}/ls.app/Run"))
+            .collect();
+        assert_eq!(resolution_candidates("ls", path), expected);
+    }
+
+    /// An empty `PATH` entry (the POSIX "current directory" trap) is skipped
+    /// by the directory view exactly as by the candidate view.
+    #[test]
+    fn search_dirs_skip_empty_path_entries() {
+        assert_eq!(
+            command_search_dirs(Some(":/Users/ada/bin:")),
+            ["/System/Apps", "/Users/ada/bin"]
+        );
     }
 }

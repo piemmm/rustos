@@ -43,6 +43,12 @@ rustos-cmdres = { path = "../../../lib/cmdres", version = "=0.0.0" }
 # so linking it grants the shell no authority.
 rustos-resref = { path = "../../../lib/resref", version = "=0.0.0" }
 
+# The shared curses/TUI input decoder (`plans/CURSES.md` C4): the REPL's raw
+# interactive mode decodes key bytes into typed events through this one
+# `lib/vt`-backed decoder — never a shell-private key table (`AGENTS.md`
+# §2.2; `plans/SHELL.md` "Interactive terminal").
+rustos-curses = { path = "../../../lib/curses", version = "=0.0.0" }
+
 # The single ANSI/VT terminal-control vocabulary (`AGENTS.md` §2.2): the
 # REPL's line reader runs the read line discipline's buffer half
 # (`rustos_vt::line::LineEditor`) — CR and LF both terminate a line

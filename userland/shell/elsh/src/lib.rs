@@ -59,6 +59,8 @@
 extern crate alloc;
 
 pub mod builtin;
+pub mod complete;
+mod editor;
 mod elevate;
 pub mod env;
 pub mod error;
@@ -74,6 +76,7 @@ mod ulimit;
 #[cfg(test)]
 pub(crate) mod test_support;
 
+pub use complete::{complete, Candidate, Completion, DirEntryInfo, WordLister};
 pub use env::Environment;
 pub use error::ParseError;
 pub use host::{

@@ -40,22 +40,16 @@ pub(crate) struct BuiltinContext<'a> {
     pub exit: &'a mut Option<i32>,
 }
 
+/// The closed set of builtin names, in dispatch order — the one list
+/// [`is_builtin`], [`dispatch`], and command completion share, so a name can
+/// never be completable but not runnable (or the reverse).
+pub(crate) const BUILTIN_NAMES: &[&str] = &[
+    "cd", "pwd", "exit", "export", "unset", "echo", "jobs", "fg", "bg", "ulimit", "elevate", "help",
+];
+
 /// `true` if `name` is a shell builtin.
 pub(crate) fn is_builtin(name: &str) -> bool {
-    matches!(
-        name,
-        "cd" | "pwd"
-            | "exit"
-            | "export"
-            | "unset"
-            | "echo"
-            | "jobs"
-            | "fg"
-            | "bg"
-            | "ulimit"
-            | "elevate"
-            | "help"
-    )
+    BUILTIN_NAMES.contains(&name)
 }
 
 /// Run the builtin named by `argv[0]` with `argv[1..]` as arguments.
@@ -272,16 +266,33 @@ fn bg(ctx: &mut BuiltinContext<'_>, args: &[String]) -> i32 {
 }
 
 fn help(ctx: &mut BuiltinContext<'_>) -> i32 {
-    ctx.console
-        .write_stdout("builtins: cd pwd exit export unset echo jobs fg bg ulimit elevate help\n");
+    let mut text = String::from("builtins:");
+    for name in BUILTIN_NAMES {
+        text.push(' ');
+        text.push_str(name);
+    }
+    text.push('\n');
+    ctx.console.write_stdout(&text);
     OK
 }
 
 #[cfg(test)]
 mod tests {
-    use super::is_builtin;
+    use super::{is_builtin, BUILTIN_NAMES};
     use crate::job::{JobState, Pid, Signal, WaitOutcome};
     use crate::test_support::Fixture;
+
+    /// The single name list and the dispatch match cannot drift apart: every
+    /// listed name is a builtin and actually dispatches (with no operands —
+    /// worst case a usage error, still `Some`).
+    #[test]
+    fn every_listed_builtin_dispatches() {
+        for &name in BUILTIN_NAMES {
+            assert!(is_builtin(name), "{name} not recognised");
+            let mut fx = Fixture::new();
+            assert!(fx.run(&[name]).is_some(), "{name} did not dispatch");
+        }
+    }
 
     #[test]
     fn unknown_command_is_not_a_builtin() {

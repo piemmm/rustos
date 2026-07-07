@@ -12,6 +12,12 @@ Mae'n darllen pob operand ffeil yn ei drefn ac yn ysgrifennu ei feitiau
 i'r allbwn safonol. Mae'r operand `-` yn enwi'r mewnbwn safonol, a heb
 operand y mewnbwn safonol yw'r unig ffynhonnell.
 
+Gall operand hefyd fod yn gyfeiriad adnodd teipiedig fel `sys:random`:
+caiff ei agor drwy ddatryswr adnoddau'r system (gyda gwiriad galluoedd)
+yn hytrach na'r system ffeiliau — mae `cat sys:random` yn ffrydio
+beitiau ar hap. Mae cyfeiriad camffurfiedig mewn gofod enwau
+cofrestredig yn wall, byth yn enw ffeil.
+
 Gydag `-n` rhifir llinellau'r allbwn yn ddi-dor ar draws pob
 ffynhonnell, felly rhifir llinell sy'n pontio dwy ffynhonnell unwaith
 yn union, pan ymddengys ei beit cyntaf. Mae `-b` yn rhifo'r llinellau

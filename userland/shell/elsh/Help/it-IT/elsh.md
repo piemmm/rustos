@@ -32,6 +32,12 @@ I comandi integrati:
 La shell non accetta operandi: l'esecuzione di script non fa ancora
 parte della sua grammatica.
 
+Su un terminale la shell offre un editor di riga interattivo: Su/Giù
+scorrono la cronologia dei comandi, `Ctrl-R` la cerca, `Ctrl-C` scarta
+la riga in corso, `Ctrl-D` su una riga vuota termina la sessione e Tab
+completa nomi di comandi, percorsi e riferimenti a risorse come
+`sys:random`.
+
 ## OPTIONS
 
 - `-h, -?` — mostrare la guida breve di questo comando e uscire.

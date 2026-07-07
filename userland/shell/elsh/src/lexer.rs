@@ -144,6 +144,26 @@ pub enum Token {
 /// [`ParseError::DanglingEscape`] for a line ending on a lone `\`, and
 /// [`ParseError::AmbiguousRedirection`] for a malformed duplication.
 pub fn tokenize(line: &str) -> Result<Vec<Token>, ParseError> {
+    Ok(tokenize_with_spans(line)?
+        .into_iter()
+        .map(|(token, _)| token)
+        .collect())
+}
+
+/// Lex `line` into a token stream, pairing each token with its `[start, end)`
+/// span in **character** indices of `line`.
+///
+/// The spans let the completion engine locate the word under the cursor with
+/// the shell's own quoting-aware lexer — never a second, completion-only
+/// tokeniser. [`tokenize`] is this function with the spans discarded, so the
+/// two views can never disagree.
+///
+/// # Errors
+///
+/// Exactly the [`tokenize`] error set.
+pub fn tokenize_with_spans(
+    line: &str,
+) -> Result<Vec<(Token, core::ops::Range<usize>)>, ParseError> {
     Lexer::new(line).run()
 }
 
@@ -228,10 +248,11 @@ impl Lexer {
         c
     }
 
-    fn run(mut self) -> Result<Vec<Token>, ParseError> {
+    fn run(mut self) -> Result<Vec<(Token, core::ops::Range<usize>)>, ParseError> {
         let mut tokens = Vec::new();
         loop {
             self.skip_spaces();
+            let start = self.pos;
             let Some(c) = self.peek() else {
                 return Ok(tokens);
             };
@@ -262,18 +283,19 @@ impl Lexer {
             // to other characters stays an ordinary word character.
             if c == '!' && matches!(self.peek2(), None | Some(' ' | '\t')) {
                 self.pos += 1;
-                tokens.push(Token::Bang);
+                tokens.push((Token::Bang, start..self.pos));
                 continue;
             }
-            if let Some(op) = self.lex_dynamic_fd_redirect()? {
-                tokens.push(op);
+            let token = if let Some(op) = self.lex_dynamic_fd_redirect()? {
+                op
             } else if let Some(op) = self.lex_redirect()? {
-                tokens.push(op);
+                op
             } else if let Some(op) = self.lex_operator() {
-                tokens.push(op);
+                op
             } else {
-                tokens.push(Token::Word(self.lex_word()?));
-            }
+                Token::Word(self.lex_word()?)
+            };
+            tokens.push((token, start..self.pos));
         }
     }
 
@@ -632,7 +654,7 @@ impl Lexer {
 
 #[cfg(test)]
 mod tests {
-    use super::{tokenize, FdSpec, RedirOp, Segment, Token};
+    use super::{tokenize, tokenize_with_spans, FdSpec, RedirOp, Segment, Token};
     use crate::error::ParseError;
     use crate::parser::OpenMode;
     use alloc::string::ToString;
@@ -640,6 +662,45 @@ mod tests {
 
     fn expandable(s: &str) -> Token {
         Token::Word(vec![Segment::Expandable(s.to_string())])
+    }
+
+    /// Spans cover each token's exact character range: words, operators, and
+    /// redirections, with inter-token whitespace excluded.
+    #[test]
+    fn spans_locate_each_token() {
+        let line = "echo  hi >out";
+        let spanned = tokenize_with_spans(line).expect("lexes");
+        let spans: vec::Vec<_> = spanned.iter().map(|(_, span)| span.clone()).collect();
+        // The redirection operator and its target word are separate tokens
+        // (the parser attaches the target), each with its own span.
+        assert_eq!(spans, [0..4, 6..8, 9..10, 10..13]);
+        assert_eq!(spanned[0].0, expandable("echo"));
+        assert!(matches!(spanned[2].0, Token::Redirect(_)));
+        assert_eq!(spanned[3].0, expandable("out"));
+        // The span slices back to the original text (char == byte here).
+        assert_eq!(&line[6..8], "hi");
+    }
+
+    /// Spans are in character indices, not bytes: a multi-byte character
+    /// counts once.
+    #[test]
+    fn spans_count_characters_not_bytes() {
+        let spanned = tokenize_with_spans("café x").expect("lexes");
+        let spans: vec::Vec<_> = spanned.iter().map(|(_, span)| span.clone()).collect();
+        assert_eq!(spans, [0..4, 5..6]);
+    }
+
+    /// The span-free view is the spanned view with the spans discarded.
+    #[test]
+    fn tokenize_agrees_with_the_spanned_view() {
+        let line = "a | b >c && ! d";
+        let plain = tokenize(line).expect("lexes");
+        let spanned: vec::Vec<_> = tokenize_with_spans(line)
+            .expect("lexes")
+            .into_iter()
+            .map(|(token, _)| token)
+            .collect();
+        assert_eq!(plain, spanned);
     }
 
     #[test]

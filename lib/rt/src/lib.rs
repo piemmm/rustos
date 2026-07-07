@@ -2694,27 +2694,44 @@ pub struct File {
 }
 
 impl File {
-    /// Open `path` with `flags`, returning the owned handle.
+    /// Open the named `target` with `flags`, returning the owned handle.
+    ///
+    /// The one shared spelling rule
+    /// ([`rustos_resref::names_resource_reference`]) decides which world the
+    /// name belongs to *before* any lookup: a filesystem path (absolute,
+    /// dot-relative, an `Alias:/path` alias form, or any unregistered
+    /// prefix) opens through [`fs_open`], while a resource reference
+    /// (`sys:random`, `sys:null`, …) opens through [`resource_open`], the
+    /// kernel's capability-checked resource resolver. Because the routing
+    /// lives here — in the one open-by-name path every first-party program
+    /// links — a resource reference works wherever a program accepts a file
+    /// name; no tool carries a private copy of the rule.
+    ///
+    /// A spelling that names a reference — well-formed or not — is *never*
+    /// retried as a filesystem lookup: the kernel resolver refuses a
+    /// malformed or unauthorised reference and the refusal stands (fail
+    /// closed), so a typo like `sys:null@` cannot silently read a file. A
+    /// real on-disk file whose name contains `:` stays reachable as
+    /// `./name`; a name that is not UTF-8 can never spell a reference and is
+    /// always a path.
     ///
     /// # Errors
     ///
-    /// The raw negative kernel result (`-errno`) the [`fs_open`] syscall
-    /// returns on any refusal.
-    pub fn open(path: &[u8], flags: OpenFlags) -> Result<Self, i64> {
-        let ret = fs_open(path, flags);
-        if ret < 0 {
-            return Err(ret);
+    /// The raw negative kernel result (`-errno`) the [`fs_open`] or
+    /// [`resource_open`] syscall returns on any refusal.
+    pub fn open(target: &[u8], flags: OpenFlags) -> Result<Self, i64> {
+        if core::str::from_utf8(target).is_ok_and(rustos_resref::names_resource_reference) {
+            return Self::open_resource(target, flags);
         }
-        // A non-negative `fs_open` result is a descriptor number, which the
-        // kernel always reports within `u32` (the descriptor space the
-        // per-process table allocates from); the conversion is exact.
-        let fd =
-            u32::try_from(ret).map_err(|_| -i64::from(rustos_abi::Errno::OutOfRange.as_i32()))?;
-        Ok(Self { fd })
+        Self::from_open_result(fs_open(target, flags))
     }
 
     /// Resolve the resource reference `reference` (e.g. `b"sys:random"`) and
     /// open it with `flags`, returning the owned handle.
+    ///
+    /// [`File::open`] routes here by spelling; this constructor is for a
+    /// caller that has already classified its target (a shell holding a
+    /// parsed redirection target) and must not re-run the rule.
     ///
     /// The returned handle reads and writes through the same [`File::read_at`]
     /// / [`File::write_at`] path a file handle uses; a resource is a
@@ -2728,13 +2745,19 @@ impl File {
     /// returns on any refusal (a malformed, unknown, or unauthorised
     /// reference, or one requesting access the resource does not offer).
     pub fn open_resource(reference: &[u8], flags: OpenFlags) -> Result<Self, i64> {
-        let ret = resource_open(reference, flags);
+        Self::from_open_result(resource_open(reference, flags))
+    }
+
+    /// Wrap an open-family syscall result (`fs_open` / `resource_open`) as an
+    /// owned handle, passing a negative `-errno` through unchanged.
+    ///
+    /// A non-negative result is a descriptor number, which the kernel always
+    /// reports within `u32` (the descriptor space the per-process table
+    /// allocates from); the conversion is exact.
+    fn from_open_result(ret: i64) -> Result<Self, i64> {
         if ret < 0 {
             return Err(ret);
         }
-        // A non-negative `resource_open` result is a descriptor number the
-        // kernel always reports within `u32` (the same per-process table
-        // `fs_open` allocates from); the conversion is exact.
         let fd =
             u32::try_from(ret).map_err(|_| -i64::from(rustos_abi::Errno::OutOfRange.as_i32()))?;
         Ok(Self { fd })
@@ -3808,6 +3831,75 @@ mod tests {
         let (_, _) = capture(neg, || {
             assert_eq!(resource_open(b"sys:nope", OpenFlags::READ), want);
         });
+    }
+
+    // --- File::open routing (the one shared spelling rule) -----------------
+    //
+    // `File::open` is the one open-by-name path every first-party program
+    // uses, so the routing between the filesystem and the kernel's resource
+    // resolver is asserted here — never re-tested (or re-implemented) per
+    // tool. Each opened handle is forgotten inside the capture closure so
+    // its drop's `fs_close` trap cannot overwrite the recorded open; the
+    // seam holds no real descriptor to leak.
+
+    #[test]
+    fn file_open_routes_paths_to_fs_open() {
+        // Absolute, dot-escaped, alias-form (`:` followed by `/`), and
+        // unregistered-prefix spellings are all filesystem paths; a file
+        // whose name contains `:` stays reachable as `./name`.
+        for path in [
+            b"/Users/root/notes".as_slice(),
+            b"./sys:random".as_slice(),
+            b"sys:/x".as_slice(),
+            b"home:file".as_slice(),
+        ] {
+            let (number, args) = capture(4, || {
+                let file = File::open(path, OpenFlags::READ).expect("armed open must succeed");
+                core::mem::forget(file);
+            });
+            assert_eq!(number, NUM_FS_OPEN, "{path:?} must be a filesystem open");
+            assert_eq!(args[0], path.as_ptr() as usize as u64);
+            assert_eq!(args[1], path.len() as u64);
+        }
+    }
+
+    #[test]
+    fn file_open_routes_a_reference_to_resource_open() {
+        let reference = b"sys:random";
+        let (number, args) = capture(5, || {
+            let file = File::open(reference, OpenFlags::READ).expect("armed open must succeed");
+            assert_eq!(file.fd(), 5);
+            core::mem::forget(file);
+        });
+        assert_eq!(number, NUM_RESOURCE_OPEN);
+        assert_eq!(args[0], reference.as_ptr() as usize as u64);
+        assert_eq!(args[1], reference.len() as u64);
+        assert_eq!(args[2], u64::from(OpenFlags::READ.bits()));
+    }
+
+    #[test]
+    fn file_open_never_retries_a_malformed_reference_as_a_path() {
+        // A registered-namespace spelling that is not a well-formed
+        // reference still goes to the resource resolver, whose refusal
+        // stands — a typo can never fall back to a filesystem lookup.
+        // The kernel maps a malformed reference to `OutOfRange`.
+        let want = -i64::from(rustos_abi::Errno::OutOfRange.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let (number, _) = capture(neg, || {
+            assert_eq!(File::open(b"sys:null@", OpenFlags::READ).unwrap_err(), want);
+        });
+        assert_eq!(number, NUM_RESOURCE_OPEN);
+    }
+
+    #[test]
+    fn file_open_treats_a_non_utf8_name_as_a_path() {
+        // A reference is UTF-8 by construction; raw bytes are a path.
+        let path = b"sys:\xffrandom";
+        let (number, _) = capture(4, || {
+            let file = File::open(path, OpenFlags::READ).expect("armed open must succeed");
+            core::mem::forget(file);
+        });
+        assert_eq!(number, NUM_FS_OPEN);
     }
 
     #[test]

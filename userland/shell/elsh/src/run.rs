@@ -49,10 +49,11 @@ mod program {
     use rustos_abi::elevate::{
         elevate_endpoint, ElevateReply, ElevateRequest, ELEVATE_MAX_REQUEST, ELEVATE_REPLY_LEN,
     };
-    use rustos_abi::{Errno, InputMode, LimitKind, ResourceLimit};
+    use rustos_abi::fs::{DirEntry, OpenFlags, FS_IO_MAX};
+    use rustos_abi::{Errno, FileKind, InputMode, LimitKind, ResourceLimit};
     use rustos_elsh::{
-        parse_invocation, Console, Elevator, Environment, Invocation, LaunchSpec, LimitStore, Pid,
-        ProcessHost, ReplInput, Shell, Signal, WaitOutcome, USAGE,
+        parse_invocation, Console, DirEntryInfo, Elevator, Environment, Invocation, LaunchSpec,
+        LimitStore, Pid, ProcessHost, ReplInput, Shell, Signal, WaitOutcome, WordLister, USAGE,
     };
     use rustos_help::{own_short_help, BundleHelp};
     use rustos_rt::io::{write_stderr_line, Stderr, Stdout, Write};
@@ -88,6 +89,63 @@ mod program {
         fn write_info(&mut self, bytes: &[u8]) {
             // fd 3 is best-effort and ignorable: discard the accepted count.
             let _ = rustos_rt::stdinfo(bytes);
+        }
+
+        fn set_mode(&mut self, mode: InputMode) -> Result<(), Errno> {
+            let ret = rustos_rt::set_input_mode(mode);
+            if ret < 0 {
+                return Err(errno_from(ret));
+            }
+            Ok(())
+        }
+
+        fn terminal_width(&self) -> Option<u16> {
+            // The prompt renders on standard output; ask its backing.
+            rustos_rt::terminal_size(rustos_abi::STDOUT)
+                .ok()
+                .map(|size| size.cols())
+        }
+    }
+
+    /// Initial byte size of the completion directory-listing buffer; grown on
+    /// `BufferTooSmall` up to the kernel's per-call staging cap.
+    const DIR_BUF_INITIAL: usize = 4096;
+
+    /// The completion engine's read-only directory seam, backed by the
+    /// kernel-authorised `fs_readdir`: every path resolution and per-inode
+    /// permission check stays kernel-side, and a refusal simply yields no
+    /// candidates (the engine degrades, never guesses).
+    struct RtWordLister;
+
+    impl WordLister for RtWordLister {
+        fn list_dir(&self, dir: &str) -> Result<Vec<DirEntryInfo>, Errno> {
+            let handle = rustos_rt::open_dir(dir.as_bytes()).map_err(Errno::from_syscall)?;
+            let mut buf = alloc::vec![0u8; DIR_BUF_INITIAL];
+            let used = loop {
+                match handle.read(&mut buf) {
+                    Ok(used) => break used,
+                    Err(ret) => match Errno::from_syscall(ret) {
+                        Errno::BufferTooSmall if buf.len() < FS_IO_MAX => {
+                            buf.resize((buf.len() * 2).min(FS_IO_MAX), 0);
+                        }
+                        other => return Err(other),
+                    },
+                }
+            };
+            let mut entries = Vec::new();
+            let mut rest = &buf[..used];
+            while !rest.is_empty() {
+                let (entry, consumed) = DirEntry::decode(rest)?;
+                rest = &rest[consumed..];
+                // The ABI contract makes every entry name UTF-8; a stream
+                // that is not is refused whole rather than partially listed.
+                let name = core::str::from_utf8(entry.name).map_err(|_| Errno::OutOfRange)?;
+                entries.push(DirEntryInfo {
+                    name: String::from(name),
+                    is_dir: entry.kind == FileKind::Directory,
+                });
+            }
+            Ok(entries)
         }
     }
 
@@ -399,7 +457,7 @@ mod program {
         let mut shell = Shell::with_environment(&host, &console, env)
             .with_limits(&limits)
             .with_elevator(&elevator);
-        rustos_elsh::run_repl(&mut shell, &console, &mut input)
+        rustos_elsh::run_repl(&mut shell, &console, &mut input, &RtWordLister)
     }
 
     rustos_rt::entry!(main);

@@ -13,14 +13,25 @@ dynamic-descriptor allocation (≥ 10, never a standard stream); process
 substitution and the `( … )`/`{ …; }` compound commands are recognised and
 fail closed rather than misparsing (tracked in `plans/SHELL.md`).
 
+On a terminal-backed session the REPL runs an interactive line editor
+(`src/editor.rs`) in the raw read discipline: arrow-key history with an
+incremental `Ctrl-R` reverse search, the readline movement/kill/yank
+chords, `Ctrl-C` line cancel, `Ctrl-D` end-of-input, and Tab completion
+(`src/complete.rs`) over command names, paths, and resource references —
+see `docs/src/userland/shell.md`. A backing that refuses raw mode (a
+pipe, a script) keeps the plain line reader, byte-identical.
+
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
 only dependencies are the audited `lib/*` crates
 [`rustos-abi`](../../../lib/abi) (the stable `Errno` on the host seam),
-[`rustos-resref`](../../../lib/resref) (the one resource-reference spelling
-parser), and [`rustos-vt`](../../../lib/vt) (the shared read line discipline
-the REPL's line reader runs), so the shell never links a
-kernel or driver crate (`AGENTS.md` §17.4).
+[`rustos-cmdres`](../../../lib/cmdres) (the one command-word search policy,
+which completion enumerates), [`rustos-curses`](../../../lib/curses) (the
+shared key-event decoder), [`rustos-resref`](../../../lib/resref) (the one
+resource-reference spelling parser and registry), and
+[`rustos-vt`](../../../lib/vt) (the shared terminal vocabulary the editor
+renders through and the plain reader's line discipline), so the shell
+never links a kernel or driver crate (`AGENTS.md` §17.4).
 
 ## A pure interpreter
 

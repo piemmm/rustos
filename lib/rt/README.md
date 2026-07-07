@@ -100,6 +100,19 @@ refusal surfaces as the raw `-errno`. The `open` / `create` / `open_dir` free
 functions are the common-case openers (read-only, write+create+truncate, and
 directory-listing respectively).
 
+`File::open` is the one **open-by-name** path, and it applies the shared
+`lib/resref` spelling rule (`names_resource_reference`) before any lookup: a
+filesystem path goes to `fs_open`, while a resource reference (`sys:random`,
+`sys:null`, …) goes to `resource_open`, the kernel's capability-checked
+resource resolver. Because the routing lives here, **every** first-party
+program accepts a resource reference wherever it accepts a file name —
+`cat sys:random`, `tee sys:null` — with no tool-side code (`AGENTS.md` §2.2).
+A spelling that names a reference is never retried as a filesystem lookup
+(the kernel resolver's refusal stands, fail closed), an on-disk name
+containing `:` stays reachable as `./name`, and `File::open_resource` remains
+the explicit constructor for a caller that has already classified its target
+(the shell's parsed redirection targets).
+
 ## Targets
 
 The `_start` trampoline, stack-canary symbols, and panic handler are compiled

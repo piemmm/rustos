@@ -14,7 +14,17 @@ reference parser. The shell does not own a reference parser; it links this one.
 
 ## A spelling step, not a resolver
 
-This crate turns a string into a typed `ResourceRef`. It does **not** resolve a
+This crate turns a string into a typed `ResourceRef`, and owns two more
+pieces of pure registry/spelling policy every consumer shares: the
+path-versus-reference decision (`classify_target`, with its structural
+half `names_resource_reference` — the one rule that says `sys:random` is a
+reference while `Home:/x`, `./sys:random`, or `foo:bar` stay paths, applied
+by the shell's redirection targets and by the userland runtime's
+open-by-name path, `rustos_rt::File::open`, so every tool's file operands
+accept a reference without tool-side code), and the closed registry views
+(`KnownNamespace::ALL` and
+`well_known_selectors`, the display/completion data the kernel resolver's
+tests cross-check against what it actually serves). It does **not** resolve a
 namespace to a resource, open anything, check an identity fingerprint, or perform
 a capability check. Resolution is capability-checked, fail-closed, and owned by
 the resolver services (the System Information API for `info:`/`stats:`, the device

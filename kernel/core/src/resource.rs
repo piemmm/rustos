@@ -174,17 +174,19 @@ fn resolve_sys(parsed: &ResourceRef) -> Result<ResourceBacking, ResolveError> {
 
 /// Confirm `flags` requests only access `backing` offers.
 ///
-/// A resource descriptor is a sequential byte stream: the filesystem-only
-/// flags (`CREATE`, `TRUNCATE`, `APPEND`, `DIRECTORY`, `EXCLUSIVE`) are
-/// meaningless for it and are refused. The open must request at least one of
-/// read/write, and each requested direction must be one the backing offers.
+/// A resource descriptor is a sequential byte stream. Following the POSIX
+/// open(2) treatment of device files, the file-disposition flags a writing
+/// tool routinely passes are tolerated as no-ops: `CREATE` creates nothing
+/// (the resource already exists once it resolves), and `TRUNCATE` / `APPEND`
+/// are positionless on a stream — so `tee sys:null` works exactly as
+/// `tee /dev/null` does. `DIRECTORY` is refused (a resource is not a
+/// directory) and so is `EXCLUSIVE` (the exclusive-creation request can
+/// never be satisfied by an object that already exists). The open must
+/// request at least one of read/write, and each requested direction must be
+/// one the backing offers.
 fn validate_access(backing: ResourceBacking, flags: OpenFlags) -> Result<(), ResolveError> {
-    let filesystem_only = OpenFlags::CREATE
-        .union(OpenFlags::TRUNCATE)
-        .union(OpenFlags::APPEND)
-        .union(OpenFlags::DIRECTORY)
-        .union(OpenFlags::EXCLUSIVE);
-    if flags.bits() & filesystem_only.bits() != 0 {
+    let unserviceable = OpenFlags::DIRECTORY.union(OpenFlags::EXCLUSIVE);
+    if flags.bits() & unserviceable.bits() != 0 {
         return Err(ResolveError::UnsupportedRequest);
     }
     if !flags.is_read() && !flags.is_write() {
@@ -256,16 +258,57 @@ mod tests {
         );
     }
 
+    /// A writing tool opens its output the way `tee` does — `WRITE` plus
+    /// `CREATE` and a `TRUNCATE`/`APPEND` disposition. On a resource those
+    /// dispositions are no-ops (POSIX device semantics), so `tee sys:null`
+    /// resolves exactly as `tee /dev/null` opens.
     #[test]
-    fn filesystem_only_flags_are_refused() {
-        assert_eq!(
-            resolve("sys:null", OpenFlags::WRITE.union(OpenFlags::CREATE)),
-            Err(ResolveError::UnsupportedRequest)
-        );
+    fn file_disposition_flags_are_tolerated() {
+        for disposition in [OpenFlags::TRUNCATE, OpenFlags::APPEND] {
+            assert_eq!(
+                resolve(
+                    "sys:null",
+                    OpenFlags::WRITE.union(OpenFlags::CREATE).union(disposition)
+                ),
+                Ok(ResourceBacking::Null)
+            );
+        }
+    }
+
+    #[test]
+    fn directory_and_exclusive_are_refused() {
         assert_eq!(
             resolve("sys:random", OpenFlags::READ.union(OpenFlags::DIRECTORY)),
             Err(ResolveError::UnsupportedRequest)
         );
+        assert_eq!(
+            resolve(
+                "sys:null",
+                OpenFlags::WRITE
+                    .union(OpenFlags::CREATE)
+                    .union(OpenFlags::EXCLUSIVE)
+            ),
+            Err(ResolveError::UnsupportedRequest)
+        );
+    }
+
+    /// The registry cross-check: every selector `lib/resref` advertises as
+    /// well-known for a namespace this resolver serves must actually resolve
+    /// for reading, so completion and documentation built on the registry can
+    /// never advertise a name the kernel refuses.
+    #[test]
+    fn advertised_well_known_selectors_resolve() {
+        use alloc::format;
+
+        for ns in KnownNamespace::ALL {
+            for selector in ns.well_known_selectors() {
+                let reference = format!("{}:{selector}", ns.as_str());
+                assert!(
+                    resolve(&reference, OpenFlags::READ).is_ok(),
+                    "{reference} is advertised as well-known but does not resolve",
+                );
+            }
+        }
     }
 
     #[test]

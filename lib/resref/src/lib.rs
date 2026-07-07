@@ -178,6 +178,46 @@ impl KnownNamespace {
         }
     }
 
+    /// Every registered namespace in declaration order, for exhaustive
+    /// iteration (registry-driven completion, tests). Kept in one place so a
+    /// namespace added to the registry can never be missed by an iterator.
+    pub const ALL: [KnownNamespace; 16] = [
+        KnownNamespace::Sys,
+        KnownNamespace::Info,
+        KnownNamespace::Stats,
+        KnownNamespace::State,
+        KnownNamespace::Disk,
+        KnownNamespace::Part,
+        KnownNamespace::Vol,
+        KnownNamespace::Tty,
+        KnownNamespace::Net,
+        KnownNamespace::Input,
+        KnownNamespace::Audio,
+        KnownNamespace::Gpu,
+        KnownNamespace::Bus,
+        KnownNamespace::Svc,
+        KnownNamespace::Proc,
+        KnownNamespace::Cap,
+    ];
+
+    /// The namespace's *well-known selectors*: the closed, documented set of
+    /// selectors the platform serves for every installation (today the
+    /// kernel-resolved unprivileged `sys:` members). Registry data for
+    /// display and completion only — spelling grants nothing, and whether a
+    /// caller may *open* one is decided by the capability-checked resolver at
+    /// open time. A namespace whose members are discovered per machine
+    /// (`disk:`, `net:`, …) has no well-known set and returns an empty slice.
+    ///
+    /// The kernel resolver's unit tests cross-check this table against what
+    /// it actually serves, so the registry cannot drift from reality.
+    #[must_use]
+    pub fn well_known_selectors(self) -> &'static [&'static str] {
+        match self {
+            KnownNamespace::Sys => &["null", "random"],
+            _ => &[],
+        }
+    }
+
     /// Classify a spelling against the registry, if it is a registered name.
     #[must_use]
     pub fn from_name(name: &str) -> Option<KnownNamespace> {
@@ -532,6 +572,88 @@ pub fn parse(input: &str) -> Result<ResourceRef, RefError> {
         facet,
         params,
     })
+}
+
+/// What a `:`-bearing target string names: one of the two worlds a shell
+/// word, redirection target, or tool operand can belong to.
+///
+/// RustOS has no `/dev`: the byte sinks and sources a program can name
+/// (`sys:null`, `sys:random`, …) are resource references, not device files.
+/// [`classify_target`] decides which world a target belongs to *before* any
+/// filesystem lookup, so a real on-disk file whose name happens to contain
+/// `:` (legal on ext/POSIX volumes, where only `NUL` and `/` are forbidden)
+/// always stays reachable as `./name` or when quoted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TargetClass {
+    /// A filesystem path (an ordinary path or an alias path), to be resolved
+    /// through the VFS.
+    Path,
+    /// A resource reference, to be resolved through the capability-checked
+    /// resource resolver — never a filesystem lookup. Only the *spelling* is
+    /// decided here; opening it is the caller's capability-checked step.
+    Resource(ResourceRef),
+}
+
+/// Classify a target string as a filesystem path or a resource reference —
+/// the one shared resolution rule every consumer (the shell's redirection
+/// targets, `cat`-style tool operands, completion) applies, never a second
+/// private copy.
+///
+/// A target names a resource reference only when it is a relative path whose
+/// first path component holds a `:` preceded by a registered resource
+/// namespace and not immediately followed by `/` (the spelling that tells
+/// `sys:null` apart from the `Alias:/path` alias-path form), and whose prefix
+/// is neither `.` nor `..`. Every other target — absolute, dot-relative,
+/// sub-path, or an unregistered prefix — is a path, so nothing on disk is
+/// ever shadowed.
+///
+/// # Errors
+///
+/// A target the rule classifies as a resource reference but that is not a
+/// well-formed reference returns the [`RefError`] — the caller fails closed
+/// (it never falls back to a filesystem lookup), so a typo cannot silently
+/// produce junk on disk.
+pub fn classify_target(target: &str) -> Result<TargetClass, RefError> {
+    if !names_resource_reference(target) {
+        return Ok(TargetClass::Path);
+    }
+    parse(target).map(TargetClass::Resource)
+}
+
+/// The structural half of the resolution rule: does `target`'s spelling name
+/// a resource reference rather than a path? See [`classify_target`].
+///
+/// This is the routing test alone — it does **not** validate the reference.
+/// A caller that needs the parsed [`ResourceRef`] (or the parse error) uses
+/// [`classify_target`]; a caller that only picks which resolver to hand the
+/// spelling to (the userland runtime's open path routing between the
+/// filesystem and the kernel's capability-checked resource resolver) uses
+/// this predicate and lets that resolver refuse a malformed reference, so
+/// there is exactly one refusal point and a typo never falls back to a
+/// filesystem lookup.
+#[must_use]
+pub fn names_resource_reference(target: &str) -> bool {
+    // Absolute paths are always paths.
+    if target.starts_with('/') {
+        return false;
+    }
+    // The rule inspects only the first path component (up to the first `/`).
+    let first_component_end = target.find('/').unwrap_or(target.len());
+    let first_component = &target[..first_component_end];
+    let Some(colon) = first_component.find(':') else {
+        return false;
+    };
+    let prefix = &first_component[..colon];
+    if prefix == "." || prefix == ".." {
+        return false;
+    }
+    if KnownNamespace::from_name(prefix).is_none() {
+        return false;
+    }
+    // A `:` immediately followed by `/` is the alias-path form (`Home:/x`), a
+    // path, not a reference. Tested against the original target so the `/`
+    // that ended the first component still counts.
+    !target[colon + 1..].starts_with('/')
 }
 
 /// Validate a lowercase ASCII ident that must start with a letter, against a
@@ -1034,5 +1156,78 @@ mod tests {
         ] {
             assert!(!e.to_string().is_empty());
         }
+    }
+
+    /// The registry iterator is exhaustive and agrees with the spellings.
+    #[test]
+    fn all_is_exhaustive_and_round_trips() {
+        for ns in KnownNamespace::ALL {
+            assert_eq!(KnownNamespace::from_name(ns.as_str()), Some(ns));
+        }
+        // Exhaustiveness: a registered spelling outside ALL cannot exist,
+        // because from_name and as_str are total over the same enum; the
+        // length pin catches a variant added without extending ALL.
+        assert_eq!(KnownNamespace::ALL.len(), 16);
+    }
+
+    /// Every well-known selector composes into a reference that parses back
+    /// to its own namespace and single-segment selector.
+    #[test]
+    fn well_known_selectors_parse() {
+        use alloc::format;
+
+        for ns in KnownNamespace::ALL {
+            for selector in ns.well_known_selectors() {
+                let spelling = format!("{}:{selector}", ns.as_str());
+                let parsed = parse(&spelling).expect("well-known selector parses");
+                assert_eq!(parsed.namespace().known(), Some(ns));
+                assert_eq!(parsed.selector(), [*selector]);
+            }
+        }
+    }
+
+    /// The happy path of the shared target-resolution rule: a bare registered
+    /// namespace classifies as a resource reference, not a file.
+    #[test]
+    fn registered_namespace_target_classifies_as_resource() {
+        for target in ["sys:null", "sys:random", "tty:debug"] {
+            match classify_target(target) {
+                Ok(TargetClass::Resource(reference)) => {
+                    assert!(reference.namespace().known().is_some());
+                }
+                other => panic!("{target} should be a resource reference, got {other:?}"),
+            }
+        }
+    }
+
+    /// Every spelling the rule keeps on the path side: an alias path (`:`
+    /// then `/`), an absolute path, a dot-relative path, a sub-path whose
+    /// first component has no `:`, an unregistered prefix, and a plain name.
+    #[test]
+    fn path_spellings_classify_as_paths() {
+        for target in [
+            "Home:/notes",
+            "/sys:random",
+            "./sys:random",
+            "../sys:random",
+            "foo/sys:random",
+            "foo:bar",
+            "sys:/foo",
+            "mylisting.txt",
+        ] {
+            assert_eq!(
+                classify_target(target),
+                Ok(TargetClass::Path),
+                "{target} should stay a path",
+            );
+        }
+    }
+
+    /// A registered-namespace prefix with a malformed reference fails closed
+    /// rather than falling back to the path world.
+    #[test]
+    fn malformed_registered_reference_fails_closed() {
+        // A guard delimiter with no fingerprint is a grammar violation.
+        assert_eq!(classify_target("sys:null@"), Err(RefError::EmptyGuard));
     }
 }

@@ -928,6 +928,7 @@ version = "0.0.0"
 dependencies = [
  "rustos-abi",
  "rustos-cmdres",
+ "rustos-curses",
  "rustos-help",
  "rustos-resref",
  "rustos-rt",
@@ -1518,6 +1519,7 @@ dependencies = [
  "rustos-abi-trap",
  "rustos-caps",
  "rustos-log",
+ "rustos-resref",
  "rustos-sync",
 ]
 

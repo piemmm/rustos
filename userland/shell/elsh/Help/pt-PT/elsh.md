@@ -31,6 +31,12 @@ Os builtins:
 A shell não aceita operandos: a execução de scripts ainda não faz parte
 da sua gramática.
 
+Num terminal, a shell oferece um editor de linha interativo: Cima/Baixo
+percorrem o histórico de comandos, `Ctrl-R` pesquisa-o, `Ctrl-C`
+descarta a linha em edição, `Ctrl-D` numa linha vazia termina a sessão,
+e Tab completa nomes de comandos, caminhos e referências de recursos
+como `sys:random`.
+
 ## OPTIONS
 
 - `-h, -?` — mostrar a ajuda curta deste próprio comando e sair.

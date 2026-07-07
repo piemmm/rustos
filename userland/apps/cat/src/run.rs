@@ -13,7 +13,8 @@
 //! exports it; the tool invents no second source), and runs the parsed
 //! command against the production seams: `RtFileSource`, which reads named
 //! files through the kernel-authorised `fs_*` syscalls (every per-inode and
-//! mount check stays kernel-side), `RtStdin`, which reads the inherited
+//! mount check stays kernel-side) and resource references (`sys:random`)
+//! through the kernel's capability-checked resolver, `RtStdin`, which reads the inherited
 //! standard input, the shared `rustos_help::BundleHelp`, which reads the
 //! tool's own bundle's `Help/` tree for the short-help switches, and
 //! `RtOutput`, which writes the stream to the inherited standard output. The
@@ -70,6 +71,10 @@ mod program {
             let mut open = self.open.borrow_mut();
             let cached = matches!(&*open, Some((name, _)) if name == path);
             if !cached {
+                // `File::open` applies the one shared spelling rule: a
+                // resource reference (`sys:random`) routes to the kernel's
+                // capability-checked resolver, a path to the filesystem —
+                // the tool carries no routing of its own.
                 let file =
                     File::open(path.as_bytes(), OpenFlags::READ).map_err(Errno::from_syscall)?;
                 *open = Some((String::from(path), file));

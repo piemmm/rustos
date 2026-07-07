@@ -32,6 +32,12 @@ Y builtins:
 Nid yw'r gragen yn cymryd operandau: nid yw rhedeg sgriptiau eto'n
 rhan o'i gramadeg.
 
+Ar derfynell mae'r gragen yn cynnig golygydd llinell rhyngweithiol: mae
+I fyny/I lawr yn pori hanes y gorchmynion, mae `Ctrl-R` yn ei chwilio,
+mae `Ctrl-C` yn gollwng y llinell gyfredol, mae `Ctrl-D` ar linell wag
+yn gorffen y sesiwn, ac mae Tab yn cwblhau enwau gorchmynion, llwybrau a
+chyfeiriadau adnoddau fel `sys:random`.
+
 ## OPTIONS
 
 - `-h, -?` — dangos cymorth byr y gorchymyn hwn ei hun a gadael.

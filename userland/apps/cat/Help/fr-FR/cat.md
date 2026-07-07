@@ -12,6 +12,13 @@ Lit chaque opérande de fichier dans l'ordre et écrit ses octets sur la
 sortie standard. L'opérande `-` désigne l'entrée standard, et sans
 opérande l'entrée standard est l'unique source.
 
+Un opérande peut aussi être une référence de ressource typée comme
+`sys:random` : elle est ouverte par le résolveur de ressources du
+système (contrôlé par capacités) plutôt que par le système de fichiers —
+`cat sys:random` produit des octets aléatoires. Une référence mal formée
+dans un espace de noms enregistré est une erreur, jamais un repli vers
+un nom de fichier.
+
 Avec `-n`, les lignes de sortie sont numérotées en continu sur toutes
 les sources, de sorte qu'une ligne à cheval sur deux sources n'est
 numérotée qu'une seule fois, à l'apparition de son premier octet.

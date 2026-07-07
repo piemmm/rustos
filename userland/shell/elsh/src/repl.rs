@@ -38,13 +38,17 @@
 //! closed pipe, an exhausted scripted transcript, or no backing at all — which
 //! the loop treats as a clean session end.
 
+use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_abi::{Human, Severity, StdInfoKind, StdInfoRecord};
+use rustos_abi::{Errno, Human, InputMode, Severity, StdInfoKind, StdInfoRecord};
+use rustos_curses::{Event, Input as KeyDecoder};
 use rustos_vt::control;
 use rustos_vt::line::{LineEditor, LineFeed};
 
+use crate::complete::{complete, Completion, WordLister};
+use crate::editor::{Completer, Editor, ReadOutcome, Session};
 use crate::host::Console;
 use crate::parser::CommandList;
 use crate::shell::Shell;
@@ -55,8 +59,9 @@ const HERE_DOC_PROMPT: &str = "> ";
 /// Maximum length of a single command line, in bytes. A line longer than this
 /// is discarded rather than buffered without bound, so untrusted input cannot
 /// drive unbounded kernel-heap growth. The discarded
-/// line is reported on `stdinfo` (fd 3).
-const MAX_LINE: usize = 4096;
+/// line is reported on `stdinfo` (fd 3). The interactive editor applies the
+/// same bound to the line under edit.
+pub(crate) const MAX_LINE: usize = 4096;
 
 /// Size of each `stdin` read the loop issues. The loop reassembles lines
 /// across reads, so this only bounds one syscall's transfer.
@@ -82,6 +87,30 @@ pub trait ReplInput {
     /// (fd 3). Best-effort and ignorable: it must never
     /// affect correctness, so the implementation discards any short write.
     fn write_info(&mut self, bytes: &[u8]);
+
+    /// Select the read line discipline of standard input. The loop asks for
+    /// [`InputMode::Raw`] to run the interactive editor and restores
+    /// [`InputMode::Cooked`] around every launched command and on exit.
+    ///
+    /// The default fails closed: a backing with no selectable discipline (a
+    /// pipe, a scripted transcript) reports [`Errno::NotImplemented`] and the
+    /// loop stays on plain line input, so scripts behave identically with or
+    /// without a terminal.
+    ///
+    /// # Errors
+    ///
+    /// The backing's [`Errno`] when the discipline cannot be selected.
+    fn set_mode(&mut self, mode: InputMode) -> Result<(), Errno> {
+        let _ = mode;
+        Err(Errno::NotImplemented)
+    }
+
+    /// The terminal's width in columns, when the output stream is a terminal
+    /// that reports one; `None` (the default) lets the editor use its
+    /// fallback width.
+    fn terminal_width(&self) -> Option<u16> {
+        None
+    }
 }
 
 /// What [`LineReader::next_line`] produced.
@@ -270,14 +299,34 @@ fn collect_here_docs(
 /// Run the read-eval-print loop until the shell requests exit or input ends,
 /// returning the session's exit code.
 ///
-/// The loop writes the prompt to standard output, reads one command line from
-/// `input`, and runs it through `shell`. A line that does not parse is already
-/// reported through the shell's `Console`, so its [`crate::ParseError`] is
-/// dropped here — a bad line is not a fatal session error.
-/// The loop ends when the `exit` builtin sets [`Shell::exit_request`] or the
-/// input stream ends; on end-of-input with no explicit `exit`, the session
-/// exits `0`.
-pub fn run(shell: &mut Shell<'_>, console: &dyn Console, input: &mut dyn ReplInput) -> i32 {
+/// The loop first asks the input backing for the raw read discipline: a
+/// terminal-backed session gets the interactive line editor (history, cursor
+/// keys, control chords, tab completion through `lister`), while a backing
+/// with no selectable discipline — a pipe, a script — falls back to plain
+/// line input, so scripted execution behaves identically with or without a
+/// terminal. A line that does not parse is already reported through the
+/// shell's `Console`, so its [`crate::ParseError`] is dropped here — a bad
+/// line is not a fatal session error. The loop ends when the `exit` builtin
+/// sets [`Shell::exit_request`] or the input stream ends; on end-of-input
+/// with no explicit `exit`, the session exits `0`.
+pub fn run(
+    shell: &mut Shell<'_>,
+    console: &dyn Console,
+    input: &mut dyn ReplInput,
+    lister: &dyn WordLister,
+) -> i32 {
+    if input.set_mode(InputMode::Raw).is_ok() {
+        let code = run_interactive(shell, console, input, lister);
+        // Leaving the session hands the console back in its default
+        // discipline. Best-effort: the session is over either way.
+        let _ = input.set_mode(InputMode::Cooked);
+        return code;
+    }
+    run_plain(shell, console, input)
+}
+
+/// The plain (non-terminal) loop: cooked line input, no editing.
+fn run_plain(shell: &mut Shell<'_>, console: &dyn Console, input: &mut dyn ReplInput) -> i32 {
     let mut reader = LineReader::new();
     // One blank line separates whatever preceded the session — the login
     // banner, or the root-unlock prompt — from the first interactive prompt.
@@ -305,10 +354,189 @@ pub fn run(shell: &mut Shell<'_>, console: &dyn Console, input: &mut dyn ReplInp
     }
 }
 
+/// Decodes raw input bytes into key events through the one shared curses
+/// decoder, buffering type-ahead across line reads so no keystroke is lost
+/// between sessions.
+struct EventStream {
+    decoder: KeyDecoder,
+    queue: VecDeque<Event>,
+    eof: bool,
+}
+
+impl EventStream {
+    fn new() -> Self {
+        Self {
+            decoder: KeyDecoder::new(),
+            queue: VecDeque::new(),
+            eof: false,
+        }
+    }
+
+    /// The next decoded event, reading more bytes as needed; `None` when the
+    /// input stream has ended.
+    fn next(&mut self, input: &mut dyn ReplInput) -> Option<Event> {
+        loop {
+            if let Some(event) = self.queue.pop_front() {
+                return Some(event);
+            }
+            if self.eof {
+                return None;
+            }
+            let mut chunk = [0u8; READ_CHUNK];
+            let read = input.read(&mut chunk);
+            let read = read.min(READ_CHUNK);
+            if read == 0 {
+                self.eof = true;
+                continue;
+            }
+            let queue = &mut self.queue;
+            self.decoder
+                .feed(&chunk[..read], |event| queue.push_back(event));
+        }
+    }
+}
+
+/// The editor's completion seam, closed over the shell's `PATH` and the
+/// injected directory lister: the one shared engine, never a second policy.
+struct ShellCompleter<'a> {
+    path_var: Option<String>,
+    lister: &'a dyn WordLister,
+}
+
+impl Completer for ShellCompleter<'_> {
+    fn complete(&self, line: &str, cursor: usize) -> Completion {
+        complete(line, cursor, self.path_var.as_deref(), self.lister)
+    }
+}
+
+/// Read one edited line under `prompt`, or `None` when the input stream
+/// ends mid-edit.
+fn read_edited_line(
+    editor: &mut Editor,
+    events: &mut EventStream,
+    prompt: String,
+    shell: &Shell<'_>,
+    console: &dyn Console,
+    input: &mut dyn ReplInput,
+    lister: &dyn WordLister,
+) -> Option<ReadOutcome> {
+    let completer = ShellCompleter {
+        path_var: shell.environment().get("PATH").map(String::from),
+        lister,
+    };
+    let mut session = Session::new(editor, prompt, input.terminal_width());
+    session.render(console);
+    while let Some(event) = events.next(input) {
+        if let Some(outcome) = session.handle(event, console, &completer) {
+            return Some(outcome);
+        }
+        session.render(console);
+    }
+    None
+}
+
+/// Collect pending here-document bodies through the editor, prompting with
+/// the continuation prompt. `Ctrl-C` (or end of input) leaves the document
+/// unterminated, so running the list fails it closed.
+fn collect_here_docs_interactive(
+    list: &mut CommandList,
+    editor: &mut Editor,
+    events: &mut EventStream,
+    shell: &Shell<'_>,
+    console: &dyn Console,
+    input: &mut dyn ReplInput,
+    lister: &dyn WordLister,
+) {
+    while list.pending_here_doc().is_some() {
+        match read_edited_line(
+            editor,
+            events,
+            String::from(HERE_DOC_PROMPT),
+            shell,
+            console,
+            input,
+            lister,
+        ) {
+            Some(ReadOutcome::Line(line)) => {
+                console.write_stdout("\r\n");
+                list.feed_here_doc_line(&line);
+            }
+            Some(ReadOutcome::Cancelled) => {
+                console.write_stdout("^C\r\n");
+                return;
+            }
+            Some(ReadOutcome::Eof) | None => return,
+        }
+    }
+}
+
+/// The interactive loop: raw input, the line editor, and history.
+fn run_interactive(
+    shell: &mut Shell<'_>,
+    console: &dyn Console,
+    input: &mut dyn ReplInput,
+    lister: &dyn WordLister,
+) -> i32 {
+    let mut editor = Editor::new();
+    let mut events = EventStream::new();
+    // One blank line separates whatever preceded the session — the login
+    // banner, or the root-unlock prompt — from the first interactive prompt.
+    console.write_stdout("\n");
+    loop {
+        let prompt = shell.render_prompt();
+        match read_edited_line(
+            &mut editor,
+            &mut events,
+            prompt,
+            shell,
+            console,
+            input,
+            lister,
+        ) {
+            Some(ReadOutcome::Line(line)) => {
+                // The editor echoed the line without its terminator; advance
+                // past it before any command output.
+                console.write_stdout("\r\n");
+                editor.remember(&line);
+                if let Ok(mut list) = shell.parse_line(&line) {
+                    collect_here_docs_interactive(
+                        &mut list,
+                        &mut editor,
+                        &mut events,
+                        shell,
+                        console,
+                        input,
+                        lister,
+                    );
+                    // A launched command owns the console until it exits:
+                    // hand it the cooked default discipline and take raw
+                    // back at the next prompt (best-effort on a backing
+                    // that refuses: editing degrades, the session lives).
+                    let _ = input.set_mode(InputMode::Cooked);
+                    let _ = shell.run_list(&list);
+                    let _ = input.set_mode(InputMode::Raw);
+                }
+                if let Some(code) = shell.exit_request() {
+                    return code;
+                }
+            }
+            Some(ReadOutcome::Cancelled) => {
+                // The bash convention: acknowledge, drop the line, re-prompt.
+                console.write_stdout("^C\r\n");
+            }
+            Some(ReadOutcome::Eof) => {
+                console.write_stdout("\r\n");
+                return shell.exit_request().unwrap_or(0);
+            }
+            None => return shell.exit_request().unwrap_or(0),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{run, ReplInput, MAX_LINE};
-    use crate::test_support::{RecordingConsole, ScriptedHost};
+    use crate::test_support::{EmptyLister, RecordingConsole, ScriptedHost};
     use crate::Shell;
     use alloc::format;
     use alloc::string::String;
@@ -358,6 +586,158 @@ mod tests {
         }
     }
 
+    /// A raw-capable scripted input: accepts every discipline change (and
+    /// records the sequence), reports a terminal width, and hands out a
+    /// fixed byte transcript — the interactive twin of [`ScriptedInput`].
+    struct RawScriptedInput {
+        input: Vec<u8>,
+        pos: usize,
+        modes: alloc::rc::Rc<core::cell::RefCell<Vec<rustos_abi::InputMode>>>,
+    }
+
+    impl RawScriptedInput {
+        fn new(input: &str) -> Self {
+            Self {
+                input: input.as_bytes().to_vec(),
+                pos: 0,
+                modes: alloc::rc::Rc::new(core::cell::RefCell::new(Vec::new())),
+            }
+        }
+    }
+
+    impl ReplInput for RawScriptedInput {
+        fn read(&mut self, buf: &mut [u8]) -> usize {
+            let remaining = &self.input[self.pos..];
+            let take = remaining.len().min(buf.len());
+            buf[..take].copy_from_slice(&remaining[..take]);
+            self.pos += take;
+            take
+        }
+
+        fn write_info(&mut self, _bytes: &[u8]) {}
+
+        fn set_mode(&mut self, mode: rustos_abi::InputMode) -> Result<(), rustos_abi::Errno> {
+            self.modes.borrow_mut().push(mode);
+            Ok(())
+        }
+
+        fn terminal_width(&self) -> Option<u16> {
+            Some(40)
+        }
+    }
+
+    /// An in-memory app store for interactive completion tests.
+    struct StoreLister;
+
+    impl crate::complete::WordLister for StoreLister {
+        fn list_dir(
+            &self,
+            dir: &str,
+        ) -> Result<Vec<crate::complete::DirEntryInfo>, rustos_abi::Errno> {
+            if dir == "/System/Apps" {
+                return Ok(alloc::vec![crate::complete::DirEntryInfo {
+                    name: String::from("cat.app"),
+                    is_dir: true,
+                }]);
+            }
+            Err(rustos_abi::Errno::NotFound)
+        }
+    }
+
+    #[test]
+    fn interactive_arrow_up_recalls_and_reruns_history() {
+        let host = ScriptedHost::new();
+        let console = RecordingConsole::new();
+        let mut shell = Shell::new(&host, &console);
+        // Run `echo hi`, then Up-arrow (CSI A) recalls it and Enter re-runs
+        // it, then `exit 5`.
+        let mut input = RawScriptedInput::new("echo hi\r\x1b[A\rexit 5\r");
+        assert_eq!(run(&mut shell, &console, &mut input, &EmptyLister), 5);
+        let out = console.stdout();
+        assert_eq!(
+            out.matches("hi\n").count(),
+            2,
+            "the recalled line ran again: {out:?}"
+        );
+    }
+
+    #[test]
+    fn interactive_ctrl_c_cancels_the_line() {
+        let host = ScriptedHost::new();
+        let console = RecordingConsole::new();
+        let mut shell = Shell::new(&host, &console);
+        // `junk` is cancelled with ^C (0x03) and never runs.
+        let mut input = RawScriptedInput::new("junk\x03exit 0\r");
+        assert_eq!(run(&mut shell, &console, &mut input, &EmptyLister), 0);
+        assert!(
+            console.stdout().contains("^C"),
+            "the cancel is acknowledged"
+        );
+        assert!(host.launches().is_empty(), "the cancelled line never runs");
+    }
+
+    #[test]
+    fn interactive_ctrl_d_ends_the_session() {
+        let host = ScriptedHost::new();
+        let console = RecordingConsole::new();
+        let mut shell = Shell::new(&host, &console);
+        let mut input = RawScriptedInput::new("\x04");
+        assert_eq!(run(&mut shell, &console, &mut input, &EmptyLister), 0);
+    }
+
+    #[test]
+    fn interactive_session_switches_disciplines_around_commands() {
+        use rustos_abi::InputMode;
+
+        let host = ScriptedHost::new();
+        let console = RecordingConsole::new();
+        let mut shell = Shell::new(&host, &console);
+        let mut input = RawScriptedInput::new("echo hi\rexit 0\r");
+        let modes = alloc::rc::Rc::clone(&input.modes);
+        assert_eq!(run(&mut shell, &console, &mut input, &EmptyLister), 0);
+        let modes = modes.borrow();
+        // Raw for the editor, cooked around the command, raw again, and
+        // cooked handed back on exit.
+        assert_eq!(modes.first(), Some(&InputMode::Raw));
+        assert_eq!(modes.last(), Some(&InputMode::Cooked));
+        assert!(
+            modes
+                .windows(2)
+                .any(|w| w == [InputMode::Cooked, InputMode::Raw]),
+            "the discipline returns to raw after a command: {modes:?}"
+        );
+    }
+
+    #[test]
+    fn interactive_tab_completes_a_command_from_the_store() {
+        let host = ScriptedHost::new();
+        let console = RecordingConsole::new();
+        let mut shell = Shell::new(&host, &console);
+        // `ca<Tab>` completes uniquely to `cat ` from the store; Enter runs
+        // it as an external command.
+        let mut input = RawScriptedInput::new("ca\t\rexit 0\r");
+        assert_eq!(run(&mut shell, &console, &mut input, &StoreLister), 0);
+        let launches = host.launches();
+        assert_eq!(launches.len(), 1, "the completed command launched");
+        assert_eq!(launches[0].commands[0].argv, ["cat"]);
+    }
+
+    #[test]
+    fn scripted_input_still_takes_the_plain_path() {
+        // A backing that refuses the raw discipline (the default) runs the
+        // plain loop: no escape sequences reach the output, so a scripted
+        // session's transcript stays byte-stable.
+        let host = ScriptedHost::new();
+        let console = RecordingConsole::new();
+        let mut shell = Shell::new(&host, &console);
+        let mut input = ScriptedInput::new("echo plain\n");
+        assert_eq!(run(&mut shell, &console, &mut input, &EmptyLister), 0);
+        assert!(
+            !console.stdout().contains('\x1b'),
+            "no escapes in plain mode"
+        );
+    }
+
     #[test]
     fn prompt_is_written_before_reading_and_eof_ends_the_session() {
         let host = ScriptedHost::new();
@@ -366,7 +746,7 @@ mod tests {
         let mut input = ScriptedInput::new("");
         // No input: the loop writes one blank line, then one prompt, reads
         // end-of-input, and exits 0.
-        assert_eq!(run(&mut shell, &console, &mut input), 0);
+        assert_eq!(run(&mut shell, &console, &mut input, &EmptyLister), 0);
         assert_eq!(console.stdout(), format!("\n{}", shell.render_prompt()));
     }
 
@@ -376,7 +756,7 @@ mod tests {
         let console = RecordingConsole::new();
         let mut shell = Shell::new(&host, &console);
         let mut input = ScriptedInput::new("echo hello\nexit 7\necho never\n");
-        assert_eq!(run(&mut shell, &console, &mut input), 7);
+        assert_eq!(run(&mut shell, &console, &mut input, &EmptyLister), 7);
         let out = console.stdout();
         assert!(out.contains("hello\n"), "echo ran: {out:?}");
         assert!(
@@ -399,7 +779,7 @@ mod tests {
         line.push_str(&"x".repeat(300));
         line.push('\n');
         let mut input = ScriptedInput::new(&line);
-        assert_eq!(run(&mut shell, &console, &mut input), 0);
+        assert_eq!(run(&mut shell, &console, &mut input, &EmptyLister), 0);
         assert!(console.stdout().contains(&"x".repeat(300)));
     }
 
@@ -409,7 +789,7 @@ mod tests {
         let console = RecordingConsole::new();
         let mut shell = Shell::new(&host, &console);
         let mut input = ScriptedInput::new("echo tail");
-        assert_eq!(run(&mut shell, &console, &mut input), 0);
+        assert_eq!(run(&mut shell, &console, &mut input, &EmptyLister), 0);
         assert!(console.stdout().contains("tail\n"));
     }
 
@@ -425,7 +805,7 @@ mod tests {
         transcript.push('\n');
         transcript.push_str("echo after\n");
         let mut input = ScriptedInput::new(&transcript);
-        assert_eq!(run(&mut shell, &console, &mut input), 0);
+        assert_eq!(run(&mut shell, &console, &mut input, &EmptyLister), 0);
         let out = console.stdout();
         assert!(
             out.contains("after\n"),
@@ -450,7 +830,7 @@ mod tests {
         let console = RecordingConsole::new();
         let mut shell = Shell::new(&host, &console);
         let mut input = ScriptedInput::new("cat <<EOF\nhello\nworld\nEOF\n");
-        assert_eq!(run(&mut shell, &console, &mut input), 0);
+        assert_eq!(run(&mut shell, &console, &mut input, &EmptyLister), 0);
 
         let launches = host.launches();
         assert_eq!(launches.len(), 1);
@@ -471,7 +851,7 @@ mod tests {
         let mut shell = Shell::new(&host, &console);
         // The input ends before the `EOF` terminator line.
         let mut input = ScriptedInput::new("cat <<EOF\npartial body\n");
-        assert_eq!(run(&mut shell, &console, &mut input), 0);
+        assert_eq!(run(&mut shell, &console, &mut input, &EmptyLister), 0);
 
         assert!(host.launches().is_empty(), "nothing runs");
         assert!(console.stderr().contains("missing its terminator"));
@@ -489,7 +869,7 @@ mod tests {
         transcript.push_str(&"y".repeat(MAX_LINE + 50));
         transcript.push_str("\nEOF\necho after\n");
         let mut input = ScriptedInput::new(&transcript);
-        assert_eq!(run(&mut shell, &console, &mut input), 0);
+        assert_eq!(run(&mut shell, &console, &mut input, &EmptyLister), 0);
 
         assert!(
             host.launches().is_empty(),
@@ -512,7 +892,7 @@ mod tests {
         let console = RecordingConsole::new();
         let mut shell = Shell::new(&host, &console);
         let mut input = ScriptedInput::new("echo hi\rexit 3\r");
-        assert_eq!(run(&mut shell, &console, &mut input), 3);
+        assert_eq!(run(&mut shell, &console, &mut input, &EmptyLister), 3);
         assert!(console.stdout().contains("hi\n"));
     }
 
@@ -522,7 +902,7 @@ mod tests {
         let console = RecordingConsole::new();
         let mut shell = Shell::new(&host, &console);
         let mut input = ScriptedInput::new("echo a\r\nexit 5\r\n");
-        assert_eq!(run(&mut shell, &console, &mut input), 5);
+        assert_eq!(run(&mut shell, &console, &mut input, &EmptyLister), 5);
         let out = console.stdout();
         assert!(out.contains("a\n"));
         // Two consumed lines mean two prompts: the LF of each CRLF completes
@@ -538,7 +918,7 @@ mod tests {
         let console = RecordingConsole::new();
         let mut shell = Shell::new(&host, &console);
         let mut input = ScriptedInput::chunked("echo a\r\nexit 5\r\n", 1);
-        assert_eq!(run(&mut shell, &console, &mut input), 5);
+        assert_eq!(run(&mut shell, &console, &mut input, &EmptyLister), 5);
         let out = console.stdout();
         assert!(out.contains("a\n"));
         assert_eq!(out.matches(shell.render_prompt().as_str()).count(), 2);
@@ -552,7 +932,7 @@ mod tests {
         let console = RecordingConsole::new();
         let mut shell = Shell::new(&host, &console);
         let mut input = ScriptedInput::new("echoZ\x7f ok\n");
-        assert_eq!(run(&mut shell, &console, &mut input), 0);
+        assert_eq!(run(&mut shell, &console, &mut input, &EmptyLister), 0);
         assert!(console.stdout().contains("ok\n"));
     }
 
@@ -568,7 +948,7 @@ mod tests {
         transcript.push('\r');
         transcript.push_str("echo after\r");
         let mut input = ScriptedInput::new(&transcript);
-        assert_eq!(run(&mut shell, &console, &mut input), 0);
+        assert_eq!(run(&mut shell, &console, &mut input, &EmptyLister), 0);
         let out = console.stdout();
         assert!(out.contains("after\n"), "the next line runs: {out:?}");
         assert!(!out.contains("yyyy"), "the dropped line never runs");
@@ -582,7 +962,7 @@ mod tests {
         let console = RecordingConsole::new();
         let mut shell = Shell::new(&host, &console);
         let mut input = ScriptedInput::new("echo crlf\r\nexit 0\r\n");
-        assert_eq!(run(&mut shell, &console, &mut input), 0);
+        assert_eq!(run(&mut shell, &console, &mut input, &EmptyLister), 0);
         let out = console.stdout();
         // The trailing '\r' must not survive into the echoed argument.
         assert!(out.contains("crlf\n"));

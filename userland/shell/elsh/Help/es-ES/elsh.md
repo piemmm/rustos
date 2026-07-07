@@ -32,6 +32,12 @@ Los comandos integrados:
 El intérprete no acepta operandos: la ejecución de guiones aún no forma
 parte de su gramática.
 
+En un terminal, el shell ofrece un editor de línea interactivo:
+Arriba/Abajo recorren el historial de órdenes, `Ctrl-R` lo busca,
+`Ctrl-C` descarta la línea en edición, `Ctrl-D` en una línea vacía
+termina la sesión, y Tab completa nombres de órdenes, rutas y
+referencias de recursos como `sys:random`.
+
 ## OPTIONS
 
 - `-h, -?` — mostrar la ayuda corta de este comando y salir.

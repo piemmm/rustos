@@ -12,6 +12,12 @@ Lee cada operando de archivo en orden y escribe sus bytes en la
 salida estándar. El operando `-` designa la entrada estándar, y sin
 operando la entrada estándar es la única fuente.
 
+Un operando también puede ser una referencia de recurso tipada como
+`sys:random`: se abre a través del resolutor de recursos del sistema
+(verificado por capacidades) en lugar del sistema de archivos — `cat
+sys:random` emite bytes aleatorios. Una referencia mal formada en un
+espacio de nombres registrado es un error, nunca un nombre de archivo.
+
 Con `-n`, las líneas de salida se numeran de forma continua a través
 de todas las fuentes, de modo que una línea que abarca dos fuentes se
 numera exactamente una vez, cuando aparece su primer byte. `-b`

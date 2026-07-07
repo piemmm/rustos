@@ -33,6 +33,12 @@ Die eingebauten Befehle:
 Die Shell nimmt keine Operanden an: die Ausführung von Skripten gehört
 noch nicht zu ihrer Grammatik.
 
+Auf einem Terminal bietet die Shell einen interaktiven Zeileneditor:
+Pfeil-hoch/-runter blättern durch den Befehlsverlauf, `Ctrl-R`
+durchsucht ihn, `Ctrl-C` verwirft die aktuelle Zeile, `Ctrl-D` auf
+leerer Zeile beendet die Sitzung, und Tab vervollständigt Befehlsnamen,
+Dateipfade und Ressourcenreferenzen wie `sys:random`.
+
 ## OPTIONS
 
 - `-h, -?` — die Kurzhilfe dieses Befehls anzeigen und beenden.

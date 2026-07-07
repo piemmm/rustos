@@ -12,6 +12,14 @@ Reads each file operand in order and writes its bytes to standard
 output. The operand `-` names standard input, and with no operand
 standard input is the single source.
 
+An operand may also be a typed resource reference: a relative operand
+whose first path component is a registered namespace, such as
+`sys:random`, is opened through the system's capability-checked
+resource resolver rather than the filesystem, so `cat sys:random`
+streams random bytes. A malformed reference in a registered namespace
+is an error, never a filename fallback; an on-disk file whose name
+contains `:` stays reachable as `./name` or when quoted.
+
 With `-n` output lines are numbered continuously across every source,
 so a line that straddles two sources is numbered exactly once, when
 its first byte appears. `-b` numbers only non-empty lines and
@@ -46,6 +54,8 @@ source is touched; the bytes already written stay written.
 ## EXAMPLES
 
 - `cat notes.txt` — write `notes.txt` to standard output.
+- `cat sys:random` — stream bytes from the system random source
+  (endless; interrupt the command to stop).
 - `cat a.txt - b.txt` — write `a.txt`, then standard input, then
   `b.txt`.
 - `cat -n log.txt` — number every output line.

@@ -13,6 +13,13 @@ auf die Standardausgabe. Der Operand `-` bezeichnet die
 Standardeingabe; ohne Operand ist die Standardeingabe die einzige
 Quelle.
 
+Ein Operand kann auch eine typisierte Ressourcenreferenz wie
+`sys:random` sein: Sie wird über den berechtigungsgeprüften
+Ressourcen-Resolver des Systems geöffnet, nicht über das Dateisystem —
+`cat sys:random` liefert Zufallsbytes. Eine fehlerhafte Referenz in
+einem registrierten Namensraum ist ein Fehler und fällt nie auf einen
+Dateinamen zurück.
+
 Mit `-n` werden die Ausgabezeilen fortlaufend über alle Quellen
 nummeriert, sodass eine Zeile, die sich über zwei Quellen erstreckt,
 genau einmal nummeriert wird — beim Erscheinen ihres ersten Bytes.

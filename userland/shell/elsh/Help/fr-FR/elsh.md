@@ -32,6 +32,12 @@ Les commandes intégrées :
 Le shell ne prend aucun opérande : l'exécution de scripts ne fait pas
 encore partie de sa grammaire.
 
+Sur un terminal, le shell offre un éditeur de ligne interactif :
+Haut/Bas parcourent l'historique des commandes, `Ctrl-R` le recherche,
+`Ctrl-C` abandonne la ligne en cours, `Ctrl-D` sur une ligne vide
+termine la session, et Tab complète les noms de commandes, les chemins
+et les références de ressources comme `sys:random`.
+
 ## OPTIONS
 
 - `-h, -?` — afficher l'aide courte de cette commande et quitter.

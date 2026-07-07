@@ -26,6 +26,12 @@ rustos-caps = { path = "../caps", version = "=0.0.0" }
 # trap assembly is not duplicated here.
 rustos-abi-trap = { path = "../abi-trap", version = "=0.0.0" }
 
+# The one shared spelling rule that decides whether a name a program opens
+# is a filesystem path or a resource reference (`sys:random`), so
+# `File::open` routes it to the right kernel resolver and every program —
+# not each tool privately — supports resource references (`AGENTS.md` §2.2).
+rustos-resref = { path = "../resref", version = "=0.0.0" }
+
 # The `SpinLock` that guards the `mem_map`-backed global allocator's shared
 # free-span state (`src/heap.rs`). First-party (`AGENTS.md` §2.12); the one
 # deduplicated lock the workspace shares (`AGENTS.md` §2.2, §6).

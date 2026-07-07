@@ -24,6 +24,11 @@ second resolution policy.
   shown always documents the program the shell would launch). An explicit
   path to a bare program names no bundle and yields the empty list — never
   a guessed sibling directory.
+- `command_search_dirs(path_var)` — the ordered *directories* the bare-word
+  search covers (the system app store, then the alias-aware `PATH`
+  entries): the directory view of the same policy, which the shell's tab
+  completion enumerates so it offers exactly the names launch would
+  resolve.
 - `search_roots(home)` — the app-store roots `man`'s recursive bundle
   search walks when the ordered candidates find nothing: the machine-wide
   `/Apps` (`rustos_abi::USER_APP_STORE`), then the user's own

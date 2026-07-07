@@ -3,9 +3,16 @@
 Stage 6 deliverable (`AGENTS.md` §3 `userland/apps/`), a `plans/APPS.md`
 command app registered at `/System/Apps/cat.app/Run` so the shell
 resolves the bare word `cat` to it. `cat` reads each of its sources in
-order and writes the bytes to the terminal. A source is either a path or
-standard input (the `-` operand, and the default when no operand is
-given). The option surface is the GNU `cat` set (`AGENTS.md` §16.7):
+order and writes the bytes to the terminal. A source is a path, standard
+input (the `-` operand, and the default when no operand is given), or a
+typed resource reference (`sys:random`). The reference support is not
+cat's: `rustos_rt::File::open` — the one open-by-name path every
+command app uses — applies the shared `lib/resref` spelling rule and
+routes a reference to the kernel's capability-checked `resource_open`
+resolver rather than the filesystem, so `cat sys:random` streams the
+kernel CSPRNG; a malformed reference in a registered namespace fails
+closed, never a filename fallback. The option surface is
+the GNU `cat` set (`AGENTS.md` §16.7):
 numbering (`-n`, non-blank `-b`), blank-line squeezing (`-s`), and the
 visibility markers (`-E`, `-T`, `-v`, plus the combinations `-e`, `-t`,
 `-A`). `-h`/`-?` render the tool's own short help from its bundled

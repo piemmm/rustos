@@ -28,6 +28,19 @@ The builtins:
 - `help` — list the builtins.
 - `exit [code]` — end the session.
 
+On a terminal the shell runs an interactive line editor with the
+familiar bash/zsh keys: Up/Down (or `Ctrl-P`/`Ctrl-N`) walk the
+session's command history, `Ctrl-R` searches it incrementally,
+Left/Right/Home/End and `Ctrl-A`/`Ctrl-E` move the cursor,
+`Ctrl-K`/`Ctrl-U`/`Ctrl-W`/`Ctrl-Y` kill and yank, `Ctrl-T`
+transposes, `Ctrl-L` repaints on a cleared screen, `Ctrl-C` discards
+the line under edit, and `Ctrl-D` on an empty line ends the session.
+Tab completes the word under the cursor: command names (builtins and
+installed command apps), file paths, and — for a redirection target or
+a reference-shaped word — resource references such as `sys:random`.
+Piped or scripted input bypasses the editor and behaves identically
+with or without a terminal.
+
 The shell takes no operands: script execution is not yet part of its
 grammar.
 

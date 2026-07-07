@@ -208,6 +208,47 @@ program's — kernel-core's `BlockingConsoleRead` parks an empty-handed
 `stream_read` caller until input arrives (`plans/PI.md` P6e-2), so an
 interactive session sits at its prompt waiting for the user to type.
 
+## Interactive line editor and tab completion
+
+When the input backing accepts the **raw** read discipline
+(`stream_input_mode`), the REPL runs the interactive line editor
+(`src/editor.rs`) instead of the plain reader: the shell echoes and repaints
+the line itself through the shared `lib/vt` escape vocabulary, and decodes
+key bytes through the shared `rustos_curses::Input` decoder — never a
+shell-private key table (`plans/SHELL.md` "Interactive terminal"). A backing
+that refuses raw mode (a pipe, a script) keeps the plain reader, so scripted
+execution is byte-identical with or without a terminal. Around every launched
+command the loop restores the cooked discipline and takes raw back at the
+next prompt; leaving the session hands the console back cooked.
+
+The editing set matches bash/zsh muscle memory: Up/Down (`Ctrl-P`/`Ctrl-N`)
+walk the bounded in-memory history (draft preserved, blanks and consecutive
+duplicates skipped); `Ctrl-R` is incremental reverse search (`Ctrl-R` steps
+older, `Ctrl-G` aborts, Escape accepts, Enter accepts and runs);
+Left/Right/Home/End (`Ctrl-A`/`E`/`B`/`F`) and `Alt-B`/`Alt-F` move; the
+kill/yank set is `Ctrl-K`/`Ctrl-U`/`Ctrl-W`/`Alt-D`/`Ctrl-Y` with `Ctrl-T`
+transpose; `Ctrl-C` cancels the line under edit (acknowledged as `^C`, `$?`
+untouched); `Ctrl-D` deletes under the cursor or, on an empty line, ends the
+session; `Ctrl-L` clears and repaints; bracketed paste inserts literally and
+never auto-runs. Delivering `Ctrl-C`/`Ctrl-Z` to a *running foreground job*
+is the staged kernel work in `.junie/plan-session-shell.md` (part 3).
+
+Tab completion (`src/complete.rs`) locates the word under the cursor with
+the shell's own span-carrying lexer (`lexer::tokenize_with_spans`) and is
+read-only: it never runs a command, writes a file, or changes `$?`. A
+command-position word completes from the builtin table and the `.app`
+bundles of the shared command-search directories
+(`rustos_cmdres::command_search_dirs` — so exactly the names the shell would
+resolve are offered); argument words complete as filesystem paths through
+the injected `WordLister` (kernel-authorised `fs_readdir`); a redirection
+target additionally offers the registered resource namespaces (`sys:` …) and
+their well-known selectors (`rustos_resref::KnownNamespace`) — the same
+registry the redirection classifier applies, cross-checked against the
+kernel resolver. A unique candidate inserts (directories stay open with `/`,
+finished words close with a space), several extend to their longest common
+prefix, and an unextendable set is listed inline. Unlexable prefixes and
+quoted/expansion-bearing words degrade to no candidates, fail closed.
+
 The `RtProcessHost` launches external commands through the `spawn` syscall
 and reaps them through `wait`. The command's words travel to the child as
 its argument vector and the shell's exported variables (with any `NAME=v

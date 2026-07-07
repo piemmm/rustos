@@ -313,8 +313,17 @@ tests in `lib/procinfo` (`cargo test -p rustos-procinfo`).
 `plans/APPS.md` command app registered at `/System/Apps/cat.app/Run`, so
 the shell resolves the bare word `cat` to it). It reads each of its
 sources in order and writes the bytes to the terminal. A source is
-either a path or standard input — the `-` operand, and the default when
-no operand is given. The option surface is the GNU `cat` set
+a path, standard input — the `-` operand, and the default when
+no operand is given — or a typed resource reference (`sys:random`).
+The reference support is not cat's own: `rustos_rt::File::open` — the
+one open-by-name path every command app uses — applies the shared
+`lib/resref` spelling rule and routes a reference to the kernel's
+capability-checked `resource_open` resolver rather than the filesystem,
+so `cat sys:random` streams the kernel CSPRNG and every other tool that
+opens a named operand accepts the same spellings. A malformed reference
+in a registered namespace fails closed (never a filename fallback), and
+an on-disk name containing `:` stays reachable as `./name`. The option
+surface is the GNU `cat` set
 (`AGENTS.md` §16.7): numbering (`-n`, non-blank `-b`), blank-line
 squeezing (`-s`), and the visibility markers (`-E`, `-T`, `-v`, and the
 combinations `-e`, `-t`, `-A`). `-h`/`-?` render the tool's own
