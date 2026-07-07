@@ -159,6 +159,12 @@ mod program {
             .unwrap_or(Errno::NotImplemented)
     }
 
+    /// The POSIX job-control stop signal number (SIGTSTP) the shell reports
+    /// a stopped job under, so `$?` shows the familiar `128 + 20 = 148` a
+    /// user scripts against — the shell-side vocabulary, deliberately the
+    /// POSIX number rather than the `abi-v1` wire discriminant.
+    const STOP_SIGNAL_NUMBER: i32 = 20;
+
     /// Launches and reaps external commands through the `spawn` and `wait`
     /// syscalls (`plans/SPAWN.md` SP3 / SP6), resolving the command word to
     /// a bundle `Run` path through the shared candidate policy
@@ -238,14 +244,36 @@ mod program {
         }
 
         fn wait(&self, pid: Pid) -> Result<WaitOutcome, Errno> {
-            let mut status = 0i32;
             // PIDs fit an `i32` on this ABI; `wait` takes a signed PID.
             #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-            let ret = rustos_rt::wait(pid.as_u64() as i32, &mut status);
+            let pid_i32 = pid.as_u64() as i32;
+            // Mark the child as this console's foreground job before
+            // blocking (the `tcsetpgrp` analogue): the kernel's cooked-mode
+            // line discipline then delivers `^C`/`^Z` to the child while
+            // the shell is parked in `wait`. A refusal (piped stdin, no
+            // console backing, an unwired kernel) is not fatal — the wait
+            // proceeds without interactive signal routing, exactly as a
+            // non-interactive session should.
+            let marked = rustos_rt::console_foreground(rustos_abi::STDIN, pid_i32) >= 0;
+            let mut status = rustos_abi::WaitStatus::Exited(0);
+            // `STOPPED` opts into stop reports, so a `^Z`-stopped foreground
+            // job returns control to the shell instead of blocking forever.
+            let ret = rustos_rt::wait(pid_i32, &mut status, rustos_abi::WaitFlags::STOPPED);
+            if marked {
+                // Reclaim the terminal: back at the prompt (or handling a
+                // stop), bytes flow to the shell again.
+                let _ = rustos_rt::console_foreground(rustos_abi::STDIN, 0);
+            }
             if ret < 0 {
                 return Err(errno_from(ret));
             }
-            Ok(WaitOutcome::Exited(status))
+            Ok(match status {
+                rustos_abi::WaitStatus::Exited(code) => WaitOutcome::Exited(code),
+                // The shell's job vocabulary speaks the POSIX numbers a
+                // user scripts against: a stop reports as SIGTSTP (20), so
+                // `$?` becomes the familiar 148.
+                rustos_abi::WaitStatus::Stopped(_) => WaitOutcome::Stopped(STOP_SIGNAL_NUMBER),
+            })
         }
 
         fn signal(&self, pid: Pid, signal: Signal) -> Result<(), Errno> {

@@ -60,9 +60,9 @@ use rustos_abi::input::KeyInput;
 use rustos_abi::waitset::{WaitSetOp, WaitSourceKind};
 use rustos_abi::{
     BootId, FileStat, HwNode, InputMode, LimitKind, MapFlags, OpenFlags, Origin, ResourceLimit,
-    Signal, SyscallNumber, TerminalSize, Time64, WaitFlags, WallClockReading, WallTimeState,
-    BOOT_ID_LEN, CONSOLE_INHERIT, ORIGIN_WIRE_LEN, SPAWN_UID_INHERIT, STDERR, STDIN, STDINFO,
-    STDOUT, TERMINAL_SIZE_WIRE_LEN,
+    Signal, SyscallNumber, TerminalSize, Time64, WaitFlags, WaitStatus, WallClockReading,
+    WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, ORIGIN_WIRE_LEN, SPAWN_UID_INHERIT, STDERR, STDIN,
+    STDINFO, STDOUT, TERMINAL_SIZE_WIRE_LEN,
 };
 use rustos_abi_trap::raw_syscall;
 
@@ -119,6 +119,9 @@ const NUM_WAIT: u64 = SyscallNumber::WAIT.as_u16() as u64;
 
 /// `signal` syscall number (as above).
 const NUM_SIGNAL: u64 = SyscallNumber::SIGNAL.as_u16() as u64;
+
+/// `console_foreground` syscall number (as above).
+const NUM_CONSOLE_FOREGROUND: u64 = SyscallNumber::CONSOLE_FOREGROUND.as_u16() as u64;
 
 /// `ipc_send` syscall number (as above).
 const NUM_IPC_SEND: u64 = SyscallNumber::IPC_SEND.as_u16() as u64;
@@ -1245,46 +1248,50 @@ pub fn irq_wait(handle: u64, timeout_ns: u64) -> i64 {
     ret as i64
 }
 
-/// Wait for a child process to exit, reaping it and reading back its exit
-/// code (`SyscallNumber::WAIT`, `plans/SPAWN.md` SP6).
+/// Wait for a child-process event, reading back the typed status record
+/// (`SyscallNumber::WAIT`, `plans/SPAWN.md` SP6/SP9).
 ///
 /// `pid` is either a specific child's PID or [`rustos_abi::WAIT_PID_ANY`] to
-/// wait for whichever of the caller's children exits next. On success the
-/// kernel writes the reaped child's exit code into `status` and returns its
-/// PID. A process may only wait on its **own** children; the kernel
-/// validates the parent/child relationship and fails closed.
+/// wait for whichever of the caller's children reports next. On success the
+/// kernel writes a [`rustos_abi::WaitStatusRecord`] — decoded here into the
+/// typed [`WaitStatus`] (`Exited` for a reaped child, `Stopped` for a child
+/// halted by [`Signal::Stop`] when `flags` carries
+/// [`WaitFlags::STOPPED`]) — and returns the reported child's PID. A
+/// process may only wait on its **own** children; the kernel validates the
+/// parent/child relationship and fails closed.
 ///
 /// The kernel encodes the result as a signed register following the
-/// standard `abi-v1` convention: a non-negative value is the reaped child's
-/// PID, and a negative value is `-errno` (recover the
+/// standard `abi-v1` convention: a non-negative value is the reported
+/// child's PID, and a negative value is `-errno` (recover the
 /// [`rustos_abi::Errno`] discriminant as `-ret`) — `status` is left
-/// untouched on a negative result. The wrapper surfaces that raw signed
-/// value so the caller decides how to react; it adds no authority and hides
-/// no error.
+/// untouched on a negative result. A record the kernel wrote but this
+/// wrapper cannot decode is refused as `-OutOfRange` rather than guessed
+/// at (fail closed). The wrapper surfaces the raw signed value so the
+/// caller decides how to react; it adds no authority and hides no error.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 wait-result encoding (PID ≥ 0, else -errno).
-pub fn wait(pid: i32, status: &mut i32) -> i64 {
-    let ptr = (status as *mut i32) as usize as u64;
+pub fn wait(pid: i32, status: &mut WaitStatus, flags: WaitFlags) -> i64 {
+    let mut record = rustos_abi::WaitStatusRecord::default();
+    let ptr = core::ptr::addr_of_mut!(record) as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
     // the `status` pointer against the caller's address space before
-    // writing the exit code to it. `status` is a live
-    // exclusive `&mut i32` for the duration of the call, so the pointer
-    // denotes writable memory the kernel may fill. A blocking wait carries
-    // no flags (`WaitFlags::empty()`).
+    // writing the record to it. `record` is a live exclusive local for the
+    // duration of the call, so the pointer denotes writable memory the
+    // kernel may fill.
     let ret = unsafe {
         raw_syscall(
             NUM_WAIT,
-            [
-                i32_arg(pid),
-                ptr,
-                u64::from(WaitFlags::empty().bits()),
-                0,
-                0,
-                0,
-            ],
+            [i32_arg(pid), ptr, u64::from(flags.bits()), 0, 0, 0],
         )
     };
-    ret as i64
+    let ret = ret as i64;
+    if ret >= 0 {
+        match record.decode() {
+            Ok(decoded) => *status = decoded,
+            Err(err) => return -i64::from(err.as_i32()),
+        }
+    }
+    ret
 }
 
 /// Poll for a child process without blocking (`SyscallNumber::WAIT` with
@@ -1307,27 +1314,31 @@ pub fn wait(pid: i32, status: &mut i32) -> i64 {
 /// wrapper surfaces that raw signed value so the caller decides how to react;
 /// it adds no authority and hides no error.
 #[must_use]
-#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 wait-result encoding (PID ≥ 0, else -errno).
-pub fn try_wait(pid: i32, status: &mut i32) -> i64 {
-    let ptr = (status as *mut i32) as usize as u64;
-    // SAFETY: identical to `wait` — the kernel validates the `status` pointer
-    // owner-side before writing, and only on a successful reap; a `WouldBlock`
-    // leaves it untouched. `status` is a live exclusive `&mut i32` for the
-    // duration of the call.
-    let ret = unsafe {
-        raw_syscall(
-            NUM_WAIT,
-            [
-                i32_arg(pid),
-                ptr,
-                u64::from(WaitFlags::NONBLOCK.bits()),
-                0,
-                0,
-                0,
-            ],
-        )
-    };
-    ret as i64
+pub fn try_wait(pid: i32, status: &mut WaitStatus) -> i64 {
+    wait(pid, status, WaitFlags::NONBLOCK)
+}
+
+/// Block until the child selected by `pid` **terminates**, reap it, and
+/// report its exit code — the simple form of [`wait`] for a parent with no
+/// job control (PID 1 reaping a session, login reaping a shell).
+///
+/// Never reports a stopped child (it passes no [`WaitFlags::STOPPED`]), so
+/// `code` is always an exit code. Returns the reaped child's PID, or the
+/// `-errno` encoding exactly as [`wait`] does; `code` is untouched on a
+/// negative result.
+#[must_use]
+pub fn wait_exit(pid: i32, code: &mut i32) -> i64 {
+    let mut status = WaitStatus::Exited(0);
+    let ret = wait(pid, &mut status, WaitFlags::empty());
+    if ret >= 0 {
+        match status {
+            WaitStatus::Exited(exit_code) => *code = exit_code,
+            // Unreachable without the STOPPED flag; refuse rather than
+            // fabricate an exit code from a stop report.
+            WaitStatus::Stopped(_) => return -i64::from(rustos_abi::Errno::OutOfRange.as_i32()),
+        }
+    }
+    ret
 }
 
 /// Deliver control signal `signal` to a child process `pid`
@@ -1356,6 +1367,36 @@ pub fn signal(pid: i32, signal: Signal) -> i64 {
         raw_syscall(
             NUM_SIGNAL,
             [i32_arg(pid), u64::from(signal.as_u32()), 0, 0, 0, 0],
+        )
+    };
+    ret as i64
+}
+
+/// Mark (or clear) the console foreground job the cooked-mode line
+/// discipline delivers `^C`/`^Z` to (`SyscallNumber::CONSOLE_FOREGROUND`,
+/// `plans/SPAWN.md` SP9 — the `tcsetpgrp` analogue).
+///
+/// `fd` is a readable inherited standard-stream descriptor naming the
+/// console (the shell passes [`rustos_abi::STDIN`]); `pid` is a live child
+/// of the caller to mark foreground, or `0` to clear the slot. The kernel
+/// authorises the child through the same parent/child bookkeeping
+/// `wait`/`signal` use and fails closed on everything else.
+///
+/// The kernel encodes the result as a signed register following the
+/// standard `abi-v1` convention: `0` on success, and a negative value is
+/// `-errno`. The wrapper surfaces that raw signed value; it adds no
+/// authority and hides no error.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
+pub fn console_foreground(fd: u32, pid: i32) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke — the kernel resolves
+    // `fd` against the caller's own descriptor table and authorises `pid`
+    // on the far side of the trap. `console_foreground` dereferences no
+    // user pointer.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_CONSOLE_FOREGROUND,
+            [u64::from(fd), i32_arg(pid), 0, 0, 0, 0],
         )
     };
     ret as i64
@@ -3419,53 +3460,75 @@ mod tests {
         });
     }
 
+    /// The `-errno` the wrapper reports when the "kernel" (the seam, which
+    /// writes nothing) claims success but the local record is undecodable —
+    /// the fail-closed decode path a mocked success always takes.
+    fn undecodable_record() -> i64 {
+        -i64::from(rustos_abi::Errno::OutOfRange.as_i32())
+    }
+
     #[test]
-    fn wait_marshals_pid_and_status_pointer() {
-        let mut status = 0i32;
-        let ptr = core::ptr::addr_of_mut!(status) as usize as u64;
-        // The kernel returns the reaped child's PID (non-negative).
+    fn wait_marshals_pid_flags_and_record_pointer() {
+        let mut status = WaitStatus::Exited(0);
+        // The seam cannot write the status record, so a mocked "success"
+        // leaves the zeroed (reserved-kind) record in place and the wrapper
+        // refuses it fail-closed rather than fabricating a status.
         let (number, args) = capture(5, || {
-            assert_eq!(wait(9, &mut status), 5);
+            assert_eq!(
+                wait(9, &mut status, WaitFlags::STOPPED),
+                undecodable_record()
+            );
         });
         assert_eq!(number, NUM_WAIT);
         assert_eq!(args[0], 9);
-        assert_eq!(args[1], ptr);
-        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+        // The record pointer names the wrapper's local record (non-null).
+        assert_ne!(args[1], 0);
+        // The caller's flag set reaches the register verbatim.
+        assert_eq!(args[2], u64::from(WaitFlags::STOPPED.bits()));
+        assert_eq!(&args[3..], &[0, 0, 0]);
+        // The out-status was left untouched by the refused decode.
+        assert_eq!(status, WaitStatus::Exited(0));
     }
 
     #[test]
     fn wait_marshals_wait_any_as_a_sign_extended_minus_one() {
-        let mut status = 0i32;
+        let mut status = WaitStatus::Exited(0);
         let (number, args) = capture(3, || {
-            assert_eq!(wait(rustos_abi::WAIT_PID_ANY, &mut status), 3);
+            assert_eq!(
+                wait(rustos_abi::WAIT_PID_ANY, &mut status, WaitFlags::empty()),
+                undecodable_record()
+            );
         });
         assert_eq!(number, NUM_WAIT);
         // `WAIT_PID_ANY` (-1) sign-extends to all-ones in the argument register.
         assert_eq!(args[0], u64::MAX);
+        // A blocking wait with no options carries an empty flag set.
+        assert_eq!(args[2], 0);
     }
 
     #[test]
     fn wait_surfaces_negative_errno_encoding() {
         // `NotFound` (no such child) is encoded as the two's-complement
-        // negation; the wrapper hands that signed value back unchanged.
-        let mut status = 0i32;
+        // negation; the wrapper hands that signed value back unchanged and
+        // leaves `status` untouched.
+        let mut status = WaitStatus::Exited(7);
         let want = -i64::from(rustos_abi::Errno::NotFound.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
-            assert_eq!(wait(9, &mut status), want);
+            assert_eq!(wait(9, &mut status, WaitFlags::empty()), want);
         });
+        assert_eq!(status, WaitStatus::Exited(7));
     }
 
     #[test]
     fn try_wait_marshals_the_nonblock_flag() {
-        let mut status = 0i32;
-        let ptr = core::ptr::addr_of_mut!(status) as usize as u64;
+        let mut status = WaitStatus::Exited(0);
         let (number, args) = capture(5, || {
-            assert_eq!(try_wait(9, &mut status), 5);
+            assert_eq!(try_wait(9, &mut status), undecodable_record());
         });
         assert_eq!(number, NUM_WAIT);
         assert_eq!(args[0], 9);
-        assert_eq!(args[1], ptr);
+        assert_ne!(args[1], 0);
         // The only difference from a blocking `wait` is the NONBLOCK flag in
         // the third argument slot.
         assert_eq!(args[2], u64::from(WaitFlags::NONBLOCK.bits()));
@@ -3477,11 +3540,38 @@ mod tests {
         // A still-running child is reported as the two's-complement negation
         // of `WouldBlock`; the wrapper hands that signed value back unchanged
         // so the caller can retry rather than treating it as a hard failure.
-        let mut status = 0i32;
+        let mut status = WaitStatus::Exited(0);
         let want = -i64::from(rustos_abi::Errno::WouldBlock.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(try_wait(9, &mut status), want);
+        });
+    }
+
+    #[test]
+    fn console_foreground_marshals_fd_and_signed_pid() {
+        let (number, args) = capture(0, || {
+            assert_eq!(console_foreground(STDIN, 9), 0);
+        });
+        assert_eq!(number, NUM_CONSOLE_FOREGROUND);
+        assert_eq!(args[0], u64::from(STDIN));
+        assert_eq!(args[1], 9);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+        // Clearing passes the `0` sentinel through unchanged.
+        let (_, args) = capture(0, || {
+            assert_eq!(console_foreground(STDIN, 0), 0);
+        });
+        assert_eq!(args[1], 0);
+    }
+
+    #[test]
+    fn console_foreground_surfaces_negative_errno_encoding() {
+        // A non-child target is refused with `NotFound`; the wrapper hands
+        // the signed encoding back unchanged.
+        let want = -i64::from(rustos_abi::Errno::NotFound.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let (_, _) = capture(neg, || {
+            assert_eq!(console_foreground(STDIN, 9), want);
         });
     }
 

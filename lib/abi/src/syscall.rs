@@ -177,10 +177,13 @@ impl SyscallNumber {
     /// exit code (`plans/SPAWN.md` SP6).
     ///
     /// Arguments: `pid: i32` (the child to wait for, or [`WAIT_PID_ANY`] to
-    /// wait for any of the caller's children), `status: *mut i32` (a
-    /// non-null user pointer the kernel writes the reaped child's exit
-    /// code into), and `flags: u32` (a [`WaitFlags`] set). Returns the
-    /// reaped child's PID. A process may only wait
+    /// wait for any of the caller's children), `status: *mut
+    /// ros_wait_status_t` (a non-null user pointer the kernel writes the
+    /// typed [`crate::WaitStatusRecord`] into — an exited record carrying
+    /// the reaped child's exit code, or, when requested with
+    /// [`WaitFlags::STOPPED`], a stopped record carrying the stopping
+    /// signal), and `flags: u32` (a [`WaitFlags`] set). Returns the
+    /// reported child's PID. A process may only wait
     /// on its **own** children — waiting reaps a child the caller spawned,
     /// so it grants no authority over anything else and needs no
     /// capability (precedent — "list my own processes");
@@ -194,7 +197,11 @@ impl SyscallNumber {
     /// matching child is still running — it returns [`crate::Errno::WouldBlock`]
     /// (the `abi-v1` "nothing yet, retry" signal) without parking the caller,
     /// and `status` is left untouched. With the bit clear the call blocks
-    /// until a child becomes reapable (never busy-polls). A reserved flag bit
+    /// until a child becomes reapable (never busy-polls). With
+    /// [`WaitFlags::STOPPED`] set the call also reports a child freshly
+    /// stopped by [`crate::Signal::Stop`] — returning its PID and writing a
+    /// stopped record — **without reaping it**; each stop is reported once,
+    /// re-armed by [`crate::Signal::Continue`]. A reserved flag bit
     /// fails closed with [`crate::Errno::OutOfRange`].
     pub const WAIT: Self = Self(16);
     /// Read the calling process's effective limit for one resource.
@@ -1251,6 +1258,30 @@ impl SyscallNumber {
     /// new foreground.
     pub const SEAT_REVOKE: Self = Self(71);
 
+    /// Mark (or clear) the console foreground job the line discipline
+    /// signals on `^C`/`^Z` (`plans/SPAWN.md` SP9 — the `tcsetpgrp`
+    /// analogue).
+    ///
+    /// Arguments: `fd: u32` (a readable inherited standard-stream
+    /// descriptor of the **caller's own** table — the console it names is
+    /// the one whose foreground slot changes, the same fd-scoped authority
+    /// [`Self::STREAM_INPUT_MODE`] uses) and `pid: i32` (a **live child of
+    /// the caller** to mark foreground, or `0` to clear the slot). While a
+    /// foreground task is set, the console's cooked-mode line discipline
+    /// consumes `^C`/`^Z` and delivers [`crate::Signal::Interrupt`] /
+    /// [`crate::Signal::Stop`] to it instead of queueing the byte; with the
+    /// slot clear (or in raw/secret mode) every byte flows to the reader
+    /// unchanged. Returns an error code (`Ok(0)` on success).
+    ///
+    /// Fails closed: a non-readable or unbacked `fd` and an unknown console
+    /// are refused ([`crate::Errno::NotFound`] /
+    /// [`crate::Errno::NotImplemented`]), and a non-zero `pid` that is not
+    /// a live child of the caller is [`crate::Errno::NotFound`] — the
+    /// parent/child relationship plus the inherited console descriptor are
+    /// the entire authority, so no capability beyond the console gate is
+    /// required.
+    pub const CONSOLE_FOREGROUND: Self = Self(72);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 
@@ -1320,11 +1351,27 @@ impl WaitFlags {
     /// becomes reapable (never busy-polls).
     pub const NONBLOCK: Self = Self(1 << 0);
 
+    /// Also report a child *stopped* by [`crate::Signal::Stop`] — the
+    /// `WUNTRACED` analogue the shell's job control uses (`plans/SPAWN.md`
+    /// SP9).
+    ///
+    /// With the bit set, [`SyscallNumber::WAIT`] additionally completes for
+    /// a child freshly stopped by [`crate::Signal::Stop`]: it returns the
+    /// child's PID and writes a *stopped* [`crate::WaitStatusRecord`]
+    /// through `status` — **without reaping the child**, which stays
+    /// waitable and resumable through [`crate::Signal::Continue`]. Each
+    /// stop is reported exactly once (edge-triggered); a `Continue` re-arms
+    /// the report for a later stop. With the bit clear a stopped child is
+    /// invisible to `wait`, exactly as before. Combines with
+    /// [`Self::NONBLOCK`]: the poll then also reports a pending stop
+    /// instead of [`crate::Errno::WouldBlock`].
+    pub const STOPPED: Self = Self(1 << 1);
+
     /// The set of all defined flag bits.
     ///
     /// Any bit outside this mask is reserved and rejected by
     /// [`WaitFlags::from_bits`].
-    const DEFINED_BITS: u32 = Self::NONBLOCK.0;
+    const DEFINED_BITS: u32 = Self::NONBLOCK.0 | Self::STOPPED.0;
 
     /// An empty flag set (blocking wait, no options).
     #[must_use]
@@ -1361,6 +1408,12 @@ impl WaitFlags {
     #[must_use]
     pub const fn is_nonblock(self) -> bool {
         self.contains(Self::NONBLOCK)
+    }
+
+    /// Whether the caller asked to be told about stopped children too.
+    #[must_use]
+    pub const fn is_stopped(self) -> bool {
+        self.contains(Self::STOPPED)
     }
 }
 
@@ -1523,9 +1576,22 @@ mod tests {
     }
 
     #[test]
+    fn wait_flags_stopped_round_trips_and_combines() {
+        let f = WaitFlags::STOPPED;
+        assert!(f.is_stopped());
+        assert!(!f.is_nonblock());
+        assert_eq!(WaitFlags::from_bits(f.bits()), Ok(f));
+        // The stop-report request combines with the non-blocking poll.
+        let both = WaitFlags::from_bits(WaitFlags::NONBLOCK.bits() | WaitFlags::STOPPED.bits())
+            .expect("defined bits");
+        assert!(both.is_nonblock());
+        assert!(both.is_stopped());
+    }
+
+    #[test]
     fn wait_flags_reserved_bits_are_rejected() {
-        // Bit 1 is reserved today.
-        assert_eq!(WaitFlags::from_bits(1 << 1), Err(Errno::OutOfRange));
+        // Bit 2 is the first reserved bit today.
+        assert_eq!(WaitFlags::from_bits(1 << 2), Err(Errno::OutOfRange));
         assert_eq!(WaitFlags::from_bits(u32::MAX), Err(Errno::OutOfRange));
     }
 }

@@ -80,7 +80,7 @@ mod program {
             return Err("memsoak: child PID out of range");
         };
         let mut status = 0i32;
-        if rustos_rt::wait(pid, &mut status) < 0 {
+        if rustos_rt::wait_exit(pid, &mut status) < 0 {
             return Err("memsoak: child wait refused");
         }
         if status != 0 {

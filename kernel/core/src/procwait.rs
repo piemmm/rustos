@@ -31,7 +31,7 @@
 
 use alloc::collections::BTreeMap;
 
-use rustos_abi::{Errno, WAIT_PID_ANY};
+use rustos_abi::{Errno, Signal, WaitFlags, WaitStatus, WAIT_PID_ANY};
 use rustos_kernel_sched_api::SchedulerArch;
 use rustos_kernel_sec::TaskId;
 use rustos_sync::SpinLock;
@@ -39,18 +39,19 @@ use rustos_sync::SpinLock;
 use crate::dispatch_slot::RescheduleAction;
 use crate::kthread::reschedule_current;
 
-/// A child process reaped by [`ProcessWait::wait`].
+/// A child event reported by [`ProcessWait::wait`].
 ///
-/// Carries the reaped child's PID (the value the `wait` syscall returns to
-/// the caller) and its exit code (the value the kernel writes to the
-/// caller's `status` out-pointer).
+/// Carries the child's PID (the value the `wait` syscall returns to the
+/// caller) and its typed status (the value the kernel encodes into the
+/// caller's `status` out-pointer): an exited child was reaped and removed,
+/// a stopped child (reported only under [`WaitFlags::STOPPED`]) stays
+/// tracked and resumable.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub struct ReapedChild {
-    /// PID of the child that was reaped.
+pub struct WaitedChild {
+    /// PID of the reported child.
     pub pid: u32,
-    /// The exit code the child passed to `exit` (the
-    /// program's terminating status).
-    pub code: i32,
+    /// What happened to it: exited (reaped) or stopped (still tracked).
+    pub status: WaitStatus,
 }
 
 /// The kernel-side producer of the `wait` syscall.
@@ -71,7 +72,10 @@ pub trait ProcessWait: Sync {
     /// return the reaped child's PID and exit code.
     ///
     /// `pid` is either a specific child's PID or [`rustos_abi::WAIT_PID_ANY`]
-    /// to wait for whichever of `parent`'s children exits next. The handler
+    /// to wait for whichever of `parent`'s children exits next. With
+    /// [`WaitFlags::STOPPED`] set in `flags` the wait also completes for a
+    /// child freshly stopped by [`Signal::Stop`] — reported without being
+    /// reaped, each stop exactly once. The handler
     /// has already validated that the caller passed a non-null `status`
     /// pointer (the dispatcher rejects a null `UserPtr`); the implementation
     /// validates the parent/child relationship — a process may only reap its
@@ -83,26 +87,27 @@ pub trait ProcessWait: Sync {
     /// `parent` (and `parent` has no children, for [`rustos_abi::WAIT_PID_ANY`]).
     /// The default producer ([`NullProcessWait`]) returns
     /// [`Errno::NotImplemented`] to mark an inert interface.
-    fn wait(&self, parent: TaskId, pid: i32) -> Result<ReapedChild, Errno>;
+    fn wait(&self, parent: TaskId, pid: i32, flags: WaitFlags) -> Result<WaitedChild, Errno>;
 
-    /// Non-blocking counterpart to [`Self::wait`]: try to reap a child of
+    /// Non-blocking counterpart to [`Self::wait`]: try to report a child of
     /// `parent` selected by `pid` **without ever parking the caller**.
     ///
     /// This backs `WaitFlags::NONBLOCK`, the poll the shell's job
     /// control uses to report finished background jobs before the next
-    /// prompt.
+    /// prompt; with [`WaitFlags::STOPPED`] also set the poll reports a
+    /// pending stop the same way.
     ///
     /// # Errors
     ///
-    /// * [`Errno::WouldBlock`] when a matching child exists but has not
-    ///   exited yet — the `abi-v1` "nothing yet, retry" signal, so a polling
-    ///   caller neither blocks nor floods the audit log.
+    /// * [`Errno::WouldBlock`] when a matching child exists but has nothing
+    ///   to report yet — the `abi-v1` "nothing yet, retry" signal, so a
+    ///   polling caller neither blocks nor floods the audit log.
     /// * [`Errno::NotFound`] when `pid` names no child of `parent`.
     ///
     /// The default fails closed with [`Errno::NotImplemented`] so a producer
     /// that predates the poll path — and the inert [`NullProcessWait`] —
     /// never fabricates a reaped child; [`KernelProcessWait`] overrides it.
-    fn poll(&self, _parent: TaskId, _pid: i32) -> Result<ReapedChild, Errno> {
+    fn poll(&self, _parent: TaskId, _pid: i32, _flags: WaitFlags) -> Result<WaitedChild, Errno> {
         Err(Errno::NotImplemented)
     }
 
@@ -122,6 +127,37 @@ pub trait ProcessWait: Sync {
     /// task — PID 1, a kernel thread — is ignored), so the parent's
     /// [`Self::wait`] can read it back. The default is a no-op.
     fn record_exit(&self, _task: TaskId, _code: i32) {}
+
+    /// Record that `task` was stopped by `signal` ([`Signal::Stop`]), so a
+    /// parent waiting with [`WaitFlags::STOPPED`] can observe it.
+    ///
+    /// Called from the signal producer after the child is parked. The
+    /// default is a no-op, exactly like the other bookkeeping hooks.
+    fn record_stop(&self, _task: TaskId, _signal: Signal) {}
+
+    /// Record that `task` was resumed ([`Signal::Continue`]), clearing any
+    /// not-yet-reported stop so a stale stop is never reported after the
+    /// child is already running again.
+    ///
+    /// Called from the signal producer after the child is unparked. The
+    /// default is a no-op.
+    fn record_continue(&self, _task: TaskId) {}
+
+    /// Authorise `sender` over the **live** child selected by `pid`,
+    /// returning the child's task id.
+    ///
+    /// The one parent/child authorisation the `signal` producer and the
+    /// `console_foreground` handler share with `wait`, so who-owns-whom has
+    /// a single definition. A zombie awaiting reap is not authorisable.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] when `pid` does not name a live child of
+    /// `sender`. The default fails closed with [`Errno::NotImplemented`] so
+    /// the inert [`NullProcessWait`] never authorises anyone.
+    fn authorise_child(&self, _sender: TaskId, _pid: i32) -> Result<TaskId, Errno> {
+        Err(Errno::NotImplemented)
+    }
 
     /// Non-consuming readiness peek: classify the child of `parent` selected
     /// by `pid` **without reaping it** (never parking, never mutating).
@@ -148,7 +184,7 @@ pub trait ProcessWait: Sync {
 pub struct NullProcessWait;
 
 impl ProcessWait for NullProcessWait {
-    fn wait(&self, _parent: TaskId, _pid: i32) -> Result<ReapedChild, Errno> {
+    fn wait(&self, _parent: TaskId, _pid: i32, _flags: WaitFlags) -> Result<WaitedChild, Errno> {
         Err(Errno::NotImplemented)
     }
 }
@@ -161,6 +197,15 @@ impl ProcessWait for NullProcessWait {
 /// `KernelSyscallHandlers::with_process_wait`.
 pub static NULL_PROCESS_WAIT: NullProcessWait = NullProcessWait;
 
+/// Narrow a scheduler task id to the `u32` PID the ABI carries.
+///
+/// Scheduler task ids stay well within `u32` for every supported
+/// configuration; a value that would not fit saturates rather than wrapping
+/// (never silently truncate).
+fn narrow_task_id(id: u64) -> u32 {
+    u32::try_from(id).unwrap_or(u32::MAX)
+}
+
 /// One child's entry in the [`ProcessTable`].
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 struct ChildEntry {
@@ -169,6 +214,11 @@ struct ChildEntry {
     /// The child's exit code once it has exited (`Some`), or `None` while it
     /// is still running. A `Some` entry is a reapable zombie.
     exit: Option<i32>,
+    /// A stop ([`Signal::Stop`]) not yet reported to a
+    /// [`WaitFlags::STOPPED`] wait. Edge-triggered: set when the child is
+    /// stopped, cleared when reported or when a continue resumes the child,
+    /// so each stop is observed at most once and never after a resume.
+    stop_pending: Option<Signal>,
 }
 
 /// Outcome of a non-consuming [`ProcessTable::peek`] /
@@ -192,9 +242,10 @@ pub enum ChildPeek {
 /// Outcome of a single [`ProcessTable::reap`] attempt.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum Reap {
-    /// A matching child had already exited; it has been removed from the
-    /// table and is reported to the caller.
-    Ready(ReapedChild),
+    /// A matching child has something to report: an exited child (removed
+    /// from the table) or, when stop reports were requested, a freshly
+    /// stopped one (kept, its pending stop consumed).
+    Ready(WaitedChild),
     /// A matching child exists but has not exited yet — the caller must
     /// block and retry.
     Blocked,
@@ -238,6 +289,7 @@ impl ProcessTable {
             ChildEntry {
                 parent: parent.0,
                 exit: None,
+                stop_pending: None,
             },
         );
     }
@@ -248,28 +300,62 @@ impl ProcessTable {
     pub fn record_exit(&mut self, task: TaskId, code: i32) {
         if let Some(entry) = self.children.get_mut(&task.0) {
             entry.exit = Some(code);
+            // A terminated child can no longer be "stopped": the exit report
+            // supersedes any unobserved stop.
+            entry.stop_pending = None;
         }
     }
 
-    /// Try to reap a child of `parent` selected by `pid`.
+    /// Mark a not-yet-reported stop by `signal` on `task`, if it is a
+    /// tracked, still-live child. A `task` the table does not track — or a
+    /// zombie awaiting reap — is ignored (a dead child cannot stop).
+    pub fn record_stop(&mut self, task: TaskId, signal: Signal) {
+        if let Some(entry) = self.children.get_mut(&task.0) {
+            if entry.exit.is_none() {
+                entry.stop_pending = Some(signal);
+            }
+        }
+    }
+
+    /// Clear any not-yet-reported stop on `task` (the child was resumed), so
+    /// a stale stop is never reported after the child is running again.
+    pub fn record_continue(&mut self, task: TaskId) {
+        if let Some(entry) = self.children.get_mut(&task.0) {
+            entry.stop_pending = None;
+        }
+    }
+
+    /// Try to report a child of `parent` selected by `pid`.
     ///
     /// `pid` is [`rustos_abi::WAIT_PID_ANY`] for any child or a specific child's
     /// id. Among the matching children: the first (lowest-id, for
     /// determinism) that has already exited is removed
-    /// and returned as [`Reap::Ready`]; if matching children exist but none
-    /// has exited the result is [`Reap::Blocked`]; if no child matches it is
+    /// and returned as [`Reap::Ready`]; otherwise, with `report_stopped`
+    /// set, the first matching child carrying an unreported stop is returned
+    /// as [`Reap::Ready`] with a stopped status — **kept in the table**,
+    /// its pending stop consumed so it is reported exactly once; if matching
+    /// children exist but none has anything to report the result is
+    /// [`Reap::Blocked`]; if no child matches it is
     /// [`Reap::NoChild`]. A negative `pid` other than [`rustos_abi::WAIT_PID_ANY`]
     /// names no child and fails closed with [`Reap::NoChild`].
     #[must_use]
-    pub fn reap(&mut self, parent: TaskId, pid: i32) -> Reap {
-        let (any_match, reapable) = self.find(parent, pid);
+    pub fn reap(&mut self, parent: TaskId, pid: i32, report_stopped: bool) -> Reap {
+        let (any_match, reapable, stopped) = self.find(parent, pid, report_stopped);
         if let Some((child_id, code)) = reapable {
             self.children.remove(&child_id);
-            // Scheduler task ids stay well within `u32` for every supported
-            // configuration; a value that would not fit saturates rather
-            // than wrapping (never silently truncate).
-            let pid = u32::try_from(child_id).unwrap_or(u32::MAX);
-            Reap::Ready(ReapedChild { pid, code })
+            Reap::Ready(WaitedChild {
+                pid: narrow_task_id(child_id),
+                status: WaitStatus::Exited(code),
+            })
+        } else if let Some((child_id, signal)) = stopped {
+            if let Some(entry) = self.children.get_mut(&child_id) {
+                // Consume the pending stop: it is reported exactly once.
+                entry.stop_pending = None;
+            }
+            Reap::Ready(WaitedChild {
+                pid: narrow_task_id(child_id),
+                status: WaitStatus::Stopped(signal),
+            })
         } else if any_match {
             Reap::Blocked
         } else {
@@ -286,7 +372,7 @@ impl ProcessTable {
     /// the two can never disagree on which children match.
     #[must_use]
     pub fn peek(&self, parent: TaskId, pid: i32) -> ChildPeek {
-        let (any_match, reapable) = self.find(parent, pid);
+        let (any_match, reapable, _) = self.find(parent, pid, false);
         if reapable.is_some() {
             ChildPeek::Reapable
         } else if any_match {
@@ -299,23 +385,32 @@ impl ProcessTable {
     /// The one matching scan behind [`Self::reap`] and [`Self::peek`]:
     /// resolve the `pid` selector (a specific child id, or
     /// [`rustos_abi::WAIT_PID_ANY`]) and report whether any child of `parent`
-    /// matches and the first (lowest-id, for determinism) matching reapable
-    /// zombie's `(task id, exit code)`.
+    /// matches, the first (lowest-id, for determinism) matching reapable
+    /// zombie's `(task id, exit code)`, and — when `report_stopped` — the
+    /// first matching child with an unreported stop. A reapable zombie wins
+    /// over a pending stop: termination is the stronger, terminal report.
     ///
     /// A negative selector other than [`rustos_abi::WAIT_PID_ANY`] names no
     /// child and fails closed as no match.
-    fn find(&self, parent: TaskId, pid: i32) -> (bool, Option<(u64, i32)>) {
+    #[allow(clippy::type_complexity)] // Three named findings of one scan; a struct would restate them.
+    fn find(
+        &self,
+        parent: TaskId,
+        pid: i32,
+        report_stopped: bool,
+    ) -> (bool, Option<(u64, i32)>, Option<(u64, Signal)>) {
         let target: Option<u64> = if pid == WAIT_PID_ANY {
             None
         } else {
             match u64::try_from(pid) {
                 Ok(id) => Some(id),
-                Err(_) => return (false, None),
+                Err(_) => return (false, None, None),
             }
         };
 
         let mut any_match = false;
         let mut reapable: Option<(u64, i32)> = None;
+        let mut stopped: Option<(u64, Signal)> = None;
         for (&child_id, entry) in &self.children {
             if entry.parent != parent.0 {
                 continue;
@@ -330,8 +425,13 @@ impl ProcessTable {
                 reapable = Some((child_id, code));
                 break;
             }
+            if report_stopped && stopped.is_none() {
+                if let Some(signal) = entry.stop_pending {
+                    stopped = Some((child_id, signal));
+                }
+            }
         }
-        (any_match, reapable)
+        (any_match, reapable, stopped)
     }
 
     /// The task id of a **live** (not-yet-exited) child of `parent` selected
@@ -388,27 +488,6 @@ where
         }
     }
 
-    /// Authorise `sender` to signal the child selected by `pid`, returning the
-    /// child's task id.
-    ///
-    /// The one bookkeeping lookup the signal producer
-    /// ([`KernelProcessSignal`](crate::procsignal::KernelProcessSignal))
-    /// shares with `wait`, so the parent/child relationship has a single
-    /// definition and the two paths can never disagree on who owns whom. A
-    /// process may signal only a **live** child it spawned.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Errno::NotFound`] when `pid` does not name a live child of
-    /// `sender` (never spawned by it, already exited, or not representable),
-    /// so a signal to a non-child or a dead process fails closed.
-    pub fn authorise_child(&self, sender: TaskId, pid: i32) -> Result<TaskId, Errno> {
-        self.table
-            .lock()
-            .live_child(sender, pid)
-            .ok_or(Errno::NotFound)
-    }
-
     /// Record that `child` was terminated by a signal, carrying `status`, and
     /// wake any parent parked in [`ProcessWait::wait`].
     ///
@@ -421,6 +500,22 @@ where
         self.table.lock().record_exit(child, status);
         // Release the lock above before waking a parent parked in `wait`.
         crate::waitq::procwait_wake();
+    }
+}
+
+impl<A> KernelProcessWait<A>
+where
+    A: SchedulerArch + Send + Sync + 'static,
+{
+    /// The one non-blocking report attempt behind both [`ProcessWait::wait`]
+    /// (its re-poll loop) and [`ProcessWait::poll`], so the blocking and
+    /// non-blocking paths can never diverge.
+    fn try_report(&self, parent: TaskId, pid: i32, flags: WaitFlags) -> Result<WaitedChild, Errno> {
+        match self.table.lock().reap(parent, pid, flags.is_stopped()) {
+            Reap::Ready(child) => Ok(child),
+            Reap::Blocked => Err(Errno::WouldBlock),
+            Reap::NoChild => Err(Errno::NotFound),
+        }
     }
 }
 
@@ -440,34 +535,53 @@ where
         crate::waitq::procwait_wake();
     }
 
-    fn poll(&self, parent: TaskId, pid: i32) -> Result<ReapedChild, Errno> {
-        // A single non-blocking reap attempt — the same primitive the
+    fn record_stop(&self, task: TaskId, signal: Signal) {
+        self.table.lock().record_stop(task, signal);
+        // A stop is a reportable event for a parent blocked in a
+        // `WaitFlags::STOPPED` wait, so it wakes the parked parents exactly
+        // as an exit does. The lock is released above before the wake.
+        crate::waitq::procwait_wake();
+    }
+
+    fn record_continue(&self, task: TaskId) {
+        // Clearing a pending stop creates nothing to report, so no wake: a
+        // parent parked in `wait` stays parked until a real event.
+        self.table.lock().record_continue(task);
+    }
+
+    fn authorise_child(&self, sender: TaskId, pid: i32) -> Result<TaskId, Errno> {
+        // The one bookkeeping lookup the signal producer and the
+        // `console_foreground` handler share with `wait`, so the
+        // parent/child relationship has a single definition. Only a
+        // **live** child authorises; a zombie fails closed.
+        self.table
+            .lock()
+            .live_child(sender, pid)
+            .ok_or(Errno::NotFound)
+    }
+
+    fn poll(&self, parent: TaskId, pid: i32, flags: WaitFlags) -> Result<WaitedChild, Errno> {
+        // A single non-blocking report attempt — the same primitive the
         // blocking `wait` loop uses, so the two can never diverge. A matching
-        // child that has not exited yet is reported as `WouldBlock` (the
+        // child with nothing to report yet is `WouldBlock` (the
         // caller decides whether to retry) rather than parking; no child at
         // all fails closed with `NotFound`.
-        match self.table.lock().reap(parent, pid) {
-            Reap::Ready(child) => Ok(child),
-            Reap::Blocked => Err(Errno::WouldBlock),
-            Reap::NoChild => Err(Errno::NotFound),
-        }
+        self.try_report(parent, pid, flags)
     }
 
     fn child_state(&self, parent: TaskId, pid: i32) -> ChildPeek {
         self.table.lock().peek(parent, pid)
     }
 
-    fn wait(&self, parent: TaskId, pid: i32) -> Result<ReapedChild, Errno> {
+    fn wait(&self, parent: TaskId, pid: i32, flags: WaitFlags) -> Result<WaitedChild, Errno> {
         loop {
             // Re-poll under the lock, then release it *before* parking so the
             // child whose exit we are waiting for can take the same lock from
-            // its own `exit` (`record_exit`) while we are suspended. The lock
-            // guard is a temporary dropped at the end of this statement.
-            let reap = self.table.lock().reap(parent, pid);
-            match reap {
-                Reap::Ready(child) => return Ok(child),
-                Reap::NoChild => return Err(Errno::NotFound),
-                Reap::Blocked => {
+            // its own `exit` (`record_exit`) while we are suspended.
+            match self.try_report(parent, pid, flags) {
+                Ok(child) => return Ok(child),
+                Err(Errno::NotFound) => return Err(Errno::NotFound),
+                Err(Errno::WouldBlock) => {
                     // **Park** the caller off the run queue until a child
                     // exits (never a busy-yield): a
                     // re-enqueuing yield here would keep the run queue
@@ -491,6 +605,9 @@ where
                         return Err(Errno::NotImplemented);
                     }
                 }
+                // `try_report` yields only the three arms above; keep the
+                // residual fail-closed rather than unreachable-panicking.
+                Err(err) => return Err(err),
             }
         }
     }
@@ -503,13 +620,13 @@ mod tests {
     #[test]
     fn null_process_wait_fails_closed() {
         assert_eq!(
-            NULL_PROCESS_WAIT.wait(TaskId(7), 9),
+            NULL_PROCESS_WAIT.wait(TaskId(7), 9, WaitFlags::empty()),
             Err(Errno::NotImplemented)
         );
         // A WAIT_PID_ANY request announces the inert interface too, rather than
         // pretending a child was reaped.
         assert_eq!(
-            NullProcessWait.wait(TaskId(1), rustos_abi::WAIT_PID_ANY),
+            NullProcessWait.wait(TaskId(1), rustos_abi::WAIT_PID_ANY, WaitFlags::empty()),
             Err(Errno::NotImplemented)
         );
         // The bookkeeping hooks are inert no-ops on the null producer.
@@ -520,17 +637,20 @@ mod tests {
     #[test]
     fn reap_unknown_child_is_no_child() {
         let mut table = ProcessTable::new();
-        assert_eq!(table.reap(TaskId(1), WAIT_PID_ANY), Reap::NoChild);
-        assert_eq!(table.reap(TaskId(1), 9), Reap::NoChild);
+        assert_eq!(table.reap(TaskId(1), WAIT_PID_ANY, false), Reap::NoChild);
+        assert_eq!(table.reap(TaskId(1), 9, false), Reap::NoChild);
     }
 
     #[test]
     fn registered_but_unexited_child_blocks() {
         let mut table = ProcessTable::new();
         table.register(TaskId(1), TaskId(2));
-        assert_eq!(table.reap(TaskId(1), WAIT_PID_ANY), Reap::Blocked);
+        assert_eq!(table.reap(TaskId(1), WAIT_PID_ANY, false), Reap::Blocked);
         // Selecting the specific child blocks the same way.
-        assert_eq!(table.reap(TaskId(1), 2), Reap::Blocked);
+        assert_eq!(table.reap(TaskId(1), 2, false), Reap::Blocked);
+        // A stop-aware wait has nothing extra to report for a merely
+        // running child.
+        assert_eq!(table.reap(TaskId(1), WAIT_PID_ANY, true), Reap::Blocked);
     }
 
     #[test]
@@ -539,11 +659,14 @@ mod tests {
         table.register(TaskId(1), TaskId(2));
         table.record_exit(TaskId(2), 7);
         assert_eq!(
-            table.reap(TaskId(1), WAIT_PID_ANY),
-            Reap::Ready(ReapedChild { pid: 2, code: 7 })
+            table.reap(TaskId(1), WAIT_PID_ANY, false),
+            Reap::Ready(WaitedChild {
+                pid: 2,
+                status: WaitStatus::Exited(7)
+            })
         );
         // A second reap finds nothing — the zombie was removed.
-        assert_eq!(table.reap(TaskId(1), WAIT_PID_ANY), Reap::NoChild);
+        assert_eq!(table.reap(TaskId(1), WAIT_PID_ANY, false), Reap::NoChild);
     }
 
     #[test]
@@ -553,11 +676,14 @@ mod tests {
         table.register(TaskId(1), TaskId(3));
         table.record_exit(TaskId(3), 5);
         // Waiting on child 2 (still running) blocks even though 3 is a zombie.
-        assert_eq!(table.reap(TaskId(1), 2), Reap::Blocked);
+        assert_eq!(table.reap(TaskId(1), 2, false), Reap::Blocked);
         // Waiting on child 3 reaps it.
         assert_eq!(
-            table.reap(TaskId(1), 3),
-            Reap::Ready(ReapedChild { pid: 3, code: 5 })
+            table.reap(TaskId(1), 3, false),
+            Reap::Ready(WaitedChild {
+                pid: 3,
+                status: WaitStatus::Exited(5)
+            })
         );
     }
 
@@ -567,12 +693,15 @@ mod tests {
         table.register(TaskId(1), TaskId(2));
         table.record_exit(TaskId(2), 0);
         // Task 9 is not the parent of child 2, so it sees no child.
-        assert_eq!(table.reap(TaskId(9), WAIT_PID_ANY), Reap::NoChild);
-        assert_eq!(table.reap(TaskId(9), 2), Reap::NoChild);
+        assert_eq!(table.reap(TaskId(9), WAIT_PID_ANY, false), Reap::NoChild);
+        assert_eq!(table.reap(TaskId(9), 2, false), Reap::NoChild);
         // The real parent still reaps it.
         assert_eq!(
-            table.reap(TaskId(1), 2),
-            Reap::Ready(ReapedChild { pid: 2, code: 0 })
+            table.reap(TaskId(1), 2, false),
+            Reap::Ready(WaitedChild {
+                pid: 2,
+                status: WaitStatus::Exited(0)
+            })
         );
     }
 
@@ -594,8 +723,11 @@ mod tests {
         // finds it.
         assert_eq!(table.peek(TaskId(1), 2), ChildPeek::Reapable);
         assert_eq!(
-            table.reap(TaskId(1), 2),
-            Reap::Ready(ReapedChild { pid: 2, code: 7 })
+            table.reap(TaskId(1), 2, false),
+            Reap::Ready(WaitedChild {
+                pid: 2,
+                status: WaitStatus::Exited(7)
+            })
         );
         assert_eq!(table.peek(TaskId(1), 2), ChildPeek::NoChild);
     }
@@ -630,7 +762,11 @@ mod tests {
         let mut table = ProcessTable::new();
         // No panic, no entry created for an untracked task (PID 1, a kthread).
         table.record_exit(TaskId(42), 3);
-        assert_eq!(table.reap(TaskId(0), WAIT_PID_ANY), Reap::NoChild);
+        assert_eq!(table.reap(TaskId(0), WAIT_PID_ANY, false), Reap::NoChild);
+        // The stop/continue hooks are equally inert for untracked tasks.
+        table.record_stop(TaskId(42), Signal::Stop);
+        table.record_continue(TaskId(42));
+        assert_eq!(table.reap(TaskId(0), WAIT_PID_ANY, true), Reap::NoChild);
     }
 
     #[test]
@@ -642,12 +778,18 @@ mod tests {
         table.record_exit(TaskId(3), 30);
         // Deterministic: the lowest-id reapable child is returned first.
         assert_eq!(
-            table.reap(TaskId(1), WAIT_PID_ANY),
-            Reap::Ready(ReapedChild { pid: 3, code: 30 })
+            table.reap(TaskId(1), WAIT_PID_ANY, false),
+            Reap::Ready(WaitedChild {
+                pid: 3,
+                status: WaitStatus::Exited(30)
+            })
         );
         assert_eq!(
-            table.reap(TaskId(1), WAIT_PID_ANY),
-            Reap::Ready(ReapedChild { pid: 5, code: 50 })
+            table.reap(TaskId(1), WAIT_PID_ANY, false),
+            Reap::Ready(WaitedChild {
+                pid: 5,
+                status: WaitStatus::Exited(50)
+            })
         );
     }
 
@@ -657,7 +799,8 @@ mod tests {
         table.register(TaskId(1), TaskId(2));
         table.record_exit(TaskId(2), 0);
         // -2 is not WAIT_PID_ANY and not a valid child id: fail closed.
-        assert_eq!(table.reap(TaskId(1), -2), Reap::NoChild);
+        assert_eq!(table.reap(TaskId(1), -2, false), Reap::NoChild);
+        assert_eq!(table.reap(TaskId(1), -2, true), Reap::NoChild);
     }
 
     #[test]
@@ -707,8 +850,11 @@ mod tests {
         // termination status, indistinguishable from a self-exit to `reap`.
         p.record_signalled_exit(TaskId(2), 130);
         assert_eq!(
-            p.wait(TaskId(1), WAIT_PID_ANY),
-            Ok(ReapedChild { pid: 2, code: 130 })
+            p.wait(TaskId(1), WAIT_PID_ANY, WaitFlags::empty()),
+            Ok(WaitedChild {
+                pid: 2,
+                status: WaitStatus::Exited(130)
+            })
         );
     }
 
@@ -731,11 +877,17 @@ mod tests {
         // vertical).
         p.record_exit(TaskId(2), 9);
         assert_eq!(
-            p.wait(TaskId(1), WAIT_PID_ANY),
-            Ok(ReapedChild { pid: 2, code: 9 })
+            p.wait(TaskId(1), WAIT_PID_ANY, WaitFlags::empty()),
+            Ok(WaitedChild {
+                pid: 2,
+                status: WaitStatus::Exited(9)
+            })
         );
         // The zombie was consumed; a second wait finds no child.
-        assert_eq!(p.wait(TaskId(1), WAIT_PID_ANY), Err(Errno::NotFound));
+        assert_eq!(
+            p.wait(TaskId(1), WAIT_PID_ANY, WaitFlags::empty()),
+            Err(Errno::NotFound)
+        );
     }
 
     #[test]
@@ -744,8 +896,14 @@ mod tests {
         p.register_child(TaskId(1), TaskId(2));
         p.record_exit(TaskId(2), 0);
         // Task 9 never spawned child 2: it may not reap it.
-        assert_eq!(p.wait(TaskId(9), WAIT_PID_ANY), Err(Errno::NotFound));
-        assert_eq!(p.wait(TaskId(9), 2), Err(Errno::NotFound));
+        assert_eq!(
+            p.wait(TaskId(9), WAIT_PID_ANY, WaitFlags::empty()),
+            Err(Errno::NotFound)
+        );
+        assert_eq!(
+            p.wait(TaskId(9), 2, WaitFlags::empty()),
+            Err(Errno::NotFound)
+        );
     }
 
     #[test]
@@ -756,7 +914,10 @@ mod tests {
         // the producer fails closed with `NotImplemented` rather than
         // busy-spinning forever.
         p.register_child(TaskId(1), TaskId(2));
-        assert_eq!(p.wait(TaskId(1), WAIT_PID_ANY), Err(Errno::NotImplemented));
+        assert_eq!(
+            p.wait(TaskId(1), WAIT_PID_ANY, WaitFlags::empty()),
+            Err(Errno::NotImplemented)
+        );
     }
 
     #[test]
@@ -765,11 +926,17 @@ mod tests {
         p.register_child(TaskId(1), TaskId(2));
         p.record_exit(TaskId(2), 9);
         assert_eq!(
-            p.poll(TaskId(1), WAIT_PID_ANY),
-            Ok(ReapedChild { pid: 2, code: 9 })
+            p.poll(TaskId(1), WAIT_PID_ANY, WaitFlags::NONBLOCK),
+            Ok(WaitedChild {
+                pid: 2,
+                status: WaitStatus::Exited(9)
+            })
         );
         // The zombie was consumed; a second poll finds no child.
-        assert_eq!(p.poll(TaskId(1), WAIT_PID_ANY), Err(Errno::NotFound));
+        assert_eq!(
+            p.poll(TaskId(1), WAIT_PID_ANY, WaitFlags::NONBLOCK),
+            Err(Errno::NotFound)
+        );
     }
 
     #[test]
@@ -779,8 +946,14 @@ mod tests {
         // (and fail closed in a host test), but the poll reports `WouldBlock`
         // immediately without ever touching the scheduler.
         p.register_child(TaskId(1), TaskId(2));
-        assert_eq!(p.poll(TaskId(1), WAIT_PID_ANY), Err(Errno::WouldBlock));
-        assert_eq!(p.poll(TaskId(1), 2), Err(Errno::WouldBlock));
+        assert_eq!(
+            p.poll(TaskId(1), WAIT_PID_ANY, WaitFlags::NONBLOCK),
+            Err(Errno::WouldBlock)
+        );
+        assert_eq!(
+            p.poll(TaskId(1), 2, WaitFlags::NONBLOCK),
+            Err(Errno::WouldBlock)
+        );
     }
 
     #[test]
@@ -790,8 +963,14 @@ mod tests {
         p.record_exit(TaskId(2), 0);
         // Task 9 never spawned child 2, and a caller with no children at all
         // sees `NotFound` — a poll grants no authority over another principal.
-        assert_eq!(p.poll(TaskId(9), WAIT_PID_ANY), Err(Errno::NotFound));
-        assert_eq!(p.poll(TaskId(9), 2), Err(Errno::NotFound));
+        assert_eq!(
+            p.poll(TaskId(9), WAIT_PID_ANY, WaitFlags::NONBLOCK),
+            Err(Errno::NotFound)
+        );
+        assert_eq!(
+            p.poll(TaskId(9), 2, WaitFlags::NONBLOCK),
+            Err(Errno::NotFound)
+        );
     }
 
     #[test]
@@ -799,8 +978,164 @@ mod tests {
         // The inert default announces an unwired interface rather than
         // fabricating a reaped child.
         assert_eq!(
-            NULL_PROCESS_WAIT.poll(TaskId(1), WAIT_PID_ANY),
+            NULL_PROCESS_WAIT.poll(TaskId(1), WAIT_PID_ANY, WaitFlags::NONBLOCK),
             Err(Errno::NotImplemented)
+        );
+    }
+
+    #[test]
+    fn a_pending_stop_is_reported_once_and_only_when_requested() {
+        let mut table = ProcessTable::new();
+        table.register(TaskId(1), TaskId(2));
+        table.record_stop(TaskId(2), Signal::Stop);
+        // Without the stop-report request the stopped child is invisible:
+        // the wait stays blocked exactly as for a running child.
+        assert_eq!(table.reap(TaskId(1), WAIT_PID_ANY, false), Reap::Blocked);
+        // With it, the stop is reported — and the child is NOT removed.
+        assert_eq!(
+            table.reap(TaskId(1), WAIT_PID_ANY, true),
+            Reap::Ready(WaitedChild {
+                pid: 2,
+                status: WaitStatus::Stopped(Signal::Stop)
+            })
+        );
+        // Edge-triggered: the same stop is never reported twice.
+        assert_eq!(table.reap(TaskId(1), WAIT_PID_ANY, true), Reap::Blocked);
+        // The child is still tracked and later exits normally.
+        table.record_exit(TaskId(2), 0);
+        assert_eq!(
+            table.reap(TaskId(1), WAIT_PID_ANY, true),
+            Reap::Ready(WaitedChild {
+                pid: 2,
+                status: WaitStatus::Exited(0)
+            })
+        );
+    }
+
+    #[test]
+    fn a_continue_clears_an_unreported_stop() {
+        let mut table = ProcessTable::new();
+        table.register(TaskId(1), TaskId(2));
+        table.record_stop(TaskId(2), Signal::Stop);
+        // The child is resumed before the parent ever looked: the stale
+        // stop must not be reported afterwards.
+        table.record_continue(TaskId(2));
+        assert_eq!(table.reap(TaskId(1), WAIT_PID_ANY, true), Reap::Blocked);
+    }
+
+    #[test]
+    fn an_exit_supersedes_an_unreported_stop() {
+        let mut table = ProcessTable::new();
+        table.register(TaskId(1), TaskId(2));
+        table.record_stop(TaskId(2), Signal::Stop);
+        // The child died while stopped (e.g. a kill): the terminal exit is
+        // the report; the stale stop is gone.
+        table.record_exit(TaskId(2), 137);
+        assert_eq!(
+            table.reap(TaskId(1), WAIT_PID_ANY, true),
+            Reap::Ready(WaitedChild {
+                pid: 2,
+                status: WaitStatus::Exited(137)
+            })
+        );
+        assert_eq!(table.reap(TaskId(1), WAIT_PID_ANY, true), Reap::NoChild);
+    }
+
+    #[test]
+    fn a_stop_on_a_zombie_is_ignored() {
+        let mut table = ProcessTable::new();
+        table.register(TaskId(1), TaskId(2));
+        table.record_exit(TaskId(2), 3);
+        // A dead child cannot stop; the exit report stands untouched.
+        table.record_stop(TaskId(2), Signal::Stop);
+        assert_eq!(
+            table.reap(TaskId(1), WAIT_PID_ANY, true),
+            Reap::Ready(WaitedChild {
+                pid: 2,
+                status: WaitStatus::Exited(3)
+            })
+        );
+    }
+
+    #[test]
+    fn a_reapable_zombie_wins_over_a_pending_stop() {
+        let mut table = ProcessTable::new();
+        table.register(TaskId(1), TaskId(2));
+        table.register(TaskId(1), TaskId(3));
+        table.record_stop(TaskId(2), Signal::Stop);
+        table.record_exit(TaskId(3), 0);
+        // Termination is the stronger, terminal report; the stop stays
+        // pending for the next wait.
+        assert_eq!(
+            table.reap(TaskId(1), WAIT_PID_ANY, true),
+            Reap::Ready(WaitedChild {
+                pid: 3,
+                status: WaitStatus::Exited(0)
+            })
+        );
+        assert_eq!(
+            table.reap(TaskId(1), WAIT_PID_ANY, true),
+            Reap::Ready(WaitedChild {
+                pid: 2,
+                status: WaitStatus::Stopped(Signal::Stop)
+            })
+        );
+    }
+
+    #[test]
+    fn peek_does_not_consume_or_reveal_a_pending_stop() {
+        let mut table = ProcessTable::new();
+        table.register(TaskId(1), TaskId(2));
+        table.record_stop(TaskId(2), Signal::Stop);
+        // The wait-set readiness peek is about reapability; a stopped child
+        // is still merely "running" to it, and the pending stop survives.
+        assert_eq!(table.peek(TaskId(1), 2), ChildPeek::Running);
+        assert_eq!(
+            table.reap(TaskId(1), 2, true),
+            Reap::Ready(WaitedChild {
+                pid: 2,
+                status: WaitStatus::Stopped(Signal::Stop)
+            })
+        );
+    }
+
+    #[test]
+    fn producer_poll_reports_a_pending_stop_without_blocking() {
+        let p = producer();
+        p.register_child(TaskId(1), TaskId(2));
+        p.record_stop(TaskId(2), Signal::Stop);
+        let flags = WaitFlags::from_bits(WaitFlags::NONBLOCK.bits() | WaitFlags::STOPPED.bits())
+            .expect("defined bits");
+        assert_eq!(
+            p.poll(TaskId(1), WAIT_PID_ANY, flags),
+            Ok(WaitedChild {
+                pid: 2,
+                status: WaitStatus::Stopped(Signal::Stop)
+            })
+        );
+        // Reported once; the second poll would block again.
+        assert_eq!(
+            p.poll(TaskId(1), WAIT_PID_ANY, flags),
+            Err(Errno::WouldBlock)
+        );
+        // The stopped child was not reaped: it is still a live,
+        // signallable child.
+        assert_eq!(p.authorise_child(TaskId(1), 2), Ok(TaskId(2)));
+    }
+
+    #[test]
+    fn producer_wait_reports_an_already_pending_stop_without_parking() {
+        let p = producer();
+        p.register_child(TaskId(1), TaskId(2));
+        p.record_stop(TaskId(2), Signal::Stop);
+        // The stop is already pending when the parent waits, so the report
+        // is immediate — the blocking park path is never reached.
+        assert_eq!(
+            p.wait(TaskId(1), WAIT_PID_ANY, WaitFlags::STOPPED),
+            Ok(WaitedChild {
+                pid: 2,
+                status: WaitStatus::Stopped(Signal::Stop)
+            })
         );
     }
 }

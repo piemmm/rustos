@@ -620,7 +620,7 @@ landing).
   (I32-pid recovery, UserPtr status) + the three test-double impls
   (`MockHandlers`/`AcceptingHandlers`/`CountingHandlers`) + decode/forward
   tests. `kernel/core`: a fail-closed arch-neutral `procwait::ProcessWait`
-  seam (`wait(parent: TaskId, pid) -> Result<ReapedChild, Errno>`; default
+  seam (`wait(parent: TaskId, pid, flags) -> Result<WaitedChild, Errno>`; default
   `NULL_PROCESS_WAIT` → `NotImplemented`, mirroring `NULL_MEM_MAP` /
   `NULL_PROCESS_SPAWN`), the `wait` handler (forward → `copy_out` the exit
   code → return pid), and a `with_process_wait` builder, so the kernel binary
@@ -738,8 +738,10 @@ Split into two increments, exactly as SP6 was (surface+seam, then producer):
   `Continue` → `SchedulerPolicy::unpark` (a continue to a non-stopped child is
   a harmless no-op — `InvalidState` is folded to `Ok`); `Terminate` / `Kill` →
   `SchedulerPolicy::exit` + `KernelProcessWait::record_signalled_exit`, which
-  records the signal's `128 + n` status (the shared `Signal::termination_status`
-  in `lib/abi`, so kernel and program agree) so the parent's `wait` reaps it.
+  records the signal's POSIX-familiar termination status (the shared
+  `Signal::termination_status` in `lib/abi`, so kernel and program agree —
+  since SP9: `Interrupt` → 130, `Kill` → 137, `Terminate` → 143) so the
+  parent's `wait` reaps it.
   Installed in `init.rs::run_phases` over the concrete wait producer +
   `state.scheduler` and threaded through a hook-level `with_process_signal`
   forwarder. Six host tests cover it over a real `Scheduler<TestArch>`
@@ -749,9 +751,10 @@ Split into two increments, exactly as SP6 was (surface+seam, then producer):
   `tests/integration/signal_program` fixture) builds an isolated child + parent
   EL0 space, admits the child, threads its scheduler-assigned PID into the
   parent's startup arguments, installs the wait + signal producers, and drives
-  the cooperative `step` loop: the child yields forever, the parent
-  `signal`s it `Terminate`, `wait`s to reap it, verifies the `130` status, and
-  exits 0 — **verified green under QEMU on `-M virt`** (PASS id 4302).
+  the cooperative `step` loop: the child yields forever, and since SP9 the
+  parent drives the full job-control sequence (`Stop` → `STOPPED` wait
+  observes the stop → `Continue` → `Terminate` → reap, verifying the 143
+  status) and exits 0 — verified green under QEMU on `-M virt`.
 
 **Done when (SP7):** a first-party program can issue `signal` through `abi-v1`
 and terminate its own child under the live scheduler on aarch64 `-M virt`;
@@ -801,6 +804,108 @@ argv-taking command app):
   the userland encoding and env lookup; the session-ceiling QEMU vertical
   types `ps --bogus` and keys on the resulting usage line — output only a
   delivered `argv[1]` can produce.
+
+---
+
+## SP9 — foreground job control: `^C`/`^Z`, `Signal::{Interrupt,Stop}`, stopped wait reports `[x]`
+
+The elsh interactive work (`.junie/plan-session-shell.md` Part 3,
+`plans/SHELL.md` "Job control"): while the shell is blocked in `wait()` on a
+foreground child, `^C` must interrupt and `^Z` must stop that child — the
+kernel console line discipline delivers the signal; the shell only marks and
+clears the foreground job. Binding design decisions:
+
+- **Signal set.** The closed `rustos_abi::Signal` gains `Interrupt` (4, the
+  `^C` interrupt request; default disposition terminates) and `Stop` (5, the
+  `^Z` stop; parks the child, never terminates it). `Signal::
+  termination_status` follows the POSIX-familiar `128 + <signal a script
+  expects>` codes — `Interrupt` → 130, `Terminate` → 143, `Kill` → 137
+  (`Continue`/`Stop` → `None`) — because §16.7 familiarity binds the codes a
+  shell user scripts against, not our wire discriminants (in-place evolution
+  of SP7's 130/131).
+- **Stopped wait reports.** `WaitFlags` gains `STOPPED` (1 << 1, the
+  `WUNTRACED` analogue): with it set, `wait` also reports a child freshly
+  stopped by `Signal::Stop` — without reaping it. A stop is reported once
+  (edge-triggered, re-armed by `Continue`). The `status` out-pointer now
+  names a typed two-field record, `rustos_abi::WaitStatusRecord`
+  (`#[repr(C)]`: `kind: u32` — 1 exited, 2 stopped, 0 reserved — plus
+  `value: i32` — the exit code, or the stopping signal's discriminant),
+  decoded fail-closed into `rustos_abi::WaitStatus::{Exited(i32),
+  Stopped(Signal)}`; no POSIX bit-packing. Every caller updates in place.
+- **Kernel bookkeeping.** `ProcessTable`'s `ChildEntry` gains
+  `stop_pending: Option<Signal>`; `KernelProcessWait` gains
+  `record_stop`/`record_continue`, its `wait`/`poll` take the decoded
+  `WaitFlags` and return `WaitedChild { pid, status: WaitStatus }` (the
+  `ReapedChild` successor), and stop events wake `PROCWAIT_WAITQ` exactly as
+  exits do. `KernelProcessSignal` delivers `Stop` →
+  `SchedulerPolicy::park(child)` + `record_stop`, `Continue` → `unpark` +
+  `record_continue`, `Interrupt` → the terminate path with its 130 status.
+- **Console line discipline.** `ConsoleDevice` owns an atomic `foreground`
+  slot (lock-free — the filter runs in the UART RX interrupt handler, where
+  spinning on a lock held by the interrupted task would deadlock a single
+  CPU) and an atomic `InputMode` mirror, and implements `ConsoleInput`:
+  every producer (the aarch64 UART RX drain — both its ISR and
+  reader-context entry — via `arch_wrapper::uart_console_device()`, and the
+  seat registry's text sink, now the video console device) pushes through
+  the device. In **cooked** mode with a foreground task set and the
+  delivery hook installed, the filter consumes `0x03`/`0x1A` and **queues**
+  `Interrupt`/`Stop` in `procsignal`'s single atomic pending slot
+  (`queue_foreground_signal`, newest wins), nudging the dispatch loop
+  (`console_wake`); the scheduler-driving delivery runs at dispatcher
+  context (`drain_pending_foreground`, called beside `drain_pending_wakes`
+  and in the idle guard) through the boot-installed `ForegroundSignal` hook
+  (implemented by `KernelProcessSignal`, installed beside
+  `with_process_signal`). All other bytes — and every byte in raw/secret
+  mode, or with no foreground set — flow to the input queue exactly as
+  before. A delivery whose target has already exited is dropped fail-closed
+  (task ids are never reused, so a stale slot can never reach a different
+  task).
+- **Stop overlay.** The scheduler's park/unpark state is shared with every
+  blocking wait, so a broadcast wake (a console byte waking all parked
+  readers) could resume a "stopped" task. `procsignal` owns a
+  `STOPPED_TASKS` overlay set: `Stop` marks before parking, the kthread
+  dispatch shim re-parks an overlay-held task instead of running it, and
+  only `Continue` (or termination) lifts the entry — so a stopped job stays
+  genuinely stopped across spurious wakes.
+- **Foreground marking.** New unprivileged-beyond-console syscall
+  `SyscallNumber::CONSOLE_FOREGROUND` (**70**): `(fd: u32, pid: i32)`; `fd`
+  must be a `StreamMode::Read` descriptor of the caller's own table (the
+  same fd-scoped authority `stream_input_mode` uses, same dispatcher
+  capability gate), `pid` must be a **live child of the caller**
+  (authorised through the one `KernelProcessWait::authorise_child`), and
+  `pid == 0` clears the slot. No new capability (§5.2 minimalism): the
+  authority is the inherited console descriptor plus the parent/child
+  relation.
+- **Shell wiring.** `RtProcessHost::wait` marks the child foreground on
+  fd 0 (`console_foreground`), issues the blocking wait with
+  `WaitFlags::STOPPED`, clears the slot on return, and decodes the record —
+  `Stopped` maps to the shell's `WaitOutcome::Stopped` with the familiar
+  POSIX numbers (`Stop` → 20, so `$?` = 148) — feeding the already-landed
+  elsh job table (`launch_foreground` stopped-job handling, `fg`/`bg`
+  resume). `ProcessHost` itself is unchanged; scripts and pipes see no
+  difference.
+- **Proof.** Host tests: ABI round-trips (signal values, flags, record
+  encode/decode + byte codec, fail-closed kinds), `ProcessTable`
+  stop/report-once/continue/reap interleavings (exit supersedes a stop, a
+  zombie wins over a pending stop), `KernelProcessSignal`
+  stop/continue/interrupt/kill-while-stopped + foreground-deliver over a
+  real `Scheduler<TestArch>`, console-device filter (cooked-only,
+  foreground-only, hook-gated, replace semantics, short push, clear
+  restores pass-through), `console_foreground` handler fail-closed paths
+  (bad fd, non-child/negative/zombie pid, no console, no producer), rt +
+  abi-sys marshalling and the rt fail-closed record decode, dispatcher
+  decode + capability-gate tests, and the fuzz/proptest mirrors. QEMU: the
+  SP7 signal vertical now drives Stop → `wait(STOPPED)` observes the stop →
+  `Continue` → `Terminate` → reap 143.
+
+**Done when (SP9):** elsh's foreground `^C` terminates and `^Z` stops the
+running child on an interactive console with the shell reporting
+`[N] Stopped …` and `fg`/`bg` resuming it; a stopped child is reported
+through `wait` only when `STOPPED` is requested; every fail-closed path above
+is host-tested; the C header, `abi-check`, the host matrix, and the QEMU
+matrix stay green. **Landed: the kernel/ABI/rt/elsh path above is complete;
+elsh marks its foreground child around every blocking wait and maps a stop
+to `$?` = 148 (SIGTSTP's POSIX number).**
 
 ---
 

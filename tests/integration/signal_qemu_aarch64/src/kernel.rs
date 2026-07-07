@@ -11,7 +11,10 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 
 use rustos_abi::rxe::LoadImage;
-use rustos_abi::{CapabilityId, CapabilityQuery, Errno, Signal, SyscallNumber, SYSCALL_MAX_ARGS};
+use rustos_abi::{
+    CapabilityId, CapabilityQuery, Errno, Signal, SyscallNumber, WaitFlags, WaitStatus,
+    WaitStatusRecord, SYSCALL_MAX_ARGS,
+};
 use rustos_arch_aarch64::context_hal::ContextSwitchHal;
 use rustos_arch_aarch64::kernel_arch::timer_frequency_hz;
 use rustos_arch_aarch64::paging::{
@@ -89,6 +92,9 @@ const FAIL_NO_PRODUCER: u16 = 13;
 
 /// Set once the parent reaped a child carrying the expected signalled status.
 static REAP_OK: AtomicBool = AtomicBool::new(false);
+/// Set once a `WaitFlags::STOPPED` wait reported the child stopped — the
+/// SP9 half of the vertical (stop overlay + stopped wait report).
+static STOP_OBSERVED: AtomicBool = AtomicBool::new(false);
 /// Scheduler task id of the parent (the program that sends the signal + waits).
 static PARENT_TID: AtomicU64 = AtomicU64::new(u64::MAX);
 
@@ -246,19 +252,35 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
         };
         #[allow(clippy::cast_possible_truncation)]
         let pid = args[0] as i32;
-        match producer.wait(TaskId(cur), pid) {
-            Ok(reaped) => {
-                // Copy the reaped status out to the parent's `status` pointer
-                // through the validated boundary, exactly as the production
-                // `wait` handler does.
-                if !copy_status_to_parent(args[1], reaped.code) {
+        // Decode the flags fail-closed, exactly as the production dispatcher
+        // does (a reserved bit never reaches the producer).
+        #[allow(clippy::cast_possible_truncation)]
+        let flags = match WaitFlags::from_bits(args[2] as u32) {
+            Ok(flags) => flags,
+            Err(err) => return encode(Err(err)),
+        };
+        match producer.wait(TaskId(cur), pid, flags) {
+            Ok(reported) => {
+                // Copy the typed status record out to the parent's `status`
+                // pointer through the validated boundary, exactly as the
+                // production `wait` handler does.
+                if !copy_status_to_parent(args[1], reported.status) {
                     qemu_exit::exit_failure(FAIL_COPY_STATUS);
                 }
-                // The parent expects Terminate's 128 + 2 = 130 status.
-                if Signal::Terminate.termination_status() == Some(reaped.code) {
-                    REAP_OK.store(true, Ordering::SeqCst);
+                match reported.status {
+                    // The SP9 half: the stop was observed without a reap.
+                    WaitStatus::Stopped(Signal::Stop) => {
+                        STOP_OBSERVED.store(true, Ordering::SeqCst);
+                    }
+                    // The parent expects Terminate's POSIX-familiar 143.
+                    WaitStatus::Exited(code)
+                        if Signal::Terminate.termination_status() == Some(code) =>
+                    {
+                        REAP_OK.store(true, Ordering::SeqCst);
+                    }
+                    _ => {}
                 }
-                encode(Ok(u64::from(reaped.pid)))
+                encode(Ok(u64::from(reported.pid)))
             }
             Err(err) => encode(Err(err)),
         }
@@ -271,11 +293,13 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
         #[allow(clippy::cast_possible_truncation)]
         let code = args[0] as i32;
         if cur == PARENT_TID.load(Ordering::SeqCst) {
-            // The parent verified the reaped signalled status and returned 0.
-            if code == 0 && REAP_OK.load(Ordering::SeqCst) {
+            // The parent stopped and resumed the child (observing the stop
+            // through a STOPPED wait), then terminated it, verified the
+            // signalled status, and returned 0.
+            if code == 0 && REAP_OK.load(Ordering::SeqCst) && STOP_OBSERVED.load(Ordering::SeqCst) {
                 note(
                     TEST_PASS,
-                    "signal test: parent terminated the child, read its signalled status, and exited 0",
+                    "signal test: parent stopped, resumed, terminated, and reaped the child, and exited 0",
                 );
                 qemu_exit::exit_success();
             }
@@ -294,15 +318,15 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
     }
 }
 
-/// Copy `code` (as the parent's `i32` status) out to the parent's `status`
-/// pointer through the retained frozen parent space. Returns `false` on a
+/// Copy the typed wait-status record out to the parent's `status` pointer
+/// through the retained frozen parent space. Returns `false` on a
 /// faulting or unmapped pointer (fail closed).
-fn copy_status_to_parent(status_va: u64, code: i32) -> bool {
+fn copy_status_to_parent(status_va: u64, status: WaitStatus) -> bool {
     let guard = PARENT_SPACE.lock();
     let Some((space, physmap)) = guard.as_ref() else {
         return false;
     };
-    let bytes = code.to_ne_bytes();
+    let bytes = WaitStatusRecord::encode(status).to_ne_bytes();
     copy_out(
         space.as_ref(),
         physmap.as_ref(),

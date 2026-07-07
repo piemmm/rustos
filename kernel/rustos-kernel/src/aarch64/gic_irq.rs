@@ -546,6 +546,12 @@ pub extern "C" fn production_device_irq_dispatch(intid: u32) {
 fn drain_uart_into_console_queue() {
     use rustos_kernel_core::ConsoleInput as _;
     let queue = &crate::aarch64::arch_wrapper::UART_INPUT;
+    // Push through the installed UART console *device*, not the raw queue:
+    // its line discipline maps a cooked-mode `^C`/`^Z` to a foreground
+    // signal at arrival time (`plans/SPAWN.md` SP9) and forwards every
+    // other byte to this same queue, so the free-space flow control below
+    // is unchanged.
+    let console = crate::aarch64::arch_wrapper::uart_console_device();
     loop {
         // Lossless backpressure: dequeue from the hardware FIFO only what the
         // console queue can accept this instant. Reading more would force the
@@ -602,12 +608,12 @@ fn drain_uart_into_console_queue() {
             // `n2 <= want <= free`: the raced-in chunk fits and its push wakes
             // the parked reader. Loop to keep draining (and to re-clear on the
             // next genuine empty).
-            let _ = queue.push(&buf[..n2]);
+            let _ = console.push(&buf[..n2]);
             continue;
         }
         // `n <= want <= free`, so the whole chunk fits and the push wakes the
         // parked reader (`ConsoleInputQueue::push` → `console_wake`).
-        let _ = queue.push(&buf[..n]);
+        let _ = console.push(&buf[..n]);
     }
 }
 

@@ -115,6 +115,10 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  66 | `fs_getcwd`    | `user_ptr` (buf), `len`                 | `u64` (bytes) | —               | no    |
 |  67 | `resource_open` | `user_ptr` (ref), `len`, `u32 flags`   | `u64` (fd)    | —               | yes   |
 |  68 | `self_origin`  | `user_ptr` (out), `len`                | `u64` (bytes) | —               | no    |
+|  69 | `users_admin`  | `user_ptr` (req), `len`, `user_ptr` (out), `len` | `u64` (bytes) | `CAP_USER_ADMIN` | yes |
+|  70 | `seat_switch`  | `u64 seat`, `u32 console`               | `errno`       | `CAP_SEAT_ADMIN` | yes |
+|  71 | `seat_revoke`  | `u64 seat`                              | `errno`       | `CAP_SEAT_ADMIN` | yes |
+|  72 | `console_foreground` | `u32 fd`, `i32 pid`               | `errno`       | `CAP_CONSOLE_READ` | yes |
 
 (Syscall numbers 39–45 — `msi_alloc`, `shm_create`/`shm_map`/`shm_unmap`,
 `waitset_create`/`waitset_ctl`/`waitset_wait` — are defined in
@@ -180,11 +184,11 @@ is exhaustive — anything not listed below is ungated:
 
 | Capability         | Syscalls gated by it       |
 | ------------------ | -------------------------- |
-| `CAP_USER_ADMIN`   | `cap_revoke`               |
+| `CAP_USER_ADMIN`   | `cap_revoke`, `users_admin` |
 | `CAP_IRQ_BIND`     | `irq_bind`, `irq_wait`     |
 | `CAP_CONSOLE_WRITE`| `stream_write`, `console_count` |
 | `CAP_PROC_SPAWN`   | `spawn`                    |
-| `CAP_CONSOLE_READ` | `stream_read`, `stream_input_mode` |
+| `CAP_CONSOLE_READ` | `stream_read`, `stream_input_mode`, `console_foreground` |
 | `CAP_USERS_READ`   | `users_db_read`, `users_db_wait` |
 | `CAP_INPUT_INJECT` | `key_inject`               |
 | `CAP_DISPLAY`      | `display_acquire`, `display_release` |
@@ -552,8 +556,11 @@ principal (the same §16.6 baseline). It is, however, *audited* — reaping a
 child is a process-lifecycle state change (a principal disappears), exactly
 as `spawn` and `exit` are audited (`AGENTS.md` §5.4.4). `pid` is either
 a specific child's PID or `rustos_abi::WAIT_PID_ANY` (`-1`, wait for any child);
-`status` is a non-null user pointer the kernel writes the reaped child's
-exit code to; `flags` is a `rustos_abi::WaitFlags` set. The handler reaches
+`status` is a non-null user pointer the kernel writes the typed
+`rustos_abi::WaitStatusRecord` to (`kind` exited or stopped plus the exit
+code or stopping signal — decoded fail-closed by
+`rustos_abi::WaitStatusRecord::decode`, never a bit-packed POSIX status
+word); `flags` is a `rustos_abi::WaitFlags` set. The handler reaches
 the scheduler-side reaper through the
 `kernel/core::procwait::ProcessWait` seam, which is installed at boot like
 the `spawn` / `mem_map` producers. The boot path installs the real
@@ -579,7 +586,18 @@ poll that finds nothing reapable is audited as the benign
 `SYSCALL_HANDLER_WOULD_BLOCK` (Debug), not an ERROR — so a polling
 job-control loop never floods the log (`AGENTS.md` §2.1 / §19.4). The
 first-party Rust wrapper is `rustos_rt::try_wait`; the C stub `ros_sys_wait`
-takes the flags argument and the header defines `ROS_WAIT_FLAG_NONBLOCK`.
+takes the flags argument and the header defines `ROS_WAIT_FLAG_NONBLOCK`,
+`ROS_WAIT_FLAG_STOPPED`, and the `ros_wait_status_t` record.
+
+With `WaitFlags::STOPPED` set the call also reports a child freshly
+**stopped** by `Signal::Stop` (`plans/SPAWN.md` SP9 — the `WUNTRACED`
+analogue the shell's job control uses): it returns the child's PID and
+writes a *stopped* record — **without reaping the child**, which stays
+tracked and resumable through `Signal::Continue`. Each stop is reported
+exactly once (edge-triggered; a `Continue` clears an unobserved stop so a
+stale report never follows a resume, and an exit supersedes one). With the
+bit clear a stopped child is invisible to `wait`, exactly as before. The
+simple wrapper for a parent with no job control is `rustos_rt::wait_exit`.
 
 `signal` (no. 64) delivers a control signal to a child of the calling
 process (`plans/SPAWN.md` SP7) — the job-control primitive the shell's
@@ -589,7 +607,8 @@ and no capability is required (the §16.6 own-process baseline). It **is**
 audited — delivering a signal is a process-lifecycle decision, exactly as
 `spawn`/`wait`/`exit` are audited (`AGENTS.md` §5.4.4). `pid` names a child
 the caller spawned; `signal` is a closed `rustos_abi::Signal` discriminant
-(`Continue` = 1, `Terminate` = 2, `Kill` = 3), and the reserved `0` or any
+(`Continue` = 1, `Terminate` = 2, `Kill` = 3, `Interrupt` = 4, `Stop` = 5),
+and the reserved `0` or any
 other value fails closed with `OutOfRange` before dispatch (validate every
 input). The handler reaches the scheduler-side deliverer through the
 `kernel/core::procsignal::ProcessSignal` seam, installed at boot like the
@@ -602,12 +621,44 @@ SP7b): it composes over the `KernelProcessWait` producer — the one owner of
 the parent/child + exit-status bookkeeping, so authorisation and the reaped
 status share a single definition — and the live scheduler, and delivers by
 driving it: `Continue` resumes a stopped child (`SchedulerPolicy::unpark`, a
-no-op for a running one), and `Terminate` / `Kill` terminate the child
-(`SchedulerPolicy::exit`) and record the signal's `128 + n` termination
-status (`Signal::termination_status`) so the parent's `wait` reaps it —
-distinguishable from a self-`exit`. The first-party Rust wrapper is
+no-op for a running one, also clearing the stop overlay and any unobserved
+stop), `Terminate` / `Kill` / `Interrupt` terminate the child
+(`SchedulerPolicy::exit`) and record the signal's POSIX-familiar
+termination status (`Signal::termination_status`: `Interrupt` → 130,
+`Kill` → 137, `Terminate` → 143 — the `128 + n` codes a shell user already
+scripts against, deliberately not our wire discriminants) so the parent's
+`wait` reaps it — distinguishable from a self-`exit` — and `Stop` parks the
+child (`SchedulerPolicy::park`), marks it in the kernel's stop overlay (a
+broadcast waitq wake can otherwise make a parked task runnable; the kthread
+dispatch shim re-parks an overlay-held task, so only `Continue` genuinely
+resumes it) and records the stop for a `WaitFlags::STOPPED` wait. The
+first-party Rust wrapper is
 `rustos_rt::signal`; the C stub is `ros_sys_signal` and the header defines
-`ROS_SIGNAL_CONTINUE` / `ROS_SIGNAL_TERMINATE` / `ROS_SIGNAL_KILL`.
+`ROS_SIGNAL_CONTINUE` / `ROS_SIGNAL_TERMINATE` / `ROS_SIGNAL_KILL` /
+`ROS_SIGNAL_INTERRUPT` / `ROS_SIGNAL_STOP`.
+
+`console_foreground` (no. 72) marks (or clears, `pid = 0`) the foreground
+job of the console behind readable descriptor `fd` — the `tcsetpgrp`
+analogue (`plans/SPAWN.md` SP9). While a foreground task is set, the
+console's **cooked-mode** line discipline consumes `^C`/`^Z` at arrival
+time (every input producer — the UART RX interrupt handler, the seat
+registry's keyboard sink — pushes through the console device's input
+filter) and queues `Signal::Interrupt`/`Signal::Stop` for the foreground
+task; the queueing is a single atomic store (interrupt-safe, the deferred
+discipline of the console wakes) and the scheduler-driving delivery runs at
+the next dispatcher-context drain, through the same `KernelProcessSignal`
+engine the `signal` syscall uses (installed as the `ForegroundSignal` hook
+at boot). Raw/secret modes and a clear slot pass every byte through
+unchanged, so a full-screen program still receives literal control bytes.
+It is gated on `CAP_CONSOLE_READ` (the `stream_input_mode` terminal-control
+gate) and audited (redirecting signal delivery is a security-relevant
+decision); the *target* authority is the parent/child relationship — a
+non-zero `pid` must be a **live child of the caller**, authorised through
+the same `ProcessWait::authorise_child` bookkeeping `wait`/`signal` use,
+and everything else fails closed with `NotFound`. The shell (`elsh`) marks
+its foreground child around every blocking `wait` and clears the slot at
+its prompt. The first-party Rust wrapper is `rustos_rt::console_foreground`;
+the C stub is `ros_sys_console_foreground`.
 
 `rlimit_get` (no. 17) and `rlimit_set` (no. 18) are the settable
 `ulimit`/`rlimit`-equivalent (`AGENTS.md` §24.3). Both name a closed

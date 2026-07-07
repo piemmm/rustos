@@ -10,7 +10,10 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 
 use rustos_abi::rxe::LoadImage;
-use rustos_abi::{CapabilityId, CapabilityQuery, Errno, SyscallNumber, SYSCALL_MAX_ARGS};
+use rustos_abi::{
+    CapabilityId, CapabilityQuery, Errno, SyscallNumber, WaitFlags, WaitStatus, WaitStatusRecord,
+    SYSCALL_MAX_ARGS,
+};
 use rustos_arch_aarch64::context_hal::ContextSwitchHal;
 use rustos_arch_aarch64::kernel_arch::timer_frequency_hz;
 use rustos_arch_aarch64::paging::{
@@ -227,15 +230,22 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
     if raw == SyscallNumber::WAIT.as_u16() {
         #[allow(clippy::cast_possible_truncation)]
         let pid = args[0] as i32;
-        match producer.wait(TaskId(cur), pid) {
+        // Decode the flags fail-closed, exactly as the production dispatcher
+        // does (a reserved bit never reaches the producer).
+        #[allow(clippy::cast_possible_truncation)]
+        let flags = match WaitFlags::from_bits(args[2] as u32) {
+            Ok(flags) => flags,
+            Err(err) => return encode(Err(err)),
+        };
+        match producer.wait(TaskId(cur), pid, flags) {
             Ok(reaped) => {
-                // Copy the reaped exit code out to the parent's `status`
+                // Copy the typed status record out to the parent's `status`
                 // pointer through the validated boundary, exactly as the
                 // production `wait` handler does.
-                if !copy_status_to_parent(args[1], reaped.code) {
+                if !copy_status_to_parent(args[1], reaped.status) {
                     qemu_exit::exit_failure(FAIL_COPY_STATUS);
                 }
-                if reaped.code == CHILD_EXIT_CODE {
+                if reaped.status == WaitStatus::Exited(CHILD_EXIT_CODE) {
                     REAP_OK.store(true, Ordering::SeqCst);
                 }
                 encode(Ok(u64::from(reaped.pid)))
@@ -270,15 +280,15 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
     }
 }
 
-/// Copy `code` (as the parent's `i32` status) out to the parent's `status`
+/// Copy the typed wait-status record out to the parent's `status`
 /// pointer through the retained frozen parent space. Returns `false` on a
 /// faulting or unmapped pointer (fail closed).
-fn copy_status_to_parent(status_va: u64, code: i32) -> bool {
+fn copy_status_to_parent(status_va: u64, status: WaitStatus) -> bool {
     let guard = PARENT_SPACE.lock();
     let Some((space, physmap)) = guard.as_ref() else {
         return false;
     };
-    let bytes = code.to_ne_bytes();
+    let bytes = WaitStatusRecord::encode(status).to_ne_bytes();
     copy_out(
         space.as_ref(),
         physmap.as_ref(),

@@ -9,7 +9,7 @@
 //! * the **child** simply returns the build-pinned `CHILD_CODE`, which the
 //!   runtime routes through the `exit` syscall, so it terminates with that
 //!   exact status;
-//! * the **parent** calls `rustos_rt::wait(WAIT_PID_ANY, &mut status)` — a real
+//! * the **parent** calls `rustos_rt::wait_exit(WAIT_PID_ANY, &mut status)` — a real
 //!   `wait` syscall the kernel blocks on until the child exits — reaps the
 //!   child, and verifies the reaped exit code is `CHILD_CODE`, returning 0 on
 //!   success and a distinct non-zero diagnostic code otherwise.
@@ -117,7 +117,7 @@ mod program {
 
         // Parent: block until the child exits, reap it, and read its code.
         let mut status: i32 = -1;
-        let reaped = rustos_rt::wait(WAIT_PID_ANY, &mut status);
+        let reaped = rustos_rt::wait_exit(WAIT_PID_ANY, &mut status);
         if reaped < 0 {
             // `wait` failed (e.g. no child, or it was not our child): the
             // negative return is `-errno`. Report a distinct diagnostic.

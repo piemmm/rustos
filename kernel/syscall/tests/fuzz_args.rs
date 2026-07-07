@@ -148,6 +148,10 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn console_foreground(&self, _c: &CallerContext<'_>, _fd: u32, _pid: i32) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
     fn stream_read(
         &self,
         _c: &CallerContext<'_>,
@@ -599,10 +603,10 @@ fn would_accept(spec_idx: usize, raw_number: u16, args: &[u64; SYSCALL_MAX_ARGS]
     }
     // `wait`'s flags argument (arg 2) carries the same extra semantic check:
     // the dispatcher runs the raw `U32` through `WaitFlags::from_bits`, which
-    // rejects any reserved bit (the only defined bit today is `NONBLOCK`).
-    // Mirror that here.
+    // rejects any reserved bit (the defined bits today are `NONBLOCK` and
+    // `STOPPED`). Mirror that here.
     if spec.number == SyscallNumber::WAIT {
-        let allowed = u64::from(WaitFlags::NONBLOCK.bits());
+        let allowed = u64::from(WaitFlags::NONBLOCK.bits() | WaitFlags::STOPPED.bits());
         if args[2] & !allowed != 0 {
             return false;
         }

@@ -84,6 +84,9 @@ const NUM_USERS_DB_WAIT: u64 = SyscallNumber::USERS_DB_WAIT.as_u16() as u64;
 const NUM_USERS_ADMIN: u64 = SyscallNumber::USERS_ADMIN.as_u16() as u64;
 const NUM_CONSOLE_COUNT: u64 = SyscallNumber::CONSOLE_COUNT.as_u16() as u64;
 const NUM_STREAM_INPUT_MODE: u64 = SyscallNumber::STREAM_INPUT_MODE.as_u16() as u64;
+
+/// `console_foreground` syscall number (as above).
+const NUM_CONSOLE_FOREGROUND: u64 = SyscallNumber::CONSOLE_FOREGROUND.as_u16() as u64;
 const NUM_KEY_INJECT: u64 = SyscallNumber::KEY_INJECT.as_u16() as u64;
 const NUM_DISPLAY_ACQUIRE: u64 = SyscallNumber::DISPLAY_ACQUIRE.as_u16() as u64;
 const NUM_DISPLAY_RELEASE: u64 = SyscallNumber::DISPLAY_RELEASE.as_u16() as u64;
@@ -691,17 +694,20 @@ pub extern "C" fn sys_mem_unmap(base: u64, len: usize) -> i32 {
     unsafe { ret_i32(raw_syscall(NUM_MEM_UNMAP, [base, len as u64, 0, 0, 0, 0])) }
 }
 
-/// `wait`: wait for a child of the calling process to exit, reaping it and
-/// writing its exit code to `status` (`SyscallNumber::WAIT`). Returns the
-/// reaped child's PID, or a `ROS_E_*` code reinterpreted into the result.
+/// `wait`: wait for a child-process event, writing the typed
+/// `ros_wait_status_t` record to `status` (`SyscallNumber::WAIT`). Returns
+/// the reported child's PID, or a `ROS_E_*` code reinterpreted into the
+/// result.
 ///
 /// `pid` is either a specific child's PID or [`rustos_abi::WAIT_PID_ANY`] to
 /// wait for any child. `flags` is a [`rustos_abi::WaitFlags`] bit set:
 /// `ROS_WAIT_FLAG_NONBLOCK` (bit 0) polls instead of blocking, returning
-/// `ROS_E_WOULD_BLOCK` when a matching child is still running. A process may
+/// `ROS_E_WOULD_BLOCK` when a matching child has nothing to report;
+/// `ROS_WAIT_FLAG_STOPPED` (bit 1) also reports a child freshly stopped by
+/// `ROS_SIGNAL_STOP` — without reaping it. A process may
 /// only wait on its **own** children; the kernel validates the parent/child
 /// relationship and the `status` pointer before writing to it, and fails
-/// closed (`plans/SPAWN.md` SP6).
+/// closed (`plans/SPAWN.md` SP6/SP9).
 #[must_use]
 #[export_name = "ros_sys_wait"]
 pub extern "C" fn sys_wait(pid: i32, status: *mut c_void, flags: u32) -> u64 {
@@ -1584,6 +1590,30 @@ pub extern "C" fn sys_signal(pid: i32, signal: u32) -> i32 {
     }
 }
 
+/// `console_foreground`: mark (or clear) the foreground job of the console
+/// behind readable descriptor `fd` — the child the cooked-mode line
+/// discipline delivers `^C`/`^Z` to (`SyscallNumber::CONSOLE_FOREGROUND`,
+/// the `tcsetpgrp` analogue). Returns a `ROS_E_*` code.
+///
+/// `pid` is a live child of the caller, or `0` to clear the slot. Requires
+/// `ROS_CAP_CONSOLE_READ` (the same fd-scoped terminal-control gate
+/// `stream_input_mode` carries); the kernel authorises the child through
+/// the same parent/child bookkeeping `wait`/`signal` use and fails closed
+/// (`plans/SPAWN.md` SP9).
+#[must_use]
+#[export_name = "ros_sys_console_foreground"]
+pub extern "C" fn sys_console_foreground(fd: u32, pid: i32) -> i32 {
+    // SAFETY: see `sys_yield`. No user pointer is dereferenced; the kernel
+    // resolves `fd` against the caller's own descriptor table and
+    // authorises `pid` on the far side of the trap.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_CONSOLE_FOREGROUND,
+            [u64::from(fd), i32_arg(pid), 0, 0, 0, 0],
+        ))
+    }
+}
+
 /// `fs_chdir`: change the calling process's working directory to the
 /// (absolute or cwd-relative) path `(path, path_len)`
 /// (`SyscallNumber::FS_CHDIR`). Returns a `ROS_E_*` code.
@@ -1697,6 +1727,7 @@ mod tests {
         (NUM_USERS_ADMIN, "users_admin", 4),
         (NUM_CONSOLE_COUNT, "console_count", 0),
         (NUM_STREAM_INPUT_MODE, "stream_input_mode", 2),
+        (NUM_CONSOLE_FOREGROUND, "console_foreground", 2),
         (NUM_KEY_INJECT, "key_inject", 2),
         (NUM_DISPLAY_ACQUIRE, "display_acquire", 0),
         (NUM_DISPLAY_RELEASE, "display_release", 0),
@@ -2662,5 +2693,27 @@ mod tests {
         assert_eq!(args[0], ptr as usize as u64);
         assert_eq!(args[1], 64);
         assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn console_foreground_marshals_fd_and_signed_pid() {
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_console_foreground(0, 9), 0);
+        });
+        assert_eq!(number, NUM_CONSOLE_FOREGROUND);
+        assert_eq!(args[0], 0);
+        assert_eq!(args[1], 9);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+        // The clear sentinel and a (refused kernel-side) negative pid both
+        // marshal verbatim — the stub never filters, the kernel decides.
+        let (_, args) = capture(0, || {
+            assert_eq!(sys_console_foreground(0, 0), 0);
+        });
+        assert_eq!(args[1], 0);
+        let (_, args) = capture(0, || {
+            assert_eq!(sys_console_foreground(0, -1), 0);
+        });
+        // `-1` sign-extends to all-ones in the argument register.
+        assert_eq!(args[1], u64::MAX);
     }
 }

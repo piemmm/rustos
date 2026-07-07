@@ -557,9 +557,10 @@ pub const SPAWN_UID_INHERIT: u32 = u32::MAX;
 pub const CONSOLE_INDEX_MAX: u8 = u8::MAX;
 
 /// A control signal delivered to a child process by
-/// [`crate::SyscallNumber::SIGNAL`].
+/// [`crate::SyscallNumber::SIGNAL`] or by the console line discipline
+/// (`plans/SPAWN.md` SP9 — the `^C`/`^Z` foreground delivery).
 ///
-/// The closed, minimal set job control needs (`plans/SPAWN.md` SP7), one
+/// The closed, minimal set job control needs (`plans/SPAWN.md` SP7/SP9), one
 /// definition shared by the kernel, the C ABI view, and every first-party
 /// caller so no consumer re-invents a parallel signal vocabulary. The
 /// discriminant is the `u32` carried in the syscall's `signal` register;
@@ -574,6 +575,15 @@ pub enum Signal {
     Terminate = 2,
     /// Forcibly kill a child.
     Kill = 3,
+    /// Interrupt the child — the console line discipline's `^C` delivery.
+    /// The default (and, with no user-installed handlers in `abi-v1`, only)
+    /// disposition terminates the child.
+    Interrupt = 4,
+    /// Stop the child without terminating it — the console line
+    /// discipline's `^Z` delivery and the shell's stop request. The child
+    /// is parked until a [`Continue`](Self::Continue) resumes it, and a
+    /// parent waiting with [`crate::WaitFlags::STOPPED`] observes the stop.
+    Stop = 5,
 }
 
 impl Signal {
@@ -596,30 +606,150 @@ impl Signal {
             1 => Ok(Self::Continue),
             2 => Ok(Self::Terminate),
             3 => Ok(Self::Kill),
+            4 => Ok(Self::Interrupt),
+            5 => Ok(Self::Stop),
             _ => Err(Errno::OutOfRange),
         }
     }
 
     /// The exit status a [`wait`](crate::SyscallNumber::WAIT) reports for a
     /// child *terminated* by this signal, or `None` for a signal that does
-    /// not end the child ([`Continue`](Self::Continue)).
+    /// not end the child ([`Continue`](Self::Continue), [`Stop`](Self::Stop)).
     ///
     /// One definition shared by the kernel's signal producer (which records
     /// it as the terminated child's status) and every caller that reaps a
     /// signalled child (which recognises it), so the two can never disagree.
-    /// It follows the long-standing Unix convention of reporting a
-    /// signal-terminated process as `128 + signal number`, so
-    /// [`Terminate`](Self::Terminate) (2) surfaces as `130` and
-    /// [`Kill`](Self::Kill) (3) as `131` — distinguishable from the small
-    /// non-negative codes a program chooses for its own `exit`.
+    /// It follows the long-standing Unix `128 + signal` convention with the
+    /// signal numbers a shell user already scripts against — `Interrupt`
+    /// surfaces as `130` (the `^C` code every POSIX shell reports),
+    /// `Terminate` as `143` (SIGTERM's), and `Kill` as `137` (SIGKILL's) —
+    /// rather than our own wire discriminants, so existing scripts keep
+    /// their meaning. All are distinguishable from the small non-negative
+    /// codes a program chooses for its own `exit`.
     #[must_use]
     pub const fn termination_status(self) -> Option<i32> {
-        // `128 + n`, spelled out per arm so the `i32` result needs no
-        // `u32 as i32` cast: Terminate (2) -> 130, Kill (3) -> 131.
         match self {
-            Self::Continue => None,
-            Self::Terminate => Some(130),
-            Self::Kill => Some(131),
+            Self::Continue | Self::Stop => None,
+            Self::Interrupt => Some(130),
+            Self::Kill => Some(137),
+            Self::Terminate => Some(143),
+        }
+    }
+}
+
+/// The event a completed [`wait`](crate::SyscallNumber::WAIT) reports about
+/// a child, decoded from the [`WaitStatusRecord`] the kernel wrote.
+///
+/// One definition shared by the kernel (which encodes it), `lib/rt` (which
+/// decodes it), and every parent that waits, so the two sides can never
+/// disagree about what a status means. A `Stopped` report never reaps the
+/// child — it stays waitable and resumable ([`Signal::Continue`]).
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum WaitStatus {
+    /// The child terminated; the reap removed it. Carries the exit code the
+    /// child passed to `exit`, or the [`Signal::termination_status`] code of
+    /// the signal that ended it.
+    Exited(i32),
+    /// The child was stopped by this signal (requested with
+    /// [`crate::WaitFlags::STOPPED`]); it was **not** reaped.
+    Stopped(Signal),
+}
+
+/// Discriminant of a [`WaitStatusRecord`] naming an exited (reaped) child.
+pub const WAIT_STATUS_KIND_EXITED: u32 = 1;
+
+/// Discriminant of a [`WaitStatusRecord`] naming a stopped (unreaped) child.
+pub const WAIT_STATUS_KIND_STOPPED: u32 = 2;
+
+/// The wire record the [`wait`](crate::SyscallNumber::WAIT) syscall writes
+/// through its `status` out-pointer (`plans/SPAWN.md` SP9).
+///
+/// A typed two-field record instead of a POSIX bit-packed status word:
+/// `kind` names the event ([`WAIT_STATUS_KIND_EXITED`] /
+/// [`WAIT_STATUS_KIND_STOPPED`]; `0` and every other value are reserved so a
+/// zeroed or garbage record fails closed on decode) and `value` carries the
+/// exit code or the stopping [`Signal`]'s discriminant. `#[repr(C)]` with
+/// two fixed-width fields, so the C view (`ros_wait_status_t`) is the same
+/// bytes.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Default)]
+pub struct WaitStatusRecord {
+    /// The event kind: [`WAIT_STATUS_KIND_EXITED`] or
+    /// [`WAIT_STATUS_KIND_STOPPED`]. `0` is reserved (the fail-closed
+    /// default) and never written by a successful `wait`.
+    pub kind: u32,
+    /// The exit code (`kind` exited) or the stopping signal's wire
+    /// discriminant (`kind` stopped).
+    pub value: i32,
+}
+
+impl WaitStatusRecord {
+    /// Byte length of the record as written through the `status` pointer.
+    pub const WIRE_LEN: usize = 8;
+
+    /// The bytes the kernel writes through the caller's `status` pointer:
+    /// `kind` then `value`, native-endian (the record never leaves the
+    /// machine — it crosses only the user/kernel boundary).
+    #[must_use]
+    pub const fn to_ne_bytes(self) -> [u8; Self::WIRE_LEN] {
+        let kind = self.kind.to_ne_bytes();
+        let value = self.value.to_ne_bytes();
+        [
+            kind[0], kind[1], kind[2], kind[3], value[0], value[1], value[2], value[3],
+        ]
+    }
+
+    /// Rebuild the record from the bytes [`Self::to_ne_bytes`] produced.
+    /// Shape only — [`Self::decode`] still validates the content.
+    #[must_use]
+    pub const fn from_ne_bytes(bytes: [u8; Self::WIRE_LEN]) -> Self {
+        Self {
+            kind: u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+            value: i32::from_ne_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+        }
+    }
+
+    /// Encode `status` as the wire record the kernel writes.
+    #[must_use]
+    // The stopped arm stores a signal discriminant (1..=5), far below
+    // `i32::MAX`, so the widening cast can never wrap.
+    #[allow(clippy::cast_possible_wrap)]
+    pub const fn encode(status: WaitStatus) -> Self {
+        match status {
+            WaitStatus::Exited(code) => Self {
+                kind: WAIT_STATUS_KIND_EXITED,
+                value: code,
+            },
+            WaitStatus::Stopped(signal) => Self {
+                kind: WAIT_STATUS_KIND_STOPPED,
+                value: signal.as_u32() as i32,
+            },
+        }
+    }
+
+    /// Decode the record back into the typed [`WaitStatus`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Errno::OutOfRange`] for a reserved `kind` (including the
+    /// zeroed default) or a stopped record whose `value` is not a defined
+    /// [`Signal`] — a malformed record is refused, never guessed at.
+    // The stopped arm casts only after the negative guard, so the cast can
+    // never lose a sign.
+    #[allow(clippy::cast_sign_loss)]
+    pub const fn decode(self) -> Result<WaitStatus, Errno> {
+        match self.kind {
+            WAIT_STATUS_KIND_EXITED => Ok(WaitStatus::Exited(self.value)),
+            WAIT_STATUS_KIND_STOPPED => {
+                if self.value < 0 {
+                    return Err(Errno::OutOfRange);
+                }
+                match Signal::from_u32(self.value as u32) {
+                    Ok(signal) => Ok(WaitStatus::Stopped(signal)),
+                    Err(err) => Err(err),
+                }
+            }
+            _ => Err(Errno::OutOfRange),
         }
     }
 }
@@ -787,11 +917,21 @@ mod tests {
     extern crate alloc;
     use super::{
         DescriptorTable, ProcessStart, ProcessStartHeader, Signal, StreamMode, StringSlot,
-        PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN,
-        PROCESS_START_MAX_TOTAL_LEN, STDERR, STDIN, STDINFO, STDOUT, STD_STREAM_COUNT,
+        WaitStatus, WaitStatusRecord, PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS,
+        PROCESS_START_MAX_STRING_LEN, PROCESS_START_MAX_TOTAL_LEN, STDERR, STDIN, STDINFO, STDOUT,
+        STD_STREAM_COUNT, WAIT_STATUS_KIND_EXITED, WAIT_STATUS_KIND_STOPPED,
     };
     use crate::{Errno, ABI_VERSION_CURRENT};
     use alloc::vec::Vec;
+
+    /// Every defined signal, for the exhaustive loops below.
+    const ALL_SIGNALS: [Signal; 5] = [
+        Signal::Continue,
+        Signal::Terminate,
+        Signal::Kill,
+        Signal::Interrupt,
+        Signal::Stop,
+    ];
 
     #[test]
     fn signal_discriminants_are_frozen() {
@@ -799,11 +939,13 @@ mod tests {
         assert_eq!(Signal::Continue.as_u32(), 1);
         assert_eq!(Signal::Terminate.as_u32(), 2);
         assert_eq!(Signal::Kill.as_u32(), 3);
+        assert_eq!(Signal::Interrupt.as_u32(), 4);
+        assert_eq!(Signal::Stop.as_u32(), 5);
     }
 
     #[test]
     fn signal_round_trips_through_its_discriminant() {
-        for signal in [Signal::Continue, Signal::Terminate, Signal::Kill] {
+        for signal in ALL_SIGNALS {
             assert_eq!(Signal::from_u32(signal.as_u32()), Ok(signal));
         }
     }
@@ -813,21 +955,75 @@ mod tests {
         // 0 is reserved so a zeroed register fails closed, and every value
         // past the defined set is rejected rather than guessed.
         assert_eq!(Signal::from_u32(0), Err(Errno::OutOfRange));
-        assert_eq!(Signal::from_u32(4), Err(Errno::OutOfRange));
+        assert_eq!(Signal::from_u32(6), Err(Errno::OutOfRange));
         assert_eq!(Signal::from_u32(u32::MAX), Err(Errno::OutOfRange));
     }
 
     #[test]
-    fn termination_status_follows_the_128_plus_signal_convention() {
-        // A terminating signal reports `128 + n`; `Continue` does not end
-        // the child, so it has no termination status.
+    fn termination_status_follows_the_posix_familiar_convention() {
+        // A terminating signal reports the `128 + n` code a POSIX shell
+        // user already scripts against (130 = interrupted, 137 = killed,
+        // 143 = terminated); `Continue` and `Stop` do not end the child, so
+        // they have no termination status.
         assert_eq!(Signal::Continue.termination_status(), None);
-        assert_eq!(Signal::Terminate.termination_status(), Some(130));
-        assert_eq!(Signal::Kill.termination_status(), Some(131));
+        assert_eq!(Signal::Stop.termination_status(), None);
+        assert_eq!(Signal::Interrupt.termination_status(), Some(130));
+        assert_eq!(Signal::Kill.termination_status(), Some(137));
+        assert_eq!(Signal::Terminate.termination_status(), Some(143));
         // The reported statuses sit above the small exit codes a program
         // chooses, so a reaper can tell a signalled death from a normal one.
-        for signal in [Signal::Terminate, Signal::Kill] {
+        for signal in [Signal::Interrupt, Signal::Terminate, Signal::Kill] {
             assert!(signal.termination_status().expect("terminating") > 128);
+        }
+    }
+
+    #[test]
+    fn wait_status_record_round_trips_both_kinds() {
+        for status in [
+            WaitStatus::Exited(0),
+            WaitStatus::Exited(143),
+            WaitStatus::Exited(-7),
+            WaitStatus::Stopped(Signal::Stop),
+        ] {
+            assert_eq!(WaitStatusRecord::encode(status).decode(), Ok(status));
+        }
+    }
+
+    #[test]
+    fn wait_status_record_byte_codec_round_trips() {
+        for status in [WaitStatus::Exited(-40), WaitStatus::Stopped(Signal::Stop)] {
+            let record = WaitStatusRecord::encode(status);
+            let bytes = record.to_ne_bytes();
+            assert_eq!(bytes.len(), WaitStatusRecord::WIRE_LEN);
+            assert_eq!(WaitStatusRecord::from_ne_bytes(bytes), record);
+        }
+    }
+
+    #[test]
+    fn wait_status_record_wire_kinds_are_frozen() {
+        assert_eq!(
+            WaitStatusRecord::encode(WaitStatus::Exited(9)).kind,
+            WAIT_STATUS_KIND_EXITED
+        );
+        let stopped = WaitStatusRecord::encode(WaitStatus::Stopped(Signal::Stop));
+        assert_eq!(stopped.kind, WAIT_STATUS_KIND_STOPPED);
+        assert_eq!(stopped.value, 5);
+    }
+
+    #[test]
+    fn wait_status_record_rejects_reserved_and_malformed_records() {
+        // The zeroed default (kind 0) and every unassigned kind fail closed.
+        assert_eq!(WaitStatusRecord::default().decode(), Err(Errno::OutOfRange));
+        assert_eq!(
+            WaitStatusRecord { kind: 3, value: 0 }.decode(),
+            Err(Errno::OutOfRange)
+        );
+        // A stopped record must carry a defined signal discriminant.
+        for value in [0, -1, 6, i32::MAX, i32::MIN] {
+            assert_eq!(
+                WaitStatusRecord { kind: 2, value }.decode(),
+                Err(Errno::OutOfRange)
+            );
         }
     }
 

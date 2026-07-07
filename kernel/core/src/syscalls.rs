@@ -2514,6 +2514,34 @@ where
         Ok(0)
     }
 
+    fn console_foreground(&self, caller: &CallerContext<'_>, fd: u32, pid: i32) -> SyscallResult {
+        // Resolve `fd` against the caller's per-process descriptor table
+        // exactly as `stream_input_mode` does: the foreground slot is a
+        // property of an *input* stream's console, so `fd` must be a
+        // readable inherited stream — anything else fails closed with
+        // `NotFound`, never leaking which case occurred.
+        let streams = self.aspaces.read().streams(caller.task_id);
+        if streams.mode(fd) != StreamMode::Read {
+            return Err(Errno::NotFound);
+        }
+        let Some(device) = self.consoles.get(usize::from(streams.console(fd))) else {
+            return Err(Errno::NotImplemented);
+        };
+        // The dispatcher already checked `CAP_CONSOLE_READ`. A zero `pid`
+        // clears the slot — the shell back at its prompt.
+        if pid == 0 {
+            device.set_foreground(None);
+            return Ok(0);
+        }
+        // A non-zero `pid` must be a live child of the caller: the same
+        // parent/child authority `wait`/`signal` enforce, decided by the
+        // one shared bookkeeping — never a caller-supplied claim. A
+        // negative, unknown, or already-exited pid fails closed.
+        let child = self.process_wait.authorise_child(caller.task_id, pid)?;
+        device.set_foreground(Some(child));
+        Ok(0)
+    }
+
     fn key_inject(&self, caller: &CallerContext<'_>, buf: u64, len: usize) -> SyscallResult {
         // The dispatcher already checked `CAP_INPUT_INJECT` and that `buf`
         // is non-null (`UserPtr`). A record is fixed-width: a `len` that
@@ -3014,29 +3042,30 @@ where
         // fabricating a reaped child — the process-wait analogue of
         // `NULL_MEM_MAP` / `NULL_PROCESS_SPAWN`.
         //
-        // `NONBLOCK` selects the poll path: it reaps an already-exited child
-        // or returns `WouldBlock` (a matching child is still running) without
-        // ever parking the caller. Cleared, `wait` blocks the caller until a
-        // child is reapable (never busy-polls). A `WouldBlock` leaves `status`
-        // untouched — the `?` returns before the copy-out below — so a poll
-        // that finds nothing writes nothing.
-        let reaped = if flags.is_nonblock() {
-            self.process_wait.poll(caller.task_id, pid)?
+        // `NONBLOCK` selects the poll path: it reports an already-pending
+        // event or returns `WouldBlock` (a matching child has nothing to
+        // report) without ever parking the caller. Cleared, `wait` blocks
+        // the caller until an event arrives (never busy-polls). `STOPPED`
+        // additionally reports a freshly stopped child without reaping it.
+        // A `WouldBlock` leaves `status` untouched — the `?` returns before
+        // the copy-out below — so a poll that finds nothing writes nothing.
+        let reported = if flags.is_nonblock() {
+            self.process_wait.poll(caller.task_id, pid, flags)?
         } else {
-            self.process_wait.wait(caller.task_id, pid)?
+            self.process_wait.wait(caller.task_id, pid, flags)?
         };
 
-        // Copy the child's exit code out to the caller's `status` pointer
+        // Copy the typed status record out to the caller's `status` pointer
         // through the validated `copy_to_user` boundary
         // *before* reporting success, so a faulting `status` is the same
         // fail-closed `BadAddress` an actual fault produces and never leaks
         // which case occurred. `with_caller_aspace` yields `None`
         // when the caller has no registered address space; fail closed.
-        let status_bytes = reaped.code.to_ne_bytes();
+        let status_bytes = rustos_abi::WaitStatusRecord::encode(reported.status).to_ne_bytes();
         match self.with_caller_aspace(caller, |space, physmap| {
             copy_out(space, physmap, VirtAddr::new(status), &status_bytes)
         }) {
-            Some(Ok(())) => Ok(u64::from(reaped.pid)),
+            Some(Ok(())) => Ok(u64::from(reported.pid)),
             Some(Err(err)) => Err(copy_fault_errno(err)),
             None => Err(Errno::BadAddress),
         }
@@ -9924,7 +9953,10 @@ mod tests {
             ])))));
         let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
         let wait_producer: &'static RecordingProcessWait = Box::leak(Box::new(
-            RecordingProcessWait::new(Ok(crate::procwait::ReapedChild { pid: 0, code: 0 })),
+            RecordingProcessWait::new(Ok(crate::procwait::WaitedChild {
+                pid: 0,
+                status: rustos_abi::WaitStatus::Exited(0),
+            })),
         ));
 
         let h = spawn_handler(
@@ -10455,6 +10487,122 @@ mod tests {
             h.stream_input_mode(&ctx, STDOUT, InputMode::Cooked.as_u32()),
             Err(Errno::NotFound)
         );
+    }
+
+    /// `console_foreground` marks only a **live child of the caller** as the
+    /// console's foreground job, resolves the console through the caller's
+    /// own readable descriptor, clears on `pid == 0`, and fails closed on
+    /// every other shape (non-child, zombie, negative pid, non-readable fd).
+    #[test]
+    fn console_foreground_authorises_and_records_the_foreground_child() {
+        use crate::procwait::ProcessWait as _;
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let echo: &'static RecordingConsole = Box::leak(Box::new(RecordingConsole::new()));
+        let rx: &'static RecordingConsoleRead = Box::leak(Box::new(RecordingConsoleRead::new(b"")));
+        let consoles: &'static [ConsoleDevice] =
+            Box::leak(Box::new([ConsoleDevice::new(echo, rx)]));
+        let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
+        let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
+            Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
+        wait.register_child(SecTaskId(2), SecTaskId(9));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_consoles(consoles)
+        .with_process_wait(wait);
+        aspaces
+            .write()
+            .set_streams(SecTaskId(2), DescriptorTable::standard());
+
+        // Marking the caller's live child records it on the console.
+        assert_eq!(h.console_foreground(&ctx, STDIN, 9), Ok(0));
+        assert_eq!(consoles[0].foreground(), Some(SecTaskId(9)));
+        // `pid == 0` clears the slot (the shell back at its prompt).
+        assert_eq!(h.console_foreground(&ctx, STDIN, 0), Ok(0));
+        assert_eq!(consoles[0].foreground(), None);
+        // A pid that is not the caller's child, and a negative pid, fail
+        // closed and leave the slot untouched.
+        assert_eq!(h.console_foreground(&ctx, STDIN, 7), Err(Errno::NotFound));
+        assert_eq!(h.console_foreground(&ctx, STDIN, -3), Err(Errno::NotFound));
+        assert_eq!(consoles[0].foreground(), None);
+        // A non-readable descriptor names no console to mark on.
+        assert_eq!(h.console_foreground(&ctx, STDOUT, 9), Err(Errno::NotFound));
+        // A zombie (exited, unreaped) child is not a markable target.
+        wait.record_exit(SecTaskId(9), 0);
+        assert_eq!(h.console_foreground(&ctx, STDIN, 9), Err(Errno::NotFound));
+        assert_eq!(consoles[0].foreground(), None);
+    }
+
+    /// With no console list installed the call announces the inert
+    /// interface, and with no process-wait producer a child claim cannot be
+    /// authorised — both fail closed.
+    #[test]
+    fn console_foreground_fails_closed_before_the_boot_wiring() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        // No console list: even a readable descriptor resolves no device.
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        aspaces
+            .write()
+            .set_streams(SecTaskId(2), DescriptorTable::standard());
+        assert_eq!(
+            h.console_foreground(&ctx, STDIN, 9),
+            Err(Errno::NotImplemented)
+        );
+
+        // A console list but no process-wait producer: the child claim is
+        // never authorised (the null producer fails closed).
+        let echo: &'static RecordingConsole = Box::leak(Box::new(RecordingConsole::new()));
+        let rx: &'static RecordingConsoleRead = Box::leak(Box::new(RecordingConsoleRead::new(b"")));
+        let consoles: &'static [ConsoleDevice] =
+            Box::leak(Box::new([ConsoleDevice::new(echo, rx)]));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_consoles(consoles);
+        assert_eq!(
+            h.console_foreground(&ctx, STDIN, 9),
+            Err(Errno::NotImplemented)
+        );
+        assert_eq!(consoles[0].foreground(), None);
+        // Clearing needs no child authorisation and still succeeds.
+        assert_eq!(h.console_foreground(&ctx, STDIN, 0), Ok(0));
     }
 
     /// Build a writable user address space at `0x1000` seeded with one
@@ -13067,15 +13215,17 @@ mod tests {
     struct RecordingProcessWait {
         last: rustos_sync::SpinLock<Option<(u64, i32)>>,
         last_poll: rustos_sync::SpinLock<Option<(u64, i32)>>,
+        last_flags: rustos_sync::SpinLock<Option<WaitFlags>>,
         last_exit: rustos_sync::SpinLock<Option<(u64, i32)>>,
         last_register: rustos_sync::SpinLock<Option<(u64, u64)>>,
-        result: Result<crate::procwait::ReapedChild, Errno>,
+        result: Result<crate::procwait::WaitedChild, Errno>,
     }
     impl RecordingProcessWait {
-        fn new(result: Result<crate::procwait::ReapedChild, Errno>) -> Self {
+        fn new(result: Result<crate::procwait::WaitedChild, Errno>) -> Self {
             Self {
                 last: rustos_sync::SpinLock::new(None),
                 last_poll: rustos_sync::SpinLock::new(None),
+                last_flags: rustos_sync::SpinLock::new(None),
                 last_exit: rustos_sync::SpinLock::new(None),
                 last_register: rustos_sync::SpinLock::new(None),
                 result,
@@ -13083,15 +13233,27 @@ mod tests {
         }
     }
     impl crate::procwait::ProcessWait for RecordingProcessWait {
-        fn wait(&self, parent: SecTaskId, pid: i32) -> Result<crate::procwait::ReapedChild, Errno> {
+        fn wait(
+            &self,
+            parent: SecTaskId,
+            pid: i32,
+            flags: WaitFlags,
+        ) -> Result<crate::procwait::WaitedChild, Errno> {
             *self.last.lock() = Some((parent.0, pid));
+            *self.last_flags.lock() = Some(flags);
             self.result
         }
-        fn poll(&self, parent: SecTaskId, pid: i32) -> Result<crate::procwait::ReapedChild, Errno> {
+        fn poll(
+            &self,
+            parent: SecTaskId,
+            pid: i32,
+            flags: WaitFlags,
+        ) -> Result<crate::procwait::WaitedChild, Errno> {
             // Record the poll arguments in a *separate* slot so a test can
             // prove the handler took the non-blocking branch (and never the
             // blocking `wait`) when `WaitFlags::NONBLOCK` is set.
             *self.last_poll.lock() = Some((parent.0, pid));
+            *self.last_flags.lock() = Some(flags);
             self.result
         }
         fn record_exit(&self, task: SecTaskId, code: i32) {
@@ -13132,7 +13294,10 @@ mod tests {
         };
 
         let producer: &'static RecordingProcessWait = Box::leak(Box::new(
-            RecordingProcessWait::new(Ok(crate::procwait::ReapedChild { pid: 42, code: 7 })),
+            RecordingProcessWait::new(Ok(crate::procwait::WaitedChild {
+                pid: 42,
+                status: rustos_abi::WaitStatus::Exited(7),
+            })),
         ));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
@@ -13174,7 +13339,10 @@ mod tests {
         };
 
         let producer: &'static RecordingProcessWait = Box::leak(Box::new(
-            RecordingProcessWait::new(Ok(crate::procwait::ReapedChild { pid: 42, code: 7 })),
+            RecordingProcessWait::new(Ok(crate::procwait::WaitedChild {
+                pid: 42,
+                status: rustos_abi::WaitStatus::Exited(7),
+            })),
         ));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
@@ -13182,6 +13350,9 @@ mod tests {
         .with_process_wait(producer);
 
         assert_eq!(h.wait(&ctx, 9, 0x1000, WaitFlags::NONBLOCK), Ok(42));
+        // The full flag set (NONBLOCK, and STOPPED when the caller asks for
+        // stop reports) reaches the producer verbatim.
+        assert_eq!(*producer.last_flags.lock(), Some(WaitFlags::NONBLOCK));
         // The non-blocking branch used `poll`, never the blocking `wait`.
         assert_eq!(*producer.last_poll.lock(), Some((2, 9)));
         assert_eq!(*producer.last.lock(), None);
@@ -13440,7 +13611,10 @@ mod tests {
         };
 
         let producer: &'static RecordingProcessWait = Box::leak(Box::new(
-            RecordingProcessWait::new(Ok(crate::procwait::ReapedChild { pid: 42, code: 0 })),
+            RecordingProcessWait::new(Ok(crate::procwait::WaitedChild {
+                pid: 42,
+                status: rustos_abi::WaitStatus::Exited(0),
+            })),
         ));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
@@ -13478,7 +13652,10 @@ mod tests {
         };
 
         let producer: &'static RecordingProcessWait = Box::leak(Box::new(
-            RecordingProcessWait::new(Ok(crate::procwait::ReapedChild { pid: 0, code: 0 })),
+            RecordingProcessWait::new(Ok(crate::procwait::WaitedChild {
+                pid: 0,
+                status: rustos_abi::WaitStatus::Exited(0),
+            })),
         ));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
@@ -16298,12 +16475,18 @@ mod tests {
             &self,
             _parent: SecTaskId,
             _pid: i32,
-        ) -> Result<crate::procwait::ReapedChild, Errno> {
+            _flags: WaitFlags,
+        ) -> Result<crate::procwait::WaitedChild, Errno> {
             Err(Errno::NotImplemented)
         }
 
-        fn poll(&self, parent: SecTaskId, pid: i32) -> Result<crate::procwait::ReapedChild, Errno> {
-            match self.0.lock().reap(parent, pid) {
+        fn poll(
+            &self,
+            parent: SecTaskId,
+            pid: i32,
+            flags: WaitFlags,
+        ) -> Result<crate::procwait::WaitedChild, Errno> {
+            match self.0.lock().reap(parent, pid, flags.is_stopped()) {
                 crate::procwait::Reap::Ready(child) => Ok(child),
                 crate::procwait::Reap::Blocked => Err(Errno::WouldBlock),
                 crate::procwait::Reap::NoChild => Err(Errno::NotFound),
@@ -16705,8 +16888,15 @@ mod tests {
         // The non-blocking reap is what drains readiness — the exact reap
         // the `wait` syscall's NONBLOCK form performs after the wake.
         assert_eq!(
-            pw.poll(SecTaskId(0x5704), rustos_abi::WAIT_PID_ANY),
-            Ok(crate::procwait::ReapedChild { pid: 21, code: 3 })
+            pw.poll(
+                SecTaskId(0x5704),
+                rustos_abi::WAIT_PID_ANY,
+                WaitFlags::NONBLOCK
+            ),
+            Ok(crate::procwait::WaitedChild {
+                pid: 21,
+                status: rustos_abi::WaitStatus::Exited(3),
+            })
         );
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
 

@@ -365,7 +365,10 @@ pub trait SyscallHandlers {
     /// child is reapable (never busy-polls). With it set the call polls: it
     /// reaps an already-exited child if one exists, otherwise — when a
     /// matching child is still running — returns [`Errno::WouldBlock`]
-    /// without parking the caller and leaves `status` untouched.
+    /// without parking the caller and leaves `status` untouched. With
+    /// [`WaitFlags::STOPPED`] set the call also reports a child freshly
+    /// stopped by [`Signal::Stop`] without reaping it. `status` receives
+    /// the typed [`rustos_abi::WaitStatusRecord`], not a bare exit code.
     fn wait(
         &self,
         caller: &CallerContext<'_>,
@@ -623,6 +626,33 @@ pub trait SyscallHandlers {
         _caller: &CallerContext<'_>,
         _fd: u32,
         _mode: u32,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Mark (or clear) the foreground job of the console behind readable
+    /// descriptor `fd`, the task its cooked-mode line discipline delivers
+    /// `^C`/`^Z` to (`plans/SPAWN.md` SP9 — the `tcsetpgrp` analogue).
+    ///
+    /// The dispatcher has already checked [`CapabilityId::CONSOLE_READ`]
+    /// (the same fd-scoped terminal-control gate `stream_input_mode`
+    /// carries) and that `pid` is a sign-extended `i32`. The implementation
+    /// resolves `fd` against the caller's own descriptor table (a
+    /// non-readable or unbacked descriptor fails closed with
+    /// [`Errno::NotFound`]), and for a non-zero `pid` authorises it as a
+    /// **live child of the caller** through the same parent/child
+    /// bookkeeping `wait`/`signal` use — never a caller-supplied claim. A
+    /// `pid` of `0` clears the slot. Returns `Ok(0)` on success.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]: a kernel build with no console list wired
+    /// has no foreground slot to set. The real handler is installed in
+    /// `kernel/core`.
+    fn console_foreground(
+        &self,
+        _caller: &CallerContext<'_>,
+        _fd: u32,
+        _pid: i32,
     ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
@@ -1831,6 +1861,15 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 decode_u32(args.0[0]),
                 decode_u32(args.0[1]),
             ),
+            SyscallNumber::CONSOLE_FOREGROUND => {
+                // args[0] is the readable descriptor naming the console;
+                // args[1] is a sign-extended `i32` PID recovered the same
+                // way `WAIT`/`SIGNAL` recover theirs (`0` clears the slot).
+                #[allow(clippy::cast_possible_wrap)]
+                let pid = (args.0[1] & 0xFFFF_FFFF) as i32;
+                self.handlers
+                    .console_foreground(caller, decode_u32(args.0[0]), pid)
+            }
             SyscallNumber::KEY_INJECT => {
                 // `validate_arg` guarantees args[0] is a non-null
                 // `UserPtr`; args[1] is the record length.
@@ -2619,6 +2658,14 @@ mod tests {
             // Success so the reachability test can assert the dispatcher
             // decoded `(fd, mode)` without wiring a real console here.
             Ok(0)
+        }
+        fn console_foreground(&self, _c: &CallerContext<'_>, _fd: u32, pid: i32) -> SyscallResult {
+            self.record("console_foreground");
+            // Echo the decoded pid back so the decode test can assert the
+            // dispatcher recovered the sign-extended `i32` without wiring a
+            // real console list here.
+            #[allow(clippy::cast_sign_loss)]
+            Ok(u64::from(pid as u32))
         }
         fn key_inject(&self, _c: &CallerContext<'_>, _buf: u64, len: usize) -> SyscallResult {
             self.record("key_inject");
@@ -3890,7 +3937,7 @@ mod tests {
         let h = MockHandlers::default();
         let d = Dispatcher::new(&h, &sink);
 
-        for bad in [0u64, 4, u64::from(u32::MAX)] {
+        for bad in [0u64, 6, u64::from(u32::MAX)] {
             let mut args = RawArgs::ZERO;
             args.0[0] = 1; // pid
             args.0[1] = bad;
@@ -3900,6 +3947,41 @@ mod tests {
             );
         }
         assert_eq!(h.last(), None);
+    }
+
+    #[test]
+    fn console_foreground_decodes_fd_and_signed_pid() {
+        // The dispatcher gates on `CAP_CONSOLE_READ` (the same fd-scoped
+        // terminal-control gate `stream_input_mode` carries), recovers the
+        // sign-extended `i32` pid, and forwards both to the handler.
+        let sink = RecordingSink::new();
+        let caps = build_caps(&[CapabilityId::CONSOLE_READ], &sink);
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers::default();
+        let d = Dispatcher::new(&h, &sink);
+
+        let mut args = RawArgs::ZERO;
+        args.0[0] = 0; // fd 0 (stdin)
+        args.0[1] = 9; // the child pid to mark foreground
+        assert_eq!(
+            d.dispatch(&ctx, SyscallNumber::CONSOLE_FOREGROUND.as_u16(), args),
+            Ok(9)
+        );
+        assert_eq!(h.last(), Some("console_foreground"));
+
+        // Without the capability the dispatcher refuses before the handler.
+        let no_caps = build_caps(&[], &sink);
+        let no_ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &no_caps,
+        };
+        assert_eq!(
+            d.dispatch(&no_ctx, SyscallNumber::CONSOLE_FOREGROUND.as_u16(), args),
+            Err(Errno::PermissionDenied)
+        );
     }
 
     #[test]

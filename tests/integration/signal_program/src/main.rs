@@ -10,15 +10,17 @@
 //!   each iteration (never exiting on its own), so it only ever ends when its
 //!   parent terminates it with a signal;
 //! * the **parent** reads the child's PID from its inherited startup argument
-//!   (`arg(1)`, which the vertical fills in), delivers `Signal::Terminate`
-//!   through the real `signal` syscall, then `wait`s for the child, reaps it,
-//!   and verifies the reaped status is the signal's `128 + n` termination
-//!   status — returning 0 on success and a distinct non-zero diagnostic
-//!   otherwise.
+//!   (`arg(1)`, which the vertical fills in), then drives the full job-control
+//!   sequence through the real syscalls (`plans/SPAWN.md` `SP7b`/`SP9`):
+//!   `Signal::Stop` → a `WaitFlags::STOPPED` wait observes the stop without
+//!   reaping → `Signal::Continue` resumes → `Signal::Terminate` ends the
+//!   child → a blocking wait reaps it and verifies the POSIX-familiar
+//!   termination status (143) — returning 0 on success and a distinct
+//!   non-zero diagnostic otherwise.
 //!
-//! The vertical asserts the parent terminated the child and exited 0, proving
-//! the `signal` delivery + signalled-reap path end to end (the `SP7b`
-//! "done when").
+//! The vertical asserts the parent stopped, resumed, terminated, and reaped
+//! the child and exited 0, proving signal delivery, the stop overlay, the
+//! stopped wait report, and the signalled reap end to end.
 //!
 //! It is a **pure-Rust** program: it links the Rust userland runtime
 //! `rustos-rt` (which provides `_start`, the stack canary, the panic handler,
@@ -35,7 +37,7 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
-    use rustos_abi::Signal;
+    use rustos_abi::{Signal, WaitFlags, WaitStatus};
 
     /// `true` when this build is the parent role, selected by
     /// `RUSTOS_SIGNAL_ROLE == "parent"`; any other value (including the child
@@ -101,26 +103,51 @@ mod program {
             return 20;
         };
 
-        // Deliver a graceful terminate to our child. `signal` returns 0 on
-        // success, `-errno` otherwise.
-        if rustos_rt::signal(child_pid, Signal::Terminate) != 0 {
+        // Stop the running child (`plans/SPAWN.md` SP9): it is parked and
+        // held by the stop overlay, not terminated.
+        if rustos_rt::signal(child_pid, Signal::Stop) != 0 {
             return 21;
+        }
+
+        // A `STOPPED` wait observes the stop — without reaping the child.
+        let mut status = WaitStatus::Exited(-1);
+        let ret = rustos_rt::wait(child_pid, &mut status, WaitFlags::STOPPED);
+        if ret < 0 {
+            return 22;
+        }
+        if ret != i64::from(child_pid) {
+            return 23;
+        }
+        if status != WaitStatus::Stopped(Signal::Stop) {
+            return 24;
+        }
+
+        // Resume it: a stopped child is still live and signallable.
+        if rustos_rt::signal(child_pid, Signal::Continue) != 0 {
+            return 25;
+        }
+
+        // Deliver a graceful terminate to our (resumed) child. `signal`
+        // returns 0 on success, `-errno` otherwise.
+        if rustos_rt::signal(child_pid, Signal::Terminate) != 0 {
+            return 26;
         }
 
         // Reap the child and read back the status the kernel recorded for it.
         let mut status: i32 = -1;
-        if rustos_rt::wait(child_pid, &mut status) < 0 {
-            return 22;
+        if rustos_rt::wait_exit(child_pid, &mut status) < 0 {
+            return 27;
         }
 
-        // A signalled child is reaped with the signal's `128 + n` status.
+        // A signalled child is reaped with the POSIX-familiar status
+        // (`Terminate` reports SIGTERM's 143).
         let Some(expected) = Signal::Terminate.termination_status() else {
-            return 23;
+            return 28;
         };
         if status != expected {
-            return 24;
+            return 29;
         }
-        // Terminated our child and observed its signalled status exactly.
+        // Stopped, resumed, terminated, and reaped our child exactly.
         0
     }
 

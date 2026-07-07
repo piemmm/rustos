@@ -373,7 +373,7 @@ mod program {
             // `ret >= 0` here, so the cast preserves the PID value; PIDs
             // fit an `i32` on this ABI.
             #[allow(clippy::cast_possible_truncation)]
-            let wret = rustos_rt::wait(ret as i32, &mut status);
+            let wret = rustos_rt::wait_exit(ret as i32, &mut status);
             if wret < 0 {
                 return Err(errno_from(wret));
             }
@@ -457,7 +457,7 @@ mod program {
         /// The targeted blocking reap of the session's shell.
         fn plain_wait(&self, pid: i32) -> Result<i32, Errno> {
             let mut status = 0i32;
-            let wret = rustos_rt::wait(pid, &mut status);
+            let wret = rustos_rt::wait_exit(pid, &mut status);
             if wret < 0 {
                 return Err(errno_from(wret));
             }

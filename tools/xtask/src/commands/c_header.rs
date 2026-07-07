@@ -2108,17 +2108,7 @@ fn generate_syscall() -> String {
     }
     out.push('\n');
 
-    out.push_str(
-        "/* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;\n\
-         * with the NONBLOCK bit set, wait() polls and returns ROS_E_WOULD_BLOCK when a\n\
-         * matching child is still running. */\n",
-    );
-    let _ = writeln!(
-        out,
-        "#define ROS_WAIT_FLAG_NONBLOCK {:#x}u",
-        WaitFlags::NONBLOCK.bits()
-    );
-    out.push('\n');
+    emit_wait_contract(&mut out);
 
     out.push_str(
         "/* fs_open() flag bits (uint32_t). Every undefined bit is reserved and rejected\n\
@@ -2192,6 +2182,12 @@ fn generate_syscall() -> String {
         Signal::Terminate.as_u32()
     );
     let _ = writeln!(out, "#define ROS_SIGNAL_KILL {}u", Signal::Kill.as_u32());
+    let _ = writeln!(
+        out,
+        "#define ROS_SIGNAL_INTERRUPT {}u",
+        Signal::Interrupt.as_u32()
+    );
+    let _ = writeln!(out, "#define ROS_SIGNAL_STOP {}u", Signal::Stop.as_u32());
     out.push('\n');
 
     out.push_str("/* Syscall entry points, implemented by the user-space stub library. */\n");
@@ -2203,6 +2199,53 @@ fn generate_syscall() -> String {
     out.push_str("#ifdef __cplusplus\n} /* extern \"C\" */\n#endif\n\n");
     out.push_str("#endif /* ROS_SYSCALL_H */\n");
     out
+}
+
+/// Emit the `wait()` contract items into `rustos_syscall.h`: the flag bits
+/// and the typed `ros_wait_status_t` record the syscall writes through its
+/// status pointer, every value read from `lib/abi` and never re-typed.
+fn emit_wait_contract(out: &mut String) {
+    use std::fmt::Write as _;
+    out.push_str(
+        "/* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;\n\
+         * with the NONBLOCK bit set, wait() polls and returns ROS_E_WOULD_BLOCK when a\n\
+         * matching child has nothing to report; with the STOPPED bit set, wait() also\n\
+         * reports a child freshly stopped by ROS_SIGNAL_STOP, without reaping it. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_WAIT_FLAG_NONBLOCK {:#x}u",
+        WaitFlags::NONBLOCK.bits()
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_WAIT_FLAG_STOPPED {:#x}u",
+        WaitFlags::STOPPED.bits()
+    );
+    out.push('\n');
+
+    out.push_str(
+        "/* The typed record wait() writes through its status pointer: kind names the\n\
+         * event (exited => value is the exit code; stopped => value is the stopping\n\
+         * ROS_SIGNAL_* discriminant); 0 and every other kind are reserved. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_WAIT_STATUS_KIND_EXITED {}u",
+        rustos_abi::WAIT_STATUS_KIND_EXITED
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_WAIT_STATUS_KIND_STOPPED {}u",
+        rustos_abi::WAIT_STATUS_KIND_STOPPED
+    );
+    out.push_str(
+        "typedef struct ros_wait_status {\n\
+         \x20   uint32_t kind;\n\
+         \x20   int32_t value;\n\
+         } ros_wait_status_t;\n",
+    );
+    out.push('\n');
 }
 
 /// `rustos_abi.h` — the umbrella header that includes every module header.
@@ -2523,6 +2566,44 @@ mod tests {
         assert!(
             h.contains("int32_t ros_sys_signal(int32_t a0, uint32_t a1);"),
             "signal prototype carries the pid and signal arguments: {h}"
+        );
+        // The stop-report flag, the two line-discipline signals, and the
+        // typed wait-status record are read from lib/abi, never re-typed.
+        assert!(
+            h.contains(&format!(
+                "#define ROS_WAIT_FLAG_STOPPED {:#x}u",
+                WaitFlags::STOPPED.bits()
+            )),
+            "wait stopped flag bit: {h}"
+        );
+        assert!(
+            h.contains(&format!(
+                "#define ROS_SIGNAL_STOP {}u",
+                Signal::Stop.as_u32()
+            )),
+            "signal stop discriminant: {h}"
+        );
+        assert!(
+            h.contains(&format!(
+                "#define ROS_SIGNAL_INTERRUPT {}u",
+                Signal::Interrupt.as_u32()
+            )),
+            "signal interrupt discriminant: {h}"
+        );
+        assert!(
+            h.contains("} ros_wait_status_t;"),
+            "wait status record struct: {h}"
+        );
+        assert!(
+            h.contains(&format!(
+                "#define ROS_WAIT_STATUS_KIND_STOPPED {}u",
+                rustos_abi::WAIT_STATUS_KIND_STOPPED
+            )),
+            "wait status stopped kind: {h}"
+        );
+        assert!(
+            h.contains("int32_t ros_sys_console_foreground(uint32_t a0, int32_t a1);"),
+            "console_foreground prototype carries the fd and pid arguments: {h}"
         );
     }
 

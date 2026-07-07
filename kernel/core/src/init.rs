@@ -622,6 +622,11 @@ impl<'a, A: KernelArch> KernelInitSpawner<'a, A> {
     ///    console output.
     fn service_between_dispatches(&self) {
         let _ = crate::waitq::drain_pending_wakes();
+        // Deliver any foreground `^C`/`^Z` the console line discipline
+        // queued from interrupt context: like the deferred wakes, the actual
+        // scheduler-driving delivery runs here, where taking the run-queue
+        // locks is safe.
+        let _ = crate::procsignal::drain_pending_foreground();
         self.arch.pump_console_tx();
     }
 }
@@ -813,7 +818,13 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
                     // *takes* it, its handler flags the wake, and the loop
                     // re-steps and drains it.
                     self.arch.set_device_irqs(false);
-                    if !crate::waitq::drain_pending_wakes() {
+                    let woke = crate::waitq::drain_pending_wakes();
+                    // A queued foreground signal is dispatchable work too: a
+                    // `^C` typed while every task is parked must terminate
+                    // the foreground job now, not after the next unrelated
+                    // interrupt.
+                    let delivered = crate::procsignal::drain_pending_foreground();
+                    if !(woke || delivered) {
                         self.arch.pump_console_tx();
                         self.arch.wait_for_interrupt();
                     }
@@ -1219,11 +1230,17 @@ fn run_phases<A: KernelArch>(
     // continue, exit for terminate/kill). `Box::leak`'d for the same
     // one-shot-publish reason as the hook. Until this stage the handler held
     // the fail-closed `NULL_PROCESS_SIGNAL`.
+    let process_signal_concrete = Box::leak(Box::new(crate::procsignal::KernelProcessSignal::new(
+        process_wait_concrete,
+        &state.scheduler,
+    )));
     let process_signal: &'static (dyn crate::procsignal::ProcessSignal + 'static) =
-        Box::leak(Box::new(crate::procsignal::KernelProcessSignal::new(
-            process_wait_concrete,
-            &state.scheduler,
-        )));
+        process_signal_concrete;
+    // The same producer is the foreground `^C`/`^Z` delivery target the
+    // console line discipline queues to (`plans/SPAWN.md` SP9): one delivery
+    // engine, two entry points (the parent-authorised syscall and the
+    // console's standing foreground instruction).
+    let _ = crate::procsignal::install_foreground_signal(process_signal_concrete);
 
     // Publish the wait-queue arch hook (Design D P-2) so the explicit /
     // timed wake paths reach the live scheduler + arch (factored out to

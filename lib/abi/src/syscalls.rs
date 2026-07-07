@@ -1735,6 +1735,33 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: Some(CapabilityId::SEAT_ADMIN),
         audit: true,
     },
+    SyscallSpec {
+        number: SyscallNumber::CONSOLE_FOREGROUND,
+        name: "console_foreground",
+        arg_count: 2,
+        args: [
+            // The readable standard-stream descriptor naming the console,
+            // then the child PID to mark foreground (`I32`, sign-extended
+            // per the ABI convention; `0` clears the slot).
+            AbiType::U32,
+            AbiType::I32,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // The foreground slot is a property of the console the reader
+        // holds, so the control shares `stream_input_mode`'s
+        // `CAP_CONSOLE_READ` gate; the *target* authority is the
+        // parent/child relationship the handler validates. It IS audited —
+        // redirecting who receives `^C`/`^Z` signal delivery is a
+        // security-relevant process-lifecycle decision (like `signal`) and
+        // is low-volume (once per foreground job), so the record cannot
+        // drown the log.
+        required_capability: Some(CapabilityId::CONSOLE_READ),
+        audit: true,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

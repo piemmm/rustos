@@ -1741,11 +1741,16 @@ The `spawn` ABI carries the child's argument vector and environment (the
 caller-encoded, kernel-revalidated startup-strings block), so the runtime
 host passes a command's words and the shell's exported variables (with any
 `NAME=v cmd` prefix overrides layered on top) to every launched program.
-Pipes, redirections, and job-control signal plumbing are not yet
-expressible over the launch ABI; the runtime host fails those closed with
-`NotImplemented` rather than silently dropping them. The shell parser and
-in-process builtins implement and test the target semantics described here
-regardless.
+Job control is live end to end (`plans/SPAWN.md` SP7/SP9): the runtime host
+delivers `Continue`/`Terminate`/`Kill` through the `signal` syscall, marks
+its foreground child on fd 0 (`console_foreground`) around every blocking
+wait so the kernel's cooked-mode line discipline routes `^C`/`^Z` to the
+running job, and waits with `WaitFlags::STOPPED` so a `^Z`-stopped job
+returns to the prompt as `WaitOutcome::Stopped` (`$?` = 148) and `fg`/`bg`
+resume it. Pipes and redirections are not yet expressible over the launch
+ABI; the runtime host fails those closed with `NotImplemented` rather than
+silently dropping them. The shell parser and in-process builtins implement
+and test the target semantics described here regardless.
 
 Redirection state (interpreter-level; the runtime host still fails closed
 until the launch ABI grows descriptor plumbing):

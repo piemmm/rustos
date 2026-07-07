@@ -470,10 +470,14 @@ pub static VIDEO_KEYBOARD: rustos_kernel_core::ConsoleInputQueue =
 /// (`plans/DISPLAY.md` D2; `plans/PI.md` P11 — input follows the
 /// surface owner).
 ///
-/// Its *text sink* is [`VIDEO_KEYBOARD`]: while the seat is unowned
-/// (the default for a freshly booted text login) the registry encodes
-/// each injected key *press* to the video console's tty bytes and enqueues
-/// them there, where the video login's `stream_read` drains them. When the
+/// Its *text sink* is the **video console device**
+/// (`VIDEO_AND_UART_CONSOLES[0]`), whose line discipline forwards to
+/// [`VIDEO_KEYBOARD`]: while the seat is unowned (the default for a freshly
+/// booted text login) the registry encodes each injected key *press* to the
+/// video console's tty bytes and pushes them through the console's input
+/// filter (`plans/SPAWN.md` SP9 — a cooked-mode `^C`/`^Z` reaches the
+/// foreground job instead of the queue), landing in the keyboard queue
+/// where the video login's `stream_read` drains them. When the
 /// window manager acquires the seat (`display_acquire`, owner-checked) the
 /// registry routes whole [`rustos_abi::input::KeyInput`] records to its
 /// desktop keyboard channel instead, drained by the owner's
@@ -481,7 +485,7 @@ pub static VIDEO_KEYBOARD: rustos_kernel_core::ConsoleInputQueue =
 /// is shared by the in-kernel keyboard driver's `ArbiterConsoleSink` (which
 /// injects key edges) and the `key_inject` / `display_acquire` /
 /// `display_release` / `keyboard_read` syscall handlers.
-pub static SEAT_REGISTRY: SeatRegistry = SeatRegistry::new(&VIDEO_KEYBOARD);
+pub static SEAT_REGISTRY: SeatRegistry = SeatRegistry::new(&VIDEO_AND_UART_CONSOLES[0]);
 
 /// The console-0 read half of the video console, gated on the in-kernel
 /// root-unlock service's ownership latch (`plans/PI.md` P11 Chunk B-2 item
@@ -534,6 +538,27 @@ pub static UART_ONLY_CONSOLES: [rustos_kernel_core::ConsoleDevice; 1] =
         &GATED_UART_READ,
         &UART_INPUT,
     )];
+
+/// The **installed** UART console device — the primary console on a
+/// headless boot, the independent second console beside an active video
+/// console — selected by the same `video::is_active()` test the boot path's
+/// `with_consoles` uses, so it is always the very device the
+/// `stream_input_mode` / `console_foreground` syscalls act on.
+///
+/// The UART RX drain pushes received bytes through this device rather than
+/// the raw [`UART_INPUT`] queue, so the console's cooked-mode line
+/// discipline sees every byte at arrival time (`plans/SPAWN.md` SP9): a
+/// `^C`/`^Z` typed while a foreground job runs is delivered as a signal
+/// even though no task is reading. Both candidate devices forward to the
+/// same [`UART_INPUT`] queue, so the drain's free-space flow control is
+/// unchanged.
+pub fn uart_console_device() -> &'static rustos_kernel_core::ConsoleDevice {
+    if rustos_arch_aarch64::video::is_active() {
+        &VIDEO_AND_UART_CONSOLES[1]
+    } else {
+        &UART_ONLY_CONSOLES[0]
+    }
+}
 
 #[cfg(test)]
 mod tests {

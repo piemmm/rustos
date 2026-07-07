@@ -95,11 +95,24 @@ extern "C" {
 #define ROS_SYS_USERS_ADMIN 69u
 #define ROS_SYS_SEAT_SWITCH 70u
 #define ROS_SYS_SEAT_REVOKE 71u
+#define ROS_SYS_CONSOLE_FOREGROUND 72u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns ROS_E_WOULD_BLOCK when a
-* matching child is still running. */
+* matching child has nothing to report; with the STOPPED bit set, wait() also
+* reports a child freshly stopped by ROS_SIGNAL_STOP, without reaping it. */
 #define ROS_WAIT_FLAG_NONBLOCK 0x1u
+#define ROS_WAIT_FLAG_STOPPED 0x2u
+
+/* The typed record wait() writes through its status pointer: kind names the
+* event (exited => value is the exit code; stopped => value is the stopping
+* ROS_SIGNAL_* discriminant); 0 and every other kind are reserved. */
+#define ROS_WAIT_STATUS_KIND_EXITED 1u
+#define ROS_WAIT_STATUS_KIND_STOPPED 2u
+typedef struct ros_wait_status {
+    uint32_t kind;
+    int32_t value;
+} ros_wait_status_t;
 
 /* fs_open() flag bits (uint32_t). Every undefined bit is reserved and rejected
 * with ROS_E_OUT_OF_RANGE, as is a combination the contract forbids (TRUNCATE/
@@ -125,6 +138,8 @@ extern "C" {
 #define ROS_SIGNAL_CONTINUE 1u
 #define ROS_SIGNAL_TERMINATE 2u
 #define ROS_SIGNAL_KILL 3u
+#define ROS_SIGNAL_INTERRUPT 4u
+#define ROS_SIGNAL_STOP 5u
 
 /* Syscall entry points, implemented by the user-space stub library. */
 void ros_sys_yield(void);
@@ -199,6 +214,7 @@ uint64_t ros_sys_self_origin(void * a0, uintptr_t a1);
 uint64_t ros_sys_users_admin(void * a0, uintptr_t a1, void * a2, uintptr_t a3);
 int32_t ros_sys_seat_switch(uint64_t a0, uint32_t a1);
 int32_t ros_sys_seat_revoke(uint64_t a0);
+int32_t ros_sys_console_foreground(uint32_t a0, int32_t a1);
 
 #ifdef __cplusplus
 } /* extern "C" */

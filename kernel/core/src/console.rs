@@ -27,10 +27,11 @@
 //! state before discovery) therefore announces an intentionally inert
 //! interface instead of pretending the write succeeded.
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-use rustos_abi::{Errno, InputMode, TerminalSize};
+use rustos_abi::{Errno, InputMode, Signal, TerminalSize};
 use rustos_kernel_sched_api::SchedulerArch;
+use rustos_kernel_sec::TaskId;
 use rustos_sync::SpinLock;
 use rustos_vt::control;
 use rustos_vt::line::EraseSeq;
@@ -464,7 +465,29 @@ pub struct ConsoleDevice {
     /// read still gives the operator visible progress. [`None`] on a
     /// console built without one (host tests of unrelated paths).
     secret: Option<&'static SecretFeedback>,
+    /// The current read line discipline, as its [`InputMode`] wire
+    /// discriminant (`plans/SPAWN.md` SP9): the input filter maps `^C`/`^Z`
+    /// to foreground signals only in the **cooked** mode, so a raw-mode
+    /// full-screen program still receives the literal bytes. Mirrors what
+    /// [`Self::set_input_mode`] installed; atomic for the same shared
+    /// `&'static` reason as `echo`.
+    mode: AtomicU32,
+    /// The console's foreground job (`console_foreground`): the scheduler
+    /// task id the cooked-mode line discipline delivers `^C`/`^Z` to
+    /// instead of queueing the byte, or [`FOREGROUND_NONE`] for no
+    /// foreground — the default, and what the shell restores at its prompt,
+    /// under which every byte passes through unchanged. An atomic, not a
+    /// lock: the input filter reads it from the UART RX interrupt handler,
+    /// where spinning on a lock held by the interrupted task would deadlock
+    /// a single CPU.
+    foreground: AtomicU64,
 }
+
+/// The [`ConsoleDevice::foreground`] sentinel for "no foreground job".
+///
+/// Scheduler task ids are small monotonically increasing values that can
+/// never reach `u64::MAX`, so the sentinel is unambiguous.
+const FOREGROUND_NONE: u64 = u64::MAX;
 
 /// The kernel echo half's per-line editing state.
 ///
@@ -525,6 +548,8 @@ impl ConsoleDevice {
                 seq: EraseSeq::new(),
             }),
             secret: None,
+            mode: AtomicU32::new(InputMode::Cooked.as_u32()),
+            foreground: AtomicU64::new(FOREGROUND_NONE),
         }
     }
 
@@ -574,6 +599,7 @@ impl ConsoleDevice {
     /// disarms it, removing any in-progress marker still on screen.
     pub fn set_input_mode(&self, mode: InputMode) {
         self.echo.store(mode.echoes(), Ordering::Relaxed);
+        self.mode.store(mode.as_u32(), Ordering::Relaxed);
         {
             let mut line = self.line.lock();
             line.col = 0;
@@ -585,6 +611,37 @@ impl ConsoleDevice {
             } else {
                 secret.disarm();
             }
+        }
+    }
+
+    /// The currently selected read line discipline.
+    ///
+    /// Decoded fail-closed: the stored value is only ever a defined
+    /// [`InputMode`] discriminant, but an undecodable value reports the
+    /// **raw** discipline — the mode with no line-discipline behaviour at
+    /// all — so corruption can never enable byte interception.
+    #[must_use]
+    pub fn input_mode(&self) -> InputMode {
+        InputMode::from_u32(self.mode.load(Ordering::Relaxed)).unwrap_or(InputMode::Raw)
+    }
+
+    /// Record `task` as this console's foreground job (`None` clears it):
+    /// the target the cooked-mode line discipline delivers `^C`/`^Z` to.
+    ///
+    /// The `console_foreground` handler has already authorised `task` as a
+    /// live child of the calling console holder; the device only stores the
+    /// standing instruction.
+    pub fn set_foreground(&self, task: Option<TaskId>) {
+        let raw = task.map_or(FOREGROUND_NONE, |t| t.0);
+        self.foreground.store(raw, Ordering::Release);
+    }
+
+    /// This console's current foreground job, if any.
+    #[must_use]
+    pub fn foreground(&self) -> Option<TaskId> {
+        match self.foreground.load(Ordering::Acquire) {
+            FOREGROUND_NONE => None,
+            raw => Some(TaskId(raw)),
         }
     }
 
@@ -742,6 +799,89 @@ impl ConsoleDevice {
             }
         }
         Ok(consumed)
+    }
+}
+
+/// The `^C` interrupt byte (ETX) the cooked line discipline maps to
+/// [`Signal::Interrupt`] while a foreground job is set.
+const INTERRUPT_BYTE: u8 = 0x03;
+
+/// The `^Z` stop byte (SUB) the cooked line discipline maps to
+/// [`Signal::Stop`] while a foreground job is set.
+const STOP_BYTE: u8 = 0x1A;
+
+impl ConsoleInput for ConsoleDevice {
+    /// Push produced input through this console's line discipline
+    /// (`plans/SPAWN.md` SP9): in the **cooked** mode, with a foreground
+    /// job set and the delivery producer installed, `^C`/`^Z` are consumed
+    /// and queued as [`Signal::Interrupt`]/[`Signal::Stop`] for the
+    /// foreground task; every other byte — and every byte in the raw or
+    /// secret modes, or with no foreground — flows to the underlying input
+    /// sink unchanged. Every input producer (a UART RX handler, the seat
+    /// registry's keyboard sink) pushes through the device, so the mapping
+    /// works even while no task is reading — exactly when a foreground job
+    /// is running and the shell is blocked in `wait`.
+    ///
+    /// The queueing side is interrupt-safe (an atomic store); the actual
+    /// scheduler-driving delivery runs at the next dispatcher-context
+    /// drain, mirroring the deferred console wakes.
+    fn push(&self, bytes: &[u8]) -> Result<usize, Errno> {
+        // Gate the interception narrowly: cooked mode, a foreground job,
+        // and an installed producer. Anything else passes through — a
+        // missing producer must not swallow bytes no one will act on.
+        let target = if self.input_mode() == InputMode::Cooked {
+            self.foreground()
+        } else {
+            None
+        };
+        let Some(target) = target else {
+            return self.input.push(bytes);
+        };
+        if !crate::procsignal::foreground_signal_installed() {
+            return self.input.push(bytes);
+        }
+
+        let mut accepted = 0usize;
+        let mut rest = bytes;
+        while !rest.is_empty() {
+            let ctl = rest
+                .iter()
+                .position(|&b| b == INTERRUPT_BYTE || b == STOP_BYTE);
+            let run = ctl.unwrap_or(rest.len());
+            if run > 0 {
+                // Forward the verbatim run ahead of the next control byte.
+                match self.input.push(&rest[..run]) {
+                    Ok(pushed) => {
+                        accepted += pushed;
+                        if pushed < run {
+                            // Short push (full queue): report what was
+                            // taken, exactly as the queue itself would.
+                            return Ok(accepted);
+                        }
+                    }
+                    // An inner error with bytes already accepted is a short
+                    // push; with nothing accepted it propagates unchanged.
+                    Err(err) if accepted == 0 => return Err(err),
+                    Err(_) => return Ok(accepted),
+                }
+                rest = &rest[run..];
+                continue;
+            }
+            // `rest[0]` is a job-control byte: consume it and queue the
+            // signal for the foreground task instead of buffering it.
+            let signal = if rest[0] == INTERRUPT_BYTE {
+                Signal::Interrupt
+            } else {
+                Signal::Stop
+            };
+            crate::procsignal::queue_foreground_signal(target, signal);
+            // Nudge the dispatch loop out of its idle park so the deferred
+            // delivery drain runs promptly even with every task parked.
+            crate::waitq::console_wake();
+            accepted += 1;
+            rest = &rest[1..];
+        }
+        Ok(accepted)
     }
 }
 
@@ -1821,5 +1961,128 @@ mod tests {
         assert_eq!(queue.read(&mut []), Ok(0));
         let mut buf = [0u8; 8];
         assert_eq!(queue.read(&mut buf), Ok(4));
+    }
+
+    /// Build a keyboard-style console (queue as both read and input halves)
+    /// for the line-discipline tests, returning the device and its queue.
+    fn filter_device() -> (&'static ConsoleDevice, &'static ConsoleInputQueue) {
+        let queue: &'static ConsoleInputQueue =
+            std::boxed::Box::leak(std::boxed::Box::new(ConsoleInputQueue::new()));
+        let device: &'static ConsoleDevice = std::boxed::Box::leak(std::boxed::Box::new(
+            ConsoleDevice::with_input(&NULL_CONSOLE, queue, queue),
+        ));
+        (device, queue)
+    }
+
+    /// Drain everything currently buffered on `queue`.
+    fn drain(queue: &ConsoleInputQueue) -> std::vec::Vec<u8> {
+        let mut buf = [0u8; CONSOLE_INPUT_QUEUE_CAPACITY];
+        let n = queue.read(&mut buf).expect("queue read");
+        buf[..n].to_vec()
+    }
+
+    #[test]
+    fn cooked_foreground_maps_ctrl_c_to_a_queued_interrupt() {
+        let _guard = crate::procsignal::foreground_test_lock();
+        crate::procsignal::ensure_foreground_hook_for_test();
+        let (device, queue) = filter_device();
+        device.set_foreground(Some(rustos_kernel_sec::TaskId(9)));
+        // The control byte is consumed (counted as accepted) and the
+        // surrounding bytes flow to the reader untouched.
+        assert_eq!(device.push(b"ab\x03cd"), Ok(5));
+        assert_eq!(drain(queue), b"abcd");
+        assert_eq!(
+            crate::procsignal::take_pending_foreground_for_test(),
+            Some((rustos_kernel_sec::TaskId(9), Signal::Interrupt))
+        );
+    }
+
+    #[test]
+    fn cooked_foreground_maps_ctrl_z_to_a_queued_stop() {
+        let _guard = crate::procsignal::foreground_test_lock();
+        crate::procsignal::ensure_foreground_hook_for_test();
+        let (device, queue) = filter_device();
+        device.set_foreground(Some(rustos_kernel_sec::TaskId(4)));
+        assert_eq!(device.push(b"\x1a"), Ok(1));
+        assert_eq!(drain(queue), b"");
+        assert_eq!(
+            crate::procsignal::take_pending_foreground_for_test(),
+            Some((rustos_kernel_sec::TaskId(4), Signal::Stop))
+        );
+    }
+
+    #[test]
+    fn raw_and_secret_modes_pass_control_bytes_through() {
+        let _guard = crate::procsignal::foreground_test_lock();
+        crate::procsignal::ensure_foreground_hook_for_test();
+        for mode in [InputMode::Raw, InputMode::Secret] {
+            let (device, queue) = filter_device();
+            device.set_foreground(Some(rustos_kernel_sec::TaskId(9)));
+            device.set_input_mode(mode);
+            // A full-screen program (raw) or a password read (secret) gets
+            // the literal bytes; nothing is queued for delivery.
+            assert_eq!(device.push(b"\x03\x1a"), Ok(2));
+            assert_eq!(drain(queue), b"\x03\x1a");
+            assert_eq!(crate::procsignal::take_pending_foreground_for_test(), None);
+        }
+    }
+
+    #[test]
+    fn cooked_without_a_foreground_passes_control_bytes_through() {
+        let _guard = crate::procsignal::foreground_test_lock();
+        crate::procsignal::ensure_foreground_hook_for_test();
+        let (device, queue) = filter_device();
+        // No foreground set — the shell at its prompt — so `^C` is ordinary
+        // input for the reader (elsh's raw editor never even reaches this:
+        // it selects raw mode; this is the cooked default).
+        assert_eq!(device.push(b"x\x03"), Ok(2));
+        assert_eq!(drain(queue), b"x\x03");
+        assert_eq!(crate::procsignal::take_pending_foreground_for_test(), None);
+    }
+
+    #[test]
+    fn clearing_the_foreground_restores_pass_through() {
+        let _guard = crate::procsignal::foreground_test_lock();
+        crate::procsignal::ensure_foreground_hook_for_test();
+        let (device, queue) = filter_device();
+        device.set_foreground(Some(rustos_kernel_sec::TaskId(9)));
+        assert_eq!(device.push(b"\x03"), Ok(1));
+        assert!(crate::procsignal::take_pending_foreground_for_test().is_some());
+        // The shell cleared the slot after its wait returned: bytes flow
+        // again.
+        device.set_foreground(None);
+        assert_eq!(device.push(b"\x03"), Ok(1));
+        assert_eq!(drain(queue), b"\x03");
+        assert_eq!(crate::procsignal::take_pending_foreground_for_test(), None);
+    }
+
+    #[test]
+    fn a_later_control_byte_replaces_the_pending_one() {
+        let _guard = crate::procsignal::foreground_test_lock();
+        crate::procsignal::ensure_foreground_hook_for_test();
+        let (device, queue) = filter_device();
+        device.set_foreground(Some(rustos_kernel_sec::TaskId(9)));
+        // Both are accepted; the single pending slot keeps the newest
+        // request (the older one is moot once the newer lands).
+        assert_eq!(device.push(b"\x03\x1a"), Ok(2));
+        assert_eq!(drain(queue), b"");
+        assert_eq!(
+            crate::procsignal::take_pending_foreground_for_test(),
+            Some((rustos_kernel_sec::TaskId(9), Signal::Stop))
+        );
+    }
+
+    #[test]
+    fn filter_reports_a_short_push_when_the_queue_fills() {
+        let _guard = crate::procsignal::foreground_test_lock();
+        crate::procsignal::ensure_foreground_hook_for_test();
+        let (device, queue) = filter_device();
+        device.set_foreground(Some(rustos_kernel_sec::TaskId(9)));
+        // Fill the queue completely, then push a run through the filter:
+        // the short push is reported exactly as the bare queue reports it.
+        let full = [b'x'; CONSOLE_INPUT_QUEUE_CAPACITY];
+        assert_eq!(device.push(&full), Ok(CONSOLE_INPUT_QUEUE_CAPACITY));
+        assert_eq!(device.push(b"yz"), Ok(0));
+        let _ = drain(queue);
     }
 }

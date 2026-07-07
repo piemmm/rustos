@@ -965,6 +965,14 @@ where
     // the `&mut ThreadControl` the shim step takes. `step.cpu` keys the
     // per-CPU resume table for a user kthread.
     scheduler.spawn(home_cpu, priority, move |step| {
+        // A task stopped by `Signal::Stop` is re-parked instead of run: the
+        // scheduler's park state is shared with every blocking wait, so a
+        // broadcast wake (a console byte waking all parked readers) can make
+        // a stopped task runnable again — the stop overlay is what keeps it
+        // genuinely stopped until an explicit `Signal::Continue` lifts it.
+        if crate::procsignal::task_is_stopped(step.task_id) {
+            return TaskAction::Park;
+        }
         dispatch_step(&mut control, step.cpu)
     })
 }
