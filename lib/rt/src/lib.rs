@@ -312,7 +312,17 @@ pub fn exit(code: i32) -> ! {
 /// resolves `fd` against the caller's descriptor table and validates the
 /// `(buf, len)` pair against the caller's address space before reading it; a short write (fewer than `bytes.len()`) is valid,
 /// so the caller loops.
-#[allow(clippy::cast_possible_truncation)] // usize == u64 on every native target; the count never exceeds `bytes.len()`.
+///
+/// The kernel encodes a failure as a negative register (`-errno`) — e.g. a
+/// missing `CAP_CONSOLE_WRITE`, or `fd` is not a writable stream. A writer
+/// handed a `&[u8]` has no way to surface an `Errno`, so a failure is
+/// reported as a zero-length write and the caller's short-write loop fails
+/// closed instead of spinning. The count is also clamped to `bytes.len()`
+/// as defence in depth, so a buggy kernel count can never drive an
+/// out-of-bounds slice in the caller — exactly as [`stream_read`] clamps.
+#[allow(clippy::cast_possible_truncation)] // usize == u64 on every native target; the clamped count never exceeds `bytes.len()`.
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 stream-write encoding (count ≥ 0, else -errno).
+#[allow(clippy::cast_sign_loss)] // The negative (`-errno`) case returns early above; the cast runs only when `written >= 0`.
 fn stream_write(fd: u32, bytes: &[u8]) -> usize {
     let ptr = bytes.as_ptr() as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
@@ -323,8 +333,11 @@ fn stream_write(fd: u32, bytes: &[u8]) -> usize {
             NUM_STREAM_WRITE,
             [u64::from(fd), ptr, bytes.len() as u64, 0, 0, 0],
         )
-    };
-    written as usize
+    } as i64;
+    if written < 0 {
+        return 0;
+    }
+    (written as usize).min(bytes.len())
 }
 
 /// Write `bytes` to standard output (fd 1), returning the
@@ -2962,6 +2975,35 @@ mod tests {
         let buffer = [0u8; 16];
         let (_, _) = capture(10, || {
             assert_eq!(stdout(&buffer), 10);
+        });
+    }
+
+    #[test]
+    fn stdout_reports_a_negative_errno_as_a_zero_length_write() {
+        // A refused write (missing `CAP_CONSOLE_WRITE`, non-writable fd) is
+        // encoded as a negative register; a `&[u8]` writer cannot carry an
+        // `Errno`, so it surfaces as a zero-length write — never a huge count
+        // that would slice out of bounds in a `write_all` loop.
+        let buffer = [0u8; 16];
+        let neg = u64::from_ne_bytes(
+            (-i64::from(rustos_abi::Errno::PermissionDenied.as_i32())).to_ne_bytes(),
+        );
+        let (_, _) = capture(neg, || {
+            assert_eq!(stdout(&buffer), 0);
+        });
+        let (_, _) = capture(neg, || {
+            assert_eq!(stderr(&buffer), 0);
+        });
+    }
+
+    #[test]
+    fn stdout_clamps_an_oversized_count_to_the_buffer_length() {
+        // Defence in depth: a count larger than the buffer (a buggy kernel)
+        // is clamped so the caller can never index past `bytes.len()`,
+        // exactly as `stdin` clamps.
+        let buffer = [0u8; 4];
+        let (_, _) = capture(93, || {
+            assert_eq!(stdout(&buffer), 4);
         });
     }
 

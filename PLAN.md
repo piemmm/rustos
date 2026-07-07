@@ -2801,6 +2801,50 @@ be split into two partial (refused) attempts. Work remaining:
   anti-brute-force defence (§2.17) — and land the fix with a regression test
   that types a slowly-delivered line (§7).
 
+## Open defect — CI-only spawn-session x86_64 failure (user OOM + wrong write count)
+
+**Status: open (escalated under §2.18/§15.7; observed only on the self-hosted
+CI runner, not reproducible locally — 44/44 oversubscribed pre-fix runs pass,
+same "tsc not invariant" boot path).**
+
+On the CI runner, `rustos-test-spawn-session-qemu-x86-64` failed (qemu status
+35) with, in order: devmgr's `ipc_call` catalogue fetch refused (`NotFound`,
+expected bring-up), a user-space "memory allocation of 8 bytes failed" (an
+`rxe` process's `rustos-rt` heap `mem_map` failing), and a cascade of
+`lib/rt/src/io.rs:129` slice panics whose out-of-range indices (181 → 94 →
+93 fixed point) equal the byte lengths of the *preceding* panic reports —
+i.e. at least one `stream_write` returned a positive count larger than the
+written buffer. The status-35 exit is the unhandled ring-3 page fault
+(`fault_handler()` = `None` → `qemu_exit::exit_failure`) the panic recursion
+eventually caused.
+
+Landed now: `rustos-rt`'s `stream_write` folds a negative (`-errno`) return
+to a zero-length write and clamps the count to the buffer length (the same
+defence `stream_read` already carried), with fail-before/pass-after
+regression tests — so no kernel count, however wrong, can drive an
+out-of-bounds slice or a panic-inside-panic storm in userland again.
+
+Work remaining (needs the failing runner's QEMU/SeaBIOS environment):
+
+- Reproduce on the CI runner and capture which allocation's `mem_map` fails
+  and with what errno; compare its PVH e820 map shape against the local one
+  (the frame pool derives from it; a differently shaped map is the one
+  environment-specific input on this path).
+- Explain the over-large `stream_write` count with kernel-side evidence. The
+  audited candidates — `write_output` clamping, `encode_result`, dispatch
+  slot/reschedule, preempt ISR + `swapgs` parity, `context.s`, FMASK IF
+  masking — are all correct by inspection and host tests; instrument the CI
+  run rather than guess (§2.16).
+- Decide whether the production x86_64 boot path must install a ring-3 fault
+  handler that kills the faulting task (fail closed, log, reap) instead of
+  taking the whole machine down through the arch default; land it with a
+  QEMU regression test if so.
+- Also observed on both machines: devmgr exits after its first evaluation on
+  this slice (a tree-seam `hw_tree_wait`/`hw_tree_read` refusal ends its
+  loop fail-closed) although the vertical's docs describe it parking in
+  `hw_tree_wait`; confirm which seam refuses and whether the slice or the
+  docs are wrong.
+
 ## Cross-cutting Tasks (run continuously alongside the stages)
 
 These never "finish"; they are part of every PR.
