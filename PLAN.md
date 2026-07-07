@@ -3973,7 +3973,7 @@ the next increment; see `plans/USB.md` for the binding design and staging.
 
 ## DISPLAY — seat ownership: the display/console locking model (`plans/DISPLAY.md`)
 
-**Status: D1–D3 done; D4–D6 planned.** Closes the console/graphics *ownership
+**Status: D1–D4 done; D5–D6 planned.** Closes the console/graphics *ownership
 and locking* gap against Linux (DRM master + `logind` seats + tty controlling
 terminal), and improves on it under the charter's fail-closed, no-ambient
 model. The plan makes the **seat** a first-class kernel object with a tracked,
@@ -4004,8 +4004,20 @@ owner-gated call sees `SeatRevoked`) — and its sole holder, the
 requiring each requester's attested `CAP_SEAT_ADMIN`, launched by PID 1,
 headless-safe). Seats are observable through the System Information API
 (`IntrospectDomain::Seats`, the audited `CAP_SYSINFO_HW` `SEAT_LIST`
-query, and `sysinfo seats`). D4 (present right derived from the live
-lease in `drivers/display/*`) is the next increment; see
+query, and `sysinfo seats`). D4 is done: the present right is derived
+from the live lease — `display_acquire` returns the minted lease
+generation, the `lib/abi` handle (`rustos_abi::seat::SeatLease`) is
+threaded to a display driver as its host's `DriverHost::seat_gate()`
+(kernel side: `SeatRegistry::present_gate` over the one
+`SeatState::verify` definition), and every display driver's
+present/flip (framebuffer, vesa, rpi_hvs — software and hardware paths
+alike) checks it first, refusing a revoked client with the distinct
+`DriverError::SeatRevoked` (`abi-v1` driver error 14) while its
+framebuffer mapping persists; a seatless host presents ungated
+(headless stays first-class). Proven by driver unit tests and the
+aarch64 framebuffer QEMU vertical's seat phase (revoked present
+refused, surface intact, new foreground renders). D5 (per-console
+controlling owner + foreground handoff) is the next increment; see
 `plans/DISPLAY.md` for the binding design and staging.
 
 ---

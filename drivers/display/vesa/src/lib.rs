@@ -48,7 +48,7 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
-use rustos_abi::driver::display::{Display, DisplayFormat, DisplayMode};
+use rustos_abi::driver::display::{Display, DisplayFormat, DisplayMode, SeatGate};
 use rustos_abi::driver::mmio::{MmioMapError, WindowError};
 use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost, MmioMapper, RegisterWindow};
 
@@ -297,13 +297,18 @@ fn validate_geometry(
 /// The driver owns the [`RegisterWindow`] for the whole load: dropping
 /// the [`VesaFramebuffer`] drops the window, which is the driver's
 /// quiesce step (the kernel reclaims the mapping on unload). Reloading is calling [`VesaFramebuffer::open`] again.
-pub struct VesaFramebuffer {
+///
+/// `'h` borrows the opening [`DriverHost`]: the driver captures the
+/// host's [`SeatGate`], so every present re-checks the presenting
+/// client's live seat lease before touching the surface.
+pub struct VesaFramebuffer<'h> {
     window: RegisterWindow,
     mode: DisplayMode,
     surface_len: usize,
+    seat: Option<&'h dyn SeatGate>,
 }
 
-impl VesaFramebuffer {
+impl<'h> VesaFramebuffer<'h> {
     /// Decode the boot-supplied VBE `ModeInfoBlock` and bring its linear
     /// framebuffer online.
     ///
@@ -325,7 +330,7 @@ impl VesaFramebuffer {
     ///
     /// Requires [`CapabilityId::MMIO_MAP`] in addition to the load-time
     /// [`CapabilityId::DRV_LOAD`] [`register`] checked.
-    pub fn open(host: &dyn DriverHost, mode_info_block: &[u8]) -> Result<Self, DriverError> {
+    pub fn open(host: &'h dyn DriverHost, mode_info_block: &[u8]) -> Result<Self, DriverError> {
         let info = VbeModeInfo::parse(mode_info_block)?;
         Self::from_mode_info(host, info)
     }
@@ -340,7 +345,10 @@ impl VesaFramebuffer {
     /// # Capabilities
     ///
     /// Requires [`CapabilityId::MMIO_MAP`].
-    pub fn from_mode_info(host: &dyn DriverHost, info: VbeModeInfo) -> Result<Self, DriverError> {
+    pub fn from_mode_info(
+        host: &'h dyn DriverHost,
+        info: VbeModeInfo,
+    ) -> Result<Self, DriverError> {
         let surface_len = info.surface_len()?;
         if surface_len == 0 {
             return Err(DriverError::LengthOutOfRange);
@@ -356,6 +364,7 @@ impl VesaFramebuffer {
             window,
             mode: info.display_mode(),
             surface_len,
+            seat: host.seat_gate(),
         })
     }
 
@@ -386,12 +395,20 @@ impl VesaFramebuffer {
     }
 }
 
-impl Display for VesaFramebuffer {
+impl Display for VesaFramebuffer<'_> {
     fn mode_info(&self) -> Result<DisplayMode, DriverError> {
         Ok(self.mode)
     }
 
     fn present(&mut self, frame: &[u8]) -> Result<(), DriverError> {
+        // The present right is derived from the live seat lease, before any
+        // other validation or surface access: a client whose lease was
+        // revoked cannot scan out even though its mapping persists. A host
+        // with no seat wired (headless, boot bring-up) exposes no gate and
+        // the present proceeds ungated.
+        if let Some(gate) = self.seat {
+            gate.check_present()?;
+        }
         if frame.len() < self.surface_len {
             return Err(DriverError::BufferTooSmall);
         }

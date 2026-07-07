@@ -87,12 +87,12 @@ pub struct HvsRegions {
 ///
 /// Requires [`CapabilityId::MMIO_MAP`] in addition to the load-time
 /// [`CapabilityId::DRV_LOAD`] [`crate::register`] checked.
-pub fn open_discovered(
-    host: &dyn DriverHost,
+pub fn open_discovered<'h>(
+    host: &'h dyn DriverHost,
     mailbox: &MailboxWiring,
     request: &FramebufferRequest,
     regions: &HvsRegions,
-) -> Result<RpiHvs, DriverError> {
+) -> Result<RpiHvs<'h>, DriverError> {
     if !host.has_capability(CapabilityId::MMIO_MAP) {
         return Err(DriverError::PermissionDenied);
     }
@@ -123,12 +123,12 @@ pub fn open_discovered(
 /// # Capabilities
 ///
 /// Requires [`CapabilityId::MMIO_MAP`] (checked by [`RpiHvs::open`]).
-pub fn open_with_transport(
-    host: &dyn DriverHost,
+pub fn open_with_transport<'h>(
+    host: &'h dyn DriverHost,
     transport: &mut dyn MailboxTransport,
     request: &FramebufferRequest,
     regions: &HvsRegions,
-) -> Result<RpiHvs, DriverError> {
+) -> Result<RpiHvs<'h>, DriverError> {
     let firmware =
         discover_framebuffer(transport, request).map_err(MailboxError::as_driver_error)?;
     let scanout = ScanoutConfig::from_firmware(&firmware).map_err(MailboxError::as_driver_error)?;

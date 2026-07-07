@@ -184,7 +184,9 @@ pub use procwait::{
 };
 pub use random::{reserve_errno, BootReserve, NullEntropy, RandomReserve};
 pub use rlimit::{authorize_set, LimitSet};
-pub use seat::{seat_errno, SeatRegistry, KEYBOARD_CHANNEL_CAPACITY, NULL_SEAT_REGISTRY};
+pub use seat::{
+    seat_errno, PresentGate, SeatRegistry, KEYBOARD_CHANNEL_CAPACITY, NULL_SEAT_REGISTRY,
+};
 pub use sleeplock::{SleepGuard, SleepLock};
 pub use spawn::{
     spawn_and_enter, spawn_image, AdmitError, EmbeddedProgram, InitSpawn, InitSpawnCtx,

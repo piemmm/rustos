@@ -1951,10 +1951,12 @@ dependencies = [
  "rustos-fdt",
  "rustos-fwcfg",
  "rustos-itest-harness",
+ "rustos-kernel-core",
  "rustos-kernel-mem",
  "rustos-kernel-sec",
  "rustos-kernel-virtio",
  "rustos-log",
+ "rustos-seat",
  "rustos-test-virtio-qemu-support",
 ]
 

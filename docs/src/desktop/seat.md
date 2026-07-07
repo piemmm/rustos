@@ -58,8 +58,10 @@ keyboard channel (which zeroes each record as it is drained, so a typed
 secret never lingers).
 
 - `display_acquire` (`abi-v1` 23, `CAP_DISPLAY`) records the
-  kernel-attested calling task as the seat owner. A seat held by another
-  task refuses the claim with `Errno::SeatBusy`; a repeat acquire by the
+  kernel-attested calling task as the seat owner and returns the minted
+  lease's generation (`>= 1`) — the client-visible handle the present
+  right is derived from (Stage D4 below). A seat held by another task
+  refuses the claim with `Errno::SeatBusy`; a repeat acquire by the
   holder is surfaced as `Errno::AlreadyExists`.
 - `display_release` (`abi-v1` 24, `CAP_DISPLAY`) is owner-checked: a
   caller that does not hold the seat is refused with
@@ -114,6 +116,42 @@ audited syscalls and held by exactly one service:
   the capability and every index on each call. Headless-safe: nothing in
   it depends on a graphical session.
 
+## The present right follows the live lease (Stage D4)
+
+Mapping the framebuffer (`CAP_MMIO_MAP`) and owning the seat
+(`CAP_DISPLAY`) are separate facts; Stage D4 couples them at the display
+driver's present path, so "I can write pixels" no longer implies "I own
+the screen":
+
+- The `lib/abi` seat handle is `rustos_abi::seat::SeatLease` — seat id,
+  owning task, and the mint-time generation `display_acquire` returned.
+  The generation is what makes a stale pre-revoke handle refusable even
+  after its owner reacquires the seat: `rustos_seat::SeatState::verify`
+  (the one definition of the check) accepts exactly the live
+  owner-and-generation pair.
+- The check reaches a display driver through its host:
+  `DriverHost::seat_gate()` returns the `SeatGate` the kernel bound to
+  the presenting client's lease (`SeatRegistry::present_gate`), and every
+  driver (`framebuffer`, `vesa`, `rpi_hvs` — both its software present
+  and its hardware `present_layers` flip) consults it **first**, before
+  any validation or surface access. The gate re-reads the registry's
+  live lease on every call; it caches nothing.
+- A revoked client's present is refused with the distinct
+  `DriverError::SeatRevoked` (mapping to `Errno::SeatRevoked`), so a
+  well-behaved compositor learns it lost the seat; any other dead handle
+  (unowned seat, another owner, stale generation, foreign seat id) is a
+  plain `DriverError::PermissionDenied`. Either way the refused frame
+  never touches the scan-out surface, even though the client's
+  framebuffer mapping still exists.
+- A host with no seat wired — a headless build or a boot-console
+  bring-up surface — exposes no gate, and the driver presents ungated:
+  there is no lease to derive the right from.
+
+The aarch64 framebuffer QEMU vertical proves the property end to end on
+a real kernel seat registry: the owner presents, an administrative
+revoke evicts it, the evicted client's next present is refused (its last
+frame stays on scan-out), and the new foreground's fresh lease renders.
+
 ## Observing seats
 
 The seat inventory is exposed through the System Information API — never
@@ -128,6 +166,5 @@ registry; the `sysinfod` broker scopes and audits the query, and
 
 ## What is not yet wired
 
-The lease-derived present right, per-console controlling-terminal
-arbitration, and multi-seat/hotplug are Stages D4–D6 of
-`plans/DISPLAY.md`.
+Per-console controlling-terminal arbitration and multi-seat/hotplug are
+Stages D5–D6 of `plans/DISPLAY.md`.

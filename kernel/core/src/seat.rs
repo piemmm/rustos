@@ -30,11 +30,13 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use rustos_abi::driver::display::SeatGate;
 use rustos_abi::input::KeyInput;
+use rustos_abi::seat::{SeatLease, SEAT_PRIMARY};
 use rustos_abi::sysinfo::{SeatRecord, SEAT_FLAG_OWNED};
-use rustos_abi::Errno;
+use rustos_abi::{DriverError, Errno};
 use rustos_keymap::{encode_key_input, MAX_KEY_BYTES};
-use rustos_seat::{ConsoleIndex, Route, SeatError, SeatOwner, SeatState};
+use rustos_seat::{ConsoleIndex, Lease, Route, SeatError, SeatOwner, SeatState};
 use rustos_sync::SpinLock;
 use zeroize::Zeroize;
 
@@ -190,8 +192,11 @@ impl SeatRegistry {
         }
     }
 
-    /// Grant the seat to the kernel-attested `owner` (`display_acquire`):
-    /// subsequently injected key edges route to the keyboard channel.
+    /// Grant the seat to the kernel-attested `owner` (`display_acquire`),
+    /// returning the minted [`Lease`]: subsequently injected key edges
+    /// route to the keyboard channel, and the lease's generation is the
+    /// handle the present path is later checked against
+    /// ([`Self::present_gate`]).
     ///
     /// # Errors
     ///
@@ -199,8 +204,8 @@ impl SeatRegistry {
     ///   is never displaced.
     /// - [`SeatError::AlreadyOwner`] — `owner` already holds it; a double
     ///   acquire is a caller bug, surfaced rather than silently succeeding.
-    pub fn acquire(&self, owner: SeatOwner) -> Result<(), SeatError> {
-        self.seat.lock().acquire(owner).map(|_| ())
+    pub fn acquire(&self, owner: SeatOwner) -> Result<Lease, SeatError> {
+        self.seat.lock().acquire(owner)
     }
 
     /// Release the seat held by `owner` (`display_release`), returning
@@ -335,6 +340,20 @@ impl SeatRegistry {
         self.seat.lock().revoke()
     }
 
+    /// The live seat-lease gate for the client holding `lease` — the one
+    /// place the present right is derived from the seat registry
+    /// (`plans/DISPLAY.md` D4). The returned gate is handed to a display
+    /// driver's host as its `DriverHost::seat_gate`; the driver consults it
+    /// at the top of every present/flip, so a revoked client cannot scan
+    /// out even though its framebuffer mapping still exists.
+    #[must_use]
+    pub const fn present_gate(&self, lease: SeatLease) -> PresentGate<'_> {
+        PresentGate {
+            registry: self,
+            lease,
+        }
+    }
+
     /// One wire-encodable snapshot of the seat for the seat inventory
     /// (`IntrospectDomain::Seats`), taken under the registry lock so the
     /// owner, generation, and foreground are one consistent observation.
@@ -352,6 +371,46 @@ impl SeatRegistry {
             foreground_console: seat.foreground_console().0,
             flags,
         }
+    }
+}
+
+/// A [`SeatGate`] bound to one client's [`SeatLease`] over the kernel seat
+/// registry: the present-path check a display driver's host exposes
+/// (`plans/DISPLAY.md` D4).
+///
+/// Every call re-reads the registry's live lease under its lock — the gate
+/// caches nothing — so a `seat_revoke` between two frames refuses the very
+/// next present. The bound handle carries the mint-time generation, which
+/// is what makes a stale pre-revoke handle refusable even after its owner
+/// reacquired the seat ([`rustos_seat::SeatState::verify`], the one
+/// definition of the check).
+pub struct PresentGate<'r> {
+    registry: &'r SeatRegistry,
+    lease: SeatLease,
+}
+
+impl SeatGate for PresentGate<'_> {
+    fn check_present(&self) -> Result<(), DriverError> {
+        // The registry hosts the primary seat; a handle naming any other
+        // seat cannot be live here (fail closed, never guess).
+        if self.lease.seat_id != SEAT_PRIMARY {
+            return Err(DriverError::PermissionDenied);
+        }
+        let lease = Lease {
+            owner: SeatOwner(self.lease.owner_task),
+            generation: self.lease.generation,
+        };
+        self.registry
+            .seat
+            .lock()
+            .verify(lease)
+            .map_err(|err| match err {
+                SeatError::SeatRevoked => DriverError::SeatRevoked,
+                SeatError::SeatBusy
+                | SeatError::AlreadyOwner
+                | SeatError::NotOwner
+                | SeatError::SeatUnowned => DriverError::PermissionDenied,
+            })
     }
 }
 
@@ -425,7 +484,9 @@ mod tests {
     #[test]
     fn a_held_seat_routes_records_to_the_owner_drain() {
         let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
-        assert_eq!(seat.acquire(WM), Ok(()));
+        let lease = seat.acquire(WM).expect("fresh seat is acquirable");
+        assert_eq!(lease.owner, WM);
+        assert_eq!(lease.generation, 1);
         assert_eq!(seat.owner(), Some(WM));
         let record = KeyInput::Pressed {
             key: KeyValue::Named(NamedKeyCode::Enter),
@@ -586,6 +647,72 @@ mod tests {
         assert!(!revoked.owned());
         assert_eq!(revoked.owner_task, 0);
         assert_eq!(revoked.generation, 1);
+    }
+
+    /// The abi-facing lease handle for `owner` under `generation` on the
+    /// primary seat.
+    fn handle(owner: SeatOwner, generation: u64) -> SeatLease {
+        SeatLease {
+            seat_id: SEAT_PRIMARY,
+            owner_task: owner.0,
+            generation,
+        }
+    }
+
+    #[test]
+    fn present_gate_admits_only_the_live_lease() {
+        let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
+        let lease = seat.acquire(WM).expect("fresh seat is acquirable");
+        assert_eq!(
+            seat.present_gate(handle(WM, lease.generation))
+                .check_present(),
+            Ok(())
+        );
+        // A handle naming another task, a stale generation, or a foreign
+        // seat id is refused before any scanout.
+        assert_eq!(
+            seat.present_gate(handle(INTRUDER, lease.generation))
+                .check_present(),
+            Err(DriverError::PermissionDenied)
+        );
+        assert_eq!(
+            seat.present_gate(handle(WM, lease.generation + 1))
+                .check_present(),
+            Err(DriverError::PermissionDenied)
+        );
+        let mut foreign = handle(WM, lease.generation);
+        foreign.seat_id = 7;
+        assert_eq!(
+            seat.present_gate(foreign).check_present(),
+            Err(DriverError::PermissionDenied)
+        );
+    }
+
+    #[test]
+    fn present_gate_refuses_a_revoked_lease_distinctly() {
+        let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
+        let lease = seat.acquire(WM).expect("fresh seat is acquirable");
+        let gate_handle = handle(WM, lease.generation);
+        seat.revoke().expect("held seat revokes");
+        // The gate re-reads the live lease on every call: the very next
+        // present after the revoke is refused, and the evicted client sees
+        // the distinct refusal so it learns it lost the seat.
+        assert_eq!(
+            seat.present_gate(gate_handle).check_present(),
+            Err(DriverError::SeatRevoked)
+        );
+        // The new foreground's fresh lease presents; the stale pre-revoke
+        // handle stays dead even though its owner may reacquire later.
+        let fresh = seat.acquire(INTRUDER).expect("revoked seat is acquirable");
+        assert_eq!(
+            seat.present_gate(handle(INTRUDER, fresh.generation))
+                .check_present(),
+            Ok(())
+        );
+        assert_eq!(
+            seat.present_gate(gate_handle).check_present(),
+            Err(DriverError::PermissionDenied)
+        );
     }
 
     #[test]

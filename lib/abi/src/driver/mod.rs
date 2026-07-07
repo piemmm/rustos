@@ -317,6 +317,15 @@ pub enum DriverError {
     /// Distinct from [`DeviceFault`](Self::DeviceFault): the device is
     /// healthy, the volume is simply full. Maps to [`Errno::NoSpace`].
     NoSpace = 13,
+    /// The presenting client's seat lease was forcibly revoked.
+    ///
+    /// Returned by a display driver's present path when the host's
+    /// [`SeatGate`](display::SeatGate) reports the client lost its seat to
+    /// an administrative `seat_revoke`. Distinct from
+    /// [`PermissionDenied`](Self::PermissionDenied) so a well-behaved
+    /// compositor learns it lost the seat rather than treating the refusal
+    /// as a generic authority failure. Maps to [`Errno::SeatRevoked`].
+    SeatRevoked = 14,
 }
 
 impl DriverError {
@@ -351,6 +360,7 @@ impl DriverError {
             11 => Ok(Self::Busy),
             12 => Ok(Self::NotImplemented),
             13 => Ok(Self::NoSpace),
+            14 => Ok(Self::SeatRevoked),
             _ => Err(Self::OutOfRange),
         }
     }
@@ -372,6 +382,7 @@ impl DriverError {
             Self::NotFound => Errno::NotFound,
             Self::SignatureInvalid => Errno::SignatureInvalid,
             Self::NoSpace => Errno::NoSpace,
+            Self::SeatRevoked => Errno::SeatRevoked,
             Self::Unsupported | Self::DeviceFault | Self::Busy | Self::NotImplemented => {
                 Errno::NotImplemented
             }
@@ -945,6 +956,36 @@ pub trait DriverHost {
     fn alloc_msi(&self) -> Result<MsiAllocation, DriverError> {
         Err(DriverError::Unsupported)
     }
+
+    /// Returns the live seat-lease gate for the client this host presents
+    /// on behalf of, if the host has wired a seat.
+    ///
+    /// A display driver consults the returned
+    /// [`SeatGate`](display::SeatGate) at the top of every present/flip,
+    /// so the present right is derived from the client's *current* seat
+    /// lease rather than from its (still-mapped) framebuffer window: a
+    /// revoked client cannot scan out over the new foreground. The gate is
+    /// bound to the client's [`SeatLease`](crate::seat::SeatLease) by the
+    /// host — the driver never sees or supplies the handle.
+    ///
+    /// The default implementation returns `None`, the correct shape for a
+    /// host with no seat wired: a headless build, a boot-console
+    /// bring-up surface, or a unit-test seam — there is no lease to derive
+    /// the right from, so the driver presents ungated for that host. This
+    /// is an `abi-v1` *internal* addition; the default body keeps every
+    /// existing host impl source-compatible.
+    ///
+    /// # Errors
+    ///
+    /// Never fails; absence of a seat is reported as `None`.
+    ///
+    /// # Capabilities
+    ///
+    /// None at the call site; the gate itself checks the client's lease
+    /// against the kernel seat registry on every call.
+    fn seat_gate(&self) -> Option<&dyn display::SeatGate> {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -980,6 +1021,7 @@ mod tests {
         assert_eq!(DriverError::Busy.as_i32(), 11);
         assert_eq!(DriverError::NotImplemented.as_i32(), 12);
         assert_eq!(DriverError::NoSpace.as_i32(), 13);
+        assert_eq!(DriverError::SeatRevoked.as_i32(), 14);
     }
 
     #[test]
@@ -991,6 +1033,7 @@ mod tests {
         assert_eq!(DriverError::NotFound.as_errno(), Errno::NotFound);
         assert_eq!(DriverError::Busy.as_errno(), Errno::NotImplemented);
         assert_eq!(DriverError::NoSpace.as_errno(), Errno::NoSpace);
+        assert_eq!(DriverError::SeatRevoked.as_errno(), Errno::SeatRevoked);
     }
 
     #[test]
@@ -1009,12 +1052,13 @@ mod tests {
             DriverError::Busy,
             DriverError::NotImplemented,
             DriverError::NoSpace,
+            DriverError::SeatRevoked,
         ];
         for err in all {
             assert_eq!(DriverError::from_i32(err.as_i32()), Ok(err));
         }
         assert_eq!(DriverError::from_i32(0), Err(DriverError::OutOfRange));
-        assert_eq!(DriverError::from_i32(14), Err(DriverError::OutOfRange));
+        assert_eq!(DriverError::from_i32(15), Err(DriverError::OutOfRange));
         assert_eq!(DriverError::from_i32(-1), Err(DriverError::OutOfRange));
     }
 
@@ -1161,6 +1205,14 @@ mod tests {
         assert!(host.has_capability(CapabilityId::DRV_LOAD));
         assert!(!host.has_capability(CapabilityId::DRV_KERNEL));
         assert_eq!(host.kind(), DriverKind::UserSpace);
+    }
+
+    #[test]
+    fn driver_host_seat_gate_defaults_to_absent() {
+        // A host with no seat wired exposes no gate: there is no lease to
+        // derive the present right from (a headless or bring-up host).
+        let host = StubHost;
+        assert!(host.seat_gate().is_none());
     }
 
     #[test]

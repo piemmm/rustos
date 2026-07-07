@@ -10,6 +10,7 @@ use core::cell::RefCell;
 use core::ptr::NonNull;
 
 use super::*;
+use core::cell::Cell;
 use rustos_abi::driver::DriverKind;
 use rustos_abi::{CapabilityId, MmioMapError, MmioMapper, RegisterWindow};
 
@@ -61,13 +62,28 @@ impl MmioMapper for MockMapper {
     }
 }
 
+/// Settable stand-in for the kernel's live seat-lease check: the test
+/// flips the verdict between frames to model an administrative revoke
+/// (and a fresh grant) without a kernel registry.
+struct MockGate {
+    verdict: Cell<Result<(), DriverError>>,
+}
+
+impl SeatGate for MockGate {
+    fn check_present(&self) -> Result<(), DriverError> {
+        self.verdict.get()
+    }
+}
+
 /// Mock driver host. `drv_load` / `mmio_map` model the load-time
 /// capability grants; `mapper` is `None` to model a host with no
-/// MMIO-map facility.
+/// MMIO-map facility; `gate` is `None` to model a host with no seat
+/// wired (present then proceeds ungated).
 struct MockHost {
     drv_load: bool,
     mmio_map: bool,
     mapper: Option<MockMapper>,
+    gate: Option<MockGate>,
 }
 
 impl MockHost {
@@ -76,6 +92,7 @@ impl MockHost {
             drv_load: true,
             mmio_map: true,
             mapper: Some(MockMapper::new(words, true)),
+            gate: None,
         }
     }
 }
@@ -93,6 +110,9 @@ impl DriverHost for MockHost {
     }
     fn mmio_mapper(&self) -> Option<&dyn MmioMapper> {
         self.mapper.as_ref().map(|m| m as &dyn MmioMapper)
+    }
+    fn seat_gate(&self) -> Option<&dyn SeatGate> {
+        self.gate.as_ref().map(|g| g as &dyn SeatGate)
     }
 }
 
@@ -112,12 +132,14 @@ fn register_requires_drv_load() {
         drv_load: true,
         mmio_map: false,
         mapper: None,
+        gate: None,
     };
     assert!(register(&granted).is_ok());
     let denied = MockHost {
         drv_load: false,
         mmio_map: false,
         mapper: None,
+        gate: None,
     };
     assert_eq!(register(&denied), Err(DriverError::PermissionDenied));
 }
@@ -195,6 +217,7 @@ fn open_requires_mmio_map_capability_on_host() {
         drv_load: true,
         mmio_map: false,
         mapper: Some(MockMapper::new(8, true)),
+        gate: None,
     };
     assert_eq!(
         Framebuffer::open(&host, config(4, 2, 16)).err(),
@@ -209,6 +232,7 @@ fn open_surfaces_mapper_capability_denial() {
         drv_load: true,
         mmio_map: true,
         mapper: Some(MockMapper::new(8, false)),
+        gate: None,
     };
     assert_eq!(
         Framebuffer::open(&host, config(4, 2, 16)).err(),
@@ -222,6 +246,7 @@ fn open_without_mapper_is_unsupported() {
         drv_load: true,
         mmio_map: true,
         mapper: None,
+        gate: None,
     };
     assert_eq!(
         Framebuffer::open(&host, config(4, 2, 16)).err(),
@@ -255,6 +280,39 @@ fn open_rejects_degenerate_geometry() {
         Framebuffer::open(&host, config(4, 2, 12)).err(),
         Some(DriverError::LengthOutOfRange)
     );
+}
+
+#[test]
+fn present_gates_on_the_live_seat_lease() {
+    let mut host = MockHost::full(8);
+    host.gate = Some(MockGate {
+        verdict: Cell::new(Ok(())),
+    });
+    let mut fb = Framebuffer::open(&host, config(4, 2, 16)).expect("open");
+    let first = vec![0x11u8; 32];
+    fb.present(&first).expect("live lease presents");
+
+    // The lease is revoked between frames: the very next present is
+    // refused with the distinct error before any surface access, so the
+    // scan-out keeps the last-presented frame even though the mapping
+    // still exists.
+    let gate = host.gate.as_ref().expect("gate installed");
+    gate.verdict.set(Err(DriverError::SeatRevoked));
+    let overwrite = vec![0x22u8; 32];
+    assert_eq!(fb.present(&overwrite), Err(DriverError::SeatRevoked));
+    let mapper = host.mapper.as_ref().expect("mapper installed");
+    assert_eq!(mapper.byte(0), 0x11);
+    assert_eq!(mapper.byte(31), 0x11);
+
+    // A stale handle also stays refused as a plain authority failure.
+    gate.verdict.set(Err(DriverError::PermissionDenied));
+    assert_eq!(fb.present(&overwrite), Err(DriverError::PermissionDenied));
+
+    // Once the host's gate reports a live lease again (the new
+    // foreground's grant), presents flow.
+    gate.verdict.set(Ok(()));
+    fb.present(&overwrite).expect("live lease presents again");
+    assert_eq!(mapper.byte(0), 0x22);
 }
 
 #[test]

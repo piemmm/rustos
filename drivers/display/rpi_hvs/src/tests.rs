@@ -94,10 +94,24 @@ impl MmioMapper for MockMapper {
     }
 }
 
+/// Settable stand-in for the kernel's live seat-lease check: the test
+/// flips the verdict between frames to model an administrative revoke
+/// (and a fresh grant) without a kernel registry.
+pub(crate) struct MockGate {
+    pub(crate) verdict: core::cell::Cell<Result<(), DriverError>>,
+}
+
+impl SeatGate for MockGate {
+    fn check_present(&self) -> Result<(), DriverError> {
+        self.verdict.get()
+    }
+}
+
 pub(crate) struct MockHost {
     pub(crate) drv_load: bool,
     pub(crate) mmio_map: bool,
     pub(crate) mapper: Option<MockMapper>,
+    pub(crate) gate: Option<MockGate>,
 }
 
 impl DriverHost for MockHost {
@@ -113,6 +127,9 @@ impl DriverHost for MockHost {
     }
     fn mmio_mapper(&self) -> Option<&dyn MmioMapper> {
         self.mapper.as_ref().map(|m| m as &dyn MmioMapper)
+    }
+    fn seat_gate(&self) -> Option<&dyn SeatGate> {
+        self.gate.as_ref().map(|g| g as &dyn SeatGate)
     }
 }
 
@@ -131,6 +148,7 @@ fn host_with(plane_count: usize) -> MockHost {
         drv_load: true,
         mmio_map: true,
         mapper: Some(mapper),
+        gate: None,
     }
 }
 
@@ -179,12 +197,14 @@ fn register_requires_drv_load() {
         drv_load: true,
         mmio_map: false,
         mapper: None,
+        gate: None,
     };
     assert!(register(&granted).is_ok());
     let denied = MockHost {
         drv_load: false,
         mmio_map: false,
         mapper: None,
+        gate: None,
     };
     assert_eq!(register(&denied), Err(DriverError::PermissionDenied));
 }
@@ -226,6 +246,59 @@ fn software_present_rejects_short_frame() {
     let host = host_with(1);
     let mut hvs = RpiHvs::open(&host, config(1)).expect("open");
     assert_eq!(hvs.present(&[0u8; 31]), Err(DriverError::BufferTooSmall));
+}
+
+#[test]
+fn present_gates_on_the_live_seat_lease() {
+    let mut host = host_with(1);
+    host.gate = Some(MockGate {
+        verdict: core::cell::Cell::new(Ok(())),
+    });
+    let mut hvs = RpiHvs::open(&host, config(1)).expect("open");
+    hvs.present(&[0x11u8; 32]).expect("live lease presents");
+
+    // The lease is revoked between frames: the very next present is
+    // refused with the distinct error before any engine access, so the
+    // scan-out keeps the last-presented frame even though the mappings
+    // still exist.
+    let gate = host.gate.as_ref().expect("gate installed");
+    gate.verdict.set(Err(DriverError::SeatRevoked));
+    assert_eq!(hvs.present(&[0x22u8; 32]), Err(DriverError::SeatRevoked));
+    let mapper = host.mapper.as_ref().expect("mapper");
+    assert_eq!(mapper.byte(SCANOUT_PHYS, 0), 0x11);
+
+    // Once the host's gate reports a live lease again (the new
+    // foreground's grant), presents flow.
+    gate.verdict.set(Ok(()));
+    hvs.present(&[0x22u8; 32])
+        .expect("live lease presents again");
+    assert_eq!(mapper.byte(SCANOUT_PHYS, 0), 0x22);
+}
+
+#[test]
+fn present_layers_gates_on_the_live_seat_lease() {
+    // The hardware layer engine is scanout too: a revoked lease is
+    // refused on the accelerated path exactly as on the software one,
+    // before any plane upload or display-list write.
+    let mut host = host_with(1);
+    host.gate = Some(MockGate {
+        verdict: core::cell::Cell::new(Err(DriverError::SeatRevoked)),
+    });
+    let mut hvs = RpiHvs::open(&host, config(1)).expect("open");
+    let pixels: Vec<u8> = (0..16u8).collect();
+    let layers = [layer(&pixels, 4, 1, 16, 0, 0)];
+    assert_eq!(hvs.present_layers(&layers), Err(DriverError::SeatRevoked));
+    // The refused flip never reached the plane buffer.
+    let mapper = host.mapper.as_ref().expect("mapper");
+    assert_eq!(mapper.byte(PLANE0_PHYS, 0), 0);
+
+    host.gate
+        .as_ref()
+        .expect("gate installed")
+        .verdict
+        .set(Ok(()));
+    hvs.present_layers(&layers).expect("live lease flips");
+    assert_eq!(mapper.byte(PLANE0_PHYS, 1), 1);
 }
 
 #[test]
@@ -310,6 +383,7 @@ fn open_requires_mmio_map_capability() {
         drv_load: true,
         mmio_map: false,
         mapper: Some(MockMapper::new(true)),
+        gate: None,
     };
     assert_eq!(
         RpiHvs::open(&host, config(1)).err(),
@@ -323,6 +397,7 @@ fn open_without_mapper_is_unsupported() {
         drv_load: true,
         mmio_map: true,
         mapper: None,
+        gate: None,
     };
     assert_eq!(
         RpiHvs::open(&host, config(1)).err(),

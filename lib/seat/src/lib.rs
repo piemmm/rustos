@@ -264,6 +264,35 @@ impl SeatState {
         }
     }
 
+    /// Check that `lease` is this seat's **live** grant — the exact
+    /// owner *and* generation minted by the most recent successful
+    /// [`SeatState::acquire`]. This is the present-path check: a display
+    /// driver scans out on behalf of the lease holder only while that
+    /// precise lease is live, so a stale pre-revoke handle can never be
+    /// mistaken for the live one even when its owner later reacquired
+    /// the seat.
+    ///
+    /// # Errors
+    ///
+    /// - [`SeatError::SeatRevoked`] — `lease.owner`'s hold was forcibly
+    ///   revoked and the eviction is still unacknowledged; the distinct
+    ///   refusal is how the evicted holder learns it lost the seat.
+    /// - [`SeatError::NotOwner`] — `lease` is not the live grant for any
+    ///   other reason: the seat is unowned, held by another task, or held
+    ///   by the same owner under a *newer* generation (the presented
+    ///   handle is stale).
+    pub fn verify(&self, lease: Lease) -> Result<(), SeatError> {
+        match self.lease {
+            LeaseState::Held(live) if live == lease => Ok(()),
+            LeaseState::Revoked { evicted } if evicted == lease.owner => {
+                Err(SeatError::SeatRevoked)
+            }
+            LeaseState::Held(_) | LeaseState::Unowned | LeaseState::Revoked { .. } => {
+                Err(SeatError::NotOwner)
+            }
+        }
+    }
+
     /// The task currently holding the seat, if any.
     #[must_use]
     pub fn owner(&self) -> Option<SeatOwner> {
@@ -453,6 +482,50 @@ mod tests {
     fn access_to_an_unowned_seat_is_refused() {
         let seat = SeatState::new(CONSOLE);
         assert_eq!(seat.access(WM), Err(SeatError::NotOwner));
+    }
+
+    #[test]
+    fn verify_accepts_exactly_the_live_lease() {
+        let (seat, lease) = held_seat();
+        assert_eq!(seat.verify(lease), Ok(()));
+        // A forged or mistaken handle naming another owner is refused.
+        let forged = Lease {
+            owner: INTRUDER,
+            generation: lease.generation,
+        };
+        assert_eq!(seat.verify(forged), Err(SeatError::NotOwner));
+    }
+
+    #[test]
+    fn verify_refuses_a_revoked_lease_distinctly() {
+        let (mut seat, lease) = held_seat();
+        seat.revoke().expect("held seat revokes");
+        // The evicted holder's handle observes the distinct refusal.
+        assert_eq!(seat.verify(lease), Err(SeatError::SeatRevoked));
+        // A third party's handle stays a plain non-owner refusal.
+        let other = Lease {
+            owner: INTRUDER,
+            generation: lease.generation,
+        };
+        assert_eq!(seat.verify(other), Err(SeatError::NotOwner));
+    }
+
+    #[test]
+    fn verify_refuses_a_stale_generation_after_reacquire() {
+        let (mut seat, stale) = held_seat();
+        seat.revoke().expect("held seat revokes");
+        let live = seat.acquire(WM).expect("an acquire is a new claim");
+        // The owner reacquired: the pre-revoke handle is dead even though
+        // its owner once again holds the seat.
+        assert_eq!(seat.verify(stale), Err(SeatError::NotOwner));
+        assert_eq!(seat.verify(live), Ok(()));
+    }
+
+    #[test]
+    fn verify_refuses_any_lease_on_an_unowned_seat() {
+        let (mut seat, lease) = held_seat();
+        seat.release(WM).expect("owner releases");
+        assert_eq!(seat.verify(lease), Err(SeatError::NotOwner));
     }
 
     #[test]

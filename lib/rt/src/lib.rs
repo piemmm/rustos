@@ -538,17 +538,21 @@ pub fn key_inject(record: &KeyInput) -> i64 {
 
 /// Acquire ownership of the seat — the display with its keyboard — as an
 /// exclusive, owner-tracked lease (`SyscallNumber::DISPLAY_ACQUIRE`,
-/// `plans/DISPLAY.md`), returning `0` on success or `-errno`.
+/// `plans/DISPLAY.md`), returning the minted lease's generation (`>= 1`)
+/// on success or `-errno`.
 ///
 /// The compositing window manager calls this when it takes over the screen:
 /// the kernel records the calling task as the seat owner, so subsequently
 /// injected key edges are delivered as [`KeyInput`] records the owner
-/// drains with [`keyboard_read`]. A seat held by another task refuses the
+/// drains with [`keyboard_read`], and the returned generation is the
+/// client's lease handle — the display present right is derived from it
+/// (`plans/DISPLAY.md` D4), so a stale pre-revoke handle can never be
+/// mistaken for the live grant. A seat held by another task refuses the
 /// claim (`SeatBusy` — ownership is never displaced) and a repeat acquire
 /// by the holder is refused (`AlreadyExists`). Requires
 /// `CAP_DISPLAY` (owning the seat is privileged).
 #[must_use]
-#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0 on success, else -errno).
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 generation-or-errno encoding (generation >= 1, else -errno).
 pub fn display_acquire() -> i64 {
     // SAFETY: `raw_syscall` is always safe to invoke; the call carries no
     // pointers and the kernel validates `CAP_DISPLAY` before touching state.
@@ -3332,8 +3336,9 @@ mod tests {
 
     #[test]
     fn display_acquire_and_release_marshal_no_arguments() {
-        let (number, args) = capture(0, || {
-            assert_eq!(display_acquire(), 0);
+        // A successful acquire returns the minted lease generation.
+        let (number, args) = capture(1, || {
+            assert_eq!(display_acquire(), 1);
         });
         assert_eq!(number, NUM_DISPLAY_ACQUIRE);
         assert_eq!(args, [0; 6]);

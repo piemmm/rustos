@@ -28,6 +28,35 @@ use crate::Errno;
 /// the service.
 pub const SEATMGR_ENDPOINT: u64 = 0x5354_1001;
 
+/// Seat id of the primary (and, until `plans/DISPLAY.md` D6 lands
+/// multi-seat, only) seat every Tier-1 image hosts. The `seat_switch` /
+/// `seat_revoke` syscalls validate a request's seat id against the live
+/// topology; today that topology is exactly this seat.
+pub const SEAT_PRIMARY: u64 = 0;
+
+/// One granted seat hold, as the client-visible handle: which seat, the
+/// kernel-attested owning task, and the per-seat monotonic generation the
+/// grant was minted under (`display_acquire` returns it).
+///
+/// The generation is what makes the handle *revocation-proof in the right
+/// direction*: after a `seat_revoke`, or a release-and-reacquire, the live
+/// lease carries a newer generation, so a stale pre-revoke handle can
+/// never be mistaken for the live grant. The kernel threads this handle
+/// into a display driver's host as the
+/// [`SeatGate`](crate::driver::display::SeatGate) it derives the present
+/// right from — holding a framebuffer mapping does not imply owning the
+/// screen.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct SeatLease {
+    /// The seat the lease was granted on ([`SEAT_PRIMARY`] today).
+    pub seat_id: u64,
+    /// The kernel-attested task id the seat recorded as its owner.
+    pub owner_task: u64,
+    /// The seat's monotonic grant counter at mint time; starts at 1 and
+    /// never repeats for a given seat.
+    pub generation: u64,
+}
+
 /// Magic number identifying a seat-administration request (`"STA1"`
 /// little-endian).
 pub const SEATMGR_REQUEST_MAGIC: u32 = u32::from_le_bytes(*b"STA1");

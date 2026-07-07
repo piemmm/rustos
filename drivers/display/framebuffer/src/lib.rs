@@ -35,7 +35,7 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
-use rustos_abi::driver::display::{Display, DisplayFormat, DisplayMode};
+use rustos_abi::driver::display::{Display, DisplayFormat, DisplayMode, SeatGate};
 use rustos_abi::driver::mmio::{MmioMapError, WindowError};
 use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost, MmioMapper, RegisterWindow};
 
@@ -131,13 +131,18 @@ impl FramebufferConfig {
 /// the [`Framebuffer`] drops the window, which is the driver's quiesce
 /// step (the kernel reclaims the mapping on unload).
 /// Reloading is simply calling [`Framebuffer::open`] again.
-pub struct Framebuffer {
+///
+/// `'h` borrows the opening [`DriverHost`]: the driver captures the
+/// host's [`SeatGate`], so every present re-checks the presenting
+/// client's live seat lease before touching the surface.
+pub struct Framebuffer<'h> {
     window: RegisterWindow,
     mode: DisplayMode,
     surface_len: usize,
+    seat: Option<&'h dyn SeatGate>,
 }
 
-impl Framebuffer {
+impl<'h> Framebuffer<'h> {
     /// Map the firmware framebuffer described by `config` and bring the
     /// surface online.
     ///
@@ -158,7 +163,7 @@ impl Framebuffer {
     ///
     /// Requires [`CapabilityId::MMIO_MAP`] in addition to the
     /// load-time [`CapabilityId::DRV_LOAD`] [`register`] checked.
-    pub fn open(host: &dyn DriverHost, config: FramebufferConfig) -> Result<Self, DriverError> {
+    pub fn open(host: &'h dyn DriverHost, config: FramebufferConfig) -> Result<Self, DriverError> {
         let surface_len = config.validate()?;
         if !host.has_capability(CapabilityId::MMIO_MAP) {
             return Err(DriverError::PermissionDenied);
@@ -176,6 +181,7 @@ impl Framebuffer {
                 format: config.format,
             },
             surface_len,
+            seat: host.seat_gate(),
         })
     }
 
@@ -206,12 +212,20 @@ impl Framebuffer {
     }
 }
 
-impl Display for Framebuffer {
+impl Display for Framebuffer<'_> {
     fn mode_info(&self) -> Result<DisplayMode, DriverError> {
         Ok(self.mode)
     }
 
     fn present(&mut self, frame: &[u8]) -> Result<(), DriverError> {
+        // The present right is derived from the live seat lease, before any
+        // other validation or surface access: a client whose lease was
+        // revoked cannot scan out even though its mapping persists. A host
+        // with no seat wired (headless, boot bring-up) exposes no gate and
+        // the present proceeds ungated.
+        if let Some(gate) = self.seat {
+            gate.check_present()?;
+        }
         if frame.len() < self.surface_len {
             return Err(DriverError::BufferTooSmall);
         }

@@ -9,6 +9,34 @@
 
 use super::DriverError;
 
+/// The live seat-lease check a display driver applies before scanout.
+///
+/// The present right is *derived from* the live seat lease, not from the
+/// ability to reach the framebuffer: mapping the surface (`CAP_MMIO_MAP`)
+/// and owning the seat (`CAP_DISPLAY`) are separate facts, and this seam
+/// is what couples them. A [`DriverHost`](crate::DriverHost) presenting
+/// on behalf of a client exposes a gate bound to that client's
+/// [`SeatLease`](crate::seat::SeatLease); the driver consults it at the
+/// top of every [`Display::present`] / [`AcceleratedDisplay::present_layers`]
+/// call, so a client whose lease was revoked cannot scan out even though
+/// its framebuffer mapping still exists. The gate holds the lease handle
+/// itself — the driver never sees or supplies it, so it cannot be forged
+/// from the driver side.
+pub trait SeatGate {
+    /// Check that the presenting client's lease is the seat's live one.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::SeatRevoked`] if the client's lease was forcibly
+    ///   revoked — the distinct refusal is how a well-behaved compositor
+    ///   learns it lost the seat rather than scribbling over the new
+    ///   foreground.
+    /// * [`DriverError::PermissionDenied`] if the lease is not the live
+    ///   grant for any other reason (the seat is unowned, held by another
+    ///   task, or the handle is stale).
+    fn check_present(&self) -> Result<(), DriverError>;
+}
+
 /// Pixel encodings supported by the abi-v1 display trait.
 ///
 /// Names follow the byte order of the first pixel in memory; the

@@ -612,7 +612,11 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         name: "display_acquire",
         arg_count: 0,
         args: [AbiType::Unit; SYSCALL_MAX_ARGS],
-        ret: AbiType::Errno,
+        // `U64` for the value-or-`-errno` register convention: a
+        // successful acquire returns the minted lease's generation
+        // (>= 1), the handle the present right is later derived from
+        // (`plans/DISPLAY.md` D4).
+        ret: AbiType::U64,
         // Owning the seat (the display and, with it, the keyboard) is
         // privileged, never ambient: only a session's
         // window manager holds `CAP_DISPLAY`, and the kernel additionally

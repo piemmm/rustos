@@ -165,7 +165,7 @@ uint64_t ros_sys_users_db_read(void * a0, uintptr_t a1);
 uint64_t ros_sys_console_count(void);
 int32_t ros_sys_stream_input_mode(uint32_t a0, uint32_t a1);
 uint64_t ros_sys_key_inject(void * a0, uintptr_t a1);
-int32_t ros_sys_display_acquire(void);
+uint64_t ros_sys_display_acquire(void);
 int32_t ros_sys_display_release(void);
 uint64_t ros_sys_keyboard_read(void * a0, uintptr_t a1);
 uint64_t ros_sys_mmio_map(uint64_t a0, uintptr_t a1, uintptr_t a2);

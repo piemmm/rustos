@@ -10,7 +10,11 @@
 //! `ramfb` from the embedded `virt` DTB and driving the framebuffer
 //! driver through `load -> use -> unload -> reload`, reading the presented
 //! pixels back through the capability-gated [`KernelMmioMapper`] to prove
-//! they reach the scan-out surface QEMU consumes.
+//! they reach the scan-out surface QEMU consumes, and then the
+//! `plans/DISPLAY.md` D4 seat phase: the present right is derived from the
+//! live lease on a real kernel [`SeatRegistry`], so a revoked client's
+//! present is refused (its last frame stays on scan-out) while the new
+//! foreground's fresh lease renders.
 //!
 //! The `fw_cfg`/`ramfb` bring-up is test-harness-specific (it synthesises
 //! the device QEMU scans out), mirroring how the virtio verticals own
@@ -22,8 +26,9 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::ptr;
 
-use rustos_abi::driver::display::{Display, DisplayFormat};
-use rustos_abi::{CapabilityId, DriverHost, DriverKind, Errno, MmioMapper};
+use rustos_abi::driver::display::{Display, DisplayFormat, SeatGate};
+use rustos_abi::seat::{SeatLease, SEAT_PRIMARY};
+use rustos_abi::{CapabilityId, DriverError, DriverHost, DriverKind, Errno, MmioMapper};
 use rustos_caps::CapabilitySet;
 use rustos_crypto::Ed25519PublicKey;
 use rustos_drv_display_framebuffer::{register as fb_register, Framebuffer, FramebufferConfig};
@@ -32,10 +37,13 @@ use rustos_drvhost::{
 };
 use rustos_fdt::Fdt;
 use rustos_fwcfg::{FwCfg, MmioDma, RamfbConfig, DRM_FORMAT_XRGB8888};
+use rustos_kernel_core::console::NULL_CONSOLE_INPUT;
+use rustos_kernel_core::SeatRegistry;
 use rustos_kernel_mem::{AddressSpace, DirectPhysMap, HostPageTable, MmioMap, VirtAddr};
 use rustos_kernel_sec::captable::{TaskCapabilities, TaskId};
 use rustos_kernel_sec::identity::UserId;
 use rustos_kernel_virtio::KernelMmioMapper;
+use rustos_seat::SeatOwner;
 use rustos_test_virtio_qemu_support::{
     bring_up_el1_identity_mmu, define_mmio_boot_harness_aarch64, AArch64QemuEnv, QemuEnv,
 };
@@ -61,10 +69,11 @@ const FB_BYTES: usize = (STRIDE * HEIGHT) as usize;
 /// reached through the identity map, so this only keys the slot bitmap).
 const MMIO_VBASE: u64 = 0x6000_0000;
 /// Capacity in pages of the register-window map: the surface is
-/// `FB_BYTES` (4 pages) and the vertical mints three windows (two driver
-/// loads + one verification), each bracketed by two guard pages, so 32
-/// pages leaves comfortable headroom.
-const MMIO_CAP_PAGES: usize = 32;
+/// `FB_BYTES` (4 pages) and the vertical mints ten windows (two driver
+/// loads + two verifications, then three seat-phase opens + three
+/// verifications), each bracketed by two guard pages, so 96 pages leaves
+/// comfortable headroom.
+const MMIO_CAP_PAGES: usize = 96;
 
 /// Upper bound of the boot identity map exposed to the MMIO mapper (the
 /// bottom 4 GiB); the `virt` board's RAM and the framebuffer surface both
@@ -123,6 +132,9 @@ impl DriverSpawner for ResolveFramebuffer {
 struct FramebufferHost<'a> {
     granted: CapabilitySet,
     mapper: &'a dyn MmioMapper,
+    /// The live seat-lease gate for the client this host presents on
+    /// behalf of; `None` for the seatless bring-up phases.
+    seat: Option<&'a dyn SeatGate>,
 }
 
 impl DriverHost for FramebufferHost<'_> {
@@ -136,6 +148,10 @@ impl DriverHost for FramebufferHost<'_> {
 
     fn mmio_mapper(&self) -> Option<&dyn MmioMapper> {
         Some(self.mapper)
+    }
+
+    fn seat_gate(&self) -> Option<&dyn SeatGate> {
+        self.seat
     }
 }
 
@@ -254,6 +270,7 @@ fn drive_lifecycle(env: &dyn QemuEnv, config: FramebufferConfig) {
     let fb_host = FramebufferHost {
         granted: open_grants,
         mapper: &mapper,
+        seat: None,
     };
 
     // Load the signed `.rxe` through the driver host (the gate).
@@ -310,6 +327,96 @@ fn drive_lifecycle(env: &dyn QemuEnv, config: FramebufferConfig) {
     if host.unload(h2).is_err() || host.loaded_count() != 0 {
         env.fail("driver unload");
     }
+
+    // D4: the present right is derived from the live seat lease.
+    drive_seat_lease(env, &mapper, config);
+}
+
+/// The `plans/DISPLAY.md` D4 seat phase, on a real kernel
+/// [`SeatRegistry`]: client A acquires the seat and presents; an
+/// administrative revoke evicts it, and A's next present is refused with
+/// the distinct `SeatRevoked` *before* the surface is touched (A's last
+/// frame stays on scan-out even though A's mapping persists); client B
+/// then acquires the freed seat under a fresh lease generation and its
+/// present renders. Every failure flips QEMU failure with a breadcrumb.
+fn drive_seat_lease(env: &dyn QemuEnv, mapper: &dyn MmioMapper, config: FramebufferConfig) {
+    static SEAT: SeatRegistry = SeatRegistry::new(&NULL_CONSOLE_INPUT);
+    const CLIENT_A: u64 = 0xA11;
+    const CLIENT_B: u64 = 0xB22;
+
+    let mut open_grants = CapabilitySet::empty();
+    open_grants.insert(CapabilityId::MMIO_MAP);
+
+    // Client A takes the seat and presents its frame.
+    let Ok(lease_a) = SEAT.acquire(SeatOwner(CLIENT_A)) else {
+        env.fail("seat: client A acquire");
+    };
+    let gate_a = SEAT.present_gate(SeatLease {
+        seat_id: SEAT_PRIMARY,
+        owner_task: CLIENT_A,
+        generation: lease_a.generation,
+    });
+    let host_a = FramebufferHost {
+        granted: open_grants,
+        mapper,
+        seat: Some(&gate_a),
+    };
+    let frame_a = make_frame(0x5A);
+    {
+        let Ok(mut fb) = Framebuffer::open(&host_a, config) else {
+            env.fail("seat: open for client A");
+        };
+        if fb.present(&frame_a).is_err() {
+            env.fail("seat: client A present");
+        }
+    }
+    verify_surface(env, mapper, config.phys_base, &frame_a);
+    env.log("framebuffer-qemu: seat owner presented");
+
+    // The administrator revokes A's lease: the very next present is
+    // refused with the distinct error and the scan-out keeps A's frame.
+    if SEAT.revoke() != Ok(SeatOwner(CLIENT_A)) {
+        env.fail("seat: revoke");
+    }
+    {
+        let Ok(mut fb) = Framebuffer::open(&host_a, config) else {
+            env.fail("seat: reopen for revoked client A");
+        };
+        if fb.present(&make_frame(0xEE)) != Err(DriverError::SeatRevoked) {
+            env.fail("seat: revoked present not refused");
+        }
+    }
+    verify_surface(env, mapper, config.phys_base, &frame_a);
+    env.log("framebuffer-qemu: revoked present refused");
+
+    // The new foreground acquires the freed seat and renders.
+    let Ok(lease_b) = SEAT.acquire(SeatOwner(CLIENT_B)) else {
+        env.fail("seat: client B acquire");
+    };
+    if lease_b.generation <= lease_a.generation {
+        env.fail("seat: lease generation not monotonic");
+    }
+    let gate_b = SEAT.present_gate(SeatLease {
+        seat_id: SEAT_PRIMARY,
+        owner_task: CLIENT_B,
+        generation: lease_b.generation,
+    });
+    let host_b = FramebufferHost {
+        granted: open_grants,
+        mapper,
+        seat: Some(&gate_b),
+    };
+    let frame_b = make_frame(0x3C);
+    {
+        let Ok(mut fb) = Framebuffer::open(&host_b, config) else {
+            env.fail("seat: open for client B");
+        };
+        if fb.present(&frame_b).is_err() {
+            env.fail("seat: client B present");
+        }
+    }
+    verify_surface(env, mapper, config.phys_base, &frame_b);
+    env.log("framebuffer-qemu: new foreground rendered");
 }
 
 /// Open the framebuffer through `fb_host`, present `frame`, drop the

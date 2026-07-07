@@ -96,6 +96,13 @@ conversion is needed.
   a pointer the driver synthesises itself (`AGENTS.md` §4).
 - The `Display` / `AcceleratedDisplay` methods are gated by ownership of
   the `DriverHandle` returned from `register`.
+- Both present paths (`present` and `present_layers`) are additionally
+  gated on the presenting client's live seat lease when the host wires
+  one (`DriverHost::seat_gate`, `plans/DISPLAY.md` D4): a revoked
+  client's flip is refused with the distinct `SeatRevoked` before any
+  plane upload or scan-out write, even though its mappings persist. A
+  host with no seat (headless, bring-up) exposes no gate and the present
+  proceeds ungated.
 
 The driver runs in user space; it does **not** request `CAP_DRV_KERNEL`.
 

@@ -42,7 +42,7 @@
 #![deny(missing_docs)]
 
 use rustos_abi::driver::display::{
-    AccelCaps, AccelLayer, AcceleratedDisplay, Display, DisplayMode,
+    AccelCaps, AccelLayer, AcceleratedDisplay, Display, DisplayMode, SeatGate,
 };
 use rustos_abi::driver::mmio::{MmioMapError, WindowError};
 use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost, MmioMapper, RegisterWindow};
@@ -92,7 +92,12 @@ struct PlaneBuffer {
 /// Dropping the [`RpiHvs`] drops every [`RegisterWindow`] it owns, which
 /// is the driver's quiesce step (the kernel reclaims the mappings on
 /// unload). Reloading is calling [`RpiHvs::open`] again.
-pub struct RpiHvs {
+///
+/// `'h` borrows the opening [`DriverHost`]: the driver captures the
+/// host's [`SeatGate`], so every present — the software scan-out copy
+/// and the hardware layer path alike — re-checks the presenting
+/// client's live seat lease before touching the engine.
+pub struct RpiHvs<'h> {
     mode: DisplayMode,
     scanout: RegisterWindow,
     scanout_len: usize,
@@ -102,9 +107,10 @@ pub struct RpiHvs {
     planes: [Option<PlaneBuffer>; MAX_PLANES],
     plane_count: usize,
     present_generation: u32,
+    seat: Option<&'h dyn SeatGate>,
 }
 
-impl RpiHvs {
+impl<'h> RpiHvs<'h> {
     /// Map the HVS regions described by `config` and bring the engine
     /// online.
     ///
@@ -122,7 +128,7 @@ impl RpiHvs {
     ///
     /// Requires [`CapabilityId::MMIO_MAP`] in addition to the load-time
     /// [`CapabilityId::DRV_LOAD`] [`register`] checked.
-    pub fn open(host: &dyn DriverHost, config: HvsConfig) -> Result<Self, DriverError> {
+    pub fn open(host: &'h dyn DriverHost, config: HvsConfig) -> Result<Self, DriverError> {
         config.validate()?;
         if !host.has_capability(CapabilityId::MMIO_MAP) {
             return Err(DriverError::PermissionDenied);
@@ -154,6 +160,7 @@ impl RpiHvs {
             planes,
             plane_count: config.plane_count,
             present_generation: 0,
+            seat: host.seat_gate(),
         })
     }
 
@@ -219,12 +226,20 @@ fn map(mapper: &dyn MmioMapper, phys: u64, len: usize) -> Result<RegisterWindow,
         .map_err(MmioMapError::as_driver_error)
 }
 
-impl Display for RpiHvs {
+impl Display for RpiHvs<'_> {
     fn mode_info(&self) -> Result<DisplayMode, DriverError> {
         Ok(self.mode)
     }
 
     fn present(&mut self, frame: &[u8]) -> Result<(), DriverError> {
+        // The present right is derived from the live seat lease, before any
+        // other validation or engine access: a client whose lease was
+        // revoked cannot scan out even though its mappings persist. A host
+        // with no seat wired (headless, boot bring-up) exposes no gate and
+        // the present proceeds ungated.
+        if let Some(gate) = self.seat {
+            gate.check_present()?;
+        }
         if frame.len() < self.scanout_len {
             return Err(DriverError::BufferTooSmall);
         }
@@ -232,7 +247,7 @@ impl Display for RpiHvs {
     }
 }
 
-impl AcceleratedDisplay for RpiHvs {
+impl AcceleratedDisplay for RpiHvs<'_> {
     fn accel_caps(&self) -> Result<AccelCaps, DriverError> {
         Ok(AccelCaps {
             max_layers: u32::try_from(self.plane_count).unwrap_or(u32::MAX),
@@ -243,6 +258,11 @@ impl AcceleratedDisplay for RpiHvs {
     }
 
     fn present_layers(&mut self, layers: &[AccelLayer<'_>]) -> Result<(), DriverError> {
+        // Same lease check as the software path: the hardware layer engine
+        // is scanout too, so it is never a bypass around the seat gate.
+        if let Some(gate) = self.seat {
+            gate.check_present()?;
+        }
         if layers.len() > self.plane_count {
             return Err(DriverError::LengthOutOfRange);
         }

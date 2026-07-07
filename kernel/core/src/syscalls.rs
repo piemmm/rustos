@@ -2606,10 +2606,15 @@ where
         // by another task refuses the claim (`SeatBusy`) rather than
         // displacing the holder — ownership is exclusive even between two
         // principals that both hold the capability (`plans/DISPLAY.md` D2).
-        self.seat_registry
+        // The minted lease's generation (>= 1) is returned so the client
+        // holds the handle its present right is later derived from
+        // (`plans/DISPLAY.md` D4); a stale pre-revoke handle can then never
+        // be mistaken for the live grant.
+        let lease = self
+            .seat_registry
             .acquire(SeatOwner(caller.task_id.0))
             .map_err(seat_errno)?;
-        Ok(0)
+        Ok(lease.generation)
     }
 
     fn display_release(&self, caller: &CallerContext<'_>) -> SyscallResult {
@@ -10821,7 +10826,9 @@ mod tests {
             Err(Errno::SeatNotOwner)
         );
 
-        assert_eq!(h.display_acquire(&ctx), Ok(0));
+        // The acquire returns the minted lease generation (the first grant
+        // on a fresh seat is generation 1).
+        assert_eq!(h.display_acquire(&ctx), Ok(1));
         assert_eq!(
             h.key_inject(&ctx, 0x1000, KeyInput::WIRE_LEN),
             Ok(KeyInput::WIRE_LEN as u64)
@@ -10893,9 +10900,9 @@ mod tests {
         )
         .with_seat_registry(seat);
 
-        // The window manager takes the seat; a repeat claim is a surfaced
-        // caller bug, not a silent success.
-        assert_eq!(h.display_acquire(&wm), Ok(0));
+        // The window manager takes the seat (lease generation 1); a repeat
+        // claim is a surfaced caller bug, not a silent success.
+        assert_eq!(h.display_acquire(&wm), Ok(1));
         assert_eq!(h.display_acquire(&wm), Err(Errno::AlreadyExists));
 
         // A second task can neither steal nor release the held seat, and
@@ -10918,9 +10925,10 @@ mod tests {
             Ok(KeyInput::WIRE_LEN as u64)
         );
 
-        // Only the owner's release frees the seat for the next claimant.
+        // Only the owner's release frees the seat for the next claimant,
+        // whose grant is a fresh lease generation.
         assert_eq!(h.display_release(&wm), Ok(0));
-        assert_eq!(h.display_acquire(&intruder), Ok(0));
+        assert_eq!(h.display_acquire(&intruder), Ok(2));
     }
 
     /// `seat_switch` validates the seat id and the target console against
@@ -11018,7 +11026,7 @@ mod tests {
         assert_eq!(h.seat_revoke(&admin, 0), Err(Errno::SeatNotOwner));
 
         // The window manager holds the seat; the admin evicts it.
-        assert_eq!(h.display_acquire(&wm), Ok(0));
+        assert_eq!(h.display_acquire(&wm), Ok(1));
         assert_eq!(h.seat_revoke(&admin, 0), Ok(0));
         assert_eq!(seat.owner(), None);
 
@@ -11048,8 +11056,9 @@ mod tests {
         assert_eq!(h.display_release(&wm), Err(Errno::SeatRevoked));
         assert_eq!(h.display_release(&wm), Err(Errno::SeatNotOwner));
 
-        // The seat is acquirable again after the revoke.
-        assert_eq!(h.display_acquire(&wm), Ok(0));
+        // The seat is acquirable again after the revoke, under a fresh
+        // lease generation the stale pre-revoke handle can never match.
+        assert_eq!(h.display_acquire(&wm), Ok(2));
     }
 
     /// The `Seats` introspection domain reports the live seat: id, owner,

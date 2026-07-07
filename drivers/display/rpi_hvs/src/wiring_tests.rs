@@ -68,6 +68,7 @@ fn open_discovered_requires_the_mmio_capability() {
         drv_load: true,
         mmio_map: false,
         mapper: Some(mailbox_mapper()),
+        gate: None,
     };
     assert_eq!(
         open_discovered(&host, &wiring_at(BUFFER_PHYS), &request(), &regions()).err(),
@@ -81,6 +82,7 @@ fn open_discovered_requires_a_mapper() {
         drv_load: true,
         mmio_map: true,
         mapper: None,
+        gate: None,
     };
     assert_eq!(
         open_discovered(&host, &wiring_at(BUFFER_PHYS), &request(), &regions()).err(),
@@ -100,6 +102,7 @@ fn open_discovered_rejects_a_buffer_outside_the_aperture() {
         drv_load: true,
         mmio_map: true,
         mapper: Some(mapper),
+        gate: None,
     };
     assert_eq!(
         open_discovered(&host, &wiring_at(OUT_OF_APERTURE), &request(), &regions()).err(),
@@ -116,6 +119,7 @@ fn open_discovered_stages_rings_and_times_out_on_a_silent_firmware() {
         drv_load: true,
         mmio_map: true,
         mapper: Some(mailbox_mapper()),
+        gate: None,
     };
     assert_eq!(
         open_discovered(&host, &wiring_at(BUFFER_PHYS), &request(), &regions()).err(),
@@ -178,6 +182,7 @@ fn discovered_config_opens_the_hvs_driver() {
         drv_load: true,
         mmio_map: true,
         mapper: Some(mapper),
+        gate: None,
     };
 
     let mut planes = [PlaneConfig {

@@ -20,6 +20,23 @@ Pixel encodings are `DisplayFormat::Rgba8888` and
 trait never panics: a frame shorter than `stride_bytes * height_px`
 maps to `DriverError::BufferTooSmall`.
 
+### The present right follows the live seat lease
+
+Every present/flip path is additionally gated on the presenting
+client's *current* seat lease (`plans/DISPLAY.md` D4): at `open` a
+driver captures its host's `DriverHost::seat_gate()` — a
+`rustos_abi::driver::display::SeatGate` the kernel bound to the
+client's `SeatLease` — and consults it at the **top** of `present` (and
+`present_layers`), before any validation or surface access. A client
+whose lease was revoked is refused with the distinct
+`DriverError::SeatRevoked` even though its framebuffer mapping
+(`CAP_MMIO_MAP`) still exists; any other dead handle is
+`DriverError::PermissionDenied`, and the refused frame never touches
+scan-out. A host with no seat wired (headless, boot bring-up, unit
+seams) exposes no gate and the present proceeds ungated — there is no
+lease to derive the right from. See
+[the seat model](../desktop/seat.md) for the ownership side.
+
 ### Optional hardware acceleration
 
 A driver whose hardware can composite a stack of planes itself also

@@ -273,16 +273,36 @@ identity), the introspection paging contract, and the manifest/AppInfo
 pins. `docs/src/desktop/seat.md`, `docs/src/userland/seatmgr.md`, and the
 kernel/sysinfod pages state the enforced behaviour.
 
-### Stage D4 — present right derived from the live lease `[ ]`
+### Stage D4 — present right derived from the live lease `[x]`
 
-**Deliverables**
-- The display driver's present/flip path (`drivers/display/*`) gates on the
-  caller's *current* seat lease (threaded through `DriverHost` as a `lib/abi`
-  seat handle), so a revoked client cannot scanout though its framebuffer
-  mapping persists. Arch-neutral; no board names (§2.20).
+**Done.** The present right is derived from the live seat lease, not from
+the framebuffer mapping:
 
-**Done when:** a QEMU display vertical proves a revoked client's present is
-refused while the new foreground renders; gate green.
+- `display_acquire` returns the minted lease's generation (`>= 1`), so the
+  client holds the `lib/abi` handle (`rustos_abi::seat::SeatLease`:
+  seat id + owner task + generation; `SEAT_PRIMARY` names the one seat).
+- The check has one definition, `rustos_seat::SeatState::verify` (exact
+  live owner-and-generation; the evicted owner's handle sees the distinct
+  `SeatRevoked`, every other dead handle `NotOwner`), hosted kernel-side
+  as `SeatRegistry::present_gate` — a `PresentGate` bound to one client's
+  lease that re-reads the live lease under the registry lock on every
+  call.
+- The gate reaches a driver as the host seam
+  `DriverHost::seat_gate() -> Option<&dyn SeatGate>` (default `None`; a
+  seatless headless/bring-up host presents ungated, §17.3). All three
+  display drivers (`framebuffer`, `vesa`, `rpi_hvs` — software `present`
+  and hardware `present_layers` alike) consult it *first*, before any
+  validation or surface access; a revoked client is refused with the new
+  `DriverError::SeatRevoked` (14, → `Errno::SeatRevoked`) while its
+  mapping persists. Arch-neutral; no board names in the gate.
+- Proven by driver unit tests (refused present leaves the surface
+  untouched, both hvs paths gated) and the aarch64 framebuffer QEMU
+  vertical's seat phase on a real `SeatRegistry`: owner presents → revoke
+  → evicted present refused with the surface intact → new foreground's
+  fresh lease renders (generation monotonicity asserted).
+
+Docs: `docs/src/desktop/seat.md`, `docs/src/drivers/display.md`, driver
+READMEs, syscall table row 23 (`u64` lease generation).
 
 ### Stage D5 — per-console controlling owner + foreground handoff `[ ]`
 

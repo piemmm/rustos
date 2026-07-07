@@ -552,6 +552,7 @@ pub static UART_ONLY_CONSOLES: [rustos_kernel_core::ConsoleDevice; 1] =
 /// discipline sees every byte at arrival time (`plans/SPAWN.md` SP9): a
 /// `^C`/`^Z` typed while a foreground job runs is delivered as a signal
 /// even though no task is reading.
+#[must_use]
 pub fn uart_console_device() -> &'static rustos_kernel_core::ConsoleDevice {
     &UART_ONLY_CONSOLES[0]
 }

@@ -471,21 +471,28 @@ pub extern "C" fn sys_key_inject(buf: *mut c_void, len: usize) -> u64 {
 
 /// `display_acquire`: acquire ownership of the seat — the display with its
 /// keyboard — as an exclusive, owner-tracked lease
-/// (`SyscallNumber::DISPLAY_ACQUIRE`, `plans/DISPLAY.md`). Returns a `ROS_E_*` code (`0` on success).
+/// (`SyscallNumber::DISPLAY_ACQUIRE`, `plans/DISPLAY.md`). Returns the
+/// minted lease's generation (`>= 1`) when non-negative, else a negative
+/// `ROS_E_*` code.
 ///
 /// The compositing window manager calls this when it takes over the screen:
 /// the kernel records the calling task as the seat owner, so injected key
 /// edges are delivered as records the owner drains with
-/// [`sys_keyboard_read`]. A seat held by another task refuses the claim
+/// [`sys_keyboard_read`], and the returned generation is the client's
+/// lease handle — the present right is derived from it, so a stale
+/// pre-revoke handle can never be mistaken for the live grant
+/// (`plans/DISPLAY.md` D4). A seat held by another task refuses the claim
 /// (`ROS_E_SEAT_BUSY` — ownership is never displaced) and a repeat acquire
 /// by the holder is refused (`ROS_E_ALREADY_EXISTS`). Gated kernel-side on
 /// `ROS_CAP_DISPLAY` (owning the seat is privileged).
 #[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 generation-or-errno encoding (generation >= 1, else -errno).
 #[export_name = "ros_sys_display_acquire"]
-pub extern "C" fn sys_display_acquire() -> i32 {
+pub extern "C" fn sys_display_acquire() -> i64 {
     // SAFETY: see `sys_yield`. The call carries no pointers; the kernel
     // validates `CAP_DISPLAY` before touching any state.
-    unsafe { ret_i32(raw_syscall(NUM_DISPLAY_ACQUIRE, NO_ARGS)) }
+    let ret = unsafe { raw_syscall(NUM_DISPLAY_ACQUIRE, NO_ARGS) };
+    ret as i64
 }
 
 /// `display_release`: release the seat and return keyboard input to
@@ -2132,8 +2139,9 @@ mod tests {
 
     #[test]
     fn display_acquire_and_release_marshal_no_arguments() {
-        let (number, args) = capture(0, || {
-            assert_eq!(sys_display_acquire(), 0);
+        // A successful acquire returns the minted lease generation.
+        let (number, args) = capture(1, || {
+            assert_eq!(sys_display_acquire(), 1);
         });
         assert_eq!(number, NUM_DISPLAY_ACQUIRE);
         assert_eq!(args, NO_ARGS);
