@@ -22,7 +22,7 @@ Per-architecture state of features whose support varies by target. Legend:
 `✓` implemented · `◐` in progress · `▢` planned · `—` not applicable.
 Architecture-neutral subsystems (kernel core, scheduler, IPC, capabilities,
 filesystems, userland, desktop) are tracked in [`PLAN.md`](./PLAN.md) and,
-for filesystems, the block below.
+for filesystems, the feature section below.
 
 | Feature | x86_64 | aarch64 | riscv64 | wasm32 |
 | --- | :-: | :-: | :-: | :-: |
@@ -50,14 +50,57 @@ for filesystems, the block below.
 Networking is the virtio-net link-layer driver plus a test ARP/ICMP-echo
 responder only; there is no IP stack (TCP/UDP/IPv4 routing) yet, hence `◐`.
 
-Filesystems are architecture-neutral — one crate runs on every bare-metal
-target (wasm32 has no block device), so per-target ticks add nothing:
+## Filesystem feature support
 
-| Filesystem | State |
-| --- | :-: |
-| ext4 | ✓ read/write |
-| FAT32 | ✓ read/write |
-| RustFS (native) | ✓ |
+This table compares the RustFS *design as implemented* against what each
+foreign filesystem itself provides — the on-disk format and its canonical
+implementation (Linux for ext4/btrfs/XFS/bcachefs, the VFAT spec for FAT32,
+RISC OS for ADFS, OpenZFS for the ZFS layer) — **not** against RustOS's
+interoperability drivers. The `ext4 on ZFS` column is ext4 on a ZFS zvol:
+the pool supplies block-level services underneath ext4 semantics, marked
+`(ZFS)` where the service is block-level and unaware of file structure.
+Legend: `✓` provided (optional features count) · `◐` partial ·
+`▢` recognised future stage · `—` not provided.
+
+| Feature | RustFS | ext4 | FAT32 | btrfs | XFS | bcachefs | ADFS | ext4 on ZFS |
+| --- | :-: | :-: | :-: | :-: | :-: | :-: | :-: | :-: |
+| RustOS driver | ✓ native | ✓ read/write | ✓ read/write | — | — | — | — | — |
+| Long file names (255 bytes) | ✓ | ✓ | ✓ VFAT | ✓ | ✓ | ✓ | ✓ E+/F+ | ✓ |
+| POSIX owner / mode / ACL | ✓ | ✓ | — | ✓ | ✓ | ✓ | — | ✓ |
+| Per-inode capability gate | ✓ | — | — | — | — | — | — | — |
+| 64-bit ns timestamps (pre-1970 / post-2038) | ✓ | ✓ | — | ✓ | ✓ | ✓ | — | ✓ |
+| Encryption at rest | ✓ always-on | ✓ fscrypt | — | — | — | ✓ | — | ✓ (ZFS) |
+| Checksummed metadata | ✓ keyed + mirrored | ✓ | — | ✓ | ✓ | ✓ | — | ✓ (ZFS) |
+| Data checksums | ✓ | — | — | ✓ | — | ✓ | — | ✓ (ZFS) |
+| Metadata self-heal (redundant copies) | ✓ | — | — | ✓ DUP | — | ✓ | — | ✓ (ZFS) |
+| Data self-heal (redundancy) | ▢ | — | — | ✓ RAID | — | ✓ replicas | — | ✓ (ZFS, with redundancy) |
+| Transparent compression | ✓ | — | — | ✓ | — | ✓ | — | ✓ (ZFS) |
+| Deduplication | ✓ inline | — | — | ✓ offline | ✓ offline | — | — | ✓ (ZFS, inline) |
+| Reflink / COW file clones | ✓ | — | — | ✓ | ✓ | ✓ | — | — |
+| Snapshots | — | — | — | ✓ | — | ✓ | — | ✓ (ZFS, zvol) |
+| Sparse files (holes) | ✓ | ✓ | — | ✓ | ✓ | ✓ | — | ✓ |
+| Crash consistency | ✓ COW | ✓ journal | — | ✓ COW | ✓ journal | ✓ COW | — | ✓ journal + COW |
+| Multi-device / RAID | — | — | — | ✓ | — | ✓ | — | ✓ (ZFS pool) |
+| Online scrub | ✓ verify + metadata repair | — | — | ✓ | ✓ | ✓ | — | ✓ (ZFS) |
+| Offline check / repair | ✓ + rescue | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ |
+| TRIM / discard | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ |
+| Online grow | ✓ | ✓ | — | ✓ | ✓ | ✓ | — | ✓ |
+| Device-health monitoring → triggered scrub | ✓ | — | — | — | — | — | — | ◐ ZED |
+
+RustOS ships drivers for RustFS (native) and for ext4 and FAT32 as
+interoperability drivers for foreign volumes: ext4 maintains every on-disk
+checksum it mounts (`metadata_csum`, `gdt_csum`, `64bit`) and fails closed to
+read-only on feature sets outside its write allow-list; FAT32 has no on-disk
+security metadata (ownership and permissions live in the VFS layer). The
+drivers' declared-limit timestamp surface is staged per `AGENTS.md` §21.
+btrfs, XFS, bcachefs, ADFS, and ZFS have no RustOS driver and appear only for
+comparison — including what RustFS does *not* do: snapshots, multi-device
+pooling/RAID, and self-healing of *data* (RustFS today detects and classifies
+bad data blocks through its three-layer integrity pipeline but repairs only
+its mirrored metadata; data reconstruction is a recognised later stage).
+Per-driver detail lives in each crate's `README.md` under
+[`drivers/filesystem/`](./drivers/filesystem) and the
+[`docs/src/filesystem/`](./docs/src/filesystem) book pages.
 
 ## Security & attack-vector prevention
 
