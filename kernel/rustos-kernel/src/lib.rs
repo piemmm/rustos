@@ -224,6 +224,15 @@ pub mod app_store;
 // every instruction set.
 pub mod kernel_fs;
 
+// The RustFS transform cache (`plans/SMARTRAM.md` SMART3): the production
+// implementation of the driver's `ClusterCache` seam, retaining verified,
+// decrypted, decompressed cluster plaintext under the `kernel/mem::reclaim`
+// classification/budget model and the SMART2 pressure bands. Each mounted
+// volume installs one at registration (`system_mount`, the aarch64 unlock
+// path). Architecture-neutral (rustfs + kernel/mem seams only), so its unit
+// and end-to-end tests run on the CI host.
+pub mod transform_cache;
+
 // The boot-time install of the read-only `/System` volume as the userland
 // `fs_*` filesystem mount (`PREREQUISITES.md` P-A): the type-erased
 // `KernelFs` mount driver, the `LATE_FILESYSTEM` / `FS_SERVICE` statics the

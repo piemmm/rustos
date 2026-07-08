@@ -4244,9 +4244,37 @@ rebuildable filesystem cache (`plans/SMARTRAM.md` SMART1 + §6.1):**
   evicted buffers zeroed), and admission is refused outside normal
   pressure — the driver always keeps serving.
 
-**Remaining (staged, `plans/SMARTRAM.md` §12):** transform caches
-(SMART3 remainder), semantic app/runtime caches (SMART4), and
-observability (SMART9) — each gated on the subsystems it consumes.
+**Done — SMART3 filesystem metadata and transformation caches
+(`plans/SMARTRAM.md` SMART3 + §6.2; `docs/src/architecture/memory.md`
+§7i):**
+- The metadata cache is the SMART1 `CachedFs` (already live on every
+  registered volume); extended-attribute/type-detection caching is
+  deliberately not built — the mounted kernel filesystem surface
+  (`KernelFs`) has no attribute or type-detection consumer today, and
+  the stage is scoped to current consumers.
+- The RustFS transform cache: the driver exposes an injected
+  `ClusterCache` seam (`drivers/filesystem/rustfs`'s `xform` module —
+  keyed by the stored run's first physical block, consulted only in the
+  serving read path, never by scrub/check/rescue; invalidation funnels
+  through the single block-free choke point, rollback purges, a
+  zero-progress entry fails the read closed) and the kernel implements
+  it (`rustos_kernel::transform_cache::TransformClusterCache`):
+  classified through the SMART1 gate as `TransformCache` owned by the
+  volume's mount handle, LRU-bounded with hysteresis under a
+  1/16-of-heap `CacheBudget`, pressure-enforced per operation
+  (preserved at mild, drained from moderate before any `ramzip`
+  handoff, growth only at normal outside the reserve), volatilely
+  wiping every released buffer. Installed on both boot volumes
+  (`system_mount` for `/System`, the aarch64 unlock path for the
+  writable root). The driver also wipes its transient decrypted
+  frame/plaintext scratch on every cluster read, clone, and decompose
+  path.
+
+**Remaining (staged, `plans/SMARTRAM.md` §12):** the non-RustFS
+transform families (verified bundle/manifest state — SMART3/SMART4
+overlap gated on their consumers), semantic app/runtime caches
+(SMART4), and observability (SMART9) — each gated on the subsystems it
+consumes.
 UI caches (SMART5) and the reliability/background/predictive caches
 (SMART6–8) are **shelved — not added**; they are built only if a
 future decision explicitly un-shelves them.

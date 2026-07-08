@@ -804,10 +804,12 @@ canonical source — is classed, bounded, and accounted
   unclassifiable, or uninvalidatable memory exists in the model.
 - **Budgets with hysteresis.** A `CacheBudget` is derived from the
   backing resource's size (`CacheBudget::from_backing` — 1/16 of the
-  kernel heap arena per volume cache, so the boot volumes together stay
-  under 1/8 of the heap and cache growth can never exhaust the heap).
-  Growth runs to the *hard* limit; a forced shrink evicts down to the
-  *low* watermark (3/4 of hard), never both on one threshold.
+  kernel heap arena per cache; each boot volume carries two, the clean
+  filesystem cache and the transform cache, so the boot volumes' four
+  caches together stay at or under 1/4 of the heap and cache growth can
+  never exhaust it). Growth runs to the *hard* limit; a forced shrink
+  evicts down to the *low* watermark (3/4 of hard), never both on one
+  threshold.
 - **Fail-closed accounting.** `CacheAccounting` keeps per-class byte
   ledgers with checked arithmetic (typed `AccountingError` on
   overflow/underflow, never wrapping) plus saturating hit/miss/
@@ -889,11 +891,64 @@ normal, mild, moderate, severe, critical — is shared with
   any remain, then hand off to `ramzip` (moderate/severe), then the VM
   pressure policy (critical). These are the seams the SWAP3 stage binds
   to when the `ramzip` store lands.
-- **The consumer.** `CachedFs` (§7g) samples the gauge at the head of
-  every cache-touching operation: the band's forced-shrink targets are
-  applied (data before metadata, every evicted buffer zeroed) before
-  the cache is read, and admission is refused outside normal pressure —
-  the volume is always still served straight from the driver.
+- **The consumers.** `CachedFs` (§7g) and the transform cache (§7i)
+  sample the gauge at the head of every cache-touching operation: the
+  band's forced-shrink targets are applied (data before metadata, every
+  evicted buffer zeroed) before the cache is read, and admission is
+  refused outside normal pressure — the volume is always still served
+  straight from the driver.
+
+## 7i. The RustFS transform cache (SMART3)
+
+The transformation cache (`plans/SMARTRAM.md` SMART3, section 6.2)
+retains the expensive intermediate form RustFS produces on every read of
+a compressed cluster: the verified, decrypted, decompressed cluster
+plaintext. Without it, each read that touches a compressed cluster pays
+the full pipeline — a device read, an AEAD decrypt, and integrity checks
+per stored block, then a whole-frame decompression — once per *call*;
+with it, once per *cluster*.
+
+- **A driver seam, a kernel implementation.** The RustFS driver stays
+  kernel-independent: it exposes the `ClusterCache` trait
+  (`rustos_drv_fs_rustfs::ClusterCache`) and consults an injected
+  implementation only in its serving read path. The production
+  implementation is `rustos_kernel::transform_cache::TransformClusterCache`,
+  installed by the boot path on both mounted volumes (`system_mount`
+  for the read-only `/System` volume, the unlock path for the writable
+  root) via `RustFs::with_cluster_cache`. A volume without a cache
+  behaves exactly as before, and the integrity passes (scrub, check,
+  rescue) never consult it — they exist to verify the on-disk bytes.
+- **Complementary to `CachedFs`, not duplicate.** `CachedFs` (§7g)
+  retains page chunks of *served* plaintext for small reads; the
+  transform cache sits below the driver's read path and covers what
+  `CachedFs` cannot: the large sequential reads (bundle and
+  driver-store loads) that bypass `CachedFs` by design, and `CachedFs`
+  misses — both of which otherwise re-run the whole transform per call.
+- **Classified, budgeted, pressure-governed.** The cache declares a
+  `CacheCandidate` (class `TransformCache`, owned by the volume's
+  stable per-boot mount handle, expensive to rebuild, decrypted user
+  data, source-mutation invalidated, droppable) through the §7g
+  admission gate — a refusal poisons it from birth and the driver keeps
+  serving. Entries are LRU-evicted against a `CacheBudget`, admission
+  obeys `growth_permitted`, and every operation first applies the
+  band's `shrink_target`: the class is preserved at mild pressure and
+  drained to zero from moderate on, before `ramzip` is handed anything
+  (§7h).
+- **Coherent by construction.** Entries are keyed by the cluster's
+  first stored physical block and carry the run length. Every block
+  free in the driver funnels through one choke point, which invalidates
+  the covering entry *before* the block can be recycled; a transaction
+  rollback (whose frees bypass that choke point) purges the whole cache;
+  a defective entry that would stall the read loop fails the read closed
+  (`DeviceFault`) instead. Reflink-shared clusters are only invalidated
+  when their stored run is actually freed — a surviving referrer keeps
+  the (still identical) plaintext.
+- **Secret hygiene.** The plaintext is decrypted user data from an
+  encrypted-at-rest volume: every buffer is volatilely wiped
+  (`zeroize`) when its entry is invalidated, evicted, replaced, purged,
+  or torn down, and the driver wipes its own transient frame and
+  plaintext scratch on every path of the cluster read, clone, and
+  decompose routines.
 
 ## 8. Testing strategy
 

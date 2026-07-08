@@ -44,6 +44,7 @@
 
 extern crate alloc;
 
+use alloc::boxed::Box;
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
@@ -73,6 +74,7 @@ mod scrub;
 mod superblock;
 mod transaction;
 mod unlock;
+mod xform;
 
 #[cfg(test)]
 mod tests;
@@ -93,6 +95,7 @@ pub use unlock::{
     UnlockDescriptor, ROOT_UNLOCK_NAME, SYSTEM_VOLUME_KEY, UNLOCK_DEFAULT_ITERATIONS,
     UNLOCK_DESCRIPTOR_LEN, UNLOCK_MAX_ITERATIONS, UNLOCK_MIN_ITERATIONS, UNLOCK_SALT_LEN,
 };
+pub use xform::{ClusterCache, MAX_CLUSTER_PLAINTEXT};
 
 use dedupe::{
     chunk_spec, dedupe_key, reverse_ref_spec, ChunkRecord, DedupeCandidate, DedupeIndex,
@@ -605,6 +608,13 @@ pub struct RustFs<B: Block> {
     /// [`RustFs::rescue`] sets it: rescue is read-only on the damaged volume by
     /// default (`docs/src/filesystem/rustfs-spec.md` §12).
     read_only: bool,
+    /// Host-injected retention of decompressed cluster plaintext
+    /// ([`ClusterCache`], `plans/SMARTRAM.md` SMART3), or `None` for a
+    /// volume that serves every read through the full transform
+    /// pipeline. Installed by [`RustFs::with_cluster_cache`];
+    /// invalidated by [`RustFs::free_block`] and purged by
+    /// [`RustFs::rollback`], so it can never serve a stale cluster.
+    cluster_cache: Option<Box<dyn ClusterCache>>,
 }
 
 /// Value width of one extent record: physical start block, logical run
@@ -756,6 +766,21 @@ impl<B: Block> RustFs<B> {
             self.rollback();
         }
         result
+    }
+
+    /// Install a host-provided transform cache retaining decompressed
+    /// cluster plaintext between reads (`plans/SMARTRAM.md` SMART3).
+    ///
+    /// The cache spares the serving read path a repeated
+    /// verify/decrypt/decompress of a cluster it already produced; every
+    /// classification, budget, pressure, and zeroisation decision lives
+    /// in the injected implementation ([`ClusterCache`]). Without one,
+    /// the volume behaves exactly as before. Install at mount time,
+    /// before the volume serves reads.
+    #[must_use]
+    pub fn with_cluster_cache(mut self, cache: Box<dyn ClusterCache>) -> Self {
+        self.cluster_cache = Some(cache);
+        self
     }
 
     /// Install a freshly derived or unwrapped key set as the volume's working
@@ -973,6 +998,12 @@ impl<B: Block> RustFs<B> {
         if phys == 0 {
             return;
         }
+        // The block's bytes are about to leave the committed tree: any
+        // cluster plaintext derived from a run covering it must go now,
+        // before the block can be reallocated and rewritten.
+        if let Some(cache) = self.cluster_cache.as_mut() {
+            cache.invalidate(phys);
+        }
         if self.is_txn_private(phys) {
             self.mark_free(phys);
             self.txn_private.remove(&phys);
@@ -1103,6 +1134,12 @@ impl<B: Block> RustFs<B> {
             self.txn_private.remove(&block);
         }
         self.txn_freed.clear();
+        // The freed allocations bypassed `free_block`, so no per-block
+        // invalidation ran: drop everything rather than risk a stale
+        // cluster over a recycled run (fail closed).
+        if let Some(cache) = self.cluster_cache.as_mut() {
+            cache.purge();
+        }
     }
 
     /// Apply a committed transaction's deferred frees and clear the private
@@ -1254,6 +1291,7 @@ impl<B: Block> RustFs<B> {
             meta_cursor: total_blocks - 1,
             clock: epoch_clock,
             read_only: false,
+            cluster_cache: None,
         };
         for block in 0..RING_BLOCKS {
             fs.mark_used(block);
@@ -2539,13 +2577,42 @@ impl<B: Block> RustFs<B> {
             let within = as_usize(pos % cap);
             match self.extent_lookup(inode, bi)? {
                 // A compressed cluster serves everything it covers from one
-                // bounded decompression.
+                // bounded decompression — or, when the host installed a
+                // transform cache, from the plaintext retained the last
+                // time this cluster was decompressed.
                 Some((start, ext)) if ext.compressed => {
-                    let plain = self.read_data_cluster(&ext)?;
                     let cluster_off = as_usize(bi - start) * as_usize(cap) + within;
-                    let chunk = (plain.len() - cluster_off).min(as_usize(end - pos));
-                    out[done..done + chunk]
-                        .copy_from_slice(&plain[cluster_off..cluster_off + chunk]);
+                    let want = as_usize(end - pos);
+                    let mut chunk = None;
+                    if let Some(cache) = self.cluster_cache.as_mut() {
+                        if let Some(plain) = cache.get(ext.phys) {
+                            chunk = Some(xform::copy_from_cluster(
+                                plain,
+                                cluster_off,
+                                &mut out[done..],
+                                want,
+                            ));
+                        }
+                    }
+                    let chunk = if let Some(chunk) = chunk {
+                        chunk
+                    } else {
+                        let plain = self.read_data_cluster(&ext)?;
+                        let chunk =
+                            xform::copy_from_cluster(&plain, cluster_off, &mut out[done..], want);
+                        if let Some(cache) = self.cluster_cache.as_mut() {
+                            cache.put(ext.phys, ext.stored, &plain);
+                        }
+                        xform::scrub(plain);
+                        chunk
+                    };
+                    if chunk == 0 {
+                        // The cluster's plaintext must cover this offset
+                        // (`pos < end <= size` inside the extent), so a
+                        // zero-byte copy means a wrong-sized entry: fail
+                        // closed rather than loop without progress.
+                        return Err(DriverError::DeviceFault);
+                    }
                     done += chunk;
                     pos += chunk as u64;
                 }

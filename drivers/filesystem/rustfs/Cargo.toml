@@ -29,6 +29,11 @@ rustos-fsmeta = { path = "../../../lib/fsmeta", version = "=0.0.0" }
 # online scrub reports (`docs/src/filesystem/rustfs-spec.md` §12; `AGENTS.md`
 # §5.4 — log security decisions with a stable event ID; §19.4).
 rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+# Volatile wiping of decrypted scratch and transform-cache plaintext before
+# the buffers return to the heap (`plans/SMARTRAM.md` §6.2): a plain zeroing
+# loop over a dying buffer can be optimised away, so the wipe routes through
+# the same audited crate the kernel caches use.
+zeroize = { version = "1.8.1", default-features = false }
 
 [lints]
 workspace = true

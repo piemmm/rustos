@@ -81,6 +81,7 @@ use rustos_partition::{parse_partition_table, PartitionBlock, PartitionType};
 
 use crate::root_mount::LATE_IDENTITY;
 use crate::shared_block::DriverStoreService;
+use crate::transform_cache::TransformClusterCache;
 
 pub use crate::kernel_fs::KernelFs;
 
@@ -137,8 +138,9 @@ const SYSTEM_MOUNT_HANDLE: u64 = 0x5959_5359; // "YYSY"
 /// volume. The driver is registered by [`register_writable_state`] after the
 /// encrypted root is unlocked; until then `/` and its writable subtrees
 /// resolve to no driver and every write/read fails closed (`NotImplemented`),
-/// never a silent fallback to the read-only `/System`.
-const ROOT_VOLUME_HANDLE: u64 = 0x524F_4F54; // "ROOT"
+/// never a silent fallback to the read-only `/System`. Crate-visible so the
+/// unlock path charges the volume's transform cache to the same identity.
+pub(crate) const ROOT_VOLUME_HANDLE: u64 = 0x524F_4F54; // "ROOT"
 
 /// Audit event: the read-only `/System` volume was published as the `fs_*`
 /// mount, so userland file reads under `/System` now resolve to a live
@@ -261,11 +263,17 @@ pub fn install_system_mount<B: Block + 'static>(
         return;
     };
     // Mount read-only under the non-secret well-known key; the volume carries
-    // no secrets and the kernel can never mutate it through this handle.
+    // no secrets and the kernel can never mutate it through this handle. The
+    // volume's compressed clusters (driver bundles, libraries) are served
+    // through the SMART3 transform cache, charged to this mount's identity.
     let Ok(fs) = RustFs::open_read_only(window, &SYSTEM_VOLUME_KEY) else {
         unavailable(audit, "system_mount_failed");
         return;
     };
+    let fs = fs.with_cluster_cache(TransformClusterCache::for_volume(
+        SYSTEM_MOUNT_HANDLE,
+        pressure,
+    ));
     let Ok(vfs) = system_vfs() else {
         unavailable(audit, "system_vfs_build_failed");
         return;

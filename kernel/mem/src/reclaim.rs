@@ -395,13 +395,16 @@ pub struct CacheBudget {
     low: usize,
 }
 
-/// The backing-resource fraction a filesystem cache may occupy.
+/// The backing-resource fraction one bounded cache may occupy.
 ///
-/// One volume's cache is capped at 1/16 of the kernel heap arena: with
-/// the fixed 64 MiB heap this is 4 MiB per volume, so the two boot
-/// volumes together stay under 1/8 of the heap and cache growth can
-/// never be the cause of kernel-heap exhaustion (`plans/SMARTRAM.md`
-/// section 7 — reserves are preserved by construction).
+/// Each cache is capped at 1/16 of the kernel heap arena: with the
+/// fixed 64 MiB heap this is 4 MiB per cache. A boot volume carries two
+/// (the clean filesystem cache and the transform cache), so the two
+/// boot volumes' four caches together stay at or under 1/4 of the heap
+/// and cache growth can never be the cause of kernel-heap exhaustion
+/// (`plans/SMARTRAM.md` section 7 — reserves are preserved by
+/// construction, and the pressure gauge stops growth long before the
+/// ceiling matters).
 const BACKING_DIVISOR: usize = 16;
 
 /// The shrink watermark as a fraction of the hard limit: a forced

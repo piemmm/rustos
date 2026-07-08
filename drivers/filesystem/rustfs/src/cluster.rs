@@ -30,6 +30,7 @@ use rustos_abi::DriverError;
 
 use crate::dedupe::{ChunkRecord, REVERSE_REF_CAP};
 use crate::integrity::{logical_hash, DataFault, StoredForm, LOGICAL_HASH_LEN};
+use crate::xform;
 use crate::{
     as_u32, as_usize, extent_spec, is_all_zero, Block, Extent, Inode, RustFs,
     COMPRESS_CLUSTER_BLOCKS, MAX_BLOCK_SIZE, METADATA_RESERVE, RING_BLOCKS,
@@ -161,8 +162,40 @@ impl<B: Block> RustFs<B> {
         ext: &Extent,
     ) -> Result<Vec<u8>, DataFault> {
         let capu = as_usize(self.data_capacity());
+        let mut frame = vec![0u8; as_usize(ext.stored) * capu];
+        let frame_len = match self.read_cluster_frame(ext, capu, &mut frame) {
+            Ok(frame_len) => frame_len,
+            Err(fault) => {
+                xform::scrub(frame);
+                return Err(fault);
+            }
+        };
+        let mut plain = vec![0u8; as_usize(ext.len) * capu];
+        let produced = rustos_compress::decompress(&frame[..frame_len], &mut plain);
+        // The frame holds the decrypted (compressed) content: wipe the
+        // scratch before it returns to the heap, success or failure.
+        xform::scrub(frame);
+        match produced {
+            Ok(produced) if produced == plain.len() => Ok(plain),
+            _ => {
+                xform::scrub(plain);
+                Err(DataFault::Logical)
+            }
+        }
+    }
+
+    /// Read, verify, and decrypt the stored blocks of the compressed
+    /// extent `ext` into `frame`, returning the whole frame's length as
+    /// declared by the cluster head. Every stored form must match its
+    /// position and the frame length must agree with the extent's
+    /// stored-block count; a mismatch fails closed as a logical fault.
+    fn read_cluster_frame(
+        &mut self,
+        ext: &Extent,
+        capu: usize,
+        frame: &mut [u8],
+    ) -> Result<usize, DataFault> {
         let stored = as_usize(ext.stored);
-        let mut frame = vec![0u8; stored * capu];
         let mut frame_len = 0usize;
         let mut blk = [0u8; MAX_BLOCK_SIZE];
         for i in 0..stored {
@@ -180,13 +213,7 @@ impl<B: Block> RustFs<B> {
             }
             frame[i * capu..(i + 1) * capu].copy_from_slice(&blk[..capu]);
         }
-        let mut plain = vec![0u8; as_usize(ext.len) * capu];
-        let produced = rustos_compress::decompress(&frame[..frame_len], &mut plain)
-            .map_err(|_| DataFault::Logical)?;
-        if produced != plain.len() {
-            return Err(DataFault::Logical);
-        }
-        Ok(plain)
+        Ok(frame_len)
     }
 
     /// Drop the reference `(ino, start_bi)` holds on the compressed cluster
@@ -334,16 +361,14 @@ impl<B: Block> RustFs<B> {
     ) -> Result<(), DriverError> {
         let plain = self.read_data_cluster(ext)?;
         if usize::try_from(self.data_refcount(ext.phys)?).unwrap_or(usize::MAX) >= REVERSE_REF_CAP {
-            return self.store_cluster(dst, dst_ino, start, &plain);
+            let result = self.store_cluster(dst, dst_ino, start, &plain);
+            xform::scrub(plain);
+            return result;
         }
         let hash = logical_hash(&plain);
-        self.share_cluster(
-            ext,
-            (src_ino, start),
-            (dst_ino, start),
-            &hash,
-            as_u32(plain.len()),
-        )?;
+        let plain_len = as_u32(plain.len());
+        xform::scrub(plain);
+        self.share_cluster(ext, (src_ino, start), (dst_ino, start), &hash, plain_len)?;
         dst.extent_root =
             self.btree_insert(dst.extent_root, start, &ext.encode(), extent_spec(dst_ino))?;
         Ok(())
@@ -365,6 +390,23 @@ impl<B: Block> RustFs<B> {
         ext: &Extent,
     ) -> Result<(), DriverError> {
         let plain = self.read_data_cluster(ext)?;
+        let result = self.restore_per_block(inode, ino, start, ext, &plain);
+        xform::scrub(plain);
+        result
+    }
+
+    /// The decompose tail: release the cluster's reference and re-store
+    /// each block of its `plain`text through the per-block pipeline.
+    /// Split out so [`decompose_cluster`](Self::decompose_cluster) can
+    /// wipe the plaintext on every exit path.
+    fn restore_per_block(
+        &mut self,
+        inode: &mut Inode,
+        ino: u32,
+        start: u64,
+        ext: &Extent,
+        plain: &[u8],
+    ) -> Result<(), DriverError> {
         self.release_cluster(ext, ino, start)?;
         inode.extent_root = self.btree_remove(inode.extent_root, start, extent_spec(ino))?;
         let capu = as_usize(self.data_capacity());

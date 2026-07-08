@@ -8,15 +8,19 @@ reclaim-rule modelling, the bounded per-entry-metadata validation bound,
 the fail-closed classification gate with typed refusals, and per-class
 checked accounting), the clean and rebuildable filesystem cache
 (section 6.1, `kernel/core::fs::CachedFs`, wrapping every registered
-volume driver and classified through that gate at construction), and
+volume driver and classified through that gate at construction),
 SMART2 (the VM pressure model and reclaim ordering,
 `kernel/mem::pressure`: the shared five-band gauge with hysteresis over
 the frame allocator, the reserve floor, per-band per-class shrink
 targets, the `ramzip` handoff gate, deterministic escalation, and the
-`CachedFs` per-operation enforcement; see `PLAN.md` §SMARTRAM for the
-done-state summary) are implemented; SMART5–SMART8 (desktop/UI,
-reliability-assist, background-validation, and predictive caches) are
-**shelved — not added**; the remaining classes are staged below  
+`CachedFs` per-operation enforcement), and SMART3 (the RustFS transform
+cache: the driver's injected `ClusterCache` seam and the kernel's
+classified, budgeted, pressure-governed, zeroing
+`TransformClusterCache`, installed on both boot volumes; see `PLAN.md`
+§SMARTRAM for the done-state summaries) are implemented; SMART5–SMART8
+(desktop/UI, reliability-assist, background-validation, and predictive
+caches) are **shelved — not added**; the remaining classes are staged
+below  
 Target: RustOS  
 Primary code areas: `kernel/mem`, `kernel/core`, `kernel/sched`, `lib/log`, existing filesystem drivers, existing desktop/session crates, and existing `lib/abi` diagnostics only if a current caller requires them  
 Secondary code areas: `drivers/filesystem/rustfs`, `userland/system/appmgr`, `userland/shell/elsh`, `userland/gui/wm`, `userland/gui/taskbar`, `userland/gui/session`, `lib/appload`, `lib/cmdres`, `lib/raster`, `lib/svg`, `lib/font`, `lib/icon`, `lib/theme`, and `lib/path`  
@@ -300,6 +304,14 @@ Rules:
   journal, COW, or flush policy.
 
 ### 6.2 Transformation cache
+
+Current state: the RustFS decompressed-cluster cache is implemented (the
+SMART3 stage entry below and `docs/src/architecture/memory.md` section
+7i): the driver's injected `ClusterCache` seam plus the kernel's
+classified, budgeted, pressure-governed, zeroing
+`TransformClusterCache`, installed on both boot volumes. The remaining
+transform families listed here land with the stages that build their
+consumers.
 
 Transformation cache stores expensive intermediate forms of authorized data:
 
@@ -713,42 +725,56 @@ racing lookup, owner teardown after forced reclaim).
 
 ### SMART3 - Filesystem metadata and transformation caches
 
-Deliverables:
+Status: **done** for every part with a current in-tree consumer
+(`docs/src/architecture/memory.md` section 7i):
 
-- Filesystem metadata cache for directory entries, stat data, ACL/security
-  metadata, extended metadata, and type-detection results where existing
-  filesystem layers have current consumers. Extended-attribute caching follows
-  `plans/RUSTFS-METADATA.md`: entries are keyed and filtered by namespace, the
-  caller-visible result respects the namespace capability rules, and the key
-  grammar/preset registry stay in `lib/fsmeta`.
-- RustFS-oriented transform cache for verified, decrypted, decompressed, and
-  parsed records, if RustFS has the required abstractions.
-- Generation-based invalidation for writes, COW epochs, remounts, key epochs,
-  policy epochs, and removable-media replacement.
-- Durable identity keys consistent with `plans/ALIAS.md` and `plans/DRIVES.md`.
-- No bypass of filesystem permissions, capabilities, or MAC checks.
+- The filesystem **metadata** cache (directory entries, stat, ACL/
+  security records, name resolution) is the SMART1 `CachedFs` and is
+  live on every registered volume. Extended-attribute and
+  type-detection caching are deliberately **not** built: the mounted
+  kernel filesystem surface (`KernelFs`) carries no attribute or
+  type-detection consumer today, and this stage's deliverables are
+  scoped to "where existing filesystem layers have current consumers".
+  When an attribute consumer lands, its caching follows
+  `plans/RUSTFS-METADATA.md` (namespace-scoped capability filtering,
+  `lib/fsmeta` as the one key grammar).
+- The **RustFS transform cache** retains the verified, decrypted,
+  decompressed plaintext of compressed clusters. The driver exposes an
+  injected seam (`rustos_drv_fs_rustfs::ClusterCache`, keyed by the
+  run's first stored block) consulted only in the serving read path —
+  never by scrub/check/rescue — with invalidation funnelled through the
+  driver's single block-free choke point, a whole-cache purge on
+  transaction rollback, and a fail-closed `DeviceFault` if an entry
+  cannot make progress. The kernel's production implementation
+  (`rustos_kernel::transform_cache::TransformClusterCache`) is
+  classified through the SMART1 gate (class `TransformCache`, owned by
+  the volume's stable per-boot mount handle), LRU-bounded with
+  hysteresis, pressure-enforced per operation (preserved at mild,
+  drained from moderate, growth only at normal outside the reserve),
+  and volatilely wipes every released buffer; the driver additionally
+  wipes its transient frame/plaintext scratch on every cluster read,
+  clone, and decompose path. Installed on both boot volumes
+  (`system_mount` for `/System`, the unlock path for the writable
+  root).
+- Within one boot the driver instance is the volume generation (mount
+  starts empty; every mutation is seen by the one registered writer),
+  matching section 6.1; removable-media generation tokens still arrive
+  with the storage subsystem that introduces removable volumes. Keys
+  are physical-run identities on the mounted volume, never
+  discovery-order device names. Permissions are untouched: the cache
+  sits below the driver's API and the secured VFS still checks every
+  operation.
 
-Tests:
-
-- Cached metadata invalidates on write, rename, truncate, delete, and metadata
-  change.
-- Stale generation rejects after removable-media replacement.
-- Permission or capability change prevents reuse of authorization-sensitive
-  cached data.
-- Cached extended-attribute listings never reveal namespaces the caller may
-  not read, matching `plans/RUSTFS-METADATA.md`.
-- Transform cache round-trips verified/decompressed data through existing
-  filesystem APIs.
-- Reclaimed or invalidated cached plaintext derived from encrypted storage is
-  zeroed before its frames are reused.
-- Corrupt verified-state metadata fails closed.
-- Decrypted user data never appears in diagnostics.
-- Forced reclaim drops transform entries without corrupting the filesystem.
-
-Docs:
-
-- Update filesystem and memory docs with cache identity, invalidation, and
-  security rules.
+The SMART3 test matrix lands with the stage: driver-seam tests
+(repeat reads served from retained plaintext proven by corrupting the
+device after population, overwrite/truncate invalidation through the
+free choke point, rollback purge, reflink-share retention, a
+wrong-sized entry failing closed instead of stalling) and kernel tests
+(classification/owner, hit/miss/insertion accounting, LRU eviction with
+hysteresis, run-covering invalidation, replacement ledger balance,
+purge, per-band growth/drain enforcement, zero-backing refusal,
+wipe-in-place, and an end-to-end serve/invalidate/pressure-drain run
+over a real in-memory RustFS volume).
 
 ### SMART4 - Application launch and runtime semantic caches
 

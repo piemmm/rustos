@@ -2265,6 +2265,290 @@ fn read_all_pattern(len: usize) -> alloc::vec::Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
+// Host-injected cluster transform cache (`plans/SMARTRAM.md` SMART3).
+// ---------------------------------------------------------------------------
+
+/// Shared observation counters for [`TestClusterCache`], readable after the
+/// cache itself has been moved into the mounted volume.
+#[derive(Default)]
+struct CacheCounts {
+    hits: core::sync::atomic::AtomicU64,
+    puts: core::sync::atomic::AtomicU64,
+    invalidations: core::sync::atomic::AtomicU64,
+    purges: core::sync::atomic::AtomicU64,
+}
+
+impl CacheCounts {
+    fn bump(counter: &core::sync::atomic::AtomicU64) {
+        counter.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn read(counter: &core::sync::atomic::AtomicU64) -> u64 {
+        counter.load(core::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// A minimal in-memory [`ClusterCache`] honouring the seam's coherence
+/// contract (run-covering invalidation, whole-cache purge), instrumented
+/// through shared counters. Test scaffolding only: the production
+/// implementation with classification, budgets, pressure, and zeroisation
+/// lives in `rustos-kernel`.
+struct TestClusterCache {
+    counts: alloc::sync::Arc<CacheCounts>,
+    entries: alloc::collections::BTreeMap<u64, (u64, alloc::vec::Vec<u8>)>,
+}
+
+impl ClusterCache for TestClusterCache {
+    fn get(&mut self, phys: u64) -> Option<&[u8]> {
+        let entry = self.entries.get(&phys)?;
+        CacheCounts::bump(&self.counts.hits);
+        Some(entry.1.as_slice())
+    }
+
+    fn put(&mut self, phys: u64, stored: u64, plaintext: &[u8]) {
+        CacheCounts::bump(&self.counts.puts);
+        self.entries.insert(phys, (stored, plaintext.to_vec()));
+    }
+
+    fn invalidate(&mut self, phys: u64) {
+        let covering = self
+            .entries
+            .range(..=phys)
+            .next_back()
+            .filter(|(start, (stored, _))| phys < *start + *stored)
+            .map(|(start, _)| *start);
+        if let Some(start) = covering {
+            self.entries.remove(&start);
+            CacheCounts::bump(&self.counts.invalidations);
+        }
+    }
+
+    fn purge(&mut self) {
+        CacheCounts::bump(&self.counts.purges);
+        self.entries.clear();
+    }
+}
+
+/// A formatted volume with the instrumented cluster cache installed, plus
+/// the shared counter handle.
+fn cached_fmt() -> (alloc::sync::Arc<CacheCounts>, RustFs<MemBlock>) {
+    let counts = alloc::sync::Arc::new(CacheCounts::default());
+    let cache = TestClusterCache {
+        counts: alloc::sync::Arc::clone(&counts),
+        entries: alloc::collections::BTreeMap::new(),
+    };
+    let fs = fmt(512, 256, 32).with_cluster_cache(alloc::boxed::Box::new(cache));
+    (counts, fs)
+}
+
+/// Read the whole `len` bytes of `node` in single-block chunks, so every
+/// chunk exercises the compressed-cluster serving arm separately.
+fn read_chunked(fs: &mut RustFs<MemBlock>, node: NodeId, len: usize) -> alloc::vec::Vec<u8> {
+    let mut out = alloc::vec![0u8; len];
+    let mut done = 0usize;
+    while done < len {
+        let end = (done + 512).min(len);
+        let n = fs
+            .read_at(node, u64::try_from(done).unwrap(), &mut out[done..end])
+            .expect("chunked read");
+        assert!(n > 0, "chunked read makes progress");
+        done += n;
+    }
+    out
+}
+
+#[test]
+fn a_retained_cluster_serves_repeat_reads_without_the_transform_pipeline() {
+    // The first read of a compressed cluster decompresses it once and
+    // offers the plaintext for retention; every later read of the cluster
+    // is served from the retained copy. Proof: after the cache is
+    // populated, corrupt the stored cluster on the device — a read that
+    // touched the device would now fail closed, so a correct result can
+    // only have come from the cache.
+    let (counts, mut fs) = cached_fmt();
+    let root = fs.root();
+    fs.create(root, b"c", NodeKind::RegularFile)
+        .expect("create");
+    let payload = compressible_cluster(&fs);
+    assert_eq!(fs.write_at(root, b"c", 0, &payload), Ok(payload.len()));
+    assert_eq!(
+        CacheCounts::read(&counts.puts),
+        0,
+        "the write path retains nothing"
+    );
+
+    let node = fs.lookup(root, b"c").expect("lookup");
+    assert_eq!(read_chunked(&mut fs, node, payload.len()), payload);
+    assert_eq!(
+        CacheCounts::read(&counts.puts),
+        1,
+        "one decompression populated the cache"
+    );
+    assert!(
+        CacheCounts::read(&counts.hits) > 0,
+        "the later chunks of the first pass already hit"
+    );
+
+    // Corrupt the stored cluster head on the device. Only the data block
+    // is touched; the metadata tree stays intact.
+    let (_, ext) = extent_of(&mut fs, b"c", 0);
+    let mut raw = [0u8; MAX_BLOCK_SIZE];
+    fs.read_block(ext.phys, &mut raw).expect("raw read");
+    raw[HEADER_LEN] ^= 0xFF;
+    fs.write_block(ext.phys, &raw).expect("raw write");
+
+    assert_eq!(
+        read_chunked(&mut fs, node, payload.len()),
+        payload,
+        "repeat reads are served from the retained plaintext, not the device"
+    );
+}
+
+#[test]
+fn overwriting_a_cluster_invalidates_its_retained_plaintext() {
+    let (counts, mut fs) = cached_fmt();
+    let root = fs.root();
+    fs.create(root, b"c", NodeKind::RegularFile)
+        .expect("create");
+    let payload = compressible_cluster(&fs);
+    assert_eq!(fs.write_at(root, b"c", 0, &payload), Ok(payload.len()));
+    let node = fs.lookup(root, b"c").expect("lookup");
+    assert_eq!(read_chunked(&mut fs, node, payload.len()), payload);
+
+    // Overwrite the whole cluster with different compressible content: the
+    // superseded stored run is freed, which must drop the retained entry.
+    let mut second = payload.clone();
+    for byte in &mut second {
+        *byte = byte.wrapping_add(1);
+    }
+    assert_eq!(fs.write_at(root, b"c", 0, &second), Ok(second.len()));
+    assert!(
+        CacheCounts::read(&counts.invalidations) >= 1,
+        "freeing the superseded run invalidated the entry"
+    );
+    assert_eq!(
+        read_chunked(&mut fs, node, second.len()),
+        second,
+        "reads after the overwrite see the new content, never the stale entry"
+    );
+}
+
+#[test]
+fn truncating_into_a_cluster_invalidates_its_retained_plaintext() {
+    let (counts, mut fs) = cached_fmt();
+    let root = fs.root();
+    fs.create(root, b"c", NodeKind::RegularFile)
+        .expect("create");
+    let payload = compressible_cluster(&fs);
+    assert_eq!(fs.write_at(root, b"c", 0, &payload), Ok(payload.len()));
+    let node = fs.lookup(root, b"c").expect("lookup");
+    assert_eq!(read_chunked(&mut fs, node, payload.len()), payload);
+
+    // A mid-cluster truncate decomposes the cluster: its stored run is
+    // freed, so the retained whole-cluster plaintext must go with it.
+    let cap = as_usize(fs.data_capacity());
+    let keep = cap * 8;
+    fs.truncate(root, b"c", u64::try_from(keep).unwrap())
+        .expect("truncate");
+    assert!(
+        CacheCounts::read(&counts.invalidations) >= 1,
+        "decomposing the cluster invalidated the entry"
+    );
+    assert_eq!(
+        read_chunked(&mut fs, node, keep),
+        payload[..keep],
+        "the kept prefix reads back from the per-block records"
+    );
+}
+
+#[test]
+fn a_failed_mutation_purges_the_retained_plaintext() {
+    let (counts, mut fs) = cached_fmt();
+    let root = fs.root();
+    fs.create(root, b"c", NodeKind::RegularFile)
+        .expect("create");
+    let payload = compressible_cluster(&fs);
+    assert_eq!(fs.write_at(root, b"c", 0, &payload), Ok(payload.len()));
+    let node = fs.lookup(root, b"c").expect("lookup");
+    assert_eq!(read_chunked(&mut fs, node, payload.len()), payload);
+
+    // A refused mutation rolls its transaction back; the rollback returns
+    // this transaction's blocks to the pool without per-block frees, so
+    // the whole cache is purged (fail closed).
+    assert!(fs.create(root, b"bad/name", NodeKind::RegularFile).is_err());
+    assert!(
+        CacheCounts::read(&counts.purges) >= 1,
+        "the rollback purged the cache"
+    );
+    assert_eq!(
+        read_chunked(&mut fs, node, payload.len()),
+        payload,
+        "the purged cache repopulates from the intact volume"
+    );
+}
+
+#[test]
+fn a_reflink_shared_cluster_keeps_its_retained_plaintext() {
+    // Removing one referrer of a shared cluster decrements the refcount
+    // without freeing the stored run, so the retained plaintext stays
+    // valid and keeps serving the surviving referrer.
+    let (counts, mut fs) = cached_fmt();
+    let root = fs.root();
+    fs.create(root, b"src", NodeKind::RegularFile)
+        .expect("create");
+    let payload = compressible_cluster(&fs);
+    assert_eq!(fs.write_at(root, b"src", 0, &payload), Ok(payload.len()));
+    fs.reflink(root, b"src", b"dst").expect("reflink");
+    let src = fs.lookup(root, b"src").expect("src");
+    assert_eq!(read_chunked(&mut fs, src, payload.len()), payload);
+
+    fs.remove(root, b"src").expect("remove one referrer");
+    let dst = fs.lookup(root, b"dst").expect("dst survives");
+    let before = CacheCounts::read(&counts.hits);
+    assert_eq!(
+        read_chunked(&mut fs, dst, payload.len()),
+        payload,
+        "the surviving referrer reads the shared cluster"
+    );
+    assert!(
+        CacheCounts::read(&counts.hits) > before,
+        "the shared cluster's entry survived the referrer removal"
+    );
+}
+
+#[test]
+fn a_wrong_sized_cache_entry_fails_closed_instead_of_stalling() {
+    /// A defective cache handing back an empty slice for every cluster.
+    struct LyingCache;
+
+    impl ClusterCache for LyingCache {
+        fn get(&mut self, _phys: u64) -> Option<&[u8]> {
+            Some(&[])
+        }
+
+        fn put(&mut self, _phys: u64, _stored: u64, _plaintext: &[u8]) {}
+
+        fn invalidate(&mut self, _phys: u64) {}
+
+        fn purge(&mut self) {}
+    }
+
+    let mut fs = fmt(512, 256, 32).with_cluster_cache(alloc::boxed::Box::new(LyingCache));
+    let root = fs.root();
+    fs.create(root, b"c", NodeKind::RegularFile)
+        .expect("create");
+    let payload = compressible_cluster(&fs);
+    assert_eq!(fs.write_at(root, b"c", 0, &payload), Ok(payload.len()));
+    let node = fs.lookup(root, b"c").expect("lookup");
+    let mut out = [0u8; 512];
+    assert_eq!(
+        fs.read_at(node, 0, &mut out),
+        Err(DriverError::DeviceFault),
+        "a zero-progress cache entry fails the read closed, never a hang"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Stage 8: online scrub (verify + repair, resumable).
 // ---------------------------------------------------------------------------
 

@@ -76,7 +76,8 @@ use crate::root_mount::{
 };
 use crate::root_storage::RootBlockBinding;
 use crate::shared_block::{DriverStoreService, SharedBlock};
-use crate::system_mount::{register_writable_state, KernelFs};
+use crate::system_mount::{register_writable_state, KernelFs, ROOT_VOLUME_HANDLE};
+use crate::transform_cache::TransformClusterCache;
 use crate::unlock_service::{
     autoload_caps, loader_caps, note, note_stage, service_caps, store_endpoint_binder_caps,
     take_boot, KthreadConsoleRead, CONSOLE0_GATE, UNLOCK_TASK, USERS_DB_INSTALLED_MESSAGE,
@@ -857,7 +858,9 @@ impl<B: Block + 'static> WritableRootSink for WritableStateSink<'_, B> {
         };
         // Re-open the same encrypted volume read-write under the just-derived
         // key. The driver retains the derived master key for the life of the
-        // mount, exactly as the read mount does.
+        // mount, exactly as the read mount does. Compressed clusters are
+        // served through the SMART3 transform cache, charged to the root
+        // volume's mount identity and governed by the shared pressure gauge.
         let Ok(fs) = RustFs::open(window, volume_key) else {
             note(
                 self.audit,
@@ -866,6 +869,10 @@ impl<B: Block + 'static> WritableRootSink for WritableStateSink<'_, B> {
             );
             return None;
         };
+        let fs = fs.with_cluster_cache(TransformClusterCache::for_volume(
+            ROOT_VOLUME_HANDLE,
+            self.pressure,
+        ));
         // The registered driver is the volume's single writer; the
         // `CAP_USER_ADMIN` account-administration engine shares this same
         // lock (`plans/CAPABILITY_USE.md` CU4) — `/System/Security` is
