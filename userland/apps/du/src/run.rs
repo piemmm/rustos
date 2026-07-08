@@ -100,7 +100,11 @@ mod program {
                 let name = core::str::from_utf8(entry.name).map_err(|_| Errno::OutOfRange)?;
                 entries.push(Entry {
                     name: String::from(name),
-                    kind: entry.kind,
+                    meta: Metadata {
+                        kind: entry.kind,
+                        size: entry.size,
+                        allocated: entry.allocated,
+                    },
                 });
             }
             Ok(entries)

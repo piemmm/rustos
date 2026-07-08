@@ -358,13 +358,16 @@ fn root_directory_lists_its_entries_in_order() {
 
     let first = fs.read_dir(root, 0, &mut name).expect("ok").expect("entry");
     assert_eq!(&name[..first.name_len], b"HELLO.TXT");
-    assert_eq!(first.kind, NodeKind::RegularFile);
+    assert_eq!(first.info.kind, NodeKind::RegularFile);
 
-    let second = fs.read_dir(root, 1, &mut name).expect("ok").expect("entry");
+    let second = fs
+        .read_dir(root, first.next_cursor, &mut name)
+        .expect("ok")
+        .expect("entry");
     assert_eq!(&name[..second.name_len], b"SUB");
-    assert_eq!(second.kind, NodeKind::Directory);
+    assert_eq!(second.info.kind, NodeKind::Directory);
 
-    assert_eq!(fs.read_dir(root, 2, &mut name), Ok(None));
+    assert_eq!(fs.read_dir(root, second.next_cursor, &mut name), Ok(None));
 }
 
 #[test]
@@ -509,16 +512,19 @@ fn long_file_name_is_reconstructed_in_listing() {
     let sub = fs.lookup(root, b"sub").expect("subdir");
 
     let mut name = [0u8; 64];
-    // `.`/`..` are skipped, so index 0 is DEEP.BIN and index 1 is the
-    // long-named file.
+    // `.`/`..` are skipped, so the first entry is DEEP.BIN and the next is
+    // the long-named file.
     let deep = fs.read_dir(sub, 0, &mut name).expect("ok").expect("entry");
     assert_eq!(&name[..deep.name_len], b"DEEP.BIN");
 
-    let long = fs.read_dir(sub, 1, &mut name).expect("ok").expect("entry");
+    let long = fs
+        .read_dir(sub, deep.next_cursor, &mut name)
+        .expect("ok")
+        .expect("entry");
     assert_eq!(&name[..long.name_len], LONG_NAME_UTF8);
-    assert_eq!(long.kind, NodeKind::RegularFile);
+    assert_eq!(long.info.kind, NodeKind::RegularFile);
 
-    assert_eq!(fs.read_dir(sub, 2, &mut name), Ok(None));
+    assert_eq!(fs.read_dir(sub, long.next_cursor, &mut name), Ok(None));
 }
 
 #[test]
@@ -567,7 +573,11 @@ fn corrupt_long_name_checksum_falls_back_to_short_name() {
     let sub = fs.lookup(root, b"sub").expect("subdir");
 
     let mut name = [0u8; 64];
-    let entry = fs.read_dir(sub, 1, &mut name).expect("ok").expect("entry");
+    let deep = fs.read_dir(sub, 0, &mut name).expect("ok").expect("entry");
+    let entry = fs
+        .read_dir(sub, deep.next_cursor, &mut name)
+        .expect("ok")
+        .expect("entry");
     assert_eq!(&name[..entry.name_len], b"GREETI~1.TXT");
 
     assert_eq!(fs.lookup(sub, LONG_NAME_UTF8), Err(DriverError::NotFound));
@@ -579,9 +589,11 @@ fn read_dir_rejects_a_buffer_too_small_for_a_long_name() {
     let root = fs.root();
     let sub = fs.lookup(root, b"sub").expect("subdir");
 
+    let mut name = [0u8; 64];
+    let deep = fs.read_dir(sub, 0, &mut name).expect("ok").expect("entry");
     let mut small = [0u8; LONG_NAME_UTF8.len() - 1];
     assert_eq!(
-        fs.read_dir(sub, 1, &mut small),
+        fs.read_dir(sub, deep.next_cursor, &mut small),
         Err(DriverError::BufferTooSmall)
     );
 }

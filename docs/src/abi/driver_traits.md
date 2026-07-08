@@ -311,15 +311,23 @@ trait**, `FilesystemRead`, not an added method on the frozen one
 | `node_info(node)`                 | Driver handle.                        |
 | `lookup(dir, name)`               | Driver handle.                        |
 | `read_at(file, offset, &mut)`     | Driver handle.                        |
-| `read_dir(dir, index, &mut name)` | Driver handle.                        |
+| `read_dir(dir, cursor, &mut name)` | Driver handle.                       |
 
 The surface is allocation-free: a `NodeId` is an opaque,
 implementation-minted token (`NodeId::NONE` is reserved), `NodeInfo`
 reports `{ kind, size, allocated }` — `allocated` being the bytes of
 on-disk storage the node's data really occupies, from the format's own
 allocation tracking (ext4 `i_blocks`, a FAT cluster chain, RustFS mapped
-extents) — and `read_dir` writes the entry name into a
-caller-provided buffer alongside a `DirEntry { node, kind, name_len }`.
+extents) — and `read_dir` writes the entry name into a caller-provided
+buffer alongside a `DirEntry { node, info, name_len, next_cursor }`.
+The entry carries the child's full `NodeInfo`, so a listing consumer
+never re-resolves each child by path to learn its kind or sizes, and
+`cursor` is an opaque resume token (`0` starts; each entry's
+`next_cursor` continues the listing in O(1), the `getdents` `d_off`
+model — a full listing is one bounded scan, never a quadratic rescan
+per entry). A token is meaningful only for the unmodified directory
+that produced it; any other value is handled safely (bounds-checked,
+fail-closed).
 Implementations expose raw structural access only and make **no**
 permission decisions — the VFS authorises every traversal against the
 §5.3 model before calling here (`AGENTS.md` §5.4). The first

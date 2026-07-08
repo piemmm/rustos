@@ -15,7 +15,7 @@ use rustos_abi::{
 use rustos_itest_harness::app_image::{compose_signed_appinfo, AppKind, AppManifestSource};
 use rustos_kernel_syscall::SYSCALL_TABLE_HASH;
 
-use crate::fs::FilesystemService;
+use crate::fs::{FilesystemService, ReaddirEntry};
 
 extern crate std;
 use std::collections::BTreeMap;
@@ -42,23 +42,28 @@ impl MemFs {
     }
 
     /// The immediate children of `dir`, derived from the file paths.
-    fn children(&self, dir: &str) -> Vec<(FileKind, String)> {
+    fn children(&self, dir: &str) -> Vec<ReaddirEntry> {
         let prefix = if dir.ends_with('/') {
             dir.to_string()
         } else {
             format!("{dir}/")
         };
-        let mut out: Vec<(FileKind, String)> = Vec::new();
-        for path in self.files.keys() {
+        let mut out: Vec<ReaddirEntry> = Vec::new();
+        for (path, body) in &self.files {
             let Some(rest) = path.strip_prefix(&prefix) else {
                 continue;
             };
-            let (kind, name) = match rest.split_once('/') {
-                Some((first, _)) => (FileKind::Directory, first),
-                None => (FileKind::Regular, rest),
+            let (kind, name, size) = match rest.split_once('/') {
+                Some((first, _)) => (FileKind::Directory, first, 0),
+                None => (FileKind::Regular, rest, body.len() as u64),
             };
-            if !out.iter().any(|(_, existing)| existing == name) {
-                out.push((kind, name.to_string()));
+            if !out.iter().any(|e| e.name == name) {
+                out.push(ReaddirEntry {
+                    kind,
+                    size,
+                    allocated: size,
+                    name: name.to_string(),
+                });
             }
         }
         out
@@ -120,7 +125,7 @@ impl FilesystemService for MemFs {
         _uid: u32,
         _caps: &dyn CapabilityQuery,
         path: &str,
-    ) -> Result<Vec<(FileKind, String)>, Errno> {
+    ) -> Result<Vec<ReaddirEntry>, Errno> {
         let children = self.children(path);
         if children.is_empty() {
             return Err(Errno::NotFound);

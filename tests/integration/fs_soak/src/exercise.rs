@@ -165,12 +165,17 @@ fn list_names<F: FilesystemRead>(
     seed: u64,
 ) -> Result<Vec<Vec<u8>>, String> {
     let mut names = Vec::new();
-    let mut index = 0u64;
+    let mut cursor = 0u64;
+    let mut steps = 0u64;
     let mut buf = [0u8; 256];
-    while let Some(entry) = ck(fs.read_dir(dir, index, &mut buf), "read_dir", seed)? {
+    while let Some(entry) = ck(fs.read_dir(dir, cursor, &mut buf), "read_dir", seed)? {
         names.push(buf[..entry.name_len].to_vec());
-        index += 1;
-        if index > 1_000_000 {
+        if entry.next_cursor == cursor {
+            return Err(format!("seed {seed:#x}: read_dir cursor did not advance"));
+        }
+        cursor = entry.next_cursor;
+        steps += 1;
+        if steps > 1_000_000 {
             return Err(format!("seed {seed:#x}: read_dir did not terminate"));
         }
     }

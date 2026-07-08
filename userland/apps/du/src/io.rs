@@ -25,12 +25,18 @@ pub struct Metadata {
 }
 
 /// One directory entry, as the walk consumes it.
+///
+/// The entry carries the full [`Metadata`] the listing reported for it, so
+/// the walk sums a directory's children from the **one** `fs_readdir`
+/// listing instead of opening and statting each child by path — on an
+/// uncached, authenticated volume every such stat is a fresh full path
+/// resolution.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Entry {
     /// The entry's name (a single path component, never a path).
     pub name: String,
-    /// Whether the entry is a regular file or a directory.
-    pub kind: FileKind,
+    /// The entry's metadata, as the listing filesystem reported it.
+    pub meta: Metadata,
 }
 
 /// Stats paths and lists directories for the usage walk.
@@ -48,7 +54,8 @@ pub trait Walk {
     /// not reach it.
     fn stat(&self, path: &str) -> Result<Metadata, Errno>;
 
-    /// The entries of the directory at `path`.
+    /// The entries of the directory at `path`, each carrying the metadata
+    /// the listing reported for it.
     ///
     /// # Errors
     ///

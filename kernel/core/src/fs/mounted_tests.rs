@@ -408,13 +408,11 @@ fn mkdir_then_readdir_reports_each_entrys_kind() {
     .expect("create file");
 
     let mut entries = svc.readdir(TEST_UID, &caps, MOUNT).expect("readdir");
-    entries.sort_by(|a, b| a.1.cmp(&b.1));
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    let kinds: Vec<(FileKind, &str)> = entries.iter().map(|e| (e.kind, e.name.as_str())).collect();
     assert_eq!(
-        entries,
-        alloc::vec![
-            (FileKind::Regular, alloc::string::String::from("file")),
-            (FileKind::Directory, alloc::string::String::from("sub")),
-        ]
+        kinds,
+        alloc::vec![(FileKind::Regular, "file"), (FileKind::Directory, "sub"),]
     );
 }
 
@@ -680,11 +678,11 @@ fn an_ordinary_user_lists_the_system_owned_read_only_mount() {
     let entries = svc
         .readdir(TEST_UID, &caps, "/System")
         .expect("an ordinary user lists /System");
-    let names: Vec<&str> = entries.iter().map(|(_, name)| name.as_str()).collect();
+    let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
     for expected in ["Kernel", "Drivers", "Logs", "Settings"] {
         assert!(names.contains(&expected), "{expected} listed: {names:?}");
     }
-    assert!(entries.iter().all(|(kind, _)| *kind == FileKind::Directory));
+    assert!(entries.iter().all(|e| e.kind == FileKind::Directory));
 }
 
 /// The mount snapshot carries the registration names and the live space

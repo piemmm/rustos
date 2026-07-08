@@ -3310,7 +3310,7 @@ impl<B: Block> FilesystemRead for RustFs<B> {
     fn read_dir(
         &mut self,
         dir: NodeId,
-        index: u64,
+        cursor: u64,
         name_out: &mut [u8],
     ) -> Result<Option<DirEntry>, DriverError> {
         let dir_ino = self.ino_of(dir)?;
@@ -3318,17 +3318,29 @@ impl<B: Block> FilesystemRead for RustFs<B> {
         if !dir_inode.is_dir() {
             return Err(DriverError::Unsupported);
         }
-        let per = self.dirents_per_block();
+        // The cursor is the entry's global slot position (`blk * per +
+        // slot`), so resumption seeks straight to the block and slot after
+        // the previously returned entry instead of rescanning the whole
+        // directory per call. Any cursor past the last block — including
+        // an arbitrary value that was never returned — falls off the block
+        // loop and ends the listing (fail closed, never out of bounds).
+        let per = self.dirents_per_block() as u64;
+        let blocks = self.dir_block_count(&dir_inode);
         let mut buf = [0u8; MAX_BLOCK_SIZE];
-        let mut seen = 0u64;
-        for blk in 0..self.dir_block_count(&dir_inode) {
+        let mut blk = cursor / per;
+        let mut slot = cursor % per;
+        while blk < blocks {
             let ptr = self.block_ptr(&dir_inode, blk)?;
             if ptr == 0 {
+                blk += 1;
+                slot = 0;
                 continue;
             }
             self.read_meta(ptr, BlockType::Directory, &mut buf)?;
-            for slot in 0..per {
-                let base = HEADER_LEN + slot * DIRENT_SIZE;
+            while slot < per {
+                let position = blk * per + slot;
+                let base = HEADER_LEN + as_usize(slot) * DIRENT_SIZE;
+                slot += 1;
                 let ino = rd_u32(&buf, base);
                 if ino == 0 {
                     continue;
@@ -3341,25 +3353,37 @@ impl<B: Block> FilesystemRead for RustFs<B> {
                 if name == b"." || name == b".." {
                     continue;
                 }
-                if seen == index {
-                    if name_out.len() < name_len {
-                        return Err(DriverError::BufferTooSmall);
-                    }
-                    name_out[..name_len].copy_from_slice(name);
-                    let child = self.read_inode(ino)?;
-                    let kind = if child.is_dir() {
-                        NodeKind::Directory
-                    } else {
-                        NodeKind::RegularFile
-                    };
-                    return Ok(Some(DirEntry {
-                        node: NodeId::from_raw(u64::from(ino)),
-                        kind,
-                        name_len,
-                    }));
+                if name_out.len() < name_len {
+                    return Err(DriverError::BufferTooSmall);
                 }
-                seen += 1;
+                name_out[..name_len].copy_from_slice(name);
+                // The child inode is read once here and its metadata
+                // returned with the entry, so a listing consumer never
+                // re-resolves the child by path to learn its sizes.
+                let child = self.read_inode(ino)?;
+                let allocated = self.allocated_bytes(&child, ino)?;
+                let child_info = if child.is_dir() {
+                    NodeInfo {
+                        kind: NodeKind::Directory,
+                        size: 0,
+                        allocated,
+                    }
+                } else {
+                    NodeInfo {
+                        kind: NodeKind::RegularFile,
+                        size: child.size,
+                        allocated,
+                    }
+                };
+                return Ok(Some(DirEntry {
+                    node: NodeId::from_raw(u64::from(ino)),
+                    info: child_info,
+                    name_len,
+                    next_cursor: position + 1,
+                }));
             }
+            blk += 1;
+            slot = 0;
         }
         Ok(None)
     }

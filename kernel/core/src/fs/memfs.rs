@@ -173,14 +173,17 @@ impl FilesystemRead for RwMockFs {
     fn read_dir(
         &mut self,
         dir: NodeId,
-        index: u64,
+        cursor: u64,
         name_out: &mut [u8],
     ) -> Result<Option<DirEntry>, DriverError> {
+        // In-RAM, the cursor is simply the entry's position in the map's
+        // stable order; any value past the end — including an arbitrary one
+        // that was never returned — falls off the map and ends the listing.
         let idx = Self::index(dir)?;
         let RwNode::Dir(children) = self.nodes.get(idx).ok_or(DriverError::NotFound)? else {
             return Err(DriverError::Unsupported);
         };
-        let Ok(i) = usize::try_from(index) else {
+        let Ok(i) = usize::try_from(cursor) else {
             return Ok(None);
         };
         let Some((name, &child)) = children.iter().nth(i) else {
@@ -189,15 +192,14 @@ impl FilesystemRead for RwMockFs {
         if name_out.len() < name.len() {
             return Err(DriverError::BufferTooSmall);
         }
-        name_out[..name.len()].copy_from_slice(name.as_bytes());
-        let kind = match self.nodes[child] {
-            RwNode::Dir(_) => NodeKind::Directory,
-            RwNode::File(_) => NodeKind::RegularFile,
-        };
+        let name_len = name.len();
+        name_out[..name_len].copy_from_slice(name.as_bytes());
+        let info = self.node_info(NodeId::from_raw(child as u64 + 1))?;
         Ok(Some(DirEntry {
             node: NodeId::from_raw(child as u64 + 1),
-            kind,
-            name_len: name.len(),
+            info,
+            name_len,
+            next_cursor: cursor + 1,
         }))
     }
 }

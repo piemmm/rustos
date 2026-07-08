@@ -442,18 +442,24 @@ fn root_lists_its_entries_in_on_disk_order() {
 
     let e0 = fs.read_dir(root, 0, &mut name).expect("ok").expect("entry");
     assert_eq!(&name[..e0.name_len], b"hello.txt");
-    assert_eq!(e0.kind, NodeKind::RegularFile);
+    assert_eq!(e0.info.kind, NodeKind::RegularFile);
 
-    let e1 = fs.read_dir(root, 1, &mut name).expect("ok").expect("entry");
+    let e1 = fs
+        .read_dir(root, e0.next_cursor, &mut name)
+        .expect("ok")
+        .expect("entry");
     assert_eq!(&name[..e1.name_len], b"classic.bin");
-    assert_eq!(e1.kind, NodeKind::RegularFile);
+    assert_eq!(e1.info.kind, NodeKind::RegularFile);
 
-    let e2 = fs.read_dir(root, 2, &mut name).expect("ok").expect("entry");
+    let e2 = fs
+        .read_dir(root, e1.next_cursor, &mut name)
+        .expect("ok")
+        .expect("entry");
     assert_eq!(&name[..e2.name_len], b"sub");
-    assert_eq!(e2.kind, NodeKind::Directory);
+    assert_eq!(e2.info.kind, NodeKind::Directory);
 
     // `.` and `..` are not surfaced, and iteration terminates.
-    assert_eq!(fs.read_dir(root, 3, &mut name), Ok(None));
+    assert_eq!(fs.read_dir(root, e2.next_cursor, &mut name), Ok(None));
 }
 
 #[test]
@@ -661,14 +667,13 @@ fn create_then_appears_in_directory_listing() {
         .expect("create");
     let mut name = [0u8; 32];
     let mut found = false;
-    for index in 0.. {
-        let Some(entry) = fs.read_dir(root, index, &mut name).expect("read_dir") else {
-            break;
-        };
+    let mut cursor = 0;
+    while let Some(entry) = fs.read_dir(root, cursor, &mut name).expect("read_dir") {
         if &name[..entry.name_len] == b"zeta.dat" {
-            assert_eq!(entry.kind, NodeKind::RegularFile);
+            assert_eq!(entry.info.kind, NodeKind::RegularFile);
             found = true;
         }
+        cursor = entry.next_cursor;
     }
     assert!(found, "the created file is listed");
 }

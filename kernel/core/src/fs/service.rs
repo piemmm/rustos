@@ -26,6 +26,27 @@ use alloc::vec::Vec;
 use rustos_abi::sysinfo::MountRecord;
 use rustos_abi::{CapabilityQuery, Errno, FileKind, FileStat, OpenFlags, UnlinkFlags};
 
+/// One directory entry as [`FilesystemService::readdir`] reports it: the
+/// child's kind, its apparent and allocated sizes, and its name.
+///
+/// The sizes ride along with the listing because the mounted filesystem
+/// already holds each child's metadata while producing the entry; a
+/// consumer that needs them (`du`) reads the one listing instead of
+/// re-resolving every child by path, which on an uncached, authenticated
+/// volume is a fresh full walk per child.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReaddirEntry {
+    /// Whether the entry names a regular file or a directory.
+    pub kind: FileKind,
+    /// Apparent length in bytes; `0` for a directory.
+    pub size: u64,
+    /// Bytes of on-disk storage the entry's data occupies, as the mounted
+    /// format's own allocation tracking reports it.
+    pub allocated: u64,
+    /// The entry's name (a single component, never `.`/`..`).
+    pub name: String,
+}
+
 /// The set of secured filesystem operations a userland `fs_*` syscall needs.
 ///
 /// Each method receives the caller's **attested** identity — `uid` is the
@@ -93,7 +114,8 @@ pub trait FilesystemService: Send + Sync {
         data: &[u8],
     ) -> Result<usize, Errno>;
 
-    /// List the entries of the directory at `path` as `(kind, name)` pairs.
+    /// List the entries of the directory at `path`, each with the kind and
+    /// sizes the mounted filesystem reports for it.
     ///
     /// # Errors
     ///
@@ -104,7 +126,7 @@ pub trait FilesystemService: Send + Sync {
         uid: u32,
         caps: &dyn CapabilityQuery,
         path: &str,
-    ) -> Result<Vec<(FileKind, String)>, Errno>;
+    ) -> Result<Vec<ReaddirEntry>, Errno>;
 
     /// Report the structural metadata of the node at `path`.
     ///
@@ -250,7 +272,7 @@ impl FilesystemService for NullFilesystemService {
         _uid: u32,
         _caps: &dyn CapabilityQuery,
         _path: &str,
-    ) -> Result<Vec<(FileKind, String)>, Errno> {
+    ) -> Result<Vec<ReaddirEntry>, Errno> {
         Err(Errno::NotImplemented)
     }
 

@@ -1019,20 +1019,26 @@ fn nonzero(ptr: u32) -> Option<u64> {
 enum DirQuery<'a> {
     /// The entry whose name matches these raw bytes exactly.
     ByName(&'a [u8]),
-    /// The `n`-th real child, skipping `.` / `..` and unused slots.
-    ByIndex(u64),
+    /// The first real child (skipping `.` / `..` and unused slots) whose
+    /// on-disk byte offset within the directory is at or past this
+    /// cursor. `0` starts the listing; the offset after a returned entry
+    /// ([`FoundEntry::next_cursor`]) resumes it in O(1). The walk starts
+    /// at the containing block's first record and skips forward, so a
+    /// cursor that does not name a record boundary — including an
+    /// arbitrary value that was never returned — can only skip entries,
+    /// never mis-parse mid-record.
+    ByCursor(u64),
 }
 
 /// A directory entry located by [`Ext4::find_entry`].
 struct FoundEntry {
     /// The child inode number.
     ino: u32,
-    /// The child kind from the entry's `file_type` byte, or `None` when
-    /// the volume lacks the `filetype` feature (the caller stats the
-    /// child inode instead).
-    kind: Option<NodeKind>,
     /// Number of name bytes written into the caller's output buffer.
     name_len: usize,
+    /// Byte offset within the directory of the record *after* this one:
+    /// the [`DirQuery::ByCursor`] value that resumes the listing there.
+    next_cursor: u64,
 }
 
 /// Minimum on-disk directory-entry header length: the four fixed header
@@ -1091,8 +1097,14 @@ impl<B: Block> Ext4<B> {
         let bs = self.layout.block_size as usize;
         let mut block_buf = [0u8; MAX_BLOCK_SIZE as usize];
         let total_blocks = dir.size.div_ceil(u64::from(self.layout.block_size));
-        let mut counter = 0u64;
-        for logical in 0..total_blocks {
+        // A cursor resume seeks straight to its containing block; the
+        // in-block scan below still starts at the block's first record so
+        // parsing always begins on a record boundary.
+        let start_block = match query {
+            DirQuery::ByCursor(cursor) => cursor / u64::from(self.layout.block_size),
+            DirQuery::ByName(_) => 0,
+        };
+        for logical in start_block..total_blocks {
             let Some(phys) = self.map_block(dir, logical)? else {
                 continue;
             };
@@ -1112,34 +1124,29 @@ impl<B: Block> Ext4<B> {
                 if ino != 0 && name_len > 0 && DIRENT_HEADER + name_len <= rec_len {
                     let name = &block_buf[pos + DIRENT_HEADER..pos + DIRENT_HEADER + name_len];
                     if name != b"." && name != b".." {
-                        let entry_kind = if self.layout.filetype {
-                            file_type_kind(block_buf[pos + 7])
-                        } else {
-                            None
-                        };
+                        let entry_offset = logical * u64::from(self.layout.block_size) + pos as u64;
                         match query {
                             DirQuery::ByName(target) => {
                                 if name == target {
                                     return Ok(Some(FoundEntry {
                                         ino,
-                                        kind: entry_kind,
                                         name_len: 0,
+                                        next_cursor: entry_offset + rec_len as u64,
                                     }));
                                 }
                             }
-                            DirQuery::ByIndex(target) => {
-                                if counter == target {
+                            DirQuery::ByCursor(cursor) => {
+                                if entry_offset >= cursor {
                                     if name_len > name_out.len() {
                                         return Err(DriverError::BufferTooSmall);
                                     }
                                     name_out[..name_len].copy_from_slice(name);
                                     return Ok(Some(FoundEntry {
                                         ino,
-                                        kind: entry_kind,
                                         name_len,
+                                        next_cursor: entry_offset + rec_len as u64,
                                     }));
                                 }
-                                counter += 1;
                             }
                         }
                     }
@@ -1148,15 +1155,6 @@ impl<B: Block> Ext4<B> {
             }
         }
         Ok(None)
-    }
-}
-
-/// Map a directory-entry `file_type` byte to a [`NodeKind`].
-fn file_type_kind(ft: u8) -> Option<NodeKind> {
-    match ft {
-        FT_REG => Some(NodeKind::RegularFile),
-        FT_DIR => Some(NodeKind::Directory),
-        _ => None,
     }
 }
 
@@ -2456,14 +2454,12 @@ impl<B: Block> Ext4<B> {
     }
 }
 
-impl<B: Block> FilesystemRead for Ext4<B> {
-    fn root(&self) -> NodeId {
-        NodeId::from_raw(u64::from(ROOT_INODE))
-    }
-
-    fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
-        let ino = node_inode(node)?;
-        let inode = self.read_inode(ino)?;
+impl<B: Block> Ext4<B> {
+    /// The [`NodeInfo`] of a decoded inode record: its kind, apparent
+    /// size, and the real allocation `i_blocks` tracks. The one
+    /// definition `node_info` and `read_dir` both report, so the two can
+    /// never disagree about a node's sizes.
+    fn inode_info(&self, inode: &Inode) -> Result<NodeInfo, DriverError> {
         let kind = inode.kind().ok_or(DriverError::NotFound)?;
         let size = match kind {
             NodeKind::Directory => 0,
@@ -2482,6 +2478,18 @@ impl<B: Block> FilesystemRead for Ext4<B> {
             size,
             allocated,
         })
+    }
+}
+
+impl<B: Block> FilesystemRead for Ext4<B> {
+    fn root(&self) -> NodeId {
+        NodeId::from_raw(u64::from(ROOT_INODE))
+    }
+
+    fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
+        let ino = node_inode(node)?;
+        let inode = self.read_inode(ino)?;
+        self.inode_info(&inode)
     }
 
     fn lookup(&mut self, dir: NodeId, name: &[u8]) -> Result<NodeId, DriverError> {
@@ -2510,7 +2518,7 @@ impl<B: Block> FilesystemRead for Ext4<B> {
     fn read_dir(
         &mut self,
         dir: NodeId,
-        index: u64,
+        cursor: u64,
         name_out: &mut [u8],
     ) -> Result<Option<DirEntry>, DriverError> {
         let ino = node_inode(dir)?;
@@ -2518,20 +2526,18 @@ impl<B: Block> FilesystemRead for Ext4<B> {
         if inode.kind() != Some(NodeKind::Directory) {
             return Err(DriverError::Unsupported);
         }
-        let Some(found) = self.find_entry(&inode, DirQuery::ByIndex(index), name_out)? else {
+        let Some(found) = self.find_entry(&inode, DirQuery::ByCursor(cursor), name_out)? else {
             return Ok(None);
         };
-        let kind = match found.kind {
-            Some(kind) => kind,
-            None => self
-                .read_inode(found.ino)?
-                .kind()
-                .ok_or(DriverError::DeviceFault)?,
-        };
+        // The child inode is read once here and its metadata returned with
+        // the entry, so a listing consumer never re-resolves the child by
+        // path to learn its kind or sizes.
+        let child = self.read_inode(found.ino)?;
         Ok(Some(DirEntry {
             node: NodeId::from_raw(u64::from(found.ino)),
-            kind,
+            info: self.inode_info(&child)?,
             name_len: found.name_len,
+            next_cursor: found.next_cursor,
         }))
     }
 }

@@ -340,23 +340,36 @@ pub const FS_NAME_MAX: usize = 255;
 /// One entry in the packed `fs_readdir` stream.
 ///
 /// `fs_readdir` fills the caller's buffer with consecutive records, each a
-/// fixed [`DirEntry::HEADER_LEN`]-byte header (`kind` + name length) followed
-/// by exactly `name_len` UTF-8 name bytes (no NUL). The reader walks the
-/// buffer with [`DirEntry::decode`]; the kernel writes it with
-/// [`DirEntry::encode_into`]. The packing lives here, once, so producer and
-/// consumer cannot disagree (no duplication).
+/// fixed [`DirEntry::HEADER_LEN`]-byte header (kind, name length, size,
+/// allocated bytes) followed by exactly `name_len` UTF-8 name bytes (no
+/// NUL). The reader walks the buffer with [`DirEntry::decode`]; the kernel
+/// writes it with [`DirEntry::encode_into`]. The packing lives here, once,
+/// so producer and consumer cannot disagree (no duplication).
+///
+/// The record carries each entry's `size` and `allocated` because the
+/// listing filesystem already holds the child's metadata while producing
+/// the entry; a consumer that needs per-entry sizes (`du`, `ls -l`) reads
+/// them from the one listing instead of opening and statting every child —
+/// on an uncached, authenticated volume each such stat is a full
+/// re-resolution of the child's path.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct DirEntry<'a> {
     /// Whether the entry names a regular file or a directory.
     pub kind: FileKind,
+    /// Apparent length in bytes; `0` for a directory.
+    pub size: u64,
+    /// Bytes of on-disk storage the entry's data occupies, as the mounted
+    /// format's own allocation tracking reports it (the [`FileStat`]
+    /// `allocated` field of the same node).
+    pub allocated: u64,
     /// The entry's name (UTF-8, no terminator, never empty, never `.`/`..`).
     pub name: &'a [u8],
 }
 
 impl<'a> DirEntry<'a> {
     /// Size of the fixed per-entry header: `kind(1)` + `pad(1)` +
-    /// `name_len(2)`.
-    pub const HEADER_LEN: usize = 4;
+    /// `name_len(2)` + `size(8)` + `allocated(8)`.
+    pub const HEADER_LEN: usize = 20;
 
     /// The total encoded length of this entry (header plus name).
     #[must_use]
@@ -389,6 +402,8 @@ impl<'a> DirEntry<'a> {
         let [lo, hi] = name_len_u16.to_le_bytes();
         out[2] = lo;
         out[3] = hi;
+        out[4..12].copy_from_slice(&self.size.to_le_bytes());
+        out[12..20].copy_from_slice(&self.allocated.to_le_bytes());
         out[Self::HEADER_LEN..total].copy_from_slice(self.name);
         Ok(total)
     }
@@ -420,6 +435,8 @@ impl<'a> DirEntry<'a> {
         Ok((
             Self {
                 kind,
+                size: read_u64(bytes, 4),
+                allocated: read_u64(bytes, 12),
                 name: &bytes[Self::HEADER_LEN..total],
             },
             total,
@@ -548,14 +565,18 @@ mod tests {
         let entries = [
             DirEntry {
                 kind: FileKind::Directory,
+                size: 0,
+                allocated: 4096,
                 name: b"Logs",
             },
             DirEntry {
                 kind: FileKind::Regular,
+                size: u64::MAX,
+                allocated: 0x0102_0304_0506_0708,
                 name: b"motd.txt",
             },
         ];
-        let mut buf = vec![0u8; 256];
+        let mut buf = vec![0u8; 512];
         let mut off = 0;
         for e in &entries {
             off += e.encode_into(&mut buf[off..]).expect("fits");
@@ -566,13 +587,21 @@ mod tests {
         let mut decoded = vec![];
         while cursor < total {
             let (entry, used) = DirEntry::decode(&buf[cursor..total]).expect("valid");
-            decoded.push((entry.kind, entry.name.to_vec()));
+            decoded.push((entry.kind, entry.size, entry.allocated, entry.name.to_vec()));
             cursor += used;
         }
         assert_eq!(cursor, total);
         assert_eq!(decoded.len(), 2);
-        assert_eq!(decoded[0], (FileKind::Directory, b"Logs".to_vec()));
-        assert_eq!(decoded[1], (FileKind::Regular, b"motd.txt".to_vec()));
+        assert_eq!(decoded[0], (FileKind::Directory, 0, 4096, b"Logs".to_vec()));
+        assert_eq!(
+            decoded[1],
+            (
+                FileKind::Regular,
+                u64::MAX,
+                0x0102_0304_0506_0708,
+                b"motd.txt".to_vec()
+            )
+        );
     }
 
     #[test]
@@ -580,12 +609,16 @@ mod tests {
         let mut buf = [0u8; 8];
         let empty = DirEntry {
             kind: FileKind::Regular,
+            size: 0,
+            allocated: 0,
             name: b"",
         };
         assert_eq!(empty.encode_into(&mut buf), Err(Errno::LengthOutOfRange));
         let big = vec![b'a'; FS_NAME_MAX + 1];
         let oversize = DirEntry {
             kind: FileKind::Regular,
+            size: 0,
+            allocated: 0,
             name: &big,
         };
         let mut wide = vec![0u8; FS_NAME_MAX + 8];
@@ -599,6 +632,8 @@ mod tests {
     fn dir_entry_encode_into_rejects_short_buffer() {
         let e = DirEntry {
             kind: FileKind::Regular,
+            size: 0,
+            allocated: 0,
             name: b"abcd",
         };
         let mut buf = [0u8; DirEntry::HEADER_LEN + 2];

@@ -55,7 +55,7 @@ use crate::sleeplock::SleepLock;
 
 use super::path::Path;
 use super::perm::Credentials;
-use super::service::FilesystemService;
+use super::service::{FilesystemService, ReaddirEntry};
 use super::{Vfs, VfsError};
 
 /// One backing filesystem driver registered in a [`LateFilesystem`],
@@ -592,18 +592,24 @@ where
         uid: u32,
         caps: &dyn CapabilityQuery,
         path: &str,
-    ) -> Result<Vec<(FileKind, String)>, Errno> {
+    ) -> Result<Vec<ReaddirEntry>, Errno> {
         self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
-            // Each entry's kind comes from the listing driver itself, never
-            // from a per-child path re-resolution: a child path can be
-            // covered by a *different* mount (the read-only `/System`
-            // volume's own `Logs`/`Settings` beneath the writable
-            // exceptions), and re-resolving it here would judge it against
-            // the wrong volume and fail the whole listing closed.
+            // Each entry's kind and sizes come from the listing driver
+            // itself, never from a per-child path re-resolution: a child
+            // path can be covered by a *different* mount (the read-only
+            // `/System` volume's own `Logs`/`Settings` beneath the writable
+            // exceptions), re-resolving it here would judge it against the
+            // wrong volume and fail the whole listing closed, and each
+            // re-resolution would repeat the child's full walk.
             let entries = vfs.list_via_secured(cred, path, fs)?;
             Ok(entries
                 .into_iter()
-                .map(|(kind, name)| (file_kind(kind), name))
+                .map(|(info, name)| ReaddirEntry {
+                    kind: file_kind(info.kind),
+                    size: info.size,
+                    allocated: info.allocated,
+                    name,
+                })
                 .collect())
         })
     }

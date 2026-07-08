@@ -204,17 +204,27 @@ pub struct NodeInfo {
 /// A single entry yielded by [`FilesystemRead::read_dir`].
 ///
 /// The entry's name is written into the caller-provided buffer; this
-/// struct carries the entry's identity and the number of name bytes
-/// written, keeping the read surface allocation-free.
+/// struct carries the entry's identity, its structural metadata, the
+/// number of name bytes written, and the cursor that resumes iteration
+/// after it, keeping the read surface allocation-free.
+///
+/// The entry carries the child's full [`NodeInfo`] because the driver has
+/// the child's metadata in hand while producing the entry: a listing
+/// consumer (`du`, `ls`) would otherwise re-resolve every child by path —
+/// a fresh full walk per entry on an uncached, authenticated volume.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct DirEntry {
     /// The child node's identifier.
     pub node: NodeId,
-    /// Whether the child is a directory or a regular file.
-    pub kind: NodeKind,
+    /// The child's structural metadata (kind, size, allocated bytes).
+    pub info: NodeInfo,
     /// Number of name bytes written into the caller's buffer.
     pub name_len: usize,
+    /// Opaque cursor resuming iteration at the entry *after* this one:
+    /// pass it back to [`FilesystemRead::read_dir`] to continue the
+    /// listing in O(1), never by rescanning from the start.
+    pub next_cursor: u64,
 }
 
 /// Read-only structural access to a mounted filesystem.
@@ -275,12 +285,25 @@ pub trait FilesystemRead {
     /// * [`DriverError::DeviceFault`] on an unrecoverable block read.
     fn read_at(&mut self, file: NodeId, offset: u64, buf: &mut [u8]) -> Result<usize, DriverError>;
 
-    /// Yield the `index`-th child of directory `dir`, writing the
-    /// child's name into `name_out`.
+    /// Yield the next child of directory `dir` at or after `cursor`,
+    /// writing the child's name into `name_out`.
+    ///
+    /// `cursor` is an **opaque resume token** (the `getdents` `d_off`
+    /// model): `0` starts the listing, and each returned entry carries
+    /// the [`DirEntry::next_cursor`] that continues it in O(1) — a full
+    /// listing therefore costs one bounded scan of the directory, never a
+    /// quadratic rescan from the start per entry. Tokens are meaningful
+    /// only for the directory that produced them, while it is unmodified;
+    /// after a mutation a retained token remains *safe* (bounded,
+    /// fail-closed, no panic) but the remainder of that listing is
+    /// unspecified — the caller restarts from `0` for a coherent view.
+    /// An arbitrary value that was never returned is handled the same
+    /// way: bounds-checked, yielding `Ok(None)`, a valid tail, or
+    /// [`DriverError::DeviceFault`], never undefined behaviour.
     ///
     /// Iteration order is the implementation's stable on-disk order.
-    /// Returns `Ok(None)` once `index` is past the last child, which is
-    /// how a caller detects the end of the directory.
+    /// Returns `Ok(None)` once the listing is exhausted, which is how a
+    /// caller detects the end of the directory.
     ///
     /// # Errors
     ///
@@ -291,7 +314,7 @@ pub trait FilesystemRead {
     fn read_dir(
         &mut self,
         dir: NodeId,
-        index: u64,
+        cursor: u64,
         name_out: &mut [u8],
     ) -> Result<Option<DirEntry>, DriverError>;
 }
@@ -959,13 +982,13 @@ mod tests {
         fn read_dir(
             &mut self,
             dir: NodeId,
-            index: u64,
+            cursor: u64,
             name_out: &mut [u8],
         ) -> Result<Option<DirEntry>, DriverError> {
             if dir != ROOT {
                 return Err(DriverError::Unsupported);
             }
-            if index != 0 {
+            if cursor != 0 {
                 return Ok(None);
             }
             if name_out.len() < FILE_NAME.len() {
@@ -974,8 +997,13 @@ mod tests {
             name_out[..FILE_NAME.len()].copy_from_slice(FILE_NAME);
             Ok(Some(DirEntry {
                 node: FILE,
-                kind: NodeKind::RegularFile,
+                info: NodeInfo {
+                    kind: NodeKind::RegularFile,
+                    size: FILE_BODY.len() as u64,
+                    allocated: FILE_BODY.len() as u64,
+                },
                 name_len: FILE_NAME.len(),
+                next_cursor: 1,
             }))
         }
     }
@@ -1004,8 +1032,10 @@ mod tests {
         let first = fs.read_dir(ROOT, 0, &mut name).expect("entry 0");
         let entry = first.expect("one entry");
         assert_eq!(entry.node, FILE);
+        assert_eq!(entry.info.kind, NodeKind::RegularFile);
+        assert_eq!(entry.info.size, FILE_BODY.len() as u64);
         assert_eq!(&name[..entry.name_len], FILE_NAME);
-        assert_eq!(fs.read_dir(ROOT, 1, &mut name), Ok(None));
+        assert_eq!(fs.read_dir(ROOT, entry.next_cursor, &mut name), Ok(None));
     }
 
     #[test]

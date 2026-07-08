@@ -1959,36 +1959,70 @@ impl<B: Block> FilesystemRead for Fat32<B> {
     fn read_dir(
         &mut self,
         dir: NodeId,
-        index: u64,
+        cursor: u64,
         name_out: &mut [u8],
     ) -> Result<Option<DirEntry>, DriverError> {
         if !node_is_dir(dir) {
             return Err(DriverError::Unsupported);
         }
-        let mut cursor = DirCursor {
-            cluster: node_cluster(dir),
-            intra: 0,
-            slot: 0,
-        };
-        let mut position = 0u64;
-        while let Some(entry) = self.next_entry(&mut cursor)? {
-            if position == index {
-                if name_out.len() < entry.name_len {
-                    return Err(DriverError::BufferTooSmall);
-                }
-                name_out[..entry.name_len].copy_from_slice(&entry.name[..entry.name_len]);
-                let kind = if entry.is_dir {
-                    NodeKind::Directory
-                } else {
-                    NodeKind::RegularFile
-                };
-                return Ok(Some(DirEntry {
-                    node: Self::entry_node(&entry),
-                    kind,
-                    name_len: entry.name_len,
-                }));
+        // The cursor packs the resume position as `cluster << 32 |
+        // intra-cluster slot`, so a continued listing seeks straight to the
+        // 32-byte slot after the previously returned entry instead of
+        // rescanning the chain per call; `0` starts at the directory's
+        // first cluster. An arbitrary value that was never returned stays
+        // safe: `next_entry` bounds every cluster step (a reserved or
+        // out-of-range cluster ends the walk or faults closed).
+        let mut walk = if cursor == 0 {
+            DirCursor {
+                cluster: node_cluster(dir),
+                intra: 0,
+                slot: 0,
             }
-            position += 1;
+        } else {
+            // A `u64` shifted right by 32 always fits `u32`.
+            let cluster = (cursor >> 32) as u32;
+            let intra = (cursor & u64::from(u32::MAX)) * DIR_ENTRY_LEN as u64;
+            if intra > self.layout.bytes_per_cluster {
+                return Ok(None);
+            }
+            DirCursor {
+                cluster,
+                intra,
+                slot: 0,
+            }
+        };
+        if let Some(entry) = self.next_entry(&mut walk)? {
+            if name_out.len() < entry.name_len {
+                return Err(DriverError::BufferTooSmall);
+            }
+            name_out[..entry.name_len].copy_from_slice(&entry.name[..entry.name_len]);
+            // The chain walk mirrors `node_info`: allocation is the entry's
+            // real FAT chain, and an empty file has no chain.
+            let allocated = if entry.cluster == 0 {
+                0
+            } else {
+                self.chain_len(entry.cluster)?.0 * self.layout.bytes_per_cluster
+            };
+            let info = if entry.is_dir {
+                NodeInfo {
+                    kind: NodeKind::Directory,
+                    size: 0,
+                    allocated,
+                }
+            } else {
+                NodeInfo {
+                    kind: NodeKind::RegularFile,
+                    size: u64::from(entry.size),
+                    allocated,
+                }
+            };
+            let next_cursor = (u64::from(walk.cluster) << 32) | (walk.intra / DIR_ENTRY_LEN as u64);
+            return Ok(Some(DirEntry {
+                node: Self::entry_node(&entry),
+                info,
+                name_len: entry.name_len,
+                next_cursor,
+            }));
         }
         Ok(None)
     }

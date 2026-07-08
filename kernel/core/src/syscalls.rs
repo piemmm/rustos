@@ -5182,10 +5182,12 @@ where
         // fault and fails the whole call closed (never a truncated record).
         let mut out = Vec::new();
         let mut rec = [0u8; DirEntry::HEADER_LEN + FS_NAME_MAX];
-        for (kind, name) in &entries {
+        for e in &entries {
             let entry = DirEntry {
-                kind: *kind,
-                name: name.as_bytes(),
+                kind: e.kind,
+                size: e.size,
+                allocated: e.allocated,
+                name: e.name.as_bytes(),
             };
             let written = entry.encode_into(&mut rec)?;
             out.extend_from_slice(&rec[..written]);
@@ -9434,7 +9436,7 @@ mod tests {
             uid: u32,
             caps: &dyn rustos_abi::CapabilityQuery,
             path: &str,
-        ) -> Result<alloc::vec::Vec<(rustos_abi::FileKind, alloc::string::String)>, Errno> {
+        ) -> Result<alloc::vec::Vec<crate::fs::ReaddirEntry>, Errno> {
             self.inner.readdir(uid, caps, path)
         }
 
@@ -18620,7 +18622,7 @@ mod tests {
     /// service must be `Send + Sync`.
     struct RecordingFs {
         read_data: Vec<u8>,
-        entries: Vec<(FileKind, String)>,
+        entries: Vec<crate::fs::ReaddirEntry>,
         stat: FileStat,
         open_err: Option<Errno>,
         log: std::sync::Mutex<Vec<String>>,
@@ -18708,7 +18710,7 @@ mod tests {
             uid: u32,
             _caps: &dyn rustos_abi::CapabilityQuery,
             path: &str,
-        ) -> Result<Vec<(FileKind, String)>, Errno> {
+        ) -> Result<Vec<crate::fs::ReaddirEntry>, Errno> {
             self.record(alloc::format!("readdir uid={uid} path={path}"));
             Ok(self.entries.clone())
         }
@@ -19039,8 +19041,18 @@ mod tests {
         };
         let mut mock = RecordingFs::new();
         mock.entries = alloc::vec![
-            (FileKind::Directory, alloc::string::String::from("Logs")),
-            (FileKind::Regular, alloc::string::String::from("motd")),
+            crate::fs::ReaddirEntry {
+                kind: FileKind::Directory,
+                size: 0,
+                allocated: 4096,
+                name: alloc::string::String::from("Logs"),
+            },
+            crate::fs::ReaddirEntry {
+                kind: FileKind::Regular,
+                size: 17,
+                allocated: 512,
+                name: alloc::string::String::from("motd"),
+            },
         ];
         let fs: &'static RecordingFs = Box::leak(Box::new(mock));
         let h = KernelSyscallHandlers::new(
@@ -19053,9 +19065,9 @@ mod tests {
                 .expect("open dir"),
         )
         .unwrap();
-        // Two records: (4 + 4) + (4 + 4) = 16 bytes.
+        // Two records: (20 + 4) + (20 + 4) = 48 bytes.
         let total = usize::try_from(h.fs_readdir(&ctx, fd, 0x1000, 64).expect("readdir")).unwrap();
-        assert_eq!(total, 16);
+        assert_eq!(total, 48);
         let stream = h
             .with_caller_aspace(&ctx, |space, physmap| {
                 let mut buf = alloc::vec![0u8; total];
@@ -19065,8 +19077,12 @@ mod tests {
             .expect("caller space");
         let (first, used) = DirEntry::decode(&stream).expect("first entry");
         assert_eq!(first.kind, FileKind::Directory);
+        assert_eq!(first.size, 0);
+        assert_eq!(first.allocated, 4096);
         assert_eq!(first.name, b"Logs");
         let (second, _) = DirEntry::decode(&stream[used..]).expect("second entry");
+        assert_eq!(second.size, 17);
+        assert_eq!(second.allocated, 512);
         assert_eq!(second.name, b"motd");
 
         // A buffer too small for the whole listing fails closed.

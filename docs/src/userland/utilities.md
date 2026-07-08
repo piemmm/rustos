@@ -345,8 +345,8 @@ paths, the fd-3 record, and the failure paths against in-memory
 `AGENTS.md` §16.7): it walks each path operand (default `.`) and
 reports, post-order, the storage each directory's tree occupies as
 `size<TAB>path` rows. The default measure is each node's **allocated**
-on-disk bytes — the `fs_stat` `allocated` field the mounted format
-reports — so sparse or compressed files count what they really occupy;
+on-disk bytes — the `allocated` field the mounted format reports — so
+sparse or compressed files count what they really occupy;
 `--apparent-size`/`-b` measure apparent lengths. `-a` adds a row per
 file, `-s` reports only the operands, `-c` appends a grand total, `-d`
 bounds the reported depth (sums are unaffected), `-S` excludes
@@ -355,8 +355,13 @@ subdirectories from a directory's own row, `-0` NUL-terminates rows, and
 `rustos_util::size` vocabulary (`AGENTS.md` §2.2), later selections
 winning as in GNU. The walk is an explicit frame stack (a deep tree can
 never exhaust the call stack) over the kernel-authorised `fs_*`
-syscalls; an unreachable path is diagnosed on standard error and the
-walk continues (exit `1`), an unreadable directory contributing nothing
+syscalls, and it is I/O-frugal by design: every `fs_readdir` entry
+carries the child's kind and sizes, so a directory of *n* children
+costs one open and one listing — never *n* per-child open/stat/close
+round-trips, each a fresh full path resolution on an uncached,
+authenticated volume; only operands are stat'ed individually. An
+unreachable operand is diagnosed on standard error and the walk
+continues (exit `1`), an unreadable directory contributing nothing
 rather than a guessed partial sum. RustOS has no hard links yet, so
 nothing can be counted twice and the GNU link-deduplication switches do
 not exist; `-x` awaits device identity (documented in the bundle's

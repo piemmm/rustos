@@ -213,15 +213,22 @@ fn walk_directories(fs: &mut RustFs<MemBlock>) {
         if visits > 4096 {
             break;
         }
-        let mut index = 0u64;
-        while let Ok(Some(entry)) = fs.read_dir(dir, index, &mut name) {
+        let mut cursor = 0u64;
+        let mut steps = 0u32;
+        while let Ok(Some(entry)) = fs.read_dir(dir, cursor, &mut name) {
             let len = entry.name_len.min(name.len());
             let _ = fs.lookup(dir, &name[..len]);
-            if matches!(entry.kind, NodeKind::Directory) && depth < 8 {
+            if matches!(entry.info.kind, NodeKind::Directory) && depth < 8 {
                 stack.push((entry.node, depth + 1));
             }
-            index += 1;
-            if index > 65_536 {
+            // A fuzzed image may hand back any cursor; a non-advancing one
+            // would loop forever, and the step budget bounds the rest.
+            if entry.next_cursor == cursor {
+                break;
+            }
+            cursor = entry.next_cursor;
+            steps += 1;
+            if steps > 65_536 {
                 break;
             }
         }

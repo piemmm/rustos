@@ -4621,15 +4621,11 @@ fn directory_entries_span_multiple_blocks_on_a_512_byte_volume() {
         assert!(fs.lookup(root, n).is_ok(), "{n:?} must be present");
     }
     let mut seen = 0u64;
-    let mut idx = 0u64;
+    let mut cursor = 0u64;
     let mut buf = alloc::vec![0u8; NAME_MAX];
-    while fs
-        .read_dir(root, idx, &mut buf)
-        .expect("read_dir")
-        .is_some()
-    {
+    while let Some(entry) = fs.read_dir(root, cursor, &mut buf).expect("read_dir") {
         seen += 1;
-        idx += 1;
+        cursor = entry.next_cursor;
     }
     assert_eq!(seen, names.len() as u64, "every entry enumerates back");
 }
@@ -5551,4 +5547,116 @@ fn stats_report_tracks_allocation() {
     );
     assert!(after.avail_blocks <= after.free_blocks);
     assert!(after.free_blocks <= after.total_blocks);
+}
+
+/// A [`MemBlock`] that counts device reads, so a test can assert an
+/// operation's I/O cost stays bounded (each read is a real device
+/// round-trip plus a whole-block authentication on an encrypted volume).
+struct CountingBlock {
+    inner: MemBlock,
+    reads: u64,
+}
+
+impl Block for CountingBlock {
+    fn geometry(&self) -> Result<rustos_abi::driver::block::BlockGeometry, DriverError> {
+        self.inner.geometry()
+    }
+    fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
+        self.reads += 1;
+        self.inner.read_blocks(lba, buf)
+    }
+    fn write_blocks(&mut self, lba: u64, buf: &[u8]) -> Result<(), DriverError> {
+        self.inner.write_blocks(lba, buf)
+    }
+}
+
+/// A reopened multi-block directory of `files` small files, over a
+/// counting device: the fixture for the cursor-listing tests.
+fn counted_dir_fixture(files: u32) -> (RustFs<CountingBlock>, NodeId) {
+    let mut fs = RustFs::format(
+        MemBlock::new(4096, 8192),
+        512,
+        &TEST_KEY,
+        &mut TestEntropy::new(),
+    )
+    .expect("format");
+    let root = fs.root();
+    let dir = fs.create(root, b"docs", NodeKind::Directory).expect("dir");
+    for i in 0..files {
+        let name = alloc::format!("f{i}.txt").into_bytes();
+        fs.create(dir, &name, NodeKind::RegularFile)
+            .expect("create");
+        fs.write_at(dir, &name, 0, b"hello world").expect("write");
+    }
+    fs.flush().expect("flush");
+    let bytes = fs.into_block().bytes();
+    let counting = CountingBlock {
+        inner: MemBlock::from_bytes(bytes, 4096, 8192),
+        reads: 0,
+    };
+    let fs = RustFs::open(counting, &TEST_KEY).expect("reopen");
+    (fs, dir)
+}
+
+/// A full cursor-chained listing yields every entry exactly once, in on-disk
+/// order, each carrying the child's own size and allocation, and an
+/// arbitrary cursor that was never returned ends the listing safely.
+#[test]
+fn read_dir_cursor_chain_lists_every_entry_with_its_sizes() {
+    const FILES: u32 = 96;
+    let (mut fs, dir) = counted_dir_fixture(FILES);
+    let mut name = [0u8; MAX_BLOCK_SIZE];
+    let mut seen = alloc::vec::Vec::new();
+    let mut cursor = 0u64;
+    while let Some(entry) = fs.read_dir(dir, cursor, &mut name).expect("read_dir") {
+        assert!(entry.next_cursor > cursor, "the cursor always advances");
+        assert_eq!(entry.info.kind, NodeKind::RegularFile);
+        assert_eq!(entry.info.size, b"hello world".len() as u64);
+        // One 4 KiB data block backs each 11-byte file.
+        assert_eq!(entry.info.allocated, 4096);
+        seen.push(alloc::string::String::from(
+            core::str::from_utf8(&name[..entry.name_len]).expect("utf8"),
+        ));
+        cursor = entry.next_cursor;
+    }
+    assert_eq!(seen.len(), FILES as usize, "every entry listed once");
+    seen.sort();
+    seen.dedup();
+    assert_eq!(seen.len(), FILES as usize, "no entry repeated");
+    // A cursor far past the directory ends the listing, fail closed.
+    assert_eq!(fs.read_dir(dir, u64::MAX, &mut name), Ok(None));
+}
+
+/// Resuming a listing from a returned cursor is O(1): the read cost of
+/// fetching the *last* entry directly is a small constant, independent of
+/// the entries before it — never a rescan of the whole directory.
+#[test]
+fn read_dir_resume_cost_is_independent_of_directory_position() {
+    const FILES: u32 = 96;
+    let (mut fs, dir) = counted_dir_fixture(FILES);
+    let mut name = [0u8; MAX_BLOCK_SIZE];
+    // Walk to the last entry, remembering the cursor that names it.
+    let mut cursor = 0u64;
+    let mut last_at = 0u64;
+    while let Some(entry) = fs.read_dir(dir, cursor, &mut name).expect("read_dir") {
+        last_at = cursor;
+        cursor = entry.next_cursor;
+    }
+    // Fetch the first and the last entry each from a cold counter: the two
+    // costs must match — position in the directory must not change the
+    // price of one resumed step.
+    fs.block_mut().reads = 0;
+    fs.read_dir(dir, 0, &mut name)
+        .expect("first")
+        .expect("an entry");
+    let first_cost = fs.block_mut().reads;
+    fs.block_mut().reads = 0;
+    fs.read_dir(dir, last_at, &mut name)
+        .expect("last")
+        .expect("an entry");
+    let last_cost = fs.block_mut().reads;
+    assert_eq!(
+        first_cost, last_cost,
+        "resuming at the end reads as little as resuming at the start"
+    );
 }

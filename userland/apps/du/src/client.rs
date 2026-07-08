@@ -127,12 +127,12 @@ impl Reporter<'_> {
                 Some(frame) => match frame.entries.get(frame.next).cloned() {
                     Some(entry) => {
                         frame.next += 1;
-                        Some((join(&frame.path, &entry.name), frame.depth + 1))
+                        Some((join(&frame.path, &entry.name), entry.meta, frame.depth + 1))
                     }
                     None => None,
                 },
             };
-            let Some((child_path, child_depth)) = next_child else {
+            let Some((child_path, child_meta, child_depth)) = next_child else {
                 // The top frame is exhausted: report it post-order and fold
                 // its tree total into its parent (or the grand total).
                 let Some(frame) = stack.pop() else { break };
@@ -150,13 +150,10 @@ impl Reporter<'_> {
                 }
                 continue;
             };
-            let child_meta = match self.walk.stat(&child_path) {
-                Ok(meta) => meta,
-                Err(errno) => {
-                    self.diagnose(&child_path, errno)?;
-                    continue;
-                }
-            };
+            // The child's metadata came with its directory entry: the one
+            // listing already reported it, so the walk never re-resolves a
+            // child by path (each such stat is a fresh full walk on an
+            // uncached, authenticated volume).
             if child_meta.kind == FileKind::Directory {
                 if let Some(child) = self.open_frame(&child_path, &child_meta, child_depth)? {
                     stack.push(child);
@@ -332,7 +329,7 @@ mod tests {
 
         fn read_dir(&self, path: &str) -> Result<Vec<Entry>, Errno> {
             match self.nodes.get(path) {
-                Some(Node::Dir(_, names)) => Ok(names
+                Some(Node::Dir(_, names)) => names
                     .iter()
                     .map(|name| {
                         let child = if path.ends_with('/') {
@@ -340,16 +337,15 @@ mod tests {
                         } else {
                             alloc::format!("{path}/{name}")
                         };
-                        let kind = match self.nodes.get(&child) {
-                            Some(Node::Dir(..) | Node::Unlistable(_)) => FileKind::Directory,
-                            _ => FileKind::Regular,
-                        };
-                        Entry {
+                        // The listing reports each child's metadata, as the
+                        // production `fs_readdir` stream does.
+                        let meta = self.stat(&child)?;
+                        Ok(Entry {
                             name: name.clone(),
-                            kind,
-                        }
+                            meta,
+                        })
                     })
-                    .collect()),
+                    .collect(),
                 Some(Node::Unlistable(_)) => Err(Errno::PermissionDenied),
                 _ => Err(Errno::NotFound),
             }
@@ -483,20 +479,17 @@ mod tests {
     }
 
     #[test]
-    fn an_unreachable_path_is_diagnosed_and_the_walk_continues() {
+    fn an_unreachable_operand_is_diagnosed_and_the_walk_continues() {
         let fs = MemFs::new(&[
-            (
-                "docs",
-                Node::Dir(512, alloc::vec!["gone".to_string(), "a".to_string()]),
-            ),
+            ("docs", Node::Dir(512, alloc::vec!["a".to_string()])),
             ("docs/a", Node::File(100, 1024)),
-            ("docs/gone", Node::Denied(Errno::PermissionDenied)),
+            ("gone", Node::Denied(Errno::PermissionDenied)),
         ]);
-        let (clean, out, err) = run_case(&["docs"], &fs);
+        let (clean, out, err) = run_case(&["gone", "docs"], &fs);
         assert!(!clean, "a diagnosed path makes the run unclean");
-        // The reachable content is still counted: 512 + 1024 = 1536 B → 2.
+        // The reachable operand is still counted: 512 + 1024 = 1536 B → 2.
         assert_eq!(out, "2\tdocs\n");
-        assert!(err.contains("docs/gone"));
+        assert!(err.contains("gone"));
         assert!(err.contains("cannot access"));
     }
 

@@ -16,9 +16,12 @@ fn readdir_lists_created_children() {
     vfs.mkdir_via_secured(&owner, &vol_path("gamma"), &mut fs)
         .expect("mkdir gamma");
 
-    let mut names = vfs
+    let mut names: Vec<(NodeKind, String)> = vfs
         .list_via_secured(&owner, &path(MOUNT), &mut fs)
-        .expect("list mount root");
+        .expect("list mount root")
+        .into_iter()
+        .map(|(info, name)| (info.kind, name))
+        .collect();
     names.sort_by(|a, b| a.1.cmp(&b.1));
     assert_eq!(
         names,

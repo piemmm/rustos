@@ -513,6 +513,8 @@ fn structured_fs_inputs_with_corrupted_fields_never_panic() {
     let mut dirent = [0u8; DirEntry::HEADER_LEN + 5];
     DirEntry {
         kind: FileKind::Directory,
+        size: 0,
+        allocated: 4096,
         name: b"inbox",
     }
     .encode_into(&mut dirent)

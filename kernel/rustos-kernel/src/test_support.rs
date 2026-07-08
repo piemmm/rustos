@@ -164,11 +164,11 @@ impl FilesystemRead for MockRootFs {
     fn read_dir(
         &mut self,
         dir: NodeId,
-        index: u64,
+        cursor: u64,
         name_out: &mut [u8],
     ) -> Result<Option<DirEntry>, DriverError> {
         let n = self.nodes.get(&dir.raw()).ok_or(DriverError::NotFound)?;
-        let Ok(index) = usize::try_from(index) else {
+        let Ok(index) = usize::try_from(cursor) else {
             return Ok(None);
         };
         let Some((name, child_id)) = n.children.get(index) else {
@@ -178,12 +178,15 @@ impl FilesystemRead for MockRootFs {
         if bytes.len() > name_out.len() {
             return Err(DriverError::LengthOutOfRange);
         }
-        name_out[..bytes.len()].copy_from_slice(bytes);
-        let kind = self.nodes.get(child_id).ok_or(DriverError::NotFound)?.kind;
+        let name_len = bytes.len();
+        name_out[..name_len].copy_from_slice(bytes);
+        let child_id = *child_id;
+        let info = self.node_info(NodeId::from_raw(child_id))?;
         Ok(Some(DirEntry {
-            node: NodeId::from_raw(*child_id),
-            kind,
-            name_len: bytes.len(),
+            node: NodeId::from_raw(child_id),
+            info,
+            name_len,
+            next_cursor: cursor + 1,
         }))
     }
 }

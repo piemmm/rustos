@@ -2343,6 +2343,50 @@ reflink independence, acorn preset round-trip).
 
 ---
 
+## Stage 5 follow-up — filesystem path-walk performance (uncached first-access cost)
+
+RustOS runs its filesystems uncached by design (first-access speed is the
+product requirement), so every block read is a device round-trip plus a
+whole-block HMAC verification. That makes redundant reads a first-order
+cost: a measured depth-4 `fs_open` walk performed 38 block reads, and a
+directory listing was O(n²) (each `read_dir(index)` rescanned from entry
+0 while `du`-style tools then re-opened and re-statted every child, a
+full path walk per child).
+
+**Done (landed with the cursor-listing change):**
+- `FilesystemRead::read_dir` takes an opaque resume cursor (`getdents`
+  `d_off` model): a full listing is one bounded scan; a stale or
+  arbitrary cursor is bounds-checked and fail-closed. All four
+  implementations (rustfs, ext4, fat32, in-RAM mock) resume in O(1).
+- The driver `DirEntry` carries the child's full `NodeInfo`, the service
+  `ReaddirEntry` and the wire record carry `size`/`allocated`, and `du`
+  sums a directory from the one listing (one open + one readdir per
+  directory instead of `n` open/stat/close round-trips).
+- The delegated listing fails closed on a non-advancing driver cursor,
+  and rustfs regression tests pin the O(1)-resume read cost and the
+  per-entry metadata.
+
+**Remaining (staged, each its own change):**
+- **Descriptor→node binding.** An open descriptor stores the resolved
+  node + access grant, not the path string: today every `fs_read`/
+  `fs_write`/`fs_stat`/`fs_readdir` on an fd re-resolves the full path
+  through the secured VFS. POSIX semantics (check at open, use the
+  grant thereafter) require the descriptor to hold the authorised node;
+  revocation semantics must be designed with it.
+- **Single-descent secured walk.** The delegate's per-component
+  `lookup` + `node_info` + `security` triple re-reads the same inodes
+  via separate B-tree descents (~9 reads per component measured on
+  rustfs); a combined driver resolve step should read each inode once
+  (~2× fewer reads per open).
+- **Per-block MAC cost on target hardware.** Every metadata read pays an
+  HMAC-SHA256 over the whole block in software (Pi 4 has no ARMv8
+  crypto extensions). If on-hardware measurement shows the MAC (not the
+  device round-trip) dominating after the walk fixes, evaluate a faster
+  audited keyed hash for the block authenticator (an on-disk format
+  change; pre-release, so it evolves in place).
+
+---
+
 ## Stage 6 — Userland Foundations
 
 **Dependencies:** Stages 2–5 sufficient for at least one platform.

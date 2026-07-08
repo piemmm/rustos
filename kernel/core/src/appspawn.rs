@@ -333,13 +333,14 @@ impl<'a> FsBundleStore<'a> {
         } else {
             format!("{root}/{rel_dir}")
         };
-        for (kind, name) in self.fs.readdir(self.uid, self.caps, &abs_dir)? {
+        for entry in self.fs.readdir(self.uid, self.caps, &abs_dir)? {
+            let name = entry.name;
             let rel = if rel_dir.is_empty() {
                 name.clone()
             } else {
                 format!("{rel_dir}/{name}")
             };
-            match kind {
+            match entry.kind {
                 FileKind::Regular => {
                     if rel == "AppInfo" {
                         continue;
@@ -369,7 +370,7 @@ impl BundleStore for FsBundleStore<'_> {
             .fs
             .readdir(self.uid, self.caps, bundle)?
             .into_iter()
-            .map(|(_, name)| name)
+            .map(|entry| entry.name)
             .collect())
     }
 

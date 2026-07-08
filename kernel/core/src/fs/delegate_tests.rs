@@ -3,6 +3,7 @@
 //! permission template applied at the mount point.
 
 use alloc::string::String;
+use alloc::vec::Vec;
 
 use crate::fs::{Mode, Path, Vfs, VfsError};
 
@@ -113,32 +114,31 @@ impl FilesystemRead for MockFs {
     fn read_dir(
         &mut self,
         dir: NodeId,
-        index: u64,
+        cursor: u64,
         name_out: &mut [u8],
     ) -> Result<Option<DirEntry>, DriverError> {
-        let entries: &[(&[u8], u64, NodeKind)] = match dir.raw() {
-            ROOT => &[
-                (b"docs", DOCS, NodeKind::Directory),
-                (b"kernel.img", KERNEL, NodeKind::RegularFile),
-            ],
-            DOCS => &[(b"readme.txt", README, NodeKind::RegularFile)],
+        let entries: &[(&[u8], u64)] = match dir.raw() {
+            ROOT => &[(b"docs", DOCS), (b"kernel.img", KERNEL)],
+            DOCS => &[(b"readme.txt", README)],
             KERNEL | README => return Err(DriverError::Unsupported),
             _ => return Err(DriverError::NotFound),
         };
-        let Ok(i) = usize::try_from(index) else {
+        let Ok(i) = usize::try_from(cursor) else {
             return Ok(None);
         };
-        let Some(&(name, node, kind)) = entries.get(i) else {
+        let Some(&(name, node)) = entries.get(i) else {
             return Ok(None);
         };
         if name_out.len() < name.len() {
             return Err(DriverError::BufferTooSmall);
         }
         name_out[..name.len()].copy_from_slice(name);
+        let info = self.node_info(NodeId::from_raw(node))?;
         Ok(Some(DirEntry {
             node: NodeId::from_raw(node),
-            kind,
+            info,
             name_len: name.len(),
+            next_cursor: cursor + 1,
         }))
     }
 }
@@ -189,10 +189,10 @@ impl FilesystemRead for BadFs {
     fn read_dir(
         &mut self,
         dir: NodeId,
-        index: u64,
+        cursor: u64,
         name_out: &mut [u8],
     ) -> Result<Option<DirEntry>, DriverError> {
-        if dir.raw() != ROOT || index != 0 {
+        if dir.raw() != ROOT || cursor != 0 {
             return Ok(None);
         }
         // A name that is not valid UTF-8.
@@ -200,8 +200,13 @@ impl FilesystemRead for BadFs {
         name_out[1] = 0xff;
         Ok(Some(DirEntry {
             node: NodeId::from_raw(DOCS),
-            kind: NodeKind::RegularFile,
+            info: NodeInfo {
+                kind: NodeKind::RegularFile,
+                size: 0,
+                allocated: 0,
+            },
             name_len: 2,
+            next_cursor: 1,
         }))
     }
 }
@@ -268,8 +273,12 @@ fn delegated_list_of_mount_point_lists_driver_root() {
     let names = vfs
         .list_via(&admin, &p("/Storage/usb0"), &mut fs)
         .expect("list mount root");
+    let kinds: Vec<(NodeKind, String)> = names
+        .into_iter()
+        .map(|(info, name)| (info.kind, name))
+        .collect();
     assert_eq!(
-        names,
+        kinds,
         [
             (NodeKind::Directory, String::from("docs")),
             (NodeKind::RegularFile, String::from("kernel.img")),
@@ -286,7 +295,19 @@ fn delegated_list_of_subdir() {
     let names = vfs
         .list_via(&admin, &p("/Storage/usb0/docs"), &mut fs)
         .expect("list subdir");
-    assert_eq!(names, [(NodeKind::RegularFile, String::from("readme.txt"))]);
+    let entries: Vec<(NodeKind, u64, String)> = names
+        .into_iter()
+        .map(|(info, name)| (info.kind, info.size, name))
+        .collect();
+    // The listing carries the child's own size, read once by the driver.
+    assert_eq!(
+        entries,
+        [(
+            NodeKind::RegularFile,
+            README_BODY.len() as u64,
+            String::from("readme.txt")
+        )]
+    );
 }
 
 #[test]
@@ -472,7 +493,11 @@ fn delegated_mkdir_then_create_inside() {
     let names = vfs
         .list_via(&admin, &p("/Storage/usb0/sub"), &mut fs)
         .expect("list");
-    assert_eq!(names, [(NodeKind::RegularFile, String::from("inner.bin"))]);
+    let kinds: Vec<(NodeKind, String)> = names
+        .into_iter()
+        .map(|(info, name)| (info.kind, name))
+        .collect();
+    assert_eq!(kinds, [(NodeKind::RegularFile, String::from("inner.bin"))]);
 }
 
 #[test]
@@ -746,10 +771,10 @@ impl FilesystemRead for SecMockFs {
     fn read_dir(
         &mut self,
         dir: NodeId,
-        index: u64,
+        cursor: u64,
         name_out: &mut [u8],
     ) -> Result<Option<DirEntry>, DriverError> {
-        if dir.raw() != ROOT || index != 0 {
+        if dir.raw() != ROOT || cursor != 0 {
             return Ok(None);
         }
         let name = b"secret.txt";
@@ -759,8 +784,13 @@ impl FilesystemRead for SecMockFs {
         name_out[..name.len()].copy_from_slice(name);
         Ok(Some(DirEntry {
             node: NodeId::from_raw(SECRET_FILE),
-            kind: NodeKind::RegularFile,
+            info: NodeInfo {
+                kind: NodeKind::RegularFile,
+                size: SECRET_BODY.len() as u64,
+                allocated: SECRET_BODY.len() as u64,
+            },
             name_len: name.len(),
+            next_cursor: 1,
         }))
     }
 }
@@ -845,7 +875,11 @@ fn secured_list_of_mount_root_lists_driver_root() {
     let names = vfs
         .list_via_secured(&admin, &p("/Storage/usb0"), &mut fs)
         .expect("secured list");
-    assert_eq!(names, [(NodeKind::RegularFile, String::from("secret.txt"))]);
+    let kinds: Vec<(NodeKind, String)> = names
+        .into_iter()
+        .map(|(info, name)| (info.kind, name))
+        .collect();
+    assert_eq!(kinds, [(NodeKind::RegularFile, String::from("secret.txt"))]);
 }
 
 #[test]
@@ -867,5 +901,75 @@ fn secured_write_honours_per_inode_parent_permission() {
     assert_eq!(
         vfs.create_via_secured(&admin, &p("/Storage/usb0/b.txt"), &mut fs),
         Err(VfsError::PermissionDenied)
+    );
+}
+
+/// A driver whose directory cursor never advances, exercising the delegated
+/// listing's no-progress guard: a corrupt directory must fail the listing
+/// closed, never spin the kernel forever.
+struct StuckCursorFs;
+
+impl FilesystemRead for StuckCursorFs {
+    fn root(&self) -> NodeId {
+        NodeId::from_raw(ROOT)
+    }
+
+    fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
+        if node.raw() == ROOT {
+            Ok(NodeInfo {
+                kind: NodeKind::Directory,
+                size: 0,
+                allocated: 0,
+            })
+        } else {
+            Err(DriverError::NotFound)
+        }
+    }
+
+    fn lookup(&mut self, _dir: NodeId, _name: &[u8]) -> Result<NodeId, DriverError> {
+        Err(DriverError::NotFound)
+    }
+
+    fn read_at(
+        &mut self,
+        _file: NodeId,
+        _offset: u64,
+        _buf: &mut [u8],
+    ) -> Result<usize, DriverError> {
+        Err(DriverError::Unsupported)
+    }
+
+    fn read_dir(
+        &mut self,
+        dir: NodeId,
+        cursor: u64,
+        name_out: &mut [u8],
+    ) -> Result<Option<DirEntry>, DriverError> {
+        if dir.raw() != ROOT {
+            return Err(DriverError::NotFound);
+        }
+        name_out[0] = b'x';
+        Ok(Some(DirEntry {
+            node: NodeId::from_raw(DOCS),
+            info: NodeInfo {
+                kind: NodeKind::RegularFile,
+                size: 0,
+                allocated: 0,
+            },
+            name_len: 1,
+            next_cursor: cursor,
+        }))
+    }
+}
+
+#[test]
+fn a_listing_whose_cursor_never_advances_fails_closed() {
+    let vfs = backed_vfs(0o755);
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let mut fs = StuckCursorFs;
+    assert_eq!(
+        vfs.list_via(&admin, &p("/Storage/usb0"), &mut fs),
+        Err(VfsError::Io)
     );
 }

@@ -251,24 +251,27 @@ impl<R: FilesystemRead + ?Sized, P: MetaPolicy<R>> DelegatedFs<'_, R, P> {
     }
 
     /// List the entries of the directory at `components`, in the driver's
-    /// stable on-disk order, each with the structural kind the driver
-    /// reports for it.
+    /// stable on-disk order, each with the structural [`NodeInfo`] the
+    /// driver reports for it.
     ///
-    /// The kind comes from the listing driver itself, so a caller never has
-    /// to re-resolve each child by path — a child whose *path* is shadowed
-    /// by another mount would otherwise be judged against the wrong volume.
+    /// The kind and sizes come from the listing driver itself, so a caller
+    /// never has to re-resolve each child by path — a child whose *path*
+    /// is shadowed by another mount would otherwise be judged against the
+    /// wrong volume, and on an uncached, authenticated volume every such
+    /// re-resolution is a fresh full walk.
     ///
     /// # Errors
     ///
     /// * [`VfsError::NotADirectory`] if `components` names a file.
     /// * [`VfsError::PermissionDenied`] if the node's metadata denies read.
     /// * [`VfsError::NotFound`] or [`VfsError::Io`] (the latter also for a
-    ///   directory entry whose on-disk name is not valid UTF-8).
+    ///   directory entry whose on-disk name is not valid UTF-8, or for a
+    ///   driver cursor that fails to advance).
     pub fn list(
         &mut self,
         cred: &Credentials<'_>,
         components: &[String],
-    ) -> Result<Vec<(NodeKind, String)>, VfsError> {
+    ) -> Result<Vec<(NodeInfo, String)>, VfsError> {
         let (node, info, meta) = self.resolve(cred, components)?;
         if info.kind != NodeKind::Directory {
             return Err(VfsError::NotADirectory);
@@ -277,16 +280,21 @@ impl<R: FilesystemRead + ?Sized, P: MetaPolicy<R>> DelegatedFs<'_, R, P> {
 
         let mut entries = Vec::new();
         let mut name_buf = [0u8; MAX_COMPONENT_LEN];
-        let mut index: u64 = 0;
+        let mut cursor: u64 = 0;
         while let Some(entry) = self
             .fs
-            .read_dir(node, index, &mut name_buf)
+            .read_dir(node, cursor, &mut name_buf)
             .map_err(map_driver_error)?
         {
+            // A cursor that does not move cannot make progress; fail the
+            // listing closed rather than loop on a corrupt directory.
+            if entry.next_cursor == cursor {
+                return Err(VfsError::Io);
+            }
             let name =
                 core::str::from_utf8(&name_buf[..entry.name_len]).map_err(|_| VfsError::Io)?;
-            entries.push((entry.kind, name.to_string()));
-            index += 1;
+            entries.push((entry.info, name.to_string()));
+            cursor = entry.next_cursor;
         }
         Ok(entries)
     }
