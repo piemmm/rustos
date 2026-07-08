@@ -12,7 +12,11 @@
 //! ```
 //!
 //! - The **logical content hash** ([`logical_hash`]) names the block's
-//!   *plaintext* content. It is the seam Stage 7 deduplication keys on
+//!   decrypted content: the logical block's plaintext for a raw record, or
+//!   the block's slice of the compressed cluster frame for a cluster block
+//!   (the cluster's end-to-end plaintext integrity then rests on the AEAD
+//!   plus the exact-size decompression of the authenticated frame). For raw
+//!   records it is the seam Stage 7 deduplication keys on
 //!   (`docs/src/filesystem/rustfs-spec.md` §9) and detects a corruption that
 //!   survives decryption. It is computed through `lib/crypto`'s audited
 //!   SHA-256 (never hand-rolled). The spec's fixed-v1
@@ -53,58 +57,72 @@ pub const DATA_INTEGRITY_TRAILER: usize = LOGICAL_HASH_LEN + PHYS_CHECKSUM_LEN;
 /// state* field). It sits between the crypto trailer and the logical hash, so
 /// the fast physical checksum covers it (a corrupted descriptor is caught by
 /// the first-layer check before the AEAD runs). The layout is one state
-/// byte followed by the little-endian `u32` length of the at-rest stored
-/// representation (the compressed-or-raw bytes the AEAD covers).
+/// byte followed by a little-endian `u32` whose meaning depends on the state
+/// ([`StoredForm`]).
 pub const COMPRESSION_DESCRIPTOR_LEN: usize = 1 + 4;
 
-/// Descriptor state byte for a record stored raw (compression did not win, so
-/// the content slot holds the plaintext directly,
-/// `docs/src/filesystem/rustfs-spec.md` §10).
-pub const COMPRESSION_RAW: u8 = 0;
+/// Descriptor state byte for a single-block record stored raw: the content
+/// slot holds the logical block's plaintext directly
+/// (`docs/src/filesystem/rustfs-spec.md` §10).
+const STORED_RAW: u8 = 0;
 
-/// Descriptor state byte for a record stored compressed with the first-party
-/// codec (`rustos_compress`).
-pub const COMPRESSION_LZ: u8 = 1;
+/// Descriptor state byte for the **first** stored block of a compressed
+/// cluster: its `u32` field carries the whole compressed frame's byte length.
+const STORED_CLUSTER_HEAD: u8 = 1;
 
-/// Whether a data record's stored representation is compressed, and how many
-/// bytes of the content slot that representation occupies.
+/// Descriptor state byte for a **continuation** stored block of a compressed
+/// cluster: its `u32` field carries the block's 1-based position within the
+/// cluster's stored run.
+const STORED_CLUSTER_PART: u8 = 2;
+
+/// How a data block's content slot stores its record
+/// (`docs/src/filesystem/rustfs-spec.md` §10 compressed extents).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct Compression {
-    /// `true` when the content slot holds an `rustos_compress` frame; `false`
-    /// when it holds the plaintext raw.
-    pub compressed: bool,
-    /// Bytes of the content slot the stored representation occupies: the
-    /// compressed frame length, or the full logical capacity when raw.
-    pub stored_len: u32,
+pub enum StoredForm {
+    /// Single-block record: the content slot holds the logical block's
+    /// plaintext raw.
+    Raw,
+    /// First stored block of a compressed cluster; `frame_len` is the byte
+    /// length of the whole compressed frame spanning the cluster's stored
+    /// blocks.
+    ClusterHead {
+        /// Byte length of the compressed frame across the stored run.
+        frame_len: u32,
+    },
+    /// Continuation stored block of a compressed cluster; `index` is its
+    /// 1-based position within the cluster's stored run.
+    ClusterPart {
+        /// 1-based position of this block within the stored run.
+        index: u32,
+    },
 }
 
-/// Serialise a [`Compression`] descriptor into the first
+/// Serialise a [`StoredForm`] descriptor into the first
 /// [`COMPRESSION_DESCRIPTOR_LEN`] bytes of `dst`. The caller guarantees
 /// `dst.len() >= COMPRESSION_DESCRIPTOR_LEN`.
-pub fn write_compression(dst: &mut [u8], desc: Compression) {
-    dst[0] = if desc.compressed {
-        COMPRESSION_LZ
-    } else {
-        COMPRESSION_RAW
+pub fn write_stored_form(dst: &mut [u8], form: StoredForm) {
+    let (state, value) = match form {
+        StoredForm::Raw => (STORED_RAW, 0),
+        StoredForm::ClusterHead { frame_len } => (STORED_CLUSTER_HEAD, frame_len),
+        StoredForm::ClusterPart { index } => (STORED_CLUSTER_PART, index),
     };
-    dst[1..5].copy_from_slice(&desc.stored_len.to_le_bytes());
+    dst[0] = state;
+    dst[1..5].copy_from_slice(&value.to_le_bytes());
 }
 
-/// Parse a [`Compression`] descriptor from the first
-/// [`COMPRESSION_DESCRIPTOR_LEN`] bytes of `src`. An unknown state byte is
-/// rejected as corruption (fail closed). The caller
-/// guarantees `src.len() >= COMPRESSION_DESCRIPTOR_LEN`.
-pub fn read_compression(src: &[u8]) -> Result<Compression, DataFault> {
-    let compressed = match src[0] {
-        COMPRESSION_RAW => false,
-        COMPRESSION_LZ => true,
-        _ => return Err(DataFault::Logical),
-    };
-    let stored_len = u32::from_le_bytes([src[1], src[2], src[3], src[4]]);
-    Ok(Compression {
-        compressed,
-        stored_len,
-    })
+/// Parse a [`StoredForm`] descriptor from the first
+/// [`COMPRESSION_DESCRIPTOR_LEN`] bytes of `src`. An unknown state byte, a
+/// non-zero raw field, a zero-length frame, or a zero part index is rejected
+/// as corruption (fail closed). The caller guarantees
+/// `src.len() >= COMPRESSION_DESCRIPTOR_LEN`.
+pub fn read_stored_form(src: &[u8]) -> Result<StoredForm, DataFault> {
+    let value = u32::from_le_bytes([src[1], src[2], src[3], src[4]]);
+    match src[0] {
+        STORED_RAW if value == 0 => Ok(StoredForm::Raw),
+        STORED_CLUSTER_HEAD if value != 0 => Ok(StoredForm::ClusterHead { frame_len: value }),
+        STORED_CLUSTER_PART if value != 0 => Ok(StoredForm::ClusterPart { index: value }),
+        _ => Err(DataFault::Logical),
+    }
 }
 
 /// Which integrity layer rejected a data block. Surfaced to the caller as a
@@ -124,9 +142,10 @@ pub enum DataFault {
     Logical,
 }
 
-/// The logical content hash of a data block's `plaintext` region: the SHA-256
+/// The logical content hash of a data block's decrypted content: the SHA-256
 /// digest, through `lib/crypto`. Identical content hashes identically (the
-/// Stage 7 dedupe seam); a single flipped plaintext byte hashes differently.
+/// Stage 7 dedupe seam keys on it for raw records); a single flipped byte
+/// hashes differently.
 #[must_use]
 pub fn logical_hash(plaintext: &[u8]) -> [u8; LOGICAL_HASH_LEN] {
     sha256(plaintext)
@@ -148,7 +167,31 @@ pub fn physical_checksum(bytes: &[u8]) -> [u8; PHYS_CHECKSUM_LEN] {
 
 #[cfg(test)]
 mod tests {
-    use super::{logical_hash, physical_checksum, LOGICAL_HASH_LEN, PHYS_CHECKSUM_LEN};
+    use super::{
+        logical_hash, physical_checksum, read_stored_form, write_stored_form, DataFault,
+        StoredForm, COMPRESSION_DESCRIPTOR_LEN, LOGICAL_HASH_LEN, PHYS_CHECKSUM_LEN,
+    };
+
+    #[test]
+    fn stored_form_round_trips_and_rejects_undefined_descriptors() {
+        let forms = [
+            StoredForm::Raw,
+            StoredForm::ClusterHead { frame_len: 12_345 },
+            StoredForm::ClusterPart { index: 7 },
+        ];
+        for form in forms {
+            let mut buf = [0u8; COMPRESSION_DESCRIPTOR_LEN];
+            write_stored_form(&mut buf, form);
+            assert_eq!(read_stored_form(&buf), Ok(form));
+        }
+        // Unknown state byte.
+        assert_eq!(read_stored_form(&[3, 0, 0, 0, 0]), Err(DataFault::Logical));
+        // A raw descriptor never carries a value.
+        assert_eq!(read_stored_form(&[0, 1, 0, 0, 0]), Err(DataFault::Logical));
+        // A zero frame length or part index is meaningless.
+        assert_eq!(read_stored_form(&[1, 0, 0, 0, 0]), Err(DataFault::Logical));
+        assert_eq!(read_stored_form(&[2, 0, 0, 0, 0]), Err(DataFault::Logical));
+    }
 
     #[test]
     fn logical_hash_is_stable_and_content_sensitive() {

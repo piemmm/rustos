@@ -37,8 +37,10 @@ use rustos_crypto::{ct_eq, hmac_sha256, MacKey, MacTag, MAC_TAG_LEN};
 pub const HEADER_MAGIC: u64 = 0x5255_5354_4653_4203;
 
 /// On-disk format version understood by this build. A volume written by a
-/// different version is refused rather than misread.
-pub const FORMAT_VERSION: u32 = 1;
+/// different version is refused rather than misread. Version 2 widened the
+/// extent record to carry a physical length and a compressed flag
+/// (`docs/src/filesystem/rustfs-spec.md` §10 compressed extents).
+pub const FORMAT_VERSION: u32 = 2;
 
 /// Fixed size of a metadata-block header, in bytes. The payload of a block
 /// begins at this offset. It is large enough to hold the 32-byte keyed
@@ -394,6 +396,21 @@ mod tests {
         let other: MacKey = [0x17u8; MAC_TAG_LEN];
         assert_eq!(
             BlockHeader::decode_verify(&block, BlockType::TxnRoot, UUID, 100, &other),
+            Err(DriverError::DeviceFault)
+        );
+    }
+
+    #[test]
+    fn a_different_format_version_is_refused() {
+        // Patch the version field and re-seal the authenticator so *only*
+        // the version differs: a volume written by another format version is
+        // refused rather than misread, even when otherwise intact.
+        let mut block = sealed();
+        block[H_VERSION..H_VERSION + 4].copy_from_slice(&(FORMAT_VERSION + 1).to_le_bytes());
+        let tag = mac_tag(&KEY, &block);
+        block[H_MAC..H_MAC_END].copy_from_slice(&tag);
+        assert_eq!(
+            BlockHeader::decode_verify(&block, BlockType::TxnRoot, UUID, 100, &KEY),
             Err(DriverError::DeviceFault)
         );
     }

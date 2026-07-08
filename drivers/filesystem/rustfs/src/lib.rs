@@ -62,6 +62,7 @@ use rustos_fsmeta::{AttrFlags, AttrKey, AttrSet};
 
 mod btree;
 mod check;
+mod cluster;
 mod crypto;
 mod dedupe;
 mod discard;
@@ -84,7 +85,7 @@ pub use crypto::{EntropySource, VolumeKey, VOLUME_KEY_LEN};
 pub use discard::{TrimReport, TRIM_BATCH_RANGES};
 pub use health::{HealthReport, HealthState, HealthThresholds};
 use integrity::{
-    logical_hash, physical_checksum, read_compression, write_compression, Compression, DataFault,
+    logical_hash, physical_checksum, read_stored_form, write_stored_form, DataFault, StoredForm,
     COMPRESSION_DESCRIPTOR_LEN, DATA_INTEGRITY_TRAILER, LOGICAL_HASH_LEN, PHYS_CHECKSUM_LEN,
 };
 pub use scrub::{ScrubBudget, ScrubReport};
@@ -256,17 +257,86 @@ fn is_all_zero(buf: &[u8]) -> bool {
     buf.iter().all(|&byte| byte == 0)
 }
 
-/// Encode an extent value: physical start block followed by run length.
-fn encode_extent(phys: u64, len: u64) -> [u8; EXTENT_VALUE_LEN] {
-    let mut value = [0u8; EXTENT_VALUE_LEN];
-    value[0..8].copy_from_slice(&phys.to_le_bytes());
-    value[8..16].copy_from_slice(&len.to_le_bytes());
-    value
+/// Extent-value flag bit marking a compressed cluster extent.
+const EXTENT_FLAG_COMPRESSED: u32 = 1;
+
+/// One decoded extent-tree record: a run of logical blocks and the physical
+/// blocks that store it (`docs/src/filesystem/rustfs-spec.md` §6, §10).
+///
+/// A **raw** extent maps each logical block 1:1 onto a physical block. A
+/// **compressed** extent covers exactly one aligned compression cluster
+/// ([`COMPRESS_CLUSTER_BLOCKS`] logical blocks) whose plaintext is stored as
+/// one compressed frame in `stored < len` contiguous physical blocks, so the
+/// saved blocks are real free space.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct Extent {
+    /// First physical block of the stored run.
+    phys: u64,
+    /// Logical blocks the extent covers.
+    len: u64,
+    /// Physical blocks backing the run: `len` for a raw extent, fewer for a
+    /// compressed cluster.
+    stored: u64,
+    /// Whether the stored run holds a single compressed cluster frame.
+    compressed: bool,
 }
 
-/// Decode an extent value into `(physical start, run length)`.
-fn decode_extent(value: &[u8]) -> (u64, u64) {
-    (rd_u64(value, 0), rd_u64(value, 8))
+impl Extent {
+    /// A raw 1:1 run of `len` logical blocks at `phys`.
+    fn raw(phys: u64, len: u64) -> Self {
+        Self {
+            phys,
+            len,
+            stored: len,
+            compressed: false,
+        }
+    }
+
+    /// A compressed cluster of `len` logical blocks stored in `stored`
+    /// contiguous physical blocks at `phys`.
+    fn cluster(phys: u64, len: u64, stored: u64) -> Self {
+        Self {
+            phys,
+            len,
+            stored,
+            compressed: true,
+        }
+    }
+
+    /// Encode this extent as an on-disk value. A raw extent stores a zero
+    /// physical length (its physical length *is* `len`, and a raw run may
+    /// exceed `u32::MAX` blocks); a compressed extent stores its bounded
+    /// physical length explicitly.
+    fn encode(&self) -> [u8; EXTENT_VALUE_LEN] {
+        let mut value = [0u8; EXTENT_VALUE_LEN];
+        value[0..8].copy_from_slice(&self.phys.to_le_bytes());
+        value[8..16].copy_from_slice(&self.len.to_le_bytes());
+        if self.compressed {
+            value[16..20].copy_from_slice(&as_u32(as_usize(self.stored)).to_le_bytes());
+            value[20..24].copy_from_slice(&EXTENT_FLAG_COMPRESSED.to_le_bytes());
+        }
+        value
+    }
+
+    /// Decode an on-disk extent value, rejecting any shape the format does
+    /// not define (fail closed): unknown flags, a raw extent carrying a
+    /// stored length, or a compressed extent whose geometry is not a bounded
+    /// cluster (`0 < stored < len <= COMPRESS_CLUSTER_BLOCKS`).
+    fn decode(value: &[u8]) -> Result<Self, DriverError> {
+        let phys = rd_u64(value, 0);
+        let len = rd_u64(value, 8);
+        let stored = u64::from(rd_u32(value, 16));
+        let flags = rd_u32(value, 20);
+        match flags {
+            0 if stored == 0 => Ok(Self::raw(phys, len)),
+            EXTENT_FLAG_COMPRESSED
+                if stored > 0 && stored < len && len <= COMPRESS_CLUSTER_BLOCKS =>
+            {
+                Ok(Self::cluster(phys, len, stored))
+            }
+            _ => Err(DriverError::DeviceFault),
+        }
+    }
 }
 
 // Inode field byte offsets within a 256-byte record.
@@ -537,8 +607,16 @@ pub struct RustFs<B: Block> {
     read_only: bool,
 }
 
-/// Value width of one extent record: physical start block plus run length.
-const EXTENT_VALUE_LEN: usize = 16;
+/// Value width of one extent record: physical start block, logical run
+/// length, stored physical length, and flags ([`Extent`]).
+const EXTENT_VALUE_LEN: usize = 24;
+
+/// Logical blocks per compression cluster: the aligned unit the write path
+/// compresses as one frame (`docs/src/filesystem/rustfs-spec.md` §10). A
+/// compressed extent always covers exactly one whole cluster, so reading any
+/// byte decompresses at most this many blocks — a constant bound that keeps
+/// random access O(log n) regardless of file size.
+const COMPRESS_CLUSTER_BLOCKS: u64 = 16;
 
 /// Free blocks held back from file *data* allocation so a shrinking
 /// transaction (delete, truncate) can always copy-on-write its metadata and
@@ -564,8 +642,8 @@ fn inode_spec() -> btree::TreeSpec {
     }
 }
 
-/// A file's extent-tree record shape: a `(phys, len)` run keyed by its
-/// starting logical block, owned by inode `ino`.
+/// A file's extent-tree record shape: an [`Extent`] keyed by its starting
+/// logical block, owned by inode `ino`.
 fn extent_spec(ino: u32) -> btree::TreeSpec {
     btree::TreeSpec {
         value_len: EXTENT_VALUE_LEN,
@@ -1641,12 +1719,12 @@ impl<B: Block> RustFs<B> {
         // §5).
         let is_dir = inode.is_dir();
         for (_, value) in self.btree_collect_entries(inode.extent_root, spec)? {
-            let (phys, len) = decode_extent(&value);
-            for b in 0..len {
+            let ext = Extent::decode(&value)?;
+            for b in 0..ext.stored {
                 if is_dir {
-                    self.mark_meta_used(phys + b);
+                    self.mark_meta_used(ext.phys + b);
                 } else {
-                    self.mark_used(phys + b);
+                    self.mark_used(ext.phys + b);
                 }
             }
         }
@@ -1665,19 +1743,38 @@ impl<B: Block> RustFs<B> {
         self.total_blocks
     }
 
-    /// The data block backing logical block `bi` of `inode`, `0` for a hole.
-    /// Resolves the extent run covering `bi` with a floor lookup.
-    fn block_ptr(&mut self, inode: &Inode, bi: u64) -> Result<u64, DriverError> {
+    /// The extent covering logical block `bi` of `inode`, with its starting
+    /// logical block, or `None` for a hole. Resolves with a floor lookup on
+    /// the extent tree.
+    fn extent_lookup(
+        &mut self,
+        inode: &Inode,
+        bi: u64,
+    ) -> Result<Option<(u64, Extent)>, DriverError> {
         let spec = extent_spec(0);
         match self.btree_get_floor(inode.extent_root, bi, spec)? {
             Some((start, value)) => {
-                let (phys, len) = decode_extent(&value);
-                if bi < start + len {
-                    Ok(phys + (bi - start))
+                let ext = Extent::decode(&value)?;
+                if bi < start + ext.len {
+                    Ok(Some((start, ext)))
                 } else {
-                    Ok(0)
+                    Ok(None)
                 }
             }
+            None => Ok(None),
+        }
+    }
+
+    /// The data block backing logical block `bi` of `inode`, `0` for a hole.
+    ///
+    /// Serves the paths whose blocks are always raw 1:1 records: directory
+    /// content, and the per-block file paths after any covering compressed
+    /// cluster has been decomposed. A compressed extent has no per-block
+    /// backing, so finding one here is corruption and fails closed.
+    fn block_ptr(&mut self, inode: &Inode, bi: u64) -> Result<u64, DriverError> {
+        match self.extent_lookup(inode, bi)? {
+            Some((_, ext)) if ext.compressed => Err(DriverError::DeviceFault),
+            Some((start, ext)) => Ok(ext.phys + (bi - start)),
             None => Ok(0),
         }
     }
@@ -1691,19 +1788,25 @@ impl<B: Block> RustFs<B> {
         let Some((start, value)) = self.btree_get_floor(inode.extent_root, bi, spec)? else {
             return Ok(());
         };
-        let (phys, len) = decode_extent(&value);
-        if bi >= start + len {
+        let ext = Extent::decode(&value)?;
+        if bi >= start + ext.len {
             return Ok(());
+        }
+        // A compressed cluster has no per-block mapping to split; callers
+        // decompose it first, so covering one here is corruption. Fail closed
+        // rather than orphan the stored run.
+        if ext.compressed {
+            return Err(DriverError::DeviceFault);
         }
         inode.extent_root = self.btree_remove(inode.extent_root, start, spec)?;
         if bi > start {
-            let left = encode_extent(phys, bi - start);
+            let left = Extent::raw(ext.phys, bi - start).encode();
             inode.extent_root = self.btree_insert(inode.extent_root, start, &left, spec)?;
         }
-        let end = start + len;
+        let end = start + ext.len;
         if bi + 1 < end {
-            let rphys = phys + (bi + 1 - start);
-            let right = encode_extent(rphys, end - (bi + 1));
+            let rphys = ext.phys + (bi + 1 - start);
+            let right = Extent::raw(rphys, end - (bi + 1)).encode();
             inode.extent_root = self.btree_insert(inode.extent_root, bi + 1, &right, spec)?;
         }
         Ok(())
@@ -1727,25 +1830,27 @@ impl<B: Block> RustFs<B> {
         let mut start = bi;
         let mut phys = ptr;
         let mut len = 1u64;
+        // Only raw neighbours merge: a compressed cluster is a sealed unit
+        // whose stored run never coalesces with a 1:1 block.
         if bi > 0 {
             if let Some((ls, value)) = self.btree_get_floor(inode.extent_root, bi - 1, spec)? {
-                let (lp, ll) = decode_extent(&value);
-                if ls + ll == bi && lp + ll == ptr {
+                let left = Extent::decode(&value)?;
+                if !left.compressed && ls + left.len == bi && left.phys + left.len == ptr {
                     inode.extent_root = self.btree_remove(inode.extent_root, ls, spec)?;
                     start = ls;
-                    phys = lp;
-                    len = ll + 1;
+                    phys = left.phys;
+                    len = left.len + 1;
                 }
             }
         }
         if let Some((rs, value)) = self.btree_get_floor(inode.extent_root, bi + 1, spec)? {
-            let (rp, rl) = decode_extent(&value);
-            if rs == bi + 1 && phys + len == rp {
+            let right = Extent::decode(&value)?;
+            if !right.compressed && rs == bi + 1 && phys + len == right.phys {
                 inode.extent_root = self.btree_remove(inode.extent_root, rs, spec)?;
-                len += rl;
+                len += right.len;
             }
         }
-        let value = encode_extent(phys, len);
+        let value = Extent::raw(phys, len).encode();
         inode.extent_root = self.btree_insert(inode.extent_root, start, &value, spec)?;
         Ok(())
     }
@@ -1990,7 +2095,14 @@ impl<B: Block> RustFs<B> {
         if inode.is_dir() {
             return Ok(false);
         }
-        Ok(self.block_ptr(&inode, cand.logical)? == cand.phys)
+        // A candidate always names a raw 1:1 record; a hole or a compressed
+        // cluster now covering its logical block means it was overwritten.
+        match self.extent_lookup(&inode, cand.logical)? {
+            Some((start, ext)) if !ext.compressed => {
+                Ok(ext.phys + (cand.logical - start) == cand.phys)
+            }
+            _ => Ok(false),
+        }
     }
 
     /// Whether the data block at `phys` decodes to plaintext byte-identical to
@@ -2035,6 +2147,13 @@ impl<B: Block> RustFs<B> {
         let chunks = self.btree_collect_entries(self.chunk_tree_root, chunk_spec())?;
         for (phys, value) in chunks {
             let record = ChunkRecord::decode(&value).ok_or(DriverError::DeviceFault)?;
+            // A cluster chunk (a reflink-shared compressed extent) records the
+            // whole cluster's plaintext length, never the single-block
+            // capacity the per-block dedupe path keys on, so it can never
+            // satisfy a per-block lookup. Skip it.
+            if u64::from(record.length) != self.data_capacity() {
+                continue;
+            }
             let referrers = self.reverse_refs(phys)?;
             let Some(&(ino, bi)) = referrers.first() else {
                 return Err(DriverError::DeviceFault);
@@ -2070,33 +2189,18 @@ impl<B: Block> RustFs<B> {
         self.logical_hash_offset() + LOGICAL_HASH_LEN
     }
 
-    /// Read the data block at `phys`, verify its two-layer integrity field, and
-    /// decrypt its content in place, leaving the plaintext in
-    /// `buf[..data_capacity()]` (`docs/src/filesystem/rustfs-spec.md` §6).
+    /// Read the data block at `phys`, verify its two-layer integrity field,
+    /// and decrypt its content in place, leaving the decrypted content slot in
+    /// `buf[..data_capacity()]` and returning how the record is stored
+    /// (`docs/src/filesystem/rustfs-spec.md` §6).
     ///
     /// The read path is the spec's: verify the fast physical checksum over the
     /// at-rest block first (so media corruption is caught cheaply, before the
     /// AEAD), then authenticate-and-decrypt the content, then verify the
-    /// plaintext against its stored logical hash. Each layer is kept distinct
-    /// ([`DataFault`]) even though all three surface as one frozen
-    /// [`DriverError::DeviceFault`].
-    ///
-    /// # Errors
-    ///
-    /// [`DriverError::DeviceFault`] on a read failure or on any integrity
-    /// layer failing (fail closed, never a panic).
-    fn read_data_block(&mut self, phys: u64, buf: &mut [u8]) -> Result<(), DriverError> {
-        self.read_data_block_classified(phys, buf)
-            .map_err(|_| DriverError::DeviceFault)
-    }
-
-    /// As [`read_data_block`](Self::read_data_block), but reports *which*
-    /// integrity layer rejected the block. The classification drives the Stage
-    /// 5 tests and is the seam Stage 8 scrub / Stage 11 health will record
-    /// against; production callers go through
-    /// [`read_data_block`](Self::read_data_block) and see only a fail-closed
-    /// [`DriverError::DeviceFault`].
-    fn read_data_block_classified(&mut self, phys: u64, buf: &mut [u8]) -> Result<(), DataFault> {
+    /// decrypted slot against its stored logical hash. Each layer is kept
+    /// distinct ([`DataFault`]); the classification drives the Stage 5 tests
+    /// and is the seam scrub and health record against.
+    fn open_data_block(&mut self, phys: u64, buf: &mut [u8]) -> Result<StoredForm, DataFault> {
         self.read_block(phys, buf)
             .map_err(|_| DataFault::Physical)?;
         let cap = as_usize(self.data_capacity());
@@ -2113,79 +2217,65 @@ impl<B: Block> RustFs<B> {
             decrypt_region(&self.content_key, region, &rest[..CRYPTO_TRAILER], phys)
                 .map_err(|_| DataFault::Aead)?;
         }
-        // Decompress after decrypt and before verifying the logical hash
-        // (`docs/src/filesystem/rustfs-spec.md` §6 read path). The hash always
-        // covers the recovered plaintext, so the Stage 7 dedupe seam is
-        // unaffected by whether the record was stored compressed or raw.
-        let desc = read_compression(&buf[desc_off..desc_off + COMPRESSION_DESCRIPTOR_LEN])?;
-        if desc.compressed {
-            let stored_len = as_usize(u64::from(desc.stored_len));
-            if stored_len > cap {
-                return Err(DataFault::Logical);
-            }
-            let mut plain = [0u8; MAX_BLOCK_SIZE];
-            let produced = rustos_compress::decompress(&buf[..stored_len], &mut plain[..cap])
-                .map_err(|_| DataFault::Logical)?;
-            if produced != cap {
-                return Err(DataFault::Logical);
-            }
-            buf[..cap].copy_from_slice(&plain[..cap]);
-        }
+        let form = read_stored_form(&buf[desc_off..desc_off + COMPRESSION_DESCRIPTOR_LEN])?;
         let mut expect = [0u8; LOGICAL_HASH_LEN];
         expect.copy_from_slice(&buf[hash_off..hash_off + LOGICAL_HASH_LEN]);
         if logical_hash(&buf[..cap]) != expect {
             return Err(DataFault::Logical);
         }
-        Ok(())
+        Ok(form)
     }
 
-    /// Compress the content in `buf[..data_capacity()]`, encrypt the stored
-    /// representation under the content key, seal the compression descriptor
-    /// and the data-integrity trailer (logical hash of the plaintext, then a
-    /// fast physical checksum over the at-rest bytes), and write the resulting
-    /// block to `phys`. The nonce is unique per `(phys, generation)` so
-    /// copy-on-write never reuses a `(key, nonce)` pair (`crypto` module).
+    /// Read the **raw** single-block data record at `phys`, leaving its
+    /// plaintext in `buf[..data_capacity()]`.
     ///
-    /// The pipeline is the spec's: `compress -> encrypt`
-    /// (`docs/src/filesystem/rustfs-spec.md` §6, §10). Compression runs over
-    /// the plaintext; when the compressed frame is not smaller than the
-    /// logical capacity the record is stored **raw** (a allowed adaptive
-    /// choice). Either way the full content slot is encrypted, so the crypto
-    /// and integrity layers are identical for compressed and raw records and
-    /// the logical hash always names the plaintext.
+    /// # Errors
+    ///
+    /// [`DriverError::DeviceFault`] on a read failure or on any integrity
+    /// layer failing (fail closed, never a panic).
+    fn read_data_block(&mut self, phys: u64, buf: &mut [u8]) -> Result<(), DriverError> {
+        self.read_data_block_classified(phys, buf)
+            .map_err(|_| DriverError::DeviceFault)
+    }
+
+    /// As [`read_data_block`](Self::read_data_block), but reports *which*
+    /// integrity layer rejected the block. The block must hold a raw
+    /// single-block record; a compressed-cluster block reached through a
+    /// per-block path is a wrong-shape read and classifies as a logical
+    /// fault. Production callers go through
+    /// [`read_data_block`](Self::read_data_block) and see only a fail-closed
+    /// [`DriverError::DeviceFault`].
+    fn read_data_block_classified(&mut self, phys: u64, buf: &mut [u8]) -> Result<(), DataFault> {
+        match self.open_data_block(phys, buf)? {
+            StoredForm::Raw => Ok(()),
+            StoredForm::ClusterHead { .. } | StoredForm::ClusterPart { .. } => {
+                Err(DataFault::Logical)
+            }
+        }
+    }
+
+    /// Encrypt the content slot in `buf[..data_capacity()]` under the content
+    /// key, seal the stored-form descriptor and the data-integrity trailer
+    /// (logical hash of the decrypted slot, then a fast physical checksum over
+    /// the at-rest bytes), and write the block to `phys`. The nonce is unique
+    /// per `(phys, generation)` so copy-on-write never reuses a `(key, nonce)`
+    /// pair (`crypto` module).
     ///
     /// # Errors
     ///
     /// [`DriverError::DeviceFault`] on a seal failure or a block write failure.
-    fn write_data_block(&mut self, phys: u64, buf: &mut [u8]) -> Result<(), DriverError> {
+    fn seal_data_block(
+        &mut self,
+        phys: u64,
+        buf: &mut [u8],
+        form: StoredForm,
+    ) -> Result<(), DriverError> {
         let cap = as_usize(self.data_capacity());
         let next_gen = self.generation.wrapping_add(1);
-        // The logical hash names the *plaintext*, so it is taken before both
-        // compression and encryption (`docs/src/filesystem/rustfs-spec.md` §6
-        // write path).
+        // The logical hash names the decrypted content slot, so it is taken
+        // before encryption (`docs/src/filesystem/rustfs-spec.md` §6 write
+        // path).
         let hash = logical_hash(&buf[..cap]);
-
-        // Compress the plaintext into scratch; keep it only when it wins (the
-        // frame is strictly smaller than the logical capacity), otherwise store
-        // the record raw. The content slot is always `cap` bytes — a compressed
-        // record stores fewer *at-rest* bytes but a logical block still maps one
-        // file block, so the slot is zero-padded after the compressed frame.
-        let mut scratch = [0u8; MAX_BLOCK_SIZE];
-        let desc = match rustos_compress::compress(&buf[..cap], &mut scratch[..cap]) {
-            Ok(n) if n < cap => {
-                buf[..n].copy_from_slice(&scratch[..n]);
-                buf[n..cap].fill(0);
-                Compression {
-                    compressed: true,
-                    stored_len: as_u32(n),
-                }
-            }
-            _ => Compression {
-                compressed: false,
-                stored_len: as_u32(cap),
-            },
-        };
-
         let desc_off = self.compression_desc_offset();
         let hash_off = self.logical_hash_offset();
         {
@@ -2199,18 +2289,35 @@ impl<B: Block> RustFs<B> {
             )
             .map_err(|_| DriverError::DeviceFault)?;
         }
-        write_compression(
+        write_stored_form(
             &mut buf[desc_off..desc_off + COMPRESSION_DESCRIPTOR_LEN],
-            desc,
+            form,
         );
         buf[hash_off..hash_off + LOGICAL_HASH_LEN].copy_from_slice(&hash);
         // The physical checksum covers the at-rest representation: ciphertext,
-        // crypto trailer, compression descriptor, and logical hash — everything
+        // crypto trailer, stored-form descriptor, and logical hash — everything
         // before the checksum.
         let csum_off = self.phys_checksum_offset();
         let checksum = physical_checksum(&buf[..csum_off]);
         buf[csum_off..csum_off + PHYS_CHECKSUM_LEN].copy_from_slice(&checksum);
         self.write_block(phys, buf)
+    }
+
+    /// Store the plaintext in `buf[..data_capacity()]` as a **raw**
+    /// single-block data record at `phys`.
+    ///
+    /// A single block is always stored raw: inside a fixed 1:1 block a
+    /// compressed frame frees nothing (its padding is encrypted, so not even
+    /// a lower layer could reclaim it), it only costs CPU on the hot data
+    /// path. Real space savings come from the cluster path
+    /// (`cluster` module), which stores a whole compressed cluster in fewer
+    /// physical blocks (`docs/src/filesystem/rustfs-spec.md` §10).
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::DeviceFault`] on a seal failure or a block write failure.
+    fn write_data_block(&mut self, phys: u64, buf: &mut [u8]) -> Result<(), DriverError> {
+        self.seal_data_block(phys, buf, StoredForm::Raw)
     }
 
     /// Free every physical run backing `inode` (number `ino`) and every node
@@ -2223,12 +2330,16 @@ impl<B: Block> RustFs<B> {
         let spec = extent_spec(ino);
         let is_dir = inode.is_dir();
         for (start, value) in self.btree_collect_entries(inode.extent_root, spec)? {
-            let (phys, len) = decode_extent(&value);
-            for b in 0..len {
+            let ext = Extent::decode(&value)?;
+            if ext.compressed {
+                self.release_cluster(&ext, ino, start)?;
+                continue;
+            }
+            for b in 0..ext.len {
                 if is_dir {
-                    self.free_meta(phys + b);
+                    self.free_meta(ext.phys + b);
                 } else {
-                    self.release_block_ref(phys + b, ino, start + b)?;
+                    self.release_block_ref(ext.phys + b, ino, start + b)?;
                 }
             }
         }
@@ -2426,18 +2537,34 @@ impl<B: Block> RustFs<B> {
         while pos < end {
             let bi = pos / cap;
             let within = as_usize(pos % cap);
-            let chunk = as_usize((cap - within as u64).min(end - pos));
-            let ptr = self.block_ptr(inode, bi)?;
-            if ptr == 0 {
-                for byte in &mut out[done..done + chunk] {
-                    *byte = 0;
+            match self.extent_lookup(inode, bi)? {
+                // A compressed cluster serves everything it covers from one
+                // bounded decompression.
+                Some((start, ext)) if ext.compressed => {
+                    let plain = self.read_data_cluster(&ext)?;
+                    let cluster_off = as_usize(bi - start) * as_usize(cap) + within;
+                    let chunk = (plain.len() - cluster_off).min(as_usize(end - pos));
+                    out[done..done + chunk]
+                        .copy_from_slice(&plain[cluster_off..cluster_off + chunk]);
+                    done += chunk;
+                    pos += chunk as u64;
                 }
-            } else {
-                self.read_data_block(ptr, &mut data)?;
-                out[done..done + chunk].copy_from_slice(&data[within..within + chunk]);
+                Some((start, ext)) => {
+                    let chunk = as_usize((cap - within as u64).min(end - pos));
+                    self.read_data_block(ext.phys + (bi - start), &mut data)?;
+                    out[done..done + chunk].copy_from_slice(&data[within..within + chunk]);
+                    done += chunk;
+                    pos += chunk as u64;
+                }
+                None => {
+                    let chunk = as_usize((cap - within as u64).min(end - pos));
+                    for byte in &mut out[done..done + chunk] {
+                        *byte = 0;
+                    }
+                    done += chunk;
+                    pos += chunk as u64;
+                }
             }
-            done += chunk;
-            pos += chunk as u64;
         }
         Ok(done)
     }
@@ -2454,13 +2581,20 @@ impl<B: Block> RustFs<B> {
         let entries = self.btree_collect_entries(inode.extent_root, extent_spec(ino))?;
         let mut blocks = 0u64;
         for (_, value) in &entries {
-            let (_, len) = decode_extent(value);
-            blocks = blocks.saturating_add(len);
+            let ext = Extent::decode(value)?;
+            blocks = blocks.saturating_add(ext.stored);
         }
         Ok(blocks.saturating_mul(self.block_size as u64))
     }
 
     /// Copy-on-write `data` into file `inode` (number `ino`) at `offset`.
+    ///
+    /// A span that covers a whole aligned compression cluster takes the
+    /// cluster route ([`store_cluster`](Self::store_cluster)): compressed
+    /// into fewer physical blocks when that wins, per-block otherwise. Any
+    /// compressed cluster the write only partially covers is first
+    /// decomposed back into per-block records (bounded work), then the
+    /// ordinary per-block copy-on-write path proceeds.
     fn write_file(
         &mut self,
         inode: &mut Inode,
@@ -2479,12 +2613,27 @@ impl<B: Block> RustFs<B> {
         if end.div_ceil(cap) > self.max_file_blocks() {
             return Err(DriverError::LengthOutOfRange);
         }
+        let cluster_bytes = capu * as_usize(COMPRESS_CLUSTER_BLOCKS);
         let mut done = 0usize;
         let mut pos = offset;
         let mut blk = [0u8; MAX_BLOCK_SIZE];
         while done < data.len() {
             let bi = pos / cap;
             let within = as_usize(pos % cap);
+            if within == 0
+                && bi % COMPRESS_CLUSTER_BLOCKS == 0
+                && data.len() - done >= cluster_bytes
+            {
+                self.store_cluster(inode, ino, bi, &data[done..done + cluster_bytes])?;
+                done += cluster_bytes;
+                pos += cluster_bytes as u64;
+                continue;
+            }
+            if let Some((start, ext)) = self.extent_lookup(inode, bi)? {
+                if ext.compressed {
+                    self.decompose_cluster(inode, ino, start, &ext)?;
+                }
+            }
             let chunk = (capu - within).min(data.len() - done);
             let old_ptr = self.block_ptr(inode, bi)?;
             for byte in &mut blk[..capu] {
@@ -2513,10 +2662,25 @@ impl<B: Block> RustFs<B> {
         }
         if size < inode.size {
             let keep = size.div_ceil(cap);
+            // A compressed cluster straddling the cut cannot be trimmed per
+            // block: decompose it first, then trim its raw remainder.
+            if let Some((start, ext)) = self.extent_lookup(inode, keep)? {
+                if ext.compressed && start < keep {
+                    self.decompose_cluster(inode, ino, start, &ext)?;
+                }
+            }
             self.free_extent_tail(inode, ino, keep)?;
             let tail = as_usize(size % cap);
             if tail != 0 {
                 let bi = size / cap;
+                // A fully kept cluster whose last block holds the partial
+                // tail must also be decomposed before that block is
+                // rewritten per block.
+                if let Some((start, ext)) = self.extent_lookup(inode, bi)? {
+                    if ext.compressed {
+                        self.decompose_cluster(inode, ino, start, &ext)?;
+                    }
+                }
                 let old_ptr = self.block_ptr(inode, bi)?;
                 if old_ptr != 0 {
                     let mut blk = [0u8; MAX_BLOCK_SIZE];
@@ -2542,18 +2706,29 @@ impl<B: Block> RustFs<B> {
     ) -> Result<(), DriverError> {
         let spec = extent_spec(ino);
         for (start, value) in self.btree_collect_entries(inode.extent_root, spec)? {
-            let (phys, len) = decode_extent(&value);
-            let end = start + len;
+            let ext = Extent::decode(&value)?;
+            let end = start + ext.len;
             if end <= keep {
                 continue;
             }
             let cut = keep.max(start);
+            if ext.compressed {
+                // The caller decomposes a straddled cluster before freeing
+                // the tail, so a compressed extent here is cut whole; a
+                // partial cut would orphan stored blocks. Fail closed.
+                if cut > start {
+                    return Err(DriverError::DeviceFault);
+                }
+                self.release_cluster(&ext, ino, start)?;
+                inode.extent_root = self.btree_remove(inode.extent_root, start, spec)?;
+                continue;
+            }
             for b in cut..end {
-                self.release_block_ref(phys + (b - start), ino, b)?;
+                self.release_block_ref(ext.phys + (b - start), ino, b)?;
             }
             inode.extent_root = self.btree_remove(inode.extent_root, start, spec)?;
             if cut > start {
-                let head = encode_extent(phys, cut - start);
+                let head = Extent::raw(ext.phys, cut - start).encode();
                 inode.extent_root = self.btree_insert(inode.extent_root, start, &head, spec)?;
             }
         }
@@ -2696,13 +2871,17 @@ impl<B: Block> RustFs<B> {
         }
         let mut dst = Inode::empty(KIND_FILE, src.sec, now);
         let dst_ino = self.alloc_inode(&dst)?;
-        let cap = self.data_capacity();
-        for bi in 0..src.size.div_ceil(cap) {
-            let src_ptr = self.block_ptr(&src, bi)?;
-            if src_ptr == 0 {
+        // Walk the source's extents: a raw run shares per block, a compressed
+        // cluster shares its whole stored run in one reference.
+        for (start, value) in self.btree_collect_entries(src.extent_root, extent_spec(src_ino))? {
+            let ext = Extent::decode(&value)?;
+            if ext.compressed {
+                self.clone_cluster_ref(src_ino, &mut dst, dst_ino, start, &ext)?;
                 continue;
             }
-            self.clone_block_ref(src_ino, &mut dst, dst_ino, bi, src_ptr)?;
+            for b in 0..ext.len {
+                self.clone_block_ref(src_ino, &mut dst, dst_ino, start + b, ext.phys + b)?;
+            }
         }
         dst.size = src.size;
         // A reflink is a copy, so it carries the source's extended attributes.

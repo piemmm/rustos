@@ -837,13 +837,14 @@ fn file_with_many_noncontiguous_extents_round_trips() {
 
 #[test]
 fn large_contiguous_write_collapses_to_few_extents() {
-    // A single sequential write lands in contiguous physical blocks, so the
-    // run-merging extent map keeps it to one record, not one per block.
+    // A single sequential write of incompressible data lands in contiguous
+    // physical blocks through the per-block path, so the run-merging extent
+    // map keeps it to one record, not one per block.
     let mut fs = fmt(4096, 4096, 64);
     let root = fs.root();
     fs.create(root, b"big", NodeKind::RegularFile)
         .expect("create");
-    let body = alloc::vec![0x7Eu8; 4096 * 64];
+    let body = incompressible(4096 * 64);
     assert_eq!(fs.write_at(root, b"big", 0, &body), Ok(body.len()));
     let node = fs.lookup(root, b"big").expect("lookup");
     let ino = u32::try_from(node.raw()).unwrap();
@@ -852,6 +853,33 @@ fn large_contiguous_write_collapses_to_few_extents() {
         .btree_collect_entries(inode.extent_root, extent_spec(ino))
         .expect("walk extents");
     assert_eq!(extents.len(), 1, "contiguous write should be one extent");
+
+    // The compressible variant instead stores one bounded compressed extent
+    // per whole cluster (plus the raw tail), never one record per block.
+    fs.create(root, b"zip", NodeKind::RegularFile)
+        .expect("create zip");
+    let body = alloc::vec![0x7Eu8; 4096 * 64];
+    assert_eq!(fs.write_at(root, b"zip", 0, &body), Ok(body.len()));
+    let cap = fs.data_capacity();
+    let blocks = (body.len() as u64).div_ceil(cap);
+    let clusters = blocks / COMPRESS_CLUSTER_BLOCKS;
+    let ino = u32::try_from(fs.lookup(root, b"zip").expect("lookup").raw()).unwrap();
+    let inode = fs.read_inode(ino).expect("inode");
+    let entries = fs
+        .btree_collect_entries(inode.extent_root, extent_spec(ino))
+        .expect("walk extents");
+    let compressed = entries
+        .iter()
+        .filter(|(_, v)| Extent::decode(v).expect("decodes").compressed)
+        .count() as u64;
+    assert_eq!(
+        compressed, clusters,
+        "each whole cluster stores as one compressed extent"
+    );
+    assert!(
+        entries.len() as u64 <= clusters + 1,
+        "the raw tail merges into at most one extra run"
+    );
 }
 
 #[test]
@@ -1382,14 +1410,34 @@ fn data_block_capacity_reserves_the_integrity_trailer() {
 // Stage 6: first-party compression on the data-record pipeline.
 // ---------------------------------------------------------------------------
 
-/// Read the on-disk compression descriptor of file `name`'s logical block
-/// `bi` (the data-record compression-state field).
-fn stored_compression(fs: &mut RustFs<MemBlock>, name: &[u8], bi: u64) -> Compression {
-    let phys = data_block_phys(fs, name, bi);
+/// Read the on-disk stored-form descriptor of the data block at `phys`.
+fn stored_form_at(fs: &mut RustFs<MemBlock>, phys: u64) -> StoredForm {
     let mut raw = [0u8; MAX_BLOCK_SIZE];
     fs.read_block(phys, &mut raw).expect("raw read");
     let off = fs.compression_desc_offset();
-    read_compression(&raw[off..off + COMPRESSION_DESCRIPTOR_LEN]).expect("descriptor parses")
+    read_stored_form(&raw[off..off + COMPRESSION_DESCRIPTOR_LEN]).expect("descriptor parses")
+}
+
+/// The extent covering logical block `bi` of file `name`, with its starting
+/// logical block.
+fn extent_of(fs: &mut RustFs<MemBlock>, name: &[u8], bi: u64) -> (u64, Extent) {
+    let node = fs.lookup(fs.root(), name).expect("lookup");
+    let ino = u32::try_from(node.raw()).unwrap();
+    let inode = fs.read_inode(ino).expect("read inode");
+    fs.extent_lookup(&inode, bi)
+        .expect("extent lookup")
+        .expect("block is mapped")
+}
+
+/// A whole-cluster payload of repeating (highly compressible) text.
+fn compressible_cluster(fs: &RustFs<MemBlock>) -> alloc::vec::Vec<u8> {
+    let len = as_usize(fs.data_capacity() * COMPRESS_CLUSTER_BLOCKS);
+    let mut payload = alloc::vec::Vec::new();
+    while payload.len() < len {
+        payload.extend_from_slice(b"RustOS rustfs ");
+    }
+    payload.truncate(len);
+    payload
 }
 
 /// A pseudo-random, incompressible buffer of `len` bytes.
@@ -1404,53 +1452,76 @@ fn incompressible(len: usize) -> alloc::vec::Vec<u8> {
 }
 
 #[test]
-fn incompressible_record_is_stored_raw_and_round_trips() {
-    // Pseudo-random data does not compress, so the adaptive choice stores
-    // it raw — yet it must still read back byte-identically.
+fn single_block_records_are_stored_raw_and_round_trip() {
+    // A single-block record is always stored raw — even highly compressible
+    // content: inside a fixed 1:1 block a compressed frame frees nothing, so
+    // compressing it would burn CPU for zero benefit. Both an incompressible
+    // and a compressible block round-trip byte-identically.
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create(root, b"r", NodeKind::RegularFile)
-        .expect("create");
     let cap = as_usize(fs.data_capacity());
-    let payload = incompressible(cap);
-    assert_eq!(fs.write_at(root, b"r", 0, &payload), Ok(payload.len()));
-
-    let desc = stored_compression(&mut fs, b"r", 0);
-    assert!(!desc.compressed, "incompressible data is stored raw");
-    assert_eq!(
-        as_usize(u64::from(desc.stored_len)),
-        cap,
-        "a raw record occupies the whole content slot"
-    );
-
-    let node = fs.lookup(fs.root(), b"r").expect("file survives");
-    assert_eq!(read_all(&mut fs, node, payload.len()), payload);
+    for (name, payload) in [
+        (b"r".as_slice(), incompressible(cap)),
+        (b"c", alloc::vec![0x41u8; cap]),
+    ] {
+        fs.create(root, name, NodeKind::RegularFile)
+            .expect("create");
+        assert_eq!(fs.write_at(root, name, 0, &payload), Ok(payload.len()));
+        let phys = data_block_phys(&mut fs, name, 0);
+        assert_eq!(
+            stored_form_at(&mut fs, phys),
+            StoredForm::Raw,
+            "a single-block record is stored raw"
+        );
+        let node = fs.lookup(fs.root(), name).expect("file survives");
+        assert_eq!(read_all(&mut fs, node, payload.len()), payload);
+    }
 }
 
 #[test]
-fn compressible_record_shrinks_at_rest_and_round_trips_across_remount_and_cow() {
-    // A compressible block stores fewer at-rest bytes (the win), and reads
-    // back byte-identical across a remount and a copy-on-write rewrite, with
-    // the logical hash (Stage 7 dedupe seam) unchanged by compression.
+fn compressible_cluster_frees_blocks_and_round_trips_across_remount_and_cow() {
+    // A whole-cluster write of compressible data stores as a compressed
+    // extent occupying strictly fewer physical blocks — real freed space,
+    // the win mandatory compression exists for — and reads back
+    // byte-identical across a remount. A partial overwrite decomposes the
+    // cluster back to per-block records and still reads back correctly.
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
     fs.create(root, b"c", NodeKind::RegularFile)
         .expect("create");
     let cap = as_usize(fs.data_capacity());
-    // Three full blocks of a short repeating pattern: highly compressible.
-    let mut payload = alloc::vec::Vec::new();
-    while payload.len() < cap * 3 {
-        payload.extend_from_slice(b"RustOS rustfs ");
-    }
-    payload.truncate(cap * 3);
+    let payload = compressible_cluster(&fs);
     assert_eq!(fs.write_at(root, b"c", 0, &payload), Ok(payload.len()));
 
-    let desc = stored_compression(&mut fs, b"c", 0);
-    assert!(desc.compressed, "a repetitive block compresses");
+    let (start, ext) = extent_of(&mut fs, b"c", 0);
+    assert_eq!(start, 0, "the compressed extent is cluster-aligned");
+    assert!(ext.compressed, "a repetitive cluster compresses");
+    assert_eq!(ext.len, COMPRESS_CLUSTER_BLOCKS);
     assert!(
-        as_usize(u64::from(desc.stored_len)) < cap,
-        "a compressed record shrinks its at-rest footprint: {} >= {cap}",
-        desc.stored_len
+        ext.stored < COMPRESS_CLUSTER_BLOCKS,
+        "a compressed cluster frees whole blocks: stored {}",
+        ext.stored
+    );
+    assert!(
+        matches!(
+            stored_form_at(&mut fs, ext.phys),
+            StoredForm::ClusterHead { .. }
+        ),
+        "the first stored block identifies itself as the cluster head"
+    );
+    let node = fs.lookup(root, b"c").expect("lookup");
+    let info = fs.node_info(node).expect("info");
+    assert_eq!(info.size, payload.len() as u64);
+    assert_eq!(
+        info.allocated,
+        ext.stored * 512,
+        "allocated bytes reflect the stored run, not the logical size"
+    );
+    assert!(
+        info.allocated < info.size,
+        "compression saves real space: {} >= {}",
+        info.allocated,
+        info.size
     );
 
     let bytes = fs.into_block().bytes();
@@ -1462,12 +1533,18 @@ fn compressible_record_shrinks_at_rest_and_round_trips_across_remount_and_cow() 
         "compressed data reads back byte-identical after a remount"
     );
 
-    // A copy-on-write rewrite of a middle region re-compresses fresh blocks.
-    let patch = alloc::vec![0x5Au8; cap];
+    // A partial (one-block) overwrite decomposes the cluster back into
+    // ordinary per-block records and the file still verifies.
+    let patch = incompressible(cap);
     let at = u64::try_from(cap).unwrap();
     assert_eq!(fs.write_at(fs.root(), b"c", at, &patch), Ok(patch.len()));
     let mut expected = payload.clone();
     expected[cap..cap * 2].copy_from_slice(&patch);
+    let (_, ext) = extent_of(&mut fs, b"c", 1);
+    assert!(
+        !ext.compressed,
+        "a partially overwritten cluster decomposes to per-block records"
+    );
     let bytes = fs.into_block().bytes();
 
     let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("remount2");
@@ -1475,67 +1552,367 @@ fn compressible_record_shrinks_at_rest_and_round_trips_across_remount_and_cow() 
     assert_eq!(
         read_all(&mut fs, node, expected.len()),
         expected,
-        "compressed data verifies after a COW rewrite"
+        "decomposed data verifies after the COW rewrite"
     );
 }
 
 #[test]
-fn integrity_still_detected_on_a_compressed_block() {
-    // The Stage-5 integrity layers still guard a compressed record: a physical
-    // (media) corruption and a logical-hash mismatch are both caught and fail
-    // closed.
+fn integrity_faults_on_a_compressed_cluster_fail_closed() {
+    // The integrity layers guard every stored block of a compressed cluster:
+    // an at-rest (media) flip is a physical fault, a tampered content-slot
+    // hash is a logical fault, and the production read path fails closed on
+    // both.
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
     fs.create(root, b"c", NodeKind::RegularFile)
         .expect("create");
-    let cap = as_usize(fs.data_capacity());
-    // A *non-zero* constant block: it compresses through the normal zstd path
-    // and produces a physical record. An all-zero block is not used here
-    // because sparse handling stores it as a metadata-only hole, never a
-    // compressed data record (`.junie/SPARSE.md` §4, §9).
-    let payload = alloc::vec![0xFFu8; cap];
+    let payload = compressible_cluster(&fs);
     assert_eq!(fs.write_at(root, b"c", 0, &payload), Ok(payload.len()));
-    assert!(
-        stored_compression(&mut fs, b"c", 0).compressed,
-        "a constant block compresses"
-    );
+    let (_, ext) = extent_of(&mut fs, b"c", 0);
+    assert!(ext.compressed, "the cluster is stored compressed");
 
-    let phys = data_block_phys(&mut fs, b"c", 0);
     let csum_off = fs.phys_checksum_offset();
     let hash_off = fs.logical_hash_offset();
     let bs = 512usize;
-    let base = as_usize(phys) * bs;
+    let base = as_usize(ext.phys) * bs;
     let baseline = fs.into_block().bytes();
 
     let reopen = |bytes: alloc::vec::Vec<u8>| {
         RustFs::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("remount")
     };
 
-    // Physical: a flipped at-rest byte is caught by the fast checksum.
+    // Physical: a flipped at-rest byte in a stored block is caught by the
+    // fast checksum, and the production read path fails closed.
     {
         let mut bytes = baseline.clone();
         bytes[base] ^= 0x01;
         let mut fs = reopen(bytes);
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        let (_, ext) = extent_of(&mut fs, b"c", 0);
         assert_eq!(
-            fs.read_data_block_classified(phys, &mut buf),
-            Err(DataFault::Physical)
+            fs.read_data_cluster_classified(&ext).unwrap_err(),
+            DataFault::Physical
+        );
+        let node = fs.lookup(fs.root(), b"c").expect("lookup");
+        let mut out = [0u8; 64];
+        assert!(
+            matches!(fs.read_at(node, 0, &mut out), Err(DriverError::DeviceFault)),
+            "the production read path fails closed on a corrupt cluster"
         );
     }
-    // Logical: corrupt the stored plaintext hash and repair the checksum, so
-    // the AEAD passes but the post-decompression hash mismatches.
+    // Logical: corrupt the stored content-slot hash and repair the checksum,
+    // so the AEAD passes but the slot hash mismatches.
     {
         let mut bytes = baseline.clone();
         bytes[base + hash_off] ^= 0x01;
         let fixed = physical_checksum(&bytes[base..base + csum_off]);
         bytes[base + csum_off..base + csum_off + PHYS_CHECKSUM_LEN].copy_from_slice(&fixed);
         let mut fs = reopen(bytes);
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        let (_, ext) = extent_of(&mut fs, b"c", 0);
         assert_eq!(
-            fs.read_data_block_classified(phys, &mut buf),
-            Err(DataFault::Logical)
+            fs.read_data_cluster_classified(&ext).unwrap_err(),
+            DataFault::Logical
         );
     }
+}
+
+#[test]
+fn extent_codec_round_trips_and_rejects_undefined_shapes() {
+    // The widened extent value decodes exactly what was encoded and refuses
+    // every shape the format does not define (fail closed).
+    let raw = Extent::raw(7, 1 << 40);
+    assert_eq!(Extent::decode(&raw.encode()).expect("raw decodes"), raw);
+    let cluster = Extent::cluster(9, COMPRESS_CLUSTER_BLOCKS, 3);
+    assert_eq!(
+        Extent::decode(&cluster.encode()).expect("cluster decodes"),
+        cluster
+    );
+
+    // Unknown flag bits.
+    let mut bad = cluster.encode();
+    bad[20] = 0xFF;
+    assert_eq!(Extent::decode(&bad), Err(DriverError::DeviceFault));
+    // A compressed cluster must occupy strictly fewer stored blocks.
+    let full = Extent::cluster(9, COMPRESS_CLUSTER_BLOCKS, COMPRESS_CLUSTER_BLOCKS);
+    assert_eq!(
+        Extent::decode(&full.encode()),
+        Err(DriverError::DeviceFault)
+    );
+    let empty = Extent::cluster(9, COMPRESS_CLUSTER_BLOCKS, 0);
+    assert_eq!(
+        Extent::decode(&empty.encode()),
+        Err(DriverError::DeviceFault)
+    );
+    // ... and never cover more than one cluster.
+    let long = Extent::cluster(9, COMPRESS_CLUSTER_BLOCKS * 2, 3);
+    assert_eq!(
+        Extent::decode(&long.encode()),
+        Err(DriverError::DeviceFault)
+    );
+    // A raw extent never carries a stored length.
+    let mut crooked = Extent::raw(7, 4).encode();
+    crooked[16] = 1;
+    assert_eq!(Extent::decode(&crooked), Err(DriverError::DeviceFault));
+}
+
+#[test]
+fn all_zero_cluster_write_becomes_holes_not_a_compressed_extent() {
+    // Zero detection outranks compression: a whole-cluster write of zeroes
+    // maps nothing at all (a compressed extent would still cost blocks).
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"z", NodeKind::RegularFile)
+        .expect("create");
+    let len = as_usize(fs.data_capacity() * COMPRESS_CLUSTER_BLOCKS);
+    let zeros = alloc::vec![0u8; len];
+    assert_eq!(fs.write_at(root, b"z", 0, &zeros), Ok(len));
+    let ino = file_ino(&mut fs, b"z");
+    assert_eq!(mapped_block_count(&mut fs, ino), 0, "zeroes map nothing");
+    assert_reads_all_zero(&mut fs, b"z", len);
+}
+
+#[test]
+fn unaligned_and_sub_cluster_writes_store_per_block() {
+    // Compression clusters form only on aligned whole-cluster spans: an
+    // unaligned cluster-sized write and a small compressible file both store
+    // through the per-block raw path and round-trip.
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    let cap = fs.data_capacity();
+    let payload = compressible_cluster(&fs);
+
+    fs.create(root, b"u", NodeKind::RegularFile)
+        .expect("create u");
+    assert_eq!(
+        fs.write_at(root, b"u", cap, &payload),
+        Ok(payload.len()),
+        "cluster-sized write, one block off alignment"
+    );
+    let ino = file_ino(&mut fs, b"u");
+    let inode = fs.read_inode(ino).expect("inode");
+    for (_, value) in fs
+        .btree_collect_entries(inode.extent_root, extent_spec(ino))
+        .expect("walk extents")
+    {
+        assert!(
+            !Extent::decode(&value).expect("decodes").compressed,
+            "an unaligned span never forms a compressed extent"
+        );
+    }
+    let node = fs.lookup(root, b"u").expect("lookup");
+    let mut got = alloc::vec![0u8; payload.len()];
+    assert_eq!(fs.read_at(node, cap, &mut got), Ok(payload.len()));
+    assert_eq!(got, payload);
+
+    fs.create(root, b"s", NodeKind::RegularFile)
+        .expect("create s");
+    let small = &payload[..as_usize(cap) * 3];
+    assert_eq!(fs.write_at(root, b"s", 0, small), Ok(small.len()));
+    let (_, ext) = extent_of(&mut fs, b"s", 0);
+    assert!(!ext.compressed, "a sub-cluster file stores per block");
+}
+
+#[test]
+fn truncate_into_a_compressed_cluster_decomposes_and_keeps_the_prefix() {
+    // Cutting a file mid-cluster decomposes the cluster, frees the truncated
+    // tail, and preserves the surviving prefix byte-exactly.
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"t", NodeKind::RegularFile)
+        .expect("create");
+    let cap = fs.data_capacity();
+    let payload = compressible_cluster(&fs);
+    assert_eq!(fs.write_at(root, b"t", 0, &payload), Ok(payload.len()));
+    let (_, ext) = extent_of(&mut fs, b"t", 0);
+    assert!(ext.compressed, "starts compressed");
+
+    let keep = as_usize(cap * 5 + 17);
+    fs.truncate(root, b"t", cap * 5 + 17).expect("truncate");
+    let node = fs.lookup(root, b"t").expect("lookup");
+    assert_eq!(fs.node_info(node).expect("info").size, (keep) as u64);
+    let ino = file_ino(&mut fs, b"t");
+    let inode = fs.read_inode(ino).expect("inode");
+    for (_, value) in fs
+        .btree_collect_entries(inode.extent_root, extent_spec(ino))
+        .expect("walk extents")
+    {
+        assert!(
+            !Extent::decode(&value).expect("decodes").compressed,
+            "the straddled cluster decomposed"
+        );
+    }
+    assert_eq!(read_all(&mut fs, node, keep), payload[..keep].to_vec());
+    assert_extents_ordered_and_disjoint(&mut fs, ino);
+}
+
+#[test]
+fn overwriting_and_removing_a_compressed_cluster_returns_its_space() {
+    // A whole-cluster overwrite replaces the old stored run without leaking
+    // it, and removing the file returns every stored block to the free pool.
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    // Baseline after `create`: the directory block the new entry grew stays
+    // with the directory, so the file's own storage is what must return.
+    fs.create(root, b"w", NodeKind::RegularFile)
+        .expect("create");
+    let before_write = fs.free_count;
+    let payload = compressible_cluster(&fs);
+    assert_eq!(fs.write_at(root, b"w", 0, &payload), Ok(payload.len()));
+    let (_, first) = extent_of(&mut fs, b"w", 0);
+    assert!(first.compressed);
+
+    // Overwrite the whole cluster with different compressible content.
+    let mut second_payload = payload.clone();
+    for byte in &mut second_payload {
+        *byte = byte.wrapping_add(1);
+    }
+    assert_eq!(
+        fs.write_at(root, b"w", 0, &second_payload),
+        Ok(second_payload.len())
+    );
+    let node = fs.lookup(root, b"w").expect("lookup");
+    assert_eq!(
+        read_all(&mut fs, node, second_payload.len()),
+        second_payload
+    );
+    let (_, ext) = extent_of(&mut fs, b"w", 0);
+    assert!(ext.compressed, "the overwrite stored a fresh cluster");
+
+    // Removing the file returns its stored run to the free pool. The
+    // metadata trees may shrink further on removal, so the total may exceed
+    // the post-create baseline — it must never drop below it (a leak).
+    let (_, last) = extent_of(&mut fs, b"w", 0);
+    fs.remove(root, b"w").expect("remove");
+    for b in 0..last.stored {
+        assert!(
+            !fs.bit_used(last.phys + b),
+            "stored cluster block {b} returns to the free pool"
+        );
+    }
+    assert!(
+        fs.free_count >= before_write,
+        "no blocks leaked: {} < {before_write}",
+        fs.free_count
+    );
+    // The mount-time rebuild reproduces the same used set, so nothing was
+    // double-freed either.
+    let live = fs.used.clone();
+    let bytes = fs.into_block().bytes();
+    let fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("reopen");
+    assert_eq!(fs.used, live, "the rebuilt used set agrees after removal");
+}
+
+#[test]
+fn reflink_shares_a_compressed_cluster_and_diverges_on_write() {
+    // A reflink of a compressed file shares the stored run at cluster
+    // granularity (refcount 2, no data copied); overwriting one side
+    // copy-on-writes it while the other still reads the original bytes.
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"src", NodeKind::RegularFile)
+        .expect("create");
+    let cap = as_usize(fs.data_capacity());
+    let payload = compressible_cluster(&fs);
+    assert_eq!(fs.write_at(root, b"src", 0, &payload), Ok(payload.len()));
+    let (_, ext) = extent_of(&mut fs, b"src", 0);
+    assert!(ext.compressed);
+
+    fs.reflink(root, b"src", b"dup").expect("reflink");
+    assert_eq!(
+        fs.data_refcount(ext.phys).expect("refcount"),
+        2,
+        "the cluster is shared as one refcounted unit"
+    );
+    let (_, dup_ext) = extent_of(&mut fs, b"dup", 0);
+    assert_eq!(dup_ext, ext, "the clone maps the same stored run");
+    let node_dup = fs.lookup(root, b"dup").expect("lookup dup");
+    assert_eq!(read_all(&mut fs, node_dup, payload.len()), payload);
+
+    // Diverge: a partial write to the clone decomposes and copies, leaving
+    // the source's compressed cluster intact.
+    let patch = incompressible(cap);
+    assert_eq!(fs.write_at(root, b"dup", 0, &patch), Ok(patch.len()));
+    let mut expected = payload.clone();
+    expected[..cap].copy_from_slice(&patch);
+    let node_dup = fs.lookup(root, b"dup").expect("lookup dup");
+    assert_eq!(read_all(&mut fs, node_dup, expected.len()), expected);
+    let node_src = fs.lookup(root, b"src").expect("lookup src");
+    assert_eq!(read_all(&mut fs, node_src, payload.len()), payload);
+    let (_, src_ext) = extent_of(&mut fs, b"src", 0);
+    assert!(
+        src_ext.compressed,
+        "the source keeps its compressed cluster"
+    );
+}
+
+#[test]
+fn rebuild_scrub_and_check_agree_on_a_compressed_volume() {
+    // The mount-time free-space rebuild reproduces the live used set for a
+    // volume holding compressed clusters, raw blocks, and holes; scrub and
+    // the offline check both pass it clean.
+    let mut fs = fmt(512, 512, 32);
+    let root = fs.root();
+    let cap = fs.data_capacity();
+    fs.create(root, b"mix", NodeKind::RegularFile)
+        .expect("create");
+    let payload = compressible_cluster(&fs);
+    assert_eq!(fs.write_at(root, b"mix", 0, &payload), Ok(payload.len()));
+    // A raw tail block and a hole beyond it.
+    let tail = incompressible(as_usize(cap));
+    assert_eq!(
+        fs.write_at(root, b"mix", cap * COMPRESS_CLUSTER_BLOCKS, &tail),
+        Ok(tail.len())
+    );
+    fs.truncate(root, b"mix", cap * (COMPRESS_CLUSTER_BLOCKS + 8))
+        .expect("extend with a hole");
+    let live = fs.used.clone();
+
+    let bytes = fs.into_block().bytes();
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 512), &TEST_KEY).expect("reopen");
+    assert_eq!(
+        fs.used, live,
+        "the rebuilt free set accounts compressed extents by stored size"
+    );
+    let report = scrub_full(&mut fs);
+    assert!(report.complete, "scrub completes");
+    assert!(!report.found_faults(), "the volume is clean: {report:?}");
+    assert!(
+        report.data_blocks_checked >= 1,
+        "the cluster's stored blocks were verified"
+    );
+    let check = fs.check(&GrantAll, &NullSink).expect("check");
+    assert!(check.structure_sound, "check validates: {check:?}");
+
+    let node = fs.lookup(fs.root(), b"mix").expect("lookup");
+    assert_eq!(read_all(&mut fs, node, payload.len()), payload);
+}
+
+#[test]
+fn alloc_data_run_claims_contiguous_blocks_and_fails_closed_when_fragmented() {
+    // The run allocator returns physically contiguous claimed blocks and
+    // reports NoSpace — never a partial claim — when no gap is wide enough.
+    let mut fs = fmt(512, 64, 8);
+    fs.begin();
+    let run = fs.alloc_data_run(4).expect("run allocates");
+    for b in 0..4 {
+        assert!(fs.bit_used(run + b), "run block {b} is claimed");
+    }
+    // Fragment the remaining pool: claim every other free block, leaving no
+    // 3-block gap anywhere.
+    let mut block = RING_BLOCKS;
+    while block < fs.total_blocks {
+        if fs.bit_used(block) {
+            block += 1;
+        } else {
+            fs.claim_block(block);
+            block += 2;
+        }
+    }
+    assert_eq!(
+        fs.alloc_data_run(3),
+        Err(DriverError::NoSpace),
+        "no contiguous gap of three blocks remains"
+    );
+    fs.rollback();
 }
 
 // ---------------------------------------------------------------------------
@@ -1831,9 +2208,10 @@ fn integrity_and_compression_hold_on_a_shared_chunk() {
     }
     let shared = data_block_phys(&mut fs, b"a", 0);
     assert_eq!(fs.data_refcount(shared).expect("refcount"), 2);
-    assert!(
-        stored_compression(&mut fs, b"a", 0).compressed,
-        "the shared chunk is stored compressed"
+    assert_eq!(
+        stored_form_at(&mut fs, shared),
+        StoredForm::Raw,
+        "a shared single-block chunk is stored raw (clusters carry compression)"
     );
 
     // Round-trips across a remount.
@@ -3792,7 +4170,7 @@ fn mapped_block_count(fs: &mut RustFs<MemBlock>, ino: u32) -> u64 {
     fs.btree_collect_entries(inode.extent_root, spec)
         .expect("walk extent tree")
         .iter()
-        .map(|(_, value)| decode_extent(value).1)
+        .map(|(_, value)| Extent::decode(value).expect("extent decodes").len)
         .sum()
 }
 
@@ -3807,8 +4185,8 @@ fn assert_extents_ordered_and_disjoint(fs: &mut RustFs<MemBlock>, ino: u32) {
     let mut prev_end = 0u64;
     for (start, value) in entries {
         assert!(start >= prev_end, "extent at {start} overlaps prior run");
-        let (_, len) = decode_extent(&value);
-        prev_end = start + len;
+        let ext = Extent::decode(&value).expect("extent decodes");
+        prev_end = start + ext.len;
     }
 }
 
@@ -4112,9 +4490,11 @@ fn sparse_all_zero_bypasses_compression_but_nonzero_constant_compresses() {
         .expect("create ff");
     let ff = alloc::vec![0xFFu8; cap];
     assert_eq!(fs.write_at(root, b"ff", 0, &ff), Ok(cap));
-    assert!(
-        stored_compression(&mut fs, b"ff", 0).compressed,
-        "a repeated non-zero constant compresses through the normal path"
+    let ff_phys = data_block_phys(&mut fs, b"ff", 0);
+    assert_eq!(
+        stored_form_at(&mut fs, ff_phys),
+        StoredForm::Raw,
+        "a non-zero constant block is a raw physical record, never a hole"
     );
     let node = fs.lookup(fs.root(), b"ff").expect("lookup ff");
     assert_eq!(

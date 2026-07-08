@@ -2289,6 +2289,14 @@ tests, the 1 GiB `fssoak`, the POSIX suite, the rustfs-over-virtio_blk QEMU
 vertical, and the `fuzz_mount`/`fuzz_compress` harnesses. Per-stage legend:
 spec §18.
 
+Compression is **cluster-granular** (on-disk format v2, spec §6/§10): an
+aligned 16-block cluster stores as one compressed extent in strictly fewer
+physical blocks (`drivers/filesystem/rustfs/src/cluster.rs`), so the savings
+are real freed space; a single-block record always stores raw (inside a fixed
+1:1 block a compressed frame frees nothing, so no CPU is spent where no block
+can be freed). Partial overwrites decompose a cluster back to per-block
+records; reflinks share clusters whole; seeks stay one extent-tree descent.
+
 ---
 
 ## Stage 5 follow-up — RustFS extended file metadata (`plans/RUSTFS-METADATA.md`)

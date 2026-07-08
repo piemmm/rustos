@@ -40,8 +40,8 @@ use crate::header::{BlockType, HEADER_LEN};
 use crate::scrub::{ScrubReport, RUSTFS_RANGE_END, RUSTFS_RANGE_START};
 use crate::transaction::TxnRoot;
 use crate::{
-    as_usize, decode_extent, extent_spec, inode_spec, rd_u32, Inode, RustFs, DIRENT_SIZE,
-    MAX_BLOCK_SIZE, NAME_MAX, ROOT_INO,
+    as_usize, extent_spec, inode_spec, rd_u32, Extent, Inode, RustFs, DIRENT_SIZE, MAX_BLOCK_SIZE,
+    NAME_MAX, ROOT_INO,
 };
 
 /// An offline `check` finished and the structure validated clean.
@@ -545,10 +545,33 @@ impl<B: Block> RustFs<B> {
                 continue;
             };
             for (start, ev) in entries {
-                let (phys, len) = decode_extent(&ev);
-                for b in 0..len {
+                let Ok(ext) = Extent::decode(&ev) else {
+                    // A malformed extent value cannot name its blocks; count
+                    // one skip and keep extracting the rest of the file.
+                    report.blocks_skipped += 1;
+                    continue;
+                };
+                if ext.compressed {
+                    // A cluster extracts whole or not at all: its blocks only
+                    // exist through the decompressed frame.
+                    match self.read_data_cluster(&ext) {
+                        Ok(plain) => {
+                            for b in 0..ext.len {
+                                let slice = &plain[as_usize(b) * cap..][..cap];
+                                out.emit_block(ino, start + b, inode.size, slice);
+                                report.blocks_extracted += 1;
+                            }
+                        }
+                        Err(_) => report.blocks_skipped += ext.len,
+                    }
+                    continue;
+                }
+                for b in 0..ext.len {
                     let logical = start + b;
-                    if self.read_data_block_classified(phys + b, &mut buf).is_ok() {
+                    if self
+                        .read_data_block_classified(ext.phys + b, &mut buf)
+                        .is_ok()
+                    {
                         out.emit_block(ino, logical, inode.size, &buf[..cap]);
                         report.blocks_extracted += 1;
                     } else {

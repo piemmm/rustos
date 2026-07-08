@@ -272,6 +272,15 @@ Deduplication being enabled does not require exhaustive foreground discovery.
 It requires active bounded foreground discovery, background discovery, exact
 verification before sharing, and rebuildable dedupe metadata.
 
+> **Cluster granularity (implementation).** The compression step operates on
+> whole aligned **clusters** of 16 logical blocks, never on a single block: a
+> compressed frame stored inside one fixed 1:1 block can free nothing (its
+> padding is encrypted, so not even a lower layer could reclaim it), so a
+> single-block record is always stored raw and only a whole-cluster write is
+> compressed — into strictly fewer contiguous physical blocks, recorded as one
+> compressed extent (§10). Zero detection still runs first: an all-zero
+> cluster becomes holes, not a compressed extent.
+
 ---
 
 ## 7. Encryption
@@ -400,10 +409,17 @@ inode/range details for health, scrub, and check.
 > caught before the AEAD), authenticates-and-decrypts, then verifies the
 > logical hash over the recovered plaintext; each layer fails closed and is
 > kept internally distinct (`integrity::DataFault`). `physical location` is the
-> extent map (Stage 2). The **compression state** field lands in Stage 6 as a
-> per-block descriptor (a state byte plus the at-rest stored length) placed
-> between the crypto trailer and the logical hash, so the physical checksum
-> covers it (`drivers/filesystem/rustfs/src/integrity.rs`). `chunk id`, `chunk
+> extent map (Stage 2). The **compression state** field is the per-block
+> **stored-form descriptor** (a state byte plus a `u32`) placed between the
+> crypto trailer and the logical hash, so the physical checksum covers it
+> (`drivers/filesystem/rustfs/src/integrity.rs`): a block is a raw
+> single-block record, the head of a compressed cluster (carrying the whole
+> frame length), or a numbered continuation of one — so a misdirected or
+> reordered stored block fails closed on read. The logical hash names the
+> decrypted content slot: the plaintext for a raw record (the dedupe seam), or
+> the block's slice of the compressed frame for a cluster block, whose
+> end-to-end plaintext integrity then rests on the AEAD plus exact-size
+> decompression. `chunk id`, `chunk
 > generation`, and `encryption domain` arrive with the chunk/refcount table and
 > dedupe (Stage 7); until then a data record is named by its `(file, logical
 > block)` extent and the trailer above.
@@ -466,19 +482,35 @@ The v1 target is a low-CPU zstd-fast-style profile, not maximum ratio.
 The first-party codec must include corpus tests, known-answer tests, malformed
 input tests, and fuzz targets.
 
-> **Stage 6 implementation.** The first-party codec is the `lib/compress`
-> crate (`AGENTS.md` §16.4 lists compression as a curated shared-library
-> class): a `no_std`, allocation-free LZ77 codec with a `"RLZ1"` frame and
-> LZ4-style token sequences — no external zstd/compression dependency (§3,
-> `AGENTS.md` §2.12). RustFS compresses each file-data record before
-> encrypting it (`compress → encrypt`) and stores the record raw when the
-> compressed frame is not smaller than the logical block capacity. The read
-> path decompresses after decrypting and before verifying the logical hash, so
-> the hash still names the plaintext. *Dedupe before compression* and
-> *compress only unique records* are satisfied trivially while dedupe is
-> pending (Stage 7): every record is unique today, so every record is
-> compressed; the order is preserved (`dedupe → compress → encrypt`) for when
-> the dedupe stage lands.
+> **Implementation — cluster-aligned compressed extents.** The first-party
+> codec is the `lib/compress` crate (`AGENTS.md` §16.4 lists compression as a
+> curated shared-library class): a `no_std`, allocation-free LZ77 codec with a
+> `"RLZ1"` frame and LZ4-style token sequences — no external zstd/compression
+> dependency (§3, `AGENTS.md` §2.12). Compression operates on whole aligned
+> **clusters** of 16 logical blocks
+> (`drivers/filesystem/rustfs/src/cluster.rs`): a write covering a full
+> cluster compresses its plaintext as one frame and, when that frees at least
+> one block and a contiguous free run is available, stores it in
+> `ceil(frame / capacity) < 16` physical blocks recorded as a single
+> **compressed extent** `(phys, logical_len = 16, phys_len, compressed)` in
+> the extent tree (on-disk format version 2). Every stored block is sealed
+> exactly like a raw record (AEAD, stored-form descriptor, slot hash, physical
+> checksum), so `compress → encrypt` holds and the freed blocks are real free
+> space — `allocated` reports the stored size. Reading any byte decompresses
+> at most one bounded cluster, so random access stays one extent-tree descent
+> regardless of file size. A single-block record is always stored **raw** (a
+> compressed frame inside one fixed block frees nothing and would burn CPU on
+> the hot path for zero benefit); an all-zero cluster becomes holes (§19);
+> incompressible, unaligned, or sub-cluster writes fall back to the per-block
+> path. A partial overwrite or mid-cluster truncate first **decomposes** the
+> cluster back to per-block records (bounded work); a reflink shares a
+> compressed cluster whole, refcounted by its first physical block (§9).
+> *Dedupe before compression* and *compress only unique records* hold:
+> per-block dedupe runs on the per-block path, cluster blocks never enter the
+> dedupe index, and a missed cross-form duplicate is an allowed missed
+> opportunity (§9). Files smaller than one cluster and small streaming
+> appends therefore store raw in v1; the optional background recompression is
+> the staged answer if profiling ever justifies it.
 
 ---
 

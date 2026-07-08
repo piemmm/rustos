@@ -147,8 +147,8 @@ use crate::dedupe::{ChunkRecord, Referrer, REVERSE_REF_CAP};
 use crate::header::{BlockHeader, BlockType, HEADER_LEN};
 use crate::integrity::DataFault;
 use crate::{
-    as_usize, decode_extent, extent_spec, inode_spec, rd_u64, wr_u64, Inode, RustFs,
-    MAX_BLOCK_SIZE, ROOT_INO,
+    as_usize, extent_spec, inode_spec, rd_u64, wr_u64, Extent, Inode, RustFs, MAX_BLOCK_SIZE,
+    ROOT_INO,
 };
 
 /// Owner object stamped in the scrub-progress block header; a reserved
@@ -365,10 +365,26 @@ impl<B: Block> RustFs<B> {
         let is_dir = inode.is_dir();
         let entries = self.btree_collect_entries(inode.extent_root, spec)?;
         let mut buf = [0u8; MAX_BLOCK_SIZE];
-        for (start, value) in entries {
-            let (phys, len) = decode_extent(&value);
-            for b in 0..len {
-                let block = phys + b;
+        for (_, value) in entries {
+            let ext = Extent::decode(&value)?;
+            if ext.compressed {
+                if is_dir {
+                    // A directory never holds a compressed extent; record the
+                    // impossible shape rather than scan the wrong blocks.
+                    report.note_meta(MetaStatus::Unrepairable);
+                    continue;
+                }
+                // The whole cluster verifies in one bounded pass: every
+                // stored block's integrity layers plus the frame shape and
+                // its decompression.
+                report.data_blocks_checked += ext.stored;
+                if let Err(fault) = self.read_data_cluster_classified(&ext) {
+                    report.note_data_fault(fault);
+                }
+                continue;
+            }
+            for b in 0..ext.len {
+                let block = ext.phys + b;
                 if is_dir {
                     let status = self.scrub_meta(block, BlockType::Directory)?;
                     report.note_meta(status);
@@ -377,7 +393,6 @@ impl<B: Block> RustFs<B> {
                     if let Err(fault) = self.read_data_block_classified(block, &mut buf) {
                         report.note_data_fault(fault);
                     }
-                    let _ = start;
                 }
             }
         }
@@ -529,10 +544,16 @@ impl<B: Block> RustFs<B> {
             let ino = u32::try_from(*ino_key).map_err(|_| DriverError::DeviceFault)?;
             let spec = extent_spec(ino);
             for (start, ev) in self.btree_collect_entries(inode.extent_root, spec)? {
-                let (phys, len) = decode_extent(&ev);
-                for b in 0..len {
+                let ext = Extent::decode(&ev)?;
+                if ext.compressed {
+                    // A cluster is shared as a unit: one referrer, keyed by
+                    // its first physical block, naming its logical start.
+                    referrers.entry(ext.phys).or_default().push((ino, start));
+                    continue;
+                }
+                for b in 0..ext.len {
                     referrers
-                        .entry(phys + b)
+                        .entry(ext.phys + b)
                         .or_default()
                         .push((ino, start + b));
                 }

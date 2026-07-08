@@ -178,20 +178,23 @@ Stage-4 AEAD tag: the AEAD proves *authenticity* of the ciphertext, while this
 field gives a cheap media-corruption check plus a content-addressable name for
 the plaintext.
 
-- **Logical content hash** (32 bytes). The hash of the block's *plaintext*
-  content, taken before encryption on write and recomputed after decryption on
-  read. Identical content hashes identically — the seam Stage 7 deduplication
-  keys on (`rustfs-spec.md` §9) — and a single changed plaintext byte changes
-  it, catching a corruption that survived decryption.
+- **Logical content hash** (32 bytes). The hash of the block's decrypted
+  content slot, taken before encryption on write and recomputed after
+  decryption on read: the plaintext for a raw record — identical content
+  hashes identically, the seam Stage 7 deduplication keys on (`rustfs-spec.md`
+  §9) — or the block's slice of the compressed frame for a cluster block,
+  whose end-to-end plaintext integrity then rests on the AEAD plus the
+  exact-size decompression of the authenticated frame.
 - **Physical checksum** (8 bytes). A fast, non-cryptographic checksum over the
-  block's at-rest bytes (ciphertext + crypto trailer + compression descriptor +
+  block's at-rest bytes (ciphertext + crypto trailer + stored-form descriptor +
   logical hash). It is verified **first** on read, so media or transport bit
   rot is caught cheaply before the AEAD runs.
 
-The write path is the spec's: take the logical hash of the plaintext, compress
-then encrypt the content (see *Compression* below), then checksum the at-rest
-block. The read path reverses it: verify the physical checksum,
-decrypt-and-authenticate, decompress, then verify the logical hash.
+The write path is the spec's: take the logical hash of the content slot,
+encrypt it (a whole-cluster write compresses first — see *Compression*
+below), then checksum the at-rest block. The read path reverses it: verify
+the physical checksum, decrypt-and-authenticate, verify the logical hash,
+and decompress a compressed cluster's assembled frame.
 Each layer fails closed to a `DriverError` (never a panic, `AGENTS.md` §5.4 /
 §2.9) and is kept internally distinct (`integrity::DataFault` —
 `Physical`/`Aead`/`Logical`) so a media fault is not confused with a tamper or
@@ -214,39 +217,60 @@ AEAD and the metadata MAC.
 
 ## Compression
 
-Compression is **mandatory and always on** (`rustfs-spec.md` §1, §10): every
-file-data record is compressed before it is encrypted. The codec is
-**first-party** — the `lib/compress` crate, a `no_std`, allocation-free LZ77
-("zstd-fast-style") codec — and RustFS takes **no external zstd/compression
-dependency** (`AGENTS.md` §2.12 / §16.4; `rustfs-spec.md` §3). It is a
-low-CPU profile (a greedy hash-table match finder, LZ4-style literal/match
-tokens, no entropy stage), not a maximum-ratio one.
+Compression is **mandatory and always on** (`rustfs-spec.md` §1, §10) and
+operates at **cluster granularity** (`src/cluster.rs`, on-disk format
+version 2): a write covering a whole aligned **cluster** — 16 logical blocks —
+compresses its plaintext as one frame and, when that frees at least one
+block, stores it in `ceil(frame / capacity) < 16` contiguous physical blocks
+recorded as a single **compressed extent**. The freed blocks are genuinely
+returned to the pool — `allocated` (the `st_blocks` analogue) reports the
+stored size. The codec is **first-party** — the `lib/compress` crate, a
+`no_std`, allocation-free LZ77 ("zstd-fast-style") codec — and RustFS takes
+**no external zstd/compression dependency** (`AGENTS.md` §2.12 / §16.4;
+`rustfs-spec.md` §3). It is a low-CPU profile (a greedy hash-table match
+finder, LZ4-style literal/match tokens, no entropy stage), not a
+maximum-ratio one.
 
-On the §6 write path the order is `dedupe → compress → encrypt` (see
-*Deduplication* below — only **unique** records are compressed). The plaintext
-logical hash is taken first (it always names the plaintext and is the dedupe
-key), then, if the record is not shared with an existing chunk, it is
-compressed; when the compressed frame is
-**not smaller** than the logical block capacity the record is stored **raw**
-(the §10 adaptive choice — incompressible data is never inflated). On the read
-path the order is `physical checksum → decrypt → decompress → verify logical
-hash`; a record stored raw skips the decompress step.
+A **single-block record is always stored raw**: inside a fixed 1:1 block a
+compressed frame frees nothing (its padding is encrypted, so not even a lower
+storage layer could reclaim it), so compressing it would burn CPU on the hot
+data path for zero benefit. Zero detection outranks compression — an all-zero
+cluster becomes metadata-only holes; an incompressible, unaligned, or
+sub-cluster write falls back to the per-block path (incompressible data is
+never inflated, the §10 adaptive choice); and a fragmented volume with no
+contiguous run degrades to raw storage, never to an error. Small files and
+small streaming appends therefore store raw in v1; bulk writes (`cp`,
+installs, large buffers) get the savings, and §10's optional background
+recompression is the staged answer if profiling justifies more.
 
-Which path a record took is recorded in a per-block **compression descriptor**
+Compression never changes addressing: offsets still divide into logical
+blocks, a compressed extent covers exactly one whole cluster, and reading any
+byte decompresses at most one bounded cluster — seeks stay one extent-tree
+descent regardless of file size. A partial overwrite or mid-cluster truncate
+first **decomposes** the cluster back into ordinary per-block records
+(bounded work, fully copy-on-write), then proceeds; a whole-cluster overwrite
+replaces the stored run outright.
+
+How a block stores its record is its per-block **stored-form descriptor**
 (the §8 data-record *compression state* field, `src/integrity.rs`): one state
-byte plus the little-endian `u32` length of the at-rest stored representation.
-It sits between the crypto trailer and the logical hash, so the fast physical
+byte plus a `u32` — a raw single-block record, the **head** of a compressed
+cluster (carrying the whole frame length), or a numbered **continuation** of
+one, so a misdirected or reordered stored block fails closed on read. It sits
+between the crypto trailer and the logical hash, so the fast physical
 checksum covers it and a corrupted descriptor is caught before the AEAD runs.
 `data_capacity()` reserves it alongside the crypto and integrity trailers.
+Every stored block of a cluster is sealed exactly like a raw record (AEAD,
+descriptor, slot hash, physical checksum), so `compress → encrypt` holds and
+the crypto and integrity layers are identical for every data block.
+Decompression is panic-free: a malformed or truncated frame, a wrong stored
+form, or a wrong decompressed size returns an error (surfaced as the
+fail-closed `DriverError::DeviceFault`), never a panic (`rustfs-spec.md`
+§10, `AGENTS.md` §2.9).
 
-The whole fixed-size content slot is always encrypted regardless of whether
-the record compressed, so the Stage-4 crypto and Stage-5 integrity layers are
-**identical** for compressed and raw records — a compressed record simply
-stores fewer at-rest bytes inside the same slot, while a logical block still
-maps exactly one file block. Decompression is panic-free: a malformed or
-truncated compressed frame returns an error (surfaced as the fail-closed
-`DriverError::DeviceFault`), never a panic (`rustfs-spec.md` §10, `AGENTS.md`
-§2.9).
+On the §6 write path the order stays `dedupe → compress → encrypt` (see
+*Deduplication* below): per-block dedupe runs on the per-block path, cluster
+blocks never enter the dedupe index, and a missed cross-form duplicate is an
+allowed missed opportunity (§9 — merging is never risked).
 
 ## Deduplication
 
@@ -289,8 +313,12 @@ index be approximate without ever risking a wrong merge.
 
 A **reflink** (`RustFs::reflink`) is a copy-on-write clone of a file that
 shares every data block with its source until a side is written, when only the
-written blocks diverge. It is an inherent driver operation, not a widening of a
-frozen `Filesystem*` ABI trait (`AGENTS.md` §2.4).
+written blocks diverge. A compressed cluster is shared **whole** — one
+reference on its stored run, keyed by the extent's first physical block — and
+a write inside a shared cluster decomposes a private copy for the writer,
+leaving the other sharer's compressed extent intact. It is an inherent driver
+operation, not a widening of a frozen `Filesystem*` ABI trait (`AGENTS.md`
+§2.4).
 
 Dedupe is **scoped to the encryption domain** (`rustfs-spec.md` §7): the domain
 (derived from the volume's master key) is carried in every chunk record and in
@@ -319,7 +347,8 @@ prior physical block through the normal COW/refcount/free path — a block still
 held by a reflink, a deduped owner, or a retained recovery root stays live. A
 zero range is never entered in the dedupe index and never compressed; repeated
 *non-zero* data (e.g. `0xFF`) is not special-cased and follows the normal
-zstd/RAW path. There is no RLE/FILL mode.
+storage path (a compressed cluster where a whole aligned cluster is written,
+raw per-block otherwise). There is no RLE/FILL mode.
 
 Reads of a hole synthesise zero bytes with no disk I/O. Extending a file (a
 larger `truncate`, or a write past EOF) leaves the new range a hole; shrinking
@@ -350,8 +379,10 @@ What scrub verifies, and what it repairs versus records:
   §2.9).
 - **Data (verify + record).** Every live file-data block is run through the
   integrity read pipeline and any failure is classified by its layer —
-  `Physical` (fast checksum), `Aead` (tag), or `Logical` (plaintext hash) — and
-  **recorded**. Deep repair / reconstruction of data is a later stage; scrub
+  `Physical` (fast checksum), `Aead` (tag), or `Logical` (content hash) — and
+  **recorded**. A compressed cluster is verified end-to-end in one bounded
+  pass: every stored block's integrity layers plus the frame shape and its
+  decompression. Deep repair / reconstruction of data is a later stage; scrub
   records honestly rather than pretending to fix what it cannot.
 - **Refcounts + reverse references (verify + repair).** The chunk refcounts and
   reverse-reference sets are **recomputed from the live inode/extent trees**
