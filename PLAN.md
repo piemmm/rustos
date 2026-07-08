@@ -1905,6 +1905,25 @@ order (one fully-gated increment each):
                    parks is a separate §2.16 efficiency follow-up, not a correctness
                    blocker now that the serial drain no longer depends on the loop
                    idling.
+                 - **Console-render burst cost bounded; `ls` streams (the
+                   `ls -lsR /` UART-stutter fix).** Two defects made a large
+                   listing on the Pi 4 video console dump nothing for ~20 s and
+                   then stall the UART debug log for seconds at a time: (1)
+                   `ls` rendered the whole recursive listing into one buffer
+                   and wrote it once at the end — it now writes each directory
+                   block as it is read (`userland/apps/ls`, memory bounded by
+                   the largest single directory, never the tree); (2) the
+                   `lib/fbcon` engine scrolled the *pixels* once per line
+                   feed (a near-whole-framebuffer `copy_within` per line), so
+                   one 4 KiB `console_write` performed dozens of framebuffer
+                   copies inside a single non-preemptible syscall span,
+                   starving every other task and the serial producers. The
+                   engine is now grid-first: every `Op` mutates only the
+                   retained cell grid and the dirtied cell rect is repainted
+                   **once** per write (blank runs span-filled; the framebuffer
+                   is written, never read), so a burst's render cost is one
+                   bounded repaint. Metal re-confirmation of smooth concurrent
+                   HDMI + UART output rides the same §0.9 pass as above.
                - **P-6 — wait-queue §27 completeness rework (staged by the
                  2026-07-06 charter amendment).** Bring `kernel/core/src/waitq.rs`
                  up to the §27 bar: the primitive P-2 landed is the thinnest slice

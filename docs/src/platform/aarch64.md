@@ -456,8 +456,9 @@ the `fw_cfg`/`ramfb` fallback on the QEMU `virt` board. On the Pi:
   through one definition and this port supplies only the board-specific
   surface discovery above. Shell output is not drawn byte-for-byte: it is
   fed through the **one** streaming ANSI/VT/xterm parser in the tree
-  (`rustos_vt::Parser` — no second escape parser), and each parsed `Op` is
-  applied straight to the scan-out surface. The console therefore
+  (`rustos_vt::Parser` — no second escape parser), each parsed `Op` mutates
+  the retained cell grid, and the dirtied cells are repainted onto the
+  scan-out surface once per write. The console therefore
   *interprets*
   escape sequences instead of printing them: SGR rendition with the
   16-colour, 256-colour (`38;5;n`) and 24-bit truecolour (`38;2;r;g;b`)
@@ -471,10 +472,13 @@ the `fw_cfg`/`ramfb` fallback on the QEMU `virt` board. On the Pi:
   `0xFF00_0000 | (r<<16) | (g<<8) | b` — correct on both the mailbox
   (`Bgra8888`) and ramfb (`XRGB8888`) surfaces, whose bytes coincide.
   The engine keeps a **retained character-cell grid** (`rustos_vt::Cell`
-  per position): each write updates the grid *and* paints the surface
-  immediately, so reaching the bottom margin **scrolls both the grid and
-  the pixels up one line** (a real terminal scroll, `copy_within`), not a
-  ring-wrap. The grid is what lets the console restore the primary screen
+  per position): each write mutates the grid and the dirtied cell rect is
+  repainted from it **once** at the end of the write, so reaching the
+  bottom margin performs a real terminal scroll (grid `copy_within`), not a
+  ring-wrap — and a burst that scrolls many lines touches the framebuffer
+  once, never once per line (the per-line pixel copy made a large listing
+  monopolise the CPU for seconds on the Pi 4, starving the buffered serial
+  drain). The grid is what lets the console restore the primary screen
   when a full-screen program leaves the alternate screen (below).
   `rustos_fbcon`
   (and, through it, `lib/vt` and `lib/font`) is depended on

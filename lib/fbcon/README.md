@@ -4,14 +4,15 @@ Stability tier: **experimental**.
 
 `rustos-fbcon` is the one architecture-neutral framebuffer text console in the
 tree. It turns a byte stream into on-screen text by feeding it to the single
-shared `rustos_vt::Parser` and applying each parsed `rustos_vt::Op` straight
-onto a borrowed 32-bit scan-out surface (`&mut [u32]`), rendering glyphs with
+shared `rustos_vt::Parser`, applying each parsed `rustos_vt::Op` to a retained
+cell grid, and repainting the dirtied cells once per write onto a borrowed
+32-bit scan-out surface (`&mut [u32]`), rendering glyphs with
 the shared `rustos_font` Inconsolata EX coverage atlas (15×28 cells, 16-level
 anti-aliasing, the face's full Unicode repertoire with a U+FFFD fallback and
 two-cell double-width glyphs). It is a full ANSI/VT/xterm-256color
 terminal: SGR colour (16 / 256 / truecolour), bold, reverse video, cursor
 motion, erase, DEC scroll regions, and — reaching the bottom of the screen —
-scrolling the pixels up like a real terminal rather than wrapping ring-style.
+scrolling up like a real terminal rather than wrapping ring-style.
 
 Every architecture port (`kernel/arch/<target>`) drives its display console
 through this crate, so the terminal emulation lives in exactly one place; a
@@ -20,10 +21,19 @@ format) discovered at runtime and calls `TextConsole::write_bytes`.
 
 ## Design
 
-- **No retained cell grid.** The pixels *are* the state, so a write paints (or
-  scrolls) the surface immediately and the engine holds no per-cell buffer.
-- **Allocator-free.** The engine is `no_std` and never allocates, so a
-  freestanding boot console with no global allocator links it directly. It
+- **Retained cell grid, one repaint per write.** The engine keeps the visible
+  screen as two borrowed `rustos_vt::Cell` grids (primary + alternate). Every
+  operation mutates only the active grid, and the cell rect a write dirtied is
+  repainted from the grid **once** at the end of the write. Deferring the
+  pixels to that single repaint bounds a write's render cost: a burst that
+  scrolls the screen many times moves only the small, cache-resident grid per
+  line and touches the framebuffer once — never one whole-framebuffer copy per
+  scrolled line, which made a large console write monopolise the CPU for
+  seconds on real hardware. Runs of blank cells are span-filled rather than
+  glyph-blitted, and the framebuffer is never read, only written.
+- **Allocator-free.** The engine is `no_std` and never allocates (the grids
+  are borrowed `&mut [Cell]`), so a freestanding boot console with no global
+  allocator links it directly. It
   depends on `rustos_vt` and `rustos_font` with `default-features = false`.
 - **Host-testable.** Every operation is pure CPU pixel arithmetic over a
   borrowed slice, so the whole engine is unit-tested on the host.

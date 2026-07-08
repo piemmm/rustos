@@ -1867,14 +1867,17 @@ console".
   `xterm-256color` terminal: shell output is fed through the one shared
   streaming parser (`rustos_vt::Parser`, §2.2 — no second escape parser,
   depended `default-features = false` so only its allocation-free parser
-  view links into the allocator-free QEMU bins) and each `Op` is applied
-  straight to the scan-out surface — SGR 16/256/truecolour, bold/reverse,
+  view links into the allocator-free QEMU bins), each `Op` mutates the
+  retained cell grid, and the dirtied cells are repainted onto the
+  scan-out surface once per write — SGR 16/256/truecolour, bold/reverse,
   cursor positioning, erase, scroll region, and explicit scroll. Glyphs
   are the shared `rustos_font` Inconsolata coverage atlas (§2.2, generated
   by `cargo xtask font-atlas`) at an integer scale (`height / 1080`,
-  clamped 1…4). Reaching the bottom margin scrolls both the retained cell
-  grid and the pixels up one line (a real terminal scroll), not a ring
-  wrap.
+  clamped 1…4). Reaching the bottom margin scrolls the retained cell grid
+  up one line (a real terminal scroll), not a ring wrap; the pixels are
+  repainted once per write, never copied per scrolled line — the per-line
+  framebuffer copy made a large listing burst monopolise the CPU for
+  seconds on metal, starving the buffered serial drain.
 - Bring-up runs in the **pre-MMU** phase of
   `rustos-kernel::boot_aarch64` (caches off ⇒ the property exchange is
   DMA-coherent with no maintenance; the state cell is written by the

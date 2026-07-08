@@ -524,3 +524,54 @@ fn dirty_bands_merge_to_their_union() {
     assert_eq!(merge_bands(Some((8, 16)), None), Some((8, 16)));
     assert_eq!(merge_bands(Some((8, 16)), Some((0, 8))), Some((0, 16)));
 }
+
+// --- Batched rendering -------------------------------------------------
+
+/// One batched write and the same stream fed a byte at a time must render
+/// identical pixels: the per-batch flush is a scheduling change, never a
+/// visible one. The stream wraps, scrolls several times, and changes
+/// colour, so the grid-then-flush path is exercised across the operations
+/// a listing burst produces.
+#[test]
+fn a_batched_burst_renders_identically_to_byte_at_a_time_writes() {
+    let stream: &[u8] = b"one\r\ntwo\r\nthree3\r\n\x1b[31;44mred\x1b[0m\r\nlast";
+    let (mut batched, mut batched_px) = console_of(4, 3);
+    batched.write_bytes(&mut batched_px, stream);
+    let (mut stepped, mut stepped_px) = console_of(4, 3);
+    for byte in stream {
+        stepped.write_bytes(&mut stepped_px, core::slice::from_ref(byte));
+    }
+    assert_eq!(batched_px, stepped_px);
+}
+
+/// A burst that scrolls reports the whole scrolled region as its dirty
+/// band, so the freestanding writer cleans every scanline the flush
+/// repainted.
+#[test]
+fn a_scrolling_burst_reports_the_full_region_dirty() {
+    let (mut console, mut pixels) = console_of(1, 3);
+    let dirty = console.write_bytes(&mut pixels, b"a\r\nb\r\nc\r\nd\r\ne");
+    assert_eq!(dirty, Some((0, 3 * CELL_HEIGHT)));
+}
+
+/// Adjacent blank runs with different backgrounds each keep their own
+/// colour: the flush's span-fill fast path must break a run at a
+/// background change, never bleed one background across it.
+#[test]
+fn adjacent_blank_runs_keep_their_own_backgrounds() {
+    let (mut console, mut pixels) = console_of(4, 1);
+    // Two red-background spaces then two green-background spaces, in one
+    // burst, on one row.
+    console.write_bytes(&mut pixels, b"\x1b[41m  \x1b[42m  ");
+    let geometry = *console.geometry();
+    let red = BASIC_PALETTE[1];
+    let green = BASIC_PALETTE[2];
+    for (column, expected) in [(0, red), (1, red), (2, green), (3, green)] {
+        assert!(
+            cell(&pixels, &geometry, column, 0)
+                .iter()
+                .all(|&p| p == expected),
+            "column {column} keeps its own background"
+        );
+    }
+}
