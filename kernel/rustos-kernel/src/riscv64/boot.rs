@@ -379,17 +379,22 @@ extern "C" fn production_preempt_dispatch(cpu: rustos_arch_api::CpuId) {
 /// (U-mode *or* idle S-mode), installed via
 /// [`rustos_arch_riscv64::preempt::set_timer_callback`].
 ///
-/// It runs the blocking-wait timed-wake sweep (Design D P-2): any waiter
-/// whose finite deadline has elapsed is unparked and the one-shot is
-/// re-armed to the next pending deadline
-/// ([`rustos_kernel_core::timed_wake_sweep`]), so a finite `hw_tree_wait`
-/// timeout fires even when the hart is otherwise idle (every task parked)
-/// and takes no preemption tick. It is pure accounting
-/// (it never context-switches), so it is safe on a tick taken in S-mode;
-/// the *preemption* of a U-mode task is the separate
-/// [`production_preempt_dispatch`] U-mode-only callback.
+/// It latches the fired tick as this hart's pending preemption
+/// ([`rustos_kernel_core::note_preempt_tick`]) and runs the blocking-wait
+/// timed-wake sweep (Design D P-2): any waiter whose finite deadline has
+/// elapsed is unparked and the one-shot is re-armed to the next pending
+/// deadline ([`rustos_kernel_core::timed_wake_sweep`]), so a finite
+/// `hw_tree_wait` timeout fires even when the hart is otherwise idle
+/// (every task parked) and takes no preemption tick. Both halves are pure
+/// accounting (they never context-switch), so they are safe on a tick
+/// taken in S-mode; the *immediate* preemption of a U-mode task is the
+/// separate [`production_preempt_dispatch`] U-mode-only callback, while a
+/// tick taken in S-mode is honoured through the latch at the interrupted
+/// syscall's completion — the running task's quantum is never silently
+/// lost to a tick the non-preemptible kernel could not act on.
 #[cfg(all(freestanding, kernel_isa = "riscv64"))]
-extern "C" fn production_tick_dispatch(_cpu: rustos_arch_api::CpuId) {
+extern "C" fn production_tick_dispatch(cpu: rustos_arch_api::CpuId) {
+    rustos_kernel_core::note_preempt_tick(cpu);
     rustos_kernel_core::timed_wake_sweep();
 }
 
@@ -404,19 +409,22 @@ extern "C" fn production_tick_dispatch(_cpu: rustos_arch_api::CpuId) {
 /// the kernel-core `Irq` phase — after the scheduler is built and before
 /// `init` drops to U-mode. The kernel runs with `sstatus.SIE == 0`, so no
 /// tick is *taken* until a U-mode task runs (the privilege rule U < S),
-/// so this is **additive and non-regressing**: a tick
-/// taken in U-mode drives [`production_preempt_dispatch`], and a one-shot
-/// that ever fired in S-mode would only disarm (never preempt — the
-/// kernel is non-preemptible).
+/// so this is **additive and non-regressing**: a tick taken in U-mode
+/// drives [`production_preempt_dispatch`] immediately, and a one-shot
+/// that fires in S-mode disarms without context-switching (the kernel is
+/// non-preemptible) but is latched by [`production_tick_dispatch`] and
+/// honoured when the interrupted syscall completes — an expired quantum
+/// is never silently lost.
 ///
 /// No *scheduler-fairness* tick callback is installed: EEVDF is tickless
 /// (fairness is advanced inside `Scheduler::step`, not by a periodic
 /// count). The per-tick callback that *is* installed
-/// ([`production_tick_dispatch`]) runs only the blocking-wait timed-wake
-/// sweep (Design D P-2): it releases any elapsed `hw_tree_wait`-style
-/// waiter and re-arms the one-shot to the next deadline, so the SBI timer
-/// is armed only for a real pending event — a preemption quantum and/or
-/// the nearest wakeup — never a fixed periodic tick.
+/// ([`production_tick_dispatch`]) latches the pending preemption and runs
+/// the blocking-wait timed-wake sweep (Design D P-2): it releases any
+/// elapsed `hw_tree_wait`-style waiter and re-arms the one-shot to the
+/// next deadline, so the SBI timer is armed only for a real pending
+/// event — a preemption quantum and/or the nearest wakeup — never a
+/// fixed periodic tick.
 ///
 /// A zero `timebase_hz` (a board that does not report the timer rate)
 /// leaves the kernel cooperative rather than arming a nonsense interval —

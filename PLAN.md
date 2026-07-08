@@ -1924,6 +1924,26 @@ order (one fully-gated increment each):
                    is written, never read), so a burst's render cost is one
                    bounded repaint. Metal re-confirmation of smooth concurrent
                    HDMI + UART output rides the same §0.9 pass as above.
+                 - **Pending-preemption latch: a quantum expiring mid-syscall
+                   is honoured at the syscall boundary, never lost.** The
+                   ports preempt only a timer tick taken from user mode (the
+                   kernel is non-preemptible, §4); a tick taken *in* a syscall
+                   used to disarm the one-shot, clear the quantum, and do
+                   nothing more — the task then resumed user mode with no
+                   timer armed and ran unpreempted until its next voluntary
+                   yield, so a syscall-heavy task (`ls -lsR /`) could starve
+                   every competitor (cooperative in practice). Now
+                   `kernel/core::preempt` keeps one lock-free per-CPU latch:
+                   every port's per-tick callback latches the fired tick, the
+                   syscall dispatch hook converts a completed syscall into the
+                   `yield` suspension when the latch is set
+                   (`completion_outcome` → `Reschedule { Yield }`), and
+                   `dispatch_step` clears the latch before switching a task in
+                   (a fresh dispatch decision supersedes it, so a user-mode
+                   tick never doubles into a spurious yield). Quantum overrun
+                   is bounded by the remainder of one syscall (each syscall's
+                   in-kernel work is itself bounded, e.g. `console_write`'s
+                   4 KiB clamp). Design: `docs/src/architecture/scheduler.md`.
                - **P-6 — wait-queue §27 completeness rework (staged by the
                  2026-07-06 charter amendment).** Bring `kernel/core/src/waitq.rs`
                  up to the §27 bar: the primitive P-2 landed is the thinnest slice

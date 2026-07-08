@@ -316,10 +316,12 @@ the two via the host-tested `rustos_arch_api::wakeup::earliest` helper, or
 disarms when neither is pending. The conversion from monotonic-ns deadline
 to counter ticks, and (on x86_64) the rebase of the chosen TSC duration
 onto the LAPIC count, use the same calibrated frequency `monotonic_ns`
-reads the other way (`AGENTS.md` §2.4). Each port installs the
-blocking-wait **timed-wake sweep** (`kernel/core::timed_wake_sweep`) as its
-per-tick timer callback, so every tick — including one taken on an
-otherwise-idle CPU armed solely for a wakeup — releases any elapsed waiter
+reads the other way (`AGENTS.md` §2.4). Each port's per-tick timer
+callback latches the fired tick as the CPU's **pending preemption**
+(`kernel/core::note_preempt_tick`, below) and runs the blocking-wait
+**timed-wake sweep** (`kernel/core::timed_wake_sweep`), so every tick —
+including one taken on an otherwise-idle CPU armed solely for a wakeup —
+releases any elapsed waiter
 and re-arms the one-shot to the next deadline. `set_wakeup` defaults to a
 no-op, so a non-preemptive port inherits the explicit-wake path only; the
 host `TestArch` records each call so the wait syscalls' re-arm epilogues
@@ -334,14 +336,32 @@ its whole span and starve the preemption one-shot, the buffered-serial
 transmit drain (§20), or an interrupt-driven waiter. The kernel stays
 **non-preemptible** (§4): a device IRQ taken while an in-kernel task runs
 services its source and returns to the *same* task; only a timer tick taken
-from EL0/U-mode/ring 3 reschedules (each port gates preemption on the
-interrupted privilege). The `preempt_inkernel_qemu_aarch64` integration
+from EL0/U-mode/ring 3 context-switches *immediately* (each port gates the
+preempt callback on the interrupted privilege). The
+`preempt_inkernel_qemu_aarch64` integration
 vertical proves both halves directly: a busy in-kernel kthread that issues
 no `yield` and no syscall still takes the generic-timer IRQ *during* its
 span (the EL1 tick callback fires), yet the EL0-preemption callback fires
 zero times and the kthread runs to its voluntary completion — under the old
 cooperative loop (device IRQs masked across the whole task run) no tick
 would be taken and it would spin forever.
+
+A tick the non-preemptible kernel cannot act on is **never lost**: the
+per-tick callback latches it as the CPU's pending preemption
+(`kernel/core::preempt` — one lock-free per-CPU flag), and the syscall
+dispatch hook consumes the latch when the interrupted syscall completes,
+suspending the caller back to the scheduler exactly as a `yield` syscall
+would (`DispatchOutcome::Reschedule { action: Yield }`) instead of
+returning to user mode with the expired quantum forgotten. The
+dispatcher clears the latch immediately before switching a task in, so a
+user-mode tick — which already preempted immediately — never doubles into
+a spurious yield on the resumed task's next syscall. A task's quantum
+overrun is therefore bounded by the remainder of one syscall (each
+syscall's in-kernel work is itself bounded, e.g. `console_write`'s 4 KiB
+clamp); without the latch, a task whose quantum expired mid-syscall
+returned to user mode with no timer armed and could starve every
+competitor until its next voluntary yield — cooperative scheduling in
+preemptive clothing.
 
 A port whose console transmit is buffered (the aarch64 PL011 — §20) keeps
 its in-memory transmit ring draining through

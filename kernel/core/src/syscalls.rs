@@ -6459,15 +6459,42 @@ where
         // turns this into a `reschedule_current` call; if no user kthread is
         // published on this CPU it falls back to an ordinary encoded return
         // (fail closed — `crate::dispatch_slot::DispatchOutcome::Reschedule`).
-        if let Some(action) = reschedule_action_for(raw_number) {
-            return DispatchOutcome::Reschedule {
-                result,
-                action,
-                cpu,
-            };
-        }
-        DispatchOutcome::Returned(result)
+        completion_outcome(raw_number, result, cpu)
     }
+}
+
+/// Decide how a completed syscall leaves the kernel: an explicit
+/// rescheduling syscall suspends with its own action, a latched
+/// preemption tick suspends with a `Yield`, and everything else returns
+/// straight to user space.
+///
+/// The latch check is the kernel's involuntary preemption point: a
+/// one-shot timer tick taken while the syscall ran in kernel mode could
+/// not context-switch (the kernel is non-preemptible), so it was latched
+/// instead (`crate::preempt`). Honouring it here — the first safe
+/// boundary — suspends the caller exactly as a `yield` syscall would,
+/// instead of `eret`ing back into user mode with its expired quantum
+/// forgotten. Without this a task that regularly sits in syscalls
+/// escapes the preemption timer entirely and can starve every
+/// competitor. An explicit reschedule takes precedence without
+/// consuming the latch: its suspension reaches the dispatcher anyway,
+/// which clears the latch before the next task switches in.
+fn completion_outcome(raw_number: u16, result: SyscallResult, cpu: CpuId) -> DispatchOutcome {
+    if let Some(action) = reschedule_action_for(raw_number) {
+        return DispatchOutcome::Reschedule {
+            result,
+            action,
+            cpu,
+        };
+    }
+    if crate::preempt::take_preempt_pending(cpu) {
+        return DispatchOutcome::Reschedule {
+            result,
+            action: RescheduleAction::Yield,
+            cpu,
+        };
+    }
+    DispatchOutcome::Returned(result)
 }
 
 /// Map a rescheduling syscall number to the [`RescheduleAction`] its
@@ -6803,6 +6830,60 @@ mod tests {
                 "{n:?} must return to user space without a reschedule"
             );
         }
+    }
+
+    /// A completed ordinary syscall with no pending preemption returns
+    /// straight to user space.
+    #[test]
+    fn completion_outcome_without_a_latched_tick_returns() {
+        const CPU: CpuId = 50;
+        assert_eq!(
+            completion_outcome(SyscallNumber::CLOCK_GET.as_u16(), Ok(1), CPU),
+            DispatchOutcome::Returned(Ok(1))
+        );
+    }
+
+    /// Regression: a timer tick latched while a syscall ran in kernel
+    /// mode converts the completed syscall into a `Yield` suspension —
+    /// the expired quantum is honoured at the syscall boundary instead
+    /// of being silently lost (before the latch existed, the caller
+    /// resumed user mode with no timer armed and could starve every
+    /// competitor). The latch is consumed by the conversion, so the next
+    /// completion returns normally.
+    #[test]
+    fn completion_outcome_with_a_latched_tick_yields_once() {
+        const CPU: CpuId = 51;
+        crate::preempt::note_preempt_tick(CPU);
+        assert_eq!(
+            completion_outcome(SyscallNumber::STREAM_WRITE.as_u16(), Ok(4), CPU),
+            DispatchOutcome::Reschedule {
+                result: Ok(4),
+                action: RescheduleAction::Yield,
+                cpu: CPU,
+            }
+        );
+        assert_eq!(
+            completion_outcome(SyscallNumber::STREAM_WRITE.as_u16(), Ok(4), CPU),
+            DispatchOutcome::Returned(Ok(4))
+        );
+    }
+
+    /// An explicit rescheduling syscall keeps its own action even with a
+    /// tick latched: its suspension reaches the dispatcher anyway, which
+    /// clears the latch before the next task switches in (`exit` must
+    /// never be downgraded to a `Yield`).
+    #[test]
+    fn completion_outcome_explicit_reschedule_takes_precedence() {
+        const CPU: CpuId = 52;
+        crate::preempt::note_preempt_tick(CPU);
+        assert_eq!(
+            completion_outcome(SyscallNumber::EXIT.as_u16(), Ok(0), CPU),
+            DispatchOutcome::Reschedule {
+                result: Ok(0),
+                action: RescheduleAction::Exit,
+                cpu: CPU,
+            }
+        );
     }
 
     /// `cap_query` returns 1 for a held capability and 0 otherwise.

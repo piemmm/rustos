@@ -792,17 +792,22 @@ extern "C" fn production_preempt_dispatch(cpu: rustos_arch_api::CpuId) {
 /// (EL0 *or* idle EL1), installed via
 /// [`rustos_arch_aarch64::preempt::set_timer_callback`].
 ///
-/// It runs the blocking-wait timed-wake sweep (Design D P-2): any waiter
-/// whose finite deadline has elapsed is unparked and the one-shot is
-/// re-armed to the next pending deadline
-/// ([`rustos_kernel_core::timed_wake_sweep`]). This is what makes a finite
-/// `hw_tree_wait` timeout fire even when the CPU is otherwise idle (every
-/// task parked) and takes no preemption tick. It is
-/// pure accounting — it never context-switches — so it is safe on a tick
-/// taken in EL1; the *preemption* of an EL0 task is the separate
-/// [`production_preempt_dispatch`] EL0-only callback.
+/// It latches the fired tick as this CPU's pending preemption
+/// ([`rustos_kernel_core::note_preempt_tick`]) and runs the blocking-wait
+/// timed-wake sweep (Design D P-2): any waiter whose finite deadline has
+/// elapsed is unparked and the one-shot is re-armed to the next pending
+/// deadline ([`rustos_kernel_core::timed_wake_sweep`]). This is what makes
+/// a finite `hw_tree_wait` timeout fire even when the CPU is otherwise
+/// idle (every task parked) and takes no preemption tick. Both halves are
+/// pure accounting — they never context-switch — so they are safe on a
+/// tick taken in EL1; the *immediate* preemption of an EL0 task is the
+/// separate [`production_preempt_dispatch`] EL0-only callback, while a
+/// tick taken in EL1 is honoured through the latch at the interrupted
+/// syscall's completion — the running task's quantum is never silently
+/// lost to a tick the non-preemptible kernel could not act on.
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
-extern "C" fn production_tick_dispatch(_cpu: rustos_arch_api::CpuId) {
+extern "C" fn production_tick_dispatch(cpu: rustos_arch_api::CpuId) {
+    rustos_kernel_core::note_preempt_tick(cpu);
     rustos_kernel_core::timed_wake_sweep();
 }
 
@@ -823,19 +828,23 @@ extern "C" fn production_tick_dispatch(_cpu: rustos_arch_api::CpuId) {
 /// tick is *taken* until EL0 runs with IRQs unmasked
 /// (`crate::aarch64::userentry`'s preemptible `SPSR`) or the root-unlock
 /// kthread unmasks at EL1 — the armed timer simply leaves PPI 30 pending
-/// until then, so this is **additive and non-regressing**: a one-shot tick taken in EL1 only disarms (it never preempts —
-/// the kernel is non-preemptible), and a tick taken in EL0 drives
-/// `production_preempt_dispatch`; the scheduler re-arms the next
-/// one-shot on its following dispatch.
+/// until then, so this is **additive and non-regressing**: a tick taken
+/// in EL0 drives `production_preempt_dispatch` immediately, and a
+/// one-shot tick taken in EL1 disarms without context-switching (the
+/// kernel is non-preemptible) but is latched by
+/// [`production_tick_dispatch`] and honoured when the interrupted
+/// syscall completes — an expired quantum is never silently lost. The
+/// scheduler re-arms the next one-shot on its following dispatch.
 ///
 /// No *scheduler-fairness* tick callback is installed: EEVDF is tickless
 /// (fairness is advanced inside `Scheduler::step`, not by a periodic
 /// count). The per-tick callback that *is* installed
-/// (`production_tick_dispatch`) runs only the blocking-wait timed-wake
-/// sweep (Design D P-2): it releases any elapsed `hw_tree_wait`-style
-/// waiter and re-arms the one-shot to the next deadline, so the timer is
-/// armed only for a real pending event — a preemption quantum and/or the
-/// nearest wakeup — never a fixed periodic tick.
+/// (`production_tick_dispatch`) latches the pending preemption and runs
+/// the blocking-wait timed-wake sweep (Design D P-2): it releases any
+/// elapsed `hw_tree_wait`-style waiter and re-arms the one-shot to the
+/// next deadline, so the timer is armed only for a real pending event —
+/// a preemption quantum and/or the nearest wakeup — never a fixed
+/// periodic tick.
 ///
 /// A zero `CNTFRQ_EL0` reading (a board that does not report the counter
 /// frequency) leaves the kernel cooperative rather than arming a nonsense

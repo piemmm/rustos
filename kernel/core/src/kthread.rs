@@ -1113,6 +1113,12 @@ where
         publish_resume::<C, S>(cpu, ctl, suspend_thunk_body::<C, S>);
     }
 
+    // This dispatch decision supersedes any timer tick latched before the
+    // switch (the scheduler re-arms the one-shot for a contended CPU on
+    // the same dispatch), so the incoming task starts its quantum without
+    // inheriting a stale reschedule obligation.
+    crate::preempt::clear_preempt_pending(cpu);
+
     // SAFETY: switch into the task. `dispatch_ctx` saves our (the
     // dispatcher's) context; `task_ctx` was made runnable by `prepare`
     // (first step) or a prior `Yielder` suspension (later steps), so it
@@ -1517,6 +1523,25 @@ mod tests {
         assert_eq!(control.state, RunState::Running);
         // The no-op double leaves the action at its initial value.
         assert_eq!(action, TaskAction::Yield);
+    }
+
+    /// Switching a task in discards any preemption tick latched before
+    /// the dispatch decision: the scheduler has just re-evaluated (and
+    /// re-armed the one-shot for a contended CPU), so the incoming task
+    /// must not inherit a stale reschedule obligation and spuriously
+    /// yield on its first syscall.
+    #[test]
+    fn dispatch_step_clears_a_latched_preemption_tick() {
+        // A CPU index no other test latches, so parallel test threads
+        // never observe each other through the process-wide slots.
+        const CPU: CpuId = 45;
+        let rec = recorder();
+        let mut control = control_with(RecordingCs(rec), BoxStack::new());
+
+        crate::preempt::note_preempt_tick(CPU);
+        let _ = dispatch_step(&mut control, CPU);
+
+        assert!(!crate::preempt::take_preempt_pending(CPU));
     }
 
     #[test]
