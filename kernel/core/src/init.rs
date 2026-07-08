@@ -1418,9 +1418,17 @@ fn run_phases<A: KernelArch>(
         Some(store) => hook.with_app_store(store),
         None => hook,
     };
+    let hook = Box::leak(Box::new(hook));
     dispatcher_callback_slot
-        .install_dispatcher(Box::leak(Box::new(hook)))
+        .install_dispatcher(hook)
         .map_err(InitError::DispatcherAlreadyInstalled)?;
+    // Publish the same leaked hook as the signal producer's task-reclaim
+    // seam, so the signal-terminate path drives the exact teardown the
+    // `exit` handler runs (a killed task must release its capability
+    // record, IRQ bindings, endpoints, and open files — a leaked pipe end
+    // would park its peer forever). Set-once; a stray re-install is a
+    // benign skip (this is the only caller).
+    let _ = process_signal_concrete.install_task_reclaim(hook);
     phase_ready(log_sink, Phase::Syscall);
 
     // Phase 6 — Ipc. The named-port registry is composed into

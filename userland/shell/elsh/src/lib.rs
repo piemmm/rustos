@@ -72,6 +72,7 @@ pub mod parser;
 pub mod repl;
 pub mod shell;
 mod ulimit;
+pub mod wireplan;
 
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -87,3 +88,6 @@ pub use invocation::{parse as parse_invocation, Invocation, UsageError, USAGE};
 pub use job::{ExitStatus, Job, JobId, JobState, JobTable, Pid, Signal, WaitOutcome};
 pub use repl::{run as run_repl, ReplInput};
 pub use shell::Shell;
+pub use wireplan::{
+    lower as lower_wire_plan, MemberPlan, OpenId, PlannedOpen, PlannedWire, PumpTask, WirePlan,
+};

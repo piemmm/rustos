@@ -849,10 +849,11 @@ on its own before the next.
       (clean exit); *blocking* is the stream backing's job (§20), and the
       kernel-core `BlockingConsoleRead` backing provides it (P6e-2), so an
       interactive session sits at its prompt until input arrives. The
-      `RtProcessHost` launches a single
-      bare-path command via `spawn` + reaps via `wait`, failing closed
-      (`NotImplemented`) on pipes/redirs/args/signals/`cd` the current `spawn`
-      ABI cannot express. `lib/abi` gained a tested `Errno::from_i32` decoder
+      `RtProcessHost` launches commands via `spawn` + reaps via `wait`
+      (args/env, signals, `cd`, and — since `plans/SPAWN.md` SP10 —
+      pipelines and redirections all run end to end; only the `{var}`
+      dynamic descriptors, fd ≥ 10, stay refused closed).
+      `lib/abi` gained a tested `Errno::from_i32` decoder
       (single source of truth, §2.2; no C-header/hash impact — a method, not
       an ABI type change) and `rustos_rt::stdin` now clamps a negative
       `-errno` to a zero-length read and clamps the count to `buf.len()`

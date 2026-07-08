@@ -255,14 +255,18 @@ its argument vector and the shell's exported variables (with any `NAME=v
 cmd` prefix overrides layered on top) as its environment, encoded into the
 `spawn` startup-strings block — strings are data, never authority, and the
 kernel re-validates the block fail-closed before building the child's own
-copy. The kernel half of pipes and redirections is landed
-(`plans/SPAWN.md` SP10a: the spawn attach block wiring a child's fd 0–3
-onto pre-opened files, resources, or `pipe_create` ends); the host-side
-wiring — pre-opening each `RedirAction` target and spawning pipeline
-members with their attach blocks — is the staged SP10b increment, so
-until it lands the host still fails a pipeline or redirection closed with
-`NotImplemented` rather than silently dropping it. The in-process builtins
-(`echo`, `exit`, `export`, `pwd`, `help`, …) work regardless.
+copy. Pipes and redirections run end to end (`plans/SPAWN.md` SP10): the
+pure `rustos_elsh::wireplan` planner lowers each pipeline into pre-opened
+targets (`fs_open` / `resource_open` / `pipe_create`), one fd 0–3 wire map
+per member, and the here-string / multios byte pumps; the host executes
+the plan over `spawn_attached` — all-or-nothing opens, kill-and-reap
+unwind on a mid-pipeline refusal, the shell's transferred ends closed
+after the last spawn, and non-leader members reaped after the leader. The
+one launch form still refused closed (`NotImplemented`) is a redirection
+or duplication naming a `{var}` dynamic descriptor (fd ≥ 10), which the
+spawn attach block cannot express — it wires only the standard fd 0–3.
+The in-process builtins (`echo`, `exit`, `export`, `pwd`, `help`, …)
+write through the `Console` seam as before.
 
 ## Builtins
 

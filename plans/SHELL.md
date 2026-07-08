@@ -1747,13 +1747,18 @@ its foreground child on fd 0 (`console_foreground`) around every blocking
 wait so the kernel's cooked-mode line discipline routes `^C`/`^Z` to the
 running job, and waits with `WaitFlags::STOPPED` so a `^Z`-stopped job
 returns to the prompt as `WaitOutcome::Stopped` (`$?` = 148) and `fg`/`bg`
-resume it. Pipes and redirections are not yet expressible over the launch
-ABI; the runtime host fails those closed with `NotImplemented` rather than
-silently dropping them. The shell parser and in-process builtins implement
-and test the target semantics described here regardless.
+resume it. Pipes and redirections run end to end (`plans/SPAWN.md` SP10):
+the pure `rustos_elsh::wireplan` planner lowers each pipeline into
+pre-opened targets (`fs_open`/`resource_open`/`pipe_create`), one fd 0–3
+wire map per member, and the here-string / multios byte pumps, and the
+runtime host executes the plan over `spawn_attached` — all-or-nothing
+opens, kill+reap unwind on a mid-pipeline refusal, transferred ends closed
+after the last spawn, non-leader members reaped after the leader. The one
+launch form still refused closed (`NotImplemented`) is a redirection or
+duplication naming a `{var}` dynamic descriptor (fd ≥ 10): the spawn
+attach block wires only the standard fd 0–3.
 
-Redirection state (interpreter-level; the runtime host still fails closed
-until the launch ABI grows descriptor plumbing):
+Redirection state:
 
 - **Implemented and tested** — the fd-aware redirection model. The lexer
   decodes each operator into a `RedirOp` (carrying its explicit or default
@@ -1842,12 +1847,10 @@ until the launch ABI grows descriptor plumbing):
   as a program name. A redirection on a *builtin* also fails closed (status
   1): builtins write through the `Console` seam, and silently sending a
   redirected stream to the terminal would be worse than refusing. A classified
-  `Resource` target is carried to the host but its *resolution to a kernel
-  stream backing* (opening `sys:null`, the capability-checked resolve of any
-  other namespace, and the well-known `sys:` stream enum in `lib/abi`) waits on
-  the launch ABI that also gates applying a file redirection: today the runtime
-  host fails closed on every redirection, so a `Path` and a `Resource` target
-  alike run nothing rather than opening.
+  `Resource` target resolves at launch through `resource_open` (the
+  capability-checked kernel resolver), exactly as a `Path` target opens
+  through `fs_open`; both are pre-opened in the shell's own table and wired
+  into the child through the spawn attach block (`plans/SPAWN.md` SP10b).
 
 ## Tests
 

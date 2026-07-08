@@ -2355,6 +2355,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-pipeline-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "rustos-arch-aarch64",
+ "rustos-itest-harness",
+ "rustos-kalloc",
+ "rustos-kernel",
+ "rustos-log",
+]
+
+[[package]]
 name = "rustos-test-posix-fs-suite"
 version = "0.0.0"
 dependencies = [

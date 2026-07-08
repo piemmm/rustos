@@ -2829,6 +2829,60 @@ const TESTS: &[QemuTest] = &[
             (MEMSOAK_PASS_PREFIX, "exit\n"),
         ],
     },
+    // `plans/SPAWN.md` SP10b: the pipeline/redirection acceptance vertical.
+    // `rustos-test-pipeline-qemu-aarch64` boots the *production* aarch64
+    // pipeline with the planted encrypted-root disk, unlocks the root,
+    // authenticates `root`/`root` at the console login, and drives the
+    // spawned shell through real pipelines and redirections over the spawn
+    // attach block and kernel pipes (`plans/SPAWN.md` SP10a):
+    // `yes | head -n 2` proves back-pressure teardown end to end — `head`
+    // exits after two lines, the pipe loses its last reader, `yes`'s next
+    // write fails `BrokenPipe` and it exits, and the shell reaps the
+    // non-leader member (the next prompt appearing at all is the witness;
+    // a hung producer or an unreaped member times the run out).
+    // `seq 1 1000 | wc -c` proves payload integrity: the consumer's `3893`
+    // (the 2893 digits plus 1000 newlines of `1..=1000`) is arithmetic
+    // over the pipe's entire byte stream, output the typed line itself
+    // never contains. The `> file` / `< file` round trip proves spawn-time
+    // file wiring both directions: `seq 776001 776005 > nums.txt` writes
+    // through a shell-pre-opened create+truncate descriptor wired as the
+    // child's stdout, and `cat < nums.txt` reads it back through a wired
+    // stdin — `776005` is content only the written file could produce.
+    // Each line is typed only after its marker appeared; every marker is
+    // output, never an echo of a typed line. The guest audit sink arms on
+    // the round trip `cat`'s audited `exit` (`sc=exit`, `comm=cat` — the
+    // last scripted tool, which only runs after every pipeline step
+    // completed) and reports PASS on the next audited `exit` — the
+    // shell's, typed only after the content marker appeared — so the
+    // verified bytes provably reached the transcript before the run ended
+    // (the session-ceiling arm-then-exit discipline). A 120-second budget
+    // covers boot + bounded PBKDF2 + the multi-exchange dialogue on QEMU
+    // TCG; single CPU like the other full-boot verticals.
+    QemuTest {
+        package: "rustos-test-pipeline-qemu-aarch64",
+        binary: "rustos-test-pipeline-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(120),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::EncryptedRootDisk,
+        keyboard: None,
+        pointer: false,
+        serial: &[
+            ("Root filesystem passphrase: ", UNLOCK_PASSPHRASE_LINE),
+            ("Username:", SESSION_USERNAME_LINE),
+            ("Password", SESSION_PASSWORD_LINE),
+            ("root@rustos ~% ", "yes | head -n 2\n"),
+            // The pipeline terminating at all (the prompt returning) is the
+            // broken-pipe + member-reap witness.
+            ("root@rustos ~% ", "seq 1 1000 | wc -c\n"),
+            ("3893", "seq 776001 776005 > /Users/root/nums.txt\n"),
+            ("root@rustos ~% ", "cat < /Users/root/nums.txt\n"),
+            ("776005", "exit\n"),
+        ],
+    },
     // `plans/PI.md` design B / B2: the pre-unlock driver-loading-by-discovery
     // autoload vertical. `rustos-test-autoload-input-qemu-aarch64` boots the
     // *production* aarch64 pipeline on the `virt` board with the

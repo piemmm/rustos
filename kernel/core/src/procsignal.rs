@@ -106,6 +106,29 @@ pub fn foreground_signal_installed() -> bool {
     matches!(FOREGROUND_SIGNAL.get(), Ok(Some(_)))
 }
 
+/// Reclaims every kernel-held resource of a task that terminated without
+/// running its own `exit` syscall — the seam through which the
+/// signal-terminate path drives the same
+/// `KernelSyscallHandlers::reclaim_task_resources` the `exit` handler
+/// runs (IRQ bindings, served call endpoints, shared memory, wait-sets,
+/// console foreground ownership, the capability record, and the
+/// address-space registry entry whose open pipe ends wake their parked
+/// peers). One definition of task teardown, two death paths. Installed
+/// per producer instance ([`KernelProcessSignal::install_task_reclaim`])
+/// rather than through a process-global slot, so each host-test fixture
+/// observes only its own terminations.
+pub trait TaskReclaim: Sync {
+    /// Release every kernel-held resource of the dead task `task` (its
+    /// scheduler/security id). Idempotent: reclaiming an already-reclaimed
+    /// or never-registered task is a no-op.
+    fn reclaim(&self, task: u64);
+}
+
+/// Error returned when [`KernelProcessSignal::install_task_reclaim`] is
+/// called more than once on the same producer.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub struct TaskReclaimAlreadyInstalled;
+
 /// The one pending foreground signal, packed `(task id << 32) | signal`.
 ///
 /// `0` means empty (a defined signal discriminant is never `0`). A single
@@ -248,6 +271,13 @@ where
     /// The live scheduler this producer drives to deliver a signal
     /// (unpark / exit the target task).
     scheduler: &'static P,
+    /// The boot-installed [`TaskReclaim`] seam a terminating signal drives
+    /// (set-once; the dispatch hook is leaked *after* this producer is
+    /// built, so the reference arrives through
+    /// [`Self::install_task_reclaim`] rather than the constructor). Unset
+    /// — a host fixture of the signal bookkeeping alone — reclaims
+    /// nothing: such a build registered no kernel resources either.
+    reclaim: OnceCell<&'static (dyn TaskReclaim + 'static)>,
 }
 
 impl<A, P> KernelProcessSignal<A, P>
@@ -259,7 +289,27 @@ where
     /// delivers through `scheduler`.
     #[must_use]
     pub const fn new(wait: &'static KernelProcessWait<A>, scheduler: &'static P) -> Self {
-        Self { wait, scheduler }
+        Self {
+            wait,
+            scheduler,
+            reclaim: OnceCell::new(),
+        }
+    }
+
+    /// Publish the [`TaskReclaim`] seam a terminating signal drives (the
+    /// boot path's leaked dispatch hook). Set-once per producer: a second
+    /// call fails closed rather than re-pointing the live seam.
+    ///
+    /// # Errors
+    ///
+    /// [`TaskReclaimAlreadyInstalled`] if a seam was already installed.
+    pub fn install_task_reclaim(
+        &self,
+        hook: &'static (dyn TaskReclaim + 'static),
+    ) -> Result<(), TaskReclaimAlreadyInstalled> {
+        self.reclaim
+            .set(hook)
+            .map_err(|_| TaskReclaimAlreadyInstalled)
     }
 
     /// Resume a stopped child ([`Signal::Continue`]).
@@ -320,6 +370,13 @@ where
                 // reached for Continue or Stop.
                 if let Some(status) = signal.termination_status() {
                     self.wait.record_signalled_exit(child, status);
+                }
+                // The victim never runs its own `exit` handler, so drive
+                // the shared teardown here: without it a killed task's
+                // capability record, IRQ bindings, endpoints, and open
+                // files (pipe ends whose peers park forever) would leak.
+                if let Ok(Some(hook)) = self.reclaim.get() {
+                    hook.reclaim(child.0);
                 }
                 Ok(())
             }
@@ -525,6 +582,40 @@ mod tests {
                 status: WaitStatus::Exited(143)
             })
         );
+    }
+
+    /// Every task id the test [`TaskReclaim`] hook was handed — the
+    /// witness that a terminate drives the shared task teardown
+    /// (`plans/SPAWN.md` SP10: a killed pipeline member must release its
+    /// open pipe ends, or its peer parks forever).
+    static RECLAIMED: SpinLock<BTreeSet<u64>> = SpinLock::new(BTreeSet::new());
+
+    struct RecordingReclaim;
+    impl TaskReclaim for RecordingReclaim {
+        fn reclaim(&self, task: u64) {
+            RECLAIMED.lock().insert(task);
+        }
+    }
+
+    /// A terminating signal drives the installed [`TaskReclaim`] seam
+    /// with the victim's id — the kill-path half of the one task
+    /// teardown the `exit` handler runs directly (regression: before the
+    /// seam existed a killed task leaked its capability record, IRQ
+    /// bindings, endpoints, and open files, and a pipe peer parked
+    /// forever).
+    #[test]
+    fn terminate_drives_the_installed_task_reclaim() {
+        let _overlay = stopped_overlay_test_lock();
+        let (wait, scheduler) = scaffold();
+        let (child, child_pid) = spawn_child(scheduler);
+        wait.register_child(TaskId(7), TaskId(child));
+        let signaller = KernelProcessSignal::new(wait, scheduler);
+        signaller
+            .install_task_reclaim(&RecordingReclaim)
+            .expect("first install on this producer");
+
+        assert_eq!(signaller.signal(TaskId(7), child_pid, Signal::Kill), Ok(()));
+        assert!(RECLAIMED.lock().contains(&child));
     }
 
     #[test]

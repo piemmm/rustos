@@ -1020,24 +1020,62 @@ Staged like SP3/SP5/SP6/SP7 (one fully-gated increment per landing):
   path, forged fd, foreign fd, direction enforcement at use, closed
   slots, dup-shared cursor), the stream routing fallbacks, and the
   handler decode paths.
-- **SP10b — elsh `RtProcessHost` wiring + `-M virt` pipeline vertical
-  (staged).** The shell side: `launch` pre-opens every `RedirAction`
-  target (`fs_open` with the `OpenMode`-derived flags / `resource_open` /
-  `pipe_create`), lowers `Dup`/`Close` onto the pending wire map, spawns
-  each pipeline member with its attach block, closes the parent's
-  transferred ends, pumps `HereString` content into its pipe and fans
-  `Multi` targets out between spawn and wait (blocking `fs_write`/
-  `fs_read` on the shell's own ends — never while parked in `wait`), and
-  reaps non-leader members after the leader. Plus the `-M virt` vertical:
-  a two-program pipeline (`producer | consumer`) and a `> file` + `< file`
-  round-trip through the production spawn path, PASS keyed on the
-  consumer's verified bytes. Lands as its own fully-gated increment.
+- **SP10b — elsh `RtProcessHost` wiring + `-M virt` pipeline vertical `[x]`.**
+  **Landed.** The lowering is a pure, host-tested planner,
+  `rustos_elsh::wireplan`: `lower` turns a `LaunchSpec` into a `WirePlan`
+  — the ordered `PlannedOpen` list (path/resource opens with
+  `OpenMode`-derived flags, pipe pairs), one fd 0–3 `PlannedWire` map per
+  member (pipeline joints wired fd 1 → next fd 0; redirections applied in
+  source order over them; `Dup` copies the source's *current* wire, so
+  `> out 2>&1` shares one open description and a bare `2>&1` is
+  `InheritSlot(1)`), and the `PumpTask` list (`HereString` → pipe +
+  `WriteContent`; multios → all targets opened plus a shell-side pipe,
+  `FanOut`/`Concat`). Fail closed: a redirection or dup source outside
+  fd 0–3 (the `{var}` dynamic forms the attach block cannot express), a
+  mixed-direction or undersized multios, and a half-lowerable pipeline
+  all refuse whole before anything opens. The `run.rs` executor opens the
+  plan all-or-nothing, spawns each member via `spawn_attached` (candidate
+  resolution per member, env overrides per command), kills + reaps
+  already-spawned members and closes every descriptor on a mid-pipeline
+  refusal, closes the transferred ends after the last spawn, runs the
+  pumps on the shell's retained ends (blocking `fs_write`/`fs_read`;
+  `BrokenPipe` ends a feed silently — the `yes | head` shape; other pump
+  errors are reported on fd 2, fail loud, without killing the job), and
+  records non-leader PIDs per leader — `wait` reaps them after the
+  leader's terminal status (a stopped leader keeps its entry for
+  `fg`/`bg`). The `-M virt` vertical
+  (`tests/integration/pipeline_qemu_aarch64`) drives the production boot
+  + login + shell through `yes | head -n 2` (broken-pipe teardown +
+  member reap), `seq 1 1000 | wc -c` (byte-exact `3893` over the pipe),
+  and a `> file` / `< file` round trip; the audit sink arms on `cat`'s
+  audited exit and PASSes on the shell's scripted exit after the content
+  marker. The vertical exposed and now pins two latent kernel defects the
+  host matrix could not reach: (1) process death never reclaimed the
+  task's kernel state — the `exit` handler skipped the address-space
+  registry withdrawal (open pipe ends leaked, so a pipe peer never saw
+  EOF/broken-pipe and parked forever) and the signal-terminate path
+  reclaimed nothing at all (a killed task also leaked its capability
+  record, IRQ bindings, endpoints, and shared memory); both paths now
+  drive the one `reclaim_task_resources` definition, the kill side
+  through the per-instance `TaskReclaim` seam
+  (`KernelProcessSignal::install_task_reclaim`, installed at boot with
+  the leaked dispatch hook), with host regression tests on both paths.
+  (2) `stream_read`/`stream_write`'s wired-descriptor branch held the
+  address-space registry's read guard across a blocking pipe park (the
+  `if let` scrutinee temporary), wedging every registry writer — a
+  sibling member's startup `mem_map` — on the non-preemptible kernel;
+  the entry is now cloned out before the wired call, and the QEMU
+  pipeline vertical is the regression test (it deadlocked before the
+  fix and passes after).
 
 **Done when (SP10):** `elsh` runs `cmd > file`, `cmd < file`, `2>&1`,
 `cmd <<< here`, multios, and `cmd | cmd` end to end on `-M virt` through
 the spawn attach block and kernel pipes; every fail-closed path above is
 host-tested; the C header, `abi-check`, the host matrix, and the QEMU
-matrix stay green.
+matrix stay green. **Landed: the full SP10 path above is complete; the
+remaining launch-ABI gap is the `{var}` dynamic descriptors (fd ≥ 10),
+which the host still refuses closed (`NotImplemented`) because the
+attach block wires only the standard fd 0–3.**
 
 ---
 

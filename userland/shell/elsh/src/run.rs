@@ -26,11 +26,11 @@
 //! then the user's `PATH`, attempted in order. The command's words travel
 //! to the child as its argument vector and the shell's exported variables
 //! (with any `NAME=v cmd` prefix overrides) as its environment, through
-//! the `spawn` startup-strings block. The kernel half of pipes and
-//! redirections is landed (`plans/SPAWN.md` `SP10a` — the spawn attach
-//! block and `pipe_create`); wiring it into this host is the staged
-//! `SP10b` increment, so until then `RtProcessHost` fails a pipeline or
-//! redirection closed rather than silently dropping it.
+//! the `spawn` startup-strings block. Pipes and redirections run end to
+//! end (`plans/SPAWN.md` SP10): the pure `rustos_elsh::wireplan` planner
+//! lowers each pipeline into pre-opened targets, per-member spawn attach
+//! blocks, and the here-string / multios byte pumps this host executes
+//! over `fs_open`/`resource_open`/`pipe_create`/`spawn_attached`.
 //!
 //! On the host it is an inert stub so `cargo build --workspace`, clippy, and
 //! fmt still cover the file.
@@ -47,15 +47,17 @@ extern crate alloc;
 mod program {
     use alloc::string::String;
     use alloc::vec::Vec;
+    use core::cell::RefCell;
 
     use rustos_abi::elevate::{
         elevate_endpoint, ElevateReply, ElevateRequest, ELEVATE_MAX_REQUEST, ELEVATE_REPLY_LEN,
     };
-    use rustos_abi::fs::{DirEntry, OpenFlags, FS_IO_MAX};
+    use rustos_abi::fs::{DirEntry, FS_IO_MAX};
     use rustos_abi::{Errno, FileKind, InputMode, LimitKind, ResourceLimit};
     use rustos_elsh::{
         parse_invocation, Console, DirEntryInfo, Elevator, Environment, Invocation, LaunchSpec,
-        LimitStore, Pid, ProcessHost, ReplInput, Shell, Signal, WaitOutcome, WordLister, USAGE,
+        LimitStore, Pid, PlannedOpen, PlannedWire, ProcessHost, PumpTask, ReplInput,
+        ResolvedCommand, Shell, Signal, WaitOutcome, WordLister, USAGE,
     };
     use rustos_help::{own_short_help, BundleHelp};
     use rustos_rt::io::{write_stderr_line, Stderr, Stdout, Write};
@@ -105,7 +107,7 @@ mod program {
             // The prompt renders on standard output; ask its backing.
             rustos_rt::terminal_size(rustos_abi::STDOUT)
                 .ok()
-                .map(|size| size.cols())
+                .map(rustos_abi::TerminalSize::cols)
         }
     }
 
@@ -167,85 +169,357 @@ mod program {
     /// POSIX number rather than the `abi-v1` wire discriminant.
     const STOP_SIGNAL_NUMBER: i32 = 20;
 
+    /// Byte size of the pump copy buffer — one kernel staging cap per read,
+    /// so a fan-out or concatenation moves data in as few syscalls as the
+    /// ABI permits.
+    const PUMP_BUF: usize = FS_IO_MAX;
+
+    /// Produce every planned handle, in plan order, returning the real
+    /// descriptor numbers indexed by
+    /// [`rustos_elsh::OpenId`]. All-or-nothing: any
+    /// refusal closes everything already opened and surfaces the `Errno`
+    /// verbatim, so a failed launch leaks no descriptor and a multios is
+    /// never partially applied.
+    fn open_planned(opens: &[PlannedOpen]) -> Result<Vec<u32>, Errno> {
+        let mut fds: Vec<u32> = Vec::with_capacity(opens.len());
+        // The write end `pipe_create` minted alongside the read end the
+        // planner just placed; consumed by the paired `PipeWrite` entry.
+        let mut pending_write: Option<u32> = None;
+        let fail = |fds: &[u32], pending: Option<u32>, err: Errno| {
+            close_fds(fds.iter().copied().chain(pending));
+            Err(err)
+        };
+        for open in opens {
+            match open {
+                PlannedOpen::Path { path, flags } => {
+                    let ret = rustos_rt::fs_open(path.as_bytes(), *flags);
+                    if ret < 0 {
+                        return fail(&fds, pending_write, errno_from(ret));
+                    }
+                    // A descriptor register is a small non-negative number.
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    fds.push(ret as u32);
+                }
+                PlannedOpen::Resource { reference, flags } => {
+                    let ret = rustos_rt::resource_open(reference.as_bytes(), *flags);
+                    if ret < 0 {
+                        return fail(&fds, pending_write, errno_from(ret));
+                    }
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    fds.push(ret as u32);
+                }
+                PlannedOpen::PipeRead => {
+                    let (read, write) = match rustos_rt::pipe_create() {
+                        Ok(ends) => ends,
+                        Err(ret) => return fail(&fds, pending_write, errno_from(ret)),
+                    };
+                    fds.push(read);
+                    pending_write = Some(write);
+                }
+                PlannedOpen::PipeWrite { .. } => {
+                    // The planner always pairs a write entry with the read
+                    // entry just before it; a plan violating that shape is
+                    // refused rather than guessed at.
+                    let Some(write) = pending_write.take() else {
+                        return fail(&fds, None, Errno::OutOfRange);
+                    };
+                    fds.push(write);
+                }
+            }
+        }
+        match pending_write {
+            // Every minted write end must have been claimed.
+            Some(write) => fail(&fds, Some(write), Errno::OutOfRange),
+            None => Ok(fds),
+        }
+    }
+
+    /// Close every descriptor `fds` yields (best-effort: a close of an
+    /// already-released descriptor fails closed kernel-side and is ignored).
+    fn close_fds(fds: impl Iterator<Item = u32>) {
+        for fd in fds {
+            let _ = rustos_rt::fs_close(fd);
+        }
+    }
+
+    /// Forcibly terminate and reap every PID in `pids` — the launch
+    /// error-path unwind, so a half-spawned pipeline never leaves a running
+    /// orphan or a zombie behind. Best-effort: a child that already exited
+    /// is simply reaped, and a refusal leaves nothing more to do.
+    fn kill_and_reap(pids: &[i32]) {
+        for &pid in pids {
+            let _ = rustos_rt::signal(pid, rustos_abi::Signal::Kill);
+            let mut status = rustos_abi::WaitStatus::Exited(0);
+            let _ = rustos_rt::wait(pid, &mut status, rustos_abi::WaitFlags::empty());
+        }
+    }
+
+    /// Spawn one pipeline member with its descriptor wires, resolving the
+    /// command word through the shared candidate policy (the system app
+    /// store first, then `PATH`) and attempting each candidate in order.
+    /// `spawn`'s `NotFound` is a definitive "no program is registered at
+    /// this path, nothing ran", so moving to the next candidate is a
+    /// deterministic first-match search, never a retry; any other refusal
+    /// (a permission or capability denial, a malformed image, a rejected
+    /// wire) is final and reported verbatim. The kernel authorises every
+    /// attempt — a candidate spelling grants nothing.
+    fn spawn_member(
+        spec: &LaunchSpec<'_>,
+        command: &ResolvedCommand,
+        wires: &[PlannedWire; rustos_abi::STD_STREAM_COUNT],
+        fds: &[u32],
+    ) -> Result<i32, Errno> {
+        let Some(word) = command.argv.first() else {
+            return Err(Errno::NotImplemented);
+        };
+        // The child's environment: the shell's exported variables with
+        // this command's `NAME=v cmd` prefix assignments layered on top
+        // (an override replaces the export of the same name), each
+        // encoded in the conventional `NAME=value` spelling the child's
+        // runtime splits at the first `=`.
+        let mut env: Vec<(&str, &str)> = spec.env.to_vec();
+        for (name, value) in &command.env_overrides {
+            match env.iter_mut().find(|(seen, _)| *seen == name.as_str()) {
+                Some(entry) => entry.1 = value.as_str(),
+                None => env.push((name.as_str(), value.as_str())),
+            }
+        }
+        let env_entries: Vec<String> = env
+            .iter()
+            .map(|(name, value)| alloc::format!("{name}={value}"))
+            .collect();
+        let env_bytes: Vec<&[u8]> = env_entries.iter().map(String::as_bytes).collect();
+        // The child's argument vector is the command's words verbatim
+        // (`argv[0]` is the typed word) — data for the child's own
+        // parser, never authority.
+        let arg_bytes: Vec<&[u8]> = command.argv.iter().map(String::as_bytes).collect();
+        // The attach block: the caller's own credential and console, with
+        // the planned wires resolved onto the descriptors just opened.
+        let mut attach = rustos_abi::SpawnAttach::INHERIT;
+        for (slot, wire) in wires.iter().enumerate() {
+            attach.wires[slot] = match wire {
+                PlannedWire::Inherit => rustos_abi::FdWire::Inherit,
+                PlannedWire::InheritSlot(source) => rustos_abi::FdWire::InheritSlot(*source),
+                PlannedWire::Closed => rustos_abi::FdWire::Closed,
+                PlannedWire::Handle(id) => rustos_abi::FdWire::Handle(fds[id.0]),
+            };
+        }
+        let path_var = spec
+            .env
+            .iter()
+            .find(|(name, _)| *name == "PATH")
+            .map(|(_, value)| *value);
+        for candidate in rustos_cmdres::resolution_candidates(word, path_var) {
+            let ret =
+                rustos_rt::spawn_attached(candidate.as_bytes(), &attach, &arg_bytes, &env_bytes);
+            if ret >= 0 {
+                // PIDs fit an `i32` on this ABI and `ret >= 0` here, so the
+                // cast preserves the PID value.
+                #[allow(clippy::cast_possible_truncation)]
+                return Ok(ret as i32);
+            }
+            let err = errno_from(ret);
+            if err != Errno::NotFound {
+                return Err(err);
+            }
+        }
+        Err(Errno::NotFound)
+    }
+
+    /// Write all of `bytes` into the pipe write end `fd`, in staging-cap
+    /// chunks. Returns `false` when the write cannot continue: every reader
+    /// closed (`BrokenPipe` — the POSIX `yes | head` shape, silently ending
+    /// the feed) or a genuine error, which is reported on standard error
+    /// (fail loud) before giving up.
+    fn pump_write(fd: u32, bytes: &[u8]) -> bool {
+        let mut written = 0;
+        while written < bytes.len() {
+            let end = (written + PUMP_BUF).min(bytes.len());
+            match rustos_rt::fs_write(fd, 0, &bytes[written..end]) {
+                Ok(0) => {
+                    // A zero-byte acceptance cannot make progress; treat it
+                    // as the stream refusing further bytes.
+                    report_pump_error("write stalled", Errno::NotImplemented);
+                    return false;
+                }
+                Ok(n) => written += n,
+                Err(ret) => {
+                    let err = errno_from(ret);
+                    if err != Errno::BrokenPipe {
+                        report_pump_error("write failed", err);
+                    }
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Run one pump task on the shell's retained ends (`plans/SPAWN.md`
+    /// `SP10b`). Pump failures do not abort the already-running job: the
+    /// affected stream simply ends early (the child sees end-of-stream or
+    /// the sink stops receiving) and the reason is reported on the shell's
+    /// standard error — fail loud, degrade gracefully.
+    fn run_pump(pump: &PumpTask, fds: &[u32]) {
+        match pump {
+            PumpTask::WriteContent { into, content } => {
+                let _ = pump_write(fds[into.0], content.as_bytes());
+            }
+            PumpTask::FanOut { from, sinks } => {
+                let mut buf = alloc::vec![0u8; PUMP_BUF];
+                // Per-sink write offsets (append-mode sinks ignore them);
+                // a failed sink is dropped from the fan-out with its error
+                // reported once, the rest keep receiving.
+                let mut offsets: Vec<Option<u64>> = alloc::vec![Some(0); sinks.len()];
+                loop {
+                    let n = match rustos_rt::fs_read(fds[from.0], 0, &mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => n,
+                        Err(ret) => {
+                            report_pump_error("read failed", errno_from(ret));
+                            break;
+                        }
+                    };
+                    for (sink, offset) in sinks.iter().zip(offsets.iter_mut()) {
+                        let Some(at) = offset else { continue };
+                        match write_all_at(fds[sink.0], *at, &buf[..n]) {
+                            Ok(()) => *at += n as u64,
+                            Err(err) => {
+                                report_pump_error("write failed", err);
+                                *offset = None;
+                            }
+                        }
+                    }
+                }
+            }
+            PumpTask::Concat { into, sources } => {
+                let mut buf = alloc::vec![0u8; PUMP_BUF];
+                'sources: for source in sources {
+                    let mut offset: u64 = 0;
+                    loop {
+                        let n = match rustos_rt::fs_read(fds[source.0], offset, &mut buf) {
+                            Ok(0) => break,
+                            Ok(n) => n,
+                            Err(ret) => {
+                                report_pump_error("read failed", errno_from(ret));
+                                break;
+                            }
+                        };
+                        offset += n as u64;
+                        if !pump_write(fds[into.0], &buf[..n]) {
+                            // No reader remains; the rest of every source
+                            // is undeliverable.
+                            break 'sources;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Write all of `bytes` at `offset` on the (file or resource) sink
+    /// `fd`, looping over short writes.
+    ///
+    /// # Errors
+    ///
+    /// The sink's [`Errno`] verbatim; a zero-byte acceptance is surfaced as
+    /// [`Errno::NotImplemented`] rather than spinning.
+    fn write_all_at(fd: u32, offset: u64, bytes: &[u8]) -> Result<(), Errno> {
+        let mut written = 0;
+        while written < bytes.len() {
+            match rustos_rt::fs_write(fd, offset + written as u64, &bytes[written..]) {
+                Ok(0) => return Err(Errno::NotImplemented),
+                Ok(n) => written += n,
+                Err(ret) => return Err(errno_from(ret)),
+            }
+        }
+        Ok(())
+    }
+
+    /// Report a pump failure on the shell's standard error — the observing
+    /// component states the reason (fail loud); the job itself keeps its
+    /// own exit status.
+    fn report_pump_error(action: &str, err: Errno) {
+        write_stderr_line(&alloc::format!("shell: redirection: {action}: {err}"));
+    }
+
     /// Launches and reaps external commands through the `spawn` and `wait`
-    /// syscalls (`plans/SPAWN.md` SP3 / SP6), resolving the command word to
-    /// a bundle `Run` path through the shared candidate policy
+    /// syscalls (`plans/SPAWN.md` SP3 / SP6 / SP10), resolving each command
+    /// word to a bundle `Run` path through the shared candidate policy
     /// (`plans/APPS.md` §8: the system app store first, then `PATH`).
-    struct RtProcessHost;
+    ///
+    /// Redirections and pipelines are lowered by the pure
+    /// [`rustos_elsh::wireplan`] planner and executed here: every target is
+    /// pre-opened in the shell's own descriptor table, each pipeline member
+    /// spawns with its attach block, the transferred ends are closed, and
+    /// the here-string / multios byte pumps run on the shell's retained
+    /// pipe ends before the job is awaited.
+    struct RtProcessHost {
+        /// Non-leader member PIDs of each launched pipeline, keyed by the
+        /// leader's PID; reaped after the leader's terminal wait so no
+        /// member is left a zombie. The shell is single-threaded, so a
+        /// `RefCell` suffices.
+        members: RefCell<Vec<(u64, Vec<i32>)>>,
+    }
+
+    impl RtProcessHost {
+        fn new() -> Self {
+            Self {
+                members: RefCell::new(Vec::new()),
+            }
+        }
+    }
 
     impl ProcessHost for RtProcessHost {
         fn launch(&self, spec: &LaunchSpec<'_>) -> Result<Pid, Errno> {
-            // The `spawn` ABI carries a program path, the child's argument
-            // vector and environment, and (since `plans/SPAWN.md` SP10a)
-            // an attach block that can wire the child's descriptors onto
-            // pre-opened files, resources, and pipe ends. Driving that
-            // wiring from this host — pre-opening every `RedirAction`
-            // target and spawning pipeline members with their blocks — is
-            // the staged SP10b increment; until it lands, pipelines and
-            // redirections are refused rather than silently dropped.
-            let [command] = spec.commands else {
-                return Err(Errno::NotImplemented);
-            };
-            if !command.redirections.is_empty() {
-                return Err(Errno::NotImplemented);
-            }
-            let Some(word) = command.argv.first() else {
-                return Err(Errno::NotImplemented);
-            };
-            // The child's environment: the shell's exported variables with
-            // this command's `NAME=v cmd` prefix assignments layered on top
-            // (an override replaces the export of the same name), each
-            // encoded in the conventional `NAME=value` spelling the child's
-            // runtime splits at the first `=`.
-            let mut env: Vec<(&str, &str)> = spec.env.to_vec();
-            for (name, value) in &command.env_overrides {
-                match env.iter_mut().find(|(seen, _)| *seen == name.as_str()) {
-                    Some(entry) => entry.1 = value.as_str(),
-                    None => env.push((name.as_str(), value.as_str())),
+            // Lower the pipeline + redirections into a wiring plan first
+            // (pure, fail-closed: an inexpressible redirection refuses the
+            // launch before anything is opened), then execute it: open
+            // every target, spawn every member with its attach block,
+            // close the transferred ends, and run the byte pumps.
+            let plan = rustos_elsh::lower_wire_plan(spec)?;
+            let fds = open_planned(&plan.opens)?;
+            let mut pids: Vec<i32> = Vec::with_capacity(plan.members.len());
+            for member in &plan.members {
+                let command = &spec.commands[member.command];
+                match spawn_member(spec, command, &member.wires, &fds) {
+                    Ok(pid) => pids.push(pid),
+                    Err(err) => {
+                        // Unwind whole: kill and reap what already runs,
+                        // then release every descriptor the plan opened.
+                        kill_and_reap(&pids);
+                        close_fds(fds.iter().copied());
+                        return Err(err);
+                    }
                 }
             }
-            let env_entries: Vec<String> = env
-                .iter()
-                .map(|(name, value)| alloc::format!("{name}={value}"))
-                .collect();
-            let env_bytes: Vec<&[u8]> = env_entries.iter().map(|entry| entry.as_bytes()).collect();
-            // The child's argument vector is the command's words verbatim
-            // (`argv[0]` is the typed word) — data for the child's own
-            // parser, never authority.
-            let arg_bytes: Vec<&[u8]> = command.argv.iter().map(|word| word.as_bytes()).collect();
-            // Resolve the word to its candidate program paths (the system
-            // app store, then the exported `PATH`) and attempt each in
-            // order. `spawn`'s `NotFound` is a definitive "no program is
-            // registered at this path, nothing ran", so moving to the next
-            // candidate is a deterministic first-match search, never a
-            // retry; any other refusal (a permission or capability denial,
-            // a malformed image) is final and reported verbatim. The
-            // kernel authorises every attempt — a candidate spelling grants
-            // nothing.
-            let path_var = spec
-                .env
-                .iter()
-                .find(|(name, _)| *name == "PATH")
-                .map(|(_, value)| *value);
-            for candidate in rustos_cmdres::resolution_candidates(word, path_var) {
-                let ret = rustos_rt::spawn_with(
-                    candidate.as_bytes(),
-                    rustos_abi::CONSOLE_INHERIT,
-                    rustos_abi::SPAWN_UID_INHERIT,
-                    &arg_bytes,
-                    &env_bytes,
-                );
-                if ret >= 0 {
-                    // `ret >= 0` here, so the cast preserves the PID value.
-                    #[allow(clippy::cast_sign_loss)]
-                    return Ok(Pid::new(ret as u64));
-                }
-                let err = errno_from(ret);
-                if err != Errno::NotFound {
-                    return Err(err);
-                }
+            // The children hold their cloned ends now; release the shell's
+            // copies of every transferred handle so pipe end-of-stream and
+            // broken-pipe semantics see only the children as holders.
+            close_fds(plan.transferred().iter().map(|id| fds[id.0]));
+            // Feed and drain the retained pump ends. Pumps run to
+            // completion before the wait: content is bounded (here-string)
+            // or ends at the child's exit (multios fan-out), and a
+            // vanished reader/writer surfaces as `BrokenPipe`/EOF rather
+            // than a hang.
+            for pump in &plan.pumps {
+                run_pump(pump, &fds);
             }
-            Err(Errno::NotFound)
+            close_fds(plan.retained().iter().map(|id| fds[id.0]));
+            // The last member is the job leader: its status becomes `$?`,
+            // and the others are reaped after it (`wait`).
+            let leader = *pids.last().ok_or(Errno::NotImplemented)?;
+            // Spawn returned the PID as a non-negative register, so the
+            // widening cast preserves the value.
+            #[allow(clippy::cast_sign_loss)]
+            let leader_pid = Pid::new(leader as u64);
+            let others: Vec<i32> = pids[..pids.len() - 1].to_vec();
+            if !others.is_empty() {
+                self.members
+                    .borrow_mut()
+                    .push((leader_pid.as_u64(), others));
+            }
+            Ok(leader_pid)
         }
 
         fn wait(&self, pid: Pid) -> Result<WaitOutcome, Errno> {
@@ -273,7 +547,32 @@ mod program {
                 return Err(errno_from(ret));
             }
             Ok(match status {
-                rustos_abi::WaitStatus::Exited(code) => WaitOutcome::Exited(code),
+                rustos_abi::WaitStatus::Exited(code) => {
+                    // The leader is gone for good: reap this pipeline's
+                    // remaining members so none is left a zombie. Their
+                    // pipe ends close as they exit, so each blocking wait
+                    // terminates (`yes | head`: the broken pipe ends the
+                    // producer). A stopped leader keeps its entry — `fg`
+                    // resumes it and the reap happens on its final wait.
+                    let entry = {
+                        let mut members = self.members.borrow_mut();
+                        members
+                            .iter()
+                            .position(|(leader, _)| *leader == pid.as_u64())
+                            .map(|at| members.swap_remove(at))
+                    };
+                    if let Some((_, others)) = entry {
+                        for member in others {
+                            let mut reaped = rustos_abi::WaitStatus::Exited(0);
+                            let _ = rustos_rt::wait(
+                                member,
+                                &mut reaped,
+                                rustos_abi::WaitFlags::empty(),
+                            );
+                        }
+                    }
+                    WaitOutcome::Exited(code)
+                }
                 // The shell's job vocabulary speaks the POSIX numbers a
                 // user scripts against: a stop reports as SIGTSTP (20), so
                 // `$?` becomes the familiar 148.
@@ -473,7 +772,7 @@ mod program {
             }
         }
         let console = RtConsole;
-        let host = RtProcessHost;
+        let host = RtProcessHost::new();
         let limits = RtLimitStore;
         let elevator = RtElevator;
         let mut input = RtInput;

@@ -1183,6 +1183,68 @@ where
         }
     }
 
+    /// Reclaim every kernel-held resource of a task that has terminated —
+    /// the one definition the `exit` syscall handler and the
+    /// signal-terminate path (`crate::procsignal`, via the boot-installed
+    /// [`crate::procsignal::TaskReclaim`] seam) share, so a task that
+    /// exits cleanly and a task that is killed release exactly the same
+    /// state. Every step is idempotent, so the two paths racing (a child
+    /// exiting as its parent kills it) reclaim once and no-op once.
+    ///
+    /// Order matters for the *security* observer: the IRQ bindings are
+    /// released first (the kernel unmasks no lines on exit,
+    /// `docs/src/security/irq.md`), and the capability record is dropped
+    /// before the address-space entry so a concurrent `cap_query` racing
+    /// the teardown cannot observe a task whose caps have vanished but
+    /// whose memory registry survives.
+    ///
+    /// Withdrawing the address-space registry entry drops the task's
+    /// standard streams, resource limits, working directory, device
+    /// grants, and — crucially — its **open-file table**: an open pipe
+    /// end's `Drop` decrements the ring's end count and wakes
+    /// `PIPE_WAITQ`, so a peer parked on the pipe observes end-of-stream
+    /// or broken-pipe instead of waiting forever on a dead partner
+    /// (`plans/SPAWN.md` SP10 — `seq | wc` must end when `seq` exits, and
+    /// `yes` must fail `BrokenPipe` when `head` is done).
+    pub(crate) fn reclaim_task_resources(&self, task: SecTaskId) {
+        let _ = self.irq.release_for(task);
+        // Tear down every synchronous call endpoint this task served
+        // before dropping its capability record: a user-space service
+        // that dies (cleanly, by fault, or killed) must not leave callers
+        // blocked in `ipc_call` forever — destroying its endpoints
+        // cancels their in-flight calls, and waking `CALL_WAITQ` re-runs
+        // each parked caller's poll so it abandons fail-closed.
+        if crate::callreg::unregister_owned_by(task.0, self.audit) > 0 {
+            crate::waitq::call_wake();
+        }
+        // Release every shared-memory mapping this task held, dropping
+        // each reference and zeroing + freeing any region whose last
+        // reference this releases (zero-on-free). The registry scrubs a
+        // freed region's frames through the kernel direct map, so the
+        // reclaim works from the dying task's own `exit` and from a
+        // killer's context alike.
+        crate::sharedreg::reclaim_task(self.shared_mem_facility, task);
+        // Drop every wait-set this task owned. A wait-set holds no
+        // resource of its own (its members only *name* endpoints and IRQ
+        // lines, reclaimed around here), so dropping the sets is the
+        // whole reclamation.
+        crate::waitset::release_owned_by(task.0);
+        // Release any console foreground ownership the dead task holds,
+        // so the console returns to its open state the moment the owner
+        // is gone rather than waiting for a reader to prove the owner
+        // dead (`plans/DISPLAY.md` D5).
+        for device in self.consoles {
+            device.clear_dead_foreground(task);
+        }
+        let _ = self.caps.write().remove(task);
+        // Withdraw the address-space registry entry last: streams, open
+        // files (pipe ends wake their parked peers as they drop), limits,
+        // grants, and the frozen space snapshot all go together, so no
+        // stale entry outlives the task (task ids are never reused, so a
+        // leaked entry could never be reclaimed later).
+        self.aspaces.write().withdraw(task);
+    }
+
     /// The one console foreground-owner gate `stream_read` and
     /// `stream_input_mode` share (`plans/DISPLAY.md` D5).
     ///
@@ -1958,70 +2020,19 @@ where
         // exists. The dispatcher's `SyscallInvoked` audit record (the `EXIT`
         // spec sets `audit = true`) still carries the code for the log.
         self.process_wait.record_exit(caller.task_id, code);
-        //
-        // Order matters:
-        //
-        //   1. Release every IRQ binding the exiting task held
-        //      (`docs/src/security/irq.md` — the kernel unmasks no
-        //      lines on exit; a freshly created task that wants the
-        //      same line must re-issue `irq_bind`).
-        //   2. Drop the capability record so a concurrent
-        //      `cap_query` racing this `exit` cannot observe a task
-        //      that the scheduler still believes exists but whose
-        //      caps have vanished.
-        //
-        // The scheduler reap is step 3, driven by the reschedule path
-        // below rather than from this handler. Each step is idempotent;
-        // the call ordering matters for
-        // the *security* observer (no caller can hold an audited
-        // capability bit after the IRQ subsystem has released the
-        // task's bindings).
-        //
-        // SP2b (`plans/SPAWN.md` SP2): the scheduler reap itself is driven
-        // by the reschedule path, not here — the dispatch hook returns
+        // The scheduler reap itself is driven by the reschedule path, not
+        // here (`plans/SPAWN.md` SP2b) — the dispatch hook returns
         // `DispatchOutcome::Reschedule { action: Exit, .. }` and the
         // bin-crate callback suspends the caller, after which the kthread
         // reports `TaskAction::Exit` and the scheduler reaps it. Calling
         // `Scheduler::exit` here as well would mutate scheduler state
         // re-entrantly from inside the in-flight `step` the exiting
-        // kthread runs under. This handler keeps only the security-state
-        // cleanup the reschedule path does not perform (IRQ bindings,
-        // capability record); both are idempotent and ordered so no caller
-        // can hold an audited capability bit after the IRQ subsystem has
-        // released the task's bindings.
-        let task = caller.task_id;
-        let _ = self.irq.release_for(task);
-        // Tear down every synchronous call endpoint this task served before
-        // dropping its capability record: a user-space service that exits
-        // (cleanly, by fault, or killed) must not leave callers blocked in
-        // `ipc_call` forever — destroying its endpoints cancels their
-        // in-flight calls, and waking `CALL_WAITQ` re-runs each parked
-        // caller's poll so it abandons fail-closed.
-        // The owner key is the *security* task id (`caller.caps.task()`), the
-        // same id `CallEndpoint::create` recorded as the owner.
-        if crate::callreg::unregister_owned_by(caller.caps.task().0, self.audit) > 0 {
-            crate::waitq::call_wake();
-        }
-        // Release every shared-memory mapping this task held, dropping each
-        // reference and zeroing + freeing any region whose last reference this
-        // releases (zero-on-free). Done here, while the exiting task is still
-        // the current one, so the registry can scrub a freed region's frames
-        // through its own live space before the scheduler reap drops it. A
-        // task that mapped none reclaims nothing (idempotent).
-        crate::sharedreg::reclaim_task(self.shared_mem_facility, task);
-        // Drop every wait-set this task owned. A wait-set holds no resource of
-        // its own (its members only *name* endpoints and IRQ lines, reclaimed
-        // above), so dropping the sets is the whole reclamation; idempotent.
-        crate::waitset::release_owned_by(task.0);
-        // Release any console foreground ownership the exiting task holds,
-        // so the console returns to its open state the moment the owner is
-        // gone rather than waiting for a reader to prove the owner dead
-        // (`plans/DISPLAY.md` D5). Idempotent: a task that owned no console
-        // clears nothing.
-        for device in self.consoles {
-            device.clear_dead_foreground(task);
-        }
-        let _ = self.caps.write().remove(task);
+        // kthread runs under. This handler performs only the kernel-state
+        // reclamation the reschedule path does not — the shared
+        // [`Self::reclaim_task_resources`] the signal-terminate path also
+        // drives, so a task that exits and a task that is killed release
+        // exactly the same resources.
+        self.reclaim_task_resources(caller.task_id);
         Ok(0)
     }
 
@@ -2532,8 +2543,14 @@ where
         // SP10) routes to its open entry — exactly one authority backs
         // each descriptor, and the wiring left the console table slot
         // Closed, so the two resolutions can never race or disagree.
+        // The entry is an owner-checked *clone* bound before the wired
+        // call, so the registry read guard drops here and is never held
+        // across a blocking pipe write — a writer parked on a full ring
+        // holding this lock would wedge every registry writer (`mem_map`,
+        // a sibling spawn) on the non-preemptible kernel.
         if (fd as usize) < rustos_abi::STD_STREAM_COUNT {
-            if let Some(entry) = self.aspaces.read().open_file_entry(caller.task_id, fd) {
+            let entry = self.aspaces.read().open_file_entry(caller.task_id, fd);
+            if let Some(entry) = entry {
                 return self.wired_stream_write(caller, &entry, buf, len);
             }
         }
@@ -2620,9 +2637,15 @@ where
         timeout_ns: u64,
     ) -> SyscallResult {
         // A **wired** standard descriptor routes to its open entry, as in
-        // `stream_write` (`plans/SPAWN.md` SP10).
+        // `stream_write` (`plans/SPAWN.md` SP10). The entry is bound
+        // before the wired call so the registry read guard drops here and
+        // is never held across a blocking pipe read — a reader parked on
+        // an empty ring holding this lock would wedge every registry
+        // writer (`mem_map`, a sibling spawn) on the non-preemptible
+        // kernel.
         if (fd as usize) < rustos_abi::STD_STREAM_COUNT {
-            if let Some(entry) = self.aspaces.read().open_file_entry(caller.task_id, fd) {
+            let entry = self.aspaces.read().open_file_entry(caller.task_id, fd);
+            if let Some(entry) = entry {
                 return self.wired_stream_read(caller, &entry, buf, len, timeout_ns);
             }
         }
@@ -6300,6 +6323,19 @@ where
     }
 }
 
+impl<A> crate::procsignal::TaskReclaim for KernelDispatchHook<'_, A>
+where
+    A: KernelArch + 'static,
+{
+    fn reclaim(&self, task: u64) {
+        // The signal-terminate path's teardown is the exit handler's
+        // teardown — one definition, reached through the boot-installed
+        // seam because the signal producer cannot borrow the handlers
+        // directly.
+        self.handlers.reclaim_task_resources(SecTaskId(task));
+    }
+}
+
 impl<A> DispatchHook for KernelDispatchHook<'_, A>
 where
     A: KernelArch + 'static,
@@ -6594,6 +6630,80 @@ mod tests {
         // The capability record was evicted as part of the security
         // cleanup the reschedule path does not perform.
         assert!(table.read().is_empty());
+    }
+
+    /// `plans/SPAWN.md` `SP10b` regression: the `exit` handler withdraws the
+    /// dead task's address-space registry entry, dropping its open pipe
+    /// ends, so a peer observes end-of-stream instead of waiting forever
+    /// on a dead partner (`seq | wc` must end when `seq` exits; before the
+    /// withdrawal landed, the write end leaked and the reader parked
+    /// forever).
+    #[test]
+    fn exit_withdraws_the_registry_entry_and_releases_pipe_ends() {
+        use crate::pipe::ReadStep;
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+
+        // A producer task (7) holds a pipe pair and has fed it two bytes;
+        // a peer (9) holds a cloned read end at its stdin, exactly as a
+        // pipeline consumer is wired at spawn.
+        let (read_fd, write_fd) = aspaces.write().open_pipe(SecTaskId(7)).expect("pair fits");
+        {
+            let reg = aspaces.read();
+            let write = reg
+                .open_file_entry(SecTaskId(7), write_fd)
+                .expect("write end");
+            let OpenBacking::Pipe(end) = &write.backing else {
+                panic!("a pipe descriptor is pipe-backed");
+            };
+            assert_eq!(end.try_write(b"hi"), crate::pipe::WriteStep::Wrote(2));
+        }
+        let read = aspaces
+            .read()
+            .open_file_entry(SecTaskId(7), read_fd)
+            .expect("read end");
+        aspaces
+            .write()
+            .install_std_entry(SecTaskId(9), rustos_abi::STDIN, read)
+            .expect("peer wired");
+
+        let caps = make_caps_record(7, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(7),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(h.exit(&ctx, 0), Ok(0));
+
+        // The producer's registry entry is gone whole (its open table,
+        // streams, limits, and cwd with it)…
+        assert!(aspaces
+            .read()
+            .open_file_entry(SecTaskId(7), write_fd)
+            .is_none());
+        // …and the peer drains the buffered bytes, then observes
+        // end-of-stream: the dead producer's write end was dropped, so the
+        // reader is never left waiting on a writer that no longer exists.
+        let peer = aspaces
+            .read()
+            .open_file_entry(SecTaskId(9), rustos_abi::STDIN)
+            .expect("peer entry");
+        let OpenBacking::Pipe(end) = &peer.backing else {
+            panic!("the peer's stdin is pipe-backed");
+        };
+        let mut buf = [0u8; 4];
+        assert_eq!(end.try_read(&mut buf), ReadStep::Read(2));
+        assert_eq!(end.try_read(&mut buf), ReadStep::Eof);
     }
 
     /// `SP2b` (`plans/SPAWN.md` SP2): the producer maps exactly the two
