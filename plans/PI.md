@@ -1486,12 +1486,13 @@ copy is added on the syscall hot path (§2.16).
     matching exit `swapgs`. Fix: a HAL cooperative-park hook pair on
     `rustos_arch_api::ContextSwitch` — `enter_cooperative_park` /
     `leave_cooperative_park`, default no-op (aarch64/riscv64 need nothing) —
-    that `kernel/core`'s kthread runtime calls in `suspend_thunk` around the
-    suspend switch (the user-kthread mid-handler park path). x86_64 implements
+    that `kernel/core`'s kthread runtime calls in `suspend_thunk_syscall`
+    around the suspend switch (the user-kthread mid-handler park path; a
+    kernel kthread's `suspend_thunk_body` skips the bracket). x86_64 implements
     them as a `swapgs` back to the between-handler convention immediately before
     the park and back into the stub-window convention immediately after resume;
     both are on the *task's* control flow and pair exactly, and the first
-    trampoline→`enter_user` entry never goes through `suspend_thunk`, so it
+    trampoline→`enter_user` entry never goes through the syscall thunk, so it
     correctly does no swapgs. Structural, fail-closed, no limit bump (§2.17),
     capability checks unchanged (§5.4), per-PML4 isolation intact (§4). No ABI
     change. Stub rustdoc + the `SyscallTls` (transient-`gs:8`) docs updated;
@@ -4709,7 +4710,8 @@ two users — or the same user twice — can be logged in concurrently.
        - `aarch64::root_unlock` (`#[cfg(freestanding)]`, in the aarch64 boot
          subtree beside `boot`/`init_spawn`): the **arch-specific bring-up
          only** — `spawn_if_present` + `run_unlock` (over the arch-neutral
-         helpers above), the GIC/FDT `device_spi`, the `RearmingIrqWaiter`,
+         helpers above), the GIC/FDT `device_spi`, the `wfi_fallback_park`
+         supplied to the shared `rustos_kernel_core::IrqParkWaiter`,
          and the throwaway-bookkeeping VBASE/`PageTablePool` constants —
          build the bring-up
          off the boot-discovered DTB — `virtio_mmio_bus_from_dtb` → `MmioMap` +
@@ -4723,21 +4725,27 @@ two users — or the same user twice — can be logged in concurrently.
          → `VirtioBlk::open` → `unlock_root_disk_interactively`. EMMC2 (the Pi
          SD host) is the staged metal increment: an EMMC2 binding fails closed
          (gate opened, root unbound).
-       - **Interrupt-driven boot + race-free `wfi` wait (load-bearing).** The
-         production aarch64 boot now brings the GICv2 up for delivery and runs
+       - **Interrupt-driven boot + task-parking device wait (load-bearing).**
+         The production aarch64 boot brings the GICv2 up for delivery and runs
          interrupt-driven: `gic_irq::install_device_irq_dispatch` (kernel-core
          `irq` phase) calls `gic::init()` (enable distributor + CPU interface;
          additive — no line delivers until a driver routes its own, §2.17).
          The unlock kthread binds the device SPI on the core-published
-         `IrqTable` and its waiter (`root_unlock::RearmingIrqWaiter`) re-arms the
-         line (`gic_irq::GicIrqController::rearm`; unmask is the arch op the
-         kernel `IrqController` trait omits) then does the canonical race-free
-         park — `exceptions::{mask_irq, wait_for_interrupt, enable_irq}` (mask
-         → re-check `IrqTable::ready_for` → `wfi` → unmask), the same discipline
-         as the `-M virt` `WfiWaiter`. A cooperative spin busy-loops a line
-         whose IRQ is never taken once a user `svc` trap masks `DAIF.I` (the
-         register-only `context.s` never restores it) and mis-delivers
-         back-to-back completions; the `wfi` park is §2.1-clean and correct.
+         `IrqTable`; the shared waiter (`rustos_kernel_core::IrqParkWaiter`)
+         re-arms the line (`gic_irq::CompositeIrqController::rearm`; unmask is
+         the arch op the kernel `IrqController` trait omits) and **parks the
+         calling task off the run queue** (register on `IRQ_WAITQ` → re-check
+         `IrqTable::ready_for` → park; woken by the ISR's `irq_wake`), so a
+         steady-state filesystem wait from a syscall context never halts the
+         CPU and the dispatch loop (and `pump_tx` console drain) keeps running
+         for the whole device wait. A context that cannot be scheduler-parked
+         (the boot kthread) takes `root_unlock::wfi_fallback_park` — the
+         canonical race-free `exceptions::{mask_irq, wait_for_interrupt,
+         enable_irq}` park (mask → re-check → `wfi` → unmask) — which starves
+         nothing at boot because everything else is parked waiting on it.
+         The consuming `block_until_ready` loop clears the per-line ready
+         flag on every wake, so the wait re-parks instead of degenerating
+         into a budget-bounded busy-poll.
          `KthreadConsoleRead` keeps the cooperative `CooperativeYield` for the
          IRQ-less, polled passphrase read.
        - **virtio-MMIO device-interrupt ACK (load-bearing).** `rustos_virtio::

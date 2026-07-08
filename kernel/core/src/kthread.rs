@@ -431,33 +431,36 @@ pub type KernelServiceBody = Box<dyn FnMut(&mut dyn YieldHandle) + Send>;
 /// than index out of bounds.
 pub const KTHREAD_MAX_CPUS: usize = 64;
 
-/// A published handle to the EL0 user kthread currently switched in on a
-/// CPU, through which its syscall trap path suspends it back to the
-/// scheduler ([`reschedule_current`]).
+/// A published handle to the kthread currently switched in on a CPU,
+/// through which its own control flow — a user task's syscall trap, or a
+/// kernel service kthread's body — suspends it back to the scheduler
+/// ([`reschedule_current`]).
 ///
 /// `data` is the address of the running task's `ThreadControl<C, S>` and
-/// `thunk` is the `C, S`-monomorphised [`suspend_thunk`] that knows how to
-/// reinterpret it; the pair is `Copy` so [`reschedule_current`] can lift it
-/// out from under the per-CPU lock *before* performing the (suspending)
-/// switch, never holding the lock across the hand-off.
+/// `thunk` is the `C, S`-monomorphised suspend thunk that knows how to
+/// reinterpret it ([`suspend_thunk_syscall`] for a user task,
+/// [`suspend_thunk_body`] for a kernel kthread); the pair is `Copy` so
+/// [`reschedule_current`] can lift it out from under the per-CPU lock
+/// *before* performing the (suspending) switch, never holding the lock
+/// across the hand-off.
 #[derive(Copy, Clone)]
 struct UserResumeHandle {
     data: usize,
     thunk: unsafe fn(usize, TaskAction),
 }
 
-/// Per-CPU EL0 resume table: slot `cpu` holds the handle for the user
-/// kthread currently switched in on that CPU, or `None` when no user task
-/// is running there.
+/// Per-CPU resume table: slot `cpu` holds the handle for the kthread
+/// currently switched in on that CPU, or `None` when the dispatcher (or
+/// pre-dispatch boot flow) is running there.
 ///
-/// [`dispatch_step`] publishes a slot immediately before switching into a
-/// user kthread and clears it the instant the task switches back, so a slot
-/// is `Some` exactly while that CPU is executing the task (in EL0 or in one
-/// of its syscall traps). The arch trap path reaches it only through
-/// [`reschedule_current`]. Each CPU touches only its own slot, so the
-/// `SpinLock` never contends across CPUs — it is the minimum interior
-/// mutability + memory-ordering primitive for the publish/observe, not a
-/// contention point.
+/// [`dispatch_step`] publishes a slot immediately before switching into
+/// *any* kthread — user or kernel — and clears it the instant the task
+/// switches back, so a slot is `Some` exactly while that CPU is executing
+/// the task (in EL0, in one of its syscall traps, or in a kernel kthread's
+/// body). It is reached only through [`reschedule_current`]. Each CPU
+/// touches only its own slot, so the `SpinLock` never contends across CPUs
+/// — it is the minimum interior mutability + memory-ordering primitive for
+/// the publish/observe, not a contention point.
 static USER_RESUME: [SpinLock<Option<UserResumeHandle>>; KTHREAD_MAX_CPUS] =
     [const { SpinLock::new(None) }; KTHREAD_MAX_CPUS];
 
@@ -509,19 +512,23 @@ const fn to_task_action(action: RescheduleAction) -> TaskAction {
 /// Suspend the `ThreadControl` at `data` with `action` and switch back to
 /// its dispatcher, returning when the task is next resumed.
 ///
-/// The `C, S`-monomorphised function pointer a [`UserResumeHandle`] carries:
-/// it reconstructs the task's [`Yielder`] from the control block and reuses
-/// [`Yielder::suspend`] so the switch-back invoke has exactly one definition.
+/// The shared body of the two `C, S`-monomorphised thunks a
+/// [`UserResumeHandle`] can carry: it reconstructs the task's [`Yielder`]
+/// from the control block and reuses [`Yielder::suspend`] so the
+/// switch-back invoke has exactly one definition. `bracket` selects the
+/// port's cooperative-park convention hook (see the thunks below).
 ///
 /// # Safety
 ///
 /// `data` must be the address of the live, boxed `ThreadControl<C, S>` the
 /// publishing [`dispatch_step`] passed, monomorphised over the *same* `C, S`.
 /// The caller must run between that `dispatch_step`'s switch-into-task and
-/// the task's switch-back — i.e. from the task's own syscall trap — so the
-/// CPU exclusively owns the control block (the kthread raw-pointer protocol,
-/// see the module docs).
-unsafe fn suspend_thunk<C, S>(data: usize, action: TaskAction)
+/// the task's switch-back — from the task's own syscall trap or its own
+/// kthread body — so the CPU exclusively owns the control block (the
+/// kthread raw-pointer protocol, see the module docs). `bracket` must be
+/// `true` exactly when the caller runs inside the port's privilege-entry
+/// convention (a syscall handler), `false` for a kthread body.
+unsafe fn suspend_with<C, S>(data: usize, action: TaskAction, bracket: bool)
 where
     C: ContextSwitch + Copy,
     S: KernelStack,
@@ -539,42 +546,89 @@ where
         };
         (cs, yielder)
     };
-    // Bracket the suspend with the port's cooperative-park hook so a port
-    // that flips a per-CPU privilege-entry convention inside its syscall
-    // handler (x86_64's entry `swapgs`) balances it across the park: this is
-    // the user-kthread mid-handler park path (the syscall trap reaches it via
-    // `reschedule_current`), the one place the imbalance arises (`plans/PI.md`
-    // X2). The pair is a no-op on ports that need nothing (aarch64/riscv64).
-    // SAFETY: we run on the parking user task's own syscall-handler control
-    // flow (the kthread raw-pointer protocol, this function's contract); the
-    // two calls bracket exactly one `Yielder::suspend`, so `enter`/`leave`
-    // pair on this task. `Exit` never returns from `suspend`, leaving the CPU
-    // in the balanced between-handler convention `enter` restored — correct,
-    // since the task never resumes.
-    unsafe {
-        cs.enter_cooperative_park();
+    if bracket {
+        // Bracket the suspend with the port's cooperative-park hook so a port
+        // that flips a per-CPU privilege-entry convention inside its syscall
+        // handler (x86_64's entry `swapgs`) balances it across the park: this
+        // is the user-kthread mid-handler park path (the syscall trap reaches
+        // it via `reschedule_current`), the one place the imbalance arises
+        // (`plans/PI.md` X2). The pair is a no-op on ports that need nothing
+        // (aarch64/riscv64).
+        // SAFETY: we run on the parking user task's own syscall-handler
+        // control flow (the kthread raw-pointer protocol, this function's
+        // contract); the two calls bracket exactly one `Yielder::suspend`, so
+        // `enter`/`leave` pair on this task. `Exit` never returns from
+        // `suspend`, leaving the CPU in the balanced between-handler
+        // convention `enter` restored — correct, since the task never
+        // resumes.
+        unsafe {
+            cs.enter_cooperative_park();
+            yielder.suspend(action);
+            cs.leave_cooperative_park();
+        }
+    } else {
+        // A kthread body never entered through the port's privilege-entry
+        // convention (no entry `swapgs` to balance), so the hook must not
+        // run — an unpaired flip would corrupt the per-CPU convention. The
+        // suspend itself is the safe `Yielder` switch-back.
         yielder.suspend(action);
-        cs.leave_cooperative_park();
     }
 }
 
-/// Suspend the EL0 user kthread currently switched in on `cpu` with
-/// `action`, returning when the scheduler next dispatches it (never, for
+/// [`suspend_with`] for a task suspending from its own **syscall
+/// handler** (a user kthread's trap path): applies the port's
+/// cooperative-park convention bracket.
+///
+/// # Safety
+///
+/// As [`suspend_with`], with the caller on the task's syscall-handler
+/// control flow.
+unsafe fn suspend_thunk_syscall<C, S>(data: usize, action: TaskAction)
+where
+    C: ContextSwitch + Copy,
+    S: KernelStack,
+{
+    // SAFETY: forwarded contract (syscall-handler control flow ⇒ bracket).
+    unsafe { suspend_with::<C, S>(data, action, true) }
+}
+
+/// [`suspend_with`] for a task suspending from its own **kthread body**
+/// (in-kernel code with no privilege-entry convention active): no bracket.
+///
+/// # Safety
+///
+/// As [`suspend_with`], with the caller on the kthread's own body control
+/// flow.
+unsafe fn suspend_thunk_body<C, S>(data: usize, action: TaskAction)
+where
+    C: ContextSwitch + Copy,
+    S: KernelStack,
+{
+    // SAFETY: forwarded contract (kthread body ⇒ no bracket).
+    unsafe { suspend_with::<C, S>(data, action, false) }
+}
+
+/// Suspend the kthread currently switched in on `cpu` with `action`,
+/// returning when the scheduler next dispatches it (never, for
 /// [`RescheduleAction::Exit`]).
 ///
-/// The bin-crate syscall-dispatch callback calls this on a
-/// [`DispatchOutcome::Reschedule`](crate::DispatchOutcome::Reschedule): a
+/// Two callers drive it: the bin-crate syscall-dispatch callback on a
+/// [`DispatchOutcome::Reschedule`](crate::DispatchOutcome::Reschedule) (a
 /// resumable user task that yielded, parked, or exited must be suspended
-/// back to the scheduler rather than returned to immediately. The suspend
+/// back to the scheduler rather than returned to immediately), and an
+/// in-kernel blocking primitive suspending its own caller — a `SleepLock`
+/// contention park, a block-device completion wait — which works equally
+/// from a user task's syscall trap and a kernel kthread's body (each
+/// published handle carries the thunk matching its context). The suspend
 /// switches to the dispatcher's saved context; control returns here — and
-/// then to the callback, which encodes the syscall result and resumes user
-/// space — only when this task is dispatched again.
+/// then to the caller — only when this task is dispatched again.
 ///
-/// Returns `true` if a user kthread was running on `cpu` and was suspended;
+/// Returns `true` if a kthread was running on `cpu` and was suspended;
 /// `false` if no resume handle is published for `cpu`. A `false` is the
-/// fail-closed signal that the caller was **not** a resumable user task (or
-/// `cpu` is out of range): the callback then treats the syscall as an
-/// ordinary return rather than perform an unsound switch.
+/// fail-closed signal that the caller was **not** a resumable task — the
+/// pre-dispatch boot flow, a host test, or an out-of-range `cpu`: the
+/// caller then falls back (ordinary syscall return, or a bounded CPU park)
+/// rather than perform an unsound switch.
 #[must_use = "a false return means no user task was suspended; the caller must fall back to an ordinary syscall return"]
 pub fn reschedule_current(cpu: CpuId, action: RescheduleAction) -> bool {
     let Ok(idx) = usize::try_from(cpu) else {
@@ -1045,8 +1099,18 @@ where
         if let Some(pre) = unsafe { (*ctl).pre_resume.as_mut() } {
             pre(stack_top);
         }
-        publish_resume::<C, S>(cpu, ctl);
+        publish_resume::<C, S>(cpu, ctl, suspend_thunk_syscall::<C, S>);
         publish_live_space::<C, S>(cpu, ctl);
+    } else {
+        // A kernel kthread is equally suspendable from its own body
+        // (`reschedule_current` from a blocking primitive it calls — a
+        // `SleepLock` contention park, a block-device completion wait), so
+        // it publishes a resume handle too — with the body thunk, which
+        // skips the syscall-entry convention bracket a kthread never
+        // established. Without this a kthread contending on a lock whose
+        // holder is parked could only spin, monopolising the CPU and
+        // starving the dispatch loop — the whole system then hangs.
+        publish_resume::<C, S>(cpu, ctl, suspend_thunk_body::<C, S>);
     }
 
     // SAFETY: switch into the task. `dispatch_ctx` saves our (the
@@ -1062,9 +1126,10 @@ where
 
     // The task switched back to us. Retire the resume handle immediately:
     // the task is no longer the one running on `cpu` (it yielded, parked,
-    // or exited), so its trap path must no longer reach this control block.
+    // or exited), so its trap/body path must no longer reach this control
+    // block.
+    clear_resume(cpu);
     if is_user {
-        clear_resume(cpu);
         clear_live_space(cpu);
         // Park this CPU's translation off the task's user root before the
         // action is reported: the invariant "a user root is active on a
@@ -1119,8 +1184,11 @@ pub fn install_park_translation(park: fn()) {
 /// Out-of-range or unconfigured `cpu` is a silent no-op: the task simply
 /// cannot be rescheduled from its trap and falls closed there, which is the
 /// same outcome [`reschedule_current`] gives.
-fn publish_resume<C, S>(cpu: CpuId, ctl: *mut ThreadControl<C, S>)
-where
+fn publish_resume<C, S>(
+    cpu: CpuId,
+    ctl: *mut ThreadControl<C, S>,
+    thunk: unsafe fn(usize, TaskAction),
+) where
     C: ContextSwitch + Copy,
     S: KernelStack,
 {
@@ -1128,7 +1196,7 @@ where
         if let Some(slot) = USER_RESUME.get(idx) {
             *slot.lock() = Some(UserResumeHandle {
                 data: ctl as usize,
-                thunk: suspend_thunk::<C, S>,
+                thunk,
             });
         }
     }
@@ -1261,7 +1329,7 @@ mod tests {
     use std::boxed::Box as StdBox;
     use std::cell::RefCell;
     use std::rc::Rc;
-    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::sync::Arc;
 
     use rustos_arch_api::{PrepareError, TaskEntry};
@@ -1282,6 +1350,9 @@ mod tests {
         last_entry: AtomicU64,
         last_prev: AtomicU64,
         last_next: AtomicU64,
+        /// Cooperative-park bracket calls observed (`enter` + `leave` each
+        /// count one), so a test can assert which suspend thunk ran.
+        brackets: AtomicUsize,
     }
 
     /// A faithful host [`ContextSwitch`] double. `prepare` seeds a
@@ -1327,8 +1398,24 @@ mod tests {
             self.0.switches.fetch_add(1, Ordering::SeqCst);
             self.0.last_prev.store(prev as u64, Ordering::SeqCst);
             self.0.last_next.store(next as u64, Ordering::SeqCst);
+            // Record whether CPU 62's resume slot is published at switch
+            // time (the kernel-kthread publish assertion; other tests use
+            // other CPU indices, so this never cross-talks).
+            if let Some(slot) = USER_RESUME.get(62) {
+                if slot.lock().is_some() {
+                    PUBLISHED_DURING_SWITCH.store(true, Ordering::SeqCst);
+                }
+            }
             // No control transfer on the host (see the module docs); the
             // real switch is proven by the per-arch QEMU verticals.
+        }
+
+        unsafe fn enter_cooperative_park(&self) {
+            self.0.brackets.fetch_add(1, Ordering::SeqCst);
+        }
+
+        unsafe fn leave_cooperative_park(&self) {
+            self.0.brackets.fetch_add(1, Ordering::SeqCst);
         }
     }
 
@@ -1642,7 +1729,11 @@ mod tests {
         // point directly. The handle's thunk reconstructs the task's
         // Yielder and suspends it: one switch, task_ctx -> dispatch_ctx,
         // with the requested action recorded.
-        publish_resume::<RecordingCs, BoxStack>(cpu, ctl);
+        publish_resume::<RecordingCs, BoxStack>(
+            cpu,
+            ctl,
+            suspend_thunk_syscall::<RecordingCs, BoxStack>,
+        );
         assert!(reschedule_current(cpu, RescheduleAction::Exit));
 
         assert_eq!(rec.switches.load(Ordering::SeqCst), 1);
@@ -1689,14 +1780,71 @@ mod tests {
     }
 
     #[test]
-    fn kernel_dispatch_step_never_publishes_a_handle() {
+    fn kernel_dispatch_step_publishes_a_body_handle_then_clears_it() {
         let rec = recorder();
         let cpu: CpuId = 62;
-        // A plain kernel kthread (no `pre_resume`) is never enrolled in the
-        // resume table, so its CPU stays unschedulable from a trap path.
+        // A plain kernel kthread (no `pre_resume`) is enrolled in the
+        // resume table for the duration of its step — its body can suspend
+        // through a blocking primitive (`reschedule_current`) exactly like
+        // a user task's syscall trap — and retired the instant it switches
+        // back.
         let mut control = control_with(RecordingCs(rec), BoxStack::new());
+        let published = &PUBLISHED_DURING_SWITCH;
+        published.store(false, Ordering::SeqCst);
         let _ = dispatch_step(&mut control, cpu);
+        // The host double's `switch` observed the published slot while the
+        // task was "running".
+        assert!(
+            published.load(Ordering::SeqCst),
+            "a kernel kthread's step must publish a resume handle"
+        );
+        // Retired after the switch-back: nothing to reschedule now.
         assert!(!reschedule_current(cpu, RescheduleAction::Yield));
+    }
+
+    /// Set by [`RecordingCs::switch`] when the resume slot for CPU 62 is
+    /// published at switch time (the kernel-kthread publish assertion).
+    static PUBLISHED_DURING_SWITCH: AtomicBool = AtomicBool::new(false);
+
+    #[test]
+    fn kernel_body_suspend_skips_the_cooperative_park_bracket() {
+        // A kernel kthread's body suspend must not run the port's
+        // syscall-entry convention bracket (x86_64's `swapgs`): an unpaired
+        // flip would corrupt the per-CPU convention. The syscall thunk runs
+        // the bracket; the body thunk does not.
+        let rec = recorder();
+        let cs = RecordingCs(rec);
+        let mut control = control_with(cs, BoxStack::new());
+        let ctl: *mut ThreadControl<RecordingCs, BoxStack> = addr_of_mut!(*control);
+        let cpu: CpuId = 59;
+
+        publish_resume::<RecordingCs, BoxStack>(
+            cpu,
+            ctl,
+            suspend_thunk_body::<RecordingCs, BoxStack>,
+        );
+        assert!(reschedule_current(cpu, RescheduleAction::Park));
+        assert_eq!(control.action, TaskAction::Park);
+        assert_eq!(
+            rec.brackets.load(Ordering::SeqCst),
+            0,
+            "a body suspend must not run the cooperative-park bracket"
+        );
+        clear_resume(cpu);
+
+        // The syscall thunk brackets the same suspend (enter + leave).
+        publish_resume::<RecordingCs, BoxStack>(
+            cpu,
+            ctl,
+            suspend_thunk_syscall::<RecordingCs, BoxStack>,
+        );
+        assert!(reschedule_current(cpu, RescheduleAction::Park));
+        assert_eq!(
+            rec.brackets.load(Ordering::SeqCst),
+            2,
+            "a syscall suspend must enter and leave the bracket"
+        );
+        clear_resume(cpu);
     }
 
     #[test]

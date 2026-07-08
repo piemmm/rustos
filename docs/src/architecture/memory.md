@@ -769,6 +769,61 @@ allocator over one configured heap window, driven against a borrowed live
   unmap), the `LiveMemMap` routing test, and the extended
   `mmio_map_qemu_aarch64` `-M virt` vertical's `mem_map` round-trip.
 
+## 7g. Reclaimable-memory model (`reclaim`) and the filesystem cache
+
+`kernel/mem::reclaim` is the one definition of how a reclaimable cache —
+memory holding *derived* state that can always be rebuilt from its
+canonical source — is classed, bounded, and accounted
+(`plans/SMARTRAM.md`):
+
+- **Classes.** Each entry belongs to one `ReclaimClass` with a
+  deterministic `reclaim_priority`: `CleanFileData` (page chunks of
+  clean file bytes, cheapest to rebuild, evicted first) and
+  `FsMetadata` (stat/security/lookup/directory-entry records — small,
+  hot, rebuilt by a tree walk, so they outlive data under pressure).
+  Classes exist only with a live consumer; more arrive with the
+  SMARTRAM stages that consume them.
+- **Budgets with hysteresis.** A `CacheBudget` is derived from the
+  backing resource's size (`CacheBudget::from_backing` — 1/16 of the
+  kernel heap arena per volume cache, so the boot volumes together stay
+  under 1/8 of the heap and cache growth can never exhaust the heap).
+  Growth runs to the *hard* limit; a forced shrink evicts down to the
+  *low* watermark (3/4 of hard), never both on one threshold.
+- **Fail-closed accounting.** `CacheAccounting` keeps per-class byte
+  ledgers with checked arithmetic (typed `AccountingError` on
+  overflow/underflow, never wrapping) plus saturating hit/miss/
+  insertion/invalidation/eviction/refusal counters.
+
+The first consumer is the **clean, rebuildable filesystem cache**
+(`kernel/core::fs::CachedFs`, `plans/SMARTRAM.md` section 6.1): a
+wrapper around each mounted volume's filesystem driver, *below* the VFS
+policy layer, applied at driver registration (`system_mount`). Key
+properties:
+
+- **Never bypasses authorisation.** Every permission check still runs
+  in the secured VFS per operation; the cache only spares the driver a
+  repeated structural read. A `security` record is cached but
+  invalidated by `set_security`, so a tightened mode is seen by the
+  very next check.
+- **One volume, one writer.** Every mutation flows through the wrapper:
+  the `fs_*` syscalls and the `CAP_USER_ADMIN` account-administration
+  engine share the single registered driver behind one `SleepLock`
+  (`LateFilesystem::register` returns the leaked lock precisely so a
+  second, coherence-breaking window over the same device cannot exist).
+- **Precise, fail-closed invalidation.** Writes/truncates drop the
+  file's chunks and stat; create/remove/rename drop the affected
+  directory's *entire* lookup set (driver name matching may fold case),
+  its directory entries, and its stat; an unidentifiable mutation
+  target purges the whole cache; a detected ledger imbalance poisons
+  the cache (purge + admit nothing) while the driver keeps serving.
+- **Bounded and zeroing.** Payload copies are fallibly allocated
+  (`try_reserve`); oversized names are refused; reads above four chunks
+  bypass the cache so bulk streams cannot evict the hot working set;
+  and every cached buffer (file bytes, names) is zeroed on
+  invalidation, eviction, purge, and teardown — the volumes are
+  encrypted at rest, so cached bytes are decrypted user data that must
+  not linger in reusable heap memory.
+
 ## 8. Testing strategy
 
 - **Unit tests** — alongside each module under `#[cfg(all(test, not(loom)))]`:

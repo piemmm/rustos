@@ -155,6 +155,13 @@ impl<F: 'static> LateFilesystem<F> {
     /// kernel state), so the hot path can copy the reference out of the
     /// registry without holding the registry lock across a parking operation.
     ///
+    /// Returns the leaked lock so a kernel-internal consumer that must write
+    /// the same volume (the `CAP_USER_ADMIN` account-administration engine's
+    /// storage) can share the **one** live driver instance: a volume has
+    /// exactly one writer, and every mutation serialises through this lock —
+    /// a second independent driver over the same device would corrupt its
+    /// copy-on-write allocation state.
+    ///
     /// # Errors
     ///
     /// [`FilesystemAlreadyInstalled`] if `handle` is already registered — a
@@ -166,7 +173,7 @@ impl<F: 'static> LateFilesystem<F> {
         driver: F,
         source: &str,
         fstype: &str,
-    ) -> Result<(), FilesystemAlreadyInstalled> {
+    ) -> Result<&'static SleepLock<F>, FilesystemAlreadyInstalled> {
         let handle = handle.as_u64();
         let mut drivers = self.drivers.lock();
         if drivers.iter().any(|e| e.handle == handle) {
@@ -179,7 +186,7 @@ impl<F: 'static> LateFilesystem<F> {
             source: String::from(source),
             fstype: String::from(fstype),
         });
-        Ok(())
+        Ok(driver)
     }
 
     /// Whether the shared VFS has been installed.

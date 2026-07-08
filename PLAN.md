@@ -1198,11 +1198,17 @@ order (one fully-gated increment each):
              (`emmc2_spi`) and binds/routes/arms it on the published IRQ table**,
              and feeds the opened `Block` to the shared `finish_unlock` tail
              virtio-blk also uses (§2.2). The SD command/transfer completion
-             waits **park on that bound line** through an `Emmc2Completion`
-             `CompletionWait` over the same re-arming `wfi` waiter the virtio
-             path uses (`RearmingIrqWaiter`, §2.2), never busy-spinning a status
-             register (§17.1/§2.16 — a polled driver must not monopolise the CPU
-             and starve the serial drain during `/System` autoload). On a real
+             waits **block on that bound line** through an `Emmc2Completion`
+             `CompletionWait` over the same task-parking waiter the virtio path
+             uses (`rustos_kernel_core::IrqParkWaiter`, §2.2): a syscall context
+             parks its task off the run queue (woken by `irq_wake`) so the
+             dispatch loop keeps running for the whole device wait, a
+             boot-kthread context takes the bounded race-free `wfi` fallback,
+             and a controller silent past the 2 s budget fails the transfer
+             closed (`DeviceFault`) — never busy-spinning a status register and
+             never halting the CPU under a running system (§17.1/§2.16/§2.23 —
+             a device wait must not starve the dispatch loop or the serial
+             drain during `/System` autoload). On a real
              Pi 4 it mounts `/System` (4140) and unlocks
              the encrypted root (4133 → users db 4040 → 4136). Two SD defects
              fixed to get there are the load-bearing facts of the driver:
@@ -1480,7 +1486,7 @@ order (one fully-gated increment each):
                **never-returning kernel service** (the sanctioned
                `KernelServiceBody` pattern): because `finish_unlock` takes `blk`
                by value while the device backing (virtio bus / `MmioMap` /
-               `DmaPool` / `RearmingIrqWaiter` / `KernelVirtioHost`, or the EMMC2
+               `DmaPool` / `IrqParkWaiter` / `KernelVirtioHost`, or the EMMC2
                `MmioMap`) stays on the still-suspended `virtio_blk_unlock` /
                `emmc2_unlock` frame, making `finish_unlock` never return keeps
                that whole call chain suspended on the kthread's coroutine stack
@@ -1858,9 +1864,12 @@ order (one fully-gated increment each):
                    `CompletionWait` seam between status re-reads — never a
                    busy-spin (§17.1/§2.16). The kernel supplies that seam:
                    `emmc2_unlock` discovers the EMMC2 GIC SPI (`emmc2_spi`),
-                   binds/routes/arms it on the published IRQ table, and parks the
-                   kthread on it through the same re-arming `wfi` waiter the virtio
-                   path uses (`Emmc2Completion` over `RearmingIrqWaiter`, §2.2).
+                   binds/routes/arms it on the published IRQ table, and blocks on
+                   it through the same task-parking waiter the virtio path uses
+                   (`Emmc2Completion` over `rustos_kernel_core::IrqParkWaiter`,
+                   §2.2; the boot kthread takes the bounded race-free `wfi`
+                   fallback, and a controller silent past the 2 s budget fails
+                   closed as `DeviceFault`).
                    The identification-only handshakes that have no completion
                    source (reset, clock-stable) still spin, each poll-budget
                    bounded and fail-closed (§2.1). Host-proven
@@ -2369,6 +2378,12 @@ full path walk per child).
 - The delegated listing fails closed on a non-advancing driver cursor,
   and rustfs regression tests pin the O(1)-resume read cost and the
   per-entry metadata.
+- **Repeat-access cost is now served by the clean, rebuildable
+  filesystem cache** (`kernel/core::fs::CachedFs`, see the SMARTRAM
+  section below): warm stat/lookup/security/dirent/data reads never
+  reach the driver, so the per-component walk cost above is paid once
+  per (unchanged) inode, not once per operation. First-access cost is
+  untouched and stays governed by the items below.
 
 **Remaining (staged, each its own change):**
 - **Descriptor→node binding.** An open descriptor stores the resolved
@@ -4103,6 +4118,45 @@ kernel host tests through the real `hw_emit_node`/`hw_remove_node`
 handlers. Input-device→seat assignment beyond the boot seat's directly
 attached keyboard is seat-manager topology policy, staged with the
 desktop session work (CU6).
+
+---
+
+## SMARTRAM — reclaimable memory services (`plans/SMARTRAM.md`)
+
+Opportunistic, bounded, owner-accounted caches over spare RAM;
+`plans/SWAPSWAPSWAP.md` owns the encrypted compressed anonymous tier.
+
+**Done — clean and rebuildable filesystem cache (`plans/SMARTRAM.md` §6.1):**
+- `kernel/mem::reclaim`: the reclaimable-memory model — `ReclaimClass`
+  (`CleanFileData` evicted before `FsMetadata`, deterministic priority),
+  `CacheBudget::from_backing` (per-volume hard limit = 1/16 of the kernel
+  heap arena; shrink watermark = 3/4 of hard — hysteresis), and the
+  checked, fail-closed `CacheAccounting` ledger with hit/miss/insertion/
+  invalidation/eviction/refusal counters.
+- `kernel/core::fs::CachedFs`: per-volume write-through cache below the
+  secured VFS (permission checks never bypassed), wrapping each driver at
+  registration (`system_mount::cached`). Caches page-chunk file data,
+  stat, security, lookup, and dirent records; LRU eviction (data before
+  metadata); large reads (> 4 chunks) bypass; payload allocations are
+  fallible; every cached buffer is zeroed on invalidation/eviction/purge/
+  teardown (the volumes are encrypted at rest); an unidentifiable
+  mutation target purges the cache and a ledger imbalance poisons it
+  (fail closed, driver keeps serving).
+- **Single-writer coherence fix (pre-existing corruption hazard):** the
+  root volume was opened read-write **twice** (the `fs_*` driver plus a
+  second `RustFs` window for the `CAP_USER_ADMIN` engine), which could
+  double-allocate COW clusters and made any cache unsound.
+  `FilesystemSecurity::set_security` moved into the abi trait (abi-v1
+  unfrozen, in-place evolution), the `AdminFs` trait was deleted,
+  `LateFilesystem::register` returns the leaked per-mount `SleepLock`,
+  and `RootAdminBacking` now shares the one registered (cache-wrapped)
+  driver — one volume, one writer, every mutation visible to the cache.
+
+**Remaining (staged, `plans/SMARTRAM.md` §12):** VM pressure bands +
+forced-reclaim ordering with `ramzip` (SMART2), transform caches
+(SMART3 remainder), semantic app/runtime caches (SMART4), UI caches
+(SMART5), reliability/background/predictive caches (SMART6–8), and
+observability (SMART9) — each gated on the subsystems it consumes.
 
 ---
 

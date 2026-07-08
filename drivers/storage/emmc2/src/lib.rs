@@ -132,7 +132,8 @@ pub trait SdhciHost {
     fn write32(&mut self, offset: usize, value: u32) -> Result<(), DriverError>;
 
     /// Park the calling task until the controller raises its interrupt
-    /// line, then return so the engine re-reads `INTERRUPT`.
+    /// line (or the wait's bounded budget elapses), then return so the
+    /// engine re-reads `INTERRUPT`.
     ///
     /// This is the seam that keeps the engine off the CPU while a slow SD
     /// completion is outstanding (a driver poll
@@ -141,7 +142,11 @@ pub trait SdhciHost {
     /// through a [`CompletionWait`]; the host-test register mock returns
     /// immediately because its completions appear inline in the model, so
     /// the engine's next `INTERRUPT` read already observes the bit.
-    fn await_irq(&mut self);
+    ///
+    /// [`CompletionSignal::TimedOut`] reports a wait that elapsed with no
+    /// interrupt at all; the engine fails the transfer closed on it (see
+    /// [`CompletionWait::await_irq`]).
+    fn await_irq(&mut self) -> CompletionSignal;
 }
 
 /// Park-until-completion seam the metal [`IrqSdhci`] host drives
@@ -151,12 +156,32 @@ pub trait SdhciHost {
 /// so it cannot name the kernel's IRQ-wait machinery. This one-method trait
 /// is the inversion point: the kernel binary supplies an implementation that
 /// blocks the calling task on the controller's bound interrupt line and is
-/// resumed by its ISR (mirroring the virtio host's `notify_wait`), while a host test supplies a no-op. It returns `()` so
-/// a spurious wake-up cannot be mistaken for a retriable failure — the engine re-reads the status register on return.
+/// resumed by its ISR (mirroring the virtio host's `notify_wait`), while a
+/// host test supplies an inline no-wait. A spurious wake-up cannot be
+/// mistaken for a retriable failure — the engine re-reads the status
+/// register on every [`CompletionSignal::Fired`] return.
 pub trait CompletionWait {
     /// Block until the controller signals a completion on its interrupt
-    /// line; the caller re-reads `INTERRUPT` on return.
-    fn await_irq(&self);
+    /// line or the implementation's bounded budget elapses; the caller
+    /// re-reads `INTERRUPT` on a fire and fails closed on a timeout.
+    fn await_irq(&self) -> CompletionSignal;
+}
+
+/// Outcome of one [`CompletionWait::await_irq`] wait.
+///
+/// The SDHCI controller raises its interrupt for every started operation —
+/// a completion *or* an error status — so a wait that elapses with no
+/// interrupt at all means the controller (or its interrupt routing) is
+/// dead. The engine maps [`Self::TimedOut`] to
+/// [`DriverError::DeviceFault`] immediately rather than re-polling a
+/// silent device: the caller gets a loud, typed error and the system keeps
+/// running, instead of a task parked forever holding its mount's lock.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum CompletionSignal {
+    /// The interrupt line fired (or may have fired); re-read `INTERRUPT`.
+    Fired,
+    /// The bounded wait elapsed with no interrupt — a dead controller.
+    TimedOut,
 }
 
 /// The metal SDHCI host: the capability-gated [`RegisterWindow`] paired with
@@ -194,8 +219,8 @@ impl<W: CompletionWait> SdhciHost for IrqSdhci<W> {
             .map_err(WindowError::as_driver_error)
     }
 
-    fn await_irq(&mut self) {
-        self.waiter.await_irq();
+    fn await_irq(&mut self) -> CompletionSignal {
+        self.waiter.await_irq()
     }
 }
 
@@ -426,7 +451,11 @@ impl<H: SdhciHost> Emmc2<H> {
     /// driver poll must not monopolise the CPU and starve interrupt-driven
     /// work). `poll_budget` bounds the number of parks as a fail-closed
     /// backstop against a storm of spurious wake-ups; the metal completion
-    /// itself arrives in one or two iterations.
+    /// itself arrives in one or two iterations. A wait that reports
+    /// [`CompletionSignal::TimedOut`] fails closed at once: the controller
+    /// signals every started operation (completion or error), so a silent
+    /// budget-long wait means the device is dead and re-polling it would
+    /// only stretch the outage.
     fn wait_interrupt(&mut self, wanted: u32) -> Result<(), DriverError> {
         for _ in 0..self.poll_budget {
             let status = self.host.read32(regs::REG_INTERRUPT)?;
@@ -439,7 +468,9 @@ impl<H: SdhciHost> Emmc2<H> {
                 self.host.write32(regs::REG_INTERRUPT, wanted)?;
                 return Ok(());
             }
-            self.host.await_irq();
+            if self.host.await_irq() == CompletionSignal::TimedOut {
+                return Err(DriverError::DeviceFault);
+            }
         }
         Err(DriverError::DeviceFault)
     }

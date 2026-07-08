@@ -220,8 +220,12 @@ in-kernel MMIO-only DriverHost, admits the driver through the signed §8
 load gate, **discovers the controller's GIC SPI from the firmware device
 tree (`emmc2_spi`) and binds, routes, and arms it on the published IRQ
 table** — supplying the driver a `CompletionWait` (`Emmc2Completion`) that
-parks the kthread on that line through the same re-arming `wfi` waiter the
-virtio bring-up uses (`RearmingIrqWaiter`, §2.2) — opens the card, and feeds
+blocks on that line through the same task-parking waiter the virtio
+bring-up uses (`rustos_kernel_core::IrqParkWaiter`, §2.2): a syscall-context
+wait parks its task off the run queue (woken by the ISR's `irq_wake`), a
+boot-kthread wait takes the bounded race-free `wfi` fallback, and a
+controller silent past the 2 s budget fails the transfer closed as
+`DriverError::DeviceFault` — opens the card, and feeds
 the resulting `Block` to the same mount + `/System` autoload +
 interactive-unlock tail as virtio-blk (`finish_unlock`, §2.2). With no EMMC2
 interrupt in the device tree the bring-up fails closed rather than parking

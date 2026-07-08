@@ -334,6 +334,17 @@ impl FilesystemSecurity for RwMockFs {
         let idx = Self::index(node)?;
         self.sec.get(idx).copied().ok_or(DriverError::NotFound)
     }
+
+    fn set_security(&mut self, node: NodeId, security: NodeSecurity) -> Result<(), DriverError> {
+        let idx = Self::index(node)?;
+        match self.sec.get_mut(idx) {
+            Some(stored) => {
+                *stored = security;
+                Ok(())
+            }
+            None => Err(DriverError::NotFound),
+        }
+    }
 }
 
 /// The mock's fixed allocation unit for its derived space accounting.

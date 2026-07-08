@@ -233,6 +233,11 @@ impl FilesystemSecurity for MockStore {
             .map(|n| n.security)
             .ok_or(DriverError::NotFound)
     }
+
+    fn set_security(&mut self, _node: NodeId, _security: NodeSecurity) -> Result<(), DriverError> {
+        // The driver store is a read path; a security write is refused.
+        Err(DriverError::Unsupported)
+    }
 }
 
 fn scanned_record(sink: &TestSink) -> (usize, usize) {

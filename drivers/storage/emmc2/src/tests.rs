@@ -93,6 +93,11 @@ struct MockSdhci {
     staged: u32,
     await_calls: u32,
 
+    // Dead-interrupt model: every `await_irq` reports a timed-out wait
+    // (no completion and no error ever signalled), modelling a dead
+    // controller or broken interrupt routing.
+    silent: bool,
+
     // When set, `write32` asserts the driver programs `IRPT_EN` with the
     // completion + error signal-enable mask, guarding
     // the regression where a zero `IRPT_EN` left the interrupt line dead.
@@ -129,6 +134,7 @@ impl MockSdhci {
             error_on_index: None,
             stall: false,
             defer: false,
+            silent: false,
             staged: 0,
             await_calls: 0,
             assert_irpt_en: false,
@@ -332,16 +338,21 @@ impl SdhciHost for MockSdhci {
         Ok(value)
     }
 
-    fn await_irq(&mut self) {
+    fn await_irq(&mut self) -> CompletionSignal {
         // Model the controller's interrupt firing: reveal any staged
         // completion bits to `INTERRUPT`. In normal mode completions are
         // already visible, so this only counts the park; in the
         // interrupt-delivery model (`healthy_deferred`) the engine cannot
         // make progress without it, proving it parks on the interrupt and
-        // never busy-spins.
+        // never busy-spins. A `silent` controller models a dead interrupt
+        // path: the bounded wait elapses with no fire.
         self.await_calls += 1;
+        if self.silent {
+            return CompletionSignal::TimedOut;
+        }
         self.interrupt |= self.staged;
         self.staged = 0;
+        CompletionSignal::Fired
     }
 
     fn write32(&mut self, offset: usize, value: u32) -> Result<(), DriverError> {
@@ -706,6 +717,21 @@ fn write_command_error_fails_closed() {
     assert_eq!(dev.write_blocks(0, &payload), Err(DriverError::DeviceFault));
 }
 
+#[test]
+fn a_silent_controller_fails_closed_instead_of_hanging() {
+    // A controller whose interrupt path is dead: completions are staged
+    // (never visible without a fire) and every bounded wait times out. The
+    // engine must surface `DeviceFault` on the *first* timed-out wait —
+    // never re-poll a silent device through its whole poll budget, and
+    // never leave the caller waiting forever.
+    let mut mock = MockSdhci::healthy_deferred(7);
+    mock.silent = true;
+    let Err(fault) = Emmc2::open(mock) else {
+        panic!("a silent controller cannot identify")
+    };
+    assert_eq!(DriverError::from(fault), DriverError::DeviceFault);
+}
+
 // --- `wiring` capability gate ---------------------------------------------
 
 /// A no-op [`CompletionWait`] for the `wiring` capability tests: those
@@ -713,7 +739,9 @@ fn write_command_error_fails_closed() {
 /// the waiter is never driven.
 struct NoIrq;
 impl crate::CompletionWait for NoIrq {
-    fn await_irq(&self) {}
+    fn await_irq(&self) -> CompletionSignal {
+        CompletionSignal::Fired
+    }
 }
 
 /// Minimal RAM-backed mapper for the `wiring` capability tests. The full

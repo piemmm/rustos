@@ -1,6 +1,10 @@
 # SMARTRAM.md - Opportunistic reclaimable memory services
 
-Status: planned implementation specification  
+Status: in progress — the clean and rebuildable filesystem cache (section
+6.1) is implemented (`kernel/mem::reclaim` + `kernel/core::fs::CachedFs`,
+wrapping every registered volume driver; see `PLAN.md` §SMARTRAM for the
+done-state summary); the remaining classes and the pressure integration
+are staged below  
 Target: RustOS  
 Primary code areas: `kernel/mem`, `kernel/core`, `kernel/sched`, `lib/log`, existing filesystem drivers, existing desktop/session crates, and existing `lib/abi` diagnostics only if a current caller requires them  
 Secondary code areas: `drivers/filesystem/rustfs`, `userland/system/appmgr`, `userland/shell/elsh`, `userland/gui/wm`, `userland/gui/taskbar`, `userland/gui/session`, `lib/appload`, `lib/cmdres`, `lib/raster`, `lib/svg`, `lib/font`, `lib/icon`, `lib/theme`, and `lib/path`  
@@ -250,6 +254,16 @@ Clean file data, directory entries, path lookup results, stat metadata,
 extended metadata, ACL/security-label lookups, content hashes, signature
 verification results, and type-detection results may use spare RAM when they
 are tied to a canonical storage identity and generation.
+
+Current state: implemented as `kernel/core::fs::CachedFs` over the
+`kernel/mem::reclaim` classification/budget/accounting model — per-volume,
+write-through, below the secured VFS (no authorisation bypass), LRU-bounded
+with hysteresis, zeroing every reclaimed buffer, invalidated precisely by
+the volume's single writer (the shared registered driver). Within one boot
+the driver instance is the volume generation (a mount starts an empty
+cache); removable-media generation tokens arrive with the storage
+subsystem that introduces removable volumes. Extended-attribute and
+content-hash caching land with their consumers.
 
 Rules:
 

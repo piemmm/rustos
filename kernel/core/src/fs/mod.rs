@@ -45,6 +45,7 @@
 //! mode bits, failing closed and never branching on `uid == 0`.
 
 mod delegate;
+mod fscache;
 #[cfg(test)]
 pub(crate) mod memfs;
 pub mod mount;
@@ -55,6 +56,7 @@ pub mod service;
 mod vfs;
 
 pub use delegate::{DelegatedFs, DelegatedInfo, MetaPolicy, PerInode, Uniform};
+pub use fscache::CachedFs;
 pub use mount::{MountPoint, MountTable};
 pub use mounted::{
     FilesystemAlreadyInstalled, IdentityAlreadyInstalled, LateFilesystem, LateIdentity,

@@ -129,6 +129,11 @@ impl FilesystemSecurity for MockRoot {
             _ => Err(DriverError::NotFound),
         }
     }
+
+    fn set_security(&mut self, _node: NodeId, _security: NodeSecurity) -> Result<(), DriverError> {
+        // The boot-load mock is a read path; a security write is refused.
+        Err(DriverError::Unsupported)
+    }
 }
 
 /// A valid single-account `users-v1` database, serialised by the same

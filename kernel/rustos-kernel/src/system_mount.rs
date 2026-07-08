@@ -67,12 +67,14 @@ use alloc::vec::Vec;
 
 use rustos_abi::driver::block::Block;
 use rustos_abi::driver::filesystem::{
-    DirEntry, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite, NodeId,
-    NodeInfo, NodeKind, NodeSecurity, VolumeStats,
+    FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
 };
-use rustos_abi::{DriverError, DriverHandle};
+use rustos_abi::DriverHandle;
 use rustos_drv_fs_rustfs::{RustFs, SYSTEM_VOLUME_KEY};
-use rustos_kernel_core::{LateFilesystem, MountedFilesystemService, Path, Vfs, VfsError};
+use rustos_kernel_core::{
+    CachedFs, LateFilesystem, MountedFilesystemService, Path, SleepLock, Vfs, VfsError,
+};
+use rustos_kernel_mem::CacheBudget;
 use rustos_kernel_sec::{GroupId, UserId};
 use rustos_log::{log, Event, EventId, Field, Level, Sink};
 use rustos_partition::{parse_partition_table, PartitionBlock, PartitionType};
@@ -80,105 +82,29 @@ use rustos_partition::{parse_partition_table, PartitionBlock, PartitionType};
 use crate::root_mount::LATE_IDENTITY;
 use crate::shared_block::DriverStoreService;
 
-/// The mounted-volume filesystem driver, type-erased.
-///
-/// A blanket trait over the structural surfaces the secured VFS delegates
-/// to — read, write, security, and the whole-volume space accounting the
-/// mount snapshot reports — plus [`Send`] (the mount lives behind a sleeping
-/// lock shared across the per-CPU syscall handlers). The blanket impl makes
-/// every concrete `RustFs<…>` a `KernelFs`; the `Box<dyn KernelFs>`
-/// forwarding impls below let the boxed, board-specific driver be the single
-/// concrete type the boot-time statics name.
-pub trait KernelFs:
-    FilesystemRead + FilesystemWrite + FilesystemSecurity + FilesystemStats + Send
-{
-}
-
-impl<T> KernelFs for T where
-    T: FilesystemRead + FilesystemWrite + FilesystemSecurity + FilesystemStats + Send
-{
-}
-
-impl FilesystemRead for Box<dyn KernelFs> {
-    fn root(&self) -> NodeId {
-        (**self).root()
-    }
-
-    fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
-        (**self).node_info(node)
-    }
-
-    fn lookup(&mut self, dir: NodeId, name: &[u8]) -> Result<NodeId, DriverError> {
-        (**self).lookup(dir, name)
-    }
-
-    fn read_at(&mut self, file: NodeId, offset: u64, buf: &mut [u8]) -> Result<usize, DriverError> {
-        (**self).read_at(file, offset, buf)
-    }
-
-    fn read_dir(
-        &mut self,
-        dir: NodeId,
-        index: u64,
-        name_out: &mut [u8],
-    ) -> Result<Option<DirEntry>, DriverError> {
-        (**self).read_dir(dir, index, name_out)
-    }
-}
-
-impl FilesystemWrite for Box<dyn KernelFs> {
-    fn create(&mut self, dir: NodeId, name: &[u8], kind: NodeKind) -> Result<NodeId, DriverError> {
-        (**self).create(dir, name, kind)
-    }
-
-    fn write_at(
-        &mut self,
-        dir: NodeId,
-        name: &[u8],
-        offset: u64,
-        data: &[u8],
-    ) -> Result<usize, DriverError> {
-        (**self).write_at(dir, name, offset, data)
-    }
-
-    fn truncate(&mut self, dir: NodeId, name: &[u8], size: u64) -> Result<(), DriverError> {
-        (**self).truncate(dir, name, size)
-    }
-
-    fn remove(&mut self, dir: NodeId, name: &[u8]) -> Result<(), DriverError> {
-        (**self).remove(dir, name)
-    }
-
-    fn rename(
-        &mut self,
-        src_dir: NodeId,
-        src_name: &[u8],
-        dst_dir: NodeId,
-        dst_name: &[u8],
-    ) -> Result<(), DriverError> {
-        (**self).rename(src_dir, src_name, dst_dir, dst_name)
-    }
-
-    fn flush(&mut self) -> Result<(), DriverError> {
-        (**self).flush()
-    }
-}
-
-impl FilesystemSecurity for Box<dyn KernelFs> {
-    fn security(&mut self, node: NodeId) -> Result<NodeSecurity, DriverError> {
-        (**self).security(node)
-    }
-}
-
-impl FilesystemStats for Box<dyn KernelFs> {
-    fn stats(&mut self) -> Result<VolumeStats, DriverError> {
-        (**self).stats()
-    }
-}
+pub use crate::kernel_fs::KernelFs;
 
 /// The set-once mount cell the `fs_*` syscalls resolve operations against,
 /// published by [`install_system_mount`] once the disk is up.
 pub static LATE_FILESYSTEM: LateFilesystem<Box<dyn KernelFs>> = LateFilesystem::new();
+
+/// Wrap a volume's driver in the clean, rebuildable filesystem cache
+/// (`plans/SMARTRAM.md` section 6.1), budgeted from the kernel heap
+/// arena the cache lives in.
+///
+/// Every mounted volume is registered through this one helper, so both
+/// the read path and every mutation (including the account-administration
+/// engine's, which shares the registered lock) flow through the same
+/// cache and its invalidation.
+fn cached<F>(driver: F) -> Box<dyn KernelFs>
+where
+    F: FilesystemRead + FilesystemWrite + FilesystemSecurity + FilesystemStats + Send + 'static,
+{
+    Box::new(CachedFs::new(
+        driver,
+        CacheBudget::from_backing(rustos_kalloc::HEAP_BYTES),
+    ))
+}
 
 /// The production `fs_*` service the dispatch hook holds from boot
 /// (`BootInfo::with_filesystem`): it routes each operation through the
@@ -351,12 +277,14 @@ pub fn install_system_mount<B: Block + 'static>(
         unavailable(audit, "already_installed");
         return;
     }
-    let driver: Box<dyn KernelFs> = Box::new(fs);
+    let driver = cached(fs);
     if LATE_FILESYSTEM
         .register(system_handle, driver, "RustFsSystem", "rustfs")
         .is_err()
     {
-        // Registered once per boot; a refusal is a logic error.
+        // Registered once per boot; a refusal is a logic error. The
+        // returned lock is not needed here: nothing else in the kernel
+        // writes the read-only `/System` volume.
         unavailable(audit, "already_installed");
         return;
     }
@@ -392,18 +320,24 @@ pub fn install_system_mount<B: Block + 'static>(
 /// failing closed and never aborts the boot. The VFS itself is published by
 /// [`install_system_mount`]; this only attaches the driver, so it is safe to
 /// call after that step regardless of ordering.
-pub fn register_writable_state(driver: Box<dyn KernelFs>, audit: &dyn Sink) {
+///
+/// Returns the registered driver's `'static` lock so the caller can share
+/// the volume's **single** writer with the account-administration engine
+/// (`RootAdminBacking`) — never a second independent window over the same
+/// device — or `None` when registration was refused.
+pub fn register_writable_state(
+    driver: Box<dyn KernelFs>,
+    audit: &dyn Sink,
+) -> Option<&'static SleepLock<Box<dyn KernelFs>>> {
     let Ok(handle) = DriverHandle::from_raw(ROOT_VOLUME_HANDLE) else {
         unavailable(audit, "writable_handle_invalid");
-        return;
+        return None;
     };
-    if LATE_FILESYSTEM
-        .register(handle, driver, "RustFsRoot", "rustfs")
-        .is_err()
-    {
+    let Ok(shared) = LATE_FILESYSTEM.register(handle, cached(driver), "RustFsRoot", "rustfs")
+    else {
         unavailable(audit, "writable_already_installed");
-        return;
-    }
+        return None;
+    };
     log(
         audit,
         &Event {
@@ -413,6 +347,7 @@ pub fn register_writable_state(driver: Box<dyn KernelFs>, audit: &dyn Sink) {
             fields: &[],
         },
     );
+    Some(shared)
 }
 
 /// Audit a declined `/System` `fs_*` mount with a stable, secret-free

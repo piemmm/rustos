@@ -19,12 +19,14 @@
 //! syscall path and the kthread path reach
 //! [`rustos_kernel_irq::block_until_ready`].
 //!
-//! Like `SyscallIrqWaiter` it **yields** (re-enqueues, staying runnable)
-//! rather than parking: the device-IRQ dispatch path only sets the
-//! per-line ready flag through [`rustos_kernel_irq::IrqTable::fire`] and
-//! does not re-enqueue a parked task, so a poll/yield cycle is the design
-//! that has no lost-wakeup window (the `kernel/irq` crate docs spell this
-//! out). Parking would deadlock until that table-internal interlock lands.
+//! Unlike `SyscallIrqWaiter` and [`crate::blockwait::IrqParkWaiter`] —
+//! which park the caller off the run queue and are woken through the
+//! `IRQ_WAITQ`/`irq_wake` interlock — this waiter **yields** (re-enqueues,
+//! staying runnable) through the kthread's own [`YieldHandle`]. That keeps
+//! it usable from a coroutine body with no scheduler-park context at all,
+//! at the cost of staying runnable between polls; a block-device
+//! completion wait uses the parking [`crate::blockwait::IrqParkWaiter`]
+//! instead.
 //!
 //! [`VirtioBlk`]: https://docs.rs/virtio-drivers
 

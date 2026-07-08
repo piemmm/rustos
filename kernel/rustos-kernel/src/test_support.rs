@@ -198,4 +198,14 @@ impl FilesystemSecurity for MockRootFs {
             .map(|n| n.security)
             .ok_or(DriverError::NotFound)
     }
+
+    fn set_security(&mut self, node: NodeId, security: NodeSecurity) -> Result<(), DriverError> {
+        match self.nodes.get_mut(&node.raw()) {
+            Some(stored) => {
+                stored.security = security;
+                Ok(())
+            }
+            None => Err(DriverError::NotFound),
+        }
+    }
 }

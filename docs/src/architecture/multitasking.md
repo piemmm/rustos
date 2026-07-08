@@ -109,21 +109,32 @@ The arch-neutral half lives in `kernel/core` and is host-proven:
   self-contained `RescheduleAction` (`Yield` / `Park` / `Exit`) mapped onto
   the scheduler's `TaskAction` at one boundary (§2.2).
 * **`reschedule_current(cpu, action) -> bool`** — the entry point the arch
-  trap path calls. It looks up a per-CPU *resume handle*, lifts it out from
-  under its lock *before* the suspending `switch` (so no lock is held
-  across the hand-off), and suspends the running user kthread back to the
-  dispatcher. It **fails closed** (returns `false`) when no user task is
-  published for the CPU, so the trap path falls back to an ordinary syscall
-  return rather than an unsound switch (§2.9, §5.4).
+  trap path *and* in-kernel blocking primitives (`SleepLock` contention, a
+  block-device completion wait) call. It looks up a per-CPU *resume
+  handle*, lifts it out from under its lock *before* the suspending
+  `switch` (so no lock is held across the hand-off), and suspends the
+  running kthread back to the dispatcher. It **fails closed** (returns
+  `false`) when no kthread is published for the CPU — the pre-dispatch
+  boot flow or a host test — so the caller falls back (an ordinary syscall
+  return, or a bounded CPU park) rather than an unsound switch (§2.9,
+  §5.4).
 * **The per-CPU resume table + `pre_resume` hook.** `dispatch_step`
-  publishes a resume handle for the user kthread it is about to switch
-  into, and clears it the instant the task switches back — so a handle is
-  valid exactly while that CPU runs the task (in EL0 or one of its syscall
-  traps). A `pre_resume` hook (carried by `spawn_user_kthread`) runs on the
-  dispatcher side before every switch-in; its presence is what marks a task
-  as a *user* kthread and what reactivates the task's address space so it
-  `eret`s under the correct translation regime (§4). The dispatcher passes
-  the hook the task's **own kernel-stack top** (`KernelStack::top`): a port
+  publishes a resume handle for *every* kthread it is about to switch
+  into — user and kernel alike — and clears it the instant the task
+  switches back, so a handle is valid exactly while that CPU runs the task
+  (in EL0, in one of its syscall traps, or in a kernel kthread's body). A
+  user task's handle carries the *syscall* suspend thunk (which brackets
+  the suspend with the port's cooperative-park convention hook); a kernel
+  kthread's carries the *body* thunk (no bracket — a kthread never entered
+  the port's privilege-entry convention). Kernel kthreads being
+  suspendable is load-bearing: a kthread contending on a `SleepLock` whose
+  holder is parked across a device wait must park too — an in-kernel spin
+  would monopolise the CPU and starve the dispatch loop. A `pre_resume`
+  hook (carried by `spawn_user_kthread`) runs on the dispatcher side
+  before every switch-in; its presence is what marks a task as a *user*
+  kthread and what reactivates the task's address space so it `eret`s
+  under the correct translation regime (§4). The dispatcher passes the
+  hook the task's **own kernel-stack top** (`KernelStack::top`): a port
   whose syscall entry does not implicitly resume on the running task's
   kernel stack uses it to repoint its per-CPU entry stack (see x86_64,
   below); a port that does (aarch64) ignores it.
@@ -177,8 +188,10 @@ task's next `syscall` would observe an unbalanced GS-swap and fault. The
 arch-neutral fix is a cooperative-park hook pair on
 `rustos_arch_api::ContextSwitch` — `enter_cooperative_park` /
 `leave_cooperative_park`, both **default no-op** — that the kthread runtime
-calls in `suspend_thunk` around the suspend switch (the user-kthread
-mid-handler park path). They are the exact analogue of the `pre_resume`
+calls in the *syscall* suspend thunk around the suspend switch (the
+user-kthread mid-handler park path; a kernel kthread's *body* suspend
+skips the bracket — it never entered the convention). They are the exact
+analogue of the `pre_resume`
 stack-top argument: a seam ports that need nothing (aarch64 saves its return
 state in the trap frame; riscv64 has no cooperative mid-handler park yet)
 leave at the default, and only x86_64 overrides — there with a `swapgs` that

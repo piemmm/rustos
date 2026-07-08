@@ -582,8 +582,11 @@ impl NodeSecurity {
 /// that keeps no per-file owner does not implement it, and the VFS keeps
 /// applying the mount-point template.
 ///
-/// The driver only *reports* the record; it makes no permission decision
-/// (the VFS is the policy point).
+/// The driver only *stores and reports* the record; it makes no
+/// permission decision (the VFS is the policy point, and every caller of
+/// [`set_security`](Self::set_security) — today the kernel's
+/// `CAP_USER_ADMIN` account-administration engine — authorises the write
+/// before delegating here).
 ///
 /// # Capabilities
 ///
@@ -598,6 +601,16 @@ pub trait FilesystemSecurity {
     /// * [`DriverError::NotFound`] if `node` does not name a live node.
     /// * [`DriverError::DeviceFault`] on an unrecoverable block read.
     fn security(&mut self, node: NodeId) -> Result<NodeSecurity, DriverError>;
+
+    /// Replace the security record stored for `node`.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::PermissionDenied`] if the volume is mounted
+    ///   read-only — refused before any state is touched.
+    /// * [`DriverError::NotFound`] if `node` does not name a live node.
+    /// * [`DriverError::DeviceFault`] on an unrecoverable block write.
+    fn set_security(&mut self, node: NodeId, security: NodeSecurity) -> Result<(), DriverError>;
 }
 
 /// The four timestamps stored for a filesystem node.
@@ -1292,7 +1305,8 @@ mod tests {
         );
     }
 
-    /// A node whose stored record the VFS reads through the trait.
+    /// A node whose stored record the VFS reads and replaces through the
+    /// trait.
     struct MockSecurityFs {
         sec: NodeSecurity,
     }
@@ -1303,6 +1317,18 @@ mod tests {
                 return Err(DriverError::NotFound);
             }
             Ok(self.sec)
+        }
+
+        fn set_security(
+            &mut self,
+            node: NodeId,
+            security: NodeSecurity,
+        ) -> Result<(), DriverError> {
+            if node == NodeId::NONE {
+                return Err(DriverError::NotFound);
+            }
+            self.sec = security;
+            Ok(())
         }
     }
 
@@ -1345,6 +1371,15 @@ mod tests {
         let mut fs = MockSecurityFs { sec };
         assert_eq!(fs.security(NodeId::from_raw(1)), Ok(sec));
         assert_eq!(fs.security(NodeId::NONE), Err(DriverError::NotFound));
+
+        let replacement = NodeSecurity::new(0o750, 8, 10);
+        assert_eq!(
+            fs.set_security(NodeId::NONE, replacement),
+            Err(DriverError::NotFound)
+        );
+        assert_eq!(fs.security(NodeId::from_raw(1)), Ok(sec));
+        assert_eq!(fs.set_security(NodeId::from_raw(1), replacement), Ok(()));
+        assert_eq!(fs.security(NodeId::from_raw(1)), Ok(replacement));
     }
 
     /// A node holding a single extended attribute in fixed buffers, enough to

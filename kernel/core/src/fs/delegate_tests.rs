@@ -807,6 +807,11 @@ impl FilesystemSecurity for SecMockFs {
             _ => Err(DriverError::NotFound),
         }
     }
+
+    fn set_security(&mut self, _node: NodeId, _security: NodeSecurity) -> Result<(), DriverError> {
+        // The mock's records are fixed; a security write is refused.
+        Err(DriverError::Unsupported)
+    }
 }
 
 #[test]

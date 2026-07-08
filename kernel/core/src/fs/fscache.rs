@@ -1,0 +1,910 @@
+//! Clean, rebuildable filesystem cache (`plans/SMARTRAM.md` section 6.1).
+//!
+//! [`CachedFs`] wraps a mounted volume's filesystem driver **below** the
+//! VFS policy layer: every permission check (capability gate, ACL, mode
+//! bits, mount flags) still runs in the secured VFS on every operation,
+//! so a cache hit can never bypass authorisation — the cache only spares
+//! the driver a repeated structural read of bytes the caller was just
+//! authorised to see.
+//!
+//! # What is cached
+//!
+//! * File **data**, in page-sized chunks ([`ReclaimClass::CleanFileData`]).
+//! * **Metadata** ([`ReclaimClass::FsMetadata`]): stat records
+//!   (`node_info`), security records (`security`), name resolution
+//!   (`lookup`), and directory entries (`read_dir`).
+//!
+//! Only *clean* state is cached: writes go straight to the driver
+//! (write-through) and invalidate what they touch, so the cache never
+//! holds dirty data and dropping any entry is always safe.
+//!
+//! # Coherence: one volume, one writer
+//!
+//! Every mutation of the volume flows through this wrapper — the `fs_*`
+//! syscalls and the account-administration engine share the single
+//! registered driver instance behind one `SleepLock`
+//! (`LateFilesystem::register`). There is no second window onto the
+//! device, so precise invalidation here is complete: `write_at` /
+//! `truncate` drop the file's data and stat, `create` / `remove` /
+//! `rename` drop the affected lookups, directory entries, and directory
+//! stats, and `set_security` drops the node's security record. When a
+//! mutation's target cannot be identified (an unexpected driver error
+//! while resolving it), the **whole cache is purged** — fail closed,
+//! never a stale entry.
+//!
+//! # Bounds, eviction, and accounting
+//!
+//! The cache is bounded by a [`CacheBudget`] derived from the kernel
+//! heap size and accounted per class in a [`CacheAccounting`] ledger
+//! (`kernel/mem::reclaim`). An insert that would exceed the hard limit
+//! first evicts least-recently-used entries down to the low watermark
+//! (hysteresis), evicting file data before metadata
+//! ([`ReclaimClass::reclaim_priority`]). Oversized entries (a name over
+//! the component bound, a read larger than the bypass limit) are refused
+//! or bypassed, never admitted unbounded. Every payload buffer the cache
+//! copies is allocated fallibly (`try_reserve`): allocation failure
+//! refuses the entry and the operation is served straight from the
+//! driver. The remaining map-node allocations are small, fixed-size, and
+//! bounded by the budget's entry-overhead charge.
+//!
+//! # Secret hygiene
+//!
+//! The volumes this wraps are encrypted at rest, so cached file bytes
+//! and names are decrypted user data: every buffer is zeroed before its
+//! entry is released — on invalidation, eviction, purge, and teardown —
+//! so reclaim never leaves plaintext in reusable heap memory.
+//!
+//! # Concurrency
+//!
+//! `CachedFs` lives inside the per-mount `SleepLock`, so every operation
+//! holds `&mut self`: lookup racing reclaim, invalidation racing
+//! rebuild, and teardown racing reclaim are impossible by construction
+//! rather than by locking discipline.
+
+use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
+use core::mem::size_of;
+
+use rustos_abi::driver::filesystem::{
+    DirEntry, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite, NodeId,
+    NodeInfo, NodeKind, NodeSecurity, VolumeStats,
+};
+use rustos_abi::DriverError;
+use rustos_kernel_mem::{CacheAccounting, CacheBudget, ReclaimClass, PAGE_SIZE};
+use zeroize::Zeroize;
+
+use super::path::MAX_COMPONENT_LEN;
+
+/// A cached file-data chunk covers exactly one page-aligned window.
+const CHUNK: usize = PAGE_SIZE;
+
+/// Reads larger than this bypass the cache entirely: a bulk sequential
+/// read (a bundle load) is served in one driver call and must not evict
+/// the hot small-read working set.
+const READ_BYPASS_LIMIT: usize = 4 * CHUNK;
+
+/// Approximate per-entry bookkeeping cost (map nodes, key copies, the
+/// LRU index) charged on top of an entry's payload so the ledger tracks
+/// real heap footprint, not just payload bytes.
+const ENTRY_OVERHEAD: usize = 96;
+
+/// Which cache pool a key lives in, for the LRU index.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum KeyRef {
+    /// `stat` pool: node id.
+    Stat(u64),
+    /// `sec` pool: node id.
+    Sec(u64),
+    /// `lookup` pool: (directory id, child name).
+    Lookup(u64, Vec<u8>),
+    /// `dirent` pool: (directory id, cursor).
+    Dirent(u64, u64),
+    /// `data` pool: (file id, chunk base offset).
+    Data(u64, u64),
+}
+
+/// A cached `node_info` record.
+struct StatEntry {
+    info: NodeInfo,
+    tick: u64,
+}
+
+/// A cached `security` record.
+struct SecEntry {
+    sec: NodeSecurity,
+    tick: u64,
+}
+
+/// A cached positive `lookup` result.
+struct LookupEntry {
+    node: u64,
+    tick: u64,
+}
+
+/// A cached `read_dir` entry: the fixed record plus its name bytes.
+struct DirentEntry {
+    entry: DirEntry,
+    name: Vec<u8>,
+    tick: u64,
+}
+
+/// A cached file-data chunk. `bytes.len() < CHUNK` marks end-of-file at
+/// `base + bytes.len()` — authoritative because every write to the
+/// volume invalidates the file's chunks before the next read.
+struct DataEntry {
+    bytes: Vec<u8>,
+    tick: u64,
+}
+
+/// The clean, rebuildable filesystem cache wrapping one volume's driver.
+///
+/// See the module docs for the design; construct with [`CachedFs::new`]
+/// at driver registration time.
+pub struct CachedFs<F> {
+    inner: F,
+    budget: CacheBudget,
+    accounting: CacheAccounting,
+    /// Monotonic recency counter; every touch assigns a fresh tick, so
+    /// ticks are unique and the LRU maps are keyed by them.
+    tick: u64,
+    /// Books no longer balance (a ledger defect was detected): the
+    /// cache has been purged and admits nothing further — every
+    /// operation is served straight from the driver (fail closed).
+    poisoned: bool,
+    stat: BTreeMap<u64, StatEntry>,
+    sec: BTreeMap<u64, SecEntry>,
+    /// Positive lookup results, nested per directory so a hit borrows
+    /// the queried name instead of allocating a tuple key.
+    lookup: BTreeMap<u64, BTreeMap<Vec<u8>, LookupEntry>>,
+    dirent: BTreeMap<(u64, u64), DirentEntry>,
+    data: BTreeMap<(u64, u64), DataEntry>,
+    /// LRU index of the data pool, keyed by tick (oldest first).
+    lru_data: BTreeMap<u64, KeyRef>,
+    /// LRU index of the metadata pools, keyed by tick (oldest first).
+    lru_meta: BTreeMap<u64, KeyRef>,
+}
+
+impl<F> CachedFs<F> {
+    /// Wrap `inner` with an empty cache bounded by `budget`.
+    #[must_use]
+    pub fn new(inner: F, budget: CacheBudget) -> Self {
+        Self {
+            inner,
+            budget,
+            accounting: CacheAccounting::new(),
+            tick: 0,
+            poisoned: false,
+            stat: BTreeMap::new(),
+            sec: BTreeMap::new(),
+            lookup: BTreeMap::new(),
+            dirent: BTreeMap::new(),
+            data: BTreeMap::new(),
+            lru_data: BTreeMap::new(),
+            lru_meta: BTreeMap::new(),
+        }
+    }
+
+    /// The cache's byte ledger and event counters.
+    #[must_use]
+    pub fn accounting(&self) -> &CacheAccounting {
+        &self.accounting
+    }
+
+    /// The cache's grow/shrink bounds.
+    #[must_use]
+    pub fn budget(&self) -> CacheBudget {
+        self.budget
+    }
+
+    /// The wrapped driver, for the host tests' call counting.
+    #[cfg(test)]
+    pub(crate) fn inner_driver(&self) -> &F {
+        &self.inner
+    }
+}
+
+impl<F> CachedFs<F> {
+    /// The next unique recency tick.
+    fn next_tick(&mut self) -> u64 {
+        self.tick += 1;
+        self.tick
+    }
+
+    /// Copy `bytes` into a fresh exact-capacity buffer, fallibly: an
+    /// allocation failure yields `None` and the caller refuses the
+    /// entry instead of aborting on heap exhaustion.
+    fn try_copy(bytes: &[u8]) -> Option<Vec<u8>> {
+        let mut out = Vec::new();
+        out.try_reserve_exact(bytes.len()).ok()?;
+        out.extend_from_slice(bytes);
+        Some(out)
+    }
+
+    /// The ledger class an LRU key belongs to.
+    fn class_of(key: &KeyRef) -> ReclaimClass {
+        match key {
+            KeyRef::Data(..) => ReclaimClass::CleanFileData,
+            _ => ReclaimClass::FsMetadata,
+        }
+    }
+
+    /// The accounted byte cost of an LRU key's entry.
+    fn cost_of(&self, key: &KeyRef) -> usize {
+        let payload = match key {
+            KeyRef::Stat(_) => size_of::<NodeInfo>(),
+            KeyRef::Sec(_) => size_of::<NodeSecurity>(),
+            KeyRef::Lookup(_, name) => name.len().saturating_mul(2).saturating_add(8),
+            KeyRef::Dirent(dir, cursor) => self
+                .dirent
+                .get(&(*dir, *cursor))
+                .map_or(0, |e| e.name.len().saturating_add(size_of::<DirEntry>())),
+            KeyRef::Data(file, base) => self.data.get(&(*file, *base)).map_or(0, |e| e.bytes.len()),
+        };
+        payload.saturating_add(ENTRY_OVERHEAD)
+    }
+
+    /// Remove the entry `key` names, zeroing its buffers, dropping its
+    /// LRU index slot, and discharging its cost. Returns the removed
+    /// entry's tick, or `None` when it was already gone.
+    fn remove_entry(&mut self, key: &KeyRef) -> Option<u64> {
+        let cost = self.cost_of(key);
+        let tick = match key {
+            KeyRef::Stat(node) => self.stat.remove(node).map(|e| e.tick),
+            KeyRef::Sec(node) => self.sec.remove(node).map(|e| e.tick),
+            KeyRef::Lookup(dir, name) => {
+                let removed = self.lookup.get_mut(dir).and_then(|names| {
+                    names
+                        .remove_entry(name.as_slice())
+                        .map(|(mut stored_name, entry)| {
+                            stored_name.as_mut_slice().zeroize();
+                            entry.tick
+                        })
+                });
+                if self.lookup.get(dir).is_some_and(BTreeMap::is_empty) {
+                    self.lookup.remove(dir);
+                }
+                removed
+            }
+            KeyRef::Dirent(dir, cursor) => self.dirent.remove(&(*dir, *cursor)).map(|mut e| {
+                e.name.as_mut_slice().zeroize();
+                e.tick
+            }),
+            KeyRef::Data(file, base) => self.data.remove(&(*file, *base)).map(|mut e| {
+                e.bytes.as_mut_slice().zeroize();
+                e.tick
+            }),
+        }?;
+        self.lru_data.remove(&tick);
+        self.lru_meta.remove(&tick);
+        if self
+            .accounting
+            .discharge(Self::class_of(key), cost)
+            .is_err()
+        {
+            self.poison();
+        }
+        Some(tick)
+    }
+
+    /// Drop every cached entry (zeroed) and admit nothing further: the
+    /// fail-closed response to a ledger defect. The driver keeps
+    /// serving every operation; only the cache is disabled.
+    fn poison(&mut self) {
+        self.poisoned = true;
+        self.purge();
+    }
+
+    /// Drop every cached entry, zeroing all buffers and rebalancing the
+    /// ledger to empty.
+    fn purge(&mut self) {
+        for entry in self.data.values_mut() {
+            entry.bytes.as_mut_slice().zeroize();
+        }
+        for entry in self.dirent.values_mut() {
+            entry.name.as_mut_slice().zeroize();
+        }
+        while let Some((_, mut names)) = self.lookup.pop_first() {
+            while let Some((mut name, _)) = names.pop_first() {
+                name.as_mut_slice().zeroize();
+            }
+        }
+        self.stat.clear();
+        self.sec.clear();
+        self.dirent.clear();
+        self.data.clear();
+        self.lru_data.clear();
+        self.lru_meta.clear();
+        self.accounting.zero_ledger();
+    }
+
+    /// Evict least-recently-used entries until the ledger total is at
+    /// most `target`, taking file data before metadata.
+    fn evict_until(&mut self, target: usize) {
+        while self.accounting.total_bytes() > target {
+            let key = match self.lru_data.first_key_value() {
+                Some((_, key)) => key.clone(),
+                None => match self.lru_meta.first_key_value() {
+                    Some((_, key)) => key.clone(),
+                    None => return,
+                },
+            };
+            if self.remove_entry(&key).is_none() {
+                // An index entry with no backing entry is a ledger
+                // defect; fail closed rather than loop.
+                self.poison();
+                return;
+            }
+            self.accounting.record_eviction();
+        }
+    }
+
+    /// Admit an entry of `cost` bytes under `key`, evicting to make
+    /// room. Returns the recency tick to store in the entry, or `None`
+    /// when the entry is refused (over budget, poisoned, or the ledger
+    /// cannot account it) — the caller then serves without caching.
+    fn admit(&mut self, key: KeyRef, cost: usize) -> Option<u64> {
+        if self.poisoned || cost > self.budget.hard() {
+            self.accounting.record_refusal();
+            return None;
+        }
+        if self.accounting.total_bytes().saturating_add(cost) > self.budget.hard() {
+            let headroom = self.budget.low().min(self.budget.hard() - cost);
+            self.evict_until(headroom);
+            if self.poisoned {
+                self.accounting.record_refusal();
+                return None;
+            }
+        }
+        let class = Self::class_of(&key);
+        if self.accounting.charge(class, cost).is_err() {
+            self.accounting.record_refusal();
+            return None;
+        }
+        let tick = self.next_tick();
+        match class {
+            ReclaimClass::CleanFileData => self.lru_data.insert(tick, key),
+            ReclaimClass::FsMetadata => self.lru_meta.insert(tick, key),
+        };
+        Some(tick)
+    }
+
+    /// Refresh `key`'s recency: move its LRU slot from `old_tick` to a
+    /// fresh tick, returning the new tick for the entry to store.
+    fn touch(&mut self, old_tick: u64) -> u64 {
+        let tick = self.next_tick();
+        if let Some(key) = self.lru_data.remove(&old_tick) {
+            self.lru_data.insert(tick, key);
+        } else if let Some(key) = self.lru_meta.remove(&old_tick) {
+            self.lru_meta.insert(tick, key);
+        }
+        tick
+    }
+
+    /// The byte offset of `pos` within its containing chunk. The
+    /// remainder of a division by [`CHUNK`] always fits `usize`.
+    #[allow(clippy::cast_possible_truncation)]
+    fn offset_in_chunk(pos: u64, base: u64) -> usize {
+        (pos - base) as usize
+    }
+}
+
+impl<F: FilesystemRead> CachedFs<F> {
+    /// Resolve the node `dir/name` currently names, for invalidation,
+    /// preferring the cache over a driver read.
+    ///
+    /// `Ok(None)` when no such child exists; `Err(())` when the driver
+    /// failed unexpectedly — the caller must then purge the whole cache
+    /// rather than leave a possibly-affected entry standing.
+    fn resolve_for_invalidation(&mut self, dir: NodeId, name: &[u8]) -> Result<Option<u64>, ()> {
+        if let Some(entry) = self
+            .lookup
+            .get(&dir.raw())
+            .and_then(|names| names.get(name))
+        {
+            return Ok(Some(entry.node));
+        }
+        match self.inner.lookup(dir, name) {
+            Ok(node) => Ok(Some(node.raw())),
+            Err(DriverError::NotFound) => Ok(None),
+            Err(_) => Err(()),
+        }
+    }
+
+    /// Drop the cached lookup for `dir/name`, if present.
+    fn invalidate_lookup(&mut self, dir: u64, name: &[u8]) {
+        // The key copy could not be allocated: the entry cannot be
+        // addressed individually, so fail closed on the whole cache.
+        let Some(name) = Self::try_copy(name) else {
+            self.purge();
+            return;
+        };
+        if self.remove_entry(&KeyRef::Lookup(dir, name)).is_some() {
+            self.accounting.record_invalidation();
+        }
+    }
+
+    /// Drop every cached lookup under `dir`.
+    ///
+    /// Used when a mutation changes the directory's name bindings
+    /// (`create` / `remove` / `rename`): name matching policy belongs to
+    /// the driver and may fold case, so an exact-byte removal could
+    /// leave a differently-spelled alias of the same binding standing —
+    /// the whole directory's lookups go instead (fail closed).
+    fn invalidate_lookups(&mut self, dir: u64) {
+        loop {
+            let Some(key) = self
+                .lookup
+                .get(&dir)
+                .and_then(|names| names.first_key_value())
+                .map(|(name, _)| KeyRef::Lookup(dir, name.clone()))
+            else {
+                return;
+            };
+            if self.remove_entry(&key).is_some() {
+                self.accounting.record_invalidation();
+            }
+        }
+    }
+
+    /// Drop the cached stat record for `node`, if present.
+    fn invalidate_stat(&mut self, node: u64) {
+        if self.remove_entry(&KeyRef::Stat(node)).is_some() {
+            self.accounting.record_invalidation();
+        }
+    }
+
+    /// Drop the cached security record for `node`, if present.
+    fn invalidate_sec(&mut self, node: u64) {
+        if self.remove_entry(&KeyRef::Sec(node)).is_some() {
+            self.accounting.record_invalidation();
+        }
+    }
+
+    /// Drop every cached data chunk of `node`.
+    fn invalidate_data(&mut self, node: u64) {
+        loop {
+            let Some(key) = self
+                .data
+                .range((node, 0)..=(node, u64::MAX))
+                .next()
+                .map(|((file, base), _)| KeyRef::Data(*file, *base))
+            else {
+                return;
+            };
+            if self.remove_entry(&key).is_some() {
+                self.accounting.record_invalidation();
+            }
+        }
+    }
+
+    /// Drop every cached directory entry of `dir` — a mutation makes
+    /// every retained cursor's remainder unspecified, and each entry
+    /// embeds a child's metadata that may just have changed.
+    fn invalidate_dirents(&mut self, dir: u64) {
+        loop {
+            let Some(key) = self
+                .dirent
+                .range((dir, 0)..=(dir, u64::MAX))
+                .next()
+                .map(|((d, cursor), _)| KeyRef::Dirent(*d, *cursor))
+            else {
+                return;
+            };
+            if self.remove_entry(&key).is_some() {
+                self.accounting.record_invalidation();
+            }
+        }
+    }
+
+    /// Drop everything cached about `node`: stat, security, and data.
+    fn invalidate_node(&mut self, node: u64) {
+        self.invalidate_stat(node);
+        self.invalidate_sec(node);
+        self.invalidate_data(node);
+    }
+
+    /// Serve one chunk-aligned slice of a file read: copy into `out`
+    /// from the cached chunk at `base`, fetching and admitting the
+    /// chunk on a miss. Returns `(bytes copied, chunk length)`; a chunk
+    /// shorter than [`CHUNK`] marks end-of-file within it.
+    fn chunk_read(
+        &mut self,
+        file: NodeId,
+        base: u64,
+        in_off: usize,
+        out: &mut [u8],
+    ) -> Result<(usize, usize), DriverError> {
+        let raw = file.raw();
+        if let Some(entry) = self.data.get(&(raw, base)) {
+            let len = entry.bytes.len();
+            let n = out.len().min(len.saturating_sub(in_off));
+            if n > 0 {
+                out[..n].copy_from_slice(&entry.bytes[in_off..in_off + n]);
+            }
+            let old_tick = entry.tick;
+            let tick = self.touch(old_tick);
+            if let Some(entry) = self.data.get_mut(&(raw, base)) {
+                entry.tick = tick;
+            }
+            self.accounting.record_hit();
+            return Ok((n, len));
+        }
+        self.accounting.record_miss();
+        let Some(mut chunk) = Self::try_zeroed(CHUNK) else {
+            // No memory for a chunk buffer: serve the caller's slice
+            // straight from the driver without caching. A short read
+            // here means EOF within this window, reported as a short
+            // chunk so the outer loop stops.
+            self.accounting.record_refusal();
+            let n = self.inner.read_at(file, base + in_off as u64, out)?;
+            let len = if n < out.len() { in_off + n } else { CHUNK };
+            return Ok((n, len));
+        };
+        let read = self.inner.read_at(file, base, chunk.as_mut_slice())?;
+        chunk[read..].zeroize();
+        chunk.truncate(read);
+        let n = out.len().min(read.saturating_sub(in_off));
+        if n > 0 {
+            out[..n].copy_from_slice(&chunk[in_off..in_off + n]);
+        }
+        let cost = read.saturating_add(ENTRY_OVERHEAD);
+        match self.admit(KeyRef::Data(raw, base), cost) {
+            Some(tick) => {
+                self.data
+                    .insert((raw, base), DataEntry { bytes: chunk, tick });
+            }
+            None => chunk.as_mut_slice().zeroize(),
+        }
+        Ok((n, read))
+    }
+
+    /// A zeroed buffer of `len` bytes, or `None` on allocation failure.
+    fn try_zeroed(len: usize) -> Option<Vec<u8>> {
+        let mut out = Vec::new();
+        out.try_reserve_exact(len).ok()?;
+        out.resize(len, 0);
+        Some(out)
+    }
+}
+
+impl<F: FilesystemRead> FilesystemRead for CachedFs<F> {
+    fn root(&self) -> NodeId {
+        self.inner.root()
+    }
+
+    fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
+        let raw = node.raw();
+        if let Some(entry) = self.stat.get(&raw) {
+            let info = entry.info;
+            let old_tick = entry.tick;
+            let tick = self.touch(old_tick);
+            if let Some(entry) = self.stat.get_mut(&raw) {
+                entry.tick = tick;
+            }
+            self.accounting.record_hit();
+            return Ok(info);
+        }
+        self.accounting.record_miss();
+        let info = self.inner.node_info(node)?;
+        let cost = size_of::<NodeInfo>().saturating_add(ENTRY_OVERHEAD);
+        if let Some(tick) = self.admit(KeyRef::Stat(raw), cost) {
+            self.stat.insert(raw, StatEntry { info, tick });
+        }
+        Ok(info)
+    }
+
+    fn lookup(&mut self, dir: NodeId, name: &[u8]) -> Result<NodeId, DriverError> {
+        let dir_raw = dir.raw();
+        if let Some(entry) = self.lookup.get(&dir_raw).and_then(|names| names.get(name)) {
+            let node = entry.node;
+            let old_tick = entry.tick;
+            let tick = self.touch(old_tick);
+            if let Some(entry) = self
+                .lookup
+                .get_mut(&dir_raw)
+                .and_then(|names| names.get_mut(name))
+            {
+                entry.tick = tick;
+            }
+            self.accounting.record_hit();
+            return Ok(NodeId::from_raw(node));
+        }
+        self.accounting.record_miss();
+        let node = self.inner.lookup(dir, name)?;
+        // A name over the VFS component bound is unbounded input from
+        // the cache's point of view and is served uncached.
+        if name.len() > MAX_COMPONENT_LEN {
+            self.accounting.record_refusal();
+            return Ok(node);
+        }
+        let (Some(key_name), Some(entry_name)) = (Self::try_copy(name), Self::try_copy(name))
+        else {
+            self.accounting.record_refusal();
+            return Ok(node);
+        };
+        let cost = name
+            .len()
+            .saturating_mul(2)
+            .saturating_add(8)
+            .saturating_add(ENTRY_OVERHEAD);
+        if let Some(tick) = self.admit(KeyRef::Lookup(dir_raw, key_name), cost) {
+            self.lookup.entry(dir_raw).or_default().insert(
+                entry_name,
+                LookupEntry {
+                    node: node.raw(),
+                    tick,
+                },
+            );
+        } else {
+            let mut entry_name = entry_name;
+            entry_name.as_mut_slice().zeroize();
+        }
+        Ok(node)
+    }
+
+    fn read_at(&mut self, file: NodeId, offset: u64, buf: &mut [u8]) -> Result<usize, DriverError> {
+        if buf.is_empty() || buf.len() > READ_BYPASS_LIMIT || self.poisoned {
+            return self.inner.read_at(file, offset, buf);
+        }
+        let chunk_len = CHUNK as u64;
+        let mut total = 0usize;
+        while total < buf.len() {
+            let Some(pos) = offset.checked_add(total as u64) else {
+                break;
+            };
+            let base = pos - (pos % chunk_len);
+            let in_off = Self::offset_in_chunk(pos, base);
+            let want = (buf.len() - total).min(CHUNK - in_off);
+            let (copied, len) =
+                self.chunk_read(file, base, in_off, &mut buf[total..total + want])?;
+            total += copied;
+            if len < CHUNK || copied < want {
+                break;
+            }
+        }
+        Ok(total)
+    }
+
+    fn read_dir(
+        &mut self,
+        dir: NodeId,
+        cursor: u64,
+        name_out: &mut [u8],
+    ) -> Result<Option<DirEntry>, DriverError> {
+        let dir_raw = dir.raw();
+        if let Some(cached) = self.dirent.get(&(dir_raw, cursor)) {
+            // The contract's refusal for an undersized buffer is served
+            // from the cached name length exactly as the driver would.
+            if name_out.len() < cached.name.len() {
+                self.accounting.record_hit();
+                return Err(DriverError::BufferTooSmall);
+            }
+            let mut entry = cached.entry;
+            entry.name_len = cached.name.len();
+            name_out[..cached.name.len()].copy_from_slice(&cached.name);
+            let old_tick = cached.tick;
+            let tick = self.touch(old_tick);
+            if let Some(cached) = self.dirent.get_mut(&(dir_raw, cursor)) {
+                cached.tick = tick;
+            }
+            self.accounting.record_hit();
+            return Ok(Some(entry));
+        }
+        self.accounting.record_miss();
+        let Some(entry) = self.inner.read_dir(dir, cursor, name_out)? else {
+            return Ok(None);
+        };
+        if entry.name_len <= MAX_COMPONENT_LEN && entry.name_len <= name_out.len() {
+            if let Some(name) = Self::try_copy(&name_out[..entry.name_len]) {
+                let cost = name
+                    .len()
+                    .saturating_add(size_of::<DirEntry>())
+                    .saturating_add(ENTRY_OVERHEAD);
+                if let Some(tick) = self.admit(KeyRef::Dirent(dir_raw, cursor), cost) {
+                    self.dirent
+                        .insert((dir_raw, cursor), DirentEntry { entry, name, tick });
+                } else {
+                    let mut name = name;
+                    name.as_mut_slice().zeroize();
+                }
+            } else {
+                self.accounting.record_refusal();
+            }
+        } else {
+            self.accounting.record_refusal();
+        }
+        // The entry carries the child's stat record; populate the stat
+        // cache so a follow-up `node_info` is a hit.
+        let child = entry.node.raw();
+        if !self.stat.contains_key(&child) {
+            let cost = size_of::<NodeInfo>().saturating_add(ENTRY_OVERHEAD);
+            if let Some(tick) = self.admit(KeyRef::Stat(child), cost) {
+                self.stat.insert(
+                    child,
+                    StatEntry {
+                        info: entry.info,
+                        tick,
+                    },
+                );
+            }
+        }
+        Ok(Some(entry))
+    }
+}
+
+impl<F: FilesystemRead + FilesystemWrite> FilesystemWrite for CachedFs<F> {
+    fn create(&mut self, dir: NodeId, name: &[u8], kind: NodeKind) -> Result<NodeId, DriverError> {
+        let result = self.inner.create(dir, name, kind);
+        // Invalidate whether or not the driver succeeded: a partially
+        // applied refusal on a foreign driver must not leave stale
+        // entries standing (RustFS rolls back, but the cache does not
+        // assume it). Name bindings changed, so the directory's whole
+        // lookup set goes (driver name matching may fold case).
+        let dir_raw = dir.raw();
+        self.invalidate_lookups(dir_raw);
+        self.invalidate_dirents(dir_raw);
+        self.invalidate_stat(dir_raw);
+        result
+    }
+
+    fn write_at(
+        &mut self,
+        dir: NodeId,
+        name: &[u8],
+        offset: u64,
+        data: &[u8],
+    ) -> Result<usize, DriverError> {
+        let target = self.resolve_for_invalidation(dir, name);
+        let result = self.inner.write_at(dir, name, offset, data);
+        match target {
+            Ok(Some(node)) => {
+                self.invalidate_stat(node);
+                self.invalidate_data(node);
+                self.invalidate_dirents(dir.raw());
+            }
+            Ok(None) => {
+                self.invalidate_lookup(dir.raw(), name);
+                self.invalidate_dirents(dir.raw());
+            }
+            Err(()) => self.purge(),
+        }
+        result
+    }
+
+    fn truncate(&mut self, dir: NodeId, name: &[u8], size: u64) -> Result<(), DriverError> {
+        let target = self.resolve_for_invalidation(dir, name);
+        let result = self.inner.truncate(dir, name, size);
+        match target {
+            Ok(Some(node)) => {
+                self.invalidate_stat(node);
+                self.invalidate_data(node);
+                self.invalidate_dirents(dir.raw());
+            }
+            Ok(None) => {
+                self.invalidate_lookup(dir.raw(), name);
+                self.invalidate_dirents(dir.raw());
+            }
+            Err(()) => self.purge(),
+        }
+        result
+    }
+
+    fn remove(&mut self, dir: NodeId, name: &[u8]) -> Result<(), DriverError> {
+        let target = self.resolve_for_invalidation(dir, name);
+        let result = self.inner.remove(dir, name);
+        let dir_raw = dir.raw();
+        match target {
+            Ok(Some(node)) => {
+                self.invalidate_lookups(dir_raw);
+                self.invalidate_node(node);
+                self.invalidate_dirents(dir_raw);
+                self.invalidate_stat(dir_raw);
+            }
+            Ok(None) => {
+                self.invalidate_lookups(dir_raw);
+                self.invalidate_dirents(dir_raw);
+            }
+            Err(()) => self.purge(),
+        }
+        result
+    }
+
+    fn rename(
+        &mut self,
+        src_dir: NodeId,
+        src_name: &[u8],
+        dst_dir: NodeId,
+        dst_name: &[u8],
+    ) -> Result<(), DriverError> {
+        let overwritten = self.resolve_for_invalidation(dst_dir, dst_name);
+        let result = self.inner.rename(src_dir, src_name, dst_dir, dst_name);
+        let src_raw = src_dir.raw();
+        let dst_raw = dst_dir.raw();
+        match overwritten {
+            Ok(Some(node)) => self.invalidate_node(node),
+            Ok(None) => {}
+            Err(()) => {
+                self.purge();
+                return result;
+            }
+        }
+        // The moved node keeps its identity (its stat, security, and
+        // data stay valid); only the name bindings and both directories'
+        // listings change.
+        self.invalidate_lookups(src_raw);
+        self.invalidate_lookups(dst_raw);
+        self.invalidate_dirents(src_raw);
+        self.invalidate_dirents(dst_raw);
+        self.invalidate_stat(src_raw);
+        self.invalidate_stat(dst_raw);
+        result
+    }
+
+    fn flush(&mut self) -> Result<(), DriverError> {
+        // Write-through: the cache holds no dirty state to flush.
+        self.inner.flush()
+    }
+}
+
+impl<F: FilesystemRead + FilesystemSecurity> FilesystemSecurity for CachedFs<F> {
+    fn security(&mut self, node: NodeId) -> Result<NodeSecurity, DriverError> {
+        let raw = node.raw();
+        if let Some(entry) = self.sec.get(&raw) {
+            let sec = entry.sec;
+            let old_tick = entry.tick;
+            let tick = self.touch(old_tick);
+            if let Some(entry) = self.sec.get_mut(&raw) {
+                entry.tick = tick;
+            }
+            self.accounting.record_hit();
+            return Ok(sec);
+        }
+        self.accounting.record_miss();
+        let sec = self.inner.security(node)?;
+        let cost = size_of::<NodeSecurity>().saturating_add(ENTRY_OVERHEAD);
+        if let Some(tick) = self.admit(KeyRef::Sec(raw), cost) {
+            self.sec.insert(raw, SecEntry { sec, tick });
+        }
+        Ok(sec)
+    }
+
+    fn set_security(&mut self, node: NodeId, security: NodeSecurity) -> Result<(), DriverError> {
+        let result = self.inner.set_security(node, security);
+        // Invalidate on success and failure alike; the next `security`
+        // re-reads the stored record.
+        self.invalidate_sec(node.raw());
+        result
+    }
+}
+
+impl<F: FilesystemStats> FilesystemStats for CachedFs<F> {
+    fn stats(&mut self) -> Result<VolumeStats, DriverError> {
+        // Volume accounting is live driver state, never cached.
+        self.inner.stats()
+    }
+}
+
+#[cfg(test)]
+#[path = "fscache_tests.rs"]
+mod tests;
+
+impl<F> Drop for CachedFs<F> {
+    /// Teardown zeroes every cached buffer: the entries hold decrypted
+    /// file bytes and names, which must not outlive their owner in
+    /// reusable heap memory.
+    fn drop(&mut self) {
+        for entry in self.data.values_mut() {
+            entry.bytes.as_mut_slice().zeroize();
+        }
+        for entry in self.dirent.values_mut() {
+            entry.name.as_mut_slice().zeroize();
+        }
+        // Lookup keys carry name bytes; BTreeMap keys are immutable in
+        // place, so drain the maps and zeroize each key as it comes out.
+        while let Some((_, mut names)) = self.lookup.pop_first() {
+            while let Some((mut name, _)) = names.pop_first() {
+                name.as_mut_slice().zeroize();
+            }
+        }
+    }
+}

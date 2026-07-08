@@ -196,27 +196,38 @@ next dispatch — **no separate EL0-frame save area and no new HAL trait**
   boundary, §2.2). Re-exported from the crate root.
 - `kthread`: a `KTHREAD_MAX_CPUS`-sized per-CPU resume table
   (`SpinLock<Option<UserResumeHandle>>`, never cross-CPU contended), the
-  `C,S`-monomorphised `suspend_thunk` (reuses `Yielder::suspend`, §2.2),
-  and the public **`reschedule_current(cpu, action) -> bool`** the arch
-  trap path calls — it lifts the handle out from under the lock *before*
-  the suspending switch (no lock across the hand-off) and **fails closed**
-  (`false`) for an unpublished/out-of-range CPU.
+  `C,S`-monomorphised suspend thunks over one shared `suspend_with` body
+  (reuses `Yielder::suspend`, §2.2) — `suspend_thunk_syscall` (brackets
+  the port's cooperative-park convention, the user mid-handler path) and
+  `suspend_thunk_body` (no bracket, a kernel kthread's own body) — and
+  the public **`reschedule_current(cpu, action) -> bool`** the arch trap
+  path and in-kernel blocking primitives call — it lifts the handle out
+  from under the lock *before* the suspending switch (no lock across the
+  hand-off) and **fails closed** (`false`) for an unpublished/out-of-range
+  CPU (the pre-dispatch boot flow, a host test).
 - `kthread`: a `pre_resume: Option<PreResume>` hook on `ThreadControl`
   whose `Some`-ness marks a **user** kthread; `dispatch_step` now takes
   `cpu`, runs `pre_resume` (the per-task address-space reactivation seam)
-  and publishes the resume handle immediately before the switch-in, and
-  clears it the instant the task switches back. New
-  `spawn_user_kthread[_with_stack]` carry the hook; plain `spawn_kthread`
-  is unchanged and never publishes.
+  and publishes the resume handle immediately before the switch-in — for
+  **every** kthread: user tasks with the syscall thunk, kernel kthreads
+  with the body thunk — and clears it the instant the task switches back.
+  Kernel kthreads being suspendable is load-bearing: a kthread contending
+  on a `SleepLock` whose holder parked across a block-device completion
+  wait parks too instead of spinning in-kernel and starving the dispatch
+  loop. New `spawn_user_kthread[_with_stack]` carry the hook.
+- Known follow-up: a kthread stack-guard violation detected at
+  `dispatch_step`'s switch-back still fails the task closed **silently**
+  (no log — the dispatcher has no sink seam); the termination must reach
+  the system log per the fail-loud rule once a logging seam exists there.
 - `rustos-kernel::dispatch_core::dispatch_via_slot`: the `Reschedule` arm
   (suspend via `reschedule_current`, then encode the result on resume).
-- **Tests:** 6 new `kernel/core` host tests (publish→suspend records the
+- **Tests:** `kernel/core` host tests (publish→suspend records the
   `task→dispatch` switch + action; no-handle and out-of-range fail closed;
   `pre_resume` fires every step and the handle is cleared after; a kernel
-  kthread never publishes; action mapping) + a bin `dispatch_core` test
-  (Reschedule with no user task falls back to an encoded return). Whole-
-  project DoD green: `cargo xtask ci` (incl. `test --qemu`), `fuzz
-  --secs 5`, and `tools/ci/soak.sh both` all pass.
+  kthread publishes a body handle for its step and it is cleared after;
+  a body suspend skips the cooperative-park bracket while a syscall
+  suspend enters and leaves it; action mapping) + a bin `dispatch_core`
+  test (Reschedule with no user task falls back to an encoded return).
 
 #### SP2b — aarch64: enter EL0 as a user kthread + wire the producer `[x]`
 

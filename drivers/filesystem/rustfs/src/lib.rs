@@ -3462,6 +3462,10 @@ impl<B: Block> FilesystemSecurity for RustFs<B> {
         let ino = self.ino_of(node)?;
         Ok(self.read_inode(ino)?.sec)
     }
+
+    fn set_security(&mut self, node: NodeId, security: Security) -> Result<(), DriverError> {
+        RustFs::set_security(self, node, security)
+    }
 }
 
 impl<B: Block> FilesystemTimestamps for RustFs<B> {

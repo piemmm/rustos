@@ -3,12 +3,14 @@
 //!
 //! `/System/Security` lives on the **writable encrypted root volume**,
 //! which the VFS mount layout deliberately shadows with the read-only
-//! `/System` volume — the account databases are reachable only through a
-//! direct window onto the root volume, exactly like the boot-time load.
-//! The unlock path therefore opens one more independent read-write
-//! [`RustFs`] window under the just-derived volume key (a sibling of the
-//! writable-state window, park-safe through the device `SleepLock`) and
-//! hands it here as the engine's [`UserAdminBacking`].
+//! `/System` volume — the account databases are reachable only through the
+//! driver backing the root volume, exactly like the boot-time load.
+//! The engine therefore shares the **one** registered root-volume driver
+//! (the same `SleepLock`-serialised instance the `fs_*` syscalls run
+//! against): the volume has a single writer, so its copy-on-write
+//! allocation state can never diverge between two independent windows, and
+//! every mutation is visible to the filesystem cache wrapped around that
+//! driver.
 //!
 //! Persistence is crash-safe: each database is written whole to a
 //! sibling temporary node carrying the original's security record, then
@@ -18,65 +20,41 @@
 //! the new account's identity; an already-present leaf is left untouched
 //! (idempotent).
 
-use alloc::boxed::Box;
-
-use rustos_abi::driver::block::Block;
 use rustos_abi::driver::filesystem::{
     FilesystemRead, FilesystemSecurity, FilesystemWrite, NodeId, NodeKind, NodeSecurity,
 };
 use rustos_abi::{DriverError, Errno};
-use rustos_drv_fs_rustfs::RustFs;
 use rustos_kernel_core::{SleepLock, UserAdminBacking, VfsError};
 
 /// Owner-only mode a freshly provisioned home directory is stamped with.
 const HOME_MODE: u32 = 0o700;
 
-/// The admin view of the mounted root volume, type-erased.
-///
-/// The structural surfaces the engine's persistence needs, plus the
-/// security-record write only the concrete driver exposes (the secured
-/// VFS has no ownership-assignment path today; this window never leaves
-/// the kernel). Mirrors `crate::system_mount::KernelFs`, with the one
-/// extra method that trait deliberately lacks.
-pub trait AdminFs: FilesystemRead + FilesystemWrite + FilesystemSecurity + Send {
-    /// Replace the security record stored for `node`.
-    ///
-    /// # Errors
-    ///
-    /// The [`DriverError`] of the underlying write.
-    fn set_security(&mut self, node: NodeId, security: NodeSecurity) -> Result<(), DriverError>;
-}
-
-impl<B: Block + Send> AdminFs for RustFs<B> {
-    fn set_security(&mut self, node: NodeId, security: NodeSecurity) -> Result<(), DriverError> {
-        RustFs::set_security(self, node, security)
-    }
-}
-
 /// The production [`UserAdminBacking`]: commits the engine's edits to the
 /// mounted encrypted root volume.
-pub struct RootAdminBacking {
-    /// The dedicated read-write window onto the root volume. A sleep lock,
-    /// because a commit parks on device completion; the engine already
-    /// serialises operations, so this lock is never contended in practice
-    /// and exists to satisfy the shared-reference seam soundly.
-    fs: SleepLock<Box<dyn AdminFs>>,
+pub struct RootAdminBacking<F: 'static> {
+    /// The root volume's single registered driver, shared with the `fs_*`
+    /// path (`LateFilesystem::register` returns this lock). A sleep lock,
+    /// because a commit parks on device completion; holding it serialises
+    /// an admin commit against every concurrent `fs_*` operation on the
+    /// same volume.
+    fs: &'static SleepLock<F>,
 }
 
-impl RootAdminBacking {
-    /// Wrap the unlock-opened admin window.
+impl<F> RootAdminBacking<F> {
+    /// Borrow the registered root-volume driver.
     #[must_use]
-    pub fn new(fs: Box<dyn AdminFs>) -> Self {
-        Self {
-            fs: SleepLock::new(fs),
-        }
+    pub const fn new(fs: &'static SleepLock<F>) -> Self {
+        Self { fs }
     }
 }
 
-impl UserAdminBacking for RootAdminBacking {
+impl<F> UserAdminBacking for RootAdminBacking<F>
+where
+    F: FilesystemRead + FilesystemWrite + FilesystemSecurity + Send + 'static,
+{
     fn persist(&self, users_text: &str, groups_text: &str) -> Result<(), Errno> {
         let mut fs = self.fs.lock();
-        let fs = &mut **fs;
+        let fs = &mut *fs;
         let security_dir = resolve_security_dir(fs)?;
         replace_file(
             fs,
@@ -104,7 +82,7 @@ impl UserAdminBacking for RootAdminBacking {
             return Err(Errno::OutOfRange);
         }
         let mut fs = self.fs.lock();
-        let fs = &mut **fs;
+        let fs = &mut *fs;
         let mut dir = fs.root();
         let mut walked = false;
         let mut remaining = components.peekable();
@@ -152,7 +130,10 @@ impl UserAdminBacking for RootAdminBacking {
 }
 
 /// Resolve `/System/Security` on the root volume's own tree.
-fn resolve_security_dir(fs: &mut dyn AdminFs) -> Result<NodeId, Errno> {
+fn resolve_security_dir<F>(fs: &mut F) -> Result<NodeId, Errno>
+where
+    F: FilesystemRead + ?Sized,
+{
     let system = fs.lookup(fs.root(), b"System").map_err(driver_errno)?;
     fs.lookup(system, b"Security").map_err(driver_errno)
 }
@@ -163,13 +144,16 @@ fn resolve_security_dir(fs: &mut dyn AdminFs) -> Result<NodeId, Errno> {
 /// image authors both databases, so a missing one is a provisioning defect
 /// surfaced as [`Errno::NotFound`], never silently created with a guessed
 /// security record.
-fn replace_file(
-    fs: &mut dyn AdminFs,
+fn replace_file<F>(
+    fs: &mut F,
     dir: NodeId,
     name: &[u8],
     tmp_name: &[u8],
     data: &[u8],
-) -> Result<(), Errno> {
+) -> Result<(), Errno>
+where
+    F: FilesystemRead + FilesystemWrite + FilesystemSecurity + ?Sized,
+{
     let existing = fs.lookup(dir, name).map_err(driver_errno)?;
     let security = fs.security(existing).map_err(driver_errno)?;
 
@@ -209,9 +193,11 @@ fn driver_errno(err: DriverError) -> Errno {
 mod tests {
     use super::*;
 
+    use alloc::boxed::Box;
     use alloc::vec::Vec;
 
-    use rustos_drv_fs_rustfs::{EntropySource, VolumeKey, VOLUME_KEY_LEN};
+    use rustos_abi::driver::block::Block;
+    use rustos_drv_fs_rustfs::{EntropySource, RustFs, VolumeKey, VOLUME_KEY_LEN};
 
     const KEY: VolumeKey = [0x5A; VOLUME_KEY_LEN];
     const SECTOR: usize = 512;
@@ -264,8 +250,9 @@ mod tests {
 
     /// Format a small volume laid out like the shipped root: the
     /// `/System/Security/{Users,Groups}` files (system-owned) and an empty
-    /// `/Users` tree.
-    fn backing() -> RootAdminBacking {
+    /// `/Users` tree. The driver lock is leaked to `'static`, exactly as
+    /// `LateFilesystem::register` leaks the production instance.
+    fn backing() -> RootAdminBacking<RustFs<VecBlock>> {
         let block = VecBlock(alloc::vec![0u8; 4 * 1024 * 1024]);
         let mut fs =
             RustFs::format(block, 64, &KEY, &mut TestEntropy(3)).expect("test volume formats");
@@ -286,12 +273,12 @@ mod tests {
         }
         fs.create(root, b"Users", NodeKind::Directory)
             .expect("mkdir Users");
-        RootAdminBacking::new(Box::new(fs))
+        RootAdminBacking::new(Box::leak(Box::new(SleepLock::new(fs))))
     }
 
-    fn read_file(backing: &RootAdminBacking, name: &[u8]) -> Vec<u8> {
+    fn read_file(backing: &RootAdminBacking<RustFs<VecBlock>>, name: &[u8]) -> Vec<u8> {
         let mut fs = backing.fs.lock();
-        let fs = &mut **fs;
+        let fs = &mut *fs;
         let security = resolve_security_dir(fs).expect("Security resolves");
         let node = fs.lookup(security, name).expect("file exists");
         let info = fs.node_info(node).expect("info");
@@ -306,7 +293,7 @@ mod tests {
         let backing = backing();
         let before = {
             let mut fs = backing.fs.lock();
-            let fs = &mut **fs;
+            let fs = &mut *fs;
             let security = resolve_security_dir(fs).expect("resolves");
             let node = fs.lookup(security, b"Users").expect("exists");
             fs.security(node).expect("security")
@@ -319,7 +306,7 @@ mod tests {
         // The replacement carries the original's security record, and no
         // temporary is left behind.
         let mut fs = backing.fs.lock();
-        let fs = &mut **fs;
+        let fs = &mut *fs;
         let security_dir = resolve_security_dir(fs).expect("resolves");
         let node = fs.lookup(security_dir, b"Users").expect("exists");
         let after = fs.security(node).expect("security");
@@ -337,7 +324,7 @@ mod tests {
         let backing = backing();
         {
             let mut fs = backing.fs.lock();
-            let fs = &mut **fs;
+            let fs = &mut *fs;
             let security = resolve_security_dir(fs).expect("resolves");
             fs.remove(security, b"Groups").expect("removes");
         }
@@ -355,7 +342,7 @@ mod tests {
             .expect("provisions");
         {
             let mut fs = backing.fs.lock();
-            let fs = &mut **fs;
+            let fs = &mut *fs;
             let users = fs.lookup(fs.root(), b"Users").expect("Users exists");
             let home = fs.lookup(users, b"grace").expect("home exists");
             let info = fs.node_info(home).expect("info");
@@ -383,7 +370,7 @@ mod tests {
         let backing = backing();
         {
             let mut fs = backing.fs.lock();
-            let fs = &mut **fs;
+            let fs = &mut *fs;
             let users = fs.lookup(fs.root(), b"Users").expect("Users exists");
             fs.create(users, b"grace", NodeKind::RegularFile)
                 .expect("plant a file");

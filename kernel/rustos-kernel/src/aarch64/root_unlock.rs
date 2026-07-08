@@ -43,13 +43,14 @@ use rustos_crypto::Ed25519PublicKey;
 use rustos_drv_bus_mmio::virtio_mmio_bus_from_dtb;
 use rustos_drv_bus_virtio::MmioTransport;
 use rustos_drv_fs_rustfs::{RustFs, VolumeKey};
-use rustos_drv_storage_emmc2::CompletionWait;
+use rustos_drv_storage_emmc2::{CompletionSignal, CompletionWait};
 use rustos_drv_storage_virtio_blk::{VirtioBlk, VIRTIO_BLK_DEVICE_ID};
 use rustos_fdt::Fdt;
 use rustos_kernel_core::{
-    ConsoleRead, ConsoleWrite, CooperativeYield, InitSpawnCtx, SecretFeedback, YieldHandle,
+    ConsoleRead, ConsoleWrite, CooperativeYield, InitSpawnCtx, IrqParkWaiter, SecretFeedback,
+    YieldHandle,
 };
-use rustos_kernel_irq::{IrqTable, IrqWaitAbort, IrqWaiter};
+use rustos_kernel_irq::{IrqTable, WaitOutcome};
 use rustos_kernel_mem::{AddressSpace, DirectPhysMap, DmaPool, FrameAllocator, MmioMap, VirtAddr};
 use rustos_kernel_sec::captable::TaskCapabilities;
 use rustos_kernel_sec::identity::UserId;
@@ -60,7 +61,9 @@ use rustos_partition::{parse_partition_table, PartitionBlock, PartitionType};
 use crate::aarch64::arch_wrapper::{
     UART_CONSOLE, UART_CONSOLE_READ, VIDEO_CONSOLE, VIDEO_KEYBOARD,
 };
-use crate::aarch64::gic_irq::{published_irq_table, CPU0_TARGET, GIC_IRQ_CONTROLLER};
+use crate::aarch64::gic_irq::{
+    published_irq_table, COMPOSITE_IRQ_CONTROLLER, CPU0_TARGET, GIC_IRQ_CONTROLLER,
+};
 use crate::aarch64::spawn_producer::AARCH64_PROCESS_SPAWN;
 use crate::driver_catalog::{EMMC2_PATH, KERNEL_DRIVER_SIGNER_PUBKEY, VIRTIO_BLK_PATH};
 use crate::driver_loader::KernelDriverLoader;
@@ -76,7 +79,6 @@ use crate::unlock_service::{
     autoload_caps, loader_caps, note, note_stage, service_caps, store_endpoint_binder_caps,
     take_boot, KthreadConsoleRead, CONSOLE0_GATE, UNLOCK_TASK, USERS_DB_INSTALLED_MESSAGE,
 };
-use crate::user_admin_backing::AdminFs;
 
 /// Per-device DMA window capacity, in pages, the virtio-blk driver
 /// allocates its request/data buffers from (transient per-request DMA).
@@ -202,95 +204,77 @@ pub(crate) fn pcie_msi_spi(fdt: &Fdt<'_>) -> Option<u32> {
     None
 }
 
-/// A blocking [`IrqWaiter`] for the unlock kthread: it **re-arms** the
-/// device's GIC line, then parks on a race-free `wfi` until the next
-/// completion.
+/// Race-free CPU park for a device wait whose context cannot be
+/// scheduler-parked — the boot kthreads bringing the disk up and serving
+/// the driver store ([`rustos_kernel_core::IrqParkWaiter`]'s fallback).
 ///
-/// [`IrqTable::fire`] masks the line on every completion (mask-before-wake),
-/// so the line is first re-enabled through [`GIC_IRQ_CONTROLLER`] (the arch
-/// unmask the kernel-side [`rustos_kernel_irq::IrqController`] trait
-/// deliberately does not expose). It then performs the canonical race-free
-/// park — mask IRQ *taking* ([`rustos_arch_aarch64::exceptions::mask_irq`]),
+/// Mask IRQ *taking* ([`rustos_arch_aarch64::exceptions::mask_irq`]),
 /// re-check the line's ready flag, `wfi`
 /// ([`rustos_arch_aarch64::exceptions::wait_for_interrupt`]) only if still
 /// not ready, then unmask ([`rustos_arch_aarch64::exceptions::enable_irq`])
 /// so the woken completion is taken by the EL1 vector and dispatched into
-/// `IrqTable::fire`. This is exactly the discipline the proven `-M virt`
-/// `WfiWaiter` uses (one wait shape).
-///
-/// Parking on `wfi` (rather than busy-yielding through the scheduler) is
-/// both correct and-clean. The production cooperative dispatch runs
-/// with `DAIF.I` masked once a user task's `svc` trap has masked it, and the
-/// register-only context switch (`context.s`) never restores it, so a
-/// kthread that merely yielded would spin a tight poll on a line whose
-/// interrupt is never taken — and re-arming the GIC line on every such spin
-/// can mis-deliver back-to-back completions, corrupting a multi-block read.
-/// The mask → check → `wfi` → unmask sequence takes exactly one completion
-/// per wake and loses no edge (a completion landing in the check-park window
-/// stays pending and wakes the `wfi`). During the boot root-unlock PID 1
-/// (`wait`) and `login` (gated console read) are parked, so halting the CPU
-/// until the completion starves nothing.
-struct RearmingIrqWaiter {
-    table: &'static IrqTable,
-    handle: IrqHandle,
-    line: u32,
-}
-
-impl IrqWaiter for RearmingIrqWaiter {
-    fn now_ns(&self) -> u64 {
-        // The wait is the unbounded `u64::MAX` sentinel, so the clock value
-        // never reaches a deadline and is immaterial — the `WfiWaiter`
-        // returns `0` for the same reason.
-        0
-    }
-
-    fn yield_now(&self) -> Result<(), IrqWaitAbort> {
-        // Re-arm the line for the next completion; the previous
-        // `IrqTable::fire` masked it. A re-arm refusal (an out-of-range
-        // line — impossible for a bound SPI) is harmless: the park below
-        // then waits on a line that cannot fire and the run budget bounds
-        // it.
-        let _ = GIC_IRQ_CONTROLLER.unmask_line(self.line);
-        // Canonical race-free park: mask IRQ taking, re-check the ready
-        // flag, `wfi` only if still not ready, then unmask so the woken
-        // completion is dispatched.
-        // SAFETY: the EL1 vector table is installed (boot
-        // `exceptions::init_vectors`) and the production device dispatch is
-        // published (the kernel-core `irq` phase), so the woken IRQ is
-        // handled rather than faulting; the three calls only manipulate
-        // `DAIF.I` and issue the `wfi` hint.
-        unsafe {
-            rustos_arch_aarch64::exceptions::mask_irq();
-            if !self.table.ready_for(self.handle) {
-                rustos_arch_aarch64::exceptions::wait_for_interrupt();
-            }
-            rustos_arch_aarch64::exceptions::enable_irq();
+/// `IrqTable::fire`. The sequence takes exactly one completion per wake and
+/// loses no edge (a completion landing in the check-park window stays
+/// pending and wakes the `wfi`). During the boot root-unlock everything
+/// else is parked waiting on this work, so briefly halting the CPU here
+/// starves nothing; every steady-state filesystem wait comes from a user
+/// task's syscall context, which the shared waiter parks off the run queue
+/// instead — the dispatch loop (and the buffered console drain) keeps
+/// running for the whole device wait.
+fn wfi_fallback_park(table: &IrqTable, handle: IrqHandle) {
+    // SAFETY: the EL1 vector table is installed (boot
+    // `exceptions::init_vectors`) and the production device dispatch is
+    // published (the kernel-core `irq` phase), so the woken IRQ is
+    // handled rather than faulting; the three calls only manipulate
+    // `DAIF.I` and issue the `wfi` hint.
+    unsafe {
+        rustos_arch_aarch64::exceptions::mask_irq();
+        if !table.ready_for(handle) {
+            rustos_arch_aarch64::exceptions::wait_for_interrupt();
         }
-        Ok(())
+        rustos_arch_aarch64::exceptions::enable_irq();
     }
 }
+
+/// Longest silence the EMMC2 completion wait tolerates before failing the
+/// transfer closed, in nanoseconds.
+///
+/// The SDHCI controller signals every started operation — a completion or
+/// an error status (its own data timeout included) — well inside this
+/// budget, so a wait that elapses with no interrupt at all means the
+/// controller or its interrupt routing is dead. The engine then surfaces
+/// `DeviceFault` (a loud, typed error to the caller) instead of a task
+/// parked forever holding the volume's lock.
+const EMMC2_SILENCE_BUDGET_NS: u64 = 2_000_000_000;
 
 /// The EMMC2 driver's completion seam ([`CompletionWait`]) over the same
-/// [`RearmingIrqWaiter`] park the virtio host uses (one
-/// wait shape, no second park implementation).
+/// shared parking waiter the virtio host uses
+/// ([`rustos_kernel_core::IrqParkWaiter`] — one wait shape, no second park
+/// implementation).
 ///
 /// The SDHCI engine calls [`await_irq`](CompletionWait::await_irq) whenever
-/// a command/transfer completion is outstanding; it re-arms the controller's
-/// bound GIC line and parks the kthread on a race-free `wfi` until the ISR
-/// signals, so the driver never busy-spins a status register and monopolises
-/// the CPU. The inner waiter owns the `'static`
-/// IRQ table, handle, and line, so the completion is `'static` and the opened
-/// [`Emmc2`] it lives in can be shared for life behind the block layer.
+/// a command/transfer completion is outstanding; the waiter parks the
+/// calling task off the run queue until the controller's ISR wakes it (or
+/// takes the bounded `wfi` fallback in a boot-kthread context), so the
+/// driver never busy-spins a status register and never halts the CPU under
+/// a running system. The waiter owns only `'static` state, so the
+/// completion is `'static` and the opened [`Emmc2`] it lives in can be
+/// shared for life behind the block layer.
 struct Emmc2Completion {
-    waiter: RearmingIrqWaiter,
+    waiter: IrqParkWaiter,
 }
 
 impl CompletionWait for Emmc2Completion {
-    fn await_irq(&self) {
-        // `RearmingIrqWaiter::yield_now` is infallible (it returns `Ok` after
-        // the re-arm + race-free `wfi` park); the engine re-reads `INTERRUPT`
-        // on return, so a spurious wake is harmless.
-        let _ = self.waiter.yield_now();
+    fn await_irq(&self) -> CompletionSignal {
+        // The engine re-reads `INTERRUPT` on a fire, so a spurious wake is
+        // harmless; every non-fire outcome (timeout, released binding,
+        // aborted wait) fails the transfer closed.
+        match self.waiter.park_wait(UNLOCK_TASK, EMMC2_SILENCE_BUDGET_NS) {
+            WaitOutcome::Ready => CompletionSignal::Fired,
+            WaitOutcome::TimedOut | WaitOutcome::NotFound | WaitOutcome::Aborted(_) => {
+                CompletionSignal::TimedOut
+            }
+        }
     }
 }
 
@@ -591,7 +575,7 @@ fn virtio_blk_unlock<'a>(
     let _ = GIC_IRQ_CONTROLLER.unmask_line(intid);
 
     // Mint the per-driver DMA host the driver allocates through, driven by
-    // the re-arming `wfi` waiter.
+    // the shared parking waiter.
     let dma_space = ArchAddressSpace::new_identity_gigapages(&UNLOCK_PT_POOL, gib)
         .ok_or("root-unlock: dma bookkeeping space")?;
     let pool = DmaPool::new(
@@ -602,12 +586,14 @@ fn virtio_blk_unlock<'a>(
         phys,
     )
     .map_err(|_| "root-unlock: dma pool")?;
-    let waiter: &'static RearmingIrqWaiter =
-        alloc::boxed::Box::leak(alloc::boxed::Box::new(RearmingIrqWaiter {
+    let waiter: &'static IrqParkWaiter =
+        alloc::boxed::Box::leak(alloc::boxed::Box::new(IrqParkWaiter::new(
             table,
             handle,
-            line: intid,
-        }));
+            intid,
+            &COMPOSITE_IRQ_CONTROLLER,
+            wfi_fallback_park,
+        )));
     let vhost: &'static KernelVirtioHost<'static, _, dyn Sink + Sync> =
         alloc::boxed::Box::leak(alloc::boxed::Box::new(KernelVirtioHost::new(
             pool,
@@ -648,8 +634,8 @@ fn virtio_blk_unlock<'a>(
 /// `CAP_MMIO_MAP` through the kernel mapper, and the controller's GIC SPI —
 /// discovered from the firmware device tree ([`emmc2_spi`]), never a board
 /// constant — is bound, routed, and armed on the
-/// published IRQ table so the driver parks on completion through the shared
-/// [`RearmingIrqWaiter`] ([`Emmc2Completion`]). `raspi4b`
+/// published IRQ table so the driver blocks on completion through the shared
+/// parking waiter ([`Emmc2Completion`]). `raspi4b`
 /// cannot model EMMC2 (`plans/PI.md` §0.4), so this path is host-tested at
 /// the driver level and metal-gated here.
 fn emmc2_unlock<'a>(
@@ -705,15 +691,17 @@ fn emmc2_unlock<'a>(
     // Arm the line for the first completion; the waiter re-arms it after each
     // subsequent one.
     let _ = GIC_IRQ_CONTROLLER.unmask_line(intid);
-    // The completion seam the SDHCI engine parks on, over the shared re-arming
-    // `wfi` waiter. Owns only `'static`/`Copy` state, so the
-    // opened `Emmc2` it lives in is `'static` and shareable for life.
+    // The completion seam the SDHCI engine blocks on, over the shared
+    // parking waiter. Owns only `'static` state, so the opened `Emmc2` it
+    // lives in is `'static` and shareable for life.
     let waiter = Emmc2Completion {
-        waiter: RearmingIrqWaiter {
+        waiter: IrqParkWaiter::new(
             table,
             handle,
-            line: intid,
-        },
+            intid,
+            &COMPOSITE_IRQ_CONTROLLER,
+            wfi_fallback_park,
+        ),
     };
 
     // A throwaway *bookkeeping* page table for the register-window map
@@ -814,7 +802,10 @@ struct WritableStateSink<'a, B: Block + 'static> {
 }
 
 impl<B: Block + 'static> WritableRootSink for WritableStateSink<'_, B> {
-    fn publish(&self, volume_key: &VolumeKey) -> Option<alloc::boxed::Box<dyn AdminFs>> {
+    fn publish(
+        &self,
+        volume_key: &VolumeKey,
+    ) -> Option<&'static rustos_kernel_core::SleepLock<alloc::boxed::Box<dyn KernelFs>>> {
         // Locate the RustFsRoot extent on a throwaway probe window, then open
         // the durable owned `'static` window onto it.
         let extent = {
@@ -856,28 +847,15 @@ impl<B: Block + 'static> WritableRootSink for WritableStateSink<'_, B> {
             );
             return None;
         };
+        // The registered driver is the volume's single writer; the
+        // `CAP_USER_ADMIN` account-administration engine shares this same
+        // lock (`plans/CAPABILITY_USE.md` CU4) — `/System/Security` is
+        // shadowed by the read-only `/System` mount, so the engine
+        // persists through this driver directly. Fail-soft: a
+        // registration refusal leaves the writable tree and `users_admin`
+        // failing closed.
         let driver: alloc::boxed::Box<dyn KernelFs> = alloc::boxed::Box::new(fs);
-        register_writable_state(driver, self.audit);
-
-        // One more independent read-write window onto the same volume for
-        // the `CAP_USER_ADMIN` account-administration engine's storage
-        // (`plans/CAPABILITY_USE.md` CU4): `/System/Security` is shadowed
-        // by the read-only `/System` mount, so the engine persists through
-        // this direct window exactly as the boot load read through one.
-        // Fail-soft: a refusal leaves `users_admin` failing closed.
-        let Ok(admin_window) = PartitionBlock::from_partition(self.store.window(), &extent) else {
-            note(
-                self.audit,
-                Level::Error,
-                "root-unlock: admin window out of range",
-            );
-            return None;
-        };
-        let Ok(admin_fs) = RustFs::open(admin_window, volume_key) else {
-            note(self.audit, Level::Error, "root-unlock: admin mount failed");
-            return None;
-        };
-        Some(alloc::boxed::Box::new(admin_fs))
+        register_writable_state(driver, self.audit)
     }
 }
 

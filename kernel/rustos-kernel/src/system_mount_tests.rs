@@ -104,6 +104,11 @@ impl FilesystemSecurity for SentinelFs {
     fn security(&mut self, _node: NodeId) -> Result<NodeSecurity, DriverError> {
         Ok(NodeSecurity::new(0o644, 1, 2))
     }
+
+    fn set_security(&mut self, _node: NodeId, _security: NodeSecurity) -> Result<(), DriverError> {
+        // The same sentinel refusal the write surface reports.
+        Err(DriverError::Busy)
+    }
 }
 
 impl FilesystemStats for SentinelFs {

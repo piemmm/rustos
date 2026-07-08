@@ -74,15 +74,16 @@ use rustos_drv_fs_rustfs::{
 };
 use rustos_kernel_core::{
     build_identity_table, load_groups_db, load_users_db_source, ConsoleRead, ConsoleWrite,
-    GroupsLoadError, HeldUsersDbSource, LateIdentity, LateUsersAdmin, LateUsersDb, UserAdminEngine,
-    UsersDbSource, UsersLoadError,
+    GroupsLoadError, HeldUsersDbSource, LateIdentity, LateUsersAdmin, LateUsersDb, SleepLock,
+    UserAdminEngine, UsersDbSource, UsersLoadError,
 };
 use rustos_kernel_sec::IdentityTable;
 use rustos_log::{log, Event, EventId, Field, Level, Sink};
 use rustos_partition::{parse_partition_table, PartitionBlock, PartitionError, PartitionType};
 use rustos_users::{GroupsDb, UsersDb};
 
-use crate::user_admin_backing::{AdminFs, RootAdminBacking};
+use crate::kernel_fs::KernelFs;
+use crate::user_admin_backing::RootAdminBacking;
 use zeroize::Zeroizing;
 
 /// A mounted root volume, viewed as the read + security surface the
@@ -251,14 +252,14 @@ pub struct UnlockedRoot {
     /// The passphrase-derived volume key of the just-unlocked root volume,
     /// held in a zero-on-drop wrapper.
     ///
-    /// Carried out of the unlock so a [`WritableRootSink`] can open a
-    /// **second**, independent read-write view of the same volume and publish
-    /// it as the writable `/System/Logs` + `/System/Settings` backing
-    /// (`PREREQUISITES.md` P-B) — the encrypted root is the one writable
-    /// partition, so its key is the only way to mount that backing. It is the
-    /// most sensitive value the unlock produces: it lives no longer than the
-    /// publish step and is wiped the instant this struct drops, and the
-    /// redacted [`Debug`] never prints it.
+    /// Carried out of the unlock so a [`WritableRootSink`] can open the
+    /// volume's read-write view and publish it as the writable
+    /// `/System/Logs` + `/System/Settings` backing (`PREREQUISITES.md` P-B)
+    /// — the encrypted root is the one writable partition, so its key is
+    /// the only way to mount that backing. It is the most sensitive value
+    /// the unlock produces: it lives no longer than the publish step and is
+    /// wiped the instant this struct drops, and the redacted [`Debug`]
+    /// never prints it.
     pub volume_key: Zeroizing<VolumeKey>,
 }
 
@@ -269,23 +270,26 @@ pub struct UnlockedRoot {
 /// The unlock itself cannot do this: it holds the key but not a second
 /// `'static` block window onto the root partition (it reuses one borrowed
 /// window per passphrase attempt). The live implementation captures the
-/// `'static` driver-store device, opens an independent read-write
-/// [`RustFs`] window onto the `RustFsRoot` partition under the supplied key,
-/// and registers it through `crate::system_mount::register_writable_state`.
-/// It is **fail-soft**: publishing the writable backing is never allowed to
-/// abort an otherwise-successful unlock.
+/// `'static` driver-store device, opens the read-write [`RustFs`] window
+/// onto the `RustFsRoot` partition under the supplied key, and registers it
+/// through `crate::system_mount::register_writable_state`. It is
+/// **fail-soft**: publishing the writable backing is never allowed to abort
+/// an otherwise-successful unlock.
 pub trait WritableRootSink {
     /// Open a writable view of the just-unlocked root volume under
     /// `volume_key` and publish it as the writable-state backing.
     ///
-    /// Additionally returns, when the volume supports it, one more
-    /// independent read-write [`AdminFs`] window onto the same volume for
-    /// the `CAP_USER_ADMIN` account-administration engine's storage
-    /// (`plans/CAPABILITY_USE.md` CU4) — `/System/Security` is shadowed by
-    /// the read-only `/System` mount, so the engine persists through this
-    /// direct window exactly as the boot load read through one. `None`
-    /// leaves account administration failing closed (`NotImplemented`).
-    fn publish(&self, volume_key: &VolumeKey) -> Option<Box<dyn AdminFs>>;
+    /// Additionally returns the **registered driver itself** — the one
+    /// `SleepLock`-serialised instance the `fs_*` syscalls run against —
+    /// so the `CAP_USER_ADMIN` account-administration engine's storage
+    /// (`plans/CAPABILITY_USE.md` CU4) shares it: the volume has exactly
+    /// one writer, never a second independent window whose copy-on-write
+    /// allocation state could diverge and corrupt the device.
+    /// `/System/Security` is shadowed by the read-only `/System` mount, so
+    /// the engine persists through this driver directly, below the VFS.
+    /// `None` leaves account administration failing closed
+    /// (`NotImplemented`).
+    fn publish(&self, volume_key: &VolumeKey) -> Option<&'static SleepLock<Box<dyn KernelFs>>>;
 }
 
 /// A [`WritableRootSink`] that publishes nothing.
@@ -297,7 +301,7 @@ pub trait WritableRootSink {
 pub struct NoWritableRootSink;
 
 impl WritableRootSink for NoWritableRootSink {
-    fn publish(&self, _volume_key: &VolumeKey) -> Option<Box<dyn AdminFs>> {
+    fn publish(&self, _volume_key: &VolumeKey) -> Option<&'static SleepLock<Box<dyn KernelFs>>> {
         None
     }
 }
@@ -842,13 +846,13 @@ fn finish_install(
         groups_db,
         volume_key,
     } = unlocked;
-    // Publish the writable `/System/Logs` + `/System/Settings` backing from
-    // a second read-write view of this same volume, while the key is still
-    // live — and receive the account-administration window opened alongside
-    // it. Fail-soft: a publish refusal leaves those subtrees (and account
-    // administration) failing closed and never blocks the users/identity
-    // install below. The key is wiped when `volume_key` drops at the end of
-    // this function.
+    // Publish the writable `/System/Logs` + `/System/Settings` backing
+    // while the key is still live — and receive the registered driver
+    // itself, which the account-administration engine shares (one volume,
+    // one writer). Fail-soft: a publish refusal leaves those subtrees (and
+    // account administration) failing closed and never blocks the
+    // users/identity install below. The key is wiped when `volume_key`
+    // drops at the end of this function.
     let admin_fs = install.writable.publish(&volume_key);
     // Install the authoritative identity table first, so the `fs_*` group
     // resolution is ready before `login` can act on the installed users
@@ -870,7 +874,7 @@ fn finish_install(
     // no admin targets, or a volume that yielded no admin window, leaves
     // `users_admin` failing closed — never a partial engine.
     if let (Some(admin), Some(fs)) = (&install.admin, admin_fs) {
-        let backing: &'static RootAdminBacking =
+        let backing: &'static RootAdminBacking<Box<dyn KernelFs>> =
             alloc::boxed::Box::leak(alloc::boxed::Box::new(RootAdminBacking::new(fs)));
         let engine = UserAdminEngine::new(
             users_db,

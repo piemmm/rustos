@@ -2605,6 +2605,16 @@ impl<B: Block> FilesystemSecurity for Ext4<B> {
         self.decode_inode_acl(ino, &inode, &mut sec)?;
         Ok(sec)
     }
+
+    fn set_security(&mut self, _node: NodeId, _security: NodeSecurity) -> Result<(), DriverError> {
+        // The ext4 on-disk format cannot faithfully store a full RustOS
+        // security record: it has no representation for the capability
+        // gate, and this driver does not rewrite POSIX-ACL xattr blocks.
+        // Storing a silently-lossy record is forbidden, so the write is
+        // refused whole (fail closed); the record a node was created
+        // with stands.
+        Err(DriverError::Unsupported)
+    }
 }
 
 /// Longest directory-entry component this driver writes (the ext

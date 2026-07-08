@@ -72,6 +72,7 @@ extern crate std;
 pub mod appspawn;
 pub mod aspace;
 pub mod audit;
+pub mod blockwait;
 pub mod boot_id;
 pub mod bootinfo;
 pub mod callreg;
@@ -134,6 +135,7 @@ pub use appspawn::{
 };
 pub use aspace::{AddressSpaceRegistry, AspaceError};
 pub use audit::AuditEvent;
+pub use blockwait::{FallbackPark, IrqParkWaiter};
 pub use bootinfo::{BootInfo, BootInfoError, IrqRouting, KernelArch, MAX_COMMAND_LINE_BYTES};
 pub use console::{
     BlockingConsoleRead, ConsoleDevice, ConsoleInput, ConsoleInputQueue, ConsoleRead, ConsoleWrite,
@@ -154,7 +156,7 @@ pub use driver_store::{
     MAX_DRIVER_IMAGE_LEN, MAX_STORE_DEPTH, MAX_STORE_DRIVERS, SYSTEM_VOLUME_STORE_PATH,
 };
 pub use fs::{
-    Access, AclEntry, AclWho, Credentials, FilesystemAlreadyInstalled, FilesystemService,
+    Access, AclEntry, AclWho, CachedFs, Credentials, FilesystemAlreadyInstalled, FilesystemService,
     IdentityAlreadyInstalled, LateFilesystem, LateIdentity, Metadata, Mode, MountPoint, MountTable,
     MountedFilesystemService, NullFilesystemService, Path, Vfs, VfsError, NULL_FILESYSTEM,
 };

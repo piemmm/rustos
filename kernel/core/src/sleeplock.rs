@@ -191,9 +191,12 @@ impl<T: ?Sized> SleepLock<T> {
             self.waiters.deregister(task);
             return;
         }
-        // Park off the run queue. A `false` return means the caller is not a
-        // resumable user kthread (a host test, or a non-task context): there
-        // is then no scheduler to park on and no real contention, so drop the
+        // Park off the run queue. Every dispatched kthread — a user task in
+        // its syscall trap and a kernel service kthread body alike — has a
+        // published resume handle, so this parks any real contender. A
+        // `false` return means the caller is not a dispatched kthread at all
+        // (a host test, or the pre-dispatch boot flow): there is then no
+        // scheduler to park on and no real contention, so drop the
         // registration and retry rather than park into the void.
         if !reschedule_current(cpu, RescheduleAction::Park) {
             self.waiters.deregister(task);

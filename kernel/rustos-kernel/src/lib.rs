@@ -217,6 +217,13 @@ pub mod system_files;
 // unit test runs on the CI host.
 pub mod app_store;
 
+// The type-erased mounted-volume driver trait (`KernelFs`) and its
+// `Box<dyn KernelFs>` forwarders. Architecture-neutral (it names only
+// `rustos_abi` types), so the arch-neutral unlock policy (`root_mount`)
+// and the account-administration storage (`user_admin_backing`) build on
+// every instruction set.
+pub mod kernel_fs;
+
 // The boot-time install of the read-only `/System` volume as the userland
 // `fs_*` filesystem mount (`PREREQUISITES.md` P-A): the type-erased
 // `KernelFs` mount driver, the `LATE_FILESYSTEM` / `FS_SERVICE` statics the
