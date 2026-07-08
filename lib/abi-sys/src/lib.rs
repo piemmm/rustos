@@ -1597,16 +1597,21 @@ pub extern "C" fn sys_signal(pid: i32, signal: u32) -> i32 {
     }
 }
 
-/// `console_foreground`: mark (or clear) the foreground job of the console
-/// behind readable descriptor `fd` — the child the cooked-mode line
-/// discipline delivers `^C`/`^Z` to (`SyscallNumber::CONSOLE_FOREGROUND`,
-/// the `tcsetpgrp` analogue). Returns a `ROS_E_*` code.
+/// `console_foreground`: grant (or release) the controlling (foreground)
+/// ownership of the console behind readable descriptor `fd` — the
+/// exclusive drain right on its input queue and the child the cooked-mode
+/// line discipline delivers `^C`/`^Z` to
+/// (`SyscallNumber::CONSOLE_FOREGROUND`, the `tcsetpgrp` analogue,
+/// `plans/DISPLAY.md` D5). Returns a `ROS_E_*` code.
 ///
-/// `pid` is a live child of the caller, or `0` to clear the slot. Requires
+/// `pid` is a live child of the caller, or `0` to release. While an owner
+/// is recorded, only it may `stream_read` or `stream_input_mode` that
+/// console — every other task sees `ROS_E_NOT_FOREGROUND`. Requires
 /// `ROS_CAP_CONSOLE_READ` (the same fd-scoped terminal-control gate
 /// `stream_input_mode` carries); the kernel authorises the child through
-/// the same parent/child bookkeeping `wait`/`signal` use and fails closed
-/// (`plans/SPAWN.md` SP9).
+/// the same parent/child bookkeeping `wait`/`signal` use,
+/// owner/granter-checks the transition (a bystander can neither take nor
+/// clear the ownership), and fails closed (`plans/SPAWN.md` SP9).
 #[must_use]
 #[export_name = "ros_sys_console_foreground"]
 pub extern "C" fn sys_console_foreground(fd: u32, pid: i32) -> i32 {

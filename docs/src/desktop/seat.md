@@ -152,6 +152,49 @@ a real kernel seat registry: the owner presents, an administrative
 revoke evicts it, the evicted client's next present is refused (its last
 frame stays on scan-out), and the new foreground's fresh lease renders.
 
+## Per-console controlling owner (Stage D5)
+
+Text consoles get the controlling-terminal arbitration Linux builds from
+session leaders, foreground process groups, and `SIGTTIN`/`SIGTTOU` — but
+as a kernel-tracked fact with fail-closed refusals instead of racy
+asynchronous signals.
+
+- **The controlling owner is a kernel-tracked task id per console.** While
+  an owner is recorded, **only the owner** drains that console's input
+  queue (`stream_read`) or changes its line discipline
+  (`stream_input_mode`); every other task — including the granting shell
+  itself — is refused with the typed `Errno::NotForeground` (27) *before
+  any input is consumed*. Two tasks on one console can never both drain
+  it. An unowned console reads openly (the shell at its prompt;
+  single-tenant bring-up), exactly as before.
+- **Handoff is an explicit, checked call, and moves only down the spawn
+  chain.** `console_foreground` (72, `CAP_CONSOLE_READ`) grants the
+  ownership to a **live child of the caller** (the same
+  `ProcessWait::authorise_child` bookkeeping `wait`/`signal` use —
+  inherited and intersected, never widened) and records the caller as the
+  **granter**. The slot transition itself is owner-checked on the console
+  device: a grant is honoured only from an unowned console, the recorded
+  granter (re-targeting between its own children), or the current owner
+  (delegating onward to its own child); a release (`pid = 0`) only from
+  the granter or the owner. A bystander can neither take the drain right
+  nor open the console by clearing the slot — both are refused with
+  `NotForeground`.
+- **No wedged consoles.** A vanished owner never strands its console: the
+  `exit` path releases any console ownership the exiting task held, and
+  the read gate clears a recorded owner the process bookkeeping proves
+  dead (`ProcessWait::is_live`; task ids are never reused, so a proven
+  death is final). The inert bookkeeping default reports every task live,
+  so a gate that cannot prove death keeps denying — it can heal, never
+  widen.
+- **Signal routing rides the same slot.** The cooked-mode `^C`/`^Z`
+  delivery to the foreground job (SP9) targets the same recorded owner, so
+  "who gets the interrupt" and "who drains the input" can never diverge.
+
+Kernel host tests prove the exclusivity (two tasks cannot both drain, the
+refused reader consumes nothing), the handoff transfer, the bystander
+steal refusals, the input-mode gate, and both no-wedge paths (exit release
+and gate healing).
+
 ## Observing seats
 
 The seat inventory is exposed through the System Information API — never
@@ -166,5 +209,4 @@ registry; the `sysinfod` broker scopes and audits the query, and
 
 ## What is not yet wired
 
-Per-console controlling-terminal arbitration and multi-seat/hotplug are
-Stages D5–D6 of `plans/DISPLAY.md`.
+Multi-seat/hotplug is Stage D6 of `plans/DISPLAY.md`.

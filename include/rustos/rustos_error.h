@@ -42,5 +42,6 @@
 #define ROS_E_SEAT_BUSY 24
 #define ROS_E_SEAT_NOT_OWNER 25
 #define ROS_E_SEAT_REVOKED 26
+#define ROS_E_NOT_FOREGROUND 27
 
 #endif /* ROS_ERROR_H */

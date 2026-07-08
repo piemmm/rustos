@@ -197,6 +197,17 @@ pub enum Errno {
     /// (including the evicted task's explicit reacquire) clears the
     /// condition.
     SeatRevoked = 26,
+    /// The caller is not the controlling (foreground) owner of the text
+    /// console it tried to control (`plans/DISPLAY.md`).
+    ///
+    /// Emitted by the foreground-gated console paths — `stream_read`,
+    /// `stream_input_mode`, and a `console_foreground` transition attempted
+    /// by a task that is neither the console's recorded owner nor the task
+    /// that granted the current ownership. Only the foreground owner drains
+    /// a console's input queue or changes its line discipline; a background
+    /// reader is refused with this code instead of being stopped by an
+    /// asynchronous signal, so there is no `SIGTTIN`-style race to exploit.
+    NotForeground = 27,
 }
 
 impl Errno {
@@ -258,6 +269,7 @@ impl Errno {
             24 => Some(Self::SeatBusy),
             25 => Some(Self::SeatNotOwner),
             26 => Some(Self::SeatRevoked),
+            27 => Some(Self::NotForeground),
             _ => None,
         }
     }
@@ -292,6 +304,7 @@ impl fmt::Display for Errno {
             Self::SeatBusy => "seat held by another task",
             Self::SeatNotOwner => "not the seat owner",
             Self::SeatRevoked => "seat lease revoked",
+            Self::NotForeground => "not the console foreground owner",
         };
         f.write_str(message)
     }
@@ -330,6 +343,7 @@ mod tests {
         assert_eq!(Errno::SeatBusy.as_i32(), 24);
         assert_eq!(Errno::SeatNotOwner.as_i32(), 25);
         assert_eq!(Errno::SeatRevoked.as_i32(), 26);
+        assert_eq!(Errno::NotForeground.as_i32(), 27);
     }
 
     #[test]
@@ -363,11 +377,12 @@ mod tests {
             Errno::SeatBusy,
             Errno::SeatNotOwner,
             Errno::SeatRevoked,
+            Errno::NotForeground,
         ] {
             assert_eq!(Errno::from_i32(errno.as_i32()), Some(errno));
         }
         assert_eq!(Errno::from_i32(0), None);
-        assert_eq!(Errno::from_i32(27), None);
+        assert_eq!(Errno::from_i32(28), None);
         assert_eq!(Errno::from_i32(-1), None);
     }
 

@@ -304,18 +304,46 @@ the framebuffer mapping:
 Docs: `docs/src/desktop/seat.md`, `docs/src/drivers/display.md`, driver
 READMEs, syscall table row 23 (`u64` lease generation).
 
-### Stage D5 — per-console controlling owner + foreground handoff `[ ]`
+### Stage D5 — per-console controlling owner + foreground handoff `[x]`
 
-**Deliverables**
-- The text-console path (`stream_read` in `kernel/core/src/syscalls.rs`)
-  gains a kernel-tracked controlling owner per console: only the foreground
-  owner drains the input queue; a background reader is denied fail-closed
-  (no async signal race). Foreground handoff is an explicit capability-checked
-  call, inherited/intersected across spawn like other rights (§5.2).
+**Done.** Each text console carries a kernel-tracked controlling
+(foreground) owner, enforced fail-closed with no `SIGTTIN`-style signal
+race:
 
-**Done when:** tests prove two tasks on one console cannot both drain input,
-handoff transfers the drain right, and background reads fail closed; gate
-green.
+- `ConsoleDevice` (`kernel/core/src/console.rs`) records
+  `{owner, granter}` (lock-free atomics the ISR input filter reads,
+  compound transitions serialised under the device's `fg` lock) with the
+  checked transitions `grant_foreground` (honoured only from an unowned
+  console, the recorded granter, or the current owner delegating to its
+  own child), `release_foreground` (granter/owner only; unowned release
+  is an idempotent success), and `clear_dead_foreground` (compare-and-
+  clear). The unchecked setter is gone.
+- `stream_read` and `stream_input_mode` share one gate
+  (`check_console_foreground`): while an owner is recorded, any other
+  task is refused with the typed `Errno::NotForeground` (new `abi-v1`
+  errno 27, generated into the C headers) before any input is consumed
+  or the discipline changes; an unowned console reads openly. No new
+  capability (§5.2): the authority is the inherited console descriptor,
+  the parent/child relation (`ProcessWait::authorise_child`), and the
+  owner-checked slot transition — the drain right only moves down the
+  spawn chain, inherited and intersected.
+- A vanished owner never wedges the console: the `exit` handler releases
+  the exiting task's ownership, and the gate clears an owner the process
+  bookkeeping proves dead (`ProcessWait::is_live`; the inert default
+  reports live, so an unproven death keeps denying — heal, never widen).
+- `console_foreground` (72) keeps its number and gains the grant/release
+  semantics in place; `^C`/`^Z` foreground signal delivery (SP9) rides
+  the same slot, so signal target and drain right can never diverge.
+  elsh's mark-around-wait wiring is unchanged.
+
+Kernel host tests prove two tasks on one console cannot both drain (the
+refused reader consumes nothing), handoff transfers the drain right,
+background reads and mode changes fail closed, bystander grant/clear
+steals are refused, and both no-wedge paths (exit release, gate healing);
+device-level transition tests and `ProcessTable::is_live` tests back
+them. Docs: `docs/src/desktop/seat.md` (D5 section),
+`docs/src/architecture/syscalls.md` (rows 13/21/72), the `lib/abi` /
+`lib/rt` / `lib/abi-sys` rustdoc.
 
 ### Stage D6 — multi-seat / hotplug `[ ]`
 

@@ -1376,15 +1376,21 @@ pub fn signal(pid: i32, signal: Signal) -> i64 {
     ret as i64
 }
 
-/// Mark (or clear) the console foreground job the cooked-mode line
-/// discipline delivers `^C`/`^Z` to (`SyscallNumber::CONSOLE_FOREGROUND`,
-/// `plans/SPAWN.md` SP9 — the `tcsetpgrp` analogue).
+/// Grant (or release) the console's controlling (foreground) ownership —
+/// the exclusive drain right on its input queue and the target the
+/// cooked-mode line discipline delivers `^C`/`^Z` to
+/// (`SyscallNumber::CONSOLE_FOREGROUND`, `plans/SPAWN.md` SP9,
+/// `plans/DISPLAY.md` D5 — the `tcsetpgrp` analogue).
 ///
 /// `fd` is a readable inherited standard-stream descriptor naming the
 /// console (the shell passes [`rustos_abi::STDIN`]); `pid` is a live child
-/// of the caller to mark foreground, or `0` to clear the slot. The kernel
+/// of the caller to make the owner, or `0` to release. While an owner is
+/// recorded, only it may `stream_read` or `stream_input_mode` that
+/// console — every other task sees `Errno::NotForeground`. The kernel
 /// authorises the child through the same parent/child bookkeeping
-/// `wait`/`signal` use and fails closed on everything else.
+/// `wait`/`signal` use, owner/granter-checks the transition itself (a
+/// bystander can neither take nor clear the ownership), and fails closed
+/// on everything else.
 ///
 /// The kernel encodes the result as a signed register following the
 /// standard `abi-v1` convention: `0` on success, and a negative value is

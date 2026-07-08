@@ -3973,7 +3973,7 @@ the next increment; see `plans/USB.md` for the binding design and staging.
 
 ## DISPLAY — seat ownership: the display/console locking model (`plans/DISPLAY.md`)
 
-**Status: D1–D4 done; D5–D6 planned.** Closes the console/graphics *ownership
+**Status: D1–D5 done; D6 planned.** Closes the console/graphics *ownership
 and locking* gap against Linux (DRM master + `logind` seats + tty controlling
 terminal), and improves on it under the charter's fail-closed, no-ambient
 model. The plan makes the **seat** a first-class kernel object with a tracked,
@@ -4016,8 +4016,18 @@ alike) checks it first, refusing a revoked client with the distinct
 framebuffer mapping persists; a seatless host presents ungated
 (headless stays first-class). Proven by driver unit tests and the
 aarch64 framebuffer QEMU vertical's seat phase (revoked present
-refused, surface intact, new foreground renders). D5 (per-console
-controlling owner + foreground handoff) is the next increment; see
+refused, surface intact, new foreground renders). D5 is done: each text
+console carries a kernel-tracked controlling (foreground) owner — while
+one is recorded, only it may `stream_read` / `stream_input_mode` that
+console (any other task sees the typed `Errno::NotForeground`, new
+`abi-v1` errno 27, before any input is consumed); `console_foreground`
+(72, unchanged number) grants/releases the ownership with layered,
+capability-minimal authority (live-child authorisation plus an
+owner/granter-checked slot transition on the console device, so a
+bystander can neither take nor clear the drain right), and a vanished
+owner never wedges the console (the `exit` path releases it; the read
+gate clears an owner `ProcessWait::is_live` proves dead — heal, never
+widen). D6 (multi-seat / hotplug) is the next increment; see
 `plans/DISPLAY.md` for the binding design and staging.
 
 ---

@@ -1077,6 +1077,35 @@ where
         }
     }
 
+    /// The one console foreground-owner gate `stream_read` and
+    /// `stream_input_mode` share (`plans/DISPLAY.md` D5).
+    ///
+    /// Admits the caller when the console is unowned or the caller is the
+    /// recorded controlling owner. A different **live** owner refuses the
+    /// caller with the typed [`Errno::NotForeground`]; an owner the
+    /// process bookkeeping proves dead is cleared in place (task ids are
+    /// never reused, so a console is never wedged behind a vanished
+    /// owner) and the caller proceeds. The inert bookkeeping default
+    /// reports every task live, so an unproven death keeps denying — the
+    /// gate can heal, never widen.
+    fn check_console_foreground(
+        &self,
+        caller: &CallerContext<'_>,
+        device: &ConsoleDevice,
+    ) -> Result<(), Errno> {
+        let Some(owner) = device.foreground() else {
+            return Ok(());
+        };
+        if owner == caller.task_id {
+            return Ok(());
+        }
+        if self.process_wait.is_live(owner) {
+            return Err(Errno::NotForeground);
+        }
+        device.clear_dead_foreground(owner);
+        Ok(())
+    }
+
     /// Copy a filesystem path of `len` bytes from the caller's address space
     /// at `ptr` and validate it as a UTF-8 string, for the `fs_open` /
     /// `fs_mkdir` / `fs_unlink` handlers.
@@ -1639,6 +1668,14 @@ where
         // its own (its members only *name* endpoints and IRQ lines, reclaimed
         // above), so dropping the sets is the whole reclamation; idempotent.
         crate::waitset::release_owned_by(task.0);
+        // Release any console foreground ownership the exiting task holds,
+        // so the console returns to its open state the moment the owner is
+        // gone rather than waiting for a reader to prove the owner dead
+        // (`plans/DISPLAY.md` D5). Idempotent: a task that owned no console
+        // clears nothing.
+        for device in self.consoles {
+            device.clear_dead_foreground(task);
+        }
         let _ = self.caps.write().remove(task);
         Ok(0)
     }
@@ -2239,6 +2276,17 @@ where
         let Some(device) = self.consoles.get(usize::from(streams.console(fd))) else {
             return Err(Errno::NotImplemented);
         };
+        // Only the console's controlling (foreground) owner drains its
+        // input queue (`plans/DISPLAY.md` D5): a background reader is
+        // refused with the typed `NotForeground` before any input is
+        // consumed — fail closed, with no `SIGTTIN`-style asynchronous
+        // signal to race. An unowned console reads openly (the shell at
+        // its prompt; single-tenant bring-up). A recorded owner that is
+        // provably dead (task ids are never reused) is cleared here so a
+        // granter that vanished before releasing can never wedge the
+        // console; a liveness oracle that cannot prove death keeps
+        // denying.
+        self.check_console_foreground(caller, device)?;
         // The dispatcher already checked `CAP_CONSOLE_READ` and that
         // `buf` is non-null (`UserPtr`). A zero-length read touches
         // neither the device nor the caller's buffer.
@@ -2502,6 +2550,11 @@ where
         let Some(device) = self.consoles.get(usize::from(streams.console(fd))) else {
             return Err(Errno::NotImplemented);
         };
+        // The line discipline is terminal control, so it belongs to the
+        // console's controlling owner exactly as the input drain does
+        // (`plans/DISPLAY.md` D5): a background task must not flip the
+        // foreground program's echo or raw mode under it.
+        self.check_console_foreground(caller, device)?;
         // The dispatcher already checked `CAP_CONSOLE_READ`. The mode is
         // the program's own terminal control — login selects secret around
         // a password read so the credential is never rendered; a
@@ -2525,18 +2578,23 @@ where
             return Err(Errno::NotImplemented);
         };
         // The dispatcher already checked `CAP_CONSOLE_READ`. A zero `pid`
-        // clears the slot — the shell back at its prompt.
+        // releases the ownership — the shell back at its prompt. The
+        // release is owner/granter-checked on the device: a background
+        // task cannot open the console by clearing the slot and then
+        // draining it (`plans/DISPLAY.md` D5).
         if pid == 0 {
-            device.set_foreground(None);
-            return Ok(0);
+            return device.release_foreground(caller.task_id).map(|()| 0);
         }
         // A non-zero `pid` must be a live child of the caller: the same
         // parent/child authority `wait`/`signal` enforce, decided by the
         // one shared bookkeeping — never a caller-supplied claim. A
-        // negative, unknown, or already-exited pid fails closed.
+        // negative, unknown, or already-exited pid fails closed. The
+        // grant itself is then slot-checked on the device (unowned, or
+        // the caller is the recorded granter or the current owner), so
+        // the drain right only ever moves down the spawn chain and is
+        // never taken from a live foreground job by a bystander.
         let child = self.process_wait.authorise_child(caller.task_id, pid)?;
-        device.set_foreground(Some(child));
-        Ok(0)
+        device.grant_foreground(caller.task_id, child).map(|()| 0)
     }
 
     fn key_inject(&self, caller: &CallerContext<'_>, buf: u64, len: usize) -> SyscallResult {
@@ -10553,6 +10611,249 @@ mod tests {
         wait.record_exit(SecTaskId(9), 0);
         assert_eq!(h.console_foreground(&ctx, STDIN, 9), Err(Errno::NotFound));
         assert_eq!(consoles[0].foreground(), None);
+    }
+
+    /// Only the console's controlling (foreground) owner drains its input
+    /// (`plans/DISPLAY.md` D5): with an owner marked, every other task's
+    /// `stream_read` is refused with the typed `NotForeground` before any
+    /// input is consumed; an explicit handoff transfers the drain right;
+    /// and neither a grant nor a clear from a bystander can steal it.
+    #[test]
+    fn stream_read_is_gated_on_the_console_foreground_owner() {
+        use crate::procwait::ProcessWait as _;
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        // Three principals on the one console: the shell (2) and its two
+        // children (9, 7), each with its own registered address space and
+        // inherited standard streams.
+        let shell_caps = make_caps_record(2, &[], sink);
+        let shell = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &shell_caps,
+        };
+        let fg_caps = make_caps_record(9, &[], sink);
+        let fg = CallerContext {
+            task_id: SecTaskId(9),
+            caps: &fg_caps,
+        };
+        let bg_caps = make_caps_record(7, &[], sink);
+        let bg = CallerContext {
+            task_id: SecTaskId(7),
+            caps: &bg_caps,
+        };
+        for task in [2u64, 9, 7] {
+            let (space, physmap) =
+                send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
+            aspaces
+                .write()
+                .register(SecTaskId(task), space, physmap)
+                .expect("registration succeeds");
+        }
+
+        let rx: &'static RecordingConsoleRead =
+            Box::leak(Box::new(RecordingConsoleRead::new(b"hello")));
+        let consoles: &'static [ConsoleDevice] = Box::leak(Box::new([ConsoleDevice::new(
+            &crate::console::NULL_CONSOLE,
+            rx,
+        )]));
+        let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
+        let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
+            Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
+        wait.register_child(SecTaskId(2), SecTaskId(9));
+        wait.register_child(SecTaskId(2), SecTaskId(7));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_consoles(consoles)
+        .with_process_wait(wait);
+        for task in [2u64, 9, 7] {
+            aspaces
+                .write()
+                .set_streams(SecTaskId(task), DescriptorTable::standard());
+        }
+
+        // The shell hands the console to child 9. From then on only 9
+        // drains: the shell's own read and the sibling's read are refused
+        // before the device is touched.
+        assert_eq!(h.console_foreground(&shell, STDIN, 9), Ok(0));
+        assert_eq!(
+            h.stream_read(&shell, STDIN, 0x1000, 16, 0),
+            Err(Errno::NotForeground)
+        );
+        assert_eq!(
+            h.stream_read(&bg, STDIN, 0x1000, 16, 0),
+            Err(Errno::NotForeground)
+        );
+        assert_eq!(*rx.last_buf_len.lock(), None);
+        assert_eq!(h.stream_read(&fg, STDIN, 0x1000, 16, 0), Ok(5));
+
+        // A bystander can neither re-target the ownership to a child of
+        // its own claim nor clear it: the drain right stays where the
+        // granter put it.
+        assert_eq!(
+            h.console_foreground(&bg, STDIN, 0),
+            Err(Errno::NotForeground)
+        );
+        assert_eq!(consoles[0].foreground(), Some(SecTaskId(9)));
+
+        // The granter's explicit handoff transfers the drain right: the
+        // old owner is now the refused background reader.
+        assert_eq!(h.console_foreground(&shell, STDIN, 7), Ok(0));
+        assert_eq!(
+            h.stream_read(&fg, STDIN, 0x1000, 16, 0),
+            Err(Errno::NotForeground)
+        );
+        assert_eq!(h.stream_read(&bg, STDIN, 0x1000, 16, 0), Ok(5));
+
+        // The granter releases (back at its prompt): the console is open
+        // again and the shell reads.
+        assert_eq!(h.console_foreground(&shell, STDIN, 0), Ok(0));
+        assert_eq!(h.stream_read(&shell, STDIN, 0x1000, 16, 0), Ok(5));
+    }
+
+    /// A foreground owner that vanished never wedges its console: the
+    /// `exit` path releases the ownership immediately, and a reader that
+    /// proves a stale owner dead through the process bookkeeping heals the
+    /// slot in place instead of being refused forever.
+    #[test]
+    fn a_dead_foreground_owner_never_wedges_the_console() {
+        use crate::procwait::ProcessWait as _;
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let shell_caps = make_caps_record(2, &[], sink);
+        let shell = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &shell_caps,
+        };
+        let fg_caps = make_caps_record(9, &[], sink);
+        let fg = CallerContext {
+            task_id: SecTaskId(9),
+            caps: &fg_caps,
+        };
+        for task in [2u64, 9] {
+            let (space, physmap) =
+                send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
+            aspaces
+                .write()
+                .register(SecTaskId(task), space, physmap)
+                .expect("registration succeeds");
+        }
+
+        let rx: &'static RecordingConsoleRead =
+            Box::leak(Box::new(RecordingConsoleRead::new(b"hello")));
+        let consoles: &'static [ConsoleDevice] = Box::leak(Box::new([ConsoleDevice::new(
+            &crate::console::NULL_CONSOLE,
+            rx,
+        )]));
+        let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
+        let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
+            Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
+        wait.register_child(SecTaskId(2), SecTaskId(9));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_consoles(consoles)
+        .with_process_wait(wait);
+        for task in [2u64, 9] {
+            aspaces
+                .write()
+                .set_streams(SecTaskId(task), DescriptorTable::standard());
+        }
+
+        // The owner's own `exit` releases the ownership on the spot.
+        assert_eq!(h.console_foreground(&shell, STDIN, 9), Ok(0));
+        assert_eq!(h.exit(&fg, 0), Ok(0));
+        assert_eq!(consoles[0].foreground(), None);
+        assert_eq!(h.stream_read(&shell, STDIN, 0x1000, 16, 0), Ok(5));
+
+        // A stale slot healed at the gate: re-mark a second child, record
+        // its death behind the console's back (a kill that never ran the
+        // exit handler), and the next refused reader proves it dead and
+        // proceeds instead of being wedged.
+        wait.register_child(SecTaskId(2), SecTaskId(12));
+        assert_eq!(h.console_foreground(&shell, STDIN, 12), Ok(0));
+        wait.record_exit(SecTaskId(12), 0);
+        assert_eq!(h.stream_read(&shell, STDIN, 0x1000, 16, 0), Ok(5));
+        assert_eq!(consoles[0].foreground(), None);
+    }
+
+    /// The read line discipline belongs to the foreground owner exactly as
+    /// the drain does: a background task's `stream_input_mode` is refused
+    /// with `NotForeground`, while the owner's own selection succeeds.
+    #[test]
+    fn stream_input_mode_is_gated_on_the_foreground_owner() {
+        use crate::procwait::ProcessWait as _;
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let shell_caps = make_caps_record(2, &[], sink);
+        let shell = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &shell_caps,
+        };
+        let fg_caps = make_caps_record(9, &[], sink);
+        let fg = CallerContext {
+            task_id: SecTaskId(9),
+            caps: &fg_caps,
+        };
+
+        let rx: &'static RecordingConsoleRead = Box::leak(Box::new(RecordingConsoleRead::new(b"")));
+        let consoles: &'static [ConsoleDevice] = Box::leak(Box::new([ConsoleDevice::new(
+            &crate::console::NULL_CONSOLE,
+            rx,
+        )]));
+        let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
+        let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
+            Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
+        wait.register_child(SecTaskId(2), SecTaskId(9));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_consoles(consoles)
+        .with_process_wait(wait);
+        for task in [2u64, 9] {
+            aspaces
+                .write()
+                .set_streams(SecTaskId(task), DescriptorTable::standard());
+        }
+
+        assert_eq!(h.console_foreground(&shell, STDIN, 9), Ok(0));
+        // The granting shell is background while its child runs: it may
+        // not flip the child's line discipline under it.
+        assert_eq!(
+            h.stream_input_mode(&shell, STDIN, InputMode::Raw.as_u32()),
+            Err(Errno::NotForeground)
+        );
+        assert_eq!(consoles[0].input_mode(), InputMode::Cooked);
+        // The owner's own terminal control works as before.
+        assert_eq!(
+            h.stream_input_mode(&fg, STDIN, InputMode::Raw.as_u32()),
+            Ok(0)
+        );
+        assert_eq!(consoles[0].input_mode(), InputMode::Raw);
     }
 
     /// With no console list installed the call announces the inert

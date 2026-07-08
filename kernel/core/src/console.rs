@@ -472,15 +472,31 @@ pub struct ConsoleDevice {
     /// [`Self::set_input_mode`] installed; atomic for the same shared
     /// `&'static` reason as `echo`.
     mode: AtomicU32,
-    /// The console's foreground job (`console_foreground`): the scheduler
-    /// task id the cooked-mode line discipline delivers `^C`/`^Z` to
-    /// instead of queueing the byte, or [`FOREGROUND_NONE`] for no
-    /// foreground — the default, and what the shell restores at its prompt,
-    /// under which every byte passes through unchanged. An atomic, not a
-    /// lock: the input filter reads it from the UART RX interrupt handler,
-    /// where spinning on a lock held by the interrupted task would deadlock
-    /// a single CPU.
+    /// The console's controlling (foreground) owner (`console_foreground`,
+    /// `plans/DISPLAY.md` D5): the scheduler task id that alone may drain
+    /// this console's input queue and change its line discipline, and the
+    /// target the cooked-mode input filter delivers `^C`/`^Z` to instead of
+    /// queueing the byte. [`FOREGROUND_NONE`] means no owner — the default,
+    /// and what the granting shell restores at its prompt — under which
+    /// reads are open and every control byte passes through unchanged. An
+    /// atomic, not a lock: the input filter reads it from the UART RX
+    /// interrupt handler, where spinning on a lock held by the interrupted
+    /// task would deadlock a single CPU. Mutated only under [`Self::fg`]
+    /// through the checked transitions ([`Self::grant_foreground`],
+    /// [`Self::release_foreground`], [`Self::clear_dead_foreground`]).
     foreground: AtomicU64,
+    /// The task that granted the current foreground ownership (the parent
+    /// that handed the console to [`Self::foreground`]), or
+    /// [`FOREGROUND_NONE`] while the console is unowned. Only this task or
+    /// the owner itself may release or re-target the ownership, so a
+    /// background task can never steal the drain right by clearing the
+    /// slot. Read and written only under [`Self::fg`].
+    granter: AtomicU64,
+    /// Serialises the compound foreground transitions (read owner + granter,
+    /// decide, write both). The input filter never takes this lock — it
+    /// reads the [`Self::foreground`] atomic alone — so the interrupt-path
+    /// constraint above still holds.
+    fg: SpinLock<()>,
 }
 
 /// The [`ConsoleDevice::foreground`] sentinel for "no foreground job".
@@ -550,6 +566,8 @@ impl ConsoleDevice {
             secret: None,
             mode: AtomicU32::new(InputMode::Cooked.as_u32()),
             foreground: AtomicU64::new(FOREGROUND_NONE),
+            granter: AtomicU64::new(FOREGROUND_NONE),
+            fg: SpinLock::new(()),
         }
     }
 
@@ -625,18 +643,81 @@ impl ConsoleDevice {
         InputMode::from_u32(self.mode.load(Ordering::Relaxed)).unwrap_or(InputMode::Raw)
     }
 
-    /// Record `task` as this console's foreground job (`None` clears it):
-    /// the target the cooked-mode line discipline delivers `^C`/`^Z` to.
+    /// Hand this console's controlling (foreground) ownership to `owner`,
+    /// recording `caller` as the granter (`plans/DISPLAY.md` D5).
     ///
-    /// The `console_foreground` handler has already authorised `task` as a
-    /// live child of the calling console holder; the device only stores the
-    /// standing instruction.
-    pub fn set_foreground(&self, task: Option<TaskId>) {
-        let raw = task.map_or(FOREGROUND_NONE, |t| t.0);
-        self.foreground.store(raw, Ordering::Release);
+    /// The `console_foreground` handler has already authorised `owner` as a
+    /// live child of `caller`, so the ownership only ever moves down the
+    /// spawn chain — inherited and intersected, never widened. The
+    /// transition itself is permitted only from a position of authority
+    /// over the slot: the console is unowned, or `caller` is the recorded
+    /// granter (re-targeting between its own children), or `caller` is the
+    /// current owner (delegating onward to its own child). Anyone else is
+    /// refused, so a background task can never take the drain right.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotForeground`] when another task's ownership is in place
+    /// and `caller` is neither its granter nor the owner.
+    pub fn grant_foreground(&self, caller: TaskId, owner: TaskId) -> Result<(), Errno> {
+        let _guard = self.fg.lock();
+        let current = self.foreground.load(Ordering::Acquire);
+        let permitted = current == FOREGROUND_NONE
+            || current == caller.0
+            || self.granter.load(Ordering::Acquire) == caller.0;
+        if !permitted {
+            return Err(Errno::NotForeground);
+        }
+        self.granter.store(caller.0, Ordering::Release);
+        self.foreground.store(owner.0, Ordering::Release);
+        Ok(())
     }
 
-    /// This console's current foreground job, if any.
+    /// Release this console's foreground ownership (the granting shell back
+    /// at its prompt), returning the console to the open, unowned state.
+    ///
+    /// Only the recorded granter or the owner itself may release; anyone
+    /// else is refused, so a background task cannot open the console by
+    /// clearing the slot and then draining it. Releasing an already-unowned
+    /// console is an idempotent success: the granter legitimately clears
+    /// after its child exited (the exit path already cleared the slot), and
+    /// there is nothing an unauthorised caller could gain from the no-op.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotForeground`] when another task's ownership is in place
+    /// and `caller` is neither its granter nor the owner.
+    pub fn release_foreground(&self, caller: TaskId) -> Result<(), Errno> {
+        let _guard = self.fg.lock();
+        let current = self.foreground.load(Ordering::Acquire);
+        if current == FOREGROUND_NONE {
+            return Ok(());
+        }
+        if current != caller.0 && self.granter.load(Ordering::Acquire) != caller.0 {
+            return Err(Errno::NotForeground);
+        }
+        self.foreground.store(FOREGROUND_NONE, Ordering::Release);
+        self.granter.store(FOREGROUND_NONE, Ordering::Release);
+        Ok(())
+    }
+
+    /// Clear the foreground slot if `dead` is its recorded owner.
+    ///
+    /// The exit path calls this for every console when a task ends, and the
+    /// read gate calls it when it proves a recorded owner dead, so a
+    /// console is never wedged behind a task that can no longer read it.
+    /// Task ids are never reused, so clearing on a proven-dead owner can
+    /// never displace a live one. A slot naming any other task is left
+    /// untouched (idempotent).
+    pub fn clear_dead_foreground(&self, dead: TaskId) {
+        let _guard = self.fg.lock();
+        if self.foreground.load(Ordering::Acquire) == dead.0 {
+            self.foreground.store(FOREGROUND_NONE, Ordering::Release);
+            self.granter.store(FOREGROUND_NONE, Ordering::Release);
+        }
+    }
+
+    /// This console's current controlling (foreground) owner, if any.
     #[must_use]
     pub fn foreground(&self) -> Option<TaskId> {
         match self.foreground.load(Ordering::Acquire) {
@@ -1981,12 +2062,22 @@ mod tests {
         buf[..n].to_vec()
     }
 
+    /// Grant `device`'s foreground ownership of task `owner` from `granter`.
+    fn grant(device: &ConsoleDevice, granter: u64, owner: u64) {
+        device
+            .grant_foreground(
+                rustos_kernel_sec::TaskId(granter),
+                rustos_kernel_sec::TaskId(owner),
+            )
+            .expect("grant foreground");
+    }
+
     #[test]
     fn cooked_foreground_maps_ctrl_c_to_a_queued_interrupt() {
         let _guard = crate::procsignal::foreground_test_lock();
         crate::procsignal::ensure_foreground_hook_for_test();
         let (device, queue) = filter_device();
-        device.set_foreground(Some(rustos_kernel_sec::TaskId(9)));
+        grant(device, 1, 9);
         // The control byte is consumed (counted as accepted) and the
         // surrounding bytes flow to the reader untouched.
         assert_eq!(device.push(b"ab\x03cd"), Ok(5));
@@ -2002,7 +2093,7 @@ mod tests {
         let _guard = crate::procsignal::foreground_test_lock();
         crate::procsignal::ensure_foreground_hook_for_test();
         let (device, queue) = filter_device();
-        device.set_foreground(Some(rustos_kernel_sec::TaskId(4)));
+        grant(device, 1, 4);
         assert_eq!(device.push(b"\x1a"), Ok(1));
         assert_eq!(drain(queue), b"");
         assert_eq!(
@@ -2017,7 +2108,7 @@ mod tests {
         crate::procsignal::ensure_foreground_hook_for_test();
         for mode in [InputMode::Raw, InputMode::Secret] {
             let (device, queue) = filter_device();
-            device.set_foreground(Some(rustos_kernel_sec::TaskId(9)));
+            grant(device, 1, 9);
             device.set_input_mode(mode);
             // A full-screen program (raw) or a password read (secret) gets
             // the literal bytes; nothing is queued for delivery.
@@ -2045,12 +2136,14 @@ mod tests {
         let _guard = crate::procsignal::foreground_test_lock();
         crate::procsignal::ensure_foreground_hook_for_test();
         let (device, queue) = filter_device();
-        device.set_foreground(Some(rustos_kernel_sec::TaskId(9)));
+        grant(device, 1, 9);
         assert_eq!(device.push(b"\x03"), Ok(1));
         assert!(crate::procsignal::take_pending_foreground_for_test().is_some());
-        // The shell cleared the slot after its wait returned: bytes flow
+        // The shell released the slot after its wait returned: bytes flow
         // again.
-        device.set_foreground(None);
+        device
+            .release_foreground(rustos_kernel_sec::TaskId(1))
+            .expect("granter releases");
         assert_eq!(device.push(b"\x03"), Ok(1));
         assert_eq!(drain(queue), b"\x03");
         assert_eq!(crate::procsignal::take_pending_foreground_for_test(), None);
@@ -2061,7 +2154,7 @@ mod tests {
         let _guard = crate::procsignal::foreground_test_lock();
         crate::procsignal::ensure_foreground_hook_for_test();
         let (device, queue) = filter_device();
-        device.set_foreground(Some(rustos_kernel_sec::TaskId(9)));
+        grant(device, 1, 9);
         // Both are accepted; the single pending slot keeps the newest
         // request (the older one is moot once the newer lands).
         assert_eq!(device.push(b"\x03\x1a"), Ok(2));
@@ -2077,12 +2170,103 @@ mod tests {
         let _guard = crate::procsignal::foreground_test_lock();
         crate::procsignal::ensure_foreground_hook_for_test();
         let (device, queue) = filter_device();
-        device.set_foreground(Some(rustos_kernel_sec::TaskId(9)));
+        grant(device, 1, 9);
         // Fill the queue completely, then push a run through the filter:
         // the short push is reported exactly as the bare queue reports it.
         let full = [b'x'; CONSOLE_INPUT_QUEUE_CAPACITY];
         assert_eq!(device.push(&full), Ok(CONSOLE_INPUT_QUEUE_CAPACITY));
         assert_eq!(device.push(b"yz"), Ok(0));
         let _ = drain(queue);
+    }
+
+    #[test]
+    fn granting_an_unowned_console_records_owner_and_granter() {
+        let (device, _queue) = filter_device();
+        assert_eq!(device.foreground(), None);
+        grant(device, 1, 9);
+        assert_eq!(device.foreground(), Some(rustos_kernel_sec::TaskId(9)));
+    }
+
+    #[test]
+    fn the_granter_can_retarget_between_its_children() {
+        let (device, _queue) = filter_device();
+        grant(device, 1, 9);
+        // The same granter moves the ownership to another of its children
+        // (a new foreground job) without releasing in between.
+        grant(device, 1, 12);
+        assert_eq!(device.foreground(), Some(rustos_kernel_sec::TaskId(12)));
+    }
+
+    #[test]
+    fn the_owner_can_delegate_onward() {
+        let (device, _queue) = filter_device();
+        grant(device, 1, 9);
+        // The foreground owner (a nested shell) hands the console to its
+        // own child; it becomes the recorded granter of the new owner.
+        grant(device, 9, 20);
+        assert_eq!(device.foreground(), Some(rustos_kernel_sec::TaskId(20)));
+        // The delegating owner can reclaim as the new grant's granter.
+        device
+            .release_foreground(rustos_kernel_sec::TaskId(9))
+            .expect("delegating owner releases");
+        assert_eq!(device.foreground(), None);
+    }
+
+    #[test]
+    fn a_bystander_cannot_take_or_retarget_the_ownership() {
+        let (device, _queue) = filter_device();
+        grant(device, 1, 9);
+        // A task that is neither the granter nor the owner is refused; the
+        // recorded ownership is untouched.
+        assert_eq!(
+            device.grant_foreground(rustos_kernel_sec::TaskId(7), rustos_kernel_sec::TaskId(8)),
+            Err(Errno::NotForeground)
+        );
+        assert_eq!(device.foreground(), Some(rustos_kernel_sec::TaskId(9)));
+    }
+
+    #[test]
+    fn a_bystander_cannot_release_the_ownership() {
+        let (device, _queue) = filter_device();
+        grant(device, 1, 9);
+        assert_eq!(
+            device.release_foreground(rustos_kernel_sec::TaskId(7)),
+            Err(Errno::NotForeground)
+        );
+        assert_eq!(device.foreground(), Some(rustos_kernel_sec::TaskId(9)));
+    }
+
+    #[test]
+    fn the_owner_can_release_its_own_ownership() {
+        let (device, _queue) = filter_device();
+        grant(device, 1, 9);
+        device
+            .release_foreground(rustos_kernel_sec::TaskId(9))
+            .expect("owner releases");
+        assert_eq!(device.foreground(), None);
+    }
+
+    #[test]
+    fn releasing_an_unowned_console_is_an_idempotent_success() {
+        let (device, _queue) = filter_device();
+        // The granter clears after its child exited (the exit path already
+        // cleared the slot): a benign no-op for any caller.
+        device
+            .release_foreground(rustos_kernel_sec::TaskId(7))
+            .expect("idempotent release");
+        assert_eq!(device.foreground(), None);
+    }
+
+    #[test]
+    fn clear_dead_foreground_clears_only_the_matching_owner() {
+        let (device, _queue) = filter_device();
+        grant(device, 1, 9);
+        // Another task's death leaves the recorded ownership in place …
+        device.clear_dead_foreground(rustos_kernel_sec::TaskId(7));
+        assert_eq!(device.foreground(), Some(rustos_kernel_sec::TaskId(9)));
+        // … and the owner's death clears it, so the console is never
+        // wedged behind a task that can no longer read it.
+        device.clear_dead_foreground(rustos_kernel_sec::TaskId(9));
+        assert_eq!(device.foreground(), None);
     }
 }

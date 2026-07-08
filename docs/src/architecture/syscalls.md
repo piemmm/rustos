@@ -637,28 +637,45 @@ first-party Rust wrapper is
 `ROS_SIGNAL_CONTINUE` / `ROS_SIGNAL_TERMINATE` / `ROS_SIGNAL_KILL` /
 `ROS_SIGNAL_INTERRUPT` / `ROS_SIGNAL_STOP`.
 
-`console_foreground` (no. 72) marks (or clears, `pid = 0`) the foreground
-job of the console behind readable descriptor `fd` — the `tcsetpgrp`
-analogue (`plans/SPAWN.md` SP9). While a foreground task is set, the
-console's **cooked-mode** line discipline consumes `^C`/`^Z` at arrival
-time (every input producer — the UART RX interrupt handler, the seat
-registry's keyboard sink — pushes through the console device's input
-filter) and queues `Signal::Interrupt`/`Signal::Stop` for the foreground
-task; the queueing is a single atomic store (interrupt-safe, the deferred
-discipline of the console wakes) and the scheduler-driving delivery runs at
-the next dispatcher-context drain, through the same `KernelProcessSignal`
-engine the `signal` syscall uses (installed as the `ForegroundSignal` hook
-at boot). Raw/secret modes and a clear slot pass every byte through
-unchanged, so a full-screen program still receives literal control bytes.
-It is gated on `CAP_CONSOLE_READ` (the `stream_input_mode` terminal-control
-gate) and audited (redirecting signal delivery is a security-relevant
-decision); the *target* authority is the parent/child relationship — a
-non-zero `pid` must be a **live child of the caller**, authorised through
-the same `ProcessWait::authorise_child` bookkeeping `wait`/`signal` use,
-and everything else fails closed with `NotFound`. The shell (`elsh`) marks
-its foreground child around every blocking `wait` and clears the slot at
-its prompt. The first-party Rust wrapper is `rustos_rt::console_foreground`;
-the C stub is `ros_sys_console_foreground`.
+`console_foreground` (no. 72) grants (or releases, `pid = 0`) the
+**controlling ownership** of the console behind readable descriptor `fd`
+— the `tcsetpgrp` analogue (`plans/SPAWN.md` SP9, `plans/DISPLAY.md` D5).
+The foreground owner is a kernel-tracked task id with two enforced
+consequences. First, **only the owner drains the console's input queue or
+changes its line discipline**: while an owner is recorded, any other
+task's `stream_read` / `stream_input_mode` on that console is refused
+with the typed `NotForeground` (errno 27) *before any input is consumed*
+— a background reader fails closed instead of being stopped by a racy
+`SIGTTIN`-style asynchronous signal; an unowned console reads openly (the
+shell at its prompt). Second, the console's **cooked-mode** line
+discipline consumes `^C`/`^Z` at arrival time (every input producer — the
+UART RX interrupt handler, the seat registry's keyboard sink — pushes
+through the console device's input filter) and queues
+`Signal::Interrupt`/`Signal::Stop` for the owner; the queueing is a
+single atomic store (interrupt-safe) and the scheduler-driving delivery
+runs at the next dispatcher-context drain, through the same
+`KernelProcessSignal` engine the `signal` syscall uses (installed as the
+`ForegroundSignal` hook at boot). Raw/secret modes and an unowned console
+pass every byte through unchanged, so a full-screen program still
+receives literal control bytes. It is gated on `CAP_CONSOLE_READ` (the
+`stream_input_mode` terminal-control gate) and audited; the authority is
+layered and capability-minimal: a non-zero `pid` must be a **live child
+of the caller** (the same `ProcessWait::authorise_child` bookkeeping
+`wait`/`signal` use — the drain right only ever moves down the spawn
+chain, inherited and intersected, never widened), and the slot transition
+itself is checked on the device — a grant is honoured only from an
+unowned console, the recorded **granter** (re-targeting between its own
+children), or the current owner (delegating onward to its own child), and
+a release only from the granter or the owner. Anything else is refused
+with `NotForeground`, so a bystander can neither take the drain right nor
+open the console by clearing the slot; a bad `pid` shape fails closed
+with `NotFound`. A vanished owner never wedges its console: the `exit`
+path releases the ownership immediately, and the read gate clears a
+recorded owner the process bookkeeping proves dead (task ids are never
+reused). The shell (`elsh`) marks its foreground child around every
+blocking `wait` and releases the slot at its prompt. The first-party Rust
+wrapper is `rustos_rt::console_foreground`; the C stub is
+`ros_sys_console_foreground`.
 
 `rlimit_get` (no. 17) and `rlimit_set` (no. 18) are the settable
 `ulimit`/`rlimit`-equivalent (`AGENTS.md` §24.3). Both name a closed
@@ -784,7 +801,14 @@ while a completed `[input complete]` marker is deliberate final feedback
 and is left in place. The **raw** mode never arms the feedback: a
 full-screen program's keystrokes draw neither an echo nor a marker.
 The in-kernel root-unlock passphrase prompt arms the same feedback
-directly, so every text/terminal password prompt shows one marker. An
+directly, so every text/terminal password prompt shows one marker. The
+line discipline is terminal control, so it belongs to the console's
+controlling (foreground) owner exactly as the input drain does
+(`plans/DISPLAY.md` D5): while a foreground owner is recorded on the
+console (`console_foreground`, no. 72), any other task's
+`stream_input_mode` — like its `stream_read` — is refused with the typed
+`NotForeground`, so a background task cannot flip the foreground
+program's echo or raw mode under it. An
 `fd` that is not a readable inherited stream fails closed with `NotFound`;
 a console-less build fails closed with `NotImplemented`. The first-party
 Rust wrapper is `rustos_rt::set_input_mode`; the C stub is

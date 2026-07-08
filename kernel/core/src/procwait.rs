@@ -171,6 +171,22 @@ pub trait ProcessWait: Sync {
     fn child_state(&self, _parent: TaskId, _pid: i32) -> ChildPeek {
         ChildPeek::NoChild
     }
+
+    /// Whether `task` is a **live** tracked process (spawned, not yet
+    /// exited).
+    ///
+    /// The console foreground gate uses this to self-heal a stale
+    /// controlling-owner slot: a recorded owner this reports dead is
+    /// cleared so the console is never wedged behind a task that can no
+    /// longer read it. Task ids are never reused, so a `false` answer is
+    /// final. The default reports **live** — the answer that keeps the
+    /// gate denying — so a producer that predates the query (and the inert
+    /// [`NullProcessWait`]) can never *widen* access by mistaking a live
+    /// owner for a dead one; [`KernelProcessWait`] overrides it with the
+    /// real bookkeeping.
+    fn is_live(&self, _task: TaskId) -> bool {
+        true
+    }
 }
 
 /// The process-wait producer installed before any real one exists.
@@ -454,6 +470,21 @@ impl ProcessTable {
             None
         }
     }
+
+    /// Whether `task` is tracked and still running, regardless of parent.
+    ///
+    /// The parentless liveness lookup behind [`ProcessWait::is_live`]: a
+    /// tracked entry with no recorded exit is live; a zombie awaiting reap,
+    /// a reaped (removed) entry, and a task the table never tracked all
+    /// report dead. Every console foreground owner was authorised as a
+    /// live tracked child when it was granted (task ids are never reused),
+    /// so "untracked" can only mean the owner is gone.
+    #[must_use]
+    pub fn is_live(&self, task: TaskId) -> bool {
+        self.children
+            .get(&task.0)
+            .is_some_and(|entry| entry.exit.is_none())
+    }
 }
 
 /// The scheduler-side `wait` producer the boot path installs (`plans/SPAWN.md`
@@ -571,6 +602,10 @@ where
 
     fn child_state(&self, parent: TaskId, pid: i32) -> ChildPeek {
         self.table.lock().peek(parent, pid)
+    }
+
+    fn is_live(&self, task: TaskId) -> bool {
+        self.table.lock().is_live(task)
     }
 
     fn wait(&self, parent: TaskId, pid: i32, flags: WaitFlags) -> Result<WaitedChild, Errno> {
@@ -826,6 +861,34 @@ mod tests {
         // A child that already exited is a zombie awaiting reap, not a
         // signallable process — fail closed.
         assert_eq!(table.live_child(TaskId(1), 2), None);
+    }
+
+    #[test]
+    fn is_live_reports_only_a_tracked_running_task() {
+        let mut table = ProcessTable::new();
+        table.register(TaskId(1), TaskId(2));
+        // A tracked, running task is live; an untracked one is not.
+        assert!(table.is_live(TaskId(2)));
+        assert!(!table.is_live(TaskId(9)));
+        // A zombie awaiting reap is dead …
+        table.record_exit(TaskId(2), 0);
+        assert!(!table.is_live(TaskId(2)));
+        // … and so is a reaped (removed) entry.
+        assert_eq!(
+            table.reap(TaskId(1), 2, false),
+            Reap::Ready(WaitedChild {
+                pid: 2,
+                status: WaitStatus::Exited(0)
+            })
+        );
+        assert!(!table.is_live(TaskId(2)));
+    }
+
+    #[test]
+    fn null_is_live_keeps_the_gate_denying() {
+        // The inert default reports live, so a gate that cannot prove a
+        // recorded owner dead keeps refusing rather than widening access.
+        assert!(NullProcessWait.is_live(TaskId(2)));
     }
 
     #[test]

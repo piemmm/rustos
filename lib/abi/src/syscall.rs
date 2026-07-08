@@ -143,9 +143,14 @@ impl SyscallNumber {
     /// short read (fewer bytes than `len`, possibly zero when no input is
     /// pending) is valid, so the caller loops. Use of a console-backed
     /// stream additionally requires [`crate::CapabilityId::CONSOLE_READ`].
-    /// An `fd` that is not a readable inherited stream fails closed; a
-    /// build with no backing wired fails closed with
-    /// [`crate::Errno::NotImplemented`].
+    /// Only the console's controlling (foreground) owner drains its input
+    /// queue (`plans/DISPLAY.md` D5): while an owner is recorded through
+    /// [`Self::CONSOLE_FOREGROUND`], any other task's read of that console
+    /// is refused with [`crate::Errno::NotForeground`] before any input is
+    /// consumed — a background reader fails closed, never stopped by an
+    /// asynchronous signal; an unowned console reads openly. An `fd` that
+    /// is not a readable inherited stream fails closed; a build with no
+    /// backing wired fails closed with [`crate::Errno::NotImplemented`].
     pub const STREAM_READ: Self = Self(13);
     /// Map a fresh anonymous `RW` region into the calling process's own
     /// address space (`plans/SPAWN.md` SP5).
@@ -285,7 +290,12 @@ impl SyscallNumber {
     /// discipline), so a reader needs no separate
     /// [`crate::CapabilityId::CONSOLE_WRITE`] for it. Gated by
     /// [`crate::CapabilityId::CONSOLE_READ`]: the input discipline belongs
-    /// to the principal that reads the console, never to every task. An
+    /// to the principal that reads the console, never to every task — and,
+    /// like the input drain, to the console's controlling (foreground)
+    /// owner while one is recorded ([`Self::CONSOLE_FOREGROUND`],
+    /// `plans/DISPLAY.md` D5): any other task's mode change is refused
+    /// with [`crate::Errno::NotForeground`], so a background task cannot
+    /// flip the foreground program's discipline under it. An
     /// `fd` that is not a readable inherited stream fails closed with
     /// [`crate::Errno::NotFound`]; a build with no console wired fails
     /// closed with [`crate::Errno::NotImplemented`].
@@ -1260,28 +1270,41 @@ impl SyscallNumber {
     /// new foreground.
     pub const SEAT_REVOKE: Self = Self(71);
 
-    /// Mark (or clear) the console foreground job the line discipline
-    /// signals on `^C`/`^Z` (`plans/SPAWN.md` SP9 — the `tcsetpgrp`
-    /// analogue).
+    /// Grant (or release) the console's controlling (foreground)
+    /// ownership — the drain right on its input queue and the target the
+    /// line discipline signals on `^C`/`^Z` (`plans/SPAWN.md` SP9,
+    /// `plans/DISPLAY.md` D5 — the `tcsetpgrp` analogue, without the
+    /// signal races).
     ///
     /// Arguments: `fd: u32` (a readable inherited standard-stream
     /// descriptor of the **caller's own** table — the console it names is
-    /// the one whose foreground slot changes, the same fd-scoped authority
+    /// the one whose ownership changes, the same fd-scoped authority
     /// [`Self::STREAM_INPUT_MODE`] uses) and `pid: i32` (a **live child of
-    /// the caller** to mark foreground, or `0` to clear the slot). While a
-    /// foreground task is set, the console's cooked-mode line discipline
-    /// consumes `^C`/`^Z` and delivers [`crate::Signal::Interrupt`] /
-    /// [`crate::Signal::Stop`] to it instead of queueing the byte; with the
-    /// slot clear (or in raw/secret mode) every byte flows to the reader
-    /// unchanged. Returns an error code (`Ok(0)` on success).
+    /// the caller** to make the owner, or `0` to release). While an owner
+    /// is recorded, **only the owner** drains the console's input
+    /// ([`Self::STREAM_READ`]) or changes its line discipline
+    /// ([`Self::STREAM_INPUT_MODE`]) — every other task is refused with
+    /// [`crate::Errno::NotForeground`] — and the cooked-mode line
+    /// discipline consumes `^C`/`^Z` and delivers
+    /// [`crate::Signal::Interrupt`] / [`crate::Signal::Stop`] to the owner
+    /// instead of queueing the byte. With no owner (or in raw/secret mode)
+    /// every byte flows to the reader unchanged. Returns an error code
+    /// (`Ok(0)` on success).
     ///
-    /// Fails closed: a non-readable or unbacked `fd` and an unknown console
-    /// are refused ([`crate::Errno::NotFound`] /
-    /// [`crate::Errno::NotImplemented`]), and a non-zero `pid` that is not
-    /// a live child of the caller is [`crate::Errno::NotFound`] — the
-    /// parent/child relationship plus the inherited console descriptor are
-    /// the entire authority, so no capability beyond the console gate is
-    /// required.
+    /// Fails closed, with layered, capability-minimal authority: a
+    /// non-readable or unbacked `fd` and an unknown console are refused
+    /// ([`crate::Errno::NotFound`] / [`crate::Errno::NotImplemented`]); a
+    /// non-zero `pid` that is not a live child of the caller is
+    /// [`crate::Errno::NotFound`] (the drain right only moves down the
+    /// spawn chain — inherited and intersected, never widened); and the
+    /// slot transition is owner-checked — a grant is honoured only from an
+    /// unowned console, the recorded granter, or the current owner, and a
+    /// release only from the granter or the owner, anything else refused
+    /// with [`crate::Errno::NotForeground`] so a bystander can neither
+    /// take the drain right nor open the console by clearing it. A dead
+    /// owner never wedges the console: `exit` releases its ownership and
+    /// the read gate clears an owner proven dead (task ids are never
+    /// reused).
     pub const CONSOLE_FOREGROUND: Self = Self(72);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.

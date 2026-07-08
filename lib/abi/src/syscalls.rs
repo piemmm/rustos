@@ -1755,11 +1755,14 @@ pub const SYSCALLS: &[SyscallSpec] = &[
             AbiType::Unit,
         ],
         ret: AbiType::Errno,
-        // The foreground slot is a property of the console the reader
-        // holds, so the control shares `stream_input_mode`'s
+        // The controlling ownership is a property of the console the
+        // reader holds, so the control shares `stream_input_mode`'s
         // `CAP_CONSOLE_READ` gate; the *target* authority is the
-        // parent/child relationship the handler validates. It IS audited —
-        // redirecting who receives `^C`/`^Z` signal delivery is a
+        // parent/child relationship the handler validates, and the slot
+        // transition itself is owner/granter-checked on the device
+        // (`plans/DISPLAY.md` D5) so a bystander can neither take nor
+        // clear the drain right. It IS audited — redirecting who drains
+        // the console and receives `^C`/`^Z` signal delivery is a
         // security-relevant process-lifecycle decision (like `signal`) and
         // is low-volume (once per foreground job), so the record cannot
         // drown the log.
