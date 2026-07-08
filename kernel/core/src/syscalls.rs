@@ -17310,17 +17310,19 @@ mod tests {
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
         // The server task owns the endpoint, so the aspace and the owner id
-        // are the same task (id 9).
+        // are the same task. The id is unique to this test: the endpoint
+        // registry is process-global, and an `exit` test for a shared id
+        // running in parallel would tear this endpoint down mid-receive.
         aspaces
             .write()
-            .register(SecTaskId(9), space, physmap)
+            .register(SecTaskId(0x5705), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
 
-        // Build the endpoint owned by the server task (9).
+        // Build the endpoint owned by the server task.
         let id = 0xCA11_3003;
-        let server_caps = make_caps_record(9, &[], sink);
+        let server_caps = make_caps_record(0x5705, &[], sink);
         let ep = Arc::new(
             CallEndpoint::create(
                 EndpointId(id),
@@ -17343,7 +17345,7 @@ mod tests {
         let ticket = ep.post(&client_caps, 7, b"ping", sink).expect("posted");
 
         let ctx = CallerContext {
-            task_id: SecTaskId(9),
+            task_id: SecTaskId(0x5705),
             caps: &server_caps,
         };
         let h = KernelSyscallHandlers::new(
@@ -17354,7 +17356,7 @@ mod tests {
         let got = h.call_recv(&ctx, id, 0x1000, 64, 0x2000).expect("received");
         assert_eq!(got, 4);
         let guard = aspaces.read();
-        let (_space, physmap) = guard.resolve(SecTaskId(9)).expect("aspace present");
+        let (_space, physmap) = guard.resolve(SecTaskId(0x5705)).expect("aspace present");
         assert_eq!(read_server_page(physmap, 1, 4), b"ping");
         let ticket_bytes = read_server_page(physmap, 2, 8);
         let recv_ticket = u64::from_le_bytes(ticket_bytes.try_into().expect("8 bytes"));
@@ -17387,16 +17389,19 @@ mod tests {
         let (space, physmap) = server_aspace(b"unused");
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
-        // Server task 9 owns both the aspace and the endpoint.
+        // The server task owns both the aspace and the endpoint. The id is
+        // unique to this test: the endpoint registry is process-global, and
+        // an `exit` test for a shared id running in parallel would tear this
+        // endpoint down mid-receive.
         aspaces
             .write()
-            .register(SecTaskId(9), space, physmap)
+            .register(SecTaskId(0x5706), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
 
         let id = 0xCA11_4004;
-        let server_caps = make_caps_record(9, &[], sink);
+        let server_caps = make_caps_record(0x5706, &[], sink);
         let ep = Arc::new(
             CallEndpoint::create(
                 EndpointId(id),
@@ -17422,7 +17427,7 @@ mod tests {
         let ticket = ep.post(&client_caps, 7, b"who-am-i", sink).expect("posted");
 
         let ctx = CallerContext {
-            task_id: SecTaskId(9),
+            task_id: SecTaskId(0x5706),
             caps: &server_caps,
         };
         let h = KernelSyscallHandlers::new(
@@ -17473,7 +17478,7 @@ mod tests {
         assert_eq!(wrote, ORIGIN_WIRE_LEN as u64);
 
         let guard = aspaces.read();
-        let (_space, physmap) = guard.resolve(SecTaskId(9)).expect("aspace present");
+        let (_space, physmap) = guard.resolve(SecTaskId(0x5706)).expect("aspace present");
         let bytes = read_server_page(physmap, 1, ORIGIN_WIRE_LEN);
         let decoded = Origin::from_bytes(&bytes).expect("valid origin");
         drop(guard);
