@@ -4165,16 +4165,32 @@ desktop session work (CU6).
 Opportunistic, bounded, owner-accounted caches over spare RAM;
 `plans/SWAPSWAPSWAP.md` owns the encrypted compressed anonymous tier.
 
-**Done — clean and rebuildable filesystem cache (`plans/SMARTRAM.md` §6.1):**
-- `kernel/mem::reclaim`: the reclaimable-memory model — `ReclaimClass`
-  (`CleanFileData` evicted before `FsMetadata`, deterministic priority),
-  `CacheBudget::from_backing` (per-volume hard limit = 1/16 of the kernel
-  heap arena; shrink watermark = 3/4 of hard — hysteresis), and the
-  checked, fail-closed `CacheAccounting` ledger with hit/miss/insertion/
-  invalidation/eviction/refusal counters.
+**Done — SMART1 classification/accounting model and the clean,
+rebuildable filesystem cache (`plans/SMARTRAM.md` SMART1 + §6.1):**
+- `kernel/mem::reclaim`: the reclaimable-memory model — the complete
+  nine-class `ReclaimClass` taxonomy with deterministic
+  `reclaim_priority` in the §7 pressure order (disposable/speculative
+  classes first, `CleanFileData` before `TransformCache`, `FsMetadata`
+  and `ReliabilityAssist` preserved longest); the `ReclaimOwner` model
+  for the owners the kernel already has (kernel subsystem, filesystem
+  volume by stable per-boot mount handle, task);
+  `RebuildCost`/`Sensitivity`/`InvalidationSource`/`ReclaimRule`
+  modelling; the fixed `MAX_ENTRY_METADATA` per-entry bookkeeping
+  validation bound; the pure, fail-closed `CacheCandidate::classify`
+  admission gate with typed `AdmissionRefusal` reasons (unknown class,
+  unknown owner, sensitive material — credential/key/capability and
+  undeclared sensitivity alike — unbounded metadata, non-reclaimable,
+  missing invalidation); `CacheBudget::from_backing` (per-volume hard
+  limit = 1/16 of the kernel heap arena; shrink watermark = 3/4 of hard
+  — hysteresis); and the checked, fail-closed per-class
+  `CacheAccounting` ledger with hit/miss/insertion/invalidation/
+  eviction/refusal counters.
 - `kernel/core::fs::CachedFs`: per-volume write-through cache below the
   secured VFS (permission checks never bypassed), wrapping each driver at
-  registration (`system_mount::cached`). Caches page-chunk file data,
+  registration (`system_mount::cached`), its two candidate declarations
+  classified through the admission gate at construction and charged to
+  the volume's `ReclaimOwner` (a refusal starts the cache poisoned —
+  fail closed, the driver keeps serving). Caches page-chunk file data,
   stat, security, lookup, and dirent records; LRU eviction (data before
   metadata); large reads (> 4 chunks) bypass; payload allocations are
   fallible; every cached buffer is zeroed on invalidation/eviction/purge/

@@ -78,7 +78,11 @@ pub use loader::{map_flags_for, map_image, LoadError};
 pub use mmio::{MmioError, MmioMap, MmioRegion, MmioWindowMap};
 pub use pagetables::FrameTableSource;
 pub use phys::{DirectPhysMap, PhysMap};
-pub use reclaim::{AccountingError, CacheAccounting, CacheBudget, ReclaimClass};
+pub use reclaim::{
+    AccountingError, AdmissionRefusal, CacheAccounting, CacheBudget, CacheCandidate, CachePolicy,
+    InvalidationSource, RebuildCost, ReclaimClass, ReclaimOwner, ReclaimRule, Sensitivity,
+    MAX_ENTRY_METADATA,
+};
 pub use sensitive::SensitiveBuffer;
 pub use slab::{Slab, SlabError, SlabHandle, SoftwareTagCheck};
 pub use spawn::{build_process_image, ProcessImage, SpawnError, UserStack};

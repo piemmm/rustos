@@ -129,6 +129,11 @@ fn budget() -> CacheBudget {
     CacheBudget::from_backing(16 * 1024 * 1024)
 }
 
+/// The test volume's reclaim owner.
+fn owner() -> ReclaimOwner {
+    ReclaimOwner::FilesystemVolume { volume: 1 }
+}
+
 /// The wrapped counting driver's call total.
 fn calls(cache: &CachedFs<Counting<RwMockFs>>) -> u64 {
     cache.inner_driver().calls
@@ -146,7 +151,7 @@ fn fixture(contents: &[u8]) -> CachedFs<Counting<RwMockFs>> {
         .write_at(dir, b"file.txt", 0, contents)
         .expect("seed contents");
     assert_eq!(written, contents.len());
-    CachedFs::new(Counting::new(fs), budget())
+    CachedFs::new(Counting::new(fs), budget(), owner())
 }
 
 fn dir_of(cache: &mut CachedFs<Counting<RwMockFs>>) -> NodeId {
@@ -378,7 +383,7 @@ fn security_change_is_seen_by_the_secured_vfs_permission_check() {
     fs.set_security(file, NodeSecurity::new(0o644, 1, 1))
         .expect("open mode");
 
-    let mut cache = CachedFs::new(Counting::new(fs), budget());
+    let mut cache = CachedFs::new(Counting::new(fs), budget(), owner());
     let mut vfs = Vfs::new(Metadata::new(UserId(0), GroupId(0), Mode::from_bits(0o755)));
     vfs.mounts_mut()
         .back_root(DriverHandle::from_raw(1).expect("handle"))
@@ -440,7 +445,11 @@ fn eviction_honours_budget_and_hysteresis_and_takes_data_first() {
     fs.create(root, b"big", NodeKind::RegularFile)
         .expect("create");
     fs.write_at(root, b"big", 0, &contents).expect("seed");
-    let mut cache = CachedFs::new(Counting::new(fs), CacheBudget::from_backing(256 * 1024));
+    let mut cache = CachedFs::new(
+        Counting::new(fs),
+        CacheBudget::from_backing(256 * 1024),
+        owner(),
+    );
     let hard = cache.budget().hard();
     let low = cache.budget().low();
     assert!(hard < contents.len());
@@ -549,6 +558,12 @@ fn counters_track_hits_misses_and_insertions() {
 }
 
 #[test]
+fn construction_classifies_and_charges_the_volume_owner() {
+    let cache = fixture(b"owned");
+    assert_eq!(cache.owner(), Some(owner()));
+}
+
+#[test]
 fn empty_and_zero_budget_cache_still_serves_correctly() {
     // A zero budget admits nothing; every operation still round-trips.
     let mut fs = RwMockFs::new();
@@ -556,7 +571,7 @@ fn empty_and_zero_budget_cache_still_serves_correctly() {
     fs.create(root, b"f", NodeKind::RegularFile)
         .expect("create");
     fs.write_at(root, b"f", 0, b"uncached").expect("seed");
-    let mut cache = CachedFs::new(Counting::new(fs), CacheBudget::from_backing(0));
+    let mut cache = CachedFs::new(Counting::new(fs), CacheBudget::from_backing(0), owner());
 
     let file = cache.lookup(root, b"f").expect("resolves");
     let mut buf = [0u8; 16];
