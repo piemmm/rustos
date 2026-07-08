@@ -88,6 +88,7 @@ pub mod introspect;
 pub mod introspect_source;
 pub mod kthread;
 pub mod kthread_irq;
+pub mod launch_cache;
 pub mod live_producer;
 pub mod loadavg;
 pub mod memmap;
@@ -173,6 +174,7 @@ pub use kthread::{
     KTHREAD_MAX_CPUS, KTHREAD_STACK_BYTES,
 };
 pub use kthread_irq::{CooperativeYield, KthreadIrqWaiter};
+pub use launch_cache::LaunchCache;
 pub use live_producer::{LiveDmaAlloc, LiveMemMap, LiveMmioMap, LiveSharedMem};
 pub use memmap::{MemMap, NullMemMap, NULL_MEM_MAP};
 pub use panic::{handle_panic, panic_dump, PanicContext};

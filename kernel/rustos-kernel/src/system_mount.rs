@@ -311,9 +311,16 @@ pub fn install_system_mount<B: Block + 'static>(
             fields: &[],
         },
     );
-    // The on-disk application store is now readable: resolve the readiness
-    // latch so a `spawn` parked on a pending store wakes and proceeds
-    // through the load gate (`plans/APPS.md` deliverable 8).
+    // The on-disk application store is now readable. Install its semantic
+    // launch cache — budgeted from the kernel heap arena exactly like the
+    // volume caches above and governed by the same pressure gauge
+    // (`plans/SMARTRAM.md` SMART4) — then resolve the readiness latch so a
+    // `spawn` parked on a pending store wakes and proceeds through the
+    // load gate (`plans/APPS.md` deliverable 8).
+    crate::app_store::APP_STORE.install_reclaim(
+        CacheBudget::from_backing(rustos_kalloc::HEAP_BYTES),
+        pressure,
+    );
     crate::app_store::APP_STORE.note_available();
 }
 

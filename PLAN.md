@@ -4270,10 +4270,35 @@ rebuildable filesystem cache (`plans/SMARTRAM.md` SMART1 + §6.1):**
   frame/plaintext scratch on every cluster read, clone, and decompose
   path.
 
+**Done — SMART4 semantic application-launch cache
+(`plans/SMARTRAM.md` SMART4 + §6.3; `docs/src/architecture/memory.md`
+§7j):**
+- `kernel/core::launch_cache::LaunchCache`, held by the `AppStore`
+  behind the `/System`-mount readiness latch: retains the shared
+  `lib/appload` gate's accepted `LoadedApp` (parsed signed manifest,
+  content-hash + interface-hash verdicts, dynamic-loader policy
+  decisions, validated `rxe` image) for immutable read-only
+  system-store bundles, once per boot. Classified through the SMART1
+  gate as `SemanticAppCache` owned by `KernelSubsystem("app_store")`,
+  LRU-bounded with hysteresis under the kernel-heap-derived
+  `CacheBudget`, pressure-enforced per operation (low watermark at
+  mild, drained from moderate before `ramzip` handoff, growth only at
+  normal outside the reserve), fail-closed (uninstalled/refused/
+  poisoned cache ⇒ every launch runs the full gate).
+  `install_system_mount` installs budget + gauge before resolving the
+  latch; the old ad-hoc RAM-divisor bundle cache was deleted. A hit is
+  caller-independent (manifest-request ceiling; per-caller capability
+  intersection at admit; the caller's VFS read of the entry point is
+  re-authorised per launch).
+- Scope decisions recorded in the plan: command-resolution *output*
+  caching (pure spelling in `lib/cmdres`, cheaper to recompute) and a
+  separate RXE relocation-preparation cache (no relocation stage
+  exists; the cached image is the validation state) are deliberately
+  not built.
+
 **Remaining (staged, `plans/SMARTRAM.md` §12):** the non-RustFS
-transform families (verified bundle/manifest state — SMART3/SMART4
-overlap gated on their consumers), semantic app/runtime caches
-(SMART4), and observability (SMART9) — each gated on the subsystems it
+transform families (verified bundle/manifest state gated on their
+consumers) and observability (SMART9) — each gated on the subsystems it
 consumes.
 UI caches (SMART5) and the reliability/background/predictive caches
 (SMART6–8) are **shelved — not added**; they are built only if a

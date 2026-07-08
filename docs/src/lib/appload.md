@@ -43,6 +43,15 @@ resolved needed libraries. The loader never executes anything: spawning the
 verified binary with that ceiling is the caller's job (the same load gate
 `init`/`drvhost` use).
 
+The kernel's spawn path retains the accepted `LoadedApp` for bundles on
+the immutable read-only system stores in the semantic launch cache
+(`rustos_kernel_core::launch_cache::LaunchCache`, `plans/SMARTRAM.md`
+SMART4): the gate runs once per boot per store bundle, and every later
+launch serves the cached result after re-authorising the caller's own
+read of the entry point — the cache stores no caller-dependent decision
+and is drained under memory pressure
+(`docs/src/architecture/memory.md` §7j).
+
 `AppLoader::resolve_library(bundle, reference)` applies the §16.4
 dynamic-loader policy: a reference resolves only against the bundle's own
 `Libraries/` or `/System/Libraries/`; anything else is `AppError::Library`.

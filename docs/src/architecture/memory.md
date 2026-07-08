@@ -950,6 +950,66 @@ with it, once per *cluster*.
   plaintext scratch on every path of the cluster read, clone, and
   decompose routines.
 
+## 7j. The semantic application-launch cache (SMART4)
+
+The semantic app/runtime cache (`plans/SMARTRAM.md` SMART4, section 6.3)
+retains the result of the one shared application load gate
+(`lib/appload`) for bundles on the immutable read-only system stores
+(`/System/Apps`, `/System/Services`): the parsed signed `AppInfo`
+manifest, the content-hash and syscall-interface-hash verdicts, the
+dynamic-loader library policy decisions, and the validated `rxe`
+entry-point image — one `LoadedApp` per bundle. Without it, every launch
+of a system command re-reads and re-hashes the whole bundle tree and
+re-verifies its Ed25519 signature; with it, once per boot.
+
+- **The cache is `rustos_kernel_core::launch_cache::LaunchCache`,**
+  held by the `AppStore` behind the `/System`-mount readiness latch. The
+  boot path that publishes the mount installs the cache's budget and the
+  system pressure gauge (`AppStore::install_reclaim`, called by
+  `install_system_mount` just before it resolves the latch); until then
+  — and on any classification refusal — every launch is served uncached
+  through the full load gate (fail closed).
+- **Only immutable bundles are cacheable.** A bundle on a writable
+  volume (`/Apps`, a user's own store) can change between launches and
+  is re-verified through the full gate every time
+  (`AppStore::cacheable_bundle`). The read-only stores cannot change
+  within a boot, so the boot *is* the entry's generation
+  (`InvalidationSource::GenerationToken`): an app or system update is a
+  new volume image and a new boot, and there is no stale-entry window to
+  invalidate across.
+- **A hit carries no caller authority.** The cached ceiling is the
+  manifest request itself (the spawn path loads under the full-word
+  intersection identity before inserting, making the result
+  caller-independent); the per-caller capability intersection happens on
+  every admit, and the spawn path re-authorises the *caller's* read of
+  the entry point through the secured VFS before serving a hit — so a
+  policy or grant change can never be replayed from the cache, and a
+  hit and a miss produce identical load decisions.
+- **Classified, budgeted, pressure-governed.** The cache declares a
+  `CacheCandidate` (class `SemanticAppCache`, owned by the kernel
+  app-store subsystem, expensive to rebuild, system data,
+  generation-invalidated, droppable) through the §7g admission gate — a
+  refusal poisons it from birth. Entries are LRU-evicted against a
+  `CacheBudget` (the same kernel-heap-derived policy as §7g/§7i),
+  admission obeys `growth_permitted`, and every operation first applies
+  the band's `shrink_target`: shrunk to the low watermark at mild
+  pressure and drained to zero from moderate on, before `ramzip` is
+  handed anything (§7h). Reclaim can never make an app unlaunchable — a
+  miss re-runs the gate over the intact on-disk bundle.
+- **No secret content.** Entries are shared `Arc`s to signed, public
+  system code (`Sensitivity::SystemData`) — never credentials, keys, or
+  user plaintext — so eviction drops the cache's reference without
+  wiping: a launched process legitimately holds the same image.
+
+Two SMART4 families are deliberately **not** cached, and are recorded as
+scope decisions in `plans/SMARTRAM.md`: command-resolution output
+(`lib/cmdres` is a pure spelling function with no I/O — recomputing it
+is cheaper than any cache, and the expensive verification behind the
+winning candidate is exactly what this cache retains), and a separate
+RXE relocation-preparation cache (the loader model has no separate
+relocation stage; the validated image in the `LoadedApp` *is* the
+cached RXE state).
+
 ## 8. Testing strategy
 
 - **Unit tests** — alongside each module under `#[cfg(all(test, not(loom)))]`:

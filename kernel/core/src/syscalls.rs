@@ -1719,11 +1719,15 @@ where
     ///
     /// A bundle on the immutable read-only system stores is fully verified
     /// **once per boot**: the accepted result is cached in the
-    /// [`AppStore`](crate::appspawn::AppStore) and every later launch
-    /// serves the cached image after re-authorising
+    /// [`AppStore`](crate::appspawn::AppStore)'s classified, budgeted,
+    /// pressure-governed semantic launch cache
+    /// ([`LaunchCache`](crate::launch_cache::LaunchCache)) and every later
+    /// launch serves the cached image after re-authorising
     /// the caller's own read of the entry point through the secured VFS —
     /// verification is hoisted off the launch hot path, authorisation is
-    /// not. Bundles on writable volumes are never cached.
+    /// not. Bundles on writable volumes are never cached, and a cache
+    /// entry reclaimed under memory pressure simply re-verifies through
+    /// the full gate.
     fn load_store_bundle(
         &self,
         caller: &CallerContext<'_>,
@@ -1777,14 +1781,7 @@ where
             .map(alloc::sync::Arc::new)
             .map_err(crate::appspawn::app_error_errno)?;
         if cacheable {
-            // The cache's byte budget scales with the discovered memory:
-            // a fixed fraction of physical RAM, so a small machine caches
-            // little and a large one is not needlessly capped.
-            let budget = self.frames.map_or(0, |frames| {
-                (frames.total_frames().saturating_mul(PAGE_SIZE))
-                    / crate::appspawn::APP_CACHE_RAM_DIVISOR
-            });
-            store.cache_verified(parsed.bundle, &app, budget);
+            store.cache_verified(parsed.bundle, &app);
         }
         Ok(app)
     }
@@ -9747,8 +9744,30 @@ mod tests {
         }
     }
 
+    /// Install a classified semantic launch cache under a gauge pinned at
+    /// normal pressure, as the boot path does once the `/System` mount is
+    /// published, so the cache-behaviour tests exercise admission and hits.
+    fn install_launch_cache(store: &crate::appspawn::AppStore) {
+        struct PlentyFree;
+        impl rustos_kernel_mem::FreeMemorySource for PlentyFree {
+            fn free_bytes(&self) -> usize {
+                1 << 29
+            }
+            fn total_bytes(&self) -> usize {
+                1 << 30
+            }
+        }
+        let source: &'static PlentyFree = Box::leak(Box::new(PlentyFree));
+        let pressure: &'static rustos_kernel_mem::MemoryPressure =
+            Box::leak(Box::new(rustos_kernel_mem::MemoryPressure::over(source)));
+        store.install_reclaim(
+            rustos_kernel_mem::CacheBudget::from_backing(1 << 24),
+            pressure,
+        );
+    }
+
     /// A second spawn of the same system-store bundle is served from the
-    /// per-boot verified-bundle cache: the same validated image is spawned
+    /// per-boot semantic launch cache: the same validated image is spawned
     /// with **zero** further data reads (no whole-bundle re-read, re-hash,
     /// or re-verify on the launch hot path) — the regression that made
     /// every command launch re-verify its bundle from disk.
@@ -9782,6 +9801,7 @@ mod tests {
         let fs: &'static InstrumentedFs = Box::leak(Box::new(InstrumentedFs::new(memfs, false)));
         let store: &'static crate::appspawn::AppStore =
             Box::leak(Box::new(crate::appspawn::AppStore::pending(anchor)));
+        install_launch_cache(store);
         store.note_available();
         let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
         let h = spawn_handler(
@@ -9850,6 +9870,7 @@ mod tests {
         let fs: &'static InstrumentedFs = Box::leak(Box::new(InstrumentedFs::new(memfs, true)));
         let store: &'static crate::appspawn::AppStore =
             Box::leak(Box::new(crate::appspawn::AppStore::pending(anchor)));
+        install_launch_cache(store);
         store.note_available();
         let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
         let h = spawn_handler(

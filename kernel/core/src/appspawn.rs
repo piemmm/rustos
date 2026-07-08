@@ -15,14 +15,20 @@
 //!   readiness latch the boot path resolves once the `/System` mount
 //!   reaches a terminal state, so an early spawn *parks* (event-woken,
 //!   never a poll loop) instead of racing the mount. It also carries the
-//!   per-boot **verified-bundle cache**: the read-only system stores are
-//!   immutable for the life of the boot, so a bundle's whole-tree hash and
-//!   signature are verified once and every later launch of the same bundle
-//!   serves the cached, already-verified image — after re-authorising the
-//!   *caller's* read of the entry point through the secured VFS, so the
-//!   cache never widens authority. Launch latency is a designed hot path;
-//!   re-verifying an immutable bundle on every keystroke-to-output cycle
-//!   is work hoisted off it.
+//!   per-boot **semantic launch cache** ([`LaunchCache`]): the read-only
+//!   system stores are immutable for the life of the boot, so a bundle's
+//!   whole-tree hash and signature are verified once and every later
+//!   launch of the same bundle serves the cached, already-verified image —
+//!   after re-authorising the *caller's* read of the entry point through
+//!   the secured VFS, so the cache never widens authority. Launch latency
+//!   is a designed hot path; re-verifying an immutable bundle on every
+//!   keystroke-to-output cycle is work hoisted off it. The cache is a
+//!   classified, budgeted, pressure-governed reclaimable-memory consumer
+//!   (`plans/SMARTRAM.md` SMART4): the boot path that publishes the mount
+//!   installs its budget and the system pressure gauge
+//!   ([`AppStore::install_reclaim`]); until then — and whenever the
+//!   classification gate refuses — the store serves every launch uncached
+//!   through the full load gate (fail closed).
 //! * [`FsBundleStore`] — the [`rustos_appload::BundleStore`] over the
 //!   kernel [`FilesystemService`], with fail-closed size/depth bounds.
 //! * [`AnchorVerifier`] — the [`rustos_appload::Verifier`] pinning the
@@ -47,9 +53,11 @@ use rustos_abi::{
 };
 use rustos_appload::{AppError, BundleStore, LoadedApp, Verifier};
 use rustos_crypto::{Ed25519PublicKey, Ed25519Signature, Sha256Stream};
+use rustos_kernel_mem::{CacheBudget, MemoryPressure};
 use rustos_sync::RwLock;
 
 use crate::fs::FilesystemService;
+use crate::launch_cache::LaunchCache;
 
 /// The on-disk application store has not reached a terminal state yet: the
 /// boot path that mounts `/System` is still running.
@@ -76,40 +84,11 @@ const STORE_UNAVAILABLE: u8 = 2;
 pub struct AppStore {
     state: AtomicU8,
     anchor: [u8; 32],
-    cache: RwLock<BundleCache>,
+    /// The semantic launch cache, absent until the boot path that
+    /// publishes the `/System` mount installs its budget and pressure
+    /// gauge; an uninstalled cache serves every launch uncached.
+    cache: RwLock<Option<LaunchCache>>,
 }
-
-/// One cached verification result: the bundle root it was verified for,
-/// the accepted [`LoadedApp`], and the LRU stamp of its last use.
-struct CacheEntry {
-    bundle: String,
-    app: Arc<LoadedApp>,
-    last_use: u64,
-}
-
-/// The per-boot verified-bundle cache body: a small set of entries plus
-/// the monotonic use clock the LRU eviction orders by.
-struct BundleCache {
-    entries: Vec<CacheEntry>,
-    clock: u64,
-}
-
-impl BundleCache {
-    /// Total run-image bytes the cache currently holds — the dominant
-    /// memory term of an entry (the manifest strings beside it are noise).
-    fn total_bytes(&self) -> usize {
-        self.entries
-            .iter()
-            .map(|entry| entry.app.run_image().len())
-            .sum()
-    }
-}
-
-/// The verified-bundle cache's share of discovered physical memory: its
-/// byte budget is total RAM divided by this (16 MiB on a 1 GiB machine),
-/// a policy scaled from the discovered hardware rather than a fixed
-/// ceiling a larger machine outgrows or a smaller one cannot afford.
-pub const APP_CACHE_RAM_DIVISOR: usize = 64;
 
 impl AppStore {
     /// A store that starts *pending*, trusting exactly the Ed25519 signer
@@ -119,10 +98,7 @@ impl AppStore {
         Self {
             state: AtomicU8::new(STORE_PENDING),
             anchor,
-            cache: RwLock::new(BundleCache {
-                entries: Vec::new(),
-                clock: 0,
-            }),
+            cache: RwLock::new(None),
         }
     }
 
@@ -187,8 +163,23 @@ impl AppStore {
             })
     }
 
+    /// Install the semantic launch cache: bounded by `budget`, governed
+    /// by the system `pressure` gauge, and classified through the
+    /// `kernel/mem::reclaim` admission gate (`plans/SMARTRAM.md`
+    /// SMART4). Called once by the boot path that publishes the
+    /// `/System` mount, before it resolves the readiness latch; only the
+    /// first installation wins. Until it runs, every launch is served
+    /// uncached through the full load gate.
+    pub fn install_reclaim(&self, budget: CacheBudget, pressure: &'static MemoryPressure) {
+        let mut cache = self.cache.write();
+        if cache.is_none() {
+            *cache = Some(LaunchCache::new(budget, pressure));
+        }
+    }
+
     /// The cached verification result for `bundle`, refreshing its LRU
-    /// stamp, or `None` when the bundle has not been verified this boot.
+    /// stamp, or `None` when the bundle has not been verified this boot,
+    /// its entry was reclaimed under pressure, or no cache is installed.
     ///
     /// A hit is proof the load gate accepted exactly these bytes earlier
     /// this boot from the immutable read-only store; it says nothing about
@@ -196,48 +187,17 @@ impl AppStore {
     /// authorises through the secured VFS before serving the hit.
     #[must_use]
     pub fn cached(&self, bundle: &str) -> Option<Arc<LoadedApp>> {
-        let mut cache = self.cache.write();
-        cache.clock += 1;
-        let clock = cache.clock;
-        let entry = cache
-            .entries
-            .iter_mut()
-            .find(|entry| entry.bundle == bundle)?;
-        entry.last_use = clock;
-        Some(Arc::clone(&entry.app))
+        self.cache.write().as_mut()?.lookup(bundle)
     }
 
-    /// Record `app` as the verified result for `bundle`, keeping the
-    /// cache's total run-image bytes within `budget` by evicting the
-    /// least recently used entries first. An image larger than the whole
-    /// budget is served but not cached; a re-verification of an already
-    /// cached bundle replaces its entry.
-    pub fn cache_verified(&self, bundle: &str, app: &Arc<LoadedApp>, budget: usize) {
-        let bytes = app.run_image().len();
-        if bytes > budget {
-            return;
+    /// Record `app` as the verified result for `bundle`. Admission and
+    /// eviction follow the cache's classified budget and pressure policy
+    /// ([`LaunchCache::insert`]); with no cache installed the result is
+    /// served uncached.
+    pub fn cache_verified(&self, bundle: &str, app: &Arc<LoadedApp>) {
+        if let Some(cache) = self.cache.write().as_mut() {
+            cache.insert(bundle, app);
         }
-        let mut cache = self.cache.write();
-        cache.clock += 1;
-        let clock = cache.clock;
-        cache.entries.retain(|entry| entry.bundle != bundle);
-        while cache.total_bytes() + bytes > budget {
-            let Some(oldest) = cache
-                .entries
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, entry)| entry.last_use)
-                .map(|(index, _)| index)
-            else {
-                break;
-            };
-            cache.entries.remove(oldest);
-        }
-        cache.entries.push(CacheEntry {
-            bundle: bundle.to_owned(),
-            app: Arc::clone(app),
-            last_use: clock,
-        });
     }
 }
 
@@ -669,38 +629,6 @@ mod tests {
         assert!(!AppStore::cacheable_bundle(
             "/Users/mallory/System/Apps/ps.app"
         ));
-    }
-
-    #[test]
-    fn the_cache_serves_replaces_and_evicts_least_recently_used() {
-        let (fs, anchor, run) = composed_bundle(vec![]);
-        let app = alloc::sync::Arc::new(load(&fs, anchor).expect("loads"));
-        let store = AppStore::pending([1u8; 32]);
-        let image = run.len();
-        // Room for exactly two images.
-        let budget = 2 * image;
-
-        assert!(store.cached("/System/Apps/a.app").is_none());
-        store.cache_verified("/System/Apps/a.app", &app, budget);
-        store.cache_verified("/System/Apps/b.app", &app, budget);
-        assert!(store.cached("/System/Apps/b.app").is_some());
-        // Refresh `a` so `b` becomes the least recently used, then insert
-        // `c`: `b` is evicted, `a` and `c` remain.
-        assert!(store.cached("/System/Apps/a.app").is_some());
-        store.cache_verified("/System/Apps/c.app", &app, budget);
-        assert!(store.cached("/System/Apps/b.app").is_none());
-        assert!(store.cached("/System/Apps/a.app").is_some());
-        assert!(store.cached("/System/Apps/c.app").is_some());
-
-        // A re-verification replaces its own entry instead of doubling it,
-        // so the neighbour is not pushed out.
-        store.cache_verified("/System/Apps/c.app", &app, budget);
-        assert!(store.cached("/System/Apps/a.app").is_some());
-        assert!(store.cached("/System/Apps/c.app").is_some());
-
-        // An image larger than the whole budget is served but never cached.
-        store.cache_verified("/System/Apps/d.app", &app, image - 1);
-        assert!(store.cached("/System/Apps/d.app").is_none());
     }
 
     #[test]

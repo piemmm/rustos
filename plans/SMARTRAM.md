@@ -13,11 +13,15 @@ SMART2 (the VM pressure model and reclaim ordering,
 `kernel/mem::pressure`: the shared five-band gauge with hysteresis over
 the frame allocator, the reserve floor, per-band per-class shrink
 targets, the `ramzip` handoff gate, deterministic escalation, and the
-`CachedFs` per-operation enforcement), and SMART3 (the RustFS transform
+`CachedFs` per-operation enforcement), SMART3 (the RustFS transform
 cache: the driver's injected `ClusterCache` seam and the kernel's
 classified, budgeted, pressure-governed, zeroing
-`TransformClusterCache`, installed on both boot volumes; see `PLAN.md`
-§SMARTRAM for the done-state summaries) are implemented; SMART5–SMART8
+`TransformClusterCache`, installed on both boot volumes), and SMART4
+(the semantic application-launch cache,
+`kernel/core::launch_cache::LaunchCache`: the classified, budgeted,
+pressure-governed retention of the load gate's accepted `LoadedApp` for
+immutable system-store bundles; see `PLAN.md` §SMARTRAM for the
+done-state summaries) are implemented; SMART5–SMART8
 (desktop/UI, reliability-assist, background-validation, and predictive
 caches) are **shelved — not added**; the remaining classes are staged
 below  
@@ -342,6 +346,18 @@ Rules:
 - transform cache is reclaimable and must not be required for correctness.
 
 ### 6.3 Semantic application and runtime cache
+
+Current state: implemented for every part with a current in-tree
+consumer (the SMART4 stage entry below and
+`docs/src/architecture/memory.md` section 7j). The kernel spawn path's
+semantic launch cache (`kernel/core::launch_cache::LaunchCache`, held by
+the `AppStore`) retains the shared load gate's accepted `LoadedApp` —
+parsed signed manifest, content-hash and interface-hash verdicts,
+dynamic-loader policy decisions, and the validated `rxe` image — for
+bundles on the immutable read-only system stores, once per boot.
+Command-resolution *output* caching and a separate RXE
+relocation-preparation cache are deliberately **not** built (scope
+decisions recorded in the SMART4 entry below).
 
 Semantic cache stores expensive application-launch and command-resolution
 results:
@@ -778,35 +794,67 @@ over a real in-memory RustFS volume).
 
 ### SMART4 - Application launch and runtime semantic caches
 
-Deliverables:
+Status: **done** for every part with a current in-tree consumer
+(`docs/src/architecture/memory.md` section 7j):
 
-- Cache parsed app manifests, signed bundle validation summaries, content-hash
-  summaries, interface-hash summaries, and dynamic-loader policy decisions
-  through existing app-load code.
-- Cache command-resolution results through the existing command resolver.
-- Cache RXE validation or relocation preparation only through the existing
-  loader model and only with current callers.
-- Scope entries by principal, capability authority, bundle identity, content
-  hash, interface hash, signature epoch, and policy epoch where required.
-- Invalidate on app update, system update, user policy change, capability
-  authority change, storage generation change, and manifest change.
+- The **semantic launch cache**
+  (`kernel/core::launch_cache::LaunchCache`) retains the one shared
+  `lib/appload` gate's accepted `LoadedApp` — the parsed signed
+  `AppInfo` manifest, the content-hash and syscall-interface-hash
+  verdicts, the dynamic-loader library policy decisions, and the
+  validated `rxe` entry-point image — for bundles on the immutable
+  read-only system stores (`/System/Apps`, `/System/Services`), once
+  per boot. It is classified through the SMART1 gate (class
+  `SemanticAppCache`, owner `KernelSubsystem("app_store")`, expensive
+  to rebuild, system data, generation-invalidated, droppable; a refusal
+  poisons it from birth), LRU-bounded with hysteresis under the same
+  kernel-heap-derived `CacheBudget` as the other volume caches, and
+  pressure-enforced per operation (shrunk to the low watermark at mild,
+  drained from moderate before any `ramzip` handoff, growth only at
+  normal outside the reserve). The `AppStore` holds it behind the
+  `/System`-mount readiness latch; `install_system_mount` installs the
+  budget and gauge just before resolving the latch, and an uninstalled
+  or poisoned cache serves every launch uncached through the full gate
+  (fail closed).
+- **Scoping and invalidation.** Only immutable read-only store bundles
+  are cacheable (`AppStore::cacheable_bundle`); a writable-volume
+  bundle is re-verified every launch, so bundle-content, signature,
+  interface-hash, and manifest changes can never be served stale.
+  Within one boot the read-only store is the generation (an app or
+  system update is a new volume image and a new boot). A hit is
+  caller-independent by construction: the cached ceiling is the
+  manifest request (verified under the full-word intersection
+  identity), the per-caller capability intersection happens on every
+  admit, and the spawn path re-authorises the caller's read of the
+  entry point through the secured VFS before serving a hit — hit and
+  miss produce identical load decisions, and no per-principal scoping
+  is needed because no caller-dependent data is stored.
+- **Scope decisions — deliberately not built.** Command-resolution
+  *output* caching is not built: `lib/cmdres` is a pure spelling
+  function (no I/O, no permission checks), so recomputing its candidate
+  list is cheaper than any cache and would only add staleness risk; the
+  expensive work behind a resolved command — the winning candidate's
+  verification — is exactly what the launch cache retains, and the
+  per-candidate filesystem probes are already served by the SMART1
+  `CachedFs` metadata cache. A separate RXE validation/relocation-
+  preparation cache is not built: the loader model has no separate
+  relocation stage, so the validated image inside the cached
+  `LoadedApp` *is* the RXE validation state. Either becomes a new
+  consumer-gated deliverable only if a future loader or resolver stage
+  introduces the missing expensive step.
 
-Tests:
-
-- Bundle content change invalidates cached launch state.
-- Signature or interface-hash change invalidates cached validation state.
-- Capability policy change prevents reuse across principals.
-- User PATH or app-store generation change invalidates command-resolution
-  cache.
-- Cache miss and cache hit produce identical load decisions.
-- Malformed cached state fails closed.
-- Reclaiming semantic cache cannot make an app unlaunchable if the source data
-  remains valid.
-
-Docs:
-
-- Update app-loading and shell documentation with semantic-cache behaviour and
-  invalidation.
+The SMART4 test matrix lands with the stage
+(`kernel/core/src/launch_cache_tests.rs` plus the spawn-path tests in
+`kernel/core/src/syscalls.rs`): classification/owner, hit/miss/
+insertion/invalidation/refusal accounting, LRU eviction with
+hysteresis, replacement without shadowing, admission refusal outside
+normal pressure with recovery, reserve and zero-backing fail-closed
+refusal, mild-band shrink to the low watermark, moderate/severe/
+critical drain, hit-equals-miss load decisions, reclaim never making an
+app unlaunchable, over-long key and over-budget entry refusal, the
+uncached-until-install store behaviour, a cached second spawn
+performing zero data reads, and a cache hit still authorising the
+caller's read (a VFS refusal blocks the cached launch).
 
 ### SMART5 - Desktop and UI cache integration
 
