@@ -777,12 +777,31 @@ canonical source — is classed, bounded, and accounted
 (`plans/SMARTRAM.md`):
 
 - **Classes.** Each entry belongs to one `ReclaimClass` with a
-  deterministic `reclaim_priority`: `CleanFileData` (page chunks of
-  clean file bytes, cheapest to rebuild, evicted first) and
-  `FsMetadata` (stat/security/lookup/directory-entry records — small,
-  hot, rebuilt by a tree walk, so they outlive data under pressure).
-  Classes exist only with a live consumer; more arrive with the
-  SMARTRAM stages that consume them.
+  deterministic `reclaim_priority` following the `plans/SMARTRAM.md`
+  section 7 pressure order (first reclaimed first): `DisposableUi`,
+  `PredictivePrefetch`, `BackgroundValidation`, `SemanticAppCache`,
+  `RuntimeCache`, `CleanFileData` (page chunks of clean file bytes,
+  one bounded device read to rebuild), `TransformCache`, `FsMetadata`
+  (stat/security/lookup/directory-entry records — small, hot, rebuilt
+  by a tree walk, so they outlive file data under pressure), and
+  `ReliabilityAssist`. The taxonomy is the complete SMARTRAM class
+  set; consumers beyond the filesystem cache arrive with the stages
+  that build them.
+- **Classification and admission (fail closed).** Before a cache
+  admits anything it declares a `CacheCandidate` — class, a
+  `ReclaimOwner` to charge (a kernel subsystem, a filesystem volume by
+  its stable per-boot mount handle, or a task; session/service owners
+  arrive with their identities), a `RebuildCost`, a `Sensitivity`, an
+  `InvalidationSource`, a `ReclaimRule`, and its worst-case per-entry
+  bookkeeping bytes — and passes `CacheCandidate::classify`, a pure
+  (deterministic) gate producing a `CachePolicy` or a typed
+  `AdmissionRefusal`. An unknown class or owner, unruled-out sensitive
+  material (credentials, keys, capability tokens — and an undeclared
+  sensitivity is treated as the most sensitive), per-entry metadata
+  over the fixed `MAX_ENTRY_METADATA` validation bound, a missing
+  reclaim rule (non-reclaimable), or a missing invalidation source is
+  refused, and the producer serves uncached: no unowned,
+  unclassifiable, or uninvalidatable memory exists in the model.
 - **Budgets with hysteresis.** A `CacheBudget` is derived from the
   backing resource's size (`CacheBudget::from_backing` — 1/16 of the
   kernel heap arena per volume cache, so the boot volumes together stay

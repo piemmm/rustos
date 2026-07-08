@@ -8,8 +8,9 @@ exactly once instead of being re-derived per target.
 ## What it does
 
 It turns a byte stream into on-screen text by feeding it to the single shared
-`rustos_vt::Parser` and applying each parsed `rustos_vt::Op` straight onto a
-borrowed 32-bit scan-out surface (`&mut [u32]`), rendering glyphs with the
+`rustos_vt::Parser`, applying each parsed `rustos_vt::Op` to a retained cell
+grid, and repainting the dirtied cells once per write onto a borrowed 32-bit
+scan-out surface (`&mut [u32]`), rendering glyphs with the
 shared `rustos_font` Inconsolata EX coverage atlas: 15×28 cells with 16-level
 anti-aliased coverage, the face's full Unicode repertoire with a U+FFFD
 fallback for anything it does not map, and double-width glyphs occupying a
@@ -22,8 +23,8 @@ curses window writer produces). It is a full terminal:
 - Cursor motion (absolute and relative), tab, backspace, carriage return.
 - Erase-in-line and erase-in-display.
 - DEC scroll regions and explicit scroll up/down.
-- **Scroll-up-at-bottom**: reaching the bottom of the screen scrolls both the
-  grid and the pixels up like a real terminal rather than wrapping ring-style.
+- **Scroll-up-at-bottom**: reaching the bottom of the screen scrolls the
+  screen up like a real terminal rather than wrapping ring-style.
 - **Alternate screen** (`CSI ? 1049 h` / `l`): a full-screen program such as
   `top` or an editor switches to a cleared alternate screen on entry and, on
   exit, the primary screen it covered is restored exactly — the xterm-family
@@ -31,13 +32,21 @@ curses window writer produces). It is a full terminal:
 
 ## Design
 
-- **Retained cell grid.** The engine keeps the visible screen as a grid of
-  `rustos_vt::Cell` (one glyph + its rendition per position). Each write updates
-  the active grid *and* paints the surface immediately, so the display stays
-  live without a separate flush; the grid exists so a screen can be repainted
-  from its cells — which is how leaving the alternate screen restores the
-  primary one. There are two grids (primary and alternate); the primary is left
-  untouched while the alternate is shown.
+- **Retained cell grid, one repaint per write.** The engine keeps the visible
+  screen as a grid of `rustos_vt::Cell` (one glyph + its rendition per
+  position). Every operation mutates only the active grid, and the cell rect a
+  write dirtied is repainted from the grid **once** at the end of the write.
+  Deferring the pixels to that single repaint bounds a write's render cost: a
+  burst that scrolls the screen many times moves only the small,
+  cache-resident grid per line and touches the framebuffer once — never one
+  whole-framebuffer copy per scrolled line, which made a large console write
+  monopolise the CPU for seconds on real hardware (starving the serial drain
+  and every other task on a non-preemptible kernel span). Runs of blank cells
+  are span-filled rather than glyph-blitted, and the framebuffer is never
+  read, only written. The grid is also how leaving the alternate screen
+  restores the primary one (a full-rect repaint). There are two grids
+  (primary and alternate); the primary is left untouched while the alternate
+  is shown.
 - **Borrowed grid storage — allocator-free.** The engine is `no_std` and never
   allocates: the two grids are passed in as `&mut [Cell]` buffers. A
   freestanding boot console with no global allocator supplies a `static`; an

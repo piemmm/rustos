@@ -68,10 +68,17 @@ fn short_help(
     out.write_all(&bytes).map_err(LsError::Output)
 }
 
-/// Inspect every operand, then render the file block followed by each
-/// directory block (depth-first under `-R`) into one buffer and write it
-/// once. Hidden entries filtered from the listing are counted and noted
-/// afterwards on the advisory stream — never in the listing itself.
+/// Inspect every operand, then render and **write** the file block followed
+/// by each directory block (depth-first under `-R`), one block at a time.
+///
+/// Output streams as the traversal proceeds — each block is written the
+/// moment its directory has been read — so a recursive listing shows
+/// progress immediately and the tool's memory stays bounded by the largest
+/// single directory, never the whole tree (a filesystem can be arbitrarily
+/// larger than RAM). A filesystem error mid-traversal therefore surfaces
+/// after the blocks already listed, exactly as any streaming tool behaves.
+/// Hidden entries filtered from the listing are counted and noted at the
+/// end on the advisory stream — never in the listing itself.
 fn list(
     options: Options,
     paths: &[String],
@@ -103,6 +110,7 @@ fn list(
         // No `total` line: the GNU tool totals directory listings only,
         // never the loose file-operand block.
         render_rows(&mut buf, &files, options);
+        write_block(out, &mut buf)?;
     }
     // A depth-first worklist: operands are pushed reversed so they pop in
     // command-line order, and a listed directory's children are pushed
@@ -127,6 +135,7 @@ fn list(
             render_total(&mut buf, &rows, options);
         }
         render_rows(&mut buf, &rows, options);
+        write_block(out, &mut buf)?;
         if options.recursive {
             // `.`/`..` never recurse — a listing must terminate even when
             // `-a` renders them.
@@ -138,10 +147,18 @@ fn list(
         }
     }
 
-    out.write_all(buf.as_bytes()).map_err(LsError::Output)?;
     if hidden_omitted > 0 {
         emit_omission_record(out, hidden_omitted);
     }
+    Ok(())
+}
+
+/// Write one rendered block to the terminal and reset the buffer for the
+/// next, so the buffer's capacity is reused across blocks and the listing
+/// streams as the traversal proceeds.
+fn write_block(out: &dyn Output, buf: &mut String) -> Result<(), LsError> {
+    out.write_all(buf.as_bytes()).map_err(LsError::Output)?;
+    buf.clear();
     Ok(())
 }
 
@@ -658,10 +675,11 @@ mod tests {
         }
     }
 
-    /// Captures every stdout byte and every fd 3 record; optionally fails on
-    /// the first stdout write.
+    /// Captures every stdout write (chunk boundaries preserved, so a test
+    /// can assert the listing streams block by block) and every fd 3
+    /// record; optionally fails on the first stdout write.
     struct Recorder {
-        bytes: RefCell<Vec<u8>>,
+        chunks: RefCell<Vec<Vec<u8>>>,
         records: RefCell<Vec<Vec<u8>>>,
         fail: bool,
     }
@@ -669,7 +687,7 @@ mod tests {
     impl Recorder {
         fn new() -> Self {
             Self {
-                bytes: RefCell::new(Vec::new()),
+                chunks: RefCell::new(Vec::new()),
                 records: RefCell::new(Vec::new()),
                 fail: false,
             }
@@ -677,14 +695,23 @@ mod tests {
 
         fn failing() -> Self {
             Self {
-                bytes: RefCell::new(Vec::new()),
+                chunks: RefCell::new(Vec::new()),
                 records: RefCell::new(Vec::new()),
                 fail: true,
             }
         }
 
         fn text(&self) -> String {
-            String::from_utf8(self.bytes.borrow().clone()).expect("utf8 output")
+            let joined: Vec<u8> = self.chunks.borrow().concat();
+            String::from_utf8(joined).expect("utf8 output")
+        }
+
+        fn chunks(&self) -> Vec<String> {
+            self.chunks
+                .borrow()
+                .iter()
+                .map(|c| String::from_utf8(c.clone()).expect("utf8 chunk"))
+                .collect()
         }
 
         fn records(&self) -> Vec<String> {
@@ -701,7 +728,7 @@ mod tests {
             if self.fail {
                 return Err(Errno::NotFound);
             }
-            self.bytes.borrow_mut().extend_from_slice(bytes);
+            self.chunks.borrow_mut().push(bytes.to_vec());
             Ok(())
         }
 
@@ -1014,6 +1041,64 @@ mod tests {
             Ok(())
         );
         assert_eq!(out.text(), "top:\nsub\nz\n\ntop/sub:\nx\n");
+    }
+
+    /// The listing streams: each directory block is written the moment its
+    /// directory has been read (one write per block), never accumulated
+    /// into a single end-of-run write whose memory would grow with the
+    /// whole tree.
+    #[test]
+    fn recursive_listing_writes_each_block_as_it_is_read() {
+        let fs = TreeFs::new()
+            .dir("top")
+            .entry("top", "z", FileKind::Regular, 0o644, 0)
+            .dir("top/sub")
+            .entry("top/sub", "x", FileKind::Regular, 0o644, 0);
+        let fs = fs.entry("top", "sub", FileKind::Directory, 0o755, 0);
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(
+                list_with(
+                    Options {
+                        recursive: true,
+                        ..Options::DEFAULT
+                    },
+                    &["top"],
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
+        assert_eq!(out.chunks(), ["top:\nsub\nz\n", "\ntop/sub:\nx\n"]);
+    }
+
+    /// A filesystem error mid-recursion surfaces after the blocks already
+    /// listed: the traversal streamed them out when their directories were
+    /// read, exactly as any streaming tool behaves.
+    #[test]
+    fn a_read_dir_error_mid_recursion_keeps_the_blocks_already_written() {
+        // `sub` is announced by `top` but has no readable node, so its
+        // `read_dir` fails after `top`'s block has been written.
+        let fs = TreeFs::new()
+            .dir("top")
+            .entry("top", "sub", FileKind::Directory, 0o755, 0);
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(
+                list_with(
+                    Options {
+                        recursive: true,
+                        ..Options::DEFAULT
+                    },
+                    &["top"],
+                ),
+                &fs,
+                &out,
+            ),
+            Err(LsError::Read(Errno::NotFound))
+        );
+        assert_eq!(out.text(), "top:\nsub\n");
     }
 
     #[test]

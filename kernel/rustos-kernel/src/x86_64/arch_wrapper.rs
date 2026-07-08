@@ -128,16 +128,21 @@ extern "C" fn production_preempt_dispatch(cpu: CpuId) {
 /// (ring 3 *or* idle ring 0), installed via
 /// [`rustos_arch_x86_64::preempt::set_timer_callback`].
 ///
-/// It runs the blocking-wait timed-wake sweep (Design D P-2): any waiter
-/// whose finite deadline has elapsed is unparked and the one-shot is
-/// re-armed to the next pending deadline
-/// ([`rustos_kernel_core::timed_wake_sweep`]), so a finite `hw_tree_wait`
-/// timeout fires even when the CPU is otherwise idle (every task parked)
-/// and takes no preemption tick. It is pure accounting
-/// (it never context-switches), so it is safe on a tick taken in ring 0;
-/// the *preemption* of a ring-3 task is the separate
-/// [`production_preempt_dispatch`] ring-3-only callback.
-extern "C" fn production_tick_dispatch(_cpu: CpuId) {
+/// It latches the fired tick as this CPU's pending preemption
+/// ([`rustos_kernel_core::note_preempt_tick`]) and runs the blocking-wait
+/// timed-wake sweep (Design D P-2): any waiter whose finite deadline has
+/// elapsed is unparked and the one-shot is re-armed to the next pending
+/// deadline ([`rustos_kernel_core::timed_wake_sweep`]), so a finite
+/// `hw_tree_wait` timeout fires even when the CPU is otherwise idle
+/// (every task parked) and takes no preemption tick. Both halves are pure
+/// accounting (they never context-switch), so they are safe on a tick
+/// taken in ring 0; the *immediate* preemption of a ring-3 task is the
+/// separate [`production_preempt_dispatch`] ring-3-only callback, while a
+/// tick taken in ring 0 is honoured through the latch at the interrupted
+/// syscall's completion — the running task's quantum is never silently
+/// lost to a tick the non-preemptible kernel could not act on.
+extern "C" fn production_tick_dispatch(cpu: CpuId) {
+    rustos_kernel_core::note_preempt_tick(cpu);
     rustos_kernel_core::timed_wake_sweep();
 }
 

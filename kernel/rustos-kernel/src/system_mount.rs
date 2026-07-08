@@ -74,7 +74,7 @@ use rustos_drv_fs_rustfs::{RustFs, SYSTEM_VOLUME_KEY};
 use rustos_kernel_core::{
     CachedFs, LateFilesystem, MountedFilesystemService, Path, SleepLock, Vfs, VfsError,
 };
-use rustos_kernel_mem::CacheBudget;
+use rustos_kernel_mem::{CacheBudget, ReclaimOwner};
 use rustos_kernel_sec::{GroupId, UserId};
 use rustos_log::{log, Event, EventId, Field, Level, Sink};
 use rustos_partition::{parse_partition_table, PartitionBlock, PartitionType};
@@ -90,19 +90,21 @@ pub static LATE_FILESYSTEM: LateFilesystem<Box<dyn KernelFs>> = LateFilesystem::
 
 /// Wrap a volume's driver in the clean, rebuildable filesystem cache
 /// (`plans/SMARTRAM.md` section 6.1), budgeted from the kernel heap
-/// arena the cache lives in.
+/// arena the cache lives in and charged to the volume identified by its
+/// stable per-boot mount handle (`volume`).
 ///
 /// Every mounted volume is registered through this one helper, so both
 /// the read path and every mutation (including the account-administration
 /// engine's, which shares the registered lock) flow through the same
 /// cache and its invalidation.
-fn cached<F>(driver: F) -> Box<dyn KernelFs>
+fn cached<F>(driver: F, volume: u64) -> Box<dyn KernelFs>
 where
     F: FilesystemRead + FilesystemWrite + FilesystemSecurity + FilesystemStats + Send + 'static,
 {
     Box::new(CachedFs::new(
         driver,
         CacheBudget::from_backing(rustos_kalloc::HEAP_BYTES),
+        ReclaimOwner::FilesystemVolume { volume },
     ))
 }
 
@@ -277,7 +279,7 @@ pub fn install_system_mount<B: Block + 'static>(
         unavailable(audit, "already_installed");
         return;
     }
-    let driver = cached(fs);
+    let driver = cached(fs, SYSTEM_MOUNT_HANDLE);
     if LATE_FILESYSTEM
         .register(system_handle, driver, "RustFsSystem", "rustfs")
         .is_err()
@@ -333,8 +335,12 @@ pub fn register_writable_state(
         unavailable(audit, "writable_handle_invalid");
         return None;
     };
-    let Ok(shared) = LATE_FILESYSTEM.register(handle, cached(driver), "RustFsRoot", "rustfs")
-    else {
+    let Ok(shared) = LATE_FILESYSTEM.register(
+        handle,
+        cached(driver, ROOT_VOLUME_HANDLE),
+        "RustFsRoot",
+        "rustfs",
+    ) else {
         unavailable(audit, "writable_already_installed");
         return None;
     };

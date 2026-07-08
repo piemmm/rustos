@@ -32,7 +32,16 @@
 //! while resolving it), the **whole cache is purged** — fail closed,
 //! never a stale entry.
 //!
-//! # Bounds, eviction, and accounting
+//! # Classification, bounds, eviction, and accounting
+//!
+//! At construction the cache declares its two [`CacheCandidate`]s —
+//! clean file data and filesystem metadata, owned by the wrapped
+//! volume, holding decrypted user data, precisely invalidated by the
+//! volume's single writer, droppable on demand, with bounded per-entry
+//! bookkeeping — and classifies them through the `kernel/mem::reclaim`
+//! admission gate. A refusal starts the cache poisoned: every
+//! operation is served straight from the driver (fail closed, never an
+//! unclassified cache).
 //!
 //! The cache is bounded by a [`CacheBudget`] derived from the kernel
 //! heap size and accounted per class in a [`CacheAccounting`] ledger
@@ -70,7 +79,10 @@ use rustos_abi::driver::filesystem::{
     NodeInfo, NodeKind, NodeSecurity, VolumeStats,
 };
 use rustos_abi::DriverError;
-use rustos_kernel_mem::{CacheAccounting, CacheBudget, ReclaimClass, PAGE_SIZE};
+use rustos_kernel_mem::{
+    CacheAccounting, CacheBudget, CacheCandidate, CachePolicy, InvalidationSource, RebuildCost,
+    ReclaimClass, ReclaimOwner, ReclaimRule, Sensitivity, PAGE_SIZE,
+};
 use zeroize::Zeroize;
 
 use super::path::MAX_COMPONENT_LEN;
@@ -144,6 +156,9 @@ pub struct CachedFs<F> {
     inner: F,
     budget: CacheBudget,
     accounting: CacheAccounting,
+    /// The classified admission policies (file data, metadata); `None`
+    /// when classification refused, which poisons the cache from birth.
+    policies: Option<(CachePolicy, CachePolicy)>,
     /// Monotonic recency counter; every touch assigns a fresh tick, so
     /// ticks are unique and the LRU maps are keyed by them.
     tick: u64,
@@ -165,15 +180,52 @@ pub struct CachedFs<F> {
 }
 
 impl<F> CachedFs<F> {
-    /// Wrap `inner` with an empty cache bounded by `budget`.
+    /// The cache's declared candidates: clean file data and filesystem
+    /// metadata for the volume `owner`, both decrypted user data (the
+    /// volumes are encrypted at rest), both precisely invalidated by
+    /// the volume's single writer, both droppable on demand. The
+    /// metadata pool's worst-case per-entry bookkeeping carries a name
+    /// component copy on top of the fixed overhead.
+    fn candidates(owner: ReclaimOwner) -> (CacheCandidate, CacheCandidate) {
+        let data = CacheCandidate {
+            class: Some(ReclaimClass::CleanFileData),
+            owner: Some(owner),
+            rebuild_cost: RebuildCost::Cheap,
+            sensitivity: Some(Sensitivity::UserData),
+            invalidation: Some(InvalidationSource::SourceMutation),
+            rule: Some(ReclaimRule::Drop),
+            entry_metadata_bytes: ENTRY_OVERHEAD,
+        };
+        let metadata = CacheCandidate {
+            class: Some(ReclaimClass::FsMetadata),
+            rebuild_cost: RebuildCost::Moderate,
+            entry_metadata_bytes: ENTRY_OVERHEAD + MAX_COMPONENT_LEN,
+            ..data
+        };
+        (data, metadata)
+    }
+
+    /// Wrap `inner` with an empty cache bounded by `budget`, charged to
+    /// the volume `owner`.
+    ///
+    /// Both candidate declarations pass the `kernel/mem::reclaim`
+    /// classification gate; a refusal poisons the cache from birth, so
+    /// every operation is served straight from the driver — fail
+    /// closed, the volume still works.
     #[must_use]
-    pub fn new(inner: F, budget: CacheBudget) -> Self {
+    pub fn new(inner: F, budget: CacheBudget, owner: ReclaimOwner) -> Self {
+        let (data, metadata) = Self::candidates(owner);
+        let policies = match (data.classify(), metadata.classify()) {
+            (Ok(data), Ok(metadata)) => Some((data, metadata)),
+            _ => None,
+        };
         Self {
             inner,
             budget,
             accounting: CacheAccounting::new(),
+            policies,
             tick: 0,
-            poisoned: false,
+            poisoned: policies.is_none(),
             stat: BTreeMap::new(),
             sec: BTreeMap::new(),
             lookup: BTreeMap::new(),
@@ -194,6 +246,14 @@ impl<F> CachedFs<F> {
     #[must_use]
     pub fn budget(&self) -> CacheBudget {
         self.budget
+    }
+
+    /// The owner the cache's memory is charged to, or `None` when
+    /// classification refused the cache (it is then poisoned and
+    /// admits nothing).
+    #[must_use]
+    pub fn owner(&self) -> Option<ReclaimOwner> {
+        self.policies.map(|(data, _)| data.owner())
     }
 
     /// The wrapped driver, for the host tests' call counting.
@@ -363,7 +423,7 @@ impl<F> CachedFs<F> {
         let tick = self.next_tick();
         match class {
             ReclaimClass::CleanFileData => self.lru_data.insert(tick, key),
-            ReclaimClass::FsMetadata => self.lru_meta.insert(tick, key),
+            _ => self.lru_meta.insert(tick, key),
         };
         Some(tick)
     }

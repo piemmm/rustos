@@ -93,6 +93,7 @@ pub mod loadavg;
 pub mod memmap;
 pub mod panic;
 pub mod pipe;
+pub mod preempt;
 pub mod proc_id;
 pub mod procsignal;
 pub mod procwait;
@@ -176,6 +177,7 @@ pub use live_producer::{LiveDmaAlloc, LiveMemMap, LiveMmioMap, LiveSharedMem};
 pub use memmap::{MemMap, NullMemMap, NULL_MEM_MAP};
 pub use panic::{handle_panic, panic_dump, PanicContext};
 pub use pipe::{Pipe, PipeEnd, PipeRole, PIPE_CAPACITY};
+pub use preempt::{note_preempt_tick, take_preempt_pending};
 pub use proc_id::{mint_proc_id, mint_proc_id_bootstrap};
 pub use procsignal::{
     drain_pending_foreground, foreground_signal_installed, install_foreground_signal,

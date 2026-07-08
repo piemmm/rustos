@@ -1905,6 +1905,45 @@ order (one fully-gated increment each):
                    parks is a separate §2.16 efficiency follow-up, not a correctness
                    blocker now that the serial drain no longer depends on the loop
                    idling.
+                 - **Console-render burst cost bounded; `ls` streams (the
+                   `ls -lsR /` UART-stutter fix).** Two defects made a large
+                   listing on the Pi 4 video console dump nothing for ~20 s and
+                   then stall the UART debug log for seconds at a time: (1)
+                   `ls` rendered the whole recursive listing into one buffer
+                   and wrote it once at the end — it now writes each directory
+                   block as it is read (`userland/apps/ls`, memory bounded by
+                   the largest single directory, never the tree); (2) the
+                   `lib/fbcon` engine scrolled the *pixels* once per line
+                   feed (a near-whole-framebuffer `copy_within` per line), so
+                   one 4 KiB `console_write` performed dozens of framebuffer
+                   copies inside a single non-preemptible syscall span,
+                   starving every other task and the serial producers. The
+                   engine is now grid-first: every `Op` mutates only the
+                   retained cell grid and the dirtied cell rect is repainted
+                   **once** per write (blank runs span-filled; the framebuffer
+                   is written, never read), so a burst's render cost is one
+                   bounded repaint. Metal re-confirmation of smooth concurrent
+                   HDMI + UART output rides the same §0.9 pass as above.
+                 - **Pending-preemption latch: a quantum expiring mid-syscall
+                   is honoured at the syscall boundary, never lost.** The
+                   ports preempt only a timer tick taken from user mode (the
+                   kernel is non-preemptible, §4); a tick taken *in* a syscall
+                   used to disarm the one-shot, clear the quantum, and do
+                   nothing more — the task then resumed user mode with no
+                   timer armed and ran unpreempted until its next voluntary
+                   yield, so a syscall-heavy task (`ls -lsR /`) could starve
+                   every competitor (cooperative in practice). Now
+                   `kernel/core::preempt` keeps one lock-free per-CPU latch:
+                   every port's per-tick callback latches the fired tick, the
+                   syscall dispatch hook converts a completed syscall into the
+                   `yield` suspension when the latch is set
+                   (`completion_outcome` → `Reschedule { Yield }`), and
+                   `dispatch_step` clears the latch before switching a task in
+                   (a fresh dispatch decision supersedes it, so a user-mode
+                   tick never doubles into a spurious yield). Quantum overrun
+                   is bounded by the remainder of one syscall (each syscall's
+                   in-kernel work is itself bounded, e.g. `console_write`'s
+                   4 KiB clamp). Design: `docs/src/architecture/scheduler.md`.
                - **P-6 — wait-queue §27 completeness rework (staged by the
                  2026-07-06 charter amendment).** Bring `kernel/core/src/waitq.rs`
                  up to the §27 bar: the primitive P-2 landed is the thinnest slice
@@ -4134,16 +4173,32 @@ desktop session work (CU6).
 Opportunistic, bounded, owner-accounted caches over spare RAM;
 `plans/SWAPSWAPSWAP.md` owns the encrypted compressed anonymous tier.
 
-**Done — clean and rebuildable filesystem cache (`plans/SMARTRAM.md` §6.1):**
-- `kernel/mem::reclaim`: the reclaimable-memory model — `ReclaimClass`
-  (`CleanFileData` evicted before `FsMetadata`, deterministic priority),
-  `CacheBudget::from_backing` (per-volume hard limit = 1/16 of the kernel
-  heap arena; shrink watermark = 3/4 of hard — hysteresis), and the
-  checked, fail-closed `CacheAccounting` ledger with hit/miss/insertion/
-  invalidation/eviction/refusal counters.
+**Done — SMART1 classification/accounting model and the clean,
+rebuildable filesystem cache (`plans/SMARTRAM.md` SMART1 + §6.1):**
+- `kernel/mem::reclaim`: the reclaimable-memory model — the complete
+  nine-class `ReclaimClass` taxonomy with deterministic
+  `reclaim_priority` in the §7 pressure order (disposable/speculative
+  classes first, `CleanFileData` before `TransformCache`, `FsMetadata`
+  and `ReliabilityAssist` preserved longest); the `ReclaimOwner` model
+  for the owners the kernel already has (kernel subsystem, filesystem
+  volume by stable per-boot mount handle, task);
+  `RebuildCost`/`Sensitivity`/`InvalidationSource`/`ReclaimRule`
+  modelling; the fixed `MAX_ENTRY_METADATA` per-entry bookkeeping
+  validation bound; the pure, fail-closed `CacheCandidate::classify`
+  admission gate with typed `AdmissionRefusal` reasons (unknown class,
+  unknown owner, sensitive material — credential/key/capability and
+  undeclared sensitivity alike — unbounded metadata, non-reclaimable,
+  missing invalidation); `CacheBudget::from_backing` (per-volume hard
+  limit = 1/16 of the kernel heap arena; shrink watermark = 3/4 of hard
+  — hysteresis); and the checked, fail-closed per-class
+  `CacheAccounting` ledger with hit/miss/insertion/invalidation/
+  eviction/refusal counters.
 - `kernel/core::fs::CachedFs`: per-volume write-through cache below the
   secured VFS (permission checks never bypassed), wrapping each driver at
-  registration (`system_mount::cached`). Caches page-chunk file data,
+  registration (`system_mount::cached`), its two candidate declarations
+  classified through the admission gate at construction and charged to
+  the volume's `ReclaimOwner` (a refusal starts the cache poisoned —
+  fail closed, the driver keeps serving). Caches page-chunk file data,
   stat, security, lookup, and dirent records; LRU eviction (data before
   metadata); large reads (> 4 chunks) bypass; payload allocations are
   fallible; every cached buffer is zeroed on invalidation/eviction/purge/

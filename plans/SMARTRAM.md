@@ -1,10 +1,16 @@
 # SMARTRAM.md - Opportunistic reclaimable memory services
 
-Status: in progress — the clean and rebuildable filesystem cache (section
-6.1) is implemented (`kernel/mem::reclaim` + `kernel/core::fs::CachedFs`,
-wrapping every registered volume driver; see `PLAN.md` §SMARTRAM for the
-done-state summary); the remaining classes and the pressure integration
-are staged below  
+Status: in progress — SMART1 (the reclaimable-memory classification and
+accounting model, `kernel/mem::reclaim`: the complete class taxonomy with
+deterministic reclaim priorities, the owner model for the owners the
+kernel already has, rebuild-cost/sensitivity/invalidation-source/
+reclaim-rule modelling, the bounded per-entry-metadata validation bound,
+the fail-closed classification gate with typed refusals, and per-class
+checked accounting) and the clean and rebuildable filesystem cache
+(section 6.1, `kernel/core::fs::CachedFs`, wrapping every registered
+volume driver and classified through that gate at construction; see
+`PLAN.md` §SMARTRAM for the done-state summary) are implemented; the
+remaining classes and the pressure integration are staged below  
 Target: RustOS  
 Primary code areas: `kernel/mem`, `kernel/core`, `kernel/sched`, `lib/log`, existing filesystem drivers, existing desktop/session crates, and existing `lib/abi` diagnostics only if a current caller requires them  
 Secondary code areas: `drivers/filesystem/rustfs`, `userland/system/appmgr`, `userland/shell/elsh`, `userland/gui/wm`, `userland/gui/taskbar`, `userland/gui/session`, `lib/appload`, `lib/cmdres`, `lib/raster`, `lib/svg`, `lib/font`, `lib/icon`, `lib/theme`, and `lib/path`  
@@ -257,7 +263,9 @@ are tied to a canonical storage identity and generation.
 
 Current state: implemented as `kernel/core::fs::CachedFs` over the
 `kernel/mem::reclaim` classification/budget/accounting model — per-volume,
-write-through, below the secured VFS (no authorisation bypass), LRU-bounded
+charged to the volume's `ReclaimOwner` through the fail-closed
+classification gate at construction, write-through, below the secured VFS
+(no authorisation bypass), LRU-bounded
 with hysteresis, zeroing every reclaimed buffer, invalidated precisely by
 the volume's single writer (the shared registered driver). Within one boot
 the driver instance is the volume generation (a mount starts an empty
