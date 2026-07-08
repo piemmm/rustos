@@ -4245,9 +4245,11 @@ rebuildable filesystem cache (`plans/SMARTRAM.md` SMART1 + §6.1):**
   pressure — the driver always keeps serving.
 
 **Remaining (staged, `plans/SMARTRAM.md` §12):** transform caches
-(SMART3 remainder), semantic app/runtime caches (SMART4), UI caches
-(SMART5), reliability/background/predictive caches (SMART6–8), and
+(SMART3 remainder), semantic app/runtime caches (SMART4), and
 observability (SMART9) — each gated on the subsystems it consumes.
+UI caches (SMART5) and the reliability/background/predictive caches
+(SMART6–8) are **shelved — not added**; they are built only if a
+future decision explicitly un-shelves them.
 
 ---
 

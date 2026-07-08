@@ -14,8 +14,9 @@ SMART2 (the VM pressure model and reclaim ordering,
 the frame allocator, the reserve floor, per-band per-class shrink
 targets, the `ramzip` handoff gate, deterministic escalation, and the
 `CachedFs` per-operation enforcement; see `PLAN.md` §SMARTRAM for the
-done-state summary) are implemented; the remaining classes are staged
-below  
+done-state summary) are implemented; SMART5–SMART8 (desktop/UI,
+reliability-assist, background-validation, and predictive caches) are
+**shelved — not added**; the remaining classes are staged below  
 Target: RustOS  
 Primary code areas: `kernel/mem`, `kernel/core`, `kernel/sched`, `lib/log`, existing filesystem drivers, existing desktop/session crates, and existing `lib/abi` diagnostics only if a current caller requires them  
 Secondary code areas: `drivers/filesystem/rustfs`, `userland/system/appmgr`, `userland/shell/elsh`, `userland/gui/wm`, `userland/gui/taskbar`, `userland/gui/session`, `lib/appload`, `lib/cmdres`, `lib/raster`, `lib/svg`, `lib/font`, `lib/icon`, `lib/theme`, and `lib/path`  
@@ -783,6 +784,10 @@ Docs:
 
 ### SMART5 - Desktop and UI cache integration
 
+**Status: shelved — not added.** This stage is deliberately not being
+implemented. Nothing below is built, tested, or documented unless this
+stage is explicitly un-shelved by a future decision.
+
 Deliverables:
 
 - Desktop/session-owned caches for SVG rasterization, theme primitives, font
@@ -813,6 +818,10 @@ Docs:
 
 ### SMART6 - Reliability and recovery assist caches
 
+**Status: shelved — not added.** This stage is deliberately not being
+implemented. Nothing below is built, tested, or documented unless this
+stage is explicitly un-shelved by a future decision.
+
 Deliverables:
 
 - Bounded reliability-assist cache for filesystem health summaries, recent
@@ -840,6 +849,10 @@ Docs:
 
 ### SMART7 - Background validation and maintenance caches
 
+**Status: shelved — not added.** This stage is deliberately not being
+implemented. Nothing below is built, tested, or documented unless this
+stage is explicitly un-shelved by a future decision.
+
 Deliverables:
 
 - Bounded background workers for checksum validation, dedupe candidate
@@ -865,6 +878,10 @@ Docs:
   conditions.
 
 ### SMART8 - Predictive workflow and prefetch caches
+
+**Status: shelved — not added.** This stage is deliberately not being
+implemented. Nothing below is built, tested, or documented unless this
+stage is explicitly un-shelved by a future decision.
 
 Deliverables:
 
@@ -945,7 +962,10 @@ Docs:
 
 ## 13. Required test matrix summary
 
-The completed feature must include tests for:
+The completed feature must include tests for the implemented and staged
+stages. The `UI and desktop cache`, `reliability and background cache`,
+and `predictive cache` blocks below belong to the shelved SMART5–SMART8
+stages and apply only if those stages are ever un-shelved:
 
 ```text
 classification:
@@ -1039,7 +1059,10 @@ Implementation is incomplete without performance evidence for any policy choice
 that affects thresholds, budgets, reclaim order, cache retention, or foreground
 latency.
 
-Required benchmark areas:
+Required benchmark areas (the desktop asset render, background
+validation, and predictive prefetch entries belong to the shelved
+SMART5–SMART8 stages and apply only if those stages are ever
+un-shelved):
 
 - cache lookup latency by class;
 - cache insert and invalidation cost by class;
