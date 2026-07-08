@@ -1,22 +1,30 @@
 # `rustos-util`
 
-Reserved destination for helpers used by **two or more** independent
-crates (`AGENTS.md` §2.3).
+The strictly justified shared-utility crate: every item here is used by
+**two or more** independent crates (`AGENTS.md` §2.3, §3), and promoting
+code into it requires a `PLAN.md` note naming those callers. `no_std`,
+allocation-free, and panic-free throughout.
 
-## State at Stage 1
+## Members
 
-The crate is empty. Stage 1 deliberately resisted the temptation to
-populate it with speculative helpers; nothing currently shared between
-two callers needs a home outside the crate it already lives in:
-
-* The 256-bit bitset that Stage 1 introduced has two future callers
-  (`rustos-caps` already; `kernel/sched` planned in Stage 2) so it
-  lives in `rustos-collections`, not here.
-* The endianness helpers in `lib/abi` are used only by ABI decoders and
-  so stay local to that crate.
+* `fmt` — no-allocation numeric formatters that render task / port /
+  capability identifiers into `lib/log`'s structured field values
+  without touching an allocator on the hot path. Promoted from
+  `kernel/sec` once `kernel/ipc` became the second caller; both consume
+  it today.
+* `size` — the GNU coreutils size vocabulary shared by the `du` and
+  `df` command apps (`plans/APPS.md`): the `-B`/`--block-size` grammar
+  (`512`, `1K`, `1MiB`, `1GB`, `c`/`w`/`b` byte suffixes, and the
+  `human-readable`/`si` rendering words, parsed fail-closed into a
+  `SizeScale`), ceiling block scaling (`blocks_ceil` — a partially used
+  block is a used block, so usage is never under-reported), and the
+  GNU `human_ceiling` renderings (`format_human`: one decimal below ten
+  units, an integer otherwise, re-tiering a rounded-up amount, in
+  powers of 1024 or 1000). Values are `u128` internally so a 100 TB+
+  volume's byte totals can never overflow (`AGENTS.md` §26.6).
 
 ## How to grow the crate
 
 Promoting code into `lib/util` requires a `PLAN.md` note documenting the
-two-or-more concrete callers, a one-paragraph rationale in this page,
-and unit tests next to the new item per `AGENTS.md` §7.
+two-or-more concrete callers, an entry in the member list above, and
+unit tests next to the new item per `AGENTS.md` §7.

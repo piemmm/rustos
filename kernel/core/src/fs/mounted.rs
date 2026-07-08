@@ -41,7 +41,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use rustos_abi::driver::filesystem::{
-    FilesystemRead, FilesystemSecurity, FilesystemWrite, NodeKind as DriverNodeKind,
+    FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
+    NodeKind as DriverNodeKind, VolumeStats,
 };
 use rustos_abi::driver::DriverHandle;
 use rustos_abi::sysinfo::MountRecord;
@@ -70,6 +71,12 @@ use super::{Vfs, VfsError};
 struct DriverEntry<F: 'static> {
     handle: u64,
     driver: &'static SleepLock<F>,
+    /// The backing volume's name (partition label / volume identity), as the
+    /// mount snapshot reports it. Registration-time facts, not driver state:
+    /// the registrar names what it mounted.
+    source: String,
+    /// The driver's filesystem-type name (`rustfs`, …).
+    fstype: String,
 }
 
 /// A set-once VFS policy layer plus a registry of backing filesystem drivers
@@ -139,7 +146,9 @@ impl<F: 'static> LateFilesystem<F> {
         self.vfs.set(vfs).map_err(|_| FilesystemAlreadyInstalled)
     }
 
-    /// Register the live driver backing the mount addressed by `handle`.
+    /// Register the live driver backing the mount addressed by `handle`,
+    /// naming the backing volume (`source`) and the driver's filesystem type
+    /// (`fstype`) for the mount snapshot.
     ///
     /// The driver is wrapped in a [`SleepLock`] and leaked to `'static` (it
     /// lives for the rest of the kernel's life, like every other boot-leaked
@@ -155,6 +164,8 @@ impl<F: 'static> LateFilesystem<F> {
         &self,
         handle: DriverHandle,
         driver: F,
+        source: &str,
+        fstype: &str,
     ) -> Result<(), FilesystemAlreadyInstalled> {
         let handle = handle.as_u64();
         let mut drivers = self.drivers.lock();
@@ -162,7 +173,12 @@ impl<F: 'static> LateFilesystem<F> {
             return Err(FilesystemAlreadyInstalled);
         }
         let driver: &'static SleepLock<F> = Box::leak(Box::new(SleepLock::new(driver)));
-        drivers.push(DriverEntry { handle, driver });
+        drivers.push(DriverEntry {
+            handle,
+            driver,
+            source: String::from(source),
+            fstype: String::from(fstype),
+        });
         Ok(())
     }
 
@@ -198,6 +214,19 @@ impl<F: 'static> LateFilesystem<F> {
     /// Every registered driver, for a whole-system `sync`.
     fn all_drivers(&self) -> Vec<&'static SleepLock<F>> {
         self.drivers.lock().iter().map(|e| e.driver).collect()
+    }
+
+    /// The registered driver for `handle` together with its registration
+    /// names, for the mount snapshot. `None` when the backing volume is not
+    /// yet online — the caller reports the mount without names or usage
+    /// rather than guessing.
+    fn entry(&self, handle: DriverHandle) -> Option<(String, String, &'static SleepLock<F>)> {
+        let handle = handle.as_u64();
+        let drivers = self.drivers.lock();
+        drivers
+            .iter()
+            .find(|e| e.handle == handle)
+            .map(|e| (e.source.clone(), e.fstype.clone(), e.driver))
     }
 }
 
@@ -407,7 +436,7 @@ impl<F: 'static> MountedFilesystemService<F> {
 
 impl<F> MountedFilesystemService<F>
 where
-    F: FilesystemRead + FilesystemWrite + FilesystemSecurity + Send + 'static,
+    F: FilesystemRead + FilesystemWrite + FilesystemSecurity + FilesystemStats + Send + 'static,
 {
     /// Resolve the mount and the caller's record, parse `path`, and run `op`
     /// against the secured VFS under the per-mount lock.
@@ -473,7 +502,7 @@ fn file_kind(kind: DriverNodeKind) -> FileKind {
 
 impl<F> FilesystemService for MountedFilesystemService<F>
 where
-    F: FilesystemRead + FilesystemWrite + FilesystemSecurity + Send + 'static,
+    F: FilesystemRead + FilesystemWrite + FilesystemSecurity + FilesystemStats + Send + 'static,
 {
     fn open(
         &self,
@@ -678,13 +707,35 @@ where
             .iter()
             .filter_map(|mount| {
                 // The mount table records the mount *point* (target) and its
-                // permission flags authoritatively; it does not yet model a
-                // backing-device name or a filesystem-type string, so those
-                // are reported empty rather than guessed. `MountRecord::new`
-                // only fails on an over-long field, which a validated VFS
-                // `Path` cannot produce; a defensive `ok()` drops any such
-                // entry rather than panicking.
-                MountRecord::new(b"", path_str(mount.path()).as_bytes(), b"", mount.flags()).ok()
+                // permission flags authoritatively; the backing volume's
+                // name, filesystem type, and space accounting come from the
+                // driver registry. A backing-less mount (the in-RAM layout
+                // dirs) or one whose volume is not yet online reports empty
+                // names and the all-zero usage — the truthful "nothing
+                // known", never a guess. A driver fault while reading its
+                // accounting likewise degrades to the all-zero usage: the
+                // mount itself is still reported (it exists — only its
+                // numbers are unavailable).
+                let (source, fstype, usage) =
+                    match mount.backing().and_then(|handle| self.mount.entry(handle)) {
+                        Some((source, fstype, driver)) => {
+                            let usage = driver.lock().stats().unwrap_or_default();
+                            (source, fstype, usage)
+                        }
+                        None => (String::new(), String::new(), VolumeStats::default()),
+                    };
+                // `MountRecord::new` only fails on an over-long field or an
+                // inconsistent usage report, which a validated VFS `Path`
+                // and a sane driver cannot produce; a defensive `ok()`
+                // drops any such entry rather than panicking.
+                MountRecord::new(
+                    source.as_bytes(),
+                    path_str(mount.path()).as_bytes(),
+                    fstype.as_bytes(),
+                    mount.flags(),
+                    usage,
+                )
+                .ok()
             })
             .collect()
     }

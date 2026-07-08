@@ -148,22 +148,19 @@ fn rebased_submounts_route_to_their_backing_subtree_and_handle() {
         )
         .expect("mount point");
     }
-    vfs.mounts_mut()
-        .mount_rebased(
-            Path::parse("/Storage/logs").expect("path"),
-            nosuid,
-            Some(h_shared),
-            alloc::vec![alloc::string::String::from("LogsArea")],
-        )
-        .expect("logs mount");
-    vfs.mounts_mut()
-        .mount_rebased(
-            Path::parse("/Storage/settings").expect("path"),
-            nosuid,
-            Some(h_shared),
-            alloc::vec![alloc::string::String::from("SettingsArea")],
-        )
-        .expect("settings mount");
+    for (mount_point, subtree) in [
+        ("/Storage/logs", "LogsArea"),
+        ("/Storage/settings", "SettingsArea"),
+    ] {
+        vfs.mounts_mut()
+            .mount_rebased(
+                Path::parse(mount_point).expect("path"),
+                nosuid,
+                Some(h_shared),
+                alloc::vec![alloc::string::String::from(subtree)],
+            )
+            .expect("rebased mount");
+    }
     vfs.mounts_mut()
         .mount(
             Path::parse("/Storage/other").expect("path"),
@@ -174,8 +171,10 @@ fn rebased_submounts_route_to_their_backing_subtree_and_handle() {
 
     let cell: &'static LateFilesystem<RwMockFs> = Box::leak(Box::new(LateFilesystem::new()));
     cell.install_vfs(vfs).expect("install vfs");
-    cell.register(h_shared, shared).expect("register shared");
-    cell.register(h_other, other).expect("register other");
+    cell.register(h_shared, shared, "shared", "memfs")
+        .expect("register shared");
+    cell.register(h_other, other, "other", "memfs")
+        .expect("register other");
     let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
     identity.install(identity_table()).expect("identity");
     let svc = MountedFilesystemService::new(cell, identity);
@@ -245,7 +244,8 @@ fn service(
         // `vfs`); register it under that same handle so the service routes
         // operations on `/Storage/vol/...` to it.
         let handle = DriverHandle::from_raw(9).expect("non-zero handle");
-        cell.register(handle, driver()).expect("register driver");
+        cell.register(handle, driver(), "vol", "memfs")
+            .expect("register driver");
     }
     let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
     if identity_installed {
@@ -668,9 +668,10 @@ fn an_ordinary_user_lists_the_system_owned_read_only_mount() {
 
     let cell: &'static LateFilesystem<RwMockFs> = Box::leak(Box::new(LateFilesystem::new()));
     cell.install_vfs(vfs).expect("install vfs");
-    cell.register(system_handle, system)
+    cell.register(system_handle, system, "system", "memfs")
         .expect("register system");
-    cell.register(root_handle, rootvol).expect("register root");
+    cell.register(root_handle, rootvol, "root", "memfs")
+        .expect("register root");
     let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
     identity.install(identity_table()).expect("identity");
     let svc = MountedFilesystemService::new(cell, identity);
@@ -684,6 +685,37 @@ fn an_ordinary_user_lists_the_system_owned_read_only_mount() {
         assert!(names.contains(&expected), "{expected} listed: {names:?}");
     }
     assert!(entries.iter().all(|(kind, _)| *kind == FileKind::Directory));
+}
+
+/// The mount snapshot carries the registration names and the live space
+/// accounting of a backed mount, and the honest empties (no names, the
+/// all-zero usage) for a mount whose backing is the in-RAM layout — the
+/// rows `df` renders. This is the regression guard for the "snapshot
+/// reported every source/fstype empty and no capacity" gap.
+#[test]
+fn mount_snapshot_reports_names_and_usage_from_the_registered_driver() {
+    let svc = ready();
+    let records = svc.mount_snapshot();
+    // The unbacked root mount reports the truthful "nothing known".
+    let root = records
+        .iter()
+        .find(|record| record.target_bytes() == b"/")
+        .expect("the root mount is always listed");
+    assert_eq!(root.source_bytes(), b"");
+    assert_eq!(root.fstype_bytes(), b"");
+    assert_eq!(root.usage().total_blocks, 0);
+    // The backed volume reports its registration names and the driver's
+    // live accounting.
+    let vol = records
+        .iter()
+        .find(|record| record.source_bytes() == b"vol")
+        .expect("the registered volume is listed by its source name");
+    assert_eq!(vol.fstype_bytes(), b"memfs");
+    let usage = vol.usage();
+    assert_eq!(usage.block_size, 512);
+    assert_eq!(usage.total_blocks, 4096);
+    assert!(usage.avail_blocks <= usage.free_blocks);
+    assert!(usage.free_blocks <= usage.total_blocks);
 }
 
 #[test]

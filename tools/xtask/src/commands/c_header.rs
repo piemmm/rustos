@@ -1310,7 +1310,8 @@ fn generate_sysinfo() -> String {
     out.push_str("#ifndef ROS_SYSINFO_H\n#define ROS_SYSINFO_H\n\n");
     out.push_str("#include <stdint.h>\n");
     out.push_str("#include \"rustos_time.h\"\n");
-    out.push_str("#include \"rustos_rlimit.h\"\n\n");
+    out.push_str("#include \"rustos_rlimit.h\"\n");
+    out.push_str("#include \"rustos_driver.h\"\n\n");
 
     sysinfo_emit_framing(&mut out);
     sysinfo_emit_record_sizes(&mut out);
@@ -1592,13 +1593,17 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
          \x20   uint16_t flags;\n\
          } ros_mount_list_request_t;\n\n",
     "/* One mount-table entry. `flags` is a MountFlags bitmap (AGENTS.md sec.5.3);\n\
-         * its flag bits are defined by the filesystem driver ABI. The inline source/\n\
-         * target/fstype buffers are valid for their respective *_len byte counts. */\n\
+         * its flag bits are defined by the filesystem driver ABI. `usage` is the\n\
+         * backing volume's space accounting (all-zero when none is known). The\n\
+         * inline source/target/fstype buffers are valid for their respective\n\
+         * *_len byte counts. */\n\
          typedef struct ros_mount_record {\n\
          \x20   uint32_t flags;\n\
          \x20   uint8_t source_len;\n\
          \x20   uint8_t target_len;\n\
          \x20   uint8_t fstype_len;\n\
+         \x20   uint8_t reserved0;\n\
+         \x20   ros_volume_stats_t usage;\n\
          \x20   uint8_t source[ROS_MOUNT_SOURCE_MAX];\n\
          \x20   uint8_t target[ROS_MOUNT_TARGET_MAX];\n\
          \x20   uint8_t fstype[ROS_MOUNT_FSTYPE_MAX];\n\
@@ -2009,7 +2014,7 @@ fn generate_driver() -> String {
 /// not cross the C boundary, so — like the driver traits — they are
 /// deliberately omitted.
 const DRIVER_SUBMODULE_TYPEDEFS: &str = concat!(
-    "/* Block-device geometry (drivers/storage/*). */\n\
+    "/* Block-device geometry (the drivers/storage class). */\n\
          typedef struct ros_block_geometry {\n\
          \x20   uint32_t block_size;\n\
          \x20   uint64_t block_count;\n\
@@ -2034,7 +2039,7 @@ const DRIVER_SUBMODULE_TYPEDEFS: &str = concat!(
          \x20   uint16_t temperature_kelvin;\n\
          \x20   uint8_t critical_warning;\n\
          } ros_health_snapshot_t;\n\n",
-    "/* Identifying tuple for a discovered device (drivers/bus/*).\n\
+    "/* Identifying tuple for a discovered device (the drivers/bus class).\n\
          * `device_class` mirrors the Rust `class` field (renamed for C++). */\n\
          typedef struct ros_bus_device {\n\
          \x20   uint32_t vendor;\n\
@@ -2043,7 +2048,8 @@ const DRIVER_SUBMODULE_TYPEDEFS: &str = concat!(
          \x20   uint16_t reserved0;\n\
          \x20   uint64_t address;\n\
          } ros_bus_device_t;\n\n",
-    "/* Active display mode (drivers/display/*); `format` is a ROS_DISPLAY_FORMAT_*. */\n\
+    "/* Active display mode (the drivers/display class); `format` is a\n\
+         * ROS_DISPLAY_FORMAT_*. */\n\
          typedef struct ros_display_mode {\n\
          \x20   uint32_t width_px;\n\
          \x20   uint32_t height_px;\n\
@@ -2076,6 +2082,18 @@ const DRIVER_SUBMODULE_TYPEDEFS: &str = concat!(
          \x20   ros_time64_t accessed;\n\
          \x20   ros_time64_t changed;\n\
          } ros_node_times_t;\n\n",
+    "/* A mounted volume's space accounting, in whole blocks of block_size bytes.\n\
+         * avail_blocks <= free_blocks <= total_blocks always holds; files/files_free\n\
+         * are 0 when the format tracks no fixed inode table. */\n\
+         typedef struct ros_volume_stats {\n\
+         \x20   uint32_t block_size;\n\
+         \x20   uint32_t reserved0;\n\
+         \x20   uint64_t total_blocks;\n\
+         \x20   uint64_t free_blocks;\n\
+         \x20   uint64_t avail_blocks;\n\
+         \x20   uint64_t files;\n\
+         \x20   uint64_t files_free;\n\
+         } ros_volume_stats_t;\n\n",
     "/* A single input event; `kind` is a ROS_INPUT_EVENT_KIND_*. */\n\
          typedef struct ros_input_event {\n\
          \x20   uint8_t kind;\n\
@@ -2083,7 +2101,7 @@ const DRIVER_SUBMODULE_TYPEDEFS: &str = concat!(
          \x20   uint16_t code;\n\
          \x20   int32_t value;\n\
          } ros_input_event_t;\n\n",
-    "/* A 48-bit IEEE 802 link-layer address (drivers/network/*). */\n\
+    "/* A 48-bit IEEE 802 link-layer address (the drivers/network class). */\n\
          typedef struct ros_mac_address {\n\
          \x20   uint8_t octets[ROS_MAC_ADDRESS_LEN];\n\
          } ros_mac_address_t;\n\n",
@@ -3338,9 +3356,9 @@ mod tests {
             (
                 "MountRecord",
                 core::mem::size_of::<MountRecord>(),
-                152,
+                200,
                 core::mem::align_of::<MountRecord>(),
-                4,
+                8,
             ),
             (
                 "ResourceLimitRecord",
@@ -3574,7 +3592,7 @@ mod tests {
         use rustos_abi::driver::block::{BlockGeometry, DiscardCapability, HealthSnapshot};
         use rustos_abi::driver::bus::BusDevice;
         use rustos_abi::driver::display::{AccelCaps, DisplayMode};
-        use rustos_abi::driver::filesystem::{DirEntry, NodeInfo, NodeTimes};
+        use rustos_abi::driver::filesystem::{DirEntry, NodeInfo, NodeTimes, VolumeStats};
         use rustos_abi::driver::input::InputEvent;
         use rustos_abi::driver::net::MacAddress;
         use rustos_abi::{
@@ -3606,7 +3624,8 @@ mod tests {
             ("rustos_sysinfo.h", "} ros_load_average_t;", size_of::<LoadAverage>(), 24, align_of::<LoadAverage>(), 4),
             ("rustos_sysinfo.h", "} ros_system_identity_t;", size_of::<SystemIdentity>(), 88, align_of::<SystemIdentity>(), 2),
             ("rustos_sysinfo.h", "} ros_mount_list_request_t;", size_of::<MountListRequest>(), 8, align_of::<MountListRequest>(), 4),
-            ("rustos_sysinfo.h", "} ros_mount_record_t;", size_of::<MountRecord>(), 152, align_of::<MountRecord>(), 4),
+            ("rustos_sysinfo.h", "} ros_mount_record_t;", size_of::<MountRecord>(), 200, align_of::<MountRecord>(), 8),
+            ("rustos_driver.h", "} ros_volume_stats_t;", size_of::<VolumeStats>(), 48, align_of::<VolumeStats>(), 8),
             ("rustos_driver.h", "} ros_driver_manifest_t;", size_of::<DriverManifest>(), 140, align_of::<DriverManifest>(), 4),
             ("rustos_driver.h", "} ros_driver_bind_key_t;", size_of::<DriverBindKey>(), 80, align_of::<DriverBindKey>(), 4),
             ("rustos_driver.h", "} ros_driver_register_reply_t;", size_of::<DriverRegisterReply>(), 24, align_of::<DriverRegisterReply>(), 8),

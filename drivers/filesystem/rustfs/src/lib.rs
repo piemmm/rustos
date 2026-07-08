@@ -49,8 +49,8 @@ use alloc::vec::Vec;
 
 use rustos_abi::driver::block::Block;
 use rustos_abi::driver::filesystem::{
-    DirEntry, FilesystemAttrs, FilesystemRead, FilesystemSecurity, FilesystemTimestamps,
-    FilesystemWrite, NodeId, NodeInfo, NodeKind, NodeTimes,
+    DirEntry, FilesystemAttrs, FilesystemRead, FilesystemSecurity, FilesystemStats,
+    FilesystemTimestamps, FilesystemWrite, NodeId, NodeInfo, NodeKind, NodeTimes, VolumeStats,
 };
 pub use rustos_abi::driver::filesystem::{
     NodeSecurity as Security, SecurityAcl as AclEntry, SecuritySubject as AclSubject,
@@ -3265,6 +3265,25 @@ impl<B: Block> FilesystemTimestamps for RustFs<B> {
     fn times(&mut self, node: NodeId) -> Result<NodeTimes, DriverError> {
         let ino = self.ino_of(node)?;
         Ok(self.read_inode(ino)?.times)
+    }
+}
+
+impl<B: Block> FilesystemStats for RustFs<B> {
+    fn stats(&mut self) -> Result<VolumeStats, DriverError> {
+        // A pure read of the mounted volume's in-memory accounting — no
+        // device I/O, so it cannot fault. Data allocation stops at the
+        // metadata reserve, so the blocks an ordinary write may still
+        // consume exclude it. Inodes are B-tree records allocated on
+        // demand: there is no fixed table, and the zero pair reports that
+        // honestly rather than fabricating a capacity.
+        Ok(VolumeStats {
+            block_size: as_u32(self.block_size),
+            total_blocks: self.total_blocks,
+            free_blocks: self.free_count,
+            avail_blocks: self.free_count.saturating_sub(METADATA_RESERVE),
+            files: 0,
+            files_free: 0,
+        })
     }
 }
 

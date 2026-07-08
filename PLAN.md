@@ -119,7 +119,11 @@ Do **not** begin a stage before all its listed dependencies are complete.
 - `lib/rng` (experimental): `CsRng` HMAC-SHA256 DRBG over `lib/crypto`'s HMAC
   (NIST CAVP-validated) with a pluggable `EntropySource`, a `HardwareRng`
   seam, and `FastRng` (xoshiro256++) — the §19.2 platform-RNG seam.
-- `lib/util` is intentionally empty (§2.3 — no item meets the ≥ 2-use rule).
+- `lib/util` holds only items with ≥ 2 independent callers (§2.3):
+  `fmt` (audit-field formatters; `kernel/sec` + `kernel/ipc`, promoted in
+  Stage 2.5) and `size` (the GNU `--block-size` grammar, ceiling block
+  scaling, and human-readable renderings; the `du` + `df` command apps,
+  `plans/APPS.md` Stage C).
 - The cross-checked `syscalls.rs` ↔ `table.rs` pair is reserved for Stage 2
   so `cargo xtask abi-check` always sees both halves.
 

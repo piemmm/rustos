@@ -555,6 +555,22 @@ scrub — through `lib/log` with stable event IDs in the `rustfs`
 `12000..13000` range (`HEALTH_OK` / `HEALTH_DEGRADED` / `HEALTH_FAILING` /
 `HEALTH_SCRUB_TRIGGERED` / `HEALTH_DENIED`).
 
+## Volume statistics
+
+The driver implements the versioned `FilesystemStats` extension
+(`stats() -> VolumeStats`, a separate `abi-v1` trait alongside the
+others — never a widening, `AGENTS.md` §2.4 / §9). The report is a pure
+read of the mounted volume's in-memory accounting — the block size, the
+committed `total_blocks`, and the live free count — with
+`avail_blocks` withholding the metadata reserve that keeps a full
+volume repairable (data allocation stops at the reserve, so consumers
+are never promised space the allocator would refuse). Inodes are
+B-tree records allocated on demand, so there is no fixed table to
+count: `files`/`files_free` carry the honest `0`/`0` "untracked" pair,
+exactly as the trait defines. These are the figures the kernel mount
+snapshot and the `sysinfo-v1` `MOUNT_LIST` rows carry, and `df`
+renders.
+
 ## Timestamps (§21)
 
 Every inode stores four 64-bit-native `Time64` timestamps —

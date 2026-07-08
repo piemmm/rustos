@@ -157,10 +157,15 @@ testable against in-memory fixtures.
   frozen payload (each query owns its argument type, `AGENTS.md` §9).
 - [`MountRecord`] — one mount-table entry: the backing `source` (bounded
   by [`MOUNT_SOURCE_MAX`]), the `target` mount point ([`MOUNT_TARGET_MAX`]),
-  the driver `fstype` ([`MOUNT_FSTYPE_MAX`]), and the [`MountFlags`]
-  mount-policy bitmap (`ro`/`nosuid`/`nodev`/`noexec`). The flag field
-  reuses the filesystem-driver ABI's `MountFlags` rather than re-declaring
-  the flag algebra (`AGENTS.md` §2.2).
+  the driver `fstype` ([`MOUNT_FSTYPE_MAX`]), the [`MountFlags`]
+  mount-policy bitmap (`ro`/`nosuid`/`nodev`/`noexec`), and the volume's
+  space accounting as a `VolumeStats` usage block (block size plus 64-bit
+  total/free/available block and inode counts) — the figures `df` renders.
+  Both the flag field and the usage block reuse the filesystem-driver
+  ABI's types rather than re-declaring them (`AGENTS.md` §2.2); a mount
+  with no live backing volume carries the all-zero usage (the honest "no
+  capacity known"), and a decode refuses an internally inconsistent usage
+  (available exceeding free, or free exceeding total) whole.
 - [`ResourceLimitRecord`] — one row of the `RESOURCE_LIMITS` response: a
   resource's `kind` ([`LimitKind`]), its effective [`ResourceLimit`]
   (soft/hard), and the caller's current live `usage`. The query takes no

@@ -741,6 +741,70 @@ pub trait FilesystemAttrs {
     fn remove_attr(&mut self, node: NodeId, key: &[u8]) -> Result<(), DriverError>;
 }
 
+/// The space accounting a mounted volume reports about itself.
+///
+/// Sizes are counted in whole blocks of `block_size` bytes — the unit the
+/// mounted format actually allocates in — so a consumer multiplies rather
+/// than guessing a divisor. Every count is 64-bit: a volume, and therefore
+/// its block counts, may exceed what 32 bits (or pointer width) can hold.
+///
+/// `avail_blocks` is the portion of `free_blocks` an ordinary data
+/// allocation may consume; a format that holds blocks back (e.g. a metadata
+/// reserve that keeps a full volume repairable) reports the smaller number
+/// here, so `avail_blocks <= free_blocks` always holds and a consumer is
+/// never promised space the driver would refuse.
+///
+/// `files` / `files_free` report the volume's inode capacity for a format
+/// with a fixed inode table. A format whose inodes are allocated dynamically
+/// (`rustfs`) has no fixed capacity to report and carries `0` in both — the
+/// honest "untracked" answer, never a fabricated total.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub struct VolumeStats {
+    /// The allocation unit, in bytes, the block counts are denominated in.
+    pub block_size: u32,
+    /// Total data blocks the volume holds.
+    pub total_blocks: u64,
+    /// Blocks currently unallocated.
+    pub free_blocks: u64,
+    /// Blocks an ordinary data allocation may still consume
+    /// (`free_blocks` minus any reserve the format withholds).
+    pub avail_blocks: u64,
+    /// Total inode capacity, or `0` when the format tracks no fixed table.
+    pub files: u64,
+    /// Free inodes, or `0` when the format tracks no fixed table.
+    pub files_free: u64,
+}
+
+/// Whole-volume space statistics for a mounted filesystem.
+///
+/// This is a **versioned `abi-v1` extension** — a *separate* trait from
+/// [`FilesystemRead`] / [`FilesystemWrite`] / [`FilesystemSecurity`] /
+/// [`FilesystemTimestamps`] / [`FilesystemAttrs`], never a widening of any
+/// of them nor of the frozen [`Filesystem`]; new behaviour ships as a new
+/// trait. Every mountable driver implements it: a volume that can be
+/// mounted always has a size, and reporting it is a read of the driver's
+/// own accounting, never a device walk.
+///
+/// The driver only *reports* the numbers; it makes no permission decision
+/// (the query is authorised kernel-side before the driver is reached).
+///
+/// # Capabilities
+///
+/// Calls are reached only through the kernel-issued
+/// [`DriverHandle`](crate::driver::DriverHandle) the host minted at load
+/// time ([`CapabilityId::DRV_LOAD`](crate::CapabilityId::DRV_LOAD)).
+pub trait FilesystemStats {
+    /// Report the volume's current space accounting.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::DeviceFault`] on an unrecoverable failure of the
+    ///   underlying device (a driver that keeps its accounting in memory
+    ///   never fails).
+    fn stats(&mut self) -> Result<VolumeStats, DriverError>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1388,5 +1452,37 @@ mod tests {
             fs.set_attr(NodeId::NONE, b"user.comment", b"x"),
             Err(DriverError::NotFound)
         );
+    }
+
+    /// Reports a fixed accounting; a zeroed record models an untracked
+    /// inode table.
+    struct MockStatsFs {
+        stats: VolumeStats,
+    }
+
+    impl FilesystemStats for MockStatsFs {
+        fn stats(&mut self) -> Result<VolumeStats, DriverError> {
+            Ok(self.stats)
+        }
+    }
+
+    #[test]
+    fn mock_stats_fs_reports_stored_record() {
+        let stats = VolumeStats {
+            block_size: 4096,
+            total_blocks: 1024,
+            free_blocks: 512,
+            avail_blocks: 480,
+            files: 0,
+            files_free: 0,
+        };
+        let mut fs = MockStatsFs { stats };
+        let reported = fs.stats().expect("stats");
+        assert_eq!(reported, stats);
+        // The contract: available never exceeds free, free never exceeds
+        // total, and the dynamic-inode answer is the zero pair.
+        assert!(reported.avail_blocks <= reported.free_blocks);
+        assert!(reported.free_blocks <= reported.total_blocks);
+        assert_eq!((reported.files, reported.files_free), (0, 0));
     }
 }

@@ -379,6 +379,19 @@ pub(crate) fn foreground_test_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// Serialises host tests that touch the process-global stopped-task overlay
+/// ([`STOPPED_TASKS`]): it is keyed by numeric task id, and each test's own
+/// leaked scheduler hands out the same small ids, so two tests signalling
+/// "their" child in parallel would insert and remove each other's entries.
+/// Every test that stops, continues, or terminates a child takes this lock.
+#[cfg(test)]
+pub(crate) fn stopped_overlay_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // A panicking holder does not corrupt the `()` state; continue.
+    LOCK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Test-only: consume and decode the pending foreground slot, so the console
 /// line-discipline tests can assert what the filter queued without invoking
 /// whichever process-global hook another test may have installed.
@@ -490,6 +503,7 @@ mod tests {
 
     #[test]
     fn terminate_ends_the_child_and_records_its_signalled_status() {
+        let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
         wait.register_child(TaskId(7), TaskId(child));
@@ -515,6 +529,7 @@ mod tests {
 
     #[test]
     fn kill_records_its_own_status() {
+        let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
         wait.register_child(TaskId(7), TaskId(child));
@@ -534,6 +549,7 @@ mod tests {
 
     #[test]
     fn interrupt_terminates_with_the_ctrl_c_status() {
+        let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
         wait.register_child(TaskId(7), TaskId(child));
@@ -557,6 +573,7 @@ mod tests {
 
     #[test]
     fn stop_parks_marks_and_reports_and_continue_lifts_it() {
+        let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
         wait.register_child(TaskId(7), TaskId(child));
@@ -591,6 +608,7 @@ mod tests {
 
     #[test]
     fn continue_clears_a_stop_the_parent_never_observed() {
+        let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
         wait.register_child(TaskId(7), TaskId(child));
@@ -615,6 +633,7 @@ mod tests {
 
     #[test]
     fn killing_a_stopped_child_lifts_its_overlay_entry() {
+        let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
         wait.register_child(TaskId(7), TaskId(child));
@@ -637,6 +656,7 @@ mod tests {
 
     #[test]
     fn foreground_deliver_maps_only_the_line_discipline_signals() {
+        let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, _child_pid) = spawn_child(scheduler);
         wait.register_child(TaskId(7), TaskId(child));
@@ -697,6 +717,7 @@ mod tests {
 
     #[test]
     fn continue_of_a_running_child_is_a_harmless_success() {
+        let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
         wait.register_child(TaskId(7), TaskId(child));
@@ -718,6 +739,7 @@ mod tests {
 
     #[test]
     fn a_signalled_child_cannot_be_signalled_twice() {
+        let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
         wait.register_child(TaskId(7), TaskId(child));

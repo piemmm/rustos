@@ -307,6 +307,65 @@ attach mapping to `MountError::Mount`. The shared page walk and the
 `source on target type fstype (options)` rendering carry their own unit
 tests in `lib/procinfo` (`cargo test -p rustos-procinfo`).
 
+## `df` — report filesystem space usage (`userland/apps/df`)
+
+`rustos-df` is the GNU coreutils `df` (`plans/APPS.md` §12.1 Stage C,
+`AGENTS.md` §16.7): one row per mounted filesystem — the volume's size,
+used and available space, use percentage, and mount point — or, with
+`file` operands, the filesystem containing each operand (chosen by the
+longest mount-point prefix, one row per filesystem). Like `mount`'s
+listing, the data is a read of live system state through the ungated
+`sysinfo-v1` `MOUNT_LIST` query (the shared
+`rustos_procinfo::for_each_mount` walk — never a second query client and
+never a `/proc`), whose rows carry each backing volume's `VolumeStats`
+as the mounted driver reports its own accounting. The default view hides
+capacity-less mounts (the in-RAM view bindings) and further mounts of an
+already-listed volume, noting the hidden count on fd 3
+(`fs.mounts_omitted`, `AGENTS.md` §20.1); `-a` shows everything.
+`-T`/`-t`/`-x` add and filter by filesystem type, `-i` reports inode
+counts (a dynamic-inode volume reports the honest zeros), `-P` selects
+the POSIX portable wording, `--total` appends a summed row, `-l` accepts
+the local-only filter (every RustOS mount is local), and
+`-k`/`-h`/`-H`/`--si`/`-B <size>` select the scale through the shared
+`rustos_util::size` vocabulary `du` uses too (`AGENTS.md` §2.2). Columns
+are auto-sized; numbers right-align. A missing or relative operand is
+diagnosed on standard error and the report continues (exit `1`; mount
+points are absolute and the tool never guesses a resolution); filters
+that leave nothing report the GNU `no file systems processed` error.
+`--output` and `--sync`/`--no-sync` are not yet available (documented in
+the bundle's `Help/`). Manifest: `CAP_CONSOLE_WRITE` + `CAP_FS_ACCESS`,
+exactly as `ps`. `cargo test -p rustos-df` drives the parser, the
+selection/filter/duplicate rules, every column format, the operand
+paths, the fd-3 record, and the failure paths against in-memory
+`sysinfod`/probe fixtures, plus the thirteen-locale `OPTIONS` pinning.
+
+## `du` — estimate file space usage (`userland/apps/du`)
+
+`rustos-du` is the GNU coreutils `du` (`plans/APPS.md` §12.1 Stage C,
+`AGENTS.md` §16.7): it walks each path operand (default `.`) and
+reports, post-order, the storage each directory's tree occupies as
+`size<TAB>path` rows. The default measure is each node's **allocated**
+on-disk bytes — the `fs_stat` `allocated` field the mounted format
+reports — so sparse or compressed files count what they really occupy;
+`--apparent-size`/`-b` measure apparent lengths. `-a` adds a row per
+file, `-s` reports only the operands, `-c` appends a grand total, `-d`
+bounds the reported depth (sums are unaffected), `-S` excludes
+subdirectories from a directory's own row, `-0` NUL-terminates rows, and
+`-k`/`-m`/`-h`/`--si`/`-B <size>` select the scale through the shared
+`rustos_util::size` vocabulary (`AGENTS.md` §2.2), later selections
+winning as in GNU. The walk is an explicit frame stack (a deep tree can
+never exhaust the call stack) over the kernel-authorised `fs_*`
+syscalls; an unreachable path is diagnosed on standard error and the
+walk continues (exit `1`), an unreadable directory contributing nothing
+rather than a guessed partial sum. RustOS has no hard links yet, so
+nothing can be counted twice and the GNU link-deduplication switches do
+not exist; `-x` awaits device identity (documented in the bundle's
+`Help/`). Manifest: `CAP_CONSOLE_WRITE` + `CAP_FS_ACCESS`. `cargo test
+-p rustos-du` drives the parser (clusters, values, conflicts), the
+post-order accumulation, every option's rendering, the diagnosed-path
+paths, and the thirteen-locale `OPTIONS` pinning against an in-memory
+tree fixture.
+
 ## `cat` — concatenate files to the terminal (`userland/apps/cat`)
 
 `rustos-cat` concatenates files and standard input (`AGENTS.md` §3; a

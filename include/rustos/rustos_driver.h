@@ -138,7 +138,7 @@ typedef struct ros_driver_register_reply {
     uint64_t handle;
 } ros_driver_register_reply_t;
 
-/* Block-device geometry (drivers/storage/*). */
+/* Block-device geometry (the drivers/storage class). */
 typedef struct ros_block_geometry {
     uint32_t block_size;
     uint64_t block_count;
@@ -166,7 +166,7 @@ typedef struct ros_health_snapshot {
     uint8_t critical_warning;
 } ros_health_snapshot_t;
 
-/* Identifying tuple for a discovered device (drivers/bus/*).
+/* Identifying tuple for a discovered device (the drivers/bus class).
 * `device_class` mirrors the Rust `class` field (renamed for C++). */
 typedef struct ros_bus_device {
     uint32_t vendor;
@@ -176,7 +176,8 @@ typedef struct ros_bus_device {
     uint64_t address;
 } ros_bus_device_t;
 
-/* Active display mode (drivers/display/*); `format` is a ROS_DISPLAY_FORMAT_*. */
+/* Active display mode (the drivers/display class); `format` is a
+* ROS_DISPLAY_FORMAT_*. */
 typedef struct ros_display_mode {
     uint32_t width_px;
     uint32_t height_px;
@@ -214,6 +215,19 @@ typedef struct ros_node_times {
     ros_time64_t changed;
 } ros_node_times_t;
 
+/* A mounted volume's space accounting, in whole blocks of block_size bytes.
+* avail_blocks <= free_blocks <= total_blocks always holds; files/files_free
+* are 0 when the format tracks no fixed inode table. */
+typedef struct ros_volume_stats {
+    uint32_t block_size;
+    uint32_t reserved0;
+    uint64_t total_blocks;
+    uint64_t free_blocks;
+    uint64_t avail_blocks;
+    uint64_t files;
+    uint64_t files_free;
+} ros_volume_stats_t;
+
 /* A single input event; `kind` is a ROS_INPUT_EVENT_KIND_*. */
 typedef struct ros_input_event {
     uint8_t kind;
@@ -222,7 +236,7 @@ typedef struct ros_input_event {
     int32_t value;
 } ros_input_event_t;
 
-/* A 48-bit IEEE 802 link-layer address (drivers/network/*). */
+/* A 48-bit IEEE 802 link-layer address (the drivers/network class). */
 typedef struct ros_mac_address {
     uint8_t octets[ROS_MAC_ADDRESS_LEN];
 } ros_mac_address_t;

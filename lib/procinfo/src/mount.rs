@@ -112,7 +112,7 @@ mod tests {
     use crate::transport::Transport;
     use alloc::vec::Vec;
     use core::cell::RefCell;
-    use rustos_abi::driver::filesystem::MountFlags;
+    use rustos_abi::driver::filesystem::{MountFlags, VolumeStats};
     use rustos_abi::sysinfo::{
         MountListRequest, MountRecord, SysinfoQueryId, SysinfoRequestHeader,
     };
@@ -160,7 +160,7 @@ mod tests {
     }
 
     fn record(source: &[u8], target: &[u8], fstype: &[u8], flags: MountFlags) -> MountRecord {
-        MountRecord::new(source, target, fstype, flags).expect("record")
+        MountRecord::new(source, target, fstype, flags, VolumeStats::default()).expect("record")
     }
 
     fn collect(fixture: &Fixture) -> Result<Vec<MountRecord>, ListError> {

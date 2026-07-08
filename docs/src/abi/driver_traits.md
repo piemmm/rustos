@@ -392,6 +392,31 @@ whose backing format keeps no timestamps (or only narrower legacy ones it
 cannot widen) simply does not implement it. The first implementation is
 the native [`rustfs` driver](../filesystem/rustfs.md).
 
+Every mountable driver additionally implements a separate versioned
+whole-volume statistics trait, `FilesystemStats`, alongside (never a
+widening of) the others (`AGENTS.md` §2.4 / §9):
+
+| Method    | Capability gate    |
+|-----------|--------------------|
+| `stats()` | Driver handle.     |
+
+`stats` returns a `VolumeStats { block_size, total_blocks, free_blocks,
+avail_blocks, files, files_free }` record: whole blocks of the unit the
+mounted format actually allocates in, with every count 64-bit
+(`AGENTS.md` §26.6 — a volume may exceed what 32 bits hold).
+`avail_blocks` is the portion of `free_blocks` an ordinary data
+allocation may consume (a format that withholds a reserve — rustfs's
+metadata reserve — reports the smaller number), so `avail_blocks ≤
+free_blocks ≤ total_blocks` always holds and consumers are never
+promised space the driver would refuse. `files`/`files_free` report a
+fixed inode table's capacity; a format that allocates inodes dynamically
+(rustfs) carries the honest `0`/`0` "untracked" pair, never a fabricated
+total. The report is a read of the driver's own accounting, never a
+device walk, and it feeds the mount snapshot the System Information
+API's `MOUNT_LIST` rows carry (so `df` renders it without a `/proc`).
+The first implementation is the native
+[`rustfs` driver](../filesystem/rustfs.md).
+
 ## Block
 
 `trait Block`. Methods:

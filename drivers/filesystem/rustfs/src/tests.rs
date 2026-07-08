@@ -5140,3 +5140,35 @@ fn node_info_reports_mapped_extent_allocation() {
     // The freed tail leaves one mapped block.
     assert_eq!(fs.node_info(node).expect("info").allocated, 512);
 }
+
+#[test]
+fn stats_report_tracks_allocation() {
+    let mut fs = fmt(512, 256, 32);
+    let before = fs.stats().expect("stats");
+    // The geometry is reported verbatim; the invariants hold; the reserve is
+    // withheld from the available count; and the dynamic inode tree reports
+    // the honest zero pair.
+    assert_eq!(before.block_size, 512);
+    assert_eq!(before.total_blocks, 256);
+    assert!(before.free_blocks <= before.total_blocks);
+    assert_eq!(
+        before.avail_blocks,
+        before.free_blocks - METADATA_RESERVE,
+        "the metadata reserve is withheld from ordinary data allocation"
+    );
+    assert_eq!((before.files, before.files_free), (0, 0));
+
+    // Writing data consumes free blocks; the report tracks the allocator.
+    let root = fs.root();
+    fs.create(root, b"file", NodeKind::RegularFile)
+        .expect("create");
+    let body = alloc::vec![7u8; 1500];
+    assert_eq!(fs.write_at(root, b"file", 0, &body), Ok(1500));
+    let after = fs.stats().expect("stats");
+    assert!(
+        after.free_blocks < before.free_blocks,
+        "allocation shrinks the free count"
+    );
+    assert!(after.avail_blocks <= after.free_blocks);
+    assert!(after.free_blocks <= after.total_blocks);
+}

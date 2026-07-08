@@ -361,7 +361,7 @@ mod tests {
     use crate::events;
     use crate::source::{Caller, ProcessScope, SysinfoSource};
     use core::cell::RefCell;
-    use rustos_abi::driver::filesystem::MountFlags;
+    use rustos_abi::driver::filesystem::{MountFlags, VolumeStats};
     use rustos_abi::sysinfo::{
         CpuTimeListRequest, CpuTimeRecord, KernelMemoryStats, LoadAverage, MountListRequest,
         MountRecord, ProcessListRequest, ProcessRecord, ProcessState, ResourceLimitRecord,
@@ -463,12 +463,20 @@ mod tests {
                 ],
                 hwtree: [1, 2, 3, 4, 5],
                 mounts: [
-                    MountRecord::new(b"rootfs", b"/", b"rustfs", MountFlags::READ_ONLY).unwrap(),
+                    MountRecord::new(
+                        b"rootfs",
+                        b"/",
+                        b"rustfs",
+                        MountFlags::READ_ONLY,
+                        VolumeStats::default(),
+                    )
+                    .unwrap(),
                     MountRecord::new(
                         b"data",
                         b"/Storage/data",
                         b"rustfs",
                         MountFlags::NOSUID.union(MountFlags::NODEV),
+                        VolumeStats::default(),
                     )
                     .unwrap(),
                 ],

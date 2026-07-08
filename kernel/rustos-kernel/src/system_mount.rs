@@ -53,9 +53,8 @@
 //! per board. The boot-time [`LateFilesystem`] / [`MountedFilesystemService`]
 //! statics must be a *single* concrete type, so the mounted driver is erased
 //! behind [`KernelFs`] (a `Box<dyn KernelFs>`); the forwarding impls below
-//! let the boxed driver satisfy the
-//! `FilesystemRead + FilesystemWrite + FilesystemSecurity + Send` bound the
-//! service requires.
+//! let the boxed driver satisfy the read/write/security/stats-plus-`Send`
+//! bound the service requires.
 //!
 //! Until the writable root driver is registered (after the encrypted root is
 //! unlocked), every operation on `/` and its writable subtrees fails closed
@@ -68,8 +67,8 @@ use alloc::vec::Vec;
 
 use rustos_abi::driver::block::Block;
 use rustos_abi::driver::filesystem::{
-    DirEntry, FilesystemRead, FilesystemSecurity, FilesystemWrite, NodeId, NodeInfo, NodeKind,
-    NodeSecurity,
+    DirEntry, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite, NodeId,
+    NodeInfo, NodeKind, NodeSecurity, VolumeStats,
 };
 use rustos_abi::{DriverError, DriverHandle};
 use rustos_drv_fs_rustfs::{RustFs, SYSTEM_VOLUME_KEY};
@@ -83,15 +82,22 @@ use crate::shared_block::DriverStoreService;
 
 /// The mounted-volume filesystem driver, type-erased.
 ///
-/// A blanket trait over the three structural surfaces the secured VFS
-/// delegates to, plus [`Send`] (the mount lives behind a sleeping lock shared
-/// across the per-CPU syscall handlers). The blanket impl makes every
-/// concrete `RustFs<…>` a `KernelFs`; the `Box<dyn KernelFs>` forwarding
-/// impls below let the boxed, board-specific driver be the single concrete
-/// type the boot-time statics name.
-pub trait KernelFs: FilesystemRead + FilesystemWrite + FilesystemSecurity + Send {}
+/// A blanket trait over the structural surfaces the secured VFS delegates
+/// to — read, write, security, and the whole-volume space accounting the
+/// mount snapshot reports — plus [`Send`] (the mount lives behind a sleeping
+/// lock shared across the per-CPU syscall handlers). The blanket impl makes
+/// every concrete `RustFs<…>` a `KernelFs`; the `Box<dyn KernelFs>`
+/// forwarding impls below let the boxed, board-specific driver be the single
+/// concrete type the boot-time statics name.
+pub trait KernelFs:
+    FilesystemRead + FilesystemWrite + FilesystemSecurity + FilesystemStats + Send
+{
+}
 
-impl<T> KernelFs for T where T: FilesystemRead + FilesystemWrite + FilesystemSecurity + Send {}
+impl<T> KernelFs for T where
+    T: FilesystemRead + FilesystemWrite + FilesystemSecurity + FilesystemStats + Send
+{
+}
 
 impl FilesystemRead for Box<dyn KernelFs> {
     fn root(&self) -> NodeId {
@@ -161,6 +167,12 @@ impl FilesystemWrite for Box<dyn KernelFs> {
 impl FilesystemSecurity for Box<dyn KernelFs> {
     fn security(&mut self, node: NodeId) -> Result<NodeSecurity, DriverError> {
         (**self).security(node)
+    }
+}
+
+impl FilesystemStats for Box<dyn KernelFs> {
+    fn stats(&mut self) -> Result<VolumeStats, DriverError> {
+        (**self).stats()
     }
 }
 
@@ -340,7 +352,10 @@ pub fn install_system_mount<B: Block + 'static>(
         return;
     }
     let driver: Box<dyn KernelFs> = Box::new(fs);
-    if LATE_FILESYSTEM.register(system_handle, driver).is_err() {
+    if LATE_FILESYSTEM
+        .register(system_handle, driver, "RustFsSystem", "rustfs")
+        .is_err()
+    {
         // Registered once per boot; a refusal is a logic error.
         unavailable(audit, "already_installed");
         return;
@@ -382,7 +397,10 @@ pub fn register_writable_state(driver: Box<dyn KernelFs>, audit: &dyn Sink) {
         unavailable(audit, "writable_handle_invalid");
         return;
     };
-    if LATE_FILESYSTEM.register(handle, driver).is_err() {
+    if LATE_FILESYSTEM
+        .register(handle, driver, "RustFsRoot", "rustfs")
+        .is_err()
+    {
         unavailable(audit, "writable_already_installed");
         return;
     }

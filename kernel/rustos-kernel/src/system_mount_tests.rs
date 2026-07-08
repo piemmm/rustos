@@ -11,8 +11,8 @@
 use alloc::boxed::Box;
 
 use rustos_abi::driver::filesystem::{
-    DirEntry, FilesystemRead, FilesystemSecurity, FilesystemWrite, NodeId, NodeInfo, NodeKind,
-    NodeSecurity,
+    DirEntry, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite, NodeId,
+    NodeInfo, NodeKind, NodeSecurity, VolumeStats,
 };
 use rustos_abi::DriverError;
 use rustos_kernel_core::Path;
@@ -103,6 +103,19 @@ impl FilesystemWrite for SentinelFs {
 impl FilesystemSecurity for SentinelFs {
     fn security(&mut self, _node: NodeId) -> Result<NodeSecurity, DriverError> {
         Ok(NodeSecurity::new(0o644, 1, 2))
+    }
+}
+
+impl FilesystemStats for SentinelFs {
+    fn stats(&mut self) -> Result<VolumeStats, DriverError> {
+        Ok(VolumeStats {
+            block_size: 512,
+            total_blocks: 17,
+            free_blocks: 17,
+            avail_blocks: 17,
+            files: 0,
+            files_free: 0,
+        })
     }
 }
 
@@ -296,4 +309,11 @@ fn boxed_kernel_fs_forwards_every_trait_method() {
     boxed
         .security(NodeId::from_raw(1))
         .expect("security forwards");
+
+    // FilesystemStats
+    assert_eq!(
+        boxed.stats().expect("stats forwards").total_blocks,
+        17,
+        "stats forwards to the inner driver"
+    );
 }

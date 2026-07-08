@@ -1705,31 +1705,35 @@ mod tests {
         // dispatcher re-parks the CPU's translation (so a dead task's
         // page-table teardown can never free a root a CPU still walks); a
         // kernel kthread's step, which activated no user root, does not.
-        // The hook slot is process-global (set-once), so the assertions
-        // are deltas, robust to sibling tests having installed it first.
-        static PARKS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+        // The hook slot is process-global (set-once) and other tests'
+        // dispatches on sibling threads invoke it too, so the counter is
+        // thread-local: this thread observes only its own steps' parks and
+        // the deltas cannot race a concurrently running test.
+        std::thread_local! {
+            static PARKS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+        }
         fn count_park() {
-            PARKS.fetch_add(1, Ordering::SeqCst);
+            PARKS.with(|parks| parks.set(parks.get() + 1));
         }
         install_park_translation(count_park);
 
         let rec = recorder();
         let hits = leak_counter();
         let mut user = user_control_with(RecordingCs(rec), BoxStack::new(), hits);
-        let before = PARKS.load(Ordering::SeqCst);
+        let before = PARKS.with(core::cell::Cell::get);
         let _ = dispatch_step(&mut user, 63);
         assert_eq!(
-            PARKS.load(Ordering::SeqCst),
+            PARKS.with(core::cell::Cell::get),
             before + 1,
             "a user-task switch-back parks the CPU's translation"
         );
 
         let rec = recorder();
         let mut kernel = control_with(RecordingCs(rec), BoxStack::new());
-        let before = PARKS.load(Ordering::SeqCst);
+        let before = PARKS.with(core::cell::Cell::get);
         let _ = dispatch_step(&mut kernel, 63);
         assert_eq!(
-            PARKS.load(Ordering::SeqCst),
+            PARKS.with(core::cell::Cell::get),
             before,
             "a kernel kthread's step activates no user root and parks nothing"
         );

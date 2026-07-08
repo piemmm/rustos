@@ -1,0 +1,12 @@
+# Signed-AppInfo manifest source for the `du` command app
+# (plans/APPS.md deliverable 8). Discovered by the build's app-bundle
+# composer; the capability list is the bundle's request, intersected with
+# the launching user's grants. CAP_CONSOLE_WRITE covers the inherited
+# standard output/error streams; CAP_FS_ACCESS is the tool's job —
+# statting and walking its path operands (and reading its own bundle's
+# Help/ documents) through the secured VFS. It reads no standard input.
+id = "os.rustos.du"
+name = "du"
+version = "0.1.0"
+kind = "command"
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS"]

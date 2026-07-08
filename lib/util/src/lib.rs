@@ -11,6 +11,10 @@
 //! * [`fmt`] — no-allocation numeric formatters for audit-log fields.
 //!   Promoted from `kernel/sec` in Stage 2.5 (`kernel/ipc`) once a second
 //!   caller materialised; consumed by `kernel/sec` and `kernel/ipc`.
+//! * [`size`] — GNU coreutils-style block-size parsing and human-readable
+//!   size formatting, consumed by the `du` and `df` command apps
+//!   (`plans/APPS.md`), so the size grammar and ceiling-rounding rules
+//!   exist in exactly one place.
 //!
 //! The flat device-tree (FDT) parser that once lived here has been folded
 //! into the single shared `lib/fdt` reader, which now owns the generic
@@ -24,3 +28,4 @@
 #![deny(missing_docs)]
 
 pub mod fmt;
+pub mod size;

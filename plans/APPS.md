@@ -775,7 +775,8 @@ behind the floor work below).
 - **Stage C — missing coreutils commands (in progress; all wanted).**
   Every GNU coreutils command implementable on the current floor, in
   prioritised batches. **Done: `true`, `false`, `yes`, `basename`,
-  `dirname`, `mkdir`, `rmdir`, `head`, `wc`, `tee`, `seq`, `whoami`** — each a
+  `dirname`, `mkdir`, `rmdir`, `head`, `wc`, `tee`, `seq`, `whoami`,
+  `du`, `df`** — each a
   full self-contained store bundle (console-write +
   `CAP_FS_ACCESS` request — plus console-read for the stdin-reading
   `head`/`wc`/`tee` — store-only: the §18.6 boot floor never grows,
@@ -846,7 +847,30 @@ behind the floor work below).
   `rustos_procinfo` account-directory walk (the `top` USER-column
   helper, one definition); a uid with no directory entry is the GNU
   `cannot find name for user ID` diagnostic, and a failed walk is a
-  service error, never misreported as a missing name. `echo` and `pwd`
+  service error, never misreported as a missing name. `du` walks its
+  operands post-order over the `fs_*` seams with an explicit frame
+  stack, measuring each node's `fs_stat` `allocated` bytes by default
+  (`--apparent-size`/`-b` for lengths) and implementing `-a`/`-s`/`-c`/
+  `-d`/`-S`/`-0` plus the GNU unit options; the `-B` grammar, ceiling
+  block scaling, and `human_ceiling` renderings live once in
+  `rustos_util::size` (a §2.2 `lib/util` promotion, shared with `df`).
+  `df` renders the GNU table (auto-sized columns, `-a`/`-T`/`-t`/`-x`/
+  `-i`/`-P`/`-l`/`--total`, operand→covering-mount by longest prefix)
+  from the ungated `MOUNT_LIST` rows, which now carry each volume's
+  `VolumeStats` — the support work: a new versioned `FilesystemStats`
+  driver-ABI extension (`stats() -> VolumeStats`, rustfs reports its
+  live accounting with the metadata reserve withheld from
+  `avail_blocks` and the honest zero inode pair), `MountRecord` evolved
+  in place to embed the usage block (invariant-checked on construct and
+  decode; C header regenerated), and the kernel mount snapshot now
+  reporting each backed mount's registration `source`/`fstype` names
+  (`LateFilesystem::register` carries them) plus the driver's live
+  stats — an unbacked mount truthfully reports empty names and the
+  all-zero usage, which `df` hides by default and notes on fd 3
+  (`fs.mounts_omitted`). Documented divergences: `du` has no link
+  deduplication (no hard links yet, Stage E) and no `-x` (no device
+  identity); `df` stages `--output`/`--sync`; neither reads the
+  `*_BLOCK_SIZE` environment family. `echo` and `pwd`
   from the first batch
   stay `elsh` builtins for now (`pwd` needs the shell's cwd state, and
   the shell resolves builtins first, so a store bundle of either would
@@ -856,7 +880,7 @@ behind the floor work below).
   `date`, `id`; then the text tools `sort`,
   `uniq`, `tr`, `cut`, `paste`, `comm`, `nl`, `tac`, `fold`, `expand`,
   `od`, `split`, `shuf`, `truncate`, `mktemp`, `realpath`, `chgrp`,
-  `sha256sum`/`cksum`, `base64`, `df`, `du`). Each is a full self-contained
+  `sha256sum`/`cksum`, `base64`). Each is a full self-contained
   bundle (§16.5) with tests and a thirteen-locale `Help/` tree; anything a
   shell builtin duplicates moves out of `elsh` where applicable.
 - **Stage D — filesystem timestamps (planned).** Plumb the driver-level

@@ -17,8 +17,8 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use rustos_abi::driver::filesystem::{
-    DirEntry, FilesystemRead, FilesystemSecurity, FilesystemWrite, NodeId, NodeInfo, NodeKind,
-    NodeSecurity,
+    DirEntry, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite, NodeId,
+    NodeInfo, NodeKind, NodeSecurity, VolumeStats,
 };
 use rustos_abi::driver::DriverError;
 
@@ -331,5 +331,37 @@ impl FilesystemSecurity for RwMockFs {
     fn security(&mut self, node: NodeId) -> Result<NodeSecurity, DriverError> {
         let idx = Self::index(node)?;
         self.sec.get(idx).copied().ok_or(DriverError::NotFound)
+    }
+}
+
+/// The mock's fixed allocation unit for its derived space accounting.
+const MOCK_BLOCK_SIZE: u32 = 512;
+
+/// The mock's fixed capacity, in [`MOCK_BLOCK_SIZE`] blocks.
+const MOCK_TOTAL_BLOCKS: u64 = 4096;
+
+impl FilesystemStats for RwMockFs {
+    fn stats(&mut self) -> Result<VolumeStats, DriverError> {
+        // Derived from the live tree, not fabricated: each file occupies
+        // whole blocks of its byte length, over a fixed test capacity, so a
+        // test observes the free count move with real writes. There is no
+        // reserve and no fixed inode table.
+        let used: u64 = self
+            .nodes
+            .iter()
+            .map(|node| match node {
+                RwNode::File(bytes) => (bytes.len() as u64).div_ceil(u64::from(MOCK_BLOCK_SIZE)),
+                RwNode::Dir(_) => 0,
+            })
+            .sum();
+        let free = MOCK_TOTAL_BLOCKS.saturating_sub(used);
+        Ok(VolumeStats {
+            block_size: MOCK_BLOCK_SIZE,
+            total_blocks: MOCK_TOTAL_BLOCKS,
+            free_blocks: free,
+            avail_blocks: free,
+            files: 0,
+            files_free: 0,
+        })
     }
 }
