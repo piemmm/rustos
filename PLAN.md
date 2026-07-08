@@ -2992,11 +2992,13 @@ deliverables (where they conflict, §19 wins) and follows the same shrink-only,
 fail-closed discipline as §17; each item lands with its own tests + docs.
 
 **Standing directive (owner):** every *independent* burn-down item
-(1, 3, 4, 5, 6, 7, 8, 11, 13) is **landed and verified green**. The remaining
-items (2, 9, 10) are **stage-blocked** and carry a binding
-**[DO IMMEDIATELY ON UNBLOCK]** order — the session that lands the prerequisite
-stage must complete the matching §19 item before other Stage work proceeds;
-item 12 stays aspirational per charter §19.7/§19.8.
+(1, 3, 4, 5, 6, 7, 8, 11, 13) is **landed and verified green**. Items (2, 10)
+are **stage-blocked** and carry a binding **[DO IMMEDIATELY ON UNBLOCK]**
+order — the session that lands the prerequisite stage must complete the
+matching §19 item before other Stage work proceeds. Item 9 is **unblocked**
+(its prerequisite, Stage 6, is complete) and is staged for full delivery by
+`.junie/fstree-next-plan.md` S8; item 12 stays aspirational per charter
+§19.7/§19.8.
 
 Landed (done):
 - §19.1 side channels — per-port `SideChannelMitigation` honest profiles
@@ -3097,11 +3099,17 @@ Landed (done):
 - §19.10 memory tagging — `MemoryTagging` HAL + the `kernel/mem` slab software
   UAF tag-check (on-by-default floor everywhere).
 
+Unblocked — staged (`.junie/fstree-next-plan.md` S8):
+- Item 9 — §19.5 parser sandboxing (minimum-capability sandbox process
+  model). Its prerequisite (Stage 6) is complete, so it is no longer
+  stage-blocked: the facility is built in full — spawn with an exact
+  minimum grant, shared-memory parse IPC, crash containment with the
+  sandbox replaced and the event logged (§19.4) — and the in-tree parsers
+  of untrusted input are moved behind it as part of completing the item.
+
 Stage-blocked **[DO IMMEDIATELY ON UNBLOCK]**:
 - Item 2 — §19.4 signed log anchors + per-service `CAP_LOG_WRITE` partitioning
   (needs a private-key signing API, Stage 2; + persisted log store, Stage 5).
-- Item 9 — §19.5 parser sandboxing (minimum-capability sandbox process model,
-  Stage 6).
 - Item 10 — §19.2 stack-canary/shadow-stack + per-arch live fault fix-up and
   remaining §19.3 `build --reproducible` / no-post-install-fetch (Stage 6/8).
 - §19.1 KPTI/IBPB and §19.10 auto-enable Arm MTE on `FEAT_MTE` close with the
