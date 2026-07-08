@@ -121,9 +121,13 @@ Do **not** begin a stage before all its listed dependencies are complete.
   seam, and `FastRng` (xoshiro256++) — the §19.2 platform-RNG seam.
 - `lib/util` holds only items with ≥ 2 independent callers (§2.3):
   `fmt` (audit-field formatters; `kernel/sec` + `kernel/ipc`, promoted in
-  Stage 2.5) and `size` (the GNU `--block-size` grammar, ceiling block
+  Stage 2.5), `size` (the GNU `--block-size` grammar, ceiling block
   scaling, and human-readable renderings; the `du` + `df` command apps,
-  `plans/APPS.md` Stage C).
+  `plans/APPS.md` Stage C), `cfloat` (the C-locale printf float renderer;
+  the `seq` + `printf` command apps, hoisted out of `seq` when `printf`
+  became the second consumer), and `cnum` (the C-locale `strtod` scanner
+  with longest-prefix `endptr` semantics and exact hex-float rounding;
+  the same two apps).
 - The cross-checked `syscalls.rs` ↔ `table.rs` pair is reserved for Stage 2
   so `cargo xtask abi-check` always sees both halves.
 

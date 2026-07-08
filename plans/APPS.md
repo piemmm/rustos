@@ -776,7 +776,7 @@ behind the floor work below).
   Every GNU coreutils command implementable on the current floor, in
   prioritised batches. **Done: `true`, `false`, `yes`, `basename`,
   `dirname`, `mkdir`, `rmdir`, `head`, `wc`, `tee`, `seq`, `whoami`,
-  `du`, `df`** — each a
+  `du`, `df`, `printf`** — each a
   full self-contained store bundle (console-write +
   `CAP_FS_ACCESS` request — plus console-read for the stdin-reading
   `head`/`wc`/`tee` — store-only: the §18.6 boot floor never grows,
@@ -840,7 +840,25 @@ behind the floor work below).
   runs, `inf` LAST), and the extra-number rounding rule — with one
   documented divergence: the float path computes in `f64`, not glibc's
   `long double` (visibly, `%a` prints the `double` spelling `0x1.8p+0`
-  rather than `%La`'s `0xcp-3`). `whoami` prints the name paired with
+  rather than `%La`'s `0xcp-3`). `printf` implements the full GNU
+  surface — the escape set (`\NNN`/`\xHH`/`\uHHHH`/`\UHHHHHHHH`, `\c`
+  ending all output), every conversion (`diouxX`, `eEfFgGaA`, `%c`,
+  `%s`, `%b` with `\0NNN` octal, `%q` quotearg-style shell quoting,
+  `%%`) with the C flags and `*`-settable width/precision, format
+  reuse, base-0/char-constant argument reading, and the GNU
+  diagnostics and exit model (conversion errors continue and exit `1`;
+  an invalid conversion specification or malformed escape is fatal
+  with prior output kept; the per-conversion flag-validity table is
+  probe-pinned against GNU coreutils). Landing it hoisted the two
+  C-locale engines `seq` already carried into `lib/util` for the
+  second consumer: `rustos_util::cfloat` (the printf float renderer
+  behind `seq -f` and `printf`'s float conversions) and
+  `rustos_util::cnum` (the `strtod` scanner, now with longest-prefix
+  `endptr` semantics — `seq` demands full consumption, `printf`
+  diagnoses the remainder). Two documented divergences: the
+  `f64`-not-`long double` computation (the `seq` precedent) and the
+  RustOS first-argument `-h`/`-?`/`--help` short-help convention
+  (`printf -- -h…` spells such a format). `whoami` prints the name paired with
   the caller's uid: the uid comes from the kernel-attested origin
   record (the ungated `self_origin` syscall) and the name from the
   ungated `USER_DIRECTORY` sysinfod query over the shared
@@ -875,7 +893,7 @@ behind the floor work below).
   stay `elsh` builtins for now (`pwd` needs the shell's cwd state, and
   the shell resolves builtins first, so a store bundle of either would
   be unreachable duplication); moving them out is decided when the
-  builtin/bundle split is revisited. Remaining first batch: `printf`,
+  builtin/bundle split is revisited. Remaining first batch:
   `tail`, `env`, `sleep`,
   `date`, `id`; then the text tools `sort`,
   `uniq`, `tr`, `cut`, `paste`, `comm`, `nl`, `tac`, `fold`, `expand`,

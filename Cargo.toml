@@ -148,6 +148,7 @@ members = [
     "userland/apps/mkdir",
     "userland/apps/mount",
     "userland/apps/mv",
+    "userland/apps/printf",
     "userland/apps/ps",
     "userland/apps/reset",
     "userland/apps/rm",

@@ -8,6 +8,13 @@
 //!
 //! Members:
 //!
+//! * [`cfloat`] — C-locale `printf(3)` floating-point rendering, consumed
+//!   by the `seq` and `printf` command apps (`plans/APPS.md`), so C's
+//!   rounding, flag, and padding rules exist in exactly one place.
+//! * [`cnum`] — C-locale `strtod(3)` scanning (decimal and hexadecimal
+//!   floats, `inf`/`nan`, longest-prefix `endptr` semantics), consumed by
+//!   the `seq` and `printf` command apps, so C's number grammar and its
+//!   exact one-step rounding exist in exactly one place.
 //! * [`fmt`] — no-allocation numeric formatters for audit-log fields.
 //!   Promoted from `kernel/sec` in Stage 2.5 (`kernel/ipc`) once a second
 //!   caller materialised; consumed by `kernel/sec` and `kernel/ipc`.
@@ -27,5 +34,9 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
+extern crate alloc;
+
+pub mod cfloat;
+pub mod cnum;
 pub mod fmt;
 pub mod size;

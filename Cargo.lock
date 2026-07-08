@@ -1457,6 +1457,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-printf"
+version = "0.0.0"
+dependencies = [
+ "rustos-help",
+ "rustos-rt",
+ "rustos-util",
+]
+
+[[package]]
 name = "rustos-procinfo"
 version = "0.0.0"
 dependencies = [
@@ -1564,6 +1573,7 @@ version = "0.0.0"
 dependencies = [
  "rustos-help",
  "rustos-rt",
+ "rustos-util",
 ]
 
 [[package]]

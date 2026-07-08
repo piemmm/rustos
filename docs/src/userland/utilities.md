@@ -613,6 +613,46 @@ diagnostic order), the generation engine (fast-path selection, exact
 big-integer runs, separators across the flush boundary, the extra-number
 rule), and the locale switch-drift pin.
 
+## `printf` — format and print data (`userland/apps/printf`)
+
+`rustos-printf` is the GNU coreutils formatter (a `plans/APPS.md` §12.1
+Stage C store bundle): print ARGUMENTs under the control of FORMAT —
+literal text, backslash escapes (`\NNN`, `\xHH`, `\uHHHH`/`\UHHHHHHHH`,
+and `\c`, which ends all output), and `%` directives (`diouxX` integers,
+`eEfFgGaA` floats, `%c`, `%s`, `%b` with its own `\0NNN`-octal escapes,
+`%q` shell quoting, `%%`) with the C flags (`-+ #0'`), width, and
+precision, both settable to `*`. The FORMAT is reused until every
+ARGUMENT is consumed. Argument conversion follows GNU exactly: base-0
+integers and `strtod` floats (through the shared `rustos_util::cnum`
+scanner), `'x` character constants, silent zero/empty for a missing or
+empty argument, and the GNU diagnostics ("expected a numeric value",
+"value not completely converted", "Numerical result out of range", the
+character-constant warning) with the run continuing and exiting `1`. An
+invalid conversion specification — an unknown letter, or a
+flag/width/precision on a conversion that rejects it (`%b`/`%q` take
+none; the per-conversion validity table is probe-pinned against GNU) —
+and a malformed escape are fatal, with output already rendered kept, as
+GNU keeps it. Floats render through the shared `rustos_util::cfloat`
+engine; `%q` reproduces coreutils `quotearg`'s shell-escape style
+(probe-pinned: bare/safe words, `''`, `"it's"` double-quoting, `\'`
+splices, `$'\t\n'` control groups, octal-escaped non-ASCII bytes).
+
+Two deliberate divergences, documented in the bundle's help: floats
+compute in `f64` rather than `long double` (the `seq` precedent — a
+value beyond double's range prints `inf`), and a *first* argument of
+`-h`/`-?`/`--help` serves the RustOS short-help convention where GNU
+would treat it as FORMAT (`printf -- -h...` spells such a format).
+
+The crate is `no_std` (with `alloc`), has no `unsafe`, and no
+`unwrap`/`expect`/`panic!` in production paths. Its manifest requests
+`CAP_CONSOLE_WRITE` and `CAP_FS_ACCESS` (the short-help read) — within
+the session baseline. `cargo test -p rustos-printf` drives the argument
+converter (base-0/char-constant/float readings, saturation, wrapping),
+the template engine (escapes, every conversion, the validity table, `\c`
+halting, `*` width/precision, flush-before-fatal), the `%q` quoter, the
+reuse loop with its diagnostics and exit statuses, and the locale
+switch-drift pin — all against observed GNU coreutils behaviour.
+
 ## `basename` / `dirname` — lexical name surgery (`userland/apps/basename`, `userland/apps/dirname`)
 
 `rustos-basename` and `rustos-dirname` are the POSIX name tools

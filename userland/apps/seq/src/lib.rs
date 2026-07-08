@@ -63,5 +63,5 @@ pub mod number;
 pub use client::{run, Output, USAGE};
 pub use command::{parse, Command, Job};
 pub use error::SeqError;
-pub use format::{parse_format, Conversion, Format};
+pub use format::{parse_format, Format};
 pub use number::{parse_number, scan_arg, Operand};

@@ -1,6 +1,6 @@
 [package]
-name = "rustos-seq"
-description = "RustOS `seq` CLI: print a sequence of numbers (`plans/APPS.md` §12.1 Stage C)."
+name = "rustos-printf"
+description = "RustOS `printf` CLI: format and print data (`plans/APPS.md` §12.1 Stage C)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,21 +12,22 @@ publish.workspace = true
 workspace = true
 
 # The `Run` binary's freestanding userland runtime (`rustos-rt`) is an
-# optional, on-by-default build feature, mirroring `rustos-yes` and
-# `rustos-head`. `cargo build -p rustos-seq` builds the tool program with
-# it; host tooling builds only the pure *library*, so the host test build
-# never pulls the userland runtime's `_start` / `#[global_allocator]` /
-# panic handler.
+# optional, on-by-default build feature, mirroring `rustos-seq` and
+# `rustos-head`. `cargo build -p rustos-printf` builds the tool program
+# with it; host tooling builds only the pure *library*, so the host test
+# build never pulls the userland runtime's `_start` /
+# `#[global_allocator]` / panic handler.
 [features]
 default = ["program"]
 program = ["dep:rustos-rt"]
 
-# The package is both the `rustos-seq` library (the pure scan + format +
-# generation engine below) and the `Run` entry-point binary of the `seq`
-# tool. The binary is a freestanding pure-Rust program on the native Tier-1
-# targets and an inert host stub elsewhere (see `src/run.rs`).
+# The package is both the `rustos-printf` library (the pure template +
+# argument-conversion engine below) and the `Run` entry-point binary of
+# the `printf` tool. The binary is a freestanding pure-Rust program on the
+# native Tier-1 targets and an inert host stub elsewhere (see
+# `src/run.rs`).
 [[bin]]
-name = "rustos-seq-run"
+name = "rustos-printf-run"
 path = "src/run.rs"
 
 [dependencies]
@@ -35,8 +36,9 @@ path = "src/run.rs"
 # switches use (plans/APPS.md).
 rustos-help = { path = "../../../lib/help", version = "=0.0.0" }
 
-# The shared C-locale printf floating-point renderer behind `-f` and the
-# default formats (`rustos_util::cfloat`, also consumed by `printf`).
+# The shared C-locale engines: printf floating-point rendering
+# (`rustos_util::cfloat`) and `strtod` argument scanning
+# (`rustos_util::cnum`), both also consumed by `seq`.
 rustos-util = { path = "../../../lib/util", version = "=0.0.0" }
 
 # For the freestanding `Run` binary only: the userland runtime `rustos-rt`

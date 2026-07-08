@@ -530,6 +530,7 @@ mod tests {
             ("man", AppKind::Command, MAN_MANIFEST),
             ("mkdir", AppKind::Command, PURE_TOOL_REQUEST),
             ("mv", AppKind::Command, FILE_TOOL_REQUEST),
+            ("printf", AppKind::Command, PURE_TOOL_REQUEST),
             ("ps", AppKind::Command, PS_MANIFEST),
             ("reset", AppKind::Command, RESET_MANIFEST),
             ("rm", AppKind::Command, FILE_TOOL_REQUEST),
