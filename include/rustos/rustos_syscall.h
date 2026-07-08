@@ -96,6 +96,7 @@ extern "C" {
 #define ROS_SYS_SEAT_SWITCH 70u
 #define ROS_SYS_SEAT_REVOKE 71u
 #define ROS_SYS_CONSOLE_FOREGROUND 72u
+#define ROS_SYS_PIPE_CREATE 73u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns ROS_E_WOULD_BLOCK when a
@@ -113,6 +114,28 @@ typedef struct ros_wait_status {
     uint32_t kind;
     int32_t value;
 } ros_wait_status_t;
+
+/* spawn() attach block: the child's credential, base console, and one wire per
+* standard descriptor (fd 0..3). Pass NULL/0 for full inherit. Every wire kind
+* other than the values below (including 0) is reserved and refused; a HANDLE
+* wire names a descriptor of the CALLER'S OWN open table (a file, resource, or
+* pipe end), owner-checked kernel-side before any child state exists. */
+#define ROS_SPAWN_ATTACH_VERSION 1u
+#define ROS_SPAWN_ATTACH_LEN 48u
+#define ROS_FD_WIRE_INHERIT 1u
+#define ROS_FD_WIRE_INHERIT_SLOT 2u
+#define ROS_FD_WIRE_CLOSED 3u
+#define ROS_FD_WIRE_HANDLE 4u
+typedef struct ros_fd_wire {
+    uint32_t kind;
+    uint32_t value;
+} ros_fd_wire_t;
+typedef struct ros_spawn_attach {
+    uint32_t version;
+    uint32_t target_uid;
+    uint64_t console;
+    ros_fd_wire_t wires[4];
+} ros_spawn_attach_t;
 
 /* fs_open() flag bits (uint32_t). Every undefined bit is reserved and rejected
 * with ROS_E_OUT_OF_RANGE, as is a combination the contract forbids (TRUNCATE/
@@ -154,7 +177,7 @@ uint64_t ros_sys_irq_bind(uint32_t a0);
 int32_t ros_sys_irq_wait(uint64_t a0, uint64_t a1);
 uint64_t ros_sys_random_get(void * a0, uintptr_t a1, uint32_t a2);
 uint64_t ros_sys_stream_write(uint32_t a0, void * a1, uintptr_t a2);
-uint64_t ros_sys_spawn(void * a0, uintptr_t a1, uint64_t a2, uint32_t a3, uint64_t a4, uintptr_t a5);
+uint64_t ros_sys_spawn(void * a0, uintptr_t a1, uint64_t a2, uintptr_t a3, uint64_t a4, uintptr_t a5);
 uint64_t ros_sys_stream_read(uint32_t a0, void * a1, uintptr_t a2, uint64_t a3);
 uint64_t ros_sys_mem_map(uintptr_t a0, uint32_t a1, uint64_t a2);
 int32_t ros_sys_mem_unmap(uint64_t a0, uintptr_t a1);
@@ -215,6 +238,7 @@ uint64_t ros_sys_users_admin(void * a0, uintptr_t a1, void * a2, uintptr_t a3);
 int32_t ros_sys_seat_switch(uint64_t a0, uint32_t a1);
 int32_t ros_sys_seat_revoke(uint64_t a0);
 int32_t ros_sys_console_foreground(uint32_t a0, int32_t a1);
+int32_t ros_sys_pipe_create(void * a0);
 
 #ifdef __cplusplus
 } /* extern "C" */

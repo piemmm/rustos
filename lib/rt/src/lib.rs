@@ -98,6 +98,7 @@ const NUM_YIELD: u64 = SyscallNumber::YIELD.as_u16() as u64;
 
 /// `spawn` syscall number (as above).
 const NUM_SPAWN: u64 = SyscallNumber::SPAWN.as_u16() as u64;
+const NUM_PIPE_CREATE: u64 = SyscallNumber::PIPE_CREATE.as_u16() as u64;
 
 /// `mem_map` syscall number (as above).
 const NUM_MEM_MAP: u64 = SyscallNumber::MEM_MAP.as_u16() as u64;
@@ -948,21 +949,68 @@ pub fn spawn_with(
     spawn_raw(path, console, target_uid, &block)
 }
 
+/// Spawn the embedded program at `path` with an explicit
+/// [`rustos_abi::SpawnAttach`]
+/// block — the child's credential, base console, and per-descriptor wires
+/// — plus the argument vector and environment the caller chose
+/// (`SyscallNumber::SPAWN`, `plans/SPAWN.md` SP10: the shell's redirection
+/// and pipeline launch form).
+///
+/// The attach block wires the child's fd 0–3 onto pre-opened descriptors
+/// of the **caller's own** open table — files ([`fs_open`]), resources
+/// ([`resource_open`]), or pipe ends ([`pipe_create`]) — each owner-checked
+/// kernel-side before any child state exists; a forged or wrong-direction
+/// handle refuses the spawn whole. The strings travel exactly as in
+/// [`spawn_with`].
+#[must_use]
+pub fn spawn_attached(
+    path: &[u8],
+    attach: &rustos_abi::SpawnAttach,
+    args: &[&[u8]],
+    env: &[&[u8]],
+) -> i64 {
+    let len = match rustos_abi::process_start_encoded_len(args, env) {
+        Ok(len) => len,
+        Err(err) => return -i64::from(err.as_i32()),
+    };
+    let mut block = alloc::vec![0u8; len];
+    // The canary field is the kernel's to mint for the child; the encoder
+    // requires a value, so carry zero and the kernel ignores it.
+    if let Err(err) = rustos_abi::process_start_write_into(&mut block, args, env, 0) {
+        return -i64::from(err.as_i32());
+    }
+    spawn_encoded(path, &attach.to_le_bytes(), &block)
+}
+
 /// The shared `SyscallNumber::SPAWN` trap the [`spawn`], [`spawn_at`],
-/// [`spawn_as`], and [`spawn_with`] wrappers issue: one raw call site so
-/// the argument layout is defined once (`console` in slot 2, `target_uid`
-/// in slot 3, the optional startup-strings block in slots 4/5).
+/// [`spawn_as`], [`spawn_with`], and [`spawn_attached`] wrappers issue:
+/// one raw call site so the argument layout is defined once (the attach
+/// block in slots 2/3, the optional startup-strings block in slots 4/5).
 ///
 /// `console` is [`rustos_abi::CONSOLE_INHERIT`] or an installed console index;
 /// `target_uid` is [`rustos_abi::SPAWN_UID_INHERIT`] (start under the caller's
 /// own credential) or a concrete uid to switch to (which the kernel gates on
-/// `CAP_SPAWN_AS_USER`); an empty `strings` slice means "no block" (the
-/// zero/zero pair), so the child receives the program's registered default
-/// arguments. The kernel encodes the result as a signed register: a
-/// non-negative value is the new PID, a negative value is `-errno`.
+/// `CAP_SPAWN_AS_USER`). The pair is carried in an all-`Inherit` attach
+/// block (`plans/SPAWN.md` SP10); an empty `strings` slice means "no
+/// block" (the zero/zero pair), so the child receives the program's
+/// registered default arguments. The kernel encodes the result as a signed
+/// register: a non-negative value is the new PID, a negative value is
+/// `-errno`.
+#[must_use]
+fn spawn_raw(path: &[u8], console: u64, target_uid: u32, strings: &[u8]) -> i64 {
+    let attach = rustos_abi::SpawnAttach {
+        target_uid,
+        console,
+        ..rustos_abi::SpawnAttach::INHERIT
+    };
+    spawn_encoded(path, &attach.to_le_bytes(), strings)
+}
+
+/// The one raw `SyscallNumber::SPAWN` call site: `(path, attach, strings)`
+/// marshalled into the six ABI registers.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 spawn-result encoding (PID ≥ 0, else -errno).
-fn spawn_raw(path: &[u8], console: u64, target_uid: u32, strings: &[u8]) -> i64 {
+fn spawn_encoded(path: &[u8], attach: &[u8], strings: &[u8]) -> i64 {
     let ptr = path.as_ptr() as usize as u64;
     let (strings_ptr, strings_len) = if strings.is_empty() {
         (0, 0)
@@ -970,24 +1018,61 @@ fn spawn_raw(path: &[u8], console: u64, target_uid: u32, strings: &[u8]) -> i64 
         (strings.as_ptr() as usize as u64, strings.len() as u64)
     };
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
-    // `(path, len)` and `(strings, strings_len)` against the caller's
-    // address space before touching them. Both slices are live shared
-    // `&[u8]`s for the duration of the call, so each `(ptr, len)` pair
-    // denotes readable memory.
+    // `(path, len)`, `(attach, attach_len)`, and `(strings, strings_len)`
+    // against the caller's address space before touching them. All three
+    // slices are live shared `&[u8]`s for the duration of the call, so
+    // each `(ptr, len)` pair denotes readable memory.
     let ret = unsafe {
         raw_syscall(
             NUM_SPAWN,
             [
                 ptr,
                 path.len() as u64,
-                console,
-                u64::from(target_uid),
+                attach.as_ptr() as usize as u64,
+                attach.len() as u64,
                 strings_ptr,
                 strings_len,
             ],
         )
     };
     ret as i64
+}
+
+/// Create a pipe — a bounded, kernel-buffered unidirectional byte stream —
+/// returning `(read_fd, write_fd)`, two descriptors of the calling
+/// process's **own** open table (`SyscallNumber::PIPE_CREATE`,
+/// `plans/SPAWN.md` SP10).
+///
+/// The ends are read/written through [`fs_read`] / [`fs_write`] (a pipe
+/// ignores the file offset) and closed through [`fs_close`]. A read on an
+/// empty pipe blocks until bytes arrive or every write end is closed (then
+/// end-of-stream, `0`); a write to a full pipe blocks until space frees,
+/// and a write with no reader left fails with
+/// [`rustos_abi::Errno::BrokenPipe`]. An end is handed to a spawned child
+/// through a [`rustos_abi::FdWire::Handle`] wire in [`spawn_attached`]'s
+/// attach block. Unprivileged: a pipe reaches only the caller's own table.
+///
+/// # Errors
+///
+/// The raw negative `-errno` register on refusal (recover the
+/// [`rustos_abi::Errno`] as `-ret`).
+pub fn pipe_create() -> Result<(u32, u32), i64> {
+    let mut fds = [0u32; 2];
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // the out-pointer against the caller's address space before writing
+    // the two descriptors. `fds` is live exclusive memory for the call.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_PIPE_CREATE,
+            [fds.as_mut_ptr() as usize as u64, 0, 0, 0, 0, 0],
+        )
+    };
+    #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno encoding.
+    let signed = ret as i64;
+    if signed < 0 {
+        return Err(signed);
+    }
+    Ok((fds[0], fds[1]))
 }
 
 /// Spawn the embedded program at `path` on the installed console `console`
@@ -3216,11 +3301,63 @@ mod tests {
         assert_eq!(number, NUM_SPAWN);
         assert_eq!(args[0], path.as_ptr() as usize as u64);
         assert_eq!(args[1], path.len() as u64);
-        // The plain `spawn` keeps the child on the caller's own console and
-        // under the caller's own credential (both inherit sentinels).
-        assert_eq!(args[2], CONSOLE_INHERIT);
-        assert_eq!(args[3], u64::from(SPAWN_UID_INHERIT));
+        // Slots 2/3 carry the encoded attach block (`plans/SPAWN.md`
+        // SP10): a live pointer of exactly the fixed length. The block's
+        // bytes are freed when the wrapper returns (the seam records only
+        // the registers); content fidelity — the plain `spawn` carrying
+        // both inherit sentinels — is the `SpawnAttach` codec's contract,
+        // covered by its `rustos_abi` round-trip tests.
+        assert_ne!(args[2], 0);
+        assert_eq!(args[3], rustos_abi::SPAWN_ATTACH_LEN as u64);
         assert_eq!(&args[4..], &[0, 0]);
+    }
+
+    #[test]
+    fn spawn_attached_marshals_the_attach_and_strings_blocks() {
+        let path = *b"/System/Apps/wc.app/Run";
+        let attach = rustos_abi::SpawnAttach {
+            wires: [
+                rustos_abi::FdWire::Handle(4),
+                rustos_abi::FdWire::Inherit,
+                rustos_abi::FdWire::Inherit,
+                rustos_abi::FdWire::Inherit,
+            ],
+            ..rustos_abi::SpawnAttach::INHERIT
+        };
+        let args: [&[u8]; 1] = [b"wc"];
+        let (number, raw) = capture(21, || {
+            assert_eq!(spawn_attached(&path, &attach, &args, &[]), 21);
+        });
+        assert_eq!(number, NUM_SPAWN);
+        assert_eq!(raw[0], path.as_ptr() as usize as u64);
+        assert_eq!(raw[1], path.len() as u64);
+        assert_ne!(raw[2], 0);
+        assert_eq!(raw[3], rustos_abi::SPAWN_ATTACH_LEN as u64);
+        assert_ne!(raw[4], 0);
+        let expected_len = rustos_abi::process_start_encoded_len(&args, &[]).expect("sized") as u64;
+        assert_eq!(raw[5], expected_len);
+    }
+
+    #[test]
+    fn pipe_create_marshals_the_out_pointer_and_decodes_the_pair() {
+        let (number, args) = capture(0, || {
+            // The seam returns 0 (success) without writing the out-param,
+            // so the decoded pair is the zeroed default — the marshalling,
+            // not the kernel's fd choice, is under test.
+            assert_eq!(pipe_create(), Ok((0, 0)));
+        });
+        assert_eq!(number, NUM_PIPE_CREATE);
+        assert_ne!(args[0], 0);
+        assert_eq!(&args[1..], &[0, 0, 0, 0, 0]);
+        // A refusal surfaces the negative errno register verbatim.
+        let neg =
+            u64::from_ne_bytes((-i64::from(rustos_abi::Errno::BadAddress.as_i32())).to_ne_bytes());
+        let (_, _) = capture(neg, || {
+            assert_eq!(
+                pipe_create(),
+                Err(-i64::from(rustos_abi::Errno::BadAddress.as_i32()))
+            );
+        });
     }
 
     #[test]
@@ -3237,8 +3374,8 @@ mod tests {
         assert_eq!(number, NUM_SPAWN);
         assert_eq!(raw[0], path.as_ptr() as usize as u64);
         assert_eq!(raw[1], path.len() as u64);
-        assert_eq!(raw[2], CONSOLE_INHERIT);
-        assert_eq!(raw[3], u64::from(SPAWN_UID_INHERIT));
+        assert_ne!(raw[2], 0);
+        assert_eq!(raw[3], rustos_abi::SPAWN_ATTACH_LEN as u64);
         // Slots 4/5 carry the encoded `PSV1` block: a live (non-null)
         // pointer whose length is exactly what the one shared encoder
         // computes for these strings. The block's own bytes are freed when
@@ -3253,23 +3390,24 @@ mod tests {
     }
 
     #[test]
-    fn spawn_as_marshals_the_console_and_target_uid() {
+    fn spawn_as_marshals_the_attach_block() {
         let path = *b"/System/Apps/elsh.app/Run";
         let (number, args) = capture(9, || {
             // login starting a user's shell on the inherited console under a
-            // switched-to uid.
+            // switched-to uid — both selectors travel inside the attach
+            // block (its codec's round-trip tests cover the content).
             assert_eq!(spawn_as(&path, CONSOLE_INHERIT, 1000), 9);
         });
         assert_eq!(number, NUM_SPAWN);
         assert_eq!(args[0], path.as_ptr() as usize as u64);
         assert_eq!(args[1], path.len() as u64);
-        assert_eq!(args[2], CONSOLE_INHERIT);
-        assert_eq!(args[3], 1000);
+        assert_ne!(args[2], 0);
+        assert_eq!(args[3], rustos_abi::SPAWN_ATTACH_LEN as u64);
         assert_eq!(&args[4..], &[0, 0]);
     }
 
     #[test]
-    fn spawn_at_marshals_the_console_index() {
+    fn spawn_at_marshals_the_attach_block() {
         let path = *b"/System/Services/login.app/Run";
         let (number, args) = capture(8, || {
             assert_eq!(spawn_at(&path, 1), 8);
@@ -3277,9 +3415,9 @@ mod tests {
         assert_eq!(number, NUM_SPAWN);
         assert_eq!(args[0], path.as_ptr() as usize as u64);
         assert_eq!(args[1], path.len() as u64);
-        assert_eq!(args[2], 1);
-        // `spawn_at` switches no user: the caller's own credential (inherit).
-        assert_eq!(args[3], u64::from(SPAWN_UID_INHERIT));
+        // The console index travels inside the attach block.
+        assert_ne!(args[2], 0);
+        assert_eq!(args[3], rustos_abi::SPAWN_ATTACH_LEN as u64);
         assert_eq!(&args[4..], &[0, 0]);
     }
 

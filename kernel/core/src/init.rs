@@ -915,6 +915,9 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
             SecTaskId(0),
             self.process_wait,
             DescriptorTable::closed(),
+            // A driver spawn wires no standard-stream open entries: its
+            // all-closed table above is the whole stream story.
+            alloc::vec::Vec::new(),
             grants,
             node_id,
             // A boot-floor driver is a kernel-trusted bootstrap principal

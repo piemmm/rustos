@@ -45,13 +45,16 @@
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use rustos_abi::hwtree::{GrantedResource, HwResource};
 use rustos_abi::{DescriptorTable, Errno, LimitKind, OpenFlags, ResourceLimit, STD_STREAM_COUNT};
 use rustos_kernel_mem::{PhysMap, UserAddressSpace};
 use rustos_kernel_sec::TaskId;
 
+use crate::pipe::PipeEnd;
 use crate::resource::ResourceBacking;
 use crate::rlimit::LimitSet;
 
@@ -184,6 +187,12 @@ pub enum OpenBacking {
     /// authorised once at open time; its reads and writes route to the named
     /// kernel subsystem rather than the VFS.
     Resource(ResourceBacking),
+    /// One counted end of a kernel pipe (`plans/SPAWN.md` SP10). Cloning
+    /// the entry (a spawn wiring a child onto the end) registers one more
+    /// live end; dropping it (close, exit, a failed spawn's unwind)
+    /// releases it and wakes the peer side — the [`PipeEnd`] handle owns
+    /// that bookkeeping.
+    Pipe(PipeEnd),
 }
 
 /// One open descriptor: what it resolves to and the [`OpenFlags`] it was
@@ -192,32 +201,89 @@ pub enum OpenBacking {
 /// The flags fix the access the handle permits — a read against a handle
 /// opened without [`OpenFlags::READ`], or a write without
 /// [`OpenFlags::WRITE`], fails closed without ever reaching the backing.
-#[derive(Clone, Debug, Eq, PartialEq)]
+///
+/// Entries cloned from one another (a `stream_read`/`stream_write` caller's
+/// snapshot, or a spawn wiring a child onto a parent descriptor) share one
+/// *open-file description*: the [`Self::cursor`] the sequential stream
+/// operations advance is one `Arc`'d counter, so two wired sinks on the
+/// same description interleave their output at one position (the POSIX
+/// dup semantics) instead of silently overwriting each other.
+#[derive(Clone, Debug)]
 pub struct OpenFile {
     /// What the descriptor resolves to.
     pub backing: OpenBacking,
     /// The access/behaviour flags the descriptor was opened with.
     pub flags: OpenFlags,
+    /// The shared sequential-stream position (bytes from the start) the
+    /// `stream_read`/`stream_write` handlers advance for a path-backed
+    /// entry. Positional `fs_read`/`fs_write` never touch it; pipe and
+    /// resource backings have no position and ignore it.
+    cursor: Arc<AtomicU64>,
 }
 
+/// Two entries are equal when they name the same backing with the same
+/// flags. The cursor is deliberately not part of equality: it is mutable
+/// per-description state, not part of what the descriptor *is*.
+impl PartialEq for OpenFile {
+    fn eq(&self, other: &Self) -> bool {
+        self.backing == other.backing && self.flags == other.flags
+    }
+}
+
+impl Eq for OpenFile {}
+
 impl OpenFile {
+    /// A fresh entry over `backing` with `flags`, its stream cursor at the
+    /// start.
+    #[must_use]
+    pub fn new(backing: OpenBacking, flags: OpenFlags) -> Self {
+        Self {
+            backing,
+            flags,
+            cursor: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// The pipe end this descriptor holds, or `None` when it is backed by
+    /// a path or resource.
+    #[must_use]
+    pub fn pipe(&self) -> Option<&PipeEnd> {
+        match &self.backing {
+            OpenBacking::Pipe(end) => Some(end),
+            _ => None,
+        }
+    }
+
+    /// The description's current sequential-stream position.
+    #[must_use]
+    pub fn cursor(&self) -> u64 {
+        self.cursor.load(Ordering::Acquire)
+    }
+
+    /// Advance the description's stream position by `n` bytes. Shared by
+    /// every clone of the description, so dup'd sinks append at one
+    /// position.
+    pub fn advance_cursor(&self, n: u64) {
+        self.cursor.fetch_add(n, Ordering::AcqRel);
+    }
+
     /// The absolute filesystem path this descriptor resolves to, or `None`
-    /// when it is backed by a resource rather than a path.
+    /// when it is backed by a resource or pipe rather than a path.
     #[must_use]
     pub fn path(&self) -> Option<&str> {
         match &self.backing {
             OpenBacking::Path(path) => Some(path),
-            OpenBacking::Resource(_) => None,
+            OpenBacking::Resource(_) | OpenBacking::Pipe(_) => None,
         }
     }
 
     /// The resource this descriptor resolves to, or `None` when it is backed
-    /// by a filesystem path.
+    /// by a filesystem path or pipe.
     #[must_use]
     pub fn resource(&self) -> Option<ResourceBacking> {
         match self.backing {
             OpenBacking::Resource(backing) => Some(backing),
-            OpenBacking::Path(_) => None,
+            OpenBacking::Path(_) | OpenBacking::Pipe(_) => None,
         }
     }
 }
@@ -686,8 +752,66 @@ impl AddressSpaceRegistry {
     ) -> Result<u32, Errno> {
         let table = self.open_files.entry(task).or_default();
         let fd = table.alloc_fd()?;
-        table.by_fd.insert(fd, OpenFile { backing, flags });
+        table.by_fd.insert(fd, OpenFile::new(backing, flags));
         Ok(fd)
+    }
+
+    /// Create a pipe for `task`, allocating a read-end and a write-end
+    /// descriptor in its open table, and return `(read_fd, write_fd)`
+    /// (`plans/SPAWN.md` SP10).
+    ///
+    /// Both descriptors draw from the same allocator as
+    /// [`Self::open_file`] / [`Self::open_resource`]. All-or-nothing: if
+    /// the second descriptor cannot be allocated the first is released
+    /// (its dropped end closes the side, so the pipe never leaks a
+    /// half-open pair). The `task` argument is the kernel-trusted caller
+    /// id.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] only on genuine descriptor-space exhaustion
+    /// (fail closed).
+    pub fn open_pipe(&mut self, task: TaskId) -> Result<(u32, u32), Errno> {
+        let (read_end, write_end) = crate::pipe::Pipe::create();
+        let read_fd = self.open_backed(task, OpenBacking::Pipe(read_end), OpenFlags::READ)?;
+        match self.open_backed(task, OpenBacking::Pipe(write_end), OpenFlags::WRITE) {
+            Ok(write_fd) => Ok((read_fd, write_fd)),
+            Err(err) => {
+                // Unwind the half-built pair: dropping the read entry
+                // closes its end through the handle's own release path.
+                self.close_file(task, read_fd);
+                Err(err)
+            }
+        }
+    }
+
+    /// Install `file` as `task`'s **standard-stream** open entry at `fd`
+    /// (one of fd 0–3) — the spawn wiring path placing a cloned parent
+    /// descriptor behind a child's standard stream (`plans/SPAWN.md`
+    /// SP10). Anything already at `fd` is replaced (and, for a pipe end,
+    /// released through its handle's drop).
+    ///
+    /// A non-standard `fd` is refused: ordinary descriptors are allocated,
+    /// never installed, so the one allocator keeps owning the ≥ 4 space.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for an `fd` at or above [`STD_STREAM_COUNT`].
+    pub fn install_std_entry(
+        &mut self,
+        task: TaskId,
+        fd: u32,
+        file: OpenFile,
+    ) -> Result<(), Errno> {
+        if fd as usize >= STD_STREAM_COUNT {
+            return Err(Errno::OutOfRange);
+        }
+        self.open_files
+            .entry(task)
+            .or_default()
+            .by_fd
+            .insert(fd, file);
+        Ok(())
     }
 
     /// Resolve `task`'s open descriptor `fd` to its recorded path and flags,
@@ -696,8 +820,10 @@ impl AddressSpaceRegistry {
     ///
     /// Returns a clone so the caller (a handle op such as `fs_read`) holds no
     /// borrow of the registry across the filesystem operation it then routes
-    /// to. `None` covers an unopened descriptor, a standard-stream number
-    /// (never recorded here), and a descriptor opened by a *different* task —
+    /// to; the clone shares the entry's open-file description (cursor, pipe
+    /// end). `None` covers an unopened descriptor, a standard-stream number
+    /// with no wired entry (only spawn wiring records fd 0–3 here), and a
+    /// descriptor opened by a *different* task —
     /// the `task` argument is the kernel-trusted caller id, so one process
     /// cannot reach another's open file by guessing a number.
     #[must_use]
@@ -1081,10 +1207,10 @@ mod tests {
         assert_eq!(fd, u32::try_from(STD_STREAM_COUNT).unwrap());
         assert_eq!(
             reg.open_file_entry(TaskId(2), fd),
-            Some(OpenFile {
-                backing: OpenBacking::Path(String::from("/System/Logs/a")),
-                flags: OpenFlags::READ,
-            })
+            Some(OpenFile::new(
+                OpenBacking::Path(String::from("/System/Logs/a")),
+                OpenFlags::READ,
+            ))
         );
     }
 
@@ -1191,6 +1317,85 @@ mod tests {
             .open_file(TaskId(4), String::from("/Storage/y"), OpenFlags::READ)
             .expect("fits");
         assert_eq!(fresh, u32::try_from(STD_STREAM_COUNT).unwrap());
+    }
+
+    // --- pipes and wired standard-stream entries --------
+
+    #[test]
+    fn open_pipe_mints_a_read_write_pair_in_the_one_number_space() {
+        let mut reg = AddressSpaceRegistry::new();
+        let (read_fd, write_fd) = reg.open_pipe(TaskId(2)).expect("pair fits");
+        assert_eq!((read_fd, write_fd), (4, 5));
+        let read = reg.open_file_entry(TaskId(2), read_fd).expect("read end");
+        let write = reg.open_file_entry(TaskId(2), write_fd).expect("write end");
+        assert!(read.flags.is_read() && !read.flags.is_write());
+        assert!(write.flags.is_write() && !write.flags.is_read());
+        let (read_end, write_end) = (read.pipe().expect("pipe"), write.pipe().expect("pipe"));
+        assert!(read_end.same_pipe(write_end));
+        // The pair is owner-bound like every descriptor.
+        assert_eq!(reg.open_file_entry(TaskId(3), read_fd), None);
+        // A later open draws the next number from the same allocator.
+        let next = reg
+            .open_file(TaskId(2), String::from("/x"), OpenFlags::READ)
+            .expect("fits");
+        assert_eq!(next, 6);
+    }
+
+    #[test]
+    fn closing_a_pipe_entry_releases_its_end() {
+        use crate::pipe::WriteStep;
+        let mut reg = AddressSpaceRegistry::new();
+        let (read_fd, write_fd) = reg.open_pipe(TaskId(2)).expect("pair fits");
+        let write = reg.open_file_entry(TaskId(2), write_fd).expect("write end");
+        let write_end = write.pipe().expect("pipe").clone();
+        // Dropping the read entry (close) leaves no reader: the writer
+        // observes broken-pipe through the shared object.
+        assert!(reg.close_file(TaskId(2), read_fd));
+        assert_eq!(write_end.try_write(b"x"), WriteStep::Broken);
+    }
+
+    #[test]
+    fn withdraw_releases_pipe_ends_through_the_table_drop() {
+        use crate::pipe::ReadStep;
+        let mut reg = AddressSpaceRegistry::new();
+        let (read_fd, _write_fd) = reg.open_pipe(TaskId(2)).expect("pair fits");
+        let read = reg.open_file_entry(TaskId(2), read_fd).expect("read end");
+        let read_end = read.pipe().expect("pipe").clone();
+        // Task exit: the whole table drops, closing the write end, so the
+        // surviving reader observes end-of-stream (nothing leaks).
+        reg.register(TaskId(2), user_space(1, 7), sim())
+            .expect("register");
+        assert!(reg.withdraw(TaskId(2)));
+        assert_eq!(read_end.try_read(&mut [0u8; 4]), ReadStep::Eof);
+    }
+
+    #[test]
+    fn install_std_entry_accepts_only_standard_slots() {
+        let mut reg = AddressSpaceRegistry::new();
+        let entry = OpenFile::new(OpenBacking::Path(String::from("/log")), OpenFlags::WRITE);
+        assert_eq!(reg.install_std_entry(TaskId(2), 1, entry.clone()), Ok(()));
+        assert_eq!(reg.open_file_entry(TaskId(2), 1), Some(entry.clone()));
+        // The reserved standard range is the only installable space.
+        assert_eq!(
+            reg.install_std_entry(TaskId(2), 4, entry),
+            Err(Errno::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn cloned_entries_share_one_stream_cursor() {
+        let entry = OpenFile::new(OpenBacking::Path(String::from("/log")), OpenFlags::WRITE);
+        let dup = entry.clone();
+        entry.advance_cursor(10);
+        // The dup observes the shared description position (POSIX dup
+        // semantics), not a private copy.
+        assert_eq!(dup.cursor(), 10);
+        dup.advance_cursor(5);
+        assert_eq!(entry.cursor(), 15);
+        // A fresh entry over the same backing has its own description.
+        let fresh = OpenFile::new(OpenBacking::Path(String::from("/log")), OpenFlags::WRITE);
+        assert_eq!(fresh.cursor(), 0);
+        assert_eq!(fresh, entry, "equality names the backing, not the cursor");
     }
 
     // --- mapped anonymous-memory accounting (the AddressSpaceBytes limit) --

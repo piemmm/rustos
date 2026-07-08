@@ -80,13 +80,14 @@ use rustos_abi::sysinfo::{
     CpuTimeRecord, MountRecord, ProcessRecord, SeatRecord, UserDirectoryRecord,
 };
 use rustos_abi::{
-    decode_log_record, BootId, CapabilityId, DescriptorTable, DirEntry, Errno, FileStat, InputMode,
-    IntrospectDomain, IrqHandle, LimitKind, MapFlags, OpenFlags, ProcId, ProcessStart, RandomFlags,
-    ResourceLimit, Signal, StreamMode, SyscallNumber, Time64, UnlinkFlags, WaitFlags, WaitSetOp,
-    WaitSourceKind, WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, FS_IO_MAX,
-    FS_NAME_MAX, FS_PATH_MAX, LOG_FIELDS_MAX, LOG_RECORD_MAX, PROCESS_START_MAX_TOTAL_LEN,
-    PROC_ID_LEN, RANDOM_REQUEST_MAX_BYTES, RESOURCE_REF_MAX, SPAWN_UID_INHERIT,
-    TERMINAL_SIZE_WIRE_LEN, WAITSET_CHILD_ANY, WAIT_PID_ANY,
+    decode_log_record, BootId, CapabilityId, DescriptorTable, DirEntry, Errno, FdWire, FileStat,
+    InputMode, IntrospectDomain, IrqHandle, LimitKind, MapFlags, OpenFlags, ProcId, ProcessStart,
+    RandomFlags, ResourceLimit, Signal, SpawnAttach, StreamMode, SyscallNumber, Time64,
+    UnlinkFlags, WaitFlags, WaitSetOp, WaitSourceKind, WallClockReading, WallTimeState,
+    BOOT_ID_LEN, CONSOLE_INHERIT, FS_IO_MAX, FS_NAME_MAX, FS_PATH_MAX, LOG_FIELDS_MAX,
+    LOG_RECORD_MAX, PROCESS_START_MAX_TOTAL_LEN, PROC_ID_LEN, RANDOM_REQUEST_MAX_BYTES,
+    RESOURCE_REF_MAX, SPAWN_ATTACH_LEN, SPAWN_UID_INHERIT, TERMINAL_SIZE_WIRE_LEN,
+    WAITSET_CHILD_ANY, WAIT_PID_ANY,
 };
 use rustos_caps::CapabilitySet;
 use rustos_kernel_ipc::{
@@ -1049,6 +1050,111 @@ where
         }
     }
 
+    /// Validate and stage `spawn`'s optional attach block from the
+    /// caller's address space (`plans/SPAWN.md` SP10).
+    ///
+    /// A zero address must carry a zero length ("no block") and resolves
+    /// to [`SpawnAttach::INHERIT`] — the caller's own credential and
+    /// descriptor table, the pre-attach semantics every existing caller
+    /// keeps. A present block must be exactly [`SPAWN_ATTACH_LEN`] bytes
+    /// (fixed-length by design), is copied through the validated
+    /// `copy_from_user` boundary, and is parsed fail-closed — a malformed
+    /// block wires nothing. The block carries only selectors; every
+    /// authority it names (the credential switch, the console index, each
+    /// handle) is validated separately by the spawn path.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] on a contradictory or wrong-length
+    /// shape; the copy fault's stable [`Errno`] (or [`Errno::BadAddress`]
+    /// for an unregistered caller) when staging fails; the parser's
+    /// [`Errno::BadMagic`] / [`Errno::OutOfRange`] on a malformed block.
+    fn stage_spawn_attach(
+        &self,
+        caller: &CallerContext<'_>,
+        attach: u64,
+        attach_len: usize,
+    ) -> Result<SpawnAttach, Errno> {
+        if attach == 0 {
+            if attach_len != 0 {
+                return Err(Errno::LengthOutOfRange);
+            }
+            return Ok(SpawnAttach::INHERIT);
+        }
+        if attach_len != SPAWN_ATTACH_LEN {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let mut block = [0u8; SPAWN_ATTACH_LEN];
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_in(space, physmap, VirtAddr::new(attach), &mut block)
+        }) {
+            Some(Ok(())) => {}
+            Some(Err(err)) => return Err(copy_fault_errno(err)),
+            None => return Err(Errno::BadAddress),
+        }
+        SpawnAttach::parse(&block)
+    }
+
+    /// Apply an attach block's per-descriptor wires onto the child's base
+    /// stream table (`plans/SPAWN.md` SP10), returning the reshaped table
+    /// plus the wired open entries to install at the child's fd 0–3.
+    ///
+    /// Every named handle is resolved owner-checked against the
+    /// kernel-trusted caller identity: a forged or foreign descriptor
+    /// refuses the whole spawn with [`Errno::NotFound`], and a handle
+    /// whose open direction cannot serve the slot (a write-only end
+    /// behind stdin) is [`Errno::PermissionDenied`]. A wired slot's
+    /// console entry is closed so exactly one authority backs each
+    /// descriptor. The cloned entries share the parent's open-file
+    /// descriptions (cursor, pipe end — the clone registers one more live
+    /// end); dropping them on any later failure path releases everything
+    /// (nothing leaks).
+    #[allow(clippy::type_complexity)] // The pair names exactly the two artefacts the wiring produces.
+    fn apply_attach_wires(
+        &self,
+        caller: &CallerContext<'_>,
+        attach: &SpawnAttach,
+        base_streams: DescriptorTable,
+    ) -> Result<(DescriptorTable, Vec<(u32, crate::aspace::OpenFile)>), Errno> {
+        let mut child_streams = base_streams;
+        let mut wired: Vec<(u32, crate::aspace::OpenFile)> = Vec::new();
+        for (slot, wire) in attach.wires.iter().enumerate() {
+            // The slot index walks the fixed four-entry table, so the
+            // conversion cannot fail; keep the residual fail-closed rather
+            // than casting.
+            let fd = u32::try_from(slot).map_err(|_| Errno::OutOfRange)?;
+            match *wire {
+                FdWire::Inherit => {}
+                FdWire::InheritSlot(source) => {
+                    child_streams.set_slot(
+                        fd,
+                        base_streams.mode(source),
+                        base_streams.console(source),
+                    );
+                }
+                FdWire::Closed => child_streams.close_slot(fd),
+                FdWire::Handle(handle) => {
+                    let entry = self
+                        .aspaces
+                        .read()
+                        .open_file_entry(caller.task_id, handle)
+                        .ok_or(Errno::NotFound)?;
+                    let direction_ok = if fd == rustos_abi::STDIN {
+                        entry.flags.is_read()
+                    } else {
+                        entry.flags.is_write()
+                    };
+                    if !direction_ok {
+                        return Err(Errno::PermissionDenied);
+                    }
+                    child_streams.close_slot(fd);
+                    wired.push((fd, entry));
+                }
+            }
+        }
+        Ok((child_streams, wired))
+    }
+
     /// Re-freeze the calling task's live address space into the registry
     /// after a syscall has mutated it (`mem_map` / `mem_unmap` / `mmio_map`
     /// / `dma_alloc`).
@@ -1240,6 +1346,245 @@ where
             // Not reachable through a write handle (open refuses write on a
             // read-only resource); fail closed rather than silently succeed.
             ResourceBacking::Random => Err(Errno::PermissionDenied),
+        }
+    }
+
+    /// Serve a read from a pipe-backed descriptor into the caller's buffer,
+    /// **parking** the caller while the pipe is empty with a live writer
+    /// (`plans/SPAWN.md` SP10 — never a busy loop).
+    ///
+    /// The one pipe-read definition `fs_read` and a wired `stream_read`
+    /// share. End-of-stream (every write end closed, ring drained) is a
+    /// zero-length read. `timeout_ns` bounds the wait (`0` = indefinite,
+    /// the `stream_read` convention); an elapsed bound is `TimedOut`. A
+    /// build with no resumable user kthread published (a park that cannot
+    /// happen) fails closed with `NotImplemented` rather than spinning.
+    fn pipe_read(
+        &self,
+        caller: &CallerContext<'_>,
+        end: &crate::pipe::PipeEnd,
+        buf: u64,
+        len: usize,
+        timeout_ns: u64,
+    ) -> SyscallResult {
+        use crate::pipe::ReadStep;
+        // Cap the per-call transfer at the staging bound (short reads are
+        // valid; the caller loops). A zero-length read is inert.
+        let len = len.min(FS_IO_MAX);
+        if len == 0 {
+            return Ok(0);
+        }
+        let mut data = alloc::vec![0u8; len];
+        // The absolute monotonic deadline of a bounded wait. With no
+        // installed wait clock nothing can park either, so the untimed
+        // sentinel keeps the fail-closed park path authoritative.
+        let deadline = if timeout_ns == 0 {
+            crate::waitq::NO_DEADLINE
+        } else {
+            crate::waitq::wait_now_ns().map_or(crate::waitq::NO_DEADLINE, |now| {
+                now.saturating_add(timeout_ns)
+            })
+        };
+        loop {
+            match end.try_read(&mut data) {
+                ReadStep::Read(n) => {
+                    // Space freed: a writer parked on the full ring can
+                    // proceed. Wake before the copy-out so the producer
+                    // overlaps with the consumer's copy.
+                    crate::waitq::pipe_wake();
+                    return match self.with_caller_aspace(caller, |space, physmap| {
+                        copy_out(space, physmap, VirtAddr::new(buf), &data[..n])
+                    }) {
+                        Some(Ok(())) => Ok(n as u64),
+                        Some(Err(err)) => Err(copy_fault_errno(err)),
+                        None => Err(Errno::BadAddress),
+                    };
+                }
+                ReadStep::Eof => return Ok(0),
+                ReadStep::Empty => {
+                    // A bounded wait that has elapsed reports `TimedOut`
+                    // only after the re-check above found nothing, so a
+                    // byte racing the deadline is still delivered.
+                    if deadline != crate::waitq::NO_DEADLINE {
+                        match crate::waitq::wait_now_ns() {
+                            Some(now) if now < deadline => {}
+                            _ => return Err(Errno::TimedOut),
+                        }
+                    }
+                    // Park off the run queue until a writer produces bytes
+                    // or closes (the `wait`/`irq_wait` interlock: register
+                    // before the park so a racing wake is never lost).
+                    let cpu = SchedulerArch::current_cpu(self.arch);
+                    crate::waitq::PIPE_WAITQ.register(caller.task_id.0, deadline);
+                    if deadline != crate::waitq::NO_DEADLINE {
+                        crate::waitq::rearm_timed_wakeup();
+                    }
+                    let parked = crate::kthread::reschedule_current(cpu, RescheduleAction::Park);
+                    crate::waitq::PIPE_WAITQ.deregister(caller.task_id.0);
+                    if deadline != crate::waitq::NO_DEADLINE {
+                        crate::waitq::rearm_timed_wakeup();
+                    }
+                    if !parked {
+                        return Err(Errno::NotImplemented);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Serve a write to a pipe-backed descriptor from the caller's buffer,
+    /// **parking** the caller while the ring is full with a live reader
+    /// (`plans/SPAWN.md` SP10 — never a busy loop).
+    ///
+    /// The one pipe-write definition `fs_write` and a wired `stream_write`
+    /// share. A short write (the free space) is valid; the caller loops. A
+    /// pipe with no read end left fails closed with `BrokenPipe`, so a
+    /// producer whose consumer exited learns to stop.
+    fn pipe_write(
+        &self,
+        caller: &CallerContext<'_>,
+        end: &crate::pipe::PipeEnd,
+        buf: u64,
+        len: usize,
+    ) -> SyscallResult {
+        use crate::pipe::WriteStep;
+        let len = len.min(FS_IO_MAX);
+        if len == 0 {
+            return Ok(0);
+        }
+        // Stage the caller's bytes in once, before any pipe state is
+        // touched (a faulting buffer writes nothing).
+        let mut data = alloc::vec![0u8; len];
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_in(space, physmap, VirtAddr::new(buf), &mut data)
+        }) {
+            Some(Ok(())) => {}
+            Some(Err(err)) => return Err(copy_fault_errno(err)),
+            None => return Err(Errno::BadAddress),
+        }
+        loop {
+            match end.try_write(&data) {
+                WriteStep::Wrote(n) => {
+                    // Bytes arrived: a reader parked on the empty ring can
+                    // proceed.
+                    crate::waitq::pipe_wake();
+                    return Ok(n as u64);
+                }
+                WriteStep::Broken => return Err(Errno::BrokenPipe),
+                WriteStep::Full => {
+                    let cpu = SchedulerArch::current_cpu(self.arch);
+                    crate::waitq::PIPE_WAITQ.register(caller.task_id.0, crate::waitq::NO_DEADLINE);
+                    let parked = crate::kthread::reschedule_current(cpu, RescheduleAction::Park);
+                    crate::waitq::PIPE_WAITQ.deregister(caller.task_id.0);
+                    if !parked {
+                        return Err(Errno::NotImplemented);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Serve a `stream_read` against a **wired** standard-stream open entry
+    /// (a spawn attach block placed a file, resource, or pipe end behind
+    /// the caller's fd 0–3, `plans/SPAWN.md` SP10).
+    ///
+    /// The entry's own open flags gate the direction (the same rule
+    /// `fs_read` applies); a path-backed stream reads at the shared
+    /// open-file-description cursor and advances it, so successive stream
+    /// reads walk the file exactly as a sequential consumer expects.
+    fn wired_stream_read(
+        &self,
+        caller: &CallerContext<'_>,
+        entry: &crate::aspace::OpenFile,
+        buf: u64,
+        len: usize,
+        timeout_ns: u64,
+    ) -> SyscallResult {
+        if !entry.flags.is_read() {
+            return Err(Errno::PermissionDenied);
+        }
+        let len = len.min(FS_IO_MAX);
+        if len == 0 {
+            return Ok(0);
+        }
+        match &entry.backing {
+            OpenBacking::Path(path) => {
+                // The coarse filesystem gate applies exactly as it does on
+                // the `fs_read` path (one rule, two entry points).
+                if !caller.caps.has(CapabilityId::FS_ACCESS) {
+                    return Err(Errno::PermissionDenied);
+                }
+                let uid = caller.caps.owner().0;
+                let mut data = vec![0u8; len];
+                let offset = entry.cursor();
+                let n =
+                    self.filesystem
+                        .read(uid, caller.caps.effective(), path, offset, &mut data)?;
+                match self.with_caller_aspace(caller, |space, physmap| {
+                    copy_out(space, physmap, VirtAddr::new(buf), &data[..n])
+                }) {
+                    Some(Ok(())) => {
+                        // Advance only after the bytes reached the caller,
+                        // so a faulting buffer re-reads rather than skips.
+                        entry.advance_cursor(n as u64);
+                        Ok(n as u64)
+                    }
+                    Some(Err(err)) => Err(copy_fault_errno(err)),
+                    None => Err(Errno::BadAddress),
+                }
+            }
+            OpenBacking::Resource(backing) => self.resource_read(caller, *backing, buf, len),
+            OpenBacking::Pipe(end) => self.pipe_read(caller, end, buf, len, timeout_ns),
+        }
+    }
+
+    /// Serve a `stream_write` against a **wired** standard-stream open
+    /// entry (`plans/SPAWN.md` SP10). The path-backed arm writes at the
+    /// shared description cursor (honouring `APPEND`), so two dup'd sinks
+    /// interleave at one position instead of overwriting each other.
+    fn wired_stream_write(
+        &self,
+        caller: &CallerContext<'_>,
+        entry: &crate::aspace::OpenFile,
+        buf: u64,
+        len: usize,
+    ) -> SyscallResult {
+        if !entry.flags.is_write() {
+            return Err(Errno::PermissionDenied);
+        }
+        let len = len.min(FS_IO_MAX);
+        if len == 0 {
+            return Ok(0);
+        }
+        match &entry.backing {
+            OpenBacking::Path(path) => {
+                if !caller.caps.has(CapabilityId::FS_ACCESS) {
+                    return Err(Errno::PermissionDenied);
+                }
+                let mut data = vec![0u8; len];
+                match self.with_caller_aspace(caller, |space, physmap| {
+                    copy_in(space, physmap, VirtAddr::new(buf), &mut data)
+                }) {
+                    Some(Ok(())) => {}
+                    Some(Err(err)) => return Err(copy_fault_errno(err)),
+                    None => return Err(Errno::BadAddress),
+                }
+                let uid = caller.caps.owner().0;
+                let append = entry.flags.contains(OpenFlags::APPEND);
+                let offset = entry.cursor();
+                let n = self.filesystem.write(
+                    uid,
+                    caller.caps.effective(),
+                    path,
+                    offset,
+                    append,
+                    &data,
+                )?;
+                entry.advance_cursor(n as u64);
+                Ok(n as u64)
+            }
+            OpenBacking::Resource(backing) => Self::resource_write(*backing, len),
+            OpenBacking::Pipe(end) => self.pipe_write(caller, end, buf, len),
         }
     }
 
@@ -2182,6 +2527,16 @@ where
         buf: u64,
         len: usize,
     ) -> SyscallResult {
+        // A **wired** standard descriptor (a spawn attach block placed a
+        // file, resource, or pipe end behind fd 0–3, `plans/SPAWN.md`
+        // SP10) routes to its open entry — exactly one authority backs
+        // each descriptor, and the wiring left the console table slot
+        // Closed, so the two resolutions can never race or disagree.
+        if (fd as usize) < rustos_abi::STD_STREAM_COUNT {
+            if let Some(entry) = self.aspaces.read().open_file_entry(caller.task_id, fd) {
+                return self.wired_stream_write(caller, &entry, buf, len);
+            }
+        }
         // Resolve `fd` against the caller's per-process descriptor table
         // *before* touching any state: the inherited
         // descriptor, not an ambient device, is the authority. An
@@ -2204,6 +2559,13 @@ where
             }
             return Err(Errno::NotFound);
         }
+        // The console capability gates exactly the console-backed arm
+        // (the dispatcher no longer applies it blanket — a pipe- or
+        // file-wired stream needs no console authority): checked before
+        // the device is resolved or touched.
+        if !caller.caps.has(CapabilityId::CONSOLE_WRITE) {
+            return Err(Errno::PermissionDenied);
+        }
         // Resolve the descriptor's console index against the installed
         // console list (the descriptor names its
         // backing; the video console and the UART are separate devices,
@@ -2214,7 +2576,7 @@ where
         let Some(device) = self.consoles.get(usize::from(streams.console(fd))) else {
             return Err(Errno::NotImplemented);
         };
-        // The dispatcher already checked `CAP_CONSOLE_WRITE` and that
+        // The dispatcher already checked that
         // `buf` is non-null (`UserPtr`). A zero-length write touches
         // neither the caller's buffer nor the device.
         if len == 0 {
@@ -2257,6 +2619,13 @@ where
         len: usize,
         timeout_ns: u64,
     ) -> SyscallResult {
+        // A **wired** standard descriptor routes to its open entry, as in
+        // `stream_write` (`plans/SPAWN.md` SP10).
+        if (fd as usize) < rustos_abi::STD_STREAM_COUNT {
+            if let Some(entry) = self.aspaces.read().open_file_entry(caller.task_id, fd) {
+                return self.wired_stream_read(caller, &entry, buf, len, timeout_ns);
+            }
+        }
         // Resolve `fd` against the caller's per-process descriptor table
         // *before* touching any state: an `fd`
         // that is not a readable inherited stream fails closed with
@@ -2265,6 +2634,12 @@ where
         let streams = self.aspaces.read().streams(caller.task_id);
         if streams.mode(fd) != StreamMode::Read {
             return Err(Errno::NotFound);
+        }
+        // The console capability gates exactly the console-backed arm
+        // (the dispatcher no longer applies it blanket): checked before
+        // the device is resolved or touched.
+        if !caller.caps.has(CapabilityId::CONSOLE_READ) {
+            return Err(Errno::PermissionDenied);
         }
         // Resolve the descriptor's console index against the installed
         // console list (`plans/PI.md` P11 — a login on
@@ -2287,7 +2662,7 @@ where
         // console; a liveness oracle that cannot prove death keeps
         // denying.
         self.check_console_foreground(caller, device)?;
-        // The dispatcher already checked `CAP_CONSOLE_READ` and that
+        // The dispatcher already checked that
         // `buf` is non-null (`UserPtr`). A zero-length read touches
         // neither the device nor the caller's buffer.
         if len == 0 {
@@ -2357,8 +2732,8 @@ where
         caller: &CallerContext<'_>,
         path: u64,
         path_len: usize,
-        console: u64,
-        target_uid: u32,
+        attach: u64,
+        attach_len: usize,
         strings: u64,
         strings_len: usize,
     ) -> SyscallResult {
@@ -2370,26 +2745,32 @@ where
             return Err(Errno::NotFound);
         }
 
-        // Validate and stage the optional startup-strings block *before*
-        // touching any further state (fail closed on a malformed shape).
+        // Validate and stage the optional attach and startup-strings
+        // blocks *before* touching any further state (fail closed on a
+        // malformed shape — a refused block wires nothing).
+        let attach = self.stage_spawn_attach(caller, attach, attach_len)?;
         let strings_buf = self.stage_spawn_strings(caller, strings, strings_len)?;
 
-        // Resolve the child's standard-stream attachment *before*
-        // touching any further state: `CONSOLE_INHERIT`
-        // copies the caller's own descriptor table (the child stays on
-        // its parent's console), while an explicit value must name
-        // an installed console index — anything else fails closed with
-        // `NotFound`, never attaching the child to a device that does
-        // not exist (`plans/PI.md` P11).
-        let child_streams = if console == CONSOLE_INHERIT {
+        // Resolve the child's *base* standard-stream table:
+        // `CONSOLE_INHERIT` copies the caller's own descriptor table (the
+        // child stays on its parent's console), while an explicit value
+        // must name an installed console index — anything else fails
+        // closed with `NotFound`, never attaching the child to a device
+        // that does not exist (`plans/PI.md` P11).
+        let base_streams = if attach.console == CONSOLE_INHERIT {
             self.aspaces.read().streams(caller.task_id)
         } else {
-            let index = match u8::try_from(console) {
+            let index = match u8::try_from(attach.console) {
                 Ok(index) if usize::from(index) < self.consoles.len() => index,
                 _ => return Err(Errno::NotFound),
             };
             DescriptorTable::standard_on(index)
         };
+
+        // Apply the per-descriptor wires onto the base table — the
+        // owner-checked, fail-closed resolution below, run *now*, before
+        // any child state exists.
+        let (child_streams, wired) = self.apply_attach_wires(caller, &attach, base_streams)?;
 
         // The spawn subsystem must be fully wired before any state is
         // touched: a build with no frame allocator threaded fails closed
@@ -2456,7 +2837,7 @@ where
 
         // Resolve the child's kernel-attested credential (uid + group set +
         // capability ceiling), never a caller-supplied value.
-        let credential = self.resolve_spawn_credential(caller, target_uid)?;
+        let credential = self.resolve_spawn_credential(caller, attach.target_uid)?;
 
         // Hand the validated `rxe` to the architecture spawn producer,
         // which builds a fresh hardware-isolated address space and admits
@@ -2481,6 +2862,10 @@ where
             caller.task_id,
             self.process_wait,
             child_streams,
+            // The wired standard-stream entries the attach block resolved
+            // above; installed into the child's own open table at
+            // admission (fd 0–3), beside its stream table.
+            wired,
             // A user-driven `spawn` grants the child no device resources:
             // device windows are minted only by the privileged driver-spawn
             // path from the matched node's requests (no
@@ -2562,6 +2947,36 @@ where
         // the display it paints.
         device.set_input_mode(mode);
         Ok(0)
+    }
+
+    fn pipe_create(&self, caller: &CallerContext<'_>, out: u64) -> SyscallResult {
+        // Unprivileged by design (`plans/SPAWN.md` SP10): both descriptors
+        // land in the caller's own open table and reach nothing else. The
+        // dispatcher already checked `out` is non-null (`UserPtr`).
+        let (read_fd, write_fd) = self.aspaces.write().open_pipe(caller.task_id)?;
+        // Two `u32`s, read end first — native byte order, exactly as the
+        // `WaitStatusRecord` out-parameter (the record never leaves the
+        // machine; it crosses only the user/kernel boundary).
+        let mut bytes = [0u8; 8];
+        bytes[..4].copy_from_slice(&read_fd.to_ne_bytes());
+        bytes[4..].copy_from_slice(&write_fd.to_ne_bytes());
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_out(space, physmap, VirtAddr::new(out), &bytes)
+        }) {
+            Some(Ok(())) => Ok(0),
+            outcome => {
+                // The caller can never learn the descriptor numbers, so
+                // unwind the pair whole (fail closed — the dropped entries
+                // close both ends through their handles).
+                let mut aspaces = self.aspaces.write();
+                aspaces.close_file(caller.task_id, read_fd);
+                aspaces.close_file(caller.task_id, write_fd);
+                match outcome {
+                    Some(Err(err)) => Err(copy_fault_errno(err)),
+                    _ => Err(Errno::BadAddress),
+                }
+            }
+        }
     }
 
     fn console_foreground(&self, caller: &CallerContext<'_>, fd: u32, pid: i32) -> SyscallResult {
@@ -4672,6 +5087,10 @@ where
             // routes to the named subsystem, ignoring the (meaningless) file
             // offset since a resource is a sequential stream.
             OpenBacking::Resource(backing) => self.resource_read(caller, *backing, buf, len),
+            // A pipe end ignores the offset too; the read parks while the
+            // pipe is empty with a live writer (no timeout on the handle
+            // path — the reader waits for its producer).
+            OpenBacking::Pipe(end) => self.pipe_read(caller, end, buf, len, 0),
         }
     }
 
@@ -4730,6 +5149,10 @@ where
             // A resource-backed descriptor was authorised at open; its write
             // routes to the named subsystem.
             OpenBacking::Resource(backing) => Self::resource_write(*backing, len),
+            // A pipe end ignores the offset; the write parks while the ring
+            // is full with a live reader and fails closed with `BrokenPipe`
+            // when none remains.
+            OpenBacking::Pipe(end) => self.pipe_write(caller, end, buf, len),
         }
     }
 
@@ -5079,10 +5502,18 @@ where
     /// The standard-stream descriptor table the admitted child is
     /// established with (the spawner decides the
     /// child's stream backing). The spawn handler resolves it from the
-    /// syscall's `console` argument — the caller's own table for
+    /// syscall's attach block — the caller's own table for
     /// `CONSOLE_INHERIT`, else `DescriptorTable::standard_on` a
-    /// validated installed-console index (`plans/PI.md` P11).
+    /// validated installed-console index (`plans/PI.md` P11), with a
+    /// wired slot closed (its authority is the open entry below).
     streams: DescriptorTable,
+    /// The attach block's resolved standard-stream open entries
+    /// (`plans/SPAWN.md` SP10): cloned, owner-checked parent descriptors
+    /// installed into the child's own open table at fd 0–3 on admission.
+    /// The clones share the parent's open-file descriptions (cursor, pipe
+    /// end); if admission never happens they drop here and release
+    /// everything.
+    wired: Vec<(u32, crate::aspace::OpenFile)>,
     /// The device-resource grants the freshly admitted child is minted —
     /// one unforgeable, owner-checked grant handle per [`HwResource`] the
     /// child's matched hardware-tree node requested, so a user-space
@@ -5143,7 +5574,10 @@ where
     /// `page_table_frames` is the `'static` allocator the producer builds
     /// the child's page tables from; `None` fails the spawn closed. `streams` is the descriptor table the
     /// child is established with — the spawner's resolved console
-    /// attachment. `grants` is the kernel-sourced set of
+    /// attachment. `wired` carries the attach block's resolved
+    /// standard-stream open entries (`plans/SPAWN.md` SP10) — empty for an
+    /// unwired spawn — installed into the child's own open table at fd 0–3
+    /// on admission. `grants` is the kernel-sourced set of
     /// device resources the child is minted a per-resource grant for — an
     /// **empty** slice for an ordinary `spawn` (a user task grants no
     /// device windows), the matched node's requested
@@ -5164,6 +5598,7 @@ where
         parent: SecTaskId,
         process_wait: &'static (dyn ProcessWait + 'static),
         streams: DescriptorTable,
+        wired: Vec<(u32, crate::aspace::OpenFile)>,
         grants: &'a [HwResource],
         node_id: Option<u32>,
         proc_id: ProcId,
@@ -5181,6 +5616,7 @@ where
             parent,
             process_wait,
             streams,
+            wired,
             grants,
             node_id,
             proc_id,
@@ -5351,11 +5787,29 @@ where
         // Establish the child's standard streams: the
         // spawner-resolved table — the parent's own (inherit) or the
         // standard shape on an explicitly selected, validated console
-        // (`plans/PI.md` P11). The program names only the fd numbers; it
-        // never reaches an ambient device. A richer
-        // inheritance policy (e.g. piping a child's `stdout`) is a later
-        // stage.
-        self.aspaces.write().set_streams(sec_id, self.streams);
+        // (`plans/PI.md` P11) — plus any **wired** open entries the attach
+        // block resolved (`plans/SPAWN.md` SP10): a cloned parent
+        // descriptor installed at the child's own fd 0–3, sharing the
+        // parent's open-file description (cursor, pipe end), with the
+        // console slot for a wired fd closed so exactly one authority
+        // backs each descriptor. The program names only the fd numbers; it
+        // never reaches an ambient device.
+        {
+            let mut aspaces = self.aspaces.write();
+            aspaces.set_streams(sec_id, self.streams);
+            for (fd, file) in &self.wired {
+                // `fd` is a standard slot by construction (the wire loop
+                // indexes the fixed table); a refusal here would signal a
+                // kernel invariant violation, so fail the admit closed
+                // rather than start a child missing a wired stream.
+                if aspaces
+                    .install_std_entry(sec_id, *fd, file.clone())
+                    .is_err()
+                {
+                    return Err(AdmitError::AspaceConflict);
+                }
+            }
+        }
 
         // Inherit the parent's effective resource limits:
         // the child's set is the parent's intersected against the system
@@ -6264,6 +6718,66 @@ mod tests {
         space
             .map(page(1), Frame(SEND_FRAME), flags)
             .expect("mapped");
+        (Box::new(space), Box::new(sim))
+    }
+
+    /// User address of the `i`-th attach block a
+    /// [`send_aspace_with_attach`] space stages (page 2, 48-byte strides).
+    fn attach_addr(i: usize) -> u64 {
+        0x2000 + (i * rustos_abi::SPAWN_ATTACH_LEN) as u64
+    }
+
+    /// The attach block the spawn-as-user tests stage: switch the child to
+    /// uid 2000, everything else inherited.
+    fn as_user_2000() -> SpawnAttach {
+        SpawnAttach {
+            target_uid: 2000,
+            ..SpawnAttach::INHERIT
+        }
+    }
+
+    /// Build a spawn-test caller space like [`send_aspace`] — `payload`
+    /// readable at `0x1000` — plus a second readable page at `0x2000`
+    /// seeded with the encoded `blocks` back to back (see [`attach_addr`]),
+    /// for the tests that drive a non-inherit spawn attach block
+    /// (`plans/SPAWN.md` SP10).
+    fn send_aspace_with_attach(
+        payload: &[u8],
+        blocks: &[SpawnAttach],
+    ) -> (
+        Box<dyn UserAddressSpace + Send + Sync>,
+        Box<dyn PhysMap + Send + Sync>,
+    ) {
+        let base = PhysAddr::new(SEND_FRAME as u64 * PAGE_SIZE as u64);
+        let sim = SimPhysMap::new(base, 2 * PAGE_SIZE);
+        if !payload.is_empty() {
+            let ptr = sim.translate(base, payload.len()).expect("seed in window");
+            // SAFETY: the window owns these bytes for the simulator's
+            // lifetime and nothing else aliases them during the test.
+            unsafe {
+                core::ptr::copy_nonoverlapping(payload.as_ptr(), ptr.as_ptr(), payload.len());
+            }
+        }
+        for (i, block) in blocks.iter().enumerate() {
+            let bytes = block.to_le_bytes();
+            let at = PhysAddr::new(base.as_u64() + PAGE_SIZE as u64 + (i * bytes.len()) as u64);
+            let ptr = sim.translate(at, bytes.len()).expect("block in window");
+            // SAFETY: as above — the window owns the bytes for the test.
+            unsafe {
+                core::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.as_ptr(), bytes.len());
+            }
+        }
+        let mut space = AddressSpace::new(HostPageTable::new());
+        space
+            .map(page(1), Frame(SEND_FRAME), MapFlags::READ | MapFlags::USER)
+            .expect("payload page mapped");
+        space
+            .map(
+                page(2),
+                Frame(SEND_FRAME + 1),
+                MapFlags::READ | MapFlags::USER,
+            )
+            .expect("attach page mapped");
         (Box::new(space), Box::new(sim))
     }
 
@@ -7832,7 +8346,7 @@ mod tests {
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(2, &[], sink);
+        let caps = make_caps_record(2, &[CapabilityId::CONSOLE_WRITE], sink);
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -7876,7 +8390,7 @@ mod tests {
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(2, &[], sink);
+        let caps = make_caps_record(2, &[CapabilityId::CONSOLE_WRITE], sink);
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -7911,7 +8425,7 @@ mod tests {
         let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(2, &[], sink);
+        let caps = make_caps_record(2, &[CapabilityId::CONSOLE_WRITE], sink);
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -7959,7 +8473,7 @@ mod tests {
         let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(2, &[], sink);
+        let caps = make_caps_record(2, &[CapabilityId::CONSOLE_WRITE], sink);
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -8002,7 +8516,7 @@ mod tests {
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(2, &[], sink);
+        let caps = make_caps_record(2, &[CapabilityId::CONSOLE_WRITE], sink);
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -8070,7 +8584,7 @@ mod tests {
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(2, &[], sink);
+        let caps = make_caps_record(2, &[CapabilityId::CONSOLE_READ], sink);
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -8122,7 +8636,7 @@ mod tests {
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(2, &[], sink);
+        let caps = make_caps_record(2, &[CapabilityId::CONSOLE_READ], sink);
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -8157,7 +8671,7 @@ mod tests {
         let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(2, &[], sink);
+        let caps = make_caps_record(2, &[CapabilityId::CONSOLE_READ], sink);
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -8210,7 +8724,7 @@ mod tests {
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(2, &[], sink);
+        let caps = make_caps_record(2, &[CapabilityId::CONSOLE_READ], sink);
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -8253,7 +8767,7 @@ mod tests {
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(2, &[], sink);
+        let caps = make_caps_record(2, &[CapabilityId::CONSOLE_READ], sink);
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -8293,7 +8807,7 @@ mod tests {
         let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(2, &[], sink);
+        let caps = make_caps_record(2, &[CapabilityId::CONSOLE_READ], sink);
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -8645,15 +9159,7 @@ mod tests {
 
         let before = sched.live_task_count();
         let pid = h
-            .spawn(
-                &ctx,
-                0x1000,
-                SPAWN_PATH.len(),
-                CONSOLE_INHERIT,
-                SPAWN_UID_INHERIT,
-                0,
-                0,
-            )
+            .spawn(&ctx, 0x1000, SPAWN_PATH.len(), 0, 0, 0, 0)
             .expect("spawn succeeds");
         assert!(
             sched.live_task_count() > before,
@@ -8733,15 +9239,7 @@ mod tests {
             producer,
         );
         assert_eq!(
-            h.spawn(
-                &ctx,
-                0x1000,
-                BUNDLE_PATH.len(),
-                CONSOLE_INHERIT,
-                SPAWN_UID_INHERIT,
-                0,
-                0
-            ),
+            h.spawn(&ctx, 0x1000, BUNDLE_PATH.len(), 0, 0, 0, 0),
             Err(Errno::NotFound)
         );
     }
@@ -8794,15 +9292,7 @@ mod tests {
         .with_filesystem(memfs)
         .with_app_store(store);
         assert_eq!(
-            h.spawn(
-                &ctx,
-                0x1000,
-                BUNDLE_PATH.len(),
-                CONSOLE_INHERIT,
-                SPAWN_UID_INHERIT,
-                0,
-                0
-            ),
+            h.spawn(&ctx, 0x1000, BUNDLE_PATH.len(), 0, 0, 0, 0),
             Err(Errno::NotFound)
         );
         assert!(producer.rxe.lock().is_empty(), "nothing may be spawned");
@@ -8859,15 +9349,7 @@ mod tests {
         .with_filesystem(memfs)
         .with_app_store(store);
         let pid = h
-            .spawn(
-                &ctx,
-                0x1000,
-                BUNDLE_PATH.len(),
-                CONSOLE_INHERIT,
-                SPAWN_UID_INHERIT,
-                0,
-                0,
-            )
+            .spawn(&ctx, 0x1000, BUNDLE_PATH.len(), 0, 0, 0, 0)
             .expect("disk-backed spawn succeeds");
         assert!(pid > 0);
         // The producer received byte-for-byte the validated on-disk image,
@@ -9062,28 +9544,12 @@ mod tests {
         )
         .with_filesystem(fs)
         .with_app_store(store);
-        h.spawn(
-            &ctx,
-            0x1000,
-            BUNDLE_PATH.len(),
-            CONSOLE_INHERIT,
-            SPAWN_UID_INHERIT,
-            0,
-            0,
-        )
-        .expect("first spawn verifies the bundle");
+        h.spawn(&ctx, 0x1000, BUNDLE_PATH.len(), 0, 0, 0, 0)
+            .expect("first spawn verifies the bundle");
         let reads_after_first = fs.reads();
         assert!(reads_after_first > 0, "the first spawn reads the bundle");
-        h.spawn(
-            &ctx,
-            0x1000,
-            BUNDLE_PATH.len(),
-            CONSOLE_INHERIT,
-            SPAWN_UID_INHERIT,
-            0,
-            0,
-        )
-        .expect("second spawn serves the cache");
+        h.spawn(&ctx, 0x1000, BUNDLE_PATH.len(), 0, 0, 0, 0)
+            .expect("second spawn serves the cache");
         assert_eq!(
             fs.reads(),
             reads_after_first,
@@ -9148,28 +9614,12 @@ mod tests {
         .with_app_store(store);
         // The first spawn verifies and caches the bundle (its reads are
         // authorised per-file by the store's own read path).
-        h.spawn(
-            &ctx,
-            0x1000,
-            BUNDLE_PATH.len(),
-            CONSOLE_INHERIT,
-            SPAWN_UID_INHERIT,
-            0,
-            0,
-        )
-        .expect("first spawn verifies the bundle");
+        h.spawn(&ctx, 0x1000, BUNDLE_PATH.len(), 0, 0, 0, 0)
+            .expect("first spawn verifies the bundle");
         // The second spawn hits the cache, but the secured VFS refuses the
         // caller's read of the entry point: the launch fails closed.
         assert_eq!(
-            h.spawn(
-                &ctx,
-                0x1000,
-                BUNDLE_PATH.len(),
-                CONSOLE_INHERIT,
-                SPAWN_UID_INHERIT,
-                0,
-                0
-            ),
+            h.spawn(&ctx, 0x1000, BUNDLE_PATH.len(), 0, 0, 0, 0),
             Err(Errno::PermissionDenied)
         );
         // Only the first, verified launch reached the producer.
@@ -9229,15 +9679,7 @@ mod tests {
         .with_filesystem(memfs)
         .with_app_store(store);
         assert_eq!(
-            h.spawn(
-                &ctx,
-                0x1000,
-                BUNDLE_PATH.len(),
-                CONSOLE_INHERIT,
-                SPAWN_UID_INHERIT,
-                0,
-                0
-            ),
+            h.spawn(&ctx, 0x1000, BUNDLE_PATH.len(), 0, 0, 0, 0),
             Err(Errno::SignatureInvalid)
         );
         assert!(producer.rxe.lock().is_empty(), "nothing may be spawned");
@@ -9300,8 +9742,8 @@ mod tests {
                 &ctx,
                 0x1000,
                 SPAWN_PATH.len(),
-                CONSOLE_INHERIT,
-                SPAWN_UID_INHERIT,
+                0,
+                0,
                 strings_addr,
                 block.len(),
             )
@@ -9358,15 +9800,7 @@ mod tests {
         );
 
         let _pid = h
-            .spawn(
-                &ctx,
-                0x1000,
-                SPAWN_PATH.len(),
-                CONSOLE_INHERIT,
-                SPAWN_UID_INHERIT,
-                0,
-                0,
-            )
+            .spawn(&ctx, 0x1000, SPAWN_PATH.len(), 0, 0, 0, 0)
             .expect("spawn succeeds");
         assert_eq!(
             producer.args.lock().as_slice(),
@@ -9427,8 +9861,8 @@ mod tests {
                 &ctx,
                 0x1000,
                 SPAWN_PATH.len(),
-                CONSOLE_INHERIT,
-                SPAWN_UID_INHERIT,
+                0,
+                0,
                 strings_addr,
                 bogus_block.len(),
             ),
@@ -9481,43 +9915,19 @@ mod tests {
 
         // Zero address with a non-zero length: a contradictory pair.
         assert_eq!(
-            h.spawn(
-                &ctx,
-                0x1000,
-                SPAWN_PATH.len(),
-                CONSOLE_INHERIT,
-                SPAWN_UID_INHERIT,
-                0,
-                8,
-            ),
+            h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), 0, 0, 0, 8,),
             Err(Errno::LengthOutOfRange)
         );
         // Present address with a zero length: no decodable block.
         assert_eq!(
-            h.spawn(
-                &ctx,
-                0x1000,
-                SPAWN_PATH.len(),
-                CONSOLE_INHERIT,
-                SPAWN_UID_INHERIT,
-                0x2000,
-                0,
-            ),
+            h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), 0, 0, 0x2000, 0,),
             Err(Errno::LengthOutOfRange)
         );
         // A length above the startup-vector format's own ceiling: bounded
         // before any kernel allocation is attempted.
         let oversized = usize::try_from(PROCESS_START_MAX_TOTAL_LEN).expect("fits") + 1;
         assert_eq!(
-            h.spawn(
-                &ctx,
-                0x1000,
-                SPAWN_PATH.len(),
-                CONSOLE_INHERIT,
-                SPAWN_UID_INHERIT,
-                0x2000,
-                oversized,
-            ),
+            h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), 0, 0, 0x2000, oversized,),
             Err(Errno::LengthOutOfRange)
         );
         assert!(producer.rxe.lock().is_empty());
@@ -9564,6 +9974,7 @@ mod tests {
             SecTaskId(1),
             &NULL_PROCESS_WAIT,
             DescriptorTable::standard(),
+            Vec::new(),
             &requested,
             // The matched node the driver was loaded for.
             Some(0x55),
@@ -9701,27 +10112,34 @@ mod tests {
             args: &[],
         };
 
+        // One ctx builder for both admits below: everything but the parent
+        // and the minted child identity is the same live kernel state.
+        let make_ctx = |parent: SecTaskId, proc_id: rustos_abi::ProcId| {
+            KernelSpawnCtx::new(
+                &frames,
+                None,
+                sink,
+                &sched,
+                &table,
+                &aspaces,
+                arch.as_ref(),
+                parent,
+                &NULL_PROCESS_WAIT,
+                DescriptorTable::standard(),
+                Vec::new(),
+                &[],
+                None,
+                proc_id,
+                ProcName::EMPTY,
+                SpawnCredential::system(),
+            )
+        };
+
         // A child spawned by that parent records the parent's attested
         // identity as its parentage, and its own (distinct) minted identity
         // as `proc_id`.
         let child_proc = rustos_abi::ProcId::from_raw([0x11; 16]);
-        let ctx = KernelSpawnCtx::new(
-            &frames,
-            None,
-            sink,
-            &sched,
-            &table,
-            &aspaces,
-            arch.as_ref(),
-            parent_task,
-            &NULL_PROCESS_WAIT,
-            DescriptorTable::standard(),
-            &[],
-            None,
-            child_proc,
-            ProcName::EMPTY,
-            SpawnCredential::system(),
-        );
+        let ctx = make_ctx(parent_task, child_proc);
         let pid = RecordingSpawn::new()
             .spawn_with(
                 program.rxe,
@@ -9748,23 +10166,7 @@ mod tests {
 
         // A kernel-parented admit — the parent id names no capability record
         // — records the kernel sentinel, never a fabricated value.
-        let orphan_ctx = KernelSpawnCtx::new(
-            &frames,
-            None,
-            sink,
-            &sched,
-            &table,
-            &aspaces,
-            arch.as_ref(),
-            SecTaskId(9999),
-            &NULL_PROCESS_WAIT,
-            DescriptorTable::standard(),
-            &[],
-            None,
-            rustos_abi::ProcId::from_raw([0x33; 16]),
-            ProcName::EMPTY,
-            SpawnCredential::system(),
-        );
+        let orphan_ctx = make_ctx(SecTaskId(9999), rustos_abi::ProcId::from_raw([0x33; 16]));
         let orphan_pid = RecordingSpawn::new()
             .spawn_with(
                 program.rxe,
@@ -9868,15 +10270,7 @@ mod tests {
         .with_spawn(programs, probe);
         // The probe records and returns `NotImplemented`; the recording, not
         // the result, is what proves the wiring.
-        let _ = h.spawn(
-            &ctx,
-            0x1000,
-            SPAWN_PATH.len(),
-            CONSOLE_INHERIT,
-            SPAWN_UID_INHERIT,
-            0,
-            0,
-        );
+        let _ = h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), 0, 0, 0, 0);
         assert!(
             probe
                 .saw_static_allocator
@@ -9892,15 +10286,7 @@ mod tests {
         let h2 = spawn_handler(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs, probe,
         );
-        let _ = h2.spawn(
-            &ctx,
-            0x1000,
-            SPAWN_PATH.len(),
-            CONSOLE_INHERIT,
-            SPAWN_UID_INHERIT,
-            0,
-            0,
-        );
+        let _ = h2.spawn(&ctx, 0x1000, SPAWN_PATH.len(), 0, 0, 0, 0);
         assert!(
             !probe
                 .saw_static_allocator
@@ -9958,15 +10344,7 @@ mod tests {
         );
 
         let pid = h
-            .spawn(
-                &ctx,
-                0x1000,
-                SPAWN_PATH.len(),
-                CONSOLE_INHERIT,
-                SPAWN_UID_INHERIT,
-                0,
-                0,
-            )
+            .spawn(&ctx, 0x1000, SPAWN_PATH.len(), 0, 0, 0, 0)
             .expect("spawn succeeds");
         // The child carries the parent's tighter Processes ceiling and the
         // default policy for every other kind.
@@ -10026,15 +10404,7 @@ mod tests {
         .with_process_wait(wait_producer);
 
         let pid = h
-            .spawn(
-                &ctx,
-                0x1000,
-                SPAWN_PATH.len(),
-                CONSOLE_INHERIT,
-                SPAWN_UID_INHERIT,
-                0,
-                0,
-            )
+            .spawn(&ctx, 0x1000, SPAWN_PATH.len(), 0, 0, 0, 0)
             .expect("spawn succeeds");
         // The child (its returned PID) was registered against parent 2.
         assert_eq!(*wait_producer.last_register.lock(), Some((2, pid)));
@@ -10085,15 +10455,7 @@ mod tests {
         .with_spawn(programs, &NULL_PROCESS_SPAWN);
 
         assert_eq!(
-            h.spawn(
-                &ctx,
-                0x1000,
-                SPAWN_PATH.len(),
-                CONSOLE_INHERIT,
-                SPAWN_UID_INHERIT,
-                0,
-                0
-            ),
+            h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), 0, 0, 0, 0),
             Err(Errno::NotImplemented)
         );
     }
@@ -10123,15 +10485,7 @@ mod tests {
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
         assert_eq!(
-            h.spawn(
-                &ctx,
-                0x1000,
-                SPAWN_PATH.len(),
-                CONSOLE_INHERIT,
-                SPAWN_UID_INHERIT,
-                0,
-                0
-            ),
+            h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), 0, 0, 0, 0),
             Err(Errno::NotImplemented)
         );
     }
@@ -10171,15 +10525,7 @@ mod tests {
         .with_spawn(&EMPTY_PROGRAM_REGISTRY, producer);
 
         assert_eq!(
-            h.spawn(
-                &ctx,
-                0x1000,
-                SPAWN_PATH.len(),
-                CONSOLE_INHERIT,
-                SPAWN_UID_INHERIT,
-                0,
-                0
-            ),
+            h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), 0, 0, 0, 0),
             Err(Errno::NotFound)
         );
         assert!(producer.rxe.lock().is_empty());
@@ -10223,15 +10569,7 @@ mod tests {
         .with_spawn(programs, producer);
 
         assert_eq!(
-            h.spawn(
-                &ctx,
-                0x1000,
-                SPAWN_PATH.len(),
-                CONSOLE_INHERIT,
-                SPAWN_UID_INHERIT,
-                0,
-                0
-            ),
+            h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), 0, 0, 0, 0),
             Err(Errno::BadAddress)
         );
         assert!(producer.rxe.lock().is_empty());
@@ -10266,23 +10604,435 @@ mod tests {
         .with_frames(&frames)
         .with_spawn(&EMPTY_PROGRAM_REGISTRY, producer);
 
+        assert_eq!(h.spawn(&ctx, 0x1000, 0, 0, 0, 0, 0), Err(Errno::NotFound));
         assert_eq!(
-            h.spawn(&ctx, 0x1000, 0, CONSOLE_INHERIT, SPAWN_UID_INHERIT, 0, 0),
+            h.spawn(&ctx, 0x1000, SPAWN_PATH_MAX + 1, 0, 0, 0, 0),
+            Err(Errno::NotFound)
+        );
+        assert!(producer.rxe.lock().is_empty());
+    }
+
+    /// `pipe_create` mints a read/write descriptor pair in the caller's own
+    /// open table and the pair round-trips bytes through `fs_write` /
+    /// `fs_read`; a drained pipe whose write end closed is end-of-stream,
+    /// and a write with no reader fails closed with `BrokenPipe`
+    /// (`plans/SPAWN.md` SP10).
+    #[test]
+    fn pipe_create_mints_a_pair_that_round_trips_bytes() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, b"ping");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        // Unprivileged: pipes and pipe I/O need no capability at all.
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+
+        // The two new descriptors land at 0x1800 (read end first).
+        assert_eq!(h.pipe_create(&ctx, 0x1800), Ok(0));
+        let mut fds = [0u8; 8];
+        h.with_caller_aspace(&ctx, |space, physmap| {
+            copy_in(space, physmap, VirtAddr::new(0x1800), &mut fds).expect("readable");
+        })
+        .expect("caller has a space");
+        let read_fd = u32::from_ne_bytes([fds[0], fds[1], fds[2], fds[3]]);
+        let write_fd = u32::from_ne_bytes([fds[4], fds[5], fds[6], fds[7]]);
+        assert_eq!((read_fd, write_fd), (4, 5));
+
+        // Bytes flow write end -> read end; the offset is ignored.
+        assert_eq!(h.fs_write(&ctx, write_fd, 999, 0x1000, 4), Ok(4));
+        assert_eq!(h.fs_read(&ctx, read_fd, 999, 0x1100, 4), Ok(4));
+        let mut out = [0u8; 4];
+        h.with_caller_aspace(&ctx, |space, physmap| {
+            copy_in(space, physmap, VirtAddr::new(0x1100), &mut out).expect("readable");
+        })
+        .expect("caller has a space");
+        assert_eq!(&out, b"ping");
+
+        // Close the write end: the drained pipe is end-of-stream, not a
+        // park or an error.
+        assert_eq!(h.fs_close(&ctx, write_fd), Ok(0));
+        assert_eq!(h.fs_read(&ctx, read_fd, 0, 0x1100, 4), Ok(0));
+
+        // A second pipe whose read end closes breaks its writer.
+        assert_eq!(h.pipe_create(&ctx, 0x1800), Ok(0));
+        let mut fds = [0u8; 8];
+        h.with_caller_aspace(&ctx, |space, physmap| {
+            copy_in(space, physmap, VirtAddr::new(0x1800), &mut fds).expect("readable");
+        })
+        .expect("caller has a space");
+        let read_fd2 = u32::from_ne_bytes([fds[0], fds[1], fds[2], fds[3]]);
+        let write_fd2 = u32::from_ne_bytes([fds[4], fds[5], fds[6], fds[7]]);
+        assert_eq!(h.fs_close(&ctx, read_fd2), Ok(0));
+        assert_eq!(
+            h.fs_write(&ctx, write_fd2, 0, 0x1000, 4),
+            Err(Errno::BrokenPipe)
+        );
+    }
+
+    /// A **wired** standard descriptor (the SP10 spawn attach) routes
+    /// `stream_read`/`stream_write` to its open entry with **no console
+    /// capability**, and the entry's own open direction is enforced
+    /// fail-closed in both directions.
+    #[test]
+    fn wired_streams_route_to_the_pipe_and_enforce_direction() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, b"data");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        // Deliberately no CONSOLE_* capability: a pipe-backed standard
+        // stream needs no console authority.
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+
+        // Wire the task the way a spawned child is wired: stdin = the
+        // pipe's read end, stdout = its write end, console table closed.
+        {
+            let mut reg = aspaces.write();
+            let (read_fd, write_fd) = reg.open_pipe(SecTaskId(2)).expect("pair fits");
+            let read = reg
+                .open_file_entry(SecTaskId(2), read_fd)
+                .expect("read end");
+            let write = reg
+                .open_file_entry(SecTaskId(2), write_fd)
+                .expect("write end");
+            reg.install_std_entry(SecTaskId(2), rustos_abi::STDIN, read)
+                .expect("stdin wired");
+            reg.install_std_entry(SecTaskId(2), rustos_abi::STDOUT, write)
+                .expect("stdout wired");
+            reg.set_streams(SecTaskId(2), DescriptorTable::closed());
+        }
+
+        // stdout -> pipe -> stdin, no console anywhere.
+        assert_eq!(h.stream_write(&ctx, rustos_abi::STDOUT, 0x1000, 4), Ok(4));
+        assert_eq!(h.stream_read(&ctx, rustos_abi::STDIN, 0x1100, 4, 0), Ok(4));
+        let mut out = [0u8; 4];
+        h.with_caller_aspace(&ctx, |space, physmap| {
+            copy_in(space, physmap, VirtAddr::new(0x1100), &mut out).expect("readable");
+        })
+        .expect("caller has a space");
+        assert_eq!(&out, b"data");
+
+        // Direction is the entry's own open flags: a read of the write end
+        // and a write of the read end both fail closed.
+        assert_eq!(
+            h.stream_read(&ctx, rustos_abi::STDOUT, 0x1100, 4, 0),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            h.stream_write(&ctx, rustos_abi::STDIN, 0x1000, 4),
+            Err(Errno::PermissionDenied)
+        );
+        // A wired descriptor is not a terminal: the console-only controls
+        // fail closed with `NotFound`.
+        assert_eq!(
+            h.stream_input_mode(&ctx, rustos_abi::STDIN, 1),
+            Err(Errno::NotFound)
+        );
+    }
+
+    /// The spawn attach block wires a parent pipe end into the child: the
+    /// child's open table holds a counted clone of the parent's end at the
+    /// standard fd, its console slot is closed, and the unwired slots
+    /// inherit (`plans/SPAWN.md` SP10).
+    #[test]
+    fn spawn_attach_wires_a_pipe_end_into_the_child() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        // The parent's pipe pair is minted first, so its descriptors are
+        // deterministic (4 = read end, 5 = write end).
+        let attach = SpawnAttach {
+            wires: [
+                FdWire::Inherit,
+                FdWire::Handle(5),
+                FdWire::Closed,
+                FdWire::Inherit,
+            ],
+            ..SpawnAttach::INHERIT
+        };
+        let (space, physmap) = send_aspace_with_attach(SPAWN_PATH, &[attach]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        let (parent_read_fd, parent_write_fd) = aspaces
+            .write()
+            .open_pipe(SecTaskId(2))
+            .expect("pipe pair fits");
+        assert_eq!((parent_read_fd, parent_write_fd), (4, 5));
+        aspaces
+            .write()
+            .set_streams(SecTaskId(2), DescriptorTable::standard_on(1));
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let programs: &'static ProgramRegistry =
+            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+                EmbeddedProgram {
+                    path: SPAWN_PATH,
+                    rxe: SPAWN_RXE,
+                    caps: &[],
+                    args: &[],
+                },
+            ])))));
+        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
+        let h = spawn_handler(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
+            producer,
+        );
+
+        let pid = h
+            .spawn(
+                &ctx,
+                0x1000,
+                SPAWN_PATH.len(),
+                attach_addr(0),
+                SPAWN_ATTACH_LEN,
+                0,
+                0,
+            )
+            .expect("wired spawn succeeds");
+
+        // The child's stdout is a counted clone of the parent's write end.
+        let child_entry = aspaces
+            .read()
+            .open_file_entry(SecTaskId(pid), rustos_abi::STDOUT)
+            .expect("wired child entry");
+        let parent_entry = aspaces
+            .read()
+            .open_file_entry(SecTaskId(2), parent_write_fd)
+            .expect("parent entry");
+        assert!(child_entry
+            .pipe()
+            .expect("pipe end")
+            .same_pipe(parent_entry.pipe().expect("pipe end")));
+        assert!(child_entry.flags.is_write());
+        // The wired slot's console entry is closed; the explicit `Closed`
+        // wire closed stderr; the untouched slots inherit the parent's
+        // console-1 table.
+        let child_streams = aspaces.read().streams(SecTaskId(pid));
+        assert_eq!(child_streams.mode(rustos_abi::STDOUT), StreamMode::Closed);
+        assert_eq!(child_streams.mode(rustos_abi::STDERR), StreamMode::Closed);
+        assert_eq!(child_streams.mode(rustos_abi::STDIN), StreamMode::Read);
+        assert_eq!(child_streams.console(rustos_abi::STDIN), 1);
+        // The child's end stays live independently of the parent's
+        // descriptor: closing the parent's write end leaves the pipe
+        // writable through the child's clone (the read end still lives).
+        assert_eq!(h.fs_close(&ctx, parent_write_fd), Ok(0));
+        assert_eq!(
+            child_entry.pipe().expect("pipe end").try_write(b"x"),
+            crate::pipe::WriteStep::Wrote(1)
+        );
+    }
+
+    /// Attach-block wiring is validated fail-closed before any child
+    /// exists: a forged or foreign handle refuses the spawn with
+    /// `NotFound`, and a handle whose direction cannot serve the slot is
+    /// `PermissionDenied`; the producer is never reached.
+    #[test]
+    fn spawn_attach_refuses_forged_and_wrong_direction_handles() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        // Block 0: a handle that names no descriptor. Block 1: the pipe's
+        // write end (fd 5) behind stdin, which needs a readable entry.
+        let blocks = [
+            SpawnAttach {
+                wires: [
+                    FdWire::Inherit,
+                    FdWire::Handle(99),
+                    FdWire::Inherit,
+                    FdWire::Inherit,
+                ],
+                ..SpawnAttach::INHERIT
+            },
+            SpawnAttach {
+                wires: [
+                    FdWire::Handle(5),
+                    FdWire::Inherit,
+                    FdWire::Inherit,
+                    FdWire::Inherit,
+                ],
+                ..SpawnAttach::INHERIT
+            },
+        ];
+        let (space, physmap) = send_aspace_with_attach(SPAWN_PATH, &blocks);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        let (_read_fd, write_fd) = aspaces
+            .write()
+            .open_pipe(SecTaskId(2))
+            .expect("pipe pair fits");
+        assert_eq!(write_fd, 5);
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let programs: &'static ProgramRegistry =
+            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+                EmbeddedProgram {
+                    path: SPAWN_PATH,
+                    rxe: SPAWN_RXE,
+                    caps: &[],
+                    args: &[],
+                },
+            ])))));
+        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
+        let h = spawn_handler(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
+            producer,
+        );
+
+        assert_eq!(
+            h.spawn(
+                &ctx,
+                0x1000,
+                SPAWN_PATH.len(),
+                attach_addr(0),
+                SPAWN_ATTACH_LEN,
+                0,
+                0,
+            ),
             Err(Errno::NotFound)
         );
         assert_eq!(
             h.spawn(
                 &ctx,
                 0x1000,
-                SPAWN_PATH_MAX + 1,
-                CONSOLE_INHERIT,
-                SPAWN_UID_INHERIT,
+                SPAWN_PATH.len(),
+                attach_addr(1),
+                SPAWN_ATTACH_LEN,
                 0,
-                0
+                0,
             ),
-            Err(Errno::NotFound)
+            Err(Errno::PermissionDenied)
         );
-        assert!(producer.rxe.lock().is_empty());
+        assert!(producer.rxe.lock().is_empty(), "nothing may be spawned");
+    }
+
+    /// The attach pair's shape is validated before any state is touched: a
+    /// contradictory zero-address pair, a wrong length, and a malformed
+    /// block all refuse the spawn whole.
+    #[test]
+    fn spawn_attach_shape_violations_fail_closed() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, SPAWN_PATH);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let programs: &'static ProgramRegistry =
+            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+                EmbeddedProgram {
+                    path: SPAWN_PATH,
+                    rxe: SPAWN_RXE,
+                    caps: &[],
+                    args: &[],
+                },
+            ])))));
+        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
+        let h = spawn_handler(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
+            producer,
+        );
+
+        // Zero address with a non-zero length: a contradictory pair.
+        assert_eq!(
+            h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), 0, SPAWN_ATTACH_LEN, 0, 0),
+            Err(Errno::LengthOutOfRange)
+        );
+        // A present address with any length other than the fixed one.
+        assert_eq!(
+            h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), 0x1000, 8, 0, 0),
+            Err(Errno::LengthOutOfRange)
+        );
+        // A well-shaped pair whose bytes are not an attach block (the path
+        // page) is refused by the fail-closed parser.
+        assert_eq!(
+            h.spawn(
+                &ctx,
+                0x1000,
+                SPAWN_PATH.len(),
+                0x1000,
+                SPAWN_ATTACH_LEN,
+                0,
+                0,
+            ),
+            Err(Errno::BadMagic)
+        );
+        assert!(producer.rxe.lock().is_empty(), "nothing may be spawned");
     }
 
     /// `console_count` reports the installed list's length, and zero on
@@ -10345,7 +11095,7 @@ mod tests {
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(2, &[], sink);
+        let caps = make_caps_record(2, &[CapabilityId::CONSOLE_WRITE], sink);
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -10404,7 +11154,7 @@ mod tests {
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(2, &[], sink);
+        let caps = make_caps_record(2, &[CapabilityId::CONSOLE_READ], sink);
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -10454,7 +11204,7 @@ mod tests {
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(2, &[], sink);
+        let caps = make_caps_record(2, &[CapabilityId::CONSOLE_READ], sink);
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -10499,7 +11249,7 @@ mod tests {
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(2, &[], sink);
+        let caps = make_caps_record(2, &[CapabilityId::CONSOLE_READ], sink);
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -10634,17 +11384,17 @@ mod tests {
         // Three principals on the one console: the shell (2) and its two
         // children (9, 7), each with its own registered address space and
         // inherited standard streams.
-        let shell_caps = make_caps_record(2, &[], sink);
+        let shell_caps = make_caps_record(2, &[CapabilityId::CONSOLE_READ], sink);
         let shell = CallerContext {
             task_id: SecTaskId(2),
             caps: &shell_caps,
         };
-        let fg_caps = make_caps_record(9, &[], sink);
+        let fg_caps = make_caps_record(9, &[CapabilityId::CONSOLE_READ], sink);
         let fg = CallerContext {
             task_id: SecTaskId(9),
             caps: &fg_caps,
         };
-        let bg_caps = make_caps_record(7, &[], sink);
+        let bg_caps = make_caps_record(7, &[CapabilityId::CONSOLE_READ], sink);
         let bg = CallerContext {
             task_id: SecTaskId(7),
             caps: &bg_caps,
@@ -10736,7 +11486,7 @@ mod tests {
         let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let shell_caps = make_caps_record(2, &[], sink);
+        let shell_caps = make_caps_record(2, &[CapabilityId::CONSOLE_READ], sink);
         let shell = CallerContext {
             task_id: SecTaskId(2),
             caps: &shell_caps,
@@ -11448,7 +12198,23 @@ mod tests {
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
-        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, SPAWN_PATH);
+        // Three staged attach blocks: an installed console (1), an
+        // uninstalled index (2), and an absurd index (u32::MAX).
+        let blocks = [
+            SpawnAttach {
+                console: 1,
+                ..SpawnAttach::INHERIT
+            },
+            SpawnAttach {
+                console: 2,
+                ..SpawnAttach::INHERIT
+            },
+            SpawnAttach {
+                console: u64::from(u32::MAX),
+                ..SpawnAttach::INHERIT
+            },
+        ];
+        let (space, physmap) = send_aspace_with_attach(SPAWN_PATH, &blocks);
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
         aspaces
@@ -11489,7 +12255,15 @@ mod tests {
         // An explicit, installed console: the child's table is the
         // standard shape on exactly that console.
         let pid = h
-            .spawn(&ctx, 0x1000, SPAWN_PATH.len(), 1, SPAWN_UID_INHERIT, 0, 0)
+            .spawn(
+                &ctx,
+                0x1000,
+                SPAWN_PATH.len(),
+                attach_addr(0),
+                SPAWN_ATTACH_LEN,
+                0,
+                0,
+            )
             .expect("spawn succeeds");
         assert_eq!(
             aspaces.read().streams(SecTaskId(pid)),
@@ -11499,7 +12273,15 @@ mod tests {
         // An index with no installed console fails closed before any
         // state is touched.
         assert_eq!(
-            h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), 2, SPAWN_UID_INHERIT, 0, 0),
+            h.spawn(
+                &ctx,
+                0x1000,
+                SPAWN_PATH.len(),
+                attach_addr(1),
+                SPAWN_ATTACH_LEN,
+                0,
+                0,
+            ),
             Err(Errno::NotFound)
         );
         assert_eq!(
@@ -11507,10 +12289,10 @@ mod tests {
                 &ctx,
                 0x1000,
                 SPAWN_PATH.len(),
-                u64::from(u32::MAX),
-                SPAWN_UID_INHERIT,
+                attach_addr(2),
+                SPAWN_ATTACH_LEN,
                 0,
-                0
+                0,
             ),
             Err(Errno::NotFound)
         );
@@ -11571,15 +12353,7 @@ mod tests {
             .write()
             .set_streams(SecTaskId(2), DescriptorTable::standard_on(1));
         let pid = h
-            .spawn(
-                &ctx,
-                0x1000,
-                SPAWN_PATH.len(),
-                CONSOLE_INHERIT,
-                SPAWN_UID_INHERIT,
-                0,
-                0,
-            )
+            .spawn(&ctx, 0x1000, SPAWN_PATH.len(), 0, 0, 0, 0)
             .expect("spawn succeeds");
         assert_eq!(
             aspaces.read().streams(SecTaskId(pid)),
@@ -11688,15 +12462,7 @@ mod tests {
             producer,
         );
         let pid = h
-            .spawn(
-                &ctx,
-                0x1000,
-                SPAWN_PATH.len(),
-                CONSOLE_INHERIT,
-                SPAWN_UID_INHERIT,
-                0,
-                0,
-            )
+            .spawn(&ctx, 0x1000, SPAWN_PATH.len(), 0, 0, 0, 0)
             .expect("inherit spawn succeeds");
         let guard = table.read();
         let child = guard.caps_for(SecTaskId(pid)).expect("child record");
@@ -11718,7 +12484,7 @@ mod tests {
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
-        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, SPAWN_PATH);
+        let (space, physmap) = send_aspace_with_attach(SPAWN_PATH, &[as_user_2000()]);
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
         aspaces
@@ -11750,7 +12516,15 @@ mod tests {
             producer,
         );
         assert_eq!(
-            h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), CONSOLE_INHERIT, 2000, 0, 0),
+            h.spawn(
+                &ctx,
+                0x1000,
+                SPAWN_PATH.len(),
+                attach_addr(0),
+                SPAWN_ATTACH_LEN,
+                0,
+                0,
+            ),
             Err(Errno::PermissionDenied)
         );
         // Fail closed before building: the producer was never reached.
@@ -11771,7 +12545,7 @@ mod tests {
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
-        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, SPAWN_PATH);
+        let (space, physmap) = send_aspace_with_attach(SPAWN_PATH, &[as_user_2000()]);
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
         aspaces
@@ -11821,7 +12595,15 @@ mod tests {
         )
         .with_identity(identity);
         let pid = h
-            .spawn(&ctx, 0x1000, SPAWN_PATH.len(), CONSOLE_INHERIT, 2000, 0, 0)
+            .spawn(
+                &ctx,
+                0x1000,
+                SPAWN_PATH.len(),
+                attach_addr(0),
+                SPAWN_ATTACH_LEN,
+                0,
+                0,
+            )
             .expect("switch spawn succeeds");
         let guard = table.read();
         let child = guard.caps_for(SecTaskId(pid)).expect("child record");
@@ -11848,7 +12630,7 @@ mod tests {
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
-        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, SPAWN_PATH);
+        let (space, physmap) = send_aspace_with_attach(SPAWN_PATH, &[as_user_2000()]);
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
         aspaces
@@ -11905,7 +12687,15 @@ mod tests {
         // fixture-builder records emitted during set-up.
         sink.clear();
         let pid = h
-            .spawn(&ctx, 0x1000, SPAWN_PATH.len(), CONSOLE_INHERIT, 2000, 0, 0)
+            .spawn(
+                &ctx,
+                0x1000,
+                SPAWN_PATH.len(),
+                attach_addr(0),
+                SPAWN_ATTACH_LEN,
+                0,
+                0,
+            )
             .expect("switch spawn succeeds");
         let guard = table.read();
         let child = guard.caps_for(SecTaskId(pid)).expect("child record");
@@ -11986,15 +12776,7 @@ mod tests {
             producer,
         );
         let pid = h
-            .spawn(
-                &ctx,
-                0x1000,
-                SPAWN_PATH.len(),
-                CONSOLE_INHERIT,
-                SPAWN_UID_INHERIT,
-                0,
-                0,
-            )
+            .spawn(&ctx, 0x1000, SPAWN_PATH.len(), 0, 0, 0, 0)
             .expect("inherit spawn succeeds");
         let guard = table.read();
         let child = guard.caps_for(SecTaskId(pid)).expect("child record");
@@ -12057,15 +12839,7 @@ mod tests {
             producer,
         );
         let pid = h
-            .spawn(
-                &ctx,
-                0x1000,
-                SPAWN_PATH.len(),
-                CONSOLE_INHERIT,
-                SPAWN_UID_INHERIT,
-                0,
-                0,
-            )
+            .spawn(&ctx, 0x1000, SPAWN_PATH.len(), 0, 0, 0, 0)
             .expect("inherit spawn succeeds");
         let guard = table.read();
         let child = guard.caps_for(SecTaskId(pid)).expect("child record");
@@ -12092,7 +12866,7 @@ mod tests {
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
-        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, SPAWN_PATH);
+        let (space, physmap) = send_aspace_with_attach(SPAWN_PATH, &[as_user_2000()]);
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
         aspaces
@@ -12135,7 +12909,15 @@ mod tests {
         )
         .with_identity(identity);
         assert_eq!(
-            h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), CONSOLE_INHERIT, 2000, 0, 0),
+            h.spawn(
+                &ctx,
+                0x1000,
+                SPAWN_PATH.len(),
+                attach_addr(0),
+                SPAWN_ATTACH_LEN,
+                0,
+                0,
+            ),
             Err(Errno::PermissionDenied)
         );
         assert!(producer.rxe.lock().is_empty());
@@ -12152,7 +12934,7 @@ mod tests {
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
-        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, SPAWN_PATH);
+        let (space, physmap) = send_aspace_with_attach(SPAWN_PATH, &[as_user_2000()]);
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
         aspaces
@@ -12188,7 +12970,15 @@ mod tests {
             producer,
         );
         assert_eq!(
-            h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), CONSOLE_INHERIT, 2000, 0, 0),
+            h.spawn(
+                &ctx,
+                0x1000,
+                SPAWN_PATH.len(),
+                attach_addr(0),
+                SPAWN_ATTACH_LEN,
+                0,
+                0,
+            ),
             Err(Errno::NotImplemented)
         );
         assert!(producer.rxe.lock().is_empty());
@@ -18706,7 +19496,14 @@ mod tests {
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(tid, &[CapabilityId::SYSINFO_INTROSPECT], sink);
+        // The viewer holds the console-read authority its console-backed
+        // stdin needs (checked in-handler since the SP10 stream routing)
+        // beside its introspect grant.
+        let caps = make_caps_record(
+            tid,
+            &[CapabilityId::SYSINFO_INTROSPECT, CapabilityId::CONSOLE_READ],
+            sink,
+        );
         let ctx = CallerContext {
             task_id: SecTaskId(tid),
             caps: &caps,

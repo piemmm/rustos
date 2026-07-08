@@ -208,6 +208,16 @@ pub enum Errno {
     /// reader is refused with this code instead of being stopped by an
     /// asynchronous signal, so there is no `SIGTTIN`-style race to exploit.
     NotForeground = 27,
+    /// A write was issued to a pipe whose every read end is closed.
+    ///
+    /// The RustOS equivalent of POSIX `EPIPE`. Emitted by a write to a
+    /// pipe end (`plans/SPAWN.md` SP10) when no reader remains: the bytes
+    /// can never be consumed, so the writer learns to stop — this is how a
+    /// `yes | head` pipeline terminates its producer. Deliberately distinct
+    /// from [`NotFound`](Self::NotFound) (the descriptor itself is still
+    /// open and owned by the caller) and from
+    /// [`WouldBlock`](Self::WouldBlock) (retrying can never succeed).
+    BrokenPipe = 28,
 }
 
 impl Errno {
@@ -270,6 +280,7 @@ impl Errno {
             25 => Some(Self::SeatNotOwner),
             26 => Some(Self::SeatRevoked),
             27 => Some(Self::NotForeground),
+            28 => Some(Self::BrokenPipe),
             _ => None,
         }
     }
@@ -305,6 +316,7 @@ impl fmt::Display for Errno {
             Self::SeatNotOwner => "not the seat owner",
             Self::SeatRevoked => "seat lease revoked",
             Self::NotForeground => "not the console foreground owner",
+            Self::BrokenPipe => "broken pipe",
         };
         f.write_str(message)
     }
@@ -344,6 +356,7 @@ mod tests {
         assert_eq!(Errno::SeatNotOwner.as_i32(), 25);
         assert_eq!(Errno::SeatRevoked.as_i32(), 26);
         assert_eq!(Errno::NotForeground.as_i32(), 27);
+        assert_eq!(Errno::BrokenPipe.as_i32(), 28);
     }
 
     #[test]
@@ -378,11 +391,12 @@ mod tests {
             Errno::SeatNotOwner,
             Errno::SeatRevoked,
             Errno::NotForeground,
+            Errno::BrokenPipe,
         ] {
             assert_eq!(Errno::from_i32(errno.as_i32()), Some(errno));
         }
         assert_eq!(Errno::from_i32(0), None);
-        assert_eq!(Errno::from_i32(28), None);
+        assert_eq!(Errno::from_i32(29), None);
         assert_eq!(Errno::from_i32(-1), None);
     }
 

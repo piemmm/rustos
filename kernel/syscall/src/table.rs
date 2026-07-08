@@ -232,28 +232,36 @@ pub trait SyscallHandlers {
     /// builds a fresh hardware-isolated address space for it,
     /// registers it as a runnable process, and returns its PID; the
     /// caller keeps running (`plans/SPAWN.md` SP3 — a true concurrent
-    /// spawn, not an `exec`-style hand-off). `console` selects the
-    /// child's standard-stream attachment:
-    /// [`rustos_abi::CONSOLE_INHERIT`] attaches the child to the
-    /// caller's own descriptor table, any other value names an
-    /// installed console index and the implementation must fail closed
-    /// with [`Errno::NotFound`] when no console is installed at it. A
+    /// spawn, not an `exec`-style hand-off). A
     /// build with no spawn service wired must fail closed with
     /// [`Errno::NotImplemented`], and a path naming no registered
     /// program with [`Errno::NotFound`], rather than silently doing
     /// nothing.
     ///
-    /// `target_uid` selects the child's kernel-attested credential
-    /// (`PREREQUISITES.md` P-C, spawn-as-user):
-    /// [`rustos_abi::SPAWN_UID_INHERIT`] starts the child under the caller's
-    /// own attested credential (no capability required), while any other value
-    /// asks the kernel to resolve that user's full credential from the
-    /// authoritative identity table and switch the child into it. A switch
-    /// requires the caller to hold [`CapabilityId::SPAWN_AS_USER`] and must
-    /// fail closed with [`Errno::PermissionDenied`] otherwise; an unresolvable
-    /// target uid fails closed rather than inventing a credential. A running
-    /// process can never change its *own* identity — the credential is fixed
-    /// at creation (there is no setuid-self).
+    /// `(attach, attach_len)` optionally carry the child's *attach block*
+    /// (`plans/SPAWN.md` SP10): a non-zero `attach` names an encoded
+    /// [`rustos_abi::SpawnAttach`] block in the caller's address space.
+    /// The implementation stages exactly
+    /// [`rustos_abi::SPAWN_ATTACH_LEN`] bytes through the validated
+    /// `copy_from_user` boundary and parses the block fail-closed; a
+    /// malformed block is rejected whole, never partially applied. The
+    /// block selects the child's credential
+    /// ([`rustos_abi::SPAWN_UID_INHERIT`] keeps the caller's own; a
+    /// concrete uid asks the kernel to resolve that user and switch the
+    /// child into it, which requires [`CapabilityId::SPAWN_AS_USER`] and
+    /// must fail closed with [`Errno::PermissionDenied`] otherwise — a
+    /// running process can never change its *own* identity, there is no
+    /// setuid-self), the console its base descriptor table comes from
+    /// ([`rustos_abi::CONSOLE_INHERIT`] = the caller's own table; any
+    /// other value names an installed console index, failing closed with
+    /// [`Errno::NotFound`] when none is installed there), and one
+    /// [`rustos_abi::FdWire`] per standard descriptor — wiring the
+    /// child's fd 0/1/2/3 onto pre-opened descriptors of the **caller's
+    /// own** open table (files, resources, pipe ends), each resolved
+    /// owner-checked against the kernel-attested caller so a forged or
+    /// foreign number refuses the spawn with [`Errno::NotFound`]. A zero
+    /// `attach` means full inherit: the caller's own credential and
+    /// descriptor table, untouched.
     ///
     /// `(strings, strings_len)` optionally carry the child's startup
     /// strings: a non-zero `strings` names an encoded
@@ -278,11 +286,28 @@ pub trait SyscallHandlers {
         caller: &CallerContext<'_>,
         path: u64,
         path_len: usize,
-        console: u64,
-        target_uid: u32,
+        attach: u64,
+        attach_len: usize,
         strings: u64,
         strings_len: usize,
     ) -> SyscallResult;
+    /// Create a pipe — a bounded, kernel-buffered unidirectional byte
+    /// stream — writing its two new descriptors (the read end first, then
+    /// the write end, two `u32`s) through the user pointer `out`
+    /// (`plans/SPAWN.md` SP10). Returns `Ok(0)` on success.
+    ///
+    /// The dispatcher has already checked that `out` is non-null. Both
+    /// descriptors land in the **caller's own** open table (the same
+    /// allocator [`SyscallHandlers::fs_open`] draws from) and are served
+    /// by [`SyscallHandlers::fs_read`] / [`SyscallHandlers::fs_write`] /
+    /// [`SyscallHandlers::fs_close`]. The default body fails closed with
+    /// [`Errno::NotImplemented`] so a build without the pipe facility
+    /// announces the inert interface rather than minting descriptors it
+    /// cannot serve.
+    fn pipe_create(&self, caller: &CallerContext<'_>, out: u64) -> SyscallResult {
+        let _ = (caller, out);
+        Err(Errno::NotImplemented)
+    }
     /// Read up to `len` bytes from the calling process's standard stream
     /// `fd` into the user buffer at `buf`, returning the number of bytes
     /// read.
@@ -1771,22 +1796,22 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             }
             SyscallNumber::SPAWN => {
                 let len = decode_len(args.0[1])?;
-                // args[2] is the console selector: the `CONSOLE_INHERIT`
-                // sentinel or an installed console index, validated by
-                // the handler against the live console list. args[3] is the
-                // `target_uid`: the `SPAWN_UID_INHERIT` sentinel (start under
-                // the caller's own credential) or a concrete uid to switch to
-                // (gated by `CAP_SPAWN_AS_USER` in the handler). args[4] and
-                // args[5] are the optional startup-strings block (zero
-                // address = absent); the handler bounds and parses it
-                // fail-closed.
+                // args[2] and args[3] are the optional attach block (zero
+                // address = absent — full inherit): the encoded
+                // `SpawnAttach` selecting the child's credential, base
+                // console, and per-descriptor wires; the handler stages and
+                // parses it fail-closed and owner-checks every named
+                // handle. args[4] and args[5] are the optional
+                // startup-strings block (zero address = absent); the
+                // handler bounds and parses it fail-closed.
+                let attach_len = decode_len(args.0[3])?;
                 let strings_len = decode_len(args.0[5])?;
                 self.handlers.spawn(
                     caller,
                     args.0[0],
                     len,
                     args.0[2],
-                    decode_u32(args.0[3]),
+                    attach_len,
                     args.0[4],
                     strings_len,
                 )
@@ -1869,6 +1894,11 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 let pid = (args.0[1] & 0xFFFF_FFFF) as i32;
                 self.handlers
                     .console_foreground(caller, decode_u32(args.0[0]), pid)
+            }
+            SyscallNumber::PIPE_CREATE => {
+                // args[0] is the non-null `UserPtr` (dispatcher-checked)
+                // the handler writes the two new descriptors through.
+                self.handlers.pipe_create(caller, args.0[0])
             }
             SyscallNumber::KEY_INJECT => {
                 // `validate_arg` guarantees args[0] is a non-null
@@ -2533,17 +2563,21 @@ mod tests {
             _c: &CallerContext<'_>,
             _path: u64,
             path_len: usize,
-            _console: u64,
-            _target_uid: u32,
+            _attach: u64,
+            _attach_len: usize,
             _strings: u64,
             _strings_len: usize,
         ) -> SyscallResult {
             self.record("spawn");
             // Echo the path length back so the reachability test can
             // assert the dispatcher decoded the `(path, path_len,
-            // console, target_uid, strings, strings_len)` arguments
+            // attach, attach_len, strings, strings_len)` arguments
             // without wiring a real spawn service here.
             Ok(path_len as u64)
+        }
+        fn pipe_create(&self, _c: &CallerContext<'_>, _out: u64) -> SyscallResult {
+            self.record("pipe_create");
+            Ok(0)
         }
         fn stream_read(
             &self,

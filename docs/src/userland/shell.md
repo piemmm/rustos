@@ -255,8 +255,12 @@ its argument vector and the shell's exported variables (with any `NAME=v
 cmd` prefix overrides layered on top) as its environment, encoded into the
 `spawn` startup-strings block — strings are data, never authority, and the
 kernel re-validates the block fail-closed before building the child's own
-copy. Pipes and redirections need descriptor plumbing the ABI does not yet
-express, so the host fails a pipeline or redirection closed with
+copy. The kernel half of pipes and redirections is landed
+(`plans/SPAWN.md` SP10a: the spawn attach block wiring a child's fd 0–3
+onto pre-opened files, resources, or `pipe_create` ends); the host-side
+wiring — pre-opening each `RedirAction` target and spawning pipeline
+members with their attach blocks — is the staged SP10b increment, so
+until it lands the host still fails a pipeline or redirection closed with
 `NotImplemented` rather than silently dropping it. The in-process builtins
 (`echo`, `exit`, `export`, `pwd`, `help`, …) work regardless.
 

@@ -132,11 +132,15 @@ impl SyscallHandlers for AcceptingHandlers {
         _c: &CallerContext<'_>,
         _path: u64,
         _path_len: usize,
-        _console: u64,
-        _target_uid: u32,
+        _attach: u64,
+        _attach_len: usize,
         _strings: u64,
         _strings_len: usize,
     ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn pipe_create(&self, _c: &CallerContext<'_>, _out: u64) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }

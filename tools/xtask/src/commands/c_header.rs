@@ -120,6 +120,7 @@ const ERRNO_NAMES: &[(&str, Errno)] = &[
     ("SEAT_NOT_OWNER", Errno::SeatNotOwner),
     ("SEAT_REVOKED", Errno::SeatRevoked),
     ("NOT_FOREGROUND", Errno::NotForeground),
+    ("BROKEN_PIPE", Errno::BrokenPipe),
 ];
 
 /// One generated C header: its file name (relative to the include directory)
@@ -2128,6 +2129,7 @@ fn generate_syscall() -> String {
     out.push('\n');
 
     emit_wait_contract(&mut out);
+    emit_spawn_attach_contract(&mut out);
 
     out.push_str(
         "/* fs_open() flag bits (uint32_t). Every undefined bit is reserved and rejected\n\
@@ -2263,6 +2265,66 @@ fn emit_wait_contract(out: &mut String) {
          \x20   uint32_t kind;\n\
          \x20   int32_t value;\n\
          } ros_wait_status_t;\n",
+    );
+    out.push('\n');
+}
+
+/// Emit the `spawn()` attach-block contract items into `rustos_syscall.h`:
+/// the version/length constants, the per-descriptor wire kinds, and the
+/// typed `ros_spawn_attach_t` block the syscall's `attach` pointer names
+/// (`plans/SPAWN.md` SP10), every value read from `lib/abi` and never
+/// re-typed. Every Tier-1 target is little-endian, so the packed C struct
+/// written in native order is exactly the encoded block the kernel parses.
+fn emit_spawn_attach_contract(out: &mut String) {
+    use std::fmt::Write as _;
+    out.push_str(
+        "/* spawn() attach block: the child's credential, base console, and one wire per\n\
+         * standard descriptor (fd 0..3). Pass NULL/0 for full inherit. Every wire kind\n\
+         * other than the values below (including 0) is reserved and refused; a HANDLE\n\
+         * wire names a descriptor of the CALLER'S OWN open table (a file, resource, or\n\
+         * pipe end), owner-checked kernel-side before any child state exists. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_SPAWN_ATTACH_VERSION {}u",
+        rustos_abi::SPAWN_ATTACH_VERSION
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_SPAWN_ATTACH_LEN {}u",
+        rustos_abi::SPAWN_ATTACH_LEN
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_FD_WIRE_INHERIT {}u",
+        rustos_abi::FD_WIRE_KIND_INHERIT
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_FD_WIRE_INHERIT_SLOT {}u",
+        rustos_abi::FD_WIRE_KIND_INHERIT_SLOT
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_FD_WIRE_CLOSED {}u",
+        rustos_abi::FD_WIRE_KIND_CLOSED
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_FD_WIRE_HANDLE {}u",
+        rustos_abi::FD_WIRE_KIND_HANDLE
+    );
+    out.push_str(
+        "typedef struct ros_fd_wire {\n\
+         \x20   uint32_t kind;\n\
+         \x20   uint32_t value;\n\
+         } ros_fd_wire_t;\n\
+         typedef struct ros_spawn_attach {\n\
+         \x20   uint32_t version;\n\
+         \x20   uint32_t target_uid;\n\
+         \x20   uint64_t console;\n\
+         \x20   ros_fd_wire_t wires[4];\n\
+         } ros_spawn_attach_t;\n",
     );
     out.push('\n');
 }
@@ -3684,11 +3746,49 @@ mod tests {
             let expected = i32::try_from(idx + 1).expect("small index");
             assert_eq!(errno.as_i32(), expected, "errno values must be dense 1..=N");
         }
-        // NotForeground is the last appended abi-v1 variant (discriminant 27).
+        // BrokenPipe is the last appended abi-v1 variant (discriminant 28).
         assert_eq!(
             ERRNO_NAMES.last().map(|(_, e)| e.as_i32()),
-            Some(Errno::NotForeground.as_i32()),
+            Some(Errno::BrokenPipe.as_i32()),
             "errno table must end at the last frozen variant"
+        );
+    }
+
+    /// The `spawn()` attach-block contract is read from `lib/abi`, never
+    /// re-typed: the fixed length, the wire kinds, and the typed block
+    /// (`plans/SPAWN.md` SP10).
+    #[test]
+    fn syscall_header_carries_the_spawn_attach_contract() {
+        let h = generate_syscall();
+        assert!(
+            h.contains(&format!(
+                "#define ROS_SPAWN_ATTACH_VERSION {}u",
+                rustos_abi::SPAWN_ATTACH_VERSION
+            )),
+            "spawn attach version: {h}"
+        );
+        assert!(
+            h.contains(&format!(
+                "#define ROS_SPAWN_ATTACH_LEN {}u",
+                rustos_abi::SPAWN_ATTACH_LEN
+            )),
+            "spawn attach length: {h}"
+        );
+        for (name, value) in [
+            ("INHERIT", rustos_abi::FD_WIRE_KIND_INHERIT),
+            ("INHERIT_SLOT", rustos_abi::FD_WIRE_KIND_INHERIT_SLOT),
+            ("CLOSED", rustos_abi::FD_WIRE_KIND_CLOSED),
+            ("HANDLE", rustos_abi::FD_WIRE_KIND_HANDLE),
+        ] {
+            assert!(
+                h.contains(&format!("#define ROS_FD_WIRE_{name} {value}u")),
+                "fd wire kind {name}: {h}"
+            );
+        }
+        assert!(h.contains("} ros_fd_wire_t;"), "fd wire struct: {h}");
+        assert!(
+            h.contains("} ros_spawn_attach_t;"),
+            "spawn attach struct: {h}"
         );
     }
 

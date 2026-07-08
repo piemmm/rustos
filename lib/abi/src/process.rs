@@ -556,6 +556,179 @@ pub const SPAWN_UID_INHERIT: u32 = u32::MAX;
 /// closed regardless.
 pub const CONSOLE_INDEX_MAX: u8 = u8::MAX;
 
+/// Version tag carried in the first field of an encoded [`SpawnAttach`]
+/// block. A block bearing any other value is refused with
+/// [`Errno::BadMagic`], so a stale or foreign encoding can never be
+/// misread as wiring.
+pub const SPAWN_ATTACH_VERSION: u32 = 1;
+
+/// Exact byte length of an encoded [`SpawnAttach`] block: the version and
+/// target-uid words, the console selector, and one `(kind, value)` pair per
+/// standard descriptor. The block is fixed-length by design — the kernel
+/// bounds the copy before staging and refuses any other length.
+pub const SPAWN_ATTACH_LEN: usize = 4 + 4 + 8 + STD_STREAM_COUNT * 8;
+
+/// How one of a spawned child's standard descriptors (fd 0–3) is backed —
+/// one entry per slot in a [`SpawnAttach`] block (`plans/SPAWN.md` SP10).
+///
+/// The *base table* the wires refer to is the one the block's console
+/// selector names: the parent's own descriptor table
+/// ([`CONSOLE_INHERIT`]) or the standard shape on an installed console
+/// index — exactly the two shapes `spawn` always offered.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum FdWire {
+    /// The base table's own slot for this descriptor (the default: the
+    /// child sees exactly what an unwired spawn would give it).
+    Inherit,
+    /// The base table's slot `n` (`0..STD_STREAM_COUNT`) — how `2>&1`
+    /// against an inherited console is spelled: the child's fd 2 becomes
+    /// whatever backs the base table's fd 1.
+    InheritSlot(u32),
+    /// No backing: every access through this descriptor denies (fail
+    /// closed), exactly like a [`DescriptorTable::closed`] slot.
+    Closed,
+    /// A descriptor of the **parent's own** open table — a file opened
+    /// with `fs_open`, a resource opened with `resource_open`, or a pipe
+    /// end minted by `pipe_create`. The kernel resolves it owner-checked
+    /// against the kernel-trusted caller identity and clones the open
+    /// description into the child; a forged or foreign number refuses the
+    /// spawn.
+    Handle(u32),
+}
+
+/// Wire discriminant for [`FdWire::Inherit`]. `0` is deliberately reserved
+/// so an accidentally zeroed block fails closed rather than decoding as
+/// all-inherit. Public (with its siblings) so the C-header generator emits
+/// the one source-of-truth value.
+pub const FD_WIRE_KIND_INHERIT: u32 = 1;
+/// Wire discriminant for [`FdWire::InheritSlot`].
+pub const FD_WIRE_KIND_INHERIT_SLOT: u32 = 2;
+/// Wire discriminant for [`FdWire::Closed`].
+pub const FD_WIRE_KIND_CLOSED: u32 = 3;
+/// Wire discriminant for [`FdWire::Handle`].
+pub const FD_WIRE_KIND_HANDLE: u32 = 4;
+
+impl FdWire {
+    /// The `(kind, value)` pair carried on the wire.
+    #[must_use]
+    const fn to_wire(self) -> (u32, u32) {
+        match self {
+            Self::Inherit => (FD_WIRE_KIND_INHERIT, 0),
+            Self::InheritSlot(slot) => (FD_WIRE_KIND_INHERIT_SLOT, slot),
+            Self::Closed => (FD_WIRE_KIND_CLOSED, 0),
+            Self::Handle(fd) => (FD_WIRE_KIND_HANDLE, fd),
+        }
+    }
+
+    /// Decode one `(kind, value)` pair, refusing every non-canonical shape:
+    /// the reserved kind `0` and unknown kinds, a non-zero `value` on a
+    /// kind that carries none, and an out-of-range slot reference.
+    const fn from_wire(kind: u32, value: u32) -> Result<Self, Errno> {
+        match kind {
+            FD_WIRE_KIND_INHERIT => {
+                if value != 0 {
+                    return Err(Errno::OutOfRange);
+                }
+                Ok(Self::Inherit)
+            }
+            FD_WIRE_KIND_INHERIT_SLOT => {
+                // Widening `u32 -> usize` is lossless on every target, so
+                // the slot bound is compared without a truncating cast.
+                if value as usize >= STD_STREAM_COUNT {
+                    return Err(Errno::OutOfRange);
+                }
+                Ok(Self::InheritSlot(value))
+            }
+            FD_WIRE_KIND_CLOSED => {
+                if value != 0 {
+                    return Err(Errno::OutOfRange);
+                }
+                Ok(Self::Closed)
+            }
+            FD_WIRE_KIND_HANDLE => Ok(Self::Handle(value)),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
+/// The spawn *attach block*: how a child's credential and standard
+/// descriptors are established (`plans/SPAWN.md` SP10). Carried by
+/// [`crate::SyscallNumber::SPAWN`]'s `attach`/`attach_len` argument pair; a
+/// zero `attach` pointer means "no block" — full inherit, exactly
+/// [`SpawnAttach::INHERIT`].
+///
+/// The block carries only *selectors*, never authority: `target_uid` is
+/// resolved and capability-gated kernel-side (`CAP_SPAWN_AS_USER`), the
+/// console index is validated against the installed list, and every
+/// [`FdWire::Handle`] is owner-checked against the kernel-trusted caller
+/// identity before anything is built.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct SpawnAttach {
+    /// The child's target user: [`SPAWN_UID_INHERIT`] or a concrete uid
+    /// (kernel-gated on `CAP_SPAWN_AS_USER`).
+    pub target_uid: u32,
+    /// The base-table selector: [`CONSOLE_INHERIT`] or an installed
+    /// console index.
+    pub console: u64,
+    /// One wire per standard descriptor, indexed by fd number.
+    pub wires: [FdWire; STD_STREAM_COUNT],
+}
+
+impl SpawnAttach {
+    /// The full-inherit block: the caller's own credential and descriptor
+    /// table, untouched — the semantics of passing no block at all.
+    pub const INHERIT: Self = Self {
+        target_uid: SPAWN_UID_INHERIT,
+        console: CONSOLE_INHERIT,
+        wires: [FdWire::Inherit; STD_STREAM_COUNT],
+    };
+
+    /// Encode the block into its fixed-length wire form.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; SPAWN_ATTACH_LEN] {
+        let mut out = [0u8; SPAWN_ATTACH_LEN];
+        out[0..4].copy_from_slice(&SPAWN_ATTACH_VERSION.to_le_bytes());
+        out[4..8].copy_from_slice(&self.target_uid.to_le_bytes());
+        out[8..16].copy_from_slice(&self.console.to_le_bytes());
+        for (index, wire) in self.wires.iter().enumerate() {
+            let at = 16 + index * 8;
+            let (kind, value) = wire.to_wire();
+            out[at..at + 4].copy_from_slice(&kind.to_le_bytes());
+            out[at + 4..at + 8].copy_from_slice(&value.to_le_bytes());
+        }
+        out
+    }
+
+    /// Parse an encoded block, fail-closed.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] for any length other than
+    /// [`SPAWN_ATTACH_LEN`], [`Errno::BadMagic`] for a version other than
+    /// [`SPAWN_ATTACH_VERSION`], and [`Errno::OutOfRange`] for any
+    /// non-canonical wire (see [`FdWire`]). A refused block wires nothing.
+    pub fn parse(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() != SPAWN_ATTACH_LEN {
+            return Err(Errno::LengthOutOfRange);
+        }
+        if read_u32(bytes, 0) != SPAWN_ATTACH_VERSION {
+            return Err(Errno::BadMagic);
+        }
+        let target_uid = read_u32(bytes, 4);
+        let console = read_u64(bytes, 8);
+        let mut wires = [FdWire::Inherit; STD_STREAM_COUNT];
+        for (index, wire) in wires.iter_mut().enumerate() {
+            let at = 16 + index * 8;
+            *wire = FdWire::from_wire(read_u32(bytes, at), read_u32(bytes, at + 4))?;
+        }
+        Ok(Self {
+            target_uid,
+            console,
+            wires,
+        })
+    }
+}
+
 /// A control signal delivered to a child process by
 /// [`crate::SyscallNumber::SIGNAL`] or by the console line discipline
 /// (`plans/SPAWN.md` SP9 — the `^C`/`^Z` foreground delivery).
@@ -880,6 +1053,26 @@ impl DescriptorTable {
         }
     }
 
+    /// Point descriptor `fd` at console `console` with access `mode` — the
+    /// spawn wiring's [`FdWire::InheritSlot`] application (`plans/SPAWN.md`
+    /// SP10). An out-of-range `fd` is a no-op: the table has no such slot,
+    /// so there is nothing to widen (fail closed).
+    pub fn set_slot(&mut self, fd: u32, mode: StreamMode, console: u8) {
+        let index = fd as usize;
+        if index < STD_STREAM_COUNT {
+            self.modes[index] = mode;
+            self.consoles[index] = console;
+        }
+    }
+
+    /// Close descriptor `fd`: every console access through it denies. Used
+    /// by the spawn wiring for [`FdWire::Closed`] and for a slot whose
+    /// backing is a wired open entry (exactly one authority per
+    /// descriptor). An out-of-range `fd` is a no-op.
+    pub fn close_slot(&mut self, fd: u32) {
+        self.set_slot(fd, StreamMode::Closed, 0);
+    }
+
     /// The single installed-console index backing **every attached**
     /// standard descriptor, or `None` when no descriptor is attached or
     /// the attached descriptors sit on different consoles.
@@ -916,10 +1109,11 @@ impl Default for DescriptorTable {
 mod tests {
     extern crate alloc;
     use super::{
-        DescriptorTable, ProcessStart, ProcessStartHeader, Signal, StreamMode, StringSlot,
-        WaitStatus, WaitStatusRecord, PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS,
-        PROCESS_START_MAX_STRING_LEN, PROCESS_START_MAX_TOTAL_LEN, STDERR, STDIN, STDINFO, STDOUT,
-        STD_STREAM_COUNT, WAIT_STATUS_KIND_EXITED, WAIT_STATUS_KIND_STOPPED,
+        DescriptorTable, FdWire, ProcessStart, ProcessStartHeader, Signal, SpawnAttach, StreamMode,
+        StringSlot, WaitStatus, WaitStatusRecord, PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS,
+        PROCESS_START_MAX_STRING_LEN, PROCESS_START_MAX_TOTAL_LEN, SPAWN_ATTACH_LEN,
+        SPAWN_ATTACH_VERSION, STDERR, STDIN, STDINFO, STDOUT, STD_STREAM_COUNT,
+        WAIT_STATUS_KIND_EXITED, WAIT_STATUS_KIND_STOPPED,
     };
     use crate::{Errno, ABI_VERSION_CURRENT};
     use alloc::vec::Vec;
@@ -932,6 +1126,72 @@ mod tests {
         Signal::Interrupt,
         Signal::Stop,
     ];
+
+    #[test]
+    fn spawn_attach_round_trips_every_wire_kind() {
+        let attach = SpawnAttach {
+            target_uid: 42,
+            console: 1,
+            wires: [
+                FdWire::Handle(9),
+                FdWire::InheritSlot(1),
+                FdWire::Closed,
+                FdWire::Inherit,
+            ],
+        };
+        let bytes = attach.to_le_bytes();
+        assert_eq!(bytes.len(), SPAWN_ATTACH_LEN);
+        assert_eq!(SpawnAttach::parse(&bytes), Ok(attach));
+        // The full-inherit block round-trips too and mirrors the no-block
+        // semantics every pre-existing caller relies on.
+        let inherit = SpawnAttach::INHERIT.to_le_bytes();
+        assert_eq!(SpawnAttach::parse(&inherit), Ok(SpawnAttach::INHERIT));
+    }
+
+    #[test]
+    fn spawn_attach_rejects_wrong_length_and_version() {
+        let bytes = SpawnAttach::INHERIT.to_le_bytes();
+        // Any length other than the fixed one is refused whole.
+        assert_eq!(
+            SpawnAttach::parse(&bytes[..SPAWN_ATTACH_LEN - 1]),
+            Err(Errno::LengthOutOfRange)
+        );
+        let mut long = Vec::from(&bytes[..]);
+        long.push(0);
+        assert_eq!(SpawnAttach::parse(&long), Err(Errno::LengthOutOfRange));
+        // A foreign version tag is refused before any wire is read.
+        let mut wrong = bytes;
+        wrong[0..4].copy_from_slice(&(SPAWN_ATTACH_VERSION + 1).to_le_bytes());
+        assert_eq!(SpawnAttach::parse(&wrong), Err(Errno::BadMagic));
+        // The all-zero block fails closed (kind 0 is reserved).
+        assert_eq!(
+            SpawnAttach::parse(&[0u8; SPAWN_ATTACH_LEN]),
+            Err(Errno::BadMagic)
+        );
+    }
+
+    #[test]
+    fn spawn_attach_rejects_non_canonical_wires() {
+        // Kind 0 is reserved and unknown kinds are refused.
+        for kind in [0u32, 5, u32::MAX] {
+            let mut bytes = SpawnAttach::INHERIT.to_le_bytes();
+            bytes[16..20].copy_from_slice(&kind.to_le_bytes());
+            assert_eq!(SpawnAttach::parse(&bytes), Err(Errno::OutOfRange));
+        }
+        // A slot reference past the standard table is refused.
+        let mut slot = SpawnAttach::INHERIT.to_le_bytes();
+        slot[16..20].copy_from_slice(&2u32.to_le_bytes());
+        let first_out_of_range = u32::try_from(STD_STREAM_COUNT).expect("small table");
+        slot[20..24].copy_from_slice(&first_out_of_range.to_le_bytes());
+        assert_eq!(SpawnAttach::parse(&slot), Err(Errno::OutOfRange));
+        // A carried value on a kind that has none breaks canonical form.
+        for kind in [1u32, 3] {
+            let mut stray = SpawnAttach::INHERIT.to_le_bytes();
+            stray[16..20].copy_from_slice(&kind.to_le_bytes());
+            stray[20..24].copy_from_slice(&7u32.to_le_bytes());
+            assert_eq!(SpawnAttach::parse(&stray), Err(Errno::OutOfRange));
+        }
+    }
 
     #[test]
     fn signal_discriminants_are_frozen() {
@@ -1095,6 +1355,21 @@ mod tests {
         let mut split = DescriptorTable::standard_on(0);
         split.consoles[STDOUT as usize] = 1;
         assert_eq!(split.session_console(), None);
+    }
+
+    #[test]
+    fn slot_mutators_retarget_and_close_in_range_only() {
+        let mut table = DescriptorTable::standard_on(0);
+        table.set_slot(STDERR, StreamMode::Write, 1);
+        assert_eq!(table.console(STDERR), 1);
+        assert_eq!(table.mode(STDERR), StreamMode::Write);
+        table.close_slot(STDOUT);
+        assert_eq!(table.mode(STDOUT), StreamMode::Closed);
+        // Out of range: a no-op, never a panic or a widened slot.
+        let before = table;
+        table.set_slot(u32::MAX, StreamMode::Read, 2);
+        table.close_slot(u32::MAX);
+        assert_eq!(table, before);
     }
 
     #[test]

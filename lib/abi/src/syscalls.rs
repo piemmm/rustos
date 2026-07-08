@@ -321,14 +321,16 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // Writing one of the calling process's inherited standard
         // streams routes to that descriptor's kernel
         // stream backing. Authority is the per-process descriptor table
-        // the spawner established — never an ambient device. In this
-        // bootstrap phase every backing is the discovered console, so the
-        // coarse `CAP_CONSOLE_WRITE` still gates use of a console-backed
-        // output stream; the descriptor table is the fine, fd-level gate.
+        // the spawner established — never an ambient device — so the
+        // dispatcher applies no blanket capability: a stream may be
+        // backed by a pipe or a wired file (`plans/SPAWN.md` SP10),
+        // which needs no console authority. The handler checks
+        // `CAP_CONSOLE_WRITE` exactly when the descriptor resolves to a
+        // console backing (the `fs_read`/`CAP_FS_ACCESS` precedent).
         // Like the other high-volume data movers (`ipc_recv`,
         // `random_get`) it is not audited per call, to avoid drowning the
         // audit log.
-        required_capability: Some(CapabilityId::CONSOLE_WRITE),
+        required_capability: None,
         audit: false,
     },
     SyscallSpec {
@@ -338,20 +340,22 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         args: [
             AbiType::UserPtr,
             AbiType::Len,
-            // The console selector: `CONSOLE_INHERIT` (the all-ones
-            // sentinel) attaches the child to the caller's own
-            // descriptor table, any other value names an installed
-            // console index (the spawner decides the
-            // child's stream backing). `U64` so the sentinel is
-            // representable; the handler validates the range.
+            // The attach block: the address of an encoded
+            // `rustos_abi::SpawnAttach` block selecting the child's
+            // target user (`SPAWN_UID_INHERIT` or a concrete uid,
+            // kernel-gated on `CAP_SPAWN_AS_USER`), its base console
+            // (`CONSOLE_INHERIT` or an installed index), and one `FdWire`
+            // per standard descriptor (`plans/SPAWN.md` SP10). Zero means
+            // "no block": full inherit, the pre-SP10 semantics. `U64`
+            // rather than `UserPtr` so the absent case is representable;
+            // the handler stages and parses a present block fail-closed
+            // and owner-checks every named handle before any state is
+            // touched.
             AbiType::U64,
-            // The target user: `SPAWN_UID_INHERIT` (the all-ones sentinel)
-            // starts the child under the caller's own attested credential,
-            // any other value asks the kernel to resolve that user's full
-            // credential and switch the child into it — which requires the
-            // caller to hold `CAP_SPAWN_AS_USER` and fails closed otherwise
-            // (spawn-as-user, never setuid-self).
-            AbiType::U32,
+            // Exact byte length of the attach block
+            // (`SPAWN_ATTACH_LEN`), zero when absent; any other value
+            // fails closed before staging.
+            AbiType::Len,
             // The child's startup strings: the address of an encoded
             // `rustos_abi::process` startup-vector block (the same `PSV1`
             // format the kernel writes into a child's image) carrying the
@@ -399,14 +403,16 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         ret: AbiType::U64,
         // Reading one of the calling process's inherited standard streams routes to that descriptor's kernel stream
         // backing. Authority is the per-process descriptor table the
-        // spawner established — never an ambient device. In this
-        // bootstrap phase every backing is the discovered console, so the
-        // coarse `CAP_CONSOLE_READ` still gates use of a console-backed
-        // input stream; the descriptor table is the fine, fd-level gate.
+        // spawner established — never an ambient device — so the
+        // dispatcher applies no blanket capability: a stream may be
+        // backed by a pipe or a wired file (`plans/SPAWN.md` SP10),
+        // which needs no console authority. The handler checks
+        // `CAP_CONSOLE_READ` exactly when the descriptor resolves to a
+        // console backing (the `fs_read`/`CAP_FS_ACCESS` precedent).
         // Like the other high-volume data movers (`stream_write`,
         // `ipc_recv`, `random_get`) it is not audited per call, to avoid
         // drowning the audit log.
-        required_capability: Some(CapabilityId::CONSOLE_READ),
+        required_capability: None,
         audit: false,
     },
     SyscallSpec {
@@ -1769,6 +1775,31 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: Some(CapabilityId::CONSOLE_READ),
         audit: true,
     },
+    SyscallSpec {
+        number: SyscallNumber::PIPE_CREATE,
+        name: "pipe_create",
+        arg_count: 1,
+        args: [
+            // The out-pointer the kernel writes the two new descriptors
+            // into: the read end first, then the write end (two `u32`s).
+            AbiType::UserPtr,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // Unprivileged: a pipe mints two descriptors of the caller's own
+        // open table and reaches nothing else — no cross-principal
+        // authority exists to gate (`plans/SPAWN.md` SP10; the `mem_map`
+        // precedent). Handing an end to a child rides the
+        // `CAP_PROC_SPAWN`-gated spawn. Not audited: creating a pipe is a
+        // high-volume, security-neutral allocation (every shell pipeline
+        // mints one), and the spawn that transfers an end IS audited.
+        required_capability: None,
+        audit: false,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in
@@ -1936,22 +1967,24 @@ mod tests {
         assert!(bind.audit, "irq_bind must be audited");
         let wait = spec_for(SyscallNumber::IRQ_WAIT).unwrap();
         assert_eq!(wait.required_capability, Some(CapabilityId::IRQ_BIND));
-        // stream_write is gated on CAP_CONSOLE_WRITE — the privileged
-        // hardware console is never ambient.
+        // stream_write / stream_read carry no dispatcher gate: a standard
+        // stream may be backed by a pipe or wired file needing no console
+        // authority. The handler checks CAP_CONSOLE_WRITE /
+        // CAP_CONSOLE_READ exactly when the descriptor resolves to a
+        // console backing, so the hardware console stays non-ambient.
         let console = spec_for(SyscallNumber::STREAM_WRITE).unwrap();
-        assert_eq!(
-            console.required_capability,
-            Some(CapabilityId::CONSOLE_WRITE)
-        );
+        assert_eq!(console.required_capability, None);
         assert!(!console.audit, "console_write must not audit per call");
-        // stream_read is gated on CAP_CONSOLE_READ — the privileged
-        // hardware console input is never ambient.
         let console_read = spec_for(SyscallNumber::STREAM_READ).unwrap();
-        assert_eq!(
-            console_read.required_capability,
-            Some(CapabilityId::CONSOLE_READ)
-        );
+        assert_eq!(console_read.required_capability, None);
         assert!(!console_read.audit, "console_read must not audit per call");
+        // pipe_create mints two descriptors of the caller's OWN open
+        // table — the unprivileged, unaudited baseline (the mem_map
+        // precedent); the spawn that transfers an end is the audited
+        // decision.
+        let pipe_create = spec_for(SyscallNumber::PIPE_CREATE).unwrap();
+        assert_eq!(pipe_create.required_capability, None);
+        assert!(!pipe_create.audit, "pipe_create must not audit per call");
         // spawn is gated on CAP_PROC_SPAWN and audited per call — a new
         // process is a security-relevant state change.
         let spawn = spec_for(SyscallNumber::SPAWN).unwrap();

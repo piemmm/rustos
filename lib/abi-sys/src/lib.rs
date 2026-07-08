@@ -135,6 +135,7 @@ const NUM_FS_CHDIR: u64 = SyscallNumber::FS_CHDIR.as_u16() as u64;
 const NUM_FS_GETCWD: u64 = SyscallNumber::FS_GETCWD.as_u16() as u64;
 const NUM_RESOURCE_OPEN: u64 = SyscallNumber::RESOURCE_OPEN.as_u16() as u64;
 const NUM_SELF_ORIGIN: u64 = SyscallNumber::SELF_ORIGIN.as_u16() as u64;
+const NUM_PIPE_CREATE: u64 = SyscallNumber::PIPE_CREATE.as_u16() as u64;
 
 /// Empty argument vector for the no-argument syscalls.
 const NO_ARGS: [u64; SYSCALL_MAX_ARGS] = [0; SYSCALL_MAX_ARGS];
@@ -362,15 +363,19 @@ pub extern "C" fn sys_stream_read(fd: u32, buf: *mut c_void, len: usize, timeout
 /// `(path, path_len)` pair against the caller's address space before
 /// reading it. The caller keeps running — this is a
 /// true concurrent spawn, not an `exec`-style hand-off (`plans/SPAWN.md`
-/// SP3). `console` selects the child's standard-stream attachment: `ROS_CONSOLE_INHERIT` keeps the child on the
-/// caller's own console; any other value names an installed console index
-/// (see `ros_sys_console_count`) and an index with no console fails
-/// closed. `target_uid` selects the child's credential: `ROS_SPAWN_UID_INHERIT`
-/// starts it under the caller's own attested credential (no capability
-/// required), any other value asks the kernel to resolve that user and switch
-/// the child into it — which requires `ROS_CAP_SPAWN_AS_USER` and fails closed
-/// otherwise. A running process can never change its own identity (there is no
-/// setuid-self).
+/// SP3).
+///
+/// `(attach, attach_len)` optionally carry the child's *attach block*: a
+/// non-null `attach` names an encoded `SpawnAttach` block (`plans/SPAWN.md`
+/// SP10) selecting the child's credential (`ROS_SPAWN_UID_INHERIT` keeps
+/// the caller's own; a concrete uid requires `ROS_CAP_SPAWN_AS_USER` —
+/// there is no setuid-self), the console its base descriptor table comes
+/// from (`ROS_CONSOLE_INHERIT` keeps the caller's own table; any other
+/// value names an installed console index, see `ros_sys_console_count`),
+/// and one wire per standard descriptor — wiring the child's fd 0/1/2/3
+/// onto pre-opened files, resources, or pipe ends of the caller's own open
+/// table, each owner-checked fail-closed. Pass NULL and `0` for "no
+/// block": full inherit (the caller's own credential and table).
 ///
 /// `(strings, strings_len)` optionally carry the child's startup strings: a
 /// non-null `strings` names an encoded `ros_process_start_*` startup-vector
@@ -385,27 +390,51 @@ pub extern "C" fn sys_stream_read(fd: u32, buf: *mut c_void, len: usize, timeout
 pub extern "C" fn sys_spawn(
     path: *mut c_void,
     path_len: usize,
-    console: u64,
-    target_uid: u32,
+    attach: *mut c_void,
+    attach_len: usize,
     strings: *mut c_void,
     strings_len: usize,
 ) -> u64 {
     // SAFETY: see `sys_ipc_send`; the kernel validates `(path, path_len)`,
-    // the console selector, the target-uid credential switch, and the
-    // optional `(strings, strings_len)` block.
+    // the optional `(attach, attach_len)` block (parsing it fail-closed
+    // and owner-checking every named handle), and the optional
+    // `(strings, strings_len)` block.
     unsafe {
         raw_syscall(
             NUM_SPAWN,
             [
                 ptr_arg(path),
                 path_len as u64,
-                console,
-                u64::from(target_uid),
+                ptr_arg(attach),
+                attach_len as u64,
                 ptr_arg(strings),
                 strings_len as u64,
             ],
         )
     }
+}
+
+/// `pipe_create`: create a pipe — a bounded, kernel-buffered unidirectional
+/// byte stream — and write its two new descriptors through `out` (the read
+/// end first, then the write end, two `uint32_t`s)
+/// (`SyscallNumber::PIPE_CREATE`, `plans/SPAWN.md` SP10). Returns a
+/// `ROS_E_*` code.
+///
+/// Unprivileged: both descriptors land in the caller's own open table (the
+/// same number space `ros_sys_fs_open` allocates from) and are read,
+/// written, and closed through `ros_sys_fs_read` / `ros_sys_fs_write` /
+/// `ros_sys_fs_close` (a pipe ignores the file offset). A read on an empty
+/// pipe blocks until bytes arrive or every write end is closed (then
+/// end-of-stream, `0`); a write to a full pipe blocks until space frees,
+/// and a write with no reader left fails closed with `ROS_E_BROKEN_PIPE`.
+/// An end is handed to a child by naming its descriptor in the spawn
+/// attach block (`ros_sys_spawn`).
+#[must_use]
+#[export_name = "ros_sys_pipe_create"]
+pub extern "C" fn sys_pipe_create(out: *mut c_void) -> i32 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates `out` against the
+    // caller's address space before writing the two descriptors.
+    unsafe { ret_i32(raw_syscall(NUM_PIPE_CREATE, [ptr_arg(out), 0, 0, 0, 0, 0])) }
 }
 
 /// `console_count`: report how many system text consoles are installed
@@ -1788,6 +1817,7 @@ mod tests {
         (NUM_FS_GETCWD, "fs_getcwd", 2),
         (NUM_RESOURCE_OPEN, "resource_open", 3),
         (NUM_SELF_ORIGIN, "self_origin", 2),
+        (NUM_PIPE_CREATE, "pipe_create", 1),
     ];
 
     #[test]
@@ -2054,7 +2084,7 @@ mod tests {
     }
 
     #[test]
-    fn spawn_marshals_path_pointer_len_console_and_target_uid() {
+    fn spawn_marshals_path_pointer_len_and_absent_blocks() {
         let mut path = *b"/Apps/Child.app/Run";
         let ptr = path.as_mut_ptr().cast::<c_void>();
         let (number, args) = capture(7, || {
@@ -2062,10 +2092,10 @@ mod tests {
                 sys_spawn(
                     ptr,
                     path.len(),
-                    rustos_abi::CONSOLE_INHERIT,
-                    rustos_abi::SPAWN_UID_INHERIT,
                     core::ptr::null_mut(),
                     0,
+                    core::ptr::null_mut(),
+                    0
                 ),
                 7
             );
@@ -2073,16 +2103,17 @@ mod tests {
         assert_eq!(number, NUM_SPAWN);
         assert_eq!(args[0], ptr as usize as u64);
         assert_eq!(args[1], path.len() as u64);
-        assert_eq!(args[2], rustos_abi::CONSOLE_INHERIT);
-        assert_eq!(args[3], u64::from(rustos_abi::SPAWN_UID_INHERIT));
-        // A NULL/0 strings pair marshals the "no block" zero/zero shape.
-        assert_eq!(&args[4..], &[0, 0]);
+        // NULL/0 attach and strings pairs marshal the "no block" (full
+        // inherit / registered defaults) zero/zero shapes.
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
     }
 
     #[test]
-    fn spawn_marshals_the_startup_strings_block() {
+    fn spawn_marshals_the_attach_and_startup_strings_blocks() {
         let mut path = *b"/Apps/Child.app/Run";
         let ptr = path.as_mut_ptr().cast::<c_void>();
+        let mut attach = rustos_abi::SpawnAttach::INHERIT.to_le_bytes();
+        let attach_ptr = attach.as_mut_ptr().cast::<c_void>();
         let mut block = *b"opaque-encoded-psv1-bytes";
         let block_ptr = block.as_mut_ptr().cast::<c_void>();
         let (number, args) = capture(9, || {
@@ -2090,8 +2121,8 @@ mod tests {
                 sys_spawn(
                     ptr,
                     path.len(),
-                    rustos_abi::CONSOLE_INHERIT,
-                    rustos_abi::SPAWN_UID_INHERIT,
+                    attach_ptr,
+                    attach.len(),
                     block_ptr,
                     block.len(),
                 ),
@@ -2099,8 +2130,22 @@ mod tests {
             );
         });
         assert_eq!(number, NUM_SPAWN);
+        assert_eq!(args[2], attach_ptr as usize as u64);
+        assert_eq!(args[3], attach.len() as u64);
         assert_eq!(args[4], block_ptr as usize as u64);
         assert_eq!(args[5], block.len() as u64);
+    }
+
+    #[test]
+    fn pipe_create_marshals_the_out_pointer() {
+        let mut fds = [0u32; 2];
+        let ptr = fds.as_mut_ptr().cast::<c_void>();
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_pipe_create(ptr), 0);
+        });
+        assert_eq!(number, NUM_PIPE_CREATE);
+        assert_eq!(args[0], ptr as usize as u64);
+        assert_eq!(&args[1..], &[0, 0, 0, 0, 0]);
     }
 
     #[test]

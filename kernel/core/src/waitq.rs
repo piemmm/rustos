@@ -369,6 +369,29 @@ pub fn procwait_wake() {
     }
 }
 
+/// The wait-queue holding pipe readers and writers blocked on an empty or
+/// full pipe (`plans/SPAWN.md` SP10). A reader whose pipe is momentarily
+/// empty (with a live writer) and a writer whose pipe is momentarily full
+/// (with a live reader) park here off the run queue (**no** busy yield) and
+/// are woken by [`pipe_wake`] whenever bytes are produced, space frees, or
+/// an end closes terminally (EOF / broken pipe). Each woken task re-runs
+/// its non-blocking step ([`crate::pipe::PipeEnd::try_read`] /
+/// [`crate::pipe::PipeEnd::try_write`]) and either progresses or parks
+/// again, so a wake for a different pipe is a harmless spurious wake and
+/// the check-then-park race is closed by the scheduler's wake-pending
+/// token (the same interlock `wait`/`irq_wait` use).
+pub static PIPE_WAITQ: WaitQueue = WaitQueue::new();
+
+/// Wake every task parked on a pipe because a pipe's condition changed
+/// (bytes arrived, space freed, or an end closed); each re-runs its step
+/// and either progresses or parks again. A fail-safe no-op before the arch
+/// hook is installed.
+pub fn pipe_wake() {
+    if let Some(arch) = wait_arch() {
+        PIPE_WAITQ.wake_all(arch);
+    }
+}
+
 /// The wait-queue holding `irq_wait` callers (Design D — the user-space
 /// device-driver IRQ path). A task that bound an IRQ line with `irq_bind`
 /// and called `irq_wait` parks here off the run queue (no busy yield) and is woken by [`irq_wake`] the instant the device-IRQ
@@ -524,6 +547,7 @@ fn run_timed_sweep(arch: &dyn WaitQueueArch) {
     IRQ_WAITQ.sweep(arch, now);
     CONSOLE_WAITQ.sweep(arch, now);
     USERS_DB_WAITQ.sweep(arch, now);
+    PIPE_WAITQ.sweep(arch, now);
     // Re-arm to the soonest pending deadline across *every* timed
     // wait-queue, so no finite timeout is dropped because another queue
     // armed a later one-shot (the nearest armed
@@ -604,7 +628,8 @@ pub fn console_deregister(task: TaskId, deadline_ns: u64) {
 }
 
 /// The soonest finite deadline pending across **every** timed wait-queue
-/// (`HW_TREE_WAITQ`, `IRQ_WAITQ`, `CONSOLE_WAITQ`, `USERS_DB_WAITQ`), or
+/// (`HW_TREE_WAITQ`, `IRQ_WAITQ`, `CONSOLE_WAITQ`, `USERS_DB_WAITQ`,
+/// `PIPE_WAITQ`), or
 /// [`None`] if none has one. A park site arms the one-shot to this so
 /// registering a *later* deadline never delays an already-pending earlier
 /// wake.
@@ -615,6 +640,7 @@ pub fn nearest_timed_deadline() -> Option<u64> {
         IRQ_WAITQ.earliest_deadline(),
         CONSOLE_WAITQ.earliest_deadline(),
         USERS_DB_WAITQ.earliest_deadline(),
+        PIPE_WAITQ.earliest_deadline(),
     ]
     .into_iter()
     .flatten()

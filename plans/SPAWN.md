@@ -911,6 +911,136 @@ to `$?` = 148 (SIGTSTP's POSIX number).**
 
 ---
 
+## SP10 — spawn-time descriptor wiring + pipes (`cmd > file`, `cmd | cmd`)
+
+The elsh Part 4 work (`.junie/plan-session-shell.md`): redirections and
+pipelines need the host/kernel half the shell's final
+`RedirAction::{Open,Dup,Close,HereString,Multi}` lowering already targets.
+The parent pre-opens every target in its **own** descriptor table and hands
+the child an explicit fd 0/1/2/3 wiring block at spawn; a pipe object
+connects `cmd | cmd`. Binding design decisions:
+
+- **One handle space, one I/O vocabulary.** `pipe_create`
+  (`SyscallNumber::PIPE_CREATE`, **73**, unprivileged, unaudited) mints one
+  kernel pipe object and returns **two descriptors in the caller's existing
+  open-descriptor table** (the same `OpenFileTable` allocator
+  `fs_open`/`resource_open` draw from): a read end (`OpenFlags::READ`) and a
+  write end (`OpenFlags::WRITE`), written to a caller out-pointer as two
+  `u32`s. Pipe ends are read/written through the existing `fs_read` /
+  `fs_write` (the offset is meaningless and ignored, exactly as for a
+  resource backing) and closed through `fs_close` — no second handle table
+  and no pipe-specific I/O syscalls. No new capability (§5.2 minimalism): a
+  pipe reaches only the caller's own table, and handing an end to a child
+  rides the existing `CAP_PROC_SPAWN` spawn gate.
+- **The pipe object** (`kernel/core::pipe`) is a bounded byte ring
+  (`PIPE_CAPACITY` = 64 KiB — a deliberate flow-control bound like the §22
+  random reserve, not a §24.1 scaling capacity: back-pressure is the point)
+  with reference-counted ends. End lifetimes are Drop-based
+  (`PipeEndHandle` clones count, drops decrement and wake), so `fs_close`,
+  a failed spawn's unwind, and task exit (the registry `withdraw` dropping
+  the table) all close ends through one path — nothing leaks and nothing is
+  double-counted. Semantics: a read on an empty pipe **parks** the caller
+  on the new `PIPE_WAITQ` (never a busy loop) until bytes or writer
+  exhaustion; all writers closed + empty ⇒ EOF (`0`). A write to a full
+  pipe parks until space; all readers closed ⇒ the new
+  `Errno::BrokenPipe` (**27**), so `yes | head`-style pipelines terminate.
+  Wakes ride `pipe_wake` (dispatcher-context `wake_all`, the
+  `procwait_wake` pattern).
+- **The spawn attach block.** `spawn` keeps its six registers but slots 2/3
+  become `attach`/`attach_len` (in-place `abi-v1` evolution; the old
+  `console` and `target_uid` registers move *into* the block): a
+  fixed-length `rustos_abi::SpawnAttach` block carrying `target_uid`
+  (`SPAWN_UID_INHERIT` sentinel), the console selector (`CONSOLE_INHERIT`
+  or an installed index — the base table exactly as before), and four typed
+  per-fd wires (`rustos_abi::FdWire`): `Inherit` (the base table's own
+  slot), `InheritSlot(n)` (the base table's slot *n* — how `2>&1` onto an
+  inherited console is spelled), `Closed`, and `Handle(fd)` (a descriptor
+  of the **parent's own** open table: a file, resource, or pipe end).
+  `attach == 0` means full inherit — exactly today's
+  `CONSOLE_INHERIT`/`SPAWN_UID_INHERIT` semantics, so every pre-existing
+  caller keeps its behaviour. The block is copied through the validated
+  boundary and parsed fail-closed **before any state is touched**; every
+  `Handle` is resolved owner-checked against the kernel-trusted caller id
+  (a forged or foreign fd is `NotFound`, never a probe oracle).
+- **Wired child streams live in the child's own open table at fd 0–3.**
+  For each `Handle` wire the kernel clones the parent's open entry into the
+  child's `OpenFileTable` at the standard fd number itself (the entries
+  share the open-file description: one `Arc`'d offset cursor, so two dup'd
+  sinks append interleaved output POSIX-correctly, and a cloned pipe end
+  counts as one more reader/writer). The child's console
+  `DescriptorTable` slot for a wired fd is `Closed`, so exactly one
+  authority backs each descriptor. `stream_read`/`stream_write` resolve
+  the caller's open table **first** (a wired standard stream routes to its
+  pipe/file/resource backing — a file stream reads/writes at the shared
+  cursor, honouring `APPEND`), then fall back to the console table.
+  `stream_input_mode`, `console_foreground`, and `terminal_size` stay
+  console-only: against a wired fd they fail closed `NotFound` (a pipe is
+  not a terminal), which is exactly what a program probing "am I on a
+  tty?" needs.
+- **The console capability gate moves into the handler's console arm.**
+  `stream_read`/`stream_write` were dispatcher-gated on
+  `CAP_CONSOLE_READ`/`CAP_CONSOLE_WRITE` — a bootstrap artefact from when
+  every backing was the console. With pipe/file backings that blanket gate
+  is wrong (a child writing its redirected stdout needs no console
+  authority), so the dispatcher rows drop it and the handler checks the
+  console capability only when the descriptor actually resolves to a
+  console backing — the exact evolution `fs_read` made when
+  `CAP_FS_ACCESS` stopped being a blanket dispatcher check. Authority is
+  the descriptor table (§5.4); the capability gates the device class.
+- **Fail closed, unwind whole.** A malformed block, unknown wire kind,
+  out-of-range slot, wrong-direction handle use, or forged fd refuses the
+  spawn before the child exists; Drop-based end handles make the
+  error-path unwind release every cloned end. OOM stays a `Result`.
+
+Staged like SP3/SP5/SP6/SP7 (one fully-gated increment per landing):
+
+- **SP10a — abi-v1 surface + kernel pipes + spawn wiring (host-proven) `[x]`.**
+  **Landed.** `lib/abi`: `Errno::BrokenPipe` (27), `SyscallNumber::PIPE_CREATE`
+  (73) + its unprivileged spec row, the `SpawnAttach`/`FdWire` block
+  (fixed-length LE encode/parse, fail-closed) + `SPAWN_ATTACH_LEN`, the
+  `SPAWN` row's slots 2/3 → `attach`/`attach_len`, and the
+  `stream_read`/`stream_write` rows' dispatcher gate dropped (checked
+  in-handler for console backings). `lib/abi-sys`: `ros_sys_spawn` carries
+  `(path, path_len, attach, attach_len, strings, strings_len)`,
+  `ros_sys_pipe_create` added; C header regenerated, drift guards green.
+  `kernel/syscall`: `SyscallHandlers::spawn` re-shaped, `pipe_create`
+  added, dispatch arms + decode tests. `kernel/core`: the `pipe` module
+  (ring + Drop-counted ends + `PIPE_WAITQ`/`pipe_wake` + park-loop
+  blocking I/O), `OpenBacking::Pipe` + the shared stream cursor on
+  `OpenFile`, `pipe_create` handler, `fs_read`/`fs_write` pipe arms,
+  `stream_read`/`stream_write` open-table-first routing with the console
+  capability checked in the console arm, the spawn handler's attach-block
+  decode + owner-checked wire resolution, and `KernelSpawnCtx` installing
+  wired entries at the child's fd 0–3 beside `set_streams`. `lib/rt`:
+  `pipe_create`, `SpawnAttach` re-exports, and `spawn_attached(path,
+  &SpawnAttach, args, env)` beside the preserved `spawn`/`spawn_at`/
+  `spawn_as`/`spawn_with` wrappers. Host tests cover the pipe object
+  (fill/drain/EOF/broken-pipe/close-idempotence), the attach codec
+  (round-trip + every fail-closed shape), owner-checked wiring (happy
+  path, forged fd, foreign fd, direction enforcement at use, closed
+  slots, dup-shared cursor), the stream routing fallbacks, and the
+  handler decode paths.
+- **SP10b — elsh `RtProcessHost` wiring + `-M virt` pipeline vertical
+  (staged).** The shell side: `launch` pre-opens every `RedirAction`
+  target (`fs_open` with the `OpenMode`-derived flags / `resource_open` /
+  `pipe_create`), lowers `Dup`/`Close` onto the pending wire map, spawns
+  each pipeline member with its attach block, closes the parent's
+  transferred ends, pumps `HereString` content into its pipe and fans
+  `Multi` targets out between spawn and wait (blocking `fs_write`/
+  `fs_read` on the shell's own ends — never while parked in `wait`), and
+  reaps non-leader members after the leader. Plus the `-M virt` vertical:
+  a two-program pipeline (`producer | consumer`) and a `> file` + `< file`
+  round-trip through the production spawn path, PASS keyed on the
+  consumer's verified bytes. Lands as its own fully-gated increment.
+
+**Done when (SP10):** `elsh` runs `cmd > file`, `cmd < file`, `2>&1`,
+`cmd <<< here`, multios, and `cmd | cmd` end to end on `-M virt` through
+the spawn attach block and kernel pipes; every fail-closed path above is
+host-tested; the C header, `abi-check`, the host matrix, and the QEMU
+matrix stay green.
+
+---
+
 ## 2. Cross-cutting requirements (apply to every stage)
 
 - **No new HAL trait unless deliberate (§17.2).** SP1–SP5 reuse the closed

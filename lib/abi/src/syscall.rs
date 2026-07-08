@@ -103,18 +103,24 @@ impl SyscallNumber {
     /// backing wired fails closed with [`crate::Errno::NotImplemented`].
     pub const STREAM_WRITE: Self = Self(11);
     /// Spawn a new process from an embedded program named by an absolute
-    /// path (`plans/SPAWN.md` SP3).
+    /// path (`plans/SPAWN.md` SP3, SP10).
     ///
     /// Arguments: `path: *const u8` (user pointer to the program's
-    /// absolute path), `path_len: usize`, and `console: u64` — which
-    /// system console the child's standard streams attach to
-    /// (the spawner, never the program, decides the
-    /// backing). Passing [`CONSOLE_INHERIT`](crate::CONSOLE_INHERIT)
-    /// attaches the child to the **caller's own** descriptor table
-    /// (the default session shape: a child stays on its parent's
-    /// console); any other value names a console index reported by
-    /// [`SyscallNumber::CONSOLE_COUNT`] and an index with no installed
-    /// console fails closed with [`crate::Errno::NotFound`]. The kernel
+    /// absolute path), `path_len: usize`, `attach: u64` (the address of an
+    /// encoded [`crate::SpawnAttach`] block, or `0` for full inherit), and
+    /// `attach_len: usize` (its exact byte length,
+    /// [`crate::SPAWN_ATTACH_LEN`], zero when absent). The attach block
+    /// selects the child's target user ([`crate::SPAWN_UID_INHERIT`] or a
+    /// concrete uid, kernel-gated on
+    /// [`crate::CapabilityId::SPAWN_AS_USER`]), the console its base
+    /// descriptor table comes from ([`CONSOLE_INHERIT`](crate::CONSOLE_INHERIT)
+    /// = the **caller's own** table; any other value names a console index
+    /// reported by [`SyscallNumber::CONSOLE_COUNT`], failing closed with
+    /// [`crate::Errno::NotFound`] when not installed), and one
+    /// [`crate::FdWire`] per standard descriptor — so a shell wires a
+    /// child's fd 0/1/2/3 onto pre-opened files, resources, or pipe ends
+    /// of the caller's **own** open table, each owner-checked before any
+    /// state is touched. The kernel
     /// copies the path in through the validated `copy_from_user`
     /// boundary, looks it up in the kernel's
     /// embedded-program registry, builds a fresh **hardware-isolated**
@@ -1306,6 +1312,27 @@ impl SyscallNumber {
     /// the read gate clears an owner proven dead (task ids are never
     /// reused).
     pub const CONSOLE_FOREGROUND: Self = Self(72);
+
+    /// Create a pipe: a bounded, kernel-buffered unidirectional byte
+    /// stream connecting two descriptors of the **caller's own** open
+    /// table (`plans/SPAWN.md` SP10 — the `cmd | cmd` primitive).
+    ///
+    /// Arguments: `out: *mut u32` (a non-null user pointer the kernel
+    /// writes two `u32` descriptors into — the read end first, then the
+    /// write end). Both descriptors draw from the same per-process
+    /// allocator [`Self::FS_OPEN`] and [`Self::RESOURCE_OPEN`] use, are
+    /// read/written through [`Self::FS_READ`] / [`Self::FS_WRITE`] (the
+    /// file offset is meaningless for a pipe and ignored), and are closed
+    /// through [`Self::FS_CLOSE`]. A read on an empty pipe **parks** the
+    /// caller until bytes arrive or every write end is closed (then
+    /// end-of-stream, `0`); a write to a full pipe parks until space
+    /// frees, and a write with every read end closed fails closed with
+    /// [`crate::Errno::BrokenPipe`]. An end is handed to a child by
+    /// naming its descriptor in a [`crate::SpawnAttach`] wire
+    /// ([`SyscallNumber::SPAWN`]). Unprivileged: a pipe reaches only the
+    /// caller's own table and carries no authority of its own —
+    /// transferring an end rides the `CAP_PROC_SPAWN`-gated spawn.
+    pub const PIPE_CREATE: Self = Self(73);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;

@@ -26,9 +26,11 @@
 //! then the user's `PATH`, attempted in order. The command's words travel
 //! to the child as its argument vector and the shell's exported variables
 //! (with any `NAME=v cmd` prefix overrides) as its environment, through
-//! the `spawn` startup-strings block. Pipes and redirections need
-//! descriptor plumbing the ABI does not yet express, so `RtProcessHost`
-//! fails them closed rather than silently dropping them.
+//! the `spawn` startup-strings block. The kernel half of pipes and
+//! redirections is landed (`plans/SPAWN.md` `SP10a` — the spawn attach
+//! block and `pipe_create`); wiring it into this host is the staged
+//! `SP10b` increment, so until then `RtProcessHost` fails a pipeline or
+//! redirection closed rather than silently dropping it.
 //!
 //! On the host it is an inert stub so `cargo build --workspace`, clippy, and
 //! fmt still cover the file.
@@ -173,11 +175,14 @@ mod program {
 
     impl ProcessHost for RtProcessHost {
         fn launch(&self, spec: &LaunchSpec<'_>) -> Result<Pid, Errno> {
-            // The `spawn` ABI carries a program path plus the child's
-            // argument vector and environment. Pipes and redirections need
-            // descriptor plumbing the ABI does not yet express; they are
-            // refused rather than silently dropped — an ABI extension, not
-            // a shortcut here.
+            // The `spawn` ABI carries a program path, the child's argument
+            // vector and environment, and (since `plans/SPAWN.md` SP10a)
+            // an attach block that can wire the child's descriptors onto
+            // pre-opened files, resources, and pipe ends. Driving that
+            // wiring from this host — pre-opening every `RedirAction`
+            // target and spawning pipeline members with their blocks — is
+            // the staged SP10b increment; until it lands, pipelines and
+            // redirections are refused rather than silently dropped.
             let [command] = spec.commands else {
                 return Err(Errno::NotImplemented);
             };
