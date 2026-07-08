@@ -58,6 +58,8 @@ use rustos_kernel_irq::{IrqController, IrqTable, MaskError};
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 use rustos_sync::once::Once;
 use rustos_sync::once::OnceCell;
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+use rustos_sync::{InterruptControl, IrqSafeSpinLock, IrqState};
 
 /// Set while the console UART's receive line is **masked at the GIC because
 /// its receive queue was full** (`drain_uart_into_console_queue`): the ISR
@@ -529,6 +531,82 @@ pub extern "C" fn production_device_irq_dispatch(intid: u32) {
     rustos_kernel_core::irq_wake();
 }
 
+/// Saved DAIF state for [`DaifIrqControl`].
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+#[derive(Copy, Clone)]
+struct DaifState(u64);
+
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+impl IrqState for DaifState {}
+
+/// The aarch64 `InterruptControl` behind [`UART_RX_GATE`]: masks IRQ+FIQ
+/// via DAIF for the critical section and restores the exact prior state
+/// on release (reentrant — an already-masked state round-trips
+/// unchanged). The same masking discipline as the arch port's video
+/// render lock, plugged into `lib/sync`'s IRQ-safe spinlock so the gate
+/// is also correct across CPUs (mask locally, spin globally).
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+struct DaifIrqControl;
+
+// SAFETY: `disable` reads DAIF and sets its I/F mask bits
+// (`msr daifset, #3`) — always permitted at EL1, touches no memory —
+// atomically masking asynchronous interrupts on this CPU and returning
+// the exact prior state; `restore` writes that state back verbatim. A
+// `disable` while already masked returns the masked state, whose restore
+// leaves interrupts masked (reentrant), exactly as the trait requires.
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+unsafe impl InterruptControl for DaifIrqControl {
+    type State = DaifState;
+
+    fn disable() -> Self::State {
+        let daif: u64;
+        // SAFETY: reading DAIF and setting its I/F mask bits is always
+        // permitted at EL1 and touches no memory.
+        unsafe {
+            core::arch::asm!(
+                "mrs {0}, daif",
+                "msr daifset, #3",
+                out(reg) daif,
+                options(nomem, nostack, preserves_flags)
+            );
+        }
+        DaifState(daif)
+    }
+
+    unsafe fn restore(state: Self::State) {
+        // SAFETY: writing back the DAIF value captured by `disable` on
+        // this CPU restores exactly the prior mask state.
+        unsafe {
+            core::arch::asm!(
+                "msr daif, {0}",
+                in(reg) state.0,
+                options(nomem, nostack, preserves_flags)
+            );
+        }
+    }
+}
+
+/// Serialises **every** access to the console UART's receive path — the
+/// destructive hardware-FIFO reads *and* the [`UART_INPUT`] ring they
+/// feed — across the RX ISR and the reader's own poll-and-read
+/// ([`poll_and_read_uart`]).
+///
+/// Without it two destructive FIFO readers race: a reader-context drain
+/// interrupted between its FIFO read and its queue push lets the ISR
+/// drain and push the remaining bytes first, reordering input across the
+/// line terminator — and a data-register read racing the ISR on the last
+/// byte returns a stale duplicate that the next reader receives as a
+/// phantom keystroke (the observed corrupted-login-line defect). Masking
+/// interrupts for the hold (DAIF, via [`DaifIrqControl`]) also removes
+/// the single-CPU deadlock of the ISR spinning on the ring lock its
+/// interrupted holder cannot release. The hold is short and bounded (one
+/// FIFO drain), and the wake it publishes (`console_wake`) is lock-free,
+/// so masked delivery is deferred by at most that bound.
+///
+/// [`UART_INPUT`]: crate::aarch64::arch_wrapper::UART_INPUT
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+static UART_RX_GATE: IrqSafeSpinLock<(), DaifIrqControl> = IrqSafeSpinLock::new(());
+
 /// Drain the console UART's hardware receive FIFO into the UART console's
 /// receive queue, waking the parked `login` reader.
 ///
@@ -540,10 +618,19 @@ pub extern "C" fn production_device_irq_dispatch(intid: u32) {
 /// free space (at most one queue capacity per interrupt) and **lossless**:
 /// it dequeues from the FIFO only what the queue can accept and leaves any
 /// surplus in the FIFO, so the level-sensitive receive interrupt re-fires as
-/// the reader drains the queue. Wait-free and
-/// allocation-free.
+/// the reader drains the queue. Allocation-free, and
+/// serialised against the reader's poll-and-read by [`UART_RX_GATE`].
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 fn drain_uart_into_console_queue() {
+    let _gate = UART_RX_GATE.lock();
+    drain_uart_locked();
+}
+
+/// The shared FIFO-to-queue drain body. Callers **must** hold
+/// [`UART_RX_GATE`]: the FIFO reads are destructive, so two concurrent
+/// drains reorder or duplicate input (see the gate's docs).
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+fn drain_uart_locked() {
     use rustos_kernel_core::ConsoleInput as _;
     let queue = &crate::aarch64::arch_wrapper::UART_INPUT;
     // Push through the installed UART console *device*, not the raw queue:
@@ -618,28 +705,40 @@ fn drain_uart_into_console_queue() {
 }
 
 /// Synchronously drain the console UART's hardware receive FIFO into the
-/// receive queue from the **reader's** context (a `stream_read` syscall),
-/// not interrupt context.
+/// receive queue and read from that queue, all from the **reader's** own
+/// context (a `stream_read` syscall or the unlock kthread) under one
+/// [`UART_RX_GATE`] hold.
 ///
-/// Called by [`crate::aarch64::arch_wrapper::UartConsoleRead::read`] on the
-/// path that is about to park an empty-handed reader. It makes console input
-/// **poll-backed**, not solely interrupt-driven: the reader pulls any byte
-/// already sitting in the hardware FIFO directly, so it only ever parks when
-/// the FIFO *and* the software queue are genuinely empty. That closes every
-/// residual device-IRQ-delivery race — a receive interrupt the CPU has not
-/// yet taken (it is busy in the masked EL1 dispatch loop), or a sub-trigger
-/// FIFO tail still awaiting the PL011 receive-timeout — because the reader no
-/// longer *depends* on the interrupt to see a byte that is already in the
-/// FIFO; the interrupt remains only the wake that unparks it once it has
-/// parked (the park is genuine, never a busy-poll: a byte
-/// arriving after this drain raises the interrupt that wakes the parked task).
+/// Called by [`crate::aarch64::arch_wrapper::UartConsoleRead::read`]. It
+/// makes console input **poll-backed**, not solely interrupt-driven: the
+/// reader pulls any byte already sitting in the hardware FIFO directly, so
+/// it only ever parks when the FIFO *and* the software queue are genuinely
+/// empty. That closes every residual device-IRQ-delivery race — a receive
+/// interrupt the CPU has not yet taken, or a sub-trigger FIFO tail still
+/// awaiting the PL011 receive-timeout — because the reader no longer
+/// *depends* on the interrupt to see a byte that is already in the FIFO;
+/// the interrupt remains only the wake that unparks it once it has parked
+/// (a genuine park, never a busy-poll: a byte arriving after this drain
+/// raises the interrupt that wakes the parked task).
 ///
-/// Runs in an EL1 syscall with IRQ taking masked, so it cannot race the ISR
-/// ([`drain_uart_into_console_queue`]) on this single console; the shared
-/// drain body is the one definition both entry points reuse.
+/// Reader-context code runs with IRQs **deliverable** (the kernel takes
+/// interrupts while in-kernel code runs), so this drain genuinely races
+/// the RX ISR without the gate; holding [`UART_RX_GATE`] across the FIFO
+/// drain *and* the queue read makes the whole step atomic against it — no
+/// reordering, no stale duplicate byte, no ISR spin on an interrupted
+/// ring-lock holder. The shared drain body is the one definition both
+/// entry points reuse.
+///
+/// # Errors
+///
+/// Propagates the queue read's error (the queue itself is infallible;
+/// the `Result` mirrors the `ConsoleRead` contract).
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
-pub fn poll_uart_into_console_queue() {
-    drain_uart_into_console_queue();
+pub fn poll_and_read_uart(buf: &mut [u8]) -> Result<usize, rustos_abi::Errno> {
+    use rustos_kernel_core::ConsoleRead as _;
+    let _gate = UART_RX_GATE.lock();
+    drain_uart_locked();
+    crate::aarch64::arch_wrapper::UART_INPUT.read(buf)
 }
 
 /// Re-enable the console UART's receive line if the ISR masked it on a full

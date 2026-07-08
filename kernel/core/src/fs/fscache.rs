@@ -80,8 +80,8 @@ use rustos_abi::driver::filesystem::{
 };
 use rustos_abi::DriverError;
 use rustos_kernel_mem::{
-    CacheAccounting, CacheBudget, CacheCandidate, CachePolicy, InvalidationSource, RebuildCost,
-    ReclaimClass, ReclaimOwner, ReclaimRule, Sensitivity, PAGE_SIZE,
+    shrink_target, CacheAccounting, CacheBudget, CacheCandidate, CachePolicy, InvalidationSource,
+    MemoryPressure, RebuildCost, ReclaimClass, ReclaimOwner, ReclaimRule, Sensitivity, PAGE_SIZE,
 };
 use zeroize::Zeroize;
 
@@ -155,6 +155,11 @@ struct DataEntry {
 pub struct CachedFs<F> {
     inner: F,
     budget: CacheBudget,
+    /// The system memory-pressure gauge, sampled at the head of every
+    /// operation: the band's forced-shrink targets are applied before
+    /// the cache is read or grown, and admission is refused outside
+    /// normal pressure or when growth would dip into the reserve.
+    pressure: &'static MemoryPressure,
     accounting: CacheAccounting,
     /// The classified admission policies (file data, metadata); `None`
     /// when classification refused, which poisons the cache from birth.
@@ -206,14 +211,19 @@ impl<F> CachedFs<F> {
     }
 
     /// Wrap `inner` with an empty cache bounded by `budget`, charged to
-    /// the volume `owner`.
+    /// the volume `owner` and governed by the system `pressure` gauge.
     ///
     /// Both candidate declarations pass the `kernel/mem::reclaim`
     /// classification gate; a refusal poisons the cache from birth, so
     /// every operation is served straight from the driver — fail
     /// closed, the volume still works.
     #[must_use]
-    pub fn new(inner: F, budget: CacheBudget, owner: ReclaimOwner) -> Self {
+    pub fn new(
+        inner: F,
+        budget: CacheBudget,
+        owner: ReclaimOwner,
+        pressure: &'static MemoryPressure,
+    ) -> Self {
         let (data, metadata) = Self::candidates(owner);
         let policies = match (data.classify(), metadata.classify()) {
             (Ok(data), Ok(metadata)) => Some((data, metadata)),
@@ -222,6 +232,7 @@ impl<F> CachedFs<F> {
         Self {
             inner,
             budget,
+            pressure,
             accounting: CacheAccounting::new(),
             policies,
             tick: 0,
@@ -398,12 +409,45 @@ impl<F> CachedFs<F> {
         }
     }
 
+    /// Apply the current pressure band's forced-shrink targets, called
+    /// at the head of every cache-touching operation before the cache
+    /// is read or grown (`plans/SMARTRAM.md` section 7). Eviction takes file data
+    /// before metadata, so the combined ceiling — resident metadata
+    /// capped at its own class target plus file data capped at its
+    /// own — shrinks each class exactly to its band target: at mild
+    /// pressure clean file data drops to the low watermark, at moderate
+    /// it drains fully while metadata is capped at the low watermark, and
+    /// at severe or critical pressure everything goes. Every evicted
+    /// buffer is zeroed on the way out, exactly as ordinary eviction.
+    fn enforce_pressure(&mut self) {
+        if self.poisoned {
+            return;
+        }
+        let band = self.pressure.sample();
+        let data_target = shrink_target(band, ReclaimClass::CleanFileData, self.budget);
+        let meta_target = shrink_target(band, ReclaimClass::FsMetadata, self.budget);
+        let data_bytes = self.accounting.class_bytes(ReclaimClass::CleanFileData);
+        let meta_bytes = self.accounting.class_bytes(ReclaimClass::FsMetadata);
+        let target = meta_bytes
+            .min(meta_target)
+            .saturating_add(data_bytes.min(data_target));
+        if self.accounting.total_bytes() > target {
+            self.evict_until(target);
+        }
+    }
+
     /// Admit an entry of `cost` bytes under `key`, evicting to make
     /// room. Returns the recency tick to store in the entry, or `None`
-    /// when the entry is refused (over budget, poisoned, or the ledger
-    /// cannot account it) — the caller then serves without caching.
+    /// when the entry is refused (over budget, poisoned, growth is
+    /// forbidden by the pressure band or would dip into the reserve,
+    /// or the ledger cannot account it) — the caller then serves
+    /// without caching.
     fn admit(&mut self, key: KeyRef, cost: usize) -> Option<u64> {
         if self.poisoned || cost > self.budget.hard() {
+            self.accounting.record_refusal();
+            return None;
+        }
+        if !self.pressure.growth_permitted(cost) {
             self.accounting.record_refusal();
             return None;
         }
@@ -633,6 +677,7 @@ impl<F: FilesystemRead> FilesystemRead for CachedFs<F> {
     }
 
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
+        self.enforce_pressure();
         let raw = node.raw();
         if let Some(entry) = self.stat.get(&raw) {
             let info = entry.info;
@@ -654,6 +699,7 @@ impl<F: FilesystemRead> FilesystemRead for CachedFs<F> {
     }
 
     fn lookup(&mut self, dir: NodeId, name: &[u8]) -> Result<NodeId, DriverError> {
+        self.enforce_pressure();
         let dir_raw = dir.raw();
         if let Some(entry) = self.lookup.get(&dir_raw).and_then(|names| names.get(name)) {
             let node = entry.node;
@@ -703,6 +749,7 @@ impl<F: FilesystemRead> FilesystemRead for CachedFs<F> {
     }
 
     fn read_at(&mut self, file: NodeId, offset: u64, buf: &mut [u8]) -> Result<usize, DriverError> {
+        self.enforce_pressure();
         if buf.is_empty() || buf.len() > READ_BYPASS_LIMIT || self.poisoned {
             return self.inner.read_at(file, offset, buf);
         }
@@ -731,6 +778,7 @@ impl<F: FilesystemRead> FilesystemRead for CachedFs<F> {
         cursor: u64,
         name_out: &mut [u8],
     ) -> Result<Option<DirEntry>, DriverError> {
+        self.enforce_pressure();
         let dir_raw = dir.raw();
         if let Some(cached) = self.dirent.get(&(dir_raw, cursor)) {
             // The contract's refusal for an undersized buffer is served
@@ -794,6 +842,7 @@ impl<F: FilesystemRead> FilesystemRead for CachedFs<F> {
 
 impl<F: FilesystemRead + FilesystemWrite> FilesystemWrite for CachedFs<F> {
     fn create(&mut self, dir: NodeId, name: &[u8], kind: NodeKind) -> Result<NodeId, DriverError> {
+        self.enforce_pressure();
         let result = self.inner.create(dir, name, kind);
         // Invalidate whether or not the driver succeeded: a partially
         // applied refusal on a foreign driver must not leave stale
@@ -814,6 +863,7 @@ impl<F: FilesystemRead + FilesystemWrite> FilesystemWrite for CachedFs<F> {
         offset: u64,
         data: &[u8],
     ) -> Result<usize, DriverError> {
+        self.enforce_pressure();
         let target = self.resolve_for_invalidation(dir, name);
         let result = self.inner.write_at(dir, name, offset, data);
         match target {
@@ -832,6 +882,7 @@ impl<F: FilesystemRead + FilesystemWrite> FilesystemWrite for CachedFs<F> {
     }
 
     fn truncate(&mut self, dir: NodeId, name: &[u8], size: u64) -> Result<(), DriverError> {
+        self.enforce_pressure();
         let target = self.resolve_for_invalidation(dir, name);
         let result = self.inner.truncate(dir, name, size);
         match target {
@@ -850,6 +901,7 @@ impl<F: FilesystemRead + FilesystemWrite> FilesystemWrite for CachedFs<F> {
     }
 
     fn remove(&mut self, dir: NodeId, name: &[u8]) -> Result<(), DriverError> {
+        self.enforce_pressure();
         let target = self.resolve_for_invalidation(dir, name);
         let result = self.inner.remove(dir, name);
         let dir_raw = dir.raw();
@@ -876,6 +928,7 @@ impl<F: FilesystemRead + FilesystemWrite> FilesystemWrite for CachedFs<F> {
         dst_dir: NodeId,
         dst_name: &[u8],
     ) -> Result<(), DriverError> {
+        self.enforce_pressure();
         let overwritten = self.resolve_for_invalidation(dst_dir, dst_name);
         let result = self.inner.rename(src_dir, src_name, dst_dir, dst_name);
         let src_raw = src_dir.raw();
@@ -908,6 +961,7 @@ impl<F: FilesystemRead + FilesystemWrite> FilesystemWrite for CachedFs<F> {
 
 impl<F: FilesystemRead + FilesystemSecurity> FilesystemSecurity for CachedFs<F> {
     fn security(&mut self, node: NodeId) -> Result<NodeSecurity, DriverError> {
+        self.enforce_pressure();
         let raw = node.raw();
         if let Some(entry) = self.sec.get(&raw) {
             let sec = entry.sec;
@@ -929,6 +983,7 @@ impl<F: FilesystemRead + FilesystemSecurity> FilesystemSecurity for CachedFs<F> 
     }
 
     fn set_security(&mut self, node: NodeId, security: NodeSecurity) -> Result<(), DriverError> {
+        self.enforce_pressure();
         let result = self.inner.set_security(node, security);
         // Invalidate on success and failure alike; the next `security`
         // re-reads the stored record.

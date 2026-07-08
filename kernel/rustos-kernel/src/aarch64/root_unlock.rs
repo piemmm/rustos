@@ -51,7 +51,9 @@ use rustos_kernel_core::{
     YieldHandle,
 };
 use rustos_kernel_irq::{IrqTable, WaitOutcome};
-use rustos_kernel_mem::{AddressSpace, DirectPhysMap, DmaPool, FrameAllocator, MmioMap, VirtAddr};
+use rustos_kernel_mem::{
+    AddressSpace, DirectPhysMap, DmaPool, FrameAllocator, MemoryPressure, MmioMap, VirtAddr,
+};
 use rustos_kernel_sec::captable::TaskCapabilities;
 use rustos_kernel_sec::identity::UserId;
 use rustos_kernel_virtio::{provision_virtio_mmio, KernelMmioMapper, KernelVirtioHost};
@@ -376,7 +378,17 @@ pub fn spawn_if_present(ctx: &'static (dyn InitSpawnCtx + Sync)) -> bool {
 
     let dtb = boot.dtb;
     let caps = service_caps();
-    let env = UnlockEnv { ctx, audit };
+    // The system memory-pressure gauge every mounted volume's cache
+    // samples (`plans/SMARTRAM.md` SMART2), over the same `'static`
+    // frame allocator the spawn path uses — physical free frames are
+    // the authoritative reading. One boot-time leak, like `caller`.
+    let pressure: &'static MemoryPressure =
+        alloc::boxed::Box::leak(alloc::boxed::Box::new(MemoryPressure::over(frames)));
+    let env = UnlockEnv {
+        ctx,
+        audit,
+        pressure,
+    };
     let body = move |yielder: &mut dyn YieldHandle| {
         // On success the root-unlock service never returns: it parks for life
         // as the persistent driver-store service (Design D D2a-2), having
@@ -483,6 +495,10 @@ fn run_unlock(
 struct UnlockEnv {
     ctx: &'static (dyn InitSpawnCtx + Sync),
     audit: &'static (dyn Sink + Sync),
+    /// The system memory-pressure gauge the mounted volumes' caches
+    /// sample (`plans/SMARTRAM.md` SMART2), built over the kernel
+    /// frame allocator before the unlock kthread spawns.
+    pressure: &'static MemoryPressure,
 }
 
 /// Bring the virtio-blk root device up over the production device-IRQ path
@@ -799,6 +815,9 @@ fn emmc2_unlock<'a>(
 struct WritableStateSink<'a, B: Block + 'static> {
     store: &'static DriverStoreService<B>,
     audit: &'a dyn Sink,
+    /// The system memory-pressure gauge the writable root volume's
+    /// cache samples, threaded from [`UnlockEnv`].
+    pressure: &'static MemoryPressure,
 }
 
 impl<B: Block + 'static> WritableRootSink for WritableStateSink<'_, B> {
@@ -855,7 +874,7 @@ impl<B: Block + 'static> WritableRootSink for WritableStateSink<'_, B> {
         // registration refusal leaves the writable tree and `users_admin`
         // failing closed.
         let driver: alloc::boxed::Box<dyn KernelFs> = alloc::boxed::Box::new(fs);
-        register_writable_state(driver, self.audit)
+        register_writable_state(driver, self.audit, self.pressure)
     }
 }
 
@@ -866,7 +885,11 @@ fn finish_unlock<B: Block + 'static>(
     coop: &CooperativeYield<'_>,
     env: UnlockEnv,
 ) -> Result<Infallible, &'static str> {
-    let UnlockEnv { ctx, audit } = env;
+    let UnlockEnv {
+        ctx,
+        audit,
+        pressure,
+    } = env;
 
     // The one brought-up disk, boot-leaked to `'static` behind the
     // block-sharing layer so two independent preemptive tasks drive it through
@@ -946,7 +969,11 @@ fn finish_unlock<B: Block + 'static>(
         // `/System/Settings`) on a successful unlock, from a second `'static`
         // read-write window onto the same `'static`-leaked disk (park-safe via
         // the device `SleepLock`), under the just-derived key.
-        let writable = WritableStateSink { store, audit };
+        let writable = WritableStateSink {
+            store,
+            audit,
+            pressure,
+        };
         // The anti-brute-force pause after a wrong passphrase: a genuine
         // timed park (never a busy-wait) for at least three seconds, so a
         // scripted brute-force gains no faster oracle than the honest
@@ -1015,7 +1042,7 @@ fn finish_unlock<B: Block + 'static>(
     // serve loop below keeps its own independent window, so the two never
     // conflict. Fail-soft and audited: a disk with no readable `/System`
     // volume simply leaves the `fs_*` syscalls failing closed.
-    crate::system_mount::install_system_mount(store, audit);
+    crate::system_mount::install_system_mount(store, audit, pressure);
 
     // The driver-signing trust anchor the autoload load gate verifies each
     // winning bundle against — the kernel's own embedded key, the single

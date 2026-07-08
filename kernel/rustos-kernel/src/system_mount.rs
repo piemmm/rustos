@@ -74,7 +74,7 @@ use rustos_drv_fs_rustfs::{RustFs, SYSTEM_VOLUME_KEY};
 use rustos_kernel_core::{
     CachedFs, LateFilesystem, MountedFilesystemService, Path, SleepLock, Vfs, VfsError,
 };
-use rustos_kernel_mem::{CacheBudget, ReclaimOwner};
+use rustos_kernel_mem::{CacheBudget, MemoryPressure, ReclaimOwner};
 use rustos_kernel_sec::{GroupId, UserId};
 use rustos_log::{log, Event, EventId, Field, Level, Sink};
 use rustos_partition::{parse_partition_table, PartitionBlock, PartitionType};
@@ -90,14 +90,16 @@ pub static LATE_FILESYSTEM: LateFilesystem<Box<dyn KernelFs>> = LateFilesystem::
 
 /// Wrap a volume's driver in the clean, rebuildable filesystem cache
 /// (`plans/SMARTRAM.md` section 6.1), budgeted from the kernel heap
-/// arena the cache lives in and charged to the volume identified by its
-/// stable per-boot mount handle (`volume`).
+/// arena the cache lives in, charged to the volume identified by its
+/// stable per-boot mount handle (`volume`), and governed by the system
+/// memory-pressure gauge (`plans/SMARTRAM.md` SMART2).
 ///
 /// Every mounted volume is registered through this one helper, so both
 /// the read path and every mutation (including the account-administration
 /// engine's, which shares the registered lock) flow through the same
-/// cache and its invalidation.
-fn cached<F>(driver: F, volume: u64) -> Box<dyn KernelFs>
+/// cache and its invalidation, and every volume's cache obeys the same
+/// pressure bands.
+fn cached<F>(driver: F, volume: u64, pressure: &'static MemoryPressure) -> Box<dyn KernelFs>
 where
     F: FilesystemRead + FilesystemWrite + FilesystemSecurity + FilesystemStats + Send + 'static,
 {
@@ -105,6 +107,7 @@ where
         driver,
         CacheBudget::from_backing(rustos_kalloc::HEAP_BYTES),
         ReclaimOwner::FilesystemVolume { volume },
+        pressure,
     ))
 }
 
@@ -235,6 +238,7 @@ fn system_vfs() -> Result<Vfs, VfsError> {
 pub fn install_system_mount<B: Block + 'static>(
     store: &'static DriverStoreService<B>,
     audit: &dyn Sink,
+    pressure: &'static MemoryPressure,
 ) {
     // Locate the `/System` extent on a first window, then drop it so the
     // second, owned window is the one promoted into the `'static` mount.
@@ -279,7 +283,7 @@ pub fn install_system_mount<B: Block + 'static>(
         unavailable(audit, "already_installed");
         return;
     }
-    let driver = cached(fs, SYSTEM_MOUNT_HANDLE);
+    let driver = cached(fs, SYSTEM_MOUNT_HANDLE, pressure);
     if LATE_FILESYSTEM
         .register(system_handle, driver, "RustFsSystem", "rustfs")
         .is_err()
@@ -330,6 +334,7 @@ pub fn install_system_mount<B: Block + 'static>(
 pub fn register_writable_state(
     driver: Box<dyn KernelFs>,
     audit: &dyn Sink,
+    pressure: &'static MemoryPressure,
 ) -> Option<&'static SleepLock<Box<dyn KernelFs>>> {
     let Ok(handle) = DriverHandle::from_raw(ROOT_VOLUME_HANDLE) else {
         unavailable(audit, "writable_handle_invalid");
@@ -337,7 +342,7 @@ pub fn register_writable_state(
     };
     let Ok(shared) = LATE_FILESYSTEM.register(
         handle,
-        cached(driver, ROOT_VOLUME_HANDLE),
+        cached(driver, ROOT_VOLUME_HANDLE, pressure),
         "RustFsRoot",
         "rustfs",
     ) else {

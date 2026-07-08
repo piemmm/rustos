@@ -6,11 +6,16 @@ deterministic reclaim priorities, the owner model for the owners the
 kernel already has, rebuild-cost/sensitivity/invalidation-source/
 reclaim-rule modelling, the bounded per-entry-metadata validation bound,
 the fail-closed classification gate with typed refusals, and per-class
-checked accounting) and the clean and rebuildable filesystem cache
+checked accounting), the clean and rebuildable filesystem cache
 (section 6.1, `kernel/core::fs::CachedFs`, wrapping every registered
-volume driver and classified through that gate at construction; see
-`PLAN.md` §SMARTRAM for the done-state summary) are implemented; the
-remaining classes and the pressure integration are staged below  
+volume driver and classified through that gate at construction), and
+SMART2 (the VM pressure model and reclaim ordering,
+`kernel/mem::pressure`: the shared five-band gauge with hysteresis over
+the frame allocator, the reserve floor, per-band per-class shrink
+targets, the `ramzip` handoff gate, deterministic escalation, and the
+`CachedFs` per-operation enforcement; see `PLAN.md` §SMARTRAM for the
+done-state summary) are implemented; the remaining classes are staged
+below  
 Target: RustOS  
 Primary code areas: `kernel/mem`, `kernel/core`, `kernel/sched`, `lib/log`, existing filesystem drivers, existing desktop/session crates, and existing `lib/abi` diagnostics only if a current caller requires them  
 Secondary code areas: `drivers/filesystem/rustfs`, `userland/system/appmgr`, `userland/shell/elsh`, `userland/gui/wm`, `userland/gui/taskbar`, `userland/gui/session`, `lib/appload`, `lib/cmdres`, `lib/raster`, `lib/svg`, `lib/font`, `lib/icon`, `lib/theme`, and `lib/path`  
@@ -671,34 +676,39 @@ Docs:
 
 ### SMART2 - Pressure integration and reclaim ordering
 
-Deliverables:
+Status: **done.** No VM pressure model existed, so this stage shipped the
+complete one (`kernel/mem::pressure`; see
+`docs/src/architecture/memory.md` section 7h):
 
-- Integration with the existing VM pressure model or a complete pressure-state
-  model if none exists.
-- Class-specific budgets and hysteresis.
-- Forced reclaim path for disposable, clean, transform, semantic, UI,
-  reliability, validation, and predictive cache classes.
-- Explicit handoff ordering to `ramzip` as defined by `plans/SWAPSWAPSWAP.md`.
-- Reserve preservation and deterministic escalation when reclaim cannot help.
-- No background workers yet.
+- The five-band `MemoryPressure` gauge (the section 3/7 vocabulary) over a
+  `FreeMemorySource` — in production the physical `FrameAllocator`, sampled
+  on the consumers' own operations (no background workers, no tick) — with
+  per-band enter/exit watermarks derived from the backing size
+  (hysteresis; the initial fractions follow the `SWAPSWAPSWAP.md` section 6
+  shape and are benchmark-tunable constants, never ABI).
+- Reserve preservation: a reserve floor (1/64 of the backing) below which
+  every reading is critical, and `growth_permitted`, which admits cache
+  growth only at normal pressure and never into the reserve. A zero/unknown
+  backing reports critical and admits nothing (fail closed).
+- The pure, deterministic reclaim-ordering policy `shrink_target` for every
+  class (disposable/speculative drop at mild; clean file begins reclaim at
+  mild and drains with transform cache at moderate; metadata and recovery
+  assist are preserved to the low watermark; severe/critical force zero),
+  plus the `ramzip_handoff` gate (compression only from moderate, and at
+  moderate only once clean+transform are drained) and the deterministic
+  `escalation` order — the seams `plans/SWAPSWAPSWAP.md` SWAP3 binds to.
+- `CachedFs` enforcement: the gauge is threaded from the boot path into
+  every mounted volume's cache; every cache-touching operation applies the
+  band's shrink targets before serving (data before metadata, evicted
+  buffers zeroed) and admission is refused outside normal pressure — the
+  driver always keeps serving.
 
-Tests:
-
-- Normal state permits bounded growth.
-- Mild pressure stops speculative growth.
-- Disposable cache drops before clean cache.
-- Clean file and transform cache are reclaimed before cold anonymous pages are
-  compressed into `ramzip`, unless the existing VM model documents a stricter
-  policy.
-- Severe pressure forces all cache classes to obey shrink requests.
-- Critical pressure starts no speculative work.
-- Reserve preservation is invariant under cache growth and shrink.
-- Reclaim racing lookup and owner teardown is safe.
-
-Docs:
-
-- Update memory architecture docs with pressure bands, reclaim order, and
-  `SWAPSWAPSWAP.md` interaction.
+The SMART2 test matrix lands with the stage: pressure-module unit tests
+(watermark ordering, hysteresis, growth per band, reserve/zero-backing
+fail-closed, determinism, class ordering, handoff, escalation, the
+allocator source) and `CachedFs` tests (admission refusal and recovery,
+moderate drain preserving metadata, severe full shrink, forced reclaim
+racing lookup, owner teardown after forced reclaim).
 
 ### SMART3 - Filesystem metadata and transformation caches
 

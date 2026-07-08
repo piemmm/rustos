@@ -843,6 +843,58 @@ properties:
   encrypted at rest, so cached bytes are decrypted user data that must
   not linger in reusable heap memory.
 
+## 7h. VM pressure bands and reclaim ordering (`pressure`)
+
+`kernel/mem::pressure` is the one definition of the system's
+memory-pressure state and of the order reclaimable caches shrink in as
+pressure rises (`plans/SMARTRAM.md` SMART2). The band vocabulary —
+normal, mild, moderate, severe, critical — is shared with
+`plans/SWAPSWAPSWAP.md`; there is no parallel model.
+
+- **The gauge.** `MemoryPressure` samples a `FreeMemorySource` — in
+  production the physical `FrameAllocator` (free frames are the
+  authoritative reading; the boot path builds one gauge over the leaked
+  allocator and every mounted volume's cache shares it) — and folds
+  each reading into a banded state machine with **hysteresis**: a band
+  is entered below one watermark and left above a strictly higher one
+  (initial targets: mild 20%/25% free, moderate 10%/14%, severe
+  6.25%/8%, critical 3.125%/5% — implementation constants in the
+  `plans/SWAPSWAPSWAP.md` section 6 shape, to be tuned by benchmark,
+  never ABI). Deepening applies immediately; relaxing steps one band at
+  a time past each exit watermark. Sampling happens on the consumers'
+  own operations — no background worker, no periodic tick.
+- **Reserves, fail closed.** The thresholds carry a reserve floor
+  (1/64 of the backing). A reading at or below it is critical
+  regardless of history; a zero-size (unknown) backing reports critical
+  for every reading and admits nothing. `growth_permitted` allows cache
+  growth only at normal pressure and never lets it take the free
+  reading into the reserve — cache expansion can never be the cause of
+  reserve exhaustion.
+- **Reclaim ordering.** `shrink_target(band, class, budget)` is the
+  pure per-band ceiling each `ReclaimClass` must shrink to: at mild
+  pressure the disposable/speculative classes drop and semantic,
+  runtime, and clean-file classes shrink to the low watermark; at
+  moderate, clean file and transform cache drain fully while metadata
+  and recovery assist are capped at the low watermark; at severe and
+  critical every class shrinks to zero. Targets are monotonically
+  non-increasing with depth.
+- **`ramzip` handoff and escalation.** `ramzip_handoff` fixes the
+  `plans/SWAPSWAPSWAP.md` ordering: no compression at normal/mild; at
+  moderate, compression of cold anonymous pages may start only once
+  clean and transform cache are drained (reconstructable clean cache is
+  cheaper than encrypted compressed anonymous storage); at severe
+  `ramzip` owns cold-anonymous policy; at critical speculative work
+  stops and `escalation` owns the next step. `escalation` is the
+  deterministic answer when reclaim cannot help: reclaim caches while
+  any remain, then hand off to `ramzip` (moderate/severe), then the VM
+  pressure policy (critical). These are the seams the SWAP3 stage binds
+  to when the `ramzip` store lands.
+- **The consumer.** `CachedFs` (§7g) samples the gauge at the head of
+  every cache-touching operation: the band's forced-shrink targets are
+  applied (data before metadata, every evicted buffer zeroed) before
+  the cache is read, and admission is refused outside normal pressure —
+  the volume is always still served straight from the driver.
+
 ## 8. Testing strategy
 
 - **Unit tests** — alongside each module under `#[cfg(all(test, not(loom)))]`:

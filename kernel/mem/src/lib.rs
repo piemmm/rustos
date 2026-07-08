@@ -58,6 +58,7 @@ pub mod loader;
 pub mod mmio;
 pub mod pagetables;
 pub mod phys;
+pub mod pressure;
 pub mod ptr;
 pub mod reclaim;
 pub mod sensitive;
@@ -78,6 +79,10 @@ pub use loader::{map_flags_for, map_image, LoadError};
 pub use mmio::{MmioError, MmioMap, MmioRegion, MmioWindowMap};
 pub use pagetables::FrameTableSource;
 pub use phys::{DirectPhysMap, PhysMap};
+pub use pressure::{
+    escalation, ramzip_handoff, shrink_target, EscalationStep, FreeMemorySource, MemoryPressure,
+    PressureBand, PressureThresholds, RamzipHandoff,
+};
 pub use reclaim::{
     AccountingError, AdmissionRefusal, CacheAccounting, CacheBudget, CacheCandidate, CachePolicy,
     InvalidationSource, RebuildCost, ReclaimClass, ReclaimOwner, ReclaimRule, Sensitivity,

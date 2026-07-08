@@ -374,20 +374,20 @@ pub struct UartConsoleRead;
 
 impl ConsoleRead for UartConsoleRead {
     fn read(&self, buf: &mut [u8]) -> Result<usize, rustos_abi::Errno> {
-        // Pull any byte already in the hardware FIFO into the queue *first*,
-        // from this reader's own context, so console input is **poll-backed**
-        // rather than solely interrupt-driven: the reader sees a byte that is
-        // physically present even if the CPU has not yet taken its receive
-        // interrupt (it is busy in the masked EL1 dispatch loop) or the byte
-        // is a sub-trigger FIFO tail still awaiting the PL011 receive-timeout.
-        // The reader therefore only ever parks when the FIFO *and* the queue
-        // are genuinely empty, closing every residual device-IRQ-delivery
-        // race; the interrupt remains only the wake that unparks it once
-        // parked (a genuine park, never a busy-poll). Runs
-        // in an EL1 syscall with IRQ taking masked, so it cannot race the ISR
-        // on this single console (one shared drain body).
+        // Pull any byte already in the hardware FIFO into the queue and read
+        // the queue in one atomic step under the receive gate
+        // (`gic_irq::poll_and_read_uart`), so console input is
+        // **poll-backed** rather than solely interrupt-driven: the reader
+        // sees a byte that is physically present even if the CPU has not yet
+        // taken its receive interrupt, and only ever parks when the FIFO
+        // *and* the queue are genuinely empty. The gate serialises this
+        // whole step against the RX ISR — reader-context code runs with
+        // IRQs deliverable, so without it the two destructive FIFO drains
+        // race and can reorder or duplicate typed bytes (the corrupted
+        // login-line defect).
         #[cfg(all(freestanding, kernel_isa = "aarch64"))]
-        crate::aarch64::gic_irq::poll_uart_into_console_queue();
+        let read = crate::aarch64::gic_irq::poll_and_read_uart(buf)?;
+        #[cfg(not(all(freestanding, kernel_isa = "aarch64")))]
         let read = UART_INPUT.read(buf)?;
         // Draining the queue may have freed the space the ISR was blocked on:
         // re-enable the receive line if it masked itself on a full queue, so

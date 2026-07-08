@@ -4207,8 +4207,36 @@ rebuildable filesystem cache (`plans/SMARTRAM.md` SMART1 + §6.1):**
   and `RootAdminBacking` now shares the one registered (cache-wrapped)
   driver — one volume, one writer, every mutation visible to the cache.
 
-**Remaining (staged, `plans/SMARTRAM.md` §12):** VM pressure bands +
-forced-reclaim ordering with `ramzip` (SMART2), transform caches
+**Done — SMART2 VM pressure bands and reclaim ordering
+(`plans/SMARTRAM.md` SMART2 + §7):**
+- `kernel/mem::pressure`: the complete pressure-state model (none
+  existed) — the five-band `MemoryPressure` gauge (normal/mild/
+  moderate/severe/critical, the one vocabulary shared with
+  `plans/SWAPSWAPSWAP.md`) over a `FreeMemorySource` (production: the
+  physical `FrameAllocator`), sampled on the consumers' own operations
+  (no background workers, no tick), with per-band enter/exit
+  watermarks derived from the backing size (hysteresis; benchmark-
+  tunable fractions, never ABI), a reserve floor (1/64) below which
+  every reading is critical, fail-closed critical on a zero/unknown
+  backing, and `growth_permitted` (growth only at normal pressure,
+  never into the reserve). The pure policy layer: `shrink_target`
+  (per-band per-class ceilings in the §7 order — disposable/
+  speculative drop at mild, clean file drains with transform at
+  moderate, metadata/recovery-assist preserved to the low watermark,
+  severe/critical force zero, monotone with depth), `ramzip_handoff`
+  (compression only from moderate, and at moderate only once
+  clean+transform are drained; critical belongs to escalation), and
+  the deterministic `escalation` order (reclaim caches → hand off to
+  `ramzip` → VM policy) — the seams SWAP3 binds to.
+- `kernel/core::fs::CachedFs` consumes the gauge: the boot path builds
+  one gauge over the leaked frame allocator (`root_unlock` →
+  `UnlockEnv` → `install_system_mount`/`register_writable_state` →
+  `system_mount::cached`), every cache-touching operation applies the
+  band's forced-shrink targets before serving (data before metadata,
+  evicted buffers zeroed), and admission is refused outside normal
+  pressure — the driver always keeps serving.
+
+**Remaining (staged, `plans/SMARTRAM.md` §12):** transform caches
 (SMART3 remainder), semantic app/runtime caches (SMART4), UI caches
 (SMART5), reliability/background/predictive caches (SMART6–8), and
 observability (SMART9) — each gated on the subsystems it consumes.
