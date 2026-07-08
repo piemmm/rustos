@@ -785,8 +785,9 @@ rustos/
 │                        #   (see §7).
 │
 ├── plans/               # Staged sub-plans referenced by PLAN.md and this
-│                        #   charter (CCOMPAT.md, CURSES.md, WIRING.md,
-│                        #   SECURITYTESTS.md). Binding under AGENTS.md.
+│                        #   charter. Binding under AGENTS.md; the topic →
+│                        #   plan jump-sheet every contributor checks first
+│                        #   is §15.18.
 │
 ├── tools/
 │   ├── xtask/           # Build orchestration (cargo xtask ...).
@@ -1421,6 +1422,40 @@ You are not exempt from any rule above. In addition:
     generator that stamps provenance onto a generated artefact, or a runtime
     diagnostic that tells a developer which rule they broke — neither is a
     hand-written comment.
+18. **Check the `plans/` jump-sheet before touching a covered area.** Every
+    document under `plans/` is binding under this charter (§3). Before you
+    design, implement, review, or assess anything that touches an area
+    below, read the matching plan(s) first — they carry the staged design
+    decisions, invariants, and deliberate carve-outs this charter does not
+    repeat — and keep them current in the same change (§13). If your change
+    contradicts a plan, stop and ask (§15.7); never silently diverge from
+    one, and never re-derive a design a plan already fixes.
+
+    | Area you are touching | Read first |
+    |---|---|
+    | Capabilities: grants, manifests, ceilings, admin, elevation, the capability lifecycle | `plans/CAPABILITY_USE.md` |
+    | Process spawn, userland multitasking | `plans/SPAWN.md` |
+    | App bundles, command apps, help, command resolution | `plans/APPS.md`; `plans/UNIVERSAL.md` (multi-arch/Wasm distribution) |
+    | The shell (`elsh`) | `plans/SHELL.md` |
+    | Terminal / TUI stack (`lib/vt`, `lib/termcap`, `lib/curses`) | `plans/CURSES.md` |
+    | Userland I/O library layer | `plans/IO.md` |
+    | Display, seats, input routing, graphical session | `plans/DISPLAY.md`; `plans/GUI-CONTROLS-DESIGN.md` (GUI controls) |
+    | Storage namespace: drives, volumes, aliases, paths, resource references | `docs/src/filesystem/drives.md` (binding spec); `plans/ALIAS.md`; `plans/DRIVES.md` |
+    | RustFS | `docs/src/filesystem/rustfs-spec.md` (binding spec); `plans/RUSTFS-METADATA.md`; `plans/RUSTFS-SNAPSHOT.md`; `plans/SPARSE.md` |
+    | System log / audit trail | `plans/SYSLOG.md` |
+    | Memory pressure, reclaimable memory, swap tiers | `plans/SMARTRAM.md`; `plans/SWAPSWAPSWAP.md` |
+    | C-callable ABI (headers, stubs, crt0) | `plans/CCOMPAT.md` |
+    | Architecture ports / Arch HAL parity | `plans/WIRING.md` |
+    | Raspberry Pi bring-up | `plans/PI.md` |
+    | USB stack and hot-removal | `plans/USB.md` |
+    | TPM / measured boot | `plans/TPM.md` |
+    | Driver layering (`drivers/` vs `lib/*` device logic) | `plans/fixdrivers.md` |
+    | The `vim` app | `plans/VIM.md` |
+    | Code-quality / comment-discipline sweeps | `plans/CODEVERIFY.md`; `plans/WAFFLE.md` |
+
+    The sheet is maintained like any other doc (§2.8, §2.14): a new
+    `plans/*.md` enters this table in the change that creates it, and a
+    deleted or superseded plan leaves it in the change that removes it.
 
 ---
 

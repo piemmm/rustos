@@ -4,11 +4,15 @@
 //!
 //! Each list is a program's **request** — the manifest side of the
 //! `user ceiling ∩ manifest request` intersection the admit path derives a
-//! child's effective set from — sized to exactly the gated syscalls the
-//! program actually calls, neither wider nor narrower. Requesting wide is
-//! not a grant (the account ceiling bounds every session process), but an
-//! unexercised request is still unaudited surface, so each list stays
-//! minimal. The registry rows in `spawn_layout` consume these lists; the
+//! child's effective set from — sized to every gated syscall the program
+//! has a code path to issue, **including capability-gated optional
+//! features that degrade gracefully when the intersection strips them**
+//! (`plans/CAPABILITY_USE.md` §4.5, CU7). Requesting wide is not a grant
+//! (the account ceiling bounds every session process — that intersection
+//! is the security boundary), but an *unexercised* request is unaudited
+//! surface, so a capability no code path uses stays out. The manifest
+//! describes what the code *can* do; the ceiling describes what the user
+//! *may* do. The registry rows in `spawn_layout` consume these lists; the
 //! unit tests below pin each one, so a manifest change is a reviewed diff,
 //! never an accident.
 //!
@@ -110,39 +114,69 @@ pub const SEATMGR_MANIFEST: &[CapabilityId] = &[
 ];
 
 /// The `ps` tool's manifest: `CAP_CONSOLE_WRITE` for its listing on fd 1
-/// and diagnostics on fd 2, plus `CAP_FS_ACCESS` because its short-help
+/// and diagnostics on fd 2, `CAP_FS_ACCESS` because its short-help
 /// switches read the bundle's own `Help/` tree through the secured VFS
 /// (which still authorises every path per-inode under the caller's
-/// attested identity). Every per-query scope is enforced by `sysinfod`
-/// against this process's kernel-attested origin.
+/// attested identity), and `CAP_SYSINFO_GLOBAL` because `-e`/`-A` issue
+/// the `GLOBAL_PROCESS_LIST` query — an optional feature above the
+/// session baseline: armed only when the account ceiling carries the
+/// capability (an administrator's intersection keeps it), refused with a
+/// stated reason for everyone else while the self-scoped listing still
+/// works. Every per-query scope is enforced by `sysinfod` against this
+/// process's kernel-attested origin.
 #[cfg(any(test, not(all(freestanding, kernel_isa = "aarch64"))))]
-pub const PS_MANIFEST: &[CapabilityId] = &[CapabilityId::CONSOLE_WRITE, CapabilityId::FS_ACCESS];
+pub const PS_MANIFEST: &[CapabilityId] = &[
+    CapabilityId::CONSOLE_WRITE,
+    CapabilityId::FS_ACCESS,
+    CapabilityId::SYSINFO_GLOBAL,
+];
 
 /// The `sysinfo` tool's manifest: like `ps`, `CAP_CONSOLE_WRITE` for the
 /// rendered results on fd 1 plus `CAP_FS_ACCESS` because its short-help
 /// switches read the bundle's own `Help/` tree through the secured VFS
 /// (which still authorises every path per-inode under the caller's
-/// attested identity); per-query authority stays with `sysinfod` and the
-/// caller's attested origin.
+/// attested identity), plus the three privileged observability requests
+/// its query surface exercises — `CAP_SYSINFO_GLOBAL`
+/// (`GLOBAL_PROCESS_LIST`), `CAP_SYSINFO_KERNEL` (`KERNEL_MEMORY_STATS`),
+/// and `CAP_SYSINFO_HW` (`HARDWARE_TREE`). Each is an optional feature
+/// above the session baseline: armed only when the account ceiling
+/// carries it (an administrator's intersection keeps all three), refused
+/// with a stated reason for everyone else while the ungated queries still
+/// work. Per-query authority stays with `sysinfod` and the caller's
+/// attested origin.
 #[cfg(any(test, not(all(freestanding, kernel_isa = "aarch64"))))]
-pub const SYSINFO_MANIFEST: &[CapabilityId] =
-    &[CapabilityId::CONSOLE_WRITE, CapabilityId::FS_ACCESS];
+pub const SYSINFO_MANIFEST: &[CapabilityId] = &[
+    CapabilityId::CONSOLE_WRITE,
+    CapabilityId::FS_ACCESS,
+    CapabilityId::SYSINFO_GLOBAL,
+    CapabilityId::SYSINFO_KERNEL,
+    CapabilityId::SYSINFO_HW,
+];
 
 /// The `top` tool's manifest: `CAP_CONSOLE_WRITE` for its full-screen
 /// display on fd 1, `CAP_CONSOLE_READ` for raw-mode keystrokes on fd 0
 /// (the latter also authorises its `stream_input_mode` raw discipline),
 /// `CAP_FS_ACCESS` because its short-help switches read the bundle's own
 /// `Help/` tree through the secured VFS (which still authorises every
-/// path per-inode under the caller's attested identity). The `USER`
-/// column's uid → name map comes from the ungated, secret-free
-/// user-directory `sysinfo` query, so no further capability is requested;
-/// `terminal_size` is ungated and per-query `sysinfo` scope is enforced by
-/// `sysinfod`.
+/// path per-inode under the caller's attested identity), plus the two
+/// privileged observability requests its optional features exercise —
+/// `CAP_SYSINFO_KERNEL` for the memory summary line
+/// (`KERNEL_MEMORY_STATS`, every refresh) and `CAP_SYSINFO_GLOBAL` for
+/// the `a` system-wide toggle (`GLOBAL_PROCESS_LIST`). Each is an
+/// optional feature above the session baseline: armed only when the
+/// account ceiling carries it (an administrator's intersection keeps
+/// both), degraded to the stated placeholder/refusal for everyone else
+/// while the self-scoped viewer keeps working. The `USER` column's uid →
+/// name map comes from the ungated, secret-free user-directory `sysinfo`
+/// query, so no further capability is requested; `terminal_size` is
+/// ungated and per-query `sysinfo` scope is enforced by `sysinfod`.
 #[cfg(any(test, not(all(freestanding, kernel_isa = "aarch64"))))]
 pub const TOP_MANIFEST: &[CapabilityId] = &[
     CapabilityId::CONSOLE_WRITE,
     CapabilityId::CONSOLE_READ,
     CapabilityId::FS_ACCESS,
+    CapabilityId::SYSINFO_GLOBAL,
+    CapabilityId::SYSINFO_KERNEL,
 ];
 
 /// The `ls` tool's manifest: `CAP_CONSOLE_WRITE` for the listing on fd 1
@@ -325,7 +359,11 @@ mod tests {
     fn ps_manifest_is_pinned() {
         assert_eq!(
             set(PS_MANIFEST),
-            set(&[CapabilityId::CONSOLE_WRITE, CapabilityId::FS_ACCESS])
+            set(&[
+                CapabilityId::CONSOLE_WRITE,
+                CapabilityId::FS_ACCESS,
+                CapabilityId::SYSINFO_GLOBAL,
+            ])
         );
     }
 
@@ -333,7 +371,13 @@ mod tests {
     fn sysinfo_manifest_is_pinned() {
         assert_eq!(
             set(SYSINFO_MANIFEST),
-            set(&[CapabilityId::CONSOLE_WRITE, CapabilityId::FS_ACCESS])
+            set(&[
+                CapabilityId::CONSOLE_WRITE,
+                CapabilityId::FS_ACCESS,
+                CapabilityId::SYSINFO_GLOBAL,
+                CapabilityId::SYSINFO_KERNEL,
+                CapabilityId::SYSINFO_HW,
+            ])
         );
     }
 
@@ -345,6 +389,8 @@ mod tests {
                 CapabilityId::CONSOLE_WRITE,
                 CapabilityId::CONSOLE_READ,
                 CapabilityId::FS_ACCESS,
+                CapabilityId::SYSINFO_GLOBAL,
+                CapabilityId::SYSINFO_KERNEL,
             ])
         );
     }
@@ -422,28 +468,77 @@ mod tests {
         );
     }
 
-    /// Every session tool a shell spawns requests within the session
-    /// baseline, so an account granted only the baseline can run the whole
-    /// default toolset: each tool's `manifest ∩ ceiling` intersection
-    /// loses nothing. The `users` tool is deliberately absent: its
-    /// `CAP_USER_ADMIN` request sits above the baseline, so it works only
-    /// for an administrator account (the administrative set carries it)
-    /// and is inert — not missing — for everyone else.
+    /// Every capability a session tool requests is either in the session
+    /// baseline (its core function, so a baseline-only account can run
+    /// the whole default toolset usefully) or in the administrator
+    /// ceiling (an optional, gracefully-degrading feature that arms only
+    /// for an entitled account's intersection). A session tool never
+    /// requests a service- or driver-class capability: those belong to
+    /// the specific system program whose manifest requests them.
     #[test]
-    fn session_tools_request_within_the_session_baseline() {
-        let baseline = set(SESSION_BASELINE);
+    fn session_tool_requests_stay_within_the_administrator_ceiling() {
+        let ceiling = rustos_users::administrator_ceiling();
         for manifest in [
             CAT_MANIFEST,
             CLEAR_MANIFEST,
             LS_MANIFEST,
+            MAN_MANIFEST,
             PS_MANIFEST,
             RESET_MANIFEST,
             SYSINFO_MANIFEST,
             TOP_MANIFEST,
         ] {
             for cap in manifest {
-                assert!(baseline.contains(*cap), "{cap:?} exceeds the baseline");
+                assert!(ceiling.contains(*cap), "{cap:?} exceeds the admin ceiling");
             }
+        }
+    }
+
+    /// The exact above-baseline subset of every session tool's request —
+    /// each entry names an optional, capability-gated feature that
+    /// degrades gracefully when a non-administrator's intersection strips
+    /// it (the tool still performs its core function within the
+    /// baseline). Widening any tool above the baseline is a reviewed diff
+    /// here, never an accident; a tool absent from this list requests
+    /// nothing above the baseline.
+    #[test]
+    fn session_tool_requests_above_the_baseline_are_the_audited_set() {
+        let baseline = set(SESSION_BASELINE);
+        let above = |manifest: &[CapabilityId]| {
+            let mut out = CapabilitySet::empty();
+            for cap in manifest {
+                if !baseline.contains(*cap) {
+                    out.insert(*cap);
+                }
+            }
+            out
+        };
+        // ps: `-e`/`-A` list every process.
+        assert_eq!(above(PS_MANIFEST), set(&[CapabilityId::SYSINFO_GLOBAL]));
+        // top: the memory summary line and the `a` system-wide toggle.
+        assert_eq!(
+            above(TOP_MANIFEST),
+            set(&[CapabilityId::SYSINFO_GLOBAL, CapabilityId::SYSINFO_KERNEL])
+        );
+        // sysinfo: the global process, kernel-memory, and hardware-tree
+        // queries of its reporting surface.
+        assert_eq!(
+            above(SYSINFO_MANIFEST),
+            set(&[
+                CapabilityId::SYSINFO_GLOBAL,
+                CapabilityId::SYSINFO_KERNEL,
+                CapabilityId::SYSINFO_HW,
+            ])
+        );
+        // Every other session tool requests nothing above the baseline.
+        for manifest in [
+            CAT_MANIFEST,
+            CLEAR_MANIFEST,
+            LS_MANIFEST,
+            MAN_MANIFEST,
+            RESET_MANIFEST,
+        ] {
+            assert_eq!(above(manifest), CapabilitySet::empty());
         }
     }
 

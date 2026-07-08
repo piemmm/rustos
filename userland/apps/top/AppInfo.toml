@@ -6,11 +6,16 @@
 # also authorises the tool's stream_echo suppression). CAP_FS_ACCESS
 # because the short-help switches read the bundle's own Help/ tree through
 # the secured VFS, which still authorises every path per-inode under the
-# caller's attested identity. The USER column's uid -> name map comes from
-# the ungated, secret-free user-directory sysinfo query, so no further
-# capability is requested for it.
+# caller's attested identity. CAP_SYSINFO_KERNEL because the memory
+# summary line issues KERNEL_MEMORY_STATS on every refresh, and
+# CAP_SYSINFO_GLOBAL because the `a` toggle issues GLOBAL_PROCESS_LIST —
+# optional features above the session baseline, armed only when the
+# launching account's ceiling carries them (an administrator) and degraded
+# to a stated placeholder/refusal for everyone else. The USER column's
+# uid -> name map comes from the ungated, secret-free user-directory
+# sysinfo query, so no further capability is requested for it.
 id = "os.rustos.top"
 name = "top"
 version = "0.1.0"
 kind = "command"
-capabilities = ["CAP_CONSOLE_WRITE", "CAP_CONSOLE_READ", "CAP_FS_ACCESS"]
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_CONSOLE_READ", "CAP_FS_ACCESS", "CAP_SYSINFO_GLOBAL", "CAP_SYSINFO_KERNEL"]

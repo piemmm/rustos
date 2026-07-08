@@ -4108,13 +4108,18 @@ desktop session work (CU6).
 
 ## CAPABILITY_USE — the capability lifecycle: login → session → administration (`plans/CAPABILITY_USE.md`)
 
-**Status: CU1–CU5 done; CU6 planned.** The full capability lifecycle is
+**Status: CU1–CU5 and CU7 done; CU6 planned.** The full capability lifecycle is
 wired: the kernel computes *effective = user grant ∩ manifest request*
 (`TaskCapabilities::derive`), the runtime spawn path threads the account's
 `capability_grants` ceiling through `SpawnCredential` into that intersection
 (inherit copies the caller's stored ceiling; a `CAP_SPAWN_AS_USER` switch
 resolves the target account's — CU1), every embedded program carries a
-pinned, exactly-sized manifest with the shell on the session baseline (CU2),
+pinned manifest sized to every gated code path it can exercise — including
+capability-gated optional features that degrade gracefully when the
+intersection strips them (`top`/`ps`/`sysinfo` request the privileged
+`CAP_SYSINFO_*` queries their optional features issue; the above-baseline
+subset per session tool is pinned as its own audited set — CU7) — with the
+shell on the session baseline (CU2),
 the debug root account is seeded with the shared `administrator_ceiling()`
 and the whole flow is proven by the `session_ceiling` QEMU vertical (CU3),
 and a running system administers its accounts through the
@@ -4263,6 +4268,14 @@ of how much code was produced.
 
 Amendments to `AGENTS.md` (the binding charter) are logged here so an agent
 can see *why* a rule exists without diffing the charter's history.
+
+- **2026-07-08 — The `plans/` jump-sheet.** Added §15.18 and repointed the
+  §3 `plans/` comment at it (maintainer request), after capability work was
+  done without consulting `plans/CAPABILITY_USE.md`: agents (and humans)
+  had no single place telling them which binding plan governs an area, so
+  staged designs risked being silently re-derived or contradicted. §15.18
+  is a topic → plan table every contributor checks before touching a
+  covered area, maintained in the same change that adds or removes a plan.
 
 - **2026-07-07 — Per-user `Apps/`, nested bundle filing, and `man`'s
   recursive help search.** Amended §16.3 (maintainer request): the fixed

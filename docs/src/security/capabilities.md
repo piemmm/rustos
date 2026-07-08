@@ -126,10 +126,24 @@ grant, and every author imports them — the image builder's debug `root`
 account (`tools/mkimage::debug_users_db`) and the QEMU disk fixtures seed
 exactly `administrator_ceiling()`, and the kernel's shell manifest
 re-exports `SESSION_BASELINE` (`plans/CAPABILITY_USE.md` CU3). Every
-other embedded program's manifest is sized to exactly the gated syscalls
-it calls — one shared definition per program in the kernel's
-`program_manifests` module, each list pinned by an exact-set unit test
-(CU2). The whole lifecycle is proven end to end by the
+other program's manifest is sized to every gated syscall the program has
+a code path to issue — **including capability-gated optional features
+that degrade gracefully when the intersection strips them** — and to
+nothing it has no code path for (`plans/CAPABILITY_USE.md` §4.5, CU7).
+The manifest describes what the code *can* do; the account ceiling
+describes what the user *may* do; the intersection does the security
+work, so requesting an optional privileged feature is safe by
+construction. `top` requests `CAP_SYSINFO_KERNEL` (the memory summary
+line) and `CAP_SYSINFO_GLOBAL` (the `a` system-wide toggle), `ps`
+requests `CAP_SYSINFO_GLOBAL` (`-e`/`-A`), and `sysinfo` requests the
+three global observability capabilities its query surface exercises: an
+administrator's intersection arms these features, while a baseline
+account's strips them and each tool reports the refusal and continues
+with its self-scoped core function. Each list is one shared definition
+per program in the kernel's `program_manifests` module, pinned by an
+exact-set unit test, with the above-baseline subset of every session
+tool additionally pinned as its own audited, reviewed set (CU2, CU7).
+The whole lifecycle is proven end to end by the
 `rustos-test-session-ceiling-qemu-aarch64` QEMU vertical: unlock, root
 login, `cd`/`pwd`/`ps` under the seeded ceiling, and a `ulimit`
 hard-bound raise refused because the shell's manifest does not request

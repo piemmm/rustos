@@ -6,8 +6,14 @@
 # attested origin. CAP_FS_ACCESS because the short-help switches read the
 # bundle's own Help/ tree through the secured VFS, which still authorises
 # every path per-inode under the caller's attested identity.
+# CAP_SYSINFO_GLOBAL (GLOBAL_PROCESS_LIST), CAP_SYSINFO_KERNEL
+# (KERNEL_MEMORY_STATS), and CAP_SYSINFO_HW (HARDWARE_TREE) because the
+# tool's reporting surface issues those queries — optional features above
+# the session baseline, armed only when the launching account's ceiling
+# carries them (an administrator) and refused with a stated reason for
+# everyone else while the ungated queries still work.
 id = "os.rustos.sysinfo"
 name = "sysinfo"
 version = "0.1.0"
 kind = "command"
-capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS"]
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS", "CAP_SYSINFO_GLOBAL", "CAP_SYSINFO_KERNEL", "CAP_SYSINFO_HW"]

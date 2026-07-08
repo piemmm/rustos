@@ -257,8 +257,23 @@ Today a program's manifest is its `EmbeddedProgram` registry row; the signed
 same semantics (request, not grant). Because the user ceiling bounds every
 session process once CU1 lands, giving the shell (or any tool) a wider
 manifest is safe: a manifest request an account's grant does not cover is
-simply not in the intersection. The registry rows are therefore sized to
-what each program *does* (§6 CU2), not to a least-common-denominator.
+simply not in the intersection.
+
+**The binding sizing rule (CU7):** a manifest requests every capability the
+program has a code path to exercise — **including optional,
+gracefully-degrading features** (`top`'s memory line, `ps -e`) — and nothing
+it has no code path for. "Minimal" binds against *unexercised* authority (a
+capability no code path uses is unaudited surface and stays out); it never
+means "only what every account is guaranteed to hold". The manifest is a
+mask describing what the code *can* do; the ceiling is policy describing
+what the user *may* do; the intersection does the security work. Sizing a
+tool's request down to the session baseline when it has privileged code
+paths is a defect: it strips the feature even from accounts whose ceiling
+grants it, with no recourse — the very trap this plan exists to prevent. An
+above-baseline request must correspond to a feature that degrades gracefully
+(`AGENTS.md` §2.24) when a non-entitled account's intersection strips it,
+and every session tool's above-baseline subset is pinned as its own audited
+set so widening is a reviewed diff.
 
 ### 4.6 The desktop (not yet implemented — direction only)
 
@@ -370,12 +385,15 @@ authorises it; anything not listed is denied.
   issues and left at its real need: login keeps the console pair +
   `PROC_SPAWN` + `USERS_READ` + `SPAWN_AS_USER` + `LOG_EMIT` (it reads the
   users db through its own gated syscall, so **no** `CAP_FS_ACCESS`);
-  devmgr, sysinfod, `ps`, `sysinfo`, and `top` were already sized exactly
-  and are unchanged.
+  devmgr and sysinfod were sized exactly. CU2's original sizing of `ps`,
+  `sysinfo`, and `top` under-requested their privileged optional query
+  paths; CU7 corrected those manifests under the §4.5 sizing rule.
 - Tests: one exact-`CapabilitySet` pinning test per manifest (plus the
-  init set), and the invariant that every session tool's request is within
-  the session baseline, so a manifest change is a reviewed diff, not an
-  accident.
+  init set), so a manifest change is a reviewed diff, not an accident.
+  The original "every session tool requests within the session baseline"
+  invariant codified the under-request and was replaced by CU7's pair of
+  invariants (within-admin-ceiling, plus the audited above-baseline
+  subset per tool).
 - Docs: `docs/src/security/capabilities.md` records the pinned-manifest
   state; the `EmbeddedProgram::caps` and `SPAWN_PROGRAMS` rustdoc name the
   shared lists.
@@ -530,6 +548,43 @@ exist from CU3).
 - Binds §4.6 when the desktop lands: WM/session manifests, `AppInfo`
   intersection, picker-issued one-shot descriptors. No design work is done
   here ahead of a live consumer.
+
+### CU7 — manifest entitlement audit (the §4.5 sizing rule)
+
+**Status: done.**
+
+- **The defect this stage fixed:** CU2 sized the session tools' manifests
+  to the session baseline, so the `manifest ∩ ceiling` intersection
+  stripped `CAP_SYSINFO_KERNEL`/`CAP_SYSINFO_GLOBAL` even from an
+  administrator whose ceiling grants them — `top`'s memory line read
+  `unavailable (needs CAP_SYSINFO_KERNEL)` and its `a` toggle was refused
+  *for every account*, with no recourse. The §5 walkthrough promise
+  ("global queries … if the *account* ceiling carries `CAP_SYSINFO_GLOBAL`")
+  was unsatisfiable. The fix is doctrine + data, zero new mechanism: no new
+  capability, no ceiling change, no runtime raise, and `sysinfod` keeps
+  gating on the caller's kernel-attested *effective* set.
+- Manifests audited against every gated code path
+  (`kernel/rustos-kernel/src/program_manifests.rs` and each tool's
+  `AppInfo.toml`, kept in lockstep by the drift pin): `top` +=
+  `CAP_SYSINFO_GLOBAL` (the `a` system-wide toggle) + `CAP_SYSINFO_KERNEL`
+  (the memory summary line); `ps` += `CAP_SYSINFO_GLOBAL` (`-e`/`-A`);
+  `sysinfo` += `CAP_SYSINFO_GLOBAL` + `CAP_SYSINFO_KERNEL` +
+  `CAP_SYSINFO_HW` (its global/kernel/hardware-tree queries). All other
+  session tools request nothing above the baseline; `users` (console pair +
+  `CAP_USER_ADMIN`) was already the correct precedent, as was login's
+  `CAP_SYSINFO_KERNEL` request.
+- Tests: the exact-set pins cover the widened manifests; the wrong
+  baseline invariant was replaced by
+  `session_tool_requests_stay_within_the_administrator_ceiling` (a session
+  tool never requests a service-/driver-class capability) and
+  `session_tool_requests_above_the_baseline_are_the_audited_set` (the
+  exact above-baseline subset per tool, empty for every tool without a
+  privileged optional feature — widening any tool is a reviewed diff
+  naming its feature).
+- Docs: `docs/src/security/capabilities.md` states the sizing rule and the
+  entitled-tool behaviour; the manifests' rustdoc and `AppInfo.toml`
+  comments name each above-baseline request's feature and its degraded
+  form.
 
 ---
 

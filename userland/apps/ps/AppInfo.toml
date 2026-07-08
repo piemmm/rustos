@@ -6,9 +6,13 @@
 # this process's kernel-attested origin. CAP_FS_ACCESS because the
 # short-help switches read the bundle's own Help/ tree through the secured
 # VFS, which still authorises every path per-inode under the caller's
-# attested identity.
+# attested identity. CAP_SYSINFO_GLOBAL because -e/-A issue the
+# GLOBAL_PROCESS_LIST query — an optional feature above the session
+# baseline, armed only when the launching account's ceiling carries it (an
+# administrator) and refused with a stated reason for everyone else while
+# the self-scoped listing still works.
 id = "os.rustos.ps"
 name = "ps"
 version = "0.1.0"
 kind = "command"
-capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS"]
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS", "CAP_SYSINFO_GLOBAL"]
