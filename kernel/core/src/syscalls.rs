@@ -133,7 +133,7 @@ use crate::procsignal::{ProcessSignal, NULL_PROCESS_SIGNAL};
 use crate::procwait::{ChildPeek, ProcessWait, NULL_PROCESS_WAIT};
 use crate::random::{reserve_errno, RandomReserve};
 use crate::rlimit::{authorize_set, LimitSet};
-use crate::seat::{seat_errno, SeatRegistry, NULL_SEAT_REGISTRY};
+use crate::seat::{SeatRegistry, NULL_SEAT_REGISTRY};
 use crate::spawn::{
     AdmitError, ProcessSpawn, ProgramRegistry, SpawnCtx, EMPTY_PROGRAM_REGISTRY, NULL_PROCESS_SPAWN,
 };
@@ -3035,7 +3035,13 @@ where
         device.grant_foreground(caller.task_id, child).map(|()| 0)
     }
 
-    fn key_inject(&self, caller: &CallerContext<'_>, buf: u64, len: usize) -> SyscallResult {
+    fn key_inject(
+        &self,
+        caller: &CallerContext<'_>,
+        seat: u64,
+        buf: u64,
+        len: usize,
+    ) -> SyscallResult {
         // The dispatcher already checked `CAP_INPUT_INJECT` and that `buf`
         // is non-null (`UserPtr`). A record is fixed-width: a `len` that
         // cannot hold one fails closed rather than letting the kernel decode
@@ -3076,7 +3082,7 @@ where
         let decoded = KeyInput::from_bytes(&record_bytes);
         record_bytes.zeroize();
         let record = decoded?;
-        let consumed = self.seat_registry.inject(record)?;
+        let consumed = self.seat_registry.inject(seat, record)?;
         // Witness the first successful delivery exactly once (`plans/PI.md` P11): proof that an (autoloaded)
         // keyboard driver has come up and is routing input through the
         // arbiter. The one-shot latch fires this on the first edge only —
@@ -3095,11 +3101,12 @@ where
         Ok(consumed as u64)
     }
 
-    fn display_acquire(&self, caller: &CallerContext<'_>) -> SyscallResult {
+    fn display_acquire(&self, caller: &CallerContext<'_>, seat: u64) -> SyscallResult {
         // The dispatcher already checked `CAP_DISPLAY`. The kernel-attested
-        // caller is recorded as the seat owner: injected key edges now
-        // follow the new surface owner (`plans/PI.md` P11), and a seat held
-        // by another task refuses the claim (`SeatBusy`) rather than
+        // caller is recorded as the named seat's owner: key edges injected
+        // for that seat now follow the new surface owner (`plans/PI.md`
+        // P11), an unknown seat id fails closed (`NotFound`), and a seat
+        // held by another task refuses the claim (`SeatBusy`) rather than
         // displacing the holder — ownership is exclusive even between two
         // principals that both hold the capability (`plans/DISPLAY.md` D2).
         // The minted lease's generation (>= 1) is returned so the client
@@ -3108,20 +3115,19 @@ where
         // be mistaken for the live grant.
         let lease = self
             .seat_registry
-            .acquire(SeatOwner(caller.task_id.0))
-            .map_err(seat_errno)?;
+            .acquire(seat, SeatOwner(caller.task_id.0))?;
         Ok(lease.generation)
     }
 
-    fn display_release(&self, caller: &CallerContext<'_>) -> SyscallResult {
+    fn display_release(&self, caller: &CallerContext<'_>, seat: u64) -> SyscallResult {
         // The dispatcher already checked `CAP_DISPLAY`. Only the recorded
-        // owner may release: input then returns to the text console so a
-        // login/shell once again receives the keyboard (`plans/PI.md` P11).
-        // A non-owner is refused (`SeatNotOwner`) — a release is never a
-        // global "flip it back" switch (`plans/DISPLAY.md` D2).
+        // owner may release: the seat's input then returns to the text
+        // console so a login/shell once again receives the keyboard
+        // (`plans/PI.md` P11). An unknown seat id fails closed (`NotFound`)
+        // and a non-owner is refused (`SeatNotOwner`) — a release is never
+        // a global "flip it back" switch (`plans/DISPLAY.md` D2).
         self.seat_registry
-            .release(SeatOwner(caller.task_id.0))
-            .map_err(seat_errno)?;
+            .release(seat, SeatOwner(caller.task_id.0))?;
         Ok(0)
     }
 
@@ -3133,19 +3139,18 @@ where
     ) -> SyscallResult {
         // The dispatcher already checked `CAP_SEAT_ADMIN`. Validate the
         // seat and the target console against the live topology *before*
-        // any state changes: the kernel hosts one seat today (id 0,
-        // `plans/DISPLAY.md` D6 adds more), and the console index must name
-        // an installed console — an unknown seat or console fails closed
-        // with `NotFound`, so a typo can never strand input on a console
-        // that does not exist.
-        if seat_id != 0 {
-            return Err(Errno::NotFound);
-        }
+        // any state changes: the seat id must name a live seat (the
+        // registry resolves it, so a hot-removed seat is gone the moment
+        // its node is) and the console index must name an installed
+        // console — an unknown seat or console fails closed with
+        // `NotFound`, so a typo can never strand input on a console that
+        // does not exist.
         let index = usize::try_from(console).map_err(|_| Errno::NotFound)?;
         if self.consoles.get(index).is_none() {
             return Err(Errno::NotFound);
         }
-        self.seat_registry.switch_foreground(ConsoleIndex(console));
+        self.seat_registry
+            .switch_foreground(seat_id, ConsoleIndex(console))?;
         // Retargeting the foreground redirects every subsequent keystroke
         // of an unowned seat — a security-relevant ownership change, so the
         // record names the seat and the new foreground.
@@ -3168,15 +3173,12 @@ where
     }
 
     fn seat_revoke(&self, _caller: &CallerContext<'_>, seat_id: u64) -> SyscallResult {
-        // The dispatcher already checked `CAP_SEAT_ADMIN`. The kernel hosts
-        // one seat today (id 0); an unknown seat fails closed with
-        // `NotFound` before any state is touched. Revoking an unowned seat
-        // surfaces `SeatNotOwner` (there is no lease to revoke) rather than
-        // reporting a success that changed nothing.
-        if seat_id != 0 {
-            return Err(Errno::NotFound);
-        }
-        let evicted = self.seat_registry.revoke().map_err(seat_errno)?;
+        // The dispatcher already checked `CAP_SEAT_ADMIN`. An unknown seat
+        // id fails closed with `NotFound` before any state is touched.
+        // Revoking an unowned seat surfaces `SeatNotOwner` (there is no
+        // lease to revoke) rather than reporting a success that changed
+        // nothing.
+        let evicted = self.seat_registry.revoke(seat_id)?;
         // Every eviction is attributable: the record carries the evicted
         // owner's task id. The evicted owner's next owner-gated call fails
         // closed with the distinct `SeatRevoked` refusal, so the loss is
@@ -3199,31 +3201,39 @@ where
         Ok(0)
     }
 
-    fn keyboard_read(&self, caller: &CallerContext<'_>, buf: u64, len: usize) -> SyscallResult {
+    fn keyboard_read(
+        &self,
+        caller: &CallerContext<'_>,
+        seat: u64,
+        buf: u64,
+        len: usize,
+    ) -> SyscallResult {
         // The dispatcher already checked `CAP_INPUT_READ` and that `buf` is
         // non-null (`UserPtr`). A record is fixed-width: a `len` that cannot
         // hold one fails closed, the kernel never writes a partial record.
         if len < KeyInput::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
         }
-        // Drain one record into a stack buffer first. `read_key` owner-gates
-        // the drain against the seat's live lease — only the task that
-        // acquired the seat may take records off the desktop channel
-        // (`plans/DISPLAY.md` D2) — then returns `0` when the channel is
-        // momentarily empty (a valid short read the caller loops on) or one
-        // whole record's `WIRE_LEN`. The buffer is wiped on every exit (a
-        // key edge may carry a typed character).
+        // Drain one record into a stack buffer first. `read_key` resolves
+        // the named seat (an unknown id fails closed `NotFound`) and
+        // owner-gates the drain against that seat's live lease — only the
+        // task that acquired the seat may take records off its desktop
+        // channel (`plans/DISPLAY.md` D2) — then returns `0` when the
+        // channel is momentarily empty (a valid short read the caller
+        // loops on) or one whole record's `WIRE_LEN`. The buffer is wiped
+        // on every exit (a key edge may carry a typed character).
         let mut record_bytes = [0u8; KeyInput::WIRE_LEN];
-        let read = match self
-            .seat_registry
-            .read_key(SeatOwner(caller.task_id.0), &mut record_bytes)
-        {
-            Ok(read) => read,
-            Err(err) => {
-                record_bytes.zeroize();
-                return Err(err);
-            }
-        };
+        let read =
+            match self
+                .seat_registry
+                .read_key(seat, SeatOwner(caller.task_id.0), &mut record_bytes)
+            {
+                Ok(read) => read,
+                Err(err) => {
+                    record_bytes.zeroize();
+                    return Err(err);
+                }
+            };
         if read == 0 {
             record_bytes.zeroize();
             return Ok(0);
@@ -3816,16 +3826,14 @@ where
                 if out_cap < SeatRecord::WIRE_LEN {
                     return Err(Errno::BufferTooSmall);
                 }
+                let max_records = out_cap / SeatRecord::WIRE_LEN;
                 // Served from the kernel's own seat registry rather than the
                 // introspect seam: the seat state lives in this crate, so the
-                // one definition answers directly. One seat today — the
-                // paging contract still holds: offset 0 returns the single
-                // record, any later offset the empty terminator.
-                if arg == 0 {
-                    self.seat_registry.record(0).to_le_bytes().to_vec()
-                } else {
-                    Vec::new()
-                }
+                // one definition answers directly. Pages by whole record —
+                // the boot seat first, then every discovery-created seat in
+                // creation order; an offset past the end returns the empty
+                // terminator.
+                self.seat_registry.records(arg, max_records)
             }
             IntrospectDomain::TaskLimits => {
                 // The 128-bit target `ProcId` does not fit in the `u64` `arg`,
@@ -4600,7 +4608,34 @@ where
         // closed with `NotImplemented`. Returns the kernel-assigned node id
         // once published, so the emitter can later retract this child by id
         // (a USB host controller removing the interface node on a port-down).
-        self.hw_tree.publish(parent_id, decoded).map(u64::from)
+        let class = decoded.class();
+        let node_id = self.hw_tree.publish(parent_id, decoded)?;
+
+        // A display-class node is a seat: publishing one mints an
+        // independent seat for it through the one discovery path, so a
+        // hotplugged display becomes ownable with no reboot
+        // (`plans/DISPLAY.md` D6). A new input-routing destination coming
+        // into existence is a security-relevant topology change, so it is
+        // audited with the seat and node ids.
+        if class == Some(rustos_abi::hwtree::HwDeviceClass::Display) {
+            let seat_id = self.seat_registry.attach_display(node_id);
+            crate::audit::emit(
+                self.audit,
+                rustos_log::Level::Info,
+                AuditEvent::SeatCreated,
+                &[
+                    Field {
+                        key: "seat",
+                        value: rustos_log::FieldValue::UnsignedInt(seat_id),
+                    },
+                    Field {
+                        key: "node",
+                        value: rustos_log::FieldValue::UnsignedInt(u64::from(node_id)),
+                    },
+                ],
+            );
+        }
+        Ok(u64::from(node_id))
     }
 
     fn hw_remove_node(&self, caller: &CallerContext<'_>, node_id: u64) -> SyscallResult {
@@ -4636,7 +4671,34 @@ where
         // (the same change channel `hw_tree_wait` observes). The store enforces the ownership check (`node_id`'s parent
         // must be `parent_id`) and fails closed `NotFound` otherwise; a build
         // with no store wired fails closed `NotImplemented`. Returns `Ok(0)` once removed (the `Errno`-return ABI shape).
-        self.hw_tree.remove(parent_id, node_id).map(|()| 0)
+        let removed = self.hw_tree.remove(parent_id, node_id)?;
+
+        // Any display node that just left the tree — the named child or a
+        // transitive descendant — takes its seat with it, through the same
+        // discovery path that created it: unplugging a display destroys its
+        // seat with no reboot, and every lease and present handle on the
+        // dead seat fails closed from here on (`plans/DISPLAY.md` D6). Each
+        // destruction is audited with the seat and node ids.
+        for vanished in removed {
+            if let Some(seat_id) = self.seat_registry.detach_display(vanished) {
+                crate::audit::emit(
+                    self.audit,
+                    rustos_log::Level::Warn,
+                    AuditEvent::SeatDestroyed,
+                    &[
+                        Field {
+                            key: "seat",
+                            value: rustos_log::FieldValue::UnsignedInt(seat_id),
+                        },
+                        Field {
+                            key: "node",
+                            value: rustos_log::FieldValue::UnsignedInt(u64::from(vanished)),
+                        },
+                    ],
+                );
+            }
+        }
+        Ok(0)
     }
 
     fn msi_alloc(&self, caller: &CallerContext<'_>, out: u64, out_len: usize) -> SyscallResult {
@@ -6436,6 +6498,7 @@ mod tests {
     use alloc::boxed::Box;
     use alloc::sync::Arc;
     use rustos_abi::input::{KeyValue, Modifiers};
+    use rustos_abi::seat::SEAT_PRIMARY;
     use rustos_abi::{CapabilityId, DescriptorTable, Errno, STDIN, STDOUT};
     use rustos_caps::CapabilitySet;
     use rustos_kernel_ipc::{CallEndpoint, CallEndpointLimits, Port, RecvCall};
@@ -11825,7 +11888,7 @@ mod tests {
         .with_seat_registry(seat);
 
         assert_eq!(
-            h.key_inject(&ctx, 0x1000, KeyInput::WIRE_LEN),
+            h.key_inject(&ctx, SEAT_PRIMARY, 0x1000, KeyInput::WIRE_LEN),
             Ok(KeyInput::WIRE_LEN as u64)
         );
         // The encoded byte is now drainable from the text sink.
@@ -11874,7 +11937,7 @@ mod tests {
 
         let id = AuditEvent::InputDelivered.id().0;
         assert_eq!(
-            h.key_inject(&ctx, 0x1000, KeyInput::WIRE_LEN),
+            h.key_inject(&ctx, SEAT_PRIMARY, 0x1000, KeyInput::WIRE_LEN),
             Ok(KeyInput::WIRE_LEN as u64)
         );
         let snapshot = sink.snapshot();
@@ -11894,7 +11957,7 @@ mod tests {
         // A second successful inject emits no further witness — never one
         // per keystroke.
         assert_eq!(
-            h.key_inject(&ctx, 0x1000, KeyInput::WIRE_LEN),
+            h.key_inject(&ctx, SEAT_PRIMARY, 0x1000, KeyInput::WIRE_LEN),
             Ok(KeyInput::WIRE_LEN as u64)
         );
         assert_eq!(
@@ -11934,12 +11997,12 @@ mod tests {
 
         // A short buffer is refused before the registry is consulted.
         assert_eq!(
-            h.key_inject(&ctx, 0x1000, KeyInput::WIRE_LEN - 1),
+            h.key_inject(&ctx, SEAT_PRIMARY, 0x1000, KeyInput::WIRE_LEN - 1),
             Err(Errno::BufferTooSmall)
         );
         // The NULL text sink accepts no injected input.
         assert_eq!(
-            h.key_inject(&ctx, 0x1000, KeyInput::WIRE_LEN),
+            h.key_inject(&ctx, SEAT_PRIMARY, 0x1000, KeyInput::WIRE_LEN),
             Err(Errno::NotImplemented)
         );
     }
@@ -11979,21 +12042,21 @@ mod tests {
 
         // A short read buffer is refused before the channel is touched.
         assert_eq!(
-            h.keyboard_read(&ctx, 0x1000, KeyInput::WIRE_LEN - 1),
+            h.keyboard_read(&ctx, SEAT_PRIMARY, 0x1000, KeyInput::WIRE_LEN - 1),
             Err(Errno::BufferTooSmall)
         );
         // An unowned seat's channel cannot be drained, even by a
         // `CAP_INPUT_READ` holder: the drain is owner-gated.
         assert_eq!(
-            h.keyboard_read(&ctx, 0x1000, KeyInput::WIRE_LEN),
+            h.keyboard_read(&ctx, SEAT_PRIMARY, 0x1000, KeyInput::WIRE_LEN),
             Err(Errno::SeatNotOwner)
         );
 
         // The acquire returns the minted lease generation (the first grant
         // on a fresh seat is generation 1).
-        assert_eq!(h.display_acquire(&ctx), Ok(1));
+        assert_eq!(h.display_acquire(&ctx, SEAT_PRIMARY), Ok(1));
         assert_eq!(
-            h.key_inject(&ctx, 0x1000, KeyInput::WIRE_LEN),
+            h.key_inject(&ctx, SEAT_PRIMARY, 0x1000, KeyInput::WIRE_LEN),
             Ok(KeyInput::WIRE_LEN as u64)
         );
         // The record routed to the desktop channel, not the text sink.
@@ -12001,17 +12064,20 @@ mod tests {
         assert_eq!(crate::console::ConsoleRead::read(queue, &mut text), Ok(0));
         // `keyboard_read` writes the whole record back into the buffer.
         assert_eq!(
-            h.keyboard_read(&ctx, 0x1000, KeyInput::WIRE_LEN),
+            h.keyboard_read(&ctx, SEAT_PRIMARY, 0x1000, KeyInput::WIRE_LEN),
             Ok(KeyInput::WIRE_LEN as u64)
         );
         // The channel is now drained.
-        assert_eq!(h.keyboard_read(&ctx, 0x1000, KeyInput::WIRE_LEN), Ok(0));
+        assert_eq!(
+            h.keyboard_read(&ctx, SEAT_PRIMARY, 0x1000, KeyInput::WIRE_LEN),
+            Ok(0)
+        );
 
         // Releasing returns input to the text console: the next press
         // routes to the text sink (the buffer still holds the 'z' record).
-        assert_eq!(h.display_release(&ctx), Ok(0));
+        assert_eq!(h.display_release(&ctx, SEAT_PRIMARY), Ok(0));
         assert_eq!(
-            h.key_inject(&ctx, 0x1000, KeyInput::WIRE_LEN),
+            h.key_inject(&ctx, SEAT_PRIMARY, 0x1000, KeyInput::WIRE_LEN),
             Ok(KeyInput::WIRE_LEN as u64)
         );
         let mut text = [0u8; 4];
@@ -12020,7 +12086,23 @@ mod tests {
 
         // The released seat is unowned: a second release by the former
         // owner is refused rather than silently succeeding.
-        assert_eq!(h.display_release(&ctx), Err(Errno::SeatNotOwner));
+        assert_eq!(
+            h.display_release(&ctx, SEAT_PRIMARY),
+            Err(Errno::SeatNotOwner)
+        );
+
+        // Every seat-addressed call fails closed for a seat that does not
+        // exist, before any capability-independent state is touched.
+        assert_eq!(h.display_acquire(&ctx, 42), Err(Errno::NotFound));
+        assert_eq!(h.display_release(&ctx, 42), Err(Errno::NotFound));
+        assert_eq!(
+            h.key_inject(&ctx, 42, 0x1000, KeyInput::WIRE_LEN),
+            Err(Errno::NotFound)
+        );
+        assert_eq!(
+            h.keyboard_read(&ctx, 42, 0x1000, KeyInput::WIRE_LEN),
+            Err(Errno::NotFound)
+        );
     }
 
     /// Seat ownership is an enforced kernel fact, not a capability side
@@ -12065,33 +12147,42 @@ mod tests {
 
         // The window manager takes the seat (lease generation 1); a repeat
         // claim is a surfaced caller bug, not a silent success.
-        assert_eq!(h.display_acquire(&wm), Ok(1));
-        assert_eq!(h.display_acquire(&wm), Err(Errno::AlreadyExists));
+        assert_eq!(h.display_acquire(&wm, SEAT_PRIMARY), Ok(1));
+        assert_eq!(
+            h.display_acquire(&wm, SEAT_PRIMARY),
+            Err(Errno::AlreadyExists)
+        );
 
         // A second task can neither steal nor release the held seat, and
         // the owner keeps it.
-        assert_eq!(h.display_acquire(&intruder), Err(Errno::SeatBusy));
-        assert_eq!(h.display_release(&intruder), Err(Errno::SeatNotOwner));
+        assert_eq!(
+            h.display_acquire(&intruder, SEAT_PRIMARY),
+            Err(Errno::SeatBusy)
+        );
+        assert_eq!(
+            h.display_release(&intruder, SEAT_PRIMARY),
+            Err(Errno::SeatNotOwner)
+        );
 
         // A record injected while the seat is held queues for the owner;
         // the intruder's drain is refused and takes nothing.
         assert_eq!(
-            h.key_inject(&wm, 0x1000, KeyInput::WIRE_LEN),
+            h.key_inject(&wm, SEAT_PRIMARY, 0x1000, KeyInput::WIRE_LEN),
             Ok(KeyInput::WIRE_LEN as u64)
         );
         assert_eq!(
-            h.keyboard_read(&intruder, 0x1000, KeyInput::WIRE_LEN),
+            h.keyboard_read(&intruder, SEAT_PRIMARY, 0x1000, KeyInput::WIRE_LEN),
             Err(Errno::SeatNotOwner)
         );
         assert_eq!(
-            h.keyboard_read(&wm, 0x1000, KeyInput::WIRE_LEN),
+            h.keyboard_read(&wm, SEAT_PRIMARY, 0x1000, KeyInput::WIRE_LEN),
             Ok(KeyInput::WIRE_LEN as u64)
         );
 
         // Only the owner's release frees the seat for the next claimant,
         // whose grant is a fresh lease generation.
-        assert_eq!(h.display_release(&wm), Ok(0));
-        assert_eq!(h.display_acquire(&intruder), Ok(2));
+        assert_eq!(h.display_release(&wm, SEAT_PRIMARY), Ok(0));
+        assert_eq!(h.display_acquire(&intruder, SEAT_PRIMARY), Ok(2));
     }
 
     /// `seat_switch` validates the seat id and the target console against
@@ -12139,12 +12230,14 @@ mod tests {
         // before any state changes; nothing is audited for a refusal.
         assert_eq!(h.seat_switch(&ctx, 1, 0), Err(Errno::NotFound));
         assert_eq!(h.seat_switch(&ctx, 0, 2), Err(Errno::NotFound));
-        assert_eq!(seat.record(0).foreground_console, 0);
+        let record = seat.record(SEAT_PRIMARY).expect("boot seat exists");
+        assert_eq!(record.foreground_console, 0);
         assert!(!sink.event_ids().contains(&AuditEvent::SeatSwitched.id().0));
 
         // A valid switch retargets the foreground and is audited.
         assert_eq!(h.seat_switch(&ctx, 0, 1), Ok(0));
-        assert_eq!(seat.record(0).foreground_console, 1);
+        let record = seat.record(SEAT_PRIMARY).expect("boot seat exists");
+        assert_eq!(record.foreground_console, 1);
         assert!(sink.event_ids().contains(&AuditEvent::SeatSwitched.id().0));
     }
 
@@ -12189,9 +12282,9 @@ mod tests {
         assert_eq!(h.seat_revoke(&admin, 0), Err(Errno::SeatNotOwner));
 
         // The window manager holds the seat; the admin evicts it.
-        assert_eq!(h.display_acquire(&wm), Ok(1));
+        assert_eq!(h.display_acquire(&wm, SEAT_PRIMARY), Ok(1));
         assert_eq!(h.seat_revoke(&admin, 0), Ok(0));
-        assert_eq!(seat.owner(), None);
+        assert_eq!(seat.owner(SEAT_PRIMARY), None);
 
         // The eviction is audited and attributable: the record carries the
         // evicted owner's task id.
@@ -12213,22 +12306,29 @@ mod tests {
         // it once, and afterwards the task is a plain non-owner.
         let mut buf = [0u8; KeyInput::WIRE_LEN];
         assert_eq!(
-            seat.read_key(SeatOwner(2), &mut buf),
+            seat.read_key(SEAT_PRIMARY, SeatOwner(2), &mut buf),
             Err(Errno::SeatRevoked)
         );
-        assert_eq!(h.display_release(&wm), Err(Errno::SeatRevoked));
-        assert_eq!(h.display_release(&wm), Err(Errno::SeatNotOwner));
+        assert_eq!(
+            h.display_release(&wm, SEAT_PRIMARY),
+            Err(Errno::SeatRevoked)
+        );
+        assert_eq!(
+            h.display_release(&wm, SEAT_PRIMARY),
+            Err(Errno::SeatNotOwner)
+        );
 
         // The seat is acquirable again after the revoke, under a fresh
         // lease generation the stale pre-revoke handle can never match.
-        assert_eq!(h.display_acquire(&wm), Ok(2));
+        assert_eq!(h.display_acquire(&wm, SEAT_PRIMARY), Ok(2));
     }
 
-    /// The `Seats` introspection domain reports the live seat: id, owner,
-    /// lease generation, and foreground console — and pages with the empty
-    /// terminator past the single seat (`plans/DISPLAY.md` D3).
+    /// The `Seats` introspection domain reports every live seat — id,
+    /// owner, lease generation, and foreground console — paging by whole
+    /// record (boot seat first, then discovery-created seats) with the
+    /// empty terminator past the end (`plans/DISPLAY.md` D3, D6).
     #[test]
-    fn sysinfo_introspect_seats_reports_the_live_seat() {
+    fn sysinfo_introspect_seats_reports_the_live_seats() {
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -12253,8 +12353,10 @@ mod tests {
         let seat: &'static SeatRegistry = Box::leak(Box::new(SeatRegistry::new(
             &crate::console::NULL_CONSOLE_INPUT,
         )));
-        seat.acquire(SeatOwner(7))
+        seat.acquire(SEAT_PRIMARY, SeatOwner(7))
             .expect("fresh seat is acquirable");
+        // A discovery-created seat pages after the boot seat.
+        let hotplug_seat = seat.attach_display(5);
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -12273,14 +12375,14 @@ mod tests {
             Err(Errno::BufferTooSmall)
         );
 
-        // Offset 0 returns the single live record.
+        // Offset 0 returns both live records, boot seat first.
         assert_eq!(
             h.sysinfo_introspect(&ctx, IntrospectDomain::Seats.as_u32(), 0, 0x1000, 4096),
-            Ok(SeatRecord::WIRE_LEN as u64)
+            Ok(2 * SeatRecord::WIRE_LEN as u64)
         );
         let delivered = h
             .with_caller_aspace(&ctx, |space, physmap| {
-                let mut buf = [0u8; SeatRecord::WIRE_LEN];
+                let mut buf = [0u8; 2 * SeatRecord::WIRE_LEN];
                 copy_in(space, physmap, VirtAddr::new(0x1000), &mut buf).expect("readable");
                 buf
             })
@@ -12290,10 +12392,19 @@ mod tests {
         assert_eq!(record.owner(), Some(7));
         assert_eq!(record.generation, 1);
         assert_eq!(record.foreground_console, 0);
+        let second =
+            SeatRecord::from_bytes(&delivered[SeatRecord::WIRE_LEN..]).expect("valid record");
+        assert_eq!(second.seat_id, hotplug_seat);
+        assert!(!second.owned());
 
-        // Any later offset is the empty paging terminator, never an error.
+        // A later offset pages the tail; past the end is the empty paging
+        // terminator, never an error.
         assert_eq!(
             h.sysinfo_introspect(&ctx, IntrospectDomain::Seats.as_u32(), 1, 0x1000, 4096),
+            Ok(SeatRecord::WIRE_LEN as u64)
+        );
+        assert_eq!(
+            h.sysinfo_introspect(&ctx, IntrospectDomain::Seats.as_u32(), 2, 0x1000, 4096),
             Ok(0)
         );
     }
@@ -15820,15 +15931,16 @@ mod tests {
             self.published.write().push((parent_id, node));
             Ok(id)
         }
-        fn remove(&self, parent_id: u32, node_id: u32) -> Result<(), Errno> {
+        fn remove(&self, parent_id: u32, node_id: u32) -> Result<alloc::vec::Vec<u32>, Errno> {
             // Model the store's fail-closed ownership gate: a node listed as
             // unremovable (unknown / not owned by the caller) is `NotFound`
-            // and is never recorded as removed.
+            // and is never recorded as removed. A successful removal reports
+            // the single removed id, as the real store reports the subtree.
             if self.unremovable.read().contains(&node_id) {
                 return Err(Errno::NotFound);
             }
             self.removed.write().push((parent_id, node_id));
-            Ok(())
+            Ok(alloc::vec![node_id])
         }
     }
 
@@ -16588,6 +16700,105 @@ mod tests {
         // node (9) as the parent; the store assigns the final id/parent.
         assert_eq!(published[0].0, 9, "parented under the emitter's own node");
         assert_eq!(published[0].1, node, "the exact node reached the store");
+        // An input-class publish is not a display: no seat was minted and
+        // nothing seat-related was audited.
+        assert!(!sink.event_ids().contains(&AuditEvent::SeatCreated.id().0));
+    }
+
+    /// A display-class node published into the live tree mints an
+    /// independent seat through the one discovery path, and removing the
+    /// node destroys it again — hotplug with no reboot (`plans/DISPLAY.md`
+    /// D6). Both topology changes are audited with the seat and node ids,
+    /// and every operation naming the dead seat — including the still-held
+    /// lease — fails closed after the removal.
+    #[test]
+    fn hotplug_display_node_creates_and_destroys_its_seat() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let mut node = rustos_abi::HwNode::new(0, 2, rustos_abi::HwDeviceClass::Display);
+        node.push_match_key(rustos_abi::HwMatchKey::usb(0x1234, 0x5678, 0x03_01_01))
+            .expect("match key fits");
+        node.push_resource(rustos_abi::HwResource::mmio(0xFE98_0000, 0x4000))
+            .expect("resource fits");
+        let bytes = node.to_le_bytes();
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &bytes);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        aspaces.write().mint_grant(
+            SecTaskId(2),
+            rustos_abi::HwResource::mmio(0xFE98_0000, 0x1_0000),
+        );
+        aspaces.write().set_loaded_node(SecTaskId(2), 9);
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let wm_caps = make_caps_record(7, &[], sink);
+        let wm = CallerContext {
+            task_id: SecTaskId(7),
+            caps: &wm_caps,
+        };
+        let source: &'static StaticHwTree =
+            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+        let seat: &'static SeatRegistry = Box::leak(Box::new(SeatRegistry::new(
+            &crate::console::NULL_CONSOLE_INPUT,
+        )));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_hw_tree(source)
+        .with_seat_registry(seat);
+
+        // Publishing the display node (store-assigned id 100) mints seat 1
+        // through the discovery path, audited with both ids.
+        assert_eq!(
+            h.hw_emit_node(&ctx, 0x1000, rustos_abi::HwNode::WIRE_LEN),
+            Ok(100)
+        );
+        let created = sink
+            .snapshot()
+            .into_iter()
+            .find(|ev| ev.id == AuditEvent::SeatCreated.id())
+            .expect("seat-created audit record present");
+        assert!(created
+            .fields
+            .iter()
+            .any(|(key, value)| key == "seat" && value == "1"));
+        assert!(created
+            .fields
+            .iter()
+            .any(|(key, value)| key == "node" && value == "100"));
+        // The new seat is live, ownable, and independent of the boot seat.
+        assert_eq!(h.display_acquire(&wm, 1), Ok(1));
+        assert_eq!(seat.owner(SEAT_PRIMARY), None);
+
+        // Removing the node destroys the seat with no reboot: the audit
+        // names it, and every call naming the dead seat fails closed —
+        // including the still-held lease.
+        assert_eq!(h.hw_remove_node(&ctx, 100), Ok(0));
+        let destroyed = sink
+            .snapshot()
+            .into_iter()
+            .find(|ev| ev.id == AuditEvent::SeatDestroyed.id())
+            .expect("seat-destroyed audit record present");
+        assert!(destroyed
+            .fields
+            .iter()
+            .any(|(key, value)| key == "seat" && value == "1"));
+        assert_eq!(h.display_acquire(&wm, 1), Err(Errno::NotFound));
+        assert_eq!(h.display_release(&wm, 1), Err(Errno::NotFound));
+        assert_eq!(seat.record(1), None);
     }
 
     /// The central recursive-PCI(e) case: a bus driver

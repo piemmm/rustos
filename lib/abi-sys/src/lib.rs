@@ -478,67 +478,72 @@ pub extern "C" fn sys_stream_input_mode(fd: u32, mode: u32) -> i32 {
 }
 
 /// `key_inject`: inject one decoded keyboard key edge at `buf` (a
-/// `ros_key_input_t` record of `len` bytes) into the kernel input-focus
-/// arbiter (`SyscallNumber::KEY_INJECT`, `plans/PI.md`
+/// `ros_key_input_t` record of `len` bytes) for seat `seat` into the kernel
+/// input-focus arbiter (`SyscallNumber::KEY_INJECT`, `plans/PI.md`
 /// P11 — input follows the surface owner). Returns the number of bytes
 /// consumed, or a `ROS_E_*` code reinterpreted into the result.
 ///
 /// The producer-side call a keyboard-input driver issues after decoding a
-/// directly attached keyboard into a key edge. Gated kernel-side on
+/// directly attached keyboard into a key edge; `seat` names the seat the
+/// keyboard belongs to (`0` for the boot seat) and an unknown id is
+/// refused with `ROS_E_NOT_FOUND`. Gated kernel-side on
 /// `ROS_CAP_INPUT_INJECT`; the kernel validates the capability and the
 /// `(buf, len)` pair against the caller's address space before reading it, decodes the record fail-closed, and routes it by who
-/// currently holds input focus — the driver no longer chooses the encoding
+/// currently holds that seat — the driver no longer chooses the encoding
 /// or the destination.
 #[must_use]
 #[export_name = "ros_sys_key_inject"]
-pub extern "C" fn sys_key_inject(buf: *mut c_void, len: usize) -> u64 {
-    // SAFETY: see `sys_ipc_send`. The kernel validates `CAP_INPUT_INJECT`
-    // and the `(buf, len)` pair against the caller's address space before
-    // reading it.
-    unsafe { raw_syscall(NUM_KEY_INJECT, [ptr_arg(buf), len as u64, 0, 0, 0, 0]) }
+pub extern "C" fn sys_key_inject(seat: u64, buf: *mut c_void, len: usize) -> u64 {
+    // SAFETY: see `sys_ipc_send`. The kernel validates `CAP_INPUT_INJECT`,
+    // the seat id, and the `(buf, len)` pair against the caller's address
+    // space before reading it.
+    unsafe { raw_syscall(NUM_KEY_INJECT, [seat, ptr_arg(buf), len as u64, 0, 0, 0]) }
 }
 
-/// `display_acquire`: acquire ownership of the seat — the display with its
-/// keyboard — as an exclusive, owner-tracked lease
+/// `display_acquire`: acquire ownership of seat `seat` — one display with
+/// its keyboard — as an exclusive, owner-tracked lease
 /// (`SyscallNumber::DISPLAY_ACQUIRE`, `plans/DISPLAY.md`). Returns the
 /// minted lease's generation (`>= 1`) when non-negative, else a negative
 /// `ROS_E_*` code.
 ///
-/// The compositing window manager calls this when it takes over the screen:
-/// the kernel records the calling task as the seat owner, so injected key
-/// edges are delivered as records the owner drains with
-/// [`sys_keyboard_read`], and the returned generation is the client's
+/// The compositing window manager calls this when it takes over a screen
+/// (`0` for the boot seat; further seats are minted per discovered display
+/// node): the kernel records the calling task as that seat's owner, so key
+/// edges injected for the seat are delivered as records the owner drains
+/// with [`sys_keyboard_read`], and the returned generation is the client's
 /// lease handle — the present right is derived from it, so a stale
 /// pre-revoke handle can never be mistaken for the live grant
-/// (`plans/DISPLAY.md` D4). A seat held by another task refuses the claim
-/// (`ROS_E_SEAT_BUSY` — ownership is never displaced) and a repeat acquire
+/// (`plans/DISPLAY.md` D4). An unknown seat id is refused with
+/// `ROS_E_NOT_FOUND`, a seat held by another task refuses the claim
+/// (`ROS_E_SEAT_BUSY` — ownership is never displaced), and a repeat acquire
 /// by the holder is refused (`ROS_E_ALREADY_EXISTS`). Gated kernel-side on
-/// `ROS_CAP_DISPLAY` (owning the seat is privileged).
+/// `ROS_CAP_DISPLAY` (owning a seat is privileged).
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 generation-or-errno encoding (generation >= 1, else -errno).
 #[export_name = "ros_sys_display_acquire"]
-pub extern "C" fn sys_display_acquire() -> i64 {
+pub extern "C" fn sys_display_acquire(seat: u64) -> i64 {
     // SAFETY: see `sys_yield`. The call carries no pointers; the kernel
     // validates `CAP_DISPLAY` before touching any state.
-    let ret = unsafe { raw_syscall(NUM_DISPLAY_ACQUIRE, NO_ARGS) };
+    let ret = unsafe { raw_syscall(NUM_DISPLAY_ACQUIRE, [seat, 0, 0, 0, 0, 0]) };
     ret as i64
 }
 
-/// `display_release`: release the seat and return keyboard input to
+/// `display_release`: release seat `seat` and return its keyboard input to
 /// the text console (`SyscallNumber::DISPLAY_RELEASE`, `plans/DISPLAY.md`). Returns a `ROS_E_*` code (`0` on
 /// success).
 ///
 /// The inverse of [`sys_display_acquire`]; gated kernel-side on
-/// `ROS_CAP_DISPLAY` and owner-checked: a caller that does not hold the
-/// seat is refused (`ROS_E_SEAT_NOT_OWNER`; `ROS_E_SEAT_REVOKED` once,
-/// after an administrative eviction) rather than flipping the seat out
-/// from under its owner.
+/// `ROS_CAP_DISPLAY` and owner-checked: an unknown seat id is refused with
+/// `ROS_E_NOT_FOUND` and a caller that does not hold the seat is refused
+/// (`ROS_E_SEAT_NOT_OWNER`; `ROS_E_SEAT_REVOKED` once, after an
+/// administrative eviction) rather than flipping the seat out from under
+/// its owner.
 #[must_use]
 #[export_name = "ros_sys_display_release"]
-pub extern "C" fn sys_display_release() -> i32 {
+pub extern "C" fn sys_display_release(seat: u64) -> i32 {
     // SAFETY: see `sys_yield`. The call carries no pointers; the kernel
     // validates `CAP_DISPLAY` before touching any state.
-    unsafe { ret_i32(raw_syscall(NUM_DISPLAY_RELEASE, NO_ARGS)) }
+    unsafe { ret_i32(raw_syscall(NUM_DISPLAY_RELEASE, [seat, 0, 0, 0, 0, 0])) }
 }
 
 /// `seat_switch`: switch a seat's foreground session — retarget which
@@ -548,9 +553,9 @@ pub extern "C" fn sys_display_release() -> i32 {
 ///
 /// The seat manager calls this to move the foreground across sessions —
 /// the `chvt` analogue. Gated kernel-side on `ROS_CAP_SEAT_ADMIN` (the
-/// seat-multiplexing authority); an unknown seat id (one seat today, id
-/// `0`) or console index is refused with `ROS_E_NOT_FOUND` before any
-/// state changes, and every switch is audit-logged.
+/// seat-multiplexing authority); an unknown seat id or console index is
+/// refused with `ROS_E_NOT_FOUND` before any state changes, and every
+/// switch is audit-logged.
 #[must_use]
 #[export_name = "ros_sys_seat_switch"]
 pub extern "C" fn sys_seat_switch(seat_id: u64, console: u32) -> i32 {
@@ -581,25 +586,26 @@ pub extern "C" fn sys_seat_revoke(seat_id: u64) -> i32 {
     unsafe { ret_i32(raw_syscall(NUM_SEAT_REVOKE, [seat_id, 0, 0, 0, 0, 0])) }
 }
 
-/// `keyboard_read`: read one decoded keyboard event from the kernel keyboard
-/// channel into `buf` (a buffer of `len` bytes, at least one
+/// `keyboard_read`: read one decoded keyboard event from seat `seat`'s
+/// keyboard channel into `buf` (a buffer of `len` bytes, at least one
 /// `ros_key_input_t` record) (`SyscallNumber::KEYBOARD_READ`, `plans/PI.md` P11). Returns the number of bytes written — one
 /// record, or `0` when the channel is momentarily drained — or a `ROS_E_*`
 /// code reinterpreted into the result.
 ///
 /// The task that owns the seat (the window manager) drains the
-/// records the kernel routed to it while it held the seat. Gated
-/// kernel-side on `ROS_CAP_INPUT_READ` **and** owner-gated against the
+/// records the kernel routed to it while it held the seat. An unknown seat
+/// id is refused with `ROS_E_NOT_FOUND`. Gated
+/// kernel-side on `ROS_CAP_INPUT_READ` **and** owner-gated against that
 /// seat's live lease (a non-owner is refused with `ROS_E_SEAT_NOT_OWNER`
 /// / `ROS_E_SEAT_REVOKED`); the kernel validates the capability and the
 /// `(buf, len)` pair against the caller's address space before writing it, and a buffer too small to hold a record fails closed.
 #[must_use]
 #[export_name = "ros_sys_keyboard_read"]
-pub extern "C" fn sys_keyboard_read(buf: *mut c_void, len: usize) -> u64 {
-    // SAFETY: see `sys_ipc_send`. The kernel validates `CAP_INPUT_READ` and
-    // the `(buf, len)` pair against the caller's address space before writing
-    // it.
-    unsafe { raw_syscall(NUM_KEYBOARD_READ, [ptr_arg(buf), len as u64, 0, 0, 0, 0]) }
+pub extern "C" fn sys_keyboard_read(seat: u64, buf: *mut c_void, len: usize) -> u64 {
+    // SAFETY: see `sys_ipc_send`. The kernel validates `CAP_INPUT_READ`,
+    // the seat id, and the `(buf, len)` pair against the caller's address
+    // space before writing it.
+    unsafe { raw_syscall(NUM_KEYBOARD_READ, [seat, ptr_arg(buf), len as u64, 0, 0, 0]) }
 }
 
 /// `resource_grants`: enumerate the device-resource grants the kernel minted
@@ -1769,10 +1775,10 @@ mod tests {
         (NUM_CONSOLE_COUNT, "console_count", 0),
         (NUM_STREAM_INPUT_MODE, "stream_input_mode", 2),
         (NUM_CONSOLE_FOREGROUND, "console_foreground", 2),
-        (NUM_KEY_INJECT, "key_inject", 2),
-        (NUM_DISPLAY_ACQUIRE, "display_acquire", 0),
-        (NUM_DISPLAY_RELEASE, "display_release", 0),
-        (NUM_KEYBOARD_READ, "keyboard_read", 2),
+        (NUM_KEY_INJECT, "key_inject", 3),
+        (NUM_DISPLAY_ACQUIRE, "display_acquire", 1),
+        (NUM_DISPLAY_RELEASE, "display_release", 1),
+        (NUM_KEYBOARD_READ, "keyboard_read", 3),
         (NUM_SEAT_SWITCH, "seat_switch", 2),
         (NUM_SEAT_REVOKE, "seat_revoke", 1),
         (NUM_MMIO_MAP, "mmio_map", 3),
@@ -2173,34 +2179,35 @@ mod tests {
     }
 
     #[test]
-    fn key_inject_marshals_pointer_and_len() {
+    fn key_inject_marshals_seat_pointer_and_len() {
         let mut record = [0u8; 8];
         let ptr = record.as_mut_ptr().cast::<c_void>();
         let len = record.len();
         // The kernel returns the number of bytes consumed.
         let (number, args) = capture(len as u64, || {
-            assert_eq!(sys_key_inject(ptr, len), len as u64);
+            assert_eq!(sys_key_inject(3, ptr, len), len as u64);
         });
         assert_eq!(number, NUM_KEY_INJECT);
-        assert_eq!(args[0], ptr as usize as u64);
-        assert_eq!(args[1], len as u64);
-        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+        assert_eq!(args[0], 3);
+        assert_eq!(args[1], ptr as usize as u64);
+        assert_eq!(args[2], len as u64);
+        assert_eq!(&args[3..], &[0, 0, 0]);
     }
 
     #[test]
-    fn display_acquire_and_release_marshal_no_arguments() {
+    fn display_acquire_and_release_marshal_the_seat_id() {
         // A successful acquire returns the minted lease generation.
         let (number, args) = capture(1, || {
-            assert_eq!(sys_display_acquire(), 1);
+            assert_eq!(sys_display_acquire(3), 1);
         });
         assert_eq!(number, NUM_DISPLAY_ACQUIRE);
-        assert_eq!(args, NO_ARGS);
+        assert_eq!(args, [3, 0, 0, 0, 0, 0]);
 
         let (number, args) = capture(0, || {
-            assert_eq!(sys_display_release(), 0);
+            assert_eq!(sys_display_release(3), 0);
         });
         assert_eq!(number, NUM_DISPLAY_RELEASE);
-        assert_eq!(args, NO_ARGS);
+        assert_eq!(args, [3, 0, 0, 0, 0, 0]);
     }
 
     #[test]
@@ -2219,18 +2226,19 @@ mod tests {
     }
 
     #[test]
-    fn keyboard_read_marshals_pointer_and_len() {
+    fn keyboard_read_marshals_seat_pointer_and_len() {
         let mut buf = [0u8; 8];
         let ptr = buf.as_mut_ptr().cast::<c_void>();
         let len = buf.len();
         // The kernel returns the number of bytes written (one record).
         let (number, args) = capture(len as u64, || {
-            assert_eq!(sys_keyboard_read(ptr, len), len as u64);
+            assert_eq!(sys_keyboard_read(3, ptr, len), len as u64);
         });
         assert_eq!(number, NUM_KEYBOARD_READ);
-        assert_eq!(args[0], ptr as usize as u64);
-        assert_eq!(args[1], len as u64);
-        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+        assert_eq!(args[0], 3);
+        assert_eq!(args[1], ptr as usize as u64);
+        assert_eq!(args[2], len as u64);
+        assert_eq!(&args[3..], &[0, 0, 0]);
     }
 
     #[test]

@@ -188,7 +188,7 @@ mod kernel {
             HW_TREE_SOURCE.publish(parent_id, node)
         }
 
-        fn remove(&self, parent_id: u32, node_id: u32) -> Result<(), Errno> {
+        fn remove(&self, parent_id: u32, node_id: u32) -> Result<Vec<u32>, Errno> {
             HW_TREE_SOURCE.remove(parent_id, node_id)
         }
     }

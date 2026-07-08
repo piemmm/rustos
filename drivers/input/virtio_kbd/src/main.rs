@@ -174,7 +174,9 @@ mod program {
         };
 
         // Pump the device forever, resolving each decoded key edge into a
-        // `KeyInput` record and injecting it into the input-focus arbiter.
+        // `KeyInput` record and injecting it for the boot seat
+        // (`SEAT_PRIMARY`) — the seat a directly attached keyboard belongs
+        // to — into the input-focus arbiter.
         // `poll` parks on the bound device interrupt while nothing is
         // pending (and acknowledges the device each cycle), so an idle
         // keyboard holds the task off the run queue — no yield loop. An
@@ -188,7 +190,7 @@ mod program {
                 Ok(drained) => {
                     for event in &events[..drained] {
                         if let Some(record) = console.feed(*event) {
-                            let _ = rustos_rt::key_inject(&record);
+                            let _ = rustos_rt::key_inject(rustos_abi::seat::SEAT_PRIMARY, &record);
                         }
                     }
                 }

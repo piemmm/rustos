@@ -310,7 +310,11 @@ impl SyscallNumber {
     /// arbiter (`plans/PI.md` P11 — input follows the
     /// surface owner).
     ///
-    /// Arguments: `buf: *const u8` (one [`crate::input::KeyInput`] record)
+    /// Arguments: `seat: u64` (the seat the edge belongs to — the seat
+    /// whose keyboard produced it, the boot seat `0` for a directly
+    /// attached keyboard; an unknown id fails closed with
+    /// [`crate::Errno::NotFound`]), `buf: *const u8` (one
+    /// [`crate::input::KeyInput`] record)
     /// and `len: usize` (its length, [`crate::input::KeyInput::WIRE_LEN`]).
     /// Returns the number of bytes consumed, or a negative error code. The
     /// keyboard-input driver that decoded a directly attached keyboard
@@ -318,7 +322,7 @@ impl SyscallNumber {
     /// released [`crate::input::KeyValue`] plus the held
     /// [`crate::input::Modifiers`] — and the kernel arbiter decides both
     /// the **encoding** and the **destination** by who currently holds
-    /// input focus (`plans/PI.md` P11): with the text console foreground it
+    /// that seat (`plans/PI.md` P11): with the text console foreground it
     /// encodes the press to its console (tty) bytes through the shared
     /// `lib/keymap` map and enqueues them on the focused console's input
     /// queue (drained by a [`SyscallNumber::STREAM_READ`]); with the
@@ -330,15 +334,18 @@ impl SyscallNumber {
     /// stream is privileged, never ambient. A malformed
     /// record is refused fail-closed.
     pub const KEY_INJECT: Self = Self(22);
-    /// Acquire ownership of the display and claim keyboard input focus
-    /// (`plans/PI.md` P11 — input follows the
+    /// Acquire ownership of a seat — one display with its keyboard — and
+    /// claim its input focus (`plans/PI.md` P11 — input follows the
     /// surface owner).
     ///
-    /// No arguments. Returns an error code (`Ok(0)` on success). The
-    /// compositing window manager calls this when it takes over the
-    /// screen: the kernel records the **kernel-attested caller** as the
-    /// seat owner, and subsequently
-    /// injected key edges ([`SyscallNumber::KEY_INJECT`]) are delivered as
+    /// Argument: `seat: u64` (the seat to acquire; the boot seat is `0`
+    /// and every further seat is minted per discovered display node — an
+    /// unknown id fails closed with [`crate::Errno::NotFound`]). Returns
+    /// the minted lease's generation (`>= 1`) or a negative error code.
+    /// The compositing window manager calls this when it takes over a
+    /// screen: the kernel records the **kernel-attested caller** as that
+    /// seat's owner, and key edges subsequently
+    /// injected for the seat ([`SyscallNumber::KEY_INJECT`]) are delivered as
     /// [`crate::input::KeyInput`] records the owner drains with
     /// [`SyscallNumber::KEYBOARD_READ`] — the same keyboard stream now
     /// following the new surface owner automatically (the desktop analogue
@@ -349,13 +356,15 @@ impl SyscallNumber {
     /// [`crate::CapabilityId::DISPLAY`]: owning the seat is privileged,
     /// never ambient (`plans/DISPLAY.md`).
     pub const DISPLAY_ACQUIRE: Self = Self(23);
-    /// Release the display and return keyboard input focus to the text
+    /// Release a seat and return its keyboard input focus to the text
     /// console (`plans/PI.md` P11).
     ///
-    /// No arguments. Returns an error code (`Ok(0)` on success). The
+    /// Argument: `seat: u64` (the seat to release; an unknown id fails
+    /// closed with [`crate::Errno::NotFound`]). Returns an error code
+    /// (`Ok(0)` on success). The
     /// inverse of [`SyscallNumber::DISPLAY_ACQUIRE`]: the seat owner
     /// calls it when it relinquishes the screen, and the kernel returns
-    /// the keyboard to the text console so a login/shell
+    /// the seat's keyboard to the text console so a login/shell
     /// once again receives it. The release is owner-checked: a caller
     /// that does not hold the seat is refused with
     /// [`crate::Errno::SeatNotOwner`] (or [`crate::Errno::SeatRevoked`]
@@ -363,11 +372,13 @@ impl SyscallNumber {
     /// back" switch. Gated by [`crate::CapabilityId::DISPLAY`]
     /// (`plans/DISPLAY.md`).
     pub const DISPLAY_RELEASE: Self = Self(24);
-    /// Read one decoded keyboard event from the kernel keyboard channel
+    /// Read one decoded keyboard event from a seat's keyboard channel
     /// (`plans/PI.md` P11 — keyboard input for the
     /// desktop).
     ///
-    /// Arguments: `buf: *mut u8` (a buffer of at least
+    /// Arguments: `seat: u64` (the seat whose channel is drained; an
+    /// unknown id fails closed with [`crate::Errno::NotFound`]),
+    /// `buf: *mut u8` (a buffer of at least
     /// [`crate::input::KeyInput::WIRE_LEN`] bytes) and `len: usize` (its
     /// length). Returns the number of bytes written — one
     /// [`crate::input::KeyInput`] record — or `0` when the channel is
@@ -1241,8 +1252,8 @@ impl SyscallNumber {
     /// unowned seat's input drains to (`plans/DISPLAY.md` D3, the
     /// `chvt`/`VT_ACTIVATE` analogue).
     ///
-    /// Arguments: `seat_id: u64` (the seat to retarget; the kernel hosts one
-    /// seat today, id `0`) and `console: u32` (the index of the installed
+    /// Arguments: `seat_id: u64` (the seat to retarget) and `console: u32`
+    /// (the index of the installed
     /// text console that becomes the seat's foreground). Returns `0` or a
     /// negative [`Errno`]: an unknown seat or console index fails closed
     /// with [`Errno::NotFound`] before any state changes, so a typo can
@@ -1259,8 +1270,8 @@ impl SyscallNumber {
     /// switched-away owner (`plans/DISPLAY.md` D3, the DRM
     /// `DROP_MASTER`-by-an-administrator analogue).
     ///
-    /// Argument: `seat_id: u64` (the seat whose lease is revoked; the kernel
-    /// hosts one seat today, id `0`). Returns `0` or a negative [`Errno`]:
+    /// Argument: `seat_id: u64` (the seat whose lease is revoked).
+    /// Returns `0` or a negative [`Errno`]:
     /// an unknown seat fails closed with [`Errno::NotFound`], and revoking
     /// an unowned seat refuses with [`Errno::SeatNotOwner`] (there is no
     /// lease to revoke) rather than reporting a success that changed

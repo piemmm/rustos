@@ -1409,7 +1409,8 @@ pub const SEAT_FLAG_OWNED: u32 = 1 << 0;
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
 pub struct SeatRecord {
-    /// The seat this record describes (one seat today, id 0).
+    /// The seat this record describes (the boot seat is id 0; further
+    /// seats are minted per discovered display node).
     pub seat_id: u64,
     /// The task holding the seat's lease; valid only when
     /// [`SEAT_FLAG_OWNED`] is set, zero otherwise.

@@ -592,11 +592,14 @@ pub const SYSCALLS: &[SyscallSpec] = &[
     SyscallSpec {
         number: SyscallNumber::KEY_INJECT,
         name: "key_inject",
-        arg_count: 2,
+        arg_count: 3,
         args: [
+            // The seat the decoded key edge belongs to (the seat whose
+            // keyboard produced it), then the encoded record. An unknown
+            // seat id fails closed with `NotFound`.
+            AbiType::U64,
             AbiType::UserPtr,
             AbiType::Len,
-            AbiType::Unit,
             AbiType::Unit,
             AbiType::Unit,
             AbiType::Unit,
@@ -616,8 +619,19 @@ pub const SYSCALLS: &[SyscallSpec] = &[
     SyscallSpec {
         number: SyscallNumber::DISPLAY_ACQUIRE,
         name: "display_acquire",
-        arg_count: 0,
-        args: [AbiType::Unit; SYSCALL_MAX_ARGS],
+        arg_count: 1,
+        args: [
+            // The seat to acquire. Seat 0 is the boot seat; each further
+            // discovered display node mints its own seat (`SEAT_LIST`
+            // enumerates them). An unknown seat id fails closed with
+            // `NotFound`.
+            AbiType::U64,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
         // `U64` for the value-or-`-errno` register convention: a
         // successful acquire returns the minted lease's generation
         // (>= 1), the handle the present right is later derived from
@@ -638,8 +652,17 @@ pub const SYSCALLS: &[SyscallSpec] = &[
     SyscallSpec {
         number: SyscallNumber::DISPLAY_RELEASE,
         name: "display_release",
-        arg_count: 0,
-        args: [AbiType::Unit; SYSCALL_MAX_ARGS],
+        arg_count: 1,
+        args: [
+            // The seat to release; only its recorded owner may. An unknown
+            // seat id fails closed with `NotFound`.
+            AbiType::U64,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
         ret: AbiType::Errno,
         // The release half of `display_acquire`; same `CAP_DISPLAY` gate
         // (plus the kernel-side owner check — only the recorded owner may
@@ -651,11 +674,14 @@ pub const SYSCALLS: &[SyscallSpec] = &[
     SyscallSpec {
         number: SyscallNumber::KEYBOARD_READ,
         name: "keyboard_read",
-        arg_count: 2,
+        arg_count: 3,
         args: [
+            // The seat whose desktop keyboard channel is drained (only its
+            // owner may), then the record buffer. An unknown seat id fails
+            // closed with `NotFound`.
+            AbiType::U64,
             AbiType::UserPtr,
             AbiType::Len,
-            AbiType::Unit,
             AbiType::Unit,
             AbiType::Unit,
             AbiType::Unit,
@@ -1701,8 +1727,8 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         name: "seat_switch",
         arg_count: 2,
         args: [
-            // The seat to retarget (one seat today, id 0), then the index
-            // of the installed text console that becomes its foreground.
+            // The seat to retarget, then the index of the installed text
+            // console that becomes its foreground.
             AbiType::U64,
             AbiType::U32,
             AbiType::Unit,
@@ -1726,7 +1752,7 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         name: "seat_revoke",
         arg_count: 1,
         args: [
-            // The seat whose current lease is revoked (one seat today, id 0).
+            // The seat whose current lease is revoked.
             AbiType::U64,
             AbiType::Unit,
             AbiType::Unit,

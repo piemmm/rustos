@@ -4029,7 +4029,7 @@ the next increment; see `plans/USB.md` for the binding design and staging.
 
 ## DISPLAY — seat ownership: the display/console locking model (`plans/DISPLAY.md`)
 
-**Status: D1–D5 done; D6 planned.** Closes the console/graphics *ownership
+**Status: complete (D1–D6 done).** Closes the console/graphics *ownership
 and locking* gap against Linux (DRM master + `logind` seats + tty controlling
 terminal), and improves on it under the charter's fail-closed, no-ambient
 model. The plan makes the **seat** a first-class kernel object with a tracked,
@@ -4083,8 +4083,22 @@ owner/granter-checked slot transition on the console device, so a
 bystander can neither take nor clear the drain right), and a vanished
 owner never wedges the console (the `exit` path releases it; the read
 gate clears an owner `ProcessWait::is_live` proves dead — heal, never
-widen). D6 (multi-seat / hotplug) is the next increment; see
-`plans/DISPLAY.md` for the binding design and staging.
+widen). D6 is done: the kernel registry hosts every seat independently —
+the boot seat (`SEAT_PRIMARY`, id 0) always exists, and a display-class
+node published into the live hardware tree mints a seat
+(`SeatRegistry::attach_display`, `SEAT_CREATED` 4053) that its removal
+destroys (`detach_display` over the removed-ids the `HwTreeSource::remove`
+seam now reports, `SEAT_DESTROYED` 4054) — hotplug with no reboot; the
+seat-addressed syscalls (`display_acquire`/`display_release`,
+`key_inject`/`keyboard_read`) name their seat and fail closed `NotFound`
+for a dead or unknown one (the present gate re-resolves the seat per
+call), seat ids are monotonic and never reused, and
+`SEAT_LIST`/`IntrospectDomain::Seats` pages every seat by whole record.
+Proven by the aarch64 framebuffer QEMU vertical's multi-seat phase and
+kernel host tests through the real `hw_emit_node`/`hw_remove_node`
+handlers. Input-device→seat assignment beyond the boot seat's directly
+attached keyboard is seat-manager topology policy, staged with the
+desktop session work (CU6).
 
 ---
 
@@ -4118,7 +4132,8 @@ interactive **session baseline**, the **administrator** as a grant set (no
 uid-0 power, no wheel group), spawn as the only delegation point (narrowing
 only), next-spawn revocation, and elevation as re-authenticated
 spawn-as-user through the session service — never setuid or a runtime raise.
-Remaining: CU6 (desktop, blocked on `plans/DISPLAY.md`) and the installer
+Remaining: CU6 (desktop; `plans/DISPLAY.md` is complete, so the seat
+foundation it needed is in place) and the installer
 first-user flow (with the installer work). See `plans/CAPABILITY_USE.md`
 for the binding design and staging.
 

@@ -92,7 +92,10 @@ pub trait HwTreeSource: Sync {
     /// Remove the child `node_id` — and its whole subtree — from the live
     /// tree, bumping the generation so every parked `hw_tree_wait` caller
     /// (the device manager) re-reads and unloads the driver bound to the
-    /// vanished node (hotplug removal).
+    /// vanished node (hotplug removal). Returns the ids of **every** node
+    /// removed — the named child plus all its transitive descendants — so
+    /// the caller can retire per-node kernel state precisely (the seat a
+    /// vanished display-class node owned, `plans/DISPLAY.md` D6).
     ///
     /// This is the store side of the `hw_remove_node` syscall and the exact
     /// mirror of [`Self::publish`]: the handler in [`crate::syscalls`] has
@@ -115,7 +118,7 @@ pub trait HwTreeSource: Sync {
     /// * [`Errno::NotFound`] if no live node has id `node_id`, or its parent
     ///   is not `parent_id` (the caller does not own it) — fail closed,
     ///   never a hint that distinguishes the two.
-    fn remove(&self, parent_id: u32, node_id: u32) -> Result<(), Errno>;
+    fn remove(&self, parent_id: u32, node_id: u32) -> Result<Vec<u32>, Errno>;
 }
 
 /// The hardware-tree source installed before any real store is wired.
@@ -138,7 +141,7 @@ impl HwTreeSource for NullHwTreeSource {
         Err(Errno::NotImplemented)
     }
 
-    fn remove(&self, _parent_id: u32, _node_id: u32) -> Result<(), Errno> {
+    fn remove(&self, _parent_id: u32, _node_id: u32) -> Result<Vec<u32>, Errno> {
         Err(Errno::NotImplemented)
     }
 }

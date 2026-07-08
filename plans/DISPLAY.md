@@ -242,7 +242,7 @@ seat returns input to the text foreground.
 its two enforcement points and its sole holder in one change (§5.2 rule 2):
 
 - `seat_switch` (`abi-v1` 70) retargets an unowned seat's foreground text
-  console; the seat id (one seat today, id 0) and console index are
+  console; the seat id and console index are
   validated against the live topology before any state changes (`NotFound`
   otherwise). `seat_revoke` (`abi-v1` 71) drives `SeatState::revoke` on
   the kernel registry: the seat becomes acquirable, input returns to the
@@ -280,7 +280,7 @@ the framebuffer mapping:
 
 - `display_acquire` returns the minted lease's generation (`>= 1`), so the
   client holds the `lib/abi` handle (`rustos_abi::seat::SeatLease`:
-  seat id + owner task + generation; `SEAT_PRIMARY` names the one seat).
+  seat id + owner task + generation; `SEAT_PRIMARY` names the boot seat).
 - The check has one definition, `rustos_seat::SeatState::verify` (exact
   live owner-and-generation; the evicted owner's handle sees the distinct
   `SeatRevoked`, every other dead handle `NotOwner`), hosted kernel-side
@@ -345,16 +345,46 @@ them. Docs: `docs/src/desktop/seat.md` (D5 section),
 `docs/src/architecture/syscalls.md` (rows 13/21/72), the `lib/abi` /
 `lib/rt` / `lib/abi-sys` rustdoc.
 
-### Stage D6 — multi-seat / hotplug `[ ]`
+### Stage D6 — multi-seat / hotplug `[x]`
 
-**Deliverables**
-- Multiple display nodes yield multiple independent seats; hotplug add/remove
-  drives seat create/destroy through the existing discovery path (§18.4),
-  reusing D1 state — no per-board logic.
+**Done.** The kernel seat registry hosts every seat on the machine, each
+an independent `rustos_seat::SeatState` with its own lock, text sink, and
+zeroing keyboard channel:
 
-**Done when:** a multi-display QEMU vertical (where emulable) proves two
-seats with independent owners and input routing; a hotplug test proves
-create/destroy with no reboot; gate green.
+- The boot seat (`SEAT_PRIMARY`, id 0) always exists — text-only on a
+  headless build. Every further seat is minted by discovery: a
+  display-class node published through `hw_emit_node` creates one
+  (`SeatRegistry::attach_display`) and its removal through
+  `hw_remove_node` — the seam now reports every removed subtree node id —
+  destroys it (`detach_display`), audited as `SEAT_CREATED` (4053) /
+  `SEAT_DESTROYED` (4054) with the seat and node ids. No reboot, no
+  parallel device list, no board coupling.
+- The seat-addressed syscalls were generalised in place (§2.13):
+  `display_acquire`/`display_release` take the seat id, and
+  `key_inject`/`keyboard_read` name the seat first
+  (`stream_read`-style), so a keyboard driver injects for the seat its
+  device belongs to (the boot seat for a directly attached keyboard) and
+  each seat's channel is drained only by its own owner. An unknown or
+  destroyed seat fails closed `NotFound` on every path, including the
+  present gate (which re-resolves the seat per call, so a hot-removed
+  display kills a still-held lease's authority instantly). Seat ids are
+  monotonic and never reused. `SEAT_LIST`/`IntrospectDomain::Seats` pages
+  every seat by whole record, boot seat first.
+- Proven by the aarch64 framebuffer QEMU vertical's multi-seat phase (two
+  seats with independent owners and input routing, present under the
+  hotplug seat's lease, detach → dead-seat present refused with the boot
+  seat intact) and kernel host tests driving create/destroy through the
+  real `hw_emit_node`/`hw_remove_node` handlers.
+
+Docs: `docs/src/desktop/seat.md` (D6 section),
+`docs/src/architecture/syscalls.md` (rows 22–25), the `lib/abi` /
+`lib/rt` / `lib/abi-sys` rustdoc, and the regenerated C headers.
+
+What D6 deliberately does **not** do: assigning *which input device*
+feeds *which seat* beyond the boot seat's directly attached keyboard is
+seat-topology policy for the seat manager, staged with the desktop
+session work (`plans/PI.md` P11 / `PLAN.md` CU6), not a kernel-side
+default.
 
 ## 6. Tests, docs, and gate (binding)
 

@@ -191,6 +191,23 @@ pub enum AuditEvent {
     /// eviction is attributable; the evicted owner's next owner-gated call
     /// fails closed with the distinct `SeatRevoked` refusal.
     SeatLeaseRevoked,
+    /// A display-class hardware-tree node was published into the live tree
+    /// and the kernel minted an independent seat for it
+    /// (`plans/DISPLAY.md` D6 — multi-seat / hotplug).
+    ///
+    /// Emitted by the `hw_emit_node` syscall handler after the validated
+    /// publish. Carries the new seat id and the display node id — a new
+    /// input-routing destination coming into existence is a
+    /// security-relevant topology change.
+    SeatCreated,
+    /// A display-class hardware-tree node left the live tree and the
+    /// kernel destroyed its seat (`plans/DISPLAY.md` D6).
+    ///
+    /// Emitted by the `hw_remove_node` syscall handler after the validated
+    /// removal. Carries the destroyed seat id and the vanished node id;
+    /// every lease and handle on the dead seat fails closed from this
+    /// point on.
+    SeatDestroyed,
     /// The kernel CSPRNG output reserve was seeded from the platform
     /// entropy source ([`rustos_arch_api::PlatformEntropy`]).
     ///
@@ -256,6 +273,8 @@ impl AuditEvent {
             Self::InputDelivered => 4050,
             Self::SeatSwitched => 4051,
             Self::SeatLeaseRevoked => 4052,
+            Self::SeatCreated => 4053,
+            Self::SeatDestroyed => 4054,
             Self::EntropyReserveSeeded => 4060,
             Self::EntropyReserveUnseeded => 4061,
             Self::BootIdMinted => 4062,
@@ -291,6 +310,8 @@ impl AuditEvent {
             Self::InputDelivered => "first input delivered to focus arbiter",
             Self::SeatSwitched => "seat foreground switched",
             Self::SeatLeaseRevoked => "seat lease revoked",
+            Self::SeatCreated => "seat created for display node",
+            Self::SeatDestroyed => "seat destroyed with display node",
             Self::EntropyReserveSeeded => "entropy reserve seeded",
             Self::EntropyReserveUnseeded => "entropy reserve unseeded",
             Self::BootIdMinted => "per-boot id minted",
@@ -341,6 +362,8 @@ mod tests {
             AuditEvent::InputDelivered,
             AuditEvent::SeatSwitched,
             AuditEvent::SeatLeaseRevoked,
+            AuditEvent::SeatCreated,
+            AuditEvent::SeatDestroyed,
             AuditEvent::EntropyReserveSeeded,
             AuditEvent::EntropyReserveUnseeded,
             AuditEvent::BootIdMinted,
@@ -379,6 +402,8 @@ mod tests {
             AuditEvent::InputDelivered.id().0,
             AuditEvent::SeatSwitched.id().0,
             AuditEvent::SeatLeaseRevoked.id().0,
+            AuditEvent::SeatCreated.id().0,
+            AuditEvent::SeatDestroyed.id().0,
             AuditEvent::EntropyReserveSeeded.id().0,
             AuditEvent::EntropyReserveUnseeded.id().0,
             AuditEvent::BootIdMinted.id().0,

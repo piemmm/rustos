@@ -256,8 +256,9 @@ mod program {
     /// kernel input-focus arbiter through the `key_inject` syscall.
     ///
     /// [`pump_once`] hands it one whole [`KeyInput`] record's wire bytes per
-    /// key edge; it decodes them fail-closed and injects the record. A
-    /// malformed record or a refused injection surfaces as
+    /// key edge; it decodes them fail-closed and injects the record for the
+    /// boot seat (`SEAT_PRIMARY`) — the seat a directly attached keyboard
+    /// belongs to. A malformed record or a refused injection surfaces as
     /// [`DriverError::DeviceFault`] (a non-fatal poll error), never silently
     /// dropping input.
     struct KeyInjectSink;
@@ -272,7 +273,7 @@ mod program {
                 "bytes_hex",
                 bytes.len() as u64,
             );
-            if rustos_rt::key_inject(&record) < 0 {
+            if rustos_rt::key_inject(rustos_abi::seat::SEAT_PRIMARY, &record) < 0 {
                 log_hex_event(
                     USB_KBD_INJECT,
                     Level::Warn,

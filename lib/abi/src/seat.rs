@@ -28,10 +28,14 @@ use crate::Errno;
 /// the service.
 pub const SEATMGR_ENDPOINT: u64 = 0x5354_1001;
 
-/// Seat id of the primary (and, until `plans/DISPLAY.md` D6 lands
-/// multi-seat, only) seat every Tier-1 image hosts. The `seat_switch` /
-/// `seat_revoke` syscalls validate a request's seat id against the live
-/// topology; today that topology is exactly this seat.
+/// Seat id of the **boot seat** every Tier-1 image hosts — the seat that
+/// always exists (a text-only seat on a headless build) and owns the
+/// directly attached keyboard. Every further seat is minted by hardware
+/// discovery, one per display-class node published into the live tree,
+/// with monotonic, never-reused ids (`plans/DISPLAY.md` D6); the
+/// seat-addressed syscalls validate a request's seat id against that live
+/// topology and fail closed with `NotFound` for a seat that does not (or
+/// no longer) exist.
 pub const SEAT_PRIMARY: u64 = 0;
 
 /// One granted seat hold, as the client-visible handle: which seat, the
@@ -48,7 +52,8 @@ pub const SEAT_PRIMARY: u64 = 0;
 /// screen.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct SeatLease {
-    /// The seat the lease was granted on ([`SEAT_PRIMARY`] today).
+    /// The seat the lease was granted on ([`SEAT_PRIMARY`], or a
+    /// discovery-minted seat id from `SEAT_LIST`).
     pub seat_id: u64,
     /// The kernel-attested task id the seat recorded as its owner.
     pub owner_task: u64,

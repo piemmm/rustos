@@ -142,8 +142,11 @@ impl HwTreeStore {
 
     /// Remove the child `node_id` — and its whole subtree — from the
     /// inventory, but **only** when its parent is exactly `parent_id`, then
-    /// bump the generation. Returns [`Errno::NotFound`] fail-closed if no live
-    /// node has that id, or if it exists but its parent is not `parent_id`.
+    /// bump the generation. Returns the ids of every removed node (the
+    /// named child plus all its transitive descendants) so the caller can
+    /// retire per-node kernel state precisely, or [`Errno::NotFound`]
+    /// fail-closed if no live node has that id, or if it exists but its
+    /// parent is not `parent_id`.
     ///
     /// This is the store side of the `hw_remove_node` syscall and the exact
     /// counterpart of [`Self::publish_child`]. The `parent_id` check is the
@@ -174,8 +177,8 @@ impl HwTreeStore {
     ///
     /// [`Errno::NotFound`] if no live node has id `node_id`, or its parent is
     /// not `parent_id` (fail closed).
-    pub fn remove_child(&self, parent_id: u32, node_id: u32) -> Result<(), Errno> {
-        {
+    pub fn remove_child(&self, parent_id: u32, node_id: u32) -> Result<Vec<u32>, Errno> {
+        let doomed = {
             let mut inner = self.inner.lock();
             // Ownership gate: the target must exist *and* be a direct child of
             // the caller's own node. The root sentinel is never a valid
@@ -209,11 +212,12 @@ impl HwTreeStore {
 
             inner.nodes.retain(|node| !doomed.contains(&node.id()));
             inner.generation += 1;
-        }
+            doomed
+        };
         // Wake parked `hw_tree_wait` callers on the change (see [`Self::seed`]);
         // done after the inner lock is dropped.
         rustos_kernel_core::hw_tree_wake();
-        Ok(())
+        Ok(doomed)
     }
 
     /// Bump the generation **without** changing the node set, waking every
@@ -362,7 +366,7 @@ impl HwTreeSource for HwTreeStoreSource {
         Ok(HW_TREE.publish_child(parent_id, node))
     }
 
-    fn remove(&self, parent_id: u32, node_id: u32) -> Result<(), Errno> {
+    fn remove(&self, parent_id: u32, node_id: u32) -> Result<Vec<u32>, Errno> {
         // Remove the child `node_id` (and its subtree) from the one
         // authoritative inventory, but only when its parent is `parent_id` —
         // the caller's own matched node, resolved kernel-side by the
@@ -372,7 +376,9 @@ impl HwTreeSource for HwTreeStoreSource {
         // `hw_tree_wait` caller so the device manager re-reads and unloads the
         // driver bound to the vanished node. It fails
         // closed `NotFound` for an unknown id or a node the caller does not
-        // own; the store only mutates the inventory.
+        // own; the store only mutates the inventory. The removed ids flow
+        // back so the handler can retire per-node kernel state (a vanished
+        // display node's seat).
         HW_TREE.remove_child(parent_id, node_id)
     }
 }
@@ -477,8 +483,9 @@ mod tests {
         assert_eq!(store.snapshot().len(), 4);
 
         // Removing child 3 (owned by bus 2) takes grandchild 4 with it, so a
-        // stale descendant never outlives its parent.
-        assert_eq!(store.remove_child(2, 3), Ok(()));
+        // stale descendant never outlives its parent — and both removed ids
+        // are reported so per-node kernel state can be retired.
+        assert_eq!(store.remove_child(2, 3), Ok(alloc::vec![3, 4]));
         let snap = store.snapshot();
         let ids: Vec<u32> = snap.iter().map(HwNode::id).collect();
         assert_eq!(ids, alloc::vec![1, 2], "only root and bus remain");
@@ -510,7 +517,7 @@ mod tests {
         let before = store.generation();
         // A successful removal advances the generation so a parked
         // `hw_tree_wait` caller wakes.
-        assert_eq!(store.remove_child(2, 3), Ok(()));
+        assert_eq!(store.remove_child(2, 3), Ok(alloc::vec![3]));
         assert_eq!(store.generation(), before + 1);
         // A fail-closed removal changes nothing, including the generation.
         assert_eq!(store.remove_child(2, 3), Err(Errno::NotFound));

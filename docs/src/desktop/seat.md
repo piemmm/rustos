@@ -50,31 +50,34 @@ reached, and the registry hosting it owns the synchronisation.
 ## What the kernel enforces (Stage D2)
 
 The kernel hosts this state machine in its seat registry
-(`rustos_kernel_core::seat::SeatRegistry`): one seat per running kernel
-today (multi-seat is Stage D6), holding the `SeatState` under the
-registry's own lock next to the two input sinks it routes between — the
-foreground text console's type-ahead queue and the bounded desktop
-keyboard channel (which zeroes each record as it is drained, so a typed
-secret never lingers).
+(`rustos_kernel_core::seat::SeatRegistry`): every seat on the machine,
+each holding its own `SeatState` under its own lock next to the two
+input sinks it routes between — the seat's foreground text console
+type-ahead queue and its bounded desktop keyboard channel (which zeroes
+each record as it is drained, so a typed secret never lingers). Every
+seat-addressed syscall names its seat and fails closed with
+`Errno::NotFound` for one that does not (or no longer) exist.
 
 - `display_acquire` (`abi-v1` 23, `CAP_DISPLAY`) records the
-  kernel-attested calling task as the seat owner and returns the minted
-  lease's generation (`>= 1`) — the client-visible handle the present
-  right is derived from (Stage D4 below). A seat held by another task
-  refuses the claim with `Errno::SeatBusy`; a repeat acquire by the
+  kernel-attested calling task as the named seat's owner and returns the
+  minted lease's generation (`>= 1`) — the client-visible handle the
+  present right is derived from (Stage D4 below). A seat held by another
+  task refuses the claim with `Errno::SeatBusy`; a repeat acquire by the
   holder is surfaced as `Errno::AlreadyExists`.
 - `display_release` (`abi-v1` 24, `CAP_DISPLAY`) is owner-checked: a
   caller that does not hold the seat is refused with
   `Errno::SeatNotOwner` (`Errno::SeatRevoked` once, after an
   administrative eviction) and the owner keeps the seat.
 - `keyboard_read` (`abi-v1` 25, `CAP_INPUT_READ`) is owner-gated through
-  `SeatState::access`: only the seat owner drains the desktop keyboard
-  channel, so a second capability holder can never siphon another
-  session's keystrokes.
-- Routing follows `SeatState::route`: a held seat's key edges go to the
-  owner's desktop channel, an unowned seat's to the foreground text
-  console — a released seat returns the keyboard to the text login
-  immediately.
+  `SeatState::access`: only the seat's owner drains its desktop keyboard
+  channel, so a second capability holder — even the owner of *another*
+  seat — can never siphon this session's keystrokes.
+- `key_inject` (`CAP_INPUT_INJECT`) carries the seat the decoded key
+  edge belongs to (the seat whose keyboard produced it; the boot seat
+  for a directly attached keyboard), and routing follows that seat's
+  `SeatState::route`: a held seat's key edges go to its owner's desktop
+  channel, an unowned seat's to its foreground text console — a released
+  seat returns the keyboard to the text login immediately.
 
 Both `display_*` calls are audited per call (a seat hand-over is the
 analogue of a foreground-tty switch), and every refusal is a typed
@@ -88,8 +91,8 @@ single new capability **`CAP_SEAT_ADMIN`** (id 33), enforced by two
 audited syscalls and held by exactly one service:
 
 - `seat_switch` (`abi-v1` 70, `CAP_SEAT_ADMIN`) retargets which installed
-  text console an unowned seat's input drains to. The seat id (one seat
-  today, id 0) and the console index are validated against the live
+  text console an unowned seat's input drains to. The seat id and the
+  console index are validated against the live
   topology **before** any state changes — an unknown either fails closed
   with `Errno::NotFound`, so a typo can never strand input on a console
   that does not exist. A held seat keeps routing to its owner until the
@@ -152,6 +155,43 @@ a real kernel seat registry: the owner presents, an administrative
 revoke evicts it, the evicted client's next present is refused (its last
 frame stays on scan-out), and the new foreground's fresh lease renders.
 
+## Multi-seat and hotplug (Stage D6)
+
+A machine with several displays is several **independent seats**, one
+uniform kernel object each — its own owner, lease generations, foreground
+console, input routing, and present gate — all reusing the one `lib/seat`
+state machine:
+
+- **The boot seat (id 0, `SEAT_PRIMARY`) always exists**, even headless,
+  where it is a text-only seat; its text sink is the console that owns
+  the directly attached keyboard. Every further seat is minted by
+  hardware discovery.
+- **Hotplug rides the one discovery path.** A display-class node
+  published into the live hardware tree (`hw_emit_node`) mints a seat
+  for it, and the node's removal (`hw_remove_node`, including as a
+  removed subtree descendant) destroys it — no reboot, no parallel
+  device list. Both topology changes are audited with the seat and node
+  ids (`SEAT_CREATED` 4053, `SEAT_DESTROYED` 4054).
+- **Seat ids are minted monotonically and never reused**, so a stale
+  lease, handle, or record can never alias a later seat — even the same
+  display replugged mints a fresh id.
+- **A destroyed seat fails closed everywhere, instantly.** Every call
+  naming the dead seat — acquire, release, inject, drain, switch, revoke
+  — refuses with `Errno::NotFound`, and a still-held lease's present
+  gate refuses the very next frame (the gate re-resolves the seat on
+  every call). The dead seat's keyboard channel is zeroed as it is
+  freed, so an undrained keystroke never outlives its seat.
+- **Independence is enforced, not assumed.** One seat's acquire, revoke,
+  or input never touches another's; each seat's channel is drained only
+  by its own owner (cross-seat drains are `SeatNotOwner`).
+
+The QEMU vertical's multi-seat phase proves two seats with independent
+owners and input routing on a real registry, presents under the hotplug
+seat's lease, then detaches the display and shows the dead seat's lease
+refused while the boot seat is untouched; kernel host tests drive the
+same lifecycle through the real `hw_emit_node`/`hw_remove_node`
+handlers.
+
 ## Per-console controlling owner (Stage D5)
 
 Text consoles get the controlling-terminal arbitration Linux builds from
@@ -204,9 +244,6 @@ a `/proc`-style file. The `SEAT_LIST` query (`sysinfo-v1` id 12, gated on
 owned/unowned flag — an unowned record carries no owner), the monotonic
 lease generation, and the foreground console. The kernel serves the
 underlying `IntrospectDomain::Seats` snapshot directly from its seat
-registry; the `sysinfod` broker scopes and audits the query, and
-`sysinfo seats` renders the table.
-
-## What is not yet wired
-
-Multi-seat/hotplug is Stage D6 of `plans/DISPLAY.md`.
+registry, paging by whole record — the boot seat first, then every
+discovery-created seat in creation order; the `sysinfod` broker scopes
+and audits the query, and `sysinfo seats` renders the table.

@@ -508,73 +508,79 @@ pub fn set_input_mode(mode: InputMode) -> i64 {
     ret as i64
 }
 
-/// Inject one decoded keyboard `record` into the kernel input-focus arbiter
-/// (`SyscallNumber::KEY_INJECT`, `plans/PI.md` P11 — input
-/// follows the surface owner), returning the raw signed register (the bytes
-/// consumed when non-negative, else `-errno`).
+/// Inject one decoded keyboard `record` for seat `seat` into the kernel
+/// input-focus arbiter (`SyscallNumber::KEY_INJECT`, `plans/PI.md` P11 —
+/// input follows the surface owner), returning the raw signed register (the
+/// bytes consumed when non-negative, else `-errno`).
 ///
 /// The producer-side call a keyboard-input driver issues after decoding a
-/// directly attached keyboard into a [`KeyInput`] key edge: the kernel
-/// validates `CAP_INPUT_INJECT` and the `(buf, len)` pair against the
-/// caller's address space, decodes the record fail-closed,
-/// and routes it by who holds input focus — a *press* encoded to the focused
-/// text console's tty bytes, or the whole record delivered to the desktop
-/// keyboard channel. The driver no longer chooses the encoding or the
-/// destination. A malformed record or an unwired arbiter
+/// directly attached keyboard into a [`KeyInput`] key edge: `seat` names
+/// the seat the keyboard belongs to (`SEAT_PRIMARY` for the boot seat's
+/// directly attached keyboard); the kernel validates `CAP_INPUT_INJECT`,
+/// the seat id (`NotFound` for an unknown seat), and the `(buf, len)` pair
+/// against the caller's address space, decodes the record fail-closed,
+/// and routes it by who holds that seat — a *press* encoded to the seat's
+/// foreground text console's tty bytes, or the whole record delivered to
+/// its desktop keyboard channel. The driver no longer chooses the encoding
+/// or the destination. A malformed record or an unwired arbiter
 /// fails closed with `-errno`; the wrapper surfaces the
 /// raw signed value so the caller decides how to react.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 count-or-errno encoding (count ≥ 0, else -errno).
-pub fn key_inject(record: &KeyInput) -> i64 {
+pub fn key_inject(seat: u64, record: &KeyInput) -> i64 {
     let bytes = record.to_le_bytes();
     let ptr = bytes.as_ptr() as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
-    // `CAP_INPUT_INJECT` and the `(buf, len)` pair against the caller's
-    // address space before reading it. `bytes` is a live
+    // `CAP_INPUT_INJECT`, the seat id, and the `(buf, len)` pair against
+    // the caller's address space before reading it. `bytes` is a live
     // stack array for the duration of the call, so the `(ptr, len)` pair
     // denotes readable memory.
-    let ret = unsafe { raw_syscall(NUM_KEY_INJECT, [ptr, bytes.len() as u64, 0, 0, 0, 0]) };
+    let ret = unsafe { raw_syscall(NUM_KEY_INJECT, [seat, ptr, bytes.len() as u64, 0, 0, 0]) };
     ret as i64
 }
 
-/// Acquire ownership of the seat — the display with its keyboard — as an
+/// Acquire ownership of seat `seat` — one display with its keyboard — as an
 /// exclusive, owner-tracked lease (`SyscallNumber::DISPLAY_ACQUIRE`,
 /// `plans/DISPLAY.md`), returning the minted lease's generation (`>= 1`)
 /// on success or `-errno`.
 ///
-/// The compositing window manager calls this when it takes over the screen:
-/// the kernel records the calling task as the seat owner, so subsequently
-/// injected key edges are delivered as [`KeyInput`] records the owner
-/// drains with [`keyboard_read`], and the returned generation is the
-/// client's lease handle — the display present right is derived from it
+/// The compositing window manager calls this when it takes over a screen
+/// (`SEAT_PRIMARY` for the boot seat; further seats are minted per
+/// discovered display node and enumerated through `SEAT_LIST`): the kernel
+/// records the calling task as that seat's owner, so key edges injected for
+/// the seat are delivered as [`KeyInput`] records the owner drains with
+/// [`keyboard_read`], and the returned generation is the client's lease
+/// handle — the display present right is derived from it
 /// (`plans/DISPLAY.md` D4), so a stale pre-revoke handle can never be
-/// mistaken for the live grant. A seat held by another task refuses the
-/// claim (`SeatBusy` — ownership is never displaced) and a repeat acquire
-/// by the holder is refused (`AlreadyExists`). Requires
-/// `CAP_DISPLAY` (owning the seat is privileged).
+/// mistaken for the live grant. An unknown seat id fails closed
+/// (`NotFound`), a seat held by another task refuses the claim (`SeatBusy`
+/// — ownership is never displaced), and a repeat acquire by the holder is
+/// refused (`AlreadyExists`). Requires `CAP_DISPLAY` (owning a seat is
+/// privileged).
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 generation-or-errno encoding (generation >= 1, else -errno).
-pub fn display_acquire() -> i64 {
+pub fn display_acquire(seat: u64) -> i64 {
     // SAFETY: `raw_syscall` is always safe to invoke; the call carries no
     // pointers and the kernel validates `CAP_DISPLAY` before touching state.
-    let ret = unsafe { raw_syscall(NUM_DISPLAY_ACQUIRE, [0, 0, 0, 0, 0, 0]) };
+    let ret = unsafe { raw_syscall(NUM_DISPLAY_ACQUIRE, [seat, 0, 0, 0, 0, 0]) };
     ret as i64
 }
 
-/// Release the seat and return keyboard input to the text console
+/// Release seat `seat` and return its keyboard input to the text console
 /// (`SyscallNumber::DISPLAY_RELEASE`,
 /// `plans/DISPLAY.md`), returning `0` on success or `-errno`.
 ///
 /// The inverse of [`display_acquire`]; requires `CAP_DISPLAY`. The release
-/// is owner-checked: a caller that does not hold the seat is refused
-/// (`SeatNotOwner`; `SeatRevoked` once, after an administrative eviction)
-/// rather than flipping the seat out from under its owner.
+/// is owner-checked: an unknown seat id fails closed (`NotFound`) and a
+/// caller that does not hold the seat is refused (`SeatNotOwner`;
+/// `SeatRevoked` once, after an administrative eviction) rather than
+/// flipping the seat out from under its owner.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0 on success, else -errno).
-pub fn display_release() -> i64 {
+pub fn display_release(seat: u64) -> i64 {
     // SAFETY: `raw_syscall` is always safe to invoke; the call carries no
     // pointers and the kernel validates `CAP_DISPLAY` before touching state.
-    let ret = unsafe { raw_syscall(NUM_DISPLAY_RELEASE, [0, 0, 0, 0, 0, 0]) };
+    let ret = unsafe { raw_syscall(NUM_DISPLAY_RELEASE, [seat, 0, 0, 0, 0, 0]) };
     ret as i64
 }
 
@@ -585,11 +591,10 @@ pub fn display_release() -> i64 {
 ///
 /// The seat manager (`seatmgr`) calls this to move the foreground across
 /// sessions — the `chvt` analogue. Requires `CAP_SEAT_ADMIN` (the
-/// seat-multiplexing authority); the kernel validates the seat id (one
-/// seat today, id `0`) and the console index against the installed
-/// topology and refuses an unknown either with `NotFound`, and every
-/// switch is audit-logged. A held seat keeps routing to its owner until
-/// the lease ends.
+/// seat-multiplexing authority); the kernel validates the seat id and the
+/// console index against the installed topology and refuses an unknown
+/// either with `NotFound`, and every switch is audit-logged. A held seat
+/// keeps routing to its owner until the lease ends.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0 on success, else -errno).
 pub fn seat_switch(seat_id: u64, console: u32) -> i64 {
@@ -620,7 +625,7 @@ pub fn seat_revoke(seat_id: u64) -> i64 {
     ret as i64
 }
 
-/// Read one decoded keyboard event from the kernel keyboard channel into
+/// Read one decoded keyboard event from seat `seat`'s keyboard channel into
 /// `buf` (`SyscallNumber::KEYBOARD_READ`, `plans/PI.md`
 /// P11), returning the raw signed register (the bytes written — one
 /// [`KeyInput`] record's [`KeyInput::WIRE_LEN`], or `0` when the channel is
@@ -628,22 +633,23 @@ pub fn seat_revoke(seat_id: u64) -> i64 {
 ///
 /// The task that owns the seat (the window manager) drains the
 /// records the kernel routed to it while it held the seat. The kernel
-/// validates `CAP_INPUT_READ`, owner-gates the drain against the seat's
-/// live lease (a non-owner is refused with `SeatNotOwner` /
+/// validates `CAP_INPUT_READ`, the seat id (`NotFound` for an unknown
+/// seat), owner-gates the drain against that seat's live lease (a
+/// non-owner is refused with `SeatNotOwner` /
 /// `SeatRevoked`), and validates the `(buf, len)` pair against the caller's
 /// address space; a `buf` shorter than
 /// [`KeyInput::WIRE_LEN`] fails closed with `-errno`. A
 /// zero return is a valid empty read, so the caller loops.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 count-or-errno encoding (count ≥ 0, else -errno).
-pub fn keyboard_read(buf: &mut [u8]) -> i64 {
+pub fn keyboard_read(seat: u64, buf: &mut [u8]) -> i64 {
     let ptr = buf.as_mut_ptr() as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
-    // `CAP_INPUT_READ` and the `(buf, len)` pair against the caller's address
-    // space before writing it. `buf` is a live exclusive
+    // `CAP_INPUT_READ`, the seat id, and the `(buf, len)` pair against the
+    // caller's address space before writing it. `buf` is a live exclusive
     // `&mut [u8]` for the duration of the call, so the `(ptr, len)` pair
     // denotes writable memory.
-    let ret = unsafe { raw_syscall(NUM_KEYBOARD_READ, [ptr, buf.len() as u64, 0, 0, 0, 0]) };
+    let ret = unsafe { raw_syscall(NUM_KEYBOARD_READ, [seat, ptr, buf.len() as u64, 0, 0, 0]) };
     ret as i64
 }
 
@@ -3445,7 +3451,7 @@ mod tests {
     }
 
     #[test]
-    fn key_inject_marshals_the_record_pointer_and_len() {
+    fn key_inject_marshals_the_seat_record_pointer_and_len() {
         use rustos_abi::input::{KeyValue, Modifiers};
         let record = KeyInput::Pressed {
             key: KeyValue::Char('a'),
@@ -3453,13 +3459,15 @@ mod tests {
         };
         let want = i64::try_from(KeyInput::WIRE_LEN).expect("WIRE_LEN fits an i64");
         let (number, args) = capture(KeyInput::WIRE_LEN as u64, || {
-            assert_eq!(key_inject(&record), want);
+            assert_eq!(key_inject(3, &record), want);
         });
         assert_eq!(number, NUM_KEY_INJECT);
-        // arg 0 is the record buffer pointer; arg 1 is its WIRE_LEN.
-        assert_ne!(args[0], 0);
-        assert_eq!(args[1], KeyInput::WIRE_LEN as u64);
-        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+        // arg 0 is the seat id; arg 1 the record buffer pointer; arg 2 its
+        // WIRE_LEN.
+        assert_eq!(args[0], 3);
+        assert_ne!(args[1], 0);
+        assert_eq!(args[2], KeyInput::WIRE_LEN as u64);
+        assert_eq!(&args[3..], &[0, 0, 0]);
     }
 
     #[test]
@@ -3474,24 +3482,24 @@ mod tests {
         let want = -i64::from(rustos_abi::Errno::NotImplemented.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
-            assert_eq!(key_inject(&record), want);
+            assert_eq!(key_inject(0, &record), want);
         });
     }
 
     #[test]
-    fn display_acquire_and_release_marshal_no_arguments() {
+    fn display_acquire_and_release_marshal_the_seat_id() {
         // A successful acquire returns the minted lease generation.
         let (number, args) = capture(1, || {
-            assert_eq!(display_acquire(), 1);
+            assert_eq!(display_acquire(3), 1);
         });
         assert_eq!(number, NUM_DISPLAY_ACQUIRE);
-        assert_eq!(args, [0; 6]);
+        assert_eq!(args, [3, 0, 0, 0, 0, 0]);
 
         let (number, args) = capture(0, || {
-            assert_eq!(display_release(), 0);
+            assert_eq!(display_release(3), 0);
         });
         assert_eq!(number, NUM_DISPLAY_RELEASE);
-        assert_eq!(args, [0; 6]);
+        assert_eq!(args, [3, 0, 0, 0, 0, 0]);
     }
 
     #[test]
@@ -3517,16 +3525,17 @@ mod tests {
     }
 
     #[test]
-    fn keyboard_read_marshals_the_buffer_pointer_and_len() {
+    fn keyboard_read_marshals_the_seat_buffer_pointer_and_len() {
         let mut buf = [0u8; KeyInput::WIRE_LEN];
         let want = i64::try_from(KeyInput::WIRE_LEN).expect("WIRE_LEN fits an i64");
         let (number, args) = capture(KeyInput::WIRE_LEN as u64, || {
-            assert_eq!(keyboard_read(&mut buf), want);
+            assert_eq!(keyboard_read(3, &mut buf), want);
         });
         assert_eq!(number, NUM_KEYBOARD_READ);
-        assert_ne!(args[0], 0);
-        assert_eq!(args[1], KeyInput::WIRE_LEN as u64);
-        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+        assert_eq!(args[0], 3);
+        assert_ne!(args[1], 0);
+        assert_eq!(args[2], KeyInput::WIRE_LEN as u64);
+        assert_eq!(&args[3..], &[0, 0, 0]);
     }
 
     #[test]

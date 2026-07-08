@@ -573,8 +573,8 @@ pub trait SyscallHandlers {
     /// unowned seat's input drains to (`plans/DISPLAY.md` D3).
     ///
     /// The dispatcher has already checked the caller holds
-    /// [`CapabilityId::SEAT_ADMIN`]. `seat_id` names the seat (one seat
-    /// today, id `0`) and `console` the installed text console that becomes
+    /// [`CapabilityId::SEAT_ADMIN`]. `seat_id` names the seat and
+    /// `console` the installed text console that becomes
     /// its foreground. The implementation validates both against the live
     /// seat registry and console list — an unknown seat or console fails
     /// closed with [`Errno::NotFound`] before any state changes — then
@@ -598,8 +598,8 @@ pub trait SyscallHandlers {
     /// switched-away owner (`plans/DISPLAY.md` D3).
     ///
     /// The dispatcher has already checked the caller holds
-    /// [`CapabilityId::SEAT_ADMIN`]. `seat_id` names the seat (one seat
-    /// today, id `0`); an unknown seat fails closed with
+    /// [`CapabilityId::SEAT_ADMIN`]. `seat_id` names the seat;
+    /// an unknown seat fails closed with
     /// [`Errno::NotFound`] and an unowned seat refuses with
     /// [`Errno::SeatNotOwner`]. On success the seat becomes acquirable,
     /// input returns to the text foreground, the evicted owner's next
@@ -688,14 +688,16 @@ pub trait SyscallHandlers {
     ///
     /// The dispatcher has already checked the caller holds
     /// [`CapabilityId::INPUT_INJECT`] and that `buf` is a non-null
-    /// `UserPtr`. The implementation copies up to `len` bytes in through
-    /// the validated `copy_from_user` boundary, decodes
+    /// `UserPtr`. `seat` names the seat the edge belongs to (the seat whose
+    /// keyboard produced it); an unknown seat id fails closed with
+    /// [`Errno::NotFound`]. The implementation copies up to `len` bytes in
+    /// through the validated `copy_from_user` boundary, decodes
     /// one [`rustos_abi::input::KeyInput`] record fail-closed, and hands it
     /// to the arbiter, which decides the encoding and destination by who
-    /// holds focus: with the text console foreground it encodes the press
+    /// holds that seat: with the text console foreground it encodes the press
     /// to console (tty) bytes and enqueues them on the focused console's
     /// input queue; with the desktop foreground it routes the record to the
-    /// kernel keyboard channel. The driver no longer chooses the encoding
+    /// seat's keyboard channel. The driver no longer chooses the encoding
     /// or destination. Returns the number of bytes
     /// consumed from the record.
     ///
@@ -703,16 +705,23 @@ pub trait SyscallHandlers {
     /// [`Errno::NotImplemented`]: a kernel build with no
     /// input-focus arbiter wired has nowhere to route the edge. The real
     /// handler is installed in `kernel/core`.
-    fn key_inject(&self, _caller: &CallerContext<'_>, _buf: u64, _len: usize) -> SyscallResult {
+    fn key_inject(
+        &self,
+        _caller: &CallerContext<'_>,
+        _seat: u64,
+        _buf: u64,
+        _len: usize,
+    ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
 
-    /// Acquire ownership of the seat — the display with its keyboard —
-    /// as an exclusive, owner-tracked lease (`plans/DISPLAY.md`;
+    /// Acquire ownership of the seat `seat` — one display with its keyboard
+    /// — as an exclusive, owner-tracked lease (`plans/DISPLAY.md`;
     /// `plans/PI.md` P11 — input follows the surface owner).
     ///
     /// The dispatcher has already checked the caller holds
-    /// [`CapabilityId::DISPLAY`]. The implementation records the
+    /// [`CapabilityId::DISPLAY`]. An unknown seat id fails closed with
+    /// [`Errno::NotFound`]. The implementation records the
     /// kernel-attested caller as the seat owner, so subsequently injected
     /// key edges ([`Self::key_inject`]) are delivered as records the owner
     /// drains with [`Self::keyboard_read`]. A seat held by another task
@@ -724,11 +733,11 @@ pub trait SyscallHandlers {
     /// [`Errno::NotImplemented`]: a build with no
     /// seat registry wired owns no seat to acquire. The real handler is
     /// installed in `kernel/core`.
-    fn display_acquire(&self, _caller: &CallerContext<'_>) -> SyscallResult {
+    fn display_acquire(&self, _caller: &CallerContext<'_>, _seat: u64) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
 
-    /// Release the seat and return keyboard input to the text
+    /// Release the seat `seat` and return its keyboard input to the text
     /// console (`plans/DISPLAY.md`; `plans/PI.md` P11).
     ///
     /// The inverse of [`Self::display_acquire`]; the dispatcher has already
@@ -736,9 +745,10 @@ pub trait SyscallHandlers {
     /// implementation is owner-checked: a caller that does not hold the
     /// seat is refused with [`Errno::SeatNotOwner`] (or
     /// [`Errno::SeatRevoked`] once, after an administrative eviction),
-    /// never a global "flip it back" switch. The default
+    /// never a global "flip it back" switch; an unknown seat id fails
+    /// closed with [`Errno::NotFound`]. The default
     /// implementation fails closed with [`Errno::NotImplemented`].
-    fn display_release(&self, _caller: &CallerContext<'_>) -> SyscallResult {
+    fn display_release(&self, _caller: &CallerContext<'_>, _seat: u64) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
 
@@ -748,6 +758,8 @@ pub trait SyscallHandlers {
     ///
     /// The dispatcher has already checked the caller holds
     /// [`CapabilityId::INPUT_READ`] and that `buf` is a non-null `UserPtr`.
+    /// `seat` names the seat whose channel is drained; an unknown seat id
+    /// fails closed with [`Errno::NotFound`].
     /// The implementation owner-gates the drain against the seat's live
     /// lease — a caller that does not hold the seat is refused with
     /// [`Errno::SeatNotOwner`] / [`Errno::SeatRevoked`] — then drains one
@@ -761,7 +773,13 @@ pub trait SyscallHandlers {
     /// [`Errno::NotImplemented`]: a build with no
     /// seat registry wired has no channel to drain. The real handler is
     /// installed in `kernel/core`.
-    fn keyboard_read(&self, _caller: &CallerContext<'_>, _buf: u64, _len: usize) -> SyscallResult {
+    fn keyboard_read(
+        &self,
+        _caller: &CallerContext<'_>,
+        _seat: u64,
+        _buf: u64,
+        _len: usize,
+    ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
 
@@ -1901,18 +1919,25 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 self.handlers.pipe_create(caller, args.0[0])
             }
             SyscallNumber::KEY_INJECT => {
-                // `validate_arg` guarantees args[0] is a non-null
-                // `UserPtr`; args[1] is the record length.
-                let len = decode_len(args.0[1])?;
-                self.handlers.key_inject(caller, args.0[0], len)
+                // args[0] is the seat id; `validate_arg` guarantees args[1]
+                // is a non-null `UserPtr`; args[2] is the record length.
+                let len = decode_len(args.0[2])?;
+                self.handlers.key_inject(caller, args.0[0], args.0[1], len)
             }
-            SyscallNumber::DISPLAY_ACQUIRE => self.handlers.display_acquire(caller),
-            SyscallNumber::DISPLAY_RELEASE => self.handlers.display_release(caller),
+            SyscallNumber::DISPLAY_ACQUIRE => {
+                // args[0] is the seat id to acquire.
+                self.handlers.display_acquire(caller, args.0[0])
+            }
+            SyscallNumber::DISPLAY_RELEASE => {
+                // args[0] is the seat id to release.
+                self.handlers.display_release(caller, args.0[0])
+            }
             SyscallNumber::KEYBOARD_READ => {
-                // `validate_arg` guarantees args[0] is a non-null
-                // `UserPtr`; args[1] is the buffer capacity.
-                let len = decode_len(args.0[1])?;
-                self.handlers.keyboard_read(caller, args.0[0], len)
+                // args[0] is the seat id; `validate_arg` guarantees args[1]
+                // is a non-null `UserPtr`; args[2] is the buffer capacity.
+                let len = decode_len(args.0[2])?;
+                self.handlers
+                    .keyboard_read(caller, args.0[0], args.0[1], len)
             }
             // `validate_arg` accepts args[0] as an opaque `Handle` u64; the
             // handler resolves it against the calling task and the grant
@@ -2701,27 +2726,41 @@ mod tests {
             #[allow(clippy::cast_sign_loss)]
             Ok(u64::from(pid as u32))
         }
-        fn key_inject(&self, _c: &CallerContext<'_>, _buf: u64, len: usize) -> SyscallResult {
+        fn key_inject(
+            &self,
+            _c: &CallerContext<'_>,
+            seat: u64,
+            _buf: u64,
+            len: usize,
+        ) -> SyscallResult {
             self.record("key_inject");
-            // Echo the length back so the reachability test can assert the
-            // dispatcher decoded `(buf, len)` without wiring a real
+            // Echo `seat + len` back so the reachability test can assert the
+            // dispatcher decoded `(seat, buf, len)` without wiring a real
             // input-focus arbiter here.
-            Ok(len as u64)
+            Ok(seat + len as u64)
         }
-        fn display_acquire(&self, _c: &CallerContext<'_>) -> SyscallResult {
+        fn display_acquire(&self, _c: &CallerContext<'_>, seat: u64) -> SyscallResult {
             self.record("display_acquire");
-            Ok(0)
+            // Echo the seat id back so the decode test can assert the
+            // dispatcher recovered it without wiring a real seat registry.
+            Ok(seat)
         }
-        fn display_release(&self, _c: &CallerContext<'_>) -> SyscallResult {
+        fn display_release(&self, _c: &CallerContext<'_>, seat: u64) -> SyscallResult {
             self.record("display_release");
-            Ok(0)
+            Ok(seat)
         }
-        fn keyboard_read(&self, _c: &CallerContext<'_>, _buf: u64, len: usize) -> SyscallResult {
+        fn keyboard_read(
+            &self,
+            _c: &CallerContext<'_>,
+            seat: u64,
+            _buf: u64,
+            len: usize,
+        ) -> SyscallResult {
             self.record("keyboard_read");
-            // Echo the length back so the reachability test can assert the
-            // dispatcher decoded `(buf, len)` without wiring a real
+            // Echo `seat + len` back so the reachability test can assert the
+            // dispatcher decoded `(seat, buf, len)` without wiring a real
             // keyboard channel here.
-            Ok(len as u64)
+            Ok(seat + len as u64)
         }
 
         fn mmio_map(
