@@ -507,21 +507,25 @@ than with a runtime flag: a [`SwapBackend`] (the raw, slot-addressed
 device) exposes only opaque [`SWAP_RECORD_LEN`]-byte records and makes
 no cryptographic decision, and the **only** way to read or write a page
 through it is [`EncryptedSwap`], whose sole constructor
-[`EncryptedSwap::activate`] takes a [`SwapKey`]. There is no plaintext
+[`EncryptedSwap::activate`] takes a [`SealKey`]. There is no plaintext
 code path to fall back to, so plaintext swap is unrepresentable
 (`AGENTS.md` §2.11).
 
-**Ephemeral per-boot key.** The [`SwapKey`] is drawn from the platform
-RNG (the §19.2 entropy source, injected as the [`EntropySource`] seam
-until that subsystem lands), zeroed on drop, and never persisted: there
-is no serialisation path and no accessor that copies the key out of the
-crate. A power cycle destroys the key, so paged-out secrets cannot be
-recovered at rest.
+**Shared sealing primitives (`seal`).** The ephemeral per-boot key
+([`SealKey`]), the injected platform-RNG seam ([`EntropySource`]), and
+the never-repeating nonce sequence ([`NonceSequence`]) have exactly one
+definition, in the `seal` module, shared by this layer and the
+compressed anonymous-memory tier ([§7n](#7n-the-encrypted-compressed-anonymous-memory-tier-ramzip)).
+Each tier holds its **own** key and sequence — neither depends on the
+other's key or metadata format — but the key-hygiene and
+nonce-uniqueness logic is never duplicated. The key is drawn from the
+platform RNG, zeroed on drop, and never persisted: a power cycle
+destroys it, so paged-out secrets cannot be recovered at rest.
 
 **Record layout & nonce discipline.** Each on-device record is
 `nonce(12) ‖ tag(16) ‖ ciphertext(4096)`. ChaCha20-Poly1305 fails
-catastrophically on `(key, nonce)` reuse, so each `EncryptedSwap`
-draws a random 32-bit salt at activation and appends a 64-bit
+catastrophically on `(key, nonce)` reuse, so each [`NonceSequence`]
+draws a random 32-bit salt at construction and appends a 64-bit
 monotonic counter; counter exhaustion fails closed
 ([`SwapError::NonceExhausted`]) rather than wrapping. The slot index is
 bound as associated data, so a record relocated to a different slot
@@ -537,8 +541,9 @@ cryptographic layer they are required to route through.
 [`SwapBackend`]: ../../rustos_kernel_mem/swap/trait.SwapBackend.html
 [`EncryptedSwap`]: ../../rustos_kernel_mem/swap/struct.EncryptedSwap.html
 [`EncryptedSwap::activate`]: ../../rustos_kernel_mem/swap/struct.EncryptedSwap.html#method.activate
-[`SwapKey`]: ../../rustos_kernel_mem/swap/struct.SwapKey.html
-[`EntropySource`]: ../../rustos_kernel_mem/swap/trait.EntropySource.html
+[`SealKey`]: ../../rustos_kernel_mem/seal/struct.SealKey.html
+[`EntropySource`]: ../../rustos_kernel_mem/seal/trait.EntropySource.html
+[`NonceSequence`]: ../../rustos_kernel_mem/seal/struct.NonceSequence.html
 [`SwapError::NonceExhausted`]: ../../rustos_kernel_mem/swap/enum.SwapError.html#variant.NonceExhausted
 [`SWAP_RECORD_LEN`]: ../../rustos_kernel_mem/swap/constant.SWAP_RECORD_LEN.html
 
@@ -1172,6 +1177,91 @@ hysteresis, per-band growth/shrink/drain enforcement with recovery,
 zero-backing refusal, uncacheable-geometry poisoning with the device
 still serving, the closed audit field shape, and wipe-in-place.
 
+## 7n. The encrypted compressed anonymous-memory tier (`ramzip`)
+
+`plans/SWAPSWAPSWAP.md` — a near-zero-idle-cost, encrypted, compressed,
+RAM-resident tier for cold anonymous pages, sitting *before* any
+optional block swap in the pressure order:
+
+```text
+active RAM → ramzip → optional encrypted block swap → VM policy
+```
+
+It is a compressed memory tier, not magic extra RAM and not persistent
+swap; the §7b block-swap layer is independent and shares neither key
+nor metadata format with it.
+
+- **Eligibility fails closed** (`ramzip::eligibility`). Only cold,
+  unpinned, CPU-only anonymous user pages qualify; kernel stacks,
+  interrupt stacks, page tables, DMA buffers, device memory, driver
+  rings, crypto-key storage, credential metadata, sensitive or
+  latency-critical pages, and pages of *unknown* role are refused with
+  a typed reason. A mapping-flag defence (`NO_CACHE`/`DMA_COHERENT`)
+  backs the classifier in depth.
+- **Derived capacity, no eager reservation** (`RamzipCaps`). Minimum
+  guarantee `max(1% RAM, 64 MiB)` (clamped to the hard cap), soft cap
+  10%, hard cap 25% — all fractions of discovered RAM, enforced per
+  band (soft at moderate pressure, hard at severe, zero elsewhere).
+  Construction allocates nothing: idle cost is one empty struct.
+- **Compress, then seal.** A page is compressed through `lib/compress`
+  first and only then sealed with `lib/crypto` AEAD under the tier's
+  own per-boot [`SealKey`]/[`NonceSequence`] (§7b's shared `seal`
+  primitives). The associated data binds the entry's identity (space
+  id, page number, mapping flags), so replay against any other page,
+  space, or permission set fails authentication. A page that does not
+  compress below the acceptance bound (`PAGE_SIZE` minus sealing
+  overhead minus the fixed per-entry metadata bound) is refused, never
+  stored raw. Every plaintext temporary is zeroed on all paths, and
+  the freed frame is scrubbed before it returns to the allocator.
+- **Pressure integration.** Compression runs only where the §7h
+  `ramzip_handoff` gate opens (moderate band with clean+transform
+  caches drained, or severe), and never pushes free memory to the
+  *decompression floor* (the §7h reserve plus fixed fault-in headroom):
+  the tier can always restore what it holds. Refusals are typed
+  (`CompressRefusal`) and feed the deterministic `escalate_refusal`
+  policy (reclaim caches first; at moderate-or-deeper with caches
+  drained, the VM policy owns the next step).
+- **Move-only restore.** `fault_in` authenticates, decrypts,
+  decompresses into a fresh frame, remaps with the original flags, and
+  deletes the blob. Authentication or decode failure returns **no
+  plaintext**: the entry is discarded, the (zeroed) frame returned,
+  the loss audit-logged (events 2002/2003), and the typed error
+  escalates through the VM policy.
+- **Accounting is checked and tamper-independent** (`RamzipLedger`).
+  Global and per-task books (logical/compressed/stored/metadata bytes,
+  entries) with all-or-nothing checked arithmetic; releases use the
+  figures charged at compression time, never a length recomputed from
+  the (corruptible) blob — a regression the fuzz harness found and
+  pinned. One task's share is bounded to half the active band cap.
+  A ledger imbalance poisons admission (restores continue).
+- **Clustering and warm-up are strictly budgeted.** After a demand
+  fault, up to 8 neighbouring entries (same space, ±8 pages, sealed
+  within 32 events) may be restored — only at normal pressure with
+  free memory above the warm-up start watermark (§7h `warmup_start` /
+  `warmup_stop` hysteresis) and the decompression floor protected;
+  cluster failure never fails the original fault. A `warm_step`
+  restores up to 8 entries near recent demand faults, re-checks the
+  gate before every page, stops instantly on any pressure transition,
+  and reports `NothingToDo` when no fault-locality evidence exists —
+  cold pages stay compressed by design.
+- **Thrash detection** is event-clock based and deterministic: restores
+  of recently sealed entries score the owning task; over the threshold
+  the tier refuses that task's pages until the score decays (halving on
+  a fixed event cadence). No wall clock, no retry loop.
+- **Enablement.** The tier is complete as the arch-neutral VM mechanism
+  (host-proven over `AddressSpace`/`PhysMap`/`FrameAllocator`, the same
+  surfaces production uses). Switching it on for arbitrary *running*
+  tasks additionally requires a restartable user page-fault path in the
+  architecture ports (trap → restore → resume), which no port provides
+  yet; that prerequisite is staged in `PLAN.md`.
+
+Audit events (continuing the §7k catalogue, `kernel/mem` range
+`2000..3000`): `RAMZIP_AUTH_FAILURE` (2002, Error) when a sealed entry
+fails authentication on restore, and `RAMZIP_ENTRY_CORRUPT` (2003,
+Error) when it fails metadata validation or decompression after
+authenticating. Both carry numeric handles only (`space`, `page`,
+`task`) — never page contents, keys, or nonces.
+
 ## 8. Testing strategy
 
 - **Unit tests** — alongside each module under `#[cfg(all(test, not(loom)))]`:
@@ -1187,7 +1277,11 @@ still serving, the closed audit field shape, and wipe-in-place.
 - **Fuzzing** — `kernel/mem/tests/fuzz_swap.rs` drives the encrypted-swap
   restore path with arbitrary device contents (`AGENTS.md` §19.6),
   asserting that tampering is always rejected and the output buffer is
-  zeroed on failure.
+  zeroed on failure. `kernel/mem/tests/fuzz_ramzip.rs` does the same
+  for the §7n tier: random compress → tamper/truncate → fault cycles
+  over the host doubles, asserting fail-closed restores, faithful
+  untampered round-trips, and books that balance to zero after every
+  cycle.
 - **Loom tests** — `kernel/mem/tests/loom.rs` model-checks concurrent
   allocation, gated on `RUSTFLAGS="--cfg loom"` exactly like
   `lib/sync`.

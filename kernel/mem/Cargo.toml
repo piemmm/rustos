@@ -43,6 +43,12 @@ rustos-abi = { path = "../../lib/abi", version = "=0.0.0" }
 # to depend on `lib/*`.
 rustos-log = { path = "../../lib/log", version = "=0.0.0" }
 
+# First-party LZ codec for the `ramzip` compressed anonymous-memory tier
+# (`plans/SWAPSWAPSWAP.md` §8): pages are compressed *before* they are
+# sealed, through the one shared codec — never a second compressor and
+# never an external dependency.
+rustos-compress = { path = "../../lib/compress", version = "=0.0.0" }
+
 # Audited AEAD for the encrypted-swap layer (`AGENTS.md` §4): pages the
 # kernel writes to a swap device are sealed with `lib/crypto`'s
 # ChaCha20-Poly1305 wrapper so a swap device never holds plaintext secrets.
@@ -63,6 +69,11 @@ zeroize = { version = "1.8.1", default-features = false }
 loom = "0.7"
 
 [dev-dependencies]
+# The crate's own integration tests (the `fuzz_ramzip` harness) need the
+# `host-tests` doubles (`HostPageTable`, `SimPhysMap`) and the test-only
+# tamper hooks; a self-referencing dev-dependency enables the feature for
+# tests only, mirroring `lib/fdt` and `kernel/sched/*`.
+rustos-kernel-mem = { path = ".", version = "=0.0.0", features = ["host-tests"] }
 # The §19.6 fuzz harness draws its inputs through the shared seed/budget
 # seam (`rustos_fuzzseed`): one place picks the per-run seed, logs it at
 # the start of the test, and bounds the smoke/soak loop (`AGENTS.md`

@@ -34,7 +34,9 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use rustos_kernel_mem::swap::SWAP_RECORD_LEN;
-use rustos_kernel_mem::{EncryptedSwap, EntropySource, SwapBackend, SwapError, SwapKey, SwapPage};
+use rustos_kernel_mem::{
+    EncryptedSwap, EntropySource, SealError, SealKey, SwapBackend, SwapError, SwapPage,
+};
 
 const SMOKE_ITERATIONS: u64 = 20_000;
 const PAGE_LEN: usize = core::mem::size_of::<SwapPage>();
@@ -73,7 +75,7 @@ impl Rng {
 /// PRNG-seeded entropy source (test-only; not a real CSPRNG).
 struct RngEntropy(Rng);
 impl EntropySource for RngEntropy {
-    fn fill(&mut self, out: &mut [u8]) -> Result<(), SwapError> {
+    fn fill(&mut self, out: &mut [u8]) -> Result<(), SealError> {
         for b in out.iter_mut() {
             *b = self.0.byte();
         }
@@ -136,7 +138,7 @@ fn fuzz_swap_restore_is_fail_closed() {
         rustos_fuzzseed::FUZZ_SEED_ENV,
     ));
     let device = MockBackend::new(SLOTS);
-    let key = SwapKey::generate(&mut RngEntropy(Rng::new(1))).expect("key");
+    let key = SealKey::generate(&mut RngEntropy(Rng::new(1))).expect("key");
     let mut swap = EncryptedSwap::activate(device.clone(), key, &mut RngEntropy(Rng::new(2)))
         .expect("activate");
 

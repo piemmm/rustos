@@ -136,6 +136,14 @@ Adding a new event requires assigning the next free identifier in
 `kernel/sec/src/audit.rs` and appending a row to this table in the same
 commit (`AGENTS.md` §13).
 
+`kernel/mem` owns the adjacent `2_000..3_000` range for its
+reclaimable-cache and compressed-memory audit events, including the
+`ramzip` tier's fail-closed restore failures — `RAMZIP_AUTH_FAILURE`
+(2002) when a sealed compressed page fails AEAD authentication (no
+plaintext is ever returned) and `RAMZIP_ENTRY_CORRUPT` (2003) when an
+authenticated entry fails metadata validation or decompression. See
+[the memory subsystem page](memory.md) (§7k, §7n) for that catalogue.
+
 ### Per-decision invariant
 
 The unit tests in `kernel/sec/src/{identity,manifest,captable}.rs`

@@ -209,6 +209,26 @@ impl PressureThresholds {
         self.reserve
     }
 
+    /// The warm-up *start* watermark: opportunistic decompression
+    /// (fault clustering, background warm-up) may begin only while the
+    /// free reading is above this — the mild band's exit watermark, so
+    /// "comfortably above" is the same figure that fully relaxes mild
+    /// pressure (`plans/SWAPSWAPSWAP.md` section 6).
+    #[must_use]
+    pub const fn warmup_start(&self) -> usize {
+        self.exit[0]
+    }
+
+    /// The warm-up *stop* watermark: a running warm-up step stops as
+    /// soon as the free reading falls to this — the mild band's enter
+    /// watermark, strictly below [`Self::warmup_start`], giving the
+    /// warm-up path its own hysteresis gap distinct from the
+    /// compression thresholds.
+    #[must_use]
+    pub const fn warmup_stop(&self) -> usize {
+        self.enter[0]
+    }
+
     /// The band a free reading maps to with no hysteresis history: the
     /// deepest band whose enter watermark the reading is below. A zero
     /// backing or a reading inside the reserve is critical.

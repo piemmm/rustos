@@ -60,8 +60,10 @@ pub mod pagetables;
 pub mod phys;
 pub mod pressure;
 pub mod ptr;
+pub mod ramzip;
 pub mod reclaim;
 pub mod reclaim_audit;
+pub mod seal;
 pub mod sensitive;
 pub mod slab;
 pub mod spawn;
@@ -84,18 +86,21 @@ pub use pressure::{
     escalation, ramzip_handoff, shrink_target, EscalationStep, FreeMemorySource, MemoryPressure,
     PressureBand, PressureThresholds, RamzipHandoff,
 };
+pub use ramzip::{
+    eligibility, escalate_refusal, CompressRefusal, FaultError, Ineligible, PageCandidate,
+    PageKind, Ramzip, RamzipCaps, RamzipCounters, RamzipLedger, VmContext, WarmOutcome,
+};
 pub use reclaim::{
     AccountingError, AdmissionRefusal, CacheAccounting, CacheBudget, CacheCandidate, CachePolicy,
     InvalidationSource, RebuildCost, ReclaimClass, ReclaimOwner, ReclaimRule, Sensitivity,
     MAX_ENTRY_METADATA,
 };
 pub use reclaim_audit::{log_cache_poisoned, log_cache_refused, ReclaimAuditEvent};
+pub use seal::{EntropySource, NonceSequence, SealError, SealKey};
 pub use sensitive::SensitiveBuffer;
 pub use slab::{Slab, SlabError, SlabHandle, SoftwareTagCheck};
 pub use spawn::{build_process_image, ProcessImage, SpawnError, UserStack};
-pub use swap::{
-    EncryptedSwap, EntropySource, SwapBackend, SwapError, SwapKey, SwapPage, SWAP_RECORD_LEN,
-};
+pub use swap::{EncryptedSwap, SwapBackend, SwapError, SwapPage, SWAP_RECORD_LEN};
 pub use uaccess::{copy_in, copy_out, UaccessError};
 pub use vmm::{
     AddressSpace, FrozenAddressSpace, MapFlags, Page, PageTable, PageTableError, UserAddressSpace,

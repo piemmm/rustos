@@ -20,7 +20,7 @@ impl CountingEntropy {
 }
 
 impl EntropySource for CountingEntropy {
-    fn fill(&mut self, out: &mut [u8]) -> Result<(), SwapError> {
+    fn fill(&mut self, out: &mut [u8]) -> Result<(), SealError> {
         for byte in out.iter_mut() {
             *byte = self.next;
             self.next = self.next.wrapping_add(1);
@@ -33,8 +33,8 @@ impl EntropySource for CountingEntropy {
 struct DeadEntropy;
 
 impl EntropySource for DeadEntropy {
-    fn fill(&mut self, _out: &mut [u8]) -> Result<(), SwapError> {
-        Err(SwapError::Entropy)
+    fn fill(&mut self, _out: &mut [u8]) -> Result<(), SealError> {
+        Err(SealError::Entropy)
     }
 }
 
@@ -102,7 +102,7 @@ impl SwapBackend for MockBackend {
 
 fn activate(slots: u64) -> EncryptedSwap<MockBackend> {
     let mut ent = CountingEntropy::new();
-    let key = SwapKey::generate(&mut ent).expect("key");
+    let key = SealKey::generate(&mut ent).expect("key");
     EncryptedSwap::activate(MockBackend::new(slots), key, &mut ent).expect("activate")
 }
 
@@ -213,35 +213,17 @@ fn backend_read_fault_zeroes_buffer() {
 fn nonce_counter_exhaustion_fails_closed() {
     let mut swap = activate(1);
     // Drive the counter to the brink; the next nonce would overflow.
-    swap.counter = u64::MAX;
+    swap.nonces = NonceSequence::with_counter([0u8; 4], u64::MAX);
     assert_eq!(swap.store(0, &page(0x01)), Err(SwapError::NonceExhausted));
-}
-
-#[test]
-fn key_generation_fails_closed_on_dead_entropy() {
-    let mut dead = DeadEntropy;
-    assert!(matches!(
-        SwapKey::generate(&mut dead),
-        Err(SwapError::Entropy)
-    ));
 }
 
 #[test]
 fn activation_fails_closed_on_dead_entropy() {
     let mut good = CountingEntropy::new();
-    let key = SwapKey::generate(&mut good).expect("key");
+    let key = SealKey::generate(&mut good).expect("key");
     let mut dead = DeadEntropy;
     let result = EncryptedSwap::activate(MockBackend::new(1), key, &mut dead);
     assert!(matches!(result, Err(SwapError::Entropy)));
-}
-
-#[test]
-fn key_debug_does_not_leak_material() {
-    let mut ent = CountingEntropy::new();
-    let key = SwapKey::generate(&mut ent).expect("key");
-    let rendered = std::format!("{key:?}");
-    assert!(rendered.contains("<redacted>"));
-    assert!(!rendered.contains("bytes: ["));
 }
 
 #[test]

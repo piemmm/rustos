@@ -15,31 +15,29 @@
 //! slot-addressed device) is *useless on its own* — it exposes only opaque
 //! fixed-size records — and the **only** way to read or write a page through
 //! it is [`EncryptedSwap`], whose sole constructor
-//! [`EncryptedSwap::activate`] takes a [`SwapKey`]. There is no plaintext
+//! [`EncryptedSwap::activate`] takes a [`SealKey`]. There is no plaintext
 //! code path to fall back to, so a plaintext swap is unrepresentable
 //! (illegal states unrepresentable).
 //!
-//! # Key lifetime
+//! # Key and nonce discipline
 //!
-//! The [`SwapKey`] is an **ephemeral per-boot** key drawn from the platform
-//! RNG (the entropy source, injected here as [`EntropySource`] until
-//! that source lands). It is zeroed on drop and never persisted: there is no
-//! serialisation path and no accessor that copies the key bytes out of the
-//! crate. A power cycle therefore destroys the key, so paged-out secrets
-//! cannot be recovered at rest.
-//!
-//! # Nonce discipline
-//!
-//! ChaCha20-Poly1305 fails catastrophically on `(key, nonce)` reuse. Each
-//! [`EncryptedSwap`] draws a random 32-bit salt at activation and appends a
-//! 64-bit monotonic counter, giving a 96-bit nonce that cannot repeat for
-//! the life of the (per-boot, unique) key. Counter exhaustion fails closed
-//! ([`SwapError::NonceExhausted`]) rather than wrapping.
+//! The key is an **ephemeral per-boot** [`SealKey`] drawn from the
+//! platform RNG (the entropy source, injected as the shared
+//! [`EntropySource`] seam): zeroed on drop, never persisted, so a power
+//! cycle destroys it and paged-out secrets cannot be recovered at rest.
+//! Nonces come from the shared [`NonceSequence`] (random salt plus
+//! monotonic counter — one definition in [`crate::seal`], shared with
+//! the compressed anonymous-memory tier). Counter exhaustion fails
+//! closed ([`SwapError::NonceExhausted`]) rather than wrapping. The
+//! swap key and nonce sequence are this layer's own; the RAM tier
+//! ([`crate::ramzip`]) holds separate ones and neither depends on the
+//! other's key or metadata format.
 
-use rustos_crypto::aead::{self, AeadKey, AeadNonce, AeadTag, AEAD_NONCE_LEN, AEAD_TAG_LEN};
+use rustos_crypto::aead::{self, AeadNonce, AeadTag, AEAD_NONCE_LEN, AEAD_TAG_LEN};
 use zeroize::Zeroize;
 
 use crate::frame::PAGE_SIZE;
+use crate::seal::{EntropySource, NonceSequence, SealError, SealKey};
 
 /// Bytes of associated data binding a record to its slot: `slot.to_le_bytes()`.
 const SLOT_AAD_LEN: usize = 8;
@@ -82,6 +80,15 @@ pub enum SwapError {
     Entropy,
 }
 
+impl From<SealError> for SwapError {
+    fn from(e: SealError) -> Self {
+        match e {
+            SealError::Entropy => Self::Entropy,
+            SealError::NonceExhausted => Self::NonceExhausted,
+        }
+    }
+}
+
 impl core::fmt::Display for SwapError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let msg = match self {
@@ -93,23 +100,6 @@ impl core::fmt::Display for SwapError {
         };
         f.write_str(msg)
     }
-}
-
-/// Source of cryptographic randomness for keys and nonce salts.
-///
-/// This is the seam for the platform RNG. Until that subsystem lands,
-/// the kernel injects a concrete implementation (mirroring the seam pattern
-/// used by `init`'s `Spawner` and `login`'s `Authenticator`); the swap layer
-/// itself never reaches for a global RNG.
-pub trait EntropySource {
-    /// Fill `out` with cryptographically random bytes.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SwapError::Entropy`] if randomness is unavailable. The swap
-    /// layer fails closed: no key or nonce salt is derived from a failed
-    /// draw.
-    fn fill(&mut self, out: &mut [u8]) -> Result<(), SwapError>;
 }
 
 /// A slot-addressed raw swap device.
@@ -138,60 +128,13 @@ pub trait SwapBackend {
     fn read_record(&self, slot: u64, record: &mut [u8]) -> Result<(), SwapError>;
 }
 
-/// An ephemeral per-boot swap-encryption key.
-///
-/// Zeroed on drop; never persisted, cloned, or copied out of the crate.
-pub struct SwapKey {
-    bytes: AeadKey,
-}
-
-impl SwapKey {
-    /// Draw a fresh random key from `entropy`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SwapError::Entropy`] if the source cannot supply randomness;
-    /// no key is constructed in that case.
-    pub fn generate(entropy: &mut dyn EntropySource) -> Result<Self, SwapError> {
-        let mut bytes: AeadKey = [0u8; rustos_crypto::aead::AEAD_KEY_LEN];
-        entropy.fill(&mut bytes)?;
-        Ok(Self { bytes })
-    }
-
-    /// Lend the key bytes to the in-crate cipher. Crate-private on purpose:
-    /// the key never leaves `kernel/mem`.
-    fn material(&self) -> &AeadKey {
-        &self.bytes
-    }
-}
-
-impl core::fmt::Debug for SwapKey {
-    /// Never reveals the key bytes.
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("SwapKey")
-            .field("bytes", &"<redacted>")
-            .finish()
-    }
-}
-
-impl Drop for SwapKey {
-    fn drop(&mut self) {
-        // SAFETY-INVARIANT: `Zeroize::zeroize` uses volatile writes the
-        // compiler may not elide, so the ephemeral key is gone once the
-        // `EncryptedSwap` that owns it is torn down (the
-        // key is discarded, never persisted).
-        self.bytes.zeroize();
-    }
-}
-
 /// The encrypted-swap front end: the only way to use a [`SwapBackend`].
 ///
 /// See the module docs for the fail-closed-by-construction guarantee.
 pub struct EncryptedSwap<B: SwapBackend> {
     backend: B,
-    key: SwapKey,
-    nonce_salt: [u8; AEAD_NONCE_LEN - 8],
-    counter: u64,
+    key: SealKey,
+    nonces: NonceSequence,
 }
 
 impl<B: SwapBackend> EncryptedSwap<B> {
@@ -206,16 +149,14 @@ impl<B: SwapBackend> EncryptedSwap<B> {
     /// Returns [`SwapError::Entropy`] if the nonce salt cannot be drawn.
     pub fn activate(
         backend: B,
-        key: SwapKey,
+        key: SealKey,
         entropy: &mut dyn EntropySource,
     ) -> Result<Self, SwapError> {
-        let mut nonce_salt = [0u8; AEAD_NONCE_LEN - 8];
-        entropy.fill(&mut nonce_salt)?;
+        let nonces = NonceSequence::new(entropy)?;
         Ok(Self {
             backend,
             key,
-            nonce_salt,
-            counter: 0,
+            nonces,
         })
     }
 
@@ -223,16 +164,6 @@ impl<B: SwapBackend> EncryptedSwap<B> {
     #[must_use]
     pub fn slot_count(&self) -> u64 {
         self.backend.slot_count()
-    }
-
-    /// Build the next unique nonce: `salt(4) ‖ counter_be(8)`.
-    fn next_nonce(&mut self) -> Result<AeadNonce, SwapError> {
-        let counter = self.counter;
-        self.counter = counter.checked_add(1).ok_or(SwapError::NonceExhausted)?;
-        let mut nonce = [0u8; AEAD_NONCE_LEN];
-        nonce[..self.nonce_salt.len()].copy_from_slice(&self.nonce_salt);
-        nonce[self.nonce_salt.len()..].copy_from_slice(&counter.to_be_bytes());
-        Ok(nonce)
     }
 
     /// Seal `page` and write it to `slot`.
@@ -250,7 +181,7 @@ impl<B: SwapBackend> EncryptedSwap<B> {
         if slot >= self.backend.slot_count() {
             return Err(SwapError::SlotOutOfRange);
         }
-        let nonce = self.next_nonce()?;
+        let nonce = self.nonces.next_nonce()?;
         let aad: [u8; SLOT_AAD_LEN] = slot.to_le_bytes();
 
         let mut record = [0u8; SWAP_RECORD_LEN];

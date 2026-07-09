@@ -1,6 +1,18 @@
 # SWAPSWAPSWAP.md - Encrypted compressed memory pressure tier
 
-Status: planned implementation specification  
+Status: SWAP1–SWAP4 implemented — the `ramzip` tier is complete as the
+architecture-neutral VM mechanism (`kernel/mem::ramzip`: fail-closed
+eligibility, derived min/soft/hard caps, checked per-task accounting,
+compress-before-encrypt authenticated store over the shared
+`kernel/mem::seal` primitives, pressure-gated compress-out with
+decompression-floor preservation, move-only fault-in, bounded
+clustering and warm-up, deterministic thrash detection and escalation;
+see `PLAN.md` §SWAPSWAPSWAP and `docs/src/architecture/memory.md` §7n
+for the done-state summaries). Enabling it for arbitrary *running*
+tasks awaits the restartable-user-page-fault prerequisite staged in
+`PLAN.md` (every port's fault hook is terminal today), and SWAP5 (the
+optional lower-tier block swap) remains a separately approved future
+design (section 15)  
 Target: RustOS  
 Primary code area: `kernel/mem`  
 Secondary code areas: `kernel/sched`, `kernel/sec`, `kernel/core`, `lib/crypto`, `lib/log`, and existing `lib/abi` diagnostics only if a current caller requires them  

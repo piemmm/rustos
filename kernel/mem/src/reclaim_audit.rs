@@ -23,9 +23,10 @@
 //! handles only — never file names, cached plaintext, keys, or
 //! capability tokens (`plans/SMARTRAM.md` section 9).
 //!
-//! Adding a new event requires assigning the next free identifier in
-//! this file and updating the table in
-//! `docs/src/architecture/memory.md`.
+//! Adding a new event requires assigning the next free identifier
+//! across the whole `kernel/mem` range — the `ramzip` tier's events
+//! (2002, 2003) live in [`crate::ramzip::RamzipAuditEvent`] — and
+//! updating the tables in `docs/src/architecture/memory.md`.
 
 use rustos_log::{log, Event, EventId, Field, FieldValue, Level, Sink};
 

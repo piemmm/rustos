@@ -4398,6 +4398,77 @@ future decision explicitly un-shelves them.
 
 ---
 
+## SWAPSWAPSWAP — the encrypted compressed anonymous-memory tier (`plans/SWAPSWAPSWAP.md`)
+
+**Done — SWAP1–SWAP4 (the `ramzip` tier as the complete arch-neutral
+VM mechanism, `kernel/mem::ramzip`;
+`docs/src/architecture/memory.md` §7n):**
+- Shared sealing primitives hoisted into `kernel/mem::seal`
+  (`SealKey`, `EntropySource`, `NonceSequence` — one definition of the
+  per-boot-key/zeroize-on-drop/salt-plus-counter-nonce discipline,
+  consumed by both the encrypted block-swap layer and `ramzip`; the
+  two tiers hold separate keys and share no metadata format). `SwapKey`
+  was deleted in favour of `SealKey` (in-place evolution).
+- SWAP1: the fail-closed eligibility classifier (`PageKind` /
+  `PageCandidate` / `Ineligible`; unknown is ineligible), the derived
+  capacity policy (`RamzipCaps`: min = max(1% RAM, 64 MiB) clamped to
+  hard, soft 10%, hard 25%, per-band ceilings, half-cap per-task
+  share, the decompression floor), and the checked all-or-nothing
+  global + per-task ledger with saturating diagnostic counters
+  (`RamzipLedger` / `RamzipCounters`).
+- SWAP2: compress-before-encrypt sealed-page store (`lib/compress`
+  then `lib/crypto` AEAD; identity-binding AAD of space/page/flags;
+  incompressible pages refused, never stored raw; plaintext
+  temporaries zeroed on every path; metadata validated before any
+  cryptography; audit events 2002/2003 on auth/decode failure).
+- SWAP3: the tier (`Ramzip`) over the real
+  `AddressSpace`/`PhysMap`/`FrameAllocator` surfaces — `compress_out`
+  gated by the SMART2 `ramzip_handoff`, thrash state, eligibility,
+  band cap, task share, and the decompression floor (compression can
+  never cause reserve exhaustion); move-only `fault_in` restoring
+  exact bytes and mapping flags, discarding the entry, and failing
+  closed (no plaintext) on authentication/decode failure; ledger
+  releases use the figures charged at compression time, never a
+  length recomputed from the corruptible blob (a defect the fuzz
+  harness caught, fixed with its regression test); deterministic
+  `escalate_refusal` (reclaim caches → VM policy).
+- SWAP4: bounded post-fault clustering (±8 pages, same space, sealed
+  within 32 events, budget 8 pages, failures never fail the original
+  fault), the budgeted `warm_step` (8 pages per step, candidates only
+  near recent demand faults, re-gated per page on the
+  `warmup_start`/`warmup_stop` hysteresis watermarks added to
+  `PressureThresholds`, instant stop on any pressure transition,
+  `NothingToDo` without locality evidence — cold pages stay
+  compressed), and the deterministic event-clock thrash detector
+  (per-task recent-cycle scoring with halving decay; a thrashing
+  task's pages are refused until forgiven).
+- Tests: the full plan §18 matrix as host tests (eligibility classes,
+  caps/reserves/fair-share, round-trip byte/flag fidelity,
+  zero-on-free scrub, tamper/truncation fail-closed with balanced
+  books, no-leak compress/fault cycles, cluster/warm gates and
+  budgets, thrash detection, escalation determinism, nonce
+  uniqueness/exhaustion) plus the seeded `fuzz_ramzip` harness
+  (registered in `cargo xtask fuzz`) driving random
+  compress→tamper/truncate→fault cycles.
+
+**Remaining (staged):**
+- **Restartable user page faults (prerequisite for live-task
+  enablement).** Every port's fault hook is terminal today (a user
+  fault parks/kills), so a *running* task cannot transparently fault a
+  compressed page back in. Enabling `ramzip` for arbitrary live tasks
+  requires the arch ports to support trap → `fault_in` → resume (and
+  the accessed-bit/page-replacement plumbing that identifies genuinely
+  cold pages). Until that lands, the tier is a complete, fully tested
+  VM mechanism with no production switch-on; nothing in it may be
+  weakened to work around the missing prerequisite.
+- SWAP5 (optional encrypted lower-tier block swap policy) remains a
+  separately approved future design per `plans/SWAPSWAPSWAP.md` §15.
+- Benchmarks beyond the host suites (per-page latency on real boards,
+  Pi-class small-RAM profile) belong with the enablement work, where
+  real workloads exist to measure.
+
+---
+
 ## CAPABILITY_USE — the capability lifecycle: login → session → administration (`plans/CAPABILITY_USE.md`)
 
 **Status: CU1–CU5 and CU7 done; CU6 planned.** The full capability lifecycle is

@@ -74,6 +74,11 @@ pub const TARGETS: &[Target] = &[
         description: "encrypted-swap restore path (untrusted swap-device bytes)",
     },
     Target {
+        package: "rustos-kernel-mem",
+        test: "fuzz_ramzip",
+        description: "ramzip compressed-entry restore (tampered/truncated sealed entries)",
+    },
+    Target {
         package: "rustos-drv-fs-rustfs",
         test: "fuzz_mount",
         description:
