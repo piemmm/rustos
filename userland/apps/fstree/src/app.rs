@@ -21,12 +21,14 @@ use crate::fs::Fs;
 use crate::model::{
     child_dirs_of, join, merge_child_dirs, BatchPrompt, ConfirmPrompt, DirNode, InputOp,
     InputPrompt, ModePrompt, Model, NameFilter, Overlay, OverwritePrompt, Pane, Prompt, SortKey,
-    View,
+    View, Viewer,
 };
 use crate::ops::{parent_of, plan_target, resolve_destination, Decision, FileOp, OpProgress};
 use crate::render::render;
 use crate::search::{ContentScan, Needle};
 use crate::tag::{Batch, BatchProgress, TagEntry};
+use crate::view_hex::{parse_offset, HexView};
+use crate::view_text::{JobOutcome, TextView};
 use crate::walk::{relative_to, FlatEntry, WalkPurpose, WalkState, Walker};
 
 /// Longest mode the prompt accepts: four octal digits (`7777`), the full
@@ -60,6 +62,11 @@ const FLAT_PAGE: usize = 512;
 /// file streams through the scanner.
 const SCAN_BYTES_PER_TICK: usize = 256 * 1024;
 
+/// Bytes of the head sample deciding a file's opening viewer: text when
+/// the sample is NUL-free, valid UTF-8 (a truncated final character
+/// allowed), hex otherwise.
+const HEAD_SAMPLE: usize = 4096;
+
 /// The session outcome the `Run` binary maps to an exit code.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum FstreeError {
@@ -88,23 +95,33 @@ pub fn run<T: Tty>(
     let mut window = Window::new(Pos::new(0, 0), screen.size());
     loop {
         clamp_scroll(model, body_rows(screen.size().rows));
+        refresh_viewer(
+            model,
+            fs,
+            body_rows(screen.size().rows),
+            usize::from(screen.size().cols),
+        );
         render(model, &mut window);
         screen.refresh(&window).map_err(|_| FstreeError::Terminal)?;
-        // While a walk is live the wait carries a short bound so an
-        // elapsed read advances the walk one tick; otherwise the read
-        // blocks until a key arrives. Either way the kernel parks the
-        // task — never a poll.
-        let ticking = model.walk.as_ref().is_some_and(WalkState::ticking);
-        screen.set_input_mode(if ticking {
+        // While a walk or a viewer scan is live the wait carries a short
+        // bound so an elapsed read advances it one tick; otherwise the
+        // read blocks until a key arrives. Either way the kernel parks
+        // the task — never a poll.
+        let walk_live = model.walk.as_ref().is_some_and(WalkState::ticking);
+        let viewer_live = viewer_ticking(model);
+        screen.set_input_mode(if walk_live || viewer_live {
             InputMode::Timeout(WALK_TICK)
         } else {
             InputMode::Blocking
         });
         let Some(event) = screen.getch().map_err(|_| FstreeError::Terminal)? else {
-            // No event: the walk bound elapsed (its tick), or a split
-            // escape sequence continues on the next read.
-            if ticking {
+            // No event: the tick bound elapsed, or a split escape
+            // sequence continues on the next read.
+            if walk_live {
                 walk_tick(model, fs);
+            }
+            if viewer_live {
+                viewer_tick(model, fs);
             }
             continue;
         };
@@ -142,6 +159,10 @@ pub fn handle_event(model: &mut Model, fs: &mut dyn Fs, event: &Event) {
             return;
         }
         Overlay::None => {}
+    }
+    if model.view == View::Viewer {
+        handle_viewer_key(model, fs, event);
+        return;
     }
     if model.view == View::Flat {
         handle_flat_key(model, fs, event);
@@ -449,6 +470,8 @@ fn submit_input(model: &mut Model, fs: &mut dyn Fs, prompt: InputPrompt) {
         InputOp::TagGlob => submit_tag_glob(model, &prompt.input),
         InputOp::FilterPattern { .. } => submit_filter(model, &prompt.input),
         InputOp::SearchGlob => submit_name_search(model, &prompt.input),
+        InputOp::ViewerGoto { hex } => submit_viewer_goto(model, fs, hex, &prompt.input),
+        InputOp::ViewerSearch { hex } => submit_viewer_search(model, fs, hex, &prompt.input),
         InputOp::ContentNeedle { tagged } => submit_content_search(model, tagged, &prompt.input),
         InputOp::BatchDest { moving, .. } => submit_batch_dest(model, fs, moving, &prompt.input),
     }
@@ -1102,6 +1125,297 @@ fn open_flat_delete(model: &mut Model) {
     });
 }
 
+/// Open the viewer the head sample picks on the regular file at `path`:
+/// the text pager for NUL-free, valid-UTF-8 heads, the hex dump for
+/// everything else. A refused read reports and opens nothing.
+fn open_viewer(model: &mut Model, fs: &mut dyn Fs, path: &str, size: u64) {
+    let mut buf = [0_u8; HEAD_SAMPLE];
+    let read = match fs.read(path, 0, &mut buf) {
+        Ok(read) => read,
+        Err(errno) => {
+            model.report(path, errno);
+            return;
+        }
+    };
+    let viewer = if is_text_head(&buf[..read]) {
+        Viewer::Text(TextView::new(path, size))
+    } else {
+        Viewer::Hex(HexView::new(path, size))
+    };
+    model.viewer = Some(viewer);
+    model.view = View::Viewer;
+}
+
+/// Whether a head sample reads as text: no NUL byte, and valid UTF-8
+/// except for a character the sample may have truncated.
+fn is_text_head(head: &[u8]) -> bool {
+    if head.contains(&0) {
+        return false;
+    }
+    match core::str::from_utf8(head) {
+        Ok(_) => true,
+        Err(error) => error.error_len().is_none(),
+    }
+}
+
+/// Leave the viewer for the panes.
+fn exit_viewer(model: &mut Model) {
+    model.view = View::Panes;
+    model.viewer = None;
+}
+
+/// The viewed file's path, for error reports.
+fn viewer_path(model: &Model) -> String {
+    match &model.viewer {
+        Some(Viewer::Text(view)) => view.path.clone(),
+        Some(Viewer::Hex(view)) => view.path.clone(),
+        None => String::new(),
+    }
+}
+
+/// Whether the open viewer has a live background scan.
+fn viewer_ticking(model: &Model) -> bool {
+    match &model.viewer {
+        Some(Viewer::Text(view)) => view.ticking(),
+        Some(Viewer::Hex(view)) => view.ticking(),
+        None => false,
+    }
+}
+
+/// Apply one key inside the viewer.
+fn handle_viewer_key(model: &mut Model, fs: &mut dyn Fs, event: &Event) {
+    let page = match &model.viewer {
+        Some(Viewer::Text(view)) => view.viewport_rows.max(1),
+        Some(Viewer::Hex(view)) => view.viewport_rows.max(1),
+        None => {
+            exit_viewer(model);
+            return;
+        }
+    };
+    let page_rows = i64::try_from(page).unwrap_or(i64::MAX);
+    match event {
+        Event::Esc => {
+            // Esc first stops a live scan in place; a second Esc leaves
+            // the viewer.
+            if viewer_ticking(model) {
+                match &mut model.viewer {
+                    Some(Viewer::Text(view)) => view.cancel_job(),
+                    Some(Viewer::Hex(view)) => view.cancel_job(),
+                    None => {}
+                }
+                model.message = Some(String::from("stopped"));
+                return;
+            }
+            exit_viewer(model);
+        }
+        Event::Char('q') => exit_viewer(model),
+        Event::Char('?') => model.overlay = Overlay::Help,
+        Event::Up | Event::Char('k') => viewer_scroll(model, fs, -1),
+        Event::Down | Event::Char('j') => viewer_scroll(model, fs, 1),
+        Event::PageUp | Event::Char('b') => viewer_scroll(model, fs, -page_rows),
+        Event::PageDown | Event::Char(' ') => viewer_scroll(model, fs, page_rows),
+        Event::Home => match &mut model.viewer {
+            Some(Viewer::Text(view)) => view.go_home(),
+            Some(Viewer::Hex(view)) => view.go_home(),
+            None => {}
+        },
+        Event::End => viewer_go_end(model, fs, page),
+        Event::Char('g') => {
+            let hex = matches!(model.viewer, Some(Viewer::Hex(_)));
+            model.prompt = Some(Prompt::Input(InputPrompt {
+                op: InputOp::ViewerGoto { hex },
+                input: String::new(),
+            }));
+        }
+        Event::Char('/') => {
+            let hex = matches!(model.viewer, Some(Viewer::Hex(_)));
+            model.prompt = Some(Prompt::Input(InputPrompt {
+                op: InputOp::ViewerSearch { hex },
+                input: String::new(),
+            }));
+        }
+        Event::Char('n') => viewer_search_next(model, fs),
+        Event::Char('w') => {
+            if let Some(Viewer::Text(view)) = &mut model.viewer {
+                view.wrap = !view.wrap;
+                model.message = Some(String::from(if view.wrap { "wrap on" } else { "wrap off" }));
+            }
+        }
+        Event::Char('x') => viewer_switch_hex(model),
+        Event::Char('t') => viewer_switch_text(model, fs),
+        _ => {}
+    }
+}
+
+/// Scroll the viewer by `delta` display rows (negative is up). A refused
+/// read reports and keeps the place.
+fn viewer_scroll(model: &mut Model, fs: &mut dyn Fs, delta: i64) {
+    let rows = usize::try_from(delta.unsigned_abs()).unwrap_or(usize::MAX);
+    let result = match &mut model.viewer {
+        Some(Viewer::Text(view)) => {
+            if delta.is_negative() {
+                view.scroll_up(fs, rows)
+            } else {
+                view.scroll_down(fs, rows)
+            }
+        }
+        Some(Viewer::Hex(view)) => view.scroll(fs, delta),
+        None => Ok(()),
+    };
+    if let Err(errno) = result {
+        let path = viewer_path(model);
+        model.report(&path, errno);
+    }
+}
+
+/// Jump the viewer to the file's end (`End`).
+fn viewer_go_end(model: &mut Model, fs: &mut dyn Fs, page: usize) {
+    let result = match &mut model.viewer {
+        Some(Viewer::Text(view)) => view.go_end(fs, page),
+        Some(Viewer::Hex(view)) => view.go_end(fs, page),
+        None => Ok(()),
+    };
+    if let Err(errno) = result {
+        let path = viewer_path(model);
+        model.report(&path, errno);
+    }
+}
+
+/// The `n` key: repeat the viewer's last search past its previous hit.
+fn viewer_search_next(model: &mut Model, fs: &mut dyn Fs) {
+    let started = match &mut model.viewer {
+        Some(Viewer::Text(view)) => view.search_next(fs),
+        Some(Viewer::Hex(view)) => view.search_next(),
+        None => return,
+    };
+    if !started {
+        model.message = Some(String::from("no previous search"));
+    }
+}
+
+/// The `x` key: show the same place as a hex dump.
+fn viewer_switch_hex(model: &mut Model) {
+    if let Some(Viewer::Text(view)) = &model.viewer {
+        model.viewer = Some(Viewer::Hex(HexView::at_offset(
+            &view.path,
+            view.size,
+            view.top.offset,
+        )));
+    }
+}
+
+/// The `t` key: show the same place as text, snapped to its row start;
+/// the line number is unknown until a goto-line re-anchors it.
+fn viewer_switch_text(model: &mut Model, fs: &mut dyn Fs) {
+    if let Some(Viewer::Hex(view)) = &model.viewer {
+        let (path, size, top) = (view.path.clone(), view.size, view.top);
+        model.viewer = Some(Viewer::Text(TextView::at_offset(fs, &path, size, top)));
+    }
+}
+
+/// A submitted viewer goto: a byte offset (decimal or `0x`-hex) for the
+/// hex dump, a 1-based line number for the text pager (a background scan
+/// counts its way there).
+fn submit_viewer_goto(model: &mut Model, fs: &mut dyn Fs, hex: bool, typed: &str) {
+    if hex {
+        let Some(offset) = parse_offset(typed) else {
+            model.message = Some(String::from("goto: not an offset (decimal or 0x-hex)"));
+            return;
+        };
+        let result = match &mut model.viewer {
+            Some(Viewer::Hex(view)) => view.go_to(fs, offset),
+            _ => Ok(()),
+        };
+        if let Err(errno) = result {
+            let path = viewer_path(model);
+            model.report(&path, errno);
+        }
+        return;
+    }
+    let Ok(target) = typed.parse::<u64>() else {
+        model.message = Some(String::from("goto: not a line number"));
+        return;
+    };
+    if target == 0 {
+        model.message = Some(String::from("goto: lines count from 1"));
+        return;
+    }
+    if let Some(Viewer::Text(view)) = &mut model.viewer {
+        view.start_goto(target);
+    }
+}
+
+/// A submitted viewer search: literal text for the text pager; text or a
+/// `0x…` byte sequence for the hex dump. The scan runs in the background;
+/// Esc stops it.
+fn submit_viewer_search(model: &mut Model, fs: &mut dyn Fs, hex: bool, typed: &str) {
+    let started = match &mut model.viewer {
+        Some(Viewer::Text(view)) if !hex => view.start_search(fs, typed),
+        Some(Viewer::Hex(view)) if hex => view.start_search(typed),
+        _ => return,
+    };
+    if !started {
+        model.message = Some(if hex {
+            String::from("search: text, or 0x followed by hex byte pairs")
+        } else {
+            String::from("empty text — nothing searched")
+        });
+    }
+}
+
+/// Advance the viewer's live scan by one bounded tick, surfacing its
+/// outcome on the message line.
+pub fn viewer_tick(model: &mut Model, fs: &mut dyn Fs) {
+    let outcome = match &mut model.viewer {
+        Some(Viewer::Text(view)) => view.tick(fs, SCAN_BYTES_PER_TICK),
+        Some(Viewer::Hex(view)) => view.tick(fs, SCAN_BYTES_PER_TICK),
+        None => return,
+    };
+    match outcome {
+        JobOutcome::Pending => {}
+        JobOutcome::Moved => {
+            model.message = Some(match &model.viewer {
+                Some(Viewer::Text(view)) => match view.top.line {
+                    Some(line) => format!("line {}", line + 1),
+                    None => String::from("match found"),
+                },
+                Some(Viewer::Hex(view)) => match view.last_hit {
+                    Some(hit) => format!("found at 0x{hit:x}"),
+                    None => format!("offset 0x{:x}", view.top),
+                },
+                None => return,
+            });
+        }
+        JobOutcome::NotFound => model.message = Some(String::from("not found")),
+        JobOutcome::PastEnd => {
+            model.message = Some(String::from("past the last line — showing the end"));
+        }
+        JobOutcome::Failed(errno) => {
+            let path = viewer_path(model);
+            model.report(&path, errno);
+        }
+    }
+}
+
+/// Re-read the open viewer's page for the frame about to render. A
+/// refused read closes the viewer and reports — stale content is never
+/// shown as live.
+pub fn refresh_viewer(model: &mut Model, fs: &mut dyn Fs, rows: usize, cols: usize) {
+    if model.view != View::Viewer {
+        return;
+    }
+    let result = match &mut model.viewer {
+        Some(Viewer::Text(view)) => view.refresh(fs, rows, cols),
+        Some(Viewer::Hex(view)) => view.refresh(fs, rows),
+        None => Ok(()),
+    };
+    if let Err(errno) = result {
+        let path = viewer_path(model);
+        exit_viewer(model);
+        model.report(&path, errno);
+    }
+}
+
 /// Apply one key to a paused operation's overwrite question: o)verwrite,
 /// s)kip, or c)ancel (Esc cancels too); any other key keeps asking.
 fn handle_overwrite_prompt(
@@ -1301,13 +1615,16 @@ fn toggle_expanded(model: &mut Model, fs: &mut dyn Fs) {
     set_expanded(model, fs, !expanded);
 }
 
-/// Enter on a file-pane row: a directory descends into it (selecting it in
-/// the tree); a regular file is left alone until the viewers arrive.
+/// Enter on a file-pane row: a directory descends into it (selecting it
+/// in the tree); a regular file opens in the viewer the head sample
+/// picks.
 fn enter_file_row(model: &mut Model, fs: &mut dyn Fs) {
     let Some(entry) = model.visible_files().get(model.file_cursor).copied() else {
         return;
     };
     if !entry.kind.is_dir() {
+        let path = join(&model.files_dir, &entry.name);
+        open_viewer(model, fs, &path, entry.size);
         return;
     }
     let parent = model.files_dir.clone();

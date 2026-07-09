@@ -27,7 +27,10 @@ Keys:
 - `Left`/`Right` or `h`/`l` — collapse/expand the tree row under the
   cursor.
 - `Enter` — in the tree, toggle expansion; in the file pane, descend
-  into the selected directory (both panes follow).
+  into the selected directory (both panes follow), or open the
+  selected file in a full-screen viewer: the text pager when the
+  file's opening bytes read as text, the hex dump otherwise (the
+  viewers are described below).
 - `Tab` — switch the focused pane.
 - `s` — open the sort menu: `n` name, `e` extension, `s` size,
   `m` modification stamp, `r` reverse the direction, `Esc` cancels.
@@ -115,8 +118,49 @@ shown, the active filename filter, and — while anything is tagged —
 the tagged count and byte total. A file whose backing format stores
 no modification stamp shows `-` in the stamp column.
 
-The text/hex/disassembly viewers arrive in later stages of the
-tool's plan.
+The viewers: `Enter` on a regular file opens it read-only in a
+full-screen viewer.
+A file whose opening bytes are NUL-free, valid UTF-8 opens in the
+**text pager**; anything else opens in the **hex dump**. `x` switches
+the text pager to the hex dump at the same place, and `t` switches
+the hex dump to the text pager (snapped to the start of the line
+containing the shown offset); `q` or `Esc` returns to the panes.
+
+Both viewers page through the file in bounded windows — the file is
+never held in memory whole, so a file of any size (well past 4 GiB)
+pages correctly — and share the keys:
+
+- `Up`/`Down` or `k`/`j` — one row; `PageUp`/`PageDown`, `b`/`Space`
+  — one page; `Home`/`End` — the start / the last page.
+- `g` — go to a place: a 1-based line number in the text pager, a
+  byte offset (decimal or `0x`-hex) in the hex dump.
+- `/` — search forward from the current place; `n` repeats the last
+  search past its previous hit. The scan runs in the background in
+  bounded steps — the session stays responsive over a huge file, the
+  status line says `searching…`, and `Esc` stops it in place.
+- `?` — this help; any key dismisses it.
+
+The **text pager** decodes UTF-8 with a visible replacement for
+invalid bytes, expands tabs, and shows every other control byte as a
+visible `·` — file contents are never sent to the terminal as raw
+escape sequences. Long lines wrap by default; `w` toggles wrapping
+off (the tail is then clipped at the right edge). `/` searches for
+literal text, matched case-insensitively, across read boundaries.
+The status line shows the place as a line number; after a jump from
+the hex dump the line number is unknown (counting was not paid for)
+until a `g` goto re-anchors it.
+
+The **hex dump** shows the classic layout — offset column, sixteen
+bytes as hex pairs, and an ASCII column with unprintable bytes as
+`.`. The offset column is as wide as the file needs (at least eight
+hex digits). `/` searches for literal text (case-insensitive) or,
+spelled `0x` followed by hex byte pairs (`0xdeadbeef`), for an exact
+byte sequence.
+
+A read the kernel refuses mid-view closes the viewer and surfaces
+the error on the message line — stale content is never shown as
+live. The disassembly viewer arrives in a later stage of the tool's
+plan.
 
 ## OPTIONS
 

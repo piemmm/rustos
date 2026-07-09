@@ -14,7 +14,9 @@ use rustos_abi::time::Time64;
 use rustos_curses::{truncate_to_width, Pos, Window};
 use rustos_vt::Attributes;
 
-use crate::model::{InputOp, Model, Overlay, Pane, Prompt, SortKey, View};
+use crate::model::{InputOp, Model, Overlay, Pane, Prompt, SortKey, View, Viewer};
+use crate::view_hex::{dump_row, offset_digits, HexView};
+use crate::view_text::TextView;
 use crate::walk::{relative_to, WalkPurpose};
 
 /// Columns given to the tree pane for a grid `cols` wide.
@@ -38,6 +40,7 @@ pub fn render(model: &Model, window: &mut Window) {
         Overlay::None | Overlay::SortMenu => match model.view {
             View::Panes => render_panes(model, window, body, cols),
             View::Flat => render_flat(model, window, body, cols),
+            View::Viewer => render_viewer(model, window, body, cols),
         },
     }
     render_status(model, window, rows, cols);
@@ -161,6 +164,41 @@ fn render_flat(model: &Model, window: &mut Window, body: u16, cols: u16) {
     }
 }
 
+/// The viewer body: the text pager's decoded page, or the hex dump's
+/// offset/hex/ASCII rows. Pure drawing over the page the last refresh
+/// loaded.
+fn render_viewer(model: &Model, window: &mut Window, body: u16, cols: u16) {
+    match &model.viewer {
+        Some(Viewer::Text(view)) => render_text_view(view, window, body, cols),
+        Some(Viewer::Hex(view)) => render_hex_view(view, window, body, cols),
+        None => {}
+    }
+}
+
+/// The text pager's page, one sanitised row per line.
+fn render_text_view(view: &TextView, window: &mut Window, body: u16, cols: u16) {
+    for (line, row) in (0..body).zip(view.rows.iter()) {
+        let _ = window.move_add_str(
+            Pos::new(line, 0),
+            truncate_to_width(&row.text, usize::from(cols)),
+        );
+    }
+}
+
+/// The hex dump's page, one offset/hex/ASCII row per line.
+fn render_hex_view(view: &HexView, window: &mut Window, body: u16, cols: u16) {
+    let digits = offset_digits(view.size);
+    for line in 0..body {
+        let Some(text) = dump_row(view.top, &view.bytes, usize::from(line), digits) else {
+            break;
+        };
+        let _ = window.move_add_str(
+            Pos::new(line, 0),
+            truncate_to_width(&text, usize::from(cols)),
+        );
+    }
+}
+
 /// The report overlay: a batch's per-file failure lines (or a walk's
 /// unreadable directories), plainly paged over the body area; any key
 /// dismisses it.
@@ -176,6 +214,10 @@ fn render_report(model: &Model, window: &mut Window, body: u16, cols: u16) {
 /// The reverse-video status line: path, entry count, sort order, free
 /// space, and the hidden toggle.
 fn render_status(model: &Model, window: &mut Window, rows: u16, cols: u16) {
+    if model.view == View::Viewer {
+        render_viewer_status(model, window, rows, cols);
+        return;
+    }
     let mut reverse = Attributes::PLAIN;
     reverse.reverse = true;
     let key = match model.sort_key {
@@ -236,6 +278,52 @@ fn render_status(model: &Model, window: &mut Window, rows: u16, cols: u16) {
     window.set_attributes(Attributes::PLAIN);
 }
 
+/// The viewer's reverse-video status line: path, size, place, and the
+/// live-scan state.
+fn render_viewer_status(model: &Model, window: &mut Window, rows: u16, cols: u16) {
+    let mut reverse = Attributes::PLAIN;
+    reverse.reverse = true;
+    let status = match &model.viewer {
+        Some(Viewer::Text(view)) => {
+            let place = match view.top.line {
+                Some(line) => format!("line {}", line + 1),
+                None => format!("offset 0x{:x}", view.top.offset),
+            };
+            let wrap = if view.wrap { "wrap" } else { "nowrap" };
+            let end = if view.at_end { "  end" } else { "" };
+            let scanning = if view.ticking() {
+                "  searching… Esc stops"
+            } else {
+                ""
+            };
+            format!(
+                "{}  text  {} bytes  {place}  {wrap}{end}{scanning}",
+                view.path, view.size
+            )
+        }
+        Some(Viewer::Hex(view)) => {
+            let end = if view.at_end { "  end" } else { "" };
+            let scanning = if view.ticking() {
+                "  searching… Esc stops"
+            } else {
+                ""
+            };
+            format!(
+                "{}  hex  {} bytes  offset 0x{:x}{end}{scanning}",
+                view.path, view.size, view.top
+            )
+        }
+        None => String::new(),
+    };
+    let mut padded = String::from(truncate_to_width(&status, usize::from(cols)));
+    while padded.len() < usize::from(cols) {
+        padded.push(' ');
+    }
+    window.set_attributes(reverse);
+    let _ = window.move_add_str(Pos::new(rows - 2, 0), &padded);
+    window.set_attributes(Attributes::PLAIN);
+}
+
 /// The message line: the open prompt's question, an error/notice, the
 /// sort-menu prompt, or key hints.
 fn render_message(model: &Model, window: &mut Window, rows: u16, cols: u16) {
@@ -252,6 +340,17 @@ fn render_message(model: &Model, window: &mut Window, rows: u16, cols: u16) {
         message.clone()
     } else if let Some(usage) = usage {
         usage
+    } else if model.view == View::Viewer {
+        match &model.viewer {
+            Some(Viewer::Text(_)) => String::from(
+                "arrows scroll  Space/b page  Home/End  g line  / search  n next  w wrap  \
+                 x hex  q back",
+            ),
+            _ => String::from(
+                "arrows scroll  Space/b page  Home/End  g offset  / search (text or 0x…)  \
+                 n next  t text  q back",
+            ),
+        }
     } else if model.view == View::Flat {
         String::from(
             "arrows move  Enter open dir  t tag  T glob  i invert  C clear  c copy  m move  \
@@ -279,65 +378,7 @@ fn prompt_line(prompt: &Prompt) -> String {
             "mode {} [{:o}]: {}_  (octal, Enter applies, Esc cancels)",
             mode.name, mode.current, mode.input
         ),
-        Prompt::Input(input) => match &input.op {
-            InputOp::CopyDest { name, .. } => {
-                format!(
-                    "copy {name} to: {}_  (Enter copies, Esc cancels)",
-                    input.input
-                )
-            }
-            InputOp::MoveDest { name, .. } => {
-                format!(
-                    "move {name} to: {}_  (Enter moves, Esc cancels)",
-                    input.input
-                )
-            }
-            InputOp::RenameTo { name, .. } => {
-                format!(
-                    "rename {name} to: {}_  (Enter renames, Esc cancels)",
-                    input.input
-                )
-            }
-            InputOp::MkdirName => {
-                format!("mkdir: {}_  (Enter creates, Esc cancels)", input.input)
-            }
-            InputOp::TagGlob => {
-                format!(
-                    "tag pattern: {}_  (glob, Enter tags, Esc cancels)",
-                    input.input
-                )
-            }
-            InputOp::FilterPattern { .. } => {
-                format!(
-                    "filter: {}_  (glob, applied as typed; Enter keeps, Esc restores)",
-                    input.input
-                )
-            }
-            InputOp::SearchGlob => {
-                format!(
-                    "search below this branch: {}_  (glob, Enter searches, Esc cancels)",
-                    input.input
-                )
-            }
-            InputOp::ContentNeedle { tagged } => {
-                let scope = if *tagged {
-                    "the tagged set"
-                } else {
-                    "this branch"
-                };
-                format!(
-                    "find in files of {scope}: {}_  (Enter searches, Esc cancels)",
-                    input.input
-                )
-            }
-            InputOp::BatchDest { moving, count } => {
-                let verb = if *moving { "move" } else { "copy" };
-                format!(
-                    "{verb} {count} tagged into directory: {}_  (Enter runs, Esc cancels)",
-                    input.input
-                )
-            }
-        },
+        Prompt::Input(input) => input_prompt_line(input),
         Prompt::ConfirmDelete(confirm) => {
             if confirm.kind.is_dir() {
                 format!("delete directory {} and its contents? y/N", confirm.name)
@@ -364,6 +405,89 @@ fn prompt_line(prompt: &Prompt) -> String {
             // conflict is paused), but fail closed rather than panic.
             None => String::from("o)verwrite  s)kip  c)ancel batch"),
         },
+    }
+}
+
+/// The question an open text prompt asks, per its subject.
+fn input_prompt_line(input: &crate::model::InputPrompt) -> String {
+    match &input.op {
+        InputOp::CopyDest { name, .. } => {
+            format!(
+                "copy {name} to: {}_  (Enter copies, Esc cancels)",
+                input.input
+            )
+        }
+        InputOp::MoveDest { name, .. } => {
+            format!(
+                "move {name} to: {}_  (Enter moves, Esc cancels)",
+                input.input
+            )
+        }
+        InputOp::RenameTo { name, .. } => {
+            format!(
+                "rename {name} to: {}_  (Enter renames, Esc cancels)",
+                input.input
+            )
+        }
+        InputOp::MkdirName => {
+            format!("mkdir: {}_  (Enter creates, Esc cancels)", input.input)
+        }
+        InputOp::TagGlob => {
+            format!(
+                "tag pattern: {}_  (glob, Enter tags, Esc cancels)",
+                input.input
+            )
+        }
+        InputOp::FilterPattern { .. } => {
+            format!(
+                "filter: {}_  (glob, applied as typed; Enter keeps, Esc restores)",
+                input.input
+            )
+        }
+        InputOp::SearchGlob => {
+            format!(
+                "search below this branch: {}_  (glob, Enter searches, Esc cancels)",
+                input.input
+            )
+        }
+        InputOp::ViewerGoto { hex } => {
+            if *hex {
+                format!(
+                    "goto offset: {}_  (decimal or 0x-hex, Enter jumps, Esc cancels)",
+                    input.input
+                )
+            } else {
+                format!("goto line: {}_  (Enter jumps, Esc cancels)", input.input)
+            }
+        }
+        InputOp::ViewerSearch { hex } => {
+            if *hex {
+                format!(
+                    "find bytes: {}_  (text or 0x hex pairs, Enter searches, Esc cancels)",
+                    input.input
+                )
+            } else {
+                format!("find text: {}_  (Enter searches, Esc cancels)", input.input)
+            }
+        }
+        InputOp::ContentNeedle { tagged } => {
+            let scope = if *tagged {
+                "the tagged set"
+            } else {
+                "this branch"
+            };
+            format!(
+                "find in files of {scope}: {}_  (Enter searches, Esc cancels)",
+                input.input
+            )
+        }
+        InputOp::BatchDest { moving, count } => {
+            let verb = if *moving { "move" } else { "copy" };
+            format!(
+                "{verb} {count} tagged into directory: {}_  (Enter runs, Esc cancels)",
+                input.input
+            )
+        }
     }
 }
 

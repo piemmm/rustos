@@ -15,9 +15,12 @@
 //! cancellable walker — and the S4 search surface: a live filename filter
 //! per pane (`f`), a branch-wide filename search (`/`), and a streaming
 //! file-content search (`F`) over the tagged set or the focused branch,
-//! both searches feeding the same taggable, operable flattened list. The
-//! viewers are staged in `.junie/fstree-next-plan.md` and land stage by
-//! stage.
+//! both searches feeding the same taggable, operable flattened list.
+//! The S5 viewers open with Enter on a regular file: a streaming text
+//! pager and an offset/hex/ASCII dump, auto-picked from a head sample,
+//! each with paging, goto, and background literal search over the same
+//! seams. The disassembly viewer is staged in
+//! `.junie/fstree-next-plan.md` and lands with its stages.
 //!
 //! # What this crate is
 //!
@@ -40,6 +43,9 @@
 //! * [`walk`] — the bounded branch walker (flattened view, disk usage,
 //!   and the searches through its [`walk::Sieve`]).
 //! * [`search`] — the streaming file-content scanner behind `F`.
+//! * [`view_text`] / [`view_hex`] — the Enter viewers: the streaming
+//!   text pager and the hex dump, paging and searching through the same
+//!   [`fs::Fs`] seam in bounded windows.
 //! * [`mod@render`] — the curses frame (panes, status, message, overlays).
 //! * [`app`] — the key grammar and the session loop (walk ticks run on a
 //!   timed input bound; every wait still parks in the kernel).
@@ -64,6 +70,8 @@ pub mod ops;
 pub mod render;
 pub mod search;
 pub mod tag;
+pub mod view_hex;
+pub mod view_text;
 pub mod walk;
 
 #[cfg(test)]
@@ -75,4 +83,6 @@ pub use model::{Model, Pane, SortKey};
 pub use render::render;
 pub use search::{ContentScan, Needle};
 pub use tag::{Batch, BatchProgress, TagEntry, TagSet};
+pub use view_hex::{HexPattern, HexView};
+pub use view_text::{JobOutcome, TextView};
 pub use walk::{FlatEntry, Sieve, WalkPurpose, WalkState, Walker};

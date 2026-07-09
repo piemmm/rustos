@@ -21,6 +21,8 @@ use rustos_glob::Pattern;
 use crate::fs::{Fs, FsEntry, VolumeSpace};
 use crate::ops::FileOp;
 use crate::tag::{Batch, TagSet};
+use crate::view_hex::HexView;
+use crate::view_text::TextView;
 use crate::walk::WalkState;
 
 /// Which pane holds the keyboard focus.
@@ -47,8 +49,8 @@ pub enum Overlay {
     Report,
 }
 
-/// Which body the session shows: the two panes, or the flattened branch
-/// view listing every file under one directory.
+/// Which body the session shows: the two panes, the flattened branch
+/// view listing every file under one directory, or a file viewer.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
 pub enum View {
     /// The tree and file panes.
@@ -56,6 +58,19 @@ pub enum View {
     Panes,
     /// The flattened branch view (`v`), fed by the live walk.
     Flat,
+    /// A full-screen file viewer ([`Model::viewer`]).
+    Viewer,
+}
+
+/// The open file viewer: text paging or the hex dump. Entered with Enter
+/// on a regular file (the head sample picks the mode); `x`/`t` switch
+/// between the two at the same place.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Viewer {
+    /// The streaming text pager.
+    Text(TextView),
+    /// The offset/hex/ASCII dump.
+    Hex(HexView),
 }
 
 /// The column the file pane is ordered by.
@@ -163,6 +178,19 @@ pub enum InputOp {
     /// A filename-glob pattern searched for below the focused directory
     /// (`/`).
     SearchGlob,
+    /// The viewer's goto target: a 1-based line (text view) or a byte
+    /// offset, decimal or `0x`-hex (hex view).
+    ViewerGoto {
+        /// Whether the open viewer is the hex dump (an offset is asked
+        /// for) rather than the text pager (a line number).
+        hex: bool,
+    },
+    /// The viewer's search subject: literal text (text view), or text /
+    /// `0x…` byte sequence (hex view).
+    ViewerSearch {
+        /// Whether the open viewer is the hex dump.
+        hex: bool,
+    },
     /// The text a content search looks for inside files (`F`).
     ContentNeedle {
         /// Whether the search runs over the tagged set (`true`) or the
@@ -320,6 +348,9 @@ pub struct Model {
     pub tags: TagSet,
     /// The live walk feeding the flattened view or the usage figures.
     pub walk: Option<WalkState>,
+    /// The open file viewer, shown while [`Model::view`] is
+    /// [`View::Viewer`].
+    pub viewer: Option<Viewer>,
     /// Which body the session shows.
     pub view: View,
     /// Cursor index into the flattened view's entries.
@@ -371,6 +402,7 @@ impl Model {
             help_text,
             tags: TagSet::new(),
             walk: None,
+            viewer: None,
             view: View::Panes,
             flat_cursor: 0,
             flat_scroll: 0,

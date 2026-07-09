@@ -9,7 +9,7 @@ tree, discovered from disk like every other bundle. The staged plan for the
 whole tool lives in `.junie/fstree-next-plan.md`; this page describes what
 is built.
 
-## What is built (S1 model core, S2 file operations, S3 tagging/batches/walks, S4 search/filter)
+## What is built (S1 model core, S2 file operations, S3 tagging/batches/walks, S4 search/filter, S5 viewers)
 
 - **The tree pane.** A lazily populated directory tree: a directory is read
   through one `fs_readdir` call when it is first shown or expanded — never
@@ -123,6 +123,29 @@ is built.
   or search is still running, `Esc` first stops it in place (the rows
   found so far stand and stay browsable); a second `Esc` leaves the
   view.
+- **The file viewers (Enter on a file).** A regular file opens read-only
+  in a full-screen viewer: the streaming **text pager** when the head
+  sample (the first 4 KiB) is NUL-free, valid UTF-8, the **hex dump**
+  otherwise; `x`/`t` switch between the two at the same place, `q`/`Esc`
+  return to the panes. Both page through the seam's `read` in bounded
+  windows — never the whole file in memory, offsets 64-bit throughout, so
+  a file past 4 GiB pages correctly. Shared keys: arrows/`k`/`j` per row,
+  `PageUp`/`PageDown`/`b`/`Space` per page, `Home`/`End`, `g` goto (a
+  1-based line, or a decimal/`0x`-hex byte offset), `/` search with `n`
+  repeat. The text pager (`src/view_text.rs`) treats a row as the bytes
+  up to a newline capped at 4 KiB (a newline-free file still pages in
+  bounded memory), decodes UTF-8 lossily, expands tabs, and renders every
+  other control byte as a visible `·` — untrusted file content reaches
+  the curses grid as printable characters only, never as raw terminal
+  escapes; `w` toggles line wrap. The hex dump (`src/view_hex.rs`) shows
+  the classic offset/16-byte-hex/ASCII rows with a size-derived offset
+  width (at least eight hex digits) and searches literal text
+  (case-insensitive) or an exact `0x…` byte sequence. Goto-line and both
+  searches run as byte-budgeted background scans on the same timed tick
+  the walks use — the session stays responsive over a huge file, the
+  status line shows `searching…`, and `Esc` stops the scan in place. A
+  read the kernel refuses mid-view closes the viewer with the error
+  surfaced — stale content is never shown as live.
 - **Help.** `-h`/`-?` print the bundle's own Help document through the
   shared `lib/help` engine; the in-session `?` overlay shows the same
   document decoded to plain text through the one `lib/vt` parser. Nothing
@@ -161,14 +184,21 @@ grammar (`src/app.rs`) mutates, over two injected seams —
   which queues found files and streams them within its own per-tick byte
   budget). One walk definition feeds the flat view, the usage figures,
   and both searches — there is no second descent.
+- The viewers live in `src/view_text.rs` and `src/view_hex.rs`: each is
+  a state machine over the seam holding only its top position and the
+  one decoded page the renderer draws (refreshed from the seam each
+  frame), plus the byte-budgeted background scan (goto-line / search)
+  the key loop ticks. Backward paging finds the previous row start
+  through one bounded window read — no line index is built, so memory
+  never follows the file.
 - `Tty` — the terminal byte channel over the inherited fd 0/1: the `Run`
   binary links the one shared `rustos_curses::StreamTty` (`lib/curses`,
   feature `program`); the program names only its standard descriptors,
   never a console device.
 
 Every wait parks in the kernel: `Screen::getch` blocks normally, and while
-a walk is live the wait carries a short timeout so an elapsed read
-advances the walk one bounded tick — there is
+a walk or a viewer scan is live the wait carries a short timeout so an
+elapsed read advances it one bounded tick — there is
 no polling loop. A refused listing fails closed: the error is surfaced on
 the message line, and the cursor, listing, and expansion state are left
 untouched — a denied directory is never shown as empty. The session runs
@@ -222,4 +252,14 @@ Enter jump landing both panes on the hit), and the content search
 read-window boundary found through the carried tail, the binary-match
 note, the tagged-set scope, a read refusal recorded rather than
 dropped, Esc stopping a live search while keeping its results, and the
-empty-needle refusal).
+empty-needle refusal). The S5 viewers: the head-sample auto-pick (text
+vs hex, with a refused head opening nothing), golden text and hex
+grids, control-byte/invalid-UTF-8/tab sanitising, wrap segmentation
+and the `w` toggle, the goto-line scan (target, past-end landing on
+the last row, non-number refusal), text search across the read-window
+boundary with `n` repeats and the not-found report, the hex dump's
+byte-sequence and case-insensitive text searches across the window
+boundary (with the malformed-`0x` refusal), goto-offset in decimal and
+hex with end clamping, paging a sparse 5 GiB backing at full 64-bit
+offsets, in-place view switching, Esc stopping a live scan before
+leaving, and a mid-view read refusal closing the viewer.

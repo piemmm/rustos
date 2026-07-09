@@ -56,6 +56,24 @@ impl Needle {
         self.lowered.is_empty()
     }
 
+    /// The index of the first occurrence of the needle in `window`,
+    /// ASCII-case-insensitively, or `None` when it does not appear.
+    #[must_use]
+    pub fn find_in(&self, window: &[u8]) -> Option<usize> {
+        let n = self.lowered.len();
+        if n == 0 || window.len() < n {
+            return None;
+        }
+        let first = self.lowered[0];
+        (0..=(window.len() - n)).find(|&start| {
+            window[start].to_ascii_lowercase() == first
+                && window[start + 1..start + n]
+                    .iter()
+                    .zip(&self.lowered[1..])
+                    .all(|(b, needle)| b.to_ascii_lowercase() == *needle)
+        })
+    }
+
     /// How many (possibly overlapping) occurrences of the needle appear
     /// in `window`, ASCII-case-insensitively.
     #[must_use]

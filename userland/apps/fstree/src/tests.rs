@@ -15,9 +15,9 @@ use rustos_abi::time::Time64;
 use rustos_abi::{Errno, FileKind};
 use rustos_curses::{Event, Pos, Size, Window};
 
-use crate::app::{handle_event, walk_tick};
+use crate::app::{handle_event, refresh_viewer, viewer_tick, walk_tick};
 use crate::fs::{Fs, FsEntry, RenameOutcome, VolumeSpace};
-use crate::model::{join, ModePrompt, Model, Overlay, Pane, Prompt, SortKey, View};
+use crate::model::{join, ModePrompt, Model, Overlay, Pane, Prompt, SortKey, View, Viewer};
 use crate::ops::{basename, is_inside, parent_of};
 use crate::render::render;
 use crate::search::{ContentScan, Needle};
@@ -769,7 +769,7 @@ fn the_sort_menu_prompt_appears_on_the_message_line() {
 // --- File operations: mkdir and rename ------------------------------------
 
 /// Type `text` into the open prompt, character by character.
-fn type_text(m: &mut Model, fs: &mut FakeFs, text: &str) {
+fn type_text(m: &mut Model, fs: &mut dyn Fs, text: &str) {
     for ch in text.chars() {
         handle_event(m, fs, &Event::Char(ch));
     }
@@ -1842,4 +1842,473 @@ fn an_empty_needle_searches_nothing() {
     assert_eq!(m.view, View::Panes);
     assert!(m.walk.is_none());
     assert_eq!(m.message.as_deref(), Some("empty text — nothing searched"));
+}
+
+// --- The viewers (S5): text paging, hex dump, search, goto ----------------
+
+/// A sparse read-only backing of `size` deterministic bytes, so a file
+/// far beyond 4 GiB is pageable without materialising it: byte `i` is
+/// `(i / 16) % 251`. Only `read` answers; everything else is refused.
+struct SparseFs {
+    size: u64,
+}
+
+impl Fs for SparseFs {
+    fn list_dir(&mut self, _path: &str) -> Result<Vec<FsEntry>, Errno> {
+        Err(Errno::NotFound)
+    }
+
+    fn volume_space(&mut self, _path: &str) -> Option<VolumeSpace> {
+        None
+    }
+
+    fn stat_mode(&mut self, _path: &str) -> Result<u32, Errno> {
+        Err(Errno::NotFound)
+    }
+
+    fn set_mode(&mut self, _path: &str, _mode: u32) -> Result<(), Errno> {
+        Err(Errno::PermissionDenied)
+    }
+
+    fn stat_kind(&mut self, _path: &str) -> Result<FileKind, Errno> {
+        Ok(FileKind::Regular)
+    }
+
+    fn read(&mut self, _path: &str, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
+        if offset >= self.size {
+            return Ok(0);
+        }
+        let take = u64::try_from(buf.len()).map_or(usize::MAX, |len| {
+            usize::try_from(len.min(self.size - offset)).unwrap_or(0)
+        });
+        for (i, slot) in buf[..take].iter_mut().enumerate() {
+            *slot = (((offset + i as u64) / 16) % 251) as u8;
+        }
+        Ok(take)
+    }
+
+    fn create(&mut self, _path: &str) -> Result<(), Errno> {
+        Err(Errno::PermissionDenied)
+    }
+
+    fn write(&mut self, _path: &str, _offset: u64, _bytes: &[u8]) -> Result<(), Errno> {
+        Err(Errno::PermissionDenied)
+    }
+
+    fn mkdir(&mut self, _path: &str) -> Result<(), Errno> {
+        Err(Errno::PermissionDenied)
+    }
+
+    fn remove_file(&mut self, _path: &str) -> Result<(), Errno> {
+        Err(Errno::PermissionDenied)
+    }
+
+    fn remove_dir(&mut self, _path: &str) -> Result<(), Errno> {
+        Err(Errno::PermissionDenied)
+    }
+
+    fn rename(&mut self, _src: &str, _dst: &str) -> Result<RenameOutcome, Errno> {
+        Err(Errno::PermissionDenied)
+    }
+}
+
+impl FakeFs {
+    /// Give the file at `path` these exact bytes (and a matching listing
+    /// entry), replacing the synthetic `x` fill.
+    fn set_bytes(&mut self, path: &str, bytes: &[u8]) {
+        let size = bytes.len() as u64;
+        self.files.insert(path.to_owned(), bytes.to_vec());
+        self.upsert_entry(
+            parent_of(path),
+            FsEntry {
+                name: basename(path).to_owned(),
+                kind: FileKind::Regular,
+                size,
+                modified: Time64::UNIX_EPOCH,
+            },
+        );
+    }
+}
+
+/// A fixture body of `count` numbered lines (`line number N\n`).
+fn numbered_lines(count: usize) -> String {
+    use core::fmt::Write as _;
+    (1..=count).fold(String::new(), |mut body, i| {
+        // Writing into a String cannot fail.
+        let _ = writeln!(body, "line number {i}");
+        body
+    })
+}
+
+/// Put the file-pane cursor on `name` and press Enter.
+fn open_file(m: &mut Model, fs: &mut FakeFs, name: &str) {
+    m.pane = Pane::Files;
+    m.file_cursor = m
+        .visible_files()
+        .iter()
+        .position(|e| e.name == name)
+        .expect("the fixture lists the entry");
+    handle_event(m, fs, &Event::Enter);
+}
+
+/// The open viewer, asserted to be the text pager.
+fn text_view(m: &Model) -> &crate::view_text::TextView {
+    match &m.viewer {
+        Some(Viewer::Text(view)) => view,
+        other => panic!("expected the text viewer, got {other:?}"),
+    }
+}
+
+/// The open viewer, asserted to be the hex dump.
+fn hex_view(m: &Model) -> &crate::view_hex::HexView {
+    match &m.viewer {
+        Some(Viewer::Hex(view)) => view,
+        other => panic!("expected the hex viewer, got {other:?}"),
+    }
+}
+
+/// Drive the viewer's live scan to completion (bounded, so a broken scan
+/// fails the test instead of hanging it).
+fn run_viewer_job(m: &mut Model, fs: &mut dyn Fs) {
+    for _ in 0..1_000 {
+        let live = match &m.viewer {
+            Some(Viewer::Text(view)) => view.ticking(),
+            Some(Viewer::Hex(view)) => view.ticking(),
+            None => false,
+        };
+        if !live {
+            return;
+        }
+        viewer_tick(m, fs);
+    }
+    panic!("the viewer scan did not finish");
+}
+
+#[test]
+fn enter_auto_picks_text_for_text_and_hex_for_binary() {
+    let mut fs = fixture();
+    fs.set_bytes("/a.rs", b"fn main() {}\n");
+    fs.set_bytes("/big", &[0x7f, b'E', b'L', b'F', 0, 1, 2, 3]);
+    let mut m = model(&mut fs);
+    open_file(&mut m, &mut fs, "a.rs");
+    assert_eq!(m.view, View::Viewer);
+    assert_eq!(text_view(&m).path, "/a.rs");
+    handle_event(&mut m, &mut fs, &Event::Char('q'));
+    assert_eq!(m.view, View::Panes);
+    assert!(m.viewer.is_none());
+    open_file(&mut m, &mut fs, "big");
+    assert_eq!(hex_view(&m).path, "/big");
+}
+
+#[test]
+fn a_refused_head_read_opens_nothing() {
+    let mut fs = fixture().read_fails("/a.rs", Errno::PermissionDenied);
+    let mut m = model(&mut fs);
+    open_file(&mut m, &mut fs, "a.rs");
+    assert_eq!(m.view, View::Panes);
+    assert!(m.viewer.is_none());
+    let message = m.message.clone().expect("a report");
+    assert!(message.contains("PermissionDenied"), "got {message}");
+}
+
+#[test]
+fn the_text_view_renders_pages_and_scrolls() {
+    let mut fs = fixture();
+    fs.set_bytes("/a.rs", b"alpha\nbravo\ncharlie\ndelta\necho\n");
+    let mut m = model(&mut fs);
+    open_file(&mut m, &mut fs, "a.rs");
+    refresh_viewer(&mut m, &mut fs, 3, 40);
+    let mut window = Window::new(Pos::new(0, 0), Size::new(5, 40));
+    render(&m, &mut window);
+    assert!(row_text(&window, 0).starts_with("alpha"));
+    assert!(row_text(&window, 1).starts_with("bravo"));
+    assert!(row_text(&window, 2).starts_with("charlie"));
+    // The status line names the file, the mode, and the place.
+    let status = row_text(&window, 3);
+    assert!(status.starts_with("/a.rs  text"), "got {status}");
+    assert!(status.contains("line 1"), "got {status}");
+    // One row down.
+    handle_event(&mut m, &mut fs, &Event::Down);
+    refresh_viewer(&mut m, &mut fs, 3, 40);
+    render(&m, &mut window);
+    assert!(row_text(&window, 0).starts_with("bravo"));
+    assert_eq!(text_view(&m).top.line, Some(1));
+    // A page down, then Home returns to the top.
+    handle_event(&mut m, &mut fs, &Event::PageDown);
+    refresh_viewer(&mut m, &mut fs, 3, 40);
+    assert_eq!(text_view(&m).top.line, Some(4));
+    handle_event(&mut m, &mut fs, &Event::Home);
+    assert_eq!(text_view(&m).top.line, Some(0));
+    // End lands the last page.
+    handle_event(&mut m, &mut fs, &Event::End);
+    refresh_viewer(&mut m, &mut fs, 3, 40);
+    assert!(text_view(&m).at_end);
+}
+
+#[test]
+fn control_bytes_and_invalid_utf8_render_visibly() {
+    let mut fs = fixture();
+    fs.set_bytes("/a.rs", b"a\x1b[31mb\xff\tc\r\n");
+    let mut m = model(&mut fs);
+    // The invalid byte makes the head sample non-text, so Enter picks
+    // the hex dump; `t` overrides to the text pager.
+    open_file(&mut m, &mut fs, "a.rs");
+    hex_view(&m);
+    handle_event(&mut m, &mut fs, &Event::Char('t'));
+    refresh_viewer(&mut m, &mut fs, 3, 40);
+    let view = text_view(&m);
+    // The escape byte is a visible dot, the invalid byte the replacement
+    // character, the tab an 8-column stop, and the CR of CRLF dropped —
+    // nothing reaches the grid as a raw escape.
+    assert_eq!(view.rows[0].text, "a·[31mb\u{FFFD}        c");
+}
+
+#[test]
+fn long_rows_wrap_and_the_toggle_truncates() {
+    let mut fs = fixture();
+    fs.set_bytes("/a.rs", b"0123456789ABCDEF0123\nshort\n");
+    let mut m = model(&mut fs);
+    open_file(&mut m, &mut fs, "a.rs");
+    refresh_viewer(&mut m, &mut fs, 4, 10);
+    let view = text_view(&m);
+    assert_eq!(view.rows[0].text, "0123456789");
+    assert_eq!(view.rows[1].text, "ABCDEF0123");
+    assert_eq!(view.rows[2].text, "short");
+    // Wrap off: one (truncated-at-render) row per file row.
+    handle_event(&mut m, &mut fs, &Event::Char('w'));
+    refresh_viewer(&mut m, &mut fs, 4, 10);
+    let view = text_view(&m);
+    assert_eq!(view.rows[0].text, "0123456789ABCDEF0123");
+    assert_eq!(view.rows[1].text, "short");
+}
+
+#[test]
+fn goto_line_scans_to_the_target_and_past_end_lands_last() {
+    let mut fs = fixture();
+    let body = numbered_lines(50);
+    fs.set_bytes("/a.rs", body.as_bytes());
+    let mut m = model(&mut fs);
+    open_file(&mut m, &mut fs, "a.rs");
+    handle_event(&mut m, &mut fs, &Event::Char('g'));
+    type_text(&mut m, &mut fs, "42");
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    run_viewer_job(&mut m, &mut fs);
+    assert_eq!(text_view(&m).top.line, Some(41));
+    assert_eq!(m.message.as_deref(), Some("line 42"));
+    // A target past the last line lands on the last row instead.
+    handle_event(&mut m, &mut fs, &Event::Char('g'));
+    type_text(&mut m, &mut fs, "999");
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    run_viewer_job(&mut m, &mut fs);
+    assert_eq!(text_view(&m).top.line, Some(49));
+    // A non-number is refused with nothing moved.
+    handle_event(&mut m, &mut fs, &Event::Char('g'));
+    type_text(&mut m, &mut fs, "abc");
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    assert_eq!(m.message.as_deref(), Some("goto: not a line number"));
+}
+
+#[test]
+fn text_search_finds_across_the_read_boundary_and_repeats() {
+    let mut fs = fixture();
+    // The needle straddles the 4096-byte read window: bytes 4090..4100.
+    let mut body = vec![b'.'; 8192];
+    for i in (80..8192).step_by(80) {
+        body[i] = b'\n';
+    }
+    body[4090..4100].copy_from_slice(b"NEEDLEfour");
+    body[6001..6007].copy_from_slice(b"needle");
+    fs.set_bytes("/a.rs", &body);
+    let mut m = model(&mut fs);
+    open_file(&mut m, &mut fs, "a.rs");
+    handle_event(&mut m, &mut fs, &Event::Char('/'));
+    type_text(&mut m, &mut fs, "needle");
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    run_viewer_job(&mut m, &mut fs);
+    assert_eq!(text_view(&m).last_hit, Some(4090), "case-insensitive hit");
+    // `n` continues past the hit to the second occurrence.
+    handle_event(&mut m, &mut fs, &Event::Char('n'));
+    run_viewer_job(&mut m, &mut fs);
+    assert_eq!(text_view(&m).last_hit, Some(6001));
+    // …and a further `n` reports not found, keeping the place.
+    handle_event(&mut m, &mut fs, &Event::Char('n'));
+    run_viewer_job(&mut m, &mut fs);
+    assert_eq!(m.message.as_deref(), Some("not found"));
+    assert_eq!(text_view(&m).last_hit, Some(6001));
+}
+
+#[test]
+fn the_hex_view_renders_the_classic_dump() {
+    let mut fs = fixture();
+    let mut bytes: Vec<u8> = (0_u8..40).collect();
+    bytes[0] = 0;
+    fs.set_bytes("/big", &bytes);
+    let mut m = model(&mut fs);
+    open_file(&mut m, &mut fs, "big");
+    refresh_viewer(&mut m, &mut fs, 3, 80);
+    let mut window = Window::new(Pos::new(0, 0), Size::new(5, 80));
+    render(&m, &mut window);
+    let first = row_text(&window, 0);
+    assert!(
+        first.starts_with("00000000  00 01 02 03 04 05 06 07  08 09 0a 0b 0c 0d 0e 0f"),
+        "got {first}"
+    );
+    assert!(first.contains("|................|"), "got {first}");
+    // The 33..40 tail row is short: eight bytes, printable ASCII shown.
+    let third = row_text(&window, 2);
+    assert!(
+        third.starts_with("00000020  20 21 22 23 24 25 26 27"),
+        "got {third}"
+    );
+    assert!(third.contains("| !\"#$%&'|"), "got {third}");
+}
+
+#[test]
+fn hex_goto_accepts_decimal_and_hex_and_clamps() {
+    let mut fs = fixture();
+    fs.set_bytes("/big", &[0xAA; 100]);
+    let mut m = model(&mut fs);
+    open_file(&mut m, &mut fs, "big");
+    handle_event(&mut m, &mut fs, &Event::Char('g'));
+    type_text(&mut m, &mut fs, "0x30");
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    assert_eq!(hex_view(&m).top, 0x30);
+    handle_event(&mut m, &mut fs, &Event::Char('g'));
+    type_text(&mut m, &mut fs, "70");
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    assert_eq!(hex_view(&m).top, 64, "row containing byte 70");
+    // Beyond the end clamps to the last row.
+    handle_event(&mut m, &mut fs, &Event::Char('g'));
+    type_text(&mut m, &mut fs, "0xFFFF");
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    assert_eq!(hex_view(&m).top, 96);
+    // Garbage is refused with nothing moved.
+    handle_event(&mut m, &mut fs, &Event::Char('g'));
+    type_text(&mut m, &mut fs, "0xZZ");
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    assert_eq!(hex_view(&m).top, 96);
+    assert_eq!(
+        m.message.as_deref(),
+        Some("goto: not an offset (decimal or 0x-hex)")
+    );
+}
+
+#[test]
+fn hex_search_finds_bytes_and_text_across_the_window_boundary() {
+    let mut fs = fixture();
+    let mut bytes = vec![0_u8; 8192];
+    bytes[4094..4098].copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+    bytes[5000..5004].copy_from_slice(b"Text");
+    fs.set_bytes("/big", &bytes);
+    let mut m = model(&mut fs);
+    open_file(&mut m, &mut fs, "big");
+    handle_event(&mut m, &mut fs, &Event::Char('/'));
+    type_text(&mut m, &mut fs, "0xdeadbeef");
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    run_viewer_job(&mut m, &mut fs);
+    assert_eq!(hex_view(&m).last_hit, Some(4094));
+    assert_eq!(hex_view(&m).top, 4080, "the hit row is on screen");
+    assert_eq!(m.message.as_deref(), Some("found at 0xffe"));
+    // A text pattern matches case-insensitively.
+    handle_event(&mut m, &mut fs, &Event::Char('/'));
+    type_text(&mut m, &mut fs, "tEXT");
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    run_viewer_job(&mut m, &mut fs);
+    assert_eq!(hex_view(&m).last_hit, Some(5000));
+    // An odd-length 0x spelling is refused before anything runs.
+    handle_event(&mut m, &mut fs, &Event::Char('/'));
+    type_text(&mut m, &mut fs, "0xabc");
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    assert_eq!(
+        m.message.as_deref(),
+        Some("search: text, or 0x followed by hex byte pairs")
+    );
+}
+
+#[test]
+fn a_file_past_4_gib_pages_with_full_64_bit_offsets() {
+    let mut fs = SparseFs {
+        size: 5 * 1024 * 1024 * 1024,
+    };
+    let mut m = model(&mut fixture());
+    m.viewer = Some(Viewer::Hex(crate::view_hex::HexView::new(
+        "/huge",
+        5 * 1024 * 1024 * 1024,
+    )));
+    m.view = View::Viewer;
+    handle_event(&mut m, &mut fs, &Event::Char('g'));
+    type_text(&mut m, &mut fs, "0x123456780");
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    assert_eq!(hex_view(&m).top, 0x1_2345_6780);
+    refresh_viewer(&mut m, &mut fs, 2, 80);
+    let mut window = Window::new(Pos::new(0, 0), Size::new(4, 80));
+    render(&m, &mut window);
+    // The offset column widens to the file's own 64-bit reach (nine hex
+    // digits for a 5 GiB file).
+    let first = row_text(&window, 0);
+    assert!(first.starts_with("123456780  "), "got {first}");
+    // End lands the final row of the 5 GiB file.
+    handle_event(&mut m, &mut fs, &Event::End);
+    let expected_top = (5 * 1024 * 1024 * 1024_u64 - 16) - 16;
+    assert_eq!(
+        hex_view(&m).top,
+        expected_top,
+        "last row minus one page row"
+    );
+}
+
+#[test]
+fn the_views_switch_in_place_and_esc_leaves() {
+    let mut fs = fixture();
+    let body = numbered_lines(20);
+    fs.set_bytes("/a.rs", body.as_bytes());
+    let mut m = model(&mut fs);
+    open_file(&mut m, &mut fs, "a.rs");
+    // Down to line 3 (offset 28), then to hex: the dump row containing
+    // that offset (aligned down to 16).
+    handle_event(&mut m, &mut fs, &Event::Down);
+    handle_event(&mut m, &mut fs, &Event::Down);
+    assert_eq!(text_view(&m).top.offset, 28);
+    handle_event(&mut m, &mut fs, &Event::Char('x'));
+    assert_eq!(hex_view(&m).top, 16);
+    // Back to text: snapped to the start of the row containing the hex
+    // top (line 2 at offset 14); goto re-anchors the line number.
+    handle_event(&mut m, &mut fs, &Event::Char('t'));
+    assert_eq!(text_view(&m).top.offset, 14);
+    assert_eq!(text_view(&m).top.line, None, "unknown until re-anchored");
+    // Esc leaves the viewer for the panes.
+    handle_event(&mut m, &mut fs, &Event::Esc);
+    assert_eq!(m.view, View::Panes);
+    assert!(m.viewer.is_none());
+}
+
+#[test]
+fn esc_stops_a_live_viewer_scan_before_leaving() {
+    let mut fs = fixture();
+    fs.set_bytes("/a.rs", &vec![b'a'; 4096]);
+    let mut m = model(&mut fs);
+    open_file(&mut m, &mut fs, "a.rs");
+    handle_event(&mut m, &mut fs, &Event::Char('/'));
+    type_text(&mut m, &mut fs, "zzz");
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    assert!(text_view(&m).ticking());
+    handle_event(&mut m, &mut fs, &Event::Esc);
+    assert!(!text_view(&m).ticking());
+    assert_eq!(m.view, View::Viewer, "the first Esc only stops the scan");
+    handle_event(&mut m, &mut fs, &Event::Esc);
+    assert_eq!(m.view, View::Panes);
+}
+
+#[test]
+fn a_read_refused_mid_view_closes_the_viewer() {
+    let mut fs = fixture();
+    fs.set_bytes("/a.rs", b"alpha\nbravo\n");
+    let mut m = model(&mut fs);
+    open_file(&mut m, &mut fs, "a.rs");
+    fs.read_fail = Some((String::from("/a.rs"), Errno::PermissionDenied));
+    refresh_viewer(&mut m, &mut fs, 3, 40);
+    assert_eq!(m.view, View::Panes);
+    assert!(m.viewer.is_none());
+    let message = m.message.clone().expect("a report");
+    assert!(message.contains("PermissionDenied"), "got {message}");
 }
