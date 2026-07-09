@@ -19,8 +19,12 @@ grammar, vetting filter, table format, encoder, and decoder — shared by the
    (upstream URL/version/date, fetch date, SHA-256 of the raw download,
    licence statement). The refresh diff is human-reviewed like any other
    change.
-2. `cargo xtask devids --write` regenerates the compact tables under
-   `lib/devids/tables/` from the committed snapshots.
+2. `cargo xtask devids --write` regenerates the compact tables from the
+   committed snapshots. Each table is written into its consuming command
+   bundle's `Resources/` directory once the consumer exists
+   (`userland/apps/lspci/Resources/pci.ids.bin`); `usb.ids.bin` stages
+   under `lib/devids/tables/` until `lsusb` lands and moves it into its
+   bundle.
 3. `cargo xtask devids` (no flag; part of `cargo xtask ci`) re-runs the
    converter and fails closed on any drift between snapshot and tables.
 

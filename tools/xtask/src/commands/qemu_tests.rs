@@ -2878,7 +2878,20 @@ const TESTS: &[QemuTest] = &[
             // The pipeline terminating at all (the prompt returning) is the
             // broken-pipe + member-reap witness.
             ("root@rustos ~% ", "seq 1 1000 | wc -c\n"),
-            ("3893", "seq 776001 776005 > /Users/root/nums.txt\n"),
+            // `lspci --help` (plans/DEVICES.md DEVICE1 V2) proves the
+            // resource-carrying bundle end to end: the spawn's load gate
+            // re-hashes the whole on-disk bundle — including the planted
+            // `Resources/pci.ids.bin` table — against the signed `AppInfo`
+            // content hash, so a mis-planted or tampered resource refuses the
+            // spawn and times the run out; the help summary's `PCI/PCIe` on
+            // the transcript (a token no other scripted step emits, immune to
+            // render wrapping) is the witness the tool ran. (The `virt` image
+            // drives virtio-mmio devices, so the tree carries no PCI-function
+            // nodes to list yet — the listing path is host-proven in
+            // `rustos-lspci`'s tests.) Typed before the round-trip `cat`, so
+            // the audit sink's arm-on-`cat` discipline is untouched.
+            ("3893", "lspci --help\n"),
+            ("PCI/PCIe", "seq 776001 776005 > /Users/root/nums.txt\n"),
             ("root@rustos ~% ", "cat < /Users/root/nums.txt\n"),
             ("776005", "exit\n"),
         ],

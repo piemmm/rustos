@@ -22,13 +22,21 @@
 //!    digits plus 1000 newlines of `1..=1000`), output the typed line
 //!    itself never contains, so it proves every byte crossed the kernel
 //!    pipe in order.
-//! 3. `seq 776001 776005 > /Users/root/nums.txt` — the shell pre-opens
+//! 3. `lspci --help` — the resource-carrying `lspci.app` bundle end to
+//!    end (`plans/DEVICES.md` DEVICE1 V2): the spawn's load gate re-hashes
+//!    the whole on-disk bundle — including the planted
+//!    `Resources/pci.ids.bin` table — against the signed `AppInfo` content
+//!    hash, and the help summary's `PCI/PCIe` on the transcript witnesses
+//!    the tool ran. The `virt` image drives virtio-mmio devices, so the
+//!    tree carries no PCI-function nodes to list yet; the listing path is
+//!    host-proven in `rustos-lspci`'s tests.
+//! 4. `seq 776001 776005 > /Users/root/nums.txt` — the shell pre-opens
 //!    the target (create + truncate) in its own table and wires it as the
 //!    child's stdout through the spawn attach block.
-//! 4. `cat < /Users/root/nums.txt` — the round trip back: the shell opens
+//! 5. `cat < /Users/root/nums.txt` — the round trip back: the shell opens
 //!    the file read-only and wires it as `cat`'s stdin; `776005` on the
-//!    transcript is content only step 3's write could have produced.
-//! 5. `exit` — typed only after the content marker appeared.
+//!    transcript is content only step 4's write could have produced.
+//! 6. `exit` — typed only after the content marker appeared.
 //!
 //! ## Why the PASS keys on `cat`'s exit *then* the shell's exit
 //!

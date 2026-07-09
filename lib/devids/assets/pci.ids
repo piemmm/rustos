@@ -1,7 +1,7 @@
 # RustOS vetted snapshot of the public pci.ids database.
 # Imported by `cargo xtask devids --fetch`; do not hand-edit — refetch
-# and re-review instead. The compact lookup tables under
-# lib/devids/tables/ are generated from this file by
+# and re-review instead. The compact lookup table is generated from
+# this file by
 # `cargo xtask devids --write` and drift-checked by `cargo xtask ci`.
 # Upstream URL: https://pci-ids.ucw.cz/v2.2/pci.ids
 # Upstream version: 2026.07.09

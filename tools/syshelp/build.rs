@@ -1,15 +1,18 @@
-//! Discover the command-app bundles' `Help/` trees from the source tree and
-//! emit them as an embedded `[HelpFile]` table.
+//! Discover the command-app bundles' `Help/` trees and `Resources/` files
+//! from the source tree and emit them as embedded `[HelpFile]` /
+//! `[ResourceFile]` tables.
 //!
 //! The image builder plants each command app's internationalised help onto
-//! the read-only `/System/Apps/<name>.app/Help/<locale>/<file>` store. The
-//! *source of truth* for that help is the bundle's own on-disk `Help/`
-//! directory — never a hand-maintained per-bundle list in the image builder,
-//! which would force an edit to a central file every time a bundle is added
-//! (the duplication the charter forbids). This script walks the app roots,
-//! finds every `Help/<locale>/<doc>.md`, and generates an `include_bytes!`
-//! row per document, so adding a bundle's help is dropping files on disk —
-//! the payload is rediscovered on the next build.
+//! the read-only `/System/Apps/<name>.app/Help/<locale>/<file>` store, and
+//! each app's bundle resources onto
+//! `/System/Apps/<name>.app/Resources/<file>`. The *source of truth* for
+//! both is the bundle's own on-disk directory — never a hand-maintained
+//! per-bundle list in the image builder, which would force an edit to a
+//! central file every time a bundle is added (the duplication the charter
+//! forbids). This script walks the app roots, finds every
+//! `Help/<locale>/<doc>.md` and every `Resources/<file>`, and generates an
+//! `include_bytes!` row per file, so adding a bundle's payload is dropping
+//! files on disk — it is rediscovered on the next build.
 //!
 //! A build script is host-only build tooling: a genuine build-environment
 //! failure (a missing `OUT_DIR`, an unreadable source tree) fails the build
@@ -80,6 +83,41 @@ fn main() {
     fs::File::create(&dest)
         .and_then(|mut f| f.write_all(rows.as_bytes()))
         .expect("write generated help table");
+
+    let mut resource_rows = String::from("[\n");
+    for root_rel in APP_ROOTS {
+        let root = workspace.join(root_rel);
+        if !root.is_dir() {
+            continue;
+        }
+        for app in sorted_children(&root) {
+            let resources = root.join(&app).join("Resources");
+            if !resources.is_dir() {
+                continue;
+            }
+            println!("cargo:rerun-if-changed={}", resources.display());
+            let bundle = format!("{app}.app");
+            for file in sorted_children(&resources) {
+                let path = resources.join(&file);
+                if !path.is_file() {
+                    continue;
+                }
+                println!("cargo:rerun-if-changed={}", path.display());
+                let abs = path.to_str().expect("resource path is valid UTF-8");
+                writeln!(
+                    resource_rows,
+                    "    ResourceFile {{ bundle: {bundle:?}, file: {file:?}, bytes: include_bytes!({abs:?}) }},"
+                )
+                .expect("write to String");
+            }
+        }
+    }
+    resource_rows.push(']');
+
+    let dest = PathBuf::from(env("OUT_DIR")).join("resource_files.rs");
+    fs::File::create(&dest)
+        .and_then(|mut f| f.write_all(resource_rows.as_bytes()))
+        .expect("write generated resource table");
 
     println!("cargo:rerun-if-changed=build.rs");
 }

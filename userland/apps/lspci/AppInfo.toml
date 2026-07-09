@@ -1,0 +1,15 @@
+# Signed-AppInfo manifest source for the `lspci` command app
+# (plans/DEVICES.md DEVICE1 V2). Discovered by the build's app-bundle
+# composer; the capability list is the bundle's request, intersected with
+# the launching user's grants. CAP_CONSOLE_WRITE covers the inherited
+# standard output/error streams; CAP_FS_ACCESS reads the tool's own
+# bundle payload (its Help/ documents and the Resources/pci.ids.bin
+# lookup table) through the secured VFS; CAP_SYSINFO_HW gates the
+# HARDWARE_TREE query the listing is rendered from — the tool's whole
+# purpose, so a refusal is reported on stderr and the tool exits rather
+# than fabricating an empty list. It reads no standard input.
+id = "os.rustos.lspci"
+name = "lspci"
+version = "0.1.0"
+kind = "command"
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS", "CAP_SYSINFO_HW"]

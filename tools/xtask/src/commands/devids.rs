@@ -8,8 +8,10 @@
 //!
 //! - `cargo xtask devids` (no arguments; part of `cargo xtask ci`) re-runs
 //!   the converter over the committed snapshots in `lib/devids/assets/` and
-//!   fails closed on any drift against the committed tables in
-//!   `lib/devids/tables/`, exactly like `c-header` and `font-atlas`.
+//!   fails closed on any drift against the committed tables (each inside its
+//!   consuming command bundle's `Resources/` once the consumer exists —
+//!   `userland/apps/lspci/Resources/pci.ids.bin` — else staged under
+//!   `lib/devids/tables/`), exactly like `c-header` and `font-atlas`.
 //! - `cargo xtask devids --write` regenerates the committed tables from the
 //!   committed snapshots.
 //! - `cargo xtask devids --fetch` is **developer-run only** — builds stay
@@ -58,7 +60,10 @@ struct Database {
     licence: &'static str,
     /// Workspace-relative committed snapshot path.
     snapshot: &'static str,
-    /// Workspace-relative committed compact-table path.
+    /// Workspace-relative committed compact-table path: the consuming
+    /// command bundle's `Resources/` file once the consumer exists (so the
+    /// table ships inside the self-contained bundle with no second copy in
+    /// the tree), else a staging home under `lib/devids/tables/`.
     table: &'static str,
 }
 
@@ -71,7 +76,7 @@ const DATABASES: &[Database] = &[
         transport: "HTTPS (TLS verified)",
         licence: "dual GPL-2.0-or-later / BSD-3-Clause (upstream header below)",
         snapshot: "lib/devids/assets/pci.ids",
-        table: "lib/devids/tables/pci.ids.bin",
+        table: "userland/apps/lspci/Resources/pci.ids.bin",
     },
     Database {
         kind: DbKind::Usb,
@@ -106,7 +111,7 @@ pub fn run(ctx: &Context, args: &[std::ffi::OsString]) -> Result<(), String> {
         return run_fetch(ctx);
     }
     if write {
-        eprintln!("xtask: [devids --write] regenerating lib/devids/tables/");
+        eprintln!("xtask: [devids --write] regenerating the compact tables");
         return run_write(ctx);
     }
     eprintln!("xtask: [devids] verifying lib/devids snapshot/table sync");
@@ -187,8 +192,8 @@ fn run_fetch(ctx: &Context) -> Result<(), String> {
             snapshot,
             "# RustOS vetted snapshot of the public {name} database.\n\
              # Imported by `cargo xtask devids --fetch`; do not hand-edit — refetch\n\
-             # and re-review instead. The compact lookup tables under\n\
-             # lib/devids/tables/ are generated from this file by\n\
+             # and re-review instead. The compact lookup table is generated from\n\
+             # this file by\n\
              # `cargo xtask devids --write` and drift-checked by `cargo xtask ci`.\n\
              # Upstream URL: {url}\n\
              # Upstream version: {version}\n\
@@ -371,7 +376,15 @@ mod tests {
     fn committed_snapshots_stay_inside_the_crate_assets() {
         for db in DATABASES {
             assert!(db.snapshot.starts_with("lib/devids/assets/"));
-            assert!(db.table.starts_with("lib/devids/tables/"));
         }
+        // Each compiled table lives inside its consuming command bundle's
+        // `Resources/` directory (the self-contained-bundle home) once the
+        // consumer exists; `usb.ids.bin` stages in `lib/devids/tables/`
+        // until `lsusb` lands and moves it into its bundle.
+        assert_eq!(
+            DATABASES[0].table,
+            "userland/apps/lspci/Resources/pci.ids.bin"
+        );
+        assert_eq!(DATABASES[1].table, "lib/devids/tables/usb.ids.bin");
     }
 }

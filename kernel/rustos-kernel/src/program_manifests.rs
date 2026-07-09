@@ -600,6 +600,15 @@ mod tests {
         const PURE_TOOL_REQUEST: &[CapabilityId] =
             &[CapabilityId::CONSOLE_WRITE, CapabilityId::FS_ACCESS];
 
+        // `lspci` (plans/DEVICES.md DEVICE1 V2): the pure-tool request plus
+        // `CAP_SYSINFO_HW` for the `HARDWARE_TREE` query it renders. Not an
+        // embedded spawn-floor program, so the list lives only in this pin.
+        const LSPCI_REQUEST: &[CapabilityId] = &[
+            CapabilityId::CONSOLE_WRITE,
+            CapabilityId::FS_ACCESS,
+            CapabilityId::SYSINFO_HW,
+        ];
+
         let userland = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../userland");
         let discovered = discover_app_manifests(&userland).expect("discovery walks");
 
@@ -623,6 +632,7 @@ mod tests {
             ("head", AppKind::Command, FILE_TOOL_REQUEST),
             ("login", AppKind::Service, LOGIN_MANIFEST),
             ("ls", AppKind::Command, LS_MANIFEST),
+            ("lspci", AppKind::Command, LSPCI_REQUEST),
             ("man", AppKind::Command, MAN_MANIFEST),
             ("mkdir", AppKind::Command, PURE_TOOL_REQUEST),
             ("mv", AppKind::Command, FILE_TOOL_REQUEST),

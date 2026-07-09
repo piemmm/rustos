@@ -268,6 +268,19 @@ fn build_system_partition(
         ];
         root_image::plant_nested_file(&mut fs, root, &components, doc.bytes)?;
     }
+    // Each command app's bundle resources (e.g. `lspci`'s compiled
+    // ID-database table), exactly as `tools/mkimage` plants them: read from
+    // the bundle's own on-disk `Resources/` source, never a per-bundle list
+    // here, so the signed content hash the load gate recomputes matches.
+    for res in rustos_syshelp::RESOURCE_FILES {
+        let components: [&[u8]; 4] = [
+            b"Apps",
+            res.bundle.as_bytes(),
+            b"Resources",
+            res.file.as_bytes(),
+        ];
+        root_image::plant_nested_file(&mut fs, root, &components, res.bytes)?;
+    }
     // Each program's signed `AppInfo` + `Run` land beside its `Help/` tree
     // (`Apps/<name>.app/…`, `Services/<name>.app/…`), exactly as
     // `tools/mkimage` plants them, so every on-disk bundle the vertical

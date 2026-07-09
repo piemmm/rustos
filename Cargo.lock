@@ -1399,6 +1399,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-lspci"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-devids",
+ "rustos-help",
+ "rustos-procinfo",
+ "rustos-rt",
+]
+
+[[package]]
 name = "rustos-man"
 version = "0.0.0"
 dependencies = [

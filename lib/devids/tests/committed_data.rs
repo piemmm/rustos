@@ -1,7 +1,10 @@
 //! The committed data files are load-bearing: the snapshots under `assets/`
-//! must pass the vetting filter, the tables under `tables/` must be exactly
-//! their compile (the same drift the `cargo xtask devids` CI gate rejects),
-//! and well-known ids must resolve to their well-known names.
+//! must pass the vetting filter, the committed tables (each inside its
+//! consuming command bundle's `Resources/` once the consumer exists —
+//! `userland/apps/lspci/Resources/pci.ids.bin` — else staged under
+//! `tables/`) must be exactly their compile (the same drift the
+//! `cargo xtask devids` CI gate rejects), and well-known ids must resolve
+//! to their well-known names.
 
 use std::path::PathBuf;
 
@@ -17,8 +20,15 @@ fn committed(kind: DbKind) -> (Vec<u8>, Vec<u8>) {
         DbKind::Usb => "usb.ids",
     };
     let snapshot = std::fs::read(crate_root().join("assets").join(name)).expect("snapshot");
-    let table =
-        std::fs::read(crate_root().join("tables").join(format!("{name}.bin"))).expect("table");
+    // The compiled pci table ships inside the `lspci` bundle; the usb table
+    // stages here until `lsusb` lands and moves it into its bundle.
+    let table_path = match kind {
+        DbKind::Pci => crate_root()
+            .join("../../userland/apps/lspci/Resources")
+            .join(format!("{name}.bin")),
+        DbKind::Usb => crate_root().join("tables").join(format!("{name}.bin")),
+    };
+    let table = std::fs::read(table_path).expect("table");
     (snapshot, table)
 }
 

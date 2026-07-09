@@ -209,11 +209,12 @@ fn build_bundle(ctx: &Context, app: &DiscoveredApp) -> Result<BuiltAppBundle, St
     let bundle_dir = app.manifest.bundle_dir();
 
     // The signed content hash covers every file the bundle ships except
-    // `AppInfo` itself: the `Run` rxe plus the bundle's `Help/` documents,
-    // exactly as the planters lay them down (the help bytes come from the
-    // same discovered source the planters plant, so image and signature
-    // cannot drift). Paths are bundle-relative and byte-sorted, the order
-    // the canonical digest framing requires.
+    // `AppInfo` itself: the `Run` rxe plus the bundle's `Help/` documents
+    // and `Resources/` files, exactly as the planters lay them down (the
+    // help and resource bytes come from the same discovered source the
+    // planters plant, so image and signature cannot drift). Paths are
+    // bundle-relative and byte-sorted, the order the canonical digest
+    // framing requires.
     let mut contents: Vec<(String, &[u8])> = rustos_syshelp::HELP_FILES
         .iter()
         .filter(|doc| doc.bundle == bundle_dir)
@@ -222,6 +223,15 @@ fn build_bundle(ctx: &Context, app: &DiscoveredApp) -> Result<BuiltAppBundle, St
             (path, doc.bytes)
         })
         .collect();
+    contents.extend(
+        rustos_syshelp::RESOURCE_FILES
+            .iter()
+            .filter(|res| res.bundle == bundle_dir)
+            .map(|res| {
+                let path = format!("{}/{}", BundleEntry::Resources.as_str(), res.file);
+                (path, res.bytes)
+            }),
+    );
     contents.push((BundleEntry::Run.as_str().to_string(), run.as_slice()));
     contents.sort_by(|a, b| a.0.cmp(&b.0));
     let digests: Vec<BundleFileDigest<'_>> = contents

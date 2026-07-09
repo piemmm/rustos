@@ -127,6 +127,36 @@ boundary, self-vs-global query routing, the self-scope advisory record
 walk), and the denied, malformed, truncated, and dead-console
 fail-closed paths.
 
+## `lspci` — list discovered PCI/PCIe devices (`userland/apps/lspci`)
+
+`rustos-lspci` is the `pciutils` `lspci` over what the RustOS model
+actually carries (`plans/DEVICES.md` DEVICE1 V2, `AGENTS.md` §16.7): one
+line per discovered PCI/PCIe function — its hardware-tree node id, class
+name, and vendor + device names. The inventory is the hardware tree read
+through the `CAP_SYSINFO_HW`-gated `sysinfo-v1` `HARDWARE_TREE` query
+(the shared `rustos_procinfo::call` client — never a `/proc` and never a
+kernel bypass), decoded fail-closed as whole `HwNode` records; a refused
+query defeats the tool's purpose, so the reason lands on standard error
+and nothing is fabricated. Names resolve through `lib/devids` from the
+vetted `pci.ids` table the bundle ships as `Resources/pci.ids.bin` (data
+on the volume, covered by the signed `AppInfo` content hash — never
+`include_bytes!`); an identity the database lacks renders numerically
+(`Vendor 8086`, `Device 2922`), with the count advised on fd 3
+(`pci.names_unresolved`, `AGENTS.md` §20.1), and a missing or invalid
+table degrades the whole listing to numeric ids with the reason on
+standard error. `-n`/`-nn` select the numeric modes, `-v` lists the
+node's declared resources (the capability-grant requests the tree
+records), `-t` renders the bus topology, and `-d
+[<vendor>]:[<device>]`/`-s <node>` filter. Documented divergences:
+RustOS records no `bus:device.function` triple (the address is the
+stable node id, `#<node>`), no subsystem ids, and no `-k` until the
+system publishes driver-binding records. Manifest: `CAP_CONSOLE_WRITE` +
+`CAP_FS_ACCESS` + `CAP_SYSINFO_HW`. `cargo test -p rustos-lspci` drives
+the parser, the naming/fallback/filter/tree/verbose renders, the
+fail-closed reply and refusal paths, and the fd-3 record against a
+canned tree and a fixture database compiled through the real
+`lib/devids` pipeline, plus the thirteen-locale `OPTIONS` pinning.
+
 ## `ps` — list processes (`userland/apps/ps`)
 
 `rustos-ps` is the POSIX-named process lister. Like `sysinfo`, it is a

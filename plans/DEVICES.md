@@ -178,18 +178,20 @@ adding it updates `AGENTS.md` §3 and `PLAN.md` in the same change, §6):
   the database has no entry, matching `lspci`'s `Device <id>` form) —
   with the established options implemented over what the model carries:
   `-n` (numeric), `-nn` (names + ids), `-d <vendor>:<device>` and
-  `-s <slot>` filters, `-k` (bound driver bundle, from `devmgr`'s
-  binding records surfaced through the existing store/sysinfo path),
-  `-v` (the node's resources: MMIO windows, IRQ lines — the grant
-  *requests* the tree records, no secrets), `-t` (tree view). Where
-  RustOS's model genuinely lacks a field Linux has (e.g. subsystem ids —
-  the hardware tree does not record them today) the option degrades
-  honestly rather than fabricating; extending `hwtree` with subsystem
-  ids is a deliberate carve-out for a later ABI revision, not smuggled in
-  here (§18.1).
+  `-s <slot>` filters, `-v` (the node's resources: MMIO windows, IRQ
+  lines — the grant *requests* the tree records, no secrets), `-t` (tree
+  view). Where RustOS's model genuinely lacks a field Linux has the
+  option is withheld or degrades honestly rather than fabricating:
+  subsystem ids are not recorded by the hardware tree today (extending
+  `hwtree` is a deliberate carve-out for a later ABI revision, not
+  smuggled in here, §18.1), and `-k` (bound driver bundle) is not
+  offered until the system publishes driver-binding records through the
+  store/sysinfo path — a clear unknown-option error beats a flag that
+  cannot be served honestly.
 - **`stdinfo`:** additive records only (§20.1) — e.g. an `omission`
   record when unnamed devices were rendered numerically, with the
-  database snapshot version in `ai` context.
+  unnamed count and whether the database loaded in `ai` context (the
+  compiled table deliberately carries no upstream version string).
 - Full `Help/` tree (en-US canonical), rustdoc, and a
   `docs/src/userland/` page in the same change (§13, §16.5).
 
@@ -218,19 +220,48 @@ Each increment ends green on the whole-project gate (§7).
   `subclass`/`prog_if`); the xtask subcommand (`--fetch` / `--write` /
   verify) imports with full provenance headers and drift-checks as a
   `cargo xtask ci` static gate; the vetted snapshots live in
-  `lib/devids/assets/`, the generated tables in `lib/devids/tables/`; the
-  `fuzz_devids` harness covers both untrusted surfaces. Reality-driven
-  decisions: usb.ids is fetched over upstream's canonical HTTP URL (no
-  valid TLS offered) with SHA-256 + review as integrity; a stray
-  ISO-8859-1 byte in usb.ids is deterministically promoted to UTF-8 and
-  recorded in the provenance header; auxiliary-section ids accept 1–4 hex
-  digits of either case (upstream publishes uppercase HUT usages) while
-  every emitted scope stays exact-width lowercase; PCI subsystem entries
-  and the auxiliary tables are validated but not encoded (no consumer
-  renders them). §3/PLAN.md carry the crate and subcommand.
-- **V2 — `lspci`.** The bundle, renderer, options, `Help/`, docs, host
-  unit tests over a canned hardware tree + database fixture, and a QEMU
-  vertical listing the virt machine's discovered PCI devices.
+  `lib/devids/assets/`, each generated table in its consuming bundle's
+  `Resources/` (V2; `usb.ids.bin` stages in `lib/devids/tables/` until
+  V3); the `fuzz_devids` harness covers both untrusted surfaces.
+  Reality-driven decisions: usb.ids is fetched over upstream's canonical
+  HTTP URL (no valid TLS offered) with SHA-256 + review as integrity; a
+  stray ISO-8859-1 byte in usb.ids is deterministically promoted to
+  UTF-8 and recorded in the provenance header; auxiliary-section ids
+  accept 1–4 hex digits of either case (upstream publishes uppercase HUT
+  usages) while every emitted scope stays exact-width lowercase; PCI
+  subsystem entries and the auxiliary tables are validated but not
+  encoded (no consumer renders them). §3/PLAN.md carry the crate and
+  subcommand.
+- **V2 — `lspci`. Done.** `userland/apps/lspci`: the pure engine
+  (fail-closed `HwNode` decode, stable parent-chain bus order, the
+  `-n`/`-nn`/`-v`/`-t`/`-d`/`-s` surface, numeric fallbacks, the
+  `pci.names_unresolved` fd-3 advisory) over the shared
+  `rustos_procinfo::call`/`Output`/`HelpSource` seams; the freestanding
+  `Run` loads `Resources/pci.ids.bin` through the VFS and degrades to
+  numeric ids (reason on stderr) on a missing/invalid table, and treats a
+  refused `CAP_SYSINFO_HW` as fatal with its reason. Thirteen-locale
+  `Help/` with the switch-pinning test; host unit tests run over a canned
+  tree + a fixture database compiled through the real `lib/devids`
+  pipeline. Reality-driven decisions: a function's address is its stable
+  hardware-tree node id (`#<node>`, the lsusb-style documented
+  divergence — the tree records no BDF); `-k` is withheld (no
+  driver-binding records exist to serve it honestly, §1.3); the compiled
+  pci table moved into the bundle (`userland/apps/lspci/Resources/`, one
+  tree copy, `cargo xtask devids` retargeted; `usb.ids.bin` stages in
+  `lib/devids/tables/` until V3 moves it into `lsusb.app`). Enabling
+  infrastructure landed with it: generic bundle-`Resources/` discovery
+  (`rustos_syshelp::RESOURCE_FILES` — build-discovered from each crate's
+  on-disk `Resources/`, never a per-bundle list) feeding the signed
+  `AppInfo` content digest and both planters (`tools/mkimage`, the QEMU
+  encrypted-root fixture); the kernel load gate already re-hashes the
+  whole bundle, so a tampered resource refuses the spawn. QEMU coverage:
+  the SP10b pipeline vertical spawns `lspci --help` from the planted
+  store, proving the resource-carrying bundle through the content-hash
+  gate end to end; the emulated aarch64 `virt` image drives virtio-mmio
+  devices and publishes no PCI-function nodes yet, so the full listing is
+  host-proven and a live-listing vertical rides the first emulated
+  PCI-function target that carries the app store (the §16.7-style
+  "where the emulated path exists" principle V3 already states).
 - **V3 — `lsusb`.** As V2 for the USB view, including the topology
   render; QEMU vertical where the emulated bus path exists, metal
   acceptance on the Pi 4 chain otherwise.

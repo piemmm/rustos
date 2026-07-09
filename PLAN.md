@@ -4098,7 +4098,7 @@ per-increment guarantees.
 
 ## DEVICES — device inventory commands + USB mass storage (`plans/DEVICES.md`)
 
-**Status: in progress (DEVICE1 V1 done; V2–V3 and DEVICE2 remain).**
+**Status: in progress (DEVICE1 V1–V2 done; V3 and DEVICE2 remain).**
 DEVICE1 adds the `lspci` and `lsusb` system command apps: they render the
 discovered PCI/USB nodes from the existing `CAP_SYSINFO_HW`-gated
 hardware-tree query, naming devices through the `lib/devids` lookup crate
@@ -4116,7 +4116,10 @@ rejection, fixed size/name/entry bounds), and the compact-table codec
 validated view) — plus the `cargo xtask devids` pipeline: the committed
 snapshots under `lib/devids/assets/` carry provenance headers (upstream
 URL/version/date, fetch date, raw SHA-256, transport/encoding statements,
-licence), `--write` regenerates `lib/devids/tables/`, the no-flag verify is
+licence), `--write` regenerates the compact tables (each written into its
+consuming command bundle's `Resources/` once the consumer exists —
+`userland/apps/lspci/Resources/pci.ids.bin`; `usb.ids.bin` stages under
+`lib/devids/tables/` until `lsusb` lands), the no-flag verify is
 a `ci` static gate, and `--fetch` imports (pci.ids over TLS; usb.ids over
 upstream's canonical HTTP URL — upstream offers no valid TLS endpoint — with
 integrity from the pinned SHA-256 + reviewed diff, and any stray ISO-8859-1
@@ -4124,7 +4127,16 @@ byte deterministically promoted to UTF-8 and recorded). The `fuzz_devids`
 harness (vetting parser + table decoder) is registered with
 `cargo xtask fuzz`. PCI subsystem entries and the auxiliary usb.ids sections
 are validated but deliberately not encoded: no consumer renders them (the
-hardware tree records no subsystem ids). DEVICE2 adds bulk transfers to
+hardware tree records no subsystem ids). V2 (done) delivered the `lspci`
+command app (`userland/apps/lspci`): the hardware tree via the shared
+`rustos_procinfo::call` `HARDWARE_TREE` client, names via the bundled
+`Resources/pci.ids.bin` table (read at runtime through the VFS, covered by
+the signed `AppInfo` content hash), the `pciutils` option surface over what
+the model carries (`-n`/`-nn`/`-v`/`-t`/`-d`/`-s`; addresses are stable
+hardware-tree node ids, `-k` withheld until driver-binding records exist),
+thirteen-locale `Help/`, and generic build-side bundle-`Resources/`
+discovery (`rustos_syshelp::RESOURCE_FILES` → AppInfo digest + both
+planters). DEVICE2 adds bulk transfers to
 the URB transport, a `drivers/storage/usb_msd` Bulk-Only-Transport class
 driver, and the `volmgr` volume manager that lands the still-open volume
 forest (`id::` roots) and automounts hotplugged filesystems into the
