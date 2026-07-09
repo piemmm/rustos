@@ -8,7 +8,8 @@
 //! `/System/Drivers/` path. On boot the test discovers the board from the
 //! embedded `virt` device tree, enables the identity MMU + EL1 vectors,
 //! builds a live `FrameAllocator`, publishes the reply `Port` (send-gated on
-//! a driver-class capability) into a live `RwLock<PortRegistry>`, installs
+//! a driver-class capability) into a live `RwLock<PortRegistry>` — both the
+//! endpoint binding and its well-known port name — installs
 //! the production `KernelDispatchHook` through a `DispatchCallbackSlot`, and
 //! spawns the stub through the production parameterised
 //! `Aarch64ProcessSpawn::spawn_with` via the exported `KernelSpawnCtx` admit
@@ -18,7 +19,9 @@
 //! The host side then drives the cooperative `step` loop, polling
 //! `Port::recv` between steps under a bounded budget — the budget-bounded
 //! cooperative wait of the Stage 4.HW handshake. The spawned stub reads
-//! `arg(1)`, sends `DriverRegisterReply::registered(...)` over the
+//! `arg(1)`, resolves the well-known reply port name from `arg(2)` over the
+//! production `port_resolve` syscall (refusing to proceed unless it names
+//! the same endpoint), sends `DriverRegisterReply::registered(...)` over the
 //! production `ipc_send` syscall (caller-context resolution, copy-in from
 //! its own isolated address space, capability-gated `Port::send`), and
 //! exits. PASS once the decoded reply round-trips the stub's pinned handle;

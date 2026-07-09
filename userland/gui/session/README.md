@@ -241,8 +241,11 @@ Relaying the active theme to the window manager and apps over live IPC (the
 event loop, routing policy, surface glue, and the `DeviceInputSource` /
 `KeyboardInputSource` that feed it live pointer and keyboard streams now all
 exist), wiring `IpcInputChannel`'s `MessagePort` to the live `ipc_recv` syscall
-once the kernel-side named-port registry lands (the IPC framing, validation, and
-fail-closed fallbacks are done and tested in-memory), resolving launcher /
+— the kernel-side named-port registry and the `port_resolve` name→endpoint
+syscall are in place, so what remains is creating, publishing, and feeding the
+desktop input ports kernel-side and binding the channel to the resolved
+endpoint (the IPC framing, validation, and fail-closed fallbacks are done and
+tested in-memory) — resolving launcher /
 session-control actions once the process and window-manager capabilities are
 wired (deferred Stage 6 work), and the VFS-backed `GraphicsAssetReader` that
 reads `/System/Graphics` on a running system (the in-memory-tested loader and

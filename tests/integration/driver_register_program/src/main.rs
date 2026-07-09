@@ -5,21 +5,26 @@
 //! The consuming vertical (`tests/integration/driver_spawn_qemu_aarch64`)
 //! spawns this program through the production parameterised spawn path
 //! (`Aarch64ProcessSpawn::spawn_with`) with the argument vector
-//! `[b"drvstub", <reply endpoint id, ASCII decimal>]` — exactly the shape
-//! the driver host hands a spawned driver process. The stub:
+//! `[b"drvstub", <reply endpoint id, ASCII decimal>, <reply port name>]`
+//! — exactly the shape the driver host hands a spawned driver process. The
+//! stub:
 //!
 //! 1. reads `arg(1)` from the validated startup vector
 //!    (`rustos_rt::arg`, published by `_start` before `main` runs);
 //! 2. parses it as the decimal reply endpoint id;
-//! 3. enumerates its kernel-minted device-resource grants through the
+//! 3. resolves the well-known port name handed over in `arg(2)` through
+//!    the production `port_resolve` syscall and refuses to proceed unless
+//!    it names the same endpoint — the publish → resolve path a process
+//!    uses to find a well-known service port it was not handed directly;
+//! 4. enumerates its kernel-minted device-resource grants through the
 //!    `resource_grants` syscall and refuses to proceed unless exactly one
 //!    well-formed register-window grant was delivered (handle 1, MMIO
 //!    kind, non-zero length) — the way a user-space driver learns the
 //!    windows its matched node requested;
-//! 4. sends a `DriverRegisterReply::registered` record over the
+//! 5. sends a `DriverRegisterReply::registered` record over the
 //!    production `ipc_send` syscall (kernel-side capability check +
 //!    copy-in);
-//! 5. returns 0, which `rustos-rt` routes through the `exit` syscall.
+//! 6. returns 0, which `rustos-rt` routes through the `exit` syscall.
 //!
 //! Each failure path returns a distinct non-zero diagnostic so the
 //! vertical fails loudly: the reply never arrives
@@ -80,6 +85,23 @@ mod program {
         let Some(endpoint) = parse_u64(raw) else {
             return 11;
         };
+
+        // The vertical also published the reply endpoint under a
+        // well-known port name and handed the name over as arg(2).
+        // Resolve it through the production `port_resolve` syscall
+        // (copy-in, grammar validation, registry lookup) and refuse to
+        // proceed unless it names the same endpoint — the name path is
+        // how a process finds a well-known service port it was not
+        // handed directly.
+        let Some(name) = rustos_rt::arg(2) else {
+            return 19;
+        };
+        let Ok(resolved) = u64::try_from(rustos_rt::port_resolve(name)) else {
+            return 20;
+        };
+        if resolved != endpoint {
+            return 21;
+        }
 
         // Verify the spawn minted and delivered this driver's device-
         // resource grant before replying: a user-space driver reaches its

@@ -560,6 +560,10 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn port_resolve(&self, _c: &CallerContext<'_>, _name: u64, _name_len: usize) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
     fn fs_chdir(&self, _c: &CallerContext<'_>, _path: u64, _path_len: usize) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)

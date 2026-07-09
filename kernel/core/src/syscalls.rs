@@ -81,13 +81,13 @@ use rustos_abi::sysinfo::{
 };
 use rustos_abi::{
     decode_log_record, BootId, CapabilityId, DescriptorTable, DirEntry, Errno, FdWire, FileStat,
-    InputMode, IntrospectDomain, IrqHandle, LimitKind, MapFlags, OpenFlags, ProcId, ProcessStart,
-    RandomFlags, ResourceLimit, Signal, SpawnAttach, StreamMode, SyscallNumber, Time64,
-    UnlinkFlags, WaitFlags, WaitSetOp, WaitSourceKind, WallClockReading, WallTimeState,
+    InputMode, IntrospectDomain, IrqHandle, LimitKind, MapFlags, OpenFlags, PortName, ProcId,
+    ProcessStart, RandomFlags, ResourceLimit, Signal, SpawnAttach, StreamMode, SyscallNumber,
+    Time64, UnlinkFlags, WaitFlags, WaitSetOp, WaitSourceKind, WallClockReading, WallTimeState,
     BOOT_ID_LEN, CONSOLE_INHERIT, FS_IO_MAX, FS_NAME_MAX, FS_PATH_MAX, LOG_FIELDS_MAX,
-    LOG_RECORD_MAX, PROCESS_START_MAX_TOTAL_LEN, PROC_ID_LEN, RANDOM_REQUEST_MAX_BYTES,
-    RESOURCE_REF_MAX, SPAWN_ATTACH_LEN, SPAWN_UID_INHERIT, TERMINAL_SIZE_WIRE_LEN,
-    WAITSET_CHILD_ANY, WAIT_PID_ANY,
+    LOG_RECORD_MAX, PORT_NAME_MAX_LEN, PROCESS_START_MAX_TOTAL_LEN, PROC_ID_LEN,
+    RANDOM_REQUEST_MAX_BYTES, RESOURCE_REF_MAX, SPAWN_ATTACH_LEN, SPAWN_UID_INHERIT,
+    TERMINAL_SIZE_WIRE_LEN, WAITSET_CHILD_ANY, WAIT_PID_ANY,
 };
 use rustos_caps::CapabilitySet;
 use rustos_kernel_ipc::{
@@ -5432,6 +5432,44 @@ where
         Ok(0)
     }
 
+    fn port_resolve(
+        &self,
+        caller: &CallerContext<'_>,
+        name: u64,
+        name_len: usize,
+    ) -> SyscallResult {
+        // Bound the copy before staging anything: a length outside the
+        // name grammar's bound can never resolve, so it is refused before
+        // any user memory is read (the cheap-reject shape `ipc_send` uses
+        // for an oversize payload).
+        if name_len == 0 || name_len > PORT_NAME_MAX_LEN {
+            return Err(Errno::LengthOutOfRange);
+        }
+
+        // Copy the name bytes in through the validated `copy_from_user`
+        // boundary. A caller with no registered address space fails closed
+        // with the same `BadAddress` an actual fault produces, never
+        // leaking which case occurred.
+        let mut buf = [0u8; PORT_NAME_MAX_LEN];
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_in(space, physmap, VirtAddr::new(name), &mut buf[..name_len])
+        }) {
+            Some(Ok(())) => {}
+            Some(Err(err)) => return Err(copy_fault_errno(err)),
+            None => return Err(Errno::BadAddress),
+        }
+
+        // Validate the grammar before the registry is consulted, and fail
+        // closed on a miss. Resolution grants nothing: the returned
+        // endpoint id is only a name for `ipc_send`/`ipc_recv`, where the
+        // per-send capability check and the mailbox bounds still apply.
+        let port_name = PortName::from_ascii(&buf[..name_len])?;
+        match self.ipc.read().resolve(&port_name) {
+            Some(id) => Ok(id.0),
+            None => Err(Errno::NotFound),
+        }
+    }
+
     fn fs_chdir(&self, caller: &CallerContext<'_>, path: u64, path_len: usize) -> SyscallResult {
         // The dispatcher already checked `CAP_FS_ACCESS` and that `path` is a
         // non-null `UserPtr`. `copy_path_in` copies the path in and resolves
@@ -7559,6 +7597,214 @@ mod tests {
         );
         assert_eq!(h.ipc_recv(&ctx, 1, 0x1000, 64), Err(Errno::BadAddress));
         assert_eq!(ipc.read().lookup(EndpointId(1)).expect("bound").len(), 1);
+    }
+
+    /// `port_resolve` of a published name copies the name in from the
+    /// caller's address space, validates it, and returns the endpoint the
+    /// registry bound it to — the value `ipc_send`/`ipc_recv` then take.
+    #[test]
+    fn port_resolve_of_published_name_returns_the_endpoint() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let name = b"desktop.pointer";
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, name);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        register_port(&ipc, 7, sink);
+        assert_eq!(
+            ipc.write().publish_name(
+                PortName::from_ascii(name).expect("well-formed name"),
+                EndpointId(7),
+                sink,
+            ),
+            Ok(())
+        );
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(h.port_resolve(&ctx, 0x1000, name.len()), Ok(7));
+    }
+
+    /// `port_resolve` of a well-formed name nothing is published under
+    /// fails closed with `NotFound`.
+    #[test]
+    fn port_resolve_of_unpublished_name_is_not_found() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let name = b"desktop.pointer";
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, name);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        register_port(&ipc, 7, sink);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(
+            h.port_resolve(&ctx, 0x1000, name.len()),
+            Err(Errno::NotFound)
+        );
+    }
+
+    /// `port_resolve` refuses bytes outside the `PortName` grammar before
+    /// the registry is consulted: an uppercase first byte is `OutOfRange`
+    /// (`from_ascii`'s alphabet refusal), never a lookup.
+    #[test]
+    fn port_resolve_of_malformed_name_is_refused() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let name = b"Desktop.pointer";
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, name);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(
+            h.port_resolve(&ctx, 0x1000, name.len()),
+            Err(Errno::OutOfRange)
+        );
+    }
+
+    /// `port_resolve` bounds the length before any user memory is read: a
+    /// zero length and a length above `PORT_NAME_MAX_LEN` are both
+    /// `LengthOutOfRange`, even for a caller with no registered address
+    /// space (the bound is checked first).
+    #[test]
+    fn port_resolve_with_out_of_bound_length_is_refused_before_the_copy() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(
+            h.port_resolve(&ctx, 0x1000, 0),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert_eq!(
+            h.port_resolve(&ctx, 0x1000, PORT_NAME_MAX_LEN + 1),
+            Err(Errno::LengthOutOfRange)
+        );
+    }
+
+    /// `port_resolve` with a faulting name pointer fails closed with
+    /// `BadAddress` — the unmapped page is refused at the copy boundary.
+    #[test]
+    fn port_resolve_with_faulting_pointer_is_bad_address() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        // Page 2 (`0x2000`) is unmapped in the caller's space.
+        assert_eq!(h.port_resolve(&ctx, 0x2000, 8), Err(Errno::BadAddress));
+    }
+
+    /// `port_resolve` from a caller with no registered address space fails
+    /// closed with the same `BadAddress` an actual fault produces, never
+    /// leaking which case occurred.
+    #[test]
+    fn port_resolve_without_registered_aspace_is_bad_address() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(3, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(3),
+            caps: &caps,
+        };
+
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(h.port_resolve(&ctx, 0x1000, 8), Err(Errno::BadAddress));
     }
 
     /// Stage `set`'s wire form (`CapabilitySet::WIRE_LEN` bytes) at the

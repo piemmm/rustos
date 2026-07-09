@@ -1847,6 +1847,28 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // Rewrites an inode's permission bits; audited.
         audit: true,
     },
+    SyscallSpec {
+        number: SyscallNumber::PORT_RESOLVE,
+        name: "port_resolve",
+        arg_count: 2,
+        args: [
+            // The ASCII name bytes; validated against the `PortName`
+            // grammar kernel-side before the registry is consulted.
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::IpcEndpoint,
+        // Unprivileged: resolving a name grants nothing — every send is
+        // still capability-checked at the port, and publication is a
+        // kernel-side bind-authority-checked operation. Not audited: a
+        // pure observer, like `cap_query` and `clock_get`.
+        required_capability: None,
+        audit: false,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

@@ -259,6 +259,9 @@ and halts. No silent recovery — `AGENTS.md` §5.4.5.
 * The signing-key authority for capability tokens. `lib/crypto` already
   ships the verifier; the per-installation authority key generation
   lives in the installer (Stage 8 / `AGENTS.md` §11.5).
-* IPC named-port registry. See the deferred items in PLAN.md
-  "Stage 2.7 follow-up" — the `ipc_send`/`ipc_recv` handlers map to
-  `Errno::NotFound` until the registry lands.
+* IPC named-port registry — since landed: `kernel/ipc::PortRegistry` is
+  composed into `KernelState`, the `ipc_send`/`ipc_recv` handlers resolve
+  endpoints against it (an unbound endpoint fails closed with
+  `Errno::NotFound`), and the `port_resolve` syscall resolves a published
+  `PortName` from user space (see
+  [the IPC page](../architecture/ipc.md#well-known-names)).

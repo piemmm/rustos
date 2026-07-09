@@ -138,6 +138,21 @@ every name that resolved to `id` (one `PORT_NAME_WITHDRAWN` each) before
 destroying the port, so a resolution can never dangle. A name grants no
 authority of its own; the per-send capability check is unchanged.
 
+User space reaches the index through the `port_resolve` syscall
+(`SyscallNumber::PORT_RESOLVE`): the kernel bounds the supplied length
+against `PORT_NAME_MAX_LEN` before touching user memory, copies the name
+bytes in through the validated `copy_from_user` boundary, validates them
+with `PortName::from_ascii`, and resolves them against the live registry
+— returning the bound `EndpointId` for `ipc_send` / `ipc_recv`, or
+`Errno::NotFound` for an unpublished name. Like the other pure observers
+(`cap_query`, `clock_get`) it is unprivileged and unaudited: resolving a
+name grants nothing, publication is a kernel-side bind-authority-checked
+operation, and every send to the resolved endpoint is still
+capability-checked at the port. The aarch64 driver-spawn QEMU vertical
+exercises the whole path live: the test kernel publishes its reply
+endpoint under a well-known name and the spawned stub resolves it over
+the syscall before replying.
+
 A `PortName` is a non-empty, ≤ 31-byte ASCII string that starts with a
 lowercase letter and continues with lowercase letters, digits, `'.'`, or
 `'_'`, with no trailing `'.'` and no `".."`. The constrained alphabet

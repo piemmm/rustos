@@ -121,6 +121,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  72 | `console_foreground` | `u32 fd`, `i32 pid`               | `errno`       | `CAP_CONSOLE_READ` | yes |
 |  73 | `pipe_create`  | `user_ptr` (out: two `u32` fds)         | `errno`       | —               | no    |
 |  74 | `fs_set_mode`  | `user_ptr` (path), `len`, `u32 mode`    | `errno`       | `CAP_FS_ACCESS` | yes   |
+|  75 | `port_resolve` | `user_ptr` (name), `len`                | `endpoint`    | —               | no    |
 
 (Syscall numbers 39–45 — `msi_alloc`, `shm_create`/`shm_map`/`shm_unmap`,
 `waitset_create`/`waitset_ctl`/`waitset_wait` — are defined in
@@ -161,6 +162,18 @@ its mode (write access does not imply chmod, and holding a capability grants
 no override), the covering mount must be writable, and a node carrying a
 `required_cap` gate demands that capability for this change as for any other
 access. The `chmod` command app and `fstree`'s mode editor are its callers.
+
+`port_resolve` (no. 75) resolves a published port name to its live IPC
+endpoint id — how a process reaches a *well-known* service port (a desktop
+input feed, a system service) without a compiled-in endpoint number. The
+kernel bounds the length against `PORT_NAME_MAX_LEN` before touching user
+memory, copies the name in through the validated `copy_from_user` boundary,
+validates it with `PortName::from_ascii`, and resolves it against the live
+named-port registry ([the IPC page](./ipc.md#well-known-names)); an
+unpublished name fails closed with `NotFound`. Like the other pure
+observers it is unprivileged and unaudited — resolution grants nothing, and
+every send to the returned endpoint is still capability-checked at the
+port.
 
 `resource_open` (no. 67) is the resource-reference analogue of `fs_open`
 (`plans/ALIAS.md`, `.junie/PREREQUISITES2.md` P5). A resource reference

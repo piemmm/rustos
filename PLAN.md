@@ -2764,7 +2764,13 @@ Shipped (headless-testable, model + renderer over injected seams):
   light/dark switch, `DesktopShell` event loop / `TaskBridge`).
 - Two default apps (filesystem browser, terminal emulator) — model + renderer.
 - `kernel/ipc::PortRegistry` named-port registry composed into `KernelState`;
-  `ipc_send`/`ipc_recv` resolve endpoints against it.
+  `ipc_send`/`ipc_recv` resolve endpoints against it. User space resolves a
+  published `PortName` to its endpoint through the unprivileged
+  `port_resolve` syscall (`abi-v1` no. 75; `rustos_rt::port_resolve` /
+  `ros_sys_port_resolve`), fail-closed (length bound before the copy-in,
+  grammar check before the registry, `NotFound` on a miss) and proven live
+  by the aarch64 driver-spawn vertical (the fixture kernel publishes the
+  reply endpoint's name; the spawned stub resolves it before replying).
 
 **User-memory copy path & per-task address spaces (staged).** The kernel
 `copy_from_user`/`copy_to_user` boundary (§5.4) behind every deferred payload
@@ -2782,9 +2788,11 @@ transfer, landed in increments:
 **Remaining this stage:**
 - E — per-arch live `copy_from_user` page-fault fix-up (`tests/SECURITY.md` §5)
   so a faulting user access returns an error rather than trapping.
-- Publish the desktop pointer/keyboard ports under their well-known
-  `PortName`s so `IpcInputChannel`'s `MessagePort` resolves to a live
-  `ipc_recv`; relay the theme switch over live IPC; wire the two default apps to
+- Create + publish the desktop pointer/keyboard ports under their well-known
+  `PortName`s in the kernel boot path and feed them from the input drivers,
+  and back `IpcInputChannel`'s `MessagePort` with the live `ipc_recv`
+  syscall (the name→endpoint resolve path, `port_resolve`, is in place);
+  relay the theme switch over live IPC; wire the two default apps to
   live VFS/shell channels + WM-presented windows.
 - The platform-RNG `EntropySource` that seeds the reserve — **DONE**
   (`.junie/PREREQUISITES.md` P-0): the Arch-HAL `rustos_arch_api::entropy`

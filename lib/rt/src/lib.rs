@@ -126,6 +126,8 @@ const NUM_CONSOLE_FOREGROUND: u64 = SyscallNumber::CONSOLE_FOREGROUND.as_u16() a
 
 /// `ipc_send` syscall number (as above).
 const NUM_IPC_SEND: u64 = SyscallNumber::IPC_SEND.as_u16() as u64;
+/// Raw number of the `port_resolve` syscall.
+const NUM_PORT_RESOLVE: u64 = SyscallNumber::PORT_RESOLVE.as_u16() as u64;
 
 /// `rlimit_get` syscall number (as above).
 const NUM_RLIMIT_GET: u64 = SyscallNumber::RLIMIT_GET.as_u16() as u64;
@@ -1672,6 +1674,26 @@ pub fn ipc_send(endpoint: u64, payload: &[u8]) -> i64 {
     // reading it. `payload` is a live shared `&[u8]` for
     // the duration of the call, so the pair denotes readable memory.
     let ret = unsafe { raw_syscall(NUM_IPC_SEND, [endpoint, ptr, payload.len() as u64, 0, 0, 0]) };
+    ret as i64
+}
+
+/// Resolve a published port name to its live IPC endpoint id
+/// (`SyscallNumber::PORT_RESOLVE`), returning the endpoint to pass to
+/// [`ipc_send`], or the raw negative kernel result (`-errno`) on failure:
+/// a malformed name, or no port published under it (`NotFound`).
+///
+/// Resolution grants nothing — every send to the returned endpoint is
+/// still capability-checked kernel-side; the wrapper adds no authority.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 signed-result encoding (value, else -errno).
+pub fn port_resolve(name: &[u8]) -> i64 {
+    let ptr = name.as_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // the `(ptr, len)` pair against the caller's address space and the
+    // port-name grammar before consulting the registry. `name` is a live
+    // shared `&[u8]` for the duration of the call, so the pair denotes
+    // readable memory.
+    let ret = unsafe { raw_syscall(NUM_PORT_RESOLVE, [ptr, name.len() as u64, 0, 0, 0, 0]) };
     ret as i64
 }
 
@@ -3279,6 +3301,30 @@ mod tests {
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(ipc_send(7, &payload), want);
+        });
+    }
+
+    #[test]
+    fn port_resolve_marshals_name_pointer_and_len() {
+        let name = *b"desktop.pointer";
+        let (number, args) = capture(7, || {
+            assert_eq!(port_resolve(&name), 7);
+        });
+        assert_eq!(number, NUM_PORT_RESOLVE);
+        assert_eq!(args[0], name.as_ptr() as usize as u64);
+        assert_eq!(args[1], name.len() as u64);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn port_resolve_surfaces_negative_errno_encoding() {
+        // `NotFound` (nothing published under the name) comes back as the
+        // two's-complement negation; the wrapper hands it back unchanged.
+        let name = *b"desktop.pointer";
+        let want = -i64::from(rustos_abi::Errno::NotFound.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let (_, _) = capture(neg, || {
+            assert_eq!(port_resolve(&name), want);
         });
     }
 

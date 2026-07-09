@@ -1362,6 +1362,29 @@ impl SyscallNumber {
     /// writable, and ownership, ACL, and capability gate are untouched.
     pub const FS_SET_MODE: Self = Self(74);
 
+    /// Resolve a published port name to its live IPC endpoint id.
+    ///
+    /// Arguments: `name: *const u8` (a non-null user pointer to the ASCII
+    /// name bytes) and `name_len: usize` (at most
+    /// [`crate::PORT_NAME_MAX_LEN`]). The kernel copies the bytes in
+    /// through the validated `copy_from_user` boundary, validates them
+    /// against the [`crate::PortName`] grammar (fail closed — a byte
+    /// sequence that is not a well-formed name is refused before the
+    /// registry is consulted), and looks the name up in the kernel's
+    /// named-port registry. Returns the bound endpoint id — the value the
+    /// caller then passes to [`Self::IPC_SEND`] / [`Self::IPC_RECV`] — or
+    /// [`crate::Errno::NotFound`] when no port is currently published
+    /// under that name.
+    ///
+    /// Unprivileged and unaudited, like the other pure observers
+    /// ([`Self::CAP_QUERY`], [`Self::CLOCK_GET`]): resolving a name grants
+    /// nothing — every send is still capability-checked at the port by
+    /// [`Self::IPC_SEND`], and publication itself is a kernel-side,
+    /// bind-authority-checked operation. This is how a process reaches a
+    /// well-known service port (a desktop input feed, a system service)
+    /// without a compiled-in endpoint number.
+    pub const PORT_RESOLVE: Self = Self(75);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 

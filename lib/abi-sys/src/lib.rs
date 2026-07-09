@@ -125,6 +125,7 @@ const NUM_FS_MKDIR: u64 = SyscallNumber::FS_MKDIR.as_u16() as u64;
 const NUM_FS_UNLINK: u64 = SyscallNumber::FS_UNLINK.as_u16() as u64;
 const NUM_FS_RENAME: u64 = SyscallNumber::FS_RENAME.as_u16() as u64;
 const NUM_FS_SET_MODE: u64 = SyscallNumber::FS_SET_MODE.as_u16() as u64;
+const NUM_PORT_RESOLVE: u64 = SyscallNumber::PORT_RESOLVE.as_u16() as u64;
 const NUM_CALL_PEER_ORIGIN: u64 = SyscallNumber::CALL_PEER_ORIGIN.as_u16() as u64;
 const NUM_WALL_TIME_GET: u64 = SyscallNumber::WALL_TIME_GET.as_u16() as u64;
 const NUM_WALL_TIME_SET: u64 = SyscallNumber::WALL_TIME_SET.as_u16() as u64;
@@ -1635,6 +1636,24 @@ pub extern "C" fn sys_fs_set_mode(path: *mut c_void, path_len: usize, mode: u32)
     }
 }
 
+/// `port_resolve`: resolve the published port name at `(name, name_len)` to
+/// its live IPC endpoint id (`SyscallNumber::PORT_RESOLVE`). Returns the
+/// endpoint id, or a negative `ROS_E_*` code encoded in the `u64` (the
+/// `ros_sys_spawn` convention). Resolution grants nothing: every send to
+/// the returned endpoint is still capability-checked kernel-side.
+#[must_use]
+#[export_name = "ros_sys_port_resolve"]
+pub extern "C" fn sys_port_resolve(name: *mut c_void, name_len: usize) -> u64 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates `(name, name_len)`
+    // against the caller's address space and the port-name grammar.
+    unsafe {
+        raw_syscall(
+            NUM_PORT_RESOLVE,
+            [ptr_arg(name), name_len as u64, 0, 0, 0, 0],
+        )
+    }
+}
+
 /// `signal`: deliver control signal `signal` (a `ros_signal_t` discriminant)
 /// to child process `pid` (`SyscallNumber::SIGNAL`). Returns a `ROS_E_*`
 /// code.
@@ -1850,6 +1869,7 @@ mod tests {
         (NUM_SELF_ORIGIN, "self_origin", 2),
         (NUM_PIPE_CREATE, "pipe_create", 1),
         (NUM_FS_SET_MODE, "fs_set_mode", 3),
+        (NUM_PORT_RESOLVE, "port_resolve", 2),
     ];
 
     #[test]
@@ -2756,6 +2776,19 @@ mod tests {
         assert_eq!(args[1], path.len() as u64);
         assert_eq!(args[2], 0o640);
         assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn port_resolve_marshals_name_pointer_and_len() {
+        let mut name = *b"desktop.pointer";
+        let ptr = name.as_mut_ptr().cast::<c_void>();
+        let (number, args) = capture(7, || {
+            assert_eq!(sys_port_resolve(ptr, name.len()), 7);
+        });
+        assert_eq!(number, NUM_PORT_RESOLVE);
+        assert_eq!(args[0], ptr as usize as u64);
+        assert_eq!(args[1], name.len() as u64);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
     }
 
     #[test]

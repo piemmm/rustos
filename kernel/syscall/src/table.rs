@@ -1676,6 +1676,28 @@ pub trait SyscallHandlers {
     ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
+
+    /// Resolve a published port name to its live IPC endpoint id.
+    ///
+    /// The dispatcher has already checked that `name` is a non-null
+    /// `UserPtr` and decoded `name_len`. The implementation copies the
+    /// name bytes in through the validated `copy_from_user` boundary,
+    /// validates them against the `rustos_abi::PortName` grammar (fail
+    /// closed — malformed bytes are refused before the registry is
+    /// consulted), and looks the name up in the named-port registry,
+    /// returning the bound endpoint id or [`Errno::NotFound`] when no
+    /// port is currently published under that name. Resolution grants
+    /// nothing: every send is still capability-checked at the port.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn port_resolve(
+        &self,
+        _caller: &CallerContext<'_>,
+        _name: u64,
+        _name_len: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
 }
 
 /// Architecture-neutral syscall dispatcher.
@@ -2190,6 +2212,14 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                     return Err(Errno::OutOfRange);
                 }
                 self.handlers.fs_set_mode(caller, args.0[0], path_len, mode)
+            }
+            SyscallNumber::PORT_RESOLVE => {
+                // args[0] is the non-null name `UserPtr`
+                // (dispatcher-checked); args[1] is the name length in
+                // bytes. The grammar and length bound are the handler's to
+                // enforce after the copy-in.
+                let name_len = decode_len(args.0[1])?;
+                self.handlers.port_resolve(caller, args.0[0], name_len)
             }
             SyscallNumber::FS_CHDIR => {
                 // args[0] is the non-null path `UserPtr` (dispatcher-checked);
@@ -3195,6 +3225,16 @@ mod tests {
             _mode: u32,
         ) -> SyscallResult {
             self.record("fs_set_mode");
+            Ok(0)
+        }
+
+        fn port_resolve(
+            &self,
+            _c: &CallerContext<'_>,
+            _name: u64,
+            _name_len: usize,
+        ) -> SyscallResult {
+            self.record("port_resolve");
             Ok(0)
         }
 

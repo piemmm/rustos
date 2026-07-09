@@ -10,7 +10,7 @@ use alloc::sync::Arc;
 use rustos_abi::hwtree::HwResource;
 use rustos_abi::{
     CapabilityId, DriverBindKey, DriverRegisterReply, Errno, HwDeviceClass, HwMatchKey, HwNode,
-    HW_NODE_ROOT, SYSCALL_MAX_ARGS,
+    PortName, HW_NODE_ROOT, SYSCALL_MAX_ARGS,
 };
 use rustos_arch_aarch64::kernel_arch::timer_frequency_hz;
 use rustos_arch_aarch64::paging::{
@@ -70,6 +70,14 @@ const REPLY_ENDPOINT: EndpointId = EndpointId(7);
 
 /// ASCII decimal form of [`REPLY_ENDPOINT`] passed as the stub's `arg(1)`.
 const REPLY_ENDPOINT_ARG: &[u8] = b"7";
+
+/// Well-known port name the reply endpoint is published under, passed to
+/// the stub as `arg(2)`. The stub resolves it through the production
+/// `port_resolve` syscall and refuses to reply unless the resolved
+/// endpoint matches `arg(1)` — proving the publish → resolve → send path
+/// end to end (the way a driver or desktop client finds a well-known
+/// service port it was not handed directly).
+const REPLY_PORT_NAME: &[u8] = b"drvhost.reply";
 
 /// Raw handle value the stub reports — pinned to the fixture program's
 /// `STUB_HANDLE_RAW` (`driver_register_program/src/main.rs`); the PASS check
@@ -409,6 +417,18 @@ fn bind_reply_port(ipc: &RwLock<PortRegistry>) {
         Ok(id) if id == REPLY_ENDPOINT => {}
         _ => qemu_exit::exit_failure(FAIL_PORT),
     }
+    // Publish the endpoint under its well-known name so the stub can
+    // resolve it over the production `port_resolve` syscall.
+    let Ok(name) = PortName::from_ascii(REPLY_PORT_NAME) else {
+        qemu_exit::exit_failure(FAIL_PORT);
+    };
+    if ipc
+        .write()
+        .publish_name(name, REPLY_ENDPOINT, &SERIAL_SINK)
+        .is_err()
+    {
+        qemu_exit::exit_failure(FAIL_PORT);
+    }
 }
 
 /// Boot entry point — the symbol the arch crate's `boot.s` trampoline calls
@@ -518,7 +538,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         &NULL_SHARED_MEM_FACILITY,
     );
     let spawn = InitCtxDriverProcessSpawn::new(&init_ctx, &AARCH64_PROCESS_SPAWN);
-    let args: [&[u8]; 2] = [b"drvstub", REPLY_ENDPOINT_ARG];
+    let args: [&[u8]; 3] = [b"drvstub", REPLY_ENDPOINT_ARG, REPLY_PORT_NAME];
     // The matched node id (the device node, id 2) the kernel records against
     // the spawned driver so its `hw_emit_node` children parent under it.
     let mut loader =
