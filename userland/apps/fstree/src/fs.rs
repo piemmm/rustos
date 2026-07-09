@@ -42,9 +42,11 @@ pub struct VolumeSpace {
     pub total_bytes: u64,
 }
 
-/// The filesystem operations the landed stages perform. Later stages
-/// extend this trait in place with the operations they introduce (copy,
-/// move, rename, delete, …) together with their callers.
+/// The filesystem operations the landed stages perform: listings, the
+/// mode editor's stat/set pair, and the mutating operations the file
+/// commands drive (probe, streamed read/write, create, mkdir, unlink,
+/// rename). Later stages extend this trait in place together with the
+/// callers they introduce.
 pub trait Fs {
     /// List every entry of the directory `path`, in any order (the model
     /// sorts them).
@@ -80,4 +82,79 @@ pub trait Fs {
     /// Any [`Errno`] the filesystem raises; the model reports it and
     /// changes nothing.
     fn set_mode(&mut self, path: &str, mode: u32) -> Result<(), Errno>;
+
+    /// The [`FileKind`] of the entry at `path` (a resolve-only stat), used
+    /// to probe a destination before any I/O.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the filesystem raises; [`Errno::NotFound`] means the
+    /// path is absent, which the operations treat as "free to create".
+    fn stat_kind(&mut self, path: &str) -> Result<FileKind, Errno>;
+
+    /// Read up to `buf.len()` bytes of the file at `path` from `offset`,
+    /// returning the count read (`0` at end of file). A short read (fewer
+    /// than requested) occurs only at end of file.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the filesystem raises while reading.
+    fn read(&mut self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize, Errno>;
+
+    /// Create (or truncate to empty) the regular file at `path`, ready to
+    /// be written from offset `0`.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the filesystem raises while creating.
+    fn create(&mut self, path: &str) -> Result<(), Errno>;
+
+    /// Write every byte of `bytes` to the file at `path` from `offset`.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the filesystem raises while writing; a partial write
+    /// is an error.
+    fn write(&mut self, path: &str, offset: u64, bytes: &[u8]) -> Result<(), Errno>;
+
+    /// Create the directory at `path`.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the filesystem raises — e.g. [`Errno::AlreadyExists`].
+    fn mkdir(&mut self, path: &str) -> Result<(), Errno>;
+
+    /// Remove the regular file at `path` (unlink one link).
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the filesystem raises while removing.
+    fn remove_file(&mut self, path: &str) -> Result<(), Errno>;
+
+    /// Remove the **empty** directory at `path`.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the filesystem raises — a non-empty directory is the
+    /// kernel's refusal to surface, never silently recursed into.
+    fn remove_dir(&mut self, path: &str) -> Result<(), Errno>;
+
+    /// Rename `src` to `dst` atomically within one volume, or report
+    /// [`RenameOutcome::CrossDevice`] when the two paths live on different
+    /// volumes so the caller can fall back to copy-then-remove.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the filesystem raises for a non-boundary failure.
+    fn rename(&mut self, src: &str, dst: &str) -> Result<RenameOutcome, Errno>;
+}
+
+/// What a [`Fs::rename`] achieved: the atomic rename, or the honest
+/// cross-volume report that drives the copy-then-remove fallback.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum RenameOutcome {
+    /// The entry was renamed atomically.
+    Renamed,
+    /// `src` and `dst` live on different volumes; nothing was changed.
+    CrossDevice,
 }

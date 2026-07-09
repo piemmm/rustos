@@ -47,6 +47,10 @@ rustos-vt = { path = "../../../lib/vt", version = "=0.0.0" }
 # parser, and the shared own-bundle short-help render the `-h`/`-?`
 # switches and the in-app `?` overlay use (plans/APPS.md).
 rustos-help = { path = "../../../lib/help", version = "=0.0.0" }
+# The one path grammar: the destination the copy/move prompt takes is
+# parsed and normalised through it (relative spellings joined onto the
+# listed directory), never by a second in-app path parser.
+rustos-path = { path = "../../../lib/path", version = "=0.0.0" }
 
 # For the freestanding `Run` binary only: the userland runtime `rustos-rt`
 # (`_start`, canary, panic handler, `mem_map` allocator, the syscall

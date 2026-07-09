@@ -33,6 +33,22 @@ Bysellau:
 - `s` — agor y ddewislen didoli: `n` enw, `e` estyniad, `s` maint,
   `m` amser addasu, `r` gwrthdroi'r cyfeiriad, `Esc` yn canslo. Caiff
   cyfeiriaduron eu grwpio bob amser cyn ffeiliau.
+- `c` — copïo'r cofnod a ddewiswyd: mae llinell fewnbwn yn gofyn am y
+  gyrchfan. Mae cyrchfan gymharol yn glanio yn y cyfeiriadur a
+  restrwyd; mae cyrchfan sy'n gyfeiriadur presennol yn derbyn y copï
+  y tu mewn iddo o dan enw'r ffynhonnell. Caiff cyfeiriadur ei gopïo
+  gyda phopeth oddi tano. Gwrthodir copïo cofnod ar ei ben ei hun neu
+  gyfeiriadur i mewn i'w is-goeden ei hun cyn ysgrifennu dim.
+- `m` — symud y cofnod a ddewiswyd, gyda'r un cwestiwn cyrchfan. O
+  fewn yr un gyfrol mae'r symud yn ailenwi atomig; ar draws cyfrolau
+  caiff y cofnod ei gopïo ac yna dilëir y ffynhonnell.
+- `r` — ailenwi'r cofnod a ddewiswyd yn ei le: mae'r llinell fewnbwn
+  wedi'i rhag-lenwi â'r enw presennol.
+- `d` — dileu'r cofnod a ddewiswyd ar ôl cadarnhad; dim ond `y` sy'n
+  bwrw ymlaen. Mae dileu cyfeiriadur yn tynnu popeth oddi tano, ac
+  mae'r cadarnhad yn dweud hynny.
+- `M` — creu cyfeiriadur yn y cyfeiriadur a restrwyd; gofynnir am ei
+  enw.
 - `a` — golygu didau caniatâd y cofnod a ddewiswyd: llinell wythol
   wedi'i rhag-lenwi â'r modd presennol. Mae Enter yn cymhwyso (dim ond y
   perchennog all ei newid — mae'r cnewyllyn yn gwrthod pawb arall), mae
@@ -41,15 +57,24 @@ Bysellau:
 - `?` — dangos y cymorth hwn dros y paneli; mae unrhyw fysell yn ei gau.
 - `q` — gadael, gan adfer y derfynell.
 
+Pan fyddai copïo neu symud yn trosysgrifo ffeil bresennol, mae'r
+sesiwn yn gofyn fesul ffeil: mae `o` yn trosysgrifo, mae `s` yn hepgor
+(erys ffynhonnell a hepgorwyd yn ei lle), ac mae `c` yn canslo'r camau
+sy'n weddill — erys yr hyn a gymhwyswyd eisoes, ac mae'r adroddiad
+terfynol yn dweud beth ddigwyddodd. Mae methiant hanner ffordd drwy
+gopïo yn tynnu'r gyrchfan hanner-ysgrifenedig ac yn dangos gwall y
+cnewyllyn; nid oes dim byth yn esgus bod yn gopï cyflawn. Caiff pob
+gweithred ei hawdurdodi gan y cnewyllyn — ymddengys gwrthodiad air am
+air ar y llinell negeseuon heb i ddim newid.
+
 Mae'r llinell statws yn dangos y llwybr a restrwyd, nifer y cofnodion
 gweladwy, y drefn didoli, beitiau rhydd/cyfanswm y gyfrol sylfaenol (pan
 all y gwasanaeth gwybodaeth system eu hadrodd) ac a yw cofnodion cudd yn
 cael eu dangos. Mae ffeil nad yw ei fformat storio yn cadw amser addasu
 yn dangos `-` yng ngholofn yr amser.
 
-Daw'r gweithrediadau ffeil (copïo, symud, ailenwi, dileu), tagio, chwilio
-a'r gwylwyr testun/hecs/dadosodwr mewn camau diweddarach o gynllun yr
-offeryn.
+Daw tagio, chwilio a'r gwylwyr testun/hecs/dadosodwr mewn camau
+diweddarach o gynllun yr offeryn.
 
 ## OPTIONS
 
@@ -66,4 +91,4 @@ offeryn.
 
 ## SEE ALSO
 
-ls, du, df
+ls, cp, mv, rm, mkdir, chmod, du, df

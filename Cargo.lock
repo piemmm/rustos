@@ -1023,6 +1023,7 @@ dependencies = [
  "rustos-abi",
  "rustos-curses",
  "rustos-help",
+ "rustos-path",
  "rustos-procinfo",
  "rustos-rt",
  "rustos-termcap",

@@ -13,7 +13,7 @@ use rustos_abi::time::Time64;
 use rustos_curses::{truncate_to_width, Pos, Window};
 use rustos_vt::Attributes;
 
-use crate::model::{Model, Overlay, Pane, SortKey};
+use crate::model::{InputOp, Model, Overlay, Pane, Prompt, SortKey};
 
 /// Columns given to the tree pane for a grid `cols` wide.
 fn tree_width(cols: u16) -> u16 {
@@ -137,29 +137,75 @@ fn render_status(model: &Model, window: &mut Window, rows: u16, cols: u16) {
     window.set_attributes(Attributes::PLAIN);
 }
 
-/// The message line: the mode-editor prompt, an error/notice, the
+/// The message line: the open prompt's question, an error/notice, the
 /// sort-menu prompt, or key hints.
 fn render_message(model: &Model, window: &mut Window, rows: u16, cols: u16) {
     let text = if let Some(prompt) = &model.prompt {
-        // The trailing underscore is the input point; the bracketed figure
-        // is the entry's current mode for reference.
-        format!(
-            "mode {} [{:o}]: {}_  (octal, Enter applies, Esc cancels)",
-            prompt.name, prompt.current, prompt.input
-        )
+        prompt_line(prompt)
     } else if model.overlay == Overlay::SortMenu {
         String::from("sort: n)ame  e)xtension  s)ize  m)odified  r)everse  Esc cancels")
     } else if let Some(message) = &model.message {
         message.clone()
     } else {
         String::from(
-            "arrows/hjkl move  Enter open  Tab pane  s sort  a mode  . hidden  ? help  q quit",
+            "arrows move  Enter open  Tab pane  c copy  m move  r rename  d delete  \
+             M mkdir  a mode  s sort  . hidden  ? help  q quit",
         )
     };
     let _ = window.move_add_str(
         Pos::new(rows - 1, 0),
         truncate_to_width(&text, usize::from(cols)),
     );
+}
+
+/// The one-line question an open prompt shows; the trailing underscore is
+/// the input point of the text prompts.
+fn prompt_line(prompt: &Prompt) -> String {
+    match prompt {
+        // The bracketed figure is the entry's current mode for reference.
+        Prompt::Mode(mode) => format!(
+            "mode {} [{:o}]: {}_  (octal, Enter applies, Esc cancels)",
+            mode.name, mode.current, mode.input
+        ),
+        Prompt::Input(input) => match &input.op {
+            InputOp::CopyDest { name, .. } => {
+                format!(
+                    "copy {name} to: {}_  (Enter copies, Esc cancels)",
+                    input.input
+                )
+            }
+            InputOp::MoveDest { name, .. } => {
+                format!(
+                    "move {name} to: {}_  (Enter moves, Esc cancels)",
+                    input.input
+                )
+            }
+            InputOp::RenameTo { name, .. } => {
+                format!(
+                    "rename {name} to: {}_  (Enter renames, Esc cancels)",
+                    input.input
+                )
+            }
+            InputOp::MkdirName => {
+                format!("mkdir: {}_  (Enter creates, Esc cancels)", input.input)
+            }
+        },
+        Prompt::ConfirmDelete(confirm) => {
+            if confirm.kind.is_dir() {
+                format!("delete directory {} and its contents? y/N", confirm.name)
+            } else {
+                format!("delete {}? y/N", confirm.name)
+            }
+        }
+        Prompt::Overwrite(paused) => match paused.op.conflict() {
+            Some(conflict) => {
+                format!("{} exists — o)verwrite  s)kip  c)ancel", conflict.dst)
+            }
+            // Unreachable by construction (the prompt exists only while a
+            // conflict is paused), but fail closed rather than panic.
+            None => String::from("o)verwrite  s)kip  c)ancel"),
+        },
+    }
 }
 
 /// The help overlay: the bundle's own Help document, plainly paged over

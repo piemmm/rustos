@@ -16,27 +16,39 @@ use rustos_abi::{Errno, FileKind};
 use rustos_curses::{Event, Pos, Size, Window};
 
 use crate::app::handle_event;
-use crate::fs::{Fs, FsEntry, VolumeSpace};
-use crate::model::{Model, Overlay, Pane, SortKey};
+use crate::fs::{Fs, FsEntry, RenameOutcome, VolumeSpace};
+use crate::model::{join, ModePrompt, Model, Overlay, Pane, Prompt, SortKey};
+use crate::ops::{basename, is_inside, parent_of};
 use crate::render::render;
 
-/// An in-memory filesystem: per-path listings, per-path modes, a denied
-/// set (listings and stats), a set-mode denial set, a log of applied mode
-/// changes, and a count of listings served (so laziness is observable).
+/// An in-memory filesystem: per-path listings, per-path file bytes,
+/// per-path modes, a denied set (listings and stats), a set-mode denial
+/// set, failure injection for the mutating operations, a log of applied
+/// mode changes, and a count of listings served (so laziness is
+/// observable). Listings are kept in step with the mutations so a refresh
+/// observes the operation's effect, exactly as the kernel view would.
 struct FakeFs {
     dirs: BTreeMap<String, Vec<FsEntry>>,
+    files: BTreeMap<String, Vec<u8>>,
     modes: BTreeMap<String, u32>,
     denied: Vec<String>,
     set_denied: Vec<String>,
     set_modes: RefCell<Vec<(String, u32)>>,
     reads: CoreCell<usize>,
     space: Option<VolumeSpace>,
+    /// `read` of this path fails with the errno.
+    read_fail: Option<(String, Errno)>,
+    /// `write` to this path fails with the errno.
+    write_fail: Option<(String, Errno)>,
+    /// `rename` reports the cross-volume boundary for these prefixes.
+    cross_volume: Vec<String>,
 }
 
 impl FakeFs {
     fn new() -> Self {
         Self {
             dirs: BTreeMap::new(),
+            files: BTreeMap::new(),
             modes: BTreeMap::new(),
             denied: Vec::new(),
             set_denied: Vec::new(),
@@ -46,10 +58,23 @@ impl FakeFs {
                 free_bytes: 500,
                 total_bytes: 1000,
             }),
+            read_fail: None,
+            write_fail: None,
+            cross_volume: Vec::new(),
         }
     }
 
+    /// Register a directory listing; each regular entry also receives
+    /// synthetic file bytes of its listed size, so contents and listings
+    /// stay one view.
     fn dir(mut self, path: &str, entries: Vec<FsEntry>) -> Self {
+        for entry in &entries {
+            if entry.kind == FileKind::Regular {
+                let file_path = join(path, &entry.name);
+                let size = usize::try_from(entry.size).expect("fixture sizes fit in usize");
+                self.files.insert(file_path, vec![b'x'; size]);
+            }
+        }
         self.dirs.insert(path.to_owned(), entries);
         self
     }
@@ -67,6 +92,56 @@ impl FakeFs {
     fn deny_set(mut self, path: &str) -> Self {
         self.set_denied.push(path.to_owned());
         self
+    }
+
+    fn read_fails(mut self, path: &str, errno: Errno) -> Self {
+        self.read_fail = Some((path.to_owned(), errno));
+        self
+    }
+
+    fn write_fails(mut self, path: &str, errno: Errno) -> Self {
+        self.write_fail = Some((path.to_owned(), errno));
+        self
+    }
+
+    /// Mark the subtree under `prefix` as living on another volume, so a
+    /// rename in or out of it reports the cross-device boundary.
+    fn cross(mut self, prefix: &str) -> Self {
+        self.cross_volume.push(prefix.to_owned());
+        self
+    }
+
+    /// The volume `path` lives on: the marked prefix containing it, or
+    /// the root volume.
+    fn volume_of(&self, path: &str) -> &str {
+        self.cross_volume
+            .iter()
+            .find(|prefix| path == *prefix || is_inside(prefix, path))
+            .map_or("/", String::as_str)
+    }
+
+    /// Replace-or-add `entry` in the listing of `parent`.
+    fn upsert_entry(&mut self, parent: &str, entry: FsEntry) {
+        if let Some(list) = self.dirs.get_mut(parent) {
+            list.retain(|e| e.name != entry.name);
+            list.push(entry);
+        }
+    }
+
+    /// Remove the entry named by `path` from its parent's listing.
+    fn drop_entry(&mut self, path: &str) {
+        let (parent, name) = (parent_of(path).to_owned(), basename(path).to_owned());
+        if let Some(list) = self.dirs.get_mut(&parent) {
+            list.retain(|e| e.name != name);
+        }
+    }
+
+    fn contents(&self, path: &str) -> Option<Vec<u8>> {
+        self.files.get(path).cloned()
+    }
+
+    fn has_dir(&self, path: &str) -> bool {
+        self.dirs.contains_key(path)
     }
 }
 
@@ -100,6 +175,175 @@ impl Fs for FakeFs {
         self.modes.insert(path.to_owned(), mode);
         self.set_modes.borrow_mut().push((path.to_owned(), mode));
         Ok(())
+    }
+
+    fn stat_kind(&mut self, path: &str) -> Result<FileKind, Errno> {
+        if self.denied.iter().any(|denied| denied == path) {
+            return Err(Errno::PermissionDenied);
+        }
+        if self.dirs.contains_key(path) {
+            return Ok(FileKind::Directory);
+        }
+        if self.files.contains_key(path) {
+            return Ok(FileKind::Regular);
+        }
+        Err(Errno::NotFound)
+    }
+
+    fn read(&mut self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
+        if let Some((failing, errno)) = &self.read_fail {
+            if failing == path {
+                return Err(*errno);
+            }
+        }
+        let bytes = self.files.get(path).ok_or(Errno::NotFound)?;
+        let start = usize::try_from(offset).map_err(|_| Errno::LengthOutOfRange)?;
+        if start >= bytes.len() {
+            return Ok(0);
+        }
+        let take = (bytes.len() - start).min(buf.len());
+        buf[..take].copy_from_slice(&bytes[start..start + take]);
+        Ok(take)
+    }
+
+    fn create(&mut self, path: &str) -> Result<(), Errno> {
+        if self.dirs.contains_key(path) {
+            return Err(Errno::AlreadyExists);
+        }
+        self.files.insert(path.to_owned(), Vec::new());
+        self.upsert_entry(
+            parent_of(path),
+            FsEntry {
+                name: basename(path).to_owned(),
+                kind: FileKind::Regular,
+                size: 0,
+                modified: Time64::UNIX_EPOCH,
+            },
+        );
+        Ok(())
+    }
+
+    fn write(&mut self, path: &str, offset: u64, bytes: &[u8]) -> Result<(), Errno> {
+        if let Some((failing, errno)) = &self.write_fail {
+            if failing == path {
+                return Err(*errno);
+            }
+        }
+        let start = usize::try_from(offset).map_err(|_| Errno::LengthOutOfRange)?;
+        let file = self.files.get_mut(path).ok_or(Errno::NotFound)?;
+        let end = start + bytes.len();
+        if file.len() < end {
+            file.resize(end, 0);
+        }
+        file[start..end].copy_from_slice(bytes);
+        let size = file.len() as u64;
+        self.upsert_entry(
+            parent_of(path),
+            FsEntry {
+                name: basename(path).to_owned(),
+                kind: FileKind::Regular,
+                size,
+                modified: Time64::UNIX_EPOCH,
+            },
+        );
+        Ok(())
+    }
+
+    fn mkdir(&mut self, path: &str) -> Result<(), Errno> {
+        if self.dirs.contains_key(path) || self.files.contains_key(path) {
+            return Err(Errno::AlreadyExists);
+        }
+        if !self.dirs.contains_key(parent_of(path)) {
+            return Err(Errno::NotFound);
+        }
+        self.dirs.insert(path.to_owned(), Vec::new());
+        self.upsert_entry(
+            parent_of(path),
+            FsEntry {
+                name: basename(path).to_owned(),
+                kind: FileKind::Directory,
+                size: 0,
+                modified: Time64::UNIX_EPOCH,
+            },
+        );
+        Ok(())
+    }
+
+    fn remove_file(&mut self, path: &str) -> Result<(), Errno> {
+        if self.files.remove(path).is_none() {
+            return Err(Errno::NotFound);
+        }
+        self.drop_entry(path);
+        Ok(())
+    }
+
+    fn remove_dir(&mut self, path: &str) -> Result<(), Errno> {
+        match self.dirs.get(path) {
+            None => return Err(Errno::NotFound),
+            Some(entries) if !entries.is_empty() => return Err(Errno::NotEmpty),
+            Some(_) => {}
+        }
+        self.dirs.remove(path);
+        self.drop_entry(path);
+        Ok(())
+    }
+
+    fn rename(&mut self, src: &str, dst: &str) -> Result<RenameOutcome, Errno> {
+        if self.volume_of(src) != self.volume_of(dst) {
+            return Ok(RenameOutcome::CrossDevice);
+        }
+        if self.dirs.contains_key(dst) {
+            // The kernel refuses renaming onto an existing directory.
+            return Err(Errno::AlreadyExists);
+        }
+        if let Some(bytes) = self.files.remove(src) {
+            self.files.insert(dst.to_owned(), bytes.clone());
+            self.drop_entry(src);
+            self.upsert_entry(
+                parent_of(dst),
+                FsEntry {
+                    name: basename(dst).to_owned(),
+                    kind: FileKind::Regular,
+                    size: bytes.len() as u64,
+                    modified: Time64::UNIX_EPOCH,
+                },
+            );
+            return Ok(RenameOutcome::Renamed);
+        }
+        if self.dirs.contains_key(src) {
+            // Re-key the directory and every descendant path in both maps.
+            let prefix = alloc::format!("{}/", src.trim_end_matches('/'));
+            let rekey = |path: &str| -> Option<String> {
+                if path == src {
+                    Some(dst.to_owned())
+                } else {
+                    path.strip_prefix(&prefix)
+                        .map(|rest| alloc::format!("{}/{rest}", dst.trim_end_matches('/')))
+                }
+            };
+            let dirs = core::mem::take(&mut self.dirs);
+            self.dirs = dirs
+                .into_iter()
+                .map(|(path, list)| (rekey(&path).unwrap_or(path), list))
+                .collect();
+            let files = core::mem::take(&mut self.files);
+            self.files = files
+                .into_iter()
+                .map(|(path, bytes)| (rekey(&path).unwrap_or(path), bytes))
+                .collect();
+            self.drop_entry(src);
+            self.upsert_entry(
+                parent_of(dst),
+                FsEntry {
+                    name: basename(dst).to_owned(),
+                    kind: FileKind::Directory,
+                    size: 0,
+                    modified: Time64::UNIX_EPOCH,
+                },
+            );
+            return Ok(RenameOutcome::Renamed);
+        }
+        Err(Errno::NotFound)
     }
 }
 
@@ -149,6 +393,14 @@ fn fixture() -> FakeFs {
 
 fn model(fs: &mut FakeFs) -> Model {
     Model::new(fs, "/", String::from("keys: q quits")).expect("root lists")
+}
+
+/// The open prompt, asserted to be the mode editor.
+fn mode_prompt(m: &Model) -> ModePrompt {
+    match m.prompt.clone() {
+        Some(Prompt::Mode(prompt)) => prompt,
+        other => panic!("expected the mode prompt, got {other:?}"),
+    }
 }
 
 fn row_text(window: &Window, row: u16) -> String {
@@ -321,7 +573,7 @@ fn the_mode_prompt_opens_prefilled_edits_and_applies() {
     // Sorted visible files: docs, locked, a.rs, b.txt, big — a.rs is index 2.
     m.file_cursor = 2;
     handle_event(&mut m, &mut fs, &Event::Char('a'));
-    let prompt = m.prompt.clone().expect("prompt opened");
+    let prompt = mode_prompt(&m);
     assert_eq!(prompt.path, "/a.rs");
     assert_eq!(prompt.current, 0o644);
     assert_eq!(prompt.input, "644");
@@ -334,7 +586,7 @@ fn the_mode_prompt_opens_prefilled_edits_and_applies() {
     for key in ['9', '6', '0', '0', '7', '7'] {
         handle_event(&mut m, &mut fs, &Event::Char(key));
     }
-    assert_eq!(m.prompt.clone().expect("still open").input, "6007");
+    assert_eq!(mode_prompt(&m).input, "6007");
     handle_event(&mut m, &mut fs, &Event::Backspace);
     handle_event(&mut m, &mut fs, &Event::Enter);
     assert_eq!(m.prompt, None);
@@ -409,7 +661,7 @@ fn the_tree_pane_edits_the_selected_directory() {
     // Tree pane (the default), cursor onto "docs".
     handle_event(&mut m, &mut fs, &Event::Down);
     handle_event(&mut m, &mut fs, &Event::Char('a'));
-    let prompt = m.prompt.clone().expect("prompt opened");
+    let prompt = mode_prompt(&m);
     assert_eq!(prompt.path, "/docs");
     assert_eq!(prompt.current, 0o755);
 }
@@ -446,7 +698,7 @@ fn the_frame_lays_out_panes_status_and_hints() {
     let status = row_text(&window, 6);
     assert!(status.starts_with("/  5 entries  sort name asc  free 500/1000"));
     // Hint line (truncated to the 60-column grid; the leading hints show).
-    assert!(row_text(&window, 7).contains("s sort"));
+    assert!(row_text(&window, 7).contains("c copy"));
 }
 
 /// The file-pane text of visible row `index`, as the renderer prints it.
@@ -507,6 +759,403 @@ fn the_sort_menu_prompt_appears_on_the_message_line() {
     let mut window = Window::new(Pos::new(0, 0), Size::new(6, 70));
     render(&m, &mut window);
     assert!(row_text(&window, 5).starts_with("sort: n)ame"));
+}
+
+// --- File operations: mkdir and rename ------------------------------------
+
+/// Type `text` into the open prompt, character by character.
+fn type_text(m: &mut Model, fs: &mut FakeFs, text: &str) {
+    for ch in text.chars() {
+        handle_event(m, fs, &Event::Char(ch));
+    }
+}
+
+#[test]
+fn mkdir_creates_a_directory_in_the_listed_directory() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    handle_event(&mut m, &mut fs, &Event::Char('M'));
+    type_text(&mut m, &mut fs, "new");
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    assert_eq!(m.prompt, None);
+    assert!(fs.has_dir("/new"));
+    // The refreshed panes show the new directory.
+    assert!(m.files.iter().any(|e| e.name == "new"));
+    assert!(m.tree_rows().iter().any(|r| r.path == "/new"));
+}
+
+#[test]
+fn mkdir_refuses_an_invalid_name_and_esc_cancels() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    handle_event(&mut m, &mut fs, &Event::Char('M'));
+    type_text(&mut m, &mut fs, "a/b");
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    assert!(m.message.clone().expect("refused").contains("invalid name"));
+    assert!(!fs.has_dir("/a/b"));
+    // Esc cancels an open prompt with nothing created.
+    handle_event(&mut m, &mut fs, &Event::Char('M'));
+    type_text(&mut m, &mut fs, "x");
+    handle_event(&mut m, &mut fs, &Event::Esc);
+    assert_eq!(m.prompt, None);
+    assert!(!fs.has_dir("/x"));
+}
+
+#[test]
+fn rename_moves_a_file_within_its_directory() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    m.file_cursor = 2; // a.rs
+    handle_event(&mut m, &mut fs, &Event::Char('r'));
+    // The prompt is prefilled with the current name; rub it out.
+    for _ in 0.."a.rs".len() {
+        handle_event(&mut m, &mut fs, &Event::Backspace);
+    }
+    type_text(&mut m, &mut fs, "z.rs");
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    assert_eq!(fs.contents("/a.rs"), None);
+    assert_eq!(fs.contents("/z.rs"), Some(vec![b'x'; 30]));
+    assert!(m.files.iter().any(|e| e.name == "z.rs"));
+}
+
+#[test]
+fn rename_onto_an_existing_file_asks_first() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    m.file_cursor = 2; // a.rs
+    handle_event(&mut m, &mut fs, &Event::Char('r'));
+    for _ in 0.."a.rs".len() {
+        handle_event(&mut m, &mut fs, &Event::Backspace);
+    }
+    type_text(&mut m, &mut fs, "b.txt");
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    // The rename paused on the existing target; skip leaves both intact.
+    assert!(matches!(m.prompt, Some(Prompt::Overwrite(_))));
+    handle_event(&mut m, &mut fs, &Event::Char('s'));
+    assert_eq!(fs.contents("/a.rs"), Some(vec![b'x'; 30]));
+    assert_eq!(fs.contents("/b.txt"), Some(vec![b'x'; 10]));
+}
+
+#[test]
+fn renaming_the_session_root_is_refused() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    handle_event(&mut m, &mut fs, &Event::Char('r'));
+    assert_eq!(m.prompt, None);
+    assert!(m.message.clone().expect("refused").contains("session root"));
+}
+
+// --- File operations: delete -----------------------------------------------
+
+#[test]
+fn delete_removes_a_file_after_confirmation() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    m.file_cursor = 2; // a.rs
+    handle_event(&mut m, &mut fs, &Event::Char('d'));
+    assert!(matches!(m.prompt, Some(Prompt::ConfirmDelete(_))));
+    handle_event(&mut m, &mut fs, &Event::Char('y'));
+    assert_eq!(fs.contents("/a.rs"), None);
+    assert!(!m.files.iter().any(|e| e.name == "a.rs"));
+}
+
+#[test]
+fn delete_declined_changes_nothing() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    m.file_cursor = 2; // a.rs
+    handle_event(&mut m, &mut fs, &Event::Char('d'));
+    // Any key but `y` declines — `n`, Esc, or anything else.
+    handle_event(&mut m, &mut fs, &Event::Char('n'));
+    assert_eq!(m.prompt, None);
+    assert_eq!(fs.contents("/a.rs"), Some(vec![b'x'; 30]));
+}
+
+#[test]
+fn delete_removes_a_directory_and_its_contents() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    // Tree pane, cursor onto "docs" (which holds guide.md).
+    handle_event(&mut m, &mut fs, &Event::Down);
+    handle_event(&mut m, &mut fs, &Event::Char('d'));
+    handle_event(&mut m, &mut fs, &Event::Char('y'));
+    assert!(!fs.has_dir("/docs"));
+    assert_eq!(fs.contents("/docs/guide.md"), None);
+    // The file pane climbed to the nearest surviving ancestor.
+    assert_eq!(m.files_dir, "/");
+    assert!(m.tree_rows().iter().all(|r| r.path != "/docs"));
+}
+
+#[test]
+fn deleting_the_session_root_is_refused() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    handle_event(&mut m, &mut fs, &Event::Char('d'));
+    assert_eq!(m.prompt, None);
+    assert!(m.message.clone().expect("refused").contains("session root"));
+}
+
+// --- File operations: copy --------------------------------------------------
+
+#[test]
+fn copy_streams_a_file_to_a_new_absolute_destination() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    m.file_cursor = 4; // big (999 bytes)
+    handle_event(&mut m, &mut fs, &Event::Char('c'));
+    type_text(&mut m, &mut fs, "/big2");
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    assert_eq!(fs.contents("/big2"), Some(vec![b'x'; 999]));
+    assert_eq!(fs.contents("/big"), Some(vec![b'x'; 999]));
+    assert!(m.files.iter().any(|e| e.name == "big2" && e.size == 999));
+}
+
+#[test]
+fn copy_into_an_existing_directory_lands_under_the_base_name() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    m.file_cursor = 2; // a.rs
+    handle_event(&mut m, &mut fs, &Event::Char('c'));
+    // A relative destination is joined onto the listed directory.
+    type_text(&mut m, &mut fs, "docs");
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    assert_eq!(fs.contents("/docs/a.rs"), Some(vec![b'x'; 30]));
+}
+
+#[test]
+fn copy_reproduces_a_directory_tree() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    // Tree pane, cursor onto "docs".
+    handle_event(&mut m, &mut fs, &Event::Down);
+    handle_event(&mut m, &mut fs, &Event::Char('c'));
+    type_text(&mut m, &mut fs, "/copy");
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    assert!(fs.has_dir("/copy"));
+    assert_eq!(fs.contents("/copy/guide.md"), Some(vec![b'x'; 5]));
+    // The source is untouched.
+    assert_eq!(fs.contents("/docs/guide.md"), Some(vec![b'x'; 5]));
+}
+
+#[test]
+fn copy_onto_itself_and_into_its_own_subtree_are_refused_before_io() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    m.file_cursor = 2; // a.rs
+    handle_event(&mut m, &mut fs, &Event::Char('c'));
+    type_text(&mut m, &mut fs, "/a.rs");
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    assert!(m.message.clone().expect("refused").contains("same entry"));
+    // A directory into its own subtree.
+    m.pane = Pane::Tree;
+    handle_event(&mut m, &mut fs, &Event::Down); // onto docs
+    handle_event(&mut m, &mut fs, &Event::Char('c'));
+    type_text(&mut m, &mut fs, "/docs/inner");
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    assert!(m.message.clone().expect("refused").contains("into itself"));
+    assert!(!fs.has_dir("/docs/inner"));
+}
+
+#[test]
+fn a_bad_destination_spelling_is_refused_by_the_path_grammar() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    m.file_cursor = 2; // a.rs
+    handle_event(&mut m, &mut fs, &Event::Char('c'));
+    // An interior empty component fails the shared grammar.
+    type_text(&mut m, &mut fs, "/x//y");
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    assert!(m.message.clone().expect("refused").contains("bad path"));
+}
+
+// --- File operations: the overwrite question --------------------------------
+
+#[test]
+fn copy_over_an_existing_file_asks_and_overwrites_on_o() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    m.file_cursor = 4; // big (999 bytes)
+    handle_event(&mut m, &mut fs, &Event::Char('c'));
+    type_text(&mut m, &mut fs, "/b.txt");
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    assert!(matches!(m.prompt, Some(Prompt::Overwrite(_))));
+    // Nothing was written while the question is open.
+    assert_eq!(fs.contents("/b.txt"), Some(vec![b'x'; 10]));
+    handle_event(&mut m, &mut fs, &Event::Char('o'));
+    assert_eq!(fs.contents("/b.txt"), Some(vec![b'x'; 999]));
+}
+
+#[test]
+fn copy_over_an_existing_file_skips_on_s_and_cancels_on_c() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    m.file_cursor = 4; // big
+    handle_event(&mut m, &mut fs, &Event::Char('c'));
+    type_text(&mut m, &mut fs, "/b.txt");
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &Event::Char('s'));
+    assert_eq!(fs.contents("/b.txt"), Some(vec![b'x'; 10]));
+    let message = m.message.clone().expect("summary");
+    assert!(message.contains("skipped"), "{message}");
+    // Cancel likewise leaves the target alone.
+    handle_event(&mut m, &mut fs, &Event::Char('c'));
+    type_text(&mut m, &mut fs, "/b.txt");
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &Event::Char('c'));
+    assert_eq!(fs.contents("/b.txt"), Some(vec![b'x'; 10]));
+    let message = m.message.clone().expect("summary");
+    assert!(message.contains("cancelled"), "{message}");
+}
+
+#[test]
+fn a_merging_directory_copy_asks_per_conflicting_file() {
+    // Copying /src into /dst merges with the existing /dst/src, which
+    // already holds a different one.txt.
+    let mut fs = FakeFs::new()
+        .dir("/", vec![dir("src"), dir("dst")])
+        .dir("/src", vec![file("one.txt", 3, 0), file("two.txt", 4, 0)])
+        .dir("/dst", vec![dir("src")])
+        .dir("/dst/src", vec![file("one.txt", 9, 0)]);
+    let mut m = model(&mut fs);
+    handle_event(&mut m, &mut fs, &Event::Down); // onto dst
+    handle_event(&mut m, &mut fs, &Event::Down); // onto src
+    handle_event(&mut m, &mut fs, &Event::Char('c'));
+    type_text(&mut m, &mut fs, "/dst");
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    // Only the conflicting file pauses; skipping it still copies the rest.
+    assert!(matches!(m.prompt, Some(Prompt::Overwrite(_))));
+    handle_event(&mut m, &mut fs, &Event::Char('s'));
+    assert_eq!(m.prompt, None);
+    assert_eq!(fs.contents("/dst/src/one.txt"), Some(vec![b'x'; 9]));
+    assert_eq!(fs.contents("/dst/src/two.txt"), Some(vec![b'x'; 4]));
+}
+
+// --- File operations: move ---------------------------------------------------
+
+#[test]
+fn move_renames_within_one_volume() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    m.file_cursor = 2; // a.rs
+    handle_event(&mut m, &mut fs, &Event::Char('m'));
+    type_text(&mut m, &mut fs, "/docs");
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    assert_eq!(fs.contents("/a.rs"), None);
+    assert_eq!(fs.contents("/docs/a.rs"), Some(vec![b'x'; 30]));
+    assert!(!m.files.iter().any(|e| e.name == "a.rs"));
+}
+
+#[test]
+fn move_across_volumes_copies_then_removes_the_source() {
+    // /vol is another volume, so the rename honestly reports the boundary
+    // and the engine falls back to copy-then-remove.
+    let mut fs = FakeFs::new()
+        .dir("/", vec![dir("vol"), dir("src")])
+        .dir("/vol", vec![])
+        .dir("/src", vec![file("data", 7, 0)])
+        .cross("/vol");
+    let mut m = model(&mut fs);
+    handle_event(&mut m, &mut fs, &Event::Down); // onto src
+    handle_event(&mut m, &mut fs, &Event::Char('m'));
+    type_text(&mut m, &mut fs, "/vol");
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    assert!(fs.has_dir("/vol/src"));
+    assert_eq!(fs.contents("/vol/src/data"), Some(vec![b'x'; 7]));
+    assert!(!fs.has_dir("/src"));
+}
+
+#[test]
+fn a_cross_volume_move_skip_keeps_the_skipped_source() {
+    // The conflicting file is skipped, so its source directory is
+    // intentionally left holding it — never a failed operation.
+    let mut fs = FakeFs::new()
+        .dir("/", vec![dir("vol"), dir("src")])
+        .dir("/vol", vec![dir("src")])
+        .dir("/vol/src", vec![file("data", 9, 0)])
+        .dir("/src", vec![file("data", 7, 0)])
+        .cross("/vol");
+    let mut m = model(&mut fs);
+    handle_event(&mut m, &mut fs, &Event::Down); // onto src
+    handle_event(&mut m, &mut fs, &Event::Char('m'));
+    type_text(&mut m, &mut fs, "/vol");
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    assert!(matches!(m.prompt, Some(Prompt::Overwrite(_))));
+    handle_event(&mut m, &mut fs, &Event::Char('s'));
+    // The target kept its bytes, the skipped source survives, and the
+    // summary says one entry was skipped.
+    assert_eq!(fs.contents("/vol/src/data"), Some(vec![b'x'; 9]));
+    assert_eq!(fs.contents("/src/data"), Some(vec![b'x'; 7]));
+    assert!(fs.has_dir("/src"));
+    let message = m.message.clone().expect("summary");
+    assert!(message.contains("skipped"), "{message}");
+}
+
+#[test]
+fn moving_the_session_root_is_refused() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    handle_event(&mut m, &mut fs, &Event::Char('m'));
+    assert_eq!(m.prompt, None);
+    assert!(m.message.clone().expect("refused").contains("session root"));
+}
+
+// --- File operations: failure injection --------------------------------------
+
+#[test]
+fn a_read_failure_mid_copy_removes_the_partial_target() {
+    let mut fs = fixture().read_fails("/big", Errno::PermissionDenied);
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    m.file_cursor = 4; // big
+    handle_event(&mut m, &mut fs, &Event::Char('c'));
+    type_text(&mut m, &mut fs, "/copy");
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    let message = m.message.clone().expect("failure surfaced");
+    assert!(message.contains("PermissionDenied"), "{message}");
+    // The half-written target was removed, and the pane shows no ghost.
+    assert_eq!(fs.contents("/copy"), None);
+    assert!(!m.files.iter().any(|e| e.name == "copy"));
+}
+
+#[test]
+fn a_write_failure_mid_copy_removes_the_partial_target() {
+    let mut fs = fixture().write_fails("/copy", Errno::NoSpace);
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    m.file_cursor = 4; // big
+    handle_event(&mut m, &mut fs, &Event::Char('c'));
+    type_text(&mut m, &mut fs, "/copy");
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    let message = m.message.clone().expect("failure surfaced");
+    assert!(message.contains("NoSpace"), "{message}");
+    assert_eq!(fs.contents("/copy"), None);
+}
+
+#[test]
+fn the_overwrite_question_appears_on_the_message_line() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    m.file_cursor = 4; // big
+    handle_event(&mut m, &mut fs, &Event::Char('c'));
+    type_text(&mut m, &mut fs, "/b.txt");
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    let mut window = Window::new(Pos::new(0, 0), Size::new(6, 70));
+    render(&m, &mut window);
+    let line = row_text(&window, 5);
+    assert!(line.starts_with("/b.txt exists"), "{line}");
+    assert!(line.contains("o)verwrite"), "{line}");
 }
 
 // --- End-to-end scripted session -----------------------------------------

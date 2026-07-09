@@ -33,6 +33,21 @@ Teclas:
 - `s` — abrir o menu de ordenação: `n` nome, `e` extensão, `s` tamanho,
   `m` data de modificação, `r` inverter o sentido, `Esc` cancela. Os
   diretórios agrupam-se sempre antes dos ficheiros.
+- `c` — copiar a entrada selecionada: uma linha pede o destino. Um
+  destino relativo cai no diretório listado; um destino que é um
+  diretório existente recebe a cópia lá dentro, com o nome da origem.
+  Um diretório é copiado com todo o seu conteúdo. Copiar uma entrada
+  sobre si própria ou um diretório para dentro da sua própria subárvore
+  é recusado antes de qualquer escrita.
+- `m` — mover a entrada selecionada, com a mesma pergunta de destino.
+  Dentro do mesmo volume a mudança é uma renomeação atómica; entre
+  volumes a entrada é copiada e a origem depois removida.
+- `r` — renomear a entrada selecionada no local: a linha vem
+  pré-preenchida com o nome atual.
+- `d` — apagar a entrada selecionada após uma confirmação; só `y`
+  prossegue. Apagar um diretório remove todo o seu conteúdo, e a
+  confirmação di-lo.
+- `M` — criar um diretório no diretório listado; o nome é pedido.
 - `a` — editar os bits de permissão da entrada selecionada: uma linha
   octal pré-preenchida com o modo atual. Enter aplica (só o proprietário
   pode alterá-lo — o núcleo recusa qualquer outro), Esc cancela.
@@ -41,6 +56,15 @@ Teclas:
 - `?` — mostrar esta ajuda sobre os painéis; qualquer tecla fecha-a.
 - `q` — sair, restaurando o terminal.
 
+Quando uma cópia ou mudança iria sobrescrever um ficheiro existente, a
+sessão pergunta por ficheiro: `o` sobrescreve, `s` salta (uma origem
+saltada fica no seu lugar) e `c` cancela os passos restantes — o que
+já foi aplicado permanece, e o relatório final diz o que aconteceu. Uma
+falha a meio da cópia remove o destino meio escrito e mostra o erro do
+núcleo; nada se faz passar por uma cópia completa. Cada operação é
+autorizada pelo núcleo — uma recusa aparece tal e qual na linha de
+mensagens sem que nada mude.
+
 A linha de estado mostra o caminho listado, o número de entradas
 visíveis, a ordem de ordenação, os bytes livres/totais do volume
 subjacente (quando o serviço de informação do sistema os pode reportar)
@@ -48,8 +72,7 @@ e se as entradas ocultas estão visíveis. Um ficheiro cujo formato de
 armazenamento não guarda data de modificação mostra `-` na coluna da
 data.
 
-As operações sobre ficheiros (copiar, mover, renomear, apagar), a
-marcação, a pesquisa e os visualizadores de texto/hexadecimal/
+A marcação, a pesquisa e os visualizadores de texto/hexadecimal/
 desassemblagem chegam em fases posteriores do plano da ferramenta.
 
 ## OPTIONS
@@ -67,4 +90,4 @@ desassemblagem chegam em fases posteriores do plano da ferramenta.
 
 ## SEE ALSO
 
-ls, du, df
+ls, cp, mv, rm, mkdir, chmod, du, df

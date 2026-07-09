@@ -3,9 +3,12 @@
 //!
 //! A persistent directory-tree pane plus a file pane over the storage
 //! forest, drawn with the OS curses library. This crate delivers the S1
-//! model core: the lazily populated tree, pane navigation, sorting, the
-//! hidden-entries toggle, the status/message lines, and the `?` help
-//! overlay. The file operations, tagging, search, and viewers are staged in
+//! model core (the lazily populated tree, pane navigation, sorting, the
+//! hidden-entries toggle, the status/message lines, the `?` help overlay)
+//! and the S2 file operations: copy, move, rename, delete, mkdir, and the
+//! permission-bits editor, each planned and validated before any I/O and
+//! driven by a resumable executor whose per-file overwrite questions run
+//! through the key loop. Tagging, search, and the viewers are staged in
 //! `.junie/fstree-next-plan.md` and land stage by stage.
 //!
 //! # What this crate is
@@ -23,7 +26,8 @@
 //! # Module map
 //!
 //! * [`fs`] — the [`fs::Fs`] seam and its listing vocabulary.
-//! * [`model`] — the tree/pane/sort state machine.
+//! * [`model`] — the tree/pane/sort/prompt state machine.
+//! * [`ops`] — the file-operation planner and resumable executor.
 //! * [`mod@render`] — the curses frame (panes, status, message, overlays).
 //! * [`app`] — the key grammar and the blocking session loop.
 //!
@@ -43,12 +47,13 @@ extern crate alloc;
 pub mod app;
 pub mod fs;
 pub mod model;
+pub mod ops;
 pub mod render;
 
 #[cfg(test)]
 mod tests;
 
 pub use app::{handle_event, run, FstreeError};
-pub use fs::{Fs, FsEntry, VolumeSpace};
+pub use fs::{Fs, FsEntry, RenameOutcome, VolumeSpace};
 pub use model::{Model, Pane, SortKey};
 pub use render::render;

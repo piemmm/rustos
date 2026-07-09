@@ -7,17 +7,28 @@
 
 use alloc::format;
 use alloc::string::String;
+use alloc::vec::Vec;
 
+use rustos_abi::FileKind;
 use rustos_curses::{Event, Pos, Screen, Tty, Window};
 
 use crate::fs::Fs;
-use crate::model::{child_dirs_of, join, DirNode, ModePrompt, Model, Overlay, Pane, SortKey};
+use crate::model::{
+    child_dirs_of, join, merge_child_dirs, ConfirmPrompt, DirNode, InputOp, InputPrompt,
+    ModePrompt, Model, Overlay, OverwritePrompt, Pane, Prompt, SortKey,
+};
+use crate::ops::{parent_of, plan_target, resolve_destination, Decision, FileOp, OpProgress};
 use crate::render::render;
 
 /// Longest mode the prompt accepts: four octal digits (`7777`), the full
 /// permission word — a fixed validation bound on typed input, matching the
 /// kernel's own `FS_MODE_MASK` ceiling.
 const MODE_DIGITS_MAX: usize = 4;
+
+/// Longest text a destination or name prompt accepts — a typing bound on
+/// the prompt line; the shared path grammar and the kernel enforce the
+/// real path limits on submission.
+const INPUT_MAX: usize = 512;
 
 /// The session outcome the `Run` binary maps to an exit code.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -65,8 +76,13 @@ pub fn run<T: Tty>(
 /// Apply one typed key event to the session state.
 pub fn handle_event(model: &mut Model, fs: &mut dyn Fs, event: &Event) {
     model.message = None;
-    if model.prompt.is_some() {
-        handle_mode_prompt(model, fs, event);
+    if let Some(prompt) = model.prompt.take() {
+        match prompt {
+            Prompt::Mode(mode) => handle_mode_prompt(model, fs, mode, event),
+            Prompt::Input(input) => handle_input_prompt(model, fs, input, event),
+            Prompt::ConfirmDelete(confirm) => handle_confirm_prompt(model, fs, &confirm, event),
+            Prompt::Overwrite(paused) => handle_overwrite_prompt(model, fs, paused, event),
+        }
         return;
     }
     match model.overlay {
@@ -86,6 +102,16 @@ pub fn handle_event(model: &mut Model, fs: &mut dyn Fs, event: &Event) {
         Event::Char('?') => model.overlay = Overlay::Help,
         Event::Char('s') => model.overlay = Overlay::SortMenu,
         Event::Char('a') => open_mode_prompt(model, fs),
+        Event::Char('c') => open_transfer_prompt(model, false),
+        Event::Char('m') => open_transfer_prompt(model, true),
+        Event::Char('r') => open_rename_prompt(model),
+        Event::Char('d') => open_delete_prompt(model),
+        Event::Char('M') => {
+            model.prompt = Some(Prompt::Input(InputPrompt {
+                op: InputOp::MkdirName,
+                input: String::new(),
+            }));
+        }
         Event::Char('.') => {
             model.show_hidden = !model.show_hidden;
             clamp_cursors(model);
@@ -116,37 +142,96 @@ pub fn handle_event(model: &mut Model, fs: &mut dyn Fs, event: &Event) {
     }
 }
 
-/// Open the mode-editor prompt on the focused pane's selection: the file
-/// pane's entry, or the tree pane's directory. The prompt starts from the
-/// entry's *current* bits (a resolve-only stat through the seam); a
-/// refused stat surfaces its error and opens nothing.
-fn open_mode_prompt(model: &mut Model, fs: &mut dyn Fs) {
-    let (path, name) = match model.pane {
+/// The focused pane's selection: the file pane's entry, or the tree
+/// pane's directory. `None` when the focused pane is empty.
+fn focused_selection(model: &Model) -> Option<(String, String, FileKind)> {
+    match model.pane {
         Pane::Files => {
-            let Some(entry) = model.visible_files().get(model.file_cursor).copied() else {
-                return;
-            };
-            (join(&model.files_dir, &entry.name), entry.name.clone())
+            let entry = model.visible_files().get(model.file_cursor).copied()?;
+            Some((
+                join(&model.files_dir, &entry.name),
+                entry.name.clone(),
+                entry.kind,
+            ))
         }
         Pane::Tree => {
             let rows = model.tree_rows();
-            let Some(row) = rows.get(model.tree_cursor) else {
-                return;
-            };
-            (row.path.clone(), row.name.clone())
+            let row = rows.get(model.tree_cursor)?;
+            Some((row.path.clone(), row.name.clone(), FileKind::Directory))
         }
+    }
+}
+
+/// Open the mode-editor prompt on the focused pane's selection. The
+/// prompt starts from the entry's *current* bits (a resolve-only stat
+/// through the seam); a refused stat surfaces its error and opens nothing.
+fn open_mode_prompt(model: &mut Model, fs: &mut dyn Fs) {
+    let Some((path, name, _)) = focused_selection(model) else {
+        return;
     };
     match fs.stat_mode(&path) {
         Ok(current) => {
-            model.prompt = Some(ModePrompt {
+            model.prompt = Some(Prompt::Mode(ModePrompt {
                 path,
                 name,
                 current,
                 input: format!("{current:o}"),
-            });
+            }));
         }
         Err(errno) => model.report(&path, errno),
     }
+}
+
+/// Open the copy (`c`) or move (`m`) destination prompt on the focused
+/// selection. Moving the session root is refused — the tree must keep its
+/// anchor; copying it elsewhere is legitimate.
+fn open_transfer_prompt(model: &mut Model, moving: bool) {
+    let Some((src, name, kind)) = focused_selection(model) else {
+        return;
+    };
+    if moving && src == model.root.path {
+        model.message = Some(String::from("cannot move the session root"));
+        return;
+    }
+    let op = if moving {
+        InputOp::MoveDest { src, name, kind }
+    } else {
+        InputOp::CopyDest { src, name, kind }
+    };
+    model.prompt = Some(Prompt::Input(InputPrompt {
+        op,
+        input: String::new(),
+    }));
+}
+
+/// Open the rename (`r`) prompt on the focused selection, prefilled with
+/// the current name. Renaming the session root is refused.
+fn open_rename_prompt(model: &mut Model) {
+    let Some((src, name, kind)) = focused_selection(model) else {
+        return;
+    };
+    if src == model.root.path {
+        model.message = Some(String::from("cannot rename the session root"));
+        return;
+    }
+    let input = name.clone();
+    model.prompt = Some(Prompt::Input(InputPrompt {
+        op: InputOp::RenameTo { src, name, kind },
+        input,
+    }));
+}
+
+/// Open the delete (`d`) confirmation on the focused selection. Deleting
+/// the session root is refused.
+fn open_delete_prompt(model: &mut Model) {
+    let Some((path, name, kind)) = focused_selection(model) else {
+        return;
+    };
+    if path == model.root.path {
+        model.message = Some(String::from("cannot delete the session root"));
+        return;
+    }
+    model.prompt = Some(Prompt::ConfirmDelete(ConfirmPrompt { path, name, kind }));
 }
 
 /// Apply one key to the open mode prompt: octal digits and Backspace
@@ -154,24 +239,20 @@ fn open_mode_prompt(model: &mut Model, fs: &mut dyn Fs) {
 /// whether the change is allowed; a refusal is surfaced verbatim and the
 /// entry is left unchanged (the prompt closes either way — the user's
 /// input survives on the message line's report, not as hidden state).
-fn handle_mode_prompt(model: &mut Model, fs: &mut dyn Fs, event: &Event) {
-    let Some(prompt) = &mut model.prompt else {
-        return;
-    };
+fn handle_mode_prompt(model: &mut Model, fs: &mut dyn Fs, mut prompt: ModePrompt, event: &Event) {
     match event {
-        Event::Esc => model.prompt = None,
+        Event::Esc => {}
         Event::Backspace => {
             prompt.input.pop();
+            model.prompt = Some(Prompt::Mode(prompt));
         }
         Event::Char(digit @ '0'..='7') => {
             if prompt.input.len() < MODE_DIGITS_MAX {
                 prompt.input.push(*digit);
             }
+            model.prompt = Some(Prompt::Mode(prompt));
         }
         Event::Enter => {
-            let Some(prompt) = model.prompt.take() else {
-                return;
-            };
             // At most four octal digits can be typed, so the parse fails
             // only on empty input and the value never exceeds `0o7777`.
             let Ok(mode) = u32::from_str_radix(&prompt.input, 8) else {
@@ -187,7 +268,242 @@ fn handle_mode_prompt(model: &mut Model, fs: &mut dyn Fs, event: &Event) {
         }
         // Any other key (a non-octal digit included) is ignored — the
         // prompt accepts only what the kernel could accept.
-        _ => {}
+        _ => model.prompt = Some(Prompt::Mode(prompt)),
+    }
+}
+
+/// Apply one key to an open text prompt: printable keys and Backspace
+/// edit, Enter submits the answer, Esc cancels with nothing changed.
+fn handle_input_prompt(model: &mut Model, fs: &mut dyn Fs, mut prompt: InputPrompt, event: &Event) {
+    match event {
+        Event::Esc => {}
+        Event::Backspace => {
+            prompt.input.pop();
+            model.prompt = Some(Prompt::Input(prompt));
+        }
+        Event::Char(ch) if !ch.is_control() => {
+            if prompt.input.len() < INPUT_MAX {
+                prompt.input.push(*ch);
+            }
+            model.prompt = Some(Prompt::Input(prompt));
+        }
+        Event::Enter => submit_input(model, fs, prompt),
+        _ => model.prompt = Some(Prompt::Input(prompt)),
+    }
+}
+
+/// Act on a submitted text prompt: plan, validate, and run the operation
+/// it names. Every refusal lands on the message line with nothing changed.
+fn submit_input(model: &mut Model, fs: &mut dyn Fs, prompt: InputPrompt) {
+    match prompt.op {
+        InputOp::CopyDest { src, kind, .. } => {
+            submit_transfer(model, fs, &src, kind, &prompt.input, false);
+        }
+        InputOp::MoveDest { src, kind, .. } => {
+            submit_transfer(model, fs, &src, kind, &prompt.input, true);
+        }
+        InputOp::RenameTo { src, name, kind } => {
+            let typed = prompt.input;
+            if typed.is_empty() || typed == "." || typed == ".." || typed.contains('/') {
+                model.message = Some(String::from("rename: invalid name"));
+                return;
+            }
+            if typed == name {
+                model.message = Some(String::from("rename: name unchanged"));
+                return;
+            }
+            let target = join(parent_of(&src), &typed);
+            run_op(
+                model,
+                fs,
+                FileOp::move_to(&src, kind, &target),
+                alloc::vec![String::from(parent_of(&src))],
+            );
+        }
+        InputOp::MkdirName => {
+            let typed = prompt.input;
+            if typed.is_empty() || typed == "." || typed == ".." || typed.contains('/') {
+                model.message = Some(String::from("mkdir: invalid name"));
+                return;
+            }
+            let path = join(&model.files_dir, &typed);
+            match fs.mkdir(&path) {
+                Ok(()) => {
+                    model.message = Some(format!("created directory {typed}"));
+                    let listed = [model.files_dir.clone()];
+                    refresh_after(model, fs, &listed);
+                }
+                Err(errno) => model.report(&path, errno),
+            }
+        }
+    }
+}
+
+/// Plan and run a copy or move of `src` to the typed destination: the
+/// spelling is normalised through the shared path grammar (relative
+/// spellings land in the listed directory), the target planned (an
+/// existing directory receives the source inside it), and the self/subtree
+/// refusals applied before any I/O.
+fn submit_transfer(
+    model: &mut Model,
+    fs: &mut dyn Fs,
+    src: &str,
+    kind: FileKind,
+    typed: &str,
+    moving: bool,
+) {
+    if typed.is_empty() {
+        model.message = Some(String::from("empty destination — nothing done"));
+        return;
+    }
+    let dst = match resolve_destination(&model.files_dir, typed) {
+        Ok(dst) => dst,
+        Err(error) => {
+            model.message = Some(error.describe());
+            return;
+        }
+    };
+    let target = match plan_target(fs, src, kind, &dst) {
+        Ok(target) => target,
+        Err(error) => {
+            model.message = Some(error.describe());
+            return;
+        }
+    };
+    let refresh = alloc::vec![
+        String::from(parent_of(src)),
+        String::from(parent_of(&target))
+    ];
+    let op = if moving {
+        FileOp::move_to(src, kind, &target)
+    } else {
+        FileOp::copy(src, kind, &target)
+    };
+    run_op(model, fs, op, refresh);
+}
+
+/// Apply one key to the delete confirmation: only `y`/`Y` proceeds; any
+/// other key declines with nothing changed — never an assumed yes.
+fn handle_confirm_prompt(
+    model: &mut Model,
+    fs: &mut dyn Fs,
+    prompt: &ConfirmPrompt,
+    event: &Event,
+) {
+    match event {
+        Event::Char('y' | 'Y') => {
+            let refresh = alloc::vec![String::from(parent_of(&prompt.path))];
+            run_op(
+                model,
+                fs,
+                FileOp::delete(&prompt.path, prompt.kind),
+                refresh,
+            );
+        }
+        _ => model.message = Some(format!("{} not deleted", prompt.name)),
+    }
+}
+
+/// Apply one key to a paused operation's overwrite question: o)verwrite,
+/// s)kip, or c)ancel (Esc cancels too); any other key keeps asking.
+fn handle_overwrite_prompt(
+    model: &mut Model,
+    fs: &mut dyn Fs,
+    mut paused: OverwritePrompt,
+    event: &Event,
+) {
+    let decision = match event {
+        Event::Char('o' | 'O') => Decision::Overwrite,
+        Event::Char('s' | 'S') => Decision::Skip,
+        Event::Char('c' | 'C') | Event::Esc => Decision::Cancel,
+        _ => {
+            model.prompt = Some(Prompt::Overwrite(paused));
+            return;
+        }
+    };
+    paused.op.resolve(decision);
+    run_op(model, fs, paused.op, paused.refresh);
+}
+
+/// Drive `op` until it finishes, fails, or pauses on an overwrite
+/// question; the panes are refreshed when it ends either way, because a
+/// failed or cancelled operation may already have applied earlier steps.
+fn run_op(model: &mut Model, fs: &mut dyn Fs, mut op: FileOp, refresh: Vec<String>) {
+    match op.advance(fs) {
+        OpProgress::Done => {
+            model.message = Some(op.summary());
+            refresh_after(model, fs, &refresh);
+        }
+        OpProgress::NeedsDecision => {
+            model.prompt = Some(Prompt::Overwrite(OverwritePrompt { op, refresh }));
+        }
+        OpProgress::Failed(error) => {
+            model.message = Some(error.describe());
+            refresh_after(model, fs, &refresh);
+        }
+    }
+}
+
+/// Refresh the panes after an operation: re-list every affected tree node
+/// that had been read, then revalidate the file pane (climbing to the
+/// nearest listable ancestor when the listed directory itself is gone).
+fn refresh_after(model: &mut Model, fs: &mut dyn Fs, dirs: &[String]) {
+    for dir in dirs {
+        reload_tree_node(model, fs, dir);
+    }
+    revalidate_file_pane(model, fs);
+    clamp_cursors(model);
+}
+
+/// Re-read the children of the tree node at `path`, preserving the
+/// expansion state of surviving branches. A node never read stays lazy; a
+/// listing now refused empties the node and collapses it (fail closed —
+/// stale rows are never shown as live).
+fn reload_tree_node(model: &mut Model, fs: &mut dyn Fs, path: &str) {
+    let populated = matches!(
+        find_node(&mut model.root, path),
+        Some(DirNode {
+            children: Some(_),
+            ..
+        })
+    );
+    if !populated {
+        return;
+    }
+    let listing = fs.list_dir(path);
+    if let Some(node) = find_node(&mut model.root, path) {
+        if let Ok(entries) = listing {
+            let old = node.children.take().unwrap_or_default();
+            node.children = Some(merge_child_dirs(path, &entries, old));
+        } else {
+            node.children = None;
+            node.expanded = false;
+        }
+    }
+}
+
+/// Re-list the file pane's directory; when it no longer lists (deleted or
+/// moved), climb to the nearest ancestor that does, stopping at the
+/// session root.
+fn revalidate_file_pane(model: &mut Model, fs: &mut dyn Fs) {
+    let mut path = model.files_dir.clone();
+    loop {
+        match fs.list_dir(&path) {
+            Ok(entries) => {
+                model.files = entries;
+                model.files_dir = path;
+                model.sort_files();
+                model.space = fs.volume_space(&model.files_dir);
+                return;
+            }
+            Err(_) if path != model.root.path => {
+                path = String::from(parent_of(&path));
+            }
+            // The session root itself no longer lists; the previous
+            // listing is kept rather than blanked — the next navigation
+            // will surface the error in place.
+            Err(_) => return,
+        }
     }
 }
 

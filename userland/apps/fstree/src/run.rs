@@ -38,14 +38,15 @@ mod program {
     use alloc::vec::Vec;
 
     use rustos_abi::fs::{DirEntry, OpenFlags, FS_IO_MAX, FS_MODE_MASK};
-    use rustos_abi::{Errno, InputMode, STDOUT};
+    use rustos_abi::{Errno, FileKind, InputMode, UnlinkFlags, STDOUT};
     use rustos_curses::{
         CursesError, InputMode as CursesInputMode, Result as CursesResult, Screen, Size, Tty,
     };
-    use rustos_fstree::{run, Fs, FsEntry, Model, VolumeSpace};
+    use rustos_fstree::{run, Fs, FsEntry, Model, RenameOutcome, VolumeSpace};
     use rustos_help::{own_short_help, BundleHelp};
     use rustos_procinfo::{for_each_mount, IpcTransport};
     use rustos_rt::io::{write_stderr_line, Stdout, Write};
+    use rustos_rt::File;
     use rustos_termcap::from_term;
     use rustos_vt::{Op, Parser};
 
@@ -114,11 +115,40 @@ mod program {
         }
     }
 
-    /// The production [`Fs`]: directory listings through the
-    /// kernel-authorised `fs_*` syscalls (each entry's kind, sizes, and
-    /// modification stamp ride the one `fs_readdir` stream), and volume
-    /// free space through the System Information API's shared mount walk.
-    struct RtFs;
+    /// The production [`Fs`]: directory listings and every file mutation
+    /// through the kernel-authorised `fs_*` syscalls (each entry's kind,
+    /// sizes, and modification stamp ride the one `fs_readdir` stream),
+    /// and volume free space through the System Information API's shared
+    /// mount walk.
+    ///
+    /// The copy engine streams a file chunk-by-chunk through path-based
+    /// seam calls, so two one-slot handle caches (the open source and the
+    /// open destination — the `cp` host's pattern) hoist the per-chunk
+    /// open off the copy path; a mutation of a cached path drops its
+    /// handle so a stale one is never written through.
+    struct RtFs {
+        reader: Option<(String, File)>,
+        writer: Option<(String, File)>,
+    }
+
+    impl RtFs {
+        fn new() -> Self {
+            Self {
+                reader: None,
+                writer: None,
+            }
+        }
+
+        /// Drop any cached handle on `path` after a mutation of it.
+        fn forget(&mut self, path: &str) {
+            if matches!(&self.reader, Some((name, _)) if name == path) {
+                self.reader = None;
+            }
+            if matches!(&self.writer, Some((name, _)) if name == path) {
+                self.writer = None;
+            }
+        }
+    }
 
     impl Fs for RtFs {
         fn list_dir(&mut self, path: &str) -> Result<Vec<FsEntry>, Errno> {
@@ -157,8 +187,8 @@ mod program {
         fn stat_mode(&mut self, path: &str) -> Result<u32, Errno> {
             // A resolve-only open: no read authority is requested, the
             // handle is closed on drop, and only the metadata is learned.
-            let file = rustos_rt::File::open(path.as_bytes(), OpenFlags::empty())
-                .map_err(Errno::from_syscall)?;
+            let file =
+                File::open(path.as_bytes(), OpenFlags::empty()).map_err(Errno::from_syscall)?;
             let stat = file.stat().map_err(Errno::from_syscall)?;
             // Only the permission bits are the editor's subject; the
             // file-type bits the backing reports above the mask are not.
@@ -174,6 +204,106 @@ mod program {
                 return Err(Errno::from_syscall(ret));
             }
             Ok(())
+        }
+
+        fn stat_kind(&mut self, path: &str) -> Result<FileKind, Errno> {
+            // A resolve-only open: no read authority is requested, the
+            // handle is closed on drop, and only the metadata is learned.
+            let file =
+                File::open(path.as_bytes(), OpenFlags::empty()).map_err(Errno::from_syscall)?;
+            let stat = file.stat().map_err(Errno::from_syscall)?;
+            Ok(stat.kind)
+        }
+
+        fn read(&mut self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
+            if !matches!(&self.reader, Some((name, _)) if name == path) {
+                let file =
+                    File::open(path.as_bytes(), OpenFlags::READ).map_err(Errno::from_syscall)?;
+                self.reader = Some((String::from(path), file));
+            }
+            match &self.reader {
+                Some((_, file)) => file.read_at(offset, buf).map_err(Errno::from_syscall),
+                // Unreachable by construction (the handle was just
+                // installed), but fail closed rather than panic.
+                None => Err(Errno::NotFound),
+            }
+        }
+
+        fn create(&mut self, path: &str) -> Result<(), Errno> {
+            // Create-or-truncate, then close: the engine writes through
+            // `write`, which re-opens the destination for the stream.
+            let file = rustos_rt::create(path.as_bytes()).map_err(Errno::from_syscall)?;
+            drop(file);
+            self.forget(path);
+            Ok(())
+        }
+
+        fn write(&mut self, path: &str, offset: u64, bytes: &[u8]) -> Result<(), Errno> {
+            if !matches!(&self.writer, Some((name, _)) if name == path) {
+                let file =
+                    File::open(path.as_bytes(), OpenFlags::WRITE).map_err(Errno::from_syscall)?;
+                self.writer = Some((String::from(path), file));
+            }
+            let Some((_, file)) = &self.writer else {
+                // Unreachable by construction (the handle was just
+                // installed), but fail closed rather than panic.
+                return Err(Errno::NotFound);
+            };
+            // The kernel may accept a short write; every byte is the
+            // seam's contract, so loop until the chunk is on disk or
+            // refused.
+            let mut written = 0usize;
+            while written < bytes.len() {
+                let n = file
+                    .write_at(offset + written as u64, &bytes[written..])
+                    .map_err(Errno::from_syscall)?;
+                if n == 0 {
+                    // A zero-byte accept would spin forever; fail closed.
+                    return Err(Errno::LengthOutOfRange);
+                }
+                written += n;
+            }
+            Ok(())
+        }
+
+        fn mkdir(&mut self, path: &str) -> Result<(), Errno> {
+            let ret = rustos_rt::fs_mkdir(path.as_bytes());
+            if ret != 0 {
+                return Err(Errno::from_syscall(ret));
+            }
+            Ok(())
+        }
+
+        fn remove_file(&mut self, path: &str) -> Result<(), Errno> {
+            let ret = rustos_rt::fs_unlink(path.as_bytes(), UnlinkFlags::empty());
+            if ret != 0 {
+                return Err(Errno::from_syscall(ret));
+            }
+            self.forget(path);
+            Ok(())
+        }
+
+        fn remove_dir(&mut self, path: &str) -> Result<(), Errno> {
+            let ret = rustos_rt::fs_unlink(path.as_bytes(), UnlinkFlags::DIRECTORY);
+            if ret != 0 {
+                return Err(Errno::from_syscall(ret));
+            }
+            Ok(())
+        }
+
+        fn rename(&mut self, src: &str, dst: &str) -> Result<RenameOutcome, Errno> {
+            let ret = rustos_rt::fs_rename(src.as_bytes(), dst.as_bytes());
+            if ret == 0 {
+                self.forget(src);
+                self.forget(dst);
+                return Ok(RenameOutcome::Renamed);
+            }
+            match Errno::from_syscall(ret) {
+                // The honest boundary report that drives the engine's
+                // copy-then-remove fallback; nothing was changed.
+                Errno::CrossVolume => Ok(RenameOutcome::CrossDevice),
+                errno => Err(errno),
+            }
         }
 
         fn volume_space(&mut self, path: &str) -> Option<VolumeSpace> {
@@ -288,7 +418,7 @@ mod program {
             Err(_) => Size::new(FALLBACK_ROWS, FALLBACK_COLS),
         };
 
-        let mut fs = RtFs;
+        let mut fs = RtFs::new();
         // The starting listing is read before the terminal is switched, so
         // a refused root fails loudly on a normal screen.
         let mut model = match Model::new(&mut fs, &root, help_text) {

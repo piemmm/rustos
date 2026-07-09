@@ -18,6 +18,7 @@ use alloc::vec::Vec;
 use rustos_abi::FileKind;
 
 use crate::fs::{Fs, FsEntry, VolumeSpace};
+use crate::ops::FileOp;
 
 /// Which pane holds the keyboard focus.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -80,6 +81,88 @@ pub struct TreeRow {
     pub expanded: bool,
 }
 
+/// The modal surface the message line carries while a question is open.
+/// While present, keys feed the prompt; the panes underneath stay drawn.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Prompt {
+    /// The mode editor (`a`).
+    Mode(ModePrompt),
+    /// A text-line question: a destination path or a new name.
+    Input(InputPrompt),
+    /// The delete confirmation (`d`).
+    ConfirmDelete(ConfirmPrompt),
+    /// A paused operation's per-file overwrite question.
+    Overwrite(OverwritePrompt),
+}
+
+/// What the open [`InputPrompt`] asks for, carrying its subject.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum InputOp {
+    /// The destination a copy of the subject lands at (`c`).
+    CopyDest {
+        /// Full path of the entry being copied.
+        src: String,
+        /// The entry's name, shown in the prompt.
+        name: String,
+        /// The entry's kind.
+        kind: FileKind,
+    },
+    /// The destination the subject moves to (`m`).
+    MoveDest {
+        /// Full path of the entry being moved.
+        src: String,
+        /// The entry's name, shown in the prompt.
+        name: String,
+        /// The entry's kind.
+        kind: FileKind,
+    },
+    /// The subject's new name within its directory (`r`).
+    RenameTo {
+        /// Full path of the entry being renamed.
+        src: String,
+        /// The entry's current name, shown in the prompt.
+        name: String,
+        /// The entry's kind.
+        kind: FileKind,
+    },
+    /// The name of a directory created in the listed directory (`M`).
+    MkdirName,
+}
+
+/// A one-line text question: the operation it feeds and the text typed so
+/// far. Printable keys and Backspace edit, Enter submits, Esc cancels.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InputPrompt {
+    /// What the answer is used for, with its subject.
+    pub op: InputOp,
+    /// The text typed so far.
+    pub input: String,
+}
+
+/// The delete confirmation (`d`): the entry about to be removed. Only
+/// `y`/`Y` proceeds; any other key declines — never an assumed yes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConfirmPrompt {
+    /// Full path of the entry to delete.
+    pub path: String,
+    /// The entry's name, shown in the question.
+    pub name: String,
+    /// The entry's kind (a directory is deleted with its contents, and
+    /// the question says so).
+    pub kind: FileKind,
+}
+
+/// A paused [`FileOp`] whose next step would overwrite an existing file;
+/// the user answers o)verwrite, s)kip, or c)ancel per file.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OverwritePrompt {
+    /// The paused operation; its [`FileOp::conflict`] names the paths.
+    pub op: FileOp,
+    /// The directories to refresh once the operation ends, carried across
+    /// the pause.
+    pub refresh: Vec<String>,
+}
+
 /// The modal mode-editor prompt (`a`): the entry being edited and the
 /// octal digits typed so far. While present, keys feed the prompt (octal
 /// digits and Backspace edit, Enter applies through the seam, Esc
@@ -127,8 +210,8 @@ pub struct Model {
     pub space: Option<VolumeSpace>,
     /// The modal surface currently shown, if any.
     pub overlay: Overlay,
-    /// The mode-editor prompt, when open (`a`).
-    pub prompt: Option<ModePrompt>,
+    /// The open prompt, when a question is being asked.
+    pub prompt: Option<Prompt>,
     /// The bundle's rendered help text, shown by the `?` overlay.
     pub help_text: String,
     /// Set when the session should end.
@@ -251,6 +334,25 @@ impl Model {
     pub fn report(&mut self, what: &str, errno: rustos_abi::Errno) {
         self.message = Some(format!("{what}: {errno:?}"));
     }
+}
+
+/// Rebuild a node's children from a fresh listing, preserving the
+/// expansion state and already-read children of every surviving name so a
+/// refresh never collapses the branches the user has open.
+pub(crate) fn merge_child_dirs(
+    parent: &str,
+    entries: &[FsEntry],
+    mut old: Vec<DirNode>,
+) -> Vec<DirNode> {
+    let mut dirs = child_dirs_of(parent, entries);
+    for node in &mut dirs {
+        if let Some(index) = old.iter().position(|o| o.name == node.name) {
+            let previous = old.swap_remove(index);
+            node.expanded = previous.expanded;
+            node.children = previous.children;
+        }
+    }
+    dirs
 }
 
 /// The child `DirNode`s of `parent` among `entries` (directories only),

@@ -35,6 +35,24 @@ Touches :
 - `s` — ouvrir le menu de tri : `n` nom, `e` extension, `s` taille,
   `m` date de modification, `r` inverser le sens, `Échap` annule. Les
   répertoires sont toujours groupés avant les fichiers.
+- `c` — copier l'entrée sélectionnée : une invite demande la
+  destination. Une destination relative atterrit dans le répertoire
+  listé ; une destination qui est un répertoire existant reçoit la copie
+  à l'intérieur, sous le nom de la source. Un répertoire est copié avec
+  tout ce qu'il contient. Copier une entrée sur elle-même ou un
+  répertoire dans son propre sous-arbre est refusé avant toute
+  écriture.
+- `m` — déplacer l'entrée sélectionnée, avec la même invite de
+  destination. Au sein d'un même volume, le déplacement est un renommage
+  atomique ; entre volumes, l'entrée est copiée puis la source
+  supprimée.
+- `r` — renommer l'entrée sélectionnée sur place : l'invite est
+  pré-remplie avec le nom actuel.
+- `d` — supprimer l'entrée sélectionnée après confirmation ; seul `y`
+  procède. Supprimer un répertoire retire tout ce qu'il contient, et la
+  confirmation le dit.
+- `M` — créer un répertoire dans le répertoire listé ; son nom est
+  demandé.
 - `a` — modifier les bits de permission de l'entrée sélectionnée : une
   invite octale pré-remplie avec le mode actuel. Entrée applique (seul le
   propriétaire peut modifier — le noyau refuse quiconque d'autre), Échap
@@ -45,15 +63,24 @@ Touches :
   ferme.
 - `q` — quitter en restaurant le terminal.
 
+Quand une copie ou un déplacement écraserait un fichier existant, la
+session demande fichier par fichier : `o` écrase, `s` saute (une source
+sautée reste en place), et `c` annule les étapes restantes — ce qui a
+déjà été appliqué le reste, et le rapport final dit ce qui s'est
+passé. Un échec en cours de copie supprime la cible à moitié écrite et
+affiche l'erreur du noyau ; rien ne se fait jamais passer pour une
+copie complète. Chaque opération est autorisée par le noyau — un refus
+apparaît tel quel sur la ligne de message, sans que rien ne change.
+
 La ligne d'état montre le chemin listé, le nombre d'entrées visibles,
 l'ordre de tri, les octets libres/totaux du volume sous-jacent (quand le
 service d'information système peut les rapporter) et si les entrées
 cachées sont affichées. Un fichier dont le format de stockage ne conserve
 pas de date de modification affiche `-` dans la colonne de date.
 
-Les opérations sur fichiers (copier, déplacer, renommer, supprimer), le
-marquage, la recherche et les visionneuses texte/hexadécimale/désassemblage
-arrivent dans les étapes ultérieures du plan de l'outil.
+Le marquage, la recherche et les visionneuses
+texte/hexadécimale/désassemblage arrivent dans les étapes ultérieures
+du plan de l'outil.
 
 ## OPTIONS
 
@@ -70,4 +97,4 @@ arrivent dans les étapes ultérieures du plan de l'outil.
 
 ## SEE ALSO
 
-ls, du, df
+ls, cp, mv, rm, mkdir, chmod, du, df

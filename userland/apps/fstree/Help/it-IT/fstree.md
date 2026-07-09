@@ -34,6 +34,22 @@ Tasti:
 - `s` — aprire il menu di ordinamento: `n` nome, `e` estensione,
   `s` dimensione, `m` data di modifica, `r` inverte il verso, `Esc`
   annulla. Le directory sono sempre raggruppate prima dei file.
+- `c` — copiare la voce selezionata: una riga chiede la destinazione.
+  Una destinazione relativa finisce nella directory elencata; una
+  destinazione che è una directory esistente riceve la copia al suo
+  interno, con il nome dell'origine. Una directory è copiata con tutto
+  il suo contenuto. Copiare una voce su sé stessa o una directory nel
+  proprio sottoalbero è rifiutato prima di scrivere qualsiasi cosa.
+- `m` — spostare la voce selezionata, con la stessa richiesta di
+  destinazione. Entro lo stesso volume lo spostamento è una rinomina
+  atomica; tra volumi la voce viene copiata e poi l'origine rimossa.
+- `r` — rinominare la voce selezionata sul posto: la riga è
+  precompilata con il nome attuale.
+- `d` — eliminare la voce selezionata dopo una conferma; solo `y`
+  procede. Eliminare una directory rimuove tutto il suo contenuto, e la
+  conferma lo dice.
+- `M` — creare una directory nella directory elencata; il nome viene
+  chiesto.
 - `a` — modificare i bit di permesso della voce selezionata: una riga
   ottale precompilata con il modo attuale. Invio applica (solo il
   proprietario può cambiarlo — il kernel rifiuta chiunque altro), Esc
@@ -43,15 +59,24 @@ Tasti:
 - `?` — mostrare questo aiuto sopra i pannelli; qualsiasi tasto lo chiude.
 - `q` — uscire ripristinando il terminale.
 
+Quando una copia o uno spostamento sovrascriverebbe un file esistente,
+la sessione chiede file per file: `o` sovrascrive, `s` salta (un
+origine saltata resta al suo posto) e `c` annulla i passi rimanenti —
+ciò che è già stato applicato rimane, e il rapporto finale dice cosa è
+successo. Un errore a metà copia rimuove la destinazione scritta a
+metà e mostra l'errore del kernel; nulla si spaccia mai per una copia
+completa. Ogni operazione è autorizzata dal kernel — un rifiuto
+compare tale e quale sulla riga dei messaggi senza che nulla cambi.
+
 La riga di stato mostra il percorso elencato, il numero di voci visibili,
 l'ordinamento, i byte liberi/totali del volume sottostante (quando il
 servizio di informazioni di sistema può riferirli) e se le voci nascoste
 sono visibili. Un file il cui formato di archiviazione non conserva la
 data di modifica mostra `-` nella colonna della data.
 
-Le operazioni sui file (copia, spostamento, rinomina, eliminazione), la
-marcatura, la ricerca e i visualizzatori testo/esadecimale/disassemblato
-arrivano nelle fasi successive del piano dello strumento.
+La marcatura, la ricerca e i visualizzatori
+testo/esadecimale/disassemblato arrivano nelle fasi successive del
+piano dello strumento.
 
 ## OPTIONS
 
@@ -68,4 +93,4 @@ arrivano nelle fasi successive del piano dello strumento.
 
 ## SEE ALSO
 
-ls, du, df
+ls, cp, mv, rm, mkdir, chmod, du, df
