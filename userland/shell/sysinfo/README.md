@@ -77,9 +77,10 @@ A reply that does not decode against `sysinfo-v1` — a truncated scalar, a
 process page whose length is not a whole number of records — is a hard
 error, never a partially-rendered guess.
 
-The hardware-tree wire format is owned by `lib/abi` §18 and is not built
-yet, so `sysinfo hardware` honestly reports the byte length the service
-returned rather than pretending to decode it (`AGENTS.md` §2.1).
+`sysinfo hardware` pages the tree in whole through the shared
+`rustos_procinfo::hwtree::fetch_tree` walk (the same fetch `lspci` and
+`lsusb` render from, `AGENTS.md` §2.2) and summarises it as a node
+count; the per-device inventory renderings are those tools' job.
 
 ## Tests
 

@@ -1,10 +1,11 @@
 //! The request dispatcher: the one place a `sysinfo` request is decoded,
 //! capability-checked, audited, and answered.
 
+use rustos_abi::hwtree::{HwNode, HwTreeHeader};
 use rustos_abi::sysinfo::{
-    spec_for, CpuTimeListRequest, CpuTimeRecord, MountListRequest, MountRecord, ProcessListRequest,
-    ProcessRecord, ResourceLimitRecord, SeatListRequest, SeatRecord, SysinfoQueryId,
-    SysinfoRequestHeader, UserDirectoryRecord, UserDirectoryRequest,
+    spec_for, CpuTimeListRequest, CpuTimeRecord, HardwareTreeRequest, MountListRequest,
+    MountRecord, ProcessListRequest, ProcessRecord, ResourceLimitRecord, SeatListRequest,
+    SeatRecord, SysinfoQueryId, SysinfoRequestHeader, UserDirectoryRecord, UserDirectoryRequest,
 };
 use rustos_abi::{Errno, LimitKind};
 use rustos_log::{log, Event, EventId, Field, Level, Sink};
@@ -144,8 +145,7 @@ fn dispatch(
     } else if query == SysinfoQueryId::KERNEL_MEMORY_STATS {
         write_bytes(&source.kernel_memory_stats(caller)?.to_le_bytes(), response)
     } else if query == SysinfoQueryId::HARDWARE_TREE {
-        let tree = source.hardware_tree(caller)?;
-        write_bytes(&tree, response)
+        hardware_tree(source, caller, payload, response)
     } else if query == SysinfoQueryId::SYSTEM_IDENTITY {
         write_bytes(&source.system_identity(caller)?.to_le_bytes(), response)
     } else if query == SysinfoQueryId::UPTIME {
@@ -196,6 +196,50 @@ fn resource_limits(
         written += ResourceLimitRecord::WIRE_LEN;
     }
     Ok(written)
+}
+
+/// Decode the [`HardwareTreeRequest`], validate the snapshot the source
+/// returned, and pack the snapshot's [`HwTreeHeader`] plus the selected
+/// window of whole [`HwNode`] records into `response`.
+///
+/// Every page repeats the header, so a paging client always sees the
+/// snapshot's total node count and the generation the page was served
+/// from, and can detect a tree that changed under its walk. The source's
+/// blob is validated before a byte is served: a snapshot whose header and
+/// body disagree fails closed with [`Errno::BadMagic`] rather than paging
+/// bytes a client would mis-frame.
+fn hardware_tree(
+    source: &dyn SysinfoSource,
+    caller: &Caller,
+    payload: &[u8],
+    response: &mut [u8],
+) -> Result<usize, Errno> {
+    let request = HardwareTreeRequest::from_bytes(payload)?;
+    let blob = source.hardware_tree(caller)?;
+    let header = HwTreeHeader::from_bytes(&blob)?;
+    let count = usize::try_from(header.node_count()).map_err(|_| Errno::LengthOutOfRange)?;
+    let body_len = count
+        .checked_mul(HwNode::WIRE_LEN)
+        .ok_or(Errno::LengthOutOfRange)?;
+    let body = &blob[HwTreeHeader::WIRE_LEN..];
+    if body.len() != body_len {
+        return Err(Errno::BadMagic);
+    }
+    if response.len() < HwTreeHeader::WIRE_LEN {
+        return Err(Errno::BufferTooSmall);
+    }
+    response[..HwTreeHeader::WIRE_LEN].copy_from_slice(&header.to_le_bytes());
+    let written = page_records(
+        &mut response[HwTreeHeader::WIRE_LEN..],
+        request.offset as usize,
+        request.limit as usize,
+        count,
+        HwNode::WIRE_LEN,
+        |index, slot| {
+            slot.copy_from_slice(&body[index * HwNode::WIRE_LEN..(index + 1) * HwNode::WIRE_LEN]);
+        },
+    )?;
+    Ok(HwTreeHeader::WIRE_LEN + written)
 }
 
 /// Decode the [`ProcessListRequest`], apply paging, and pack the selected
@@ -366,13 +410,14 @@ mod tests {
     use crate::source::{Caller, ProcessScope, SysinfoSource};
     use core::cell::RefCell;
     use rustos_abi::driver::filesystem::{MountFlags, VolumeStats};
+    use rustos_abi::hwtree::{HwDeviceClass, HwNode, HwTreeHeader, HW_NODE_ROOT};
     use rustos_abi::sysinfo::{
-        CpuTimeListRequest, CpuTimeRecord, KernelMemoryStats, LoadAverage, MountListRequest,
-        MountRecord, ProcessListRequest, ProcessRecord, ProcessState, ResourceLimitRecord,
-        SeatListRequest, SeatRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
-        UserDirectoryRecord, UserDirectoryRequest, LOAD_FIXED_SHIFT, MACHINE_ID_LEN,
-        RESOURCE_LIMITS_REPORT_LEN, SEAT_FLAG_OWNED, SYSINFO_REQUEST_MAGIC,
-        SYSINFO_VERSION_CURRENT,
+        CpuTimeListRequest, CpuTimeRecord, HardwareTreeRequest, KernelMemoryStats, LoadAverage,
+        MountListRequest, MountRecord, ProcessListRequest, ProcessRecord, ProcessState,
+        ResourceLimitRecord, SeatListRequest, SeatRecord, SysinfoQueryId, SysinfoRequestHeader,
+        SystemIdentity, Uptime, UserDirectoryRecord, UserDirectoryRequest, LOAD_FIXED_SHIFT,
+        MACHINE_ID_LEN, RESOURCE_LIMITS_REPORT_LEN, SEAT_FLAG_OWNED, SYSINFO_MAX_REPLY,
+        SYSINFO_REPLY_STATUS_LEN, SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT,
     };
     use rustos_abi::time::{Duration64, Time64};
     use rustos_abi::{
@@ -433,11 +478,31 @@ mod tests {
         }
     }
 
+    /// Encode a hardware-tree snapshot exactly as `hw_tree_read` returns
+    /// it: the [`HwTreeHeader`] followed by every node's wire image.
+    fn tree_blob(generation: u64, nodes: &[HwNode]) -> alloc::vec::Vec<u8> {
+        let mut blob = alloc::vec::Vec::new();
+        blob.extend_from_slice(&HwTreeHeader::new(generation, nodes.len() as u64).to_le_bytes());
+        for node in nodes {
+            blob.extend_from_slice(&node.to_le_bytes());
+        }
+        blob
+    }
+
+    /// A three-node discovered tree: a root and two devices under it.
+    fn tree_nodes() -> alloc::vec::Vec<HwNode> {
+        alloc::vec![
+            HwNode::new(0, HW_NODE_ROOT, HwDeviceClass::Root),
+            HwNode::new(1, 0, HwDeviceClass::Serial),
+            HwNode::new(2, 0, HwDeviceClass::Storage),
+        ]
+    }
+
     /// In-memory fixture standing in for the kernel's live state.
     struct FixtureSource {
         own: [ProcessRecord; 2],
         global: [ProcessRecord; 3],
-        hwtree: [u8; 5],
+        hwtree: alloc::vec::Vec<u8>,
         mounts: [MountRecord; 2],
     }
     impl FixtureSource {
@@ -465,7 +530,7 @@ mod tests {
                     mk(10, 1000, b"shell"),
                     mk(11, 1000, b"editor"),
                 ],
-                hwtree: [1, 2, 3, 4, 5],
+                hwtree: tree_blob(7, &tree_nodes()),
                 mounts: [
                     MountRecord::new(
                         b"rootfs",
@@ -509,7 +574,7 @@ mod tests {
             })
         }
         fn hardware_tree(&self, _caller: &Caller) -> Result<alloc::vec::Vec<u8>, Errno> {
-            Ok(self.hwtree.to_vec())
+            Ok(self.hwtree.clone())
         }
         fn user_directory(
             &self,
@@ -734,22 +799,133 @@ mod tests {
         );
     }
 
+    /// Decode one hardware-tree reply page: the repeated snapshot header
+    /// and the whole node records that follow it.
+    fn decode_tree_page(reply: &[u8]) -> (HwTreeHeader, alloc::vec::Vec<HwNode>) {
+        let header = HwTreeHeader::from_bytes(reply).unwrap();
+        let body = &reply[HwTreeHeader::WIRE_LEN..];
+        assert_eq!(body.len() % HwNode::WIRE_LEN, 0);
+        let nodes = body
+            .chunks_exact(HwNode::WIRE_LEN)
+            .map(|chunk| HwNode::from_bytes(chunk).unwrap())
+            .collect();
+        (header, nodes)
+    }
+
     #[test]
-    fn hardware_tree_passes_through_and_is_gated() {
+    fn hardware_tree_is_gated_and_pages() {
         let source = FixtureSource::new();
         let sink = RecordingSink::new();
-        let req = request_bytes(SysinfoQueryId::HARDWARE_TREE, &[]);
-        let mut resp = [0u8; 16];
+        let page = |offset: u32, limit: u16| {
+            request_bytes(
+                SysinfoQueryId::HARDWARE_TREE,
+                &HardwareTreeRequest {
+                    offset,
+                    limit,
+                    flags: 0,
+                }
+                .to_le_bytes(),
+            )
+        };
+        let mut resp = [0u8; HwTreeHeader::WIRE_LEN + 2 * HwNode::WIRE_LEN];
 
         let denied = Caps(&[]);
         assert_eq!(
-            serve(&source, &caller(&denied), &sink, &req, &mut resp),
+            serve(&source, &caller(&denied), &sink, &page(0, 2), &mut resp),
             Err(Errno::PermissionDenied)
         );
 
+        // Page 1: the snapshot header plus the first two of three nodes.
         let granted = Caps(&[CapabilityId::SYSINFO_HW]);
-        let n = serve(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
-        assert_eq!(&resp[..n], &[1, 2, 3, 4, 5]);
+        let n = serve(&source, &caller(&granted), &sink, &page(0, 2), &mut resp).unwrap();
+        let (header, nodes) = decode_tree_page(&resp[..n]);
+        assert_eq!(header.generation(), 7);
+        assert_eq!(header.node_count(), 3);
+        assert_eq!(nodes, tree_nodes()[..2]);
+
+        // Page 2: the same header, the final node.
+        let n = serve(&source, &caller(&granted), &sink, &page(2, 2), &mut resp).unwrap();
+        let (header, nodes) = decode_tree_page(&resp[..n]);
+        assert_eq!(header.node_count(), 3);
+        assert_eq!(nodes, tree_nodes()[2..]);
+
+        // Past the end: the header alone, no records.
+        let n = serve(&source, &caller(&granted), &sink, &page(3, 2), &mut resp).unwrap();
+        let (_, nodes) = decode_tree_page(&resp[..n]);
+        assert!(nodes.is_empty());
+    }
+
+    #[test]
+    fn hardware_tree_larger_than_one_reply_serves_across_pages() {
+        // A tree far larger than one framed reply window: the regression
+        // that used to fail closed with `BufferTooSmall` instead of paging.
+        let nodes: alloc::vec::Vec<HwNode> = (0..40)
+            .map(|id| {
+                HwNode::new(
+                    id,
+                    if id == 0 { HW_NODE_ROOT } else { 0 },
+                    HwDeviceClass::Other,
+                )
+            })
+            .collect();
+        let mut source = FixtureSource::new();
+        source.hwtree = tree_blob(9, &nodes);
+        assert!(source.hwtree.len() > SYSINFO_MAX_REPLY);
+
+        let sink = RecordingSink::new();
+        let granted = Caps(&[CapabilityId::SYSINFO_HW]);
+        let limit = u16::try_from(
+            (SYSINFO_MAX_REPLY - SYSINFO_REPLY_STATUS_LEN - HwTreeHeader::WIRE_LEN)
+                / HwNode::WIRE_LEN,
+        )
+        .unwrap();
+        let mut resp = [0u8; SYSINFO_MAX_REPLY - SYSINFO_REPLY_STATUS_LEN];
+        let mut walked: alloc::vec::Vec<HwNode> = alloc::vec::Vec::new();
+        loop {
+            let req = request_bytes(
+                SysinfoQueryId::HARDWARE_TREE,
+                &HardwareTreeRequest {
+                    offset: u32::try_from(walked.len()).unwrap(),
+                    limit,
+                    flags: 0,
+                }
+                .to_le_bytes(),
+            );
+            let n = serve(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
+            let (header, page) = decode_tree_page(&resp[..n]);
+            assert_eq!(header.generation(), 9);
+            assert_eq!(header.node_count(), nodes.len() as u64);
+            if page.is_empty() {
+                break;
+            }
+            walked.extend_from_slice(&page);
+        }
+        assert_eq!(walked, nodes);
+    }
+
+    #[test]
+    fn hardware_tree_malformed_snapshot_fails_closed() {
+        // A snapshot whose header claims more nodes than its body carries
+        // is refused whole, never paged.
+        let mut source = FixtureSource::new();
+        source.hwtree = tree_blob(1, &tree_nodes());
+        source.hwtree.pop();
+        let sink = RecordingSink::new();
+        let granted = Caps(&[CapabilityId::SYSINFO_HW]);
+        let req = request_bytes(
+            SysinfoQueryId::HARDWARE_TREE,
+            &HardwareTreeRequest {
+                offset: 0,
+                limit: 4,
+                flags: 0,
+            }
+            .to_le_bytes(),
+        );
+        let mut resp = [0u8; 4096];
+        assert_eq!(
+            serve(&source, &caller(&granted), &sink, &req, &mut resp),
+            Err(Errno::BadMagic)
+        );
     }
 
     #[test]

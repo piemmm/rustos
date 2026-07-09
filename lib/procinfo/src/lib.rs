@@ -47,7 +47,7 @@
 //!
 //! * [`transport`] — the [`Transport`] and [`Output`] seams.
 //! * [`request`] — [`encode_request`], [`call`], and [`CallError`].
-//! * [`hwtree`] — the shared `HARDWARE_TREE` reply decode and the
+//! * [`hwtree`] — the shared paged `HARDWARE_TREE` fetch and the
 //!   stable-bus-order / topology-view walk the device-inventory listing
 //!   tools (`lspci`, `lsusb`) share.
 //! * [`list`] — the generic paged-list walk and the shared [`ListError`].
@@ -91,7 +91,7 @@ pub mod users;
 #[cfg(all(freestanding, feature = "program"))]
 pub use client::{IpcTransport, RtOutput};
 pub use cputime::{for_each_cpu_time, CPU_TIME_PAGE};
-pub use hwtree::{bus_order, class_label, decode_tree, depth_of, keep_with_ancestors};
+pub use hwtree::{bus_order, class_label, depth_of, fetch_tree, keep_with_ancestors, HW_TREE_PAGE};
 pub use list::{field_lossy, ListError};
 pub use mount::{for_each_mount, render_mount, render_options, MOUNT_PAGE};
 pub use process::{

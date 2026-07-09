@@ -14,8 +14,8 @@ use rustos_abi::{Errno, LimitKind};
 
 use rustos_help::{own_short_help, HelpSource};
 use rustos_procinfo::{
-    call, emit_self_scope_omission, for_each_process, render_limit_bound, render_process, Output,
-    Transport, PROCESS_HEADER,
+    call, emit_self_scope_omission, fetch_tree, for_each_process, render_limit_bound,
+    render_process, Output, Transport, PROCESS_HEADER,
 };
 
 use crate::command::Command;
@@ -150,12 +150,12 @@ fn run_memory(transport: &dyn Transport, out: &dyn Output) -> Result<(), Sysinfo
 
 /// Fetch the hardware tree and report its size.
 ///
-/// The hardware-tree wire format is owned by `lib/abi` and is not built
-/// yet, so the CLI does not pretend to decode it: it honestly reports the
-/// byte length the service returned (no faking).
+/// The tree is paged in whole through the shared `lib/procinfo` walk; the
+/// CLI summarises it as a node count. The per-device inventory renderings
+/// are `lspci`'s and `lsusb`'s job.
 fn run_hardware(transport: &dyn Transport, out: &dyn Output) -> Result<(), SysinfoError> {
-    let reply = service_call(transport, SysinfoQueryId::HARDWARE_TREE, &[])?;
-    emit(out, &format!("hardware tree: {} bytes", reply.len()))
+    let nodes = fetch_tree(transport).map_err(SysinfoError::from)?;
+    emit(out, &format!("hardware tree: {} nodes", nodes.len()))
 }
 
 /// Fetch and render the machine identity.
@@ -286,6 +286,7 @@ mod tests {
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
     use core::cell::RefCell;
+    use rustos_abi::hwtree::{HwDeviceClass, HwNode, HwTreeHeader, HW_NODE_ROOT};
     use rustos_abi::sysinfo::{
         KernelMemoryStats, ProcessListRequest, ProcessRecord, ProcessState, ResourceLimitRecord,
         SeatListRequest, SeatRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
@@ -757,14 +758,23 @@ mod tests {
     }
 
     #[test]
-    fn hardware_reports_the_byte_count() {
+    fn hardware_reports_the_node_count() {
+        let nodes = [
+            HwNode::new(0, HW_NODE_ROOT, HwDeviceClass::Root),
+            HwNode::new(1, 0, HwDeviceClass::Serial),
+        ];
         let mut fixture = Fixture::new(Vec::new());
-        fixture.hardware = alloc::vec![0u8; 42];
+        fixture
+            .hardware
+            .extend_from_slice(&HwTreeHeader::new(3, nodes.len() as u64).to_le_bytes());
+        for node in &nodes {
+            fixture.hardware.extend_from_slice(&node.to_le_bytes());
+        }
         let out = Recorder::new();
         assert_eq!(run(Command::Hardware, &fixture, &out), Ok(()));
         assert_eq!(
             out.lines(),
-            alloc::vec!["hardware tree: 42 bytes".to_string()]
+            alloc::vec!["hardware tree: 2 nodes".to_string()]
         );
     }
 

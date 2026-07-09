@@ -118,7 +118,11 @@ state. The endpoint's message sizes are one shared contract:
 records past the status word). The server sizes its endpoint by these
 constants and every client sizes its buffers by them, so neither keeps a
 private copy that could drift; a list longer than one page is paged across
-successive requests (a client advancing `offset`/shrinking `limit`).
+successive requests (a client advancing `offset`/shrinking `limit`). The
+hardware tree pages the same way: each `HARDWARE_TREE` reply is the
+snapshot's `HwTreeHeader` (its total node count and generation) followed
+by one page of whole `HwNode` records, so a client can page a tree of any
+size and detect a snapshot that changed under its walk.
 
 First-party programs do not hand-roll this call: the `program` feature of
 `lib/procinfo` provides `IpcTransport`, the production `Transport` that posts

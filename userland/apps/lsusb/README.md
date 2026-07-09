@@ -13,10 +13,11 @@ filters. `-?`/`--help` render the tool's own short help from its bundled
 
 The inventory is read exclusively through the System Information API
 (`AGENTS.md` §16.6): the `CAP_SYSINFO_HW`-gated `sysinfo-v1`
-`HARDWARE_TREE` query served by `sysinfod`, decoded fail-closed as whole
-`rustos_abi::hwtree::HwNode` records through the shared
-`rustos_procinfo::hwtree` walk — never a `/proc`-style scrape and never
-a kernel bypass. A refused query defeats the tool's whole purpose, so
+`HARDWARE_TREE` query served by `sysinfod`, paged in whole through the
+shared `rustos_procinfo::hwtree::fetch_tree` walk — fail-closed whole
+`rustos_abi::hwtree::HwNode` records reassembled from a
+generation-checked snapshot, never a `/proc`-style scrape and never a
+kernel bypass. A refused query defeats the tool's whole purpose, so
 the reason lands on standard error and nothing is fabricated
 (`AGENTS.md` §2.24).
 

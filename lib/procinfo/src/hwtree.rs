@@ -1,9 +1,9 @@
-//! Shared hardware-tree decode and render-order helpers.
+//! Shared hardware-tree fetch and render-order helpers.
 //!
-//! The device-inventory listing tools (`lspci`, `lsusb`) both fetch the
-//! hardware tree through the `sysinfo-v1` `HARDWARE_TREE` query and walk
-//! it the same way: decode the reply fail-closed as whole
-//! [`HwNode`] records, visit the nodes in stable bus order, label the
+//! The device-inventory listing tools (`lspci`, `lsusb`) and `sysinfo`
+//! all fetch the hardware tree through the paged `sysinfo-v1`
+//! `HARDWARE_TREE` query and walk it the same way: page the snapshot in
+//! with [`fetch_tree`], visit the nodes in stable bus order, label the
 //! non-selected context nodes in a `-t` topology view, and keep a
 //! selected node's ancestor chain visible. Sibling userland crates may
 //! not depend on one another, so that shared walk lives here, in one
@@ -11,27 +11,113 @@
 
 use alloc::vec::Vec;
 
-use rustos_abi::hwtree::{HwDeviceClass, HwNode};
+use rustos_abi::hwtree::{HwDeviceClass, HwNode, HwTreeHeader};
+use rustos_abi::sysinfo::{
+    HardwareTreeRequest, SysinfoQueryId, SYSINFO_MAX_REPLY, SYSINFO_REPLY_STATUS_LEN,
+};
 use rustos_abi::Errno;
 
-/// Decode a `HARDWARE_TREE` reply as whole [`HwNode`] records.
+use crate::request::{call, CallError};
+use crate::transport::Transport;
+
+/// The most whole [`HwNode`] records one framed reply can carry after
+/// its status word and the repeated [`HwTreeHeader`].
+const HW_TREE_PAGE_RECORDS: usize =
+    (SYSINFO_MAX_REPLY - SYSINFO_REPLY_STATUS_LEN - HwTreeHeader::WIRE_LEN) / HwNode::WIRE_LEN;
+
+// A page carries at least one record (or the walk could never progress)
+// and fits the request's u16 `limit` field, so the narrowing cast below
+// cannot truncate.
+const _: () = assert!(HW_TREE_PAGE_RECORDS > 0 && HW_TREE_PAGE_RECORDS <= u16::MAX as usize);
+
+/// Number of [`HwNode`] records requested per `HARDWARE_TREE` page.
+/// Derived from the endpoint's contract rather than hand-picked, so a
+/// wider reply window automatically widens the page.
+#[allow(clippy::cast_possible_truncation)] // compile-time checked above
+pub const HW_TREE_PAGE: u16 = HW_TREE_PAGE_RECORDS as u16;
+
+/// How many snapshots [`fetch_tree`] attempts before concluding the tree
+/// is changing faster than it can be walked (hotplug churn) and giving
+/// up rather than looping.
+const FETCH_ATTEMPTS: usize = 3;
+
+/// Fetch the whole hardware tree, paging the `HARDWARE_TREE` query until
+/// the snapshot's total node count is held.
 ///
-/// The reply is untrusted input to the consuming tool: a length that is
-/// not a whole number of records, or a record that does not decode,
-/// fails the listing closed rather than rendering a partial inventory.
+/// Every page repeats the snapshot's [`HwTreeHeader`]; the walk checks
+/// that the generation stayed constant across pages and restarts on a
+/// fresh snapshot when the tree changed under it, at most
+/// `FETCH_ATTEMPTS` times.
+///
+/// The reply is untrusted input to the consuming tool and the walk
+/// **fails closed**: a page that is not a whole number of records, a
+/// record that does not decode, or a snapshot that ends short of (or
+/// serves past) its own declared total is refused rather than rendered
+/// as a partial inventory.
 ///
 /// # Errors
 ///
-/// [`Errno::BufferTooSmall`] for a partial trailing record, or the
-/// decode error of the offending record.
-pub fn decode_tree(reply: &[u8]) -> Result<Vec<HwNode>, Errno> {
-    if reply.len() % HwNode::WIRE_LEN != 0 {
-        return Err(Errno::BufferTooSmall);
+/// * [`CallError::PermissionDenied`] — the caller lacks `CAP_SYSINFO_HW`.
+/// * [`CallError::Service`]`(`[`Errno::BadMagic`]`)` — a structurally
+///   invalid page or an inconsistent snapshot.
+/// * [`CallError::Service`]`(`[`Errno::TimedOut`]`)` — the tree kept
+///   changing across `FETCH_ATTEMPTS` snapshots.
+/// * Any other transport failure, propagated verbatim.
+pub fn fetch_tree(transport: &dyn Transport) -> Result<Vec<HwNode>, CallError> {
+    for _ in 0..FETCH_ATTEMPTS {
+        if let Some(nodes) = fetch_snapshot(transport)? {
+            return Ok(nodes);
+        }
     }
-    reply
-        .chunks_exact(HwNode::WIRE_LEN)
-        .map(HwNode::from_bytes)
-        .collect()
+    Err(CallError::Service(Errno::TimedOut))
+}
+
+/// Walk one snapshot to completion. Returns `None` when the snapshot's
+/// generation moved between pages, so the caller takes a fresh one.
+fn fetch_snapshot(transport: &dyn Transport) -> Result<Option<Vec<HwNode>>, CallError> {
+    let mut nodes: Vec<HwNode> = Vec::new();
+    let mut generation: Option<u64> = None;
+    loop {
+        let offset =
+            u32::try_from(nodes.len()).map_err(|_| CallError::Service(Errno::LengthOutOfRange))?;
+        let request = HardwareTreeRequest {
+            offset,
+            limit: HW_TREE_PAGE,
+            flags: 0,
+        };
+        let reply = call(
+            transport,
+            SysinfoQueryId::HARDWARE_TREE,
+            &request.to_le_bytes(),
+        )?;
+        let header = HwTreeHeader::from_bytes(&reply).map_err(CallError::Service)?;
+        let body = &reply[HwTreeHeader::WIRE_LEN..];
+        if body.len() % HwNode::WIRE_LEN != 0 {
+            return Err(CallError::Service(Errno::BadMagic));
+        }
+        match generation {
+            None => generation = Some(header.generation()),
+            Some(seen) if seen != header.generation() => return Ok(None),
+            Some(_) => {}
+        }
+        let total = usize::try_from(header.node_count())
+            .map_err(|_| CallError::Service(Errno::LengthOutOfRange))?;
+        for chunk in body.chunks_exact(HwNode::WIRE_LEN) {
+            nodes.push(HwNode::from_bytes(chunk).map_err(CallError::Service)?);
+        }
+        if nodes.len() > total {
+            // More records than the snapshot's own header promised.
+            return Err(CallError::Service(Errno::BadMagic));
+        }
+        if nodes.len() == total {
+            return Ok(Some(nodes));
+        }
+        if body.is_empty() {
+            // Short of the promised total with no forward progress: a
+            // truncated snapshot, refused whole.
+            return Err(CallError::Service(Errno::BadMagic));
+        }
+    }
 }
 
 /// The indices of `nodes` in stable bus order: a depth-first walk from
@@ -163,27 +249,144 @@ mod tests {
         out
     }
 
-    fn wire(nodes: &[HwNode]) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        for node in nodes {
-            bytes.extend_from_slice(&node.to_le_bytes());
+    /// Serves paged `HARDWARE_TREE` replies the way the real service does:
+    /// every page repeats the snapshot header (the generation drawn from
+    /// `gens`, the last entry repeating) and carries the whole records of
+    /// the requested window. `total_override` lets a test claim a total the
+    /// body cannot honour; `ragged` appends a stray byte to every page.
+    struct PagedFixture {
+        nodes: Vec<HwNode>,
+        gens: core::cell::RefCell<Vec<u64>>,
+        total_override: Option<u64>,
+        ragged: bool,
+    }
+
+    impl PagedFixture {
+        fn new(nodes: Vec<HwNode>) -> Self {
+            Self {
+                nodes,
+                gens: core::cell::RefCell::new(alloc::vec![7]),
+                total_override: None,
+                ragged: false,
+            }
         }
-        bytes
+
+        fn generation(&self) -> u64 {
+            let mut gens = self.gens.borrow_mut();
+            if gens.len() > 1 {
+                gens.remove(0)
+            } else {
+                gens[0]
+            }
+        }
+    }
+
+    impl Transport for PagedFixture {
+        fn query(&self, request: &[u8]) -> Result<Vec<u8>, Errno> {
+            let header = rustos_abi::sysinfo::SysinfoRequestHeader::from_bytes(request)?;
+            assert_eq!(header.query, SysinfoQueryId::HARDWARE_TREE);
+            let payload = &request[rustos_abi::sysinfo::SysinfoRequestHeader::WIRE_LEN..];
+            let req = HardwareTreeRequest::from_bytes(payload)?;
+            let total = self.total_override.unwrap_or(self.nodes.len() as u64);
+            let mut reply = Vec::new();
+            reply.extend_from_slice(&HwTreeHeader::new(self.generation(), total).to_le_bytes());
+            let offset = req.offset as usize;
+            if offset < self.nodes.len() {
+                let take = core::cmp::min(self.nodes.len() - offset, req.limit as usize);
+                for node in &self.nodes[offset..offset + take] {
+                    reply.extend_from_slice(&node.to_le_bytes());
+                }
+            }
+            if self.ragged {
+                reply.push(0);
+            }
+            Ok(reply)
+        }
+    }
+
+    /// A flat tree larger than two pages, so a fetch must page.
+    fn big_tree() -> Vec<HwNode> {
+        (0..2 * u32::from(HW_TREE_PAGE) + 3)
+            .map(|id| {
+                HwNode::new(
+                    id,
+                    if id == 0 { HW_NODE_ROOT } else { 0 },
+                    HwDeviceClass::Other,
+                )
+            })
+            .collect()
     }
 
     #[test]
-    fn decode_round_trips_whole_records() {
-        let nodes = nodes();
-        let decoded = decode_tree(&wire(&nodes)).expect("decodes");
-        assert_eq!(decoded.len(), nodes.len());
-        assert_eq!(decoded[0].id(), 3);
+    fn fetch_reassembles_a_multi_page_tree() {
+        let nodes = big_tree();
+        let fixture = PagedFixture::new(nodes.clone());
+        assert_eq!(fetch_tree(&fixture), Ok(nodes));
     }
 
     #[test]
-    fn decode_fails_closed_on_a_partial_record() {
-        let mut bytes = wire(&nodes());
-        bytes.push(0);
-        assert_eq!(decode_tree(&bytes), Err(Errno::BufferTooSmall));
+    fn fetch_restarts_when_the_tree_changes_under_the_walk() {
+        // The first walk sees generation 1 then 2 (a hotplug between its
+        // pages) and restarts; the second walk sees a stable snapshot.
+        let nodes = big_tree();
+        let fixture = PagedFixture {
+            gens: core::cell::RefCell::new(alloc::vec![1, 2]),
+            ..PagedFixture::new(nodes.clone())
+        };
+        assert_eq!(fetch_tree(&fixture), Ok(nodes));
+    }
+
+    #[test]
+    fn fetch_gives_up_on_relentless_churn() {
+        // Every page arrives from a different snapshot; after the bounded
+        // attempts the walk reports the contention rather than looping.
+        let gens: Vec<u64> = (0..64).collect();
+        let fixture = PagedFixture {
+            gens: core::cell::RefCell::new(gens),
+            ..PagedFixture::new(big_tree())
+        };
+        assert_eq!(
+            fetch_tree(&fixture),
+            Err(CallError::Service(Errno::TimedOut))
+        );
+    }
+
+    #[test]
+    fn fetch_fails_closed_on_a_truncated_snapshot() {
+        // The header promises one more record than the body can supply.
+        let nodes = big_tree();
+        let total = nodes.len() as u64 + 1;
+        let fixture = PagedFixture {
+            total_override: Some(total),
+            ..PagedFixture::new(nodes)
+        };
+        assert_eq!(
+            fetch_tree(&fixture),
+            Err(CallError::Service(Errno::BadMagic))
+        );
+    }
+
+    #[test]
+    fn fetch_fails_closed_on_a_partial_record() {
+        let fixture = PagedFixture {
+            ragged: true,
+            ..PagedFixture::new(nodes())
+        };
+        assert_eq!(
+            fetch_tree(&fixture),
+            Err(CallError::Service(Errno::BadMagic))
+        );
+    }
+
+    #[test]
+    fn fetch_maps_a_capability_denial() {
+        struct Denied;
+        impl Transport for Denied {
+            fn query(&self, _request: &[u8]) -> Result<Vec<u8>, Errno> {
+                Err(Errno::PermissionDenied)
+            }
+        }
+        assert_eq!(fetch_tree(&Denied), Err(CallError::PermissionDenied));
     }
 
     #[test]

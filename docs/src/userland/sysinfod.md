@@ -39,7 +39,7 @@ a privileged query without first passing its capability gate.
 | `SELF_PROCESS_LIST`   | none                 | no      | packed `ProcessRecord`s        |
 | `GLOBAL_PROCESS_LIST` | `CAP_SYSINFO_GLOBAL` | yes     | packed `ProcessRecord`s        |
 | `KERNEL_MEMORY_STATS` | `CAP_SYSINFO_KERNEL` | yes     | `KernelMemoryStats`            |
-| `HARDWARE_TREE`       | `CAP_SYSINFO_HW`     | yes     | encoded hardware tree (opaque) |
+| `HARDWARE_TREE`       | `CAP_SYSINFO_HW`     | yes     | `HwTreeHeader` + `HwNode` page |
 | `SYSTEM_IDENTITY`     | none                 | no      | `SystemIdentity`               |
 | `UPTIME`              | none                 | no      | `Uptime`                       |
 | `MOUNT_LIST`          | none                 | no      | packed `MountRecord`s          |

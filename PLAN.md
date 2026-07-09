@@ -4132,7 +4132,7 @@ harness (vetting parser + table decoder) is registered with
 are validated but deliberately not encoded: no consumer renders them (the
 hardware tree records no subsystem ids). V2 (done) delivered the `lspci`
 command app (`userland/apps/lspci`): the hardware tree via the shared
-`rustos_procinfo::call` `HARDWARE_TREE` client, names via the bundled
+paged `rustos_procinfo::hwtree::fetch_tree` client, names via the bundled
 `Resources/pci.ids.bin` table (read at runtime through the VFS, covered by
 the signed `AppInfo` content hash), the `pciutils` option surface over what
 the model carries (`-n`/`-nn`/`-v`/`-t`/`-d`/`-s`; addresses are stable

@@ -103,14 +103,16 @@ pub trait SysinfoSource {
     /// Reached only after the `CAP_SYSINFO_KERNEL` gate has passed.
     fn kernel_memory_stats(&self, caller: &Caller) -> Result<KernelMemoryStats, Errno>;
 
-    /// Return the encoded detected hardware tree.
+    /// Return the encoded detected hardware tree, exactly as `hw_tree_read`
+    /// supplies it: one `HwTreeHeader` followed by whole `HwNode` records.
     ///
-    /// Reached only after the `CAP_SYSINFO_HW` gate has passed. The bytes
-    /// are passed through verbatim: the hardware-tree wire format is owned
-    /// by `lib/abi`, not by this service, so `sysinfod`
-    /// frames them without interpreting them. Returned as an **owned** `Vec`
-    /// for the same reason as [`process_records`](Self::process_records) — a
-    /// syscall-backed source materialises the bytes on each call.
+    /// Reached only after the `CAP_SYSINFO_HW` gate has passed. The
+    /// snapshot is returned whole; [`crate::serve`] validates the header
+    /// against the body (fail closed) and applies the request's
+    /// `offset`/`limit` record window, repeating the header on every page.
+    /// Returned as an **owned** `Vec` for the same reason as
+    /// [`process_records`](Self::process_records) — a syscall-backed source
+    /// materialises the bytes on each call.
     fn hardware_tree(&self, caller: &Caller) -> Result<Vec<u8>, Errno>;
 
     /// Return the machine identity (machine ID, OS version, hostname).

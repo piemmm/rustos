@@ -100,10 +100,10 @@ limit. The paging loop lives in the client; the ABI carries only the
   records — is a hard `SysinfoError::Service` error, never a
   partially-rendered guess.
 
-The hardware-tree wire format is owned by `lib/abi` (`AGENTS.md` §18.1)
-and is not built yet, so `sysinfo hardware` honestly reports the byte
-length the service returned rather than pretending to decode it
-(`AGENTS.md` §2.1).
+`sysinfo hardware` pages the tree in whole through the shared
+`rustos_procinfo::hwtree::fetch_tree` walk (the same fetch `lspci` and
+`lsusb` render from, `AGENTS.md` §2.2) and summarises it as a node
+count; the per-device inventory renderings are those tools' job.
 
 ### Advisory output (`stdinfo`, fd 3)
 
@@ -134,8 +134,9 @@ actually carries (`plans/DEVICES.md` DEVICE1 V2, `AGENTS.md` §16.7): one
 line per discovered PCI/PCIe function — its hardware-tree node id, class
 name, and vendor + device names. The inventory is the hardware tree read
 through the `CAP_SYSINFO_HW`-gated `sysinfo-v1` `HARDWARE_TREE` query
-(the shared `rustos_procinfo::call` client — never a `/proc` and never a
-kernel bypass), decoded fail-closed as whole `HwNode` records; a refused
+(the shared paged `rustos_procinfo::hwtree::fetch_tree` walk — never a
+`/proc` and never a kernel bypass), fail-closed whole `HwNode` records
+reassembled from a generation-checked snapshot; a refused
 query defeats the tool's purpose, so the reason lands on standard error
 and nothing is fabricated. Names resolve through `lib/devids` from the
 vetted `pci.ids` table the bundle ships as `Resources/pci.ids.bin` (data
@@ -163,9 +164,9 @@ canned tree and a fixture database compiled through the real
 actually carries (`plans/DEVICES.md` DEVICE1 V3, `AGENTS.md` §16.7): one
 `Bus NNN Device NNN: ID vvvv:pppp <vendor> <product>` line per
 discovered USB interface. It shares `lspci`'s whole posture: the same
-`CAP_SYSINFO_HW`-gated `HARDWARE_TREE` query, the same fail-closed
-`HwNode` decode and stable bus order (the shared
-`rustos_procinfo::hwtree` walk both tools use, `AGENTS.md` §2.2), and
+`CAP_SYSINFO_HW`-gated `HARDWARE_TREE` query, the same fail-closed paged
+fetch and stable bus order (the shared `rustos_procinfo::hwtree` walk
+both tools use, `AGENTS.md` §2.2), and
 names resolved through `lib/devids` from the vetted `usb.ids` table the
 bundle ships as `Resources/usb.ids.bin`. An identity the database lacks
 shows only its `ID vvvv:pppp` (as `usbutils` omits an unknown string),

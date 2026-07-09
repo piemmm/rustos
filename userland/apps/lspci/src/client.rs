@@ -8,10 +8,9 @@ use core::fmt::Write as _;
 
 use rustos_abi::hwtree::{HwMatchKind, HwNode, HwResource, HwResourceKind};
 use rustos_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
-use rustos_abi::sysinfo::SysinfoQueryId;
 use rustos_devids::DevIds;
 use rustos_help::{own_short_help, HelpSource};
-use rustos_procinfo::{call, hwtree, Transport};
+use rustos_procinfo::{hwtree, Transport};
 
 use crate::command::{Command, NameMode, Options};
 use crate::error::LspciError;
@@ -64,8 +63,7 @@ pub fn run(
         Command::List(options) => options,
     };
 
-    let reply = call(transport, SysinfoQueryId::HARDWARE_TREE, &[]).map_err(LspciError::from)?;
-    let nodes = hwtree::decode_tree(&reply).map_err(LspciError::Service)?;
+    let nodes = hwtree::fetch_tree(transport).map_err(LspciError::from)?;
     let order = hwtree::bus_order(&nodes);
 
     // The PCI functions, in stable bus order (parent-chain order from the
@@ -329,7 +327,7 @@ mod tests {
     use alloc::vec::Vec;
     use core::cell::RefCell;
 
-    use rustos_abi::hwtree::{HwDeviceClass, HwMatchKey, HW_NODE_ROOT};
+    use rustos_abi::hwtree::{HwDeviceClass, HwMatchKey, HwTreeHeader, HW_NODE_ROOT};
     use rustos_abi::Errno;
     use rustos_devids::{textdb, DbKind};
     use rustos_help::SourceError;
@@ -381,14 +379,18 @@ C 02  Network controller
             .push_match_key(HwMatchKey::compatible(b"fixture,timer").expect("fits"))
             .expect("key fits");
 
+        let nodes = [root, bridge, nic, ahci, timer];
         let mut bytes = Vec::new();
-        for node in [root, bridge, nic, ahci, timer] {
+        bytes.extend_from_slice(&HwTreeHeader::new(1, nodes.len() as u64).to_le_bytes());
+        for node in nodes {
             bytes.extend_from_slice(&node.to_le_bytes());
         }
         bytes
     }
 
     /// A transport serving one canned `HARDWARE_TREE` reply (or refusal).
+    /// The fixture tree fits one page, so the paged fetch issues exactly
+    /// one request.
     struct Fixture {
         reply: Result<Vec<u8>, Errno>,
     }
@@ -585,15 +587,16 @@ C 02  Network controller
 
     #[test]
     fn a_malformed_reply_fails_closed() {
-        // Not a whole number of node records.
+        // Not a whole number of node records after the snapshot header.
         let (out, result) = run_case(&[], Ok(alloc::vec![0u8; HwNode::WIRE_LEN + 1]), true);
-        assert_eq!(result, Err(LspciError::Service(Errno::BufferTooSmall)));
+        assert_eq!(result, Err(LspciError::Service(Errno::BadMagic)));
         assert!(out.lines().is_empty(), "no partial inventory is rendered");
     }
 
     #[test]
     fn an_empty_tree_lists_nothing_cleanly() {
-        let (out, result) = run_case(&[], Ok(Vec::new()), true);
+        let empty = HwTreeHeader::new(1, 0).to_le_bytes().to_vec();
+        let (out, result) = run_case(&[], Ok(empty), true);
         result.expect("an empty inventory is not an error");
         assert!(out.lines().is_empty());
         assert!(out.infos.borrow().is_empty());

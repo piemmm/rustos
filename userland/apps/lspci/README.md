@@ -13,10 +13,12 @@ tree through the shared `lib/help` engine (`plans/APPS.md` §4).
 
 The inventory is read exclusively through the System Information API
 (`AGENTS.md` §16.6): the `CAP_SYSINFO_HW`-gated `sysinfo-v1`
-`HARDWARE_TREE` query served by `sysinfod`, decoded fail-closed as whole
-`rustos_abi::hwtree::HwNode` records — never a `/proc`-style scrape and
-never a kernel bypass. A refused query defeats the tool's whole purpose,
-so the reason lands on standard error and nothing is fabricated
+`HARDWARE_TREE` query served by `sysinfod`, paged in whole through the
+shared `rustos_procinfo::hwtree::fetch_tree` walk — fail-closed whole
+`rustos_abi::hwtree::HwNode` records reassembled from a
+generation-checked snapshot, never a `/proc`-style scrape and never a
+kernel bypass. A refused query defeats the tool's whole purpose, so the
+reason lands on standard error and nothing is fabricated
 (`AGENTS.md` §2.24).
 
 Names come from the vetted `pci.ids` snapshot (`lib/devids`) compiled

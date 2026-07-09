@@ -54,7 +54,19 @@ impl SysinfoQueryId {
     pub const GLOBAL_PROCESS_LIST: Self = Self(1);
     /// Read kernel memory statistics. Requires `CAP_SYSINFO_KERNEL`.
     pub const KERNEL_MEMORY_STATS: Self = Self(2);
-    /// Read the detected hardware tree. Requires `CAP_SYSINFO_HW`.
+    /// Read the detected hardware tree, paged by a [`HardwareTreeRequest`].
+    /// Requires `CAP_SYSINFO_HW`.
+    ///
+    /// The reply is one [`HwTreeHeader`](crate::hwtree::HwTreeHeader) —
+    /// whose `node_count` is the **total** node count of the snapshot and
+    /// whose `generation` identifies it — followed by up to
+    /// [`HardwareTreeRequest::limit`] whole
+    /// [`HwNode`](crate::hwtree::HwNode) records starting at
+    /// [`HardwareTreeRequest::offset`]. A tree is larger than one framed
+    /// reply can carry (one [`HwNode`](crate::hwtree::HwNode) is hundreds
+    /// of bytes), so a client pages until it holds `node_count` records,
+    /// checking that `generation` stayed constant across pages and
+    /// restarting the walk when the tree changed under it.
     pub const HARDWARE_TREE: Self = Self(3);
     /// Read machine identity (machine ID, OS version). Requires none.
     pub const SYSTEM_IDENTITY: Self = Self(4);
@@ -1395,6 +1407,58 @@ impl SeatListRequest {
     }
 }
 
+/// Request payload for [`SysinfoQueryId::HARDWARE_TREE`].
+///
+/// Identical paging shape to [`SeatListRequest`]: `offset` names the first
+/// [`HwNode`](crate::hwtree::HwNode) index to return and `limit` bounds the
+/// page. The reply prefixes every page with the snapshot's
+/// [`HwTreeHeader`](crate::hwtree::HwTreeHeader) so the client always sees
+/// the total node count and the generation the page was served from.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub struct HardwareTreeRequest {
+    /// Index of the first node record to return.
+    pub offset: u32,
+    /// Maximum number of records to return.
+    pub limit: u16,
+    /// Reserved; must be zero in `sysinfo-v1`.
+    pub flags: u16,
+}
+
+impl HardwareTreeRequest {
+    /// Encoded size on the wire.
+    pub const WIRE_LEN: usize = 8;
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u32(&mut out, 0, self.offset);
+        put_u16(&mut out, 4, self.limit);
+        put_u16(&mut out, 6, self.flags);
+        out
+    }
+
+    /// Decode from `bytes`.
+    ///
+    /// Returns [`Errno::BufferTooSmall`] if short, or [`Errno::BadMagic`] if
+    /// a reserved flag bit is set (fail closed on an unknown request shape).
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let flags = read_u16(bytes, 6);
+        if flags != 0 {
+            return Err(Errno::BadMagic);
+        }
+        Ok(Self {
+            offset: read_u32(bytes, 0),
+            limit: read_u16(bytes, 4),
+            flags,
+        })
+    }
+}
+
 /// [`SeatRecord::flags`] bit: the seat is currently held under a lease and
 /// [`SeatRecord::owner_task`] names the owning task.
 pub const SEAT_FLAG_OWNED: u32 = 1 << 0;
@@ -1951,15 +2015,16 @@ pub const RESOURCE_LIMITS_REPORT_LEN: usize = ResourceLimitRecord::WIRE_LEN * Li
 #[cfg(test)]
 mod tests {
     use super::{
-        encoded_query_table, spec_for, CpuTimeListRequest, CpuTimeRecord, KernelMemoryStats,
-        LoadAverage, MountListRequest, MountRecord, ProcessListRequest, ProcessRecord,
-        ProcessState, ResourceLimitRecord, SeatListRequest, SeatRecord, SysinfoQueryId,
-        SysinfoRequestHeader, SystemIdentity, Uptime, UserDirectoryRecord, UserDirectoryRequest,
-        VolumeStats, ENCODED_QUERY_TABLE, ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX, LOAD_FIXED_SHIFT,
-        MACHINE_ID_LEN, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, PROCESS_CPU_NONE,
-        PROCESS_NAME_MAX, RESOURCE_LIMITS_REPORT_LEN, SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERIES,
-        SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC,
-        SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1, USER_DIRECTORY_NAME_MAX,
+        encoded_query_table, spec_for, CpuTimeListRequest, CpuTimeRecord, HardwareTreeRequest,
+        KernelMemoryStats, LoadAverage, MountListRequest, MountRecord, ProcessListRequest,
+        ProcessRecord, ProcessState, ResourceLimitRecord, SeatListRequest, SeatRecord,
+        SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime, UserDirectoryRecord,
+        UserDirectoryRequest, VolumeStats, ENCODED_QUERY_TABLE, ENCODED_QUERY_TABLE_LEN,
+        HOSTNAME_MAX, LOAD_FIXED_SHIFT, MACHINE_ID_LEN, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX,
+        MOUNT_TARGET_MAX, PROCESS_CPU_NONE, PROCESS_NAME_MAX, RESOURCE_LIMITS_REPORT_LEN,
+        SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERIES, SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN,
+        SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1,
+        USER_DIRECTORY_NAME_MAX,
     };
     use crate::driver::filesystem::MountFlags;
     use crate::origin::ProcId;
@@ -2215,6 +2280,26 @@ mod tests {
         assert_eq!(SeatListRequest::from_bytes(&bytes), Err(Errno::BadMagic));
         assert_eq!(
             SeatListRequest::from_bytes(&[0u8; SeatListRequest::WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn hardware_tree_request_round_trips_and_rejects_reserved() {
+        let req = HardwareTreeRequest {
+            offset: 14,
+            limit: 14,
+            flags: 0,
+        };
+        assert_eq!(HardwareTreeRequest::from_bytes(&req.to_le_bytes()), Ok(req));
+        let mut bytes = req.to_le_bytes();
+        bytes[6] = 1;
+        assert_eq!(
+            HardwareTreeRequest::from_bytes(&bytes),
+            Err(Errno::BadMagic)
+        );
+        assert_eq!(
+            HardwareTreeRequest::from_bytes(&[0u8; HardwareTreeRequest::WIRE_LEN - 1]),
             Err(Errno::BufferTooSmall)
         );
     }
