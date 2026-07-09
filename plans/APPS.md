@@ -74,7 +74,8 @@ blocked on their kernel syscalls — `cp`/`mv`/`rm`/`useradd`/`groupadd`
 are registered store bundles), the §12.1 Stage C remainder (the first
 batch's `true`/`false`/`yes`/`basename`/`dirname`/`mkdir`/`rmdir`/
 `head`/`wc`/`tee`/`seq`/`whoami` are registered store bundles; the rest
-land in further batches), and
+land in further batches), the §12.2 colour-scheme and box-drawing work
+(deliverable 9), and
 deliverable 8 increment 5 (the x86_64/riscv64 storage floor, then
 deletion of the embedded registry those ports still carry as their
 §18.6 boot floor). Help documents are authored **only** in
@@ -922,6 +923,90 @@ behind the floor work below).
   support in the VFS and RustFS, then `ln`, `readlink`, `link`, `unlink`,
   `ls -L/-H`, `cp -l/-s/-d/-a`, `stat`'s link fields.
 
+## 12.2 Terminal colour, the standard scheme, and box drawing
+
+**Status: planned** (deliverable 9). Binding design for how command apps and
+full-screen curses apps use colour, emphasis, and box drawing. Everything here
+rides the one terminal vocabulary (`lib/vt`), capability database
+(`lib/termcap`), and screen model (`lib/curses`) of `plans/CURSES.md` — no
+second escape table, colour list, or glyph set anywhere (§2.2).
+
+- **Use colour where possible and appropriate.** Command apps SHOULD use
+  colour — and the other SGR emphasis attributes (bold, underline, dim,
+  italic) — wherever it genuinely helps a human read the output: `ls` file
+  kinds, `grep` matches, `fstree` structure, `man`'s rendered Markdown,
+  diagnostics, and any future command with visually distinguishable classes
+  of output. "Appropriate" is a judgement, not a quota: colour marks
+  *meaningful distinctions* (kinds, matches, severities, structure), never
+  decoration for its own sake, and a tool whose output has no such
+  distinctions adds none. Colour and emphasis are presentation only: the
+  information MUST survive with every attribute stripped (a mono terminal,
+  a colourblind reader, and a script see the same facts), so colour is never
+  the *sole* carrier of a distinction.
+- **The standard RustOS colour scheme.** There is exactly **one** standard
+  terminal colour scheme, defined once as data (a semantic-role palette,
+  proposed home `rustos_vt::scheme` beside the SGR vocabulary it maps onto;
+  the implementing change confirms the home and updates the crate docs) and
+  imported by every consumer — `lib/help`'s renders, `lib/curses` defaults,
+  and each command app — never a per-tool colour list (§2.2). The scheme
+  maps **semantic roles** (heading, emphasis, literal/code, path/directory,
+  executable, match/highlight, error, warning, success, metadata/dim,
+  selection, border) onto the SGR palette; tools name roles, never raw
+  colour numbers, so the scheme can evolve as data. Design requirements,
+  binding on the concrete palette:
+  - **No eye strain.** Comfortable contrast against both dark and light
+    terminal backgrounds; no low-contrast pairings (saturated pure blue on
+    black, dark grey on black) and no vibrating complementary pairs.
+  - **Aesthetic.** The palette is designed as a coherent whole and reviewed
+    as one — not a per-tool accretion of defaults.
+  - **Mindful of colourblind users, without being reduced by them.** No
+    distinction is encoded *solely* as a hue pair the common colour-vision
+    deficiencies confuse (red-vs-green above all): such roles also differ in
+    brightness or attribute (bold/underline). The scheme still uses the full
+    palette — it serves every user and does not collapse to a
+    deficiency-safe subset.
+  - **Degrades deterministically.** Roles render honestly at the terminal's
+    attested colour depth through the one `lib/termcap` capability judgement
+    (truecolour → 256 → 16 → mono, `plans/CURSES.md`); on `dumb`/mono the
+    roles degrade to plain or attribute-only output, never to garbage.
+- **Colour is render-to-terminal only — piped output stays clean.** Colour
+  MUST NOT interfere with processing of a command's output. Escape sequences
+  are applied only in the render-to-terminal path, decided by the same
+  console attestation the `man` pager already uses (§7): the kernel attests
+  geometry only for a console it owns, so a redirected, piped, or otherwise
+  non-console `stdout` fails that probe closed and the tool emits **plain
+  bytes with no escape codes** — `ls | wc -l` and `ls > file` see exactly
+  the uncoloured render. Apart from the SGR sequences themselves, the
+  coloured and plain renders are byte-identical: colour never changes
+  columns, ordering, quoting, wording, or exit status (§16.7). Tools whose
+  GNU counterpart takes `--color[=WHEN]` (`ls`, `grep`, …) spell it
+  identically (§1.1): `auto` (the default, attestation-decided), `always`
+  (explicit override — e.g. a serial or remote session the kernel cannot
+  attest, where the fail-closed default is plain), and `never`. Colour never
+  guesses: an unattested console renders plain until a finer "stdout is an
+  interactive terminal" attestation exists (staged with deliverable 9), and
+  `--color=always` is the honest escape hatch meanwhile.
+- **`man` renders Markdown with colour and emphasis.** As part of its
+  ability to parse the Help Markdown (§3, §7), `man` — that is, the one
+  `lib/help` `render_full`/`render_short` engine every consumer shares —
+  SHOULD use the standard scheme wherever possible: section headings bold in
+  the heading role, `*emphasis*`/`**strong**` as the italic/bold SGR
+  attributes, inline code and fenced blocks in the literal role, `OPTIONS`
+  switch keys highlighted, and `SEE ALSO` references in the path role. The
+  same terminal-only rule applies (a piped `man ls` emits plain text), the
+  content is unchanged either way, and the render still degrades through the
+  `TermType` capability record.
+- **Box drawing uses the Unicode Box Drawing block.** A full-screen curses
+  app (`top`, `edit`, the planned `sysmon`, …) draws every box, border,
+  divider, and rule it uses with glyphs from the standard **Unicode Box
+  Drawing block (U+2500 through U+257F)** — `─ │ ┌ ┐ └ ┘ ├ ┤ ┬ ┴ ┼` and
+  their heavy/double variants — via `lib/curses`'s box/border/line-drawing
+  API (`plans/CURSES.md` C4), never hand-rolled ASCII art (`+`/`-`/`|`) and
+  never a private glyph table. The ASCII fallback exists in exactly one
+  place — `lib/curses`'s degrade path for a `TermType` whose capability
+  record cannot carry the block (e.g. `dumb`) — so every app degrades
+  identically (§2.2, fail closed §2.9).
+
 ## 13. Deliverables and required `AGENTS.md` amendments
 
 Staged work (dependencies: the bundle/`appmgr` stack and `plans/CURSES.md`,
@@ -1070,6 +1155,33 @@ both landed; `plans/SHELL.md` command execution):
    §18.6 boot floor. All prior deliverables' references to
    `/System/Apps/<cmd>.app/Run` being served from `spawn_paths.rs` are
    superseded by this on-disk-bundle model.
+
+9. **The standard colour scheme, coloured renders, and box drawing
+   (§12.2)** — **planned.** One properly-gated staging:
+   - The shared semantic-role palette — one definition beside the `lib/vt`
+     SGR vocabulary it maps onto (home confirmed, and the crate docs /
+     `docs/src/` page updated, in the implementing change), with the
+     §12.2 eye-strain / aesthetic / colourblind requirements reviewed on
+     the concrete colour choices and the `lib/termcap` depth downgrade
+     (truecolour → 256 → 16 → mono) unit-tested per role.
+   - The one shared "colour to a terminal only" decision: the console
+     attestation the `man` pager already uses, exposed as a single helper
+     every colour-capable tool imports (never a per-tool probe, §2.2),
+     plus the GNU `--color[=WHEN]` switch surface (`auto` default,
+     `always`, `never`) for the tools whose GNU counterpart has it
+     (§1.1), and — staged behind it — the finer "stdout is an interactive
+     terminal" attestation for consoles the kernel does not own (serial),
+     which lands with its own kernel/ABI design, never guessed at.
+   - `lib/help`'s coloured `render_full`/`render_short` (headings,
+     emphasis, literal/code, switch keys through the scheme's roles),
+     inherited by `man` and every command's short help at once.
+   - Adoption in the existing colour-appropriate tools (`ls` file kinds,
+     `fstree` structure and its tree rules through `lib/curses`'s
+     U+2500–U+257F box glyphs, and each future tool — e.g. `grep` — in
+     the change that lands it), each with tests asserting the piped
+     render is byte-identical minus the SGR sequences and carries no
+     escape codes, and each tool's `Help/` trees updated in the same
+     change (§8.1).
 
 Required `AGENTS.md` amendments (each with a one-line rationale in PLAN.md's
 "Charter Amendments" section, §13):
