@@ -284,6 +284,35 @@ stdout/stderr, never by reshaping stdout. Security and correctness (§5.4, §4)
 win over bug-for-bug fidelity. The per-command option/output specifications
 this document adds MUST honour §16.7.
 
+### 1.2 Output is streamed, never accumulated
+
+A command app's output size is unbounded: `ls -lsR /` can legitimately emit
+gigabytes of listing, and on a filesystem that permits unbounded depth the
+traversal never ends at all. A "store then send" design — collecting the whole
+result in a growable buffer and writing it at the end — therefore overflows or
+exhausts memory on exactly the inputs a real system produces (`AGENTS.md`
+§26.3), and is a defect regardless of how well it behaves on small trees.
+
+- **Stream by default.** A command app writes each unit of output (a line, an
+  entry, a chunk) to `stdout` as it is produced and moves on, holding only
+  bounded working state. Memory use is a function of the *working set* (the
+  current entry, the current directory), never of the total output size
+  (`AGENTS.md` §2.16, §24.1). Streaming is preferred because it always works:
+  it is correct at any output size, lets a pipe consumer see output
+  immediately, and lets stream back-pressure pace the producer.
+- **Buffer only what the format itself demands, and bound it.** Some GNU
+  output formats genuinely need look-ahead — `ls`'s column auto-sizing needs
+  one directory's entries, `df`'s auto-sized columns need the mount table,
+  `head -n -N` needs a last-N queue. Such state is bounded to the smallest
+  unit the format requires (one directory, one table, N lines — never the
+  whole recursive traversal) and the bounded shape is deliberate, as `head`'s
+  constant-memory ring and line queue already demonstrate (§12.1 Stage C).
+  A format need is never an excuse to accumulate the full output.
+- **Exhaustion still fails closed.** Where bounded working state can still hit
+  a genuine out-of-memory condition, the tool reports the typed error and
+  fails loud (`AGENTS.md` §2.9, §2.24) — it never panics or silently truncates
+  output.
+
 ## 2. Bundle layout (per §16.5)
 
 The fixed top-level layout of `AGENTS.md` §16.5 carries one documentation
