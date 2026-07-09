@@ -3678,11 +3678,19 @@ I/O vocabulary. See `.junie/PREREQUISITES2.md` for the full P0–P6 status.
   (`kernel/core::fs::resolve_machine_alias`, derived from the one `ROOT_TEMPLATE`
   so the view and alias namespace cannot drift, §2.2), then authorised
   identically to the projected view path; an unpublished alias fails closed
-  with `NotFound`. **Still open under P4** (tracked, not stubbed, future
-  multi-root work — not a shell blocker): the durable `id::`/`fs::` resolver
-  `Root` variants and the volume forest, at which point machine aliases rebind
-  to independent `id::` roots without changing the resolver contract. Remaining
-  prerequisites (P5) are tracked in `.junie/PREREQUISITES2.md`.
+  with `NotFound`. **Durable `id::` resolution is landed**
+  (`plans/DEVICES.md` D3a): `lib/path` gained `Root::VolumeId` in place and
+  the kernel volume forest (`kernel/core::fs::volumes`, installed via
+  `BootInfo::with_volumes`) resolves a published volume's stable identity —
+  the RustFS per-volume UUID, published by the boot mount/unlock paths with
+  audited `fs.root.publish.{allow,deny}` events — at the same entry point,
+  fail-closed for an unpublished id. **Still open under P4** (tracked, not
+  stubbed — not a shell blocker): the multi-root volume forest (runtime
+  attach/unpublish, roots outside the default view, `plans/DEVICES.md`
+  D3b/D3c) and the `fs::` resolver `Root` variant, at which point machine
+  aliases rebind to independent `id::` roots without changing the resolver
+  contract. Remaining prerequisites (P5) are tracked in
+  `.junie/PREREQUISITES2.md`.
 - P5 (reference parser) — shared resource-reference parser as a `lib/*` crate:
   **done.** `lib/resref` (`rustos-resref`) is the one definition of how a RustOS
   resource reference is lexed and validated into a typed `ResourceRef`, so the
@@ -4174,8 +4182,17 @@ each ready LUN as a `rustos_abi::blkio` block-service endpoint + 32 KiB
 shared window behind an emitted Storage-class node
 (`rustos,usb-msd-lun`), write-protect enforced driver-side; host-proven
 over scripted doubles, Pi 4 metal acceptance for the live path (QEMU
-models no Pi USB). D3–D4 remain: the `volmgr` volume manager landing the
-still-open volume forest (`id::` roots) and automounting hotplugged
+models no Pi USB). D3a (done) landed the durable `id::` roots: `lib/path`
+`Root::VolumeId` (canonical hyphenated lowercase UUID spelling only,
+fail-closed), the kernel volume forest
+(`kernel/core::fs::volumes::VolumeForest`, threaded
+`BootInfo::with_volumes` like the other late-installed seams) resolving an
+`id::<volume-id>/path` at the single kernel path-resolution entry point to
+the view location the published volume's root backs (authorised by the
+secured VFS identically — never a policy bypass), and boot publication of
+both boot volumes' RustFS UUIDs with audited `fs.root.publish.{allow,deny}`
+events. D3b–D4 remain: runtime volume attach over blkio + multi-root
+publish/unpublish, the `volmgr` service automounting hotplugged
 filesystems into the `Storage:` catalog with deterministic collision-free
 names and user-usable permissions, plus the surprise-removal state machine
 (retained uncommitted writes, syslog events, force-unmount, and verified

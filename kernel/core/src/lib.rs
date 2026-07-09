@@ -174,7 +174,8 @@ pub use driver_store::{
 pub use fs::{
     Access, AclEntry, AclWho, CachedFs, Credentials, FilesystemAlreadyInstalled, FilesystemService,
     IdentityAlreadyInstalled, LateFilesystem, LateIdentity, Metadata, Mode, MountPoint, MountTable,
-    MountedFilesystemService, NullFilesystemService, Path, Vfs, VfsError, NULL_FILESYSTEM,
+    MountedFilesystemService, NullFilesystemService, Path, Vfs, VfsError, VolumeForest,
+    VolumePublishError, NULL_FILESYSTEM, NULL_VOLUME_FOREST,
 };
 pub use groups::{build_identity_table, load_groups_db, GroupsLoadError, GROUPS_DB_PATH};
 pub use hwtree::{HwTreeSource, NullHwTreeSource, NULL_HW_TREE};

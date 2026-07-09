@@ -54,6 +54,7 @@ pub mod path;
 pub mod perm;
 pub mod service;
 mod vfs;
+pub mod volumes;
 
 pub use delegate::{DelegatedFs, DelegatedInfo, MetaPolicy, PerInode, Uniform};
 pub use fscache::CachedFs;
@@ -68,6 +69,7 @@ pub use path::{
 pub use perm::{Access, AclEntry, AclWho, Credentials, Metadata, Mode};
 pub use service::{FilesystemService, NullFilesystemService, ReaddirEntry, NULL_FILESYSTEM};
 pub use vfs::Vfs;
+pub use volumes::{VolumeForest, VolumePublishError, NULL_VOLUME_FOREST};
 
 use core::fmt;
 

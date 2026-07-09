@@ -419,20 +419,74 @@ names a sibling crate.
   that carries the USB stack. The bundle ships in the Pi image
   (`Drivers/storage/usb_msd/Run`, signed, least-privilege manifest).
 
-### 2.4 D3 — the volume manager and automount
+### 2.4 D3 — the volume forest and automount
 
 This lands the still-open volume forest (PLAN.md P4) as its centre; the
-work is completed here, not stubbed around (§2.19).
+work is completed here, not stubbed around (§2.19). It is staged as three
+sub-increments, each green alone on the whole-project gate (§7): the
+durable-identity core first, then runtime multi-root attach, then the
+volume-policy service.
+
+#### 2.4.1 D3a — durable `id::` roots for mounted volumes. **Done.**
+
+- `lib/path` gained `Root::VolumeId` **in place** (§2.13 — no second
+  parser): `id::<volume-id>/path` parses only from the canonical
+  hyphenated lowercase UUID spelling into a typed 16-byte `VolumeId`
+  (any other spelling is `VolumeIdInvalid`, fail-closed; `..` cannot
+  escape the root; `Display` renders the canonical spelling and
+  re-parses to the same value, covered by the `fuzz_path` round-trip
+  harness, whose templates already mutate an `id::` form).
+- The **kernel volume forest** (`kernel/core::fs::volumes::VolumeForest`)
+  is the registry from a volume's stable identity to the live root:
+  threaded `BootInfo::with_volumes` → dispatch hook → syscall handlers
+  exactly like the other late-installed seams (fail-closed
+  `NULL_VOLUME_FOREST` default), and read by the single kernel
+  path-resolution entry point (`resolve_against_cwd`), so an
+  `id::`-rooted path resolves to the `/`-view location the published
+  volume's root backs and is then authorised by the secured VFS exactly
+  as the equivalent view path — never a policy bypass. A nil or
+  duplicate identity is refused at publish; an unpublished identity
+  fails closed `NotFound`.
+- `RustFs::volume_uuid()` exposes the per-volume UUID (already minted at
+  format and verified into every block header), and the boot mount paths
+  publish both boot volumes — the read-only System volume at the
+  `System` view prefix, the encrypted writable root at the view root —
+  with the audited `fs.root.publish.{allow,deny}` events (4170/4171,
+  drives.md §23). `docs/src/filesystem/drives.md` §12/§21 and
+  `docs/src/lib/path.md` record the landed state.
+- **Deliberate scope decisions.** Volume identity crosses the ABI only
+  as path *text* today, so no `lib/abi` volume-id type is minted ahead
+  of its first typed consumer (the D3b/D3c storage sysinfo queries,
+  §2.3/§2.4); forest unpublication lands with its first producer
+  (hotplug detach, D3b), so the boot-time forest is append-only.
+
+#### 2.4.2 D3b — runtime volume attach and multi-root publication
+
+- The kernel gains the runtime half the boot-time forest deliberately
+  lacks: **attach** a filesystem driver to a hot-pluggable block source
+  — a kernel blkio-client `Block` over the per-LUN endpoint + shared
+  window a user-space block driver serves (`rustos_abi::blkio`, the D2
+  `rustos,usb-msd-lun` nodes) — producing a volume root that is not
+  boot-wired.
+- Runtime mounts: a published volume's root joins the live mount table
+  under its `Storage:`-catalog view location (chosen by volmgr, D3c)
+  with the §16.3 removable-media flags; the forest gains **unpublish**
+  (detach retracts the root, fail-closed for new I/O).
+- Capability posture: attach/publish/unpublish under `CAP_FS_MOUNT`
+  (drives.md §14 — reuse before minting, §5.2); every decision audited
+  with the drives.md §23 event ids.
+
+#### 2.4.3 D3c — `volmgr`: probe, automount, alias/catalog, permissions
 
 - **`userland/system/volmgr`** (new service bundle) owns volume policy,
   as `devmgr` owns driver policy: it watches the hardware tree
   (`hw_tree_wait`) for storage-class nodes, probes partitions through
   `lib/partition`, probes each partition for a supported filesystem
   (RustFS / ext4 / FAT32 signatures, fail-closed probe order), and asks
-  the kernel to attach the matched filesystem driver and publish the
-  volume's durable **`id::<volume-id>` root** — the canonical identity
-  (`docs/src/filesystem/drives.md`). The `id::` resolver `Root` variants
-  land with this increment.
+  the kernel to attach the matched filesystem driver (the D3b path) and
+  publish the volume's durable **`id::<volume-id>` root** — the
+  canonical identity (`docs/src/filesystem/drives.md`; the `id::`
+  spelling and its kernel resolution landed in D3a).
 - **Alias + catalog publication.** For each published root, alias policy
   derives a human name and the `Storage:` catalog view updates
   (`Storage:/<Name>` → `<Name>:/`, drives.md §15). Naming:
@@ -510,7 +564,11 @@ work is completed here, not stubbed around (§2.19).
 
 - **D1** bulk URB transport (host-provable alone). **Done** (§2.2).
 - **D2** `usb_msd` class driver (host mock + QEMU/metal). **Done** (§2.3).
-- **D3** `volmgr` + `id::` roots + alias/catalog automount + permissions.
+- **D3a** durable `id::` roots — `lib/path` `Root::VolumeId` + the kernel
+  volume forest + boot-volume publication. **Done** (§2.4.1).
+- **D3b** runtime volume attach over blkio + multi-root
+  publish/unpublish (§2.4.2).
+- **D3c** `volmgr` + alias/catalog automount + permissions (§2.4.3).
 - **D4** surprise-removal state machine, force-unmount, verified
   re-insert.
 

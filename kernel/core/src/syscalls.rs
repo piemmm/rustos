@@ -125,7 +125,9 @@ use crate::devres::{
     NULL_MSI_ALLOC_FACILITY, NULL_SHARED_MEM_FACILITY,
 };
 use crate::dispatch_slot::{DispatchHook, DispatchOutcome, RescheduleAction};
-use crate::fs::{FilesystemService, LateIdentity, NULL_FILESYSTEM};
+use crate::fs::{
+    FilesystemService, LateIdentity, VolumeForest, NULL_FILESYSTEM, NULL_VOLUME_FOREST,
+};
 use crate::hwtree::{HwTreeSource, NULL_HW_TREE};
 use crate::introspect::{IntrospectSource, NULL_INTROSPECT};
 use crate::memmap::{MemMap, NULL_MEM_MAP};
@@ -406,6 +408,15 @@ where
     /// like the users database, because the mounted filesystem lives for the
     /// lifetime of the running kernel.
     filesystem: &'static (dyn FilesystemService + 'static),
+    /// The volume forest the `id::<volume-id>/…` path spelling resolves
+    /// through (`plans/DEVICES.md` D3a). Defaults to
+    /// [`NULL_VOLUME_FOREST`], into which nothing is ever published, so
+    /// every `id::` path fails closed with [`Errno::NotFound`]; the boot
+    /// path that mounts volumes installs its forest through
+    /// [`Self::with_volumes`] and publishes each mounted volume's stable
+    /// identity into it. Held as a `'static` borrow, exactly like the
+    /// filesystem service.
+    volumes: &'static VolumeForest,
     /// The kernel wall clock the `wall_time_get` / `wall_time_set` syscalls
     /// read and drive (`PREREQUISITES.md` P-D). Defaults to the fail-closed
     /// [`NULL_WALL_CLOCK`] (reads report `Unset`, a set returns
@@ -564,6 +575,11 @@ where
             // (`PREREQUISITES.md` P-A): every `fs_*` syscall fails closed with
             // `NotImplemented`, never fabricating a handle or a read.
             filesystem: &NULL_FILESYSTEM,
+            // The volume forest is unwired until the boot path that mounts
+            // volumes installs its forest and publishes their identities
+            // (`plans/DEVICES.md` D3a): every `id::<volume-id>/…` path
+            // fails closed with `NotFound`, never resolving a guessed root.
+            volumes: &NULL_VOLUME_FOREST,
             // The wall clock is unwired until the boot path installs the
             // production `KernelWallClock` (`PREREQUISITES.md` P-D):
             // `wall_time_get` reports `Unset` and `wall_time_set` fails closed
@@ -614,6 +630,21 @@ where
         filesystem: &'static (dyn FilesystemService + 'static),
     ) -> Self {
         self.filesystem = filesystem;
+        self
+    }
+
+    /// Install the volume forest the `id::<volume-id>/…` path spelling
+    /// resolves through, consuming and returning `self`
+    /// (`plans/DEVICES.md` D3a).
+    ///
+    /// Called once by the boot path that mounts volumes, with the `'static`
+    /// forest it publishes each mounted volume's stable identity into.
+    /// Until this is called the handler holds the fail-closed
+    /// [`NULL_VOLUME_FOREST`] and every `id::` path returns
+    /// [`Errno::NotFound`].
+    #[must_use]
+    pub const fn with_volumes(mut self, volumes: &'static VolumeForest) -> Self {
+        self.volumes = volumes;
         self
     }
 
@@ -1699,6 +1730,17 @@ where
                 let base = crate::fs::resolve_machine_alias(name).ok_or(Errno::NotFound)?;
                 let mut components = Vec::with_capacity(parsed.components().len() + 1);
                 components.push(String::from(base));
+                components.extend(parsed.components().iter().cloned());
+                Ok(render_view_path(&components))
+            }
+            // A durable volume-identity spelling (`id::<volume-id>/…`)
+            // resolves through the volume forest to the `/`-view location
+            // the published volume's root backs; the result is then
+            // authorised by the secured VFS exactly as the equivalent view
+            // path would be, so the durable form is never a policy bypass.
+            // An unpublished identity fails closed — never a guessed root.
+            rustos_path::Root::VolumeId(id) => {
+                let mut components = self.volumes.resolve(id.as_bytes()).ok_or(Errno::NotFound)?;
                 components.extend(parsed.components().iter().cloned());
                 Ok(render_view_path(&components))
             }
@@ -6278,6 +6320,21 @@ where
         filesystem: &'static (dyn FilesystemService + 'static),
     ) -> Self {
         self.handlers = self.handlers.with_filesystem(filesystem);
+        self
+    }
+
+    /// Install the volume forest the `id::<volume-id>/…` path spelling
+    /// resolves through, consuming and returning `self`
+    /// (`plans/DEVICES.md` D3a).
+    ///
+    /// The hook-level mirror of [`KernelSyscallHandlers::with_volumes`]:
+    /// called once by the boot path that mounts volumes and publishes their
+    /// stable identities. A boot path that publishes no volume simply never
+    /// calls it and every `id::` path stays fail-closed through
+    /// [`NULL_VOLUME_FOREST`].
+    #[must_use]
+    pub fn with_volumes(mut self, volumes: &'static VolumeForest) -> Self {
+        self.handlers = self.handlers.with_volumes(volumes);
         self
     }
 
@@ -20092,6 +20149,100 @@ mod tests {
 
         assert_eq!(
             h.fs_open(&ctx, 0x1000, "Nope:/x".len(), OpenFlags::READ),
+            Err(Errno::NotFound)
+        );
+        assert!(
+            fs.calls().is_empty(),
+            "resolution failed before the VFS was touched"
+        );
+        assert_eq!(aspaces.read().open_file_entry(SecTaskId(2), 4), None);
+    }
+
+    /// An `id::<volume-id>/…` path opens the same backing object as the
+    /// `/`-view location the published volume's root backs: with the System
+    /// volume's identity published at the `System` prefix,
+    /// `id::…/Kernel/img` resolves to `/System/Kernel/img` before the VFS
+    /// sees it (`plans/DEVICES.md` D3a).
+    #[test]
+    fn fs_open_resolves_a_published_volume_id_to_its_view_prefix() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let raw = b"id::00000000-0000-0000-0000-000000000001/Kernel/img";
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, raw);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let mut id = [0u8; 16];
+        id[15] = 1;
+        let forest: &'static crate::fs::VolumeForest =
+            Box::leak(Box::new(crate::fs::VolumeForest::new()));
+        forest.publish(id, &["System"]).expect("publish succeeds");
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(fs)
+        .with_volumes(forest);
+
+        h.fs_open(&ctx, 0x1000, raw.len(), OpenFlags::READ)
+            .expect("open succeeds");
+        assert_eq!(
+            fs.calls(),
+            alloc::vec![alloc::string::String::from(
+                "open uid=1000 path=/System/Kernel/img flags=1"
+            )],
+            "the volume id resolved to the view location its root backs"
+        );
+    }
+
+    /// An `id::` path naming no published volume fails closed with
+    /// `NotFound` before the VFS is touched, and records no descriptor —
+    /// the handlers' default forest has nothing published into it.
+    #[test]
+    fn fs_open_on_an_unpublished_volume_id_fails_closed() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let raw = b"id::00000000-0000-0000-0000-000000000001/Kernel/img";
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, raw);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(fs);
+
+        assert_eq!(
+            h.fs_open(&ctx, 0x1000, raw.len(), OpenFlags::READ),
             Err(Errno::NotFound)
         );
         assert!(

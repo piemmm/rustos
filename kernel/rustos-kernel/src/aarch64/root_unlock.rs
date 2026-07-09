@@ -882,8 +882,9 @@ impl<B: Block + 'static> WritableRootSink for WritableStateSink<B> {
         // persists through this driver directly. Fail-soft: a
         // registration refusal leaves the writable tree and `users_admin`
         // failing closed.
+        let volume_uuid = fs.volume_uuid();
         let driver: alloc::boxed::Box<dyn KernelFs> = alloc::boxed::Box::new(fs);
-        register_writable_state(driver, self.audit, self.pressure)
+        register_writable_state(driver, volume_uuid, self.audit, self.pressure)
     }
 }
 

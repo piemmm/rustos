@@ -977,6 +977,12 @@ fn enter_kernel_core(
     // encrypted-root unlock publishes the identity table, so wiring the hook
     // here changes no boot behaviour until those installs land.
     .with_filesystem(&crate::system_mount::FS_SERVICE)
+    // Resolve `id::<volume-id>/…` paths against the volume forest the
+    // mount/unlock tasks publish each mounted volume's stable identity
+    // into (`plans/DEVICES.md` D3a). Until a volume is published every
+    // `id::` path fails closed `NotFound`, so wiring the hook here changes
+    // no boot behaviour until those installs land.
+    .with_volumes(&crate::system_mount::VOLUME_FOREST)
     // Resolve a spawn-as-user switch (`PREREQUISITES.md` P-C) against the
     // same set-once identity cell the filesystem service resolves caller
     // groups against and the root-unlock kthread publishes the on-disk

@@ -73,6 +73,7 @@ use rustos_abi::DriverHandle;
 use rustos_drv_fs_rustfs::{RustFs, SYSTEM_VOLUME_KEY};
 use rustos_kernel_core::{
     CachedFs, LateFilesystem, MountedFilesystemService, Path, SleepLock, Vfs, VfsError,
+    VolumeForest,
 };
 use rustos_kernel_mem::{CacheBudget, MemoryPressure, ReclaimOwner};
 use rustos_kernel_sec::{GroupId, UserId};
@@ -88,6 +89,14 @@ pub use crate::kernel_fs::KernelFs;
 /// The set-once mount cell the `fs_*` syscalls resolve operations against,
 /// published by [`install_system_mount`] once the disk is up.
 pub static LATE_FILESYSTEM: LateFilesystem<Box<dyn KernelFs>> = LateFilesystem::new();
+
+/// The volume forest the `id::<volume-id>/…` path spelling resolves through
+/// (`plans/DEVICES.md` D3a): each mounted volume's stable identity is
+/// published here as its driver is registered, so the volume is addressable
+/// by its durable `id::` root as well as through the `/` view. Installed
+/// into the boot handover via `BootInfo::with_volumes`; until a volume is
+/// published every `id::` path fails closed `NotFound`.
+pub static VOLUME_FOREST: VolumeForest = VolumeForest::new();
 
 /// Wrap a volume's driver in the clean, rebuildable filesystem cache
 /// (`plans/SMARTRAM.md` section 6.1), budgeted from the kernel heap
@@ -165,6 +174,71 @@ const SYSTEM_FS_WRITABLE_MOUNTED: EventId = EventId(4145);
 /// failing closed; this is never fatal to boot. The `cause` field names the
 /// check that declined, secret-free.
 const SYSTEM_FS_UNAVAILABLE: EventId = EventId(4144);
+
+/// Audit event: a mounted volume's stable identity was published into the
+/// volume forest, so the volume is now addressable as `id::<volume-id>/…`
+/// (drives.md `fs.root.publish.allow`). The `volume` field names the
+/// backing volume; identities are not secrets but the log carries the
+/// mount name, which is what an operator greps for.
+const VOLUME_ID_PUBLISHED: EventId = EventId(4170);
+
+/// Audit event: a mounted volume's identity could not be published
+/// (drives.md `fs.root.publish.deny`) — a nil identity or a duplicate.
+/// `id::` access to the volume stays fail-closed; the `/` view is
+/// unaffected. Never fatal to boot.
+const VOLUME_ID_PUBLISH_REFUSED: EventId = EventId(4171);
+
+/// Publish a mounted volume's stable identity into [`VOLUME_FOREST`] and
+/// audit the outcome (drives.md `fs.root.publish.{allow,deny}`), naming the
+/// backing volume in either record. Fail-soft: a refusal leaves the volume
+/// reachable through the `/` view only.
+fn publish_volume_identity(
+    volume_uuid: [u8; 16],
+    view_prefix: &[&str],
+    volume: &'static str,
+    audit: &'static (dyn Sink + Sync),
+) {
+    match VOLUME_FOREST.publish(volume_uuid, view_prefix) {
+        Ok(()) => {
+            log(
+                audit,
+                &Event {
+                    level: Level::Info,
+                    id: VOLUME_ID_PUBLISHED,
+                    message: "system-mount: volume identity published to the volume forest",
+                    fields: &[Field {
+                        key: "volume",
+                        value: rustos_log::FieldValue::Str(volume),
+                    }],
+                },
+            );
+        }
+        Err(refusal) => {
+            let cause = match refusal {
+                rustos_kernel_core::VolumePublishError::NilIdentity => "nil_identity",
+                rustos_kernel_core::VolumePublishError::AlreadyPublished => "already_published",
+            };
+            log(
+                audit,
+                &Event {
+                    level: Level::Warn,
+                    id: VOLUME_ID_PUBLISH_REFUSED,
+                    message: "system-mount: volume identity publication refused",
+                    fields: &[
+                        Field {
+                            key: "volume",
+                            value: rustos_log::FieldValue::Str(volume),
+                        },
+                        Field {
+                            key: "cause",
+                            value: rustos_log::FieldValue::Str(cause),
+                        },
+                    ],
+                },
+            );
+        }
+    }
+}
 
 /// Build the production VFS policy layer: the writable root volume mounted
 /// as `/`, the read-only `/System` volume shadowing it, and the writable
@@ -281,6 +355,7 @@ pub fn install_system_mount<B: Block + 'static>(
         pressure,
         audit,
     ));
+    let volume_uuid = fs.volume_uuid();
     let Ok(vfs) = system_vfs() else {
         unavailable(audit, "system_vfs_build_failed");
         return;
@@ -318,6 +393,9 @@ pub fn install_system_mount<B: Block + 'static>(
             fields: &[],
         },
     );
+    // The read-only `/System` volume's root is the `/System` view subtree,
+    // so its durable `id::` root resolves there.
+    publish_volume_identity(volume_uuid, &["System"], "RustFsSystem", audit);
     // The on-disk application store is now readable. Install its semantic
     // launch cache — budgeted from the kernel heap arena exactly like the
     // volume caches above and governed by the same pressure gauge
@@ -356,6 +434,7 @@ pub fn install_system_mount<B: Block + 'static>(
 /// device — or `None` when registration was refused.
 pub fn register_writable_state(
     driver: Box<dyn KernelFs>,
+    volume_uuid: [u8; 16],
     audit: &'static (dyn Sink + Sync),
     pressure: &'static MemoryPressure,
 ) -> Option<&'static SleepLock<Box<dyn KernelFs>>> {
@@ -381,6 +460,9 @@ pub fn register_writable_state(
             fields: &[],
         },
     );
+    // The writable root volume *is* `/`, so its durable `id::` root
+    // resolves at the view root.
+    publish_volume_identity(volume_uuid, &[], "RustFsRoot", audit);
     Some(shared)
 }
 

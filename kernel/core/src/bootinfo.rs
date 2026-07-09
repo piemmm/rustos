@@ -34,7 +34,9 @@ use rustos_log::{Level, Sink};
 
 use crate::console::{ConsoleDevice, NO_CONSOLES};
 use crate::dispatch_slot::DispatchCallbackSlot;
-use crate::fs::{FilesystemService, LateIdentity, NULL_FILESYSTEM};
+use crate::fs::{
+    FilesystemService, LateIdentity, VolumeForest, NULL_FILESYSTEM, NULL_VOLUME_FOREST,
+};
 use crate::hwtree::{HwTreeSource, NULL_HW_TREE};
 use crate::seat::{SeatRegistry, NULL_SEAT_REGISTRY};
 use crate::spawn::{
@@ -746,6 +748,19 @@ where
     /// exactly like the users database.
     pub filesystem: &'static (dyn FilesystemService + 'static),
 
+    /// The volume forest the `id::` path resolver reads
+    /// (`plans/DEVICES.md` D3a).
+    ///
+    /// Defaults to [`NULL_VOLUME_FOREST`], into which nothing is ever
+    /// published, so every `id::<volume-id>/…` resolution fails closed with
+    /// [`rustos_abi::Errno::NotFound`]. A boot path that mounts volumes
+    /// installs its own forest through [`Self::with_volumes`] and publishes
+    /// each mounted volume's stable identity into it; `kernel_main` then
+    /// threads it into the production dispatch hook. Held as a `'static`
+    /// borrow because the forest lives for the lifetime of the running
+    /// kernel, exactly like the filesystem service.
+    pub volumes: &'static VolumeForest,
+
     /// The authoritative identity table the `spawn` handler resolves a
     /// spawn-as-user switch against (`PREREQUISITES.md` P-C).
     ///
@@ -856,6 +871,11 @@ where
             // (`PREREQUISITES.md` P-A): every `fs_*` syscall fails closed
             // through `NULL_FILESYSTEM`.
             filesystem: &NULL_FILESYSTEM,
+            // Volume forest unwired until a boot path mounts volumes and
+            // installs its forest through `with_volumes`
+            // (`plans/DEVICES.md` D3a): every `id::` resolution fails
+            // closed through `NULL_VOLUME_FOREST`.
+            volumes: &NULL_VOLUME_FOREST,
             // Identity table unwired until a boot path unlocks the root and
             // installs it through `with_spawn_identity` (`PREREQUISITES.md`
             // P-C): a spawn-as-user switch fails closed through
@@ -1041,6 +1061,20 @@ where
         filesystem: &'static (dyn FilesystemService + 'static),
     ) -> Self {
         self.filesystem = filesystem;
+        self
+    }
+
+    /// Install the volume forest the `id::` path resolver reads, consuming
+    /// and returning `self` (`plans/DEVICES.md` D3a).
+    ///
+    /// Called by a boot path that mounts volumes, handing the `'static`
+    /// forest it publishes each mounted volume's stable identity into.
+    /// Until this is called the handover holds [`NULL_VOLUME_FOREST`] and
+    /// every `id::<volume-id>/…` path fails closed with
+    /// [`rustos_abi::Errno::NotFound`].
+    #[must_use]
+    pub const fn with_volumes(mut self, volumes: &'static VolumeForest) -> Self {
+        self.volumes = volumes;
         self
     }
 

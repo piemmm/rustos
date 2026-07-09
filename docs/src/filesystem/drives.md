@@ -250,17 +250,20 @@ so parsing can never widen authority.
 
 **Implemented today.** `Root` covers the spellings with present consumers: the
 synthetic view (`/path`), the alias shorthand (`Alias:/path`), the expanded
-internal `alias::Name/path`, and relative paths. The durable/administrative
-resolver spellings (`id::`, `fs::`, `<driver>::`, `dev::`, `net::`, `view::`)
-are *declined* today (`PathError::UnsupportedResolver`), and a bare
+internal `alias::Name/path`, relative paths, and the durable
+`id::<volume-id>/path` form (`Root::VolumeId`, a typed 16-byte identity
+parsed only from the canonical hyphenated lowercase UUID spelling — resolved
+by the kernel volume forest, `plans/DEVICES.md` D3a). The remaining
+administrative resolver spellings (`fs::`, `<driver>::`, `dev::`, `net::`,
+`view::`) are *declined* today (`PathError::UnsupportedResolver`), and a bare
 `Name:selector` is declined (`PathError::NotAPath`), because they have no
 consumer yet.
 
-**Resolver-stage work (remaining).** When the descriptor-producing open-a-path
-ABI (§21) and the resource-alias grammar land, `lib/path` gains the `id::` /
-`fs::` / `<driver>::` / `dev::` / `net::` / `view::` `Root` variants **in
-place** (`AGENTS.md` §2.13 — no `v2`, no second parser); each variant is added
-by the stage that introduces its caller, not speculatively (§2.3 / §2.4).
+**Resolver-stage work (remaining).** As recovery/diagnostic tooling lands,
+`lib/path` gains the `fs::` / `<driver>::` / `dev::` / `net::` / `view::`
+`Root` variants **in place** (`AGENTS.md` §2.13 — no `v2`, no second parser);
+each variant is added by the stage that introduces its caller, not
+speculatively (§2.3 / §2.4).
 
 ## 13. Boot, discovery, and publishing lifecycle
 
@@ -386,11 +389,19 @@ through `lib/path`, and **machine-alias resolution** is wired there:
 `Alias:/path` and the expanded `alias::Name/path` resolve for the four machine
 aliases, which are the canonical roots the `/` view projects as `/<Name>`
 (`kernel/core::fs::resolve_machine_alias`, derived from the one root template
-so the view and the alias namespace cannot drift). The durable `id::`/`fs::`
-resolver `Root` variants (§12) and the multi-root volume forest they address
-remain a future increment; machine aliases then rebind from the single root's
-subtrees to independent `id::` volume roots without changing the resolver
-contract.
+so the view and the alias namespace cannot drift). **Durable `id::`
+resolution is wired at the same entry point** (`plans/DEVICES.md` D3a): the
+kernel volume forest (`kernel/core::fs::volumes::VolumeForest`, installed via
+`BootInfo::with_volumes`) maps each mounted volume's stable identity — the
+RustFS per-volume UUID, published by the boot mount/unlock paths with the
+audited `fs.root.publish.{allow,deny}` events — to the `/`-view location its
+root backs, so `id::<volume-id>/path` opens the same object under the same
+permissions, never a policy bypass, and an unpublished identity fails closed
+`NotFound`. The multi-root volume forest (roots *outside* the default view,
+runtime attach/unpublish, and the `fs::` resolver) remains a future increment
+(`plans/DEVICES.md` D3b/D3c); machine aliases then rebind from the single
+root's subtrees to independent `id::` volume roots without changing the
+resolver contract.
 
 ## 22. Error model
 

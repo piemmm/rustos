@@ -29,11 +29,20 @@ widen authority.
 | Alias shorthand | `Home:/Documents/spec.md` | `Root::Alias("Home")` |
 | Expanded alias | `alias::Home/Documents` | `Root::Alias("Home")` |
 | Relative | `Documents/spec.md`, `.`, `../notes` | `Root::Relative` |
+| Durable volume identity | `id::b7f2…8001/Documents` | `Root::VolumeId(…)` |
 
 The alias shorthand and the expanded `alias::` form parse to the **identical**
 value; the shorthand is the canonical human spelling the `Display` impl renders.
 The first `/` after the `:` marks the root boundary — the alias name is never a
 path component, and `Alias:relative` (no `/`) is not a filesystem path.
+
+The volume-identity form is the durable machine spelling of a root
+(`docs/src/filesystem/drives.md` §8): the id must be the canonical hyphenated
+lowercase UUID spelling (`8-4-4-4-12` hex digits), decoded into a typed
+16-byte `VolumeId`; any other spelling is refused (`VolumeIdInvalid`), never
+"fixed up", so a rendered path always re-parses to the same value. Resolving
+the id to a live root is the kernel volume forest's job
+(`rustos_kernel_core::fs::volumes`), not this crate's.
 
 ## Boundary with resource references
 
@@ -56,16 +65,17 @@ second path parser.
 For the ancestor-walking tools — `mkdir -p` (create missing parents,
 outermost first) and `rmdir -p` (remove parents, innermost first) — a parsed
 `Path` exports `prefix(len)`: the canonical spelling of the path truncated to
-its first `len` components (`prefix(0)` is the bare root — `/`, `Name:/`, or
-`.`). Both walks import this one rule, so how a truncated path is spelled is
-never re-derived per tool.
+its first `len` components (`prefix(0)` is the bare root — `/`, `Name:/`,
+`id::<volume-id>/`, or `.`). Both walks import this one rule, so how a
+truncated path is spelled is never re-derived per tool.
 
-The durable and administrative resolver spellings — `id::<volume-id>/…`,
-`fs::<driver>/<root>/…`, the `<driver>::<root>/…` shorthand, `dev::…`, and
-`net::…` — are refused with `PathError::UnsupportedResolver`. They serve
-durable-reference and recovery tooling that does not exist yet; parsing them
-now, with no consumer, would be a speculative interface, so they are added by
-the stage that introduces their callers.
+The remaining administrative resolver spellings — `fs::<driver>/<root>/…`,
+the `<driver>::<root>/…` shorthand, `dev::…`, and `net::…` — are refused
+with `PathError::UnsupportedResolver`. They serve recovery and diagnostic
+tooling that does not exist yet; parsing them now, with no consumer, would be
+a speculative interface, so they are added by the stage that introduces their
+callers (`id::` landed with the kernel volume forest, `plans/DEVICES.md`
+D3a).
 
 ## Fail closed, bounded, and round-tripping
 
@@ -75,8 +85,9 @@ bound, not a growable capacity: `MAX_PATH_LEN`, `MAX_COMPONENTS`,
 `PathError` — never a silently "fixed up" path — when a bound is exceeded, an
 interior component is empty (`a//b`), a component holds a control character or a
 `:` (a reserved delimiter, so a rendered path always re-parses to the same
-value), or `..` climbs above a view or alias root (`EscapesRoot`). A leading
-`..` in a *relative* path is preserved for the caller to resolve.
+value), or `..` climbs above a view, alias, or volume-id root
+(`EscapesRoot`). A leading `..` in a *relative* path is preserved for the
+caller to resolve.
 
 The crate is `no_std` + `alloc` and `#![forbid(unsafe_code)]`. Parsing is the
 only fallible step and never panics; it runs in time linear in the input with no

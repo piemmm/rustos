@@ -1086,6 +1086,7 @@ fn run_phases<A: KernelArch>(
         users_admin,
         hw_tree,
         filesystem,
+        volumes,
         spawn_identity,
         kernel_heap_bytes,
         ..
@@ -1380,6 +1381,11 @@ fn run_phases<A: KernelArch>(
         // default `NULL_FILESYSTEM` keeps every `fs_*` syscall fail-closed
         // when no volume was mounted.
         .with_filesystem(filesystem)
+        // Resolve `id::<volume-id>/…` paths against the volume forest the
+        // boot path publishes mounted volumes into (`plans/DEVICES.md`
+        // D3a); the default `NULL_VOLUME_FOREST` keeps every `id::`
+        // resolution fail-closed when no volume was published.
+        .with_volumes(volumes)
         // Resolve a spawn-as-user switch against the authoritative identity
         // table the boot path installed (`PREREQUISITES.md` P-C) — the same
         // table the filesystem service resolves caller groups against; the

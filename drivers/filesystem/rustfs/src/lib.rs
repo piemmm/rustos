@@ -1400,6 +1400,18 @@ impl<B: Block> RustFs<B> {
         Self::open_inner(block, volume_key, false)
     }
 
+    /// The volume's stable identity: the 16 raw bytes of the random
+    /// per-volume UUID minted at [`Self::format`] and verified into every
+    /// block header, in on-disk byte order.
+    ///
+    /// This is what the kernel volume forest publishes so the volume is
+    /// addressable as `id::<volume-id>/…` (`docs/src/filesystem/drives.md`
+    /// §8). Identity only — holding it grants nothing.
+    #[must_use]
+    pub fn volume_uuid(&self) -> [u8; 16] {
+        self.fs_uuid.to_le_bytes()
+    }
+
     /// Open the rustfs volume on `block` **read-only**, under `volume_key`.
     ///
     /// Identical to [`Self::open`] in how it selects and replays the

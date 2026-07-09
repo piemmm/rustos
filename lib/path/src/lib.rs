@@ -30,6 +30,14 @@
 //! - **Relative** — no leading `/` and no leading `Name:`/`Name::` token, e.g.
 //!   `Documents/spec.md`, `.`, or `../notes`. The root is [`Root::Relative`];
 //!   the caller resolves it against a current directory.
+//! - **Durable volume identity** — `id::<volume-id>/path`, e.g.
+//!   `id::b7f2e4e6-8d7a-4ef8-a13e-d3b84d4e8001/Documents`. The volume id is
+//!   the canonical hyphenated lowercase UUID spelling (`8-4-4-4-12` hex
+//!   digits); any other spelling is refused, so a rendered path always
+//!   re-parses to the same value. The root is [`Root::VolumeId`]. This is
+//!   the durable machine form (`docs/src/filesystem/drives.md` §8): it
+//!   names a volume root by its stable identity, independent of any alias
+//!   or the `/` view, and is resolved by the kernel's volume forest.
 //!
 //! A leading `Name:` (single colon) that is **not** followed by `/` is refused
 //! with [`PathError::NotAPath`]: that is either a resource reference
@@ -38,12 +46,13 @@
 //! relative path — there is no Windows-style `Drive:relative`). A caller that
 //! also handles resource references routes a `NotAPath` string to that resolver.
 //!
-//! The durable and administrative resolver spellings — `id::<volume-id>/…`,
-//! `fs::<driver>/<root>/…`, the `<driver>::<root>/…` shorthand, `dev::…`, and
-//! `net::…` — are refused with [`PathError::UnsupportedResolver`]. They belong
-//! to durable-reference and recovery tooling that does not exist yet; parsing
-//! them now, with no consumer, would be a speculative interface. They are added
-//! by the stage that introduces their callers.
+//! The remaining administrative resolver spellings — `fs::<driver>/<root>/…`,
+//! the `<driver>::<root>/…` shorthand, `dev::…`, and `net::…` — are refused
+//! with [`PathError::UnsupportedResolver`]. They belong to recovery and
+//! diagnostic tooling that does not exist yet; parsing them now, with no
+//! consumer, would be a speculative interface. They are added by the stage
+//! that introduces their callers (`id::` landed with the kernel volume
+//! forest, `plans/DEVICES.md` D3a).
 //!
 //! # Bounds and fail-closed behaviour
 //!
@@ -103,6 +112,49 @@ pub const MAX_COMPONENT_LEN: usize = 255;
 /// Largest alias name, in bytes.
 pub const MAX_ALIAS_LEN: usize = 64;
 
+/// Exact byte length of a canonical volume-id spelling
+/// (`8-4-4-4-12` lowercase hex, e.g.
+/// `b7f2e4e6-8d7a-4ef8-a13e-d3b84d4e8001`).
+pub const VOLUME_ID_TEXT_LEN: usize = 36;
+
+/// A stable volume identity, parsed from the canonical hyphenated
+/// lowercase UUID spelling of an `id::`-rooted path.
+///
+/// The 16 raw bytes are the UUID's hex digits in text order (big-endian
+/// field order, exactly as spelled). This is the parse-time *spelling*
+/// value; resolving it to a live volume root is the kernel volume
+/// forest's job, so holding one grants nothing.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct VolumeId([u8; 16]);
+
+impl VolumeId {
+    /// Wrap 16 raw identity bytes.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
+
+    /// The 16 raw identity bytes, in spelling order.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 16] {
+        &self.0
+    }
+}
+
+impl fmt::Display for VolumeId {
+    /// Renders the canonical hyphenated lowercase spelling, which
+    /// [`parse`] accepts back unchanged.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (index, byte) in self.0.iter().enumerate() {
+            if matches!(index, 4 | 6 | 8 | 10) {
+                f.write_str("-")?;
+            }
+            write!(f, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
+
 /// The root a [`Path`] is anchored to — how its components are to be resolved.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Root {
@@ -112,6 +164,10 @@ pub enum Root {
     /// A named alias root (`Alias:/…` or `alias::Alias/…`). The stored string
     /// is the validated alias name, without the `:`/`::` delimiter.
     Alias(String),
+    /// A durable volume-identity root (`id::<volume-id>/…`): the stable
+    /// machine form that names a volume root independently of any alias or
+    /// the `/` view (`docs/src/filesystem/drives.md` §8).
+    VolumeId(VolumeId),
     /// A relative path (`…`), resolved by the caller against a current
     /// directory. The components may begin with `..` entries.
     Relative,
@@ -119,10 +175,11 @@ pub enum Root {
 
 /// A parsed, normalised RustOS path: a [`Root`] plus its components.
 ///
-/// Components never contain `/`, are never empty, and — for a [`Root::View`] or
-/// [`Root::Alias`] — never contain a `.` or `..` navigation entry (those are
-/// resolved away, and a `..` that would climb above the root is a parse error).
-/// A [`Root::Relative`] path may retain leading `..` entries.
+/// Components never contain `/`, are never empty, and — for a [`Root::View`],
+/// [`Root::Alias`], or [`Root::VolumeId`] — never contain a `.` or `..`
+/// navigation entry (those are resolved away, and a `..` that would climb
+/// above the root is a parse error). A [`Root::Relative`] path may retain
+/// leading `..` entries.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Path {
     root: Root,
@@ -147,15 +204,25 @@ impl Path {
     pub fn alias(&self) -> Option<&str> {
         match &self.root {
             Root::Alias(name) => Some(name),
-            Root::View | Root::Relative => None,
+            Root::View | Root::VolumeId(_) | Root::Relative => None,
         }
     }
 
-    /// Whether this path names its own root (a view or alias path), as opposed
-    /// to a relative path resolved against a current directory.
+    /// The volume identity, when this path is anchored to an `id::` root.
+    #[must_use]
+    pub fn volume_id(&self) -> Option<&VolumeId> {
+        match &self.root {
+            Root::VolumeId(id) => Some(id),
+            Root::View | Root::Alias(_) | Root::Relative => None,
+        }
+    }
+
+    /// Whether this path names its own root (a view, alias, or volume-id
+    /// path), as opposed to a relative path resolved against a current
+    /// directory.
     #[must_use]
     pub fn is_absolute(&self) -> bool {
-        matches!(self.root, Root::View | Root::Alias(_))
+        matches!(self.root, Root::View | Root::Alias(_) | Root::VolumeId(_))
     }
 
     /// The canonical spelling of this path truncated to its first `len`
@@ -166,7 +233,7 @@ impl Path {
     /// outermost-first (`prefix(1)`, `prefix(2)`, …) and `rmdir -p` each
     /// proper ancestor innermost-first, so neither tool re-derives how a
     /// truncated path is spelled. `prefix(0)` is the bare root (`/`,
-    /// `Name:/`, or `.` for a relative path).
+    /// `Name:/`, `id::<volume-id>/`, or `.` for a relative path).
     #[must_use]
     pub fn prefix(&self, len: usize) -> Option<String> {
         if len > self.components.len() {
@@ -183,8 +250,9 @@ impl Path {
 }
 
 impl fmt::Display for Path {
-    /// Renders the canonical human spelling: `/a/b` for a view, `Name:/a/b` for
-    /// an alias, and `a/b` (or `.` when empty) for a relative path.
+    /// Renders the canonical human spelling: `/a/b` for a view, `Name:/a/b`
+    /// for an alias, `id::<volume-id>/a/b` for a volume-id root, and `a/b`
+    /// (or `.` when empty) for a relative path.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.root {
             Root::View => {
@@ -193,6 +261,10 @@ impl fmt::Display for Path {
             }
             Root::Alias(name) => {
                 write!(f, "{name}:/")?;
+                write_components(f, &self.components)
+            }
+            Root::VolumeId(id) => {
+                write!(f, "id::{id}/")?;
                 write_components(f, &self.components)
             }
             Root::Relative => {
@@ -239,7 +311,8 @@ pub enum PathError {
     /// path grammar, so it is never a literal filename character; a name that
     /// needs one is escaped by the filesystem driver, not spelled here.
     ColonInComponent,
-    /// A `..` component tried to climb above a view or alias root.
+    /// A `..` component tried to climb above a view, alias, or volume-id
+    /// root.
     EscapesRoot,
     /// The alias name was empty (`:/…` or `alias::/…`).
     AliasEmpty,
@@ -250,9 +323,12 @@ pub enum PathError {
     AliasInvalidChar,
     /// A resolver token was empty (`::…`).
     ResolverEmpty,
-    /// A resolver-prefixed spelling (`id::`, `fs::`, `dev::`, `net::`, or a
-    /// `<driver>::` shorthand) was used. These durable/administrative forms
-    /// have no consumer yet and are not parsed by this layer.
+    /// An `id::` volume identity was not the canonical hyphenated lowercase
+    /// UUID spelling (`8-4-4-4-12` hex digits).
+    VolumeIdInvalid,
+    /// A resolver-prefixed spelling (`fs::`, `dev::`, `net::`, or a
+    /// `<driver>::` shorthand) was used. These administrative forms have no
+    /// consumer yet and are not parsed by this layer.
     UnsupportedResolver,
     /// The input had a `Name:selector` shape (single colon not followed by
     /// `/`): a resource reference owned by the separate resource-reference
@@ -275,6 +351,9 @@ impl fmt::Display for PathError {
             PathError::AliasTooLong => "alias name exceeds the maximum length",
             PathError::AliasInvalidChar => "alias name contains an invalid character",
             PathError::ResolverEmpty => "resolver name is empty",
+            PathError::VolumeIdInvalid => {
+                "volume id is not the canonical hyphenated lowercase UUID spelling"
+            }
             PathError::UnsupportedResolver => {
                 "resolver-prefixed path spelling is not supported here"
             }
@@ -366,6 +445,9 @@ fn parse_rooted(input: &str, colon: usize) -> Result<Path, PathError> {
         if resolver == "alias" {
             return parse_expanded_alias(rest);
         }
+        if resolver == "id" {
+            return parse_volume_id(rest);
+        }
         return Err(PathError::UnsupportedResolver);
     }
 
@@ -396,6 +478,56 @@ fn parse_expanded_alias(rest: &str) -> Result<Path, PathError> {
         root: Root::Alias(alias),
         components,
     })
+}
+
+/// Parse the tail of a volume-identity spelling (`id::` already stripped),
+/// i.e. `<volume-id>` or `<volume-id>/path/inside/root`.
+fn parse_volume_id(rest: &str) -> Result<Path, PathError> {
+    let (text, path) = match rest.find('/') {
+        Some(slash) => (&rest[..slash], &rest[slash + 1..]),
+        None => (rest, ""),
+    };
+    let id = validate_volume_id(text)?;
+    let components = normalise(path, true)?;
+    Ok(Path {
+        root: Root::VolumeId(id),
+        components,
+    })
+}
+
+/// Validate the canonical hyphenated lowercase UUID spelling and decode its
+/// 16 identity bytes. Any other spelling — wrong length, misplaced hyphen,
+/// uppercase or non-hex digit — is refused, never "fixed up", so a rendered
+/// path always re-parses to the same value.
+fn validate_volume_id(text: &str) -> Result<VolumeId, PathError> {
+    let bytes = text.as_bytes();
+    if bytes.len() != VOLUME_ID_TEXT_LEN {
+        return Err(PathError::VolumeIdInvalid);
+    }
+    let mut id = [0u8; 16];
+    let mut out = 0;
+    let mut high: Option<u8> = None;
+    for (index, &byte) in bytes.iter().enumerate() {
+        if matches!(index, 8 | 13 | 18 | 23) {
+            if byte != b'-' {
+                return Err(PathError::VolumeIdInvalid);
+            }
+            continue;
+        }
+        let digit = match byte {
+            b'0'..=b'9' => byte - b'0',
+            b'a'..=b'f' => byte - b'a' + 10,
+            _ => return Err(PathError::VolumeIdInvalid),
+        };
+        match high.take() {
+            None => high = Some(digit),
+            Some(h) => {
+                id[out] = (h << 4) | digit;
+                out += 1;
+            }
+        }
+    }
+    Ok(VolumeId::from_bytes(id))
 }
 
 /// Validate an alias name and return it as an owned string.
@@ -647,10 +779,6 @@ mod tests {
     #[test]
     fn unsupported_resolvers_refused() {
         assert_eq!(
-            parse("id::b7f2e4e6-8d7a-4ef8-a13e-d3b84d4e8001/x"),
-            Err(PathError::UnsupportedResolver)
-        );
-        assert_eq!(
             parse("fs::rustfs/System/x"),
             Err(PathError::UnsupportedResolver)
         );
@@ -666,6 +794,105 @@ mod tests {
             parse("net::nas.local/x"),
             Err(PathError::UnsupportedResolver)
         );
+    }
+
+    const VOLUME_ID_TEXT: &str = "b7f2e4e6-8d7a-4ef8-a13e-d3b84d4e8001";
+
+    const VOLUME_ID_BYTES: [u8; 16] = [
+        0xb7, 0xf2, 0xe4, 0xe6, 0x8d, 0x7a, 0x4e, 0xf8, 0xa1, 0x3e, 0xd3, 0xb8, 0x4d, 0x4e, 0x80,
+        0x01,
+    ];
+
+    #[test]
+    fn volume_id_path_parses_to_its_bytes() {
+        let input = alloc::format!("id::{VOLUME_ID_TEXT}/Documents/file.txt");
+        let p = parse(&input).unwrap();
+        assert_eq!(
+            p.root(),
+            &Root::VolumeId(VolumeId::from_bytes(VOLUME_ID_BYTES))
+        );
+        assert_eq!(components(&p), vec!["Documents", "file.txt"]);
+        assert!(p.is_absolute());
+        assert_eq!(p.alias(), None);
+        assert_eq!(p.volume_id(), Some(&VolumeId::from_bytes(VOLUME_ID_BYTES)));
+        assert_eq!(p.to_string(), input);
+    }
+
+    #[test]
+    fn bare_volume_id_root() {
+        // Both the bare spelling and the trailing-slash rendering parse to
+        // the same empty-component path.
+        let bare = parse(&alloc::format!("id::{VOLUME_ID_TEXT}")).unwrap();
+        let slashed = parse(&alloc::format!("id::{VOLUME_ID_TEXT}/")).unwrap();
+        assert_eq!(bare, slashed);
+        assert!(bare.components().is_empty());
+        assert_eq!(bare.to_string(), alloc::format!("id::{VOLUME_ID_TEXT}/"));
+        assert_eq!(
+            bare.prefix(0).as_deref(),
+            Some("id::b7f2e4e6-8d7a-4ef8-a13e-d3b84d4e8001/")
+        );
+    }
+
+    #[test]
+    fn volume_id_display_round_trips() {
+        let input = alloc::format!("id::{VOLUME_ID_TEXT}/a/./b/../c");
+        let p = parse(&input).unwrap();
+        let rendered = p.to_string();
+        assert_eq!(rendered, alloc::format!("id::{VOLUME_ID_TEXT}/a/c"));
+        assert_eq!(parse(&rendered).unwrap(), p);
+    }
+
+    #[test]
+    fn volume_id_cannot_escape_its_root() {
+        assert_eq!(
+            parse(&alloc::format!("id::{VOLUME_ID_TEXT}/..")),
+            Err(PathError::EscapesRoot)
+        );
+    }
+
+    #[test]
+    fn non_canonical_volume_ids_rejected() {
+        // Uppercase hex.
+        assert_eq!(
+            parse("id::B7F2E4E6-8D7A-4EF8-A13E-D3B84D4E8001/x"),
+            Err(PathError::VolumeIdInvalid)
+        );
+        // Wrong length (truncated, extended, and empty).
+        assert_eq!(
+            parse("id::b7f2e4e6-8d7a-4ef8-a13e-d3b84d4e800/x"),
+            Err(PathError::VolumeIdInvalid)
+        );
+        assert_eq!(
+            parse("id::b7f2e4e6-8d7a-4ef8-a13e-d3b84d4e80011/x"),
+            Err(PathError::VolumeIdInvalid)
+        );
+        assert_eq!(parse("id::/x"), Err(PathError::VolumeIdInvalid));
+        assert_eq!(parse("id::"), Err(PathError::VolumeIdInvalid));
+        // A misplaced hyphen and a non-hex digit.
+        assert_eq!(
+            parse("id::b7f2e4e68-d7a-4ef8-a13e-d3b84d4e8001/x"),
+            Err(PathError::VolumeIdInvalid)
+        );
+        assert_eq!(
+            parse("id::b7f2e4g6-8d7a-4ef8-a13e-d3b84d4e8001/x"),
+            Err(PathError::VolumeIdInvalid)
+        );
+        // Braced/unhyphenated UUID spellings are not canonical.
+        assert_eq!(
+            parse("id::{b7f2e4e6-8d7a-4ef8-a13e-d3b84d4e8001}/x"),
+            Err(PathError::VolumeIdInvalid)
+        );
+        assert_eq!(
+            parse("id::b7f2e4e68d7a4ef8a13ed3b84d4e8001/x"),
+            Err(PathError::VolumeIdInvalid)
+        );
+    }
+
+    #[test]
+    fn volume_id_display_is_canonical() {
+        let id = VolumeId::from_bytes(VOLUME_ID_BYTES);
+        assert_eq!(id.to_string(), VOLUME_ID_TEXT);
+        assert_eq!(*id.as_bytes(), VOLUME_ID_BYTES);
     }
 
     #[test]
@@ -749,6 +976,7 @@ mod tests {
             PathError::AliasTooLong,
             PathError::AliasInvalidChar,
             PathError::ResolverEmpty,
+            PathError::VolumeIdInvalid,
             PathError::UnsupportedResolver,
             PathError::NotAPath,
         ] {
