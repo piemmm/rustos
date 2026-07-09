@@ -129,8 +129,22 @@ pub(crate) mod test_alloc;
 // volume is defined once.
 #[cfg(test)]
 pub(crate) mod test_bundle;
+// Shared host-test fixture for the reclaimable-cache pressure gauge (a
+// controllable free-memory source plus per-band readings), used by the
+// filesystem-cache, launch-cache, and cross-cache integration suites so
+// the gauge scaffolding is defined once.
+#[cfg(test)]
+pub(crate) mod test_pressure;
 #[cfg(any(test, feature = "test-arch"))]
 pub mod test_sink;
+
+// Cross-cache integration tests for the reclaimable-memory services
+// (`plans/SMARTRAM.md` SMART10): one shared pressure gauge driving the
+// filesystem cache and the launch cache together, the combined `ramzip`
+// handoff arithmetic, the thrash scenario, and the work-avoided
+// benchmark evidence.
+#[cfg(test)]
+mod reclaim_integration_tests;
 
 pub use appspawn::{
     app_error_errno, bundle_run_path, AnchorVerifier, AppStore, BundleRunPath, FsBundleStore,

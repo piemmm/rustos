@@ -3,8 +3,10 @@
 //! both the `appspawn` unit tests and the `spawn` syscall-handler tests so
 //! the fake volume is defined once.
 
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use rustos_abi::rxe::{LoadHeader, RxePermission, Segment, LOAD_FLAG_PIE};
@@ -12,10 +14,14 @@ use rustos_abi::{
     BundleFileDigest, CapabilityId, CapabilityQuery, Errno, FileKind, FileStat, OpenFlags,
     UnlinkFlags, ABI_VERSION_CURRENT, LOAD_MAGIC,
 };
+use rustos_appload::{AppError, AppLoader, AppLoaderConfig, LoadedApp};
+use rustos_caps::CapabilitySet;
 use rustos_itest_harness::app_image::{compose_signed_appinfo, AppKind, AppManifestSource};
 use rustos_kernel_syscall::SYSCALL_TABLE_HASH;
 
+use crate::appspawn::{AnchorVerifier, FsBundleStore};
 use crate::fs::{FilesystemService, ReaddirEntry};
+use crate::test_sink::TestSink;
 
 extern crate std;
 use std::collections::BTreeMap;
@@ -242,4 +248,39 @@ pub(crate) fn composed_bundle(caps: Vec<CapabilityId>) -> (MemFs, [u8; 32], Vec<
         ("/System/Apps/ps.app/Help/en-US/ps.md", help.as_slice()),
     ]);
     (fs, composed.signer_pubkey, run)
+}
+
+/// A `CapabilityQuery` granting nothing — the mock filesystem enforces
+/// no permissions.
+pub(crate) struct NoCaps;
+impl CapabilityQuery for NoCaps {
+    fn holds(&self, _cap: CapabilityId) -> bool {
+        false
+    }
+}
+
+/// Run the full `rustos_appload` gate over `fs`, exactly as the spawn
+/// path does.
+pub(crate) fn gate_load(fs: &MemFs, anchor: [u8; 32]) -> Result<LoadedApp, AppError> {
+    let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+    let store = FsBundleStore::new(fs, 1000, &NoCaps);
+    let verifier = AnchorVerifier::new(anchor);
+    let loader = AppLoader::new(AppLoaderConfig {
+        accepted_abi_version: ABI_VERSION_CURRENT,
+        syscall_table_hash: SYSCALL_TABLE_HASH,
+        store: &store,
+        verifier: &verifier,
+        sink,
+    });
+    loader.load(
+        "/System/Apps/ps.app",
+        &CapabilitySet::from_words([u64::MAX; 4]),
+    )
+}
+
+/// A verified [`LoadedApp`] straight from the shared load gate, over the
+/// composed in-memory test bundle.
+pub(crate) fn verified_app() -> Arc<LoadedApp> {
+    let (fs, anchor, _run) = composed_bundle(Vec::new());
+    Arc::new(gate_load(&fs, anchor).expect("the composed bundle verifies"))
 }

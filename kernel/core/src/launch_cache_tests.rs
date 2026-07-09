@@ -6,94 +6,15 @@
 
 use super::*;
 
-use core::sync::atomic::{AtomicUsize, Ordering};
-
 use alloc::boxed::Box;
 
 use rustos_kernel_mem::{FreeMemorySource, PressureBand};
 
-use crate::test_bundle::{composed_bundle, MemFs};
+use crate::test_bundle::{composed_bundle, gate_load, verified_app};
+use crate::test_pressure::{free_for, pressured, unpressured, TEST_TOTAL};
 use crate::test_sink::TestSink;
 
 extern crate std;
-
-/// The test gauge's backing size (1 GiB), so the band watermarks land
-/// on readable byte counts.
-const TEST_TOTAL: usize = 1 << 30;
-
-/// A controllable memory reading backing a test pressure gauge.
-struct TestSource {
-    free: AtomicUsize,
-}
-
-impl FreeMemorySource for TestSource {
-    fn free_bytes(&self) -> usize {
-        self.free.load(Ordering::Relaxed)
-    }
-
-    fn total_bytes(&self) -> usize {
-        TEST_TOTAL
-    }
-}
-
-/// A gauge plus its adjustable source, starting with `free` bytes free.
-fn pressured(free: usize) -> (&'static TestSource, &'static MemoryPressure) {
-    let source: &'static TestSource = Box::leak(Box::new(TestSource {
-        free: AtomicUsize::new(free),
-    }));
-    (source, Box::leak(Box::new(MemoryPressure::over(source))))
-}
-
-/// A gauge pinned at plentiful free memory: normal pressure.
-fn unpressured() -> &'static MemoryPressure {
-    pressured(TEST_TOTAL / 2).1
-}
-
-/// A free reading that folds to `band` from any shallower state.
-fn free_for(band: PressureBand) -> usize {
-    match band {
-        PressureBand::Normal => TEST_TOTAL / 2,
-        PressureBand::Mild => TEST_TOTAL / 5 - 4096,
-        PressureBand::Moderate => TEST_TOTAL / 10 - 4096,
-        PressureBand::Severe => TEST_TOTAL / 16 - 4096,
-        PressureBand::Critical => TEST_TOTAL / 32 - 4096,
-    }
-}
-
-/// A verified [`LoadedApp`] straight from the shared load gate, over the
-/// composed in-memory test bundle.
-fn verified_app() -> Arc<LoadedApp> {
-    let (fs, anchor, _run) = composed_bundle(alloc::vec![]);
-    Arc::new(gate_load(&fs, anchor).expect("the composed bundle verifies"))
-}
-
-/// Run the full `rustos_appload` gate over `fs`, exactly as the spawn
-/// path does.
-fn gate_load(fs: &MemFs, anchor: [u8; 32]) -> Result<LoadedApp, rustos_appload::AppError> {
-    let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
-    let store = crate::appspawn::FsBundleStore::new(fs, 1000, &NoCaps);
-    let verifier = crate::appspawn::AnchorVerifier::new(anchor);
-    let loader = rustos_appload::AppLoader::new(rustos_appload::AppLoaderConfig {
-        accepted_abi_version: rustos_abi::ABI_VERSION_CURRENT,
-        syscall_table_hash: rustos_kernel_syscall::SYSCALL_TABLE_HASH,
-        store: &store,
-        verifier: &verifier,
-        sink,
-    });
-    loader.load(
-        "/System/Apps/ps.app",
-        &rustos_caps::CapabilitySet::from_words([u64::MAX; 4]),
-    )
-}
-
-/// A `CapabilityQuery` granting nothing — the mock filesystem enforces
-/// no permissions.
-struct NoCaps;
-impl rustos_abi::CapabilityQuery for NoCaps {
-    fn holds(&self, _cap: rustos_abi::CapabilityId) -> bool {
-        false
-    }
-}
 
 /// A generous budget every test entry fits under.
 fn budget() -> CacheBudget {
@@ -169,9 +90,7 @@ fn reclaim_cannot_make_an_app_unlaunchable() {
         &Arc::new(gate_load(&fs, anchor).expect("gate accepts")),
     );
     // Severe pressure drains the entry.
-    source
-        .free
-        .store(free_for(PressureBand::Severe), Ordering::Relaxed);
+    source.set_free(free_for(PressureBand::Severe));
     assert!(cache.lookup("/System/Apps/ps.app").is_none());
     // The source bundle is intact, so the full gate still accepts it and
     // returns the same decision the cache would have served.
@@ -251,9 +170,7 @@ fn admission_is_refused_outside_normal_pressure_and_recovers() {
     assert_eq!(cache.accounting().total_bytes(), 0);
     // Back at normal pressure (above the mild exit watermark), admission
     // resumes.
-    source
-        .free
-        .store(free_for(PressureBand::Normal), Ordering::Relaxed);
+    source.set_free(free_for(PressureBand::Normal));
     cache.insert("/System/Apps/a.app", &app);
     assert!(cache.lookup("/System/Apps/a.app").is_some());
 }
@@ -285,9 +202,7 @@ fn mild_pressure_shrinks_to_the_low_watermark() {
     cache.insert("/System/Apps/c.app", &app);
     assert_eq!(cache.resident().len(), 3);
 
-    source
-        .free
-        .store(free_for(PressureBand::Mild), Ordering::Relaxed);
+    source.set_free(free_for(PressureBand::Mild));
     // Any operation applies the band's shrink target first.
     assert!(cache.lookup("/System/Apps/c.app").is_some());
     assert!(
@@ -308,7 +223,7 @@ fn moderate_and_deeper_pressure_drain_the_cache() {
         let mut cache = LaunchCache::new(budget(), pressure, sink());
         cache.insert("/System/Apps/a.app", &verified_app());
         assert_eq!(cache.resident().len(), 1);
-        source.free.store(free_for(band), Ordering::Relaxed);
+        source.set_free(free_for(band));
         assert!(
             cache.lookup("/System/Apps/a.app").is_none(),
             "{band:?} drains the semantic cache before ramzip handoff"
@@ -379,9 +294,7 @@ fn a_forced_pressure_shrink_is_counted() {
     let mut cache = LaunchCache::new(budget(), pressure, sink());
     cache.insert("/System/Apps/a.app", &verified_app());
     assert_eq!(cache.accounting().pressure_shrinks(), 0);
-    source
-        .free
-        .store(free_for(PressureBand::Moderate), Ordering::Relaxed);
+    source.set_free(free_for(PressureBand::Moderate));
     assert!(cache.lookup("/System/Apps/a.app").is_none());
     assert_eq!(cache.accounting().pressure_shrinks(), 1);
 }

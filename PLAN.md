@@ -4317,6 +4317,32 @@ rebuildable filesystem cache (`plans/SMARTRAM.md` SMART1 + §6.1):**
   `AppStore::install_reclaim`) and report a poisoning exactly once;
   normal operation emits nothing.
 
+**Done — SMART10 cross-cache integration, thrash, and benchmark
+evidence (`plans/SMARTRAM.md` SMART10; `docs/src/architecture/memory.md`
+§7l):**
+- `kernel/core/src/reclaim_integration_tests.rs`: the production
+  `CachedFs` and `LaunchCache` on **one** shared gauge through the full
+  band order; the `ramzip` handoff computed over the caches' combined
+  clean+transform residue (held while any remains, open once their own
+  operations drain it, never at critical — escalation yields the VM
+  policy); the shared reserve floor; no stale serving for a file
+  mutated while the caches were drained; the thrash scenario (band
+  flapping inside the hysteresis window causes zero rebuild churn,
+  detected via the SMART9 counters); and the work-avoided benchmark
+  evidence (warm passes deterministically perform zero driver reads /
+  load-gate runs; wall-clock numbers printed as estimates).
+- The layered stack in `kernel/rustos-kernel`'s transform-cache suite:
+  `CachedFs` over a real RustFS volume consulting the installed
+  `TransformClusterCache` on one gauge — a filesystem-cache hit never
+  reaches the transform layer; moderate pressure drains both layers
+  while correct bytes keep being served.
+- Shared test fixtures live once (`kernel/core/src/test_pressure.rs`;
+  the bundle-verification helpers in `kernel/core/src/test_bundle.rs`),
+  replacing the per-suite copies. A dedicated QEMU pressure vertical is
+  deliberately not built (the band arithmetic is pure and host-proven;
+  the sampled frame allocator is already soaked by
+  `memsoak_qemu_aarch64`).
+
 **Remaining (staged, `plans/SMARTRAM.md` §12):** the non-RustFS
 transform families (verified bundle/manifest state gated on their
 consumers) — gated on the subsystems they consume.

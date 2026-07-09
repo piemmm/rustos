@@ -431,8 +431,14 @@ impl rustos_drv_fs_rustfs::ClusterCache for Observed {
 const TEST_KEY: VolumeKey = [0x5a; VOLUME_KEY_LEN];
 
 /// A formatted in-memory volume with the production cache installed
-/// behind the counting forwarder, plus the gauge source and counters.
-fn cached_volume() -> (&'static TestSource, Arc<SeamCounts>, RustFs<VecBlock>) {
+/// behind the counting forwarder, plus the shared gauge (and its
+/// source) and the seam counters.
+fn cached_volume() -> (
+    &'static TestSource,
+    &'static MemoryPressure,
+    Arc<SeamCounts>,
+    RustFs<VecBlock>,
+) {
     let (source, pressure) = pressured(free_for(PressureBand::Normal));
     let counts = Arc::new(SeamCounts::default());
     let observed = Observed {
@@ -454,7 +460,7 @@ fn cached_volume() -> (&'static TestSource, Arc<SeamCounts>, RustFs<VecBlock>) {
     )
     .expect("format")
     .with_cluster_cache(Box::new(observed));
-    (source, counts, fs)
+    (source, pressure, counts, fs)
 }
 
 /// A whole-cluster payload of repeating (highly compressible) text,
@@ -470,7 +476,7 @@ fn compressible_cluster(len: usize) -> alloc::vec::Vec<u8> {
 
 #[test]
 fn the_production_cache_serves_and_invalidates_inside_a_real_volume() {
-    let (source, counts, mut fs) = cached_volume();
+    let (source, _pressure, counts, mut fs) = cached_volume();
     let root = fs.root();
     fs.create(root, b"c", NodeKind::RegularFile)
         .expect("create");
@@ -533,5 +539,71 @@ fn the_production_cache_serves_and_invalidates_inside_a_real_volume() {
         counts.hits.load(Ordering::Relaxed),
         before,
         "moderate pressure drained the transform cache"
+    );
+}
+
+#[test]
+fn both_cache_layers_share_one_gauge_and_drain_before_the_ramzip_handoff() {
+    // The production stack (`plans/SMARTRAM.md` SMART10): the clean
+    // filesystem cache wraps the driver whose read path consults the
+    // transform cache, both governed by the one boot gauge.
+    let (source, pressure, counts, mut fs) = cached_volume();
+    let root = fs.root();
+    fs.create(root, b"c", NodeKind::RegularFile)
+        .expect("create");
+    let generous = compressible_cluster(16 * 1024);
+    assert_eq!(fs.write_at(root, b"c", 0, &generous), Ok(generous.len()));
+
+    let mut cached = rustos_kernel_core::CachedFs::new(
+        fs,
+        CacheBudget::from_backing(16 * 1024 * 1024),
+        ReclaimOwner::FilesystemVolume {
+            volume: 0x524F_4F54,
+        },
+        pressure,
+        sink(),
+    );
+    let node = cached.lookup(root, b"c").expect("lookup");
+
+    // First small read populates both layers (a driver read that fills
+    // the transform cache, a chunk copy in the filesystem cache).
+    let mut out = vec![0u8; 512];
+    assert_eq!(cached.read_at(node, 0, &mut out), Ok(out.len()));
+    assert_eq!(&out[..], &generous[..512]);
+    assert!(
+        cached.accounting().class_bytes(ReclaimClass::CleanFileData) > 0,
+        "the filesystem cache holds the served chunk"
+    );
+
+    // A warm repeat is served by the filesystem cache alone: the
+    // transform seam sees no further traffic.
+    let transform_hits = counts.hits.load(Ordering::Relaxed);
+    assert_eq!(cached.read_at(node, 0, &mut out), Ok(out.len()));
+    assert_eq!(&out[..], &generous[..512]);
+    assert_eq!(
+        counts.hits.load(Ordering::Relaxed),
+        transform_hits,
+        "a filesystem-cache hit never reaches the transform layer"
+    );
+
+    // Moderate pressure on the shared gauge drains both layers on
+    // their own next operations, and the volume still serves correct
+    // bytes straight through the driver's full transform pipeline.
+    source
+        .free
+        .store(free_for(PressureBand::Moderate), Ordering::Relaxed);
+    assert_eq!(cached.read_at(node, 0, &mut out), Ok(out.len()));
+    assert_eq!(&out[..], &generous[..512]);
+    assert_eq!(
+        cached.accounting().class_bytes(ReclaimClass::CleanFileData),
+        0,
+        "moderate pressure drains the clean filesystem cache"
+    );
+    let drained_hits = counts.hits.load(Ordering::Relaxed);
+    assert_eq!(cached.read_at(node, 0, &mut out), Ok(out.len()));
+    assert_eq!(
+        counts.hits.load(Ordering::Relaxed),
+        drained_hits,
+        "moderate pressure drained the transform cache below it"
     );
 }

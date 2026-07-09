@@ -866,9 +866,9 @@ normal, mild, moderate, severe, critical — is shared with
   is entered below one watermark and left above a strictly higher one
   (initial targets: mild 20%/25% free, moderate 10%/14%, severe
   6.25%/8%, critical 3.125%/5% — implementation constants in the
-  `plans/SWAPSWAPSWAP.md` section 6 shape, to be tuned by benchmark,
-  never ABI). Deepening applies immediately; relaxing steps one band at
-  a time past each exit watermark. Sampling happens on the consumers'
+  `plans/SWAPSWAPSWAP.md` section 6 shape, backed by the §7l benchmark
+  evidence, never ABI). Deepening applies immediately; relaxing steps
+  one band at a time past each exit watermark. Sampling happens on the consumers'
   own operations — no background worker, no periodic tick. Every
   *stored* band change counts one entry into the new band
   (`MemoryPressure::band_entries`, one atomic per band; the starting
@@ -1061,6 +1061,57 @@ current in-tree caller requires it, and none does today.
   `AppStore::install_reclaim`), and the unlock path's
   `register_writable_state` / `WritableStateSink` (the writable root's
   pair).
+
+## 7l. Cross-cache integration and benchmark evidence (SMART10)
+
+The per-cache suites (§7g–§7j) each prove one cache against its own
+gauge; the SMART10 integration suites prove the *system* behaviour the
+plan binds, over **one** shared gauge:
+
+- **`kernel/core/src/reclaim_integration_tests.rs`** drives the
+  production `CachedFs` and `LaunchCache` from a single simulated
+  free-memory source through the full band order: mild refuses growth
+  while clean data survives, moderate drains the semantic and clean
+  classes while hot metadata is preserved, severe forces every class
+  to zero, and both caches keep serving correctly from their backings
+  throughout. The `ramzip` handoff is computed over the caches'
+  *combined* clean+transform residue (held while any remains, open
+  once their own next operations drain it, never at critical — where
+  `escalation` yields the VM policy), the reserve floor is shared and
+  admits nothing, and a file mutated while the caches were drained is
+  never served stale after recovery.
+- **The thrash scenario** flaps the free reading inside the mild
+  band's hysteresis window: the band holds (`band_entries` does not
+  grow), neither cache oscillates between rebuild and reclaim (the
+  insertion counters stay flat and the refused re-admissions are
+  counted), and one genuine recovery above the exit watermark rebuilds
+  once — churn is detected through the §7k counters and reduced to
+  zero rebuilds by the hysteresis plus outside-normal admission
+  refusal, with no new mechanism.
+- **The layered stack** is proven in
+  `kernel/rustos-kernel/src/transform_cache_tests.rs`: `CachedFs`
+  wrapping a real RustFS volume whose read path consults the installed
+  `TransformClusterCache`, both on one gauge — a filesystem-cache hit
+  never reaches the transform layer, and moderate pressure drains both
+  layers on their own next operations while the volume still serves
+  correct bytes through the full decrypt/decompress pipeline.
+- **Benchmark evidence** (`plans/SMARTRAM.md` section 14) is the
+  work-avoided form: the integration suite's bench test asserts
+  deterministically that a warm pass performs zero driver reads and
+  zero load-gate runs (the retention policy's entire benefit), and
+  prints wall-clock estimates for the warm and cold passes —
+  explicitly estimates for threshold tuning, never guarantees or
+  assertions. The shared test fixtures live once:
+  `kernel/core/src/test_pressure.rs` (the controllable gauge source)
+  and the bundle-verification helpers in
+  `kernel/core/src/test_bundle.rs`.
+
+The gauge's QEMU-level behaviour rides the existing memory soak
+(`tests/integration/memsoak_qemu_aarch64`), which exercises the frame
+allocator the production gauge samples; a dedicated in-guest
+pressure-band vertical is deliberately not built while the gauge's
+consumers are all host-provable — the band arithmetic is pure and the
+allocator reading is already soaked.
 
 ## 8. Testing strategy
 

@@ -9,16 +9,16 @@ use super::*;
 use crate::fs::memfs::RwMockFs;
 use crate::fs::perm::{Credentials, Metadata, Mode};
 use crate::fs::{Path, Vfs, VfsError};
+use crate::test_pressure::{free_for, pressured, unpressured, TestSource};
 use crate::test_sink::TestSink;
 
 use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicUsize, Ordering};
 
 use rustos_abi::driver::DriverHandle;
 use rustos_caps::CapabilitySet;
-use rustos_kernel_mem::{FreeMemorySource, MemoryPressure, PressureBand};
+use rustos_kernel_mem::PressureBand;
 use rustos_kernel_sec::{GroupId, UserId};
 
 /// A driver wrapper counting every structural call, so a test can prove
@@ -131,49 +131,6 @@ impl<F: FilesystemStats> FilesystemStats for Counting<F> {
 /// A generous test budget (1 MiB hard limit).
 fn budget() -> CacheBudget {
     CacheBudget::from_backing(16 * 1024 * 1024)
-}
-
-/// The test gauge's backing size (1 GiB), so the band watermarks land
-/// on readable byte counts.
-const TEST_TOTAL: usize = 1 << 30;
-
-/// A controllable memory reading backing a test pressure gauge.
-struct TestSource {
-    free: AtomicUsize,
-}
-
-impl FreeMemorySource for TestSource {
-    fn free_bytes(&self) -> usize {
-        self.free.load(Ordering::Relaxed)
-    }
-
-    fn total_bytes(&self) -> usize {
-        TEST_TOTAL
-    }
-}
-
-/// A gauge plus its adjustable source, starting with `free` bytes free.
-fn pressured(free: usize) -> (&'static TestSource, &'static MemoryPressure) {
-    let source: &'static TestSource = Box::leak(Box::new(TestSource {
-        free: AtomicUsize::new(free),
-    }));
-    (source, Box::leak(Box::new(MemoryPressure::over(source))))
-}
-
-/// A gauge pinned at plentiful free memory: normal pressure.
-fn unpressured() -> &'static MemoryPressure {
-    pressured(TEST_TOTAL / 2).1
-}
-
-/// A free reading that folds to `band` from any shallower state.
-fn free_for(band: PressureBand) -> usize {
-    match band {
-        PressureBand::Normal => TEST_TOTAL / 2,
-        PressureBand::Mild => TEST_TOTAL / 5 - 4096,
-        PressureBand::Moderate => TEST_TOTAL / 10 - 4096,
-        PressureBand::Severe => TEST_TOTAL / 16 - 4096,
-        PressureBand::Critical => TEST_TOTAL / 32 - 4096,
-    }
 }
 
 /// The test volume's reclaim owner.
@@ -666,10 +623,6 @@ fn pressured_fixture(contents: &[u8]) -> (&'static TestSource, CachedFs<Counting
     (source, cache)
 }
 
-fn set_free(source: &TestSource, free: usize) {
-    source.free.store(free, Ordering::Relaxed);
-}
-
 #[test]
 fn admission_stops_outside_normal_pressure() {
     let (source, pressure) = pressured(free_for(PressureBand::Mild));
@@ -690,7 +643,7 @@ fn admission_stops_outside_normal_pressure() {
     assert!(cache.accounting().refusals() > 0);
 
     // Back at normal pressure the same cache grows again.
-    set_free(source, free_for(PressureBand::Normal));
+    source.set_free(free_for(PressureBand::Normal));
     let m = cache.read_at(file, 0, &mut buf).expect("reads again");
     assert_eq!(&buf[..m], b"still served");
     assert!(cache.accounting().total_bytes() > 0);
@@ -701,7 +654,7 @@ fn moderate_pressure_drains_file_data_and_keeps_metadata() {
     let (source, mut cache) = pressured_fixture(b"drained at moderate");
     let meta_before = cache.accounting().class_bytes(ReclaimClass::FsMetadata);
 
-    set_free(source, free_for(PressureBand::Moderate));
+    source.set_free(free_for(PressureBand::Moderate));
     let file = {
         let dir = dir_of(&mut cache);
         cache.lookup(dir, b"file.txt").expect("file resolves")
@@ -723,7 +676,7 @@ fn moderate_pressure_drains_file_data_and_keeps_metadata() {
 fn severe_pressure_forces_every_class_to_shrink_to_zero() {
     let (source, mut cache) = pressured_fixture(b"gone at severe");
 
-    set_free(source, free_for(PressureBand::Severe));
+    source.set_free(free_for(PressureBand::Severe));
     let dir = dir_of(&mut cache);
     let file = cache.lookup(dir, b"file.txt").expect("still served");
     let mut buf = [0u8; 64];
@@ -749,7 +702,7 @@ fn forced_reclaim_racing_lookup_serves_correct_data() {
         cache.lookup(dir, b"file.txt").expect("file resolves")
     };
 
-    set_free(source, free_for(PressureBand::Critical));
+    source.set_free(free_for(PressureBand::Critical));
     let mut buf = [0u8; 64];
     let n = cache
         .read_at(file, 0, &mut buf)
@@ -758,7 +711,7 @@ fn forced_reclaim_racing_lookup_serves_correct_data() {
     assert_eq!(cache.accounting().total_bytes(), 0);
 
     // Relaxing back to normal lets the cache rebuild and serve warm.
-    set_free(source, free_for(PressureBand::Normal));
+    source.set_free(free_for(PressureBand::Normal));
     // Hysteresis: critical relaxes one band per sample past each exit
     // watermark, so a few samples walk it back to normal.
     for _ in 0..PressureBand::ALL.len() {
@@ -772,7 +725,7 @@ fn forced_reclaim_racing_lookup_serves_correct_data() {
 #[test]
 fn owner_teardown_after_forced_reclaim_balances_the_ledger() {
     let (source, mut cache) = pressured_fixture(b"torn down cleanly");
-    set_free(source, free_for(PressureBand::Severe));
+    source.set_free(free_for(PressureBand::Severe));
     let dir = dir_of(&mut cache);
     cache.node_info(dir).expect("served under pressure");
     assert_eq!(cache.accounting().total_bytes(), 0);
@@ -785,7 +738,7 @@ fn owner_teardown_after_forced_reclaim_balances_the_ledger() {
 fn a_forced_pressure_shrink_is_counted() {
     let (source, mut cache) = pressured_fixture(b"shrink is counted");
     assert_eq!(cache.accounting().pressure_shrinks(), 0);
-    set_free(source, free_for(PressureBand::Severe));
+    source.set_free(free_for(PressureBand::Severe));
     let root = cache.root();
     let _ = cache.lookup(root, b"dir");
     assert!(cache.accounting().pressure_shrinks() >= 1);

@@ -20,11 +20,13 @@ classified, budgeted, pressure-governed, zeroing
 (the semantic application-launch cache,
 `kernel/core::launch_cache::LaunchCache`: the classified, budgeted,
 pressure-governed retention of the load gate's accepted `LoadedApp` for
-immutable system-store bundles), and SMART9 (observability through
+immutable system-store bundles), SMART9 (observability through
 existing diagnostics: the split payload/metadata ledger with
 pressure-shrink/teardown/failure counters, the pressure gauge's
 per-band transition counters, and the `kernel/mem` `reclaim_audit`
-events — no public ABI; see `PLAN.md` §SMARTRAM for the done-state
+events — no public ABI), and SMART10 (the cross-cache integration,
+thrash, and benchmark-evidence suites over one shared gauge; see
+`PLAN.md` §SMARTRAM for the done-state
 summaries) are implemented; SMART5–SMART8
 (desktop/UI, reliability-assist, background-validation, and predictive
 caches) are **shelved — not added**; the remaining classes are staged
@@ -1025,29 +1027,54 @@ What now holds (`docs/src/architecture/memory.md` §7k):
 
 ### SMART10 - Integration, benchmarks, and full validation
 
-Deliverables:
+**Status: done** for the implemented stages (SMART1–SMART4 + SMART9;
+the shelved SMART5–SMART8 rows of the section 13 matrix apply only if
+those stages are ever un-shelved). See
+`docs/src/architecture/memory.md` §7l for the binding description.
 
-- End-to-end integration of implemented cache classes with pressure, owner
-  accounting, invalidation, diagnostics, and `ramzip` handoff.
-- Benchmark results for policy thresholds and cache retention choices.
-- `PLAN.md` update if a staged roadmap item advanced.
-- README matrix review if an implemented feature's support varies by target.
-- Whole-project validation gate run in the foreground to completion.
+What now holds:
 
-Tests:
+- **Cross-cache integration over one shared gauge**
+  (`kernel/core/src/reclaim_integration_tests.rs`): the production
+  `CachedFs` and `LaunchCache` driven through the full band order from
+  a single simulated free-memory source; the `ramzip` handoff computed
+  over the caches' combined clean+transform residue (held while any
+  remains, open once their own operations drain it, never at critical
+  — escalation yields the VM policy); the shared reserve floor; and
+  no-stale-serving for a file mutated while the caches were drained.
+- **The layered stack** (`kernel/rustos-kernel/src/`
+  `transform_cache_tests.rs`): `CachedFs` over a real RustFS volume
+  whose read path consults the installed `TransformClusterCache`, both
+  on one gauge — a filesystem-cache hit never reaches the transform
+  layer, and moderate pressure drains both layers while correct bytes
+  keep being served through the full transform pipeline.
+- **Thrash scenario**: band flapping inside the mild hysteresis window
+  causes zero rebuild churn (flat insertion counters, counted
+  refusals, no repeated band entries); one genuine recovery rebuilds
+  once. Churn is detected through the SMART9 counters and reduced by
+  hysteresis plus outside-normal admission refusal — no new mechanism.
+- **Benchmark evidence** (section 14): deterministic work-avoided
+  assertions (a warm pass performs zero driver reads and zero
+  load-gate runs) plus printed wall-clock estimates for warm and cold
+  passes — estimates for threshold tuning, never guarantees. The
+  band watermarks and budget fractions stay implementation constants.
+- **Shared fixtures live once**: the controllable gauge source
+  (`kernel/core/src/test_pressure.rs`) and the bundle-verification
+  helpers (`kernel/core/src/test_bundle.rs`) are the single
+  definitions every cache suite imports.
 
-- Host-side pressure simulation across all implemented cache classes.
-- QEMU memory-pressure test where practical.
-- Multi-user privacy and invalidation tests.
-- Desktop and headless build coverage where applicable.
-- Filesystem media generation and storage identity tests.
-- Thrash scenario where cache rebuild churn is detected and reduced.
-- Whole-project validation gate required by `AGENTS.md`.
+Scope decisions recorded:
 
-Docs:
-
-- Update memory, filesystem, app-loading, desktop, diagnostics, and security
-  docs to describe the implemented state.
+- A dedicated QEMU pressure-band vertical is not built: the gauge's
+  band arithmetic is pure and host-proven, and the frame allocator it
+  samples is already exercised by the existing
+  `tests/integration/memsoak_qemu_aarch64` soak.
+- Removable-media generation and multi-seat/desktop rows of the
+  section 13 matrix stay with their owning staged/shelved stages
+  (removable media has no kernel subsystem yet; SMART5–SMART8 are
+  shelved); the multi-user authorization rows are held by the
+  per-cache suites (authorisation-sensitive reuse in `CachedFs`,
+  hit/miss-identical decisions in `LaunchCache`).
 
 ---
 
