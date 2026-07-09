@@ -1918,6 +1918,61 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: None,
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::POINTER_INJECT,
+        name: "pointer_inject",
+        arg_count: 3,
+        args: [
+            // The seat the decoded pointer event belongs to (the seat whose
+            // pointing device produced it), then the encoded record. An
+            // unknown seat id fails closed with `NotFound`.
+            AbiType::U64,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `U64` so the C view carries the bytes-consumed-or-`-errno`
+        // register convention `key_inject` uses.
+        ret: AbiType::U64,
+        // Feeding the system pointer stream is privileged, never ambient:
+        // only the pointer-input driver that decoded a discovered device
+        // holds `CAP_INPUT_INJECT` — the same gate, and the same posture,
+        // as `key_inject`. It fires once per motion/button event (far more
+        // often than a key edge), so auditing every call would drown the
+        // log — it is NOT audited; the device manager's one-time driver
+        // load IS the audited security decision.
+        required_capability: Some(CapabilityId::INPUT_INJECT),
+        audit: false,
+    },
+    SyscallSpec {
+        number: SyscallNumber::POINTER_READ,
+        name: "pointer_read",
+        arg_count: 3,
+        args: [
+            // The seat whose desktop pointer channel is drained (only its
+            // owner may), then the record buffer. An unknown seat id fails
+            // closed with `NotFound`.
+            AbiType::U64,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `U64` so the C view carries the bytes-read-or-`-errno` register
+        // convention `keyboard_read` uses.
+        ret: AbiType::U64,
+        // Reading the pointer channel is privileged, never ambient: the
+        // capability is `CAP_INPUT_READ`, and the drain is additionally
+        // owner-gated kernel-side against the seat's live lease, so pointer
+        // input is delivered only to the task that owns the surface
+        // (`plans/DISPLAY.md`) — the same double gate as `keyboard_read`.
+        // Like the other high-volume stream readers it is NOT audited.
+        required_capability: Some(CapabilityId::INPUT_READ),
+        audit: false,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in
@@ -2157,36 +2212,6 @@ mod tests {
             Some(CapabilityId::CONSOLE_READ)
         );
         assert!(!stream_input_mode.audit, "stream_input_mode must not audit");
-        // key_inject feeds one decoded key edge into the input-focus
-        // arbiter, so it is gated on the privileged CAP_INPUT_INJECT — the
-        // system keyboard stream is never ambient — and,
-        // like the per-event stream operations, is not audited per call.
-        let key_inject = spec_for(SyscallNumber::KEY_INJECT).unwrap();
-        assert_eq!(
-            key_inject.required_capability,
-            Some(CapabilityId::INPUT_INJECT)
-        );
-        assert!(!key_inject.audit, "key_inject must not audit");
-        // display_acquire / display_release own the display and keyboard
-        // focus, gated on CAP_DISPLAY and audited per call — re-routing the
-        // keyboard stream is a security-relevant ownership change.
-        for n in [
-            SyscallNumber::DISPLAY_ACQUIRE,
-            SyscallNumber::DISPLAY_RELEASE,
-        ] {
-            let spec = spec_for(n).unwrap();
-            assert_eq!(spec.required_capability, Some(CapabilityId::DISPLAY));
-            assert!(spec.audit, "display ownership must be audited");
-        }
-        // keyboard_read drains the kernel keyboard channel for the display
-        // owner, gated on CAP_INPUT_READ and — like stream_read — not
-        // audited per call.
-        let keyboard_read = spec_for(SyscallNumber::KEYBOARD_READ).unwrap();
-        assert_eq!(
-            keyboard_read.required_capability,
-            Some(CapabilityId::INPUT_READ)
-        );
-        assert!(!keyboard_read.audit, "keyboard_read must not audit");
         // hw_tree_read / hw_tree_wait expose the privileged *global*
         // hardware inventory and its change notifications, gated on
         // CAP_SYSINFO_HW (never the ambient
@@ -2240,6 +2265,42 @@ mod tests {
             SyscallNumber::IPC_RECV,
         ] {
             assert!(spec_for(n).unwrap().required_capability.is_none());
+        }
+    }
+
+    #[test]
+    fn input_capability_requirements_are_frozen() {
+        // key_inject feeds one decoded key edge into the input-focus
+        // arbiter, so it is gated on the privileged CAP_INPUT_INJECT — the
+        // system keyboard stream is never ambient — and,
+        // like the per-event stream operations, is not audited per call.
+        // pointer_inject is its pointer analogue: the same gate and the
+        // same unaudited per-event posture.
+        for n in [SyscallNumber::KEY_INJECT, SyscallNumber::POINTER_INJECT] {
+            let spec = spec_for(n).unwrap();
+            assert_eq!(spec.required_capability, Some(CapabilityId::INPUT_INJECT));
+            assert!(!spec.audit, "input injection must not audit per event");
+        }
+        // display_acquire / display_release own the display and keyboard
+        // focus, gated on CAP_DISPLAY and audited per call — re-routing the
+        // keyboard stream is a security-relevant ownership change.
+        for n in [
+            SyscallNumber::DISPLAY_ACQUIRE,
+            SyscallNumber::DISPLAY_RELEASE,
+        ] {
+            let spec = spec_for(n).unwrap();
+            assert_eq!(spec.required_capability, Some(CapabilityId::DISPLAY));
+            assert!(spec.audit, "display ownership must be audited");
+        }
+        // keyboard_read drains the kernel keyboard channel for the seat
+        // owner, gated on CAP_INPUT_READ (the kernel additionally
+        // owner-gates the drain against the seat's live lease) and — like
+        // stream_read — not audited per call. pointer_read is its pointer
+        // analogue with the identical double gate.
+        for n in [SyscallNumber::KEYBOARD_READ, SyscallNumber::POINTER_READ] {
+            let spec = spec_for(n).unwrap();
+            assert_eq!(spec.required_capability, Some(CapabilityId::INPUT_READ));
+            assert!(!spec.audit, "input drains must not audit per event");
         }
     }
 

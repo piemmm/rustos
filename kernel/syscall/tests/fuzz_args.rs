@@ -260,6 +260,26 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn pointer_inject(
+        &self,
+        _c: &CallerContext<'_>,
+        _seat: u64,
+        _buf: u64,
+        _len: usize,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn pointer_read(
+        &self,
+        _c: &CallerContext<'_>,
+        _seat: u64,
+        _buf: u64,
+        _len: usize,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
     fn mmio_map(
         &self,
         _c: &CallerContext<'_>,

@@ -51,12 +51,15 @@ reached, and the registry hosting it owns the synchronisation.
 
 The kernel hosts this state machine in its seat registry
 (`rustos_kernel_core::seat::SeatRegistry`): every seat on the machine,
-each holding its own `SeatState` under its own lock next to the two
-input sinks it routes between — the seat's foreground text console
-type-ahead queue and its bounded desktop keyboard channel (which zeroes
-each record as it is drained, so a typed secret never lingers). Every
-seat-addressed syscall names its seat and fails closed with
-`Errno::NotFound` for one that does not (or no longer) exist.
+each holding its own `SeatState` under its own lock next to the input
+sinks it routes between — the seat's foreground text console type-ahead
+queue and its bounded desktop keyboard and pointer channels. The two
+desktop channels share one ring definition (`InputChannel`), differing
+only in capacity (64 key records; 256 pointer records — a pointing device
+emits far more events between per-frame drains) and both zero each record
+as it is drained, so a typed secret never lingers. Every seat-addressed
+syscall names its seat and fails closed with `Errno::NotFound` for one
+that does not (or no longer) exist.
 
 - `display_acquire` (`abi-v1` 23, `CAP_DISPLAY`) records the
   kernel-attested calling task as the named seat's owner and returns the
@@ -78,6 +81,18 @@ seat-addressed syscall names its seat and fails closed with
   `SeatState::route`: a held seat's key edges go to its owner's desktop
   channel, an unowned seat's to its foreground text console — a released
   seat returns the keyboard to the text login immediately.
+- `pointer_inject` (`abi-v1` 78, `CAP_INPUT_INJECT`) and `pointer_read`
+  (`abi-v1` 79, `CAP_INPUT_READ`) are the pointer analogues: a
+  pointer-input driver injects each decoded motion, button edge, or
+  scroll step for its device's seat, the registry queues it on a held
+  seat's pointer channel, and only the live lease owner drains it — the
+  same `SeatState::access` gate as `keyboard_read`, so no other
+  capability holder can observe the pointer stream. While the seat is
+  unowned the record is consumed and discarded: the text console has no
+  pointer consumer, and the driver never learns — and never chooses —
+  the destination. Desktop input is deliberately *not* a named IPC port:
+  a port's receive gate is capability-only and cannot express "only the
+  live seat-lease holder may drain".
 
 Both `display_*` calls are audited per call (a seat hand-over is the
 analogue of a foreground-tty switch), and every refusal is a typed

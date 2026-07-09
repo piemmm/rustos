@@ -86,17 +86,18 @@
 //! [`KeyInputChannel`] into the same [`InputEvent`](rustos_wm::InputEvent)
 //! stream, which the window manager delivers to the focused window.
 //!
-//! Both of those channels are, in turn, backed by a kernel IPC endpoint:
-//! [`IpcInputChannel`] (the [`ipc`] module) frames each fixed-length input
-//! record out of the payload of an `abi-v1` IPC message received through an
-//! injected [`MessagePort`] seam (the
-//! [`ipc_recv`](rustos_abi::SyscallNumber::IPC_RECV) syscall on a running
-//! system, an in-memory queue in tests). It implements both
-//! [`PointerInputChannel`] and [`KeyInputChannel`] through one shared,
-//! fail-closed validation path — the header must decode, the message must be
-//! destined for the bound endpoint, and the payload must be exactly the
-//! record's wire length — so a truncated, misrouted, or corrupt frame can
-//! never be decoded as a spurious event.
+//! Both of those channels are, in turn, backed by the kernel seat registry:
+//! [`SeatInputChannel`] (the [`seat`] module) drains each fixed-width input
+//! record from the per-seat, owner-gated channel the kernel routed the
+//! desktop's input to, through an injected [`SeatEventReader`] seam (the
+//! seat-addressed [`POINTER_READ`](rustos_abi::SyscallNumber::POINTER_READ) /
+//! [`KEYBOARD_READ`](rustos_abi::SyscallNumber::KEYBOARD_READ) syscalls on a
+//! running system, an in-memory queue in tests). Only the task holding the
+//! seat lease may drain — the kernel owner-gates every read — and the
+//! channel implements both [`PointerInputChannel`] and [`KeyInputChannel`]
+//! through one shared, fail-closed validation path: a drain of anything
+//! other than exactly one whole record surfaces an error, so a truncated
+//! read can never be decoded as a spurious event.
 //!
 //! # Running-task list ↔ window stack
 //!
@@ -129,9 +130,9 @@ extern crate alloc;
 pub mod assets;
 pub mod device;
 pub mod input;
-pub mod ipc;
 pub mod keyboard;
 pub mod presenter;
+pub mod seat;
 pub mod session;
 pub mod shell;
 pub mod tasks;
@@ -142,9 +143,9 @@ mod tests;
 pub use assets::{load_cursor_theme, load_icon_set, GraphicsAssetReader, GRAPHICS_DIR};
 pub use device::{DeviceInputSource, PointerInputChannel};
 pub use input::{SessionInputResponse, SessionInputRouter};
-pub use ipc::{IpcInputChannel, MessagePort};
 pub use keyboard::{KeyInputChannel, KeyboardInputSource};
 pub use presenter::TaskbarPresenter;
+pub use seat::{SeatEventReader, SeatInputChannel};
 pub use session::{DesktopSession, SessionEvent};
 pub use shell::{DesktopShell, InputSource, ShellOutcome};
 pub use tasks::TaskBridge;

@@ -75,6 +75,7 @@ pub extern "C" fn production_dispatch(
 /// task-fatal fault never returns (the helper suspends the reclaimed
 /// task with an exit action); `false` sends the trap handler to its
 /// fatal path (fail closed).
+#[must_use = "the resolution verdict decides whether the trap handler retries or takes its fatal path"]
 pub extern "C" fn production_user_fault(far: u64) -> bool {
     crate::dispatch_core::resolve_user_fault_via_slot(&DISPATCH_SLOT, far)
 }

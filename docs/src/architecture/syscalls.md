@@ -122,10 +122,13 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  73 | `pipe_create`  | `user_ptr` (out: two `u32` fds)         | `errno`       | —               | no    |
 |  74 | `fs_set_mode`  | `user_ptr` (path), `len`, `u32 mode`    | `errno`       | `CAP_FS_ACCESS` | yes   |
 |  75 | `port_resolve` | `user_ptr` (name), `len`                | `endpoint`    | —               | no    |
+|  78 | `pointer_inject` | `u64 seat`, `user_ptr` (record), `len` | `u64` (bytes) | `CAP_INPUT_INJECT` | no |
+|  79 | `pointer_read` | `u64 seat`, `user_ptr` (buf), `len`     | `u64` (bytes) | `CAP_INPUT_READ` | no    |
 
 (Syscall numbers 39–45 — `msi_alloc`, `shm_create`/`shm_map`/`shm_unmap`,
-`waitset_create`/`waitset_ctl`/`waitset_wait` — are defined in
-`lib/abi/src/syscall.rs`; their rows are not yet transcribed into this table.)
+`waitset_create`/`waitset_ctl`/`waitset_wait` — and 76–77 — `file_map`/
+`file_unmap` — are defined in `lib/abi/src/syscall.rs`; their rows are not
+yet transcribed into this table.)
 
 `fs_chdir` (no. 65) and `fs_getcwd` (no. 66) give each process a working
 directory. A path handed to any path-taking filesystem call (`fs_open`,
@@ -164,8 +167,8 @@ no override), the covering mount must be writable, and a node carrying a
 access. The `chmod` command app and `fstree`'s mode editor are its callers.
 
 `port_resolve` (no. 75) resolves a published port name to its live IPC
-endpoint id — how a process reaches a *well-known* service port (a desktop
-input feed, a system service) without a compiled-in endpoint number. The
+endpoint id — how a process reaches a *well-known* service port (a system
+service rendezvous) without a compiled-in endpoint number. The
 kernel bounds the length against `PORT_NAME_MAX_LEN` before touching user
 memory, copies the name in through the validated `copy_from_user` boundary,
 validates it with `PortName::from_ascii`, and resolves it against the live
@@ -174,6 +177,27 @@ unpublished name fails closed with `NotFound`. Like the other pure
 observers it is unprivileged and unaudited — resolution grants nothing, and
 every send to the returned endpoint is still capability-checked at the
 port.
+
+`pointer_inject` (no. 78) and `pointer_read` (no. 79) are the pointer
+analogues of `key_inject` (no. 22) and `keyboard_read` (no. 25): the same
+seat-addressed, capability-gated pair, carrying one fixed-width
+`PointerInput` record (`lib/abi/src/input.rs`) per call. A pointer-input
+driver holding `CAP_INPUT_INJECT` injects each decoded motion, button
+edge, or scroll step for the seat its device belongs to; the kernel copies
+the record in through the validated boundary, decodes it fail-closed, and
+the seat registry routes it by who holds the seat — a held seat's record
+is queued on its bounded per-seat pointer channel, an unowned seat's
+record is consumed and discarded (the text console has no pointer
+consumer; the driver never learns, and never chooses, the destination).
+The seat owner drains the channel with `pointer_read`, gated on
+`CAP_INPUT_READ` **and** owner-gated against the live seat lease exactly
+like `keyboard_read` — a non-owner (even one holding the capability) is
+refused with `SeatNotOwner`/`SeatRevoked`, so no other session can observe
+the pointer stream. Both are unaudited per event like the other
+high-volume stream calls; the first delivered input event (key or
+pointer) emits the one-shot `INPUT_DELIVERED` liveness witness. Wrappers:
+`rustos_rt::pointer_inject` / `rustos_rt::pointer_read`; C stubs
+`ros_sys_pointer_inject` / `ros_sys_pointer_read`.
 
 `resource_open` (no. 67) is the resource-reference analogue of `fs_open`
 (`plans/ALIAS.md`, `.junie/PREREQUISITES2.md` P5). A resource reference
@@ -217,9 +241,9 @@ is exhaustive — anything not listed below is ungated:
 | `CAP_PROC_SPAWN`   | `spawn`                    |
 | `CAP_CONSOLE_READ` | `stream_read` (console-backed descriptors only, checked in-handler), `stream_input_mode`, `console_foreground` |
 | `CAP_USERS_READ`   | `users_db_read`, `users_db_wait` |
-| `CAP_INPUT_INJECT` | `key_inject`               |
+| `CAP_INPUT_INJECT` | `key_inject`, `pointer_inject` |
 | `CAP_DISPLAY`      | `display_acquire`, `display_release` |
-| `CAP_INPUT_READ`   | `keyboard_read`            |
+| `CAP_INPUT_READ`   | `keyboard_read`, `pointer_read` |
 | `CAP_MMIO_MAP`     | `mmio_map`                 |
 | `CAP_MEM_DMA`      | `dma_alloc`, `dma_free`    |
 | `CAP_SYSINFO_HW`   | `hw_tree_read`, `hw_tree_wait` |
@@ -983,7 +1007,7 @@ re-validates arguments — the dispatcher does that first.
 | `yield_now`     | `Scheduler::yield_current(caller.task_id)`                                                                    | `NoSuchTask → NotFound`, otherwise `OutOfRange`.                          |
 | `exit`          | `CapTable::remove(caller.task_id)` then `Scheduler::exit(caller.task_id)`                                     | `NoSuchTask → NotFound`, otherwise `OutOfRange`.                          |
 | `ipc_send`      | `PortRegistry::lookup(endpoint)` in `KernelState.ipc`; payload copied in through `copy_from_user`, then `Port::send(caller.caps, payload)` | Unbound endpoint → `NotFound` (no extra audit). `len > port.max_payload` → `MessageTooLarge`. Faulting buffer / no registered address space → `BadAddress`. Otherwise `Port::send`'s errno (`PermissionDenied`, `MessageTooLarge`, …). |
-| `ipc_recv`      | `PortRegistry::lookup(endpoint)`; `Port::recv_with` peek/commit copies the head message out through `copy_to_user`, committing the dequeue only on success | Unbound endpoint → `NotFound` (no extra audit). Bound + empty → `WouldBlock`. Buffer smaller than the message → `BufferTooSmall` (message retained). Faulting buffer / no registered address space → `BadAddress` (message retained). Otherwise `Ok(payload_len)`. |
+| `ipc_recv`      | `PortRegistry::lookup(endpoint)`; the caller is gated against the port's `required_recv_caps` **before** any message is observed (the same handler-side receive gate `call_recv` applies); then `Port::recv_with` peek/commit copies the head message out through `copy_to_user`, committing the dequeue only on success | Unbound endpoint → `NotFound` (no extra audit). Caller lacking a required receive capability → `PermissionDenied` (nothing about the mailbox is revealed, message retained). Bound + empty → `WouldBlock`. Buffer smaller than the message → `BufferTooSmall` (message retained). Faulting buffer / no registered address space → `BadAddress` (message retained). Otherwise `Ok(payload_len)`. |
 | `cap_query`     | `caller.caps.has(cap)` mapped to `0` / `1`                                                                    | —                                                                         |
 | `cap_delegate`  | `CapabilitySet` copied in through `copy_from_user`, then `CapTable::caps_for_mut(target).delegate(set, audit)` | Faulting `set_ptr` / no registered address space → `BadAddress`. Unknown `target` → `NotFound`. A widening request → `DelegationWiden`. |
 | `cap_revoke`    | `CapTable::caps_for_mut(target).revoke(cap, audit)`                                                           | Unknown `target` → `NotFound`.                                            |
@@ -1129,9 +1153,12 @@ pieces required to lift these deferrals. The named-port registry that
 (`kernel/ipc::PortRegistry`, see [the IPC page](./ipc.md#named-port-registry))
 is composed into `KernelState` and borrowed by the handlers, so
 endpoint resolution is live, and both `ipc_send`'s copy-in and
-`ipc_recv`'s peek/commit copy-out are wired; what remains for IPC is
-publishing the desktop's input ports under their well-known `PortName`s
-so a userland `MessagePort` resolves to a live `ipc_recv` (increment E).
+`ipc_recv`'s peek/commit copy-out are wired. Desktop input does **not**
+flow over named IPC ports: it is delivered through the seat registry's
+owner-gated per-seat channels (`keyboard_read` / `pointer_read`), because
+a named port's receive gate is capability-only and cannot express "only
+the live seat-lease holder may drain" — named ports serve service
+rendezvous (resolved via `port_resolve`), not the input stream.
 
 The first half of that copy path is now wired (increment C of the
 staged "User-memory copy path & per-task address spaces" effort,

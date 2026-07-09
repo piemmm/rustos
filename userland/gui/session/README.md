@@ -168,29 +168,31 @@ which delivers it to the focused window. Like the pointer source it holds no
 input capability and fails closed on a malformed record (`AGENTS.md` §5.4 /
 §2.9).
 
-## Kernel IPC-backed input channels
+## Seat-backed input channels
 
-`IpcInputChannel` (the `ipc` module) is the kernel backing for both the
-`PointerInputChannel` and `KeyInputChannel` seams above, which were until now
-satisfied only by an in-memory test queue. It delivers each fixed-length input
-record as the payload of an `abi-v1` IPC message received from a bound kernel
-endpoint. The raw messages arrive through an injected `MessagePort` seam — the
-`ipc_recv` syscall on a running system, an in-memory queue in tests
-(`AGENTS.md` §7) — so the crate still holds no endpoint capability of its own
-and the framing runs above the kernel boundary (`AGENTS.md` §17.4 / §19.5).
+`SeatInputChannel` (the `seat` module) is the kernel backing for both the
+`PointerInputChannel` and `KeyInputChannel` seams above: it drains each
+fixed-width input record from the per-seat, owner-gated channel the kernel
+seat registry routed the desktop's input to (`plans/DISPLAY.md`;
+`docs/src/desktop/seat.md`). The records arrive through an injected
+`SeatEventReader` seam — the seat-addressed `pointer_read` / `keyboard_read`
+syscalls (`rustos_rt::pointer_read` / `rustos_rt::keyboard_read`) on a
+running system, an in-memory queue in tests (`AGENTS.md` §7) — so the crate
+holds no seat lease of its own and stays host-testable (`AGENTS.md` §17.4).
 
-Every message is validated before its payload becomes a record and fails closed
-(`AGENTS.md` §5.4 / §2.9): the `IpcMessageHeader` must decode (magic, ABI
-version, reserved field, bounded length), the message must be destined for the
-endpoint the channel is bound to (`NotFound` otherwise), and the payload must be
-exactly the record's wire length (`BufferTooSmall` / `MessageTooLarge`
-otherwise), so a truncated, misrouted, or corrupt frame can never decode as a
-spurious pointer move or key press. A pointer record and a key record are each a
-fixed-length payload behind one IPC header, so the channel implements **both**
-seam traits through one shared validation path rather than two (`AGENTS.md`
-§2.2); which records flow is decided by the endpoint a channel is bound to. Bind
-it to the pointer endpoint and wrap it in `DeviceInputSource`, or to the
-keyboard endpoint and wrap it in `KeyboardInputSource`.
+The security property is kernel-side: every drain is gated on
+`CAP_INPUT_READ` **and** owner-gated against the seat's live lease, so only
+the session that acquired the seat receives the stream. Desktop input is
+deliberately not a named IPC port — a port's receive gate is capability-only
+and cannot express "only the live seat-lease holder may drain". The
+channel's own validation is narrow and fails closed (`AGENTS.md` §5.4 /
+§2.9): an empty drain is `None`, and a drain of anything other than exactly
+one whole record surfaces `LengthOutOfRange` rather than handing truncated
+bytes to the decoder. A pointer record and a key record are each a
+fixed-width drain, so the channel implements **both** seam traits through
+one shared validation path rather than two (`AGENTS.md` §2.2); which records
+flow is decided by the reader it wraps. Wrap a pointer reader in
+`DeviceInputSource`, or a keyboard reader in `KeyboardInputSource`.
 
 ## Running-task list ↔ window stack
 
@@ -240,12 +242,11 @@ production paths (`AGENTS.md` §2.9).
 Relaying the active theme to the window manager and apps over live IPC (the
 event loop, routing policy, surface glue, and the `DeviceInputSource` /
 `KeyboardInputSource` that feed it live pointer and keyboard streams now all
-exist), wiring `IpcInputChannel`'s `MessagePort` to the live `ipc_recv` syscall
-— the kernel-side named-port registry and the `port_resolve` name→endpoint
-syscall are in place, so what remains is creating, publishing, and feeding the
-desktop input ports kernel-side and binding the channel to the resolved
-endpoint (the IPC framing, validation, and fail-closed fallbacks are done and
-tested in-memory) — resolving launcher /
+exist), the live `SeatEventReader` over `rustos_rt::pointer_read` /
+`rustos_rt::keyboard_read` in the desktop session binary once it exists (the
+kernel side — seat channels, owner gating, and both syscalls — is live and
+tested; the channel's draining, validation, and fail-closed fallbacks are
+done and tested in-memory), resolving launcher /
 session-control actions once the process and window-manager capabilities are
 wired (deferred Stage 6 work), and the VFS-backed `GraphicsAssetReader` that
 reads `/System/Graphics` on a running system (the in-memory-tested loader and

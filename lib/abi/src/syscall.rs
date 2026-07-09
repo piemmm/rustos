@@ -1425,6 +1425,53 @@ impl SyscallNumber {
     /// [`SyscallNumber::MEM_UNMAP`].
     pub const FILE_UNMAP: Self = Self(77);
 
+    /// Inject one decoded pointer event into the kernel seat registry
+    /// (`plans/PI.md` P11 — input follows the surface owner; the pointer
+    /// analogue of [`SyscallNumber::KEY_INJECT`]).
+    ///
+    /// Arguments: `seat: u64` (the seat the event belongs to — the seat
+    /// whose pointing device produced it, the boot seat `0` for a directly
+    /// attached device; an unknown id fails closed with
+    /// [`crate::Errno::NotFound`]), `buf: *const u8` (one
+    /// [`crate::input::PointerInput`] record) and `len: usize` (its length,
+    /// [`crate::input::PointerInput::WIRE_LEN`]). Returns the number of
+    /// bytes consumed, or a negative error code. The pointer-input driver
+    /// (virtio-input / USB HID) emits the *device-resolved event* — a
+    /// motion, button edge, or scroll step — and the kernel seat registry
+    /// decides the destination by who currently holds that seat: while the
+    /// desktop (window manager) owns it the whole record is routed to the
+    /// seat's pointer channel (drained by [`SyscallNumber::POINTER_READ`]);
+    /// while the seat is unowned the record is consumed and discarded —
+    /// the text console has no pointer consumer, and dropping at the
+    /// arbiter keeps the routing policy out of the device driver exactly
+    /// as for key edges. Gated by [`crate::CapabilityId::INPUT_INJECT`]:
+    /// feeding the system's input stream is privileged, never ambient. A
+    /// malformed record is refused fail-closed.
+    pub const POINTER_INJECT: Self = Self(78);
+
+    /// Read one decoded pointer event from a seat's pointer channel
+    /// (`plans/PI.md` P11 — pointer input for the desktop; the pointer
+    /// analogue of [`SyscallNumber::KEYBOARD_READ`]).
+    ///
+    /// Arguments: `seat: u64` (the seat whose channel is drained; an
+    /// unknown id fails closed with [`crate::Errno::NotFound`]),
+    /// `buf: *mut u8` (a buffer of at least
+    /// [`crate::input::PointerInput::WIRE_LEN`] bytes) and `len: usize`
+    /// (its length). Returns the number of bytes written — one
+    /// [`crate::input::PointerInput`] record — or `0` when the channel is
+    /// momentarily drained; a buffer too small to hold a record fails
+    /// closed with [`crate::Errno::BufferTooSmall`]. The task that owns the
+    /// seat (the window manager / desktop session) drains the records the
+    /// seat registry routed to it while it held the seat. Gated by
+    /// [`crate::CapabilityId::INPUT_READ`] **and** owner-gated against the
+    /// seat's live lease: a caller that does not hold the seat is refused
+    /// with [`crate::Errno::SeatNotOwner`] (or
+    /// [`crate::Errno::SeatRevoked`] after an administrative eviction), so
+    /// pointer input is delivered only to whoever currently owns the
+    /// surface, and an unattached channel denies rather than leaking to a
+    /// device (`plans/DISPLAY.md`).
+    pub const POINTER_READ: Self = Self(79);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 

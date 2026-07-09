@@ -93,6 +93,8 @@ const NUM_KEY_INJECT: u64 = SyscallNumber::KEY_INJECT.as_u16() as u64;
 const NUM_DISPLAY_ACQUIRE: u64 = SyscallNumber::DISPLAY_ACQUIRE.as_u16() as u64;
 const NUM_DISPLAY_RELEASE: u64 = SyscallNumber::DISPLAY_RELEASE.as_u16() as u64;
 const NUM_KEYBOARD_READ: u64 = SyscallNumber::KEYBOARD_READ.as_u16() as u64;
+const NUM_POINTER_INJECT: u64 = SyscallNumber::POINTER_INJECT.as_u16() as u64;
+const NUM_POINTER_READ: u64 = SyscallNumber::POINTER_READ.as_u16() as u64;
 const NUM_SEAT_SWITCH: u64 = SyscallNumber::SEAT_SWITCH.as_u16() as u64;
 const NUM_SEAT_REVOKE: u64 = SyscallNumber::SEAT_REVOKE.as_u16() as u64;
 const NUM_MMIO_MAP: u64 = SyscallNumber::MMIO_MAP.as_u16() as u64;
@@ -610,6 +612,61 @@ pub extern "C" fn sys_keyboard_read(seat: u64, buf: *mut c_void, len: usize) -> 
     // the seat id, and the `(buf, len)` pair against the caller's address
     // space before writing it.
     unsafe { raw_syscall(NUM_KEYBOARD_READ, [seat, ptr_arg(buf), len as u64, 0, 0, 0]) }
+}
+
+/// `pointer_inject`: inject one decoded pointer event at `buf` (a
+/// `ros_pointer_input_t` record of `len` bytes) for seat `seat` into the
+/// kernel seat registry (`SyscallNumber::POINTER_INJECT`, `plans/PI.md`
+/// P11 — the pointer analogue of [`sys_key_inject`]). Returns the number
+/// of bytes consumed, or a `ROS_E_*` code reinterpreted into the result.
+///
+/// The producer-side call a pointer-input driver issues after decoding a
+/// discovered pointing device into an event; `seat` names the seat the
+/// device belongs to (`0` for the boot seat) and an unknown id is refused
+/// with `ROS_E_NOT_FOUND`. Gated kernel-side on `ROS_CAP_INPUT_INJECT`;
+/// the kernel validates the capability and the `(buf, len)` pair against
+/// the caller's address space before reading it, decodes the record
+/// fail-closed, and routes it by who currently holds that seat — a held
+/// seat's pointer channel, or consumed and discarded while unowned (the
+/// text console has no pointer consumer). The driver never chooses the
+/// destination.
+#[must_use]
+#[export_name = "ros_sys_pointer_inject"]
+pub extern "C" fn sys_pointer_inject(seat: u64, buf: *mut c_void, len: usize) -> u64 {
+    // SAFETY: see `sys_ipc_send`. The kernel validates `CAP_INPUT_INJECT`,
+    // the seat id, and the `(buf, len)` pair against the caller's address
+    // space before reading it.
+    unsafe {
+        raw_syscall(
+            NUM_POINTER_INJECT,
+            [seat, ptr_arg(buf), len as u64, 0, 0, 0],
+        )
+    }
+}
+
+/// `pointer_read`: read one decoded pointer event from seat `seat`'s
+/// pointer channel into `buf` (a buffer of `len` bytes, at least one
+/// `ros_pointer_input_t` record) (`SyscallNumber::POINTER_READ`,
+/// `plans/PI.md` P11 — the pointer analogue of [`sys_keyboard_read`]).
+/// Returns the number of bytes written — one record, or `0` when the
+/// channel is momentarily drained — or a `ROS_E_*` code reinterpreted into
+/// the result.
+///
+/// The task that owns the seat (the window manager) drains the records the
+/// kernel routed to it while it held the seat. An unknown seat id is
+/// refused with `ROS_E_NOT_FOUND`. Gated kernel-side on
+/// `ROS_CAP_INPUT_READ` **and** owner-gated against that seat's live lease
+/// (a non-owner is refused with `ROS_E_SEAT_NOT_OWNER` /
+/// `ROS_E_SEAT_REVOKED`); the kernel validates the capability and the
+/// `(buf, len)` pair against the caller's address space before writing it,
+/// and a buffer too small to hold a record fails closed.
+#[must_use]
+#[export_name = "ros_sys_pointer_read"]
+pub extern "C" fn sys_pointer_read(seat: u64, buf: *mut c_void, len: usize) -> u64 {
+    // SAFETY: see `sys_ipc_send`. The kernel validates `CAP_INPUT_READ`,
+    // the seat id, and the `(buf, len)` pair against the caller's address
+    // space before writing it.
+    unsafe { raw_syscall(NUM_POINTER_READ, [seat, ptr_arg(buf), len as u64, 0, 0, 0]) }
 }
 
 /// `resource_grants`: enumerate the device-resource grants the kernel minted
@@ -1906,6 +1963,8 @@ mod tests {
         (NUM_PIPE_CREATE, "pipe_create", 1),
         (NUM_FS_SET_MODE, "fs_set_mode", 3),
         (NUM_PORT_RESOLVE, "port_resolve", 2),
+        (NUM_POINTER_INJECT, "pointer_inject", 3),
+        (NUM_POINTER_READ, "pointer_read", 3),
     ];
 
     #[test]

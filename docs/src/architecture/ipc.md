@@ -61,8 +61,16 @@ the kernel delivers the payload into the receiver's address space, or a
 receive buffer too small to hold it — leaves the message at the head of
 the mailbox to be re-delivered rather than dropping it on the floor
 (`AGENTS.md` §5.4, fail closed). Like `recv` it performs no capability
-check; the receiver's authority was fixed at bind time. The `ipc_recv`
-syscall is built on this primitive (see the syscall page).
+check of its own; the **syscall layer** gates every receive — the
+`ipc_recv` handler checks the caller against the port's
+`required_recv_caps` *before* any message is observed or dequeued (the
+same handler-side receive gate `call_recv` applies to a call endpoint),
+refusing an under-capable caller with `Errno::PermissionDenied` while the
+message stays queued and nothing about the mailbox — not even whether it
+is empty — is revealed. Bind-time proof alone is not enough: the binder
+holding the capabilities says nothing about who later names the endpoint
+id in a receive. The `ipc_recv` syscall is built on this pair of checks
+(see the syscall page).
 
 ## Named-port registry
 
@@ -115,10 +123,14 @@ RustOS `EAGAIN`) when the bound mailbox is momentarily empty and
 ### Well-known names
 
 A numeric `EndpointId` is an opaque handle a binder must already know.
-So that a process can reach a *well-known* endpoint — the desktop's
-pointer- and keyboard-input ports, a long-running system service — by a
-stable name instead, the registry keeps a second index from `PortName`
-(`lib/abi`, §9) to `EndpointId`:
+So that a process can reach a *well-known* endpoint — a long-running
+system service's rendezvous — by a stable name instead, the registry
+keeps a second index from `PortName` (`lib/abi`, §9) to `EndpointId`.
+(Desktop input is deliberately **not** a named port: a port's receive
+gate is capability-only, so it cannot express "only the live seat-lease
+holder may drain"; the pointer/keyboard streams flow through the seat
+registry's owner-gated channels instead — see
+[the seat page](../desktop/seat.md).)
 
 * `publish_name(name, id)` binds a validated `PortName` to a
   currently-registered endpoint. It fails closed: a name already in use

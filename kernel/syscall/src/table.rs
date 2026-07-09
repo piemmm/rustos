@@ -783,6 +783,66 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Inject one decoded pointer event into the kernel seat registry
+    /// (`plans/PI.md` P11 — the pointer analogue of [`Self::key_inject`]).
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::INPUT_INJECT`] and that `buf` is a non-null
+    /// `UserPtr`. `seat` names the seat the event belongs to (the seat
+    /// whose pointing device produced it); an unknown seat id fails closed
+    /// with [`Errno::NotFound`]. The implementation copies up to `len`
+    /// bytes in through the validated `copy_from_user` boundary, decodes
+    /// one [`rustos_abi::input::PointerInput`] record fail-closed, and
+    /// hands it to the seat registry, which routes by who holds that seat:
+    /// a held seat's record goes to its pointer channel (drained by
+    /// [`Self::pointer_read`]); an unowned seat's record is consumed and
+    /// discarded — the text console has no pointer consumer. Returns the
+    /// number of bytes consumed from the record.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]: a kernel build with no seat registry
+    /// wired has nowhere to route the event. The real handler is installed
+    /// in `kernel/core`.
+    fn pointer_inject(
+        &self,
+        _caller: &CallerContext<'_>,
+        _seat: u64,
+        _buf: u64,
+        _len: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Read one decoded pointer event from a seat's pointer channel
+    /// (`plans/PI.md` P11 — the pointer analogue of
+    /// [`Self::keyboard_read`]).
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::INPUT_READ`] and that `buf` is a non-null `UserPtr`.
+    /// `seat` names the seat whose channel is drained; an unknown seat id
+    /// fails closed with [`Errno::NotFound`]. The implementation
+    /// owner-gates the drain against the seat's live lease — a caller that
+    /// does not hold the seat is refused with [`Errno::SeatNotOwner`] /
+    /// [`Errno::SeatRevoked`] — then drains one
+    /// [`rustos_abi::input::PointerInput`] record the seat registry routed
+    /// to the channel into `buf` (at least
+    /// [`rustos_abi::input::PointerInput::WIRE_LEN`] bytes), copies it out
+    /// through the validated boundary, and returns the number of bytes
+    /// written — or `0` when the channel is drained.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]: a build with no seat registry wired has
+    /// no channel to drain. The real handler is installed in `kernel/core`.
+    fn pointer_read(
+        &self,
+        _caller: &CallerContext<'_>,
+        _seat: u64,
+        _buf: u64,
+        _len: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// Map a granted device MMIO register window into the calling driver's
     /// own address space (`plans/PI.md` P10 chunk
     /// 5d-0).
@@ -2011,6 +2071,20 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 self.handlers
                     .keyboard_read(caller, args.0[0], args.0[1], len)
             }
+            SyscallNumber::POINTER_INJECT => {
+                // args[0] is the seat id; `validate_arg` guarantees args[1]
+                // is a non-null `UserPtr`; args[2] is the record length.
+                let len = decode_len(args.0[2])?;
+                self.handlers
+                    .pointer_inject(caller, args.0[0], args.0[1], len)
+            }
+            SyscallNumber::POINTER_READ => {
+                // args[0] is the seat id; `validate_arg` guarantees args[1]
+                // is a non-null `UserPtr`; args[2] is the buffer capacity.
+                let len = decode_len(args.0[2])?;
+                self.handlers
+                    .pointer_read(caller, args.0[0], args.0[1], len)
+            }
             // `validate_arg` accepts args[0] as an opaque `Handle` u64; the
             // handler resolves it against the calling task and the grant
             // table (forgery + ownership are checked there). args[1] is the byte offset of the sub-region within the
@@ -2864,6 +2938,34 @@ mod tests {
             // Echo `seat + len` back so the reachability test can assert the
             // dispatcher decoded `(seat, buf, len)` without wiring a real
             // keyboard channel here.
+            Ok(seat + len as u64)
+        }
+
+        fn pointer_inject(
+            &self,
+            _c: &CallerContext<'_>,
+            seat: u64,
+            _buf: u64,
+            len: usize,
+        ) -> SyscallResult {
+            self.record("pointer_inject");
+            // Echo `seat + len` back so the reachability test can assert the
+            // dispatcher decoded `(seat, buf, len)` without wiring a real
+            // seat registry here.
+            Ok(seat + len as u64)
+        }
+
+        fn pointer_read(
+            &self,
+            _c: &CallerContext<'_>,
+            seat: u64,
+            _buf: u64,
+            len: usize,
+        ) -> SyscallResult {
+            self.record("pointer_read");
+            // Echo `seat + len` back so the reachability test can assert the
+            // dispatcher decoded `(seat, buf, len)` without wiring a real
+            // pointer channel here.
             Ok(seat + len as u64)
         }
 

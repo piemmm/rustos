@@ -2796,6 +2796,26 @@ Shipped (headless-testable, model + renderer over injected seams):
   grammar check before the registry, `NotFound` on a miss) and proven live
   by the aarch64 driver-spawn vertical (the fixture kernel publishes the
   reply endpoint's name; the spawned stub resolves it before replying).
+  The `ipc_recv` handler gates every receive against the port's
+  `required_recv_caps` (the `call_recv` pattern) before any message is
+  observed — bind-time proof alone left the receive path fail-open (any
+  task naming an endpoint id could drain it); regression-tested.
+- **Desktop input is seat-routed, never a named IPC port.** A port's
+  receive gate is capability-only and cannot express "only the live
+  seat-lease holder may drain", so the planned `desktop.pointer`/
+  `desktop.keyboard` ports were dropped in favour of the seat model:
+  `pointer_inject` (78, `CAP_INPUT_INJECT`) / `pointer_read` (79,
+  `CAP_INPUT_READ` + live-lease owner gate) mirror `key_inject`/
+  `keyboard_read` exactly, over a per-seat bounded zeroing pointer channel
+  (one generic ring shared with the keyboard channel; 256 pointer records,
+  drop-oldest). An unowned seat consumes and discards pointer records (no
+  text-mode consumer; the driver never learns who holds the seat).
+  Wrappers in `lib/rt` (`pointer_inject`/`pointer_read`), stubs in
+  `lib/abi-sys`, C headers regenerated. The desktop session consumes both
+  streams through `SeatInputChannel` over the injected `SeatEventReader`
+  seam (`userland/gui/session::seat`, replacing the deleted
+  `IpcInputChannel`/`MessagePort` IPC framing); named ports remain for
+  service rendezvous.
 
 **User-memory copy path & per-task address spaces (staged).** The kernel
 `copy_from_user`/`copy_to_user` boundary (§5.4) behind every deferred payload
@@ -2813,12 +2833,12 @@ transfer, landed in increments:
 **Remaining this stage:**
 - E — per-arch live `copy_from_user` page-fault fix-up (`tests/SECURITY.md` §5)
   so a faulting user access returns an error rather than trapping.
-- Create + publish the desktop pointer/keyboard ports under their well-known
-  `PortName`s in the kernel boot path and feed them from the input drivers,
-  and back `IpcInputChannel`'s `MessagePort` with the live `ipc_recv`
-  syscall (the name→endpoint resolve path, `port_resolve`, is in place);
-  relay the theme switch over live IPC; wire the two default apps to
-  live VFS/shell channels + WM-presented windows.
+- Feed the seat's pointer channel from a real pointer driver
+  (virtio-input tablet / USB HID mouse → `pointer_inject`) and land the
+  live `SeatEventReader` (over `rustos_rt::pointer_read`/`keyboard_read`)
+  in the desktop session binary when it exists; relay the theme switch
+  over live IPC; wire the two default apps to live VFS/shell channels +
+  WM-presented windows.
 - The platform-RNG `EntropySource` that seeds the reserve — **DONE**
   (`.junie/PREREQUISITES.md` P-0): the Arch-HAL `rustos_arch_api::entropy`
   slice (x86_64 `RDSEED`/`RDRAND`, aarch64 `RNDR` `Supported`; riscv64 `Zkr` /

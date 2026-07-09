@@ -56,7 +56,7 @@
 
 extern crate alloc;
 
-use rustos_abi::input::KeyInput;
+use rustos_abi::input::{KeyInput, PointerInput};
 use rustos_abi::waitset::{WaitSetOp, WaitSourceKind};
 use rustos_abi::{
     BootId, FileStat, HwNode, InputMode, LimitKind, MapFlags, OpenFlags, Origin, ResourceLimit,
@@ -167,6 +167,12 @@ const NUM_DISPLAY_RELEASE: u64 = SyscallNumber::DISPLAY_RELEASE.as_u16() as u64;
 
 /// `keyboard_read` syscall number (as above).
 const NUM_KEYBOARD_READ: u64 = SyscallNumber::KEYBOARD_READ.as_u16() as u64;
+
+/// `pointer_inject` syscall number (as above).
+const NUM_POINTER_INJECT: u64 = SyscallNumber::POINTER_INJECT.as_u16() as u64;
+
+/// `pointer_read` syscall number (as above).
+const NUM_POINTER_READ: u64 = SyscallNumber::POINTER_READ.as_u16() as u64;
 
 /// `seat_switch` syscall number (as above).
 const NUM_SEAT_SWITCH: u64 = SyscallNumber::SEAT_SWITCH.as_u16() as u64;
@@ -661,6 +667,65 @@ pub fn keyboard_read(seat: u64, buf: &mut [u8]) -> i64 {
     // `&mut [u8]` for the duration of the call, so the `(ptr, len)` pair
     // denotes writable memory.
     let ret = unsafe { raw_syscall(NUM_KEYBOARD_READ, [seat, ptr, buf.len() as u64, 0, 0, 0]) };
+    ret as i64
+}
+
+/// Inject one decoded pointer `record` for seat `seat` into the kernel seat
+/// registry (`SyscallNumber::POINTER_INJECT`, `plans/PI.md` P11 — the
+/// pointer analogue of [`key_inject`]), returning the raw signed register
+/// (the bytes consumed when non-negative, else `-errno`).
+///
+/// The producer-side call a pointer-input driver issues after decoding a
+/// discovered pointing device into a [`PointerInput`] event: `seat` names
+/// the seat the device belongs to (`SEAT_PRIMARY` for the boot seat); the
+/// kernel validates `CAP_INPUT_INJECT`, the seat id (`NotFound` for an
+/// unknown seat), and the `(buf, len)` pair against the caller's address
+/// space, decodes the record fail-closed, and routes it by who holds that
+/// seat — the whole record delivered to a held seat's pointer channel, or
+/// consumed and discarded while the seat is unowned (the text console has
+/// no pointer consumer). The driver never chooses the destination. A
+/// malformed record or an unwired registry fails closed with `-errno`; the
+/// wrapper surfaces the raw signed value so the caller decides how to
+/// react.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 count-or-errno encoding (count ≥ 0, else -errno).
+pub fn pointer_inject(seat: u64, record: &PointerInput) -> i64 {
+    let bytes = record.to_le_bytes();
+    let ptr = bytes.as_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // `CAP_INPUT_INJECT`, the seat id, and the `(buf, len)` pair against
+    // the caller's address space before reading it. `bytes` is a live
+    // stack array for the duration of the call, so the `(ptr, len)` pair
+    // denotes readable memory.
+    let ret = unsafe { raw_syscall(NUM_POINTER_INJECT, [seat, ptr, bytes.len() as u64, 0, 0, 0]) };
+    ret as i64
+}
+
+/// Read one decoded pointer event from seat `seat`'s pointer channel into
+/// `buf` (`SyscallNumber::POINTER_READ`, `plans/PI.md` P11 — the pointer
+/// analogue of [`keyboard_read`]), returning the raw signed register (the
+/// bytes written — one [`PointerInput`] record's
+/// [`PointerInput::WIRE_LEN`], or `0` when the channel is momentarily
+/// drained — when non-negative, else `-errno`).
+///
+/// The task that owns the seat (the window manager) drains the records the
+/// kernel routed to it while it held the seat. The kernel validates
+/// `CAP_INPUT_READ`, the seat id (`NotFound` for an unknown seat),
+/// owner-gates the drain against that seat's live lease (a non-owner is
+/// refused with `SeatNotOwner` / `SeatRevoked`), and validates the
+/// `(buf, len)` pair against the caller's address space; a `buf` shorter
+/// than [`PointerInput::WIRE_LEN`] fails closed with `-errno`. A zero
+/// return is a valid empty read, so the caller loops.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 count-or-errno encoding (count ≥ 0, else -errno).
+pub fn pointer_read(seat: u64, buf: &mut [u8]) -> i64 {
+    let ptr = buf.as_mut_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // `CAP_INPUT_READ`, the seat id, and the `(buf, len)` pair against the
+    // caller's address space before writing it. `buf` is a live exclusive
+    // `&mut [u8]` for the duration of the call, so the `(ptr, len)` pair
+    // denotes writable memory.
+    let ret = unsafe { raw_syscall(NUM_POINTER_READ, [seat, ptr, buf.len() as u64, 0, 0, 0]) };
     ret as i64
 }
 
@@ -3668,6 +3733,48 @@ mod tests {
         assert_ne!(args[1], 0);
         assert_eq!(args[2], KeyInput::WIRE_LEN as u64);
         assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn pointer_inject_marshals_the_seat_record_pointer_and_len() {
+        let record = PointerInput::Moved { x: 5, y: -9 };
+        let want = i64::try_from(PointerInput::WIRE_LEN).expect("WIRE_LEN fits an i64");
+        let (number, args) = capture(PointerInput::WIRE_LEN as u64, || {
+            assert_eq!(pointer_inject(3, &record), want);
+        });
+        assert_eq!(number, NUM_POINTER_INJECT);
+        // arg 0 is the seat id; arg 1 the record buffer pointer; arg 2 its
+        // WIRE_LEN.
+        assert_eq!(args[0], 3);
+        assert_ne!(args[1], 0);
+        assert_eq!(args[2], PointerInput::WIRE_LEN as u64);
+        assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn pointer_read_marshals_the_seat_buffer_pointer_and_len() {
+        let mut buf = [0u8; PointerInput::WIRE_LEN];
+        let want = i64::try_from(PointerInput::WIRE_LEN).expect("WIRE_LEN fits an i64");
+        let (number, args) = capture(PointerInput::WIRE_LEN as u64, || {
+            assert_eq!(pointer_read(3, &mut buf), want);
+        });
+        assert_eq!(number, NUM_POINTER_READ);
+        assert_eq!(args[0], 3);
+        assert_ne!(args[1], 0);
+        assert_eq!(args[2], PointerInput::WIRE_LEN as u64);
+        assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn pointer_read_surfaces_negative_errno_encoding() {
+        // A non-owner's drain is refused with `SeatNotOwner`; the wrapper
+        // surfaces the raw `-errno` register unchanged.
+        let mut buf = [0u8; PointerInput::WIRE_LEN];
+        let want = -i64::from(rustos_abi::Errno::SeatNotOwner.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let (_, _) = capture(neg, || {
+            assert_eq!(pointer_read(0, &mut buf), want);
+        });
     }
 
     #[test]

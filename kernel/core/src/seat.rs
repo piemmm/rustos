@@ -15,7 +15,10 @@
 //!   drains it.
 //! * **Desktop foreground** (a held seat): the whole record is routed to the
 //!   seat's keyboard channel, where the seat owner (the window manager)
-//!   drains it with `keyboard_read`.
+//!   drains it with `keyboard_read`. Pointer events take the same shape
+//!   through the seat's pointer channel (`pointer_inject` → `pointer_read`);
+//!   while the seat is unowned they are consumed and discarded, because the
+//!   text console has no pointer consumer.
 //!
 //! Ownership is a kernel fact, not a capability side effect: `display_acquire`
 //! records the kernel-attested caller as the seat owner ([`SeatOwner`]), a
@@ -35,7 +38,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use rustos_abi::driver::display::SeatGate;
-use rustos_abi::input::KeyInput;
+use rustos_abi::input::{KeyInput, PointerInput};
 use rustos_abi::seat::{SeatLease, SEAT_PRIMARY};
 use rustos_abi::sysinfo::{SeatRecord, SEAT_FLAG_OWNED};
 use rustos_abi::{DriverError, Errno};
@@ -57,49 +60,74 @@ use crate::console::{ConsoleInput, NULL_CONSOLE_INPUT};
 /// oldest record (the producer never blocks).
 pub const KEYBOARD_CHANNEL_CAPACITY: usize = 64;
 
-/// The fixed-capacity record ring behind the desktop keyboard channel.
-struct ChannelRing {
-    buf: [[u8; KeyInput::WIRE_LEN]; KEYBOARD_CHANNEL_CAPACITY],
+/// Capacity, in [`PointerInput`] records, of the desktop pointer channel's
+/// ring.
+///
+/// The same **fixed bound** rationale as [`KEYBOARD_CHANNEL_CAPACITY`], sized
+/// larger because a pointing device emits far more events than a keyboard —
+/// a drag produces a motion record per hardware report, hundreds per second —
+/// so the ring must absorb a realistic burst between the compositor's
+/// per-frame drains. Overflow still drops the *oldest* record: a stale
+/// motion is worthless once a fresher one exists, and the producer never
+/// blocks and never grows kernel memory.
+pub const POINTER_CHANNEL_CAPACITY: usize = 256;
+
+/// The fixed-capacity record ring behind a desktop input channel:
+/// `CAP` records of `REC` bytes each.
+struct ChannelRing<const CAP: usize, const REC: usize> {
+    buf: [[u8; REC]; CAP],
     /// Index of the next record to drain.
     head: usize,
     /// Number of records currently queued.
     len: usize,
 }
 
-impl ChannelRing {
+impl<const CAP: usize, const REC: usize> ChannelRing<CAP, REC> {
     const fn new() -> Self {
         Self {
-            buf: [[0u8; KeyInput::WIRE_LEN]; KEYBOARD_CHANNEL_CAPACITY],
+            buf: [[0u8; REC]; CAP],
             head: 0,
             len: 0,
         }
     }
 }
 
-impl Drop for ChannelRing {
+impl<const CAP: usize, const REC: usize> Drop for ChannelRing<CAP, REC> {
     fn drop(&mut self) {
-        // A destroyed seat's ring may still hold undrained key records (a
-        // typed character — possibly a password keystroke — transits this
-        // buffer), so the whole backing store is wiped before the memory is
-        // freed: zero-on-free for memory that held a credential.
+        // A destroyed seat's ring may still hold undrained records (a typed
+        // character — possibly a password keystroke — transits the keyboard
+        // ring), so the whole backing store is wiped before the memory is
+        // freed: zero-on-free for memory that held a credential. The
+        // pointer ring shares the one ring definition, so it inherits the
+        // wipe at no extra code.
         self.buf.zeroize();
     }
 }
 
-/// A bounded, lock-protected channel of decoded [`KeyInput`] records the
-/// seat routes to the desktop while it is held, drained one record at a
-/// time by the seat owner's `keyboard_read`.
+/// A bounded, lock-protected channel of fixed-width input records the seat
+/// routes to the desktop while it is held, drained one record at a time by
+/// the seat owner (`keyboard_read` / `pointer_read`).
 ///
-/// Each drained record is **zeroed in place** as it leaves the ring: a key
-/// event can carry a typed character (a password keystroke transits this
-/// channel between the keyboard driver and the desktop), so the buffer must
-/// not retain it after the consumer has taken it (zero-on-free
-/// for memory that held a credential — secret hygiene).
-struct KeyboardChannel {
-    ring: SpinLock<ChannelRing>,
+/// The one ring definition behind both desktop input channels; only the
+/// capacity and record width differ. Each drained record is **zeroed in
+/// place** as it leaves the ring: a key event can carry a typed character
+/// (a password keystroke transits the keyboard channel between the driver
+/// and the desktop), so the buffer must not retain it after the consumer
+/// has taken it (zero-on-free for memory that held a credential — secret
+/// hygiene).
+struct InputChannel<const CAP: usize, const REC: usize> {
+    ring: SpinLock<ChannelRing<CAP, REC>>,
 }
 
-impl KeyboardChannel {
+/// The desktop keyboard channel: [`KeyInput`] records, drained by
+/// `keyboard_read`.
+type KeyboardChannel = InputChannel<KEYBOARD_CHANNEL_CAPACITY, { KeyInput::WIRE_LEN }>;
+
+/// The desktop pointer channel: [`PointerInput`] records, drained by
+/// `pointer_read`.
+type PointerChannel = InputChannel<POINTER_CHANNEL_CAPACITY, { PointerInput::WIRE_LEN }>;
+
+impl<const CAP: usize, const REC: usize> InputChannel<CAP, REC> {
     const fn new() -> Self {
         Self {
             ring: SpinLock::new(ChannelRing::new()),
@@ -108,37 +136,37 @@ impl KeyboardChannel {
 
     /// Enqueue one record, dropping the oldest if the ring is full (the
     /// producer never blocks).
-    fn push(&self, record: &[u8; KeyInput::WIRE_LEN]) {
+    fn push(&self, record: &[u8; REC]) {
         let mut ring = self.ring.lock();
-        if ring.len == KEYBOARD_CHANNEL_CAPACITY {
-            // Drop the oldest record to make room — a stale keystroke is
+        if ring.len == CAP {
+            // Drop the oldest record to make room — a stale record is
             // preferable to unbounded growth or refusing the live one.
             let head = ring.head;
             ring.buf[head].zeroize();
-            ring.head = (head + 1) % KEYBOARD_CHANNEL_CAPACITY;
+            ring.head = (head + 1) % CAP;
             ring.len -= 1;
         }
-        let idx = (ring.head + ring.len) % KEYBOARD_CHANNEL_CAPACITY;
+        let idx = (ring.head + ring.len) % CAP;
         ring.buf[idx] = *record;
         ring.len += 1;
     }
 
     /// Drain one record into `out`, zeroing the drained slot, and return the
-    /// number of bytes written ([`KeyInput::WIRE_LEN`], or `0` when empty).
+    /// number of bytes written (`REC`, or `0` when empty).
     ///
-    /// `out` is assumed to be at least [`KeyInput::WIRE_LEN`] bytes (the caller
-    /// checks the bound first).
+    /// `out` is assumed to be at least `REC` bytes (the caller checks the
+    /// bound first).
     fn drain_one(&self, out: &mut [u8]) -> usize {
         let mut ring = self.ring.lock();
         if ring.len == 0 {
             return 0;
         }
         let idx = ring.head;
-        out[..KeyInput::WIRE_LEN].copy_from_slice(&ring.buf[idx]);
+        out[..REC].copy_from_slice(&ring.buf[idx]);
         ring.buf[idx].zeroize();
-        ring.head = (ring.head + 1) % KEYBOARD_CHANNEL_CAPACITY;
+        ring.head = (ring.head + 1) % CAP;
         ring.len -= 1;
-        KeyInput::WIRE_LEN
+        REC
     }
 }
 
@@ -161,7 +189,7 @@ pub fn seat_errno(err: SeatError) -> Errno {
 
 /// One seat's kernel-side backing: the shared [`SeatState`] owner/lease
 /// state machine under its own lock, the seat's text sink, and its desktop
-/// keyboard channel.
+/// keyboard and pointer channels.
 ///
 /// Each seat's state and channel are independent — one seat's input, owner,
 /// and revocations never touch another's — and each slot carries its own
@@ -174,8 +202,10 @@ struct SeatSlot {
     /// A seat with no attached text console (a hotplugged display) uses
     /// [`NULL_CONSOLE_INPUT`], which fails closed.
     text_sink: &'static (dyn ConsoleInput + 'static),
-    /// The desktop keyboard channel — the seat's desktop sink.
+    /// The desktop keyboard channel — the seat's desktop keyboard sink.
     channel: KeyboardChannel,
+    /// The desktop pointer channel — the seat's desktop pointer sink.
+    pointer: PointerChannel,
 }
 
 impl SeatSlot {
@@ -184,6 +214,7 @@ impl SeatSlot {
             state: SpinLock::new(SeatState::new(ConsoleIndex(0))),
             text_sink,
             channel: KeyboardChannel::new(),
+            pointer: PointerChannel::new(),
         }
     }
 
@@ -383,6 +414,30 @@ impl SeatRegistry {
         Ok(KeyInput::WIRE_LEN)
     }
 
+    /// Route one decoded pointer event to seat `seat_id`'s current
+    /// foreground sink, returning the number of bytes consumed from the
+    /// record ([`PointerInput::WIRE_LEN`]).
+    ///
+    /// A **held** seat routes the whole record to its pointer channel. An
+    /// **unowned** seat consumes and discards the record: the text console
+    /// has no pointer consumer, and dropping at the arbiter keeps the
+    /// routing policy out of the device driver exactly as for key edges —
+    /// the driver never learns (and never needs to learn) who holds the
+    /// seat.
+    ///
+    /// # Errors
+    ///
+    /// - [`Errno::NotFound`] — no live seat has that id.
+    pub fn inject_pointer(&self, seat_id: u64, record: PointerInput) -> Result<usize, Errno> {
+        let slot = self.resolve(seat_id)?;
+        let route = slot.state.lock().route();
+        if let Route::Desktop(_) = route {
+            let bytes = record.to_le_bytes();
+            slot.pointer.push(&bytes);
+        }
+        Ok(PointerInput::WIRE_LEN)
+    }
+
     /// Record that a key edge has been delivered to the seat and report
     /// whether this was the **first** delivery since boot.
     ///
@@ -428,6 +483,39 @@ impl SeatRegistry {
         let slot = self.resolve(seat_id)?;
         slot.state.lock().access(owner).map_err(seat_errno)?;
         Ok(slot.channel.drain_one(out))
+    }
+
+    /// Drain one decoded pointer event from seat `seat_id`'s pointer
+    /// channel into `out` for the kernel-attested `owner`, returning the
+    /// bytes written — one [`PointerInput`] record, or `0` when the channel
+    /// is drained (`pointer_read`).
+    ///
+    /// The drain is owner-gated through the seat's live lease
+    /// ([`SeatState::access`]) exactly like [`Self::read_key`]: only the
+    /// task that acquired the seat may take records off its pointer
+    /// channel, so a second holder of `CAP_INPUT_READ` — even the owner of
+    /// *another* seat — can never observe this session's pointer stream.
+    ///
+    /// # Errors
+    ///
+    /// - [`Errno::BufferTooSmall`] — `out` cannot hold a whole record
+    ///   ([`PointerInput::WIRE_LEN`] bytes); the kernel never writes a
+    ///   partial record.
+    /// - [`Errno::NotFound`] — no live seat has that id.
+    /// - [`Errno::SeatNotOwner`] — `owner` does not hold the seat.
+    /// - [`Errno::SeatRevoked`] — `owner`'s lease was revoked.
+    pub fn read_pointer(
+        &self,
+        seat_id: u64,
+        owner: SeatOwner,
+        out: &mut [u8],
+    ) -> Result<usize, Errno> {
+        if out.len() < PointerInput::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let slot = self.resolve(seat_id)?;
+        slot.state.lock().access(owner).map_err(seat_errno)?;
+        Ok(slot.pointer.drain_one(out))
     }
 
     /// The task currently holding seat `seat_id`, if any
@@ -812,6 +900,140 @@ mod tests {
         assert_eq!(
             seat.read_key(SEAT_PRIMARY, WM, &mut buf),
             Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn a_held_seat_routes_pointer_records_to_the_owner_drain() {
+        let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
+        seat.acquire(SEAT_PRIMARY, WM)
+            .expect("fresh seat is acquirable");
+        let record = PointerInput::Moved { x: 40, y: -8 };
+        assert_eq!(
+            seat.inject_pointer(SEAT_PRIMARY, record),
+            Ok(PointerInput::WIRE_LEN)
+        );
+        let mut buf = [0u8; PointerInput::WIRE_LEN];
+        let n = seat
+            .read_pointer(SEAT_PRIMARY, WM, &mut buf)
+            .expect("owner drains");
+        assert_eq!(n, PointerInput::WIRE_LEN);
+        assert_eq!(PointerInput::from_bytes(&buf), Ok(record));
+        // Drained: the channel is now empty.
+        assert_eq!(seat.read_pointer(SEAT_PRIMARY, WM, &mut buf), Ok(0));
+    }
+
+    #[test]
+    fn an_unowned_seat_discards_pointer_records() {
+        // With no desktop owner there is no pointer consumer: the record is
+        // consumed and dropped — never routed to the text sink, never an
+        // error the driver must special-case per event.
+        let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
+        let record = PointerInput::Moved { x: 1, y: 2 };
+        assert_eq!(
+            seat.inject_pointer(SEAT_PRIMARY, record),
+            Ok(PointerInput::WIRE_LEN)
+        );
+        // Acquiring afterwards finds an empty channel: the pre-ownership
+        // record was not retained.
+        seat.acquire(SEAT_PRIMARY, WM)
+            .expect("fresh seat is acquirable");
+        let mut buf = [0u8; PointerInput::WIRE_LEN];
+        assert_eq!(seat.read_pointer(SEAT_PRIMARY, WM, &mut buf), Ok(0));
+    }
+
+    #[test]
+    fn a_non_owner_cannot_drain_the_pointer_channel() {
+        let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
+        seat.acquire(SEAT_PRIMARY, WM)
+            .expect("fresh seat is acquirable");
+        let record = PointerInput::Moved { x: 3, y: 4 };
+        assert_eq!(
+            seat.inject_pointer(SEAT_PRIMARY, record),
+            Ok(PointerInput::WIRE_LEN)
+        );
+        let mut buf = [0u8; PointerInput::WIRE_LEN];
+        // Holding CAP_INPUT_READ alone is not enough: the drain is gated on
+        // the live lease, so the record stays queued for the owner.
+        assert_eq!(
+            seat.read_pointer(SEAT_PRIMARY, INTRUDER, &mut buf),
+            Err(Errno::SeatNotOwner)
+        );
+        assert_eq!(
+            seat.read_pointer(SEAT_PRIMARY, WM, &mut buf)
+                .expect("owner drains"),
+            PointerInput::WIRE_LEN
+        );
+    }
+
+    #[test]
+    fn reading_pointer_of_an_unowned_seat_is_refused() {
+        let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
+        let mut buf = [0u8; PointerInput::WIRE_LEN];
+        assert_eq!(
+            seat.read_pointer(SEAT_PRIMARY, WM, &mut buf),
+            Err(Errno::SeatNotOwner)
+        );
+    }
+
+    #[test]
+    fn read_pointer_rejects_a_short_buffer() {
+        let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
+        seat.acquire(SEAT_PRIMARY, WM)
+            .expect("fresh seat is acquirable");
+        let mut buf = [0u8; PointerInput::WIRE_LEN - 1];
+        assert_eq!(
+            seat.read_pointer(SEAT_PRIMARY, WM, &mut buf),
+            Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn pointer_channel_drops_the_oldest_record_on_overflow() {
+        let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
+        seat.acquire(SEAT_PRIMARY, WM)
+            .expect("fresh seat is acquirable");
+        // Fill the ring plus one: the first record is dropped.
+        for i in 0..=POINTER_CHANNEL_CAPACITY {
+            let record = PointerInput::Moved {
+                x: i32::try_from(i).unwrap(),
+                y: 0,
+            };
+            assert_eq!(
+                seat.inject_pointer(SEAT_PRIMARY, record),
+                Ok(PointerInput::WIRE_LEN)
+            );
+        }
+        // The very first record (x == 0) was evicted, so the oldest
+        // surviving record is the second pushed (x == 1).
+        let mut buf = [0u8; PointerInput::WIRE_LEN];
+        assert_eq!(
+            seat.read_pointer(SEAT_PRIMARY, WM, &mut buf),
+            Ok(PointerInput::WIRE_LEN)
+        );
+        assert_eq!(
+            PointerInput::from_bytes(&buf),
+            Ok(PointerInput::Moved { x: 1, y: 0 })
+        );
+    }
+
+    #[test]
+    fn pointer_and_keyboard_channels_are_independent() {
+        // One seat's two channels never bleed into each other: a key record
+        // is only ever drained by `read_key`, a pointer record only by
+        // `read_pointer`.
+        let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
+        seat.acquire(SEAT_PRIMARY, WM)
+            .expect("fresh seat is acquirable");
+        assert_eq!(
+            seat.inject(SEAT_PRIMARY, press_char('k')),
+            Ok(KeyInput::WIRE_LEN)
+        );
+        let mut buf = [0u8; PointerInput::WIRE_LEN];
+        assert_eq!(seat.read_pointer(SEAT_PRIMARY, WM, &mut buf), Ok(0));
+        assert_eq!(
+            seat.read_key(SEAT_PRIMARY, WM, &mut buf),
+            Ok(KeyInput::WIRE_LEN)
         );
     }
 

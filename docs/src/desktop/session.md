@@ -208,41 +208,39 @@ a malformed record fails closed with its `Errno` rather than being
 misinterpreted (`AGENTS.md` §5.4 / §2.9). The ABI record is documented in
 [Input events](../abi/input.md).
 
-## Kernel IPC-backed input channels
+## Seat-backed input channels
 
-The `PointerInputChannel` and `KeyInputChannel` seams above were, until now,
-satisfied only by an in-memory test queue. `IpcInputChannel` (the `ipc` module)
-is their kernel backing: it delivers each fixed-length input record as the
-payload of an `abi-v1` IPC message received from a bound kernel endpoint. The
-raw messages arrive through an injected `MessagePort` seam — the
-[`ipc_recv`](../architecture/syscalls.md) syscall on a running system, an
-in-memory queue in tests (`AGENTS.md` §7) — so the crate still holds no endpoint
-capability of its own and the framing runs above the kernel boundary
-(`AGENTS.md` §17.4 / §19.5).
+The `PointerInputChannel` and `KeyInputChannel` seams above are backed by the
+kernel **seat registry**, not by IPC ports: `SeatInputChannel` (the `seat`
+module) drains each fixed-width input record from the per-seat, owner-gated
+channel the kernel routed the desktop's input to
+([the seat page](./seat.md)). The records arrive through an injected
+`SeatEventReader` seam — the seat-addressed
+[`pointer_read` / `keyboard_read`](../architecture/syscalls.md) syscalls
+(`rustos_rt::pointer_read` / `rustos_rt::keyboard_read`) on a running system,
+an in-memory queue in tests (`AGENTS.md` §7) — so the crate holds no seat
+lease of its own and stays host-testable (`AGENTS.md` §17.4).
 
-`recv_record` validates every message before its payload becomes a record and
-fails closed (`AGENTS.md` §5.4 / §2.9): a frame too short to hold the
-`IpcMessageHeader` and the record is rejected as `BufferTooSmall`; the header
-itself must decode (magic, ABI version, reserved field, bounded length); the
-message must be destined for the endpoint the channel is bound to, else
-`NotFound`; and the payload must be exactly the record's `WIRE_LEN`, else
-`BufferTooSmall` (short) or `MessageTooLarge` (long). Only then is the payload
-handed to the record decoder, so a truncated, misrouted, or corrupt frame can
-never be decoded as a spurious pointer move or key press.
+The security property lives kernel-side: each drain is gated on
+`CAP_INPUT_READ` **and** owner-gated against the seat's live lease, so only
+the session that acquired the seat ever receives the stream — a named IPC
+port was deliberately rejected for input, because a port's receive gate is
+capability-only and cannot express "only the live seat-lease holder may
+drain". The channel's own validation is narrow and fail-closed (`AGENTS.md`
+§5.4 / §2.9): an empty drain is `None`, and a drain of anything other than
+exactly one whole record (`WIRE_LEN` bytes) surfaces `LengthOutOfRange`
+rather than handing truncated bytes to the decoder.
 
-A pointer record and a key record are each a fixed-length payload behind one
-IPC header, so `IpcInputChannel` implements **both** seam traits through that
-one shared validation path rather than two (`AGENTS.md` §2.2); which records
-flow is decided by the endpoint a channel is bound to, not by its type. Bind a
-channel to the pointer endpoint and wrap it in `DeviceInputSource`, or to the
-keyboard endpoint and wrap it in `KeyboardInputSource`. The live `MessagePort`
-over the `ipc_recv` syscall is deferred wiring (the kernel-side named-port
-registry has not yet landed); the framing, validation, and fail-closed
-behaviour are complete and tested in-memory.
+A pointer record and a key record are each a fixed-width drain from the
+caller's own seat, so `SeatInputChannel` implements **both** seam traits
+through one shared validation path rather than two (`AGENTS.md` §2.2); which
+records flow is decided by the reader it wraps — a pointer reader wrapped in
+`DeviceInputSource`, a keyboard reader in `KeyboardInputSource`.
 
 Relaying the appearance switch to the WM and apps over IPC remains a later
 increment; the desktop now reads a live pointer **and** keyboard event stream
-end to end, each channel framed out of validated kernel IPC messages.
+end to end, each channel drained from the kernel's owner-gated seat
+channels.
 
 ## Tests
 
@@ -286,9 +284,9 @@ channel fault propagating while a queued record still decodes afterwards, and
 likewise: decoding a character press with its modifiers, a named release that
 folds a function key into `NamedKey::Function`, a malformed record surfacing
 `BadMagic`, a channel fault propagating while a queued record still decodes,
-and `into_channel`. Finally it covers `IpcInputChannel`: framing a pointer
-move, a pointer press, and a key press out of valid IPC messages; a drained
-endpoint yielding `None`; a one-shot port fault propagating then recovering;
-and the fail-closed paths — a corrupt header, a message for another endpoint, a
-payload one byte too long, a truncated frame, a short-payload frame, an invalid
-record payload, and a key channel rejecting a pointer endpoint's frame.
+and `into_channel`. Finally it covers `SeatInputChannel`: draining a pointer
+move, a pointer press, and a key press from the in-memory seat reader; a
+drained channel yielding `None`; a one-shot reader fault (`SeatNotOwner`)
+propagating then recovering; and the fail-closed paths — a partial record
+refused as `LengthOutOfRange` and a whole-length but structurally invalid
+record surfacing the decoder's `BadMagic`.

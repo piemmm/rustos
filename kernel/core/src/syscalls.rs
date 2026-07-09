@@ -75,7 +75,7 @@
 
 use crate::sched::{CpuId, SchedError, Scheduler, SchedulerArch};
 use rustos_abi::hwtree::{HwResource, HwResourceKind};
-use rustos_abi::input::KeyInput;
+use rustos_abi::input::{KeyInput, PointerInput};
 use rustos_abi::sysinfo::{
     CpuTimeRecord, MountRecord, ProcessRecord, SeatRecord, UserDirectoryRecord,
 };
@@ -2254,6 +2254,21 @@ where
             return Err(Errno::NotFound);
         };
 
+        // Gate the receiver against the port's required receive
+        // capabilities *before* any message is observed or dequeued — the
+        // same handler-side gate `call_recv` applies to a call endpoint.
+        // `Port::create` proves only that the *binder* held these
+        // capabilities; without this per-receive check any task that could
+        // name the endpoint id could drain another principal's messages
+        // (fail open). A denied receiver learns nothing about the mailbox,
+        // not even whether it is empty.
+        if !port
+            .required_recv_caps()
+            .is_subset_of(caller.caps.effective())
+        {
+            return Err(Errno::PermissionDenied);
+        }
+
         // Peek-then-commit (D.2): the message is dequeued only once it
         // has been copied into the caller's buffer through the validated
         // `copy_to_user` boundary. Resolving the caller's address space
@@ -3401,6 +3416,103 @@ where
         };
         record_bytes.zeroize();
         result
+    }
+
+    fn pointer_inject(
+        &self,
+        caller: &CallerContext<'_>,
+        seat: u64,
+        buf: u64,
+        len: usize,
+    ) -> SyscallResult {
+        // The dispatcher already checked `CAP_INPUT_INJECT` and that `buf`
+        // is non-null (`UserPtr`). A record is fixed-width: a `len` that
+        // cannot hold one fails closed rather than letting the kernel
+        // decode a truncated event (never act on a partial input).
+        if len < PointerInput::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        // Copy exactly one record in from the caller's address space
+        // through the validated `copy_from_user` boundary before touching
+        // the seat registry. `with_caller_aspace` yields `None` when the
+        // caller has no registered address space — fail closed with the
+        // same `BadAddress` an actual fault produces, never leaking which
+        // case occurred. Unlike a key edge a pointer record never carries
+        // typed content, so the staging buffer needs no zeroisation.
+        let mut record_bytes = [0u8; PointerInput::WIRE_LEN];
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_in(space, physmap, VirtAddr::new(buf), &mut record_bytes)
+        }) {
+            Some(Ok(())) => {}
+            Some(Err(err)) => return Err(copy_fault_errno(err)),
+            None => return Err(Errno::BadAddress),
+        }
+
+        // Decode the record fail-closed: a malformed event is refused
+        // rather than interpreted. The seat registry routes by who holds
+        // the seat — a held seat's pointer channel, or consumed-and-
+        // discarded while unowned (the text console has no pointer
+        // consumer) — so the driver never chooses the destination.
+        let record = PointerInput::from_bytes(&record_bytes)?;
+        let consumed = self.seat_registry.inject_pointer(seat, record)?;
+        // The same one-shot liveness witness `key_inject` drives: the first
+        // delivered input event — key or pointer — proves an (autoloaded)
+        // input driver is routing through the arbiter. The latch fires at
+        // most once system-wide and the record carries no event content.
+        if self.seat_registry.note_first_delivery() {
+            crate::audit::emit(
+                self.audit,
+                rustos_log::Level::Info,
+                AuditEvent::InputDelivered,
+                &[],
+            );
+        }
+        Ok(consumed as u64)
+    }
+
+    fn pointer_read(
+        &self,
+        caller: &CallerContext<'_>,
+        seat: u64,
+        buf: u64,
+        len: usize,
+    ) -> SyscallResult {
+        // The dispatcher already checked `CAP_INPUT_READ` and that `buf` is
+        // non-null (`UserPtr`). A record is fixed-width: a `len` that
+        // cannot hold one fails closed, the kernel never writes a partial
+        // record.
+        if len < PointerInput::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        // Drain one record into a stack buffer first. `read_pointer`
+        // resolves the named seat (an unknown id fails closed `NotFound`)
+        // and owner-gates the drain against that seat's live lease — only
+        // the task that acquired the seat may take records off its pointer
+        // channel — then returns `0` when the channel is momentarily empty
+        // (a valid short read the caller loops on) or one whole record's
+        // `WIRE_LEN`. A pointer record carries no typed content, so no
+        // zeroisation is needed on the staging buffer.
+        let mut record_bytes = [0u8; PointerInput::WIRE_LEN];
+        let read = self.seat_registry.read_pointer(
+            seat,
+            SeatOwner(caller.task_id.0),
+            &mut record_bytes,
+        )?;
+        if read == 0 {
+            return Ok(0);
+        }
+
+        // Copy the record out to the caller's address space through the
+        // validated `copy_to_user` boundary. A `None` (unregistered caller)
+        // or a fault fails closed with `BadAddress`, never leaking which
+        // case occurred.
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_out(space, physmap, VirtAddr::new(buf), &record_bytes[..read])
+        }) {
+            Some(Ok(())) => Ok(read as u64),
+            Some(Err(err)) => Err(copy_fault_errno(err)),
+            None => Err(Errno::BadAddress),
+        }
     }
 
     fn mem_map(
@@ -7790,6 +7902,77 @@ mod tests {
             })
             .expect("caller has a registered space");
         assert_eq!(read_back, payload);
+    }
+
+    /// Regression — the fail-open receive path: `ipc_recv` on a port
+    /// whose `required_recv_caps` the caller does not hold is refused with
+    /// `PermissionDenied` **before** any message is observed or dequeued,
+    /// and the queued message stays put for the authorised receiver.
+    /// Before the fix the recv path never consulted `required_recv_caps`
+    /// (they were proven only against the *binder* at `Port::create`), so
+    /// any task that could name the endpoint id could drain another
+    /// principal's messages.
+    #[test]
+    fn ipc_recv_without_required_recv_caps_is_denied_and_retains() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(4), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+
+        // A port that requires `CAP_INPUT_READ` of its receivers, bound by
+        // a creator that holds it (the bind-time half of the gate).
+        let creator = make_caps_record(0xB2, &[CapabilityId::INPUT_READ], sink);
+        let port = Port::create(
+            EndpointId(9),
+            &creator,
+            CapabilitySet::empty(),
+            caps_with(&[CapabilityId::INPUT_READ]),
+            64,
+            4,
+            sink,
+        )
+        .expect("recv-restricted port creation succeeds");
+        assert!(ipc.write().register(port, sink).is_ok());
+        enqueue(&ipc, 9, &[0xA5u8; 4], sink);
+
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+
+        // A caller without the capability is denied — even though it never
+        // registered an address space, the gate fires first, so the denial
+        // leaks nothing about the mailbox or the caller's memory.
+        let intruder_caps = make_caps_record(3, &[], sink);
+        let intruder = CallerContext {
+            task_id: SecTaskId(3),
+            caps: &intruder_caps,
+        };
+        assert_eq!(
+            h.ipc_recv(&intruder, 9, 0x1000, 64),
+            Err(Errno::PermissionDenied)
+        );
+        // The message was not consumed by the denied receiver.
+        assert_eq!(ipc.read().lookup(EndpointId(9)).expect("bound").len(), 1);
+
+        // The authorised receiver drains it.
+        let reader_caps = make_caps_record(4, &[CapabilityId::INPUT_READ], sink);
+        let reader = CallerContext {
+            task_id: SecTaskId(4),
+            caps: &reader_caps,
+        };
+        assert_eq!(h.ipc_recv(&reader, 9, 0x1000, 64), Ok(4));
+        assert!(ipc.read().lookup(EndpointId(9)).expect("bound").is_empty());
     }
 
     /// `ipc_recv` from a bound but *empty* endpoint is `WouldBlock` — a
@@ -12718,6 +12901,199 @@ mod tests {
             h.key_inject(&ctx, SEAT_PRIMARY, 0x1000, KeyInput::WIRE_LEN),
             Err(Errno::NotImplemented)
         );
+    }
+
+    /// Build a writable user address space at `0x1000` seeded with one
+    /// encoded [`PointerInput`] record, registered against task 2, plus
+    /// the caller context. The mapping is `READ|WRITE` so the same buffer
+    /// can be read by `pointer_inject` and written by `pointer_read`.
+    fn pointer_inject_aspace(aspaces: &RwLock<AddressSpaceRegistry>, record: PointerInput) {
+        let bytes = record.to_le_bytes();
+        let (space, physmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &bytes);
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+    }
+
+    /// `pointer_inject` routes a record to the seat owner's `pointer_read`
+    /// while the seat is held, and the drain is owner-gated exactly like
+    /// `keyboard_read` — an unowned seat's channel denies even for a
+    /// `CAP_INPUT_READ` holder, a short buffer is refused before any state
+    /// is touched, and a record injected while unowned is consumed and
+    /// discarded (the text console has no pointer consumer).
+    #[test]
+    fn pointer_inject_routes_records_to_pointer_read() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let record = PointerInput::Moved { x: 11, y: -7 };
+        pointer_inject_aspace(&aspaces, record);
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let queue: &'static crate::console::ConsoleInputQueue =
+            Box::leak(Box::new(crate::console::ConsoleInputQueue::new()));
+        let seat: &'static SeatRegistry = Box::leak(Box::new(SeatRegistry::new(queue)));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_seat_registry(seat);
+
+        // A short inject buffer is refused before the registry is
+        // consulted; a short read buffer likewise.
+        assert_eq!(
+            h.pointer_inject(&ctx, SEAT_PRIMARY, 0x1000, PointerInput::WIRE_LEN - 1),
+            Err(Errno::BufferTooSmall)
+        );
+        assert_eq!(
+            h.pointer_read(&ctx, SEAT_PRIMARY, 0x1000, PointerInput::WIRE_LEN - 1),
+            Err(Errno::BufferTooSmall)
+        );
+        // An unowned seat's channel cannot be drained, even by a
+        // `CAP_INPUT_READ` holder: the drain is owner-gated.
+        assert_eq!(
+            h.pointer_read(&ctx, SEAT_PRIMARY, 0x1000, PointerInput::WIRE_LEN),
+            Err(Errno::SeatNotOwner)
+        );
+        // A record injected while the seat is unowned is consumed and
+        // discarded — never queued for a future owner, never an error.
+        assert_eq!(
+            h.pointer_inject(&ctx, SEAT_PRIMARY, 0x1000, PointerInput::WIRE_LEN),
+            Ok(PointerInput::WIRE_LEN as u64)
+        );
+
+        // Held: the record routes whole to the owner's drain.
+        assert_eq!(h.display_acquire(&ctx, SEAT_PRIMARY), Ok(1));
+        assert_eq!(
+            h.pointer_inject(&ctx, SEAT_PRIMARY, 0x1000, PointerInput::WIRE_LEN),
+            Ok(PointerInput::WIRE_LEN as u64)
+        );
+        assert_eq!(
+            h.pointer_read(&ctx, SEAT_PRIMARY, 0x1000, PointerInput::WIRE_LEN),
+            Ok(PointerInput::WIRE_LEN as u64)
+        );
+        // The record round-tripped intact through the caller's buffer.
+        let read_back = h
+            .with_caller_aspace(&ctx, |space, physmap| {
+                let mut buf = [0u8; PointerInput::WIRE_LEN];
+                copy_in(space, physmap, VirtAddr::new(0x1000), &mut buf).expect("readable");
+                buf
+            })
+            .expect("caller has a registered space");
+        assert_eq!(PointerInput::from_bytes(&read_back), Ok(record));
+        // The channel is now drained: the discarded pre-ownership record
+        // never surfaced.
+        assert_eq!(
+            h.pointer_read(&ctx, SEAT_PRIMARY, 0x1000, PointerInput::WIRE_LEN),
+            Ok(0)
+        );
+    }
+
+    /// `pointer_inject` refuses a malformed record fail-closed: the decode
+    /// error surfaces before the seat registry ever sees the event, so a
+    /// corrupt buffer can never be interpreted as a spurious motion or
+    /// click.
+    #[test]
+    fn pointer_inject_refuses_a_malformed_record_fail_closed() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        // A zeroed page: not a decodable pointer record (bad magic).
+        let (space, physmap) = send_aspace(
+            MapFlags::READ | MapFlags::WRITE | MapFlags::USER,
+            &[0u8; PointerInput::WIRE_LEN],
+        );
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let queue: &'static crate::console::ConsoleInputQueue =
+            Box::leak(Box::new(crate::console::ConsoleInputQueue::new()));
+        let seat: &'static SeatRegistry = Box::leak(Box::new(SeatRegistry::new(queue)));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_seat_registry(seat);
+
+        assert_eq!(
+            h.pointer_inject(&ctx, SEAT_PRIMARY, 0x1000, PointerInput::WIRE_LEN),
+            Err(Errno::BadMagic)
+        );
+    }
+
+    /// The first successful `pointer_inject` drives the same one-shot
+    /// `InputDelivered` witness as `key_inject`: an input driver is proven
+    /// live by its first delivered event of either kind, and no later
+    /// event of either kind emits a second witness.
+    #[test]
+    fn pointer_inject_witnesses_first_delivery_exactly_once() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        pointer_inject_aspace(&aspaces, PointerInput::Moved { x: 0, y: 1 });
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let queue: &'static crate::console::ConsoleInputQueue =
+            Box::leak(Box::new(crate::console::ConsoleInputQueue::new()));
+        let seat: &'static SeatRegistry = Box::leak(Box::new(SeatRegistry::new(queue)));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_seat_registry(seat);
+
+        sink.clear();
+        assert_eq!(
+            h.pointer_inject(&ctx, SEAT_PRIMARY, 0x1000, PointerInput::WIRE_LEN),
+            Ok(PointerInput::WIRE_LEN as u64)
+        );
+        let witnesses = |sink: &TestSink| {
+            sink.event_ids()
+                .iter()
+                .filter(|id| **id == AuditEvent::InputDelivered.id().0)
+                .count()
+        };
+        assert_eq!(witnesses(sink), 1, "first delivery emits one witness");
+        assert_eq!(
+            h.pointer_inject(&ctx, SEAT_PRIMARY, 0x1000, PointerInput::WIRE_LEN),
+            Ok(PointerInput::WIRE_LEN as u64)
+        );
+        assert_eq!(witnesses(sink), 1, "no further witness on later injects");
     }
 
     /// `display_acquire` binds the caller as the seat owner and routes
