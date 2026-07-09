@@ -478,6 +478,66 @@ fn mac_finderflags_round_trip() {
     );
 }
 
+#[test]
+fn acorn_attr_round_trips() {
+    // A locked, publicly readable directory in canonical order.
+    let attr = 0b0010_1101; // R, L, D, r
+    let (value, len) = acorn::attr_to_value(attr).expect("encode");
+    assert_eq!(&value[..len], b"RLD/r");
+    assert_eq!(acorn::attr_from_value(&value[..len]).expect("parse"), attr);
+    // Letters parse in any order; duplicates and unknowns fail closed.
+    assert_eq!(acorn::attr_from_value(b"DLR/r").expect("parse"), attr);
+    assert_eq!(
+        acorn::attr_from_value(b"RR/"),
+        Err(MetadataError::NotRepresentable)
+    );
+    assert_eq!(
+        acorn::attr_from_value(b"Q/"),
+        Err(MetadataError::NotRepresentable)
+    );
+    assert_eq!(
+        acorn::attr_from_value(b"RW"),
+        Err(MetadataError::NotRepresentable)
+    );
+    assert_eq!(
+        acorn::attr_from_value(b"R/w/e"),
+        Err(MetadataError::NotRepresentable)
+    );
+    // Every defined bit survives the round trip.
+    let (value, len) = acorn::attr_to_value(acorn::ATTR_BITS).expect("encode");
+    assert_eq!(&value[..len], b"RWLDEP/rwe");
+    assert_eq!(
+        acorn::attr_from_value(&value[..len]).expect("parse"),
+        acorn::ATTR_BITS
+    );
+    // Bits outside the defined set are not representable.
+    assert_eq!(
+        acorn::attr_to_value(0x0200),
+        Err(MetadataError::NotRepresentable)
+    );
+}
+
+#[test]
+fn acorn_datestamp_round_trips() {
+    let stamp = 0x0000_A1B2_C3D4_u64;
+    let value = acorn::datestamp_to_value(stamp).expect("encode");
+    assert_eq!(&value, b"00a1b2c3d4");
+    assert_eq!(acorn::datestamp_from_value(&value).expect("parse"), stamp);
+    // The stamp is 40 bits, the value exactly ten hex digits.
+    assert_eq!(
+        acorn::datestamp_to_value(1 << 40),
+        Err(MetadataError::NotRepresentable)
+    );
+    assert_eq!(
+        acorn::datestamp_from_value(b"123"),
+        Err(MetadataError::NotRepresentable)
+    );
+    assert_eq!(
+        acorn::datestamp_from_value(b"00a1b2c3dg"),
+        Err(MetadataError::NotRepresentable)
+    );
+}
+
 // --- helpers -------------------------------------------------------------
 
 fn atari_epoch_secs() -> i64 {

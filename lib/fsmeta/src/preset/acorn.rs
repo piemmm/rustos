@@ -196,6 +196,138 @@ pub fn time64_to_centiseconds(time: Time64) -> Result<u64, MetadataError> {
     Ok(centiseconds)
 }
 
+/// `FileCore` attribute bits in canonical `acorn.attr` bit order:
+/// owner read (`R`), owner write (`W`), locked (`L`), directory (`D`),
+/// execute-only (`E`), public read (`r`), public write (`w`), public
+/// execute (`e`, 8-bit ADFS only), and private (`P`, 8-bit ADFS only).
+pub const ATTR_BITS: u16 = 0x01FF;
+
+/// Owner-part attribute letters and their bit positions.
+const ATTR_OWNER: [(u8, u16); 6] = [
+    (b'R', 1 << 0),
+    (b'W', 1 << 1),
+    (b'L', 1 << 2),
+    (b'D', 1 << 3),
+    (b'E', 1 << 4),
+    (b'P', 1 << 8),
+];
+
+/// Public-part attribute letters and their bit positions.
+const ATTR_PUBLIC: [(u8, u16); 3] = [(b'r', 1 << 5), (b'w', 1 << 6), (b'e', 1 << 7)];
+
+/// Longest canonical `acorn.attr` value (`RWLDEP/rwe`).
+pub const ATTR_VALUE_MAX: usize = 10;
+
+/// Encode `FileCore` attribute bits as the canonical `acorn.attr` value:
+/// the owner letters in `RWLDEP` order, a `/`, then the public letters
+/// in `rwe` order (a locked, publicly readable directory encodes as
+/// `b"RLD/r"`).
+///
+/// # Errors
+///
+/// [`MetadataError::NotRepresentable`] if `attr` carries bits outside
+/// [`ATTR_BITS`].
+pub fn attr_to_value(attr: u16) -> Result<([u8; ATTR_VALUE_MAX], usize), MetadataError> {
+    if attr & !ATTR_BITS != 0 {
+        return Err(MetadataError::NotRepresentable);
+    }
+    let mut out = [0u8; ATTR_VALUE_MAX];
+    let mut len = 0;
+    for (letter, bit) in ATTR_OWNER {
+        if attr & bit != 0 {
+            out[len] = letter;
+            len += 1;
+        }
+    }
+    out[len] = b'/';
+    len += 1;
+    for (letter, bit) in ATTR_PUBLIC {
+        if attr & bit != 0 {
+            out[len] = letter;
+            len += 1;
+        }
+    }
+    Ok((out, len))
+}
+
+/// Parse an `acorn.attr` value back into `FileCore` attribute bits. The
+/// letters may appear in any order around the single `/`; duplicate or
+/// unknown letters are rejected.
+///
+/// # Errors
+///
+/// [`MetadataError::NotRepresentable`] on any malformed value.
+pub fn attr_from_value(value: &[u8]) -> Result<u16, MetadataError> {
+    let slash = value
+        .iter()
+        .position(|&b| b == b'/')
+        .ok_or(MetadataError::NotRepresentable)?;
+    let (owner, public) = (&value[..slash], &value[slash + 1..]);
+    if public.contains(&b'/') {
+        return Err(MetadataError::NotRepresentable);
+    }
+    let mut attr = 0u16;
+    for &letter in owner {
+        let (_, bit) = ATTR_OWNER
+            .iter()
+            .find(|(l, _)| *l == letter)
+            .ok_or(MetadataError::NotRepresentable)?;
+        if attr & bit != 0 {
+            return Err(MetadataError::NotRepresentable);
+        }
+        attr |= bit;
+    }
+    for &letter in public {
+        let (_, bit) = ATTR_PUBLIC
+            .iter()
+            .find(|(l, _)| *l == letter)
+            .ok_or(MetadataError::NotRepresentable)?;
+        if attr & bit != 0 {
+            return Err(MetadataError::NotRepresentable);
+        }
+        attr |= bit;
+    }
+    Ok(attr)
+}
+
+/// Encode a 40-bit centisecond datestamp as the canonical
+/// `acorn.datestamp` value: ten lowercase hex digits, so the raw stamp
+/// round-trips exactly.
+///
+/// # Errors
+///
+/// [`MetadataError::NotRepresentable`] if `centiseconds` exceeds 40 bits.
+pub fn datestamp_to_value(centiseconds: u64) -> Result<[u8; 10], MetadataError> {
+    if centiseconds >= CENTIS_LIMIT {
+        return Err(MetadataError::NotRepresentable);
+    }
+    let mut out = [0u8; 10];
+    for (i, slot) in out.iter_mut().enumerate() {
+        let shift = 36 - 4 * u32::try_from(i).unwrap_or(0);
+        *slot = hex_digit(u8::try_from((centiseconds >> shift) & 0xF).unwrap_or(0));
+    }
+    Ok(out)
+}
+
+/// Parse an `acorn.datestamp` value (ten hex digits, upper or lower
+/// case) back into a 40-bit centisecond stamp.
+///
+/// # Errors
+///
+/// [`MetadataError::NotRepresentable`] if the value is not exactly ten
+/// hex digits.
+pub fn datestamp_from_value(value: &[u8]) -> Result<u64, MetadataError> {
+    if value.len() != 10 {
+        return Err(MetadataError::NotRepresentable);
+    }
+    let mut out: u64 = 0;
+    for &byte in value {
+        let nibble = hex_value(byte).ok_or(MetadataError::NotRepresentable)?;
+        out = (out << 4) | u64::from(nibble);
+    }
+    Ok(out)
+}
+
 /// The lowercase-hex character for a nibble `0..=15`.
 fn hex_digit(nibble: u8) -> u8 {
     match nibble {

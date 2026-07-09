@@ -88,6 +88,7 @@ members = [
     "drivers/display/rpi_hvs",
 
     # Drivers — filesystem
+    "drivers/filesystem/adfs",
     "drivers/filesystem/ext4",
     "drivers/filesystem/fat32",
     "drivers/filesystem/rustfs",

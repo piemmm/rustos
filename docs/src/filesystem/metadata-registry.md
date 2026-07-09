@@ -25,7 +25,8 @@ are privileged (a VFS capability gate). See rustfs-spec §21.1.
 | `acorn.filetype` | 12-bit filetype as three lowercase hex digits, e.g. `fff` (Text). Absent when the object is typed by load/exec instead. |
 | `acorn.loadaddr` | 32-bit load address, eight lowercase hex digits. |
 | `acorn.execaddr` | 32-bit exec address, eight lowercase hex digits. |
-| `acorn.datestamp` | RISC OS 40-bit centisecond timestamp (since 1900), convertible to/from `Time64`. |
+| `acorn.attr` | `FileCore` access bits: owner letters in `RWLDEP` order, `/`, public letters in `rwe` order (e.g. a locked, publicly readable directory is `RLD/r`). |
+| `acorn.datestamp` | RISC OS 40-bit centisecond timestamp (since 1900) as ten lowercase hex digits, stored exactly so it round-trips; convertible to/from `Time64`. |
 
 A filetyped object encodes its type and a timestamp *inside* the load/exec
 words (`load >> 20 == 0xFFF`). The registry stores the decoded `acorn.filetype`

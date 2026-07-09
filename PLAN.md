@@ -2304,9 +2304,14 @@ order (one fully-gated increment each):
   `Settings`).
 - Filesystem drivers: `rustfs` (native COW, journaled), `ext4` (read +
   checksummed/`64bit`/`metadata_csum` validated against `mke2fs`/`e2fsck`,
-  first-party crc32c/crc16), `fat32`. Each ships a first-party `format`
-  (no `mkfs` shell-out, §12) and returns `NoSpace`/`Errno::NoSpace` on
-  exhaustion.
+  first-party crc32c/crc16), `fat32`, and `adfs` (read/write across every
+  Acorn `FileCore` format — S/M/L/D old map, E/F new map, E+/F+ big
+  directories, old- and new-map hard discs — validating every on-disc
+  checksum, with RISC OS load/exec/filetype/datestamp/attribute metadata
+  surfaced through the shared `lib/fsmeta` `acorn.*` keys and a
+  corruption test suite plus a registered `fuzz_mount` harness). Each
+  ships a first-party `format` (no `mkfs` shell-out, §12) and returns
+  `NoSpace`/`Errno::NoSpace` on exhaustion.
 - Tests: `rustfs` journal crash-consistency soak (seeded, old-or-new
   recovery), end-to-end `rustfs`-over-virtio_blk QEMU vertical (fixture
   authored by `RustFs::format` itself, §2.2), the `pjdfstest`-equivalent

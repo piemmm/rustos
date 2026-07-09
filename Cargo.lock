@@ -820,6 +820,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-drv-fs-adfs"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-fsmeta",
+ "rustos-fuzzseed",
+]
+
+[[package]]
 name = "rustos-drv-fs-ext4"
 version = "0.0.0"
 dependencies = [

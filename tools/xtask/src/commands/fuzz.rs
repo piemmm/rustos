@@ -85,6 +85,12 @@ pub const TARGETS: &[Target] = &[
             "rustfs mount / metadata + directory decode (superblock ring, root, trees, dirents)",
     },
     Target {
+        package: "rustos-drv-fs-adfs",
+        test: "fuzz_adfs_mount",
+        description:
+            "ADFS mount / decode (maps, disc records, boot block, fixed + big directories)",
+    },
+    Target {
         package: "rustos-compress",
         test: "fuzz_compress",
         description: "first-party LZ decode (untrusted compressed-record bytes)",

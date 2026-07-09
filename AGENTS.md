@@ -505,6 +505,10 @@ rustos/
 │   │   └── rpi_hvs/      # Raspberry Pi VideoCore HVS hardware-layer
 │   │                    #   compositor (the GPU-accelerated path).
 │   ├── filesystem/
+│   │   ├── adfs/        # Acorn ADFS / RISC OS FileCore, read/write: every
+│   │   │                #   format (S/M/L/D old map, E/F new map, E+/F+ big
+│   │   │                #   directories, hard discs), RISC OS metadata via
+│   │   │                #   the shared lib/fsmeta acorn.* keys.
 │   │   ├── ext4/
 │   │   ├── fat32/
 │   │   └── rustfs/      # Native, POSIX-compliant, capability-aware FS.
