@@ -4343,6 +4343,29 @@ evidence (`plans/SMARTRAM.md` SMART10; `docs/src/architecture/memory.md`
   the sampled frame allocator is already soaked by
   `memsoak_qemu_aarch64`).
 
+**Done — SMART11 whole-disk block-level LRU cache
+(`plans/SMARTRAM.md` SMART11; `docs/src/architecture/memory.md`
+§7m):**
+- `kernel/rustos-kernel::block_cache::BlockCache` wraps the one
+  brought-up boot disk **below** the block-sharing layer
+  (`shared_block::SharedBlock`, on the device side of its sleep lock),
+  so every window onto the disk — the `/System` driver-store window,
+  the encrypted-root unlock window, and the writable-root window —
+  reads through one coherent per-block LRU cache; installed by the
+  shared `finish_unlock` boot tail for both the virtio-blk and EMMC2
+  bring-ups, on the same gauge and audit sink as the volume caches.
+- Classified through the SMART1 gate as `CleanFileData` owned by the
+  `boot_block_device` kernel subsystem (a refusal or an unboundable
+  block size poisons it to pure passthrough — fail closed),
+  pressure-enforced per operation (low watermark at mild, drained
+  from moderate before `ramzip` handoff, growth only at normal
+  outside the reserve), LRU-bounded with hysteresis under the
+  kernel-heap-derived `CacheBudget`. Write-through coherence: a
+  successful write refreshes cached copies in place, a failed write
+  or discard invalidates its range, large reads bypass, and
+  `BufferClass::Sensitive` I/O bypasses *and* evicts its range so no
+  key-slot block is ever retained; every released buffer is wiped.
+
 **Remaining (staged, `plans/SMARTRAM.md` §12):** the non-RustFS
 transform families (verified bundle/manifest state gated on their
 consumers) — gated on the subsystems they consume.

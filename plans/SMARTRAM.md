@@ -24,10 +24,13 @@ immutable system-store bundles), SMART9 (observability through
 existing diagnostics: the split payload/metadata ledger with
 pressure-shrink/teardown/failure counters, the pressure gauge's
 per-band transition counters, and the `kernel/mem` `reclaim_audit`
-events — no public ABI), and SMART10 (the cross-cache integration,
-thrash, and benchmark-evidence suites over one shared gauge; see
-`PLAN.md` §SMARTRAM for the done-state
-summaries) are implemented; SMART5–SMART8
+events — no public ABI), SMART10 (the cross-cache integration,
+thrash, and benchmark-evidence suites over one shared gauge), and
+SMART11 (the whole-disk block-level LRU cache,
+`kernel/rustos-kernel::block_cache::BlockCache`: the classified,
+budgeted, pressure-governed, zeroing per-block cache the boot path
+installs under the block-sharing layer; see `PLAN.md` §SMARTRAM for
+the done-state summaries) are implemented; SMART5–SMART8
 (desktop/UI, reliability-assist, background-validation, and predictive
 caches) are **shelved — not added**; the remaining classes are staged
 below  
@@ -1075,6 +1078,73 @@ Scope decisions recorded:
   shelved); the multi-user authorization rows are held by the
   per-cache suites (authorisation-sensitive reuse in `CachedFs`,
   hit/miss-identical decisions in `LaunchCache`).
+
+### SMART11 - Whole-disk block-level LRU cache
+
+Status: **done** (`docs/src/architecture/memory.md` section 7m). The
+filesystem block-level cache the section 6.1 model implies below the
+volume layer, subject to the same pressure-integration reclaim
+ordering as every other class:
+
+- `kernel/rustos-kernel::block_cache::BlockCache` wraps the one
+  brought-up boot disk **below** the block-sharing layer
+  (`shared_block::SharedBlock`), on the device side of its sleep
+  lock, so every window onto the disk — the `/System` driver-store
+  window, the encrypted-root unlock window, and the writable-root
+  window — reads through one coherent per-block LRU cache and every
+  mutation any window issues is observed serialised. Installed by the
+  shared `finish_unlock` boot tail (both the virtio-blk and EMMC2
+  bring-ups), threaded the same gauge and audit sink as the volume
+  caches.
+- Classified through the SMART1 gate as `CleanFileData` (cheap to
+  rebuild — one bounded device read), owned by the
+  `boot_block_device` kernel subsystem, treated as user data (the
+  disk carries the encrypted user volume), source-mutation
+  invalidated, droppable; a refusal — or a device block size the
+  per-block entry model cannot bound — poisons the cache from birth
+  and every operation passes straight through (fail closed).
+- Pressure-enforced per operation under the SMART2 gauge: shrunk to
+  the low watermark at mild pressure, drained to zero from moderate
+  on (before any `ramzip` handoff, matching section 7), growth only
+  at normal pressure outside the reserve, LRU eviction to the low
+  watermark on a full budget (hysteresis).
+- Coherence: a successful write refreshes cached copies in place
+  (admitting nothing new), a failed write invalidates its range (the
+  device state is unknown), a discard invalidates its range, and
+  reads wider than the large-read bound stream through uncached so a
+  bulk bundle/driver-store load cannot flush the hot working set.
+- Secret hygiene: `BufferClass::Sensitive` reads and writes bypass
+  the cache entirely *and* evict any cached copy of their range, so
+  no key-slot or credential-bearing block is ever retained; every
+  released buffer is volatilely wiped.
+- Observability rides SMART9 unchanged: cache label `block`, the
+  split payload/metadata ledger, and the one-shot 2000/2001 audit
+  events.
+
+The SMART11 test matrix lands with the stage
+(`kernel/rustos-kernel/src/block_cache_tests.rs`): classification/
+owner, hit/miss/insertion accounting with a device-corruption proof
+that a hit never reaches the device, multi-block partial-hit
+behaviour, write-through coherence, failed-write and discard
+invalidation, sensitive-class scrubbing on both directions,
+non-sensitive classified reads cached normally, large-read bypass,
+unaligned passthrough, LRU eviction with hysteresis, per-band
+growth/shrink/drain enforcement with recovery, zero-backing refusal,
+uncacheable-geometry poisoning with the device still serving,
+geometry-fault refusal to wrap, forwarding of geometry/discard
+capability/health, split ledger accounting, one-shot closed-shape
+audit reporting, silence in normal operation, and wipe-in-place.
+
+Scope decisions recorded:
+
+- The cache is installed on the one persistent shared boot disk (the
+  only whole-disk device the kernel keeps mounted today); additional
+  disks receive the same wrap when the storage subsystem that
+  introduces them lands.
+- Removable-media generation tokens stay with the storage subsystem
+  that introduces removable volumes (section 6.1): within one boot
+  the wrapped device instance is the generation, and the cache dies
+  with it.
 
 ---
 

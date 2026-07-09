@@ -67,6 +67,7 @@ use crate::aarch64::gic_irq::{
     published_irq_table, COMPOSITE_IRQ_CONTROLLER, CPU0_TARGET, GIC_IRQ_CONTROLLER,
 };
 use crate::aarch64::spawn_producer::AARCH64_PROCESS_SPAWN;
+use crate::block_cache::BlockCache;
 use crate::driver_catalog::{EMMC2_PATH, KERNEL_DRIVER_SIGNER_PUBKEY, VIRTIO_BLK_PATH};
 use crate::driver_loader::KernelDriverLoader;
 use crate::driver_spawn_loader::InitCtxDriverProcessSpawn;
@@ -904,7 +905,12 @@ fn finish_unlock<B: Block + 'static>(
     // their own serialised windows: *this* task is the
     // driver-store serve loop (below), and a *separate* spawned task runs the
     // encrypted-root unlock. A geometry fault refuses the device fail-closed.
-    let store: &'static DriverStoreService<B> =
+    // The device sits behind the SMART11 block cache (`plans/SMARTRAM.md`),
+    // on the device side of the sharing lock, so every window reads through
+    // one coherent, pressure-governed cache of recently used blocks.
+    let blk = BlockCache::for_boot_disk(blk, pressure, audit)
+        .map_err(|_| "root-unlock: block device geometry")?;
+    let store: &'static DriverStoreService<BlockCache<B>> =
         alloc::boxed::Box::leak(alloc::boxed::Box::new(DriverStoreService::new(
             SharedBlock::new(blk).map_err(|_| "root-unlock: block device geometry")?,
         )));

@@ -233,6 +233,16 @@ pub mod kernel_fs;
 // and end-to-end tests run on the CI host.
 pub mod transform_cache;
 
+// The whole-disk block-level LRU cache (`plans/SMARTRAM.md` SMART11):
+// wraps the one brought-up boot device *below* the block-sharing layer,
+// so every window onto the disk reads through one coherent cache of
+// recently used device blocks under the `kernel/mem::reclaim`
+// classification/budget model and the SMART2 pressure bands (class
+// `CleanFileData` — reclaimed from mild pressure, before any `ramzip`
+// handoff). Architecture-neutral (block-ABI + kernel/mem seams only),
+// so its unit tests run on the CI host.
+pub mod block_cache;
+
 // The boot-time install of the read-only `/System` volume as the userland
 // `fs_*` filesystem mount (`PREREQUISITES.md` P-A): the type-erased
 // `KernelFs` mount driver, the `LATE_FILESYSTEM` / `FS_SERVICE` statics the

@@ -1113,6 +1113,65 @@ pressure-band vertical is deliberately not built while the gauge's
 consumers are all host-provable — the band arithmetic is pure and the
 allocator reading is already soaked.
 
+## 7m. The whole-disk block cache (SMART11)
+
+`kernel/rustos-kernel/src/block_cache.rs` is the block-level LRU cache
+under the entire mounted storage stack (`plans/SMARTRAM.md` SMART11):
+the boot path wraps the one brought-up disk in a `BlockCache` **before**
+the block-sharing layer (`shared_block::SharedBlock`), so every window
+onto the disk — the `/System` driver-store window, the encrypted-root
+unlock window, and the writable-root window — reads through one
+coherent cache of recently used device blocks. It complements the
+layers above rather than duplicating them: `CachedFs` (§7g) retains
+served plaintext per volume and the transform cache (§7i) retains
+decompressed cluster plaintext; the block cache retains the raw device
+blocks underneath both, so their misses — and every consumer with no
+higher cache (partition-table walks, driver-store scans, RustFS
+metadata block reads) — avoid a device round-trip that parks the
+calling task across a completion interrupt.
+
+- **Classification and budget.** Classified through the §7g gate as
+  `CleanFileData` (clean, rebuildable, one bounded device read),
+  owned by the `boot_block_device` kernel subsystem, treated as user
+  data (the disk carries the encrypted user volume), droppable, and
+  precisely invalidated by the device's single serialised writer. A
+  refusal — or a block size the per-block entry model cannot bound —
+  poisons the cache from birth: every operation passes straight
+  through to the device (fail closed). Bounded by the same
+  kernel-heap-derived `CacheBudget` as the volume caches.
+- **Pressure.** Every operation first applies the band's forced-shrink
+  target for the clean-file class (§7h): shrunk to the low watermark
+  at mild pressure and drained to zero from moderate on, before any
+  `ramzip` handoff; growth only at normal pressure and never into the
+  reserve. Inserts over the hard limit evict least-recently-used
+  blocks down to the low watermark (hysteresis).
+- **Coherence.** The cache sits on the device side of the sharing
+  lock, so it observes every operation any window issues, serialised:
+  a successful write refreshes the cached copies of the written blocks
+  in place (admitting nothing new), a failed write invalidates the
+  range (the device state is unknown — fail closed), and a discard
+  invalidates its range. Reads spanning more than
+  `LARGE_READ_BYPASS_BLOCKS` stream through uncached so a bulk bundle
+  or driver-store load cannot flush the hot working set.
+- **Secret hygiene.** `BufferClass::Sensitive` reads and writes (key
+  slots, credentials) bypass the cache entirely *and* evict any cached
+  copy of their range, so no credential-bearing block is ever
+  retained; every released buffer is volatilely wiped (invalidation,
+  eviction, pressure shrink, poisoning, teardown).
+- **Observability.** The §7k ledger/counters and audit events apply
+  unchanged: the cache label is `block`, a classification refusal
+  emits `RECLAIM_CACHE_REFUSED` (2000), and a detected ledger/index
+  defect emits `RECLAIM_CACHE_POISONED` (2001) exactly once.
+
+The host suite (`kernel/rustos-kernel/src/block_cache_tests.rs`)
+proves classification, hit/miss/insertion accounting (a hit is shown
+never to reach the device by corrupting the backing store),
+write-through coherence, failed-write and discard invalidation,
+sensitive-class scrubbing, the large-read bypass, LRU eviction with
+hysteresis, per-band growth/shrink/drain enforcement with recovery,
+zero-backing refusal, uncacheable-geometry poisoning with the device
+still serving, the closed audit field shape, and wipe-in-place.
+
 ## 8. Testing strategy
 
 - **Unit tests** — alongside each module under `#[cfg(all(test, not(loom)))]`:
