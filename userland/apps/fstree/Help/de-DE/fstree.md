@@ -56,15 +56,44 @@ Tasten:
   oktale Eingabezeile, vorbelegt mit dem aktuellen Modus. Enter wendet an
   (nur der Eigentümer darf ändern — der Kernel weist alle anderen ab),
   Esc bricht ab.
+- `t` — den gewählten Eintrag des Dateibereichs markieren oder die
+  Markierung aufheben und eine Zeile hinabgehen; wiederholtes Drücken
+  markiert also eine Reihe. Markierte Einträge tragen ein `*`.
+- `T` — nach Muster markieren: ein Glob (`*`, `?`, `[...]`), der gegen
+  die sichtbaren Namen geprüft wird; jeder Treffer kommt zur
+  Markierungsmenge hinzu.
+- `i` — die Markierungen über die sichtbaren Einträge invertieren.
+- `C` — alle Markierungen aufheben.
+- `u` — den Plattenverbrauch unter dem fokussierten Verzeichnis
+  zählen: Dateien, Bytes und Verzeichnisse, schrittweise im
+  Hintergrund durchlaufen. `Esc` bricht ab und behält die bis dahin
+  gezählten Zahlen.
+- `v` — den Zweig unter dem fokussierten Verzeichnis flach anzeigen:
+  eine Liste jeder Datei darunter, seitenweise gefüllt (`Leertaste`
+  lädt die nächste Seite). In der Ansicht markieren `t`/`T`/`i`/`C`
+  ihre Zeilen, `c`/`m`/`d` führen Stapeloperationen über die
+  Markierungsmenge aus, und `Esc` kehrt zu den Bereichen zurück. Die
+  Zeilen sind relativ zum flachen Zweig benannt.
 - `.` — versteckte Einträge (Punktnamen) in beiden Bereichen ein- und
   ausblenden.
 - `?` — diese Hilfe über den Bereichen anzeigen; jede Taste schließt sie.
 - `q` — beenden und das Terminal wiederherstellen.
 
+Solange Einträge markiert sind, wirken `c`, `m` und `d` auf die ganze
+Markierungsmenge statt auf die Auswahl: `c`/`m` fragen nach einem
+bestehenden Zielverzeichnis, in dem die Einträge landen, und `d`
+bestätigt das Stapellöschen. Die Einträge werden in
+Markierungsreihenfolge verarbeitet; ein fehlgeschlagener Eintrag hält
+den Rest nie auf, der Abschlussbericht zählt das Gelungene, und ein
+Berichtsbildschirm nennt jeden Fehlschlag beim Namen — ein Stapel ist
+nie stillschweigend unvollständig. Gelungene Einträge verlieren ihre
+Markierung; Fehlschläge bleiben für einen neuen Versuch markiert.
+
 Würde ein Kopieren oder Verschieben eine bestehende Datei
 überschreiben, fragt die Sitzung pro Datei: `o` überschreibt, `s`
 überspringt (eine übersprungene Quelle bleibt an ihrem Platz), und `c`
-bricht die verbleibenden Schritte ab — bereits Angewandtes bleibt
+bricht die verbleibenden Schritte ab — in einem Stapel verwirft der
+Abbruch alle verbleibenden Einträge — bereits Angewandtes bleibt
 bestehen, und der Abschlussbericht sagt, was geschah. Ein Fehler
 mitten im Kopieren entfernt das halb geschriebene Ziel und zeigt den
 Fehler des Kernels; nichts gibt sich je als vollständige Kopie aus.
@@ -73,11 +102,12 @@ erscheint wörtlich in der Meldungszeile, ohne dass sich etwas ändert.
 
 Die Statuszeile zeigt den aufgelisteten Pfad, die Zahl der sichtbaren
 Einträge, die Sortierordnung, die freien/gesamten Bytes des tragenden
-Datenträgers (sofern der Systeminformationsdienst sie melden kann) und
-ob versteckte Einträge angezeigt werden. Eine Datei, deren Format keine
+Datenträgers (sofern der Systeminformationsdienst sie melden kann), ob
+versteckte Einträge angezeigt werden und — solange etwas markiert ist —
+die Zahl der Markierungen samt Bytesumme. Eine Datei, deren Format keine
 Änderungszeit speichert, zeigt `-` in der Zeitspalte.
 
-Das Markieren, die Suche und die Text-/Hex-/Disassembler-Ansichten
+Die Suche und die Text-/Hex-/Disassembler-Ansichten
 kommen in späteren Stufen des Plans dieses Werkzeugs.
 
 ## OPTIONS
@@ -95,4 +125,4 @@ kommen in späteren Stufen des Plans dieses Werkzeugs.
 
 ## SEE ALSO
 
-ls, cp, mv, rm, mkdir, chmod, du, df
+ls, cp, mv, rm, mkdir, chmod, du, df, find

@@ -15,7 +15,8 @@
 //! the session). It then sizes the screen from the console the kernel gave
 //! it, puts the terminal into raw (no-echo) input, and runs the
 //! [`rustos_top`] viewer loop
-//! against two seams: `RtTty`, the curses byte channel over the inherited
+//! against two seams: the shared `rustos_curses::StreamTty`, the curses byte
+//! channel over the inherited
 //! standard input/output (fd 0/1), and `IpcTransport` (shared through
 //! `lib/procinfo`), which carries the framed `sysinfo-v1` request to
 //! `/System/Services/sysinfod.app/Run` over the well-known IPC call endpoint. The tool
@@ -44,14 +45,10 @@
 mod program {
     extern crate alloc;
 
-    use alloc::vec::Vec;
-
     use core::time::Duration;
 
-    use rustos_abi::{Errno, InputMode, STDOUT};
-    use rustos_curses::{
-        CursesError, InputMode as CursesInputMode, Result as CursesResult, Screen, Size, Tty,
-    };
+    use rustos_abi::{InputMode, STDOUT};
+    use rustos_curses::{InputMode as CursesInputMode, Screen, Size, StreamTty};
     use rustos_help::{own_short_help, BundleHelp};
     use rustos_procinfo::{user_names, IpcTransport};
     use rustos_rt::io::{write_stderr_line, Stdout, Write};
@@ -63,75 +60,6 @@ mod program {
     /// line, whose remote terminal size only the far-end emulator knows).
     const FALLBACK_ROWS: u16 = 24;
     const FALLBACK_COLS: u16 = 80;
-
-    /// The maximum input bytes drained from standard input in one blocking
-    /// read. A key press (even a multi-byte escape sequence) is a handful of
-    /// bytes; a small stack buffer absorbs a burst without allocating, and the
-    /// curses input decoder reassembles sequences that span reads.
-    const INPUT_CHUNK: usize = 64;
-
-    /// The curses [`Tty`] over the program's inherited standard streams: writes
-    /// go to standard output (fd 1) and blocking reads draw from standard input
-    /// (fd 0), both through `rustos-rt`. The program names only its inherited
-    /// descriptors, never a console device, so the same binary drives a serial
-    /// terminal, a framebuffer console, or a future windowed terminal
-    /// unchanged — the stream layer owns which backing that is.
-    struct RtTty;
-
-    impl Tty for RtTty {
-        fn write(&mut self, bytes: &[u8]) -> CursesResult<()> {
-            // The shared `rustos_rt::io` short-write loop — no tty-private copy
-            // (the charter forbids that duplication). `write_all` loops over
-            // short writes and fails closed (never spins) if the backing stops
-            // accepting bytes, which the seam reports as an I/O error.
-            Stdout.write_all(bytes).map_err(|_| CursesError::Io)
-        }
-
-        fn read(&mut self) -> CursesResult<Vec<u8>> {
-            // The standard-input backing owns blocking and offers no
-            // peek/poll, so a non-blocking read cannot know what is pending: it
-            // honestly reports "nothing available right now" rather than
-            // blocking or fabricating input. The viewer runs the timed
-            // input mode, so this path is never its wait; it exists to satisfy
-            // the seam and never lies about available bytes.
-            Ok(Vec::new())
-        }
-
-        fn read_blocking(&mut self) -> CursesResult<Vec<u8>> {
-            let mut buf = [0u8; INPUT_CHUNK];
-            // `rustos_rt::stdin` parks the task in the kernel until at least
-            // one byte arrives (the backing owns blocking), then returns the
-            // count read; a zero-length return means the stream reported end of
-            // input, which the seam encodes as an empty vector.
-            let read = rustos_rt::stdin(&mut buf);
-            Ok(buf[..read.min(buf.len())].to_vec())
-        }
-
-        fn read_timeout(&mut self, timeout: Duration) -> CursesResult<Vec<u8>> {
-            let mut buf = [0u8; INPUT_CHUNK];
-            // The kernel treats a zero bound as "wait indefinitely", so the
-            // (already parser-clamped) delay is floored at one nanosecond —
-            // defence in depth, never the viewer's wait. The backing parks
-            // the task until input arrives or the bound elapses; an elapsed
-            // bound is the auto-refresh tick, reported as "no bytes", while
-            // any other refusal is a real terminal failure.
-            let timeout_ns = u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX).max(1);
-            match rustos_rt::stdin_timeout(&mut buf, timeout_ns) {
-                Ok(read) => Ok(buf[..read.min(buf.len())].to_vec()),
-                Err(err) => {
-                    let timed_out = i32::try_from(-err)
-                        .ok()
-                        .and_then(Errno::from_i32)
-                        .is_some_and(|errno| errno == Errno::TimedOut);
-                    if timed_out {
-                        Ok(Vec::new())
-                    } else {
-                        Err(CursesError::Io)
-                    }
-                }
-            }
-        }
-    }
 
     /// Render `top`'s own short help (`NAME` + `SYNOPSIS` + compact
     /// `OPTIONS`) from its own bundle's `Help/` tree through the one shared
@@ -191,7 +119,7 @@ mod program {
         let term = rustos_rt::env_var(b"TERM")
             .and_then(|raw| core::str::from_utf8(raw).ok())
             .map_or(rustos_termcap::TermType::Dumb, from_term);
-        let mut screen = Screen::new(RtTty, term, size);
+        let mut screen = Screen::new(StreamTty, term, size);
         // Bound every input wait by the refresh delay (`-d`), so the view
         // redraws itself on that cadence without a key press — the kernel
         // parks the read for the interval, never a poll loop.

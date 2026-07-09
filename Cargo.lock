@@ -650,7 +650,9 @@ dependencies = [
 name = "rustos-curses"
 version = "0.0.0"
 dependencies = [
+ "rustos-abi",
  "rustos-fuzzseed",
+ "rustos-rt",
  "rustos-termcap",
  "rustos-vt",
 ]
@@ -1022,6 +1024,7 @@ version = "0.0.0"
 dependencies = [
  "rustos-abi",
  "rustos-curses",
+ "rustos-glob",
  "rustos-help",
  "rustos-path",
  "rustos-procinfo",

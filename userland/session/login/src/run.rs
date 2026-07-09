@@ -64,8 +64,6 @@ mod program {
     use alloc::string::String;
     use alloc::vec::Vec;
 
-    use core::time::Duration;
-
     use rustos_abi::elevate::{elevate_endpoint, ELEVATE_MAX_REQUEST, ELEVATE_REPLY_LEN};
     use rustos_abi::sysinfo::{KernelMemoryStats, LoadAverage, SysinfoQueryId, SystemIdentity};
     use rustos_abi::{
@@ -73,7 +71,7 @@ mod program {
         ORIGIN_CONSOLE_NONE, ORIGIN_WIRE_LEN,
     };
     use rustos_caps::CapabilitySet;
-    use rustos_curses::{CursesError, Screen, Size, Tty};
+    use rustos_curses::{Screen, Size, StreamTty};
     use rustos_login::elevate::ElevateLauncher;
     use rustos_login::{
         events, handle_elevate_request, session_environment, supervise, AuthenticatedUser,
@@ -81,7 +79,6 @@ mod program {
         LoginStatus, LoginView, SessionKind, SessionLauncher, SessionOutcome, StatusSource,
     };
     use rustos_procinfo::{call, IpcTransport};
-    use rustos_rt::io::{Stdout, Write};
     use rustos_rt::LogSink;
     use rustos_termcap::TermType;
     use rustos_users::{UsersDb, MAX_DB_LEN};
@@ -102,50 +99,6 @@ mod program {
     /// unlock takes yet short enough to recover promptly; the wait parks the
     /// CPU throughout, so a long bound costs nothing.
     const DB_WAIT_TIMEOUT_NS: u64 = 5_000_000_000;
-
-    /// The console byte channel behind the curses view: rendered bytes go
-    /// to fd 1 through the shared `rustos_rt::io` short-write loop, and
-    /// keystrokes come from fd 0 one byte at a time — the console stream
-    /// backing parks the task until input arrives (never a busy poll), so
-    /// a zero-length read means the stream failed or closed and the view
-    /// fails closed on it. The timed read parks with the `stream_read`
-    /// timeout and reports an elapsed bound as an empty read (the view's
-    /// refresh tick), keeping a genuine failure a distinct channel error.
-    struct RtTty;
-
-    impl Tty for RtTty {
-        fn write(&mut self, bytes: &[u8]) -> rustos_curses::Result<()> {
-            Stdout.write_all(bytes).map_err(|_| CursesError::Io)
-        }
-
-        fn read(&mut self) -> rustos_curses::Result<Vec<u8>> {
-            self.read_blocking()
-        }
-
-        fn read_blocking(&mut self) -> rustos_curses::Result<Vec<u8>> {
-            let mut byte = [0u8; 1];
-            if rustos_rt::stdin(&mut byte) == 0 {
-                return Err(CursesError::Io);
-            }
-            Ok(alloc::vec![byte[0]])
-        }
-
-        fn read_timeout(&mut self, timeout: Duration) -> rustos_curses::Result<Vec<u8>> {
-            let mut byte = [0u8; 1];
-            // A zero bound would wait indefinitely on this syscall; the
-            // shortest expressible bound preserves "return promptly".
-            let timeout_ns = u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX).max(1);
-            match rustos_rt::stdin_timeout(&mut byte, timeout_ns) {
-                Ok(read) if read > 0 => Ok(byte[..read].to_vec()),
-                // A successful zero-length read is the closed stream.
-                Ok(_) => Err(CursesError::Io),
-                // An elapsed bound is not an error: it is the view's
-                // refresh tick.
-                Err(code) if code == -i64::from(Errno::TimedOut.as_i32()) => Ok(Vec::new()),
-                Err(_) => Err(CursesError::Io),
-            }
-        }
-    }
 
     /// The console line discipline behind the view: the `stream_input_mode`
     /// syscall. Raw (echo off, per-keystroke) while the view owns the
@@ -638,7 +591,7 @@ mod program {
         let size = rustos_rt::terminal_size(1)
             .map(|s| Size::new(s.rows(), s.cols()))
             .unwrap_or(Size::new(25, 80));
-        let screen = Screen::new(RtTty, TermType::Xterm256Color, size);
+        let screen = Screen::new(StreamTty, TermType::Xterm256Color, size);
         let view = CursesView::new(screen, RtStatusSource, RtConsoleMode);
         supervise(
             load_users_db,

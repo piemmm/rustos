@@ -65,7 +65,8 @@ whole viewer runs against in-memory fixtures with no kernel (`AGENTS.md` §7).
 - **`run` (the `Run` binary, `src/run.rs`)** — the freestanding pure-Rust
   program a shell spawns. It links `rustos-rt` (behind the on-by-default
   `program` feature) and drives the viewer against two production seams: the
-  shared `lib/procinfo` `IpcTransport` to `sysinfod`, and `RtTty`, a curses
+  shared `lib/procinfo` `IpcTransport` to `sysinfod`, and the shared
+  `rustos_curses::StreamTty`, the one curses
   channel over the inherited standard streams (writes to fd 1, blocking reads
   from fd 0, local echo suppressed for raw input). It sizes the screen from the
   `terminal_size` syscall — the console's real grid when the kernel knows it (a

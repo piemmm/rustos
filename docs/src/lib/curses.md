@@ -48,6 +48,15 @@ added the first in-tree consumer (`userland/apps/top`).
   (`nodelay`), or `Timeout(..)` waiting. A blocking `getch` re-reads past a
   chunk that decodes to no event (an unmodelled sequence), so `None` from it
   means exactly one thing: the channel has closed.
+- **`StreamTty`** (feature `program`, freestanding targets only) is the one
+  production `Tty` over a program's inherited standard streams (fd 0/1)
+  through `rustos-rt`. Blocking and timed reads park the task in the kernel; a
+  closed stream surfaces as a loud `CursesError::Io` rather than a silent
+  empty read a session could spin on, and an elapsed timed read is the
+  caller's tick, kept distinct from failure. Every full-screen tool's `Run`
+  binary (`top`, `vim`, `edit`, `fstree`, `login`) links this one definition
+  instead of carrying a per-app copy (`AGENTS.md` §2.2). The host build and
+  the host tests never compile it, so the seam stays kernel-free there.
 - **Character width** (`char_width` / `is_wide` / `str_width` /
   `truncate_to_width`, re-exported from `lib/vt`'s `width` module — the one
   definition every cell grid shares) knows a CJK / fullwidth / emoji glyph
@@ -96,8 +105,10 @@ unrenderable colour is degraded (`AGENTS.md` §2.9). Nothing here writes to fd 3
 
 ## Layering and testing
 
-`lib/curses` depends on `rustos-vt` and `rustos-termcap` (and `lib/*`) only —
-never on `kernel/*`, `drivers/*`, or `userland/*` (`AGENTS.md` §17.4) — and is
+`lib/curses` depends on `rustos-vt` and `rustos-termcap` (and, behind the
+`program` feature on freestanding targets, `rustos-rt` + `rustos-abi` for
+`StreamTty`) — all `lib/*`, never `kernel/*`, `drivers/*`, or `userland/*`
+(`AGENTS.md` §17.4) — and is
 text-only infrastructure outside `userland/gui/*`, so a headless image links it
 freely (§17.3).
 

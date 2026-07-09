@@ -4,11 +4,15 @@
 //! A persistent directory-tree pane plus a file pane over the storage
 //! forest, drawn with the OS curses library. This crate delivers the S1
 //! model core (the lazily populated tree, pane navigation, sorting, the
-//! hidden-entries toggle, the status/message lines, the `?` help overlay)
-//! and the S2 file operations: copy, move, rename, delete, mkdir, and the
+//! hidden-entries toggle, the status/message lines, the `?` help overlay),
+//! the S2 file operations (copy, move, rename, delete, mkdir, and the
 //! permission-bits editor, each planned and validated before any I/O and
 //! driven by a resumable executor whose per-file overwrite questions run
-//! through the key loop. Tagging, search, and the viewers are staged in
+//! through the key loop), and the S3 tagging surface: multi-file tags
+//! (`t`, tag-by-glob, invert, clear), batch copy/move/delete over the
+//! tagged set with a per-file continue-on-error report, the flattened
+//! branch view, and disk-usage statistics — both fed by one bounded,
+//! cancellable walker. Search and the viewers are staged in
 //! `.junie/fstree-next-plan.md` and land stage by stage.
 //!
 //! # What this crate is
@@ -28,8 +32,11 @@
 //! * [`fs`] — the [`fs::Fs`] seam and its listing vocabulary.
 //! * [`model`] — the tree/pane/sort/prompt state machine.
 //! * [`ops`] — the file-operation planner and resumable executor.
+//! * [`tag`] — the tag set and the batch-operation driver.
+//! * [`walk`] — the bounded branch walker (flattened view, disk usage).
 //! * [`mod@render`] — the curses frame (panes, status, message, overlays).
-//! * [`app`] — the key grammar and the blocking session loop.
+//! * [`app`] — the key grammar and the session loop (walk ticks run on a
+//!   timed input bound; every wait still parks in the kernel).
 //!
 //! # Layering & safety
 //!
@@ -49,6 +56,8 @@ pub mod fs;
 pub mod model;
 pub mod ops;
 pub mod render;
+pub mod tag;
+pub mod walk;
 
 #[cfg(test)]
 mod tests;
@@ -57,3 +66,5 @@ pub use app::{handle_event, run, FstreeError};
 pub use fs::{Fs, FsEntry, RenameOutcome, VolumeSpace};
 pub use model::{Model, Pane, SortKey};
 pub use render::render;
+pub use tag::{Batch, BatchProgress, TagEntry, TagSet};
+pub use walk::{FlatEntry, WalkPurpose, WalkState, Walker};

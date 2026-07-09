@@ -57,15 +57,42 @@ Touches :
   invite octale pré-remplie avec le mode actuel. Entrée applique (seul le
   propriétaire peut modifier — le noyau refuse quiconque d'autre), Échap
   annule.
+- `t` — marquer ou démarquer l'entrée sélectionnée du panneau de
+  fichiers et descendre d'une ligne ; des pressions répétées marquent
+  donc une série. Les entrées marquées portent un `*`.
+- `T` — marquer par motif : un glob (`*`, `?`, `[...]`) comparé aux
+  noms visibles ; chaque correspondance rejoint l'ensemble marqué.
+- `i` — inverser les marques sur les entrées visibles.
+- `C` — effacer toutes les marques.
+- `u` — compter l'usage disque sous le répertoire ciblé : fichiers,
+  octets et répertoires, parcourus progressivement en arrière-plan.
+  `Échap` annule en conservant les chiffres déjà comptés.
+- `v` — aplatir la branche sous le répertoire ciblé : une liste de
+  chaque fichier en dessous, remplie page par page (`Espace` charge la
+  page suivante). Dans la vue, `t`/`T`/`i`/`C` marquent ses lignes,
+  `c`/`m`/`d` lancent des opérations groupées sur l'ensemble marqué,
+  et `Échap` revient aux panneaux. Les lignes sont nommées
+  relativement à la branche aplatie.
 - `.` — afficher/masquer les entrées cachées (noms à point) dans les deux
   panneaux.
 - `?` — afficher cette aide par-dessus les panneaux ; toute touche la
   ferme.
 - `q` — quitter en restaurant le terminal.
 
+Tant que des entrées sont marquées, `c`, `m` et `d` agissent sur
+l'ensemble marqué plutôt que sur la sélection : `c`/`m` demandent un
+répertoire de destination existant où atterrissent les entrées, et `d`
+confirme la suppression groupée. Les entrées sont traitées dans
+l'ordre de marquage ; un échec n'arrête jamais le reste, le rapport
+final compte ce qui a réussi et un écran de rapport nomme chaque
+échec — un lot n'est jamais silencieusement partiel. Les entrées
+réussies sont démarquées ; les échecs restent marqués pour un nouvel
+essai.
+
 Quand une copie ou un déplacement écraserait un fichier existant, la
 session demande fichier par fichier : `o` écrase, `s` saute (une source
-sautée reste en place), et `c` annule les étapes restantes — ce qui a
+sautée reste en place), et `c` annule les étapes restantes — dans un
+lot, l'annulation abandonne toutes les entrées restantes — ce qui a
 déjà été appliqué le reste, et le rapport final dit ce qui s'est
 passé. Un échec en cours de copie supprime la cible à moitié écrite et
 affiche l'erreur du noyau ; rien ne se fait jamais passer pour une
@@ -74,11 +101,13 @@ apparaît tel quel sur la ligne de message, sans que rien ne change.
 
 La ligne d'état montre le chemin listé, le nombre d'entrées visibles,
 l'ordre de tri, les octets libres/totaux du volume sous-jacent (quand le
-service d'information système peut les rapporter) et si les entrées
-cachées sont affichées. Un fichier dont le format de stockage ne conserve
+service d'information système peut les rapporter), si les entrées
+cachées sont affichées et — tant que quelque chose est marqué — le
+nombre d'entrées marquées avec leur total d'octets. Un fichier dont le
+format de stockage ne conserve
 pas de date de modification affiche `-` dans la colonne de date.
 
-Le marquage, la recherche et les visionneuses
+La recherche et les visionneuses
 texte/hexadécimale/désassemblage arrivent dans les étapes ultérieures
 du plan de l'outil.
 
@@ -97,4 +126,4 @@ du plan de l'outil.
 
 ## SEE ALSO
 
-ls, cp, mv, rm, mkdir, chmod, du, df
+ls, cp, mv, rm, mkdir, chmod, du, df, find

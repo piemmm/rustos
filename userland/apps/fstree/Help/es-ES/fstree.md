@@ -53,14 +53,40 @@ Teclas:
 - `a` — editar los bits de permiso de la entrada seleccionada: una línea
   octal precargada con el modo actual. Intro aplica (solo el propietario
   puede cambiarlo — el núcleo rechaza a cualquier otro), Esc cancela.
+- `t` — marcar o desmarcar la entrada seleccionada del panel de
+  archivos y bajar una fila; pulsaciones repetidas marcan una serie.
+  Las entradas marcadas llevan un `*`.
+- `T` — marcar por patrón: un glob (`*`, `?`, `[...]`) comparado con
+  los nombres visibles; cada coincidencia se añade al conjunto marcado.
+- `i` — invertir las marcas sobre las entradas visibles.
+- `C` — borrar todas las marcas.
+- `u` — contar el uso de disco bajo el directorio enfocado: archivos,
+  bytes y directorios, recorridos de forma incremental en segundo
+  plano. `Esc` cancela conservando las cifras contadas hasta entonces.
+- `v` — aplanar la rama bajo el directorio enfocado: una lista de cada
+  archivo debajo, llenada página a página (`Espacio` carga la
+  siguiente). Dentro de la vista, `t`/`T`/`i`/`C` marcan sus filas,
+  `c`/`m`/`d` ejecutan operaciones por lotes sobre el conjunto marcado
+  y `Esc` vuelve a los paneles. Las filas se nombran relativas a la
+  rama aplanada.
 - `.` — mostrar/ocultar las entradas ocultas (nombres con punto) en ambos
   paneles.
 - `?` — mostrar esta ayuda sobre los paneles; cualquier tecla la cierra.
 - `q` — salir restaurando el terminal.
 
+Mientras haya entradas marcadas, `c`, `m` y `d` actúan sobre todo el
+conjunto marcado en lugar de la selección: `c`/`m` piden un directorio
+de destino existente donde caen las entradas, y `d` confirma el
+borrado por lotes. Las entradas se procesan en orden de marcado; un
+fallo nunca detiene al resto, el informe final cuenta lo que tuvo
+éxito y una pantalla de informe nombra cada fallo — un lote nunca es
+parcial en silencio. Las entradas con éxito se desmarcan; los fallos
+siguen marcados para reintentar.
+
 Cuando una copia o un movimiento sobrescribiría un archivo existente,
 la sesión pregunta por archivo: `o` sobrescribe, `s` lo salta (un
 origen saltado queda en su sitio) y `c` cancela los pasos restantes —
+en un lote, cancelar abandona todas las entradas restantes —
 lo ya aplicado permanece, y el informe final dice qué ocurrió. Un
 fallo a mitad de copia elimina el destino a medio escribir y muestra
 el error del núcleo; nada se hace pasar jamás por una copia completa.
@@ -70,11 +96,13 @@ la línea de mensajes sin que nada cambie.
 La línea de estado muestra la ruta listada, el número de entradas
 visibles, el orden de clasificación, los bytes libres/totales del volumen
 subyacente (cuando el servicio de información del sistema puede
-informarlos) y si se muestran las entradas ocultas. Un archivo cuyo
+informarlos), si se muestran las entradas ocultas y — mientras haya
+algo marcado — el número de entradas marcadas con su total de bytes.
+Un archivo cuyo
 formato de almacenamiento no guarda fecha de modificación muestra `-` en
 la columna de fecha.
 
-El marcado, la búsqueda y los visores de
+La búsqueda y los visores de
 texto/hexadecimal/desensamblado llegan en etapas posteriores del plan
 de la herramienta.
 
@@ -93,4 +121,4 @@ de la herramienta.
 
 ## SEE ALSO
 
-ls, cp, mv, rm, mkdir, chmod, du, df
+ls, cp, mv, rm, mkdir, chmod, du, df, find

@@ -50,13 +50,37 @@ Keys:
 - `a` — edit the selected entry's permission bits: an octal prompt
   pre-filled with the current mode. Enter applies (only the entry's owner
   may change it — the kernel refuses anyone else), Esc cancels.
+- `t` — tag or untag the selected file-pane entry and step down, so
+  repeated presses mark a run. Tagged entries carry a `*` marker.
+- `T` — tag by pattern: a glob (`*`, `?`, `[...]`) matched against the
+  visible names; every match is added to the tagged set.
+- `i` — invert the tags across the visible entries.
+- `C` — clear every tag.
+- `u` — count disk usage under the focused directory: files, bytes,
+  and directories, walked incrementally in the background. `Esc`
+  cancels, keeping the figures counted so far.
+- `v` — flatten the branch under the focused directory: one list of
+  every file beneath it, filling page by page (`Space` loads the next
+  page). Inside the view, `t`/`T`/`i`/`C` tag its rows, `c`/`m`/`d`
+  run batch operations over the tagged set, and `Esc` returns to the
+  panes. Rows are named relative to the flattened branch.
 - `.` — toggle hidden (dot-named) entries in both panes.
 - `?` — show this help over the panes; any key dismisses it.
 - `q` — quit, restoring the terminal.
 
+While entries are tagged, `c`, `m`, and `d` operate on the whole
+tagged set instead of the selection: `c`/`m` ask for an existing
+destination directory the entries land in, and `d` confirms the batch
+delete. Entries are processed in tag order; a failed entry never
+stops the rest, and the completion report counts what succeeded while
+a report screen lists every failure by name — a batch is never
+silently partial. Entries that succeeded are untagged; failures stay
+tagged for a retry.
+
 When a copy or move would overwrite an existing file, the session
 asks per file: `o` overwrites it, `s` skips it (a skipped source is
-left in place), and `c` cancels the remaining steps — work already
+left in place), and `c` cancels the remaining steps — in a batch,
+cancel drops all remaining entries — work already
 applied stays applied, and the completion report says what happened.
 A failure mid-copy removes the half-written target and surfaces the
 kernel's error; nothing ever masquerades as a complete copy. Every
@@ -65,11 +89,12 @@ the message line with nothing changed.
 
 The status line shows the listed path, its visible entry count, the
 sort order, the backing volume's free/total bytes (when the System
-Information service can report them), and whether hidden entries are
-shown. A file whose backing format stores no modification stamp shows
+Information service can report them), whether hidden entries are
+shown, and — while anything is tagged — the tagged count and byte
+total. A file whose backing format stores no modification stamp shows
 `-` in the stamp column.
 
-Tagging, search, and the text/hex/disassembly viewers arrive in later
+Search and the text/hex/disassembly viewers arrive in later
 stages of the tool's plan.
 
 ## OPTIONS
@@ -87,4 +112,4 @@ stages of the tool's plan.
 
 ## SEE ALSO
 
-ls, cp, mv, rm, mkdir, chmod, du, df
+ls, cp, mv, rm, mkdir, chmod, du, df, find

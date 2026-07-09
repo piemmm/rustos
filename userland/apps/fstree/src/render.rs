@@ -1,10 +1,11 @@
-//! The curses frame: tree pane, file pane, status line, message line, and
-//! the sort-menu and help overlays.
+//! The curses frame: tree pane, file pane, the flattened branch view, the
+//! status line, the message line, and the sort-menu, help, and report
+//! overlays.
 //!
 //! Layout, left to right: the tree pane, a one-column divider, and the file
-//! pane; the last two rows are the reverse-video status line and the
-//! message line. Pure drawing over the [`Model`] — no I/O, so golden-grid
-//! tests drive it directly.
+//! pane (or the full-width flattened view); the last two rows are the
+//! reverse-video status line and the message line. Pure drawing over the
+//! [`Model`] — no I/O, so golden-grid tests drive it directly.
 
 use alloc::format;
 use alloc::string::String;
@@ -13,7 +14,8 @@ use rustos_abi::time::Time64;
 use rustos_curses::{truncate_to_width, Pos, Window};
 use rustos_vt::Attributes;
 
-use crate::model::{InputOp, Model, Overlay, Pane, Prompt, SortKey};
+use crate::model::{InputOp, Model, Overlay, Pane, Prompt, SortKey, View};
+use crate::walk::{relative_to, WalkPurpose};
 
 /// Columns given to the tree pane for a grid `cols` wide.
 fn tree_width(cols: u16) -> u16 {
@@ -30,10 +32,13 @@ pub fn render(model: &Model, window: &mut Window) {
         return;
     }
     let body = rows - 2;
-    if model.overlay == Overlay::Help {
-        render_help(model, window, body, cols);
-    } else {
-        render_panes(model, window, body, cols);
+    match model.overlay {
+        Overlay::Help => render_help(model, window, body, cols),
+        Overlay::Report => render_report(model, window, body, cols),
+        Overlay::None | Overlay::SortMenu => match model.view {
+            View::Panes => render_panes(model, window, body, cols),
+            View::Flat => render_flat(model, window, body, cols),
+        },
     }
     render_status(model, window, rows, cols);
     render_message(model, window, rows, cols);
@@ -73,7 +78,11 @@ fn render_panes(model: &Model, window: &mut Window, body: u16, cols: u16) {
     let fw = usize::from(cols - fx);
     let visible_files = files.iter().enumerate().skip(model.file_scroll);
     for (line, (index, entry)) in (0..body).zip(visible_files) {
+        let tagged = model
+            .tags
+            .contains(&crate::model::join(&model.files_dir, &entry.name));
         let text = file_row(
+            tagged,
             entry.kind.is_dir(),
             &entry.name,
             entry.size,
@@ -92,8 +101,17 @@ fn render_panes(model: &Model, window: &mut Window, body: u16, cols: u16) {
     }
 }
 
-/// One file-pane row: name left, size and stamp right-aligned.
-fn file_row(is_dir: bool, name: &str, size: u64, modified: Time64, width: usize) -> String {
+/// One file-pane row: the tag marker, name left, size and stamp
+/// right-aligned.
+fn file_row(
+    tagged: bool,
+    is_dir: bool,
+    name: &str,
+    size: u64,
+    modified: Time64,
+    width: usize,
+) -> String {
+    let marker = if tagged { "*" } else { " " };
     let stamp = format_stamp(modified);
     let size_text = if is_dir {
         String::from("<dir>")
@@ -101,9 +119,53 @@ fn file_row(is_dir: bool, name: &str, size: u64, modified: Time64, width: usize)
         format!("{size}")
     };
     let tail = format!("{size_text:>12} {stamp:>16}");
-    let name_width = width.saturating_sub(tail.len() + 1);
+    let name_width = width.saturating_sub(tail.len() + 3);
     let shown = truncate_to_width(name, name_width);
-    format!("{shown:<name_width$} {tail}")
+    format!("{marker}{shown:<name_width$} {tail}")
+}
+
+/// The flattened branch view: one full-width row per found file — the tag
+/// marker, the branch-relative path, size and stamp right-aligned — while
+/// the walk fills the list page by page.
+fn render_flat(model: &Model, window: &mut Window, body: u16, cols: u16) {
+    let Some(walk) = &model.walk else {
+        return;
+    };
+    let plain = Attributes::PLAIN;
+    let mut reverse = Attributes::PLAIN;
+    reverse.reverse = true;
+    let width = usize::from(cols);
+    let visible = walk.entries.iter().enumerate().skip(model.flat_scroll);
+    for (line, (index, entry)) in (0..body).zip(visible) {
+        let text = file_row(
+            model.tags.contains(&entry.path),
+            false,
+            relative_to(&walk.root, &entry.path),
+            entry.size,
+            entry.modified,
+            width,
+        );
+        let attrs = if index == model.flat_cursor {
+            reverse
+        } else {
+            plain
+        };
+        window.set_attributes(attrs);
+        let _ = window.move_add_str(Pos::new(line, 0), truncate_to_width(&text, width));
+        window.set_attributes(plain);
+    }
+}
+
+/// The report overlay: a batch's per-file failure lines (or a walk's
+/// unreadable directories), plainly paged over the body area; any key
+/// dismisses it.
+fn render_report(model: &Model, window: &mut Window, body: u16, cols: u16) {
+    for (line, text) in (0..body).zip(model.report_lines.iter()) {
+        let _ = window.move_add_str(
+            Pos::new(line, 0),
+            truncate_to_width(text, usize::from(cols)),
+        );
+    }
 }
 
 /// The reverse-video status line: path, entry count, sort order, free
@@ -123,11 +185,35 @@ fn render_status(model: &Model, window: &mut Window, rows: u16, cols: u16) {
         Some(space) => format!("  free {}/{}", space.free_bytes, space.total_bytes),
         None => String::new(),
     };
-    let status = format!(
-        "{}  {} entries  sort {key} {direction}{space}{hidden}",
-        model.files_dir,
-        model.visible_files().len(),
-    );
+    let tags = if model.tags.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "  {} tagged ({} bytes)",
+            model.tags.count(),
+            model.tags.total_bytes()
+        )
+    };
+    let status = if let (View::Flat, Some(walk)) = (model.view, &model.walk) {
+        let state = if walk.done {
+            ""
+        } else if walk.paused {
+            "  more with Space"
+        } else {
+            "  walking…"
+        };
+        format!(
+            "{} flattened  {} entries{state}{tags}",
+            walk.root,
+            walk.entries.len(),
+        )
+    } else {
+        format!(
+            "{}  {} entries  sort {key} {direction}{space}{hidden}{tags}",
+            model.files_dir,
+            model.visible_files().len(),
+        )
+    };
     let mut padded = String::from(truncate_to_width(&status, usize::from(cols)));
     while padded.len() < usize::from(cols) {
         padded.push(' ');
@@ -140,16 +226,29 @@ fn render_status(model: &Model, window: &mut Window, rows: u16, cols: u16) {
 /// The message line: the open prompt's question, an error/notice, the
 /// sort-menu prompt, or key hints.
 fn render_message(model: &Model, window: &mut Window, rows: u16, cols: u16) {
+    let usage = model
+        .walk
+        .as_ref()
+        .filter(|walk| walk.purpose == WalkPurpose::Usage)
+        .map(|walk| format!("usage of {}: {} (Esc cancels)", walk.root, walk.figures()));
     let text = if let Some(prompt) = &model.prompt {
         prompt_line(prompt)
     } else if model.overlay == Overlay::SortMenu {
         String::from("sort: n)ame  e)xtension  s)ize  m)odified  r)everse  Esc cancels")
     } else if let Some(message) = &model.message {
         message.clone()
+    } else if let Some(usage) = usage {
+        usage
+    } else if model.view == View::Flat {
+        String::from(
+            "arrows move  t tag  T glob  i invert  C clear  c copy  m move  d delete  \
+             Space more  Esc back",
+        )
     } else {
         String::from(
-            "arrows move  Enter open  Tab pane  c copy  m move  r rename  d delete  \
-             M mkdir  a mode  s sort  . hidden  ? help  q quit",
+            "arrows move  Enter open  Tab pane  t tag  T glob  i invert  c copy  m move  \
+             r rename  d delete  M mkdir  a mode  u usage  v flatten  s sort  . hidden  \
+             ? help  q quit",
         )
     };
     let _ = window.move_add_str(
@@ -189,6 +288,19 @@ fn prompt_line(prompt: &Prompt) -> String {
             InputOp::MkdirName => {
                 format!("mkdir: {}_  (Enter creates, Esc cancels)", input.input)
             }
+            InputOp::TagGlob => {
+                format!(
+                    "tag pattern: {}_  (glob, Enter tags, Esc cancels)",
+                    input.input
+                )
+            }
+            InputOp::BatchDest { moving, count } => {
+                let verb = if *moving { "move" } else { "copy" };
+                format!(
+                    "{verb} {count} tagged into directory: {}_  (Enter runs, Esc cancels)",
+                    input.input
+                )
+            }
         },
         Prompt::ConfirmDelete(confirm) => {
             if confirm.kind.is_dir() {
@@ -204,6 +316,17 @@ fn prompt_line(prompt: &Prompt) -> String {
             // Unreachable by construction (the prompt exists only while a
             // conflict is paused), but fail closed rather than panic.
             None => String::from("o)verwrite  s)kip  c)ancel"),
+        },
+        Prompt::ConfirmBatchDelete { count } => {
+            format!("delete {count} tagged entries (directories recursively)? y/N")
+        }
+        Prompt::BatchOverwrite(paused) => match paused.batch.conflict() {
+            Some(conflict) => {
+                format!("{} exists — o)verwrite  s)kip  c)ancel batch", conflict.dst)
+            }
+            // Unreachable by construction (the prompt exists only while a
+            // conflict is paused), but fail closed rather than panic.
+            None => String::from("o)verwrite  s)kip  c)ancel batch"),
         },
     }
 }

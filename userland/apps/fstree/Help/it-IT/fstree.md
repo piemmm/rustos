@@ -54,14 +54,41 @@ Tasti:
   ottale precompilata con il modo attuale. Invio applica (solo il
   proprietario può cambiarlo — il kernel rifiuta chiunque altro), Esc
   annulla.
+- `t` — marcare o smarcare la voce selezionata del pannello dei file e
+  scendere di una riga; pressioni ripetute marcano quindi una serie.
+  Le voci marcate portano un `*`.
+- `T` — marcare per modello: un glob (`*`, `?`, `[...]`) confrontato
+  con i nomi visibili; ogni corrispondenza si aggiunge all'insieme
+  marcato.
+- `i` — invertire le marcature sulle voci visibili.
+- `C` — cancellare tutte le marcature.
+- `u` — contare l'uso del disco sotto la directory attiva: file, byte
+  e directory, percorsi in modo incrementale in secondo piano. `Esc`
+  annulla conservando le cifre contate fin lì.
+- `v` — appiattire il ramo sotto la directory attiva: un elenco di
+  ogni file sottostante, riempito pagina per pagina (`Spazio` carica
+  la successiva). Nella vista, `t`/`T`/`i`/`C` marcano le sue righe,
+  `c`/`m`/`d` eseguono operazioni in blocco sull'insieme marcato e
+  `Esc` torna ai pannelli. Le righe sono nominate relativamente al
+  ramo appiattito.
 - `.` — mostrare/nascondere le voci nascoste (nomi con punto) in entrambi
   i pannelli.
 - `?` — mostrare questo aiuto sopra i pannelli; qualsiasi tasto lo chiude.
 - `q` — uscire ripristinando il terminale.
 
+Finché ci sono voci marcate, `c`, `m` e `d` agiscono sull'intero
+insieme marcato invece che sulla selezione: `c`/`m` chiedono una
+directory di destinazione esistente in cui le voci atterrano, e `d`
+conferma l'eliminazione in blocco. Le voci sono elaborate in ordine di
+marcatura; un errore non ferma mai il resto, il rapporto finale conta
+ciò che è riuscito e una schermata di rapporto nomina ogni errore — un
+blocco non è mai silenziosamente parziale. Le voci riuscite vengono
+smarcate; gli errori restano marcati per riprovare.
+
 Quando una copia o uno spostamento sovrascriverebbe un file esistente,
 la sessione chiede file per file: `o` sovrascrive, `s` salta (un
 origine saltata resta al suo posto) e `c` annulla i passi rimanenti —
+in un blocco, annullare abbandona tutte le voci rimanenti —
 ciò che è già stato applicato rimane, e il rapporto finale dice cosa è
 successo. Un errore a metà copia rimuove la destinazione scritta a
 metà e mostra l'errore del kernel; nulla si spaccia mai per una copia
@@ -70,11 +97,13 @@ compare tale e quale sulla riga dei messaggi senza che nulla cambi.
 
 La riga di stato mostra il percorso elencato, il numero di voci visibili,
 l'ordinamento, i byte liberi/totali del volume sottostante (quando il
-servizio di informazioni di sistema può riferirli) e se le voci nascoste
-sono visibili. Un file il cui formato di archiviazione non conserva la
+servizio di informazioni di sistema può riferirli), se le voci nascoste
+sono visibili e — finché qualcosa è marcato — il numero di voci
+marcate con il loro totale di byte. Un file il cui formato di
+archiviazione non conserva la
 data di modifica mostra `-` nella colonna della data.
 
-La marcatura, la ricerca e i visualizzatori
+La ricerca e i visualizzatori
 testo/esadecimale/disassemblato arrivano nelle fasi successive del
 piano dello strumento.
 
@@ -93,4 +122,4 @@ piano dello strumento.
 
 ## SEE ALSO
 
-ls, cp, mv, rm, mkdir, chmod, du, df
+ls, cp, mv, rm, mkdir, chmod, du, df, find

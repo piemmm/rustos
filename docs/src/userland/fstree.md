@@ -9,7 +9,7 @@ tree, discovered from disk like every other bundle. The staged plan for the
 whole tool lives in `.junie/fstree-next-plan.md`; this page describes what
 is built.
 
-## What is built (stages S1 — the model core — and S2 — file operations)
+## What is built (S1 model core, S2 file operations, S3 tagging/batches/walks)
 
 - **The tree pane.** A lazily populated directory tree: a directory is read
   through one `fs_readdir` call when it is first shown or expanded — never
@@ -61,6 +61,35 @@ is built.
   whole-file slurp); a mid-stream failure removes the partial target and
   surfaces the kernel's errno, so a half-written file never masquerades
   as a copy.
+- **Tagging.** `t` toggles a tag on the file pane's selected entry (and
+  steps down, so a held key marks a run); `T` tags by a filename glob
+  compiled by the one shared matcher (`lib/glob`) against the visible
+  names; `i` inverts the tags over the visible entries; `C` clears them.
+  Tagged entries carry a `*` marker and the status line shows the tagged
+  count and listed-byte total. Tag order is preserved — it is the batch
+  order.
+- **Batch operations.** While anything is tagged, `c`/`m`/`d` operate on
+  the whole tagged set: `c`/`m` ask for an existing destination directory
+  (validated before anything runs) and `d` confirms the batch delete.
+  The batch driver (`src/tag.rs`) plans each entry's landing spot as it
+  comes up, **continues past a failed entry**, and collects a per-file
+  failure report shown on a dismissable report overlay — a batch is never
+  silently partial. An overwrite conflict pauses the whole batch through
+  the same o/s/c question a single operation uses; cancel drops the
+  remaining entries (applied work stays, and the report says so).
+  Succeeded sources are untagged; failures stay tagged for a retry, and a
+  delete or move prunes tags only for paths verified gone.
+- **Disk usage (`u`) and the flattened branch view (`v`).** Both are fed
+  by one bounded, cancellable walker (`src/walk.rs`): a depth-first,
+  deterministic (name-ordered) descent that reads at most a fixed number
+  of directories per tick, counts files/bytes/directories, and records an
+  unreadable directory instead of stopping — the summary says exactly
+  what could not be read. `u` reports its running figures on the message
+  line and `Esc` cancels keeping the count so far. `v` lists every file
+  under the focused directory (paths relative to the branch root) and
+  pauses at page boundaries so a huge branch fills memory only as far as
+  asked — `Space` loads the next page; inside the view `t`/`T`/`i`/`C`
+  tag rows and `c`/`m`/`d` run batches; `Esc` returns to the panes.
 - **Help.** `-h`/`-?` print the bundle's own Help document through the
   shared `lib/help` engine; the in-session `?` overlay shows the same
   document decoded to plain text through the one `lib/vt` parser. Nothing
@@ -89,11 +118,18 @@ grammar (`src/app.rs`) mutates, over two injected seams —
   and pauses on each overwrite conflict, handing the decision to the key
   loop — a paused operation holds no filesystem handle, only the paths
   still to process.
-- `Tty` (from `rustos-curses`) — the terminal byte channel over the
-  inherited fd 0/1; the program names only its standard descriptors, never
-  a console device.
+- The tag set and batch driver live in `src/tag.rs` (an ordered `TagSet`
+  and a `Batch` that drives one `FileOp` per entry, pausing through the
+  same conflict machinery), and the bounded walker in `src/walk.rs`
+  (memory follows the frontier, never the subtree).
+- `Tty` — the terminal byte channel over the inherited fd 0/1: the `Run`
+  binary links the one shared `rustos_curses::StreamTty` (`lib/curses`,
+  feature `program`); the program names only its standard descriptors,
+  never a console device.
 
-Every wait blocks (`Screen::getch` parks the task in the kernel); there is
+Every wait parks in the kernel: `Screen::getch` blocks normally, and while
+a walk is live the wait carries a short timeout so an elapsed read
+advances the walk one bounded tick — there is
 no polling loop. A refused listing fails closed: the error is surfaced on
 the message line, and the cursor, listing, and expansion state are left
 untouched — a denied directory is never shown as empty. The session runs
@@ -130,4 +166,12 @@ refusals), the overwrite matrix (overwrite, skip, cancel, per-file
 questions in a merging directory copy), move (same-volume rename,
 cross-volume copy-then-remove, skip preserving the skipped source), and
 failure injection (a read or write failure mid-copy removes the partial
-target and surfaces the errno with the panes consistent).
+target and surfaces the errno with the panes consistent). The S3 surface
+is covered the same way: tag toggle/figures, tree-pane refusal, glob
+tagging (matching and malformed patterns), invert/clear, batch delete
+continuing past a denied entry with the report in tag order, batch copy
+with skip and with cancel (remaining entries dropped, still tagged),
+destination validation, the walker's per-tick read budget and error
+recording, the usage walk's bounded ticks/cancellation/final figures,
+flattened-view pagination with resume, flat-view tagging and exit, and
+the status line's tag figures.

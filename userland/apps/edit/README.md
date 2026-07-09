@@ -62,9 +62,9 @@ bindings are function-key-driven — `F10` where the DOS editor used `Alt`,
   input read, never a poll (`AGENTS.md` §2.23).
 - **`command`** — the `edit [file] [-h | -?]` argument grammar.
 - **`run.rs`** — the freestanding `Run` binary: `rustos-rt` runtime, the
-  `RtTty` byte channel over fd 0/1, the `RtFs` whole-file seam, raw input
-  for the session (cooked restored on exit), and the `-h`/`-?` short help
-  through the shared `lib/help` engine.
+  shared `rustos_curses::StreamTty` byte channel over fd 0/1, the `RtFs`
+  whole-file seam, raw input for the session (cooked restored on exit),
+  and the `-h`/`-?` short help through the shared `lib/help` engine.
 
 The bundle's `Help/` tree (six locales, `en-US` canonical) is the single
 source of the command's documentation (plans/APPS.md); nothing is

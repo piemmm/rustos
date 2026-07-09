@@ -13,7 +13,8 @@
 //! shared engine and exit, plans/APPS.md §4; at most one file operand is
 //! accepted). It then sizes the screen from the console the kernel gave it,
 //! puts the terminal into raw (no-echo) input, and runs the [`rustos_edit`]
-//! editor loop against two seams: `RtTty`, the curses byte channel over the
+//! editor loop against two seams: the shared `rustos_curses::StreamTty`, the
+//! curses byte channel over the
 //! inherited standard input/output (fd 0/1), and `RtFs`, whole-file
 //! load/save over the kernel-authorised `fs_*` syscalls. The tool binds
 //! only to its inherited descriptors, never a console device, and holds no
@@ -46,7 +47,7 @@ mod program {
     use alloc::vec::Vec;
 
     use rustos_abi::{Errno, InputMode, OpenFlags, STDOUT};
-    use rustos_curses::{CursesError, Result as CursesResult, Screen, Size, Tty};
+    use rustos_curses::{Screen, Size, StreamTty};
     use rustos_edit::{parse, run, Command, Fs, Model, MAX_FILE_BYTES, USAGE};
     use rustos_help::{own_short_help, BundleHelp};
     use rustos_rt::io::{write_stderr_line, Stdout, Write};
@@ -58,52 +59,6 @@ mod program {
     /// line, whose remote terminal size only the far-end emulator knows).
     const FALLBACK_ROWS: u16 = 24;
     const FALLBACK_COLS: u16 = 80;
-
-    /// The maximum input bytes drained from standard input in one blocking
-    /// read. A key press (even a multi-byte escape sequence) is a handful of
-    /// bytes; a small stack buffer absorbs a burst without allocating, and the
-    /// curses input decoder reassembles sequences that span reads.
-    const INPUT_CHUNK: usize = 64;
-
-    /// The curses [`Tty`] over the program's inherited standard streams:
-    /// writes go to standard output (fd 1) and blocking reads draw from
-    /// standard input (fd 0), both through `rustos-rt`. The program names
-    /// only its inherited descriptors, never a console device, so the same
-    /// binary drives a serial terminal, a framebuffer console, or a future
-    /// windowed terminal unchanged — the stream layer owns which backing
-    /// that is.
-    struct RtTty;
-
-    impl Tty for RtTty {
-        fn write(&mut self, bytes: &[u8]) -> CursesResult<()> {
-            // The shared `rustos_rt::io` short-write loop — no tty-private
-            // copy (the charter forbids that duplication). `write_all` loops
-            // over short writes and fails closed (never spins) if the
-            // backing stops accepting bytes, which the seam reports as an
-            // I/O error.
-            Stdout.write_all(bytes).map_err(|_| CursesError::Io)
-        }
-
-        fn read(&mut self) -> CursesResult<Vec<u8>> {
-            // The standard-input backing owns blocking and offers no
-            // peek/poll, so a non-blocking read cannot know what is pending:
-            // it honestly reports "nothing available right now" rather than
-            // blocking or fabricating input. The editor runs the blocking
-            // input mode, so this path is never its wait; it exists to
-            // satisfy the seam and never lies about available bytes.
-            Ok(Vec::new())
-        }
-
-        fn read_blocking(&mut self) -> CursesResult<Vec<u8>> {
-            let mut buf = [0u8; INPUT_CHUNK];
-            // `rustos_rt::stdin` parks the task in the kernel until at least
-            // one byte arrives (the backing owns blocking), then returns the
-            // count read; a zero-length return means the stream reported end
-            // of input, which the seam encodes as an empty vector.
-            let read = rustos_rt::stdin(&mut buf);
-            Ok(buf[..read.min(buf.len())].to_vec())
-        }
-    }
 
     /// The production [`Fs`]: whole-file load and save over the
     /// kernel-authorised `fs_*` view of the filesystem. It adds no
@@ -216,7 +171,7 @@ mod program {
         let term = rustos_rt::env_var(b"TERM")
             .and_then(|raw| core::str::from_utf8(raw).ok())
             .map_or(rustos_termcap::TermType::Dumb, from_term);
-        let mut screen = Screen::new(RtTty, term, size);
+        let mut screen = Screen::new(StreamTty, term, size);
         // Take over the display for the session: the alternate screen
         // where the terminal has one (restoring the covered content on
         // exit), an in-place erase otherwise — either way the editor never

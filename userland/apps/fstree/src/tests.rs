@@ -15,11 +15,13 @@ use rustos_abi::time::Time64;
 use rustos_abi::{Errno, FileKind};
 use rustos_curses::{Event, Pos, Size, Window};
 
-use crate::app::handle_event;
+use crate::app::{handle_event, walk_tick};
 use crate::fs::{Fs, FsEntry, RenameOutcome, VolumeSpace};
-use crate::model::{join, ModePrompt, Model, Overlay, Pane, Prompt, SortKey};
+use crate::model::{join, ModePrompt, Model, Overlay, Pane, Prompt, SortKey, View};
 use crate::ops::{basename, is_inside, parent_of};
 use crate::render::render;
+use crate::tag::TagEntry;
+use crate::walk::{WalkPurpose, WalkState, Walker};
 
 /// An in-memory filesystem: per-path listings, per-path file bytes,
 /// per-path modes, a denied set (listings and stats), a set-mode denial
@@ -698,7 +700,7 @@ fn the_frame_lays_out_panes_status_and_hints() {
     let status = row_text(&window, 6);
     assert!(status.starts_with("/  5 entries  sort name asc  free 500/1000"));
     // Hint line (truncated to the 60-column grid; the leading hints show).
-    assert!(row_text(&window, 7).contains("c copy"));
+    assert!(row_text(&window, 7).contains("t tag"));
 }
 
 /// The file-pane text of visible row `index`, as the renderer prints it.
@@ -717,8 +719,10 @@ fn file_row_text(m: &Model, index: usize) -> String {
         format!("{}", entry.size)
     };
     let tail = format!("{size_text:>12} {stamp:>16}");
-    let name_width = 39 - (tail.len() + 1);
-    format!("{:<name_width$} {tail}", entry.name)
+    // The row starts with the one-column tag marker (a space while
+    // untagged), so the name field gives up marker + two separators.
+    let name_width = 39 - (tail.len() + 3);
+    format!(" {:<name_width$} {tail}", entry.name)
 }
 
 #[test]
@@ -1187,4 +1191,356 @@ fn a_scripted_session_browses_sorts_and_quits() {
     // The session read exactly the directories it visited: the root, then
     // `/docs` for the file pane and once more for its tree expansion.
     assert_eq!(fs.reads.get(), 3);
+}
+
+// --- S3: tagging, batch operations, and the bounded walks ----------------
+
+/// Tag an already-listed entry directly (the key path is exercised by the
+/// toggle tests; the batch tests need a specific tag order).
+fn tag(m: &mut Model, path: &str, kind: FileKind, size: u64) {
+    m.tags.insert(TagEntry {
+        path: path.to_owned(),
+        kind,
+        size,
+    });
+}
+
+#[test]
+fn tag_toggles_and_reports_figures() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    // Visible, name-sorted, dirs first: docs locked a.rs b.txt big.
+    m.file_cursor = 2;
+    handle_event(&mut m, &mut fs, &Event::Char('t'));
+    assert!(m.tags.contains("/a.rs"));
+    // The cursor stepped down so repeated presses mark a run.
+    assert_eq!(m.file_cursor, 3);
+    handle_event(&mut m, &mut fs, &Event::Char('t'));
+    assert!(m.tags.contains("/b.txt"));
+    assert_eq!(m.tags.count(), 2);
+    assert_eq!(m.tags.total_bytes(), 40);
+    // Toggling a tagged entry untags it.
+    m.file_cursor = 2;
+    handle_event(&mut m, &mut fs, &Event::Char('t'));
+    assert!(!m.tags.contains("/a.rs"));
+    assert_eq!(m.tags.count(), 1);
+}
+
+#[test]
+fn tags_from_the_tree_pane_are_refused() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    m.pane = Pane::Tree;
+    handle_event(&mut m, &mut fs, &Event::Char('t'));
+    assert!(m.tags.is_empty());
+    assert!(m.message.is_some());
+}
+
+#[test]
+fn glob_tagging_tags_matching_visible_entries() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    handle_event(&mut m, &mut fs, &Event::Char('T'));
+    for ch in "*.rs".chars() {
+        handle_event(&mut m, &mut fs, &Event::Char(ch));
+    }
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    assert!(m.tags.contains("/a.rs"));
+    assert_eq!(m.tags.count(), 1);
+    let message = m.message.clone().expect("a tagging report");
+    assert!(message.contains("tagged 1 matching"), "got {message}");
+}
+
+#[test]
+fn malformed_glob_reports_and_tags_nothing() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    handle_event(&mut m, &mut fs, &Event::Char('T'));
+    handle_event(&mut m, &mut fs, &Event::Char('['));
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    assert!(m.tags.is_empty());
+    let message = m.message.clone().expect("a refusal");
+    assert!(message.starts_with("bad pattern"), "got {message}");
+}
+
+#[test]
+fn invert_swaps_the_tagged_set() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    m.file_cursor = 2;
+    handle_event(&mut m, &mut fs, &Event::Char('t')); // tags a.rs
+    handle_event(&mut m, &mut fs, &Event::Char('i'));
+    assert!(!m.tags.contains("/a.rs"));
+    assert!(m.tags.contains("/docs"));
+    assert!(m.tags.contains("/locked"));
+    assert!(m.tags.contains("/b.txt"));
+    assert!(m.tags.contains("/big"));
+    assert_eq!(m.tags.count(), 4);
+}
+
+#[test]
+fn clear_drops_every_tag() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    m.file_cursor = 2;
+    handle_event(&mut m, &mut fs, &Event::Char('t'));
+    handle_event(&mut m, &mut fs, &Event::Char('C'));
+    assert!(m.tags.is_empty());
+}
+
+#[test]
+fn batch_delete_continues_past_a_failure_and_reports_it_in_order() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    // Tag order fixes the batch (and report) order: b.txt, locked, a.rs.
+    tag(&mut m, "/b.txt", FileKind::Regular, 10);
+    tag(&mut m, "/locked", FileKind::Directory, 0);
+    tag(&mut m, "/a.rs", FileKind::Regular, 30);
+    handle_event(&mut m, &mut fs, &Event::Char('d'));
+    assert!(matches!(
+        m.prompt,
+        Some(Prompt::ConfirmBatchDelete { count: 3 })
+    ));
+    handle_event(&mut m, &mut fs, &Event::Char('y'));
+    // The failed entry did not stop the later one.
+    assert!(fs.contents("/b.txt").is_none());
+    assert!(fs.contents("/a.rs").is_none());
+    // The denied directory survives, still listed in the root.
+    assert!(fs
+        .dirs
+        .get("/")
+        .is_some_and(|list| list.iter().any(|e| e.name == "locked")));
+    assert_eq!(
+        m.message.as_deref(),
+        Some("batch: deleted 2 of 3 tagged, 1 failed")
+    );
+    // The report overlay lists exactly the failure, in encounter order.
+    assert_eq!(m.overlay, Overlay::Report);
+    assert_eq!(
+        m.report_lines,
+        vec![String::from("/locked: PermissionDenied")]
+    );
+    // Succeeded entries are untagged; the failed one stays tagged.
+    assert!(m.tags.contains("/locked"));
+    assert_eq!(m.tags.count(), 1);
+}
+
+/// A fixture whose destination directory already holds one of the batch's
+/// names, so a copy pauses on the overwrite question.
+fn conflict_fixture() -> FakeFs {
+    FakeFs::new()
+        .dir(
+            "/",
+            vec![
+                dir("docs"),
+                file("b.txt", 10, 2_000),
+                file("big", 999, 3_000),
+            ],
+        )
+        .dir(
+            "/docs",
+            vec![file("guide.md", 5, 4_000), file("b.txt", 5, 1_000)],
+        )
+}
+
+#[test]
+fn batch_copy_skip_continues_with_the_rest() {
+    let mut fs = conflict_fixture();
+    let mut m = model(&mut fs);
+    tag(&mut m, "/b.txt", FileKind::Regular, 10);
+    tag(&mut m, "/big", FileKind::Regular, 999);
+    handle_event(&mut m, &mut fs, &Event::Char('c'));
+    for ch in "docs".chars() {
+        handle_event(&mut m, &mut fs, &Event::Char(ch));
+    }
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    // The existing /docs/b.txt paused the batch on its question.
+    assert!(matches!(m.prompt, Some(Prompt::BatchOverwrite(_))));
+    handle_event(&mut m, &mut fs, &Event::Char('s'));
+    assert_eq!(
+        m.message.as_deref(),
+        Some("batch: copied 2 of 2 tagged, 1 skipped")
+    );
+    // The skipped target is untouched; the rest copied.
+    assert_eq!(fs.contents("/docs/b.txt").map(|b| b.len()), Some(5));
+    assert_eq!(fs.contents("/docs/big").map(|b| b.len()), Some(999));
+    // Both entries completed (the skip was inside one), so both untag.
+    assert!(m.tags.is_empty());
+}
+
+#[test]
+fn batch_cancel_drops_the_remaining_entries() {
+    let mut fs = conflict_fixture();
+    let mut m = model(&mut fs);
+    tag(&mut m, "/b.txt", FileKind::Regular, 10);
+    tag(&mut m, "/big", FileKind::Regular, 999);
+    handle_event(&mut m, &mut fs, &Event::Char('c'));
+    for ch in "docs".chars() {
+        handle_event(&mut m, &mut fs, &Event::Char(ch));
+    }
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    assert!(matches!(m.prompt, Some(Prompt::BatchOverwrite(_))));
+    handle_event(&mut m, &mut fs, &Event::Char('c'));
+    let message = m.message.clone().expect("a batch report");
+    assert!(message.ends_with("(cancelled)"), "got {message}");
+    // The cancelled entry is reported; the remainder never ran.
+    assert_eq!(m.report_lines, vec![String::from("/b.txt: cancelled")]);
+    assert!(fs.contents("/docs/big").is_none());
+    // Nothing succeeded, so both entries stay tagged for a retry.
+    assert_eq!(m.tags.count(), 2);
+}
+
+#[test]
+fn batch_destination_must_be_an_existing_directory() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    tag(&mut m, "/a.rs", FileKind::Regular, 30);
+    handle_event(&mut m, &mut fs, &Event::Char('c'));
+    for ch in "b.txt".chars() {
+        handle_event(&mut m, &mut fs, &Event::Char(ch));
+    }
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    assert_eq!(
+        m.message.as_deref(),
+        Some("batch destination must be an existing directory")
+    );
+    assert_eq!(fs.contents("/b.txt").map(|b| b.len()), Some(10));
+}
+
+#[test]
+fn walker_reads_at_most_the_tick_budget() {
+    let mut fs = fixture();
+    let mut walker = Walker::new("/");
+    let found = walker.tick(&mut fs, 1);
+    // One tick, one directory read — the budget bounds the pass.
+    assert_eq!(fs.reads.get(), 1);
+    // The root's regular files, in name order.
+    let names: Vec<&str> = found.iter().map(|e| e.path.as_str()).collect();
+    assert_eq!(names, ["/a.rs", "/b.txt", "/big"]);
+    assert!(walker.more());
+    let _ = walker.tick(&mut fs, 10);
+    assert!(!walker.more());
+    // The denied directory is recorded, never silently dropped.
+    assert_eq!(
+        walker.errors,
+        vec![String::from("/locked: PermissionDenied")]
+    );
+    assert_eq!(walker.files_seen, 5);
+    assert_eq!(walker.bytes, 1_045);
+    assert_eq!(walker.dirs_seen, 3);
+}
+
+/// A root of twenty empty subdirectories, so one bounded tick cannot
+/// finish the walk.
+fn wide_fixture() -> FakeFs {
+    let mut entries = Vec::new();
+    let mut fs = FakeFs::new();
+    for index in 0..20_u32 {
+        let name = format!("d{index:02}");
+        entries.push(dir(&name));
+        fs = fs.dir(&format!("/{name}"), vec![]);
+    }
+    fs.dir("/", entries)
+}
+
+#[test]
+fn usage_walk_ticks_bounded_and_esc_cancels() {
+    let mut fs = wide_fixture();
+    let mut m = model(&mut fs);
+    let before = fs.reads.get();
+    handle_event(&mut m, &mut fs, &Event::Char('u'));
+    assert!(matches!(
+        m.walk,
+        Some(WalkState {
+            purpose: WalkPurpose::Usage,
+            ..
+        })
+    ));
+    walk_tick(&mut m, &mut fs);
+    // One tick reads at most its directory budget.
+    assert_eq!(fs.reads.get() - before, 16);
+    assert!(m.walk.is_some());
+    handle_event(&mut m, &mut fs, &Event::Esc);
+    assert!(m.walk.is_none());
+    let message = m.message.clone().expect("a cancellation report");
+    assert!(message.contains("cancelled"), "got {message}");
+}
+
+#[test]
+fn usage_walk_completes_with_figures_and_reports_unreadable() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    handle_event(&mut m, &mut fs, &Event::Char('u'));
+    let mut guard = 0;
+    while m.walk.is_some() {
+        walk_tick(&mut m, &mut fs);
+        guard += 1;
+        assert!(guard < 10, "the walk must finish");
+    }
+    assert_eq!(
+        m.message.as_deref(),
+        Some("usage of /: 5 files, 1045 bytes, 3 dirs, 1 unreadable")
+    );
+    assert_eq!(m.overlay, Overlay::Report);
+    assert_eq!(
+        m.report_lines,
+        vec![String::from("/locked: PermissionDenied")]
+    );
+}
+
+#[test]
+fn flat_walk_paginates_and_resumes() {
+    let mut fs = fixture();
+    let mut walk = WalkState::new("/", WalkPurpose::Flat, 2);
+    walk.tick(&mut fs, 1);
+    // The page boundary paused the walk with directories still pending.
+    assert!(walk.paused);
+    assert!(!walk.done);
+    assert!(!walk.ticking());
+    walk.resume();
+    walk.tick(&mut fs, 10);
+    assert!(walk.done);
+    assert_eq!(walk.entries.len(), 5);
+}
+
+#[test]
+fn flat_view_tags_rows_and_esc_returns_to_the_panes() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    handle_event(&mut m, &mut fs, &Event::Char('v'));
+    assert_eq!(m.view, View::Flat);
+    let mut guard = 0;
+    while m.walk.as_ref().is_some_and(WalkState::ticking) {
+        walk_tick(&mut m, &mut fs);
+        guard += 1;
+        assert!(guard < 10, "the walk must finish");
+    }
+    // The first found file is the root's first regular entry.
+    handle_event(&mut m, &mut fs, &Event::Char('t'));
+    assert!(m.tags.contains("/a.rs"));
+    assert_eq!(m.flat_cursor, 1);
+    handle_event(&mut m, &mut fs, &Event::Esc);
+    assert_eq!(m.view, View::Panes);
+    assert!(m.walk.is_none());
+    // Tags survive leaving the view.
+    assert_eq!(m.tags.count(), 1);
+}
+
+#[test]
+fn status_line_shows_the_tag_figures() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    m.file_cursor = 2;
+    handle_event(&mut m, &mut fs, &Event::Char('t'));
+    handle_event(&mut m, &mut fs, &Event::Char('t'));
+    let mut window = Window::new(Pos::new(0, 0), Size::new(10, 70));
+    render(&m, &mut window);
+    let status = row_text(&window, 8);
+    assert!(status.contains("2 tagged (40 bytes)"), "got {status}");
 }

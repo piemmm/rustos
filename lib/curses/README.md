@@ -39,6 +39,13 @@ vocabulary, and terminal capabilities come from `lib/termcap`.
   `read_events` (batched), and `set_input_mode` selects blocking, non-blocking
   (`nodelay`), or timeout waiting. The `Tty` seam mirrors the terminal app's
   `ShellSource`, so the whole pipeline is host-testable without a kernel.
+- **`StreamTty`** (feature `program`, freestanding targets only) — the one
+  production `Tty` over a program's inherited standard streams (fd 0/1)
+  through `rustos-rt`: blocking and timed reads park in the kernel, a closed
+  stream is a loud `CursesError::Io` (never a silent empty read a session
+  could spin on), and an elapsed timed read is the caller's tick. Every
+  full-screen tool's `Run` binary links this one definition instead of
+  carrying its own copy (`AGENTS.md` §2.2).
 
 ## One vocabulary, fail closed
 
@@ -53,8 +60,10 @@ colour is degraded (`AGENTS.md` §2.9). Nothing here writes to fd 3 (`stdinfo`,
 
 ## Layering
 
-`lib/curses` depends on `rustos-vt` and `rustos-termcap` (and `lib/*`) only —
-never on `kernel/*`, `drivers/*`, or `userland/*` (`AGENTS.md` §17.4) — and is
+`lib/curses` depends on `rustos-vt` and `rustos-termcap` (and, behind the
+`program` feature on freestanding targets, `rustos-rt` + `rustos-abi` for
+`StreamTty`) — all `lib/*`, never `kernel/*`, `drivers/*`, or `userland/*`
+(`AGENTS.md` §17.4) — and is
 text-only infrastructure outside `userland/gui/*`, so a headless image links it
 freely (§17.3).
 

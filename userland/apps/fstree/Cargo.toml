@@ -51,6 +51,9 @@ rustos-help = { path = "../../../lib/help", version = "=0.0.0" }
 # parsed and normalised through it (relative spellings joined onto the
 # listed directory), never by a second in-app path parser.
 rustos-path = { path = "../../../lib/path", version = "=0.0.0" }
+# The one filename-glob matcher: tag-by-pattern (`T`) compiles and matches
+# through it, never a second in-app wildcard matcher.
+rustos-glob = { path = "../../../lib/glob", version = "=0.0.0" }
 
 # For the freestanding `Run` binary only: the userland runtime `rustos-rt`
 # (`_start`, canary, panic handler, `mem_map` allocator, the syscall
@@ -67,3 +70,9 @@ rustos-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features
 # syscall-backed own-bundle `HelpSource` (`BundleHelp`), shared by every
 # command app.
 rustos-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }
+# The freestanding `Run` binary also enables the curses library's shared
+# standard-streams `Tty` (`StreamTty`), the one channel definition every
+# full-screen tool links instead of a per-app copy.
+rustos-curses = { path = "../../../lib/curses", version = "=0.0.0", features = [
+    "program",
+] }

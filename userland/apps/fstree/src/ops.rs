@@ -322,6 +322,14 @@ impl FileOp {
         self.conflict.as_ref().map(|(conflict, _)| conflict)
     }
 
+    /// Whether the user cancelled the operation's remaining steps at an
+    /// overwrite question; work already applied stayed applied. The batch
+    /// driver reads this to tell a cancelled entry from a completed one.
+    #[must_use]
+    pub fn cancelled(&self) -> bool {
+        self.cancelled
+    }
+
     /// Answer the paused question: overwrite re-queues the approved step,
     /// skip withholds it (and any removal of its emptied ancestors), and
     /// cancel drops every remaining step — work already applied stays.

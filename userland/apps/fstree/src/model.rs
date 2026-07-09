@@ -19,6 +19,8 @@ use rustos_abi::FileKind;
 
 use crate::fs::{Fs, FsEntry, VolumeSpace};
 use crate::ops::FileOp;
+use crate::tag::{Batch, TagSet};
+use crate::walk::WalkState;
 
 /// Which pane holds the keyboard focus.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -39,6 +41,20 @@ pub enum Overlay {
     SortMenu,
     /// The help overlay covers the panes.
     Help,
+    /// A batch's per-file failure report ([`Model::report_lines`]) covers
+    /// the panes until a key dismisses it.
+    Report,
+}
+
+/// Which body the session shows: the two panes, or the flattened branch
+/// view listing every file under one directory.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub enum View {
+    /// The tree and file panes.
+    #[default]
+    Panes,
+    /// The flattened branch view (`v`), fed by the live walk.
+    Flat,
 }
 
 /// The column the file pane is ordered by.
@@ -93,6 +109,13 @@ pub enum Prompt {
     ConfirmDelete(ConfirmPrompt),
     /// A paused operation's per-file overwrite question.
     Overwrite(OverwritePrompt),
+    /// The batch delete confirmation (`d` with tags).
+    ConfirmBatchDelete {
+        /// How many entries are tagged, spelled out in the question.
+        count: usize,
+    },
+    /// A paused batch's per-file overwrite question.
+    BatchOverwrite(BatchPrompt),
 }
 
 /// What the open [`InputPrompt`] asks for, carrying its subject.
@@ -127,6 +150,16 @@ pub enum InputOp {
     },
     /// The name of a directory created in the listed directory (`M`).
     MkdirName,
+    /// A filename-glob pattern tagging every matching visible entry (`T`).
+    TagGlob,
+    /// The destination directory a batch copy/move lands in (`c`/`m` with
+    /// tags).
+    BatchDest {
+        /// Whether the batch moves (`true`) or copies.
+        moving: bool,
+        /// How many entries are tagged, spelled out in the prompt.
+        count: usize,
+    },
 }
 
 /// A one-line text question: the operation it feeds and the text typed so
@@ -160,6 +193,18 @@ pub struct OverwritePrompt {
     pub op: FileOp,
     /// The directories to refresh once the operation ends, carried across
     /// the pause.
+    pub refresh: Vec<String>,
+}
+
+/// A paused [`Batch`] whose current entry would overwrite an existing
+/// file; the user answers o)verwrite, s)kip, or c)ancel — cancel drops
+/// the batch's remaining entries.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchPrompt {
+    /// The paused batch; its [`Batch::conflict`] names the paths.
+    pub batch: Batch,
+    /// The directories to refresh once the batch ends, carried across the
+    /// pause.
     pub refresh: Vec<String>,
 }
 
@@ -214,6 +259,18 @@ pub struct Model {
     pub prompt: Option<Prompt>,
     /// The bundle's rendered help text, shown by the `?` overlay.
     pub help_text: String,
+    /// The tagged entries (`t`, the glob prompt, invert).
+    pub tags: TagSet,
+    /// The live walk feeding the flattened view or the usage figures.
+    pub walk: Option<WalkState>,
+    /// Which body the session shows.
+    pub view: View,
+    /// Cursor index into the flattened view's entries.
+    pub flat_cursor: usize,
+    /// First flattened row shown (scrolling).
+    pub flat_scroll: usize,
+    /// The lines the report overlay shows (a batch's per-file failures).
+    pub report_lines: Vec<String>,
     /// Set when the session should end.
     pub quit: bool,
 }
@@ -254,6 +311,12 @@ impl Model {
             overlay: Overlay::None,
             prompt: None,
             help_text,
+            tags: TagSet::new(),
+            walk: None,
+            view: View::Panes,
+            flat_cursor: 0,
+            flat_scroll: 0,
+            report_lines: Vec::new(),
             quit: false,
         };
         let entries = fs.list_dir(root_path)?;

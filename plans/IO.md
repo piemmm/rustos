@@ -90,9 +90,13 @@ done items):
   short-write loop over the `lib/rt` byte-slice wrappers now write through
   `rustos_rt::io::{Stdout, Stderr, Write}`, and the duplicated loops are
   deleted: `userland/shell/elsh` (`RtConsole`), `userland/session/login`
-  (`RtPrompt`), `userland/apps/top` (`RtTty`), `userland/system/init` (the
+  (`RtPrompt`), `userland/system/init` (the
   banner write), and `lib/procinfo` (`RtOutput` / `write_stderr_line`, which
-  back `sysinfo` / `ps` / `top`). There is one `Write::write_all` loop in
+  back `sysinfo` / `ps` / `top`). The curses standard-streams channel lives
+  once as `rustos_curses::StreamTty` (`lib/curses`, feature `program`),
+  linked by every full-screen program (`top`, `vim`, `edit`, `fstree`,
+  `login`) instead of a per-app `Tty` copy, and writes through the same
+  `rustos_rt::io` loop. There is one `Write::write_all` loop in
   userland. The bounded, edit-aware line readers that are **not** the unbounded
   `BufReader` — the shell REPL's `MAX_LINE`-capped `LineReader` and login's
   byte-wise prompt reads, both running the one shared

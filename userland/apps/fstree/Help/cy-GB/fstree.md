@@ -53,14 +53,41 @@ Bysellau:
   wedi'i rhag-lenwi â'r modd presennol. Mae Enter yn cymhwyso (dim ond y
   perchennog all ei newid — mae'r cnewyllyn yn gwrthod pawb arall), mae
   Esc yn canslo.
+- `t` — tagio neu ddad-dagio cofnod a ddewiswyd y panel ffeiliau a
+  symud rhes i lawr; mae pwyso dro ar ôl tro felly'n tagio rhes o
+  gofnodion. Mae cofnodion wedi'u tagio yn cario `*`.
+- `T` — tagio yn ôl patrwm: glob (`*`, `?`, `[...]`) a gymherir â'r
+  enwau gweladwy; ychwanegir pob cydweddiad at y set a dagiwyd.
+- `i` — gwrthdroi'r tagiau dros y cofnodion gweladwy.
+- `C` — clirio pob tag.
+- `u` — cyfrif defnydd disg o dan y cyfeiriadur â ffocws: ffeiliau,
+  beitiau a chyfeiriaduron, wedi'u cerdded fesul cam yn y cefndir.
+  Mae `Esc` yn canslo gan gadw'r ffigurau a gyfrifwyd hyd hynny.
+- `v` — fflatio'r gangen o dan y cyfeiriadur â ffocws: un rhestr o
+  bob ffeil oddi tani, yn llenwi fesul tudalen (mae `Bwlch` yn llwytho'r
+  dudalen nesaf). Yn y golwg, mae `t`/`T`/`i`/`C` yn tagio ei rhesi,
+  mae `c`/`m`/`d` yn rhedeg gweithredoedd swp dros y set a dagiwyd, ac
+  mae `Esc` yn dychwelyd i'r paneli. Enwir y rhesi yn gymharol â'r
+  gangen a fflatiwyd.
 - `.` — dangos/cuddio cofnodion cudd (enwau â dot) yn y ddau banel.
 - `?` — dangos y cymorth hwn dros y paneli; mae unrhyw fysell yn ei gau.
 - `q` — gadael, gan adfer y derfynell.
 
+Tra bo cofnodion wedi'u tagio, mae `c`, `m` a `d` yn gweithredu ar y
+set gyfan a dagiwyd yn hytrach na'r dewisiad: mae `c`/`m` yn gofyn am
+gyfeiriadur cyrchfan presennol y mae'r cofnodion yn glanio ynddo, ac
+mae `d` yn cadarnhau'r dileu swp. Prosesir y cofnodion yn nhrefn eu
+tagio; nid yw cofnod a fethodd byth yn atal y gweddill, mae'r
+adroddiad terfynol yn cyfrif yr hyn a lwyddodd, ac mae sgrin adroddiad
+yn enwi pob methiant — nid yw swp byth yn rhannol yn dawel. Caiff
+cofnodion a lwyddodd eu dad-dagio; erys methiannau wedi'u tagio ar
+gyfer ailgynnig.
+
 Pan fyddai copïo neu symud yn trosysgrifo ffeil bresennol, mae'r
 sesiwn yn gofyn fesul ffeil: mae `o` yn trosysgrifo, mae `s` yn hepgor
 (erys ffynhonnell a hepgorwyd yn ei lle), ac mae `c` yn canslo'r camau
-sy'n weddill — erys yr hyn a gymhwyswyd eisoes, ac mae'r adroddiad
+sy'n weddill — mewn swp, mae canslo'n gollwng pob cofnod sy'n weddill
+— erys yr hyn a gymhwyswyd eisoes, ac mae'r adroddiad
 terfynol yn dweud beth ddigwyddodd. Mae methiant hanner ffordd drwy
 gopïo yn tynnu'r gyrchfan hanner-ysgrifenedig ac yn dangos gwall y
 cnewyllyn; nid oes dim byth yn esgus bod yn gopï cyflawn. Caiff pob
@@ -69,11 +96,13 @@ air ar y llinell negeseuon heb i ddim newid.
 
 Mae'r llinell statws yn dangos y llwybr a restrwyd, nifer y cofnodion
 gweladwy, y drefn didoli, beitiau rhydd/cyfanswm y gyfrol sylfaenol (pan
-all y gwasanaeth gwybodaeth system eu hadrodd) ac a yw cofnodion cudd yn
-cael eu dangos. Mae ffeil nad yw ei fformat storio yn cadw amser addasu
+all y gwasanaeth gwybodaeth system eu hadrodd), a yw cofnodion cudd yn
+cael eu dangos, a — tra bo rhywbeth wedi'i dagio — nifer y cofnodion a
+dagiwyd gyda'u cyfanswm beitiau. Mae ffeil nad yw ei fformat storio yn
+cadw amser addasu
 yn dangos `-` yng ngholofn yr amser.
 
-Daw tagio, chwilio a'r gwylwyr testun/hecs/dadosodwr mewn camau
+Daw chwilio a'r gwylwyr testun/hecs/dadosodwr mewn camau
 diweddarach o gynllun yr offeryn.
 
 ## OPTIONS
@@ -91,4 +120,4 @@ diweddarach o gynllun yr offeryn.
 
 ## SEE ALSO
 
-ls, cp, mv, rm, mkdir, chmod, du, df
+ls, cp, mv, rm, mkdir, chmod, du, df, find

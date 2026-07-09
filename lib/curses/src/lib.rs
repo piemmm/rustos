@@ -64,6 +64,8 @@ pub mod geom;
 pub mod input;
 pub mod render;
 pub mod screen;
+#[cfg(all(freestanding, feature = "program"))]
+pub mod stream;
 pub mod window;
 
 #[cfg(test)]
@@ -77,4 +79,6 @@ pub use input::{Event, Input};
 pub use render::{render, CursorState};
 pub use rustos_vt::{char_width, is_wide, str_width, truncate_to_width, CONTINUATION};
 pub use screen::{InputMode, Screen, Tty, DEFAULT_COLOR_PAIR};
+#[cfg(all(freestanding, feature = "program"))]
+pub use stream::StreamTty;
 pub use window::{BorderChars, Window};
