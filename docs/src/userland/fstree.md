@@ -9,7 +9,7 @@ tree, discovered from disk like every other bundle. The staged plan for the
 whole tool lives in `.junie/fstree-next-plan.md`; this page describes what
 is built.
 
-## What is built (S1 model core, S2 file operations, S3 tagging/batches/walks)
+## What is built (S1 model core, S2 file operations, S3 tagging/batches/walks, S4 search/filter)
 
 - **The tree pane.** A lazily populated directory tree: a directory is read
   through one `fs_readdir` call when it is first shown or expanded — never
@@ -90,6 +90,39 @@ is built.
   pauses at page boundaries so a huge branch fills memory only as far as
   asked — `Space` loads the next page; inside the view `t`/`T`/`i`/`C`
   tag rows and `c`/`m`/`d` run batches; `Esc` returns to the panes.
+- **The live filename filter (`f`).** A glob (`lib/glob`) narrowing the
+  file pane as it is typed: every keystroke in the prompt re-applies the
+  pattern, Enter keeps it (shown in the status line), and Esc restores
+  the filter held before the prompt opened. A pattern that does not
+  (yet) compile — an unclosed bracket mid-edit — hides nothing: the pane
+  stays unfiltered and the status line marks the filter `(bad pattern)`,
+  so entries are never silently hidden behind an uncompilable pattern.
+  Emptying the pattern clears the filter.
+- **Branch filename search (`/`).** The S3 walker with a name sieve: the
+  focused branch is descended in the same bounded, cancellable ticks,
+  and every file whose branch-relative path matches the glob lands in
+  the flattened view as it is found. Results are ordinary flat rows —
+  taggable, batchable, and jumpable.
+- **Content search (`F`).** A literal, ASCII-case-insensitive text
+  search through file contents — over the tagged set when anything is
+  tagged (tagged files directly, tagged directories walked), otherwise
+  over the focused branch. The scanner (`src/search.rs`) streams each
+  file in bounded windows through the seam's `read`, carrying the last
+  `needle-1` bytes across reads so a match spanning a window boundary
+  is still found; a file is never held in memory whole. Each result row
+  carries its match count; a file whose first window contains a NUL is
+  reported as a `binary` match — its bytes are counted, never rendered.
+  A file that refuses to read is recorded in the walk's report, never
+  silently dropped.
+- **Flat-view navigation.** `Enter` on any flattened row (a listing or a
+  search hit) jumps to the row's directory in the panes: the tree is
+  expanded down to it, the file cursor lands on the entry (lifting the
+  hidden toggle or clearing the filter when either hides it — with the
+  change visible in the status line), and a directory that refuses to
+  list keeps the flattened view with the error surfaced. While a walk
+  or search is still running, `Esc` first stops it in place (the rows
+  found so far stand and stay browsable); a second `Esc` leaves the
+  view.
 - **Help.** `-h`/`-?` print the bundle's own Help document through the
   shared `lib/help` engine; the in-session `?` overlay shows the same
   document decoded to plain text through the one `lib/vt` parser. Nothing
@@ -121,7 +154,13 @@ grammar (`src/app.rs`) mutates, over two injected seams —
 - The tag set and batch driver live in `src/tag.rs` (an ordered `TagSet`
   and a `Batch` that drives one `FileOp` per entry, pausing through the
   same conflict machinery), and the bounded walker in `src/walk.rs`
-  (memory follows the frontier, never the subtree).
+  (memory follows the frontier, never the subtree). The searches are the
+  same walk with a `Sieve` deciding which found files reach the list:
+  `All` (the plain flattened view), `Name` (the `/` glob against the
+  branch-relative path), or `Content` (the `F` scanner, `src/search.rs`,
+  which queues found files and streams them within its own per-tick byte
+  budget). One walk definition feeds the flat view, the usage figures,
+  and both searches — there is no second descent.
 - `Tty` — the terminal byte channel over the inherited fd 0/1: the `Run`
   binary links the one shared `rustos_curses::StreamTty` (`lib/curses`,
   feature `program`); the program names only its standard descriptors,
@@ -174,4 +213,13 @@ with skip and with cancel (remaining entries dropped, still tagged),
 destination validation, the walker's per-tick read budget and error
 recording, the usage walk's bounded ticks/cancellation/final figures,
 flattened-view pagination with resume, flat-view tagging and exit, and
-the status line's tag figures.
+the status line's tag figures. The S4 surface: the live filter
+(narrowing as typed, Esc restore, Enter keep with the status-line
+indicator, the honest bad-pattern behaviour), the name search (matching
+rows with the denied directory still reported, bad-pattern refusal, the
+Enter jump landing both panes on the hit), and the content search
+(case-insensitive matching with overlap counting, a match spanning a
+read-window boundary found through the carried tail, the binary-match
+note, the tagged-set scope, a read refusal recorded rather than
+dropped, Esc stopping a live search while keeping its results, and the
+empty-needle refusal).

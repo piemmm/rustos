@@ -20,8 +20,9 @@ use crate::fs::{Fs, FsEntry, RenameOutcome, VolumeSpace};
 use crate::model::{join, ModePrompt, Model, Overlay, Pane, Prompt, SortKey, View};
 use crate::ops::{basename, is_inside, parent_of};
 use crate::render::render;
+use crate::search::{ContentScan, Needle};
 use crate::tag::TagEntry;
-use crate::walk::{WalkPurpose, WalkState, Walker};
+use crate::walk::{FlatEntry, WalkPurpose, WalkState, Walker};
 
 /// An in-memory filesystem: per-path listings, per-path file bytes,
 /// per-path modes, a denied set (listings and stats), a set-mode denial
@@ -1497,13 +1498,13 @@ fn usage_walk_completes_with_figures_and_reports_unreadable() {
 fn flat_walk_paginates_and_resumes() {
     let mut fs = fixture();
     let mut walk = WalkState::new("/", WalkPurpose::Flat, 2);
-    walk.tick(&mut fs, 1);
+    walk.tick(&mut fs, 1, usize::MAX);
     // The page boundary paused the walk with directories still pending.
     assert!(walk.paused);
     assert!(!walk.done);
     assert!(!walk.ticking());
     walk.resume();
-    walk.tick(&mut fs, 10);
+    walk.tick(&mut fs, 10, usize::MAX);
     assert!(walk.done);
     assert_eq!(walk.entries.len(), 5);
 }
@@ -1543,4 +1544,302 @@ fn status_line_shows_the_tag_figures() {
     render(&m, &mut window);
     let status = row_text(&window, 8);
     assert!(status.contains("2 tagged (40 bytes)"), "got {status}");
+}
+
+// --- S4: the live filename filter (`f`) ---------------------------------
+
+/// Names of the visible file-pane entries.
+fn visible_names(m: &Model) -> Vec<String> {
+    m.visible_files().iter().map(|e| e.name.clone()).collect()
+}
+
+#[test]
+fn the_filter_narrows_the_pane_as_typed_and_esc_restores() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    handle_event(&mut m, &mut fs, &Event::Char('f'));
+    type_text(&mut m, &mut fs, "*.rs");
+    // The narrowing is live while the prompt is still open.
+    assert!(m.prompt.is_some());
+    assert_eq!(visible_names(&m), ["a.rs"]);
+    handle_event(&mut m, &mut fs, &Event::Esc);
+    // Esc restores the filter held before the prompt opened: none.
+    assert!(m.filter.is_none());
+    assert_eq!(
+        visible_names(&m),
+        ["docs", "locked", "a.rs", "b.txt", "big"]
+    );
+}
+
+#[test]
+fn enter_keeps_the_filter_and_the_status_line_shows_it() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    handle_event(&mut m, &mut fs, &Event::Char('f'));
+    type_text(&mut m, &mut fs, "*.txt");
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    assert!(m.prompt.is_none());
+    assert_eq!(visible_names(&m), ["b.txt"]);
+    assert_eq!(m.message.as_deref(), Some("filter *.txt: 1 shown"));
+    let mut window = Window::new(Pos::new(0, 0), Size::new(10, 70));
+    render(&m, &mut window);
+    let status = row_text(&window, 8);
+    assert!(status.contains("filter *.txt"), "got {status}");
+    // Reopening pre-fills the pattern for editing; emptying it clears.
+    handle_event(&mut m, &mut fs, &Event::Char('f'));
+    for _ in 0.."*.txt".len() {
+        handle_event(&mut m, &mut fs, &Event::Backspace);
+    }
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    assert!(m.filter.is_none());
+    assert_eq!(m.message.as_deref(), Some("filter cleared"));
+}
+
+#[test]
+fn a_bad_filter_pattern_hides_nothing_and_says_so() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    handle_event(&mut m, &mut fs, &Event::Char('f'));
+    type_text(&mut m, &mut fs, "[a");
+    // An uncompilable pattern filters nothing behind the user's back.
+    assert_eq!(
+        visible_names(&m),
+        ["docs", "locked", "a.rs", "b.txt", "big"]
+    );
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    let message = m.message.clone().expect("a bad-pattern report");
+    assert!(message.contains("bad pattern"), "got {message}");
+    let mut window = Window::new(Pos::new(0, 0), Size::new(10, 70));
+    render(&m, &mut window);
+    let status = row_text(&window, 8);
+    assert!(status.contains("filter [a (bad pattern)"), "got {status}");
+}
+
+// --- S4: the branch filename search (`/`) --------------------------------
+
+/// Drive the live walk to completion through the app's tick path.
+fn finish_walk(m: &mut Model, fs: &mut FakeFs) {
+    let mut guard = 0;
+    while m.walk.as_ref().is_some_and(WalkState::ticking) {
+        walk_tick(m, fs);
+        guard += 1;
+        assert!(guard < 100, "the walk must finish");
+    }
+}
+
+#[test]
+fn name_search_lists_matching_paths_below_the_branch() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    handle_event(&mut m, &mut fs, &Event::Char('/'));
+    type_text(&mut m, &mut fs, "*.md");
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    assert_eq!(m.view, View::Flat);
+    finish_walk(&mut m, &mut fs);
+    let walk = m.walk.as_ref().expect("the search walk");
+    let paths: Vec<&str> = walk.entries.iter().map(|e| e.path.as_str()).collect();
+    assert_eq!(paths, ["/docs/guide.md"]);
+    // The denied directory is still recorded, never silently dropped.
+    assert_eq!(walk.walker.errors, ["/locked: PermissionDenied"]);
+    let mut window = Window::new(Pos::new(0, 0), Size::new(10, 70));
+    render(&m, &mut window);
+    let status = row_text(&window, 8);
+    assert!(status.contains("search *.md"), "got {status}");
+    assert!(status.contains("1 entries"), "got {status}");
+}
+
+#[test]
+fn a_bad_search_pattern_is_refused_in_the_panes() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    handle_event(&mut m, &mut fs, &Event::Char('/'));
+    type_text(&mut m, &mut fs, "[x");
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    assert_eq!(m.view, View::Panes);
+    assert!(m.walk.is_none());
+    let message = m.message.clone().expect("a bad-pattern report");
+    assert!(message.contains("bad pattern"), "got {message}");
+}
+
+#[test]
+fn flat_enter_jumps_to_the_hits_directory() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    handle_event(&mut m, &mut fs, &Event::Char('/'));
+    type_text(&mut m, &mut fs, "*.md");
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    finish_walk(&mut m, &mut fs);
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    assert_eq!(m.view, View::Panes);
+    assert!(m.walk.is_none());
+    assert_eq!(m.pane, Pane::Files);
+    assert_eq!(m.files_dir, "/docs");
+    let files = m.visible_files();
+    assert_eq!(files[m.file_cursor].name, "guide.md");
+    // The tree cursor landed on the expanded hit directory.
+    let rows = m.tree_rows();
+    assert_eq!(rows[m.tree_cursor].path, "/docs");
+}
+
+// --- S4: the content search (`F`) ----------------------------------------
+
+#[test]
+fn needle_matching_is_case_insensitive_and_counts_overlaps() {
+    let needle = Needle::new("aa").expect("a needle");
+    assert_eq!(needle.count_in(b"AaAa"), 3);
+    assert_eq!(needle.count_in(b"bbbb"), 0);
+    assert_eq!(needle.count_in(b"a"), 0);
+    assert!(Needle::new("").is_none());
+}
+
+#[test]
+fn content_search_finds_the_needle_case_insensitively() {
+    let mut fs = fixture();
+    fs.files
+        .insert("/a.rs".to_owned(), b"say Hello, World".to_vec());
+    let mut m = model(&mut fs);
+    handle_event(&mut m, &mut fs, &Event::Char('F'));
+    type_text(&mut m, &mut fs, "hello");
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    assert_eq!(m.view, View::Flat);
+    finish_walk(&mut m, &mut fs);
+    let walk = m.walk.as_ref().expect("the search walk");
+    let rows: Vec<(&str, Option<&str>)> = walk
+        .entries
+        .iter()
+        .map(|e| (e.path.as_str(), e.note.as_deref()))
+        .collect();
+    assert_eq!(rows, [("/a.rs", Some("1 match"))]);
+}
+
+#[test]
+fn a_match_spanning_a_read_boundary_is_found() {
+    let mut fs = FakeFs::new().dir("/", vec![file("data", 12, 0)]);
+    fs.files
+        .insert("/data".to_owned(), b"abcNEEdleFGh".to_vec());
+    let needle = Needle::new("needle").expect("a needle");
+    let mut scan = ContentScan::new(needle);
+    scan.enqueue(vec![FlatEntry {
+        path: String::from("/data"),
+        kind: FileKind::Regular,
+        size: 12,
+        modified: Time64::UNIX_EPOCH,
+        note: None,
+    }]);
+    // A byte budget of 4 splits the file into 4-byte reads, so the
+    // occurrence spans two boundaries; the carried tail still finds it.
+    let mut matched = Vec::new();
+    let mut guard = 0;
+    while scan.busy() {
+        matched.extend(scan.tick(&mut fs, 4));
+        guard += 1;
+        assert!(guard < 100, "the scan must finish");
+    }
+    assert_eq!(matched.len(), 1);
+    assert_eq!(matched[0].note.as_deref(), Some("1 match"));
+    assert_eq!(scan.scanned, 1);
+}
+
+#[test]
+fn a_binary_file_is_reported_as_a_binary_match() {
+    let mut fs = fixture();
+    fs.files
+        .insert("/big".to_owned(), b"\x00\x01key here, key there".to_vec());
+    let mut m = model(&mut fs);
+    handle_event(&mut m, &mut fs, &Event::Char('F'));
+    type_text(&mut m, &mut fs, "key");
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    finish_walk(&mut m, &mut fs);
+    let walk = m.walk.as_ref().expect("the search walk");
+    let rows: Vec<(&str, Option<&str>)> = walk
+        .entries
+        .iter()
+        .map(|e| (e.path.as_str(), e.note.as_deref()))
+        .collect();
+    assert_eq!(rows, [("/big", Some("binary, 2 matches"))]);
+}
+
+#[test]
+fn content_search_over_the_tagged_set_scans_tagged_files_and_dirs() {
+    let mut fs = fixture();
+    fs.files
+        .insert("/b.txt".to_owned(), b"the token lives here".to_vec());
+    fs.files
+        .insert("/docs/guide.md".to_owned(), b"token".to_vec());
+    fs.files.insert("/a.rs".to_owned(), b"token too".to_vec());
+    let mut m = model(&mut fs);
+    m.tags.insert(TagEntry {
+        path: String::from("/b.txt"),
+        kind: FileKind::Regular,
+        size: 10,
+    });
+    m.tags.insert(TagEntry {
+        path: String::from("/docs"),
+        kind: FileKind::Directory,
+        size: 0,
+    });
+    handle_event(&mut m, &mut fs, &Event::Char('F'));
+    type_text(&mut m, &mut fs, "token");
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    finish_walk(&mut m, &mut fs);
+    let walk = m.walk.as_ref().expect("the search walk");
+    let paths: Vec<&str> = walk.entries.iter().map(|e| e.path.as_str()).collect();
+    // The tagged file and the tagged directory's contents — never the
+    // untagged /a.rs.
+    assert_eq!(paths, ["/b.txt", "/docs/guide.md"]);
+}
+
+#[test]
+fn a_read_refusal_during_the_scan_is_recorded_not_dropped() {
+    let mut fs = fixture().read_fails("/big", Errno::PermissionDenied);
+    fs.files.insert("/a.rs".to_owned(), b"needle".to_vec());
+    let mut m = model(&mut fs);
+    handle_event(&mut m, &mut fs, &Event::Char('F'));
+    type_text(&mut m, &mut fs, "needle");
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    finish_walk(&mut m, &mut fs);
+    let walk = m.walk.as_ref().expect("the search walk");
+    let paths: Vec<&str> = walk.entries.iter().map(|e| e.path.as_str()).collect();
+    assert_eq!(paths, ["/a.rs"]);
+    assert!(
+        walk.walker
+            .errors
+            .iter()
+            .any(|line| line == "/big: PermissionDenied"),
+        "got {:?}",
+        walk.walker.errors
+    );
+}
+
+#[test]
+fn esc_stops_a_live_search_keeping_results_and_esc_again_exits() {
+    let mut fs = fixture();
+    fs.files.insert("/a.rs".to_owned(), b"needle".to_vec());
+    let mut m = model(&mut fs);
+    handle_event(&mut m, &mut fs, &Event::Char('F'));
+    type_text(&mut m, &mut fs, "needle");
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    assert!(m.walk.as_ref().is_some_and(WalkState::ticking));
+    // Esc while the search runs stops it in place…
+    handle_event(&mut m, &mut fs, &Event::Esc);
+    let walk = m.walk.as_ref().expect("the stopped walk");
+    assert!(walk.done);
+    assert_eq!(m.view, View::Flat);
+    let message = m.message.clone().expect("a stop report");
+    assert!(message.contains("stopped"), "got {message}");
+    // …and a second Esc leaves the view.
+    handle_event(&mut m, &mut fs, &Event::Esc);
+    assert_eq!(m.view, View::Panes);
+    assert!(m.walk.is_none());
+}
+
+#[test]
+fn an_empty_needle_searches_nothing() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    handle_event(&mut m, &mut fs, &Event::Char('F'));
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    assert_eq!(m.view, View::Panes);
+    assert!(m.walk.is_none());
+    assert_eq!(m.message.as_deref(), Some("empty text — nothing searched"));
 }

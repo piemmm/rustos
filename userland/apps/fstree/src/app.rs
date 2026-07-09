@@ -20,12 +20,14 @@ use rustos_glob::Pattern;
 use crate::fs::Fs;
 use crate::model::{
     child_dirs_of, join, merge_child_dirs, BatchPrompt, ConfirmPrompt, DirNode, InputOp,
-    InputPrompt, ModePrompt, Model, Overlay, OverwritePrompt, Pane, Prompt, SortKey, View,
+    InputPrompt, ModePrompt, Model, NameFilter, Overlay, OverwritePrompt, Pane, Prompt, SortKey,
+    View,
 };
 use crate::ops::{parent_of, plan_target, resolve_destination, Decision, FileOp, OpProgress};
 use crate::render::render;
+use crate::search::{ContentScan, Needle};
 use crate::tag::{Batch, BatchProgress, TagEntry};
-use crate::walk::{relative_to, WalkPurpose, WalkState};
+use crate::walk::{relative_to, FlatEntry, WalkPurpose, WalkState, Walker};
 
 /// Longest mode the prompt accepts: four octal digits (`7777`), the full
 /// permission word — a fixed validation bound on typed input, matching the
@@ -52,6 +54,11 @@ const WALK_DIRS_PER_TICK: usize = 16;
 /// (Space) releases the next page — a huge branch never fills memory
 /// unasked.
 const FLAT_PAGE: usize = 512;
+
+/// File bytes one content-search tick may scan — the bound that keeps a
+/// tick's read work small so the key loop stays responsive while a large
+/// file streams through the scanner.
+const SCAN_BYTES_PER_TICK: usize = 256 * 1024;
 
 /// The session outcome the `Run` binary maps to an exit code.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -164,6 +171,9 @@ pub fn handle_event(model: &mut Model, fs: &mut dyn Fs, event: &Event) {
         }
         Event::Char('u') => start_walk(model, WalkPurpose::Usage),
         Event::Char('v') => start_walk(model, WalkPurpose::Flat),
+        Event::Char('f') => open_filter_prompt(model),
+        Event::Char('/') => open_search_prompt(model),
+        Event::Char('F') => open_content_prompt(model),
         Event::Esc => cancel_usage_walk(model),
         Event::Char('.') => {
             model.show_hidden = !model.show_hidden;
@@ -355,22 +365,40 @@ fn handle_mode_prompt(model: &mut Model, fs: &mut dyn Fs, mut prompt: ModePrompt
 }
 
 /// Apply one key to an open text prompt: printable keys and Backspace
-/// edit, Enter submits the answer, Esc cancels with nothing changed.
+/// edit, Enter submits the answer, Esc cancels with nothing changed —
+/// except the live filter prompt, whose edits show immediately and whose
+/// Esc restores the filter held before the prompt opened.
 fn handle_input_prompt(model: &mut Model, fs: &mut dyn Fs, mut prompt: InputPrompt, event: &Event) {
     match event {
-        Event::Esc => {}
+        Event::Esc => {
+            if let InputOp::FilterPattern { previous } = prompt.op {
+                model.filter = previous;
+                clamp_cursors(model);
+            }
+        }
         Event::Backspace => {
             prompt.input.pop();
+            live_apply_filter(model, &prompt);
             model.prompt = Some(Prompt::Input(prompt));
         }
         Event::Char(ch) if !ch.is_control() => {
             if prompt.input.len() < INPUT_MAX {
                 prompt.input.push(*ch);
             }
+            live_apply_filter(model, &prompt);
             model.prompt = Some(Prompt::Input(prompt));
         }
         Event::Enter => submit_input(model, fs, prompt),
         _ => model.prompt = Some(Prompt::Input(prompt)),
+    }
+}
+
+/// Re-apply the filter prompt's text to the file pane as typed, so the
+/// narrowing is visible live while the prompt is open.
+fn live_apply_filter(model: &mut Model, prompt: &InputPrompt) {
+    if matches!(prompt.op, InputOp::FilterPattern { .. }) {
+        model.filter = NameFilter::from_text(&prompt.input);
+        clamp_cursors(model);
     }
 }
 
@@ -419,6 +447,9 @@ fn submit_input(model: &mut Model, fs: &mut dyn Fs, prompt: InputPrompt) {
             }
         }
         InputOp::TagGlob => submit_tag_glob(model, &prompt.input),
+        InputOp::FilterPattern { .. } => submit_filter(model, &prompt.input),
+        InputOp::SearchGlob => submit_name_search(model, &prompt.input),
+        InputOp::ContentNeedle { tagged } => submit_content_search(model, tagged, &prompt.input),
         InputOp::BatchDest { moving, .. } => submit_batch_dest(model, fs, moving, &prompt.input),
     }
 }
@@ -730,6 +761,108 @@ fn submit_batch_dest(model: &mut Model, fs: &mut dyn Fs, moving: bool, typed: &s
     run_batch(model, fs, batch, refresh);
 }
 
+/// The `f` key: open the live filter prompt, pre-filled with the active
+/// filter so it can be edited; the filter as it stood is restored on Esc.
+fn open_filter_prompt(model: &mut Model) {
+    let previous = model.filter.clone();
+    let input = previous
+        .as_ref()
+        .map_or_else(String::new, |f| f.text.clone());
+    model.prompt = Some(Prompt::Input(InputPrompt {
+        op: InputOp::FilterPattern { previous },
+        input,
+    }));
+}
+
+/// The `/` key: open the branch filename-search prompt.
+fn open_search_prompt(model: &mut Model) {
+    model.prompt = Some(Prompt::Input(InputPrompt {
+        op: InputOp::SearchGlob,
+        input: String::new(),
+    }));
+}
+
+/// The `F` key: open the content-search prompt. The scope is decided
+/// here — the tagged set when anything is tagged, the focused branch
+/// otherwise — and the question says which.
+fn open_content_prompt(model: &mut Model) {
+    model.prompt = Some(Prompt::Input(InputPrompt {
+        op: InputOp::ContentNeedle {
+            tagged: !model.tags.is_empty(),
+        },
+        input: String::new(),
+    }));
+}
+
+/// A submitted (Entered) filter: it is already applied live; the message
+/// line reports what it shows.
+fn submit_filter(model: &mut Model, typed: &str) {
+    model.message = Some(match &model.filter {
+        None => String::from("filter cleared"),
+        Some(filter) if filter.pattern.is_none() => {
+            format!("filter {typed}: bad pattern — showing everything")
+        }
+        Some(_) => format!("filter {typed}: {} shown", model.visible_files().len()),
+    });
+}
+
+/// A submitted filename-search pattern: walk the focused branch listing
+/// every file whose branch-relative path matches. A malformed pattern is
+/// reported and searches nothing.
+fn submit_name_search(model: &mut Model, typed: &str) {
+    if typed.is_empty() {
+        model.message = Some(String::from("empty pattern — nothing searched"));
+        return;
+    }
+    let pattern = match Pattern::new(typed) {
+        Ok(pattern) => pattern,
+        Err(error) => {
+            model.message = Some(format!("bad pattern: {error}"));
+            return;
+        }
+    };
+    let root = focused_dir(model);
+    enter_flat(model);
+    model.walk = Some(WalkState::name_search(&root, typed, pattern, FLAT_PAGE));
+}
+
+/// A submitted content-search needle: stream through the tagged set
+/// (tagged files directly, tagged directories walked) or the focused
+/// branch, listing every file whose contents contain the needle.
+fn submit_content_search(model: &mut Model, tagged: bool, typed: &str) {
+    let Some(needle) = Needle::new(typed) else {
+        model.message = Some(String::from("empty text — nothing searched"));
+        return;
+    };
+    let scan = ContentScan::new(needle);
+    let (root, walker, seeds) = if tagged {
+        let mut dirs = Vec::new();
+        let mut seeds = Vec::new();
+        for item in model.tags.entries() {
+            if item.kind.is_dir() {
+                dirs.push(item.path.clone());
+            } else {
+                seeds.push(FlatEntry {
+                    path: item.path.clone(),
+                    kind: item.kind,
+                    size: item.size,
+                    modified: rustos_abi::time::Time64::UNIX_EPOCH,
+                    note: None,
+                });
+            }
+        }
+        (model.root.path.clone(), Walker::from_seeds(dirs), seeds)
+    } else {
+        let root = focused_dir(model);
+        let walker = Walker::new(&root);
+        (root, walker, Vec::new())
+    };
+    enter_flat(model);
+    model.walk = Some(WalkState::content_search(
+        &root, typed, scan, walker, seeds, FLAT_PAGE,
+    ));
+}
+
 /// The `u`/`v` keys: start a walk of the focused directory — counting
 /// only (`u`), or feeding the flattened branch view (`v`).
 fn start_walk(model: &mut Model, purpose: WalkPurpose) {
@@ -744,10 +877,15 @@ fn start_walk(model: &mut Model, purpose: WalkPurpose) {
 
 /// Enter (or restart) the flattened branch view below `root`.
 fn start_flat_walk(model: &mut Model, root: &str) {
+    enter_flat(model);
+    model.walk = Some(WalkState::new(root, WalkPurpose::Flat, FLAT_PAGE));
+}
+
+/// Switch to the flattened view with its cursor reset.
+fn enter_flat(model: &mut Model) {
     model.view = View::Flat;
     model.flat_cursor = 0;
     model.flat_scroll = 0;
-    model.walk = Some(WalkState::new(root, WalkPurpose::Flat, FLAT_PAGE));
 }
 
 /// Esc in the panes: cancel a live usage walk, keeping (and reporting)
@@ -769,7 +907,7 @@ pub fn walk_tick(model: &mut Model, fs: &mut dyn Fs) {
     let Some(mut walk) = model.walk.take() else {
         return;
     };
-    walk.tick(fs, WALK_DIRS_PER_TICK);
+    walk.tick(fs, WALK_DIRS_PER_TICK, SCAN_BYTES_PER_TICK);
     if walk.done && walk.purpose == WalkPurpose::Usage {
         model.message = Some(format!("usage of {}: {}", walk.root, walk.figures()));
         if !walk.walker.errors.is_empty() {
@@ -784,12 +922,20 @@ pub fn walk_tick(model: &mut Model, fs: &mut dyn Fs) {
 /// Apply one key inside the flattened branch view.
 fn handle_flat_key(model: &mut Model, fs: &mut dyn Fs, event: &Event) {
     match event {
-        Event::Esc | Event::Char('q') => {
-            model.view = View::Panes;
-            model.walk = None;
-            model.flat_cursor = 0;
-            model.flat_scroll = 0;
+        Event::Esc => {
+            // Esc first stops a live walk in place (the results found so
+            // far stand and stay browsable); a second Esc leaves the view.
+            if model.walk.as_ref().is_some_and(WalkState::ticking) {
+                if let Some(walk) = &mut model.walk {
+                    walk.stop();
+                    model.message = Some(format!("stopped: {}", walk.figures()));
+                }
+                return;
+            }
+            exit_flat(model);
         }
+        Event::Char('q') => exit_flat(model),
+        Event::Enter => jump_to_flat_hit(model, fs),
         Event::Up | Event::Char('k') => move_flat_cursor(model, -1),
         Event::Down | Event::Char('j') => move_flat_cursor(model, 1),
         Event::Char(' ') => {
@@ -808,10 +954,80 @@ fn handle_flat_key(model: &mut Model, fs: &mut dyn Fs, event: &Event) {
         Event::Char('m') => open_flat_batch(model, true),
         Event::Char('d') => open_flat_delete(model),
         Event::Char('?') => model.overlay = Overlay::Help,
-        _ => {
-            let _ = fs;
-        }
+        _ => {}
     }
+}
+
+/// Leave the flattened view for the panes, dropping the walk.
+fn exit_flat(model: &mut Model) {
+    model.view = View::Panes;
+    model.walk = None;
+    model.flat_cursor = 0;
+    model.flat_scroll = 0;
+}
+
+/// Enter on a flattened row: jump to the hit's directory in the panes,
+/// landing the file cursor on the hit. A directory that refuses to list
+/// reports its error and keeps the flattened view — fail closed, never a
+/// blank pane.
+fn jump_to_flat_hit(model: &mut Model, fs: &mut dyn Fs) {
+    let Some((path, root)) = model.walk.as_ref().and_then(|walk| {
+        walk.entries
+            .get(model.flat_cursor)
+            .map(|entry| (entry.path.clone(), walk.root.clone()))
+    }) else {
+        return;
+    };
+    let parent = String::from(parent_of(&path));
+    let name = path.rsplit('/').next().unwrap_or_default();
+    if !select_dir(model, fs, &parent) {
+        return;
+    }
+    exit_flat(model);
+    reveal_in_tree(model, fs, &root, &parent);
+    reveal_in_files(model, name);
+    model.pane = Pane::Files;
+}
+
+/// Expand the tree along `root`..`parent` so the jumped-to directory has
+/// a visible row, and put the tree cursor on it. Expansion is best-effort:
+/// an ancestor that refuses to list simply stays collapsed — the file
+/// pane already shows the destination.
+fn reveal_in_tree(model: &mut Model, fs: &mut dyn Fs, root: &str, parent: &str) {
+    let mut path = String::from(root);
+    let rest = relative_to(root, parent);
+    let steps = rest.split('/').filter(|c| !c.is_empty());
+    for component in steps {
+        if !populate_children(model, fs, &path) {
+            break;
+        }
+        if let Some(node) = find_node(&mut model.root, &path) {
+            node.expanded = true;
+        }
+        path = join(&path, component);
+    }
+    if let Some(index) = model.tree_rows().iter().position(|row| row.path == parent) {
+        model.tree_cursor = index;
+    }
+    clamp_cursors(model);
+}
+
+/// Land the file cursor on `name`, lifting the hidden toggle or the
+/// filter when either hides the hit — a jump lands on its subject, and
+/// the change is visible in the status line, never silent.
+fn reveal_in_files(model: &mut Model, name: &str) {
+    let visible = |m: &Model| m.visible_files().iter().any(|e| e.name == name);
+    if !visible(model) && name.starts_with('.') && !model.show_hidden {
+        model.show_hidden = true;
+    }
+    if !visible(model) && model.filter.is_some() {
+        model.filter = None;
+        model.message = Some(String::from("filter cleared to reveal the hit"));
+    }
+    if let Some(index) = model.visible_files().iter().position(|e| e.name == name) {
+        model.file_cursor = index;
+    }
+    clamp_cursors(model);
 }
 
 /// Move the flattened view's cursor by `delta` within the listed entries.

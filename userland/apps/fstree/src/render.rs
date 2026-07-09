@@ -137,10 +137,15 @@ fn render_flat(model: &Model, window: &mut Window, body: u16, cols: u16) {
     let width = usize::from(cols);
     let visible = walk.entries.iter().enumerate().skip(model.flat_scroll);
     for (line, (index, entry)) in (0..body).zip(visible) {
+        let rel = relative_to(&walk.root, &entry.path);
+        let shown = match &entry.note {
+            Some(note) => format!("{rel}  [{note}]"),
+            None => String::from(rel),
+        };
         let text = file_row(
             model.tags.contains(&entry.path),
             false,
-            relative_to(&walk.root, &entry.path),
+            &shown,
             entry.size,
             entry.modified,
             width,
@@ -181,6 +186,13 @@ fn render_status(model: &Model, window: &mut Window, rows: u16, cols: u16) {
     };
     let direction = if model.sort_desc { "desc" } else { "asc" };
     let hidden = if model.show_hidden { "  hidden" } else { "" };
+    let filter = match &model.filter {
+        Some(filter) if filter.pattern.is_none() => {
+            format!("  filter {} (bad pattern)", filter.text)
+        }
+        Some(filter) => format!("  filter {}", filter.text),
+        None => String::new(),
+    };
     let space = match model.space {
         Some(space) => format!("  free {}/{}", space.free_bytes, space.total_bytes),
         None => String::new(),
@@ -200,16 +212,17 @@ fn render_status(model: &Model, window: &mut Window, rows: u16, cols: u16) {
         } else if walk.paused {
             "  more with Space"
         } else {
-            "  walking…"
+            "  searching… Esc stops"
         };
         format!(
-            "{} flattened  {} entries{state}{tags}",
+            "{} {}  {} entries{state}{tags}",
             walk.root,
+            walk.label(),
             walk.entries.len(),
         )
     } else {
         format!(
-            "{}  {} entries  sort {key} {direction}{space}{hidden}{tags}",
+            "{}  {} entries  sort {key} {direction}{space}{hidden}{filter}{tags}",
             model.files_dir,
             model.visible_files().len(),
         )
@@ -241,14 +254,14 @@ fn render_message(model: &Model, window: &mut Window, rows: u16, cols: u16) {
         usage
     } else if model.view == View::Flat {
         String::from(
-            "arrows move  t tag  T glob  i invert  C clear  c copy  m move  d delete  \
-             Space more  Esc back",
+            "arrows move  Enter open dir  t tag  T glob  i invert  C clear  c copy  m move  \
+             d delete  Space more  Esc back",
         )
     } else {
         String::from(
             "arrows move  Enter open  Tab pane  t tag  T glob  i invert  c copy  m move  \
-             r rename  d delete  M mkdir  a mode  u usage  v flatten  s sort  . hidden  \
-             ? help  q quit",
+             r rename  d delete  M mkdir  a mode  f filter  / search  F contents  u usage  \
+             v flatten  s sort  . hidden  ? help  q quit",
         )
     };
     let _ = window.move_add_str(
@@ -291,6 +304,29 @@ fn prompt_line(prompt: &Prompt) -> String {
             InputOp::TagGlob => {
                 format!(
                     "tag pattern: {}_  (glob, Enter tags, Esc cancels)",
+                    input.input
+                )
+            }
+            InputOp::FilterPattern { .. } => {
+                format!(
+                    "filter: {}_  (glob, applied as typed; Enter keeps, Esc restores)",
+                    input.input
+                )
+            }
+            InputOp::SearchGlob => {
+                format!(
+                    "search below this branch: {}_  (glob, Enter searches, Esc cancels)",
+                    input.input
+                )
+            }
+            InputOp::ContentNeedle { tagged } => {
+                let scope = if *tagged {
+                    "the tagged set"
+                } else {
+                    "this branch"
+                };
+                format!(
+                    "find in files of {scope}: {}_  (Enter searches, Esc cancels)",
                     input.input
                 )
             }

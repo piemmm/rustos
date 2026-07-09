@@ -1,6 +1,7 @@
 //! The bounded, cancellable branch walker — the one recursive-descent
-//! definition shared by the flattened branch view (`v`) and the disk-usage
-//! statistics (`u`).
+//! definition shared by the flattened branch view (`v`), the disk-usage
+//! statistics (`u`), and the branch searches (`/`, `F`), which are the
+//! same walk with a [`Sieve`] deciding which found files reach the list.
 //!
 //! A walk never recurses through a whole branch in one blocking pass: each
 //! [`Walker::tick`] reads at most a fixed number of directories and returns,
@@ -17,9 +18,11 @@ use alloc::vec::Vec;
 
 use rustos_abi::time::Time64;
 use rustos_abi::FileKind;
+use rustos_glob::Pattern;
 
 use crate::fs::Fs;
 use crate::model::join;
+use crate::search::ContentScan;
 
 /// One file a walk found, listed by the flattened branch view.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -34,6 +37,9 @@ pub struct FlatEntry {
     /// Last contents-modification instant ([`Time64::UNIX_EPOCH`] renders
     /// as absent).
     pub modified: Time64,
+    /// A short annotation shown after the row's path (a content search's
+    /// match figures); `None` for a plain listing row.
+    pub note: Option<String>,
 }
 
 /// The incremental depth-first descent below one root directory.
@@ -64,13 +70,30 @@ impl Walker {
     /// the first frontier entry).
     #[must_use]
     pub fn new(root: &str) -> Self {
+        Self::from_seeds(alloc::vec![String::from(root)])
+    }
+
+    /// A walk of everything below each of `dirs`, visited in the given
+    /// order — the tagged-set content search seeds its tagged directories
+    /// this way. An empty seed list is a finished walk.
+    #[must_use]
+    pub fn from_seeds(mut dirs: Vec<String>) -> Self {
+        // The LIFO frontier pops the last entry first, so the seeds are
+        // reversed to visit in the given order.
+        dirs.reverse();
         Self {
-            frontier: alloc::vec![String::from(root)],
+            frontier: dirs,
             files_seen: 0,
             bytes: 0,
             dirs_seen: 0,
             errors: Vec::new(),
         }
+    }
+
+    /// Drop every directory still unread (the user stopped the walk);
+    /// the counters and errors so far stand.
+    pub fn stop(&mut self) {
+        self.frontier.clear();
     }
 
     /// Whether directories remain to be read.
@@ -114,6 +137,7 @@ impl Walker {
                         kind: entry.kind,
                         size: entry.size,
                         modified: entry.modified,
+                        note: None,
                     });
                 }
             }
@@ -140,14 +164,39 @@ pub enum WalkPurpose {
     Usage,
 }
 
+/// Which of the walked files reach the flattened list.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Sieve {
+    /// Every file (the plain flattened view).
+    All,
+    /// Files whose branch-relative path matches the glob (`/`).
+    Name {
+        /// The pattern as typed, for the status line.
+        text: String,
+        /// The compiled matcher.
+        pattern: Pattern,
+    },
+    /// Files whose contents contain the needle (`F`); the scan streams
+    /// through its own byte budget per tick.
+    Content {
+        /// The needle as typed, for the status line.
+        text: String,
+        /// The streaming scanner and its queue.
+        scan: ContentScan,
+    },
+}
+
 /// A live walk carried by the model between ticks: the walker, its
-/// purpose, the collected entries (flat view only), and the paging state.
+/// purpose, the sieve, the collected entries (flat view only), and the
+/// paging state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WalkState {
     /// The directory the walk descends below.
     pub root: String,
     /// What the walk feeds.
     pub purpose: WalkPurpose,
+    /// Which found files reach the list.
+    pub sieve: Sieve,
     /// The incremental descent.
     pub walker: Walker,
     /// The files found so far (flat view; empty for a usage walk).
@@ -167,10 +216,46 @@ impl WalkState {
     /// `page` further entries have accumulated.
     #[must_use]
     pub fn new(root: &str, purpose: WalkPurpose, page: usize) -> Self {
+        Self::sieved(root, purpose, Sieve::All, Walker::new(root), page)
+    }
+
+    /// A filename search below `root`: a flattened walk listing only the
+    /// files whose branch-relative path matches `pattern`.
+    #[must_use]
+    pub fn name_search(root: &str, text: &str, pattern: Pattern, page: usize) -> Self {
+        let sieve = Sieve::Name {
+            text: String::from(text),
+            pattern,
+        };
+        Self::sieved(root, WalkPurpose::Flat, sieve, Walker::new(root), page)
+    }
+
+    /// A content search: `walker` supplies the directories to descend
+    /// (the focused branch, or the tagged directories) and `seeds` the
+    /// files already known (the tagged files); `scan` holds the needle.
+    #[must_use]
+    pub fn content_search(
+        root: &str,
+        text: &str,
+        mut scan: ContentScan,
+        walker: Walker,
+        seeds: Vec<FlatEntry>,
+        page: usize,
+    ) -> Self {
+        scan.enqueue(seeds);
+        let sieve = Sieve::Content {
+            text: String::from(text),
+            scan,
+        };
+        Self::sieved(root, WalkPurpose::Flat, sieve, walker, page)
+    }
+
+    fn sieved(root: &str, purpose: WalkPurpose, sieve: Sieve, walker: Walker, page: usize) -> Self {
         Self {
             root: String::from(root),
             purpose,
-            walker: Walker::new(root),
+            sieve,
+            walker,
             entries: Vec::new(),
             page: page.max(1),
             paused: false,
@@ -185,29 +270,75 @@ impl WalkState {
         !self.done && !self.paused
     }
 
-    /// Advance the walk by one bounded tick of at most `budget`
-    /// directories.
-    pub fn tick(&mut self, fs: &mut dyn Fs, budget: usize) {
+    /// Advance the walk by one bounded tick: at most `dir_budget`
+    /// directories read, and — for a content search — at most
+    /// `byte_budget` file bytes scanned.
+    pub fn tick(&mut self, fs: &mut dyn Fs, dir_budget: usize, byte_budget: usize) {
         if !self.ticking() {
             return;
         }
-        let found = self.walker.tick(fs, budget);
+        let found = self.walker.tick(fs, dir_budget);
+        let accepted = match &mut self.sieve {
+            Sieve::All => found,
+            Sieve::Name { pattern, .. } => {
+                let root = &self.root;
+                found
+                    .into_iter()
+                    .filter(|entry| pattern.matches(relative_to(root, &entry.path)))
+                    .collect()
+            }
+            Sieve::Content { scan, .. } => {
+                scan.enqueue(found);
+                scan.tick(fs, byte_budget)
+            }
+        };
+        let scanning = matches!(&self.sieve, Sieve::Content { scan, .. } if scan.busy());
+        let more = self.walker.more() || scanning;
         if self.purpose == WalkPurpose::Flat {
             let boundary = (self.entries.len() / self.page + 1) * self.page;
-            self.entries.extend(found);
-            if self.entries.len() >= boundary && self.walker.more() {
+            self.entries.extend(accepted);
+            if self.entries.len() >= boundary && more {
                 self.paused = true;
             }
         }
-        if !self.walker.more() {
-            self.done = true;
-            self.paused = false;
+        if !more {
+            self.finish();
         }
+    }
+
+    /// Stop the walk where it stands: nothing further is read or scanned,
+    /// and the entries, counters, and errors so far stand.
+    pub fn stop(&mut self) {
+        self.walker.stop();
+        if let Sieve::Content { scan, .. } = &mut self.sieve {
+            scan.stop();
+        }
+        self.finish();
+    }
+
+    /// Mark the walk finished, folding a content scan's read errors into
+    /// the walker's report so nothing unreadable goes unreported.
+    fn finish(&mut self) {
+        if let Sieve::Content { scan, .. } = &mut self.sieve {
+            self.walker.errors.append(&mut scan.errors);
+        }
+        self.done = true;
+        self.paused = false;
     }
 
     /// Resume a walk paused at a page boundary.
     pub fn resume(&mut self) {
         self.paused = false;
+    }
+
+    /// The status line's name for what fills the list.
+    #[must_use]
+    pub fn label(&self) -> String {
+        match &self.sieve {
+            Sieve::All => String::from("flattened"),
+            Sieve::Name { text, .. } => format!("search {text}"),
+            Sieve::Content { text, .. } => format!("contains \"{text}\""),
+        }
     }
 
     /// The one-line progress/summary figures: files, bytes, directories,

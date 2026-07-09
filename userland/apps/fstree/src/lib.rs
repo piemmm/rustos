@@ -12,8 +12,12 @@
 //! (`t`, tag-by-glob, invert, clear), batch copy/move/delete over the
 //! tagged set with a per-file continue-on-error report, the flattened
 //! branch view, and disk-usage statistics — both fed by one bounded,
-//! cancellable walker. Search and the viewers are staged in
-//! `.junie/fstree-next-plan.md` and land stage by stage.
+//! cancellable walker — and the S4 search surface: a live filename filter
+//! per pane (`f`), a branch-wide filename search (`/`), and a streaming
+//! file-content search (`F`) over the tagged set or the focused branch,
+//! both searches feeding the same taggable, operable flattened list. The
+//! viewers are staged in `.junie/fstree-next-plan.md` and land stage by
+//! stage.
 //!
 //! # What this crate is
 //!
@@ -33,7 +37,9 @@
 //! * [`model`] — the tree/pane/sort/prompt state machine.
 //! * [`ops`] — the file-operation planner and resumable executor.
 //! * [`tag`] — the tag set and the batch-operation driver.
-//! * [`walk`] — the bounded branch walker (flattened view, disk usage).
+//! * [`walk`] — the bounded branch walker (flattened view, disk usage,
+//!   and the searches through its [`walk::Sieve`]).
+//! * [`search`] — the streaming file-content scanner behind `F`.
 //! * [`mod@render`] — the curses frame (panes, status, message, overlays).
 //! * [`app`] — the key grammar and the session loop (walk ticks run on a
 //!   timed input bound; every wait still parks in the kernel).
@@ -56,6 +62,7 @@ pub mod fs;
 pub mod model;
 pub mod ops;
 pub mod render;
+pub mod search;
 pub mod tag;
 pub mod walk;
 
@@ -66,5 +73,6 @@ pub use app::{handle_event, run, FstreeError};
 pub use fs::{Fs, FsEntry, RenameOutcome, VolumeSpace};
 pub use model::{Model, Pane, SortKey};
 pub use render::render;
+pub use search::{ContentScan, Needle};
 pub use tag::{Batch, BatchProgress, TagEntry, TagSet};
-pub use walk::{FlatEntry, WalkPurpose, WalkState, Walker};
+pub use walk::{FlatEntry, Sieve, WalkPurpose, WalkState, Walker};

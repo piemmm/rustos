@@ -16,6 +16,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use rustos_abi::FileKind;
+use rustos_glob::Pattern;
 
 use crate::fs::{Fs, FsEntry, VolumeSpace};
 use crate::ops::FileOp;
@@ -152,6 +153,23 @@ pub enum InputOp {
     MkdirName,
     /// A filename-glob pattern tagging every matching visible entry (`T`).
     TagGlob,
+    /// The live filename filter's pattern (`f`): each edit re-applies it
+    /// to the file pane as typed; Esc restores the filter held before the
+    /// prompt opened.
+    FilterPattern {
+        /// The filter as it stood when the prompt opened, restored on Esc.
+        previous: Option<NameFilter>,
+    },
+    /// A filename-glob pattern searched for below the focused directory
+    /// (`/`).
+    SearchGlob,
+    /// The text a content search looks for inside files (`F`).
+    ContentNeedle {
+        /// Whether the search runs over the tagged set (`true`) or the
+        /// focused branch, decided when the prompt opens and spelled out
+        /// in its question.
+        tagged: bool,
+    },
     /// The destination directory a batch copy/move lands in (`c`/`m` with
     /// tags).
     BatchDest {
@@ -208,6 +226,43 @@ pub struct BatchPrompt {
     pub refresh: Vec<String>,
 }
 
+/// The file pane's live filename filter (`f`): the pattern as typed and
+/// its compiled form. While the typed text is not (yet) a valid glob —
+/// e.g. an unclosed bracket expression mid-edit — `pattern` is `None`,
+/// the pane stays unfiltered, and the status line says the pattern is
+/// bad; nothing is silently hidden by a filter that could not compile.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NameFilter {
+    /// The pattern as typed.
+    pub text: String,
+    /// The compiled matcher, or `None` while the text does not compile.
+    pub pattern: Option<Pattern>,
+}
+
+impl NameFilter {
+    /// Compile `text` into the filter it describes: `None` for empty text
+    /// (no filter), a filter with `pattern: None` for text that does not
+    /// compile.
+    #[must_use]
+    pub fn from_text(text: &str) -> Option<Self> {
+        if text.is_empty() {
+            return None;
+        }
+        Some(Self {
+            text: String::from(text),
+            pattern: Pattern::new(text).ok(),
+        })
+    }
+
+    /// Whether `name` passes the filter. A filter whose pattern did not
+    /// compile passes everything — the status line reports the bad
+    /// pattern instead of hiding entries behind it.
+    #[must_use]
+    pub fn admits(&self, name: &str) -> bool {
+        self.pattern.as_ref().map_or(true, |p| p.matches(name))
+    }
+}
+
 /// The modal mode-editor prompt (`a`): the entry being edited and the
 /// octal digits typed so far. While present, keys feed the prompt (octal
 /// digits and Backspace edit, Enter applies through the seam, Esc
@@ -249,6 +304,8 @@ pub struct Model {
     pub sort_desc: bool,
     /// Whether dotfile entries are shown.
     pub show_hidden: bool,
+    /// The file pane's live filename filter (`f`), when one is set.
+    pub filter: Option<NameFilter>,
     /// The one-line message surface (errors, notices).
     pub message: Option<String>,
     /// Free/total space of the volume backing the listed directory.
@@ -306,6 +363,7 @@ impl Model {
             sort_key: SortKey::Name,
             sort_desc: false,
             show_hidden: false,
+            filter: None,
             message: None,
             space: None,
             overlay: Overlay::None,
@@ -355,12 +413,14 @@ impl Model {
         }
     }
 
-    /// The file-pane entries after the hidden-names filter.
+    /// The file-pane entries after the hidden-names filter and the live
+    /// filename filter (`f`).
     #[must_use]
     pub fn visible_files(&self) -> Vec<&FsEntry> {
         self.files
             .iter()
             .filter(|e| self.show_hidden || !e.name.starts_with('.'))
+            .filter(|e| self.filter.as_ref().map_or(true, |f| f.admits(&e.name)))
             .collect()
     }
 

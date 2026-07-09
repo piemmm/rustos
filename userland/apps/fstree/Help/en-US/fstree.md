@@ -56,14 +56,35 @@ Keys:
   visible names; every match is added to the tagged set.
 - `i` — invert the tags across the visible entries.
 - `C` — clear every tag.
+- `f` — filter the file pane by a filename glob, applied live as it is
+  typed. `Enter` keeps the filter (shown in the status line), `Esc`
+  restores the filter as it stood. A pattern that does not compile
+  hides nothing — the status line marks it `(bad pattern)` instead.
+  Emptying the pattern clears the filter.
+- `/` — search the branch under the focused directory by filename
+  glob, matched against each file's branch-relative path. Results
+  arrive in the flattened view as they are found.
+- `F` — search file contents for a literal text, matched
+  case-insensitively and streamed in bounded windows (a match spanning
+  a read boundary is still found). With entries tagged, the search
+  covers the tagged set (tagged directories recursively); otherwise it
+  covers the focused branch. Each result row carries its match count;
+  a file whose contents look binary is reported as a binary match —
+  its bytes are never shown. A file that refuses to read is listed in
+  the walk's report, never silently dropped.
 - `u` — count disk usage under the focused directory: files, bytes,
   and directories, walked incrementally in the background. `Esc`
   cancels, keeping the figures counted so far.
 - `v` — flatten the branch under the focused directory: one list of
   every file beneath it, filling page by page (`Space` loads the next
   page). Inside the view, `t`/`T`/`i`/`C` tag its rows, `c`/`m`/`d`
-  run batch operations over the tagged set, and `Esc` returns to the
-  panes. Rows are named relative to the flattened branch.
+  run batch operations over the tagged set, `Enter` jumps to the
+  selected row's directory in the panes (landing the cursor on it),
+  and `Esc` returns to the panes. While a walk or search is still
+  running, `Esc` first stops it, keeping the rows found so far. Rows
+  are named relative to the flattened branch. Search results (`/`,
+  `F`) fill this same view, so their rows are taggable and operable
+  exactly like a flattened listing.
 - `.` — toggle hidden (dot-named) entries in both panes.
 - `?` — show this help over the panes; any key dismisses it.
 - `q` — quit, restoring the terminal.
@@ -90,12 +111,12 @@ the message line with nothing changed.
 The status line shows the listed path, its visible entry count, the
 sort order, the backing volume's free/total bytes (when the System
 Information service can report them), whether hidden entries are
-shown, and — while anything is tagged — the tagged count and byte
-total. A file whose backing format stores no modification stamp shows
-`-` in the stamp column.
+shown, the active filename filter, and — while anything is tagged —
+the tagged count and byte total. A file whose backing format stores
+no modification stamp shows `-` in the stamp column.
 
-Search and the text/hex/disassembly viewers arrive in later
-stages of the tool's plan.
+The text/hex/disassembly viewers arrive in later stages of the
+tool's plan.
 
 ## OPTIONS
 
