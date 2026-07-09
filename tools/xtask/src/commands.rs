@@ -1342,6 +1342,56 @@ fn run_image(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     build_platform_image(ctx, parsed).map(|_| ())
 }
 
+/// Signed driver bundles paired with their `/System/Drivers/` store paths.
+type DriverBundles = Vec<(&'static [&'static [u8]], Vec<u8>)>;
+
+/// Cross-compile and sign every autoloaded `/System/Drivers/` bundle the
+/// image ships, paired with its store path. They all run in user space
+/// (the floor stays storage-only), so `devmgr` autoloads each against its
+/// discovered node — and the bus chain is recursive: the PCIe root-complex
+/// driver binds the discovered `brcm,bcm2711-pcie` node and emits the
+/// VL805 PCI function; the VL805 driver binds that, reloads the controller
+/// firmware over the mailbox, and emits the `usb,xhci` node; the xHCI
+/// **host-controller driver** binds that, enumerates the device, and emits
+/// one per-interface node; the keyboard **class** driver binds that and
+/// pumps key edges into the input arbiter over the URB transport
+/// (`plans/USB.md` U3b/U4); the mass-storage **class** driver binds a
+/// mass-storage interface node the same way and serves each logical unit
+/// as a block-service endpoint behind a per-LUN storage node
+/// (`plans/DEVICES.md` D2).
+fn build_image_driver_bundles(ctx: &Context) -> Result<DriverBundles, String> {
+    Ok(vec![
+        (
+            image_drivers::VCMAILBOX_STORE_PATH,
+            image_drivers::build_vcmailbox_bundle(ctx)?,
+        ),
+        (
+            image_drivers::PCIE_BRCM_STORE_PATH,
+            image_drivers::build_pcie_brcm_bundle(ctx)?,
+        ),
+        (
+            image_drivers::VL805_STORE_PATH,
+            image_drivers::build_vl805_bundle(ctx)?,
+        ),
+        (
+            image_drivers::USB_XHCI_STORE_PATH,
+            image_drivers::build_xhci_bundle(ctx)?,
+        ),
+        (
+            image_drivers::USB_KBD_STORE_PATH,
+            image_drivers::build_usb_kbd_bundle(ctx)?,
+        ),
+        (
+            image_drivers::VIRTIO_KBD_STORE_PATH,
+            image_drivers::build_virtio_kbd_bundle(ctx)?,
+        ),
+        (
+            image_drivers::USB_MSD_STORE_PATH,
+            image_drivers::build_usb_msd_bundle(ctx)?,
+        ),
+    ])
+}
+
 /// Build the platform image and return the written whole-disk image's
 /// path (consumed by `run` to boot the image it just built).
 fn build_platform_image(ctx: &Context, args: ImageArgs) -> Result<PathBuf, String> {
@@ -1408,30 +1458,12 @@ fn build_platform_image(ctx: &Context, args: ImageArgs) -> Result<PathBuf, Strin
     })?;
 
     // Cross-compile and sign the autoloaded `/System/Drivers/` bundles the
-    // image ships, then install them into the read-only `/System` store. They
-    // all run in user space (the floor stays storage-only), so `devmgr`
-    // autoloads each against its discovered node — and the bus chain is
-    // recursive: the PCIe root-complex driver binds the discovered
-    // `brcm,bcm2711-pcie` node and emits the VL805 PCI function; the VL805
-    // driver binds that, reloads the controller firmware over the mailbox, and
-    // emits the `usb,xhci` node; the xHCI **host-controller driver** binds
-    // that, enumerates the device, and emits one per-interface node; the
-    // keyboard **class** driver binds that and pumps key edges into the input
-    // arbiter over the URB transport (`plans/USB.md` U3b/U4).
-    let vcmailbox = image_drivers::build_vcmailbox_bundle(ctx)?;
-    let pcie_brcm = image_drivers::build_pcie_brcm_bundle(ctx)?;
-    let vl805 = image_drivers::build_vl805_bundle(ctx)?;
-    let xhci = image_drivers::build_xhci_bundle(ctx)?;
-    let usb_kbd = image_drivers::build_usb_kbd_bundle(ctx)?;
-    let virtio_kbd = image_drivers::build_virtio_kbd_bundle(ctx)?;
-    let drivers: [(&[&[u8]], &[u8]); 6] = [
-        (image_drivers::VCMAILBOX_STORE_PATH, &vcmailbox),
-        (image_drivers::PCIE_BRCM_STORE_PATH, &pcie_brcm),
-        (image_drivers::VL805_STORE_PATH, &vl805),
-        (image_drivers::USB_XHCI_STORE_PATH, &xhci),
-        (image_drivers::USB_KBD_STORE_PATH, &usb_kbd),
-        (image_drivers::VIRTIO_KBD_STORE_PATH, &virtio_kbd),
-    ];
+    // image ships, then install them into the read-only `/System` store.
+    let bundles = build_image_driver_bundles(ctx)?;
+    let drivers: Vec<(&[&[u8]], &[u8])> = bundles
+        .iter()
+        .map(|(path, bytes)| (*path, bytes.as_slice()))
+        .collect();
 
     // Compose the self-contained application bundles the read-only system
     // app/service stores ship — every discovered program's signed `AppInfo`

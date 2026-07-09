@@ -40,8 +40,9 @@ Facts the stages below build on, so no stage re-derives them:
   nodes → class drivers over the URB transport IPC
   (`lib/abi/src/usb_urb.rs`), with event-driven hotplug in both
   directions and the kernel driver-unload mechanism. The URB transport
-  serves control, interrupt, and — since D1 (§2.2) — bulk transfers;
-  the D2 mass-storage class driver is the first bulk consumer.
+  serves control-IN, the no-data control-OUT (since D2 — a SETUP-only
+  class request; a control-OUT *data stage* stays refused, it has no
+  consumer), interrupt, and — since D1 (§2.2) — bulk transfers.
 - **The block-driver contract exists**
   (`rustos_abi::driver::block::Block`), implemented by
   `drivers/storage/virtio_blk` and `drivers/storage/emmc2` with bounded,
@@ -357,34 +358,66 @@ names a sibling crate.
   HCD `UrbService` bulk tests (held-then-completed, in-band
   `EndpointStalled`).
 
-### 2.3 D2 — `drivers/storage/usb_msd` (Bulk-Only Transport class driver)
+### 2.3 D2 — `drivers/storage/usb_msd` (Bulk-Only Transport class driver). **Done.**
 
-- New crate `drivers/storage/usb_msd/` (a storage-class leaf, vendor-
-  neutral namespace, §8): binds an emitted USB interface node matched by
-  `HwMatchKey::usb(0, 0, 0x08_06_50)` — mass storage, SCSI transparent
-  command set, bulk-only transport. Holds only `CAP_SHM` /
-  `CAP_IPC_ENDPOINT` / `CAP_LOG_EMIT` plus the storage-node emission
-  right; no MMIO, no DMA, no IRQ (least privilege, §5.4).
-- Implements USB BOT (CBW/CSW framing, tag matching, phase-error
-  recovery via Bulk-Only Mass Storage Reset) and the SCSI transparent
-  subset a disk needs: `INQUIRY`, `TEST UNIT READY`, `REQUEST SENSE`,
-  `READ CAPACITY(10)`/`(16)`, `READ(10)`/`(16)`, `WRITE(10)`/`(16)`,
-  `SYNCHRONIZE CACHE(10)`, `MODE SENSE(6)` (write-protect bit),
-  `GET MAX LUN`. Every device-supplied field (CSW tags, residues, sense
-  data, capacity, LUN count) is bounds-checked fail-closed — the device
-  is hostile input (§5.4, §19).
-- Exposes each LUN as a `rustos_abi::driver::block::Block` served over
-  the same driver IPC shape the existing block drivers use, and emits one
-  storage-class hardware-tree node per LUN (so the volume layer reacts to
-  it exactly as to any other disk). Read-only media (write-protect) is
-  declared on the node/block capability, enforced fail-closed.
-- Transfers are chunked through a fixed shared-buffer window (the
-  virtio_blk precedent): per-device cost is fixed, never a function of
-  request length or volume size (§2.16, §26).
-- Host unit tests over a mock URB transport (BOT framing, tag mismatch,
-  stall recovery, short reads, write-protect, multi-LUN); QEMU vertical
-  with `qemu-xhci` + `usb-storage` where the emulated controller path
-  exists, Pi 4 metal acceptance otherwise (`plans/PI.md` §0.4).
+- `drivers/storage/usb_msd/` (storage-class leaf, vendor-neutral
+  namespace, §8): a pure user-space class driver binding
+  `HwMatchKey::usb(0, 0, 0x08_06_50)`. The crate is a host-testable `lib`
+  (`desc` — fail-closed configuration-descriptor reader; `bot` — the
+  BOT/SCSI engine over the `MsdTransport` seam; `serve` — the
+  block-service state machine) plus the freestanding `Run` program. Caps:
+  `CAP_SHM`, `CAP_IPC_ENDPOINT`, `CAP_IPC_BIND_PRIVILEGED` (the per-LUN
+  serve endpoints), `CAP_HW_EMIT`, `CAP_LOG_EMIT`; no MMIO/DMA/IRQ.
+- BOT + the full planned SCSI subset are implemented with every
+  device-supplied field bounds-checked fail-closed: CSW
+  signature/tag/residue/status validation, data-phase-stall → CSW
+  fall-through, CSW-stall single retry, tag-mismatch / corrupt-CSW /
+  phase-error → Bulk-Only Mass Storage Reset; `GET MAX LUN` (STALL means
+  one LUN, >15 fails closed), `INQUIRY`, bounded `TEST UNIT
+  READY`/`REQUEST SENSE` ready drain, `READ CAPACITY(10)`/`(16)`
+  (validated power-of-two 512–4096 block size; 16-byte form past the
+  32-bit LBA horizon), `READ`/`WRITE(10)`/`(16)` selected by range,
+  `SYNCHRONIZE CACHE(10)` (ILLEGAL REQUEST = no cache = success),
+  `MODE SENSE(6)` WP bit (a refused MODE SENSE reports write-enabled —
+  the established meaning — while enforcement stays driver-side:
+  `LunBlock` refuses writes to protected media before any byte reaches
+  the device). Each LUN is a `rustos_abi::driver::block::Block`
+  (`LunBlock`, chunked through the fixed 32 KiB window so per-device cost
+  never scales with request length) plus a `Flush` seam (the `Block`
+  trait carries no flush).
+- **Reality-driven decisions.** (1) No block-over-IPC protocol existed
+  (the existing block drivers are in-kernel bootstrap floor), so D2
+  defined it: `lib/abi/src/blkio.rs` — fixed-frame `BlkRequest`
+  (geometry/read/write/flush) + `BlkCompletion` (geometry + read-only
+  flag, `-errno` status word) over a `BLK_DATA_LEN` = 32 KiB shared data
+  window, the same call-endpoint + shared-window IPC shape as the URB
+  transport; covered by the `fuzz_decode` harness. The `Run` binds one
+  endpoint + window per ready LUN and emits one Storage-class node
+  carrying them (compatible key `rustos,usb-msd-lun` — the D3 volume
+  manager's selector), served on a wait-set; detach retracts the nodes
+  and exits 0 for reload. (2) The emitted interface node carries no
+  endpoint numbers and the bulk server validates them, so the driver
+  reads the device's own configuration descriptor (bounded, fail-closed)
+  to derive the interface number and bulk pair — the same facts the HCD
+  derived, never assumed. (3) The planned no-data control-OUT landed with
+  its first consumer: `UrbEngine::control_no_data` / `drive_urb`
+  Control+Out+len==0 / `UrbClient::control_no_data` (a data-stage OUT
+  stays refused); the engine reuses the existing SETUP_TRT_NO_DATA
+  control path. (4) The HCD's per-interface URB buffer grew from 64 B to
+  one bulk chunk (`BULK_BUF_LEN` = 4096, the same page) so bulk data fits;
+  a class-side transfer splits into ≤4 KiB URB chunks.
+- Host-proven over scripted doubles: BOT framing, tag mismatch,
+  reset-recovery trails, CSW-stall retry, stalled data phases, short
+  reads refused, sense mapping (DATA PROTECT → `PermissionDenied`),
+  capacity validation incl. a 100 TB-class unit, write-protect
+  enforcement before the wire, chunk sequencing, sensitive-window scrub,
+  multi-LUN CBW addressing; hostile descriptor streams; the whole
+  blkio request surface over an in-memory device. No QEMU fixture
+  publishes USB interface nodes (QEMU models no Pi USB — the U4/V3
+  precedent), so the live path is Pi 4 metal acceptance and a
+  `qemu-xhci` + `usb-storage` vertical rides the first emulated target
+  that carries the USB stack. The bundle ships in the Pi image
+  (`Drivers/storage/usb_msd/Run`, signed, least-privilege manifest).
 
 ### 2.4 D3 — the volume manager and automount
 
@@ -476,7 +509,7 @@ work is completed here, not stubbed around (§2.19).
 ### 2.6 DEVICE2 increment order
 
 - **D1** bulk URB transport (host-provable alone). **Done** (§2.2).
-- **D2** `usb_msd` class driver (host mock + QEMU/metal).
+- **D2** `usb_msd` class driver (host mock + QEMU/metal). **Done** (§2.3).
 - **D3** `volmgr` + `id::` roots + alias/catalog automount + permissions.
 - **D4** surprise-removal state machine, force-unmount, verified
   re-insert.

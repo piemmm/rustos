@@ -67,6 +67,13 @@ impl UrbEngine for MockEngine {
         Ok(n)
     }
 
+    fn control_no_data(&mut self, _setup: [u8; 8]) -> Result<(), DriverError> {
+        // No serve-level test drives a no-data control-OUT through this
+        // double yet; the seam-level round-trip lives in
+        // `rustos_usb::transport::tests`.
+        Err(DriverError::NotFound)
+    }
+
     fn interrupt_in(&mut self, data: &mut [u8]) -> Result<Option<usize>, DriverError> {
         self.interrupt_calls += 1;
         if let Some(err) = self.interrupt_fault.take() {

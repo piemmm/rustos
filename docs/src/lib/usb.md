@@ -74,15 +74,18 @@ build on the *same* engine without depending on each other — exactly the split
   - `UrbEngine` — the controller-side operation seam the HCD's live engine
     performs (`UsbDevice` implements it: `control_in` over the EP0 control
     transfer — targeting the enumerated *device*, switching a hub-downstream
-    device's EP0 ring active for the transfer — `interrupt_in` over the
-    `ReportSource` report poll, and `bulk_in` / `bulk_out` over the bulk
-    endpoint pair a mass-storage interface configures at enumeration,
-    `plans/DEVICES.md` D1).
+    device's EP0 ring active for the transfer — `control_no_data` over the
+    same path for a SETUP-only class request (the BOT Mass Storage Reset,
+    `plans/DEVICES.md` D2), `interrupt_in` over the `ReportSource` report
+    poll, and `bulk_in` / `bulk_out` over the bulk endpoint pair a
+    mass-storage interface configures at enumeration, `plans/DEVICES.md`
+    D1).
   - `drive_urb` — the controller-side server transformation: decode a URB,
-    validate it fail-closed against the interface (control ⇒ endpoint 0 / IN;
-    interrupt/bulk ⇒ a device endpoint; an oversize length, a control-OUT
-    transfer, or a malformed frame is refused **before** the engine is
-    touched), drive the engine over the shared buffer, and frame the
+    validate it fail-closed against the interface (control ⇒ endpoint 0,
+    served as IN or the zero-length no-data OUT; interrupt/bulk ⇒ a device
+    endpoint; an oversize length, a control-OUT *data stage*, or a
+    malformed frame is refused **before** the engine is touched), drive the
+    engine over the shared buffer, and frame the
     completion in band. A not-yet-arrived interrupt-IN report — or a bulk
     transfer still in flight — leaves the HCD's IPC ticket outstanding until
     the controller event arrives, so the class driver parks instead of
@@ -90,7 +93,8 @@ build on the *same* engine without depending on each other — exactly the split
   - `UrbCall` / `UrbClient` — the class-side client: a class driver implements
     `UrbCall` over the kernel `ipc_call` surface (a host test routes the bytes
     straight to `serve_urb`), and
-    `UrbClient::{control_in, interrupt_in, bulk_in, bulk_out}` build the URB,
+    `UrbClient::{control_in, control_no_data, interrupt_in, bulk_in,
+    bulk_out}` build the URB,
     submit it, and decode the completion. A class driver speaks only
     this ABI, so the same binary works behind any controller that serves it —
     it touches no controller register and no other interface's buffer (§5.4,

@@ -4062,6 +4062,14 @@ impl<H: XhciHost, M: DmaRegion> crate::transport::UrbEngine for UsbDevice<H, M> 
         Ok(copied)
     }
 
+    fn control_no_data(&mut self, setup: [u8; 8]) -> Result<(), DriverError> {
+        // No data stage: the request's whole meaning rides in SETUP (the
+        // engine's control path builds a SETUP + status-IN transfer when the
+        // data length is zero). It targets the enumerated *device* exactly as
+        // `control_in` does — never the hub above it.
+        self.device_control(setup, 0).map(|_| ())
+    }
+
     fn interrupt_in(&mut self, data: &mut [u8]) -> Result<Option<usize>, DriverError> {
         self.next_report(data)
     }

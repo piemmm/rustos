@@ -75,6 +75,10 @@ pub const USB_KBD_STORE_PATH: &[&[u8]] = &[b"Drivers", b"input", b"usb_kbd", b"R
 /// same path the `-M virt` autoload vertical's fixture plants.
 pub const VIRTIO_KBD_STORE_PATH: &[&[u8]] = &[b"Drivers", b"input", b"virtio_kbd", b"Run"];
 
+/// Store path of the USB mass-storage class-driver bundle: class `storage`,
+/// the `usb_msd` leaf naming the (vendor-neutral) driver.
+pub const USB_MSD_STORE_PATH: &[&[u8]] = &[b"Drivers", b"storage", b"usb_msd", b"Run"];
+
 /// Cross-compile `package` for the freestanding aarch64 target, convert the
 /// linked PIE ELF to a production-biased `rxe`, and wrap it as the signed
 /// payload of a `kind = UserSpace` bundle requesting exactly `caps` and
@@ -102,6 +106,7 @@ fn build_bundle(
         "rustos-drv-bus-usb" => "drivers/bus/usb/xhci",
         "rustos-drv-input-usb-kbd" => "drivers/input/usb_kbd",
         "rustos-drv-input-virtio-kbd" => "drivers/input/virtio_kbd",
+        "rustos-drv-storage-usb-msd" => "drivers/storage/usb_msd",
         other => return Err(format!("image: no source dir mapped for driver {other}")),
     };
     // A driver crate's `Run` binary shares the package name.
@@ -258,6 +263,36 @@ pub fn build_usb_kbd_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
             CapabilityId::LOG_EMIT,
         ],
         rustos_drv_input_usb_kbd::BIND_KEYS,
+    )
+}
+
+/// Build and sign the USB mass-storage **class**-driver bundle.
+///
+/// A pure BOT/SCSI class driver: it maps the shared URB buffer its
+/// host-controller driver forwarded and creates the per-LUN data windows
+/// (`CAP_SHM`), submits URBs on its one interface's transport endpoint
+/// (`CAP_IPC_ENDPOINT`), binds the per-LUN block-service endpoints it
+/// serves (`CAP_IPC_BIND_PRIVILEGED`), publishes/retracts the per-LUN
+/// storage nodes (`CAP_HW_EMIT`), and emits diagnostics (`CAP_LOG_EMIT`) —
+/// and nothing more. It holds **no** MMIO, DMA, or IRQ authority. Carries
+/// `rustos_drv_storage_usb_msd::BIND_KEYS`, so it autoloads against the
+/// mass-storage interface node the HCD emitted (`plans/DEVICES.md` D2).
+///
+/// # Errors
+///
+/// As [`build_vcmailbox_bundle`].
+pub fn build_usb_msd_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
+    build_bundle(
+        ctx,
+        "rustos-drv-storage-usb-msd",
+        &[
+            CapabilityId::SHM,
+            CapabilityId::IPC_ENDPOINT,
+            CapabilityId::IPC_BIND_PRIVILEGED,
+            CapabilityId::HW_EMIT,
+            CapabilityId::LOG_EMIT,
+        ],
+        rustos_drv_storage_usb_msd::BIND_KEYS,
     )
 }
 

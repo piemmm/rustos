@@ -102,6 +102,7 @@ driving the device from an arbitrary caller's context.
 |------------------------------------------|--------------------------------------|---------------------|------------------------------------------|
 | [virtio-blk](./virtio.md)                | `rustos-drv-storage-virtio-blk`      | virtio (PCI / MMIO) | host-side tests + mock transport only    |
 | Raspberry Pi 4 EMMC2                      | `rustos-drv-storage-emmc2`           | Pi 4 SDHCI (MMIO)   | read + write host-tested; interrupt-driven; wired into root-unlock; metal acceptance pending (Pi 4) |
+| USB mass storage (BOT)                    | `rustos-drv-storage-usb-msd`         | any USB host via the URB transport | BOT/SCSI engine + block service host-tested over scripted doubles; metal acceptance pending (Pi 4) |
 
 QEMU integration on real PCI / MMIO virtio devices depends on the
 prerequisites enumerated in `.junie/next-session-prompt.md` (kernel
@@ -109,7 +110,7 @@ DMA, IRQ routing, bus-handle hand-off).
 
 ### Discovery and the bootstrap floor
 
-Both shipped block drivers publish a canonical `BIND_KEYS` table
+Every shipped block driver publishes a canonical `BIND_KEYS` table
 (`AGENTS.md` §18.3) so a discovered hardware-tree node binds them by
 match, never by a kernel guess (§18.5):
 
@@ -117,8 +118,9 @@ match, never by a kernel guess (§18.5):
 |--------------|-----------------------------------------------|-------------------------------------------------|
 | virtio-blk   | virtio device id `2` (`HwMatchKey::virtio(2)`)| a probed virtio node (PCI or MMIO transport)    |
 | EMMC2        | `compatible = "brcm,bcm2711-emmc2"`           | the aarch64 `FdtDiscovery` Storage node         |
+| USB MSD      | USB class `08:06:50` (`HwMatchKey::usb(0, 0, 0x08_06_50)`) | the mass-storage interface node the xHCI HCD emits |
 
-The block drivers are part of the **bootstrap floor** (`AGENTS.md`
+The virtio-blk and EMMC2 drivers are part of the **bootstrap floor** (`AGENTS.md`
 §18.6): the storage path must be up before the signed driver store under
 `/System/Drivers/` is reachable, so the volume that holds the store can be
 read. They are therefore compiled in and registered in the kernel binary's
@@ -238,3 +240,42 @@ it failed — distinguishing a controller/command fault (`error=device
 fault`) from a decode rejection (`error=unsupported`) at the same step.
 Since `raspi4b` cannot model EMMC2, that live bring-up is metal-gated; the
 host test and the §0.9 metal checklist are the acceptance artefacts.
+
+### USB mass storage (Bulk-Only Transport) — `drivers/storage/usb_msd`
+
+`rustos-drv-storage-usb-msd` is the first **discovered-tier, user-space**
+block driver (`plans/DEVICES.md` D2): a pure USB *class* driver `devmgr`
+autoloads against the mass-storage interface node the xHCI host-controller
+driver emits. It owns no register window, no DMA, and no IRQ — every
+transfer rides the bus-agnostic URB transport (`lib/usb`), so the same
+binary serves a disk behind any host controller that speaks it.
+
+The driver reads the device's own configuration descriptor to derive the
+interface number and bulk endpoint pair (never assumed), then speaks USB
+MSC Bulk-Only Transport 1.0: each SCSI command wrapped in a CBW on
+bulk-OUT, the data phase over the bulk pair in bounded chunks, and the CSW
+validated field by field (signature, tag match, residue bound, status) —
+the device is hostile input. A stalled data phase falls through to the
+CSW; a stalled CSW read is retried once; a tag mismatch, corrupt CSW, or
+phase error runs the spec's Bulk-Only Mass Storage Reset (the D2 no-data
+control-OUT extension of the URB seam) and fails the command closed.
+
+Per logical unit (`GET MAX LUN`, up to 16) the bring-up runs `INQUIRY`
+(non-disk types are skipped), a bounded `TEST UNIT READY`/`REQUEST SENSE`
+ready drain, `READ CAPACITY(10)`/`(16)` with a fully validated geometry
+(power-of-two block size 512–4096; the 16-byte form covers units past the
+32-bit LBA horizon), and the `MODE SENSE(6)` write-protect bit — enforced
+driver-side (`DriverError::PermissionDenied` before any byte reaches the
+device), not merely reported.
+
+Each ready LUN is published as a **storage-class hardware-tree node**
+(compatible `rustos,usb-msd-lun`) carrying two grants: a block-service
+call endpoint and a 32 KiB shared data window. Consumers drive the unit
+with the fixed-frame `rustos_abi::blkio` protocol (`BlkRequest`:
+geometry / read / write / flush; completions carry the geometry and the
+read-only flag) — the same request-reply IPC shape as the URB transport,
+served by the driver's wait-set loop (never a busy-poll). A hot-unplug
+surfaces as the URB endpoint vanishing: the driver retracts its LUN nodes
+and exits cleanly so a re-plug re-enumerates and reloads it. The engine,
+descriptor reader, and block service are host-proven over scripted
+doubles; the live path is Pi 4 metal acceptance (QEMU models no Pi USB).

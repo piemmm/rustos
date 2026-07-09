@@ -1,0 +1,52 @@
+[package]
+name = "rustos-drv-storage-usb-msd"
+description = "RustOS autoloaded user-space USB mass-storage *class* driver: binds an emitted mass-storage interface node (08:06:50 — SCSI transparent command set over Bulk-Only Transport), drives BOT/SCSI over the bus-agnostic URB transport, and serves each logical unit as a block-service endpoint behind a per-LUN storage hardware-tree node (plans/DEVICES.md D2)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# The crate is a `lib` (the loadable-module identity — the `BIND_KEYS` bind
+# table the host image builder authors the signed manifest from — plus the
+# host-testable BOT/SCSI engine and block-service state machine) and a `Run`
+# binary (`src/main.rs`, the autoloaded class-driver process). It depends only
+# on `lib/*` crates so the layered dependency direction holds (no
+# `drivers/*`→`drivers/*` edge — it reaches its host-controller driver only
+# through the public URB transport ABI and serves consumers only through the
+# public block-service ABI). The binary is a freestanding pure-Rust program on
+# the native Tier-1 targets and an inert host stub elsewhere
+# (`src/main.rs` / `build.rs`), mirroring `drivers/input/usb_kbd`.
+
+[dependencies]
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+
+# Everything the freestanding program links beyond the `lib` is pulled in only
+# for the bare-metal targets the binary is actually built for; on the host the
+# binary is an inert stub.
+[target.'cfg(target_os = "none")'.dependencies]
+# The capability-set type the rt-backed `DriverHost` is built over.
+rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+# The bus-agnostic URB transport client (`UrbCall`, `UrbClient`): the seam this
+# class driver submits control and bulk URBs to its host-controller driver
+# over, without naming the controller or the bus. Also the one definition of
+# the per-URB bulk chunk ceiling (`device::BULK_BUF_LEN`).
+rustos-usb = { path = "../../../lib/usb", version = "=0.0.0" }
+# The user-space driver runtime: turns the kernel-issued device-resource grants
+# into the `DriverHost` the bring-up consumes.
+rustos-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0" }
+# The pure-Rust userland runtime: `_start`, the stack canary, the panic
+# handler, and the syscall wrappers the class driver issues (`ipc_call` for the
+# URB transport, `shm_create`/`call_create`/`hw_emit_node` for the per-LUN
+# block services, the wait-set trio for the serve loop), plus the `LogSink`
+# that marshals diagnostics to the kernel log over `log_emit`.
+rustos-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+# The structured diagnostic event vocabulary (`Event`/`Field`/`Level`).
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+# Fixed-buffer formatting helpers for numeric diagnostic fields, avoiding
+# allocation in the freestanding driver.
+rustos-util = { path = "../../../lib/util", version = "=0.0.0" }

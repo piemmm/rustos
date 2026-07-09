@@ -144,9 +144,13 @@ mod program {
     /// controller takes the base on the first try).
     const URB_ENDPOINT_PROBES: u64 = 64;
 
-    /// Bytes of shared buffer per interface — comfortably holds a boot report
-    /// (8 bytes) and any control-IN descriptor a class driver reads.
-    const SHM_LEN: usize = 64;
+    /// Bytes of shared buffer per interface: one bulk chunk
+    /// ([`rustos_usb::device::BULK_BUF_LEN`], the engine's per-TD ceiling —
+    /// one definition, never a second constant), which also comfortably
+    /// holds a boot report and any control-IN descriptor a class driver
+    /// reads. One page, so the mass-storage data path costs the keyboard
+    /// path nothing extra.
+    const SHM_LEN: usize = rustos_usb::device::BULK_BUF_LEN;
 
     /// Outstanding-URB capacity of the per-interface endpoint. The class
     /// driver submits one at a time (it blocks on the reply); a small queue

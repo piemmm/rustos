@@ -912,6 +912,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-drv-storage-usb-msd"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-caps",
+ "rustos-drvrt",
+ "rustos-log",
+ "rustos-rt",
+ "rustos-usb",
+ "rustos-util",
+]
+
+[[package]]
 name = "rustos-drv-storage-virtio-blk"
 version = "0.0.0"
 dependencies = [
@@ -3377,6 +3390,7 @@ dependencies = [
  "rustos-drv-bus-usb-vl805",
  "rustos-drv-input-usb-kbd",
  "rustos-drv-input-virtio-input",
+ "rustos-drv-storage-usb-msd",
  "rustos-fuzzseed",
  "rustos-help",
  "rustos-itest-harness",

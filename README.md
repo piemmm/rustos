@@ -41,7 +41,7 @@ for filesystems, the feature section below.
 | Side-channel mitigation | ✓ | ✓ | ✓ | ✓ |
 | Memory tagging (software UAF floor) | ✓ | ✓ | ✓ | ✓ |
 | Framebuffer / display | ✓ | ✓ | ▢ | ✓ |
-| Block storage | ✓ virtio | ✓ virtio + eMMC | ✓ virtio | — |
+| Block storage | ✓ virtio | ✓ virtio + eMMC + USB | ✓ virtio | — |
 | Networking | ◐ virtio | ◐ virtio | ◐ virtio | — |
 | Input devices | ✓ ps2 + USB | ✓ virtio + USB | ✓ virtio | ✓ host |
 | Production kernel binary | ✓ | ✓ | ▢ | ▢ |

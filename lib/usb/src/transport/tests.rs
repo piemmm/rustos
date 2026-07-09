@@ -39,6 +39,8 @@ struct MockEngine {
     reports: Vec<Vec<u8>>,
     control_calls: usize,
     interrupt_calls: usize,
+    /// SETUP packets delivered by completed no-data control-OUT transfers.
+    no_data_setups: Vec<[u8; 8]>,
     /// Queued device responses for bulk-IN, delivered one per completed TD.
     bulk_in_data: Vec<Vec<u8>>,
     /// Bytes each completed bulk-OUT TD delivered to the device.
@@ -63,6 +65,7 @@ impl MockEngine {
             reports: Vec::new(),
             control_calls: 0,
             interrupt_calls: 0,
+            no_data_setups: Vec::new(),
             bulk_in_data: Vec::new(),
             bulk_out_sink: Vec::new(),
             bulk_in_armed: None,
@@ -79,6 +82,11 @@ impl UrbEngine for MockEngine {
         let n = self.control_response.len().min(data.len());
         data[..n].copy_from_slice(&self.control_response[..n]);
         Ok(n)
+    }
+
+    fn control_no_data(&mut self, setup: [u8; 8]) -> Result<(), DriverError> {
+        self.no_data_setups.push(setup);
+        Ok(())
     }
 
     fn interrupt_in(&mut self, data: &mut [u8]) -> Result<Option<usize>, DriverError> {
@@ -295,20 +303,43 @@ fn rejects_illegal_direction() {
     );
     assert_eq!(engine.interrupt_calls, 0);
 
-    // A control-OUT is not served on this boot-protocol seam.
-    let control_out = UrbRequest {
+    // A control-OUT *data stage* has no consumer on this seam; it is
+    // refused before the engine is touched. The no-data form (length 0)
+    // is served — see `control_no_data_round_trips_through_the_client`.
+    let control_out_with_data = UrbRequest {
         endpoint: 0,
         transfer_type: UsbTransferType::Control,
         direction: UsbDirection::Out,
         buffer: BUFFER_HANDLE,
-        length: 0,
+        length: 8,
         setup: [0; 8],
     };
     assert_eq!(
-        serve_one(&control_out, 8, &mut engine),
+        serve_one(&control_out_with_data, 8, &mut engine),
         Err(Errno::NotImplemented)
     );
     assert_eq!(engine.control_calls, 0);
+    assert!(engine.no_data_setups.is_empty());
+}
+
+#[test]
+fn control_no_data_round_trips_through_the_client() {
+    let engine = Rc::new(RefCell::new(MockEngine::new()));
+    let buffer = Rc::new(RefCell::new(vec![0u8; 8]));
+
+    let mut client = UrbClient::new(DirectCall {
+        engine: engine.clone(),
+        buffer,
+    });
+
+    // A BOT Bulk-Only Mass Storage Reset SETUP packet.
+    let setup = [0x21, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+    client
+        .control_no_data(setup)
+        .expect("no-data control-OUT completes");
+    // The engine received exactly the SETUP packet, once.
+    assert_eq!(engine.borrow().no_data_setups, vec![setup]);
+    assert_eq!(engine.borrow().control_calls, 0);
 }
 
 #[test]

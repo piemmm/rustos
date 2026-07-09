@@ -4106,7 +4106,7 @@ per-increment guarantees.
 
 ## DEVICES — device inventory commands + USB mass storage (`plans/DEVICES.md`)
 
-**Status: in progress (DEVICE1 V1–V3 done; DEVICE2 remains).**
+**Status: in progress (DEVICE1 V1–V3 done; DEVICE2 D1–D2 done; D3–D4 remain).**
 DEVICE1 adds the `lspci` and `lsusb` system command apps: they render the
 discovered PCI/USB nodes from the existing `CAP_SYSINFO_HW`-gated
 hardware-tree query, naming devices through the `lib/devids` lookup crate
@@ -4156,14 +4156,23 @@ thirteen-locale `Help/`, and a `lsusb --help` step in the SP10b pipeline
 vertical — with the shared hardware-tree walk (decode, stable bus order,
 depth, ancestor-keep, class labels) hoisted into
 `rustos_procinfo::hwtree` so `lspci` and `lsusb` render through one
-definition. DEVICE2 adds bulk transfers to
-the URB transport, a `drivers/storage/usb_msd` Bulk-Only-Transport class
-driver, and the `volmgr` volume manager that lands the still-open volume
-forest (`id::` roots) and automounts hotplugged filesystems into the
-`Storage:` catalog with deterministic collision-free names and user-usable
-permissions — plus the surprise-removal state machine (retained uncommitted
-writes, syslog events, force-unmount, and verified re-insert replay). See
-`plans/DEVICES.md` for the binding design and staging.
+definition. DEVICE2: D1 (done) added bulk transfers to the URB transport;
+D2 (done) delivered the `drivers/storage/usb_msd` Bulk-Only-Transport class
+driver — a pure user-space class driver that derives its interface and bulk
+endpoint pair from the device's own configuration descriptor, drives the
+fail-closed BOT/SCSI engine (with the spec's stall/retry/Mass-Storage-Reset
+recovery, landed alongside the URB seam's no-data control-OUT), and serves
+each ready LUN as a `rustos_abi::blkio` block-service endpoint + 32 KiB
+shared window behind an emitted Storage-class node
+(`rustos,usb-msd-lun`), write-protect enforced driver-side; host-proven
+over scripted doubles, Pi 4 metal acceptance for the live path (QEMU
+models no Pi USB). D3–D4 remain: the `volmgr` volume manager landing the
+still-open volume forest (`id::` roots) and automounting hotplugged
+filesystems into the `Storage:` catalog with deterministic collision-free
+names and user-usable permissions, plus the surprise-removal state machine
+(retained uncommitted writes, syslog events, force-unmount, and verified
+re-insert replay). See `plans/DEVICES.md` for the binding design and
+staging.
 
 ---
 

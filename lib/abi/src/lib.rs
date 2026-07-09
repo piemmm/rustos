@@ -17,6 +17,7 @@
 #![deny(missing_docs)]
 
 pub mod appinfo;
+pub mod blkio;
 pub mod boot;
 pub mod capability;
 pub mod driver;

@@ -1,0 +1,564 @@
+//! The freestanding body of the mass-storage `Run` binary (`main.rs`):
+//! URB-backed transport, LUN bring-up, per-LUN block-service publication,
+//! and the wait-set serve loop (`plans/DEVICES.md` D2).
+
+use rustos_abi::blkio::{BLK_COMPLETION_LEN, BLK_DATA_LEN, BLK_REQUEST_LEN};
+use rustos_abi::hwtree::HW_NODE_ROOT;
+use rustos_abi::waitset::{WaitSetOp, WaitSourceKind};
+use rustos_abi::{CapabilityId, Errno, HwDeviceClass, HwMatchKey, HwNode, HwResource};
+use rustos_caps::CapabilitySet;
+use rustos_drv_storage_usb_msd::bot::{
+    LunBlock, LunState, Msd, MsdTransport, DEVICE_TYPE_DIRECT_ACCESS, MAX_LUNS,
+};
+use rustos_drv_storage_usb_msd::desc::{
+    configuration_total_length, find_msd_interface, CONFIGURATION_HEADER_LEN,
+};
+use rustos_drv_storage_usb_msd::serve::serve_request;
+use rustos_drvrt::{RtDriverHost, RtGrantSyscalls};
+use rustos_log::{log, Event, EventId, Field, FieldValue, Level};
+use rustos_rt::LogSink;
+use rustos_usb::device::BULK_BUF_LEN;
+use rustos_usb::transport::{UrbCall, UrbClient};
+use rustos_util::fmt::format_hex_u64;
+
+/// Exit code when the rt-backed driver host could not be built from the
+/// kernel-delivered grants. A reserved, fail-closed value.
+const EXIT_NO_HOST: i32 = 80;
+
+/// Exit code when the matched interface node did not carry the URB
+/// transport endpoint and shared-buffer grants this driver needs.
+const EXIT_NO_TRANSPORT: i32 = 81;
+
+/// Exit code when the device's descriptors or LUN bring-up refused every
+/// unit (no disk to serve).
+const EXIT_BRINGUP_FAILED: i32 = 82;
+
+/// Exit code when a per-LUN block service (endpoint, window, node, or the
+/// wait-set) could not be stood up.
+const EXIT_NO_SERVICE: i32 = 83;
+
+/// Diagnostic event id: the one-shot "LUNs published, serving" beacon.
+const MSD_READY: EventId = EventId(4160);
+
+/// Diagnostic event id: a bring-up step completed.
+const MSD_SETUP: EventId = EventId(4161);
+
+/// Diagnostic event id: a bring-up or serve step failed.
+const MSD_ERROR: EventId = EventId(4162);
+
+/// Diagnostic event id: one LUN was brought up and its node published.
+const MSD_LUN_READY: EventId = EventId(4163);
+
+/// Diagnostic event id: one LUN was skipped (non-disk type or never
+/// became ready) — logged, never a crash.
+const MSD_LUN_SKIPPED: EventId = EventId(4164);
+
+/// Diagnostic event id: the interface disappeared; nodes retracted and
+/// the driver exits for a clean reload on re-plug.
+const MSD_DETACHED: EventId = EventId(4165);
+
+/// Reserved id range the per-LUN block-service endpoints are bound in
+/// (`b"MSD\0"`-tagged, mirroring the HCD's URB endpoint range shape).
+const BLK_ENDPOINT_BASE: u64 = 0x004D_5344_0000_0000;
+
+/// How many endpoint ids to probe per LUN before giving up.
+const BLK_ENDPOINT_PROBES: u64 = 64;
+
+/// Outstanding-request capacity of a per-LUN endpoint. The volume layer
+/// submits one request at a time (it blocks on the reply); a small queue
+/// absorbs a re-submit racing the previous reply.
+const BLK_ENDPOINT_CAPACITY: usize = 4;
+
+/// Bounded bring-up TEST UNIT READY attempts per LUN. Each failed
+/// attempt reads (and thereby clears) the unit's sense state — the
+/// standard start-of-day UNIT ATTENTION drain — so this is a fixed
+/// number of real round trips, never a hot spin.
+const READY_ATTEMPTS: usize = 8;
+
+/// Wait forever on the serve wait-set (block requests arrive whenever a
+/// consumer issues them).
+const WAIT_FOREVER_NS: u64 = u64::MAX;
+
+/// The capability set the driver host re-checks up front; the kernel is
+/// the authority and re-checks every trap. It is the least-privilege set
+/// this class driver needs — no MMIO, DMA, or IRQ.
+fn driver_caps() -> CapabilitySet {
+    let mut caps = CapabilitySet::empty();
+    caps.insert(CapabilityId::SHM);
+    caps.insert(CapabilityId::IPC_ENDPOINT);
+    caps.insert(CapabilityId::IPC_BIND_PRIVILEGED);
+    caps.insert(CapabilityId::HW_EMIT);
+    caps.insert(CapabilityId::LOG_EMIT);
+    caps
+}
+
+/// The class-side URB transport: one synchronous, capability-checked
+/// `ipc_call` to the host-controller driver's per-interface endpoint. It
+/// records a vanished endpoint (`Errno::NotFound`) so the serve loop can
+/// retract the LUN nodes and exit for a clean reload.
+struct IpcUrbCall {
+    endpoint: u64,
+    disconnected: bool,
+}
+
+impl UrbCall for IpcUrbCall {
+    fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
+        match rustos_rt::ipc_call(self.endpoint, request, reply) {
+            Ok(len) => Ok(len),
+            Err(neg) => {
+                let errno =
+                    Errno::from_i32(i32::try_from(-neg).unwrap_or(0)).unwrap_or(Errno::NotFound);
+                if errno == Errno::NotFound {
+                    self.disconnected = true;
+                }
+                Err(errno)
+            }
+        }
+    }
+}
+
+/// [`MsdTransport`] over the URB transport: control and bulk URBs against
+/// the HCD, bounce-copied through this driver's mapping of the shared URB
+/// data buffer. Bulk transfers are split into per-URB chunks of at most
+/// one buffer ([`BULK_BUF_LEN`], the engine's per-TD ceiling); a short
+/// chunk ends the transfer honestly.
+struct UrbTransport {
+    client: UrbClient<IpcUrbCall>,
+    /// This driver's mapping of the shared URB data buffer (the HCD maps
+    /// the same frames and moves each transfer's bytes through it).
+    shm: &'static mut [u8],
+    /// The interface's bulk endpoint numbers, read from the device's own
+    /// configuration descriptor.
+    bulk_in_endpoint: u8,
+    bulk_out_endpoint: u8,
+}
+
+impl UrbTransport {
+    /// Whether the underlying transport endpoint has vanished (the HCD
+    /// retracted the interface — the device was unplugged).
+    fn disconnected(&self) -> bool {
+        self.client.transport().disconnected
+    }
+}
+
+impl MsdTransport for UrbTransport {
+    fn control_in(&mut self, setup: [u8; 8], data: &mut [u8]) -> Result<usize, Errno> {
+        let len =
+            u32::try_from(data.len().min(self.shm.len())).map_err(|_| Errno::LengthOutOfRange)?;
+        let n = self.client.control_in(setup, 0, len)? as usize;
+        let n = n.min(data.len()).min(self.shm.len());
+        data[..n].copy_from_slice(&self.shm[..n]);
+        Ok(n)
+    }
+
+    fn control_no_data(&mut self, setup: [u8; 8]) -> Result<(), Errno> {
+        self.client.control_no_data(setup)
+    }
+
+    fn bulk_in(&mut self, data: &mut [u8]) -> Result<usize, Errno> {
+        let mut off = 0usize;
+        while off < data.len() {
+            let chunk = (data.len() - off).min(BULK_BUF_LEN);
+            let chunk_u32 = u32::try_from(chunk).map_err(|_| Errno::LengthOutOfRange)?;
+            let n = self.client.bulk_in(self.bulk_in_endpoint, 0, chunk_u32)? as usize;
+            let n = n.min(chunk);
+            data[off..off + n].copy_from_slice(&self.shm[..n]);
+            off += n;
+            if n < chunk {
+                break; // Short packet: the device ended the phase early.
+            }
+        }
+        Ok(off)
+    }
+
+    fn bulk_out(&mut self, data: &[u8]) -> Result<usize, Errno> {
+        let mut off = 0usize;
+        while off < data.len() {
+            let chunk = (data.len() - off).min(BULK_BUF_LEN);
+            self.shm[..chunk].copy_from_slice(&data[off..off + chunk]);
+            let chunk_u32 = u32::try_from(chunk).map_err(|_| Errno::LengthOutOfRange)?;
+            let n = self.client.bulk_out(self.bulk_out_endpoint, 0, chunk_u32)? as usize;
+            let n = n.min(chunk);
+            off += n;
+            if n < chunk {
+                break;
+            }
+        }
+        Ok(off)
+    }
+
+    fn scrub(&mut self) {
+        self.shm.fill(0);
+    }
+}
+
+/// Emit one structured diagnostic event with a single hex field.
+fn log_hex_event(id: EventId, level: Level, message: &'static str, key: &'static str, value: u64) {
+    let mut value_buf = [0u8; 16];
+    log(
+        &LogSink,
+        &Event {
+            level,
+            id,
+            message,
+            fields: &[Field {
+                key,
+                value: FieldValue::Str(format_hex_u64(value, &mut value_buf)),
+            }],
+        },
+    );
+}
+
+/// The 8-byte SETUP of a standard `GET_DESCRIPTOR(CONFIGURATION, 0)` for
+/// `length` bytes (USB 2.0 §9.4.3).
+fn get_configuration_setup(length: u16) -> [u8; 8] {
+    let len = length.to_le_bytes();
+    [0x80, 0x06, 0x00, 0x02, 0x00, 0x00, len[0], len[1]]
+}
+
+/// One published logical unit: its serve endpoint, shared data window,
+/// emitted node, and brought-up state.
+struct LunServe {
+    endpoint: u64,
+    node_id: u32,
+    state: LunState,
+    window: &'static mut [u8],
+}
+
+/// Bind one per-LUN block-service endpoint, probing the reserved id range
+/// until a free id is found. Binding it grant-restricted (`send_caps`
+/// carries `CAP_IPC_ENDPOINT`) makes the kernel mint this driver the
+/// matching per-endpoint grant, which it forwards onto the LUN node so a
+/// consumer inherits exactly the right to drive this one unit.
+fn bind_blk_endpoint() -> Option<u64> {
+    let mut send_caps = CapabilitySet::empty();
+    send_caps.insert(CapabilityId::IPC_ENDPOINT);
+    let recv_caps = CapabilitySet::empty();
+    for i in 0..BLK_ENDPOINT_PROBES {
+        let id = BLK_ENDPOINT_BASE + i;
+        let ret = rustos_rt::call_create(
+            id,
+            &send_caps,
+            &recv_caps,
+            BLK_REQUEST_LEN,
+            BLK_COMPLETION_LEN,
+            BLK_ENDPOINT_CAPACITY,
+        );
+        if ret == 0 {
+            return Some(id);
+        }
+    }
+    None
+}
+
+/// Create a LUN's shared data window, returning this driver's mapping and
+/// the shm id forwarded as the node's grant.
+fn create_window() -> Option<(&'static mut [u8], u64)> {
+    let mut shm_id = 0u64;
+    let base = rustos_rt::shm_create(BLK_DATA_LEN, &mut shm_id);
+    if base < 0 {
+        return None;
+    }
+    // SAFETY: `shm_create` mapped `BLK_DATA_LEN` bytes of zeroed,
+    // cacheable, RW (non-executable) memory into this process at `base`
+    // and returned that base. The region is owned by this process for the
+    // rest of its life (never unmapped here), and no other reference in
+    // this address space aliases it, so a single exclusive `&mut [u8]`
+    // over exactly the requested length is sound. The consumer maps the
+    // same frames through its own inherited grant.
+    let window = unsafe { core::slice::from_raw_parts_mut(base as usize as *mut u8, BLK_DATA_LEN) };
+    Some((window, shm_id))
+}
+
+/// Publish one LUN's storage node: class `Storage`, a
+/// `rustos,usb-msd-lun` compatible key the volume layer selects on, and
+/// the two transport grants (the block-service endpoint and the shared
+/// data window). Returns the kernel-assigned node id.
+fn emit_lun_node(endpoint: u64, shm_id: u64) -> Option<u32> {
+    let mut node = HwNode::new(0, HW_NODE_ROOT, HwDeviceClass::Storage);
+    let key = HwMatchKey::compatible(b"rustos,usb-msd-lun").ok()?;
+    node.push_match_key(key).ok()?;
+    node.push_resource(HwResource::endpoint(endpoint)).ok()?;
+    node.push_resource(HwResource::shared(shm_id)).ok()?;
+    let emit = rustos_rt::hw_emit_node(&node);
+    if emit < 0 {
+        return None;
+    }
+    #[allow(clippy::cast_sign_loss)] // `emit >= 0` is the assigned node id.
+    Some(emit as u32)
+}
+
+/// Bring one LUN up: identity, the bounded ready drain, geometry, and
+/// write policy. `Ok(None)` skips the unit (not a disk / never ready);
+/// `Err` is a transport-level failure.
+fn bring_up_lun(msd: &mut Msd<UrbTransport>, lun: u8) -> Result<Option<LunState>, Errno> {
+    let inquiry = msd.inquiry(lun)?;
+    if inquiry.device_type != DEVICE_TYPE_DIRECT_ACCESS {
+        log_hex_event(
+            MSD_LUN_SKIPPED,
+            Level::Info,
+            "usb-msd: LUN skipped (not a direct-access unit)",
+            "type_hex",
+            u64::from(inquiry.device_type),
+        );
+        return Ok(None);
+    }
+    // Drain the start-of-day UNIT ATTENTION / not-ready states: each
+    // failed TEST UNIT READY is followed by the REQUEST SENSE that clears
+    // it. Bounded — a unit that never becomes ready is skipped, not
+    // spun on.
+    let mut ready = false;
+    for _ in 0..READY_ATTEMPTS {
+        if msd.test_unit_ready(lun)? {
+            ready = true;
+            break;
+        }
+        let _sense = msd.request_sense(lun)?;
+    }
+    if !ready {
+        log_hex_event(
+            MSD_LUN_SKIPPED,
+            Level::Warn,
+            "usb-msd: LUN skipped (never became ready)",
+            "lun_hex",
+            u64::from(lun),
+        );
+        return Ok(None);
+    }
+    let geometry = msd.read_capacity(lun)?;
+    let write_protected = msd.write_protected(lun)?;
+    Ok(Some(LunState {
+        geometry,
+        write_protected,
+    }))
+}
+
+/// Retract every published LUN node (device unplugged / fatal exit).
+fn retract_all(luns: &[Option<LunServe>]) {
+    for lun in luns.iter().flatten() {
+        let _ = rustos_rt::hw_remove_node(lun.node_id);
+    }
+}
+
+/// Program entry point. `rustos-rt`'s `_start` calls it once the runtime
+/// is set up and routes its return value through the `exit` syscall.
+///
+/// On success this never returns: the block-service loop runs for the
+/// life of the device, and a detach exits `0` so `devmgr` reloads the
+/// driver cleanly on re-plug.
+fn main() -> i32 {
+    // No MMIO/DMA grants to map, so no coherency shim is needed.
+    let Ok(host) = RtDriverHost::from_grants_query(driver_caps(), RtGrantSyscalls, None) else {
+        return EXIT_NO_HOST;
+    };
+    // The matched interface node carried two transport grants: the URB
+    // call endpoint (its id) and the shared data buffer (mapped here).
+    let Some(endpoint) = host.urb_endpoint() else {
+        return EXIT_NO_TRANSPORT;
+    };
+    let Ok(shm_base) = host.map_shared() else {
+        return EXIT_NO_TRANSPORT;
+    };
+    // SAFETY: `map_shared` mapped the HCD-created shared URB data buffer
+    // (one bulk chunk, `BULK_BUF_LEN` bytes — the one length both sides
+    // build from) into this process at `shm_base` and returned that base.
+    // The mapping lives for the rest of this process and nothing else in
+    // this address space aliases it, so a single exclusive `&mut [u8]`
+    // over the buffer is sound. The HCD writes it only while serving this
+    // driver's own blocking URB calls.
+    let shm =
+        unsafe { core::slice::from_raw_parts_mut(shm_base as usize as *mut u8, BULK_BUF_LEN) };
+
+    // Learn the interface number and bulk endpoint pair from the device's
+    // own configuration descriptor (never assumed): header first for the
+    // total length, then the full stream, parsed in place from the shared
+    // buffer the control-IN landed it in.
+    let mut client = UrbClient::new(IpcUrbCall {
+        endpoint,
+        disconnected: false,
+    });
+    let header_len = CONFIGURATION_HEADER_LEN as u32;
+    let Ok(n) = client.control_in(get_configuration_setup(header_len as u16), 0, header_len) else {
+        return EXIT_BRINGUP_FAILED;
+    };
+    let Ok(total) = configuration_total_length(&shm[..(n as usize).min(shm.len())]) else {
+        return EXIT_BRINGUP_FAILED;
+    };
+    // A configuration stream larger than the shared buffer cannot be
+    // fetched over this transport; refuse the device rather than parse a
+    // truncated stream.
+    let Ok(total_u16) = u16::try_from(total) else {
+        return EXIT_BRINGUP_FAILED;
+    };
+    if total > shm.len() {
+        return EXIT_BRINGUP_FAILED;
+    }
+    let Ok(n) = client.control_in(get_configuration_setup(total_u16), 0, total_u16.into()) else {
+        return EXIT_BRINGUP_FAILED;
+    };
+    if (n as usize) < total {
+        return EXIT_BRINGUP_FAILED;
+    }
+    let Ok(interface) = find_msd_interface(&shm[..total]) else {
+        return EXIT_BRINGUP_FAILED;
+    };
+    log_hex_event(
+        MSD_SETUP,
+        Level::Info,
+        "usb-msd: interface + bulk endpoint pair derived from descriptors",
+        "in_out_hex",
+        (u64::from(interface.bulk_in) << 8) | u64::from(interface.bulk_out),
+    );
+
+    let transport = UrbTransport {
+        client,
+        shm,
+        bulk_in_endpoint: interface.bulk_in,
+        bulk_out_endpoint: interface.bulk_out,
+    };
+    let mut msd = Msd::new(transport, interface.interface_number);
+
+    // Bring every unit up; publish one storage node per ready LUN.
+    let Ok(lun_count) = msd.lun_count() else {
+        return EXIT_BRINGUP_FAILED;
+    };
+    let mut luns: [Option<LunServe>; MAX_LUNS] = core::array::from_fn(|_| None);
+    let mut published = 0usize;
+    for lun in 0..lun_count {
+        let state = match bring_up_lun(&mut msd, lun) {
+            Ok(Some(state)) => state,
+            Ok(None) => continue,
+            Err(err) => {
+                log_hex_event(
+                    MSD_ERROR,
+                    Level::Warn,
+                    "usb-msd: LUN bring-up failed",
+                    "errno_hex",
+                    err as u64,
+                );
+                continue;
+            }
+        };
+        let Some(blk_endpoint) = bind_blk_endpoint() else {
+            return EXIT_NO_SERVICE;
+        };
+        let Some((window, shm_id)) = create_window() else {
+            return EXIT_NO_SERVICE;
+        };
+        let Some(node_id) = emit_lun_node(blk_endpoint, shm_id) else {
+            return EXIT_NO_SERVICE;
+        };
+        log_hex_event(
+            MSD_LUN_READY,
+            Level::Info,
+            "usb-msd: LUN published as a storage node",
+            "blocks_hex",
+            state.geometry.block_count,
+        );
+        luns[usize::from(lun)] = Some(LunServe {
+            endpoint: blk_endpoint,
+            node_id,
+            state,
+            window,
+        });
+        published += 1;
+    }
+    if published == 0 {
+        log_hex_event(
+            MSD_ERROR,
+            Level::Error,
+            "usb-msd: no logical unit could be brought up",
+            "count_hex",
+            u64::from(lun_count),
+        );
+        return EXIT_BRINGUP_FAILED;
+    }
+
+    // The serve wait-set: one member per published LUN endpoint, token =
+    // LUN number.
+    let set = rustos_rt::waitset_create();
+    if set < 0 {
+        retract_all(&luns);
+        return EXIT_NO_SERVICE;
+    }
+    #[allow(clippy::cast_sign_loss)] // `set >= 0` is the wait-set handle.
+    let set = set as u64;
+    for (lun, serve) in luns.iter().enumerate() {
+        let Some(serve) = serve else { continue };
+        let ret = rustos_rt::waitset_ctl(
+            set,
+            WaitSetOp::Add,
+            WaitSourceKind::Endpoint,
+            serve.endpoint,
+            lun as u64,
+        );
+        if ret != 0 {
+            retract_all(&luns);
+            return EXIT_NO_SERVICE;
+        }
+    }
+
+    log(
+        &LogSink,
+        &Event {
+            level: Level::Info,
+            id: MSD_READY,
+            message: "usb-msd: logical units published, serving block requests",
+            fields: &[],
+        },
+    );
+
+    // Event-driven service loop: park on the wait-set until a consumer's
+    // request arrives, serve it (the data moves via blocking URB calls
+    // that park in the kernel), reply, and check for detach. Never a
+    // busy-poll.
+    loop {
+        let mut token = 0u64;
+        let ret = rustos_rt::waitset_wait(set, WAIT_FOREVER_NS, &mut token);
+        if ret < 0 {
+            retract_all(&luns);
+            return EXIT_NO_SERVICE;
+        }
+        let index = usize::try_from(token).unwrap_or(MAX_LUNS);
+        let Some(serve) = luns.get_mut(index).and_then(Option::as_mut) else {
+            continue;
+        };
+        let mut request = [0u8; BLK_REQUEST_LEN];
+        let mut ticket = 0u64;
+        let Ok(n) = rustos_rt::call_recv(serve.endpoint, &mut request, &mut ticket) else {
+            continue;
+        };
+        let lun = index as u8;
+        let read_only = serve.state.write_protected;
+        let mut reply = [0u8; BLK_COMPLETION_LEN];
+        let len = {
+            let mut block = LunBlock::new(&mut msd, lun, serve.state);
+            serve_request(
+                &mut block,
+                read_only,
+                &request[..n],
+                serve.window,
+                &mut reply,
+            )
+        };
+        let _ = rustos_rt::call_reply(serve.endpoint, ticket, &reply[..len]);
+        // A vanished URB endpoint means the HCD retracted the interface:
+        // the device is gone. Retract the LUN nodes and exit cleanly so a
+        // re-plug re-enumerates and reloads this driver.
+        if msd.transport().disconnected() {
+            log(
+                &LogSink,
+                &Event {
+                    level: Level::Info,
+                    id: MSD_DETACHED,
+                    message: "usb-msd: device detached, retracting LUN nodes and exiting",
+                    fields: &[],
+                },
+            );
+            retract_all(&luns);
+            return 0;
+        }
+    }
+}
+
+rustos_rt::entry!(main);

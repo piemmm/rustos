@@ -39,12 +39,12 @@ use rustos_abi::{DriverError, Errno};
 /// The HCD's live engine implements this; a malformed transfer never reaches
 /// it because [`drive_urb`] validates the URB first. The transfers the
 /// served device classes need are present: a control-IN transfer (used
-/// during enumeration and for class-IN requests), a non-blocking
-/// interrupt-IN poll (the HID report path), and non-blocking bulk IN/OUT
-/// (the mass-storage data path, `plans/DEVICES.md` D1). Control-OUT is
-/// deliberately absent — it lands with its first consumer (the BOT class
-/// driver's Mass Storage Reset, `plans/DEVICES.md` D2); the server refuses
-/// it fail-closed rather than pretending to perform it.
+/// during enumeration and for class-IN requests), a **no-data** control-OUT
+/// (a class request carrying its whole meaning in SETUP — the BOT Mass
+/// Storage Reset, `plans/DEVICES.md` D2), a non-blocking interrupt-IN poll
+/// (the HID report path), and non-blocking bulk IN/OUT (the mass-storage
+/// data path, `plans/DEVICES.md` D1). A control-OUT *data stage* has no
+/// consumer and is refused fail-closed rather than pretended.
 pub trait UrbEngine {
     /// Run a control-IN transfer (SETUP + IN data stage) into `data`,
     /// returning the bytes the device delivered.
@@ -54,6 +54,16 @@ pub trait UrbEngine {
     /// A [`DriverError`] from the controller/device (e.g.
     /// [`DriverError::DeviceFault`]).
     fn control_in(&mut self, setup: [u8; 8], data: &mut [u8]) -> Result<usize, DriverError>;
+
+    /// Run a no-data control transfer (SETUP + status stage only, USB 2.0
+    /// §9.3 `wLength == 0`): a class request whose whole meaning rides in
+    /// `setup`, e.g. the BOT Bulk-Only Mass Storage Reset.
+    ///
+    /// # Errors
+    ///
+    /// A [`DriverError`] from the controller/device (e.g.
+    /// [`DriverError::DeviceFault`]).
+    fn control_no_data(&mut self, setup: [u8; 8]) -> Result<(), DriverError>;
 
     /// Poll the interface's interrupt-IN endpoint for one pending report into
     /// `data`. `Ok(Some(n))` if a report arrived, `Ok(None)` if none is
@@ -131,9 +141,17 @@ pub fn drive_urb<E: UrbEngine>(
             if urb.endpoint != 0 {
                 return Err(Errno::OutOfRange);
             }
-            // Only the IN data stage is served on this seam.
-            if urb.direction != UsbDirection::In {
-                return Err(Errno::NotImplemented);
+            // The served control shapes are the IN data stage and the
+            // no-data OUT (SETUP only); a control-OUT *data stage* has no
+            // consumer and is refused fail-closed.
+            if urb.direction == UsbDirection::Out {
+                if urb.length != 0 {
+                    return Err(Errno::NotImplemented);
+                }
+                engine
+                    .control_no_data(urb.setup)
+                    .map_err(DriverError::as_errno)?;
+                return Ok(Some(0));
             }
             // A control transfer completes synchronously within the call.
             let transferred = engine
@@ -236,6 +254,14 @@ impl<T: UrbCall> UrbClient<T> {
         Self { transport }
     }
 
+    /// Borrow the underlying call transport, so a class driver can observe
+    /// transport-level state it records there (e.g. that the served
+    /// interface's endpoint has vanished after a hot-unplug).
+    #[must_use]
+    pub fn transport(&self) -> &T {
+        &self.transport
+    }
+
     /// Submit `urb` and decode the completion, returning the bytes
     /// transferred.
     ///
@@ -268,6 +294,25 @@ impl<T: UrbCall> UrbClient<T> {
             length,
             setup,
         })
+    }
+
+    /// Submit a no-data control-OUT URB on endpoint 0 (SETUP + status stage
+    /// only): a class request whose whole meaning rides in `setup`, e.g. the
+    /// BOT Bulk-Only Mass Storage Reset.
+    ///
+    /// # Errors
+    ///
+    /// The carried completion [`Errno`], or an encode/transport error.
+    pub fn control_no_data(&mut self, setup: [u8; 8]) -> Result<(), Errno> {
+        self.submit(&UrbRequest {
+            endpoint: 0,
+            transfer_type: UsbTransferType::Control,
+            direction: UsbDirection::Out,
+            buffer: 0,
+            length: 0,
+            setup,
+        })
+        .map(|_| ())
     }
 
     /// Submit an interrupt-IN URB for `endpoint` reading one report into the

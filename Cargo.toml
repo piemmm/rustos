@@ -110,6 +110,7 @@ members = [
     # Drivers — storage
     "drivers/storage/virtio_blk",
     "drivers/storage/emmc2",
+    "drivers/storage/usb_msd",
 
     # Drivers — network
     "drivers/network/virtio_net",

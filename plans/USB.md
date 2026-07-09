@@ -721,8 +721,8 @@ is the operator's acceptance step (QEMU models no Pi USB, §0.4).
   driver or HCD extension on top of this seam, not part of bringing the split
   up. (Single-tier hub *hot-plug* is in: U5 services the onboard hub's
   status-change endpoint event-driven. Bulk transfers themselves have since
-  landed on this seam — `plans/DEVICES.md` D1 — leaving the mass-storage
-  class driver as DEVICES.md D2.)
+  landed on this seam — `plans/DEVICES.md` D1 — and the mass-storage
+  class driver followed as DEVICES.md D2.)
 - A second host-controller driver (a non-xHCI controller): the architecture
   admits it (it binds a different controller node and serves the same URB ABI),
   but none is planned here.
