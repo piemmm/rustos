@@ -5269,6 +5269,7 @@ where
                 kind: e.kind,
                 size: e.size,
                 allocated: e.allocated,
+                modified: e.modified,
                 name: e.name.as_bytes(),
             };
             let written = entry.encode_into(&mut rec)?;
@@ -19471,12 +19472,14 @@ mod tests {
                 kind: FileKind::Directory,
                 size: 0,
                 allocated: 4096,
+                modified: Time64::from_secs(1_111),
                 name: alloc::string::String::from("Logs"),
             },
             crate::fs::ReaddirEntry {
                 kind: FileKind::Regular,
                 size: 17,
                 allocated: 512,
+                modified: Time64::from_secs(2_222),
                 name: alloc::string::String::from("motd"),
             },
         ];
@@ -19491,9 +19494,9 @@ mod tests {
                 .expect("open dir"),
         )
         .unwrap();
-        // Two records: (20 + 4) + (20 + 4) = 48 bytes.
-        let total = usize::try_from(h.fs_readdir(&ctx, fd, 0x1000, 64).expect("readdir")).unwrap();
-        assert_eq!(total, 48);
+        // Two records: (32 + 4) + (32 + 4) = 72 bytes.
+        let total = usize::try_from(h.fs_readdir(&ctx, fd, 0x1000, 96).expect("readdir")).unwrap();
+        assert_eq!(total, 72);
         let stream = h
             .with_caller_aspace(&ctx, |space, physmap| {
                 let mut buf = alloc::vec![0u8; total];
@@ -19505,10 +19508,12 @@ mod tests {
         assert_eq!(first.kind, FileKind::Directory);
         assert_eq!(first.size, 0);
         assert_eq!(first.allocated, 4096);
+        assert_eq!(first.modified, Time64::from_secs(1_111));
         assert_eq!(first.name, b"Logs");
         let (second, _) = DirEntry::decode(&stream[used..]).expect("second entry");
         assert_eq!(second.size, 17);
         assert_eq!(second.allocated, 512);
+        assert_eq!(second.modified, Time64::from_secs(2_222));
         assert_eq!(second.name, b"motd");
 
         // A buffer too small for the whole listing fails closed.

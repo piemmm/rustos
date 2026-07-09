@@ -15,6 +15,7 @@
 //! an [`Errno`] rather than indexing out of range.
 
 use crate::le::{put_u32, put_u64, read_u32, read_u64};
+use crate::time::Time64;
 use crate::Errno;
 
 /// Maximum length, in bytes, of a single path passed to a filesystem
@@ -341,17 +342,22 @@ pub const FS_NAME_MAX: usize = 255;
 ///
 /// `fs_readdir` fills the caller's buffer with consecutive records, each a
 /// fixed [`DirEntry::HEADER_LEN`]-byte header (kind, name length, size,
-/// allocated bytes) followed by exactly `name_len` UTF-8 name bytes (no
-/// NUL). The reader walks the buffer with [`DirEntry::decode`]; the kernel
+/// allocated bytes, modification stamp) followed by exactly `name_len`
+/// UTF-8 name bytes (no NUL). The reader walks the buffer with
+/// [`DirEntry::decode`]; the kernel
 /// writes it with [`DirEntry::encode_into`]. The packing lives here, once,
 /// so producer and consumer cannot disagree (no duplication).
 ///
-/// The record carries each entry's `size` and `allocated` because the
+/// The record carries each entry's `size`, `allocated`, and `modified`
+/// because the
 /// listing filesystem already holds the child's metadata while producing
-/// the entry; a consumer that needs per-entry sizes (`du`, `ls -l`) reads
+/// the entry; a consumer that needs per-entry sizes or stamps (`du`,
+/// `ls -l`, a file manager's listing) reads
 /// them from the one listing instead of opening and statting every child —
 /// on an uncached, authenticated volume each such stat is a full
-/// re-resolution of the child's path.
+/// re-resolution of the child's path (and a format such as FAT stores the
+/// stamp only in the parent's directory record, so the listing is the one
+/// place it is reportable at all).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct DirEntry<'a> {
     /// Whether the entry names a regular file or a directory.
@@ -362,14 +368,19 @@ pub struct DirEntry<'a> {
     /// format's own allocation tracking reports it (the [`FileStat`]
     /// `allocated` field of the same node).
     pub allocated: u64,
+    /// The entry's last contents-modification instant (mtime), as the
+    /// mounted format stores it, widened to [`Time64`] without truncation.
+    /// A backing that stores no per-node stamp reports
+    /// [`Time64::UNIX_EPOCH`], never a fabricated wall time.
+    pub modified: Time64,
     /// The entry's name (UTF-8, no terminator, never empty, never `.`/`..`).
     pub name: &'a [u8],
 }
 
 impl<'a> DirEntry<'a> {
     /// Size of the fixed per-entry header: `kind(1)` + `pad(1)` +
-    /// `name_len(2)` + `size(8)` + `allocated(8)`.
-    pub const HEADER_LEN: usize = 20;
+    /// `name_len(2)` + `size(8)` + `allocated(8)` + `modified(12)`.
+    pub const HEADER_LEN: usize = 32;
 
     /// The total encoded length of this entry (header plus name).
     #[must_use]
@@ -404,6 +415,7 @@ impl<'a> DirEntry<'a> {
         out[3] = hi;
         out[4..12].copy_from_slice(&self.size.to_le_bytes());
         out[12..20].copy_from_slice(&self.allocated.to_le_bytes());
+        out[20..32].copy_from_slice(&self.modified.to_le_bytes());
         out[Self::HEADER_LEN..total].copy_from_slice(self.name);
         Ok(total)
     }
@@ -419,6 +431,8 @@ impl<'a> DirEntry<'a> {
     ///   [`FileKind`].
     /// * [`Errno::LengthOutOfRange`] if the declared name length is zero or
     ///   exceeds [`FS_NAME_MAX`].
+    /// * [`Errno::TimestampOutOfRange`] if the modification stamp is not a
+    ///   canonical [`Time64`] encoding.
     pub fn decode(bytes: &'a [u8]) -> Result<(Self, usize), Errno> {
         if bytes.len() < Self::HEADER_LEN {
             return Err(Errno::BufferTooSmall);
@@ -437,6 +451,7 @@ impl<'a> DirEntry<'a> {
                 kind,
                 size: read_u64(bytes, 4),
                 allocated: read_u64(bytes, 12),
+                modified: Time64::from_bytes(&bytes[20..32])?,
                 name: &bytes[Self::HEADER_LEN..total],
             },
             total,
@@ -448,6 +463,7 @@ impl<'a> DirEntry<'a> {
 mod tests {
     extern crate alloc;
     use super::{DirEntry, FileKind, FileStat, OpenFlags, UnlinkFlags, FS_NAME_MAX};
+    use crate::time::Time64;
     use crate::Errno;
     use alloc::vec;
 
@@ -567,12 +583,16 @@ mod tests {
                 kind: FileKind::Directory,
                 size: 0,
                 allocated: 4096,
+                // Pre-1970: the full signed range must round-trip.
+                modified: Time64::from_secs(-2_000_000_000),
                 name: b"Logs",
             },
             DirEntry {
                 kind: FileKind::Regular,
                 size: u64::MAX,
                 allocated: 0x0102_0304_0506_0708,
+                // Post-2038: never a 32-bit seconds wrap.
+                modified: Time64::new(4_000_000_000, 999_999_999).expect("canonical"),
                 name: b"motd.txt",
             },
         ];
@@ -587,21 +607,53 @@ mod tests {
         let mut decoded = vec![];
         while cursor < total {
             let (entry, used) = DirEntry::decode(&buf[cursor..total]).expect("valid");
-            decoded.push((entry.kind, entry.size, entry.allocated, entry.name.to_vec()));
+            decoded.push((
+                entry.kind,
+                entry.size,
+                entry.allocated,
+                entry.modified,
+                entry.name.to_vec(),
+            ));
             cursor += used;
         }
         assert_eq!(cursor, total);
         assert_eq!(decoded.len(), 2);
-        assert_eq!(decoded[0], (FileKind::Directory, 0, 4096, b"Logs".to_vec()));
+        assert_eq!(
+            decoded[0],
+            (
+                FileKind::Directory,
+                0,
+                4096,
+                Time64::from_secs(-2_000_000_000),
+                b"Logs".to_vec()
+            )
+        );
         assert_eq!(
             decoded[1],
             (
                 FileKind::Regular,
                 u64::MAX,
                 0x0102_0304_0506_0708,
+                Time64::new(4_000_000_000, 999_999_999).expect("canonical"),
                 b"motd.txt".to_vec()
             )
         );
+    }
+
+    #[test]
+    fn dir_entry_decode_rejects_non_canonical_stamp() {
+        let entry = DirEntry {
+            kind: FileKind::Regular,
+            size: 1,
+            allocated: 1,
+            modified: Time64::UNIX_EPOCH,
+            name: b"f",
+        };
+        let mut buf = [0u8; DirEntry::HEADER_LEN + 1];
+        entry.encode_into(&mut buf).expect("fits");
+        // Corrupt the stamp's nanosecond field past its canonical bound.
+        buf[28..32].copy_from_slice(&1_000_000_000u32.to_le_bytes());
+        assert_eq!(DirEntry::decode(&buf), Err(Errno::TimestampOutOfRange));
     }
 
     #[test]
@@ -611,6 +663,7 @@ mod tests {
             kind: FileKind::Regular,
             size: 0,
             allocated: 0,
+            modified: Time64::UNIX_EPOCH,
             name: b"",
         };
         assert_eq!(empty.encode_into(&mut buf), Err(Errno::LengthOutOfRange));
@@ -619,6 +672,7 @@ mod tests {
             kind: FileKind::Regular,
             size: 0,
             allocated: 0,
+            modified: Time64::UNIX_EPOCH,
             name: &big,
         };
         let mut wide = vec![0u8; FS_NAME_MAX + 8];
@@ -634,6 +688,7 @@ mod tests {
             kind: FileKind::Regular,
             size: 0,
             allocated: 0,
+            modified: Time64::UNIX_EPOCH,
             name: b"abcd",
         };
         let mut buf = [0u8; DirEntry::HEADER_LEN + 2];

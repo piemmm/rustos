@@ -30,6 +30,7 @@ use rustos_abi::driver::filesystem::{
     FilesystemRead, FilesystemSecurity, FilesystemWrite, NodeId, NodeInfo, NodeKind,
 };
 use rustos_abi::driver::DriverError;
+use rustos_abi::time::Time64;
 
 use super::path::MAX_COMPONENT_LEN;
 use super::perm::{Access, Credentials, Metadata};
@@ -251,8 +252,8 @@ impl<R: FilesystemRead + ?Sized, P: MetaPolicy<R>> DelegatedFs<'_, R, P> {
     }
 
     /// List the entries of the directory at `components`, in the driver's
-    /// stable on-disk order, each with the structural [`NodeInfo`] the
-    /// driver reports for it.
+    /// stable on-disk order, each with the structural [`NodeInfo`] and the
+    /// last-modification stamp the driver reports for it.
     ///
     /// The kind and sizes come from the listing driver itself, so a caller
     /// never has to re-resolve each child by path — a child whose *path*
@@ -271,7 +272,7 @@ impl<R: FilesystemRead + ?Sized, P: MetaPolicy<R>> DelegatedFs<'_, R, P> {
         &mut self,
         cred: &Credentials<'_>,
         components: &[String],
-    ) -> Result<Vec<(NodeInfo, String)>, VfsError> {
+    ) -> Result<Vec<(NodeInfo, Time64, String)>, VfsError> {
         let (node, info, meta) = self.resolve(cred, components)?;
         if info.kind != NodeKind::Directory {
             return Err(VfsError::NotADirectory);
@@ -293,7 +294,7 @@ impl<R: FilesystemRead + ?Sized, P: MetaPolicy<R>> DelegatedFs<'_, R, P> {
             }
             let name =
                 core::str::from_utf8(&name_buf[..entry.name_len]).map_err(|_| VfsError::Io)?;
-            entries.push((entry.info, name.to_string()));
+            entries.push((entry.info, entry.modified, name.to_string()));
             cursor = entry.next_cursor;
         }
         Ok(entries)

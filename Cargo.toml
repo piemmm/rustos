@@ -140,6 +140,7 @@ members = [
     "userland/apps/edit",
     "userland/apps/false",
     "userland/apps/files",
+    "userland/apps/fstree",
     "userland/apps/getcap",
     "userland/apps/groupadd",
     "userland/apps/head",

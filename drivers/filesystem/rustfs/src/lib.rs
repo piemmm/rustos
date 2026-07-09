@@ -3445,6 +3445,7 @@ impl<B: Block> FilesystemRead for RustFs<B> {
                 return Ok(Some(DirEntry {
                     node: NodeId::from_raw(u64::from(ino)),
                     info: child_info,
+                    modified: child.times.modified,
                     name_len,
                     next_cursor: position + 1,
                 }));

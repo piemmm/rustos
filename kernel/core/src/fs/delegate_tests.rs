@@ -11,6 +11,7 @@ use rustos_abi::driver::filesystem::{
     DirEntry, FilesystemRead, MountFlags, NodeId, NodeInfo, NodeKind,
 };
 use rustos_abi::driver::{DriverError, DriverHandle};
+use rustos_abi::time::Time64;
 use rustos_caps::CapabilitySet;
 use rustos_kernel_sec::{GroupId, UserId};
 
@@ -19,6 +20,10 @@ use crate::fs::perm::Credentials;
 // The in-memory read/write driver fixture is shared with the mounted-service
 // tests; the one definition lives in `crate::fs::memfs` (no per-test copy).
 use crate::fs::memfs::{RwMockFs, ADMIN_GID, ADMIN_UID};
+
+/// The fixed last-modification stamp `MockFs` reports for every entry, so
+/// the tests can assert the stamp travels through the delegation unchanged.
+const MOCK_MODIFIED: Time64 = Time64::from_secs(1_234_567);
 
 fn p(text: &str) -> Path {
     Path::parse(text).expect("valid path")
@@ -137,6 +142,7 @@ impl FilesystemRead for MockFs {
         Ok(Some(DirEntry {
             node: NodeId::from_raw(node),
             info,
+            modified: MOCK_MODIFIED,
             name_len: name.len(),
             next_cursor: cursor + 1,
         }))
@@ -205,6 +211,7 @@ impl FilesystemRead for BadFs {
                 size: 0,
                 allocated: 0,
             },
+            modified: Time64::UNIX_EPOCH,
             name_len: 2,
             next_cursor: 1,
         }))
@@ -275,7 +282,7 @@ fn delegated_list_of_mount_point_lists_driver_root() {
         .expect("list mount root");
     let kinds: Vec<(NodeKind, String)> = names
         .into_iter()
-        .map(|(info, name)| (info.kind, name))
+        .map(|(info, _, name)| (info.kind, name))
         .collect();
     assert_eq!(
         kinds,
@@ -295,16 +302,18 @@ fn delegated_list_of_subdir() {
     let names = vfs
         .list_via(&admin, &p("/Storage/usb0/docs"), &mut fs)
         .expect("list subdir");
-    let entries: Vec<(NodeKind, u64, String)> = names
+    let entries: Vec<(NodeKind, u64, Time64, String)> = names
         .into_iter()
-        .map(|(info, name)| (info.kind, info.size, name))
+        .map(|(info, modified, name)| (info.kind, info.size, modified, name))
         .collect();
-    // The listing carries the child's own size, read once by the driver.
+    // The listing carries the child's own size and modification stamp,
+    // read once by the driver.
     assert_eq!(
         entries,
         [(
             NodeKind::RegularFile,
             README_BODY.len() as u64,
+            MOCK_MODIFIED,
             String::from("readme.txt")
         )]
     );
@@ -495,7 +504,7 @@ fn delegated_mkdir_then_create_inside() {
         .expect("list");
     let kinds: Vec<(NodeKind, String)> = names
         .into_iter()
-        .map(|(info, name)| (info.kind, name))
+        .map(|(info, _, name)| (info.kind, name))
         .collect();
     assert_eq!(kinds, [(NodeKind::RegularFile, String::from("inner.bin"))]);
 }
@@ -789,6 +798,7 @@ impl FilesystemRead for SecMockFs {
                 size: SECRET_BODY.len() as u64,
                 allocated: SECRET_BODY.len() as u64,
             },
+            modified: Time64::UNIX_EPOCH,
             name_len: name.len(),
             next_cursor: 1,
         }))
@@ -882,7 +892,7 @@ fn secured_list_of_mount_root_lists_driver_root() {
         .expect("secured list");
     let kinds: Vec<(NodeKind, String)> = names
         .into_iter()
-        .map(|(info, name)| (info.kind, name))
+        .map(|(info, _, name)| (info.kind, name))
         .collect();
     assert_eq!(kinds, [(NodeKind::RegularFile, String::from("secret.txt"))]);
 }
@@ -961,6 +971,7 @@ impl FilesystemRead for StuckCursorFs {
                 size: 0,
                 allocated: 0,
             },
+            modified: Time64::UNIX_EPOCH,
             name_len: 1,
             next_cursor: cursor,
         }))

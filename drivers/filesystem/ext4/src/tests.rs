@@ -1693,3 +1693,41 @@ fn writing_grows_the_reported_allocation() {
     // The freed tail block leaves the surviving one accounted.
     assert_eq!(fs.node_info(file).expect("info").allocated, FS_BLOCK as u64);
 }
+
+#[test]
+fn inode_time_classic_field_is_signed() {
+    // Without an extra field the classic 32-bit seconds are signed: a
+    // pre-1970 stamp decodes below zero, never as a huge unsigned value.
+    assert_eq!(
+        crate::decode_inode_time(0xFFFF_FFFF, None),
+        Ok(Time64::from_secs(-1))
+    );
+    assert_eq!(
+        crate::decode_inode_time(1_700_000_000, None),
+        Ok(Time64::from_secs(1_700_000_000))
+    );
+}
+
+#[test]
+fn inode_time_extra_extends_the_epoch_past_2038() {
+    // Epoch bit 1 prepends 1 above bit 31: the low word is then unsigned.
+    assert_eq!(
+        crate::decode_inode_time(5, Some(0b01)),
+        Ok(Time64::from_secs((1 << 32) + 5))
+    );
+    // Without epoch bits the extra field still carries the nanoseconds.
+    assert_eq!(
+        crate::decode_inode_time(10, Some(500 << 2)),
+        Time64::new(10, 500).map_err(|_| rustos_abi::DriverError::DeviceFault)
+    );
+}
+
+#[test]
+fn inode_time_corrupt_nanoseconds_fail_closed() {
+    // A nanosecond count of a full second cannot come from a valid encode;
+    // it is corruption and is refused, never clamped.
+    assert_eq!(
+        crate::decode_inode_time(0, Some(1_000_000_000 << 2)),
+        Err(rustos_abi::DriverError::DeviceFault)
+    );
+}

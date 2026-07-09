@@ -102,6 +102,7 @@
 - [System-log tool (`log`)](./userland/log.md)
 - [Building a curses TUI (`top`)](./userland/curses-porting.md)
 - [The `vim` editor](./userland/vim.md)
+- [The `fstree` file manager](./userland/fstree.md)
 
 # Desktop
 

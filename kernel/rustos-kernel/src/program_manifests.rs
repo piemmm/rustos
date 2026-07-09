@@ -618,6 +618,7 @@ mod tests {
             ("edit", AppKind::Command, FILE_TOOL_REQUEST),
             ("elsh", AppKind::Command, SESSION_BASELINE),
             ("false", AppKind::Command, PURE_TOOL_REQUEST),
+            ("fstree", AppKind::Command, FILE_TOOL_REQUEST),
             ("groupadd", AppKind::Command, ADMIN_TOOL_REQUEST),
             ("head", AppKind::Command, FILE_TOOL_REQUEST),
             ("login", AppKind::Service, LOGIN_MANIFEST),

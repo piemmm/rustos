@@ -515,6 +515,7 @@ fn structured_fs_inputs_with_corrupted_fields_never_panic() {
         kind: FileKind::Directory,
         size: 0,
         allocated: 4096,
+        modified: Time64::new(1_234_567_890, 987_654_321).expect("canonical"),
         name: b"inbox",
     }
     .encode_into(&mut dirent)

@@ -1,0 +1,15 @@
+# Signed-AppInfo manifest source for the `fstree` command app
+# (plans/APPS.md deliverable 8, .junie/fstree-next-plan.md). Discovered by
+# the build's app-bundle composer; the capability list is the bundle's
+# request, intersected with the launching user's grants. CAP_CONSOLE_WRITE
+# drives the full-screen display on fd 1; CAP_CONSOLE_READ the raw-mode
+# keystrokes on fd 0 (it also authorises the tool's stream_echo
+# suppression). CAP_FS_ACCESS is the file manager's job — listing
+# directories and reading file metadata (and reading its own bundle's
+# Help/ documents) through the secured VFS, which still authorises every
+# path per-inode under the caller's attested identity.
+id = "os.rustos.fstree"
+name = "fstree"
+version = "0.1.0"
+kind = "command"
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_CONSOLE_READ", "CAP_FS_ACCESS"]

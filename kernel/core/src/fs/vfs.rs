@@ -16,6 +16,7 @@ use rustos_abi::driver::filesystem::{
     FilesystemRead, FilesystemSecurity, FilesystemWrite, MountFlags, NodeInfo as DriverNodeInfo,
     NodeKind as DriverNodeKind,
 };
+use rustos_abi::time::Time64;
 use rustos_abi::CapabilityId;
 use rustos_kernel_sec::{GroupId, UserId};
 
@@ -169,7 +170,8 @@ impl Vfs {
     }
 
     /// List a directory under a driver-backed mount, delegating to `fs`.
-    /// Each entry carries the structural [`DriverNodeInfo`] the listing
+    /// Each entry carries the structural [`DriverNodeInfo`] and the
+    /// last-modification stamp the listing
     /// driver reports, so a caller never re-resolves a child by path (a
     /// child path shadowed by another mount would be judged against the
     /// wrong volume, and each re-resolution would be a fresh full walk).
@@ -189,7 +191,7 @@ impl Vfs {
         cred: &Credentials<'_>,
         path: &Path,
         fs: &mut dyn FilesystemRead,
-    ) -> Result<Vec<(DriverNodeInfo, String)>, VfsError> {
+    ) -> Result<Vec<(DriverNodeInfo, Time64, String)>, VfsError> {
         let (template, remainder) = self.delegate_context(cred, path, false)?;
         DelegatedFs::new(fs, template).list(cred, &remainder)
     }
@@ -365,7 +367,7 @@ impl Vfs {
         cred: &Credentials<'_>,
         path: &Path,
         fs: &mut F,
-    ) -> Result<Vec<(DriverNodeInfo, String)>, VfsError> {
+    ) -> Result<Vec<(DriverNodeInfo, Time64, String)>, VfsError> {
         let (template, remainder) = self.delegate_context(cred, path, false)?;
         DelegatedFs::new_secured(fs, template).list(cred, &remainder)
     }

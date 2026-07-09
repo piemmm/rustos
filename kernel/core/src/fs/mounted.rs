@@ -611,10 +611,11 @@ where
             let entries = vfs.list_via_secured(cred, path, fs)?;
             Ok(entries
                 .into_iter()
-                .map(|(info, name)| ReaddirEntry {
+                .map(|(info, modified, name)| ReaddirEntry {
                     kind: file_kind(info.kind),
                     size: info.size,
                     allocated: info.allocated,
+                    modified,
                     name,
                 })
                 .collect())

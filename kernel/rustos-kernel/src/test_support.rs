@@ -185,6 +185,7 @@ impl FilesystemRead for MockRootFs {
         Ok(Some(DirEntry {
             node: NodeId::from_raw(child_id),
             info,
+            modified: rustos_abi::time::Time64::UNIX_EPOCH,
             name_len,
             next_cursor: cursor + 1,
         }))

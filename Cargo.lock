@@ -1008,6 +1008,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-fstree"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-curses",
+ "rustos-help",
+ "rustos-procinfo",
+ "rustos-rt",
+ "rustos-termcap",
+ "rustos-vt",
+]
+
+[[package]]
 name = "rustos-fuzzseed"
 version = "0.0.0"
 dependencies = [

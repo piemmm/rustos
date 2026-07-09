@@ -173,7 +173,7 @@ fn walk_dir<F>(
         }
     };
 
-    for (info, name) in entries {
+    for (info, _, name) in entries {
         if drivers.len() >= MAX_STORE_DRIVERS {
             // The store presents more entries than the validation bound
             // permits; the surplus is refused fail-closed rather than growing the scan without limit.

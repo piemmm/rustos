@@ -201,11 +201,14 @@ typedef struct ros_node_info {
 } ros_node_info_t;
 
 /* One directory entry; `node` is a NodeId (uint64_t). The entry carries the
-* child's full ros_node_info_t and the opaque cursor that resumes the
-* listing after it (pass it back to read_dir; 0 starts a listing). */
+* child's full ros_node_info_t, its last-modification instant (the epoch
+* when the backing stores no per-node stamp), and the opaque cursor that
+* resumes the listing after it (pass it back to read_dir; 0 starts a
+* listing). */
 typedef struct ros_dir_entry {
     uint64_t node;
     ros_node_info_t info;
+    ros_time64_t modified;
     uintptr_t name_len;
     uint64_t next_cursor;
 } ros_dir_entry_t;

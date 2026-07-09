@@ -68,6 +68,7 @@ impl MemFs {
                     kind,
                     size,
                     allocated: size,
+                    modified: rustos_abi::time::Time64::UNIX_EPOCH,
                     name: name.to_string(),
                 });
             }

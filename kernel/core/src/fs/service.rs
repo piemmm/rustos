@@ -24,6 +24,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use rustos_abi::sysinfo::MountRecord;
+use rustos_abi::time::Time64;
 use rustos_abi::{CapabilityQuery, Errno, FileKind, FileStat, OpenFlags, UnlinkFlags};
 
 /// One directory entry as [`FilesystemService::readdir`] reports it: the
@@ -43,6 +44,10 @@ pub struct ReaddirEntry {
     /// Bytes of on-disk storage the entry's data occupies, as the mounted
     /// format's own allocation tracking reports it.
     pub allocated: u64,
+    /// The entry's last contents-modification instant, as the mounted
+    /// format stores it ([`Time64::UNIX_EPOCH`] for a backing with no
+    /// per-node stamp).
+    pub modified: Time64,
     /// The entry's name (a single component, never `.`/`..`).
     pub name: String,
 }

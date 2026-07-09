@@ -20,7 +20,7 @@ fn readdir_lists_created_children() {
         .list_via_secured(&owner, &path(MOUNT), &mut fs)
         .expect("list mount root")
         .into_iter()
-        .map(|(info, name)| (info.kind, name))
+        .map(|(info, _, name)| (info.kind, name))
         .collect();
     names.sort_by(|a, b| a.1.cmp(&b.1));
     assert_eq!(

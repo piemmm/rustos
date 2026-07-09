@@ -1163,3 +1163,69 @@ mod format {
         );
     }
 }
+
+/// Pack a DOS date word from its calendar fields.
+fn dos_date(year: u16, month: u16, day: u16) -> u16 {
+    ((year - 1980) << 9) | (month << 5) | day
+}
+
+/// Pack a DOS time word from its clock fields.
+fn dos_time(hour: u16, minute: u16, second: u16) -> u16 {
+    (hour << 11) | (minute << 5) | (second / 2)
+}
+
+#[test]
+fn dos_datetime_start_of_epoch_decodes() {
+    // 1980-01-01 00:00:00 UTC, the earliest FAT timestamp.
+    assert_eq!(
+        crate::dos_datetime_to_time64(dos_date(1980, 1, 1), dos_time(0, 0, 0)),
+        Time64::from_secs(315_532_800)
+    );
+}
+
+#[test]
+fn dos_datetime_leap_day_decodes() {
+    // 2020-02-29 00:00:00 UTC — a valid leap day.
+    assert_eq!(
+        crate::dos_datetime_to_time64(dos_date(2020, 2, 29), dos_time(0, 0, 0)),
+        Time64::from_secs(1_582_934_400)
+    );
+}
+
+#[test]
+fn dos_datetime_end_of_range_decodes_past_2038() {
+    // 2107-12-31 23:59:58 UTC, the last representable FAT instant — far
+    // beyond the 32-bit 2038 boundary, so the wide decode must not wrap.
+    assert_eq!(
+        crate::dos_datetime_to_time64(dos_date(2107, 12, 31), dos_time(23, 59, 58)),
+        Time64::from_secs(4_354_819_198)
+    );
+}
+
+#[test]
+fn dos_datetime_undecodable_fields_report_no_stamp() {
+    let ok_time = dos_time(12, 0, 0);
+    let ok_date = dos_date(2024, 6, 15);
+    // Month 0 and 13, day 0, a non-leap February 29th, and hour 24 are not
+    // calendar instants; each reports the "no stamp" epoch, never a guess.
+    assert_eq!(
+        crate::dos_datetime_to_time64((44 << 9) | 15, ok_time),
+        Time64::UNIX_EPOCH
+    );
+    assert_eq!(
+        crate::dos_datetime_to_time64((44 << 9) | (13 << 5) | 15, ok_time),
+        Time64::UNIX_EPOCH
+    );
+    assert_eq!(
+        crate::dos_datetime_to_time64(dos_date(2024, 6, 0), ok_time),
+        Time64::UNIX_EPOCH
+    );
+    assert_eq!(
+        crate::dos_datetime_to_time64(dos_date(2023, 2, 29), ok_time),
+        Time64::UNIX_EPOCH
+    );
+    assert_eq!(
+        crate::dos_datetime_to_time64(ok_date, 24 << 11),
+        Time64::UNIX_EPOCH
+    );
+}

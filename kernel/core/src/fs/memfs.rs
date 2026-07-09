@@ -21,6 +21,7 @@ use rustos_abi::driver::filesystem::{
     NodeInfo, NodeKind, NodeSecurity, VolumeStats,
 };
 use rustos_abi::driver::DriverError;
+use rustos_abi::time::Time64;
 
 /// Default owner uid baked into a freshly created node's security record.
 pub(crate) const ADMIN_UID: u32 = 1;
@@ -198,6 +199,9 @@ impl FilesystemRead for RwMockFs {
         Ok(Some(DirEntry {
             node: NodeId::from_raw(child as u64 + 1),
             info,
+            // The in-RAM tree keeps no per-node stamp; the epoch is the
+            // documented "no stamp" value, never a fabricated wall time.
+            modified: Time64::UNIX_EPOCH,
             name_len,
             next_cursor: cursor + 1,
         }))

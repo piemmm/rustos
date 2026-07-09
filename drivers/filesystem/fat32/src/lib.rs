@@ -55,6 +55,7 @@ use rustos_abi::driver::block::Block;
 use rustos_abi::driver::filesystem::{
     DirEntry, FilesystemRead, FilesystemWrite, NodeId, NodeInfo, NodeKind,
 };
+use rustos_abi::time::Time64;
 use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 
 /// Per-driver `DriverHandle` marker returned by [`register`].
@@ -235,6 +236,11 @@ struct ParsedEntry {
     cluster: u32,
     size: u32,
     is_dir: bool,
+    /// Last-write instant decoded from the short entry's DOS date/time
+    /// pair; [`Time64::UNIX_EPOCH`] when the stored fields are not a
+    /// decodable calendar date (the documented "no stamp" value — never a
+    /// clamped or guessed date).
+    mtime: Time64,
     /// Device byte offset of the 8.3 short entry (the one carrying the
     /// cluster and size); the write path patches metadata here.
     short_offset: u64,
@@ -386,10 +392,59 @@ fn parse_short_entry(raw: &[u8; DIR_ENTRY_LEN]) -> ParsedEntry {
         cluster,
         size: le32(raw, 28),
         is_dir: raw[11] & ATTR_DIRECTORY != 0,
+        mtime: dos_datetime_to_time64(le16(raw, 24), le16(raw, 22)),
         short_offset: 0,
         first_slot: 0,
         slot_span: 0,
     }
+}
+
+/// Decode a DOS (FAT) date/time pair into a [`Time64`], UTC.
+///
+/// `date` packs `year-1980` (bits 9..16), month `1..=12` (bits 5..9), and
+/// day `1..=31` (bits 0..5); `time` packs hours (bits 11..16), minutes
+/// (bits 5..11), and two-second units (bits 0..5). FAT keeps no timezone,
+/// so the stored local wall time is reported as-is — the format's own
+/// declared precision and range limit, not a RustOS one. Every decodable
+/// pair (1980..=2107) is representable in [`Time64`], so the conversion
+/// never truncates; a field combination that is not a real calendar
+/// date/time is not decodable and yields [`Time64::UNIX_EPOCH`], the
+/// documented "no stamp" value — never a clamped or guessed date.
+fn dos_datetime_to_time64(date: u16, time: u16) -> Time64 {
+    let year = i64::from(date >> 9) + 1980;
+    let month = u32::from((date >> 5) & 0x0F);
+    let day = u32::from(date & 0x1F);
+    let hour = i64::from(time >> 11);
+    let minute = i64::from((time >> 5) & 0x3F);
+    let second = i64::from(time & 0x1F) * 2;
+    if !(1..=12).contains(&month) || day == 0 || hour > 23 || minute > 59 || second > 58 {
+        return Time64::UNIX_EPOCH;
+    }
+    let days_in_month: u32 = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        _ => {
+            let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+            if leap {
+                29
+            } else {
+                28
+            }
+        }
+    };
+    if day > days_in_month {
+        return Time64::UNIX_EPOCH;
+    }
+    // Civil-date to epoch-day conversion (Howard Hinnant's `days_from_civil`
+    // algorithm), exact over the whole FAT range.
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = i64::from((month + 9) % 12);
+    let doy = (153 * mp + 2) / 5 + i64::from(day) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Time64::from_secs(days * 86_400 + hour * 3_600 + minute * 60 + second)
 }
 
 /// VFAT short-name checksum binding a long-name set to its 8.3 entry.
@@ -2020,6 +2075,7 @@ impl<B: Block> FilesystemRead for Fat32<B> {
             return Ok(Some(DirEntry {
                 node: Self::entry_node(&entry),
                 info,
+                modified: entry.mtime,
                 name_len: entry.name_len,
                 next_cursor,
             }));

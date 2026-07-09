@@ -356,7 +356,8 @@ subdirectories from a directory's own row, `-0` NUL-terminates rows, and
 winning as in GNU. The walk is an explicit frame stack (a deep tree can
 never exhaust the call stack) over the kernel-authorised `fs_*`
 syscalls, and it is I/O-frugal by design: every `fs_readdir` entry
-carries the child's kind and sizes, so a directory of *n* children
+carries the child's kind, sizes, and modification stamp, so a directory
+of *n* children
 costs one open and one listing — never *n* per-child open/stat/close
 round-trips, each a fresh full path resolution on an uncached,
 authenticated volume; only operands are stat'ed individually. An

@@ -72,6 +72,7 @@ use rustos_abi::driver::filesystem::{
     DirEntry, FilesystemRead, FilesystemSecurity, FilesystemWrite, NodeId, NodeInfo, NodeKind,
     NodeSecurity, SecurityAcl, SecuritySubject,
 };
+use rustos_abi::time::Time64;
 use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 
 /// Per-driver `DriverHandle` marker returned by [`register`].
@@ -303,6 +304,36 @@ fn le32(buf: &[u8], off: usize) -> u32 {
     }
 }
 
+/// Decode an on-disk inode timestamp into a [`Time64`].
+///
+/// `secs` is the classic 32-bit seconds field, signed when no extra field
+/// extends it. `extra`, when the enlarged inode record carries it, packs
+/// two epoch-extension bits (bits 0..2, prepended above bit 31 of the
+/// seconds — the ext4 disk-layout extended-timestamp encoding) and a
+/// 30-bit nanosecond count (bits 2..32). A nanosecond count at or above
+/// one second is on-disk corruption and fails closed rather than being
+/// clamped or wrapped.
+fn decode_inode_time(secs: u32, extra: Option<u32>) -> Result<Time64, DriverError> {
+    // The classic field is signed on disk; reinterpret the bits, never a
+    // value-changing conversion.
+    let signed_secs = i32::from_le_bytes(secs.to_le_bytes());
+    let Some(extra) = extra else {
+        return Ok(Time64::from_secs(i64::from(signed_secs)));
+    };
+    let epoch = u64::from(extra & 0x3);
+    let seconds = if epoch == 0 {
+        i64::from(signed_secs)
+    } else {
+        // The epoch bits extend the seconds above bit 31; the low 32 bits
+        // are then unsigned. At most 2 + 32 significant bits, so the wide
+        // conversion is total; a failure can only mean a broken invariant
+        // and is treated as corruption.
+        i64::try_from((epoch << 32) | u64::from(secs)).map_err(|_| DriverError::DeviceFault)?
+    };
+    let nanos = extra >> 2;
+    Time64::new(seconds, nanos).map_err(|_| DriverError::DeviceFault)
+}
+
 /// Write a little-endian `u16` at `off`; a no-op if out of bounds.
 fn put_le16(buf: &mut [u8], off: usize, value: u16) {
     if let Some(b) = buf.get_mut(off..off + 2) {
@@ -439,6 +470,9 @@ impl Layout {
 struct Inode {
     /// `i_mode`, including the type bits.
     mode: u16,
+    /// Last contents-modification instant, decoded from `i_mtime` (and
+    /// `i_mtime_extra` where the enlarged inode record carries it).
+    mtime: Time64,
     /// Owning user id (`i_uid` low half combined with the osd2 high half).
     uid: u32,
     /// Owning group id (`i_gid` low half combined with the osd2 high half).
@@ -838,29 +872,43 @@ impl<B: Block> Ext4<B> {
     /// Read and decode inode number `ino`.
     fn read_inode(&mut self, ino: u32) -> Result<Inode, DriverError> {
         let inode_offset = self.locate_inode(ino)?;
-        let mut raw = [0u8; 128];
+        // 144 bytes covers the classic 128-byte record plus `i_extra_isize`
+        // (0x80) and `i_mtime_extra` (0x88..0x8C) of an enlarged record; the
+        // read never exceeds the volume's own inode record size.
+        let mut raw = [0u8; 144];
+        let want = core::cmp::min(self.layout.inode_size as usize, raw.len());
         device_read(
             &mut self.block,
             self.block_size,
             self.block_count,
             inode_offset,
-            &mut raw,
+            &mut raw[..want],
         )?;
+        let raw = &raw[..want];
 
-        let mode = le16(&raw, 0);
-        let uid = u32::from(le16(&raw, 0x02)) | (u32::from(le16(&raw, 0x78)) << 16);
-        let gid = u32::from(le16(&raw, 0x18)) | (u32::from(le16(&raw, 0x7A)) << 16);
-        let size_lo = u64::from(le32(&raw, 0x04));
-        let size_hi = u64::from(le32(&raw, 0x6C));
-        let flags = le32(&raw, 0x20);
+        let mode = le16(raw, 0);
+        let uid = u32::from(le16(raw, 0x02)) | (u32::from(le16(raw, 0x78)) << 16);
+        let gid = u32::from(le16(raw, 0x18)) | (u32::from(le16(raw, 0x7A)) << 16);
+        let size_lo = u64::from(le32(raw, 0x04));
+        let size_hi = u64::from(le32(raw, 0x6C));
+        let flags = le32(raw, 0x20);
         let blocks =
-            u64::from(le32(&raw, INODE_BLOCKS_LO)) | (u64::from(le16(&raw, INODE_BLOCKS_HI)) << 32);
-        let file_acl =
-            u64::from(le32(&raw, 0x68)) | (u64::from(le16(&raw, INODE_FILE_ACL_HI)) << 32);
+            u64::from(le32(raw, INODE_BLOCKS_LO)) | (u64::from(le16(raw, INODE_BLOCKS_HI)) << 32);
+        let file_acl = u64::from(le32(raw, 0x68)) | (u64::from(le16(raw, INODE_FILE_ACL_HI)) << 32);
         let mut block = [0u8; I_BLOCK_LEN];
         block.copy_from_slice(&raw[I_BLOCK_OFFSET..I_BLOCK_OFFSET + I_BLOCK_LEN]);
+        // `i_mtime_extra` is present when the enlarged record's
+        // `i_extra_isize` covers it (ext4 disk layout: the extra timestamp
+        // fields start at 0x84; mtime's is 0x88..0x8C).
+        let mtime_extra = if raw.len() >= 0x8C && usize::from(le16(raw, 0x80)) >= 0x8C - 128 {
+            Some(le32(raw, 0x88))
+        } else {
+            None
+        };
+        let mtime = decode_inode_time(le32(raw, 0x10), mtime_extra)?;
         Ok(Inode {
             mode,
+            mtime,
             uid,
             gid,
             size: (size_hi << 32) | size_lo,
@@ -2536,6 +2584,7 @@ impl<B: Block> FilesystemRead for Ext4<B> {
         Ok(Some(DirEntry {
             node: NodeId::from_raw(u64::from(found.ino)),
             info: self.inode_info(&child)?,
+            modified: child.mtime,
             name_len: found.name_len,
             next_cursor: found.next_cursor,
         }))

@@ -212,6 +212,12 @@ pub struct NodeInfo {
 /// the child's metadata in hand while producing the entry: a listing
 /// consumer (`du`, `ls`) would otherwise re-resolve every child by path —
 /// a fresh full walk per entry on an uncached, authenticated volume.
+///
+/// The same reasoning carries the child's last-modification stamp: the
+/// listing driver has already read the child's inode or directory record,
+/// and a format such as FAT stores the stamp *only* in the parent's
+/// directory record, so the listing is the one place every driver can
+/// report it without a second walk.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct DirEntry {
@@ -219,6 +225,13 @@ pub struct DirEntry {
     pub node: NodeId,
     /// The child's structural metadata (kind, size, allocated bytes).
     pub info: NodeInfo,
+    /// The child's last contents-modification instant (mtime), as the
+    /// mounted format stores it, widened to [`Time64`] without truncation
+    /// (a narrower on-disk encoding such as FAT's is always representable).
+    /// A backing that stores no per-node stamp reports
+    /// [`Time64::UNIX_EPOCH`] — the same instant the clockless kernel's
+    /// creation path stamps — never a fabricated wall time.
+    pub modified: Time64,
     /// Number of name bytes written into the caller's buffer.
     pub name_len: usize,
     /// Opaque cursor resuming iteration at the entry *after* this one:
@@ -1015,6 +1028,7 @@ mod tests {
                     size: FILE_BODY.len() as u64,
                     allocated: FILE_BODY.len() as u64,
                 },
+                modified: Time64::UNIX_EPOCH,
                 name_len: FILE_NAME.len(),
                 next_cursor: 1,
             }))

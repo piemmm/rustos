@@ -2071,11 +2071,14 @@ const DRIVER_SUBMODULE_TYPEDEFS: &str = concat!(
          \x20   uint64_t allocated;\n\
          } ros_node_info_t;\n\n",
     "/* One directory entry; `node` is a NodeId (uint64_t). The entry carries the\n\
-         * child's full ros_node_info_t and the opaque cursor that resumes the\n\
-         * listing after it (pass it back to read_dir; 0 starts a listing). */\n\
+         * child's full ros_node_info_t, its last-modification instant (the epoch\n\
+         * when the backing stores no per-node stamp), and the opaque cursor that\n\
+         * resumes the listing after it (pass it back to read_dir; 0 starts a\n\
+         * listing). */\n\
          typedef struct ros_dir_entry {\n\
          \x20   uint64_t node;\n\
          \x20   ros_node_info_t info;\n\
+         \x20   ros_time64_t modified;\n\
          \x20   uintptr_t name_len;\n\
          \x20   uint64_t next_cursor;\n\
          } ros_dir_entry_t;\n\n",
@@ -3701,7 +3704,7 @@ mod tests {
             ("rustos_driver.h", "} ros_display_mode_t;", size_of::<DisplayMode>(), 16, align_of::<DisplayMode>(), 4),
             ("rustos_driver.h", "} ros_accel_caps_t;", size_of::<AccelCaps>(), 16, align_of::<AccelCaps>(), 4),
             ("rustos_driver.h", "} ros_node_info_t;", size_of::<NodeInfo>(), 24, align_of::<NodeInfo>(), 8),
-            ("rustos_driver.h", "} ros_dir_entry_t;", size_of::<DirEntry>(), 48, align_of::<DirEntry>(), 8),
+            ("rustos_driver.h", "} ros_dir_entry_t;", size_of::<DirEntry>(), 64, align_of::<DirEntry>(), 8),
             ("rustos_driver.h", "} ros_node_times_t;", size_of::<NodeTimes>(), 64, align_of::<NodeTimes>(), 8),
             ("rustos_driver.h", "} ros_input_event_t;", size_of::<InputEvent>(), 8, align_of::<InputEvent>(), 4),
             ("rustos_driver.h", "} ros_mac_address_t;", size_of::<MacAddress>(), 6, align_of::<MacAddress>(), 1),
