@@ -1453,6 +1453,7 @@ You are not exempt from any rule above. In addition:
     | RustFS | `docs/src/filesystem/rustfs-spec.md` (binding spec); `plans/RUSTFS-METADATA.md`; `plans/RUSTFS-SNAPSHOT.md`; `plans/SPARSE.md` |
     | System log / audit trail | `plans/SYSLOG.md` |
     | Memory pressure, reclaimable memory, swap tiers | `plans/SMARTRAM.md`; `plans/SWAPSWAPSWAP.md` |
+    | Stress testing, load generation, live kernel/memory monitoring (`sysmon`, `stress`, memory pinning, signal observation) | `plans/STRESSTEST.md` |
     | C-callable ABI (headers, stubs, crt0) | `plans/CCOMPAT.md` |
     | Architecture ports / Arch HAL parity | `plans/WIRING.md` |
     | Raspberry Pi bring-up | `plans/PI.md` |

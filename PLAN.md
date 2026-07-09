@@ -4135,6 +4135,31 @@ writes, syslog events, force-unmount, and verified re-insert replay). See
 
 ---
 
+## STRESSTEST — stress testing + live kernel monitoring (`plans/STRESSTEST.md`)
+
+**Status: planned (ST1–ST6).** Makes RustOS's behaviour under load
+observable and provokable with first-party tools. ST1 exports the counters
+the kernel already keeps — the `kernel/mem` pressure gauge, reclaim ledger,
+and `ramzip` accounting, plus per-CPU load — as four new audited
+`CAP_SYSINFO_KERNEL` sysinfo queries (`MEMORY_PRESSURE`, `RECLAIM_STATS`,
+`RAMZIP_STATS`, `CPU_LOAD`) with matching `info:cpu/*` / `stats:mem/*` /
+`stats:cpu/*` resolver selectors and `sysinfo` CLI surface. ST2 lands the
+memory-pinning API behind `plans/SWAPSWAPSWAP.md` §5's "pinned" eligibility
+class: `mem_pin`/`mem_unpin` (whole-process anonymous memory, not inherited,
+cleared on exit) gated by the new `CAP_MEM_PIN` and bounded by a new
+`LimitKind::PinnedMemory` resource limit. ST3 adds `signal_intake` — a
+fail-closed opt-in that turns `Interrupt`/`Terminate` into a waitset-drainable
+event (`Kill` stays unmaskable; a second pending `Interrupt` escalates to
+terminate). ST4 is `sysmon`, the fullscreen curses kernel-memory monitor
+(pinned, event-driven, per-panel graceful degradation); ST5 is `stress`, the
+stress-ng-style load generator (pinned controller + swappable cpu/vm/io/hdd/
+cache workers, `--overcommit`, `--timeout`, `--quiet`, `--background`,
+`--monitor`, clean signal teardown); ST6 is the combined QEMU vertical,
+benchmarks, and docs sweep. See `plans/STRESSTEST.md` for the binding design
+and staging.
+
+---
+
 ## DISPLAY — seat ownership: the display/console locking model (`plans/DISPLAY.md`)
 
 **Status: complete (D1–D6 done).** Closes the console/graphics *ownership
