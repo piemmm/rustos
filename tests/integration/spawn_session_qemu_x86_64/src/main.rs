@@ -175,7 +175,15 @@ mod kernel {
     /// audit-observer sink.
     #[no_mangle]
     pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
-        boot(multiboot_info, &SERIAL_SINK, &AUDIT_SINK)
+        // `SyscallInvoked` (`EventId(5000)`) is `Debug`, below the default
+        // `Info` filter; this observer's PASS finisher fires on it, so
+        // boot with the filter lowered.
+        boot(
+            multiboot_info,
+            &SERIAL_SINK,
+            &AUDIT_SINK,
+            rustos_log::Level::Debug,
+        )
     }
 }
 

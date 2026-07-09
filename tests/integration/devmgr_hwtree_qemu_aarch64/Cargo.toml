@@ -42,6 +42,7 @@ rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0
 # authoritative `hwtree_store::HW_TREE` / `HW_TREE_SOURCE` the witness bumps
 # and forwards to.
 rustos-kernel = { path = "../../../kernel/rustos-kernel", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
 # The kernel core's `HwTreeSource` seam (the injected `WitnessSource`
 # implements it) and its blocking wait-queue (`waitq::HW_TREE_WAITQ`) the
 # witness observes to detect devmgr's true park.

@@ -136,7 +136,16 @@ mod kernel {
     /// production boot pipeline with the audit-observer sink in place.
     #[no_mangle]
     pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
-        boot_riscv64::boot(hartid, dtb, &SERIAL_SINK, &AUDIT_SINK)
+        // `SyscallInvoked` (`EventId(5000)`) is `Debug`, below the default
+        // `Info` filter; this observer's PASS finisher fires on it, so
+        // boot with the filter lowered.
+        boot_riscv64::boot(
+            hartid,
+            dtb,
+            &SERIAL_SINK,
+            &AUDIT_SINK,
+            rustos_log::Level::Debug,
+        )
     }
 }
 

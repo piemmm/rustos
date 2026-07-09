@@ -110,11 +110,15 @@ pub fn serve(
     }
 
     // Record the invocation before dispatch so every privileged call is
-    // accounted for even if the backing source later errors.
+    // accounted for even if the backing source later errors. Recorded at
+    // `Debug`: a monitor polling privileged queries emits this allow
+    // record continuously, and at `Info` it floods the default console
+    // filter; lowering the filter recovers it for forensics. Denials stay
+    // at `Warn` and always surface.
     if spec.audit {
         emit(
             audit,
-            Level::Info,
+            Level::Debug,
             events::QUERY_SERVED,
             "sysinfo query served",
             &[query_field(spec.name)],
@@ -712,6 +716,9 @@ mod tests {
 
     #[test]
     fn audited_query_emits_served_record() {
+        // The served record is `Debug` (below the default `Info` filter),
+        // so widen the global filter to observe it.
+        rustos_log::set_max_level(Level::Trace);
         let source = FixtureSource::new();
         let caps = Caps(&[CapabilityId::SYSINFO_KERNEL]);
         let sink = RecordingSink::new();
@@ -723,7 +730,7 @@ mod tests {
         assert_eq!(stats.page_size, 4096);
         assert_eq!(
             sink.events.borrow().as_slice(),
-            &[(Level::Info, events::QUERY_SERVED)]
+            &[(Level::Debug, events::QUERY_SERVED)]
         );
     }
 
@@ -939,6 +946,9 @@ mod tests {
 
     #[test]
     fn seat_list_is_gated_audited_and_pages() {
+        // The served record is `Debug` (below the default `Info` filter),
+        // so widen the global filter to observe it.
+        rustos_log::set_max_level(Level::Trace);
         let source = FixtureSource::new();
         let sink = RecordingSink::new();
         let slr = SeatListRequest {
@@ -972,7 +982,7 @@ mod tests {
         assert_eq!(record.foreground_console, 1);
         assert_eq!(
             sink.events.borrow().as_slice(),
-            &[(Level::Info, events::QUERY_SERVED)]
+            &[(Level::Debug, events::QUERY_SERVED)]
         );
 
         // Paging past the single seat returns the empty terminator.

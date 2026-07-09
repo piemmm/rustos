@@ -214,7 +214,13 @@ mod kernel {
     #[no_mangle]
     pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         let dtb = DTB_BLOB.as_ptr() as u64;
-        boot_aarch64::boot(dtb, &SERIAL_SINK, &SERIAL_SINK, &WITNESS_SOURCE)
+        boot_aarch64::boot(
+            dtb,
+            &SERIAL_SINK,
+            &SERIAL_SINK,
+            rustos_log::Level::Info,
+            &WITNESS_SOURCE,
+        )
     }
 }
 

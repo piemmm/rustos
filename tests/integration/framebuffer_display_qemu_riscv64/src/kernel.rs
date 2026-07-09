@@ -78,5 +78,11 @@ fn framebuffer_qemu_panic(info: &PanicInfo<'_>) -> ! {
 /// the audit observer sink in place.
 #[no_mangle]
 pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
-    boot(hartid, dtb, &SERIAL_SINK, &AUDIT_SINK)
+    boot(
+        hartid,
+        dtb,
+        &SERIAL_SINK,
+        &AUDIT_SINK,
+        rustos_log::Level::Info,
+    )
 }

@@ -10,7 +10,7 @@
 //!
 //! | ID   | Level | Name                          | When |
 //! |-----:|-------|-------------------------------|------|
-//! | 5000 | Info  | `SYSCALL_INVOKED`             | A syscall passed every dispatcher check and was forwarded to its handler. Emitted only for security-relevant syscalls (`SyscallSpec::audit`). |
+//! | 5000 | Debug | `SYSCALL_INVOKED`             | A syscall passed every dispatcher check and was forwarded to its handler. Emitted only for security-relevant syscalls (`SyscallSpec::audit`). Recorded at `Debug` so a busy workload's steady allow stream cannot flood the default `Info` console; lower the filter to capture it. |
 //! | 5001 | Error | `SYSCALL_PERMISSION_DENIED`   | The caller's effective capability set does not contain the syscall's `required_capability`. |
 //! | 5002 | Error | `SYSCALL_UNKNOWN`             | The supplied syscall number is outside the `abi-v1` table. |
 //! | 5003 | Error | `SYSCALL_BAD_ARGUMENTS`       | One or more arguments failed type-specific validation. |
@@ -29,6 +29,13 @@ use rustos_log::{log, Event, EventId, Field, Level, Sink};
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum AuditEvent {
     /// A syscall was dispatched to its handler.
+    ///
+    /// An *allow* record for a security-relevant syscall. Recorded at
+    /// [`Level::Debug`]: a routine workload invokes audited syscalls
+    /// continuously, so at `Info` this record drowns every other line on
+    /// the default console filter. The record remains available for
+    /// forensics when the level is lowered; refusals stay at
+    /// [`Level::Error`] and always surface.
     SyscallInvoked,
     /// A syscall was refused because the caller lacked the required
     /// capability.
@@ -72,19 +79,23 @@ impl AuditEvent {
 
     /// Severity at which this event is emitted.
     ///
-    /// Successful dispatches are recorded at [`Level::Info`]; refused or
-    /// failed dispatches at [`Level::Error`] so they surface above a
-    /// routine info filter.
+    /// Refused or failed dispatches are recorded at [`Level::Error`] so
+    /// they surface above a routine info filter. The high-rate benign
+    /// outcomes — a successful dispatch and a would-block retry — are
+    /// recorded at [`Level::Debug`] so they cannot flood the default
+    /// `Info` console; lowering the filter recovers them for forensics.
     #[must_use]
     pub const fn level(self) -> Level {
         match self {
-            Self::SyscallInvoked => Level::Info,
+            // The benign high-rate outcomes: the continuous allow stream
+            // of a routine workload and the "nothing yet, retry" signal.
+            // Neither is an error, and both are too frequent for the
+            // default console filter.
+            Self::SyscallInvoked | Self::SyscallHandlerWouldBlock => Level::Debug,
             Self::SyscallPermissionDenied
             | Self::SyscallUnknown
             | Self::SyscallBadArguments
             | Self::SyscallHandlerRejected => Level::Error,
-            // A benign "nothing yet, retry" outcome — not an error.
-            Self::SyscallHandlerWouldBlock => Level::Debug,
         }
     }
 
@@ -166,5 +177,16 @@ mod tests {
                 < AuditEvent::SyscallHandlerRejected.level()
         );
         assert!(AuditEvent::SyscallHandlerWouldBlock.level() < Level::Info);
+    }
+
+    #[test]
+    fn a_successful_dispatch_is_recorded_below_the_default_filter() {
+        // The steady allow stream of a busy workload must never flood the
+        // default `Info` console: `SyscallInvoked` is `Debug`, dropped by
+        // the default filter and recovered by lowering it for forensics.
+        // Every refusal stays at `Error` and always surfaces.
+        assert_eq!(AuditEvent::SyscallInvoked.level(), Level::Debug);
+        assert!(AuditEvent::SyscallInvoked.level() < Level::Info);
+        assert!(AuditEvent::SyscallInvoked.level() < AuditEvent::SyscallPermissionDenied.level());
     }
 }

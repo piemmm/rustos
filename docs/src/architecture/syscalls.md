@@ -934,7 +934,7 @@ emit `SYSCALL_INVOKED`; the pre-dispatch refusals (`PERMISSION_DENIED`,
 
 | ID    | Level | Name                          | When |
 | ----: | ----- | ----------------------------- | ---- |
-| 5000  | Info  | `SYSCALL_INVOKED`             | A security-relevant syscall passed every check and was dispatched. |
+| 5000  | Debug | `SYSCALL_INVOKED`             | A security-relevant syscall passed every check and was dispatched. Recorded at `Debug`, below the default `Info` filter: a routine workload invokes audited syscalls continuously, and at `Info` this steady allow stream drowns every other console line; available for forensics when the level is lowered. Refusals (5001–5004) stay at `Error` and always surface. |
 | 5001  | Error | `SYSCALL_PERMISSION_DENIED`   | Caller lacked the required capability. |
 | 5002  | Error | `SYSCALL_UNKNOWN`             | Number was outside the `abi-v1` table. |
 | 5003  | Error | `SYSCALL_BAD_ARGUMENTS`       | Argument validation failed. |

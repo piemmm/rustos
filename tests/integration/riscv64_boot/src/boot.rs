@@ -15,7 +15,7 @@
 //! test-observer side channel. The boot-completed QEMU bins swap only
 //! the audit sink, exactly as the x86_64 / aarch64 verticals do.
 
-use rustos_log::Sink;
+use rustos_log::{Level, Sink};
 
 pub use rustos_kernel::riscv64::boot::{try_boot, BootError, RiscvBinArch};
 
@@ -30,7 +30,11 @@ pub use rustos_kernel::riscv64::boot::{try_boot, BootError, RiscvBinArch};
 ///
 /// `log_sink` / `audit_sink` are the `&'static` sinks the consuming
 /// vertical installs; its audit sink flips the `SiFive` Test device on
-/// `AuditEvent::BootCompleted`. Returns the bottom type.
+/// `AuditEvent::BootCompleted`. `log_level` is the initial global log
+/// filter `kernel_main` installs (`BootInfo::log_level`); a vertical
+/// that must observe the `Debug`-level allow records (e.g.
+/// `SyscallInvoked`, `EventId(5000)`) passes `Level::Debug`, the rest
+/// pass `Level::Info`. Returns the bottom type.
 ///
 /// # SAFETY-INVARIANT
 ///
@@ -41,6 +45,7 @@ pub fn boot(
     dtb: u64,
     log_sink: &'static (dyn Sink + Sync),
     audit_sink: &'static (dyn Sink + Sync),
+    log_level: Level,
 ) -> ! {
     // Publish before delegating, while the map can still be observed:
     // the production pipeline moves it into the hand-off. A build
@@ -50,5 +55,5 @@ pub fn boot(
         crate::publish::publish_memory_map(&map);
     }
     crate::publish::publish_dtb(dtb);
-    rustos_kernel::riscv64::boot::boot(hartid, dtb, log_sink, audit_sink)
+    rustos_kernel::riscv64::boot::boot(hartid, dtb, log_sink, audit_sink, log_level)
 }

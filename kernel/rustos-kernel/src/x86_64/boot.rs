@@ -330,6 +330,11 @@ const KTHREAD_ARENA_IDENTITY_LIMIT: u64 = 4 << 30;
 /// the audit sink with one that flips the QEMU `isa-debug-exit`
 /// device on `AuditEvent::BootCompleted`.
 ///
+/// `log_level` is the initial global log filter `kernel_main` installs
+/// (`BootInfo::log_level`). Production passes [`Level::Info`]; an audit
+/// observer vertical that must see the `Debug`-level allow records (e.g.
+/// `SyscallInvoked`, `EventId(5000)`) passes [`Level::Debug`].
+///
 /// Returns the bottom type. On every failure the function logs one
 /// [`KERNEL_BOOT_INIT_FAILED`] record (with the stable cause string
 /// from [`BootError::as_str`]) and parks the CPU forever via
@@ -346,8 +351,9 @@ pub fn boot(
     boot_info: u64,
     log_sink: &'static (dyn Sink + Sync),
     audit_sink: &'static (dyn Sink + Sync),
+    log_level: Level,
 ) -> ! {
-    match try_boot(boot_info, log_sink, audit_sink) {
+    match try_boot(boot_info, log_sink, audit_sink, log_level) {
         Ok(boot_info) => kernel_main(boot_info),
         Err(err) => {
             log_init_failure(log_sink, err);
@@ -402,6 +408,7 @@ fn try_boot(
     boot_info: u64,
     log_sink: &'static (dyn Sink + Sync),
     audit_sink: &'static (dyn Sink + Sync),
+    log_level: Level,
 ) -> Result<BootInfo<'static, BinArch>, BootError> {
     // 1. Per-CPU init (BSP).
     //
@@ -692,7 +699,7 @@ fn try_boot(
         arch_arc,
         log_sink,
         audit_sink,
-        Level::Info,
+        log_level,
         // Stage 2.7 follow-up (f4): hand the bin-crate-owned slot to
         // `kernel_main`'s `Syscall` phase. The arch-level
         // `set_dispatch_callback` (step 7 above) is unchanged; this

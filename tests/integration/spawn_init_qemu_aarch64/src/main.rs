@@ -154,6 +154,10 @@ mod kernel {
             dtb,
             &SERIAL_SINK,
             &AUDIT_SINK,
+            // `SyscallInvoked` (`EventId(5000)`) is `Debug`, below the
+            // default `Info` filter; this observer's PASS finisher fires
+            // on it, so boot with the filter lowered.
+            rustos_log::Level::Debug,
             &rustos_kernel::hwtree_store::HW_TREE_SOURCE,
         )
     }

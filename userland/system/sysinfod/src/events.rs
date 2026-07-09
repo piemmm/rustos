@@ -22,7 +22,11 @@ pub const SYSINFOD_RANGE_END: u32 = 9_000;
 /// [`SysinfoQuerySpec::audit`](rustos_abi::SysinfoQuerySpec) flag is set —
 /// the cross-principal, kernel, and hardware queries.
 /// Self-scoped observers are deliberately not recorded, to avoid drowning
-/// the audit log.
+/// the audit log. Recorded at `Debug`: a monitor polling privileged
+/// queries emits this allow record continuously, so at `Info` it floods
+/// the default console filter; lowering the filter recovers it for
+/// forensics. Denials ([`QUERY_DENIED`]) stay at `Warn` and always
+/// surface.
 pub const QUERY_SERVED: EventId = EventId(8_001);
 /// A query was refused because the caller lacks its required capability.
 ///

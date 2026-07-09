@@ -223,6 +223,11 @@ fn enable_mmu_and_vectors() -> Option<AddressSpace> {
 /// [`rustos_arch_aarch64::SERIAL_SINK`]; the boot-completed QEMU vertical
 /// substitutes an audit sink that exits QEMU on `AuditEvent::BootCompleted`.
 ///
+/// `log_level` is the initial global log filter `kernel_main` installs
+/// (`BootInfo::log_level`). Production passes [`Level::Info`]; an audit
+/// observer vertical that must see the `Debug`-level allow records (e.g.
+/// `SyscallInvoked`, `EventId(5000)`) passes [`Level::Debug`].
+///
 /// `hw_tree` is the [`HwTreeSource`] the `hw_tree_read` / `hw_tree_wait`
 /// syscalls serve. In production it is the authoritative
 /// [`crate::hwtree_store::HW_TREE_SOURCE`]; it is injected here — the same
@@ -250,6 +255,7 @@ pub fn boot(
     dtb: u64,
     log_sink: &'static (dyn Sink + Sync),
     audit_sink: &'static (dyn Sink + Sync),
+    log_level: Level,
     hw_tree: &'static (dyn rustos_kernel_core::HwTreeSource + 'static),
 ) -> ! {
     // Enable FP/SIMD before the log formatter (which the compiler may
@@ -725,7 +731,7 @@ pub fn boot(
             // production mount path consumes the binding in the following
             // increment (`plans/PI.md` Chunk B-2).
             audit_root_storage_binding(dtb, log_sink);
-            enter_kernel_core(arch, layout.map, log_sink, audit_sink, hw_tree)
+            enter_kernel_core(arch, layout.map, log_sink, audit_sink, log_level, hw_tree)
         }
     }
 
@@ -888,6 +894,7 @@ fn enter_kernel_core(
     memory_map: rustos_kernel_mem::BootMemoryMap,
     log_sink: &'static (dyn Sink + Sync),
     audit_sink: &'static (dyn Sink + Sync),
+    log_level: Level,
     hw_tree: &'static (dyn rustos_kernel_core::HwTreeSource + 'static),
 ) -> ! {
     // The arch port's `svc` trampoline fail-closes if it fires before a
@@ -907,7 +914,7 @@ fn enter_kernel_core(
         arch,
         log_sink,
         audit_sink,
-        Level::Info,
+        log_level,
         &DISPATCH_SLOT,
     )
     // Install the discovered console list (`plans/PI.md` P11): when the

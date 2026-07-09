@@ -74,7 +74,9 @@ into a global one without the global query's capability gate.
 
 Reserved `EventId` range `8000..9000`:
 
-- `8001 QUERY_SERVED` — an audited query was invoked (Info).
+- `8001 QUERY_SERVED` — an audited query was invoked (Debug: a polling
+  monitor emits it continuously, so it sits below the default `Info`
+  filter; lower the filter to capture it).
 - `8002 QUERY_DENIED` — capability check failed (Warn).
 - `8003 REQUEST_MALFORMED` — header/payload decode failed (Warn).
 - `8004 QUERY_UNAVAILABLE` — reserved-but-unassigned query id (Warn).

@@ -159,6 +159,7 @@ mod kernel {
             dtb,
             &SERIAL_SINK,
             &AUDIT_SINK,
+            rustos_log::Level::Info,
             &rustos_kernel::hwtree_store::HW_TREE_SOURCE,
         )
     }

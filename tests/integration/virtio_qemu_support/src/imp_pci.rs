@@ -46,7 +46,9 @@ pub use rustos_kernel::{boot, handle_panic_via_kernel_core};
 #[doc(hidden)]
 pub use rustos_kernel::{SerialSink as HarnessSerialSink, SERIAL_SINK as HARNESS_SERIAL_SINK};
 #[doc(hidden)]
-pub use rustos_log::{Event as HarnessEvent, EventId as HarnessEventId, Sink as HarnessSink};
+pub use rustos_log::{
+    Event as HarnessEvent, EventId as HarnessEventId, Level as HarnessLevel, Sink as HarnessSink,
+};
 
 use rustos_kernel::kalloc::{Heap, HEAP_BYTES};
 use rustos_kernel::FreeListAllocator;
@@ -354,7 +356,12 @@ macro_rules! define_boot_harness {
         /// the audit observer sink in place.
         #[no_mangle]
         pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
-            $crate::boot(multiboot_info, &$crate::HARNESS_SERIAL_SINK, &AUDIT_SINK)
+            $crate::boot(
+                multiboot_info,
+                &$crate::HARNESS_SERIAL_SINK,
+                &AUDIT_SINK,
+                $crate::HarnessLevel::Info,
+            )
         }
     };
 }

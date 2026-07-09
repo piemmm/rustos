@@ -50,7 +50,9 @@ pub use rustos_arch_riscv64::{
     SerialSink as HarnessSerialSink, SERIAL_SINK as HARNESS_SERIAL_SINK,
 };
 #[doc(hidden)]
-pub use rustos_log::{Event as HarnessEvent, EventId as HarnessEventId, Sink as HarnessSink};
+pub use rustos_log::{
+    Event as HarnessEvent, EventId as HarnessEventId, Level as HarnessLevel, Sink as HarnessSink,
+};
 #[doc(hidden)]
 pub use rustos_test_riscv64_boot::boot;
 
@@ -526,7 +528,13 @@ macro_rules! define_mmio_boot_harness {
         /// with the audit observer sink in place.
         #[no_mangle]
         pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
-            $crate::boot(hartid, dtb, &$crate::HARNESS_SERIAL_SINK, &AUDIT_SINK)
+            $crate::boot(
+                hartid,
+                dtb,
+                &$crate::HARNESS_SERIAL_SINK,
+                &AUDIT_SINK,
+                $crate::HarnessLevel::Info,
+            )
         }
     };
 }

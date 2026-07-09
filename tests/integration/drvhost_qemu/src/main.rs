@@ -182,7 +182,12 @@ mod kernel {
     /// bin exposes, but with our audit sink in place.
     #[no_mangle]
     pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
-        boot(multiboot_info, &SERIAL_SINK, &AUDIT_SINK)
+        boot(
+            multiboot_info,
+            &SERIAL_SINK,
+            &AUDIT_SINK,
+            rustos_log::Level::Info,
+        )
     }
 }
 

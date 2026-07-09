@@ -652,6 +652,11 @@ fn enable_mmu_and_vectors() -> bool {
 /// substitutes an audit sink that flips the `SiFive` Test device on
 /// `AuditEvent::BootCompleted`.
 ///
+/// `log_level` is the initial global log filter `kernel_main` installs
+/// (`BootInfo::log_level`). Production passes [`Level::Info`]; an audit
+/// observer vertical that must see the `Debug`-level allow records (e.g.
+/// `SyscallInvoked`, `EventId(5000)`) passes [`Level::Debug`].
+///
 /// RV-P2: enables the Sv39 identity MMU and installs the trap vector +
 /// the production `ecall` dispatch callback before handing off, so the
 /// production path runs paged with syscall dispatch wired
@@ -674,6 +679,7 @@ pub fn boot(
     dtb: u64,
     log_sink: &'static (dyn Sink + Sync),
     audit_sink: &'static (dyn Sink + Sync),
+    log_level: Level,
 ) -> ! {
     // RV-P2: enable the Sv39 identity MMU + S-mode trap vector before
     // any allocator/scheduler work, then install the production `ecall`
@@ -692,7 +698,7 @@ pub fn boot(
         halt_current_hart()
     }
 
-    match try_boot(hartid, dtb, log_sink, audit_sink) {
+    match try_boot(hartid, dtb, log_sink, audit_sink, log_level) {
         Ok(boot_info) => kernel_main(boot_info),
         Err(err) => {
             log_init_failure(log_sink, err);
@@ -768,6 +774,7 @@ pub fn try_boot(
     dtb: u64,
     log_sink: &'static (dyn Sink + Sync),
     audit_sink: &'static (dyn Sink + Sync),
+    log_level: Level,
 ) -> Result<BootInfo<'static, RiscvBinArch>, BootError> {
     if hartid != u64::from(BOOT_CPU) {
         return Err(BootError::UnexpectedHart);
@@ -841,7 +848,7 @@ pub fn try_boot(
         arch,
         log_sink,
         audit_sink,
-        Level::Info,
+        log_level,
         &DISPATCH_SLOT,
     )
     // Install the SBI console as the only console-list entry so PID 1

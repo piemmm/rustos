@@ -73,7 +73,12 @@ mod kernel {
     /// `tests/integration/kernel_arch_boot`).
     #[no_mangle]
     pub extern "C" fn kernel_main(boot_info: u64) -> ! {
-        boot(boot_info, &SERIAL_SINK, &SERIAL_SINK)
+        boot(
+            boot_info,
+            &SERIAL_SINK,
+            &SERIAL_SINK,
+            rustos_log::Level::Info,
+        )
     }
 }
 
@@ -136,6 +141,7 @@ mod kernel {
             dtb,
             &SERIAL_SINK,
             &SERIAL_SINK,
+            rustos_log::Level::Info,
             &rustos_kernel::hwtree_store::HW_TREE_SOURCE,
         )
     }
@@ -198,7 +204,13 @@ mod kernel {
     /// `tests/integration/kernel_arch_boot_riscv64`).
     #[no_mangle]
     pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
-        boot::boot(hartid, dtb, &SERIAL_SINK, &SERIAL_SINK)
+        boot::boot(
+            hartid,
+            dtb,
+            &SERIAL_SINK,
+            &SERIAL_SINK,
+            rustos_log::Level::Info,
+        )
     }
 }
 

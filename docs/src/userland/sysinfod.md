@@ -97,10 +97,15 @@ query carries.
 
 | Id   | Constant            | Level | Meaning                                   |
 |------|---------------------|-------|-------------------------------------------|
-| 8001 | `QUERY_SERVED`      | Info  | an audited query was invoked              |
+| 8001 | `QUERY_SERVED`      | Debug | an audited query was invoked              |
 | 8002 | `QUERY_DENIED`      | Warn  | capability check failed                   |
 | 8003 | `REQUEST_MALFORMED` | Warn  | header or payload decode failed           |
 | 8004 | `QUERY_UNAVAILABLE` | Warn  | reserved-but-unassigned query identifier  |
+
+`QUERY_SERVED` is recorded at `Debug` because a polling monitor emits it
+continuously: at `Info` it would flood the default console filter.
+Lowering the global filter recovers the allow stream for forensics;
+denials stay at `Warn` and always surface.
 
 Self-scoped, ungated observers are deliberately not audited, to avoid
 drowning the log; the cross-principal, kernel, and hardware queries are.

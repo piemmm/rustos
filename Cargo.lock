@@ -1857,6 +1857,7 @@ dependencies = [
  "rustos-kalloc",
  "rustos-kernel",
  "rustos-kernel-core",
+ "rustos-log",
 ]
 
 [[package]]
