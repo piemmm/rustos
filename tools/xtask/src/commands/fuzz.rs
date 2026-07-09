@@ -221,6 +221,12 @@ pub const TARGETS: &[Target] = &[
         description:
             "lib/procinfo info:/stats: resolver (untrusted reference bytes + hostile sysinfod replies: never panics, fails closed, envelope invariants hold)",
     },
+    Target {
+        package: "rustos-devids",
+        test: "fuzz_devids",
+        description:
+            "lib/devids pci.ids/usb.ids vetting parser + compact-table decoder (untrusted upstream-download and table bytes)",
+    },
 ];
 
 /// How long to run each harness.
@@ -662,6 +668,14 @@ mod tests {
         let chosen = selected(&opts).expect("known target");
         assert_eq!(chosen.len(), 1);
         assert_eq!(chosen[0].package, "rustos-path");
+    }
+
+    #[test]
+    fn devids_harness_is_registered() {
+        let opts = parse(&argv(&["--target", "fuzz_devids"])).expect("flag parses");
+        let chosen = selected(&opts).expect("known target");
+        assert_eq!(chosen.len(), 1);
+        assert_eq!(chosen[0].package, "rustos-devids");
     }
 
     #[test]

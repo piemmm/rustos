@@ -4098,14 +4098,33 @@ per-increment guarantees.
 
 ## DEVICES — device inventory commands + USB mass storage (`plans/DEVICES.md`)
 
-**Status: planned (DEVICE1–DEVICE2).** DEVICE1 adds the `lspci` and `lsusb`
-system command apps: they render the discovered PCI/USB nodes from the
-existing `CAP_SYSINFO_HW`-gated hardware-tree query, naming devices through a
-new `lib/devids` lookup crate whose data is vetted, provenance-pinned
-snapshots of the public PCI (`pci-ids.ucw.cz`) and USB
-(`linux-usb.org/usb.ids`) ID databases, imported and malicious-content-
-filtered by a developer-run `cargo xtask devids --fetch` (never a build-time
-network fetch, §19.3) with a CI drift gate. DEVICE2 adds bulk transfers to
+**Status: in progress (DEVICE1 V1 done; V2–V3 and DEVICE2 remain).**
+DEVICE1 adds the `lspci` and `lsusb` system command apps: they render the
+discovered PCI/USB nodes from the existing `CAP_SYSINFO_HW`-gated
+hardware-tree query, naming devices through the `lib/devids` lookup crate
+whose data is vetted, provenance-pinned snapshots of the public PCI
+(`pci-ids.ucw.cz`) and USB (`linux-usb.org/usb.ids`) ID databases, imported
+and malicious-content-filtered by a developer-run `cargo xtask devids
+--fetch` (never a build-time network fetch, §19.3) with a CI drift gate.
+V1 (done) delivered `lib/devids` — the one definition of the snapshot
+grammar, the strict fail-closed vetting filter (whole-file grammar
+validation, UTF-8 with no control bytes so no terminal-escape injection,
+exact-width lowercase-hex ids in emitted scopes, per-scope duplicate
+rejection, fixed size/name/entry bounds), and the compact-table codec
+(sorted 12-byte records over an interned strings blob; alloc-free O(log n)
+`vendor`/`device`/`class`/`subclass`/`prog_if` lookups over a fully
+validated view) — plus the `cargo xtask devids` pipeline: the committed
+snapshots under `lib/devids/assets/` carry provenance headers (upstream
+URL/version/date, fetch date, raw SHA-256, transport/encoding statements,
+licence), `--write` regenerates `lib/devids/tables/`, the no-flag verify is
+a `ci` static gate, and `--fetch` imports (pci.ids over TLS; usb.ids over
+upstream's canonical HTTP URL — upstream offers no valid TLS endpoint — with
+integrity from the pinned SHA-256 + reviewed diff, and any stray ISO-8859-1
+byte deterministically promoted to UTF-8 and recorded). The `fuzz_devids`
+harness (vetting parser + table decoder) is registered with
+`cargo xtask fuzz`. PCI subsystem entries and the auxiliary usb.ids sections
+are validated but deliberately not encoded: no consumer renders them (the
+hardware tree records no subsystem ids). DEVICE2 adds bulk transfers to
 the URB transport, a `drivers/storage/usb_msd` Bulk-Only-Transport class
 driver, and the `volmgr` volume manager that lands the still-open volume
 forest (`id::` roots) and automounts hotplugged filesystems into the

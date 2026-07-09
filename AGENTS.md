@@ -561,6 +561,15 @@ rustos/
 │   │                    #   /System/Libraries/ class, fail closed (§2.9).
 │   ├── cursor/          # Shared pointer cursors rasterised onto a raster
 │   │                    #   Surface, keyed by the theme's CursorKind (§10, §17.4).
+│   ├── devids/          # PCI/USB ID-database engine (plans/DEVICES.md): the
+│   │                    #   one definition of the vetted pci.ids/usb.ids
+│   │                    #   snapshot grammar + fail-closed vetting filter, the
+│   │                    #   compact sorted table encoder, and the alloc-free
+│   │                    #   binary-search decoder lspci/lsusb read their
+│   │                    #   bundled tables through. Snapshots + generated
+│   │                    #   tables live in the crate; `cargo xtask devids`
+│   │                    #   imports (--fetch, developer-run only, §19.3),
+│   │                    #   regenerates (--write), and drift-checks in ci (§2.2).
 │   ├── devmatch/        # Deterministic hardware-node <-> driver bind-table
 │   │                    #   match policy (§18.3): the one definition shared by
 │   │                    #   userland devmgr and the kernel driver catalogue (§2.2).

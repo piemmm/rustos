@@ -34,6 +34,11 @@ path = "src/main.rs"
 # Rust: a future ABI change cannot pass `cargo build` without breaking
 # the cross-check.
 rustos-abi = { path = "../../lib/abi", version = "=0.0.0" }
+# `devids` imports, vets, and compiles the public PCI/USB ID databases
+# through the one grammar/vetting/codec definition in `lib/devids` (shared
+# with the runtime consumers, AGENTS.md §2.2), and drift-checks the
+# committed tables in `ci`.
+rustos-devids = { path = "../../lib/devids", version = "=0.0.0" }
 rustos-kernel-syscall = { path = "../../kernel/syscall", version = "=0.0.0" }
 rustos-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
 # `test --qemu` cross-builds the CCOMPAT end-to-end C programs, whose build

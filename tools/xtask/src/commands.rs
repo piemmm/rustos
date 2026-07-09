@@ -15,6 +15,7 @@ mod c_header;
 mod cfg_check;
 mod ci_long;
 mod deps_check;
+mod devids;
 mod font_atlas;
 mod fssoak;
 mod fuzz;
@@ -47,6 +48,7 @@ pub enum Command {
     AbiCheck,
     CHeader,
     FontAtlas,
+    Devids,
     DepsCheck,
     CfgCheck,
     HelpLint,
@@ -77,6 +79,7 @@ impl Command {
         Command::AbiCheck,
         Command::CHeader,
         Command::FontAtlas,
+        Command::Devids,
         Command::DepsCheck,
         Command::CfgCheck,
         Command::HelpLint,
@@ -106,6 +109,7 @@ impl Command {
             "abi-check" => Command::AbiCheck,
             "c-header" => Command::CHeader,
             "font-atlas" => Command::FontAtlas,
+            "devids" => Command::Devids,
             "deps-check" => Command::DepsCheck,
             "cfg-check" => Command::CfgCheck,
             "help-lint" => Command::HelpLint,
@@ -137,6 +141,7 @@ impl Command {
             Command::AbiCheck => "abi-check",
             Command::CHeader => "c-header",
             Command::FontAtlas => "font-atlas",
+            Command::Devids => "devids",
             Command::DepsCheck => "deps-check",
             Command::CfgCheck => "cfg-check",
             Command::HelpLint => "help-lint",
@@ -172,6 +177,10 @@ impl Command {
             }
             Command::FontAtlas => {
                 "Generate/verify the Inconsolata EX glyph atlas (`--write` to regenerate)."
+            }
+            Command::Devids => {
+                "Verify the vetted PCI/USB ID-database tables (`--write` to regenerate, \
+                 `--fetch` to import upstream; developer-run only)."
             }
             Command::DepsCheck => "Enforce the §17.4 modularity dependency graph.",
             Command::CfgCheck => "Reject target-conditional compilation outside the arch ports.",
@@ -217,6 +226,7 @@ impl Command {
             Command::AbiCheck => run_abi_check(ctx, args),
             Command::CHeader => run_c_header(ctx, args),
             Command::FontAtlas => run_font_atlas(ctx, args),
+            Command::Devids => devids::run(ctx, args),
             Command::DepsCheck => run_deps_check(ctx),
             Command::CfgCheck => run_cfg_check(ctx),
             Command::HelpLint => help_lint::run(ctx),
@@ -1024,6 +1034,10 @@ fn run_static_gates(ctx: &Context) -> Result<(), String> {
         // committed face in-process and compares byte-for-byte, no
         // workspace build.
         static_gate("font-atlas", ctx, |c| run_font_atlas(c, &[])),
+        // The vetted PCI/USB ID-database drift guard: recompiles the
+        // committed snapshots in-process and compares byte-for-byte with
+        // the committed tables, no workspace build and no network.
+        static_gate("devids", ctx, |c| devids::run(c, &[])),
         // Silver: exhaustively model-check the capability + IPC state machine.
         // Exhaustive (not budgeted) and fast; a reachable invariant violation
         // fails closed.

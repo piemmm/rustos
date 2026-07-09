@@ -39,6 +39,10 @@
 //! - `font-atlas`   — generates (`--write`) or verifies the Inconsolata EX
 //!   glyph atlas in `lib/font/src/` from the committed face in
 //!   `lib/font/assets/`
+//! - `devids`       — verifies the compact PCI/USB ID-database tables in
+//!   `lib/devids/tables/` against the vetted snapshots in
+//!   `lib/devids/assets/` (`--write` to regenerate; `--fetch` — developer-run
+//!   only, never CI — to import and vet the upstream databases)
 //! - `deps-check` — enforces the modularity dependency graph
 //!   (layering, concrete-scheduler naming, optional-desktop boundary)
 //! - `cfg-check` — rejects target-conditional compilation
@@ -64,7 +68,7 @@
 //!   so a failing PR fails fast: `fmt --check`, then the concurrent
 //!   static-gate group (`deps-check`, `cfg-check`, `help-lint`,
 //!   `spec-review`, `supply-chain`, `abi-check`, `c-header`, `font-atlas`,
-//!   `model-check` —
+//!   `devids`, `model-check` —
 //!   all read-only, non-compiling checks run at once so their costs overlap),
 //!   then `docs-check` (rustdoc/link failures are the common first trip and
 //!   need only a doc build, so they run ahead of the compile-heavy stages),

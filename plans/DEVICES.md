@@ -82,20 +82,24 @@ The public databases are:
   line grammar, distributed with `usbutils` under GPL-2.0-or-later; no
   in-file licence header, so the import records the upstream licence
   statement in the snapshot provenance header and the refresh stops for
-  human review if upstream terms change, §15.7).
+  human review if upstream terms change, §15.7). Upstream publishes **no
+  valid TLS endpoint** for this file (`linux-usb.org`, `www.linux-usb.org`,
+  and the maintainer mirror all serve broken certificates), so the fetch
+  uses the canonical HTTP URL and integrity rests on the recorded SHA-256
+  plus the human review of the snapshot diff — CI and builds never fetch.
 
 Both share one grammar: `vendor_id  name` lines, single-tab
-`device_id  name` children, two-tab subsystem/interface children, plus
-trailing single-letter class/other tables (`C`, and for usb.ids `AT`,
-`HID`, `R`, `BIAS`, `PHY`, `HUT`, `L`, `VT`). One parser handles both
-(§2.2).
+`device_id  name` children, two-tab subsystem children (pci.ids only), plus
+trailing tagged class/other tables (`C`, and for usb.ids `AT`, `HID`, `R`,
+`BIAS`, `PHY`, `HUT`, `L`, `HCC`, `VT` — a closed set; an unknown tag stops
+the import for review). One parser handles both (§2.2).
 
 **Pipeline (the `cargo xtask devids` subcommand):**
 
 1. `cargo xtask devids --fetch` — developer-run only, never CI or the
    build (§19.3 forbids build/post-install network fetches; builds stay
    offline and reproducible). It downloads both files over HTTPS where
-   offered (the usb.ids fetch upgrades to `https://www.linux-usb.org`),
+   offered (pci.ids; usb.ids has no valid TLS endpoint, see above),
    runs the vetting filter (below), and rewrites the committed snapshots
    under `lib/devids/assets/` with a provenance header: upstream URL,
    upstream version/date lines, fetch date, SHA-256 of the raw download,
@@ -208,12 +212,22 @@ adding it updates `AGENTS.md` §3 and `PLAN.md` in the same change, §6):
 
 Each increment ends green on the whole-project gate (§7).
 
-- **V1 — `lib/devids` + `cargo xtask devids`.** The shared parser +
-  vetting filter + compact-table encoder/decoder/lookup, the xtask
-  subcommand (`--fetch` / `--write` / verify), the committed vetted
-  snapshots and generated tables, the fuzz harness, and the CI drift
-  gate wired into `cargo xtask ci`. §3/PLAN.md updated for the new crate
-  and subcommand.
+- **V1 — `lib/devids` + `cargo xtask devids`. Done.** `lib/devids` holds
+  the shared parser + vetting filter + compact-table encoder and the
+  alloc-free binary-search decoder (`DevIds`: `vendor`/`device`/`class`/
+  `subclass`/`prog_if`); the xtask subcommand (`--fetch` / `--write` /
+  verify) imports with full provenance headers and drift-checks as a
+  `cargo xtask ci` static gate; the vetted snapshots live in
+  `lib/devids/assets/`, the generated tables in `lib/devids/tables/`; the
+  `fuzz_devids` harness covers both untrusted surfaces. Reality-driven
+  decisions: usb.ids is fetched over upstream's canonical HTTP URL (no
+  valid TLS offered) with SHA-256 + review as integrity; a stray
+  ISO-8859-1 byte in usb.ids is deterministically promoted to UTF-8 and
+  recorded in the provenance header; auxiliary-section ids accept 1–4 hex
+  digits of either case (upstream publishes uppercase HUT usages) while
+  every emitted scope stays exact-width lowercase; PCI subsystem entries
+  and the auxiliary tables are validated but not encoded (no consumer
+  renders them). §3/PLAN.md carry the crate and subcommand.
 - **V2 — `lspci`.** The bundle, renderer, options, `Help/`, docs, host
   unit tests over a canned hardware tree + database fixture, and a QEMU
   vertical listing the virt machine's discovered PCI devices.

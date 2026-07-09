@@ -43,6 +43,7 @@ members = [
     "lib/crypto",
     "lib/curses",
     "lib/cursor",
+    "lib/devids",
     "lib/devmatch",
     "lib/dma-barrier",
     "lib/drvrt",

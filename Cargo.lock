@@ -676,6 +676,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-devids"
+version = "0.0.0"
+dependencies = [
+ "rustos-fuzzseed",
+]
+
+[[package]]
 name = "rustos-devmatch"
 version = "0.0.0"
 dependencies = [
@@ -3326,6 +3333,7 @@ dependencies = [
  "rustos-abi",
  "rustos-cc",
  "rustos-crypto",
+ "rustos-devids",
  "rustos-drv-bus-pcie-brcm",
  "rustos-drv-bus-usb",
  "rustos-drv-bus-usb-vl805",
