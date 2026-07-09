@@ -68,8 +68,13 @@ fn owner() -> ReclaimOwner {
     ReclaimOwner::FilesystemVolume { volume: 7 }
 }
 
+/// A leaked capturing sink for the cache's audit records.
+fn sink() -> &'static rustos_kernel_core::test_sink::TestSink {
+    Box::leak(Box::new(rustos_kernel_core::test_sink::TestSink::new()))
+}
+
 fn cache() -> TransformClusterCache {
-    TransformClusterCache::new(budget(), owner(), unpressured())
+    TransformClusterCache::new(budget(), owner(), unpressured(), sink())
 }
 
 /// One kibibyte of recognisable plaintext.
@@ -187,7 +192,7 @@ fn purge_drops_everything_and_zeroes_the_ledger() {
 #[test]
 fn growth_stops_outside_normal_pressure_and_moderate_drains_the_class() {
     let (source, pressure) = pressured(free_for(PressureBand::Normal));
-    let mut cache = TransformClusterCache::new(budget(), owner(), pressure);
+    let mut cache = TransformClusterCache::new(budget(), owner(), pressure, sink());
     cache.put(10, 1, &payload(1));
     assert!(cache.get(10).is_some());
 
@@ -215,10 +220,82 @@ fn growth_stops_outside_normal_pressure_and_moderate_drains_the_class() {
 #[test]
 fn a_zero_backing_admits_nothing() {
     let mut cache =
-        TransformClusterCache::new(CacheBudget::from_backing(0), owner(), unpressured());
+        TransformClusterCache::new(CacheBudget::from_backing(0), owner(), unpressured(), sink());
     cache.put(10, 1, &payload(1));
     assert!(cache.get(10).is_none());
     assert!(cache.accounting().refusals() >= 1);
+}
+
+#[test]
+fn a_forced_pressure_shrink_is_counted() {
+    let (source, pressure) = pressured(free_for(PressureBand::Normal));
+    let mut cache = TransformClusterCache::new(budget(), owner(), pressure, sink());
+    cache.put(10, 1, &payload(1));
+    assert_eq!(cache.accounting().pressure_shrinks(), 0);
+    source
+        .free
+        .store(free_for(PressureBand::Moderate), Ordering::Relaxed);
+    assert!(cache.get(10).is_none());
+    assert_eq!(cache.accounting().pressure_shrinks(), 1);
+}
+
+#[test]
+fn payload_and_metadata_bytes_are_accounted_separately() {
+    let mut cache = cache();
+    cache.put(10, 1, &payload(1));
+    let acct = cache.accounting();
+    let class = ReclaimClass::TransformCache;
+    assert_eq!(acct.class_payload_bytes(class), 1024);
+    assert_eq!(acct.class_metadata_bytes(class), ENTRY_OVERHEAD);
+    assert_eq!(acct.class_bytes(class), 1024 + ENTRY_OVERHEAD);
+}
+
+#[test]
+fn a_purge_counts_an_owner_teardown_drain() {
+    let mut cache = cache();
+    cache.put(10, 1, &payload(1));
+    assert_eq!(cache.accounting().teardowns(), 0);
+    cache.purge();
+    assert_eq!(cache.accounting().teardowns(), 1);
+    assert_eq!(cache.accounting().total_bytes(), 0);
+}
+
+#[test]
+fn a_detected_defect_is_counted_and_reported_once() {
+    let captured = sink();
+    let mut cache = TransformClusterCache::new(budget(), owner(), unpressured(), captured);
+    cache.put(10, 1, &payload(1));
+    cache.poison("ledger_imbalance");
+    assert_eq!(cache.accounting().failures(), 1);
+    assert!(cache.accounting().teardowns() >= 1);
+    assert_eq!(cache.accounting().total_bytes(), 0);
+    let events = captured.snapshot();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].id.0, 2001);
+    // The record's field shape is closed — fixed labels and numeric
+    // handles only, never plaintext or a block address payload.
+    let keys: alloc::vec::Vec<&str> = events[0].fields.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(keys, ["cache", "owner", "owner_id", "cause"]);
+    assert_eq!(events[0].fields[0].1, "transform");
+    assert_eq!(events[0].fields[1].1, "volume");
+    assert_eq!(events[0].fields[2].1, "7");
+    assert_eq!(events[0].fields[3].1, "ledger_imbalance");
+    // An already-poisoned cache never reports again.
+    cache.poison("orphan_index_slot");
+    assert_eq!(captured.snapshot().len(), 1);
+    assert_eq!(cache.accounting().failures(), 1);
+}
+
+#[test]
+fn normal_operation_emits_no_audit_records() {
+    let captured = sink();
+    let mut cache = TransformClusterCache::new(budget(), owner(), unpressured(), captured);
+    cache.put(10, 1, &payload(1));
+    assert!(cache.get(10).is_some());
+    assert!(cache.get(99).is_none());
+    cache.invalidate(10);
+    cache.purge();
+    assert!(captured.snapshot().is_empty());
 }
 
 #[test]
@@ -365,6 +442,7 @@ fn cached_volume() -> (&'static TestSource, Arc<SeamCounts>, RustFs<VecBlock>) {
                 volume: 0x524F_4F54,
             },
             pressure,
+            sink(),
         ),
         counts: Arc::clone(&counts),
     };

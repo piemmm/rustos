@@ -9760,9 +9760,12 @@ mod tests {
         let source: &'static PlentyFree = Box::leak(Box::new(PlentyFree));
         let pressure: &'static rustos_kernel_mem::MemoryPressure =
             Box::leak(Box::new(rustos_kernel_mem::MemoryPressure::over(source)));
+        let audit: &'static crate::test_sink::TestSink =
+            Box::leak(Box::new(crate::test_sink::TestSink::new()));
         store.install_reclaim(
             rustos_kernel_mem::CacheBudget::from_backing(1 << 24),
             pressure,
+            audit,
         );
     }
 

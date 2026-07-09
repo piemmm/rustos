@@ -61,6 +61,7 @@ pub mod phys;
 pub mod pressure;
 pub mod ptr;
 pub mod reclaim;
+pub mod reclaim_audit;
 pub mod sensitive;
 pub mod slab;
 pub mod spawn;
@@ -88,6 +89,7 @@ pub use reclaim::{
     InvalidationSource, RebuildCost, ReclaimClass, ReclaimOwner, ReclaimRule, Sensitivity,
     MAX_ENTRY_METADATA,
 };
+pub use reclaim_audit::{log_cache_poisoned, log_cache_refused, ReclaimAuditEvent};
 pub use sensitive::SensitiveBuffer;
 pub use slab::{Slab, SlabError, SlabHandle, SoftwareTagCheck};
 pub use spawn::{build_process_image, ProcessImage, SpawnError, UserStack};

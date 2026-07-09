@@ -273,6 +273,12 @@ rustos-drv-storage-emmc2 = { path = "../../drivers/storage/emmc2", version = "=0
 ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zeroize"] }
 
 [dev-dependencies]
+# The transform-cache host tests capture the reclaim audit records
+# (`plans/SMARTRAM.md` SMART9) through `kernel/core`'s `TestSink`,
+# exposed by its host-only `test-arch` feature. Feature unification
+# applies only to this crate's test builds; production images never
+# enable it.
+rustos-kernel-core = { path = "../core", version = "=0.0.0", features = ["test-arch"] }
 # The `program_manifests` drift test discovers every program crate's
 # `AppInfo.toml` through the shared composer walk and pins it against the
 # embedded registry's capability lists, so the two sources cannot diverge

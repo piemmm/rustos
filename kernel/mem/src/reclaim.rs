@@ -257,6 +257,22 @@ pub enum AdmissionRefusal {
     MissingInvalidation,
 }
 
+impl AdmissionRefusal {
+    /// The stable `cause` label carried by the refusal's audit record
+    /// (see [`crate::reclaim_audit`]).
+    #[must_use]
+    pub const fn cause(self) -> &'static str {
+        match self {
+            Self::UnknownClass => "unknown_class",
+            Self::UnknownOwner => "unknown_owner",
+            Self::SensitiveMaterial => "sensitive_material",
+            Self::UnboundedMetadata => "unbounded_metadata",
+            Self::NonReclaimable => "non_reclaimable",
+            Self::MissingInvalidation => "missing_invalidation",
+        }
+    }
+}
+
 /// A cache's declaration of what it intends to hold, submitted to
 /// [`classify`](Self::classify) before any entry is admitted.
 ///
@@ -442,19 +458,26 @@ impl CacheBudget {
 
 /// The running byte ledger and event counters of one bounded cache.
 ///
-/// Bytes are kept per [`ReclaimClass`]; every mutation is
-/// checked-arithmetic and fails closed with [`AccountingError`] rather
-/// than wrapping. Event counters saturate: they are diagnostics, and a
-/// saturated diagnostic is still truthful about "a very large number".
+/// Bytes are kept per [`ReclaimClass`], split into the entry payloads
+/// and the per-entry bookkeeping metadata charged on top of them, so
+/// the payload and metadata contributions stay separately observable;
+/// every mutation is checked-arithmetic and fails closed with
+/// [`AccountingError`] rather than wrapping. Event counters saturate:
+/// they are diagnostics, and a saturated diagnostic is still truthful
+/// about "a very large number".
 #[derive(Debug, Default)]
 pub struct CacheAccounting {
-    class_bytes: [usize; ReclaimClass::ALL.len()],
+    payload_bytes: [usize; ReclaimClass::ALL.len()],
+    metadata_bytes: [usize; ReclaimClass::ALL.len()],
     hits: u64,
     misses: u64,
     insertions: u64,
     invalidations: u64,
     evictions: u64,
     refusals: u64,
+    pressure_shrinks: u64,
+    teardowns: u64,
+    failures: u64,
 }
 
 impl CacheAccounting {
@@ -462,17 +485,22 @@ impl CacheAccounting {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            class_bytes: [0; ReclaimClass::ALL.len()],
+            payload_bytes: [0; ReclaimClass::ALL.len()],
+            metadata_bytes: [0; ReclaimClass::ALL.len()],
             hits: 0,
             misses: 0,
             insertions: 0,
             invalidations: 0,
             evictions: 0,
             refusals: 0,
+            pressure_shrinks: 0,
+            teardowns: 0,
+            failures: 0,
         }
     }
 
-    /// Total bytes currently charged across all classes.
+    /// Total bytes currently charged across all classes, payload and
+    /// per-entry metadata together.
     #[must_use]
     pub const fn total_bytes(&self) -> usize {
         // Per-class charges are individually checked, and each fits the
@@ -480,41 +508,82 @@ impl CacheAccounting {
         // saturating keeps the diagnostic truthful even if it could.
         let mut total = 0usize;
         let mut i = 0;
-        while i < self.class_bytes.len() {
-            total = total.saturating_add(self.class_bytes[i]);
+        while i < self.payload_bytes.len() {
+            total = total.saturating_add(self.payload_bytes[i]);
+            total = total.saturating_add(self.metadata_bytes[i]);
             i += 1;
         }
         total
     }
 
-    /// Bytes currently charged to `class`.
+    /// Bytes currently charged to `class`, payload and per-entry
+    /// metadata together — the footprint the budget and shrink targets
+    /// bound.
     #[must_use]
     pub const fn class_bytes(&self, class: ReclaimClass) -> usize {
-        self.class_bytes[class.index()]
+        self.payload_bytes[class.index()].saturating_add(self.metadata_bytes[class.index()])
     }
 
-    /// Charge `bytes` to `class` for an admitted entry.
+    /// Payload bytes currently charged to `class`.
+    #[must_use]
+    pub const fn class_payload_bytes(&self, class: ReclaimClass) -> usize {
+        self.payload_bytes[class.index()]
+    }
+
+    /// Per-entry bookkeeping metadata bytes currently charged to
+    /// `class`.
+    #[must_use]
+    pub const fn class_metadata_bytes(&self, class: ReclaimClass) -> usize {
+        self.metadata_bytes[class.index()]
+    }
+
+    /// Charge an admitted entry to `class`: `payload` bytes of cached
+    /// content plus `metadata` bytes of per-entry bookkeeping.
     ///
     /// # Errors
     ///
-    /// [`AccountingError::Overflow`] if the ledger cannot represent the
-    /// new total; nothing is charged.
-    pub fn charge(&mut self, class: ReclaimClass, bytes: usize) -> Result<(), AccountingError> {
-        let slot = &mut self.class_bytes[class.index()];
-        *slot = slot.checked_add(bytes).ok_or(AccountingError::Overflow)?;
+    /// [`AccountingError::Overflow`] if the ledger cannot represent
+    /// either new component total; nothing is charged.
+    pub fn charge(
+        &mut self,
+        class: ReclaimClass,
+        payload: usize,
+        metadata: usize,
+    ) -> Result<(), AccountingError> {
+        let new_payload = self.payload_bytes[class.index()]
+            .checked_add(payload)
+            .ok_or(AccountingError::Overflow)?;
+        let new_metadata = self.metadata_bytes[class.index()]
+            .checked_add(metadata)
+            .ok_or(AccountingError::Overflow)?;
+        self.payload_bytes[class.index()] = new_payload;
+        self.metadata_bytes[class.index()] = new_metadata;
         self.insertions = self.insertions.saturating_add(1);
         Ok(())
     }
 
-    /// Discharge `bytes` from `class` for a removed entry.
+    /// Discharge a removed entry from `class`: `payload` bytes of
+    /// cached content plus `metadata` bytes of per-entry bookkeeping.
     ///
     /// # Errors
     ///
     /// [`AccountingError::Underflow`] if more is discharged than was
-    /// ever charged — the books no longer balance; nothing is changed.
-    pub fn discharge(&mut self, class: ReclaimClass, bytes: usize) -> Result<(), AccountingError> {
-        let slot = &mut self.class_bytes[class.index()];
-        *slot = slot.checked_sub(bytes).ok_or(AccountingError::Underflow)?;
+    /// ever charged in either component — the books no longer balance;
+    /// nothing is changed.
+    pub fn discharge(
+        &mut self,
+        class: ReclaimClass,
+        payload: usize,
+        metadata: usize,
+    ) -> Result<(), AccountingError> {
+        let new_payload = self.payload_bytes[class.index()]
+            .checked_sub(payload)
+            .ok_or(AccountingError::Underflow)?;
+        let new_metadata = self.metadata_bytes[class.index()]
+            .checked_sub(metadata)
+            .ok_or(AccountingError::Underflow)?;
+        self.payload_bytes[class.index()] = new_payload;
+        self.metadata_bytes[class.index()] = new_metadata;
         Ok(())
     }
 
@@ -526,7 +595,8 @@ impl CacheAccounting {
     /// it is the only truthful value left. Never a substitute for
     /// per-entry [`discharge`](Self::discharge) in normal operation.
     pub fn zero_ledger(&mut self) {
-        self.class_bytes = [0; ReclaimClass::ALL.len()];
+        self.payload_bytes = [0; ReclaimClass::ALL.len()];
+        self.metadata_bytes = [0; ReclaimClass::ALL.len()];
     }
 
     /// Record a lookup served from the cache.
@@ -553,6 +623,24 @@ impl CacheAccounting {
     /// allocation failure).
     pub fn record_refusal(&mut self) {
         self.refusals = self.refusals.saturating_add(1);
+    }
+
+    /// Record one pressure-forced shrink pass that actually reclaimed
+    /// entries (the band's target was below the resident footprint).
+    pub fn record_pressure_shrink(&mut self) {
+        self.pressure_shrinks = self.pressure_shrinks.saturating_add(1);
+    }
+
+    /// Record one whole-cache drain on an owner-teardown path (volume
+    /// unmount, transaction rollback purge, cache drop).
+    pub fn record_teardown(&mut self) {
+        self.teardowns = self.teardowns.saturating_add(1);
+    }
+
+    /// Record one detected internal failure: a ledger or index defect
+    /// that poisoned the cache (fail closed).
+    pub fn record_failure(&mut self) {
+        self.failures = self.failures.saturating_add(1);
     }
 
     /// Lookups served from the cache.
@@ -589,6 +677,24 @@ impl CacheAccounting {
     #[must_use]
     pub const fn refusals(&self) -> u64 {
         self.refusals
+    }
+
+    /// Pressure-forced shrink passes that reclaimed entries.
+    #[must_use]
+    pub const fn pressure_shrinks(&self) -> u64 {
+        self.pressure_shrinks
+    }
+
+    /// Whole-cache drains on owner-teardown paths.
+    #[must_use]
+    pub const fn teardowns(&self) -> u64 {
+        self.teardowns
+    }
+
+    /// Detected internal failures that poisoned the cache.
+    #[must_use]
+    pub const fn failures(&self) -> u64 {
+        self.failures
     }
 }
 
@@ -707,16 +813,36 @@ mod tests {
     fn accounting_charges_every_class_independently() {
         let mut acct = CacheAccounting::new();
         for (i, class) in ReclaimClass::ALL.into_iter().enumerate() {
-            acct.charge(class, i + 1).expect("charges");
+            acct.charge(class, i + 1, 0).expect("charges");
         }
         for (i, class) in ReclaimClass::ALL.into_iter().enumerate() {
             assert_eq!(acct.class_bytes(class), i + 1);
         }
         assert_eq!(acct.total_bytes(), (1..=ReclaimClass::ALL.len()).sum());
         for (i, class) in ReclaimClass::ALL.into_iter().enumerate() {
-            acct.discharge(class, i + 1).expect("discharges");
+            acct.discharge(class, i + 1, 0).expect("discharges");
         }
         assert_eq!(acct.total_bytes(), 0);
+    }
+
+    #[test]
+    fn metadata_bytes_are_accounted_separately_per_class() {
+        let mut acct = CacheAccounting::new();
+        acct.charge(ReclaimClass::CleanFileData, 4096, 96)
+            .expect("charges");
+        acct.charge(ReclaimClass::FsMetadata, 64, 160)
+            .expect("charges");
+        assert_eq!(acct.class_payload_bytes(ReclaimClass::CleanFileData), 4096);
+        assert_eq!(acct.class_metadata_bytes(ReclaimClass::CleanFileData), 96);
+        assert_eq!(acct.class_bytes(ReclaimClass::CleanFileData), 4192);
+        assert_eq!(acct.class_payload_bytes(ReclaimClass::FsMetadata), 64);
+        assert_eq!(acct.class_metadata_bytes(ReclaimClass::FsMetadata), 160);
+        assert_eq!(acct.total_bytes(), 4096 + 96 + 64 + 160);
+        acct.discharge(ReclaimClass::CleanFileData, 4096, 96)
+            .expect("discharges");
+        assert_eq!(acct.class_payload_bytes(ReclaimClass::CleanFileData), 0);
+        assert_eq!(acct.class_metadata_bytes(ReclaimClass::CleanFileData), 0);
+        assert_eq!(acct.total_bytes(), 64 + 160);
     }
 
     #[test]
@@ -737,13 +863,14 @@ mod tests {
     #[test]
     fn charge_and_discharge_balance_per_class() {
         let mut acct = CacheAccounting::new();
-        acct.charge(ReclaimClass::CleanFileData, 4096)
+        acct.charge(ReclaimClass::CleanFileData, 4096, 0)
             .expect("charges");
-        acct.charge(ReclaimClass::FsMetadata, 128).expect("charges");
+        acct.charge(ReclaimClass::FsMetadata, 128, 0)
+            .expect("charges");
         assert_eq!(acct.class_bytes(ReclaimClass::CleanFileData), 4096);
         assert_eq!(acct.class_bytes(ReclaimClass::FsMetadata), 128);
         assert_eq!(acct.total_bytes(), 4224);
-        acct.discharge(ReclaimClass::CleanFileData, 4096)
+        acct.discharge(ReclaimClass::CleanFileData, 4096, 0)
             .expect("discharges");
         assert_eq!(acct.total_bytes(), 128);
     }
@@ -751,25 +878,54 @@ mod tests {
     #[test]
     fn overflow_is_refused_and_charges_nothing() {
         let mut acct = CacheAccounting::new();
-        acct.charge(ReclaimClass::FsMetadata, usize::MAX)
+        acct.charge(ReclaimClass::FsMetadata, usize::MAX, 0)
             .expect("charges");
         assert_eq!(
-            acct.charge(ReclaimClass::FsMetadata, 1),
+            acct.charge(ReclaimClass::FsMetadata, 1, 0),
             Err(AccountingError::Overflow)
         );
         assert_eq!(acct.class_bytes(ReclaimClass::FsMetadata), usize::MAX);
     }
 
     #[test]
-    fn underflow_is_refused_and_discharges_nothing() {
+    fn metadata_overflow_is_refused_and_charges_neither_component() {
         let mut acct = CacheAccounting::new();
-        acct.charge(ReclaimClass::CleanFileData, 10)
+        acct.charge(ReclaimClass::FsMetadata, 0, usize::MAX)
             .expect("charges");
         assert_eq!(
-            acct.discharge(ReclaimClass::CleanFileData, 11),
+            acct.charge(ReclaimClass::FsMetadata, 1, 1),
+            Err(AccountingError::Overflow)
+        );
+        assert_eq!(acct.class_payload_bytes(ReclaimClass::FsMetadata), 0);
+        assert_eq!(
+            acct.class_metadata_bytes(ReclaimClass::FsMetadata),
+            usize::MAX
+        );
+    }
+
+    #[test]
+    fn underflow_is_refused_and_discharges_nothing() {
+        let mut acct = CacheAccounting::new();
+        acct.charge(ReclaimClass::CleanFileData, 10, 0)
+            .expect("charges");
+        assert_eq!(
+            acct.discharge(ReclaimClass::CleanFileData, 11, 0),
             Err(AccountingError::Underflow)
         );
         assert_eq!(acct.class_bytes(ReclaimClass::CleanFileData), 10);
+    }
+
+    #[test]
+    fn metadata_underflow_is_refused_and_discharges_neither_component() {
+        let mut acct = CacheAccounting::new();
+        acct.charge(ReclaimClass::CleanFileData, 10, 4)
+            .expect("charges");
+        assert_eq!(
+            acct.discharge(ReclaimClass::CleanFileData, 10, 5),
+            Err(AccountingError::Underflow)
+        );
+        assert_eq!(acct.class_payload_bytes(ReclaimClass::CleanFileData), 10);
+        assert_eq!(acct.class_metadata_bytes(ReclaimClass::CleanFileData), 4);
     }
 
     #[test]
@@ -780,11 +936,31 @@ mod tests {
         acct.record_invalidation();
         acct.record_eviction();
         acct.record_refusal();
+        acct.record_pressure_shrink();
+        acct.record_teardown();
+        acct.record_failure();
         assert_eq!(acct.hits(), 1);
         assert_eq!(acct.misses(), 1);
         assert_eq!(acct.invalidations(), 1);
         assert_eq!(acct.evictions(), 1);
         assert_eq!(acct.refusals(), 1);
+        assert_eq!(acct.pressure_shrinks(), 1);
+        assert_eq!(acct.teardowns(), 1);
+        assert_eq!(acct.failures(), 1);
         assert_eq!(acct.insertions(), 0);
+    }
+
+    #[test]
+    fn zero_ledger_clears_both_components_and_keeps_counters() {
+        let mut acct = CacheAccounting::new();
+        acct.charge(ReclaimClass::TransformCache, 512, 96)
+            .expect("charges");
+        acct.record_teardown();
+        acct.zero_ledger();
+        assert_eq!(acct.total_bytes(), 0);
+        assert_eq!(acct.class_payload_bytes(ReclaimClass::TransformCache), 0);
+        assert_eq!(acct.class_metadata_bytes(ReclaimClass::TransformCache), 0);
+        assert_eq!(acct.teardowns(), 1);
+        assert_eq!(acct.insertions(), 1);
     }
 }

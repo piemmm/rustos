@@ -9,6 +9,7 @@ use super::*;
 use crate::fs::memfs::RwMockFs;
 use crate::fs::perm::{Credentials, Metadata, Mode};
 use crate::fs::{Path, Vfs, VfsError};
+use crate::test_sink::TestSink;
 
 use alloc::boxed::Box;
 use alloc::vec;
@@ -180,6 +181,11 @@ fn owner() -> ReclaimOwner {
     ReclaimOwner::FilesystemVolume { volume: 1 }
 }
 
+/// A leaked capturing sink for the cache's audit records.
+fn sink() -> &'static TestSink {
+    Box::leak(Box::new(TestSink::new()))
+}
+
 /// The wrapped counting driver's call total.
 fn calls(cache: &CachedFs<Counting<RwMockFs>>) -> u64 {
     cache.inner_driver().calls
@@ -197,7 +203,7 @@ fn fixture(contents: &[u8]) -> CachedFs<Counting<RwMockFs>> {
         .write_at(dir, b"file.txt", 0, contents)
         .expect("seed contents");
     assert_eq!(written, contents.len());
-    CachedFs::new(Counting::new(fs), budget(), owner(), unpressured())
+    CachedFs::new(Counting::new(fs), budget(), owner(), unpressured(), sink())
 }
 
 fn dir_of(cache: &mut CachedFs<Counting<RwMockFs>>) -> NodeId {
@@ -429,7 +435,7 @@ fn security_change_is_seen_by_the_secured_vfs_permission_check() {
     fs.set_security(file, NodeSecurity::new(0o644, 1, 1))
         .expect("open mode");
 
-    let mut cache = CachedFs::new(Counting::new(fs), budget(), owner(), unpressured());
+    let mut cache = CachedFs::new(Counting::new(fs), budget(), owner(), unpressured(), sink());
     let mut vfs = Vfs::new(Metadata::new(UserId(0), GroupId(0), Mode::from_bits(0o755)));
     vfs.mounts_mut()
         .back_root(DriverHandle::from_raw(1).expect("handle"))
@@ -496,6 +502,7 @@ fn eviction_honours_budget_and_hysteresis_and_takes_data_first() {
         CacheBudget::from_backing(256 * 1024),
         owner(),
         unpressured(),
+        sink(),
     );
     let hard = cache.budget().hard();
     let low = cache.budget().low();
@@ -623,6 +630,7 @@ fn empty_and_zero_budget_cache_still_serves_correctly() {
         CacheBudget::from_backing(0),
         owner(),
         unpressured(),
+        sink(),
     );
 
     let file = cache.lookup(root, b"f").expect("resolves");
@@ -644,7 +652,7 @@ fn pressured_fixture(contents: &[u8]) -> (&'static TestSource, CachedFs<Counting
     fs.create(dir, b"file.txt", NodeKind::RegularFile)
         .expect("create");
     fs.write_at(dir, b"file.txt", 0, contents).expect("seed");
-    let mut cache = CachedFs::new(Counting::new(fs), budget(), owner(), pressure);
+    let mut cache = CachedFs::new(Counting::new(fs), budget(), owner(), pressure, sink());
     let dir = {
         let root = cache.root();
         cache.lookup(root, b"dir").expect("dir resolves")
@@ -670,7 +678,7 @@ fn admission_stops_outside_normal_pressure() {
     fs.create(root, b"f", NodeKind::RegularFile)
         .expect("create");
     fs.write_at(root, b"f", 0, b"still served").expect("seed");
-    let mut cache = CachedFs::new(Counting::new(fs), budget(), owner(), pressure);
+    let mut cache = CachedFs::new(Counting::new(fs), budget(), owner(), pressure, sink());
 
     // Under mild pressure nothing is admitted, but every operation is
     // still served correctly straight from the driver.
@@ -771,4 +779,85 @@ fn owner_teardown_after_forced_reclaim_balances_the_ledger() {
     // Teardown after a forced reclaim: the drop path purges and zeroes
     // whatever remains without unbalancing the (already empty) ledger.
     drop(cache);
+}
+
+#[test]
+fn a_forced_pressure_shrink_is_counted() {
+    let (source, mut cache) = pressured_fixture(b"shrink is counted");
+    assert_eq!(cache.accounting().pressure_shrinks(), 0);
+    set_free(source, free_for(PressureBand::Severe));
+    let root = cache.root();
+    let _ = cache.lookup(root, b"dir");
+    assert!(cache.accounting().pressure_shrinks() >= 1);
+    assert_eq!(cache.accounting().total_bytes(), 0);
+}
+
+#[test]
+fn payload_and_metadata_bytes_are_accounted_separately() {
+    let mut cache = fixture(b"split ledger");
+    let file = file_of(&mut cache);
+    let mut buf = [0u8; 16];
+    cache.read_at(file, 0, &mut buf).expect("reads");
+    cache.node_info(file).expect("stat");
+    let acct = cache.accounting();
+    for class in [ReclaimClass::CleanFileData, ReclaimClass::FsMetadata] {
+        assert!(acct.class_payload_bytes(class) > 0);
+        assert!(acct.class_metadata_bytes(class) > 0);
+        assert_eq!(
+            acct.class_bytes(class),
+            acct.class_payload_bytes(class) + acct.class_metadata_bytes(class)
+        );
+    }
+}
+
+#[test]
+fn a_detected_defect_is_counted_and_reported_once() {
+    let captured = sink();
+    let mut cache = CachedFs::new(
+        Counting::new(RwMockFs::new()),
+        budget(),
+        owner(),
+        unpressured(),
+        captured,
+    );
+    cache.poison("ledger_imbalance");
+    assert_eq!(cache.accounting().failures(), 1);
+    assert!(cache.accounting().teardowns() >= 1);
+    let events = captured.snapshot();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].id.0, 2001);
+    // The record's field shape is closed — fixed labels and numeric
+    // handles only, never a file name or cached bytes.
+    let keys: Vec<&str> = events[0].fields.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(keys, ["cache", "owner", "owner_id", "cause"]);
+    assert_eq!(events[0].fields[0].1, "clean_fs");
+    assert_eq!(events[0].fields[1].1, "volume");
+    assert_eq!(events[0].fields[2].1, "1");
+    assert_eq!(events[0].fields[3].1, "ledger_imbalance");
+    // An already-poisoned cache never reports again.
+    cache.poison("orphan_index_slot");
+    assert_eq!(captured.snapshot().len(), 1);
+    assert_eq!(cache.accounting().failures(), 1);
+}
+
+#[test]
+fn normal_operation_emits_no_audit_records() {
+    let captured = sink();
+    let mut fs = RwMockFs::new();
+    let root = fs.root();
+    fs.create(root, b"f", NodeKind::RegularFile)
+        .expect("create");
+    fs.write_at(root, b"f", 0, b"quiet").expect("seed");
+    let mut cache = CachedFs::new(
+        Counting::new(fs),
+        budget(),
+        owner(),
+        unpressured(),
+        captured,
+    );
+    let file = cache.lookup(root, b"f").expect("resolves");
+    let mut buf = [0u8; 8];
+    cache.read_at(file, 0, &mut buf).expect("reads");
+    cache.node_info(file).expect("stat");
+    assert!(captured.snapshot().is_empty());
 }

@@ -812,8 +812,13 @@ canonical source — is classed, bounded, and accounted
   threshold.
 - **Fail-closed accounting.** `CacheAccounting` keeps per-class byte
   ledgers with checked arithmetic (typed `AccountingError` on
-  overflow/underflow, never wrapping) plus saturating hit/miss/
-  insertion/invalidation/eviction/refusal counters.
+  overflow/underflow, never wrapping), split into the entry *payloads*
+  and the per-entry bookkeeping *metadata* charged on top of them
+  (`class_payload_bytes` / `class_metadata_bytes`; the budget and
+  shrink targets bound their sum), plus saturating hit/miss/insertion/
+  invalidation/eviction/refusal counters and the SMART9 event counters:
+  pressure-forced shrink passes, whole-cache teardown drains, and
+  detected internal failures (§7k).
 
 The first consumer is the **clean, rebuildable filesystem cache**
 (`kernel/core::fs::CachedFs`, `plans/SMARTRAM.md` section 6.1): a
@@ -864,7 +869,11 @@ normal, mild, moderate, severe, critical — is shared with
   `plans/SWAPSWAPSWAP.md` section 6 shape, to be tuned by benchmark,
   never ABI). Deepening applies immediately; relaxing steps one band at
   a time past each exit watermark. Sampling happens on the consumers'
-  own operations — no background worker, no periodic tick.
+  own operations — no background worker, no periodic tick. Every
+  *stored* band change counts one entry into the new band
+  (`MemoryPressure::band_entries`, one atomic per band; the starting
+  band and hysteresis holds count nothing), so pressure-state
+  transitions stay observable through the internal diagnostics (§7k).
 - **Reserves, fail closed.** The thresholds carry a reserve floor
   (1/64 of the backing). A reading at or below it is critical
   regardless of history; a zero-size (unknown) backing reports critical
@@ -1009,6 +1018,49 @@ winning candidate is exactly what this cache retains), and a separate
 RXE relocation-preparation cache (the loader model has no separate
 relocation stage; the validated image in the `LoadedApp` *is* the
 cached RXE state).
+
+## 7k. Reclaimable-cache observability (SMART9)
+
+The reclaimable-cache subsystem is observable through **internal
+counters and existing structured logging only** (`plans/SMARTRAM.md`
+SMART9, section 11): no `/proc`, no `/sys`, no text-scrape file, and no
+new public ABI — a System Information query is added only when a
+current in-tree caller requires it, and none does today.
+
+- **Counters.** Every cache instance's `CacheAccounting` (§7g) is the
+  per-owner counter surface — each cache is charged to exactly one
+  `ReclaimOwner`, so its ledger *is* that owner's contribution. Beside
+  the split payload/metadata byte ledgers and the hit/miss/insertion/
+  invalidation/eviction/refusal counters it counts: `pressure_shrinks`
+  (forced-shrink passes that actually reclaimed), `teardowns`
+  (whole-cache drains — a rollback purge, a poison drain), and
+  `failures` (detected ledger/index defects). The pressure gauge counts
+  entries into each band (`band_entries`, §7h). Counters saturate:
+  they are diagnostics, never control flow.
+- **Stable audit events.** Security-relevant failures emit one
+  structured record through the boot audit sink using `kernel/mem`'s
+  reserved `EventId` range (`2_000..3_000`, `reclaim_audit`):
+  `RECLAIM_CACHE_REFUSED` (2000, Error) when a candidate fails the §7g
+  classification gate at construction (the cache starts poisoned, its
+  consumer serves uncached), and `RECLAIM_CACHE_POISONED` (2001, Error)
+  when a live cache detects a ledger or index defect — a corruption-like
+  event — drains itself, and disables admission. A cache reports its
+  poisoning exactly once; normal operation emits nothing.
+- **Closed field shape, no secrets.** Every record carries exactly
+  `cache` (the fixed label `clean_fs` / `transform` / `launch`),
+  `owner` (a kernel subsystem name or the owner kind `volume` /
+  `task`), `owner_id` (the numeric mount handle or task id), and
+  `cause` (a fixed label such as `ledger_imbalance`,
+  `orphan_index_slot`, or an `AdmissionRefusal::cause`). No file name,
+  cached plaintext, key, or capability token can enter a diagnostic
+  record (`plans/SMARTRAM.md` section 9).
+- **The wiring.** The boot paths that build the caches thread the
+  `'static` audit sink through their constructors: `system_mount`'s
+  `cached` helper and `install_system_mount` (the `/System` volume's
+  clean and transform caches, the launch cache via
+  `AppStore::install_reclaim`), and the unlock path's
+  `register_writable_state` / `WritableStateSink` (the writable root's
+  pair).
 
 ## 8. Testing strategy
 

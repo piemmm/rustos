@@ -16,12 +16,16 @@ targets, the `ramzip` handoff gate, deterministic escalation, and the
 `CachedFs` per-operation enforcement), SMART3 (the RustFS transform
 cache: the driver's injected `ClusterCache` seam and the kernel's
 classified, budgeted, pressure-governed, zeroing
-`TransformClusterCache`, installed on both boot volumes), and SMART4
+`TransformClusterCache`, installed on both boot volumes), SMART4
 (the semantic application-launch cache,
 `kernel/core::launch_cache::LaunchCache`: the classified, budgeted,
 pressure-governed retention of the load gate's accepted `LoadedApp` for
-immutable system-store bundles; see `PLAN.md` §SMARTRAM for the
-done-state summaries) are implemented; SMART5–SMART8
+immutable system-store bundles), and SMART9 (observability through
+existing diagnostics: the split payload/metadata ledger with
+pressure-shrink/teardown/failure counters, the pressure gauge's
+per-band transition counters, and the `kernel/mem` `reclaim_audit`
+events — no public ABI; see `PLAN.md` §SMARTRAM for the done-state
+summaries) are implemented; SMART5–SMART8
 (desktop/UI, reliability-assist, background-validation, and predictive
 caches) are **shelved — not added**; the remaining classes are staged
 below  
@@ -984,27 +988,40 @@ Docs:
 
 ### SMART9 - Observability through existing diagnostics
 
-Deliverables:
+**Status: done.** The subsystem is observable through internal counters
+and existing structured logging only; no public ABI was added (no
+current caller requires one), and no `/proc`/`/sys`/text-scrape path
+exists.
 
-- Internal counters for cache classes, owners, bytes, metadata, reclaim events,
-  invalidations, failures, and pressure-state transitions.
-- Structured logs for security-relevant failures and corruption-like events.
-- Existing System Information API exposure only if a current caller requires it.
-- No `/proc`, `/sys`, ad-hoc text scrape, or speculative syscall.
+What now holds (`docs/src/architecture/memory.md` §7k):
 
-Tests:
-
-- Counters update consistently across insert, hit, miss, invalidation, reclaim,
-  owner teardown, and failure paths.
-- Security-relevant failures log stable events.
-- Diagnostics expose no plaintext, keys, credentials, capability tokens, or
-  unauthorized filenames.
-- Public ABI remains absent unless approved and fully tested.
-- Fuzz diagnostics decoders if ABI exposure is added.
-
-Docs:
-
-- Update diagnostics and memory docs with observability policy.
+- `kernel/mem::reclaim::CacheAccounting` splits each class's byte
+  ledger into payload and per-entry bookkeeping metadata
+  (`class_payload_bytes` / `class_metadata_bytes`; budgets bound the
+  sum) and counts, beside hits/misses/insertions/invalidations/
+  evictions/refusals: `pressure_shrinks` (forced-shrink passes that
+  reclaimed), `teardowns` (whole-cache drains), and `failures`
+  (detected ledger/index defects). Each cache instance is charged to
+  exactly one `ReclaimOwner`, so its ledger is that owner's
+  contribution.
+- `kernel/mem::pressure::MemoryPressure` counts entries into each band
+  (`band_entries`, one atomic per band, swap-exact per stored change;
+  the starting band and hysteresis holds count nothing).
+- `kernel/mem::reclaim_audit` owns the subsystem's stable audit events
+  in the reserved `2_000..3_000` range: `RECLAIM_CACHE_REFUSED` (2000)
+  for a classification-gate refusal at construction and
+  `RECLAIM_CACHE_POISONED` (2001) for a live cache's detected
+  ledger/index defect. The field shape is closed — `cache` label,
+  `owner` kind/name, numeric `owner_id`, `cause` label — so no
+  filename, plaintext, key, or capability token can enter a record.
+  All three caches (`CachedFs`, `TransformClusterCache`,
+  `LaunchCache`) take the boot audit sink at construction and report a
+  poisoning exactly once; normal operation emits nothing.
+- Tests land beside each piece: counter-per-path and ledger-split
+  coverage in `kernel/mem` and all three cache test suites, transition
+  counting in the pressure tests, one-shot poison reporting with the
+  closed field shape, and a no-records-in-normal-operation check per
+  cache.
 
 ### SMART10 - Integration, benchmarks, and full validation
 

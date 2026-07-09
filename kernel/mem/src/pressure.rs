@@ -45,7 +45,7 @@
 //! is unknown (zero) reports critical pressure and admits nothing:
 //! fail closed, never a guess.
 
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
 use crate::frame::{FrameAllocator, PAGE_SIZE};
 use crate::reclaim::{CacheBudget, ReclaimClass};
@@ -270,10 +270,19 @@ impl PressureThresholds {
 /// block each other; two racing samples fold the same reading to the
 /// same band, and the reserve floor is re-checked on every growth
 /// decision, so a lost store can never admit growth into the reserve.
+///
+/// Each stored band change bumps the entered band's transition counter
+/// (a saturation-free `u64` per band), so pressure-state transitions
+/// stay observable through the internal diagnostics without any
+/// background worker or public ABI (`plans/SMARTRAM.md` SMART9).
 pub struct MemoryPressure {
     source: &'static (dyn FreeMemorySource + 'static),
     thresholds: PressureThresholds,
     band: AtomicU8,
+    /// Entries into each band, indexed by [`PressureBand::depth`]. The
+    /// starting band is not counted: the gauge begins there rather
+    /// than transitioning into it.
+    transitions: [AtomicU64; 5],
 }
 
 impl MemoryPressure {
@@ -288,6 +297,7 @@ impl MemoryPressure {
             source,
             thresholds,
             band: AtomicU8::new(band.depth()),
+            transitions: [const { AtomicU64::new(0) }; 5],
         }
     }
 
@@ -304,12 +314,24 @@ impl MemoryPressure {
     }
 
     /// Take a fresh reading and fold it into the band with hysteresis,
-    /// returning the resulting band.
+    /// returning the resulting band. A sample that changes the stored
+    /// band counts one entry into the new band; a sample that holds the
+    /// band counts nothing.
     pub fn sample(&self) -> PressureBand {
         let free = self.source.free_bytes();
         let next = self.thresholds.fold(self.band(), free);
-        self.band.store(next.depth(), Ordering::Relaxed);
+        let previous = self.band.swap(next.depth(), Ordering::Relaxed);
+        if previous != next.depth() {
+            self.transitions[next.depth() as usize].fetch_add(1, Ordering::Relaxed);
+        }
         next
+    }
+
+    /// How many sampled transitions have entered `band` since the gauge
+    /// was built. The band the gauge started in is not counted.
+    #[must_use]
+    pub fn band_entries(&self, band: PressureBand) -> u64 {
+        self.transitions[band.depth() as usize].load(Ordering::Relaxed)
     }
 
     /// Whether a cache may grow by `cost_bytes` right now: growth is
@@ -580,6 +602,51 @@ mod tests {
         assert_eq!(pressure.sample(), PressureBand::Mild);
         set_free(source, t.exit[0] + 4096);
         assert_eq!(pressure.sample(), PressureBand::Normal);
+    }
+
+    #[test]
+    fn band_transitions_are_counted_once_per_stored_change() {
+        let t = PressureThresholds::from_total(TOTAL);
+        let (source, pressure) = gauge(TOTAL / 2);
+        // The starting band is not a transition.
+        for band in PressureBand::ALL {
+            assert_eq!(pressure.band_entries(band), 0);
+        }
+        // A held band counts nothing, however often it is sampled.
+        assert_eq!(pressure.sample(), PressureBand::Normal);
+        assert_eq!(pressure.sample(), PressureBand::Normal);
+        assert_eq!(pressure.band_entries(PressureBand::Normal), 0);
+        // Deepening to moderate counts one entry into moderate.
+        set_free(source, t.enter[1] - 4096);
+        assert_eq!(pressure.sample(), PressureBand::Moderate);
+        assert_eq!(pressure.band_entries(PressureBand::Moderate), 1);
+        // The hysteresis hold between enter and exit is not a change.
+        set_free(source, t.enter[1] + 4096);
+        assert_eq!(pressure.sample(), PressureBand::Moderate);
+        assert_eq!(pressure.band_entries(PressureBand::Moderate), 1);
+        // Relaxing one band counts one entry into the relaxed band.
+        set_free(source, t.exit[1] + 4096);
+        assert_eq!(pressure.sample(), PressureBand::Mild);
+        assert_eq!(pressure.band_entries(PressureBand::Mild), 1);
+        set_free(source, t.exit[0] + 4096);
+        assert_eq!(pressure.sample(), PressureBand::Normal);
+        assert_eq!(pressure.band_entries(PressureBand::Normal), 1);
+        assert_eq!(pressure.band_entries(PressureBand::Severe), 0);
+        assert_eq!(pressure.band_entries(PressureBand::Critical), 0);
+    }
+
+    #[test]
+    fn repeated_band_swings_accumulate_entries() {
+        let t = PressureThresholds::from_total(TOTAL);
+        let (source, pressure) = gauge(TOTAL / 2);
+        for _ in 0..3 {
+            set_free(source, t.enter[3] - 4096);
+            assert_eq!(pressure.sample(), PressureBand::Critical);
+            set_free(source, TOTAL / 2);
+            while pressure.sample() != PressureBand::Normal {}
+        }
+        assert_eq!(pressure.band_entries(PressureBand::Critical), 3);
+        assert_eq!(pressure.band_entries(PressureBand::Normal), 3);
     }
 
     #[test]

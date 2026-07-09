@@ -63,9 +63,11 @@ use alloc::vec::Vec;
 
 use rustos_appload::LoadedApp;
 use rustos_kernel_mem::{
-    shrink_target, CacheAccounting, CacheBudget, CacheCandidate, CachePolicy, InvalidationSource,
-    MemoryPressure, RebuildCost, ReclaimClass, ReclaimOwner, ReclaimRule, Sensitivity,
+    log_cache_poisoned, log_cache_refused, shrink_target, CacheAccounting, CacheBudget,
+    CacheCandidate, CachePolicy, InvalidationSource, MemoryPressure, RebuildCost, ReclaimClass,
+    ReclaimOwner, ReclaimRule, Sensitivity,
 };
+use rustos_log::Sink;
 
 /// Approximate per-entry bookkeeping cost (map nodes, the LRU index
 /// slot, the fixed entry fields, the `Arc` control block) charged on
@@ -78,6 +80,9 @@ const ENTRY_OVERHEAD: usize = 128;
 /// what keeps the declared per-entry metadata honest. A longer key is
 /// refused (served uncached), never truncated.
 const MAX_BUNDLE_KEY: usize = 256;
+
+/// The fixed `cache` label this cache's audit records carry.
+const CACHE_LABEL: &str = "launch";
 
 /// One cached verification result: the accepted [`LoadedApp`] and the
 /// recency tick of its last use.
@@ -95,6 +100,9 @@ pub struct LaunchCache {
     /// cache is read or grown, and admission is refused outside normal
     /// pressure or when growth would dip into the reserve.
     pressure: &'static MemoryPressure,
+    /// The audit sink a classification refusal or detected ledger
+    /// defect reports through (`kernel/mem::reclaim_audit`).
+    sink: &'static (dyn Sink + Sync),
     accounting: CacheAccounting,
     /// The classified admission policy; `None` when classification
     /// refused, which poisons the cache from birth.
@@ -121,20 +129,32 @@ impl LaunchCache {
     /// every launch still works through the full load gate — fail
     /// closed, never an unclassified cache.
     #[must_use]
-    pub fn new(budget: CacheBudget, pressure: &'static MemoryPressure) -> Self {
+    pub fn new(
+        budget: CacheBudget,
+        pressure: &'static MemoryPressure,
+        sink: &'static (dyn Sink + Sync),
+    ) -> Self {
+        let owner = ReclaimOwner::KernelSubsystem("app_store");
         let candidate = CacheCandidate {
             class: Some(ReclaimClass::SemanticAppCache),
-            owner: Some(ReclaimOwner::KernelSubsystem("app_store")),
+            owner: Some(owner),
             rebuild_cost: RebuildCost::Expensive,
             sensitivity: Some(Sensitivity::SystemData),
             invalidation: Some(InvalidationSource::GenerationToken),
             rule: Some(ReclaimRule::Drop),
             entry_metadata_bytes: ENTRY_OVERHEAD + MAX_BUNDLE_KEY,
         };
-        let policy = candidate.classify().ok();
+        let policy = match candidate.classify() {
+            Ok(policy) => Some(policy),
+            Err(refusal) => {
+                log_cache_refused(sink, CACHE_LABEL, Some(owner), refusal);
+                None
+            }
+        };
         Self {
             budget,
             pressure,
+            sink,
             accounting: CacheAccounting::new(),
             poisoned: policy.is_none(),
             policy,
@@ -164,27 +184,32 @@ impl LaunchCache {
         self.tick
     }
 
-    /// The accounted byte cost of caching `app` under `key`: the
-    /// validated image, the owned manifest strings and resolved-library
-    /// references beside it, the key copy, and the fixed overhead.
-    fn cost_of(key: &str, app: &LoadedApp) -> usize {
+    /// The accounted `(payload, metadata)` byte cost of caching `app`
+    /// under `key`: the validated image, the owned manifest strings,
+    /// and the resolved-library references as payload; the key copy,
+    /// the per-library node overhead, and the fixed overhead as
+    /// per-entry bookkeeping.
+    fn cost_of(key: &str, app: &LoadedApp) -> (usize, usize) {
         let strings = app
             .id()
             .len()
             .saturating_add(app.name().len())
             .saturating_add(app.version().len())
             .saturating_add(app.run_path().len());
-        let libraries: usize = app
+        let references: usize = app
             .libraries()
             .iter()
-            .map(|library| library.reference.len().saturating_add(ENTRY_OVERHEAD))
+            .map(|library| library.reference.len())
             .sum();
-        app.run_image()
+        let payload = app
+            .run_image()
             .len()
             .saturating_add(strings)
-            .saturating_add(libraries)
+            .saturating_add(references);
+        let metadata = ENTRY_OVERHEAD
             .saturating_add(key.len())
-            .saturating_add(ENTRY_OVERHEAD)
+            .saturating_add(app.libraries().len().saturating_mul(ENTRY_OVERHEAD));
+        (payload, metadata)
     }
 
     /// Remove the entry under `key`, dropping its LRU slot and
@@ -194,24 +219,29 @@ impl LaunchCache {
             return false;
         };
         self.lru.remove(&entry.tick);
+        let (payload, metadata) = Self::cost_of(key, &entry.app);
         if self
             .accounting
-            .discharge(
-                ReclaimClass::SemanticAppCache,
-                Self::cost_of(key, &entry.app),
-            )
+            .discharge(ReclaimClass::SemanticAppCache, payload, metadata)
             .is_err()
         {
-            self.poison();
+            self.poison("ledger_imbalance");
         }
         true
     }
 
     /// Drop every entry and admit nothing further: the fail-closed
-    /// response to a ledger defect. Launches keep working; only the
-    /// cache is disabled.
-    fn poison(&mut self) {
+    /// response to the internal defect named by `cause`. Launches keep
+    /// working; only the cache is disabled. The defect is counted and
+    /// reported once through the audit sink, and the whole-cache drain
+    /// is counted as a teardown.
+    fn poison(&mut self, cause: &'static str) {
+        if !self.poisoned {
+            self.accounting.record_failure();
+            log_cache_poisoned(self.sink, CACHE_LABEL, self.owner(), cause);
+        }
         self.poisoned = true;
+        self.accounting.record_teardown();
         self.entries.clear();
         self.lru.clear();
         self.accounting.zero_ledger();
@@ -228,7 +258,7 @@ impl LaunchCache {
             if !self.remove_key(&key) {
                 // An index slot with no backing entry is a ledger
                 // defect; fail closed rather than loop.
-                self.poison();
+                self.poison("orphan_index_slot");
                 return;
             }
             self.accounting.record_eviction();
@@ -247,6 +277,7 @@ impl LaunchCache {
         let band = self.pressure.sample();
         let target = shrink_target(band, ReclaimClass::SemanticAppCache, self.budget);
         if self.accounting.total_bytes() > target {
+            self.accounting.record_pressure_shrink();
             self.evict_until(target);
         }
     }
@@ -299,7 +330,8 @@ impl LaunchCache {
         if self.poisoned {
             return;
         }
-        let cost = Self::cost_of(bundle, app);
+        let (payload, metadata) = Self::cost_of(bundle, app);
+        let cost = payload.saturating_add(metadata);
         if cost > self.budget.hard() || !self.pressure.growth_permitted(cost) {
             self.accounting.record_refusal();
             return;
@@ -321,7 +353,7 @@ impl LaunchCache {
         key.push_str(bundle);
         if self
             .accounting
-            .charge(ReclaimClass::SemanticAppCache, cost)
+            .charge(ReclaimClass::SemanticAppCache, payload, metadata)
             .is_err()
         {
             self.accounting.record_refusal();

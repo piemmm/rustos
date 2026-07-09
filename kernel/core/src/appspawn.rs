@@ -54,6 +54,7 @@ use rustos_abi::{
 use rustos_appload::{AppError, BundleStore, LoadedApp, Verifier};
 use rustos_crypto::{Ed25519PublicKey, Ed25519Signature, Sha256Stream};
 use rustos_kernel_mem::{CacheBudget, MemoryPressure};
+use rustos_log::Sink;
 use rustos_sync::RwLock;
 
 use crate::fs::FilesystemService;
@@ -170,10 +171,15 @@ impl AppStore {
     /// `/System` mount, before it resolves the readiness latch; only the
     /// first installation wins. Until it runs, every launch is served
     /// uncached through the full load gate.
-    pub fn install_reclaim(&self, budget: CacheBudget, pressure: &'static MemoryPressure) {
+    pub fn install_reclaim(
+        &self,
+        budget: CacheBudget,
+        pressure: &'static MemoryPressure,
+        sink: &'static (dyn Sink + Sync),
+    ) {
         let mut cache = self.cache.write();
         if cache.is_none() {
-            *cache = Some(LaunchCache::new(budget, pressure));
+            *cache = Some(LaunchCache::new(budget, pressure, sink));
         }
     }
 

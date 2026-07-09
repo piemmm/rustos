@@ -36,6 +36,13 @@ rustos-arch-api = { path = "../arch/api", version = "=0.0.0" }
 # `AddressSpace`. §17.4 permits a kernel subsystem to depend on `lib/*`.
 rustos-abi = { path = "../../lib/abi", version = "=0.0.0" }
 
+# Structured logging for the reclaimable-cache audit events
+# (`plans/SMARTRAM.md` SMART9): a cache classification refusal or a
+# detected ledger defect emits a stable `EventId` record in the
+# `kernel/mem` range (`2_000..3_000`). §17.4 permits a kernel subsystem
+# to depend on `lib/*`.
+rustos-log = { path = "../../lib/log", version = "=0.0.0" }
+
 # Audited AEAD for the encrypted-swap layer (`AGENTS.md` §4): pages the
 # kernel writes to a swap device are sealed with `lib/crypto`'s
 # ChaCha20-Poly1305 wrapper so a swap device never holds plaintext secrets.

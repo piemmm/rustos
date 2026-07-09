@@ -4296,10 +4296,30 @@ rebuildable filesystem cache (`plans/SMARTRAM.md` SMART1 + §6.1):**
   exists; the cached image is the validation state) are deliberately
   not built.
 
+**Done — SMART9 observability through existing diagnostics
+(`plans/SMARTRAM.md` SMART9 + §11; `docs/src/architecture/memory.md`
+§7k):**
+- Internal counters only, no public ABI (no current caller requires
+  one): `CacheAccounting` splits every class ledger into payload and
+  per-entry bookkeeping metadata (`class_payload_bytes` /
+  `class_metadata_bytes`) and adds `pressure_shrinks` / `teardowns` /
+  `failures` beside the existing event counters; `MemoryPressure`
+  counts entries into each band (`band_entries`, swap-exact per stored
+  change).
+- `kernel/mem::reclaim_audit` owns the subsystem's stable audit events
+  in kernel/mem's reserved `2_000..3_000` `EventId` range:
+  `RECLAIM_CACHE_REFUSED` (2000) and `RECLAIM_CACHE_POISONED` (2001),
+  with a closed `cache`/`owner`/`owner_id`/`cause` field shape (fixed
+  labels and numeric handles — never a filename, plaintext, key, or
+  token). All three caches (`CachedFs`, `TransformClusterCache`,
+  `LaunchCache`) take the boot audit sink at construction (threaded
+  through `system_mount`, the root-unlock path, and
+  `AppStore::install_reclaim`) and report a poisoning exactly once;
+  normal operation emits nothing.
+
 **Remaining (staged, `plans/SMARTRAM.md` §12):** the non-RustFS
 transform families (verified bundle/manifest state gated on their
-consumers) and observability (SMART9) — each gated on the subsystems it
-consumes.
+consumers) — gated on the subsystems they consume.
 UI caches (SMART5) and the reliability/background/predictive caches
 (SMART6–8) are **shelved — not added**; they are built only if a
 future decision explicitly un-shelves them.

@@ -100,7 +100,12 @@ pub static LATE_FILESYSTEM: LateFilesystem<Box<dyn KernelFs>> = LateFilesystem::
 /// engine's, which shares the registered lock) flow through the same
 /// cache and its invalidation, and every volume's cache obeys the same
 /// pressure bands.
-fn cached<F>(driver: F, volume: u64, pressure: &'static MemoryPressure) -> Box<dyn KernelFs>
+fn cached<F>(
+    driver: F,
+    volume: u64,
+    pressure: &'static MemoryPressure,
+    audit: &'static (dyn Sink + Sync),
+) -> Box<dyn KernelFs>
 where
     F: FilesystemRead + FilesystemWrite + FilesystemSecurity + FilesystemStats + Send + 'static,
 {
@@ -109,6 +114,7 @@ where
         CacheBudget::from_backing(rustos_kalloc::HEAP_BYTES),
         ReclaimOwner::FilesystemVolume { volume },
         pressure,
+        audit,
     ))
 }
 
@@ -239,7 +245,7 @@ fn system_vfs() -> Result<Vfs, VfsError> {
 /// keyed by the non-secret well-known [`SYSTEM_VOLUME_KEY`].
 pub fn install_system_mount<B: Block + 'static>(
     store: &'static DriverStoreService<B>,
-    audit: &dyn Sink,
+    audit: &'static (dyn Sink + Sync),
     pressure: &'static MemoryPressure,
 ) {
     // Locate the `/System` extent on a first window, then drop it so the
@@ -273,6 +279,7 @@ pub fn install_system_mount<B: Block + 'static>(
     let fs = fs.with_cluster_cache(TransformClusterCache::for_volume(
         SYSTEM_MOUNT_HANDLE,
         pressure,
+        audit,
     ));
     let Ok(vfs) = system_vfs() else {
         unavailable(audit, "system_vfs_build_failed");
@@ -291,7 +298,7 @@ pub fn install_system_mount<B: Block + 'static>(
         unavailable(audit, "already_installed");
         return;
     }
-    let driver = cached(fs, SYSTEM_MOUNT_HANDLE, pressure);
+    let driver = cached(fs, SYSTEM_MOUNT_HANDLE, pressure, audit);
     if LATE_FILESYSTEM
         .register(system_handle, driver, "RustFsSystem", "rustfs")
         .is_err()
@@ -320,6 +327,7 @@ pub fn install_system_mount<B: Block + 'static>(
     crate::app_store::APP_STORE.install_reclaim(
         CacheBudget::from_backing(rustos_kalloc::HEAP_BYTES),
         pressure,
+        audit,
     );
     crate::app_store::APP_STORE.note_available();
 }
@@ -348,7 +356,7 @@ pub fn install_system_mount<B: Block + 'static>(
 /// device — or `None` when registration was refused.
 pub fn register_writable_state(
     driver: Box<dyn KernelFs>,
-    audit: &dyn Sink,
+    audit: &'static (dyn Sink + Sync),
     pressure: &'static MemoryPressure,
 ) -> Option<&'static SleepLock<Box<dyn KernelFs>>> {
     let Ok(handle) = DriverHandle::from_raw(ROOT_VOLUME_HANDLE) else {
@@ -357,7 +365,7 @@ pub fn register_writable_state(
     };
     let Ok(shared) = LATE_FILESYSTEM.register(
         handle,
-        cached(driver, ROOT_VOLUME_HANDLE, pressure),
+        cached(driver, ROOT_VOLUME_HANDLE, pressure, audit),
         "RustFsRoot",
         "rustfs",
     ) else {

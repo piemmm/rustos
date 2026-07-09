@@ -813,15 +813,15 @@ fn emmc2_unlock<'a>(
 /// sole writer of the volume. Fail-soft and audited: any partition/window/
 /// mount refusal leaves the writable tree failing closed and never disturbs
 /// the users/identity install.
-struct WritableStateSink<'a, B: Block + 'static> {
+struct WritableStateSink<B: Block + 'static> {
     store: &'static DriverStoreService<B>,
-    audit: &'a dyn Sink,
+    audit: &'static (dyn Sink + Sync),
     /// The system memory-pressure gauge the writable root volume's
     /// cache samples, threaded from [`UnlockEnv`].
     pressure: &'static MemoryPressure,
 }
 
-impl<B: Block + 'static> WritableRootSink for WritableStateSink<'_, B> {
+impl<B: Block + 'static> WritableRootSink for WritableStateSink<B> {
     fn publish(
         &self,
         volume_key: &VolumeKey,
@@ -872,6 +872,7 @@ impl<B: Block + 'static> WritableRootSink for WritableStateSink<'_, B> {
         let fs = fs.with_cluster_cache(TransformClusterCache::for_volume(
             ROOT_VOLUME_HANDLE,
             self.pressure,
+            self.audit,
         ));
         // The registered driver is the volume's single writer; the
         // `CAP_USER_ADMIN` account-administration engine shares this same

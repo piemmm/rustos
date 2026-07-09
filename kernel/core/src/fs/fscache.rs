@@ -80,9 +80,11 @@ use rustos_abi::driver::filesystem::{
 };
 use rustos_abi::DriverError;
 use rustos_kernel_mem::{
-    shrink_target, CacheAccounting, CacheBudget, CacheCandidate, CachePolicy, InvalidationSource,
-    MemoryPressure, RebuildCost, ReclaimClass, ReclaimOwner, ReclaimRule, Sensitivity, PAGE_SIZE,
+    log_cache_poisoned, log_cache_refused, shrink_target, CacheAccounting, CacheBudget,
+    CacheCandidate, CachePolicy, InvalidationSource, MemoryPressure, RebuildCost, ReclaimClass,
+    ReclaimOwner, ReclaimRule, Sensitivity, PAGE_SIZE,
 };
+use rustos_log::Sink;
 use zeroize::Zeroize;
 
 use super::path::MAX_COMPONENT_LEN;
@@ -160,6 +162,9 @@ pub struct CachedFs<F> {
     /// the cache is read or grown, and admission is refused outside
     /// normal pressure or when growth would dip into the reserve.
     pressure: &'static MemoryPressure,
+    /// The audit sink a classification refusal or detected ledger
+    /// defect reports through (`kernel/mem::reclaim_audit`).
+    sink: &'static (dyn Sink + Sync),
     accounting: CacheAccounting,
     /// The classified admission policies (file data, metadata); `None`
     /// when classification refused, which poisons the cache from birth.
@@ -183,6 +188,9 @@ pub struct CachedFs<F> {
     /// LRU index of the metadata pools, keyed by tick (oldest first).
     lru_meta: BTreeMap<u64, KeyRef>,
 }
+
+/// The fixed `cache` label this cache's audit records carry.
+const CACHE_LABEL: &str = "clean_fs";
 
 impl<F> CachedFs<F> {
     /// The cache's declared candidates: clean file data and filesystem
@@ -223,16 +231,23 @@ impl<F> CachedFs<F> {
         budget: CacheBudget,
         owner: ReclaimOwner,
         pressure: &'static MemoryPressure,
+        sink: &'static (dyn Sink + Sync),
     ) -> Self {
         let (data, metadata) = Self::candidates(owner);
         let policies = match (data.classify(), metadata.classify()) {
             (Ok(data), Ok(metadata)) => Some((data, metadata)),
-            _ => None,
+            (data, metadata) => {
+                for refusal in [data.err(), metadata.err()].into_iter().flatten() {
+                    log_cache_refused(sink, CACHE_LABEL, Some(owner), refusal);
+                }
+                None
+            }
         };
         Self {
             inner,
             budget,
             pressure,
+            sink,
             accounting: CacheAccounting::new(),
             policies,
             tick: 0,
@@ -299,26 +314,37 @@ impl<F> CachedFs<F> {
         }
     }
 
-    /// The accounted byte cost of an LRU key's entry.
-    fn cost_of(&self, key: &KeyRef) -> usize {
-        let payload = match key {
-            KeyRef::Stat(_) => size_of::<NodeInfo>(),
-            KeyRef::Sec(_) => size_of::<NodeSecurity>(),
-            KeyRef::Lookup(_, name) => name.len().saturating_mul(2).saturating_add(8),
-            KeyRef::Dirent(dir, cursor) => self
-                .dirent
-                .get(&(*dir, *cursor))
-                .map_or(0, |e| e.name.len().saturating_add(size_of::<DirEntry>())),
-            KeyRef::Data(file, base) => self.data.get(&(*file, *base)).map_or(0, |e| e.bytes.len()),
-        };
-        payload.saturating_add(ENTRY_OVERHEAD)
+    /// The accounted `(payload, metadata)` byte cost of an LRU key's
+    /// entry: the cached content, and the per-entry bookkeeping (the
+    /// fixed overhead plus any key-copy bytes) on top of it.
+    fn cost_of(&self, key: &KeyRef) -> (usize, usize) {
+        match key {
+            KeyRef::Stat(_) => (size_of::<NodeInfo>(), ENTRY_OVERHEAD),
+            KeyRef::Sec(_) => (size_of::<NodeSecurity>(), ENTRY_OVERHEAD),
+            // The cached content is the resolved node id; the name is
+            // carried twice as bookkeeping (map key and LRU key copy).
+            KeyRef::Lookup(_, name) => (
+                8,
+                ENTRY_OVERHEAD.saturating_add(name.len().saturating_mul(2)),
+            ),
+            KeyRef::Dirent(dir, cursor) => (
+                self.dirent
+                    .get(&(*dir, *cursor))
+                    .map_or(0, |e| e.name.len().saturating_add(size_of::<DirEntry>())),
+                ENTRY_OVERHEAD,
+            ),
+            KeyRef::Data(file, base) => (
+                self.data.get(&(*file, *base)).map_or(0, |e| e.bytes.len()),
+                ENTRY_OVERHEAD,
+            ),
+        }
     }
 
     /// Remove the entry `key` names, zeroing its buffers, dropping its
     /// LRU index slot, and discharging its cost. Returns the removed
     /// entry's tick, or `None` when it was already gone.
     fn remove_entry(&mut self, key: &KeyRef) -> Option<u64> {
-        let cost = self.cost_of(key);
+        let (payload, metadata) = self.cost_of(key);
         let tick = match key {
             KeyRef::Stat(node) => self.stat.remove(node).map(|e| e.tick),
             KeyRef::Sec(node) => self.sec.remove(node).map(|e| e.tick),
@@ -349,25 +375,34 @@ impl<F> CachedFs<F> {
         self.lru_meta.remove(&tick);
         if self
             .accounting
-            .discharge(Self::class_of(key), cost)
+            .discharge(Self::class_of(key), payload, metadata)
             .is_err()
         {
-            self.poison();
+            self.poison("ledger_imbalance");
         }
         Some(tick)
     }
 
     /// Drop every cached entry (zeroed) and admit nothing further: the
-    /// fail-closed response to a ledger defect. The driver keeps
-    /// serving every operation; only the cache is disabled.
-    fn poison(&mut self) {
+    /// fail-closed response to the internal defect named by `cause`.
+    /// The driver keeps serving every operation; only the cache is
+    /// disabled. The defect is counted and reported once through the
+    /// audit sink; a cache already poisoned (including from birth)
+    /// does not report again.
+    fn poison(&mut self, cause: &'static str) {
+        if !self.poisoned {
+            self.accounting.record_failure();
+            log_cache_poisoned(self.sink, CACHE_LABEL, self.owner(), cause);
+        }
         self.poisoned = true;
         self.purge();
     }
 
     /// Drop every cached entry, zeroing all buffers and rebalancing the
-    /// ledger to empty.
+    /// ledger to empty. Every whole-cache drain is counted as a
+    /// teardown.
     fn purge(&mut self) {
+        self.accounting.record_teardown();
         for entry in self.data.values_mut() {
             entry.bytes.as_mut_slice().zeroize();
         }
@@ -402,7 +437,7 @@ impl<F> CachedFs<F> {
             if self.remove_entry(&key).is_none() {
                 // An index entry with no backing entry is a ledger
                 // defect; fail closed rather than loop.
-                self.poison();
+                self.poison("orphan_index_slot");
                 return;
             }
             self.accounting.record_eviction();
@@ -432,17 +467,19 @@ impl<F> CachedFs<F> {
             .min(meta_target)
             .saturating_add(data_bytes.min(data_target));
         if self.accounting.total_bytes() > target {
+            self.accounting.record_pressure_shrink();
             self.evict_until(target);
         }
     }
 
-    /// Admit an entry of `cost` bytes under `key`, evicting to make
-    /// room. Returns the recency tick to store in the entry, or `None`
-    /// when the entry is refused (over budget, poisoned, growth is
-    /// forbidden by the pressure band or would dip into the reserve,
-    /// or the ledger cannot account it) — the caller then serves
-    /// without caching.
-    fn admit(&mut self, key: KeyRef, cost: usize) -> Option<u64> {
+    /// Admit an entry of `payload` cached-content bytes plus `metadata`
+    /// bookkeeping bytes under `key`, evicting to make room. Returns
+    /// the recency tick to store in the entry, or `None` when the entry
+    /// is refused (over budget, poisoned, growth is forbidden by the
+    /// pressure band or would dip into the reserve, or the ledger
+    /// cannot account it) — the caller then serves without caching.
+    fn admit(&mut self, key: KeyRef, payload: usize, metadata: usize) -> Option<u64> {
+        let cost = payload.saturating_add(metadata);
         if self.poisoned || cost > self.budget.hard() {
             self.accounting.record_refusal();
             return None;
@@ -460,7 +497,7 @@ impl<F> CachedFs<F> {
             }
         }
         let class = Self::class_of(&key);
-        if self.accounting.charge(class, cost).is_err() {
+        if self.accounting.charge(class, payload, metadata).is_err() {
             self.accounting.record_refusal();
             return None;
         }
@@ -651,8 +688,7 @@ impl<F: FilesystemRead> CachedFs<F> {
         if n > 0 {
             out[..n].copy_from_slice(&chunk[in_off..in_off + n]);
         }
-        let cost = read.saturating_add(ENTRY_OVERHEAD);
-        match self.admit(KeyRef::Data(raw, base), cost) {
+        match self.admit(KeyRef::Data(raw, base), read, ENTRY_OVERHEAD) {
             Some(tick) => {
                 self.data
                     .insert((raw, base), DataEntry { bytes: chunk, tick });
@@ -691,8 +727,7 @@ impl<F: FilesystemRead> FilesystemRead for CachedFs<F> {
         }
         self.accounting.record_miss();
         let info = self.inner.node_info(node)?;
-        let cost = size_of::<NodeInfo>().saturating_add(ENTRY_OVERHEAD);
-        if let Some(tick) = self.admit(KeyRef::Stat(raw), cost) {
+        if let Some(tick) = self.admit(KeyRef::Stat(raw), size_of::<NodeInfo>(), ENTRY_OVERHEAD) {
             self.stat.insert(raw, StatEntry { info, tick });
         }
         Ok(info)
@@ -728,12 +763,8 @@ impl<F: FilesystemRead> FilesystemRead for CachedFs<F> {
             self.accounting.record_refusal();
             return Ok(node);
         };
-        let cost = name
-            .len()
-            .saturating_mul(2)
-            .saturating_add(8)
-            .saturating_add(ENTRY_OVERHEAD);
-        if let Some(tick) = self.admit(KeyRef::Lookup(dir_raw, key_name), cost) {
+        let metadata = ENTRY_OVERHEAD.saturating_add(name.len().saturating_mul(2));
+        if let Some(tick) = self.admit(KeyRef::Lookup(dir_raw, key_name), 8, metadata) {
             self.lookup.entry(dir_raw).or_default().insert(
                 entry_name,
                 LookupEntry {
@@ -804,11 +835,10 @@ impl<F: FilesystemRead> FilesystemRead for CachedFs<F> {
         };
         if entry.name_len <= MAX_COMPONENT_LEN && entry.name_len <= name_out.len() {
             if let Some(name) = Self::try_copy(&name_out[..entry.name_len]) {
-                let cost = name
-                    .len()
-                    .saturating_add(size_of::<DirEntry>())
-                    .saturating_add(ENTRY_OVERHEAD);
-                if let Some(tick) = self.admit(KeyRef::Dirent(dir_raw, cursor), cost) {
+                let payload = name.len().saturating_add(size_of::<DirEntry>());
+                if let Some(tick) =
+                    self.admit(KeyRef::Dirent(dir_raw, cursor), payload, ENTRY_OVERHEAD)
+                {
                     self.dirent
                         .insert((dir_raw, cursor), DirentEntry { entry, name, tick });
                 } else {
@@ -825,8 +855,9 @@ impl<F: FilesystemRead> FilesystemRead for CachedFs<F> {
         // cache so a follow-up `node_info` is a hit.
         let child = entry.node.raw();
         if !self.stat.contains_key(&child) {
-            let cost = size_of::<NodeInfo>().saturating_add(ENTRY_OVERHEAD);
-            if let Some(tick) = self.admit(KeyRef::Stat(child), cost) {
+            if let Some(tick) =
+                self.admit(KeyRef::Stat(child), size_of::<NodeInfo>(), ENTRY_OVERHEAD)
+            {
                 self.stat.insert(
                     child,
                     StatEntry {
@@ -975,8 +1006,8 @@ impl<F: FilesystemRead + FilesystemSecurity> FilesystemSecurity for CachedFs<F> 
         }
         self.accounting.record_miss();
         let sec = self.inner.security(node)?;
-        let cost = size_of::<NodeSecurity>().saturating_add(ENTRY_OVERHEAD);
-        if let Some(tick) = self.admit(KeyRef::Sec(raw), cost) {
+        if let Some(tick) = self.admit(KeyRef::Sec(raw), size_of::<NodeSecurity>(), ENTRY_OVERHEAD)
+        {
             self.sec.insert(raw, SecEntry { sec, tick });
         }
         Ok(sec)
