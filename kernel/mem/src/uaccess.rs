@@ -64,8 +64,14 @@ pub enum UaccessError {
     /// `ptr + len` does not fit in the address space, or the length
     /// exceeds what a single span can describe (CWE-190).
     LengthOverflow,
-    /// A page in the range has no mapping in the address space.
-    NotMapped,
+    /// A page in the range has no mapping in the address space. `va` is
+    /// the page-aligned base of the first unmapped page, so a caller
+    /// backing demand-paged file mappings can offer exactly that page to
+    /// its fault resolver and retry.
+    NotMapped {
+        /// Page-aligned base of the first unmapped page.
+        va: u64,
+    },
     /// A page in the range is mapped but is not user-accessible — the
     /// classic kernel-pointer-confusion vector.
     NotUser,
@@ -203,9 +209,11 @@ where
         // `page_start` is page-aligned by construction, so `Page::from_addr`
         // cannot report `Misaligned`; treat any error as "no mapping" to
         // stay total and fail-closed.
-        let page =
-            Page::from_addr(VirtAddr::new(page_start)).map_err(|_| UaccessError::NotMapped)?;
-        let (frame, flags) = space.translate(page).ok_or(UaccessError::NotMapped)?;
+        let page = Page::from_addr(VirtAddr::new(page_start))
+            .map_err(|_| UaccessError::NotMapped { va: page_start })?;
+        let (frame, flags) = space
+            .translate(page)
+            .ok_or(UaccessError::NotMapped { va: page_start })?;
         if !flags.contains(MapFlags::USER) {
             return Err(UaccessError::NotUser);
         }
@@ -415,7 +423,7 @@ mod tests {
         let mut dst = [0u8; 4];
         assert_eq!(
             copy_in(&space, &sim, VirtAddr::new(0x4000), &mut dst),
-            Err(UaccessError::NotMapped)
+            Err(UaccessError::NotMapped { va: 0x4000 })
         );
     }
 
@@ -476,7 +484,12 @@ mod tests {
                 VirtAddr::new(0x4000 + PAGE_SIZE as u64 - 4),
                 &mut dst,
             ),
-            Err(UaccessError::NotMapped)
+            // The reported address is the *second* (unmapped) page's
+            // base — exactly the page a demand-paging caller must
+            // resolve before retrying.
+            Err(UaccessError::NotMapped {
+                va: 0x4000 + PAGE_SIZE as u64
+            })
         );
     }
 

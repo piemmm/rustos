@@ -57,6 +57,11 @@ pub const fn exception_class(esr: u64) -> u64 {
     (esr >> ESR_EC_SHIFT) & ESR_EC_MASK
 }
 
+/// `ESR_ELx.ISS.WnR` (bit 6) for a data abort: `1` = the abort was
+/// raised by a write (or a cache-maintenance operation, which reports as
+/// a write). ARM ARM D17.2.37, ISS encoding for a Data Abort.
+pub const ESR_ISS_WNR: u64 = 1 << 6;
+
 /// `true` iff `esr` denotes a data abort taken from a lower EL — an EL0
 /// user access that could not be translated. This is the only exception
 /// class the demand-paged file-mapping resolver may attempt to resolve:
@@ -65,6 +70,21 @@ pub const fn exception_class(esr: u64) -> u64 {
 #[must_use]
 pub const fn is_lower_el_data_abort(esr: u64) -> bool {
     exception_class(esr) == EC_DATA_ABORT_LOWER
+}
+
+/// `true` iff a data abort's `esr` reports a **write** access (`WnR`
+/// set). Only meaningful when [`is_lower_el_data_abort`] (or another
+/// data-abort class check) already holds.
+///
+/// A write abort is never offered to the demand-paged file-mapping
+/// resolver: a file mapping is read-only, so a store to it can never be
+/// made valid — and once the target page is resident, resolving a write
+/// fault as "already resident, retry" would re-execute the store into an
+/// endless fault storm instead of killing the task. Write aborts always
+/// take the fatal path.
+#[must_use]
+pub const fn is_write_data_abort(esr: u64) -> bool {
+    esr & ESR_ISS_WNR != 0
 }
 
 /// `true` iff `esr` denotes a data or instruction abort (a page fault),
@@ -224,6 +244,19 @@ mod tests {
     fn exception_class_extracts_the_ec_field() {
         let esr = (EC_DATA_ABORT_SAME << ESR_EC_SHIFT) | 0x37; // ISS noise
         assert_eq!(exception_class(esr), EC_DATA_ABORT_SAME);
+    }
+
+    #[test]
+    fn write_aborts_are_distinguished_from_reads() {
+        let read_abort = EC_DATA_ABORT_LOWER << ESR_EC_SHIFT;
+        let write_abort = read_abort | ESR_ISS_WNR;
+        // A store to a read-only file mapping must never be offered to
+        // the resolver (it would retry forever against a resident page);
+        // a read abort remains resolvable.
+        assert!(is_write_data_abort(write_abort));
+        assert!(!is_write_data_abort(read_abort));
+        // WnR is ISS bit 6 (ARM ARM D17.2.37).
+        assert_eq!(ESR_ISS_WNR, 1 << 6);
     }
 
     #[test]

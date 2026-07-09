@@ -2454,8 +2454,9 @@ full path walk per child).
 
 ## Stage 5 follow-up — demand-paged file mappings (`file_map` / `file_unmap`)
 
-**Status: landed (aarch64 + riscv64 fault-resolving; x86_64 fail-closed);
-remainders staged in `.junie/fstree-next-plan.md` M1.**
+**Status: landed (aarch64, riscv64, and x86_64 all fault-resolving);
+the QEMU end-to-end vertical is the one staged remainder
+(`.junie/fstree-next-plan.md` M1).**
 
 `abi-v1` syscalls 75/76 give a program a read-only, demand-paged private
 mapping of an open file (the `mmap(2)` shape): `file_map` reserves address
@@ -2471,9 +2472,13 @@ reclaiming exactly what `exit`/signal-kill reclaim — never the machine.
 shared `AddressSpaceBytes` accounting covers both map families. Full design
 and per-port state: `docs/src/architecture/memory.md` §7f/§7o. First
 consumer: `fstree`'s viewers (`RtFs` mapped reads with streamed fallback).
-Remaining work (x86_64 resumable `#PF` ISR, copy-path fault resolution,
-the QEMU vertical, fault-kill audit event) is the immediate M1 stage in
-`.junie/fstree-next-plan.md`.
+The x86_64 resumable `#PF` entry (save → resolve under the timer path's
+`swapgs` convention → restore → `iretq` retry), copy-path fault
+resolution (`KernelSyscallHandlers::copy_in_user`, so an untouched
+mapping works as a syscall buffer), the read-only fault gating on every
+port (a write fault is always fatal to the task, never retried), and the
+`TaskFaultKilled` audit event are landed. The remaining M1 work is the
+QEMU end-to-end vertical in `.junie/fstree-next-plan.md`.
 
 ## Stage 6 — Userland Foundations
 

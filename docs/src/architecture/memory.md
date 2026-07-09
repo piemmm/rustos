@@ -1285,24 +1285,36 @@ costs only the pages actually touched, `AGENTS.md` §26.7):
   page-aligned file offset, and the **mapping-time identity** (uid +
   effective capability snapshot, the open-descriptor authority model; the
   mapping survives a later `fs_close`).
-- **Fault-driven backing.** An EL0 data abort is offered to the resident
-  `DispatchHook::resolve_user_fault` before the fatal path (aarch64:
-  `fault::set_user_fault_resolver`, installed beside the dispatch callback).
-  The resolver attributes the fault to the scheduler's current task, looks
-  up the covering `FileRegion`, reads the single covering page through the
-  secured VFS **under the mapping-time identity** (owner/mode/ACL re-applied
-  on every fault), and maps it read-only, never executable
-  (`filemap::FILE_FLAGS`; a short tail page is zero-filled past
-  end-of-file). The registry snapshot is re-frozen so the copy path sees the
-  new page, and the task retries the faulting instruction.
+- **Fault-driven backing.** A user-mode **read** data fault is offered to
+  the resident `DispatchHook::resolve_user_fault` before the fatal path
+  (each port's `fault::set_user_fault_resolver`, installed beside the
+  dispatch callback: the aarch64 lower-EL data-abort branch, the riscv64
+  U-mode load-page-fault branch, and the x86_64 resumable `#PF` entry —
+  which saves the interrupted GPRs, offers a user/not-present/read/data
+  fault to the resolver under the timer path's `swapgs` convention, and
+  on success restores and `iretq`s into a retry). The resolver attributes
+  the fault to the scheduler's current task, looks up the covering
+  `FileRegion`, reads the single covering page through the secured VFS
+  **under the mapping-time identity** (owner/mode/ACL re-applied on every
+  fault), and maps it read-only, never executable (`filemap::FILE_FLAGS`;
+  a short tail page is zero-filled past end-of-file). The registry
+  snapshot is re-frozen so the copy path sees the new page, and the task
+  retries the faulting instruction. A **write** fault (or instruction
+  fetch) is never offered: file mappings are read-only, so it can never
+  be made valid — resolving one against a resident page would retry the
+  store into an endless fault storm — and it always takes the task-kill
+  path.
 - **Fail closed, kill the task not the machine.** An address outside every
   region, a page wholly at/past end-of-file (the `SIGBUS` analogue), a
   filesystem error, or frame exhaustion terminates the *faulting task*: the
   hook records exit code 139 (`128 + SIGSEGV`), reclaims exactly what
   `exit`/signal-kill reclaim, and the port suspends it with an `Exit`
-  action. A fault with no attributable task falls back to the fatal halt. A
-  page already resident (a concurrent resolution) is a benign race and
-  simply resumes.
+  action. The kill is audited with the stable `TaskFaultKilled` event
+  (kernel/core id 4034): task id plus a coarse `fault_class`
+  (`file_region` / `wild`), never the raw address — so a crashing program
+  is visible on the system log, not only via its `wait` status. A fault
+  with no attributable task falls back to the fatal halt. A page already
+  resident (a concurrent resolution) is a benign race and simply resumes.
 - **Release is sparse.** `file_unmap` (no. 76) releases only the exact whole
   `(base, len)` region the caller mapped (validated against the per-task
   region table before any teardown): resident pages are unmapped and their
@@ -1310,23 +1322,35 @@ costs only the pages actually touched, `AGENTS.md` §26.7):
   is credited, and the snapshot re-frozen so freed pages leave it. Task
   exit reclaims resident pages through the live space's drop and the region
   records through the registry withdraw.
-- **Limitation (staged).** A mapped page that was never touched from user
-  mode is not yet resolvable from the *kernel's* copy path: passing an
-  untouched region as a syscall buffer yields `BadAddress` until the pages
-  are touched. Resolving faults from `copy_in`/`copy_out` is staged work
-  (`.junie/fstree-next-plan.md`). aarch64 and riscv64 resolve faults today
-  (riscv64: the U-mode load/store page-fault branch in the trap handler);
-  x86_64's #PF ISR cannot yet *resume* an interrupted task, so its ports
-  pass a zero file window — `file_map` there fails closed as a
-  deterministic `OutOfMemory` until the resumable ISR lands (staged in
-  the same plan). wasm32 has no user-fault source and reserves nothing.
+- **The kernel copy path resolves misses too.** A syscall buffer inside an
+  untouched mapping works without pre-touching (`write(fd, mapped, n)`):
+  the copy walk reports the missing page's base
+  (`UaccessError::NotMapped { va }`), and the one fault-aware staging
+  helper (`KernelSyscallHandlers::copy_in_user`, used by every handler
+  that copies a user buffer in) offers exactly that page to the same
+  resolver — same region table, same mapping-time identity — releasing
+  the registry guard around each resolution and retrying under a budget
+  of one resolution per touched page (an unresolvable miss stays the
+  stable `BadAddress`). Copy-*out* is unchanged: file mappings are
+  read-only, so a write into one fails closed regardless. aarch64,
+  riscv64, and x86_64 all resolve faults today and pass their
+  `user_windows` file window at spawn; wasm32 has no user-fault source
+  and reserves nothing.
 - **Tested.** `kernel/mem` `filemap` engine tests (fill/zero-tail/W^X/
   scrub-on-error, sparse release), `LiveSpace` file-region tests
   (reserve/fault/read-back/release, fail-closed coverage checks, drop
   reclaim), `kernel/core` handler + resolver tests (shape/fd/limit
   refusals, exact-match unmap, page read at the right file offset, EOF and
-  foreign-task refusal, benign-race fold), dispatch-core fault-forwarding
-  tests, and the `lib/rt` wrapper marshalling tests.
+  foreign-task refusal, benign-race fold), the `copy_in_user`
+  resolve-retry tests (miss offered + bounded, outside-region and
+  resident-page behaviour), the fault-kill audit test, per-port fault
+  gating tests (aarch64 `is_write_data_abort`, riscv64
+  `is_load_page_fault`, x86_64 `is_resolvable_user_fault` + resolver-slot
+  round-trip), dispatch-core fault-forwarding tests, and the `lib/rt`
+  wrapper marshalling tests. The QEMU end-to-end vertical (map → fault →
+  verify → unmap → wild-access exit 139, with the parent observing it
+  through `wait`) is the staged remainder in
+  `.junie/fstree-next-plan.md`.
 
 ## 8. Testing strategy
 

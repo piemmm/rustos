@@ -127,6 +127,21 @@ pub enum AuditEvent {
     /// an already-gone handle down is a benign
     /// [`rustos_abi::Errno::NotFound`] and emits no record (idempotent).
     DriverUnloaded,
+    /// A task was killed by an unresolvable user-mode fault: the fault
+    /// resolver could not back the access, so the task's crash exit
+    /// (`128 + SIGSEGV`) was recorded and its resources reclaimed — the
+    /// task dies, never the machine.
+    ///
+    /// Emitted by the fault-kill path
+    /// (`KernelSyscallHandlers::record_fault_exit`, a crate-private
+    /// method) so a crashing program is visible on the
+    /// system log, not only via its `wait` status. The record carries the
+    /// task id and a coarse `fault_class` (`file_region` — a miss inside a
+    /// live file mapping the resolver refused, e.g. past end-of-file;
+    /// `wild` — an address outside every mapping), and deliberately **not**
+    /// the raw faulting address (diagnostics policy: no address-space
+    /// layout leakage onto the log).
+    TaskFaultKilled,
     /// The `/System/Security/Users` database was read off the mounted
     /// root volume and parsed (`crate::users`, `plans/PI.md` P11).
     UsersDbLoaded,
@@ -263,6 +278,7 @@ impl AuditEvent {
             Self::ProcessSpawnDenied => 4031,
             Self::ProcessSpawnFailed => 4032,
             Self::DriverUnloaded => 4033,
+            Self::TaskFaultKilled => 4034,
             Self::UsersDbLoaded => 4040,
             Self::UsersDbRejected => 4041,
             Self::GroupsDbLoaded => 4043,
@@ -300,6 +316,7 @@ impl AuditEvent {
             Self::ProcessSpawnDenied => "process spawn denied",
             Self::ProcessSpawnFailed => "process spawn failed",
             Self::DriverUnloaded => "driver unloaded",
+            Self::TaskFaultKilled => "task killed by unresolvable user fault",
             Self::UsersDbLoaded => "users database loaded",
             Self::UsersDbRejected => "users database rejected",
             Self::GroupsDbLoaded => "groups database loaded",
@@ -352,6 +369,7 @@ mod tests {
             AuditEvent::ProcessSpawnDenied,
             AuditEvent::ProcessSpawnFailed,
             AuditEvent::DriverUnloaded,
+            AuditEvent::TaskFaultKilled,
             AuditEvent::UsersDbLoaded,
             AuditEvent::UsersDbRejected,
             AuditEvent::GroupsDbLoaded,
@@ -392,6 +410,7 @@ mod tests {
             AuditEvent::ProcessSpawnDenied.id().0,
             AuditEvent::ProcessSpawnFailed.id().0,
             AuditEvent::DriverUnloaded.id().0,
+            AuditEvent::TaskFaultKilled.id().0,
             AuditEvent::UsersDbLoaded.id().0,
             AuditEvent::UsersDbRejected.id().0,
             AuditEvent::GroupsDbLoaded.id().0,

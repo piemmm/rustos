@@ -11,23 +11,29 @@
 //!
 //! It is the x86_64 analogue of the riscv64 ([`crate`]'s sibling
 //! `rustos_arch_riscv64::fault`) and aarch64
-//! (`rustos_arch_aarch64::fault`) synchronous-fault hooks: every other
-//! synchronous exception remains unrecoverable in this kernel slice
-//! (resuming the faulting instruction without fix-up logic would re-trap
-//! forever), so the default posture is to fail closed (never silently reset). A single fault handler may be installed
-//! through [`crate::fault::set_fault_handler`] before any fault can fire; the
-//! dedicated `#PF` entry then invokes it with the decoded error code, the
-//! linear address (`CR2`), and the faulting instruction pointer. With no
-//! observer installed the entry preserves the exact fail-closed behaviour
-//! the default thunk had (a `#PF` halts the binary through
-//! `qemu_exit::exit_failure`) — installing the dedicated entry
-//! *strengthens* x86_64 (the error code is now decoded correctly and the
-//! fault is observable) without weakening the default (no security regression — fail closed).
+//! (`rustos_arch_aarch64::fault`) synchronous-fault hooks, with the same
+//! two-tier posture:
+//!
+//! * A **resolvable ring-3 data fault**
+//!   ([`crate::fault::is_resolvable_user_fault`]) is offered to the
+//!   installed [`crate::fault::UserFaultResolveFn`] first — the
+//!   demand-paged file-mapping path. A resolved fault returns through the
+//!   entry's full GPR restore and `iretq`, retrying the faulting
+//!   instruction against the now-resident page.
+//! * Every other synchronous exception remains unrecoverable in this
+//!   kernel slice, so the default posture is to fail closed (never
+//!   silently reset). A single fault handler may be installed through
+//!   [`crate::fault::set_fault_handler`] before any fault can fire; the
+//!   dedicated `#PF` entry then invokes it with the decoded error code,
+//!   the linear address (`CR2`), and the faulting instruction pointer.
+//!   With no observer installed the entry preserves the exact fail-closed
+//!   behaviour the default thunk had (a `#PF` halts the binary through
+//!   `qemu_exit::exit_failure`).
 //!
 //! The faulting address lives in `CR2` on x86_64 (it is *not* pushed on
-//! the stack), so the dedicated entry captures it in the prologue before
-//! any further fault could clobber it. The handler **must not return** —
-//! see [`crate::fault::FaultHandlerFn`].
+//! the stack), so the dedicated entry captures it before any further
+//! fault could clobber it. The fatal handler **must not return** — see
+//! [`crate::fault::FaultHandlerFn`].
 //!
 //! # No global mutable state
 //!
@@ -82,6 +88,28 @@ pub const fn is_user(error_code: u64) -> bool {
 #[must_use]
 pub const fn is_write(error_code: u64) -> bool {
     error_code & PF_ERR_WRITE != 0
+}
+
+/// `true` iff a `#PF` with this error code may be offered to the
+/// installed [`UserFaultResolveFn`]: a **user-mode, not-present, read
+/// data** access — the only shape a demand-paged file-mapping fault can
+/// take. Everything else is fatal:
+///
+/// * a kernel-mode fault (`U/S` clear) is never file backing — the
+///   kernel copy path resolves its own misses in software;
+/// * a protection violation (`P` set) cannot be fixed by making a page
+///   resident;
+/// * an instruction fetch is never file backing (a file mapping is
+///   never executable);
+/// * a write can never be made valid — a file mapping is read-only, and
+///   resolving a write fault as "already resident, retry" would
+///   re-execute the store into an endless fault storm instead of
+///   killing the task.
+#[must_use]
+pub const fn is_resolvable_user_fault(error_code: u64) -> bool {
+    is_user(error_code)
+        && is_not_present(error_code)
+        && error_code & (PF_ERR_WRITE | PF_ERR_INSTR) == 0
 }
 
 /// Signature of the fault handler the dedicated `#PF` entry invokes.
@@ -144,6 +172,68 @@ fn clear_fault_handler_for_tests() {
     FAULT_HANDLER.store(0, Ordering::Release);
 }
 
+/// Signature of the user-fault resolver the dedicated `#PF` entry offers
+/// a resolvable ring-3 data fault to before the fatal path.
+///
+/// `faulting_addr` is the `CR2` faulting linear address. A `true` return
+/// means the fault is dealt with and the entry simply returns — the
+/// interrupt frame's `RIP` still points at the faulting instruction, so
+/// the `iretq` retries the access against the now-resident page. A
+/// `false` return means the fault was not (and will never be)
+/// resolvable and the entry falls through to the fatal
+/// [`FaultHandlerFn`] path. The callback may also *not return* for the
+/// faulting task: when the fault is fatal to the task alone, the
+/// binary's callback suspends it into the scheduler with an exit action
+/// and the entry's call never completes on that stack — exactly like a
+/// rescheduling syscall. Like every trap-path callback it is a bare
+/// `extern "C" fn` with no captured environment.
+pub type UserFaultResolveFn = extern "C" fn(faulting_addr: u64) -> bool;
+
+/// Slot holding the installed user-fault resolver as a raw function
+/// pointer (`0` = none installed).
+static USER_FAULT_RESOLVER: AtomicUsize = AtomicUsize::new(0);
+
+/// Install the user-fault resolver.
+///
+/// Must be called once, on the boot CPU, before user space is entered
+/// (the syscall-dispatch ordering contract). Without one installed every
+/// ring-3 `#PF` takes the fatal path — fail closed, exactly as before
+/// demand paging existed.
+///
+/// # Errors
+///
+/// [`SetFaultHandlerError::AlreadyInstalled`] on the second publish.
+pub fn set_user_fault_resolver(cb: UserFaultResolveFn) -> Result<(), SetFaultHandlerError> {
+    let raw = cb as usize;
+    USER_FAULT_RESOLVER
+        .compare_exchange(0, raw, Ordering::AcqRel, Ordering::Acquire)
+        .map(|_| ())
+        .map_err(|_| SetFaultHandlerError::AlreadyInstalled)
+}
+
+/// Read back the installed user-fault resolver, if any. The dedicated
+/// `#PF` entry calls this on a resolvable ring-3 data fault; it is also
+/// a test/diagnostic observer.
+#[must_use]
+pub fn user_fault_resolver() -> Option<UserFaultResolveFn> {
+    let raw = USER_FAULT_RESOLVER.load(Ordering::Acquire);
+    if raw == 0 {
+        None
+    } else {
+        // SAFETY: every value stored into the slot round-trips a valid
+        // `UserFaultResolveFn` through `set_user_fault_resolver`; function
+        // pointers are `usize`-sized so the transmute is lossless.
+        Some(unsafe { core::mem::transmute::<usize, UserFaultResolveFn>(raw) })
+    }
+}
+
+#[cfg(test)]
+fn clear_user_fault_resolver_for_tests() {
+    // Test-only: lets back-to-back host tests reinstall a resolver.
+    // Production code never clears the slot.
+    USER_FAULT_RESOLVER.store(0, Ordering::Release);
+}
+
 // --- Freestanding dedicated `#PF` entry ----------------------------
 
 /// Linear address of the dedicated `#PF` ISR stub, for
@@ -157,19 +247,33 @@ pub fn page_fault_isr_addr() -> u64 {
     page_fault_isr as *const () as usize as u64
 }
 
-/// Dedicated `#PF` (vector 14) ISR stub.
+/// Dedicated `#PF` (vector 14) ISR stub — **resumable**.
 ///
 /// On entry the CPU has pushed the hardware error code and the 5-word
 /// [`crate::interrupts::InterruptStackFrame`] on the destination stack
 /// (RSP0 for a ring-3 fault), so `%rsp` points at the error code and
-/// `[%rsp + 8]` at the faulting `rip`. The stub marshals
-/// `(error_code, CR2, rip)` into the SysV argument registers and tail-
-/// calls [`rustos_arch_x86_64_page_fault_dispatch`], which is `-> !`;
-/// there is therefore no epilogue or `iretq` (a returning page-fault
-/// handler would re-trap).
+/// `[%rsp + 8]` at the faulting `rip`. The stub saves the 15
+/// architectural GPRs in the [`crate::interrupts::SavedRegs`] order
+/// (the same order `define_isr!` pins), marshals `(error_code, CR2,
+/// rip)` into the SysV argument registers, and calls
+/// [`rustos_arch_x86_64_page_fault_dispatch`]. The dispatcher *returns
+/// only when the fault was resolved* (the faulting page is now
+/// resident); the stub then restores the GPRs, drops the hardware error
+/// code, and `iretq`s — the frame's untouched `RIP` re-runs the faulting
+/// instruction, which now succeeds. An unresolvable fault never returns
+/// from the dispatcher (the fatal path diverges), so a stale resume is
+/// impossible.
 ///
-/// `CR2` is read in the prologue before any other memory access that
-/// could itself fault and overwrite it.
+/// `CR2` is read after the GPR saves (a register is needed to hold it)
+/// but before any access that could itself fault: pushes to the
+/// always-mapped per-CPU kernel stack cannot raise `#PF`.
+///
+/// Stack alignment: the CPU 16-aligns `%rsp` before pushing the frame on
+/// a stack switch (ring 3 -> RSP0), so after the error code + 5-word
+/// frame (48 bytes) `%rsp` is 16-aligned on entry, and after the 15 GPR
+/// pushes (120 bytes) it is ≡ 8 (mod 16). The `subq $8` re-aligns it so
+/// the `call` lands the SysV callee with `%rsp ≡ 8 (mod 16)` after its
+/// return-address push — the System V AMD64 §3.2.2 entry state.
 ///
 /// # Safety
 ///
@@ -183,37 +287,104 @@ pub fn page_fault_isr_addr() -> u64 {
 #[no_mangle]
 pub unsafe extern "C" fn page_fault_isr() {
     core::arch::naked_asm!(
-        // %rdi <- error code (top of stack), %rsi <- CR2 (faulting
-        // linear address), %rdx <- faulting rip ([rsp + 8]).
-        "movq (%rsp), %rdi",
+        "pushq %rax",
+        "pushq %rcx",
+        "pushq %rdx",
+        "pushq %rbx",
+        "pushq %rbp",
+        "pushq %rsi",
+        "pushq %rdi",
+        "pushq %r8",
+        "pushq %r9",
+        "pushq %r10",
+        "pushq %r11",
+        "pushq %r12",
+        "pushq %r13",
+        "pushq %r14",
+        "pushq %r15",
+        // %rdi <- error code (above the 15 saved GPRs = 120 bytes),
+        // %rsi <- CR2 (faulting linear address), %rdx <- faulting rip.
+        "movq 120(%rsp), %rdi",
         "mov %cr2, %rsi",
-        "movq 8(%rsp), %rdx",
-        // The CPU 16-aligns %rsp before pushing the frame on a stack switch
-        // (ring 3 -> RSP0), so after the error code + 5-word frame (48 bytes,
-        // a multiple of 16) %rsp is 16-aligned on entry. A `call` from a
-        // 16-aligned %rsp lands the SysV callee with %rsp ≡ 8 (mod 16) after
-        // its return-address push — exactly the System V AMD64 §3.2.2 entry
-        // state — so no further adjustment is needed (matching the proven
-        // `idt.rs` `pf_thunk`, which does no adjustment either).
+        "movq 128(%rsp), %rdx",
+        "subq $8, %rsp",
         "call {dispatch}",
+        "addq $8, %rsp",
+        // The dispatcher returned: the fault is resolved. Restore the
+        // interrupted GPRs, drop the hardware error code, and retry the
+        // faulting instruction.
+        "popq %r15",
+        "popq %r14",
+        "popq %r13",
+        "popq %r12",
+        "popq %r11",
+        "popq %r10",
+        "popq %r9",
+        "popq %r8",
+        "popq %rdi",
+        "popq %rsi",
+        "popq %rbp",
+        "popq %rbx",
+        "popq %rdx",
+        "popq %rcx",
+        "popq %rax",
+        "addq $8, %rsp",
+        "iretq",
         dispatch = sym rustos_arch_x86_64_page_fault_dispatch,
         options(att_syntax),
     )
 }
 
-/// Rust dispatcher the dedicated `#PF` stub tail-calls.
+/// Rust dispatcher the dedicated `#PF` stub calls.
 ///
-/// Forwards to the installed [`FaultHandlerFn`] when one is present;
-/// otherwise preserves the fail-closed default the no-error default
-/// thunk had — a page fault with no observer halts the binary through
-/// [`crate::qemu_exit::exit_failure`].
+/// A resolvable ring-3 data fault ([`is_resolvable_user_fault`]) is
+/// offered to the installed [`UserFaultResolveFn`] first: a `true`
+/// return means the faulting page is now resident, and this function
+/// returns so the stub restores the GPRs and `iretq`s into a retry of
+/// the faulting instruction. The resolver call is bracketed by the same
+/// `swapgs` pair the LAPIC-timer ring-3 preemption path uses: an
+/// interrupt gate taken from ring 3 does *not* swap GS, and the resolver
+/// may reschedule (park on filesystem I/O, or suspend a task-fatal
+/// caller with an exit action), which requires the in-handler GS
+/// convention.
+///
+/// Every other case is fatal and **never returns**: the installed
+/// [`FaultHandlerFn`] observes it, or, with none installed, the
+/// fail-closed default halts the binary through
+/// [`crate::qemu_exit::exit_failure`] — exactly the posture the
+/// non-resumable entry had.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[no_mangle]
 extern "C" fn rustos_arch_x86_64_page_fault_dispatch(
     error_code: u64,
     faulting_addr: u64,
     rip: u64,
-) -> ! {
+) {
+    if is_resolvable_user_fault(error_code) {
+        if let Some(resolver) = user_fault_resolver() {
+            // SAFETY: `swapgs` is privileged and runs in ring 0 here; it
+            // touches only the GS-base/`KERNEL_GS_BASE` swap, no memory
+            // or flags. The fault came from ring 3 (`is_user` in the
+            // gate), where the interrupt gate performed no swap, so the
+            // pair brackets exactly one resolver call on this task's own
+            // trap control flow. If the resolver suspends a task-fatal
+            // caller (never returning here), the park machinery owns the
+            // GS convention from that point, exactly as on the
+            // LAPIC-timer preemption path.
+            unsafe {
+                core::arch::asm!("swapgs", options(nomem, nostack, preserves_flags));
+            }
+            let resolved = resolver(faulting_addr);
+            // SAFETY: as above — the matching swap restoring the user GS
+            // the `iretq` (or the fatal path) proceeds under.
+            unsafe {
+                core::arch::asm!("swapgs", options(nomem, nostack, preserves_flags));
+            }
+            if resolved {
+                return;
+            }
+        }
+    }
     match fault_handler() {
         Some(handler) => handler(error_code, faulting_addr, rip),
         None => crate::qemu_exit::exit_failure(),
@@ -248,6 +419,42 @@ mod tests {
         assert!(is_not_present(PF_ERR_WRITE | PF_ERR_USER));
         // A protection violation has P set, so it is *not* not-present.
         assert!(!is_not_present(PF_ERR_PRESENT));
+    }
+
+    #[test]
+    fn only_user_not_present_read_data_faults_are_resolvable() {
+        // The demand-paged file-mapping shape: ring 3, not-present, read,
+        // data access.
+        assert!(is_resolvable_user_fault(PF_ERR_USER));
+        // A kernel-mode fault is never offered.
+        assert!(!is_resolvable_user_fault(0));
+        // A protection violation cannot be fixed by residency.
+        assert!(!is_resolvable_user_fault(PF_ERR_USER | PF_ERR_PRESENT));
+        // A write to a read-only file mapping must kill the task, not
+        // retry forever against a resident page.
+        assert!(!is_resolvable_user_fault(PF_ERR_USER | PF_ERR_WRITE));
+        // An instruction fetch is never file backing.
+        assert!(!is_resolvable_user_fault(PF_ERR_USER | PF_ERR_INSTR));
+    }
+
+    extern "C" fn host_user_fault_resolver(_faulting_addr: u64) -> bool {
+        false
+    }
+
+    #[test]
+    fn user_fault_resolver_slot_is_set_once_and_round_trips() {
+        clear_user_fault_resolver_for_tests();
+        assert!(user_fault_resolver().is_none());
+        set_user_fault_resolver(host_user_fault_resolver).expect("first install");
+        assert_eq!(
+            user_fault_resolver().map(|f| f as usize),
+            Some(host_user_fault_resolver as UserFaultResolveFn as usize)
+        );
+        assert_eq!(
+            set_user_fault_resolver(host_user_fault_resolver),
+            Err(SetFaultHandlerError::AlreadyInstalled)
+        );
+        clear_user_fault_resolver_for_tests();
     }
 
     #[test]

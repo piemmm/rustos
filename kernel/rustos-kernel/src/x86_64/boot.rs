@@ -68,7 +68,7 @@ use rustos_log::{Event, EventId, Field, Level, Sink};
 use crate::mem_map::carve_guard_arena_from_map;
 use crate::stack_arena::{IdentityBlockStore, KTHREAD_STACK_ARENA};
 use crate::x86_64::arch_wrapper::BinArch;
-use crate::x86_64::dispatch::{production_dispatch, DISPATCH_SLOT};
+use crate::x86_64::dispatch::{production_dispatch, production_user_fault, DISPATCH_SLOT};
 use crate::x86_64::init_spawn::X86_64_INIT_SPAWN;
 use crate::x86_64::ioapic_controller::IoApicController;
 use crate::x86_64::serial_sink::COM1_CONSOLES;
@@ -593,6 +593,15 @@ fn try_boot(
     //    forever — the same fail-closed posture the (c7-bin) commit
     //    shipped, now coexisting with the live dispatcher.
     syscall_entry::set_dispatch_callback(production_dispatch);
+    // Demand-paged file mappings resolve their ring-3 `#PF`s through the
+    // same resident hook; install the resolver beside the dispatch
+    // callback so both are in place before user space exists. This
+    // single-entry boot path installs exactly once; a second publish
+    // would be a programmer error, so it parks fail-closed rather than
+    // running with an unpredictable fault path.
+    if fault::set_user_fault_resolver(production_user_fault).is_err() {
+        arch_halt();
+    }
 
     // 7b. Publish the caller-owned per-CPU syscall-TLS arena before
     //     `init_local_syscalls` (which writes this CPU's slot and points

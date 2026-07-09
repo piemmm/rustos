@@ -56,16 +56,21 @@ pub const fn is_page_fault(scause: u64) -> bool {
     )
 }
 
-/// `true` iff `scause` denotes a **data** page fault (load or store/AMO)
-/// — the only classes the demand-paged file-mapping resolver may attempt
-/// to resolve. An instruction page fault is never file backing (a file
-/// mapping is never executable) and always takes the fatal path.
+/// `true` iff `scause` denotes a **load** page fault — the only class
+/// the demand-paged file-mapping resolver may attempt to resolve. An
+/// instruction page fault is never file backing (a file mapping is never
+/// executable), and a store/AMO page fault is never resolvable either: a
+/// file mapping is read-only, so a store to it can never be made valid —
+/// and once the target page is resident, resolving a store fault as
+/// "already resident, retry" would re-execute the store into an endless
+/// fault storm instead of killing the task. Both always take the fatal
+/// path.
 #[must_use]
-pub const fn is_data_page_fault(scause: u64) -> bool {
+pub const fn is_load_page_fault(scause: u64) -> bool {
     if (scause & crate::trap::SCAUSE_INTERRUPT_BIT) != 0 {
         return false;
     }
-    matches!(scause, SCAUSE_LOAD_PAGE_FAULT | SCAUSE_STORE_PAGE_FAULT)
+    scause == SCAUSE_LOAD_PAGE_FAULT
 }
 
 /// Signature of the fault handler the trap path invokes for an
@@ -223,16 +228,20 @@ mod tests {
     }
 
     #[test]
-    fn data_page_faults_are_distinguished() {
-        assert!(is_data_page_fault(SCAUSE_LOAD_PAGE_FAULT));
-        assert!(is_data_page_fault(SCAUSE_STORE_PAGE_FAULT));
+    fn only_load_page_faults_are_resolvable() {
+        assert!(is_load_page_fault(SCAUSE_LOAD_PAGE_FAULT));
+        // A store/AMO page fault is never offered to the user-fault
+        // resolver: a file mapping is read-only, and resolving a store
+        // against a resident page would retry the store forever instead
+        // of killing the task.
+        assert!(!is_load_page_fault(SCAUSE_STORE_PAGE_FAULT));
         // Instruction page faults, interrupts, and an `ecall` are never
         // offered to the user-fault resolver.
-        assert!(!is_data_page_fault(SCAUSE_INSTRUCTION_PAGE_FAULT));
-        assert!(!is_data_page_fault(
+        assert!(!is_load_page_fault(SCAUSE_INSTRUCTION_PAGE_FAULT));
+        assert!(!is_load_page_fault(
             crate::trap::SCAUSE_INTERRUPT_BIT | SCAUSE_LOAD_PAGE_FAULT
         ));
-        assert!(!is_data_page_fault(8));
+        assert!(!is_load_page_fault(8));
     }
 
     extern "C" fn host_user_fault_resolver(_stval: u64) -> bool {

@@ -1065,6 +1065,55 @@ where
         Some(f(space, physmap))
     }
 
+    /// Copy `dst.len()` bytes in from the caller's user buffer at `uaddr`,
+    /// resolving demand-paged file-mapping misses on the way — the one
+    /// fault-aware `copy_in` every syscall handler that stages a user
+    /// buffer uses.
+    ///
+    /// A syscall buffer inside an untouched `file_map` region has no
+    /// resident page yet, so the plain copy walk reports the miss as
+    /// [`UaccessError::NotMapped`] with the failing page's base. This
+    /// helper offers exactly that page to [`Self::resolve_file_fault`] —
+    /// the same region table and the same mapping-time identity the
+    /// hardware fault path uses — and retries the copy against the
+    /// re-frozen snapshot, so `write(fd, mapped, n)` works without
+    /// pre-touching the mapping. The registry read guard is released
+    /// before each resolution (the resolver re-freezes through the write
+    /// lock), and the retry budget is one resolution per touched page
+    /// plus the unaligned head, so a hostile or shrinking mapping can
+    /// never spin: an unresolvable miss, an exhausted budget, or any
+    /// other copy fault fails closed with the same stable
+    /// [`Errno::BadAddress`] the plain path reports.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::BadAddress`] when the caller has no registered address
+    /// space, the range is invalid, or a miss cannot be resolved.
+    pub fn copy_in_user(
+        &self,
+        caller: &CallerContext<'_>,
+        uaddr: u64,
+        dst: &mut [u8],
+    ) -> Result<(), Errno> {
+        let mut budget = dst.len() / PAGE_SIZE + 2;
+        loop {
+            let outcome = self.with_caller_aspace(caller, |space, physmap| {
+                copy_in(space, physmap, VirtAddr::new(uaddr), dst)
+            });
+            match outcome {
+                None => return Err(Errno::BadAddress),
+                Some(Ok(())) => return Ok(()),
+                Some(Err(UaccessError::NotMapped { va })) if budget > 0 => {
+                    budget -= 1;
+                    if !self.resolve_file_fault(caller.task_id, va) {
+                        return Err(Errno::BadAddress);
+                    }
+                }
+                Some(Err(err)) => return Err(copy_fault_errno(err)),
+            }
+        }
+    }
+
     /// Validate and stage `spawn`'s optional startup-strings block from the
     /// caller's address space.
     ///
@@ -1099,13 +1148,8 @@ where
             return Err(Errno::LengthOutOfRange);
         }
         let mut buf = alloc::vec![0u8; strings_len];
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_in(space, physmap, VirtAddr::new(strings), &mut buf)
-        }) {
-            Some(Ok(())) => Ok(Some(buf)),
-            Some(Err(err)) => Err(copy_fault_errno(err)),
-            None => Err(Errno::BadAddress),
-        }
+        self.copy_in_user(caller, strings, &mut buf)?;
+        Ok(Some(buf))
     }
 
     /// Validate and stage `spawn`'s optional attach block from the
@@ -1143,13 +1187,7 @@ where
             return Err(Errno::LengthOutOfRange);
         }
         let mut block = [0u8; SPAWN_ATTACH_LEN];
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_in(space, physmap, VirtAddr::new(attach), &mut block)
-        }) {
-            Some(Ok(())) => {}
-            Some(Err(err)) => return Err(copy_fault_errno(err)),
-            None => return Err(Errno::BadAddress),
-        }
+        self.copy_in_user(caller, attach, &mut block)?;
         SpawnAttach::parse(&block)
     }
 
@@ -1257,7 +1295,41 @@ where
     /// convention), so a parent reaping the crashed child observes a
     /// crash, not a clean exit. The scheduler reap itself is driven by the
     /// port's `Exit` suspension, exactly as for the `exit` syscall.
-    pub(crate) fn record_fault_exit(&self, task: SecTaskId) {
+    ///
+    /// The kill is audited with a stable event id
+    /// ([`AuditEvent::TaskFaultKilled`]) so a crashing program is visible
+    /// on the system log, not only via its `wait` status. The record
+    /// names the task and a coarse class of the faulting address —
+    /// `file_region` (a miss inside a live file mapping the resolver
+    /// refused, e.g. past end-of-file) or `wild` (outside every mapping)
+    /// — never the raw address (diagnostics policy: no address-space
+    /// layout leakage onto the log).
+    pub(crate) fn record_fault_exit(&self, task: SecTaskId, fault_va: u64) {
+        let fault_class = if self
+            .aspaces
+            .read()
+            .file_region_covering(task, fault_va)
+            .is_some()
+        {
+            "file_region"
+        } else {
+            "wild"
+        };
+        crate::audit::emit(
+            self.audit,
+            rustos_log::Level::Warn,
+            AuditEvent::TaskFaultKilled,
+            &[
+                Field {
+                    key: "task",
+                    value: rustos_log::FieldValue::UnsignedInt(task.0),
+                },
+                Field {
+                    key: "fault_class",
+                    value: rustos_log::FieldValue::Str(fault_class),
+                },
+            ],
+        );
         self.process_wait.record_exit(task, FAULT_EXIT_CODE);
         self.reclaim_task_resources(task);
     }
@@ -1431,13 +1503,7 @@ where
             return Err(Errno::LengthOutOfRange);
         }
         let mut buf = vec![0u8; len];
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_in(space, physmap, VirtAddr::new(ptr), &mut buf)
-        }) {
-            Some(Ok(())) => {}
-            Some(Err(err)) => return Err(copy_fault_errno(err)),
-            None => return Err(Errno::BadAddress),
-        }
+        self.copy_in_user(caller, ptr, &mut buf)?;
         let Ok(raw) = core::str::from_utf8(&buf) else {
             return Err(Errno::OutOfRange);
         };
@@ -1464,13 +1530,7 @@ where
             return Err(Errno::LengthOutOfRange);
         }
         let mut buf = vec![0u8; len];
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_in(space, physmap, VirtAddr::new(ptr), &mut buf)
-        }) {
-            Some(Ok(())) => {}
-            Some(Err(err)) => return Err(copy_fault_errno(err)),
-            None => return Err(Errno::BadAddress),
-        }
+        self.copy_in_user(caller, ptr, &mut buf)?;
         let Ok(raw) = core::str::from_utf8(&buf) else {
             return Err(Errno::OutOfRange);
         };
@@ -1653,13 +1713,7 @@ where
         // Stage the caller's bytes in once, before any pipe state is
         // touched (a faulting buffer writes nothing).
         let mut data = alloc::vec![0u8; len];
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_in(space, physmap, VirtAddr::new(buf), &mut data)
-        }) {
-            Some(Ok(())) => {}
-            Some(Err(err)) => return Err(copy_fault_errno(err)),
-            None => return Err(Errno::BadAddress),
-        }
+        self.copy_in_user(caller, buf, &mut data)?;
         loop {
             match end.try_write(&data) {
                 WriteStep::Wrote(n) => {
@@ -1760,13 +1814,7 @@ where
                     return Err(Errno::PermissionDenied);
                 }
                 let mut data = vec![0u8; len];
-                match self.with_caller_aspace(caller, |space, physmap| {
-                    copy_in(space, physmap, VirtAddr::new(buf), &mut data)
-                }) {
-                    Some(Ok(())) => {}
-                    Some(Err(err)) => return Err(copy_fault_errno(err)),
-                    None => return Err(Errno::BadAddress),
-                }
+                self.copy_in_user(caller, buf, &mut data)?;
                 let uid = caller.caps.owner().0;
                 let append = entry.flags.contains(OpenFlags::APPEND);
                 let offset = entry.cursor();
@@ -2223,13 +2271,7 @@ where
         // with the same `BadAddress` an actual fault produces, never
         // leaking which case occurred.
         let mut payload = alloc::vec![0u8; len];
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_in(space, physmap, VirtAddr::new(ptr), &mut payload)
-        }) {
-            Some(Ok(())) => {}
-            Some(Err(err)) => return Err(copy_fault_errno(err)),
-            None => return Err(Errno::BadAddress),
-        }
+        self.copy_in_user(caller, ptr, &mut payload)?;
 
         // Enqueue. `Port::send` performs the per-send capability check
         // against the caller's effective set and
@@ -2335,13 +2377,7 @@ where
         // any copy fault both collapse onto `BadAddress`, never leaking
         // which case occurred.
         let mut buf = [0u8; CapabilitySet::WIRE_LEN];
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_in(space, physmap, VirtAddr::new(set_ptr), &mut buf)
-        }) {
-            Some(Ok(())) => {}
-            Some(Err(err)) => return Err(copy_fault_errno(err)),
-            None => return Err(Errno::BadAddress),
-        }
+        self.copy_in_user(caller, set_ptr, &mut buf)?;
 
         // Every 32-byte pattern is a representable set, and `buf` is
         // exactly `WIRE_LEN`, so decoding cannot fail. Run the `CapTable`
@@ -2450,13 +2486,7 @@ where
             return Err(Errno::BufferTooSmall);
         }
         let mut buf = [0u8; Time64::WIRE_LEN];
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_in(space, physmap, VirtAddr::new(time), &mut buf)
-        }) {
-            Some(Ok(())) => {}
-            Some(Err(err)) => return Err(copy_fault_errno(err)),
-            None => return Err(Errno::BadAddress),
-        }
+        self.copy_in_user(caller, time, &mut buf)?;
         // Reject a non-canonical instant (e.g. nanos >= 1e9) before setting.
         let wall = Time64::from_bytes(&buf)?;
         let cpu = SchedulerArch::current_cpu(self.arch);
@@ -2777,13 +2807,7 @@ where
         // `BadAddress` an actual fault produces, never leaking which
         // case occurred.
         let mut payload = alloc::vec![0u8; take];
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_in(space, physmap, VirtAddr::new(buf), &mut payload)
-        }) {
-            Some(Ok(())) => {}
-            Some(Err(err)) => return Err(copy_fault_errno(err)),
-            None => return Err(Errno::BadAddress),
-        }
+        self.copy_in_user(caller, buf, &mut payload)?;
 
         // Hand the copied bytes to the descriptor's console device, cooking
         // output newlines (LF -> CR LF) through the console line discipline
@@ -2973,13 +2997,7 @@ where
         // registered address space — fails closed with `BadAddress`, never
         // leaking which case occurred.
         let mut path_buf = alloc::vec![0u8; path_len];
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_in(space, physmap, VirtAddr::new(path), &mut path_buf)
-        }) {
-            Some(Ok(())) => {}
-            Some(Err(err)) => return Err(copy_fault_errno(err)),
-            None => return Err(Errno::BadAddress),
-        }
+        self.copy_in_user(caller, path, &mut path_buf)?;
 
         // Resolve the path: first against the compiled-in boot-floor
         // registry, otherwise as an on-disk `<Name>.app` store bundle read
@@ -3224,18 +3242,9 @@ where
         // registered address space — fail closed with the same `BadAddress`
         // an actual fault produces, never leaking which case occurred.
         let mut record_bytes = [0u8; KeyInput::WIRE_LEN];
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_in(space, physmap, VirtAddr::new(buf), &mut record_bytes)
-        }) {
-            Some(Ok(())) => {}
-            Some(Err(err)) => {
-                record_bytes.zeroize();
-                return Err(copy_fault_errno(err));
-            }
-            None => {
-                record_bytes.zeroize();
-                return Err(Errno::BadAddress);
-            }
+        if let Err(err) = self.copy_in_user(caller, buf, &mut record_bytes) {
+            record_bytes.zeroize();
+            return Err(err);
         }
 
         // Decode the record fail-closed: a malformed edge is refused rather
@@ -4022,13 +4031,7 @@ where
         // space and any copy fault collapse onto the same fail-closed
         // `BadAddress`.
         let mut buf = [0u8; ResourceLimit::WIRE_LEN];
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_in(space, physmap, VirtAddr::new(value), &mut buf)
-        }) {
-            Some(Ok(())) => {}
-            Some(Err(err)) => return Err(copy_fault_errno(err)),
-            None => return Err(Errno::BadAddress),
-        }
+        self.copy_in_user(caller, value, &mut buf)?;
         // `decode` validates `soft <= hard` and fails closed on a malformed
         // pair, so a hostile buffer never yields a usable limit.
         let requested = ResourceLimit::decode(&buf)?;
@@ -4095,13 +4098,7 @@ where
             return Err(Errno::LengthOutOfRange);
         }
         let mut req_buf = vec![0u8; req_len];
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_in(space, physmap, VirtAddr::new(req), &mut req_buf)
-        }) {
-            Some(Ok(())) => {}
-            Some(Err(err)) => return Err(copy_fault_errno(err)),
-            None => return Err(Errno::BadAddress),
-        }
+        self.copy_in_user(caller, req, &mut req_buf)?;
 
         // Decode fail-closed, run the engine under the caller's
         // kernel-attested identity, and capture the response before the
@@ -4239,13 +4236,7 @@ where
                     return Err(Errno::BufferTooSmall);
                 }
                 let mut id_bytes = [0u8; PROC_ID_LEN];
-                match self.with_caller_aspace(caller, |space, physmap| {
-                    copy_in(space, physmap, VirtAddr::new(out), &mut id_bytes)
-                }) {
-                    Some(Ok(())) => {}
-                    Some(Err(err)) => return Err(copy_fault_errno(err)),
-                    None => return Err(Errno::BadAddress),
-                }
+                self.copy_in_user(caller, out, &mut id_bytes)?;
                 let proc_id = ProcId::from_raw(id_bytes);
                 self.introspect.task_limits(proc_id)?
             }
@@ -4486,13 +4477,7 @@ where
         // has no registered address space — fail closed with the same
         // `BadAddress` a fault produces, never leaking which case occurred.
         let mut payload = alloc::vec![0u8; request_len];
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_in(space, physmap, VirtAddr::new(request), &mut payload)
-        }) {
-            Some(Ok(())) => {}
-            Some(Err(err)) => return Err(copy_fault_errno(err)),
-            None => return Err(Errno::BadAddress),
-        }
+        self.copy_in_user(caller, request, &mut payload)?;
 
         // Post the request. `CallEndpoint::post` performs the per-call
         // capability check against the caller's effective set (no ambient authority) and re-checks the size, returning a
@@ -4610,14 +4595,8 @@ where
         // occurred.
         let mut send_buf = [0u8; CapabilitySet::WIRE_LEN];
         let mut recv_buf = [0u8; CapabilitySet::WIRE_LEN];
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_in(space, physmap, VirtAddr::new(send_caps), &mut send_buf)?;
-            copy_in(space, physmap, VirtAddr::new(recv_caps), &mut recv_buf)
-        }) {
-            Some(Ok(())) => {}
-            Some(Err(err)) => return Err(copy_fault_errno(err)),
-            None => return Err(Errno::BadAddress),
-        }
+        self.copy_in_user(caller, send_caps, &mut send_buf)?;
+        self.copy_in_user(caller, recv_caps, &mut recv_buf)?;
         // Every 32-byte pattern is a representable set; decoding cannot fail.
         let send_set = CapabilitySet::from_le_bytes(&send_buf)?;
         let recv_set = CapabilitySet::from_le_bytes(&recv_buf)?;
@@ -4784,13 +4763,7 @@ where
             return Err(Errno::MessageTooLarge);
         }
         let mut payload = alloc::vec![0u8; reply_len];
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_in(space, physmap, VirtAddr::new(reply), &mut payload)
-        }) {
-            Some(Ok(())) => {}
-            Some(Err(err)) => return Err(copy_fault_errno(err)),
-            None => return Err(Errno::BadAddress),
-        }
+        self.copy_in_user(caller, reply, &mut payload)?;
 
         // Complete the ticket and wake the caller blocked in `ipc_call` for
         // it — exactly that caller, by the poster scheduler id the endpoint
@@ -4886,13 +4859,7 @@ where
         // registered address space — fails closed with `BadAddress`, never
         // an oracle distinguishing the cause.
         let mut payload = alloc::vec![0u8; len];
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_in(space, physmap, VirtAddr::new(record), &mut payload)
-        }) {
-            Some(Ok(())) => {}
-            Some(Err(err)) => return Err(copy_fault_errno(err)),
-            None => return Err(Errno::BadAddress),
-        }
+        self.copy_in_user(caller, record, &mut payload)?;
 
         // Fully validate the record (lengths, slice bounds, UTF-8) before
         // building an event from it.
@@ -4947,13 +4914,7 @@ where
         // an oracle distinguishing the cause. The buffer
         // is a fixed `WIRE_LEN` stack array (no allocation).
         let mut bytes = [0u8; rustos_abi::HwNode::WIRE_LEN];
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_in(space, physmap, VirtAddr::new(node), &mut bytes)
-        }) {
-            Some(Ok(())) => {}
-            Some(Err(err)) => return Err(copy_fault_errno(err)),
-            None => return Err(Errno::BadAddress),
-        }
+        self.copy_in_user(caller, node, &mut bytes)?;
 
         // Fully decode and validate the node (lengths, discriminants,
         // bounded match-key / resource counts) before touching state.
@@ -5602,13 +5563,7 @@ where
                 // *before* touching the filesystem (a faulting buffer writes
                 // nothing).
                 let mut data = vec![0u8; len];
-                match self.with_caller_aspace(caller, |space, physmap| {
-                    copy_in(space, physmap, VirtAddr::new(buf), &mut data)
-                }) {
-                    Some(Ok(())) => {}
-                    Some(Err(err)) => return Err(copy_fault_errno(err)),
-                    None => return Err(Errno::BadAddress),
-                }
+                self.copy_in_user(caller, buf, &mut data)?;
                 let uid = caller.caps.owner().0;
                 // An append handle writes at the current end of file, ignoring
                 // the supplied offset (the journal-append posture).
@@ -5846,13 +5801,7 @@ where
         // with the same `BadAddress` an actual fault produces, never
         // leaking which case occurred.
         let mut buf = [0u8; PORT_NAME_MAX_LEN];
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_in(space, physmap, VirtAddr::new(name), &mut buf[..name_len])
-        }) {
-            Some(Ok(())) => {}
-            Some(Err(err)) => return Err(copy_fault_errno(err)),
-            None => return Err(Errno::BadAddress),
-        }
+        self.copy_in_user(caller, name, &mut buf[..name_len])?;
 
         // Validate the grammar before the registry is consulted, and fail
         // closed on a miss. Resolution grants nothing: the returned
@@ -6954,10 +6903,11 @@ where
         }
         // A wild access, a page at/past end-of-file, or an unresolvable
         // read: fatal to the task and only the task. Record the crash exit
-        // so a waiting parent reaps a real status, reclaim exactly what a
-        // clean exit or a signal kill reclaims, and hand the port the CPU
-        // to suspend the task on.
-        self.handlers.record_fault_exit(task);
+        // so a waiting parent reaps a real status (and the audit log gets
+        // its stable fault-kill record), reclaim exactly what a clean exit
+        // or a signal kill reclaims, and hand the port the CPU to suspend
+        // the task on.
+        self.handlers.record_fault_exit(task, fault_va);
         UserFaultOutcome::Terminated { cpu }
     }
 }
@@ -14592,6 +14542,7 @@ mod tests {
         &'static RwLock<AddressSpaceRegistry>,
         KernelSyscallHandlers<'static, TestArch>,
         CallerContext<'static>,
+        &'static TestSink,
     ) {
         install_trace_filter();
         let sink = make_sink();
@@ -14626,7 +14577,7 @@ mod tests {
         let h = KernelSyscallHandlers::new(sched, table, arch, sink, irq, ctl, ipc, aspaces, rng)
             .with_filesystem(fs)
             .with_file_map(fm);
-        (fs, fm, aspaces, h, ctx)
+        (fs, fm, aspaces, h, ctx, sink)
     }
 
     /// `file_map` validates the request shape, resolves the caller's own
@@ -14634,7 +14585,7 @@ mod tests {
     /// the page-rounded region + accounting.
     #[test]
     fn file_map_validates_reserves_and_records_the_region() {
-        let (_fs, fm, aspaces, h, ctx) = file_map_fixture(Vec::new());
+        let (_fs, fm, aspaces, h, ctx, _sink) = file_map_fixture(Vec::new());
         let fd = u32::try_from(
             h.fs_open(&ctx, 0x1000, "/big".len(), OpenFlags::READ)
                 .expect("open"),
@@ -14672,7 +14623,7 @@ mod tests {
     /// touched.
     #[test]
     fn file_map_refuses_unreadable_and_non_file_descriptors() {
-        let (_fs, fm, aspaces, h, ctx) = file_map_fixture(Vec::new());
+        let (_fs, fm, aspaces, h, ctx, _sink) = file_map_fixture(Vec::new());
         let wo = u32::try_from(
             h.fs_open(&ctx, 0x1000, "/big".len(), OpenFlags::WRITE)
                 .expect("open write-only"),
@@ -14697,7 +14648,7 @@ mod tests {
     /// same accounting as `mem_map`, so the two consume one budget.
     #[test]
     fn file_map_enforces_the_shared_address_space_limit() {
-        let (_fs, fm, aspaces, h, ctx) = file_map_fixture(Vec::new());
+        let (_fs, fm, aspaces, h, ctx, _sink) = file_map_fixture(Vec::new());
         aspaces.write().set_limit(
             SecTaskId(2),
             LimitKind::AddressSpaceBytes,
@@ -14729,7 +14680,7 @@ mod tests {
     /// closed touching nothing.
     #[test]
     fn file_unmap_releases_only_the_exact_owned_region() {
-        let (_fs, fm, aspaces, h, ctx) = file_map_fixture(Vec::new());
+        let (_fs, fm, aspaces, h, ctx, _sink) = file_map_fixture(Vec::new());
         let fd = u32::try_from(
             h.fs_open(&ctx, 0x1000, "/big".len(), OpenFlags::READ)
                 .expect("open"),
@@ -14758,7 +14709,7 @@ mod tests {
     /// under the mapping-time identity and maps it at the page base.
     #[test]
     fn resolve_file_fault_reads_and_maps_the_covering_page() {
-        let (fs, fm, _aspaces, h, ctx) = file_map_fixture(std::vec![0xCD; 100]);
+        let (fs, fm, _aspaces, h, ctx, _sink) = file_map_fixture(std::vec![0xCD; 100]);
         let fd = u32::try_from(
             h.fs_open(&ctx, 0x1000, "/big".len(), OpenFlags::READ)
                 .expect("open"),
@@ -14783,7 +14734,7 @@ mod tests {
     /// end-of-file (the `SIGBUS` analogue) are all refused.
     #[test]
     fn resolve_file_fault_refuses_everything_outside_live_backing() {
-        let (_fs, fm, _aspaces, h, ctx) = file_map_fixture(Vec::new());
+        let (_fs, fm, _aspaces, h, ctx, _sink) = file_map_fixture(Vec::new());
         // No region at all.
         assert!(!h.resolve_file_fault(SecTaskId(2), 0x9999_0000));
         let fd = u32::try_from(
@@ -14808,7 +14759,7 @@ mod tests {
     /// other producer failure refuses the fault.
     #[test]
     fn resolve_file_fault_folds_the_already_resident_race_as_resolved() {
-        let (_fs, fm, _aspaces, h, ctx) = file_map_fixture(std::vec![1; 8]);
+        let (_fs, fm, _aspaces, h, ctx, _sink) = file_map_fixture(std::vec![1; 8]);
         let fd = u32::try_from(
             h.fs_open(&ctx, 0x1000, "/big".len(), OpenFlags::READ)
                 .expect("open"),
@@ -14819,6 +14770,94 @@ mod tests {
         assert!(h.resolve_file_fault(SecTaskId(2), base));
         *fm.map_page_result.lock() = Err(Errno::OutOfMemory);
         assert!(!h.resolve_file_fault(SecTaskId(2), base));
+    }
+
+    /// A `copy_in_user` miss inside a live file region is offered to the
+    /// fault resolver (the same region table and identity the hardware
+    /// path uses), and the retry loop is bounded: the recording producer
+    /// never installs a translation, so the copy must terminate through
+    /// its budget with the stable `BadAddress` — never a spin.
+    #[test]
+    fn copy_in_user_offers_the_miss_to_the_file_resolver_and_stays_bounded() {
+        let (fs, fm, _aspaces, h, ctx, _sink) = file_map_fixture(std::vec![0xEE; PAGE_SIZE]);
+        let fd = u32::try_from(
+            h.fs_open(&ctx, 0x1000, "/big".len(), OpenFlags::READ)
+                .expect("open"),
+        )
+        .unwrap();
+        let base = h.file_map(&ctx, fd, 0, 0x1000).expect("maps");
+        let mut buf = [0u8; 16];
+        assert_eq!(h.copy_in_user(&ctx, base, &mut buf), Err(Errno::BadAddress));
+        // Each retry resolved the covering page once (the producer records
+        // it and the VFS read hit the file), and the budget for a 16-byte
+        // copy is exactly two resolutions.
+        assert_eq!(
+            *fm.pages.lock(),
+            std::vec![(base, PAGE_SIZE), (base, PAGE_SIZE)]
+        );
+        let calls = fs.calls();
+        let read_call = calls.iter().rev().find(|c| c.starts_with("read")).unwrap();
+        assert!(read_call.contains("path=/big"), "got: {read_call}");
+    }
+
+    /// A `copy_in_user` miss outside every file region fails closed with
+    /// `BadAddress` without consulting the producer, and a copy from a
+    /// resident page is served exactly as the plain path always was.
+    #[test]
+    fn copy_in_user_fails_closed_outside_regions_and_serves_resident_pages() {
+        let (_fs, fm, _aspaces, h, ctx, _sink) = file_map_fixture(Vec::new());
+        let mut buf = [0u8; 4];
+        assert_eq!(
+            h.copy_in_user(&ctx, 0x9999_0000, &mut buf),
+            Err(Errno::BadAddress)
+        );
+        assert!(fm.pages.lock().is_empty());
+        // The staging page at 0x1000 is resident and holds the fixture's
+        // path bytes; the fault-aware copy serves it without any resolution.
+        h.copy_in_user(&ctx, 0x1000, &mut buf)
+            .expect("resident copy");
+        assert_eq!(&buf, b"/big");
+        assert!(fm.pages.lock().is_empty());
+    }
+
+    /// A fault-kill emits the stable `TaskFaultKilled` audit record naming
+    /// the task and the coarse fault class — `file_region` for a miss the
+    /// resolver refused inside a live mapping, `wild` for an address
+    /// outside every mapping — and never the raw faulting address.
+    #[test]
+    fn record_fault_exit_audits_the_kill_with_a_fault_class() {
+        let (_fs, _fm, _aspaces, h, ctx, sink) = file_map_fixture(Vec::new());
+        let fd = u32::try_from(
+            h.fs_open(&ctx, 0x1000, "/big".len(), OpenFlags::READ)
+                .expect("open"),
+        )
+        .unwrap();
+        let base = h.file_map(&ctx, fd, 0, 0x1000).expect("maps");
+        sink.clear();
+        // A refused miss inside the live region (the empty file reads as
+        // zero bytes, so the page is past end-of-file), then a wild access.
+        h.record_fault_exit(SecTaskId(2), base);
+        h.record_fault_exit(SecTaskId(2), 0x9999_0000);
+        let kills: Vec<_> = sink
+            .snapshot()
+            .into_iter()
+            .filter(|e| e.id == AuditEvent::TaskFaultKilled.id())
+            .collect();
+        assert_eq!(kills.len(), 2);
+        assert_eq!(kills[0].level, rustos_log::Level::Warn);
+        assert!(kills[0]
+            .fields
+            .contains(&(String::from("task"), String::from("2"))));
+        assert!(kills[0]
+            .fields
+            .contains(&(String::from("fault_class"), String::from("file_region"))));
+        assert!(kills[1]
+            .fields
+            .contains(&(String::from("fault_class"), String::from("wild"))));
+        // Diagnostics policy: the record never carries the raw address.
+        for kill in &kills {
+            assert_eq!(kill.fields.len(), 2, "task + fault_class only");
+        }
     }
 
     /// A minimal published live space whose [`LiveUserSpace::freeze`] returns

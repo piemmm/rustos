@@ -348,12 +348,7 @@ impl InitSpawn for X86_64InitSpawn {
                     VirtAddr::new(SHARED_WINDOW_BASE),
                     spawn_layout::SHARED_WINDOW_PAGES,
                     VirtAddr::new(windows.file_base),
-                    // Zero until the x86_64 #PF path can *resume* a faulting
-                    // task (its ISR is currently no-return): with no window,
-                    // `file_map` fails closed as a deterministic OOM instead
-                    // of arming a mapping whose first touch would be fatal.
-                    // The resumable ISR is staged in `.junie/fstree-next-plan.md`.
-                    0,
+                    windows.file_pages,
                 )
                 .ok()
                 .map(|live| Box::new(live) as Box<dyn LiveUserSpace + Send>)
