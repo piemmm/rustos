@@ -40,8 +40,8 @@
 //!   glyph atlas in `lib/font/src/` from the committed face in
 //!   `lib/font/assets/`
 //! - `devids`       — verifies the compact PCI/USB ID-database tables (each
-//!   inside its consuming command bundle's `Resources/`, else staged in
-//!   `lib/devids/tables/`) against the vetted snapshots in
+//!   inside its consuming command bundle's `Resources/`) against the vetted
+//!   snapshots in
 //!   `lib/devids/assets/` (`--write` to regenerate; `--fetch` — developer-run
 //!   only, never CI — to import and vet the upstream databases)
 //! - `deps-check` — enforces the modularity dependency graph

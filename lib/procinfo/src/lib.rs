@@ -47,6 +47,9 @@
 //!
 //! * [`transport`] — the [`Transport`] and [`Output`] seams.
 //! * [`request`] — [`encode_request`], [`call`], and [`CallError`].
+//! * [`hwtree`] — the shared `HARDWARE_TREE` reply decode and the
+//!   stable-bus-order / topology-view walk the device-inventory listing
+//!   tools (`lspci`, `lsusb`) share.
 //! * [`list`] — the generic paged-list walk and the shared [`ListError`].
 //! * [`process`] — the process-list paging walk and row rendering.
 //! * [`mount`] — the mount-table paging walk and row rendering.
@@ -75,6 +78,7 @@ extern crate alloc;
 #[cfg(all(freestanding, feature = "program"))]
 pub mod client;
 pub mod cputime;
+pub mod hwtree;
 pub mod list;
 pub mod mount;
 pub mod process;
@@ -87,6 +91,7 @@ pub mod users;
 #[cfg(all(freestanding, feature = "program"))]
 pub use client::{IpcTransport, RtOutput};
 pub use cputime::{for_each_cpu_time, CPU_TIME_PAGE};
+pub use hwtree::{bus_order, class_label, decode_tree, depth_of, keep_with_ancestors};
 pub use list::{field_lossy, ListError};
 pub use mount::{for_each_mount, render_mount, render_options, MOUNT_PAGE};
 pub use process::{

@@ -6,13 +6,12 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 
-use rustos_abi::hwtree::{HwDeviceClass, HwMatchKind, HwNode, HwResource, HwResourceKind};
+use rustos_abi::hwtree::{HwMatchKind, HwNode, HwResource, HwResourceKind};
 use rustos_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
 use rustos_abi::sysinfo::SysinfoQueryId;
-use rustos_abi::Errno;
 use rustos_devids::DevIds;
 use rustos_help::{own_short_help, HelpSource};
-use rustos_procinfo::{call, Transport};
+use rustos_procinfo::{call, hwtree, Transport};
 
 use crate::command::{Command, NameMode, Options};
 use crate::error::LspciError;
@@ -66,8 +65,8 @@ pub fn run(
     };
 
     let reply = call(transport, SysinfoQueryId::HARDWARE_TREE, &[]).map_err(LspciError::from)?;
-    let nodes = decode_tree(&reply)?;
-    let order = bus_order(&nodes);
+    let nodes = hwtree::decode_tree(&reply).map_err(LspciError::Service)?;
+    let order = hwtree::bus_order(&nodes);
 
     // The PCI functions, in stable bus order (parent-chain order from the
     // tree), then filtered by `-s` / `-d`.
@@ -111,56 +110,6 @@ pub fn run(
         emit_unnamed_record(out, unnamed, database.is_some());
     }
     Ok(())
-}
-
-/// Decode the `HARDWARE_TREE` reply as whole [`HwNode`] records.
-///
-/// The reply is untrusted input to this tool: a length that is not a whole
-/// number of records, or a record that does not decode, fails the listing
-/// closed rather than rendering a partial inventory.
-fn decode_tree(reply: &[u8]) -> Result<Vec<HwNode>, LspciError> {
-    if reply.len() % HwNode::WIRE_LEN != 0 {
-        return Err(LspciError::Service(Errno::BufferTooSmall));
-    }
-    reply
-        .chunks_exact(HwNode::WIRE_LEN)
-        .map(|chunk| HwNode::from_bytes(chunk).map_err(LspciError::Service))
-        .collect()
-}
-
-/// The indices of `nodes` in stable bus order: a depth-first walk from the
-/// roots, children visited in ascending node-id order. A node whose parent
-/// is absent from the reply is treated as a root rather than dropped, so a
-/// truncated view still lists every device it carries.
-fn bus_order(nodes: &[HwNode]) -> Vec<usize> {
-    let ids: Vec<u32> = nodes.iter().map(HwNode::id).collect();
-    let mut by_id: Vec<usize> = (0..nodes.len()).collect();
-    by_id.sort_by_key(|&i| ids[i]);
-
-    let mut order = Vec::with_capacity(nodes.len());
-    let mut visited = alloc::vec![false; nodes.len()];
-    // An explicit stack; children are pushed in reverse id order so they
-    // pop in ascending order.
-    let mut stack: Vec<usize> = Vec::new();
-    for &root in by_id
-        .iter()
-        .filter(|&&i| !ids.contains(&nodes[i].parent()) || nodes[i].parent() == nodes[i].id())
-    {
-        stack.push(root);
-        while let Some(index) = stack.pop() {
-            if visited[index] {
-                continue;
-            }
-            visited[index] = true;
-            order.push(index);
-            for &child in by_id.iter().rev() {
-                if child != index && nodes[child].parent() == ids[index] {
-                    stack.push(child);
-                }
-            }
-        }
-    }
-    order
 }
 
 /// `true` if `function` passes the `-s` / `-d` filters.
@@ -246,35 +195,15 @@ fn render_tree(
 ) -> Result<(), LspciError> {
     // Which nodes are (or contain) a selected PCI function.
     let selected_ids: Vec<u32> = functions.iter().map(|f| f.node.id()).collect();
-    let mut keep = alloc::vec![false; nodes.len()];
-    for (index, node) in nodes.iter().enumerate() {
-        if !selected_ids.contains(&node.id()) {
-            continue;
-        }
-        keep[index] = true;
-        // Mark the ancestor chain, stopping on a cycle or a missing parent.
-        let mut parent = node.parent();
-        let mut steps = 0;
-        while steps <= nodes.len() {
-            let Some(pos) = nodes.iter().position(|n| n.id() == parent) else {
-                break;
-            };
-            if keep[pos] {
-                break;
-            }
-            keep[pos] = true;
-            parent = nodes[pos].parent();
-            steps += 1;
-        }
-    }
+    let keep = hwtree::keep_with_ancestors(nodes, &selected_ids);
 
     // Depth-first over the kept nodes, in the same stable bus order.
-    for &index in &bus_order(nodes) {
+    for &index in &hwtree::bus_order(nodes) {
         if !keep[index] {
             continue;
         }
         let node = &nodes[index];
-        let depth = depth_of(nodes, node);
+        let depth = hwtree::depth_of(nodes, node);
         let mut line = String::new();
         for _ in 0..depth {
             line.push_str("  ");
@@ -283,7 +212,7 @@ fn render_tree(
             let _ = write!(line, "#{} ", node.id());
             push_identity(&mut line, options, function, database, unnamed);
         } else {
-            let _ = write!(line, "#{} {}", node.id(), class_label(node.class()));
+            let _ = write!(line, "#{} {}", node.id(), hwtree::class_label(node.class()));
         }
         line.push('\n');
         out.write_all(line.as_bytes()).map_err(LspciError::Output)?;
@@ -294,42 +223,6 @@ fn render_tree(
         }
     }
     Ok(())
-}
-
-/// `node`'s depth below its outermost present ancestor, bounded by the
-/// node count so a cyclic parent link cannot loop.
-fn depth_of(nodes: &[HwNode], node: &HwNode) -> usize {
-    let mut depth = 0;
-    let mut parent = node.parent();
-    while depth < nodes.len() {
-        let Some(pos) = nodes.iter().position(|n| n.id() == parent) else {
-            break;
-        };
-        if nodes[pos].id() == node.id() {
-            break;
-        }
-        depth += 1;
-        parent = nodes[pos].parent();
-    }
-    depth
-}
-
-/// A terse label for a non-PCI context node in the `-t` view.
-fn class_label(class: Option<HwDeviceClass>) -> &'static str {
-    match class {
-        Some(HwDeviceClass::Root) => "root",
-        Some(HwDeviceClass::Bus) => "bus",
-        Some(HwDeviceClass::Cpu) => "cpu",
-        Some(HwDeviceClass::Memory) => "memory",
-        Some(HwDeviceClass::Display) => "display",
-        Some(HwDeviceClass::Input) => "input",
-        Some(HwDeviceClass::Network) => "network",
-        Some(HwDeviceClass::Storage) => "storage",
-        Some(HwDeviceClass::Timer) => "timer",
-        Some(HwDeviceClass::InterruptController) => "interrupt-controller",
-        Some(HwDeviceClass::Serial) => "serial",
-        Some(HwDeviceClass::Other) | None => "device",
-    }
 }
 
 /// Render a function's declared resources — the capability-grant
@@ -436,7 +329,8 @@ mod tests {
     use alloc::vec::Vec;
     use core::cell::RefCell;
 
-    use rustos_abi::hwtree::{HwMatchKey, HW_NODE_ROOT};
+    use rustos_abi::hwtree::{HwDeviceClass, HwMatchKey, HW_NODE_ROOT};
+    use rustos_abi::Errno;
     use rustos_devids::{textdb, DbKind};
     use rustos_help::SourceError;
 

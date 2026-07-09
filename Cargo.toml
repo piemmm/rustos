@@ -147,6 +147,7 @@ members = [
     "userland/apps/head",
     "userland/apps/ls",
     "userland/apps/lspci",
+    "userland/apps/lsusb",
     "userland/apps/man",
     "userland/apps/mkdir",
     "userland/apps/mount",

@@ -30,13 +30,18 @@
 //!    the tool ran. The `virt` image drives virtio-mmio devices, so the
 //!    tree carries no PCI-function nodes to list yet; the listing path is
 //!    host-proven in `rustos-lspci`'s tests.
-//! 4. `seq 776001 776005 > /Users/root/nums.txt` — the shell pre-opens
+//! 4. `lsusb --help` — the same proof for the resource-carrying
+//!    `lsusb.app` bundle (`plans/DEVICES.md` DEVICE1 V3): the load gate
+//!    re-hashes it — including the planted `Resources/usb.ids.bin` table —
+//!    and the help summary's `USB devices` witnesses the tool ran; the
+//!    listing path is host-proven in `rustos-lsusb`'s tests.
+//! 5. `seq 776001 776005 > /Users/root/nums.txt` — the shell pre-opens
 //!    the target (create + truncate) in its own table and wires it as the
 //!    child's stdout through the spawn attach block.
-//! 5. `cat < /Users/root/nums.txt` — the round trip back: the shell opens
+//! 6. `cat < /Users/root/nums.txt` — the round trip back: the shell opens
 //!    the file read-only and wires it as `cat`'s stdin; `776005` on the
-//!    transcript is content only step 4's write could have produced.
-//! 6. `exit` — typed only after the content marker appeared.
+//!    transcript is content only step 5's write could have produced.
+//! 7. `exit` — typed only after the content marker appeared.
 //!
 //! ## Why the PASS keys on `cat`'s exit *then* the shell's exit
 //!

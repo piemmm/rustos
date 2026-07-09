@@ -4101,7 +4101,7 @@ per-increment guarantees.
 
 ## DEVICES — device inventory commands + USB mass storage (`plans/DEVICES.md`)
 
-**Status: in progress (DEVICE1 V1–V2 done; V3 and DEVICE2 remain).**
+**Status: in progress (DEVICE1 V1–V3 done; DEVICE2 remains).**
 DEVICE1 adds the `lspci` and `lsusb` system command apps: they render the
 discovered PCI/USB nodes from the existing `CAP_SYSINFO_HW`-gated
 hardware-tree query, naming devices through the `lib/devids` lookup crate
@@ -4120,9 +4120,9 @@ validated view) — plus the `cargo xtask devids` pipeline: the committed
 snapshots under `lib/devids/assets/` carry provenance headers (upstream
 URL/version/date, fetch date, raw SHA-256, transport/encoding statements,
 licence), `--write` regenerates the compact tables (each written into its
-consuming command bundle's `Resources/` once the consumer exists —
-`userland/apps/lspci/Resources/pci.ids.bin`; `usb.ids.bin` stages under
-`lib/devids/tables/` until `lsusb` lands), the no-flag verify is
+consuming command bundle's `Resources/` —
+`userland/apps/lspci/Resources/pci.ids.bin`,
+`userland/apps/lsusb/Resources/usb.ids.bin`), the no-flag verify is
 a `ci` static gate, and `--fetch` imports (pci.ids over TLS; usb.ids over
 upstream's canonical HTTP URL — upstream offers no valid TLS endpoint — with
 integrity from the pinned SHA-256 + reviewed diff, and any stray ISO-8859-1
@@ -4139,7 +4139,19 @@ the model carries (`-n`/`-nn`/`-v`/`-t`/`-d`/`-s`; addresses are stable
 hardware-tree node ids, `-k` withheld until driver-binding records exist),
 thirteen-locale `Help/`, and generic build-side bundle-`Resources/`
 discovery (`rustos_syshelp::RESOURCE_FILES` → AppInfo digest + both
-planters). DEVICE2 adds bulk transfers to
+planters). V3 (done) delivered the `lsusb` command app
+(`userland/apps/lsusb`): the same posture over the USB view — the
+`usbutils` option surface (`-v` interface class/subclass/protocol names,
+`-t` controller→interface topology, `-d`/`-s` filters with the `usbutils`
+`[[<bus>]:][<devnum>]` grammar), bus/device numbers derived from the
+hardware tree's stable node ids (controller parent id / interface node
+id, the documented divergence), names via the bundled
+`Resources/usb.ids.bin`, the `usb.names_unresolved` fd-3 advisory,
+thirteen-locale `Help/`, and a `lsusb --help` step in the SP10b pipeline
+vertical — with the shared hardware-tree walk (decode, stable bus order,
+depth, ancestor-keep, class labels) hoisted into
+`rustos_procinfo::hwtree` so `lspci` and `lsusb` render through one
+definition. DEVICE2 adds bulk transfers to
 the URB transport, a `drivers/storage/usb_msd` Bulk-Only-Transport class
 driver, and the `volmgr` volume manager that lands the still-open volume
 forest (`id::` roots) and automounts hotplugged filesystems into the

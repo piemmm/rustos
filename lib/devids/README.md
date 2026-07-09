@@ -21,10 +21,10 @@ grammar, vetting filter, table format, encoder, and decoder — shared by the
    change.
 2. `cargo xtask devids --write` regenerates the compact tables from the
    committed snapshots. Each table is written into its consuming command
-   bundle's `Resources/` directory once the consumer exists
-   (`userland/apps/lspci/Resources/pci.ids.bin`); `usb.ids.bin` stages
-   under `lib/devids/tables/` until `lsusb` lands and moves it into its
-   bundle.
+   bundle's `Resources/` directory
+   (`userland/apps/lspci/Resources/pci.ids.bin`,
+   `userland/apps/lsusb/Resources/usb.ids.bin`), so it ships inside the
+   self-contained bundle with no second copy in the tree.
 3. `cargo xtask devids` (no flag; part of `cargo xtask ci`) re-runs the
    converter and fails closed on any drift between snapshot and tables.
 

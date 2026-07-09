@@ -157,6 +157,35 @@ fail-closed reply and refusal paths, and the fd-3 record against a
 canned tree and a fixture database compiled through the real
 `lib/devids` pipeline, plus the thirteen-locale `OPTIONS` pinning.
 
+## `lsusb` — list discovered USB devices (`userland/apps/lsusb`)
+
+`rustos-lsusb` is the `usbutils` `lsusb` over what the RustOS model
+actually carries (`plans/DEVICES.md` DEVICE1 V3, `AGENTS.md` §16.7): one
+`Bus NNN Device NNN: ID vvvv:pppp <vendor> <product>` line per
+discovered USB interface. It shares `lspci`'s whole posture: the same
+`CAP_SYSINFO_HW`-gated `HARDWARE_TREE` query, the same fail-closed
+`HwNode` decode and stable bus order (the shared
+`rustos_procinfo::hwtree` walk both tools use, `AGENTS.md` §2.2), and
+names resolved through `lib/devids` from the vetted `usb.ids` table the
+bundle ships as `Resources/usb.ids.bin`. An identity the database lacks
+shows only its `ID vvvv:pppp` (as `usbutils` omits an unknown string),
+with the count advised on fd 3 (`usb.names_unresolved`, `AGENTS.md`
+§20.1); a missing or invalid table degrades the whole listing to bare
+ids with the reason on standard error. `-v` lists the interface class /
+subclass / protocol names from the `usb.ids` class tables, `-t` renders
+the controller → interface topology, and `-d [<vendor>]:[<product>]` /
+`-s [[<bus>]:][<devnum>]` filter. Documented divergences: RustOS has no
+Linux bus/devnum registry (the bus number is the controller's stable
+hardware-tree node id, the device number the interface's own node id),
+and the inventory records one node per *interface*, so a
+multi-interface device lists once per interface. Manifest:
+`CAP_CONSOLE_WRITE` + `CAP_FS_ACCESS` + `CAP_SYSINFO_HW`. `cargo test
+-p rustos-lsusb` drives the parser (including the `usbutils` `-s`
+grammar), the naming/bare-id/filter/tree/verbose renders, the
+fail-closed reply and refusal paths, and the fd-3 record against a
+canned tree and a fixture database compiled through the real
+`lib/devids` pipeline, plus the thirteen-locale `OPTIONS` pinning.
+
 ## `ps` — list processes (`userland/apps/ps`)
 
 `rustos-ps` is the POSIX-named process lister. Like `sysinfo`, it is a

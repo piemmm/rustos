@@ -9,9 +9,10 @@
 //! - `cargo xtask devids` (no arguments; part of `cargo xtask ci`) re-runs
 //!   the converter over the committed snapshots in `lib/devids/assets/` and
 //!   fails closed on any drift against the committed tables (each inside its
-//!   consuming command bundle's `Resources/` once the consumer exists —
-//!   `userland/apps/lspci/Resources/pci.ids.bin` — else staged under
-//!   `lib/devids/tables/`), exactly like `c-header` and `font-atlas`.
+//!   consuming command bundle's `Resources/` —
+//!   `userland/apps/lspci/Resources/pci.ids.bin`,
+//!   `userland/apps/lsusb/Resources/usb.ids.bin`), exactly like `c-header`
+//!   and `font-atlas`.
 //! - `cargo xtask devids --write` regenerates the committed tables from the
 //!   committed snapshots.
 //! - `cargo xtask devids --fetch` is **developer-run only** — builds stay
@@ -61,9 +62,8 @@ struct Database {
     /// Workspace-relative committed snapshot path.
     snapshot: &'static str,
     /// Workspace-relative committed compact-table path: the consuming
-    /// command bundle's `Resources/` file once the consumer exists (so the
-    /// table ships inside the self-contained bundle with no second copy in
-    /// the tree), else a staging home under `lib/devids/tables/`.
+    /// command bundle's `Resources/` file, so the table ships inside the
+    /// self-contained bundle with no second copy in the tree.
     table: &'static str,
 }
 
@@ -87,7 +87,7 @@ const DATABASES: &[Database] = &[
         licence: "GPL-2.0-or-later (as distributed with usbutils; the upstream \
                   file carries no licence header)",
         snapshot: "lib/devids/assets/usb.ids",
-        table: "lib/devids/tables/usb.ids.bin",
+        table: "userland/apps/lsusb/Resources/usb.ids.bin",
     },
 ];
 
@@ -378,13 +378,15 @@ mod tests {
             assert!(db.snapshot.starts_with("lib/devids/assets/"));
         }
         // Each compiled table lives inside its consuming command bundle's
-        // `Resources/` directory (the self-contained-bundle home) once the
-        // consumer exists; `usb.ids.bin` stages in `lib/devids/tables/`
-        // until `lsusb` lands and moves it into its bundle.
+        // `Resources/` directory — the self-contained-bundle home, with no
+        // second copy anywhere in the tree.
         assert_eq!(
             DATABASES[0].table,
             "userland/apps/lspci/Resources/pci.ids.bin"
         );
-        assert_eq!(DATABASES[1].table, "lib/devids/tables/usb.ids.bin");
+        assert_eq!(
+            DATABASES[1].table,
+            "userland/apps/lsusb/Resources/usb.ids.bin"
+        );
     }
 }

@@ -221,8 +221,7 @@ Each increment ends green on the whole-project gate (§7).
   verify) imports with full provenance headers and drift-checks as a
   `cargo xtask ci` static gate; the vetted snapshots live in
   `lib/devids/assets/`, each generated table in its consuming bundle's
-  `Resources/` (V2; `usb.ids.bin` stages in `lib/devids/tables/` until
-  V3); the `fuzz_devids` harness covers both untrusted surfaces.
+  `Resources/`; the `fuzz_devids` harness covers both untrusted surfaces.
   Reality-driven decisions: usb.ids is fetched over upstream's canonical
   HTTP URL (no valid TLS offered) with SHA-256 + review as integrity; a
   stray ISO-8859-1 byte in usb.ids is deterministically promoted to
@@ -247,8 +246,7 @@ Each increment ends green on the whole-project gate (§7).
   divergence — the tree records no BDF); `-k` is withheld (no
   driver-binding records exist to serve it honestly, §1.3); the compiled
   pci table moved into the bundle (`userland/apps/lspci/Resources/`, one
-  tree copy, `cargo xtask devids` retargeted; `usb.ids.bin` stages in
-  `lib/devids/tables/` until V3 moves it into `lsusb.app`). Enabling
+  tree copy, `cargo xtask devids` retargeted). Enabling
   infrastructure landed with it: generic bundle-`Resources/` discovery
   (`rustos_syshelp::RESOURCE_FILES` — build-discovered from each crate's
   on-disk `Resources/`, never a per-bundle list) feeding the signed
@@ -260,11 +258,37 @@ Each increment ends green on the whole-project gate (§7).
   gate end to end; the emulated aarch64 `virt` image drives virtio-mmio
   devices and publishes no PCI-function nodes yet, so the full listing is
   host-proven and a live-listing vertical rides the first emulated
-  PCI-function target that carries the app store (the §16.7-style
-  "where the emulated path exists" principle V3 already states).
-- **V3 — `lsusb`.** As V2 for the USB view, including the topology
-  render; QEMU vertical where the emulated bus path exists, metal
-  acceptance on the Pi 4 chain otherwise.
+  PCI-function target that carries the app store.
+- **V3 — `lsusb`. Done.** `userland/apps/lsusb`, as V2 for the USB view:
+  the pure engine (interface selection over `HwMatchKind::Usb` keys, the
+  `usbutils` default `Bus NNN Device NNN: ID vvvv:pppp <vendor>
+  <product>` line, `-v` interface class/subclass/protocol names from the
+  usb.ids class tables — decimal descriptor values, as `usbutils` prints
+  them — `-t` controller→interface topology, `-d [<vendor>]:[<product>]`
+  and `-s [[<bus>]:][<devnum>]` filters, the `usb.names_unresolved` fd-3
+  advisory) over the same seams as `lspci`; the freestanding `Run` loads
+  `Resources/usb.ids.bin` and degrades to bare ids (reason on stderr) on
+  a missing/invalid table; thirteen-locale `Help/` with the
+  switch-pinning test; host unit tests over a canned tree + a fixture
+  database compiled through the real `lib/devids` pipeline.
+  Reality-driven decisions: a device's bus number is its controller's
+  stable hardware-tree node id and its device number its own node id
+  (RustOS has no Linux devnum registry — the §1.4 documented
+  divergence), and one line renders per *interface* node (the inventory
+  the HCD emits), with no root-hub pseudo-devices; an identity the
+  database does not name shows only its `ID vvvv:pppp` (the `usbutils`
+  omission shape), counted on fd 3. The shared hardware-tree walk
+  (fail-closed decode, stable bus order, depth, ancestor-keep, class
+  labels) was hoisted into `rustos_procinfo::hwtree` and `lspci`
+  refitted onto it, so the two listing tools render through one
+  definition; `cargo xtask devids` now writes `usb.ids.bin` into the
+  bundle and the `lib/devids/tables/` staging home is deleted. QEMU
+  coverage follows the V2 precedent: the SP10b pipeline vertical spawns
+  `lsusb --help` from the planted store (the resource-carrying bundle
+  through the content-hash gate); no emulated fixture publishes
+  USB-interface nodes yet, so the live listing is host-proven and a
+  live-listing vertical rides the first emulated USB target that
+  carries the app store (Pi 4 metal acceptance otherwise).
 
 ---
 
