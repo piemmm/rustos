@@ -931,7 +931,7 @@ extern "C" fn production_tick_dispatch(cpu: rustos_arch_api::CpuId) {
 /// in EL0 drives `production_preempt_dispatch` immediately, and a
 /// one-shot tick taken in EL1 disarms without context-switching (the
 /// kernel is non-preemptible) but is latched by
-/// [`production_tick_dispatch`] and honoured when the interrupted
+/// `production_tick_dispatch` and honoured when the interrupted
 /// syscall completes — an expired quantum is never silently lost. The
 /// scheduler re-arms the next one-shot on its following dispatch.
 ///

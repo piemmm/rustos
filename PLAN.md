@@ -4079,17 +4079,40 @@ increment landing complete and green:
 
 ## USB — modular USB stack + device hot-removal (`plans/USB.md`)
 
-**Status: planned (U1–U5).** Splits the metal-proven single-process keyboard
-chain into the three independent layers the §17 modularity contracts require:
-a bus driver emits the controller node, a user-space host-controller driver
-(HCD, `drivers/bus/usb/xhci`) owns one controller and serves a bus-agnostic
-URB transport IPC, and per-device class drivers (`drivers/input/usb_kbd`, …)
-bind emitted per-interface nodes and submit URBs — no bus↔class hardwiring
-(§2.20, §17.4). Hot-removal is structural: the HCD watches root-hub ports and
-calls `hw_remove_node`, and `devmgr` reacts by unloading the bound driver
-through a new kernel driver-unload mechanism (`StoreRequest::Unload`). U1
-(kernel driver-unload + devmgr unload reaction, fully host/QEMU-testable) is
-the next increment; see `plans/USB.md` for the binding design and staging.
+**Status: done (U1–U5 landed; live attach/detach acceptance on Pi 4 metal is
+the operator's step — QEMU models no Pi USB).** The stack is the three
+independent layers the §17 modularity contracts require: a bus driver emits
+the controller node, the user-space host-controller driver (HCD,
+`drivers/bus/usb/xhci`) owns one controller and serves the bus-agnostic URB
+transport IPC (`lib/abi/src/usb_urb.rs`), and per-device class drivers
+(`drivers/input/usb_kbd`, …) bind emitted per-interface nodes and submit URBs
+— no bus↔class hardwiring (§2.20, §17.4). Hot-removal is structural: the HCD
+watches ports event-driven and calls `hw_remove_node`; `devmgr` unloads the
+bound driver through the kernel driver-unload mechanism
+(`StoreRequest::Unload`), and re-plug re-enumerates a fresh device and
+autoloads. The URB transport serves control and interrupt transfers; bulk is
+the DEVICES-plan extension. See `plans/USB.md` for the binding design and
+per-increment guarantees.
+
+---
+
+## DEVICES — device inventory commands + USB mass storage (`plans/DEVICES.md`)
+
+**Status: planned (DEVICE1–DEVICE2).** DEVICE1 adds the `lspci` and `lsusb`
+system command apps: they render the discovered PCI/USB nodes from the
+existing `CAP_SYSINFO_HW`-gated hardware-tree query, naming devices through a
+new `lib/devids` lookup crate whose data is vetted, provenance-pinned
+snapshots of the public PCI (`pci-ids.ucw.cz`) and USB
+(`linux-usb.org/usb.ids`) ID databases, imported and malicious-content-
+filtered by a developer-run `cargo xtask devids --fetch` (never a build-time
+network fetch, §19.3) with a CI drift gate. DEVICE2 adds bulk transfers to
+the URB transport, a `drivers/storage/usb_msd` Bulk-Only-Transport class
+driver, and the `volmgr` volume manager that lands the still-open volume
+forest (`id::` roots) and automounts hotplugged filesystems into the
+`Storage:` catalog with deterministic collision-free names and user-usable
+permissions — plus the surprise-removal state machine (retained uncommitted
+writes, syslog events, force-unmount, and verified re-insert replay). See
+`plans/DEVICES.md` for the binding design and staging.
 
 ---
 

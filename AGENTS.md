@@ -1448,6 +1448,7 @@ You are not exempt from any rule above. In addition:
     | Architecture ports / Arch HAL parity | `plans/WIRING.md` |
     | Raspberry Pi bring-up | `plans/PI.md` |
     | USB stack and hot-removal | `plans/USB.md` |
+    | Device inventory commands (`lspci`/`lsusb`), USB mass storage, hotplug automount | `plans/DEVICES.md` |
     | TPM / measured boot | `plans/TPM.md` |
     | Driver layering (`drivers/` vs `lib/*` device logic) | `plans/fixdrivers.md` |
     | The `vim` app | `plans/VIM.md` |
