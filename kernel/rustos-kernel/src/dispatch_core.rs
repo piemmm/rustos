@@ -17,7 +17,9 @@
 //! here once.
 
 use rustos_abi::SYSCALL_MAX_ARGS;
-use rustos_kernel_core::{reschedule_current, DispatchCallbackSlot, DispatchOutcome};
+use rustos_kernel_core::{
+    reschedule_current, DispatchCallbackSlot, DispatchOutcome, RescheduleAction, UserFaultOutcome,
+};
 use rustos_kernel_syscall::RawArgs;
 
 /// Bridge the kernel-stack `[u64; SYSCALL_MAX_ARGS]` frame to a
@@ -121,6 +123,38 @@ pub fn dispatch_via_slot(slot: &DispatchCallbackSlot, number: u64, args: RawArgs
     }
 }
 
+/// Forward one user-mode data abort through a slot's resident hook.
+///
+/// Returns `true` when the faulting page is now resident and the arch
+/// port should simply return to the task (the retried access succeeds).
+/// A fault fatal to the task alone never returns from this call: the
+/// hook has recorded the crash exit and reclaimed the task's resources,
+/// and the `Exit` suspension hands the CPU back to the scheduler. Every
+/// other case — empty slot, no attributable task, or (degenerately) no
+/// published user kthread to suspend — returns `false`, sending the arch
+/// port to its fatal path (fail closed).
+///
+/// Shared by every architecture's user-fault callback so the lookup →
+/// resolve → terminate sequence has one definition.
+pub fn resolve_user_fault_via_slot(slot: &DispatchCallbackSlot, fault_va: u64) -> bool {
+    let Some(hook) = slot.get() else {
+        return false;
+    };
+    match hook.resolve_user_fault(fault_va) {
+        UserFaultOutcome::Resolved => true,
+        UserFaultOutcome::Terminated { cpu } => {
+            // The task is dead (exit recorded, resources reclaimed):
+            // suspend it with an `Exit` action — control never returns
+            // for the reclaimed task. A `false` return means no user
+            // kthread is published on `cpu`; the task cannot be resumed
+            // over reclaimed state, so fall through to the fatal path.
+            let _ = reschedule_current(cpu, RescheduleAction::Exit);
+            false
+        }
+        UserFaultOutcome::Unhandled => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,14 +163,19 @@ mod tests {
     use rustos_kernel_core::{DispatchHook, RescheduleAction};
 
     /// Hook that returns a caller-supplied [`DispatchOutcome`] for
-    /// each invocation. Used to exercise both production-dispatch
-    /// branches (happy path and `NoCallerContext`).
+    /// each invocation — and, for the user-fault path, a caller-supplied
+    /// [`UserFaultOutcome`]. Used to exercise every production-dispatch
+    /// branch (happy path, `NoCallerContext`, and the fault dispositions).
     struct StaticHook {
         outcome: DispatchOutcome,
+        fault_outcome: UserFaultOutcome,
     }
     impl DispatchHook for StaticHook {
         fn dispatch(&self, _raw_number: u16, _args: RawArgs) -> DispatchOutcome {
             self.outcome
+        }
+        fn resolve_user_fault(&self, _fault_va: u64) -> UserFaultOutcome {
+            self.fault_outcome
         }
     }
 
@@ -207,6 +246,7 @@ mod tests {
         let slot = DispatchCallbackSlot::new();
         let hook: &'static StaticHook = Box::leak(Box::new(StaticHook {
             outcome: DispatchOutcome::Returned(Ok(0x42)),
+            fault_outcome: UserFaultOutcome::Unhandled,
         }));
         slot.install_dispatcher(hook as &'static dyn DispatchHook)
             .expect("install");
@@ -219,6 +259,7 @@ mod tests {
         let slot = DispatchCallbackSlot::new();
         let hook: &'static StaticHook = Box::leak(Box::new(StaticHook {
             outcome: DispatchOutcome::Returned(Err(Errno::PermissionDenied)),
+            fault_outcome: UserFaultOutcome::Unhandled,
         }));
         slot.install_dispatcher(hook as &'static dyn DispatchHook)
             .expect("install");
@@ -236,6 +277,7 @@ mod tests {
         let slot = DispatchCallbackSlot::new();
         let hook: &'static StaticHook = Box::leak(Box::new(StaticHook {
             outcome: DispatchOutcome::NoCallerContext,
+            fault_outcome: UserFaultOutcome::Unhandled,
         }));
         slot.install_dispatcher(hook as &'static dyn DispatchHook)
             .expect("install");
@@ -254,11 +296,56 @@ mod tests {
                 action: RescheduleAction::Yield,
                 cpu: 50,
             },
+            fault_outcome: UserFaultOutcome::Unhandled,
         }));
         slot.install_dispatcher(hook as &'static dyn DispatchHook)
             .expect("install");
         let got = dispatch_via_slot(&slot, 0, RawArgs::ZERO);
         assert_eq!(got, Some(0x7));
+    }
+
+    #[test]
+    fn resolve_user_fault_via_slot_reports_a_resolved_fault() {
+        let slot = DispatchCallbackSlot::new();
+        let hook: &'static StaticHook = Box::leak(Box::new(StaticHook {
+            outcome: DispatchOutcome::NoCallerContext,
+            fault_outcome: UserFaultOutcome::Resolved,
+        }));
+        slot.install_dispatcher(hook as &'static dyn DispatchHook)
+            .expect("install");
+        assert!(resolve_user_fault_via_slot(&slot, 0xF000_1000));
+    }
+
+    #[test]
+    fn resolve_user_fault_via_slot_fails_closed_without_a_hook_or_task() {
+        // An empty slot resolves nothing (the arch port takes its fatal
+        // path), and an `Unhandled` disposition does the same.
+        let empty = DispatchCallbackSlot::new();
+        assert!(!resolve_user_fault_via_slot(&empty, 0xF000_1000));
+
+        let slot = DispatchCallbackSlot::new();
+        let hook: &'static StaticHook = Box::leak(Box::new(StaticHook {
+            outcome: DispatchOutcome::NoCallerContext,
+            fault_outcome: UserFaultOutcome::Unhandled,
+        }));
+        slot.install_dispatcher(hook as &'static dyn DispatchHook)
+            .expect("install");
+        assert!(!resolve_user_fault_via_slot(&slot, 0xF000_1000));
+    }
+
+    #[test]
+    fn resolve_user_fault_via_slot_terminated_without_a_kthread_fails_closed() {
+        // A `Terminated` disposition on a CPU with no published user
+        // kthread (the host has none) cannot resume the reclaimed task:
+        // the helper reports unresolved so the arch port halts.
+        let slot = DispatchCallbackSlot::new();
+        let hook: &'static StaticHook = Box::leak(Box::new(StaticHook {
+            outcome: DispatchOutcome::NoCallerContext,
+            fault_outcome: UserFaultOutcome::Terminated { cpu: 51 },
+        }));
+        slot.install_dispatcher(hook as &'static dyn DispatchHook)
+            .expect("install");
+        assert!(!resolve_user_fault_via_slot(&slot, 0xF000_1000));
     }
 
     #[test]

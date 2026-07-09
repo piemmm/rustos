@@ -784,8 +784,10 @@ order (one fully-gated increment each):
        `init_spawn`/`spawn_producer` place the window at
        `spawn_layout::ANON_WINDOW_OFFSET` (4 GiB above the image bias — the
        topmost user region, above the device/DMA/shared windows) and size it
-       from discovered RAM via `anon_layout::anon_window_pages` (physical RAM
-       clamped to the addressable user VA above the base, floored at 16 MiB),
+       from discovered RAM via `user_windows::user_windows` (physical RAM
+       clamped to half the addressable user VA above the base, floored at
+       16 MiB; the demand-paged `file_map` window takes the remainder —
+       `docs/src/architecture/memory.md` §7f/§7o),
        never a fixed `const` ceiling (§24.1). Proven by `kernel/mem` +
        `kernel/core`
        host tests and the extended `mmio_map_qemu_aarch64` `-M virt` vertical
@@ -2449,6 +2451,29 @@ full path walk per child).
   change; pre-release, so it evolves in place).
 
 ---
+
+## Stage 5 follow-up — demand-paged file mappings (`file_map` / `file_unmap`)
+
+**Status: landed (aarch64 + riscv64 fault-resolving; x86_64 fail-closed);
+remainders staged in `.junie/fstree-next-plan.md` M1.**
+
+`abi-v1` syscalls 75/76 give a program a read-only, demand-paged private
+mapping of an open file (the `mmap(2)` shape): `file_map` reserves address
+space only (out of the per-task file window `user_windows` splits above the
+heap window) and records the mapping-time identity; each page is backed on
+first access by the user-fault resolver (`DispatchHook::resolve_user_fault`
+→ `KernelSyscallHandlers::resolve_file_fault`), which reads the covering
+page through the secured VFS under that identity and maps it read-only,
+never executable. An unresolvable fault (wild access, page at/past
+end-of-file, read error, OOM) terminates the faulting task with exit 139 —
+reclaiming exactly what `exit`/signal-kill reclaim — never the machine.
+`file_unmap` releases sparsely (resident frames zeroed on free) and the
+shared `AddressSpaceBytes` accounting covers both map families. Full design
+and per-port state: `docs/src/architecture/memory.md` §7f/§7o. First
+consumer: `fstree`'s viewers (`RtFs` mapped reads with streamed fallback).
+Remaining work (x86_64 resumable `#PF` ISR, copy-path fault resolution,
+the QEMU vertical, fault-kill audit event) is the immediate M1 stage in
+`.junie/fstree-next-plan.md`.
 
 ## Stage 6 — Userland Foundations
 

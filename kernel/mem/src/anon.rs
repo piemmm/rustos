@@ -79,7 +79,9 @@ pub fn page_count_for(len: usize) -> Result<u64, AnonError> {
 
 /// The page-aligned virtual address of the `page_index`-th page above
 /// `base_va`, or [`AnonError::Overflow`] if it would leave the address space.
-fn page_at(base_va: u64, page_index: u64) -> Result<Page, AnonError> {
+/// Crate-visible so the demand-paged file-mapping engine
+/// ([`crate::filemap`]) walks regions through the same one definition.
+pub(crate) fn page_at(base_va: u64, page_index: u64) -> Result<Page, AnonError> {
     let offset = page_index
         .checked_mul(PAGE_SIZE as u64)
         .ok_or(AnonError::Overflow)?;

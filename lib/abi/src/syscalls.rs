@@ -1869,6 +1869,55 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: None,
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::FILE_MAP,
+        name: "file_map",
+        arg_count: 3,
+        args: [
+            // The descriptor to map; must be open for reading and backed
+            // by a filesystem path (a resource or pipe backing is refused
+            // by the handler — only a positional byte store can page).
+            AbiType::U32,
+            // The file byte offset the mapping starts at (page-aligned).
+            // Always 64-bit: a mappable file may exceed both `usize` and
+            // any 32-bit figure (storage width is never pointer width).
+            AbiType::U64,
+            // The mapping length in bytes (rounded up to whole pages);
+            // 64-bit for the same reason as the offset.
+            AbiType::U64,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::U64,
+        // The mapping is a read view of a filesystem object, so the same
+        // coarse gate as the other filesystem calls applies at dispatch;
+        // per-inode owner/mode/ACL enforcement is the secured VFS's, and
+        // is re-applied by the fault path on every demand-paged read
+        // under the mapping-time identity. Like `fs_read` it is not
+        // audited per call.
+        required_capability: Some(CapabilityId::FS_ACCESS),
+        audit: false,
+    },
+    SyscallSpec {
+        number: SyscallNumber::FILE_UNMAP,
+        name: "file_unmap",
+        arg_count: 2,
+        args: [
+            AbiType::U64,
+            AbiType::U64,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // The release half of `file_map`: it only shrinks the caller's
+        // own address space, so it is the unprivileged, unaudited
+        // baseline (the `mem_unmap` posture).
+        required_capability: None,
+        audit: false,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in
@@ -2069,6 +2118,16 @@ mod tests {
         let mem_unmap = spec_for(SyscallNumber::MEM_UNMAP).unwrap();
         assert_eq!(mem_unmap.required_capability, None);
         assert!(!mem_unmap.audit, "mem_unmap must not audit per call");
+        // file_map reads a filesystem object into the caller's OWN address
+        // space, so it carries the coarse filesystem gate at dispatch (the
+        // fs_set_mode precedent) but is not audited per call; file_unmap
+        // only shrinks the caller's own space (the mem_unmap posture).
+        let file_map = spec_for(SyscallNumber::FILE_MAP).unwrap();
+        assert_eq!(file_map.required_capability, Some(CapabilityId::FS_ACCESS));
+        assert!(!file_map.audit, "file_map must not audit per call");
+        let file_unmap = spec_for(SyscallNumber::FILE_UNMAP).unwrap();
+        assert_eq!(file_unmap.required_capability, None);
+        assert!(!file_unmap.audit, "file_unmap must not audit per call");
         // rlimit_get reads the caller's own effective limit, so it is the
         // unprivileged baseline and is not audited per call. rlimit_set is ungated at the dispatcher (lowering a bound
         // needs no capability; the `CAP_RLIMIT_RAISE` check is fine-grained

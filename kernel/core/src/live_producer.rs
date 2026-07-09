@@ -30,6 +30,7 @@ use rustos_kernel_mem::{
 use rustos_kernel_sched_api::SchedulerArch;
 
 use crate::devres::{DmaAllocFacility, DmaCarve, MmioMapFacility, SharedMemFacility};
+use crate::filemap::FileMap;
 use crate::kthread::with_current_live_space;
 use crate::memmap::MemMap;
 
@@ -175,6 +176,51 @@ where
         let page_count = page_count_for(len).map_err(anon_errno)?;
         let cpu = self.arch.current_cpu();
         with_current_live_space(cpu, |space| space.unmap_anonymous(base, page_count))
+            .ok_or(Errno::NotImplemented)?
+            .map_err(live_errno)
+    }
+}
+
+/// The whole-page count a `len`-byte file mapping spans, rounded up.
+///
+/// The file-mapping length is 64-bit end to end (a mappable file may
+/// exceed both `usize` and any 32-bit figure), so this is the `u64` form
+/// of [`page_count_for`]; a zero length names nothing and fails closed.
+fn file_page_count(len: u64) -> Result<u64, Errno> {
+    if len == 0 {
+        return Err(Errno::LengthOutOfRange);
+    }
+    Ok(len.div_ceil(PAGE_SIZE as u64))
+}
+
+impl<A> FileMap for LiveMemMap<A>
+where
+    A: SchedulerArch + Send + Sync + 'static,
+{
+    fn reserve(&self, len: u64) -> Result<u64, Errno> {
+        let page_count = file_page_count(len)?;
+        let cpu = self.arch.current_cpu();
+        // Pure address-space reservation out of this task's own
+        // file-mapping window; no frame moves until a fault lands.
+        with_current_live_space(cpu, |space| space.reserve_file_region(page_count))
+            .ok_or(Errno::NotImplemented)?
+            .map_err(live_errno)
+    }
+
+    fn map_page(&self, va: u64, contents: &[u8]) -> Result<(), Errno> {
+        let cpu = self.arch.current_cpu();
+        // The live space refuses an address outside every reserved file
+        // region (`NotFound` after folding), so the fault path can never
+        // materialise memory the task did not map.
+        with_current_live_space(cpu, |space| space.map_file_page_at(va, contents))
+            .ok_or(Errno::NotImplemented)?
+            .map_err(live_errno)
+    }
+
+    fn release(&self, base: u64, len: u64) -> Result<u64, Errno> {
+        let page_count = file_page_count(len)?;
+        let cpu = self.arch.current_cpu();
+        with_current_live_space(cpu, |space| space.release_file_region(base, page_count))
             .ok_or(Errno::NotImplemented)?
             .map_err(live_errno)
     }
@@ -413,6 +459,9 @@ mod tests {
         device_maps: Vec<(u64, usize)>,
         dma_allocs: Vec<(usize, u64)>,
         dma_frees: Vec<u64>,
+        file_reserves: Vec<u64>,
+        file_page_maps: Vec<(u64, usize)>,
+        file_releases: Vec<(u64, u64)>,
         next: Option<LiveSpaceError>,
     }
 
@@ -423,6 +472,14 @@ mod tests {
     /// The base a placed (non-`FIXED`) map reports back from the fake, so the
     /// producer test can assert the returned value flows through unchanged.
     const PLACED_BASE: u64 = 0xC000_0000;
+
+    /// The base a file-region reservation reports back from the fake, so the
+    /// producer test can assert the returned value flows through unchanged.
+    const FILE_BASE: u64 = 0xF000_0000;
+
+    /// The resident-page count a file-region release reports back from the
+    /// fake.
+    const FILE_RESIDENT: u64 = 3;
 
     impl LiveUserSpace for FakeLive {
         fn map_anonymous(&mut self, base_va: u64, page_count: u64) -> Result<u64, LiveSpaceError> {
@@ -446,6 +503,34 @@ mod tests {
             match self.next.take() {
                 Some(err) => Err(err),
                 None => Ok(()),
+            }
+        }
+
+        fn reserve_file_region(&mut self, page_count: u64) -> Result<u64, LiveSpaceError> {
+            self.file_reserves.push(page_count);
+            match self.next.take() {
+                Some(err) => Err(err),
+                None => Ok(FILE_BASE),
+            }
+        }
+
+        fn map_file_page_at(&mut self, va: u64, contents: &[u8]) -> Result<(), LiveSpaceError> {
+            self.file_page_maps.push((va, contents.len()));
+            match self.next.take() {
+                Some(err) => Err(err),
+                None => Ok(()),
+            }
+        }
+
+        fn release_file_region(
+            &mut self,
+            base_va: u64,
+            page_count: u64,
+        ) -> Result<u64, LiveSpaceError> {
+            self.file_releases.push((base_va, page_count));
+            match self.next.take() {
+                Some(err) => Err(err),
+                None => Ok(FILE_RESIDENT),
             }
         }
 
@@ -611,6 +696,59 @@ mod tests {
             producer.map(PAGE, MapFlags::FIXED, 0x4000),
             Err(Errno::OutOfMemory)
         );
+    }
+
+    #[test]
+    fn file_map_reserve_routes_to_the_current_live_space() {
+        let (fake, ptr) = leak_fake();
+        let _guard = publish_live_space_for_test(10, fake);
+
+        let producer = LiveMemMap::new(arch_at(10));
+        // The byte length rounds up to whole pages; the reserved base flows
+        // back unchanged.
+        assert_eq!(FileMap::reserve(&producer, PAGE as u64 + 1), Ok(FILE_BASE));
+        // SAFETY: the producer's `&mut` has ended; single-threaded read.
+        let recorded = unsafe { &*ptr };
+        assert_eq!(recorded.file_reserves, std::vec![2]);
+    }
+
+    #[test]
+    fn file_map_page_and_release_route_to_the_current_live_space() {
+        let (fake, ptr) = leak_fake();
+        let _guard = publish_live_space_for_test(11, fake);
+
+        let producer = LiveMemMap::new(arch_at(11));
+        assert_eq!(producer.map_page(FILE_BASE, &[7; 12]), Ok(()));
+        assert_eq!(
+            producer.release(FILE_BASE, 4 * PAGE as u64),
+            Ok(FILE_RESIDENT)
+        );
+        // SAFETY: see above.
+        let recorded = unsafe { &*ptr };
+        assert_eq!(recorded.file_page_maps, std::vec![(FILE_BASE, 12)]);
+        assert_eq!(recorded.file_releases, std::vec![(FILE_BASE, 4)]);
+    }
+
+    #[test]
+    fn file_map_with_no_published_space_fails_closed() {
+        // No live space published on this CPU: every file-mapping operation
+        // announces the inert interface rather than pretending anything was
+        // reserved, backed, or freed. A zero length is refused before the
+        // space is even consulted.
+        let producer = LiveMemMap::new(arch_at(12));
+        assert_eq!(
+            FileMap::reserve(&producer, PAGE as u64),
+            Err(Errno::NotImplemented)
+        );
+        assert_eq!(
+            producer.map_page(0xF000_0000, &[1]),
+            Err(Errno::NotImplemented)
+        );
+        assert_eq!(
+            producer.release(0xF000_0000, PAGE as u64),
+            Err(Errno::NotImplemented)
+        );
+        assert_eq!(FileMap::reserve(&producer, 0), Err(Errno::LengthOutOfRange));
     }
 
     #[test]

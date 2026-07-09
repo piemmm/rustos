@@ -75,9 +75,9 @@ pub enum FstreeError {
 }
 
 /// Rows available to a pane body: the grid minus the status and message
-/// lines.
+/// lines and the box's top and bottom border rows.
 fn body_rows(screen_rows: u16) -> usize {
-    usize::from(screen_rows.saturating_sub(2))
+    usize::from(screen_rows.saturating_sub(4))
 }
 
 /// Drive the session against the seams until the user quits.
@@ -99,7 +99,9 @@ pub fn run<T: Tty>(
             model,
             fs,
             body_rows(screen.size().rows),
-            usize::from(screen.size().cols),
+            // The viewer wraps to the boxed interior, inside the side
+            // borders.
+            usize::from(screen.size().cols.saturating_sub(2)),
         );
         render(model, &mut window);
         screen.refresh(&window).map_err(|_| FstreeError::Terminal)?;

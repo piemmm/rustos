@@ -177,6 +177,55 @@ pub trait DispatchHook: Sync {
     ///
     /// Never panic, never silently succeed.
     fn dispatch(&self, raw_number: u16, args: RawArgs) -> DispatchOutcome;
+
+    /// Handle a user-mode data abort at `fault_va` on the calling CPU:
+    /// resolve it as demand-paged file backing (a `file_map` region) or
+    /// terminate the faulting task.
+    ///
+    /// The architecture port's user-fault path calls this before treating
+    /// the abort as fatal, and acts on the returned
+    /// [`UserFaultOutcome`]:
+    ///
+    /// * [`UserFaultOutcome::Resolved`] — the faulting page was made
+    ///   resident (or already was, a benign concurrent resolution): the
+    ///   port returns to the task and the retried access succeeds.
+    /// * [`UserFaultOutcome::Terminated`] — the address is not
+    ///   demand-paged backing of the current task's (a wild access, a page
+    ///   at/past end-of-file — the `SIGBUS` analogue — or an unresolvable
+    ///   read/OOM): the hook has already recorded the crash exit code and
+    ///   reclaimed the task's kernel resources, and the port suspends the
+    ///   task with [`crate::reschedule_current`] and
+    ///   [`RescheduleAction::Exit`] on the carried `cpu` — the task is
+    ///   reaped and never runs again, and the rest of the system is
+    ///   untouched (fail closed without collateral damage).
+    /// * [`UserFaultOutcome::Unhandled`] — the fault cannot even be
+    ///   attributed to a task (no current task on this CPU): the port
+    ///   falls back to its fatal path (halt), exactly as before.
+    ///
+    /// The default refuses every fault as [`UserFaultOutcome::Unhandled`],
+    /// so a hook built without a file-mapping resolver can never fabricate
+    /// memory.
+    fn resolve_user_fault(&self, _fault_va: u64) -> UserFaultOutcome {
+        UserFaultOutcome::Unhandled
+    }
+}
+
+/// Disposition of one [`DispatchHook::resolve_user_fault`] call — what the
+/// architecture port must do with the faulting task (see the method docs).
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum UserFaultOutcome {
+    /// The faulting page is now resident; return to the task and retry.
+    Resolved,
+    /// The fault was fatal to the task: its exit is recorded and its
+    /// kernel resources reclaimed; suspend it with
+    /// [`RescheduleAction::Exit`] on `cpu`.
+    Terminated {
+        /// The CPU the task was identified on; keys the per-CPU resume
+        /// handle exactly as [`DispatchOutcome::Reschedule`] does.
+        cpu: u32,
+    },
+    /// No task could be attributed; the port falls back to its fatal path.
+    Unhandled,
 }
 
 /// Kernel-side publication point for the production [`DispatchHook`].

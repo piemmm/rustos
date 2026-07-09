@@ -99,6 +99,8 @@ extern "C" {
 #define ROS_SYS_PIPE_CREATE 73u
 #define ROS_SYS_FS_SET_MODE 74u
 #define ROS_SYS_PORT_RESOLVE 75u
+#define ROS_SYS_FILE_MAP 76u
+#define ROS_SYS_FILE_UNMAP 77u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns ROS_E_WOULD_BLOCK when a
@@ -249,6 +251,8 @@ int32_t ros_sys_console_foreground(uint32_t a0, int32_t a1);
 int32_t ros_sys_pipe_create(void * a0);
 int32_t ros_sys_fs_set_mode(void * a0, uintptr_t a1, uint32_t a2);
 uint64_t ros_sys_port_resolve(void * a0, uintptr_t a1);
+uint64_t ros_sys_file_map(uint32_t a0, uint64_t a1, uint64_t a2);
+int32_t ros_sys_file_unmap(uint64_t a0, uint64_t a1);
 
 #ifdef __cplusplus
 } /* extern "C" */

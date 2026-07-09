@@ -690,13 +690,17 @@ fn the_frame_lays_out_panes_status_and_hints() {
     let m = model(&mut fs);
     let mut window = Window::new(Pos::new(0, 0), Size::new(8, 60));
     render(&m, &mut window);
-    // Tree pane: root marker and child dirs, divider at the tree width.
+    // Top border: the pane titles ride the box, divider at the tree width.
+    let top = row_text(&window, 0);
+    assert!(top.starts_with("┌─ Tree "), "got {top}");
+    assert!(top.contains("┬─ Files "), "got {top}");
+    // Tree pane content inside the border, the file pane past the divider.
     assert_eq!(
-        row_text(&window, 0),
-        format!("{:<20}|{}", "- /", file_row_text(&m, 0))
+        row_text(&window, 1),
+        format!("│{:<19}│{:<38}│", "- /", file_row_text(&m, 0))
     );
-    assert!(row_text(&window, 1).starts_with("  + docs"));
-    assert!(row_text(&window, 2).starts_with("  + locked"));
+    assert!(row_text(&window, 2).starts_with("│  + docs"));
+    assert!(row_text(&window, 3).starts_with("│  + locked"));
     // Status line: path, count, sort, free space.
     let status = row_text(&window, 6);
     assert!(status.starts_with("/  5 entries  sort name asc  free 500/1000"));
@@ -708,7 +712,8 @@ fn the_frame_lays_out_panes_status_and_hints() {
 fn file_row_text(m: &Model, index: usize) -> String {
     let files = m.visible_files();
     let entry = files[index];
-    // 60 cols, tree width 20, divider 1: the file pane is 39 wide.
+    // 60 cols, tree width 20, side borders and divider: the file pane's
+    // interior is 38 wide.
     let stamp = if entry.modified == Time64::UNIX_EPOCH {
         String::from("-")
     } else {
@@ -722,7 +727,7 @@ fn file_row_text(m: &Model, index: usize) -> String {
     let tail = format!("{size_text:>12} {stamp:>16}");
     // The row starts with the one-column tag marker (a space while
     // untagged), so the name field gives up marker + two separators.
-    let name_width = 39 - (tail.len() + 3);
+    let name_width = 38 - (tail.len() + 3);
     format!(" {:<name_width$} {tail}", entry.name)
 }
 
@@ -737,7 +742,9 @@ fn the_epoch_stamp_renders_as_absent_and_real_stamps_as_dates() {
     // The directory rows carry no stamp; the file rows carry real dates.
     let docs_row = grid.iter().find(|r| r.contains("docs")).expect("docs row");
     assert!(docs_row.contains("<dir>"));
-    assert!(docs_row.trim_end().ends_with('-'));
+    // The stamp is the last content character before the box's right
+    // border and its padding.
+    assert!(docs_row.trim_end_matches(['│', ' ']).ends_with('-'));
     let file_row = grid.iter().find(|r| r.contains("a.rs")).expect("file row");
     assert!(file_row.contains("1970-01-01 00:16"), "secs=1000 renders");
 }
@@ -750,7 +757,7 @@ fn the_help_overlay_replaces_the_panes() {
     assert_eq!(m.overlay, Overlay::Help);
     let mut window = Window::new(Pos::new(0, 0), Size::new(6, 40));
     render(&m, &mut window);
-    assert_eq!(row_text(&window, 0), "keys: q quits");
+    assert!(row_text(&window, 1).starts_with("│keys: q quits"));
     // Any key dismisses it.
     handle_event(&mut m, &mut fs, &Event::Char('x'));
     assert_eq!(m.overlay, Overlay::None);
@@ -2018,20 +2025,20 @@ fn the_text_view_renders_pages_and_scrolls() {
     let mut m = model(&mut fs);
     open_file(&mut m, &mut fs, "a.rs");
     refresh_viewer(&mut m, &mut fs, 3, 40);
-    let mut window = Window::new(Pos::new(0, 0), Size::new(5, 40));
+    let mut window = Window::new(Pos::new(0, 0), Size::new(7, 40));
     render(&m, &mut window);
-    assert!(row_text(&window, 0).starts_with("alpha"));
-    assert!(row_text(&window, 1).starts_with("bravo"));
-    assert!(row_text(&window, 2).starts_with("charlie"));
+    assert!(row_text(&window, 1).starts_with("│alpha"));
+    assert!(row_text(&window, 2).starts_with("│bravo"));
+    assert!(row_text(&window, 3).starts_with("│charlie"));
     // The status line names the file, the mode, and the place.
-    let status = row_text(&window, 3);
+    let status = row_text(&window, 5);
     assert!(status.starts_with("/a.rs  text"), "got {status}");
     assert!(status.contains("line 1"), "got {status}");
     // One row down.
     handle_event(&mut m, &mut fs, &Event::Down);
     refresh_viewer(&mut m, &mut fs, 3, 40);
     render(&m, &mut window);
-    assert!(row_text(&window, 0).starts_with("bravo"));
+    assert!(row_text(&window, 1).starts_with("│bravo"));
     assert_eq!(text_view(&m).top.line, Some(1));
     // A page down, then Home returns to the top.
     handle_event(&mut m, &mut fs, &Event::PageDown);
@@ -2146,18 +2153,18 @@ fn the_hex_view_renders_the_classic_dump() {
     let mut m = model(&mut fs);
     open_file(&mut m, &mut fs, "big");
     refresh_viewer(&mut m, &mut fs, 3, 80);
-    let mut window = Window::new(Pos::new(0, 0), Size::new(5, 80));
+    let mut window = Window::new(Pos::new(0, 0), Size::new(7, 80));
     render(&m, &mut window);
-    let first = row_text(&window, 0);
+    let first = row_text(&window, 1);
     assert!(
-        first.starts_with("00000000  00 01 02 03 04 05 06 07  08 09 0a 0b 0c 0d 0e 0f"),
+        first.starts_with("│00000000  00 01 02 03 04 05 06 07  08 09 0a 0b 0c 0d 0e 0f"),
         "got {first}"
     );
     assert!(first.contains("|................|"), "got {first}");
     // The 33..40 tail row is short: eight bytes, printable ASCII shown.
-    let third = row_text(&window, 2);
+    let third = row_text(&window, 3);
     assert!(
-        third.starts_with("00000020  20 21 22 23 24 25 26 27"),
+        third.starts_with("│00000020  20 21 22 23 24 25 26 27"),
         "got {third}"
     );
     assert!(third.contains("| !\"#$%&'|"), "got {third}");
@@ -2241,12 +2248,12 @@ fn a_file_past_4_gib_pages_with_full_64_bit_offsets() {
     handle_event(&mut m, &mut fs, &Event::Enter);
     assert_eq!(hex_view(&m).top, 0x1_2345_6780);
     refresh_viewer(&mut m, &mut fs, 2, 80);
-    let mut window = Window::new(Pos::new(0, 0), Size::new(4, 80));
+    let mut window = Window::new(Pos::new(0, 0), Size::new(6, 80));
     render(&m, &mut window);
     // The offset column widens to the file's own 64-bit reach (nine hex
     // digits for a 5 GiB file).
-    let first = row_text(&window, 0);
-    assert!(first.starts_with("123456780  "), "got {first}");
+    let first = row_text(&window, 1);
+    assert!(first.starts_with("│123456780  "), "got {first}");
     // End lands the final row of the 5 GiB file.
     handle_event(&mut m, &mut fs, &Event::End);
     let expected_top = (5 * 1024 * 1024 * 1024_u64 - 16) - 16;

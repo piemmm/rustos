@@ -27,8 +27,9 @@ pub mod spawn_producer;
 /// The aarch64 port configures `TCR_EL1.T0SZ = 25`, so the `TTBR0_EL1`
 /// (user) translation regime covers a 39-bit virtual address range
 /// `[0, 2^39)` = 512 GiB. `2^39` is therefore the first address a user
-/// mapping can never reach, and the ceiling the anonymous-heap window
-/// ([`crate::anon_layout::anon_window_pages`]) sizes itself below so it can
+/// mapping can never reach, and the ceiling the dynamic heap and
+/// file-mapping windows ([`crate::user_windows::user_windows`]) size
+/// themselves below so they can
 /// never run past addressable user space. Genuinely target-specific — the
 /// `T0SZ` the port programs dictates it — so it lives beside the port, not
 /// in the architecture-neutral layout module.

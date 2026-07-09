@@ -392,6 +392,24 @@ unsafe extern "C" fn rustos_aarch64_trap_handler(kind: u64, frame: *mut u64) {
             return;
         }
 
+        // A data abort from EL0 may be a demand-paged file-mapping fault:
+        // offer it to the installed resolver before the fatal path. A
+        // `true` return means the faulting page is now resident, so
+        // returning here lets the trampoline `eret` re-run the faulting
+        // instruction (`ELR_EL1` still points at it — the PE does not
+        // advance it for an abort). A fault that is fatal to the task
+        // alone never returns from the resolver (the callback suspends
+        // the task into the scheduler with an exit action); `false`
+        // falls through to the fatal path below, exactly as with no
+        // resolver installed (fail closed).
+        if kind == kind::LOWER_SYNC && crate::fault::is_lower_el_data_abort(esr) {
+            if let Some(resolver) = crate::fault::user_fault_resolver() {
+                if resolver(read_far()) {
+                    return;
+                }
+            }
+        }
+
         // Any other synchronous exception (an abort, or a non-`svc`
         // lower-EL fault). Forward to the installed fault handler if
         // present (the memory-isolation vertical installs one);

@@ -106,6 +106,12 @@ const NUM_MEM_MAP: u64 = SyscallNumber::MEM_MAP.as_u16() as u64;
 /// `mem_unmap` syscall number (as above).
 const NUM_MEM_UNMAP: u64 = SyscallNumber::MEM_UNMAP.as_u16() as u64;
 
+/// `file_map` syscall number (as above).
+const NUM_FILE_MAP: u64 = SyscallNumber::FILE_MAP.as_u16() as u64;
+
+/// `file_unmap` syscall number (as above).
+const NUM_FILE_UNMAP: u64 = SyscallNumber::FILE_UNMAP.as_u16() as u64;
+
 /// `mmio_map` syscall number (as above).
 const NUM_MMIO_MAP: u64 = SyscallNumber::MMIO_MAP.as_u16() as u64;
 
@@ -1192,6 +1198,56 @@ pub fn mem_unmap(base: u64, len: usize) -> i64 {
     // the `(base, len)` range against the caller's own address space before
     // unmapping it. No user pointer is dereferenced.
     let ret = unsafe { raw_syscall(NUM_MEM_UNMAP, [base, len as u64, 0, 0, 0, 0]) };
+    ret as i64
+}
+
+/// Map `len` bytes of the open file `fd`, starting at the page-aligned
+/// file byte `offset`, into the calling process's **own** address space as
+/// a demand-paged, read-only private mapping
+/// (`SyscallNumber::FILE_MAP` — the `mmap(2)` shape).
+///
+/// No page is read at call time: the kernel backs each page on first
+/// access, so a mapping may exceed RAM by orders of magnitude (a
+/// multi-terabyte file is viewed through the pages actually touched). `fd`
+/// must be open for reading and filesystem-backed; every demand-paged read
+/// is re-checked by the secured VFS under the mapping-time identity, and
+/// the mapping survives a later `fs_close(fd)`. Touching a page wholly
+/// at/past end-of-file terminates the process (the `SIGBUS` analogue), so
+/// callers bound their accesses by the file size (`fs_stat`). The mapping
+/// is never writable and never executable (W^X).
+///
+/// The kernel encodes the result as a signed register following the
+/// standard `abi-v1` convention: a non-negative value is the base address
+/// of the new region and a negative value is `-errno` (recover the
+/// [`rustos_abi::Errno`] discriminant as `-ret`). The wrapper surfaces
+/// that raw signed value; it adds no authority and hides no error.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 file_map-result encoding (base ≥ 0, else -errno).
+pub fn file_map(fd: u32, offset: u64, len: u64) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke — the kernel validates
+    // the call on the far side of the trap. `file_map` dereferences no user
+    // pointer; it reserves a region in the caller's own space and returns
+    // its base, so no memory operand is passed.
+    let ret = unsafe { raw_syscall(NUM_FILE_MAP, [u64::from(fd), offset, len, 0, 0, 0]) };
+    ret as i64
+}
+
+/// Release the whole file mapping of `len` bytes based at `base` previously
+/// returned by [`file_map`] from the calling process's own address space
+/// (`SyscallNumber::FILE_UNMAP`).
+///
+/// Only the exact whole region can be released; pages never touched were
+/// never backed and cost nothing, and the kernel zeroes the frames it
+/// reclaims (secret hygiene). Returns `0` on success or `-errno` (recover
+/// the [`rustos_abi::Errno`] discriminant as `-ret`), following the
+/// standard `abi-v1` signed-result convention; the wrapper hides no error.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 file_unmap-result encoding (0, else -errno).
+pub fn file_unmap(base: u64, len: u64) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // the `(base, len)` pair against the caller's own recorded mappings
+    // before any teardown. No user pointer is dereferenced.
+    let ret = unsafe { raw_syscall(NUM_FILE_UNMAP, [base, len, 0, 0, 0, 0]) };
     ret as i64
 }
 
@@ -3683,6 +3739,38 @@ mod tests {
         assert_eq!(args[0], base);
         assert_eq!(args[1], 0x2000);
         assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn file_map_marshals_fd_offset_and_len() {
+        let base = 0x30_0000_0000u64;
+        let want = i64::try_from(base).expect("base fits an i64");
+        let (number, args) = capture(base, || {
+            assert_eq!(file_map(7, 0x3000, 0x4001), want);
+        });
+        assert_eq!(number, NUM_FILE_MAP);
+        assert_eq!(args[0], 7);
+        assert_eq!(args[1], 0x3000);
+        assert_eq!(args[2], 0x4001);
+        assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn file_unmap_marshals_base_and_len_and_surfaces_errno() {
+        let base = 0x30_0000_0000u64;
+        let (number, args) = capture(0, || {
+            assert_eq!(file_unmap(base, 0x4001), 0);
+        });
+        assert_eq!(number, NUM_FILE_UNMAP);
+        assert_eq!(args[0], base);
+        assert_eq!(args[1], 0x4001);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+
+        let want = -i64::from(rustos_abi::Errno::NotFound.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let (_, _) = capture(neg, || {
+            assert_eq!(file_unmap(base, 0x4001), want);
+        });
     }
 
     #[test]

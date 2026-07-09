@@ -180,6 +180,20 @@ impl AnonWindowMap {
         base_va >= self.base.as_u64() && base_va < top
     }
 
+    /// `true` iff `va` (any address, not only a base) lies inside a *live*
+    /// allocation of this window — the test the live space uses before
+    /// backing a demand-paged fault, so an address in the window but outside
+    /// every reserved region is refused rather than silently backed.
+    #[must_use]
+    pub fn covers(&self, va: u64) -> bool {
+        let Some((&base, &pages)) = self.regions.range(..=va).next_back() else {
+            return false;
+        };
+        // The base cannot overflow: the window's top was validated at
+        // construction, so `base + pages * PAGE_SIZE` stays in range.
+        va < base + (pages as u64) * PAGE_SIZE as u64
+    }
+
     /// Number of live allocations.
     #[must_use]
     pub fn live(&self) -> usize {
@@ -291,6 +305,27 @@ mod tests {
         assert_eq!(w.live(), 1);
         w.release(a, 3).expect("the matching release succeeds");
         assert_eq!(w.live(), 0);
+    }
+
+    #[test]
+    fn covers_names_only_live_regions_never_the_gaps() {
+        let mut w = window();
+        let a = w.allocate(2).expect("fits");
+        let b = w.allocate(3).expect("fits");
+        // Any byte inside a live region is covered, including mid-page.
+        assert!(w.covers(a));
+        assert!(w.covers(a + PAGE + 123));
+        assert!(w.covers(b + 2 * PAGE));
+        // The exclusive top of a region and the window's unreserved tail
+        // are not (the fault path must refuse them).
+        assert!(!w.covers(b + 3 * PAGE));
+        assert!(!w.covers(WINDOW_BASE + (WINDOW_PAGES as u64 - 1) * PAGE));
+        // A released region stops being covered.
+        w.release(a, 2).expect("live");
+        assert!(!w.covers(a + PAGE));
+        assert!(w.covers(b), "the neighbour region is untouched");
+        // An address below the window is never covered.
+        assert!(!w.covers(WINDOW_BASE - 1));
     }
 
     #[test]

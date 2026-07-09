@@ -1698,6 +1698,36 @@ pub trait SyscallHandlers {
     ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
+
+    /// Map `len` bytes of open file `fd`, starting at the page-aligned
+    /// file byte `offset`, into the caller's own address space as a
+    /// demand-paged, read-only private mapping, returning its base
+    /// address (the `mmap(2)` shape).
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::FS_ACCESS`]. The implementation resolves `fd`
+    /// against the caller's table (open for reading, path-backed),
+    /// validates the alignment and extent, reserves the region, and
+    /// records the mapping-time identity the fault path pages under.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn file_map(
+        &self,
+        _caller: &CallerContext<'_>,
+        _fd: u32,
+        _offset: u64,
+        _len: u64,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Release the whole file mapping based at `base` (`len` bytes, as
+    /// requested at map time) from the caller's own address space.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn file_unmap(&self, _caller: &CallerContext<'_>, _base: u64, _len: u64) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
 }
 
 /// Architecture-neutral syscall dispatcher.
@@ -2220,6 +2250,18 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 // enforce after the copy-in.
                 let name_len = decode_len(args.0[1])?;
                 self.handlers.port_resolve(caller, args.0[0], name_len)
+            }
+            SyscallNumber::FILE_MAP => {
+                // args[0] is the descriptor; args[1] the page-aligned file
+                // offset; args[2] the length in bytes. Offset and length
+                // stay 64-bit end to end (storage width is never pointer
+                // width); the handler validates alignment and extent.
+                self.handlers
+                    .file_map(caller, decode_u32(args.0[0]), args.0[1], args.0[2])
+            }
+            SyscallNumber::FILE_UNMAP => {
+                // args[0] is the region base; args[1] its full length.
+                self.handlers.file_unmap(caller, args.0[0], args.0[1])
             }
             SyscallNumber::FS_CHDIR => {
                 // args[0] is the non-null path `UserPtr` (dispatcher-checked);
@@ -3235,6 +3277,22 @@ mod tests {
             _name_len: usize,
         ) -> SyscallResult {
             self.record("port_resolve");
+            Ok(0)
+        }
+
+        fn file_map(
+            &self,
+            _c: &CallerContext<'_>,
+            _fd: u32,
+            _offset: u64,
+            _len: u64,
+        ) -> SyscallResult {
+            self.record("file_map");
+            Ok(0)
+        }
+
+        fn file_unmap(&self, _c: &CallerContext<'_>, _base: u64, _len: u64) -> SyscallResult {
+            self.record("file_unmap");
             Ok(0)
         }
 

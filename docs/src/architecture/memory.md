@@ -755,23 +755,26 @@ allocator over one configured heap window, driven against a borrowed live
   live-plus-freed region count, never the page count of the window. The
   window is *address space*, not a physical resource, and its size is
   **derived from discovered RAM, never a hard-wired constant** (`AGENTS.md`
-  §24.1): each port places it as the **topmost** user region (4 GiB above
-  the image bias, `spawn_layout::ANON_WINDOW_OFFSET`, above the device, DMA,
-  and shared-memory windows) so it has room to grow, and sizes it through
-  `anon_layout::anon_window_pages(total_frames, base, USER_VA_TOP)` — the
-  size of physical RAM (the true upper bound on backable pages), clamped to
-  the addressable user VA above the base and floored at
-  `ANON_WINDOW_MIN_PAGES` (16 MiB) for a tiny machine. A 1 GiB machine gets
-  the same 1 GiB window the former fixed constant gave; a large server
-  scales up instead of being capped at 1 GiB. The window costs no RAM until
-  the frame allocator backs a mapping — and that backing fails closed as a
-  deterministic OOM (§4), so a 20 GiB request on a 1 GiB machine is refused
-  (at the virtual reservation if it exceeds the window, else at frame
-  exhaustion), never over-committed.
+  §24.1): each port places it as the topmost *fixed-anchor* user region
+  (4 GiB above the image bias, `spawn_layout::ANON_WINDOW_OFFSET`, above the
+  device, DMA, and shared-memory windows) and splits the address space above
+  it through `user_windows::user_windows(total_frames, base, USER_VA_TOP)` —
+  the heap window tracks physical RAM (the true upper bound on backable
+  pages), clamped to half the addressable user VA above the base and floored
+  at `ANON_WINDOW_MIN_PAGES` (16 MiB) for a tiny machine, while the
+  demand-paged **file-mapping window** (§7o) takes every remaining page up
+  to the per-port user-VA ceiling. A 1 GiB machine gets the same 1 GiB heap
+  window the former fixed constant gave; a large server scales up instead of
+  being capped at 1 GiB. The window costs no RAM until the frame allocator
+  backs a mapping — and that backing fails closed as a deterministic OOM
+  (§4), so a 20 GiB request on a 1 GiB machine is refused (at the virtual
+  reservation if it exceeds the window, else at frame exhaustion), never
+  over-committed.
 - **Tested.** `AnonWindowMap` host-unit tests (bump/no-overlap, exhaustion,
   release+reuse, fail-closed release), `LiveSpace` placement tests (real
   `HostPageTable` map + zero-on-map + reuse + fail-closed wrong-extent
-  unmap), the `LiveMemMap` routing test, and the extended
+  unmap), the `LiveMemMap` routing test, the `user_windows` split tests
+  (small/large RAM, half-split cap, degenerate spans), and the extended
   `mmio_map_qemu_aarch64` `-M virt` vertical's `mem_map` round-trip.
 
 ## 7g. Reclaimable-memory model (`reclaim`) and the filesystem cache
@@ -1261,6 +1264,69 @@ fails authentication on restore, and `RAMZIP_ENTRY_CORRUPT` (2003,
 Error) when it fails metadata validation or decompression after
 authenticating. Both carry numeric handles only (`space`, `page`,
 `task`) — never page contents, keys, or nonces.
+
+## 7o. Demand-paged file mappings (`file_map` / `file_unmap`)
+
+`file_map` (`abi-v1` no. 75) maps a byte range of an open, readable,
+filesystem-backed descriptor into the caller's own address space as a
+**demand-paged, read-only private mapping** — the `mmap(2)` shape. It is how
+a program views a file far larger than RAM (a 20 TB file on a 1 GiB machine
+costs only the pages actually touched, `AGENTS.md` §26.7):
+
+- **Reserve, don't read.** The handler validates the shape (page-aligned
+  offset, non-zero length, no overflow), resolves the descriptor
+  owner-checked against the kernel-trusted caller id (open for reading,
+  `OpenBacking::Path` only — a resource/pipe has no positional bytes), and
+  checks the projected total against the caller's shared
+  `AddressSpaceBytes` accounting (one budget with `mem_map`). It then
+  *reserves address space only* out of the task's file-mapping window
+  (`LiveSpace`'s file `AnonWindowMap`, sized by `user_windows` §7f) and
+  records a `FileRegion` — base, page-rounded length, resolved path,
+  page-aligned file offset, and the **mapping-time identity** (uid +
+  effective capability snapshot, the open-descriptor authority model; the
+  mapping survives a later `fs_close`).
+- **Fault-driven backing.** An EL0 data abort is offered to the resident
+  `DispatchHook::resolve_user_fault` before the fatal path (aarch64:
+  `fault::set_user_fault_resolver`, installed beside the dispatch callback).
+  The resolver attributes the fault to the scheduler's current task, looks
+  up the covering `FileRegion`, reads the single covering page through the
+  secured VFS **under the mapping-time identity** (owner/mode/ACL re-applied
+  on every fault), and maps it read-only, never executable
+  (`filemap::FILE_FLAGS`; a short tail page is zero-filled past
+  end-of-file). The registry snapshot is re-frozen so the copy path sees the
+  new page, and the task retries the faulting instruction.
+- **Fail closed, kill the task not the machine.** An address outside every
+  region, a page wholly at/past end-of-file (the `SIGBUS` analogue), a
+  filesystem error, or frame exhaustion terminates the *faulting task*: the
+  hook records exit code 139 (`128 + SIGSEGV`), reclaims exactly what
+  `exit`/signal-kill reclaim, and the port suspends it with an `Exit`
+  action. A fault with no attributable task falls back to the fatal halt. A
+  page already resident (a concurrent resolution) is a benign race and
+  simply resumes.
+- **Release is sparse.** `file_unmap` (no. 76) releases only the exact whole
+  `(base, len)` region the caller mapped (validated against the per-task
+  region table before any teardown): resident pages are unmapped and their
+  frames zeroed on free, never-touched holes cost nothing, the accounting
+  is credited, and the snapshot re-frozen so freed pages leave it. Task
+  exit reclaims resident pages through the live space's drop and the region
+  records through the registry withdraw.
+- **Limitation (staged).** A mapped page that was never touched from user
+  mode is not yet resolvable from the *kernel's* copy path: passing an
+  untouched region as a syscall buffer yields `BadAddress` until the pages
+  are touched. Resolving faults from `copy_in`/`copy_out` is staged work
+  (`.junie/fstree-next-plan.md`). aarch64 and riscv64 resolve faults today
+  (riscv64: the U-mode load/store page-fault branch in the trap handler);
+  x86_64's #PF ISR cannot yet *resume* an interrupted task, so its ports
+  pass a zero file window — `file_map` there fails closed as a
+  deterministic `OutOfMemory` until the resumable ISR lands (staged in
+  the same plan). wasm32 has no user-fault source and reserves nothing.
+- **Tested.** `kernel/mem` `filemap` engine tests (fill/zero-tail/W^X/
+  scrub-on-error, sparse release), `LiveSpace` file-region tests
+  (reserve/fault/read-back/release, fail-closed coverage checks, drop
+  reclaim), `kernel/core` handler + resolver tests (shape/fd/limit
+  refusals, exact-match unmap, page read at the right file offset, EOF and
+  foreign-task refusal, benign-race fold), dispatch-core fault-forwarding
+  tests, and the `lib/rt` wrapper marshalling tests.
 
 ## 8. Testing strategy
 

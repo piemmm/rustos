@@ -39,6 +39,7 @@ use alloc::vec::Vec;
 use crate::anon::{map_anonymous, unmap_anonymous, zero_frame, AnonError};
 use crate::anon_window::AnonWindowMap;
 use crate::dma::{DmaError, DmaWindowMap};
+use crate::filemap::{map_file_page, unmap_file_region};
 use crate::frame::FrameAllocator;
 use crate::mmio::{MmioError, MmioWindowMap};
 use crate::phys::PhysMap;
@@ -146,6 +147,58 @@ pub trait LiveUserSpace: Send {
     /// [`LiveSpaceError::Anon`] (e.g. [`AnonError::NotMapped`] when the
     /// range is not one this space mapped).
     fn unmap_anonymous(&mut self, base_va: u64, page_count: u64) -> Result<(), LiveSpaceError>;
+
+    /// Reserve `page_count` pages of *address space* for a demand-paged,
+    /// read-only file mapping at a **kernel-chosen** base, returning that
+    /// base. No page table entry is written and no frame is drawn: the
+    /// region is backed one page at a time by [`Self::map_file_page_at`]
+    /// from the kernel's fault path, so reserving a huge region costs
+    /// nothing until it is touched.
+    ///
+    /// The placement is drawn from this task's file-mapping window —
+    /// deliberately separate from the anonymous heap window, whose span is
+    /// clamped to physical RAM (anonymous pages must all be backable); a
+    /// file mapping is bounded only by address space.
+    ///
+    /// # Errors
+    ///
+    /// [`LiveSpaceError::Anon`] — [`AnonError::OutOfMemory`] when the file
+    /// window is exhausted (or absent on a degenerate configuration with no
+    /// address space left above the heap window), or the precise
+    /// placement error otherwise.
+    fn reserve_file_region(&mut self, page_count: u64) -> Result<u64, LiveSpaceError>;
+
+    /// Make the single page at the page-aligned `va` resident inside a
+    /// region previously returned by [`Self::reserve_file_region`],
+    /// carrying `contents` (at most one page; a short slice is the page
+    /// straddling end-of-file, zero-filled past it). The page is mapped
+    /// read-only and never executable.
+    ///
+    /// `va` must lie inside a *live* reserved file region: an address in
+    /// the window but outside every reservation is refused (fail closed) —
+    /// the fault path never backs address space the task did not map.
+    ///
+    /// # Errors
+    ///
+    /// [`LiveSpaceError::Anon`] — [`AnonError::NotMapped`] when `va` is not
+    /// covered by a live file region, [`AnonError::Map`] when the page is
+    /// already resident (a benign fault race; the caller retries the
+    /// access), or the precise frame/fill error otherwise.
+    fn map_file_page_at(&mut self, va: u64, contents: &[u8]) -> Result<(), LiveSpaceError>;
+
+    /// Release the whole file region based at `base_va` (`page_count`
+    /// pages, exactly as reserved), sparsely unmapping the pages fault
+    /// history made resident — zeroing each frame on free — and returning
+    /// the reservation to the file window. Returns the number of pages
+    /// that were resident.
+    ///
+    /// # Errors
+    ///
+    /// [`LiveSpaceError::Anon`] — [`AnonError::NotMapped`] when
+    /// `(base_va, page_count)` is not a live file region of this space
+    /// (fail closed: nothing is torn down).
+    fn release_file_region(&mut self, base_va: u64, page_count: u64)
+        -> Result<u64, LiveSpaceError>;
 
     /// Map `len` bytes of device physical memory beginning at `phys_base`
     /// into this space, returning the kernel-chosen base user virtual
@@ -280,7 +333,13 @@ pub trait LiveUserSpace: Send {
 ///   shared-memory window. It reuses the [`MmioWindowMap`] guarded-window
 ///   mechanism (one slot/guard definition) but maps cacheable, not
 ///   device-ordered, and owns no frames (the region's frames belong to the
-///   shared-region registry).
+///   shared-region registry);
+/// * `file` — the per-task placement allocator for demand-paged file
+///   mappings, over its own window above the heap window: reservations are
+///   pure address space, backed one page at a time by the fault path
+///   ([`crate::filemap`]). `None` on a degenerate configuration whose user
+///   address space has no room above the heap window (file mapping then
+///   fails closed as a deterministic OOM).
 pub struct LiveSpace<P: PageTable, M: PhysMap> {
     space: AddressSpace<P>,
     physmap: M,
@@ -289,6 +348,7 @@ pub struct LiveSpace<P: PageTable, M: PhysMap> {
     anon: AnonWindowMap,
     dma: DmaWindowMap,
     shared: MmioWindowMap,
+    file: Option<AnonWindowMap>,
 }
 
 impl<P: PageTable, M: PhysMap> LiveSpace<P, M> {
@@ -332,6 +392,8 @@ impl<P: PageTable, M: PhysMap> LiveSpace<P, M> {
         dma_window_pages: usize,
         shared_window_base: VirtAddr,
         shared_window_pages: usize,
+        file_window_base: VirtAddr,
+        file_window_pages: usize,
     ) -> Result<Self, MmioError> {
         let mmio = MmioWindowMap::new(mmio_window_base, mmio_window_pages)?;
         // An anonymous-heap-window config error is the same class of fault as
@@ -347,6 +409,18 @@ impl<P: PageTable, M: PhysMap> LiveSpace<P, M> {
         // its own virtual range distinct from the device-window range so the
         // two never collide.
         let shared = MmioWindowMap::new(shared_window_base, shared_window_pages)?;
+        // The file-mapping window is the one window that may legitimately be
+        // empty: a degenerate configuration with no address space left above
+        // the heap window still spawns, and file mapping fails closed at
+        // reservation time. A non-empty window is validated like the others.
+        let file = if file_window_pages == 0 {
+            None
+        } else {
+            Some(
+                AnonWindowMap::new(file_window_base, file_window_pages)
+                    .map_err(|_| MmioError::InvalidMapConfig)?,
+            )
+        };
         Ok(Self {
             space,
             physmap,
@@ -355,6 +429,7 @@ impl<P: PageTable, M: PhysMap> LiveSpace<P, M> {
             anon,
             dma,
             shared,
+            file,
         })
     }
 
@@ -420,6 +495,14 @@ where
     }
 
     fn unmap_anonymous(&mut self, base_va: u64, page_count: u64) -> Result<(), LiveSpaceError> {
+        // A file-mapped region is released only through
+        // `release_file_region` (its residency is sparse and its
+        // bookkeeping lives in the file window): an anonymous unmap naming
+        // an address in the file window is the wrong call and fails closed
+        // before any teardown.
+        if self.file.as_ref().is_some_and(|file| file.owns(base_va)) {
+            return Err(LiveSpaceError::Anon(AnonError::NotMapped));
+        }
         // A base inside the heap window is a non-`FIXED` placement: it must
         // match a live record exactly before any teardown, so a bad
         // (base, len) for an in-window address fails closed without unmapping
@@ -444,6 +527,70 @@ where
             let _ = self.anon.release(base_va, page_count);
         }
         Ok(())
+    }
+
+    fn reserve_file_region(&mut self, page_count: u64) -> Result<u64, LiveSpaceError> {
+        // Pure placement: no page table entry and no frame until a fault
+        // lands in the region. An absent window (degenerate configuration)
+        // is the same deterministic refusal as an exhausted one.
+        let file = self
+            .file
+            .as_mut()
+            .ok_or(LiveSpaceError::Anon(AnonError::OutOfMemory))?;
+        Ok(file.allocate(page_count)?)
+    }
+
+    fn map_file_page_at(&mut self, va: u64, contents: &[u8]) -> Result<(), LiveSpaceError> {
+        // Only an address inside a live reserved file region is ever
+        // backed: the fault path must not be able to materialise memory
+        // the task never mapped (fail closed before any frame is drawn).
+        if !self.file.as_ref().is_some_and(|file| file.covers(va)) {
+            return Err(LiveSpaceError::Anon(AnonError::NotMapped));
+        }
+        let frames = self.frames;
+        map_file_page(
+            &mut self.space,
+            &self.physmap,
+            va,
+            contents,
+            || frames.alloc().ok(),
+            |frame| {
+                // The frame never became user-visible; returning it to the
+                // allocator cannot fail meaningfully (best-effort, never a
+                // panic).
+                let _ = frames.free(frame);
+            },
+        )?;
+        Ok(())
+    }
+
+    fn release_file_region(
+        &mut self,
+        base_va: u64,
+        page_count: u64,
+    ) -> Result<u64, LiveSpaceError> {
+        // The (base, extent) must name a live reservation exactly before
+        // any teardown, so a bad pair fails closed without touching a
+        // neighbour's pages; residency inside the region is fault history
+        // and legitimately sparse.
+        let file = self
+            .file
+            .as_mut()
+            .ok_or(LiveSpaceError::Anon(AnonError::NotMapped))?;
+        file.validate(base_va, page_count)?;
+        let frames = self.frames;
+        let resident = unmap_file_region(
+            &mut self.space,
+            &self.physmap,
+            base_va,
+            page_count,
+            |frame| {
+                let _ = frames.free(frame);
+            },
+        )?;
+        // Validated above, so the release matches; ignore its result.
+        let _ = file.release(base_va, page_count);
+        Ok(resident)
     }
 
     fn map_device_window(&mut self, phys_base: u64, len: usize) -> Result<u64, LiveSpaceError> {
@@ -593,6 +740,22 @@ mod tests {
         SimPhysMap::new(PhysAddr::new(SIM_BASE), SIM_BYTES)
     }
 
+    use crate::phys::PhysMap;
+
+    /// A `PhysMap` view over one leaked, shared [`SimPhysMap`], so a test
+    /// observes the same simulated physical memory the live space writes
+    /// and scrubs through (each `sim()` owns disjoint storage).
+    struct SharedSim(&'static SimPhysMap);
+    impl PhysMap for SharedSim {
+        fn translate(
+            &self,
+            phys: crate::frame::PhysAddr,
+            len: usize,
+        ) -> Option<core::ptr::NonNull<u8>> {
+            self.0.translate(phys, len)
+        }
+    }
+
     /// The user virtual window device mappings land in — far above the
     /// anonymous regions the tests map, on freshly walked tables.
     const MMIO_WINDOW_BASE: u64 = 0x8000_0000;
@@ -614,6 +777,11 @@ mod tests {
     const SHARED_WINDOW_BASE: u64 = 0x2_0000_0000;
     const SHARED_WINDOW_PAGES: usize = 64;
 
+    /// The user virtual window demand-paged file mappings are reserved in —
+    /// distinct from every window and `FIXED` region above.
+    const FILE_WINDOW_BASE: u64 = 0x3_0000_0000;
+    const FILE_WINDOW_PAGES: usize = 64;
+
     fn live() -> LiveSpace<HostPageTable, SimPhysMap> {
         LiveSpace::new(
             AddressSpace::new(HostPageTable::new()),
@@ -627,6 +795,8 @@ mod tests {
             DMA_WINDOW_PAGES,
             VirtAddr::new(SHARED_WINDOW_BASE),
             SHARED_WINDOW_PAGES,
+            VirtAddr::new(FILE_WINDOW_BASE),
+            FILE_WINDOW_PAGES,
         )
         .expect("a page-aligned, non-zero window is valid")
     }
@@ -842,6 +1012,8 @@ mod tests {
                 DMA_WINDOW_PAGES,
                 VirtAddr::new(SHARED_WINDOW_BASE),
                 SHARED_WINDOW_PAGES,
+                VirtAddr::new(FILE_WINDOW_BASE),
+                FILE_WINDOW_PAGES,
             )
             .expect("windows are valid");
             live.alloc_dma(2 * PAGE_SIZE, 0)
@@ -865,22 +1037,6 @@ mod tests {
         // return *every* frame it owned — `FIXED` anonymous, placed
         // anonymous, and DMA alike — while leaving registry-owned shared
         // frames and device windows untouched, and scrub the freed bytes.
-        use crate::phys::PhysMap;
-
-        /// A `PhysMap` view over one leaked, shared [`SimPhysMap`], so the
-        /// test observes the same simulated physical memory the live space
-        /// scrubs through (each `sim()` owns disjoint storage).
-        struct SharedSim(&'static SimPhysMap);
-        impl PhysMap for SharedSim {
-            fn translate(
-                &self,
-                phys: crate::frame::PhysAddr,
-                len: usize,
-            ) -> Option<core::ptr::NonNull<u8>> {
-                self.0.translate(phys, len)
-            }
-        }
-
         let frames = leaked_frames();
         let before = frames.free_frames();
         let simmap: &'static SimPhysMap = Box::leak(Box::new(sim()));
@@ -905,6 +1061,8 @@ mod tests {
                 DMA_WINDOW_PAGES,
                 VirtAddr::new(SHARED_WINDOW_BASE),
                 SHARED_WINDOW_PAGES,
+                VirtAddr::new(FILE_WINDOW_BASE),
+                FILE_WINDOW_PAGES,
             )
             .expect("windows are valid");
 
@@ -985,6 +1143,8 @@ mod tests {
             DMA_WINDOW_PAGES,
             VirtAddr::new(SHARED_WINDOW_BASE),
             SHARED_WINDOW_PAGES,
+            VirtAddr::new(FILE_WINDOW_BASE),
+            FILE_WINDOW_PAGES,
         )
         .expect("windows are valid");
 
@@ -1042,6 +1202,119 @@ mod tests {
             live.unmap_shared(base, len).is_err(),
             "double-unmap of a shared region fails closed"
         );
+    }
+
+    #[test]
+    fn a_file_region_reserves_faults_reads_back_and_releases_sparsely() {
+        let frames = leaked_frames();
+        let before = frames.free_frames();
+        let (mut live, simmap) = live_over(frames);
+        // Reserving draws pure address space: no frame moves.
+        let base = live.reserve_file_region(4).expect("window has room");
+        assert!(base >= FILE_WINDOW_BASE);
+        assert_eq!(frames.free_frames(), before, "reservation costs no RAM");
+
+        // Fault two of the four pages resident and read the bytes back
+        // through the uaccess boundary.
+        live.map_file_page_at(base + PAGE_SIZE as u64, &[0x11; 8])
+            .expect("fault page 1");
+        live.map_file_page_at(base + 3 * PAGE_SIZE as u64, &[0x33; 8])
+            .expect("fault page 3");
+        let mut buf = [0u8; 8];
+        copy_in(
+            live.space(),
+            simmap,
+            VirtAddr::new(base + PAGE_SIZE as u64),
+            &mut buf,
+        )
+        .expect("resident page reads");
+        assert_eq!(buf, [0x11; 8]);
+
+        // Releasing reclaims exactly the two resident pages and returns
+        // the reservation for reuse.
+        assert_eq!(live.release_file_region(base, 4), Ok(2));
+        assert_eq!(frames.free_frames(), before, "all frames returned");
+        assert_eq!(
+            live.release_file_region(base, 4),
+            Err(LiveSpaceError::Anon(AnonError::NotMapped)),
+            "a released region is gone"
+        );
+        let again = live.reserve_file_region(4).expect("slots were returned");
+        assert_eq!(again, base, "first-fit reuses the released range");
+    }
+
+    #[test]
+    fn a_fault_outside_any_reserved_file_region_is_refused() {
+        let mut live = live();
+        // Nothing reserved: any window address is refused.
+        assert_eq!(
+            live.map_file_page_at(FILE_WINDOW_BASE, &[1]),
+            Err(LiveSpaceError::Anon(AnonError::NotMapped))
+        );
+        // With a reservation, an address past its top is still refused.
+        let base = live.reserve_file_region(2).expect("room");
+        assert_eq!(
+            live.map_file_page_at(base + 2 * PAGE_SIZE as u64, &[1]),
+            Err(LiveSpaceError::Anon(AnonError::NotMapped))
+        );
+    }
+
+    #[test]
+    fn unmap_anonymous_refuses_a_file_region_base() {
+        let mut live = live();
+        let base = live.reserve_file_region(2).expect("room");
+        live.map_file_page_at(base, &[7]).expect("fault");
+        // The anonymous release path must not tear down (or even inspect)
+        // a file region — wrong syscall, fail closed.
+        assert_eq!(
+            live.unmap_anonymous(base, 2),
+            Err(LiveSpaceError::Anon(AnonError::NotMapped))
+        );
+        assert_eq!(live.release_file_region(base, 2), Ok(1));
+    }
+
+    #[test]
+    fn dropping_the_live_space_reclaims_resident_file_pages() {
+        let frames = leaked_frames();
+        let before = frames.free_frames();
+        {
+            let (mut live, _sim) = live_over(frames);
+            let base = live.reserve_file_region(8).expect("room");
+            live.map_file_page_at(base, &[1]).expect("fault");
+            live.map_file_page_at(base + 5 * PAGE_SIZE as u64, &[2])
+                .expect("fault");
+            assert!(frames.free_frames() < before);
+        }
+        // Teardown walked the live pages: both resident file pages (and the
+        // page-table frames) came back.
+        assert_eq!(frames.free_frames(), before);
+    }
+
+    /// A live space over the caller's own `'static` allocator handle and a
+    /// shared simulated physical map (returned alongside), so a test can
+    /// watch frame counts across the space's life and read the bytes the
+    /// space wrote through the same storage.
+    fn live_over(
+        frames: &'static FrameAllocator,
+    ) -> (LiveSpace<HostPageTable, SharedSim>, &'static SimPhysMap) {
+        let simmap: &'static SimPhysMap = Box::leak(Box::new(sim()));
+        let live = LiveSpace::new(
+            AddressSpace::new(HostPageTable::new()),
+            SharedSim(simmap),
+            frames,
+            VirtAddr::new(MMIO_WINDOW_BASE),
+            MMIO_WINDOW_PAGES,
+            VirtAddr::new(ANON_WINDOW_BASE),
+            ANON_WINDOW_PAGES,
+            VirtAddr::new(DMA_WINDOW_BASE),
+            DMA_WINDOW_PAGES,
+            VirtAddr::new(SHARED_WINDOW_BASE),
+            SHARED_WINDOW_PAGES,
+            VirtAddr::new(FILE_WINDOW_BASE),
+            FILE_WINDOW_PAGES,
+        )
+        .expect("windows are valid");
+        (live, simmap)
     }
 
     /// The retained live space must be `Send` (it is owned by the kernel

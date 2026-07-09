@@ -64,6 +64,28 @@ pub extern "C" fn production_dispatch(
     }
 }
 
+/// Production user-fault resolver callback installed beside the dispatch
+/// callback before user space is entered.
+///
+/// The riscv64 trap handler offers every U-mode load/store page fault
+/// here first (`rustos_arch_riscv64::fault::UserFaultResolveFn`); the
+/// arch-neutral lookup → resolve → terminate sequence lives in
+/// [`crate::dispatch_core::resolve_user_fault_via_slot`] and is
+/// unit-tested there once. `true` re-runs the faulting instruction; a
+/// task-fatal fault never returns (the helper suspends the reclaimed
+/// task with an exit action); `false` sends the trap handler to its
+/// fatal path (fail closed).
+pub extern "C" fn production_user_fault(stval: u64) -> bool {
+    crate::dispatch_core::resolve_user_fault_via_slot(&DISPATCH_SLOT, stval)
+}
+
+// SAFETY-INVARIANT: [`production_user_fault`] is a valid
+// [`rustos_arch_riscv64::fault::UserFaultResolveFn`]. The compile-time
+// coercion below fails to type-check if the ABI, parameter list, or
+// return type ever drifts, matching `_DISPATCH_SIGNATURE_PINNED`.
+const _USER_FAULT_SIGNATURE_PINNED: rustos_arch_riscv64::fault::UserFaultResolveFn =
+    production_user_fault;
+
 /// Halt the hart forever (the riscv64 fail-closed branch).
 ///
 /// Wrapped behind a non-test indirection so host tests can replace the

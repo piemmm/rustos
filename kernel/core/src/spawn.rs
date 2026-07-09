@@ -1048,6 +1048,8 @@ mod tests {
                 8,
                 VirtAddr::new(0x7000_0000),
                 8,
+                VirtAddr::new(0x8000_0000),
+                8,
             )
             .expect("windows are valid");
             drop(live);

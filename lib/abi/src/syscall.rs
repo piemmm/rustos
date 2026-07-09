@@ -1385,6 +1385,46 @@ impl SyscallNumber {
     /// without a compiled-in endpoint number.
     pub const PORT_RESOLVE: Self = Self(75);
 
+    /// Map a byte range of an open file into the calling process's own
+    /// address space as a demand-paged, read-only private mapping
+    /// (the `mmap(2)` shape; see [`crate::memory`]).
+    ///
+    /// Arguments: `fd: u32` (a descriptor the caller opened for reading,
+    /// backed by a filesystem path), `offset: u64` (the file byte offset
+    /// the mapping starts at; must be page-aligned), and `len: u64` (the
+    /// mapping length in bytes, rounded up to whole pages). Returns the
+    /// page-aligned base address of the new region. No page is read or
+    /// backed at call time: each page is populated on first access by the
+    /// kernel's fault path, reading through the secured VFS under the
+    /// **mapping-time** identity (uid + capability snapshot, the same
+    /// authority model as the open descriptor itself), so a 20 TB file
+    /// costs only the pages actually touched. A page whose first byte
+    /// lies at or past end-of-file is not backed: touching it terminates
+    /// the faulting process (the `SIGBUS` analogue, fail closed); a page
+    /// straddling end-of-file is zero-filled past the end. The mapping is
+    /// always read-only and never executable (W^X); it survives a later
+    /// `fs_close` of `fd` (the region carries its own authority snapshot,
+    /// exactly as an open descriptor would). Unprivileged like
+    /// [`SyscallNumber::MEM_MAP`] — the region lands only in the caller's
+    /// own hardware-isolated space — but the handler requires the
+    /// descriptor to be open for reading and `CAP_FS_ACCESS`, the same
+    /// gate `fs_read` applies. The page-rounded extent is charged against
+    /// the caller's `AddressSpaceBytes` limit.
+    pub const FILE_MAP: Self = Self(76);
+
+    /// Release a region previously returned by [`SyscallNumber::FILE_MAP`]
+    /// from the calling process's own address space.
+    ///
+    /// Arguments: `base: u64` (the region's base, exactly as returned by
+    /// `file_map`) and `len: u64` (the region's full length in bytes, as
+    /// requested at map time). Only the whole region can be released;
+    /// a partial or unknown range fails closed with
+    /// [`crate::Errno::NotFound`]. Pages never touched were never backed
+    /// and cost nothing to release; resident pages are unmapped and their
+    /// frames zeroed on free (secret hygiene). Unprivileged, mirroring
+    /// [`SyscallNumber::MEM_UNMAP`].
+    pub const FILE_UNMAP: Self = Self(77);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 

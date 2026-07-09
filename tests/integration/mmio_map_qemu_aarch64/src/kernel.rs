@@ -98,6 +98,15 @@ const SHARED_WINDOW_BASE: u64 = USER_BIAS + 0x1_0000_0000;
 /// Pages backing the shared-memory window (256 KiB).
 const SHARED_WINDOW_PAGES: usize = 64;
 
+/// Base of the program's demand-paged file-mapping virtual region: 5 GiB
+/// above [`USER_BIAS`] - above the shared-memory window and clear of the
+/// image/stack - mirroring the production aarch64 spawn layout (the
+/// dynamic window above the anonymous heap).
+const FILE_WINDOW_BASE: u64 = USER_BIAS + 0x1_4000_0000;
+/// Pages of address space in the file-mapping window (this vertical never
+/// reserves out of it; it only has to be valid).
+const FILE_WINDOW_PAGES: usize = 64;
+
 /// Per-process stack-canary seed handed to the program.
 const CANARY: u64 = 0x5520_C000_D15E_A5ED;
 
@@ -549,6 +558,8 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         DMA_WINDOW_PAGES,
         VirtAddr::new(SHARED_WINDOW_BASE),
         SHARED_WINDOW_PAGES,
+        VirtAddr::new(FILE_WINDOW_BASE),
+        FILE_WINDOW_PAGES,
     ) else {
         qemu_exit::exit_failure(FAIL_LIVE_BUILD);
     };

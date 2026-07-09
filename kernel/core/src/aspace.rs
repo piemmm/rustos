@@ -51,6 +51,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use rustos_abi::hwtree::{GrantedResource, HwResource};
 use rustos_abi::{DescriptorTable, Errno, LimitKind, OpenFlags, ResourceLimit, STD_STREAM_COUNT};
+use rustos_caps::CapabilitySet;
 use rustos_kernel_mem::{PhysMap, UserAddressSpace};
 use rustos_kernel_sec::TaskId;
 
@@ -140,19 +141,20 @@ pub struct AddressSpaceRegistry {
     /// [`withdraw`](Self::withdraw) so a reused id never inherits a dead
     /// task's handles.
     open_files: BTreeMap<TaskId, OpenFileTable>,
-    /// Each live task's running total of anonymous memory it has mapped
-    /// through `mem_map`, in bytes (whole pages). Co-located with the
-    /// address space for the same reason as [`Self::streams`]: it shares the
-    /// exact per-process lifecycle — accrued on a `mem_map`, released on a
-    /// `mem_unmap`, and dropped when the task exits — and is keyed by the
+    /// Each live task's running total of mapped address space, in bytes
+    /// (whole pages): anonymous memory from `mem_map` plus demand-paged
+    /// file regions from `file_map`. Co-located with the address space for
+    /// the same reason as [`Self::streams`]: it shares the exact
+    /// per-process lifecycle — accrued on a map, released on the matching
+    /// unmap, and dropped when the task exits — and is keyed by the
     /// same [`TaskId`]. This is the live usage the kernel checks the
     /// `LimitKind::AddressSpaceBytes` ceiling against so the limit is
     /// actually enforced on the allocation path (fail closed) rather than
     /// merely stored. A task with no entry has mapped nothing, so
-    /// [`Self::mapped_anon_bytes`] resolves to `0`. Dropped at
+    /// [`Self::mapped_aspace_bytes`] resolves to `0`. Dropped at
     /// [`withdraw`](Self::withdraw) so a reused id never inherits a dead
     /// task's accounting.
-    mapped_anon_bytes: BTreeMap<TaskId, u64>,
+    mapped_aspace_bytes: BTreeMap<TaskId, u64>,
     /// Each live task's current working directory, as a normalised absolute
     /// path (the `/`-view spelling). Co-located with the address space for
     /// the same reason as [`Self::streams`]: it shares the exact per-process
@@ -165,6 +167,45 @@ pub struct AddressSpaceRegistry {
     /// [`withdraw`](Self::withdraw) so a reused id never inherits a dead
     /// task's directory.
     cwds: BTreeMap<TaskId, String>,
+    /// Each live task's demand-paged file mappings (the regions `file_map`
+    /// reserves and the fault path backs), keyed by region base. Co-located
+    /// with the address space for the same reason as [`Self::open_files`]:
+    /// a mapping shares the exact per-process lifecycle — recorded on
+    /// `file_map`, removed on `file_unmap`, and dropped when the task exits
+    /// — and is keyed by the same kernel-trusted [`TaskId`]. A task with no
+    /// entry has mapped no file, so a fault outside every record resolves
+    /// to `None` and the task is terminated rather than silently backed
+    /// (fail closed). Dropped at [`withdraw`](Self::withdraw) so a reused
+    /// id never inherits a dead task's mappings.
+    file_regions: BTreeMap<TaskId, BTreeMap<u64, FileRegion>>,
+}
+
+/// One live demand-paged file mapping of a task: the region `file_map`
+/// reserved, the file range behind it, and the mapping-time identity the
+/// fault path reads under.
+///
+/// `len` is the page-rounded byte length actually reserved (the figure
+/// charged against `LimitKind::AddressSpaceBytes` and credited back on
+/// release), and `offset` the page-aligned file byte offset of the
+/// region's first page. `uid` and `caps` are the caller's kernel-attested
+/// owner and effective capability snapshot at map time — the same
+/// authority model as an open descriptor, so a later capability revocation
+/// affects new mappings, not pages an existing mapping still faults in
+/// (exactly as it does not retract an open descriptor).
+#[derive(Clone, Debug)]
+pub struct FileRegion {
+    /// Base user virtual address of the reserved region.
+    pub base: u64,
+    /// Page-rounded byte length of the region.
+    pub len: u64,
+    /// Absolute path of the mapped file, as resolved at open time.
+    pub path: String,
+    /// Page-aligned byte offset into the file of the region's first page.
+    pub offset: u64,
+    /// The mapping caller's kernel-attested owning user id.
+    pub uid: u32,
+    /// The mapping caller's effective capability set at map time.
+    pub caps: CapabilitySet,
 }
 
 /// What a descriptor resolves to: a filesystem path or a typed resource.
@@ -360,8 +401,9 @@ impl AddressSpaceRegistry {
             grants: BTreeMap::new(),
             loaded_nodes: BTreeMap::new(),
             open_files: BTreeMap::new(),
-            mapped_anon_bytes: BTreeMap::new(),
+            mapped_aspace_bytes: BTreeMap::new(),
             cwds: BTreeMap::new(),
+            file_regions: BTreeMap::new(),
         }
     }
 
@@ -438,8 +480,9 @@ impl AddressSpaceRegistry {
         let had_grants = self.grants.remove(&task).is_some();
         let had_node = self.loaded_nodes.remove(&task).is_some();
         let had_files = self.open_files.remove(&task).is_some();
-        let had_anon = self.mapped_anon_bytes.remove(&task).is_some();
+        let had_anon = self.mapped_aspace_bytes.remove(&task).is_some();
         let had_cwd = self.cwds.remove(&task).is_some();
+        let had_file_regions = self.file_regions.remove(&task).is_some();
         self.tasks.remove(&task).is_some()
             || had_streams
             || had_limits
@@ -448,6 +491,7 @@ impl AddressSpaceRegistry {
             || had_files
             || had_anon
             || had_cwd
+            || had_file_regions
     }
 
     /// Record that the autoloaded driver `task` was loaded for the discovered
@@ -646,47 +690,103 @@ impl AddressSpaceRegistry {
         self.limits.get(&task).copied().unwrap_or_default()
     }
 
-    /// `task`'s running total of anonymous memory mapped through `mem_map`,
-    /// in bytes, or `0` when it has mapped none.
+    /// `task`'s running total of mapped address space — anonymous memory
+    /// plus demand-paged file regions — in bytes, or `0` when it has mapped
+    /// none.
     ///
-    /// The `mem_map` handler reads this to check a request against the
-    /// `LimitKind::AddressSpaceBytes` ceiling before mapping. The `task`
-    /// argument is the kernel-trusted caller id.
+    /// The `mem_map` and `file_map` handlers read this to check a request
+    /// against the `LimitKind::AddressSpaceBytes` ceiling before mapping.
+    /// The `task` argument is the kernel-trusted caller id.
     #[must_use]
-    pub fn mapped_anon_bytes(&self, task: TaskId) -> u64 {
-        self.mapped_anon_bytes.get(&task).copied().unwrap_or(0)
+    pub fn mapped_aspace_bytes(&self, task: TaskId) -> u64 {
+        self.mapped_aspace_bytes.get(&task).copied().unwrap_or(0)
     }
 
-    /// Accrue `bytes` against `task`'s mapped-anonymous-memory total.
+    /// Accrue `bytes` against `task`'s mapped-address-space total.
     ///
-    /// Called by the `mem_map` handler *after* a map succeeds and only once
+    /// Called by the `mem_map`/`file_map` handlers *after* a map succeeds and only once
     /// the request has been admitted against the task's
     /// `LimitKind::AddressSpaceBytes` ceiling, so the saturating add never
     /// loses accounting in practice; it saturates rather than wraps purely
     /// so a future miscount can never silently understate usage (fail
     /// closed, never a panic). The `task` argument is the kernel-trusted
     /// caller id.
-    pub fn charge_anon(&mut self, task: TaskId, bytes: u64) {
-        let entry = self.mapped_anon_bytes.entry(task).or_insert(0);
+    pub fn charge_aspace_bytes(&mut self, task: TaskId, bytes: u64) {
+        let entry = self.mapped_aspace_bytes.entry(task).or_insert(0);
         *entry = entry.saturating_add(bytes);
     }
 
-    /// Release `bytes` from `task`'s mapped-anonymous-memory total.
+    /// Release `bytes` from `task`'s mapped-address-space total.
     ///
-    /// Called by the `mem_unmap` handler *after* an unmap succeeds, so
+    /// Called by the `mem_unmap`/`file_unmap` handlers *after* an unmap succeeds, so
     /// `bytes` corresponds to pages that were actually backed and charged.
     /// The subtraction saturates at zero (it can never underflow into a
     /// bogus huge total that would wrongly deny later maps) and drops the
     /// entry once it reaches zero so a task that frees everything holds no
     /// residual accounting. The `task` argument is the kernel-trusted
     /// caller id.
-    pub fn credit_anon(&mut self, task: TaskId, bytes: u64) {
-        if let Some(entry) = self.mapped_anon_bytes.get_mut(&task) {
+    pub fn credit_aspace_bytes(&mut self, task: TaskId, bytes: u64) {
+        if let Some(entry) = self.mapped_aspace_bytes.get_mut(&task) {
             *entry = entry.saturating_sub(bytes);
             if *entry == 0 {
-                self.mapped_anon_bytes.remove(&task);
+                self.mapped_aspace_bytes.remove(&task);
             }
         }
+    }
+
+    /// Record `task`'s live demand-paged file mapping `region`, keyed by its
+    /// base address.
+    ///
+    /// Called by the `file_map` handler *after* the producer has reserved
+    /// the region, so every record names address space the task actually
+    /// holds. The record carries the mapping-time identity (uid + effective
+    /// capability snapshot) the fault path pages under — the same authority
+    /// model as an open descriptor, resolved once at map time. The `task`
+    /// argument is the kernel-trusted caller id.
+    pub fn record_file_region(&mut self, task: TaskId, region: FileRegion) {
+        self.file_regions
+            .entry(task)
+            .or_default()
+            .insert(region.base, region);
+    }
+
+    /// Resolve `task`'s file-mapping record whose `(base, len)` matches
+    /// exactly, without removing it.
+    ///
+    /// The `file_unmap` handler validates the caller-named pair against
+    /// this before any teardown, so a mismatched or unknown pair fails
+    /// closed touching nothing.
+    #[must_use]
+    pub fn file_region_exact(&self, task: TaskId, base: u64, len: u64) -> Option<FileRegion> {
+        let region = self.file_regions.get(&task)?.get(&base)?;
+        (region.len == len).then(|| region.clone())
+    }
+
+    /// Remove `task`'s file-mapping record based at `base`, returning it.
+    ///
+    /// Called by the `file_unmap` handler *after* the producer released the
+    /// region, so record and reservation leave together.
+    pub fn remove_file_region(&mut self, task: TaskId, base: u64) -> Option<FileRegion> {
+        let regions = self.file_regions.get_mut(&task)?;
+        let removed = regions.remove(&base);
+        if regions.is_empty() {
+            self.file_regions.remove(&task);
+        }
+        removed
+    }
+
+    /// Resolve the file-mapping record of `task`'s that covers the virtual
+    /// address `va`, if any.
+    ///
+    /// The user-fault resolver calls this to decide whether a faulting
+    /// address is demand-paged file backing (resolve and resume) or a
+    /// genuine wild access (terminate, fail closed). Returns a clone so no
+    /// registry lock is held across the filesystem read that follows.
+    #[must_use]
+    pub fn file_region_covering(&self, task: TaskId, va: u64) -> Option<FileRegion> {
+        let regions = self.file_regions.get(&task)?;
+        let (_, region) = regions.range(..=va).next_back()?;
+        (va < region.base + region.len).then(|| region.clone())
     }
 
     /// Open a file/directory descriptor for `task`, recording the resolved
@@ -1403,41 +1503,122 @@ mod tests {
     #[test]
     fn a_task_with_no_mapping_has_zero_mapped_anon_bytes() {
         let reg = AddressSpaceRegistry::new();
-        assert_eq!(reg.mapped_anon_bytes(TaskId(2)), 0);
+        assert_eq!(reg.mapped_aspace_bytes(TaskId(2)), 0);
     }
 
     #[test]
     fn charge_then_credit_tracks_the_running_total() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.charge_anon(TaskId(2), 0x4000);
-        assert_eq!(reg.mapped_anon_bytes(TaskId(2)), 0x4000);
+        reg.charge_aspace_bytes(TaskId(2), 0x4000);
+        assert_eq!(reg.mapped_aspace_bytes(TaskId(2)), 0x4000);
         // A second map accrues onto the existing total.
-        reg.charge_anon(TaskId(2), 0x1000);
-        assert_eq!(reg.mapped_anon_bytes(TaskId(2)), 0x5000);
+        reg.charge_aspace_bytes(TaskId(2), 0x1000);
+        assert_eq!(reg.mapped_aspace_bytes(TaskId(2)), 0x5000);
         // Freeing one region credits it back.
-        reg.credit_anon(TaskId(2), 0x1000);
-        assert_eq!(reg.mapped_anon_bytes(TaskId(2)), 0x4000);
+        reg.credit_aspace_bytes(TaskId(2), 0x1000);
+        assert_eq!(reg.mapped_aspace_bytes(TaskId(2)), 0x4000);
     }
 
     #[test]
     fn credit_saturates_at_zero_and_drops_the_entry() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.charge_anon(TaskId(2), 0x2000);
+        reg.charge_aspace_bytes(TaskId(2), 0x2000);
         // Crediting more than is charged can never underflow into a bogus
         // huge total that would wrongly deny later maps.
-        reg.credit_anon(TaskId(2), 0x9000);
-        assert_eq!(reg.mapped_anon_bytes(TaskId(2)), 0);
+        reg.credit_aspace_bytes(TaskId(2), 0x9000);
+        assert_eq!(reg.mapped_aspace_bytes(TaskId(2)), 0);
         // Crediting a task that holds nothing is a no-op.
-        reg.credit_anon(TaskId(3), 0x1000);
-        assert_eq!(reg.mapped_anon_bytes(TaskId(3)), 0);
+        reg.credit_aspace_bytes(TaskId(3), 0x1000);
+        assert_eq!(reg.mapped_aspace_bytes(TaskId(3)), 0);
     }
 
     #[test]
     fn withdraw_drops_anon_accounting_so_a_reused_id_starts_clean() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.charge_anon(TaskId(4), 0x8000);
+        reg.charge_aspace_bytes(TaskId(4), 0x8000);
         assert!(reg.withdraw(TaskId(4)));
         // A reused id never inherits the dead task's mapped-memory total.
-        assert_eq!(reg.mapped_anon_bytes(TaskId(4)), 0);
+        assert_eq!(reg.mapped_aspace_bytes(TaskId(4)), 0);
+    }
+
+    // --- demand-paged file-mapping regions (file_map / file_unmap) --------
+
+    fn file_region(base: u64, len: u64) -> FileRegion {
+        FileRegion {
+            base,
+            len,
+            path: String::from("/big"),
+            offset: 0x1000,
+            uid: 7,
+            caps: CapabilitySet::from_words([0; 4]),
+        }
+    }
+
+    #[test]
+    fn file_region_exact_matches_only_the_recorded_pair_of_the_owner() {
+        let mut reg = AddressSpaceRegistry::new();
+        reg.record_file_region(TaskId(2), file_region(0x10_0000, 0x4000));
+        // The exact `(base, len)` of the recording task resolves; a wrong
+        // base, a wrong length, and another task's lookup all fail closed.
+        assert!(reg
+            .file_region_exact(TaskId(2), 0x10_0000, 0x4000)
+            .is_some());
+        assert!(reg
+            .file_region_exact(TaskId(2), 0x10_1000, 0x4000)
+            .is_none());
+        assert!(reg
+            .file_region_exact(TaskId(2), 0x10_0000, 0x3000)
+            .is_none());
+        assert!(reg
+            .file_region_exact(TaskId(3), 0x10_0000, 0x4000)
+            .is_none());
+    }
+
+    #[test]
+    fn file_region_covering_resolves_only_addresses_inside_a_live_region() {
+        let mut reg = AddressSpaceRegistry::new();
+        reg.record_file_region(TaskId(2), file_region(0x10_0000, 0x4000));
+        reg.record_file_region(TaskId(2), file_region(0x20_0000, 0x1000));
+        // Base, an interior byte, and the last byte are covered.
+        assert!(reg.file_region_covering(TaskId(2), 0x10_0000).is_some());
+        assert!(reg.file_region_covering(TaskId(2), 0x10_2fff).is_some());
+        assert!(reg.file_region_covering(TaskId(2), 0x10_3fff).is_some());
+        // The exclusive top, the gap between regions, an address below every
+        // region, and another task's address space are not.
+        assert!(reg.file_region_covering(TaskId(2), 0x10_4000).is_none());
+        assert!(reg.file_region_covering(TaskId(2), 0x18_0000).is_none());
+        assert!(reg.file_region_covering(TaskId(2), 0x0f_ffff).is_none());
+        assert!(reg.file_region_covering(TaskId(3), 0x10_0000).is_none());
+        // The second region resolves independently and carries its record.
+        let hit = reg
+            .file_region_covering(TaskId(2), 0x20_0abc)
+            .expect("inside the second region");
+        assert_eq!(hit.base, 0x20_0000);
+        assert_eq!(hit.path, "/big");
+    }
+
+    #[test]
+    fn remove_file_region_returns_the_record_and_only_once() {
+        let mut reg = AddressSpaceRegistry::new();
+        reg.record_file_region(TaskId(2), file_region(0x10_0000, 0x4000));
+        let removed = reg
+            .remove_file_region(TaskId(2), 0x10_0000)
+            .expect("recorded");
+        assert_eq!(removed.len, 0x4000);
+        // Gone: neither an exact lookup, a covering lookup, nor a second
+        // removal can see it.
+        assert!(reg
+            .file_region_exact(TaskId(2), 0x10_0000, 0x4000)
+            .is_none());
+        assert!(reg.file_region_covering(TaskId(2), 0x10_0001).is_none());
+        assert!(reg.remove_file_region(TaskId(2), 0x10_0000).is_none());
+    }
+
+    #[test]
+    fn withdraw_drops_file_regions_so_a_reused_id_starts_clean() {
+        let mut reg = AddressSpaceRegistry::new();
+        reg.record_file_region(TaskId(5), file_region(0x10_0000, 0x4000));
+        assert!(reg.withdraw(TaskId(5)));
+        assert!(reg.file_region_covering(TaskId(5), 0x10_0000).is_none());
     }
 }

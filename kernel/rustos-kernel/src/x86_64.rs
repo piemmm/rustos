@@ -34,8 +34,8 @@ pub mod spawn_producer;
 /// whose canonical *lower* (user) half is `[0, 2^47)` — the same
 /// `0x0000_8000_0000_0000` boundary the syscall-entry canonicality check
 /// guards. `2^47` is therefore the first address a user mapping can never
-/// reach, and the ceiling the anonymous-heap window
-/// ([`crate::anon_layout::anon_window_pages`]) sizes itself below so it can
+/// reach, and the ceiling the dynamic heap and file-mapping windows
+/// ([`crate::user_windows::user_windows`]) size themselves below so they can
 /// never run past addressable user space. Genuinely target-specific — the
 /// paging mode dictates it — so it lives beside the port, not in the
 /// architecture-neutral layout module.

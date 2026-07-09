@@ -81,6 +81,76 @@ mod program {
     struct RtFs {
         reader: Option<(String, File)>,
         writer: Option<(String, File)>,
+        mapped: Option<MappedFile>,
+    }
+
+    /// One live demand-paged mapping of the file the viewers are reading
+    /// (`file_map`): the kernel backs each page on first access, so one
+    /// mapping serves a file of any size — a 20 TB file costs only the
+    /// pages the viewer actually shows. Dropped (released) when another
+    /// file is read or the file is mutated.
+    struct MappedFile {
+        path: String,
+        base: u64,
+        len: u64,
+        /// Apparent file size at map time: the hard bound on every copy,
+        /// because a page wholly past end-of-file is never touched (the
+        /// kernel would terminate the process — the `SIGBUS` analogue).
+        size: u64,
+    }
+
+    impl MappedFile {
+        /// Map the whole of `path` read-only, or `None` when the file is
+        /// empty or the kernel refuses (no file-mapping window on this
+        /// port, a non-mappable backing) — the caller then streams.
+        fn open(path: &str) -> Option<MappedFile> {
+            let file = File::open(path.as_bytes(), OpenFlags::READ).ok()?;
+            let size = file.stat().ok()?.size;
+            if size == 0 {
+                return None;
+            }
+            let ret = rustos_rt::file_map(file.fd(), 0, size);
+            // The mapping carries its own authority snapshot, so the
+            // descriptor closes here (on drop) without affecting it.
+            let base = u64::try_from(ret).ok()?;
+            Some(MappedFile {
+                path: String::from(path),
+                base,
+                len: size,
+                size,
+            })
+        }
+
+        /// Copy up to `buf.len()` bytes from `offset`, bounded by the
+        /// mapped size (`0` at or past end of file — the seam's end
+        /// signal).
+        fn read_at(&self, offset: u64, buf: &mut [u8]) -> usize {
+            if offset >= self.size {
+                return 0;
+            }
+            let available = self.size - offset;
+            let count = usize::try_from(available.min(buf.len() as u64)).unwrap_or(buf.len());
+            // SAFETY: the kernel mapped `[base, base + len)` read-only into
+            // this process at `file_map` time and `offset + count <= size
+            // <= len`, so every byte read lies inside the mapping and below
+            // end-of-file; `buf` is a live, disjoint local slice.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    (self.base + offset) as *const u8,
+                    buf.as_mut_ptr(),
+                    count,
+                );
+            }
+            count
+        }
+    }
+
+    impl Drop for MappedFile {
+        fn drop(&mut self) {
+            // Best-effort release; the kernel reclaims the region at exit
+            // regardless, and a refusal here has nothing to act on.
+            let _ = rustos_rt::file_unmap(self.base, self.len);
+        }
     }
 
     impl RtFs {
@@ -88,16 +158,27 @@ mod program {
             Self {
                 reader: None,
                 writer: None,
+                mapped: None,
             }
         }
 
-        /// Drop any cached handle on `path` after a mutation of it.
+        /// Drop any cached handle or mapping on `path` after a mutation of
+        /// it, so stale bytes are never served or written through.
         fn forget(&mut self, path: &str) {
             if matches!(&self.reader, Some((name, _)) if name == path) {
                 self.reader = None;
             }
             if matches!(&self.writer, Some((name, _)) if name == path) {
                 self.writer = None;
+            }
+            self.forget_mapping(path);
+        }
+
+        /// Drop the cached mapping on `path` alone (resident pages are a
+        /// map-time snapshot; a write to the file must invalidate them).
+        fn forget_mapping(&mut self, path: &str) {
+            if matches!(&self.mapped, Some(mapped) if mapped.path == path) {
+                self.mapped = None;
             }
         }
     }
@@ -168,6 +249,21 @@ mod program {
         }
 
         fn read(&mut self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
+            // The demand-paged mapping is the preferred window source: it
+            // serves a file of any size at the cost of the pages actually
+            // touched. One mapping is cached — the file the viewer is
+            // paging — and replaced when another file is read.
+            if !matches!(&self.mapped, Some(mapped) if mapped.path == path) {
+                self.mapped = MappedFile::open(path);
+            }
+            if let Some(mapped) = &self.mapped {
+                if mapped.path == path {
+                    return Ok(mapped.read_at(offset, buf));
+                }
+            }
+            // Streamed fallback — the same bytes through `fs_read` — for a
+            // file the kernel declined to map (an empty file, or a port
+            // with no file-mapping window yet).
             if !matches!(&self.reader, Some((name, _)) if name == path) {
                 let file =
                     File::open(path.as_bytes(), OpenFlags::READ).map_err(Errno::from_syscall)?;
@@ -191,6 +287,9 @@ mod program {
         }
 
         fn write(&mut self, path: &str, offset: u64, bytes: &[u8]) -> Result<(), Errno> {
+            // A write invalidates any mapping of the same file: resident
+            // pages are a map-time snapshot and must not be served stale.
+            self.forget_mapping(path);
             if !matches!(&self.writer, Some((name, _)) if name == path) {
                 let file =
                     File::open(path.as_bytes(), OpenFlags::WRITE).map_err(Errno::from_syscall)?;

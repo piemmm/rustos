@@ -337,10 +337,14 @@ pub const SHARED_WINDOW_PAGES: usize = 256;
 /// image, stack, and startup block. It is highest so it can extend upward
 /// toward the per-architecture user-VA ceiling without colliding with a
 /// fixed-size sibling — the room that lets the heap window scale with
-/// discovered RAM (see [`crate::anon_layout::anon_window_pages`]). The
-/// `mem_map` placement allocator hands each non-`FIXED` request a base out
-/// of `[bias + ANON_WINDOW_OFFSET, … + anon_window_pages·4 KiB)`. One value
-/// shared by every port for the same reason as [`MMIO_WINDOW_OFFSET`].
+/// discovered RAM and the demand-paged file-mapping window take every
+/// remaining page above the heap window's top (the
+/// [`crate::user_windows::user_windows`] split). The `mem_map` placement
+/// allocator hands each non-`FIXED` request a base out of
+/// `[bias + ANON_WINDOW_OFFSET, … + anon_pages·4 KiB)`, and `file_map`
+/// reservations land in the window from there up to the user-VA ceiling.
+/// One value shared by every port for the same reason as
+/// [`MMIO_WINDOW_OFFSET`].
 pub const ANON_WINDOW_OFFSET: u64 = 0x1_0000_0000;
 
 /// Per-process stack-canary seed handed to PID 1 `init`. Any value; the kernel RNG-seeded canary is a later stage.

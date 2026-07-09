@@ -80,6 +80,7 @@ pub mod console;
 pub mod devres;
 pub mod dispatch_slot;
 pub mod driver_store;
+pub mod filemap;
 pub mod fs;
 pub mod groups;
 pub mod hwtree;
@@ -166,11 +167,13 @@ pub use devres::{
 };
 pub use dispatch_slot::{
     AlreadyInstalledError, DispatchCallbackSlot, DispatchHook, DispatchOutcome, RescheduleAction,
+    UserFaultOutcome,
 };
 pub use driver_store::{
     enumerate_driver_store, DriverImageError, DriverImageReader, DRIVER_STORE_PATH,
     MAX_DRIVER_IMAGE_LEN, MAX_STORE_DEPTH, MAX_STORE_DRIVERS, SYSTEM_VOLUME_STORE_PATH,
 };
+pub use filemap::{FileMap, NullFileMap, NULL_FILE_MAP};
 pub use fs::{
     Access, AclEntry, AclWho, CachedFs, Credentials, FilesystemAlreadyInstalled, FilesystemService,
     IdentityAlreadyInstalled, LateFilesystem, LateIdentity, Metadata, Mode, MountPoint, MountTable,

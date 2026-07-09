@@ -372,25 +372,35 @@ impl ProcessSpawn for X86_64ProcessSpawn {
         // retains no live space and the child's `mem_map` / `mmio_map` fail
         // closed.
         let live: Option<Box<dyn LiveUserSpace + Send>> = match ctx.page_table_allocator() {
-            Some(static_frames) => LiveSpace::new(
-                space,
-                DirectPhysMap::new(KERNEL_VMA_BASE, PHYSMAP_SPAN),
-                static_frames,
-                VirtAddr::new(MMIO_WINDOW_BASE),
-                spawn_layout::MMIO_WINDOW_PAGES,
-                VirtAddr::new(ANON_WINDOW_BASE),
-                crate::anon_layout::anon_window_pages(
+            Some(static_frames) => {
+                let windows = crate::user_windows::user_windows(
                     static_frames.total_frames() as u64,
                     ANON_WINDOW_BASE,
                     super::USER_VA_TOP,
-                ),
-                VirtAddr::new(DMA_WINDOW_BASE),
-                spawn_layout::DMA_WINDOW_PAGES,
-                VirtAddr::new(SHARED_WINDOW_BASE),
-                spawn_layout::SHARED_WINDOW_PAGES,
-            )
-            .ok()
-            .map(|live| Box::new(live) as Box<dyn LiveUserSpace + Send>),
+                );
+                LiveSpace::new(
+                    space,
+                    DirectPhysMap::new(KERNEL_VMA_BASE, PHYSMAP_SPAN),
+                    static_frames,
+                    VirtAddr::new(MMIO_WINDOW_BASE),
+                    spawn_layout::MMIO_WINDOW_PAGES,
+                    VirtAddr::new(ANON_WINDOW_BASE),
+                    windows.anon_pages,
+                    VirtAddr::new(DMA_WINDOW_BASE),
+                    spawn_layout::DMA_WINDOW_PAGES,
+                    VirtAddr::new(SHARED_WINDOW_BASE),
+                    spawn_layout::SHARED_WINDOW_PAGES,
+                    VirtAddr::new(windows.file_base),
+                    // Zero until the x86_64 #PF path can *resume* a faulting
+                    // task (its ISR is currently no-return): with no window,
+                    // `file_map` fails closed as a deterministic OOM instead
+                    // of arming a mapping whose first touch would be fatal.
+                    // The resumable ISR is staged in `.junie/fstree-next-plan.md`.
+                    0,
+                )
+                .ok()
+                .map(|live| Box::new(live) as Box<dyn LiveUserSpace + Send>)
+            }
             None => None,
         };
 

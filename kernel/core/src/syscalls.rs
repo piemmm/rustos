@@ -115,7 +115,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::aspace::{AddressSpaceRegistry, OpenBacking};
+use crate::aspace::{AddressSpaceRegistry, FileRegion, OpenBacking};
 use crate::audit::AuditEvent;
 use crate::bootinfo::KernelArch;
 use crate::console::{ConsoleDevice, NO_CONSOLES};
@@ -124,7 +124,8 @@ use crate::devres::{
     MsiAllocFacility, SharedMemFacility, NULL_DMA_ALLOC_FACILITY, NULL_MMIO_MAP_FACILITY,
     NULL_MSI_ALLOC_FACILITY, NULL_SHARED_MEM_FACILITY,
 };
-use crate::dispatch_slot::{DispatchHook, DispatchOutcome, RescheduleAction};
+use crate::dispatch_slot::{DispatchHook, DispatchOutcome, RescheduleAction, UserFaultOutcome};
+use crate::filemap::{FileMap, NULL_FILE_MAP};
 use crate::fs::{
     FilesystemService, LateIdentity, VolumeForest, NULL_FILESYSTEM, NULL_VOLUME_FOREST,
 };
@@ -311,6 +312,14 @@ where
     /// producer through [`Self::with_mem_map`] once `SP5b` lands. Held as a
     /// `'static` borrow, exactly like the console device and spawn producer.
     mem_map: &'static (dyn MemMap + 'static),
+    /// The architecture-specific demand-paged file-mapping producer the
+    /// `file_map` / `file_unmap` syscalls and the user-fault resolver drive
+    /// to reserve, back, and release read-only file regions in the caller's
+    /// own live address space. Defaults to [`NULL_FILE_MAP`] (fail closed
+    /// with [`Errno::NotImplemented`]); the boot path installs the concrete
+    /// producer through [`Self::with_file_map`]. Held as a `'static`
+    /// borrow, exactly like the `mem_map` producer.
+    file_map: &'static (dyn FileMap + 'static),
     /// The scheduler-side process-wait producer the `wait` syscall drives
     /// to block the caller until one of its children exits, reap it, and
     /// report its exit code (`plans/SPAWN.md` SP6). Defaults to
@@ -517,6 +526,10 @@ where
             // the `kernel/mem` live-mapping producer (`plans/SPAWN.md` SP5b):
             // `mem_map` / `mem_unmap` fail closed with `NotImplemented`.
             mem_map: &NULL_MEM_MAP,
+            // File-mapping subsystem unwired until the boot path installs the
+            // `kernel/mem` live-mapping producer: `file_map` / `file_unmap`
+            // fail closed with `NotImplemented`.
+            file_map: &NULL_FILE_MAP,
             // Process-wait subsystem unwired until the boot path installs the
             // scheduler-side producer (`plans/SPAWN.md` SP6b): `wait` fails
             // closed with `NotImplemented`.
@@ -887,6 +900,20 @@ where
         self
     }
 
+    /// Install the architecture demand-paged file-mapping producer the
+    /// `file_map` / `file_unmap` syscalls and the user-fault resolver
+    /// drive, consuming and returning `self`.
+    ///
+    /// Until this is called the handler holds [`NULL_FILE_MAP`], so both
+    /// syscalls fail closed with [`Errno::NotImplemented`]. The producer
+    /// must be `'static`: it lives for the lifetime of the running kernel,
+    /// exactly like the `mem_map` producer.
+    #[must_use]
+    pub const fn with_file_map(mut self, file_map: &'static (dyn FileMap + 'static)) -> Self {
+        self.file_map = file_map;
+        self
+    }
+
     /// Install the architecture MMIO-map producer the `mmio_map` syscall
     /// drives, consuming and returning `self` (`plans/PI.md` P10 chunk
     /// 5d-0).
@@ -1206,11 +1233,89 @@ where
     /// registered snapshot is a no-op — there is nothing to refresh and the
     /// mutation could not have touched a live space either.
     fn refreeze_caller_aspace(&self, caller: &CallerContext<'_>) {
+        self.refreeze_task_aspace(caller.task_id);
+    }
+
+    /// Re-freeze the current CPU's live address space into the registry
+    /// under `task` — the [`Self::refreeze_caller_aspace`] mechanism, keyed
+    /// by a bare task id so the user-fault resolver (which has no
+    /// [`CallerContext`]) shares the one definition.
+    fn refreeze_task_aspace(&self, task: SecTaskId) {
         let cpu = SchedulerArch::current_cpu(self.arch);
         if let Some(frozen) = crate::kthread::with_current_live_space(cpu, |live| live.freeze()) {
             self.aspaces
                 .write()
-                .reregister_space(caller.task_id, Box::new(frozen));
+                .reregister_space(task, Box::new(frozen));
+        }
+    }
+
+    /// Record a fault-kill of `task` and reclaim its kernel resources —
+    /// the involuntary sibling of the `exit` handler, driven by the
+    /// user-fault resolver when an abort is fatal to the task.
+    ///
+    /// The exit code is [`FAULT_EXIT_CODE`] (the `128 + SIGSEGV` shell
+    /// convention), so a parent reaping the crashed child observes a
+    /// crash, not a clean exit. The scheduler reap itself is driven by the
+    /// port's `Exit` suspension, exactly as for the `exit` syscall.
+    pub(crate) fn record_fault_exit(&self, task: SecTaskId) {
+        self.process_wait.record_exit(task, FAULT_EXIT_CODE);
+        self.reclaim_task_resources(task);
+    }
+
+    /// Resolve a user-mode data abort at `fault_va` as demand-paged file
+    /// backing for `task`, returning `true` when the faulting page is now
+    /// resident and the access should simply be retried.
+    ///
+    /// The demand-paging heart of `file_map`: if `fault_va` lies inside a
+    /// region the task mapped, the single covering page is read through
+    /// the secured VFS **under the mapping-time identity** (uid +
+    /// capability snapshot — the secured VFS re-applies the owner/mode/ACL
+    /// checks on every fault, so a permission change on the file is
+    /// honoured for pages not yet resident) and mapped read-only into the
+    /// task's live space. Everything else is refused (fail closed): an
+    /// address outside every region, a page wholly at/past end-of-file
+    /// (the `SIGBUS` analogue), a filesystem error, or frame exhaustion
+    /// all report `false`, and the arch port terminates the task rather
+    /// than back memory it cannot vouch for. A page that became resident
+    /// since the fault (a concurrent resolution) is a benign race and
+    /// reports `true`.
+    ///
+    /// `task` is the kernel-trusted current task of the faulting CPU,
+    /// never a caller-supplied value.
+    #[must_use]
+    pub fn resolve_file_fault(&self, task: SecTaskId, fault_va: u64) -> bool {
+        let Some(region) = self.aspaces.read().file_region_covering(task, fault_va) else {
+            return false;
+        };
+        let page_va = fault_va & !(PAGE_SIZE as u64 - 1);
+        // Cannot overflow: `file_map` validated `offset + page-rounded len`
+        // at map time, and `page_va` lies inside the region.
+        let file_offset = region.offset + (page_va - region.base);
+        let mut page = vec![0u8; PAGE_SIZE];
+        let read = self.filesystem.read(
+            region.uid,
+            &region.caps,
+            &region.path,
+            file_offset,
+            &mut page,
+        );
+        match read {
+            // A page wholly at/past end-of-file is never backed; a short
+            // read is the page straddling end-of-file, zero-filled past it
+            // by the producer.
+            Ok(0) | Err(_) => false,
+            Ok(n) => match self.file_map.map_page(page_va, &page[..n]) {
+                Ok(()) => {
+                    // The fault grew the live space; re-freeze the registry
+                    // snapshot so the copy path can see the new page.
+                    self.refreeze_task_aspace(task);
+                    true
+                }
+                // Already resident: another resolution won the race; the
+                // retried access succeeds as-is.
+                Err(Errno::BadAddress) => true,
+                Err(_) => false,
+            },
         }
     }
 
@@ -2026,6 +2131,11 @@ const CONSOLE_READ_MAX: usize = 4096;
 /// than this; a longer request is refused with [`Errno::NotFound`] (it
 /// cannot name any registered program) rather than allocated.
 const SPAWN_PATH_MAX: usize = 1024;
+
+/// Exit status recorded for a task killed by an unresolvable user fault:
+/// the `128 + SIGSEGV (11)` shell convention, so a parent reaping the
+/// crashed child observes a crash, never a clean exit.
+const FAULT_EXIT_CODE: i32 = 139;
 
 impl<A> SyscallHandlers for KernelSyscallHandlers<'_, A>
 where
@@ -3333,7 +3443,7 @@ where
                 .get(LimitKind::AddressSpaceBytes)
                 .soft;
             let projected = aspaces
-                .mapped_anon_bytes(caller.task_id)
+                .mapped_aspace_bytes(caller.task_id)
                 .checked_add(charged)
                 .ok_or(Errno::OutOfRange)?;
             if projected > soft {
@@ -3354,7 +3464,9 @@ where
         // region (the copy path must reflect live memory). Only on success:
         // a failed map touched no mappings and charges nothing.
         if result.is_ok() {
-            self.aspaces.write().charge_anon(caller.task_id, charged);
+            self.aspaces
+                .write()
+                .charge_aspace_bytes(caller.task_id, charged);
             self.refreeze_caller_aspace(caller);
         }
         result
@@ -3566,7 +3678,136 @@ where
             let credited = (len as u64)
                 .div_ceil(PAGE_SIZE as u64)
                 .saturating_mul(PAGE_SIZE as u64);
-            self.aspaces.write().credit_anon(caller.task_id, credited);
+            self.aspaces
+                .write()
+                .credit_aspace_bytes(caller.task_id, credited);
+            self.refreeze_caller_aspace(caller);
+        }
+        result
+    }
+
+    fn file_map(
+        &self,
+        caller: &CallerContext<'_>,
+        fd: u32,
+        offset: u64,
+        len: u64,
+    ) -> SyscallResult {
+        // The dispatcher enforced `CAP_FS_ACCESS`. Validate the shape before
+        // touching any state: a zero length names nothing; the file offset
+        // must be page-aligned (each faulting page reads the file at
+        // `offset + page_index · PAGE_SIZE`); and the page-rounded extent
+        // must not overflow either the address space or the file-offset
+        // arithmetic the fault path performs.
+        if len == 0 {
+            return Err(Errno::LengthOutOfRange);
+        }
+        if offset % PAGE_SIZE as u64 != 0 {
+            return Err(Errno::BadAlignment);
+        }
+        let charged = len
+            .div_ceil(PAGE_SIZE as u64)
+            .checked_mul(PAGE_SIZE as u64)
+            .ok_or(Errno::OutOfRange)?;
+        offset.checked_add(charged).ok_or(Errno::OutOfRange)?;
+        // Resolve the caller's own descriptor (owner-checked against the
+        // kernel-trusted caller id). It must be open for reading, and only a
+        // filesystem-backed descriptor can page: a resource or pipe is a
+        // sequential stream with no positional bytes to map.
+        let handle = self
+            .aspaces
+            .read()
+            .open_file_entry(caller.task_id, fd)
+            .ok_or(Errno::NotFound)?;
+        if !handle.flags.is_read() {
+            return Err(Errno::PermissionDenied);
+        }
+        let OpenBacking::Path(path) = &handle.backing else {
+            return Err(Errno::PermissionDenied);
+        };
+        // Enforce the caller's `AddressSpaceBytes` ceiling *before*
+        // reserving — the same projection `mem_map` applies, over the same
+        // shared accounting, so the `ulimit -v`-style bound covers file
+        // mappings too (fail closed, checked against the kernel-trusted
+        // caller id).
+        {
+            let aspaces = self.aspaces.read();
+            let soft = aspaces
+                .limits(caller.task_id)
+                .get(LimitKind::AddressSpaceBytes)
+                .soft;
+            let projected = aspaces
+                .mapped_aspace_bytes(caller.task_id)
+                .checked_add(charged)
+                .ok_or(Errno::OutOfRange)?;
+            if projected > soft {
+                return Err(Errno::OutOfRange);
+            }
+        }
+        // Reserve pure address space in the caller's own live space — no
+        // page is read or backed until a fault lands in the region. The
+        // default `NULL_FILE_MAP` fails closed with `NotImplemented`.
+        let base = self.file_map.reserve(len)?;
+        // Record the region under the kernel-trusted caller id, carrying the
+        // mapping-time identity (uid + effective capability snapshot) the
+        // fault path re-checks every demand-paged read under — the same
+        // authority model as the open descriptor itself, so the mapping
+        // survives a later `fs_close` of `fd`. Charge the page-rounded
+        // extent, the figure `file_unmap` later credits.
+        let region = FileRegion {
+            base,
+            len: charged,
+            path: path.clone(),
+            offset,
+            uid: caller.caps.owner().0,
+            caps: *caller.caps.effective(),
+        };
+        {
+            let mut aspaces = self.aspaces.write();
+            aspaces.record_file_region(caller.task_id, region);
+            aspaces.charge_aspace_bytes(caller.task_id, charged);
+        }
+        Ok(base)
+    }
+
+    fn file_unmap(&self, caller: &CallerContext<'_>, base: u64, len: u64) -> SyscallResult {
+        // A zero-length range names nothing; reject before touching state.
+        if len == 0 {
+            return Err(Errno::LengthOutOfRange);
+        }
+        // The caller names the mapping by the same figures `file_map` took;
+        // compare against the page-rounded record so only the whole region
+        // — owned by *this* task — can be released (fail closed before any
+        // teardown; one task can never release another's region because the
+        // record is keyed by the kernel-trusted caller id).
+        let charged = len
+            .div_ceil(PAGE_SIZE as u64)
+            .checked_mul(PAGE_SIZE as u64)
+            .ok_or(Errno::OutOfRange)?;
+        if self
+            .aspaces
+            .read()
+            .file_region_exact(caller.task_id, base, charged)
+            .is_none()
+        {
+            return Err(Errno::NotFound);
+        }
+        // Sparsely release: only the pages fault history made resident are
+        // unmapped and their frames zeroed on free; a never-touched hole
+        // costs nothing. Success reports `Ok(0)` — the `Errno`-return ABI
+        // shape.
+        let result = self.file_map.release(base, len).map(|_resident| 0);
+        // Only on success: drop the record, credit the accounting, and
+        // re-freeze the registry snapshot so the freed pages are dropped
+        // from it too — leaving them in the stale snapshot would let the
+        // copy path read memory the task no longer owns (fail closed, never
+        // expose freed memory).
+        if result.is_ok() {
+            {
+                let mut aspaces = self.aspaces.write();
+                aspaces.remove_file_region(caller.task_id, base);
+                aspaces.credit_aspace_bytes(caller.task_id, charged);
+            }
             self.refreeze_caller_aspace(caller);
         }
         result
@@ -6234,6 +6475,19 @@ where
         }
     }
 
+    /// Install the demand-paged file-mapping producer the `file_map` /
+    /// `file_unmap` syscalls and the user-fault resolver drive, consuming
+    /// and returning `self`.
+    ///
+    /// The hook-level mirror of [`KernelSyscallHandlers::with_file_map`]:
+    /// until called, both syscalls and every user fault stay fail-closed
+    /// through [`NULL_FILE_MAP`].
+    #[must_use]
+    pub fn with_file_map(mut self, file_map: &'static (dyn FileMap + 'static)) -> Self {
+        self.handlers = self.handlers.with_file_map(file_map);
+        self
+    }
+
     /// Install the users-database holder the `users_db_read` syscall
     /// serves, consuming and returning `self` (`plans/PI.md` P11).
     ///
@@ -6571,6 +6825,28 @@ where
         // published on this CPU it falls back to an ordinary encoded return
         // (fail closed — `crate::dispatch_slot::DispatchOutcome::Reschedule`).
         completion_outcome(raw_number, result, cpu)
+    }
+
+    fn resolve_user_fault(&self, fault_va: u64) -> UserFaultOutcome {
+        // Identify the faulting task exactly as `dispatch` identifies a
+        // syscall caller: the scheduler's per-CPU current-task slot, never
+        // anything caller-supplied. No task on this CPU means the fault
+        // cannot even be attributed; the port falls back to its fatal path.
+        let cpu = SchedulerArch::current_cpu(self.arch);
+        let Some(sched_task_id) = self.sched.current_task(cpu) else {
+            return UserFaultOutcome::Unhandled;
+        };
+        let task = SecTaskId(sched_task_id);
+        if self.handlers.resolve_file_fault(task, fault_va) {
+            return UserFaultOutcome::Resolved;
+        }
+        // A wild access, a page at/past end-of-file, or an unresolvable
+        // read: fatal to the task and only the task. Record the crash exit
+        // so a waiting parent reaps a real status, reclaim exactly what a
+        // clean exit or a signal kill reclaims, and hand the port the CPU
+        // to suspend the task on.
+        self.handlers.record_fault_exit(task);
+        UserFaultOutcome::Terminated { cpu }
     }
 }
 
@@ -13820,7 +14096,7 @@ mod tests {
         let base = h
             .mem_map(&ctx, 0x2000, rustos_abi::MapFlags::empty(), 0)
             .expect("a map at the ceiling succeeds");
-        assert_eq!(aspaces.read().mapped_anon_bytes(SecTaskId(2)), 0x2000);
+        assert_eq!(aspaces.read().mapped_aspace_bytes(SecTaskId(2)), 0x2000);
 
         // A further page would exceed the ceiling: denied, fail closed, and
         // the producer is never reached for the rejected request.
@@ -13831,16 +14107,16 @@ mod tests {
         );
         assert!(producer.last_map.lock().is_none());
         // The denied request changed no accounting.
-        assert_eq!(aspaces.read().mapped_anon_bytes(SecTaskId(2)), 0x2000);
+        assert_eq!(aspaces.read().mapped_aspace_bytes(SecTaskId(2)), 0x2000);
 
         // Freeing the mapped region credits the bytes back, so a fresh map
         // of the same size fits under the ceiling again.
         assert_eq!(h.mem_unmap(&ctx, base, 0x2000), Ok(0));
-        assert_eq!(aspaces.read().mapped_anon_bytes(SecTaskId(2)), 0);
+        assert_eq!(aspaces.read().mapped_aspace_bytes(SecTaskId(2)), 0);
         assert!(h
             .mem_map(&ctx, 0x2000, rustos_abi::MapFlags::empty(), 0)
             .is_ok());
-        assert_eq!(aspaces.read().mapped_anon_bytes(SecTaskId(2)), 0x2000);
+        assert_eq!(aspaces.read().mapped_aspace_bytes(SecTaskId(2)), 0x2000);
     }
 
     /// A page-rounded request: a sub-page `len` is charged as a whole page,
@@ -13880,12 +14156,293 @@ mod tests {
         // One byte rounds up to a whole page and just fits the one-page
         // ceiling; it is charged as a full page, not a single byte.
         assert!(h.mem_map(&ctx, 1, rustos_abi::MapFlags::empty(), 0).is_ok());
-        assert_eq!(aspaces.read().mapped_anon_bytes(SecTaskId(2)), 0x1000);
+        assert_eq!(aspaces.read().mapped_aspace_bytes(SecTaskId(2)), 0x1000);
         // A second single byte would need a second page: denied.
         assert_eq!(
             h.mem_map(&ctx, 1, rustos_abi::MapFlags::empty(), 0),
             Err(Errno::OutOfRange)
         );
+    }
+
+    // --- file_map / file_unmap (demand-paged file mappings) ---------------
+
+    /// The base the recording file-map producer reserves every region at.
+    const FILE_REGION_BASE: u64 = 0x0F00_0000;
+
+    /// A recording [`crate::filemap::FileMap`]: logs each call, reserves at
+    /// [`FILE_REGION_BASE`], and returns a configurable `map_page` result so
+    /// the resolver's race/failure folds are exercised without a page table.
+    struct RecordingFileMap {
+        reserves: rustos_sync::SpinLock<Vec<u64>>,
+        pages: rustos_sync::SpinLock<Vec<(u64, usize)>>,
+        releases: rustos_sync::SpinLock<Vec<(u64, u64)>>,
+        map_page_result: rustos_sync::SpinLock<Result<(), Errno>>,
+    }
+
+    impl RecordingFileMap {
+        fn new() -> Self {
+            Self {
+                reserves: rustos_sync::SpinLock::new(Vec::new()),
+                pages: rustos_sync::SpinLock::new(Vec::new()),
+                releases: rustos_sync::SpinLock::new(Vec::new()),
+                map_page_result: rustos_sync::SpinLock::new(Ok(())),
+            }
+        }
+    }
+
+    impl crate::filemap::FileMap for RecordingFileMap {
+        fn reserve(&self, len: u64) -> Result<u64, Errno> {
+            self.reserves.lock().push(len);
+            Ok(FILE_REGION_BASE)
+        }
+        fn map_page(&self, va: u64, contents: &[u8]) -> Result<(), Errno> {
+            self.pages.lock().push((va, contents.len()));
+            *self.map_page_result.lock()
+        }
+        fn release(&self, base: u64, len: u64) -> Result<u64, Errno> {
+            self.releases.lock().push((base, len));
+            Ok(1)
+        }
+    }
+
+    /// Build the shared file-mapping fixture: a task with `/big` staged in
+    /// its user page (so `fs_open` can read the path), a recording
+    /// filesystem serving `read_data`, and a recording file-map producer.
+    fn file_map_fixture(
+        read_data: Vec<u8>,
+    ) -> (
+        &'static RecordingFs,
+        &'static RecordingFileMap,
+        &'static RwLock<AddressSpaceRegistry>,
+        KernelSyscallHandlers<'static, TestArch>,
+        CallerContext<'static>,
+    ) {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch: &'static Arc<TestArch> = Box::leak(Box::new(Arc::new(TestArch::with_cpus(1))));
+        let sched = Box::leak(Box::new(make_sched(arch.clone())));
+        let table = Box::leak(Box::new(RwLock::new(CapTable::new())));
+        let ipc = Box::leak(Box::new(RwLock::new(PortRegistry::new())));
+        let (space, physmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, b"/big");
+        let aspaces: &'static RwLock<AddressSpaceRegistry> =
+            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let rng = Box::leak(Box::new(unseeded_rng()));
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = Box::leak(Box::new(IrqTable::new(31)));
+        let ctl = Box::leak(Box::new(UnsupportedController));
+        let caps = Box::leak(Box::new(make_caps_record(
+            2,
+            &[CapabilityId::FS_ACCESS],
+            sink,
+        )));
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps,
+        };
+        let mut mock = RecordingFs::new();
+        mock.read_data = read_data;
+        let fs: &'static RecordingFs = Box::leak(Box::new(mock));
+        let fm: &'static RecordingFileMap = Box::leak(Box::new(RecordingFileMap::new()));
+        let h = KernelSyscallHandlers::new(sched, table, arch, sink, irq, ctl, ipc, aspaces, rng)
+            .with_filesystem(fs)
+            .with_file_map(fm);
+        (fs, fm, aspaces, h, ctx)
+    }
+
+    /// `file_map` validates the request shape, resolves the caller's own
+    /// readable file descriptor, reserves through the producer, and records
+    /// the page-rounded region + accounting.
+    #[test]
+    fn file_map_validates_reserves_and_records_the_region() {
+        let (_fs, fm, aspaces, h, ctx) = file_map_fixture(Vec::new());
+        let fd = u32::try_from(
+            h.fs_open(&ctx, 0x1000, "/big".len(), OpenFlags::READ)
+                .expect("open"),
+        )
+        .unwrap();
+
+        // Shape refusals, all before the producer is touched: a zero
+        // length, a misaligned file offset, an unknown descriptor, and an
+        // offset+extent that overflows.
+        assert_eq!(h.file_map(&ctx, fd, 0, 0), Err(Errno::LengthOutOfRange));
+        assert_eq!(h.file_map(&ctx, fd, 123, 0x1000), Err(Errno::BadAlignment));
+        assert_eq!(h.file_map(&ctx, 99, 0, 0x1000), Err(Errno::NotFound));
+        assert_eq!(
+            h.file_map(&ctx, fd, u64::MAX - 0x0fff, 0x1000),
+            Err(Errno::OutOfRange)
+        );
+        assert!(fm.reserves.lock().is_empty());
+
+        // A sub-page length maps: reserved with the raw length, recorded
+        // and charged page-rounded, at the mapping-time identity.
+        let base = h.file_map(&ctx, fd, 0x3000, 0x1001).expect("maps");
+        assert_eq!(base, FILE_REGION_BASE);
+        assert_eq!(*fm.reserves.lock(), std::vec![0x1001]);
+        assert_eq!(aspaces.read().mapped_aspace_bytes(SecTaskId(2)), 0x2000);
+        let region = aspaces
+            .read()
+            .file_region_exact(SecTaskId(2), base, 0x2000)
+            .expect("recorded page-rounded");
+        assert_eq!(region.path, "/big");
+        assert_eq!(region.offset, 0x3000);
+    }
+
+    /// Only a readable, filesystem-backed descriptor can be mapped: a
+    /// write-only handle and a pipe end are refused before the producer is
+    /// touched.
+    #[test]
+    fn file_map_refuses_unreadable_and_non_file_descriptors() {
+        let (_fs, fm, aspaces, h, ctx) = file_map_fixture(Vec::new());
+        let wo = u32::try_from(
+            h.fs_open(&ctx, 0x1000, "/big".len(), OpenFlags::WRITE)
+                .expect("open write-only"),
+        )
+        .unwrap();
+        assert_eq!(
+            h.file_map(&ctx, wo, 0, 0x1000),
+            Err(Errno::PermissionDenied)
+        );
+        let (pipe_read, _pipe_write) = aspaces
+            .write()
+            .open_pipe(SecTaskId(2))
+            .expect("pipe pair fits");
+        assert_eq!(
+            h.file_map(&ctx, pipe_read, 0, 0x1000),
+            Err(Errno::PermissionDenied)
+        );
+        assert!(fm.reserves.lock().is_empty());
+    }
+
+    /// The `AddressSpaceBytes` ceiling covers file mappings through the
+    /// same accounting as `mem_map`, so the two consume one budget.
+    #[test]
+    fn file_map_enforces_the_shared_address_space_limit() {
+        let (_fs, fm, aspaces, h, ctx) = file_map_fixture(Vec::new());
+        aspaces.write().set_limit(
+            SecTaskId(2),
+            LimitKind::AddressSpaceBytes,
+            ResourceLimit::new(0x1000, u64::MAX).expect("well-formed"),
+        );
+        let fd = u32::try_from(
+            h.fs_open(&ctx, 0x1000, "/big".len(), OpenFlags::READ)
+                .expect("open"),
+        )
+        .unwrap();
+        // Over the ceiling: denied before the producer is touched.
+        assert_eq!(h.file_map(&ctx, fd, 0, 0x2000), Err(Errno::OutOfRange));
+        assert!(fm.reserves.lock().is_empty());
+        // Exactly at the ceiling: admitted and charged.
+        let base = h.file_map(&ctx, fd, 0, 0x1000).expect("fits");
+        assert_eq!(aspaces.read().mapped_aspace_bytes(SecTaskId(2)), 0x1000);
+        // The budget is shared: an anonymous map now exceeds it too.
+        assert_eq!(
+            h.mem_map(&ctx, 1, rustos_abi::MapFlags::empty(), 0),
+            Err(Errno::OutOfRange)
+        );
+        // Releasing the file region frees the budget again.
+        assert_eq!(h.file_unmap(&ctx, base, 0x1000), Ok(0));
+        assert_eq!(aspaces.read().mapped_aspace_bytes(SecTaskId(2)), 0);
+    }
+
+    /// `file_unmap` releases only the exact whole region the caller mapped;
+    /// a wrong base, wrong length, foreign task, or double release fails
+    /// closed touching nothing.
+    #[test]
+    fn file_unmap_releases_only_the_exact_owned_region() {
+        let (_fs, fm, aspaces, h, ctx) = file_map_fixture(Vec::new());
+        let fd = u32::try_from(
+            h.fs_open(&ctx, 0x1000, "/big".len(), OpenFlags::READ)
+                .expect("open"),
+        )
+        .unwrap();
+        let base = h.file_map(&ctx, fd, 0, 0x1800).expect("maps");
+
+        assert_eq!(h.file_unmap(&ctx, base, 0), Err(Errno::LengthOutOfRange));
+        assert_eq!(
+            h.file_unmap(&ctx, base + 0x1000, 0x1800),
+            Err(Errno::NotFound)
+        );
+        assert_eq!(h.file_unmap(&ctx, base, 0x4000), Err(Errno::NotFound));
+        assert!(fm.releases.lock().is_empty());
+
+        // The exact pair (compared page-rounded, as recorded) releases,
+        // credits, and forgets the region.
+        assert_eq!(h.file_unmap(&ctx, base, 0x1800), Ok(0));
+        assert_eq!(*fm.releases.lock(), std::vec![(base, 0x1800)]);
+        assert_eq!(aspaces.read().mapped_aspace_bytes(SecTaskId(2)), 0);
+        assert_eq!(h.file_unmap(&ctx, base, 0x1800), Err(Errno::NotFound));
+    }
+
+    /// The fault resolver backs exactly the faulting page: it reads the
+    /// covering page through the secured VFS at the region's file offset
+    /// under the mapping-time identity and maps it at the page base.
+    #[test]
+    fn resolve_file_fault_reads_and_maps_the_covering_page() {
+        let (fs, fm, _aspaces, h, ctx) = file_map_fixture(std::vec![0xCD; 100]);
+        let fd = u32::try_from(
+            h.fs_open(&ctx, 0x1000, "/big".len(), OpenFlags::READ)
+                .expect("open"),
+        )
+        .unwrap();
+        let base = h.file_map(&ctx, fd, 0x3000, 0x2000).expect("maps");
+
+        // A fault mid-way into the region's second page.
+        assert!(h.resolve_file_fault(SecTaskId(2), base + 0x1000 + 5));
+        assert_eq!(*fm.pages.lock(), std::vec![(base + 0x1000, 100)]);
+        // The read hit the file at region offset + page offset (0x3000 +
+        // 0x1000), for one whole page, under the recorded path.
+        let calls = fs.calls();
+        let read_call = calls.iter().rev().find(|c| c.starts_with("read")).unwrap();
+        assert!(read_call.contains("path=/big"), "got: {read_call}");
+        assert!(read_call.contains("off=16384"), "got: {read_call}");
+        assert!(read_call.contains("len=4096"), "got: {read_call}");
+    }
+
+    /// Everything outside a live region fails closed: an unmapped address,
+    /// a foreign task's address, a released region, and a page wholly past
+    /// end-of-file (the `SIGBUS` analogue) are all refused.
+    #[test]
+    fn resolve_file_fault_refuses_everything_outside_live_backing() {
+        let (_fs, fm, _aspaces, h, ctx) = file_map_fixture(Vec::new());
+        // No region at all.
+        assert!(!h.resolve_file_fault(SecTaskId(2), 0x9999_0000));
+        let fd = u32::try_from(
+            h.fs_open(&ctx, 0x1000, "/big".len(), OpenFlags::READ)
+                .expect("open"),
+        )
+        .unwrap();
+        let base = h.file_map(&ctx, fd, 0, 0x2000).expect("maps");
+        // Empty `read_data` means the file reads as zero bytes: the page is
+        // wholly past end-of-file and is never backed.
+        assert!(!h.resolve_file_fault(SecTaskId(2), base));
+        // Another task faulting on this task's region resolves nothing.
+        assert!(!h.resolve_file_fault(SecTaskId(3), base));
+        // A released region stops resolving.
+        assert_eq!(h.file_unmap(&ctx, base, 0x2000), Ok(0));
+        assert!(!h.resolve_file_fault(SecTaskId(2), base));
+        assert!(fm.pages.lock().is_empty());
+    }
+
+    /// A page that became resident since the fault (a concurrent
+    /// resolution) is a benign race the resolver reports as resolved; any
+    /// other producer failure refuses the fault.
+    #[test]
+    fn resolve_file_fault_folds_the_already_resident_race_as_resolved() {
+        let (_fs, fm, _aspaces, h, ctx) = file_map_fixture(std::vec![1; 8]);
+        let fd = u32::try_from(
+            h.fs_open(&ctx, 0x1000, "/big".len(), OpenFlags::READ)
+                .expect("open"),
+        )
+        .unwrap();
+        let base = h.file_map(&ctx, fd, 0, 0x1000).expect("maps");
+        *fm.map_page_result.lock() = Err(Errno::BadAddress);
+        assert!(h.resolve_file_fault(SecTaskId(2), base));
+        *fm.map_page_result.lock() = Err(Errno::OutOfMemory);
+        assert!(!h.resolve_file_fault(SecTaskId(2), base));
     }
 
     /// A minimal published live space whose [`LiveUserSpace::freeze`] returns
@@ -13905,6 +14462,15 @@ mod tests {
             Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
         }
         fn unmap_anonymous(&mut self, _base: u64, _pages: u64) -> Result<(), LiveSpaceError> {
+            Err(LiveSpaceError::Anon(AnonError::NotMapped))
+        }
+        fn reserve_file_region(&mut self, _pages: u64) -> Result<u64, LiveSpaceError> {
+            Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
+        }
+        fn map_file_page_at(&mut self, _va: u64, _contents: &[u8]) -> Result<(), LiveSpaceError> {
+            Err(LiveSpaceError::Anon(AnonError::NotMapped))
+        }
+        fn release_file_region(&mut self, _base: u64, _pages: u64) -> Result<u64, LiveSpaceError> {
             Err(LiveSpaceError::Anon(AnonError::NotMapped))
         }
         fn map_device_window(&mut self, _phys: u64, _len: usize) -> Result<u64, LiveSpaceError> {

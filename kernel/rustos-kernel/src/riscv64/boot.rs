@@ -71,7 +71,7 @@ use rustos_kernel_sched_api::SchedulerConfig;
 use rustos_kernel_sec::IdentityTableBuilder;
 use rustos_log::{log, Event, EventId, Field, Level, Sink};
 
-use crate::riscv64::dispatch::{production_dispatch, DISPATCH_SLOT};
+use crate::riscv64::dispatch::{production_dispatch, production_user_fault, DISPATCH_SLOT};
 
 /// Logical CPU id of the boot hart for the single-hart slice.
 const BOOT_CPU: CpuId = 0;
@@ -688,6 +688,15 @@ pub fn boot(
     // user thread can run.
     let mmu_on = enable_mmu_and_vectors();
     syscall_entry::set_dispatch_callback(production_dispatch);
+    // Demand-paged file mappings resolve their U-mode data page faults
+    // through the same resident hook; install the resolver beside the
+    // dispatch callback so both are in place before user space exists.
+    // This single-entry boot path installs exactly once; a second publish
+    // would be a programmer error, so it parks fail-closed rather than
+    // running with an unpredictable fault path.
+    if rustos_arch_riscv64::fault::set_user_fault_resolver(production_user_fault).is_err() {
+        halt_current_hart()
+    }
 
     log_reached(log_sink, hartid, dtb, mmu_on);
 

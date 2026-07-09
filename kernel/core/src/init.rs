@@ -1300,7 +1300,7 @@ fn run_phases<A: KernelArch>(
     // with `NotImplemented` exactly as the `NULL_*` defaults did. All are
     // `Box::leak`'d for the same one-shot-publish reason as the hook, arch-
     // generic so this names no concrete port.
-    let (mem_map, mmio_map_facility, dma_alloc_facility, shared_mem_facility) =
+    let (mem_map, file_map, mmio_map_facility, dma_alloc_facility, shared_mem_facility) =
         live_producers(state.arch.as_ref(), &state.frame_allocator);
 
     // The production wall clock, named so it backs *both* the
@@ -1363,6 +1363,11 @@ fn run_phases<A: KernelArch>(
             mmio_map_facility,
             dma_alloc_facility,
         )
+        // Serve `file_map` / `file_unmap` and the user-fault resolver
+        // through the demand-paged file-mapping producer; the default
+        // `NULL_FILE_MAP` keeps both syscalls (and every fault) fail-closed
+        // until installed.
+        .with_file_map(file_map)
         // Serve the users database the boot path loaded off the mounted
         // root volume (`plans/PI.md` P11); the default `NULL_USERS_DB`
         // keeps `users_db_read` fail-closed when no root volume was
@@ -1464,11 +1469,17 @@ fn live_producers<A: KernelArch>(
     frames: &'static FrameAllocator,
 ) -> (
     &'static (dyn crate::memmap::MemMap + 'static),
+    &'static (dyn crate::filemap::FileMap + 'static),
     &'static (dyn crate::devres::MmioMapFacility + 'static),
     &'static (dyn crate::devres::DmaAllocFacility + 'static),
     &'static (dyn crate::devres::SharedMemFacility + 'static),
 ) {
+    // `LiveMemMap` implements both the anonymous-memory and the
+    // demand-paged file-mapping producer over the same per-CPU live-space
+    // routing; the two facilities are distinct leaked instances of the one
+    // type (each holds only the shared `'static` arch borrow).
     (
+        Box::leak(Box::new(crate::live_producer::LiveMemMap::new(arch))),
         Box::leak(Box::new(crate::live_producer::LiveMemMap::new(arch))),
         Box::leak(Box::new(crate::live_producer::LiveMmioMap::new(arch))),
         Box::leak(Box::new(crate::live_producer::LiveDmaAlloc::new(arch))),

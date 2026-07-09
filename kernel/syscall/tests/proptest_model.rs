@@ -565,6 +565,14 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
+    fn file_map(&self, _c: &CallerContext<'_>, _fd: u32, _offset: u64, _len: u64) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn file_unmap(&self, _c: &CallerContext<'_>, _base: u64, _len: u64) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
     fn fs_chdir(&self, _c: &CallerContext<'_>, _path: u64, _path_len: usize) -> SyscallResult {
         self.bump();
         Ok(0)

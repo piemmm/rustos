@@ -385,6 +385,33 @@ unsafe extern "C" fn rustos_riscv64_trap_handler(frame: *mut TrapFrame) {
             }
             return;
         }
+        // A load/store page fault taken from U-mode may be a demand-paged
+        // file-mapping fault: offer it to the installed resolver before
+        // the fatal path. `true` means the faulting page is now resident;
+        // returning leaves the saved `sepc` on the faulting instruction,
+        // so the asm epilogue's `sret` retries the access. A fault fatal
+        // to the task alone never returns from the resolver (the callback
+        // suspends the task into the scheduler with an exit action);
+        // `false` falls through to the fatal path below, exactly as with
+        // no resolver installed (fail closed).
+        // SAFETY: `frame` is the live saved-register frame the asm vector
+        // passed; reading its saved `sstatus` is sound.
+        if crate::fault::is_data_page_fault(scause)
+            && trap_came_from_user(unsafe { (*frame).sstatus })
+        {
+            if let Some(resolver) = crate::fault::user_fault_resolver() {
+                let stval: u64;
+                // SAFETY: reading `stval` (the faulting address) has no
+                // side effects.
+                unsafe {
+                    core::arch::asm!("csrr {}, stval", out(reg) stval, options(nomem, nostack));
+                }
+                if resolver(stval) {
+                    return;
+                }
+            }
+        }
+
         // Any other synchronous exception (a page fault, an access
         // fault, an illegal instruction) is unrecoverable in this slice:
         // returning would re-execute the faulting instruction forever.

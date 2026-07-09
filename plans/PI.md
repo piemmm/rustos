@@ -3334,10 +3334,12 @@ table, so a new board is match **data**, not new code. Sub-increments
     every port's `init_spawn`/`spawn_producer` thread the shared
     `spawn_layout::ANON_WINDOW_OFFSET` (4 GiB above the image bias — the
     topmost user region, above the device/DMA/shared windows) and size the
-    window from discovered RAM via `anon_layout::anon_window_pages`
-    (physical RAM clamped to the addressable user VA above the base, floored
-    at 16 MiB), never a fixed `const` ceiling (§24.1). Host-tested
-    (`anon_window_pages` 5 + `AnonWindowMap` 7 + `LiveSpace`
+    window from discovered RAM via `user_windows::user_windows`
+    (physical RAM clamped to half the addressable user VA above the base,
+    floored at 16 MiB; the demand-paged `file_map` window takes the
+    remainder — `docs/src/architecture/memory.md` §7f/§7o), never a fixed
+    `const` ceiling (§24.1). Host-tested
+    (`user_windows` 7 + `AnonWindowMap` 7 + `LiveSpace`
     placement 4 + `LiveMemMap` routing 2) and proven on `-M virt` by the
     extended `mmio_map_qemu_aarch64` vertical (the EL0 program maps its granted
     window **and** round-trips a placed `mem_map`: map → write sentinel →

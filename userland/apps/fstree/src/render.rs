@@ -1,18 +1,22 @@
-//! The curses frame: tree pane, file pane, the flattened branch view, the
-//! status line, the message line, and the sort-menu, help, and report
-//! overlays.
+//! The curses frame: the boxed tree and file panes, the flattened branch
+//! view, the file viewers, the status bar, the message line, and the
+//! sort-menu, help, and report overlays.
 //!
-//! Layout, left to right: the tree pane, a one-column divider, and the file
-//! pane (or the full-width flattened view); the last two rows are the
-//! reverse-video status line and the message line. Pure drawing over the
-//! [`Model`] — no I/O, so golden-grid tests drive it directly.
+//! The body is drawn inside a bordered box whose top edge carries the pane
+//! titles (the focused pane's title in bold); the tree pane, a full-height
+//! divider, and the file pane share it, while the flattened view, the
+//! viewers, and the overlays take the whole box. The last two rows are the
+//! white-on-blue status bar and the message line (bold prompts, bold-yellow
+//! notices, dim key hints); rows are colour-coded by class (directories
+//! blue, tagged entries yellow, the focused row reverse). Pure drawing over
+//! the [`Model`] — no I/O, so golden-grid tests drive it directly.
 
 use alloc::format;
 use alloc::string::String;
 
 use rustos_abi::time::Time64;
 use rustos_curses::{truncate_to_width, Pos, Window};
-use rustos_vt::Attributes;
+use rustos_vt::{Attributes, BasicColor, Color};
 
 use crate::model::{InputOp, Model, Overlay, Pane, Prompt, SortKey, View, Viewer};
 use crate::view_hex::{dump_row, offset_digits, HexView};
@@ -24,13 +28,125 @@ fn tree_width(cols: u16) -> u16 {
     (cols / 3).clamp(12, 40).min(cols.saturating_sub(2))
 }
 
+// --- Styles ---------------------------------------------------------------
+//
+// One place defines every attribute the frame uses, so the palette is
+// changed here and nowhere else. Colours degrade through the curses
+// renderer's per-terminal downgrade (a monochrome terminal keeps the
+// bold/dim/reverse shape).
+
+/// The pane borders: cyan lines around every body region.
+fn border_attrs() -> Attributes {
+    let mut attrs = Attributes::PLAIN;
+    attrs.foreground = Color::Basic(BasicColor::Cyan);
+    attrs
+}
+
+/// A pane title on the top border: bold cyan for the focused pane,
+/// dim cyan for the inactive one.
+fn title_attrs(focused: bool) -> Attributes {
+    let mut attrs = border_attrs();
+    if focused {
+        attrs.bold = true;
+    } else {
+        attrs.dim = true;
+    }
+    attrs
+}
+
+/// A directory row: bold blue, the conventional directory colour.
+fn dir_attrs() -> Attributes {
+    let mut attrs = Attributes::PLAIN;
+    attrs.bold = true;
+    attrs.foreground = Color::Basic(BasicColor::Blue);
+    attrs
+}
+
+/// A tagged row: yellow, so the tagged set reads at a glance.
+fn tag_attrs() -> Attributes {
+    let mut attrs = Attributes::PLAIN;
+    attrs.foreground = Color::Basic(BasicColor::Yellow);
+    attrs
+}
+
+/// The status bar: white on blue, the classic full-width band.
+fn status_attrs() -> Attributes {
+    let mut attrs = Attributes::PLAIN;
+    attrs.foreground = Color::Basic(BasicColor::White);
+    attrs.background = Color::Basic(BasicColor::Blue);
+    attrs
+}
+
+/// The key-hint line: dim, so hints never compete with content.
+fn hint_attrs() -> Attributes {
+    let mut attrs = Attributes::PLAIN;
+    attrs.dim = true;
+    attrs
+}
+
+/// A notice or error on the message line: bold yellow, so a refusal is
+/// never mistaken for a hint.
+fn message_attrs() -> Attributes {
+    let mut attrs = Attributes::PLAIN;
+    attrs.bold = true;
+    attrs.foreground = Color::Basic(BasicColor::Yellow);
+    attrs
+}
+
+/// An open prompt on the message line: bold, with the default colours.
+fn prompt_attrs() -> Attributes {
+    let mut attrs = Attributes::PLAIN;
+    attrs.bold = true;
+    attrs
+}
+
+// --- The frame --------------------------------------------------------------
+
+/// Draw the body's box: the top border carrying `titles` (each a
+/// `(column, text, focused)` triple), the side and bottom borders, and —
+/// when `divider` names a column — the full-height pane divider with its
+/// junctions. Content is drawn *inside* the box (rows `1..body - 1`,
+/// columns `1..cols - 1`).
+fn draw_frame(
+    window: &mut Window,
+    body: u16,
+    cols: u16,
+    divider: Option<u16>,
+    titles: &[(u16, &str, bool)],
+) {
+    let border = border_attrs();
+    window.set_attributes(border);
+    let inner = usize::from(cols.saturating_sub(2));
+    let horizontal = "─".repeat(inner);
+    let top = format!("┌{horizontal}┐");
+    let bottom = format!("└{horizontal}┘");
+    let _ = window.move_add_str(Pos::new(0, 0), &top);
+    let _ = window.move_add_str(Pos::new(body - 1, 0), &bottom);
+    for row in 1..body - 1 {
+        let _ = window.move_add_str(Pos::new(row, 0), "│");
+        let _ = window.move_add_str(Pos::new(row, cols - 1), "│");
+    }
+    if let Some(column) = divider {
+        let _ = window.move_add_str(Pos::new(0, column), "┬");
+        for row in 1..body - 1 {
+            let _ = window.move_add_str(Pos::new(row, column), "│");
+        }
+        let _ = window.move_add_str(Pos::new(body - 1, column), "┴");
+    }
+    for &(column, text, focused) in titles {
+        window.set_attributes(title_attrs(focused));
+        let _ = window.move_add_str(Pos::new(0, column), text);
+    }
+    window.set_attributes(Attributes::PLAIN);
+}
+
 /// Draw one full frame of `model` into `window`.
 pub fn render(model: &Model, window: &mut Window) {
     let size = window.size();
     let rows = size.rows;
     let cols = size.cols;
     window.erase();
-    if rows < 3 || cols < 8 {
+    if rows < 5 || cols < 8 {
         return;
     }
     let body = rows - 2;
@@ -47,7 +163,7 @@ pub fn render(model: &Model, window: &mut Window) {
     render_message(model, window, rows, cols);
 }
 
-/// The two panes and their divider.
+/// The two boxed panes and their divider.
 fn render_panes(model: &Model, window: &mut Window, body: u16, cols: u16) {
     let plain = Attributes::PLAIN;
     let mut reverse = Attributes::PLAIN;
@@ -56,31 +172,43 @@ fn render_panes(model: &Model, window: &mut Window, body: u16, cols: u16) {
     dim.dim = true;
 
     let tw = tree_width(cols);
-    for row in 0..body {
-        let _ = window.move_add_str(Pos::new(row, tw), "|");
-    }
+    draw_frame(
+        window,
+        body,
+        cols,
+        Some(tw),
+        &[
+            (2, " Tree ", model.pane == Pane::Tree),
+            (tw + 2, " Files ", model.pane == Pane::Files),
+        ],
+    );
+    let inner = body - 2;
 
     let tree_rows = model.tree_rows();
     let visible_tree = tree_rows.iter().enumerate().skip(model.tree_scroll);
-    for (line, (index, row)) in (0..body).zip(visible_tree) {
+    for (line, (index, row)) in (0..inner).zip(visible_tree) {
         let marker = if row.expanded { "- " } else { "+ " };
         let text = format!("{:indent$}{marker}{}", "", row.name, indent = row.depth * 2);
         let focused = index == model.tree_cursor;
         let attrs = match (focused, model.pane) {
             (true, Pane::Tree) => reverse,
             (true, Pane::Files) => dim,
-            _ => plain,
+            // Every tree row is a directory; colour it as one.
+            _ => dir_attrs(),
         };
         window.set_attributes(attrs);
-        let _ = window.move_add_str(Pos::new(line, 0), truncate_to_width(&text, usize::from(tw)));
+        let _ = window.move_add_str(
+            Pos::new(line + 1, 1),
+            truncate_to_width(&text, usize::from(tw - 1)),
+        );
         window.set_attributes(plain);
     }
 
     let files = model.visible_files();
     let fx = tw + 1;
-    let fw = usize::from(cols - fx);
+    let fw = usize::from(cols - 1 - fx);
     let visible_files = files.iter().enumerate().skip(model.file_scroll);
-    for (line, (index, entry)) in (0..body).zip(visible_files) {
+    for (line, (index, entry)) in (0..inner).zip(visible_files) {
         let tagged = model
             .tags
             .contains(&crate::model::join(&model.files_dir, &entry.name));
@@ -96,10 +224,14 @@ fn render_panes(model: &Model, window: &mut Window, body: u16, cols: u16) {
         let attrs = match (focused, model.pane) {
             (true, Pane::Files) => reverse,
             (true, Pane::Tree) => dim,
+            // Unfocused rows read by class: tagged first (the working
+            // set), then directories, then plain files.
+            _ if tagged => tag_attrs(),
+            _ if entry.kind.is_dir() => dir_attrs(),
             _ => plain,
         };
         window.set_attributes(attrs);
-        let _ = window.move_add_str(Pos::new(line, fx), truncate_to_width(&text, fw));
+        let _ = window.move_add_str(Pos::new(line + 1, fx), truncate_to_width(&text, fw));
         window.set_attributes(plain);
     }
 }
@@ -137,29 +269,27 @@ fn render_flat(model: &Model, window: &mut Window, body: u16, cols: u16) {
     let plain = Attributes::PLAIN;
     let mut reverse = Attributes::PLAIN;
     reverse.reverse = true;
-    let width = usize::from(cols);
+    let title = format!(" {} ", walk.label());
+    draw_frame(window, body, cols, None, &[(2, &title, true)]);
+    let width = usize::from(cols - 2);
     let visible = walk.entries.iter().enumerate().skip(model.flat_scroll);
-    for (line, (index, entry)) in (0..body).zip(visible) {
+    for (line, (index, entry)) in (0..body - 2).zip(visible) {
         let rel = relative_to(&walk.root, &entry.path);
         let shown = match &entry.note {
             Some(note) => format!("{rel}  [{note}]"),
             None => String::from(rel),
         };
-        let text = file_row(
-            model.tags.contains(&entry.path),
-            false,
-            &shown,
-            entry.size,
-            entry.modified,
-            width,
-        );
+        let tagged = model.tags.contains(&entry.path);
+        let text = file_row(tagged, false, &shown, entry.size, entry.modified, width);
         let attrs = if index == model.flat_cursor {
             reverse
+        } else if tagged {
+            tag_attrs()
         } else {
             plain
         };
         window.set_attributes(attrs);
-        let _ = window.move_add_str(Pos::new(line, 0), truncate_to_width(&text, width));
+        let _ = window.move_add_str(Pos::new(line + 1, 1), truncate_to_width(&text, width));
         window.set_attributes(plain);
     }
 }
@@ -175,51 +305,58 @@ fn render_viewer(model: &Model, window: &mut Window, body: u16, cols: u16) {
     }
 }
 
-/// The text pager's page, one sanitised row per line.
+/// The text pager's page inside its box, one sanitised row per line.
 fn render_text_view(view: &TextView, window: &mut Window, body: u16, cols: u16) {
-    for (line, row) in (0..body).zip(view.rows.iter()) {
+    let title = format!(" {} ", view.path);
+    draw_frame(window, body, cols, None, &[(2, &title, true)]);
+    for (line, row) in (0..body - 2).zip(view.rows.iter()) {
         let _ = window.move_add_str(
-            Pos::new(line, 0),
-            truncate_to_width(&row.text, usize::from(cols)),
+            Pos::new(line + 1, 1),
+            truncate_to_width(&row.text, usize::from(cols - 2)),
         );
     }
 }
 
-/// The hex dump's page, one offset/hex/ASCII row per line.
+/// The hex dump's page inside its box, one offset/hex/ASCII row per
+/// line; the offset column reads in cyan so the eye tracks it.
 fn render_hex_view(view: &HexView, window: &mut Window, body: u16, cols: u16) {
+    let title = format!(" {} ", view.path);
+    draw_frame(window, body, cols, None, &[(2, &title, true)]);
     let digits = offset_digits(view.size);
-    for line in 0..body {
+    for line in 0..body - 2 {
         let Some(text) = dump_row(view.top, &view.bytes, usize::from(line), digits) else {
             break;
         };
-        let _ = window.move_add_str(
-            Pos::new(line, 0),
-            truncate_to_width(&text, usize::from(cols)),
-        );
+        let shown = truncate_to_width(&text, usize::from(cols - 2));
+        let _ = window.move_add_str(Pos::new(line + 1, 1), shown);
+        // Re-tint the offset column (the row's first `digits` characters,
+        // always ASCII hex) without re-shaping the row.
+        let offset_len = digits.min(shown.len());
+        window.set_attributes(border_attrs());
+        let _ = window.move_add_str(Pos::new(line + 1, 1), &shown[..offset_len]);
+        window.set_attributes(Attributes::PLAIN);
     }
 }
 
 /// The report overlay: a batch's per-file failure lines (or a walk's
-/// unreadable directories), plainly paged over the body area; any key
-/// dismisses it.
+/// unreadable directories), paged inside its box; any key dismisses it.
 fn render_report(model: &Model, window: &mut Window, body: u16, cols: u16) {
-    for (line, text) in (0..body).zip(model.report_lines.iter()) {
+    draw_frame(window, body, cols, None, &[(2, " Report ", true)]);
+    for (line, text) in (0..body - 2).zip(model.report_lines.iter()) {
         let _ = window.move_add_str(
-            Pos::new(line, 0),
-            truncate_to_width(text, usize::from(cols)),
+            Pos::new(line + 1, 1),
+            truncate_to_width(text, usize::from(cols - 2)),
         );
     }
 }
 
-/// The reverse-video status line: path, entry count, sort order, free
-/// space, and the hidden toggle.
+/// The status bar: path, entry count, sort order, free space, and the
+/// hidden toggle.
 fn render_status(model: &Model, window: &mut Window, rows: u16, cols: u16) {
     if model.view == View::Viewer {
         render_viewer_status(model, window, rows, cols);
         return;
     }
-    let mut reverse = Attributes::PLAIN;
-    reverse.reverse = true;
     let key = match model.sort_key {
         SortKey::Name => "name",
         SortKey::Extension => "ext",
@@ -273,16 +410,13 @@ fn render_status(model: &Model, window: &mut Window, rows: u16, cols: u16) {
     while padded.len() < usize::from(cols) {
         padded.push(' ');
     }
-    window.set_attributes(reverse);
+    window.set_attributes(status_attrs());
     let _ = window.move_add_str(Pos::new(rows - 2, 0), &padded);
     window.set_attributes(Attributes::PLAIN);
 }
 
-/// The viewer's reverse-video status line: path, size, place, and the
-/// live-scan state.
+/// The viewer's status bar: path, size, place, and the live-scan state.
 fn render_viewer_status(model: &Model, window: &mut Window, rows: u16, cols: u16) {
-    let mut reverse = Attributes::PLAIN;
-    reverse.reverse = true;
     let status = match &model.viewer {
         Some(Viewer::Text(view)) => {
             let place = match view.top.line {
@@ -319,54 +453,64 @@ fn render_viewer_status(model: &Model, window: &mut Window, rows: u16, cols: u16
     while padded.len() < usize::from(cols) {
         padded.push(' ');
     }
-    window.set_attributes(reverse);
+    window.set_attributes(status_attrs());
     let _ = window.move_add_str(Pos::new(rows - 2, 0), &padded);
     window.set_attributes(Attributes::PLAIN);
 }
 
 /// The message line: the open prompt's question, an error/notice, the
-/// sort-menu prompt, or key hints.
+/// sort-menu prompt, or key hints — each in its own register (bold
+/// prompts, bold-yellow notices, dim hints) so the eye reads the kind
+/// before the words.
 fn render_message(model: &Model, window: &mut Window, rows: u16, cols: u16) {
     let usage = model
         .walk
         .as_ref()
         .filter(|walk| walk.purpose == WalkPurpose::Usage)
         .map(|walk| format!("usage of {}: {} (Esc cancels)", walk.root, walk.figures()));
-    let text = if let Some(prompt) = &model.prompt {
-        prompt_line(prompt)
+    let (text, attrs) = if let Some(prompt) = &model.prompt {
+        (prompt_line(prompt), prompt_attrs())
     } else if model.overlay == Overlay::SortMenu {
-        String::from("sort: n)ame  e)xtension  s)ize  m)odified  r)everse  Esc cancels")
+        (
+            String::from("sort: n)ame  e)xtension  s)ize  m)odified  r)everse  Esc cancels"),
+            prompt_attrs(),
+        )
     } else if let Some(message) = &model.message {
-        message.clone()
+        (message.clone(), message_attrs())
     } else if let Some(usage) = usage {
-        usage
-    } else if model.view == View::Viewer {
-        match &model.viewer {
-            Some(Viewer::Text(_)) => String::from(
-                "arrows scroll  Space/b page  Home/End  g line  / search  n next  w wrap  \
-                 x hex  q back",
-            ),
-            _ => String::from(
-                "arrows scroll  Space/b page  Home/End  g offset  / search (text or 0x…)  \
-                 n next  t text  q back",
-            ),
-        }
-    } else if model.view == View::Flat {
-        String::from(
-            "arrows move  Enter open dir  t tag  T glob  i invert  C clear  c copy  m move  \
-             d delete  Space more  Esc back",
-        )
+        (usage, message_attrs())
     } else {
-        String::from(
-            "arrows move  Enter open  Tab pane  t tag  T glob  i invert  c copy  m move  \
-             r rename  d delete  M mkdir  a mode  f filter  / search  F contents  u usage  \
-             v flatten  s sort  . hidden  ? help  q quit",
-        )
+        let hint = if model.view == View::Viewer {
+            match &model.viewer {
+                Some(Viewer::Text(_)) => String::from(
+                    "arrows scroll  Space/b page  Home/End  g line  / search  n next  w wrap  \
+                     x hex  q back",
+                ),
+                _ => String::from(
+                    "arrows scroll  Space/b page  Home/End  g offset  / search (text or 0x…)  \
+                     n next  t text  q back",
+                ),
+            }
+        } else if model.view == View::Flat {
+            String::from(
+                "arrows move  Enter open dir  t tag  T glob  i invert  C clear  c copy  m move  \
+                 d delete  Space more  Esc back",
+            )
+        } else {
+            String::from(
+                "arrows move  Enter open  Tab pane  t tag  T glob  i invert  c copy  m move  \
+                 r rename  d delete  M mkdir  a mode  f filter  / search  F contents  u usage  \
+                 v flatten  s sort  . hidden  ? help  q quit",
+            )
+        };
+        (hint, hint_attrs())
     };
+    window.set_attributes(attrs);
     let _ = window.move_add_str(
         Pos::new(rows - 1, 0),
         truncate_to_width(&text, usize::from(cols)),
     );
+    window.set_attributes(Attributes::PLAIN);
 }
 
 /// The one-line question an open prompt shows; the trailing underscore is
@@ -491,14 +635,14 @@ fn input_prompt_line(input: &crate::model::InputPrompt) -> String {
     }
 }
 
-/// The help overlay: the bundle's own Help document, plainly paged over
-/// the body area (never embedded text — the string arrives through the
-/// help seam).
+/// The help overlay: the bundle's own Help document, paged inside its box
+/// (never embedded text — the string arrives through the help seam).
 fn render_help(model: &Model, window: &mut Window, body: u16, cols: u16) {
-    for (line, text) in (0..body).zip(model.help_text.lines()) {
+    draw_frame(window, body, cols, None, &[(2, " Help ", true)]);
+    for (line, text) in (0..body - 2).zip(model.help_text.lines()) {
         let _ = window.move_add_str(
-            Pos::new(line, 0),
-            truncate_to_width(text, usize::from(cols)),
+            Pos::new(line + 1, 1),
+            truncate_to_width(text, usize::from(cols - 2)),
         );
     }
 }

@@ -76,6 +76,8 @@ const NUM_STREAM_READ: u64 = SyscallNumber::STREAM_READ.as_u16() as u64;
 const NUM_SPAWN: u64 = SyscallNumber::SPAWN.as_u16() as u64;
 const NUM_MEM_MAP: u64 = SyscallNumber::MEM_MAP.as_u16() as u64;
 const NUM_MEM_UNMAP: u64 = SyscallNumber::MEM_UNMAP.as_u16() as u64;
+const NUM_FILE_MAP: u64 = SyscallNumber::FILE_MAP.as_u16() as u64;
+const NUM_FILE_UNMAP: u64 = SyscallNumber::FILE_UNMAP.as_u16() as u64;
 const NUM_WAIT: u64 = SyscallNumber::WAIT.as_u16() as u64;
 const NUM_RLIMIT_GET: u64 = SyscallNumber::RLIMIT_GET.as_u16() as u64;
 const NUM_RLIMIT_SET: u64 = SyscallNumber::RLIMIT_SET.as_u16() as u64;
@@ -736,6 +738,38 @@ pub extern "C" fn sys_mem_unmap(base: u64, len: usize) -> i32 {
     // SAFETY: see `sys_yield`. The kernel validates the `(base, len)` range
     // against the caller's address space before unmapping it.
     unsafe { ret_i32(raw_syscall(NUM_MEM_UNMAP, [base, len as u64, 0, 0, 0, 0])) }
+}
+
+/// `file_map`: map `len` bytes of the open, readable, filesystem-backed
+/// file `fd`, starting at the page-aligned file byte `offset`, into the
+/// calling process's own address space as a demand-paged, **read-only**
+/// private mapping (`SyscallNumber::FILE_MAP` — the `mmap(2)` shape).
+/// Returns the base address of the new region.
+///
+/// No page is read at call time: the kernel backs each page on first
+/// access under the mapping-time identity, so a mapping may exceed RAM by
+/// orders of magnitude. Touching a page wholly at/past end-of-file
+/// terminates the process (the `SIGBUS` analogue); bound accesses by the
+/// file size. The mapping is never writable and never executable. An
+/// error is reported as a `ROS_E_*` code reinterpreted into the result.
+#[must_use]
+#[export_name = "ros_sys_file_map"]
+pub extern "C" fn sys_file_map(fd: u32, offset: u64, len: u64) -> u64 {
+    // SAFETY: see `sys_yield`. No user pointer is dereferenced here; the
+    // kernel reserves the region and returns its base.
+    unsafe { raw_syscall(NUM_FILE_MAP, [u64::from(fd), offset, len, 0, 0, 0]) }
+}
+
+/// `file_unmap`: release the whole file mapping of `len` bytes based at
+/// `base` previously returned by [`sys_file_map`] from the calling
+/// process's own address space (`SyscallNumber::FILE_UNMAP`). Returns a
+/// `ROS_E_*` code.
+#[must_use]
+#[export_name = "ros_sys_file_unmap"]
+pub extern "C" fn sys_file_unmap(base: u64, len: u64) -> i32 {
+    // SAFETY: see `sys_yield`. The kernel validates the `(base, len)` pair
+    // against the caller's own recorded mappings before any teardown.
+    unsafe { ret_i32(raw_syscall(NUM_FILE_UNMAP, [base, len, 0, 0, 0, 0])) }
 }
 
 /// `wait`: wait for a child-process event, writing the typed
@@ -1810,6 +1844,8 @@ mod tests {
         (NUM_STREAM_READ, "stream_read", 4),
         (NUM_MEM_MAP, "mem_map", 3),
         (NUM_MEM_UNMAP, "mem_unmap", 2),
+        (NUM_FILE_MAP, "file_map", 3),
+        (NUM_FILE_UNMAP, "file_unmap", 2),
         (NUM_WAIT, "wait", 3),
         (NUM_RLIMIT_GET, "rlimit_get", 2),
         (NUM_RLIMIT_SET, "rlimit_set", 2),

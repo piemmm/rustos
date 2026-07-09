@@ -56,6 +56,18 @@ pub const fn is_page_fault(scause: u64) -> bool {
     )
 }
 
+/// `true` iff `scause` denotes a **data** page fault (load or store/AMO)
+/// — the only classes the demand-paged file-mapping resolver may attempt
+/// to resolve. An instruction page fault is never file backing (a file
+/// mapping is never executable) and always takes the fatal path.
+#[must_use]
+pub const fn is_data_page_fault(scause: u64) -> bool {
+    if (scause & crate::trap::SCAUSE_INTERRUPT_BIT) != 0 {
+        return false;
+    }
+    matches!(scause, SCAUSE_LOAD_PAGE_FAULT | SCAUSE_STORE_PAGE_FAULT)
+}
+
 /// Signature of the fault handler the trap path invokes for an
 /// unexpected synchronous exception.
 ///
@@ -109,6 +121,65 @@ pub fn fault_handler() -> Option<FaultHandlerFn> {
     }
 }
 
+/// Signature of the user-fault resolver the trap path offers a U-mode
+/// data page fault to before the fatal path.
+///
+/// `stval` is the faulting address. A `true` return means the fault is
+/// dealt with and the trap path simply returns — the saved `sepc` still
+/// points at the faulting instruction, so the `sret` retries the access
+/// against the now-resident page. A `false` return means the fault was
+/// not (and will never be) resolvable and the trap path falls through to
+/// the fatal [`FaultHandlerFn`] path. The callback may also *not return*
+/// for the faulting task: when the fault is fatal to the task alone, the
+/// binary's callback suspends it into the scheduler with an exit action —
+/// exactly like a rescheduling syscall. Like every trap-path callback it
+/// is a bare `extern "C" fn` with no captured environment.
+pub type UserFaultResolveFn = extern "C" fn(stval: u64) -> bool;
+
+/// Slot holding the installed user-fault resolver as a raw function
+/// pointer (`0` = none installed).
+static USER_FAULT_RESOLVER: AtomicUsize = AtomicUsize::new(0);
+
+/// Install the user-fault resolver.
+///
+/// Must be called once, on the boot hart, before user space is entered.
+/// Without one installed every U-mode data page fault takes the fatal
+/// path — fail closed, exactly as before demand paging existed.
+///
+/// # Errors
+///
+/// [`SetFaultHandlerError::AlreadyInstalled`] on the second publish.
+pub fn set_user_fault_resolver(cb: UserFaultResolveFn) -> Result<(), SetFaultHandlerError> {
+    let raw = cb as usize;
+    USER_FAULT_RESOLVER
+        .compare_exchange(0, raw, Ordering::AcqRel, Ordering::Acquire)
+        .map(|_| ())
+        .map_err(|_| SetFaultHandlerError::AlreadyInstalled)
+}
+
+/// Read back the installed user-fault resolver, if any. The trap path
+/// calls this on a U-mode data page fault; it is also a test/diagnostic
+/// observer.
+#[must_use]
+pub fn user_fault_resolver() -> Option<UserFaultResolveFn> {
+    let raw = USER_FAULT_RESOLVER.load(Ordering::Acquire);
+    if raw == 0 {
+        None
+    } else {
+        // SAFETY: every value stored into the slot round-trips a valid
+        // `UserFaultResolveFn` through `set_user_fault_resolver`; function
+        // pointers are `usize`-sized so the transmute is lossless.
+        Some(unsafe { core::mem::transmute::<usize, UserFaultResolveFn>(raw) })
+    }
+}
+
+#[cfg(test)]
+fn clear_user_fault_resolver_for_tests() {
+    // Test-only: lets back-to-back host tests reinstall a resolver.
+    // Production code never clears the slot.
+    USER_FAULT_RESOLVER.store(0, Ordering::Release);
+}
+
 #[cfg(test)]
 fn clear_fault_handler_for_tests() {
     // Test-only: lets back-to-back host tests reinstall a handler.
@@ -149,6 +220,42 @@ mod tests {
         assert_eq!(SCAUSE_INSTRUCTION_PAGE_FAULT, 12);
         assert_eq!(SCAUSE_LOAD_PAGE_FAULT, 13);
         assert_eq!(SCAUSE_STORE_PAGE_FAULT, 15);
+    }
+
+    #[test]
+    fn data_page_faults_are_distinguished() {
+        assert!(is_data_page_fault(SCAUSE_LOAD_PAGE_FAULT));
+        assert!(is_data_page_fault(SCAUSE_STORE_PAGE_FAULT));
+        // Instruction page faults, interrupts, and an `ecall` are never
+        // offered to the user-fault resolver.
+        assert!(!is_data_page_fault(SCAUSE_INSTRUCTION_PAGE_FAULT));
+        assert!(!is_data_page_fault(
+            crate::trap::SCAUSE_INTERRUPT_BIT | SCAUSE_LOAD_PAGE_FAULT
+        ));
+        assert!(!is_data_page_fault(8));
+    }
+
+    extern "C" fn host_user_fault_resolver(_stval: u64) -> bool {
+        false
+    }
+
+    #[test]
+    fn user_fault_resolver_slot_is_set_once_and_round_trips() {
+        clear_user_fault_resolver_for_tests();
+        assert!(user_fault_resolver().is_none());
+
+        set_user_fault_resolver(host_user_fault_resolver).expect("first install");
+        let got = user_fault_resolver().expect("resolver present");
+        assert_eq!(
+            got as *const () as usize,
+            host_user_fault_resolver as *const () as usize
+        );
+
+        assert_eq!(
+            set_user_fault_resolver(host_user_fault_resolver),
+            Err(SetFaultHandlerError::AlreadyInstalled)
+        );
+        clear_user_fault_resolver_for_tests();
     }
 
     extern "C" fn host_fault_handler(_scause: u64, _stval: u64, _sepc: u64) -> ! {
