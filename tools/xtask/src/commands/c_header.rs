@@ -121,6 +121,7 @@ const ERRNO_NAMES: &[(&str, Errno)] = &[
     ("SEAT_REVOKED", Errno::SeatRevoked),
     ("NOT_FOREGROUND", Errno::NotForeground),
     ("BROKEN_PIPE", Errno::BrokenPipe),
+    ("ENDPOINT_STALLED", Errno::EndpointStalled),
 ];
 
 /// One generated C header: its file name (relative to the include directory)
@@ -1757,6 +1758,8 @@ fn driver_emit_discriminants(out: &mut String) {
         ("BUSY", DriverError::Busy),
         ("NOT_IMPLEMENTED", DriverError::NotImplemented),
         ("NO_SPACE", DriverError::NoSpace),
+        ("SEAT_REVOKED", DriverError::SeatRevoked),
+        ("ENDPOINT_STALLED", DriverError::EndpointStalled),
     ] {
         let _ = writeln!(
             out,
@@ -3778,10 +3781,11 @@ mod tests {
             let expected = i32::try_from(idx + 1).expect("small index");
             assert_eq!(errno.as_i32(), expected, "errno values must be dense 1..=N");
         }
-        // BrokenPipe is the last appended abi-v1 variant (discriminant 28).
+        // EndpointStalled is the last appended abi-v1 variant
+        // (discriminant 29).
         assert_eq!(
             ERRNO_NAMES.last().map(|(_, e)| e.as_i32()),
-            Some(Errno::BrokenPipe.as_i32()),
+            Some(Errno::EndpointStalled.as_i32()),
             "errno table must end at the last frozen variant"
         );
     }

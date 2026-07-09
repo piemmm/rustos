@@ -10,9 +10,9 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use super::device::{
-    hub_port_connected, hub_port_enabled, hub_port_speed, BringUp, DeviceDescriptor, DmaRegion,
-    EnumStage, HubEvent, InterfaceInfo, UsbDevice, EVENT_RING_SEGMENT_MIN_TRBS, REPORT_LEN,
-    RING_TRBS,
+    hub_port_connected, hub_port_enabled, hub_port_speed, BringUp, BulkDirection, DeviceDescriptor,
+    DmaRegion, EnumStage, HubEvent, InterfaceInfo, UsbDevice, BULK_BUF_LEN, BULK_SLOTS,
+    EVENT_RING_SEGMENT_MIN_TRBS, REPORT_LEN, RING_TRBS,
 };
 use super::ring::{EventRingCursor, ProducerRing};
 use super::trb::{CompletionCode, Trb, TrbType, CONTROL_CYCLE, TRB_LEN};
@@ -33,8 +33,9 @@ const MOCK_WINDOW_LEN: usize = 0x3000;
 const MOCK_DMA_BASE: u64 = 0x0010_0000;
 /// Byte length of the shared DMA buffer (the layout for 32 slots with
 /// 64-byte contexts, plus the hub status-change ring and report buffer,
-/// needs ~5.4 KiB).
-const MOCK_DMA_LEN: usize = 0x4000;
+/// needs ~5.4 KiB; the two bulk rings and their staging buffers add
+/// ~66 KiB).
+const MOCK_DMA_LEN: usize = 0x18000;
 /// The mock's 64-byte contexts (its `HCCPARAMS1` sets CSZ).
 const MOCK_CTX_SIZE: usize = 64;
 
@@ -202,6 +203,30 @@ const MOCK_HUB_CONFIG_DESCRIPTOR: [u8; 25] = [
     // downstream keyboard's DCI 3), interrupt, wMaxPacketSize=1 (the
     // port-change bitmap byte), bInterval=12.
     0x07, 0x05, 0x82, 0x03, 0x01, 0x00, 0x0C,
+];
+
+/// The device descriptor fixture for a mass-storage device (class in the
+/// interface descriptor, vendor `0x0781` product `0x5567` — a generic
+/// flash-disk identity).
+const MOCK_MSD_DESCRIPTOR: [u8; 18] = [
+    18, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x40, 0x81, 0x07, 0x67, 0x55, 0x00, 0x01, 0x00, 0x00,
+    0x00, 0x01,
+];
+
+/// The configuration descriptor fixture for the mass-storage device: one
+/// interface of class `08:06:50` (mass storage, SCSI transparent, bulk-only
+/// transport) with a bulk-IN endpoint 0x83 (EP3 IN → DCI 7) and a bulk-OUT
+/// endpoint 0x04 (EP4 OUT → DCI 8) — deliberately not endpoints 1/2, so a
+/// driver that assumes the endpoint numbers is caught.
+const MOCK_MSD_CONFIG_DESCRIPTOR: [u8; 32] = [
+    // Configuration: wTotalLength=32, 1 interface.
+    0x09, 0x02, 0x20, 0x00, 0x01, 0x01, 0x00, 0x80, 0x32, //
+    // Interface: class=0x08, subclass=0x06 (SCSI), protocol=0x50 (BOT).
+    0x09, 0x04, 0x00, 0x00, 0x02, 0x08, 0x06, 0x50, 0x00, //
+    // Endpoint: 0x83 bulk IN, wMaxPacketSize=512.
+    0x07, 0x05, 0x83, 0x02, 0x00, 0x02, 0x00, //
+    // Endpoint: 0x04 bulk OUT, wMaxPacketSize=512.
+    0x07, 0x05, 0x04, 0x02, 0x00, 0x02, 0x00,
 ];
 
 /// Register-level xHCI model: the capability block, `USBCMD`/`USBSTS`
@@ -451,6 +476,53 @@ struct MockXhci {
     /// reports — the latched port changes (e.g. Connect Status Change). `0`
     /// = no change latched.
     hub_downstream_change: u16,
+    /// When set, the attached (non-hub) device is a **mass-storage** device:
+    /// the descriptor fixtures switch to the MSD pair (interface class
+    /// `08:06:50` with the bulk endpoint pair) instead of the HID keyboard.
+    msd_device: bool,
+    /// The bulk-IN endpoint model, captured from the two-endpoint (bulk
+    /// pair) Configure Endpoint.
+    bulk_in: MockBulk,
+    /// The bulk-OUT endpoint model, as [`Self::bulk_in`].
+    bulk_out: MockBulk,
+    /// Scripted device responses for bulk-IN TDs, one consumed per TD; a TD
+    /// with no queued response stays pending (the device has not produced
+    /// data yet).
+    bulk_in_responses: VecDeque<Vec<u8>>,
+    /// Bytes each completed bulk-OUT TD delivered to the device.
+    bulk_out_received: Vec<Vec<u8>>,
+}
+
+/// One direction of the mock's bulk endpoint model: the transfer ring's
+/// base / consumer state, the DCI the Configure Endpoint named (`0` = not
+/// configured), a one-shot STALL knob, and the recovery state machine.
+struct MockBulk {
+    base: u64,
+    index: usize,
+    cycle: bool,
+    dci: u8,
+    /// One-shot: the next serviced TD on this endpoint STALLs and halts it.
+    stall_next: bool,
+    /// Endpoint recovery state, modelling the xHCI order the silicon
+    /// requires: `0` running, `1` halted (STALL posted), `2` Reset Endpoint
+    /// seen, `3` Set TR Dequeue Pointer seen; a device-side
+    /// `CLEAR_FEATURE(ENDPOINT_HALT)` completes the recovery (`3` → `0`).
+    /// A halted endpoint's ring is not serviced, so a driver that skips or
+    /// re-orders a recovery step fails loudly.
+    halt: u8,
+}
+
+impl MockBulk {
+    const fn new() -> Self {
+        Self {
+            base: 0,
+            index: 0,
+            cycle: true,
+            dci: 0,
+            stall_next: false,
+            halt: 0,
+        }
+    }
 }
 
 impl MockXhci {
@@ -535,6 +607,11 @@ impl MockXhci {
             int_max_esit: 0,
             keyboard_config: &MOCK_CONFIG_DESCRIPTOR,
             int_dci: 3,
+            msd_device: false,
+            bulk_in: MockBulk::new(),
+            bulk_out: MockBulk::new(),
+            bulk_in_responses: VecDeque::new(),
+            bulk_out_received: Vec::new(),
             hub_slot_id: 0,
             hub_int_base: 0,
             hub_int_dci: 0,
@@ -566,6 +643,14 @@ impl MockXhci {
         mock.mem = Some(Rc::clone(mem));
         mock.portsc[0] =
             regs::PORTSC_CCS | regs::PORTSC_PED | regs::PORTSC_PP | (3 << regs::PORTSC_SPEED_SHIFT);
+        mock
+    }
+
+    /// As [`Self::with_device`], but the attached device is a mass-storage
+    /// device (interface class `08:06:50` with the bulk endpoint pair).
+    fn with_msd_device(mem: &SharedMem) -> Self {
+        let mut mock = Self::with_device(mem);
+        mock.msd_device = true;
         mock
     }
 
@@ -671,6 +756,14 @@ impl MockXhci {
         let mut image = [0u8; TRB_LEN];
         image.copy_from_slice(&mem[off..off + TRB_LEN]);
         Trb::from_bytes(image)
+    }
+
+    /// Read `len` bytes of shared memory at device-visible `addr` (the
+    /// device side of a bulk-OUT transfer).
+    fn read_mem(&self, addr: u64, len: usize) -> Vec<u8> {
+        let mem = self.mem.as_ref().expect("device model attached").borrow();
+        let offset = Self::mem_offset(addr);
+        mem[offset..offset + len].to_vec()
     }
 
     fn write_mem(&self, addr: u64, bytes: &[u8]) {
@@ -878,6 +971,42 @@ impl MockXhci {
                     let code = self.handle_configure_endpoint(trb.parameter, trb.slot_id());
                     self.post_command_completion(addr, code, trb.slot_id());
                 }
+                Ok(TrbType::ResetEndpoint) => {
+                    // Clears the controller-side halt (§4.6.8): the first
+                    // step of the required recovery order.
+                    let dci = trb.endpoint_id();
+                    if dci == self.bulk_in.dci && self.bulk_in.halt == 1 {
+                        self.bulk_in.halt = 2;
+                    }
+                    if dci == self.bulk_out.dci && self.bulk_out.halt == 1 {
+                        self.bulk_out.halt = 2;
+                    }
+                    self.post_command_completion(addr, CompletionCode::Success, trb.slot_id());
+                }
+                Ok(TrbType::SetTrDequeuePointer) => {
+                    // Repositions the endpoint's ring (§4.6.10): honoured
+                    // only after a Reset Endpoint cleared the halt.
+                    let dci = trb.endpoint_id();
+                    let base = trb.parameter & !0xF;
+                    let cycle = trb.parameter & 1 != 0;
+                    if dci == self.bulk_in.dci {
+                        self.bulk_in.base = base;
+                        self.bulk_in.index = 0;
+                        self.bulk_in.cycle = cycle;
+                        if self.bulk_in.halt == 2 {
+                            self.bulk_in.halt = 3;
+                        }
+                    }
+                    if dci == self.bulk_out.dci {
+                        self.bulk_out.base = base;
+                        self.bulk_out.index = 0;
+                        self.bulk_out.cycle = cycle;
+                        if self.bulk_out.halt == 2 {
+                            self.bulk_out.halt = 3;
+                        }
+                    }
+                    self.post_command_completion(addr, CompletionCode::Success, trb.slot_id());
+                }
                 Ok(TrbType::NoOpCommand) => {
                     self.post_command_completion(addr, CompletionCode::Success, 0);
                 }
@@ -962,6 +1091,50 @@ impl MockXhci {
         // names only the slot context (A0 alone) is the hub-topology
         // update that marks the parent hub as a hub.
         let endpoint_adds = add & !0b1;
+        // Two endpoint adds are the bulk endpoint pair (mass storage): read
+        // each context's Endpoint Type field (§6.2.3 dword 1 bits 3:5) and
+        // capture its ring; anything but one bulk-IN + one bulk-OUT is a
+        // malformed configure.
+        if endpoint_adds.count_ones() == 2 {
+            if add & 0b1 == 0 {
+                return CompletionCode::TrbError;
+            }
+            let mut bits = endpoint_adds;
+            let mut in_seen = false;
+            let mut out_seen = false;
+            while bits != 0 {
+                let dci = bits.trailing_zeros();
+                bits &= bits - 1;
+                let ep_ctx_off = input_ctx + (1 + u64::from(dci)) * MOCK_CTX_SIZE as u64;
+                let ctx = self.read_dwords(ep_ctx_off, 4);
+                let ep_type = (ctx[1] >> 3) & 0x7;
+                let dequeue = self.ep_ctx_dequeue(ep_ctx_off);
+                match ep_type {
+                    // Bulk IN.
+                    6 => {
+                        self.bulk_in.dci = u8::try_from(dci).expect("DCI fits a byte");
+                        self.bulk_in.base = dequeue;
+                        self.bulk_in.index = 0;
+                        self.bulk_in.cycle = true;
+                        in_seen = true;
+                    }
+                    // Bulk OUT.
+                    2 => {
+                        self.bulk_out.dci = u8::try_from(dci).expect("DCI fits a byte");
+                        self.bulk_out.base = dequeue;
+                        self.bulk_out.index = 0;
+                        self.bulk_out.cycle = true;
+                        out_seen = true;
+                    }
+                    _ => return CompletionCode::TrbError,
+                }
+            }
+            if !(in_seen && out_seen) {
+                return CompletionCode::TrbError;
+            }
+            self.configured = true;
+            return CompletionCode::Success;
+        }
         if endpoint_adds != 0 {
             // A HID endpoint Configure Endpoint names the slot context
             // (A0) and exactly one endpoint (A(dci)). The DCI is read
@@ -1074,8 +1247,10 @@ impl MockXhci {
     fn descriptor_fixture(&self, desc_type: u8) -> &'static [u8] {
         let is_hub_device = self.hub_ports > 0 && !self.downstream_active;
         match (desc_type, is_hub_device) {
+            (0x01, false) if self.msd_device => &MOCK_MSD_DESCRIPTOR,
             (0x01, false) => &MOCK_DESCRIPTOR,
             (0x01, true) => &MOCK_HUB_DESCRIPTOR,
+            (_, false) if self.msd_device => &MOCK_MSD_CONFIG_DESCRIPTOR,
             (_, false) => self.keyboard_config,
             (_, true) => &MOCK_HUB_CONFIG_DESCRIPTOR,
         }
@@ -1155,6 +1330,35 @@ impl MockXhci {
             (0x23, 0x01) => {
                 if (16..=20).contains(&setup[2]) {
                     self.hub_downstream_change &= !(1u16 << (setup[2] - 16));
+                }
+            }
+            // Standard CLEAR_FEATURE(ENDPOINT_HALT) on an endpoint (USB 2.0
+            // §9.4.1): the device-side half of a bulk halt recovery.
+            (0x02, 0x01) if setup[2] == 0x00 => {
+                // The request must reach the *device's* own control
+                // endpoint. One wrongly issued to the hub's EP0 (the resting
+                // active control context) is a mistargeted recovery: the hub
+                // has no such endpoint, so it STALLs — loudly, exactly as
+                // real hardware would.
+                if self.hub_slot_id != 0 && self.ep0_slot == self.hub_slot_id {
+                    self.ep0_halted = true;
+                    self.post_transfer_event(status_addr, CompletionCode::StallError, 1, 0);
+                    return;
+                }
+                let number = setup[4] & 0x0F;
+                let dci = if setup[4] & 0x80 != 0 {
+                    number * 2 + 1
+                } else {
+                    number * 2
+                };
+                // The device-side clear completes the recovery only after
+                // the controller-side Reset Endpoint + Set TR Dequeue
+                // Pointer ran, mirroring the order the silicon requires.
+                if dci == self.bulk_in.dci && self.bulk_in.halt == 3 {
+                    self.bulk_in.halt = 0;
+                }
+                if dci == self.bulk_out.dci && self.bulk_out.halt == 3 {
+                    self.bulk_out.halt = 0;
                 }
             }
             // SET_CONFIGURATION
@@ -1238,6 +1442,81 @@ impl MockXhci {
                 CompletionCode::Success
             };
             self.post_transfer_event(addr, code, self.int_dci, residual);
+        }
+    }
+
+    /// Consume queued bulk-IN TDs, answering each from the scripted
+    /// [`Self::bulk_in_responses`] (one response per TD; a TD with no queued
+    /// response stays pending). A halted endpoint is not serviced; the
+    /// one-shot stall knob halts it and posts a `StallError` for the TD it
+    /// consumed.
+    fn process_bulk_in_ring(&mut self) {
+        loop {
+            if self.bulk_in.halt != 0 {
+                return;
+            }
+            let (mut index, mut cycle) = (self.bulk_in.index, self.bulk_in.cycle);
+            let base = self.bulk_in.base;
+            let Some((addr, trb)) = self.next_owned(base, &mut index, &mut cycle) else {
+                return;
+            };
+            if trb.trb_type() != Ok(TrbType::Normal) {
+                return;
+            }
+            let len = trb.status & 0x1_FFFF;
+            if self.bulk_in.stall_next {
+                self.bulk_in.stall_next = false;
+                self.bulk_in.halt = 1;
+                self.bulk_in.index = index;
+                self.bulk_in.cycle = cycle;
+                self.post_transfer_event(addr, CompletionCode::StallError, self.bulk_in.dci, len);
+                return;
+            }
+            let Some(response) = self.bulk_in_responses.pop_front() else {
+                return;
+            };
+            self.bulk_in.index = index;
+            self.bulk_in.cycle = cycle;
+            let supplied = usize::min(response.len(), len as usize);
+            self.write_mem(trb.parameter, &response[..supplied]);
+            let residual = len - u32::try_from(supplied).expect("response fits");
+            let code = if residual > 0 {
+                CompletionCode::ShortPacket
+            } else {
+                CompletionCode::Success
+            };
+            self.post_transfer_event(addr, code, self.bulk_in.dci, residual);
+        }
+    }
+
+    /// Consume queued bulk-OUT TDs, capturing each TD's bytes in
+    /// [`Self::bulk_out_received`]. As [`Self::process_bulk_in_ring`] for
+    /// the halt/stall behaviour.
+    fn process_bulk_out_ring(&mut self) {
+        loop {
+            if self.bulk_out.halt != 0 {
+                return;
+            }
+            let (mut index, mut cycle) = (self.bulk_out.index, self.bulk_out.cycle);
+            let base = self.bulk_out.base;
+            let Some((addr, trb)) = self.next_owned(base, &mut index, &mut cycle) else {
+                return;
+            };
+            if trb.trb_type() != Ok(TrbType::Normal) {
+                return;
+            }
+            self.bulk_out.index = index;
+            self.bulk_out.cycle = cycle;
+            let len = trb.status & 0x1_FFFF;
+            if self.bulk_out.stall_next {
+                self.bulk_out.stall_next = false;
+                self.bulk_out.halt = 1;
+                self.post_transfer_event(addr, CompletionCode::StallError, self.bulk_out.dci, len);
+                return;
+            }
+            let bytes = self.read_mem(trb.parameter, len as usize);
+            self.bulk_out_received.push(bytes);
+            self.post_transfer_event(addr, CompletionCode::Success, self.bulk_out.dci, 0);
         }
     }
 
@@ -1360,6 +1639,8 @@ impl MockXhci {
         self.hub_int_dci = 0;
         self.hub_reset = 0;
         self.hub_powered = 0;
+        self.bulk_in = MockBulk::new();
+        self.bulk_out = MockBulk::new();
     }
 }
 
@@ -1575,6 +1856,12 @@ impl MockXhci {
                     self.ep0_slot = u8::try_from(index).unwrap_or(0);
                 }
                 self.process_ep0_ring();
+            }
+            (_, value) if self.bulk_in.dci != 0 && value == u32::from(self.bulk_in.dci) => {
+                self.process_bulk_in_ring();
+            }
+            (_, value) if self.bulk_out.dci != 0 && value == u32::from(self.bulk_out.dci) => {
+                self.process_bulk_out_ring();
             }
             (_, 3) => self.process_int_ring(),
             _ => {}
@@ -3687,6 +3974,20 @@ fn interface_info_decodes_and_fails_closed() {
     assert_eq!(info.configuration_value, 1);
     assert_eq!(info.interface_number, 0);
     assert_eq!(info.class24, 0x03_01_01);
+    // A HID interface carries no bulk endpoints.
+    assert!(!info.has_bulk_pair());
+    assert_eq!((info.bulk_in_dci, info.bulk_out_dci), (0, 0));
+
+    // The mass-storage fixture: class `08:06:50` with the bulk pair at the
+    // DCIs its endpoint descriptors report (EP3 IN → 7, EP4 OUT → 8),
+    // max packet 512 each — read, never assumed.
+    let msd = InterfaceInfo::decode(&MOCK_MSD_CONFIG_DESCRIPTOR).expect("MSD fixture decodes");
+    assert_eq!(msd.class24, 0x08_06_50);
+    assert!(msd.has_bulk_pair());
+    assert_eq!(msd.bulk_in_dci, 7);
+    assert_eq!(msd.bulk_in_max_packet, 512);
+    assert_eq!(msd.bulk_out_dci, 8);
+    assert_eq!(msd.bulk_out_max_packet, 512);
 
     // Too short to hold the configuration header.
     assert_eq!(
@@ -3761,6 +4062,269 @@ fn describe_device_before_enumeration_fails_closed() {
     assert_eq!(
         device.describe_device(7, 9).err(),
         Some(DriverError::NotFound)
+    );
+}
+
+/// Bring up a directly-attached mass-storage device on root port 1,
+/// asserting its identity so every bulk test starts from a proven
+/// enumeration.
+fn started_msd(mem: &SharedMem) -> UsbDevice<MockXhci, MockDma> {
+    let mut device = started_device(MockXhci::with_msd_device(mem), mem);
+    let descriptor = device.enumerate_hid(1).expect("the MSD enumerates");
+    assert_eq!(descriptor.vendor_id, 0x0781);
+    assert_eq!(descriptor.product_id, 0x5567);
+    device
+}
+
+#[test]
+fn enumerating_a_mass_storage_device_configures_its_bulk_endpoint_pair() {
+    use rustos_abi::{HwDeviceClass, HwMatchKey};
+    let mem = shared_mem();
+    let mut device = started_msd(&mem);
+
+    // The controller was told about both bulk endpoints at the DCIs the
+    // descriptor reports (EP3 IN → 7, EP4 OUT → 8 — never assumed), and
+    // the device reached the configured state.
+    assert_eq!(device.host_mut().bulk_in.dci, 7);
+    assert_eq!(device.host_mut().bulk_out.dci, 8);
+    assert!(device.host_mut().configured);
+
+    // The emitted node is an honest storage node carrying the interface's
+    // real class triple, so a mass-storage class driver's bind key
+    // (`08:06:50`, vendor/product wildcard) resolves against it.
+    let node = device.describe_device(7, 9).expect("identity captured");
+    assert_eq!(node.class(), Some(HwDeviceClass::Storage));
+    let emitted = node.match_keys()[0];
+    assert_eq!(emitted, HwMatchKey::usb(0x0781, 0x5567, 0x08_06_50));
+    assert!(HwMatchKey::usb(0, 0, 0x08_06_50).matches(&emitted));
+}
+
+#[test]
+fn bulk_out_transfers_deliver_the_bytes_to_the_device() {
+    let mem = shared_mem();
+    let mut device = started_msd(&mem);
+
+    let payload = alloc::vec![0x5Au8; 24];
+    let slot = device.queue_bulk_out(&payload).expect("TD queues");
+    assert_eq!(slot, 0);
+
+    // The mock device consumed the TD at the doorbell and captured the
+    // bytes; the completion reports every byte accepted.
+    assert_eq!(device.host_mut().bulk_out_received, alloc::vec![payload]);
+    let complete = device
+        .poll_bulk(&mut [])
+        .expect("poll succeeds")
+        .expect("a completion is pending");
+    assert_eq!(complete.direction, BulkDirection::Out);
+    assert_eq!(complete.slot, 0);
+    assert_eq!(complete.result, Ok(24));
+    // Nothing further is pending.
+    assert_eq!(device.poll_bulk(&mut []), Ok(None));
+}
+
+#[test]
+fn bulk_in_transfers_land_the_devices_bytes_and_report_short_packets_honestly() {
+    let mem = shared_mem();
+    let mut device = started_msd(&mem);
+
+    // The device answers the 64-byte read with only 10 bytes (a short
+    // packet, e.g. a short SCSI response).
+    let response = alloc::vec![0xA7u8; 10];
+    device
+        .host_mut()
+        .bulk_in_responses
+        .push_back(response.clone());
+    device.queue_bulk_in(64).expect("TD queues");
+
+    let mut buf = [0u8; 64];
+    let complete = device
+        .poll_bulk(&mut buf)
+        .expect("poll succeeds")
+        .expect("a completion is pending");
+    assert_eq!(complete.direction, BulkDirection::In);
+    assert_eq!(complete.result, Ok(10));
+    assert_eq!(&buf[..10], &response[..]);
+}
+
+#[test]
+fn several_bulk_tds_queue_per_direction_and_complete_in_order() {
+    let mem = shared_mem();
+    let mut device = started_msd(&mem);
+
+    // Three reads with distinct payloads, queued before any is reaped.
+    for byte in [0x11u8, 0x22, 0x33] {
+        device
+            .host_mut()
+            .bulk_in_responses
+            .push_back(alloc::vec![byte; 8]);
+    }
+    for expected_slot in 0..3 {
+        let slot = device.queue_bulk_in(8).expect("TD queues");
+        assert_eq!(slot, expected_slot);
+    }
+
+    // Completions arrive in submission order, each with its own bytes.
+    for (expected_slot, byte) in [(0usize, 0x11u8), (1, 0x22), (2, 0x33)] {
+        let mut buf = [0u8; 8];
+        let complete = device
+            .poll_bulk(&mut buf)
+            .expect("poll succeeds")
+            .expect("a completion is pending");
+        assert_eq!(complete.direction, BulkDirection::In);
+        assert_eq!(complete.slot, expected_slot);
+        assert_eq!(complete.result, Ok(8));
+        assert_eq!(buf, [byte; 8]);
+    }
+    assert_eq!(device.poll_bulk(&mut []), Ok(None));
+}
+
+#[test]
+fn a_full_bulk_ring_refuses_further_tds_and_bounds_the_queue() {
+    let mem = shared_mem();
+    let mut device = started_msd(&mem);
+
+    // With no responses scripted, every queued TD stays in flight. The
+    // ring holds `BULK_SLOTS - 1` TDs (one slot stays free to distinguish
+    // full from empty); the next queue is refused, never wrapped over.
+    for _ in 0..BULK_SLOTS - 1 {
+        device.queue_bulk_in(8).expect("TD queues");
+    }
+    assert_eq!(device.queue_bulk_in(8).err(), Some(DriverError::Busy));
+    assert_eq!(
+        device.bulk_in_flight(BulkDirection::In),
+        BULK_SLOTS - 1,
+        "every accepted TD stays accounted"
+    );
+
+    // An oversize TD is refused before any staging is touched.
+    assert_eq!(
+        device.queue_bulk_in(BULK_BUF_LEN + 1).err(),
+        Some(DriverError::LengthOutOfRange)
+    );
+}
+
+#[test]
+fn a_bulk_stall_recovers_the_endpoint_and_answers_every_queued_td() {
+    let mem = shared_mem();
+    let mut device = started_msd(&mem);
+
+    // Two reads are in flight when the device STALLs the first.
+    device.host_mut().bulk_in.stall_next = true;
+    device.queue_bulk_in(8).expect("first TD queues");
+    device.queue_bulk_in(8).expect("second TD queues");
+
+    // The stalled TD surfaces the distinct per-transfer stall, and the
+    // recovery ran in-line: Reset Endpoint → Set TR Dequeue Pointer →
+    // CLEAR_FEATURE(ENDPOINT_HALT), leaving the mock endpoint running.
+    let mut buf = [0u8; 8];
+    let complete = device
+        .poll_bulk(&mut buf)
+        .expect("poll succeeds")
+        .expect("the stalled TD completes");
+    assert_eq!(complete.slot, 0);
+    assert_eq!(complete.result, Err(DriverError::EndpointStalled));
+    assert_eq!(device.host_mut().bulk_in.halt, 0, "endpoint recovered");
+
+    // The TD the halt abandoned is answered too — never silently lost.
+    let aborted = device
+        .poll_bulk(&mut buf)
+        .expect("poll succeeds")
+        .expect("the abandoned TD is answered");
+    assert_eq!(aborted.slot, 1);
+    assert_eq!(aborted.result, Err(DriverError::EndpointStalled));
+
+    // The recovered endpoint serves fresh transfers immediately.
+    device
+        .host_mut()
+        .bulk_in_responses
+        .push_back(alloc::vec![0x77u8; 8]);
+    device.queue_bulk_in(8).expect("fresh TD queues");
+    let fresh = device
+        .poll_bulk(&mut buf)
+        .expect("poll succeeds")
+        .expect("the fresh TD completes");
+    assert_eq!(fresh.result, Ok(8));
+    assert_eq!(buf, [0x77u8; 8]);
+}
+
+#[test]
+fn a_downstream_msd_stall_recovery_targets_the_device_never_the_hub() {
+    // A storage stick behind the onboard hub (the Pi topology): at rest the
+    // hub is the active control context, so the recovery's
+    // CLEAR_FEATURE(ENDPOINT_HALT) must switch to the device's own EP0 — the
+    // mock STALLs a clear wrongly issued to the hub, so a mistargeted
+    // recovery fails this test loudly.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 2);
+    mock.msd_device = true;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+    let brought_up = device.bring_up_keyboard(&delay).expect("bring-up runs");
+    let BringUp::Device(descriptor) = brought_up else {
+        panic!("a downstream device is enumerated");
+    };
+    assert_eq!(descriptor.vendor_id, 0x0781);
+
+    device.host_mut().bulk_out.stall_next = true;
+    device.queue_bulk_out(&[0xE1u8; 4]).expect("TD queues");
+    let complete = device
+        .poll_bulk(&mut [])
+        .expect("poll succeeds")
+        .expect("the stalled TD completes");
+    assert_eq!(complete.result, Err(DriverError::EndpointStalled));
+    assert_eq!(device.host_mut().bulk_out.halt, 0, "endpoint recovered");
+    // The clear reached the device's EP0 (a mistargeted one STALLs and
+    // halts EP0 in the mock), and the hub watch survived the recovery.
+    assert!(!device.host_mut().ep0_halted, "EP0 was never mistargeted");
+    assert!(device.hub_watch_active(), "the hub watch keeps its ring");
+
+    // And the recovered endpoint accepts a fresh transfer end to end.
+    device
+        .queue_bulk_out(&[0xE2u8; 4])
+        .expect("fresh TD queues");
+    let fresh = device
+        .poll_bulk(&mut [])
+        .expect("poll succeeds")
+        .expect("the fresh TD completes");
+    assert_eq!(fresh.result, Ok(4));
+}
+
+#[test]
+fn urb_engine_bulk_serves_the_configured_endpoints_and_rejects_others() {
+    use crate::transport::UrbEngine;
+    let mem = shared_mem();
+    let mut device = started_msd(&mem);
+
+    // A bulk URB naming an endpoint that is not the configured one in its
+    // direction is refused before any ring is touched.
+    let mut buf = [0u8; 8];
+    assert_eq!(
+        UrbEngine::bulk_in(&mut device, 1, &mut buf).err(),
+        Some(DriverError::OutOfRange)
+    );
+    assert_eq!(
+        UrbEngine::bulk_out(&mut device, 3, &buf).err(),
+        Some(DriverError::OutOfRange)
+    );
+
+    // The right endpoints serve the arm-then-reap URB shape: the first
+    // drive arms (still in flight), the next reaps the completion.
+    device
+        .host_mut()
+        .bulk_in_responses
+        .push_back(alloc::vec![0x42u8; 8]);
+    assert_eq!(UrbEngine::bulk_in(&mut device, 3, &mut buf), Ok(None));
+    assert_eq!(UrbEngine::bulk_in(&mut device, 3, &mut buf), Ok(Some(8)));
+    assert_eq!(buf, [0x42u8; 8]);
+
+    assert_eq!(UrbEngine::bulk_out(&mut device, 4, &[0x9Cu8; 6]), Ok(None));
+    assert_eq!(
+        UrbEngine::bulk_out(&mut device, 4, &[0x9Cu8; 6]),
+        Ok(Some(6))
+    );
+    assert_eq!(
+        device.host_mut().bulk_out_received.last(),
+        Some(&alloc::vec![0x9Cu8; 6])
     );
 }
 

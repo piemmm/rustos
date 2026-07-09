@@ -24,16 +24,26 @@ use rustos_usb::transport::UrbEngine;
 /// `shm` slice it is handed, not this value.
 const BUFFER_HANDLE: u64 = 0x0BAD_F00D_0000_0001;
 
-/// A controllable [`UrbEngine`] double: control-IN copies a fixed response and
-/// interrupt-IN delivers queued reports once each, then "nothing pending".
-/// Records its call counts so a test can prove a rejected URB never reaches it.
+/// A controllable [`UrbEngine`] double: control-IN copies a fixed response,
+/// interrupt-IN delivers queued reports once each, then "nothing pending",
+/// and the bulk pair mirrors the live engine's arm-then-reap shape (first
+/// drive arms and returns `None`, a later drive completes from the queued
+/// device data). Records its call counts so a test can prove a rejected URB
+/// never reaches it.
 struct MockEngine {
     control_response: Vec<u8>,
     reports: Vec<Vec<u8>>,
     interrupt_fault: Option<DriverError>,
     control_calls: usize,
     interrupt_calls: usize,
+    /// Queued device responses for bulk-IN, delivered one per completed TD.
+    bulk_in_data: Vec<Vec<u8>>,
+    /// An armed bulk-IN TD's requested length, `None` when idle.
+    bulk_in_armed: Option<usize>,
 }
+
+/// The mock interface's bulk-IN endpoint number.
+const BULK_IN_ENDPOINT: u8 = 2;
 
 impl MockEngine {
     fn new() -> Self {
@@ -43,6 +53,8 @@ impl MockEngine {
             interrupt_fault: None,
             control_calls: 0,
             interrupt_calls: 0,
+            bulk_in_data: Vec::new(),
+            bulk_in_armed: None,
         }
     }
 }
@@ -67,6 +79,30 @@ impl UrbEngine for MockEngine {
         let n = report.len().min(data.len());
         data[..n].copy_from_slice(&report[..n]);
         Ok(Some(n))
+    }
+
+    fn bulk_in(&mut self, endpoint: u8, data: &mut [u8]) -> Result<Option<usize>, DriverError> {
+        if endpoint != BULK_IN_ENDPOINT {
+            return Err(DriverError::OutOfRange);
+        }
+        if self.bulk_in_armed.is_none() {
+            self.bulk_in_armed = Some(data.len());
+            return Ok(None);
+        }
+        if self.bulk_in_data.is_empty() {
+            return Ok(None);
+        }
+        self.bulk_in_armed = None;
+        let response = self.bulk_in_data.remove(0);
+        let n = response.len().min(data.len());
+        data[..n].copy_from_slice(&response[..n]);
+        Ok(Some(n))
+    }
+
+    fn bulk_out(&mut self, _endpoint: u8, _data: &[u8]) -> Result<Option<usize>, DriverError> {
+        // No serve-level test drives bulk-OUT through this double yet; the
+        // seam-level round-trip lives in `rustos_usb::transport::tests`.
+        Err(DriverError::NotFound)
     }
 }
 
@@ -119,6 +155,49 @@ fn an_interrupt_in_is_held_until_a_controller_event_completes_it() {
         other => panic!("expected a Reply, got {other:?}"),
     }
     assert_eq!(&shm[..8], &report[..]);
+    assert!(!service.is_busy());
+}
+
+/// Encode a bulk-IN URB on `endpoint` reading `length` bytes.
+fn bulk_in_urb(endpoint: u8, length: u32) -> Vec<u8> {
+    let urb = UrbRequest {
+        endpoint,
+        transfer_type: UsbTransferType::Bulk,
+        direction: UsbDirection::In,
+        buffer: BUFFER_HANDLE,
+        length,
+        setup: [0; 8],
+    };
+    let mut buf = [0u8; URB_REQUEST_LEN];
+    let n = urb.encode(&mut buf).expect("encodes");
+    buf[..n].to_vec()
+}
+
+#[test]
+fn a_bulk_in_is_held_until_a_controller_event_completes_it() {
+    // Bulk completions are delivered asynchronously exactly like interrupt
+    // completions: the submit arms the TD and is held, the controller event
+    // reaps it and replies with the device's bytes in the shared buffer.
+    let mut engine = MockEngine::new();
+    let mut shm = vec![0u8; 16];
+    let mut service = UrbService::new();
+    let request = bulk_in_urb(BULK_IN_ENDPOINT, 16);
+
+    let outcome = service.on_submit(true, 0x21, &request, &mut shm, &mut engine);
+    assert_eq!(outcome, UrbOutcome::Held);
+    assert!(service.is_busy());
+
+    let payload = vec![0xC3u8; 16];
+    engine.bulk_in_data = vec![payload.clone()];
+    let outcome = service.on_event(&mut shm, &mut engine);
+    match outcome {
+        UrbOutcome::Reply(reply) => {
+            assert_eq!(reply.ticket, 0x21);
+            assert_eq!(decode_completion(&reply.bytes[..reply.len]), Ok(16));
+        }
+        other => panic!("expected a Reply, got {other:?}"),
+    }
+    assert_eq!(&shm[..16], &payload[..]);
     assert!(!service.is_busy());
 }
 
@@ -259,9 +338,10 @@ fn an_illegal_urb_is_replied_fail_closed_without_reaching_the_engine() {
     let mut shm = vec![0u8; 8];
     let mut service = UrbService::new();
 
-    // A bulk transfer is out of scope for this seam.
+    // A bulk transfer must target a device endpoint, never the shared
+    // control endpoint.
     let urb = UrbRequest {
-        endpoint: 2,
+        endpoint: 0,
         transfer_type: UsbTransferType::Bulk,
         direction: UsbDirection::In,
         buffer: BUFFER_HANDLE,
@@ -272,7 +352,7 @@ fn an_illegal_urb_is_replied_fail_closed_without_reaching_the_engine() {
     let n = urb.encode(&mut buf).expect("encodes");
 
     let outcome = service.on_submit(true, 0x33, &buf[..n], &mut shm, &mut engine);
-    assert_eq!(reply_result(&outcome), Err(Errno::NotImplemented));
+    assert_eq!(reply_result(&outcome), Err(Errno::OutOfRange));
     assert!(!service.is_busy());
     assert_eq!(engine.control_calls, 0);
     assert_eq!(engine.interrupt_calls, 0);

@@ -29,15 +29,32 @@ use rustos_abi::{DriverError, Errno};
 const BUFFER_HANDLE: u64 = 0x0BAD_F00D_0000_0001;
 
 /// A controllable [`UrbEngine`] double: a control-IN transfer copies a fixed
-/// response into the caller's buffer, and interrupt-IN delivers queued
-/// reports once each, then reports "nothing pending". Records its call count
-/// so a test can prove a rejected URB never reaches it.
+/// response into the caller's buffer, interrupt-IN delivers queued reports
+/// once each then reports "nothing pending", and the bulk pair mirrors the
+/// live engine's arm-then-reap shape (first drive arms and returns `None`,
+/// a later drive completes) with a one-shot STALL knob. Records its call
+/// counts so a test can prove a rejected URB never reaches it.
 struct MockEngine {
     control_response: Vec<u8>,
     reports: Vec<Vec<u8>>,
     control_calls: usize,
     interrupt_calls: usize,
+    /// Queued device responses for bulk-IN, delivered one per completed TD.
+    bulk_in_data: Vec<Vec<u8>>,
+    /// Bytes each completed bulk-OUT TD delivered to the device.
+    bulk_out_sink: Vec<Vec<u8>>,
+    /// An armed bulk-IN TD's requested length, `None` when idle.
+    bulk_in_armed: Option<usize>,
+    /// An armed bulk-OUT TD's staged bytes, `None` when idle.
+    bulk_out_armed: Option<Vec<u8>>,
+    /// When set, the next reaped bulk TD STALLs (consumed once).
+    stall_next_bulk: bool,
+    bulk_calls: usize,
 }
+
+/// The interface's bulk endpoint numbers the mock serves.
+const BULK_IN_ENDPOINT: u8 = 1;
+const BULK_OUT_ENDPOINT: u8 = 2;
 
 impl MockEngine {
     fn new() -> Self {
@@ -46,6 +63,12 @@ impl MockEngine {
             reports: Vec::new(),
             control_calls: 0,
             interrupt_calls: 0,
+            bulk_in_data: Vec::new(),
+            bulk_out_sink: Vec::new(),
+            bulk_in_armed: None,
+            bulk_out_armed: None,
+            stall_next_bulk: false,
+            bulk_calls: 0,
         }
     }
 }
@@ -66,6 +89,48 @@ impl UrbEngine for MockEngine {
         let report = self.reports.remove(0);
         let n = report.len().min(data.len());
         data[..n].copy_from_slice(&report[..n]);
+        Ok(Some(n))
+    }
+
+    fn bulk_in(&mut self, endpoint: u8, data: &mut [u8]) -> Result<Option<usize>, DriverError> {
+        self.bulk_calls += 1;
+        if endpoint != BULK_IN_ENDPOINT {
+            return Err(DriverError::OutOfRange);
+        }
+        if self.bulk_in_armed.is_none() {
+            self.bulk_in_armed = Some(data.len());
+            return Ok(None);
+        }
+        self.bulk_in_armed = None;
+        if self.stall_next_bulk {
+            self.stall_next_bulk = false;
+            return Err(DriverError::EndpointStalled);
+        }
+        if self.bulk_in_data.is_empty() {
+            return Ok(None);
+        }
+        let response = self.bulk_in_data.remove(0);
+        let n = response.len().min(data.len());
+        data[..n].copy_from_slice(&response[..n]);
+        Ok(Some(n))
+    }
+
+    fn bulk_out(&mut self, endpoint: u8, data: &[u8]) -> Result<Option<usize>, DriverError> {
+        self.bulk_calls += 1;
+        if endpoint != BULK_OUT_ENDPOINT {
+            return Err(DriverError::OutOfRange);
+        }
+        if self.bulk_out_armed.is_none() {
+            self.bulk_out_armed = Some(data.to_vec());
+            return Ok(None);
+        }
+        let staged = self.bulk_out_armed.take().unwrap_or_default();
+        if self.stall_next_bulk {
+            self.stall_next_bulk = false;
+            return Err(DriverError::EndpointStalled);
+        }
+        let n = staged.len();
+        self.bulk_out_sink.push(staged);
         Ok(Some(n))
     }
 }
@@ -247,19 +312,105 @@ fn rejects_illegal_direction() {
 }
 
 #[test]
-fn rejects_bulk_transfers() {
+fn bulk_in_round_trips_through_the_client() {
+    let engine = Rc::new(RefCell::new(MockEngine::new()));
+    let payload = vec![0xA5u8; 16];
+    engine.borrow_mut().bulk_in_data = vec![payload.clone()];
+    let buffer = Rc::new(RefCell::new(vec![0u8; 16]));
+
+    let mut client = UrbClient::new(DirectCall {
+        engine: engine.clone(),
+        buffer: buffer.clone(),
+    });
+
+    // The first drive arms the TD (the synchronous double surfaces the held
+    // URB as the retryable `WouldBlock`); the re-drive reaps its completion.
+    assert_eq!(
+        client.bulk_in(BULK_IN_ENDPOINT, BUFFER_HANDLE, 16),
+        Err(Errno::WouldBlock)
+    );
+    let transferred = client
+        .bulk_in(BULK_IN_ENDPOINT, BUFFER_HANDLE, 16)
+        .expect("bulk-IN completes");
+    assert_eq!(transferred, 16);
+    assert_eq!(&buffer.borrow()[..16], &payload[..]);
+}
+
+#[test]
+fn bulk_out_round_trips_through_the_client() {
+    let engine = Rc::new(RefCell::new(MockEngine::new()));
+    let buffer = Rc::new(RefCell::new(vec![0x5Au8; 12]));
+
+    let mut client = UrbClient::new(DirectCall {
+        engine: engine.clone(),
+        buffer: buffer.clone(),
+    });
+
+    assert_eq!(
+        client.bulk_out(BULK_OUT_ENDPOINT, BUFFER_HANDLE, 12),
+        Err(Errno::WouldBlock)
+    );
+    let transferred = client
+        .bulk_out(BULK_OUT_ENDPOINT, BUFFER_HANDLE, 12)
+        .expect("bulk-OUT completes");
+    assert_eq!(transferred, 12);
+    // The device received exactly the shared buffer's bytes.
+    assert_eq!(engine.borrow().bulk_out_sink, vec![vec![0x5Au8; 12]]);
+}
+
+#[test]
+fn rejects_bulk_on_the_control_endpoint() {
     let mut engine = MockEngine::new();
     let urb = UrbRequest {
-        endpoint: 2,
+        endpoint: 0,
         transfer_type: UsbTransferType::Bulk,
         direction: UsbDirection::In,
         buffer: BUFFER_HANDLE,
         length: 8,
         setup: [0; 8],
     };
-    assert_eq!(serve_one(&urb, 8, &mut engine), Err(Errno::NotImplemented));
-    assert_eq!(engine.control_calls, 0);
-    assert_eq!(engine.interrupt_calls, 0);
+    assert_eq!(serve_one(&urb, 8, &mut engine), Err(Errno::OutOfRange));
+    assert_eq!(engine.bulk_calls, 0);
+}
+
+#[test]
+fn a_wrong_bulk_endpoint_fails_closed_in_band() {
+    // The engine owns the interface's endpoint map; a bulk URB naming an
+    // endpoint that is not the configured one in that direction is refused
+    // and the refusal framed in band.
+    let mut engine = MockEngine::new();
+    let urb = UrbRequest {
+        endpoint: 7,
+        transfer_type: UsbTransferType::Bulk,
+        direction: UsbDirection::In,
+        buffer: BUFFER_HANDLE,
+        length: 8,
+        setup: [0; 8],
+    };
+    assert_eq!(serve_one(&urb, 8, &mut engine), Err(Errno::OutOfRange));
+}
+
+#[test]
+fn a_stalled_bulk_transfer_surfaces_endpoint_stalled_in_band() {
+    let engine = Rc::new(RefCell::new(MockEngine::new()));
+    engine.borrow_mut().stall_next_bulk = true;
+    let buffer = Rc::new(RefCell::new(vec![0u8; 8]));
+
+    let mut client = UrbClient::new(DirectCall {
+        engine: engine.clone(),
+        buffer,
+    });
+
+    // Arm, then reap the STALL: the completion carries the distinct
+    // `EndpointStalled` so a class driver can run its own (BOT) recovery.
+    assert_eq!(
+        client.bulk_in(BULK_IN_ENDPOINT, BUFFER_HANDLE, 8),
+        Err(Errno::WouldBlock)
+    );
+    assert_eq!(
+        client.bulk_in(BULK_IN_ENDPOINT, BUFFER_HANDLE, 8),
+        Err(Errno::EndpointStalled)
+    );
 }
 
 #[test]

@@ -53,8 +53,9 @@ build on the *same* engine without depending on each other — exactly the split
   their own, so the owner publishes every write through the `device::DmaRegion`
   seam.
 - `XHCI_DMA_BYTES` — the bytes a host carves for one controller's device-shared
-  DMA structures (rings, contexts, report buffers, scratchpad), sized for the
-  VL805's 31-page scratchpad worst case. It lives here, beside the engine that
+  DMA structures (rings, contexts, report buffers, bulk staging, scratchpad),
+  sized for the VL805's 31-page scratchpad worst case plus the bulk
+  rings/staging. It lives here, beside the engine that
   lays the region out, so every host that carves it — the PCI bus driver's
   wiring (`drivers/bus/usb`) and the arch-neutral keyboard driver
   (`drivers/input/usb_hid`) — shares one definition (§2.2).
@@ -72,22 +73,35 @@ build on the *same* engine without depending on each other — exactly the split
   an in-band `Errno`). `transport` adds the two ends both sides share:
   - `UrbEngine` — the controller-side operation seam the HCD's live engine
     performs (`UsbDevice` implements it: `control_in` over the EP0 control
-    transfer, `interrupt_in` over the `ReportSource` report poll).
+    transfer — targeting the enumerated *device*, switching a hub-downstream
+    device's EP0 ring active for the transfer — `interrupt_in` over the
+    `ReportSource` report poll, and `bulk_in` / `bulk_out` over the bulk
+    endpoint pair a mass-storage interface configures at enumeration,
+    `plans/DEVICES.md` D1).
   - `drive_urb` — the controller-side server transformation: decode a URB,
     validate it fail-closed against the interface (control ⇒ endpoint 0 / IN;
-    interrupt ⇒ a device endpoint / IN; an oversize length, a bulk or
-    control-OUT transfer, or a malformed frame is refused **before** the engine
-    is touched), drive the engine over the shared buffer, and frame the
-    completion in band. A not-yet-arrived interrupt-IN report leaves the HCD's
-    IPC ticket outstanding until the controller event arrives, so the class
-    driver parks instead of retrying.
+    interrupt/bulk ⇒ a device endpoint; an oversize length, a control-OUT
+    transfer, or a malformed frame is refused **before** the engine is
+    touched), drive the engine over the shared buffer, and frame the
+    completion in band. A not-yet-arrived interrupt-IN report — or a bulk
+    transfer still in flight — leaves the HCD's IPC ticket outstanding until
+    the controller event arrives, so the class driver parks instead of
+    retrying.
   - `UrbCall` / `UrbClient` — the class-side client: a class driver implements
     `UrbCall` over the kernel `ipc_call` surface (a host test routes the bytes
-    straight to `serve_urb`), and `UrbClient::{control_in, interrupt_in}` build
-    the URB, submit it, and decode the completion. A class driver speaks only
+    straight to `serve_urb`), and
+    `UrbClient::{control_in, interrupt_in, bulk_in, bulk_out}` build the URB,
+    submit it, and decode the completion. A class driver speaks only
     this ABI, so the same binary works behind any controller that serves it —
     it touches no controller register and no other interface's buffer (§5.4,
     `plans/USB.md` §1.3).
+  - Bulk endpoints are served through per-direction transfer rings with
+    per-slot staging buffers (several TDs may be outstanding per direction,
+    completing in order), short packets report the honest byte count, and a
+    device STALL is recovered in place — Reset Endpoint → Set TR Dequeue
+    Pointer → `CLEAR_FEATURE(ENDPOINT_HALT)` on the device's own EP0 — with
+    every abandoned TD answered and the stall surfaced as the distinct
+    `EndpointStalled`, so a BOT class driver can run its own recovery.
 
 ## Design
 

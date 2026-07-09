@@ -198,6 +198,14 @@ pub const fn control_slot(slot: u8) -> u32 {
     (slot as u32) << 24
 }
 
+/// Encode an Endpoint ID (DCI) into the control-word Endpoint ID field
+/// (bits 20:16) of an endpoint-targeted command TRB — Reset Endpoint and
+/// Set TR Dequeue Pointer (§6.4.3.8 / §6.4.3.9).
+#[must_use]
+pub const fn control_endpoint(dci: u8) -> u32 {
+    ((dci as u32) & 0x1F) << 16
+}
+
 /// TRB types this driver models (§6.4.6, table 6-91).
 #[repr(u8)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -224,6 +232,13 @@ pub enum TrbType {
     AddressDevice = 11,
     /// Configure Endpoint command (§6.4.3.5).
     ConfigureEndpoint = 12,
+    /// Reset Endpoint command (§6.4.3.8): clear a halted endpoint's state
+    /// after a STALL so it can be repositioned and resumed.
+    ResetEndpoint = 14,
+    /// Set TR Dequeue Pointer command (§6.4.3.9): reposition a stopped
+    /// endpoint's transfer-ring dequeue pointer, dropping the TRBs the halt
+    /// abandoned.
+    SetTrDequeuePointer = 16,
     /// No Op command (command-ring diagnostics, §6.4.3.1).
     NoOpCommand = 23,
     /// Transfer event (§6.4.2.1).
@@ -258,6 +273,8 @@ impl TrbType {
             10 => Ok(Self::DisableSlot),
             11 => Ok(Self::AddressDevice),
             12 => Ok(Self::ConfigureEndpoint),
+            14 => Ok(Self::ResetEndpoint),
+            16 => Ok(Self::SetTrDequeuePointer),
             23 => Ok(Self::NoOpCommand),
             32 => Ok(Self::TransferEvent),
             33 => Ok(Self::CommandCompletion),

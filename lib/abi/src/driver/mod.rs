@@ -326,6 +326,17 @@ pub enum DriverError {
     /// compositor learns it lost the seat rather than treating the refusal
     /// as a generic authority failure. Maps to [`Errno::SeatRevoked`].
     SeatRevoked = 14,
+    /// A device endpoint answered the transfer with a protocol STALL.
+    ///
+    /// Returned by the USB URB transport's bulk path when the device halts
+    /// the addressed endpoint — an in-band protocol signal (USB BOT rejects
+    /// a phase with a bulk STALL), not the unrecoverable hardware error
+    /// [`DeviceFault`](Self::DeviceFault) reports. The host-controller
+    /// driver has already recovered the endpoint (halt cleared, ring
+    /// repositioned) when this is delivered, so the caller may run its own
+    /// class-level recovery and submit fresh transfers immediately. Maps to
+    /// [`Errno::EndpointStalled`].
+    EndpointStalled = 15,
 }
 
 impl DriverError {
@@ -361,6 +372,7 @@ impl DriverError {
             12 => Ok(Self::NotImplemented),
             13 => Ok(Self::NoSpace),
             14 => Ok(Self::SeatRevoked),
+            15 => Ok(Self::EndpointStalled),
             _ => Err(Self::OutOfRange),
         }
     }
@@ -383,6 +395,7 @@ impl DriverError {
             Self::SignatureInvalid => Errno::SignatureInvalid,
             Self::NoSpace => Errno::NoSpace,
             Self::SeatRevoked => Errno::SeatRevoked,
+            Self::EndpointStalled => Errno::EndpointStalled,
             Self::Unsupported | Self::DeviceFault | Self::Busy | Self::NotImplemented => {
                 Errno::NotImplemented
             }
@@ -1022,6 +1035,7 @@ mod tests {
         assert_eq!(DriverError::NotImplemented.as_i32(), 12);
         assert_eq!(DriverError::NoSpace.as_i32(), 13);
         assert_eq!(DriverError::SeatRevoked.as_i32(), 14);
+        assert_eq!(DriverError::EndpointStalled.as_i32(), 15);
     }
 
     #[test]
@@ -1034,6 +1048,10 @@ mod tests {
         assert_eq!(DriverError::Busy.as_errno(), Errno::NotImplemented);
         assert_eq!(DriverError::NoSpace.as_errno(), Errno::NoSpace);
         assert_eq!(DriverError::SeatRevoked.as_errno(), Errno::SeatRevoked);
+        assert_eq!(
+            DriverError::EndpointStalled.as_errno(),
+            Errno::EndpointStalled
+        );
     }
 
     #[test]
@@ -1053,12 +1071,13 @@ mod tests {
             DriverError::NotImplemented,
             DriverError::NoSpace,
             DriverError::SeatRevoked,
+            DriverError::EndpointStalled,
         ];
         for err in all {
             assert_eq!(DriverError::from_i32(err.as_i32()), Ok(err));
         }
         assert_eq!(DriverError::from_i32(0), Err(DriverError::OutOfRange));
-        assert_eq!(DriverError::from_i32(15), Err(DriverError::OutOfRange));
+        assert_eq!(DriverError::from_i32(16), Err(DriverError::OutOfRange));
         assert_eq!(DriverError::from_i32(-1), Err(DriverError::OutOfRange));
     }
 

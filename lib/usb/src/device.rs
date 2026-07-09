@@ -88,6 +88,25 @@ const HUB_REPORT_LEN: usize = 8;
 /// device descriptor).
 const CTRL_DATA_LEN: usize = 64;
 
+/// TRB slots in each bulk transfer ring (one link + [`BULK_SLOTS`] data
+/// slots). Sized so several bulk URBs can be outstanding per direction
+/// while the whole staging area still fits the fixed controller DMA carve
+/// beside the scratchpad pages — a protocol working set, not a scalable
+/// capacity (the class driver chunks a large transfer through it at a
+/// fixed per-device cost).
+pub const BULK_RING_TRBS: usize = 9;
+
+/// Data slots in each bulk transfer ring (the ring's last slot is its
+/// permanent Link TRB). Each data slot owns one [`BULK_BUF_LEN`] staging
+/// buffer, so a completed TRB maps back to its bytes by slot index alone.
+pub const BULK_SLOTS: usize = BULK_RING_TRBS - 1;
+
+/// Byte length of one bulk staging buffer — the largest single bulk URB.
+/// One controller page: a class driver moves larger transfers as a
+/// sequence of URBs through the shared-memory window (the `virtio_blk`
+/// chunking precedent), so per-device DMA cost stays fixed.
+pub const BULK_BUF_LEN: usize = 4096;
+
 /// Contexts in an input context: the input control context, the slot
 /// context, and the 31 endpoint contexts (§6.2.5).
 const INPUT_CONTEXTS: usize = 33;
@@ -104,6 +123,12 @@ const EP_TYPE_CONTROL: u32 = 4;
 
 /// Endpoint context type field: Interrupt IN (§6.2.3).
 const EP_TYPE_INTERRUPT_IN: u32 = 7;
+
+/// Endpoint context type field: Bulk OUT (§6.2.3).
+const EP_TYPE_BULK_OUT: u32 = 2;
+
+/// Endpoint context type field: Bulk IN (§6.2.3).
+const EP_TYPE_BULK_IN: u32 = 6;
 
 /// Device Context Index of the default control endpoint (§4.5.1). Also
 /// the default for [`UsbDevice::int_dci`] before a HID interface's
@@ -145,6 +170,18 @@ struct Layout {
     /// Second device slot's default-control-endpoint transfer ring.
     ep0_ring2: usize,
     int_ring: usize,
+    /// Bulk-IN transfer ring ([`BULK_RING_TRBS`] slots), live only for a
+    /// device whose matched interface carries a bulk-IN endpoint (e.g. a
+    /// mass-storage interface).
+    bulk_in_ring: usize,
+    /// Bulk-OUT transfer ring, as [`Self::bulk_in_ring`].
+    bulk_out_ring: usize,
+    /// [`BULK_SLOTS`] staging buffers of [`BULK_BUF_LEN`] bytes for the
+    /// bulk-IN ring: slot `n`'s TRB points at buffer `n`, so a completion
+    /// maps back to its bytes by slot index.
+    bulk_in_bufs: usize,
+    /// Staging buffers for the bulk-OUT ring, as [`Self::bulk_in_bufs`].
+    bulk_out_bufs: usize,
     /// Transfer ring for an addressed hub's interrupt-IN status-change
     /// endpoint (USB 2.0 §11.12.3), armed concurrently with the downstream
     /// device's interrupt endpoint so a connect/disconnect on the hub is
@@ -269,6 +306,10 @@ impl Layout {
         let hub_report = take(HUB_REPORT_LEN);
         let ctrl_data = take(CTRL_DATA_LEN);
         let report_bufs = take(RING_TRBS * REPORT_LEN);
+        let bulk_in_ring = take(BULK_RING_TRBS * trb::TRB_LEN);
+        let bulk_out_ring = take(BULK_RING_TRBS * trb::TRB_LEN);
+        let bulk_in_bufs = take(BULK_SLOTS * BULK_BUF_LEN);
+        let bulk_out_bufs = take(BULK_SLOTS * BULK_BUF_LEN);
         let (scratchpad_array, scratchpad_pages) = if scratchpad_count > 0 {
             let array = take(scratchpad_count * 8);
             // The buffer pages must be page-aligned, not merely 64-aligned.
@@ -296,6 +337,10 @@ impl Layout {
             output_ctx2,
             ep0_ring2,
             int_ring,
+            bulk_in_ring,
+            bulk_out_ring,
+            bulk_in_bufs,
+            bulk_out_bufs,
             hub_int_ring,
             hub_report,
             ctrl_data,
@@ -354,6 +399,14 @@ const fn setup_get_configuration_descriptor(len: u16) -> [u8; 8] {
     [0x80, 0x06, 0x00, 0x02, 0x00, 0x00, l[0], l[1]]
 }
 
+/// The 8-byte SETUP payload of a standard `CLEAR_FEATURE(ENDPOINT_HALT)`
+/// targeting endpoint `ep_addr` (USB 2.0 §9.4.1): recipient endpoint,
+/// feature selector `ENDPOINT_HALT` (0), resetting the endpoint's
+/// device-side halt and data toggle after a STALL.
+const fn setup_clear_endpoint_halt(ep_addr: u8) -> [u8; 8] {
+    [0x02, 0x01, 0x00, 0x00, ep_addr, 0x00, 0x00, 0x00]
+}
+
 /// `bDescriptorType` of a configuration descriptor (USB 2.0 §9.4
 /// Table 9-5).
 const DESC_TYPE_CONFIGURATION: u8 = 0x02;
@@ -367,10 +420,11 @@ const DESC_TYPE_ENDPOINT: u8 = 0x05;
 /// Byte length of an endpoint descriptor (USB 2.0 §9.6.6).
 const ENDPOINT_DESCRIPTOR_LEN: usize = 7;
 
-/// `bmAttributes` transfer-type mask and the Interrupt transfer type
-/// (USB 2.0 §9.6.6 Table 9-13).
+/// `bmAttributes` transfer-type mask and the Interrupt and Bulk transfer
+/// types (USB 2.0 §9.6.6 Table 9-13).
 const ENDPOINT_ATTR_TYPE_MASK: u8 = 0x03;
 const ENDPOINT_ATTR_INTERRUPT: u8 = 0x03;
+const ENDPOINT_ATTR_BULK: u8 = 0x02;
 
 /// `bEndpointAddress` direction bit (USB 2.0 §9.6.6): set for an IN
 /// endpoint.
@@ -623,6 +677,20 @@ pub struct InterfaceInfo {
     /// it (speed-dependent units, decoded by `interrupt_interval`).
     /// `0` for a non-HID interface.
     pub int_b_interval: u8,
+    /// Device Context Index of the interface's first bulk-IN endpoint
+    /// (§4.5.1: `2 * endpoint_number + 1`), read from its endpoint
+    /// descriptor. `0` when the interface carries none — a DCI of zero
+    /// names no device endpoint, so it doubles as "absent".
+    pub bulk_in_dci: u8,
+    /// `wMaxPacketSize` (bits 0:10) of the bulk-IN endpoint. `0` when
+    /// absent.
+    pub bulk_in_max_packet: u16,
+    /// Device Context Index of the interface's first bulk-OUT endpoint
+    /// (§4.5.1: `2 * endpoint_number`). `0` when absent.
+    pub bulk_out_dci: u8,
+    /// `wMaxPacketSize` (bits 0:10) of the bulk-OUT endpoint. `0` when
+    /// absent.
+    pub bulk_out_max_packet: u16,
 }
 
 impl InterfaceInfo {
@@ -633,9 +701,11 @@ impl InterfaceInfo {
 
     /// Decode the `GET_DESCRIPTOR(configuration)` bytes into the
     /// configuration value, the **first** interface's number and class
-    /// triple, and that interface's first interrupt-IN endpoint (DCI, max
-    /// packet size, `bInterval`). Walks the concatenated descriptors by
-    /// each `bLength` (the endpoint is read, never assumed).
+    /// triple, that interface's first interrupt-IN endpoint (DCI, max
+    /// packet size, `bInterval`), and its first bulk-IN and bulk-OUT
+    /// endpoints (DCI, max packet size — a mass-storage interface's data
+    /// pipes). Walks the concatenated descriptors by each `bLength` (every
+    /// endpoint is read, never assumed).
     ///
     /// # Errors
     ///
@@ -654,6 +724,8 @@ impl InterfaceInfo {
         let mut offset = usize::from(buf[0]);
         let mut interface: Option<(u8, u32)> = None;
         let mut int_endpoint: Option<(u8, u16, u8)> = None;
+        let mut bulk_in: Option<(u8, u16)> = None;
+        let mut bulk_out: Option<(u8, u16)> = None;
         while offset + 2 <= buf.len() {
             let length = usize::from(buf[offset]);
             let end = offset.checked_add(length).ok_or(DriverError::BadMagic)?;
@@ -678,20 +750,28 @@ impl InterfaceInfo {
                             | u32::from(buf[offset + 7]),
                     ));
                 }
-                DESC_TYPE_ENDPOINT if interface.is_some() && int_endpoint.is_none() => {
+                DESC_TYPE_ENDPOINT if interface.is_some() => {
                     if length < ENDPOINT_DESCRIPTOR_LEN {
                         return Err(DriverError::BadMagic);
                     }
                     let address = buf[offset + 2];
                     let attributes = buf[offset + 3];
-                    if attributes & ENDPOINT_ATTR_TYPE_MASK == ENDPOINT_ATTR_INTERRUPT
-                        && address & ENDPOINT_ADDR_DIR_IN != 0
-                    {
-                        let endpoint_number = address & ENDPOINT_ADDR_NUMBER_MASK;
-                        let dci = endpoint_number * 2 + 1;
-                        let max_packet = u16::from_le_bytes([buf[offset + 4], buf[offset + 5]])
-                            & ENDPOINT_MAX_PACKET_MASK;
-                        int_endpoint = Some((dci, max_packet, buf[offset + 6]));
+                    let is_in = address & ENDPOINT_ADDR_DIR_IN != 0;
+                    let endpoint_number = address & ENDPOINT_ADDR_NUMBER_MASK;
+                    let max_packet = u16::from_le_bytes([buf[offset + 4], buf[offset + 5]])
+                        & ENDPOINT_MAX_PACKET_MASK;
+                    match attributes & ENDPOINT_ATTR_TYPE_MASK {
+                        ENDPOINT_ATTR_INTERRUPT if is_in && int_endpoint.is_none() => {
+                            int_endpoint =
+                                Some((endpoint_number * 2 + 1, max_packet, buf[offset + 6]));
+                        }
+                        ENDPOINT_ATTR_BULK if is_in && bulk_in.is_none() => {
+                            bulk_in = Some((endpoint_number * 2 + 1, max_packet));
+                        }
+                        ENDPOINT_ATTR_BULK if !is_in && bulk_out.is_none() => {
+                            bulk_out = Some((endpoint_number * 2, max_packet));
+                        }
+                        _ => {}
                     }
                 }
                 _ => {}
@@ -709,6 +789,8 @@ impl InterfaceInfo {
             None if is_hid => return Err(DriverError::BadMagic),
             None => (DCI_CONTROL, 0, 0),
         };
+        let (bulk_in_dci, bulk_in_max_packet) = bulk_in.unwrap_or((0, 0));
+        let (bulk_out_dci, bulk_out_max_packet) = bulk_out.unwrap_or((0, 0));
         Ok(Self {
             configuration_value,
             interface_number,
@@ -716,6 +798,10 @@ impl InterfaceInfo {
             int_dci,
             int_max_packet,
             int_b_interval,
+            bulk_in_dci,
+            bulk_in_max_packet,
+            bulk_out_dci,
+            bulk_out_max_packet,
         })
     }
 
@@ -730,16 +816,112 @@ impl InterfaceInfo {
     pub const fn is_hid(&self) -> bool {
         self.class24 >> 16 == INTERFACE_CLASS_HID
     }
+
+    /// Whether the matched interface carries the bulk-IN **and** bulk-OUT
+    /// endpoint pair a bulk protocol needs (a mass-storage Bulk-Only
+    /// Transport interface carries exactly this pair, USB MSC BOT §4).
+    /// Only such an interface gets its bulk endpoints configured; a lone
+    /// bulk endpoint is left unserved rather than half-configured.
+    #[must_use]
+    pub const fn has_bulk_pair(&self) -> bool {
+        self.bulk_in_dci != 0 && self.bulk_out_dci != 0
+    }
 }
 
-/// Identity of the enumerated HID device, captured during
-/// [`UsbDevice::enumerate_hid`] so the bus can emit it as a discovered
-/// hardware-tree child node ([`UsbDevice::describe_device`]).
+/// Identity of the enumerated device's served interface (HID or bulk),
+/// captured during [`UsbDevice::enumerate_hid`] so the bus can emit it as a
+/// discovered hardware-tree child node ([`UsbDevice::describe_device`]).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-struct HidIdentity {
+struct DeviceIdentity {
     vendor_id: u16,
     product_id: u16,
     interface_class: u32,
+}
+
+/// Direction of a bulk transfer on the enumerated interface's configured
+/// bulk endpoint pair.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) enum BulkDirection {
+    /// Device → host, on the interface's bulk-IN endpoint.
+    In,
+    /// Host → device, on the interface's bulk-OUT endpoint.
+    Out,
+}
+
+/// One retired bulk TD, as reported by [`UsbDevice::poll_bulk`].
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BulkComplete {
+    /// Which bulk endpoint the TD ran on.
+    pub direction: BulkDirection,
+    /// The transfer-ring data slot the TD occupied (the ticket
+    /// [`UsbDevice::queue_bulk_in`] / [`UsbDevice::queue_bulk_out`]
+    /// returned), pairing the completion with its submission.
+    pub slot: usize,
+    /// Bytes actually moved, or the per-transfer failure:
+    /// [`DriverError::EndpointStalled`] for a TD the device answered with
+    /// STALL (or one
+    /// the halt recovery dropped — the endpoint is already recovered when
+    /// this is delivered), [`DriverError::DeviceFault`] for a hard
+    /// controller/device error on this TD.
+    pub result: Result<u32, DriverError>,
+}
+
+/// Parked-completion capacity: every data slot of both bulk rings could
+/// complete while a synchronous EP0 transfer or command is awaiting its own
+/// event, so the FIFO holds the worst case. A protocol working set, not a
+/// scalable capacity.
+const BULK_QUEUE_CAP: usize = 2 * BULK_SLOTS;
+
+/// A fixed-capacity FIFO over a circular buffer — the parked bulk
+/// completions and halt-dropped TD records, whose worst case is bounded by
+/// the bulk rings' in-flight capacity ([`BULK_QUEUE_CAP`]).
+struct Fifo<T: Copy, const N: usize> {
+    items: [Option<T>; N],
+    head: usize,
+    len: usize,
+}
+
+impl<T: Copy, const N: usize> Fifo<T, N> {
+    const fn new() -> Self {
+        Self {
+            items: [None; N],
+            head: 0,
+            len: 0,
+        }
+    }
+
+    /// Append `item`.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::Busy`] when full — with capacity sized to the rings'
+    /// in-flight bound this means a controller posted more completions than
+    /// TDs were queued, surfaced rather than absorbed.
+    fn push(&mut self, item: T) -> Result<(), DriverError> {
+        if self.len == N {
+            return Err(DriverError::Busy);
+        }
+        self.items[(self.head + self.len) % N] = Some(item);
+        self.len += 1;
+        Ok(())
+    }
+
+    /// Remove and return the oldest item, `None` when empty.
+    fn pop(&mut self) -> Option<T> {
+        if self.len == 0 {
+            return None;
+        }
+        let item = self.items[self.head].take();
+        self.head = (self.head + 1) % N;
+        self.len -= 1;
+        item
+    }
+
+    const fn clear(&mut self) {
+        self.items = [None; N];
+        self.head = 0;
+        self.len = 0;
+    }
 }
 
 /// Encode the xHCI endpoint-context Interval (§6.2.3.6, Table 6-12) for
@@ -1034,7 +1216,7 @@ pub struct UsbDevice<H: XhciHost, M: DmaRegion> {
     /// device's async interrupt-IN completions ([`Self::pending_kbd`]) and to
     /// ring its doorbell. `0` before a device is enumerated.
     device_slot: u8,
-    identity: Option<HidIdentity>,
+    identity: Option<DeviceIdentity>,
     /// Device Context Index of the enumerated device's interrupt-IN endpoint,
     /// read from its endpoint descriptor during enumeration (§4.5.1).
     /// [`DCI_CONTROL`] until a HID interface is configured; the
@@ -1042,6 +1224,41 @@ pub struct UsbDevice<H: XhciHost, M: DmaRegion> {
     /// check both use it, so a keyboard whose interrupt endpoint is
     /// not endpoint 1 is still serviced.
     int_dci: u8,
+    /// Bulk-IN transfer ring over [`Layout::bulk_in_ring`], built when the
+    /// enumerated interface's bulk endpoint pair is configured
+    /// ([`Self::finish_enumeration`]). `None` otherwise.
+    bulk_in_ring: Option<ProducerRing>,
+    /// Bulk-OUT transfer ring over [`Layout::bulk_out_ring`], as
+    /// [`Self::bulk_in_ring`].
+    bulk_out_ring: Option<ProducerRing>,
+    /// Device Context Index of the configured bulk-IN endpoint (`0` = none).
+    bulk_in_dci: u8,
+    /// Device Context Index of the configured bulk-OUT endpoint (`0` = none).
+    bulk_out_dci: u8,
+    /// Requested byte length of each in-flight bulk-IN TD, by ring data
+    /// slot, so a completion's residual decodes into bytes transferred.
+    bulk_in_len: [u32; BULK_SLOTS],
+    /// As [`Self::bulk_in_len`], for the bulk-OUT ring.
+    bulk_out_len: [u32; BULK_SLOTS],
+    /// Bulk transfer completions observed while a synchronous EP0 transfer
+    /// or command was awaiting its own event, parked for
+    /// [`Self::poll_bulk`] to consume rather than faulting the shared event
+    /// ring. Several bulk TDs can be outstanding at once, so this is a
+    /// FIFO, unlike the single [`Self::pending_kbd`] slot.
+    pending_bulk: Fifo<Trb, BULK_QUEUE_CAP>,
+    /// TDs a bulk halt recovery dropped ([`Self::recover_bulk_endpoint`]),
+    /// reported by [`Self::poll_bulk`] as stalled completions so every
+    /// queued transfer is answered, never silently lost.
+    aborted_bulk: Fifo<(BulkDirection, usize), BULK_QUEUE_CAP>,
+    /// The enumerated *downstream* device's default-control-endpoint ring,
+    /// parked by [`Self::restore_hub_active`] while the hub is the active
+    /// control context, so a device-targeted control transfer after
+    /// enumeration (a URB control-IN, the halt recovery's `CLEAR_FEATURE`)
+    /// can reactivate it ([`Self::activate_device_control`]) instead of
+    /// wrongly targeting the hub. `None` for a directly-attached device
+    /// (whose EP0 ring is simply the active one) and while the device is
+    /// itself the active context.
+    device_ep0_ring: Option<ProducerRing>,
     /// The addressed hub's slot, kept alive concurrently with the downstream
     /// device so the hub's status-change endpoint can be watched and its
     /// per-port class requests issued. `0` when the device is directly on a
@@ -1173,6 +1390,15 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             device_slot: 0,
             identity: None,
             int_dci: DCI_CONTROL,
+            bulk_in_ring: None,
+            bulk_out_ring: None,
+            bulk_in_dci: 0,
+            bulk_out_dci: 0,
+            bulk_in_len: [0; BULK_SLOTS],
+            bulk_out_len: [0; BULK_SLOTS],
+            pending_bulk: Fifo::new(),
+            aborted_bulk: Fifo::new(),
+            device_ep0_ring: None,
             hub_slot: 0,
             hub_int_dci: 0,
             hub_down_port: 0,
@@ -1446,6 +1672,15 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         self.freed_slot != 0 && event.slot_id() == self.freed_slot
     }
 
+    /// Whether `event` is a completion on one of the enumerated device's
+    /// configured bulk endpoints, routed by its stable slot and endpoint.
+    fn is_bulk_async(&self, event: Trb) -> bool {
+        self.device_slot != 0
+            && event.slot_id() == self.device_slot
+            && ((self.bulk_in_dci != 0 && event.endpoint_id() == self.bulk_in_dci)
+                || (self.bulk_out_dci != 0 && event.endpoint_id() == self.bulk_out_dci))
+    }
+
     /// Park an asynchronous interrupt-IN completion for its endpoint's
     /// consumer, so a synchronous EP0/command wait sharing the one event ring
     /// neither faults on it nor drops it.
@@ -1471,6 +1706,14 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
                 return Err(DriverError::DeviceFault);
             }
             self.pending_hub = Some(event);
+            return Ok(true);
+        }
+        if self.is_bulk_async(event) {
+            // Several bulk TDs can be outstanding at once, so bulk parks in
+            // a FIFO sized to both rings' in-flight bound; overflow means
+            // the controller posted more completions than TDs were queued —
+            // a protocol violation, surfaced by the push.
+            self.pending_bulk.push(event)?;
             return Ok(true);
         }
         if self.is_stale_freed_transfer(event) {
@@ -1934,6 +2177,12 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
                 0,
                 trb::control_slot(slot),
             ))?;
+        } else if interface.has_bulk_pair() {
+            // A non-HID interface carrying the bulk endpoint pair (e.g. a
+            // mass-storage Bulk-Only Transport interface) gets both bulk
+            // endpoints configured; its transfers are then served over the
+            // bulk URB path.
+            self.configure_bulk_endpoints(slot, base, &interface)?;
         }
 
         self.stage = EnumStage::SetConfiguration;
@@ -1944,8 +2193,12 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             // does not implement it STALLs, which is tolerated.
             self.stage = EnumStage::SetProtocol;
             self.control_optional(setup_set_protocol_boot(interface.interface_number))?;
-
-            self.identity = Some(HidIdentity {
+        }
+        if interface.is_hid() || interface.has_bulk_pair() {
+            // The engine serves this interface (HID reports or bulk
+            // transfers), so capture its identity for the emitted
+            // hardware-tree node.
+            self.identity = Some(DeviceIdentity {
                 vendor_id: descriptor.vendor_id,
                 product_id: descriptor.product_id,
                 interface_class: interface.class24,
@@ -1953,6 +2206,86 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         }
         self.stage = EnumStage::Configured;
         Ok(descriptor)
+    }
+
+    /// Configure the enumerated interface's bulk-IN/OUT endpoint pair
+    /// (§4.6.6): build both transfer rings, write the input context adding
+    /// both DCIs with Context Entries raised to cover them, and issue one
+    /// Configure Endpoint. The rings and DCIs go live only after the
+    /// controller accepts the command, so a refused configure leaves no
+    /// half-armed bulk state.
+    fn configure_bulk_endpoints(
+        &mut self,
+        slot: u8,
+        base: SlotCtxBase,
+        interface: &InterfaceInfo,
+    ) -> Result<(), DriverError> {
+        let in_dci = interface.bulk_in_dci;
+        let out_dci = interface.bulk_out_dci;
+        // Zero both rings before building fresh ones: a re-enumeration
+        // reuses the memory, and stale TRBs at the producer cycle would be
+        // consumed past the new enqueue pointer.
+        let zeros = [0u8; trb::TRB_LEN];
+        for slot_index in 0..BULK_RING_TRBS {
+            self.dma
+                .write(self.layout.bulk_in_ring + slot_index * trb::TRB_LEN, &zeros)?;
+            self.dma.write(
+                self.layout.bulk_out_ring + slot_index * trb::TRB_LEN,
+                &zeros,
+            )?;
+        }
+        let in_base = self.phys_of(self.layout.bulk_in_ring);
+        let (in_ring, in_link) = ProducerRing::new(BULK_RING_TRBS, in_base)?;
+        self.dma.write(
+            self.layout.bulk_in_ring + in_ring.link_slot() * trb::TRB_LEN,
+            &in_link.to_bytes(),
+        )?;
+        let out_base = self.phys_of(self.layout.bulk_out_ring);
+        let (out_ring, out_link) = ProducerRing::new(BULK_RING_TRBS, out_base)?;
+        self.dma.write(
+            self.layout.bulk_out_ring + out_ring.link_slot() * trb::TRB_LEN,
+            &out_link.to_bytes(),
+        )?;
+
+        let context_entries = u32::from(in_dci.max(out_dci));
+        let add_flags = 1 | (1u32 << u32::from(in_dci)) | (1u32 << u32::from(out_dci));
+        self.write_input_ctx(0, &input_control_dwords(add_flags))?;
+        self.write_input_ctx(1, &slot_ctx_dwords(base, context_entries))?;
+        self.write_input_ctx(
+            1 + usize::from(in_dci),
+            &ep_ctx_dwords(
+                EP_TYPE_BULK_IN,
+                u32::from(interface.bulk_in_max_packet),
+                0,
+                in_base,
+            ),
+        )?;
+        self.write_input_ctx(
+            1 + usize::from(out_dci),
+            &ep_ctx_dwords(
+                EP_TYPE_BULK_OUT,
+                u32::from(interface.bulk_out_max_packet),
+                0,
+                out_base,
+            ),
+        )?;
+        self.stage = EnumStage::ConfigureEndpoint;
+        self.command(Trb::new(
+            TrbType::ConfigureEndpoint,
+            self.phys_of(self.layout.input_ctx),
+            0,
+            trb::control_slot(slot),
+        ))?;
+        self.device_slot = slot;
+        self.bulk_in_ring = Some(in_ring);
+        self.bulk_out_ring = Some(out_ring);
+        self.bulk_in_dci = in_dci;
+        self.bulk_out_dci = out_dci;
+        self.bulk_in_len = [0; BULK_SLOTS];
+        self.bulk_out_len = [0; BULK_SLOTS];
+        self.pending_bulk.clear();
+        self.aborted_bulk.clear();
+        Ok(())
     }
 
     /// Bring up the first root-hub port reporting a connected device.
@@ -2337,11 +2670,13 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     /// the hub's parked EP0 ring and point the active slot / context offsets
     /// back at the hub's first region.
     ///
-    /// The downstream device's EP0 ring is dropped — a configured HID device
-    /// issues no further control transfers (only its interrupt-IN endpoint is
-    /// serviced), and a fresh attach rebuilds the region anyway. Keeping the
-    /// hub active at rest lets the status-change watcher and per-port class
-    /// requests target the hub with no per-call context switch.
+    /// The downstream device's EP0 ring is **parked** in
+    /// [`Self::device_ep0_ring`] so a post-enumeration control transfer
+    /// targeting the device (a URB control-IN, the bulk halt recovery's
+    /// `CLEAR_FEATURE`) can reactivate it ([`Self::activate_device_control`])
+    /// instead of wrongly targeting the hub. Keeping the hub active at rest
+    /// lets the status-change watcher and per-port class requests target the
+    /// hub with no per-call context switch.
     ///
     /// # Errors
     ///
@@ -2349,11 +2684,58 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     /// bug — the hub was never rebound away from).
     fn restore_hub_active(&mut self) -> Result<(), DriverError> {
         let hub_ring = self.hub_ep0_ring.take().ok_or(DriverError::DeviceFault)?;
-        self.ep0_ring = hub_ring;
+        self.device_ep0_ring = Some(core::mem::replace(&mut self.ep0_ring, hub_ring));
         self.ep0_ring_off = self.layout.ep0_ring;
         self.output_ctx_off = self.layout.output_ctx;
         self.slot = self.hub_slot;
         Ok(())
+    }
+
+    /// Make the enumerated downstream device the active control context
+    /// again, reactivating the EP0 ring [`Self::restore_hub_active`] parked,
+    /// so a post-enumeration control transfer (a URB control-IN, the bulk
+    /// halt recovery's `CLEAR_FEATURE`) targets the *device*, never the hub.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::DeviceFault`] if no device EP0 ring is parked (a
+    /// caller bug — the device is directly attached and already active, or
+    /// no device is enumerated).
+    fn activate_device_control(&mut self) -> Result<(), DriverError> {
+        let device_ring = self
+            .device_ep0_ring
+            .take()
+            .ok_or(DriverError::DeviceFault)?;
+        self.hub_ep0_ring = Some(core::mem::replace(&mut self.ep0_ring, device_ring));
+        self.ep0_ring_off = self.layout.ep0_ring2;
+        self.output_ctx_off = self.layout.output_ctx2;
+        self.slot = self.device_slot;
+        Ok(())
+    }
+
+    /// Run a control transfer targeting the enumerated **device** rather
+    /// than whatever slot is the resting active control context: a
+    /// directly-attached device is already active, a hub-downstream device
+    /// is activated for the transfer and the hub restored after — even when
+    /// the transfer itself fails, so the hub watch never loses its ring.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::NotFound`] with no device enumerated, else as
+    /// [`Self::control`] / [`Self::activate_device_control`].
+    fn device_control(&mut self, setup: [u8; 8], data_in_len: u32) -> Result<u32, DriverError> {
+        if self.device_slot == 0 {
+            return Err(DriverError::NotFound);
+        }
+        if self.slot == self.device_slot {
+            return self.control(setup, data_in_len);
+        }
+        self.activate_device_control()?;
+        let result = self.control(setup, data_in_len);
+        let restored = self.restore_hub_active();
+        let transferred = result?;
+        restored?;
+        Ok(transferred)
     }
 
     /// Address and configure the HID device on downstream hub `down_port`
@@ -2673,6 +3055,8 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         self.identity = None;
         self.hub_down_port = 0;
         self.pending_kbd = None;
+        self.device_ep0_ring = None;
+        self.clear_bulk_state();
         // The fault that triggered this teardown is now acted on; clear it so a
         // freshly re-enumerated device is not immediately re-detached on a stale
         // code.
@@ -2800,6 +3184,8 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         self.hub_int_endpoint = None;
         self.pending_kbd = None;
         self.pending_hub = None;
+        self.device_ep0_ring = None;
+        self.clear_bulk_state();
         self.freed_slot = 0;
         self.root_port = 0;
         self.stage = EnumStage::Scan;
@@ -3014,6 +3400,8 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         self.hub_int_endpoint = None;
         self.pending_kbd = None;
         self.pending_hub = None;
+        self.device_ep0_ring = None;
+        self.clear_bulk_state();
         self.freed_slot = 0;
         self.last_report_fault_code = 0;
         self.stage = EnumStage::Scan;
@@ -3144,7 +3532,16 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     /// resources are minted at the load gate).
     pub fn describe_device(&self, parent_id: u32, node_id: u32) -> Result<HwNode, DriverError> {
         let identity = self.identity.ok_or(DriverError::NotFound)?;
-        let mut node = HwNode::new(node_id, parent_id, HwDeviceClass::Input);
+        // Derive the node's device class from the interface's own class
+        // byte, never assumed: a HID interface is an input device, a
+        // mass-storage interface a storage device. An unmapped class is
+        // honestly `Other` — the match keys still carry the exact triple.
+        let device_class = match identity.interface_class >> 16 {
+            0x03 => HwDeviceClass::Input,
+            0x08 => HwDeviceClass::Storage,
+            _ => HwDeviceClass::Other,
+        };
+        let mut node = HwNode::new(node_id, parent_id, device_class);
         node.push_match_key(HwMatchKey::usb(
             identity.vendor_id,
             identity.product_id,
@@ -3247,6 +3644,349 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     }
 }
 
+/// Bulk transfer serving: several TDs may be queued per direction (each
+/// ring data slot pairs with its own staging buffer), completions are
+/// decoded asynchronously off the shared event ring, and a device STALL is
+/// recovered in place (Reset Endpoint → Set TR Dequeue Pointer →
+/// `CLEAR_FEATURE(ENDPOINT_HALT)`) with every abandoned TD answered.
+impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
+    /// Layout ring offset, staging-buffer offset, and DCI of `direction`'s
+    /// configured bulk endpoint.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::NotFound`] when no device is enumerated or the
+    /// interface carries no configured bulk endpoint in that direction.
+    fn bulk_params(&self, direction: BulkDirection) -> Result<(usize, usize, u8), DriverError> {
+        let (ring_off, bufs_off, dci) = match direction {
+            BulkDirection::In => (
+                self.layout.bulk_in_ring,
+                self.layout.bulk_in_bufs,
+                self.bulk_in_dci,
+            ),
+            BulkDirection::Out => (
+                self.layout.bulk_out_ring,
+                self.layout.bulk_out_bufs,
+                self.bulk_out_dci,
+            ),
+        };
+        if self.device_slot == 0 || dci == 0 {
+            return Err(DriverError::NotFound);
+        }
+        Ok((ring_off, bufs_off, dci))
+    }
+
+    /// TDs in flight on `direction`'s bulk ring (`0` when unconfigured).
+    pub(crate) fn bulk_in_flight(&self, direction: BulkDirection) -> usize {
+        match direction {
+            BulkDirection::In => self.bulk_in_ring.as_ref(),
+            BulkDirection::Out => self.bulk_out_ring.as_ref(),
+        }
+        .map_or(0, ProducerRing::in_flight)
+    }
+
+    /// Queue one bulk-IN TD reading up to `len` bytes from the device,
+    /// returning the ring data slot it occupies (the ticket its
+    /// [`BulkComplete`] echoes). Several TDs may be queued; they complete
+    /// in order through [`Self::poll_bulk`].
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::NotFound`] — no configured bulk-IN endpoint.
+    /// * [`DriverError::LengthOutOfRange`] — `len` exceeds
+    ///   [`BULK_BUF_LEN`] (the caller chunks larger transfers).
+    /// * [`DriverError::Busy`] — the ring is full; poll completions first.
+    pub(crate) fn queue_bulk_in(&mut self, len: usize) -> Result<usize, DriverError> {
+        self.queue_bulk(BulkDirection::In, len, None)
+    }
+
+    /// Queue one bulk-OUT TD writing `data` to the device, returning its
+    /// ring data slot. As [`Self::queue_bulk_in`] otherwise.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::queue_bulk_in`].
+    pub(crate) fn queue_bulk_out(&mut self, data: &[u8]) -> Result<usize, DriverError> {
+        self.queue_bulk(BulkDirection::Out, data.len(), Some(data))
+    }
+
+    /// Shared body of the bulk queue paths: stage the OUT bytes (when
+    /// given), push one Normal TRB pointing at the slot's staging buffer,
+    /// publish it, record the requested length, and ring the endpoint's
+    /// doorbell.
+    fn queue_bulk(
+        &mut self,
+        direction: BulkDirection,
+        len: usize,
+        data: Option<&[u8]>,
+    ) -> Result<usize, DriverError> {
+        let (ring_off, bufs_off, dci) = self.bulk_params(direction)?;
+        if len > BULK_BUF_LEN {
+            return Err(DriverError::LengthOutOfRange);
+        }
+        let len_u32 = u32::try_from(len).map_err(|_| DriverError::LengthOutOfRange)?;
+        let slot = match direction {
+            BulkDirection::In => self.bulk_in_ring.as_ref(),
+            BulkDirection::Out => self.bulk_out_ring.as_ref(),
+        }
+        .ok_or(DriverError::NotFound)?
+        .enqueue_slot();
+        // Refuse a full ring before staging, so a rejected queue leaves no
+        // half-written buffer.
+        if self.bulk_in_flight(direction) >= BULK_SLOTS - 1 {
+            return Err(DriverError::Busy);
+        }
+        if let Some(bytes) = data {
+            self.dma.write(bufs_off + slot * BULK_BUF_LEN, bytes)?;
+        }
+        let buffer = self.phys_of(bufs_off + slot * BULK_BUF_LEN);
+        let normal = Trb::new(
+            TrbType::Normal,
+            buffer,
+            len_u32,
+            trb::CONTROL_IOC | trb::CONTROL_ISP,
+        );
+        let ring = match direction {
+            BulkDirection::In => self.bulk_in_ring.as_mut(),
+            BulkDirection::Out => self.bulk_out_ring.as_mut(),
+        }
+        .ok_or(DriverError::NotFound)?;
+        let outcome = ring.push(normal)?;
+        let link_slot = ring.link_slot();
+        publish(&mut self.dma, ring_off, link_slot, &outcome)?;
+        match direction {
+            BulkDirection::In => self.bulk_in_len[slot] = len_u32,
+            BulkDirection::Out => self.bulk_out_len[slot] = len_u32,
+        }
+        self.xhci.ring_doorbell(self.device_slot, u32::from(dci))?;
+        Ok(slot)
+    }
+
+    /// Reap the next completed bulk TD, if any: halt-dropped TDs first
+    /// (answered as stalled), then completions parked while a synchronous
+    /// wait ran, then fresh controller events. A completed bulk-IN TD's
+    /// bytes are copied into `in_buf`. Never blocks: `Ok(None)` when
+    /// nothing has completed yet.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::DeviceFault`] for a controller protocol violation (a
+    /// completion for a TRB never queued, out of order, or an unmodelled
+    /// event type); errors of the halt recovery a stalled completion
+    /// triggers. A per-TD transfer failure is **not** an error here — it is
+    /// reported in the returned [`BulkComplete::result`].
+    pub(crate) fn poll_bulk(
+        &mut self,
+        in_buf: &mut [u8],
+    ) -> Result<Option<BulkComplete>, DriverError> {
+        if let Some((direction, slot)) = self.aborted_bulk.pop() {
+            return Ok(Some(BulkComplete {
+                direction,
+                slot,
+                result: Err(DriverError::EndpointStalled),
+            }));
+        }
+        if let Some(event) = self.pending_bulk.pop() {
+            return self.decode_bulk_event(event, in_buf).map(Some);
+        }
+        // Bounded by the event segment: one pass can hold at most the
+        // segment's TRBs, and `poll_bulk` never blocks.
+        for _ in 0..RING_TRBS {
+            let Some(event) = self.poll_event()? else {
+                return Ok(None);
+            };
+            match event.trb_type() {
+                Ok(TrbType::PortStatusChange) => continue,
+                Ok(TrbType::TransferEvent) => {}
+                _ => return Err(DriverError::DeviceFault),
+            }
+            if self.is_bulk_async(event) {
+                return self.decode_bulk_event(event, in_buf).map(Some);
+            }
+            // A keyboard report or hub status-change completion sharing the
+            // event ring is parked for its consumer; a stale freed-slot
+            // event is drained. Anything else is a controller fault.
+            if self.stash_async_event(event)? {
+                continue;
+            }
+            return Err(DriverError::DeviceFault);
+        }
+        Ok(None)
+    }
+
+    /// Decode one bulk [`TrbType::TransferEvent`] (already confirmed to
+    /// target a configured bulk endpoint) into its [`BulkComplete`],
+    /// retiring the TD — on **every** outcome, so the software dequeue
+    /// always matches the controller — and running the halt recovery on a
+    /// STALL.
+    fn decode_bulk_event(
+        &mut self,
+        event: Trb,
+        in_buf: &mut [u8],
+    ) -> Result<BulkComplete, DriverError> {
+        let direction = if self.bulk_in_dci != 0 && event.endpoint_id() == self.bulk_in_dci {
+            BulkDirection::In
+        } else {
+            BulkDirection::Out
+        };
+        let (ring_off, bufs_off, _dci) = self.bulk_params(direction)?;
+        // Map the completed TRB back to its ring slot, validating every
+        // step of the controller's claim: alignment, range, and in-order
+        // completion (the event must name the oldest in-flight TD).
+        let ring_base = self.phys_of(ring_off);
+        let offset = event
+            .parameter
+            .checked_sub(ring_base)
+            .ok_or(DriverError::DeviceFault)?;
+        let trb_len = trb::TRB_LEN as u64;
+        if offset % trb_len != 0 {
+            return Err(DriverError::DeviceFault);
+        }
+        let slot = usize::try_from(offset / trb_len).map_err(|_| DriverError::DeviceFault)?;
+        if slot >= BULK_SLOTS {
+            return Err(DriverError::DeviceFault);
+        }
+        {
+            let ring = match direction {
+                BulkDirection::In => self.bulk_in_ring.as_mut(),
+                BulkDirection::Out => self.bulk_out_ring.as_mut(),
+            }
+            .ok_or(DriverError::DeviceFault)?;
+            if ring.in_flight() == 0 || ring.dequeue_slot() != slot {
+                return Err(DriverError::DeviceFault);
+            }
+            ring.retire_one()?;
+        }
+        match event.completion_code() {
+            Ok(CompletionCode::Success | CompletionCode::ShortPacket) => {
+                let requested = match direction {
+                    BulkDirection::In => self.bulk_in_len[slot],
+                    BulkDirection::Out => self.bulk_out_len[slot],
+                };
+                let transferred = requested
+                    .checked_sub(event.transfer_residual())
+                    .ok_or(DriverError::DeviceFault)?;
+                if direction == BulkDirection::In {
+                    let count =
+                        usize::try_from(transferred).map_err(|_| DriverError::DeviceFault)?;
+                    if count > in_buf.len() {
+                        return Err(DriverError::DeviceFault);
+                    }
+                    self.dma
+                        .read(bufs_off + slot * BULK_BUF_LEN, &mut in_buf[..count])?;
+                }
+                Ok(BulkComplete {
+                    direction,
+                    slot,
+                    result: Ok(transferred),
+                })
+            }
+            Ok(CompletionCode::StallError) => {
+                // Recover the endpoint now (the abandoned TDs are answered
+                // through `aborted_bulk`), then report this TD stalled; by
+                // the time the caller sees it the endpoint accepts fresh
+                // transfers again.
+                self.recover_bulk_endpoint(direction)?;
+                Ok(BulkComplete {
+                    direction,
+                    slot,
+                    result: Err(DriverError::EndpointStalled),
+                })
+            }
+            // A hard per-TD fault (transaction error, babble, an unmodelled
+            // code): the TD is retired so the ring stays consistent, and the
+            // failure is reported on this TD; the caller decides whether the
+            // device is gone.
+            _ => Ok(BulkComplete {
+                direction,
+                slot,
+                result: Err(DriverError::DeviceFault),
+            }),
+        }
+    }
+
+    /// Recover `direction`'s halted bulk endpoint after a STALL (xHCI
+    /// §4.8.3): answer every TD the halt abandoned, Reset Endpoint
+    /// (§4.6.8), rebuild the transfer ring at its base and repoint the
+    /// controller's dequeue there (§4.6.10), then clear the device-side
+    /// halt so its data toggle resets (USB 2.0 §9.4.5). The endpoint
+    /// accepts fresh transfers when this returns.
+    fn recover_bulk_endpoint(&mut self, direction: BulkDirection) -> Result<(), DriverError> {
+        let (ring_off, _bufs_off, dci) = self.bulk_params(direction)?;
+        // Every TD still in flight was abandoned by the halt (the endpoint
+        // stopped executing); answer each as stalled so no queued transfer
+        // is silently lost.
+        loop {
+            let slot = {
+                let ring = match direction {
+                    BulkDirection::In => self.bulk_in_ring.as_mut(),
+                    BulkDirection::Out => self.bulk_out_ring.as_mut(),
+                }
+                .ok_or(DriverError::DeviceFault)?;
+                if ring.in_flight() == 0 {
+                    break;
+                }
+                let slot = ring.dequeue_slot();
+                ring.retire_one()?;
+                slot
+            };
+            self.aborted_bulk.push((direction, slot))?;
+        }
+        // Reset Endpoint clears the controller-side halt state.
+        self.command(Trb::new(
+            TrbType::ResetEndpoint,
+            0,
+            0,
+            trb::control_slot(self.device_slot) | trb::control_endpoint(dci),
+        ))?;
+        // Rebuild the software ring at its base and drop the abandoned
+        // TRBs, then point the controller's dequeue at the fresh base with
+        // Dequeue Cycle State 1 to match.
+        let zeros = [0u8; trb::TRB_LEN];
+        for slot_index in 0..BULK_RING_TRBS {
+            self.dma
+                .write(ring_off + slot_index * trb::TRB_LEN, &zeros)?;
+        }
+        let base = self.phys_of(ring_off);
+        let (ring, link) = ProducerRing::new(BULK_RING_TRBS, base)?;
+        self.dma
+            .write(ring_off + ring.link_slot() * trb::TRB_LEN, &link.to_bytes())?;
+        match direction {
+            BulkDirection::In => self.bulk_in_ring = Some(ring),
+            BulkDirection::Out => self.bulk_out_ring = Some(ring),
+        }
+        self.command(Trb::new(
+            TrbType::SetTrDequeuePointer,
+            base | 1,
+            0,
+            trb::control_slot(self.device_slot) | trb::control_endpoint(dci),
+        ))?;
+        // Clear the device-side halt on the device's own control endpoint
+        // (never the hub's), resetting its data toggle.
+        let ep_addr = match direction {
+            BulkDirection::In => (dci / 2) | ENDPOINT_ADDR_DIR_IN,
+            BulkDirection::Out => dci / 2,
+        };
+        self.device_control(setup_clear_endpoint_halt(ep_addr), 0)?;
+        Ok(())
+    }
+
+    /// Drop every bulk endpoint's state — the device is gone or the
+    /// controller was reset. Unanswered TDs die with the transport
+    /// endpoint that carried them (the HCD aborts the outstanding URB on a
+    /// device disconnect), so nothing here replays into a fresh device.
+    fn clear_bulk_state(&mut self) {
+        self.bulk_in_ring = None;
+        self.bulk_out_ring = None;
+        self.bulk_in_dci = 0;
+        self.bulk_out_dci = 0;
+        self.bulk_in_len = [0; BULK_SLOTS];
+        self.bulk_out_len = [0; BULK_SLOTS];
+        self.pending_bulk.clear();
+        self.aborted_bulk.clear();
+    }
+}
+
 impl<H: XhciHost, M: DmaRegion> ReportSource for UsbDevice<H, M> {
     fn next_report(&mut self, buf: &mut [u8]) -> Result<Option<usize>, DriverError> {
         if self.device_slot == 0 {
@@ -3311,9 +4051,11 @@ impl<H: XhciHost, M: DmaRegion> crate::transport::UrbEngine for UsbDevice<H, M> 
     fn control_in(&mut self, setup: [u8; 8], data: &mut [u8]) -> Result<usize, DriverError> {
         // The engine's control transfer lands the IN data in the device's
         // control-data DMA buffer; copy out only the bytes the device
-        // delivered, never past the caller's shared buffer.
+        // delivered, never past the caller's shared buffer. It targets the
+        // enumerated *device* — for a hub-downstream device the device's
+        // EP0 ring is activated for the transfer, never the hub's.
         let requested = u32::try_from(data.len()).map_err(|_| DriverError::LengthOutOfRange)?;
-        let transferred = self.control(setup, requested)?;
+        let transferred = self.device_control(setup, requested)?;
         let transferred = usize::try_from(transferred).map_err(|_| DriverError::DeviceFault)?;
         let copied = transferred.min(data.len());
         self.dma.read(self.layout.ctrl_data, &mut data[..copied])?;
@@ -3322,5 +4064,53 @@ impl<H: XhciHost, M: DmaRegion> crate::transport::UrbEngine for UsbDevice<H, M> 
 
     fn interrupt_in(&mut self, data: &mut [u8]) -> Result<Option<usize>, DriverError> {
         self.next_report(data)
+    }
+
+    fn bulk_in(&mut self, endpoint: u8, data: &mut [u8]) -> Result<Option<usize>, DriverError> {
+        // The URB names an endpoint *number*; it must be the configured
+        // bulk-IN endpoint's (its DCI is `2n + 1`).
+        if self.bulk_in_dci == 0 || endpoint != self.bulk_in_dci / 2 {
+            return Err(DriverError::OutOfRange);
+        }
+        // The URB transport holds one URB outstanding per interface: arm
+        // the TD on first drive, reap its completion on a later one.
+        if self.bulk_in_flight(BulkDirection::In) == 0 {
+            self.queue_bulk_in(data.len())?;
+            return Ok(None);
+        }
+        match self.poll_bulk(data)? {
+            Some(complete) if complete.direction == BulkDirection::In => match complete.result {
+                Ok(n) => Ok(Some(
+                    usize::try_from(n).map_err(|_| DriverError::DeviceFault)?,
+                )),
+                Err(err) => Err(err),
+            },
+            // A completion for the other direction cannot belong to the one
+            // outstanding URB — a protocol violation, surfaced.
+            Some(_) => Err(DriverError::DeviceFault),
+            None => Ok(None),
+        }
+    }
+
+    fn bulk_out(&mut self, endpoint: u8, data: &[u8]) -> Result<Option<usize>, DriverError> {
+        if self.bulk_out_dci == 0 || endpoint != self.bulk_out_dci / 2 {
+            return Err(DriverError::OutOfRange);
+        }
+        if self.bulk_in_flight(BulkDirection::Out) == 0 {
+            self.queue_bulk_out(data)?;
+            return Ok(None);
+        }
+        // An OUT completion carries no device bytes to copy back.
+        let mut no_in_bytes = [0u8; 0];
+        match self.poll_bulk(&mut no_in_bytes)? {
+            Some(complete) if complete.direction == BulkDirection::Out => match complete.result {
+                Ok(n) => Ok(Some(
+                    usize::try_from(n).map_err(|_| DriverError::DeviceFault)?,
+                )),
+                Err(err) => Err(err),
+            },
+            Some(_) => Err(DriverError::DeviceFault),
+            None => Ok(None),
+        }
     }
 }

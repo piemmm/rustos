@@ -118,6 +118,15 @@ impl ProducerRing {
         (self.enqueue + self.data_slots() - self.dequeue) % self.data_slots()
     }
 
+    /// Data-slot index of the oldest in-flight TRB — the one the next
+    /// [`Self::retire_one`] retires. Meaningful only while
+    /// [`Self::in_flight`] is non-zero; used to synthesize per-slot
+    /// completions for TRBs an endpoint halt abandoned.
+    #[must_use]
+    pub fn dequeue_slot(&self) -> usize {
+        self.dequeue
+    }
+
     /// Enqueue `trb`, stamping the producer cycle state into it.
     ///
     /// Returns the [`PushOutcome`] the memory owner publishes. When

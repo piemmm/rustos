@@ -37,13 +37,14 @@ use rustos_abi::{DriverError, Errno};
 /// The controller-side operations the URB transport server drives.
 ///
 /// The HCD's live engine implements this; a malformed transfer never reaches
-/// it because [`drive_urb`] validates the URB first. Only the boot-protocol
-/// transfers the keyboard stack needs are present: a control-IN transfer
-/// (used during enumeration and for class-IN requests) and a non-blocking
-/// interrupt-IN poll (the report path). Control-OUT and bulk are deliberately
-/// absent — they are a later class-driver extension on this seam
-/// (`plans/USB.md` §4); the server refuses them fail-closed rather than
-/// pretending to perform them.
+/// it because [`drive_urb`] validates the URB first. The transfers the
+/// served device classes need are present: a control-IN transfer (used
+/// during enumeration and for class-IN requests), a non-blocking
+/// interrupt-IN poll (the HID report path), and non-blocking bulk IN/OUT
+/// (the mass-storage data path, `plans/DEVICES.md` D1). Control-OUT is
+/// deliberately absent — it lands with its first consumer (the BOT class
+/// driver's Mass Storage Reset, `plans/DEVICES.md` D2); the server refuses
+/// it fail-closed rather than pretending to perform it.
 pub trait UrbEngine {
     /// Run a control-IN transfer (SETUP + IN data stage) into `data`,
     /// returning the bytes the device delivered.
@@ -62,6 +63,33 @@ pub trait UrbEngine {
     ///
     /// A [`DriverError`] from the controller/device.
     fn interrupt_in(&mut self, data: &mut [u8]) -> Result<Option<usize>, DriverError>;
+
+    /// Drive one bulk-IN transfer on device endpoint number `endpoint`
+    /// reading into `data`: arm it if not yet armed, then reap its
+    /// completion. `Ok(Some(n))` when the transfer finished (`n` bytes
+    /// landed in `data`; a short packet yields `n < data.len()`),
+    /// `Ok(None)` while it is still in flight (the caller re-drives on the
+    /// next controller event).
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::EndpointStalled`] — the device answered the
+    ///   transfer with STALL; the engine has already recovered the
+    ///   endpoint, so the caller may submit fresh transfers immediately.
+    /// * [`DriverError::OutOfRange`] — `endpoint` is not the interface's
+    ///   configured bulk-IN endpoint.
+    /// * Any other [`DriverError`] for a hard controller/device fault.
+    fn bulk_in(&mut self, endpoint: u8, data: &mut [u8]) -> Result<Option<usize>, DriverError>;
+
+    /// Drive one bulk-OUT transfer on device endpoint number `endpoint`
+    /// writing `data`: arm it if not yet armed, then reap its completion.
+    /// `Ok(Some(n))` when the transfer finished (`n` bytes accepted by the
+    /// device), `Ok(None)` while it is still in flight.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::bulk_in`].
+    fn bulk_out(&mut self, endpoint: u8, data: &[u8]) -> Result<Option<usize>, DriverError>;
 }
 
 /// Decode `request`, validate it fail-closed against the interface, and drive
@@ -133,9 +161,29 @@ pub fn drive_urb<E: UrbEngine>(
                 None => Ok(None),
             }
         }
-        // Bulk is out of scope for the boot-protocol stack (`plans/USB.md`
-        // §4); refuse it rather than queue a transfer the engine cannot run.
-        UsbTransferType::Bulk => Err(Errno::NotImplemented),
+        UsbTransferType::Bulk => {
+            // A bulk transfer targets a device endpoint, never the shared
+            // control endpoint. Whether the endpoint is the interface's
+            // configured bulk endpoint in that direction is the engine's
+            // check (it owns the interface's endpoint map); both fail
+            // closed before any ring is touched.
+            if urb.endpoint == 0 {
+                return Err(Errno::OutOfRange);
+            }
+            let outcome = match urb.direction {
+                UsbDirection::In => engine.bulk_in(urb.endpoint, slice),
+                UsbDirection::Out => engine.bulk_out(urb.endpoint, slice),
+            }
+            .map_err(DriverError::as_errno)?;
+            match outcome {
+                Some(transferred) => Ok(Some(
+                    u32::try_from(transferred).map_err(|_| Errno::LengthOutOfRange)?,
+                )),
+                // Still in flight — hold the URB outstanding; the next
+                // controller event re-drives it.
+                None => Ok(None),
+            }
+        }
     }
 }
 
@@ -235,6 +283,45 @@ impl<T: UrbCall> UrbClient<T> {
             endpoint,
             transfer_type: UsbTransferType::Interrupt,
             direction: UsbDirection::In,
+            buffer,
+            length,
+            setup: [0; 8],
+        })
+    }
+
+    /// Submit a bulk-IN URB for `endpoint` reading up to `length` bytes into
+    /// the shared `buffer`, returning the bytes the device delivered (a
+    /// short packet yields fewer than `length`).
+    ///
+    /// # Errors
+    ///
+    /// The carried completion [`Errno`] — notably
+    /// [`Errno::EndpointStalled`] when the device answered the transfer
+    /// with STALL (the endpoint is already recovered; the caller runs its
+    /// class-level recovery and may submit again) — or an encode/transport
+    /// error. The call blocks until the transfer completes.
+    pub fn bulk_in(&mut self, endpoint: u8, buffer: u64, length: u32) -> Result<u32, Errno> {
+        self.submit(&UrbRequest {
+            endpoint,
+            transfer_type: UsbTransferType::Bulk,
+            direction: UsbDirection::In,
+            buffer,
+            length,
+            setup: [0; 8],
+        })
+    }
+
+    /// Submit a bulk-OUT URB for `endpoint` writing `length` bytes from the
+    /// shared `buffer`, returning the bytes the device accepted.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::bulk_in`].
+    pub fn bulk_out(&mut self, endpoint: u8, buffer: u64, length: u32) -> Result<u32, Errno> {
+        self.submit(&UrbRequest {
+            endpoint,
+            transfer_type: UsbTransferType::Bulk,
+            direction: UsbDirection::Out,
             buffer,
             length,
             setup: [0; 8],

@@ -68,6 +68,8 @@
 #define ROS_DRIVER_ERROR_BUSY ((int32_t)11)
 #define ROS_DRIVER_ERROR_NOT_IMPLEMENTED ((int32_t)12)
 #define ROS_DRIVER_ERROR_NO_SPACE ((int32_t)13)
+#define ROS_DRIVER_ERROR_SEAT_REVOKED ((int32_t)14)
+#define ROS_DRIVER_ERROR_ENDPOINT_STALLED ((int32_t)15)
 
 /* PCI vendor ID assigned to virtio devices (uint16_t; virtio 1.1 sec.4.1.2). */
 #define ROS_VIRTIO_PCI_VENDOR_ID ((uint16_t)0x1af4u)

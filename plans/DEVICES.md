@@ -40,8 +40,8 @@ Facts the stages below build on, so no stage re-derives them:
   nodes → class drivers over the URB transport IPC
   (`lib/abi/src/usb_urb.rs`), with event-driven hotplug in both
   directions and the kernel driver-unload mechanism. The URB transport
-  today serves control and interrupt transfers only; `serve_urb` rejects
-  bulk fail-closed. Mass storage is the first bulk consumer.
+  serves control, interrupt, and — since D1 (§2.2) — bulk transfers;
+  the D2 mass-storage class driver is the first bulk consumer.
 - **The block-driver contract exists**
   (`rustos_abi::driver::block::Block`), implemented by
   `drivers/storage/virtio_blk` and `drivers/storage/emmc2` with bounded,
@@ -310,22 +310,52 @@ Every edge is discovery + match + public ABI (§2.20, §17.4): the class
 driver knows no controller, the volume layer knows no bus, and nothing
 names a sibling crate.
 
-### 2.2 D1 — bulk transfers on the URB transport
+### 2.2 D1 — bulk transfers on the URB transport. **Done.**
 
-- `lib/abi/src/usb_urb.rs` already spells `UsbTransferType::Bulk`;
-  `lib/usb` gains real bulk support: per-endpoint transfer rings in the
-  xHCI engine (IN and OUT), queueing of multiple outstanding bulk URBs
-  per direction, short-packet and stall handling (`CLEAR_FEATURE
-  (ENDPOINT_HALT)` + ring recovery), and `serve_urb` validation extended
-  to bulk (endpoint ownership, length within the shared buffer, direction
-  legal — fail closed as today).
-- The HCD stays a single wait-set event loop (§2.23); bulk completions
-  are delivered asynchronously exactly like interrupt completions. Data
-  still moves through the U3a2 shared-memory buffers with the HCD
-  bounce-copying into its own DMA rings — the class driver continues to
-  hold **zero** DMA authority (§5.4).
-- Host-proven over the existing register-level mock (which grows bulk
-  endpoints), including stall/short-packet/queue-depth regressions.
+- `lib/usb` serves real bulk transfers: a mass-storage interface's bulk
+  endpoint pair (the first bulk-IN + bulk-OUT the configuration
+  descriptor reports, never assumed) is configured at enumeration with
+  per-direction transfer rings (`BULK_RING_TRBS` = 9) whose data slots
+  each own a 4 KiB staging buffer, so several bulk TDs queue per
+  direction (`queue_bulk_in`/`queue_bulk_out`, ring-full → `Busy`) and
+  complete in order through the non-blocking `poll_bulk`; short packets
+  report the honest byte count from the residual. A device STALL is
+  recovered in place — Reset Endpoint → ring rebuild + Set TR Dequeue
+  Pointer → `CLEAR_FEATURE(ENDPOINT_HALT)` on the **device's own** EP0 —
+  with every abandoned TD answered, surfaced as the new distinct
+  `Errno::EndpointStalled` (29) / `DriverError::EndpointStalled` (15) so
+  the D2 BOT driver can run its own recovery (C headers regenerated;
+  the generator's DriverError table also gained the previously-omitted
+  `SEAT_REVOKED`).
+- `UrbEngine` gained `bulk_in`/`bulk_out` (arm-then-reap, `Ok(None)`
+  while in flight), `drive_urb` validates bulk fail-closed (never
+  endpoint 0; the engine owns the endpoint map), and
+  `UrbClient::{bulk_in, bulk_out}` are the class-side builders. The HCD
+  stays the single wait-set event loop: `UrbService` holds a bulk URB
+  outstanding and completes it on the controller event exactly like an
+  interrupt URB; the class driver still holds **zero** DMA authority
+  (the HCD bounce-copies through its staging buffers).
+- Reality-driven fixes landed with it: `restore_hub_active` now **parks**
+  a downstream device's EP0 ring (`device_ep0_ring`) instead of dropping
+  it, so a post-enumeration device-targeted control transfer (a URB
+  control-IN, the recovery's `CLEAR_FEATURE`) switches to the device via
+  `activate_device_control` and never wrongly targets the hub — the Pi
+  topology, where every stick sits behind the integrated hub;
+  `describe_device` derives the emitted node's class from the interface
+  class byte (`0x08` → `Storage`, `0x03` → `Input`, else `Other`)
+  instead of hardcoding `Input`. Teardown/reset paths clear all bulk
+  state.
+- Host-proven over the register-level mock, which grew a scripted
+  mass-storage device (fixture endpoints deliberately EP3-IN/EP4-OUT →
+  DCIs 7/8, two-endpoint Configure Endpoint, per-direction halt state
+  machine that serves nothing until Reset Endpoint → Set TR Dequeue →
+  device-side `CLEAR_FEATURE` run **in order**, and a hub-mistargeted
+  clear STALLs EP0 loudly): enumeration/node emission, OUT/IN
+  round-trips, short packets, in-order multi-TD completion + queue-depth
+  bound, stall recovery answering every queued TD (direct and
+  downstream-of-hub), and URB-seam validation; plus transport-seam and
+  HCD `UrbService` bulk tests (held-then-completed, in-band
+  `EndpointStalled`).
 
 ### 2.3 D2 — `drivers/storage/usb_msd` (Bulk-Only Transport class driver)
 
@@ -445,7 +475,7 @@ work is completed here, not stubbed around (§2.19).
 
 ### 2.6 DEVICE2 increment order
 
-- **D1** bulk URB transport (host-provable alone).
+- **D1** bulk URB transport (host-provable alone). **Done** (§2.2).
 - **D2** `usb_msd` class driver (host mock + QEMU/metal).
 - **D3** `volmgr` + `id::` roots + alias/catalog automount + permissions.
 - **D4** surprise-removal state machine, force-unmount, verified

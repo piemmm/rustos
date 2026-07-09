@@ -218,6 +218,19 @@ pub enum Errno {
     /// open and owned by the caller) and from
     /// [`WouldBlock`](Self::WouldBlock) (retrying can never succeed).
     BrokenPipe = 28,
+    /// A device endpoint answered the transfer with a protocol STALL.
+    ///
+    /// Emitted by the USB URB transport (`crate::usb_urb`) when the device
+    /// halts the addressed endpoint instead of moving data — for a
+    /// mass-storage device this is an in-band protocol signal (USB BOT uses
+    /// a bulk-IN STALL to reject a phase), not a hardware failure, so a
+    /// class driver must be able to tell it apart from
+    /// [`DriverError::DeviceFault`](crate::DriverError::DeviceFault)'s
+    /// unrecoverable fault and run its own recovery. The host-controller
+    /// driver has already recovered the endpoint (cleared the halt and
+    /// repositioned the ring) by the time this code is delivered; the
+    /// caller may submit fresh transfers immediately.
+    EndpointStalled = 29,
 }
 
 impl Errno {
@@ -281,6 +294,7 @@ impl Errno {
             26 => Some(Self::SeatRevoked),
             27 => Some(Self::NotForeground),
             28 => Some(Self::BrokenPipe),
+            29 => Some(Self::EndpointStalled),
             _ => None,
         }
     }
@@ -317,6 +331,7 @@ impl fmt::Display for Errno {
             Self::SeatRevoked => "seat lease revoked",
             Self::NotForeground => "not the console foreground owner",
             Self::BrokenPipe => "broken pipe",
+            Self::EndpointStalled => "endpoint stalled",
         };
         f.write_str(message)
     }
@@ -357,6 +372,7 @@ mod tests {
         assert_eq!(Errno::SeatRevoked.as_i32(), 26);
         assert_eq!(Errno::NotForeground.as_i32(), 27);
         assert_eq!(Errno::BrokenPipe.as_i32(), 28);
+        assert_eq!(Errno::EndpointStalled.as_i32(), 29);
     }
 
     #[test]
@@ -392,11 +408,12 @@ mod tests {
             Errno::SeatRevoked,
             Errno::NotForeground,
             Errno::BrokenPipe,
+            Errno::EndpointStalled,
         ] {
             assert_eq!(Errno::from_i32(errno.as_i32()), Some(errno));
         }
         assert_eq!(Errno::from_i32(0), None);
-        assert_eq!(Errno::from_i32(29), None);
+        assert_eq!(Errno::from_i32(30), None);
         assert_eq!(Errno::from_i32(-1), None);
     }
 
