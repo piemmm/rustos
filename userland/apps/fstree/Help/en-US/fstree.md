@@ -32,6 +32,9 @@ Keys:
 - `s` — open the sort menu: `n` name, `e` extension, `s` size,
   `m` modification stamp, `r` reverse the direction, `Esc` cancels.
   Directories always group before files.
+- `a` — edit the selected entry's permission bits: an octal prompt
+  pre-filled with the current mode. Enter applies (only the entry's owner
+  may change it — the kernel refuses anyone else), Esc cancels.
 - `.` — toggle hidden (dot-named) entries in both panes.
 - `?` — show this help over the panes; any key dismisses it.
 - `q` — quit, restoring the terminal.

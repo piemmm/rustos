@@ -5,11 +5,14 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use rustos_help::{own_short_help, HelpSource};
+
 use crate::command::{Command, Mode, Options, Verbosity};
 use crate::error::ChmodError;
 use crate::io::{Entry, EntryKind, FileSystem, Output};
 
-/// The usage banner printed by [`Command::Help`].
+/// The usage banner a usage error is reported with, and the fallback the
+/// short-help switches print when `chmod`'s own Help tree is unavailable.
 pub const USAGE: &str = "\
 usage: chmod [-cfRv] [--] MODE file...
 
@@ -17,7 +20,7 @@ usage: chmod [-cfRv] [--] MODE file...
   -c, --changes         report only files whose mode actually changed
   -v, --verbose         report every file processed
   -f, --silent, --quiet suppress most error messages
-  -h, --help            show this message
+  -h, -?, --help        show this message
 
 MODE is either an octal value (e.g. 644, 0755) or a comma-separated list of
 symbolic clauses [ugoa]*[-+=][rwxXst]* (e.g. g+w, o-rx, a=rx, u+s). `--` ends
@@ -25,7 +28,13 @@ option parsing: every later argument is an operand. To set a mode beginning
 with `-`, write it without the dash (a-w) or end options first (chmod -- -w f).
 ";
 
+/// `chmod`'s own command word: the short-help switches render its own Help
+/// document through the same engine as any other command's.
+const OWN_WORD: &str = "chmod";
+
 /// Run one [`Command`], changing the mode of its files through `fs`.
+/// `locale` is the user's `LANG` preference, if set; `help` is the tool's
+/// own `Help/` tree, read by the short-help switches.
 ///
 /// Each file is inspected, its new mode computed from the parsed [`Mode`] and
 /// the file's current mode/kind, and the result applied. With `-R` a directory
@@ -48,9 +57,15 @@ with `-`, write it without the dash (a-w) or end options first (chmod -- -w f).
 ///   recursive descent.
 /// * [`ChmodError::Silenced`] — one or more operands failed under `-f`.
 /// * [`ChmodError::Output`] — writing the usage banner or a report failed.
-pub fn run(command: Command, fs: &dyn FileSystem, out: &dyn Output) -> Result<(), ChmodError> {
+pub fn run(
+    command: Command,
+    locale: Option<&str>,
+    fs: &dyn FileSystem,
+    help: &dyn HelpSource,
+    out: &dyn Output,
+) -> Result<(), ChmodError> {
     match command {
-        Command::Help => out.write_all(USAGE.as_bytes()).map_err(ChmodError::Output),
+        Command::Help => short_help(locale, help, out),
         Command::Change {
             options,
             mode,
@@ -73,6 +88,21 @@ pub fn run(command: Command, fs: &dyn FileSystem, out: &dyn Output) -> Result<()
             Ok(())
         }
     }
+}
+
+/// Render `chmod`'s own short help (`NAME` + `SYNOPSIS` + compact `OPTIONS`)
+/// from its own Help tree through the one shared engine; when no document
+/// can be served (a build without the bundle's documents) the usage banner
+/// stands in — the tool's own text, not fabricated help content — so `-h`
+/// never fails.
+fn short_help(
+    locale: Option<&str>,
+    help: &dyn HelpSource,
+    out: &dyn Output,
+) -> Result<(), ChmodError> {
+    let bytes =
+        own_short_help(help, locale, OWN_WORD).unwrap_or_else(|| String::from(USAGE).into_bytes());
+    out.write_all(&bytes).map_err(ChmodError::Output)
 }
 
 /// Apply `mode` to `path`, then — when `-R` and `path` is a directory —
@@ -178,7 +208,7 @@ fn join(parent: &str, name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{run, USAGE};
+    use super::{run as engine_run, USAGE};
     use crate::command::parse;
     use crate::error::ChmodError;
     use crate::io::{Entry, EntryKind, FileSystem, Metadata, Output};
@@ -186,6 +216,45 @@ mod tests {
     use alloc::vec::Vec;
     use core::cell::RefCell;
     use rustos_abi::Errno;
+    use rustos_help::{HelpSource, SourceError};
+
+    /// A Help tree with no documents at all: the short-help fallback path.
+    struct NoHelp;
+
+    impl HelpSource for NoHelp {
+        fn locale_dirs(&self) -> Result<Vec<String>, SourceError> {
+            Ok(Vec::new())
+        }
+
+        fn read(
+            &self,
+            _locale_dir: &str,
+            _file_name: &str,
+        ) -> Result<Option<Vec<u8>>, SourceError> {
+            Ok(None)
+        }
+    }
+
+    /// A Help tree holding one canonical `chmod.md` document.
+    struct OneDoc;
+
+    const DOC: &str = "## NAME\n\nchmod — change file mode bits\n\n\
+                       ## SYNOPSIS\n\n`chmod [-cfRv] [--] MODE file...`\n\n\
+                       ## DESCRIPTION\n\nChanges modes.\n";
+
+    impl HelpSource for OneDoc {
+        fn locale_dirs(&self) -> Result<Vec<String>, SourceError> {
+            Ok(alloc::vec![String::from("en-US")])
+        }
+
+        fn read(&self, locale_dir: &str, file_name: &str) -> Result<Option<Vec<u8>>, SourceError> {
+            if locale_dir == "en-US" && file_name == "chmod.md" {
+                Ok(Some(DOC.as_bytes().to_vec()))
+            } else {
+                Ok(None)
+            }
+        }
+    }
 
     /// An in-memory tree. Each node carries its kind and current mode; a
     /// directory's children are derived by parent path. Failure injection
@@ -359,15 +428,42 @@ mod tests {
     }
 
     fn run_args(args: &[&str], fs: &MemFs, out: &Recorder) -> Result<(), ChmodError> {
-        run(parse(args).expect("valid command"), fs, out)
+        engine_run(parse(args).expect("valid command"), None, fs, &NoHelp, out)
     }
 
     #[test]
     fn help_prints_the_usage_banner() {
+        // With no Help documents available the tool's own usage banner
+        // stands in — never fabricated help content.
         let fs = MemFs::new();
         let out = Recorder::new();
         assert_eq!(run_args(&["--help"], &fs, &out), Ok(()));
         assert_eq!(out.written(), USAGE.as_bytes());
+    }
+
+    #[test]
+    fn help_renders_the_short_help_from_the_document() {
+        let fs = MemFs::new();
+        let out = Recorder::new();
+        assert_eq!(
+            engine_run(
+                parse(&["-h"]).expect("valid command"),
+                None,
+                &fs,
+                &OneDoc,
+                &out
+            ),
+            Ok(())
+        );
+        let written = String::from_utf8(out.written()).expect("utf-8 help");
+        assert!(
+            written.contains("chmod — change file mode bits"),
+            "{written}"
+        );
+        assert!(
+            written.contains("chmod [-cfRv] [--] MODE file..."),
+            "{written}"
+        );
     }
 
     #[test]

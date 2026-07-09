@@ -34,6 +34,10 @@ Tasti:
 - `s` — aprire il menu di ordinamento: `n` nome, `e` estensione,
   `s` dimensione, `m` data di modifica, `r` inverte il verso, `Esc`
   annulla. Le directory sono sempre raggruppate prima dei file.
+- `a` — modificare i bit di permesso della voce selezionata: una riga
+  ottale precompilata con il modo attuale. Invio applica (solo il
+  proprietario può cambiarlo — il kernel rifiuta chiunque altro), Esc
+  annulla.
 - `.` — mostrare/nascondere le voci nascoste (nomi con punto) in entrambi
   i pannelli.
 - `?` — mostrare questo aiuto sopra i pannelli; qualsiasi tasto lo chiude.

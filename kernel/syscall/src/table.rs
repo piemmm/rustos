@@ -10,8 +10,8 @@
 
 use rustos_abi::{
     spec_for, AbiType, CapabilityId, Errno, IrqHandle, MapFlags, OpenFlags, RandomFlags, Signal,
-    SyscallNumber, SyscallSpec, UnlinkFlags, WaitFlags, ENCODED_TABLE, PROC_ID_HEX_LEN,
-    SYSCALL_MAX_ARGS,
+    SyscallNumber, SyscallSpec, UnlinkFlags, WaitFlags, ENCODED_TABLE, FS_MODE_MASK,
+    PROC_ID_HEX_LEN, SYSCALL_MAX_ARGS,
 };
 use rustos_crypto::{sha256, Sha256Digest};
 use rustos_kernel_sec::{TaskCapabilities, TaskId};
@@ -1656,6 +1656,26 @@ pub trait SyscallHandlers {
     ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
+
+    /// Set the permission bits of the file or directory at the absolute
+    /// path `path` (`path_len` bytes) to `mode` (the `chmod(2)` shape).
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::FS_ACCESS`], that `path` is a non-null `UserPtr`,
+    /// and rejected any `mode` bit above [`FS_MODE_MASK`]. The per-inode
+    /// rule — only the inode's owner may change its mode — is the secured
+    /// VFS's, applied in the handler's filesystem service.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn fs_set_mode(
+        &self,
+        _caller: &CallerContext<'_>,
+        _path: u64,
+        _path_len: usize,
+        _mode: u32,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
 }
 
 /// Architecture-neutral syscall dispatcher.
@@ -2158,6 +2178,18 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 let dst_len = decode_len(args.0[3])?;
                 self.handlers
                     .fs_rename(caller, args.0[0], src_len, args.0[2], dst_len)
+            }
+            SyscallNumber::FS_SET_MODE => {
+                // args[0] is the non-null path `UserPtr` (dispatcher-checked);
+                // args[1] is the path length; args[2] is the mode word,
+                // refused here for any bit above the permission mask (never
+                // masked to a mode the caller did not ask for).
+                let path_len = decode_len(args.0[1])?;
+                let mode = decode_u32(args.0[2]);
+                if mode & !FS_MODE_MASK != 0 {
+                    return Err(Errno::OutOfRange);
+                }
+                self.handlers.fs_set_mode(caller, args.0[0], path_len, mode)
             }
             SyscallNumber::FS_CHDIR => {
                 // args[0] is the non-null path `UserPtr` (dispatcher-checked);
@@ -3155,6 +3187,17 @@ mod tests {
             Ok(0)
         }
 
+        fn fs_set_mode(
+            &self,
+            _c: &CallerContext<'_>,
+            _path: u64,
+            _path_len: usize,
+            _mode: u32,
+        ) -> SyscallResult {
+            self.record("fs_set_mode");
+            Ok(0)
+        }
+
         fn fs_chdir(&self, _c: &CallerContext<'_>, _path: u64, _path_len: usize) -> SyscallResult {
             self.record("fs_chdir");
             Ok(0)
@@ -3880,6 +3923,44 @@ mod tests {
             Err(Errno::OutOfRange)
         );
         assert_eq!(h.last(), None);
+    }
+
+    #[test]
+    fn fs_set_mode_rejects_a_mode_above_the_permission_mask() {
+        // `mode` is declared `U32`; the per-arg validator accepts the
+        // 32-bit value, but a bit above `FS_MODE_MASK` (a file-type bit,
+        // say) must be refused with `Errno::OutOfRange` before the handler
+        // is reached — never silently masked to a mode the caller did not
+        // ask for.
+        let sink = RecordingSink::new();
+        let caps = build_caps(&[CapabilityId::FS_ACCESS], &sink);
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers::default();
+        let d = Dispatcher::new(&h, &sink);
+
+        let mut args = RawArgs::ZERO;
+        args.0[0] = 0x1000; // path — a non-null user pointer
+        args.0[1] = 16; // path length
+        args.0[2] = 0o10_0644; // a file-type bit above the mask
+        assert_eq!(
+            d.dispatch(&ctx, SyscallNumber::FS_SET_MODE.as_u16(), args),
+            Err(Errno::OutOfRange)
+        );
+        assert_eq!(h.last(), None);
+
+        // The full permission word (all twelve bits) is the inclusive
+        // upper bound and reaches the handler.
+        let mut args = RawArgs::ZERO;
+        args.0[0] = 0x1000;
+        args.0[1] = 16;
+        args.0[2] = u64::from(FS_MODE_MASK);
+        assert!(d
+            .dispatch(&ctx, SyscallNumber::FS_SET_MODE.as_u16(), args)
+            .is_ok());
+        assert_eq!(h.last(), Some("fs_set_mode"));
     }
 
     #[test]

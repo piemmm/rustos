@@ -124,6 +124,7 @@ const NUM_FS_SYNC: u64 = SyscallNumber::FS_SYNC.as_u16() as u64;
 const NUM_FS_MKDIR: u64 = SyscallNumber::FS_MKDIR.as_u16() as u64;
 const NUM_FS_UNLINK: u64 = SyscallNumber::FS_UNLINK.as_u16() as u64;
 const NUM_FS_RENAME: u64 = SyscallNumber::FS_RENAME.as_u16() as u64;
+const NUM_FS_SET_MODE: u64 = SyscallNumber::FS_SET_MODE.as_u16() as u64;
 const NUM_CALL_PEER_ORIGIN: u64 = SyscallNumber::CALL_PEER_ORIGIN.as_u16() as u64;
 const NUM_WALL_TIME_GET: u64 = SyscallNumber::WALL_TIME_GET.as_u16() as u64;
 const NUM_WALL_TIME_SET: u64 = SyscallNumber::WALL_TIME_SET.as_u16() as u64;
@@ -1610,6 +1611,30 @@ pub extern "C" fn sys_fs_rename(
     }
 }
 
+/// `fs_set_mode`: set the permission bits of the file or directory at the
+/// absolute path `(path, path_len)` to `mode` (`SyscallNumber::FS_SET_MODE`,
+/// the `chmod(2)` shape). Returns a `ROS_E_*` code.
+///
+/// `mode` carries at most `ROS_FS_MODE_MASK` (the `rwx` triads plus the
+/// setuid/setgid/sticky bits); any higher bit fails closed with
+/// `ROS_E_OUT_OF_RANGE` — never masked to a mode the caller did not ask
+/// for. Requires `ROS_CAP_FS_ACCESS`; resolution and the permission/
+/// mount-flag model match `ros_sys_fs_open`, and only the inode's owner may
+/// change its mode. The kernel validates `(path, path_len)` against the
+/// caller's address space before reading it.
+#[must_use]
+#[export_name = "ros_sys_fs_set_mode"]
+pub extern "C" fn sys_fs_set_mode(path: *mut c_void, path_len: usize, mode: u32) -> i32 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates `(path, path_len)`
+    // and rejects any `mode` bit above the permission mask.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_FS_SET_MODE,
+            [ptr_arg(path), path_len as u64, u64::from(mode), 0, 0, 0],
+        ))
+    }
+}
+
 /// `signal`: deliver control signal `signal` (a `ros_signal_t` discriminant)
 /// to child process `pid` (`SyscallNumber::SIGNAL`). Returns a `ROS_E_*`
 /// code.
@@ -1824,6 +1849,7 @@ mod tests {
         (NUM_RESOURCE_OPEN, "resource_open", 3),
         (NUM_SELF_ORIGIN, "self_origin", 2),
         (NUM_PIPE_CREATE, "pipe_create", 1),
+        (NUM_FS_SET_MODE, "fs_set_mode", 3),
     ];
 
     #[test]
@@ -2716,6 +2742,20 @@ mod tests {
         });
         assert_eq!(number, NUM_FS_UNLINK);
         assert_eq!(args[2], dir_bit);
+    }
+
+    #[test]
+    fn fs_set_mode_marshals_path_len_and_mode() {
+        let mut path = *b"/Storage/file";
+        let ptr = path.as_mut_ptr().cast::<c_void>();
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_fs_set_mode(ptr, path.len(), 0o640), 0);
+        });
+        assert_eq!(number, NUM_FS_SET_MODE);
+        assert_eq!(args[0], ptr as usize as u64);
+        assert_eq!(args[1], path.len() as u64);
+        assert_eq!(args[2], 0o640);
+        assert_eq!(&args[3..], &[0, 0, 0]);
     }
 
     #[test]

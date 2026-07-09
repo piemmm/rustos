@@ -34,6 +34,9 @@ Teclas:
 - `s` — abrir el menú de ordenación: `n` nombre, `e` extensión,
   `s` tamaño, `m` fecha de modificación, `r` invertir el sentido, `Esc`
   cancela. Los directorios siempre se agrupan antes que los archivos.
+- `a` — editar los bits de permiso de la entrada seleccionada: una línea
+  octal precargada con el modo actual. Intro aplica (solo el propietario
+  puede cambiarlo — el núcleo rechaza a cualquier otro), Esc cancela.
 - `.` — mostrar/ocultar las entradas ocultas (nombres con punto) en ambos
   paneles.
 - `?` — mostrar esta ayuda sobre los paneles; cualquier tecla la cierra.

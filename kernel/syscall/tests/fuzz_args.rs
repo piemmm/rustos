@@ -28,7 +28,8 @@
 use core::cell::RefCell;
 use rustos_abi::{
     spec_for, AbiType, CapabilityId, Errno, IrqHandle, MapFlags, OpenFlags, RandomFlags,
-    SyscallNumber, UnlinkFlags, WaitFlags, ENCODED_TABLE_LEN, SYSCALLS, SYSCALL_MAX_ARGS,
+    SyscallNumber, UnlinkFlags, WaitFlags, ENCODED_TABLE_LEN, FS_MODE_MASK, SYSCALLS,
+    SYSCALL_MAX_ARGS,
 };
 use rustos_caps::CapabilitySet;
 use rustos_kernel_sec::{TaskCapabilities, TaskId, UserId};
@@ -549,6 +550,16 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn fs_set_mode(
+        &self,
+        _c: &CallerContext<'_>,
+        _path: u64,
+        _path_len: usize,
+        _mode: u32,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
     fn fs_chdir(&self, _c: &CallerContext<'_>, _path: u64, _path_len: usize) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
@@ -659,6 +670,13 @@ fn would_accept(spec_idx: usize, raw_number: u16, args: &[u64; SYSCALL_MAX_ARGS]
         if UnlinkFlags::from_bits(raw).is_err() {
             return false;
         }
+    }
+    // `fs_set_mode`'s mode argument (arg 2) carries the same extra semantic
+    // check: the dispatcher refuses any bit above `FS_MODE_MASK` (the
+    // permission triads plus setuid/setgid/sticky) rather than masking it.
+    // Mirror that here.
+    if spec.number == SyscallNumber::FS_SET_MODE && args[2] & !u64::from(FS_MODE_MASK) != 0 {
+        return false;
     }
     true
 }

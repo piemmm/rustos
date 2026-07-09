@@ -171,6 +171,45 @@ impl<'fs, R: FilesystemRead + FilesystemSecurity + ?Sized> DelegatedFs<'fs, R, P
             _policy: PhantomData,
         }
     }
+
+    /// Set the permission bits of the node at `components` to `mode` (the
+    /// `chmod(2)` shape), leaving its ownership, ACL, and capability gate
+    /// untouched.
+    ///
+    /// Only the node's **owner** may change its mode — mode bits grant no
+    /// write-implies-chmod, and holding a capability grants no override —
+    /// so a non-owner is refused, and a node carrying a `required_cap`
+    /// gate additionally demands that capability (the gate guards *all*
+    /// access to the node, this change included). `mode` must already be
+    /// validated to the permission mask by the caller; the stored record's
+    /// mode field carries only permission bits by contract.
+    ///
+    /// Implemented only for the per-inode policy: a uniform-template mount
+    /// has no stored per-node record for a mode change to land in.
+    ///
+    /// # Errors
+    ///
+    /// [`VfsError::NotFound`], [`VfsError::NotADirectory`],
+    /// [`VfsError::PermissionDenied`], or [`VfsError::Io`].
+    pub fn set_mode(
+        &mut self,
+        cred: &Credentials<'_>,
+        components: &[String],
+        mode: u32,
+    ) -> Result<(), VfsError> {
+        let (node, _info, meta) = self.resolve(cred, components)?;
+        if let Some(cap) = meta.required_cap {
+            if !cred.caps.holds(cap) {
+                return Err(VfsError::PermissionDenied);
+            }
+        }
+        if cred.uid != meta.owner {
+            return Err(VfsError::PermissionDenied);
+        }
+        let mut sec = self.fs.security(node).map_err(map_driver_error)?;
+        sec.mode = mode;
+        self.fs.set_security(node, sec).map_err(map_driver_error)
+    }
 }
 
 impl<R: FilesystemRead + ?Sized, P: MetaPolicy<R>> DelegatedFs<'_, R, P> {

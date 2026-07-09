@@ -77,7 +77,8 @@ pub use field::{
     NAMED_FIELD_KEY_PREFIX_LEN, RESERVED_PREFIXES, UUID_LEN,
 };
 pub use fs::{
-    DirEntry, FileKind, FileStat, OpenFlags, UnlinkFlags, FS_IO_MAX, FS_NAME_MAX, FS_PATH_MAX,
+    DirEntry, FileKind, FileStat, OpenFlags, UnlinkFlags, FS_IO_MAX, FS_MODE_MASK, FS_NAME_MAX,
+    FS_PATH_MAX,
 };
 pub use hwtree::{
     HwDeviceClass, HwMatchKey, HwMatchKind, HwNode, HwResource, HwResourceKind, HwTreeHeader,

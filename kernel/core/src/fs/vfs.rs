@@ -468,6 +468,33 @@ impl Vfs {
         DelegatedFs::new_secured(fs, template).remove(cred, &remainder, dir_only)
     }
 
+    /// Set the permission bits of the node at `path` to `mode` under a
+    /// driver-backed mount, delegating to `fs` (the `chmod(2)` shape).
+    ///
+    /// Only the node's owner may change its mode, and a `required_cap`
+    /// gate on the node is honoured (see
+    /// [`DelegatedFs::set_mode`](super::delegate::DelegatedFs::set_mode)).
+    /// Secured-only: a uniform-template mount stores no per-node record
+    /// for the change to land in, so no unsecured twin exists.
+    ///
+    /// # Errors
+    ///
+    /// * [`VfsError::NotFound`] if no driver-backed mount covers `path`.
+    /// * [`VfsError::ReadOnly`] if the covering mount is read-only.
+    /// * [`VfsError::PermissionDenied`] if the caller is not the node's
+    ///   owner or fails a search/capability check on the way to it.
+    /// * [`VfsError::NotADirectory`] or [`VfsError::Io`].
+    pub fn set_mode_via_secured<F: FilesystemRead + FilesystemSecurity + ?Sized>(
+        &self,
+        cred: &Credentials<'_>,
+        path: &Path,
+        fs: &mut F,
+        mode: u32,
+    ) -> Result<(), VfsError> {
+        let (template, remainder) = self.delegate_context(cred, path, true)?;
+        DelegatedFs::new_secured(fs, template).set_mode(cred, &remainder, mode)
+    }
+
     /// Move `src` to `dst` under a driver-backed mount, delegating to `fs`.
     ///
     /// Both paths must lie under the *same* writable driver-backed mount

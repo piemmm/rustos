@@ -36,6 +36,17 @@ pub const FS_PATH_MAX: usize = 4096;
 /// never caps total file size, only one syscall's copy.
 pub const FS_IO_MAX: usize = 1 << 20;
 
+/// The permission bits a [`fs_set_mode`](crate::SyscallNumber::FS_SET_MODE)
+/// word may carry: the owner/group/other `rwx` triads plus the
+/// setuid/setgid/sticky bits (`0o7777`).
+///
+/// A fixed validation bound on untrusted input: the dispatcher refuses a
+/// mode word carrying any higher bit with [`Errno::OutOfRange`] rather than
+/// masking it (never silently apply a different mode than the one asked
+/// for). The file-type bits [`FileStat::mode`] reports above this mask are
+/// the filesystem's own and are never settable through the call.
+pub const FS_MODE_MASK: u32 = 0o7777;
+
 /// What an inode is, as reported by [`FileStat`] and each [`DirEntry`].
 ///
 /// Deliberately closed: the VFS distinguishes only regular files and

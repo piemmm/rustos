@@ -260,6 +260,9 @@ const NUM_FS_MKDIR: u64 = SyscallNumber::FS_MKDIR.as_u16() as u64;
 const NUM_FS_UNLINK: u64 = SyscallNumber::FS_UNLINK.as_u16() as u64;
 const NUM_FS_RENAME: u64 = SyscallNumber::FS_RENAME.as_u16() as u64;
 
+/// `fs_set_mode` syscall number (as above).
+const NUM_FS_SET_MODE: u64 = SyscallNumber::FS_SET_MODE.as_u16() as u64;
+
 /// `call_peer_origin` syscall number (as above).
 const NUM_CALL_PEER_ORIGIN: u64 = SyscallNumber::CALL_PEER_ORIGIN.as_u16() as u64;
 
@@ -2825,6 +2828,33 @@ pub fn fs_rename(src: &[u8], dst: &[u8]) -> i64 {
     ret as i64
 }
 
+/// Set the permission bits of the file or directory at the absolute `path`
+/// to `mode` (`SyscallNumber::FS_SET_MODE`, the `chmod(2)` shape).
+///
+/// `mode` carries at most [`rustos_abi::FS_MODE_MASK`] (the
+/// owner/group/other `rwx` triads plus the setuid/setgid/sticky bits); any
+/// higher bit is refused at dispatch with `Errno::OutOfRange` — never
+/// silently masked. The kernel authorises the change through the secured
+/// VFS under the caller's attested identity: only the inode's **owner** may
+/// change its mode, the covering mount must be writable, and ownership,
+/// ACL, and capability gate are untouched. Returns `0` on success or
+/// `-errno`.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
+pub fn fs_set_mode(path: &[u8], mode: u32) -> i64 {
+    let ptr = path.as_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
+    // `(ptr, len)` pair against the caller's address space before reading it.
+    // `path` is a live shared `&[u8]` for the duration of the call.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_FS_SET_MODE,
+            [ptr, path.len() as u64, u64::from(mode), 0, 0, 0],
+        )
+    };
+    ret as i64
+}
+
 /// Change the calling process's working directory to `path`
 /// (`SyscallNumber::FS_CHDIR`).
 ///
@@ -4358,6 +4388,19 @@ mod tests {
         assert_eq!(args[0], path.as_ptr() as usize as u64);
         assert_eq!(args[1], path.len() as u64);
         assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn fs_set_mode_marshals_path_and_mode() {
+        let path = b"/Users/me/notes.txt";
+        let (number, args) = capture(0, || {
+            assert_eq!(fs_set_mode(path, 0o640), 0);
+        });
+        assert_eq!(number, NUM_FS_SET_MODE);
+        assert_eq!(args[0], path.as_ptr() as usize as u64);
+        assert_eq!(args[1], path.len() as u64);
+        assert_eq!(args[2], 0o640);
+        assert_eq!(&args[3..], &[0, 0, 0]);
     }
 
     #[test]

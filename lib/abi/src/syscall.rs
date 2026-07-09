@@ -1345,6 +1345,23 @@ impl SyscallNumber {
     /// transferring an end rides the `CAP_PROC_SPAWN`-gated spawn.
     pub const PIPE_CREATE: Self = Self(73);
 
+    /// Set the POSIX permission bits of the file or directory at an
+    /// absolute path (the `chmod(2)` shape).
+    ///
+    /// Arguments: `path: *const u8` (a non-null user pointer),
+    /// `path_len: usize` (at most [`crate::FS_PATH_MAX`]), and
+    /// `mode: u32` — the new permission bits, at most
+    /// [`crate::FS_MODE_MASK`] (the `rwx` triads plus the
+    /// setuid/setgid/sticky bits); a raw word carrying any higher bit
+    /// fails closed with [`crate::Errno::OutOfRange`] at dispatch. The
+    /// file-type is not the caller's to change and is not part of the
+    /// word. Gated on `CAP_FS_ACCESS` like the other path-taking
+    /// filesystem calls; the per-inode rule is the secured VFS's — only
+    /// the inode's **owner** may change its mode (holding a capability
+    /// does not override ownership), the covering mount must be
+    /// writable, and ownership, ACL, and capability gate are untouched.
+    pub const FS_SET_MODE: Self = Self(74);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 

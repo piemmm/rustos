@@ -599,6 +599,60 @@ fn rename_on_a_read_only_mount_fails_closed() {
 }
 
 #[test]
+fn set_mode_rewrites_the_permission_bits_for_the_owner() {
+    let svc = ready();
+    let caps = caps();
+    let p = path("f");
+    svc.open(
+        TEST_UID,
+        &caps,
+        &p,
+        OpenFlags::CREATE.union(OpenFlags::WRITE),
+    )
+    .expect("create");
+
+    svc.set_mode(TEST_UID, &caps, &p, 0o600).expect("chmod");
+
+    let st = svc.stat(TEST_UID, &caps, &p).expect("stat");
+    assert_eq!(st.mode, 0o600);
+    assert_eq!(st.uid, TEST_UID);
+    assert_eq!(st.gid, TEST_GID);
+}
+
+#[test]
+fn set_mode_above_the_permission_mask_fails_closed() {
+    // Defence in depth at the service seam: a file-type bit is refused
+    // before any resolution, so the record can never be corrupted.
+    let svc = ready();
+    let caps = caps();
+    assert_eq!(
+        svc.set_mode(TEST_UID, &caps, &path("f"), 0o10_0644),
+        Err(Errno::OutOfRange)
+    );
+}
+
+#[test]
+fn set_mode_on_a_read_only_mount_fails_closed() {
+    // `ReadOnly` collapses onto `PermissionDenied` at the ABI boundary.
+    let svc = service(true, true, true);
+    let caps = caps();
+    assert_eq!(
+        svc.set_mode(TEST_UID, &caps, &path("a"), 0o600),
+        Err(Errno::PermissionDenied)
+    );
+}
+
+#[test]
+fn set_mode_before_a_mount_is_installed_fails_closed() {
+    let svc = service(false, true, false);
+    let caps = caps();
+    assert_eq!(
+        svc.set_mode(TEST_UID, &caps, &path("a"), 0o600),
+        Err(Errno::NotImplemented)
+    );
+}
+
+#[test]
 fn rename_before_a_mount_is_installed_fails_closed() {
     let svc = service(false, true, false);
     let caps = caps();

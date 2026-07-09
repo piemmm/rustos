@@ -618,6 +618,7 @@ mod tests {
         let embedded: &[(&str, AppKind, &[CapabilityId])] = &[
             ("basename", AppKind::Command, PURE_TOOL_REQUEST),
             ("cat", AppKind::Command, CAT_MANIFEST),
+            ("chmod", AppKind::Command, PURE_TOOL_REQUEST),
             ("clear", AppKind::Command, CLEAR_MANIFEST),
             ("cp", AppKind::Command, FILE_TOOL_REQUEST),
             ("devmgr", AppKind::Service, DEVMGR_MANIFEST),

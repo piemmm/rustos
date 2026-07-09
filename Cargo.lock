@@ -580,6 +580,8 @@ name = "rustos-chmod"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-help",
+ "rustos-rt",
 ]
 
 [[package]]

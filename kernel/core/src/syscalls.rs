@@ -5414,6 +5414,24 @@ where
         Ok(0)
     }
 
+    fn fs_set_mode(
+        &self,
+        caller: &CallerContext<'_>,
+        path: u64,
+        path_len: usize,
+        mode: u32,
+    ) -> SyscallResult {
+        // The dispatcher already checked `CAP_FS_ACCESS`, that `path` is a
+        // non-null `UserPtr`, and rejected any `mode` bit above the
+        // permission mask. The owner-only rule is the secured VFS's, applied
+        // under the caller's attested identity.
+        let path = self.copy_path_in(caller, path, path_len)?;
+        let uid = caller.caps.owner().0;
+        self.filesystem
+            .set_mode(uid, caller.caps.effective(), &path, mode)?;
+        Ok(0)
+    }
+
     fn fs_chdir(&self, caller: &CallerContext<'_>, path: u64, path_len: usize) -> SyscallResult {
         // The dispatcher already checked `CAP_FS_ACCESS` and that `path` is a
         // non-null `UserPtr`. `copy_path_in` copies the path in and resolves
@@ -9742,6 +9760,16 @@ mod tests {
             dst: &str,
         ) -> Result<(), Errno> {
             self.inner.rename(uid, caps, src, dst)
+        }
+
+        fn set_mode(
+            &self,
+            uid: u32,
+            caps: &dyn rustos_abi::CapabilityQuery,
+            path: &str,
+            mode: u32,
+        ) -> Result<(), Errno> {
+            self.inner.set_mode(uid, caps, path, mode)
         }
     }
 
@@ -19199,6 +19227,19 @@ mod tests {
             self.record(alloc::format!("rename uid={uid} src={src} dst={dst}"));
             Ok(())
         }
+
+        fn set_mode(
+            &self,
+            uid: u32,
+            _caps: &dyn rustos_abi::CapabilityQuery,
+            path: &str,
+            mode: u32,
+        ) -> Result<(), Errno> {
+            self.record(alloc::format!(
+                "set_mode uid={uid} path={path} mode={mode:o}"
+            ));
+            Ok(())
+        }
     }
 
     /// `fs_open` resolves+authorises through the service under the caller's
@@ -19812,6 +19853,47 @@ mod tests {
             "resolution failed before the VFS was touched"
         );
         assert_eq!(aspaces.read().open_file_entry(SecTaskId(2), 4), None);
+    }
+
+    /// `fs_set_mode` copies the path in, resolves it, and reaches the
+    /// service under the caller's attested uid with the mode word intact.
+    #[test]
+    fn fs_set_mode_attests_the_caller_and_reaches_the_service() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, b"/Users/bob/notes");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(fs);
+
+        h.fs_set_mode(&ctx, 0x1000, "/Users/bob/notes".len(), 0o640)
+            .expect("set_mode succeeds");
+        assert_eq!(
+            fs.calls(),
+            alloc::vec![alloc::string::String::from(
+                "set_mode uid=1000 path=/Users/bob/notes mode=640"
+            )],
+            "the service saw the attested uid, the resolved path, and the mode"
+        );
     }
 
     /// `fs_getcwd` writes the caller's working directory out; an undersized

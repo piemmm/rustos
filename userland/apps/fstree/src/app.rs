@@ -5,13 +5,19 @@
 //! input arrives); there is no polling loop. The terminal is restored by
 //! the `Run` binary's alternate-screen bracketing, not here.
 
+use alloc::format;
 use alloc::string::String;
 
 use rustos_curses::{Event, Pos, Screen, Tty, Window};
 
 use crate::fs::Fs;
-use crate::model::{child_dirs_of, join, DirNode, Model, Overlay, Pane, SortKey};
+use crate::model::{child_dirs_of, join, DirNode, ModePrompt, Model, Overlay, Pane, SortKey};
 use crate::render::render;
+
+/// Longest mode the prompt accepts: four octal digits (`7777`), the full
+/// permission word — a fixed validation bound on typed input, matching the
+/// kernel's own `FS_MODE_MASK` ceiling.
+const MODE_DIGITS_MAX: usize = 4;
 
 /// The session outcome the `Run` binary maps to an exit code.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -59,6 +65,10 @@ pub fn run<T: Tty>(
 /// Apply one typed key event to the session state.
 pub fn handle_event(model: &mut Model, fs: &mut dyn Fs, event: &Event) {
     model.message = None;
+    if model.prompt.is_some() {
+        handle_mode_prompt(model, fs, event);
+        return;
+    }
     match model.overlay {
         Overlay::Help => {
             // Any key dismisses the help overlay.
@@ -75,6 +85,7 @@ pub fn handle_event(model: &mut Model, fs: &mut dyn Fs, event: &Event) {
         Event::Char('q') => model.quit = true,
         Event::Char('?') => model.overlay = Overlay::Help,
         Event::Char('s') => model.overlay = Overlay::SortMenu,
+        Event::Char('a') => open_mode_prompt(model, fs),
         Event::Char('.') => {
             model.show_hidden = !model.show_hidden;
             clamp_cursors(model);
@@ -101,6 +112,81 @@ pub fn handle_event(model: &mut Model, fs: &mut dyn Fs, event: &Event) {
             Pane::Tree => toggle_expanded(model, fs),
             Pane::Files => enter_file_row(model, fs),
         },
+        _ => {}
+    }
+}
+
+/// Open the mode-editor prompt on the focused pane's selection: the file
+/// pane's entry, or the tree pane's directory. The prompt starts from the
+/// entry's *current* bits (a resolve-only stat through the seam); a
+/// refused stat surfaces its error and opens nothing.
+fn open_mode_prompt(model: &mut Model, fs: &mut dyn Fs) {
+    let (path, name) = match model.pane {
+        Pane::Files => {
+            let Some(entry) = model.visible_files().get(model.file_cursor).copied() else {
+                return;
+            };
+            (join(&model.files_dir, &entry.name), entry.name.clone())
+        }
+        Pane::Tree => {
+            let rows = model.tree_rows();
+            let Some(row) = rows.get(model.tree_cursor) else {
+                return;
+            };
+            (row.path.clone(), row.name.clone())
+        }
+    };
+    match fs.stat_mode(&path) {
+        Ok(current) => {
+            model.prompt = Some(ModePrompt {
+                path,
+                name,
+                current,
+                input: format!("{current:o}"),
+            });
+        }
+        Err(errno) => model.report(&path, errno),
+    }
+}
+
+/// Apply one key to the open mode prompt: octal digits and Backspace
+/// edit, Enter applies through the seam, Esc cancels. The kernel decides
+/// whether the change is allowed; a refusal is surfaced verbatim and the
+/// entry is left unchanged (the prompt closes either way — the user's
+/// input survives on the message line's report, not as hidden state).
+fn handle_mode_prompt(model: &mut Model, fs: &mut dyn Fs, event: &Event) {
+    let Some(prompt) = &mut model.prompt else {
+        return;
+    };
+    match event {
+        Event::Esc => model.prompt = None,
+        Event::Backspace => {
+            prompt.input.pop();
+        }
+        Event::Char(digit @ '0'..='7') => {
+            if prompt.input.len() < MODE_DIGITS_MAX {
+                prompt.input.push(*digit);
+            }
+        }
+        Event::Enter => {
+            let Some(prompt) = model.prompt.take() else {
+                return;
+            };
+            // At most four octal digits can be typed, so the parse fails
+            // only on empty input and the value never exceeds `0o7777`.
+            let Ok(mode) = u32::from_str_radix(&prompt.input, 8) else {
+                model.message = Some(String::from("mode: empty — nothing applied"));
+                return;
+            };
+            match fs.set_mode(&prompt.path, mode) {
+                Ok(()) => {
+                    model.message = Some(format!("mode of {} now {mode:o}", prompt.name));
+                }
+                Err(errno) => model.report(&prompt.path, errno),
+            }
+        }
+        // Any other key (a non-octal digit included) is ignored — the
+        // prompt accepts only what the kernel could accept.
         _ => {}
     }
 }

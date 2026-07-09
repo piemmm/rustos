@@ -97,6 +97,7 @@ extern "C" {
 #define ROS_SYS_SEAT_REVOKE 71u
 #define ROS_SYS_CONSOLE_FOREGROUND 72u
 #define ROS_SYS_PIPE_CREATE 73u
+#define ROS_SYS_FS_SET_MODE 74u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns ROS_E_WOULD_BLOCK when a
@@ -155,6 +156,12 @@ typedef struct ros_spawn_attach {
 * directory (the atomic rmdir posture) and a non-directory is refused with
 * ROS_E_NOT_A_DIRECTORY. */
 #define ROS_UNLINK_FLAG_DIRECTORY 0x1u
+
+/* fs_set_mode() permission-bit mask (the `mode` argument, uint32_t): the
+* owner/group/other rwx triads plus the setuid/setgid/sticky bits. A mode
+* carrying any higher bit (a file-type bit, say) is rejected with
+* ROS_E_OUT_OF_RANGE, never silently masked. */
+#define ROS_FS_MODE_MASK 0xfffu
 
 /* signal() control signals (the `signal` argument, uint32_t). 0 is reserved and
 * never valid; a value outside this set is rejected with ROS_E_OUT_OF_RANGE. */
@@ -239,6 +246,7 @@ int32_t ros_sys_seat_switch(uint64_t a0, uint32_t a1);
 int32_t ros_sys_seat_revoke(uint64_t a0);
 int32_t ros_sys_console_foreground(uint32_t a0, int32_t a1);
 int32_t ros_sys_pipe_create(void * a0);
+int32_t ros_sys_fs_set_mode(void * a0, uintptr_t a1, uint32_t a2);
 
 #ifdef __cplusplus
 } /* extern "C" */

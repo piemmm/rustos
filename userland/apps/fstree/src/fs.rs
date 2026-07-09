@@ -42,9 +42,9 @@ pub struct VolumeSpace {
     pub total_bytes: u64,
 }
 
-/// The filesystem operations the S1 session performs. Later stages extend
-/// this trait in place with the operations they introduce (copy, move,
-/// rename, delete, …) together with their callers.
+/// The filesystem operations the landed stages perform. Later stages
+/// extend this trait in place with the operations they introduce (copy,
+/// move, rename, delete, …) together with their callers.
 pub trait Fs {
     /// List every entry of the directory `path`, in any order (the model
     /// sorts them).
@@ -59,4 +59,25 @@ pub trait Fs {
     /// Report the free/total space of the volume backing `path`, or `None`
     /// when the figure is unavailable (best-effort; never an error).
     fn volume_space(&mut self, path: &str) -> Option<VolumeSpace>;
+
+    /// The current permission bits of the entry at `path` (a resolve-only
+    /// stat — no read authority is requested), for the mode editor's
+    /// pre-filled prompt.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the filesystem raises; the model surfaces it and
+    /// opens no prompt.
+    fn stat_mode(&mut self, path: &str) -> Result<u32, Errno>;
+
+    /// Set the permission bits of the entry at `path` to `mode` (at most
+    /// [`rustos_abi::FS_MODE_MASK`]). The kernel owns the authorisation:
+    /// only the entry's owner may change its mode, and a refusal comes
+    /// back as the frozen [`Errno`] the model surfaces unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the filesystem raises; the model reports it and
+    /// changes nothing.
+    fn set_mode(&mut self, path: &str, mode: u32) -> Result<(), Errno>;
 }

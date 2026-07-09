@@ -549,9 +549,9 @@ mod tests {
         assert_eq!(
             names,
             [
-                "basename", "cat", "clear", "cp", "devmgr", "df", "dirname", "du", "edit", "elsh",
-                "false", "fstree", "groupadd", "head", "login", "ls", "lspci", "man", "mkdir",
-                "mv", "printf", "ps", "reset", "rm", "rmdir", "seatmgr", "seq", "sysinfo",
+                "basename", "cat", "chmod", "clear", "cp", "devmgr", "df", "dirname", "du", "edit",
+                "elsh", "false", "fstree", "groupadd", "head", "login", "ls", "lspci", "man",
+                "mkdir", "mv", "printf", "ps", "reset", "rm", "rmdir", "seatmgr", "seq", "sysinfo",
                 "sysinfod", "tee", "top", "true", "useradd", "users", "vim", "wc", "whoami", "yes"
             ]
         );

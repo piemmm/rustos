@@ -35,6 +35,10 @@ Touches :
 - `s` — ouvrir le menu de tri : `n` nom, `e` extension, `s` taille,
   `m` date de modification, `r` inverser le sens, `Échap` annule. Les
   répertoires sont toujours groupés avant les fichiers.
+- `a` — modifier les bits de permission de l'entrée sélectionnée : une
+  invite octale pré-remplie avec le mode actuel. Entrée applique (seul le
+  propriétaire peut modifier — le noyau refuse quiconque d'autre), Échap
+  annule.
 - `.` — afficher/masquer les entrées cachées (noms à point) dans les deux
   panneaux.
 - `?` — afficher cette aide par-dessus les panneaux ; toute touche la

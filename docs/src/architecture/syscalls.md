@@ -120,6 +120,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  71 | `seat_revoke`  | `u64 seat`                              | `errno`       | `CAP_SEAT_ADMIN` | yes |
 |  72 | `console_foreground` | `u32 fd`, `i32 pid`               | `errno`       | `CAP_CONSOLE_READ` | yes |
 |  73 | `pipe_create`  | `user_ptr` (out: two `u32` fds)         | `errno`       | —               | no    |
+|  74 | `fs_set_mode`  | `user_ptr` (path), `len`, `u32 mode`    | `errno`       | `CAP_FS_ACCESS` | yes   |
 
 (Syscall numbers 39–45 — `msi_alloc`, `shm_create`/`shm_map`/`shm_unmap`,
 `waitset_create`/`waitset_ctl`/`waitset_wait` — are defined in
@@ -127,7 +128,8 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 
 `fs_chdir` (no. 65) and `fs_getcwd` (no. 66) give each process a working
 directory. A path handed to any path-taking filesystem call (`fs_open`,
-`fs_mkdir`, `fs_unlink`, `fs_rename`, and `fs_chdir` itself) is resolved at
+`fs_mkdir`, `fs_unlink`, `fs_rename`, `fs_set_mode`, and `fs_chdir` itself)
+is resolved at
 the single kernel entry point (`copy_path_in`): an absolute `/`-view path is
 normalised through the shared path parser (`lib/path`), and a relative path
 is first joined onto the caller's current working directory, so `.`/`..` are
@@ -148,6 +150,17 @@ subject to the identical inode/mount-flag authorisation. `lib/path` already
 refuses any `..` that would escape the alias root. A name that is not a
 published root fails closed with `NotFound` before the VFS is touched; session
 and volume aliases are published by their owning services when those land.
+
+`fs_set_mode` (no. 74) is the `chmod(2)` shape: it rewrites the permission
+bits (the `rwx` triads plus setuid/setgid/sticky, at most `FS_MODE_MASK` =
+`0o7777`) of the file or directory at a path, leaving ownership, ACL, and
+any capability gate untouched. A mode word carrying any higher bit is
+refused at dispatch with `OutOfRange` — never silently masked. The
+per-inode rule is the secured VFS's: only the inode's **owner** may change
+its mode (write access does not imply chmod, and holding a capability grants
+no override), the covering mount must be writable, and a node carrying a
+`required_cap` gate demands that capability for this change as for any other
+access. The `chmod` command app and `fstree`'s mode editor are its callers.
 
 `resource_open` (no. 67) is the resource-reference analogue of `fs_open`
 (`plans/ALIAS.md`, `.junie/PREREQUISITES2.md` P5). A resource reference
@@ -200,7 +213,7 @@ is exhaustive — anything not listed below is ungated:
 | `CAP_SYSINFO_INTROSPECT` | `sysinfo_introspect` |
 | `CAP_LOG_EMIT`     | `log_emit`                 |
 | `CAP_HW_EMIT`      | `hw_emit_node`, `hw_remove_node` |
-| `CAP_FS_ACCESS`    | `fs_open`, `fs_readdir`, `fs_stat`, `fs_truncate`, `fs_sync`, `fs_mkdir`, `fs_unlink`, `fs_rename`, `fs_chdir` (the path-taking calls), and — enforced *in the handler* on a path-backed descriptor — `fs_read`, `fs_write`, `fs_close` |
+| `CAP_FS_ACCESS`    | `fs_open`, `fs_readdir`, `fs_stat`, `fs_truncate`, `fs_sync`, `fs_mkdir`, `fs_unlink`, `fs_rename`, `fs_set_mode`, `fs_chdir` (the path-taking calls), and — enforced *in the handler* on a path-backed descriptor — `fs_read`, `fs_write`, `fs_close` |
 | `CAP_TIME_SET`     | `wall_time_set`            |
 
 The `CAP_IRQ_BIND` rationale, the wake-up contract, and the failure

@@ -766,9 +766,21 @@ behind the floor work below).
   deduplicated onto it. `useradd` creates the account with an unusable
   random password record (the GNU `!`-field equivalent — a password is
   set afterwards via the `users` tool), the session-baseline ceiling,
-  and the shared shell/home defaults. **Remaining,
-  blocked on kernel prerequisites:** `chmod`/`chown` need fs
-  mode/owner-set syscalls, `getcap`/`setcap` need per-inode
+  and the shared shell/home defaults.
+  **Done: `chmod`** — registered in the change that landed its syscall:
+  `fs_set_mode` (74, the `chmod(2)` shape; `CAP_FS_ACCESS`-gated, audited,
+  mode word validated to `FS_MODE_MASK` at dispatch and again at the
+  service seam, never masked) flows dispatcher → `MountedFilesystemService`
+  → `Vfs::set_mode_via_secured` → the per-inode `DelegatedFs::set_mode`,
+  where only the inode's **owner** may change its mode (no
+  write-implies-chmod, no capability override, `required_cap` honoured,
+  read-only mounts refused), rewriting only the driver security record's
+  mode field. The bundle is store-only (console-write + `CAP_FS_ACCESS`),
+  with the thirteen-locale `Help/` tree, `-h`/`-?` over `lib/help`, and
+  the `ros_sys_fs_set_mode` stub + `ROS_FS_MODE_MASK` in the regenerated C
+  header. `fstree`'s `a` mode editor is the second caller.
+  **Remaining, blocked on kernel prerequisites:** `chown` needs the fs
+  owner-set syscall, `getcap`/`setcap` need per-inode
   capability-requirement get/set syscalls, and `mount` needs the mount
   syscall — none exists yet, and a stubbed production seam is forbidden;
   each tool registers in the change that lands its syscall.
@@ -804,8 +816,9 @@ behind the floor work below).
   `--ignore-fail-on-non-empty` tolerates exactly `NotEmpty`. Both
   tools' `-p` walks share the one ancestor-spelling rule
   (`rustos_path::Path::prefix`, the §2.2 seam added for exactly these
-  walks); `mkdir`'s GNU `-m` is deliberately staged behind the same
-  mode-set syscall `chmod` waits on (Stage B), never stubbed. `head`
+  walks); `mkdir`'s GNU `-m` remains staged — its kernel prerequisite
+  (`fs_set_mode`, Stage B `chmod`) now exists, and the flag lands with
+  its own tests in its own change, never stubbed. `head`
   implements the full GNU surface — `-n`/`-c` with the leading `-`
   elide form and the multiplier suffix alphabet, `-q`/`-v`/`-z`,
   bundles/permutation, and the obsolete first-argument

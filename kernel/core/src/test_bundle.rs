@@ -181,6 +181,16 @@ impl FilesystemService for MemFs {
     ) -> Result<(), Errno> {
         Err(Errno::NotImplemented)
     }
+
+    fn set_mode(
+        &self,
+        _uid: u32,
+        _caps: &dyn CapabilityQuery,
+        _path: &str,
+        _mode: u32,
+    ) -> Result<(), Errno> {
+        Err(Errno::NotImplemented)
+    }
 }
 
 /// A minimal valid single-segment PIE `rxe` whose CFI tag is the kernel's

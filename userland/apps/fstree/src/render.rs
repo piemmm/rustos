@@ -137,14 +137,24 @@ fn render_status(model: &Model, window: &mut Window, rows: u16, cols: u16) {
     window.set_attributes(Attributes::PLAIN);
 }
 
-/// The message line: an error/notice, the sort-menu prompt, or key hints.
+/// The message line: the mode-editor prompt, an error/notice, the
+/// sort-menu prompt, or key hints.
 fn render_message(model: &Model, window: &mut Window, rows: u16, cols: u16) {
-    let text = if model.overlay == Overlay::SortMenu {
+    let text = if let Some(prompt) = &model.prompt {
+        // The trailing underscore is the input point; the bracketed figure
+        // is the entry's current mode for reference.
+        format!(
+            "mode {} [{:o}]: {}_  (octal, Enter applies, Esc cancels)",
+            prompt.name, prompt.current, prompt.input
+        )
+    } else if model.overlay == Overlay::SortMenu {
         String::from("sort: n)ame  e)xtension  s)ize  m)odified  r)everse  Esc cancels")
     } else if let Some(message) = &model.message {
         message.clone()
     } else {
-        String::from("arrows/hjkl move  Enter open  Tab pane  s sort  . hidden  ? help  q quit")
+        String::from(
+            "arrows/hjkl move  Enter open  Tab pane  s sort  a mode  . hidden  ? help  q quit",
+        )
     };
     let _ = window.move_add_str(
         Pos::new(rows - 1, 0),

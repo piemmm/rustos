@@ -1826,6 +1826,27 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: None,
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::FS_SET_MODE,
+        name: "fs_set_mode",
+        arg_count: 3,
+        args: [
+            AbiType::UserPtr,
+            AbiType::Len,
+            // The new permission bits. A word carrying any bit above
+            // `FS_MODE_MASK` (the `rwx` triads plus setuid/setgid/sticky)
+            // fails closed at dispatch — never masked to a mode the caller
+            // did not ask for.
+            AbiType::U32,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        required_capability: Some(CapabilityId::FS_ACCESS),
+        // Rewrites an inode's permission bits; audited.
+        audit: true,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in
@@ -2166,6 +2187,7 @@ mod tests {
             SyscallNumber::FS_MKDIR,
             SyscallNumber::FS_UNLINK,
             SyscallNumber::FS_RENAME,
+            SyscallNumber::FS_SET_MODE,
         ] {
             assert_eq!(
                 spec_for(n).unwrap().required_capability,
@@ -2197,6 +2219,7 @@ mod tests {
             SyscallNumber::FS_MKDIR,
             SyscallNumber::FS_UNLINK,
             SyscallNumber::FS_RENAME,
+            SyscallNumber::FS_SET_MODE,
         ] {
             assert!(
                 spec_for(n).unwrap().audit,

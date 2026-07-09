@@ -37,7 +37,7 @@ mod program {
     use alloc::string::String;
     use alloc::vec::Vec;
 
-    use rustos_abi::fs::{DirEntry, FS_IO_MAX};
+    use rustos_abi::fs::{DirEntry, OpenFlags, FS_IO_MAX, FS_MODE_MASK};
     use rustos_abi::{Errno, InputMode, STDOUT};
     use rustos_curses::{
         CursesError, InputMode as CursesInputMode, Result as CursesResult, Screen, Size, Tty,
@@ -152,6 +152,28 @@ mod program {
                 });
             }
             Ok(entries)
+        }
+
+        fn stat_mode(&mut self, path: &str) -> Result<u32, Errno> {
+            // A resolve-only open: no read authority is requested, the
+            // handle is closed on drop, and only the metadata is learned.
+            let file = rustos_rt::File::open(path.as_bytes(), OpenFlags::empty())
+                .map_err(Errno::from_syscall)?;
+            let stat = file.stat().map_err(Errno::from_syscall)?;
+            // Only the permission bits are the editor's subject; the
+            // file-type bits the backing reports above the mask are not.
+            Ok(stat.mode & FS_MODE_MASK)
+        }
+
+        fn set_mode(&mut self, path: &str, mode: u32) -> Result<(), Errno> {
+            // The kernel authorises the change (owner-only, mount-flag,
+            // per-inode checks); the prompt's four-octal-digit bound keeps
+            // `mode` within the permission mask already.
+            let ret = rustos_rt::fs_set_mode(path.as_bytes(), mode);
+            if ret != 0 {
+                return Err(Errno::from_syscall(ret));
+            }
+            Ok(())
         }
 
         fn volume_space(&mut self, path: &str) -> Option<VolumeSpace> {

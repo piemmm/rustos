@@ -212,6 +212,27 @@ pub trait FilesystemService: Send + Sync {
         dst: &str,
     ) -> Result<(), Errno>;
 
+    /// Set the permission bits of the node at the absolute `path` to `mode`
+    /// (the `chmod(2)` shape), leaving ownership, ACL, and capability gate
+    /// untouched.
+    ///
+    /// Only the node's owner may change its mode; holding a capability
+    /// grants no override.
+    ///
+    /// # Errors
+    ///
+    /// The stable [`Errno`] for the VFS refusal (a missing path, a
+    /// non-owner caller, a read-only mount), [`Errno::OutOfRange`] for a
+    /// mode carrying a bit above the permission mask, or
+    /// [`Errno::NotImplemented`] when no filesystem is mounted.
+    fn set_mode(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        path: &str,
+        mode: u32,
+    ) -> Result<(), Errno>;
+
     /// Snapshot the system mount table as wire-ready [`MountRecord`]s, in a
     /// stable order (the permanent root mount first), for the System
     /// Information introspection feed.
@@ -319,6 +340,16 @@ impl FilesystemService for NullFilesystemService {
         _caps: &dyn CapabilityQuery,
         _src: &str,
         _dst: &str,
+    ) -> Result<(), Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn set_mode(
+        &self,
+        _uid: u32,
+        _caps: &dyn CapabilityQuery,
+        _path: &str,
+        _mode: u32,
     ) -> Result<(), Errno> {
         Err(Errno::NotImplemented)
     }

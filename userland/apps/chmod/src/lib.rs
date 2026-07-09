@@ -18,7 +18,10 @@
 //!
 //! * [`FileSystem`] — learn a path's kind and current mode, set its mode, and
 //!   read a directory's entries (for `-R`).
-//! * [`Output`] — write the usage banner to the terminal.
+//! * [`Output`] — write the short help and `-v`/`-c` reports to the terminal.
+//! * `HelpSource` (from `lib/help`) — the tool's own bundle `Help/` tree,
+//!   rendered by the `-h`/`-?`/`--help` switches through the one shared
+//!   engine (never embedded help text).
 //!
 //! The binary that ships as `chmod` wires the real syscall-backed filesystem
 //! and console output; tests wire in-memory fixtures. This is the seam
@@ -49,9 +52,9 @@
 //!
 //! # Layering & safety
 //!
-//! `no_std` (with `alloc`); the only dependency is the
-//! audited `lib/abi` crate, so this userland tool never links a kernel or
-//! driver crate. No `unsafe`, and no
+//! `no_std` (with `alloc`); the only dependencies are the audited `lib/abi`
+//! crate and the shared `lib/help` engine, so this userland tool never links
+//! a kernel or driver crate. No `unsafe`, and no
 //! `unwrap`/`expect`/`panic!` in production paths.
 
 #![no_std]

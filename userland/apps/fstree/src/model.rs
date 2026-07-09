@@ -80,6 +80,23 @@ pub struct TreeRow {
     pub expanded: bool,
 }
 
+/// The modal mode-editor prompt (`a`): the entry being edited and the
+/// octal digits typed so far. While present, keys feed the prompt (octal
+/// digits and Backspace edit, Enter applies through the seam, Esc
+/// cancels); the panes underneath stay drawn.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModePrompt {
+    /// Full path of the entry whose mode is being edited.
+    pub path: String,
+    /// The entry's name, shown in the prompt.
+    pub name: String,
+    /// The entry's current permission bits, shown as the reference value.
+    pub current: u32,
+    /// The octal digits typed so far (starts as the current mode, so Enter
+    /// alone re-applies it).
+    pub input: String,
+}
+
 /// The whole session state the renderer draws and the key handler mutates.
 pub struct Model {
     /// The tree of directories, populated lazily as nodes expand.
@@ -110,6 +127,8 @@ pub struct Model {
     pub space: Option<VolumeSpace>,
     /// The modal surface currently shown, if any.
     pub overlay: Overlay,
+    /// The mode-editor prompt, when open (`a`).
+    pub prompt: Option<ModePrompt>,
     /// The bundle's rendered help text, shown by the `?` overlay.
     pub help_text: String,
     /// Set when the session should end.
@@ -150,6 +169,7 @@ impl Model {
             message: None,
             space: None,
             overlay: Overlay::None,
+            prompt: None,
             help_text,
             quit: false,
         };

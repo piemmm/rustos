@@ -919,6 +919,112 @@ fn secured_write_honours_per_inode_parent_permission() {
     );
 }
 
+#[test]
+fn secured_set_mode_by_owner_rewrites_only_the_mode() {
+    let vfs = backed_vfs_rw(0o755);
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let mut fs = RwMockFs::new();
+    let path = p("/Storage/usb0/a.txt");
+    vfs.create_via_secured(&admin, &path, &mut fs)
+        .expect("create");
+
+    vfs.set_mode_via_secured(&admin, &path, &mut fs, 0o640)
+        .expect("owner chmod");
+
+    // The mode changed; ownership and the (absent) capability gate did not.
+    let info = vfs
+        .stat_via_secured(&admin, &path, &mut fs)
+        .expect("secured stat");
+    assert_eq!(info.meta.mode, Mode::from_bits(0o640));
+    assert_eq!(info.meta.owner, UserId(ADMIN_UID));
+    assert_eq!(info.meta.group, GroupId(ADMIN_GID));
+    assert_eq!(info.meta.required_cap, None);
+}
+
+#[test]
+fn secured_set_mode_by_non_owner_is_denied_even_with_write_access() {
+    let vfs = backed_vfs_rw(0o755);
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let mut fs = RwMockFs::new();
+    let path = p("/Storage/usb0/a.txt");
+    vfs.create_via_secured(&admin, &path, &mut fs)
+        .expect("create");
+    // World-writable: write access must still not grant chmod.
+    vfs.set_mode_via_secured(&admin, &path, &mut fs, 0o777)
+        .expect("owner opens the file up");
+
+    let other = cred(9, 9, &caps);
+    assert_eq!(
+        vfs.set_mode_via_secured(&other, &path, &mut fs, 0o600),
+        Err(VfsError::PermissionDenied)
+    );
+    // The refused change did not land.
+    let info = vfs
+        .stat_via_secured(&admin, &path, &mut fs)
+        .expect("secured stat");
+    assert_eq!(info.meta.mode, Mode::from_bits(0o777));
+}
+
+#[test]
+fn secured_set_mode_honours_the_nodes_capability_gate() {
+    let vfs = backed_vfs_rw(0o755);
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let mut fs = RwMockFs::new();
+    let path = p("/Storage/usb0/a.txt");
+    vfs.create_via_secured(&admin, &path, &mut fs)
+        .expect("create");
+    // Gate the node on CAP_AUDIT_READ through the driver's own surface.
+    let node = fs
+        .lookup(fs.root(), b"a.txt")
+        .expect("created node resolves");
+    let mut sec = fs.security(node).expect("record exists");
+    sec.required_cap = Some(CapabilityId::AUDIT_READ);
+    fs.set_security(node, sec).expect("gate installed");
+
+    // The owner without the capability is refused; with it, allowed.
+    assert_eq!(
+        vfs.set_mode_via_secured(&admin, &path, &mut fs, 0o600),
+        Err(VfsError::PermissionDenied)
+    );
+    let mut holding = CapabilitySet::empty();
+    holding.insert(CapabilityId::AUDIT_READ);
+    let admin_holding = cred(ADMIN_UID, ADMIN_GID, &holding);
+    vfs.set_mode_via_secured(&admin_holding, &path, &mut fs, 0o600)
+        .expect("gated owner chmod");
+    // The gate itself survived the mode change.
+    let after = fs.security(node).expect("record exists");
+    assert_eq!(after.required_cap, Some(CapabilityId::AUDIT_READ));
+    assert_eq!(after.mode, 0o600);
+}
+
+#[test]
+fn secured_set_mode_on_read_only_mount_is_read_only() {
+    // `backed_vfs` mounts with `READ_ONLY`.
+    let vfs = backed_vfs(0o755);
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let mut fs = RwMockFs::new();
+    assert_eq!(
+        vfs.set_mode_via_secured(&admin, &p("/Storage/usb0/a.txt"), &mut fs, 0o640),
+        Err(VfsError::ReadOnly)
+    );
+}
+
+#[test]
+fn secured_set_mode_of_missing_path_is_not_found() {
+    let vfs = backed_vfs_rw(0o755);
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let mut fs = RwMockFs::new();
+    assert_eq!(
+        vfs.set_mode_via_secured(&admin, &p("/Storage/usb0/absent"), &mut fs, 0o640),
+        Err(VfsError::NotFound)
+    );
+}
+
 /// A driver whose directory cursor never advances, exercising the delegated
 /// listing's no-progress guard: a corrupt directory must fail the listing
 /// closed, never spin the kernel forever.

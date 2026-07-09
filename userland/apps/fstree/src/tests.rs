@@ -9,7 +9,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::{format, vec};
 
-use core::cell::Cell as CoreCell;
+use core::cell::{Cell as CoreCell, RefCell};
 
 use rustos_abi::time::Time64;
 use rustos_abi::{Errno, FileKind};
@@ -20,11 +20,15 @@ use crate::fs::{Fs, FsEntry, VolumeSpace};
 use crate::model::{Model, Overlay, Pane, SortKey};
 use crate::render::render;
 
-/// An in-memory filesystem: per-path listings, a denied set, and a count
-/// of listings served (so laziness is observable).
+/// An in-memory filesystem: per-path listings, per-path modes, a denied
+/// set (listings and stats), a set-mode denial set, a log of applied mode
+/// changes, and a count of listings served (so laziness is observable).
 struct FakeFs {
     dirs: BTreeMap<String, Vec<FsEntry>>,
+    modes: BTreeMap<String, u32>,
     denied: Vec<String>,
+    set_denied: Vec<String>,
+    set_modes: RefCell<Vec<(String, u32)>>,
     reads: CoreCell<usize>,
     space: Option<VolumeSpace>,
 }
@@ -33,7 +37,10 @@ impl FakeFs {
     fn new() -> Self {
         Self {
             dirs: BTreeMap::new(),
+            modes: BTreeMap::new(),
             denied: Vec::new(),
+            set_denied: Vec::new(),
+            set_modes: RefCell::new(Vec::new()),
             reads: CoreCell::new(0),
             space: Some(VolumeSpace {
                 free_bytes: 500,
@@ -47,8 +54,18 @@ impl FakeFs {
         self
     }
 
+    fn mode(mut self, path: &str, mode: u32) -> Self {
+        self.modes.insert(path.to_owned(), mode);
+        self
+    }
+
     fn deny(mut self, path: &str) -> Self {
         self.denied.push(path.to_owned());
+        self
+    }
+
+    fn deny_set(mut self, path: &str) -> Self {
+        self.set_denied.push(path.to_owned());
         self
     }
 }
@@ -64,6 +81,25 @@ impl Fs for FakeFs {
 
     fn volume_space(&mut self, _path: &str) -> Option<VolumeSpace> {
         self.space
+    }
+
+    fn stat_mode(&mut self, path: &str) -> Result<u32, Errno> {
+        if self.denied.iter().any(|denied| denied == path) {
+            return Err(Errno::PermissionDenied);
+        }
+        self.modes.get(path).copied().ok_or(Errno::NotFound)
+    }
+
+    fn set_mode(&mut self, path: &str, mode: u32) -> Result<(), Errno> {
+        if self.set_denied.iter().any(|denied| denied == path) {
+            return Err(Errno::PermissionDenied);
+        }
+        if !self.modes.contains_key(path) {
+            return Err(Errno::NotFound);
+        }
+        self.modes.insert(path.to_owned(), mode);
+        self.set_modes.borrow_mut().push((path.to_owned(), mode));
+        Ok(())
     }
 }
 
@@ -104,6 +140,11 @@ fn fixture() -> FakeFs {
         .dir("/docs", vec![file("guide.md", 5, 4_000)])
         .dir("/.hidden", vec![file("secret", 1, 0)])
         .deny("/locked")
+        .mode("/", 0o755)
+        .mode("/docs", 0o755)
+        .mode("/a.rs", 0o644)
+        .mode("/b.txt", 0o600)
+        .deny_set("/b.txt")
 }
 
 fn model(fs: &mut FakeFs) -> Model {
@@ -268,6 +309,122 @@ fn entering_a_directory_from_the_file_pane_descends_both_panes() {
     assert_eq!(m.files_dir, "/docs");
     let rows = m.tree_rows();
     assert_eq!(rows[m.tree_cursor].path, "/docs");
+}
+
+// --- The mode editor (`a`) ------------------------------------------------
+
+#[test]
+fn the_mode_prompt_opens_prefilled_edits_and_applies() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    // Sorted visible files: docs, locked, a.rs, b.txt, big — a.rs is index 2.
+    m.file_cursor = 2;
+    handle_event(&mut m, &mut fs, &Event::Char('a'));
+    let prompt = m.prompt.clone().expect("prompt opened");
+    assert_eq!(prompt.path, "/a.rs");
+    assert_eq!(prompt.current, 0o644);
+    assert_eq!(prompt.input, "644");
+    // Rub the prefill out and type a new mode; a non-octal digit and a
+    // fifth digit are refused at the prompt (the kernel could never
+    // accept them).
+    for _ in 0..3 {
+        handle_event(&mut m, &mut fs, &Event::Backspace);
+    }
+    for key in ['9', '6', '0', '0', '7', '7'] {
+        handle_event(&mut m, &mut fs, &Event::Char(key));
+    }
+    assert_eq!(m.prompt.clone().expect("still open").input, "6007");
+    handle_event(&mut m, &mut fs, &Event::Backspace);
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    assert_eq!(m.prompt, None);
+    assert_eq!(
+        fs.set_modes.borrow().as_slice(),
+        &[(String::from("/a.rs"), 0o600)]
+    );
+    let message = m.message.clone().expect("success reported");
+    assert!(message.contains("600"), "{message}");
+}
+
+#[test]
+fn esc_cancels_the_mode_prompt_without_writing() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    m.file_cursor = 2; // a.rs
+    handle_event(&mut m, &mut fs, &Event::Char('a'));
+    handle_event(&mut m, &mut fs, &Event::Char('0'));
+    handle_event(&mut m, &mut fs, &Event::Esc);
+    assert_eq!(m.prompt, None);
+    assert!(fs.set_modes.borrow().is_empty());
+}
+
+#[test]
+fn a_refused_stat_opens_no_prompt() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    // Tree pane, cursor onto the denied directory row.
+    m.tree_cursor = 2; // "locked"
+    handle_event(&mut m, &mut fs, &Event::Char('a'));
+    assert_eq!(m.prompt, None);
+    let message = m.message.clone().expect("denial surfaced");
+    assert!(message.contains("locked"), "{message}");
+}
+
+#[test]
+fn a_kernel_refusal_of_the_change_is_surfaced_and_nothing_applies() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    m.file_cursor = 3; // b.txt — statable, but the change is denied
+    handle_event(&mut m, &mut fs, &Event::Char('a'));
+    assert!(m.prompt.is_some());
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    assert_eq!(m.prompt, None);
+    assert!(fs.set_modes.borrow().is_empty());
+    let message = m.message.clone().expect("denial surfaced");
+    assert!(message.contains("PermissionDenied"), "{message}");
+}
+
+#[test]
+fn an_emptied_prompt_applies_nothing() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    m.file_cursor = 2; // a.rs
+    handle_event(&mut m, &mut fs, &Event::Char('a'));
+    for _ in 0..4 {
+        handle_event(&mut m, &mut fs, &Event::Backspace);
+    }
+    handle_event(&mut m, &mut fs, &Event::Enter);
+    assert_eq!(m.prompt, None);
+    assert!(fs.set_modes.borrow().is_empty());
+    assert!(m.message.is_some(), "the empty apply is reported");
+}
+
+#[test]
+fn the_tree_pane_edits_the_selected_directory() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    // Tree pane (the default), cursor onto "docs".
+    handle_event(&mut m, &mut fs, &Event::Down);
+    handle_event(&mut m, &mut fs, &Event::Char('a'));
+    let prompt = m.prompt.clone().expect("prompt opened");
+    assert_eq!(prompt.path, "/docs");
+    assert_eq!(prompt.current, 0o755);
+}
+
+#[test]
+fn the_mode_prompt_appears_on_the_message_line() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    m.file_cursor = 2; // a.rs
+    handle_event(&mut m, &mut fs, &Event::Char('a'));
+    let mut window = Window::new(Pos::new(0, 0), Size::new(6, 70));
+    render(&m, &mut window);
+    let line = row_text(&window, 5);
+    assert!(line.starts_with("mode a.rs [644]: 644_"), "{line}");
 }
 
 // --- Renderer: golden grids ---------------------------------------------

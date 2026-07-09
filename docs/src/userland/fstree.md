@@ -9,7 +9,7 @@ tree, discovered from disk like every other bundle. The staged plan for the
 whole tool lives in `.junie/fstree-next-plan.md`; this page describes what
 is built.
 
-## What is built (stage S1 — the model core)
+## What is built (stage S1 — the model core — plus the mode editor)
 
 - **The tree pane.** A lazily populated directory tree: a directory is read
   through one `fs_readdir` call when it is first shown or expanded — never
@@ -31,6 +31,14 @@ is built.
   API's `MOUNT_LIST` query through the shared `rustos_procinfo` mount walk,
   best-effort — an unreachable service simply omits the figure), and either
   an error, the sort prompt, or the key hints.
+- **The mode editor.** `a` edits the focused selection's permission bits
+  (the file pane's entry, or the tree pane's directory): a modal octal
+  prompt on the message line, pre-filled with the entry's current bits
+  (a resolve-only stat through the seam). Octal digits and Backspace
+  edit — a non-octal key and a fifth digit are refused at the prompt,
+  matching the kernel's `FS_MODE_MASK` ceiling — Enter applies through
+  `fs_set_mode` (the kernel's owner-only rule decides; a refusal is
+  surfaced verbatim and nothing changes), and Esc cancels.
 - **Help.** `-h`/`-?` print the bundle's own Help document through the
   shared `lib/help` engine; the in-session `?` overlay shows the same
   document decoded to plain text through the one `lib/vt` parser. Nothing
@@ -42,11 +50,12 @@ The charter's seam pattern (as `vim` and `top`): an I/O-free state machine
 (`src/model.rs`) the pure renderer (`src/render.rs`) draws and the key
 grammar (`src/app.rs`) mutates, over two injected seams —
 
-- `Fs` (`src/fs.rs`) — `list_dir` and `volume_space`; the `Run` binary
-  implements it over the kernel-authorised `fs_*` syscalls and the sysinfo
-  mount walk, the tests over an in-memory tree. The trait carries exactly
-  the operations this stage performs; each later stage extends it in place
-  with the operations it introduces, together with their callers.
+- `Fs` (`src/fs.rs`) — `list_dir`, `volume_space`, and the mode editor's
+  `stat_mode`/`set_mode`; the `Run` binary implements it over the
+  kernel-authorised `fs_*` syscalls and the sysinfo mount walk, the tests
+  over an in-memory tree. The trait carries exactly the operations the
+  landed stages perform; each later stage extends it in place with the
+  operations it introduces, together with their callers.
 - `Tty` (from `rustos-curses`) — the terminal byte channel over the
   inherited fd 0/1; the program names only its standard descriptors, never
   a console device.
@@ -73,5 +82,8 @@ Host tests drive the whole session without a kernel or terminal: model
 unit tests (lazy expansion counted through the seam, every sort key and
 direction, hidden-toggle cursor clamping, fail-closed denial), golden-grid
 renders (pane layout, the absent-stamp `-`, real stamp formatting, the
-help overlay, the sort prompt), and a scripted end-to-end session
+help overlay, the sort prompt, the mode prompt), the mode-editor flows
+(pre-filled prompt, digit/Backspace editing with non-octal and
+fifth-digit refusal, apply, Esc cancel, refused stat, kernel-refused
+change, emptied prompt), and a scripted end-to-end session
 (browse → expand → pane switch → sort → hidden toggle → help → quit).

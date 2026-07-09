@@ -220,7 +220,7 @@ impl Clause {
 /// * `-v` / `--verbose` — report every file processed.
 /// * `-f` / `--silent` / `--quiet` — suppress per-operand error
 ///   diagnostics and keep going (the run still fails).
-/// * `-h` / `--help` — print the usage banner (wins immediately).
+/// * `-h` / `-?` / `--help` — print the short help (wins immediately).
 /// * `--` — end option parsing; every later argument is an operand.
 /// * any other `-…` — a [`ChmodError::Usage`] error (fail closed; never a
 ///   silently ignored token).
@@ -264,7 +264,7 @@ pub fn parse(args: &[&str]) -> Result<Command, ChmodError> {
                         'c' => options.verbosity = Verbosity::Changes,
                         'v' => options.verbosity = Verbosity::All,
                         'f' => options.quiet = true,
-                        'h' => return Ok(Command::Help),
+                        'h' | '?' => return Ok(Command::Help),
                         _ => return Err(ChmodError::Usage),
                     }
                 }
@@ -463,6 +463,7 @@ mod tests {
     #[test]
     fn help_flags_win() {
         assert_eq!(parse(&["-h"]), Ok(Command::Help));
+        assert_eq!(parse(&["-?"]), Ok(Command::Help));
         assert_eq!(parse(&["--help"]), Ok(Command::Help));
         assert_eq!(parse(&["-Rh", "644", "f"]), Ok(Command::Help));
     }

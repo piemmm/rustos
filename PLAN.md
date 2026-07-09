@@ -3934,8 +3934,11 @@ precisely instead of collapsing onto `OutOfRange`) and a validated
 under its own lock — `rmdir` carries no stat/remove race, and `rm`'s
 own directory removals now pass it too. Both tools' `-p` walks share
 the one ancestor-spelling rule (`rustos_path::Path::prefix`); `mkdir`'s
-GNU `-m` is deliberately staged behind the same mode-set syscall
-`chmod` waits on, never stubbed. The C header carries the new errnos
+GNU `-m` remains staged — its kernel prerequisite (`fs_set_mode`,
+syscall 74, landed with the registered `chmod` bundle and `fstree`'s
+mode editor; owner-only, `CAP_FS_ACCESS`-gated, audited) now exists,
+and the flag lands with its own tests in its own change, never
+stubbed. The C header carries the new errnos
 plus `ROS_UNLINK_FLAG_DIRECTORY` and the previously-unpublished
 `ROS_OPEN_FLAG_*` bits (regenerated, drift-guarded).
 

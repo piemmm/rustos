@@ -33,6 +33,10 @@ Bysellau:
 - `s` — agor y ddewislen didoli: `n` enw, `e` estyniad, `s` maint,
   `m` amser addasu, `r` gwrthdroi'r cyfeiriad, `Esc` yn canslo. Caiff
   cyfeiriaduron eu grwpio bob amser cyn ffeiliau.
+- `a` — golygu didau caniatâd y cofnod a ddewiswyd: llinell wythol
+  wedi'i rhag-lenwi â'r modd presennol. Mae Enter yn cymhwyso (dim ond y
+  perchennog all ei newid — mae'r cnewyllyn yn gwrthod pawb arall), mae
+  Esc yn canslo.
 - `.` — dangos/cuddio cofnodion cudd (enwau â dot) yn y ddau banel.
 - `?` — dangos y cymorth hwn dros y paneli; mae unrhyw fysell yn ei gau.
 - `q` — gadael, gan adfer y derfynell.

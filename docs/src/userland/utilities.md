@@ -716,9 +716,10 @@ suffix, and alias-root cases), and the locale switch-drift pins.
 (`plans/APPS.md` §12.1 Stage C store bundles). `mkdir` creates each
 operand through `fs_mkdir` (`-p`/`--parents` creates missing ancestors
 and tolerates an operand that is already a directory; `-v`/`--verbose`
-reports `mkdir: created directory 'dir'`); GNU's `-m`/`--mode` is
-deliberately staged behind the mode-set kernel work `chmod` waits on,
-never stubbed. `rmdir` removes each (empty) directory operand through
+reports `mkdir: created directory 'dir'`); GNU's `-m`/`--mode` remains
+staged — its kernel prerequisite (`fs_set_mode`, syscall 74) now exists,
+and the flag lands with its own tests in its own change, never stubbed.
+`rmdir` removes each (empty) directory operand through
 the **directory-only** `fs_unlink` (`UnlinkFlags::DIRECTORY`): the
 filesystem decides the node's kind atomically in the same locked walk
 that removes it, so the tool carries no stat/remove race — a file is
@@ -1384,8 +1385,14 @@ permission model.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
-only dependency is the audited `rustos-abi` crate, so it never links a
-kernel or driver crate (`AGENTS.md` §17.4).
+only dependencies are the audited `rustos-abi` crate and the shared
+`lib/help` engine, so it never links a kernel or driver crate
+(`AGENTS.md` §17.4). The `Run` binary (`src/run.rs`, the store bundle's
+entry point) wires the production seams: a resolve-only `fs_open` +
+`fs_stat` learns each operand's kind and current bits, `fs_set_mode`
+(syscall 74) applies the change — the kernel enforces the owner-only
+rule, the mount flags, and every per-inode check — and the one shared
+grow-on-`BufferTooSmall` `fs_readdir` walk feeds `-R`.
 
 ### Grammar
 
@@ -1396,14 +1403,14 @@ chmod [-cfRv] [--] MODE file...
   -c, --changes         report only files whose mode actually changed
   -v, --verbose         report every file processed
   -f, --silent, --quiet suppress most error messages
-  -h, --help            show the usage banner
+  -h, -?, --help        show this command's own short help
 ```
 
 A mode and at least one file are required. `--` ends option parsing:
 every later argument is an operand. POSIX `chmod` spells recursive `-R`;
 a bare `-r` is not an option. To set a mode that begins with `-`, write
 it without the dash (`a-w`) or end option parsing first
-(`chmod -- -w file`). `-h`/`--help` wins immediately. The later of `-c`
+(`chmod -- -w file`). `-h`/`-?`/`--help` wins immediately. The later of `-c`
 / `-v` wins; the reports use the GNU wording (`mode of 'f' changed from
 0644 (rw-r--r--) to 0664 (rw-rw-r--)`, `mode of 'f' retained as …`).
 `-f` suppresses each failing operand's diagnostic and keeps going, then
@@ -1436,8 +1443,11 @@ other userland crates (`cat`'s `FileSource`, `ls`'s `Listing`, `rm`'s
 
 - `FileSystem` — learn a path's kind and current mode, set its mode, and
   read a directory's entries (for `-R`).
-- `Output` — write the usage banner to the terminal (`chmod` is silent on
-  success).
+- `Output` — write the short help and the `-v`/`-c` reports to the
+  terminal (`chmod` is otherwise silent on success).
+- `HelpSource` (from `lib/help`) — the bundle's own `Help/` tree, rendered
+  by the `-h`/`-?`/`--help` switches through the one shared engine; the
+  usage banner is only the fallback when no document can be served.
 
 On a running system these are syscall- and console-backed; in tests they
 are in-memory fixtures, so every parsing, mode-algebra, and recursion
@@ -1467,8 +1477,9 @@ omitted-who, conditional `X`, setuid/setgid/sticky, left-to-right clause
 application, empty-perm no-ops), an octal change, a symbolic change,
 several files, a non-recursive directory change leaving its contents
 alone, a recursive change touching the directory before its contents,
-per-node `X` resolution under recursion, and the missing-operand / stat /
-apply / read-during-recursion fail-closed paths.
+per-node `X` resolution under recursion, the missing-operand / stat /
+apply / read-during-recursion fail-closed paths, and the short-help
+switches (the rendered own-document path and the usage-banner fallback).
 
 ## `chown` — change file owner and group (`userland/apps/chown`)
 

@@ -46,7 +46,9 @@ use rustos_abi::driver::filesystem::{
 };
 use rustos_abi::driver::DriverHandle;
 use rustos_abi::sysinfo::MountRecord;
-use rustos_abi::{CapabilityQuery, Errno, FileKind, FileStat, OpenFlags, UnlinkFlags};
+use rustos_abi::{
+    CapabilityQuery, Errno, FileKind, FileStat, OpenFlags, UnlinkFlags, FS_MODE_MASK,
+};
 use rustos_caps::CapabilitySet;
 use rustos_kernel_sec::{GroupId, IdentityTable, UserId};
 use rustos_sync::{OnceCell, RwLock, SpinLock};
@@ -709,6 +711,25 @@ where
         let mut fs = driver.lock();
         vfs.rename_via_secured(&cred, &src, &dst, &mut *fs)
             .map_err(VfsError::to_errno)
+    }
+
+    fn set_mode(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        path: &str,
+        mode: u32,
+    ) -> Result<(), Errno> {
+        // Defence in depth behind the dispatcher's own mask check: a mode
+        // word carrying a bit above the permission mask is refused here too,
+        // so no in-kernel caller can write a corrupt record through this
+        // seam.
+        if mode & !FS_MODE_MASK != 0 {
+            return Err(Errno::OutOfRange);
+        }
+        self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
+            vfs.set_mode_via_secured(cred, path, fs, mode)
+        })
     }
 
     fn mount_snapshot(&self) -> Vec<MountRecord> {

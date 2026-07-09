@@ -60,7 +60,7 @@ use rustos_abi::{
     CAPABILITY_ID_MAX, COARSE_CLOCK_GRANULARITY_NS, CONSOLE_INHERIT, DRIVER_MANIFEST_MAGIC,
     DRIVER_MANIFEST_MAX_BIND_KEYS, DRIVER_MANIFEST_MAX_CAPABILITIES, DRIVER_REGISTER_REPLY_MAGIC,
     DRIVER_REGISTER_STATUS_OK, DRIVER_SIGNATURE_LEN, DRIVER_SIGNER_PUBKEY_LEN,
-    ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX, HWTREE_VERSION_V1, HW_COMPATIBLE_MAX,
+    ENCODED_QUERY_TABLE_LEN, FS_MODE_MASK, HOSTNAME_MAX, HWTREE_VERSION_V1, HW_COMPATIBLE_MAX,
     HW_NODE_MAX_MATCH_KEYS, HW_NODE_MAX_RESOURCES, HW_NODE_ROOT, IPC_MESSAGE_HEADER_MAGIC,
     KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC, KIND_KEY_PRESSED, KIND_KEY_RELEASED,
     KIND_MOVED, KIND_PRESSED, KIND_RELEASED, LIBREF_MAX, LOAD_FLAG_PIE, LOAD_MAGIC,
@@ -2136,7 +2136,47 @@ fn generate_syscall() -> String {
 
     emit_wait_contract(&mut out);
     emit_spawn_attach_contract(&mut out);
+    emit_fs_contract(&mut out);
 
+    out.push_str(
+        "/* signal() control signals (the `signal` argument, uint32_t). 0 is reserved and\n\
+         * never valid; a value outside this set is rejected with ROS_E_OUT_OF_RANGE. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_SIGNAL_CONTINUE {}u",
+        Signal::Continue.as_u32()
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_SIGNAL_TERMINATE {}u",
+        Signal::Terminate.as_u32()
+    );
+    let _ = writeln!(out, "#define ROS_SIGNAL_KILL {}u", Signal::Kill.as_u32());
+    let _ = writeln!(
+        out,
+        "#define ROS_SIGNAL_INTERRUPT {}u",
+        Signal::Interrupt.as_u32()
+    );
+    let _ = writeln!(out, "#define ROS_SIGNAL_STOP {}u", Signal::Stop.as_u32());
+    out.push('\n');
+
+    out.push_str("/* Syscall entry points, implemented by the user-space stub library. */\n");
+    for spec in SYSCALLS {
+        let _ = writeln!(out, "{}", prototype(spec));
+    }
+    out.push('\n');
+
+    out.push_str("#ifdef __cplusplus\n} /* extern \"C\" */\n#endif\n\n");
+    out.push_str("#endif /* ROS_SYSCALL_H */\n");
+    out
+}
+
+/// Emit the filesystem-call contract items into `rustos_syscall.h`: the
+/// `fs_open()` and `fs_unlink()` flag bits and the `fs_set_mode()`
+/// permission mask, every value read from `lib/abi` and never re-typed.
+fn emit_fs_contract(out: &mut String) {
+    use std::fmt::Write as _;
     out.push_str(
         "/* fs_open() flag bits (uint32_t). Every undefined bit is reserved and rejected\n\
          * with ROS_E_OUT_OF_RANGE, as is a combination the contract forbids (TRUNCATE/\n\
@@ -2195,37 +2235,13 @@ fn generate_syscall() -> String {
     out.push('\n');
 
     out.push_str(
-        "/* signal() control signals (the `signal` argument, uint32_t). 0 is reserved and\n\
-         * never valid; a value outside this set is rejected with ROS_E_OUT_OF_RANGE. */\n",
+        "/* fs_set_mode() permission-bit mask (the `mode` argument, uint32_t): the\n\
+         * owner/group/other rwx triads plus the setuid/setgid/sticky bits. A mode\n\
+         * carrying any higher bit (a file-type bit, say) is rejected with\n\
+         * ROS_E_OUT_OF_RANGE, never silently masked. */\n",
     );
-    let _ = writeln!(
-        out,
-        "#define ROS_SIGNAL_CONTINUE {}u",
-        Signal::Continue.as_u32()
-    );
-    let _ = writeln!(
-        out,
-        "#define ROS_SIGNAL_TERMINATE {}u",
-        Signal::Terminate.as_u32()
-    );
-    let _ = writeln!(out, "#define ROS_SIGNAL_KILL {}u", Signal::Kill.as_u32());
-    let _ = writeln!(
-        out,
-        "#define ROS_SIGNAL_INTERRUPT {}u",
-        Signal::Interrupt.as_u32()
-    );
-    let _ = writeln!(out, "#define ROS_SIGNAL_STOP {}u", Signal::Stop.as_u32());
+    let _ = writeln!(out, "#define ROS_FS_MODE_MASK {FS_MODE_MASK:#x}u");
     out.push('\n');
-
-    out.push_str("/* Syscall entry points, implemented by the user-space stub library. */\n");
-    for spec in SYSCALLS {
-        let _ = writeln!(out, "{}", prototype(spec));
-    }
-    out.push('\n');
-
-    out.push_str("#ifdef __cplusplus\n} /* extern \"C\" */\n#endif\n\n");
-    out.push_str("#endif /* ROS_SYSCALL_H */\n");
-    out
 }
 
 /// Emit the `wait()` contract items into `rustos_syscall.h`: the flag bits
@@ -2640,6 +2656,16 @@ mod tests {
         assert!(
             h.contains("int32_t ros_sys_fs_unlink(void * a0, uintptr_t a1, uint32_t a2);"),
             "fs_unlink prototype carries the flags argument: {h}"
+        );
+        // The fs_set_mode() permission mask is read from lib/abi, never
+        // re-typed, and the prototype carries its uint32_t mode argument.
+        assert!(
+            h.contains(&format!("#define ROS_FS_MODE_MASK {FS_MODE_MASK:#x}u")),
+            "fs_set_mode permission mask: {h}"
+        );
+        assert!(
+            h.contains("int32_t ros_sys_fs_set_mode(void * a0, uintptr_t a1, uint32_t a2);"),
+            "fs_set_mode prototype carries the mode argument: {h}"
         );
         // The signal() control-signal discriminants are read from lib/abi,
         // never re-typed, and the prototype carries its (pid, signal) args.

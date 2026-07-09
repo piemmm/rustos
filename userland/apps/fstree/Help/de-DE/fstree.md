@@ -34,6 +34,10 @@ Tasten:
 - `s` — das Sortiermenü öffnen: `n` Name, `e` Erweiterung, `s` Größe,
   `m` Änderungszeit, `r` Richtung umkehren, `Esc` bricht ab.
   Verzeichnisse stehen stets vor den Dateien.
+- `a` — die Berechtigungsbits des gewählten Eintrags bearbeiten: eine
+  oktale Eingabezeile, vorbelegt mit dem aktuellen Modus. Enter wendet an
+  (nur der Eigentümer darf ändern — der Kernel weist alle anderen ab),
+  Esc bricht ab.
 - `.` — versteckte Einträge (Punktnamen) in beiden Bereichen ein- und
   ausblenden.
 - `?` — diese Hilfe über den Bereichen anzeigen; jede Taste schließt sie.
