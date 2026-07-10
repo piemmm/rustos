@@ -13,6 +13,15 @@
 //! the caller, and a malformed pointer never causes the kernel to touch
 //! memory the user does not own.
 //!
+//! The byte move itself runs under the architecture port's **fault
+//! window** ([`rustos_arch_api::uaccess::copy_user_span`]): should the
+//! software proof above ever be violated — a kernel defect, a corrupted
+//! table, a stale direct-map window — the resulting hardware data fault
+//! resumes at the window's fix-up and the copy stops with
+//! [`UaccessError::Faulted`] instead of halting the machine. On targets
+//! with no synchronous-fault source (`wasm32`, the host test build) the
+//! seam is a plain copy and the variant is unreachable.
+//!
 //! # Why a page walk
 //!
 //! User memory is contiguous in the *virtual* address space but its
@@ -83,6 +92,12 @@ pub enum UaccessError {
     /// The backing frame is outside the kernel's direct physical map, so
     /// the kernel cannot reach its bytes.
     PhysUnmapped,
+    /// A hardware data fault interrupted the byte move and was absorbed
+    /// by the architecture port's fault window. The validated software
+    /// walk should make this unreachable; observing it means the walk's
+    /// proof was violated underneath the copy (a kernel defect), and the
+    /// copy fails closed instead of halting the machine.
+    Faulted,
 }
 
 /// Copy `dst.len()` bytes *from* the user buffer at `uaddr` in `space`
@@ -118,11 +133,13 @@ pub fn copy_in(
             // is within `dst` because the per-span lengths sum to
             // `dst.len()` and each `buf_off` is the running prefix. The
             // kernel `dst` allocation and the user frame are distinct
-            // regions, but `copy` (memmove semantics) is sound even if
-            // they were not.
+            // regions, so the non-overlap contract holds. A residual
+            // hardware fault is absorbed by the port's fault window and
+            // surfaces as the error mapped below.
             unsafe {
                 let into = dst_base.add(buf_off);
-                core::ptr::copy(user_ptr.cast_const(), into, span);
+                rustos_arch_api::uaccess::copy_user_span(into, user_ptr.cast_const(), span)
+                    .map_err(|_| UaccessError::Faulted)
             }
         },
     )
@@ -157,11 +174,14 @@ pub fn copy_out(
             // writable bytes (the page is mapped USER|WRITE and the
             // `PhysMap` covers `[phys, phys + span)`). `buf_off + span`
             // is within `src` because the per-span lengths sum to
-            // `src.len()`. `copy` tolerates overlap; the regions are in
-            // practice distinct frames.
+            // `src.len()`. The kernel `src` allocation and the user frame
+            // are distinct regions, so the non-overlap contract holds. A
+            // residual hardware fault is absorbed by the port's fault
+            // window and surfaces as the error mapped below.
             unsafe {
                 let from = src_base.add(buf_off);
-                core::ptr::copy(from, user_ptr, span);
+                rustos_arch_api::uaccess::copy_user_span(user_ptr, from, span)
+                    .map_err(|_| UaccessError::Faulted)
             }
         },
     )
@@ -174,8 +194,10 @@ pub fn copy_out(
 /// `required` is the data permission the direction needs on top of
 /// [`MapFlags::USER`]; `missing_perm` is the error returned when a page
 /// is user-accessible but lacks it. The closure performs the actual
-/// byte move; `walk` owns every bounds and permission check so the two
-/// public entry points share exactly one validated traversal.
+/// byte move and reports a fault the hardware window absorbed; `walk`
+/// owns every bounds and permission check so the two public entry
+/// points share exactly one validated traversal, and it stops at the
+/// first span whose move fails.
 fn walk<F>(
     space: &dyn UserAddressSpace,
     physmap: &dyn PhysMap,
@@ -186,7 +208,7 @@ fn walk<F>(
     mut per_span: F,
 ) -> Result<(), UaccessError>
 where
-    F: FnMut(*mut u8, usize, usize),
+    F: FnMut(*mut u8, usize, usize) -> Result<(), UaccessError>,
 {
     if len == 0 {
         return Ok(());
@@ -235,7 +257,7 @@ where
             .translate(PhysAddr::new(phys), span)
             .ok_or(UaccessError::PhysUnmapped)?;
 
-        per_span(ptr.as_ptr(), buf_off, span);
+        per_span(ptr.as_ptr(), buf_off, span)?;
 
         buf_off += span;
         addr += span_u64;
@@ -529,6 +551,45 @@ mod tests {
         let mut dst = [0u8; 5];
         copy_in(erased, &sim, VirtAddr::new(0xA000), &mut dst).expect("copy_in via dyn");
         assert_eq!(dst, src);
+    }
+
+    #[test]
+    fn per_span_fault_stops_the_walk_at_the_first_failing_span() {
+        // Drive the shared traversal directly with a closure that fails
+        // on the second span, the shape a hardware fault absorbed by the
+        // port's fault window takes. The walk must surface the error and
+        // never visit the third span (no byte past the failure is
+        // touched).
+        let sim = sim();
+        let f0 = Frame(SIM_BASE_FRAME);
+        let f1 = Frame(SIM_BASE_FRAME + 1);
+        let f2 = Frame(SIM_BASE_FRAME + 2);
+        let flags = MapFlags::READ | MapFlags::USER;
+        let space = space_with(&[
+            (0x4000, f0, flags),
+            (0x5000, f1, flags),
+            (0x6000, f2, flags),
+        ]);
+
+        let mut spans_seen = 0usize;
+        let result = walk(
+            &space,
+            &sim,
+            VirtAddr::new(0x4000),
+            3 * PAGE_SIZE,
+            MapFlags::READ,
+            UaccessError::NotReadable,
+            |_ptr, _buf_off, _span| {
+                spans_seen += 1;
+                if spans_seen == 2 {
+                    Err(UaccessError::Faulted)
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert_eq!(result, Err(UaccessError::Faulted));
+        assert_eq!(spans_seen, 2, "the walk must stop at the failing span");
     }
 
     #[test]

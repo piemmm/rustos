@@ -444,6 +444,13 @@ fn try_boot(
         percpu::install_vector(0, fault::PAGE_FAULT_VECTOR, fault::page_fault_isr_addr())
             .map_err(|_| BootError::PageFaultIsrInstall)?;
     }
+    // Arm the fault-windowed user copy beside the dedicated `#PF` entry:
+    // the entry's kernel-fault window check redirects an in-window fault
+    // to the copy's fix-up, so the two are one mechanism and install
+    // together (the riscv64/aarch64 ports pair them inside their
+    // trap-vector installers). A conflicting occupant is a boot-order
+    // defect and refuses the boot (fail closed).
+    rustos_arch_x86_64::uaccess::install().map_err(|_| BootError::PageFaultIsrInstall)?;
 
     // 1c. Enable `IA32_EFER.NXE` so the W^X No-Execute leaf bit the
     //     process-image builder sets on a ring-3 program's data/rodata

@@ -72,6 +72,16 @@ pub const fn is_lower_el_data_abort(esr: u64) -> bool {
     exception_class(esr) == EC_DATA_ABORT_LOWER
 }
 
+/// `true` iff `esr` denotes a data abort taken from the **current** EL
+/// — EL1 kernel code touching an address the active translation regime
+/// refuses. The only recoverable shape is a fault inside the guarded
+/// user-copy window (`crate::uaccess`), which the trap handler redirects
+/// to the copy's fix-up; every other same-EL abort stays fatal.
+#[must_use]
+pub const fn is_current_el_data_abort(esr: u64) -> bool {
+    exception_class(esr) == EC_DATA_ABORT_SAME
+}
+
 /// `true` iff a data abort's `esr` reports a **write** access (`WnR`
 /// set). Only meaningful when [`is_lower_el_data_abort`] (or another
 /// data-abort class check) already holds.
@@ -281,6 +291,17 @@ mod tests {
             EC_INSTRUCTION_ABORT_LOWER << ESR_EC_SHIFT
         ));
         assert!(!is_lower_el_data_abort(0b01_0101 << ESR_EC_SHIFT));
+    }
+
+    #[test]
+    fn current_el_data_aborts_are_distinguished() {
+        let same = EC_DATA_ABORT_SAME << ESR_EC_SHIFT;
+        let lower = EC_DATA_ABORT_LOWER << ESR_EC_SHIFT;
+        let instr_same = EC_INSTRUCTION_ABORT_SAME << ESR_EC_SHIFT;
+        assert!(is_current_el_data_abort(same));
+        assert!(!is_current_el_data_abort(lower));
+        assert!(!is_current_el_data_abort(instr_same));
+        assert!(!is_current_el_data_abort(0));
     }
 
     extern "C" fn host_fault_handler(_esr: u64, _far: u64, _elr: u64) -> ! {

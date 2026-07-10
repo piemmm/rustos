@@ -216,9 +216,15 @@ log. Folds into `cargo xtask proptest --quick`/`--soak` (§19.7).
   `kernel/mem/src/uaccess.rs` (`copy_in`/`copy_out`) walks the caller's address
   space one page at a time, rejecting any page missing `USER` or the required
   read/write permission fail-closed (host-tested via `HostPageTable` /
-  `SimPhysMap`). The remaining per-access **hardware** fault trap — taking a
-  real `#PF` mid-copy on a concurrently-unmapped page — is Stage-6 (it needs
-  the live x86_64 fault path).
+  `SimPhysMap`). *Hardware fault fix-up landed:* the per-access byte move runs
+  inside each MMU port's exported fault window (`rustos_arch_api::uaccess` +
+  the per-port `uaccess` modules); a kernel-mode data fault whose saved PC
+  lies in the window is redirected by the port's trap handler to the window's
+  fix-up and surfaces as `UaccessError::Faulted` (collapsed onto the same
+  `BadAddress` oracle-free errno), never a halt. Proven live by the
+  `tests/integration/uaccess_fault_qemu_{riscv64,aarch64,x86_64}` verticals,
+  which take real in-window read- and write-side faults through the shared
+  `uaccess::conformance` checks.
 - **Side-channel transition barriers (§19.1; Spectre/MDS/L1TF).** Conformance
   assertions the charter already mandates: syscall-entry barrier present
   (`lfence`), context-switch buffer flush present (`verw`), and
@@ -235,10 +241,10 @@ log. Folds into `cargo xtask proptest --quick`/`--soak` (§19.7).
   zero-on-free info-leak, DMA descriptor fuzzing, slab metadata fault-injection,
   audit-log chain-tamper. All map to named CVE classes against already-landed
   code.
-- **Highest yield but Stage-6-gated:** SMEP/SMAP/WP enforcement, the
-  `copy_from_user` hardware fault trap (the arch-neutral page-walk validator
-  has already landed; §5), KPTI. Write the conformance/spec tests now as the
-  gate; implement in Stage 6.
+- **Highest yield but Stage-6-gated:** SMEP/SMAP/WP enforcement and KPTI.
+  Write the conformance/spec tests now as the gate; implement in Stage 6.
+  (The `copy_from_user` hardware fault trap has landed — §5 — with per-port
+  QEMU verticals.)
 - **Regression-guard, not bug-finding:** the side-channel barrier /
   `is_release_ready` honesty tests.
 - **What these tests cannot prove:** they validate the *detector*, not that

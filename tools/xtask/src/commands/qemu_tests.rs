@@ -1318,6 +1318,63 @@ const TESTS: &[QemuTest] = &[
         pointer_move: None,
         serial: &[],
     },
+    // `tests/SECURITY.md` §5 / `PLAN.md` Stage 7 item E — the per-port
+    // `copy_from_user` hardware fault fix-up verticals. Each takes a
+    // *real* kernel-mode data fault inside the port's guarded user-copy
+    // window (read side and write side) and PASSes only when the fault
+    // surfaces as an error return from the copy — the trap handler
+    // redirected the saved PC to the window's fix-up — with the CPU
+    // continuing to run; the fatal fault handler reports FAILURE. The
+    // riscv64/aarch64 members stand up a minimal identity-mapped kernel
+    // around their trap-vector installers (which arm the Arch HAL
+    // guarded-copy slot); all three drive the one shared
+    // `rustos_arch_api::uaccess::conformance` checks. Single CPU and a
+    // 60-second budget match the other boot-then-do-fixed-work tests.
+    QemuTest {
+        package: "rustos-test-uaccess-fault-qemu-riscv64",
+        binary: "rustos-test-uaccess-fault-qemu-riscv64",
+        target: "riscv64gc-unknown-none-elf",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+        pointer_move: None,
+        serial: &[],
+    },
+    QemuTest {
+        package: "rustos-test-uaccess-fault-qemu-aarch64",
+        binary: "rustos-test-uaccess-fault-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+        pointer_move: None,
+        serial: &[],
+    },
+    // The x86_64 member boots the **production** `rustos-kernel` pipeline
+    // (the dedicated `#PF` entry install + guarded-copy arm live on the
+    // real boot path) and drives the shared checks on `BootCompleted`.
+    QemuTest {
+        package: "rustos-test-uaccess-fault-qemu-x86_64",
+        binary: "rustos-test-uaccess-fault-qemu-x86_64",
+        target: "x86_64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+        pointer_move: None,
+        serial: &[],
+    },
     // `plans/PI.md` guard-page fault-form (riscv64 stage G3c): the
     // *production* fault-form, the riscv64 sibling of
     // `rustos-test-stack-overrun-qemu-aarch64`.

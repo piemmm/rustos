@@ -223,6 +223,15 @@ extern "C" {
 /// can `ecall`, or the handler fails closed.
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 pub unsafe fn install_trap_vector() {
+    // Arm the fault-windowed user copy alongside the vector: the two are
+    // one mechanism (the handler below redirects an in-window fault to
+    // the copy's fix-up), so no consumer can install the vector without
+    // the recovery. The install is idempotent for this routine; a
+    // conflicting occupant is a boot-order defect the hart must not run
+    // past (fail closed).
+    if crate::uaccess::install().is_err() {
+        crate::kernel_arch::halt_current_hart();
+    }
     let base = rustos_riscv64_trap_vector as *const () as usize;
     // SAFETY: `base` is the 4-byte-aligned address of the asm trap
     // vector (direct mode encodes mode 0 in the low two bits, which are
@@ -337,6 +346,10 @@ pub unsafe fn wait_for_interrupt() {
 /// * A supervisor external interrupt forwards to the installed PLIC
 ///   dispatcher (claim → `IrqTable::fire` → complete).
 /// * A supervisor timer interrupt drives the scheduler tick.
+/// * An S-mode load/store page fault whose saved `sepc` lies inside the
+///   guarded user-copy fault window ([`crate::uaccess`]) is redirected
+///   to the copy's fix-up (the frame's `sepc` is rewritten), so the copy
+///   returns an error instead of the hart halting.
 /// * Any other synchronous exception is unexpected in this slice and
 ///   fails closed by parking the hart rather than `sret`-looping on the
 ///   faulting instruction (never silently reset).
@@ -402,19 +415,37 @@ unsafe extern "C" fn rustos_riscv64_trap_handler(frame: *mut TrapFrame) {
         // SAFETY: `frame` is the live saved-register frame the asm vector
         // passed; reading its saved `sstatus` is sound.
         let write_fault = crate::fault::is_store_page_fault(scause);
-        if (crate::fault::is_load_page_fault(scause) || write_fault)
-            && trap_came_from_user(unsafe { (*frame).sstatus })
-        {
-            if let Some(resolver) = crate::fault::user_fault_resolver() {
-                let stval: u64;
-                // SAFETY: reading `stval` (the faulting address) has no
-                // side effects.
+        if crate::fault::is_load_page_fault(scause) || write_fault {
+            // SAFETY: `frame` is the live saved-register frame; reading
+            // its saved `sstatus`/`sepc` is sound.
+            let from_user = trap_came_from_user(unsafe { (*frame).sstatus });
+            if from_user {
+                if let Some(resolver) = crate::fault::user_fault_resolver() {
+                    let stval: u64;
+                    // SAFETY: reading `stval` (the faulting address) has no
+                    // side effects.
+                    unsafe {
+                        core::arch::asm!("csrr {}, stval", out(reg) stval, options(nomem, nostack));
+                    }
+                    if resolver(stval, write_fault) {
+                        return;
+                    }
+                }
+            } else if let Some(fixup) =
+                // SAFETY: reading the frame's saved `sepc` is sound.
+                crate::uaccess::kernel_fixup_for(unsafe { (*frame).sepc })
+            {
+                // An S-mode data page fault inside the guarded user-copy
+                // window: the validated copy's software proof was violated
+                // underneath it. Resume at the copy's fix-up so it returns
+                // an error to the caller instead of taking the hart down
+                // (the epilogue reloads `sepc` from the frame).
+                // SAFETY: `frame` is the live saved-register frame; the
+                // fix-up address is a real instruction in this image.
                 unsafe {
-                    core::arch::asm!("csrr {}, stval", out(reg) stval, options(nomem, nostack));
+                    (*frame).sepc = fixup;
                 }
-                if resolver(stval, write_fault) {
-                    return;
-                }
+                return;
             }
         }
 

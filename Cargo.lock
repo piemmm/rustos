@@ -3079,6 +3079,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-uaccess-fault-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "rustos-arch-aarch64",
+ "rustos-arch-api",
+ "rustos-itest-harness",
+ "rustos-log",
+]
+
+[[package]]
+name = "rustos-test-uaccess-fault-qemu-riscv64"
+version = "0.0.0"
+dependencies = [
+ "rustos-arch-api",
+ "rustos-arch-riscv64",
+ "rustos-itest-harness",
+ "rustos-log",
+]
+
+[[package]]
+name = "rustos-test-uaccess-fault-qemu-x86_64"
+version = "0.0.0"
+dependencies = [
+ "rustos-arch-api",
+ "rustos-arch-x86_64",
+ "rustos-itest-harness",
+ "rustos-kernel",
+ "rustos-log",
+]
+
+[[package]]
 name = "rustos-test-uart-console-qemu-aarch64"
 version = "0.0.0"
 dependencies = [

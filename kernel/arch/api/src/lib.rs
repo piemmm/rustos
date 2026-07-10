@@ -50,7 +50,12 @@
 //! trait whose [`TlbShootdown::flush_page`] the per-process map/unmap
 //! path drives to invalidate one CPU's stale cached translation
 //! (`invlpg` / `tlbi vae1is` / `sfence.vma`), plus its
-//! [`tlb::conformance`] vertical — and the **cross-CPU TLB-shootdown**
+//! [`tlb::conformance`] vertical — the MMU slice also carries the
+//! **fault-guarded user-copy** extension ([`uaccess`]): the set-once
+//! [`GuardedCopyFn`] slot each port's fault-windowed span copy is
+//! published through, so a hardware fault taken mid user-copy resumes at
+//! the window's fix-up and surfaces as an error instead of the fatal
+//! path, plus its [`uaccess::conformance`] checks — and the **cross-CPU TLB-shootdown**
 //! slice (`plans/WIRING.md` W6): the
 //! [`CrossCpuTlbShootdown`] trait whose [`CrossCpuTlbShootdown::shootdown_page`]
 //! invalidates a stale translation on *every* online CPU (an x86_64
@@ -106,6 +111,7 @@ pub mod sidechannel;
 pub mod smp;
 pub mod timer;
 pub mod tlb;
+pub mod uaccess;
 pub mod userentry;
 pub mod wakeup;
 pub mod xtlb;
@@ -148,6 +154,11 @@ pub use frames::{
 };
 
 pub use tlb::{conformance as tlb_conformance, TlbShootdown};
+
+pub use uaccess::{
+    conformance as uaccess_conformance, copy_user_span, install_guarded_copy, pc_in_window,
+    CopySpanFault, GuardedCopyFn, InstallGuardedCopyError,
+};
 
 pub use xtlb::{conformance as xtlb_conformance, CrossCpuTlbShootdown};
 

@@ -185,6 +185,11 @@ pub mod tlb_shootdown;
 /// CPUID probe the boot path consults before trusting `RDTSC` as a
 /// cross-CPU monotonic clock source.
 pub mod tsc;
+/// x86_64 fault-windowed user-copy routine backing the Arch HAL
+/// guarded-copy slot (`rustos_arch_api::uaccess`): a kernel-mode `#PF`
+/// taken inside the copy resumes at its fix-up and surfaces as an error
+/// instead of the fatal path.
+pub mod uaccess;
 /// x86_64 implementation of the Arch HAL "enter user mode" surface
 /// ([`rustos_arch_api::EnterUser`]): the one `iretq`
 /// sequence that drops a built process image into ring 3.

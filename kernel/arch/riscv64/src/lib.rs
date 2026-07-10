@@ -151,6 +151,11 @@ pub mod syscall_entry;
 /// supervisor (SBI) timer wired in [`preempt`].
 pub mod timer_hal;
 pub mod trap;
+/// riscv64 fault-windowed user-copy routine backing the Arch HAL
+/// guarded-copy slot (`rustos_arch_api::uaccess`): a kernel-mode page
+/// fault taken inside the copy resumes at its fix-up and surfaces as an
+/// error instead of the fatal path.
+pub mod uaccess;
 /// riscv64 implementation of the Arch HAL "enter user mode" surface
 /// ([`rustos_arch_api::EnterUser`]): the one `sret`
 /// sequence that drops a built process image into U-mode.

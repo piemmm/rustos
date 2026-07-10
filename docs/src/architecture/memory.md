@@ -218,20 +218,49 @@ Every page is checked, fail-closed, before a byte moves:
 | `copy_in` page lacks `READ` | `NotReadable` |
 | `copy_out` page lacks `WRITE` (read-only / executable — the §19.2 W^X guard) | `NotWritable` |
 | Backing frame outside the direct map | `PhysUnmapped` |
+| A hardware fault interrupted the byte move (window fix-up) | `Faulted` |
 
 A page missing `USER` is rejected **before** a missing data permission,
 so a kernel-pointer-confusion attempt is never downgraded to a mere "not
 readable". A zero-length copy touches no memory and succeeds for any
 base. The two entry points carry one encapsulated `unsafe` block each
-(the in-page `core::ptr::copy`), with a `// SAFETY:` rationale and full
+(the in-page span move), with a `// SAFETY:` rationale and full
 host-test coverage (`AGENTS.md` §2.10): cross-page, mid-page-offset,
 round-trip, and every fail-closed branch are exercised with
 `HostPageTable` + `SimPhysMap`.
 
+**The byte move itself runs under the architecture port's hardware
+fault window** (`rustos_arch_api::uaccess`, the `copy_from_user`
+page-fault fix-up of `tests/SECURITY.md` §5). Each MMU port publishes a
+fault-windowed span-copy routine into a set-once Arch HAL slot at its
+trap-vector install chokepoint (riscv64 `trap::install_trap_vector`,
+aarch64 `exceptions::init_vectors`, x86_64 the production boot beside
+its dedicated `#PF`-entry install): the copy's loads/stores sit inside
+an exported `[window_begin, window_end)` instruction range, and the
+port's trap handler, on a **kernel-mode** data fault whose saved PC lies
+inside that range, rewrites the frame's saved PC (`sepc` / the frame
+ELR slot / the interrupt frame `RIP`) to the window's fix-up — which
+returns "faulted" to the caller, surfaced as `UaccessError::Faulted`
+and collapsed onto the same `BadAddress` every other copy fault maps
+to. The validated walk makes an in-window fault unreachable under
+correct operation; the window is the backstop for a violated proof (a
+kernel defect, a corrupted table), turning it into a failed syscall
+instead of a halted machine. With no routine installed (the host test
+build, `wasm32` — no synchronous-fault source) the seam is a plain
+copy. The copy shape is per-port: `rep movsb` on x86_64, a 16-byte
+`ldp`/`stp` loop on aarch64, and an alignment-safe doubleword loop on
+riscv64 (a misaligned `ld`/`sd` may trap on real silicon, so the window
+only ever absorbs page faults). Three QEMU verticals
+(`tests/integration/uaccess_fault_qemu_{riscv64,aarch64,x86_64}`) take
+real in-window faults on both the read and write side through the one
+shared `rustos_arch_api::uaccess::conformance` checks and PASS only
+when each surfaces as an error with the CPU still running.
+
 This module is the foundational primitive of the staged user-memory
 work: the per-task address-space registry, the syscall wiring of
 `ipc_send` / `ipc_recv` / `cap_delegate` / `random_get`, and the
-per-architecture page-fault fix-up all build on it (see `PLAN.md`).
+per-architecture page-fault fix-up above all build on it (see
+`PLAN.md`).
 
 [`uaccess`]: ../../rustos_kernel_mem/uaccess/index.html
 [`copy_in`]: ../../rustos_kernel_mem/uaccess/fn.copy_in.html

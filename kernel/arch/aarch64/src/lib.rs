@@ -154,6 +154,11 @@ pub mod syscall_entry;
 /// neutral scheduler-tick callback install + dispatch over the EL1
 /// physical generic timer wired in [`preempt`].
 pub mod timer_hal;
+/// aarch64 fault-windowed user-copy routine backing the Arch HAL
+/// guarded-copy slot (`rustos_arch_api::uaccess`): a same-EL data abort
+/// taken inside the copy resumes at its fix-up and surfaces as an error
+/// instead of the fatal path.
+pub mod uaccess;
 /// PL011 line and BCM2711 GPIO 14/15 pin-mux bring-up for the discovered
 /// console: real Pi 4 silicon leaves `UART0` unrouted and disabled until
 /// the kernel programs it (QEMU's PL011 powers up enabled, masking the

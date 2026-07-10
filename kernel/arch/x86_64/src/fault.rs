@@ -269,12 +269,15 @@ pub fn page_fault_isr_addr() -> u64 {
 /// `[%rsp + 8]` at the faulting `rip`. The stub saves the 15
 /// architectural GPRs in the [`crate::interrupts::SavedRegs`] order
 /// (the same order `define_isr!` pins), marshals `(error_code, CR2,
-/// rip)` into the SysV argument registers, and calls
+/// rip, &frame.rip)` into the SysV argument registers, and calls
 /// [`rustos_arch_x86_64_page_fault_dispatch`]. The dispatcher *returns
-/// only when the fault was resolved* (the faulting page is now
-/// resident); the stub then restores the GPRs, drops the hardware error
-/// code, and `iretq`s — the frame's untouched `RIP` re-runs the faulting
-/// instruction, which now succeeds. An unresolvable fault never returns
+/// only when the fault was dealt with* — a resolved ring-3 demand-paging
+/// fault (the frame's untouched `RIP` re-runs the faulting instruction,
+/// which now succeeds) or a kernel-mode fault inside the guarded
+/// user-copy window (the dispatcher rewrote the frame's `RIP` to the
+/// copy's fix-up, so the `iretq` resumes there and the copy reports the
+/// fault as an error). The stub then restores the GPRs, drops the
+/// hardware error code, and `iretq`s. Any other fault never returns
 /// from the dispatcher (the fatal path diverges), so a stale resume is
 /// impossible.
 ///
@@ -317,10 +320,15 @@ pub unsafe extern "C" fn page_fault_isr() {
         "pushq %r14",
         "pushq %r15",
         // %rdi <- error code (above the 15 saved GPRs = 120 bytes),
-        // %rsi <- CR2 (faulting linear address), %rdx <- faulting rip.
+        // %rsi <- CR2 (faulting linear address), %rdx <- faulting rip,
+        // %rcx <- address of the frame's RIP slot, so the dispatcher can
+        // redirect a kernel-mode fault inside the guarded user-copy
+        // window to the copy's fix-up (the `iretq` below then resumes
+        // there).
         "movq 120(%rsp), %rdi",
         "mov %cr2, %rsi",
         "movq 128(%rsp), %rdx",
+        "leaq 128(%rsp), %rcx",
         "subq $8, %rsp",
         "call {dispatch}",
         "addq $8, %rsp",
@@ -351,6 +359,13 @@ pub unsafe extern "C" fn page_fault_isr() {
 
 /// Rust dispatcher the dedicated `#PF` stub calls.
 ///
+/// A **kernel-mode** fault whose `rip` lies inside the guarded
+/// user-copy window ([`crate::uaccess`]) is redirected to the copy's
+/// fix-up by rewriting the interrupt frame's `RIP` slot (`rip_slot`)
+/// and returning: the stub's restore + `iretq` resume at the fix-up,
+/// which reports the fault to the copy's caller as an error. Every
+/// other kernel-mode fault stays on the fatal path.
+///
 /// A ring-3 data fault ([`is_user_data_fault`], read or write) is
 /// offered to the installed [`UserFaultResolveFn`] first, with the
 /// error-code `W/R` verdict: a `true` return means the faulting page is
@@ -375,8 +390,24 @@ extern "C" fn rustos_arch_x86_64_page_fault_dispatch(
     error_code: u64,
     faulting_addr: u64,
     rip: u64,
+    rip_slot: *mut u64,
 ) {
-    if is_user_data_fault(error_code) {
+    if !is_user(error_code) {
+        if let Some(fixup) = crate::uaccess::kernel_fixup_for(rip) {
+            // A kernel-mode page fault inside the guarded user-copy
+            // window: the validated copy's software proof was violated
+            // underneath it. Rewrite the frame's RIP so the stub's
+            // `iretq` resumes at the copy's fix-up and the copy returns
+            // an error to its caller instead of taking the CPU down.
+            // SAFETY: `rip_slot` is the stub-provided address of the
+            // live interrupt frame's RIP word; the fix-up address is a
+            // real instruction in this image.
+            unsafe {
+                *rip_slot = fixup;
+            }
+            return;
+        }
+    } else if is_user_data_fault(error_code) {
         if let Some(resolver) = user_fault_resolver() {
             // SAFETY: `swapgs` is privileged and runs in ring 0 here; it
             // touches only the GS-base/`KERNEL_GS_BASE` swap, no memory

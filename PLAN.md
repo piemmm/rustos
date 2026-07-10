@@ -2881,9 +2881,28 @@ transfer, landed in increments:
   `random_get` (CSPRNG output drawn in fixed chunks, copied via `copy_out`,
   staging zeroised; unseeded → `EntropyNotReady`, never weak bytes, §22).
 
+- E — per-arch live `copy_from_user` page-fault fix-up (`tests/SECURITY.md`
+  §5) — **DONE.** The uaccess byte move runs inside each MMU port's
+  exported fault window (`rustos_arch_api::uaccess`: set-once idempotent
+  `GuardedCopyFn` slot + `copy_user_span`, plain-copy default for
+  host/wasm32, shared `conformance` checks; an in-place extension of the
+  §17.2 MMU slice, no new slice). Per-port windowed copies — x86_64
+  `rep movsb`, aarch64 `ldp`/`stp` pair loop, riscv64 alignment-safe
+  doubleword loop (a misaligned access may trap on real silicon, so the
+  window only ever absorbs page faults) — with fix-up labels that set the
+  error return themselves; the trap handlers rewrite only the saved PC
+  (riscv64 frame `sepc`, aarch64 frame ELR slot, x86_64 the `#PF` stub now
+  passes the frame's RIP-slot pointer to its dispatcher) on a kernel-mode
+  data fault whose PC is in-window. Armed at each port's vector-install
+  chokepoint (`install_trap_vector` / `init_vectors`; x86_64 pairs it with
+  the dedicated `#PF` install on the production boot, refusing the boot on
+  a conflicting slot). Surfaces as `UaccessError::Faulted` → the same
+  oracle-free `BadAddress`. Proven live by
+  `tests/integration/uaccess_fault_qemu_{riscv64,aarch64,x86_64}` (real
+  read- and write-side in-window faults, CPU keeps running) plus host
+  unit tests (slot semantics, window containment, walk propagation).
+
 **Remaining this stage:**
-- E — per-arch live `copy_from_user` page-fault fix-up (`tests/SECURITY.md` §5)
-  so a faulting user access returns an error rather than trapping.
 - Land the live `SeatEventReader` (over `rustos_rt::pointer_read`/
   `keyboard_read`) in the desktop session binary when it exists (the
   virtio pointer feed into the seat channel is done — see above; the USB

@@ -12,9 +12,13 @@
 //! * `rustos_aarch64_trap_handler` dispatches an IRQ to the GIC
 //!   acknowledge → timer/SGI → end-of-interrupt handshake, routes an EL0
 //!   `svc` (lower-EL synchronous exception) to the installed
-//!   [`crate::syscall_entry`] dispatch callback, and routes any other
-//!   synchronous exception to the installed [`crate::fault`] handler (or
-//!   fails closed by parking the CPU).
+//!   [`crate::syscall_entry`] dispatch callback, redirects a same-EL
+//!   data abort taken inside the guarded user-copy fault window
+//!   ([`crate::uaccess`]) to the copy's fix-up (the frame's ELR slot is
+//!   rewritten, so the copy returns an error instead of the CPU
+//!   halting), and routes any other synchronous exception to the
+//!   installed [`crate::fault`] handler (or fails closed by parking the
+//!   CPU).
 //!
 //! # EL0 `svc` syscall dispatch
 //!
@@ -32,6 +36,12 @@
 //! The handler and the CSR writes are freestanding-only; the exception
 //! *kind* constants and their classification build on the host so their
 //! unit tests run under `cargo test`.
+
+/// Index of the saved `ELR_EL1` slot in the trampoline's register frame:
+/// the word straight after the 31 saved GP registers (`vectors.s` stores
+/// it at byte offset 248). The guarded user-copy fix-up rewrites this
+/// slot, so the epilogue's `msr ELR_EL1` + `eret` resume at the fix-up.
+pub const ELR_FRAME_INDEX: usize = crate::syscall_entry::SAVED_GPRS;
 
 /// Exception kinds the vector table tags each entry with, matching the
 /// `mov x0, #N` immediates in `vectors.s` (entry index `0..16`).
@@ -166,6 +176,15 @@ extern "C" {
 /// `vectors.s`, satisfying the `VBAR_EL1` alignment requirement.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub unsafe fn init_vectors() {
+    // Arm the fault-windowed user copy alongside the vector table: the
+    // two are one mechanism (the handler below redirects an in-window
+    // same-EL data abort to the copy's fix-up), so no consumer can
+    // install the vectors without the recovery. The install is
+    // idempotent for this routine; a conflicting occupant is a
+    // boot-order defect the CPU must not run past (fail closed).
+    if crate::uaccess::install().is_err() {
+        crate::kernel_arch::halt_current_cpu();
+    }
     let base = rustos_aarch64_vectors as *const () as u64;
     // SAFETY: `base` is the 2 KiB-aligned address of the asm vector
     // table; writing it to `VBAR_EL1` has no side effect beyond the
@@ -414,6 +433,27 @@ unsafe extern "C" fn rustos_aarch64_trap_handler(kind: u64, frame: *mut u64) {
             }
         }
 
+        // A data abort taken from EL1 itself whose saved `ELR_EL1` lies
+        // inside the guarded user-copy window: the validated copy's
+        // software proof was violated underneath it. Rewrite the frame's
+        // ELR slot to the copy's fix-up so the trampoline's `eret`
+        // resumes there and the copy returns an error to its caller
+        // instead of taking the CPU down. Every other same-EL abort
+        // stays on the fatal path below.
+        if kind == kind::CUR_SPX_SYNC && crate::fault::is_current_el_data_abort(esr) {
+            if let Some(fixup) = crate::uaccess::kernel_fixup_for(read_elr()) {
+                // SAFETY: `frame` is the live trampoline register frame;
+                // `ELR_FRAME_INDEX` addresses its saved-`ELR_EL1` word
+                // (`vectors.s` byte offset 248), which the epilogue
+                // restores before `eret`. The fix-up address is a real
+                // instruction in this image.
+                unsafe {
+                    *frame.add(ELR_FRAME_INDEX) = fixup;
+                }
+                return;
+            }
+        }
+
         // Any other synchronous exception (an abort, or a non-`svc`
         // lower-EL fault). Forward to the installed fault handler if
         // present (the memory-isolation vertical installs one);
@@ -447,6 +487,14 @@ mod tests {
         assert!(is_sync(kind::CUR_SPX_SYNC));
         assert!(is_sync(kind::LOWER_SYNC));
         assert!(!is_sync(kind::CUR_SPX_IRQ));
+    }
+
+    #[test]
+    fn elr_frame_index_matches_the_trampoline_layout() {
+        // `vectors.s` stores ELR_EL1 at byte offset 248, straight after
+        // x0..x30; a desync here would make the fix-up rewrite corrupt a
+        // GP register instead of the return address.
+        assert_eq!(ELR_FRAME_INDEX * 8, 248);
     }
 
     #[test]
