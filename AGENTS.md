@@ -596,6 +596,16 @@ rustos/
 │   │                    #   and objdump-class tools consume them over
 │   │                    #   lib/binfmt; fuzzed (§19.6), decode runs in the
 │   │                    #   §19.5 parser sandbox.
+│   ├── display/         # Display-service protocol engine (plans/DISPLAY.md
+│   │                    #   D7b): the one definition of the zero-copy,
+│   │                    #   lease-gated frame-presentation semantics over the
+│   │                    #   reserved DISPLAY_ENDPOINT — the DisplayServer
+│   │                    #   engine a display driver's Run binary hosts
+│   │                    #   (per-request call_peer_seat lease gate, lease-
+│   │                    #   generation-bound shm frame region, damage-aware
+│   │                    #   blits through the Display trait) and the
+│   │                    #   DisplayClient/RemoteDisplay halves a desktop
+│   │                    #   session presents through (§2.2).
 │   ├── dma-barrier/     # DMA memory-ordering barriers for user-space drivers
 │   │                    #   (dma_wmb/dma_rmb): the single per-arch dsb/dmb (or
 │   │                    #   fence) carve-out ordering a driver's writes to

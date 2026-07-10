@@ -2916,8 +2916,32 @@ transfer, landed in increments:
   recipient), and `call_peer_seat` (`abi-v1` 83, the `call_peer_origin`
   trust window, live-lease generation answer) — kernel host tests, `lib/rt`
   wrappers, `ros_sys_*` stubs, C headers, and the syscalls/seat docs all
-  landed together. Remaining: D7b (display protocol + `lib/display`
-  engine/client + the framebuffer service process), D7c (the desktop
+  landed together. **D7b is landed except the service process:** the
+  fixed-width, fuzzed `lib/abi::display_ipc` protocol (`Query`/`Configure`/
+  `Present`, the reserved squat-protected `DISPLAY_ENDPOINT`, the shared
+  `lib/abi::reply` status frame), the new `lib/display` crate (the
+  `DisplayServer` engine — decode → `call_peer_seat` lease gate on every
+  request, lease-generation-bound configure state, bounded present — and
+  the `DisplayClient`/`RemoteDisplay` halves with per-frame stale-damage
+  double-buffer bookkeeping), the in-place `Display::present_region`
+  evolution (full-blit default; real partial blits in the framebuffer
+  driver; the WM compositor threads its damage bounds through it), the
+  distinct `Errno::DeviceFault` (`DriverError::as_errno` now maps
+  `DeviceFault`/`Busy` to `DeviceFault`/`WouldBlock`), and the
+  `HwResourceKind::Framebuffer` scan-out resource (geometry-carrying
+  window: validated `framebuffer_mode` decode, `sole_framebuffer` grant
+  resolver, `mmio_map` admission) so a user-space display driver learns
+  its surface from discovery, never a board constant. Remaining for D7b —
+  the framebuffer service `Run` binary: hoist the linear-surface engine
+  out of `drivers/display/framebuffer` into `lib/display` (the
+  `lib/virtio_input` precedent — the Run crate may link `lib/*` only and
+  the QEMU verticals keep a non-driver consumer), evolve `shm_map` to
+  report the mapped region's length (the server must size its frame
+  slice from the kernel's answer, never the client's claim), convert
+  `drivers/display/framebuffer` to the bin-only Run crate (grants →
+  `sole_framebuffer` → surface; `DISPLAY_ENDPOINT` bind under
+  `CAP_IPC_BIND_PRIVILEGED`; wait-set serve loop), and repoint the three
+  framebuffer QEMU verticals. Then D7c (the desktop
   session binary: the live `SeatEventReader` over `rustos_rt::pointer_read`/
   `keyboard_read` after `display_acquire`, draining after each `SeatInput`
   wake, driving `DesktopShell` with the queried mode as the screen `Rect`),
@@ -3284,13 +3308,24 @@ Landed (done):
 - §19.10 memory tagging — `MemoryTagging` HAL + the `kernel/mem` slab software
   UAF tag-check (on-by-default floor everywhere).
 
-Unblocked — staged (`.junie/fstree-next-plan.md` S8):
+Unblocked — in progress (`.junie/fstree-next-plan.md` S8):
 - Item 9 — §19.5 parser sandboxing (minimum-capability sandbox process
-  model). Its prerequisite (Stage 6) is complete, so it is no longer
-  stage-blocked: the facility is built in full — spawn with an exact
-  minimum grant, shared-memory parse IPC, crash containment with the
-  sandbox replaced and the event logged (§19.4) — and the in-tree parsers
-  of untrusted input are moved behind it as part of completing the item.
+  model). Its prerequisite (Stage 6) is complete. The **kernel sandbox-spawn
+  primitive is landed** (S8a): `SpawnAttach` carries a `flags` word whose
+  `SPAWN_FLAG_SANDBOX` bit admits the child as a parser sandbox — the block
+  is canonical only with fully explicit `Closed`/`Handle` wires, an
+  inherited credential, and no console index (one fail-closed definition in
+  `SpawnAttach::parse`); the child's capability record is branded
+  `as_sandboxed()` (all three sets forced empty regardless of manifest,
+  `delegate`/`apply_token` refuse it outright), and the syscall dispatcher
+  confines a sandboxed task to the closed `sandbox_allows` list (yield,
+  exit, stream_read/write, fs_read/write/close, mem_map/unmap), audited on
+  denial. Docs: `docs/src/security/sandbox.md`. Remaining (staged
+  `.junie/fstree-next-plan.md` S8b/S8c): the user-space parse seam (typed
+  request/response over wired descriptors, host-testable fake), crash
+  containment with the worker replaced and the event logged (§19.4), the
+  `lib/binfmt`/`lib/disasm` decode wiring behind it, and the sweep moving
+  the remaining in-tree untrusted-input parsers behind the facility.
   Its first consumers exist: `lib/binfmt` (`rustos-binfmt`, done —
   `.junie/fstree-next-plan.md` S6) is the read-only executable-container
   decoder: typed, borrowed, fail-closed views of the `rxe` load image +

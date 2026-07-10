@@ -58,6 +58,9 @@
 #define ROS_HW_RES_PORT ((uint16_t)2u)
 #define ROS_HW_RES_DMA ((uint16_t)3u)
 #define ROS_HW_RES_BUS_WINDOW ((uint16_t)4u)
+#define ROS_HW_RES_ENDPOINT ((uint16_t)5u)
+#define ROS_HW_RES_SHARED ((uint16_t)6u)
+#define ROS_HW_RES_FRAMEBUFFER ((uint16_t)7u)
 
 /* One match key on a node. Mirrors the #[repr(C)] layout; the packed
 * little-endian wire size is ROS_HW_MATCH_KEY_WIRE_LEN. */

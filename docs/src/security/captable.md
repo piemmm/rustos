@@ -203,7 +203,11 @@ same record, on which the caller invokes
 `TaskCapabilities::{delegate,revoke,apply_token}`. Those methods
 preserve the subset-only delegation invariant in `lib/caps` and emit
 the appropriate audit events; the registry itself never widens or
-synthesises capability state.
+synthesises capability state. A record branded a parser sandbox
+(`as_sandboxed()`, set only by the spawn admit path for a
+`SPAWN_FLAG_SANDBOX` child — `docs/src/security/sandbox.md`) carries
+every capability set forced empty, and `delegate`/`apply_token` refuse
+it outright before examining any payload.
 
 ## Wiring / Lifecycle
 

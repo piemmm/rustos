@@ -388,7 +388,8 @@ default.
 
 ### Stage D7 — the display-client present path (the graphical session goes live)
 
-**Status: in progress — D7a done; D7b is next.** D1–D6 made the seat an
+**Status: in progress — D7a done; D7b landed except the service
+process (below); the `Run` binary is next.** D1–D6 made the seat an
 enforced, revocable kernel object and derived the present right from the
 live lease — but the only presenters so far are kernel-side fixtures. D7 is the
 missing transport: a user-space window-manager session presenting
@@ -452,24 +453,56 @@ Sub-stages, each shipped complete (code + tests + docs, §7 gate green):
     `call_peer_origin` window); returns `SeatNotOwner` / `SeatRevoked` /
     `NotFound` fail-closed. No capability: the authority is serving the
     in-flight call, exactly as `call_peer_origin`.
-- **D7b — the display service.** `lib/abi/src/display_ipc.rs` (the
-  fixed-width, fail-closed, fuzzed protocol: `Query` → mode,
-  `Configure { shm_handle, frame_count, frame geometry }`,
-  `Present { frame_index, damage rect }`) and the reserved
-  `DISPLAY_ENDPOINT` (added to `is_reserved_endpoint`; one endpoint —
-  the service carries seat ids in-protocol, so a later multi-GPU broker
-  is additive, not a v2). A new `lib/display` crate hosts **both**
-  halves over injected seams so the protocol semantics have one
-  definition (§2.2): the server engine (decode → lease check via a
-  `call_peer_seat` seam → geometry/bounds validation → blit through the
-  `Display` trait, damage-aware via an in-place `Display` region-present
-  evolution with a full-blit default) and the client
-  (`RemoteDisplay`: implements the *existing* `Display` trait over the
-  shm back frame + present call, so `Compositor::present` is unchanged).
-  Every request is gated on the caller's live lease — including `Query`,
-  so only the seat owner learns the mode. The framebuffer driver's `Run`
-  binary hosts the engine (grants → surface, endpoint bind under
-  `CAP_IPC_BIND_PRIVILEGED`, waitset serve loop).
+- **D7b — the display service. `[~]` Landed except the service process.**
+  Landed: `lib/abi/src/display_ipc.rs` (the fixed-width, fail-closed,
+  fuzzed protocol: `Query` → mode reply, `Configure { shm_handle,
+  frame_count, frame geometry }`, `Present { frame_index, damage rect }`,
+  every reserved tail zero-checked) and the reserved `DISPLAY_ENDPOINT`
+  (`0x0D15_1001`, in `is_reserved_endpoint`; one endpoint — the service
+  carries seat ids in-protocol, so a later multi-GPU broker is additive,
+  not a v2); the shared `lib/abi::reply` status frame (hoisted from the
+  seatmgr module, §2.2); the `lib/display` crate hosting **both** halves
+  over injected seams so the protocol semantics have one definition
+  (§2.2): the server engine (`DisplayServer`: decode → lease check via
+  the `SeatCheck` seam over `call_peer_seat` on **every** request, `Query`
+  included — only the seat owner learns the mode → exact-mode geometry
+  validation → map-once `ShmMapper` → blit through the `Display` trait;
+  the configure state is bound to the granting lease's *generation*, so a
+  revoked or re-acquired seat must reconfigure before it can present, and
+  an observed lease loss drops the stale mapping) and the client
+  (`DisplayClient` over a `DisplayTransport` seam; `RemoteDisplay`
+  implements the *existing* `Display` trait over the client's mapping
+  with per-frame stale-damage union bookkeeping, so `Compositor::present`
+  is unchanged and a double-buffered frame is always current). The
+  in-place `Display::present_region` evolution landed with a full-blit
+  default, a real partial blit in the framebuffer driver, and the WM
+  compositor threading its composited damage bounds through it. The
+  surface-discovery contract landed as `HwResourceKind::Framebuffer`
+  (the FDT `simple-framebuffer` model normalised into the hardware tree,
+  §18.1): a geometry-carrying, `CAP_MMIO_MAP`-gated scan-out window with
+  a validated `framebuffer_mode` decode, the `sole_framebuffer` grant
+  resolver, and `mmio_map` admission — plus the distinct
+  `Errno::DeviceFault` (`DriverError::as_errno` now maps
+  `DeviceFault`/`Busy` to `DeviceFault`/`WouldBlock`).
+  **Remaining — the framebuffer service process.** The `Run` binary
+  hosts the engine (grants → `sole_framebuffer` → surface, endpoint bind
+  under `CAP_IPC_BIND_PRIVILEGED`, waitset serve loop). Its fixed shape
+  (the `lib/virtio_input` precedent — a Run crate links `lib/*` only,
+  `cargo xtask deps-check` forbids a `drivers/*`→`drivers/*` edge, and
+  the kernel test verticals must not inherit `rustos-rt`):
+  1. hoist the linear-surface engine (`Framebuffer`/`FramebufferConfig`)
+     out of `drivers/display/framebuffer` into `lib/display` (the QEMU
+     verticals stay legal non-driver consumers);
+  2. evolve `shm_map` in place to report the mapped region's length —
+     the server sizes its frame slice from the kernel's answer, never
+     the client's claimed geometry (§5.4);
+  3. convert `drivers/display/framebuffer` to the bin-only `Run` crate
+     (build.rs `freestanding` cfg, `Run.ld`, host stub — the
+     `virtio_kbd` shape) wiring `RtDriverHost` grants, an
+     `RtSeatCheck` over `call_peer_seat`, and an `RtShmMapper` over
+     `shm_map` into `DisplayServer::serve`;
+  4. repoint the three framebuffer QEMU verticals at the hoisted
+     surface engine.
 - **D7c — the desktop session binary.** `userland/gui/session` gains its
   `Run` program: `display_acquire(SEAT_PRIMARY)` → `DisplayClient`
   bring-up (query, shm double buffer, `shm_grant`, configure) → the live

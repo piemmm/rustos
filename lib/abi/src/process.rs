@@ -560,13 +560,40 @@ pub const CONSOLE_INDEX_MAX: u8 = u8::MAX;
 /// block. A block bearing any other value is refused with
 /// [`Errno::BadMagic`], so a stale or foreign encoding can never be
 /// misread as wiring.
-pub const SPAWN_ATTACH_VERSION: u32 = 1;
+pub const SPAWN_ATTACH_VERSION: u32 = 2;
 
 /// Exact byte length of an encoded [`SpawnAttach`] block: the version and
-/// target-uid words, the console selector, and one `(kind, value)` pair per
-/// standard descriptor. The block is fixed-length by design — the kernel
-/// bounds the copy before staging and refuses any other length.
-pub const SPAWN_ATTACH_LEN: usize = 4 + 4 + 8 + STD_STREAM_COUNT * 8;
+/// target-uid words, the console selector, the flags word, and one
+/// `(kind, value)` pair per standard descriptor. The block is fixed-length
+/// by design — the kernel bounds the copy before staging and refuses any
+/// other length.
+pub const SPAWN_ATTACH_LEN: usize = 4 + 4 + 8 + 8 + STD_STREAM_COUNT * 8;
+
+/// [`SpawnAttach::flags`] bit: start the child as a **parser sandbox**
+/// process (`docs/src/security/sandbox.md`).
+///
+/// A sandboxed child is the minimum-capability worker a program hands
+/// untrusted bytes to: its effective capability set is forced empty
+/// regardless of its manifest request or its user's grants, no capability
+/// can ever be delegated to it, and the syscall dispatcher refuses every
+/// syscall outside the closed sandbox allow-list (self-scoped and
+/// descriptor-scoped operations only — no path-based filesystem access, no
+/// IPC binding, no spawning). The only authority a sandboxed child holds is
+/// the explicit descriptors its parent wired at spawn.
+///
+/// A sandbox block is canonical only when nothing ambient flows in: every
+/// wire must be [`FdWire::Closed`] or [`FdWire::Handle`] (never an inherit
+/// form), the credential must be inherited ([`SPAWN_UID_INHERIT`]), and the
+/// console selector must be [`CONSOLE_INHERIT`] (no console index — a
+/// sandbox never receives console-backed streams). [`SpawnAttach::parse`]
+/// refuses any other shape, so the rule has exactly one definition shared
+/// by the kernel and every userland encoder.
+pub const SPAWN_FLAG_SANDBOX: u64 = 1;
+
+/// Every [`SpawnAttach::flags`] bit with a defined meaning. A block
+/// carrying any bit outside this mask is refused — reserved bits fail
+/// closed instead of silently meaning nothing.
+pub const SPAWN_FLAGS_ALL: u64 = SPAWN_FLAG_SANDBOX;
 
 /// How one of a spawned child's standard descriptors (fd 0–3) is backed —
 /// one entry per slot in a [`SpawnAttach`] block (`plans/SPAWN.md` SP10).
@@ -661,7 +688,8 @@ impl FdWire {
 /// resolved and capability-gated kernel-side (`CAP_SPAWN_AS_USER`), the
 /// console index is validated against the installed list, and every
 /// [`FdWire::Handle`] is owner-checked against the kernel-trusted caller
-/// identity before anything is built.
+/// identity before anything is built. The flags word only ever *narrows*
+/// the child ([`SPAWN_FLAG_SANDBOX`]); no flag can widen authority.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct SpawnAttach {
     /// The child's target user: [`SPAWN_UID_INHERIT`] or a concrete uid
@@ -670,6 +698,9 @@ pub struct SpawnAttach {
     /// The base-table selector: [`CONSOLE_INHERIT`] or an installed
     /// console index.
     pub console: u64,
+    /// Spawn-mode flags: zero or a combination of the defined
+    /// [`SPAWN_FLAGS_ALL`] bits. Reserved bits are refused at parse.
+    pub flags: u64,
     /// One wire per standard descriptor, indexed by fd number.
     pub wires: [FdWire; STD_STREAM_COUNT],
 }
@@ -680,8 +711,32 @@ impl SpawnAttach {
     pub const INHERIT: Self = Self {
         target_uid: SPAWN_UID_INHERIT,
         console: CONSOLE_INHERIT,
+        flags: 0,
         wires: [FdWire::Inherit; STD_STREAM_COUNT],
     };
+
+    /// Build a canonical [`SPAWN_FLAG_SANDBOX`] block over `wires`.
+    ///
+    /// The credential and console selectors take the only values a sandbox
+    /// block permits (inherit both); the caller supplies the explicit
+    /// wires. The result still round-trips through [`Self::parse`], which
+    /// refuses any inherit-form wire, so a non-canonical `wires` array is
+    /// caught before it reaches the kernel.
+    #[must_use]
+    pub const fn sandbox(wires: [FdWire; STD_STREAM_COUNT]) -> Self {
+        Self {
+            target_uid: SPAWN_UID_INHERIT,
+            console: CONSOLE_INHERIT,
+            flags: SPAWN_FLAG_SANDBOX,
+            wires,
+        }
+    }
+
+    /// Whether this block requests the parser-sandbox spawn mode.
+    #[must_use]
+    pub const fn is_sandbox(&self) -> bool {
+        self.flags & SPAWN_FLAG_SANDBOX != 0
+    }
 
     /// Encode the block into its fixed-length wire form.
     #[must_use]
@@ -690,8 +745,9 @@ impl SpawnAttach {
         out[0..4].copy_from_slice(&SPAWN_ATTACH_VERSION.to_le_bytes());
         out[4..8].copy_from_slice(&self.target_uid.to_le_bytes());
         out[8..16].copy_from_slice(&self.console.to_le_bytes());
+        out[16..24].copy_from_slice(&self.flags.to_le_bytes());
         for (index, wire) in self.wires.iter().enumerate() {
-            let at = 16 + index * 8;
+            let at = 24 + index * 8;
             let (kind, value) = wire.to_wire();
             out[at..at + 4].copy_from_slice(&kind.to_le_bytes());
             out[at + 4..at + 8].copy_from_slice(&value.to_le_bytes());
@@ -706,7 +762,10 @@ impl SpawnAttach {
     /// [`Errno::LengthOutOfRange`] for any length other than
     /// [`SPAWN_ATTACH_LEN`], [`Errno::BadMagic`] for a version other than
     /// [`SPAWN_ATTACH_VERSION`], and [`Errno::OutOfRange`] for any
-    /// non-canonical wire (see [`FdWire`]). A refused block wires nothing.
+    /// non-canonical wire (see [`FdWire`]), any reserved flag bit, or a
+    /// non-canonical [`SPAWN_FLAG_SANDBOX`] block (an inherit-form wire, a
+    /// uid switch, or a console index — nothing ambient may flow into a
+    /// sandbox). A refused block wires nothing.
     pub fn parse(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() != SPAWN_ATTACH_LEN {
             return Err(Errno::LengthOutOfRange);
@@ -716,16 +775,34 @@ impl SpawnAttach {
         }
         let target_uid = read_u32(bytes, 4);
         let console = read_u64(bytes, 8);
+        let flags = read_u64(bytes, 16);
+        if flags & !SPAWN_FLAGS_ALL != 0 {
+            return Err(Errno::OutOfRange);
+        }
         let mut wires = [FdWire::Inherit; STD_STREAM_COUNT];
         for (index, wire) in wires.iter_mut().enumerate() {
-            let at = 16 + index * 8;
+            let at = 24 + index * 8;
             *wire = FdWire::from_wire(read_u32(bytes, at), read_u32(bytes, at + 4))?;
         }
-        Ok(Self {
+        let block = Self {
             target_uid,
             console,
+            flags,
             wires,
-        })
+        };
+        if block.is_sandbox() {
+            let explicit = block
+                .wires
+                .iter()
+                .all(|wire| matches!(wire, FdWire::Closed | FdWire::Handle(_)));
+            if !explicit
+                || block.target_uid != SPAWN_UID_INHERIT
+                || block.console != CONSOLE_INHERIT
+            {
+                return Err(Errno::OutOfRange);
+            }
+        }
+        Ok(block)
     }
 }
 
@@ -1112,8 +1189,8 @@ mod tests {
         DescriptorTable, FdWire, ProcessStart, ProcessStartHeader, Signal, SpawnAttach, StreamMode,
         StringSlot, WaitStatus, WaitStatusRecord, PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS,
         PROCESS_START_MAX_STRING_LEN, PROCESS_START_MAX_TOTAL_LEN, SPAWN_ATTACH_LEN,
-        SPAWN_ATTACH_VERSION, STDERR, STDIN, STDINFO, STDOUT, STD_STREAM_COUNT,
-        WAIT_STATUS_KIND_EXITED, WAIT_STATUS_KIND_STOPPED,
+        SPAWN_ATTACH_VERSION, SPAWN_FLAGS_ALL, SPAWN_FLAG_SANDBOX, STDERR, STDIN, STDINFO, STDOUT,
+        STD_STREAM_COUNT, WAIT_STATUS_KIND_EXITED, WAIT_STATUS_KIND_STOPPED,
     };
     use crate::{Errno, ABI_VERSION_CURRENT};
     use alloc::vec::Vec;
@@ -1132,6 +1209,7 @@ mod tests {
         let attach = SpawnAttach {
             target_uid: 42,
             console: 1,
+            flags: 0,
             wires: [
                 FdWire::Handle(9),
                 FdWire::InheritSlot(1),
@@ -1175,22 +1253,93 @@ mod tests {
         // Kind 0 is reserved and unknown kinds are refused.
         for kind in [0u32, 5, u32::MAX] {
             let mut bytes = SpawnAttach::INHERIT.to_le_bytes();
-            bytes[16..20].copy_from_slice(&kind.to_le_bytes());
+            bytes[24..28].copy_from_slice(&kind.to_le_bytes());
             assert_eq!(SpawnAttach::parse(&bytes), Err(Errno::OutOfRange));
         }
         // A slot reference past the standard table is refused.
         let mut slot = SpawnAttach::INHERIT.to_le_bytes();
-        slot[16..20].copy_from_slice(&2u32.to_le_bytes());
+        slot[24..28].copy_from_slice(&2u32.to_le_bytes());
         let first_out_of_range = u32::try_from(STD_STREAM_COUNT).expect("small table");
-        slot[20..24].copy_from_slice(&first_out_of_range.to_le_bytes());
+        slot[28..32].copy_from_slice(&first_out_of_range.to_le_bytes());
         assert_eq!(SpawnAttach::parse(&slot), Err(Errno::OutOfRange));
         // A carried value on a kind that has none breaks canonical form.
         for kind in [1u32, 3] {
             let mut stray = SpawnAttach::INHERIT.to_le_bytes();
-            stray[16..20].copy_from_slice(&kind.to_le_bytes());
-            stray[20..24].copy_from_slice(&7u32.to_le_bytes());
+            stray[24..28].copy_from_slice(&kind.to_le_bytes());
+            stray[28..32].copy_from_slice(&7u32.to_le_bytes());
             assert_eq!(SpawnAttach::parse(&stray), Err(Errno::OutOfRange));
         }
+    }
+
+    #[test]
+    fn spawn_attach_rejects_reserved_flag_bits() {
+        // Every undefined flag bit fails closed rather than silently
+        // meaning nothing.
+        for flags in [SPAWN_FLAGS_ALL + 1, 1u64 << 63, u64::MAX] {
+            let mut bytes = SpawnAttach::INHERIT.to_le_bytes();
+            bytes[16..24].copy_from_slice(&flags.to_le_bytes());
+            assert_eq!(SpawnAttach::parse(&bytes), Err(Errno::OutOfRange));
+        }
+    }
+
+    #[test]
+    fn spawn_attach_sandbox_round_trips_and_reports_the_mode() {
+        let attach = SpawnAttach::sandbox([
+            FdWire::Handle(4),
+            FdWire::Handle(5),
+            FdWire::Closed,
+            FdWire::Closed,
+        ]);
+        assert!(attach.is_sandbox());
+        assert!(!SpawnAttach::INHERIT.is_sandbox());
+        let parsed = SpawnAttach::parse(&attach.to_le_bytes());
+        assert_eq!(parsed, Ok(attach));
+    }
+
+    #[test]
+    fn spawn_attach_sandbox_refuses_every_ambient_shape() {
+        let explicit = [
+            FdWire::Handle(4),
+            FdWire::Handle(5),
+            FdWire::Closed,
+            FdWire::Closed,
+        ];
+        // An inherit-form wire lets ambient backing flow in; refused.
+        for ambient in [FdWire::Inherit, FdWire::InheritSlot(1)] {
+            let mut wires = explicit;
+            wires[2] = ambient;
+            let block = SpawnAttach {
+                flags: SPAWN_FLAG_SANDBOX,
+                wires,
+                ..SpawnAttach::INHERIT
+            };
+            assert_eq!(
+                SpawnAttach::parse(&block.to_le_bytes()),
+                Err(Errno::OutOfRange)
+            );
+        }
+        // A credential switch inside a sandbox spawn is refused.
+        let uid_switch = SpawnAttach {
+            target_uid: 42,
+            flags: SPAWN_FLAG_SANDBOX,
+            wires: explicit,
+            ..SpawnAttach::INHERIT
+        };
+        assert_eq!(
+            SpawnAttach::parse(&uid_switch.to_le_bytes()),
+            Err(Errno::OutOfRange)
+        );
+        // A console index is a console-backed base table; refused.
+        let console = SpawnAttach {
+            console: 0,
+            flags: SPAWN_FLAG_SANDBOX,
+            wires: explicit,
+            ..SpawnAttach::INHERIT
+        };
+        assert_eq!(
+            SpawnAttach::parse(&console.to_le_bytes()),
+            Err(Errno::OutOfRange)
+        );
     }
 
     #[test]

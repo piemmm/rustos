@@ -28,6 +28,7 @@
 - [Audit-log integrity](./security/audit_log.md)
 - [Supply-chain integrity: the SBOM](./security/supply_chain.md)
 - [Fuzzing the untrusted-input surface](./security/fuzzing.md)
+- [The parser sandbox: minimum-capability workers](./security/sandbox.md)
 - [Stateful models for the capability core](./security/proptest_models.md)
 - [The capability + IPC model (Silver)](./security/model/capability_ipc.md)
 - [The rxe loader: W^X, PIE, KASLR, CFI](./security/rxe_loader.md)

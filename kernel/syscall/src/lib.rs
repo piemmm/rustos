@@ -44,6 +44,6 @@ pub mod table;
 
 pub use audit::AuditEvent;
 pub use table::{
-    verify_table_hash, CallerContext, Dispatcher, RawArgs, SyscallHandlers, SyscallResult,
-    SYSCALL_TABLE_HASH,
+    sandbox_allows, verify_table_hash, CallerContext, Dispatcher, RawArgs, SyscallHandlers,
+    SyscallResult, SYSCALL_TABLE_HASH,
 };

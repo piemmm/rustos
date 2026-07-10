@@ -199,6 +199,15 @@ pub struct TaskCapabilities {
     /// [`Self::as_system_principal`]; defaults to `false` (a user-session
     /// task whose ceiling is its account grant).
     system_principal: bool,
+    /// `true` for a **parser sandbox** process (`SPAWN_FLAG_SANDBOX`,
+    /// `docs/src/security/sandbox.md`): a minimum-capability worker whose
+    /// grant, manifest request, and effective set are all forced empty and
+    /// stay empty for the task's whole life — [`Self::delegate`] and
+    /// [`Self::apply_token`] refuse a sandboxed target outright, and the
+    /// syscall dispatcher confines the task to its closed sandbox
+    /// allow-list. Set only by the kernel spawn-admit path through
+    /// [`Self::as_sandboxed`]; defaults to `false`.
+    sandboxed: bool,
     /// Kernel-generated process-instance identity, distinct from the
     /// reusable scheduler [`TaskId`]. Defaults to [`ProcId::KERNEL`] —
     /// the sentinel for a schedulable entity that is not a distinct user
@@ -301,6 +310,7 @@ impl TaskCapabilities {
             manifest_request,
             effective,
             system_principal: false,
+            sandboxed: false,
             proc_id: ProcId::KERNEL,
             parent_proc_id: ProcId::KERNEL,
             name: ProcName::EMPTY,
@@ -326,6 +336,31 @@ impl TaskCapabilities {
     pub fn as_system_principal(mut self) -> Self {
         self.system_principal = true;
         self
+    }
+
+    /// Mark this record as a **parser sandbox** process and force every
+    /// capability set empty.
+    ///
+    /// The emptiness is structural, not caller discipline: whatever grant or
+    /// manifest request the record was derived with is discarded here, so a
+    /// sandboxed task can never start with — or later re-derive — any
+    /// capability. Consumed and returned so the spawn-admit path can set it
+    /// inline, mirroring [`Self::as_system_principal`]. Only the kernel's
+    /// spawn-admit site calls it, and only for a spawn whose attach block
+    /// carried `SPAWN_FLAG_SANDBOX`.
+    #[must_use]
+    pub fn as_sandboxed(mut self) -> Self {
+        self.sandboxed = true;
+        self.user_grant = CapabilitySet::EMPTY;
+        self.manifest_request = CapabilitySet::EMPTY;
+        self.effective = CapabilitySet::EMPTY;
+        self
+    }
+
+    /// Whether this record belongs to a parser-sandbox process.
+    #[must_use]
+    pub fn is_sandboxed(&self) -> bool {
+        self.sandboxed
     }
 
     /// Attach the task's kernel-attested group credential (primary group and
@@ -576,8 +611,10 @@ impl TaskCapabilities {
 
     /// Install a delegated subset on the task.
     ///
-    /// Returns [`Errno::DelegationWiden`] (and emits
-    /// [`AuditEvent::TaskCapabilitiesDelegateWiden`]) if `requested`
+    /// Returns [`Errno::PermissionDenied`] (and emits
+    /// [`AuditEvent::TaskCapabilitiesDelegateWiden`]) for a sandboxed
+    /// target — a sandbox may never be handed capabilities — and
+    /// [`Errno::DelegationWiden`] (same audit event) if `requested`
     /// would widen the current effective set. On success the effective
     /// set is **replaced** with the delegated subset and one
     /// [`AuditEvent::TaskCapabilitiesDelegated`] is emitted. The
@@ -589,6 +626,21 @@ impl TaskCapabilities {
         requested: &CapabilitySet,
         audit: &S,
     ) -> Result<(), Errno> {
+        if self.sandboxed {
+            // A sandbox holds nothing and may never be handed anything —
+            // even the empty set is refused so the answer never depends on
+            // the payload.
+            let mut buf = [0u8; 16];
+            record(
+                audit,
+                AuditEvent::TaskCapabilitiesDelegateWiden,
+                &[Field {
+                    key: "task",
+                    value: rustos_log::FieldValue::Str(format_hex_u64(self.task.0, &mut buf)),
+                }],
+            );
+            return Err(Errno::PermissionDenied);
+        }
         match self.effective.delegate(requested) {
             Ok(narrowed) => {
                 self.effective = narrowed;
@@ -635,8 +687,10 @@ impl TaskCapabilities {
     ///
     /// # Errors
     ///
-    /// Forwards [`CapabilityToken::verify`]'s error verbatim and emits
-    /// [`AuditEvent::TaskCapabilitiesDelegateWiden`].
+    /// Returns [`Errno::PermissionDenied`] for a sandboxed target before
+    /// any verification (a sandbox may never be handed capabilities);
+    /// otherwise forwards [`CapabilityToken::verify`]'s error verbatim.
+    /// Either failure emits [`AuditEvent::TaskCapabilitiesDelegateWiden`].
     pub fn apply_token<S: Sink + ?Sized>(
         &mut self,
         token: &CapabilityToken,
@@ -644,6 +698,20 @@ impl TaskCapabilities {
         epoch: RevocationEpoch,
         audit: &S,
     ) -> Result<(), Errno> {
+        if self.sandboxed {
+            // Same rule as `delegate`: no token — however well signed — may
+            // ever land capabilities on a sandbox.
+            let mut buf = [0u8; 16];
+            record(
+                audit,
+                AuditEvent::TaskCapabilitiesDelegateWiden,
+                &[Field {
+                    key: "task",
+                    value: rustos_log::FieldValue::Str(format_hex_u64(self.task.0, &mut buf)),
+                }],
+            );
+            return Err(Errno::PermissionDenied);
+        }
         match token.verify(authority, &self.effective, epoch, self.task.0) {
             Ok(()) => {
                 self.effective = token.caps;
@@ -1172,6 +1240,88 @@ mod tests {
         assert_eq!(t.apply_token(&token, &authority, epoch, &sink), Ok(()));
         assert!(t.has(CapabilityId::FS_MOUNT));
         assert!(!t.has(CapabilityId::AUDIT_READ));
+    }
+
+    #[test]
+    fn as_sandboxed_forces_every_capability_set_empty() {
+        // Whatever the record was derived with, marking it sandboxed strips
+        // the grant, the manifest request, and the effective set — the
+        // emptiness is structural, so nothing can later re-derive from the
+        // discarded sets.
+        let grant = caps_of(&[CapabilityId::FS_MOUNT, CapabilityId::NET_RAW]);
+        let sink = RecordingSink::new();
+        let t =
+            TaskCapabilities::derive(TaskId(11), UserId(1000), grant, grant, &sink).as_sandboxed();
+        assert!(t.is_sandboxed());
+        assert!(t.effective().is_empty());
+        assert!(t.user_grant().is_empty());
+        assert!(t.manifest_request().is_empty());
+        assert!(!t.has(CapabilityId::FS_MOUNT));
+    }
+
+    #[test]
+    fn delegate_refuses_a_sandboxed_target() {
+        let sink = RecordingSink::new();
+        let mut t = TaskCapabilities::derive(
+            TaskId(12),
+            UserId(1000),
+            caps_of(&[CapabilityId::FS_MOUNT]),
+            caps_of(&[CapabilityId::FS_MOUNT]),
+            &sink,
+        )
+        .as_sandboxed();
+        // Even the empty set is refused: the answer never depends on the
+        // payload, and the attempt is audited as a widening attempt.
+        assert_eq!(
+            t.delegate(&CapabilitySet::empty(), &sink),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            t.delegate(&caps_of(&[CapabilityId::FS_MOUNT]), &sink),
+            Err(Errno::PermissionDenied)
+        );
+        assert!(t.effective().is_empty());
+        assert_eq!(
+            sink.ids(),
+            [
+                AuditEvent::TaskCapabilitiesDerived.id().0,
+                AuditEvent::TaskCapabilitiesDelegateWiden.id().0,
+                AuditEvent::TaskCapabilitiesDelegateWiden.id().0,
+            ]
+        );
+    }
+
+    #[test]
+    fn apply_token_refuses_a_sandboxed_target() {
+        // A correctly-signed, current-epoch token whose payload is even the
+        // empty set is refused on a sandboxed record before verification.
+        let signing = SigningKey::from_bytes(&[0x44; 32]);
+        let authority = Ed25519PublicKey::from_bytes(signing.verifying_key().as_bytes()).unwrap();
+        let sink = RecordingSink::new();
+        let mut t = TaskCapabilities::derive(
+            TaskId(13),
+            UserId(1000),
+            caps_of(&[CapabilityId::FS_MOUNT]),
+            caps_of(&[CapabilityId::FS_MOUNT]),
+            &sink,
+        )
+        .as_sandboxed();
+        let epoch = RevocationEpoch(1);
+        let payload = CapabilitySet::empty();
+        let body = CapabilityToken::signing_input(ABI_VERSION_CURRENT, t.task().0, epoch, &payload);
+        let sig = signing.sign(&body);
+        let token = CapabilityToken {
+            abi_version: ABI_VERSION_CURRENT,
+            subject: t.task().0,
+            epoch,
+            caps: payload,
+            signature: Ed25519Signature::from_bytes(sig.to_bytes()),
+        };
+        assert_eq!(
+            t.apply_token(&token, &authority, epoch, &sink),
+            Err(Errno::PermissionDenied)
+        );
+        assert!(t.effective().is_empty());
     }
 
     #[test]

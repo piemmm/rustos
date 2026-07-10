@@ -231,6 +231,19 @@ pub enum Errno {
     /// repositioned the ring) by the time this code is delivered; the
     /// caller may submit fresh transfers immediately.
     EndpointStalled = 29,
+    /// The device behind the requested operation faulted.
+    ///
+    /// The client-visible form of
+    /// [`DriverError::DeviceFault`](crate::DriverError::DeviceFault): the
+    /// hardware (or its driver) rejected an operation that was otherwise
+    /// well-formed and authorised — a display service's scan-out engine
+    /// refusing a present, a controller failing mid-transfer. Deliberately
+    /// distinct from [`WouldBlock`](Self::WouldBlock) (a retry can
+    /// legitimately succeed once the device is idle) and from
+    /// [`NotImplemented`](Self::NotImplemented) (the operation itself is
+    /// supported); a caller treats it as the device being unhealthy, not
+    /// as a protocol error of its own making.
+    DeviceFault = 30,
 }
 
 impl Errno {
@@ -295,6 +308,7 @@ impl Errno {
             27 => Some(Self::NotForeground),
             28 => Some(Self::BrokenPipe),
             29 => Some(Self::EndpointStalled),
+            30 => Some(Self::DeviceFault),
             _ => None,
         }
     }
@@ -332,6 +346,7 @@ impl fmt::Display for Errno {
             Self::NotForeground => "not the console foreground owner",
             Self::BrokenPipe => "broken pipe",
             Self::EndpointStalled => "endpoint stalled",
+            Self::DeviceFault => "device fault",
         };
         f.write_str(message)
     }
@@ -373,6 +388,7 @@ mod tests {
         assert_eq!(Errno::NotForeground.as_i32(), 27);
         assert_eq!(Errno::BrokenPipe.as_i32(), 28);
         assert_eq!(Errno::EndpointStalled.as_i32(), 29);
+        assert_eq!(Errno::DeviceFault.as_i32(), 30);
     }
 
     #[test]
@@ -409,11 +425,12 @@ mod tests {
             Errno::NotForeground,
             Errno::BrokenPipe,
             Errno::EndpointStalled,
+            Errno::DeviceFault,
         ] {
             assert_eq!(Errno::from_i32(errno.as_i32()), Some(errno));
         }
         assert_eq!(Errno::from_i32(0), None);
-        assert_eq!(Errno::from_i32(30), None);
+        assert_eq!(Errno::from_i32(31), None);
         assert_eq!(Errno::from_i32(-1), None);
     }
 

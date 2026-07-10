@@ -19,7 +19,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use rustos_abi::driver::display::{
-    AccelCaps, AccelLayer, AcceleratedDisplay, Display, DisplayFormat, DisplayMode,
+    AccelCaps, AccelLayer, AcceleratedDisplay, DamageRect, Display, DisplayFormat, DisplayMode,
 };
 use rustos_abi::DriverError;
 
@@ -325,20 +325,28 @@ impl Compositor {
     /// Recompose every damaged pixel into the back buffer and the
     /// scan-out frame, then clear the damage. Pixels outside the damage
     /// region keep their previous value (the point of damage tracking).
-    pub fn composite(&mut self) {
+    ///
+    /// Returns the smallest screen rectangle covering every recomposed
+    /// pixel — [`Rect::EMPTY`] when nothing was dirty — so a presenter
+    /// can hand the display only the changed region
+    /// ([`Display::present_region`]).
+    pub fn composite(&mut self) -> Rect {
         let screen = self.screen_rect();
         let damage = core::mem::take(&mut self.damage);
+        let mut bounds = Rect::EMPTY;
         for &dirty in damage.rects() {
             let area = dirty.intersection(&screen);
             if area.is_empty() {
                 continue;
             }
+            bounds = bounds.union(&area);
             for y in area.top()..area.bottom() {
                 for x in area.left()..area.right() {
                     self.recompose_pixel(x, y);
                 }
             }
         }
+        bounds
     }
 
     /// The current scan-out frame, laid out for [`Compositor::mode`].
@@ -355,13 +363,25 @@ impl Compositor {
 
     /// Composite any pending damage and present the frame to `display`.
     ///
+    /// When the recomposed damage is a strict sub-rectangle of the screen
+    /// the frame is handed over through [`Display::present_region`], so a
+    /// driver whose scan-out path is a copy (and the remote display
+    /// client's shared-memory blit) touches only the changed pixels; a
+    /// whole-screen damage — and the no-damage case, whose present is the
+    /// caller's explicit request to (re-)show the current frame — takes
+    /// the full [`Display::present`] path.
+    ///
     /// # Errors
     ///
     /// Propagates any [`DriverError`] the display driver returns from
-    /// [`Display::present`].
+    /// [`Display::present`] / [`Display::present_region`].
     pub fn present(&mut self, display: &mut dyn Display) -> Result<(), DriverError> {
-        self.composite();
-        display.present(&self.frame)
+        let bounds = self.composite();
+        if let Some(damage) = sub_screen_damage(&bounds, &self.mode) {
+            display.present_region(&self.frame, damage)
+        } else {
+            display.present(&self.frame)
+        }
     }
 
     /// Present via the display's hardware layer engine when it can serve
@@ -548,6 +568,30 @@ impl LayerBuf {
             opacity: 255,
         }
     }
+}
+
+/// Convert composited damage `bounds` into the [`DamageRect`] a
+/// [`Display::present_region`] call carries, or `None` when the full
+/// [`Display::present`] path should run instead: an empty bounds (the
+/// present is then an explicit re-show of the current frame) or a bounds
+/// covering the whole screen. The bounds are already clipped to the
+/// screen, so the coordinate conversions cannot fail; a rectangle that
+/// nevertheless does not fit falls back to the full present rather than
+/// presenting a wrong region.
+fn sub_screen_damage(bounds: &Rect, mode: &DisplayMode) -> Option<DamageRect> {
+    if bounds.is_empty() {
+        return None;
+    }
+    let damage = DamageRect {
+        x: u32::try_from(bounds.left()).ok()?,
+        y: u32::try_from(bounds.top()).ok()?,
+        width_px: bounds.width,
+        height_px: bounds.height,
+    };
+    if damage.covers(mode) {
+        return None;
+    }
+    Some(damage)
 }
 
 /// Allocate a zeroed scan-out frame for `mode`, or `None` if its size

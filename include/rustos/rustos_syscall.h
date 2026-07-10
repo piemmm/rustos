@@ -130,8 +130,13 @@ typedef struct ros_wait_status {
 * other than the values below (including 0) is reserved and refused; a HANDLE
 * wire names a descriptor of the CALLER'S OWN open table (a file, resource, or
 * pipe end), owner-checked kernel-side before any child state exists. */
-#define ROS_SPAWN_ATTACH_VERSION 1u
-#define ROS_SPAWN_ATTACH_LEN 48u
+#define ROS_SPAWN_ATTACH_VERSION 2u
+#define ROS_SPAWN_ATTACH_LEN 56u
+/* Attach-block flags. SANDBOX starts the child as a minimum-capability
+* parser sandbox: empty capability set, closed syscall allow-list, and
+* every wire must be CLOSED or HANDLE (nothing ambient flows in). Any
+* reserved flag bit is refused. */
+#define ROS_SPAWN_FLAG_SANDBOX 1u
 #define ROS_FD_WIRE_INHERIT 1u
 #define ROS_FD_WIRE_INHERIT_SLOT 2u
 #define ROS_FD_WIRE_CLOSED 3u
@@ -144,6 +149,7 @@ typedef struct ros_spawn_attach {
     uint32_t version;
     uint32_t target_uid;
     uint64_t console;
+    uint64_t flags;
     ros_fd_wire_t wires[4];
 } ros_spawn_attach_t;
 

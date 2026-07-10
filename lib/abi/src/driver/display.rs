@@ -59,12 +59,91 @@ impl DisplayFormat {
         self as u8
     }
 
+    /// Recover a format from its wire value.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Errno::OutOfRange`] if `value` is not a known format (fail
+    /// closed on a malformed argument).
+    pub const fn from_u8(value: u8) -> Result<Self, crate::Errno> {
+        match value {
+            1 => Ok(Self::Rgba8888),
+            2 => Ok(Self::Bgra8888),
+            _ => Err(crate::Errno::OutOfRange),
+        }
+    }
+
     /// Bytes per pixel in this format.
     #[must_use]
     pub const fn bytes_per_pixel(self) -> u32 {
         match self {
             Self::Rgba8888 | Self::Bgra8888 => 4,
         }
+    }
+}
+
+/// One axis-aligned pixel rectangle of a presented frame, in surface
+/// coordinates (origin top-left) — the *damage* a present names as changed
+/// since the previous frame, so a driver can blit only the touched pixels.
+///
+/// A rectangle is validated against the active [`DisplayMode`] with
+/// [`DamageRect::validate_in`] before any pixel access: a zero-sized or
+/// out-of-bounds rectangle is refused, never clamped, so a hostile client
+/// cannot steer the blit outside the frame it supplied.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct DamageRect {
+    /// X of the rectangle's left edge, in pixels from the surface's left.
+    pub x: u32,
+    /// Y of the rectangle's top edge, in pixels from the surface's top.
+    pub y: u32,
+    /// Width in pixels; never zero in a valid rectangle.
+    pub width_px: u32,
+    /// Height in pixels; never zero in a valid rectangle.
+    pub height_px: u32,
+}
+
+impl DamageRect {
+    /// The rectangle covering the whole of `mode`'s surface.
+    #[must_use]
+    pub const fn full(mode: &DisplayMode) -> Self {
+        Self {
+            x: 0,
+            y: 0,
+            width_px: mode.width_px,
+            height_px: mode.height_px,
+        }
+    }
+
+    /// Whether this rectangle covers the whole of `mode`'s surface.
+    #[must_use]
+    pub const fn covers(&self, mode: &DisplayMode) -> bool {
+        self.x == 0
+            && self.y == 0
+            && self.width_px == mode.width_px
+            && self.height_px == mode.height_px
+    }
+
+    /// Check the rectangle is non-empty and lies wholly inside `mode`'s
+    /// surface.
+    ///
+    /// The extents are summed in `u64`, so a hostile `x + width_px` cannot
+    /// wrap back into range.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::LengthOutOfRange`] if the rectangle is empty or any
+    /// edge falls outside the surface.
+    pub const fn validate_in(&self, mode: &DisplayMode) -> Result<(), DriverError> {
+        if self.width_px == 0 || self.height_px == 0 {
+            return Err(DriverError::LengthOutOfRange);
+        }
+        let right = self.x as u64 + self.width_px as u64;
+        let bottom = self.y as u64 + self.height_px as u64;
+        if right > mode.width_px as u64 || bottom > mode.height_px as u64 {
+            return Err(DriverError::LengthOutOfRange);
+        }
+        Ok(())
     }
 }
 
@@ -130,6 +209,34 @@ pub trait Display {
     ///
     /// [`DriverHandle`]: crate::driver::DriverHandle
     fn present(&mut self, frame: &[u8]) -> Result<(), DriverError>;
+
+    /// Present a fully-rendered frame of which only `damage` changed.
+    ///
+    /// `frame` carries the **whole** surface exactly as for
+    /// [`Self::present`]; `damage` names the rectangle that differs from
+    /// the previously presented frame, so a driver whose scan-out path is
+    /// a copy can blit only the touched pixels. The default forwards to
+    /// the full-frame [`Self::present`] — a correct (if unoptimised)
+    /// implementation for every existing driver — after validating
+    /// `damage` against the active mode, so a malformed rectangle is
+    /// refused identically on both paths.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::LengthOutOfRange`] if `damage` is empty or falls
+    ///   outside the active mode's surface.
+    /// * Everything [`Self::present`] can return.
+    ///
+    /// # Capabilities
+    ///
+    /// Caller must present the driver's
+    /// [`DriverHandle`](crate::driver::DriverHandle), exactly as for
+    /// [`Self::present`].
+    fn present_region(&mut self, frame: &[u8], damage: DamageRect) -> Result<(), DriverError> {
+        let mode = self.mode_info()?;
+        damage.validate_in(&mode)?;
+        self.present(frame)
+    }
 }
 
 /// What an [`AcceleratedDisplay`] back-end can composite in hardware.

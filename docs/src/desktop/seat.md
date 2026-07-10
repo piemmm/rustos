@@ -257,7 +257,7 @@ refused reader consumes nothing), the handoff transfer, the bystander
 steal refusals, the input-mode gate, and both no-wedge paths (exit release
 and gate healing).
 
-## Toward the live desktop session (Stage D7a)
+## Toward the live desktop session (Stages D7a–D7b)
 
 Stage D7 (`plans/DISPLAY.md`) is the display-client present path: a
 user-space window-manager session presenting composited frames to a
@@ -290,9 +290,49 @@ Its kernel surfaces are live:
   never a raw (recyclable) PID, and never a handle a bystander could
   use.
 
-The display service protocol, the `lib/display` engine/client, the
-framebuffer service process, and the desktop session binary build on
-these in stages D7b–D7d.
+On top of those surfaces, the display-service protocol and its engine
+are live (stage D7b):
+
+- **The wire protocol** is `rustos_abi::display_ipc`: one reserved,
+  squat-protected rendezvous (`DISPLAY_ENDPOINT`, bindable only under
+  `CAP_IPC_BIND_PRIVILEGED`) serving the fixed-width, fail-closed
+  requests `Query` (→ the mode reply), `Configure { shm grant handle,
+  frame count, frame geometry }`, and `Present { frame index, damage
+  rect }`. Requests carry the seat id in-protocol; every reserved tail
+  is zero-checked, and the decoders are fuzzed alongside the other ABI
+  decoders.
+- **One definition of the semantics.** The `lib/display` crate hosts
+  both halves over injected seams: the `DisplayServer` engine a display
+  driver's `Run` binary hosts (decode → `call_peer_seat` lease gate on
+  **every** request, `Query` included, so only the seat owner learns
+  the mode → exact-mode geometry validation → map-once shm adoption →
+  bounded, damage-aware blit through the `Display` trait) and the
+  `DisplayClient`/`RemoteDisplay` client the desktop session presents
+  through — `RemoteDisplay` implements the existing `Display` trait
+  over the session's own mapping of the shared frame region, tracking
+  each frame's stale region so a double-buffered present copies only
+  the pixels that need refreshing.
+- **Frames are bound to the lease that configured them.** `Configure`
+  records the granting lease's generation; a `Present` under any other
+  generation (a revoked or re-acquired seat) is refused until the new
+  owner reconfigures, and a caller observed to have lost its lease has
+  its stale frame region dropped — one owner's frames can never scan
+  out under another's lease.
+- **Damage travels end to end.** `Display::present_region` (an in-place
+  evolution with a full-blit default) carries the changed rectangle
+  from the compositor — which reports its composited damage bounds —
+  through the protocol to the driver's partial blit, so a small update
+  touches only its own scanlines on the scan-out path.
+- **A display's surface is discovered, never assumed.** A display-class
+  hardware node can now carry a `Framebuffer` resource — a
+  geometry-carrying, `CAP_MMIO_MAP`-gated scan-out window (the FDT
+  `simple-framebuffer` model normalised into the hardware tree) whose
+  validated mode the autoloaded display service reads through
+  `sole_framebuffer` before mapping the window through `mmio_map`.
+
+The framebuffer service process (the `Run` binary hosting the engine),
+the desktop session binary, and the end-to-end vertical build on these
+in the remainder of D7b and stages D7c–D7d (`plans/DISPLAY.md`).
 
 ## Observing seats
 

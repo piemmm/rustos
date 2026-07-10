@@ -103,6 +103,38 @@ pub struct CallerContext<'a> {
     pub caps: &'a TaskCapabilities,
 }
 
+/// Whether a **parser sandbox** task (`SPAWN_FLAG_SANDBOX`,
+/// `docs/src/security/sandbox.md`) may issue `number` at all.
+///
+/// The list is closed and deliberately short: only the self-scoped and
+/// descriptor-scoped operations a sandboxed worker needs to run, talk over
+/// the descriptors its parent explicitly wired, and manage its own heap.
+/// Everything that names an object *outside* the task — a path, an IPC
+/// endpoint, a resource reference, a process, a device, system state — is
+/// refused before its handler runs, so a compromised parser cannot even
+/// probe those surfaces. In particular there is no `fs_open` (no path-based
+/// authority; `fs_read`/`fs_write`/`fs_close` act only on descriptors the
+/// parent handed over), no `spawn`/`signal`/`wait` (a sandbox spawns
+/// nothing), no `ipc_*`/`pipe_create`/`resource_open` (no new channels),
+/// and no `cap_*` (a sandbox holds nothing and may never be handed
+/// anything). Widening this list is a security decision reviewed under the
+/// charter's capability-minimalism bar, never a convenience.
+#[must_use]
+pub fn sandbox_allows(number: SyscallNumber) -> bool {
+    matches!(
+        number,
+        SyscallNumber::YIELD
+            | SyscallNumber::EXIT
+            | SyscallNumber::STREAM_READ
+            | SyscallNumber::STREAM_WRITE
+            | SyscallNumber::FS_READ
+            | SyscallNumber::FS_WRITE
+            | SyscallNumber::FS_CLOSE
+            | SyscallNumber::MEM_MAP
+            | SyscallNumber::MEM_UNMAP
+    )
+}
+
 /// Return type of a single dispatched syscall.
 ///
 /// `Ok(value)` is the unsigned return register; the architecture stub
@@ -1933,7 +1965,13 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             return Err(Errno::NotFound);
         };
 
-        // step 2: capability check.
+        // step 2: sandbox confinement, then capability check. Confinement
+        // first: a sandboxed task's answer never depends on what the
+        // syscall would have required, only on the closed allow-list.
+        if caller.caps.is_sandboxed() && !sandbox_allows(number) {
+            self.audit_denied(caller, spec);
+            return Err(Errno::PermissionDenied);
+        }
         if let Some(required) = spec.required_capability {
             if !caller.caps.has(required) {
                 self.audit_denied(caller, spec);
@@ -3661,6 +3699,76 @@ mod tests {
         assert_eq!(h.last(), None);
         // Exactly one denied event.
         assert_eq!(sink.ids(), [AuditEvent::SyscallPermissionDenied.id().0]);
+    }
+
+    #[test]
+    fn sandbox_allow_list_is_closed_and_exact() {
+        // The confinement list is a frozen security decision: widening it
+        // must fail this test, so the widening is made deliberately, in
+        // review, never by accident.
+        let mut allowed: Vec<&str> = rustos_abi::SYSCALLS
+            .iter()
+            .filter(|spec| sandbox_allows(spec.number))
+            .map(|spec| spec.name)
+            .collect();
+        allowed.sort_unstable();
+        assert_eq!(
+            allowed,
+            [
+                "exit",
+                "fs_close",
+                "fs_read",
+                "fs_write",
+                "mem_map",
+                "mem_unmap",
+                "stream_read",
+                "stream_write",
+                "yield",
+            ]
+        );
+    }
+
+    #[test]
+    fn sandboxed_caller_is_confined_to_the_allow_list() {
+        // Exhaustive over the whole table: an allow-listed syscall reaches
+        // its handler; every other syscall is refused before its handler
+        // runs, with the denial audited. A fresh handler and sink per
+        // syscall keeps the assertions independent.
+        for spec in rustos_abi::SYSCALLS {
+            let sink = RecordingSink::new();
+            let caps = build_caps(&[], &sink).as_sandboxed();
+            let ctx = CallerContext {
+                task_id: TaskId(8),
+                caps: &caps,
+            };
+            let h = MockHandlers::default();
+            let d = Dispatcher::new(&h, &sink);
+            let mut args = RawArgs::ZERO;
+            populate_valid_args(spec, &mut args);
+            let r = d.dispatch(&ctx, spec.number.as_u16(), args);
+            if sandbox_allows(spec.number) {
+                assert!(
+                    r.is_ok(),
+                    "{} should pass the sandbox gate: {r:?}",
+                    spec.name
+                );
+                assert_eq!(h.last(), Some(spec.name));
+            } else {
+                assert_eq!(
+                    r,
+                    Err(Errno::PermissionDenied),
+                    "{} must be refused for a sandboxed task",
+                    spec.name
+                );
+                assert_eq!(h.last(), None, "{} reached its handler", spec.name);
+                assert!(
+                    sink.ids()
+                        .contains(&AuditEvent::SyscallPermissionDenied.id().0),
+                    "{} denial was not audited",
+                    spec.name
+                );
+            }
+        }
     }
 
     #[test]

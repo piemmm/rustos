@@ -315,11 +315,9 @@ mod tests {
         let n = serve_request(&channel, &req_bytes, &mut reply).expect("serves");
 
         let mut out = [0u32; MAILBOX_PROPERTY_WORDS];
-        // `DeviceFault` maps to `Errno::NotImplemented` via `as_errno`.
-        assert_eq!(
-            decode_reply(&reply[..n], &mut out),
-            Err(Errno::NotImplemented)
-        );
+        // `DeviceFault` maps to its distinct `Errno::DeviceFault` via
+        // `as_errno`.
+        assert_eq!(decode_reply(&reply[..n], &mut out), Err(Errno::DeviceFault));
     }
 
     #[test]

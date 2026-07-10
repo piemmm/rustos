@@ -39,9 +39,8 @@
 // `rustos-rt`) never enter those builds.
 #[cfg(all(freestanding, feature = "program"))]
 mod program {
-    use rustos_abi::seat::{
-        encode_seat_reply, SEATMGR_ENDPOINT, SEATMGR_MAX_REQUEST, SEATMGR_REPLY_LEN,
-    };
+    use rustos_abi::reply::encode_status_reply;
+    use rustos_abi::seat::{SEATMGR_ENDPOINT, SEATMGR_MAX_REQUEST, SEATMGR_REPLY_LEN};
     use rustos_abi::{Errno, Origin, ORIGIN_WIRE_LEN};
     use rustos_caps::CapabilitySet;
     use rustos_rt::LogSink;
@@ -133,7 +132,7 @@ mod program {
                     Err(ret) => Err(errno_from(ret)),
                 };
 
-            let reply = encode_seat_reply(outcome);
+            let reply = encode_status_reply(outcome);
             let _ = rustos_rt::call_reply(SEATMGR_ENDPOINT, ticket, &reply);
         }
     }

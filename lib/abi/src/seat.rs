@@ -12,7 +12,9 @@
 //! audited service rather than ad-hoc syscall callers.
 //!
 //! Requests are the fixed-width [`SeatAdminRequest`]; the reply is the
-//! [`SEATMGR_REPLY_LEN`]-byte status frame carrying `0` or a negative
+//! shared [`SEATMGR_REPLY_LEN`]-byte status frame
+//! ([`crate::reply::encode_status_reply`] /
+//! [`crate::reply::decode_status_reply`]) carrying `0` or a negative
 //! [`Errno`] discriminant. Every decode fails closed: an unknown magic,
 //! version, operation, or a dirty reserved field refuses rather than
 //! guessing.
@@ -73,9 +75,9 @@ pub const SEATMGR_VERSION_V1: u16 = 1;
 /// fixed-width [`SeatAdminRequest`].
 pub const SEATMGR_MAX_REQUEST: usize = SeatAdminRequest::WIRE_LEN;
 
-/// Reply length, in bytes: one little-endian `i32` status word — `0` on
-/// success, a negative [`Errno`] discriminant on refusal.
-pub const SEATMGR_REPLY_LEN: usize = 4;
+/// Reply length, in bytes: the shared status frame — `0` on success, a
+/// negative [`Errno`] discriminant on refusal.
+pub const SEATMGR_REPLY_LEN: usize = crate::reply::STATUS_REPLY_LEN;
 
 /// One seat-administration operation (`plans/DISPLAY.md` D3).
 ///
@@ -171,49 +173,9 @@ impl SeatAdminRequest {
     }
 }
 
-/// Encode a seat-administration outcome as the [`SEATMGR_REPLY_LEN`]-byte
-/// status frame: `0` for success, the negative [`Errno`] discriminant for a
-/// refusal.
-#[must_use]
-pub fn encode_seat_reply(result: Result<(), Errno>) -> [u8; SEATMGR_REPLY_LEN] {
-    let status: i32 = match result {
-        Ok(()) => 0,
-        Err(err) => -err.as_i32(),
-    };
-    status.to_le_bytes()
-}
-
-/// Decode a seat-administration reply frame.
-///
-/// # Errors
-///
-/// * [`Errno::BufferTooSmall`] — `bytes` cannot hold the status word.
-/// * [`Errno::OutOfRange`] — a non-zero status that is not a defined
-///   negative [`Errno`] discriminant (fail closed on a corrupt frame).
-/// * The decoded [`Errno`] itself, when the service refused the request.
-pub fn decode_seat_reply(bytes: &[u8]) -> Result<(), Errno> {
-    if bytes.len() < SEATMGR_REPLY_LEN {
-        return Err(Errno::BufferTooSmall);
-    }
-    let mut raw = [0u8; SEATMGR_REPLY_LEN];
-    raw.copy_from_slice(&bytes[..SEATMGR_REPLY_LEN]);
-    let status = i32::from_le_bytes(raw);
-    if status == 0 {
-        return Ok(());
-    }
-    let errno = status
-        .checked_neg()
-        .and_then(Errno::from_i32)
-        .ok_or(Errno::OutOfRange)?;
-    Err(errno)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        decode_seat_reply, encode_seat_reply, SeatAdminRequest, SEATMGR_REPLY_LEN,
-        SEATMGR_REQUEST_MAGIC,
-    };
+    use super::{SeatAdminRequest, SEATMGR_REPLY_LEN, SEATMGR_REQUEST_MAGIC};
     use crate::Errno;
 
     #[test]
@@ -280,24 +242,7 @@ mod tests {
     }
 
     #[test]
-    fn replies_round_trip_ok_and_error() {
-        assert_eq!(decode_seat_reply(&encode_seat_reply(Ok(()))), Ok(()));
-        assert_eq!(
-            decode_seat_reply(&encode_seat_reply(Err(Errno::PermissionDenied))),
-            Err(Errno::PermissionDenied)
-        );
-        // Fail closed: a short frame and an undefined status word.
-        assert_eq!(
-            decode_seat_reply(&[0u8; SEATMGR_REPLY_LEN - 1]),
-            Err(Errno::BufferTooSmall)
-        );
-        assert_eq!(
-            decode_seat_reply(&i32::MIN.to_le_bytes()),
-            Err(Errno::OutOfRange)
-        );
-        assert_eq!(
-            decode_seat_reply(&1i32.to_le_bytes()),
-            Err(Errno::OutOfRange)
-        );
+    fn reply_length_is_the_shared_status_frame() {
+        assert_eq!(SEATMGR_REPLY_LEN, crate::reply::STATUS_REPLY_LEN);
     }
 }

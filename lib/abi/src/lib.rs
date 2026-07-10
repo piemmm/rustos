@@ -20,6 +20,7 @@ pub mod appinfo;
 pub mod blkio;
 pub mod boot;
 pub mod capability;
+pub mod display_ipc;
 pub mod driver;
 pub mod driver_store;
 pub mod elevate;
@@ -38,6 +39,7 @@ pub mod memory;
 pub mod origin;
 pub mod process;
 pub mod random;
+pub mod reply;
 pub mod rlimit;
 pub mod rxe;
 pub mod seat;
@@ -121,8 +123,9 @@ pub use process::{
     StringSlot, WaitStatus, WaitStatusRecord, CONSOLE_INDEX_MAX, CONSOLE_INHERIT,
     FD_WIRE_KIND_CLOSED, FD_WIRE_KIND_HANDLE, FD_WIRE_KIND_INHERIT, FD_WIRE_KIND_INHERIT_SLOT,
     PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN,
-    PROCESS_START_MAX_TOTAL_LEN, SPAWN_ATTACH_LEN, SPAWN_ATTACH_VERSION, SPAWN_UID_INHERIT, STDERR,
-    STDIN, STDINFO, STDOUT, STD_STREAM_COUNT, WAIT_STATUS_KIND_EXITED, WAIT_STATUS_KIND_STOPPED,
+    PROCESS_START_MAX_TOTAL_LEN, SPAWN_ATTACH_LEN, SPAWN_ATTACH_VERSION, SPAWN_FLAGS_ALL,
+    SPAWN_FLAG_SANDBOX, SPAWN_UID_INHERIT, STDERR, STDIN, STDINFO, STDOUT, STD_STREAM_COUNT,
+    WAIT_STATUS_KIND_EXITED, WAIT_STATUS_KIND_STOPPED,
 };
 pub use random::{RandomFlags, RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES};
 pub use rlimit::{LimitKind, ResourceLimit, RLIMIT_INFINITY};
