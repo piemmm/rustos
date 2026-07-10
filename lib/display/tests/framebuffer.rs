@@ -1,18 +1,19 @@
-//! Unit tests for the linear framebuffer driver against an in-process
-//! mock [`MmioMapper`] (mirrors the bus drivers' `MockMapper`).
+//! Tests for the linear-framebuffer surface engine against an
+//! in-process mock [`MmioMapper`] (mirrors the bus drivers' `MockMapper`).
+//!
+//! These live in the crate's `tests/` directory rather than beside the
+//! code: minting a mock [`RegisterWindow`] requires its `unsafe`
+//! constructor, and the library itself forbids `unsafe` outright — a
+//! separate test crate keeps that guarantee intact.
 
-extern crate alloc;
+use std::cell::{Cell, RefCell};
+use std::ptr::NonNull;
+use std::rc::Rc;
 
-use alloc::rc::Rc;
-use alloc::vec;
-use alloc::vec::Vec;
-use core::cell::RefCell;
-use core::ptr::NonNull;
-
-use super::*;
-use core::cell::Cell;
+use rustos_abi::driver::display::{DamageRect, Display, DisplayFormat, DisplayMode, SeatGate};
 use rustos_abi::driver::DriverKind;
-use rustos_abi::{CapabilityId, MmioMapError, MmioMapper, RegisterWindow};
+use rustos_abi::{CapabilityId, DriverError, DriverHost, MmioMapError, MmioMapper, RegisterWindow};
+use rustos_display::{Framebuffer, FramebufferConfig};
 
 /// Stand-in for the kernel's MMIO-map facility. Backs every minted
 /// [`RegisterWindow`] with a fixed `u32` buffer (≥ 4-byte aligned,
@@ -57,7 +58,7 @@ impl MmioMapper for MockMapper {
         // 4-byte aligned (the `Vec<u32>` allocation guarantee); the
         // backing is held in an `Rc` that outlives every window minted
         // here, and the tests touch it through `byte()` only between —
-        // never during — the driver's writes.
+        // never during — the engine's writes.
         Ok(unsafe { RegisterWindow::from_mapping(phys_base, base, len) })
     }
 }
@@ -75,12 +76,11 @@ impl SeatGate for MockGate {
     }
 }
 
-/// Mock driver host. `drv_load` / `mmio_map` model the load-time
-/// capability grants; `mapper` is `None` to model a host with no
-/// MMIO-map facility; `gate` is `None` to model a host with no seat
-/// wired (present then proceeds ungated).
+/// Mock driver host. `mmio_map` models the load-time capability grant;
+/// `mapper` is `None` to model a host with no MMIO-map facility; `gate`
+/// is `None` to model a host with no seat wired (present then proceeds
+/// ungated).
 struct MockHost {
-    drv_load: bool,
     mmio_map: bool,
     mapper: Option<MockMapper>,
     gate: Option<MockGate>,
@@ -89,7 +89,6 @@ struct MockHost {
 impl MockHost {
     fn full(words: usize) -> Self {
         Self {
-            drv_load: true,
             mmio_map: true,
             mapper: Some(MockMapper::new(words, true)),
             gate: None,
@@ -100,7 +99,6 @@ impl MockHost {
 impl DriverHost for MockHost {
     fn has_capability(&self, cap: CapabilityId) -> bool {
         match cap {
-            CapabilityId::DRV_LOAD => self.drv_load,
             CapabilityId::MMIO_MAP => self.mmio_map,
             _ => false,
         }
@@ -124,24 +122,6 @@ fn config(width: u32, height: u32, stride: u32) -> FramebufferConfig {
         stride_bytes: stride,
         format: DisplayFormat::Bgra8888,
     }
-}
-
-#[test]
-fn register_requires_drv_load() {
-    let granted = MockHost {
-        drv_load: true,
-        mmio_map: false,
-        mapper: None,
-        gate: None,
-    };
-    assert!(register(&granted).is_ok());
-    let denied = MockHost {
-        drv_load: false,
-        mmio_map: false,
-        mapper: None,
-        gate: None,
-    };
-    assert_eq!(register(&denied), Err(DriverError::PermissionDenied));
 }
 
 #[test]
@@ -251,7 +231,6 @@ fn present_region_fails_closed_on_bad_damage_and_short_frame() {
 #[test]
 fn present_region_is_seat_gated_before_any_write() {
     let host = MockHost {
-        drv_load: true,
         mmio_map: true,
         mapper: Some(MockMapper::new(8, true)),
         gate: Some(MockGate {
@@ -302,7 +281,6 @@ fn present_ignores_trailing_bytes_of_oversized_frame() {
 #[test]
 fn open_requires_mmio_map_capability_on_host() {
     let host = MockHost {
-        drv_load: true,
         mmio_map: false,
         mapper: Some(MockMapper::new(8, true)),
         gate: None,
@@ -317,7 +295,6 @@ fn open_requires_mmio_map_capability_on_host() {
 fn open_surfaces_mapper_capability_denial() {
     // Host advertises the grant but the mapper itself fails closed.
     let host = MockHost {
-        drv_load: true,
         mmio_map: true,
         mapper: Some(MockMapper::new(8, false)),
         gate: None,
@@ -331,7 +308,6 @@ fn open_surfaces_mapper_capability_denial() {
 #[test]
 fn open_without_mapper_is_unsupported() {
     let host = MockHost {
-        drv_load: true,
         mmio_map: true,
         mapper: None,
         gate: None,

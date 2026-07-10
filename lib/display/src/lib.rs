@@ -18,15 +18,22 @@
 //! adds the behaviour. Frames travel through one `shm_grant`ed region
 //! mapped once at configure time — presents carry a frame index and a
 //! damage rectangle, never pixels.
+//!
+//! The crate also hosts [`framebuffer::Framebuffer`] — the generic
+//! linear-surface engine the framebuffer service's `Run` binary scans
+//! out through (and the framebuffer QEMU verticals drive directly), so
+//! the surface blit has exactly one definition.
 
 #![no_std]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
 pub mod client;
+pub mod framebuffer;
 pub mod server;
 
 pub use client::{DisplayClient, DisplayTransport, RemoteDisplay};
+pub use framebuffer::{Framebuffer, FramebufferConfig};
 pub use server::{DisplayServer, FrameRegion, SeatCheck, ShmMapper, DISPLAY_REPLY_MAX};
 
 use rustos_abi::{DriverError, Errno};

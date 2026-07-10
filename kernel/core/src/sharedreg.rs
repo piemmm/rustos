@@ -121,12 +121,14 @@ pub fn create(
 }
 
 /// Map an existing region `id` into `task`'s own live address space,
-/// returning its base user virtual address.
+/// returning its base user virtual address and the region's byte length
+/// (the registry's own record — the size the caller may trust without
+/// consulting the granting task).
 ///
 /// # Errors
 ///
 /// [`Errno::NotFound`] if the region was torn down, or the facility error.
-pub fn map(facility: &dyn SharedMemFacility, task: TaskId, id: u64) -> Result<u64, Errno> {
+pub fn map(facility: &dyn SharedMemFacility, task: TaskId, id: u64) -> Result<(u64, usize), Errno> {
     // Snapshot the backing under the lock; map outside it.
     let (phys_base, pages) = {
         let state = REGIONS.lock();
@@ -149,7 +151,7 @@ pub fn map(facility: &dyn SharedMemFacility, task: TaskId, id: u64) -> Result<u6
         .entry(task.0)
         .or_default()
         .push((base_va, id));
-    Ok(base_va)
+    Ok((base_va, region_len_bytes(pages)))
 }
 
 /// Release `task`'s shared mapping based at `base`, tearing down its
@@ -417,8 +419,10 @@ mod tests {
         let owner = TaskId(0x5_0002);
         let grantee = TaskId(0x5_0003);
         let (owner_va, id) = create(&fac, owner, 1).expect("create");
-        // A grantee maps the same region: refs = 2.
-        let grantee_va = map(&fac, grantee, id).expect("grantee maps");
+        // A grantee maps the same region: refs = 2. The reported length is
+        // the registry's own record of the one-page region, never a claim.
+        let (grantee_va, grantee_len) = map(&fac, grantee, id).expect("grantee maps");
+        assert_eq!(grantee_len, PAGE_SIZE);
         assert_eq!(fac.maps.lock().unwrap().len(), 2);
 
         // The owner releases first: ref drops to 1, the frames are NOT freed
@@ -445,7 +449,7 @@ mod tests {
         let owner = TaskId(0x5_0004);
         let grantee = TaskId(0x5_0005);
         let (_owner_va, id) = create(&fac, owner, 1).expect("create");
-        let _grantee_va = map(&fac, grantee, id).expect("grantee maps");
+        let (_grantee_va, _) = map(&fac, grantee, id).expect("grantee maps");
 
         // Reclaiming the grantee (e.g. a class driver unloaded on hot-removal)
         // drops its reference but does not free the region — the owner still

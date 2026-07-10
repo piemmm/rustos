@@ -2916,32 +2916,34 @@ transfer, landed in increments:
   recipient), and `call_peer_seat` (`abi-v1` 83, the `call_peer_origin`
   trust window, live-lease generation answer) — kernel host tests, `lib/rt`
   wrappers, `ros_sys_*` stubs, C headers, and the syscalls/seat docs all
-  landed together. **D7b is landed except the service process:** the
+  landed together. **D7b (the display service) is done:** the
   fixed-width, fuzzed `lib/abi::display_ipc` protocol (`Query`/`Configure`/
   `Present`, the reserved squat-protected `DISPLAY_ENDPOINT`, the shared
-  `lib/abi::reply` status frame), the new `lib/display` crate (the
+  `lib/abi::reply` status frame), the `lib/display` crate (the
   `DisplayServer` engine — decode → `call_peer_seat` lease gate on every
-  request, lease-generation-bound configure state, bounded present — and
-  the `DisplayClient`/`RemoteDisplay` halves with per-frame stale-damage
-  double-buffer bookkeeping), the in-place `Display::present_region`
-  evolution (full-blit default; real partial blits in the framebuffer
-  driver; the WM compositor threads its damage bounds through it), the
-  distinct `Errno::DeviceFault` (`DriverError::as_errno` now maps
-  `DeviceFault`/`Busy` to `DeviceFault`/`WouldBlock`), and the
+  request, lease-generation-bound configure state, bounded present — the
+  `DisplayClient`/`RemoteDisplay` halves with per-frame stale-damage
+  double-buffer bookkeeping, and the hoisted linear-surface engine
+  `Framebuffer`/`FramebufferConfig` the three framebuffer QEMU verticals
+  drive as non-driver consumers), the in-place `Display::present_region`
+  evolution (full-blit default; the WM compositor threads its damage
+  bounds through it), the
+  distinct `Errno::DeviceFault` (`DriverError::as_errno` maps
+  `DeviceFault`/`Busy` to `DeviceFault`/`WouldBlock`), the
   `HwResourceKind::Framebuffer` scan-out resource (geometry-carrying
   window: validated `framebuffer_mode` decode, `sole_framebuffer` grant
   resolver, `mmio_map` admission) so a user-space display driver learns
-  its surface from discovery, never a board constant. Remaining for D7b —
-  the framebuffer service `Run` binary: hoist the linear-surface engine
-  out of `drivers/display/framebuffer` into `lib/display` (the
-  `lib/virtio_input` precedent — the Run crate may link `lib/*` only and
-  the QEMU verticals keep a non-driver consumer), evolve `shm_map` to
-  report the mapped region's length (the server must size its frame
-  slice from the kernel's answer, never the client's claim), convert
-  `drivers/display/framebuffer` to the bin-only Run crate (grants →
-  `sole_framebuffer` → surface; `DISPLAY_ENDPOINT` bind under
-  `CAP_IPC_BIND_PRIVILEGED`; wait-set serve loop), and repoint the three
-  framebuffer QEMU verticals. Then D7c (the desktop
+  its surface from discovery, never a board constant, the in-place
+  `shm_map` evolution (a `len_out` user pointer reports the kernel
+  registry's own record of the mapped region's byte length, so a server
+  — and the four shm-consuming driver programs, which verify it before
+  building their slices — never sizes shared bytes from a peer's claim),
+  and the framebuffer service `Run` binary itself
+  (`drivers/display/framebuffer`, bin-only on the `virtio_kbd` shape:
+  grants → `sole_framebuffer` → surface; `DISPLAY_ENDPOINT` bind under
+  `CAP_IPC_BIND_PRIVILEGED`; `RtSeatCheck`/`RtShmMapper` seams; a
+  waitset-parked serve loop with fail-loud reserved exit codes — its
+  image bundle + bind keys ride the D7d autoload world). Then D7c (the desktop
   session binary: the live `SeatEventReader` over `rustos_rt::pointer_read`/
   `keyboard_read` after `display_acquire`, draining after each `SeatInput`
   wake, driving `DesktopShell` with the queried mode as the screen `Rect`),

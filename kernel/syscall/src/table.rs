@@ -1512,13 +1512,15 @@ pub trait SyscallHandlers {
     /// names a shared region, maps that region's existing kernel-owned frames
     /// into the caller's own address space, accounts the mapping so the
     /// frames are not freed while the caller still maps them, and returns its
-    /// base user virtual address. An unknown or non-owned handle, a grant of
-    /// the wrong kind, or a torn-down region fails closed.
+    /// base user virtual address, writing the region's byte length — the
+    /// kernel's own record, never the granting client's claim — to the
+    /// caller-supplied `len_out` pointer. An unknown or non-owned handle, a
+    /// grant of the wrong kind, or a torn-down region fails closed.
     ///
     /// The default implementation fails closed with
     /// [`Errno::NotImplemented`]; the real handler is installed in
     /// `kernel/core`.
-    fn shm_map(&self, _caller: &CallerContext<'_>, _handle: u64) -> SyscallResult {
+    fn shm_map(&self, _caller: &CallerContext<'_>, _handle: u64, _len_out: u64) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
 
@@ -2348,10 +2350,12 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 self.handlers.shm_create(caller, len, args.0[1])
             }
             SyscallNumber::SHM_MAP => {
-                // args[0] is an opaque `Handle` u64; the handler resolves it
+                // args[0] is an opaque `Handle` u64 the handler resolves
                 // against the calling task and the grant table (forgery +
-                // ownership are checked there).
-                self.handlers.shm_map(caller, args.0[0])
+                // ownership are checked there); args[1] is the non-null
+                // `len_out` `UserPtr` the handler writes the mapped region's
+                // byte length to (dispatcher-checked).
+                self.handlers.shm_map(caller, args.0[0], args.0[1])
             }
             SyscallNumber::SHM_UNMAP => {
                 // args[0] is the base virtual address the map returned; args[1]
@@ -3388,7 +3392,7 @@ mod tests {
             Ok(len as u64)
         }
 
-        fn shm_map(&self, _c: &CallerContext<'_>, handle: u64) -> SyscallResult {
+        fn shm_map(&self, _c: &CallerContext<'_>, handle: u64, _len_out: u64) -> SyscallResult {
             self.record("shm_map");
             Ok(handle)
         }

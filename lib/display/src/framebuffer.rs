@@ -1,78 +1,42 @@
-//! RustOS generic linear framebuffer display driver.
+//! The generic linear-framebuffer surface engine.
 //!
-//! Implements [`rustos_abi::driver::display::Display`] over a single
-//! firmware-provided linear pixel surface. The driver is
-//! platform-neutral: it copies a fully-rendered frame into a linear
-//! framebuffer whose physical base, geometry, and pixel encoding the
-//! boot capability discovered and handed to the driver host. The same
-//! source serves every platform whose firmware exposes such a surface
-//! (the aarch64 Raspberry Pi mailbox framebuffer, the riscv64 `virt`
-//! board's `ramfb`, and any UEFI GOP linear frame buffer); the
-//! wasm32 canvas target presents the same surface shape through the
-//! browser host.
+//! Implements [`Display`] over a single firmware-provided linear pixel
+//! surface. The engine is platform-neutral: it copies a fully-rendered
+//! frame into a linear framebuffer whose physical base, geometry, and
+//! pixel encoding the hosting process discovered and handed in — the
+//! `drivers/display/framebuffer` `Run` binary resolves them from its
+//! kernel-issued device-resource grants (`sole_framebuffer`), and the
+//! framebuffer QEMU verticals hand-assemble them from the board they
+//! synthesise. The same engine serves every platform whose firmware
+//! exposes such a surface (the aarch64 Raspberry Pi mailbox framebuffer,
+//! the riscv64 `virt` board's `ramfb`, any UEFI GOP linear frame
+//! buffer); the wasm32 canvas target presents the same surface shape
+//! through the browser host.
 //!
 //! Compositing, damage tracking, and GPU acceleration live above this
-//! driver in `userland/gui/wm`; the driver itself only owns the final
+//! engine in `userland/gui/wm`; the engine itself only owns the final
 //! scan-out copy (`lib/abi/src/driver/display.rs`).
-//!
-//! # Public surface
-//!
-//! Per the only public *function* is [`register`].
-//! [`Framebuffer`] is a public *type* re-exported so the driver host
-//! can instantiate it through [`Framebuffer::open`]; the host never
-//! reaches into the type beyond the [`Display`] trait.
 //!
 //! # Capabilities
 //!
-//! Loading requires [`CapabilityId::DRV_LOAD`]. Mapping the surface
-//! additionally requires [`CapabilityId::MMIO_MAP`]: the framebuffer
-//! is device-visible memory and is reached only through the
-//! capability-gated [`MmioMapper`], never through a pointer the driver
-//! synthesises itself (no ambient authority). The
-//! driver runs in user space; it does not request `CAP_DRV_KERNEL`.
-
-#![no_std]
-#![forbid(unsafe_op_in_unsafe_fn)]
-#![deny(missing_docs)]
+//! Mapping the surface requires
+//! [`CapabilityId::MMIO_MAP`](rustos_abi::CapabilityId::MMIO_MAP): the
+//! framebuffer is device-visible memory and is reached only through the
+//! capability-gated [`MmioMapper`], never through a pointer the engine
+//! synthesises itself (no ambient authority).
 
 use rustos_abi::driver::display::{DamageRect, Display, DisplayFormat, DisplayMode, SeatGate};
 use rustos_abi::driver::mmio::{MmioMapError, WindowError};
-use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost, MmioMapper, RegisterWindow};
+use rustos_abi::{CapabilityId, DriverError, DriverHost, MmioMapper, RegisterWindow};
 
-#[cfg(test)]
-mod tests;
-
-/// Per-driver `DriverHandle` marker returned by [`register`].
+/// Discovered description of a linear framebuffer.
 ///
-/// Mirrors the convention the bus and storage drivers use: the host
-/// re-issues a host-local handle when binding the driver into its load
-/// table; this constant is the on-the-wire signal that every load-time
-/// gate cleared. The bytes spell `"FBUF"`.
-const REGISTER_HANDLE_MARKER: u64 = 0x4642_5546_0000_0001;
-
-/// Driver entry point.
-///
-/// # Errors
-///
-/// * [`DriverError::PermissionDenied`] if the host did not grant
-///   [`CapabilityId::DRV_LOAD`].
-///
-/// # Capabilities
-///
-/// Requires [`CapabilityId::DRV_LOAD`].
-pub fn register(host: &dyn DriverHost) -> Result<DriverHandle, DriverError> {
-    if !host.has_capability(CapabilityId::DRV_LOAD) {
-        return Err(DriverError::PermissionDenied);
-    }
-    DriverHandle::from_raw(REGISTER_HANDLE_MARKER)
-}
-
-/// Firmware-discovered description of a linear framebuffer.
-///
-/// The boot capability fills this in from the platform's framebuffer
-/// hand-off (UEFI GOP, the Pi mailbox, `ramfb`) and the driver host
-/// passes it to [`Framebuffer::open`]. The driver never invents these
-/// values; it only validates them and maps the region they describe.
+/// The hosting process fills this in from the platform's framebuffer
+/// hand-off (the kernel-granted
+/// [`Framebuffer`](rustos_abi::hwtree::HwResourceKind::Framebuffer)
+/// resource, UEFI GOP, the Pi mailbox, `ramfb`) and passes it to
+/// [`Framebuffer::open`]. The engine never invents these values; it only
+/// validates them and maps the region they describe.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct FramebufferConfig {
     /// Device-visible physical base address of scanline 0, pixel 0.
@@ -127,14 +91,17 @@ impl FramebufferConfig {
 /// A linear framebuffer surface mapped through the host's
 /// [`MmioMapper`].
 ///
-/// The driver owns the [`RegisterWindow`] for the whole load: dropping
-/// the [`Framebuffer`] drops the window, which is the driver's quiesce
-/// step (the kernel reclaims the mapping on unload).
+/// The engine owns the [`RegisterWindow`] for the whole load: dropping
+/// the [`Framebuffer`] drops the window, which is the hosting process's
+/// quiesce step (the kernel reclaims the mapping on unload).
 /// Reloading is simply calling [`Framebuffer::open`] again.
 ///
-/// `'h` borrows the opening [`DriverHost`]: the driver captures the
+/// `'h` borrows the opening [`DriverHost`]: the engine captures the
 /// host's [`SeatGate`], so every present re-checks the presenting
-/// client's live seat lease before touching the surface.
+/// client's live seat lease before touching the surface. A host with no
+/// gate wired (headless bring-up, or a service that gates presents
+/// upstream through the display-protocol lease check) presents ungated
+/// here.
 pub struct Framebuffer<'h> {
     window: RegisterWindow,
     mode: DisplayMode,
@@ -148,7 +115,7 @@ impl<'h> Framebuffer<'h> {
     ///
     /// Obtains the host's [`MmioMapper`], maps exactly
     /// `stride_bytes * height_px` bytes at `config.phys_base`, and
-    /// returns a driver ready to [`present`](Display::present).
+    /// returns an engine ready to [`present`](Display::present).
     ///
     /// # Errors
     ///
@@ -161,8 +128,7 @@ impl<'h> Framebuffer<'h> {
     ///
     /// # Capabilities
     ///
-    /// Requires [`CapabilityId::MMIO_MAP`] in addition to the
-    /// load-time [`CapabilityId::DRV_LOAD`] [`register`] checked.
+    /// Requires [`CapabilityId::MMIO_MAP`].
     pub fn open(host: &'h dyn DriverHost, config: FramebufferConfig) -> Result<Self, DriverError> {
         let surface_len = config.validate()?;
         if !host.has_capability(CapabilityId::MMIO_MAP) {

@@ -9,7 +9,7 @@
 //!    static page-aligned scan-out surface in guest RAM becomes a real
 //!    framebuffer device the host scans out from (the boot hand-off);
 //! 2. assembles the parsed geometry into a
-//!    [`rustos_drv_display_framebuffer::FramebufferConfig`];
+//!    [`rustos_display::FramebufferConfig`];
 //! 3. loads the signed framebuffer display `.rxe` through
 //!    [`rustos_drvhost::Host`] (the load gate) and drives it through
 //!    `load -> use -> unload -> reload`, where "use" maps the surface

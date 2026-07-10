@@ -593,6 +593,12 @@ is resolved from the endpoint at grant time — never a caller-supplied
 so the number is useless to a bystander. Every mint is audited, exactly
 as `shm_create`. This is how the desktop session hands its composed frame
 buffer to the display service with zero frame bytes crossing the IPC.
+`shm_map` (no. 41) itself takes the grant handle plus a `len_out` user
+pointer and, alongside the mapped base it returns, writes the region's
+byte length — the kernel's own record of the region, never the granting
+task's claim — so a server sizes its view of the shared bytes from the
+kernel's answer (`plans/DISPLAY.md` D7b). Wrapper `rustos_rt::shm_map`;
+C stub `ros_sys_shm_map`.
 
 The wait-set (`waitset_ctl`, no. 44) additionally accepts a `SeatInput`
 member (`plans/DISPLAY.md` D7a): `id` names a seat whose **live lease the

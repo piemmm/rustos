@@ -230,10 +230,11 @@ mod program {
                 }
             };
             let n = (transferred as usize).min(REPORT_BUF_LEN).min(buf.len());
-            // SAFETY: `RtDriverHost::map_shared` mapped at least
-            // `REPORT_BUF_LEN` bytes of the granted shared region RW into this
-            // process at `shm_base` (the host-controller driver sized the
-            // region for a boot report), and that mapping outlives this read.
+            // SAFETY: `RtDriverHost::map_shared` mapped the granted shared
+            // region RW into this process at `shm_base`, `main` verified the
+            // kernel-reported length holds at least `REPORT_BUF_LEN` bytes
+            // before constructing this source, and that mapping outlives
+            // this read.
             // The HCD's write to the same frames happens-before this read: the
             // URB reply we just received is the kernel's release of that write.
             // We read only `n ≤ REPORT_BUF_LEN` bytes, wholly in-bounds.
@@ -316,9 +317,15 @@ mod program {
             "endpoint_hex",
             endpoint,
         );
-        let Ok(shm_base) = host.map_shared() else {
+        // The kernel reports the mapped region's true length; a region too
+        // small for one boot report is a mis-provisioned node refused here,
+        // before any shared-buffer read is built over it.
+        let Ok((shm_base, shm_len)) = host.map_shared() else {
             return EXIT_NO_TRANSPORT;
         };
+        if shm_len < REPORT_BUF_LEN {
+            return EXIT_NO_TRANSPORT;
+        }
         log_hex_event(
             USB_KBD_SETUP,
             Level::Info,

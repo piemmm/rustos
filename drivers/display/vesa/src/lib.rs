@@ -13,9 +13,10 @@
 //! presents fully-rendered frames into it.
 //!
 //! This is what distinguishes the VESA driver from the generic
-//! `framebuffer` sibling (`rustos-drv-display-framebuffer`): the
-//! framebuffer driver consumes an already-parsed geometry record from
-//! firmware that hands off a surface directly (UEFI GOP, the Pi mailbox,
+//! linear-surface engine (`rustos_display::Framebuffer`, hosted by the
+//! `drivers/display/framebuffer` service process): that engine consumes
+//! an already-parsed geometry record from firmware that hands off a
+//! surface directly (UEFI GOP, the Pi mailbox,
 //! `ramfb`), whereas this driver owns the VBE-specific decode — the
 //! linear-framebuffer attribute bit, the direct-colour memory model, the
 //! per-channel mask sizes and field positions — that a VBE `ModeInfoBlock`

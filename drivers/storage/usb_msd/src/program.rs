@@ -388,12 +388,19 @@ fn main() -> i32 {
     let Some(endpoint) = host.endpoint_grant() else {
         return EXIT_NO_TRANSPORT;
     };
-    let Ok(shm_base) = host.map_shared() else {
+    // The kernel reports the mapped region's true length; a buffer too
+    // small for one bulk chunk is a mis-provisioned node refused here,
+    // before any slice is built over it.
+    let Ok((shm_base, shm_len)) = host.map_shared() else {
         return EXIT_NO_TRANSPORT;
     };
+    if shm_len < BULK_BUF_LEN {
+        return EXIT_NO_TRANSPORT;
+    }
     // SAFETY: `map_shared` mapped the HCD-created shared URB data buffer
-    // (one bulk chunk, `BULK_BUF_LEN` bytes — the one length both sides
-    // build from) into this process at `shm_base` and returned that base.
+    // into this process at `shm_base`, and the kernel-reported length was
+    // verified above to hold at least `BULK_BUF_LEN` bytes (one bulk
+    // chunk — the one length both sides build from).
     // The mapping lives for the rest of this process and nothing else in
     // this address space aliases it, so a single exclusive `&mut [u8]`
     // over the buffer is sound. The HCD writes it only while serving this

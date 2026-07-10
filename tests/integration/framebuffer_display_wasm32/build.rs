@@ -9,8 +9,9 @@
 //! script: a `wasm32-unknown-unknown` `cdylib` is laid out by the
 //! WebAssembly object format, not a per-arch script.
 //!
-//! The manifest requests only `CAP_DRV_LOAD`:
-//! `rustos_drv_display_framebuffer::register` gates on it, and the host
+//! The manifest requests only `CAP_DRV_LOAD`: the vertical's in-process
+//! spawner gates on it (the load-time check a spawned `Run` process
+//! clears through the driver-host gate), and the host
 //! installs the manifest's requested set intersected with the caller's
 //! grants. The `CAP_MMIO_MAP` the surface mapping
 //! additionally requires is granted on the separate `DriverHost` the

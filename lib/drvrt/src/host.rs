@@ -357,13 +357,16 @@ impl<S: GrantSyscalls> RtDriverHost<S> {
             .map(|slot| slot.resource.base())
     }
 
-    /// Map the cross-process shared URB data buffer the class driver was
-    /// granted, returning its base user virtual address.
+    /// Map the cross-process shared data buffer the driver was granted,
+    /// returning its base user virtual address and the region's byte
+    /// length — the kernel's own record, so the driver sizes its view of
+    /// the shared bytes from the kernel's answer, never the granting
+    /// task's claim.
     ///
     /// Resolves the single [`HwResourceKind::Shared`] grant its matched
-    /// interface node carried and maps it through `shm_map`; the host-controller
-    /// driver created the region and forwarded the grant, so the class driver
-    /// maps the *same* frames without holding any DMA authority. Fails closed
+    /// node carried and maps it through `shm_map`; the granting driver
+    /// created the region and forwarded the grant, so this driver maps
+    /// the *same* frames without holding any DMA authority. Fails closed
     /// if no shared grant was delivered or the map is refused.
     ///
     /// # Errors
@@ -373,22 +376,26 @@ impl<S: GrantSyscalls> RtDriverHost<S> {
     /// * [`DriverError::PermissionDenied`] if the kernel refuses the map (the
     ///   driver lacks `CAP_SHM`), else [`DriverError::Unsupported`] for any
     ///   other kernel refusal.
-    pub fn map_shared(&self) -> Result<u64, DriverError> {
+    pub fn map_shared(&self) -> Result<(u64, usize), DriverError> {
         let slot = self
             .grants
             .iter()
             .flatten()
             .find(|slot| slot.resource.kind() == Some(HwResourceKind::Shared))
             .ok_or(DriverError::NotFound)?;
-        let ret = self.syscalls.shm_map(slot.handle);
+        let mut len: u64 = 0;
+        let ret = self.syscalls.shm_map(slot.handle, &mut len);
         if ret < 0 {
             return Err(match decode_errno(ret) {
                 Some(Errno::PermissionDenied) => DriverError::PermissionDenied,
                 _ => DriverError::Unsupported,
             });
         }
+        // A length the host's address width cannot hold is a kernel-side
+        // inconsistency; refuse it rather than truncate.
+        let len = usize::try_from(len).map_err(|_| DriverError::Unsupported)?;
         #[allow(clippy::cast_sign_loss)] // `ret >= 0` checked above; it is a user VA.
-        Ok(ret as u64)
+        Ok((ret as u64, len))
     }
 }
 

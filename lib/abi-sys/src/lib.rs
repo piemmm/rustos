@@ -1431,7 +1431,9 @@ pub extern "C" fn sys_shm_create(len: usize, id_out: *mut c_void) -> u64 {
 /// `shm_map`: map a shared-memory region the kernel has **granted** the
 /// calling task into its own address space (`SyscallNumber::SHM_MAP`).
 /// Returns the base **user virtual address** the region is mapped at, or a
-/// `ROS_E_*` code reinterpreted into the result.
+/// `ROS_E_*` code reinterpreted into the result. On success the region's
+/// byte length — the kernel's own record, never the granting task's claim —
+/// is written to `len_out`; it is left untouched on failure.
 ///
 /// `handle` is an unforgeable, kernel-issued device-resource grant the driver
 /// received for the matched hardware-tree node it binds. The kernel resolves
@@ -1442,11 +1444,11 @@ pub extern "C" fn sys_shm_create(len: usize, id_out: *mut c_void) -> u64 {
 /// `ROS_CAP_SHM`.
 #[must_use]
 #[export_name = "ros_sys_shm_map"]
-pub extern "C" fn sys_shm_map(handle: u64) -> u64 {
-    // SAFETY: see `sys_yield`. No user pointer is dereferenced here; the
-    // kernel resolves the grant handle against the caller and returns the
-    // mapped region's base virtual address.
-    unsafe { raw_syscall(NUM_SHM_MAP, [handle, 0, 0, 0, 0, 0]) }
+pub extern "C" fn sys_shm_map(handle: u64, len_out: *mut c_void) -> u64 {
+    // SAFETY: see `sys_dma_alloc`; the kernel validates the `len_out` pointer
+    // against the caller's address space before writing the region's byte
+    // length to it.
+    unsafe { raw_syscall(NUM_SHM_MAP, [handle, ptr_arg(len_out), 0, 0, 0, 0]) }
 }
 
 /// `shm_unmap`: release the shared-memory mapping of `len` bytes based at
@@ -2022,7 +2024,7 @@ mod tests {
         (NUM_HW_REMOVE_NODE, "hw_remove_node", 1),
         (NUM_MSI_ALLOC, "msi_alloc", 2),
         (NUM_SHM_CREATE, "shm_create", 2),
-        (NUM_SHM_MAP, "shm_map", 1),
+        (NUM_SHM_MAP, "shm_map", 2),
         (NUM_SHM_UNMAP, "shm_unmap", 2),
         (NUM_SHM_GRANT, "shm_grant", 2),
         (NUM_CALL_PEER_SEAT, "call_peer_seat", 3),
@@ -2626,13 +2628,16 @@ mod tests {
     }
 
     #[test]
-    fn shm_map_marshals_the_grant_handle() {
+    fn shm_map_marshals_the_grant_handle_and_len_out_pointer() {
+        let mut len = 0u64;
+        let ptr = core::ptr::addr_of_mut!(len).cast::<c_void>();
         let (number, args) = capture(0x9000_4000, || {
-            assert_eq!(sys_shm_map(0x2A), 0x9000_4000);
+            assert_eq!(sys_shm_map(0x2A, ptr), 0x9000_4000);
         });
         assert_eq!(number, NUM_SHM_MAP);
         assert_eq!(args[0], 0x2A);
-        assert_eq!(&args[1..], &[0, 0, 0, 0, 0]);
+        assert_eq!(args[1], ptr as usize as u64);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
     }
 
     #[test]

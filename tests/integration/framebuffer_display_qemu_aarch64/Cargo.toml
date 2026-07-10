@@ -25,14 +25,15 @@ ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zer
 # (`AGENTS.md` §17.2 — the instruction-set choice lives in `build.rs`).
 # The global allocator, the EL1 bring-up, and the boot-harness macro all
 # come from the shared `rustos-test-virtio-qemu-support` crate
-# (`AGENTS.md` §2.2); this bin adds only the framebuffer driver, the
-# capability/host plumbing, and the shared fw_cfg/ramfb client.
+# (`AGENTS.md` §2.2); this bin adds only the shared `lib/display`
+# framebuffer surface engine, the capability/host plumbing, and the
+# shared fw_cfg/ramfb client.
 [target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
 rustos-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
 rustos-drvhost = { path = "../../../userland/system/drvhost", version = "=0.0.0" }
-rustos-drv-display-framebuffer = { path = "../../../drivers/display/framebuffer", version = "=0.0.0" }
+rustos-display = { path = "../../../lib/display", version = "=0.0.0" }
 rustos-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
 rustos-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0", features = ["host-tests"] }
 rustos-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }

@@ -74,32 +74,53 @@ partial (§2.9).
 
 | Driver       | Crate                                | Surface source                            | Stage 4 status        |
 |--------------|--------------------------------------|-------------------------------------------|------------------------|
-| framebuffer  | `rustos-drv-display-framebuffer`     | firmware linear framebuffer (GOP / Pi mailbox / `ramfb`) | host-side tests + riscv64 & aarch64 `ramfb` QEMU verticals + wasm32 browser-canvas vertical |
+| framebuffer  | `rustos-drv-display-framebuffer` (Run process over `rustos_display::Framebuffer`) | firmware linear framebuffer (GOP / Pi mailbox / `ramfb`) | host-side tests + riscv64 & aarch64 `ramfb` QEMU verticals + wasm32 browser-canvas vertical |
 | vesa         | `rustos-drv-display-vesa`            | x86_64 VBE linear framebuffer (`ModeInfoBlock`) | host-side tests + x86_64 `ramfb` QEMU vertical |
 | rpi_hvs      | `rustos-drv-display-rpi-hvs`         | Raspberry Pi VideoCore HVS plane compositor (`AcceleratedDisplay`) | host-side tests |
 
 The two display drivers are deliberate siblings (`AGENTS.md` §2.2
 carve-out), not duplicates: `vesa` owns the VBE-specific decode, while
-`framebuffer` consumes an already-parsed geometry record.
+the framebuffer path consumes an already-parsed geometry record.
 
 ### `rustos-drv-display-framebuffer`
 
-The framebuffer driver copies a frame into a firmware-provided linear
-surface. It does not program a display controller; the boot capability
-discovers the surface and hands the driver a `FramebufferConfig`
-(physical base, width, height, stride, format).
+The framebuffer display service copies a presented frame into a
+firmware-provided linear surface. Its crate is **bin-only** — the `Run`
+entry point of the `/System/Drivers/` bundle `devmgr` autoloads when a
+display node carrying a `HwResourceKind::Framebuffer` resource is
+discovered — and it holds no device logic of its own: the
+linear-surface engine is `rustos_display::Framebuffer` and the
+protocol engine is `rustos_display::DisplayServer` (`lib/display`, one
+shared definition, `plans/DISPLAY.md` D7b). Neither programs a display
+controller; the service resolves its surface's `(phys_base, mode)`
+fail-closed from its kernel-issued device-resource grants
+(`sole_framebuffer`) and never scans out a guessed geometry.
 
 `Framebuffer::open` validates the geometry and maps exactly
 `stride_bytes * height_px` bytes through the host's `MmioMapper`,
 which enforces `CAP_MMIO_MAP`. The framebuffer is therefore reached
 only through a kernel-installed mapping, never through a pointer the
-driver synthesises (`AGENTS.md` §4 — no ambient authority). `present`
+service synthesises (`AGENTS.md` §4 — no ambient authority). `present`
 is byte-preserving: it copies the caller's frame verbatim into the
-mapped window, bounds-checked at every write.
+mapped window, bounds-checked at every write; `present_region` blits
+only the validated damage rectangle.
 
-Lifecycle: `register` clears `CAP_DRV_LOAD`; `Framebuffer::open` maps
-the surface; dropping the `Framebuffer` releases the window (unload);
-calling `open` again reloads.
+The service binds the reserved `DISPLAY_ENDPOINT` (its manifest's
+`CAP_IPC_BIND_PRIVILEGED` — a squatter cannot intercept presents) and
+serves the `lib/display` protocol from a wait-set park: every request
+— `Query` included — is gated on the in-flight caller's live seat
+lease through `call_peer_seat`, a `Configure` maps the client's
+`shm_grant`ed frame region once (sized from the kernel's own record of
+the region length via `shm_map`'s `len_out`, never the client's
+claimed geometry), and a `Present` blits by frame index — zero frame
+bytes ever cross the IPC.
+
+Lifecycle: the signed-bundle load gate clears `CAP_DRV_LOAD`;
+`Framebuffer::open` maps the surface; dropping the `Framebuffer`
+releases the window (unload); calling `open` again reloads. The engine
+and its unit tests live in `lib/display`
+(`lib/display/tests/framebuffer.rs`); the QEMU verticals below drive
+that same shared engine.
 
 #### QEMU integration vertical
 

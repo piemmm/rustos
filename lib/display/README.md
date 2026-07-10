@@ -21,6 +21,14 @@ and the client can never drift apart.
   re-acquired seat) is refused fail-closed until the new owner
   reconfigures, so one owner's frames can never be scanned out under
   another's lease.
+- **Surface engine** (`Framebuffer` / `FramebufferConfig`): the generic
+  linear-framebuffer scan-out engine the framebuffer service's `Run`
+  binary hosts behind the `Display` trait (and the framebuffer QEMU
+  verticals drive directly), hoisted here so the surface blit has
+  exactly one definition. It validates the discovered geometry
+  fail-closed, maps exactly `stride_bytes * height_px` bytes through
+  the capability-gated `MmioMapper`, and blits full frames or damage
+  spans with every write bounds-checked by the window.
 - **Client** (`DisplayClient` / `RemoteDisplay`): the session-side half
   over the injected `DisplayTransport` seam. `RemoteDisplay` implements
   the existing `rustos_abi` `Display` trait over the client's own
@@ -35,6 +43,10 @@ vocabulary crosses the wire as typed `Errno` status frames, converted
 through the one shared `DriverError::as_errno` mapping on the server
 and the client-side inverse `driver_error_from_errno` here.
 
-`no_std`; unit-tested on the host against mock seams. Consumed by the
-framebuffer driver's `Run` binary (server) and the desktop session
-(client).
+`no_std`, `forbid(unsafe_code)`; unit-tested on the host against mock
+seams (the protocol halves in `src/tests.rs`; the surface engine in
+`tests/framebuffer.rs`, a separate test crate because its mock
+`RegisterWindow` needs the `unsafe` constructor the library itself
+forbids). Consumed by the framebuffer service's `Run` binary (server +
+surface engine), the framebuffer QEMU verticals (surface engine), and
+the desktop session (client).

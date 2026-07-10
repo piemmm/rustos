@@ -50,14 +50,16 @@ pub trait GrantSyscalls {
 
     /// Map the cross-process shared-memory region named by the kernel-issued
     /// grant `handle` into the calling task's own address space, returning the
-    /// base user virtual address of the mapping (or `-errno`).
+    /// base user virtual address of the mapping (or `-errno`) and writing the
+    /// region's byte length — the kernel's own record, never the granting
+    /// task's claim — to `len_out` on success.
     ///
     /// A class driver maps the URB data buffer its host-controller driver
     /// created and forwarded as a grant on the matched interface node, holding
     /// no DMA authority of its own.
     ///
     /// Mirrors [`rustos_rt::shm_map`].
-    fn shm_map(&self, handle: u64) -> i64;
+    fn shm_map(&self, handle: u64, len_out: &mut u64) -> i64;
 
     /// Enumerate the device-resource grants the kernel minted for the
     /// calling task into `buf`, returning the total number of bytes written
@@ -143,8 +145,8 @@ impl GrantSyscalls for RtGrantSyscalls {
     }
 
     #[inline]
-    fn shm_map(&self, handle: u64) -> i64 {
-        rustos_rt::shm_map(handle)
+    fn shm_map(&self, handle: u64, len_out: &mut u64) -> i64 {
+        rustos_rt::shm_map(handle, len_out)
     }
 
     #[inline]

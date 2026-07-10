@@ -5288,7 +5288,7 @@ where
         Ok(base_va)
     }
 
-    fn shm_map(&self, caller: &CallerContext<'_>, handle: u64) -> SyscallResult {
+    fn shm_map(&self, caller: &CallerContext<'_>, handle: u64, len_out: u64) -> SyscallResult {
         // Step 2 (capability) was enforced by the dispatcher: the `shm_map`
         // spec carries `CAP_SHM`. Step 3 (validate every input): resolve
         // `handle` to a granted resource **for the calling task**
@@ -5307,10 +5307,33 @@ where
         // live space and account the mapping so the region's frames are not
         // freed while the caller still maps them. A region torn down between
         // grant and map fails closed `NotFound`.
-        let base_va =
+        let (base_va, len) =
             crate::sharedreg::map(self.shared_mem_facility, caller.task_id, resource.base())?;
-        // The map grew the caller's live space; re-freeze its snapshot.
+        // The map grew the caller's live space; re-freeze its snapshot so
+        // the `len_out` copy sees current memory, exactly as `shm_create`.
         self.refreeze_caller_aspace(caller);
+        // Report the region's byte length — the registry's own record, so a
+        // server sizes its view from the kernel's answer, never the granting
+        // client's claim — through the validated `copy_to_user` boundary. A
+        // faulting `len_out` releases the mapping we just accounted and
+        // fails closed, so a faulting call leaves no half-told mapping
+        // behind and never widens authority.
+        let len_bytes = (len as u64).to_le_bytes();
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_out(space, physmap, VirtAddr::new(len_out), &len_bytes)
+        }) {
+            Some(Ok(())) => {}
+            Some(Err(err)) => {
+                let _ = crate::sharedreg::unmap(self.shared_mem_facility, caller.task_id, base_va);
+                self.refreeze_caller_aspace(caller);
+                return Err(copy_fault_errno(err));
+            }
+            None => {
+                let _ = crate::sharedreg::unmap(self.shared_mem_facility, caller.task_id, base_va);
+                self.refreeze_caller_aspace(caller);
+                return Err(Errno::BadAddress);
+            }
+        }
         Ok(base_va)
     }
 
@@ -19597,13 +19620,71 @@ mod tests {
         )
         .with_shared_mem_facility(facility);
 
-        // A handle the task was never granted resolves to nothing.
-        assert_eq!(h.shm_map(&ctx, 0x9999), Err(Errno::NotFound));
+        // A handle the task was never granted resolves to nothing. Both
+        // refusals are decided before the mapping (and before the `len_out`
+        // write), so no user pointer is needed.
+        assert_eq!(h.shm_map(&ctx, 0x9999, 0x2000), Err(Errno::NotFound));
         // A grant of the wrong kind (an IRQ line) is refused before mapping.
         let handle = aspaces
             .write()
             .mint_grant(SecTaskId(8), rustos_abi::HwResource::irq(33, 1));
-        assert_eq!(h.shm_map(&ctx, handle), Err(Errno::OutOfRange));
+        assert_eq!(h.shm_map(&ctx, handle, 0x2000), Err(Errno::OutOfRange));
+    }
+
+    /// `shm_map` maps a granted region into the caller and writes the
+    /// region's byte length — the registry's own record, never the granting
+    /// task's claim — to `len_out` (`plans/DISPLAY.md` D7b).
+    #[test]
+    fn shm_map_returns_the_base_and_reports_the_kernel_recorded_length() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        // A two-page caller space; `len_out` is page 2 (`0x2000`) so the
+        // test reads the written length back with `read_reply_page`.
+        let (space, physmap) = call_aspace(b"");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(9), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(9, &[CapabilityId::SHM], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(9),
+            caps: &caps,
+        };
+        let facility: &'static RecordingSharedFacility =
+            Box::leak(Box::new(RecordingSharedFacility { va: 0x2_0000_3000 }));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_shared_mem_facility(facility);
+
+        // A two-page region another task created; the caller was granted it.
+        let (owner_va, id) =
+            crate::sharedreg::create(facility, SecTaskId(10), 2).expect("region created");
+        let handle = aspaces
+            .write()
+            .mint_grant(SecTaskId(9), rustos_abi::HwResource::shared(id));
+
+        let va = h.shm_map(&ctx, handle, 0x2000).expect("shm_map succeeds");
+        assert_eq!(va, 0x2_0000_3000, "the mapped base flows back");
+        // The region's byte length — two whole pages, the registry's own
+        // record — was written to `len_out` (page 2).
+        let len_bytes = read_reply_page(
+            aspaces.read().resolve(SecTaskId(9)).expect("registered").1,
+            8,
+        );
+        let len = u64::from_le_bytes(len_bytes.try_into().expect("8 bytes"));
+        assert_eq!(len, 2 * PAGE_SIZE as u64);
+        // Cleanup so the global region registry does not leak across tests.
+        let _ = crate::sharedreg::unmap(facility, SecTaskId(9), va);
+        let _ = crate::sharedreg::unmap(facility, SecTaskId(10), owner_va);
     }
 
     /// `shm_grant` delegates a mapping right only for a region the caller

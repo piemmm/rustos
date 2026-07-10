@@ -55,13 +55,13 @@ mod kernel {
 
     use rustos_abi::driver::display::{Display, DisplayFormat};
     use rustos_abi::driver::{MmioMapError, MmioMapper, RegisterWindow};
-    use rustos_abi::{CapabilityId, DriverHost, DriverKind, Errno};
+    use rustos_abi::{CapabilityId, DriverError, DriverHost, DriverKind, Errno};
     use rustos_arch_wasm32::bindings::{host_has_display, host_present_framebuffer};
     use rustos_arch_wasm32::console::write_line;
     use rustos_arch_wasm32::handle_panic_via_console;
     use rustos_caps::CapabilitySet;
     use rustos_crypto::Ed25519PublicKey;
-    use rustos_drv_display_framebuffer::{register as fb_register, Framebuffer, FramebufferConfig};
+    use rustos_display::{Framebuffer, FramebufferConfig};
     use rustos_drvhost::{
         DriverSpawner, Host, HostConfig, ImageSource, SpawnContext, SpawnRegisterError,
     };
@@ -212,8 +212,18 @@ mod kernel {
         }
     }
 
-    /// Spawner registering every verified manifest in-process through
-    /// the framebuffer driver's `register` entry point.
+    /// Per-load `DriverHandle` marker the spawner reports. The bytes
+    /// spell `"FBUF"`, mirroring the marker the framebuffer driver's
+    /// `register` entry point used before it became a spawned `Run`
+    /// process.
+    const FB_HANDLE_MARKER: u64 = 0x4642_5546_0000_0001;
+
+    /// Spawner clearing every verified manifest through the load-time
+    /// capability gate. The framebuffer driver is a spawned `Run`
+    /// process in production (its engine lives in `lib/display`), so
+    /// the vertical's in-process spawner carries only the gate a
+    /// register entry point would have enforced: no `CAP_DRV_LOAD`, no
+    /// load.
     struct ResolveFramebuffer;
 
     impl DriverSpawner for ResolveFramebuffer {
@@ -221,7 +231,11 @@ mod kernel {
             &self,
             ctx: &SpawnContext<'_>,
         ) -> Result<rustos_abi::DriverHandle, SpawnRegisterError> {
-            fb_register(ctx.host).map_err(SpawnRegisterError::Register)
+            if !ctx.host.has_capability(CapabilityId::DRV_LOAD) {
+                return Err(SpawnRegisterError::Register(DriverError::PermissionDenied));
+            }
+            rustos_abi::DriverHandle::from_raw(FB_HANDLE_MARKER)
+                .map_err(SpawnRegisterError::Register)
         }
     }
 

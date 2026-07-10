@@ -2545,21 +2545,28 @@ pub fn shm_create(len: usize, id_out: &mut u64) -> i64 {
 /// `RW`/non-exec, guard-bracketed, into the caller's own address space, and
 /// bumps the region's reference count so neither holder frees frames the other
 /// still maps. A forged or wrong-kind handle resolves to nothing and is
-/// refused. The call carries `CAP_SHM` (enforced kernel-side).
+/// refused. On success the region's byte length — the kernel's own record,
+/// never the granting task's claim, so a server sizes its view of the shared
+/// bytes from the kernel's answer — is written to `len_out`. The call carries
+/// `CAP_SHM` (enforced kernel-side).
 ///
 /// The kernel encodes the result as a signed register following the standard
 /// `abi-v1` convention: a non-negative value is the base virtual address of
 /// the mapping, and a negative value is `-errno` (recover the
-/// [`rustos_abi::Errno`] discriminant as `-ret`). The wrapper surfaces that
-/// raw signed value; it adds no authority and hides no error.
+/// [`rustos_abi::Errno`] discriminant as `-ret`) — `len_out` is left untouched
+/// on a negative result. The wrapper surfaces that raw signed value; it adds
+/// no authority and hides no error.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 shm_map-result encoding (base ≥ 0, else -errno).
-pub fn shm_map(handle: u64) -> i64 {
+pub fn shm_map(handle: u64, len_out: &mut u64) -> i64 {
+    let len_ptr = (len_out as *mut u64) as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke — the kernel validates
-    // the call on the far side of the trap. `shm_map` dereferences no user
-    // pointer; it resolves the grant handle and maps the region into the
-    // caller's own space, returning its base.
-    let ret = unsafe { raw_syscall(NUM_SHM_MAP, [handle, 0, 0, 0, 0, 0]) };
+    // the call on the far side of the trap. `len_out` is a live exclusive
+    // `&mut u64` for the duration of the call, so the pointer denotes
+    // writable memory the kernel may fill with the mapped region's byte
+    // length; the kernel validates it against the caller's own address space
+    // before writing.
+    let ret = unsafe { raw_syscall(NUM_SHM_MAP, [handle, len_ptr, 0, 0, 0, 0]) };
     ret as i64
 }
 
@@ -4462,13 +4469,16 @@ mod tests {
     }
 
     #[test]
-    fn shm_map_marshals_the_handle() {
+    fn shm_map_marshals_the_handle_and_the_len_out_pointer() {
+        let mut len = 0u64;
+        let len_ptr = core::ptr::addr_of_mut!(len) as usize as u64;
         let (number, args) = capture(0x8000, || {
-            assert_eq!(shm_map(0xDEAD), 0x8000);
+            assert_eq!(shm_map(0xDEAD, &mut len), 0x8000);
         });
         assert_eq!(number, NUM_SHM_MAP);
         assert_eq!(args[0], 0xDEAD);
-        assert_eq!(&args[1..], &[0, 0, 0, 0, 0]);
+        assert_eq!(args[1], len_ptr);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
     }
 
     #[test]

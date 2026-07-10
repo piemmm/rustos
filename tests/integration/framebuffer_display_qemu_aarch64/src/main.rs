@@ -8,7 +8,7 @@
 //! device with QEMU's `ramfb` — a scan-out surface in guest RAM whose
 //! geometry is programmed into the device over the shared `fw_cfg` MMIO
 //! DMA interface (`src/kernel.rs`) — assembles the geometry as a
-//! `rustos_drv_display_framebuffer::FramebufferConfig`, then loads the
+//! `rustos_display::FramebufferConfig`, then loads the
 //! signed framebuffer display `.rxe` through `rustos_drvhost::Host` and
 //! drives it through `load -> use -> unload -> reload`: "use" maps the
 //! surface through the capability-gated `KernelMmioMapper` and `present`s

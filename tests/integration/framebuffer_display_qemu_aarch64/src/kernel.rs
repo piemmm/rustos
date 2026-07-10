@@ -36,7 +36,7 @@ use rustos_abi::seat::{SeatLease, SEAT_PRIMARY};
 use rustos_abi::{CapabilityId, DriverError, DriverHost, DriverKind, Errno, MmioMapper};
 use rustos_caps::CapabilitySet;
 use rustos_crypto::Ed25519PublicKey;
-use rustos_drv_display_framebuffer::{register as fb_register, Framebuffer, FramebufferConfig};
+use rustos_display::{Framebuffer, FramebufferConfig};
 use rustos_drvhost::{
     DriverSpawner, Host, HostConfig, ImageSource, SpawnContext, SpawnRegisterError,
 };
@@ -118,8 +118,16 @@ impl ImageSource for BakedSource {
     }
 }
 
-/// Spawner registering every verified manifest in-process through the
-/// framebuffer driver's `register` entry point.
+/// Per-load `DriverHandle` marker the spawner reports. The bytes spell
+/// `"FBUF"`, mirroring the marker the framebuffer driver's `register`
+/// entry point used before it became a spawned `Run` process.
+const FB_HANDLE_MARKER: u64 = 0x4642_5546_0000_0001;
+
+/// Spawner clearing every verified manifest through the load-time
+/// capability gate. The framebuffer driver is a spawned `Run` process in
+/// production (its engine lives in `lib/display`), so the vertical's
+/// in-process spawner carries only the gate a register entry point would
+/// have enforced: no `CAP_DRV_LOAD`, no load.
 struct ResolveFramebuffer;
 
 impl DriverSpawner for ResolveFramebuffer {
@@ -127,7 +135,10 @@ impl DriverSpawner for ResolveFramebuffer {
         &self,
         ctx: &SpawnContext<'_>,
     ) -> Result<rustos_abi::DriverHandle, SpawnRegisterError> {
-        fb_register(ctx.host).map_err(SpawnRegisterError::Register)
+        if !ctx.host.has_capability(CapabilityId::DRV_LOAD) {
+            return Err(SpawnRegisterError::Register(DriverError::PermissionDenied));
+        }
+        rustos_abi::DriverHandle::from_raw(FB_HANDLE_MARKER).map_err(SpawnRegisterError::Register)
     }
 }
 

@@ -388,8 +388,8 @@ default.
 
 ### Stage D7 — the display-client present path (the graphical session goes live)
 
-**Status: in progress — D7a done; D7b landed except the service
-process (below); the `Run` binary is next.** D1–D6 made the seat an
+**Status: in progress — D7a and D7b done; D7c (the desktop session
+binary) is next.** D1–D6 made the seat an
 enforced, revocable kernel object and derived the present right from the
 live lease — but the only presenters so far are kernel-side fixtures. D7 is the
 missing transport: a user-space window-manager session presenting
@@ -453,8 +453,8 @@ Sub-stages, each shipped complete (code + tests + docs, §7 gate green):
     `call_peer_origin` window); returns `SeatNotOwner` / `SeatRevoked` /
     `NotFound` fail-closed. No capability: the authority is serving the
     in-flight call, exactly as `call_peer_origin`.
-- **D7b — the display service. `[~]` Landed except the service process.**
-  Landed: `lib/abi/src/display_ipc.rs` (the fixed-width, fail-closed,
+- **D7b — the display service. `[x]` — done.**
+  `lib/abi/src/display_ipc.rs` (the fixed-width, fail-closed,
   fuzzed protocol: `Query` → mode reply, `Configure { shm_handle,
   frame_count, frame geometry }`, `Present { frame_index, damage rect }`,
   every reserved tail zero-checked) and the reserved `DISPLAY_ENDPOINT`
@@ -484,25 +484,24 @@ Sub-stages, each shipped complete (code + tests + docs, §7 gate green):
   resolver, and `mmio_map` admission — plus the distinct
   `Errno::DeviceFault` (`DriverError::as_errno` now maps
   `DeviceFault`/`Busy` to `DeviceFault`/`WouldBlock`).
-  **Remaining — the framebuffer service process.** The `Run` binary
-  hosts the engine (grants → `sole_framebuffer` → surface, endpoint bind
-  under `CAP_IPC_BIND_PRIVILEGED`, waitset serve loop). Its fixed shape
-  (the `lib/virtio_input` precedent — a Run crate links `lib/*` only,
-  `cargo xtask deps-check` forbids a `drivers/*`→`drivers/*` edge, and
-  the kernel test verticals must not inherit `rustos-rt`):
-  1. hoist the linear-surface engine (`Framebuffer`/`FramebufferConfig`)
-     out of `drivers/display/framebuffer` into `lib/display` (the QEMU
-     verticals stay legal non-driver consumers);
-  2. evolve `shm_map` in place to report the mapped region's length —
-     the server sizes its frame slice from the kernel's answer, never
-     the client's claimed geometry (§5.4);
-  3. convert `drivers/display/framebuffer` to the bin-only `Run` crate
-     (build.rs `freestanding` cfg, `Run.ld`, host stub — the
-     `virtio_kbd` shape) wiring `RtDriverHost` grants, an
-     `RtSeatCheck` over `call_peer_seat`, and an `RtShmMapper` over
-     `shm_map` into `DisplayServer::serve`;
-  4. repoint the three framebuffer QEMU verticals at the hoisted
-     surface engine.
+  **The framebuffer service process** hosts the engine: the
+  linear-surface engine (`Framebuffer`/`FramebufferConfig`) lives in
+  `lib/display` (`lib/display/src/framebuffer.rs`, tests in
+  `lib/display/tests/framebuffer.rs`; the three framebuffer QEMU
+  verticals drive it as legal non-driver consumers);
+  `drivers/display/framebuffer` is the bin-only `Run` crate (build.rs
+  `freestanding` cfg, `Run.ld`, host stub — the `virtio_kbd` shape)
+  wiring `RtDriverHost` grants → `sole_framebuffer` → surface, the
+  reserved `DISPLAY_ENDPOINT` bind under `CAP_IPC_BIND_PRIVILEGED`, an
+  `RtSeatCheck` over `call_peer_seat`, and an `RtShmMapper` over
+  `shm_map` into a waitset-parked `DisplayServer::serve` loop
+  (fail-loud reserved exit codes; never a busy poll). `shm_map`
+  (`abi-v1` 41) reports the mapped region's byte length through a
+  `len_out` user pointer — the kernel registry's own record, so a
+  server (and the four shm-consuming driver programs, which now verify
+  it before building their slices) sizes its view from the kernel's
+  answer, never the granting task's claimed geometry. The service's
+  image bundle + bind keys land with the D7d autoload world.
 - **D7c — the desktop session binary.** `userland/gui/session` gains its
   `Run` program: `display_acquire(SEAT_PRIMARY)` → `DisplayClient`
   bring-up (query, shm double buffer, `shm_grant`, configure) → the live

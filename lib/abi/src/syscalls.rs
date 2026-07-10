@@ -1095,17 +1095,23 @@ pub const SYSCALLS: &[SyscallSpec] = &[
     SyscallSpec {
         number: SyscallNumber::SHM_MAP,
         name: "shm_map",
-        arg_count: 1,
+        arg_count: 2,
         args: [
+            // The grant handle, then the out pointer the mapped region's
+            // byte length is written to — the kernel's own record of the
+            // region size, so a server never sizes a frame slice from a
+            // client's claimed geometry.
             AbiType::Handle,
-            AbiType::Unit,
+            AbiType::UserPtr,
             AbiType::Unit,
             AbiType::Unit,
             AbiType::Unit,
             AbiType::Unit,
         ],
         // `U64` carries the mapped base virtual address (or a negated errno)
-        // back to the driver, exactly like `mmio_map`.
+        // back to the driver, exactly like `mmio_map`; the region's byte
+        // length is written to the `len_out` user pointer, exactly as
+        // `shm_create` writes the region id.
         ret: AbiType::U64,
         // Mapping a granted shared region is privileged, never ambient: only
         // a driver granted the matched node's shared-region resource holds

@@ -14,9 +14,10 @@
 //!    QEMU's `-kernel <ELF>` aarch64 path passes no DTB pointer, so the
 //!    test reads the `fw_cfg` MMIO base from this build-time blob.
 //!
-//! The manifest requests only `CAP_DRV_LOAD`:
-//! `rustos_drv_display_framebuffer::register` gates on it, and the host
-//! installs the manifest's requested set intersected with the caller's
+//! The manifest requests only `CAP_DRV_LOAD`: the vertical's in-process
+//! spawner gates on it (the load-time check a spawned `Run` process
+//! clears through the driver-host gate), and the host installs the
+//! manifest's requested set intersected with the caller's
 //! grants. The `CAP_MMIO_MAP` the surface mapping
 //! additionally requires is granted on the separate `DriverHost` the bin
 //! builds for `Framebuffer::open`, never through the manifest, mirroring
@@ -68,7 +69,7 @@ fn main() {
     let signing_key = SigningKey::from_bytes(&TEST_SEED);
     let signer_pubkey: [u8; 32] = signing_key.verifying_key().to_bytes();
 
-    // The framebuffer driver's `register` entry checks `CAP_DRV_LOAD`.
+    // The vertical's in-process spawner checks `CAP_DRV_LOAD` at load.
     // The effective set is the intersection of the loading user's grants
     // and this manifest request, so name it here as well as on the caller.
     let caps: &[u16] = &[CapabilityId::DRV_LOAD.as_u16()];

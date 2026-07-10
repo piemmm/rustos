@@ -37,7 +37,7 @@ rustos-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
 rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
 rustos-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
 rustos-drvhost = { path = "../../../userland/system/drvhost", version = "=0.0.0" }
-rustos-drv-display-framebuffer = { path = "../../../drivers/display/framebuffer", version = "=0.0.0" }
+rustos-display = { path = "../../../lib/display", version = "=0.0.0" }
 rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
 
 [build-dependencies]

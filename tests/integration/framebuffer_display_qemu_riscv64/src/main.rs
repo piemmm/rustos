@@ -5,7 +5,7 @@
 //! `ramfb`: a scan-out surface lives in guest RAM and the geometry is
 //! programmed into the device over the `fw_cfg` MMIO DMA interface
 //! (`src/kernel.rs`). The kernel publishes the resulting geometry as a
-//! `rustos_drv_display_framebuffer::FramebufferConfig` boot
+//! `rustos_display::FramebufferConfig` boot
 //! hand-off, then the signed framebuffer display `.rxe` is loaded
 //! through `rustos_drvhost::Host` and driven through `load -> use ->
 //! unload -> reload`: "use" maps the surface through the

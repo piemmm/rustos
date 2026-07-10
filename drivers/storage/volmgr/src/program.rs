@@ -158,12 +158,19 @@ fn main() -> i32 {
     else {
         return EXIT_NO_TRANSPORT;
     };
-    let Ok(window_base) = host.map_shared() else {
+    // The kernel reports the mapped region's true length; a window too
+    // small for the blkio data protocol is a mis-provisioned node refused
+    // here, before any slice is built over it.
+    let Ok((window_base, window_len)) = host.map_shared() else {
         return EXIT_NO_TRANSPORT;
     };
+    if window_len < BLK_DATA_LEN {
+        return EXIT_NO_TRANSPORT;
+    }
     // SAFETY: `map_shared` mapped the serving driver's shared data window
-    // (`BLK_DATA_LEN` bytes — the one length both sides build from) into
-    // this process at `window_base` and returned that base. The mapping
+    // into this process at `window_base`, and the kernel-reported length
+    // was verified above to hold at least `BLK_DATA_LEN` bytes (the one
+    // length both sides build from). The mapping
     // lives for the rest of this process and nothing else in this address
     // space aliases it, so a single exclusive `&mut [u8]` over the buffer
     // is sound. The serving driver writes it only while serving this

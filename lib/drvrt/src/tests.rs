@@ -283,13 +283,18 @@ impl GrantSyscalls for MockSyscalls {
         n as i64
     }
 
-    fn shm_map(&self, handle: u64) -> i64 {
+    fn shm_map(&self, handle: u64, len_out: &mut u64) -> i64 {
         // Map the whole granted shared region: return its backing buffer's
-        // base VA, mirroring the kernel mapping the region's frames into the
-        // caller. An unknown handle fails closed `NotFound`.
+        // base VA and report its length, mirroring the kernel mapping the
+        // region's frames into the caller and writing the registry's own
+        // record of the size. An unknown handle fails closed `NotFound`
+        // with `len_out` untouched.
         let backings = self.backings.borrow();
         match backings.iter().find(|b| b.handle == handle) {
-            Some(b) => b.buffer.as_ptr() as usize as i64,
+            Some(b) => {
+                *len_out = b.buffer.len() as u64;
+                b.buffer.as_ptr() as usize as i64
+            }
             None => -i64::from(Errno::NotFound.as_i32()),
         }
     }
@@ -1075,7 +1080,9 @@ fn map_shared_maps_the_granted_region() {
         None,
     )
     .unwrap();
-    assert_eq!(host.map_shared(), Ok(base));
+    // Both the base and the kernel-reported region length come back; the
+    // driver never sizes the shared bytes from the granting task's claim.
+    assert_eq!(host.map_shared(), Ok((base, 64)));
 }
 
 #[test]
