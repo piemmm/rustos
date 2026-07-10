@@ -19528,19 +19528,19 @@ mod tests {
         // A region the caller holds no grant for is refused before any
         // endpoint state is read — indistinguishable from a region that
         // does not exist.
-        assert_eq!(h.shm_grant(&ctx, 42, 0xD15_1001), Err(Errno::NotFound));
+        assert_eq!(h.shm_grant(&ctx, 42, 0xD15_2001), Err(Errno::NotFound));
 
         // The caller now holds the region's grant, but the endpoint is
         // unknown: still refused, nothing minted.
         let _own = aspaces
             .write()
             .mint_grant(SecTaskId(7), rustos_abi::HwResource::shared(42));
-        assert_eq!(h.shm_grant(&ctx, 42, 0xD15_1001), Err(Errno::NotFound));
+        assert_eq!(h.shm_grant(&ctx, 42, 0xD15_2001), Err(Errno::NotFound));
 
         // A live endpoint owned by the service task: the grant lands on the
         // endpoint's *server*, resolved kernel-side at grant time.
         let server_caps = make_caps_record(0x5707, &[], sink);
-        let id = 0xD15_1001;
+        let id = 0xD15_2001;
         let ep = Arc::new(
             CallEndpoint::create(
                 EndpointId(id),

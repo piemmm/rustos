@@ -277,6 +277,22 @@ fn render_resources(
             Some(HwResourceKind::Shared) => {
                 let _ = write!(line, "Shared-memory region {base}");
             }
+            Some(HwResourceKind::Framebuffer) => {
+                match resource.framebuffer_mode() {
+                    Ok(mode) => {
+                        let _ = write!(
+                            line,
+                            "Framebuffer at 0x{base:x} [size=0x{len:x}] {}x{} stride {}",
+                            mode.width_px, mode.height_px, mode.stride_bytes
+                        );
+                    }
+                    // A malformed geometry still lists as a window; the
+                    // mode is simply not shown (fail closed, never guess).
+                    Err(_) => {
+                        let _ = write!(line, "Framebuffer at 0x{base:x} [size=0x{len:x}]");
+                    }
+                }
+            }
             None => line.push_str("resource (unknown kind)"),
         }
         line.push('\n');

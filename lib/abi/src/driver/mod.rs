@@ -396,9 +396,12 @@ impl DriverError {
             Self::NoSpace => Errno::NoSpace,
             Self::SeatRevoked => Errno::SeatRevoked,
             Self::EndpointStalled => Errno::EndpointStalled,
-            Self::Unsupported | Self::DeviceFault | Self::Busy | Self::NotImplemented => {
-                Errno::NotImplemented
-            }
+            // A faulted device is its own client-visible condition; a busy
+            // one is retryable (`WouldBlock`); an unsupported operation
+            // reads as not implemented.
+            Self::DeviceFault => Errno::DeviceFault,
+            Self::Busy => Errno::WouldBlock,
+            Self::Unsupported | Self::NotImplemented => Errno::NotImplemented,
         }
     }
 }
@@ -715,6 +718,59 @@ where
         return Err(DriverError::OutOfRange);
     }
     Ok((base, len))
+}
+
+/// Resolve the *single* linear scan-out surface from a driver's
+/// kernel-issued device-resource grants: the
+/// [`Framebuffer`](crate::hwtree::HwResourceKind::Framebuffer) resource a
+/// display-class node carries, returned as the window's CPU-physical
+/// base and its validated
+/// [`DisplayMode`](crate::driver::display::DisplayMode)
+/// (`plans/DISPLAY.md` D7b).
+///
+/// The sibling of [`sole_register_window`] for the display class: the
+/// autoloaded display service builds its surface from exactly this grant
+/// and nothing else, so a mis-provisioned node fails the bring-up rather
+/// than scanning out a guessed geometry.
+///
+/// # Errors
+///
+/// Fails closed, never guessing a missing or ambiguous surface:
+///
+/// * [`DriverError::NotFound`] if no framebuffer grant is present.
+/// * [`DriverError::Unsupported`] if more than one is present (an
+///   ambiguous delivery — a packaging defect the driver refuses rather
+///   than picking one).
+/// * [`DriverError::BadMagic`] / [`DriverError::OutOfRange`] /
+///   [`DriverError::LengthOutOfRange`] if the resource's geometry does
+///   not validate ([`HwResource::framebuffer_mode`]).
+///
+/// # Capabilities
+///
+/// None. This inspects a grant set the kernel already minted; the map
+/// itself is capability-checked kernel-side at the `mmio_map` trap.
+pub fn sole_framebuffer<'a, I>(
+    resources: I,
+) -> Result<(u64, crate::driver::display::DisplayMode), DriverError>
+where
+    I: IntoIterator<Item = &'a HwResource>,
+{
+    let mut surface: Option<&HwResource> = None;
+    for resource in resources {
+        if resource.kind() == Some(crate::hwtree::HwResourceKind::Framebuffer) {
+            if surface.is_some() {
+                return Err(DriverError::Unsupported);
+            }
+            surface = Some(resource);
+        }
+    }
+    let resource = surface.ok_or(DriverError::NotFound)?;
+    let mode = resource.framebuffer_mode().map_err(|err| match err {
+        Errno::BadMagic => DriverError::BadMagic,
+        Errno::LengthOutOfRange => DriverError::LengthOutOfRange,
+        _ => DriverError::OutOfRange,
+    })?;
+    Ok((resource.base(), mode))
 }
 
 /// Host-supplied environment passed to every driver's `register`
@@ -1045,7 +1101,9 @@ mod tests {
             Errno::PermissionDenied
         );
         assert_eq!(DriverError::NotFound.as_errno(), Errno::NotFound);
-        assert_eq!(DriverError::Busy.as_errno(), Errno::NotImplemented);
+        assert_eq!(DriverError::Busy.as_errno(), Errno::WouldBlock);
+        assert_eq!(DriverError::DeviceFault.as_errno(), Errno::DeviceFault);
+        assert_eq!(DriverError::Unsupported.as_errno(), Errno::NotImplemented);
         assert_eq!(DriverError::NoSpace.as_errno(), Errno::NoSpace);
         assert_eq!(DriverError::SeatRevoked.as_errno(), Errno::SeatRevoked);
         assert_eq!(
@@ -1487,6 +1545,30 @@ mod tests {
         assert_eq!(
             sole_register_window([HwResource::mmio(0x1000_0000, 0)].iter()),
             Err(DriverError::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn sole_framebuffer_resolves_the_surface_and_fails_closed() {
+        let mode = crate::driver::display::DisplayMode {
+            width_px: 640,
+            height_px: 480,
+            stride_bytes: 2560,
+            format: crate::driver::display::DisplayFormat::Bgra8888,
+        };
+        let fb = HwResource::framebuffer(0x4000_0000, &mode).expect("valid mode");
+        // The surface resolves alongside unrelated grants.
+        let grants = [HwResource::irq(33, 1), fb];
+        assert_eq!(sole_framebuffer(grants.iter()), Ok((0x4000_0000, mode)));
+        // No surface grant.
+        assert_eq!(
+            sole_framebuffer([HwResource::mmio(0x1000_0000, 0x1000)].iter()),
+            Err(DriverError::NotFound)
+        );
+        // Two surface grants — ambiguous, refused rather than guessed.
+        assert_eq!(
+            sole_framebuffer([fb, fb].iter()),
+            Err(DriverError::Unsupported)
         );
     }
 }

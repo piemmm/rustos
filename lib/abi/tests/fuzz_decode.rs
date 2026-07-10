@@ -24,12 +24,14 @@
 //! reproducible. The bit-flip harness is an exhaustive boundary sweep, not a
 //! random one, so it does not draw a seed.
 
+use rustos_abi::display_ipc::{decode_mode_reply, DisplayRequest};
 use rustos_abi::elevate::{ElevateReply, ElevateRequest, ELEVATE_MAX_REQUEST, ELEVATE_REPLY_LEN};
 use rustos_abi::fs::{DirEntry, FileKind, FileStat, OpenFlags, FS_NAME_MAX};
 use rustos_abi::input::{KeyInput, PointerInput};
 use rustos_abi::process::{ProcessStart, ProcessStartHeader, StringSlot};
+use rustos_abi::reply::decode_status_reply;
 use rustos_abi::rlimit::ResourceLimit;
-use rustos_abi::seat::{decode_seat_reply, SeatAdminRequest};
+use rustos_abi::seat::SeatAdminRequest;
 use rustos_abi::sysinfo::{
     decode_reply, encode_reply_ok, IntrospectDomain, KernelMemoryStats, MountListRequest,
     MountRecord, ProcessListRequest, ProcessRecord, ResourceLimitRecord, SeatListRequest,
@@ -155,15 +157,28 @@ fn exercise_sysinfo_records(bytes: &[u8]) {
 
 /// Drive the seat-manager protocol decoders on `bytes` (one arm of
 /// [`exercise`]): an accepted seat-administration request must round-trip
-/// through its encoder, and the reply-frame decoder must refuse a corrupt
-/// status word cleanly, never panic.
+/// through its encoder, and the shared status-reply decoder must refuse a
+/// corrupt status word cleanly, never panic.
 fn exercise_seatmgr(bytes: &[u8]) {
     if let Ok(request) = SeatAdminRequest::from_bytes(bytes) {
         let redecoded = SeatAdminRequest::from_bytes(&request.to_le_bytes())
             .expect("round-trip of an accepted request must succeed");
         assert_eq!(request, redecoded);
     }
-    let _ = decode_seat_reply(bytes);
+    let _ = decode_status_reply(bytes);
+}
+
+/// Drive the display-service protocol decoders on `bytes` (one arm of
+/// [`exercise`]): an accepted display request must round-trip through its
+/// encoder, and the mode-reply decoder — untrusted service output a client
+/// parses — must refuse a corrupt frame cleanly, never panic.
+fn exercise_display_ipc(bytes: &[u8]) {
+    if let Ok(request) = DisplayRequest::from_bytes(bytes) {
+        let redecoded = DisplayRequest::from_bytes(&request.to_le_bytes())
+            .expect("round-trip of an accepted request must succeed");
+        assert_eq!(request, redecoded);
+    }
+    let _ = decode_mode_reply(bytes);
 }
 
 /// Drive every ABI decoder on `bytes`.
@@ -197,6 +212,7 @@ fn exercise(bytes: &[u8]) {
     exercise_users_admin(bytes);
     exercise_sysinfo_records(bytes);
     exercise_seatmgr(bytes);
+    exercise_display_ipc(bytes);
     exercise_elevate(bytes);
     if let Ok(time) = Time64::from_bytes(bytes) {
         let redecoded = Time64::from_bytes(&time.to_le_bytes())

@@ -8,17 +8,29 @@ GPU acceleration live above this trait, not inside it.
 
 ## Class trait
 
-`Display` is intentionally minimal — two methods:
+`Display` is intentionally minimal — three methods:
 
-| Method      | Purpose                                  | Capability gate          |
-|-------------|------------------------------------------|--------------------------|
-| `mode_info` | report `DisplayMode { width_px, height_px, stride_bytes, format }` | `DriverHandle` ownership |
-| `present`   | copy a fully-rendered frame to the surface | `DriverHandle` ownership |
+| Method           | Purpose                                  | Capability gate          |
+|------------------|------------------------------------------|--------------------------|
+| `mode_info`      | report `DisplayMode { width_px, height_px, stride_bytes, format }` | `DriverHandle` ownership |
+| `present`        | copy a fully-rendered frame to the surface | `DriverHandle` ownership |
+| `present_region` | present a full frame of which only a `DamageRect` changed | `DriverHandle` ownership |
 
 Pixel encodings are `DisplayFormat::Rgba8888` and
 `DisplayFormat::Bgra8888` (4 bytes per pixel). Per `AGENTS.md` §2.9 the
 trait never panics: a frame shorter than `stride_bytes * height_px`
 maps to `DriverError::BufferTooSmall`.
+
+`present_region` is the damage-aware present (`plans/DISPLAY.md` D7b):
+`frame` still carries the whole surface, and `damage` names the
+rectangle that changed since the previous present, validated against
+the active mode (`DamageRect::validate_in` — non-empty, wholly
+on-surface, overflow-checked) before any pixel access. The trait
+supplies a full-blit default so every driver stays correct unchanged;
+a driver whose scan-out path is a copy overrides it to blit only the
+touched scanline spans (the framebuffer driver does). The WM
+compositor threads its composited damage bounds through this method,
+so a small screen update costs a small copy end to end.
 
 ### The present right follows the live seat lease
 

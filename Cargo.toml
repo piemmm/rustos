@@ -47,6 +47,7 @@ members = [
     "lib/devids",
     "lib/devmatch",
     "lib/disasm",
+    "lib/display",
     "lib/dma-barrier",
     "lib/drvrt",
     "lib/fbcon",

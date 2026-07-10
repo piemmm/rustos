@@ -187,6 +187,94 @@ fn present_handles_non_word_multiple_surface() {
 }
 
 #[test]
+fn present_region_blits_only_the_damaged_span() {
+    let host = MockHost::full(8);
+    let mut fb = Framebuffer::open(&host, config(4, 2, 16)).expect("open");
+    let frame = vec![0xEEu8; 32];
+    let damage = DamageRect {
+        x: 1,
+        y: 1,
+        width_px: 2,
+        height_px: 1,
+    };
+    fb.present_region(&frame, damage).expect("region present");
+    let mapper = host.mapper.as_ref().expect("mapper");
+    // Row 1, pixels 1..3 (bytes 20..28) carry the frame; all else is 0.
+    for off in 0..32 {
+        let expected = if (20..28).contains(&off) { 0xEE } else { 0x00 };
+        assert_eq!(mapper.byte(off), expected, "byte {off}");
+    }
+}
+
+#[test]
+fn present_region_fails_closed_on_bad_damage_and_short_frame() {
+    let host = MockHost::full(8);
+    let mut fb = Framebuffer::open(&host, config(4, 2, 16)).expect("open");
+    let frame = vec![0xEEu8; 32];
+    // Escaping and empty rectangles are refused before any write.
+    for damage in [
+        DamageRect {
+            x: 3,
+            y: 0,
+            width_px: 2,
+            height_px: 1,
+        },
+        DamageRect {
+            x: 0,
+            y: 0,
+            width_px: 0,
+            height_px: 1,
+        },
+    ] {
+        assert_eq!(
+            fb.present_region(&frame, damage),
+            Err(DriverError::LengthOutOfRange)
+        );
+    }
+    // A short frame is refused after the bounds pass.
+    let full = DamageRect {
+        x: 0,
+        y: 0,
+        width_px: 4,
+        height_px: 2,
+    };
+    assert_eq!(
+        fb.present_region(&frame[..16], full),
+        Err(DriverError::BufferTooSmall)
+    );
+    let mapper = host.mapper.as_ref().expect("mapper");
+    for off in 0..32 {
+        assert_eq!(mapper.byte(off), 0x00, "surface untouched at byte {off}");
+    }
+}
+
+#[test]
+fn present_region_is_seat_gated_before_any_write() {
+    let host = MockHost {
+        drv_load: true,
+        mmio_map: true,
+        mapper: Some(MockMapper::new(8, true)),
+        gate: Some(MockGate {
+            verdict: Cell::new(Err(DriverError::SeatRevoked)),
+        }),
+    };
+    let mut fb = Framebuffer::open(&host, config(4, 2, 16)).expect("open");
+    let frame = vec![0xEEu8; 32];
+    let damage = DamageRect {
+        x: 0,
+        y: 0,
+        width_px: 1,
+        height_px: 1,
+    };
+    assert_eq!(
+        fb.present_region(&frame, damage),
+        Err(DriverError::SeatRevoked)
+    );
+    let mapper = host.mapper.as_ref().expect("mapper");
+    assert_eq!(mapper.byte(0), 0x00, "a revoked present writes nothing");
+}
+
+#[test]
 fn present_rejects_short_frame() {
     let host = MockHost::full(8);
     let mut fb = Framebuffer::open(&host, config(4, 2, 16)).expect("open");

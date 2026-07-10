@@ -35,7 +35,7 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
-use rustos_abi::driver::display::{Display, DisplayFormat, DisplayMode, SeatGate};
+use rustos_abi::driver::display::{DamageRect, Display, DisplayFormat, DisplayMode, SeatGate};
 use rustos_abi::driver::mmio::{MmioMapError, WindowError};
 use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost, MmioMapper, RegisterWindow};
 
@@ -186,26 +186,37 @@ impl<'h> Framebuffer<'h> {
     }
 
     /// Copy `frame[..surface_len]` into the mapped window.
-    ///
-    /// The bulk of the surface is written as naturally-aligned `u32`
-    /// scan-out words; any trailing bytes (a surface whose length is
-    /// not a multiple of four) are written individually. Every write
-    /// is bounds-checked by the window, so a miscomputed offset fails
-    /// closed instead of escaping the mapping.
     fn blit(&self, frame: &[u8]) -> Result<(), DriverError> {
-        let whole_words = self.surface_len / 4;
-        for word in 0..whole_words {
-            let off = word * 4;
+        self.blit_span(frame, 0, self.surface_len)
+    }
+
+    /// Copy `frame[offset..offset + len]` into the window at `offset` —
+    /// the one write path both the full and the region blit share.
+    ///
+    /// The bulk of the span is written as naturally-aligned `u32`
+    /// scan-out words; unaligned head and tail bytes are written
+    /// individually. Every write is bounds-checked by the window, so a
+    /// miscomputed offset fails closed instead of escaping the mapping.
+    fn blit_span(&self, frame: &[u8], offset: usize, len: usize) -> Result<(), DriverError> {
+        let end = offset + len;
+        let head_end = end.min(offset.next_multiple_of(4));
+        for (off, &byte) in frame.iter().enumerate().take(head_end).skip(offset) {
+            self.window
+                .write_u8(off, byte)
+                .map_err(WindowError::as_driver_error)?;
+        }
+        let mut off = head_end;
+        while off + 4 <= end {
             let value =
                 u32::from_le_bytes([frame[off], frame[off + 1], frame[off + 2], frame[off + 3]]);
             self.window
                 .write_u32(off, value)
                 .map_err(WindowError::as_driver_error)?;
+            off += 4;
         }
-        let tail_start = whole_words * 4;
-        for (i, &byte) in frame[tail_start..self.surface_len].iter().enumerate() {
+        for (tail, &byte) in frame.iter().enumerate().take(end).skip(off) {
             self.window
-                .write_u8(tail_start + i, byte)
+                .write_u8(tail, byte)
                 .map_err(WindowError::as_driver_error)?;
         }
         Ok(())
@@ -230,5 +241,26 @@ impl Display for Framebuffer<'_> {
             return Err(DriverError::BufferTooSmall);
         }
         self.blit(frame)
+    }
+
+    fn present_region(&mut self, frame: &[u8], damage: DamageRect) -> Result<(), DriverError> {
+        // Same order as the full present: the lease first, then every
+        // bound, then the surface.
+        if let Some(gate) = self.seat {
+            gate.check_present()?;
+        }
+        damage.validate_in(&self.mode)?;
+        if frame.len() < self.surface_len {
+            return Err(DriverError::BufferTooSmall);
+        }
+        let stride = self.mode.stride_bytes as usize;
+        let bpp = self.mode.format.bytes_per_pixel() as usize;
+        let x0 = damage.x as usize * bpp;
+        let span = damage.width_px as usize * bpp;
+        for row in 0..damage.height_px as usize {
+            let offset = (damage.y as usize + row) * stride + x0;
+            self.blit_span(frame, offset, span)?;
+        }
+        Ok(())
     }
 }

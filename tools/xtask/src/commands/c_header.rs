@@ -122,6 +122,7 @@ const ERRNO_NAMES: &[(&str, Errno)] = &[
     ("NOT_FOREGROUND", Errno::NotForeground),
     ("BROKEN_PIPE", Errno::BrokenPipe),
     ("ENDPOINT_STALLED", Errno::EndpointStalled),
+    ("DEVICE_FAULT", Errno::DeviceFault),
 ];
 
 /// One generated C header: its file name (relative to the include directory)
@@ -602,6 +603,9 @@ fn hwtree_enum_macros(out: &mut String) {
         ("PORT", HwResourceKind::Port),
         ("DMA", HwResourceKind::Dma),
         ("BUS_WINDOW", HwResourceKind::BusWindow),
+        ("ENDPOINT", HwResourceKind::Endpoint),
+        ("SHARED", HwResourceKind::Shared),
+        ("FRAMEBUFFER", HwResourceKind::Framebuffer),
     ] {
         let _ = writeln!(
             out,
@@ -3781,11 +3785,11 @@ mod tests {
             let expected = i32::try_from(idx + 1).expect("small index");
             assert_eq!(errno.as_i32(), expected, "errno values must be dense 1..=N");
         }
-        // EndpointStalled is the last appended abi-v1 variant
-        // (discriminant 29).
+        // DeviceFault is the last appended abi-v1 variant
+        // (discriminant 30).
         assert_eq!(
             ERRNO_NAMES.last().map(|(_, e)| e.as_i32()),
-            Some(Errno::EndpointStalled.as_i32()),
+            Some(Errno::DeviceFault.as_i32()),
             "errno table must end at the last frozen variant"
         );
     }

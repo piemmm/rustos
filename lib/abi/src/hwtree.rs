@@ -31,6 +31,7 @@
 //! against `WIRE_LEN` (validate every input, fail
 //! closed).
 
+use crate::driver::display::{DisplayFormat, DisplayMode};
 use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
 use crate::{CapabilityId, Errno};
 
@@ -423,6 +424,20 @@ pub enum HwResourceKind {
     /// resource as its sole grant, so it can map exactly its own interface's
     /// buffer and nothing else (no ambient authority).
     Shared = 6,
+    /// A **linear scan-out surface**: a mappable framebuffer window
+    /// (`base`..`base+len`) that additionally carries the pixel geometry
+    /// the platform programmed it with, so a display driver spawned into
+    /// user space learns its mode from discovery rather than a board
+    /// constant — the FDT `simple-framebuffer` model, normalised into the
+    /// hardware tree (`plans/DISPLAY.md` D7b). The per-kind fields:
+    /// `flags` is the [`DisplayFormat`] wire value (its reserved high
+    /// bits zero), `xlate` packs the width (low 32 bits) and height
+    /// (high 32 bits) in pixels, and the stride is `len / height`,
+    /// recovered and validated by
+    /// [`HwResource::framebuffer_mode`]. A GPU that exposes an
+    /// accelerated engine publishes its own register/DMA resources
+    /// alongside — this kind describes only the dumb linear surface.
+    Framebuffer = 7,
 }
 
 impl HwResourceKind {
@@ -443,6 +458,7 @@ impl HwResourceKind {
             4 => Some(Self::BusWindow),
             5 => Some(Self::Endpoint),
             6 => Some(Self::Shared),
+            7 => Some(Self::Framebuffer),
             _ => None,
         }
     }
@@ -453,10 +469,10 @@ impl HwResourceKind {
     #[must_use]
     pub const fn required_capability(self) -> CapabilityId {
         match self {
-            // A register/framebuffer window, an x86 I/O port range, and
-            // an outbound bus window are all mapped through the kernel's
-            // MMIO-map facility.
-            Self::Mmio | Self::Port | Self::BusWindow => CapabilityId::MMIO_MAP,
+            // A register/framebuffer window (plain or geometry-carrying),
+            // an x86 I/O port range, and an outbound bus window are all
+            // mapped through the kernel's MMIO-map facility.
+            Self::Mmio | Self::Port | Self::BusWindow | Self::Framebuffer => CapabilityId::MMIO_MAP,
             Self::Irq => CapabilityId::IRQ_BIND,
             Self::Dma => CapabilityId::MEM_DMA,
             // Submitting to a grant-restricted call endpoint is gated by the
@@ -580,6 +596,83 @@ impl HwResource {
         Self::new(HwResourceKind::Shared, id, 1, 0)
     }
 
+    /// A linear scan-out surface at CPU-physical `base`, programmed with
+    /// `mode` — the geometry-carrying window a display-class node
+    /// publishes so its autoloaded driver can map and drive the surface
+    /// (`plans/DISPLAY.md` D7b).
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] if `mode` is degenerate: a zero
+    /// extent, a stride that cannot hold one scanline of `mode.format`
+    /// pixels, or a surface length that overflows.
+    pub fn framebuffer(base: u64, mode: &DisplayMode) -> Result<Self, Errno> {
+        if mode.width_px == 0 || mode.height_px == 0 {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let min_stride = u64::from(mode.width_px) * u64::from(mode.format.bytes_per_pixel());
+        if u64::from(mode.stride_bytes) < min_stride {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let len = u64::from(mode.stride_bytes)
+            .checked_mul(u64::from(mode.height_px))
+            .ok_or(Errno::LengthOutOfRange)?;
+        let xlate = u64::from(mode.width_px) | (u64::from(mode.height_px) << 32);
+        Ok(Self::new_xlate(
+            HwResourceKind::Framebuffer,
+            base,
+            len,
+            u32::from(mode.format.as_u8()),
+            xlate,
+        ))
+    }
+
+    /// Recover the [`DisplayMode`] a [`Framebuffer`](HwResourceKind::Framebuffer)
+    /// resource carries, validating every field — the one decode a
+    /// display driver builds its surface from, so a corrupt or hostile
+    /// node can never yield a geometry that escapes the window.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::OutOfRange`] — not a framebuffer resource, or an
+    ///   unknown pixel format.
+    /// * [`Errno::BadMagic`] — reserved format bits set (wire
+    ///   corruption).
+    /// * [`Errno::LengthOutOfRange`] — a zero extent, a length that is
+    ///   not an exact multiple of the height, a stride that overflows
+    ///   `u32` or cannot hold one scanline.
+    pub fn framebuffer_mode(&self) -> Result<DisplayMode, Errno> {
+        if self.kind() != Some(HwResourceKind::Framebuffer) {
+            return Err(Errno::OutOfRange);
+        }
+        if self.flags > u32::from(u8::MAX) {
+            return Err(Errno::BadMagic);
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let format = DisplayFormat::from_u8(self.flags as u8)?;
+        #[allow(clippy::cast_possible_truncation)]
+        let width_px = self.xlate as u32;
+        let height_px = u32::try_from(self.xlate >> 32).map_err(|_| Errno::LengthOutOfRange)?;
+        if width_px == 0 || height_px == 0 {
+            return Err(Errno::LengthOutOfRange);
+        }
+        if self.len % u64::from(height_px) != 0 {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let stride = self.len / u64::from(height_px);
+        let stride_bytes = u32::try_from(stride).map_err(|_| Errno::LengthOutOfRange)?;
+        let min_stride = u64::from(width_px) * u64::from(format.bytes_per_pixel());
+        if u64::from(stride_bytes) < min_stride {
+            return Err(Errno::LengthOutOfRange);
+        }
+        Ok(DisplayMode {
+            width_px,
+            height_px,
+            stride_bytes,
+            format,
+        })
+    }
+
     fn new(kind: HwResourceKind, base: u64, len: u64, flags: u32) -> Self {
         Self::new_xlate(kind, base, len, flags, 0)
     }
@@ -661,7 +754,7 @@ impl HwResource {
     #[must_use]
     pub fn register_window_base(&self) -> Option<u64> {
         match self.kind() {
-            Some(HwResourceKind::Mmio) => Some(self.base),
+            Some(HwResourceKind::Mmio | HwResourceKind::Framebuffer) => Some(self.base),
             Some(HwResourceKind::BusWindow) => Some(self.xlate),
             _ => None,
         }
@@ -681,9 +774,10 @@ impl HwResource {
     /// type whose semantics it depends on, so the kernel
     /// never re-decides per-kind containment.
     ///
-    /// Coverage always requires identical `flags`, and — for every pairing
-    /// but one — the same [`HwResourceKind`]. Beyond that the rule follows
-    /// each kind's meaning:
+    /// Coverage requires identical `flags` between like kinds (and the
+    /// blank flags of a plain window when one is re-described, below),
+    /// and — for two pairings — allows a cross-kind step. Beyond that the
+    /// rule follows each kind's meaning:
     ///
     /// * [`Mmio`](HwResourceKind::Mmio), [`Port`](HwResourceKind::Port), and
     ///   [`Irq`](HwResourceKind::Irq) are untranslated `[base, base+len)`
@@ -715,7 +809,10 @@ impl HwResource {
             // An undecodable discriminant on either side fails closed.
             return false;
         };
-        if self.flags != child.flags {
+        // Like kinds must carry identical flags; the cross-kind arms state
+        // their own flag rule (a per-kind field is only comparable within
+        // its kind).
+        if parent_kind == child_kind && self.flags != child.flags {
             return false;
         }
         match (parent_kind, child_kind) {
@@ -731,8 +828,10 @@ impl HwResource {
             (HwResourceKind::BusWindow, HwResourceKind::Mmio) => {
                 // A host bridge's outbound window covers a child register BAR
                 // resolved to a CPU-physical window inside it (PCI(e)
-                // discovery): pure CPU-side containment, no wider.
-                interval_contains(self.base, self.len, child.base, child.len)
+                // discovery): pure CPU-side containment, no wider; both are
+                // flagless windows.
+                self.flags == child.flags
+                    && interval_contains(self.base, self.len, child.base, child.len)
             }
             (HwResourceKind::Mmio, HwResourceKind::Mmio)
             | (HwResourceKind::Port, HwResourceKind::Port)
@@ -743,6 +842,20 @@ impl HwResource {
                 // `[id, id+len)` range exactly like an IRQ line range: the
                 // child must lie wholly within the parent grant.
                 interval_contains(self.base, self.len, child.base, child.len)
+            }
+            (HwResourceKind::Framebuffer, HwResourceKind::Framebuffer) => {
+                // A scan-out surface is granted whole, geometry and all:
+                // the flags (format) already matched above, and the packed
+                // geometry plus the exact window must too — a child cannot
+                // reinterpret the parent's surface with a different shape.
+                self.xlate == child.xlate && self.base == child.base && self.len == child.len
+            }
+            (HwResourceKind::Mmio, HwResourceKind::Framebuffer) => {
+                // An emitter holding a plain (flagless) window over the
+                // surface's memory may publish it as a geometry-carrying
+                // scan-out node (the display bring-up path): pure CPU-side
+                // containment — the geometry adds description, never reach.
+                self.flags == 0 && interval_contains(self.base, self.len, child.base, child.len)
             }
             // Every other kind pairing fails closed.
             _ => false,
@@ -1419,6 +1532,123 @@ mod tests {
             HwResourceKind::Shared.required_capability(),
             CapabilityId::SHM
         );
+        assert_eq!(
+            HwResourceKind::Framebuffer.required_capability(),
+            CapabilityId::MMIO_MAP
+        );
+    }
+
+    #[test]
+    fn framebuffer_resource_round_trips_its_mode() {
+        let mode = DisplayMode {
+            width_px: 1280,
+            height_px: 720,
+            stride_bytes: 5120,
+            format: DisplayFormat::Bgra8888,
+        };
+        let fb = HwResource::framebuffer(0x4000_0000, &mode).expect("valid mode");
+        assert_eq!(fb.kind(), Some(HwResourceKind::Framebuffer));
+        assert_eq!(fb.base(), 0x4000_0000);
+        assert_eq!(fb.length(), 5120 * 720);
+        assert_eq!(fb.required_capability(), Ok(CapabilityId::MMIO_MAP));
+        assert_eq!(fb.register_window_base(), Some(0x4000_0000));
+        assert_eq!(fb.framebuffer_mode(), Ok(mode));
+        assert_eq!(HwResource::from_bytes(&fb.to_le_bytes()).unwrap(), fb);
+        assert_eq!(
+            HwResourceKind::from_u16(7),
+            Some(HwResourceKind::Framebuffer)
+        );
+    }
+
+    #[test]
+    fn framebuffer_constructor_refuses_degenerate_modes() {
+        let mode = |w: u32, h: u32, stride: u32| DisplayMode {
+            width_px: w,
+            height_px: h,
+            stride_bytes: stride,
+            format: DisplayFormat::Rgba8888,
+        };
+        assert_eq!(
+            HwResource::framebuffer(0, &mode(0, 720, 5120)),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert_eq!(
+            HwResource::framebuffer(0, &mode(1280, 0, 5120)),
+            Err(Errno::LengthOutOfRange)
+        );
+        // A stride that cannot hold one 1280-px scanline (needs 5120).
+        assert_eq!(
+            HwResource::framebuffer(0, &mode(1280, 720, 5119)),
+            Err(Errno::LengthOutOfRange)
+        );
+    }
+
+    #[test]
+    fn framebuffer_mode_decode_fails_closed_on_hostile_fields() {
+        let mode = DisplayMode {
+            width_px: 4,
+            height_px: 2,
+            stride_bytes: 16,
+            format: DisplayFormat::Bgra8888,
+        };
+        let good = HwResource::framebuffer(0x1000, &mode).expect("valid mode");
+
+        // Not a framebuffer resource at all.
+        assert_eq!(
+            HwResource::mmio(0x1000, 32).framebuffer_mode(),
+            Err(Errno::OutOfRange)
+        );
+        // Reserved format bits / unknown format byte.
+        let dirty_flags = HwResource::new(HwResourceKind::Framebuffer, 0x1000, 32, 0x100);
+        assert_eq!(dirty_flags.framebuffer_mode(), Err(Errno::BadMagic));
+        let bad_format = HwResource::new(HwResourceKind::Framebuffer, 0x1000, 32, 9);
+        assert_eq!(bad_format.framebuffer_mode(), Err(Errno::OutOfRange));
+        // Zero geometry, a non-exact length, an undersized stride.
+        let zero_geo = HwResource::new_xlate(HwResourceKind::Framebuffer, 0x1000, 32, 2, 0);
+        assert_eq!(zero_geo.framebuffer_mode(), Err(Errno::LengthOutOfRange));
+        let ragged =
+            HwResource::new_xlate(HwResourceKind::Framebuffer, 0x1000, 33, 2, 4 | (2u64 << 32));
+        assert_eq!(ragged.framebuffer_mode(), Err(Errno::LengthOutOfRange));
+        let thin = HwResource::new_xlate(
+            HwResourceKind::Framebuffer,
+            0x1000,
+            24, // stride 12 < 4 px × 4 bytes
+            2,
+            4 | (2u64 << 32),
+        );
+        assert_eq!(thin.framebuffer_mode(), Err(Errno::LengthOutOfRange));
+        // The well-formed resource still decodes.
+        assert_eq!(good.framebuffer_mode(), Ok(mode));
+    }
+
+    #[test]
+    fn framebuffer_coverage_is_exact_or_from_a_plain_window() {
+        let mode = DisplayMode {
+            width_px: 4,
+            height_px: 2,
+            stride_bytes: 16,
+            format: DisplayFormat::Bgra8888,
+        };
+        let fb = HwResource::framebuffer(0x1000, &mode).expect("valid mode");
+        // Identical surface: covered.
+        assert!(fb.covers(&HwResource::framebuffer(0x1000, &mode).unwrap()));
+        // A different window or geometry is not.
+        assert!(!fb.covers(&HwResource::framebuffer(0x2000, &mode).unwrap()));
+        let other = DisplayMode {
+            width_px: 2,
+            height_px: 4,
+            stride_bytes: 8,
+            format: DisplayFormat::Bgra8888,
+        };
+        assert!(!fb.covers(&HwResource::framebuffer(0x1000, &other).unwrap()));
+        // A plain window over the surface memory covers the described
+        // surface; a disjoint or short window does not, and the
+        // geometry-carrying grant never covers a plain window.
+        assert!(HwResource::mmio(0x1000, 32).covers(&fb));
+        assert!(HwResource::mmio(0x0, 0x10000).covers(&fb));
+        assert!(!HwResource::mmio(0x1000, 16).covers(&fb));
+        assert!(!HwResource::mmio(0x2000, 32).covers(&fb));
+        assert!(!fb.covers(&HwResource::mmio(0x1000, 32)));
     }
 
     #[test]

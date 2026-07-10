@@ -373,8 +373,9 @@ pub static NULL_SHARED_MEM_FACILITY: NullSharedMemFacility = NullSharedMemFacili
 /// (validate every input):
 ///
 /// * the resource must be an MMIO register window
-///   ([`HwResourceKind::Mmio`]) or an outbound bus window
-///   ([`HwResourceKind::BusWindow`]) — the two kinds whose far side is a
+///   ([`HwResourceKind::Mmio`]), an outbound bus window
+///   ([`HwResourceKind::BusWindow`]), or a linear scan-out surface
+///   ([`HwResourceKind::Framebuffer`]) — the kinds whose far side is a
 ///   memory-mapped block. A [`HwResourceKind::Port`] (x86 I/O ports),
 ///   [`HwResourceKind::Irq`], or [`HwResourceKind::Dma`] grant is **not** a
 ///   mappable window and is refused with [`Errno::OutOfRange`], even though
@@ -401,7 +402,7 @@ pub fn mappable_subwindow(
     len: usize,
 ) -> Result<(u64, usize), Errno> {
     match resource.kind() {
-        Some(HwResourceKind::Mmio | HwResourceKind::BusWindow) => {}
+        Some(HwResourceKind::Mmio | HwResourceKind::BusWindow | HwResourceKind::Framebuffer) => {}
         // A known-but-non-window kind, or an unknown discriminant, is the
         // wrong shape for `mmio_map`; refuse rather than mapping it.
         _ => return Err(Errno::OutOfRange),
@@ -555,6 +556,25 @@ mod tests {
         assert_eq!(
             mappable_subwindow(&bus, 0, 0x400_0000),
             Ok((0x6000_0000, 0x400_0000))
+        );
+
+        // A linear scan-out surface maps exactly like a plain window (the
+        // display service's grant, `plans/DISPLAY.md` D7b): whole window
+        // in, escape refused.
+        let mode = rustos_abi::driver::display::DisplayMode {
+            width_px: 1280,
+            height_px: 720,
+            stride_bytes: 5120,
+            format: rustos_abi::driver::display::DisplayFormat::Bgra8888,
+        };
+        let fb = HwResource::framebuffer(0x4000_0000, &mode).expect("valid mode");
+        assert_eq!(
+            mappable_subwindow(&fb, 0, 5120 * 720),
+            Ok((0x4000_0000, 5120 * 720))
+        );
+        assert_eq!(
+            mappable_subwindow(&fb, 0, 5120 * 720 + 1),
+            Err(Errno::OutOfRange)
         );
     }
 
