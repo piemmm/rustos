@@ -388,8 +388,8 @@ default.
 
 ### Stage D7 — the display-client present path (the graphical session goes live)
 
-**Status: in progress — D7a and D7b done; D7c (the desktop session
-binary) is next.** D1–D6 made the seat an
+**Status: in progress — D7a, D7b, and D7c done; D7d (the end-to-end
+QEMU vertical) is next.** D1–D6 made the seat an
 enforced, revocable kernel object and derived the present right from the
 live lease — but the only presenters so far are kernel-side fixtures. D7 is the
 missing transport: a user-space window-manager session presenting
@@ -502,15 +502,25 @@ Sub-stages, each shipped complete (code + tests + docs, §7 gate green):
   it before building their slices) sizes its view from the kernel's
   answer, never the granting task's claimed geometry. The service's
   image bundle + bind keys land with the D7d autoload world.
-- **D7c — the desktop session binary.** `userland/gui/session` gains its
-  `Run` program: `display_acquire(SEAT_PRIMARY)` → `DisplayClient`
-  bring-up (query, shm double buffer, `shm_grant`, configure) → the live
-  `SeatEventReader` over `rustos_rt::pointer_read`/`keyboard_read`
-  drained after each `SeatInput` wake → `DesktopShell` pump →
-  composite → present with damage. `DeviceInputSource` receives the
-  compositor's screen `Rect` from the queried mode. Loss of the seat
-  (typed `SeatRevoked`/`SeatNotOwner` on any drain or present) tears the
-  session down fail-loud; it never spins or repaints blind.
+- **D7c — the desktop session binary. `[x]` — done.**
+  `userland/gui/session` ships the `Run` program (`src/run.rs`, the
+  login-crate lib+bin shape: `freestanding` build.rs cfg, the shared PIE
+  `Run.ld`, an `AppInfo.toml` requesting exactly `CAP_DISPLAY` +
+  `CAP_INPUT_READ` + `CAP_SHM`, host stub elsewhere):
+  `display_acquire(SEAT_PRIMARY)` → `DisplayClient` bring-up over
+  `ipc_call` (query → checked frame arithmetic → `shm_create` double
+  buffer → `shm_grant` to the display endpoint's serving task →
+  configure) → `RemoteDisplay` over the session's own mapping → the live
+  `SeatEventReader`s over `rustos_rt::pointer_read`/`keyboard_read`
+  drained after each `SeatInput` wake → `DesktopShell` pump → composite →
+  present with damage. `DeviceInputSource` receives the screen `Rect`
+  from the queried mode; the compositor's background is the active
+  theme's desktop colour. Loss of the seat (typed
+  `SeatRevoked`/`SeatNotOwner` on any drain or present) tears the
+  session down fail-loud — reason on `stderr`, reserved exit codes
+  90–97, owner-checked `display_release` on every exit path — never a
+  spin or a blind repaint. The bundle's image planting and spawn ride
+  D7d.
 - **D7d — end to end.** The autoload QEMU vertical world grows a display
   node + the framebuffer service + the spawned session: injected key and
   `mouse_move` reach the session through the seat channels, the

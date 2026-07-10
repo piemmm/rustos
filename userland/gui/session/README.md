@@ -223,6 +223,40 @@ window manager's `InputRouter::focus` / `unfocus`. The bridge holds no pixels
 and grants itself no authority — the compositor, router, and taskbar are the
 embedder's, passed in per call.
 
+## The `Run` binary — the live desktop session (`plans/DISPLAY.md` D7c)
+
+The crate also ships the desktop session's `Run` entry-point binary
+(`src/run.rs`, built freestanding on the native Tier-1 targets and an inert
+host stub elsewhere), the first live embedder of everything above. It wires
+the real seams end to end:
+
+- `display_acquire(SEAT_PRIMARY)` binds the session as the boot seat's
+  owner; the kernel owner-gates every later drain and present against that
+  live, revocable lease — the session asserts nothing itself.
+- `DisplayClient` over `ipc_call` to the reserved `DISPLAY_ENDPOINT`
+  performs the bring-up handshake: query the mode (checked frame
+  arithmetic, fail closed on overflow or a zero-sized mode), `shm_create`
+  the double-buffered frame region, `shm_grant` it **to the serving task of
+  the display endpoint** (never a raw, recyclable PID), configure, then
+  present by frame index through `RemoteDisplay` — no frame bytes ever
+  cross the IPC.
+- The `DesktopShell` is driven from the two live seat readers (the
+  seat-addressed `pointer_read` / `keyboard_read` behind the
+  `SeatEventReader` seam), with the queried mode as the pointer's screen
+  rectangle and the compositor's background taken from the active theme's
+  desktop colour.
+- The session **parks on a `SeatInput` wait-set member** between events —
+  never a poll loop — woken by input delivery *and* by lease loss. Losing
+  the seat (the typed `SeatRevoked` / `SeatNotOwner` on any drain or
+  present) tears the session down fail-loud: the reason lands on `stderr`
+  and a reserved exit code (90–97, documented in `src/run.rs`) tells the
+  spawning supervisor what happened; the owner-checked `display_release`
+  runs on every exit path after the acquire.
+
+The manifest (`AppInfo.toml`) requests exactly `CAP_DISPLAY`,
+`CAP_INPUT_READ`, and `CAP_SHM`. The bundle's image planting and the
+end-to-end QEMU vertical ride the D7d autoload world (`plans/DISPLAY.md`).
+
 ## Dependencies and layering
 
 The crate composes the other GUI crates and `lib/*` only — `rustos-taskbar`,
@@ -234,20 +268,24 @@ keyboard sources decode)
 `userland/gui/*` edge; nothing outside `userland/gui/*` depends on it (§17.3),
 so a headless image omits it cleanly.
 
-It is `no_std`. `#![forbid(unsafe_code)]`; no `unwrap`/`expect`/`panic!` in
-production paths (`AGENTS.md` §2.9).
+The `Run` binary additionally links `rustos-display` (the client half of the
+present protocol) and `rustos-rt` (the pure-Rust userland runtime), for the
+bare-metal targets only.
+
+The library is `no_std` with `#![forbid(unsafe_code)]`; no
+`unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). The `Run`
+binary holds the one justified `unsafe` — the slice view of its own
+kernel-mapped frame region, with its invariants stated in a `// SAFETY:`
+block (`AGENTS.md` §2.10).
 
 ## Still to come (Stage 7)
 
-Relaying the active theme to the window manager and apps over live IPC (the
-event loop, routing policy, surface glue, and the `DeviceInputSource` /
-`KeyboardInputSource` that feed it live pointer and keyboard streams now all
-exist), the live `SeatEventReader` over `rustos_rt::pointer_read` /
-`rustos_rt::keyboard_read` in the desktop session binary once it exists (the
-kernel side — seat channels, owner gating, and both syscalls — is live and
-tested; the channel's draining, validation, and fail-closed fallbacks are
-done and tested in-memory), resolving launcher /
+The D7d end-to-end QEMU vertical (the autoload world grows the display node,
+the framebuffer service bundle, and this spawned session; login flips
+`graphical_available` when both bundles are present), relaying the active
+theme to the window manager and apps over live IPC, resolving launcher /
 session-control actions once the process and window-manager capabilities are
 wired (deferred Stage 6 work), and the VFS-backed `GraphicsAssetReader` that
 reads `/System/Graphics` on a running system (the in-memory-tested loader and
-its fallbacks now exist).
+its fallbacks now exist; the `Run` binary installs the built-in artwork until
+then).

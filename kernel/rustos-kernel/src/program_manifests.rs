@@ -600,6 +600,19 @@ mod tests {
         const PURE_TOOL_REQUEST: &[CapabilityId] =
             &[CapabilityId::CONSOLE_WRITE, CapabilityId::FS_ACCESS];
 
+        // The desktop graphical-session service (plans/DISPLAY.md D7c):
+        // the boot seat's revocable lease (CAP_DISPLAY), the owner-gated
+        // seat input drains (CAP_INPUT_READ), and the zero-copy frame
+        // region it creates and grants to the display service (CAP_SHM).
+        // It ships purely as a discovered on-disk bundle — the boot floor
+        // never grows — so no `spawn_layout` row or manifest constant
+        // exists for it and its `AppInfo.toml` is pinned here directly.
+        const DESKTOP_SESSION_REQUEST: &[CapabilityId] = &[
+            CapabilityId::DISPLAY,
+            CapabilityId::INPUT_READ,
+            CapabilityId::SHM,
+        ];
+
         // The device-inventory listing tools `lspci` and `lsusb`
         // (plans/DEVICES.md DEVICE1): the pure-tool request plus
         // `CAP_SYSINFO_HW` for the `HARDWARE_TREE` query they render. Not
@@ -622,6 +635,7 @@ mod tests {
             ("chmod", AppKind::Command, PURE_TOOL_REQUEST),
             ("clear", AppKind::Command, CLEAR_MANIFEST),
             ("cp", AppKind::Command, FILE_TOOL_REQUEST),
+            ("desktop", AppKind::Service, DESKTOP_SESSION_REQUEST),
             ("devmgr", AppKind::Service, DEVMGR_MANIFEST),
             ("df", AppKind::Command, PURE_TOOL_REQUEST),
             ("dirname", AppKind::Command, PURE_TOOL_REQUEST),
