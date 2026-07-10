@@ -62,8 +62,8 @@ build on the *same* engine without depending on each other — exactly the split
   sized for the VL805's 31-page scratchpad worst case plus the bulk
   rings/staging. It lives here, beside the engine that
   lays the region out, so every host that carves it — the PCI bus driver's
-  wiring (`drivers/bus/usb`) and the arch-neutral keyboard driver
-  (`drivers/input/usb_hid`) — shares one definition (§2.2).
+  wiring (`drivers/bus/usb`) and the arch-neutral HID class drivers
+  (`drivers/input/usb_kbd`, `drivers/input/usb_mouse`) — shares one definition (§2.2).
 - `XHCI_COMPATIBLE` — the `compatible` identity (`usb,xhci`) a discovered xHCI
   controller node carries (§18.1). An xHCI-protocol identity (not a board or
   vendor name), so it lives here as the single definition the emitting bus

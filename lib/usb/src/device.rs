@@ -2528,6 +2528,14 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     /// it enabled, and attach the device behind it
     /// ([`Self::attach_downstream_device`]).
     ///
+    /// On **any** failure the port's latched changes are drained
+    /// (best-effort) before the error is surfaced: the reset this attach
+    /// issued latches `C_PORT_RESET` (and the connect change may already be
+    /// latched), and a hub keeps its status-change endpoint re-reporting the
+    /// port until every latch is cleared — an undrained failed attach would
+    /// make the watch re-fire, and re-run the same failing enumeration,
+    /// forever (the metal fault loop that starved every other port).
+    ///
     /// # Errors
     ///
     /// * [`DriverError::DeviceFault`] if the reset port does not report
@@ -2536,9 +2544,26 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     /// * Any error of [`Self::reset_hub_port`], [`Self::hub_port_status`],
     ///   or [`Self::attach_downstream_device`].
     fn attach_hub_port(&mut self, port: u8, delay: &dyn Delay) -> Result<usize, DriverError> {
-        // Reset the port so the hub enables it and establishes its speed
-        // and transaction translator, then wait the reset-recovery window
-        // before reading the port enabled.
+        let result = self.reset_confirm_and_attach(port, delay);
+        if result.is_err() {
+            // Best-effort: the device just failed, so these hub-class
+            // transfers may fail too; the attach error is the one surfaced.
+            if let Ok((_, change)) = self.hub_port_status_change(port) {
+                let _ = self.clear_hub_port_changes(port, change);
+            }
+        }
+        result
+    }
+
+    /// The attach core of [`Self::attach_hub_port`]: reset the port so the
+    /// hub enables it and establishes its speed and transaction translator,
+    /// wait the reset-recovery window, confirm it enabled, and attach the
+    /// device behind it.
+    fn reset_confirm_and_attach(
+        &mut self,
+        port: u8,
+        delay: &dyn Delay,
+    ) -> Result<usize, DriverError> {
         self.reset_hub_port(port)?;
         delay.delay_us(HUB_RESET_RECOVERY_US);
         let status = self.hub_port_status(port)?;
@@ -2954,10 +2979,21 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         // genuine hot-plug rather than immediately and forever on a stale
         // latch.
         let restored = self.restore_hub_active();
+        // Drain the latches on the failed path too: a failed attach that
+        // leaves the connect/reset changes latched makes the hub's
+        // status-change endpoint re-report the same stale change forever,
+        // and each re-service re-runs the failing enumeration — the metal
+        // symptom where one broken device pegs the hub watch in a
+        // multi-second fault loop and starves every other port's service.
+        let drained = if restored.is_ok() {
+            self.hub_port_status_change(down_port)
+                .and_then(|(_, change)| self.clear_hub_port_changes(down_port, change))
+        } else {
+            Ok(())
+        };
         result?;
         restored?;
-        let change = self.hub_port_status_change(down_port)?.1;
-        self.clear_hub_port_changes(down_port, change)?;
+        drained?;
         Ok(index)
     }
 
@@ -3439,10 +3475,18 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     /// that is not a connect/disconnect we act on (a reset or enable change,
     /// a connect for a port already served, or a connect with the device
     /// table full) is drained and ignored.
+    ///
+    /// The scan is **per-port fail-soft**, mirroring the bring-up walk: one
+    /// port's broken or unresponsive device has its latches drained
+    /// ([`Self::attach_hub_port`]) and the remaining changed ports are still
+    /// serviced, so a mouse that fails enumeration can never cost the
+    /// keyboard beside it its hot-plug. The first failure is surfaced (the
+    /// caller logs it) only when no actionable event was found.
     fn process_hub_change(&mut self, delay: &dyn Delay) -> Result<HubEvent, DriverError> {
         let num_ports = self.hub_num_ports()?;
         let mut bitmap = [0u8; HUB_REPORT_LEN];
         self.dma.read(self.layout.hub_report, &mut bitmap)?;
+        let mut first_failure = None;
         for port in 1..=num_ports {
             let byte = usize::from(port / 8);
             let bit = port % 8;
@@ -3455,22 +3499,22 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             }
             // A genuine connect transition on a port with no device tracked,
             // while the table has room: enumerate a brand-new device.
-            // `attach_downstream_device` resets the port and drains every
-            // latch (including this connect change) on success.
+            // `attach_hub_port` resets the port and drains every latch
+            // (including this connect change) whether or not it succeeds.
             if change & PORT_CHANGE_CONNECT != 0
                 && hub_port_connected(status)
                 && self.device_index_for_hub_port(port).is_none()
                 && self.free_device_index().is_some()
             {
-                self.reset_hub_port(port)?;
-                delay.delay_us(HUB_RESET_RECOVERY_US);
-                let status = self.hub_port_status_change(port)?.0;
-                if !hub_port_enabled(status) {
-                    return Err(DriverError::DeviceFault);
+                match self.attach_hub_port(port, delay) {
+                    Ok(index) => return Ok(HubEvent::Attached(index)),
+                    Err(err) => {
+                        if first_failure.is_none() {
+                            first_failure = Some(err);
+                        }
+                        continue;
+                    }
                 }
-                let speed = hub_port_speed(status);
-                let index = self.attach_downstream_device(port, speed)?;
-                return Ok(HubEvent::Attached(index));
             }
             // A genuine disconnect of a device we track on this port: drain
             // the latches, then free it — the other served devices are
@@ -3487,7 +3531,10 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             // re-arms clean rather than re-firing on the stale change.
             self.clear_hub_port_changes(port, change)?;
         }
-        Ok(HubEvent::None)
+        match first_failure {
+            Some(err) => Err(err),
+            None => Ok(HubEvent::None),
+        }
     }
 
     /// Reset the controller and re-enumerate from scratch, treating whatever

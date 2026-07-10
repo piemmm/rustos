@@ -24,7 +24,7 @@ Six driver-class traits are defined under
 | Filesystem | [`driver::filesystem::Filesystem`]          | `drivers/filesystem/{fat32,ext4,rustfs}` (Stage 5) |
 | Block      | [`driver::block::Block`]                    | `drivers/storage/virtio_blk`              |
 | Net        | [`driver::net::Net`]                        | `drivers/network/virtio_net`              |
-| Input      | [`driver::input::Input`]                    | `drivers/input/{ps2,usb_hid}`             |
+| Input      | [`driver::input::Input`]                    | `drivers/input/{ps2,usb_kbd,usb_mouse}`             |
 | Bus        | [`driver::bus::Bus`]                        | `drivers/bus/{pci,mmio,virtio}`           |
 
 Each class crate (`drivers/<class>/<name>/`) ships exactly one

@@ -1382,6 +1382,10 @@ fn build_image_driver_bundles(ctx: &Context) -> Result<DriverBundles, String> {
             image_drivers::build_usb_kbd_bundle(ctx)?,
         ),
         (
+            image_drivers::USB_MOUSE_STORE_PATH,
+            image_drivers::build_usb_mouse_bundle(ctx)?,
+        ),
+        (
             image_drivers::VIRTIO_KBD_STORE_PATH,
             image_drivers::build_virtio_kbd_bundle(ctx)?,
         ),

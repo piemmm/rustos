@@ -540,7 +540,7 @@ engine's poll budget (`AGENTS.md` §2.1 / §2.9).
 
 `UsbDevice` implements the `rustos_abi::driver::input::ReportSource`
 seam (hoisted into `lib/abi` because its consumer,
-`drivers/input/usb_hid`, is a sibling driver and drivers depend only
+`drivers/input/usb_kbd` (and its mouse sibling), is a sibling driver and drivers depend only
 on `lib/*`, `AGENTS.md` §17.4): when no interrupt-IN transfer is in flight,
 `next_report` arms exactly one TRB for the class-driver URB currently waiting
 and rings the endpoint doorbell, returning `None` so the HCD holds the IPC
@@ -950,7 +950,7 @@ captured for emission. `UsbDevice::describe_device(parent_id, node_id)`
 then returns an `HwNode` of class `Input`, parented at the controller's
 node, carrying one `HwMatchKey::usb` of the device's `vid:pid` and that
 captured interface class — never a fabricated one (`AGENTS.md` §18.5) —
-so `usb_hid::BIND_KEYS`'s class-wildcard keyboard/mouse keys resolve
+so the `usb_kbd`/`usb_mouse` class-wildcard `BIND_KEYS` resolve
 against it exactly as `devmgr` will. It fails closed with `NotFound`
 before a device has been enumerated.
 

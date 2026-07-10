@@ -98,6 +98,7 @@ members = [
     # Drivers — input
     "drivers/input/ps2",
     "drivers/input/usb_kbd",
+    "drivers/input/usb_mouse",
     "drivers/input/virtio_input",
     "drivers/input/virtio_kbd",
 

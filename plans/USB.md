@@ -723,9 +723,45 @@ the live controller behaviour is host- and CI-proven first.
     inherently metal-only (QEMU models no Pi USB, §0.4). Update the `README.md`
     matrix on metal sign-off.
 
-U1–U5 are landed; the modular USB stack — bus driver → user-space HCD owning
-one controller and serving the URB transport → per-interface class drivers,
-with event-driven hub hot-plug and fresh re-enumeration — is complete and
+- **U6 — `usb_mouse` class driver + broken-device isolation `[x]` (DONE;
+  live path metal-only).** `drivers/input/usb_mouse` is the HID boot-mouse
+  sibling of `usb_kbd`: a `lib`+`Run` crate binding the boot-mouse interface
+  key (`HwMatchKey::usb(0,0,0x03_01_02)`), same least-privilege caps
+  (`CAP_INPUT_INJECT`/`CAP_SHM`/`CAP_IPC_ENDPOINT`/`CAP_LOG_EMIT`), pumping
+  blocking interrupt-IN URBs through `rustos_hid::BootMouse` and injecting
+  each decoded event through the one shared `PointerInput::from_device_event`
+  mapping → `pointer_inject` (scroll ticks decode but are not injected — no
+  pointer-record scroll consumer exists yet). `NotFound` exits for reload;
+  repeated faults exit fail-closed. The bundle ships in the Pi image
+  (`Drivers/input/usb_mouse/Run`, signed).
+  Two engine defects found while landing it (the metal boot log's ~4 s
+  `hub status-change service failed err_hex=a` loop with a mouse connected):
+  - **A failed downstream attach left the port's latched changes set**, so
+    the hub status-change endpoint re-reported the same stale change forever
+    and every re-service re-ran the failing multi-second enumeration —
+    starving every other port's service (the keyboard died the moment a
+    problematic device shared the hub). `attach_hub_port` and
+    `attach_downstream_device` now drain the port's whole latch set
+    (best-effort) on the failed path too, so a broken device costs one
+    surfaced error per genuine change, never a fault loop.
+  - **One port's failure aborted the whole hot-plug scan**
+    (`process_hub_change` propagated the first attach error with `?`),
+    so a broken device's connect change starved a healthy device's event in
+    the same report. The scan is now per-port fail-soft, mirroring the
+    bring-up walk: the failing port is drained and skipped, the remaining
+    changed ports are serviced, and the first failure is surfaced only when
+    no actionable event was found.
+  Host regressions (the mock gained a scripted boot mouse on its own port
+  with a second, slot-attributed interrupt endpoint, and a
+  port-never-enables knob):
+  `bring_up_serves_a_keyboard_and_a_mouse_behind_the_hub_together`,
+  `a_failing_port_at_bring_up_never_costs_the_keyboard_its_service`,
+  `a_failed_hot_plug_attach_drains_the_port_latches_so_the_watch_stays_quiet`.
+
+U1–U6 are landed; the modular USB stack — bus driver → user-space HCD owning
+one controller and serving the URB transport → per-interface class drivers
+(keyboard, mouse, mass storage), with event-driven hub hot-plug, fresh
+re-enumeration, and per-port failure isolation — is complete and
 host-/CI-proven. The live attach/detach/re-attach behaviour is metal-only and
 is the operator's acceptance step (QEMU models no Pi USB, §0.4).
 

@@ -345,8 +345,9 @@ deferred to later stages (not stubbed, §15.1).
   - `drivers/bus/pci` (x86_64), `drivers/bus/mmio` (aarch64/riscv64),
     `drivers/bus/virtio` (cross-arch).
   - `drivers/storage/virtio_blk`.
-  - `drivers/input/ps2` (x86_64), `drivers/input/usb_hid` (boot-protocol
-    decode landed; xHCI endpoint wiring tracked in `plans/PI.md` P10).
+  - `drivers/input/ps2` (x86_64), `drivers/input/usb_kbd` +
+    `drivers/input/usb_mouse` (HID boot-protocol class drivers over the
+    URB transport, `plans/USB.md`).
   - `drivers/network/virtio_net`.
 
 **Tests**
@@ -2686,7 +2687,7 @@ added to the file-map verticals.
   keyboard *producer* is now wired host-side: the shared terminal key map
   `lib/keymap` (`encode_key` — `Key`+`Modifiers`→console tty bytes,
   allocation-free, reusing the `lib/vt` escape vocabulary, §2.2) plus the
-  `drivers/input/usb_hid` `console` module (the US HID-usage→`Key` table
+  `lib/hid` `console` module (the US HID-usage→`Key` table
   with modifier + caps/num-lock state, and the `pump_once` driver loop
   that injects the bytes through a `ConsoleSink` — `console_input` on
   metal). Remaining console wiring (the Pi VL805/xHCI **metal** path that

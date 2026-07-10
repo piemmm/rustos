@@ -212,7 +212,7 @@ complex, `plans/PI.md` P10) is `rustos_kernel::run_with_driver_host`
 
 ### In-kernel chain admission (the Pi 4 USB keyboard)
 
-The Pi 4 USB-keyboard chain (`pcie_brcm` → `bus_usb` → `usb_hid`) is the
+The Pi 4 USB-keyboard chain (`pcie_brcm` → `bus_usb` → `usb_kbd`) is the
 first *production* caller of the `Host::load` gate (`plans/PI.md` P10
 5c-ii). Its drivers are statically linked, and their §8 `register()`
 entries are admission-only (a `CAP_DRV_LOAD` check returning a marker),
@@ -236,7 +236,7 @@ buys nothing
 (`AGENTS.md` §19.3), so it is committed and the signatures stay
 bit-reproducible. The keyboard service admits the two bus drivers before
 bring-up and re-matches the enumerated HID child against the driver
-catalogue to admit `usb_hid` before feeding input — fail closed at each
+catalogue to admit the HID class driver before feeding input — fail closed at each
 step (`AGENTS.md` §5.4).
 
 ### Signed-store scan

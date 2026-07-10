@@ -230,6 +230,27 @@ const MOCK_MSD_CONFIG_DESCRIPTOR: [u8; 32] = [
     0x07, 0x05, 0x04, 0x02, 0x00, 0x02, 0x00,
 ];
 
+/// The device descriptor fixture for a HID boot **mouse** (class in the
+/// interface descriptor, vendor `0x046D` product `0xC539` — a generic
+/// three-button wheel mouse identity, deliberately distinct from the
+/// keyboard fixture's product id so per-index identities are assertable).
+const MOCK_MOUSE_DESCRIPTOR: [u8; 18] = [
+    18, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x40, 0x6D, 0x04, 0x39, 0xC5, 0x00, 0x01, 0x00, 0x00,
+    0x00, 0x01,
+];
+
+/// The configuration descriptor fixture for the boot mouse: one interface
+/// of class `0x03_01_02` (HID, boot, mouse) with an interrupt-IN endpoint 1
+/// (DCI 3), `wMaxPacketSize` = 4 (buttons + X + Y + wheel).
+const MOCK_MOUSE_CONFIG_DESCRIPTOR: [u8; 25] = [
+    // Configuration: wTotalLength=25, 1 interface.
+    0x09, 0x02, 0x19, 0x00, 0x01, 0x01, 0x00, 0xA0, 0x32, //
+    // Interface: class=0x03 (HID), sub=0x01 (boot), protocol=0x02 (mouse).
+    0x09, 0x04, 0x00, 0x00, 0x01, 0x03, 0x01, 0x02, 0x00, //
+    // Endpoint: 0x81 interrupt IN, wMaxPacketSize=4, bInterval=10.
+    0x07, 0x05, 0x81, 0x03, 0x04, 0x00, 0x0A,
+];
+
 /// Register-level xHCI model: the capability block, `USBCMD`/`USBSTS`
 /// halt/reset behaviour, four `PORTSC` ports, a doorbell write log,
 /// and — when a shared DMA buffer is attached — an in-memory device
@@ -486,6 +507,28 @@ struct MockXhci {
     /// It shares [`Self::hub_downstream_status`]; the change latch stays
     /// keyed to [`Self::hub_downstream_port`].
     msd_downstream_port: u8,
+    /// A downstream hub port carrying a HID boot **mouse** (`0` = none):
+    /// the addressed device on this port answers with the mouse fixtures
+    /// and its interrupt endpoint is captured as the second HID endpoint
+    /// ([`Self::int2_slot`]), so a keyboard and a mouse hang off the hub
+    /// at once. It shares [`Self::hub_downstream_status`]; the change
+    /// latch stays keyed to [`Self::hub_downstream_port`].
+    mouse_downstream_port: u8,
+    /// A downstream hub port whose device never reports
+    /// `PORT_STATUS_ENABLE` after a reset (`0` = none) — a broken or
+    /// half-seated device whose enumeration must fail without costing the
+    /// other ports their service and without leaving the port's change
+    /// latches set.
+    fail_enable_downstream_port: u8,
+    /// The second configured HID interrupt endpoint (the mouse beside the
+    /// keyboard), captured when the addressed device on
+    /// [`Self::mouse_downstream_port`] has its interrupt endpoint
+    /// configured. Its completions are posted with its own slot, so the
+    /// engine's per-device demux is exercised.
+    int2: MockInt,
+    /// Scripted reports for the second HID endpoint, mirroring
+    /// [`Self::pending_reports`].
+    pending_reports2: VecDeque<Vec<u8>>,
     /// The xHCI slot whose interrupt-IN endpoint the `int_*` state models
     /// (recorded at Configure Endpoint), so its transfer events carry that
     /// slot even after a later device becomes the most recently addressed.
@@ -533,6 +576,30 @@ impl MockBulk {
             dci: 0,
             stall_next: false,
             halt: 0,
+        }
+    }
+}
+
+/// A second modelled HID interrupt-IN endpoint (the mouse beside the
+/// keyboard): the transfer ring's base / consumer state, the DCI the
+/// Configure Endpoint named, and the slot it was configured on (`0` =
+/// not configured).
+struct MockInt {
+    base: u64,
+    index: usize,
+    cycle: bool,
+    dci: u8,
+    slot: u8,
+}
+
+impl MockInt {
+    const fn new() -> Self {
+        Self {
+            base: 0,
+            index: 0,
+            cycle: true,
+            dci: 0,
+            slot: 0,
         }
     }
 }
@@ -621,6 +688,10 @@ impl MockXhci {
             int_dci: 3,
             msd_device: false,
             msd_downstream_port: 0,
+            mouse_downstream_port: 0,
+            fail_enable_downstream_port: 0,
+            int2: MockInt::new(),
+            pending_reports2: VecDeque::new(),
             int_slot: 0,
             bulk_slot: 0,
             bulk_in: MockBulk::new(),
@@ -1069,7 +1140,8 @@ impl MockXhci {
             // programmed them — the hub occupies slot 1.
             let route_port = (route_string & 0xF) as u8;
             let scripted = route_port == self.hub_downstream_port
-                || (self.msd_downstream_port != 0 && route_port == self.msd_downstream_port);
+                || (self.msd_downstream_port != 0 && route_port == self.msd_downstream_port)
+                || (self.mouse_downstream_port != 0 && route_port == self.mouse_downstream_port);
             if !scripted {
                 return CompletionCode::TrbError;
             }
@@ -1177,6 +1249,22 @@ impl MockXhci {
                 self.hub_int_cycle = true;
                 return CompletionCode::Success;
             }
+            // The mouse's interrupt endpoint is recorded as the *second* HID
+            // endpoint, keyed by the addressed device's downstream port, so a
+            // keyboard and a mouse are modelled concurrently — each posting
+            // completions with its own slot.
+            if self.mouse_downstream_port != 0
+                && self.downstream_route_port == self.mouse_downstream_port
+            {
+                self.int2.dci = u8::try_from(dci).expect("DCI fits a byte");
+                self.int2.base =
+                    self.ep_ctx_dequeue(input_ctx + (1 + u64::from(dci)) * MOCK_CTX_SIZE as u64);
+                self.int2.index = 0;
+                self.int2.cycle = true;
+                self.int2.slot = slot;
+                self.configured = true;
+                return CompletionCode::Success;
+            }
             self.int_dci = u8::try_from(dci).expect("DCI fits a byte");
             let ep_ctx_off = input_ctx + (1 + u64::from(dci)) * MOCK_CTX_SIZE as u64;
             let int_ctx = self.read_dwords(ep_ctx_off, 5);
@@ -1274,11 +1362,15 @@ impl MockXhci {
         let is_msd = self.msd_device
             || (self.msd_downstream_port != 0
                 && self.downstream_route_port == self.msd_downstream_port);
+        let is_mouse = self.mouse_downstream_port != 0
+            && self.downstream_route_port == self.mouse_downstream_port;
         match (desc_type, is_hub_device) {
             (0x01, false) if is_msd => &MOCK_MSD_DESCRIPTOR,
+            (0x01, false) if is_mouse => &MOCK_MOUSE_DESCRIPTOR,
             (0x01, false) => &MOCK_DESCRIPTOR,
             (0x01, true) => &MOCK_HUB_DESCRIPTOR,
             (_, false) if is_msd => &MOCK_MSD_CONFIG_DESCRIPTOR,
+            (_, false) if is_mouse => &MOCK_MOUSE_CONFIG_DESCRIPTOR,
             (_, false) => self.keyboard_config,
             (_, true) => &MOCK_HUB_CONFIG_DESCRIPTOR,
         }
@@ -1473,6 +1565,41 @@ impl MockXhci {
         }
     }
 
+    /// Consume the second HID endpoint's queued interrupt TDs, answering
+    /// each from [`Self::pending_reports2`] — [`Self::process_int_ring`] for
+    /// the mouse beside the keyboard. Completions are posted with the
+    /// endpoint's own slot ([`Self::int2_slot`]), so the engine's
+    /// per-device slot+DCI demux is exercised.
+    fn process_int2_ring(&mut self) {
+        if self.int2.slot == 0 {
+            return;
+        }
+        if self.downstream_active && !self.hub_marked_as_hub {
+            return;
+        }
+        while let Some(report) = self.pending_reports2.front().cloned() {
+            let (mut index, mut cycle) = (self.int2.index, self.int2.cycle);
+            let base = self.int2.base;
+            let Some((addr, trb)) = self.next_owned(base, &mut index, &mut cycle) else {
+                return;
+            };
+            if trb.trb_type() != Ok(TrbType::Normal) {
+                return;
+            }
+            self.int2.index = index;
+            self.int2.cycle = cycle;
+            self.pending_reports2.pop_front();
+            self.write_mem(trb.parameter, &report);
+            let residual = trb.status - u32::try_from(report.len()).expect("report fits");
+            let code = if residual > 0 {
+                CompletionCode::ShortPacket
+            } else {
+                CompletionCode::Success
+            };
+            self.post_transfer_event_for_slot(addr, code, self.int2.dci, residual, self.int2.slot);
+        }
+    }
+
     /// Consume queued bulk-IN TDs, answering each from the scripted
     /// [`Self::bulk_in_responses`] (one response per TD; a TD with no queued
     /// response stays pending). A halted endpoint is not serviced; the
@@ -1613,11 +1740,18 @@ impl MockXhci {
         };
         let powered = port >= 1 && self.hub_powered & bit != 0;
         let is_device_port = port == self.hub_downstream_port
-            || (self.msd_downstream_port != 0 && port == self.msd_downstream_port);
+            || (self.msd_downstream_port != 0 && port == self.msd_downstream_port)
+            || (self.mouse_downstream_port != 0 && port == self.mouse_downstream_port);
         let w_status = if powered && is_device_port {
             // Once the port has been reset it reports enabled
-            // (PORT_STATUS_ENABLE, bit 1) in addition to its connect/speed bits.
-            let enabled = if self.hub_reset & bit != 0 { 1 << 1 } else { 0 };
+            // (PORT_STATUS_ENABLE, bit 1) in addition to its connect/speed
+            // bits — unless the port's device is scripted to never enable
+            // (a broken or half-seated device).
+            let enabled = if self.hub_reset & bit != 0 && port != self.fail_enable_downstream_port {
+                1 << 1
+            } else {
+                0
+            };
             self.hub_downstream_status | enabled
         } else {
             0
@@ -1673,6 +1807,7 @@ impl MockXhci {
         self.bulk_out = MockBulk::new();
         self.int_slot = 0;
         self.bulk_slot = 0;
+        self.int2 = MockInt::new();
     }
 }
 
@@ -1894,6 +2029,13 @@ impl MockXhci {
             }
             (_, value) if self.bulk_out.dci != 0 && value == u32::from(self.bulk_out.dci) => {
                 self.process_bulk_out_ring();
+            }
+            (index, value)
+                if self.int2.slot != 0
+                    && index == usize::from(self.int2.slot)
+                    && value == u32::from(self.int2.dci) =>
+            {
+                self.process_int2_ring();
             }
             (_, 3) => self.process_int_ring(),
             _ => {}
@@ -5336,4 +5478,142 @@ fn unplugging_the_keyboard_leaves_the_storage_stick_served() {
         other => panic!("expected the keyboard to re-attach, got {other:?}"),
     }
     assert!(device.device_live(0), "the stick is still served");
+}
+
+#[test]
+fn bring_up_serves_a_keyboard_and_a_mouse_behind_the_hub_together() {
+    // The Pi 4 defect the mouse class driver rides on: a keyboard and a
+    // mouse plugged in together must both be served, each on its own
+    // device index with its own interrupt endpoint, and each emitted node
+    // must carry its own interface class so `devmgr` autoloads the
+    // keyboard *and* the mouse class driver.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    // The mouse sits on the lower-numbered port, so the bring-up walk
+    // reaches it first.
+    mock.mouse_downstream_port = 2;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+
+    device
+        .bring_up(&delay)
+        .expect("bring-up serves both devices");
+    assert!(device.device_live(0), "the mouse (walked first) is served");
+    assert!(device.device_live(1), "the keyboard is served beside it");
+    let mouse = device.device_identity(0).expect("the mouse is index 0");
+    assert_eq!(mouse.product_id, 0xC539);
+    assert_eq!(
+        mouse.interface_class, 0x03_01_02,
+        "a HID boot-mouse interface"
+    );
+    let keyboard = device.device_identity(1).expect("the keyboard is index 1");
+    assert_eq!(keyboard.product_id, 0xC077);
+    assert_eq!(
+        keyboard.interface_class, 0x03_01_01,
+        "a HID boot-keyboard interface"
+    );
+    assert!(device.hub_watch_active());
+
+    // Each node derives its own class and match key, so the keyboard and
+    // the mouse class drivers autoload independently.
+    let mouse_node = device.describe_device(0, 0, 1).expect("mouse node");
+    assert_eq!(mouse_node.class(), Some(rustos_abi::HwDeviceClass::Input));
+    let kbd_node = device.describe_device(1, 0, 2).expect("keyboard node");
+    assert_eq!(kbd_node.class(), Some(rustos_abi::HwDeviceClass::Input));
+
+    // The keyboard's reports flow on its own index...
+    let mut buf = [0u8; REPORT_LEN];
+    assert_eq!(device.next_report(1, &mut buf), Ok(None));
+    device
+        .host_mut()
+        .pending_reports
+        .push_back(alloc::vec![0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    device.host_mut().process_int_ring();
+    assert_eq!(device.next_report(1, &mut buf), Ok(Some(REPORT_LEN)));
+    assert_eq!(buf[2], 0x04, "the keystroke reaches the keyboard's index");
+
+    // ...and the mouse's boot reports on its own index, concurrently.
+    let mut mouse_buf = [0u8; REPORT_LEN];
+    assert_eq!(device.next_report(0, &mut mouse_buf), Ok(None));
+    device
+        .host_mut()
+        .pending_reports2
+        .push_back(alloc::vec![0x01, 0x05, 0xFB, 0x00]);
+    device.host_mut().process_int2_ring();
+    assert_eq!(device.next_report(0, &mut mouse_buf), Ok(Some(4)));
+    assert_eq!(
+        &mouse_buf[..4],
+        &[0x01, 0x05, 0xFB, 0x00],
+        "left button + X/Y deltas reach the mouse's index"
+    );
+}
+
+#[test]
+fn a_failing_port_at_bring_up_never_costs_the_keyboard_its_service() {
+    // A broken or half-seated device whose port never enables after the
+    // reset must be skipped fail-soft by the bring-up walk: the keyboard
+    // beside it is still served, and the failure claims no device index.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    mock.mouse_downstream_port = 2;
+    mock.fail_enable_downstream_port = 2;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+
+    device
+        .bring_up(&delay)
+        .expect("bring-up survives the broken port");
+    assert!(
+        device.device_live(0),
+        "the keyboard is served on the first free index"
+    );
+    let keyboard = device.device_identity(0).expect("the keyboard is served");
+    assert_eq!(keyboard.interface_class, 0x03_01_01);
+    assert!(!device.device_live(1), "the broken device claimed no index");
+    assert!(device.hub_watch_active(), "the hub watch is still armed");
+}
+
+#[test]
+fn a_failed_hot_plug_attach_drains_the_port_latches_so_the_watch_stays_quiet() {
+    // The metal fault loop: a connect change whose device fails to attach
+    // used to leave the port's latched changes set, so the hub re-reported
+    // the same change forever and every re-service re-ran the failing
+    // multi-second enumeration — starving every other device's service.
+    // A failed attach must drain the latches (one surfaced error, then
+    // quiet) rather than wedging the watch.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    // The watched downstream device's port never enables after a reset.
+    mock.fail_enable_downstream_port = 4;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+
+    device
+        .bring_up(&delay)
+        .expect("bring-up survives the broken port");
+    assert!(!device.any_device_live(), "nothing enumerates");
+    assert!(device.hub_watch_active(), "the hub watch is armed");
+    assert_eq!(
+        device.host_mut().hub_downstream_change,
+        0,
+        "the failed bring-up attach drained the port's latches"
+    );
+
+    // The hub reports a fresh connect change for the broken device.
+    device.host_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
+    device.host_mut().post_hub_status_change(&[1 << 4]);
+    assert_eq!(
+        device.next_hub_change(&delay),
+        Err(DriverError::DeviceFault),
+        "the failing attach is surfaced once"
+    );
+    assert_eq!(
+        device.host_mut().hub_downstream_change,
+        0,
+        "the failed attach drained every latch, so the hub cannot re-report it"
+    );
+    // With the latches drained the watch goes quiet: no further completion
+    // is pending, and the service reports nothing rather than re-running
+    // the failing enumeration forever.
+    assert_eq!(device.next_hub_change(&delay), Ok(HubEvent::None));
 }

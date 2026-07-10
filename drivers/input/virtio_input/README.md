@@ -11,7 +11,7 @@ The arch-neutral, transport-agnostic open/poll/decode device logic (the
 `lib/virtio_input` (`rustos_virtio_input`), so both this driver and the
 user-space input-driver process compose it without a `drivers/*`→`drivers/*`
 dependency (`AGENTS.md` §17.4 / §2.2 — the virtio analogue of `lib/hid` ↔
-`drivers/input/usb_hid`). See that crate's README and
+`drivers/input/usb_kbd`). See that crate's README and
 `docs/src/drivers/input.md` for the wire protocol, event encoding, and polling
 model.
 
