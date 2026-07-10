@@ -90,17 +90,28 @@ pub const fn is_write(error_code: u64) -> bool {
     error_code & PF_ERR_WRITE != 0
 }
 
-/// `true` iff a `#PF` with this error code may be offered to the
-/// installed [`UserFaultResolveFn`]: a **user-mode, not-present, read
-/// data** access — the only shape a demand-paged file-mapping fault can
-/// take. Everything else is fatal:
+/// `true` iff a `#PF` with this error code is a **user-mode data**
+/// access (read or write, not an instruction fetch) — the class the
+/// dedicated `#PF` entry offers to the installed [`UserFaultResolveFn`].
+/// A kernel-mode fault (`U/S` clear) is never offered: it is never file
+/// backing (the kernel copy path resolves its own misses in software),
+/// and an instruction fetch is never file backing either (a file mapping
+/// is never executable). A write in this class is offered but never
+/// *resolved* — see [`is_resolvable_user_fault`] — the resolver kills
+/// the faulting task instead, so a store to a read-only mapping (or any
+/// wild write) costs the task, never the CPU.
+#[must_use]
+pub const fn is_user_data_fault(error_code: u64) -> bool {
+    is_user(error_code) && error_code & PF_ERR_INSTR == 0
+}
+
+/// `true` iff a `#PF` with this error code may actually be *resolved* by
+/// making a page resident: a **user-mode, not-present, read data**
+/// access — the only shape a demand-paged file-mapping fault can take.
+/// Everything else in the offered class is fatal to the task:
 ///
-/// * a kernel-mode fault (`U/S` clear) is never file backing — the
-///   kernel copy path resolves its own misses in software;
 /// * a protection violation (`P` set) cannot be fixed by making a page
 ///   resident;
-/// * an instruction fetch is never file backing (a file mapping is
-///   never executable);
 /// * a write can never be made valid — a file mapping is read-only, and
 ///   resolving a write fault as "already resident, retry" would
 ///   re-execute the store into an endless fault storm instead of
@@ -173,21 +184,24 @@ fn clear_fault_handler_for_tests() {
 }
 
 /// Signature of the user-fault resolver the dedicated `#PF` entry offers
-/// a resolvable ring-3 data fault to before the fatal path.
+/// a ring-3 data fault to before the fatal path.
 ///
-/// `faulting_addr` is the `CR2` faulting linear address. A `true` return
-/// means the fault is dealt with and the entry simply returns — the
-/// interrupt frame's `RIP` still points at the faulting instruction, so
-/// the `iretq` retries the access against the now-resident page. A
-/// `false` return means the fault was not (and will never be)
-/// resolvable and the entry falls through to the fatal
-/// [`FaultHandlerFn`] path. The callback may also *not return* for the
-/// faulting task: when the fault is fatal to the task alone, the
-/// binary's callback suspends it into the scheduler with an exit action
-/// and the entry's call never completes on that stack — exactly like a
-/// rescheduling syscall. Like every trap-path callback it is a bare
-/// `extern "C" fn` with no captured environment.
-pub type UserFaultResolveFn = extern "C" fn(faulting_addr: u64) -> bool;
+/// `faulting_addr` is the `CR2` faulting linear address and `write` the
+/// `#PF` error-code `W/R` verdict (`true` = the access was a store). A
+/// `true` return means the fault is dealt with and the entry simply
+/// returns — the interrupt frame's `RIP` still points at the faulting
+/// instruction, so the `iretq` retries the access against the
+/// now-resident page; only a read is ever resolved this way (file
+/// mappings are read-only). A `false` return means the fault was not
+/// (and will never be) resolvable and the entry falls through to the
+/// fatal [`FaultHandlerFn`] path. The callback may also *not return* for
+/// the faulting task: when the fault is fatal to the task alone — every
+/// write, and any unresolvable read — the binary's callback suspends it
+/// into the scheduler with an exit action and the entry's call never
+/// completes on that stack — exactly like a rescheduling syscall, so the
+/// task dies and the CPU never halts. Like every trap-path callback it
+/// is a bare `extern "C" fn` with no captured environment.
+pub type UserFaultResolveFn = extern "C" fn(faulting_addr: u64, write: bool) -> bool;
 
 /// Slot holding the installed user-fault resolver as a raw function
 /// pointer (`0` = none installed).
@@ -337,10 +351,12 @@ pub unsafe extern "C" fn page_fault_isr() {
 
 /// Rust dispatcher the dedicated `#PF` stub calls.
 ///
-/// A resolvable ring-3 data fault ([`is_resolvable_user_fault`]) is
-/// offered to the installed [`UserFaultResolveFn`] first: a `true`
-/// return means the faulting page is now resident, and this function
-/// returns so the stub restores the GPRs and `iretq`s into a retry of
+/// A ring-3 data fault ([`is_user_data_fault`], read or write) is
+/// offered to the installed [`UserFaultResolveFn`] first, with the
+/// error-code `W/R` verdict: a `true` return means the faulting page is
+/// now resident (reads only — a write is never resolved, the resolver
+/// kills the faulting task instead), and this function returns so the
+/// stub restores the GPRs and `iretq`s into a retry of
 /// the faulting instruction. The resolver call is bracketed by the same
 /// `swapgs` pair the LAPIC-timer ring-3 preemption path uses: an
 /// interrupt gate taken from ring 3 does *not* swap GS, and the resolver
@@ -360,7 +376,7 @@ extern "C" fn rustos_arch_x86_64_page_fault_dispatch(
     faulting_addr: u64,
     rip: u64,
 ) {
-    if is_resolvable_user_fault(error_code) {
+    if is_user_data_fault(error_code) {
         if let Some(resolver) = user_fault_resolver() {
             // SAFETY: `swapgs` is privileged and runs in ring 0 here; it
             // touches only the GS-base/`KERNEL_GS_BASE` swap, no memory
@@ -374,7 +390,7 @@ extern "C" fn rustos_arch_x86_64_page_fault_dispatch(
             unsafe {
                 core::arch::asm!("swapgs", options(nomem, nostack, preserves_flags));
             }
-            let resolved = resolver(faulting_addr);
+            let resolved = resolver(faulting_addr, is_write(error_code));
             // SAFETY: as above — the matching swap restoring the user GS
             // the `iretq` (or the fatal path) proceeds under.
             unsafe {
@@ -437,7 +453,25 @@ mod tests {
         assert!(!is_resolvable_user_fault(PF_ERR_USER | PF_ERR_INSTR));
     }
 
-    extern "C" fn host_user_fault_resolver(_faulting_addr: u64) -> bool {
+    #[test]
+    fn user_data_faults_are_offered_reads_and_writes_alike() {
+        // Regression (the M1 file-map vertical's `store` role): the offer
+        // gate admits ring-3 reads *and* writes — a write is offered so
+        // the resolver kills the faulting task; before this gate existed a
+        // user store to a read-only mapping fell to the fatal path and
+        // could halt the whole CPU.
+        assert!(is_user_data_fault(PF_ERR_USER));
+        assert!(is_user_data_fault(PF_ERR_USER | PF_ERR_WRITE));
+        assert!(is_user_data_fault(
+            PF_ERR_USER | PF_ERR_PRESENT | PF_ERR_WRITE
+        ));
+        // Kernel-mode faults and instruction fetches are never offered.
+        assert!(!is_user_data_fault(0));
+        assert!(!is_user_data_fault(PF_ERR_WRITE));
+        assert!(!is_user_data_fault(PF_ERR_USER | PF_ERR_INSTR));
+    }
+
+    extern "C" fn host_user_fault_resolver(_faulting_addr: u64, _write: bool) -> bool {
         false
     }
 

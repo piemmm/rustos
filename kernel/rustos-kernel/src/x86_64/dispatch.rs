@@ -106,17 +106,18 @@ pub extern "C" fn production_dispatch(
 /// Production user-fault resolver callback installed beside the dispatch
 /// callback before user space is entered.
 ///
-/// The dedicated `#PF` entry offers every resolvable ring-3 data fault
-/// here first ([`rustos_arch_x86_64::fault::UserFaultResolveFn`]); the
-/// arch-neutral lookup → resolve → terminate sequence lives in
+/// The dedicated `#PF` entry offers every ring-3 data fault here first
+/// ([`rustos_arch_x86_64::fault::UserFaultResolveFn`]), with `write` the
+/// `#PF` error-code `W/R` verdict; the arch-neutral lookup → resolve →
+/// terminate sequence lives in
 /// [`crate::dispatch_core::resolve_user_fault_via_slot`] and is
 /// unit-tested there once. `true` re-runs the faulting instruction; a
-/// task-fatal fault never returns (the helper suspends the reclaimed
-/// task with an exit action); `false` sends the `#PF` entry to its
-/// fatal path (fail closed).
+/// task-fatal fault (any write, or an unresolvable read) never returns
+/// (the helper suspends the reclaimed task with an exit action);
+/// `false` sends the `#PF` entry to its fatal path (fail closed).
 #[must_use]
-pub extern "C" fn production_user_fault(faulting_addr: u64) -> bool {
-    crate::dispatch_core::resolve_user_fault_via_slot(&DISPATCH_SLOT, faulting_addr)
+pub extern "C" fn production_user_fault(faulting_addr: u64, write: bool) -> bool {
+    crate::dispatch_core::resolve_user_fault_via_slot(&DISPATCH_SLOT, faulting_addr, write)
 }
 
 // SAFETY-INVARIANT: [`production_user_fault`] is a valid

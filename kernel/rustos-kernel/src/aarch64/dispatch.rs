@@ -68,16 +68,17 @@ pub extern "C" fn production_dispatch(
 /// callback before user space is entered.
 ///
 /// The aarch64 trap handler offers every EL0 data abort here first
-/// (`rustos_arch_aarch64::fault::UserFaultResolveFn`); the arch-neutral
-/// lookup → resolve → terminate sequence lives in
+/// (`rustos_arch_aarch64::fault::UserFaultResolveFn`), with `write` the
+/// `ESR.WnR` verdict; the arch-neutral lookup → resolve → terminate
+/// sequence lives in
 /// [`crate::dispatch_core::resolve_user_fault_via_slot`] and is
 /// unit-tested there once. `true` re-runs the faulting instruction; a
-/// task-fatal fault never returns (the helper suspends the reclaimed
-/// task with an exit action); `false` sends the trap handler to its
-/// fatal path (fail closed).
+/// task-fatal fault (any write, or an unresolvable read) never returns
+/// (the helper suspends the reclaimed task with an exit action);
+/// `false` sends the trap handler to its fatal path (fail closed).
 #[must_use = "the resolution verdict decides whether the trap handler retries or takes its fatal path"]
-pub extern "C" fn production_user_fault(far: u64) -> bool {
-    crate::dispatch_core::resolve_user_fault_via_slot(&DISPATCH_SLOT, far)
+pub extern "C" fn production_user_fault(far: u64, write: bool) -> bool {
+    crate::dispatch_core::resolve_user_fault_via_slot(&DISPATCH_SLOT, far, write)
 }
 
 // SAFETY-INVARIANT: [`production_user_fault`] is a valid

@@ -57,20 +57,30 @@ pub const fn is_page_fault(scause: u64) -> bool {
 }
 
 /// `true` iff `scause` denotes a **load** page fault — the only class
-/// the demand-paged file-mapping resolver may attempt to resolve. An
+/// the demand-paged file-mapping resolver may attempt to *resolve*. An
 /// instruction page fault is never file backing (a file mapping is never
-/// executable), and a store/AMO page fault is never resolvable either: a
-/// file mapping is read-only, so a store to it can never be made valid —
-/// and once the target page is resident, resolving a store fault as
-/// "already resident, retry" would re-execute the store into an endless
-/// fault storm instead of killing the task. Both always take the fatal
-/// path.
+/// executable) and is not offered at all.
 #[must_use]
 pub const fn is_load_page_fault(scause: u64) -> bool {
     if (scause & crate::trap::SCAUSE_INTERRUPT_BIT) != 0 {
         return false;
     }
     scause == SCAUSE_LOAD_PAGE_FAULT
+}
+
+/// `true` iff `scause` denotes a **store/AMO** page fault. It is offered
+/// to the resolver with `write = true`, which never resolves it: a file
+/// mapping is read-only, so a store to it can never be made valid — and
+/// once the target page is resident, resolving a store fault as "already
+/// resident, retry" would re-execute the store into an endless fault
+/// storm. The resolver kills the faulting task instead, so a store to a
+/// read-only mapping (or any wild write) costs the task, never the hart.
+#[must_use]
+pub const fn is_store_page_fault(scause: u64) -> bool {
+    if (scause & crate::trap::SCAUSE_INTERRUPT_BIT) != 0 {
+        return false;
+    }
+    scause == SCAUSE_STORE_PAGE_FAULT
 }
 
 /// Signature of the fault handler the trap path invokes for an
@@ -129,17 +139,21 @@ pub fn fault_handler() -> Option<FaultHandlerFn> {
 /// Signature of the user-fault resolver the trap path offers a U-mode
 /// data page fault to before the fatal path.
 ///
-/// `stval` is the faulting address. A `true` return means the fault is
-/// dealt with and the trap path simply returns — the saved `sepc` still
-/// points at the faulting instruction, so the `sret` retries the access
-/// against the now-resident page. A `false` return means the fault was
-/// not (and will never be) resolvable and the trap path falls through to
-/// the fatal [`FaultHandlerFn`] path. The callback may also *not return*
-/// for the faulting task: when the fault is fatal to the task alone, the
-/// binary's callback suspends it into the scheduler with an exit action —
-/// exactly like a rescheduling syscall. Like every trap-path callback it
-/// is a bare `extern "C" fn` with no captured environment.
-pub type UserFaultResolveFn = extern "C" fn(stval: u64) -> bool;
+/// `stval` is the faulting address and `write` the store/AMO `scause`
+/// verdict (`true` = the access was a store). A `true` return means the
+/// fault is dealt with and the trap path simply returns — the saved
+/// `sepc` still points at the faulting instruction, so the `sret`
+/// retries the access against the now-resident page; only a load is
+/// ever resolved this way (file mappings are read-only). A `false`
+/// return means the fault was not (and will never be) resolvable and
+/// the trap path falls through to the fatal [`FaultHandlerFn`] path.
+/// The callback may also *not return* for the faulting task: when the
+/// fault is fatal to the task alone — every store, and any unresolvable
+/// load — the binary's callback suspends it into the scheduler with an
+/// exit action — exactly like a rescheduling syscall, so the task dies
+/// and the hart never halts. Like every trap-path callback it is a bare
+/// `extern "C" fn` with no captured environment.
+pub type UserFaultResolveFn = extern "C" fn(stval: u64, write: bool) -> bool;
 
 /// Slot holding the installed user-fault resolver as a raw function
 /// pointer (`0` = none installed).
@@ -228,23 +242,32 @@ mod tests {
     }
 
     #[test]
-    fn only_load_page_faults_are_resolvable() {
+    fn load_and_store_page_faults_are_classified_for_the_resolver() {
+        // A load page fault is the resolvable class (demand-paged file
+        // backing); a store/AMO page fault is offered with `write = true`
+        // and is always fatal to the task (file mappings are read-only —
+        // resolving a store against a resident page would retry it
+        // forever, and before this classification a user store could park
+        // the whole hart).
         assert!(is_load_page_fault(SCAUSE_LOAD_PAGE_FAULT));
-        // A store/AMO page fault is never offered to the user-fault
-        // resolver: a file mapping is read-only, and resolving a store
-        // against a resident page would retry the store forever instead
-        // of killing the task.
         assert!(!is_load_page_fault(SCAUSE_STORE_PAGE_FAULT));
+        assert!(is_store_page_fault(SCAUSE_STORE_PAGE_FAULT));
+        assert!(!is_store_page_fault(SCAUSE_LOAD_PAGE_FAULT));
         // Instruction page faults, interrupts, and an `ecall` are never
         // offered to the user-fault resolver.
         assert!(!is_load_page_fault(SCAUSE_INSTRUCTION_PAGE_FAULT));
+        assert!(!is_store_page_fault(SCAUSE_INSTRUCTION_PAGE_FAULT));
         assert!(!is_load_page_fault(
             crate::trap::SCAUSE_INTERRUPT_BIT | SCAUSE_LOAD_PAGE_FAULT
         ));
+        assert!(!is_store_page_fault(
+            crate::trap::SCAUSE_INTERRUPT_BIT | SCAUSE_STORE_PAGE_FAULT
+        ));
         assert!(!is_load_page_fault(8));
+        assert!(!is_store_page_fault(8));
     }
 
-    extern "C" fn host_user_fault_resolver(_stval: u64) -> bool {
+    extern "C" fn host_user_fault_resolver(_stval: u64, _write: bool) -> bool {
         false
     }
 

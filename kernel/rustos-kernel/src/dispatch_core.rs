@@ -125,6 +125,10 @@ pub fn dispatch_via_slot(slot: &DispatchCallbackSlot, number: u64, args: RawArgs
 
 /// Forward one user-mode data abort through a slot's resident hook.
 ///
+/// `write` is the port-attested access direction; a write is never
+/// resolved (file mappings are read-only) and is always fatal to the
+/// faulting task, through the same lookup → terminate sequence.
+///
 /// Returns `true` when the faulting page is now resident and the arch
 /// port should simply return to the task (the retried access succeeds).
 /// A fault fatal to the task alone never returns from this call: the
@@ -136,11 +140,15 @@ pub fn dispatch_via_slot(slot: &DispatchCallbackSlot, number: u64, args: RawArgs
 ///
 /// Shared by every architecture's user-fault callback so the lookup →
 /// resolve → terminate sequence has one definition.
-pub fn resolve_user_fault_via_slot(slot: &DispatchCallbackSlot, fault_va: u64) -> bool {
+pub fn resolve_user_fault_via_slot(
+    slot: &DispatchCallbackSlot,
+    fault_va: u64,
+    write: bool,
+) -> bool {
     let Some(hook) = slot.get() else {
         return false;
     };
-    match hook.resolve_user_fault(fault_va) {
+    match hook.resolve_user_fault(fault_va, write) {
         UserFaultOutcome::Resolved => true,
         UserFaultOutcome::Terminated { cpu } => {
             // The task is dead (exit recorded, resources reclaimed):
@@ -174,7 +182,14 @@ mod tests {
         fn dispatch(&self, _raw_number: u16, _args: RawArgs) -> DispatchOutcome {
             self.outcome
         }
-        fn resolve_user_fault(&self, _fault_va: u64) -> UserFaultOutcome {
+        fn resolve_user_fault(&self, _fault_va: u64, write: bool) -> UserFaultOutcome {
+            // Mirror the production hook's invariant: a write is never
+            // resolved, so a `Resolved` disposition under `write` is a
+            // scaffolding bug worth failing loudly on.
+            assert!(
+                !(write && self.fault_outcome == UserFaultOutcome::Resolved),
+                "a write fault must never resolve"
+            );
             self.fault_outcome
         }
     }
@@ -313,15 +328,17 @@ mod tests {
         }));
         slot.install_dispatcher(hook as &'static dyn DispatchHook)
             .expect("install");
-        assert!(resolve_user_fault_via_slot(&slot, 0xF000_1000));
+        assert!(resolve_user_fault_via_slot(&slot, 0xF000_1000, false));
     }
 
     #[test]
     fn resolve_user_fault_via_slot_fails_closed_without_a_hook_or_task() {
         // An empty slot resolves nothing (the arch port takes its fatal
-        // path), and an `Unhandled` disposition does the same.
+        // path), and an `Unhandled` disposition does the same — for reads
+        // and writes alike.
         let empty = DispatchCallbackSlot::new();
-        assert!(!resolve_user_fault_via_slot(&empty, 0xF000_1000));
+        assert!(!resolve_user_fault_via_slot(&empty, 0xF000_1000, false));
+        assert!(!resolve_user_fault_via_slot(&empty, 0xF000_1000, true));
 
         let slot = DispatchCallbackSlot::new();
         let hook: &'static StaticHook = Box::leak(Box::new(StaticHook {
@@ -330,7 +347,7 @@ mod tests {
         }));
         slot.install_dispatcher(hook as &'static dyn DispatchHook)
             .expect("install");
-        assert!(!resolve_user_fault_via_slot(&slot, 0xF000_1000));
+        assert!(!resolve_user_fault_via_slot(&slot, 0xF000_1000, false));
     }
 
     #[test]
@@ -345,7 +362,25 @@ mod tests {
         }));
         slot.install_dispatcher(hook as &'static dyn DispatchHook)
             .expect("install");
-        assert!(!resolve_user_fault_via_slot(&slot, 0xF000_1000));
+        assert!(!resolve_user_fault_via_slot(&slot, 0xF000_1000, false));
+    }
+
+    #[test]
+    fn resolve_user_fault_via_slot_write_fault_is_terminated_never_resolved() {
+        // Regression (the M1 file-map vertical's `store` role): a write
+        // fault flows through the same seam with `write = true` and comes
+        // back `Terminated` — the task dies; the CPU is never halted just
+        // because the access was a store. With no published kthread on the
+        // host the helper still reports unresolved (the port's fatal path),
+        // but the disposition it acted on was the task-fatal one.
+        let slot = DispatchCallbackSlot::new();
+        let hook: &'static StaticHook = Box::leak(Box::new(StaticHook {
+            outcome: DispatchOutcome::NoCallerContext,
+            fault_outcome: UserFaultOutcome::Terminated { cpu: 52 },
+        }));
+        slot.install_dispatcher(hook as &'static dyn DispatchHook)
+            .expect("install");
+        assert!(!resolve_user_fault_via_slot(&slot, 0xF000_2000, true));
     }
 
     #[test]

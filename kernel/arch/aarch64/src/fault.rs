@@ -163,18 +163,22 @@ fn clear_fault_handler_for_tests() {
 /// Signature of the user-fault resolver the vector offers a lower-EL data
 /// abort to before the fatal path.
 ///
-/// `far` is the `FAR_EL1` faulting address. A `true` return means the
+/// `far` is the `FAR_EL1` faulting address and `write` the `ESR.WnR`
+/// verdict (`true` = the access was a store). A `true` return means the
 /// fault is dealt with and the vector simply returns — `ELR_EL1` still
 /// points at the faulting instruction, so the `eret` retries the access
-/// against the now-resident page. A `false` return means the fault was
-/// not (and will never be) resolvable and the vector falls through to the
-/// fatal [`FaultHandlerFn`] path. The callback may also *not return* for
-/// the faulting task: when the fault is fatal to the task alone, the
-/// binary's callback suspends it into the scheduler with an exit action
-/// and the vector call never completes on that stack — exactly like a
-/// rescheduling syscall. Like every trap-path callback it is a bare
-/// `extern "C" fn` with no captured environment.
-pub type UserFaultResolveFn = extern "C" fn(far: u64) -> bool;
+/// against the now-resident page; only a read is ever resolved this way
+/// (file mappings are read-only, so resolving a store would retry it
+/// forever). A `false` return means the fault was not (and will never
+/// be) resolvable and the vector falls through to the fatal
+/// [`FaultHandlerFn`] path. The callback may also *not return* for
+/// the faulting task: when the fault is fatal to the task alone — every
+/// write, and any unresolvable read — the binary's callback suspends it
+/// into the scheduler with an exit action and the vector call never
+/// completes on that stack — exactly like a rescheduling syscall, so the
+/// task dies and the CPU never halts. Like every trap-path callback it
+/// is a bare `extern "C" fn` with no captured environment.
+pub type UserFaultResolveFn = extern "C" fn(far: u64, write: bool) -> bool;
 
 /// Slot holding the installed user-fault resolver as a raw function
 /// pointer (`0` = none installed).
@@ -283,7 +287,7 @@ mod tests {
         panic!("host test handler must never be invoked");
     }
 
-    extern "C" fn host_user_fault_resolver(_far: u64) -> bool {
+    extern "C" fn host_user_fault_resolver(_far: u64, _write: bool) -> bool {
         false
     }
 

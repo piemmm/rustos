@@ -68,15 +68,16 @@ pub extern "C" fn production_dispatch(
 /// callback before user space is entered.
 ///
 /// The riscv64 trap handler offers every U-mode load/store page fault
-/// here first (`rustos_arch_riscv64::fault::UserFaultResolveFn`); the
-/// arch-neutral lookup → resolve → terminate sequence lives in
+/// here first (`rustos_arch_riscv64::fault::UserFaultResolveFn`), with
+/// `write` the store/AMO `scause` verdict; the arch-neutral lookup →
+/// resolve → terminate sequence lives in
 /// [`crate::dispatch_core::resolve_user_fault_via_slot`] and is
 /// unit-tested there once. `true` re-runs the faulting instruction; a
-/// task-fatal fault never returns (the helper suspends the reclaimed
-/// task with an exit action); `false` sends the trap handler to its
-/// fatal path (fail closed).
-pub extern "C" fn production_user_fault(stval: u64) -> bool {
-    crate::dispatch_core::resolve_user_fault_via_slot(&DISPATCH_SLOT, stval)
+/// task-fatal fault (any write, or an unresolvable read) never returns
+/// (the helper suspends the reclaimed task with an exit action);
+/// `false` sends the trap handler to its fatal path (fail closed).
+pub extern "C" fn production_user_fault(stval: u64, write: bool) -> bool {
+    crate::dispatch_core::resolve_user_fault_via_slot(&DISPATCH_SLOT, stval, write)
 }
 
 // SAFETY-INVARIANT: [`production_user_fault`] is a valid

@@ -56,7 +56,12 @@ use rustos_kernel_mem::{
 use rustos_kernel_syscall::SYSCALL_TABLE_HASH;
 use rustos_sync::Once;
 
-use crate::spawn_layout::{self, CHILD_USER_BIAS};
+use crate::spawn_layout;
+// Re-exported so out-of-crate consumers of this producer (the QEMU
+// file-mapping vertical) can pin their fixture `rxe`'s relocation bias to
+// the exact bias this producer maps every child at — the aarch64 port's
+// `USER_IMAGE_BIAS` export, mirrored (one definition, no copied constant).
+pub use crate::spawn_layout::CHILD_USER_BIAS;
 use crate::stack_arena::{FrameArenaGrow, KTHREAD_STACK_ARENA};
 
 /// Gigabytes of identity map each spawned child address space provides.

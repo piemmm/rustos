@@ -1299,11 +1299,16 @@ costs only the pages actually touched, `AGENTS.md` §26.7):
   fault), and maps it read-only, never executable (`filemap::FILE_FLAGS`;
   a short tail page is zero-filled past end-of-file). The registry
   snapshot is re-frozen so the copy path sees the new page, and the task
-  retries the faulting instruction. A **write** fault (or instruction
-  fetch) is never offered: file mappings are read-only, so it can never
-  be made valid — resolving one against a resident page would retry the
-  store into an endless fault storm — and it always takes the task-kill
-  path.
+  retries the faulting instruction. A **write** fault is offered through
+  the same seam with the port-attested `write` verdict (aarch64
+  `ESR.WnR`, riscv64 store/AMO `scause`, x86_64 `#PF` `W/R`) but is never
+  *resolved*: file mappings are read-only, so it can never be made valid
+  — resolving one against a resident page would retry the store into an
+  endless fault storm — and the one shared hook policy sends every write
+  (like every unresolvable read) down the task-kill path, so a store to a
+  read-only mapping or any wild user write costs the task, never the
+  CPU. An instruction fetch is never offered at all (a file mapping is
+  never executable) and still falls to the port's fatal path.
 - **Fail closed, kill the task not the machine.** An address outside every
   region, a page wholly at/past end-of-file (the `SIGBUS` analogue), a
   filesystem error, or frame exhaustion terminates the *faulting task*: the
@@ -1344,13 +1349,22 @@ costs only the pages actually touched, `AGENTS.md` §26.7):
   foreign-task refusal, benign-race fold), the `copy_in_user`
   resolve-retry tests (miss offered + bounded, outside-region and
   resident-page behaviour), the fault-kill audit test, per-port fault
-  gating tests (aarch64 `is_write_data_abort`, riscv64
-  `is_load_page_fault`, x86_64 `is_resolvable_user_fault` + resolver-slot
-  round-trip), dispatch-core fault-forwarding tests, and the `lib/rt`
-  wrapper marshalling tests. The QEMU end-to-end vertical (map → fault →
-  verify → unmap → wild-access exit 139, with the parent observing it
-  through `wait`) is the staged remainder in
-  `.junie/fstree-next-plan.md`.
+  classification tests (aarch64 `is_write_data_abort`, riscv64
+  `is_load_page_fault` / `is_store_page_fault`, x86_64
+  `is_user_data_fault` / `is_resolvable_user_fault` + resolver-slot
+  round-trip), dispatch-core fault-forwarding tests (including the
+  write-fault-is-terminated regression), and the `lib/rt` wrapper
+  marshalling tests. The QEMU end-to-end verticals
+  (`tests/integration/file_map_qemu_aarch64` / `…_riscv64`, over the
+  shared four-role fixture program `tests/integration/file_map_program`)
+  prove the whole path live on both boards through the production
+  `KernelDispatchHook`: demand-fault of the first/interior/EOF-straddle
+  pages with byte and zero-fill verification, the mapping surviving
+  `fs_close`, an untouched mapped page handed to `fs_open` as its path
+  buffer (the copy-path proof), sparse `file_unmap`, a wild read after
+  unmap fault-killed with exit 139, and a store to the resident read-only
+  mapping fault-killed with exit 139 — each observed by a parent through
+  the production `spawn` + `wait`.
 
 ## 8. Testing strategy
 

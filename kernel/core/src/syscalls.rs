@@ -7001,7 +7001,7 @@ where
         completion_outcome(raw_number, result, cpu)
     }
 
-    fn resolve_user_fault(&self, fault_va: u64) -> UserFaultOutcome {
+    fn resolve_user_fault(&self, fault_va: u64, write: bool) -> UserFaultOutcome {
         // Identify the faulting task exactly as `dispatch` identifies a
         // syscall caller: the scheduler's per-CPU current-task slot, never
         // anything caller-supplied. No task on this CPU means the fault
@@ -7011,15 +7011,19 @@ where
             return UserFaultOutcome::Unhandled;
         };
         let task = SecTaskId(sched_task_id);
-        if self.handlers.resolve_file_fault(task, fault_va) {
+        // A write is never resolved: file mappings are read-only, so
+        // mapping the page would retry the store forever against a
+        // resident page. It is fatal to the task below — the one shared
+        // policy every port's write gate feeds.
+        if !write && self.handlers.resolve_file_fault(task, fault_va) {
             return UserFaultOutcome::Resolved;
         }
-        // A wild access, a page at/past end-of-file, or an unresolvable
-        // read: fatal to the task and only the task. Record the crash exit
-        // so a waiting parent reaps a real status (and the audit log gets
-        // its stable fault-kill record), reclaim exactly what a clean exit
-        // or a signal kill reclaims, and hand the port the CPU to suspend
-        // the task on.
+        // A wild access, a page at/past end-of-file, an unresolvable
+        // read, or any write: fatal to the task and only the task. Record
+        // the crash exit so a waiting parent reaps a real status (and the
+        // audit log gets its stable fault-kill record), reclaim exactly
+        // what a clean exit or a signal kill reclaims, and hand the port
+        // the CPU to suspend the task on.
         self.handlers.record_fault_exit(task, fault_va);
         UserFaultOutcome::Terminated { cpu }
     }

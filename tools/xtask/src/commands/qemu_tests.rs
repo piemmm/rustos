@@ -1913,6 +1913,59 @@ const TESTS: &[QemuTest] = &[
         pointer_move: None,
         serial: &[],
     },
+    // M1 file-mapping remainder (`docs/src/architecture/memory.md` §7o): the
+    // aarch64 demand-paged `file_map` vertical — the end-to-end proof of the
+    // **production** `KernelSyscallHandlers` fault path. The chassis installs
+    // the production `KernelDispatchHook` through a `DispatchCallbackSlot`
+    // (production `LiveMemMap` producer for `mem_map` *and* `file_map`, a
+    // read-only in-guest filesystem double serving one fixture file, a real
+    // `KernelProcessWait`, a `ProgramRegistry` carrying the three child
+    // roles) and binds the production user-fault resolver to the same slot.
+    // The four-role fixture program's parent is spawned through the
+    // production `InitSpawnCtx::spawn_driver_process` seam and drives the
+    // children through production `spawn` + `wait`: `verify` demand-faults
+    // the mapping's first/interior/EOF-straddle pages (bytes + zero fill),
+    // proves the mapping survives `fs_close`, hands an untouched mapped page
+    // to `fs_open` as its path buffer (the syscall copy-path fault-resolution
+    // proof), and unmaps (exit 0); `wild` reads after unmap and `store`
+    // writes to the read-only mapping — both fault-killed, exit 139, observed
+    // by the parent through `wait`. PASS once the chassis reaps a parent exit
+    // of 0; every failure site carries a distinct finisher (the parent's
+    // diagnostic exit code is folded in). Single CPU and a 60-second budget
+    // match the other boot-then-do-fixed-work aarch64 tests.
+    QemuTest {
+        package: "rustos-test-file-map-qemu-aarch64",
+        binary: "rustos-test-file-map-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+        pointer_move: None,
+        serial: &[],
+    },
+    // The riscv64 twin of the file-map vertical above: the same four-role
+    // fixture program and production `KernelDispatchHook` chassis, driven on
+    // the riscv64 `virt` board through the S-mode trap path (load *and*
+    // store/AMO U-mode page faults offered to the production resolver) and
+    // the riscv64 production spawn producer.
+    QemuTest {
+        package: "rustos-test-file-map-qemu-riscv64",
+        binary: "rustos-test-file-map-qemu-riscv64",
+        target: "riscv64gc-unknown-none-elf",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+        pointer_move: None,
+        serial: &[],
+    },
     // PI Stage 5d-0-ii (b′)-2 (`plans/PI.md`): the aarch64 `mmio_map` vertical —
     // the first proof that an EL0 driver maps a **granted device MMIO window**
     // at runtime via `abi-v1` `mmio_map` over the per-task **retained live

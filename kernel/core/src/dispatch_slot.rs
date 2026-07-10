@@ -182,6 +182,13 @@ pub trait DispatchHook: Sync {
     /// resolve it as demand-paged file backing (a `file_map` region) or
     /// terminate the faulting task.
     ///
+    /// `write` is the port-attested access direction (aarch64 `ESR.WnR`,
+    /// riscv64 store/AMO `scause`, x86_64 `#PF` error-code `W/R`). File
+    /// mappings are read-only, so a write is never resolved — it is fatal
+    /// to the task — but it still flows through this one seam so a store
+    /// to a read-only mapping (or any wild write) kills the *task* and
+    /// never the CPU.
+    ///
     /// The architecture port's user-fault path calls this before treating
     /// the abort as fatal, and acts on the returned
     /// [`UserFaultOutcome`]:
@@ -191,8 +198,8 @@ pub trait DispatchHook: Sync {
     ///   port returns to the task and the retried access succeeds.
     /// * [`UserFaultOutcome::Terminated`] — the address is not
     ///   demand-paged backing of the current task's (a wild access, a page
-    ///   at/past end-of-file — the `SIGBUS` analogue — or an unresolvable
-    ///   read/OOM): the hook has already recorded the crash exit code and
+    ///   at/past end-of-file — the `SIGBUS` analogue — an unresolvable
+    ///   read/OOM, or **any write**): the hook has already recorded the crash exit code and
     ///   reclaimed the task's kernel resources, and the port suspends the
     ///   task with [`crate::reschedule_current`] and
     ///   [`RescheduleAction::Exit`] on the carried `cpu` — the task is
@@ -205,7 +212,7 @@ pub trait DispatchHook: Sync {
     /// The default refuses every fault as [`UserFaultOutcome::Unhandled`],
     /// so a hook built without a file-mapping resolver can never fabricate
     /// memory.
-    fn resolve_user_fault(&self, _fault_va: u64) -> UserFaultOutcome {
+    fn resolve_user_fault(&self, _fault_va: u64, _write: bool) -> UserFaultOutcome {
         UserFaultOutcome::Unhandled
     }
 }

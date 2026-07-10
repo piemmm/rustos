@@ -392,24 +392,23 @@ unsafe extern "C" fn rustos_aarch64_trap_handler(kind: u64, frame: *mut u64) {
             return;
         }
 
-        // A *read* data abort from EL0 may be a demand-paged file-mapping
-        // fault: offer it to the installed resolver before the fatal
-        // path. A `true` return means the faulting page is now resident,
-        // so returning here lets the trampoline `eret` re-run the
-        // faulting instruction (`ELR_EL1` still points at it — the PE
-        // does not advance it for an abort). A fault that is fatal to the
-        // task alone never returns from the resolver (the callback
-        // suspends the task into the scheduler with an exit action);
-        // `false` falls through to the fatal path below, exactly as with
-        // no resolver installed (fail closed). A *write* abort is never
-        // offered: file mappings are read-only, so it is always fatal to
-        // the task — resolving it would retry the store forever.
-        if kind == kind::LOWER_SYNC
-            && crate::fault::is_lower_el_data_abort(esr)
-            && !crate::fault::is_write_data_abort(esr)
-        {
+        // Every data abort from EL0 is offered to the installed resolver
+        // before the fatal path, with the `ESR.WnR` verdict. A *read* may
+        // be a demand-paged file-mapping fault: a `true` return means the
+        // faulting page is now resident, so returning here lets the
+        // trampoline `eret` re-run the faulting instruction (`ELR_EL1`
+        // still points at it — the PE does not advance it for an abort).
+        // A *write* is never resolved (file mappings are read-only;
+        // resolving a store would retry it forever) — the resolver kills
+        // the faulting task instead, so a store to a read-only mapping or
+        // any wild write costs the task, never the CPU. A fault that is
+        // fatal to the task alone never returns from the resolver (the
+        // callback suspends the task into the scheduler with an exit
+        // action); `false` falls through to the fatal path below, exactly
+        // as with no resolver installed (fail closed).
+        if kind == kind::LOWER_SYNC && crate::fault::is_lower_el_data_abort(esr) {
             if let Some(resolver) = crate::fault::user_fault_resolver() {
-                if resolver(read_far()) {
+                if resolver(read_far(), crate::fault::is_write_data_abort(esr)) {
                     return;
                 }
             }

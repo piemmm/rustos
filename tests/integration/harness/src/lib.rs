@@ -31,6 +31,12 @@
 
 pub mod elf2rxe;
 
+/// The M1 demand-paged file-mapping fixture: the single definition of the
+/// fixture file the `file_map_qemu_*` verticals serve kernel-side and probe
+/// from EL0 (geometry constants, content generator, `RUSTOS_FM_*` env
+/// pinning, and the kernel-side constants emitter).
+pub mod filemap_fixture;
+
 /// The signed `.rxe` driver-bundle composer, shared by the build scripts
 /// that lay a kernel-trusted driver into the system.
 /// Enabled by the `driver-image` feature so the Ed25519 dependency is

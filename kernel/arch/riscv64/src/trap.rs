@@ -385,20 +385,24 @@ unsafe extern "C" fn rustos_riscv64_trap_handler(frame: *mut TrapFrame) {
             }
             return;
         }
-        // A load page fault taken from U-mode may be a demand-paged
-        // file-mapping fault: offer it to the installed resolver before
-        // the fatal path. `true` means the faulting page is now resident;
+        // A load or store/AMO page fault taken from U-mode is offered to
+        // the installed resolver before the fatal path, with the store
+        // verdict. For a *load* it may be a demand-paged file-mapping
+        // fault: `true` means the faulting page is now resident;
         // returning leaves the saved `sepc` on the faulting instruction,
-        // so the asm epilogue's `sret` retries the access. A fault fatal
-        // to the task alone never returns from the resolver (the callback
-        // suspends the task into the scheduler with an exit action);
-        // `false` falls through to the fatal path below, exactly as with
-        // no resolver installed (fail closed). A store/AMO page fault is
-        // never offered: file mappings are read-only, so it is always
-        // fatal to the task — resolving it would retry the store forever.
+        // so the asm epilogue's `sret` retries the access. A *store* is
+        // never resolved (file mappings are read-only; resolving it would
+        // retry the store forever) — the resolver kills the faulting task
+        // instead, so a store to a read-only mapping or any wild write
+        // costs the task, never the hart. A fault fatal to the task alone
+        // never returns from the resolver (the callback suspends the task
+        // into the scheduler with an exit action); `false` falls through
+        // to the fatal path below, exactly as with no resolver installed
+        // (fail closed).
         // SAFETY: `frame` is the live saved-register frame the asm vector
         // passed; reading its saved `sstatus` is sound.
-        if crate::fault::is_load_page_fault(scause)
+        let write_fault = crate::fault::is_store_page_fault(scause);
+        if (crate::fault::is_load_page_fault(scause) || write_fault)
             && trap_came_from_user(unsafe { (*frame).sstatus })
         {
             if let Some(resolver) = crate::fault::user_fault_resolver() {
@@ -408,7 +412,7 @@ unsafe extern "C" fn rustos_riscv64_trap_handler(frame: *mut TrapFrame) {
                 unsafe {
                     core::arch::asm!("csrr {}, stval", out(reg) stval, options(nomem, nostack));
                 }
-                if resolver(stval) {
+                if resolver(stval, write_fault) {
                     return;
                 }
             }
