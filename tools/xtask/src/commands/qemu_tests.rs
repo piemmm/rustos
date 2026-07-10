@@ -2023,6 +2023,39 @@ const TESTS: &[QemuTest] = &[
         pointer_move: None,
         serial: &[],
     },
+    // The S8b parser-sandbox vertical (`docs/src/security/sandbox.md`;
+    // `.junie/fstree-next-plan.md` S8b): prove the `lib/sandbox` seam end
+    // to end over the S8a kernel sandbox spawn mode on the aarch64 `virt`
+    // board. The chassis installs the production `KernelDispatchHook`
+    // (LiveMemMap for the `rustos-rt` heaps, a real `KernelProcessWait`, a
+    // `ProgramRegistry` carrying the fixture's three worker paths) and
+    // spawns the four-role fixture program's parent through the production
+    // `InitSpawnCtx::spawn_driver_process` seam. The parent drives the
+    // seam over the real syscalls: container + instruction decode of valid
+    // and malformed inputs through a genuinely sandboxed decode worker
+    // (its own binary spawned via `SpawnAttach::sandbox` over pipes), real
+    // crash containment (a worker that exits without serving yields a
+    // typed error, a logged crash event, and a surviving caller), and the
+    // syscall wall probed from inside a live sandbox (`fs_open`/`spawn`
+    // refused while the pipe reply crosses). PASS once the chassis reaps a
+    // parent exit of 0; every failure site carries a distinct finisher
+    // (the parent's diagnostic exit code is folded in). Single CPU and a
+    // 60-second budget match the other boot-then-do-fixed-work aarch64
+    // tests.
+    QemuTest {
+        package: "rustos-test-sandbox-qemu-aarch64",
+        binary: "rustos-test-sandbox-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+        pointer_move: None,
+        serial: &[],
+    },
     // PI Stage 5d-0-ii (b′)-2 (`plans/PI.md`): the aarch64 `mmio_map` vertical —
     // the first proof that an EL0 driver maps a **granted device MMIO window**
     // at runtime via `abi-v1` `mmio_map` over the per-task **retained live

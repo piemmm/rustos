@@ -274,6 +274,11 @@ pub const TARGETS: &[Target] = &[
         test: "fuzz_x86_64",
         description: "lib/disasm x86_64 decoder (untrusted executable-file bytes: never panics, always makes forward progress, 15-byte cap)",
     },
+    Target {
+        package: "rustos-sandbox",
+        test: "fuzz_sandbox",
+        description: "lib/sandbox decode seam (hostile input files through the sandboxed decode service, and hostile worker replies into the fail-closed client decoders)",
+    },
 ];
 
 /// How long to run each harness.

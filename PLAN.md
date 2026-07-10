@@ -3320,12 +3320,23 @@ Unblocked — in progress (`.junie/fstree-next-plan.md` S8):
   `delegate`/`apply_token` refuse it outright), and the syscall dispatcher
   confines a sandboxed task to the closed `sandbox_allows` list (yield,
   exit, stream_read/write, fs_read/write/close, mem_map/unmap), audited on
-  denial. Docs: `docs/src/security/sandbox.md`. Remaining (staged
-  `.junie/fstree-next-plan.md` S8b/S8c): the user-space parse seam (typed
-  request/response over wired descriptors, host-testable fake), crash
-  containment with the worker replaced and the event logged (§19.4), the
-  `lib/binfmt`/`lib/disasm` decode wiring behind it, and the sweep moving
-  the remaining in-tree untrusted-input parsers behind the facility.
+  denial. The **user-space seam is landed** (S8b): `lib/sandbox`
+  (`rustos-sandbox`) is the one typed request/reply path a program runs a
+  parser through — length-framed protocol over a `Channel`, worker `serve`
+  loop over a total `Service`, and parent-side `ParserSandbox` crash
+  containment (typed error, dead worker reaped and replaced, stable
+  `EventId(6000)`/`EventId(6001)` events, §19.4) — with the production
+  transport (`RtLauncher` spawns the program's own binary in a worker role
+  via `SpawnAttach::sandbox` over pipes), a public in-process loopback
+  fake for host tests, and the `lib/binfmt`/`lib/disasm` decode service
+  behind it (fail-closed client-side reply validation; `fuzz_sandbox` in
+  `cargo xtask fuzz`). Proven end to end by the aarch64 QEMU vertical
+  (`tests/integration/sandbox_program` + `sandbox_qemu_aarch64`): decode
+  of valid/malformed inputs through a real sandboxed worker, real-process
+  crash containment, and the syscall wall probed from inside. Docs:
+  `docs/src/security/sandbox.md`. Remaining (staged
+  `.junie/fstree-next-plan.md` S8c): the sweep moving the remaining
+  in-tree untrusted-input parsers behind the facility.
   Its first consumers exist: `lib/binfmt` (`rustos-binfmt`, done —
   `.junie/fstree-next-plan.md` S6) is the read-only executable-container
   decoder: typed, borrowed, fail-closed views of the `rxe` load image +

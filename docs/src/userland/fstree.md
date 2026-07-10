@@ -263,3 +263,16 @@ boundary (with the malformed-`0x` refusal), goto-offset in decimal and
 hex with end clamping, paging a sparse 5 GiB backing at full 64-bit
 offsets, in-place view switching, Esc stopping a live scan before
 leaving, and a mid-view read refusal closing the viewer.
+
+## The disassembly viewer's foundation
+
+The third viewer — structural decode of `rxe`/ELF/wasm containers and
+instruction-level disassembly for the four Tier-1 ISAs — is staged as S9
+in `.junie/fstree-next-plan.md`. Its foundation is in place: the parser
+sandbox (the kernel sandbox spawn mode plus the `lib/sandbox` seam —
+[the parser sandbox](../security/sandbox.md),
+[`rustos-sandbox`](../lib/sandbox.md)) already hosts the
+`lib/binfmt`/`lib/disasm` decode service, so the viewer performs every
+container and instruction decode inside a minimum-capability worker
+process from its first commit; in-process decode of an untrusted
+executable is banned.

@@ -1,0 +1,54 @@
+[package]
+name = "rustos-test-sandbox-qemu-aarch64"
+description = "S8b QEMU integration test (docs/src/security/sandbox.md): prove the lib/sandbox parser-sandbox seam end to end on the aarch64 virt board. The build script compiles the pure-Rust four-role fixture program (tests/integration/sandbox_program) PIE once — linking rustos-sandbox with its program feature — and converts it to an rxe blob. The kernel installs the production KernelDispatchHook through a DispatchCallbackSlot (LiveMemMap for the rt heap, a real KernelProcessWait, a ProgramRegistry carrying the three worker paths) and spawns the parent role through the production InitSpawnCtx::spawn_driver_process seam. The parent drives the seam over the real syscalls: container and instruction decode of valid and malformed inputs through a genuinely sandboxed worker (its own binary spawned via SpawnAttach::sandbox over pipes), real crash containment (a worker that exits without serving yields a typed error, a logged crash event, and a surviving caller), and the in-sandbox syscall wall (a probe worker's fs_open and spawn are refused inside the sandbox while its pipe reply crosses). PASS once the chassis reaps a parent exit of 0."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# This bin is the S8b parser-sandbox vertical: the proving `-M virt` slice
+# of the kernel sandbox spawn mode (S8a) plus the user-space seam over it,
+# composed from the production `KernelDispatchHook` + `KernelSyscallHandlers`
+# path rather than a bespoke dispatch shim.
+#
+# The `test-hooks` feature is on by default. Release builds that enable it
+# are rejected by the `compile_error!` guard in `src/main.rs` (AGENTS.md §1 —
+# no hacks; §5.4.5 — fail closed), mirroring the file-map vertical.
+[features]
+default = ["test-hooks"]
+test-hooks = []
+
+[[bin]]
+name = "rustos-test-sandbox-qemu-aarch64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+rustos-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
+rustos-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+rustos-kernel = { path = "../../../kernel/rustos-kernel", version = "=0.0.0" }
+rustos-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+rustos-kernel-ipc = { path = "../../../kernel/ipc", version = "=0.0.0" }
+rustos-kernel-irq = { path = "../../../kernel/irq", version = "=0.0.0" }
+rustos-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }
+rustos-kernel-sched-api = { path = "../../../kernel/sched/api", version = "=0.0.0" }
+rustos-kernel-sched-eevdf = { path = "../../../kernel/sched/eevdf", version = "=0.0.0" }
+rustos-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+rustos-sync = { path = "../../../lib/sync", version = "=0.0.0" }
+
+[build-dependencies]
+# The shared harness: the target cfg emitter, the `virt` DTB dump helper,
+# and the ELF→rxe converter. Host-only build glue (`AGENTS.md` §12).
+rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
+# The build script stamps the kernel's compiled-in syscall CFI tag into the
+# converted `rxe` so the production loader admits it (`AGENTS.md` §9).
+rustos-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }

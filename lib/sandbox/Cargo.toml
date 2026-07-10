@@ -1,0 +1,48 @@
+[package]
+name = "rustos-sandbox"
+description = "RustOS parser-sandbox seam (AGENTS.md §19.5): the one typed request/reply path a program uses to run a parser of untrusted input inside a minimum-capability sandbox process — length-framed protocol, crash containment with worker replacement and stable log events, and the container/disassembly decode service (`lib/binfmt` + `lib/disasm`) as its first consumers."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# The `program` feature adds the production transport a `Run` binary links:
+# the parent-side launcher (pipes + the sandbox spawn attach block over
+# `rustos-rt`) and the worker-side standard-stream channel. It is enabled
+# only when a bare-metal program binary is built — the pure protocol/seam
+# library and the host tests never pull the runtime. Mirrors
+# `rustos-curses`'s split.
+[features]
+program = ["dep:rustos-rt"]
+
+[dependencies]
+# The frozen `Errno` vocabulary the channel and launcher report, and the
+# manifest capability-id types the decode summary carries.
+rustos-abi = { path = "../abi", version = "=0.0.0" }
+# The structured-event vocabulary the crash-containment events are logged
+# through (stable `EventId`s in this crate's reserved 6000-range).
+rustos-log = { path = "../log", version = "=0.0.0" }
+# The executable-container decoder the sandboxed decode service runs.
+rustos-binfmt = { path = "../binfmt", version = "=0.0.0" }
+# The per-ISA instruction decoders the sandboxed decode service runs.
+rustos-disasm = { path = "../disasm", version = "=0.0.0" }
+
+# The `program`-feature transport links the freestanding userland runtime
+# for `pipe_create`/`spawn_attached`/`fs_*`/`wait` on the parent side and
+# the standard-stream reads/writes on the worker side. Pulled only for the
+# bare-metal targets a `Run` binary is actually built for; on the host
+# neither is compiled.
+[target.'cfg(target_os = "none")'.dependencies]
+rustos-rt = { path = "../rt", version = "=0.0.0", optional = true }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+# The §19.6 fuzz harness draws its inputs through the shared seed/budget
+# seam (`rustos_fuzzseed`): one place picks the per-run seed, logs it at
+# the start of the test, and bounds the smoke/soak loop (`AGENTS.md`
+# §2.2). Test scaffolding only; never in a RustOS build.
+rustos-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

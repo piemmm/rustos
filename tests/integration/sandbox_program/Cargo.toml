@@ -1,0 +1,28 @@
+[package]
+name = "rustos-test-sandbox"
+description = "S8b parser-sandbox fixture: a minimal, separately-linked pure-Rust EL0 program built once and driven in four path-selected roles. The parent drives the whole lib/sandbox seam over the real syscalls: decode of valid and malformed inputs through a genuinely sandboxed worker (spawned from its own binary via SpawnAttach::sandbox over pipes), real crash containment (a worker that dies without serving yields a typed error, a logged crash event, and a surviving caller), and the in-sandbox syscall wall (a probe worker attempts forbidden syscalls inside the sandbox and reports the denials over its reply pipe). Built PIE for a native Tier-1 target and converted to an rxe blob by the consuming test's build script."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "rustos-test-sandbox"
+path = "src/main.rs"
+
+# The program is a pure-Rust RustOS program (`AGENTS.md` §1), so it links the
+# pure-Rust userland runtime `rustos-rt` — never the C ABI. `rustos-sandbox`
+# is built with its `program` feature so the production transport
+# (`rustos_sandbox::rt`) is compiled in. Only on the native Tier-1 targets
+# (`target_os = "none"`); on the host it is an inert stub so
+# `cargo build --workspace` / clippy still cover it.
+[target.'cfg(target_os = "none")'.dependencies]
+rustos-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+rustos-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0", features = ["program"] }

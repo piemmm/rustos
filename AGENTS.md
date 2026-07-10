@@ -739,6 +739,14 @@ rustos/
 │   ├── rt/              # The pure-Rust userland runtime a first-party program
 │   │                    #   links (§1): _start, stack canary, panic handler,
 │   │                    #   syscall wrappers, entry! macro, over lib/abi-trap.
+│   ├── sandbox/         # The §19.5 parser-sandbox seam: the one typed
+│   │                    #   request/reply path a program runs a parser of
+│   │                    #   untrusted input through, over the kernel sandbox
+│   │                    #   spawn mode — length-framed protocol, worker serve
+│   │                    #   loop, crash containment (typed error, replaced
+│   │                    #   worker, stable log events), the in-process
+│   │                    #   loopback fake for host tests, and the sandboxed
+│   │                    #   lib/binfmt + lib/disasm decode service (§2.2).
 │   ├── seat/            # Arch-neutral seat model (plans/DISPLAY.md): the
 │   │                    #   exclusive, owner-tracked, revocable lease on one
 │   │                    #   display + keyboard + pointer and its input-routing

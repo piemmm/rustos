@@ -75,6 +75,45 @@ it, `signal` can kill it, and a crashed worker is observed exactly like
 any other abnormal child exit. Nothing about the sandbox brand weakens
 the parent's side.
 
+## The user-space seam: `lib/sandbox`
+
+The kernel primitive makes a sandboxed process *exist*; `lib/sandbox`
+(`rustos-sandbox`) is the one user-space seam that makes it *usable*, so
+the containment discipline is written once and every program that
+sandboxes a parse imports it:
+
+- **Protocol** (`proto`): a length-framed byte protocol over any
+  bidirectional `Channel` (pipes in production, in-memory fakes in host
+  tests), bounded by `MAX_FRAME`. Both sides refuse an oversize declared
+  length before reading or allocating a payload byte.
+- **Worker** (`worker`): `serve` reads a request frame, hands the payload
+  to a total `Service`, writes the reply frame, and ends cleanly when the
+  parent closes the request stream. A malformed request is a typed error
+  *reply*, never a panic.
+- **Host side** (`host`): `ParserSandbox` sends one request and blocks
+  for the reply. Every worker failure — crash, protocol violation,
+  oversize reply, exit without answering — is contained identically: the
+  caller receives a typed `SandboxError`, the dead worker is reaped and
+  **replaced**, and the event is logged with a stable id
+  (`EventId(6000)` worker crashed, `EventId(6001)` worker unavailable;
+  the crate owns `6000..7000`). A parser crash never takes down the
+  calling program.
+- **Production transport** (`rt`, feature `program`, freestanding only):
+  the parent spawns **its own binary** in a worker role — two fresh
+  pipes wired to the child's fd 0/1 through `SpawnAttach::sandbox`, the
+  `--parser-sandbox-worker` argv marker, a blocking reap on disposal.
+  The worker serves over its standard streams, exactly the surface the
+  allow-list admits.
+- **First consumers** (`decode`): executable-container summaries
+  (`lib/binfmt`) and per-window instruction disassembly (`lib/disasm`)
+  run inside the worker; the client-side helpers validate every reply
+  field fail-closed, because a worker that has parsed hostile bytes is
+  itself treated as hostile.
+
+Host tests inject the in-process `loopback` fake exactly as the
+`Fs`/`Tty` seams take fakes, so a consumer's full parent-side path runs
+under plain `cargo test`.
+
 ## What this deliberately is not
 
 - It is not a general jail configuration surface: there is exactly one
@@ -101,3 +140,15 @@ the parent's side.
 - `kernel/core`: an end-to-end spawn with a sandbox attach block admits
   a child whose record is sandboxed and empty despite a manifest that
   requests a capability, with every standard stream closed.
+- `lib/sandbox`: framing round-trips and truncation/oversize refusals;
+  serve-loop semantics; containment (typed error, reap, replacement,
+  logged events, frozen event ids); fail-closed decode of hostile
+  replies; and the `fuzz_sandbox` harness (hostile input files through
+  the decode service, hostile worker replies into the client decoders)
+  in `cargo xtask fuzz`.
+- QEMU (`tests/integration/sandbox_program` + `sandbox_qemu_aarch64`):
+  the whole seam over the real syscalls on the `virt` board — decode of
+  valid and malformed inputs through a genuinely sandboxed worker, real
+  crash containment with a surviving caller, and the syscall wall probed
+  from inside a live sandbox (`fs_open`/`spawn` denied while the pipe
+  reply crosses).
