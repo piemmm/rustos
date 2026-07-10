@@ -1174,6 +1174,33 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Report whether the in-flight caller of a served call endpoint holds a
+    /// seat's live lease, returning the lease's generation
+    /// (`plans/DISPLAY.md` D7a — the display service's per-present check).
+    ///
+    /// The implementation resolves `endpoint`, enforces the endpoint's
+    /// required **receive** capability against the caller and confirms it is
+    /// the owning task — both before touching state, exactly as
+    /// [`Self::call_peer_origin`] — then looks up the attested identity
+    /// captured for `ticket` and reads seat `seat`'s **live** lease for that
+    /// peer, answering with its generation (`>= 1`). A foreign endpoint or
+    /// an unknown/not-in-service ticket fails closed; a peer that does not
+    /// hold the seat is the typed [`Errno::SeatNotOwner`] /
+    /// [`Errno::SeatRevoked`] refusal.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]; the real handler is installed in
+    /// `kernel/core`.
+    fn call_peer_seat(
+        &self,
+        _caller: &CallerContext<'_>,
+        _endpoint: u64,
+        _ticket: u64,
+        _seat: u64,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// Read the kernel wall-clock time and its provenance state (P-D).
     ///
     /// The dispatcher has already checked `out` is a non-null `UserPtr`; the
@@ -1478,6 +1505,32 @@ pub trait SyscallHandlers {
     /// [`Errno::NotImplemented`]; the real handler is installed in
     /// `kernel/core`.
     fn shm_unmap(&self, _caller: &CallerContext<'_>, _base: u64, _len: usize) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Grant the serving task of a call endpoint the right to map a shared
+    /// memory region the caller owns, returning the minted grant handle
+    /// (`plans/DISPLAY.md` D7a — the display client hands its frame buffer
+    /// to the display service).
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::SHM`] and audited the call. The implementation
+    /// confirms the caller itself holds a `Shared` grant covering `region`
+    /// (delegation never widens authority), resolves the live serving task
+    /// of `endpoint` at grant time — never a caller-supplied (recyclable)
+    /// PID — and mints that task its own unforgeable handle for the region.
+    /// An unknown region, a region the caller cannot map, or an unknown
+    /// endpoint fails closed with [`Errno::NotFound`].
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]; the real handler is installed in
+    /// `kernel/core`.
+    fn shm_grant(
+        &self,
+        _caller: &CallerContext<'_>,
+        _region: u64,
+        _endpoint: u64,
+    ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
 
@@ -2267,6 +2320,19 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 // is its length in bytes.
                 let len = decode_len(args.0[1])?;
                 self.handlers.shm_unmap(caller, args.0[0], len)
+            }
+            SyscallNumber::SHM_GRANT => {
+                // args[0] is the shared-region id the caller owns; args[1] is
+                // the call-endpoint id whose serving task receives the grant
+                // (both resolved and owner-checked by the handler).
+                self.handlers.shm_grant(caller, args.0[0], args.0[1])
+            }
+            SyscallNumber::CALL_PEER_SEAT => {
+                // args[0] is the endpoint id; args[1] the in-service ticket;
+                // args[2] the seat id whose live lease is checked against
+                // the ticket's peer.
+                self.handlers
+                    .call_peer_seat(caller, args.0[0], args.0[1], args.0[2])
             }
             SyscallNumber::WAITSET_CREATE => {
                 // No arguments; the handler mints a handle for the caller.
@@ -3172,6 +3238,20 @@ mod tests {
             Ok(origin_cap as u64)
         }
 
+        fn call_peer_seat(
+            &self,
+            _c: &CallerContext<'_>,
+            _endpoint: u64,
+            _ticket: u64,
+            seat: u64,
+        ) -> SyscallResult {
+            self.record("call_peer_seat");
+            // Echo the seat id so the reachability test can assert the
+            // dispatcher decoded the three arguments without wiring a real
+            // endpoint / seat registry here.
+            Ok(seat)
+        }
+
         fn wall_time_get(
             &self,
             _c: &CallerContext<'_>,
@@ -3278,6 +3358,14 @@ mod tests {
         fn shm_unmap(&self, _c: &CallerContext<'_>, _base: u64, _len: usize) -> SyscallResult {
             self.record("shm_unmap");
             Ok(0)
+        }
+
+        fn shm_grant(&self, _c: &CallerContext<'_>, region: u64, _endpoint: u64) -> SyscallResult {
+            self.record("shm_grant");
+            // Echo the region id so the reachability test can assert the
+            // dispatcher decoded both arguments without wiring a real grant
+            // table here.
+            Ok(region)
         }
 
         fn waitset_create(&self, _c: &CallerContext<'_>) -> SyscallResult {

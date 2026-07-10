@@ -1506,6 +1506,47 @@ impl SyscallNumber {
     /// every detach decision is audited.
     pub const VOLUME_DETACH: Self = Self(81);
 
+    /// Grant the serving task of a call endpoint the right to map a shared
+    /// memory region the caller owns (`plans/DISPLAY.md` D7a — the display
+    /// client hands its frame buffer to the display service).
+    ///
+    /// Arguments: the region id a prior [`SyscallNumber::SHM_CREATE`]
+    /// returned, then the call-endpoint id whose **serving task** receives
+    /// the grant. The caller must itself hold a `Shared` grant for the
+    /// region (it can map what it shares — delegation never widens
+    /// authority), and the endpoint must have a live server; the recipient
+    /// is resolved kernel-side from the endpoint at grant time, never a
+    /// caller-supplied (recyclable) PID, so a grant cannot land on a reused
+    /// task id. Returns the minted unforgeable grant handle, which the
+    /// caller forwards in-band for the recipient's
+    /// [`SyscallNumber::SHM_MAP`] — the handle is owner-checked there, so
+    /// the number is useless to a bystander. Requires `CAP_SHM`; every
+    /// mint is audited, exactly as `shm_create`.
+    pub const SHM_GRANT: Self = Self(82);
+
+    /// Report whether the in-flight caller of a served call endpoint holds
+    /// a seat's live lease (`plans/DISPLAY.md` D7a — the display service's
+    /// per-present check).
+    ///
+    /// Arguments: the endpoint id, the ticket of the in-service call
+    /// (exactly as [`SyscallNumber::CALL_PEER_ORIGIN`]), then the seat id.
+    /// The caller must own the endpoint and hold its receive capability;
+    /// the check is valid only between `call_recv` and `call_reply`, so a
+    /// server learns seat facts only about a task it is actively
+    /// servicing — seat ownership is never enumerable (that listing stays
+    /// behind `CAP_SYSINFO_HW`). Returns the live lease's generation
+    /// (`>= 1`) when the peer holds the seat; fails closed with
+    /// [`crate::Errno::SeatNotOwner`] (another task holds it or it is
+    /// unowned), [`crate::Errno::SeatRevoked`] (the peer's lease was
+    /// revoked and is unacknowledged), or [`crate::Errno::NotFound`] (no
+    /// such seat, endpoint, or in-flight ticket). No capability beyond the
+    /// endpoint's own receive gate: the authority is serving the in-flight
+    /// call, exactly as `call_peer_origin`. Not audited per call — it is
+    /// the per-frame present gate (the kernel-side `PresentGate` is not
+    /// audited per check either); the security decision it feeds (a refused
+    /// present) is the service's to log.
+    pub const CALL_PEER_SEAT: Self = Self(83);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 

@@ -483,6 +483,35 @@ pub fn app_store_wake() {
     }
 }
 
+/// The wait-queue holding a desktop session parked on a `SeatInput`
+/// wait-set member while its seat's keyboard and pointer channels are both
+/// empty (`plans/DISPLAY.md` D7a). Only wait-sets that actually contain a
+/// `SeatInput` member register here (`waitset_wait` checks the membership
+/// first), so the pointer-rate wakes a drag produces never touch an
+/// unrelated waitset waiter (no thundering herd). It is woken by
+/// [`seat_input_wake`] when a record is routed to a held seat's desktop
+/// channel **and** when a lease ends (release, revoke, seat destruction),
+/// so a session that lost its seat wakes and observes the typed refusal on
+/// its next drain instead of parking forever. Waiters carry their
+/// wait-set's own deadline semantics; the check-then-park race is closed by
+/// the scheduler's wake-pending token, exactly as the other queues.
+pub static SEAT_INPUT_WAITQ: WaitQueue = WaitQueue::new();
+
+/// Wake every desktop session parked on a `SeatInput` wait-set member
+/// because a record was routed to a held seat's desktop channel or a seat
+/// lease ended; each re-scans its members and parks again when nothing is
+/// ready. A fail-safe no-op before the arch hook is installed.
+///
+/// A broadcast, not a wake-one: the registry does not track which waiter
+/// observes which seat, and only seat-input waiters register on this queue,
+/// so the blast radius is the (small) set of desktop sessions — one per
+/// held seat.
+pub fn seat_input_wake() {
+    if let Some(arch) = wait_arch() {
+        SEAT_INPUT_WAITQ.wake_all(arch);
+    }
+}
+
 /// The wait-queue holding `ipc_call` callers (Design D D2b). A caller parks
 /// here after posting its request to a [`rustos_kernel_ipc::call::CallEndpoint`]
 /// and is woken by [`call_wake`] when the bound server replies (no busy yield). `ipc_call` carries no timeout, so every waiter

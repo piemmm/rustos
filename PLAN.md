@@ -2903,12 +2903,26 @@ transfer, landed in increments:
   unit tests (slot semantics, window containment, walk propagation).
 
 **Remaining this stage:**
-- Land the live `SeatEventReader` (over `rustos_rt::pointer_read`/
-  `keyboard_read`) in the desktop session binary when it exists (the
-  virtio pointer feed into the seat channel is done — see above; the USB
-  HID mouse joins through the same shared `from_device_event` mapping when
-  its metal report pump lands); relay the theme switch over live IPC;
-  wire the two default apps to live VFS/shell channels + WM-presented
+- **The display-client present path (`plans/DISPLAY.md` D7) — the
+  graphical session goes live.** The binding design is fixed there
+  (zero-copy shm double-buffer frames, per-present kernel lease check,
+  endpoint-directed region grants, park-on-seat-input). **D7a (the kernel
+  surfaces) is done:** `WaitSourceKind::SeatInput` (wake on input *and* on
+  lease loss, owner-checked add, oracle-free refusals),
+  `shm_grant` (`abi-v1` 82, `CAP_SHM`, audited, endpoint-directed
+  recipient), and `call_peer_seat` (`abi-v1` 83, the `call_peer_origin`
+  trust window, live-lease generation answer) — kernel host tests, `lib/rt`
+  wrappers, `ros_sys_*` stubs, C headers, and the syscalls/seat docs all
+  landed together. Remaining: D7b (display protocol + `lib/display`
+  engine/client + the framebuffer service process), D7c (the desktop
+  session binary: the live `SeatEventReader` over `rustos_rt::pointer_read`/
+  `keyboard_read` after `display_acquire`, draining after each `SeatInput`
+  wake, driving `DesktopShell` with the queried mode as the screen `Rect`),
+  D7d (the end-to-end QEMU vertical + login's `graphical_available` flip).
+  The virtio pointer feed into the seat channel is done — see above; the
+  USB HID mouse joins through the same shared `from_device_event` mapping
+  when its metal report pump lands. Then: relay the theme switch over live
+  IPC; wire the two default apps to live VFS/shell channels + WM-presented
   windows.
 - The platform-RNG `EntropySource` that seeds the reserve — **DONE**
   (`.junie/PREREQUISITES.md` P-0): the Arch-HAL `rustos_arch_api::entropy`

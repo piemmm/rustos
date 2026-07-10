@@ -2016,6 +2016,55 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: Some(CapabilityId::FS_MOUNT),
         audit: true,
     },
+    SyscallSpec {
+        number: SyscallNumber::SHM_GRANT,
+        name: "shm_grant",
+        arg_count: 2,
+        args: [
+            // The shared-region id the caller owns, then the call-endpoint
+            // id whose serving task receives the map grant.
+            AbiType::Handle,
+            AbiType::IpcEndpoint,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `U64` carries the minted grant handle (or a negated errno) back to
+        // the caller, who forwards it in-band; the handle is owner-checked
+        // at `shm_map`, so the value is useless to a bystander.
+        ret: AbiType::U64,
+        // Delegating a mapping of cross-process shared memory is privileged
+        // exactly as minting one: the same `CAP_SHM` gate as `shm_create`,
+        // and every mint is audited — it is a security-relevant grant and
+        // low-volume (once per display-surface configure), so the record
+        // cannot drown the log.
+        required_capability: Some(CapabilityId::SHM),
+        audit: true,
+    },
+    SyscallSpec {
+        number: SyscallNumber::CALL_PEER_SEAT,
+        name: "call_peer_seat",
+        arg_count: 3,
+        args: [
+            // endpoint id, in-service ticket, then the seat id checked.
+            AbiType::IpcEndpoint,
+            AbiType::Handle,
+            AbiType::Handle,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `U64` carries the live lease generation (>= 1) or a negated errno.
+        ret: AbiType::U64,
+        // Gated like `call_peer_origin` by the endpoint's required receive
+        // capability against the reading server (enforced in the handler),
+        // not a flat dispatcher gate. Not audited per call: it is the
+        // per-frame present gate on the display service's serve path — the
+        // kernel-side `PresentGate` is not audited per check either.
+        required_capability: None,
+        audit: false,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

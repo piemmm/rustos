@@ -237,6 +237,12 @@ const NUM_SHM_MAP: u64 = SyscallNumber::SHM_MAP.as_u16() as u64;
 /// `shm_unmap` syscall number (as above).
 const NUM_SHM_UNMAP: u64 = SyscallNumber::SHM_UNMAP.as_u16() as u64;
 
+/// `shm_grant` syscall number (as above).
+const NUM_SHM_GRANT: u64 = SyscallNumber::SHM_GRANT.as_u16() as u64;
+
+/// `call_peer_seat` syscall number (as above).
+const NUM_CALL_PEER_SEAT: u64 = SyscallNumber::CALL_PEER_SEAT.as_u16() as u64;
+
 /// `waitset_create` syscall number (as above).
 const NUM_WAITSET_CREATE: u64 = SyscallNumber::WAITSET_CREATE.as_u16() as u64;
 
@@ -2576,6 +2582,58 @@ pub fn shm_unmap(base: u64, len: usize) -> i64 {
     ret as i64
 }
 
+/// Grant the serving task of call endpoint `endpoint` the right to map the
+/// shared-memory region `region` the caller owns
+/// (`SyscallNumber::SHM_GRANT`, `plans/DISPLAY.md` D7a — the display client
+/// hands its frame buffer to the display service), returning the minted
+/// grant handle (≥ 1) or `-errno`.
+///
+/// The kernel requires `CAP_SHM`, confirms the caller itself holds a
+/// `Shared` grant covering `region` (delegation never widens authority),
+/// resolves the **live serving task** of `endpoint` at grant time — never a
+/// caller-supplied (recyclable) PID — and mints that task its own
+/// unforgeable handle for the region; the mint is audited. The caller
+/// forwards the returned handle in-band (an IPC request field); it resolves
+/// only when presented by the recipient task's own [`shm_map`], so the
+/// number is useless to a bystander. An unknown region, a region the caller
+/// cannot map, or an unknown endpoint fails closed with `-errno`
+/// (`NotFound`).
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 handle-or-errno encoding (handle ≥ 1, else -errno).
+pub fn shm_grant(region: u64, endpoint: u64) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke — the call carries no
+    // pointers, and the kernel validates `CAP_SHM`, the caller's own region
+    // grant, and the endpoint before minting anything.
+    let ret = unsafe { raw_syscall(NUM_SHM_GRANT, [region, endpoint, 0, 0, 0, 0]) };
+    ret as i64
+}
+
+/// Ask whether the in-flight caller of served call endpoint `endpoint`
+/// (ticket `ticket`) holds seat `seat`'s live lease
+/// (`SyscallNumber::CALL_PEER_SEAT`, `plans/DISPLAY.md` D7a — the display
+/// service's per-present check), returning the live lease generation
+/// (≥ 1) or `-errno`.
+///
+/// Valid only between [`call_recv`] and [`call_reply`] on an endpoint the
+/// caller owns and may receive from (the [`call_peer_origin`] window): a
+/// server learns seat facts only about a task it is actively servicing, so
+/// seat ownership is never enumerable through this path. The kernel reads
+/// the seat's **live** lease at check time — a revocation between two
+/// frames refuses the very next present. Refusals are typed and
+/// fail-closed: `SeatNotOwner` (unowned or another task holds it),
+/// `SeatRevoked` (the peer's unacknowledged eviction), `NotFound` (no such
+/// seat, endpoint, or in-service ticket), `PermissionDenied` (the caller
+/// does not own the endpoint or lacks its receive capability).
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 generation-or-errno encoding (generation ≥ 1, else -errno).
+pub fn call_peer_seat(endpoint: u64, ticket: u64, seat: u64) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke — the call carries no
+    // pointers, and the kernel gates it on endpoint ownership + receive
+    // capability before reading any seat state.
+    let ret = unsafe { raw_syscall(NUM_CALL_PEER_SEAT, [endpoint, ticket, seat, 0, 0, 0]) };
+    ret as i64
+}
+
 /// Create a kernel **wait-set**: a multiplexing object that observes the
 /// readiness of several event sources so one task can service them all
 /// without a busy-poll (`SyscallNumber::WAITSET_CREATE`; `plans/USB.md` U3a3
@@ -2602,12 +2660,16 @@ pub fn waitset_create() -> i64 {
 /// or [`WaitSetOp::Del`]; `kind` selects whether `id` names an IPC call
 /// endpoint the caller serves ([`WaitSourceKind::Endpoint`]), an
 /// [`IrqHandle`](rustos_abi::IrqHandle) the caller bound
-/// ([`WaitSourceKind::Irq`]), or a child of the caller awaiting reap — a
+/// ([`WaitSourceKind::Irq`]), a child of the caller awaiting reap — a
 /// PID or [`rustos_abi::waitset::WAITSET_CHILD_ANY`]
-/// ([`WaitSourceKind::Child`]); `token` is the caller's opaque value reported by
-/// [`waitset_wait`] when this member is ready. On `Add` the kernel resolves
-/// and **owner-checks** the named resource against the calling task before
-/// recording it, so the set can never observe authority the caller lacks.
+/// ([`WaitSourceKind::Child`]), or a seat whose live lease the caller holds
+/// via `display_acquire` ([`WaitSourceKind::SeatInput`], ready on queued
+/// keyboard/pointer input *and* on losing the lease, so a revocation is
+/// observed rather than parked through); `token` is the caller's opaque
+/// value reported by [`waitset_wait`] when this member is ready. On `Add`
+/// the kernel resolves and **owner-checks** the named resource against the
+/// calling task before recording it, so the set can never observe authority
+/// the caller lacks.
 ///
 /// Returns `0` on success, or the raw negative kernel result (`-errno`): an
 /// unowned/unknown resource or wrong `(kind, id)` (`NotFound`), a duplicate
@@ -3822,6 +3884,53 @@ mod tests {
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(pointer_read(0, &mut buf), want);
+        });
+    }
+
+    #[test]
+    fn shm_grant_marshals_the_region_and_endpoint() {
+        let (number, args) = capture(5, || {
+            assert_eq!(shm_grant(42, 0xD15_1001), 5);
+        });
+        assert_eq!(number, NUM_SHM_GRANT);
+        assert_eq!(args[0], 42);
+        assert_eq!(args[1], 0xD15_1001);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn shm_grant_surfaces_negative_errno_encoding() {
+        // A region the caller does not hold is refused with `NotFound`; the
+        // wrapper surfaces the raw `-errno` register unchanged.
+        let want = -i64::from(rustos_abi::Errno::NotFound.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let (_, _) = capture(neg, || {
+            assert_eq!(shm_grant(42, 0xD15_1001), want);
+        });
+    }
+
+    #[test]
+    fn call_peer_seat_marshals_endpoint_ticket_and_seat() {
+        let (number, args) = capture(3, || {
+            assert_eq!(call_peer_seat(0xD15_1001, 9, 0), 3);
+        });
+        assert_eq!(number, NUM_CALL_PEER_SEAT);
+        assert_eq!(args[0], 0xD15_1001);
+        assert_eq!(args[1], 9);
+        assert_eq!(args[2], 0);
+        assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn call_peer_seat_surfaces_negative_errno_encoding() {
+        // The evicted peer's check is refused with the distinct
+        // `SeatRevoked`; the wrapper surfaces the raw `-errno` register
+        // unchanged so the service can refuse the present with the typed
+        // cause.
+        let want = -i64::from(rustos_abi::Errno::SeatRevoked.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let (_, _) = capture(neg, || {
+            assert_eq!(call_peer_seat(0xD15_1001, 9, 0), want);
         });
     }
 

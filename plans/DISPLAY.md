@@ -386,6 +386,112 @@ seat-topology policy for the seat manager, staged with the desktop
 session work (`plans/PI.md` P11 / `PLAN.md` CU6), not a kernel-side
 default.
 
+### Stage D7 — the display-client present path (the graphical session goes live)
+
+**Status: in progress — D7a done; D7b is next.** D1–D6 made the seat an
+enforced, revocable kernel object and derived the present right from the
+live lease — but the only presenters so far are kernel-side fixtures. D7 is the
+missing transport: a user-space window-manager session presenting
+composited frames to a user-space display-driver process, zero-copy,
+lease-gated end to end, fast enough for 4K video and games and reusable
+by a future remote-control display service (the same protocol served by
+a network sink instead of a scanout surface; latency, not architecture,
+is the only difference).
+
+**Design (binding).** The shape is deliberately DRM/Wayland-grade:
+
+- **Zero-copy frames.** The session creates one `shm_create` region
+  holding two frames (double buffer), renders into the back frame, and
+  presents by *index* — no frame bytes ever cross the IPC. The display
+  service maps the region **once** at configure time; the hot path
+  (present) does no mapping, no allocation, and no copy other than the
+  driver's own blit to scanout (a direct-scanout driver may eliminate
+  even that by scanning out the granted region itself — the region stays
+  mapped, so the protocol already permits it).
+- **The lease is checked kernel-side, per present, with no oracle.** The
+  service never trusts a claimed lease: it asks the kernel whether the
+  *in-flight caller of its own endpoint* holds the live lease
+  (`call_peer_seat`, below). Facts flow only about a task that already
+  called you — the `call_peer_origin` trust shape — so seat ownership is
+  never enumerable (`SEAT_LIST` stays `CAP_SYSINFO_HW`).
+- **Sharing memory is an explicit, endpoint-directed capability act.**
+  `shm_grant` lets a region's owner mint a map-grant **to the serving
+  task of an endpoint it can already call** — never to a raw (recyclable)
+  PID, so a grant cannot land on a reused task id. The handle value
+  travels in-band; it is owner-checked at `shm_map`, so a bystander who
+  learns the number holds nothing.
+- **Input parks; nothing polls.** The session blocks on its wait-set —
+  a new `SeatInput` member kind, woken by input delivery *and by
+  revocation*, so a session that lost its seat wakes, observes the typed
+  `SeatRevoked` on its next drain, and tears down instead of parking
+  forever or scribbling on.
+
+Sub-stages, each shipped complete (code + tests + docs, §7 gate green):
+
+- **D7a — kernel surfaces `[x]` — done.** All three surfaces are live with
+  kernel host tests (grant/deny/revoked-window/readiness), `lib/rt`
+  wrappers + marshal tests, `ros_sys_*` stubs, regenerated C headers, and
+  the `docs/src/architecture/syscalls.md` / `docs/src/desktop/seat.md`
+  pages updated in the same change.
+  - `WaitSourceKind::SeatInput` (wire value 3, `id` = seat id):
+    owner-checked at `waitset_ctl` add (the caller must hold the seat's
+    live lease; `NotFound`/`SeatNotOwner` otherwise). Ready when the
+    seat's keyboard **or** pointer channel holds a record, or when the
+    member's task no longer holds the live lease (revoke / release —
+    wake-on-revoke makes the loss observable). Wake hooks ride the
+    existing inject/deliver and revoke/release paths in the kernel seat
+    registry; no new polling.
+  - `shm_grant` (`abi-v1` 82): `shm_grant(region_id, endpoint_id)` →
+    grant-handle. `CAP_SHM`-gated; the caller must own the region; the
+    recipient is resolved as the live serving task of `endpoint_id` at
+    grant time; fail-closed typed errnos; the mint is audit-logged with
+    a stable event id.
+  - `call_peer_seat` (`abi-v1` 83): `call_peer_seat(endpoint_id,
+    seat_id)` → live lease generation. Valid only between `call_recv`
+    and `call_reply` on an endpoint the caller serves (the
+    `call_peer_origin` window); returns `SeatNotOwner` / `SeatRevoked` /
+    `NotFound` fail-closed. No capability: the authority is serving the
+    in-flight call, exactly as `call_peer_origin`.
+- **D7b — the display service.** `lib/abi/src/display_ipc.rs` (the
+  fixed-width, fail-closed, fuzzed protocol: `Query` → mode,
+  `Configure { shm_handle, frame_count, frame geometry }`,
+  `Present { frame_index, damage rect }`) and the reserved
+  `DISPLAY_ENDPOINT` (added to `is_reserved_endpoint`; one endpoint —
+  the service carries seat ids in-protocol, so a later multi-GPU broker
+  is additive, not a v2). A new `lib/display` crate hosts **both**
+  halves over injected seams so the protocol semantics have one
+  definition (§2.2): the server engine (decode → lease check via a
+  `call_peer_seat` seam → geometry/bounds validation → blit through the
+  `Display` trait, damage-aware via an in-place `Display` region-present
+  evolution with a full-blit default) and the client
+  (`RemoteDisplay`: implements the *existing* `Display` trait over the
+  shm back frame + present call, so `Compositor::present` is unchanged).
+  Every request is gated on the caller's live lease — including `Query`,
+  so only the seat owner learns the mode. The framebuffer driver's `Run`
+  binary hosts the engine (grants → surface, endpoint bind under
+  `CAP_IPC_BIND_PRIVILEGED`, waitset serve loop).
+- **D7c — the desktop session binary.** `userland/gui/session` gains its
+  `Run` program: `display_acquire(SEAT_PRIMARY)` → `DisplayClient`
+  bring-up (query, shm double buffer, `shm_grant`, configure) → the live
+  `SeatEventReader` over `rustos_rt::pointer_read`/`keyboard_read`
+  drained after each `SeatInput` wake → `DesktopShell` pump →
+  composite → present with damage. `DeviceInputSource` receives the
+  compositor's screen `Rect` from the queried mode. Loss of the seat
+  (typed `SeatRevoked`/`SeatNotOwner` on any drain or present) tears the
+  session down fail-loud; it never spins or repaints blind.
+- **D7d — end to end.** The autoload QEMU vertical world grows a display
+  node + the framebuffer service + the spawned session: injected key and
+  `mouse_move` reach the session through the seat channels, the
+  composited frame reaches the scanout surface, and the readback proves
+  the pixels. `userland/session/login` flips `graphical_available` when
+  (and only when) the display service and session bundles are present
+  (`plans/PI.md` P10's final step rides this).
+
+**Explicitly not in D7:** a GPU/3D or video-decode pipeline (the
+protocol's damage + direct-scanout shape is designed so those extend it
+in place); a network display service (same protocol, later plan); the
+input-device→seat topology policy (CU6 / `plans/PI.md` P11).
+
 ## 6. Tests, docs, and gate (binding)
 
 - Every stage: unit tests in-crate, integration/QEMU verticals where hardware

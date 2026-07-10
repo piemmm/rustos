@@ -84,6 +84,17 @@ pub enum WaitSourceKind {
     /// ever observe its **own** children: a specific `id` that names no
     /// child of the caller is refused when the member is added.
     Child = 2,
+    /// A seat's desktop input channels (its `id` is the seat id). Adding the
+    /// member is owner-checked against the seat's **live lease**: only the
+    /// task that acquired the seat (`display_acquire`) may observe its input.
+    /// Ready when the seat's keyboard **or** pointer channel holds a record
+    /// for the member's task, and *also* when that task no longer holds the
+    /// live lease (the lease was revoked, released, or the seat was
+    /// hot-removed) — the wake-on-loss makes losing the seat observable: the
+    /// woken owner's next drain fails closed with the typed refusal and the
+    /// session tears down instead of parking forever
+    /// (`plans/DISPLAY.md` D7a).
+    SeatInput = 3,
 }
 
 impl WaitSourceKind {
@@ -104,6 +115,7 @@ impl WaitSourceKind {
             0 => Ok(Self::Endpoint),
             1 => Ok(Self::Irq),
             2 => Ok(Self::Child),
+            3 => Ok(Self::SeatInput),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -128,10 +140,11 @@ mod tests {
             WaitSourceKind::Endpoint,
             WaitSourceKind::Irq,
             WaitSourceKind::Child,
+            WaitSourceKind::SeatInput,
         ] {
             assert_eq!(WaitSourceKind::from_u32(kind.as_u32()), Ok(kind));
         }
-        assert_eq!(WaitSourceKind::from_u32(3), Err(Errno::OutOfRange));
+        assert_eq!(WaitSourceKind::from_u32(4), Err(Errno::OutOfRange));
         assert_eq!(WaitSourceKind::from_u32(u32::MAX), Err(Errno::OutOfRange));
     }
 
@@ -142,6 +155,7 @@ mod tests {
         assert_eq!(WaitSourceKind::Endpoint.as_u32(), 0);
         assert_eq!(WaitSourceKind::Irq.as_u32(), 1);
         assert_eq!(WaitSourceKind::Child.as_u32(), 2);
+        assert_eq!(WaitSourceKind::SeatInput.as_u32(), 3);
         assert_eq!(WAITSET_CHILD_ANY, u64::MAX);
     }
 }

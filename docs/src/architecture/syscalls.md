@@ -124,6 +124,10 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  75 | `port_resolve` | `user_ptr` (name), `len`                | `endpoint`    | —               | no    |
 |  78 | `pointer_inject` | `u64 seat`, `user_ptr` (record), `len` | `u64` (bytes) | `CAP_INPUT_INJECT` | no |
 |  79 | `pointer_read` | `u64 seat`, `user_ptr` (buf), `len`     | `u64` (bytes) | `CAP_INPUT_READ` | no    |
+|  80 | `volume_attach` | `user_ptr` (request), `len`            | `errno`       | `CAP_FS_MOUNT`  | yes   |
+|  81 | `volume_detach` | `user_ptr` (request), `len`            | `errno`       | `CAP_FS_MOUNT`  | yes   |
+|  82 | `shm_grant`    | `Handle` (region), `IpcEndpoint`        | `u64` (handle) | `CAP_SHM`      | yes   |
+|  83 | `call_peer_seat` | `IpcEndpoint`, `Handle` (ticket), `u64 seat` | `u64` (generation) | —     | no    |
 
 (Syscall numbers 39–45 — `msi_alloc`, `shm_create`/`shm_map`/`shm_unmap`,
 `waitset_create`/`waitset_ctl`/`waitset_wait` — and 76–77 — `file_map`/
@@ -252,6 +256,7 @@ is exhaustive — anything not listed below is ungated:
 | `CAP_INPUT_INJECT` | `key_inject`, `pointer_inject` |
 | `CAP_DISPLAY`      | `display_acquire`, `display_release` |
 | `CAP_INPUT_READ`   | `keyboard_read`, `pointer_read` |
+| `CAP_SHM`          | `shm_create`, `shm_map`, `shm_grant` |
 | `CAP_MMIO_MAP`     | `mmio_map`                 |
 | `CAP_MEM_DMA`      | `dma_alloc`, `dma_free`    |
 | `CAP_SYSINFO_HW`   | `hw_tree_read`, `hw_tree_wait` |
@@ -564,6 +569,40 @@ time has no id — the call fails closed with `EntropyNotReady` rather than
 return the all-zero `BootId::UNSET` sentinel as if it were real. The
 first-party Rust wrapper is `rustos_rt::boot_id`; the C stub is
 `ros_sys_boot_id_get`.
+
+`call_peer_seat` (no. 83) is the seat-holding twin of `call_peer_origin`
+(`plans/DISPLAY.md` D7a): while a call is in service (between `call_recv`
+and `call_reply`) the endpoint's owning server may ask whether that
+caller's task holds a named seat's **live** lease, and receives the lease
+generation (≥ 1) or the typed `SeatNotOwner` / `SeatRevoked` / `NotFound`
+refusal. It is the display service's per-present gate: the check is fresh
+at call time (a revocation between two frames refuses the very next
+present), and it discloses seat facts only about a task the server is
+actively servicing — seat ownership is never enumerable (`SEAT_LIST`
+stays behind `CAP_SYSINFO_HW`). Wrapper `rustos_rt::call_peer_seat`; C
+stub `ros_sys_call_peer_seat`. Not audited per call — it is the per-frame
+hot path, exactly like the kernel-side present gate.
+
+`shm_grant` (no. 82) is the endpoint-directed delegation of a shared
+memory region (`plans/DISPLAY.md` D7a): the region's owner (holding
+`CAP_SHM` and its own per-region grant) mints the **live serving task**
+of a call endpoint an unforgeable handle for the region, which the owner
+forwards in-band and the recipient presents to `shm_map`. The recipient
+is resolved from the endpoint at grant time — never a caller-supplied
+(recyclable) PID — and the handle resolves only for the recipient task,
+so the number is useless to a bystander. Every mint is audited, exactly
+as `shm_create`. This is how the desktop session hands its composed frame
+buffer to the display service with zero frame bytes crossing the IPC.
+
+The wait-set (`waitset_ctl`, no. 44) additionally accepts a `SeatInput`
+member (`plans/DISPLAY.md` D7a): `id` names a seat whose **live lease the
+caller holds** (owner-checked at add, oracle-free `NotFound` otherwise),
+and the member is ready when the seat's keyboard or pointer channel holds
+a record — *and* when the caller loses the lease (release, revoke, seat
+hot-removal), so a desktop session parked on its input observes the loss
+instead of parking forever. The wake rides the seat registry's inject and
+revoke paths; only sets that contain a `SeatInput` member join the seat
+wake queue, so pointer-rate wakes never touch unrelated waiters.
 
 `self_origin` (no. 68) is the self-directed twin of `call_peer_origin` (no.
 58): where that lets a server read the kernel-attested identity of the *peer*

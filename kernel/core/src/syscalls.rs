@@ -4919,6 +4919,43 @@ where
         }
     }
 
+    fn call_peer_seat(
+        &self,
+        caller: &CallerContext<'_>,
+        endpoint: u64,
+        ticket: u64,
+        seat: u64,
+    ) -> SyscallResult {
+        // Resolve + gate before touching state, exactly as
+        // `call_peer_origin`: the reader must hold the endpoint's required
+        // receive capability and be the owning task (no ambient authority);
+        // an unknown endpoint fails closed.
+        let Some(ep) = crate::callreg::lookup(EndpointId(endpoint)) else {
+            return Err(Errno::NotFound);
+        };
+        if !ep
+            .required_recv_caps()
+            .is_subset_of(caller.caps.effective())
+            || ep.owner() != caller.caps.task().0
+        {
+            return Err(Errno::PermissionDenied);
+        }
+        // The kernel-attested identity snapshotted for this in-service
+        // ticket: a server learns seat facts only about a caller it is
+        // actively servicing (between `call_recv` and `call_reply`), so
+        // seat ownership is never enumerable through this path.
+        let Some(peer) = ep.peer_origin(CallTicket(ticket)) else {
+            return Err(Errno::NotFound);
+        };
+        // Read the seat's *live* lease for the peer — fresh at check time,
+        // exactly like the kernel-side present gate — and answer with its
+        // generation. Every refusal is typed and fail-closed: `SeatNotOwner`
+        // (unowned or another task holds it), `SeatRevoked` (the peer's
+        // unacknowledged eviction), `NotFound` (no such seat).
+        let lease = self.seat_registry.live_lease(seat, SeatOwner(peer.pid()))?;
+        Ok(lease.generation)
+    }
+
     fn self_origin(&self, caller: &CallerContext<'_>, out: u64, out_cap: usize) -> SyscallResult {
         // The reader's buffer must hold a whole origin; a short buffer fails
         // closed rather than truncating the record.
@@ -5272,6 +5309,37 @@ where
         Ok(base_va)
     }
 
+    fn shm_grant(&self, caller: &CallerContext<'_>, region: u64, endpoint: u64) -> SyscallResult {
+        // Step 2 (capability) was enforced by the dispatcher: the `shm_grant`
+        // spec carries `CAP_SHM`, and the mint is dispatcher-audited exactly
+        // as `shm_create`. Step 3 (validate every input): the caller must
+        // itself hold a `Shared` grant covering the region — delegation
+        // never widens authority, a task can share only a mapping right it
+        // already has. An unknown region and a region the caller cannot map
+        // are the same `NotFound`, so the error shape confirms nothing about
+        // foreign regions.
+        let wanted = HwResource::shared(region);
+        if !self.aspaces.read().grant_covers(caller.task_id, &wanted) {
+            return Err(Errno::NotFound);
+        }
+        // Resolve the recipient as the live serving task of `endpoint` at
+        // grant time — never a caller-supplied (recyclable) PID, so the
+        // grant cannot land on a reused task id. An unknown endpoint fails
+        // closed before any state changes.
+        let Some(ep) = crate::callreg::lookup(EndpointId(endpoint)) else {
+            return Err(Errno::NotFound);
+        };
+        // Mint the recipient its own unforgeable handle for the region. The
+        // handle value travels back to the caller (who forwards it in-band
+        // to the service); it resolves only when presented by the recipient
+        // task itself, so the number is useless to a bystander.
+        let handle = self
+            .aspaces
+            .write()
+            .mint_grant(SecTaskId(ep.owner()), wanted);
+        Ok(handle)
+    }
+
     fn shm_unmap(&self, caller: &CallerContext<'_>, base: u64, _len: usize) -> SyscallResult {
         // No capability: this releases only the caller's own mapping (the
         // `mem_unmap` posture). Resolve `(caller, base)` against the
@@ -5352,6 +5420,22 @@ where
                             return Err(Errno::NotFound);
                         }
                     }
+                    WaitSourceKind::SeatInput => {
+                        // A wait-set may observe a seat's input only for the
+                        // task holding its live lease (`display_acquire`
+                        // bound the caller). Every refusal — unknown seat,
+                        // another owner, a revoked lease — collapses to the
+                        // same `NotFound` the other kinds use: `waitset_ctl`
+                        // carries no capability gate, so a typed seat error
+                        // here would be an existence/ownership oracle.
+                        if self
+                            .seat_registry
+                            .live_lease(id, SeatOwner(caller.task_id.0))
+                            .is_err()
+                        {
+                            return Err(Errno::NotFound);
+                        }
+                    }
                 }
                 crate::waitset::add(
                     caller.task_id.0,
@@ -5386,16 +5470,23 @@ where
         // value (fail closed) — exactly as `irq_wait` computes it.
         let deadline_ns = self.arch.monotonic_ns(cpu).saturating_add(timeout_ns);
 
-        // Register on all three wake channels *before* the first scan so an
+        // Register on the wake channels *before* the first scan so an
         // event arriving in the register/park window is not lost:
         // `SERVE_WAITQ` (an IPC request posted to a member endpoint,
         // `NO_DEADLINE`), `IRQ_WAITQ` (a member line firing, plus the timed
         // sweep that enforces the timeout), and `PROCWAIT_WAITQ` (a child
         // exiting, the same wake `record_exit` sends a parent parked in
-        // `wait`). `register` is idempotent.
+        // `wait`). `register` is idempotent. `SEAT_INPUT_WAITQ` is joined
+        // only by a set that actually holds a `SeatInput` member, so the
+        // pointer-rate wakes a drag produces never touch an unrelated
+        // waitset waiter.
+        let observes_seat = members.iter().any(|m| m.kind == WaitSourceKind::SeatInput);
         crate::waitq::SERVE_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
         crate::waitq::IRQ_WAITQ.register(sched_task, deadline_ns);
         crate::waitq::PROCWAIT_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
+        if observes_seat {
+            crate::waitq::SEAT_INPUT_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
+        }
 
         // `(kind, id, token)` of the ready member; `id`/`kind` drive the
         // post-write IRQ-edge consume.
@@ -5423,6 +5514,13 @@ where
                         self.process_wait.child_state(caller.task_id, selector)
                             == ChildPeek::Reapable
                     }),
+                    // A non-consuming peek: a queued keyboard/pointer record
+                    // for the live owner, or the loss of the lease itself
+                    // (revoked, released, seat destroyed) — the woken owner
+                    // drains and observes the typed refusal.
+                    WaitSourceKind::SeatInput => {
+                        self.seat_registry.input_ready(m.id, SeatOwner(sched_task))
+                    }
                 };
                 if is_ready {
                     ready = Some((m.kind, m.id, m.token));
@@ -5470,6 +5568,9 @@ where
         crate::waitq::SERVE_WAITQ.deregister(sched_task);
         crate::waitq::IRQ_WAITQ.deregister(sched_task);
         crate::waitq::PROCWAIT_WAITQ.deregister(sched_task);
+        if observes_seat {
+            crate::waitq::SEAT_INPUT_WAITQ.deregister(sched_task);
+        }
         // Re-point the one-shot at the nearest deadline any remaining waiter
         // on *any* timed wait-queue needs (or clear it) so a finished wait
         // leaves no stale arming and drops no other queue's pending wake.
@@ -19397,6 +19498,251 @@ mod tests {
             .write()
             .mint_grant(SecTaskId(8), rustos_abi::HwResource::irq(33, 1));
         assert_eq!(h.shm_map(&ctx, handle), Err(Errno::OutOfRange));
+    }
+
+    /// `shm_grant` delegates a mapping right only for a region the caller
+    /// itself holds, only to the live serving task of a real endpoint, and
+    /// the minted handle resolves only for that recipient
+    /// (`plans/DISPLAY.md` D7a).
+    #[test]
+    fn shm_grant_delegates_only_a_held_region_to_the_endpoints_server() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(7, &[CapabilityId::SHM], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(7),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+
+        // A region the caller holds no grant for is refused before any
+        // endpoint state is read — indistinguishable from a region that
+        // does not exist.
+        assert_eq!(h.shm_grant(&ctx, 42, 0xD15_1001), Err(Errno::NotFound));
+
+        // The caller now holds the region's grant, but the endpoint is
+        // unknown: still refused, nothing minted.
+        let _own = aspaces
+            .write()
+            .mint_grant(SecTaskId(7), rustos_abi::HwResource::shared(42));
+        assert_eq!(h.shm_grant(&ctx, 42, 0xD15_1001), Err(Errno::NotFound));
+
+        // A live endpoint owned by the service task: the grant lands on the
+        // endpoint's *server*, resolved kernel-side at grant time.
+        let server_caps = make_caps_record(0x5707, &[], sink);
+        let id = 0xD15_1001;
+        let ep = Arc::new(
+            CallEndpoint::create(
+                EndpointId(id),
+                &server_caps,
+                CapabilitySet::empty(),
+                CapabilitySet::empty(),
+                CallEndpointLimits {
+                    max_request: 64,
+                    max_reply: 64,
+                    capacity: 4,
+                },
+                sink,
+            )
+            .expect("unrestricted endpoint"),
+        );
+        crate::callreg::register(ep.clone(), sink).expect("registered");
+        let handle = h.shm_grant(&ctx, 42, id).expect("grant mints a handle");
+        // The recipient resolves it to exactly the shared region…
+        assert_eq!(
+            aspaces.read().grant(SecTaskId(0x5707), handle),
+            Some(rustos_abi::HwResource::shared(42))
+        );
+        // …and the handle is meaningless when presented by anyone else
+        // (owner-checked at `shm_map`; the number is useless to a bystander).
+        assert_eq!(aspaces.read().grant(SecTaskId(9), handle), None);
+        crate::callreg::unregister(EndpointId(id));
+    }
+
+    /// `call_peer_seat` answers only while the ticket is in service, only
+    /// for the endpoint's owning server, and reports the *live* lease of
+    /// the peer: `SeatNotOwner` before an acquire, the minted generation
+    /// while held, and the distinct `SeatRevoked` after an eviction
+    /// (`plans/DISPLAY.md` D7a).
+    #[test]
+    fn call_peer_seat_reports_the_live_lease_of_the_in_service_peer() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+
+        let queue: &'static crate::console::ConsoleInputQueue =
+            Box::leak(Box::new(crate::console::ConsoleInputQueue::new()));
+        let seat: &'static SeatRegistry = Box::leak(Box::new(SeatRegistry::new(queue)));
+
+        let id = 0xCA11_5EA7;
+        let server_caps = make_caps_record(0x5708, &[], sink);
+        let ep = Arc::new(
+            CallEndpoint::create(
+                EndpointId(id),
+                &server_caps,
+                CapabilitySet::empty(),
+                CapabilitySet::empty(),
+                CallEndpointLimits {
+                    max_request: 64,
+                    max_reply: 64,
+                    capacity: 4,
+                },
+                sink,
+            )
+            .expect("unrestricted endpoint"),
+        );
+        crate::callreg::register(ep.clone(), sink).expect("registered");
+
+        // The client (task 7) posts a present request.
+        let client_caps = make_caps_record(7, &[], sink);
+        let ticket = ep.post(&client_caps, 7, b"present", sink).expect("posted");
+
+        let ctx = CallerContext {
+            task_id: SecTaskId(0x5708),
+            caps: &server_caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_seat_registry(seat);
+
+        // Not yet in service: the peer is not readable (fail closed).
+        assert_eq!(
+            h.call_peer_seat(&ctx, id, ticket.0, SEAT_PRIMARY),
+            Err(Errno::NotFound)
+        );
+        // Move the call into service.
+        let RecvCall::Received(call) = ep.recv_call(usize::MAX) else {
+            panic!("posted call is receivable");
+        };
+        assert_eq!(call.ticket, ticket);
+
+        // A foreign reader (not the endpoint's owner) is denied before any
+        // seat state is read.
+        let foreign_caps = make_caps_record(8, &[], sink);
+        let foreign_ctx = CallerContext {
+            task_id: SecTaskId(8),
+            caps: &foreign_caps,
+        };
+        assert_eq!(
+            h.call_peer_seat(&foreign_ctx, id, ticket.0, SEAT_PRIMARY),
+            Err(Errno::PermissionDenied)
+        );
+
+        // The peer holds no lease: the typed SeatNotOwner refusal.
+        assert_eq!(
+            h.call_peer_seat(&ctx, id, ticket.0, SEAT_PRIMARY),
+            Err(Errno::SeatNotOwner)
+        );
+        // The peer acquires the seat: the answer is the live generation.
+        let lease = seat
+            .acquire(SEAT_PRIMARY, SeatOwner(7))
+            .expect("seat acquired");
+        assert_eq!(
+            h.call_peer_seat(&ctx, id, ticket.0, SEAT_PRIMARY),
+            Ok(lease.generation)
+        );
+        // An unknown seat fails closed regardless of the lease.
+        assert_eq!(
+            h.call_peer_seat(&ctx, id, ticket.0, 999),
+            Err(Errno::NotFound)
+        );
+        // After an administrative eviction the answer is the distinct
+        // revoked refusal — the service refuses the present and the client
+        // learns it lost the seat.
+        let evicted = seat.revoke(SEAT_PRIMARY).expect("lease revoked");
+        assert_eq!(evicted, SeatOwner(7));
+        assert_eq!(
+            h.call_peer_seat(&ctx, id, ticket.0, SEAT_PRIMARY),
+            Err(Errno::SeatRevoked)
+        );
+        crate::callreg::unregister(EndpointId(id));
+    }
+
+    /// Adding a `SeatInput` wait-set member is owner-checked against the
+    /// seat's live lease, and every refusal is the same oracle-free
+    /// `NotFound` the other member kinds use (`plans/DISPLAY.md` D7a).
+    #[test]
+    fn waitset_seat_member_requires_the_live_lease() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let queue: &'static crate::console::ConsoleInputQueue =
+            Box::leak(Box::new(crate::console::ConsoleInputQueue::new()));
+        let seat: &'static SeatRegistry = Box::leak(Box::new(SeatRegistry::new(queue)));
+        // Task ids unique to this test: the wait-set registry is process-
+        // global, and another test asserts the exact count of sets it
+        // releases for its own task id.
+        let caps = make_caps_record(0x5709, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(0x5709),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_seat_registry(seat);
+
+        let ws = h.waitset_create(&ctx).expect("wait-set minted");
+        let add = WaitSetOp::Add.as_u32();
+        let kind = WaitSourceKind::SeatInput.as_u32();
+        // An unowned seat: the caller holds no lease, so the member is
+        // refused without confirming the seat exists.
+        assert_eq!(
+            h.waitset_ctl(&ctx, ws, add, kind, SEAT_PRIMARY, 0xA),
+            Err(Errno::NotFound)
+        );
+        // An unknown seat: the same refusal shape.
+        assert_eq!(
+            h.waitset_ctl(&ctx, ws, add, kind, 999, 0xA),
+            Err(Errno::NotFound)
+        );
+        // The live owner may observe its seat.
+        seat.acquire(SEAT_PRIMARY, SeatOwner(0x5709))
+            .expect("seat acquired");
+        assert_eq!(h.waitset_ctl(&ctx, ws, add, kind, SEAT_PRIMARY, 0xA), Ok(0));
+        // A different task cannot observe someone else's seat, even knowing
+        // its id — the same oracle-free refusal.
+        let other_caps = make_caps_record(0x570A, &[], sink);
+        let other_ctx = CallerContext {
+            task_id: SecTaskId(0x570A),
+            caps: &other_caps,
+        };
+        let other_set = h.waitset_create(&other_ctx).expect("wait-set minted");
+        assert_eq!(
+            h.waitset_ctl(&other_ctx, other_set, add, kind, SEAT_PRIMARY, 0xB),
+            Err(Errno::NotFound)
+        );
+        // Cleanup: the wait-set registry is process-global, so this test
+        // releases exactly the sets it minted, and the seat lease with them.
+        assert_eq!(crate::waitset::release_owned_by(0x5709), 1);
+        assert_eq!(crate::waitset::release_owned_by(0x570A), 1);
+        seat.release(SEAT_PRIMARY, SeatOwner(0x5709))
+            .expect("seat released");
     }
 
     /// `shm_create` on a build with no shared-memory facility wired fails

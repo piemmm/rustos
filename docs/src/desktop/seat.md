@@ -257,6 +257,43 @@ refused reader consumes nothing), the handoff transfer, the bystander
 steal refusals, the input-mode gate, and both no-wedge paths (exit release
 and gate healing).
 
+## Toward the live desktop session (Stage D7a)
+
+Stage D7 (`plans/DISPLAY.md`) is the display-client present path: a
+user-space window-manager session presenting composited frames to a
+user-space display-driver service, zero-copy and lease-gated end to end.
+Its kernel surfaces are live:
+
+- **Park on seat input, never poll.** The wait-set accepts a `SeatInput`
+  member (`waitset_ctl`, kind 3, `id` = seat id), owner-checked at add
+  against the seat's live lease with the same oracle-free `NotFound` the
+  other member kinds use. The member is ready when the seat's keyboard
+  **or** pointer channel holds a record — and when the caller *loses* the
+  lease (release, administrative revoke, display hot-removal), so a
+  parked session wakes, observes the typed `SeatRevoked`/`SeatNotOwner`
+  on its next drain, and tears down instead of parking forever. The wake
+  rides the registry's inject and revoke paths; only sets holding a
+  `SeatInput` member join the seat wake queue, so pointer-rate wakes
+  never touch unrelated waiters.
+- **The per-present check is `call_peer_seat`** (`abi-v1` 83): while a
+  present request is in service (between `call_recv` and `call_reply`),
+  the display service asks the kernel whether the *in-flight caller*
+  holds the named seat's live lease and receives the lease generation or
+  the typed refusal. The trust shape is exactly `call_peer_origin` — a
+  server learns seat facts only about a task it is actively servicing —
+  so seat ownership is never enumerable, and the answer is fresh at
+  check time exactly like the kernel-side present gate.
+- **Frames travel by grant, not by copy.** The session shares its frame
+  region with the display service through `shm_grant` (`abi-v1` 82): an
+  endpoint-directed, `CAP_SHM`-gated, audited delegation that mints the
+  endpoint's live serving task its own unforgeable `shm_map` handle —
+  never a raw (recyclable) PID, and never a handle a bystander could
+  use.
+
+The display service protocol, the `lib/display` engine/client, the
+framebuffer service process, and the desktop session binary build on
+these in stages D7b–D7d.
+
 ## Observing seats
 
 The seat inventory is exposed through the System Information API — never

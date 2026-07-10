@@ -281,6 +281,20 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
+    fn shm_grant(&self, _c: &CallerContext<'_>, _region: u64, _endpoint: u64) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn call_peer_seat(
+        &self,
+        _c: &CallerContext<'_>,
+        _endpoint: u64,
+        _ticket: u64,
+        _seat: u64,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
     fn mmio_map(
         &self,
         _c: &CallerContext<'_>,

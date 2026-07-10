@@ -116,6 +116,8 @@ const NUM_MSI_ALLOC: u64 = SyscallNumber::MSI_ALLOC.as_u16() as u64;
 const NUM_SHM_CREATE: u64 = SyscallNumber::SHM_CREATE.as_u16() as u64;
 const NUM_SHM_MAP: u64 = SyscallNumber::SHM_MAP.as_u16() as u64;
 const NUM_SHM_UNMAP: u64 = SyscallNumber::SHM_UNMAP.as_u16() as u64;
+const NUM_SHM_GRANT: u64 = SyscallNumber::SHM_GRANT.as_u16() as u64;
+const NUM_CALL_PEER_SEAT: u64 = SyscallNumber::CALL_PEER_SEAT.as_u16() as u64;
 const NUM_WAITSET_CREATE: u64 = SyscallNumber::WAITSET_CREATE.as_u16() as u64;
 const NUM_WAITSET_CTL: u64 = SyscallNumber::WAITSET_CTL.as_u16() as u64;
 const NUM_WAITSET_WAIT: u64 = SyscallNumber::WAITSET_WAIT.as_u16() as u64;
@@ -1465,6 +1467,49 @@ pub extern "C" fn sys_shm_unmap(base: u64, len: usize) -> i32 {
     unsafe { ret_i32(raw_syscall(NUM_SHM_UNMAP, [base, len as u64, 0, 0, 0, 0])) }
 }
 
+/// `shm_grant`: grant the serving task of call endpoint `endpoint` the right
+/// to map the shared-memory region `region` the caller owns
+/// (`SyscallNumber::SHM_GRANT`). Returns the minted, unforgeable grant
+/// handle (>= 1), or a `ROS_E_*` code reinterpreted into the result.
+///
+/// The kernel requires `ROS_CAP_SHM`, confirms the caller itself holds a
+/// grant covering the region (delegation never widens authority), and
+/// resolves the recipient as the endpoint's live serving task at grant
+/// time — never a caller-supplied PID. The caller forwards the handle
+/// in-band; it resolves only through the recipient's own
+/// [`sys_shm_map`], so the number is useless to a bystander. Audited.
+#[must_use]
+#[export_name = "ros_sys_shm_grant"]
+pub extern "C" fn sys_shm_grant(region: u64, endpoint: u64) -> u64 {
+    // SAFETY: see `sys_yield`. No user pointer is dereferenced; the kernel
+    // validates the capability, the caller's own region grant, and the
+    // endpoint before minting anything.
+    unsafe { raw_syscall(NUM_SHM_GRANT, [region, endpoint, 0, 0, 0, 0]) }
+}
+
+/// `call_peer_seat`: ask whether the in-flight caller of served call
+/// endpoint `endpoint` (ticket `ticket`, the value `ros_sys_call_recv`
+/// wrote) holds seat `seat`'s live lease
+/// (`SyscallNumber::CALL_PEER_SEAT`). Returns the live lease generation
+/// (>= 1), or a `ROS_E_*` code reinterpreted into the result
+/// (`ROS_E_SEAT_NOT_OWNER`, `ROS_E_SEAT_REVOKED`, `ROS_E_NOT_FOUND`,
+/// `ROS_E_PERMISSION_DENIED`).
+///
+/// Valid only between `ros_sys_call_recv` and `ros_sys_call_reply` on an
+/// endpoint the caller owns and may receive from — the
+/// `ros_sys_call_peer_origin` window — so a server learns seat facts only
+/// about a task it is actively servicing. The kernel reads the seat's
+/// live lease at check time; a revocation between two frames refuses the
+/// very next present.
+#[must_use]
+#[export_name = "ros_sys_call_peer_seat"]
+pub extern "C" fn sys_call_peer_seat(endpoint: u64, ticket: u64, seat: u64) -> u64 {
+    // SAFETY: see `sys_yield`. No user pointer is dereferenced; the kernel
+    // gates the call on endpoint ownership + receive capability before
+    // reading any seat state.
+    unsafe { raw_syscall(NUM_CALL_PEER_SEAT, [endpoint, ticket, seat, 0, 0, 0]) }
+}
+
 /// `waitset_create`: create a caller-owned wait-set that multiplexes the
 /// readiness of several event sources (`SyscallNumber::WAITSET_CREATE`).
 /// Returns the kernel-minted, opaque wait-set handle, or a `ROS_E_*` code
@@ -1485,8 +1530,12 @@ pub extern "C" fn sys_waitset_create() -> u64 {
 /// (`SyscallNumber::WAITSET_CTL`). Returns a `ROS_E_*` code.
 ///
 /// `op` is a `ROS_WAITSET_OP_*` value (`Add` / `Del`); `kind` is a
-/// `ROS_WAIT_SOURCE_*` value (`Endpoint` / `Irq`); `id` names the resource (an
-/// IPC call-endpoint id the caller serves, or an `IrqHandle` the caller bound);
+/// `ROS_WAIT_SOURCE_*` value (`Endpoint` / `Irq` / `Child` / `SeatInput`);
+/// `id` names the resource (an IPC call-endpoint id the caller serves, an
+/// `IrqHandle` the caller bound, a child PID or the any-child sentinel, or a
+/// seat id whose live lease the caller holds via `display_acquire` — the
+/// seat member is ready on queued keyboard/pointer input *and* on losing
+/// the lease, so a revocation is observed rather than parked through);
 /// `token` is the caller's opaque tag reported back by [`sys_waitset_wait`]. On
 /// `Add` the kernel resolves and owner-checks the named resource against the
 /// calling task before recording it — never ambient authority; a resource the
@@ -1975,6 +2024,8 @@ mod tests {
         (NUM_SHM_CREATE, "shm_create", 2),
         (NUM_SHM_MAP, "shm_map", 1),
         (NUM_SHM_UNMAP, "shm_unmap", 2),
+        (NUM_SHM_GRANT, "shm_grant", 2),
+        (NUM_CALL_PEER_SEAT, "call_peer_seat", 3),
         (NUM_WAITSET_CREATE, "waitset_create", 0),
         (NUM_WAITSET_CTL, "waitset_ctl", 5),
         (NUM_WAITSET_WAIT, "waitset_wait", 3),
@@ -2593,6 +2644,29 @@ mod tests {
         assert_eq!(args[0], 0x9000_4000);
         assert_eq!(args[1], 0x2000);
         assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn shm_grant_marshals_region_and_endpoint() {
+        let (number, args) = capture(5, || {
+            assert_eq!(sys_shm_grant(42, 0xD15_1001), 5);
+        });
+        assert_eq!(number, NUM_SHM_GRANT);
+        assert_eq!(args[0], 42);
+        assert_eq!(args[1], 0xD15_1001);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn call_peer_seat_marshals_endpoint_ticket_and_seat() {
+        let (number, args) = capture(3, || {
+            assert_eq!(sys_call_peer_seat(0xD15_1001, 9, 0), 3);
+        });
+        assert_eq!(number, NUM_CALL_PEER_SEAT);
+        assert_eq!(args[0], 0xD15_1001);
+        assert_eq!(args[1], 9);
+        assert_eq!(args[2], 0);
+        assert_eq!(&args[3..], &[0, 0, 0]);
     }
 
     #[test]

@@ -151,6 +151,13 @@ impl<const CAP: usize, const REC: usize> InputChannel<CAP, REC> {
         ring.len += 1;
     }
 
+    /// Whether the channel currently holds at least one undrained record
+    /// (the `SeatInput` wait-set readiness probe; a peek — nothing is
+    /// consumed).
+    fn pending(&self) -> bool {
+        self.ring.lock().len > 0
+    }
+
     /// Drain one record into `out`, zeroing the drained slot, and return the
     /// number of bytes written (`REC`, or `0` when empty).
     ///
@@ -391,7 +398,14 @@ impl SeatRegistry {
     pub fn release(&self, seat_id: u64, owner: SeatOwner) -> Result<(), Errno> {
         let slot = self.resolve(seat_id)?;
         let outcome = slot.state.lock().release(owner);
-        outcome.map_err(seat_errno)
+        let released = outcome.map_err(seat_errno);
+        if released.is_ok() {
+            // A lease ending is a `SeatInput` readiness edge: wake any
+            // parked observer so losing the seat is observable rather than
+            // an eternal park.
+            crate::waitq::seat_input_wake();
+        }
+        released
     }
 
     /// Route one decoded key edge to seat `seat_id`'s current foreground
@@ -421,6 +435,9 @@ impl SeatRegistry {
             Route::Desktop(_) => {
                 let bytes = record.to_le_bytes();
                 slot.channel.push(&bytes);
+                // Wake the seat owner parked on a `SeatInput` wait-set
+                // member; it drains the channel and parks again when empty.
+                crate::waitq::seat_input_wake();
             }
             Route::Text(_) => {
                 let mut out = [0u8; MAX_KEY_BYTES];
@@ -459,6 +476,8 @@ impl SeatRegistry {
         if let Route::Desktop(_) = route {
             let bytes = record.to_le_bytes();
             slot.pointer.push(&bytes);
+            // Wake the seat owner parked on a `SeatInput` wait-set member.
+            crate::waitq::seat_input_wake();
         }
         Ok(PointerInput::WIRE_LEN)
     }
@@ -631,10 +650,16 @@ impl SeatRegistry {
     /// characters never outlives its seat). The boot seat has no display
     /// node and can never be destroyed.
     pub fn detach_display(&self, node_id: u32) -> Option<u64> {
-        let mut hotplug = self.hotplug.lock();
-        let index = hotplug.iter().position(|seat| seat.node_id == node_id)?;
-        let seat = hotplug.remove(index);
-        Some(seat.seat_id)
+        let seat_id = {
+            let mut hotplug = self.hotplug.lock();
+            let index = hotplug.iter().position(|seat| seat.node_id == node_id)?;
+            let seat = hotplug.remove(index);
+            seat.seat_id
+        };
+        // A destroyed seat is a `SeatInput` readiness edge for its (former)
+        // owner, exactly like a revoke; wake outside the hotplug lock.
+        crate::waitq::seat_input_wake();
+        Some(seat_id)
     }
 
     /// Retarget seat `seat_id`'s foreground text console (`seat_switch`,
@@ -670,7 +695,53 @@ impl SeatRegistry {
     pub fn revoke(&self, seat_id: u64) -> Result<SeatOwner, Errno> {
         let slot = self.resolve(seat_id)?;
         let outcome = slot.state.lock().revoke();
-        outcome.map_err(seat_errno)
+        let evicted = outcome.map_err(seat_errno);
+        if evicted.is_ok() {
+            // Wake the evicted owner parked on a `SeatInput` wait-set
+            // member: its next drain fails closed `SeatRevoked`, so the
+            // eviction is observed instead of parked through.
+            crate::waitq::seat_input_wake();
+        }
+        evicted
+    }
+
+    /// The live lease `owner` currently holds on seat `seat_id`
+    /// (`plans/DISPLAY.md` D7a): the owner-check behind adding a
+    /// `SeatInput` wait-set member and behind `call_peer_seat`'s
+    /// per-present answer.
+    ///
+    /// # Errors
+    ///
+    /// - [`Errno::NotFound`] — no live seat has that id.
+    /// - [`Errno::SeatNotOwner`] — `owner` does not hold the seat (it is
+    ///   unowned or another task holds it).
+    /// - [`Errno::SeatRevoked`] — `owner`'s lease was revoked and the
+    ///   revocation is unacknowledged.
+    pub fn live_lease(&self, seat_id: u64, owner: SeatOwner) -> Result<Lease, Errno> {
+        let slot = self.resolve(seat_id)?;
+        let lease = slot.state.lock().access(owner);
+        lease.map_err(seat_errno)
+    }
+
+    /// Whether a `SeatInput` wait-set member observing seat `seat_id` for
+    /// `owner` is ready (`plans/DISPLAY.md` D7a). A non-consuming peek:
+    ///
+    /// - a record is queued on the seat's keyboard **or** pointer channel
+    ///   while `owner` holds the live lease — there is input to drain; or
+    /// - `owner` no longer holds the live lease (released, revoked, seat
+    ///   destroyed) — the loss itself is the event: the woken owner's next
+    ///   drain returns the typed refusal and the session tears down.
+    ///
+    /// Only "the lease is live and both channels are empty" parks.
+    #[must_use]
+    pub fn input_ready(&self, seat_id: u64, owner: SeatOwner) -> bool {
+        let Ok(slot) = self.resolve(seat_id) else {
+            return true;
+        };
+        if slot.state.lock().access(owner).is_err() {
+            return true;
+        }
+        slot.channel.pending() || slot.pointer.pending()
     }
 
     /// The live seat-lease gate for the client holding `lease` — the one
@@ -754,6 +825,51 @@ mod tests {
 
     fn text_queue() -> &'static ConsoleInputQueue {
         Box::leak(Box::new(ConsoleInputQueue::new()))
+    }
+
+    /// The `SeatInput` readiness probe: only "the lease is live and both
+    /// desktop channels are empty" parks. Queued input, a released or
+    /// revoked lease, a foreign observer, and a destroyed seat are all
+    /// ready — the loss of the seat is itself the observable event.
+    #[test]
+    fn input_ready_reports_queued_records_and_lease_loss() {
+        let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
+        seat.acquire(SEAT_PRIMARY, WM).expect("seat acquired");
+        // Held, both channels empty: the owner parks.
+        assert!(!seat.input_ready(SEAT_PRIMARY, WM));
+        // A key record queues: ready until drained.
+        assert_eq!(
+            seat.inject(SEAT_PRIMARY, press_char('k')),
+            Ok(KeyInput::WIRE_LEN)
+        );
+        assert!(seat.input_ready(SEAT_PRIMARY, WM));
+        let mut buf = [0u8; KeyInput::WIRE_LEN];
+        assert_eq!(
+            seat.read_key(SEAT_PRIMARY, WM, &mut buf),
+            Ok(KeyInput::WIRE_LEN)
+        );
+        assert!(!seat.input_ready(SEAT_PRIMARY, WM));
+        // A pointer record queues through the sibling channel: also ready.
+        assert_eq!(
+            seat.inject_pointer(SEAT_PRIMARY, PointerInput::MovedBy { dx: 1, dy: 2 }),
+            Ok(PointerInput::WIRE_LEN)
+        );
+        assert!(seat.input_ready(SEAT_PRIMARY, WM));
+        let mut pbuf = [0u8; PointerInput::WIRE_LEN];
+        assert_eq!(
+            seat.read_pointer(SEAT_PRIMARY, WM, &mut pbuf),
+            Ok(PointerInput::WIRE_LEN)
+        );
+        assert!(!seat.input_ready(SEAT_PRIMARY, WM));
+        // A task that is not the live owner never parks unwoken: it is
+        // "ready" and its drain returns the typed refusal.
+        assert!(seat.input_ready(SEAT_PRIMARY, INTRUDER));
+        // Revocation is a readiness edge for the evicted owner.
+        assert_eq!(seat.revoke(SEAT_PRIMARY), Ok(WM));
+        assert!(seat.input_ready(SEAT_PRIMARY, WM));
+        // An unknown seat is ready (the wait must not park forever on a
+        // hot-removed display).
+        assert!(seat.input_ready(999, WM));
     }
 
     #[test]
