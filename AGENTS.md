@@ -585,6 +585,17 @@ rustos/
 │   ├── devmatch/        # Deterministic hardware-node <-> driver bind-table
 │   │                    #   match policy (§18.3): the one definition shared by
 │   │                    #   userland devmgr and the kernel driver catalogue (§2.2).
+│   ├── disasm/          # Instruction decoders for the four Tier-1 ISAs
+│   │                    #   (riscv64 RV64GC incl. C, aarch64 A64, wasm code
+│   │                    #   bodies, x86_64 prefixes/REX/ModRM/SIB over the
+│   │                    #   one- and two-byte maps), one shared Insn output
+│   │                    #   vocabulary: pure slice+address decoders that
+│   │                    #   always make forward progress and render
+│   │                    #   undecodable bytes honestly ((bad) / .inst),
+│   │                    #   never guessing — the fstree disassembly viewer
+│   │                    #   and objdump-class tools consume them over
+│   │                    #   lib/binfmt; fuzzed (§19.6), decode runs in the
+│   │                    #   §19.5 parser sandbox.
 │   ├── dma-barrier/     # DMA memory-ordering barriers for user-space drivers
 │   │                    #   (dma_wmb/dma_rmb): the single per-arch dsb/dmb (or
 │   │                    #   fence) carve-out ordering a driver's writes to

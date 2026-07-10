@@ -254,6 +254,26 @@ pub const TARGETS: &[Target] = &[
         test: "fuzz_wasm",
         description: "lib/binfmt wasm module-structure view (untrusted executable-file bytes)",
     },
+    Target {
+        package: "rustos-disasm",
+        test: "fuzz_riscv64",
+        description: "lib/disasm RV64GC decoder (untrusted executable-file bytes: never panics, always makes forward progress)",
+    },
+    Target {
+        package: "rustos-disasm",
+        test: "fuzz_aarch64",
+        description: "lib/disasm A64 decoder (untrusted executable-file bytes: never panics, always makes forward progress)",
+    },
+    Target {
+        package: "rustos-disasm",
+        test: "fuzz_wasm_isa",
+        description: "lib/disasm wasm code-body decoder (untrusted executable-file bytes: never panics, always makes forward progress)",
+    },
+    Target {
+        package: "rustos-disasm",
+        test: "fuzz_x86_64",
+        description: "lib/disasm x86_64 decoder (untrusted executable-file bytes: never panics, always makes forward progress, 15-byte cap)",
+    },
 ];
 
 /// How long to run each harness.

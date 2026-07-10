@@ -45,6 +45,7 @@
   - [`rustos-crypto`](./lib/crypto.md)
   - [`rustos-curses`](./lib/curses.md)
   - [`rustos-devmatch`](./lib/devmatch.md)
+  - [`rustos-disasm`](./lib/disasm.md)
   - [`rustos-dma-barrier`](./lib/dma_barrier.md)
   - [`rustos-drvrt`](./lib/drvrt.md)
   - [`rustos-fbcon`](./lib/fbcon.md)

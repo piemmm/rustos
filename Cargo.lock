@@ -734,6 +734,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-disasm"
+version = "0.0.0"
+dependencies = [
+ "rustos-fuzzseed",
+]
+
+[[package]]
 name = "rustos-dma-barrier"
 version = "0.0.0"
 

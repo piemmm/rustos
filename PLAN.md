@@ -3300,9 +3300,16 @@ Unblocked — staged (`.junie/fstree-next-plan.md` S8):
   (section directory + code-body framing over strict LEB128). It is
   `no_std`+`alloc`, `#![forbid(unsafe_code)]`, capped per §24.4, unit-
   tested with truncation/mutation matrices, and fuzzed (`fuzz_rxe`/
-  `fuzz_elf`/`fuzz_wasm` in `cargo xtask fuzz`). `lib/disasm` (S7) is the
-  staged sibling; the fstree disassembly viewer (S9) runs both only inside
-  the S8 sandbox.
+  `fuzz_elf`/`fuzz_wasm` in `cargo xtask fuzz`). `lib/disasm`
+  (`rustos-disasm`, done — `.junie/fstree-next-plan.md` S7) is the sibling
+  instruction-decoder crate: pure slice+address decoders for the four
+  Tier-1 ISAs (riscv64 RV64GC incl. C, aarch64 A64, wasm code bodies,
+  x86_64 one-/two-byte maps with the 15-byte cap) over one shared `Insn`
+  vocabulary — forward progress on any input, undecodable bytes rendered
+  honestly (`(bad)`/`.inst`), validation-bounded per §24.4, per-ISA
+  conformance tables, and fuzzed (`fuzz_riscv64`/`fuzz_aarch64`/
+  `fuzz_wasm_isa`/`fuzz_x86_64` in `cargo xtask fuzz`). The fstree
+  disassembly viewer (S9) runs both only inside the S8 sandbox.
 
 Stage-blocked **[DO IMMEDIATELY ON UNBLOCK]**:
 - Item 2 — §19.4 signed log anchors + per-service `CAP_LOG_WRITE` partitioning
