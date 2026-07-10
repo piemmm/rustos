@@ -1077,6 +1077,16 @@ re-validates arguments — the dispatcher does that first.
 | `dma_alloc`     | resolves `handle` against the caller (same owner-checked per-task grant table), validates the grant is a DMA constraint (`devres::dma_constraint`), rejects a zero / over-the-grant-maximum `len`, then carves a physically-contiguous, zeroed, coherent `RW` buffer bounded by the grant's CPU-side `addr_limit` into the caller's own address space through the installed `DmaAllocFacility` (`with_dma_alloc_facility`; default `NULL_DMA_ALLOC_FACILITY`), resolves the device-visible base via `devres::translate_device_addr` (CPU-physical for a coherent constraint, re-based onto the far side for a translating inbound viewport, `HwResource::dma_translated`), and copies it out to `device_out`, returning the buffer's base virtual address (`plans/PI.md` P10 chunk 5d-0) | Unknown / non-owned handle → `NotFound`. Non-DMA grant → `OutOfRange`. `len == 0` → `LengthOutOfRange`. Over-max / over-limit, or a carve escaping a translating viewport → `OutOfRange`. No DMA facility wired → `NotImplemented`. Frame exhaustion → `OutOfMemory`. Faulting `device_out` → `BadAddress`. Otherwise `Ok(base)`. |
 | `dma_free`      | the symmetric free for `dma_alloc`: resolves `handle` against the caller (same owner-checked per-task grant table), validates the grant is a DMA constraint (`devres::dma_constraint`), then releases the buffer based at `cpu_va` from the caller's own address space through the same `DmaAllocFacility` (`free`), zeroing every backing byte (zero-on-free, `AGENTS.md` §4) before its frames return to the allocator, and re-freezes the caller's address-space snapshot. Only `cpu_va` is taken from the caller; the buffer's extent is the allocator's authoritative record. A long-running driver reclaims each transfer's bounce buffers through this rather than leaking DMA frames until it exits (`plans/PI.md` P10) | Unknown / non-owned handle → `NotFound`. Non-DMA grant → `OutOfRange`. `cpu_va` not the base of a live carve in the caller's DMA window (covers a stale, double, or cross-task free) → `OutOfRange`. No DMA facility wired → `NotImplemented`. Otherwise `Ok(0)`. |
 
+`spawn` also carries the **parser-sandbox mode**
+(`docs/src/security/sandbox.md`): an attach block whose `flags` word
+sets `SPAWN_FLAG_SANDBOX` — parsed canonical only with fully explicit
+`Closed`/`Handle` wires, an inherited credential, and no console index —
+admits the child with its capability record branded `as_sandboxed()`
+(every capability set forced empty regardless of the manifest) and its
+syscalls confined by the dispatcher to the closed `sandbox_allows`
+list. The flag only ever narrows the child, so requesting it needs no
+capability.
+
 `spawn`'s store-bundle verification runs **once per boot** per
 read-only system-store bundle (`/System/Apps`, `/System/Services` —
 immutable for the life of the boot): the accepted `LoadedApp` is cached
@@ -1248,7 +1258,11 @@ following sequence — the order matches `AGENTS.md` §5.4 step for step:
 1. Caller identification — the `CallerContext` comes from the per-CPU
    current-task slot owned by `kernel/sched`; the dispatcher does not
    accept caller-supplied identity.
-2. Capability check via `TaskCapabilities::has`.
+2. Sandbox confinement — a task branded a parser sandbox
+   (`TaskCapabilities::is_sandboxed`) is refused every syscall outside
+   the closed `sandbox_allows` list before anything else is considered
+   (`docs/src/security/sandbox.md`) — then the capability check via
+   `TaskCapabilities::has`.
 3. Argument validation against the declared `AbiType`s and trailing-zero
    rule.
 4. Dispatch through the `SyscallHandlers` trait. `kernel/core` provides

@@ -1008,7 +1008,12 @@ Staged like SP3/SP5/SP6/SP7 (one fully-gated increment per landing):
 - **SP10a — abi-v1 surface + kernel pipes + spawn wiring (host-proven) `[x]`.**
   **Landed.** `lib/abi`: `Errno::BrokenPipe` (27), `SyscallNumber::PIPE_CREATE`
   (73) + its unprivileged spec row, the `SpawnAttach`/`FdWire` block
-  (fixed-length LE encode/parse, fail-closed) + `SPAWN_ATTACH_LEN`, the
+  (fixed-length LE encode/parse, fail-closed; the block also carries a
+  `flags` word whose sole defined bit `SPAWN_FLAG_SANDBOX` requests the
+  parser-sandbox spawn mode — canonical only with fully explicit
+  `Closed`/`Handle` wires, an inherited credential, and no console index;
+  kernel enforcement and the dispatcher allow-list are documented in
+  `docs/src/security/sandbox.md`) + `SPAWN_ATTACH_LEN`, the
   `SPAWN` row's slots 2/3 → `attach`/`attach_len`, and the
   `stream_read`/`stream_write` rows' dispatcher gate dropped (checked
   in-handler for console backings). `lib/abi-sys`: `ros_sys_spawn` carries

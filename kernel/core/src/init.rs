@@ -938,6 +938,9 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
             // identity above. uid 0 carries no ambient authority; the driver's
             // powers flow only from `caps`.
             SpawnCredential::system(),
+            // A driver is a trusted, manifest-bounded principal, never a
+            // parser sandbox.
+            false,
         );
         // A boot-floor driver reads its configuration from its argument
         // vector alone; it inherits no environment (there is no principal

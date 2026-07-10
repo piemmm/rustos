@@ -2323,6 +2323,17 @@ fn emit_spawn_attach_contract(out: &mut String) {
         "#define ROS_SPAWN_ATTACH_LEN {}u",
         rustos_abi::SPAWN_ATTACH_LEN
     );
+    out.push_str(
+        "/* Attach-block flags. SANDBOX starts the child as a minimum-capability\n\
+         * parser sandbox: empty capability set, closed syscall allow-list, and\n\
+         * every wire must be CLOSED or HANDLE (nothing ambient flows in). Any\n\
+         * reserved flag bit is refused. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_SPAWN_FLAG_SANDBOX {}u",
+        rustos_abi::SPAWN_FLAG_SANDBOX
+    );
     let _ = writeln!(
         out,
         "#define ROS_FD_WIRE_INHERIT {}u",
@@ -2352,6 +2363,7 @@ fn emit_spawn_attach_contract(out: &mut String) {
          \x20   uint32_t version;\n\
          \x20   uint32_t target_uid;\n\
          \x20   uint64_t console;\n\
+         \x20   uint64_t flags;\n\
          \x20   ros_fd_wire_t wires[4];\n\
          } ros_spawn_attach_t;\n",
     );
@@ -3813,6 +3825,17 @@ mod tests {
                 rustos_abi::SPAWN_ATTACH_LEN
             )),
             "spawn attach length: {h}"
+        );
+        assert!(
+            h.contains(&format!(
+                "#define ROS_SPAWN_FLAG_SANDBOX {}u",
+                rustos_abi::SPAWN_FLAG_SANDBOX
+            )),
+            "spawn sandbox flag: {h}"
+        );
+        assert!(
+            h.contains("    uint64_t flags;"),
+            "spawn attach flags field: {h}"
         );
         for (name, value) in [
             ("INHERIT", rustos_abi::FD_WIRE_KIND_INHERIT),

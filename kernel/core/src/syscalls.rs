@@ -3142,6 +3142,11 @@ where
             // (inherit the caller's own, or a capability-gated switch to a
             // target user) — never a caller-supplied value.
             credential,
+            // A sandbox spawn (`SPAWN_FLAG_SANDBOX`) brands the child's
+            // record at admission. The block was parsed canonical, so the
+            // flag arrives only with fully explicit wires and an inherited
+            // credential; it can only narrow the child.
+            attach.is_sandbox(),
         );
         let (rxe, requested): (&[u8], CapabilitySet) = if let Some(program) = program {
             (program.rxe, program.capability_set())
@@ -6242,6 +6247,14 @@ where
     /// so its later filesystem checks and its attested [`rustos_abi::Origin`]
     /// run under an authoritative identity.
     credential: SpawnCredential,
+    /// Whether the child is admitted as a **parser sandbox**
+    /// (`SPAWN_FLAG_SANDBOX`, `docs/src/security/sandbox.md`): its
+    /// capability record is branded sandboxed at admission, which forces
+    /// every capability set empty for the task's whole life and confines
+    /// its syscalls to the dispatcher's closed allow-list. Read from the
+    /// caller's *parsed, canonical* attach block — the flag can only ever
+    /// narrow the child, so the caller is free to request it.
+    sandbox: bool,
 }
 
 impl<'a, A> KernelSpawnCtx<'a, A>
@@ -6286,6 +6299,7 @@ where
         proc_id: ProcId,
         name: ProcName,
         credential: SpawnCredential,
+        sandbox: bool,
     ) -> Self {
         Self {
             frames,
@@ -6304,6 +6318,7 @@ where
             proc_id,
             name,
             credential,
+            sandbox,
         }
     }
 }
@@ -6446,6 +6461,14 @@ where
         )
         .with_start_time(start_time)
         .with_console(console);
+        // Brand a sandbox child last, after every attestation is attached:
+        // the brand strips all three capability sets structurally and marks
+        // the record for the dispatcher's allow-list confinement.
+        let record = if self.sandbox {
+            record.as_sandboxed()
+        } else {
+            record
+        };
         self.caps.write().insert(record);
 
         // Register the child's frozen address space + direct map under the
@@ -11225,6 +11248,7 @@ mod tests {
             ProcName::from_bytes_truncating(b"driverproc"),
             // A driver-spawn admits under the fixed system credential.
             SpawnCredential::system(),
+            false,
         );
 
         let program = EmbeddedProgram {
@@ -11372,6 +11396,7 @@ mod tests {
                 proc_id,
                 ProcName::EMPTY,
                 SpawnCredential::system(),
+                false,
             )
         };
 
@@ -12109,6 +12134,87 @@ mod tests {
             child_entry.pipe().expect("pipe end").try_write(b"x"),
             crate::pipe::WriteStep::Wrote(1)
         );
+    }
+
+    /// A `SPAWN_FLAG_SANDBOX` attach block admits a **parser sandbox**
+    /// child: its capability record is branded sandboxed with every set
+    /// forced empty — even though the program's manifest requests a
+    /// capability — and its explicit all-`Closed` wires leave every
+    /// standard stream denied (`docs/src/security/sandbox.md`).
+    #[test]
+    fn spawn_with_a_sandbox_attach_admits_an_empty_confined_child() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        // A canonical sandbox block: every wire explicit (all closed
+        // here), inherited credential, no console index.
+        let attach = SpawnAttach::sandbox([FdWire::Closed; rustos_abi::STD_STREAM_COUNT]);
+        let (space, physmap) = send_aspace_with_attach(SPAWN_PATH, &[attach]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        // The program's manifest requests a real capability; the sandbox
+        // brand must strip it regardless.
+        let programs: &'static ProgramRegistry =
+            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+                EmbeddedProgram {
+                    path: SPAWN_PATH,
+                    rxe: SPAWN_RXE,
+                    caps: &[CapabilityId::FS_MOUNT],
+                    args: &[],
+                },
+            ])))));
+        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
+        let h = spawn_handler(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
+            producer,
+        );
+
+        let pid = h
+            .spawn(
+                &ctx,
+                0x1000,
+                SPAWN_PATH.len(),
+                attach_addr(0),
+                SPAWN_ATTACH_LEN,
+                0,
+                0,
+            )
+            .expect("sandbox spawn succeeds");
+
+        let guard = table.read();
+        let record = guard.caps_for(SecTaskId(pid)).expect("child record");
+        assert!(record.is_sandboxed());
+        assert!(record.effective().is_empty());
+        assert!(record.user_grant().is_empty());
+        assert!(record.manifest_request().is_empty());
+        assert!(!record.has(CapabilityId::FS_MOUNT));
+        drop(guard);
+        // Every standard stream is denied: the explicit `Closed` wires are
+        // the whole story, nothing ambient flowed in.
+        let child_streams = aspaces.read().streams(SecTaskId(pid));
+        for fd in [
+            rustos_abi::STDIN,
+            rustos_abi::STDOUT,
+            rustos_abi::STDERR,
+            rustos_abi::STDINFO,
+        ] {
+            assert_eq!(child_streams.mode(fd), StreamMode::Closed);
+        }
     }
 
     /// Attach-block wiring is validated fail-closed before any child
