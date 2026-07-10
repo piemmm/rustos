@@ -57,8 +57,8 @@ parser of untrusted bytes.
 `rustos_vt` for the escape tables) — never on `kernel/*`, `drivers/*`, or
 `userland/*` (`AGENTS.md` §17.4) — and is text-mode infrastructure outside
 `userland/gui/*`, so a headless image links it freely (§17.3). Its consumer is
-the keyboard drivers' console-input producer (`drivers/input/usb_hid`'s
-`console` module); the HID-usage→`Key` resolution is the driver's
+the keyboard drivers' console-input producer (`lib/hid`'s
+`console` module, composed by `drivers/input/usb_kbd`); the HID-usage→`Key` resolution is the driver's
 device-specific half, while this `Key`→bytes map is the shared half. Unit
 tests (`AGENTS.md` §7) live next to the code (`src/lib.rs`): the printable,
 control, alt-prefix, arrow, editing, and function-key encodings, the

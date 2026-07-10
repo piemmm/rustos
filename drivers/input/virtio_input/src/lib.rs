@@ -8,7 +8,7 @@
 //! `lib/virtio_input` (`rustos_virtio_input`) so both this driver and
 //! the user-space input-driver process compose it without a
 //! `drivers/*`→`drivers/*` dependency (the
-//! virtio analogue of `lib/hid` ↔ `drivers/input/usb_hid`).
+//! virtio analogue of `lib/hid` ↔ `drivers/input/usb_kbd`).
 //!
 //! # Capabilities
 //!

@@ -888,6 +888,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-drv-input-usb-mouse"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-caps",
+ "rustos-drvrt",
+ "rustos-hid",
+ "rustos-log",
+ "rustos-rt",
+ "rustos-usb",
+ "rustos-util",
+]
+
+[[package]]
 name = "rustos-drv-input-virtio-input"
 version = "0.0.0"
 dependencies = [
@@ -3509,6 +3523,7 @@ dependencies = [
  "rustos-drv-bus-usb",
  "rustos-drv-bus-usb-vl805",
  "rustos-drv-input-usb-kbd",
+ "rustos-drv-input-usb-mouse",
  "rustos-drv-input-virtio-input",
  "rustos-drv-storage-usb-msd",
  "rustos-drv-storage-volmgr",

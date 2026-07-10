@@ -1,7 +1,7 @@
 //! RustOS shared terminal key map (`lib/keymap`).
 //!
 //! A console-input *producer* — a directly attached keyboard driver such as
-//! `drivers/input/usb_hid` or `drivers/input/ps2` — decodes its device's
+//! `drivers/input/usb_kbd` or `drivers/input/ps2` — decodes its device's
 //! scancodes into the [`Key`] vocabulary (`lib/input`) and must then turn each
 //! key press into the byte sequence a terminal sends down its input stream: a
 //! printable character as itself, `Ctrl-C` as the `0x03` control code, the up

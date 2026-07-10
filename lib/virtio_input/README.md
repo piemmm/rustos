@@ -5,7 +5,7 @@ logic: the virtio-1.1 §5.8 open/poll/decode engine over the bus-agnostic
 `lib/virtio` `Transport`. It lives in `lib/*` so both the in-kernel `-M virt`
 input verticals and the user-space input-driver process compose it without a
 `drivers/*`→`drivers/*` dependency (`AGENTS.md` §17.4 / §2.2 — the virtio
-analogue of `lib/hid` ↔ `drivers/input/usb_hid`). The thin
+analogue of `lib/hid` ↔ `drivers/input/usb_kbd`). The thin
 `drivers/input/virtio_input` crate keeps only the §8 `register` entry and the
 §18.3 bind table built from `VIRTIO_INPUT_DEVICE_ID`.
 

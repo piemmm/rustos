@@ -70,6 +70,10 @@ pub const USB_XHCI_STORE_PATH: &[&[u8]] = &[b"Drivers", b"bus_usb", b"xhci", b"R
 /// `usb_kbd` leaf naming the (vendor-neutral) driver.
 pub const USB_KBD_STORE_PATH: &[&[u8]] = &[b"Drivers", b"input", b"usb_kbd", b"Run"];
 
+/// Store path of the USB boot-mouse class-driver bundle: class `input`, the
+/// `usb_mouse` leaf naming the (vendor-neutral) driver.
+pub const USB_MOUSE_STORE_PATH: &[&[u8]] = &[b"Drivers", b"input", b"usb_mouse", b"Run"];
+
 /// Store path of the virtio-input keyboard/pointer driver bundle: class
 /// `input`, the `virtio_kbd` leaf naming the (vendor-neutral) driver — the
 /// same path the `-M virt` autoload vertical's fixture plants.
@@ -110,6 +114,7 @@ fn build_bundle(
         "rustos-drv-bus-usb-vl805" => "drivers/bus/usb/vl805",
         "rustos-drv-bus-usb" => "drivers/bus/usb/xhci",
         "rustos-drv-input-usb-kbd" => "drivers/input/usb_kbd",
+        "rustos-drv-input-usb-mouse" => "drivers/input/usb_mouse",
         "rustos-drv-input-virtio-kbd" => "drivers/input/virtio_kbd",
         "rustos-drv-storage-usb-msd" => "drivers/storage/usb_msd",
         "rustos-drv-storage-volmgr" => "drivers/storage/volmgr",
@@ -269,6 +274,33 @@ pub fn build_usb_kbd_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
             CapabilityId::LOG_EMIT,
         ],
         rustos_drv_input_usb_kbd::BIND_KEYS,
+    )
+}
+
+/// Build and sign the USB boot-mouse **class**-driver bundle.
+///
+/// A pure HID class driver: it injects decoded pointer records into the
+/// kernel input-focus arbiter (`CAP_INPUT_INJECT`), maps the shared URB
+/// buffer its host-controller driver forwarded (`CAP_SHM`), submits URBs on
+/// its one interface's transport endpoint (`CAP_IPC_ENDPOINT`), and emits a
+/// one-shot beacon (`CAP_LOG_EMIT`) — and nothing more. It holds **no** MMIO,
+/// DMA, or IRQ authority. Carries `rustos_drv_input_usb_mouse::BIND_KEYS`, so
+/// it autoloads against the HID boot-mouse interface node the HCD emitted.
+///
+/// # Errors
+///
+/// As [`build_vcmailbox_bundle`].
+pub fn build_usb_mouse_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
+    build_bundle(
+        ctx,
+        "rustos-drv-input-usb-mouse",
+        &[
+            CapabilityId::INPUT_INJECT,
+            CapabilityId::SHM,
+            CapabilityId::IPC_ENDPOINT,
+            CapabilityId::LOG_EMIT,
+        ],
+        rustos_drv_input_usb_mouse::BIND_KEYS,
     )
 }
 

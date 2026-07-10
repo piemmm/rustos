@@ -29,7 +29,8 @@ maps to `DriverError::BufferTooSmall`.
 | Driver        | Crate                            | Hardware                         | Status                          |
 |---------------|----------------------------------|----------------------------------|---------------------------------|
 | ps2           | `rustos-drv-input-ps2`           | Intel 8042 keyboard controller   | host-side tests + QEMU vertical |
-| usb_hid       | `rustos-drv-input-usb-hid`       | USB-HID boot keyboard / mouse    | host-side tests (P10; xHCI report path host-proven, PCI BAR wiring pending) |
+| usb_kbd       | `rustos-drv-input-usb-kbd`       | USB HID boot keyboard (URB transport class driver) | host-side tests; live path is Pi 4 metal acceptance |
+| usb_mouse     | `rustos-drv-input-usb-mouse`     | USB HID boot mouse (URB transport class driver)    | host-side tests; live path is Pi 4 metal acceptance |
 | virtio_input  | `rustos-drv-input-virtio-input`  | virtio-input (keyboard / pointer) | host-side tests + QEMU vertical |
 
 ### `rustos-drv-input-ps2`
@@ -98,7 +99,7 @@ device logic and the keyboard console producer described below live in the
 shared by the in-kernel `-M virt` verticals and the user-space input-driver
 process (`rustos-drv-input-virtio-kbd`, below) without a
 `drivers/*`→`drivers/*` edge (`AGENTS.md` §17.4 / §2.2 — the virtio analogue of
-`lib/hid` ↔ `drivers/input/usb_hid`).
+`lib/hid` ↔ `drivers/input/usb_kbd`).
 
 The virtio-input logic implements `Input` over the bus-agnostic virtio
 transport from `lib/virtio`, so one source compiles against both the PCI
@@ -229,10 +230,10 @@ publishes for a HID boot-keyboard interface — never the controller node — an
 holds **no** controller register grant and **no** DMA grant: its matched
 node's only resources are the per-interface URB call endpoint and the shared
 report buffer (`AGENTS.md` §5.4 — least privilege). It is a pure-Rust
-`rustos-rt` program (`AGENTS.md` §1 / §16.4) kept separate from the
-`rustos-drv-input-usb-hid` decode crate so the userland runtime never enters
-the kernel's dependency graph, and depends only on `lib/*` crates so the
-§17.4 layering holds. `main` builds
+`rustos-rt` program (`AGENTS.md` §1 / §16.4) whose HID boot-report decode
+lives in the shared [`lib/hid`](../lib/hid.md) crate, so the userland runtime
+never enters the kernel's dependency graph, and depends only on `lib/*`
+crates so the §17.4 layering holds. `main` builds
 `rustos_drvrt::RtDriverHost::from_grants_query` over its kernel-issued grants,
 takes the endpoint id and maps the shared buffer from them, wraps the
 `lib/usb` transport client in a `ReportSource` (`UrbReportSource`: each
@@ -249,4 +250,28 @@ the interface node, `devmgr` unloads this driver, and a re-plug autoloads a
 fresh instance onto the same transport. This bundle is installed into the
 image `/System/Drivers/` store and autoloaded by `devmgr` against the
 discovered HID interface node; QEMU models no Pi USB, so the live autoload +
-keystroke is the metal acceptance item (`AGENTS.md` §0.9).
+keystroke is the metal acceptance item (`plans/PI.md` §0.4).
+
+### The autoloaded driver binary (`rustos-drv-input-usb-mouse`)
+
+`drivers/input/usb_mouse` (`rustos-drv-input-usb-mouse`, `src/main.rs`) is the
+USB HID boot-**mouse** sibling of the keyboard class driver: the same signed
+`/System/Drivers/` bundle shape, the same least-privilege capability set
+(`CAP_INPUT_INJECT`, `CAP_SHM`, `CAP_IPC_ENDPOINT`, `CAP_LOG_EMIT` — no MMIO,
+DMA, or IRQ), and the same blocking URB transport pump. Its `BIND_KEYS` match
+the HID boot-mouse interface key (`usb(0, 0, 0x03_01_02)`), so `devmgr`
+autoloads it against the mouse interface node the host-controller driver
+emits — a keyboard and a mouse plugged in together are each served by their
+own class driver over their own per-interface transport (the engine's
+concurrent-device table; see the `lib/usb`
+`bring_up_serves_a_keyboard_and_a_mouse_behind_the_hub_together` regression).
+Each report is decoded through `rustos_hid::BootMouse` (button edges diffed
+against the previous report, X/Y/wheel deltas), and every decoded event is
+translated by the one shared device→seat mapping
+`PointerInput::from_device_event` — the same mapping the virtio pointer path
+uses, so the two can never diverge — and injected through `pointer_inject`.
+Scroll ticks are decoded but deliberately not injected: the pointer record
+vocabulary carries no scroll consumer yet, and fabricating a record is
+forbidden (`AGENTS.md` §2.9). Disconnect/reload and the fail-closed error
+budget behave exactly as the keyboard driver's; the live report path is the
+Pi 4 metal acceptance item.

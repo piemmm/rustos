@@ -9,7 +9,7 @@ in-kernel `-M virt` input verticals and the user-space input-driver process
 dependency (`AGENTS.md` §17.4 / §2.2), exactly as the bus-agnostic xHCI protocol
 lives in
 [`rustos-usb`](./usb.md) rather than the xHCI driver, and the HID logic lives
-in [`rustos-hid`](./hid.md) rather than `drivers/input/usb_hid`. The thin
+in [`rustos-hid`](./hid.md) rather than the USB HID class drivers. The thin
 `drivers/input/virtio_input` crate keeps only the §8 `register` entry and the
 §18.3 bind table.
 

@@ -1,7 +1,8 @@
 //! Input driver class (`drivers/input/*`).
 //!
 //! Input drivers report user-generated events: keyboard, pointer, and
-//! scroll. Stage 4 first drivers are `ps2` and `usb_hid`.
+//! scroll. The shipped drivers are `ps2`, `usb_kbd`, `usb_mouse`, and the
+//! virtio-input pair.
 
 use super::DriverError;
 
@@ -114,8 +115,8 @@ pub trait Input {
 /// reports into [`InputEvent`]s.
 ///
 /// The seam lives here because its two sides are *sibling* drivers —
-/// `drivers/bus/usb` produces reports, `drivers/input/usb_hid`
-/// consumes them — and drivers may depend only on `lib/*`, never on
+/// `drivers/bus/usb` produces reports, the HID class drivers
+/// (`drivers/input/usb_kbd`, `drivers/input/usb_mouse`) consume them — and drivers may depend only on `lib/*`, never on
 /// each other. Host tests drive a decoder over a
 /// mock queue; on metal the implementation drains the device's
 /// interrupt-IN endpoint through the xHCI transfer ring.

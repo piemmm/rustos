@@ -22,7 +22,7 @@ other (§17.4 — `drivers/* → lib/*` only).
 - `device::UsbDevice` — the single-device HID enumeration engine (Enable Slot →
   Address Device → descriptors → `SET_PROTOCOL(boot)` → Configure Endpoint →
   primed interrupt-IN ring), implementing the `rustos_abi::driver::input`
-  `ReportSource` seam so the `drivers/input/usb_hid` decoders read reports
+  `ReportSource` seam so the `lib/hid` decoders (composed by the `usb_kbd`/`usb_mouse` class drivers) read reports
   straight off the transfer ring.
 - `regs` / `trb` / `ring` — the register, TRB, and ring-state vocabularies.
 - `XHCI_DMA_BYTES` — the device-shared DMA carve size for one controller
