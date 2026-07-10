@@ -41,10 +41,11 @@
 //! [`SMOKE_FLIP_SAMPLES`] sample of the single-byte sweep plus
 //! [`SMOKE_ITERATIONS`] PRNG images, all from a fresh, logged seed. The
 //! time-limited GitHub soak (`cargo xtask fuzz`) exports
-//! `RUSTOS_FUZZ_BUDGET_SECS`, which switches the harness to its exhaustive
-//! coverage — every byte of the image is flipped in turn and the PRNG loop runs
-//! to the wall-clock budget. The cheap, deterministic both-copies-bad sweep
-//! runs in either mode.
+//! `RUSTOS_FUZZ_BUDGET_SECS`, which switches the harness to its budgeted
+//! coverage — byte positions are swept in a seeded full-coverage order until
+//! the wall-clock budget elapses (the nightly budget flips every byte of the
+//! image) and the PRNG loop runs to the same budget. The cheap, deterministic
+//! both-copies-bad sweep runs in either mode.
 
 use rustos_abi::driver::block::{Block, BlockGeometry, DeviceHealth, HealthSnapshot};
 use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
@@ -110,7 +111,8 @@ const IMAGE_LEN: usize = BLOCK_SIZE as usize * 64;
 const SMOKE_ITERATIONS: u64 = 512;
 
 /// Number of seed-driven single-byte-flip positions the smoke pass samples from
-/// the structured sweep. The soak flips every byte of the image instead.
+/// the structured sweep. The soak sweeps positions to its wall-clock budget
+/// instead.
 const SMOKE_FLIP_SAMPLES: u64 = 256;
 
 /// Byte offset inside the 32-byte keyed-tag slot (72..104) of the 128-byte
@@ -335,7 +337,6 @@ fn formatted_image() -> Vec<u8> {
 #[test]
 fn open_never_panics_on_arbitrary_images() {
     let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
-    let soak = deadline.is_some();
     let base = formatted_image();
 
     // Draw and log the seed up front so every sampled byte position and every
@@ -353,16 +354,19 @@ fn open_never_panics_on_arbitrary_images() {
     };
 
     // Structured single-byte sweep over a valid image, probing the
-    // identity/checksum rejection on a near-valid image. The soak flips every
-    // byte exhaustively; a plain `cargo test` (no budget) samples a small,
-    // seed-driven subset so the per-PR run stays quick — each `exercise` is a
-    // full encrypted mount + re-check, far heavier than a byte decoder.
-    if soak {
-        for i in 0..base.len() {
+    // identity/checksum rejection on a near-valid image. The soak visits
+    // positions in a seeded full-coverage order and stops at the wall-clock
+    // deadline — the nightly budget flips every byte, a short budget probes a
+    // reproducible spread on time. A plain `cargo test` (no budget) samples a
+    // small, seed-driven subset so the per-PR run stays quick — each
+    // `exercise` is a full encrypted mount + re-check, far heavier than a
+    // byte decoder.
+    if let Some(deadline) = deadline {
+        rustos_fuzzseed::budgeted_sweep(base.len(), next(), deadline, |i| {
             let mut image = base.clone();
             image[i] ^= 0xff;
             exercise(&image);
-        }
+        });
     } else {
         for _ in 0..SMOKE_FLIP_SAMPLES {
             let mut image = base.clone();

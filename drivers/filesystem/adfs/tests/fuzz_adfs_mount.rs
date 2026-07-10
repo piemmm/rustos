@@ -17,8 +17,10 @@
 //! formatted images — one per map flavour (old map, new map, big
 //! directories) — to hammer the checksum and structural validation.
 //! A plain `cargo test` runs a quick seed-driven smoke sample; the
-//! time-limited soak (`RUSTOS_FUZZ_BUDGET_SECS`) flips every byte of
-//! every base image and runs the PRNG stream to the budget.
+//! time-limited soak (`RUSTOS_FUZZ_BUDGET_SECS`) sweeps byte positions
+//! in a seeded full-coverage order until the wall-clock budget elapses
+//! (the nightly budget flips every byte of every base image) and runs
+//! the PRNG stream to the same budget.
 
 use rustos_abi::driver::block::{Block, BlockGeometry};
 use rustos_abi::driver::filesystem::{
@@ -41,7 +43,7 @@ const BASES: [(AdfsVariant, usize); 3] = [
 const SMOKE_ITERATIONS: u64 = 128;
 
 /// Seed-driven single-byte-flip samples per base image in the smoke
-/// pass; the soak flips every byte instead.
+/// pass; the soak sweeps positions to its wall-clock budget instead.
 const SMOKE_FLIP_SAMPLES: u64 = 128;
 
 /// In-RAM device over a byte image.
@@ -185,7 +187,6 @@ fn formatted_image(variant: AdfsVariant, bytes: usize) -> Vec<u8> {
 #[test]
 fn fuzz_adfs_mount() {
     let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
-    let soak = deadline.is_some();
 
     // Draw and log the seed up front so every sampled byte position and
     // every PRNG image below replays exactly from the logged value.
@@ -200,13 +201,17 @@ fn fuzz_adfs_mount() {
     for (variant, bytes) in BASES {
         let base = formatted_image(variant, bytes);
         // Structured single-byte sweep over a valid image, probing the
-        // checksum/structure rejection near genuinely valid data.
-        if soak {
-            for i in 0..base.len() {
+        // checksum/structure rejection near genuinely valid data. The soak
+        // visits positions in a seeded full-coverage order and stops at the
+        // wall-clock deadline — the nightly budget flips every byte, a short
+        // budget probes a reproducible spread on time — while the smoke pass
+        // samples a fixed number of positions.
+        if let Some(deadline) = deadline {
+            rustos_fuzzseed::budgeted_sweep(base.len(), next(), deadline, |i| {
                 let mut image = base.clone();
                 image[i] ^= 0xFF;
                 exercise(&image);
-            }
+            });
         } else {
             for _ in 0..SMOKE_FLIP_SAMPLES {
                 let mut image = base.clone();

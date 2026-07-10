@@ -143,6 +143,59 @@ pub fn within_budget(deadline: Option<Instant>) -> bool {
     matches!(deadline, Some(end) if Instant::now() < end)
 }
 
+/// Greatest common divisor (Euclid), used to pick a stride that makes the
+/// [`budgeted_sweep`] order a full permutation.
+fn gcd(mut a: usize, mut b: usize) -> usize {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
+}
+
+/// Visit every index in `0..len` exactly once, in a seeded pseudo-random
+/// order, stopping early once `deadline` has passed.
+///
+/// The exhaustive soak sweeps (flipping every byte of a formatted filesystem
+/// image, say) can be far larger than a short wall-clock budget: swept
+/// sequentially front-to-back they would ignore the budget entirely and
+/// overrun a 5-second run by minutes. This helper keeps such a sweep
+/// budget-honest without giving up the exhaustive guarantee: the order is a
+/// full permutation of `0..len` (a seeded start offset advanced by a stride
+/// coprime to `len`), so a budget that outlives the sweep (the 24-hour
+/// nightly) still visits every index exactly once, while a short budget
+/// probes a well-spread sample of positions and stops on time. The order
+/// replays exactly from `seed`, so a logged failure reproduces.
+///
+/// The deadline is checked before every visit: the overshoot past `deadline`
+/// is bounded by a single `visit` call.
+pub fn budgeted_sweep(len: usize, seed: u64, deadline: Instant, mut visit: impl FnMut(usize)) {
+    if len == 0 {
+        return;
+    }
+    let reduce = |x: u64| usize::try_from(x % (len as u64)).unwrap_or(0);
+    let mut pos = reduce(splitmix64(seed));
+    // Any stride coprime to `len` cycles through all of `0..len`; counting
+    // down from a seeded candidate always terminates at 1, which is coprime
+    // to everything.
+    let mut stride = reduce(splitmix64(seed ^ 0x5851_F42D_4C95_7F2D)).max(1);
+    while gcd(stride, len) != 1 {
+        stride -= 1;
+    }
+    for _ in 0..len {
+        if Instant::now() >= deadline {
+            break;
+        }
+        visit(pos);
+        // `pos + stride` stays in `0..2*len`; subtracting the wrap first
+        // keeps the arithmetic overflow-free for any `usize` length.
+        pos = if stride >= len - pos {
+            stride - (len - pos)
+        } else {
+            pos + stride
+        };
+    }
+}
+
 /// Expand a 64-bit seed into a 32-byte seed (e.g. proptest's `ChaCha` seed)
 /// via four `SplitMix64` rounds.
 #[must_use]
@@ -267,7 +320,8 @@ pub mod prop {
 #[cfg(test)]
 mod tests {
     use super::{
-        budget_deadline, entropy_seed, expand_seed, resolve_seed, splitmix64, within_budget, Lcg,
+        budget_deadline, budgeted_sweep, entropy_seed, expand_seed, resolve_seed, splitmix64,
+        within_budget, Lcg,
     };
     use std::time::{Duration, Instant};
 
@@ -368,5 +422,56 @@ mod tests {
             rng.fill(&mut buf);
             assert_eq!(buf.len(), len);
         }
+    }
+
+    /// A deadline comfortably beyond the test's own runtime.
+    fn far_deadline() -> Instant {
+        Instant::now() + Duration::from_secs(3600)
+    }
+
+    #[test]
+    fn budgeted_sweep_visits_every_index_exactly_once_within_budget() {
+        // Lengths with varied factorisations (even, odd, prime, power of
+        // two, tiny) so the coprime-stride permutation is exercised broadly.
+        for len in [1usize, 2, 3, 16, 17, 100, 1024, 4095] {
+            for seed in [0u64, 1, 42, u64::MAX] {
+                let mut seen = vec![0u32; len];
+                budgeted_sweep(len, seed, far_deadline(), |i| seen[i] += 1);
+                assert!(
+                    seen.iter().all(|&n| n == 1),
+                    "len {len} seed {seed}: not a one-visit permutation"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn budgeted_sweep_stops_at_an_expired_deadline() {
+        // The regression this helper exists for: an exhaustive sweep must
+        // honour its wall-clock budget instead of running to completion.
+        let expired = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .expect("an instant one second in the past exists");
+        let mut visits = 0u32;
+        budgeted_sweep(1_000_000, 7, expired, |_| visits += 1);
+        assert_eq!(visits, 0, "an expired budget must stop the sweep");
+    }
+
+    #[test]
+    fn budgeted_sweep_handles_an_empty_range() {
+        budgeted_sweep(0, 9, far_deadline(), |_| panic!("nothing to visit"));
+    }
+
+    #[test]
+    fn budgeted_sweep_order_replays_from_its_seed() {
+        let order = |seed: u64| {
+            let mut positions = Vec::new();
+            budgeted_sweep(257, seed, far_deadline(), |i| positions.push(i));
+            positions
+        };
+        assert_eq!(order(11), order(11));
+        // Distinct seeds explore in a different order (a fixed pair, so the
+        // assertion is deterministic).
+        assert_ne!(order(11), order(12));
     }
 }
