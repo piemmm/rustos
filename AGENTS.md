@@ -546,6 +546,14 @@ rustos/
 │   │                    #   loader library policy), shared by the kernel boot-
 │   │                    #   floor spawn path and the user-space appmgr service
 │   │                    #   so it is never re-implemented (§2.2, §16.5, §17.4).
+│   ├── binfmt/          # Read-only executable-container decoder: typed,
+│   │                    #   fail-closed views of the rxe load image +
+│   │                    #   manifest summary (through the lib/abi types, so
+│   │                    #   inspection and the load path never diverge),
+│   │                    #   ELF64, and wasm module structure, for the
+│   │                    #   fstree disassembly viewer and objdump-class
+│   │                    #   tools. Never executes or loads; fuzzed (§19.6);
+│   │                    #   decode runs in the §19.5 parser sandbox.
 │   ├── caps/            # Capability primitives.
 │   ├── cmdres/          # Shared command-word resolution policy (plans/
 │   │                    #   APPS.md §8–§9): the one pure definition of the

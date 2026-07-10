@@ -548,6 +548,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-binfmt"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-fuzzseed",
+]
+
+[[package]]
 name = "rustos-caps"
 version = "0.0.0"
 dependencies = [

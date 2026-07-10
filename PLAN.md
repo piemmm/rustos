@@ -3274,6 +3274,20 @@ Unblocked — staged (`.junie/fstree-next-plan.md` S8):
   minimum grant, shared-memory parse IPC, crash containment with the
   sandbox replaced and the event logged (§19.4) — and the in-tree parsers
   of untrusted input are moved behind it as part of completing the item.
+  Its first consumers exist: `lib/binfmt` (`rustos-binfmt`, done —
+  `.junie/fstree-next-plan.md` S6) is the read-only executable-container
+  decoder: typed, borrowed, fail-closed views of the `rxe` load image +
+  manifest summary (decoded through the `lib/abi` types —
+  `LoadImage::parse_for_inspection`, `decode_capability_ids` — so
+  inspection and the load path never diverge, and the CFI tag is reported,
+  never compared), ELF64 (header/phdrs/sections/names/symbols, lazy and
+  bounds-checked, extended numbering refused), and wasm module structure
+  (section directory + code-body framing over strict LEB128). It is
+  `no_std`+`alloc`, `#![forbid(unsafe_code)]`, capped per §24.4, unit-
+  tested with truncation/mutation matrices, and fuzzed (`fuzz_rxe`/
+  `fuzz_elf`/`fuzz_wasm` in `cargo xtask fuzz`). `lib/disasm` (S7) is the
+  staged sibling; the fstree disassembly viewer (S9) runs both only inside
+  the S8 sandbox.
 
 Stage-blocked **[DO IMMEDIATELY ON UNBLOCK]**:
 - Item 2 — §19.4 signed log anchors + per-service `CAP_LOG_WRITE` partitioning

@@ -157,17 +157,18 @@ pub fn verify_manifest<S: Sink + ?Sized>(
     //    duplicates idempotently — they are not themselves grounds for
     //    rejection but unknowns absolutely are.
     let body = &bytes[ManifestHeader::WIRE_LEN..manifest_end];
+    let mut decoded = [CapabilityId::FS_MOUNT; rustos_abi::MANIFEST_MAX_CAPABILITIES as usize];
+    let count = usize::from(header.capability_count);
+    if rustos_abi::decode_capability_ids(body, count, &mut decoded).is_err() {
+        emit_errno(
+            audit,
+            AuditEvent::ManifestUnknownCapability,
+            Errno::OutOfRange,
+        );
+        return Err(Errno::OutOfRange);
+    }
     let mut requested = CapabilitySet::empty();
-    for chunk in body.chunks_exact(CAPABILITY_BODY_STRIDE) {
-        let raw = u16::from_le_bytes([chunk[0], chunk[1]]);
-        let Ok(id) = CapabilityId::from_raw(raw) else {
-            emit_errno(
-                audit,
-                AuditEvent::ManifestUnknownCapability,
-                Errno::OutOfRange,
-            );
-            return Err(Errno::OutOfRange);
-        };
+    for &id in &decoded[..count] {
         if !is_known_capability(id) {
             emit_errno(
                 audit,

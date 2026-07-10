@@ -233,6 +233,22 @@ pub const TARGETS: &[Target] = &[
         description:
             "lib/devids pci.ids/usb.ids vetting parser + compact-table decoder (untrusted upstream-download and table bytes)",
     },
+    Target {
+        package: "rustos-binfmt",
+        test: "fuzz_rxe",
+        description:
+            "lib/binfmt rxe inspection view + manifest summary (untrusted executable-file bytes)",
+    },
+    Target {
+        package: "rustos-binfmt",
+        test: "fuzz_elf",
+        description: "lib/binfmt ELF64 view (untrusted executable-file bytes)",
+    },
+    Target {
+        package: "rustos-binfmt",
+        test: "fuzz_wasm",
+        description: "lib/binfmt wasm module-structure view (untrusted executable-file bytes)",
+    },
 ];
 
 /// How long to run each harness.
@@ -682,6 +698,16 @@ mod tests {
         let chosen = selected(&opts).expect("known target");
         assert_eq!(chosen.len(), 1);
         assert_eq!(chosen[0].package, "rustos-devids");
+    }
+
+    #[test]
+    fn binfmt_harnesses_are_registered() {
+        for name in ["fuzz_rxe", "fuzz_elf", "fuzz_wasm"] {
+            let opts = parse(&argv(&["--target", name])).expect("flag parses");
+            let chosen = selected(&opts).expect("known target");
+            assert_eq!(chosen.len(), 1);
+            assert_eq!(chosen[0].package, "rustos-binfmt");
+        }
     }
 
     #[test]

@@ -551,6 +551,34 @@ impl LoadImage {
         bytes: &[u8],
         expected_cfi_tag: &[u8; SYSCALL_TABLE_HASH_LEN],
     ) -> Result<Self, RxeError> {
+        let (header, image) = Self::parse_validated(bytes)?;
+        if ct_ne(&header.cfi_tag, expected_cfi_tag) {
+            return Err(RxeError::InterfaceHashMismatch);
+        }
+        Ok(image)
+    }
+
+    /// Parse and validate a load image for *inspection*, enforcing every
+    /// structural invariant but skipping the CFI-tag comparison.
+    ///
+    /// An inspection tool (a file manager's executable viewer, an
+    /// `objdump`-class command) has no kernel interface hash to compare
+    /// against; it reports [`LoadHeader::cfi_tag`] instead of enforcing it.
+    /// Every load path MUST use [`LoadImage::parse`], which refuses a
+    /// mismatched tag; this entry point never admits a binary to execution.
+    ///
+    /// # Errors
+    ///
+    /// The same [`RxeError`] set as [`LoadImage::parse`], except
+    /// [`RxeError::InterfaceHashMismatch`], which only `parse` can return.
+    pub fn parse_for_inspection(bytes: &[u8]) -> Result<Self, RxeError> {
+        Self::parse_validated(bytes).map(|(_, image)| image)
+    }
+
+    /// Shared structural validator behind [`LoadImage::parse`] and
+    /// [`LoadImage::parse_for_inspection`]: every load-time invariant except
+    /// the CFI-tag comparison, which only the load path can perform.
+    fn parse_validated(bytes: &[u8]) -> Result<(LoadHeader, Self), RxeError> {
         let header = LoadHeader::from_bytes(bytes)?;
         if header.magic != LOAD_MAGIC {
             return Err(RxeError::BadMagic);
@@ -563,9 +591,6 @@ impl LoadImage {
         }
         if !header.is_pie() {
             return Err(RxeError::NotPositionIndependent);
-        }
-        if ct_ne(&header.cfi_tag, expected_cfi_tag) {
-            return Err(RxeError::InterfaceHashMismatch);
         }
 
         let count = usize::from(header.segment_count);
@@ -628,7 +653,7 @@ impl LoadImage {
         if !image.entry_is_executable() {
             return Err(RxeError::BadEntryPoint);
         }
-        Ok(image)
+        Ok((header, image))
     }
 
     /// Image-relative entry-point virtual address.

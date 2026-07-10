@@ -34,6 +34,7 @@ members = [
     "lib/abi-sys",
     "lib/abi-trap",
     "lib/appload",
+    "lib/binfmt",
     "lib/kalloc",
     "lib/caps",
     "lib/cmdres",
