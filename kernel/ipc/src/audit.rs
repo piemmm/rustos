@@ -43,6 +43,7 @@
 //! | 3047 | Error | `CALL_QUEUE_FULL`             | A post was refused because the endpoint's outstanding-call queue was full. |
 //! | 3048 | Debug | `CALL_REPLIED`                | A server delivered a reply to an in-flight call. Recorded at `Debug` for the same reason as `CALL_POSTED` (3043): routine high-throughput RPC completion. Its denial (3049) stays at `Error`. |
 //! | 3049 | Error | `CALL_REPLY_DENIED`           | A reply was refused (unknown ticket, or reply exceeded `max_reply`). |
+//! | 3050 | Error | `CALL_ENDPOINT_REGISTER_DENIED` | A registry bind was refused because the `EndpointId` was already bound (the created endpoint is dropped; mirrors `PORT_REGISTER_DENIED`, 3004). |
 //!
 //! Adding a new event requires assigning the next free identifier in
 //! this file and appending a row to the table in
@@ -121,6 +122,8 @@ pub enum AuditEvent {
     CallReplied,
     /// A reply was refused (unknown ticket, or reply exceeded `max_reply`).
     CallReplyDenied,
+    /// A registry bind was refused because the id was already bound.
+    CallEndpointRegisterDenied,
 }
 
 impl AuditEvent {
@@ -159,6 +162,7 @@ impl AuditEvent {
             Self::CallQueueFull => 3047,
             Self::CallReplied => 3048,
             Self::CallReplyDenied => 3049,
+            Self::CallEndpointRegisterDenied => 3050,
         })
     }
 
@@ -206,7 +210,8 @@ impl AuditEvent {
             | Self::CallRequestTooLarge
             | Self::CallPostToClosedEndpoint
             | Self::CallQueueFull
-            | Self::CallReplyDenied => Level::Error,
+            | Self::CallReplyDenied
+            | Self::CallEndpointRegisterDenied => Level::Error,
         }
     }
 
@@ -248,6 +253,7 @@ impl AuditEvent {
             Self::CallQueueFull => "ipc call queue full",
             Self::CallReplied => "ipc call replied",
             Self::CallReplyDenied => "ipc call reply denied",
+            Self::CallEndpointRegisterDenied => "ipc call endpoint registration denied",
         }
     }
 }
@@ -256,11 +262,14 @@ impl AuditEvent {
 ///
 /// Returns whatever [`rustos_log::log`] returns: `true` if the event
 /// passed the global level filter, `false` if it was dropped. Callers
-/// in this crate ignore the return value because the audit trail's
+/// ignore the return value because the audit trail's
 /// configuration — not the call site — decides whether the record
 /// reaches a backing store; the *decision* itself is recorded by
-/// virtue of the call.
-pub(crate) fn record<S: Sink + ?Sized>(sink: &S, event: AuditEvent, fields: &[Field<'_>]) -> bool {
+/// virtue of the call. Public because the kernel call-endpoint registry
+/// (`kernel/core`'s `callreg`) audits its registration refusals with
+/// this crate's vocabulary ([`AuditEvent::CallEndpointRegisterDenied`]),
+/// exactly as [`crate::registry::PortRegistry`] audits port binds.
+pub fn record<S: Sink + ?Sized>(sink: &S, event: AuditEvent, fields: &[Field<'_>]) -> bool {
     log(
         sink,
         &Event {
@@ -363,6 +372,7 @@ mod tests {
         assert_eq!(AuditEvent::CallQueueFull.id(), EventId(3047));
         assert_eq!(AuditEvent::CallReplied.id(), EventId(3048));
         assert_eq!(AuditEvent::CallReplyDenied.id(), EventId(3049));
+        assert_eq!(AuditEvent::CallEndpointRegisterDenied.id(), EventId(3050));
     }
 
     #[test]
@@ -399,6 +409,7 @@ mod tests {
             AuditEvent::CallQueueFull,
             AuditEvent::CallReplied,
             AuditEvent::CallReplyDenied,
+            AuditEvent::CallEndpointRegisterDenied,
         ] {
             let id = ev.id().0;
             assert!(
@@ -462,6 +473,7 @@ mod tests {
             AuditEvent::CallPostToClosedEndpoint,
             AuditEvent::CallQueueFull,
             AuditEvent::CallReplyDenied,
+            AuditEvent::CallEndpointRegisterDenied,
         ] {
             assert_eq!(ev.level(), rustos_log::Level::Error);
         }

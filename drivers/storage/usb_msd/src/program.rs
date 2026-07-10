@@ -59,10 +59,18 @@ const MSD_DETACHED: EventId = EventId(4165);
 
 /// Reserved id range the per-LUN block-service endpoints are bound in
 /// (`b"MSD\0"`-tagged, mirroring the HCD's URB endpoint range shape).
+/// Each driver process claims one contiguous block of [`MAX_LUNS`] ids
+/// ([`claim_blk_block`]): creating a block's first id claims the whole
+/// block, so a second device's driver probes on to the next block and two
+/// processes never collide on one id — and, within a claimed block, LUN
+/// `n`'s create at `base + n` succeeds first try, so bring-up never logs a
+/// rejected `call_create`.
 const BLK_ENDPOINT_BASE: u64 = 0x004D_5344_0000_0000;
 
-/// How many endpoint ids to probe per LUN before giving up.
-const BLK_ENDPOINT_PROBES: u64 = 64;
+/// How many [`MAX_LUNS`]-id blocks to probe before giving up (a generous
+/// bound on simultaneously served mass-storage devices; the first driver
+/// claims the first block on its first try).
+const BLK_ENDPOINT_BLOCKS: u64 = 64;
 
 /// Outstanding-request capacity of a per-LUN endpoint. The volume layer
 /// submits one request at a time (it blocks on the reply); a small queue
@@ -225,30 +233,54 @@ struct LunServe {
     window: &'static mut [u8],
 }
 
-/// Bind one per-LUN block-service endpoint, probing the reserved id range
-/// until a free id is found. Binding it grant-restricted (`send_caps`
-/// carries `CAP_IPC_ENDPOINT`) makes the kernel mint this driver the
-/// matching per-endpoint grant, which it forwards onto the LUN node so a
-/// consumer inherits exactly the right to drive this one unit.
-fn bind_blk_endpoint() -> Option<u64> {
+/// Create the block-service endpoint `id`. Binding it grant-restricted
+/// (`send_caps` carries `CAP_IPC_ENDPOINT`) makes the kernel mint this
+/// driver the matching per-endpoint grant, which it forwards onto the LUN
+/// node so a consumer inherits exactly the right to drive this one unit.
+/// `false` if the kernel refused the id.
+fn create_blk_endpoint(id: u64) -> bool {
     let mut send_caps = CapabilitySet::empty();
     send_caps.insert(CapabilityId::IPC_ENDPOINT);
     let recv_caps = CapabilitySet::empty();
-    for i in 0..BLK_ENDPOINT_PROBES {
-        let id = BLK_ENDPOINT_BASE + i;
-        let ret = rustos_rt::call_create(
-            id,
-            &send_caps,
-            &recv_caps,
-            BLK_REQUEST_LEN,
-            BLK_COMPLETION_LEN,
-            BLK_ENDPOINT_CAPACITY,
-        );
-        if ret == 0 {
-            return Some(id);
+    rustos_rt::call_create(
+        id,
+        &send_caps,
+        &recv_caps,
+        BLK_REQUEST_LEN,
+        BLK_COMPLETION_LEN,
+        BLK_ENDPOINT_CAPACITY,
+    ) == 0
+}
+
+/// Claim this driver's block of [`MAX_LUNS`] contiguous endpoint ids by
+/// probing block bases until one's *first* id binds. That one create is
+/// the only contended syscall; every per-LUN id inside the claimed block
+/// is then bound deterministically by [`bind_blk_endpoint`]. Returns the
+/// claimed block's base id (its first endpoint already bound, serving
+/// LUN 0 when LUN 0 is published), or `None` when every block is taken.
+fn claim_blk_block() -> Option<u64> {
+    let stride = u64::try_from(MAX_LUNS).ok()?;
+    for block in 0..BLK_ENDPOINT_BLOCKS {
+        let base = BLK_ENDPOINT_BASE + block * stride;
+        if create_blk_endpoint(base) {
+            return Some(base);
         }
     }
     None
+}
+
+/// Bind LUN `lun`'s block-service endpoint inside the claimed block
+/// `block_base`: the id is `block_base + lun`. The block's first id was
+/// already bound by the claim ([`claim_blk_block`]); every other id is
+/// created here and must succeed — a refusal means the reserved range was
+/// squatted on, and the bring-up fails closed.
+fn bind_blk_endpoint(block_base: u64, lun: u8) -> Option<u64> {
+    let id = block_base + u64::from(lun);
+    if lun == 0 || create_blk_endpoint(id) {
+        Some(id)
+    } else {
+        None
+    }
 }
 
 /// Create a LUN's shared data window, returning this driver's mapping and
@@ -422,6 +454,9 @@ fn main() -> i32 {
     let Ok(lun_count) = msd.lun_count() else {
         return EXIT_BRINGUP_FAILED;
     };
+    let Some(blk_block) = claim_blk_block() else {
+        return EXIT_NO_SERVICE;
+    };
     let mut luns: [Option<LunServe>; MAX_LUNS] = core::array::from_fn(|_| None);
     let mut published = 0usize;
     for lun in 0..lun_count {
@@ -439,7 +474,7 @@ fn main() -> i32 {
                 continue;
             }
         };
-        let Some(blk_endpoint) = bind_blk_endpoint() else {
+        let Some(blk_endpoint) = bind_blk_endpoint(blk_block, lun) else {
             return EXIT_NO_SERVICE;
         };
         let Some((window, shm_id)) = create_window() else {

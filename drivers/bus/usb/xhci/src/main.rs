@@ -81,7 +81,7 @@ mod program {
     use rustos_drvrt::{RtDriverHost, RtGrantSyscalls};
     use rustos_log::{log, Event, EventId, Field, Level};
     use rustos_rt::{ClockDelay, LogSink};
-    use rustos_usb::device::{BringUp, HubEvent};
+    use rustos_usb::device::{HubEvent, MAX_DEVICES};
     use rustos_util::fmt::format_hex_u64;
 
     /// Exit code when the rt-backed driver host could not be built from the
@@ -98,9 +98,6 @@ mod program {
     /// Exit code when the controller came up but the URB transport seam (the
     /// shared buffer or the call endpoint) could not be created.
     const EXIT_NO_TRANSPORT: i32 = 83;
-
-    /// Exit code when the interface node could not be published.
-    const EXIT_EMIT_FAILED: i32 = 84;
 
     /// Diagnostic event id: a one-shot controller bring-up failure.
     const HCD_BRINGUP_FAILED: EventId = EventId(4126);
@@ -125,24 +122,25 @@ mod program {
     /// Diagnostic event id: a URB reply was sent or attempted.
     const HCD_URB_REPLY: EventId = EventId(4152);
 
-    /// Diagnostic event id: a controller IRQ woke the HCD loop.
-    const HCD_IRQ_WAKE: EventId = EventId(4153);
-
     /// Diagnostic event id: a wait-set or IPC transport error happened.
     const HCD_WAIT_ERROR: EventId = EventId(4154);
 
-    /// Reserved base of the URB call-endpoint id range the HCD allocates from.
+    /// Reserved base of the URB call-endpoint id range the HCDs allocate from.
     ///
     /// A grant-restricted endpoint id the class driver reaches only through
     /// the kernel-minted grant on its matched node — distinct from the
-    /// well-known `DRIVER_STORE_ENDPOINT`. The HCD probes upward from the base
-    /// until `call_create` succeeds, so two controllers (a future second HCD)
-    /// never collide on one id.
+    /// well-known `DRIVER_STORE_ENDPOINT`. Each controller claims one
+    /// contiguous block of [`MAX_DEVICES`] ids ([`claim_urb_endpoints`]):
+    /// creating a block's first id claims the whole block, so a second
+    /// controller's HCD probes on to the next block and two controllers
+    /// never collide on one id — and, within a claimed block, every create
+    /// succeeds first try, so a boot never logs a rejected `call_create`.
     const URB_ENDPOINT_BASE: u64 = 0x0055_5242_0000_0000;
 
-    /// How many endpoint ids to probe before giving up (a generous bound; one
-    /// controller takes the base on the first try).
-    const URB_ENDPOINT_PROBES: u64 = 64;
+    /// How many [`MAX_DEVICES`]-id blocks to probe before giving up (a
+    /// generous bound on simultaneous controllers; the first HCD claims the
+    /// first block on its first try).
+    const URB_ENDPOINT_BLOCKS: u64 = 64;
 
     /// Bytes of shared buffer per interface: one bulk chunk
     /// ([`rustos_usb::device::BULK_BUF_LEN`], the engine's per-TD ceiling —
@@ -157,10 +155,11 @@ mod program {
     /// absorbs a re-submit racing the previous reply.
     const ENDPOINT_CAPACITY: usize = 4;
 
-    /// Wait-set token for "a URB submit arrived on the transport endpoint".
-    const TOKEN_URB: u64 = 1;
     /// Wait-set token for "the controller completion interrupt fired".
-    const TOKEN_IRQ: u64 = 2;
+    const TOKEN_IRQ: u64 = 0;
+    /// Base wait-set token for "a URB submit arrived on device index
+    /// `token - TOKEN_URB_BASE`'s transport endpoint".
+    const TOKEN_URB_BASE: u64 = 1;
 
     fn log_hex_event(
         id: EventId,
@@ -224,33 +223,92 @@ mod program {
         }
     }
 
-    enum FaultDetachOutcome {
-        NotDetached,
-        Detached,
-        Reattached,
+    /// One device index's URB transport: the call endpoint and shared buffer
+    /// created once at start-up (and reused across attach/detach cycles at
+    /// the same index, so a re-plugged device's class driver lands on the
+    /// same transport), the per-interface URB service, and the published
+    /// interface node.
+    struct Transport {
+        /// The URB call endpoint the class driver submits on.
+        endpoint_id: u64,
+        /// The shared data buffer's kernel id, forwarded as a node grant.
+        shm_id: u64,
+        /// The HCD's own mapping of the shared buffer. The process serves
+        /// this transport for its whole life, so the mapping is permanent.
+        shm: &'static mut [u8],
+        /// The per-interface URB service (at most one outstanding URB).
+        service: UrbService,
+        /// The published interface node id; meaningful only while
+        /// [`Self::node_live`].
+        node_id: u32,
+        /// Whether an interface node is currently published for this index.
+        node_live: bool,
     }
 
-    fn service_hub_after_fault_detach(
-        endpoint_id: u64,
-        shm_id: u64,
+    /// Publish the interface node for the served device at `index` onto its
+    /// transport, logging the attach. A device that cannot be described or
+    /// whose node the kernel refuses stays unpublished (fail closed).
+    fn publish_interface(
         device: &mut rustos_drv_bus_usb::bringup::ControllerDevice,
-        delay: &ClockDelay,
-    ) -> Option<u32> {
-        match device.next_hub_change(delay) {
-            Ok(HubEvent::Attached(_)) => {
-                let id = emit_interface_node(device, endpoint_id, shm_id);
-                if let Some(node) = id {
-                    log_hex_event(
-                        HCD_ATTACHED,
-                        Level::Info,
-                        "usb-hcd: device attached while re-arming hub watch after fault detach",
-                        "node_hex",
-                        u64::from(node),
-                    );
-                }
-                id
+        index: usize,
+        transport: &mut Transport,
+    ) {
+        if transport.node_live || !device.device_live(index) {
+            return;
+        }
+        let Some(id) = emit_interface_node(device, index, transport.endpoint_id, transport.shm_id)
+        else {
+            return;
+        };
+        transport.node_id = id;
+        transport.node_live = true;
+        log_hex_event(
+            HCD_ATTACHED,
+            Level::Info,
+            "usb-hcd: interface node emitted",
+            "node_hex",
+            u64::from(id),
+        );
+    }
+
+    /// Retract `transport`'s published interface node (best-effort) and
+    /// abort its outstanding URB, so the class driver being unloaded never
+    /// stays parked on a dead device.
+    fn retract_interface(transport: &mut Transport) {
+        if transport.node_live {
+            if rustos_rt::hw_remove_node(transport.node_id) < 0 {
+                log_hex_event(
+                    HCD_WAIT_ERROR,
+                    Level::Warn,
+                    "usb-hcd: interface retraction failed",
+                    "node_hex",
+                    u64::from(transport.node_id),
+                );
             }
-            Ok(HubEvent::Detached | HubEvent::None) => None,
+            transport.node_live = false;
+        }
+        abort_pending_urb(transport.endpoint_id, &mut transport.service);
+    }
+
+    /// Service one pending hub status-change after a fault detach re-armed
+    /// the watch, publishing a freshly attached device's interface.
+    fn service_hub_after_fault_detach(
+        device: &mut rustos_drv_bus_usb::bringup::ControllerDevice,
+        transports: &mut [Option<Transport>],
+        delay: &ClockDelay,
+    ) {
+        match device.next_hub_change(delay) {
+            Ok(HubEvent::Attached(index)) => {
+                if let Some(transport) = transports.get_mut(index).and_then(Option::as_mut) {
+                    publish_interface(device, index, transport);
+                }
+            }
+            Ok(HubEvent::Detached(index)) => {
+                if let Some(transport) = transports.get_mut(index).and_then(Option::as_mut) {
+                    retract_interface(transport);
+                }
+            }
+            Ok(HubEvent::None) => {}
             Err(err) => {
                 log_hex_event(
                     HCD_WAIT_ERROR,
@@ -259,56 +317,46 @@ mod program {
                     "err_hex",
                     err as u64,
                 );
-                None
             }
         }
     }
 
+    /// Whether the failed URB reply for device `index` was caused by the
+    /// device physically vanishing; if so, detach it, retract its interface,
+    /// answer the URB `NotFound`, and service the hub watch (which may
+    /// already carry the re-attach). `true` when the device was detached
+    /// (the reply has then been answered); `false` leaves the reply for the
+    /// caller to send.
     fn retract_after_fault_if_gone(
-        endpoint_id: u64,
-        shm_id: u64,
-        interface_node_id: &mut u32,
         device: &mut rustos_drv_bus_usb::bringup::ControllerDevice,
+        index: usize,
+        transports: &mut [Option<Transport>],
         reply: UrbReply,
         delay: &ClockDelay,
-    ) -> FaultDetachOutcome {
+    ) -> bool {
         if urb_reply_errno(&reply) != Some(Errno::NotImplemented) {
-            return FaultDetachOutcome::NotDetached;
+            return false;
         }
-        match device.detach_if_watched_device_gone() {
+        match device.detach_if_device_gone(index) {
             Ok(true) => {
-                if rustos_rt::hw_remove_node(*interface_node_id) >= 0 {
-                    reply_error(endpoint_id, reply.ticket, Errno::NotFound);
-                    log(
-                        &LogSink,
-                        &Event {
-                            level: Level::Info,
-                            id: HCD_DISCONNECT,
-                            message:
-                                "usb-hcd: device transfer fault confirmed disconnect, interface retracted",
-                            fields: &[],
-                        },
-                    );
-                    if let Some(node) =
-                        service_hub_after_fault_detach(endpoint_id, shm_id, device, delay)
-                    {
-                        *interface_node_id = node;
-                        FaultDetachOutcome::Reattached
-                    } else {
-                        FaultDetachOutcome::Detached
-                    }
-                } else {
-                    log_hex_event(
-                        HCD_WAIT_ERROR,
-                        Level::Warn,
-                        "usb-hcd: interface retraction failed after transfer fault",
-                        "node_hex",
-                        u64::from(*interface_node_id),
-                    );
-                    FaultDetachOutcome::NotDetached
+                if let Some(transport) = transports.get_mut(index).and_then(Option::as_mut) {
+                    retract_interface(transport);
+                    reply_error(transport.endpoint_id, reply.ticket, Errno::NotFound);
                 }
+                log(
+                    &LogSink,
+                    &Event {
+                        level: Level::Info,
+                        id: HCD_DISCONNECT,
+                        message:
+                            "usb-hcd: device transfer fault confirmed disconnect, interface retracted",
+                        fields: &[],
+                    },
+                );
+                service_hub_after_fault_detach(device, transports, delay);
+                true
             }
-            Ok(false) => FaultDetachOutcome::NotDetached,
+            Ok(false) => false,
             Err(err) => {
                 log_hex_event(
                     HCD_WAIT_ERROR,
@@ -317,46 +365,35 @@ mod program {
                     "err_hex",
                     err as u64,
                 );
-                FaultDetachOutcome::NotDetached
+                false
             }
         }
     }
 
     /// Reset the controller and re-enumerate from scratch, re-arming the
-    /// interrupter the reset cleared and — if a device is already back —
-    /// publishing a fresh interface node so `devmgr` re-autoloads the class
-    /// driver onto the same transport.
+    /// interrupter the reset cleared and publishing a fresh interface node
+    /// for every device found back, so `devmgr` re-autoloads each class
+    /// driver onto the same per-index transport.
     ///
-    /// This is the recovery a root-port re-attach uses and the recovery from a
-    /// latched controller fault uses: in both cases the controller is returned
-    /// to the same state a cold boot with nothing attached reaches, from which
-    /// the next connect enumerates through the normal attach path. With no
-    /// device present yet (`BringUp::AwaitingDevice`) it simply leaves the
-    /// controller awaiting that connect. The caller refreshes its watched root
-    /// port from `device.root_port()` afterwards.
+    /// This is the recovery a root-port re-attach uses and the recovery from
+    /// a latched controller fault uses: in both cases the controller is
+    /// returned to the same state a cold boot reaches, from which the next
+    /// connect enumerates through the normal attach path. With no device
+    /// present yet it simply leaves the controller awaiting that connect.
+    /// The caller refreshes its watched root port from `device.root_port()`
+    /// afterwards.
     fn reset_reenumerate_and_publish(
         device: &mut rustos_drv_bus_usb::bringup::ControllerDevice,
-        endpoint_id: u64,
-        shm_id: u64,
-        interface_node_id: &mut u32,
-        node_live: &mut bool,
+        transports: &mut [Option<Transport>],
         delay: &ClockDelay,
     ) {
-        let Ok(outcome) = device.reset_and_reenumerate(delay) else {
+        if device.reset_and_reenumerate(delay).is_err() {
             return;
-        };
+        }
         let _ = device.enable_interrupter();
-        if matches!(outcome, BringUp::Device(_)) {
-            if let Some(id) = emit_interface_node(device, endpoint_id, shm_id) {
-                *interface_node_id = id;
-                *node_live = true;
-                log_hex_event(
-                    HCD_ATTACHED,
-                    Level::Info,
-                    "usb-hcd: device attached, interface published",
-                    "node_hex",
-                    u64::from(id),
-                );
+        for (index, slot) in transports.iter_mut().enumerate() {
+            if let Some(transport) = slot {
+                publish_interface(device, index, transport);
             }
         }
     }
@@ -367,17 +404,13 @@ mod program {
     /// transfers go silent — on the Pi 4 the VL805 latches a Host System Error
     /// during a downstream-device hot-removal teardown, after its Disable Slot
     /// has already completed, which is why an unplug worked but the controller
-    /// never saw the re-plug. Retract any still-live interface, abort a held
-    /// URB, then reset and re-enumerate so the controller returns to the proven
-    /// await-connect state and a re-plug enumerates normally. Returns whether a
-    /// recovery ran (so the caller refreshes its watched root port).
+    /// never saw the re-plug. Retract every still-live interface, abort the
+    /// held URBs, then reset and re-enumerate so the controller returns to the
+    /// proven await-connect state and a re-plug enumerates normally. Returns
+    /// whether a recovery ran (so the caller refreshes its watched root port).
     fn recover_if_controller_faulted(
         device: &mut rustos_drv_bus_usb::bringup::ControllerDevice,
-        endpoint_id: u64,
-        shm_id: u64,
-        interface_node_id: &mut u32,
-        node_live: &mut bool,
-        service: &mut UrbService,
+        transports: &mut [Option<Transport>],
         delay: &ClockDelay,
     ) -> bool {
         if !device.controller_faulted() {
@@ -392,19 +425,10 @@ mod program {
                 fields: &[],
             },
         );
-        if *node_live {
-            let _ = rustos_rt::hw_remove_node(*interface_node_id);
-            *node_live = false;
+        for transport in transports.iter_mut().flatten() {
+            retract_interface(transport);
         }
-        abort_pending_urb(endpoint_id, service);
-        reset_reenumerate_and_publish(
-            device,
-            endpoint_id,
-            shm_id,
-            interface_node_id,
-            node_live,
-            delay,
-        );
+        reset_reenumerate_and_publish(device, transports, delay);
         true
     }
 
@@ -424,32 +448,106 @@ mod program {
         caps
     }
 
-    /// Bind the URB transport endpoint, probing the reserved id range until a
-    /// free id is found. Binding it grant-restricted (`send_caps` carries
-    /// `CAP_IPC_ENDPOINT`) makes the kernel mint this HCD the matching
-    /// per-endpoint grant, which it forwards onto the interface node so the
-    /// class driver inherits exactly the right to submit URBs on this one
-    /// interface. Returns the bound endpoint id, or `None` if the range is
-    /// exhausted.
-    fn bind_urb_endpoint() -> Option<u64> {
+    /// Bind the URB transport endpoint `id`. Binding it grant-restricted
+    /// (`send_caps` carries `CAP_IPC_ENDPOINT`) makes the kernel mint this
+    /// HCD the matching per-endpoint grant, which it forwards onto the
+    /// interface node so the class driver inherits exactly the right to
+    /// submit URBs on this one interface. `false` if the kernel refused the
+    /// id (already bound, or the create was rejected).
+    fn bind_urb_endpoint(id: u64) -> bool {
         let mut send_caps = CapabilitySet::empty();
         send_caps.insert(CapabilityId::IPC_ENDPOINT);
         let recv_caps = CapabilitySet::empty();
-        for i in 0..URB_ENDPOINT_PROBES {
-            let id = URB_ENDPOINT_BASE + i;
-            let ret = rustos_rt::call_create(
-                id,
-                &send_caps,
-                &recv_caps,
-                URB_REQUEST_LEN,
-                URB_COMPLETION_LEN,
-                ENDPOINT_CAPACITY,
-            );
-            if ret == 0 {
-                return Some(id);
+        rustos_rt::call_create(
+            id,
+            &send_caps,
+            &recv_caps,
+            URB_REQUEST_LEN,
+            URB_COMPLETION_LEN,
+            ENDPOINT_CAPACITY,
+        ) == 0
+    }
+
+    /// Claim this controller's URB endpoint ids: one contiguous block of
+    /// [`MAX_DEVICES`] ids from the reserved range, bound in one pass.
+    ///
+    /// Creating a block's *first* id claims the block — that create is the
+    /// only contended one, so a second controller's HCD moves to the next
+    /// block without ever touching a claimed block's interior ids, and each
+    /// interior create succeeds first try (a rejected interior create means
+    /// the reserved range was squatted on, and the claim fails closed).
+    /// Returns the bound ids, index-aligned with the device table, or `None`
+    /// when every block is taken or an interior id was refused.
+    fn claim_urb_endpoints() -> Option<[u64; MAX_DEVICES]> {
+        let stride = u64::try_from(MAX_DEVICES).ok()?;
+        for block in 0..URB_ENDPOINT_BLOCKS {
+            let base = URB_ENDPOINT_BASE + block * stride;
+            if !bind_urb_endpoint(base) {
+                continue;
             }
+            let mut ids = [0u64; MAX_DEVICES];
+            ids[0] = base;
+            for (index, id) in ids.iter_mut().enumerate().skip(1) {
+                *id = base + u64::try_from(index).ok()?;
+                if !bind_urb_endpoint(*id) {
+                    return None;
+                }
+            }
+            return Some(ids);
         }
         None
+    }
+
+    /// Create device index `index`'s URB transport over its already-bound
+    /// call endpoint `endpoint_id` ([`claim_urb_endpoints`]): its shared
+    /// data buffer and the endpoint's registration on the wait-set under
+    /// the index's token. `None` on any refusal (the caller fails closed —
+    /// a transport-less device could never complete a URB).
+    fn create_transport(set: u64, index: usize, endpoint_id: u64) -> Option<Transport> {
+        let mut shm_id = 0u64;
+        let shm_base = rustos_rt::shm_create(SHM_LEN, &mut shm_id);
+        if shm_base < 0 {
+            return None;
+        }
+        // SAFETY: `shm_create` mapped `SHM_LEN` bytes of zeroed, cacheable,
+        // RW (non-executable) memory into this process at `shm_base` and
+        // returned that base. The region is owned by this process for the
+        // rest of its life (never unmapped), and no other reference in this
+        // address space aliases it — each transport owns its own region — so
+        // a single exclusive `&mut [u8]` over exactly the requested length is
+        // sound (and `'static`, as the mapping is permanent). The class
+        // driver maps the same frames in its *own* address space;
+        // cross-process sharing is outside Rust's aliasing model (like
+        // DMA/MMIO) and is synchronised by the URB reply, which
+        // happens-after the HCD's write here.
+        let shm: &'static mut [u8] =
+            unsafe { core::slice::from_raw_parts_mut(shm_base as usize as *mut u8, SHM_LEN) };
+        let token = TOKEN_URB_BASE + u64::try_from(index).ok()?;
+        let endpoint_add = rustos_rt::waitset_ctl(
+            set,
+            WaitSetOp::Add,
+            WaitSourceKind::Endpoint,
+            endpoint_id,
+            token,
+        );
+        if super::waitset_ctl_result(endpoint_add).is_err() {
+            return None;
+        }
+        log_hex_event(
+            HCD_URB_SETUP,
+            Level::Info,
+            "usb-hcd: URB transport created",
+            "endpoint_hex",
+            endpoint_id,
+        );
+        Some(Transport {
+            endpoint_id,
+            shm_id,
+            shm,
+            service: UrbService::new(),
+            node_id: 0,
+            node_live: false,
+        })
     }
 
     /// Whether the enumerated device is still connected on its root port (the
@@ -464,21 +562,23 @@ mod program {
             .is_none_or(|portsc| portsc & 1 != 0)
     }
 
-    /// Build and publish the enumerated device's interface node — its
+    /// Build and publish the served device at `index`'s interface node — its
     /// `vid:pid:class` match keys plus the per-interface URB-transport grants
     /// (the call endpoint and the shared buffer) the class driver inherits —
     /// returning the kernel-assigned node id.
     ///
     /// Used for the initial publish and, identically, for a re-attach after a
     /// hot-plug: a *fresh* node so `devmgr` re-autoloads the class driver onto
-    /// the same transport endpoint, so keystrokes resume to the same OS sink.
-    /// `None` if the device is not enumerated or the kernel refuses the node.
+    /// the same transport endpoint, so the device's data resumes to the same
+    /// OS sink. `None` if the device is not enumerated or the kernel refuses
+    /// the node.
     fn emit_interface_node(
         device: &mut rustos_drv_bus_usb::bringup::ControllerDevice,
+        index: usize,
         endpoint_id: u64,
         shm_id: u64,
     ) -> Option<u32> {
-        let node = device.describe_device(HW_NODE_ROOT, 0).ok()?;
+        let node = device.describe_device(index, HW_NODE_ROOT, 0).ok()?;
         let node = attach_transport_grants(node, endpoint_id, shm_id).ok()?;
         let emit = rustos_rt::hw_emit_node(&node);
         if emit < 0 {
@@ -528,47 +628,34 @@ mod program {
             }
         };
 
-        // Stand up the per-interface URB transport seam: a shared data buffer
-        // and the grant-restricted call endpoint, both minting this HCD the
-        // grant it forwards onto the interface node.
-        let mut shm_id = 0u64;
-        let shm_base = rustos_rt::shm_create(SHM_LEN, &mut shm_id);
-        if shm_base < 0 {
+        // Build the wait-set the loop parks on: every transport endpoint and
+        // the controller IRQ line. All must succeed before any interface is
+        // published, because interrupt-IN URBs complete only through that
+        // event-driven wake path.
+        let set = rustos_rt::waitset_create();
+        if set < 0 {
             return EXIT_NO_TRANSPORT;
         }
-        // SAFETY: `shm_create` mapped `SHM_LEN` bytes of zeroed, cacheable,
-        // RW (non-executable) memory into this process at `shm_base` and
-        // returned that base. The region is owned by this process for the rest
-        // of its life (never unmapped here), and no other reference in this
-        // address space aliases it, so a single exclusive `&mut [u8]` over
-        // exactly the requested length is sound. The class driver maps the
-        // same frames in its *own* address space; cross-process sharing is
-        // outside Rust's aliasing model (like DMA/MMIO) and is synchronised by
-        // the URB reply, which happens-after the HCD's write here.
-        let shm: &mut [u8] =
-            unsafe { core::slice::from_raw_parts_mut(shm_base as usize as *mut u8, SHM_LEN) };
-        log_hex_event(
-            HCD_URB_SETUP,
-            Level::Info,
-            "usb-hcd: shared URB buffer created",
-            "shm_id_hex",
-            shm_id,
-        );
+        #[allow(clippy::cast_sign_loss)] // `set >= 0` is the wait-set handle.
+        let set = set as u64;
 
-        let Some(endpoint_id) = bind_urb_endpoint() else {
+        // Stand up the per-interface URB transport seam — one shared data
+        // buffer and one grant-restricted call endpoint per servable device
+        // index, each minting this HCD the grant it forwards onto that
+        // index's interface node. All are created up front: a hot-plugged
+        // device must never find its transport missing, and an idle
+        // transport costs one page and one endpoint.
+        let Some(endpoint_ids) = claim_urb_endpoints() else {
             return EXIT_NO_TRANSPORT;
         };
-        log_hex_event(
-            HCD_URB_SETUP,
-            Level::Info,
-            "usb-hcd: URB endpoint created",
-            "endpoint_hex",
-            endpoint_id,
-        );
+        let mut transports: [Option<Transport>; MAX_DEVICES] = [const { None }; MAX_DEVICES];
+        for (index, slot) in transports.iter_mut().enumerate() {
+            let Some(transport) = create_transport(set, index, endpoint_ids[index]) else {
+                return EXIT_NO_TRANSPORT;
+            };
+            *slot = Some(transport);
+        }
 
-        // The interface node (USB match keys + transport grants) is published
-        // only after the IRQ wait source is proved live below, so the class
-        // driver cannot be autoloaded into a transport with no completion wake.
         // `root_port` tracks the directly-attached device's root port for the
         // disconnect watch; it is refreshed after a re-enumeration. `0` while
         // no directly-attached device is present (a cold boot, or the hub
@@ -621,27 +708,6 @@ mod program {
         let Some(irq_handle) = irq_handle else {
             return EXIT_NO_TRANSPORT;
         };
-
-        // Build the wait-set the loop parks on: the transport endpoint always,
-        // and the controller IRQ line. Both must succeed before the interface
-        // is published, because interrupt-IN URBs complete only through that
-        // event-driven wake path.
-        let set = rustos_rt::waitset_create();
-        if set < 0 {
-            return EXIT_NO_TRANSPORT;
-        }
-        #[allow(clippy::cast_sign_loss)] // `set >= 0` is the wait-set handle.
-        let set = set as u64;
-        let endpoint_add = rustos_rt::waitset_ctl(
-            set,
-            WaitSetOp::Add,
-            WaitSourceKind::Endpoint,
-            endpoint_id,
-            TOKEN_URB,
-        );
-        if super::waitset_ctl_result(endpoint_add).is_err() {
-            return EXIT_NO_TRANSPORT;
-        }
         let irq_add = rustos_rt::waitset_ctl(
             set,
             WaitSetOp::Add,
@@ -667,26 +733,17 @@ mod program {
             irq_handle,
         );
 
-        // Publish the interface node only if a device is actually present.
-        // A cold boot with the keyboard unplugged is a first-class state: the
+        // Publish an interface node for every device enumerated at bring-up.
+        // A cold boot with nothing plugged in is a first-class state: the
         // controller comes up with no node, and the first hot-plug connect —
         // delivered through the onboard hub's status-change watch, or a
-        // root-port connect — publishes the node from the event loop below.
-        let mut node_live = device.device_present();
-        let mut interface_node_id = 0u32;
-        if node_live {
-            let Some(id) = emit_interface_node(&mut device, endpoint_id, shm_id) else {
-                return EXIT_EMIT_FAILED;
-            };
-            interface_node_id = id;
-            log_hex_event(
-                HCD_URB_SETUP,
-                Level::Info,
-                "usb-hcd: interface node emitted",
-                "node_hex",
-                u64::from(id),
-            );
-        } else {
+        // root-port connect — publishes from the event loop below.
+        for (index, slot) in transports.iter_mut().enumerate() {
+            if let Some(transport) = slot {
+                publish_interface(&mut device, index, transport);
+            }
+        }
+        if !device.any_device_live() {
             log(
                 &LogSink,
                 &Event {
@@ -708,8 +765,6 @@ mod program {
             },
         );
 
-        let mut service = UrbService::new();
-
         // The asynchronous event loop: park until the transport endpoint or the
         // controller interrupt is ready, never spinning a quiet controller.
         loop {
@@ -728,19 +783,27 @@ mod program {
                 return 0;
             }
             match token {
-                TOKEN_URB => {
+                token if token >= TOKEN_URB_BASE => {
+                    #[allow(clippy::cast_possible_truncation)]
+                    // The token was registered as `TOKEN_URB_BASE + index`.
+                    let index = (token - TOKEN_URB_BASE) as usize;
+                    let Some(transport) = transports.get_mut(index).and_then(Option::as_mut) else {
+                        continue;
+                    };
                     let mut request = [0u8; URB_REQUEST_LEN];
                     let mut ticket = 0u64;
-                    match rustos_rt::call_recv(endpoint_id, &mut request, &mut ticket) {
+                    match rustos_rt::call_recv(transport.endpoint_id, &mut request, &mut ticket) {
                         Ok(n) => {
-                            match service.on_submit(
-                                node_live,
+                            match transport.service.on_submit(
+                                transport.node_live,
                                 ticket,
                                 &request[..n],
-                                shm,
-                                &mut device,
+                                transport.shm,
+                                &mut device.engine_for(index),
                             ) {
-                                UrbOutcome::Reply(reply) => reply_to_urb(endpoint_id, reply),
+                                UrbOutcome::Reply(reply) => {
+                                    reply_to_urb(transport.endpoint_id, reply);
+                                }
                                 UrbOutcome::Held => {}
                                 UrbOutcome::Idle => log_hex_event(
                                     HCD_WAIT_ERROR,
@@ -772,75 +835,58 @@ mod program {
                     // spins the loop, while a per-event advance only ever clears
                     // EHB once the ring is genuinely caught up.
                     let _ = device.acknowledge_interrupt();
-                    // Hot-plug. When a hub is watched (the device sits behind
+                    // Hot-plug. When a hub is watched (the devices sit behind
                     // the onboard hub, so its root port never changes), a hub
                     // status-change report drives connect/disconnect: a fresh
                     // device is enumerated and a new interface node published
-                    // (so `devmgr` re-autoloads the class driver onto the same
-                    // transport), and a disconnect retracts the node. A
+                    // on its index's transport (so `devmgr` autoloads the
+                    // class driver onto the same endpoint across a re-plug),
+                    // and a disconnect retracts only that device's node. A
                     // directly-attached device instead has its root port
                     // watched for disconnect, and a root-port connect — whether
                     // the first ever (cold boot, nothing attached at bring-up)
-                    // or a re-attach — drives a fresh re-enumeration. Both leave
+                    // or a re-attach — drives a fresh re-enumeration. All leave
                     // the controller up.
-                    let mut disconnect_handled = false;
                     if device.hub_watch_active() {
-                        // A keyboard on the Pi 4 hangs off a hub, and pulling it
-                        // out takes that hub with it: the unplug surfaces as the
-                        // *root* port (where the hub sat) clearing its connect
-                        // bit, not as a downstream hub-port change — the hub is
-                        // gone, so it answers neither its status-change endpoint
-                        // nor a control transfer. Check the hub's own root port
-                        // first; if it is gone, retract the interface and tear
-                        // down so a re-plug re-enumerates from scratch.
+                        // Every external device on the Pi 4 hangs off a hub,
+                        // and pulling that assembly out takes the hub with it:
+                        // the unplug surfaces as the *root* port (where the hub
+                        // sat) clearing its connect bit, not as a downstream
+                        // hub-port change — the hub is gone, so it answers
+                        // neither its status-change endpoint nor a control
+                        // transfer. Check the hub's own root port first; if it
+                        // is gone, retract every interface and tear down so a
+                        // re-plug re-enumerates from scratch.
                         match device.detach_if_hub_root_gone() {
                             Ok(true) => {
-                                if node_live && rustos_rt::hw_remove_node(interface_node_id) < 0 {
-                                    log_hex_event(
-                                        HCD_WAIT_ERROR,
-                                        Level::Warn,
-                                        "usb-hcd: interface retraction failed after hub assembly detach",
-                                        "node_hex",
-                                        u64::from(interface_node_id),
-                                    );
+                                for transport in transports.iter_mut().flatten() {
+                                    retract_interface(transport);
                                 }
-                                abort_pending_urb(endpoint_id, &mut service);
-                                node_live = false;
-                                disconnect_handled = true;
                                 log(
                                     &LogSink,
                                     &Event {
                                         level: Level::Info,
                                         id: HCD_DISCONNECT,
-                                        message: "usb-hcd: hub assembly disconnected at root port, interface retracted",
+                                        message: "usb-hcd: hub assembly disconnected at root port, interfaces retracted",
                                         fields: &[],
                                     },
                                 );
                             }
                             Ok(false) => match device.next_hub_change(&delay) {
-                                Ok(HubEvent::Attached(_)) => {
-                                    if let Some(id) =
-                                        emit_interface_node(&mut device, endpoint_id, shm_id)
+                                Ok(HubEvent::Attached(index)) => {
+                                    if let Some(transport) =
+                                        transports.get_mut(index).and_then(Option::as_mut)
                                     {
-                                        interface_node_id = id;
-                                        node_live = true;
-                                        log_hex_event(
-                                            HCD_ATTACHED,
-                                            Level::Info,
-                                            "usb-hcd: device attached, interface published",
-                                            "node_hex",
-                                            u64::from(id),
-                                        );
+                                        publish_interface(&mut device, index, transport);
                                     }
                                 }
-                                Ok(HubEvent::Detached) => {
-                                    if node_live
-                                        && rustos_rt::hw_remove_node(interface_node_id) >= 0
+                                Ok(HubEvent::Detached(index)) => {
+                                    if let Some(transport) =
+                                        transports.get_mut(index).and_then(Option::as_mut)
                                     {
-                                        abort_pending_urb(endpoint_id, &mut service);
-                                        node_live = false;
-                                        disconnect_handled = true;
-                                        log(
+                                        retract_interface(transport);
+                                    }
+                                    log(
                                         &LogSink,
                                         &Event {
                                             level: Level::Info,
@@ -850,18 +896,6 @@ mod program {
                                             fields: &[],
                                         },
                                     );
-                                    } else if node_live {
-                                        log_hex_event(
-                                            HCD_WAIT_ERROR,
-                                            Level::Warn,
-                                            "usb-hcd: interface retraction failed after hub detach",
-                                            "node_hex",
-                                            u64::from(interface_node_id),
-                                        );
-                                    } else {
-                                        abort_pending_urb(endpoint_id, &mut service);
-                                        disconnect_handled = true;
-                                    }
                                 }
                                 Ok(HubEvent::None) => {}
                                 Err(err) => log_hex_event(
@@ -880,117 +914,96 @@ mod program {
                                 err as u64,
                             ),
                         }
-                    } else if node_live {
+                    } else if device.any_device_live() {
                         // Directly-attached device: retract on a root-port
                         // disconnect (the `CCS` connect bit clearing).
                         if !still_connected(&mut device, root_port) {
-                            if rustos_rt::hw_remove_node(interface_node_id) >= 0 {
-                                abort_pending_urb(endpoint_id, &mut service);
-                                node_live = false;
-                                disconnect_handled = true;
-                                log(
-                                    &LogSink,
-                                    &Event {
-                                        level: Level::Info,
-                                        id: HCD_DISCONNECT,
-                                        message:
-                                            "usb-hcd: device disconnected, interface retracted",
-                                        fields: &[],
-                                    },
-                                );
-                            } else {
-                                log_hex_event(
-                                    HCD_WAIT_ERROR,
-                                    Level::Warn,
-                                    "usb-hcd: interface retraction failed after root-port detach",
-                                    "node_hex",
-                                    u64::from(interface_node_id),
-                                );
+                            for transport in transports.iter_mut().flatten() {
+                                retract_interface(transport);
                             }
+                            log(
+                                &LogSink,
+                                &Event {
+                                    level: Level::Info,
+                                    id: HCD_DISCONNECT,
+                                    message: "usb-hcd: device disconnected, interface retracted",
+                                    fields: &[],
+                                },
+                            );
                         }
                     } else if device.any_root_port_connected() {
-                        // A directly-attached device appeared on a root port —
-                        // either the first connect after a cold boot with
-                        // nothing attached at bring-up, or a re-attach after a
-                        // disconnect. Reset the controller and enumerate it as a
-                        // brand-new device, re-arm the interrupter the reset
-                        // cleared (so the next connect/disconnect still wakes
-                        // the loop), refresh the watched root port, and publish a
-                        // fresh interface node so the class driver is autoloaded
-                        // onto the same transport.
-                        reset_reenumerate_and_publish(
-                            &mut device,
-                            endpoint_id,
-                            shm_id,
-                            &mut interface_node_id,
-                            &mut node_live,
-                            &delay,
-                        );
+                        // A device appeared on a root port — either the first
+                        // connect after a cold boot with nothing attached at
+                        // bring-up, or a re-attach after a disconnect. Reset
+                        // the controller and re-run the bring-up walk, re-arm
+                        // the interrupter the reset cleared (so the next
+                        // connect/disconnect still wakes the loop), refresh
+                        // the watched root port, and publish fresh interface
+                        // nodes so each class driver is autoloaded onto its
+                        // index's transport.
+                        reset_reenumerate_and_publish(&mut device, &mut transports, &delay);
                         root_port = device.root_port();
                     }
                     // A disconnect-handling teardown above (a hub status-change
                     // detach or a hub-assembly detach) can leave the controller
                     // halted with a latched Host System Error on the Pi 4 VL805;
-                    // recover before the shortcut so the re-plug is still seen.
-                    if recover_if_controller_faulted(
-                        &mut device,
-                        endpoint_id,
-                        shm_id,
-                        &mut interface_node_id,
-                        &mut node_live,
-                        &mut service,
-                        &delay,
-                    ) {
+                    // recover before servicing so the re-plug is still seen.
+                    if recover_if_controller_faulted(&mut device, &mut transports, &delay) {
                         root_port = device.root_port();
                         continue;
                     }
-                    // A disconnect tore the device down; the endpoint is gone,
-                    // so there is nothing left to service this wake.
-                    if disconnect_handled {
-                        continue;
-                    }
-                    match service.on_event(shm, &mut device) {
-                        UrbOutcome::Reply(reply) => {
-                            if node_live {
-                                match retract_after_fault_if_gone(
-                                    endpoint_id,
-                                    shm_id,
-                                    &mut interface_node_id,
-                                    &mut device,
-                                    reply,
-                                    &delay,
-                                ) {
-                                    FaultDetachOutcome::NotDetached => {
-                                        reply_to_urb(endpoint_id, reply)
+                    // Drive every transport with a URB outstanding: the drained
+                    // event(s) may complete any of them, and a completion the
+                    // hot-plug handling above parked must not wait for another
+                    // interrupt. A transport whose device just detached has
+                    // already had its URB aborted, so it is simply not busy.
+                    for index in 0..transports.len() {
+                        let busy = transports[index]
+                            .as_ref()
+                            .is_some_and(|transport| transport.service.is_busy());
+                        if !busy {
+                            continue;
+                        }
+                        let Some(outcome) = transports[index].as_mut().map(|transport| {
+                            transport
+                                .service
+                                .on_event(transport.shm, &mut device.engine_for(index))
+                        }) else {
+                            continue;
+                        };
+                        match outcome {
+                            UrbOutcome::Reply(reply) => {
+                                let node_live = transports[index]
+                                    .as_ref()
+                                    .is_some_and(|transport| transport.node_live);
+                                let detached = node_live
+                                    && retract_after_fault_if_gone(
+                                        &mut device,
+                                        index,
+                                        &mut transports,
+                                        reply,
+                                        &delay,
+                                    );
+                                if !detached {
+                                    if let Some(transport) = transports[index].as_ref() {
+                                        reply_to_urb(transport.endpoint_id, reply);
                                     }
-                                    FaultDetachOutcome::Detached => node_live = false,
-                                    FaultDetachOutcome::Reattached => node_live = true,
                                 }
-                            } else {
-                                reply_to_urb(endpoint_id, reply);
                             }
-                        }
-                        UrbOutcome::Held => {
-                            let _ = log(
-                                &LogSink,
-                                &Event {
-                                    level: Level::Debug,
-                                    id: HCD_URB_HELD,
-                                    message: "usb-hcd: IRQ did not complete held URB yet",
-                                    fields: &[],
-                                },
-                            );
-                        }
-                        UrbOutcome::Idle => {
-                            let _ = log(
-                                &LogSink,
-                                &Event {
-                                    level: Level::Debug,
-                                    id: HCD_IRQ_WAKE,
-                                    message: "usb-hcd: IRQ had no outstanding URB",
-                                    fields: &[],
-                                },
-                            );
+                            UrbOutcome::Held => {
+                                let _ = log(
+                                    &LogSink,
+                                    &Event {
+                                        level: Level::Debug,
+                                        id: HCD_URB_HELD,
+                                        message: "usb-hcd: IRQ did not complete held URB yet",
+                                        fields: &[],
+                                    },
+                                );
+                            }
+                            // `is_busy` was checked above, so an Idle outcome
+                            // cannot occur; nothing to service either way.
+                            UrbOutcome::Idle => {}
                         }
                     }
                     // The transfer-fault disconnect teardown (the Disable Slot in
@@ -998,15 +1011,7 @@ mod program {
                     // fault on the Pi 4 VL805 after it completes; recover here too
                     // so the re-plug is seen rather than the controller staying
                     // halted and silent.
-                    if recover_if_controller_faulted(
-                        &mut device,
-                        endpoint_id,
-                        shm_id,
-                        &mut interface_node_id,
-                        &mut node_live,
-                        &mut service,
-                        &delay,
-                    ) {
+                    if recover_if_controller_faulted(&mut device, &mut transports, &delay) {
                         root_port = device.root_port();
                     }
                 }

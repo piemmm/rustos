@@ -31,23 +31,28 @@ build on the *same* engine without depending on each other — exactly the split
   Reset, wait ready); `start` programs the DMA structures (`DCBAAP`, command
   ring, interrupter-0 event ring) and runs the controller; `reset_port` /
   `set_port_power` / `ring_doorbell` / `ack_event` drive the root hub and rings.
-- `device::UsbDevice` — the single-device HID enumeration engine: Enable Slot →
-  Address Device → `GET_DESCRIPTOR` → `SET_CONFIGURATION` → `SET_PROTOCOL(boot)`
-  → Configure Endpoint, then the `rustos_abi::driver::input::ReportSource` seam
-  so the host-controller driver arms one interrupt-IN transfer for the class URB
-  it is currently serving. The interrupt-IN endpoint's DCI, packet size, and
-  interval are read from the device's endpoint descriptor (never hard-coded).
-  `bring_up_keyboard` is the arch-neutral
-  bring-up orchestration a keyboard driver runs once: it enumerates the first
-  connected root-hub port and, when that device is itself a hub (the Pi 4B's
-  onboard hub), powers the hub's ports, finds the connected one, resets it
-  (settle windows supplied by the `rustos_abi::Delay` seam), and addresses the
-  device behind it on a second slot — so the keyboard is discovered, never a
-  guessed port, with one definition shared by every consumer (§2.2 / §18). A
-  device absent at bring-up is a first-class state, not a failure: it returns
-  `BringUp::AwaitingDevice` with the controller up and the first-connect watch
-  armed (the onboard hub's status-change endpoint, or the root port), so a cold
-  boot with the keyboard unplugged works and it autoloads when plugged in.
+- `device::UsbDevice` — the multi-device enumeration engine: per device,
+  Enable Slot → Address Device → `GET_DESCRIPTOR` → `SET_CONFIGURATION` →
+  `SET_PROTOCOL(boot)` → Configure Endpoint, into a table of up to
+  `MAX_DEVICES` concurrently served devices, each with its own layout region
+  (EP0 / interrupt / bulk rings and buffers). `next_report(index, …)` arms one
+  interrupt-IN transfer for the class URB device `index` is currently serving,
+  and `engine_for(index)` is the per-device `UrbEngine` view the HCD's URB
+  service drives — one interface's transfers can never reach another
+  device's endpoints. Endpoint DCIs, packet sizes, and intervals are read
+  from each device's descriptors (never hard-coded).
+  `bring_up` is the arch-neutral bring-up orchestration the host-controller
+  driver runs once: it enumerates the first connected root-hub port and, when
+  that device is itself a hub (the Pi 4B's onboard hub), powers the hub's
+  ports and enumerates **every** connected downstream port (settle windows
+  supplied by the `rustos_abi::Delay` seam) — a keyboard and a storage stick
+  plugged in together are both served, neither displacing the other, and a
+  port whose device fails enumeration is skipped with its slot released,
+  never allowed to cost the other devices their service. A device absent at
+  bring-up is a first-class state, not a failure: the controller comes up
+  with the first-connect watch armed (the onboard hub's status-change
+  endpoint, or the root port), so a cold boot with nothing plugged in works
+  and each device autoloads when plugged in.
 - `regs` / `trb` / `ring` — the register, TRB, and ring-state vocabularies; the
   ring state machines (`ProducerRing`, `EventRingCursor`) hold no memory of
   their own, so the owner publishes every write through the `device::DmaRegion`

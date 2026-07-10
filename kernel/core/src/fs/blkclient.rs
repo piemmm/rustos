@@ -411,7 +411,7 @@ mod tests {
             )
             .expect("endpoint"),
         );
-        crate::callreg::register(Arc::clone(&endpoint)).expect("register");
+        crate::callreg::register(Arc::clone(&endpoint), &SINK).expect("register");
         endpoint
     }
 

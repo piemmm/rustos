@@ -1287,9 +1287,13 @@ The boot path's only role is discovery and Device-typing the windows:
   discovered node: `pcie_brcm` binds the bridge, trains the link, assigns
   the VL805 BAR, and emits the VL805 PCI function (`hw_emit_node`); `vl805`
   binds that, reloads the controller firmware over the VideoCore mailbox,
-  and emits the `usb,xhci` node; `usb_kbd` binds that, maps the BAR, carves
-  DMA, brings the controller up, enumerates the boot keyboard, and pumps
-  decoded key edges into the input-focus arbiter through `key_inject`. Each
+  and emits the `usb,xhci` node; the `xhci` HCD binds that, maps the BAR,
+  carves DMA, brings the controller up, enumerates every reachable device,
+  and emits one interface node per served device; each class driver
+  (`usb_kbd` for the boot keyboard, `usb_msd` for a storage stick) binds its
+  interface node and drives its device over the URB transport — the
+  keyboard pumping decoded key edges into the input-focus arbiter through
+  `key_inject`. Each
   driver is granted only the resources its matched node requested (§18.3),
   reached through its rt-backed `DriverHost`. The bridge→CPU BAR translation
   is resolved in user space (`pcie_brcm` emits the BAR as a CPU-physical
@@ -1349,19 +1353,19 @@ bring-up last entered and the xHCI completion code it saw there — together
 they distinguish an empty hub (`err=not_found`, `4126 stage=0`) from a
 device that is present but faults part-way through enumeration.
 
-**Boot-keyboard enumeration orchestration.** The arch-neutral
-root→hub→downstream-HID bring-up sequence (enumerate the first connected
-root-hub port; if it is a hub, power its ports, find the connected one,
-reset it, and address the device behind it on a second xHCI slot) lives in
-one place — `rustos_usb::device::UsbDevice::bring_up_keyboard` — so a
-keyboard reached through the Pi 4B's onboard hub is *discovered*, never a
-guessed port (`AGENTS.md` §2.2 / §18), and the same routine serves any USB
-keyboard driver over `lib/usb`. The HCD calls it once at bring-up; a device
-absent at that point is not a failure — it returns `BringUp::AwaitingDevice`
-with the controller up and the first-connect watch armed (the onboard hub's
-status-change endpoint, or the root port), so a cold boot with the keyboard
-unplugged works and it autoloads when plugged in. A real enumeration fault
-fails closed.
+**Enumeration orchestration.** The arch-neutral root→hub→downstream
+bring-up sequence (enumerate the first connected root-hub port; if it is a
+hub, power its ports and address the device behind **every** connected one
+on its own xHCI slot, up to `MAX_DEVICES` at once) lives in one place —
+`rustos_usb::device::UsbDevice::bring_up` — so every device reached through
+the Pi 4B's onboard hub is *discovered*, never a guessed port (`AGENTS.md`
+§2.2 / §18): a keyboard and a storage stick plugged in together are both
+served, neither displacing the other. The HCD calls it once at bring-up; a
+device absent at that point is not a failure — the controller comes up with
+the first-connect watch armed (the onboard hub's status-change endpoint, or
+the root port), so a cold boot with nothing plugged in works and each device
+autoloads when plugged in. A real enumeration fault on one port skips that
+port fail-closed without costing the others their service.
 
 **Keyboard poll-loop diagnostics (`4129`/`4130`/`4131`).** Once the
 keyboard is brought up, the keyboard

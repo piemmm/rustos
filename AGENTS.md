@@ -718,8 +718,9 @@ rustos/
 │   │                    #   palettes, corner radii, fonts, cursors (§10).
 │   ├── usb/             # Bus-agnostic xHCI USB host-controller protocol: the
 │   │                    #   XhciHost register seam, the Xhci controller engine,
-│   │                    #   the TRB/ring vocabulary, and the single-device HID
-│   │                    #   enumeration engine, shared by drivers/bus/usb/xhci and
+│   │                    #   the TRB/ring vocabulary, and the multi-device
+│   │                    #   enumeration engine (up to MAX_DEVICES concurrently
+│   │                    #   served devices), shared by drivers/bus/usb/xhci and
 │   │                    #   an arch-neutral user-space keyboard driver (§2.2/§17.4).
 │   ├── users/           # User-account database: the /System/Security/Users
 │   │                    #   format, PBKDF2 password records over lib/crypto,

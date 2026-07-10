@@ -901,8 +901,9 @@ order (one fully-gated increment each):
          `drivers/bus/usb` (xHCI) with `drivers/input/usb_hid` (HID decode) while
          the xHCI protocol lived inside the bus driver. The bus-agnostic xHCI
          protocol — the `XhciHost` register seam, the `Xhci` controller engine,
-         the TRB/ring vocabulary, and the single-device HID `UsbDevice`
-         enumeration engine — therefore moved into a new `lib/usb` (`rustos-usb`)
+         the TRB/ring vocabulary, and the `UsbDevice` enumeration engine (since
+         DEVICES.md multi-device: a table of concurrently served devices)
+         — therefore moved into a new `lib/usb` (`rustos-usb`)
          crate (`lib/abi`-only, `no_std`, Tier-1-portable), the USB analogue of
          `lib/virtio` ↔ `drivers/bus/virtio` (§2.2/§6/§17.4). `drivers/bus/usb`
          keeps only the §8 `register` entry, the §18.3 `BIND_KEYS` table, and the

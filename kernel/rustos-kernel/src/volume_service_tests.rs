@@ -247,7 +247,8 @@ fn register_endpoint(id: u64) -> StdArc<CallEndpoint> {
         )
         .expect("endpoint"),
     );
-    rustos_kernel_core::callreg::register(StdArc::clone(&endpoint)).expect("register endpoint");
+    rustos_kernel_core::callreg::register(StdArc::clone(&endpoint), &SINK)
+        .expect("register endpoint");
     endpoint
 }
 

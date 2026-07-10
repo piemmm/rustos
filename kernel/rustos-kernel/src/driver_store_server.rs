@@ -468,7 +468,7 @@ pub fn serve_system_store(
         create_driver_store_endpoint(binder, audit)
             .map_err(|_| "driver-store: could not bind the driver-store endpoint")?,
     );
-    rustos_kernel_core::callreg::register(endpoint.clone())
+    rustos_kernel_core::callreg::register(endpoint.clone(), audit)
         .map_err(|_| "driver-store: driver-store endpoint id already bound")?;
     // Record this kthread's scheduler id on the endpoint so a posted
     // request wakes exactly this server instead of broadcasting to every

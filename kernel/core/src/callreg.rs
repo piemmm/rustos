@@ -24,8 +24,10 @@
 //! # Fail closed
 //!
 //! [`register`] refuses to overwrite a live binding (returns
-//! [`Errno::AlreadyExists`]) so the kernel never silently re-points a live
-//! endpoint; [`lookup`] of an unbound id yields `None`,
+//! [`Errno::AlreadyExists`] and audits the refusal as
+//! [`AuditEvent::CallEndpointRegisterDenied`], mirroring the port
+//! registry's register-denied event) so the kernel never silently
+//! re-points a live endpoint; [`lookup`] of an unbound id yields `None`,
 //! which the handler maps to [`Errno::NotFound`] and audits at that
 //! boundary (mirroring [`rustos_kernel_ipc::registry::PortRegistry`]).
 
@@ -34,9 +36,11 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use rustos_abi::Errno;
-use rustos_kernel_ipc::{CallEndpoint, EndpointId};
-use rustos_log::Sink;
+use rustos_kernel_ipc::audit::record;
+use rustos_kernel_ipc::{AuditEvent, CallEndpoint, EndpointId};
+use rustos_log::{Field, Sink};
 use rustos_sync::SpinLock;
+use rustos_util::fmt::format_hex_u64;
 
 /// The global call-endpoint registry (set-up by the boot path's kthread
 /// server, read by the `ipc_call` syscall handler). Pure data behind a
@@ -50,14 +54,29 @@ static CALL_ENDPOINTS: SpinLock<BTreeMap<EndpointId, Arc<CallEndpoint>>> =
 ///
 /// [`Errno::AlreadyExists`] if the id is already bound; the existing
 /// binding is left untouched and the kernel never silently overwrites a
-/// live endpoint.
-pub fn register(endpoint: Arc<CallEndpoint>) -> Result<(), Errno> {
+/// live endpoint. The refusal is the security decision this rendezvous
+/// makes, so it is recorded on `audit` as
+/// [`AuditEvent::CallEndpointRegisterDenied`] (a bare "endpoint created"
+/// with no subsequent denial would misread as a live endpoint); the
+/// emission happens after the registry lock is released.
+pub fn register(endpoint: Arc<CallEndpoint>, audit: &dyn Sink) -> Result<(), Errno> {
     let id = endpoint.id();
-    let mut map = CALL_ENDPOINTS.lock();
-    if map.contains_key(&id) {
+    let clashed = match CALL_ENDPOINTS.lock().entry(id) {
+        alloc::collections::btree_map::Entry::Occupied(_) => true,
+        alloc::collections::btree_map::Entry::Vacant(slot) => {
+            slot.insert(endpoint);
+            false
+        }
+    };
+    if clashed {
+        let mut id_buf = [0u8; 16];
+        let id_field = Field {
+            key: "endpoint",
+            value: rustos_log::FieldValue::Str(format_hex_u64(id.0, &mut id_buf)),
+        };
+        record(audit, AuditEvent::CallEndpointRegisterDenied, &[id_field]);
         return Err(Errno::AlreadyExists);
     }
-    map.insert(id, endpoint);
     Ok(())
 }
 
@@ -129,6 +148,25 @@ mod tests {
         fn write_event(&self, _event: &rustos_log::Event<'_>) {}
     }
 
+    /// A recording sink capturing emitted event ids, for asserting the
+    /// registration-denied audit.
+    struct RecordingSink {
+        ids: std::cell::RefCell<std::vec::Vec<u32>>,
+    }
+    impl RecordingSink {
+        fn new() -> Self {
+            rustos_log::set_max_level(rustos_log::Level::Trace);
+            Self {
+                ids: std::cell::RefCell::new(std::vec::Vec::new()),
+            }
+        }
+    }
+    impl Sink for RecordingSink {
+        fn write_event(&self, event: &rustos_log::Event<'_>) {
+            self.ids.borrow_mut().push(event.id.0);
+        }
+    }
+
     fn endpoint(id: u64) -> Arc<CallEndpoint> {
         let sink = NullSink;
         let creator = TaskCapabilities::derive(
@@ -159,7 +197,7 @@ mod tests {
     fn register_then_lookup_round_trips() {
         let id = EndpointId(0xCA11_0001);
         assert!(!contains(id));
-        register(endpoint(id.0)).expect("first bind succeeds");
+        register(endpoint(id.0), &NullSink).expect("first bind succeeds");
         assert!(contains(id));
         assert_eq!(lookup(id).map(|e| e.id()), Some(id));
         // Clean up so the global registry does not leak across tests.
@@ -168,11 +206,21 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_register_is_already_exists() {
+    fn duplicate_register_is_already_exists_and_audited() {
         let id = EndpointId(0xCA11_0002);
-        register(endpoint(id.0)).expect("first bind succeeds");
-        let err = register(endpoint(id.0)).expect_err("duplicate refused");
+        let sink = RecordingSink::new();
+        register(endpoint(id.0), &sink).expect("first bind succeeds");
+        assert!(
+            sink.ids.borrow().is_empty(),
+            "a successful bind emits no registry audit"
+        );
+        let err = register(endpoint(id.0), &sink).expect_err("duplicate refused");
         assert_eq!(err, Errno::AlreadyExists);
+        assert_eq!(
+            *sink.ids.borrow(),
+            [AuditEvent::CallEndpointRegisterDenied.id().0],
+            "the refused bind is the audited decision"
+        );
         unregister(id);
     }
 

@@ -150,8 +150,8 @@ ABI — never by naming a sibling crate (§17.4, §2.20):
   completion — status, bytes transferred. It carries no controller detail.
 - The HCD serves a URB transport **call endpoint** per interface it emits
   (`lib/usb` gains the controller-side "transport server" and the class-side
-  "transport client" over this ABI; the existing single-device enumeration
-  engine is reused by the HCD, not the class driver). The interface node the
+  "transport client" over this ABI; the multi-device enumeration
+  engine is owned by the HCD, not the class driver). The interface node the
   HCD emits names the endpoint id the class driver connects to as its sole
   "resource" — so the capability to submit URBs for an interface is minted
   kernel-side from the matched node, never ambient (§4, §5.4).
@@ -377,7 +377,9 @@ the live controller behaviour is host- and CI-proven first.
     while no interface node is live) + `attach_transport_grants` (adds the
     endpoint + shm grants onto the `describe_device` node). Host-tested.
   - `main.rs` (freestanding): `from_grants_query` → bring-up → `shm_create`
-    (the URB buffer) + grant-restricted `call_create` (probed id range) →
+    (the URB buffer) + grant-restricted `call_create` (one `MAX_DEVICES`-id
+    block claimed by its first id, per-index ids inside it, so a boot never
+    logs a rejected create) →
     `describe_device`/`attach_transport_grants`/`hw_emit_node` (now returns the
     assigned node id) → enable interrupter + `irq_bind` → **async wait-set
     loop** (URB endpoint + controller IRQ): recv → `UrbService::on_submit`
@@ -472,18 +474,29 @@ the live controller behaviour is host- and CI-proven first.
     + re-enumerate) on a root-port connect, treating it as a brand-new device.
     The connect trigger is `UsbDevice::any_root_port_connected` (any root port,
     since with no device addressed there is no specific port to watch).
+  - **Every reachable device is served concurrently.** `UsbDevice::bring_up`
+    enumerates the root device and, when it is the onboard hub, **every**
+    connected downstream port into a table of up to
+    `rustos_usb::device::MAX_DEVICES` concurrently served devices — a
+    keyboard and a storage stick plugged in together are both served, neither
+    displacing the other (the Pi 4 boot defect where a plugged-in stick won
+    the single device slot and the keyboard never enumerated). Each device
+    owns its own layout region (EP0/interrupt/bulk rings and buffers) and is
+    driven through the per-device `engine_for(index)` `UrbEngine` view; the
+    HCD serves one URB transport (endpoint + shared buffer + node) per device
+    index, so one interface's transfers can never reach another device's
+    endpoints. A port whose device fails enumeration is skipped with its slot
+    released, never allowed to cost the other ports their service.
   - **A device absent at initial bring-up is a first-class state, not a
-    failure.** `UsbDevice::bring_up_keyboard` (replacing the old
-    `enumerate_boot_keyboard`) returns `BringUp::{Device, AwaitingDevice}`: the
-    controller is always brought up and left serving. When the root device is
-    the onboard hub but no downstream device is connected yet, the hub's
-    status-change watch is armed and `AwaitingDevice` is returned; when no root
-    device is present at all, the controller waits for the first root-port
-    connect. The HCD publishes the interface node only once the first connect
-    enumerates a device (`device_present()`), so a cold boot with the keyboard
-    unplugged works: plug it in afterwards and it autoloads. `reset_and_reenumerate`
-    returns the same `BringUp`, so a device that vanished before re-enumeration
-    leaves the controller awaiting one rather than faulting.
+    failure.** The controller is always brought up and left serving. When the
+    root device is the onboard hub but no downstream device is connected yet,
+    the hub's status-change watch is armed; when no root device is present at
+    all, the controller waits for the first root-port connect. The HCD
+    publishes an interface node per device actually enumerated
+    (`device_live(index)`), so a cold boot with nothing plugged in works:
+    plug a device in afterwards and it autoloads. `reset_and_reenumerate`
+    re-runs the same bring-up walk, so devices that vanished before
+    re-enumeration leave the controller awaiting them rather than faulting.
   - Host/CI-proven over the register-level mock (the mock gained a hub
     status-change endpoint, per-slot EP0-ring tracking, Disable Slot, and HCRST
     state reset; `SET_FEATURE(PORT_RESET)` latches the Reset-change bit and
@@ -494,10 +507,15 @@ the live controller behaviour is host- and CI-proven first.
     `enumeration_drains_every_port_change_latch_so_the_hub_watch_stays_quiet`,
     `trailing_freed_slot_transfer_event_is_drained_not_faulted`,
     `hub_assembly_unplug_at_root_port_tears_down_and_replug_reenumerates`,
-    and the cold-boot-no-device cases
+    the cold-boot-no-device cases
     `bring_up_keyboard_arms_the_hub_watch_when_no_downstream_device_is_present`,
     `bring_up_keyboard_then_a_downstream_connect_enumerates_a_fresh_keyboard`,
-    `bring_up_keyboard_comes_up_awaiting_a_connect_when_no_device_is_attached`.
+    `bring_up_keyboard_comes_up_awaiting_a_connect_when_no_device_is_attached`,
+    and the concurrent-device cases (the mock scripts a keyboard and a
+    mass-storage stick on separate hub ports at once, with per-endpoint slot
+    attribution)
+    `bring_up_serves_a_keyboard_and_a_storage_stick_behind_the_hub_together`
+    and `unplugging_the_keyboard_leaves_the_storage_stick_served`.
   - **Whole-hub-assembly unplug (hub directly on a root port) is detected at
     the root port.** When a hub sits directly on a root port and is itself
     pulled, the unplug surfaces as that root port clearing its connect bit, not
@@ -522,7 +540,7 @@ the live controller behaviour is host- and CI-proven first.
     transaction* (`CompletionCode::indicates_device_unreachable`:
     `UsbTransactionError` or `SplitTransactionError`, excluding a stall/babble
     where the device is responding) is conclusive on its own, so
-    `UsbDevice::detach_if_watched_device_gone` frees the device slot
+    `UsbDevice::detach_if_device_gone` frees the device slot
     **directly** on that code — captured in `last_report_fault_code` by
     `decode_transfer_report` and read before any hub control transfer — instead
     of depending on the confirmation the vanished device's hub often cannot
@@ -533,7 +551,7 @@ the live controller behaviour is host- and CI-proven first.
     `detach_downstream_device` issued a Disable Slot command and waited for its
     completion, but the gone device's hub does not let the controller post that
     completion in time, so the teardown returned `DeviceFault`, the slot was
-    never freed (`device_present()` stayed true), and `process_hub_change`
+    never freed (its table entry stayed live), and `process_hub_change`
     ignored the re-plug connect (it enumerates only when no device is tracked) —
     the "no log on re-plug" symptom. `UsbDevice::disable_slot_best_effort` now
     posts the Disable Slot, waits within budget, and **frees the local slot

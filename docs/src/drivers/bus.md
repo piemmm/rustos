@@ -358,7 +358,7 @@ transports.
 
 The Pi 4 reaches its USB-A ports through a VL805 PCIe xHCI controller
 (`plans/PI.md` P10). The bus-agnostic xHCI protocol layers and the
-single-device HID enumeration engine live in the `lib/usb`
+multi-device enumeration engine live in the `lib/usb`
 (`rustos-usb`) crate — the USB analogue of `lib/virtio` — so this driver
 and an arch-neutral user-space keyboard driver can both build on the same
 engine without depending on each other (`AGENTS.md` §17.4). This driver
@@ -425,14 +425,17 @@ length on every `pop`.
 
 ### Device enumeration and the HID report path
 
-`device` is the single-device enumeration engine. All device-shared
+`device` is the multi-device enumeration engine. All device-shared
 bytes live in one caller-provided region behind the crate's
 `DmaRegion` seam — implemented for the `lib/abi` `DmaSlab` in
 production and by a plain shared buffer in tests — and the engine
-computes a 64-byte-aligned `Layout` inside it (DCBAA, ERST, command
-ring, event segment, input/output contexts, EP0 and interrupt-IN
-transfer rings, the control data buffer, and per-slot report
-buffers), refusing a region that is misaligned or too small.
+computes a 64-byte-aligned `Layout` inside it: the shared structures
+(DCBAA, ERST, command ring, event segment, input context, the root
+device's output context and EP0 ring, the hub status-change ring and
+report, the control data buffer) plus one region per concurrently
+served device (`MAX_DEVICES`, each holding an output context, EP0 /
+interrupt-IN / bulk transfer rings, report buffers, and bulk staging),
+refusing a region that is misaligned or too small.
 
 `UsbDevice::start` zeroes the region, publishes the ERST entry and
 the rings' Link TRBs, and starts the controller through `Xhci::start`.
@@ -460,12 +463,14 @@ transfer event whose interrupt-TRB pointer is not in the control wait's watch
 list → `REJECT_ADDRESS_MISMATCH`, then a wedged ring; the metal symptom was
 the hub's per-port `GET_STATUS` reads returning the all-ones sentinel).
 
-A device *downstream* of an enumerated hub (the Pi 4B keyboard hangs
-off the onboard `2109:3431` VIA hub) is reached on a **second xHCI
-slot**. `UsbDevice::enumerate_downstream_hid(down_port, speed)` keeps
-the hub addressed on its slot and gives the downstream device its own
-EP0 ring and output context (the layout reserves both;
-`control`/`address_device`/`next_report` follow the active slot through
+Devices *downstream* of an enumerated hub (every external device on the
+Pi 4B hangs off the onboard `2109:3431` VIA hub) are each reached on
+their **own xHCI slot** — the `bring_up` walk attaches every connected
+downstream port, up to `MAX_DEVICES` devices at once, so a keyboard and
+a storage stick are served together. `UsbDevice::attach_downstream_device
+(down_port, speed)` keeps the hub addressed on its slot and gives the
+new device the EP0 ring and output context of a free device region
+(`control`/`address_device`/`next_report` follow the active slot through
 `ep0_ring_off`/`output_ctx_off`), then Enable Slot + Address Device
 with a slot context carrying the **Route String** (the hub's downstream
 port, §8.9) and — for a full/low-speed device behind the high-speed hub
@@ -474,12 +479,15 @@ so the controller splits its transactions through the hub's TT. The
 post-Address sequence (descriptors → Configure Endpoint →
 `SET_CONFIGURATION` → `SET_PROTOCOL(boot)` → ready for request-driven report
 arming) is the shared `finish_enumeration`, identical to a root-port device —
-only the topology in the slot context differs. The caller owns the wall-clock
-power-on-good and reset-recovery delays: it powers the port, resets it
-(`SET_FEATURE(PORT_RESET)`), waits, and confirms the port enabled with
-the speed read from `GET_STATUS` before addressing.
+only the topology in the slot context differs. A failed attach restores
+the hub as the active control context and releases the claimed slot, so
+one port's broken device never costs the other ports their service. The
+caller owns the wall-clock power-on-good and reset-recovery delays: it
+powers the port, resets it (`SET_FEATURE(PORT_RESET)`), waits, and
+confirms the port enabled with the speed read from `GET_STATUS` before
+addressing.
 
-Before addressing anything behind it, `enumerate_downstream_hid` first
+Before addressing anything behind it, the bring-up walk first
 **marks the hub as a hub** in its own slot context
 (`configure_hub_slot`): it reads the hub descriptor (`bNbrPorts` and the
 `wHubCharacteristics` TT Think Time, `read_hub_topology`), copies the

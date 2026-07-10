@@ -217,139 +217,36 @@ separate crate from the §8
 pulling it into the kernel-linked driver shell (`AGENTS.md` §2.2 — the `usb_kbd`
 analogue).
 
-### `rustos-drv-input-usb-hid`
-
-`rustos-drv-input-usb-hid` is the §8 driver identity — the `register` entry and
-the §18.3 `BIND_KEYS` bind table. The reusable decode/console/orchestration
-logic described below lives in the [`rustos-hid`](../lib/hid.md) library
-(`lib/hid`), so the user-space keyboard driver process consumes it without a
-`drivers/*`→`drivers/*` edge (`AGENTS.md` §17.4 / §2.2).
-
-The USB-HID logic decodes the two **boot-protocol** report formats
-(USB HID 1.11 Appendix B) — the fixed 8-byte keyboard report and the
-3-or-more-byte mouse report every USB keyboard/mouse must speak without
-a report-descriptor parse — into platform-neutral `InputEvent`s. It is
-the input path for the Pi 4's USB ports (`plans/PI.md` P10).
-
-The decoders (`BootKeyboard`, `BootMouse`) are written against the
-`ReportSource` seam, defined in `lib/abi`
-(`rustos_abi::driver::input`) because its producer is a sibling driver
-and drivers depend only on `lib/*` (`AGENTS.md` §17.4): on metal the
-source is the device's interrupt-IN endpoint serviced by the xHCI
-driver's `UsbDevice` engine ([bus drivers](bus.md)), which enumerates
-the device (`SET_PROTOCOL(boot)` included) and polls the interrupt-IN
-transfer ring; host tests drive a mock report queue — the
-`emmc2`/`rpi_hvs` seam shape (`AGENTS.md` §2.2) — and the usb crate's
-end-to-end test polls a `BootKeyboard` over the mock controller. The
-PCI BAR / hwtree wiring for the VL805 is the remaining P10 work; QEMU
-models no Pi USB timing, so the host suite is the emulation artefact
-and metal acceptance is a checklist.
-
-The keyboard report carries *state* (every held key appears in every
-report), so the decoder diffs consecutive reports and emits one `Key`
-edge per change — releases, then presses, then modifier-bit edges —
-with `code` the HID usage ID (page `0x07`; modifiers `0xE0..=0xE7`). A
-rollover/POST-error report (an array slot in `0x01..=0x03`) keeps the
-held-key state and diffs only the still-valid modifier byte; a
-duplicated usage in a hostile report presses once. Mouse reports are
-buttons (diffed into `Key` events `0x110`/`0x111`/`0x112` — the same
-codes a virtio pointer device delivers) plus `Pointer` X/Y and `Scroll`
-wheel deltas.
-
-Everything fails closed (`AGENTS.md` §5.4): wrong-length reports are
-rejected whole (`LengthOutOfRange`) without touching the device state,
-a source claiming more bytes than its buffer is a `DeviceFault`, and
-events that overflow the caller's `poll` buffer are latched for the
-next call rather than dropped. A per-`poll` report budget bounds the
-work a flooding device can force (`AGENTS.md` §2.1).
-
-#### Console-input producer
-
-For a keyboard wired to a text console, the driver's `console` module
-turns the raw HID-usage edges above into the console (tty) bytes a
-terminal sends (`plans/PI.md` P11). `KeyboardConsole` tracks the held
-modifiers and the caps-/num-lock state, resolves each press to the
-`rustos_input::Key` a US layout produces — the HID-usage table is
-HID-specific, so it lives in the driver; a `ps2` keyboard resolves
-scancode set 1 into the same vocabulary — and runs that key through the
-shared `lib/keymap` terminal map ([`rustos-keymap`](../lib/keymap.md)),
-the one definition that owns the `Key`→bytes translation
-(`AGENTS.md` §2.2). `pump_once` is the driver loop: poll the keyboard,
-feed each event, and inject the produced bytes through a `ConsoleSink`
-— on metal a `console_input` call against the video console's index,
-host-tested with a recording sink. The whole path is allocation-free
-and fails closed (an unknown usage or a non-press produces no bytes).
-Delivering the reports over the Pi 4's VL805 xHCI controller is the
-remaining metal step; QEMU models no Pi USB, so the decode + keymap are
-host-proven and the hardware delivery is a checklist.
-
-#### Boot-keyboard driver-process orchestration
-
-The `service` module is the composition a **user-space** USB boot-keyboard
-driver runs at start-up (`plans/PI.md` P10 chunk 5d-2-ii). It is
-arch-neutral: the board `PCIe` root-complex bring-up and BAR assignment stay
-in the separate board bus driver (`drivers/bus/pcie_brcm` +
-`drivers/bus/usb`); the keyboard driver is autoloaded against the discovered
-HID node, granted **only** the resources its matched node requested — its
-already-assigned xHCI register BAR and a DMA constraint (`AGENTS.md` §18.3) —
-and reaches them through the `DriverHost` its runtime builds over those
-grants. So the orchestration names no PCI, no BCM2711, and no board
-(`AGENTS.md` §2.20).
-
-`bring_up_boot_keyboard(host, delay, bar_base, bar_len, dma_aperture_top)`
-carves the device-shared DMA region and checks it lies wholly below the
-discovered inbound-DMA aperture **before** any register is touched (fail
-closed, `AGENTS.md` §5.4), maps the granted register BAR, brings the
-controller up (`rustos_usb::Xhci::open` + `UsbDevice::start`), and runs the
-arch-neutral root→hub→downstream-HID enumeration
-(`UsbDevice::bring_up_keyboard`, which descends the Pi 4's onboard hub
-when present, `AGENTS.md` §2.2). It returns a `BootKeyboard` the driver's
-service loop drives with `pump_once`, injecting each decoded key edge through
-`key_inject`. The device-shared DMA size is the one `rustos_usb::XHCI_DMA_BYTES`
-the xHCI driver's wiring also carves (`AGENTS.md` §2.2). QEMU models no Pi USB
-timing, so the host tests prove the composition and its fail-closed paths up
-to the controller hand-off — over an inert mock window `Xhci::open` fails
-closed with `DeviceFault`, the on-metal boundary — and the live bring-up plus
-the report pump are the metal acceptance item.
-
-`derive_keyboard_resources` turns the device-resource grants the kernel
-delivered (its `HwResource` set) into the `bar_base`/`bar_len`/
-`dma_aperture_top` the bring-up needs: exactly one register window — an
-`Mmio` window (named by its base) or an outbound `BusWindow` (named by its
-far-side bus address) — and exactly one `Dma` constraint (its device-visible
-exclusive top: the far-side base plus extent for a translated inbound
-viewport, or its `addr_limit` for an untranslated one). It fails closed
-(`NotFound` for a missing window or constraint, `Unsupported` for an
-ambiguous double grant, `OutOfRange` for a zero-length BAR) and never guesses
-a board constant (`AGENTS.md` §2.16 / §2.20 / §5.4).
-
-#### The autoloaded driver binary (`rustos-drv-input-usb-kbd`)
+### The autoloaded driver binary (`rustos-drv-input-usb-kbd`)
 
 The keyboard driver *process* is a **separate crate**,
 `drivers/input/usb_kbd` (`rustos-drv-input-usb-kbd`, `src/main.rs`): the
-`devmgr`-autoloaded **user-space** keyboard driver, installed as a signed
-`/System/Drivers/` bundle (`AGENTS.md` §18, `plans/PI.md` P10 chunk
-5d-2-ii) — the "drivers in user space" steady state (`AGENTS.md` §4). It is a
-pure-Rust `rustos-rt` program (`AGENTS.md` §1 / §16.4) kept separate from the
-`rustos-drv-input-usb-hid` driver so the userland runtime never enters the
-kernel's dependency graph, and depends only on `lib/*` crates so the §17.4
-layering holds. `main` builds `rustos_drvrt::RtDriverHost::from_grants_query`
-over its kernel-issued grants (coherent DMA is carved kernel-side, so no
-architecture-specific cache shim is supplied — platform-neutral, `AGENTS.md`
-§2.20), derives its BAR + DMA aperture from the same grants with
-`rustos_hid::derive_keyboard_resources` (no second `resource_grants` syscall,
-`AGENTS.md` §2.16), runs `rustos_hid::bring_up_boot_keyboard`, and then pumps
-the keyboard forever with `rustos_hid::pump_once`, injecting each decoded key
-edge into the kernel input-focus arbiter through the `key_inject` syscall.
-Each `pump_once` is a blocking URB `ipc_call` the host-controller driver
-answers only when the controller's completion interrupt delivers a report, so
-the driver parks in the kernel between keystrokes — never a busy poll
-(`AGENTS.md` §2.23) — and repeated pump errors exit fail-closed after a
-bounded budget. The host adds no authority — every
-capability and bound is re-checked kernel-side (`AGENTS.md` §5.4) — and a
-bring-up failure exits with a reserved fail-closed code, leaving the console
-without a keyboard rather than wedged (`AGENTS.md` §2.9). This bundle is
-installed into the image `/System/Drivers/` store and autoloaded by `devmgr`
-against the discovered `usb,xhci` node the VL805 bus driver emits (the
-recursive bus chain, `plans/PI.md` P10 D5d); QEMU models no Pi USB, so the
-live autoload + keystroke is the metal acceptance item (`AGENTS.md` §0.9).
+`devmgr`-autoloaded **user-space** keyboard **class driver**, installed as a
+signed `/System/Drivers/` bundle (`AGENTS.md` §18, `plans/USB.md` §1.2) — the
+"drivers in user space" steady state (`AGENTS.md` §4). It binds the
+USB-interface node the host-controller driver (`drivers/bus/usb/xhci`)
+publishes for a HID boot-keyboard interface — never the controller node — and
+holds **no** controller register grant and **no** DMA grant: its matched
+node's only resources are the per-interface URB call endpoint and the shared
+report buffer (`AGENTS.md` §5.4 — least privilege). It is a pure-Rust
+`rustos-rt` program (`AGENTS.md` §1 / §16.4) kept separate from the
+`rustos-drv-input-usb-hid` decode crate so the userland runtime never enters
+the kernel's dependency graph, and depends only on `lib/*` crates so the
+§17.4 layering holds. `main` builds
+`rustos_drvrt::RtDriverHost::from_grants_query` over its kernel-issued grants,
+takes the endpoint id and maps the shared buffer from them, wraps the
+`lib/usb` transport client in a `ReportSource` (`UrbReportSource`: each
+`next_report` submits an interrupt-IN URB and reads the completed report out
+of the shared buffer), and then pumps the keyboard forever with
+`rustos_hid::pump_once`, injecting each produced key record into the seat's
+input routing through the `key_inject` syscall. Each pump is a blocking URB `ipc_call` the
+host-controller driver answers only when the controller's completion
+interrupt delivers a report, so the driver parks in the kernel between
+keystrokes — never a busy poll (`AGENTS.md` §2.23) — and repeated pump errors
+exit fail-closed after a bounded budget, leaving the console without a
+keyboard rather than wedged (`AGENTS.md` §2.9). A device disconnect retracts
+the interface node, `devmgr` unloads this driver, and a re-plug autoloads a
+fresh instance onto the same transport. This bundle is installed into the
+image `/System/Drivers/` store and autoloaded by `devmgr` against the
+discovered HID interface node; QEMU models no Pi USB, so the live autoload +
+keystroke is the metal acceptance item (`AGENTS.md` §0.9).

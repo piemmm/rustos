@@ -43,6 +43,16 @@ Facts the stages below build on, so no stage re-derives them:
   serves control-IN, the no-data control-OUT (since D2 — a SETUP-only
   class request; a control-OUT *data stage* stays refused, it has no
   consumer), interrupt, and — since D1 (§2.2) — bulk transfers.
+  **The engine and HCD serve every reachable device concurrently**
+  (`UsbDevice::bring_up` walks every connected hub port into a table of
+  up to `MAX_DEVICES` devices, each with its own layout region and its
+  own HCD transport — endpoint, shared buffer, interface node): a
+  keyboard and a storage stick plugged in together are both served,
+  fixing the Pi 4 boot defect where a plugged-in stick won the engine's
+  single device slot and the keyboard never enumerated. Hot-plug
+  attaches/detaches exactly the affected device's index; a failed
+  per-port enumeration is skipped with its slot released
+  (`plans/USB.md` §1.1).
 - **The block-driver contract exists**
   (`rustos_abi::driver::block::Block`), implemented by
   `drivers/storage/virtio_blk` and `drivers/storage/emmc2` with bounded,

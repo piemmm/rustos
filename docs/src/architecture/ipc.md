@@ -258,6 +258,7 @@ Audit events live in the `kernel/ipc` reserved range `3_000..4_000`
 | 3047 | Error | `CALL_QUEUE_FULL`             | The endpoint's outstanding-call queue was full. |
 | 3048 | Debug | `CALL_REPLIED`                | A server delivered a reply to an in-flight call. `Debug` for the same reason as `CALL_POSTED` (3043): routine high-throughput RPC completion. Its denial (3049) stays at `Error`. |
 | 3049 | Error | `CALL_REPLY_DENIED`           | Unknown ticket, or reply exceeded `max_reply`. |
+| 3050 | Error | `CALL_ENDPOINT_REGISTER_DENIED` | A registry bind was refused because the `EndpointId` was already bound; the freshly created endpoint is dropped (mirrors `PORT_REGISTER_DENIED`, 3004). |
 
 Adding a new event requires assigning the next free identifier in
 `kernel/ipc/src/audit.rs` and appending a row to this table.

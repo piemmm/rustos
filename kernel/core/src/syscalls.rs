@@ -4722,8 +4722,9 @@ where
         )?;
         // Publish it so the `ipc_call` handler can resolve callers to it. A
         // live id is never silently re-pointed: a clash fails closed with
-        // `AlreadyExists` and the freshly built endpoint is dropped.
-        crate::callreg::register(alloc::sync::Arc::new(endpoint))?;
+        // `AlreadyExists` (audited by the registry as the register-denied
+        // decision) and the freshly built endpoint is dropped.
+        crate::callreg::register(alloc::sync::Arc::new(endpoint), self.audit)?;
 
         // Mint the creator the per-endpoint grant for a grant-restricted
         // endpoint — mirroring `msi_alloc`'s grant for an allocated IRQ line.
@@ -18724,7 +18725,7 @@ mod tests {
             )
             .expect("unrestricted endpoint"),
         );
-        crate::callreg::register(ep.clone()).expect("registered");
+        crate::callreg::register(ep.clone(), sink).expect("registered");
         ep
     }
 
@@ -18869,7 +18870,7 @@ mod tests {
             )
             .expect("restricted endpoint"),
         );
-        crate::callreg::register(ep).expect("registered");
+        crate::callreg::register(ep, sink).expect("registered");
 
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
@@ -19085,10 +19086,22 @@ mod tests {
         assert!(!crate::callreg::contains(EndpointId(id)));
         assert_eq!(h.call_create(&ctx, id, 0x1000, 0x2000, 64, 64, 4), Ok(0));
         assert!(crate::callreg::contains(EndpointId(id)));
-        // A second bind of the same live id fails closed.
+        let denied = rustos_kernel_ipc::AuditEvent::CallEndpointRegisterDenied
+            .id()
+            .0;
+        assert!(
+            !sink.event_ids().contains(&denied),
+            "a clean bind emits no register-denied audit"
+        );
+        // A second bind of the same live id fails closed, and the refusal —
+        // not a bare "endpoint created" — is what lands on the audit trail.
         assert_eq!(
             h.call_create(&ctx, id, 0x1000, 0x2000, 64, 64, 4),
             Err(Errno::AlreadyExists)
+        );
+        assert!(
+            sink.event_ids().contains(&denied),
+            "the refused re-bind is audited as register-denied"
         );
         crate::callreg::unregister(EndpointId(id));
     }
@@ -19173,7 +19186,7 @@ mod tests {
             )
             .expect("grant-restricted endpoint"),
         );
-        crate::callreg::register(ep.clone()).expect("registered");
+        crate::callreg::register(ep.clone(), sink).expect("registered");
         ep
     }
 
@@ -19678,7 +19691,7 @@ mod tests {
             )
             .expect("endpoint"),
         );
-        crate::callreg::register(ep.clone()).expect("registered");
+        crate::callreg::register(ep.clone(), sink).expect("registered");
         let poster = make_caps_record(99, &[], sink);
         ep.post(&poster, 99, b"x", sink).expect("post a request");
 
@@ -19936,7 +19949,7 @@ mod tests {
             )
             .expect("restricted-recv endpoint"),
         );
-        crate::callreg::register(ep).expect("registered");
+        crate::callreg::register(ep, sink).expect("registered");
 
         // The caller (task 2) does not hold CAP_AUDIT_READ.
         let caps = make_caps_record(2, &[], sink);
@@ -19997,7 +20010,7 @@ mod tests {
             )
             .expect("unrestricted endpoint"),
         );
-        crate::callreg::register(ep.clone()).expect("registered");
+        crate::callreg::register(ep.clone(), sink).expect("registered");
 
         // A client (task 7) posts a request, awaiting its reply.
         let client_caps = make_caps_record(7, &[], sink);
@@ -20076,7 +20089,7 @@ mod tests {
             )
             .expect("unrestricted endpoint"),
         );
-        crate::callreg::register(ep.clone()).expect("registered");
+        crate::callreg::register(ep.clone(), sink).expect("registered");
 
         // A client (task 7) with a minted process instance and a real
         // capability posts a request.
