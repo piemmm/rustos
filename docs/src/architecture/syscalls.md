@@ -181,23 +181,31 @@ port.
 `pointer_inject` (no. 78) and `pointer_read` (no. 79) are the pointer
 analogues of `key_inject` (no. 22) and `keyboard_read` (no. 25): the same
 seat-addressed, capability-gated pair, carrying one fixed-width
-`PointerInput` record (`lib/abi/src/input.rs`) per call. A pointer-input
-driver holding `CAP_INPUT_INJECT` injects each decoded motion, button
-edge, or scroll step for the seat its device belongs to; the kernel copies
-the record in through the validated boundary, decodes it fail-closed, and
-the seat registry routes it by who holds the seat — a held seat's record
-is queued on its bounded per-seat pointer channel, an unowned seat's
-record is consumed and discarded (the text console has no pointer
-consumer; the driver never learns, and never chooses, the destination).
-The seat owner drains the channel with `pointer_read`, gated on
-`CAP_INPUT_READ` **and** owner-gated against the live seat lease exactly
-like `keyboard_read` — a non-owner (even one holding the capability) is
-refused with `SeatNotOwner`/`SeatRevoked`, so no other session can observe
-the pointer stream. Both are unaudited per event like the other
-high-volume stream calls; the first delivered input event (key or
-pointer) emits the one-shot `INPUT_DELIVERED` liveness witness. Wrappers:
-`rustos_rt::pointer_inject` / `rustos_rt::pointer_read`; C stubs
-`ros_sys_pointer_inject` / `ros_sys_pointer_read`.
+`PointerInput` record (`lib/abi/src/input.rs`) per call. The record is
+device-resolved but screen-independent — a relative displacement
+(`MovedBy`) or a resolved button edge, never an absolute position: only
+the seat owner (the desktop session, which owns the compositor) knows the
+screen extent, so it accumulates and clamps displacements into the
+on-screen pointer position; a driver needs no display-geometry authority.
+A pointer-input driver holding `CAP_INPUT_INJECT` injects each decoded
+motion or button edge for the seat its device belongs to (scroll ticks
+are not carried yet — the vocabulary is extended with the first desktop
+scroll consumer, never ahead of it); the kernel copies the record in
+through the validated boundary, decodes it fail-closed, and the seat
+registry routes it by who holds the seat — a held seat's record is queued
+on its bounded per-seat pointer channel, an unowned seat's record is
+consumed and discarded (the text console has no pointer consumer; the
+driver never learns, and never chooses, the destination). The seat owner
+drains the channel with `pointer_read`, gated on `CAP_INPUT_READ` **and**
+owner-gated against the live seat lease exactly like `keyboard_read` — a
+non-owner (even one holding the capability) is refused with
+`SeatNotOwner`/`SeatRevoked`, so no other session can observe the pointer
+stream. Both are unaudited per event like the other high-volume stream
+calls; the first delivered event of each input kind emits that kind's
+one-shot `INPUT_DELIVERED` liveness witness (`kind=key` / `kind=pointer`,
+at most one each). Wrappers: `rustos_rt::pointer_inject` /
+`rustos_rt::pointer_read`; C stubs `ros_sys_pointer_inject` /
+`ros_sys_pointer_read`.
 
 `resource_open` (no. 67) is the resource-reference analogue of `fs_open`
 (`plans/ALIAS.md`, `.junie/PREREQUISITES2.md` P5). A resource reference

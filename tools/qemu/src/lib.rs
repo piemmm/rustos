@@ -198,6 +198,27 @@ pub struct KeyInjection {
     pub ready_occurrences: u32,
 }
 
+/// A deterministic pointer-motion injection request for an input vertical
+/// — the mouse analogue of [`KeyInjection`].
+///
+/// The runner waits for [`ready_marker`](Self::ready_marker) on the serial
+/// console, then sends one `mouse_move <dx> <dy>` through the QEMU monitor.
+/// QEMU delivers the relative motion to the attached `virtio-mouse-device`
+/// (`EV_REL` events), so the guest's pointer driver decodes and injects a
+/// real device-originated motion. Requires [`Spec::with_virtio_mouse`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PointerInjection {
+    /// Serial-console substring the runner waits for before injecting —
+    /// typically a marker proving the keyboard's own injection already
+    /// landed, so the two injections are ordered and separately
+    /// witnessed.
+    pub ready_marker: String,
+    /// Relative x motion in device counts (positive rightward).
+    pub dx: i32,
+    /// Relative y motion in device counts (positive downward).
+    pub dy: i32,
+}
+
 /// One step of a deterministic serial-input script for an interactive
 /// vertical.
 ///
@@ -324,6 +345,11 @@ pub struct Spec {
     /// driven when a pointer sibling is enumerated beside it. Only the
     /// aarch64 argv honours it today.
     pub input_mouse: bool,
+    /// When `Some`, inject the described relative mouse motion through
+    /// the QEMU monitor once its readiness marker appears on the serial
+    /// console. Meaningful only with [`Spec::input_mouse`]; `None`
+    /// injects no motion.
+    pub input_pointer_move: Option<PointerInjection>,
     /// When non-empty, pipe QEMU's stdin and replay the steps in order:
     /// each waits for its readiness marker on the serial console (past
     /// the previous step's match) before writing its line. Empty leaves
@@ -365,6 +391,7 @@ impl Spec {
             extra_args: Vec::new(),
             input_keyboard: None,
             input_mouse: false,
+            input_pointer_move: None,
             serial_input: Vec::new(),
             session: SessionKind::HeadlessTest,
         }
@@ -401,6 +428,7 @@ impl Spec {
             extra_args: Vec::new(),
             input_keyboard: None,
             input_mouse: false,
+            input_pointer_move: None,
             serial_input: Vec::new(),
             session: SessionKind::HeadlessTest,
         }
@@ -422,6 +450,7 @@ impl Spec {
             extra_args: Vec::new(),
             input_keyboard: None,
             input_mouse: false,
+            input_pointer_move: None,
             serial_input: Vec::new(),
             session: SessionKind::HeadlessTest,
         }
@@ -515,6 +544,21 @@ impl Spec {
         self
     }
 
+    /// Inject one relative mouse motion (`mouse_move dx dy`) through the
+    /// QEMU monitor once `ready_marker` appears on the serial console.
+    /// Also attaches the `virtio-mouse-device` the motion targets, so a
+    /// spec cannot ask for motion with no device to deliver it to.
+    #[must_use]
+    pub fn with_pointer_move(mut self, ready_marker: impl Into<String>, dx: i32, dy: i32) -> Self {
+        self.input_mouse = true;
+        self.input_pointer_move = Some(PointerInjection {
+            ready_marker: ready_marker.into(),
+            dx,
+            dy,
+        });
+        self
+    }
+
     /// Append one step to the serial-input script: pipe QEMU's stdin and
     /// write `line` to the guest's serial input once the guest prints
     /// `ready_marker` on the serial console, past the previous step's
@@ -582,15 +626,13 @@ impl Runner {
             cmd.arg(a);
         }
 
-        // When the spec asks for key injection, attach a QEMU monitor on
-        // a private unix socket so the runner can drive `sendkey` once the
-        // guest is ready. The socket is server-side in QEMU (created at
-        // startup, well before the guest's readiness marker) and the
-        // runner connects as a client.
-        let monitor = spec
-            .input_keyboard
-            .as_ref()
-            .map(|_| MonitorSocket::reserve());
+        // When the spec asks for key or pointer injection, attach a QEMU
+        // monitor on a private unix socket so the runner can drive
+        // `sendkey` / `mouse_move` once the guest is ready. The socket is
+        // server-side in QEMU (created at startup, well before the guest's
+        // readiness marker) and the runner connects as a client.
+        let monitor = (spec.input_keyboard.is_some() || spec.input_pointer_move.is_some())
+            .then(MonitorSocket::reserve);
         if let Some(mon) = &monitor {
             cmd.arg("-chardev");
             let mut chardev = OsString::from("socket,id=rustos-mon,server=on,wait=off,path=");
@@ -700,6 +742,7 @@ fn supervise(
     let SerialDrain {
         captured,
         marker_seen,
+        pointer_marker_seen,
         reader,
     } = spawn_serial_drain(&mut child, spec);
 
@@ -726,8 +769,7 @@ fn supervise(
     // and then check once: that pattern adds up to `timeout` of latency
     // for fast-failing tests, which would slow `cargo xtask ci`.
     let tick = Duration::from_millis(25);
-    // `injected` starts "done" when no injection was requested.
-    let mut injected = spec.input_keyboard.is_none();
+    let mut injections = InjectionState::new(spec);
     // Serial-input script cursor: the next step to send, and the byte
     // offset in the captured serial log just past the previous step's
     // matched marker. Matching only ever advances, so each marker must
@@ -736,41 +778,14 @@ fn supervise(
     // on the first occurrence.
     let mut serial_step = 0usize;
     let mut serial_search_from = 0usize;
-    // Hold the monitor connection open for the rest of the run: a
-    // readline monitor discards a command if the peer disconnects
-    // before it is processed, so the stream must outlive the send.
-    let mut monitor_conn: Option<UnixStream> = None;
     let done = 'run: loop {
         if let Some(status) = child.try_wait()? {
-            if serial_step < spec.serial_input.len() {
-                // The guest exited before the script completed: an
-                // unreached marker means the expected exchange never
-                // happened (e.g. a prompt that should have followed a
-                // reply never printed), so the run fails even when the
-                // guest itself reported success.
-                break 'run DoneReason::InjectionFailed(format!(
-                    "serial input script incomplete: {serial_step} of {} steps sent \
-                     before exit (next marker {:?} never seen)",
-                    spec.serial_input.len(),
-                    spec.serial_input[serial_step].ready_marker,
-                ));
-            }
-            break 'run DoneReason::Exited(status.code().unwrap_or(-1));
+            break 'run exit_reason(spec, serial_step, injections.pointer_sent, status);
         }
-        if !injected && marker_seen.load(Ordering::Acquire) {
-            // Safe to unwrap: `injected` is only `false` when both
-            // `input_keyboard` and `monitor` are `Some`.
-            let mon = monitor.expect("monitor present for injection");
-            let key = &spec.input_keyboard.as_ref().expect("key present").key;
-            match inject_key(mon.path(), key) {
-                Ok(stream) => monitor_conn = Some(stream),
-                Err(e) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    break 'run DoneReason::InjectionFailed(format!("key injection failed: {e}"));
-                }
-            }
-            injected = true;
+        if let Err(e) = injections.drive(spec, monitor, &marker_seen, &pointer_marker_seen) {
+            let _ = child.kill();
+            let _ = child.wait();
+            break 'run DoneReason::InjectionFailed(e);
         }
         let advanced = advance_serial_script(
             &spec.serial_input,
@@ -797,10 +812,10 @@ fn supervise(
     };
 
     // The child has exited (or been killed); the reader thread sees
-    // EOF on the closed pipe and finishes. Drop the monitor connection
+    // EOF on the closed pipe and finishes. Drop the monitor connections
     // and the guest's serial input pipe only now, once the run is
     // complete.
-    drop(monitor_conn);
+    drop(injections);
     drop(serial_stdin);
     let _ = reader.join();
     let _ = err_reader.join();
@@ -953,6 +968,8 @@ struct SerialDrain {
     /// Set once the key injection's readiness marker has appeared the
     /// required number of times.
     marker_seen: Arc<AtomicBool>,
+    /// Set once the pointer injection's readiness marker has appeared.
+    pointer_marker_seen: Arc<AtomicBool>,
     /// The drain thread, joined once the child has exited.
     reader: std::thread::JoinHandle<()>,
 }
@@ -971,6 +988,7 @@ struct SerialDrain {
 fn spawn_serial_drain(child: &mut Child, spec: &Spec) -> SerialDrain {
     let captured = Arc::new(Mutex::new(String::new()));
     let marker_seen = Arc::new(AtomicBool::new(false));
+    let pointer_marker_seen = Arc::new(AtomicBool::new(false));
     let reader = {
         let captured = Arc::clone(&captured);
         let stdout = child.stdout.take();
@@ -982,6 +1000,9 @@ fn spawn_serial_drain(child: &mut Child, spec: &Spec) -> SerialDrain {
                 Arc::clone(&marker_seen),
             ));
         }
+        if let Some(p) = &spec.input_pointer_move {
+            markers.push((p.ready_marker.clone(), 1, Arc::clone(&pointer_marker_seen)));
+        }
         std::thread::spawn(move || {
             drain_stream(stdout, &captured, &markers);
         })
@@ -989,6 +1010,7 @@ fn spawn_serial_drain(child: &mut Child, spec: &Spec) -> SerialDrain {
     SerialDrain {
         captured,
         marker_seen,
+        pointer_marker_seen,
         reader,
     }
 }
@@ -1033,18 +1055,118 @@ fn drain_stream(
     }
 }
 
-/// Send a single `sendkey <key>` command to QEMU's HMP monitor on the
-/// unix socket at `path`, returning the still-open connection. QEMU
-/// emits a real key press+release pair to the guest's input device. The
-/// HMP monitor accepts newline-terminated commands immediately, so the
-/// banner need not be read first — but the caller must keep the returned
-/// stream alive until the run ends, because a readline monitor discards
-/// the command if the peer disconnects before it is processed.
-fn inject_key(path: &Path, key: &str) -> io::Result<UnixStream> {
-    let mut stream = UnixStream::connect(path)?;
-    stream.write_all(format!("sendkey {key}\n").as_bytes())?;
-    stream.flush()?;
-    Ok(stream)
+/// The one-shot marker-gated monitor injections [`supervise`] drives on
+/// every poll tick: whether each requested injection has been sent, and
+/// the **single** still-open monitor connection every injection shares.
+/// One connection, deliberately: QEMU's monitor chardev socket serves
+/// one client at a time, so a second connection while the first is held
+/// open would sit unaccepted in the listen backlog and its command would
+/// silently never be processed — and the readline monitor discards a
+/// command if the peer disconnects before processing it, so the one
+/// stream is opened on the first send and held for the rest of the run.
+struct InjectionState {
+    key_sent: bool,
+    pointer_sent: bool,
+    conn: Option<UnixStream>,
+}
+
+impl InjectionState {
+    /// Each `*_sent` flag starts "done" when its injection was not
+    /// requested, so [`Self::drive`] only ever acts on requested ones.
+    fn new(spec: &Spec) -> Self {
+        Self {
+            key_sent: spec.input_keyboard.is_none(),
+            pointer_sent: spec.input_pointer_move.is_none(),
+            conn: None,
+        }
+    }
+
+    /// Send whichever requested injections have just become ready.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failing injection's message; the caller kills the
+    /// child and fails the run with it.
+    fn drive(
+        &mut self,
+        spec: &Spec,
+        monitor: Option<&MonitorSocket>,
+        key_seen: &AtomicBool,
+        pointer_seen: &AtomicBool,
+    ) -> Result<(), String> {
+        // Safe to unwrap inside the closures: each `*_sent` flag is only
+        // `false` when its injection request and `monitor` are both `Some`.
+        if !self.key_sent && key_seen.load(Ordering::Acquire) {
+            let key = &spec.input_keyboard.as_ref().expect("key present").key;
+            self.send(monitor, "key", &format!("sendkey {key}"))?;
+            self.key_sent = true;
+        }
+        if !self.pointer_sent && pointer_seen.load(Ordering::Acquire) {
+            let mv = spec.input_pointer_move.as_ref().expect("motion present");
+            self.send(
+                monitor,
+                "pointer",
+                &format!("mouse_move {} {}", mv.dx, mv.dy),
+            )?;
+            self.pointer_sent = true;
+        }
+        Ok(())
+    }
+
+    /// Write one newline-terminated command over the shared monitor
+    /// connection, opening it on the first send. The HMP monitor accepts
+    /// commands immediately, so the banner need not be read first.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failing injection's message (`what` names it).
+    fn send(
+        &mut self,
+        monitor: Option<&MonitorSocket>,
+        what: &str,
+        command: &str,
+    ) -> Result<(), String> {
+        let fail = |e: io::Error| format!("{what} injection failed: {e}");
+        if self.conn.is_none() {
+            let mon = monitor.expect("monitor present for injection");
+            self.conn = Some(UnixStream::connect(mon.path()).map_err(fail)?);
+        }
+        let Some(stream) = self.conn.as_mut() else {
+            // Unreachable after the ensure above; refuse rather than panic.
+            return Err(fail(io::Error::other("monitor connection vanished")));
+        };
+        stream
+            .write_all(format!("{command}\n").as_bytes())
+            .and_then(|()| stream.flush())
+            .map_err(fail)
+    }
+}
+
+/// Classify a child exit observed by [`supervise`]: an exit before the
+/// serial-input script completed, or before a requested pointer motion
+/// was ever sent, means the exchange the vertical was meant to prove
+/// never happened — the run fails even when the guest itself reported
+/// success. Otherwise the guest's own exit status decides the outcome.
+fn exit_reason(
+    spec: &Spec,
+    serial_step: usize,
+    pointer_injected: bool,
+    status: std::process::ExitStatus,
+) -> DoneReason {
+    if serial_step < spec.serial_input.len() {
+        return DoneReason::InjectionFailed(format!(
+            "serial input script incomplete: {serial_step} of {} steps sent \
+             before exit (next marker {:?} never seen)",
+            spec.serial_input.len(),
+            spec.serial_input[serial_step].ready_marker,
+        ));
+    }
+    if !pointer_injected {
+        return DoneReason::InjectionFailed(
+            "pointer injection never sent: its readiness marker was not seen before exit".into(),
+        );
+    }
+    DoneReason::Exited(status.code().unwrap_or(-1))
 }
 
 /// Helper exported for downstream consumers (e.g. `cargo xtask`) that need to
@@ -1270,6 +1392,7 @@ mod tests {
             extra_args: Vec::new(),
             input_keyboard: None,
             input_mouse: false,
+            input_pointer_move: None,
             serial_input: Vec::new(),
             session: SessionKind::HeadlessTest,
         };

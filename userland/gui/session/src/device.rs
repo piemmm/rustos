@@ -8,6 +8,16 @@
 //! the desktop's `lib/input` [`InputEvent`] vocabulary the window manager and
 //! taskbar route.
 //!
+//! The seat channel is deliberately **screen-independent**: a driver injects
+//! relative displacements ([`PointerInput::MovedBy`]) and resolved button
+//! edges, because only the seat owner — this desktop session, which owns the
+//! compositor — knows the screen's pixel extent. [`DeviceInputSource`] is
+//! where that policy lives: it holds the absolute pointer position, starts it
+//! at the screen's centre, accumulates each displacement with saturating
+//! arithmetic, and clamps the result to the screen rectangle, so the pointer
+//! can never leave the screen no matter what a (compromised) injector sends.
+//! Construction refuses an empty screen outright (fail closed).
+//!
 //! The raw bytes arrive through an injected [`PointerInputChannel`] seam — a
 //! capability-checked kernel input channel on a running system, an in-memory
 //! queue in tests — so this `userland/gui` crate holds no
@@ -22,7 +32,7 @@
 
 use rustos_abi::input::{PointerButtonCode, PointerInput};
 use rustos_abi::Errno;
-use rustos_wm::{InputEvent, Point, PointerButton};
+use rustos_wm::{InputEvent, Point, PointerButton, Rect};
 
 use crate::shell::InputSource;
 
@@ -46,21 +56,46 @@ pub trait PointerInputChannel {
 }
 
 /// An [`InputSource`] that decodes [`PointerInput`] records from a
-/// [`PointerInputChannel`].
+/// [`PointerInputChannel`] and resolves them against the screen.
 ///
-/// Wrap a channel with [`new`](Self::new), then hand the source to
+/// Wrap a channel with [`new`](Self::new), handing it the compositor's
+/// screen rectangle, then give the source to
 /// [`DesktopShell::pump`](crate::DesktopShell::pump): each
-/// [`poll`](InputSource::poll) reads one record from the channel and decodes
-/// it into an [`InputEvent`].
+/// [`poll`](InputSource::poll) reads one record from the channel, decodes
+/// it, and — for motion — advances the held pointer position, clamped to
+/// the screen.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DeviceInputSource<C> {
     channel: C,
+    /// The screen rectangle every accumulated position is clamped into.
+    screen: Rect,
+    /// The current absolute pointer position; motion records advance it.
+    pointer: Point,
 }
 
 impl<C> DeviceInputSource<C> {
-    /// Build a device input source over `channel`.
-    pub const fn new(channel: C) -> Self {
-        Self { channel }
+    /// Build a device input source over `channel`, resolving motion against
+    /// `screen` (the compositor's pixel rectangle). The pointer starts at
+    /// the screen's centre.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Errno::OutOfRange`] when `screen` is empty: a screenless
+    /// source could never establish a valid pointer position, so it is
+    /// refused at construction rather than misbehaving later (fail closed).
+    pub fn new(channel: C, screen: Rect) -> Result<Self, Errno> {
+        if screen.is_empty() {
+            return Err(Errno::OutOfRange);
+        }
+        let centre = Point::new(
+            screen.left().saturating_add_unsigned(screen.width / 2),
+            screen.top().saturating_add_unsigned(screen.height / 2),
+        );
+        Ok(Self {
+            channel,
+            screen,
+            pointer: centre,
+        })
     }
 
     /// The underlying channel.
@@ -77,6 +112,31 @@ impl<C> DeviceInputSource<C> {
     pub fn into_channel(self) -> C {
         self.channel
     }
+
+    /// The current absolute pointer position.
+    #[must_use]
+    pub const fn pointer(&self) -> Point {
+        self.pointer
+    }
+
+    /// Advance the pointer by one displacement, saturating and clamping so
+    /// the result always lies on the screen — a hostile or faulty injector
+    /// can pin the pointer to an edge, never move it off-screen or wrap it.
+    fn displace(&mut self, dx: i32, dy: i32) -> Point {
+        let max_x = self.screen.right() - 1;
+        let max_y = self.screen.bottom() - 1;
+        self.pointer = Point::new(
+            self.pointer
+                .x
+                .saturating_add(dx)
+                .clamp(self.screen.left(), max_x),
+            self.pointer
+                .y
+                .saturating_add(dy)
+                .clamp(self.screen.top(), max_y),
+        );
+        self.pointer
+    }
 }
 
 /// Map a decoded [`PointerButtonCode`] to the desktop's [`PointerButton`].
@@ -92,26 +152,21 @@ const fn pointer_button(code: PointerButtonCode) -> PointerButton {
     }
 }
 
-/// Translate a decoded ABI [`PointerInput`] into the desktop [`InputEvent`].
-fn to_input_event(record: PointerInput) -> InputEvent {
-    match record {
-        PointerInput::Moved { x, y } => InputEvent::PointerMoved {
-            to: Point::new(x, y),
-        },
-        PointerInput::Pressed(button) => InputEvent::PointerPressed {
-            button: pointer_button(button),
-        },
-        PointerInput::Released(button) => InputEvent::PointerReleased {
-            button: pointer_button(button),
-        },
-    }
-}
-
 impl<C: PointerInputChannel> InputSource for DeviceInputSource<C> {
     fn poll(&mut self) -> Result<Option<InputEvent>, Errno> {
         match self.channel.next_record()? {
             None => Ok(None),
-            Some(bytes) => Ok(Some(to_input_event(PointerInput::from_bytes(&bytes)?))),
+            Some(bytes) => Ok(Some(match PointerInput::from_bytes(&bytes)? {
+                PointerInput::MovedBy { dx, dy } => InputEvent::PointerMoved {
+                    to: self.displace(dx, dy),
+                },
+                PointerInput::Pressed(button) => InputEvent::PointerPressed {
+                    button: pointer_button(button),
+                },
+                PointerInput::Released(button) => InputEvent::PointerReleased {
+                    button: pointer_button(button),
+                },
+            })),
         }
     }
 }
@@ -123,7 +178,11 @@ mod tests {
     use alloc::collections::VecDeque;
     use rustos_abi::input::{PointerButtonCode, PointerInput};
     use rustos_abi::Errno;
-    use rustos_wm::{InputEvent, Point, PointerButton};
+    use rustos_wm::{InputEvent, Point, PointerButton, Rect};
+
+    /// The screen the tests resolve motion against: 640×480 at the origin,
+    /// so the pointer starts at its centre (320, 240).
+    const SCREEN: Rect = Rect::new(0, 0, 640, 480);
 
     /// An in-memory channel that yields queued records, optionally faulting.
     struct QueueChannel {
@@ -157,17 +216,71 @@ mod tests {
         }
     }
 
+    fn source(events: &[PointerInput]) -> DeviceInputSource<QueueChannel> {
+        DeviceInputSource::new(QueueChannel::new(events), SCREEN).expect("non-empty screen")
+    }
+
     #[test]
-    fn decodes_moved_to_absolute_point() {
-        let mut source =
-            DeviceInputSource::new(QueueChannel::new(&[PointerInput::Moved { x: 12, y: -5 }]));
+    fn empty_screen_is_refused_at_construction() {
+        assert_eq!(
+            DeviceInputSource::new(QueueChannel::new(&[]), Rect::EMPTY).map(|_| ()),
+            Err(Errno::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn pointer_starts_at_the_screen_centre() {
+        let source = source(&[]);
+        assert_eq!(source.pointer(), Point::new(320, 240));
+    }
+
+    #[test]
+    fn displacements_accumulate_into_an_absolute_position() {
+        let mut source = source(&[
+            PointerInput::MovedBy { dx: 12, dy: -5 },
+            PointerInput::MovedBy { dx: -2, dy: 0 },
+        ]);
         assert_eq!(
             source.poll(),
             Ok(Some(InputEvent::PointerMoved {
-                to: Point::new(12, -5)
+                to: Point::new(332, 235)
+            }))
+        );
+        assert_eq!(
+            source.poll(),
+            Ok(Some(InputEvent::PointerMoved {
+                to: Point::new(330, 235)
             }))
         );
         assert_eq!(source.poll(), Ok(None));
+    }
+
+    #[test]
+    fn motion_is_clamped_to_the_screen() {
+        // A displacement past every edge — including i32 extremes, which
+        // must saturate rather than wrap — pins the pointer to the edge.
+        let mut source = source(&[
+            PointerInput::MovedBy {
+                dx: i32::MIN,
+                dy: i32::MIN,
+            },
+            PointerInput::MovedBy {
+                dx: i32::MAX,
+                dy: i32::MAX,
+            },
+        ]);
+        assert_eq!(
+            source.poll(),
+            Ok(Some(InputEvent::PointerMoved {
+                to: Point::new(0, 0)
+            }))
+        );
+        assert_eq!(
+            source.poll(),
+            Ok(Some(InputEvent::PointerMoved {
+                to: Point::new(639, 479)
+            }))
+        );
     }
 
     #[test]
@@ -177,7 +290,7 @@ mod tests {
             PointerInput::Released(PointerButtonCode::Secondary),
             PointerInput::Pressed(PointerButtonCode::Middle),
         ];
-        let mut source = DeviceInputSource::new(QueueChannel::new(&events));
+        let mut source = source(&events);
         assert_eq!(
             source.poll(),
             Ok(Some(InputEvent::PointerPressed {
@@ -200,10 +313,21 @@ mod tests {
     }
 
     #[test]
+    fn buttons_do_not_move_the_pointer() {
+        let mut source = source(&[PointerInput::Pressed(PointerButtonCode::Primary)]);
+        let before = source.pointer();
+        assert!(matches!(
+            source.poll(),
+            Ok(Some(InputEvent::PointerPressed { .. }))
+        ));
+        assert_eq!(source.pointer(), before);
+    }
+
+    #[test]
     fn malformed_record_surfaces_bad_magic() {
         let mut channel = QueueChannel::new(&[]);
         channel.push_raw([0u8; PointerInput::WIRE_LEN]);
-        let mut source = DeviceInputSource::new(channel);
+        let mut source = DeviceInputSource::new(channel, SCREEN).expect("non-empty screen");
         // An all-zero record has the wrong magic and must be refused, never
         // misinterpreted.
         assert_eq!(source.poll(), Err(Errno::BadMagic));
@@ -211,23 +335,22 @@ mod tests {
 
     #[test]
     fn channel_fault_propagates() {
-        let mut channel = QueueChannel::new(&[PointerInput::Moved { x: 1, y: 2 }]);
+        let mut channel = QueueChannel::new(&[PointerInput::MovedBy { dx: 1, dy: 2 }]);
         channel.fault_with(Errno::NotFound);
-        let mut source = DeviceInputSource::new(channel);
+        let mut source = DeviceInputSource::new(channel, SCREEN).expect("non-empty screen");
         assert_eq!(source.poll(), Err(Errno::NotFound));
         // After the one-shot fault clears, the queued record still decodes.
         assert_eq!(
             source.poll(),
             Ok(Some(InputEvent::PointerMoved {
-                to: Point::new(1, 2)
+                to: Point::new(321, 242)
             }))
         );
     }
 
     #[test]
     fn into_channel_returns_the_wrapped_channel() {
-        let source =
-            DeviceInputSource::new(QueueChannel::new(&[PointerInput::Moved { x: 0, y: 0 }]));
+        let source = source(&[PointerInput::MovedBy { dx: 0, dy: 0 }]);
         let channel = source.into_channel();
         assert_eq!(channel.records.len(), 1);
     }

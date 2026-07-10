@@ -1092,6 +1092,26 @@ where
         Some(f(space, physmap))
     }
 
+    /// Emit the one-shot first-delivery audit witness for `kind` if this
+    /// delivery was that kind's first — the single definition the
+    /// `key_inject` and `pointer_inject` handlers share. The event carries
+    /// only the input kind (`kind=key` / `kind=pointer`), never event
+    /// content, count, or timing, and fires at most once per kind over the
+    /// kernel's lifetime.
+    fn witness_first_delivery(&self, kind: crate::seat::DeliveredInputKind) {
+        if self.seat_registry.note_first_delivery(kind) {
+            crate::audit::emit(
+                self.audit,
+                rustos_log::Level::Info,
+                AuditEvent::InputDelivered,
+                &[Field {
+                    key: "kind",
+                    value: rustos_log::FieldValue::Str(kind.as_str()),
+                }],
+            );
+        }
+    }
+
     /// Copy `dst.len()` bytes in from the caller's user buffer at `uaddr`,
     /// resolving demand-paged file-mapping misses on the way — the one
     /// fault-aware `copy_in` every syscall handler that stages a user
@@ -3283,21 +3303,14 @@ where
         record_bytes.zeroize();
         let record = decoded?;
         let consumed = self.seat_registry.inject(seat, record)?;
-        // Witness the first successful delivery exactly once (`plans/PI.md` P11): proof that an (autoloaded)
-        // keyboard driver has come up and is routing input through the
-        // arbiter. The one-shot latch fires this on the first edge only —
+        // Witness the first successful key delivery exactly once
+        // (`plans/PI.md` P11): proof that an (autoloaded) keyboard driver
+        // has come up and is routing input through the arbiter. The
+        // per-kind one-shot latch fires this on the first edge only —
         // never per keystroke — and the record carries no key content,
         // count, or timing, so a typed secret and its cadence never reach
-        // the log (no input-content/timing noise;
-        // — secret hygiene).
-        if self.seat_registry.note_first_delivery() {
-            crate::audit::emit(
-                self.audit,
-                rustos_log::Level::Info,
-                AuditEvent::InputDelivered,
-                &[],
-            );
-        }
+        // the log (no input-content/timing noise — secret hygiene).
+        self.witness_first_delivery(crate::seat::DeliveredInputKind::Key);
         Ok(consumed as u64)
     }
 
@@ -3491,18 +3504,12 @@ where
         // consumer) — so the driver never chooses the destination.
         let record = PointerInput::from_bytes(&record_bytes)?;
         let consumed = self.seat_registry.inject_pointer(seat, record)?;
-        // The same one-shot liveness witness `key_inject` drives: the first
-        // delivered input event — key or pointer — proves an (autoloaded)
-        // input driver is routing through the arbiter. The latch fires at
-        // most once system-wide and the record carries no event content.
-        if self.seat_registry.note_first_delivery() {
-            crate::audit::emit(
-                self.audit,
-                rustos_log::Level::Info,
-                AuditEvent::InputDelivered,
-                &[],
-            );
-        }
+        // The pointer analogue of `key_inject`'s liveness witness: the
+        // first delivered pointer record proves an (autoloaded) pointer
+        // driver is routing through the arbiter. The per-kind latch fires
+        // at most once and the record carries no event content, so key and
+        // pointer liveness are separately attributable from the log.
+        self.witness_first_delivery(crate::seat::DeliveredInputKind::Pointer);
         Ok(consumed as u64)
     }
 
@@ -12898,13 +12905,22 @@ mod tests {
             1,
             "first inject emits exactly one witness"
         );
-        // The witness carries no key content: a typed secret never reaches
-        // the log.
+        // The witness carries no key content — only the input-kind
+        // attribution — so a typed secret never reaches the log.
         let witness = snapshot
             .iter()
             .find(|e| e.id.0 == id)
             .expect("witness present");
-        assert!(witness.fields.is_empty(), "the witness carries no fields");
+        assert_eq!(
+            witness.fields.len(),
+            1,
+            "the witness carries only the kind attribution"
+        );
+        assert_eq!(
+            witness.fields[0],
+            ("kind".into(), "key".into()),
+            "the key witness is attributed kind=key"
+        );
 
         // A second successful inject emits no further witness — never one
         // per keystroke.
@@ -12988,7 +13004,7 @@ mod tests {
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
-        let record = PointerInput::Moved { x: 11, y: -7 };
+        let record = PointerInput::MovedBy { dx: 11, dy: -7 };
         pointer_inject_aspace(&aspaces, record);
         let rng = unseeded_rng();
         let irq = IrqTable::new(31);
@@ -13102,10 +13118,12 @@ mod tests {
         );
     }
 
-    /// The first successful `pointer_inject` drives the same one-shot
-    /// `InputDelivered` witness as `key_inject`: an input driver is proven
-    /// live by its first delivered event of either kind, and no later
-    /// event of either kind emits a second witness.
+    /// The first successful `pointer_inject` drives the pointer kind's
+    /// one-shot `InputDelivered` witness (`kind=pointer`, the analogue of
+    /// `key_inject`'s `kind=key`): a pointer driver is proven live by its
+    /// first delivered record, and no later pointer record emits a second
+    /// witness. (The two kinds' latches are independent — proven at the
+    /// registry level in `seat.rs`.)
     #[test]
     fn pointer_inject_witnesses_first_delivery_exactly_once() {
         install_trace_filter();
@@ -13115,7 +13133,7 @@ mod tests {
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
-        pointer_inject_aspace(&aspaces, PointerInput::Moved { x: 0, y: 1 });
+        pointer_inject_aspace(&aspaces, PointerInput::MovedBy { dx: 0, dy: 1 });
         let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;

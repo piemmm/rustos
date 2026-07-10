@@ -62,13 +62,15 @@ struct QemuTest {
     /// the serial console. Used by the aarch64 virtio-input vertical to
     /// make a real device→driver input event deterministic.
     keyboard: Option<(&'static str, &'static str)>,
-    /// When `true`, additionally attach a `virtio-mouse-device` after the
-    /// keyboard — the two-identical-virtio-input-nodes topology an
-    /// interactive session presents — so the autoload vertical proves the
-    /// keyboard driver instance is still loaded and delivering when a
-    /// pointer sibling matches the same driver bundle (per-node driver
-    /// instances, not one shared load).
-    pointer: bool,
+    /// When `Some((marker, dx, dy))`, additionally attach a
+    /// `virtio-mouse-device` after the keyboard — the
+    /// two-identical-virtio-input-nodes topology an interactive session
+    /// presents, proving per-node driver instances — and inject one
+    /// relative motion (`mouse_move dx dy`) once the guest prints
+    /// `marker` on the serial console. Used by the autoload vertical to
+    /// prove the pointer path (decode → `pointer_inject`) end to end
+    /// beside the keyboard's.
+    pointer_move: Option<(&'static str, i32, i32)>,
     /// Ordered serial-input script: for each `(marker, line)` step, pipe
     /// QEMU's stdin and write `line` to the guest's serial input once it
     /// prints `marker` on the serial console past the previous step's
@@ -190,6 +192,21 @@ const WRONG_UNLOCK_PASSPHRASE_PREFIX: &str = "abc";
 /// (inject only once the driver can receive).
 const AUTOLOAD_INPUT_KEY_MARKER: &str = "sc=irq_bind";
 
+/// Serial marker after which the autoload-input vertical injects the mouse
+/// motion: the serial rendering of the **key** kind's one-shot
+/// `InputDelivered` audit witness (`EventId` 4050 with `kind=key`), emitted
+/// the moment the injected keystroke reached the input-focus arbiter. Gating
+/// the motion on it orders the two injections — key first, pointer second —
+/// so the vertical's PASS condition (both per-kind witnesses observed by the
+/// guest sink) attributes each input class separately: the keystroke cannot
+/// satisfy the pointer witness and vice versa.
+const AUTOLOAD_INPUT_POINTER_MARKER: &str = "first input delivered to focus arbiter kind=key";
+
+/// The relative mouse motion the autoload-input vertical injects
+/// (`mouse_move dx dy`): an arbitrary non-zero displacement on both axes,
+/// so the driver decodes at least one `EV_REL` event per axis.
+const AUTOLOAD_INPUT_POINTER_MOVE: (i32, i32) = (15, 7);
+
 /// The username line the session-ceiling vertical types at the login
 /// view's `Username:` field.
 const SESSION_USERNAME_LINE: &str = "root\n";
@@ -265,7 +282,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // Stage 3a (b) deliverable: AP bring-up + scheduler stress on real
@@ -284,7 +301,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // Stage 3a (c7-bin) deliverable: boot the production
@@ -311,7 +328,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // Stage 2.7 follow-up (f6) deliverable: boot the production
@@ -339,7 +356,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // CCOMPAT stage CC2 deliverable (`plans/CCOMPAT.md`): the per-native-
@@ -369,7 +386,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // CCOMPAT stage CC2 deliverable (`plans/CCOMPAT.md`): the riscv64
@@ -400,7 +417,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // CCOMPAT stage CC2 deliverable (`plans/CCOMPAT.md`): the aarch64
@@ -432,7 +449,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // CCOMPAT stage CC3 deliverable (`plans/CCOMPAT.md`): the x86_64
@@ -465,7 +482,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // x86_64 `syscall` register-preservation regression vertical
@@ -493,7 +510,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // CCOMPAT stage CC3 deliverable (`plans/CCOMPAT.md`): the riscv64
@@ -526,7 +543,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // CCOMPAT stage CC3 deliverable (`plans/CCOMPAT.md`): the aarch64
@@ -560,7 +577,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // CCOMPAT stage CC3 deliverable (`plans/CCOMPAT.md`): the x86_64
@@ -597,7 +614,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // CCOMPAT stage CC5 deliverable (`plans/CCOMPAT.md`): the riscv64
@@ -629,7 +646,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // CCOMPAT stage CC5 deliverable (`plans/CCOMPAT.md`): the aarch64
@@ -662,7 +679,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // CCOMPAT stage CC5 deliverable (`plans/CCOMPAT.md`): the x86_64
@@ -698,7 +715,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // Stage 4 deliverable: boot the production kernel pipeline,
@@ -718,7 +735,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // Stage 4 first-driver vertical: boot the production kernel
@@ -753,7 +770,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // Stage 4.D Item 2-tail.2 QEMU validation: boot the production
@@ -781,7 +798,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // Stage 4.D Item 4: `rustos-test-virtio-blk-pci-x86-64` performs a
@@ -811,7 +828,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // Stage 5 end-to-end FAT32 vertical: `rustos-test-fat32-virtio-blk-
@@ -834,7 +851,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::Fat32,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // Stage 5 end-to-end rustfs vertical: `rustos-test-rustfs-virtio-blk-
@@ -858,7 +875,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::Rustfs,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // Stage 4.D Item 4: `rustos-test-virtio-net-pci-x86-64` performs a
@@ -885,7 +902,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // Stage 4.D Item 4: `rustos-test-kernel-arch-boot-riscv64` boots
@@ -907,7 +924,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // PI Stage RV-P3 (`plans/PI.md`): `rustos-test-spawn-init-qemu-riscv64`
@@ -938,7 +955,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // Stage 3c: `rustos-test-timer-preempt-qemu-riscv64` is the riscv64
@@ -964,7 +981,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // Stage 3c: `rustos-test-ipi-smp-qemu-riscv64` is the riscv64
@@ -991,7 +1008,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // WIRING Stage W6 (`plans/WIRING.md` §3): the aarch64 multi-core SMP
@@ -1017,7 +1034,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // Stage 3c: `rustos-test-sched-drive-qemu-riscv64` is the riscv64
@@ -1050,7 +1067,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // WIRING Stage W7 (`plans/WIRING.md` §3): the aarch64 "arch
@@ -1086,7 +1103,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // SPAWN Stage SP1 (`plans/SPAWN.md` §1): the `kernel/core` kthread
@@ -1116,7 +1133,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // SPAWN Stage SP1 (`plans/SPAWN.md` §1): the riscv64 sibling of the
@@ -1145,7 +1162,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // SPAWN Stage SP1 (`plans/SPAWN.md` §1): the x86_64 sibling of the
@@ -1174,7 +1191,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // WIRING Stage W6 (`plans/WIRING.md` §3): the cross-CPU TLB-shootdown
@@ -1196,7 +1213,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // WIRING Stage W6: the aarch64 cross-CPU TLB-shootdown vertical. The
@@ -1217,7 +1234,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // WIRING Stage W6: the x86_64 cross-CPU TLB-shootdown vertical — the
@@ -1240,7 +1257,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // Stage 3c: `rustos-test-memory-isolation-qemu-riscv64` is the riscv64
@@ -1267,7 +1284,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // `plans/PI.md` guard-page fault-form (riscv64 stage G1):
@@ -1298,7 +1315,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // `plans/PI.md` guard-page fault-form (riscv64 stage G3c): the
@@ -1334,7 +1351,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // Stage 4.D Item 4: `rustos-test-virtio-blk-mmio-riscv64` is the
@@ -1360,7 +1377,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // Stage 4.D Item 4: `rustos-test-virtio-net-mmio-riscv64` is the
@@ -1384,7 +1401,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // Stage 4 first-driver vertical (display class):
@@ -1411,7 +1428,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: true,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // Stage 4 first-driver vertical (display class, x86_64 sibling of the
@@ -1439,7 +1456,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: true,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // PI Stage P6c-2 (`plans/PI.md`): `rustos-test-kernel-arch-boot-aarch64`
@@ -1471,7 +1488,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: true,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // PI Stage P6c-3 (`plans/PI.md`): `rustos-test-spawn-init-qemu-aarch64`
@@ -1501,7 +1518,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // SPAWN Stage SP3b (`plans/SPAWN.md`) + `plans/PI.md` P11:
@@ -1553,7 +1570,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::EncryptedRootDisk,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[
             ("Root filesystem passphrase: ", UNLOCK_PASSPHRASE_LINE),
             ("Username:", "root\n"),
@@ -1611,7 +1628,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::EncryptedRootDisk,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // SPAWN Stage SP2c (`plans/SPAWN.md` §1): the aarch64 EL0↔EL0 timeshare
@@ -1641,7 +1658,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // PI Stage D2b-2b-A P-1 (`plans/PI.md`): the aarch64 involuntary-preemption
@@ -1676,7 +1693,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // PI Stage D2b-2b-A P-1b (`plans/PI.md`): the riscv64 involuntary-preemption
@@ -1714,7 +1731,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // PI Stage D2b-2b-A P-1c (`plans/PI.md`): the x86_64 involuntary-preemption
@@ -1757,7 +1774,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // PLAN.md P-5 (2026-06-23 amendment): the aarch64
@@ -1794,7 +1811,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // PLAN.md Stage 4.HW: the aarch64 driver-spawn handshake vertical — the
@@ -1831,7 +1848,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // plans/USB.md U1: the aarch64 driver-*unload* vertical — the symmetric
@@ -1861,7 +1878,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // SPAWN Stage SP5b-2 (`plans/SPAWN.md` §1): the aarch64 `mem_map`/
@@ -1893,7 +1910,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // PI Stage 5d-0-ii (b′)-2 (`plans/PI.md`): the aarch64 `mmio_map` vertical —
@@ -1930,7 +1947,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // SPAWN Stage SP5b-2 (`plans/SPAWN.md` §1): the riscv64 `mem_map`/
@@ -1965,7 +1982,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // PI Stage RV-X1 (`plans/PI.md` §X tail): the riscv64 single-resumable-
@@ -2001,7 +2018,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // PI Stage RV-X2 (`plans/PI.md` §X tail): the riscv64 two-task EL0
@@ -2038,7 +2055,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // PI Stage RV-X3 (`plans/PI.md` §X tail): the riscv64 runtime-`spawn`
@@ -2074,7 +2091,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // SPAWN Stage SP5b-2 (`plans/SPAWN.md` §1): the x86_64 `mem_map`/
@@ -2111,7 +2128,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // PI Stage G1/G2 (`plans/PI.md`): the x86_64 guard-page fault-form
@@ -2143,7 +2160,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // PI Stage G3c (`plans/PI.md`): the x86_64 production guard-page
@@ -2176,7 +2193,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // PI Stage X1 (`plans/PI.md` §X): the x86_64 single-resumable-user-kthread
@@ -2212,7 +2229,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // PI Stage X2 (`plans/PI.md` §X): the x86_64 two-task EL0 timeshare — the
@@ -2254,7 +2271,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // PI Stage X3a (`plans/PI.md` §X): the x86_64 PID 1 (`init`) ring-3
@@ -2288,7 +2305,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // PI Stage X3b + X4 follow-on (`plans/PI.md` §X): the x86_64 runtime
@@ -2330,7 +2347,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // PI Stage P6e-3b prerequisite (`plans/PI.md`): the aarch64 heap-allocator
@@ -2363,7 +2380,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // SPAWN Stage SP6b (`plans/SPAWN.md` §1): the aarch64 `wait` vertical —
@@ -2395,7 +2412,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // SPAWN Stage SP7b (`plans/SPAWN.md` §1): the aarch64 `signal` vertical —
@@ -2431,7 +2448,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // PI Stage X4 (`plans/PI.md`): the x86_64 `wait` vertical — the cross-port
@@ -2467,7 +2484,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // PI Stage RV-X4 (`plans/PI.md` §X tail): the riscv64 `wait` vertical —
@@ -2502,7 +2519,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // PI Stage P2 (`plans/PI.md`): `rustos-test-uart-console-qemu-aarch64`
@@ -2532,7 +2549,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // Stage W11 (`plans/WIRING.md` §3):
@@ -2560,7 +2577,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // `plans/PI.md` P11 (root-volume read path at boot):
@@ -2587,7 +2604,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::UsersRoot,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // `plans/PI.md` P11 Chunk B-2 (root-mount->login): the
@@ -2620,7 +2637,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::EncryptedRootDisk,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // `plans/PI.md` P11 Chunk B-2 INCREMENT (2): the
@@ -2678,7 +2695,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::EncryptedRootDisk,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[
             (
                 "Root filesystem passphrase: ",
@@ -2738,7 +2755,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::EncryptedRootDisk,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[
             ("Root filesystem passphrase: ", UNLOCK_PASSPHRASE_LINE),
             // The full-screen login view paints `Username:` once and the
@@ -2820,7 +2837,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::MemsoakRootDisk,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[
             ("Root filesystem passphrase: ", UNLOCK_PASSPHRASE_LINE),
             ("Username:", SESSION_USERNAME_LINE),
@@ -2869,7 +2886,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::EncryptedRootDisk,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[
             ("Root filesystem passphrase: ", UNLOCK_PASSPHRASE_LINE),
             ("Username:", SESSION_USERNAME_LINE),
@@ -2933,7 +2950,11 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::AutoloadRootDisk,
         keyboard: Some((AUTOLOAD_INPUT_KEY_MARKER, "a")),
-        pointer: true,
+        pointer_move: Some((
+            AUTOLOAD_INPUT_POINTER_MARKER,
+            AUTOLOAD_INPUT_POINTER_MOVE.0,
+            AUTOLOAD_INPUT_POINTER_MOVE.1,
+        )),
         serial: &[("Root filesystem passphrase: ", UNLOCK_PASSPHRASE_LINE)],
     },
     // Stage W11 (`plans/WIRING.md` §3):
@@ -2958,7 +2979,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // Stage W11-B (`plans/WIRING.md` §3): the aarch64 display vertical —
@@ -2987,7 +3008,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: true,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // Stage 3b: `rustos-test-timer-preempt-qemu-aarch64` is the aarch64
@@ -3009,7 +3030,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // Stage 3b: `rustos-test-memory-isolation-qemu-aarch64` is the
@@ -3035,7 +3056,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // `plans/PI.md` guard-page fault-form (stage G1):
@@ -3065,7 +3086,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // `plans/PI.md` guard-page fault-form (stage G2):
@@ -3097,7 +3118,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // `plans/PI.md` guard-page fault-form (stage G3c): the *production*
@@ -3132,7 +3153,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // WIRING Stage W3-B (`plans/WIRING.md` §3): the aarch64 device-IRQ
@@ -3162,7 +3183,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // P11 Chunk B-2 INCREMENT (1) (`plans/PI.md`): the aarch64 device-SPI
@@ -3198,7 +3219,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // Stage W11-B (`plans/WIRING.md` §3): the aarch64 input vertical —
@@ -3229,7 +3250,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: Some(("virtio-qemu: virtio-input eventq armed", "a")),
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
     // WIRING (`plans/WIRING.md` §1/§3): the riscv64 input vertical —
@@ -3261,7 +3282,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: Some(("virtio-qemu: virtio-input eventq armed", "a")),
-        pointer: false,
+        pointer_move: None,
         serial: &[],
     },
 ];
@@ -3675,13 +3696,16 @@ fn finish_run(t: &QemuTest, kernel: &Path, mut spec: Spec) -> Result<(), String>
     }
 
     // Attach the pointer sibling after the keyboard — the interactive
-    // session's two-identical-virtio-input-nodes topology — so the
-    // autoload vertical proves per-node driver instances. Each instance
-    // arms and prints the readiness marker once, so the key injection
-    // waits for both markers: injecting on the first (possibly the
-    // mouse's) would race the keyboard's own arming and lose the press.
-    if t.pointer {
-        spec = spec.with_virtio_mouse().with_keyboard_ready_occurrences(2);
+    // session's two-identical-virtio-input-nodes topology — and let the
+    // runner inject the relative motion once its marker appears. Each
+    // driver instance arms and prints the readiness marker once, so the
+    // key injection waits for both markers: injecting on the first
+    // (possibly the mouse's) would race the keyboard's own arming and
+    // lose the press.
+    if let Some((marker, dx, dy)) = t.pointer_move {
+        spec = spec
+            .with_pointer_move(marker, dx, dy)
+            .with_keyboard_ready_occurrences(2);
     }
 
     // Pipe QEMU's stdin for the interactive-session vertical and let the

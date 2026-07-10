@@ -289,14 +289,38 @@ pub struct SeatRegistry {
     /// The next seat id to mint; starts past [`SEAT_PRIMARY`] and only
     /// ever increases.
     next_seat_id: AtomicU64,
-    /// One-shot latch: `false` until the first key edge is delivered to
-    /// any seat, then `true` forever. It lets the `key_inject` syscall
-    /// handler emit a single audit witness the first time a (typically
-    /// autoloaded) keyboard driver delivers input — proof the input path
-    /// is live — without logging one record per keystroke, which would
-    /// leak typed secrets and their timing (no
-    /// input-content/timing noise — secret hygiene).
-    first_delivery: AtomicBool,
+    /// One-shot latches, one per input kind: `false` until the first key
+    /// edge (respectively pointer record) is delivered to any seat, then
+    /// `true` forever. They let the `key_inject` / `pointer_inject`
+    /// syscall handlers emit one audit witness per input kind the first
+    /// time a (typically autoloaded) driver of that kind delivers input —
+    /// proof each input path is live and attributable per kind — without
+    /// logging one record per event, which would leak typed secrets and
+    /// their timing (no input-content/timing noise — secret hygiene).
+    first_key_delivery: AtomicBool,
+    first_pointer_delivery: AtomicBool,
+}
+
+/// The input kind a first-delivery witness attributes
+/// ([`SeatRegistry::note_first_delivery`]): which class of input driver
+/// proved itself live.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum DeliveredInputKind {
+    /// A keyboard key edge (`key_inject`).
+    Key,
+    /// A pointer motion or button record (`pointer_inject`).
+    Pointer,
+}
+
+impl DeliveredInputKind {
+    /// The stable `kind` field value the audit witness carries.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Key => "key",
+            Self::Pointer => "pointer",
+        }
+    }
 }
 
 impl SeatRegistry {
@@ -312,7 +336,8 @@ impl SeatRegistry {
             primary: SeatSlot::new(text_sink),
             hotplug: SpinLock::new(Vec::new()),
             next_seat_id: AtomicU64::new(SEAT_PRIMARY + 1),
-            first_delivery: AtomicBool::new(false),
+            first_key_delivery: AtomicBool::new(false),
+            first_pointer_delivery: AtomicBool::new(false),
         }
     }
 
@@ -438,21 +463,28 @@ impl SeatRegistry {
         Ok(PointerInput::WIRE_LEN)
     }
 
-    /// Record that a key edge has been delivered to the seat and report
-    /// whether this was the **first** delivery since boot.
+    /// Record that an input record of `kind` has been delivered to the
+    /// seat and report whether this was the **first** delivery of that
+    /// kind since boot.
     ///
-    /// Returns `true` exactly once over the registry's lifetime — on the
-    /// first call — and `false` on every later call, through a one-shot
-    /// compare-and-set on the `first_delivery` latch. The `key_inject`
-    /// handler calls this after a successful [`Self::inject`] and emits a
-    /// single audit witness ([`crate::audit::AuditEvent::InputDelivered`])
-    /// on the `true`, so the log records that an (autoloaded) input driver
-    /// is live without a per-keystroke record (no
-    /// input-content/timing noise — secret hygiene). It carries no
-    /// key content; only the fact of first delivery.
+    /// Returns `true` exactly once per input kind over the registry's
+    /// lifetime — on the kind's first call — and `false` on every later
+    /// call, through a one-shot compare-and-set on that kind's latch. The
+    /// `key_inject` / `pointer_inject` handlers call this after a
+    /// successful [`Self::inject`] / [`Self::inject_pointer`] and emit one
+    /// audit witness ([`crate::audit::AuditEvent::InputDelivered`], with a
+    /// `kind` field) per `true`, so the log records that an (autoloaded)
+    /// driver of each input class is live — at most two records over the
+    /// kernel's lifetime, never one per event (no input-content/timing
+    /// noise — secret hygiene). It carries no event content; only the fact
+    /// of the kind's first delivery.
     #[must_use]
-    pub fn note_first_delivery(&self) -> bool {
-        self.first_delivery
+    pub fn note_first_delivery(&self, kind: DeliveredInputKind) -> bool {
+        let latch = match kind {
+            DeliveredInputKind::Key => &self.first_key_delivery,
+            DeliveredInputKind::Pointer => &self.first_pointer_delivery,
+        };
+        latch
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
     }
@@ -880,15 +912,19 @@ mod tests {
     }
 
     #[test]
-    fn first_delivery_latch_fires_exactly_once() {
-        // The one-shot witness latch returns `true` on the first call and
-        // `false` forever after, regardless of routing or ownership — so the
-        // `key_inject` handler emits a single audit witness and never one
-        // per keystroke.
+    fn first_delivery_latch_fires_exactly_once_per_kind() {
+        // Each input kind's one-shot witness latch returns `true` on its
+        // first call and `false` forever after, regardless of routing or
+        // ownership — so the `key_inject` / `pointer_inject` handlers emit
+        // one audit witness per kind and never one per event. The two
+        // kinds latch independently: a delivered keystroke says nothing
+        // about the pointer path.
         let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
-        assert!(seat.note_first_delivery());
-        assert!(!seat.note_first_delivery());
-        assert!(!seat.note_first_delivery());
+        assert!(seat.note_first_delivery(DeliveredInputKind::Key));
+        assert!(!seat.note_first_delivery(DeliveredInputKind::Key));
+        assert!(seat.note_first_delivery(DeliveredInputKind::Pointer));
+        assert!(!seat.note_first_delivery(DeliveredInputKind::Pointer));
+        assert!(!seat.note_first_delivery(DeliveredInputKind::Key));
     }
 
     #[test]
@@ -908,7 +944,7 @@ mod tests {
         let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
         seat.acquire(SEAT_PRIMARY, WM)
             .expect("fresh seat is acquirable");
-        let record = PointerInput::Moved { x: 40, y: -8 };
+        let record = PointerInput::MovedBy { dx: 40, dy: -8 };
         assert_eq!(
             seat.inject_pointer(SEAT_PRIMARY, record),
             Ok(PointerInput::WIRE_LEN)
@@ -929,7 +965,7 @@ mod tests {
         // consumed and dropped — never routed to the text sink, never an
         // error the driver must special-case per event.
         let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
-        let record = PointerInput::Moved { x: 1, y: 2 };
+        let record = PointerInput::MovedBy { dx: 1, dy: 2 };
         assert_eq!(
             seat.inject_pointer(SEAT_PRIMARY, record),
             Ok(PointerInput::WIRE_LEN)
@@ -947,7 +983,7 @@ mod tests {
         let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
         seat.acquire(SEAT_PRIMARY, WM)
             .expect("fresh seat is acquirable");
-        let record = PointerInput::Moved { x: 3, y: 4 };
+        let record = PointerInput::MovedBy { dx: 3, dy: 4 };
         assert_eq!(
             seat.inject_pointer(SEAT_PRIMARY, record),
             Ok(PointerInput::WIRE_LEN)
@@ -995,17 +1031,17 @@ mod tests {
             .expect("fresh seat is acquirable");
         // Fill the ring plus one: the first record is dropped.
         for i in 0..=POINTER_CHANNEL_CAPACITY {
-            let record = PointerInput::Moved {
-                x: i32::try_from(i).unwrap(),
-                y: 0,
+            let record = PointerInput::MovedBy {
+                dx: i32::try_from(i).unwrap(),
+                dy: 0,
             };
             assert_eq!(
                 seat.inject_pointer(SEAT_PRIMARY, record),
                 Ok(PointerInput::WIRE_LEN)
             );
         }
-        // The very first record (x == 0) was evicted, so the oldest
-        // surviving record is the second pushed (x == 1).
+        // The very first record (dx == 0) was evicted, so the oldest
+        // surviving record is the second pushed (dx == 1).
         let mut buf = [0u8; PointerInput::WIRE_LEN];
         assert_eq!(
             seat.read_pointer(SEAT_PRIMARY, WM, &mut buf),
@@ -1013,7 +1049,7 @@ mod tests {
         );
         assert_eq!(
             PointerInput::from_bytes(&buf),
-            Ok(PointerInput::Moved { x: 1, y: 0 })
+            Ok(PointerInput::MovedBy { dx: 1, dy: 0 })
         );
     }
 

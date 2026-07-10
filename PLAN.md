@@ -2821,6 +2821,29 @@ Shipped (headless-testable, model + renderer over injected seams):
   seam (`userland/gui/session::seat`, replacing the deleted
   `IpcInputChannel`/`MessagePort` IPC framing); named ports remain for
   service rendezvous.
+- **The pointer record is device-resolved but screen-independent.**
+  `PointerInput` carries a relative displacement (`MovedBy { dx, dy }`) or
+  a resolved button edge, never an absolute position: only the seat owner
+  (the desktop session, which owns the compositor) knows the screen
+  extent, so `DeviceInputSource` accumulates displacements — saturating,
+  clamped to the screen `Rect` it is constructed with (empty screen
+  refused), starting at the centre — and drivers need no display-geometry
+  authority (the libinput/Wayland split). Scroll ticks are not carried
+  until a desktop scroll consumer exists. `PointerInput::from_device_event`
+  (`lib/abi`) is the one device→seat mapping (axis deltas + the shared
+  `evdev` `BTN_*` codes, hoisted with `AXIS_X`/`AXIS_Y` into
+  `rustos_abi::driver::input` from the lib/hid + lib/virtio_input copies).
+- **The seat's pointer channel is fed by the real virtio-input driver.**
+  `drivers/input/virtio_kbd` pumps every decoded event through the shared
+  pointer mapping first (→ `pointer_inject`), else the keyboard producer
+  (→ `key_inject`); one instance serves whichever device its node is.
+  The first delivery of each input kind emits a per-kind one-shot
+  `INPUT_DELIVERED` witness (`kind=key`/`kind=pointer`, at most two
+  records). The autoload QEMU vertical now attaches the virtio-mouse
+  sibling, injects a key, waits for the `kind=key` witness line, injects
+  `mouse_move` through the QEMU monitor, and PASSes only when **both**
+  per-kind witnesses appear — proving key + pointer delivery end to end
+  through the discovery → signed gate → spawn → inject path.
 
 **User-memory copy path & per-task address spaces (staged).** The kernel
 `copy_from_user`/`copy_to_user` boundary (§5.4) behind every deferred payload
@@ -2838,12 +2861,13 @@ transfer, landed in increments:
 **Remaining this stage:**
 - E — per-arch live `copy_from_user` page-fault fix-up (`tests/SECURITY.md` §5)
   so a faulting user access returns an error rather than trapping.
-- Feed the seat's pointer channel from a real pointer driver
-  (virtio-input tablet / USB HID mouse → `pointer_inject`) and land the
-  live `SeatEventReader` (over `rustos_rt::pointer_read`/`keyboard_read`)
-  in the desktop session binary when it exists; relay the theme switch
-  over live IPC; wire the two default apps to live VFS/shell channels +
-  WM-presented windows.
+- Land the live `SeatEventReader` (over `rustos_rt::pointer_read`/
+  `keyboard_read`) in the desktop session binary when it exists (the
+  virtio pointer feed into the seat channel is done — see above; the USB
+  HID mouse joins through the same shared `from_device_event` mapping when
+  its metal report pump lands); relay the theme switch over live IPC;
+  wire the two default apps to live VFS/shell channels + WM-presented
+  windows.
 - The platform-RNG `EntropySource` that seeds the reserve — **DONE**
   (`.junie/PREREQUISITES.md` P-0): the Arch-HAL `rustos_arch_api::entropy`
   slice (x86_64 `RDSEED`/`RDRAND`, aarch64 `RNDR` `Supported`; riscv64 `Zkr` /

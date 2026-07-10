@@ -3785,7 +3785,7 @@ mod tests {
 
     #[test]
     fn pointer_inject_marshals_the_seat_record_pointer_and_len() {
-        let record = PointerInput::Moved { x: 5, y: -9 };
+        let record = PointerInput::MovedBy { dx: 5, dy: -9 };
         let want = i64::try_from(PointerInput::WIRE_LEN).expect("WIRE_LEN fits an i64");
         let (number, args) = capture(PointerInput::WIRE_LEN as u64, || {
             assert_eq!(pointer_inject(3, &record), want);

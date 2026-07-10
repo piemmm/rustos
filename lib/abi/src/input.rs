@@ -3,12 +3,23 @@
 //! A pointing device reports motion, presses, and releases. On a running
 //! system those reports reach the user-space desktop as a stream of framed
 //! records over a capability-checked kernel input channel; this module fixes
-//! the *contract* of one such record, [`PointerInput`]. The desktop's
-//! `no_std` GUI vocabulary (`lib/input`'s `InputEvent`) is the in-process
-//! shape the window manager and taskbar route; this ABI record is the bytes
-//! that travel the kernel boundary and decode into it. The kernel never hands a parser the device's structure: it hands a
+//! the *contract* of one such record, [`PointerInput`]. The kernel never hands a parser the device's structure: it hands a
 //! buffer, and [`PointerInput::from_bytes`] validates every field and fails
 //! closed.
+//!
+//! The record is **device-resolved but screen-independent**: motion is the
+//! relative displacement the device reported ([`MovedBy`](PointerInput::MovedBy)),
+//! and a button edge names a *resolved* button (primary / secondary /
+//! middle), never a raw platform keycode. Turning this stream into an
+//! absolute on-screen pointer position — accumulating displacements and
+//! clamping to the display extent — is the **seat owner's** policy: only the
+//! desktop session that owns the compositor knows the screen's pixel size
+//! (and its runtime scale), so the position lives there, never in a driver.
+//! An input driver therefore needs no display-geometry authority at all —
+//! it decodes its device and injects, and the kernel seat channel is a dumb,
+//! validated pipe. (The desktop's `no_std` GUI vocabulary — `lib/input`'s
+//! absolute `PointerMoved` — is what the seat owner produces *after* that
+//! accumulation.)
 //!
 //! Keyboard input is modelled alongside the pointer by [`KeyInput`]: the
 //! *desktop-level* key event the window manager delivers to the focused
@@ -24,14 +35,13 @@
 //!
 //! This is **not** a duplicate of [`crate::driver::input::InputEvent`]. That type is the *device-level* contract an input
 //! driver reports across the [`Input`](crate::driver::input::Input) driver
-//! trait: raw per-axis pointer *deltas*, scroll ticks, and platform keycodes.
-//! [`PointerInput`] is the *desktop-level* event the window manager and
-//! taskbar route: an **absolute** pointer position and a *resolved* pointer
-//! button (primary / secondary / middle). Turning the device-relative driver
-//! stream into this resolved stream — accumulating deltas into a position,
-//! deciding which keycodes are pointer buttons — is pointer-input policy that
-//! lives above the driver, not a second copy of the same data. The two ABIs
-//! sit on opposite sides of that policy.
+//! trait: single-axis pointer *deltas*, scroll ticks, and platform keycodes,
+//! one event per axis or edge. [`PointerInput`] is the *seat-channel* record
+//! an input-driver process injects (`pointer_inject`): button keycodes are
+//! resolved to the closed button set and scroll ticks are not carried (the
+//! desktop has no scroll consumer yet; the vocabulary is extended with the
+//! consumer, never ahead of it). [`PointerInput::from_device_event`] is the
+//! one spelling of that mapping, shared by every pointer-input driver.
 //!
 //! # Wire layout
 //!
@@ -41,20 +51,23 @@
 //! |-------:|-----:|------------|------------------------------------------|
 //! |      0 |    4 | `magic`    | [`POINTER_INPUT_MAGIC`]                   |
 //! |      4 |    2 | `version`  | ABI version ([`crate::ABI_VERSION_CURRENT`]) |
-//! |      6 |    2 | `kind`     | [`KIND_MOVED`] / [`KIND_PRESSED`] / [`KIND_RELEASED`] |
+//! |      6 |    2 | `kind`     | [`KIND_MOVED_BY`] / [`KIND_PRESSED`] / [`KIND_RELEASED`] |
 //! |      8 |    2 | `button`   | [`BUTTON_NONE`] for motion, else a button code |
 //! |     10 |    2 | `reserved` | must be zero                             |
-//! |     12 |    4 | `x`        | absolute screen x (motion only)          |
-//! |     16 |    4 | `y`        | absolute screen y (motion only)          |
+//! |     12 |    4 | `dx`       | signed x displacement (motion only)      |
+//! |     16 |    4 | `dy`       | signed y displacement (motion only)      |
 //!
-//! The coordinate fields carry the new pointer position for a
-//! [`Moved`](PointerInput::Moved) record and must be zero for a press or
+//! The displacement fields carry the reported motion for a
+//! [`MovedBy`](PointerInput::MovedBy) record and must be zero for a press or
 //! release (a real pointing device reports motion separately from clicks, and
-//! a router applies a button at the position the last motion established —
-//! the same model as `lib/input`). The `button` field is [`BUTTON_NONE`] for
-//! motion and a valid button code for a press or release. Any other
-//! combination is wire corruption and is refused.
+//! the seat owner applies a button at the position its accumulated motion
+//! established — the same model as `lib/input`). The `button` field is
+//! [`BUTTON_NONE`] for motion and a valid button code for a press or
+//! release. Any other combination is wire corruption and is refused.
 
+use crate::driver::input::{
+    InputEvent, InputEventKind, AXIS_X, AXIS_Y, POINTER_BUTTON_CODE_BASE, POINTER_BUTTON_COUNT,
+};
 use crate::le::{put_i32, put_u16, put_u32, read_i32, read_u16, read_u32};
 use crate::Errno;
 
@@ -62,14 +75,14 @@ use crate::Errno;
 /// little-endian).
 pub const POINTER_INPUT_MAGIC: u32 = u32::from_le_bytes(*b"PIN1");
 
-/// `kind` code for an absolute pointer move.
-pub const KIND_MOVED: u16 = 0;
+/// `kind` code for a relative pointer move.
+pub const KIND_MOVED_BY: u16 = 0;
 /// `kind` code for a pointer-button press.
 pub const KIND_PRESSED: u16 = 1;
 /// `kind` code for a pointer-button release.
 pub const KIND_RELEASED: u16 = 2;
 
-/// `button` code carried by a [`Moved`](PointerInput::Moved) record: no
+/// `button` code carried by a [`MovedBy`](PointerInput::MovedBy) record: no
 /// button is involved in a motion event.
 pub const BUTTON_NONE: u16 = 0;
 
@@ -117,19 +130,22 @@ impl PointerButtonCode {
 /// A single decoded pointer input event.
 ///
 /// The type makes illegal states unrepresentable: a
-/// [`Moved`](Self::Moved) carries a position and no button, while a
+/// [`MovedBy`](Self::MovedBy) carries a displacement and no button, while a
 /// [`Pressed`](Self::Pressed) / [`Released`](Self::Released) carries a button
-/// and no position. [`from_bytes`](Self::from_bytes) is the only way to build
-/// one from untrusted bytes and validates the whole record before returning
-/// it.
+/// and no displacement. [`from_bytes`](Self::from_bytes) is the only way to
+/// build one from untrusted bytes and validates the whole record before
+/// returning it.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum PointerInput {
-    /// The pointer moved to an absolute screen position.
-    Moved {
-        /// New pointer x coordinate, in screen pixels.
-        x: i32,
-        /// New pointer y coordinate, in screen pixels.
-        y: i32,
+    /// The pointer moved by a relative displacement, in the device's
+    /// count units (positive x rightward, positive y downward — the
+    /// `evdev` orientation). The seat owner accumulates displacements
+    /// into its absolute, extent-clamped screen position.
+    MovedBy {
+        /// Signed x displacement.
+        dx: i32,
+        /// Signed y displacement.
+        dy: i32,
     },
     /// A pointer button went down at the current pointer position.
     Pressed(PointerButtonCode),
@@ -147,16 +163,16 @@ impl PointerInput {
         let mut out = [0u8; Self::WIRE_LEN];
         put_u32(&mut out, 0, POINTER_INPUT_MAGIC);
         put_u16(&mut out, 4, crate::ABI_VERSION_CURRENT_U16);
-        let (kind, button, x, y) = match *self {
-            Self::Moved { x, y } => (KIND_MOVED, BUTTON_NONE, x, y),
+        let (kind, button, dx, dy) = match *self {
+            Self::MovedBy { dx, dy } => (KIND_MOVED_BY, BUTTON_NONE, dx, dy),
             Self::Pressed(button) => (KIND_PRESSED, button.code(), 0, 0),
             Self::Released(button) => (KIND_RELEASED, button.code(), 0, 0),
         };
         put_u16(&mut out, 6, kind);
         put_u16(&mut out, 8, button);
         // bytes 10..12 reserved, already zero.
-        put_i32(&mut out, 12, x);
-        put_i32(&mut out, 16, y);
+        put_i32(&mut out, 12, dx);
+        put_i32(&mut out, 16, dy);
         out
     }
 
@@ -171,7 +187,8 @@ impl PointerInput {
     /// * [`Errno::BufferTooSmall`] if `bytes.len() < WIRE_LEN`.
     /// * [`Errno::BadMagic`] if the magic word does not match, or if the
     ///   reserved field is non-zero, or if a press/release record carries a
-    ///   non-zero coordinate (a coordinate belongs to a motion record only).
+    ///   non-zero displacement (a displacement belongs to a motion record
+    ///   only).
     /// * [`Errno::AbiVersionUnsupported`] if `version` is not
     ///   [`crate::ABI_VERSION_CURRENT`].
     /// * [`Errno::OutOfRange`] if `kind` is not a defined kind, or if the
@@ -193,17 +210,17 @@ impl PointerInput {
         }
         let kind = read_u16(bytes, 6);
         let button = read_u16(bytes, 8);
-        let x = read_i32(bytes, 12);
-        let y = read_i32(bytes, 16);
+        let dx = read_i32(bytes, 12);
+        let dy = read_i32(bytes, 16);
         match kind {
-            KIND_MOVED => {
+            KIND_MOVED_BY => {
                 if button != BUTTON_NONE {
                     return Err(Errno::OutOfRange);
                 }
-                Ok(Self::Moved { x, y })
+                Ok(Self::MovedBy { dx, dy })
             }
             KIND_PRESSED | KIND_RELEASED => {
-                if x != 0 || y != 0 {
+                if dx != 0 || dy != 0 {
                     return Err(Errno::BadMagic);
                 }
                 let button = PointerButtonCode::from_code(button)?;
@@ -214,6 +231,57 @@ impl PointerInput {
                 })
             }
             _ => Err(Errno::OutOfRange),
+        }
+    }
+
+    /// Translate one device-level [`InputEvent`] into the seat-channel
+    /// record an input driver injects, or [`None`] when the event carries
+    /// no pointer record.
+    ///
+    /// The one shared spelling of the device→seat pointer mapping, so the
+    /// virtio and USB HID driver processes can never diverge:
+    ///
+    /// * a [`Pointer`](InputEventKind::Pointer) axis delta becomes a
+    ///   single-axis [`MovedBy`](Self::MovedBy);
+    /// * a [`Key`](InputEventKind::Key) edge whose code is one of the
+    ///   [`POINTER_BUTTON_CODE_BASE`] button codes becomes a
+    ///   [`Pressed`](Self::Pressed) / [`Released`](Self::Released) of the
+    ///   resolved button;
+    /// * everything else — keyboard keys (a keyboard producer's job),
+    ///   [`Scroll`](InputEventKind::Scroll) ticks (no desktop scroll
+    ///   consumer yet), an unknown axis, or a non-edge button value (a
+    ///   repeat) — produces no record rather than a guessed one (fail
+    ///   closed, never fabricate input).
+    #[must_use]
+    pub fn from_device_event(event: &InputEvent) -> Option<Self> {
+        match event.kind {
+            InputEventKind::Pointer => match event.code {
+                AXIS_X => Some(Self::MovedBy {
+                    dx: event.value,
+                    dy: 0,
+                }),
+                AXIS_Y => Some(Self::MovedBy {
+                    dx: 0,
+                    dy: event.value,
+                }),
+                _ => None,
+            },
+            InputEventKind::Key => {
+                let offset = event.code.checked_sub(POINTER_BUTTON_CODE_BASE)?;
+                if offset >= POINTER_BUTTON_COUNT {
+                    return None;
+                }
+                // The wire button codes are 1-based (`BUTTON_NONE` is 0),
+                // the device codes 0-based from the base; `from_code`
+                // keeps the closed set authoritative.
+                let button = PointerButtonCode::from_code(offset + 1).ok()?;
+                match event.value {
+                    1 => Some(Self::Pressed(button)),
+                    0 => Some(Self::Released(button)),
+                    _ => None,
+                }
+            }
+            InputEventKind::Scroll => None,
         }
     }
 }
@@ -561,8 +629,11 @@ mod tests {
     use super::{
         KeyInput, KeyValue, Modifiers, NamedKeyCode, PointerButtonCode, PointerInput, BUTTON_NONE,
         KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC, KIND_KEY_PRESSED, KIND_KEY_RELEASED,
-        KIND_MOVED, KIND_PRESSED, KIND_RELEASED, MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT,
+        KIND_MOVED_BY, KIND_PRESSED, KIND_RELEASED, MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT,
         POINTER_INPUT_MAGIC,
+    };
+    use crate::driver::input::{
+        InputEvent, InputEventKind, AXIS_X, AXIS_Y, POINTER_BUTTON_CODE_BASE,
     };
     use crate::{Errno, ABI_VERSION_CURRENT};
 
@@ -573,7 +644,7 @@ mod tests {
 
     #[test]
     fn moved_round_trips() {
-        let event = PointerInput::Moved { x: -17, y: 42 };
+        let event = PointerInput::MovedBy { dx: -17, dy: 42 };
         let decoded = PointerInput::from_bytes(&event.to_le_bytes()).expect("valid record");
         assert_eq!(decoded, event);
     }
@@ -605,14 +676,14 @@ mod tests {
 
     #[test]
     fn rejects_bad_magic() {
-        let mut bytes = PointerInput::Moved { x: 1, y: 2 }.to_le_bytes();
+        let mut bytes = PointerInput::MovedBy { dx: 1, dy: 2 }.to_le_bytes();
         bytes[0] ^= 0xFF;
         assert_eq!(PointerInput::from_bytes(&bytes), Err(Errno::BadMagic));
     }
 
     #[test]
     fn rejects_bad_version() {
-        let mut bytes = PointerInput::Moved { x: 1, y: 2 }.to_le_bytes();
+        let mut bytes = PointerInput::MovedBy { dx: 1, dy: 2 }.to_le_bytes();
         bytes[4] = 99;
         assert_eq!(
             PointerInput::from_bytes(&bytes),
@@ -622,21 +693,21 @@ mod tests {
 
     #[test]
     fn rejects_nonzero_reserved() {
-        let mut bytes = PointerInput::Moved { x: 1, y: 2 }.to_le_bytes();
+        let mut bytes = PointerInput::MovedBy { dx: 1, dy: 2 }.to_le_bytes();
         bytes[10] = 1;
         assert_eq!(PointerInput::from_bytes(&bytes), Err(Errno::BadMagic));
     }
 
     #[test]
     fn rejects_unknown_kind() {
-        let mut bytes = PointerInput::Moved { x: 0, y: 0 }.to_le_bytes();
+        let mut bytes = PointerInput::MovedBy { dx: 0, dy: 0 }.to_le_bytes();
         bytes[6] = 9;
         assert_eq!(PointerInput::from_bytes(&bytes), Err(Errno::OutOfRange));
     }
 
     #[test]
     fn rejects_button_on_motion() {
-        let mut bytes = PointerInput::Moved { x: 0, y: 0 }.to_le_bytes();
+        let mut bytes = PointerInput::MovedBy { dx: 0, dy: 0 }.to_le_bytes();
         // Low byte of the `button` field at offset 8: set it to Primary (1).
         bytes[8] = 1;
         assert_eq!(PointerInput::from_bytes(&bytes), Err(Errno::OutOfRange));
@@ -658,10 +729,108 @@ mod tests {
     }
 
     #[test]
-    fn rejects_coordinate_on_press() {
+    fn rejects_displacement_on_press() {
         let mut bytes = PointerInput::Pressed(PointerButtonCode::Primary).to_le_bytes();
         bytes[12] = 1;
         assert_eq!(PointerInput::from_bytes(&bytes), Err(Errno::BadMagic));
+    }
+
+    /// One device event per axis maps onto a single-axis displacement.
+    #[test]
+    fn device_axis_deltas_map_to_single_axis_moves() {
+        let x = InputEvent {
+            kind: InputEventKind::Pointer,
+            reserved0: 0,
+            code: AXIS_X,
+            value: -6,
+        };
+        let y = InputEvent {
+            kind: InputEventKind::Pointer,
+            reserved0: 0,
+            code: AXIS_Y,
+            value: 11,
+        };
+        assert_eq!(
+            PointerInput::from_device_event(&x),
+            Some(PointerInput::MovedBy { dx: -6, dy: 0 })
+        );
+        assert_eq!(
+            PointerInput::from_device_event(&y),
+            Some(PointerInput::MovedBy { dx: 0, dy: 11 })
+        );
+    }
+
+    /// The three `evdev` button codes resolve to the closed button set,
+    /// press and release alike.
+    #[test]
+    fn device_button_edges_resolve_each_button() {
+        for (offset, button) in [
+            (0, PointerButtonCode::Primary),
+            (1, PointerButtonCode::Secondary),
+            (2, PointerButtonCode::Middle),
+        ] {
+            let mut event = InputEvent {
+                kind: InputEventKind::Key,
+                reserved0: 0,
+                code: POINTER_BUTTON_CODE_BASE + offset,
+                value: 1,
+            };
+            assert_eq!(
+                PointerInput::from_device_event(&event),
+                Some(PointerInput::Pressed(button))
+            );
+            event.value = 0;
+            assert_eq!(
+                PointerInput::from_device_event(&event),
+                Some(PointerInput::Released(button))
+            );
+        }
+    }
+
+    /// Keyboard keys, scroll ticks, unknown axes, out-of-set buttons, and
+    /// repeat values produce no record (fail closed, never fabricate).
+    #[test]
+    fn device_events_outside_the_pointer_vocabulary_produce_nothing() {
+        let cases = [
+            // A keyboard key (`KEY_A` = 30) is the keyboard producer's job.
+            InputEvent {
+                kind: InputEventKind::Key,
+                reserved0: 0,
+                code: 30,
+                value: 1,
+            },
+            // A code past the modelled button set (`BTN_SIDE` = 0x113).
+            InputEvent {
+                kind: InputEventKind::Key,
+                reserved0: 0,
+                code: POINTER_BUTTON_CODE_BASE + 3,
+                value: 1,
+            },
+            // A button repeat carries no edge.
+            InputEvent {
+                kind: InputEventKind::Key,
+                reserved0: 0,
+                code: POINTER_BUTTON_CODE_BASE,
+                value: 2,
+            },
+            // An axis this vocabulary does not model.
+            InputEvent {
+                kind: InputEventKind::Pointer,
+                reserved0: 0,
+                code: 2,
+                value: 1,
+            },
+            // Scroll has no desktop consumer yet, so no record is minted.
+            InputEvent {
+                kind: InputEventKind::Scroll,
+                reserved0: 0,
+                code: AXIS_Y,
+                value: -1,
+            },
+        ];
+        for event in cases {
+            assert_eq!(PointerInput::from_device_event(&event), None);
+        }
     }
 
     #[test]
@@ -673,7 +842,7 @@ mod tests {
     #[test]
     fn known_constants_are_frozen() {
         assert_eq!(POINTER_INPUT_MAGIC, u32::from_le_bytes(*b"PIN1"));
-        assert_eq!(KIND_MOVED, 0);
+        assert_eq!(KIND_MOVED_BY, 0);
         assert_eq!(KIND_PRESSED, 1);
         assert_eq!(KIND_RELEASED, 2);
         assert_eq!(BUTTON_NONE, 0);

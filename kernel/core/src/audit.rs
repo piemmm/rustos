@@ -33,7 +33,7 @@
 //! | 4042 | Info | `DRIVER_STORE_SCANNED` | audit | The `/System/Drivers/` signed-driver store was enumerated for autoload candidates. The `drivers` field carries the count of bundle image paths found; `skipped` the count of entries refused fail-closed during the walk. |
 //! | 4045 | Info | `USER_ADMIN_APPLIED` | audit | A `CAP_USER_ADMIN` account-administration operation was validated, persisted, and made live. The `op`, `target`, and `caller_uid` fields name the operation, the affected account/group, and the kernel-attested caller. |
 //! | 4046 | Warn | `USER_ADMIN_REJECTED` | audit | A `CAP_USER_ADMIN` account-administration operation was refused; nothing changed (fail closed). The `op`, `target`, `caller_uid`, and `errno` fields name the operation, the affected account/group, the caller, and the refusal. |
-//! | 4050 | Info | `INPUT_DELIVERED` | audit | A keyboard driver delivered the **first** key edge to the input-focus arbiter via `key_inject`. Emitted exactly once over the kernel's lifetime, carries no key content or timing — it witnesses that an autoloaded input driver is live, never a per-keystroke record. |
+//! | 4050 | Info | `INPUT_DELIVERED` | audit | An input driver delivered the **first** record of its kind to the input-focus arbiter — `kind=key` for the first `key_inject` edge, `kind=pointer` for the first `pointer_inject` record. Emitted at most once per input kind over the kernel's lifetime, carries no event content or timing — it witnesses that an autoloaded driver of that class is live, never a per-event record. |
 //! | 4051 | Info | `SEAT_SWITCHED` | audit | A `CAP_SEAT_ADMIN` `seat_switch` retargeted a seat's foreground text console. The `seat` and `console` fields name the seat and the new foreground. |
 //! | 4052 | Warn | `SEAT_LEASE_REVOKED` | audit | A `CAP_SEAT_ADMIN` `seat_revoke` forcibly evicted a seat's lease holder. The `seat` and `evicted` fields name the seat and the evicted owner's task id. |
 //!
@@ -176,18 +176,20 @@ pub enum AuditEvent {
     /// and nothing changed (fail closed). Carries the operation, target,
     /// attested caller uid, and the refusing errno.
     UserAdminRejected,
-    /// A keyboard driver delivered the **first** key edge to the
+    /// An input driver delivered the **first** record of its kind to the
     /// seat registry (`crate::seat`, `plans/PI.md` P11 —
     /// the autoload-by-discovery witness).
     ///
-    /// Emitted by the `key_inject` syscall handler the first time
-    /// [`crate::seat::SeatRegistry::inject`] succeeds, gated by a
-    /// one-shot latch ([`crate::seat::SeatRegistry::note_first_delivery`]),
-    /// so it fires exactly once over the kernel's lifetime. It witnesses
-    /// that an (autoloaded) input driver has come up and is delivering
-    /// input; it carries **no** key content, count, or timing — a
-    /// per-keystroke record would leak typed secrets and is forbidden
-    /// (no input-content/timing noise on the log;
+    /// Emitted by the `key_inject` / `pointer_inject` syscall handlers the
+    /// first time [`crate::seat::SeatRegistry::inject`] /
+    /// [`crate::seat::SeatRegistry::inject_pointer`] succeeds for that
+    /// input kind, gated by a per-kind one-shot latch
+    /// ([`crate::seat::SeatRegistry::note_first_delivery`]), so it fires
+    /// at most once per kind — twice over the kernel's lifetime — with a
+    /// `kind` field (`key` / `pointer`) attributing which input class
+    /// proved itself live. It carries **no** event content, count, or
+    /// timing — a per-event record would leak typed secrets and is
+    /// forbidden (no input-content/timing noise on the log;
     /// — secret hygiene).
     InputDelivered,
     /// A `CAP_SEAT_ADMIN` `seat_switch` retargeted a seat's foreground

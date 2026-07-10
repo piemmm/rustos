@@ -1,11 +1,16 @@
-//! The `Run` entry-point binary of the virtio-input keyboard driver, installed
-//! as a signed `/System/Drivers/` bundle and **autoloaded into user space** by
-//! `devmgr` when a virtio-input device is discovered (
-//! `plans/PI.md` P10 chunk 5d-2-ii).
+//! The `Run` entry-point binary of the virtio-input driver (keyboard *and*
+//! pointer), installed as a signed `/System/Drivers/` bundle and
+//! **autoloaded into user space** by `devmgr` when a virtio-input device is
+//! discovered (`plans/PI.md` P10 chunk 5d-2-ii).
 //!
 //! This is the "drivers in user space" steady state on the
-//! hardware QEMU `-M virt` actually presents (a virtio-input keyboard; the
-//! metal Pi 4 keyboard is the USB `drivers/input/usb_kbd`). The kernel mints
+//! hardware QEMU `-M virt` actually presents (a virtio-input keyboard and
+//! its virtio-mouse pointer sibling; the metal Pi 4 keyboard is the USB
+//! `drivers/input/usb_kbd`). One driver instance is spawned per discovered
+//! virtio-input node, and each instance serves whatever event stream its
+//! own device produces — the bind table cannot know whether a node is a
+//! keyboard or a mouse, so every instance runs both producers and the
+//! device decides which of them ever yields a record. The kernel mints
 //! this process exactly the device-resource grants its matched node requested
 //! — the device's register window and a DMA constraint, and no more — and this program reaches them through the
 //! rt-backed `RtDriverHost`. It names no board, bus, or transport detail: it maps a register window by address, carves a DMA
@@ -40,11 +45,15 @@
 //!   its event queue, and only then binds the granted interrupt (the arm
 //!   step), so readiness is never advertised before the device can accept a
 //!   keystroke.
-//! * The poll/feed/inject loop: each decoded `InputEvent` key edge is
-//!   resolved into a `KeyInput` record by `VirtioKeyboardConsole` and
-//!   injected into the kernel input-focus arbiter through the `key_inject`
-//!   syscall, which routes it by who holds focus. The
-//!   driver no longer chooses the encoding or the destination.
+//! * The poll/feed/inject loop: each decoded `InputEvent` is offered to the
+//!   shared pointer mapping first (`PointerInput::from_device_event` — axis
+//!   deltas and the `BTN_*` button edges) and injected through
+//!   `pointer_inject`; every other event is resolved into a `KeyInput`
+//!   record by `VirtioKeyboardConsole` and injected through `key_inject`.
+//!   Both syscalls route by who holds the seat; the driver never chooses
+//!   the encoding or the destination, and it never learns the screen —
+//!   pointer records carry relative displacements the seat owner
+//!   accumulates (`lib/abi` `input`).
 //!
 //! After bring-up `main` pumps the device forever, **parking on the granted
 //! device interrupt** between events: `VirtioInput::poll` waits through the
@@ -73,6 +82,7 @@ mod program {
     use rustos_abi::driver::input::{Input, InputEvent, InputEventKind};
     use rustos_abi::driver::sole_register_window;
     use rustos_abi::driver::virtio::VirtioHost;
+    use rustos_abi::input::PointerInput;
     use rustos_abi::{CapabilityId, MmioMapper};
     use rustos_caps::CapabilitySet;
     use rustos_drvrt::{RtDriverHost, RtGrantSyscalls};
@@ -173,10 +183,10 @@ mod program {
             return EXIT_BRINGUP_FAILED;
         };
 
-        // Pump the device forever, resolving each decoded key edge into a
-        // `KeyInput` record and injecting it for the boot seat
-        // (`SEAT_PRIMARY`) — the seat a directly attached keyboard belongs
-        // to — into the input-focus arbiter.
+        // Pump the device forever, injecting each decoded event for the
+        // boot seat (`SEAT_PRIMARY`) — the seat a directly attached input
+        // device belongs to — into the input-focus arbiter: pointer records
+        // through `pointer_inject`, key edges through `key_inject`.
         // `poll` parks on the bound device interrupt while nothing is
         // pending (and acknowledges the device each cycle), so an idle
         // keyboard holds the task off the run queue — no yield loop. An
@@ -189,7 +199,14 @@ mod program {
             match input.poll(&mut events) {
                 Ok(drained) => {
                     for event in &events[..drained] {
-                        if let Some(record) = console.feed(*event) {
+                        // The pointer mapping claims the pointer vocabulary
+                        // (axis deltas, `BTN_*` edges); everything else is
+                        // the keyboard producer's. The two are disjoint by
+                        // construction, so no event is ever double-injected.
+                        if let Some(record) = PointerInput::from_device_event(event) {
+                            let _ =
+                                rustos_rt::pointer_inject(rustos_abi::seat::SEAT_PRIMARY, &record);
+                        } else if let Some(record) = console.feed(*event) {
                             let _ = rustos_rt::key_inject(rustos_abi::seat::SEAT_PRIMARY, &record);
                         }
                     }

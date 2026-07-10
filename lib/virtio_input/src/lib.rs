@@ -45,7 +45,7 @@ pub mod console;
 
 pub use console::VirtioKeyboardConsole;
 
-use rustos_abi::driver::input::{Input, InputEvent, InputEventKind};
+use rustos_abi::driver::input::{Input, InputEvent, InputEventKind, AXIS_X, AXIS_Y};
 use rustos_abi::driver::BufferClass;
 use rustos_abi::DriverError;
 use rustos_virtio::{
@@ -96,14 +96,6 @@ mod wire {
     pub const REL_Y: u16 = 0x01;
     /// `REL_WHEEL` — vertical scroll-wheel motion.
     pub const REL_WHEEL: u16 = 0x08;
-
-    /// `code` value for the X axis in the platform-neutral
-    /// [`InputEventKind::Pointer`](rustos_abi::driver::input::InputEventKind::Pointer)
-    /// / `Scroll` encoding.
-    pub const AXIS_X: u16 = 0;
-    /// `code` value for the Y axis in the platform-neutral
-    /// pointer / scroll encoding.
-    pub const AXIS_Y: u16 = 1;
 }
 
 /// Decode one raw `virtio_input_event` triple into the platform-neutral
@@ -130,19 +122,19 @@ fn decode_event(etype: u16, code: u16, value: i32) -> Option<InputEvent> {
             wire::REL_X => Some(InputEvent {
                 kind: InputEventKind::Pointer,
                 reserved0: 0,
-                code: wire::AXIS_X,
+                code: AXIS_X,
                 value,
             }),
             wire::REL_Y => Some(InputEvent {
                 kind: InputEventKind::Pointer,
                 reserved0: 0,
-                code: wire::AXIS_Y,
+                code: AXIS_Y,
                 value,
             }),
             wire::REL_WHEEL => Some(InputEvent {
                 kind: InputEventKind::Scroll,
                 reserved0: 0,
-                code: wire::AXIS_Y,
+                code: AXIS_Y,
                 value,
             }),
             _ => None,

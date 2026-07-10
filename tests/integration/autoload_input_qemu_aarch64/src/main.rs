@@ -1,10 +1,11 @@
 //! `plans/PI.md` P10 5d-2-ii(b-2-iii) QEMU integration test: boot the
 //! production aarch64 `rustos-kernel` pipeline on the `virt` board with a
 //! planted whole-disk encrypted-root image that carries a **kernel-signed
-//! virtio-input keyboard driver bundle** in `/System/Drivers/`, and prove the
-//! full **driver-loading-by-discovery autoload path** spawns that user-space
-//! driver, which delivers an injected keystroke to the kernel input-focus
-//! arbiter.
+//! virtio-input driver bundle** in `/System/Drivers/`, and prove the full
+//! **driver-loading-by-discovery autoload path** spawns one user-space
+//! driver instance per discovered virtio-input node (keyboard + mouse),
+//! which deliver an injected keystroke **and** an injected mouse motion to
+//! the kernel input-focus arbiter (`key_inject` and `pointer_inject`).
 //!
 //! ## What this test asserts — and how it differs from its siblings
 //!
@@ -39,30 +40,34 @@
 //!    `KERNEL_DRIVER_SIGNER_PUBKEY`) and **spawns it into its own user-space
 //!    process** with exactly that node's resource grants (register window, DMA,
 //!    and the IRQ line) plus the delegated `CAP_INPUT_INJECT`.
-//! 4. The spawned driver maps its register window, brings the virtio-input
-//!    device up, **then binds its granted interrupt line and parks on
-//!    `irq_wait`** (interrupt-driven, never a busy poll; the bind is
-//!    `VirtioInput::open_armed`'s arm step, issued only once the eventq is
-//!    live so the audited bind is a truthful readiness witness), and on
-//!    each device interrupt pumps decoded key edges into the arbiter via
-//!    `key_inject`.
+//! 4. Each spawned driver instance maps its register window, brings its
+//!    virtio-input device up, **then binds its granted interrupt line and
+//!    parks on `irq_wait`** (interrupt-driven, never a busy poll; the bind
+//!    is `VirtioInput::open_armed`'s arm step, issued only once the eventq
+//!    is live so the audited bind is a truthful readiness witness), and on
+//!    each device interrupt pumps decoded events into the arbiter — key
+//!    edges via `key_inject`, pointer records via `pointer_inject`.
 //!
-//! ## Why the PASS keys on the first-delivery witness
+//! ## Why the PASS keys on both per-kind first-delivery witnesses
 //!
-//! The audit sink reports PASS once it sees `AuditEvent::InputDelivered`
-//! (`EventId` 4050) — the one-shot witness the
-//! `key_inject` handler emits the first time an input driver delivers a key
-//! edge to the arbiter (it carries no key content, count, or
-//! timing). Reaching it requires every preceding step to have succeeded: the
-//! `/System` volume mounted and served, the store listed, the signed bundle
-//! verified, the node matched, the user-space driver spawned and granted its
-//! resources plus `CAP_INPUT_INJECT`, the device brought up, its interrupt
-//! bound and routed, and the injected keystroke decoded and delivered. The
-//! harness injects the key only once the driver has armed its interrupt (the
-//! audited `irq_bind` syscall, `AUTOLOAD_INPUT_KEY_MARKER`), so the device is
-//! active with posted buffers and the keypress is delivered rather than dropped
-//! against an un-ready device. A run where any step fails never reaches that
-//! witness, so the harness times out — the documented fail-loud behaviour.
+//! The audit sink reports PASS once it has seen `AuditEvent::InputDelivered`
+//! (`EventId` 4050) for **both** input kinds — the per-kind one-shot
+//! witnesses the `key_inject` / `pointer_inject` handlers emit the first
+//! time a driver of each class delivers to the arbiter (`kind=key` /
+//! `kind=pointer`; no event content, count, or timing). Reaching them
+//! requires every preceding step to have succeeded: the `/System` volume
+//! mounted and served, the store listed, the signed bundle verified, each
+//! node matched, one user-space driver instance spawned per node and
+//! granted its resources plus `CAP_INPUT_INJECT`, each device brought up,
+//! its interrupt bound and routed, the injected keystroke decoded and
+//! delivered, and the injected mouse motion decoded (the shared
+//! `PointerInput::from_device_event` mapping) and delivered. The harness
+//! injects the key only once both driver instances have armed their
+//! interrupts (the audited `irq_bind` syscall, twice), and injects the
+//! mouse motion only once the key witness's `kind=key` line appears on
+//! serial — so each witness is attributable to its own injection. A run
+//! where any step fails never reaches both witnesses, so the harness times
+//! out — the documented fail-loud behaviour.
 //!
 //! ## Embedded `virt` device tree
 //!
@@ -91,6 +96,7 @@
 #[cfg(itest_aarch64)]
 mod kernel {
     use core::panic::PanicInfo;
+    use core::sync::atomic::{AtomicBool, Ordering};
 
     use rustos_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
     use rustos_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
@@ -119,24 +125,60 @@ mod kernel {
         unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
 
     /// Sink that replays every event through [`SERIAL_SINK`] and reports PASS
-    /// to QEMU the instant the one-shot first-input-delivery witness appears —
-    /// proof that the autoloaded user-space virtio-input driver came up and
-    /// delivered a key edge to the input-focus arbiter (the full
-    /// discovery → signed gate → spawn → inject path).
-    struct AutoloadInputSink;
+    /// to QEMU once **both** per-kind first-input-delivery witnesses have
+    /// appeared (`kind=key` and `kind=pointer`) — proof that the autoloaded
+    /// user-space virtio-input driver instances came up and delivered a key
+    /// edge *and* a pointer record to the input-focus arbiter (the full
+    /// discovery → signed gate → spawn → inject path, per input class).
+    struct AutoloadInputSink {
+        key_delivered: AtomicBool,
+        pointer_delivered: AtomicBool,
+    }
+
+    impl AutoloadInputSink {
+        const fn new() -> Self {
+            Self {
+                key_delivered: AtomicBool::new(false),
+                pointer_delivered: AtomicBool::new(false),
+            }
+        }
+    }
 
     impl Sink for AutoloadInputSink {
         fn write_event(&self, event: &Event<'_>) {
             // Replay through the serial sink so the QEMU transcript records the
-            // full boot + unlock + autoload + input timeline.
+            // full boot + unlock + autoload + input timeline (the harness also
+            // gates its mouse injection on the `kind=key` line of this replay).
             SerialSink::new().write_event(event);
-            if event.id.0 == AuditEvent::InputDelivered.id().0 {
+            if event.id.0 != AuditEvent::InputDelivered.id().0 {
+                return;
+            }
+            // Attribute the witness by its `kind` field; an unrecognised
+            // field value flips neither latch (fail closed — a malformed
+            // witness can never satisfy the PASS condition).
+            for field in event.fields {
+                if field.key != "kind" {
+                    continue;
+                }
+                match field.value {
+                    rustos_log::FieldValue::Str("key") => {
+                        self.key_delivered.store(true, Ordering::Release);
+                    }
+                    rustos_log::FieldValue::Str("pointer") => {
+                        self.pointer_delivered.store(true, Ordering::Release);
+                    }
+                    _ => {}
+                }
+            }
+            if self.key_delivered.load(Ordering::Acquire)
+                && self.pointer_delivered.load(Ordering::Acquire)
+            {
                 qemu_exit::exit_success();
             }
         }
     }
 
-    static AUDIT_SINK: AutoloadInputSink = AutoloadInputSink;
+    static AUDIT_SINK: AutoloadInputSink = AutoloadInputSink::new();
 
     /// Forward to the shared aarch64 panic bridge. A panic before the PASS
     /// finisher parks the CPU, the run times out, and the harness reports

@@ -23,7 +23,7 @@
 #define ROS_KEY_INPUT_WIRE_LEN 20u
 
 /* Record `kind` codes: pointer moves/clicks then key down/up (uint16_t). */
-#define ROS_INPUT_KIND_MOVED ((uint16_t)0u)
+#define ROS_INPUT_KIND_MOVED_BY ((uint16_t)0u)
 #define ROS_INPUT_KIND_PRESSED ((uint16_t)1u)
 #define ROS_INPUT_KIND_RELEASED ((uint16_t)2u)
 #define ROS_INPUT_KIND_KEY_PRESSED ((uint16_t)1u)

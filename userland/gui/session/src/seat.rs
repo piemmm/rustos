@@ -151,7 +151,11 @@ mod tests {
         PointerInput,
     };
     use rustos_abi::Errno;
-    use rustos_wm::{InputEvent, Key, NamedKey, Point};
+    use rustos_wm::{InputEvent, Key, NamedKey, Point, Rect};
+
+    /// The screen the pointer sources resolve motion against: 640×480 at
+    /// the origin, so the pointer starts at its centre (320, 240).
+    const SCREEN: Rect = Rect::new(0, 0, 640, 480);
 
     /// An in-memory reader that yields queued records, optionally faulting
     /// once before the next drain.
@@ -200,13 +204,14 @@ mod tests {
     #[test]
     fn drains_a_pointer_move_from_the_seat_channel() {
         let mut channel = pointer_channel();
-        let record = PointerInput::Moved { x: 7, y: -3 };
+        let record = PointerInput::MovedBy { dx: 7, dy: -3 };
         channel.reader_mut().push(record.to_le_bytes().to_vec());
-        let mut source = DeviceInputSource::new(channel);
+        let mut source = DeviceInputSource::new(channel, SCREEN).expect("non-empty screen");
+        // The displacement is applied to the centre start position.
         assert_eq!(
             source.poll(),
             Ok(Some(InputEvent::PointerMoved {
-                to: Point::new(7, -3)
+                to: Point::new(327, 237)
             }))
         );
         assert_eq!(source.poll(), Ok(None));
@@ -257,7 +262,7 @@ mod tests {
     #[test]
     fn reader_fault_propagates_then_recovers() {
         let mut channel = pointer_channel();
-        let record = PointerInput::Moved { x: 1, y: 2 };
+        let record = PointerInput::MovedBy { dx: 1, dy: 2 };
         channel.reader_mut().push(record.to_le_bytes().to_vec());
         channel.reader_mut().fault_with(Errno::SeatNotOwner);
         assert_eq!(
@@ -292,16 +297,18 @@ mod tests {
         channel
             .reader_mut()
             .push(alloc::vec![0u8; PointerInput::WIRE_LEN]);
-        let mut source = DeviceInputSource::new(channel);
+        let mut source = DeviceInputSource::new(channel, SCREEN).expect("non-empty screen");
         assert_eq!(source.poll(), Err(Errno::BadMagic));
     }
 
     #[test]
     fn into_reader_returns_the_wrapped_reader() {
         let mut channel = pointer_channel();
-        channel
-            .reader_mut()
-            .push(PointerInput::Moved { x: 0, y: 0 }.to_le_bytes().to_vec());
+        channel.reader_mut().push(
+            PointerInput::MovedBy { dx: 0, dy: 0 }
+                .to_le_bytes()
+                .to_vec(),
+        );
         let reader = channel.into_reader();
         assert_eq!(reader.records.len(), 1);
     }

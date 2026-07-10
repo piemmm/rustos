@@ -10,18 +10,25 @@ live in `lib/abi/src/input.rs` (`rustos_abi::input`).
 [`PointerInput`] is one decoded pointer event. The type makes illegal
 states unrepresentable (`AGENTS.md` §2.11):
 
-- `Moved { x, y }` — the pointer moved to an absolute screen position.
+- `MovedBy { dx, dy }` — the pointer moved by a relative displacement in
+  the device's count units (`evdev` orientation: positive x rightward,
+  positive y downward).
 - `Pressed(button)` / `Released(button)` — a [`PointerButtonCode`]
   (primary / secondary / middle) went down or came up at the current
   pointer position.
 
+The record is deliberately **screen-independent**: only the seat owner
+(the desktop session, which owns the compositor) knows the screen's pixel
+extent, so *it* accumulates displacements into the absolute, clamped
+on-screen position — an input driver needs no display-geometry authority.
+
 A record is exactly [`PointerInput::WIRE_LEN`] (20) bytes, little-endian:
 a `"PIN1"` magic, the two-byte ABI version, a `kind` code, a `button`
-code, a reserved half-word, and two 4-byte signed coordinates. The
-coordinates carry the new position for a move and are zero for a press or
-release (a pointing device reports motion separately from clicks, and a
-router applies a button at the position the last motion established — the
-same model as `lib/input`).
+code, a reserved half-word, and two 4-byte signed displacements. The
+displacement fields carry the reported motion for a move and are zero for
+a press or release (a pointing device reports motion separately from
+clicks, and the seat owner applies a button at the position its
+accumulated motion established — the same model as `lib/input`).
 
 ## Fail-closed decoding
 
@@ -30,7 +37,7 @@ value and refuses anything inconsistent rather than guessing
 (`AGENTS.md` §5.4 / §19.5): a short buffer, a wrong magic, an
 unsupported version, a non-zero reserved field, an undefined `kind`, a
 `button` code inconsistent with the kind (a button on a move, or no /
-unknown button on a press), or a coordinate on a press/release all fail
+unknown button on a press), or a displacement on a press/release all fail
 with the matching [`Errno`]. The decoder is enrolled in the `lib/abi`
 fuzz harness (`AGENTS.md` §19.6).
 
@@ -38,13 +45,15 @@ fuzz harness (`AGENTS.md` §19.6).
 
 This is **not** a duplicate of the device-level
 [`driver::input::InputEvent`] (`AGENTS.md` §2.2). That type is what an
-input *driver* reports across the [`Input`] driver trait: raw per-axis
-pointer *deltas*, scroll ticks, and platform keycodes. `PointerInput` is
-the *desktop-level* event the window manager and taskbar route — an
-**absolute** position and a *resolved* button. Turning the
-device-relative driver stream into this resolved stream is pointer-input
-policy that sits above the driver; the two ABIs are on opposite sides of
-it.
+input *driver* reports across the [`Input`] driver trait: single-axis
+pointer *deltas*, scroll ticks, and platform keycodes, one event per axis
+or edge. `PointerInput` is the *seat-channel* record a driver process
+injects (`pointer_inject`): button keycodes are resolved to the closed
+button set, and scroll ticks are not carried (the desktop has no scroll
+consumer yet; the vocabulary is extended with the consumer, never ahead
+of it). [`PointerInput::from_device_event`] is the one shared spelling of
+that mapping, so the virtio and USB HID driver processes can never
+diverge.
 
 ## The keyboard record
 
@@ -88,6 +97,7 @@ focused window; the taskbar takes no keyboard input.
 [`Modifiers`]: ../../rustos_abi/input/struct.Modifiers.html
 [`PointerInput::WIRE_LEN`]: ../../rustos_abi/input/enum.PointerInput.html#associatedconstant.WIRE_LEN
 [`PointerInput::from_bytes`]: ../../rustos_abi/input/enum.PointerInput.html#method.from_bytes
+[`PointerInput::from_device_event`]: ../../rustos_abi/input/enum.PointerInput.html#method.from_device_event
 [`PointerButtonCode`]: ../../rustos_abi/input/enum.PointerButtonCode.html
 [`Errno`]: ../../rustos_abi/error/enum.Errno.html
 [`driver::input::InputEvent`]: ../../rustos_abi/driver/input/struct.InputEvent.html

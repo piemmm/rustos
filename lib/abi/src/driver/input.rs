@@ -47,6 +47,24 @@ impl InputEventKind {
     }
 }
 
+/// `code` of the X axis in an [`InputEventKind::Pointer`] /
+/// [`InputEventKind::Scroll`] event — the platform-neutral axis encoding
+/// every input decoder (`lib/hid`, `lib/virtio_input`) reports in. One
+/// definition here; decoders import it rather than carrying a private copy.
+pub const AXIS_X: u16 = 0;
+/// `code` of the Y axis (see [`AXIS_X`]).
+pub const AXIS_Y: u16 = 1;
+
+/// `code` of pointer button `n` in an [`InputEventKind::Key`] event:
+/// `0x110` primary/left, `0x111` secondary/right, `0x112` middle — the
+/// `evdev` `BTN_LEFT`/`BTN_RIGHT`/`BTN_MIDDLE` codes a virtio pointer
+/// device delivers, mirrored by the USB HID boot-mouse decode, so every
+/// pointer producer sees one button vocabulary.
+pub const POINTER_BUTTON_CODE_BASE: u16 = 0x110;
+/// Pointer buttons the platform-neutral vocabulary models (primary,
+/// secondary, middle), starting at [`POINTER_BUTTON_CODE_BASE`].
+pub const POINTER_BUTTON_COUNT: u16 = 3;
+
 /// A single input event.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

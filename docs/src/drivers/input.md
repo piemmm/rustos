@@ -193,8 +193,13 @@ over its kernel-issued grants (coherency `None` — coherent DMA, platform-neutr
 `rustos_abi::driver::sole_register_window` over `RtDriverHost::resources()` (the
 one definition shared with the USB keyboard driver, §2.2 / §2.16), maps it
 through `mmio_map`, builds the bus-agnostic `MmioTransport`, brings the device up
-with `VirtioInput::open_armed`, and loops `poll` → `VirtioKeyboardConsole::feed` →
-`key_inject`. The pump is interrupt-driven: `open_armed` runs
+with `VirtioInput::open_armed`, and pumps `poll`, offering each decoded event to
+the shared pointer mapping first (`PointerInput::from_device_event` — axis
+deltas and `BTN_*` edges → `pointer_inject`) and every other event to
+`VirtioKeyboardConsole::feed` → `key_inject`; one driver instance is spawned
+per discovered virtio-input node (keyboard and mouse alike — the bind table
+cannot tell them apart), and each instance's device decides which producer
+ever yields a record. The pump is interrupt-driven: `open_armed` runs
 `RtDriverHost::bind_irq` on the granted device line as its *arm* step, strictly
 after the eventq is live (`DRIVER_OK`, buffers posted, device kicked), so the
 audited `irq_bind` syscall is a truthful "keyboard ready" witness — binding any

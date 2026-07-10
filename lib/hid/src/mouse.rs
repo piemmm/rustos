@@ -18,19 +18,19 @@
 use rustos_abi::driver::input::{Input, InputEvent, InputEventKind};
 use rustos_abi::DriverError;
 
-use crate::{poll_source, PendingEvents, ReportDecode, ReportSource, AXIS_X, AXIS_Y};
+use crate::{
+    poll_source, PendingEvents, ReportDecode, ReportSource, AXIS_X, AXIS_Y,
+    POINTER_BUTTON_CODE_BASE, POINTER_BUTTON_COUNT,
+};
 
 /// Minimum byte length of a boot mouse input report.
 pub const BOOT_MOUSE_REPORT_MIN: usize = 3;
 
-/// `Key` code of mouse button `n` (`0x110` left, `0x111` right,
-/// `0x112` middle) — the codes a virtio pointer device delivers for the
-/// same buttons, so the WM sees one button vocabulary.
-pub const BUTTON_CODE_BASE: u16 = 0x110;
-
-/// Buttons the boot protocol defines (bits 0..3 of byte 0). Bits 3..8
-/// are device-specific per §B.2 and deliberately not interpreted.
-const BUTTON_COUNT: u8 = 3;
+/// Buttons the boot protocol defines (bits 0..3 of byte 0) — exactly the
+/// shared platform-neutral button set. Bits 3..8 are device-specific per
+/// §B.2 and deliberately not interpreted.
+#[allow(clippy::cast_possible_truncation)] // 3 fits a u8 by definition.
+const BUTTON_COUNT: u8 = POINTER_BUTTON_COUNT as u8;
 
 /// Mask selecting the boot-protocol button bits.
 const BUTTON_MASK: u8 = (1 << BUTTON_COUNT) - 1;
@@ -96,7 +96,7 @@ impl ReportDecode<MAX_EVENTS> for MouseState {
                 pending.push(InputEvent {
                     kind: InputEventKind::Key,
                     reserved0: 0,
-                    code: BUTTON_CODE_BASE + u16::from(bit),
+                    code: POINTER_BUTTON_CODE_BASE + u16::from(bit),
                     value: i32::from(pressed),
                 })?;
             }

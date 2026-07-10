@@ -124,11 +124,11 @@ fn decode_maps_key_press_and_release() {
 fn decode_maps_relative_pointer_and_wheel() {
     let x = decode_event(wire::EV_REL, wire::REL_X, -3).expect("rel-x decodes");
     assert_eq!(x.kind, InputEventKind::Pointer);
-    assert_eq!(x.code, wire::AXIS_X);
+    assert_eq!(x.code, AXIS_X);
     assert_eq!(x.value, -3);
     let y = decode_event(wire::EV_REL, wire::REL_Y, 7).expect("rel-y decodes");
     assert_eq!(y.kind, InputEventKind::Pointer);
-    assert_eq!(y.code, wire::AXIS_Y);
+    assert_eq!(y.code, AXIS_Y);
     assert_eq!(y.value, 7);
     let wheel = decode_event(wire::EV_REL, wire::REL_WHEEL, 1).expect("wheel decodes");
     assert_eq!(wheel.kind, InputEventKind::Scroll);

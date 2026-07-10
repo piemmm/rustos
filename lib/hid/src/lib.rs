@@ -45,7 +45,7 @@
 //!   `key_inject` syscall ([`pump_once`], `plans/PI.md` P11), leaving the
 //!   encoding and routing to the kernel input-focus arbiter. Key repeat remains a higher-layer concern.
 //! * Mouse buttons surface as `Key` events with codes
-//!   [`mouse::BUTTON_CODE_BASE`]` + n` (`0x110`/`0x111`/`0x112` for
+//!   [`POINTER_BUTTON_CODE_BASE`]` + n` (`0x110`/`0x111`/`0x112` for
 //!   left/right/middle — the same codes a virtio pointer device delivers, so
 //!   the WM sees one button vocabulary).
 //! * Motion surfaces as `Pointer` events on axes [`AXIS_X`]/[`AXIS_Y`] and
@@ -73,16 +73,11 @@ mod tests;
 pub use console::{pump_once, ConsoleSink, KeyboardConsole};
 pub use keyboard::BootKeyboard;
 pub use mouse::BootMouse;
-pub use rustos_abi::driver::input::ReportSource;
-
-/// `code` value for the X axis in the platform-neutral
-/// [`InputEventKind::Pointer`] / [`InputEventKind::Scroll`] encoding
-/// (`lib/abi/src/driver/input.rs`).
-pub const AXIS_X: u16 = 0;
-
-/// `code` value for the Y axis in the platform-neutral pointer /
-/// scroll encoding.
-pub const AXIS_Y: u16 = 1;
+// The axis and pointer-button codes are the platform-neutral `lib/abi`
+// vocabulary; one definition, imported rather than re-derived here.
+pub use rustos_abi::driver::input::{
+    ReportSource, AXIS_X, AXIS_Y, POINTER_BUTTON_CODE_BASE, POINTER_BUTTON_COUNT,
+};
 
 /// Byte length of the report buffer a [`poll`](rustos_abi::driver::input::Input::poll)
 /// hands to [`ReportSource::next_report`].

@@ -83,16 +83,23 @@ that does not (or no longer) exist.
   seat returns the keyboard to the text login immediately.
 - `pointer_inject` (`abi-v1` 78, `CAP_INPUT_INJECT`) and `pointer_read`
   (`abi-v1` 79, `CAP_INPUT_READ`) are the pointer analogues: a
-  pointer-input driver injects each decoded motion, button edge, or
-  scroll step for its device's seat, the registry queues it on a held
-  seat's pointer channel, and only the live lease owner drains it — the
-  same `SeatState::access` gate as `keyboard_read`, so no other
-  capability holder can observe the pointer stream. While the seat is
-  unowned the record is consumed and discarded: the text console has no
-  pointer consumer, and the driver never learns — and never chooses —
-  the destination. Desktop input is deliberately *not* a named IPC port:
-  a port's receive gate is capability-only and cannot express "only the
-  live seat-lease holder may drain".
+  pointer-input driver injects each decoded relative motion or resolved
+  button edge for its device's seat (a `PointerInput` record is
+  screen-independent — the seat owner, which owns the compositor,
+  accumulates displacements into the on-screen position; scroll ticks
+  are not carried until a desktop scroll consumer exists), the registry
+  queues it on a held seat's pointer channel, and only the live lease
+  owner drains it — the same `SeatState::access` gate as
+  `keyboard_read`, so no other capability holder can observe the pointer
+  stream. While the seat is unowned the record is consumed and
+  discarded: the text console has no pointer consumer, and the driver
+  never learns — and never chooses — the destination. The first
+  delivered record of each input kind emits that kind's one-shot
+  `INPUT_DELIVERED` witness (`kind=key` / `kind=pointer`), so keyboard
+  and pointer liveness are separately attributable from the log.
+  Desktop input is deliberately *not* a named IPC port: a port's receive
+  gate is capability-only and cannot express "only the live seat-lease
+  holder may drain".
 
 Both `display_*` calls are audited per call (a seat hand-over is the
 analogue of a foreground-tty switch), and every refusal is a typed

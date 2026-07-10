@@ -178,15 +178,22 @@ The `InputSource` the shell `pump`s is now backed by a live device channel.
 running system, an in-memory queue in tests (`AGENTS.md` §7) — that hands the
 desktop one framed `rustos_abi::input::PointerInput` record at a time. Each
 `poll` reads one record and decodes it through `PointerInput::from_bytes` into
-the `lib/input` `InputEvent` the window manager and taskbar route: a `Moved`
-record becomes an absolute `PointerMoved`, a `Pressed` / `Released` record
-becomes a `PointerPressed` / `PointerReleased` carrying the resolved
-`PointerButton`. The crate holds no input capability of its own — the channel
+the `lib/input` `InputEvent` the window manager and taskbar route: a `MovedBy`
+record's relative displacement is accumulated — saturating, clamped to the
+screen rectangle the source is constructed with (an empty screen is refused
+at construction), starting at the screen centre — into an absolute
+`PointerMoved`, and a `Pressed` / `Released` record becomes a
+`PointerPressed` / `PointerReleased` carrying the resolved `PointerButton`.
+The accumulation lives here deliberately: the seat channel is
+screen-independent, and only this seat-owning session knows the compositor's
+pixel extent, so a driver never needs display-geometry authority and a
+hostile injector can pin the pointer to an edge but never move it off-screen
+or wrap it. The crate holds no input capability of its own — the channel
 delivers the bytes and the decode runs above the device (`AGENTS.md` §17.4 /
 §19.5) — and a malformed record fails closed with its `Errno` rather than being
 misinterpreted, ending the shell's `pump` without disturbing the events already
-applied (`AGENTS.md` §5.4 / §2.9). The ABI record itself is the desktop-level
-pointer event documented in [Input events](../abi/input.md); it is a
+applied (`AGENTS.md` §5.4 / §2.9). The ABI record itself is the seat-channel
+pointer record documented in [Input events](../abi/input.md); it is a
 distinct layer from the device-level driver input ABI, not a duplicate of it
 (`AGENTS.md` §2.2).
 
@@ -276,8 +283,10 @@ window-manager focus and the bar highlight; pressing the desktop clearing the
 highlight while the task stays listed; the window↔task mapping both ways;
 activating an unknown task changing nothing; and syncing focus to an untracked
 window leaving the highlight in place while clearing it on a desktop press. It
-also covers `DeviceInputSource`: decoding a `Moved` record to an absolute
-`PointerMoved`, each pointer button for press and release, a malformed
+also covers `DeviceInputSource`: accumulating `MovedBy` displacements into
+absolute, screen-clamped `PointerMoved` positions (including `i32`-extreme
+displacements saturating to the screen edge and an empty screen refused at
+construction), each pointer button for press and release, a malformed
 (all-zero) record surfacing `BadMagic` rather than being misinterpreted, a
 channel fault propagating while a queued record still decodes afterwards, and
 `into_channel` returning the wrapped channel. It covers `KeyboardInputSource`
