@@ -297,6 +297,18 @@ pub trait SharedMemFacility: Sync {
     /// that cannot be reached for scrubbing is dropped rather than panicking
     /// (the inert default is a no-op).
     fn free_region(&self, phys_base: u64, order: u32, pages: u64);
+
+    /// Translate the `len` bytes beginning at a region's `phys_base` into a
+    /// kernel-reachable pointer (the kernel direct map), for a **kernel**
+    /// consumer of a shared region — the runtime volume attach path's block
+    /// client, which drives a user-space block service through the region
+    /// without a user mapping of its own.
+    ///
+    /// Returns `None` when the kernel cannot reach the frames (the inert
+    /// default); the caller fails closed.
+    fn kernel_window(&self, _phys_base: u64, _len: usize) -> Option<core::ptr::NonNull<u8>> {
+        None
+    }
 }
 
 /// The shared-memory facility installed before any real one exists.
@@ -320,6 +332,32 @@ impl SharedMemFacility for NullSharedMemFacility {
         Err(Errno::NotImplemented)
     }
     fn free_region(&self, _phys_base: u64, _order: u32, _pages: u64) {}
+}
+
+/// The boot-installed production shared-memory facility, recorded once so
+/// kernel-internal consumers that are not threaded through the boot
+/// handover — the runtime volume attach path's [`crate::sharedreg`] kernel
+/// hold — reach the same allocator/direct-map mechanism the `shm_*`
+/// syscalls use. First-wins: the boot path's instances are
+/// interchangeable (they borrow the same shared allocator and direct map).
+static INSTALLED_SHARED_MEM: rustos_sync::OnceCell<&'static (dyn SharedMemFacility + 'static)> =
+    rustos_sync::OnceCell::new();
+
+/// Record the boot-built production shared-memory facility. Idempotent
+/// (first-wins); never called with the inert null.
+pub fn install_shared_mem_facility(facility: &'static (dyn SharedMemFacility + 'static)) {
+    let _ = INSTALLED_SHARED_MEM.set(facility);
+}
+
+/// The boot-installed shared-memory facility, or the fail-closed
+/// [`NULL_SHARED_MEM_FACILITY`] before boot installs one (every consumer
+/// then fails closed with [`Errno::NotImplemented`]).
+#[must_use]
+pub fn installed_shared_mem_facility() -> &'static (dyn SharedMemFacility + 'static) {
+    match INSTALLED_SHARED_MEM.get() {
+        Ok(Some(facility)) => *facility,
+        _ => &NULL_SHARED_MEM_FACILITY,
+    }
 }
 
 /// The shared [`NullSharedMemFacility`] the syscall handler defaults to.

@@ -44,6 +44,7 @@
 //! [`perm::Metadata::authorize`]: capability gate, then ACL, then POSIX
 //! mode bits, failing closed and never branching on `uid == 0`.
 
+pub mod blkclient;
 mod delegate;
 mod fscache;
 #[cfg(test)]
@@ -54,8 +55,10 @@ pub mod path;
 pub mod perm;
 pub mod service;
 mod vfs;
+pub mod volsvc;
 pub mod volumes;
 
+pub use blkclient::BlkClient;
 pub use delegate::{DelegatedFs, DelegatedInfo, MetaPolicy, PerInode, Uniform};
 pub use fscache::CachedFs;
 pub use mount::{MountPoint, MountTable};
@@ -69,6 +72,7 @@ pub use path::{
 pub use perm::{Access, AclEntry, AclWho, Credentials, Metadata, Mode};
 pub use service::{FilesystemService, NullFilesystemService, ReaddirEntry, NULL_FILESYSTEM};
 pub use vfs::Vfs;
+pub use volsvc::{NullVolumeService, VolumeService, NULL_VOLUME_SERVICE};
 pub use volumes::{VolumeForest, VolumePublishError, NULL_VOLUME_FOREST};
 
 use core::fmt;
@@ -102,9 +106,9 @@ pub(crate) const PRIVATE_ROOT_HANDLE: u64 = 0x726F_6F74;
 /// rejected as a [`DriverHandle`] (it never is — the value is non-zero),
 /// or the underlying [`MountTable::back_root`] refusal.
 pub(crate) fn root_backed_vfs() -> Result<Vfs, VfsError> {
-    let mut vfs = Vfs::new(Metadata::new(UserId(0), GroupId(0), Mode::from_bits(0o755)));
+    let vfs = Vfs::new(Metadata::new(UserId(0), GroupId(0), Mode::from_bits(0o755)));
     let handle = DriverHandle::from_raw(PRIVATE_ROOT_HANDLE).map_err(|_| VfsError::Io)?;
-    vfs.mounts_mut().back_root(handle)?;
+    vfs.mounts_write().back_root(handle)?;
     Ok(vfs)
 }
 

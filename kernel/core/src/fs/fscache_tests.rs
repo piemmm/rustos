@@ -393,8 +393,8 @@ fn security_change_is_seen_by_the_secured_vfs_permission_check() {
         .expect("open mode");
 
     let mut cache = CachedFs::new(Counting::new(fs), budget(), owner(), unpressured(), sink());
-    let mut vfs = Vfs::new(Metadata::new(UserId(0), GroupId(0), Mode::from_bits(0o755)));
-    vfs.mounts_mut()
+    let vfs = Vfs::new(Metadata::new(UserId(0), GroupId(0), Mode::from_bits(0o755)));
+    vfs.mounts_write()
         .back_root(DriverHandle::from_raw(1).expect("handle"))
         .expect("backs root");
 

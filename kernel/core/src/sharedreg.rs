@@ -24,6 +24,7 @@
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
+use core::ptr::NonNull;
 
 use rustos_abi::Errno;
 use rustos_kernel_mem::PAGE_SIZE;
@@ -160,9 +161,10 @@ pub fn map(facility: &dyn SharedMemFacility, task: TaskId, id: u64) -> Result<u6
 /// [`Errno::NotFound`] if `base` does not name a live shared mapping of
 /// `task`.
 pub fn unmap(facility: &dyn SharedMemFacility, task: TaskId, base: u64) -> Result<(), Errno> {
-    // Find and remove the mapping record, recover its region, and decide
-    // whether this was the last reference - all under the lock.
-    let (id, len, free) = {
+    // Find and remove the mapping record and recover its region's length
+    // under the lock; the reference itself is dropped through the shared
+    // release step below, outside it.
+    let (id, len) = {
         let mut state = REGIONS.lock();
         let list = state.mappings.get_mut(&task.0).ok_or(Errno::NotFound)?;
         let pos = list
@@ -173,10 +175,28 @@ pub fn unmap(facility: &dyn SharedMemFacility, task: TaskId, base: u64) -> Resul
         if list.is_empty() {
             state.mappings.remove(&task.0);
         }
-        let region = state.regions.get_mut(&id).ok_or(Errno::NotFound)?;
-        let len = region_len_bytes(region.pages);
+        let region = state.regions.get(&id).ok_or(Errno::NotFound)?;
+        (id, region_len_bytes(region.pages))
+    };
+    // Tear down the caller's page-table entries (outside the registry
+    // lock), then drop the mapping's reference — freeing the frames if it
+    // was the last one.
+    let unmap = facility.unmap_region(base, len);
+    release_ref(facility, id);
+    unmap
+}
+
+/// Drop one reference to region `id`, freeing its frames if this was the
+/// last one. The shared release step behind [`unmap`], [`reclaim_task`],
+/// and a [`KernelHold`] drop.
+fn release_ref(facility: &dyn SharedMemFacility, id: u64) {
+    let free = {
+        let mut state = REGIONS.lock();
+        let Some(region) = state.regions.get_mut(&id) else {
+            return;
+        };
         region.refs -= 1;
-        let free = if region.refs == 0 {
+        if region.refs == 0 {
             let Region {
                 phys_base,
                 order,
@@ -187,16 +207,111 @@ pub fn unmap(facility: &dyn SharedMemFacility, task: TaskId, base: u64) -> Resul
             Some((phys_base, order, pages))
         } else {
             None
-        };
-        (id, len, free)
+        }
     };
-    let _ = id;
-    // Tear down the caller's page-table entries (outside the registry lock).
-    let unmap = facility.unmap_region(base, len);
     if let Some((phys_base, order, pages)) = free {
         facility.free_region(phys_base, order, pages);
     }
-    unmap
+}
+
+/// A **kernel** consumer's counted hold on a shared region: the region's
+/// frames stay alive (and are reached through the kernel direct map, never
+/// a user mapping) until the hold is dropped.
+///
+/// The first consumer is the runtime volume attach path's block client
+/// (`plans/DEVICES.md` D3b), which drives a user-space block service
+/// through the service's shared data window. Holding a reference here is
+/// what makes the owner's exit safe: the owner's mappings are reclaimed,
+/// but the frames are freed only when the kernel's hold also drops, so the
+/// kernel never reads through a dangling window.
+pub struct KernelHold {
+    facility: &'static dyn SharedMemFacility,
+    id: u64,
+    ptr: NonNull<u8>,
+    len: usize,
+}
+
+// SAFETY: the hold owns a counted reference on kernel-owned, physically
+// contiguous frames reached through the kernel direct map; the pointer
+// stays valid for the hold's whole life on any CPU, and the hold hands the
+// raw pointer out only through `as_ptr` (no references are formed here),
+// so moving or sharing the handle across threads cannot create an aliasing
+// or lifetime hazard the holder does not already manage.
+unsafe impl Send for KernelHold {}
+// SAFETY: as for `Send` — `&KernelHold` only exposes the raw base pointer
+// and length.
+unsafe impl Sync for KernelHold {}
+
+impl KernelHold {
+    /// Base of the region in kernel-reachable memory.
+    #[must_use]
+    pub fn as_ptr(&self) -> *mut u8 {
+        self.ptr.as_ptr()
+    }
+
+    /// Region length in bytes.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// `true` if the region is zero-length (never the case for a live
+    /// region — creation requires at least one page).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+impl Drop for KernelHold {
+    fn drop(&mut self) {
+        release_ref(self.facility, self.id);
+    }
+}
+
+#[cfg(test)]
+impl KernelHold {
+    /// A hold over caller-owned test memory, bypassing the registry: the
+    /// inert facility's release is a no-op for the unknown id, so dropping
+    /// the hold never frees anything. The caller keeps the pointed-to
+    /// buffer alive for the hold's life.
+    pub(crate) fn for_test(ptr: NonNull<u8>, len: usize) -> Self {
+        Self {
+            facility: &crate::devres::NULL_SHARED_MEM_FACILITY,
+            id: 0,
+            ptr,
+            len,
+        }
+    }
+}
+
+/// Take a kernel-side counted hold on region `id`, translating its frames
+/// through the kernel direct map.
+///
+/// # Errors
+///
+/// [`Errno::NotFound`] if the region was torn down, or
+/// [`Errno::NotImplemented`] when the facility cannot reach the frames
+/// (fail closed; the reference is released again).
+pub fn kernel_hold(facility: &'static dyn SharedMemFacility, id: u64) -> Result<KernelHold, Errno> {
+    let (phys_base, pages) = {
+        let mut state = REGIONS.lock();
+        let region = state.regions.get_mut(&id).ok_or(Errno::NotFound)?;
+        region.refs += 1;
+        (region.phys_base, region.pages)
+    };
+    let len = region_len_bytes(pages);
+    if let Some(ptr) = facility.kernel_window(phys_base, len) {
+        Ok(KernelHold {
+            facility,
+            id,
+            ptr,
+            len,
+        })
+    } else {
+        release_ref(facility, id);
+        Err(Errno::NotImplemented)
+    }
 }
 
 /// Reclaim every shared mapping `task` held when it exits or is torn down,
@@ -204,31 +319,15 @@ pub fn unmap(facility: &dyn SharedMemFacility, task: TaskId, base: u64) -> Resul
 /// releases. Does **not** tear down page-table entries (the task's address
 /// space is being destroyed). Idempotent.
 pub fn reclaim_task(facility: &dyn SharedMemFacility, task: TaskId) {
-    let frees: Vec<(u64, u32, u64)> = {
+    let ids: Vec<u64> = {
         let mut state = REGIONS.lock();
         let Some(list) = state.mappings.remove(&task.0) else {
             return;
         };
-        let mut frees = Vec::new();
-        for (_, id) in list {
-            if let Some(region) = state.regions.get_mut(&id) {
-                region.refs -= 1;
-                if region.refs == 0 {
-                    let Region {
-                        phys_base,
-                        order,
-                        pages,
-                        ..
-                    } = *region;
-                    state.regions.remove(&id);
-                    frees.push((phys_base, order, pages));
-                }
-            }
-        }
-        frees
+        list.into_iter().map(|(_, id)| id).collect()
     };
-    for (phys_base, order, pages) in frees {
-        facility.free_region(phys_base, order, pages);
+    for id in ids {
+        release_ref(facility, id);
     }
 }
 
@@ -244,6 +343,7 @@ mod tests {
 
     extern crate std;
     use core::sync::atomic::{AtomicU64, Ordering};
+    use std::boxed::Box;
     use std::sync::Mutex;
     use std::vec::Vec;
 
@@ -357,6 +457,73 @@ mod tests {
         assert_eq!(fac.frees.lock().unwrap().len(), 1, "freed at last ref");
         // Reclaiming a task with no mappings is a benign no-op (idempotent).
         reclaim_task(&fac, owner);
+        assert_eq!(fac.frees.lock().unwrap().len(), 1);
+    }
+
+    /// A facility double whose `kernel_window` serves a real buffer, so the
+    /// kernel-hold path can be exercised host-side.
+    struct WindowFacility {
+        inner: FakeFacility,
+        window: Mutex<Vec<u8>>,
+    }
+
+    impl SharedMemFacility for WindowFacility {
+        fn alloc_region(&self, pages: u64) -> Result<(u64, u32), Errno> {
+            self.inner.alloc_region(pages)
+        }
+        fn map_region(&self, phys_base: u64, pages: u64) -> Result<u64, Errno> {
+            self.inner.map_region(phys_base, pages)
+        }
+        fn unmap_region(&self, base: u64, len: usize) -> Result<(), Errno> {
+            self.inner.unmap_region(base, len)
+        }
+        fn free_region(&self, phys_base: u64, order: u32, pages: u64) {
+            self.inner.free_region(phys_base, order, pages);
+        }
+        fn kernel_window(&self, _phys_base: u64, len: usize) -> Option<NonNull<u8>> {
+            let mut window = self.window.lock().unwrap();
+            if window.len() < len {
+                window.resize(len, 0);
+            }
+            NonNull::new(window.as_mut_ptr())
+        }
+    }
+
+    #[test]
+    fn kernel_hold_keeps_the_region_alive_past_the_owner() {
+        let fac: &'static WindowFacility = Box::leak(Box::new(WindowFacility {
+            inner: FakeFacility::new(),
+            window: Mutex::new(Vec::new()),
+        }));
+        let owner = TaskId(0x5_0007);
+        let (_va, id) = create(fac, owner, 1).expect("create");
+        let hold = kernel_hold(fac, id).expect("kernel hold");
+        assert_eq!(hold.len(), PAGE_SIZE);
+        assert!(!hold.is_empty());
+        assert!(!hold.as_ptr().is_null());
+
+        // The owner exits: its mapping is reclaimed, but the kernel's hold
+        // keeps the frames alive.
+        reclaim_task(fac, owner);
+        assert!(fac.inner.frees.lock().unwrap().is_empty());
+        // Dropping the hold releases the last reference and frees exactly
+        // once.
+        drop(hold);
+        assert_eq!(fac.inner.frees.lock().unwrap().len(), 1);
+        // The region is gone: a later hold fails closed.
+        assert_eq!(kernel_hold(fac, id).err(), Some(Errno::NotFound));
+    }
+
+    #[test]
+    fn kernel_hold_fails_closed_when_the_kernel_cannot_reach_the_frames() {
+        // `FakeFacility` inherits the fail-closed default `kernel_window`.
+        let fac: &'static FakeFacility = Box::leak(Box::new(FakeFacility::new()));
+        let owner = TaskId(0x5_0008);
+        let (va, id) = create(fac, owner, 1).expect("create");
+        assert_eq!(kernel_hold(fac, id).err(), Some(Errno::NotImplemented));
+        // The failed hold released its reference: the owner's unmap still
+        // frees exactly once.
+        unmap(fac, owner, va).expect("unmap");
         assert_eq!(fac.frees.lock().unwrap().len(), 1);
     }
 

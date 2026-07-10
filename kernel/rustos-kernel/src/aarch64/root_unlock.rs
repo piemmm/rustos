@@ -826,7 +826,8 @@ impl<B: Block + 'static> WritableRootSink for WritableStateSink<B> {
     fn publish(
         &self,
         volume_key: &VolumeKey,
-    ) -> Option<&'static rustos_kernel_core::SleepLock<alloc::boxed::Box<dyn KernelFs>>> {
+    ) -> Option<alloc::sync::Arc<rustos_kernel_core::SleepLock<alloc::boxed::Box<dyn KernelFs>>>>
+    {
         // Locate the RustFsRoot extent on a throwaway probe window, then open
         // the durable owned `'static` window onto it.
         let extent = {

@@ -1973,6 +1973,49 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: Some(CapabilityId::INPUT_READ),
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::VOLUME_ATTACH,
+        name: "volume_attach",
+        arg_count: 2,
+        args: [
+            // Non-null `UserPtr` to the encoded `VolumeAttachRequest`,
+            // then its length (at most `VOLUME_ATTACH_MAX_LEN`).
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // Attaching a filesystem and publishing its root reshapes the
+        // storage namespace for every principal, so it carries the mount
+        // authority and every decision is audited (the drives.md
+        // fs.root.attached / fs.hotplug.root_added events).
+        required_capability: Some(CapabilityId::FS_MOUNT),
+        audit: true,
+    },
+    SyscallSpec {
+        number: SyscallNumber::VOLUME_DETACH,
+        name: "volume_detach",
+        arg_count: 2,
+        args: [
+            // Non-null `UserPtr` to the encoded `VolumeDetachRequest`
+            // (the 16-byte volume identity), then its exact length.
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // The retraction half of `volume_attach`: the same mount
+        // authority, and every decision is audited (the drives.md
+        // fs.hotplug.root_removed events).
+        required_capability: Some(CapabilityId::FS_MOUNT),
+        audit: true,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in
@@ -2439,6 +2482,19 @@ mod tests {
         );
         assert!(!spec.audit, "sysinfo_introspect must not audit per call");
         assert_eq!(spec.name, "sysinfo_introspect");
+    }
+
+    #[test]
+    fn volume_capability_requirements_are_frozen() {
+        // Attaching and detaching runtime volumes reshapes the storage
+        // namespace for every principal: both carry the mount authority
+        // and both are audited per call. Lock this down so a refactor
+        // cannot loosen the gate or drop the audit.
+        for number in [SyscallNumber::VOLUME_ATTACH, SyscallNumber::VOLUME_DETACH] {
+            let spec = spec_for(number).unwrap();
+            assert_eq!(spec.required_capability, Some(CapabilityId::FS_MOUNT));
+            assert!(spec.audit, "{} must be audited", spec.name);
+        }
     }
 
     #[test]

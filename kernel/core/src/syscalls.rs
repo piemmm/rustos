@@ -127,7 +127,8 @@ use crate::devres::{
 use crate::dispatch_slot::{DispatchHook, DispatchOutcome, RescheduleAction, UserFaultOutcome};
 use crate::filemap::{FileMap, NULL_FILE_MAP};
 use crate::fs::{
-    FilesystemService, LateIdentity, VolumeForest, NULL_FILESYSTEM, NULL_VOLUME_FOREST,
+    FilesystemService, LateIdentity, VolumeForest, VolumeService, NULL_FILESYSTEM,
+    NULL_VOLUME_FOREST, NULL_VOLUME_SERVICE,
 };
 use crate::hwtree::{HwTreeSource, NULL_HW_TREE};
 use crate::introspect::{IntrospectSource, NULL_INTROSPECT};
@@ -426,6 +427,14 @@ where
     /// identity into it. Held as a `'static` borrow, exactly like the
     /// filesystem service.
     volumes: &'static VolumeForest,
+    /// The runtime volume attach/detach service the `volume_attach` /
+    /// `volume_detach` syscalls delegate to (`plans/DEVICES.md` D3b).
+    /// Defaults to [`NULL_VOLUME_SERVICE`] (every operation fails closed
+    /// with [`Errno::NotImplemented`]); the boot path that can host
+    /// runtime volumes installs the real service through
+    /// [`Self::with_volume_service`]. Held as a `'static` borrow, exactly
+    /// like the filesystem service.
+    volume_service: &'static (dyn VolumeService + 'static),
     /// The kernel wall clock the `wall_time_get` / `wall_time_set` syscalls
     /// read and drive (`PREREQUISITES.md` P-D). Defaults to the fail-closed
     /// [`NULL_WALL_CLOCK`] (reads report `Unset`, a set returns
@@ -593,6 +602,7 @@ where
             // (`plans/DEVICES.md` D3a): every `id::<volume-id>/…` path
             // fails closed with `NotFound`, never resolving a guessed root.
             volumes: &NULL_VOLUME_FOREST,
+            volume_service: &NULL_VOLUME_SERVICE,
             // The wall clock is unwired until the boot path installs the
             // production `KernelWallClock` (`PREREQUISITES.md` P-D):
             // `wall_time_get` reports `Unset` and `wall_time_set` fails closed
@@ -658,6 +668,23 @@ where
     #[must_use]
     pub const fn with_volumes(mut self, volumes: &'static VolumeForest) -> Self {
         self.volumes = volumes;
+        self
+    }
+
+    /// Install the runtime volume attach/detach service the
+    /// `volume_attach` / `volume_detach` syscalls delegate to, consuming
+    /// and returning `self` (`plans/DEVICES.md` D3b).
+    ///
+    /// Called once by a boot path that can host runtime volumes. Until
+    /// this is called the handler holds the fail-closed
+    /// [`NULL_VOLUME_SERVICE`] and every attach/detach returns
+    /// [`Errno::NotImplemented`].
+    #[must_use]
+    pub const fn with_volume_service(
+        mut self,
+        volume_service: &'static (dyn VolumeService + 'static),
+    ) -> Self {
+        self.volume_service = volume_service;
         self
     }
 
@@ -3891,6 +3918,67 @@ where
         Ok(base)
     }
 
+    fn volume_attach(
+        &self,
+        caller: &CallerContext<'_>,
+        request: u64,
+        request_len: usize,
+    ) -> SyscallResult {
+        // Bound the copy before allocating: an attach frame has a fixed
+        // maximum encoding.
+        if request_len > rustos_abi::volume::VOLUME_ATTACH_MAX_LEN {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let mut payload = alloc::vec![0u8; request_len];
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_in(space, physmap, VirtAddr::new(request), &mut payload)
+        }) {
+            Some(Ok(())) => {}
+            Some(Err(err)) => return Err(copy_fault_errno(err)),
+            None => return Err(Errno::BadAddress),
+        }
+        // Decode fail-closed: every field is validated (extent shape,
+        // filesystem type, name spelling) before anything is looked up.
+        let decoded = rustos_abi::volume::VolumeAttachRequest::decode(&payload)?;
+        // The dispatcher verified `CAP_FS_MOUNT`; the transport resources
+        // the request names must additionally be covered by the caller's
+        // own kernel-minted grants — the endpoint and window forwarded on
+        // the storage node the volume manager matched — so holding the
+        // mount authority alone can never reach another driver's
+        // transport (no ambient authority).
+        {
+            let aspaces = self.aspaces.read();
+            if !aspaces.grant_covers(caller.task_id, &HwResource::endpoint(decoded.endpoint))
+                || !aspaces.grant_covers(caller.task_id, &HwResource::shared(decoded.window))
+            {
+                return Err(Errno::PermissionDenied);
+            }
+        }
+        self.volume_service.attach(&decoded).map(|()| 0)
+    }
+
+    fn volume_detach(
+        &self,
+        caller: &CallerContext<'_>,
+        request: u64,
+        request_len: usize,
+    ) -> SyscallResult {
+        // A detach frame is exactly the 16-byte volume identity.
+        if request_len != rustos_abi::volume::VOLUME_DETACH_LEN {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let mut payload = [0u8; rustos_abi::volume::VOLUME_DETACH_LEN];
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_in(space, physmap, VirtAddr::new(request), &mut payload)
+        }) {
+            Some(Ok(())) => {}
+            Some(Err(err)) => return Err(copy_fault_errno(err)),
+            None => return Err(Errno::BadAddress),
+        }
+        let decoded = rustos_abi::volume::VolumeDetachRequest::decode(&payload)?;
+        self.volume_service.detach(&decoded).map(|()| 0)
+    }
+
     fn file_unmap(&self, caller: &CallerContext<'_>, base: u64, len: u64) -> SyscallResult {
         // A zero-length range names nothing; reject before touching state.
         if len == 0 {
@@ -6650,6 +6738,24 @@ where
     #[must_use]
     pub fn with_volumes(mut self, volumes: &'static VolumeForest) -> Self {
         self.handlers = self.handlers.with_volumes(volumes);
+        self
+    }
+
+    /// Install the runtime volume attach/detach service the
+    /// `volume_attach` / `volume_detach` syscalls delegate to, consuming
+    /// and returning `self` (`plans/DEVICES.md` D3b).
+    ///
+    /// The hook-level mirror of
+    /// [`KernelSyscallHandlers::with_volume_service`]: called once by a
+    /// boot path that can host runtime volumes. A boot path without one
+    /// simply never calls it and every attach/detach stays fail-closed
+    /// through [`NULL_VOLUME_SERVICE`].
+    #[must_use]
+    pub fn with_volume_service(
+        mut self,
+        volume_service: &'static (dyn VolumeService + 'static),
+    ) -> Self {
+        self.handlers = self.handlers.with_volume_service(volume_service);
         self
     }
 

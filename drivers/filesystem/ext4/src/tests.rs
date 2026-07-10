@@ -1276,6 +1276,20 @@ fn security_decodes_an_inline_posix_acl_from_the_inode_body() {
 
 // --- First-party formatter (`Ext4::format`). ---
 
+/// The fixed volume identity the formatter tests stamp (tests need a
+/// deterministic value; production callers mint one from the kernel RNG).
+const TEST_UUID: [u8; 16] = [
+    0xB7, 0xF2, 0xE4, 0xE6, 0x8D, 0x7A, 0x4E, 0xF8, 0xA1, 0x3E, 0xD3, 0xB8, 0x4D, 0x4E, 0x80, 0x01,
+];
+
+#[test]
+fn format_refuses_the_nil_uuid() {
+    assert_eq!(
+        Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, [0u8; 16]).err(),
+        Some(DriverError::OutOfRange)
+    );
+}
+
 /// Logical-block (sector) size of the configurable in-memory device the
 /// formatter tests run against.
 const FMT_SECTOR: usize = 512;
@@ -1389,7 +1403,7 @@ fn format_rejects_a_device_too_small_for_one_group() {
     // 1 MiB cannot host even a single 8-MiB (1024-byte block) group.
     let sectors = 1024 * 1024 / FMT_SECTOR as u64;
     assert_eq!(
-        Ext4::format(SizedBlock::new(sectors), 64).err(),
+        Ext4::format(SizedBlock::new(sectors), 64, TEST_UUID).err(),
         Some(DriverError::OutOfRange)
     );
 }
@@ -1397,14 +1411,14 @@ fn format_rejects_a_device_too_small_for_one_group() {
 #[test]
 fn format_rejects_a_zero_inode_budget() {
     assert_eq!(
-        Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 0).err(),
+        Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 0, TEST_UUID).err(),
         Some(DriverError::OutOfRange)
     );
 }
 
 #[test]
 fn format_produces_a_mountable_empty_volume() {
-    let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256).expect("format");
+    let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format");
     let root = fs.root();
     assert_eq!(fs.node_info(root).expect("info").kind, NodeKind::Directory);
     // A freshly formatted root has no children (only `.`/`..`, which the
@@ -1416,7 +1430,7 @@ fn format_produces_a_mountable_empty_volume() {
 #[test]
 fn format_create_write_read_roundtrips_across_a_remount() {
     let body = b"a fresh ext4 volume, formatted in RustOS\n";
-    let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256).expect("format");
+    let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format");
     let root = fs.root();
     fs.create(root, b"hello.txt", NodeKind::RegularFile)
         .expect("create");
@@ -1432,8 +1446,41 @@ fn format_create_write_read_roundtrips_across_a_remount() {
 }
 
 #[test]
+fn stats_track_the_live_superblock_and_the_uuid_is_remount_stable() {
+    let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format");
+    let uuid = fs.volume_uuid();
+    assert_ne!(uuid, [0u8; 16], "the formatter mints a non-nil s_uuid");
+
+    let before = fs.stats().expect("stats");
+    assert!(before.total_blocks > 0);
+    assert!(before.free_blocks <= before.total_blocks);
+    assert!(before.avail_blocks <= before.free_blocks);
+    assert!(before.files >= 256);
+    assert!(before.files_free < before.files);
+
+    // Allocating a file consumes blocks and an inode.
+    let root = fs.root();
+    fs.create(root, b"stats.bin", NodeKind::RegularFile)
+        .expect("create");
+    let body = [0xA5u8; 8192];
+    assert_eq!(fs.write_at(root, b"stats.bin", 0, &body), Ok(body.len()));
+    let after = fs.stats().expect("stats");
+    assert!(after.free_blocks < before.free_blocks);
+    assert_eq!(after.files_free, before.files_free - 1);
+
+    // Removing it restores both counts, and the identity survives a
+    // remount of the same bytes.
+    fs.remove(root, b"stats.bin").expect("remove");
+    let restored = fs.stats().expect("stats");
+    assert_eq!(restored.free_blocks, before.free_blocks);
+    assert_eq!(restored.files_free, before.files_free);
+    let fs = Ext4::open(fs.into_block()).expect("reopen");
+    assert_eq!(fs.volume_uuid(), uuid);
+}
+
+#[test]
 fn format_data_region_fills_to_no_space_then_recovers() {
-    let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256).expect("format");
+    let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format");
     let root = fs.root();
     let written = fill_to_no_space(&mut fs, root);
     assert!(written > 0, "expected to write at least one block");
@@ -1457,7 +1504,7 @@ fn format_data_region_fills_to_no_space_then_recovers() {
 #[test]
 fn format_inode_table_fills_to_no_space() {
     // 16 inodes per group, 10 reserved (1..=10) → exactly 6 usable.
-    let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 16).expect("format");
+    let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 16, TEST_UUID).expect("format");
     let root = fs.root();
     let mut created = 0usize;
     loop {
@@ -1474,7 +1521,7 @@ fn format_inode_table_fills_to_no_space() {
 
 #[test]
 fn format_spans_multiple_block_groups() {
-    let mut fs = Ext4::format(SizedBlock::new(TWO_GROUP_SECTORS), 1024).expect("format");
+    let mut fs = Ext4::format(SizedBlock::new(TWO_GROUP_SECTORS), 1024, TEST_UUID).expect("format");
     let root = fs.root();
     let written = fill_to_no_space(&mut fs, root);
     // One block group holds 8 MiB of data blocks; writing past that
@@ -1495,7 +1542,7 @@ fn format_spans_multiple_block_groups() {
 
 #[test]
 fn rename_within_directory_preserves_contents() {
-    let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256).expect("format");
+    let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format");
     let root = fs.root();
     fs.create(root, b"a.txt", NodeKind::RegularFile).unwrap();
     fs.write_at(root, b"a.txt", 0, b"hello").unwrap();
@@ -1509,7 +1556,7 @@ fn rename_within_directory_preserves_contents() {
 
 #[test]
 fn rename_missing_source_is_not_found() {
-    let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256).expect("format");
+    let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format");
     let root = fs.root();
     assert_eq!(
         fs.rename(root, b"nope", root, b"x"),
@@ -1520,7 +1567,8 @@ fn rename_missing_source_is_not_found() {
 #[test]
 fn rename_across_directories_persists() {
     let dev = {
-        let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256).expect("format");
+        let mut fs =
+            Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format");
         let root = fs.root();
         let src = fs.create(root, b"src", NodeKind::Directory).unwrap();
         let dst = fs.create(root, b"dst", NodeKind::Directory).unwrap();
@@ -1542,7 +1590,7 @@ fn rename_across_directories_persists() {
 
 #[test]
 fn rename_overwrites_existing_file() {
-    let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256).expect("format");
+    let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format");
     let root = fs.root();
     fs.create(root, b"a.txt", NodeKind::RegularFile).unwrap();
     fs.write_at(root, b"a.txt", 0, b"AAAA").unwrap();
@@ -1559,7 +1607,7 @@ fn rename_overwrites_existing_file() {
 
 #[test]
 fn rename_refuses_kind_mismatch_and_nonempty_dir_target() {
-    let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256).expect("format");
+    let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format");
     let root = fs.root();
     fs.create(root, b"f.txt", NodeKind::RegularFile).unwrap();
     fs.create(root, b"d", NodeKind::Directory).unwrap();
@@ -1579,7 +1627,8 @@ fn rename_refuses_kind_mismatch_and_nonempty_dir_target() {
 #[test]
 fn rename_moves_a_directory_across_parents() {
     let dev = {
-        let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256).expect("format");
+        let mut fs =
+            Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format");
         let root = fs.root();
         let p1 = fs.create(root, b"p1", NodeKind::Directory).unwrap();
         let p2 = fs.create(root, b"p2", NodeKind::Directory).unwrap();
@@ -1603,7 +1652,7 @@ fn rename_moves_a_directory_across_parents() {
 
 #[test]
 fn rename_refuses_moving_directory_into_its_subtree() {
-    let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256).expect("format");
+    let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format");
     let root = fs.root();
     let a = fs.create(root, b"a", NodeKind::Directory).unwrap();
     let b = fs.create(a, b"b", NodeKind::Directory).unwrap();
@@ -1613,7 +1662,7 @@ fn rename_refuses_moving_directory_into_its_subtree() {
 
 #[test]
 fn rename_rejects_bad_destination_name() {
-    let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256).expect("format");
+    let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format");
     let root = fs.root();
     fs.create(root, b"a.txt", NodeKind::RegularFile).unwrap();
     assert_eq!(
@@ -1676,7 +1725,7 @@ fn blocks_high_half_never_leaks_into_file_acl() {
 
 #[test]
 fn writing_grows_the_reported_allocation() {
-    let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256).expect("format");
+    let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format");
     let root = fs.root();
     let file = fs
         .create(root, b"grow.bin", NodeKind::RegularFile)

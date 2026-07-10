@@ -20,6 +20,8 @@
 //! the new account's identity; an already-present leaf is left untouched
 //! (idempotent).
 
+use alloc::sync::Arc;
+
 use rustos_abi::driver::filesystem::{
     FilesystemRead, FilesystemSecurity, FilesystemWrite, NodeId, NodeKind, NodeSecurity,
 };
@@ -37,13 +39,13 @@ pub struct RootAdminBacking<F: 'static> {
     /// because a commit parks on device completion; holding it serialises
     /// an admin commit against every concurrent `fs_*` operation on the
     /// same volume.
-    fs: &'static SleepLock<F>,
+    fs: Arc<SleepLock<F>>,
 }
 
 impl<F> RootAdminBacking<F> {
-    /// Borrow the registered root-volume driver.
+    /// Share the registered root-volume driver.
     #[must_use]
-    pub const fn new(fs: &'static SleepLock<F>) -> Self {
+    pub const fn new(fs: Arc<SleepLock<F>>) -> Self {
         Self { fs }
     }
 }
@@ -193,7 +195,6 @@ fn driver_errno(err: DriverError) -> Errno {
 mod tests {
     use super::*;
 
-    use alloc::boxed::Box;
     use alloc::vec::Vec;
 
     use rustos_abi::driver::block::Block;
@@ -273,7 +274,7 @@ mod tests {
         }
         fs.create(root, b"Users", NodeKind::Directory)
             .expect("mkdir Users");
-        RootAdminBacking::new(Box::leak(Box::new(SleepLock::new(fs))))
+        RootAdminBacking::new(Arc::new(SleepLock::new(fs)))
     }
 
     fn read_file(backing: &RootAdminBacking<RustFs<VecBlock>>, name: &[u8]) -> Vec<u8> {

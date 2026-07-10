@@ -3734,12 +3734,14 @@ I/O vocabulary. See `.junie/PREREQUISITES2.md` for the full P0–P6 status.
   `BootInfo::with_volumes`) resolves a published volume's stable identity —
   the RustFS per-volume UUID, published by the boot mount/unlock paths with
   audited `fs.root.publish.{allow,deny}` events — at the same entry point,
-  fail-closed for an unpublished id. **Still open under P4** (tracked, not
-  stubbed — not a shell blocker): the multi-root volume forest (runtime
-  attach/unpublish, roots outside the default view, `plans/DEVICES.md`
-  D3b/D3c) and the `fs::` resolver `Root` variant, at which point machine
-  aliases rebind to independent `id::` roots without changing the resolver
-  contract. Remaining prerequisites (P5) are tracked in
+  fail-closed for an unpublished id. **Runtime attach/unpublish is landed**
+  (`plans/DEVICES.md` D3b): the `volume_attach`/`volume_detach` syscalls
+  mount a hot-pluggable volume under `/Storage/<name>` and publish/withdraw
+  its `id::` root through the same forest. **Still open under P4** (tracked,
+  not stubbed — not a shell blocker): the catalog/alias projection
+  (`plans/DEVICES.md` D3c) and the `fs::` resolver `Root` variant, at which
+  point machine aliases rebind to independent `id::` roots without changing
+  the resolver contract. Remaining prerequisites (P5) are tracked in
   `.junie/PREREQUISITES2.md`.
 - P5 (reference parser) — shared resource-reference parser as a `lib/*` crate:
   **done.** `lib/resref` (`rustos-resref`) is the one definition of how a RustOS
@@ -4241,13 +4243,21 @@ fail-closed), the kernel volume forest
 the view location the published volume's root backs (authorised by the
 secured VFS identically — never a policy bypass), and boot publication of
 both boot volumes' RustFS UUIDs with audited `fs.root.publish.{allow,deny}`
-events. D3b–D4 remain: runtime volume attach over blkio + multi-root
-publish/unpublish, the `volmgr` service automounting hotplugged
-filesystems into the `Storage:` catalog with deterministic collision-free
-names and user-usable permissions, plus the surprise-removal state machine
-(retained uncommitted writes, syslog events, force-unmount, and verified
-re-insert replay). See `plans/DEVICES.md` for the binding design and
-staging.
+events. D3b (done) landed the runtime half: the `volume_attach` /
+`volume_detach` syscalls (`CAP_FS_MOUNT` + per-resource grant checks,
+audited), the kernel blkio-client `Block` over a served endpoint + shared
+window (counted kernel hold on the window's frames), the runtime-mutable
+mount table with per-mount permission templates, `Arc`-shared driver
+registration with `unregister`, forest `unpublish`, and the
+`RuntimeVolumeService` mounting RustFS/ext4/FAT32 under `/Storage/<name>`
+with full unwind and the drives.md hotplug audit events — ext4/FAT32
+gained `FilesystemStats` + volume identity along the way (and the ext4
+formatter's nil-`s_uuid` defect was fixed: the caller now mints the UUID).
+D3c–D4 remain: the `volmgr` service automounting hotplugged filesystems
+into the `Storage:` catalog with deterministic collision-free names and
+user-usable permissions, plus the surprise-removal state machine (retained
+uncommitted writes, syslog events, force-unmount, and verified re-insert
+replay). See `plans/DEVICES.md` for the binding design and staging.
 
 ---
 

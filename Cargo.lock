@@ -1195,6 +1195,7 @@ dependencies = [
  "rustos-devmgr",
  "rustos-drv-bus-mmio",
  "rustos-drv-bus-virtio",
+ "rustos-drv-fs-ext4",
  "rustos-drv-fs-fat32",
  "rustos-drv-fs-rustfs",
  "rustos-drv-storage-emmc2",

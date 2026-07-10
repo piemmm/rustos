@@ -228,9 +228,9 @@ impl<B: Block> Writer<'_, B> {
     }
 }
 
-/// Format a fresh ext4 volume onto `block`, sized from its geometry and
-/// hosting at least `inode_count` inodes.
-pub(crate) fn write_volume<B: Block>(block: &mut B, inode_count: u32) -> Result<(), DriverError> {
+/// Validate the device geometry a fresh volume is laid onto, returning
+/// `(dev_block_size, dev_block_count, total_bytes)`.
+fn formatting_geometry<B: Block>(block: &mut B) -> Result<(u32, u64, u64), DriverError> {
     let geo = block.geometry()?;
     let dev_block_size = geo.block_size;
     if dev_block_size == 0 || dev_block_size > MAX_BLOCK_SIZE || !dev_block_size.is_power_of_two() {
@@ -240,6 +240,22 @@ pub(crate) fn write_volume<B: Block>(block: &mut B, inode_count: u32) -> Result<
     let total_bytes = u64::from(dev_block_size)
         .checked_mul(dev_block_count)
         .ok_or(DriverError::DeviceFault)?;
+    Ok((dev_block_size, dev_block_count, total_bytes))
+}
+
+/// Format a fresh ext4 volume onto `block`, sized from its geometry and
+/// hosting at least `inode_count` inodes, stamped with the caller-minted
+/// volume `uuid` (the reserved all-zero identity is refused — a volume
+/// without an identity cannot be published).
+pub(crate) fn write_volume<B: Block>(
+    block: &mut B,
+    inode_count: u32,
+    uuid: [u8; 16],
+) -> Result<(), DriverError> {
+    if uuid == [0u8; 16] {
+        return Err(DriverError::OutOfRange);
+    }
+    let (dev_block_size, dev_block_count, total_bytes) = formatting_geometry(block)?;
 
     let plan = plan(total_bytes, inode_count)?;
     let mut writer = Writer {
@@ -348,7 +364,13 @@ pub(crate) fn write_volume<B: Block>(block: &mut B, inode_count: u32) -> Result<
         }
     }
 
-    write_superblock(&mut writer, &plan, free_blocks_total, free_inodes_total)?;
+    write_superblock(
+        &mut writer,
+        &plan,
+        free_blocks_total,
+        free_inodes_total,
+        uuid,
+    )?;
     Ok(())
 }
 
@@ -414,6 +436,7 @@ fn write_superblock<B: Block>(
     plan: &Plan,
     free_blocks: u64,
     free_inodes: u64,
+    uuid: [u8; 16],
 ) -> Result<(), DriverError> {
     let mut sb = [0u8; super::SUPERBLOCK_LEN];
     let log_block_size = plan.block_size.trailing_zeros() - 10; // log2(bs/1024)
@@ -433,5 +456,6 @@ fn write_superblock<B: Block>(
     put_le32(&mut sb, 0x54, FIRST_INODE); // s_first_ino
     put_le16(&mut sb, 0x58, u16_of(usize_of(u64::from(INODE_SIZE))?)?); // s_inode_size
     put_le32(&mut sb, 0x60, INCOMPAT_FILETYPE | INCOMPAT_EXTENTS); // s_feature_incompat
+    sb[0x68..0x78].copy_from_slice(&uuid); // s_uuid
     writer.write_at(SUPERBLOCK_OFFSET, &sb)
 }

@@ -49,6 +49,7 @@ pub mod terminal;
 pub mod time;
 pub mod usb_urb;
 pub mod users_admin;
+pub mod volume;
 pub mod waitset;
 
 pub use appinfo::{
@@ -158,6 +159,10 @@ pub use terminal::{InputMode, TerminalSize, TERMINAL_SIZE_WIRE_LEN};
 pub use time::{
     coarsen_clock_ns, Duration64, Time64, WallClockReading, WallTimeState,
     COARSE_CLOCK_GRANULARITY_NS, NANOS_PER_SEC,
+};
+pub use volume::{
+    validate_volume_name, VolumeAttachRequest, VolumeDetachRequest, VolumeFsType,
+    VOLUME_ATTACH_MAX_LEN, VOLUME_DETACH_LEN, VOLUME_ID_LEN, VOLUME_NAME_MAX,
 };
 pub use waitset::{WaitSetOp, WaitSourceKind, WAITSET_CHILD_ANY};
 

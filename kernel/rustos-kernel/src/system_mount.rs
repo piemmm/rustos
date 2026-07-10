@@ -63,6 +63,7 @@
 //! handle.
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use rustos_abi::driver::block::Block;
@@ -109,7 +110,7 @@ pub static VOLUME_FOREST: VolumeForest = VolumeForest::new();
 /// engine's, which shares the registered lock) flow through the same
 /// cache and its invalidation, and every volume's cache obeys the same
 /// pressure bands.
-fn cached<F>(
+pub(crate) fn cached<F>(
     driver: F,
     volume: u64,
     pressure: &'static MemoryPressure,
@@ -190,15 +191,19 @@ const VOLUME_ID_PUBLISH_REFUSED: EventId = EventId(4171);
 
 /// Publish a mounted volume's stable identity into [`VOLUME_FOREST`] and
 /// audit the outcome (drives.md `fs.root.publish.{allow,deny}`), naming the
-/// backing volume in either record. Fail-soft: a refusal leaves the volume
-/// reachable through the `/` view only.
-fn publish_volume_identity(
+/// backing volume in either record, and returning the outcome so the
+/// runtime attach path can unwind a refused publication. The boot mounts
+/// ignore the result (fail-soft: a refusal leaves the volume reachable
+/// through the `/` view only). One definition, so the publish audit can
+/// never diverge between boot and runtime.
+pub(crate) fn publish_volume_identity(
     volume_uuid: [u8; 16],
     view_prefix: &[&str],
-    volume: &'static str,
+    volume: &str,
     audit: &'static (dyn Sink + Sync),
-) {
-    match VOLUME_FOREST.publish(volume_uuid, view_prefix) {
+) -> Result<(), rustos_kernel_core::VolumePublishError> {
+    let outcome = VOLUME_FOREST.publish(volume_uuid, view_prefix);
+    match outcome {
         Ok(()) => {
             log(
                 audit,
@@ -213,7 +218,7 @@ fn publish_volume_identity(
                 },
             );
         }
-        Err(refusal) => {
+        Err(ref refusal) => {
             let cause = match refusal {
                 rustos_kernel_core::VolumePublishError::NilIdentity => "nil_identity",
                 rustos_kernel_core::VolumePublishError::AlreadyPublished => "already_published",
@@ -238,6 +243,7 @@ fn publish_volume_identity(
             );
         }
     }
+    outcome
 }
 
 /// Build the production VFS policy layer: the writable root volume mounted
@@ -274,28 +280,32 @@ fn publish_volume_identity(
 /// (a default-layout mount unexpectedly absent, or a refused double-backing)
 /// — all wiring defects, surfaced (fail closed) rather than panicked.
 fn system_vfs() -> Result<Vfs, VfsError> {
-    let mut vfs = Vfs::with_default_layout(UserId(0), GroupId(0));
+    let vfs = Vfs::with_default_layout(UserId(0), GroupId(0));
     let system_handle = DriverHandle::from_raw(SYSTEM_MOUNT_HANDLE).map_err(|_| VfsError::Io)?;
     let root_handle = DriverHandle::from_raw(ROOT_VOLUME_HANDLE).map_err(|_| VfsError::Io)?;
-    let mounts = vfs.mounts_mut();
-    // The encrypted, writable root volume *is* `/`.
-    mounts.back_root(root_handle)?;
-    // The read-only `/System` volume shadows `/` at `/System`; its content is
-    // the volume's own root, so it is a whole-volume mount (no rebasing).
-    mounts.set_backing(&Path::parse("/System")?, system_handle, Vec::new())?;
-    // The writable `/System` exceptions and the flag-bearing top-level
-    // subtrees are the *same* writable root volume, each rebased onto its own
-    // same-named path there so the one driver resolves from its own root.
-    for sub in [
-        "/System/Logs",
-        "/System/Settings",
-        "/Users",
-        "/Apps",
-        "/Storage",
-    ] {
-        let path = Path::parse(sub)?;
-        let subtree = path.components().to_vec();
-        mounts.set_backing(&path, root_handle, subtree)?;
+    {
+        let mut mounts = vfs.mounts_write();
+        // The encrypted, writable root volume *is* `/`.
+        mounts.back_root(root_handle)?;
+        // The read-only `/System` volume shadows `/` at `/System`; its
+        // content is the volume's own root, so it is a whole-volume mount
+        // (no rebasing).
+        mounts.set_backing(&Path::parse("/System")?, system_handle, Vec::new())?;
+        // The writable `/System` exceptions and the flag-bearing top-level
+        // subtrees are the *same* writable root volume, each rebased onto
+        // its own same-named path there so the one driver resolves from its
+        // own root.
+        for sub in [
+            "/System/Logs",
+            "/System/Settings",
+            "/Users",
+            "/Apps",
+            "/Storage",
+        ] {
+            let path = Path::parse(sub)?;
+            let subtree = path.components().to_vec();
+            mounts.set_backing(&path, root_handle, subtree)?;
+        }
     }
     Ok(vfs)
 }
@@ -322,6 +332,10 @@ pub fn install_system_mount<B: Block + 'static>(
     audit: &'static (dyn Sink + Sync),
     pressure: &'static MemoryPressure,
 ) {
+    // Wire the runtime volume attach/detach service with the same audit
+    // sink and pressure gauge the boot mounts use; until the mount table
+    // below is published its operations still fail closed.
+    crate::volume_service::VOLUME_SERVICE.install(audit, pressure);
     // Locate the `/System` extent on a first window, then drop it so the
     // second, owned window is the one promoted into the `'static` mount.
     let extent = {
@@ -394,8 +408,9 @@ pub fn install_system_mount<B: Block + 'static>(
         },
     );
     // The read-only `/System` volume's root is the `/System` view subtree,
-    // so its durable `id::` root resolves there.
-    publish_volume_identity(volume_uuid, &["System"], "RustFsSystem", audit);
+    // so its durable `id::` root resolves there. Fail-soft: a refusal was
+    // audited and leaves the volume reachable through the `/` view.
+    let _ = publish_volume_identity(volume_uuid, &["System"], "RustFsSystem", audit);
     // The on-disk application store is now readable. Install its semantic
     // launch cache — budgeted from the kernel heap arena exactly like the
     // volume caches above and governed by the same pressure gauge
@@ -428,7 +443,7 @@ pub fn install_system_mount<B: Block + 'static>(
 /// [`install_system_mount`]; this only attaches the driver, so it is safe to
 /// call after that step regardless of ordering.
 ///
-/// Returns the registered driver's `'static` lock so the caller can share
+/// Returns the registered driver's shared lock so the caller can share
 /// the volume's **single** writer with the account-administration engine
 /// (`RootAdminBacking`) — never a second independent window over the same
 /// device — or `None` when registration was refused.
@@ -437,7 +452,7 @@ pub fn register_writable_state(
     volume_uuid: [u8; 16],
     audit: &'static (dyn Sink + Sync),
     pressure: &'static MemoryPressure,
-) -> Option<&'static SleepLock<Box<dyn KernelFs>>> {
+) -> Option<Arc<SleepLock<Box<dyn KernelFs>>>> {
     let Ok(handle) = DriverHandle::from_raw(ROOT_VOLUME_HANDLE) else {
         unavailable(audit, "writable_handle_invalid");
         return None;
@@ -461,8 +476,9 @@ pub fn register_writable_state(
         },
     );
     // The writable root volume *is* `/`, so its durable `id::` root
-    // resolves at the view root.
-    publish_volume_identity(volume_uuid, &[], "RustFsRoot", audit);
+    // resolves at the view root. Fail-soft: a refusal was audited and
+    // leaves the volume reachable through the `/` view.
+    let _ = publish_volume_identity(volume_uuid, &[], "RustFsRoot", audit);
     Some(shared)
 }
 

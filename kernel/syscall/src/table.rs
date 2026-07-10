@@ -1788,6 +1788,43 @@ pub trait SyscallHandlers {
     fn file_unmap(&self, _caller: &CallerContext<'_>, _base: u64, _len: u64) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
+
+    /// Attach a filesystem driver to a runtime block source and publish
+    /// the volume's root (`plans/DEVICES.md` D3b).
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::FS_MOUNT`]. `request`/`request_len` name the
+    /// caller's encoded `VolumeAttachRequest`; the implementation copies
+    /// it in, decodes it fail-closed, and re-validates every field
+    /// against live state before mounting anything.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn volume_attach(
+        &self,
+        _caller: &CallerContext<'_>,
+        _request: u64,
+        _request_len: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Detach a runtime-attached volume: flush it, retract its mount, and
+    /// unpublish its root (`plans/DEVICES.md` D3b).
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::FS_MOUNT`]. `request`/`request_len` name the
+    /// caller's encoded `VolumeDetachRequest` (the volume's stable
+    /// identity).
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn volume_detach(
+        &self,
+        _caller: &CallerContext<'_>,
+        _request: u64,
+        _request_len: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
 }
 
 /// Architecture-neutral syscall dispatcher.
@@ -2336,6 +2373,20 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             SyscallNumber::FILE_UNMAP => {
                 // args[0] is the region base; args[1] its full length.
                 self.handlers.file_unmap(caller, args.0[0], args.0[1])
+            }
+            SyscallNumber::VOLUME_ATTACH => {
+                // args[0] is the non-null request `UserPtr`
+                // (dispatcher-checked); args[1] is its length. The frame
+                // grammar and bounds are the handler's to enforce after
+                // the copy-in.
+                let request_len = decode_len(args.0[1])?;
+                self.handlers.volume_attach(caller, args.0[0], request_len)
+            }
+            SyscallNumber::VOLUME_DETACH => {
+                // args[0] is the non-null request `UserPtr`
+                // (dispatcher-checked); args[1] is its exact length.
+                let request_len = decode_len(args.0[1])?;
+                self.handlers.volume_detach(caller, args.0[0], request_len)
             }
             SyscallNumber::FS_CHDIR => {
                 // args[0] is the non-null path `UserPtr` (dispatcher-checked);
@@ -3398,6 +3449,26 @@ mod tests {
             Ok(0)
         }
 
+        fn volume_attach(
+            &self,
+            _c: &CallerContext<'_>,
+            _request: u64,
+            _request_len: usize,
+        ) -> SyscallResult {
+            self.record("volume_attach");
+            Ok(0)
+        }
+
+        fn volume_detach(
+            &self,
+            _c: &CallerContext<'_>,
+            _request: u64,
+            _request_len: usize,
+        ) -> SyscallResult {
+            self.record("volume_detach");
+            Ok(0)
+        }
+
         fn fs_chdir(&self, _c: &CallerContext<'_>, _path: u64, _path_len: usize) -> SyscallResult {
             self.record("fs_chdir");
             Ok(0)
@@ -3451,6 +3522,7 @@ mod tests {
                 CapabilityId::TIME_SET,
                 CapabilityId::SYSINFO_INTROSPECT,
                 CapabilityId::SEAT_ADMIN,
+                CapabilityId::FS_MOUNT,
             ],
             &sink,
         );

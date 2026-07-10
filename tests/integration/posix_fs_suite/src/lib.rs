@@ -236,7 +236,7 @@ pub fn rustfs_backed_vfs(read_only: bool) -> (Vfs, LiveFs) {
     } else {
         MountFlags::default()
     };
-    vfs.mounts_mut()
+    vfs.mounts_write()
         .mount(path(MOUNT), flags, Some(handle))
         .expect("mount the rustfs volume");
 

@@ -53,7 +53,8 @@
 
 use rustos_abi::driver::block::Block;
 use rustos_abi::driver::filesystem::{
-    DirEntry, FilesystemRead, FilesystemWrite, NodeId, NodeInfo, NodeKind,
+    DirEntry, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite, NodeId,
+    NodeInfo, NodeKind, NodeSecurity, VolumeStats,
 };
 use rustos_abi::time::Time64;
 use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
@@ -275,6 +276,64 @@ pub struct Fat32<B: Block> {
     /// single forward step per allocation while still finding every free
     /// cluster — turning a sequential fill from O(n²) into O(n).
     next_free: u32,
+    /// Live count of free data clusters, established by one FAT scan at
+    /// open and maintained by the allocator and the chain-free path, so
+    /// [`FilesystemStats::stats`] never re-scans the FAT.
+    free_clusters: u64,
+    /// The volume's stable 16-byte identity, derived from the BPB volume
+    /// serial and label (see [`Fat32::volume_identity`]).
+    identity: [u8; 16],
+}
+
+/// The volume's stable 16-byte identity, derived from the boot sector:
+/// the BPB volume serial + label when the extended boot signature declares
+/// them, else zeros. The trailing tag byte keeps the identity non-nil
+/// either way (FAT32 has no UUID; drives.md sanctions a content-derived
+/// identity for formats without one).
+fn identity_from_boot(boot: &[u8; 512]) -> [u8; 16] {
+    let mut identity = [0u8; 16];
+    if boot[66] == 0x29 {
+        identity[..4].copy_from_slice(&boot[67..71]);
+        identity[4..15].copy_from_slice(&boot[71..82]);
+    }
+    identity[15] = 0xF3;
+    identity
+}
+
+/// One linear FAT scan counting the free data clusters, run once at open;
+/// the allocator and the chain-free path maintain the count from there,
+/// so space accounting never re-scans the FAT.
+fn count_free_clusters<B: Block>(
+    block: &mut B,
+    block_size: u32,
+    block_count: u64,
+    fat_start_byte: u64,
+    max_cluster: u32,
+) -> Result<u64, DriverError> {
+    let mut free_clusters = 0u64;
+    let mut chunk = [0u8; MAX_BLOCK_SIZE as usize];
+    let mut cluster = 2u32;
+    while cluster <= max_cluster {
+        let remaining = (u64::from(max_cluster) - u64::from(cluster) + 1) * 4;
+        let take = remaining.min(chunk.len() as u64);
+        let take_usize = usize::try_from(take).map_err(|_| DriverError::DeviceFault)?;
+        device_read(
+            block,
+            block_size,
+            block_count,
+            fat_start_byte + u64::from(cluster) * 4,
+            &mut chunk[..take_usize],
+        )?;
+        for entry in chunk[..take_usize].chunks_exact(4) {
+            if le32(entry, 0) & FAT32_CLUSTER_MASK == 0 {
+                free_clusters += 1;
+            }
+        }
+        // `take` is a whole number of 4-byte entries by construction
+        // (`MAX_BLOCK_SIZE` and `remaining` are both multiples of 4).
+        cluster += u32::try_from(take / 4).map_err(|_| DriverError::DeviceFault)?;
+    }
+    Ok(free_clusters)
 }
 
 /// Read `u16` little-endian from `buf` at `offset`.
@@ -751,6 +810,15 @@ impl<B: Block> Fat32<B> {
             return Err(DriverError::BadMagic);
         }
 
+        let identity = identity_from_boot(&boot);
+        let free_clusters = count_free_clusters(
+            &mut block,
+            block_size,
+            block_count,
+            fat_start_byte,
+            max_cluster,
+        )?;
+
         Ok(Self {
             block,
             block_size,
@@ -766,7 +834,22 @@ impl<B: Block> Fat32<B> {
             },
             // The first allocatable cluster; the allocator advances it.
             next_free: 2,
+            free_clusters,
+            identity,
         })
+    }
+
+    /// The volume's stable 16-byte identity.
+    ///
+    /// FAT32 has no UUID, so this is content-derived: the BPB volume
+    /// serial (4 bytes) and label (11 bytes) when the extended boot
+    /// signature declares them, zero otherwise, closed by a constant tag
+    /// byte so the identity is never the reserved all-zero value. Stable
+    /// across re-inserts (the serial and label live on the medium);
+    /// honestly weaker than a real UUID, as the format is.
+    #[must_use]
+    pub fn volume_identity(&self) -> [u8; 16] {
+        self.identity
     }
 
     /// Lay down a fresh, empty FAT32 volume on `block` and bring it
@@ -990,6 +1073,7 @@ impl<B: Block> Fat32<B> {
                     self.zero_cluster(candidate)?;
                 }
                 self.next_free = if candidate >= max { 2 } else { candidate + 1 };
+                self.free_clusters = self.free_clusters.saturating_sub(1);
                 return Ok(candidate);
             }
             candidate = if candidate >= max { 2 } else { candidate + 1 };
@@ -1005,6 +1089,7 @@ impl<B: Block> Fat32<B> {
         while (2..=self.layout.max_cluster).contains(&cluster) {
             let next = self.fat_entry(cluster)?;
             self.set_fat(cluster, 0)?;
+            self.free_clusters += 1;
             min_freed = min_freed.min(cluster);
             match classify_chain(next) {
                 ChainStep::Next(n) => cluster = n,
@@ -2120,6 +2205,50 @@ impl<B: Block> FilesystemWrite for Fat32<B> {
     fn flush(&mut self) -> Result<(), DriverError> {
         // All mutations are written straight through to the block device.
         Ok(())
+    }
+}
+
+impl<B: Block> FilesystemSecurity for Fat32<B> {
+    fn security(&mut self, node: NodeId) -> Result<NodeSecurity, DriverError> {
+        // FAT32 stores no owner, mode, ACL, or capability gate, so every
+        // node reports one uniform, restrictive default record: owned by
+        // the system principal, group-writable by nobody. The volume
+        // manager's mount policy is what grants ordinary users access to
+        // a foreign volume; the driver itself never fabricates per-file
+        // ownership the format cannot hold.
+        let info = self.node_info(node)?;
+        let mode = match info.kind {
+            NodeKind::Directory => 0o755,
+            NodeKind::RegularFile => 0o644,
+        };
+        Ok(NodeSecurity::new(mode, 0, 0))
+    }
+
+    fn set_security(&mut self, _node: NodeId, _security: NodeSecurity) -> Result<(), DriverError> {
+        // The FAT32 on-disk format cannot store any part of a RustOS
+        // security record. Storing a silently-lossy record is forbidden,
+        // so the write is refused whole (fail closed).
+        Err(DriverError::Unsupported)
+    }
+}
+
+impl<B: Block> FilesystemStats for Fat32<B> {
+    fn stats(&mut self) -> Result<VolumeStats, DriverError> {
+        // A pure read of the counter established by the open-time FAT scan
+        // and maintained by the allocator — no device I/O. The allocation
+        // unit FAT32 accounts in is the cluster, so the figures are
+        // cluster-denominated; FAT32 has no inode table, and the zero pair
+        // reports that honestly rather than fabricating a capacity.
+        let bytes_per_cluster =
+            u32::try_from(self.layout.bytes_per_cluster).map_err(|_| DriverError::DeviceFault)?;
+        Ok(VolumeStats {
+            block_size: bytes_per_cluster,
+            total_blocks: u64::from(self.layout.max_cluster) - 1,
+            free_blocks: self.free_clusters,
+            avail_blocks: self.free_clusters,
+            files: 0,
+            files_free: 0,
+        })
     }
 }
 

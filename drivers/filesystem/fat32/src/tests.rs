@@ -994,6 +994,66 @@ mod format {
     }
 
     #[test]
+    fn stats_track_allocation_and_identity_is_remount_stable() {
+        let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB)).expect("format");
+        let identity = fs.volume_identity();
+        assert_ne!(
+            identity, [0u8; 16],
+            "the tag byte keeps the identity non-nil"
+        );
+
+        let before = fs.stats().expect("stats");
+        assert!(before.total_blocks > 0);
+        assert!(before.free_blocks <= before.total_blocks);
+        assert_eq!(before.avail_blocks, before.free_blocks);
+        // FAT32 has no inode table; the zero pair reports that honestly.
+        assert_eq!((before.files, before.files_free), (0, 0));
+
+        // Allocating a multi-cluster body drops the maintained count;
+        // removing it restores the exact figure.
+        let root = fs.root();
+        fs.create(root, b"stats.bin", NodeKind::RegularFile)
+            .expect("create");
+        let body = std::vec![0x5Au8; 40_000];
+        assert_eq!(fs.write_at(root, b"stats.bin", 0, &body), Ok(body.len()));
+        let after = fs.stats().expect("stats");
+        assert!(after.free_blocks < before.free_blocks);
+        fs.remove(root, b"stats.bin").expect("remove");
+        let restored = fs.stats().expect("stats");
+        assert_eq!(restored.free_blocks, before.free_blocks);
+
+        // A fresh open's full FAT scan agrees with the maintained count,
+        // and the identity survives the remount.
+        let mut fs = Fat32::open(fs.into_block()).expect("reopen");
+        assert_eq!(fs.stats().expect("stats").free_blocks, before.free_blocks);
+        assert_eq!(fs.volume_identity(), identity);
+    }
+
+    #[test]
+    fn security_is_uniform_and_stores_are_refused() {
+        let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB)).expect("format");
+        let root = fs.root();
+        fs.create(root, b"file.txt", NodeKind::RegularFile)
+            .expect("create");
+        let file = fs.lookup(root, b"file.txt").expect("lookup");
+
+        // The format stores no owner model: one uniform, restrictive,
+        // system-owned record per kind, never fabricated per-file
+        // ownership.
+        let dir_sec = fs.security(root).expect("dir security");
+        assert_eq!((dir_sec.mode, dir_sec.uid, dir_sec.gid), (0o755, 0, 0));
+        assert!(dir_sec.required_cap.is_none());
+        let file_sec = fs.security(file).expect("file security");
+        assert_eq!((file_sec.mode, file_sec.uid, file_sec.gid), (0o644, 0, 0));
+
+        // A store would be silently lossy, so it is refused whole.
+        assert_eq!(
+            fs.set_security(file, NodeSecurity::new(0o600, 1000, 100)),
+            Err(DriverError::Unsupported)
+        );
+    }
+
+    #[test]
     fn filling_a_formatted_volume_reports_no_space() {
         let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB)).expect("format");
         let root = fs.root();

@@ -36,8 +36,8 @@
 //! account, or a call made before the identity table or the mount is
 //! installed, is denied rather than served.
 
-use alloc::boxed::Box;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use rustos_abi::driver::filesystem::{
@@ -67,12 +67,16 @@ use super::{Vfs, VfsError};
 /// The driver needs `&mut self` per operation and may **park** across a
 /// block-device completion IRQ, so it is serialised by a sleeping
 /// [`SleepLock`] (never a spin lock — a second contender would busy-spin
-/// while the holder sleeps). The lock is leaked to `'static` so the hot path
-/// copies the reference out of the registry without holding the registry
-/// lock across the (possibly parking) operation.
+/// while the holder sleeps). The lock is shared by [`Arc`] so the hot path
+/// clones the handle out of the registry without holding the registry
+/// lock across the (possibly parking) operation — and so a runtime
+/// [`unregister`](LateFilesystem::unregister) (a hotplug volume detach)
+/// drops the registry's reference while any in-flight operation keeps the
+/// driver alive through its own clone: no leak per detach, no
+/// use-after-free.
 struct DriverEntry<F: 'static> {
     handle: u64,
-    driver: &'static SleepLock<F>,
+    driver: Arc<SleepLock<F>>,
     /// The backing volume's name (partition label / volume identity), as the
     /// mount snapshot reports it. Registration-time facts, not driver state:
     /// the registrar names what it mounted.
@@ -152,43 +156,60 @@ impl<F: 'static> LateFilesystem<F> {
     /// naming the backing volume (`source`) and the driver's filesystem type
     /// (`fstype`) for the mount snapshot.
     ///
-    /// The driver is wrapped in a [`SleepLock`] and leaked to `'static` (it
-    /// lives for the rest of the kernel's life, like every other boot-leaked
-    /// kernel state), so the hot path can copy the reference out of the
-    /// registry without holding the registry lock across a parking operation.
+    /// The driver is wrapped in a [`SleepLock`] behind an [`Arc`], so the
+    /// hot path can clone the handle out of the registry without holding
+    /// the registry lock across a parking operation, and a runtime
+    /// [`unregister`](Self::unregister) can drop the registry's reference
+    /// while in-flight operations finish on their own clones.
     ///
-    /// Returns the leaked lock so a kernel-internal consumer that must write
-    /// the same volume (the `CAP_USER_ADMIN` account-administration engine's
-    /// storage) can share the **one** live driver instance: a volume has
-    /// exactly one writer, and every mutation serialises through this lock —
-    /// a second independent driver over the same device would corrupt its
-    /// copy-on-write allocation state.
+    /// Returns a clone of the shared lock so a kernel-internal consumer that
+    /// must write the same volume (the `CAP_USER_ADMIN`
+    /// account-administration engine's storage) can share the **one** live
+    /// driver instance: a volume has exactly one writer, and every mutation
+    /// serialises through this lock — a second independent driver over the
+    /// same device would corrupt its copy-on-write allocation state.
     ///
     /// # Errors
     ///
     /// [`FilesystemAlreadyInstalled`] if `handle` is already registered — a
-    /// driver is bound to its handle exactly once (fail closed; never a
-    /// silent re-bind).
+    /// driver is bound to its handle exactly once while registered (fail
+    /// closed; never a silent re-bind). A handle freed by
+    /// [`unregister`](Self::unregister) may be reused by a later attach.
     pub fn register(
         &self,
         handle: DriverHandle,
         driver: F,
         source: &str,
         fstype: &str,
-    ) -> Result<&'static SleepLock<F>, FilesystemAlreadyInstalled> {
+    ) -> Result<Arc<SleepLock<F>>, FilesystemAlreadyInstalled> {
         let handle = handle.as_u64();
         let mut drivers = self.drivers.lock();
         if drivers.iter().any(|e| e.handle == handle) {
             return Err(FilesystemAlreadyInstalled);
         }
-        let driver: &'static SleepLock<F> = Box::leak(Box::new(SleepLock::new(driver)));
+        let driver = Arc::new(SleepLock::new(driver));
         drivers.push(DriverEntry {
             handle,
-            driver,
+            driver: Arc::clone(&driver),
             source: String::from(source),
             fstype: String::from(fstype),
         });
         Ok(driver)
+    }
+
+    /// Withdraw the driver registered for `handle` (a runtime volume
+    /// detach), returning the registry's shared handle so the caller can
+    /// flush and drop it.
+    ///
+    /// Operations already in flight hold their own [`Arc`] clones and
+    /// finish safely; every later resolution of `handle` fails closed
+    /// [`Errno::NotImplemented`] exactly as before the driver was
+    /// registered. Fails closed: an unknown handle removes nothing.
+    pub fn unregister(&self, handle: DriverHandle) -> Option<Arc<SleepLock<F>>> {
+        let handle = handle.as_u64();
+        let mut drivers = self.drivers.lock();
+        let pos = drivers.iter().position(|e| e.handle == handle)?;
+        Some(drivers.remove(pos).driver)
     }
 
     /// Whether the shared VFS has been installed.
@@ -199,8 +220,10 @@ impl<F: 'static> LateFilesystem<F> {
 
     /// The installed VFS, or [`Errno::NotImplemented`] before one is
     /// published (fail closed — a kernel with no mounted volume serves no
-    /// `fs_*` syscall).
-    fn vfs(&self) -> Result<&Vfs, Errno> {
+    /// `fs_*` syscall). Public for the runtime volume attach/detach
+    /// service, which adds and retracts mounts through the one live mount
+    /// table.
+    pub fn vfs(&self) -> Result<&Vfs, Errno> {
         match self.vfs.get() {
             Ok(Some(vfs)) => Ok(vfs),
             _ => Err(Errno::NotImplemented),
@@ -210,32 +233,38 @@ impl<F: 'static> LateFilesystem<F> {
     /// The driver registered for `handle`, or [`Errno::NotImplemented`] when
     /// none is (fail closed — a mount whose backing volume is not yet online,
     /// or has no driver, serves no operation, never a silent fallback).
-    fn driver(&self, handle: DriverHandle) -> Result<&'static SleepLock<F>, Errno> {
+    /// Public for the runtime volume detach path, which flushes exactly the
+    /// departing volume before retracting it.
+    pub fn driver(&self, handle: DriverHandle) -> Result<Arc<SleepLock<F>>, Errno> {
         let handle = handle.as_u64();
         let drivers = self.drivers.lock();
         drivers
             .iter()
             .find(|e| e.handle == handle)
-            .map(|e| e.driver)
+            .map(|e| Arc::clone(&e.driver))
             .ok_or(Errno::NotImplemented)
     }
 
     /// Every registered driver, for a whole-system `sync`.
-    fn all_drivers(&self) -> Vec<&'static SleepLock<F>> {
-        self.drivers.lock().iter().map(|e| e.driver).collect()
+    fn all_drivers(&self) -> Vec<Arc<SleepLock<F>>> {
+        self.drivers
+            .lock()
+            .iter()
+            .map(|e| Arc::clone(&e.driver))
+            .collect()
     }
 
     /// The registered driver for `handle` together with its registration
     /// names, for the mount snapshot. `None` when the backing volume is not
     /// yet online — the caller reports the mount without names or usage
     /// rather than guessing.
-    fn entry(&self, handle: DriverHandle) -> Option<(String, String, &'static SleepLock<F>)> {
+    fn entry(&self, handle: DriverHandle) -> Option<(String, String, Arc<SleepLock<F>>)> {
         let handle = handle.as_u64();
         let drivers = self.drivers.lock();
         drivers
             .iter()
             .find(|e| e.handle == handle)
-            .map(|e| (e.source.clone(), e.fstype.clone(), e.driver))
+            .map(|e| (e.source.clone(), e.fstype.clone(), Arc::clone(&e.driver)))
     }
 }
 
@@ -490,7 +519,7 @@ where
     /// backing-less covering mount yields [`VfsError::NotFound`] (no volume
     /// to delegate to); a backed mount whose driver is not yet registered
     /// yields [`Errno::NotImplemented`] — both fail closed.
-    fn resolve_driver(&self, vfs: &Vfs, path: &Path) -> Result<&'static SleepLock<F>, Errno> {
+    fn resolve_driver(&self, vfs: &Vfs, path: &Path) -> Result<Arc<SleepLock<F>>, Errno> {
         let handle = vfs
             .mounts()
             .resolve(path)
@@ -738,7 +767,12 @@ where
         let Ok(vfs) = self.mount.vfs() else {
             return Vec::new();
         };
-        vfs.mounts()
+        // Snapshot the mount list under the short read lock and drop the
+        // guard before touching any driver: `driver.lock()` below may park
+        // on a busy volume, and a spinning mount-table guard must never be
+        // held across a park.
+        let mounts: Vec<super::MountPoint> = vfs.mounts().iter().cloned().collect();
+        mounts
             .iter()
             .filter_map(|mount| {
                 // The mount table records the mount *point* (target) and its

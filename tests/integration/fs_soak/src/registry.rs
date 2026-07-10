@@ -15,6 +15,11 @@ use crate::{exercise, random_exercise, RamBlock};
 /// soak exercises the encrypted-volume path under this fixed key.
 const RUSTFS_SOAK_KEY: VolumeKey = [0xa5; VOLUME_KEY_LEN];
 
+/// Volume identity the soak stamps onto its ext4 volumes: deterministic
+/// (the soak is reproducible), non-nil (the formatter refuses the reserved
+/// all-zero identity).
+const SOAK_EXT4_UUID: [u8; 16] = [0x5A; 16];
+
 /// Deterministic stand-in for the platform RNG seam: a byte counter that gives
 /// `RustFs::format` distinct, reproducible key material and UUID. Soak
 /// scaffolding only, never a production entropy source.
@@ -90,7 +95,7 @@ impl SoakFs for RustFs<RamBlock> {
 impl SoakFs for Ext4<RamBlock> {
     fn format_volume(block: RamBlock) -> Result<Self, DriverError> {
         let inodes = inode_budget(block.len_bytes());
-        Ext4::format(block, inodes)
+        Ext4::format(block, inodes, SOAK_EXT4_UUID)
     }
 
     fn remount(self) -> Result<Self, DriverError> {

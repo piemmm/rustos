@@ -227,7 +227,7 @@ fn backed_vfs(mount_mode: u16) -> Vfs {
     vfs.mkdir(&admin, &p("/Storage/usb0"), Mode::from_bits(mount_mode))
         .expect("create mount point");
     let handle = DriverHandle::from_raw(7).expect("non-zero handle");
-    vfs.mounts_mut()
+    vfs.mounts_write()
         .mount(p("/Storage/usb0"), MountFlags::READ_ONLY, Some(handle))
         .expect("mount backed");
     vfs
@@ -460,7 +460,7 @@ fn backed_vfs_rw(mount_mode: u16) -> Vfs {
         .expect("create mount point");
     let handle = DriverHandle::from_raw(8).expect("non-zero handle");
     let flags = MountFlags::from_bits(0).expect("empty flags");
-    vfs.mounts_mut()
+    vfs.mounts_write()
         .mount(p("/Storage/usb0"), flags, Some(handle))
         .expect("mount backed");
     vfs
@@ -662,9 +662,9 @@ fn delegated_mutation_of_mount_root_is_invalid() {
 /// the writable root volume backs `/`), so a delegated create at `/<name>`
 /// lands a top-level directory on the volume.
 fn root_backed_rw_vfs() -> Vfs {
-    let mut vfs = Vfs::with_default_layout(UserId(ADMIN_UID), GroupId(ADMIN_GID));
+    let vfs = Vfs::with_default_layout(UserId(ADMIN_UID), GroupId(ADMIN_GID));
     let handle = DriverHandle::from_raw(9).expect("non-zero handle");
-    vfs.mounts_mut()
+    vfs.mounts_write()
         .back_root(handle)
         .expect("back the root mount");
     vfs
@@ -699,12 +699,12 @@ fn delegated_rename_across_two_backed_mounts_is_cross_volume() {
     // backings, so it is refused with the dedicated `CrossVolume` error
     // (the EXDEV-equivalent `mv` falls back to copy-then-remove on) —
     // never a generic path error a caller could not act on.
-    let mut vfs = root_backed_rw_vfs();
+    let vfs = root_backed_rw_vfs();
     let caps = CapabilitySet::empty();
     let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
     let handle = DriverHandle::from_raw(11).expect("non-zero handle");
     let flags = MountFlags::from_bits(0).expect("empty flags");
-    vfs.mounts_mut()
+    vfs.mounts_write()
         .mount(p("/Storage/usb0"), flags, Some(handle))
         .expect("mount a second backed volume");
     let mut fs = RwMockFs::new();

@@ -69,8 +69,8 @@
 
 use rustos_abi::driver::block::Block;
 use rustos_abi::driver::filesystem::{
-    DirEntry, FilesystemRead, FilesystemSecurity, FilesystemWrite, NodeId, NodeInfo, NodeKind,
-    NodeSecurity, SecurityAcl, SecuritySubject,
+    DirEntry, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite, NodeId,
+    NodeInfo, NodeKind, NodeSecurity, SecurityAcl, SecuritySubject, VolumeStats,
 };
 use rustos_abi::time::Time64;
 use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
@@ -733,6 +733,13 @@ impl<B: Block> Ext4<B> {
         })
     }
 
+    /// The volume's stable identity: the superblock `s_uuid`, minted by
+    /// the formatter and stable across re-inserts.
+    #[must_use]
+    pub fn volume_uuid(&self) -> [u8; 16] {
+        self.layout.uuid
+    }
+
     /// Lay down a fresh, empty ext4 volume on `block` and return it
     /// mounted.
     ///
@@ -750,21 +757,24 @@ impl<B: Block> Ext4<B> {
     /// count is rounded up to a whole number of inodes per group (at
     /// least 16 per group). The reserved inodes 1..=10 and an
     /// extent-mapped empty root directory (inode 2) are laid down; the
-    /// remainder are free.
+    /// remainder are free. `uuid` is the volume's stable identity
+    /// (`s_uuid`); the caller mints it from its own entropy source — this
+    /// `no_std` driver has none — and the reserved all-zero value is
+    /// refused, so a formatted volume always has a publishable identity.
     ///
     /// # Errors
     ///
     /// * [`DriverError::DeviceFault`] if the device geometry is
     ///   degenerate or a block write fails.
     /// * [`DriverError::OutOfRange`] if the device is too small to host a
-    ///   single block group's metadata plus a non-empty data region, or
-    ///   `inode_count` is zero.
+    ///   single block group's metadata plus a non-empty data region,
+    ///   `inode_count` is zero, or `uuid` is the refused all-zero value.
     ///
     /// # Capabilities
     ///
     /// Reached only through the driver's [`DriverHandle`].
-    pub fn format(mut block: B, inode_count: u32) -> Result<Self, DriverError> {
-        format::write_volume(&mut block, inode_count)?;
+    pub fn format(mut block: B, inode_count: u32, uuid: [u8; 16]) -> Result<Self, DriverError> {
+        format::write_volume(&mut block, inode_count, uuid)?;
         Self::open(block)
     }
 
@@ -2663,6 +2673,44 @@ impl<B: Block> FilesystemSecurity for Ext4<B> {
         // refused whole (fail closed); the record a node was created
         // with stands.
         Err(DriverError::Unsupported)
+    }
+}
+
+impl<B: Block> FilesystemStats for Ext4<B> {
+    fn stats(&mut self) -> Result<VolumeStats, DriverError> {
+        // Read the live superblock: this driver's own write path maintains
+        // the on-disk free counts, so the device is the single source of
+        // truth (an in-memory shadow could drift from a crash-recovered
+        // volume). One bounded read per query, off every hot path.
+        let mut sb = [0u8; SUPERBLOCK_LEN];
+        device_read(
+            &mut self.block,
+            self.block_size,
+            self.block_count,
+            SUPERBLOCK_OFFSET,
+            &mut sb,
+        )?;
+        let is_64bit = le32(&sb, 0x60) & INCOMPAT_64BIT != 0;
+        let hi = |offset: usize| {
+            if is_64bit {
+                u64::from(le32(&sb, offset)) << 32
+            } else {
+                0
+            }
+        };
+        let total_blocks = u64::from(le32(&sb, 0x04)) | hi(0x150);
+        let reserved_blocks = u64::from(le32(&sb, 0x08)) | hi(0x154);
+        let free_blocks = u64::from(le32(&sb, 0x0C)) | hi(0x158);
+        Ok(VolumeStats {
+            block_size: self.layout.block_size,
+            total_blocks,
+            free_blocks,
+            // Blocks reserved for the superuser are free but not available
+            // to an ordinary allocation, the POSIX `f_bavail` distinction.
+            avail_blocks: free_blocks.saturating_sub(reserved_blocks),
+            files: u64::from(le32(&sb, 0x00)),
+            files_free: u64::from(le32(&sb, 0x10)),
+        })
     }
 }
 

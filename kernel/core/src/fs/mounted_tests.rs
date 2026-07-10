@@ -84,7 +84,7 @@ fn vfs(read_only: bool) -> Vfs {
     } else {
         MountFlags::from_bits(0).expect("empty flags")
     };
-    vfs.mounts_mut()
+    vfs.mounts_write()
         .mount(mount, flags, Some(handle))
         .expect("mount backed");
     vfs
@@ -152,7 +152,7 @@ fn rebased_submounts_route_to_their_backing_subtree_and_handle() {
         ("/Storage/logs", "LogsArea"),
         ("/Storage/settings", "SettingsArea"),
     ] {
-        vfs.mounts_mut()
+        vfs.mounts_write()
             .mount_rebased(
                 Path::parse(mount_point).expect("path"),
                 nosuid,
@@ -161,7 +161,7 @@ fn rebased_submounts_route_to_their_backing_subtree_and_handle() {
             )
             .expect("rebased mount");
     }
-    vfs.mounts_mut()
+    vfs.mounts_write()
         .mount(
             Path::parse("/Storage/other").expect("path"),
             nosuid,
@@ -699,11 +699,11 @@ fn an_ordinary_user_lists_the_system_owned_read_only_mount() {
 
     // The production mount layout: writable root as `/`, read-only volume
     // over `/System`, writable exceptions rebased back out of it.
-    let mut vfs = Vfs::with_default_layout(UserId(0), GroupId(0));
+    let vfs = Vfs::with_default_layout(UserId(0), GroupId(0));
     let system_handle = DriverHandle::from_raw(9).expect("handle");
     let root_handle = DriverHandle::from_raw(10).expect("handle");
-    vfs.mounts_mut().back_root(root_handle).expect("back /");
-    vfs.mounts_mut()
+    vfs.mounts_write().back_root(root_handle).expect("back /");
+    vfs.mounts_write()
         .set_backing(
             &Path::parse("/System").expect("path"),
             system_handle,
@@ -713,7 +713,7 @@ fn an_ordinary_user_lists_the_system_owned_read_only_mount() {
     for sub in ["/System/Logs", "/System/Settings"] {
         let path = Path::parse(sub).expect("path");
         let subtree = path.components().to_vec();
-        vfs.mounts_mut()
+        vfs.mounts_write()
             .set_backing(&path, root_handle, subtree)
             .expect("back writable exception");
     }

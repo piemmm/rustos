@@ -456,25 +456,78 @@ volume-policy service.
   `docs/src/lib/path.md` record the landed state.
 - **Deliberate scope decisions.** Volume identity crosses the ABI only
   as path *text* today, so no `lib/abi` volume-id type is minted ahead
-  of its first typed consumer (the D3b/D3c storage sysinfo queries,
-  §2.3/§2.4); forest unpublication lands with its first producer
-  (hotplug detach, D3b), so the boot-time forest is append-only.
+  of its first typed consumer (the D3c storage sysinfo queries,
+  §2.3/§2.4). Forest unpublication landed with its first producer, the
+  D3b runtime detach; the boot volumes themselves are published once and
+  never withdrawn.
 
-#### 2.4.2 D3b — runtime volume attach and multi-root publication
+#### 2.4.2 D3b — runtime volume attach and multi-root publication. **Done.**
 
-- The kernel gains the runtime half the boot-time forest deliberately
-  lacks: **attach** a filesystem driver to a hot-pluggable block source
-  — a kernel blkio-client `Block` over the per-LUN endpoint + shared
-  window a user-space block driver serves (`rustos_abi::blkio`, the D2
-  `rustos,usb-msd-lun` nodes) — producing a volume root that is not
-  boot-wired.
-- Runtime mounts: a published volume's root joins the live mount table
-  under its `Storage:`-catalog view location (chosen by volmgr, D3c)
-  with the §16.3 removable-media flags; the forest gains **unpublish**
-  (detach retracts the root, fail-closed for new I/O).
-- Capability posture: attach/publish/unpublish under `CAP_FS_MOUNT`
-  (drives.md §14 — reuse before minting, §5.2); every decision audited
-  with the drives.md §23 event ids.
+- **The ABI**: `volume_attach` (78) / `volume_detach` (79), both
+  `CAP_FS_MOUNT`-gated and audited, taking the fixed-frame
+  `lib/abi/src/volume.rs` requests (`VolumeAttachRequest`: endpoint +
+  window + probed partition extent + fstype + validated catalog name;
+  `VolumeDetachRequest`: the 16-byte volume identity). The attach handler
+  additionally requires the caller's own kernel-minted resource grants to
+  cover **both** transport resources the request names (the endpoint and
+  the shared window forwarded on the matched storage node), so the mount
+  authority alone can never reach another driver's transport. `lib/rt`
+  wrappers and `ros_sys_*` stubs landed; C headers regenerated.
+- **The kernel blkio client** (`kernel/core::fs::blkclient::BlkClient`):
+  a `Block` over the per-LUN call endpoint + shared window, using the
+  `ipc_call` post → wake-server → park → take-reply discipline (a
+  destroyed endpoint cancels the in-flight call — typed fault, never a
+  hang). The window is reached through a counted **kernel hold**
+  (`sharedreg::kernel_hold` over the new `SharedMemFacility::
+  kernel_window` direct-map translation), so the frames outlive the
+  owning driver's exit while the kernel still reads them. Geometry is
+  validated fail-closed at connect; transfers chunk through the 32 KiB
+  window; the device write policy is enforced client-side too.
+- **Runtime-mutable mount table**: `Vfs` now holds its `MountTable`
+  behind an `RwLock` (guards held only for lookups, never across a
+  park), `LateFilesystem` shares drivers by `Arc<SleepLock<_>>` and
+  gained `unregister` (a detached volume's driver drops cleanly — no
+  leak per unplug, in-flight operations finish on their own clones), and
+  the forest gained `unpublish`. A runtime mount carries its own
+  permission template (`MountTable::mount_with_template`) because its
+  mount point has no node in the boot layout tree; ancestor search
+  authorisation still walks the real tree.
+- **The service** (`kernel/rustos-kernel::volume_service`, installed via
+  the `BootInfo::with_volume_service` seam → `NULL_VOLUME_SERVICE`
+  fail-closed default): windows the extent (`PartitionBlock`), opens the
+  matched filesystem (RustFS / ext4 / FAT32), mounts under
+  `/Storage/<name>` with `nosuid,nodev,noexec` (+`ro` per the device),
+  and publishes the identity **last** with full unwind on any refusal.
+  Detach orders fs-flush → device-flush → unmount → unregister →
+  unpublish and fails closed (volume stays attached) on a flush error; a
+  vanished endpoint (device already gone) is not a refusal. Audit:
+  4172/4173 (`fs.hotplug.root_added` allow/deny), 4174/4175
+  (`root_removed`), publication through the one shared
+  `fs.root.publish.{allow,deny}` definition (4170/4171).
+- **Reality-driven decisions.** (1) ext4/FAT32 lacked the
+  `FilesystemStats` surface and any volume identity: both gained honest
+  impls (ext4: live superblock counts + `s_uuid`; FAT32: an open-time
+  FAT scan maintained by the allocator, serial‖label‖tag identity —
+  content-derived, as drives.md §8 sanctions for formats without a
+  UUID), and FAT32 gained the uniform restrictive `FilesystemSecurity`
+  posture (stores refused — silently-lossy records are forbidden). The
+  ext4 **formatter wrote a nil `s_uuid`** — a real defect the new tests
+  exposed; `Ext4::format` now takes the caller-minted UUID and refuses
+  nil. (2) A RustFS attach uses the well-known key (non-secret volumes,
+  as the System volume): a privately-keyed volume refuses with a typed
+  error, and key-provisioned attach arrives with volmgr's key policy —
+  the kernel never guesses a secret. (3) The mount template is the
+  restrictive system-owned default until D3c's storage-group identity
+  map lands; listing `/Storage` (the catalog *view*) is D3c's synthetic
+  catalog work — D3b delivers resolution, not enumeration.
+- Host-proven end to end: the lifecycle test serves a formatted FAT32
+  image over a genuine call endpoint from another thread, attaches it,
+  resolves the published root, reads the file through the production
+  `fs_*` service, refuses a duplicate-identity attach with clean unwind,
+  detaches (device flush observed), and fails closed on re-detach — plus
+  unit tests across blkclient (chunking, hostile geometry, stall/detach
+  faults), sharedreg kernel holds, mount templates, forest unpublish,
+  and both filesystems' new stats/identity surfaces.
 
 #### 2.4.3 D3c — `volmgr`: probe, automount, alias/catalog, permissions
 
@@ -567,7 +620,7 @@ volume-policy service.
 - **D3a** durable `id::` roots — `lib/path` `Root::VolumeId` + the kernel
   volume forest + boot-volume publication. **Done** (§2.4.1).
 - **D3b** runtime volume attach over blkio + multi-root
-  publish/unpublish (§2.4.2).
+  publish/unpublish. **Done** (§2.4.2).
 - **D3c** `volmgr` + alias/catalog automount + permissions (§2.4.3).
 - **D4** surprise-removal state machine, force-unmount, verified
   re-insert.

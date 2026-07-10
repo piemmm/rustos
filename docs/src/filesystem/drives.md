@@ -397,11 +397,17 @@ RustFS per-volume UUID, published by the boot mount/unlock paths with the
 audited `fs.root.publish.{allow,deny}` events — to the `/`-view location its
 root backs, so `id::<volume-id>/path` opens the same object under the same
 permissions, never a policy bypass, and an unpublished identity fails closed
-`NotFound`. The multi-root volume forest (roots *outside* the default view,
-runtime attach/unpublish, and the `fs::` resolver) remains a future increment
-(`plans/DEVICES.md` D3b/D3c); machine aliases then rebind from the single
-root's subtrees to independent `id::` volume roots without changing the
-resolver contract.
+`NotFound`. **Runtime attach and unpublish are landed** (`plans/DEVICES.md`
+D3b): the `CAP_FS_MOUNT`-gated, audited `volume_attach` / `volume_detach`
+syscalls attach a filesystem driver to a hot-pluggable block source (the
+kernel blkio client over a served block-service endpoint + shared window),
+mount its root at `/Storage/<name>` with the removable-media flags, and
+publish/withdraw its `id::` root through the same forest — a detach flushes
+first and fails closed rather than discarding uncommitted data. The catalog
+*projection* (`Storage:/` enumeration, alias policy) and the `fs::` resolver
+remain future increments (`plans/DEVICES.md` D3c); machine aliases then
+rebind from the single root's subtrees to independent `id::` volume roots
+without changing the resolver contract.
 
 ## 22. Error model
 

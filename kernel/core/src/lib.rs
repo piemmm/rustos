@@ -178,7 +178,7 @@ pub use fs::{
     Access, AclEntry, AclWho, CachedFs, Credentials, FilesystemAlreadyInstalled, FilesystemService,
     IdentityAlreadyInstalled, LateFilesystem, LateIdentity, Metadata, Mode, MountPoint, MountTable,
     MountedFilesystemService, NullFilesystemService, Path, Vfs, VfsError, VolumeForest,
-    VolumePublishError, NULL_FILESYSTEM, NULL_VOLUME_FOREST,
+    VolumePublishError, VolumeService, NULL_FILESYSTEM, NULL_VOLUME_FOREST, NULL_VOLUME_SERVICE,
 };
 pub use groups::{build_identity_table, load_groups_db, GroupsLoadError, GROUPS_DB_PATH};
 pub use hwtree::{HwTreeSource, NullHwTreeSource, NULL_HW_TREE};

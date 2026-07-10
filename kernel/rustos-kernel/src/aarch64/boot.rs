@@ -992,6 +992,11 @@ fn enter_kernel_core(
     // `id::` path fails closed `NotFound`, so wiring the hook here changes
     // no boot behaviour until those installs land.
     .with_volumes(&crate::system_mount::VOLUME_FOREST)
+    // Delegate runtime volume attach/detach (`plans/DEVICES.md` D3b) to
+    // the production service; it fails closed `NotImplemented` until the
+    // mount task wires its audit sink and pressure gauge, so this changes
+    // no boot behaviour until that install lands.
+    .with_volume_service(&crate::volume_service::VOLUME_SERVICE)
     // Resolve a spawn-as-user switch (`PREREQUISITES.md` P-C) against the
     // same set-once identity cell the filesystem service resolves caller
     // groups against and the root-unlock kthread publishes the on-disk

@@ -19,6 +19,7 @@ use rustos_abi::driver::filesystem::{
 use rustos_abi::time::Time64;
 use rustos_abi::CapabilityId;
 use rustos_kernel_sec::{GroupId, UserId};
+use rustos_sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use super::delegate::{DelegatedFs, DelegatedInfo};
 use super::mount::MountTable;
@@ -57,10 +58,15 @@ impl Node {
 }
 
 /// An in-RAM virtual filesystem tree.
-#[derive(Clone, Debug, Eq, PartialEq)]
+///
+/// The mount table lives behind its own [`RwLock`] so a runtime volume
+/// attach/detach can add or retract a mount through a shared `&Vfs` (the
+/// set-once boot cell) while concurrent operations resolve against it.
+/// Every reader takes the guard only for the tiny lookup and copies what
+/// it needs out — never across a driver call, which may park.
 pub struct Vfs {
     root: Node,
-    mounts: MountTable,
+    mounts: RwLock<MountTable>,
 }
 
 impl Vfs {
@@ -70,7 +76,7 @@ impl Vfs {
     pub fn new(root_meta: Metadata) -> Self {
         Self {
             root: Node::directory(root_meta),
-            mounts: MountTable::new(MountFlags::default()),
+            mounts: RwLock::new(MountTable::new(MountFlags::default())),
         }
     }
 
@@ -124,19 +130,25 @@ impl Vfs {
             }
         }
 
-        Self { root, mounts }
+        Self {
+            root,
+            mounts: RwLock::new(mounts),
+        }
     }
 
-    /// The mount table.
-    #[must_use]
-    pub fn mounts(&self) -> &MountTable {
-        &self.mounts
+    /// The mount table, read-locked for the duration of the returned guard.
+    ///
+    /// Hold the guard only for the lookup and copy the needed facts out;
+    /// never hold it across a driver operation, which may park while the
+    /// guard's contenders would spin.
+    pub fn mounts(&self) -> RwLockReadGuard<'_, MountTable> {
+        self.mounts.read()
     }
 
-    /// The mount table, mutably, for wiring a block-backed filesystem
-    /// driver into a subtree.
-    pub fn mounts_mut(&mut self) -> &mut MountTable {
-        &mut self.mounts
+    /// The mount table, write-locked, for wiring a block-backed filesystem
+    /// driver into a subtree or adding/retracting a runtime mount.
+    pub fn mounts_write(&self) -> RwLockWriteGuard<'_, MountTable> {
+        self.mounts.write()
     }
 
     /// Read from a file under a driver-backed mount, delegating the I/O to
@@ -551,29 +563,33 @@ impl Vfs {
         src: &Path,
         dst: &Path,
     ) -> Result<(Metadata, Vec<String>, Vec<String>), VfsError> {
-        let src_mount = self.mounts.resolve(src);
-        let dst_mount = self.mounts.resolve(dst);
-        if src_mount.backing().is_none() || dst_mount.backing().is_none() {
-            return Err(VfsError::NotFound);
-        }
-        if src_mount.is_read_only() || dst_mount.is_read_only() {
-            return Err(VfsError::ReadOnly);
-        }
-        if src_mount.path() != dst_mount.path() {
-            return Err(VfsError::CrossVolume);
-        }
-        let mount_depth = src_mount.path().depth();
-        let mount_path = src_mount.path().clone();
-        // A sub-mount roots its content at `backing_subtree` on the backing
-        // volume; both rename paths share the one covering mount (checked
-        // above), so both remainders are re-based by the same prefix so the
-        // driver resolves from its own root.
-        let subtree = src_mount.backing_subtree().to_vec();
-        let node = self.resolve(cred, &mount_path)?;
-        let NodeKind::Directory(_) = &node.kind else {
-            return Err(VfsError::NotADirectory);
+        // Copy the mount facts out under a short read lock; nothing below
+        // holds the guard.
+        let (mount_depth, mount_path, subtree, mount_template) = {
+            let mounts = self.mounts.read();
+            let src_mount = mounts.resolve(src);
+            let dst_mount = mounts.resolve(dst);
+            if src_mount.backing().is_none() || dst_mount.backing().is_none() {
+                return Err(VfsError::NotFound);
+            }
+            if src_mount.is_read_only() || dst_mount.is_read_only() {
+                return Err(VfsError::ReadOnly);
+            }
+            if src_mount.path() != dst_mount.path() {
+                return Err(VfsError::CrossVolume);
+            }
+            // A sub-mount roots its content at `backing_subtree` on the
+            // backing volume; both rename paths share the one covering
+            // mount (checked above), so both remainders are re-based by
+            // the same prefix so the driver resolves from its own root.
+            (
+                src_mount.path().depth(),
+                src_mount.path().clone(),
+                src_mount.backing_subtree().to_vec(),
+                src_mount.template().cloned(),
+            )
         };
-        let template = node.meta.clone();
+        let template = self.mount_point_template(cred, &mount_path, mount_template)?;
         let rebase = |path: &Path| {
             let mut rem = subtree.clone();
             rem.extend_from_slice(&path.components()[mount_depth..]);
@@ -599,27 +615,65 @@ impl Vfs {
         path: &Path,
         require_writable: bool,
     ) -> Result<(Metadata, Vec<String>), VfsError> {
-        let mount = self.mounts.resolve(path);
-        if mount.backing().is_none() {
-            return Err(VfsError::NotFound);
-        }
-        if require_writable && mount.is_read_only() {
-            return Err(VfsError::ReadOnly);
-        }
-        let mount_depth = mount.path().depth();
-        let mount_path = mount.path().clone();
-        // A sub-mount roots its content at `backing_subtree` on the backing
-        // volume (empty for a whole-volume mount): prepend it to the path
-        // remainder below the mount point so the delegated walk resolves
-        // from the driver's own root and lands on the volume's real subtree.
-        let mut remainder = mount.backing_subtree().to_vec();
-        let node = self.resolve(cred, &mount_path)?;
-        let NodeKind::Directory(_) = &node.kind else {
-            return Err(VfsError::NotADirectory);
+        // Copy the mount facts out under a short read lock; nothing below
+        // holds the guard.
+        let (mount_depth, mount_path, mut remainder, mount_template) = {
+            let mounts = self.mounts.read();
+            let mount = mounts.resolve(path);
+            if mount.backing().is_none() {
+                return Err(VfsError::NotFound);
+            }
+            if require_writable && mount.is_read_only() {
+                return Err(VfsError::ReadOnly);
+            }
+            // A sub-mount roots its content at `backing_subtree` on the
+            // backing volume (empty for a whole-volume mount): prepend it
+            // to the path remainder below the mount point so the delegated
+            // walk resolves from the driver's own root and lands on the
+            // volume's real subtree.
+            (
+                mount.path().depth(),
+                mount.path().clone(),
+                mount.backing_subtree().to_vec(),
+                mount.template().cloned(),
+            )
         };
-        let template = node.meta.clone();
+        let template = self.mount_point_template(cred, &mount_path, mount_template)?;
         remainder.extend_from_slice(&path.components()[mount_depth..]);
         Ok((template, remainder))
+    }
+
+    /// The permission template the delegated walk applies at and below a
+    /// mount point.
+    ///
+    /// A boot-layout mount's template is its mount-point node in the
+    /// in-RAM tree, resolved with search authorisation on every ancestor.
+    /// A **runtime** mount (a hotplug volume under `/Storage/<name>`) has
+    /// no node at its mount point, so its template travels with the mount
+    /// itself; the ancestors that do exist are still walked with search
+    /// authorisation — including the mount point's parent — so a caller
+    /// with no reach into `/Storage` cannot reach a volume mounted there.
+    fn mount_point_template(
+        &self,
+        cred: &Credentials<'_>,
+        mount_path: &Path,
+        mount_template: Option<Metadata>,
+    ) -> Result<Metadata, VfsError> {
+        if let Some(template) = mount_template {
+            let parent = mount_path.parent().ok_or(VfsError::NotFound)?;
+            let node = self.resolve(cred, &parent)?;
+            let NodeKind::Directory(_) = &node.kind else {
+                return Err(VfsError::NotADirectory);
+            };
+            node.meta.authorize(cred, Access::Execute)?;
+            Ok(template)
+        } else {
+            let node = self.resolve(cred, mount_path)?;
+            let NodeKind::Directory(_) = &node.kind else {
+                return Err(VfsError::NotADirectory);
+            };
+            Ok(node.meta.clone())
+        }
     }
 
     /// Look up the [`Metadata`] of the inode at `path`.
@@ -705,7 +759,7 @@ impl Vfs {
         path: &Path,
         contents: Vec<u8>,
     ) -> Result<(), VfsError> {
-        if self.mounts.is_read_only(path) {
+        if self.mounts.read().is_read_only(path) {
             return Err(VfsError::ReadOnly);
         }
         let node = self.resolve_mut(cred, path)?;
@@ -762,7 +816,7 @@ impl Vfs {
         // Removal mutates the parent directory, so the parent's covering
         // mount governs writability (e.g. removing the `/System/Logs`
         // mount point is forbidden by the read-only `/System`).
-        if self.mounts.is_read_only(&parent_path) {
+        if self.mounts.read().is_read_only(&parent_path) {
             return Err(VfsError::ReadOnly);
         }
         let parent = self.resolve_mut(cred, &parent_path)?;
@@ -802,7 +856,7 @@ impl Vfs {
         path: &Path,
         cap: Option<CapabilityId>,
     ) -> Result<(), VfsError> {
-        if self.mounts.is_read_only(path) {
+        if self.mounts.read().is_read_only(path) {
             return Err(VfsError::ReadOnly);
         }
         let node = self.resolve_mut(cred, path)?;
@@ -821,7 +875,7 @@ impl Vfs {
         let parent_path = path.parent().ok_or(VfsError::InvalidPath)?;
         // Creation mutates the parent directory, so the parent's covering
         // mount governs writability.
-        if self.mounts.is_read_only(&parent_path) {
+        if self.mounts.read().is_read_only(&parent_path) {
             return Err(VfsError::ReadOnly);
         }
         let parent = self.resolve_mut(cred, &parent_path)?;

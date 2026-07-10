@@ -133,7 +133,8 @@ fn system_vfs_mounts_the_writable_volume_as_root() {
     // the regression guard for the "writes outside /System/{Logs,Settings}
     // were non-persistent" defect.
     let vfs = system_vfs().expect("the production VFS builds");
-    let root = vfs.mounts().resolve(&Path::parse("/").expect("valid"));
+    let mounts = vfs.mounts();
+    let root = mounts.resolve(&Path::parse("/").expect("valid"));
     assert_eq!(root.path(), &Path::parse("/").expect("valid"));
     assert!(!root.is_read_only(), "/ is writable");
     let root_handle = root
@@ -147,7 +148,7 @@ fn system_vfs_mounts_the_writable_volume_as_root() {
 
     for top in ["/Users", "/Apps", "/Storage"] {
         let under = Path::parse(&alloc::format!("{top}/alice/file")).expect("valid path");
-        let mount = vfs.mounts().resolve(&under);
+        let mount = mounts.resolve(&under);
         assert_eq!(
             mount.path(),
             &Path::parse(top).expect("valid"),
@@ -183,7 +184,8 @@ fn system_vfs_shadows_root_with_the_read_only_system_volume() {
         .expect("/ is driver-backed");
 
     let under_system = Path::parse("/System/Drivers/x").expect("valid path");
-    let mount = vfs.mounts().resolve(&under_system);
+    let mounts = vfs.mounts();
+    let mount = mounts.resolve(&under_system);
     assert_eq!(mount.path(), &Path::parse("/System").expect("valid"));
     assert!(mount.is_read_only(), "/System is mounted read-only");
     let system_handle = mount
@@ -224,9 +226,10 @@ fn system_vfs_carves_logs_and_settings_back_to_the_writable_volume() {
     let nosuid_nodev_noexec = MountFlags::NOSUID
         .union(MountFlags::NODEV)
         .union(MountFlags::NOEXEC);
+    let mounts = vfs.mounts();
     for name in ["Logs", "Settings"] {
         let under = Path::parse(&alloc::format!("/System/{name}/file")).expect("valid path");
-        let mount = vfs.mounts().resolve(&under);
+        let mount = mounts.resolve(&under);
         assert_eq!(
             mount.path(),
             &Path::parse(&alloc::format!("/System/{name}")).expect("valid"),

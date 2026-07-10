@@ -1087,6 +1087,7 @@ fn run_phases<A: KernelArch>(
         hw_tree,
         filesystem,
         volumes,
+        volume_service,
         spawn_identity,
         kernel_heap_bytes,
         ..
@@ -1391,6 +1392,11 @@ fn run_phases<A: KernelArch>(
         // D3a); the default `NULL_VOLUME_FOREST` keeps every `id::`
         // resolution fail-closed when no volume was published.
         .with_volumes(volumes)
+        // Delegate runtime volume attach/detach to the service the boot
+        // path installed (`plans/DEVICES.md` D3b); the default
+        // `NULL_VOLUME_SERVICE` keeps both syscalls fail-closed when no
+        // boot path can host runtime volumes.
+        .with_volume_service(volume_service)
         // Resolve a spawn-as-user switch against the authoritative identity
         // table the boot path installed (`PREREQUISITES.md` P-C) — the same
         // table the filesystem service resolves caller groups against; the
@@ -1504,9 +1510,19 @@ fn build_shared_mem_facility<A: KernelArch>(
     frames: &'static FrameAllocator,
 ) -> &'static (dyn crate::devres::SharedMemFacility + 'static) {
     match arch.direct_phys_map() {
-        Some(physmap) => Box::leak(Box::new(crate::live_producer::LiveSharedMem::new(
-            arch, frames, physmap,
-        ))),
+        Some(physmap) => {
+            let facility: &'static (dyn crate::devres::SharedMemFacility + 'static) =
+                Box::leak(Box::new(crate::live_producer::LiveSharedMem::new(
+                    arch, frames, physmap,
+                )));
+            // Record the production facility (first-wins) so kernel-side
+            // shared-region consumers outside the boot handover — the
+            // runtime volume attach path's kernel hold — reach the same
+            // mechanism. The inert null is never recorded, so a port
+            // without a direct map stays fail-closed.
+            crate::devres::install_shared_mem_facility(facility);
+            facility
+        }
         None => &crate::devres::NULL_SHARED_MEM_FACILITY,
     }
 }

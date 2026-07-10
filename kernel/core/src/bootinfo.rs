@@ -35,7 +35,8 @@ use rustos_log::{Level, Sink};
 use crate::console::{ConsoleDevice, NO_CONSOLES};
 use crate::dispatch_slot::DispatchCallbackSlot;
 use crate::fs::{
-    FilesystemService, LateIdentity, VolumeForest, NULL_FILESYSTEM, NULL_VOLUME_FOREST,
+    FilesystemService, LateIdentity, VolumeForest, VolumeService, NULL_FILESYSTEM,
+    NULL_VOLUME_FOREST, NULL_VOLUME_SERVICE,
 };
 use crate::hwtree::{HwTreeSource, NULL_HW_TREE};
 use crate::seat::{SeatRegistry, NULL_SEAT_REGISTRY};
@@ -761,6 +762,17 @@ where
     /// kernel, exactly like the filesystem service.
     pub volumes: &'static VolumeForest,
 
+    /// The runtime volume attach/detach service the `volume_attach` /
+    /// `volume_detach` syscalls delegate to (`plans/DEVICES.md` D3b).
+    ///
+    /// Defaults to [`NULL_VOLUME_SERVICE`], so every attach/detach fails
+    /// closed with [`rustos_abi::Errno::NotImplemented`]. A boot path
+    /// that can host runtime volumes installs its service through
+    /// [`Self::with_volume_service`]; `kernel_main` then threads it into
+    /// the production dispatch hook. Held as a `'static` borrow, exactly
+    /// like the filesystem service.
+    pub volume_service: &'static (dyn VolumeService + 'static),
+
     /// The authoritative identity table the `spawn` handler resolves a
     /// spawn-as-user switch against (`PREREQUISITES.md` P-C).
     ///
@@ -876,6 +888,11 @@ where
             // (`plans/DEVICES.md` D3a): every `id::` resolution fails
             // closed through `NULL_VOLUME_FOREST`.
             volumes: &NULL_VOLUME_FOREST,
+            // Volume attach/detach service unwired until a boot path that
+            // can host runtime volumes installs it through
+            // `with_volume_service` (`plans/DEVICES.md` D3b): every
+            // attach/detach fails closed through `NULL_VOLUME_SERVICE`.
+            volume_service: &NULL_VOLUME_SERVICE,
             // Identity table unwired until a boot path unlocks the root and
             // installs it through `with_spawn_identity` (`PREREQUISITES.md`
             // P-C): a spawn-as-user switch fails closed through
@@ -1075,6 +1092,23 @@ where
     #[must_use]
     pub const fn with_volumes(mut self, volumes: &'static VolumeForest) -> Self {
         self.volumes = volumes;
+        self
+    }
+
+    /// Install the runtime volume attach/detach service the
+    /// `volume_attach` / `volume_detach` syscalls delegate to, consuming
+    /// and returning `self` (`plans/DEVICES.md` D3b).
+    ///
+    /// Called by a boot path that can host runtime volumes. Until this is
+    /// called the handover holds [`NULL_VOLUME_SERVICE`] and every
+    /// attach/detach fails closed with
+    /// [`rustos_abi::Errno::NotImplemented`].
+    #[must_use]
+    pub const fn with_volume_service(
+        mut self,
+        volume_service: &'static (dyn VolumeService + 'static),
+    ) -> Self {
+        self.volume_service = volume_service;
         self
     }
 

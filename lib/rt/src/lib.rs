@@ -112,6 +112,12 @@ const NUM_FILE_MAP: u64 = SyscallNumber::FILE_MAP.as_u16() as u64;
 /// `file_unmap` syscall number (as above).
 const NUM_FILE_UNMAP: u64 = SyscallNumber::FILE_UNMAP.as_u16() as u64;
 
+/// `volume_attach` syscall number (as above).
+const NUM_VOLUME_ATTACH: u64 = SyscallNumber::VOLUME_ATTACH.as_u16() as u64;
+
+/// `volume_detach` syscall number (as above).
+const NUM_VOLUME_DETACH: u64 = SyscallNumber::VOLUME_DETACH.as_u16() as u64;
+
 /// `mmio_map` syscall number (as above).
 const NUM_MMIO_MAP: u64 = SyscallNumber::MMIO_MAP.as_u16() as u64;
 
@@ -1313,6 +1319,48 @@ pub fn file_unmap(base: u64, len: u64) -> i64 {
     // the `(base, len)` pair against the caller's own recorded mappings
     // before any teardown. No user pointer is dereferenced.
     let ret = unsafe { raw_syscall(NUM_FILE_UNMAP, [base, len, 0, 0, 0, 0]) };
+    ret as i64
+}
+
+/// Attach a filesystem driver to a runtime block source and publish the
+/// volume's root (`SyscallNumber::VOLUME_ATTACH`, `plans/DEVICES.md` D3b).
+///
+/// `request` is an encoded [`rustos_abi::volume::VolumeAttachRequest`]
+/// naming the block-service endpoint + shared data window the caller holds
+/// as grants, the probed partition extent, the filesystem type, and the
+/// catalog name. Requires `CAP_FS_MOUNT`; the kernel re-validates every
+/// field against live state and fails closed. Returns `0` on success or
+/// `-errno` (recover the [`rustos_abi::Errno`] discriminant as `-ret`).
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
+pub fn volume_attach(request: &[u8]) -> i64 {
+    let ptr = request.as_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // the `(ptr, len)` pair against the caller's address space before
+    // reading it. `request` is a live shared `&[u8]` for the duration of
+    // the call.
+    let ret = unsafe { raw_syscall(NUM_VOLUME_ATTACH, [ptr, request.len() as u64, 0, 0, 0, 0]) };
+    ret as i64
+}
+
+/// Detach a runtime-attached volume: flush it, retract its mount, and
+/// unpublish its root (`SyscallNumber::VOLUME_DETACH`, `plans/DEVICES.md`
+/// D3b).
+///
+/// `request` is an encoded [`rustos_abi::volume::VolumeDetachRequest`]
+/// (the volume's stable 16-byte identity). Requires `CAP_FS_MOUNT`; only a
+/// volume attached through [`volume_attach`] can be detached, and the
+/// detach fails closed on a flush error rather than discarding uncommitted
+/// data. Returns `0` on success or `-errno`.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
+pub fn volume_detach(request: &[u8]) -> i64 {
+    let ptr = request.as_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // the `(ptr, len)` pair against the caller's address space before
+    // reading it. `request` is a live shared `&[u8]` for the duration of
+    // the call.
+    let ret = unsafe { raw_syscall(NUM_VOLUME_DETACH, [ptr, request.len() as u64, 0, 0, 0, 0]) };
     ret as i64
 }
 

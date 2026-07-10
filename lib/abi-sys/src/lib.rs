@@ -78,6 +78,8 @@ const NUM_MEM_MAP: u64 = SyscallNumber::MEM_MAP.as_u16() as u64;
 const NUM_MEM_UNMAP: u64 = SyscallNumber::MEM_UNMAP.as_u16() as u64;
 const NUM_FILE_MAP: u64 = SyscallNumber::FILE_MAP.as_u16() as u64;
 const NUM_FILE_UNMAP: u64 = SyscallNumber::FILE_UNMAP.as_u16() as u64;
+const NUM_VOLUME_ATTACH: u64 = SyscallNumber::VOLUME_ATTACH.as_u16() as u64;
+const NUM_VOLUME_DETACH: u64 = SyscallNumber::VOLUME_DETACH.as_u16() as u64;
 const NUM_WAIT: u64 = SyscallNumber::WAIT.as_u16() as u64;
 const NUM_RLIMIT_GET: u64 = SyscallNumber::RLIMIT_GET.as_u16() as u64;
 const NUM_RLIMIT_SET: u64 = SyscallNumber::RLIMIT_SET.as_u16() as u64;
@@ -827,6 +829,42 @@ pub extern "C" fn sys_file_unmap(base: u64, len: u64) -> i32 {
     // SAFETY: see `sys_yield`. The kernel validates the `(base, len)` pair
     // against the caller's own recorded mappings before any teardown.
     unsafe { ret_i32(raw_syscall(NUM_FILE_UNMAP, [base, len, 0, 0, 0, 0])) }
+}
+
+/// `volume_attach`: attach a filesystem driver to a runtime block source
+/// and publish the volume's root (`SyscallNumber::VOLUME_ATTACH`).
+/// `request`/`request_len` name an encoded volume-attach request frame;
+/// requires `CAP_FS_MOUNT`. Returns a `ROS_E_*` code.
+#[must_use]
+#[export_name = "ros_sys_volume_attach"]
+pub extern "C" fn sys_volume_attach(request: *const u8, request_len: usize) -> i32 {
+    // SAFETY: see `sys_yield`. The kernel validates the `(request,
+    // request_len)` pair against the caller's address space before reading
+    // it; a bad pointer is refused, never dereferenced here.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_VOLUME_ATTACH,
+            [request as u64, request_len as u64, 0, 0, 0, 0],
+        ))
+    }
+}
+
+/// `volume_detach`: flush, unmount, and unpublish a runtime-attached
+/// volume (`SyscallNumber::VOLUME_DETACH`). `request`/`request_len` name
+/// an encoded volume-detach request frame (the volume's stable 16-byte
+/// identity); requires `CAP_FS_MOUNT`. Returns a `ROS_E_*` code.
+#[must_use]
+#[export_name = "ros_sys_volume_detach"]
+pub extern "C" fn sys_volume_detach(request: *const u8, request_len: usize) -> i32 {
+    // SAFETY: see `sys_yield`. The kernel validates the `(request,
+    // request_len)` pair against the caller's address space before reading
+    // it; a bad pointer is refused, never dereferenced here.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_VOLUME_DETACH,
+            [request as u64, request_len as u64, 0, 0, 0, 0],
+        ))
+    }
 }
 
 /// `wait`: wait for a child-process event, writing the typed
@@ -1903,6 +1941,8 @@ mod tests {
         (NUM_MEM_UNMAP, "mem_unmap", 2),
         (NUM_FILE_MAP, "file_map", 3),
         (NUM_FILE_UNMAP, "file_unmap", 2),
+        (NUM_VOLUME_ATTACH, "volume_attach", 2),
+        (NUM_VOLUME_DETACH, "volume_detach", 2),
         (NUM_WAIT, "wait", 3),
         (NUM_RLIMIT_GET, "rlimit_get", 2),
         (NUM_RLIMIT_SET, "rlimit_set", 2),

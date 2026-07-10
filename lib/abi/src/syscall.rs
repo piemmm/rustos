@@ -1472,6 +1472,40 @@ impl SyscallNumber {
     /// device (`plans/DISPLAY.md`).
     pub const POINTER_READ: Self = Self(79);
 
+    /// Attach a filesystem driver to a runtime block source and publish
+    /// the volume's root (`plans/DEVICES.md` D3b).
+    ///
+    /// Arguments: a non-null pointer to an encoded
+    /// [`crate::volume::VolumeAttachRequest`] and its length (at most
+    /// [`crate::volume::VOLUME_ATTACH_MAX_LEN`]). The request names a
+    /// block-service endpoint + shared data window ([`crate::blkio`],
+    /// both held as kernel grants by the calling volume manager), the
+    /// probed partition extent, the filesystem type, and the catalog name
+    /// the root is projected under (`/Storage/<name>`). The kernel
+    /// re-validates everything against live state — the endpoint, the
+    /// window, the device geometry, the extent bounds, the name — opens
+    /// the filesystem read-only or read-write per the device's write
+    /// policy, mounts it with the removable-media flags
+    /// (`nosuid,nodev,noexec`), and publishes its stable identity into
+    /// the volume forest so `id::<volume-id>/…` paths resolve. Requires
+    /// `CAP_FS_MOUNT`; every attach decision is audited.
+    pub const VOLUME_ATTACH: Self = Self(80);
+
+    /// Detach a runtime-attached volume: flush it, retract its mount, and
+    /// unpublish its root (`plans/DEVICES.md` D3b).
+    ///
+    /// Arguments: a non-null pointer to an encoded
+    /// [`crate::volume::VolumeDetachRequest`] (the volume's stable
+    /// 16-byte identity) and its length (exactly
+    /// [`crate::volume::VOLUME_DETACH_LEN`]). Only a volume attached
+    /// through [`SyscallNumber::VOLUME_ATTACH`] can be detached — the
+    /// boot volumes are permanent and refuse this path. The volume is
+    /// flushed first and the detach fails closed on a flush error rather
+    /// than discarding uncommitted data (forced discard is a separate,
+    /// explicitly-spelled future operation). Requires `CAP_FS_MOUNT`;
+    /// every detach decision is audited.
+    pub const VOLUME_DETACH: Self = Self(81);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 

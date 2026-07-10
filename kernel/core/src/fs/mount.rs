@@ -19,6 +19,7 @@ use rustos_abi::driver::filesystem::MountFlags;
 use rustos_abi::driver::DriverHandle;
 
 use super::path::Path;
+use super::perm::Metadata;
 use super::VfsError;
 
 /// One entry in the [`MountTable`].
@@ -39,6 +40,12 @@ pub struct MountPoint {
     /// `/System/Logs` backed by the encrypted root volume's own
     /// `/System/Logs` directory carries `["System", "Logs"]` here.
     backing_subtree: Vec<String>,
+    /// The permission template the delegated walk applies at and below the
+    /// mount point, for a **runtime** mount whose mount point has no node
+    /// in the in-RAM layout tree (a hotplug volume under `/Storage/<name>`).
+    /// `None` for the boot layout's mounts, whose mount-point node in the
+    /// tree is the template.
+    template: Option<Metadata>,
 }
 
 impl MountPoint {
@@ -76,6 +83,14 @@ impl MountPoint {
     pub fn is_read_only(&self) -> bool {
         self.flags.contains(MountFlags::READ_ONLY)
     }
+
+    /// The owned permission template of a runtime mount, or `None` for a
+    /// boot-layout mount (whose mount-point node in the in-RAM tree is the
+    /// template).
+    #[must_use]
+    pub fn template(&self) -> Option<&Metadata> {
+        self.template.as_ref()
+    }
 }
 
 /// The system mount table.
@@ -99,6 +114,7 @@ impl MountTable {
                 flags: root_flags,
                 backing: None,
                 backing_subtree: Vec::new(),
+                template: None,
             }],
         }
     }
@@ -146,6 +162,39 @@ impl MountTable {
             flags,
             backing,
             backing_subtree,
+            template: None,
+        });
+        Ok(())
+    }
+
+    /// Add a **runtime** mount at `path` with `flags`, backed by `backing`
+    /// and carrying its own permission `template`.
+    ///
+    /// A runtime mount point (a hotplug volume under `/Storage/<name>`)
+    /// has no node in the in-RAM layout tree, so the template the
+    /// delegated walk applies at and below the mount point travels with
+    /// the mount itself.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VfsError::AlreadyExists`] if a mount already covers
+    /// exactly `path`.
+    pub fn mount_with_template(
+        &mut self,
+        path: Path,
+        flags: MountFlags,
+        backing: DriverHandle,
+        template: Metadata,
+    ) -> Result<(), VfsError> {
+        if self.mounts.iter().any(|m| m.path == path) {
+            return Err(VfsError::AlreadyExists);
+        }
+        self.mounts.push(MountPoint {
+            path,
+            flags,
+            backing: Some(backing),
+            backing_subtree: Vec::new(),
+            template: Some(template),
         });
         Ok(())
     }
@@ -377,6 +426,42 @@ mod tests {
             Err(VfsError::AlreadyExists)
         );
         assert_eq!(table.resolve(&p("/Storage")).backing(), Some(handle));
+    }
+
+    #[test]
+    fn a_runtime_mount_carries_its_own_template() {
+        use super::super::perm::{Metadata, Mode};
+        use rustos_kernel_sec::{GroupId, UserId};
+
+        let mut table = MountTable::new(MountFlags::default());
+        let handle = DriverHandle::from_raw(0x564F).expect("non-zero handle");
+        let template = Metadata::new(UserId(0), GroupId(0), Mode::from_bits(0o755));
+        table
+            .mount_with_template(
+                p("/Storage/usb1"),
+                MountFlags::NOSUID,
+                handle,
+                template.clone(),
+            )
+            .expect("runtime mount");
+
+        let mount = table.resolve(&p("/Storage/usb1/file"));
+        assert_eq!(mount.backing(), Some(handle));
+        assert_eq!(mount.template(), Some(&template));
+        // Boot-layout mounts carry no template (their tree node is it).
+        assert_eq!(table.resolve(&p("/other")).template(), None);
+        // The runtime mount unmounts like any other, and a duplicate is
+        // refused while mounted.
+        assert_eq!(
+            table.mount_with_template(
+                p("/Storage/usb1"),
+                MountFlags::NOSUID,
+                handle,
+                template.clone()
+            ),
+            Err(VfsError::AlreadyExists)
+        );
+        table.unmount(&p("/Storage/usb1")).expect("unmount");
     }
 
     #[test]

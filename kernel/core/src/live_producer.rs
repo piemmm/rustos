@@ -429,6 +429,13 @@ where
         let frame = Frame::containing(PhysAddr::new(phys_base));
         let _ = self.frames.free_order(frame, order);
     }
+
+    fn kernel_window(&self, phys_base: u64, len: usize) -> Option<core::ptr::NonNull<u8>> {
+        // The same direct-map translation the scrub path uses: the region's
+        // frames are physically contiguous, so one translation covers the
+        // whole window.
+        self.physmap.translate(PhysAddr::new(phys_base), len)
+    }
 }
 
 #[cfg(test)]

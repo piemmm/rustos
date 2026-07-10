@@ -16,13 +16,13 @@
 //! the durable spelling is never a policy bypass. An identity that is not
 //! published fails closed with "not found" — never a guessed root.
 //!
-//! Today every mounted volume backs a region of the one `/` view, so a
-//! publication records the volume root's view prefix (`[]` for the
-//! writable root volume, `["System"]` for the read-only system volume).
-//! When the multi-root forest lands (`plans/DEVICES.md` D3b), roots gain
-//! locations outside the default view and hotplug unpublication; the
-//! contract here — publish an identity, resolve it fail-closed — is
-//! unchanged by that growth.
+//! Every mounted volume backs a region of the one `/` view, so a
+//! publication records the volume root's view prefix: `[]` for the
+//! writable root volume, `["System"]` for the read-only system volume,
+//! and `["Storage", <name>]` for a runtime-attached volume projected
+//! into the `Storage:` catalog (`plans/DEVICES.md` D3b). A hotplug
+//! detach withdraws its publication with [`VolumeForest::unpublish`];
+//! the boot volumes are published once and never withdrawn.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -61,12 +61,11 @@ impl core::fmt::Display for VolumePublishError {
 /// The registry of published volume roots the `id::` resolver reads.
 ///
 /// Held as a `&'static` borrow by the syscall handlers, exactly like the
-/// other boot-installed seams: the boot path that mounts a volume publishes
-/// its identity here, and until it does every `id::` resolution fails
-/// closed. Publication is append-only today (volumes mount at boot and stay
-/// mounted); hotplug unpublication lands with its producer
-/// (`plans/DEVICES.md` D3b). Reads take the shared lock only for the tiny
-/// lookup, never across a filesystem operation.
+/// other boot-installed seams: the boot or runtime-attach path that mounts
+/// a volume publishes its identity here, a runtime detach withdraws it,
+/// and an identity that is not published fails closed. Reads take the
+/// shared lock only for the tiny lookup, never across a filesystem
+/// operation.
 pub struct VolumeForest {
     roots: RwLock<Vec<VolumeRoot>>,
 }
@@ -103,6 +102,18 @@ impl VolumeForest {
             view_prefix: view_prefix.iter().map(|c| String::from(*c)).collect(),
         });
         Ok(())
+    }
+
+    /// Withdraw a published identity, returning the `/`-view components
+    /// its root resolved to so the caller can retract the matching mount.
+    ///
+    /// Fails closed: an identity that is not published returns `None` and
+    /// removes nothing, so a forged or repeated detach can never withdraw
+    /// another volume's root.
+    pub fn unpublish(&self, id: &[u8; 16]) -> Option<Vec<String>> {
+        let mut roots = self.roots.write();
+        let pos = roots.iter().position(|root| &root.id == id)?;
+        Some(roots.remove(pos).view_prefix)
     }
 
     /// Resolve a published identity to its root's `/`-view components, or
@@ -176,6 +187,34 @@ mod tests {
             Err(VolumePublishError::AlreadyPublished)
         );
         assert_eq!(forest.resolve(&ID_A), Some(vec!["System".to_string()]));
+    }
+
+    #[test]
+    fn unpublish_withdraws_exactly_the_named_root() {
+        let forest = VolumeForest::new();
+        forest.publish(ID_A, &["Storage", "usb1"]).expect("publish");
+        forest.publish(ID_B, &[]).expect("publish");
+        assert_eq!(
+            forest.unpublish(&ID_A),
+            Some(vec!["Storage".to_string(), "usb1".to_string()])
+        );
+        // The withdrawn identity no longer resolves; the other root is
+        // untouched; a repeated detach fails closed.
+        assert_eq!(forest.resolve(&ID_A), None);
+        assert_eq!(forest.resolve(&ID_B), Some(Vec::new()));
+        assert_eq!(forest.unpublish(&ID_A), None);
+        // The identity can be re-published (the re-insert path).
+        forest
+            .publish(ID_A, &["Storage", "usb1"])
+            .expect("re-publish");
+        assert!(forest.resolve(&ID_A).is_some());
+    }
+
+    #[test]
+    fn unpublish_unknown_identity_fails_closed() {
+        let forest = VolumeForest::new();
+        assert_eq!(forest.unpublish(&ID_A), None);
+        assert_eq!(forest.unpublish(&[0u8; 16]), None);
     }
 
     #[test]

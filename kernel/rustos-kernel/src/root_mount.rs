@@ -64,6 +64,7 @@
 //! `virtio-blk` proves it on `-M virt`, EMMC2 on metal (§0.4 / P8).
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 
 use rustos_abi::driver::block::Block;
 use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemSecurity, NodeKind};
@@ -289,7 +290,7 @@ pub trait WritableRootSink {
     /// the engine persists through this driver directly, below the VFS.
     /// `None` leaves account administration failing closed
     /// (`NotImplemented`).
-    fn publish(&self, volume_key: &VolumeKey) -> Option<&'static SleepLock<Box<dyn KernelFs>>>;
+    fn publish(&self, volume_key: &VolumeKey) -> Option<Arc<SleepLock<Box<dyn KernelFs>>>>;
 }
 
 /// A [`WritableRootSink`] that publishes nothing.
@@ -301,7 +302,7 @@ pub trait WritableRootSink {
 pub struct NoWritableRootSink;
 
 impl WritableRootSink for NoWritableRootSink {
-    fn publish(&self, _volume_key: &VolumeKey) -> Option<&'static SleepLock<Box<dyn KernelFs>>> {
+    fn publish(&self, _volume_key: &VolumeKey) -> Option<Arc<SleepLock<Box<dyn KernelFs>>>> {
         None
     }
 }

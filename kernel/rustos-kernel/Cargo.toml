@@ -127,6 +127,7 @@ rustos-users = { path = "../../lib/users", version = "=0.0.0" }
 # architecture-neutral, so it is a common dependency and its host tests run
 # on the CI host.
 rustos-drv-fs-fat32 = { path = "../../drivers/filesystem/fat32", version = "=0.0.0" }
+rustos-drv-fs-ext4 = { path = "../../drivers/filesystem/ext4", version = "=0.0.0" }
 # The shared, scheme-neutral partition layer (`AGENTS.md` §2.2): the boot
 # path splits the single whole-disk block device into its FAT boot and
 # `RustFS` root partitions through `parse_partition_table` + the

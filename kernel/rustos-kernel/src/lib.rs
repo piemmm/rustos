@@ -265,6 +265,14 @@ pub mod system_mount;
 // run — on the CI host as well as every kernel target.
 pub mod user_admin_backing;
 
+// Runtime volume attach/detach service behind the `volume_attach` /
+// `volume_detach` syscalls (`plans/DEVICES.md` D3b). It builds on
+// `system_mount`'s mount cell and names the filesystem driver crates, so
+// it is gated like `system_mount` on the ports with a storage floor; its
+// host tests (the full attach/read/detach lifecycle) run on the CI host.
+#[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64"))]
+pub mod volume_service;
+
 // The kernel-resident `/System` driver-store IPC *server* (Design D
 // D2b-2c): the arch-neutral request→reply translation that drains a
 // `rustos_kernel_ipc::CallEndpoint` and serves each
