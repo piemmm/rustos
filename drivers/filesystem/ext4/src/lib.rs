@@ -107,8 +107,10 @@ const SUPERBLOCK_OFFSET: u64 = 1024;
 /// Encoded length of the fixed superblock fields the driver reads.
 const SUPERBLOCK_LEN: usize = 1024;
 
-/// On-disk superblock magic (`s_magic`), little-endian `0xEF53`.
-const EXT_MAGIC: u16 = 0xEF53;
+/// On-disk superblock magic (`s_magic`), little-endian `0xEF53`. The one
+/// definition lives in `lib/fsprobe`, which the volume manager's signature
+/// probe shares, so the probe and this driver can never disagree.
+const EXT_MAGIC: u16 = rustos_fsprobe::EXT4_SUPERBLOCK_MAGIC;
 
 /// `s_feature_incompat`: directory entries carry a file-type byte.
 const INCOMPAT_FILETYPE: u32 = 0x0002;

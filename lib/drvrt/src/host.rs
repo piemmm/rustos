@@ -338,17 +338,18 @@ impl<S: GrantSyscalls> RtDriverHost<S> {
         Ok(())
     }
 
-    /// The URB-transport call-endpoint id the class driver submits URBs to,
-    /// from the single [`HwResourceKind::Endpoint`] grant its matched
-    /// interface node carried, or `None` if it holds no such grant.
+    /// The call-endpoint id of the single [`HwResourceKind::Endpoint`]
+    /// grant the driver's matched node carried, or `None` if it holds no
+    /// such grant.
     ///
     /// [`HwResource::base`] holds the endpoint id of an endpoint grant. The
-    /// class driver names this id in [`ipc_call`](rustos_rt::ipc_call) to
-    /// reach its host-controller driver's URB transport; the kernel admits the
-    /// call only because the driver inherited this per-endpoint grant (no
-    /// ambient authority — it cannot reach another interface's endpoint).
+    /// driver names this id in `ipc_call` to reach the transport its node
+    /// forwarded — a class driver's URB endpoint, a volume manager's blkio
+    /// endpoint — and the kernel admits the call only because the driver
+    /// inherited this per-endpoint grant (no ambient authority — it cannot
+    /// reach another node's endpoint).
     #[must_use]
-    pub fn urb_endpoint(&self) -> Option<u64> {
+    pub fn endpoint_grant(&self) -> Option<u64> {
         self.grants
             .iter()
             .flatten()

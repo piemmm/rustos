@@ -4333,11 +4333,23 @@ registration with `unregister`, forest `unpublish`, and the
 with full unwind and the drives.md hotplug audit events — ext4/FAT32
 gained `FilesystemStats` + volume identity along the way (and the ext4
 formatter's nil-`s_uuid` defect was fixed: the caller now mints the UUID).
-D3c–D4 remain: the `volmgr` service automounting hotplugged filesystems
-into the `Storage:` catalog with deterministic collision-free names and
-user-usable permissions, plus the surprise-removal state machine (retained
-uncommitted writes, syslog events, force-unmount, and verified re-insert
-replay). See `plans/DEVICES.md` for the binding design and staging.
+D3c (done) landed the automount policy: `drivers/storage/volmgr`, a
+per-node autoloaded policy driver (the D3b grant model gates the blkio
+endpoint and `volume_attach` behind the matched node's own grants, so the
+per-node instance — not a singleton watcher — is the least-privilege,
+zero-new-kernel-surface design) that probes a whole-device filesystem
+signature else the GPT/MBR partitions **by content** through the new
+`lib/fsprobe` crate (the one home of the RustFS/ext4/FAT32
+signature/label/identity definitions, imported by the fs drivers
+themselves), derives the deterministic catalog name (sanitised label →
+`<fstype><n>` → identity-fingerprint suffix on collision), and issues the
+audited `volume_attach` per volume, exiting 0 run-to-completion — the
+`mbr::encode` silently-drops-`Other`-partitions defect was fixed en route
+with a regression test. D3d–D4 remain: the mount-policy permission
+identity map (`storage` group) + `Storage:` catalog enumeration, plus the
+surprise-removal state machine (retained uncommitted writes, syslog
+events, force-unmount, and verified re-insert replay). See
+`plans/DEVICES.md` for the binding design and staging.
 
 ---
 

@@ -33,8 +33,10 @@ use rustos_crypto::{ct_eq, hmac_sha256, MacKey, MacTag, MAC_TAG_LEN};
 
 /// Magic in a metadata block header's first eight bytes: `"RUSTFSB\3"`. The
 /// trailing byte tracks the on-disk block layout; it advanced to `3` when the
-/// fast physical checksum became the keyed authenticator (Stage 3).
-pub const HEADER_MAGIC: u64 = 0x5255_5354_4653_4203;
+/// fast physical checksum became the keyed authenticator (Stage 3). The one
+/// definition lives in `lib/fsprobe`, which the volume manager's signature
+/// probe shares, so the probe and this driver can never disagree.
+pub use rustos_fsprobe::RUSTFS_HEADER_MAGIC as HEADER_MAGIC;
 
 /// On-disk format version understood by this build. A volume written by a
 /// different version is refused rather than misread. Version 2 widened the

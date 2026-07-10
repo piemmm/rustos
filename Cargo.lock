@@ -841,6 +841,7 @@ name = "rustos-drv-fs-ext4"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-fsprobe",
 ]
 
 [[package]]
@@ -848,6 +849,7 @@ name = "rustos-drv-fs-fat32"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-fsprobe",
 ]
 
 [[package]]
@@ -858,6 +860,7 @@ dependencies = [
  "rustos-compress",
  "rustos-crypto",
  "rustos-fsmeta",
+ "rustos-fsprobe",
  "rustos-fuzzseed",
  "rustos-log",
  "zeroize",
@@ -938,6 +941,20 @@ version = "0.0.0"
 dependencies = [
  "rustos-abi",
  "rustos-virtio",
+]
+
+[[package]]
+name = "rustos-drv-storage-volmgr"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-caps",
+ "rustos-drvrt",
+ "rustos-fsprobe",
+ "rustos-log",
+ "rustos-partition",
+ "rustos-rt",
+ "rustos-util",
 ]
 
 [[package]]
@@ -1042,6 +1059,14 @@ dependencies = [
 
 [[package]]
 name = "rustos-fsmeta"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-fuzzseed",
+]
+
+[[package]]
+name = "rustos-fsprobe"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
@@ -3486,6 +3511,7 @@ dependencies = [
  "rustos-drv-input-usb-kbd",
  "rustos-drv-input-virtio-input",
  "rustos-drv-storage-usb-msd",
+ "rustos-drv-storage-volmgr",
  "rustos-fuzzseed",
  "rustos-help",
  "rustos-itest-harness",

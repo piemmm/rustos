@@ -622,6 +622,13 @@ rustos/
 │   │                    #   Mac) with checked Time64 conversions — the one
 │   │                    #   definition RustFS, the foreign-FS drivers, and the
 │   │                    #   copy/archive tools share (§2.2; rustfs-spec §21).
+│   ├── fsprobe/         # Shared filesystem signature/label/identity probe:
+│   │                    #   the one definition of how an extent head is
+│   │                    #   recognised as RustFS/ext4/FAT32, the stable
+│   │                    #   identity each format carries, and the short
+│   │                    #   display fingerprint (ALIAS §3.8) — shared by the
+│   │                    #   volmgr policy driver's probe and the filesystem
+│   │                    #   drivers' own magic/identity definitions (§2.2).
 │   ├── fwcfg/           # Shared QEMU fw_cfg DMA client + ramfb programming
 │   │                    #   helper: the one fw_cfg protocol definition the
 │   │                    #   aarch64 framebuffer boot console's QEMU virt ramfb

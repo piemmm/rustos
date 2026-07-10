@@ -1,0 +1,54 @@
+[package]
+name = "rustos-drv-storage-volmgr"
+description = "RustOS autoloaded user-space volume-manager policy driver: binds the storage-class block-service node a block driver emits, probes its partitions (lib/partition) and filesystem signatures (lib/fsprobe) over the blkio transport, derives the deterministic catalog name, and asks the kernel to attach and publish each recognised volume (plans/DEVICES.md D3c)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# The crate is a `lib` (the loadable-module identity — the `BIND_KEYS` bind
+# table the host image builder authors the signed manifest from — plus the
+# host-testable policy engine: the blkio block client, the partition and
+# filesystem probe plan, and the naming policy) and a `Run` binary
+# (`src/main.rs`, the autoloaded per-node policy process). It depends only on
+# `lib/*` crates so the layered dependency direction holds (no
+# `drivers/*`→`drivers/*` edge — it reaches its block driver only through the
+# public blkio ABI and the kernel only through the public `volume_attach`
+# syscall). The binary is a freestanding pure-Rust program on the native
+# Tier-1 targets and an inert host stub elsewhere (`src/main.rs` /
+# `build.rs`), mirroring `drivers/storage/usb_msd`.
+
+[dependencies]
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The shared scheme-neutral partition-table layer: MBR/GPT parse and the
+# bounds-checked extent window the probe reads each candidate head through.
+rustos-partition = { path = "../../../lib/partition", version = "=0.0.0" }
+# The shared filesystem signature/label/identity probe and the identity
+# fingerprint the collision-suffix naming policy renders.
+rustos-fsprobe = { path = "../../../lib/fsprobe", version = "=0.0.0" }
+
+# Everything the freestanding program links beyond the `lib` is pulled in only
+# for the bare-metal targets the binary is actually built for; on the host the
+# binary is an inert stub.
+[target.'cfg(target_os = "none")'.dependencies]
+# The capability-set type the rt-backed `DriverHost` is built over.
+rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+# The user-space driver runtime: resolves the kernel-issued device-resource
+# grants (the block-service endpoint and the shared data window) the matched
+# storage node carried.
+rustos-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0" }
+# The pure-Rust userland runtime: `_start`, the stack canary, the panic
+# handler, and the syscall wrappers the policy driver issues (`ipc_call` for
+# the blkio transport, `volume_attach` for publication), plus the `LogSink`
+# that marshals diagnostics to the kernel log over `log_emit`.
+rustos-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+# The structured diagnostic event vocabulary (`Event`/`Field`/`Level`).
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+# Fixed-buffer formatting helpers for numeric diagnostic fields, avoiding
+# allocation in the freestanding driver.
+rustos-util = { path = "../../../lib/util", version = "=0.0.0" }

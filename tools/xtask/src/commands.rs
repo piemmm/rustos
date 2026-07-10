@@ -1389,6 +1389,10 @@ fn build_image_driver_bundles(ctx: &Context) -> Result<DriverBundles, String> {
             image_drivers::USB_MSD_STORE_PATH,
             image_drivers::build_usb_msd_bundle(ctx)?,
         ),
+        (
+            image_drivers::VOLMGR_STORE_PATH,
+            image_drivers::build_volmgr_bundle(ctx)?,
+        ),
     ])
 }
 

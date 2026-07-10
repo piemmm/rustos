@@ -122,6 +122,11 @@ pub const TARGETS: &[Target] = &[
         description: "lib/partition MBR + GPT table parsers (untrusted on-disk partition bytes)",
     },
     Target {
+        package: "rustos-fsprobe",
+        test: "fuzz_fsprobe",
+        description: "lib/fsprobe filesystem-signature probe (untrusted removable-media bytes)",
+    },
+    Target {
         package: "rustos-fsmeta",
         test: "fuzz_fsmeta",
         description:

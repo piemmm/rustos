@@ -279,3 +279,37 @@ surfaces as the URB endpoint vanishing: the driver retracts its LUN nodes
 and exits cleanly so a re-plug re-enumerates and reloads it. The engine,
 descriptor reader, and block service are host-proven over scripted
 doubles; the live path is Pi 4 metal acceptance (QEMU models no Pi USB).
+
+### Volume manager (automount policy) — `drivers/storage/volmgr`
+
+`rustos-drv-storage-volmgr` closes the hotplug loop (`plans/DEVICES.md`
+D3c): it is the **policy driver** `devmgr` autoloads against each per-LUN
+block-service node (compatible `rustos,usb-msd-lun`), one instance per
+node, spawned with exactly that node's blkio endpoint + shared-window
+grants — the same discovery/match/grant machinery every driver uses, so
+no new kernel surface and no ambient authority (an instance can never
+reach a sibling device's transport; the per-endpoint grant gates every
+`ipc_call`).
+
+The instance is a **read-only prober**: a fail-closed blkio `Block`
+client (hostile geometry refused at connect, `write_blocks` refuses by
+construction), the layout probe (whole-device filesystem signature first
+— a superfloppy — else the GPT/MBR table via `lib/partition`, each
+present partition's head probed by content through `lib/fsprobe`;
+declared partition types are hints the probe ignores), and the
+deterministic naming policy (the volume's own label sanitised through
+the alias character rules, else `<fstype><n>`; a name collision appends
+the volume-identity fingerprint, lengthened per retry, so re-inserting
+the same volume re-derives the same name). Each recognised volume is
+handed to the kernel through the `CAP_FS_MOUNT`-gated, audited
+`volume_attach` syscall — the kernel re-validates the grants, extent,
+and name, opens the filesystem itself, mounts under `/Storage/<name>`,
+and publishes the durable `id::` root. The instance then exits `0`
+(run-to-completion; the kernel-held mount outlives it), logging every
+outcome with stable event ids (4180–4184). Removal handling (surprise
+removal, retained dirty state, force-unmount, verified re-insert) is the
+staged D4 work.
+
+The blkio client, probe plan, and naming policy are host-proven over
+scripted devices and synthetic disk images; the live path is Pi 4 metal
+acceptance, following the `usb_msd` precedent.

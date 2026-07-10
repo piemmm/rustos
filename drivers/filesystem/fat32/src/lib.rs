@@ -287,18 +287,11 @@ pub struct Fat32<B: Block> {
 
 /// The volume's stable 16-byte identity, derived from the boot sector:
 /// the BPB volume serial + label when the extended boot signature declares
-/// them, else zeros. The trailing tag byte keeps the identity non-nil
-/// either way (FAT32 has no UUID; drives.md sanctions a content-derived
-/// identity for formats without one).
-fn identity_from_boot(boot: &[u8; 512]) -> [u8; 16] {
-    let mut identity = [0u8; 16];
-    if boot[66] == 0x29 {
-        identity[..4].copy_from_slice(&boot[67..71]);
-        identity[4..15].copy_from_slice(&boot[71..82]);
-    }
-    identity[15] = 0xF3;
-    identity
-}
+/// them, else zeros. The one derivation lives in `lib/fsprobe`
+/// ([`rustos_fsprobe::fat32_identity_from_boot`]), which the volume
+/// manager's signature probe shares, so a probe-side fingerprint always
+/// names the identity this driver publishes.
+use rustos_fsprobe::fat32_identity_from_boot as identity_from_boot;
 
 /// One linear FAT scan counting the free data clusters, run once at open;
 /// the allocator and the chain-free path maintain the count from there,

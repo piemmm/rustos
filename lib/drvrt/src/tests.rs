@@ -1040,7 +1040,7 @@ fn emit_node_surfaces_a_kernel_refusal_fail_closed() {
 const SHM_HANDLE: u64 = 9;
 
 #[test]
-fn urb_endpoint_reads_the_endpoint_grant_base() {
+fn endpoint_grant_reads_the_endpoint_grant_base() {
     // A class driver's matched interface node carried a per-endpoint grant;
     // its `base` is the URB transport endpoint id the driver `ipc_call`s.
     let mock = MockSyscalls::new();
@@ -1051,15 +1051,15 @@ fn urb_endpoint_reads_the_endpoint_grant_base() {
         None,
     )
     .unwrap();
-    assert_eq!(host.urb_endpoint(), Some(0xD012_5701));
+    assert_eq!(host.endpoint_grant(), Some(0xD012_5701));
 }
 
 #[test]
-fn urb_endpoint_is_none_without_an_endpoint_grant() {
+fn endpoint_grant_is_none_without_an_endpoint_grant() {
     let mock = MockSyscalls::new();
     let host =
         RtDriverHost::new(caps(&[CapabilityId::MMIO_MAP]), mock, &[regs_grant()], None).unwrap();
-    assert_eq!(host.urb_endpoint(), None);
+    assert_eq!(host.endpoint_grant(), None);
 }
 
 #[test]

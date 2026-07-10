@@ -1,0 +1,251 @@
+//! The freestanding body of the volume-manager `Run` binary (`main.rs`):
+//! grant resolution, the blkio probe, and the attach loop
+//! (`plans/DEVICES.md` D3c).
+
+use rustos_abi::blkio::BLK_DATA_LEN;
+use rustos_abi::hwtree::HwResourceKind;
+use rustos_abi::volume::{VolumeAttachRequest, VOLUME_ATTACH_MAX_LEN};
+use rustos_abi::{CapabilityId, Errno};
+use rustos_caps::CapabilitySet;
+use rustos_drv_storage_volmgr::blk::{BlkCall, RemoteBlock};
+use rustos_drv_storage_volmgr::name::{candidate, CANDIDATE_ATTEMPTS};
+use rustos_drv_storage_volmgr::plan::{plan_volumes, VolumePlan};
+use rustos_drvrt::{RtDriverHost, RtGrantSyscalls};
+use rustos_log::{log, Event, EventId, Field, FieldValue, Level};
+use rustos_rt::LogSink;
+use rustos_util::fmt::format_hex_u64;
+
+/// Exit code when the rt-backed driver host could not be built from the
+/// kernel-delivered grants. A reserved, fail-closed value.
+const EXIT_NO_HOST: i32 = 90;
+
+/// Exit code when the matched storage node did not carry the blkio
+/// endpoint and shared-window grants this driver needs.
+const EXIT_NO_TRANSPORT: i32 = 91;
+
+/// Exit code when the served device could not be probed (a transport or
+/// device fault — never merely an unrecognised layout).
+const EXIT_DEVICE_FAILED: i32 = 92;
+
+/// Diagnostic event id: the device was probed; carries the planned and
+/// unrecognised counts.
+const VOLMGR_PROBED: EventId = EventId(4180);
+
+/// Diagnostic event id: one volume attached and published.
+const VOLMGR_ATTACHED: EventId = EventId(4181);
+
+/// Diagnostic event id: one volume's attach was refused (the kernel's
+/// audited attach events carry the cause; this records the errno seen
+/// from this side).
+const VOLMGR_ATTACH_FAILED: EventId = EventId(4182);
+
+/// Diagnostic event id: the device carried nothing attachable (no
+/// partition table, no recognised filesystem) — a normal outcome, logged
+/// so an unformatted stick is diagnosable.
+const VOLMGR_NOTHING_ATTACHABLE: EventId = EventId(4183);
+
+/// Diagnostic event id: the device could not be probed (transport or
+/// device fault) and this instance is exiting for supervision.
+const VOLMGR_DEVICE_FAILED: EventId = EventId(4184);
+
+/// The capability set the driver host re-checks up front; the kernel is
+/// the authority and re-checks every trap. It is the least-privilege set
+/// this policy driver needs — no MMIO, DMA, IRQ, or node emission.
+fn driver_caps() -> CapabilitySet {
+    let mut caps = CapabilitySet::empty();
+    caps.insert(CapabilityId::SHM);
+    caps.insert(CapabilityId::IPC_ENDPOINT);
+    caps.insert(CapabilityId::FS_MOUNT);
+    caps.insert(CapabilityId::LOG_EMIT);
+    caps
+}
+
+/// The production blkio transport: one synchronous, capability-checked
+/// `ipc_call` on the granted block-service endpoint. The serving driver
+/// fills the shared window during the call, so the window parameter is
+/// untouched here.
+struct RtBlkCall {
+    endpoint: u64,
+}
+
+impl BlkCall for RtBlkCall {
+    fn call(
+        &mut self,
+        request: &[u8],
+        reply: &mut [u8],
+        _window: &mut [u8],
+    ) -> Result<usize, Errno> {
+        rustos_rt::ipc_call(self.endpoint, request, reply).map_err(|neg| {
+            Errno::from_i32(i32::try_from(-neg).unwrap_or(0)).unwrap_or(Errno::NotFound)
+        })
+    }
+}
+
+/// Emit one structured diagnostic event with a single hex field.
+fn log_hex_event(id: EventId, level: Level, message: &'static str, key: &'static str, value: u64) {
+    let mut value_buf = [0u8; 16];
+    log(
+        &LogSink,
+        &Event {
+            level,
+            id,
+            message,
+            fields: &[Field {
+                key,
+                value: FieldValue::Str(format_hex_u64(value, &mut value_buf)),
+            }],
+        },
+    );
+}
+
+/// Ask the kernel to attach one planned volume, walking the deterministic
+/// candidate-name sequence on a name collision. Any other refusal is
+/// final: the kernel audited its cause, and retrying an identical request
+/// cannot change the answer.
+fn attach_plan(endpoint: u64, window: u64, plan: &VolumePlan) -> Result<(), Errno> {
+    let mut last = Errno::AlreadyExists;
+    for attempt in 0..CANDIDATE_ATTEMPTS {
+        let Some(name) = candidate(&plan.base, &plan.identity, attempt) else {
+            break;
+        };
+        let request = VolumeAttachRequest {
+            endpoint,
+            window,
+            first_lba: plan.first_lba,
+            blocks: plan.blocks,
+            fstype: plan.fstype,
+            name: name.as_bytes(),
+        };
+        let mut frame = [0u8; VOLUME_ATTACH_MAX_LEN];
+        let len = request.encode(&mut frame)?;
+        let ret = rustos_rt::volume_attach(&frame[..len]);
+        if ret == 0 {
+            return Ok(());
+        }
+        let errno =
+            Errno::from_i32(i32::try_from(-ret).unwrap_or(0)).unwrap_or(Errno::NotImplemented);
+        if errno != Errno::AlreadyExists {
+            return Err(errno);
+        }
+        last = errno;
+    }
+    Err(last)
+}
+
+/// Program entry point. `rustos-rt`'s `_start` calls it once the runtime
+/// is set up and routes its return value through the `exit` syscall.
+///
+/// Run-to-completion: probe, attach, report, exit `0`. The kernel owns
+/// every published mount from attach onward, so nothing here needs to
+/// outlive the job; a re-plug re-discovers the node and reloads this
+/// driver afresh.
+fn main() -> i32 {
+    // No MMIO/DMA grants to map, so no coherency shim is needed.
+    let Ok(host) = RtDriverHost::from_grants_query(driver_caps(), RtGrantSyscalls, None) else {
+        return EXIT_NO_HOST;
+    };
+    // The matched storage node carried two transport grants: the blkio
+    // call endpoint (its id) and the shared data window (mapped here; its
+    // region id rides in every attach request the kernel re-checks
+    // against this task's grants).
+    let Some(endpoint) = host.endpoint_grant() else {
+        return EXIT_NO_TRANSPORT;
+    };
+    let Some(window_id) = host
+        .resources()
+        .find(|resource| resource.kind() == Some(HwResourceKind::Shared))
+        .map(rustos_abi::hwtree::HwResource::base)
+    else {
+        return EXIT_NO_TRANSPORT;
+    };
+    let Ok(window_base) = host.map_shared() else {
+        return EXIT_NO_TRANSPORT;
+    };
+    // SAFETY: `map_shared` mapped the serving driver's shared data window
+    // (`BLK_DATA_LEN` bytes — the one length both sides build from) into
+    // this process at `window_base` and returned that base. The mapping
+    // lives for the rest of this process and nothing else in this address
+    // space aliases it, so a single exclusive `&mut [u8]` over the buffer
+    // is sound. The serving driver writes it only while serving this
+    // process's own blocking blkio calls.
+    let window =
+        unsafe { core::slice::from_raw_parts_mut(window_base as usize as *mut u8, BLK_DATA_LEN) };
+
+    let mut client = match RemoteBlock::connect(RtBlkCall { endpoint }, window) {
+        Ok(client) => client,
+        Err(err) => {
+            log_hex_event(
+                VOLMGR_DEVICE_FAILED,
+                Level::Error,
+                "volmgr: block service unusable, exiting",
+                "errno_hex",
+                err as u64,
+            );
+            return EXIT_DEVICE_FAILED;
+        }
+    };
+
+    // Probe and attach. The sink runs per recognised volume; attach
+    // failures are logged per volume, never fatal to the sibling volumes
+    // on the same device (fail only the affected volume).
+    let mut attached = 0u64;
+    let summary = plan_volumes(&mut client, |plan| {
+        match attach_plan(endpoint, window_id, plan) {
+            Ok(()) => {
+                attached += 1;
+                log_hex_event(
+                    VOLMGR_ATTACHED,
+                    Level::Info,
+                    "volmgr: volume attached and published",
+                    "first_lba_hex",
+                    plan.first_lba,
+                );
+            }
+            Err(err) => {
+                log_hex_event(
+                    VOLMGR_ATTACH_FAILED,
+                    Level::Warn,
+                    "volmgr: volume attach refused",
+                    "errno_hex",
+                    err as u64,
+                );
+            }
+        }
+    });
+    let summary = match summary {
+        Ok(summary) => summary,
+        Err(err) => {
+            log_hex_event(
+                VOLMGR_DEVICE_FAILED,
+                Level::Error,
+                "volmgr: device probe failed, exiting",
+                "errno_hex",
+                err as u64,
+            );
+            return EXIT_DEVICE_FAILED;
+        }
+    };
+
+    if summary.planned == 0 {
+        log_hex_event(
+            VOLMGR_NOTHING_ATTACHABLE,
+            Level::Info,
+            "volmgr: no attachable volume on this device",
+            "unrecognised_hex",
+            u64::from(summary.unrecognised),
+        );
+        return 0;
+    }
+    // A refused sibling volume was logged above; the exit stays `0` so a
+    // partially attachable device still serves what it can.
+    log_hex_event(
+        VOLMGR_PROBED,
+        Level::Info,
+        "volmgr: device probed and volumes published",
+        "attached_hex",
+        attached,
+    );
+    0
+}
+
+rustos_rt::entry!(main);

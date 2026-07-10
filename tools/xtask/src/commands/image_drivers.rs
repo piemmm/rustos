@@ -79,6 +79,11 @@ pub const VIRTIO_KBD_STORE_PATH: &[&[u8]] = &[b"Drivers", b"input", b"virtio_kbd
 /// the `usb_msd` leaf naming the (vendor-neutral) driver.
 pub const USB_MSD_STORE_PATH: &[&[u8]] = &[b"Drivers", b"storage", b"usb_msd", b"Run"];
 
+/// Store path of the volume-manager policy-driver bundle: class `storage`,
+/// the `volmgr` leaf naming the (vendor-neutral, bus-neutral) policy
+/// driver that binds the per-LUN block-service nodes.
+pub const VOLMGR_STORE_PATH: &[&[u8]] = &[b"Drivers", b"storage", b"volmgr", b"Run"];
+
 /// Cross-compile `package` for the freestanding aarch64 target, convert the
 /// linked PIE ELF to a production-biased `rxe`, and wrap it as the signed
 /// payload of a `kind = UserSpace` bundle requesting exactly `caps` and
@@ -107,6 +112,7 @@ fn build_bundle(
         "rustos-drv-input-usb-kbd" => "drivers/input/usb_kbd",
         "rustos-drv-input-virtio-kbd" => "drivers/input/virtio_kbd",
         "rustos-drv-storage-usb-msd" => "drivers/storage/usb_msd",
+        "rustos-drv-storage-volmgr" => "drivers/storage/volmgr",
         other => return Err(format!("image: no source dir mapped for driver {other}")),
     };
     // A driver crate's `Run` binary shares the package name.
@@ -293,6 +299,35 @@ pub fn build_usb_msd_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
             CapabilityId::LOG_EMIT,
         ],
         rustos_drv_storage_usb_msd::BIND_KEYS,
+    )
+}
+
+/// Build and sign the volume-manager **policy**-driver bundle.
+///
+/// A pure policy driver: it maps the shared data window its block driver
+/// forwarded (`CAP_SHM`), issues blkio calls on its one granted
+/// block-service endpoint (`CAP_IPC_ENDPOINT`), requests the audited
+/// kernel attach of each recognised volume (`CAP_FS_MOUNT`), and emits
+/// diagnostics (`CAP_LOG_EMIT`) — and nothing more. It holds **no** MMIO,
+/// DMA, IRQ, or node-emission authority. Carries
+/// `rustos_drv_storage_volmgr::BIND_KEYS`, so it autoloads against the
+/// per-LUN block-service storage node the mass-storage class driver
+/// emitted (`plans/DEVICES.md` D3c).
+///
+/// # Errors
+///
+/// As [`build_vcmailbox_bundle`].
+pub fn build_volmgr_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
+    build_bundle(
+        ctx,
+        "rustos-drv-storage-volmgr",
+        &[
+            CapabilityId::SHM,
+            CapabilityId::IPC_ENDPOINT,
+            CapabilityId::FS_MOUNT,
+            CapabilityId::LOG_EMIT,
+        ],
+        rustos_drv_storage_volmgr::BIND_KEYS,
     )
 }
 

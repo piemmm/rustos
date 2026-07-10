@@ -96,6 +96,11 @@ pub enum MbrError {
     /// does not fit MBR's 32-bit fields (use [`crate::gpt`] for such a
     /// disk).
     ExtentTooLarge,
+    /// A [`Partition`] handed to [`encode`] has a role no MBR type byte
+    /// represents ([`PartitionType::Other`] — a many-to-one
+    /// classification): encoding it would silently drop the partition
+    /// from the table, so it is refused instead.
+    UnrepresentableRole,
 }
 
 /// One raw MBR primary-partition extent, in [`MBR_SECTOR_LEN`]-byte LBA
@@ -118,14 +123,19 @@ pub fn classify(type_byte: u8) -> PartitionType {
     }
 }
 
-/// The MBR type byte [`encode`] writes for a scheme-neutral role.
+/// The MBR type byte [`encode`] writes for a scheme-neutral role, or
+/// `None` for [`PartitionType::Other`]: `classify` folds every foreign
+/// type byte into `Other`, so no single byte can represent it — and the
+/// unused byte would make the entry *absent*, silently dropping the
+/// partition from the encoded table. An unrepresentable role is refused
+/// at [`encode`] instead (fail closed, never silent data loss).
 #[must_use]
-pub fn type_byte_for(ty: PartitionType) -> u8 {
+pub fn type_byte_for(ty: PartitionType) -> Option<u8> {
     match ty {
-        PartitionType::FatBoot => PART_TYPE_FAT32_LBA,
-        PartitionType::RustFsSystem => PART_TYPE_RUSTFS_SYSTEM,
-        PartitionType::RustFsRoot => PART_TYPE_RUSTFS,
-        PartitionType::Other => PART_TYPE_UNUSED,
+        PartitionType::FatBoot => Some(PART_TYPE_FAT32_LBA),
+        PartitionType::RustFsSystem => Some(PART_TYPE_RUSTFS_SYSTEM),
+        PartitionType::RustFsRoot => Some(PART_TYPE_RUSTFS),
+        PartitionType::Other => None,
     }
 }
 
@@ -168,8 +178,9 @@ fn validate_extents(parts: &[RawExtent]) -> Result<(), MbrError> {
 fn raw_from_partition(part: &Partition) -> Result<RawExtent, MbrError> {
     let start_lba = u32::try_from(part.start_lba).map_err(|_| MbrError::ExtentTooLarge)?;
     let sectors = u32::try_from(part.block_count).map_err(|_| MbrError::ExtentTooLarge)?;
+    let type_byte = type_byte_for(part.ty).ok_or(MbrError::UnrepresentableRole)?;
     Ok(RawExtent {
-        type_byte: type_byte_for(part.ty),
+        type_byte,
         start_lba,
         sectors,
     })

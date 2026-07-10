@@ -385,7 +385,7 @@ fn main() -> i32 {
     };
     // The matched interface node carried two transport grants: the URB
     // call endpoint (its id) and the shared data buffer (mapped here).
-    let Some(endpoint) = host.urb_endpoint() else {
+    let Some(endpoint) = host.endpoint_grant() else {
         return EXIT_NO_TRANSPORT;
     };
     let Ok(shm_base) = host.map_shared() else {

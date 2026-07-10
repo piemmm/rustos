@@ -539,45 +539,91 @@ volume-policy service.
   faults), sharedreg kernel holds, mount templates, forest unpublish,
   and both filesystems' new stats/identity surfaces.
 
-#### 2.4.3 D3c — `volmgr`: probe, automount, alias/catalog, permissions
+#### 2.4.3 D3c — `volmgr`: the automount policy driver. **Done.**
 
-- **`userland/system/volmgr`** (new service bundle) owns volume policy,
-  as `devmgr` owns driver policy: it watches the hardware tree
-  (`hw_tree_wait`) for storage-class nodes, probes partitions through
-  `lib/partition`, probes each partition for a supported filesystem
-  (RustFS / ext4 / FAT32 signatures, fail-closed probe order), and asks
-  the kernel to attach the matched filesystem driver (the D3b path) and
-  publish the volume's durable **`id::<volume-id>` root** — the
-  canonical identity (`docs/src/filesystem/drives.md`; the `id::`
-  spelling and its kernel resolution landed in D3a).
-- **Alias + catalog publication.** For each published root, alias policy
-  derives a human name and the `Storage:` catalog view updates
-  (`Storage:/<Name>` → `<Name>:/`, drives.md §15). Naming:
+- **`drivers/storage/volmgr`** owns automount policy, as `devmgr` owns
+  driver policy — but as a **per-node autoloaded policy driver**, not a
+  singleton tree-watching service. Reality-driven design decision: the
+  landed D3b security model gates the blkio call endpoint behind the
+  kernel-minted per-endpoint grant (`ipc_call` refuses an ungranted
+  caller before any byte moves) and `volume_attach` additionally
+  requires the caller's grants to cover both transport resources; grants
+  are minted in exactly one place, the per-node driver-admission spawn.
+  A singleton watcher could therefore neither probe nor attach without
+  new kernel surface, whereas the existing discovery/match/grant
+  machinery gives the per-node instance exactly one device's transport
+  authority — least privilege, zero new kernel surface. The crate's
+  `BIND_KEYS` selects the block-service node's compatible key
+  (`rustos,usb-msd-lun` today; a future hot-pluggable block source adds
+  its key as data — the engine names no bus, §2.20).
+- **The instance** (caps: `CAP_SHM`, `CAP_IPC_ENDPOINT`, `CAP_FS_MOUNT`,
+  `CAP_LOG_EMIT`; no MMIO/DMA/IRQ/emit): connects a **read-only** blkio
+  `Block` client (hostile geometry refused at connect; `write_blocks`
+  refuses by construction), probes a whole-device filesystem signature
+  first (superfloppy), else the GPT/MBR table (`lib/partition`), probing
+  each present partition's head **by content** through the new
+  `lib/fsprobe` crate (the one home of the RustFS/ext4/FAT32 signature,
+  label, and identity definitions — the fs drivers import their magic/
+  identity from it, so probe and driver can never disagree; §2.2), and
+  asks the kernel to attach each recognised volume (the D3b
+  `volume_attach` path: kernel re-validates grants/extent/name, opens
+  the filesystem, mounts under `/Storage/<name>`, publishes the durable
+  `id::` root). It then exits `0` — run-to-completion; the kernel-held
+  mount outlives it, and a re-plug re-discovers and reloads afresh.
+  Events 4180–4184 log probe/attach/nothing-attachable/device-failed.
+- **Naming is deterministic, never a coin-flip:**
   1. the volume's own label, sanitised through the alias character rules
-     (`plans/ALIAS.md` §5.2 — anything else is dropped, an empty result
-     falls through);
-  2. else `<fstype><n>` (`fat1`, `ext1`, …).
-  **Collision resolution is deterministic, never a coin-flip:** a name
-  already published gets the volume-id short fingerprint appended
-  (`Backup@7K2M` shorthand form, ALIAS.md §3.8), which is unique by
-  construction; a second collision is impossible. Re-inserting the same
-  volume re-derives the same name (stable identity), so a user's scripts
-  keep working.
+     (ALIAS.md §5.2: lowercased `a-z0-9-_`, everything else dropped,
+     leading separators stripped, empty falls through);
+  2. else `<fstype><n>` (`fat1`, `ext1`, `rustfs1`), `n` the 1-based
+     per-type ordinal in device order;
+  3. a name the kernel reports in use (`AlreadyExists`) gets the
+     volume-identity fingerprint appended (ALIAS.md §3.8, rendered by
+     `rustos_fsprobe::fingerprint` — lowercase Crockford base32, spelled
+     with `-` because the volume-name grammar has no `@`), lengthened
+     4 → 8 → full per retry; distinct identities have distinct full
+     fingerprints, so the sequence terminates. Re-inserting the same
+     volume re-derives the same name (stable identity), so a user's
+     scripts keep working.
+- **Defect fixed en route (§2.18):** `lib/partition`'s `mbr::encode`
+  silently *dropped* a `PartitionType::Other` partition (its type byte
+  encoded as the unused marker). `type_byte_for` now returns `Option`
+  and `encode` refuses an unrepresentable role
+  (`MbrError::UnrepresentableRole`), with a regression test.
+- Host-proven: the blkio client (hostile geometry, chunking, shape
+  violations, refused writes, corrupt replies), the probe plan
+  (superfloppy, content-over-type partitions, lying extents, blank
+  device, device fault, per-type ordinals), the naming policy
+  (sanitisation, fallback, candidate truncation/uniqueness), and
+  `lib/fsprobe` (signatures, hostile heads, probe order, fingerprint
+  bit-coverage). Live path: Pi 4 metal acceptance (QEMU models no Pi
+  USB — the D2/U4 precedent); the bundle ships in the Pi image
+  (`Drivers/storage/volmgr/Run`, signed, least-privilege manifest).
+
+#### 2.4.4 D3d — mount-policy permissions and the catalog view
+
+The user-facing half D3c deliberately did not touch (it needs the
+`storage` group and kernel view work, each with its own enforcement
+point):
+
 - **Permissions so logged-in users can use the data (§5.3, §16.3):**
-  removable volumes mount `nosuid,nodev,noexec` by default; relaxation
+  removable volumes mount `nosuid,nodev,noexec` (landed); relaxation
   requires `CAP_FS_MOUNT_RELAX` and is audit-logged. Foreign filesystems
   with no owner model (FAT32) get a mount-policy identity map: files
   appear owned by the `storage` group with group read/write, so any
   logged-in member (the installer adds interactive users to it) can read
   and write without ambient authority; volumes with a real owner model
-  (ext4, RustFS) keep their on-disk owners/modes/ACLs. Automount itself
-  runs under `volmgr`'s `CAP_FS_MOUNT`; no new capability is minted
-  unless an enforcement gap proves one is needed (§5.2 minimalism).
-- Every publish/unpublish/deny is logged with a stable event id (§19.4).
-- Host unit tests over mock block devices (probe order, label
-  sanitisation, collision fingerprinting, policy maps); QEMU vertical:
-  attach a disk image → assert the root, alias, catalog entry, and a
-  user-scoped read/write through `fs_open`.
+  (ext4, RustFS) keep their on-disk owners/modes/ACLs. The kernel attach
+  path's mount template is the seam (`mount_with_template` — today the
+  restrictive system-owned default, with the identity map called out as
+  this work).
+- **Catalog enumeration:** listing `/Storage` (the `Storage:` catalog
+  *view*) enumerates the published runtime roots (`Storage:/<Name>` →
+  `<Name>:/`, drives.md §15); D3b/D3c deliver resolution of a published
+  root, not enumeration of the set.
+- Host unit tests over the policy maps and the catalog view; QEMU
+  vertical: attach a disk image → assert the root, alias, catalog entry,
+  and a user-scoped read/write through `fs_open`.
 
 ### 2.5 D4 — surprise removal, force-unmount, verified re-insert
 
@@ -631,14 +677,19 @@ volume-policy service.
   volume forest + boot-volume publication. **Done** (§2.4.1).
 - **D3b** runtime volume attach over blkio + multi-root
   publish/unpublish. **Done** (§2.4.2).
-- **D3c** `volmgr` + alias/catalog automount + permissions (§2.4.3).
+- **D3c** `volmgr` — the per-node automount policy driver + `lib/fsprobe`
+  + deterministic naming. **Done** (§2.4.3).
+- **D3d** mount-policy permissions (`storage` group identity map) + the
+  `Storage:` catalog enumeration (§2.4.4).
 - **D4** surprise-removal state machine, force-unmount, verified
   re-insert.
 
 D3 is deliberately after D2 so automount is proven against a real
 hot-pluggable block source, but its volume-forest core is bus-neutral
 and serves the existing virtio/emmc disks identically — nothing in
-`volmgr` may name USB (§2.20).
+`volmgr`'s engine names a bus; its bind table selects block-service
+nodes by their own compatible keys, which is data, not bus coupling
+(§2.20).
 
 ---
 

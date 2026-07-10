@@ -144,14 +144,34 @@ fn mbr_round_trips_the_three_partition_design_b_layout() {
 }
 
 #[test]
-fn mbr_type_byte_round_trips_every_role() {
+fn mbr_type_byte_round_trips_every_representable_role() {
     for ty in [
         PartitionType::FatBoot,
         PartitionType::RustFsSystem,
         PartitionType::RustFsRoot,
     ] {
-        assert_eq!(mbr::classify(mbr::type_byte_for(ty)), ty);
+        let byte = mbr::type_byte_for(ty).expect("representable role");
+        assert_eq!(mbr::classify(byte), ty);
     }
+    // `Other` folds every foreign type byte together, so no single byte
+    // represents it.
+    assert_eq!(mbr::type_byte_for(PartitionType::Other), None);
+}
+
+#[test]
+fn mbr_encode_refuses_an_unrepresentable_role_instead_of_dropping_it() {
+    // Encoding an `Other` partition once wrote the *unused* type byte,
+    // silently dropping the partition from the table; it must be refused
+    // whole instead.
+    let parts = [
+        boot(2048, 4096),
+        Partition {
+            ty: PartitionType::Other,
+            start_lba: 8192,
+            block_count: 4096,
+        },
+    ];
+    assert_eq!(mbr::encode(&parts), Err(MbrError::UnrepresentableRole));
 }
 
 #[test]
