@@ -251,6 +251,58 @@ const MOCK_MOUSE_CONFIG_DESCRIPTOR: [u8; 25] = [
     0x07, 0x05, 0x81, 0x03, 0x04, 0x00, 0x0A,
 ];
 
+/// The device descriptor fixture for a **composite** wireless
+/// keyboard+mouse receiver (vendor `0x046D` product `0xC534` — a generic
+/// unifying-receiver identity): one device whose single configuration
+/// carries a boot-keyboard interface *and* a boot-mouse interface, the
+/// adapter shape whose second function used to be invisible. Like the
+/// real receiver it is a full-speed device with `bMaxPacketSize0` = 8
+/// (byte 7), so any EP0 IN read longer than 8 bytes fails until the
+/// driver re-evaluates the EP0 context to the honest size.
+const MOCK_COMPOSITE_DESCRIPTOR: [u8; 18] = [
+    18, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x08, 0x6D, 0x04, 0x34, 0xC5, 0x00, 0x29, 0x00, 0x00,
+    0x00, 0x01,
+];
+
+/// As [`MOCK_COMPOSITE_DESCRIPTOR`], but forging `bMaxPacketSize0` = 7 —
+/// a value no full-speed device may report (USB 2.0 §5.5.3 allows only
+/// 8/16/32/64) — so the driver must reject the device fail-closed rather
+/// than program a nonsense EP0 context.
+const MOCK_COMPOSITE_DESCRIPTOR_FORGED_EP0: [u8; 18] = [
+    18, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x07, 0x6D, 0x04, 0x34, 0xC5, 0x00, 0x29, 0x00, 0x00,
+    0x00, 0x01,
+];
+
+/// The configuration descriptor for the composite receiver: interface 0 is
+/// a boot keyboard (EP1 IN → DCI 3), interface 1 a boot mouse (EP2 IN →
+/// DCI 5), each with a HID descriptor between the interface and endpoint
+/// descriptors, followed by an **alternate setting** of interface 1 whose
+/// EP3 endpoint must be skipped (only the default setting is served).
+/// `wTotalLength` = 75 deliberately exceeds a 64-byte read, so the full
+/// configuration must be fetched or the mouse interface is truncated away.
+const MOCK_COMPOSITE_CONFIG_DESCRIPTOR: [u8; 75] = [
+    // Configuration: wTotalLength=75, 2 interfaces, bConfigurationValue=1.
+    0x09, 0x02, 0x4B, 0x00, 0x02, 0x01, 0x00, 0xA0, 0x32, //
+    // Interface 0: class=0x03 (HID), sub=0x01 (boot), protocol=0x01
+    // (keyboard).
+    0x09, 0x04, 0x00, 0x00, 0x01, 0x03, 0x01, 0x01, 0x00, //
+    // HID descriptor (type 0x21).
+    0x09, 0x21, 0x11, 0x01, 0x00, 0x01, 0x22, 0x3F, 0x00, //
+    // Endpoint: 0x81 interrupt IN, wMaxPacketSize=8, bInterval=10.
+    0x07, 0x05, 0x81, 0x03, 0x08, 0x00, 0x0A, //
+    // Interface 1: class=0x03 (HID), sub=0x01 (boot), protocol=0x02
+    // (mouse).
+    0x09, 0x04, 0x01, 0x00, 0x01, 0x03, 0x01, 0x02, 0x00, //
+    // HID descriptor.
+    0x09, 0x21, 0x11, 0x01, 0x00, 0x01, 0x22, 0x40, 0x00, //
+    // Endpoint: 0x82 interrupt IN, wMaxPacketSize=8, bInterval=10.
+    0x07, 0x05, 0x82, 0x03, 0x08, 0x00, 0x0A, //
+    // Interface 1 **alternate setting 1**: its EP3 endpoint must be
+    // skipped, never mistaken for the default setting's.
+    0x09, 0x04, 0x01, 0x01, 0x01, 0x03, 0x01, 0x02, 0x00, //
+    0x07, 0x05, 0x83, 0x03, 0x08, 0x00, 0x0A,
+];
+
 /// Register-level xHCI model: the capability block, `USBCMD`/`USBSTS`
 /// halt/reset behaviour, four `PORTSC` ports, a doorbell write log,
 /// and — when a shared DMA buffer is attached — an in-memory device
@@ -333,6 +385,16 @@ struct MockXhci {
     ep0_slot: u8,
     /// Saved per-slot EP0 ring `(base, index, cycle)`, indexed by slot id.
     ep0_saved: [(u64, usize, bool); 33],
+    /// Per-slot EP0 Max Packet Size programmed by Address Device and
+    /// re-evaluated by Evaluate Context, indexed by slot id. When it
+    /// overstates the addressed device's real `bMaxPacketSize0`, a
+    /// standard-descriptor IN stage delivers only one device-sized packet
+    /// before the controller ends the TD short — the metal fault a
+    /// full-speed wireless receiver with an 8-byte EP0 hits.
+    ep0_max: [u16; 33],
+    /// Evaluate Context commands executed, so a test can assert the EP0
+    /// max-packet fix-up ran exactly when the descriptor demanded it.
+    evaluate_context_count: usize,
     int_base: u64,
     int_index: usize,
     int_cycle: bool,
@@ -514,6 +576,19 @@ struct MockXhci {
     /// at once. It shares [`Self::hub_downstream_status`]; the change
     /// latch stays keyed to [`Self::hub_downstream_port`].
     mouse_downstream_port: u8,
+    /// A downstream hub port carrying the **composite** keyboard+mouse
+    /// receiver (`0` = none): the addressed device on this port answers
+    /// with the composite fixtures, its first interrupt endpoint is
+    /// captured as the primary HID endpoint (`int_*`) and its second — the
+    /// mouse interface on the **same slot** — as [`Self::int2`]. It shares
+    /// [`Self::hub_downstream_status`]; the change latch stays keyed to
+    /// [`Self::hub_downstream_port`].
+    composite_downstream_port: u8,
+    /// When set, the composite receiver's device descriptor forges a
+    /// `bMaxPacketSize0` no full-speed device may report
+    /// ([`MOCK_COMPOSITE_DESCRIPTOR_FORGED_EP0`]), so its enumeration must
+    /// fail closed without costing the other ports their service.
+    forge_composite_ep0_max: bool,
     /// A downstream hub port whose device never reports
     /// `PORT_STATUS_ENABLE` after a reset (`0` = none) — a broken or
     /// half-seated device whose enumeration must fail without costing the
@@ -605,6 +680,10 @@ impl MockInt {
 }
 
 impl MockXhci {
+    // A flat field-initialiser list: every line is one register default or
+    // model knob, which reads more clearly as one literal than split
+    // across artificial helpers.
+    #[allow(clippy::too_many_lines)]
     fn new() -> Self {
         Self {
             cap_dword0: 0x0110_0000 | MOCK_CAPLENGTH, // xHCI 1.1
@@ -643,6 +722,8 @@ impl MockXhci {
             ep0_cycle: true,
             ep0_slot: 0,
             ep0_saved: [(0, 0, true); 33],
+            ep0_max: [0; 33],
+            evaluate_context_count: 0,
             int_base: 0,
             int_index: 0,
             int_cycle: true,
@@ -689,6 +770,8 @@ impl MockXhci {
             msd_device: false,
             msd_downstream_port: 0,
             mouse_downstream_port: 0,
+            composite_downstream_port: 0,
+            forge_composite_ep0_max: false,
             fail_enable_downstream_port: 0,
             int2: MockInt::new(),
             pending_reports2: VecDeque::new(),
@@ -1064,6 +1147,10 @@ impl MockXhci {
                     let code = self.handle_configure_endpoint(trb.parameter, trb.slot_id());
                     self.post_command_completion(addr, code, trb.slot_id());
                 }
+                Ok(TrbType::EvaluateContext) => {
+                    let code = self.handle_evaluate_context(trb.parameter, trb.slot_id());
+                    self.post_command_completion(addr, code, trb.slot_id());
+                }
                 Ok(TrbType::ResetEndpoint) => {
                     // Clears the controller-side halt (§4.6.8): the first
                     // step of the required recovery order.
@@ -1141,7 +1228,9 @@ impl MockXhci {
             let route_port = (route_string & 0xF) as u8;
             let scripted = route_port == self.hub_downstream_port
                 || (self.msd_downstream_port != 0 && route_port == self.msd_downstream_port)
-                || (self.mouse_downstream_port != 0 && route_port == self.mouse_downstream_port);
+                || (self.mouse_downstream_port != 0 && route_port == self.mouse_downstream_port)
+                || (self.composite_downstream_port != 0
+                    && route_port == self.composite_downstream_port);
             if !scripted {
                 return CompletionCode::TrbError;
             }
@@ -1164,6 +1253,14 @@ impl MockXhci {
         self.ep0_base = self.ep_ctx_dequeue(input_ctx + 2 * MOCK_CTX_SIZE as u64);
         self.ep0_index = 0;
         self.ep0_cycle = true;
+        // Capture the EP0 Max Packet Size the driver programmed (§6.2.3
+        // dword 1 bits 31:16): when it overstates the device's real
+        // `bMaxPacketSize0`, descriptor reads deliver one device packet.
+        let ep0_ctx = self.read_dwords(input_ctx + 2 * MOCK_CTX_SIZE as u64, 2);
+        let s = usize::from(self.active_slot);
+        if s < self.ep0_max.len() {
+            self.ep0_max[s] = u16::try_from(ep0_ctx[1] >> 16).expect("16-bit field");
+        }
         // This slot's EP0 ring becomes the live control context; record it so
         // a later doorbell for another slot can switch away and back.
         self.ep0_slot = self.active_slot;
@@ -1172,6 +1269,26 @@ impl MockXhci {
             self.ep0_saved[s] = (self.ep0_base, 0, true);
         }
         self.addressed = true;
+        CompletionCode::Success
+    }
+
+    /// Evaluate Context (xHCI §4.6.7): re-evaluate the EP0 Max Packet
+    /// Size the input context carries. Only the A1 add flag is legal for
+    /// the max-packet fix-up, and — unlike Address Device — the live EP0
+    /// ring cursor is deliberately untouched: the controller evaluates
+    /// just the named field (§6.2.3.3), never repositioning the ring.
+    fn handle_evaluate_context(&mut self, input_ctx: u64, slot: u8) -> CompletionCode {
+        let control = self.read_dwords(input_ctx, 2);
+        if control[1] != 0b10 {
+            return CompletionCode::TrbError;
+        }
+        let ep0_ctx = self.read_dwords(input_ctx + 2 * MOCK_CTX_SIZE as u64, 2);
+        let s = usize::from(slot);
+        if s >= self.ep0_max.len() {
+            return CompletionCode::TrbError;
+        }
+        self.ep0_max[s] = u16::try_from(ep0_ctx[1] >> 16).expect("16-bit field");
+        self.evaluate_context_count += 1;
         CompletionCode::Success
     }
 
@@ -1249,20 +1366,20 @@ impl MockXhci {
                 self.hub_int_cycle = true;
                 return CompletionCode::Success;
             }
-            // The mouse's interrupt endpoint is recorded as the *second* HID
-            // endpoint, keyed by the addressed device's downstream port, so a
-            // keyboard and a mouse are modelled concurrently — each posting
-            // completions with its own slot.
-            if self.mouse_downstream_port != 0
-                && self.downstream_route_port == self.mouse_downstream_port
-            {
-                self.int2.dci = u8::try_from(dci).expect("DCI fits a byte");
-                self.int2.base =
-                    self.ep_ctx_dequeue(input_ctx + (1 + u64::from(dci)) * MOCK_CTX_SIZE as u64);
-                self.int2.index = 0;
-                self.int2.cycle = true;
-                self.int2.slot = slot;
-                self.configured = true;
+            // The *second* HID interrupt endpoint is recorded in the second
+            // endpoint model: the composite receiver's mouse interface
+            // (configured after its keyboard interface on the **same**
+            // slot), or a separate mouse device's endpoint (keyed by its
+            // own downstream port and slot) — so two HID endpoints are
+            // serviced concurrently and their completions carry the right
+            // slot and DCI.
+            let composite_second = self.composite_downstream_port != 0
+                && self.downstream_route_port == self.composite_downstream_port
+                && self.int_slot == slot;
+            let mouse_device = self.mouse_downstream_port != 0
+                && self.downstream_route_port == self.mouse_downstream_port;
+            if composite_second || mouse_device {
+                self.capture_second_int_endpoint(input_ctx, dci, slot);
                 return CompletionCode::Success;
             }
             self.int_dci = u8::try_from(dci).expect("DCI fits a byte");
@@ -1295,6 +1412,20 @@ impl MockXhci {
         self.hub_ctx_num_ports = ((slot_ctx[1] >> 24) & 0xFF) as u8;
         self.hub_ctx_tt_think_time = ((slot_ctx[2] >> 16) & 0b11) as u8;
         CompletionCode::Success
+    }
+
+    /// Record an interrupt-IN endpoint into the second endpoint model
+    /// ([`Self::int2`]) at Configure Endpoint time — the shared capture for
+    /// a composite receiver's second interface and for a separate mouse
+    /// device's endpoint.
+    fn capture_second_int_endpoint(&mut self, input_ctx: u64, dci: u32, slot: u8) {
+        self.int2.dci = u8::try_from(dci).expect("DCI fits a byte");
+        self.int2.base =
+            self.ep_ctx_dequeue(input_ctx + (1 + u64::from(dci)) * MOCK_CTX_SIZE as u64);
+        self.int2.index = 0;
+        self.int2.cycle = true;
+        self.int2.slot = slot;
+        self.configured = true;
     }
 
     fn process_ep0_ring(&mut self) {
@@ -1364,15 +1495,40 @@ impl MockXhci {
                 && self.downstream_route_port == self.msd_downstream_port);
         let is_mouse = self.mouse_downstream_port != 0
             && self.downstream_route_port == self.mouse_downstream_port;
+        let is_composite = self.composite_downstream_port != 0
+            && self.downstream_route_port == self.composite_downstream_port;
         match (desc_type, is_hub_device) {
             (0x01, false) if is_msd => &MOCK_MSD_DESCRIPTOR,
             (0x01, false) if is_mouse => &MOCK_MOUSE_DESCRIPTOR,
+            (0x01, false) if is_composite && self.forge_composite_ep0_max => {
+                &MOCK_COMPOSITE_DESCRIPTOR_FORGED_EP0
+            }
+            (0x01, false) if is_composite => &MOCK_COMPOSITE_DESCRIPTOR,
             (0x01, false) => &MOCK_DESCRIPTOR,
             (0x01, true) => &MOCK_HUB_DESCRIPTOR,
             (_, false) if is_msd => &MOCK_MSD_CONFIG_DESCRIPTOR,
             (_, false) if is_mouse => &MOCK_MOUSE_CONFIG_DESCRIPTOR,
+            (_, false) if is_composite => &MOCK_COMPOSITE_CONFIG_DESCRIPTOR,
             (_, false) => self.keyboard_config,
             (_, true) => &MOCK_HUB_CONFIG_DESCRIPTOR,
+        }
+    }
+
+    /// The bytes a standard `GET_DESCRIPTOR` delivers: the addressed
+    /// device's fixture, capped to one device-sized packet when the
+    /// programmed EP0 Max Packet Size does not match the device's real
+    /// `bMaxPacketSize0` — the controller sees the first undersized packet
+    /// as a short packet and ends the TD (the metal fault of reading a
+    /// full descriptor from a full-speed device with an 8-byte EP0 while
+    /// the context still assumes 64).
+    fn standard_descriptor_reply(&self, desc_type: u8) -> &'static [u8] {
+        let source = self.descriptor_fixture(desc_type);
+        let device_ep0 = usize::from(self.descriptor_fixture(0x01)[7]);
+        let programmed = usize::from(self.ep0_max[usize::from(self.ep0_slot)]);
+        if programmed != device_ep0 && device_ep0 < source.len() {
+            &source[..device_ep0]
+        } else {
+            source
         }
     }
 
@@ -1396,7 +1552,7 @@ impl MockXhci {
             // GET_DESCRIPTOR(device | configuration); a hub answers with
             // the hub fixtures (class 0x09), a keyboard with the HID ones.
             (0x80, 0x06) if setup[3] == 0x01 || setup[3] == 0x02 => {
-                let source = self.descriptor_fixture(setup[3]);
+                let source = self.standard_descriptor_reply(setup[3]);
                 if !self.deliver_in_data(data, source, w_length, status_addr) {
                     return;
                 }
@@ -1741,7 +1897,8 @@ impl MockXhci {
         let powered = port >= 1 && self.hub_powered & bit != 0;
         let is_device_port = port == self.hub_downstream_port
             || (self.msd_downstream_port != 0 && port == self.msd_downstream_port)
-            || (self.mouse_downstream_port != 0 && port == self.mouse_downstream_port);
+            || (self.mouse_downstream_port != 0 && port == self.mouse_downstream_port)
+            || (self.composite_downstream_port != 0 && port == self.composite_downstream_port);
         let w_status = if powered && is_device_port {
             // Once the port has been reset it reports enabled
             // (PORT_STATUS_ENABLE, bit 1) in addition to its connect/speed
@@ -1787,6 +1944,7 @@ impl MockXhci {
         self.ep0_cycle = true;
         self.ep0_slot = 0;
         self.ep0_saved = [(0, 0, true); 33];
+        self.ep0_max = [0; 33];
         self.int_index = 0;
         self.int_cycle = true;
         self.event_index = 0;
@@ -4162,22 +4320,34 @@ fn boot_keyboard_decodes_over_the_xhci_transfer_ring() {
     assert_eq!(keyboard.poll(&mut events), Ok(0));
 }
 
+/// Decode a fixture and return its interfaces, panicking (test-only) on a
+/// refusal — the shared happy-path entry for the decode assertions.
+fn decoded(buf: &[u8]) -> [Option<InterfaceInfo>; crate::device::MAX_INTERFACES] {
+    InterfaceInfo::decode_all(buf).expect("fixture decodes")
+}
+
 #[test]
 fn interface_info_decodes_and_fails_closed() {
     // The boot-keyboard fixture: config value 1, interface 0, class
-    // `0x03_01_01`.
-    let info = InterfaceInfo::decode(&MOCK_CONFIG_DESCRIPTOR).expect("fixture decodes");
+    // `0x03_01_01`, and no second interface.
+    let interfaces = decoded(&MOCK_CONFIG_DESCRIPTOR);
+    let info = interfaces[0].expect("the keyboard interface decodes");
     assert_eq!(info.configuration_value, 1);
     assert_eq!(info.interface_number, 0);
     assert_eq!(info.class24, 0x03_01_01);
+    assert!(info.is_servable());
     // A HID interface carries no bulk endpoints.
     assert!(!info.has_bulk_pair());
     assert_eq!((info.bulk_in_dci, info.bulk_out_dci), (0, 0));
+    assert_eq!(
+        interfaces[1], None,
+        "a single-interface device stays single"
+    );
 
     // The mass-storage fixture: class `08:06:50` with the bulk pair at the
     // DCIs its endpoint descriptors report (EP3 IN → 7, EP4 OUT → 8),
     // max packet 512 each — read, never assumed.
-    let msd = InterfaceInfo::decode(&MOCK_MSD_CONFIG_DESCRIPTOR).expect("MSD fixture decodes");
+    let msd = decoded(&MOCK_MSD_CONFIG_DESCRIPTOR)[0].expect("MSD interface decodes");
     assert_eq!(msd.class24, 0x08_06_50);
     assert!(msd.has_bulk_pair());
     assert_eq!(msd.bulk_in_dci, 7);
@@ -4187,34 +4357,106 @@ fn interface_info_decodes_and_fails_closed() {
 
     // Too short to hold the configuration header.
     assert_eq!(
-        InterfaceInfo::decode(&MOCK_CONFIG_DESCRIPTOR[..8]),
+        InterfaceInfo::decode_all(&MOCK_CONFIG_DESCRIPTOR[..8]),
         Err(DriverError::BadMagic)
     );
     // Leading descriptor is not a configuration descriptor.
     let mut wrong_type = MOCK_CONFIG_DESCRIPTOR;
     wrong_type[1] = 0x01;
     assert_eq!(
-        InterfaceInfo::decode(&wrong_type),
+        InterfaceInfo::decode_all(&wrong_type),
         Err(DriverError::BadMagic)
     );
     // An interface descriptor claiming a length that runs off the end.
     let mut runaway = MOCK_CONFIG_DESCRIPTOR;
     runaway[9] = 0xFF;
-    assert_eq!(InterfaceInfo::decode(&runaway), Err(DriverError::BadMagic));
+    assert_eq!(
+        InterfaceInfo::decode_all(&runaway),
+        Err(DriverError::BadMagic)
+    );
     // A configuration with no interface descriptor at all (only the
     // 9-byte header).
     assert_eq!(
-        InterfaceInfo::decode(&MOCK_CONFIG_DESCRIPTOR[..9]),
+        InterfaceInfo::decode_all(&MOCK_CONFIG_DESCRIPTOR[..9]),
         Err(DriverError::BadMagic)
     );
     // A second interface class is honoured (boot mouse `0x03_01_02`).
     let mut mouse = MOCK_CONFIG_DESCRIPTOR;
     mouse[16] = 0x02;
     assert_eq!(
-        InterfaceInfo::decode(&mouse)
-            .expect("mouse decodes")
-            .class24,
+        decoded(&mouse)[0].expect("mouse decodes").class24,
         0x03_01_02
+    );
+}
+
+#[test]
+fn interface_info_decodes_every_interface_of_a_composite_device() {
+    // The composite receiver fixture: interface 0 is the boot keyboard
+    // (EP1 IN → DCI 3), interface 1 the boot mouse (EP2 IN → DCI 5), and
+    // the trailing alternate setting of interface 1 (EP3) is skipped.
+    let interfaces = decoded(&MOCK_COMPOSITE_CONFIG_DESCRIPTOR);
+    let keyboard = interfaces[0].expect("the keyboard interface decodes");
+    assert_eq!(keyboard.interface_number, 0);
+    assert_eq!(keyboard.class24, 0x03_01_01);
+    assert_eq!(keyboard.int_dci, 3);
+    assert!(keyboard.is_servable());
+    let mouse = interfaces[1].expect("the mouse interface decodes");
+    assert_eq!(mouse.interface_number, 1);
+    assert_eq!(mouse.class24, 0x03_01_02);
+    assert_eq!(
+        mouse.int_dci, 5,
+        "the default setting's EP2, never the alternate setting's EP3"
+    );
+    assert!(mouse.is_servable());
+    assert_eq!(interfaces[2], None, "the alternate setting adds nothing");
+}
+
+#[test]
+fn interface_info_drops_a_malformed_hid_interface_but_serves_its_sibling() {
+    // Interface 0 is a HID interface with **no** interrupt-IN endpoint
+    // (malformed — nothing to poll); interface 1 is a well-formed boot
+    // mouse. The malformed one is dropped, the sibling still served.
+    let config: [u8; 34] = [
+        // Configuration: wTotalLength=34, 2 interfaces.
+        0x09, 0x02, 0x22, 0x00, 0x02, 0x01, 0x00, 0xA0, 0x32, //
+        // Interface 0: HID boot keyboard with no endpoint at all.
+        0x09, 0x04, 0x00, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, //
+        // Interface 1: HID boot mouse, EP1 IN (DCI 3).
+        0x09, 0x04, 0x01, 0x00, 0x01, 0x03, 0x01, 0x02, 0x00, //
+        0x07, 0x05, 0x81, 0x03, 0x04, 0x00, 0x0A,
+    ];
+    let interfaces = decoded(&config);
+    let mouse = interfaces[0].expect("the well-formed sibling is served");
+    assert_eq!(mouse.class24, 0x03_01_02);
+    assert_eq!(interfaces[1], None);
+
+    // A device whose *only* interface is the malformed HID one has nothing
+    // decodable and is rejected whole.
+    assert_eq!(
+        InterfaceInfo::decode_all(&config[..18]),
+        Err(DriverError::BadMagic)
+    );
+}
+
+#[test]
+fn interface_info_bounds_the_decoded_interface_set() {
+    // Five interfaces in one configuration: only the first
+    // `MAX_INTERFACES` are decoded; the excess is ignored, never trusted.
+    let mut config = alloc::vec![
+        // Configuration header: wTotalLength=89, 5 interfaces.
+        0x09u8, 0x02, 0x59, 0x00, 0x05, 0x01, 0x00, 0xA0, 0x32,
+    ];
+    for number in 0..5u8 {
+        config.extend_from_slice(&[0x09, 0x04, number, 0x00, 0x01, 0x03, 0x01, 0x02, 0x00]);
+        config.extend_from_slice(&[0x07, 0x05, 0x81 + number, 0x03, 0x04, 0x00, 0x0A]);
+    }
+    let interfaces = InterfaceInfo::decode_all(&config).expect("the set decodes");
+    assert_eq!(interfaces.iter().flatten().count(), 4);
+    assert_eq!(
+        interfaces[3]
+            .expect("the fourth interface decodes")
+            .interface_number,
+        3
     );
 }
 
@@ -5571,6 +5813,232 @@ fn a_failing_port_at_bring_up_never_costs_the_keyboard_its_service() {
     assert_eq!(keyboard.interface_class, 0x03_01_01);
     assert!(!device.device_live(1), "the broken device claimed no index");
     assert!(device.hub_watch_active(), "the hub watch is still armed");
+}
+
+#[test]
+fn bring_up_serves_both_interfaces_of_a_composite_receiver() {
+    use crate::transport::UrbEngine;
+    use rustos_abi::HwMatchKey;
+    // The wireless keyboard+mouse receiver: ONE device behind the hub whose
+    // configuration carries a boot-keyboard interface and a boot-mouse
+    // interface. Both must be served — each on its own device index with
+    // its own interrupt endpoint and its own emitted node — while sharing
+    // one slot and one EP0. Its 75-byte configuration also proves the
+    // full-length configuration read (a 64-byte read truncated the mouse
+    // interface away).
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    mock.composite_downstream_port = 4;
+    // Like the real receiver, a full-speed device whose 8-byte EP0 must be
+    // re-evaluated before any multi-packet descriptor read succeeds.
+    mock.hub_downstream_status = 1 << 0;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+
+    device
+        .bring_up(&delay)
+        .expect("the composite receiver enumerates");
+    assert!(device.device_live(0), "the keyboard interface is served");
+    assert!(device.device_live(1), "the mouse interface is served");
+    assert!(!device.device_live(2));
+    let keyboard = device.device_identity(0).expect("keyboard identity");
+    assert_eq!(keyboard.product_id, 0xC534);
+    assert_eq!(keyboard.interface_class, 0x03_01_01);
+    let mouse = device.device_identity(1).expect("mouse identity");
+    assert_eq!(mouse.product_id, 0xC534, "one physical device");
+    assert_eq!(mouse.interface_class, 0x03_01_02);
+    assert_eq!(
+        device.raw_device_slot(0),
+        device.raw_device_slot(1),
+        "both interfaces ride one device slot"
+    );
+    assert_eq!(
+        device.host_mut().evaluate_context_count,
+        1,
+        "the 8-byte EP0 was re-evaluated exactly once for the one device"
+    );
+    assert!(device.hub_watch_active());
+
+    // Each interface publishes its own node with its own class key, so
+    // `devmgr` autoloads the keyboard AND the mouse class driver.
+    let kbd_node = device.describe_device(0, 0, 1).expect("keyboard node");
+    assert!(HwMatchKey::usb(0, 0, 0x03_01_01).matches(&kbd_node.match_keys()[0]));
+    let mouse_node = device.describe_device(1, 0, 2).expect("mouse node");
+    assert!(HwMatchKey::usb(0, 0, 0x03_01_02).matches(&mouse_node.match_keys()[0]));
+
+    // Keystrokes flow on the keyboard interface's index...
+    let mut buf = [0u8; REPORT_LEN];
+    assert_eq!(device.next_report(0, &mut buf), Ok(None));
+    device
+        .host_mut()
+        .pending_reports
+        .push_back(alloc::vec![0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    device.host_mut().process_int_ring();
+    assert_eq!(device.next_report(0, &mut buf), Ok(Some(REPORT_LEN)));
+    assert_eq!(buf[2], 0x04);
+
+    // ...and mouse reports on the mouse interface's index, concurrently.
+    let mut mouse_buf = [0u8; REPORT_LEN];
+    assert_eq!(device.next_report(1, &mut mouse_buf), Ok(None));
+    device
+        .host_mut()
+        .pending_reports2
+        .push_back(alloc::vec![0x01, 0x05, 0xFB, 0x00]);
+    device.host_mut().process_int2_ring();
+    assert_eq!(device.next_report(1, &mut mouse_buf), Ok(Some(4)));
+    assert_eq!(&mouse_buf[..4], &[0x01, 0x05, 0xFB, 0x00]);
+
+    // A control transfer through the SIBLING index routes through the
+    // slot's EP0 owner (the primary entry parked it), so a mouse class
+    // driver's control-IN works even though its entry never held the ring.
+    let mut data = [0u8; 18];
+    let setup = [0x80, 0x06, 0x00, 0x01, 0x00, 0x00, 18, 0x00];
+    let transferred = device
+        .engine_for(1)
+        .control_in(setup, &mut data)
+        .expect("the sibling's control transfer routes through the EP0 owner");
+    assert_eq!(transferred, 18);
+    assert_eq!(&data[..], &MOCK_COMPOSITE_DESCRIPTOR[..]);
+}
+
+#[test]
+fn unplugging_a_composite_receiver_frees_both_interfaces_and_a_replug_reserves_them() {
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    mock.composite_downstream_port = 4;
+    // Full speed with an 8-byte EP0, like the real receiver.
+    mock.hub_downstream_status = 1 << 0;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+
+    device
+        .bring_up(&delay)
+        .expect("the composite receiver enumerates");
+    assert!(device.device_live(0) && device.device_live(1));
+
+    // Unplug the receiver: ONE physical disconnect must free BOTH interface
+    // entries — a stale sibling entry would hold the freed slot's rings.
+    device.host_mut().hub_downstream_status = 0;
+    device.host_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
+    device.host_mut().post_hub_status_change(&[1 << 4]);
+    assert_eq!(device.next_hub_change(&delay), Ok(HubEvent::Detached(0)));
+    assert!(!device.device_live(0), "the keyboard interface is freed");
+    assert!(
+        !device.device_live(1),
+        "the sibling mouse interface is freed with it"
+    );
+    assert!(device.hub_watch_active());
+
+    // Re-plug: a brand-new enumeration serves both interfaces again.
+    device.host_mut().hub_downstream_status = 1 << 0;
+    device.host_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
+    device.host_mut().post_hub_status_change(&[1 << 4]);
+    assert_eq!(device.next_hub_change(&delay), Ok(HubEvent::Attached(0)));
+    assert!(device.device_live(0), "the keyboard interface is re-served");
+    assert!(device.device_live(1), "the mouse interface is re-served");
+    assert_eq!(
+        device
+            .device_identity(1)
+            .expect("mouse identity")
+            .interface_class,
+        0x03_01_02
+    );
+}
+
+#[test]
+fn a_composite_receiver_beside_the_keyboard_costs_it_nothing() {
+    // The metal defect this rides on: booting with the wireless receiver
+    // plugged in beside the ordinary keyboard killed the keyboard. Both
+    // devices — three interfaces in total — must be served concurrently.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    // The receiver sits on the lower-numbered port, so the walk reaches it
+    // first. Both devices are full speed; only the receiver's 8-byte EP0
+    // needs the Evaluate Context fix-up.
+    mock.composite_downstream_port = 2;
+    mock.hub_downstream_status = 1 << 0;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+
+    device
+        .bring_up(&delay)
+        .expect("bring-up serves both devices");
+    let composite_kbd = device.device_identity(0).expect("receiver keyboard");
+    assert_eq!(composite_kbd.product_id, 0xC534);
+    assert_eq!(composite_kbd.interface_class, 0x03_01_01);
+    let composite_mouse = device.device_identity(1).expect("receiver mouse");
+    assert_eq!(composite_mouse.product_id, 0xC534);
+    assert_eq!(composite_mouse.interface_class, 0x03_01_02);
+    let keyboard = device.device_identity(2).expect("the ordinary keyboard");
+    assert_eq!(keyboard.product_id, 0xC077);
+    assert_eq!(
+        keyboard.interface_class, 0x03_01_01,
+        "the ordinary keyboard is served beside the receiver's two interfaces"
+    );
+    assert_ne!(
+        device.raw_device_slot(0),
+        device.raw_device_slot(2),
+        "the receiver and the keyboard are separate devices on separate slots"
+    );
+    assert_eq!(
+        device.host_mut().evaluate_context_count,
+        1,
+        "only the receiver's EP0 needed re-evaluating; the 64-byte keyboard did not"
+    );
+    assert!(device.hub_watch_active());
+}
+
+#[test]
+fn a_forged_ep0_max_packet_fails_closed_without_costing_the_keyboard() {
+    // A full-speed device may report bMaxPacketSize0 of 8/16/32/64 only
+    // (USB 2.0 §5.5.3). A receiver forging 7 must be rejected fail-closed
+    // — never programmed into the EP0 context — and its failure must not
+    // cost the keyboard beside it its service.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    mock.composite_downstream_port = 2;
+    mock.forge_composite_ep0_max = true;
+    mock.hub_downstream_status = 1 << 0;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+
+    device
+        .bring_up(&delay)
+        .expect("bring-up survives the forged device");
+    let keyboard = device.device_identity(0).expect("the keyboard is served");
+    assert_eq!(keyboard.product_id, 0xC077);
+    assert!(
+        !device.device_live(1) && !device.device_live(2),
+        "the forged device claimed no index"
+    );
+    assert_eq!(
+        device.host_mut().evaluate_context_count,
+        0,
+        "a forged bMaxPacketSize0 is never programmed into the EP0 context"
+    );
+    assert!(device.hub_watch_active());
+}
+
+#[test]
+fn ep0_max_packet_validation_follows_the_speed_rules() {
+    use crate::device::ep0_max_packet_from_descriptor as validate;
+    // Low speed fixes 8 (USB 2.0 §5.5.3).
+    assert_eq!(validate(2, 8), Ok(8));
+    assert_eq!(validate(2, 64), Err(DriverError::BadMagic));
+    // Full speed allows exactly 8/16/32/64.
+    for size in [8u8, 16, 32, 64] {
+        assert_eq!(validate(1, size), Ok(u32::from(size)));
+    }
+    assert_eq!(validate(1, 7), Err(DriverError::BadMagic));
+    assert_eq!(validate(1, 0), Err(DriverError::BadMagic));
+    // High speed fixes 64.
+    assert_eq!(validate(3, 64), Ok(64));
+    assert_eq!(validate(3, 8), Err(DriverError::BadMagic));
+    // SuperSpeed encodes its fixed 512 as the exponent 9 (USB 3.2 §9.6.1).
+    assert_eq!(validate(4, 9), Ok(512));
+    assert_eq!(validate(4, 64), Err(DriverError::BadMagic));
+    // A speed ID this driver does not model fails closed.
+    assert_eq!(validate(0, 8), Err(DriverError::DeviceFault));
 }
 
 #[test]

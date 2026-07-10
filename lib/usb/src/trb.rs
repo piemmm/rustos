@@ -232,6 +232,11 @@ pub enum TrbType {
     AddressDevice = 11,
     /// Configure Endpoint command (§6.4.3.5).
     ConfigureEndpoint = 12,
+    /// Evaluate Context command (§6.4.3.6): re-evaluate fields of an
+    /// addressed device's contexts — here the default control endpoint's
+    /// Max Packet Size once the device descriptor reports the real
+    /// `bMaxPacketSize0` (§4.6.7).
+    EvaluateContext = 13,
     /// Reset Endpoint command (§6.4.3.8): clear a halted endpoint's state
     /// after a STALL so it can be repositioned and resumed.
     ResetEndpoint = 14,
@@ -273,6 +278,7 @@ impl TrbType {
             10 => Ok(Self::DisableSlot),
             11 => Ok(Self::AddressDevice),
             12 => Ok(Self::ConfigureEndpoint),
+            13 => Ok(Self::EvaluateContext),
             14 => Ok(Self::ResetEndpoint),
             16 => Ok(Self::SetTrDequeuePointer),
             23 => Ok(Self::NoOpCommand),

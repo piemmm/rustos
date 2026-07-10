@@ -648,20 +648,22 @@ order (one fully-gated increment each):
      - **5b-ii — USB/HID child emission — done.** `bus_usb` emits the
        enumerated HID device under the VL805 as a child `HwNode` keyed by its
        **interface** class (`0x03_01_01` keyboard / `0x03_01_02` mouse).
-       `UsbDevice::enumerate_hid` now reads the configuration descriptor and
-       parses its first interface descriptor (`InterfaceInfo::decode`,
-       fail-closed bounded walk by each `bLength`): the discovered
-       `bConfigurationValue` / `bInterfaceNumber` drive `SET_CONFIGURATION` /
-       `SET_PROTOCOL(boot)` (no longer hard-coded `1` / `0`), and the captured
-       24-bit interface class is held as the device's identity. The new
+       `UsbDevice::enumerate_hid` now reads the whole configuration
+       descriptor and parses every default-alternate interface descriptor
+       (`InterfaceInfo::decode_all`, fail-closed bounded walk by each
+       `bLength`; a composite keyboard+mouse receiver gets one entry and one
+       node per served interface): the discovered `bConfigurationValue` /
+       `bInterfaceNumber` drive `SET_CONFIGURATION` / per-interface
+       `SET_PROTOCOL(boot)` (no longer hard-coded `1` / `0`), and each
+       captured 24-bit interface class is held as that entry's identity. The new
        `UsbDevice::describe_device(parent_id, node_id)` returns an `HwNode`
        (class `Input`) carrying one `HwMatchKey::usb` of the device's
        `vid:pid` + that captured interface class — never fabricated
        (§18.5) — fail-closed `NotFound` before enumeration; the
        `usb_hid::BIND_KEYS` class-wildcard keys resolve against it. A new
        method only — no `#[repr(C)]`/C-header drift. Host-proven (the
-       `InterfaceInfo::decode` fail-closed cases, the emitted-node match, the
-       pre-enumeration refusal).
+       `InterfaceInfo::decode_all` fail-closed cases, the emitted-node match,
+       the pre-enumeration refusal).
      The remaining sub-increments turn the bring-up *around* — from a
      hand-composed module that hunts for the keyboard to data-driven
      discovery + `devmgr` autoload — one fully-gated landing each. A live

@@ -32,10 +32,18 @@ build on the *same* engine without depending on each other — exactly the split
   ring, interrupter-0 event ring) and runs the controller; `reset_port` /
   `set_port_power` / `ring_doorbell` / `ack_event` drive the root hub and rings.
 - `device::UsbDevice` — the multi-device enumeration engine: per device,
-  Enable Slot → Address Device → `GET_DESCRIPTOR` → `SET_CONFIGURATION` →
-  `SET_PROTOCOL(boot)` → Configure Endpoint, into a table of up to
-  `MAX_DEVICES` concurrently served devices, each with its own layout region
-  (EP0 / interrupt / bulk rings and buffers). `next_report(index, …)` arms one
+  Enable Slot → Address Device → an 8-byte `GET_DESCRIPTOR` prefix whose
+  validated `bMaxPacketSize0` drives an Evaluate Context EP0 fix-up when
+  it differs from the speed's assumed worst case (a full-speed receiver's
+  8-byte EP0) → the full `GET_DESCRIPTOR` reads (the configuration at its
+  exact advertised `wTotalLength`) → `SET_CONFIGURATION` →
+  `SET_PROTOCOL(boot)` per HID interface → Configure Endpoint, into a table
+  of up to `MAX_DEVICES` concurrently served **interfaces**, each with its
+  own layout region (EP0 / interrupt / bulk rings and buffers). A composite
+  device — a wireless keyboard+mouse receiver — occupies one entry per
+  served interface, the siblings sharing its slot and EP0
+  (`InterfaceInfo::decode_all` decodes every default-alternate interface).
+  `next_report(index, …)` arms one
   interrupt-IN transfer for the class URB device `index` is currently serving,
   and `engine_for(index)` is the per-device `UrbEngine` view the HCD's URB
   service drives — one interface's transfers can never reach another

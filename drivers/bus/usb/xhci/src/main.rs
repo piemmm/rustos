@@ -290,23 +290,39 @@ mod program {
         abort_pending_urb(transport.endpoint_id, &mut transport.service);
     }
 
+    /// Reconcile every transport's published node with the engine's live
+    /// device table: publish a node for each newly served index and retract
+    /// the node of each no-longer-served index (aborting its held URB). A
+    /// composite device — a wireless keyboard+mouse receiver — attaches or
+    /// detaches **several** indices in one hub event, so the whole table is
+    /// trued up rather than a single index.
+    fn reconcile_interfaces(
+        device: &mut rustos_drv_bus_usb::bringup::ControllerDevice,
+        transports: &mut [Option<Transport>],
+    ) {
+        for (index, slot) in transports.iter_mut().enumerate() {
+            let Some(transport) = slot else {
+                continue;
+            };
+            if device.device_live(index) {
+                publish_interface(device, index, transport);
+            } else if transport.node_live {
+                retract_interface(transport);
+            }
+        }
+    }
+
     /// Service one pending hub status-change after a fault detach re-armed
-    /// the watch, publishing a freshly attached device's interface.
+    /// the watch, reconciling the published interfaces with whatever the
+    /// change attached or detached.
     fn service_hub_after_fault_detach(
         device: &mut rustos_drv_bus_usb::bringup::ControllerDevice,
         transports: &mut [Option<Transport>],
         delay: &ClockDelay,
     ) {
         match device.next_hub_change(delay) {
-            Ok(HubEvent::Attached(index)) => {
-                if let Some(transport) = transports.get_mut(index).and_then(Option::as_mut) {
-                    publish_interface(device, index, transport);
-                }
-            }
-            Ok(HubEvent::Detached(index)) => {
-                if let Some(transport) = transports.get_mut(index).and_then(Option::as_mut) {
-                    retract_interface(transport);
-                }
+            Ok(HubEvent::Attached(_) | HubEvent::Detached(_)) => {
+                reconcile_interfaces(device, transports);
             }
             Ok(HubEvent::None) => {}
             Err(err) => {
@@ -339,8 +355,11 @@ mod program {
         }
         match device.detach_if_device_gone(index) {
             Ok(true) => {
+                // The detach freed every entry riding the device's slot (a
+                // composite device's siblings vanish together), so true up
+                // the whole node table, then answer the faulted URB.
+                reconcile_interfaces(device, transports);
                 if let Some(transport) = transports.get_mut(index).and_then(Option::as_mut) {
-                    retract_interface(transport);
                     reply_error(transport.endpoint_id, reply.ticket, Errno::NotFound);
                 }
                 log(
@@ -391,11 +410,7 @@ mod program {
             return;
         }
         let _ = device.enable_interrupter();
-        for (index, slot) in transports.iter_mut().enumerate() {
-            if let Some(transport) = slot {
-                publish_interface(device, index, transport);
-            }
-        }
+        reconcile_interfaces(device, transports);
     }
 
     /// Recover if the controller has latched a fatal error or halted
@@ -873,19 +888,11 @@ mod program {
                                 );
                             }
                             Ok(false) => match device.next_hub_change(&delay) {
-                                Ok(HubEvent::Attached(index)) => {
-                                    if let Some(transport) =
-                                        transports.get_mut(index).and_then(Option::as_mut)
-                                    {
-                                        publish_interface(&mut device, index, transport);
-                                    }
+                                Ok(HubEvent::Attached(_)) => {
+                                    reconcile_interfaces(&mut device, &mut transports);
                                 }
-                                Ok(HubEvent::Detached(index)) => {
-                                    if let Some(transport) =
-                                        transports.get_mut(index).and_then(Option::as_mut)
-                                    {
-                                        retract_interface(transport);
-                                    }
+                                Ok(HubEvent::Detached(_)) => {
+                                    reconcile_interfaces(&mut device, &mut transports);
                                     log(
                                         &LogSink,
                                         &Event {

@@ -758,12 +758,89 @@ the live controller behaviour is host- and CI-proven first.
   `a_failing_port_at_bring_up_never_costs_the_keyboard_its_service`,
   `a_failed_hot_plug_attach_drains_the_port_latches_so_the_watch_stays_quiet`.
 
-U1–U6 are landed; the modular USB stack — bus driver → user-space HCD owning
+- **U7 — composite (multi-interface) devices `[x]` (DONE; live path
+  metal-only).** One physical USB device may carry several functions — the
+  motivating hardware is a wireless keyboard+mouse receiver whose single
+  configuration holds a boot-keyboard interface *and* a boot-mouse
+  interface. Before this, `InterfaceInfo` decoded only the first interface
+  (the second function was structurally invisible), the 64-byte
+  configuration read truncated a two/three-interface configuration
+  mid-descriptor, and one device-table entry existed per device — on metal
+  the receiver's attach faulted (`hub status-change service failed
+  err_hex=a`) and booting with it connected cost the keyboard its service.
+  The engine now realises §1.1's "one node per interface" for composite
+  devices:
+  - `InterfaceInfo::decode_all` decodes **every** default-alternate
+    interface (bounded by `MAX_INTERFACES`, alternate settings skipped, a
+    malformed HID interface with no interrupt-IN endpoint dropped so a
+    well-formed sibling is still served); the control-data buffer
+    (`CTRL_DATA_LEN`, 512 B) holds a composite device's whole configuration
+    in one read.
+  - `finish_enumeration` plans one device-table entry per servable
+    interface: the primary at the caller's index (it owns the slot's parked
+    EP0 cursor via `active_device`), each sibling at its own free index and
+    ring region while **sharing the device's slot and EP0**. Every
+    Configure Endpoint carries Context Entries covering the highest served
+    DCI, `SET_CONFIGURATION` runs once, and `SET_PROTOCOL(boot)` runs per
+    HID interface. A sibling's control transfers route through the slot's
+    EP0 owner (`ep0_owner_index`); the (slot, DCI) event demux and the
+    per-index report/bulk paths are unchanged.
+  - `detach_device` frees **every** entry sharing the vanished device's
+    slot, so one physical unplug retracts all of its interfaces; the HCD
+    reconciles all published nodes against the live table
+    (`reconcile_interfaces`) after any hub event, fault detach, or
+    reset/re-enumeration instead of touching a single index.
+  - Host regressions (the mock gained a composite fixture whose 75-byte
+    configuration exceeds the old 64-byte read plus an alternate-setting
+    decoy, and a `composite_downstream_port` knob capturing the same slot's
+    second interrupt endpoint):
+    `interface_info_decodes_every_interface_of_a_composite_device`,
+    `interface_info_drops_a_malformed_hid_interface_but_serves_its_sibling`,
+    `interface_info_bounds_the_decoded_interface_set`,
+    `bring_up_serves_both_interfaces_of_a_composite_receiver`,
+    `unplugging_a_composite_receiver_frees_both_interfaces_and_a_replug_reserves_them`,
+    `a_composite_receiver_beside_the_keyboard_costs_it_nothing`.
+
+- **U8 — EP0 max-packet discovery + exact-length descriptor reads `[x]`
+  (DONE; live path metal-only).** Enumeration assumed the speed's
+  worst-case EP0 max packet (full speed → 64) for every EP0 transfer, but
+  a full-speed device may legally use 8/16/32 — the real wireless
+  receiver reports `bMaxPacketSize0` = 8, so its 18-byte device-descriptor
+  read terminated short at the first 8-byte packet and the attach faulted
+  (`hub status-change service failed err_hex=a` at hot-plug; at boot the
+  failed walk left no device served). The engine now performs the
+  standard fix-up every production stack does:
+  - `finish_enumeration` first reads the 8-byte descriptor prefix (one
+    packet at the smallest legal EP0 size, so it completes at any real
+    size), validates `bMaxPacketSize0` against the speed
+    (`ep0_max_packet_from_descriptor`: low 8, full 8/16/32/64, high 64,
+    SuperSpeed exponent 9; anything else `BadMagic`, fail-closed), and
+    issues an **Evaluate Context** (`TrbType::EvaluateContext`, A1-only
+    input context, xHCI §4.6.7) whenever the honest size differs from the
+    Address Device assumption — only then the full 18-byte read.
+  - The configuration descriptor is read at its exact advertised length:
+    a 9-byte header read for `wTotalLength`, then precisely that many
+    bytes (clamped to `CTRL_DATA_LEN`) — never an over-long request a
+    buggy device might mishandle.
+  - The mock models the physics (per-slot programmed EP0 max captured at
+    Address Device / Evaluate Context; a mismatched descriptor read
+    delivers one device-sized packet), the composite fixture is a
+    full-speed device with `bMaxPacketSize0` = 8 like the real receiver,
+    and regressions pin the behaviour:
+    `bring_up_serves_both_interfaces_of_a_composite_receiver` /
+    `a_composite_receiver_beside_the_keyboard_costs_it_nothing` (exactly
+    one Evaluate Context for the receiver, none for the 64-byte keyboard),
+    `a_forged_ep0_max_packet_fails_closed_without_costing_the_keyboard`,
+    `ep0_max_packet_validation_follows_the_speed_rules`.
+
+U1–U8 are landed; the modular USB stack — bus driver → user-space HCD owning
 one controller and serving the URB transport → per-interface class drivers
 (keyboard, mouse, mass storage), with event-driven hub hot-plug, fresh
-re-enumeration, and per-port failure isolation — is complete and
-host-/CI-proven. The live attach/detach/re-attach behaviour is metal-only and
-is the operator's acceptance step (QEMU models no Pi USB, §0.4).
+re-enumeration, per-port failure isolation, composite (multi-interface)
+devices served one node per interface, and EP0 max-packet discovery for
+full-speed devices — is complete and host-/CI-proven. The
+live attach/detach/re-attach behaviour is metal-only and is the operator's
+acceptance step (QEMU models no Pi USB, §0.4).
 
 ---
 

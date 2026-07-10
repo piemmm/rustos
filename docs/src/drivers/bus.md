@@ -443,12 +443,22 @@ the rings' Link TRBs, and starts the controller through `Xhci::start`.
 port to the configured state (§4.3): port reset when the port is not
 yet enabled, Enable Slot (validating the returned slot ID), Address
 Device (input control context `A0 | A1`, slot context, EP0 context
-with the speed-derived max packet size), `GET_DESCRIPTOR(device)`
-(decoded fail-closed — a forged length, type, or zero-configuration
-descriptor is `BadMagic`), `GET_DESCRIPTOR(configuration)` (the first
-interface descriptor's class triple and `bConfigurationValue` /
-`bInterfaceNumber` drive the steps below — never assumed), and
-`SET_CONFIGURATION`.
+with the speed-derived **worst-case** max packet size), an 8-byte
+`GET_DESCRIPTOR(device)` prefix read ending at `bMaxPacketSize0` —
+one packet at the smallest legal EP0 size, so it completes whatever
+size the device really uses — whose validated value (low speed 8,
+full speed 8/16/32/64, high speed 64, SuperSpeed exponent 9; anything
+else is `BadMagic`) drives an **Evaluate Context** (§4.6.7) whenever
+it differs from the assumed size (a full-speed wireless receiver's
+8-byte EP0 otherwise terminates every longer EP0 IN read short at its
+first packet — the metal `DeviceFault`), then the full 18-byte
+`GET_DESCRIPTOR(device)` (decoded fail-closed — a forged length, type,
+or zero-configuration descriptor is `BadMagic`),
+`GET_DESCRIPTOR(configuration)` in two steps (the 9-byte header for
+`wTotalLength`, then exactly that many bytes — never an over-long
+request a buggy device might mishandle; the interface descriptors'
+class triples and `bConfigurationValue` / `bInterfaceNumber` drive the
+steps below — never assumed), and `SET_CONFIGURATION`.
 
 The interrupt-IN endpoint is configured (Configure Endpoint) and
 `SET_PROTOCOL(boot)` is issued **only for a HID interface**. It is not
@@ -514,11 +524,12 @@ with zero events — the metal symptom where the addressed keyboard never
 typed. A control endpoint (Interval `0`) leaves the field reserved-zero.
 
 The interrupt-IN endpoint itself is **read from the configuration
-descriptor, never assumed** (`InterfaceInfo::decode`). The driver walks
-past the matched interface descriptor to its first interrupt-IN endpoint
-and takes its Device Context Index (`2 × endpoint_number + 1`),
-`wMaxPacketSize`, and `bInterval`; `finish_enumeration` then configures
-*that* DCI, and `next_report` doorbells and drains it for each waiting URB.
+descriptor, never assumed** (`InterfaceInfo::decode_all`). The driver
+walks past each default-alternate interface descriptor to its first
+interrupt-IN endpoint and takes its Device Context Index
+(`2 × endpoint_number + 1`), `wMaxPacketSize`, and `bInterval`;
+`finish_enumeration` then configures *that* DCI per served interface, and
+`next_report` doorbells and drains it for each waiting URB.
 `interrupt_interval` encodes the endpoint-context Interval from the
 descriptor's `bInterval` and the device speed (high/SuperSpeed
 `bInterval − 1`; full/low-speed frames → the `fls(bInterval × 8) − 1`
@@ -937,13 +948,19 @@ The USB host driver does the same one level down, for the HID device it
 enumerates behind the controller (`plans/PI.md` Stage 4.HW item 5b-ii).
 A USB device's class lives on its *interface*, not its device
 descriptor (whose `bDeviceClass` is `0` for an HID device), so
-`UsbDevice::enumerate_hid` reads the configuration descriptor during
-bring-up and parses its first interface descriptor
-(`InterfaceInfo::decode`, walking the concatenated descriptors by each
-`bLength`, fail-closed on a truncated, mistyped, or interface-less
-reply). The discovered `bConfigurationValue` and `bInterfaceNumber`
-drive `SET_CONFIGURATION` and the HID `SET_PROTOCOL(boot)` — neither is
-assumed to be `1` / `0` any more — and the 24-bit interface class
+`UsbDevice::enumerate_hid` reads the configuration descriptor at its
+exact advertised `wTotalLength` during bring-up (a 9-byte header read
+first, then precisely that many bytes) and parses **every**
+default-alternate interface descriptor (`InterfaceInfo::decode_all`,
+walking the concatenated descriptors by each `bLength`, fail-closed on
+a truncated, mistyped, or
+interface-less reply). A composite device — a wireless keyboard+mouse
+receiver carrying a boot-keyboard *and* a boot-mouse interface — gets one
+device-table entry and one emitted node **per served interface**, the
+siblings sharing the device's slot and EP0. The discovered
+`bConfigurationValue` and each `bInterfaceNumber` drive
+`SET_CONFIGURATION` and the per-interface HID `SET_PROTOCOL(boot)` —
+neither is assumed to be `1` / `0` any more — and the 24-bit interface class
 `(bInterfaceClass << 16) | (bInterfaceSubClass << 8) | bInterfaceProtocol`
 (an HID boot keyboard is `0x03_01_01`, a boot mouse `0x03_01_02`) is
 captured for emission. `UsbDevice::describe_device(parent_id, node_id)`

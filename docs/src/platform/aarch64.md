@@ -1289,7 +1289,8 @@ The boot path's only role is discovery and Device-typing the windows:
   binds that, reloads the controller firmware over the VideoCore mailbox,
   and emits the `usb,xhci` node; the `xhci` HCD binds that, maps the BAR,
   carves DMA, brings the controller up, enumerates every reachable device,
-  and emits one interface node per served device; each class driver
+  and emits one interface node per served interface (a composite
+  keyboard+mouse receiver publishes two); each class driver
   (`usb_kbd` for the boot keyboard, `usb_msd` for a storage stick) binds its
   interface node and drives its device over the URB transport — the
   keyboard pumping decoded key edges into the input-focus arbiter through
@@ -1420,14 +1421,16 @@ keyboard whose interrupt-IN endpoint is not endpoint 1 then has its
 Configure Endpoint, doorbell, and `next_report` all aimed at the wrong
 DCI, so the controller schedules the real endpoint never — Address
 Device and Configure Endpoint succeed (hence `4128`, the hub marked, a
-non-zero Max ESIT Payload), yet no report flows. `InterfaceInfo::decode`
-now walks past the matched interface to its first interrupt-IN endpoint
-and captures its DCI (`2 × endpoint_number + 1`), `wMaxPacketSize`, and
-`bInterval`; `finish_enumeration` configures/doorbells/drains that DCI
-(stored as `UsbDevice::int_dci`), and `interrupt_interval` derives the
+non-zero Max ESIT Payload), yet no report flows. `InterfaceInfo::decode_all`
+now walks past each default-alternate interface to its first interrupt-IN
+endpoint and captures its DCI (`2 × endpoint_number + 1`),
+`wMaxPacketSize`, and `bInterval`; `finish_enumeration`
+configures/doorbells/drains that DCI per served interface
+(each entry's `int_dci`), and `interrupt_interval` derives the
 endpoint-context Interval from `bInterval` and the device speed (xHCI
-Table 6-12) instead of a fixed exponent. A HID interface that reports no
-interrupt-IN endpoint fails closed (`BadMagic`, §2.9). Host-proven by
+Table 6-12) instead of a fixed exponent. A device whose only decodable
+interface is a HID interface with no interrupt-IN endpoint fails closed
+(`BadMagic`). Host-proven by
 `downstream_keyboard_is_serviced_on_its_descriptor_reported_endpoint` (a
 mock keyboard whose interrupt endpoint is endpoint 2 → DCI 5: the
 Configure Endpoint must name DCI 5 and the report drains on it — fails

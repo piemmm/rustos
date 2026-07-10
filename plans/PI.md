@@ -2986,9 +2986,9 @@ keyboard service kthread**:
     interrupt-IN endpoint is not endpoint 1 then has its Configure Endpoint,
     doorbell, and `next_report` all aimed at the wrong DCI, so the controller
     schedules the real endpoint never — Address Device + Configure Endpoint
-    succeed (hence `4128`), but no report flows. `InterfaceInfo::decode` now
-    walks past the matched interface to its first interrupt-IN endpoint and
-    captures its DCI (`2·endpoint_number + 1`), `wMaxPacketSize`, and
+    succeed (hence `4128`), but no report flows. `InterfaceInfo::decode_all`
+    now walks past each default-alternate interface to its first interrupt-IN
+    endpoint and captures its DCI (`2·endpoint_number + 1`), `wMaxPacketSize`, and
     `bInterval`; `finish_enumeration` configures/doorbells/drains that DCI
     (stored as `UsbDevice::int_dci`) and `interrupt_interval` derives the
     endpoint-context Interval from `bInterval` + speed (xHCI Table 6-12) rather
@@ -3157,8 +3157,8 @@ table, so a new board is match **data**, not new code. Sub-increments
   node matches `bus_usb::BIND_KEYS`. **5b-ii — done:** `bus_usb` emits the
   HID device under the VL805 keyed by its **interface** class
   (`0x030101`/`0x030102`). `UsbDevice::enumerate_hid` now reads the
-  configuration descriptor and parses its first interface descriptor
-  (`InterfaceInfo::decode`, fail-closed): the discovered `bConfigurationValue`
+  configuration descriptor and parses every default-alternate interface
+  descriptor (`InterfaceInfo::decode_all`, fail-closed): the discovered `bConfigurationValue`
   / `bInterfaceNumber` drive `SET_CONFIGURATION` / `SET_PROTOCOL(boot)` (no
   longer hard-coded `1` / `0`), the 24-bit interface class is captured (never
   fabricated, §18.5), and `UsbDevice::describe_device(parent, node)` returns an

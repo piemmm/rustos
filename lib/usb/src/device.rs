@@ -84,9 +84,22 @@ pub const REPORT_LEN: usize = 8;
 /// scalable capacity.
 const HUB_REPORT_LEN: usize = 8;
 
-/// Byte length of the control-transfer data buffer (holds the 18-byte
-/// device descriptor).
-const CTRL_DATA_LEN: usize = 64;
+/// Byte length of the control-transfer data buffer. Sized to hold a
+/// composite device's **whole** configuration descriptor in one read: a
+/// wireless keyboard+mouse receiver concatenates two or three interface
+/// descriptors with their HID and endpoint descriptors, which overflows a
+/// 64-byte read and would truncate the tail interfaces mid-descriptor. A
+/// validation bound on device-supplied data, not a scalable capacity: a
+/// configuration longer than this is served from its first
+/// [`CTRL_DATA_LEN`] bytes only.
+const CTRL_DATA_LEN: usize = 512;
+
+/// Interfaces decoded from one configuration descriptor: the servable
+/// working set of one device. A composite device (a wireless
+/// keyboard+mouse receiver) carries two or three interfaces; further
+/// interfaces are ignored rather than trusted. A validation bound on
+/// device-supplied data, not a scalable capacity.
+pub const MAX_INTERFACES: usize = 4;
 
 /// TRB slots in each bulk transfer ring (one link + [`BULK_SLOTS`] data
 /// slots). Sized so several bulk URBs can be outstanding per direction
@@ -390,19 +403,62 @@ impl Layout {
     }
 }
 
-/// Default-control-endpoint max packet size for a protocol speed ID
-/// (USB2 §5.5.3, USB3 §9.6.6).
+/// Default-control-endpoint max packet size *assumed* for a protocol
+/// speed ID before the device descriptor reports the real
+/// `bMaxPacketSize0` (USB2 §5.5.3, USB3 §9.6.6). Full speed's 64-byte
+/// worst case holds only for the one-packet prefix read
+/// ([`DEVICE_DESCRIPTOR_PREFIX_LEN`]); a full-speed device may legally
+/// use 8/16/32, so any longer transfer must wait for the Evaluate
+/// Context fix-up ([`ep0_max_packet_from_descriptor`]).
 const fn ep0_max_packet(speed: u8) -> Result<u32, DriverError> {
     match speed {
-        // Low speed.
-        2 => Ok(8),
-        // Full and high speed (full speed's worst case is used until
-        // the device descriptor reports otherwise; 64 is universally
-        // legal for the fixed-format requests this driver issues).
-        1 | 3 => Ok(64),
-        // SuperSpeed.
-        4 => Ok(512),
+        SPEED_LOW => Ok(8),
+        SPEED_FULL | SPEED_HIGH => Ok(64),
+        SPEED_SUPER => Ok(512),
         _ => Err(DriverError::DeviceFault),
+    }
+}
+
+/// Byte length of the device-descriptor prefix read before the default
+/// control endpoint's real max packet size is known: bytes 0..8 of the
+/// descriptor, ending at `bMaxPacketSize0` (USB 2.0 §9.6.1). Eight bytes
+/// is a single packet at the smallest legal EP0 size, so the read
+/// completes identically whatever size the device actually uses.
+const DEVICE_DESCRIPTOR_PREFIX_LEN: usize = 8;
+
+/// Validate a device descriptor's `bMaxPacketSize0` against the protocol
+/// speed and return the default control endpoint's max packet size in
+/// bytes: low speed fixes 8, full speed allows 8/16/32/64, high speed
+/// fixes 64 (USB 2.0 §5.5.3), and `SuperSpeed` encodes its fixed 512 as
+/// the exponent 9 (USB 3.2 §9.6.1).
+///
+/// # Errors
+///
+/// * [`DriverError::BadMagic`] for a value the speed does not permit —
+///   a forged or corrupt reply.
+/// * [`DriverError::DeviceFault`] for a speed ID this driver does not
+///   model.
+pub(crate) fn ep0_max_packet_from_descriptor(
+    speed: u8,
+    b_max_packet0: u8,
+) -> Result<u32, DriverError> {
+    let valid = match speed {
+        SPEED_LOW => b_max_packet0 == 8,
+        SPEED_FULL => matches!(b_max_packet0, 8 | 16 | 32 | 64),
+        SPEED_HIGH => b_max_packet0 == 64,
+        SPEED_SUPER => {
+            return if b_max_packet0 == 9 {
+                Ok(512)
+            } else {
+                Err(DriverError::BadMagic)
+            }
+        }
+        _ => return Err(DriverError::DeviceFault),
+    };
+    if valid {
+        Ok(u32::from(b_max_packet0))
+    } else {
+        Err(DriverError::BadMagic)
     }
 }
 
@@ -548,6 +604,13 @@ const SPEED_FULL: u8 = 1;
 /// xHCI protocol speed ID for a low-speed device (§7.2.1).
 const SPEED_LOW: u8 = 2;
 
+/// xHCI protocol speed ID for a high-speed device (§7.2.1): the speed of
+/// the Pi 4B's onboard hub.
+const SPEED_HIGH: u8 = 3;
+
+/// xHCI protocol speed ID for a `SuperSpeed` device (§7.2.1).
+const SPEED_SUPER: u8 = 4;
+
 /// The fields of the 18-byte USB device descriptor this driver uses
 /// (USB 2.0 §9.6.1), decoded fail-closed.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -675,17 +738,19 @@ pub const fn hub_port_speed(status: u16) -> u8 {
     }
 }
 
-/// The configuration- and first-interface-descriptor fields this driver
-/// needs (USB 2.0 §9.6.3 / §9.6.5), decoded fail-closed from the
-/// `GET_DESCRIPTOR(configuration)` bytes. The interface class is read from
-/// the device, never assumed, so the emitted hardware-tree child node
-/// carries the honest class.
+/// One interface's descriptor fields this driver needs (USB 2.0 §9.6.3 /
+/// §9.6.5), decoded fail-closed from the `GET_DESCRIPTOR(configuration)`
+/// bytes — one per default-alternate interface of the configuration
+/// ([`Self::decode_all`]), so a composite device's functions are each
+/// represented. The interface class is read from the device, never
+/// assumed, so each emitted hardware-tree child node carries the honest
+/// class.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct InterfaceInfo {
     /// `bConfigurationValue` to select with `SET_CONFIGURATION`.
     pub configuration_value: u8,
-    /// `bInterfaceNumber` of the matched interface (the target of the
-    /// HID `SET_PROTOCOL` class request).
+    /// `bInterfaceNumber` of this interface (the target of the HID
+    /// `SET_PROTOCOL` class request).
     pub interface_number: u8,
     /// The 24-bit USB interface class code
     /// `(bInterfaceClass << 16) | (bInterfaceSubClass << 8) | bInterfaceProtocol`
@@ -727,21 +792,31 @@ impl InterfaceInfo {
     const CONFIG_HEADER_LEN: usize = 9;
     const INTERFACE_LEN: usize = 9;
 
-    /// Decode the `GET_DESCRIPTOR(configuration)` bytes into the
-    /// configuration value, the **first** interface's number and class
-    /// triple, that interface's first interrupt-IN endpoint (DCI, max
-    /// packet size, `bInterval`), and its first bulk-IN and bulk-OUT
-    /// endpoints (DCI, max packet size — a mass-storage interface's data
-    /// pipes). Walks the concatenated descriptors by each `bLength` (every
-    /// endpoint is read, never assumed).
+    /// Decode the `GET_DESCRIPTOR(configuration)` bytes into **every**
+    /// default-alternate interface of the configuration (up to
+    /// [`MAX_INTERFACES`], filled from index `0`): each interface's number
+    /// and class triple, its first interrupt-IN endpoint (DCI, max packet
+    /// size, `bInterval`), and its first bulk-IN and bulk-OUT endpoints
+    /// (DCI, max packet size — a mass-storage interface's data pipes).
+    /// Walks the concatenated descriptors by each `bLength` (every endpoint
+    /// is read, never assumed). A composite device — a wireless
+    /// keyboard+mouse receiver carrying a boot-keyboard interface *and* a
+    /// boot-mouse interface on one device — therefore decodes into one
+    /// entry per interface, so each can be served and published separately.
+    ///
+    /// An interface descriptor with a non-zero `bAlternateSetting` is
+    /// skipped along with its endpoints (only the default setting is
+    /// selected, USB 2.0 §9.6.5), and a HID interface carrying no
+    /// interrupt-IN endpoint — malformed, there is nothing to poll for
+    /// reports (USB HID 1.11 §4.4) — is dropped so a well-formed sibling
+    /// interface is still served rather than the whole device rejected.
     ///
     /// # Errors
     ///
     /// [`DriverError::BadMagic`] for a non-configuration leading
     /// descriptor, a length running off the buffer or below its minimum,
-    /// no interface descriptor, or a HID interface with no interrupt-IN
-    /// endpoint — a forged or corrupt reply.
-    pub fn decode(buf: &[u8]) -> Result<Self, DriverError> {
+    /// or no decodable interface at all — a forged or corrupt reply.
+    pub fn decode_all(buf: &[u8]) -> Result<[Option<Self>; MAX_INTERFACES], DriverError> {
         if buf.len() < Self::CONFIG_HEADER_LEN
             || usize::from(buf[0]) < Self::CONFIG_HEADER_LEN
             || buf[1] != DESC_TYPE_CONFIGURATION
@@ -749,7 +824,12 @@ impl InterfaceInfo {
             return Err(DriverError::BadMagic);
         }
         let configuration_value = buf[5];
+        let mut out: [Option<Self>; MAX_INTERFACES] = [None; MAX_INTERFACES];
+        let mut count = 0usize;
         let mut offset = usize::from(buf[0]);
+        // The default-alternate interface whose endpoints are being
+        // collected; `None` before the first interface descriptor and
+        // inside a skipped alternate setting.
         let mut interface: Option<(u8, u32)> = None;
         let mut int_endpoint: Option<(u8, u16, u8)> = None;
         let mut bulk_in: Option<(u8, u16)> = None;
@@ -762,21 +842,29 @@ impl InterfaceInfo {
             }
             match buf[offset + 1] {
                 DESC_TYPE_INTERFACE => {
-                    // Only the first interface is matched; a second one
-                    // ends the search so its endpoints are never mistaken
-                    // for the matched interface's (USB 2.0 §9.4.3).
-                    if interface.is_some() {
-                        break;
-                    }
                     if length < Self::INTERFACE_LEN {
                         return Err(DriverError::BadMagic);
                     }
-                    interface = Some((
-                        buf[offset + 2],
-                        (u32::from(buf[offset + 5]) << 16)
-                            | (u32::from(buf[offset + 6]) << 8)
-                            | u32::from(buf[offset + 7]),
-                    ));
+                    Self::flush_interface(
+                        configuration_value,
+                        &mut interface,
+                        &mut int_endpoint,
+                        &mut bulk_in,
+                        &mut bulk_out,
+                        &mut out,
+                        &mut count,
+                    );
+                    // Only the default alternate setting is served; an
+                    // alternate setting's endpoints must never be mistaken
+                    // for the default's (USB 2.0 §9.6.5).
+                    if buf[offset + 3] == 0 {
+                        interface = Some((
+                            buf[offset + 2],
+                            (u32::from(buf[offset + 5]) << 16)
+                                | (u32::from(buf[offset + 6]) << 8)
+                                | u32::from(buf[offset + 7]),
+                        ));
+                    }
                 }
                 DESC_TYPE_ENDPOINT if interface.is_some() => {
                     if length < ENDPOINT_DESCRIPTOR_LEN {
@@ -806,20 +894,53 @@ impl InterfaceInfo {
             }
             offset = end;
         }
-        let (interface_number, class24) = interface.ok_or(DriverError::BadMagic)?;
+        Self::flush_interface(
+            configuration_value,
+            &mut interface,
+            &mut int_endpoint,
+            &mut bulk_in,
+            &mut bulk_out,
+            &mut out,
+            &mut count,
+        );
+        if out[0].is_none() {
+            return Err(DriverError::BadMagic);
+        }
+        Ok(out)
+    }
+
+    /// Complete the interface being collected by [`Self::decode_all`] into
+    /// the output set, clearing the collection state for the next one. A
+    /// HID interface with no interrupt-IN endpoint is dropped (malformed —
+    /// nothing to poll for reports), and an interface beyond the
+    /// [`MAX_INTERFACES`] bound is ignored rather than trusted.
+    fn flush_interface(
+        configuration_value: u8,
+        interface: &mut Option<(u8, u32)>,
+        int_endpoint: &mut Option<(u8, u16, u8)>,
+        bulk_in: &mut Option<(u8, u16)>,
+        bulk_out: &mut Option<(u8, u16)>,
+        out: &mut [Option<Self>; MAX_INTERFACES],
+        count: &mut usize,
+    ) {
+        let int = int_endpoint.take();
+        let b_in = bulk_in.take();
+        let b_out = bulk_out.take();
+        let Some((interface_number, class24)) = interface.take() else {
+            return;
+        };
         let is_hid = class24 >> 16 == INTERFACE_CLASS_HID;
-        // A HID interface without an interrupt-IN endpoint is a forged or
-        // corrupt reply: there is nothing to poll for reports (USB HID
-        // 1.11 §4.4). A non-HID interface (e.g. a hub)
-        // carries no endpoint this engine services.
-        let (int_dci, int_max_packet, int_b_interval) = match int_endpoint {
+        let (int_dci, int_max_packet, int_b_interval) = match int {
             Some(endpoint) => endpoint,
-            None if is_hid => return Err(DriverError::BadMagic),
+            None if is_hid => return,
             None => (DCI_CONTROL, 0, 0),
         };
-        let (bulk_in_dci, bulk_in_max_packet) = bulk_in.unwrap_or((0, 0));
-        let (bulk_out_dci, bulk_out_max_packet) = bulk_out.unwrap_or((0, 0));
-        Ok(Self {
+        if *count >= MAX_INTERFACES {
+            return;
+        }
+        let (bulk_in_dci, bulk_in_max_packet) = b_in.unwrap_or((0, 0));
+        let (bulk_out_dci, bulk_out_max_packet) = b_out.unwrap_or((0, 0));
+        out[*count] = Some(Self {
             configuration_value,
             interface_number,
             class24,
@@ -830,7 +951,17 @@ impl InterfaceInfo {
             bulk_in_max_packet,
             bulk_out_dci,
             bulk_out_max_packet,
-        })
+        });
+        *count += 1;
+    }
+
+    /// Whether this interface carries an endpoint this engine serves: a
+    /// HID interface with its interrupt-IN endpoint, or an interface with
+    /// the bulk endpoint pair. A served interface gets its own device-table
+    /// entry and its own published hardware-tree node.
+    #[must_use]
+    pub const fn is_servable(&self) -> bool {
+        (self.is_hid() && self.int_dci != DCI_CONTROL) || self.has_bulk_pair()
     }
 
     /// Whether the matched interface is a Human Interface Device (USB
@@ -892,6 +1023,16 @@ pub(crate) struct BulkComplete {
     /// this is delivered), [`DriverError::DeviceFault`] for a hard
     /// controller/device error on this TD.
     pub result: Result<u32, DriverError>,
+}
+
+/// The endpoint rings configured for one planned interface, held until
+/// the device-table entries are installed after the EP0 transfers of
+/// enumeration complete.
+struct ConfiguredRings {
+    /// The interrupt-IN transfer ring, for a HID interface.
+    int_ring: Option<ProducerRing>,
+    /// The bulk-IN/bulk-OUT ring pair, for a bulk interface.
+    bulk_rings: Option<(ProducerRing, ProducerRing)>,
 }
 
 /// Parked-completion capacity: every data slot of both bulk rings could
@@ -2060,6 +2201,146 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         Ok(())
     }
 
+    /// Re-evaluate the default control endpoint's Max Packet Size to the
+    /// device-reported `bMaxPacketSize0` (§4.6.7): Address Device assumed
+    /// the speed's worst case, and with an overstated context every EP0 IN
+    /// transfer longer than one device packet terminates short at the
+    /// first packet — the metal fault a full-speed wireless receiver with
+    /// an 8-byte EP0 hits on the 18-byte descriptor read. The input
+    /// context names only the EP0 context (A1); the controller evaluates
+    /// just its Max Packet Size field (§6.2.3.3), the ring fields carried
+    /// for well-formedness only.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::DeviceFault`] if the controller rejects the
+    ///   command.
+    fn evaluate_ep0_max_packet(&mut self, slot: u8, max_packet: u32) -> Result<(), DriverError> {
+        self.write_input_ctx(0, &input_control_dwords(0b10))?;
+        self.write_input_ctx(
+            1 + usize::from(DCI_CONTROL),
+            &ep_ctx_dwords(
+                EP_TYPE_CONTROL,
+                max_packet,
+                0,
+                self.phys_of(self.ep0_ring_off),
+            ),
+        )?;
+        self.command(Trb::new(
+            TrbType::EvaluateContext,
+            self.phys_of(self.layout.input_ctx),
+            0,
+            trb::control_slot(slot),
+        ))?;
+        Ok(())
+    }
+
+    /// Read and decode the 18-byte device descriptor in two steps (USB 2.0
+    /// §5.5.3): the Address Device EP0 context assumed the speed's
+    /// worst-case packet size, but a full-speed device may legally use
+    /// 8/16/32 — and with an overstated context, any EP0 IN transfer longer
+    /// than one device packet terminates short at the first packet. So one
+    /// worst-case-safe packet ending at `bMaxPacketSize0` is read first,
+    /// the context is re-evaluated to the honest size
+    /// ([`Self::evaluate_ep0_max_packet`]), and only then the full
+    /// descriptor.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::BadMagic`] for a forged descriptor prefix or a
+    ///   `bMaxPacketSize0` the speed does not permit.
+    /// * [`DriverError::DeviceFault`] for any controller/device failure.
+    fn read_device_descriptor(
+        &mut self,
+        slot: u8,
+        base: SlotCtxBase,
+    ) -> Result<DeviceDescriptor, DriverError> {
+        self.stage = EnumStage::GetDeviceDescriptor;
+        let prefix_len = u32::try_from(DEVICE_DESCRIPTOR_PREFIX_LEN)
+            .map_err(|_| DriverError::LengthOutOfRange)?;
+        let prefix_len_u16 = u16::try_from(DEVICE_DESCRIPTOR_PREFIX_LEN)
+            .map_err(|_| DriverError::LengthOutOfRange)?;
+        let transferred = self.control(setup_get_device_descriptor(prefix_len_u16), prefix_len)?;
+        if transferred != prefix_len {
+            return Err(DriverError::DeviceFault);
+        }
+        let mut prefix = [0u8; DEVICE_DESCRIPTOR_PREFIX_LEN];
+        self.dma.read(self.layout.ctrl_data, &mut prefix)?;
+        if usize::from(prefix[0]) < DeviceDescriptor::LEN || prefix[1] != 0x01 {
+            return Err(DriverError::BadMagic);
+        }
+        let ep0_max = ep0_max_packet_from_descriptor(base.speed, prefix[7])?;
+        if ep0_max != ep0_max_packet(base.speed)? {
+            self.evaluate_ep0_max_packet(slot, ep0_max)?;
+        }
+
+        let descriptor_len =
+            u32::try_from(DeviceDescriptor::LEN).map_err(|_| DriverError::LengthOutOfRange)?;
+        let descriptor_len_u16 =
+            u16::try_from(DeviceDescriptor::LEN).map_err(|_| DriverError::LengthOutOfRange)?;
+        let transferred = self.control(
+            setup_get_device_descriptor(descriptor_len_u16),
+            descriptor_len,
+        )?;
+        if transferred != descriptor_len {
+            return Err(DriverError::DeviceFault);
+        }
+        let mut bytes = [0u8; DeviceDescriptor::LEN];
+        self.dma.read(self.layout.ctrl_data, &mut bytes)?;
+        DeviceDescriptor::decode(&bytes)
+    }
+
+    /// Read the configuration descriptor at its exact advertised length
+    /// into `config_bytes`, returning the byte count to decode: the 9-byte
+    /// header first for `wTotalLength`, then precisely that many bytes
+    /// (clamped to [`CTRL_DATA_LEN`] — a validation bound on
+    /// device-supplied data, not a scalable capacity). Asking for more
+    /// than the device holds relies on it short-packeting the reply —
+    /// conforming devices do, but real receivers have been caught
+    /// mishandling an over-long request, so only bytes the device
+    /// advertised are ever requested.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::BadMagic`] for a non-configuration header or an
+    ///   impossible `wTotalLength`.
+    /// * [`DriverError::DeviceFault`] for any controller/device failure.
+    fn read_configuration(
+        &mut self,
+        config_bytes: &mut [u8; CTRL_DATA_LEN],
+    ) -> Result<usize, DriverError> {
+        self.stage = EnumStage::GetConfigDescriptor;
+        let header_len = u32::try_from(InterfaceInfo::CONFIG_HEADER_LEN)
+            .map_err(|_| DriverError::LengthOutOfRange)?;
+        let header_len_u16 = u16::try_from(InterfaceInfo::CONFIG_HEADER_LEN)
+            .map_err(|_| DriverError::LengthOutOfRange)?;
+        let transferred = self.control(
+            setup_get_configuration_descriptor(header_len_u16),
+            header_len,
+        )?;
+        if transferred != header_len {
+            return Err(DriverError::DeviceFault);
+        }
+        let mut header = [0u8; InterfaceInfo::CONFIG_HEADER_LEN];
+        self.dma.read(self.layout.ctrl_data, &mut header)?;
+        if header[1] != DESC_TYPE_CONFIGURATION {
+            return Err(DriverError::BadMagic);
+        }
+        let total = usize::from(u16::from_le_bytes([header[2], header[3]]));
+        if total < InterfaceInfo::CONFIG_HEADER_LEN {
+            return Err(DriverError::BadMagic);
+        }
+        let total = usize::min(total, CTRL_DATA_LEN);
+        let total_u16 = u16::try_from(total).map_err(|_| DriverError::LengthOutOfRange)?;
+        let total_u32 = u32::try_from(total).map_err(|_| DriverError::LengthOutOfRange)?;
+        let transferred = self.control(setup_get_configuration_descriptor(total_u16), total_u32)?;
+        if transferred != total_u32 {
+            return Err(DriverError::DeviceFault);
+        }
+        self.dma.read(self.layout.ctrl_data, config_bytes)?;
+        Ok(total)
+    }
+
     /// Bring the device on root-hub `port` to the configured state:
     /// port reset (when not yet enabled), Enable Slot, Address Device,
     /// `GET_DESCRIPTOR(device)`/`(configuration)`, and `SET_CONFIGURATION`.
@@ -2113,9 +2394,9 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
 
     /// Complete enumeration of the device already Enable-Slotted into
     /// `slot` and Address-Deviced with topology `base`: read its device
-    /// and configuration descriptors and, for a HID interface, configure
-    /// the interrupt-IN endpoint, `SET_CONFIGURATION`, and best-effort
-    /// `SET_PROTOCOL(boot)`.
+    /// and configuration descriptors and, for each servable interface,
+    /// configure its endpoints, then `SET_CONFIGURATION` and a best-effort
+    /// `SET_PROTOCOL(boot)` per HID interface.
     ///
     /// Shared by the root-hub ([`Self::enumerate_hid`]) and downstream
     /// ([`Self::attach_downstream_device`]) paths so the post-Address
@@ -2123,12 +2404,15 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     /// in `base`. The interrupt-IN endpoint is armed only for a HID
     /// interface (see [`Self::enumerate_hid`]).
     ///
-    /// A served interface (HID or bulk) creates the device-table entry at
+    /// The first served interface creates the device-table entry at
     /// `index` — its endpoint rings live in that index's layout region —
-    /// and leaves it the active control context; `hub_port` records the hub
-    /// downstream port it hangs off (`0` for a root-attached device). A
-    /// hub, or an interface this engine serves no transfer type for,
-    /// creates no entry.
+    /// and leaves it the active control context. Each **further** served
+    /// interface of a composite device (a wireless keyboard+mouse receiver)
+    /// takes its own free table index and ring region while sharing the
+    /// device's slot and EP0, so each function is served — and published —
+    /// separately. `hub_port` records the hub downstream port the device
+    /// hangs off (`0` for a root-attached device). A hub, or an interface
+    /// this engine serves no transfer type for, creates no entry.
     ///
     /// # Errors
     ///
@@ -2141,134 +2425,230 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         index: usize,
         hub_port: u8,
     ) -> Result<DeviceDescriptor, DriverError> {
-        self.stage = EnumStage::GetDeviceDescriptor;
-        let descriptor_len =
-            u32::try_from(DeviceDescriptor::LEN).map_err(|_| DriverError::LengthOutOfRange)?;
-        let transferred = self.control(setup_get_device_descriptor(0x12), descriptor_len)?;
-        if transferred != descriptor_len {
-            return Err(DriverError::DeviceFault);
-        }
-        let mut bytes = [0u8; DeviceDescriptor::LEN];
-        self.dma.read(self.layout.ctrl_data, &mut bytes)?;
-        let descriptor = DeviceDescriptor::decode(&bytes)?;
-
-        // Read the configuration descriptor to discover the interface's
-        // class and number rather than assuming. The whole buffer is
-        // requested; the device short-packets at the real length.
-        let config_buf_len =
-            u32::try_from(CTRL_DATA_LEN).map_err(|_| DriverError::LengthOutOfRange)?;
-        let config_len_u16 =
-            u16::try_from(CTRL_DATA_LEN).map_err(|_| DriverError::LengthOutOfRange)?;
-        self.stage = EnumStage::GetConfigDescriptor;
-        let transferred = self.control(
-            setup_get_configuration_descriptor(config_len_u16),
-            config_buf_len,
-        )?;
-        let transferred = usize::min(
-            usize::try_from(transferred).map_err(|_| DriverError::DeviceFault)?,
-            CTRL_DATA_LEN,
-        );
+        let descriptor = self.read_device_descriptor(slot, base)?;
         let mut config_bytes = [0u8; CTRL_DATA_LEN];
-        self.dma.read(self.layout.ctrl_data, &mut config_bytes)?;
-        let interface = InterfaceInfo::decode(&config_bytes[..transferred])?;
+        let total = self.read_configuration(&mut config_bytes)?;
+        let interfaces = InterfaceInfo::decode_all(&config_bytes[..total])?;
+        let first = interfaces[0].ok_or(DriverError::BadMagic)?;
 
         // A hub's interrupt-IN status-change endpoint is captured (not armed
         // here) so the downstream-walk can configure and watch it once the
         // hub slot is marked a hub; arming it inline would interleave async
         // status reports with the EP0 hub-class transfers that follow.
-        if descriptor.is_hub() && interface.int_dci != DCI_CONTROL {
+        if descriptor.is_hub() && first.int_dci != DCI_CONTROL {
             self.hub_int_endpoint = Some((
-                interface.int_dci,
-                u32::from(interface.int_max_packet),
-                interrupt_interval(base.speed, interface.int_b_interval),
+                first.int_dci,
+                u32::from(first.int_max_packet),
+                interrupt_interval(base.speed, first.int_b_interval),
             ));
         }
 
-        let region = *self
-            .layout
-            .device_regions
-            .get(index)
-            .ok_or(DriverError::OutOfRange)?;
         if self.devices.get(index).map_or(true, Option::is_some) {
             // The entry must be free: overwriting a live device would leak
             // its slot and rings.
             return Err(DriverError::Busy);
         }
 
-        // Arm the interrupt-IN endpoint only for a HID interface; a hub
-        // uses only its control endpoint (arming a hub's status-change
-        // endpoint wedges its EP0 ring — see `enumerate_hid`).
-        let mut int_ring = None;
-        let mut int_dci = DCI_CONTROL;
-        let mut bulk_rings = None;
-        if interface.is_hid() {
-            // Build the device's interrupt-IN ring in its own region,
-            // zeroing first: a region reused after a detach must start from
-            // a clean producer state (stale TRBs at the producer cycle would
-            // be consumed past the new enqueue pointer).
-            let zeros = [0u8; trb::TRB_LEN];
-            for ring_slot in 0..RING_TRBS {
-                self.dma
-                    .write(region.int_ring + ring_slot * trb::TRB_LEN, &zeros)?;
-            }
-            let ring_base = self.phys_of(region.int_ring);
-            let (ring, link) = ProducerRing::new(RING_TRBS, ring_base)?;
-            self.dma.write(
-                region.int_ring + ring.link_slot() * trb::TRB_LEN,
-                &link.to_bytes(),
-            )?;
-            // Configure the interrupt-IN endpoint the descriptor reports
-            // (DCI, max packet size, service interval — never assumed),
-            // raising the slot's context entries to cover that DCI.
-            int_dci = interface.int_dci;
-            let max_packet = u32::from(interface.int_max_packet);
-            let interval = interrupt_interval(base.speed, interface.int_b_interval);
-            self.write_input_ctx(0, &input_control_dwords(1 | (1u32 << u32::from(int_dci))))?;
-            self.write_input_ctx(1, &slot_ctx_dwords(base, u32::from(int_dci)))?;
-            self.write_input_ctx(
-                1 + usize::from(int_dci),
-                &ep_ctx_dwords(EP_TYPE_INTERRUPT_IN, max_packet, interval, ring_base),
-            )?;
-            self.stage = EnumStage::ConfigureEndpoint;
-            self.command(Trb::new(
-                TrbType::ConfigureEndpoint,
-                self.phys_of(self.layout.input_ctx),
-                0,
-                trb::control_slot(slot),
-            ))?;
-            int_ring = Some(ring);
-        } else if interface.has_bulk_pair() {
-            // A non-HID interface carrying the bulk endpoint pair (e.g. a
-            // mass-storage Bulk-Only Transport interface) gets both bulk
-            // endpoints configured; its transfers are then served over the
-            // bulk URB path.
-            bulk_rings = Some(self.configure_bulk_endpoints(slot, base, &interface, region)?);
+        let plan = self.plan_interfaces(index, &interfaces);
+
+        // Every Configure Endpoint rewrites the slot context, so its
+        // Context Entries field must cover the highest DCI any served
+        // sibling interface uses — a later sibling's command must never
+        // shrink an already-configured endpoint out of scope (xHCI §6.2.2).
+        let mut max_dci = DCI_CONTROL;
+        for (_, iface) in plan.iter().flatten() {
+            max_dci = max_dci
+                .max(iface.int_dci)
+                .max(iface.bulk_in_dci)
+                .max(iface.bulk_out_dci);
+        }
+
+        let mut rings: [Option<ConfiguredRings>; MAX_INTERFACES] = [const { None }; MAX_INTERFACES];
+        for (entry, rings_slot) in plan.iter().zip(rings.iter_mut()) {
+            let Some((target, iface)) = entry else {
+                continue;
+            };
+            *rings_slot = Some(self.configure_interface(slot, base, *target, iface, max_dci)?);
         }
 
         self.stage = EnumStage::SetConfiguration;
-        self.control(setup_set_configuration(interface.configuration_value), 0)?;
+        self.control(setup_set_configuration(first.configuration_value), 0)?;
 
-        if interface.is_hid() {
-            // `SET_PROTOCOL(boot)`, the last EP0 transfer; a device that
-            // does not implement it STALLs, which is tolerated.
-            self.stage = EnumStage::SetProtocol;
-            self.control_optional(setup_set_protocol_boot(interface.interface_number))?;
+        for (_, iface) in plan.iter().flatten() {
+            if iface.is_hid() {
+                // `SET_PROTOCOL(boot)` per HID interface; a device that
+                // does not implement it STALLs, which is tolerated.
+                self.stage = EnumStage::SetProtocol;
+                self.control_optional(setup_set_protocol_boot(iface.interface_number))?;
+            }
         }
-        if interface.is_hid() || interface.has_bulk_pair() {
+
+        let mut installed = false;
+        for (entry, rings_slot) in plan.iter().zip(rings.iter_mut()) {
+            let (Some((target, iface)), Some(configured)) = (entry, rings_slot.take()) else {
+                continue;
+            };
+            let region = *self
+                .layout
+                .device_regions
+                .get(*target)
+                .ok_or(DriverError::OutOfRange)?;
+            let int_dci = if iface.is_hid() {
+                iface.int_dci
+            } else {
+                DCI_CONTROL
+            };
             self.install_device_entry(
-                index, slot, hub_port, region, descriptor, &interface, int_dci, int_ring,
-                bulk_rings,
+                *target,
+                slot,
+                hub_port,
+                region,
+                descriptor,
+                iface,
+                int_dci,
+                configured.int_ring,
+                configured.bulk_rings,
             );
+            installed = true;
+        }
+        if installed {
+            // The primary entry owns the slot's (currently active) EP0
+            // cursor; sibling entries share the slot and route their control
+            // transfers through it. A fresh device now owns its slot, so
+            // stop tolerating trailing events for previously-freed ones (any
+            // such completion has long since arrived in the detach→attach
+            // window).
+            self.active_device = Some(index);
+            self.freed_slots = [0; MAX_DEVICES];
         }
         self.stage = EnumStage::Configured;
         Ok(descriptor)
     }
 
-    /// Install the freshly enumerated, served device into the table at
-    /// `index`. The entry's EP0 ring is the active control-context cursor
-    /// right now, so it is recorded as active rather than parked; the caller
-    /// parks it (`restore_hub_active`) once the hub must be reactivated, and
-    /// a root-attached device simply stays active.
+    /// Plan which interfaces of the decoded set are served and at which
+    /// device-table index: the first servable one takes the caller's
+    /// `index`; each further one — a composite device's sibling function,
+    /// e.g. the mouse interface of a wireless keyboard+mouse receiver —
+    /// takes its own free table index (and that index's ring region),
+    /// sharing the device's slot and EP0. An interface beyond the table's
+    /// room is left unserved rather than displacing a live device. A hub,
+    /// or an interface this engine serves no transfer type for, is not
+    /// planned.
+    fn plan_interfaces(
+        &self,
+        index: usize,
+        interfaces: &[Option<InterfaceInfo>; MAX_INTERFACES],
+    ) -> [Option<(usize, InterfaceInfo)>; MAX_INTERFACES] {
+        let mut plan: [Option<(usize, InterfaceInfo)>; MAX_INTERFACES] = [None; MAX_INTERFACES];
+        let mut planned = 0usize;
+        let mut claimed = [false; MAX_DEVICES];
+        claimed[index] = true;
+        for iface in interfaces.iter().flatten() {
+            if !iface.is_servable() {
+                continue;
+            }
+            let target = if planned == 0 {
+                index
+            } else {
+                let free = self
+                    .devices
+                    .iter()
+                    .enumerate()
+                    .position(|(entry_index, entry)| entry.is_none() && !claimed[entry_index]);
+                let Some(free) = free else {
+                    break;
+                };
+                free
+            };
+            claimed[target] = true;
+            plan[planned] = Some((target, *iface));
+            planned += 1;
+        }
+        plan
+    }
+
+    /// Configure one planned interface's endpoints in its `target` index's
+    /// own ring region, returning the built rings. The interrupt-IN
+    /// endpoint is built and configured only for a HID interface; a hub
+    /// uses only its control endpoint (arming a hub's status-change
+    /// endpoint wedges its EP0 ring — see [`Self::enumerate_hid`]). Every
+    /// slot-context write carries `max_dci` as Context Entries so a
+    /// sibling's already-configured endpoint is never shrunk out of scope.
+    fn configure_interface(
+        &mut self,
+        slot: u8,
+        base: SlotCtxBase,
+        target: usize,
+        iface: &InterfaceInfo,
+        max_dci: u8,
+    ) -> Result<ConfiguredRings, DriverError> {
+        let region = *self
+            .layout
+            .device_regions
+            .get(target)
+            .ok_or(DriverError::OutOfRange)?;
+        if !iface.is_hid() {
+            // A non-HID interface carrying the bulk endpoint pair (e.g. a
+            // mass-storage Bulk-Only Transport interface) gets both bulk
+            // endpoints configured; its transfers are then served over the
+            // bulk URB path.
+            let pair = self.configure_bulk_endpoints(slot, base, iface, region, max_dci)?;
+            return Ok(ConfiguredRings {
+                int_ring: None,
+                bulk_rings: Some(pair),
+            });
+        }
+        // Build the interface's interrupt-IN ring in its own region,
+        // zeroing first: a region reused after a detach must start from a
+        // clean producer state (stale TRBs at the producer cycle would be
+        // consumed past the new enqueue pointer).
+        let zeros = [0u8; trb::TRB_LEN];
+        for ring_slot in 0..RING_TRBS {
+            self.dma
+                .write(region.int_ring + ring_slot * trb::TRB_LEN, &zeros)?;
+        }
+        let ring_base = self.phys_of(region.int_ring);
+        let (ring, link) = ProducerRing::new(RING_TRBS, ring_base)?;
+        self.dma.write(
+            region.int_ring + ring.link_slot() * trb::TRB_LEN,
+            &link.to_bytes(),
+        )?;
+        // Configure the interrupt-IN endpoint the descriptor reports
+        // (DCI, max packet size, service interval — never assumed).
+        let max_packet = u32::from(iface.int_max_packet);
+        let interval = interrupt_interval(base.speed, iface.int_b_interval);
+        self.write_input_ctx(
+            0,
+            &input_control_dwords(1 | (1u32 << u32::from(iface.int_dci))),
+        )?;
+        self.write_input_ctx(1, &slot_ctx_dwords(base, u32::from(max_dci)))?;
+        self.write_input_ctx(
+            1 + usize::from(iface.int_dci),
+            &ep_ctx_dwords(EP_TYPE_INTERRUPT_IN, max_packet, interval, ring_base),
+        )?;
+        self.stage = EnumStage::ConfigureEndpoint;
+        self.command(Trb::new(
+            TrbType::ConfigureEndpoint,
+            self.phys_of(self.layout.input_ctx),
+            0,
+            trb::control_slot(slot),
+        ))?;
+        Ok(ConfiguredRings {
+            int_ring: Some(ring),
+            bulk_rings: None,
+        })
+    }
+
+    /// Install one freshly enumerated, served interface into the table at
+    /// `index`. The device's EP0 ring is the active control-context cursor
+    /// right now, so the entry is recorded with `ep0_ring: None` (active,
+    /// not parked); the caller parks it into the *primary* entry
+    /// (`restore_hub_active` via `active_device`) once the hub must be
+    /// reactivated, and a root-attached device simply stays active. A
+    /// composite sibling entry shares the primary's slot, output context,
+    /// and EP0 offsets and never itself holds the parked ring — its control
+    /// transfers route through the slot's EP0 owner
+    /// ([`Self::ep0_owner_index`]).
     #[allow(clippy::too_many_arguments)] // The one construction site's facts.
     fn install_device_entry(
         &mut self,
@@ -2316,17 +2696,14 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             aborted_bulk: Fifo::new(),
             last_report_fault_code: 0,
         });
-        self.active_device = Some(index);
-        // A fresh device now owns its slot, so stop tolerating trailing
-        // events for previously-freed ones (any such completion has long
-        // since arrived in the detach→attach window).
-        self.freed_slots = [0; MAX_DEVICES];
     }
 
     /// Configure the enumerated interface's bulk-IN/OUT endpoint pair
     /// (§4.6.6) inside `region`: build both transfer rings, write the input
-    /// context adding both DCIs with Context Entries raised to cover them,
-    /// and issue one Configure Endpoint. The rings are returned — and go
+    /// context adding both DCIs with Context Entries raised to `max_dci`
+    /// (the highest DCI any of the device's served interfaces uses, so a
+    /// composite sibling's endpoint is never shrunk out of scope), and
+    /// issue one Configure Endpoint. The rings are returned — and go
     /// live in the caller's device-table entry — only after the controller
     /// accepts the command, so a refused configure leaves no half-armed
     /// bulk state.
@@ -2336,6 +2713,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         base: SlotCtxBase,
         interface: &InterfaceInfo,
         region: DeviceRegion,
+        max_dci: u8,
     ) -> Result<(ProducerRing, ProducerRing), DriverError> {
         let in_dci = interface.bulk_in_dci;
         let out_dci = interface.bulk_out_dci;
@@ -2362,7 +2740,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             &out_link.to_bytes(),
         )?;
 
-        let context_entries = u32::from(in_dci.max(out_dci));
+        let context_entries = u32::from(max_dci);
         let add_flags = 1 | (1u32 << u32::from(in_dci)) | (1u32 << u32::from(out_dci));
         self.write_input_ctx(0, &input_control_dwords(add_flags))?;
         self.write_input_ctx(1, &slot_ctx_dwords(base, context_entries))?;
@@ -2856,6 +3234,21 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         Ok(())
     }
 
+    /// Index of the device-table entry holding slot `slot`'s **parked** EP0
+    /// ring — the entry a control transfer for that slot is activated
+    /// through. A composite device's sibling entries share the slot but
+    /// never themselves hold the ring, so a sibling's control transfer
+    /// routes through this owner. `None` while the slot's ring is not
+    /// parked (the slot is already the active control context, or no entry
+    /// holds it).
+    fn ep0_owner_index(&self, slot: u8) -> Option<usize> {
+        self.devices.iter().position(|entry| {
+            entry
+                .as_ref()
+                .is_some_and(|device| device.slot == slot && device.ep0_ring.is_some())
+        })
+    }
+
     /// Make the served device at `index` the active control context again,
     /// reactivating the EP0 ring [`Self::restore_hub_active`] parked in its
     /// table entry, so a post-enumeration control transfer (a URB
@@ -2904,7 +3297,11 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         if self.slot == device_slot {
             return self.control(setup, data_in_len);
         }
-        self.activate_device_control(index)?;
+        // A composite sibling entry shares its slot's EP0 with the primary
+        // entry and never itself holds the parked ring; activate through
+        // whichever entry owns it.
+        let owner = self.ep0_owner_index(device_slot).unwrap_or(index);
+        self.activate_device_control(owner)?;
         let result = self.control(setup, data_in_len);
         let restored = self.restore_hub_active();
         let transferred = result?;
@@ -3188,11 +3585,12 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     }
 
     /// Tear down the served device at `index` after it has disconnected:
-    /// Disable its slot, clear its DCBAA entry, and drop its table entry
-    /// with all per-device state (so a re-attach is a brand-new
-    /// enumeration; the fresh attach rebuilds its rings in the region). The
-    /// hub stays addressed and watched, and every other served device is
-    /// untouched.
+    /// Disable its slot, clear its DCBAA entry, and drop its table entry —
+    /// **and every sibling entry sharing its slot**, since a composite
+    /// device's interfaces vanish together with the physical device — with
+    /// all per-device state (so a re-attach is a brand-new enumeration; the
+    /// fresh attach rebuilds its rings in the regions). The hub stays
+    /// addressed and watched, and every other served device is untouched.
     ///
     /// # Errors
     ///
@@ -3200,22 +3598,32 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     /// The Disable Slot command is best-effort and never fails the teardown
     /// (see [`Self::disable_slot_best_effort`]).
     fn detach_device(&mut self, index: usize) -> Result<(), DriverError> {
-        let Some(entry) = self.devices.get_mut(index) else {
+        let Some(slot) = self
+            .devices
+            .get(index)
+            .and_then(Option::as_ref)
+            .map(|device| device.slot)
+        else {
             return Ok(());
         };
-        let Some(device) = entry.take() else {
-            return Ok(());
-        };
-        if self.active_device == Some(index) {
-            // The vanished device is somehow the active control context (at
-            // rest the hub is); make the hub active again best-effort so
-            // the cursor never points at the freed slot. Its ring is
-            // dropped with the device, and the cursor index is cleared even
-            // when no hub ring was parked to restore.
-            let _ = self.restore_hub_active();
-            self.active_device = None;
+        for entry_index in 0..self.devices.len() {
+            let shares_slot = self.devices[entry_index]
+                .as_ref()
+                .is_some_and(|device| device.slot == slot);
+            if !shares_slot {
+                continue;
+            }
+            if self.active_device == Some(entry_index) {
+                // The vanished device is somehow the active control context
+                // (at rest the hub is); make the hub active again
+                // best-effort so the cursor never points at the freed slot.
+                // Its ring is dropped with the device, and the cursor index
+                // is cleared even when no hub ring was parked to restore.
+                let _ = self.restore_hub_active();
+                self.active_device = None;
+            }
+            self.devices[entry_index] = None;
         }
-        let slot = device.slot;
         if slot != 0 {
             self.disable_slot_best_effort(slot);
             self.dma.write(
