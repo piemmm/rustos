@@ -321,7 +321,12 @@ mod program {
         delay: &ClockDelay,
     ) {
         match device.next_hub_change(delay) {
-            Ok(HubEvent::Attached(_) | HubEvent::Detached(_)) => {
+            Ok(
+                HubEvent::Attached(_)
+                | HubEvent::Detached(_)
+                | HubEvent::HubAttached(_)
+                | HubEvent::HubDetached(_),
+            ) => {
                 reconcile_interfaces(device, transports);
             }
             Ok(HubEvent::None) => {}
@@ -888,10 +893,17 @@ mod program {
                                 );
                             }
                             Ok(false) => match device.next_hub_change(&delay) {
-                                Ok(HubEvent::Attached(_)) => {
+                                Ok(HubEvent::Attached(_) | HubEvent::HubAttached(_)) => {
+                                    // A fresh leaf device — or a fresh hub
+                                    // tier whose downstream devices were
+                                    // enumerated with it — is published by
+                                    // diffing every live index.
                                     reconcile_interfaces(&mut device, &mut transports);
                                 }
-                                Ok(HubEvent::Detached(_)) => {
+                                Ok(HubEvent::Detached(_) | HubEvent::HubDetached(_)) => {
+                                    // A vanished leaf device — or a vanished
+                                    // hub tier with everything behind it —
+                                    // is retracted by the same diff.
                                     reconcile_interfaces(&mut device, &mut transports);
                                     log(
                                         &LogSink,

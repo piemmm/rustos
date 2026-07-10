@@ -91,14 +91,18 @@ controller behaviour is a metal checklist (`plans/PI.md` §0.4).
 
 ## Limitations
 
-- One enumerated device per controller engine (`UsbDevice` drives a single HID
-  device's slot + interrupt-IN endpoint). Event-driven hot-plug — hub-downstream
-  connect/disconnect, directly-attached connect/disconnect, fresh
-  re-enumeration, and cold boot with no device attached — is built and
-  host-proven (`plans/USB.md` U5); live attach/detach/cold-boot acceptance is
+- Up to `rustos_usb::device::MAX_DEVICES` concurrently served devices per
+  controller engine, sharing that many device regions with the downstream
+  hubs' contexts. Event-driven hot-plug — hub-downstream connect/disconnect
+  on any tier, directly-attached connect/disconnect, fresh re-enumeration,
+  and cold boot with no device attached — is built and host-proven
+  (`plans/USB.md` U5/U9); live attach/detach/cold-boot acceptance is
   metal-only (QEMU models no Pi USB).
-- Only a single hub tier (the Pi 4's onboard hub) is descended and watched; a
-  hub behind a hub is out of scope (`plans/USB.md` §4).
+- Hubs are descended recursively (a hub plugged into a hub, up to the xHCI
+  route string's five tiers): each tier is installed, marked, and watched on
+  its own status-change endpoint, an unplugged hub cascades the teardown of
+  everything behind it, and a hot-plugged hub is descended in place
+  (`plans/USB.md` U9).
 
 ## Test surface
 

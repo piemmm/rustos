@@ -418,13 +418,13 @@ the live controller behaviour is host- and CI-proven first.
   metal acceptance is the operator's).** Both staged refinements are built in
   `lib/usb`, and the HCD services them:
   - **Hub-downstream hot-plug is event-driven, not polled.** The `UsbDevice`
-    engine, when it descends one tier through a hub, configures and **arms the
+    engine, when it descends through a hub, configures and **arms the
     hub's interrupt-IN status-change endpoint** (USB 2.0 §11.12.3) and keeps
     the hub addressed (the resting active control context) concurrently with
     the downstream device. The shared xHCI event ring is **demultiplexed per
-    endpoint** (`is_hub_async`/`is_kbd_async` + the `pending_kbd`/`pending_hub`
-    parking slots), so a status-change report and a keyboard report never
-    collide and a synchronous EP0/command wait never faults on an async
+    endpoint** (`hub_async_index`/`report_async_index` + the per-device and
+    per-hub parking slots), so a status-change report and a keyboard report
+    never collide and a synchronous EP0/command wait never faults on an async
     completion. `next_hub_change` reads the changed downstream port: a
     disconnect frees the device slot (Disable Slot) → `HubEvent::Detached`; a
     connect enumerates a **brand-new** device → `HubEvent::Attached`. No
@@ -833,9 +833,56 @@ the live controller behaviour is host- and CI-proven first.
     `a_forged_ep0_max_packet_fails_closed_without_costing_the_keyboard`,
     `ep0_max_packet_validation_follows_the_speed_rules`.
 
-U1–U8 are landed; the modular USB stack — bus driver → user-space HCD owning
+- **U9 — multi-tier hubs (a hub plugged into a hub) `[x]` (DONE; live path
+  metal-only).** The engine tracks every hub in a table
+  (`lib/usb::device::HubState`, up to `MAX_HUBS` concurrently addressed
+  hubs, `MAX_HUB_DEPTH` = 5 route-string tiers), not a single implicit
+  tier:
+  - **Topology is per hub, never assumed.** Each hub records its parent
+    hub + port, its Route String, depth, speed, and the TT coordinates its
+    slot context carries. A child extends its parent's route by one nibble
+    (`route_for_child`, fail-closed on port 0/>15 and on exceeding the five
+    tiers), and a full/low-speed child splits through the TT of the nearest
+    **high-speed** ancestor: the parent hub itself when high-speed, else
+    the coordinates the parent inherited (§6.2.2/§8.9).
+  - **A downstream device that enumerates as a hub is installed, marked,
+    and descended** (`install_hub` → `descend_hub`): its ports are powered
+    and scanned (per-port fail-soft, exactly like the bring-up walk — and
+    a tier whose descent fails is torn down whole, never left
+    half-installed), and its own interrupt-IN status-change endpoint is
+    configured and armed on its own layout region
+    (`Layout::hub_regions`). Its slot contexts stay on the device region it
+    was enumerated on, which it claims for its lifetime
+    (`HubState::device_region`, excluded from `free_device_index`).
+  - **Every tier is watched concurrently.** The event-ring demux routes
+    each status-change completion to its hub (`hub_async_index`, per-hub
+    parking slots); `next_hub_change` services whichever hub reported and
+    re-arms that hub's watch even on a failed service. Hub-class requests
+    target any hub through the generalised active-control-context
+    switching (`activate_hub_control`/`hub_control`; the resting context is
+    the root hub).
+  - **Unplugging a hub cascades.** The parent's port disconnect tears down
+    the hub and everything behind it — served devices and deeper hub tiers
+    recursively (`detach_hub`) — as `HubEvent::HubDetached`; a hot-plugged
+    hub is installed and descended in place as `HubEvent::HubAttached`.
+    The HCD reconciles its published interface nodes against the live
+    device table for both, so class drivers autoload/unload per device
+    exactly as for a leaf hot-plug.
+  - Host-proven over the register-level mock, which gained a **nested-hub
+    bank** (`with_nested_hub`: a high-speed hub on the root hub's port 3
+    with a full-speed keyboard on its port 2; per-EP0-slot routing of
+    hub-class requests, nested marking/status-endpoint capture, nested TT
+    validation at Address Device, `post_nested_hub_status_change`):
+    `bring_up_serves_a_keyboard_behind_a_nested_hub` (route string `0x23`
+    + nested TT + end-to-end report),
+    `hot_plug_on_a_nested_hubs_port_attaches_and_detaches_through_its_own_watch`,
+    `unplugging_a_nested_hub_cascades_and_a_replug_rebuilds_the_tier`,
+    `route_for_child_extends_one_nibble_per_tier_and_fails_closed`.
+
+U1–U9 are landed; the modular USB stack — bus driver → user-space HCD owning
 one controller and serving the URB transport → per-interface class drivers
-(keyboard, mouse, mass storage), with event-driven hub hot-plug, fresh
+(keyboard, mouse, mass storage), with event-driven hub hot-plug on every
+tier, recursive multi-tier hub descent with cascade teardown, fresh
 re-enumeration, per-port failure isolation, composite (multi-interface)
 devices served one node per interface, and EP0 max-packet discovery for
 full-speed devices — is complete and host-/CI-proven. The
@@ -846,13 +893,12 @@ acceptance step (QEMU models no Pi USB, §0.4).
 
 ## 4. Out of scope (explicitly)
 
-- Non-boot-protocol HID, **multi-tier** hubs (a hub behind a hub — only the
-  single onboard-hub tier the Pi 4 presents is descended and watched),
-  isochronous transfers, and bulk-storage class drivers — each is a later class
+- Non-boot-protocol HID and isochronous transfers — each is a later class
   driver or HCD extension on top of this seam, not part of bringing the split
-  up. (Single-tier hub *hot-plug* is in: U5 services the onboard hub's
-  status-change endpoint event-driven. Bulk transfers themselves have since
-  landed on this seam — `plans/DEVICES.md` D1 — and the mass-storage
+  up. (Hub *hot-plug* is in: U5 services each hub's status-change endpoint
+  event-driven, and U9 descends and watches **multi-tier** hubs — a hub
+  plugged into a hub — with cascade teardown. Bulk transfers themselves have
+  since landed on this seam — `plans/DEVICES.md` D1 — and the mass-storage
   class driver followed as DEVICES.md D2.)
 - A second host-controller driver (a non-xHCI controller): the architecture
   admits it (it binds a different controller node and serves the same URB ABI),

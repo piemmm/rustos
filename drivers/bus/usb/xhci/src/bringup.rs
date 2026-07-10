@@ -382,9 +382,10 @@ pub fn bring_up_controller_diagnostic(
         .map_err(|e| ControllerBringupError::bare(BringupPhase::ControllerStart, e))?;
 
     // Bring the controller up to serve every reachable device, transparently
-    // descending one tier through an onboard hub. The arch-neutral
-    // root→hub→downstream orchestration lives once in `rustos_usb`, so each
-    // device is discovered, never a guessed port. A device absent at boot is
+    // descending through hubs — including a hub plugged into a hub. The
+    // arch-neutral root→hub→downstream orchestration lives once in
+    // `rustos_usb`, so each device is discovered, never a guessed port. A
+    // device absent at boot is
     // **not** a failure: `bring_up` leaves the controller up with the
     // first-connect watch armed (the onboard hub's status-change endpoint, or
     // the root port), and the HCD publishes interface nodes only for the

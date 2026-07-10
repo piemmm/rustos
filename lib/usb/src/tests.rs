@@ -10,9 +10,9 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use super::device::{
-    hub_port_connected, hub_port_enabled, hub_port_speed, BulkDirection, DeviceDescriptor,
-    DmaRegion, EnumStage, HubEvent, InterfaceInfo, UsbDevice, BULK_BUF_LEN, BULK_SLOTS,
-    EVENT_RING_SEGMENT_MIN_TRBS, REPORT_LEN, RING_TRBS,
+    hub_port_connected, hub_port_enabled, hub_port_speed, route_for_child, AttachOutcome,
+    BulkDirection, DeviceDescriptor, DmaRegion, EnumStage, HubEvent, InterfaceInfo, UsbDevice,
+    BULK_BUF_LEN, BULK_SLOTS, EVENT_RING_SEGMENT_MIN_TRBS, MAX_HUB_DEPTH, REPORT_LEN, RING_TRBS,
 };
 use super::ring::{EventRingCursor, ProducerRing};
 use super::trb::{CompletionCode, Trb, TrbType, CONTROL_CYCLE, TRB_LEN};
@@ -610,6 +610,47 @@ struct MockXhci {
     int_slot: u8,
     /// As [`Self::int_slot`], for the bulk endpoint pair.
     bulk_slot: u8,
+    /// A downstream **root-hub** port carrying a nested hub — a hub plugged
+    /// into a hub (`0` = none). The addressed device on this port answers
+    /// with the hub fixtures, reporting [`Self::nested_hub_ports`]
+    /// downstream ports of its own; once addressed, its hub-class requests
+    /// are served from the nested bank below, keyed by
+    /// [`Self::nested_hub_slot`]. Its root-hub-port `wPortStatus` reads
+    /// connected (high-speed) while [`Self::nested_root_connected`], with
+    /// [`Self::nested_root_change`] as the port's latched changes.
+    nested_hub_downstream_port: u8,
+    /// The nested hub's downstream port count (its hub class descriptor's
+    /// `bNbrPorts`).
+    nested_hub_ports: u8,
+    /// The slot the nested hub was addressed on, captured at Address
+    /// Device (`0` = not yet addressed). Hub-class requests arriving on
+    /// this slot's EP0 are served from the nested bank.
+    nested_hub_slot: u8,
+    /// The full Route String of the most recent Address Device
+    /// ([`Self::downstream_route_port`] keeps only the low nibble, for the
+    /// single-tier assertions).
+    downstream_route: u32,
+    /// Whether the nested hub is physically present on its root-hub port.
+    nested_root_connected: bool,
+    /// The root-hub port's latched `wPortChange` for the nested hub's port
+    /// (the unplug/replug connect change).
+    nested_root_change: u16,
+    /// Bitmask of nested-hub downstream ports software has powered.
+    nested_powered: u32,
+    /// Bitmask of nested-hub downstream ports software has reset.
+    nested_reset: u32,
+    /// The nested hub's downstream port carrying a keyboard (`0` = none),
+    /// with that device's `wPortStatus` and latched `wPortChange`.
+    nested_downstream_port: u8,
+    nested_downstream_status: u16,
+    nested_downstream_change: u16,
+    /// Set once a hub-topology Configure Endpoint marked the **nested**
+    /// hub's slot (the root hub's marking is [`Self::hub_marked_as_hub`]).
+    nested_marked: bool,
+    /// The nested hub's interrupt-IN status-change endpoint, captured at
+    /// Configure Endpoint on the marked nested slot; a change is posted
+    /// with [`Self::post_nested_hub_status_change`].
+    nested_int: MockInt,
     /// The bulk-IN endpoint model, captured from the two-endpoint (bulk
     /// pair) Configure Endpoint.
     bulk_in: MockBulk,
@@ -777,6 +818,19 @@ impl MockXhci {
             pending_reports2: VecDeque::new(),
             int_slot: 0,
             bulk_slot: 0,
+            nested_hub_downstream_port: 0,
+            nested_hub_ports: 0,
+            nested_hub_slot: 0,
+            downstream_route: 0,
+            nested_root_connected: false,
+            nested_root_change: 0,
+            nested_powered: 0,
+            nested_reset: 0,
+            nested_downstream_port: 0,
+            nested_downstream_status: 0,
+            nested_downstream_change: 0,
+            nested_marked: false,
+            nested_int: MockInt::new(),
             bulk_in: MockBulk::new(),
             bulk_out: MockBulk::new(),
             bulk_in_responses: VecDeque::new(),
@@ -802,6 +856,23 @@ impl MockXhci {
         mock.hub_downstream_port = downstream;
         // Current Connect Status (bit 0) | High-Speed Device (bit 10).
         mock.hub_downstream_status = (1 << 0) | (1 << 10);
+        mock
+    }
+
+    /// As [`Self::with_hub`], but with a **nested hub** on the root hub's
+    /// downstream port 3: a high-speed hub reporting four downstream ports
+    /// of its own, with a full-speed keyboard on its downstream port 2 —
+    /// the hub-plugged-into-a-hub topology. The root hub carries no other
+    /// device.
+    fn with_nested_hub(mem: &SharedMem) -> Self {
+        let mut mock = Self::with_hub(mem, 4, 0);
+        mock.nested_hub_downstream_port = 3;
+        mock.nested_hub_ports = 4;
+        mock.nested_root_connected = true;
+        mock.nested_downstream_port = 2;
+        // Current Connect Status only: a full-speed keyboard, so its
+        // transactions split through the nested hub's TT.
+        mock.nested_downstream_status = 1 << 0;
         mock
     }
 
@@ -1219,28 +1290,56 @@ impl MockXhci {
         let tt_hub_slot = (slot_ctx[2] & 0xFF) as u8;
         let tt_port = ((slot_ctx[2] >> 8) & 0xFF) as u8;
         if route_string != 0 {
-            // A device downstream of the hub: validate the Route String
-            // and, for a full/low-speed device behind the high-speed hub,
-            // the transaction-translator coordinates the driver must
-            // program (xHCI §6.2.2 / §8.9). A wrong topology faults
-            // Address Device, so the host test proves the driver
-            // programmed them — the hub occupies slot 1.
+            // A device downstream of a hub: validate the Route String
+            // and, for a full/low-speed device, the transaction-translator
+            // coordinates the driver must program (xHCI §6.2.2 / §8.9). A
+            // wrong topology faults Address Device, so the host test proves
+            // the driver programmed them — the root hub occupies slot 1.
             let route_port = (route_string & 0xF) as u8;
-            let scripted = route_port == self.hub_downstream_port
-                || (self.msd_downstream_port != 0 && route_port == self.msd_downstream_port)
-                || (self.mouse_downstream_port != 0 && route_port == self.mouse_downstream_port)
-                || (self.composite_downstream_port != 0
-                    && route_port == self.composite_downstream_port);
+            let nested_route = u32::from(self.nested_hub_downstream_port);
+            let is_nested_hub =
+                self.nested_hub_downstream_port != 0 && route_string == nested_route;
+            let is_nested_child = self.nested_hub_downstream_port != 0
+                && self.nested_downstream_port != 0
+                && route_string == (nested_route | (u32::from(self.nested_downstream_port) << 4));
+            let single_tier = route_string <= 0xF && !is_nested_hub;
+            let scripted = is_nested_hub
+                || is_nested_child
+                || (single_tier
+                    && (route_port == self.hub_downstream_port
+                        || (self.msd_downstream_port != 0
+                            && route_port == self.msd_downstream_port)
+                        || (self.mouse_downstream_port != 0
+                            && route_port == self.mouse_downstream_port)
+                        || (self.composite_downstream_port != 0
+                            && route_port == self.composite_downstream_port)));
             if !scripted {
                 return CompletionCode::TrbError;
             }
             let needs_tt = speed == 1 || speed == 2;
-            let (want_hub, want_port) = if needs_tt { (1u8, route_port) } else { (0, 0) };
+            // A full/low-speed device splits through the transaction
+            // translator of the nearest **high-speed** hub above it: the
+            // nested hub for its own child, else the root hub (slot 1).
+            let (want_hub, want_port) = if needs_tt {
+                if is_nested_child {
+                    (self.nested_hub_slot, self.nested_downstream_port)
+                } else {
+                    (1u8, route_port)
+                }
+            } else {
+                (0, 0)
+            };
             if tt_hub_slot != want_hub || tt_port != want_port {
                 return CompletionCode::TrbError;
             }
+            if is_nested_hub {
+                self.nested_hub_slot = self.active_slot;
+            }
             self.downstream_active = true;
-            self.downstream_route_port = route_port;
+            self.downstream_route = route_string;
+            // The single-tier assertions read the low nibble; a nested
+            // route is identified by the full route string instead.
+            self.downstream_route_port = if single_tier { route_port } else { 0 };
         }
         // Save the previously-live slot's EP0 ring progress before this slot
         // becomes the live control context, so switching back to it (e.g. the
@@ -1355,7 +1454,7 @@ impl MockXhci {
                 return CompletionCode::TrbError;
             }
             let dci = endpoint_adds.trailing_zeros();
-            // An endpoint added to the slot already marked a hub is the hub's
+            // An endpoint added to a slot already marked a hub is that hub's
             // interrupt-IN status-change endpoint, recorded separately so it
             // does not clobber a downstream device's interrupt endpoint state.
             if self.hub_marked_as_hub && slot == self.hub_slot_id {
@@ -1364,6 +1463,15 @@ impl MockXhci {
                     self.ep_ctx_dequeue(input_ctx + (1 + u64::from(dci)) * MOCK_CTX_SIZE as u64);
                 self.hub_int_index = 0;
                 self.hub_int_cycle = true;
+                return CompletionCode::Success;
+            }
+            if self.nested_marked && slot == self.nested_hub_slot {
+                self.nested_int.dci = u8::try_from(dci).expect("DCI fits a byte");
+                self.nested_int.base =
+                    self.ep_ctx_dequeue(input_ctx + (1 + u64::from(dci)) * MOCK_CTX_SIZE as u64);
+                self.nested_int.index = 0;
+                self.nested_int.cycle = true;
+                self.nested_int.slot = slot;
                 return CompletionCode::Success;
             }
             // The *second* HID interrupt endpoint is recorded in the second
@@ -1406,6 +1514,12 @@ impl MockXhci {
         let slot_ctx = self.read_dwords(input_ctx + MOCK_CTX_SIZE as u64, 3);
         if slot_ctx[0] & (1 << 26) == 0 {
             return CompletionCode::TrbError;
+        }
+        // The nested hub is marked on its own slot; the root hub's marking
+        // (and its captured context fields) stay intact beside it.
+        if self.nested_hub_slot != 0 && slot == self.nested_hub_slot {
+            self.nested_marked = true;
+            return CompletionCode::Success;
         }
         self.hub_marked_as_hub = true;
         self.hub_slot_id = slot;
@@ -1486,7 +1600,13 @@ impl MockXhci {
     /// hub, the HID keyboard fixtures once a downstream device has been
     /// addressed (a non-zero Route String set `downstream_active`).
     fn descriptor_fixture(&self, desc_type: u8) -> &'static [u8] {
-        let is_hub_device = self.hub_ports > 0 && !self.downstream_active;
+        // The nested hub answers with the hub fixtures too: it is a hub
+        // one tier down, identified by its full route string.
+        let is_nested_hub_addressed = self.nested_hub_downstream_port != 0
+            && self.downstream_active
+            && self.downstream_route == u32::from(self.nested_hub_downstream_port);
+        let is_hub_device =
+            (self.hub_ports > 0 && !self.downstream_active) || is_nested_hub_addressed;
         // The device kind is the *addressed* device's: the global flag for a
         // single-device fixture, or the per-port kind when a storage stick
         // is scripted beside the keyboard on its own downstream port.
@@ -1558,41 +1678,29 @@ impl MockXhci {
                 }
             }
             // Class GET_DESCRIPTOR(hub) (USB 2.0 §11.24.2.5): bDescLength,
-            // bDescriptorType=0x29, bNbrPorts, then a minimal tail.
+            // bDescriptorType=0x29, bNbrPorts, then a minimal tail. The
+            // reply is the addressed hub's — the nested hub reports its own
+            // port count when the request rides its EP0.
             (0xA0, 0x06) if setup[3] == 0x29 => {
                 let desc_type = if self.forge_hub_descriptor {
                     0x00
                 } else {
                     0x29
                 };
-                let hub_desc = [9u8, desc_type, self.hub_ports, 0x00, 0x00, 0x32, 0x00, 0xFF];
+                let ports = if self.nested_hub_slot != 0 && self.ep0_slot == self.nested_hub_slot {
+                    self.nested_hub_ports
+                } else {
+                    self.hub_ports
+                };
+                let hub_desc = [9u8, desc_type, ports, 0x00, 0x00, 0x32, 0x00, 0xFF];
                 if !self.deliver_in_data(data, &hub_desc, w_length, status_addr) {
                     return;
                 }
             }
-            // Class SET_FEATURE on a downstream port (USB 2.0 §11.24.2.13):
-            // PORT_POWER (8) marks the 1-based port powered.
-            (0x23, 0x03) => {
-                if setup[4] >= 1 {
-                    let bit = 1 << (u32::from(setup[4]) - 1);
-                    match setup[2] {
-                        // PORT_POWER (8): mark the 1-based port powered.
-                        8 => self.hub_powered |= bit,
-                        // PORT_RESET (4): mark it reset, so its next
-                        // GET_STATUS reports the port enabled — and, like real
-                        // hardware, latch the Reset-change bit (wPortChange
-                        // bit 4) so the driver must clear it as well as the
-                        // connect change or the port stays flagged forever.
-                        4 => {
-                            self.hub_reset |= bit;
-                            if setup[4] == self.hub_downstream_port {
-                                self.hub_downstream_change |= 1 << 4;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
+            // Class SET_FEATURE on a downstream port (USB 2.0 §11.24.2.13),
+            // served from the addressed hub's bank: the nested hub's when
+            // the request rides its EP0, else the root hub's.
+            (0x23, 0x03) => self.execute_set_port_feature(setup[2], setup[4]),
             // Class GET_STATUS on a downstream port (USB 2.0 §11.24.2.7):
             // the connected downstream port reports its status once
             // powered, every other port reads disconnected.
@@ -1603,11 +1711,7 @@ impl MockXhci {
             // mirroring real hardware. A driver that clears only the connect
             // change leaves the reset change (bit 4) latched and the port
             // permanently flagged, so the watch keeps re-firing.
-            (0x23, 0x01) => {
-                if (16..=20).contains(&setup[2]) {
-                    self.hub_downstream_change &= !(1u16 << (setup[2] - 16));
-                }
-            }
+            (0x23, 0x01) => self.execute_clear_port_feature(setup[2], setup[4]),
             // Standard CLEAR_FEATURE(ENDPOINT_HALT) on an endpoint (USB 2.0
             // §9.4.1): the device-side half of a bulk halt recovery.
             (0x02, 0x01) if setup[2] == 0x00 => {
@@ -1866,10 +1970,99 @@ impl MockXhci {
         });
     }
 
+    /// Execute a class `SET_FEATURE` on downstream hub `port` (USB 2.0
+    /// §11.24.2.13), served from the addressed hub's bank: `PORT_POWER`
+    /// (8) marks the port powered; `PORT_RESET` (4) marks it reset and —
+    /// like real hardware — latches the Reset-change bit (wPortChange bit
+    /// 4) so the driver must clear it as well as the connect change or the
+    /// port stays flagged forever.
+    fn execute_set_port_feature(&mut self, feature: u8, port: u8) {
+        if port < 1 {
+            return;
+        }
+        let bit = 1 << (u32::from(port) - 1);
+        let nested = self.nested_hub_slot != 0 && self.ep0_slot == self.nested_hub_slot;
+        match (feature, nested) {
+            (8, false) => self.hub_powered |= bit,
+            (8, true) => self.nested_powered |= bit,
+            (4, false) => {
+                self.hub_reset |= bit;
+                if port == self.hub_downstream_port {
+                    self.hub_downstream_change |= 1 << 4;
+                }
+                if self.nested_hub_downstream_port != 0 && port == self.nested_hub_downstream_port {
+                    self.nested_root_change |= 1 << 4;
+                }
+            }
+            (4, true) => {
+                self.nested_reset |= bit;
+                if port == self.nested_downstream_port {
+                    self.nested_downstream_change |= 1 << 4;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Execute a class `CLEAR_FEATURE` on downstream hub `port` (USB 2.0
+    /// §11.24.2.2): clear *only* the latched change the feature selector
+    /// names (`C_PORT_CONNECTION`=16 .. `C_PORT_RESET`=20 → wPortChange
+    /// bits 0..4), in the addressed hub's bank, mirroring real hardware. A
+    /// driver that clears only the connect change leaves the reset change
+    /// (bit 4) latched and the port permanently flagged, so the watch
+    /// keeps re-firing.
+    fn execute_clear_port_feature(&mut self, feature: u8, port: u8) {
+        if !(16..=20).contains(&feature) {
+            return;
+        }
+        let bit = 1u16 << (feature - 16);
+        if self.nested_hub_slot != 0 && self.ep0_slot == self.nested_hub_slot {
+            if port == self.nested_downstream_port {
+                self.nested_downstream_change &= !bit;
+            }
+        } else if self.nested_hub_downstream_port != 0 && port == self.nested_hub_downstream_port {
+            self.nested_root_change &= !bit;
+        } else {
+            self.hub_downstream_change &= !bit;
+        }
+    }
+
+    /// Deliver one status-change report from the **nested** hub, as
+    /// [`Self::post_hub_status_change`] does for the root hub: write
+    /// `bitmap` into the nested hub's armed status-change transfer and post
+    /// its completion with the nested hub's slot and DCI.
+    fn post_nested_hub_status_change(&mut self, bitmap: &[u8]) {
+        let (mut index, mut cycle) = (self.nested_int.index, self.nested_int.cycle);
+        let base = self.nested_int.base;
+        let Some((addr, trb)) = self.next_owned(base, &mut index, &mut cycle) else {
+            return;
+        };
+        if trb.trb_type() != Ok(TrbType::Normal) {
+            return;
+        }
+        self.nested_int.index = index;
+        self.nested_int.cycle = cycle;
+        self.write_mem(trb.parameter, bitmap);
+        let residual = trb.status - u32::try_from(bitmap.len()).expect("bitmap fits");
+        let code = if residual > 0 {
+            CompletionCode::ShortPacket
+        } else {
+            CompletionCode::Success
+        };
+        self.post_event(Trb {
+            parameter: addr,
+            status: (u32::from(code.as_u8()) << 24) | residual,
+            control: (u32::from(TrbType::TransferEvent.as_u8()) << 10)
+                | (u32::from(self.nested_int.dci) << 16)
+                | trb::control_slot(self.nested_hub_slot),
+        });
+    }
+
     /// Execute a class `GET_STATUS` on downstream hub `port` (USB 2.0
     /// §11.24.2.7): honour the fault knobs, then reply with the port's
     /// `wPortStatus` (connect/speed once powered, plus enabled once reset) and
-    /// its latched `wPortChange`.
+    /// its latched `wPortChange`. Served from the addressed hub's bank
+    /// (nested vs root), keyed by the EP0 slot the request rode.
     fn execute_get_port_status(
         &mut self,
         port: u8,
@@ -1894,32 +2087,69 @@ impl MockXhci {
         } else {
             0
         };
-        let powered = port >= 1 && self.hub_powered & bit != 0;
-        let is_device_port = port == self.hub_downstream_port
-            || (self.msd_downstream_port != 0 && port == self.msd_downstream_port)
-            || (self.mouse_downstream_port != 0 && port == self.mouse_downstream_port)
-            || (self.composite_downstream_port != 0 && port == self.composite_downstream_port);
-        let w_status = if powered && is_device_port {
-            // Once the port has been reset it reports enabled
-            // (PORT_STATUS_ENABLE, bit 1) in addition to its connect/speed
-            // bits — unless the port's device is scripted to never enable
-            // (a broken or half-seated device).
-            let enabled = if self.hub_reset & bit != 0 && port != self.fail_enable_downstream_port {
-                1 << 1
+        // The addressed hub's bank: the nested hub's ports when the request
+        // rides its EP0, else the root hub's.
+        let (w_status, change) = if self.nested_hub_slot != 0
+            && self.ep0_slot == self.nested_hub_slot
+        {
+            let powered = port >= 1 && self.nested_powered & bit != 0;
+            let w_status = if powered && port == self.nested_downstream_port {
+                let enabled = if self.nested_reset & bit != 0 {
+                    1 << 1
+                } else {
+                    0
+                };
+                self.nested_downstream_status | enabled
             } else {
                 0
             };
-            self.hub_downstream_status | enabled
+            let change = if port == self.nested_downstream_port {
+                self.nested_downstream_change
+            } else {
+                0
+            };
+            (w_status, change)
+        } else if self.nested_hub_downstream_port != 0 && port == self.nested_hub_downstream_port {
+            // The root-hub port carrying the nested hub itself: connected
+            // high-speed while present, with its own latched changes.
+            let powered = self.hub_powered & bit != 0;
+            let w_status = if powered && self.nested_root_connected {
+                let enabled = if self.hub_reset & bit != 0 { 1 << 1 } else { 0 };
+                (1 << 0) | (1 << 10) | enabled
+            } else {
+                0
+            };
+            (w_status, self.nested_root_change)
         } else {
-            0
-        };
-        // The latched `wPortChange` (e.g. Connect Status Change) is reported
-        // for the watched downstream port, so the hub-hotplug path can confirm
-        // and clear it.
-        let change = if port == self.hub_downstream_port {
-            self.hub_downstream_change
-        } else {
-            0
+            let powered = port >= 1 && self.hub_powered & bit != 0;
+            let is_device_port = port == self.hub_downstream_port
+                || (self.msd_downstream_port != 0 && port == self.msd_downstream_port)
+                || (self.mouse_downstream_port != 0 && port == self.mouse_downstream_port)
+                || (self.composite_downstream_port != 0 && port == self.composite_downstream_port);
+            let w_status = if powered && is_device_port {
+                // Once the port has been reset it reports enabled
+                // (PORT_STATUS_ENABLE, bit 1) in addition to its connect/speed
+                // bits — unless the port's device is scripted to never enable
+                // (a broken or half-seated device).
+                let enabled =
+                    if self.hub_reset & bit != 0 && port != self.fail_enable_downstream_port {
+                        1 << 1
+                    } else {
+                        0
+                    };
+                self.hub_downstream_status | enabled
+            } else {
+                0
+            };
+            // The latched `wPortChange` (e.g. Connect Status Change) is
+            // reported for the watched downstream port, so the hub-hotplug
+            // path can confirm and clear it.
+            let change = if port == self.hub_downstream_port {
+                self.hub_downstream_change
+            } else {
+                0
+            };
+            (w_status, change)
         };
         let status_bytes = w_status.to_le_bytes();
         let change_bytes = change.to_le_bytes();
@@ -1966,6 +2196,12 @@ impl MockXhci {
         self.int_slot = 0;
         self.bulk_slot = 0;
         self.int2 = MockInt::new();
+        self.nested_hub_slot = 0;
+        self.downstream_route = 0;
+        self.nested_powered = 0;
+        self.nested_reset = 0;
+        self.nested_marked = false;
+        self.nested_int = MockInt::new();
     }
 }
 
@@ -2694,8 +2930,8 @@ fn arm_report_request(device: &mut UsbDevice<MockXhci, MockDma>) {
     );
 }
 
-/// The step-by-step downstream attach the hub-descent tests drive: mark the
-/// active slot a hub, attach the device on `port`, and arm the hub's
+/// The step-by-step downstream attach the hub-descent tests drive: install
+/// the enumerated root hub, attach the device on `port`, and arm the hub's
 /// status-change watch, returning the fresh device index. Mirrors the
 /// sequence `UsbDevice::bring_up` runs per connected port.
 fn enumerate_downstream(
@@ -2703,10 +2939,45 @@ fn enumerate_downstream(
     port: u8,
     speed: u8,
 ) -> Result<usize, DriverError> {
-    device.mark_active_slot_as_hub()?;
-    let index = device.attach_downstream_device(port, speed)?;
-    device.configure_hub_watch()?;
-    Ok(index)
+    let root_hub = device.install_root_hub()?;
+    attach_and_watch(device, root_hub, port, speed)
+}
+
+/// The attach half of [`enumerate_downstream`], for tests that install the
+/// root hub themselves (to drive per-port class requests first): attach the
+/// leaf device on `hub`'s `port` and arm that hub's status-change watch.
+fn attach_and_watch(
+    device: &mut UsbDevice<MockXhci, MockDma>,
+    hub: usize,
+    port: u8,
+    speed: u8,
+) -> Result<usize, DriverError> {
+    let outcome = device.attach_downstream_device(hub, port, speed, &TestDelay::default())?;
+    device.configure_hub_watch(hub)?;
+    match outcome {
+        AttachOutcome::Device(index) => Ok(index),
+        // These tests attach leaf devices only; a hub here is a harness bug.
+        AttachOutcome::Hub(_) => Err(DriverError::BadMagic),
+    }
+}
+
+/// Enumerate the root hub on root port 1, install it, and ready its
+/// downstream `port`: power, reset, and read the post-reset status the
+/// attach decision needs. Returns the root hub's table index and the
+/// port's `wPortStatus`.
+fn install_hub_and_ready_port(device: &mut UsbDevice<MockXhci, MockDma>, port: u8) -> (usize, u16) {
+    device.enumerate_hid(1).expect("the hub enumerates");
+    let hub = device.install_root_hub().expect("the root hub installs");
+    device
+        .power_hub_port(hub, port)
+        .expect("power the downstream port");
+    device
+        .reset_hub_port(hub, port)
+        .expect("reset the downstream port");
+    let status = device
+        .hub_port_status(hub, port)
+        .expect("status after reset");
+    (hub, status)
 }
 
 #[test]
@@ -3109,12 +3380,15 @@ fn hub_discovery_finds_the_downstream_device() {
     device.enumerate_hid(1).expect("the hub enumerates");
 
     assert_eq!(device.hub_num_ports().expect("hub descriptor read"), 4);
+    let hub = device.install_root_hub().expect("the root hub installs");
     for port in 1..=4 {
         device
-            .power_hub_port(port)
+            .power_hub_port(hub, port)
             .expect("power the downstream port");
     }
-    let status = device.hub_port_status(2).expect("downstream port status");
+    let status = device
+        .hub_port_status(hub, 2)
+        .expect("downstream port status");
     assert!(
         hub_port_connected(status),
         "the keyboard's port is connected"
@@ -3125,7 +3399,9 @@ fn hub_discovery_finds_the_downstream_device() {
         "the downstream device is high-speed"
     );
 
-    let empty = device.hub_port_status(1).expect("downstream port status");
+    let empty = device
+        .hub_port_status(hub, 1)
+        .expect("downstream port status");
     assert!(
         !hub_port_connected(empty),
         "an unpopulated downstream port reads disconnected"
@@ -3140,14 +3416,21 @@ fn hub_port_reads_disconnected_until_powered() {
     let mem = shared_mem();
     let mut device = started_device(MockXhci::with_hub(&mem, 4, 2), &mem);
     device.enumerate_hid(1).expect("the hub enumerates");
+    let hub = device.install_root_hub().expect("the root hub installs");
 
-    let before = device.hub_port_status(2).expect("downstream port status");
+    let before = device
+        .hub_port_status(hub, 2)
+        .expect("downstream port status");
     assert!(
         !hub_port_connected(before),
         "the downstream port reads disconnected before power"
     );
-    device.power_hub_port(2).expect("power the downstream port");
-    let after = device.hub_port_status(2).expect("downstream port status");
+    device
+        .power_hub_port(hub, 2)
+        .expect("power the downstream port");
+    let after = device
+        .hub_port_status(hub, 2)
+        .expect("downstream port status");
     assert!(
         hub_port_connected(after),
         "the downstream port connects once powered"
@@ -3197,13 +3480,14 @@ fn enumerating_a_hub_does_not_arm_its_interrupt_endpoint() {
             .expect("hub descriptor read succeeds"),
         4,
     );
+    let hub = device.install_root_hub().expect("the root hub installs");
     for port in 1..=4 {
         device
-            .power_hub_port(port)
+            .power_hub_port(hub, port)
             .expect("power the downstream port");
     }
     let status = device
-        .hub_port_status(2)
+        .hub_port_status(hub, 2)
         .expect("downstream port status read succeeds despite the queued report");
     assert!(
         hub_port_connected(status),
@@ -3233,16 +3517,23 @@ fn enumerate_downstream_hid_addresses_a_full_speed_keyboard_through_the_hub() {
     let hub = device.enumerate_hid(1).expect("the hub enumerates");
     assert!(hub.is_hub(), "the device on the root hub is the VIA hub");
     let hub_slot = device.active_slot();
+    let root_hub = device.install_root_hub().expect("the root hub installs");
 
     // Bring the keyboard's downstream port up: power, reset, confirm
     // enabled (the caller owns these wall-clock delays on metal).
-    device.power_hub_port(4).expect("power the downstream port");
+    device
+        .power_hub_port(root_hub, 4)
+        .expect("power the downstream port");
     assert!(
-        hub_port_connected(device.hub_port_status(4).expect("status")),
+        hub_port_connected(device.hub_port_status(root_hub, 4).expect("status")),
         "the keyboard's port is connected once powered"
     );
-    device.reset_hub_port(4).expect("reset the downstream port");
-    let status = device.hub_port_status(4).expect("status after reset");
+    device
+        .reset_hub_port(root_hub, 4)
+        .expect("reset the downstream port");
+    let status = device
+        .hub_port_status(root_hub, 4)
+        .expect("status after reset");
     assert!(
         hub_port_enabled(status),
         "the downstream port is enabled after reset"
@@ -3250,7 +3541,7 @@ fn enumerate_downstream_hid_addresses_a_full_speed_keyboard_through_the_hub() {
     let speed = hub_port_speed(status);
     assert_eq!(speed, 1, "the keyboard reports full speed behind the hub");
 
-    let keyboard = enumerate_downstream(&mut device, 4, speed)
+    let keyboard = attach_and_watch(&mut device, root_hub, 4, speed)
         .expect("the keyboard behind the hub is addressed and configured");
     let identity = device
         .device_identity(keyboard)
@@ -3515,11 +3806,8 @@ fn addressing_a_downstream_keyboard_marks_the_parent_hub_as_a_hub() {
     mock.hub_downstream_status = 1 << 0;
     let mut device = started_device(mock, &mem);
 
-    device.enumerate_hid(1).expect("the hub enumerates");
-    device.power_hub_port(4).expect("power the downstream port");
-    device.reset_hub_port(4).expect("reset the downstream port");
-    let status = device.hub_port_status(4).expect("status after reset");
-    enumerate_downstream(&mut device, 4, hub_port_speed(status))
+    let (hub, status) = install_hub_and_ready_port(&mut device, 4);
+    attach_and_watch(&mut device, hub, 4, hub_port_speed(status))
         .expect("the keyboard behind the hub is addressed");
 
     // The parent hub was marked a hub with its real port count, the
@@ -3568,11 +3856,8 @@ fn the_downstream_interrupt_endpoint_carries_a_nonzero_max_esit_payload() {
     mock.hub_downstream_status = 1 << 0; // full-speed downstream device
     let mut device = started_device(mock, &mem);
 
-    device.enumerate_hid(1).expect("the hub enumerates");
-    device.power_hub_port(4).expect("power the downstream port");
-    device.reset_hub_port(4).expect("reset the downstream port");
-    let status = device.hub_port_status(4).expect("status after reset");
-    enumerate_downstream(&mut device, 4, hub_port_speed(status))
+    let (hub, status) = install_hub_and_ready_port(&mut device, 4);
+    attach_and_watch(&mut device, hub, 4, hub_port_speed(status))
         .expect("the keyboard behind the hub is addressed");
 
     assert_ne!(
@@ -3622,11 +3907,8 @@ fn downstream_keyboard_is_serviced_on_its_descriptor_reported_endpoint() {
     mock.keyboard_config = &MOCK_CONFIG_DESCRIPTOR_EP2;
     let mut device = started_device(mock, &mem);
 
-    device.enumerate_hid(1).expect("the hub enumerates");
-    device.power_hub_port(4).expect("power the downstream port");
-    device.reset_hub_port(4).expect("reset the downstream port");
-    let status = device.hub_port_status(4).expect("status after reset");
-    let keyboard = enumerate_downstream(&mut device, 4, hub_port_speed(status))
+    let (hub, status) = install_hub_and_ready_port(&mut device, 4);
+    let keyboard = attach_and_watch(&mut device, hub, 4, hub_port_speed(status))
         .expect("the keyboard behind the hub is addressed on its real endpoint");
     assert!(device.device_live(keyboard));
 
@@ -3666,13 +3948,10 @@ fn enumerate_downstream_hid_omits_the_tt_for_a_high_speed_device() {
     let mock = MockXhci::with_hub(&mem, 4, 3);
     let mut device = started_device(mock, &mem);
 
-    device.enumerate_hid(1).expect("the hub enumerates");
-    device.power_hub_port(3).expect("power the downstream port");
-    device.reset_hub_port(3).expect("reset the downstream port");
-    let status = device.hub_port_status(3).expect("status after reset");
+    let (hub, status) = install_hub_and_ready_port(&mut device, 3);
     assert_eq!(hub_port_speed(status), 3, "high-speed downstream device");
 
-    let keyboard = enumerate_downstream(&mut device, 3, hub_port_speed(status))
+    let keyboard = attach_and_watch(&mut device, hub, 3, hub_port_speed(status))
         .expect("a high-speed downstream HID device is addressed without a TT");
     assert!(device.device_live(keyboard));
     assert_eq!(device.host_mut().downstream_route_port, 3);
@@ -3719,9 +3998,10 @@ fn faulting_hub_port_status_records_the_completion_code() {
     mock.fault_hub_port_status = true;
     let mut device = started_device(mock, &mem);
     device.enumerate_hid(1).expect("the hub enumerates");
+    let hub = device.install_root_hub().expect("the root hub installs");
 
     assert_eq!(
-        device.hub_port_status(2),
+        device.hub_port_status(hub, 2),
         Err(DriverError::DeviceFault),
         "a STALLed GET_STATUS fails closed"
     );
@@ -3752,9 +4032,10 @@ fn faulting_hub_port_status_records_an_undecodable_completion_code() {
     mock.fault_hub_port_status_raw = RESOURCE_ERROR;
     let mut device = started_device(mock, &mem);
     device.enumerate_hid(1).expect("the hub enumerates");
+    let hub = device.install_root_hub().expect("the root hub installs");
 
     assert_eq!(
-        device.hub_port_status(2),
+        device.hub_port_status(hub, 2),
         Err(DriverError::OutOfRange),
         "an undecodable GET_STATUS completion fails closed on the decode"
     );
@@ -3785,9 +4066,10 @@ fn faulting_hub_port_status_records_an_unexpected_event_type() {
     mock.fault_hub_port_status_evtype = unexpected;
     let mut device = started_device(mock, &mem);
     device.enumerate_hid(1).expect("the hub enumerates");
+    let hub = device.install_root_hub().expect("the root hub installs");
 
     assert_eq!(
-        device.hub_port_status(2),
+        device.hub_port_status(hub, 2),
         Err(DriverError::DeviceFault),
         "an unexpected event type fails the GET_STATUS wait closed"
     );
@@ -5357,12 +5639,13 @@ fn a_failed_status_change_service_re_arms_the_watch_so_a_replug_is_still_seen() 
     // The hub posts a status-change report, but servicing it fails: right
     // after a downstream disconnect the gone device's transaction translator
     // briefly cannot answer the hub's class control transfers (the metal
-    // `reject_hex=4`), so reading the hub topology faults. The service
-    // therefore returns an error — yet the status-change endpoint MUST still
-    // be re-armed across that error, or the watch is left with no outstanding
-    // transfer, the hub can never post another report, and the later reconnect
-    // produces no interrupt at all (the "re-plug not detected" symptom).
-    device.host_mut().forge_hub_descriptor = true;
+    // `reject_hex=4`), so the changed port's `GET_PORT_STATUS` faults. The
+    // service therefore returns an error — yet the status-change endpoint
+    // MUST still be re-armed across that error, or the watch is left with no
+    // outstanding transfer, the hub can never post another report, and the
+    // later reconnect produces no interrupt at all (the "re-plug not
+    // detected" symptom).
+    device.host_mut().fault_hub_port_status = true;
     device.host_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
     device.host_mut().post_hub_status_change(&[1 << 4]);
     assert!(
@@ -5381,7 +5664,7 @@ fn a_failed_status_change_service_re_arms_the_watch_so_a_replug_is_still_seen() 
     // The transient hub fault clears and the keyboard is (re-)plugged. The
     // connect is only delivered if the status-change endpoint was re-armed
     // despite the earlier error — i.e. an interrupt can still reach the engine.
-    device.host_mut().forge_hub_descriptor = false;
+    device.host_mut().fault_hub_port_status = false;
     device.host_mut().hub_downstream_status = 1 << 0;
     device.host_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
     device.host_mut().post_hub_status_change(&[1 << 4]);
@@ -6084,4 +6367,158 @@ fn a_failed_hot_plug_attach_drains_the_port_latches_so_the_watch_stays_quiet() {
     // is pending, and the service reports nothing rather than re-running
     // the failing enumeration forever.
     assert_eq!(device.next_hub_change(&delay), Ok(HubEvent::None));
+}
+
+#[test]
+fn route_for_child_extends_one_nibble_per_tier_and_fails_closed() {
+    // Tier 0 (the root-attached hub) fills the low nibble; each deeper
+    // tier the next (xHCI §8.9.1, least-significant nibble first).
+    assert_eq!(route_for_child(0, 0, 3), Ok(0x3));
+    assert_eq!(route_for_child(0x3, 1, 2), Ok(0x23));
+    assert_eq!(route_for_child(0x23, 2, 15), Ok(0xF23));
+    // Port 0 names no downstream port and a port above 15 cannot be
+    // encoded in a nibble; the route string holds exactly MAX_HUB_DEPTH
+    // tiers — all fail closed rather than aliasing topology.
+    assert_eq!(route_for_child(0, 0, 0), Err(DriverError::OutOfRange));
+    assert_eq!(route_for_child(0, 0, 16), Err(DriverError::OutOfRange));
+    assert_eq!(
+        route_for_child(0, MAX_HUB_DEPTH, 1),
+        Err(DriverError::OutOfRange)
+    );
+}
+
+#[test]
+fn bring_up_serves_a_keyboard_behind_a_nested_hub() {
+    // A hub plugged into a hub: the root hub carries a second hub on its
+    // downstream port 3, and a full-speed keyboard hangs off that nested
+    // hub's port 2. The bring-up walk descends both tiers: the nested hub
+    // is installed, marked a hub on its own slot, and watched, and the
+    // keyboard is addressed with the two-nibble route string and the
+    // *nested* hub's transaction translator — the mock faults Address
+    // Device on any other topology, so a served keyboard proves both.
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_nested_hub(&mem), &mem);
+    let delay = TestDelay::default();
+    device.bring_up(&delay).expect("both hub tiers come up");
+
+    // The nested hub's contexts claimed device region 0, so the keyboard
+    // is served on the next free index — and index 0 is not misreported
+    // as a live device.
+    assert!(!device.device_live(0));
+    assert!(
+        device.device_live(1),
+        "the keyboard behind the nested hub is served"
+    );
+    let identity = device.device_identity(1).expect("the keyboard is served");
+    assert_eq!(identity.vendor_id, 0x046D);
+    assert_eq!(
+        device.host_mut().downstream_route,
+        0x23,
+        "nibble 0 routes the root hub's port 3, nibble 1 the nested hub's port 2"
+    );
+    assert!(
+        device.host_mut().nested_marked,
+        "the nested hub's own slot carries the Hub bit"
+    );
+    assert_ne!(
+        device.host_mut().nested_int.dci,
+        0,
+        "the nested hub's status-change watch is configured and armed"
+    );
+    assert!(device.hub_watch_active());
+
+    // Keystrokes flow end to end through both tiers.
+    let mut buf = [0u8; REPORT_LEN];
+    assert_eq!(device.next_report(1, &mut buf), Ok(None));
+    device
+        .host_mut()
+        .pending_reports
+        .push_back(alloc::vec![0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    device.host_mut().process_int_ring();
+    let len = device
+        .next_report(1, &mut buf)
+        .expect("a report drains")
+        .expect("a report is available");
+    assert_eq!(len, REPORT_LEN);
+    assert_eq!(buf[2], 0x04, "the 'a' keycode crosses both hub tiers");
+}
+
+#[test]
+fn hot_plug_on_a_nested_hubs_port_attaches_and_detaches_through_its_own_watch() {
+    // Nothing behind the nested hub at bring-up: both tiers' watches arm,
+    // and a later connect on the *nested* hub's port is serviced through
+    // the nested hub's own status-change endpoint — then the unplug frees
+    // the keyboard again, leaving both hubs watched.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_nested_hub(&mem);
+    mock.nested_downstream_status = 0;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+    device
+        .bring_up(&delay)
+        .expect("both hub tiers come up empty");
+    assert!(!device.any_device_live());
+    assert!(device.hub_watch_active());
+
+    // Plug the keyboard into the nested hub's port 2.
+    device.host_mut().nested_downstream_status = 1 << 0;
+    device.host_mut().nested_downstream_change = PORT_CHANGE_CONNECTION;
+    device.host_mut().post_nested_hub_status_change(&[1 << 2]);
+    let index = match device.next_hub_change(&delay) {
+        Ok(HubEvent::Attached(index)) => index,
+        other => panic!("expected an attach through the nested hub's watch, got {other:?}"),
+    };
+    assert!(device.device_live(index));
+
+    // Unplug it again: the disconnect arrives on the nested hub's watch
+    // and frees only the keyboard, never a hub.
+    device.host_mut().nested_downstream_status = 0;
+    device.host_mut().nested_downstream_change = PORT_CHANGE_CONNECTION;
+    device.host_mut().post_nested_hub_status_change(&[1 << 2]);
+    assert_eq!(
+        device.next_hub_change(&delay),
+        Ok(HubEvent::Detached(index))
+    );
+    assert!(!device.device_live(index));
+    assert!(device.hub_watch_active(), "both watches stay armed");
+}
+
+#[test]
+fn unplugging_a_nested_hub_cascades_and_a_replug_rebuilds_the_tier() {
+    // Pulling a hub out of a hub takes every device behind it too: the
+    // disconnect arrives on the *root* hub's watch, the nested tier is
+    // torn down as one cascade, and a re-plug rebuilds it from scratch —
+    // the nested hub reinstalled and watched, and its keyboard re-served.
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_nested_hub(&mem), &mem);
+    let delay = TestDelay::default();
+    device.bring_up(&delay).expect("both hub tiers come up");
+    assert!(device.device_live(1));
+
+    device.host_mut().nested_root_connected = false;
+    device.host_mut().nested_root_change = PORT_CHANGE_CONNECTION;
+    device.host_mut().post_hub_status_change(&[1 << 3]);
+    match device.next_hub_change(&delay) {
+        Ok(HubEvent::HubDetached(_)) => {}
+        other => panic!("expected the hub tier to cascade down, got {other:?}"),
+    }
+    assert!(!device.any_device_live(), "the keyboard went with its hub");
+    assert!(device.hub_watch_active(), "the root hub stays watched");
+
+    // Re-plug the hub assembly. The old slot was disabled with the tier,
+    // so the mock forgets it too; a brand-new enumeration re-addresses
+    // the hub on a fresh slot and re-marks it.
+    device.host_mut().nested_hub_slot = 0;
+    device.host_mut().nested_marked = false;
+    device.host_mut().nested_root_connected = true;
+    device.host_mut().nested_root_change = PORT_CHANGE_CONNECTION;
+    device.host_mut().post_hub_status_change(&[1 << 3]);
+    match device.next_hub_change(&delay) {
+        Ok(HubEvent::HubAttached(_)) => {}
+        other => panic!("expected the hub tier to rebuild, got {other:?}"),
+    }
+    assert!(
+        device.any_device_live(),
+        "the keyboard behind the re-plugged hub is served again"
+    );
 }
