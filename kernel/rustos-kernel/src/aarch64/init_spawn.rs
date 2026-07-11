@@ -43,6 +43,7 @@ use rustos_kernel_mem::{
 };
 use rustos_kernel_syscall::SYSCALL_TABLE_HASH;
 
+use super::spawn_producer::ConfiguredIdentityPhysMap;
 use crate::spawn_layout;
 use crate::stack_arena::{FrameArenaGrow, KTHREAD_STACK_ARENA};
 
@@ -283,6 +284,14 @@ impl InitSpawn for Aarch64InitSpawn {
         // the snapshot above was frozen from. A context with no `'static`
         // allocator, or a window the allocator rejects, retains no live space
         // and PID 1's `mem_map` / `mmio_map` fail closed.
+        //
+        // The live space's `PhysMap` must be [`ConfiguredIdentityPhysMap`]:
+        // a `dma_alloc` carve is mapped Normal-Non-Cacheable for the caller
+        // while the kernel zeroes it through the cacheable identity alias,
+        // so the post-zero `clean_invalidate` must be the real dcache
+        // clean+invalidate (the runtime spawn producer's rationale applies
+        // identically here — a no-op physmap leaves dirty zero lines that
+        // the cache later writes back over device-visible rings).
         let live: Option<Box<dyn LiveUserSpace + Send>> = match ctx.static_frames() {
             Some(static_frames) => {
                 let windows = crate::user_windows::user_windows(
@@ -292,7 +301,7 @@ impl InitSpawn for Aarch64InitSpawn {
                 );
                 LiveSpace::new(
                     space,
-                    DirectPhysMap::identity((identity_gib as u64) << 30),
+                    ConfiguredIdentityPhysMap,
                     static_frames,
                     VirtAddr::new(MMIO_WINDOW_BASE),
                     spawn_layout::MMIO_WINDOW_PAGES,

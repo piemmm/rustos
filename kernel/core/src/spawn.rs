@@ -1099,6 +1099,10 @@ mod tests {
             fn translate(&self, phys: PhysAddr, len: usize) -> Option<core::ptr::NonNull<u8>> {
                 self.0.translate(phys, len)
             }
+
+            fn clean_invalidate(&self, phys: PhysAddr, len: usize) {
+                self.0.clean_invalidate(phys, len);
+            }
         }
 
         set_max_level(Level::Trace);

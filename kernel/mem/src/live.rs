@@ -754,6 +754,10 @@ mod tests {
         ) -> Option<core::ptr::NonNull<u8>> {
             self.0.translate(phys, len)
         }
+
+        fn clean_invalidate(&self, phys: crate::frame::PhysAddr, len: usize) {
+            self.0.clean_invalidate(phys, len);
+        }
     }
 
     /// The user virtual window device mappings land in — far above the
@@ -964,6 +968,98 @@ mod tests {
         copy_in(live.space(), &sim, VirtAddr::new(mapping.cpu_va), &mut buf)
             .expect("readable user range");
         assert!(buf.iter().all(|&b| b == 0), "DMA buffer is zeroed");
+    }
+
+    /// The live space's DMA path must route the post-zero cache maintenance
+    /// through *its own* `PhysMap` on both allocation and free: the carve is
+    /// zeroed through the cacheable direct-map alias while the owning task
+    /// reaches the same frames through a non-cacheable mapping, so a live
+    /// space built over a physmap whose `clean_invalidate` does nothing
+    /// leaves dirty zero lines that are later written back over the task's
+    /// device-shared rings (the Pi 4 xHCI regression). This pins the
+    /// delegation the spawn producers rely on when they wire the
+    /// cache-maintaining physmap into each task's live space.
+    #[test]
+    fn dma_alloc_and_free_clean_the_direct_map_alias_through_the_spaces_physmap() {
+        use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+        struct Recorded {
+            calls: AtomicUsize,
+            last_phys: AtomicU64,
+            last_len: AtomicUsize,
+        }
+        struct RecordingSim {
+            inner: SimPhysMap,
+            recorded: &'static Recorded,
+        }
+        impl PhysMap for RecordingSim {
+            fn translate(
+                &self,
+                phys: crate::frame::PhysAddr,
+                len: usize,
+            ) -> Option<core::ptr::NonNull<u8>> {
+                self.inner.translate(phys, len)
+            }
+
+            fn clean_invalidate(&self, phys: crate::frame::PhysAddr, len: usize) {
+                self.recorded.calls.fetch_add(1, Ordering::Relaxed);
+                self.recorded
+                    .last_phys
+                    .store(phys.as_u64(), Ordering::Relaxed);
+                self.recorded.last_len.store(len, Ordering::Relaxed);
+            }
+        }
+
+        let recorded: &'static Recorded = Box::leak(Box::new(Recorded {
+            calls: AtomicUsize::new(0),
+            last_phys: AtomicU64::new(0),
+            last_len: AtomicUsize::new(0),
+        }));
+        let mut live = LiveSpace::new(
+            AddressSpace::new(HostPageTable::new()),
+            RecordingSim {
+                inner: sim(),
+                recorded,
+            },
+            leaked_frames(),
+            VirtAddr::new(MMIO_WINDOW_BASE),
+            MMIO_WINDOW_PAGES,
+            VirtAddr::new(ANON_WINDOW_BASE),
+            ANON_WINDOW_PAGES,
+            VirtAddr::new(DMA_WINDOW_BASE),
+            DMA_WINDOW_PAGES,
+            VirtAddr::new(SHARED_WINDOW_BASE),
+            SHARED_WINDOW_PAGES,
+            VirtAddr::new(FILE_WINDOW_BASE),
+            FILE_WINDOW_PAGES,
+        )
+        .expect("windows are valid");
+
+        let mapping = live
+            .alloc_dma(2 * PAGE_SIZE, 0)
+            .expect("a free block exists");
+        assert_eq!(
+            recorded.calls.load(Ordering::Relaxed),
+            1,
+            "alloc cleans the alias"
+        );
+        assert_eq!(
+            recorded.last_phys.load(Ordering::Relaxed),
+            mapping.phys_base
+        );
+        assert_eq!(recorded.last_len.load(Ordering::Relaxed), 2 * PAGE_SIZE);
+
+        live.free_dma(mapping.cpu_va).expect("live carve frees");
+        assert_eq!(
+            recorded.calls.load(Ordering::Relaxed),
+            2,
+            "free cleans the alias"
+        );
+        assert_eq!(
+            recorded.last_phys.load(Ordering::Relaxed),
+            mapping.phys_base
+        );
+        assert_eq!(recorded.last_len.load(Ordering::Relaxed), 2 * PAGE_SIZE);
     }
 
     #[test]

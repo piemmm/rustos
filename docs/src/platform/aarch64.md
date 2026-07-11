@@ -1495,11 +1495,22 @@ maintenance). The user-space driver maps its device-shared DMA slab
 Normal-Non-Cacheable, but the kernel zeroes each allocated/freeing carve
 through the cacheable direct-map alias; those dirty zero cache lines must
 be cleaned and invalidated before the controller or a later owner uses the
-same frames. The production `PhysMap` therefore exposes a
-`clean_invalidate(phys, len)` hook; `DmaPool` calls it after zeroing on
-allocation and free, and the aarch64 configured identity map routes it to
+same frames. The production `PhysMap` therefore **requires** a
+`clean_invalidate(phys, len)` implementation (there is deliberately no
+default — a silently inherited no-op is exactly how the regression below
+shipped); `DmaPool` calls it after zeroing on allocation and free, and the
+aarch64 `ConfiguredIdentityPhysMap` routes it to
 `clean_invalidate_dcache_range` (`dc civac` + `dsb`). Coherent ports and
-host tests keep the no-op default. Host-proven by
+host tests carry explicit, documented no-ops (`DirectPhysMap`,
+`SimPhysMap`). The per-task `LiveSpace` behind the user-space `dma_alloc`
+syscall must be built over `ConfiguredIdentityPhysMap` too: when the
+user-space driver move first wired it over the no-op `DirectPhysMap`, the
+dirty zero lines from a fresh carve's direct-map zeroing were written back
+at an arbitrary later time over the NC-written xHCI rings — on the Pi 4 a
+second USB device's larger carve triggered exactly that eviction and the
+command ring went silent at its Configure Endpoint (`enum_stage=6`,
+`completion=0`, `reject=4`, keyboard dead only while a storage stick was
+also attached). Host-proven by
 `alloc_cleans_direct_map_alias_after_zeroing` and
 `free_cleans_direct_map_alias_after_zeroing` in `kernel/mem`, plus the
 existing `DmaSlab` coherency tests for user-space slab read/write

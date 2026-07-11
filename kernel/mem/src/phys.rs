@@ -42,8 +42,22 @@ pub trait PhysMap {
 
     /// Clean and invalidate the direct-map alias of `[phys, phys + len)` to
     /// the point of coherency after the kernel has written bytes that a
-    /// non-coherent DMA master will also access.
-    fn clean_invalidate(&self, _phys: PhysAddr, _len: usize) {}
+    /// non-coherent DMA master — or a non-cacheable user mapping of the
+    /// same frames — will also access.
+    ///
+    /// The DMA carve path zeroes freshly allocated (and freed) buffers
+    /// through the *cacheable* direct-map alias while the driver reaches
+    /// the same frames through a Normal-Non-Cacheable user mapping. On a
+    /// non-I/O-coherent platform the dirty zero lines that zeroing leaves
+    /// behind are written back at an arbitrary later time, silently
+    /// overwriting rings and descriptors the driver has since published
+    /// (the Pi 4 xHCI command ring went dead exactly this way). Every
+    /// implementation must therefore state its coherence decision
+    /// explicitly: a real cache clean+invalidate on a port whose DMA
+    /// masters are not I/O-coherent, or a documented no-op where no
+    /// incoherent alias can exist. There is deliberately no default — a
+    /// silently inherited no-op is how the defect above shipped.
+    fn clean_invalidate(&self, phys: PhysAddr, len: usize);
 }
 
 /// The kernel's direct physical map: physical `p` is reachable at the
@@ -85,6 +99,17 @@ impl PhysMap for DirectPhysMap {
         let virt = base.checked_add(self.offset)?;
         let addr = usize::try_from(virt).ok()?;
         NonNull::new(addr as *mut u8)
+    }
+
+    fn clean_invalidate(&self, _phys: PhysAddr, _len: usize) {
+        // Deliberate no-op: `DirectPhysMap` carries no architecture handle,
+        // so it can serve only I/O-coherent configurations (x86_64, the
+        // QEMU `virt` boards) and purely cacheable uses (image build,
+        // copy-out). A port whose DMA masters are not I/O-coherent (the
+        // Pi 4's BCM2711 PCIe) must wire a `PhysMap` that wraps its cache
+        // maintenance primitive instead — the aarch64
+        // `ConfiguredIdentityPhysMap` — anywhere DMA buffers are zeroed
+        // through the direct map.
     }
 }
 
@@ -155,6 +180,11 @@ impl PhysMap for SimPhysMap {
         // nothing else live.
         let ptr = self.storage.as_ptr().wrapping_add(off).cast_mut();
         NonNull::new(ptr)
+    }
+
+    fn clean_invalidate(&self, _phys: PhysAddr, _len: usize) {
+        // Deliberate no-op: the simulator's "physical RAM" is ordinary
+        // host memory with no hardware cache alias to maintain.
     }
 }
 

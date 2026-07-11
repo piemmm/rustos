@@ -389,6 +389,16 @@ impl ProcessSpawn for Aarch64ProcessSpawn {
         // frozen from. A build context with no `'static` allocator, or a
         // window the allocator rejects, retains no live space and the child's
         // `mem_map` / `mmio_map` fail closed.
+        //
+        // The live space's `PhysMap` must be [`ConfiguredIdentityPhysMap`]:
+        // the child's `dma_alloc` carves are mapped Normal-Non-Cacheable for
+        // the driver while the kernel zeroes them through the cacheable
+        // identity alias, so the post-zero `clean_invalidate` must be the
+        // real dcache clean+invalidate. A no-op physmap here left dirty zero
+        // lines behind that the cache wrote back over the driver's live
+        // xHCI rings at an arbitrary later time — on the Pi 4 the second
+        // USB device's larger carve triggered exactly that eviction and the
+        // controller's command ring went silent mid-enumeration.
         let live: Option<Box<dyn LiveUserSpace + Send>> = match ctx.page_table_allocator() {
             Some(static_frames) => {
                 let windows = crate::user_windows::user_windows(
@@ -398,7 +408,7 @@ impl ProcessSpawn for Aarch64ProcessSpawn {
                 );
                 LiveSpace::new(
                     space,
-                    DirectPhysMap::identity((identity_gib as u64) << 30),
+                    ConfiguredIdentityPhysMap,
                     static_frames,
                     VirtAddr::new(MMIO_WINDOW_BASE),
                     spawn_layout::MMIO_WINDOW_PAGES,
