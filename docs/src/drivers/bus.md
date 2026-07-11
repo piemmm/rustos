@@ -426,18 +426,22 @@ length on every `pop`.
 ### Device enumeration and the HID report path
 
 `device` is the multi-device enumeration engine. All device-shared
-bytes live in one caller-provided region behind the crate's
-`DmaRegion` seam — implemented for the `lib/abi` `DmaSlab` in
-production and by a plain shared buffer in tests — and the engine
-computes a 64-byte-aligned `Layout` inside it: the shared structures
-(DCBAA, ERST, command ring, event segment, input context, the root
-device's output context and EP0 ring, the hub status-change ring and
-report, the control data buffer) plus one region per concurrently
-served device (`MAX_DEVICES`, each holding an output context, EP0 /
-interrupt-IN / bulk transfer rings, report buffers, and bulk staging),
-refusing a region that is misaligned or too small.
+bytes live in a growable bank of DMA chunks behind the crate's
+`DmaBank` seam — the `SlabBank` over the host's owned `DmaSlab`
+allocations in production, a plain shared buffer in tests. The
+engine's first chunk holds the 64-byte-aligned shared `Layout` (DCBAA,
+ERST, command ring, event segment, input context, the root device's
+output context and EP0 ring, the control data buffer, the scratchpad),
+sized exactly to the controller's reported geometry and refused if its
+base is misaligned or the bank cannot supply it. Every concurrently
+served device's region (output context, EP0 / interrupt-IN / bulk
+transfer rings, report buffers, and bulk staging) and every addressed
+hub's status-change ring + report live in chunks grown on attach and
+released on detach, so the served-device count is bounded only by the
+controller's reported slots and genuine memory exhaustion — never a
+compile-time budget.
 
-`UsbDevice::start` zeroes the region, publishes the ERST entry and
+`UsbDevice::start` zeroes the shared chunk, publishes the ERST entry and
 the rings' Link TRBs, and starts the controller through `Xhci::start`.
 `UsbDevice::enumerate_hid(port)` then brings the device on a root-hub
 port to the configured state (§4.3): port reset when the port is not
@@ -476,10 +480,10 @@ the hub's per-port `GET_STATUS` reads returning the all-ones sentinel).
 Devices *downstream* of an enumerated hub (every external device on the
 Pi 4B hangs off the onboard `2109:3431` VIA hub) are each reached on
 their **own xHCI slot** — the `bring_up` walk attaches every connected
-downstream port, up to `MAX_DEVICES` devices at once, so a keyboard and
+downstream port, so a keyboard and
 a storage stick are served together. `UsbDevice::attach_downstream_device
 (down_port, speed)` keeps the hub addressed on its slot and gives the
-new device the EP0 ring and output context of a free device region
+new device the EP0 ring and output context of a freshly claimed device region
 (`control`/`address_device`/`next_report` follow the active slot through
 `ep0_ring_off`/`output_ctx_off`), then Enable Slot + Address Device
 with a slot context carrying the **Route String** (the hub's downstream
@@ -883,24 +887,22 @@ supertrait of `Bus`) is that seam:
 `&dyn PciBus`, never naming the concrete `lib/pci` crate
 (`AGENTS.md` §17.4).
 
-The xHCI driver consumes it in `rustos_drv_bus_usb::wiring`. A
-`devmgr`/host composition maps the discovered `brcm,bcm2711-pcie`
-ECAM-access window, builds the bus over it (`mechanism_ecam`), and
-hands the `&dyn PciBus` plus the discovered inbound-DMA aperture top and
-the outbound PCIe window to
-`open_discovered(host, bus, dma_aperture_top, outbound_window)`. That
-function checks `CAP_MMIO_MAP`, enumerates for the USB-class function
-(`0x0C03`), carves the device-shared DMA region from the host's DMA
-facility and verifies it lies wholly **below** the aperture the bridge
-lets devices reach (fail-closed `OutOfRange`, `AGENTS.md` §5.4), assigns
-BAR0 inside the outbound window if firmware left it unassigned
-(`assign_bar`), enables bus mastering, and maps BAR0 — these map-prefix
-steps are factored into the public `map_controller`, returning the
-mapped `MappedXhci { window, dma }` — and then brings the controller up
-through `Xhci::open` + `UsbDevice::start`. The split lets the autoloaded
-user-space keyboard driver read the controller's capability block and
-report a mapping / open / start failure distinctly between the map and the
-bring-up, without re-mapping the BAR (one window per device, `AGENTS.md` §2.2).
+The xHCI host-controller driver consumes it in
+`rustos_drv_bus_usb::bringup`. The board bus drivers assign the
+controller's BAR and publish the enumerated controller as the
+`usb,xhci` node carrying the BAR + DMA + IRQ grants
+(`drivers/bus/pcie_brcm` trains the link and enumerates the VL805;
+`drivers/bus/usb/vl805` reloads its firmware and emits the node). The
+autoloaded HCD derives those grants (`derive_controller_resources`),
+maps the register BAR, and builds the growable `SlabBank` over its
+host's DMA seam with the discovered inbound-DMA aperture top — every
+chunk the engine grows (the shared structures now, each device's
+region as it attaches) is verified at allocation time to lie wholly
+**below** the aperture the bridge lets devices reach (fail-closed
+`OutOfRange`, `AGENTS.md` §5.4) — and then brings the controller up
+through `Xhci::open` + `UsbDevice::start` + `UsbDevice::bring_up`
+(`bring_up_controller_diagnostic`, whose phase breadcrumb reports a
+map / open / start / enumerate failure distinctly).
 QEMU models no Pi USB timing (`AGENTS.md` §0.4), so the host tests prove
 the composition and its fail-closed paths up to the controller hand-off;
 the live controller bring-up is the on-metal acceptance item.

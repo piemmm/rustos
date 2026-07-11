@@ -33,17 +33,20 @@
 //! [`DriverError::DeviceFault`], which is exactly the on-metal boundary. The
 //! live controller bring-up is the on-metal acceptance item.
 
-use rustos_abi::driver::dma::DmaSlab;
 use rustos_abi::hwtree::{HwResource, HwResourceKind};
 use rustos_abi::{CapabilityId, Delay, DriverError, DriverHost, MmioMapper, RegisterWindow};
 use rustos_usb::device::{EnumStage, UsbDevice};
-use rustos_usb::{Xhci, XhciOpenStage, DEFAULT_POLL_BUDGET, XHCI_DMA_BYTES};
+use rustos_usb::{SlabBank, Xhci, XhciOpenStage, DEFAULT_POLL_BUDGET};
 
 /// The brought-up controller engine the HCD serves: a [`UsbDevice`] over the
-/// mapped register BAR and the carved DMA region. It is enumerated and pointed
-/// at the attached device's slot when a device is present, or left serving
-/// with its first-connect watch armed when none is yet attached.
-pub type ControllerDevice = UsbDevice<RegisterWindow, DmaSlab>;
+/// mapped register BAR and a growable [`SlabBank`] of DMA chunks minted from
+/// the host's DMA seam (so per-device memory is allocated on attach and
+/// released on detach, bounded by the controller's slots and genuine
+/// exhaustion — never a fixed carve). It is enumerated and pointed at the
+/// attached device's slot when a device is present, or left serving with its
+/// first-connect watch armed when none is yet attached. The `'h` lifetime is
+/// the borrow of the [`DriverHost`] whose DMA seam backs the bank.
+pub type ControllerDevice<'h> = UsbDevice<RegisterWindow, SlabBank<'h>>;
 
 /// The concrete bring-up inputs the HCD derives from its kernel-issued
 /// device-resource grants to drive [`bring_up_controller`].
@@ -173,13 +176,13 @@ where
 /// Requires [`CapabilityId::MMIO_MAP`] (to map the register BAR); the DMA
 /// carve is gated on the host's own DMA capability (`CAP_MEM_DMA`) at
 /// allocation time. Both are re-checked kernel-side at each map/allocation.
-pub fn bring_up_controller(
-    host: &dyn DriverHost,
+pub fn bring_up_controller<'h>(
+    host: &'h dyn DriverHost,
     delay: &dyn Delay,
     bar_base: u64,
     bar_len: usize,
     dma_aperture_top: u64,
-) -> Result<ControllerDevice, DriverError> {
+) -> Result<ControllerDevice<'h>, DriverError> {
     bring_up_controller_diagnostic(host, delay, bar_base, bar_len, dma_aperture_top)
         .map_err(|err| err.error)
 }
@@ -194,17 +197,14 @@ pub enum BringupPhase {
     /// Acquiring the host's capability / mapper / DMA seams (a missing
     /// `CAP_MMIO_MAP`, `MmioMapper`, or DMA host).
     Setup,
-    /// Carving the device-shared DMA region (`dma_alloc`).
-    DmaCarve,
-    /// The carved region's device-visible end exceeds the inbound DMA aperture
-    /// the controller can reach.
-    DmaAperture,
     /// Mapping the controller's register BAR (`mmio_map`).
     BarMap,
     /// Bringing the controller to the halted/reset state ([`Xhci::open`]).
     ControllerOpen,
-    /// Programming the DMA structures and starting the controller
-    /// ([`UsbDevice::start`]).
+    /// Growing and programming the controller's shared DMA structures and
+    /// starting the controller ([`UsbDevice::start`]). Covers the shared
+    /// chunk's allocation and its aperture/alignment refusals (the bank
+    /// fails closed on a chunk the controller could not reach).
     ControllerStart,
     /// Bringing the controller up to serve the keyboard
     /// ([`UsbDevice::bring_up`]); a device absent at boot is not a
@@ -218,8 +218,6 @@ impl BringupPhase {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Setup => "setup",
-            Self::DmaCarve => "dma_carve",
-            Self::DmaAperture => "dma_aperture",
             Self::BarMap => "bar_map",
             Self::ControllerOpen => "controller_open",
             Self::ControllerStart => "controller_start",
@@ -310,15 +308,15 @@ impl ControllerBringupError {
 /// # Capabilities
 ///
 /// As [`bring_up_controller`].
-pub fn bring_up_controller_diagnostic(
-    host: &dyn DriverHost,
+pub fn bring_up_controller_diagnostic<'h>(
+    host: &'h dyn DriverHost,
     delay: &dyn Delay,
     bar_base: u64,
     bar_len: usize,
     dma_aperture_top: u64,
-) -> Result<ControllerDevice, ControllerBringupError> {
-    // Capability before state; the kernel re-checks at the map/carve traps
-    // regardless.
+) -> Result<ControllerDevice<'h>, ControllerBringupError> {
+    // Capability before state; the kernel re-checks at the map/allocation
+    // traps regardless.
     if !host.has_capability(CapabilityId::MMIO_MAP) {
         return Err(ControllerBringupError::bare(
             BringupPhase::Setup,
@@ -336,28 +334,15 @@ pub fn bring_up_controller_diagnostic(
         DriverError::Unsupported,
     ))?;
 
-    // Carve the device-shared DMA region and verify it lies wholly below the
-    // discovered inbound-DMA aperture before any register is touched: a region
-    // the controller cannot reach is a fail-closed refusal, never a silent
-    // truncation. The kernel maps it coherent (Normal Non-Cacheable on a
-    // non-I/O-coherent platform), so the controller sees the rings the driver
-    // writes with no cache maintenance.
-    let dma = dma_host
-        .alloc_dma_zeroed(XHCI_DMA_BYTES)
-        .map_err(|e| ControllerBringupError::bare(BringupPhase::DmaCarve, e))?;
-    let end = dma
-        .phys()
-        .checked_add(dma.len() as u64)
-        .ok_or(ControllerBringupError::bare(
-            BringupPhase::DmaAperture,
-            DriverError::OutOfRange,
-        ))?;
-    if end > dma_aperture_top {
-        return Err(ControllerBringupError::bare(
-            BringupPhase::DmaAperture,
-            DriverError::OutOfRange,
-        ));
-    }
+    // Every DMA chunk the engine grows — the shared structures now, each
+    // device's region as it attaches — is allocated through this bank and
+    // verified to lie wholly below the discovered inbound-DMA aperture at
+    // allocation time: a chunk the controller cannot reach is a fail-closed
+    // refusal, never a silent truncation. The kernel maps each chunk
+    // coherent (Normal Non-Cacheable on a non-I/O-coherent platform), so
+    // the controller sees the rings the driver writes with no cache
+    // maintenance.
+    let dma = SlabBank::with_aperture(dma_host, dma_aperture_top);
 
     // Map the controller's already-assigned register BAR. The host resolves
     // the grant covering `[bar_base, bar_base + bar_len)` and maps that window
@@ -376,8 +361,8 @@ pub fn bring_up_controller_diagnostic(
         e
     })?;
 
-    // Lay out and program the device-shared structures out of the carved
-    // region and start the controller.
+    // Grow the shared chunk out of the bank, lay out and program the
+    // device-shared structures, and start the controller.
     let mut device = UsbDevice::start(xhci, dma, DEFAULT_POLL_BUDGET)
         .map_err(|e| ControllerBringupError::bare(BringupPhase::ControllerStart, e))?;
 

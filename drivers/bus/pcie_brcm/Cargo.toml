@@ -40,9 +40,8 @@ rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # drives once the link trains. `lib/* → lib/*`, no cycle.
 rustos-pci = { path = "../../../lib/pci", version = "=0.0.0" }
 # The xHCI-protocol facts the published node's grants are sized by:
-# `XHCI_BAR_INDEX` (the controller's register BAR) and `XHCI_DMA_BYTES` (the
-# downstream driver's DMA working set), one definition shared with the xHCI
-# driver (`AGENTS.md` §2.2).
+# `XHCI_BAR_INDEX` (the controller's register BAR), one definition shared
+# with the xHCI driver (`AGENTS.md` §2.2).
 rustos-usb = { path = "../../../lib/usb", version = "=0.0.0" }
 
 # Everything the freestanding program links beyond the device logic is pulled

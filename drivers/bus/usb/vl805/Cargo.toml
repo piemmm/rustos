@@ -40,8 +40,7 @@ rustos-abi = { path = "../../../../lib/abi", version = "=0.0.0" }
 rustos-vcmailbox = { path = "../../../../lib/vcmailbox", version = "=0.0.0" }
 # The bus-agnostic xHCI controller crate: the single definition of the
 # controller's `compatible` identity (`XHCI_COMPATIBLE`) the published node
-# carries and its DMA working-set size (`XHCI_DMA_BYTES`), shared with the
-# controller driver that binds the node (§2.2).
+# carries, shared with the controller driver that binds the node (§2.2).
 rustos-usb = { path = "../../../../lib/usb", version = "=0.0.0" }
 
 [dev-dependencies]

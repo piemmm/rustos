@@ -2123,8 +2123,8 @@ seam shape, §2.2; no QEMU vertical — QEMU models no Pi USB timing,
 - `drivers/bus/usb` (`rustos-drv-bus-usb`, placeholder replaced): the
   xHCI protocol layers and the HID enumeration engine over the
   `XhciHost` register seam (`RegisterWindow` on metal, register-level
-  mock in tests) and the `DmaRegion` memory seam (`lib/abi` `DmaSlab`
-  on metal, a shared in-memory buffer in tests) — `regs`
+  mock in tests) and the `DmaBank` memory seam (the `SlabBank` over
+  `lib/abi` `DmaSlab`s on metal, a shared in-memory buffer in tests) — `regs`
   (cap/op/runtime/doorbell vocabulary), `trb` (fail-closed
   `TrbType`/`CompletionCode`, event-field decode, byte conversion),
   `ring` (memory-free `ProducerRing` returning `PushOutcome`s the
@@ -2721,13 +2721,13 @@ keyboard service kthread**:
     gap. The BCM2711 PCIe root complex is **not** I/O-coherent (the very reason
     the VideoCore mailbox and the HVS framebuffer already clean/invalidate on
     this platform), yet the xHCI device-shared DMA region is plain cacheable,
-    identity-mapped RAM and its `DmaRegion for DmaSlab` read/write did **no**
+    identity-mapped RAM and the engine's `DmaSlab`-backed read/write did **no**
     maintenance: the command-ring TRB the CPU wrote stayed in a dirty cache
     line the controller never saw (stale memory → no command → no completion),
     and symmetrically the CPU would read a stale event ring. The fix gives
     `DmaSlab` an optional `SlabCoherencyFn` (`with_coherency`) and a
     `sync_range(offset, len)` that cleans **and** invalidates the touched range
-    to the point of coherency; the USB driver's `DmaRegion` impl invalidates
+    to the point of coherency; the USB engine's DMA-bank read/write invalidates
     **before** every read and cleans **after** every write, and
     `keyboard_service::FrameDmaHost` wires the aarch64
     `clean_invalidate_dcache_range` (`dc civac` + `dsb`) into every minted slab
@@ -2735,8 +2735,8 @@ keyboard service kthread**:
     Host-proven by
     `dma_slab_sync_range_brackets_only_in_bounds_ranges_through_the_hook`
     (lib/virtio) and
-    `dma_slab_region_brackets_writes_and_reads_with_cache_maintenance`
-    (drivers/bus/usb). A rebuilt image carrying the maintenance still captured
+    `slab_bank_brackets_writes_and_reads_with_cache_maintenance`
+    (lib/usb). A rebuilt image carrying the maintenance still captured
     `4126 stage_hex=2 completion_hex=0`, so it was necessary but not the whole
     cause — the controller had a second reason not to consume the command ring
     (the scratchpad lever below).
@@ -2752,11 +2752,13 @@ keyboard service kthread**:
     `PAGESIZE` (`max_scratchpad_buffers()` / `page_size()`, surfaced as `4106`
     `max_scratchpad_hex`); `device::Layout` reserves a page-aligned scratchpad
     pointer array plus that many page-aligned buffer pages (fail-closed if the
-    carve cannot hold them or a scratchpad-needing controller reports no page
-    size / an unaligned base); `UsbDevice::start` fills the array with each
-    buffer's device-visible base and points `DCBAA[0]` at it; and the carve
-    (`wiring::XHCI_DMA_BYTES`) grew 16 KiB → **256 KiB** to hold 31 × 4 KiB
-    pages plus the rings/contexts. Host-proven by `drivers/bus/usb`
+    bank cannot supply the chunk or a scratchpad-needing controller reports no
+    page size / an unaligned base); `UsbDevice::start` fills the array with
+    each buffer's device-visible base and points `DCBAA[0]` at it; and the
+    engine's shared chunk is grown from the `rustos_usb::SlabBank` sized
+    exactly to that reported geometry (the 31 × 4 KiB pages plus the
+    rings/contexts), with each device's region a further chunk grown on
+    attach and released on detach. Host-proven by `drivers/bus/usb`
     `start_reserves_scratchpad_and_programs_dcbaa0` (a mock that, like the VL805,
     withholds every command completion until `DCBAA[0]` is programmed —
     enumeration then runs end to end),
@@ -3066,7 +3068,7 @@ keyboard service kthread**:
   `bring_up_trains_the_link_and_programs_the_windows`. The pause vanishing on
   metal is an on-metal acceptance item (QEMU models no Pi PCIe/USB, §0.4).
 - **Firmware reload sequenced after the VL805's BAR is based (done).** The
-  reload fires from `open_controller`, after `map_controller` bases the BAR +
+  reload fires after the map prefix bases the BAR +
   sets memory/bus-master decode and before the caps wait/`Xhci::open`
   (non-fatal, §2.9/§18.4) — `dev_addr=0x10_0000` and the property message
   match the vendor's VL805 reset message exactly. Its outcome/response
@@ -3504,11 +3506,12 @@ table, so a new board is match **data**, not new code. Sub-increments
       (host-proven).** `drivers/input/usb_hid::service::bring_up_boot_keyboard`
       is the composition the user-space keyboard driver runs at start-up. Over
       its `DriverHost` (the rt-backed host built from its kernel-issued grants)
-      it carves the device-shared DMA region and aperture-checks it *before* any
-      register is touched (fail closed, §5.4), maps its granted xHCI register
+      it builds the growable `rustos_usb::SlabBank` over its host's DMA seam
+      with the discovered aperture top (every chunk is aperture-checked at
+      allocation time, fail closed, §5.4), maps its granted xHCI register
       BAR, brings the controller up (`rustos_usb::Xhci::open` +
-      `UsbDevice::start`, carving the shared `rustos_usb::XHCI_DMA_BYTES` —
-      hoisted from `bus_usb::wiring` into `lib/usb`, §2.2), and runs the
+      `UsbDevice::start`, growing the geometry-sized shared chunk — the one
+      engine definition in `lib/usb`, §2.2), and runs the
       arch-neutral `enumerate_boot_keyboard`, returning a `BootKeyboard` the
       service loop drives with `pump_once`. It names no PCI/BCM2711/board
       (§2.20): the board PCIe root-complex bring-up + BAR assignment stay in the

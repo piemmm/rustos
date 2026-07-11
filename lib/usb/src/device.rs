@@ -13,52 +13,91 @@
 //!
 //! # Memory seam
 //!
-//! Every byte the controller shares with the driver lives in one
-//! caller-provided region behind the [`DmaRegion`] trait — on metal a
-//! capability-granted [`DmaSlab`], in host tests a plain shared
-//! buffer — so the enumeration state machine is proven host-side
-//! against the register-level mock plus an in-memory ring model. The engine performs every ring read/write
+//! Every byte the controller shares with the driver lives in a growable,
+//! caller-provided bank of DMA chunks behind the [`DmaBank`] trait — on
+//! metal the [`crate::SlabBank`] over capability-granted slabs, in host
+//! tests a plain shared buffer — so the enumeration state machine is
+//! proven host-side against the register-level mock plus an in-memory
+//! ring model. The controller's shared structures live in one chunk sized
+//! exactly to the silicon's reported geometry; every device and hub gets
+//! its own chunk on attach and returns it on detach, so concurrency is
+//! bounded by the controller's slots and genuine memory exhaustion, never
+//! a compile-time budget. The engine performs every ring read/write
 //! through the seam; the ring state machines themselves hold no
 //! memory ([`ProducerRing`], [`EventRingCursor`]).
 
-use rustos_abi::driver::dma::DmaSlab;
+use alloc::vec::Vec;
+
 use rustos_abi::{Delay, DriverError, HwDeviceClass, HwMatchKey, HwNode};
 
 use crate::ring::{EventRingCursor, ProducerRing, PushOutcome};
 use crate::trb::{self, CompletionCode, Trb, TrbType};
 use crate::{DmaProgram, Xhci, XhciHost};
 
-/// Device-shared memory the engine and the controller both see.
+/// Growable device-shared memory the engine and the controller both see:
+/// a bank of independently allocated DMA chunks addressed through one
+/// virtual offset space.
 ///
-/// `phys` is the device-visible base; reads and writes are CPU-side
-/// and bounds-checked. The implementor owns DMA publication ordering
-/// (cache cleaning/invalidation on a non-coherent interconnect).
-pub trait DmaRegion {
-    /// Device-visible base address of the region.
-    fn phys(&self) -> u64;
+/// The engine sizes nothing up front beyond the controller's own shared
+/// structures: each enumerated device's rings and buffers live in a chunk
+/// [`Self::grow`]n on attach and [`Self::release`]d on detach, so the
+/// number of concurrently served devices is bounded by the controller's
+/// silicon (its device slots) and genuine memory exhaustion — never by a
+/// compile-time constant.
+///
+/// Chunk base offsets are never reused: a stale offset kept past its
+/// chunk's release maps to no chunk and every access through it fails
+/// closed, rather than aliasing a later allocation. Reads and writes are
+/// CPU-side and bounds-checked within a single chunk. The implementor
+/// owns DMA publication ordering (cache cleaning/invalidation on a
+/// non-coherent interconnect).
+pub trait DmaBank {
+    /// Allocate a fresh zeroed chunk of `len` bytes and return its base
+    /// offset in the bank's virtual offset space.
+    ///
+    /// The chunk's device-visible base is 64-byte aligned at minimum (the
+    /// strictest alignment the xHCI context/ring structures need); the
+    /// production bank's chunks are page-aligned. The base offset is
+    /// 4096-aligned so in-chunk layout arithmetic preserves alignment.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::LengthOutOfRange`] on genuine memory exhaustion
+    ///   (the DMA pool, or the bank's bookkeeping heap).
+    /// * [`DriverError::OutOfRange`] if the chunk would lie beyond the
+    ///   device-visible aperture the controller can reach, or `len` is 0.
+    fn grow(&mut self, len: usize) -> Result<usize, DriverError>;
 
-    /// Byte length of the region.
-    fn len(&self) -> usize;
+    /// Release the chunk whose base offset `grow` returned, returning its
+    /// memory to the allocator.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::NotFound`] if `base` names no live chunk (a double
+    /// release or a forged offset — fail closed, never a panic).
+    fn release(&mut self, base: usize) -> Result<(), DriverError>;
 
-    /// `true` iff the region is zero-length.
-    fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
+    /// Device-visible address of virtual offset `offset`.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::OutOfRange`] if `offset` lies in no live chunk.
+    fn phys_of(&self, offset: usize) -> Result<u64, DriverError>;
 
     /// Copy `buf.len()` bytes at `offset` into `buf`.
     ///
     /// # Errors
     ///
-    /// [`DriverError::OutOfRange`] if `offset + buf.len()` exceeds
-    /// the region.
+    /// [`DriverError::OutOfRange`] if `[offset, offset + buf.len())` does
+    /// not lie wholly within one live chunk.
     fn read(&mut self, offset: usize, buf: &mut [u8]) -> Result<(), DriverError>;
 
     /// Publish `bytes` at `offset`.
     ///
     /// # Errors
     ///
-    /// [`DriverError::OutOfRange`] if `offset + bytes.len()` exceeds
-    /// the region.
+    /// [`DriverError::OutOfRange`] if `[offset, offset + bytes.len())` does
+    /// not lie wholly within one live chunk.
     fn write(&mut self, offset: usize, bytes: &[u8]) -> Result<(), DriverError>;
 }
 
@@ -120,24 +159,15 @@ pub const BULK_SLOTS: usize = BULK_RING_TRBS - 1;
 /// chunking precedent), so per-device DMA cost stays fixed.
 pub const BULK_BUF_LEN: usize = 4096;
 
-/// Device regions available to one controller engine: the root-attached
-/// device, or — when the root device is a hub — the devices served across
-/// every hub tier at once, where a downstream hub's contexts also claim
-/// one region (`HubState::device_region`). Four matches the downstream
-/// port count of the Pi 4's integrated hub; the DMA carve is sized so
-/// every region fits ([`crate::XHCI_DMA_BYTES`]) and the layout
-/// computation fails closed if not.
-/// A protocol working set for one controller, not a scalable capacity.
-pub const MAX_DEVICES: usize = 4;
-
-/// Hubs tracked concurrently by one controller engine: the root-attached
-/// hub plus downstream hubs (a hub plugged into a hub), each addressed and
-/// watched at once. Four covers the root hub with a three-hub chain or
-/// fan-out below it while every region still fits the fixed controller DMA
-/// carve ([`crate::XHCI_DMA_BYTES`]); the layout computation fails closed
-/// if not. A protocol working set for one controller, not a scalable
-/// capacity.
-pub const MAX_HUBS: usize = 4;
+/// The xHCI protocol's ceiling on device slots one controller can expose:
+/// `HCSPARAMS1.MaxSlots` is an 8-bit field (xHCI 1.2 §5.3.3), so no
+/// controller addresses more than 255 devices concurrently. The engine
+/// serves as many devices as the *controller actually reports* — each
+/// enumerated device claims a demand-allocated DMA chunk and a table
+/// entry, released on detach — so the only concurrency bounds are this
+/// protocol ceiling, the controller's own reported slot count, and
+/// genuine memory exhaustion (which fails closed as a typed error).
+pub const XHCI_MAX_SLOTS: usize = 255;
 
 /// Deepest hub chain a device may sit behind: the xHCI Route String has
 /// five four-bit tiers (§8.9.1 / §6.2.2), matching USB 2.0 §4.1.1's
@@ -185,17 +215,45 @@ const HUB_POWER_ON_GOOD_US: u32 = 100_000;
 /// recovery; this conservative budget covers a slow hub.
 const HUB_RESET_RECOVERY_US: u32 = 50_000;
 
-/// One tracked hub's status-change watch slice of the [`Layout`]: the
-/// transfer ring and report buffer of its interrupt-IN status-change
-/// endpoint (USB 2.0 §11.12.3). Every hub the engine keeps addressed —
-/// the root-attached hub and each downstream hub — owns exactly one, so
-/// all [`MAX_HUBS`] tiers are watched at once. A hub's output context and
-/// EP0 ring are not here: the root-attached hub is addressed on the root
+/// Packs structures into a chunk of the [`DmaBank`]'s offset space at
+/// 64-byte alignment — the strictest alignment any xHCI context or ring
+/// requires — so every region constructor lays its slices out through the
+/// one definition.
+struct Packer {
+    next: usize,
+}
+
+impl Packer {
+    /// Start packing at `base` (a [`DmaBank::grow`] chunk base, or `0` to
+    /// measure a region's packed length).
+    const fn new(base: usize) -> Self {
+        Self { next: base }
+    }
+
+    /// Claim `len` bytes, returning their offset and advancing to the
+    /// next 64-byte boundary.
+    const fn take(&mut self, len: usize) -> usize {
+        let offset = self.next;
+        self.next = (self.next + len).next_multiple_of(64);
+        offset
+    }
+}
+
+/// One tracked hub's status-change watch chunk: the transfer ring and
+/// report buffer of its interrupt-IN status-change endpoint (USB 2.0
+/// §11.12.3). Every hub the engine keeps addressed — the root-attached
+/// hub and each downstream hub — owns exactly one, allocated from the
+/// [`DmaBank`] when the hub installs and released when it detaches, so
+/// every tier is watched at once. A hub's output context and EP0 ring are
+/// not here: the root-attached hub is addressed on the root
 /// [`Layout::output_ctx`]/[`Layout::ep0_ring`] before it is known to be a
 /// hub, and a downstream hub keeps the [`DeviceRegion`] it was enumerated
 /// on ([`HubState::device_region`]).
 #[derive(Copy, Clone, Debug, Default)]
 struct HubRegion {
+    /// The chunk base offset this region was laid out at — the
+    /// [`DmaBank::release`] key.
+    base: usize,
     /// The hub's interrupt-IN status-change endpoint transfer ring.
     int_ring: usize,
     /// One status-change report buffer for [`Self::int_ring`]: the hub's
@@ -204,14 +262,40 @@ struct HubRegion {
     report: usize,
 }
 
-/// One served device's slice of the [`Layout`]: its output device context,
+impl HubRegion {
+    /// Lay the region out inside the chunk granted at `base`.
+    const fn at(base: usize) -> Self {
+        let mut packer = Packer::new(base);
+        Self {
+            base,
+            int_ring: packer.take(RING_TRBS * trb::TRB_LEN),
+            report: packer.take(HUB_REPORT_LEN),
+        }
+    }
+
+    /// Packed byte length of one hub watch region — the [`DmaBank::grow`]
+    /// request that backs [`Self::at`].
+    const fn layout_len() -> usize {
+        let mut packer = Packer::new(0);
+        let _ = packer.take(RING_TRBS * trb::TRB_LEN);
+        let _ = packer.take(HUB_REPORT_LEN);
+        packer.next
+    }
+}
+
+/// One served device's demand-allocated chunk: its output device context,
 /// default-control-endpoint transfer ring, interrupt-IN transfer ring with
 /// its per-slot report buffers, and bulk endpoint rings with their staging
 /// buffers. Every enumerated device — the root-attached device, or each
-/// device downstream of the addressed hub — owns exactly one, so all
-/// [`MAX_DEVICES`] stay live in the DCBAA at once.
+/// device downstream of the addressed hub — owns exactly one, allocated
+/// from the [`DmaBank`] when the device attaches and released when it
+/// detaches, so all served devices stay live in the DCBAA at once and an
+/// idle controller pays for none.
 #[derive(Copy, Clone, Debug, Default)]
 struct DeviceRegion {
+    /// The chunk base offset this region was laid out at — the
+    /// [`DmaBank::release`] key.
+    base: usize,
     /// The device slot's output device context.
     output_ctx: usize,
     /// The device's default-control-endpoint transfer ring.
@@ -245,6 +329,32 @@ struct DeviceRegion {
 }
 
 impl DeviceRegion {
+    /// Lay the region out inside the chunk granted at `base`, for a
+    /// controller with `ctx_size`-byte contexts.
+    const fn at(base: usize, ctx_size: usize) -> Self {
+        let mut packer = Packer::new(base);
+        Self {
+            base,
+            output_ctx: packer.take(OUTPUT_CONTEXTS * ctx_size),
+            ep0_ring: packer.take(RING_TRBS * trb::TRB_LEN),
+            int_ring: packer.take(RING_TRBS * trb::TRB_LEN),
+            report_bufs: packer.take(RING_TRBS * REPORT_LEN),
+            bulk_in_ring: packer.take(BULK_RING_TRBS * trb::TRB_LEN),
+            bulk_out_ring: packer.take(BULK_RING_TRBS * trb::TRB_LEN),
+            bulk_in2_ring: packer.take(BULK_RING_TRBS * trb::TRB_LEN),
+            bulk_out2_ring: packer.take(BULK_RING_TRBS * trb::TRB_LEN),
+            bulk_in_bufs: packer.take(BULK_SLOTS * BULK_BUF_LEN),
+            bulk_out_bufs: packer.take(BULK_SLOTS * BULK_BUF_LEN),
+        }
+    }
+
+    /// Packed byte length of one device region — the [`DmaBank::grow`]
+    /// request that backs [`Self::at`].
+    const fn layout_len(ctx_size: usize) -> usize {
+        let region = Self::at(0, ctx_size);
+        (region.bulk_out_bufs + BULK_SLOTS * BULK_BUF_LEN).next_multiple_of(64)
+    }
+
     /// Region offset of `pipe`'s transfer ring.
     fn bulk_ring_off(&self, pipe: BulkPipe) -> usize {
         match (pipe.direction, pipe.secondary) {
@@ -264,10 +374,19 @@ impl DeviceRegion {
     }
 }
 
-/// Where each structure lives inside the caller's [`DmaRegion`].
+/// Where each **controller-shared** structure lives inside the engine's
+/// dedicated shared chunk — the first [`DmaBank::grow`] the engine
+/// performs: DCBAA (sized from the controller's reported `MaxSlots`),
+/// ERST, command ring, event segment, input context, the root-attached
+/// device's output context and EP0 ring, the control data buffer, and the
+/// scratchpad. Per-device and per-hub regions are **not** here: each is
+/// its own demand-allocated chunk ([`DeviceRegion::at`] /
+/// [`HubRegion::at`]), so the shared chunk's size is exactly what the
+/// silicon's reported geometry requires.
 ///
-/// All offsets are 64-byte aligned — the strictest alignment any of
-/// the structures requires.
+/// All offsets are 64-byte aligned, computed chunk-relative by
+/// [`Self::new`] and made absolute in the bank's offset space by
+/// [`Self::rebased`].
 #[derive(Copy, Clone, Debug)]
 struct Layout {
     dcbaa: usize,
@@ -281,24 +400,15 @@ struct Layout {
     output_ctx: usize,
     /// The root-attached device's default-control-endpoint transfer ring.
     ep0_ring: usize,
-    /// Per-device regions: one per concurrently served device
-    /// ([`MAX_DEVICES`]). A directly-attached root device uses
-    /// `device_regions[0]`'s endpoint resources beside the root
-    /// [`Self::output_ctx`] / [`Self::ep0_ring`]; each hub-downstream
-    /// device uses its own region wholesale.
-    device_regions: [DeviceRegion; MAX_DEVICES],
-    /// Per-hub status-change watch regions: one per concurrently
-    /// addressed hub ([`MAX_HUBS`]), armed concurrently with the served
-    /// devices' endpoints so a connect/disconnect on any tier is delivered
-    /// event-driven rather than polled.
-    hub_regions: [HubRegion; MAX_HUBS],
     ctrl_data: usize,
     /// Offset of the scratchpad buffer pointer array (xHCI §6.6): one
     /// 64-bit device-visible pointer per scratchpad buffer, the array
-    /// `DCBAA[0]` points at. `0` when the controller needs no scratchpad.
+    /// `DCBAA[0]` points at. Meaningful only when
+    /// [`Self::scratchpad_count`] is non-zero.
     scratchpad_array: usize,
     /// Offset of the first scratchpad buffer page. Each buffer is one
-    /// controller page and page-aligned. `0` when none.
+    /// controller page and page-aligned. Meaningful only when
+    /// [`Self::scratchpad_count`] is non-zero.
     scratchpad_pages: usize,
     /// Number of scratchpad buffers reserved (`HCSPARAMS2` Max Scratchpad
     /// Buffers; the VL805 needs 31).
@@ -306,136 +416,64 @@ struct Layout {
     /// The controller page size each scratchpad buffer occupies.
     page_size: usize,
     ctx_size: usize,
+    /// The shared chunk's base offset in the bank ([`Self::rebased`]).
+    base: usize,
+    /// Packed byte length of the shared chunk — the [`DmaBank::grow`]
+    /// request that backs it.
     total: usize,
 }
 
-impl DmaRegion for DmaSlab {
-    fn phys(&self) -> u64 {
-        DmaSlab::phys(self)
-    }
-
-    fn len(&self) -> usize {
-        DmaSlab::len(self)
-    }
-
-    fn read(&mut self, offset: usize, buf: &mut [u8]) -> Result<(), DriverError> {
-        let end = offset
-            .checked_add(buf.len())
-            .ok_or(DriverError::OutOfRange)?;
-        // Invalidate the CPU's view of this range first, so a non-coherent
-        // DMA master's writes (e.g. an event TRB the controller posted)
-        // are read from memory rather than a stale cache line. A no-op on
-        // a coherent interconnect / the mock host.
-        DmaSlab::sync_range(self, offset, buf.len());
-        let bytes = self.as_bytes();
-        if end > bytes.len() {
-            return Err(DriverError::OutOfRange);
-        }
-        buf.copy_from_slice(&bytes[offset..end]);
-        Ok(())
-    }
-
-    fn write(&mut self, offset: usize, bytes: &[u8]) -> Result<(), DriverError> {
-        let end = offset
-            .checked_add(bytes.len())
-            .ok_or(DriverError::OutOfRange)?;
-        let dst = self.as_bytes_mut();
-        if end > dst.len() {
-            return Err(DriverError::OutOfRange);
-        }
-        dst[offset..end].copy_from_slice(bytes);
-        // Clean this range to memory, so a non-coherent DMA master reads
-        // the freshly published bytes (e.g. a command TRB) once the
-        // doorbell is rung rather than stale memory. A no-op on a coherent
-        // interconnect / the mock host.
-        DmaSlab::sync_range(self, offset, bytes.len());
-        Ok(())
-    }
-}
-
 impl Layout {
-    /// Compute the layout for a controller with `max_slots` device
-    /// slots and `csz` context size, inside a region of `region_len`
-    /// bytes at device-visible base `phys`.
+    /// Compute the shared-structure layout, chunk-relative, for a
+    /// controller with `max_slots` device slots, `csz` context size, and
+    /// the reported scratchpad geometry. The result's offsets are relative
+    /// to a chunk base of `0`; [`Self::rebased`] moves them to the granted
+    /// chunk.
     ///
     /// # Errors
     ///
-    /// * [`DriverError::OutOfRange`] if `phys` is zero or not 64-byte
-    ///   aligned.
-    /// * [`DriverError::LengthOutOfRange`] if the region cannot hold
-    ///   every structure.
+    /// * [`DriverError::OutOfRange`] if the controller demands scratchpad
+    ///   buffers but reports no page size.
+    /// * [`DriverError::LengthOutOfRange`] if the scratchpad arithmetic
+    ///   overflows (a hostile or broken geometry report).
     fn new(
         max_slots: u8,
         csz: bool,
-        region_len: usize,
-        phys: u64,
         scratchpad_count: u32,
         page_size: usize,
     ) -> Result<Self, DriverError> {
-        if phys == 0 || phys % 64 != 0 {
-            return Err(DriverError::OutOfRange);
-        }
         let scratchpad_count = scratchpad_count as usize;
-        // A controller that needs scratchpad must report a page size, and
-        // the region base must be page-aligned so each buffer lands on a
-        // page boundary in the device address space (xHCI §4.20 / §6.6).
-        // Fail closed otherwise.
-        if scratchpad_count > 0 && (page_size == 0 || phys % page_size as u64 != 0) {
+        // A controller that needs scratchpad must report a page size so
+        // each buffer can land on a page boundary in the device address
+        // space (xHCI §4.20 / §6.6). Fail closed otherwise.
+        if scratchpad_count > 0 && page_size == 0 {
             return Err(DriverError::OutOfRange);
         }
         let ctx_size = if csz { 64 } else { 32 };
-        let mut next = 0usize;
-        let mut take = |len: usize| -> usize {
-            let offset = next;
-            next = (next + len).next_multiple_of(64);
-            offset
-        };
-        let dcbaa = take((usize::from(max_slots) + 1) * 8);
-        let erst = take(16);
-        let command_ring = take(RING_TRBS * trb::TRB_LEN);
-        let event_segment = take(RING_TRBS * trb::TRB_LEN);
-        let input_ctx = take(INPUT_CONTEXTS * ctx_size);
-        let output_ctx = take(OUTPUT_CONTEXTS * ctx_size);
-        let ep0_ring = take(RING_TRBS * trb::TRB_LEN);
-        let mut hub_regions = [HubRegion::default(); MAX_HUBS];
-        for region in &mut hub_regions {
-            *region = HubRegion {
-                int_ring: take(RING_TRBS * trb::TRB_LEN),
-                report: take(HUB_REPORT_LEN),
-            };
-        }
-        let ctrl_data = take(CTRL_DATA_LEN);
-        let mut device_regions = [DeviceRegion::default(); MAX_DEVICES];
-        for region in &mut device_regions {
-            *region = DeviceRegion {
-                output_ctx: take(OUTPUT_CONTEXTS * ctx_size),
-                ep0_ring: take(RING_TRBS * trb::TRB_LEN),
-                int_ring: take(RING_TRBS * trb::TRB_LEN),
-                report_bufs: take(RING_TRBS * REPORT_LEN),
-                bulk_in_ring: take(BULK_RING_TRBS * trb::TRB_LEN),
-                bulk_out_ring: take(BULK_RING_TRBS * trb::TRB_LEN),
-                bulk_in2_ring: take(BULK_RING_TRBS * trb::TRB_LEN),
-                bulk_out2_ring: take(BULK_RING_TRBS * trb::TRB_LEN),
-                bulk_in_bufs: take(BULK_SLOTS * BULK_BUF_LEN),
-                bulk_out_bufs: take(BULK_SLOTS * BULK_BUF_LEN),
-            };
-        }
+        let mut packer = Packer::new(0);
+        let dcbaa = packer.take((usize::from(max_slots) + 1) * 8);
+        let erst = packer.take(16);
+        let command_ring = packer.take(RING_TRBS * trb::TRB_LEN);
+        let event_segment = packer.take(RING_TRBS * trb::TRB_LEN);
+        let input_ctx = packer.take(INPUT_CONTEXTS * ctx_size);
+        let output_ctx = packer.take(OUTPUT_CONTEXTS * ctx_size);
+        let ep0_ring = packer.take(RING_TRBS * trb::TRB_LEN);
+        let ctrl_data = packer.take(CTRL_DATA_LEN);
         let (scratchpad_array, scratchpad_pages) = if scratchpad_count > 0 {
-            let array = take(scratchpad_count * 8);
+            let array = packer.take(scratchpad_count * 8);
             // The buffer pages must be page-aligned, not merely 64-aligned.
-            next = next.next_multiple_of(page_size);
-            let pages = next;
-            next = next
-                .checked_add(scratchpad_count * page_size)
+            let pages = packer.next.next_multiple_of(page_size);
+            packer.next = pages
+                .checked_add(
+                    scratchpad_count
+                        .checked_mul(page_size)
+                        .ok_or(DriverError::LengthOutOfRange)?,
+                )
                 .ok_or(DriverError::LengthOutOfRange)?;
             (array, pages)
         } else {
             (0, 0)
         };
-        let total = next;
-        if total > region_len {
-            return Err(DriverError::LengthOutOfRange);
-        }
         Ok(Self {
             dcbaa,
             erst,
@@ -444,16 +482,42 @@ impl Layout {
             input_ctx,
             output_ctx,
             ep0_ring,
-            device_regions,
-            hub_regions,
             ctrl_data,
             scratchpad_array,
             scratchpad_pages,
             scratchpad_count,
             page_size,
             ctx_size,
-            total,
+            base: 0,
+            total: packer.next,
         })
+    }
+
+    /// The same layout moved to the shared chunk granted at `base` (a
+    /// [`DmaBank::grow`] base offset): every offset becomes absolute in
+    /// the bank's offset space. The scratchpad offsets are moved only when
+    /// scratchpad is in use, preserving their "meaningful only when
+    /// non-zero-count" contract.
+    fn rebased(self, base: usize) -> Self {
+        let (scratchpad_array, scratchpad_pages) = if self.scratchpad_count > 0 {
+            (self.scratchpad_array + base, self.scratchpad_pages + base)
+        } else {
+            (0, 0)
+        };
+        Self {
+            dcbaa: self.dcbaa + base,
+            erst: self.erst + base,
+            command_ring: self.command_ring + base,
+            event_segment: self.event_segment + base,
+            input_ctx: self.input_ctx + base,
+            output_ctx: self.output_ctx + base,
+            ep0_ring: self.ep0_ring + base,
+            ctrl_data: self.ctrl_data + base,
+            scratchpad_array,
+            scratchpad_pages,
+            base,
+            ..self
+        }
     }
 
     /// Offset of context `index` inside the input context (§6.2.5:
@@ -1384,7 +1448,7 @@ fn ep_ctx_dwords(ep_type: u32, max_packet: u32, interval: u32, ring: u64) -> [u3
 /// Publish one [`PushOutcome`] into the ring at `ring_offset`: the
 /// data TRB first, then — when the push wrapped — the re-cycled Link
 /// TRB (§4.9.2.1 ordering).
-fn publish<M: DmaRegion>(
+fn publish<M: DmaBank>(
     dma: &mut M,
     ring_offset: usize,
     link_slot: usize,
@@ -1529,11 +1593,13 @@ struct HubState {
     /// The [`HubRegion`] holding this hub's status-change ring and report
     /// buffer.
     region: HubRegion,
-    /// The device-region index this hub's contexts live on. A downstream
-    /// hub is enumerated on a free device region before it is known to be
-    /// a hub and keeps it for its lifetime (the region is excluded from
-    /// [`UsbDevice::free_device_index`] while claimed); `None` for the
-    /// root-attached hub, which lives on the root region.
+    /// The device-region table index this hub's contexts live on. A
+    /// downstream hub is enumerated on a freshly claimed device region
+    /// before it is known to be a hub and keeps it for its lifetime (the
+    /// entry is excluded from [`UsbDevice::claim_device_entry`]'s reuse
+    /// while claimed, and released on detach); `None` for the
+    /// root-attached hub, which lives on the shared chunk's root
+    /// structures.
     device_region: Option<usize>,
     /// The hub's default-control-endpoint producer ring, **parked** here
     /// while the hub is not the active control context. `None` while
@@ -1721,6 +1787,17 @@ impl DeviceState {
     }
 }
 
+/// Push one `None` entry onto a growable engine table, fallibly:
+/// exhaustion of the bookkeeping heap surfaces as a typed error, never a
+/// panic (deterministic OOM).
+fn push_free_entry<T>(table: &mut Vec<Option<T>>) -> Result<usize, DriverError> {
+    table
+        .try_reserve(1)
+        .map_err(|_| DriverError::LengthOutOfRange)?;
+    table.push(None);
+    Ok(table.len() - 1)
+}
+
 /// The controller engine serving every enumerated device on one started
 /// xHCI controller.
 ///
@@ -1730,7 +1807,7 @@ impl DeviceState {
 /// device table. [`UsbDevice::next_report`] arms one interrupt-IN transfer
 /// for the class-driver URB a device is currently serving, and the
 /// host-controller driver completes that URB from the controller event.
-pub struct UsbDevice<H: XhciHost, M: DmaRegion> {
+pub struct UsbDevice<H: XhciHost, M: DmaBank> {
     xhci: Xhci<H>,
     dma: M,
     layout: Layout,
@@ -1768,8 +1845,18 @@ pub struct UsbDevice<H: XhciHost, M: DmaRegion> {
     slot: u8,
     /// The concurrently served devices, indexed by the device index the
     /// [`HubEvent`]s carry and the per-device transfer paths take. `None`
-    /// entries are free.
-    devices: [Option<DeviceState>; MAX_DEVICES],
+    /// entries are free. Grows as devices attach ([`Self::claim_device_entry`])
+    /// and is bounded only by the controller's reported slot count times the
+    /// servable interfaces per slot — a silicon-derived ceiling, never a
+    /// hand-picked constant.
+    devices: Vec<Option<DeviceState>>,
+    /// Each table entry's demand-allocated DMA chunk, index-aligned with
+    /// [`Self::devices`]. `Some` from the entry's claim
+    /// ([`Self::claim_device_entry`]) until its release — a downstream
+    /// hub's contexts keep their entry's region claimed for the hub's
+    /// lifetime ([`HubState::device_region`]) even though no served device
+    /// occupies the entry.
+    regions: Vec<Option<DeviceRegion>>,
     /// Index into [`Self::devices`] of the device that is the active
     /// control context, `None` while a hub (or the root device) is active.
     active_device: Option<usize>,
@@ -1778,8 +1865,10 @@ pub struct UsbDevice<H: XhciHost, M: DmaRegion> {
     /// root-attached hub; every hub is kept addressed concurrently with
     /// the served devices so each tier's status-change endpoint is watched
     /// and its per-port class requests can be issued. All `None` when the
-    /// root device is not a hub (no hub tier).
-    hubs: [Option<HubState>; MAX_HUBS],
+    /// root device is not a hub (no hub tier). Grows as hub tiers install
+    /// ([`Self::claim_hub_entry`]); each entry's status-change watch lives
+    /// in its own demand-allocated chunk, released on detach.
+    hubs: Vec<Option<HubState>>,
     /// Index into [`Self::hubs`] of the hub that is the active control
     /// context, `None` while a device (or the pre-install enumeration
     /// cursor) is active. At rest this is `Some(0)` (the root hub) when a
@@ -1804,8 +1893,9 @@ pub struct UsbDevice<H: XhciHost, M: DmaRegion> {
     /// since arrived by then). Without this, such a stale event matched
     /// neither a device endpoint nor the hub endpoint and faulted the
     /// event-ring consumers, wedging the hub status-change watch so a later
-    /// re-plug went unseen.
-    freed_slots: [u8; MAX_DEVICES],
+    /// re-plug went unseen. Deduplicated, so it never holds more than the
+    /// protocol's 255 slots ([`XHCI_MAX_SLOTS`]).
+    freed_slots: Vec<u8>,
     /// The last enumeration step [`Self::enumerate_hid`] entered, for a
     /// one-shot fault-localising diagnostic ([`Self::enum_stage`]).
     stage: EnumStage,
@@ -1827,9 +1917,16 @@ pub struct UsbDevice<H: XhciHost, M: DmaRegion> {
     last_reject: u8,
 }
 
-impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
-    /// Lay out and zero the DMA structures inside `dma`, program them,
-    /// and start the controller.
+impl<H: XhciHost, M: DmaBank> UsbDevice<H, M> {
+    /// Grow the controller's shared chunk out of `dma`, lay the shared
+    /// structures out inside it, program them, and start the controller.
+    ///
+    /// The chunk is sized **exactly** to the geometry the silicon reports
+    /// (`MaxSlots`, context size, scratchpad count and page size); no
+    /// per-device memory is reserved here — each device's region is grown
+    /// on attach and released on detach, so the served-device count is
+    /// bounded by the controller's slots and genuine memory exhaustion,
+    /// never a compile-time budget.
     ///
     /// `budget` bounds every wait this engine performs (register
     /// polls and event-ring polls), failing closed on a stuck
@@ -1837,23 +1934,40 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     ///
     /// # Errors
     ///
-    /// * [`DriverError::OutOfRange`] if `dma` is not 64-byte aligned.
-    /// * [`DriverError::LengthOutOfRange`] if `dma` cannot hold the
-    ///   structures (the 64-byte-aligned layout described in the
-    ///   module docs).
+    /// * [`DriverError::OutOfRange`] if the granted chunk's device-visible
+    ///   base is zero, not 64-byte aligned, or (when the controller needs
+    ///   scratchpad) leaves the scratchpad pages off a controller-page
+    ///   boundary.
+    /// * [`DriverError::LengthOutOfRange`] if the bank cannot supply the
+    ///   shared chunk (deterministic OOM — the [`DmaHost`] exhaustion
+    ///   convention).
     /// * [`DriverError::DeviceFault`] if the controller does not
     ///   start within `budget` polls.
+    ///
+    /// [`DmaHost`]: rustos_abi::driver::dma::DmaHost
     pub fn start(xhci: Xhci<H>, dma: M, budget: u32) -> Result<Self, DriverError> {
         let mut xhci = xhci;
         let mut dma = dma;
         let layout = Layout::new(
             xhci.max_slots(),
             xhci.csz(),
-            dma.len(),
-            dma.phys(),
             xhci.max_scratchpad_buffers(),
             xhci.page_size(),
         )?;
+        let base = dma.grow(layout.total)?;
+        let layout = layout.rebased(base);
+        let phys = dma.phys_of(base)?;
+        if phys == 0 || phys % 64 != 0 {
+            return Err(DriverError::OutOfRange);
+        }
+        // Each scratchpad buffer must land on a controller-page boundary
+        // in the device address space (xHCI §4.20 / §6.6); fail closed on
+        // a chunk the bank could not place page-aligned.
+        if layout.scratchpad_count > 0
+            && dma.phys_of(layout.scratchpad_pages)? % layout.page_size as u64 != 0
+        {
+            return Err(DriverError::OutOfRange);
+        }
 
         let (command_ring, ep0_ring, event_cursor) =
             Self::program_and_start(&mut xhci, &mut dma, &layout, budget)?;
@@ -1872,13 +1986,14 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             event_cursor,
             budget,
             slot: 0,
-            devices: [const { None }; MAX_DEVICES],
+            devices: Vec::new(),
+            regions: Vec::new(),
             active_device: None,
-            hubs: [const { None }; MAX_HUBS],
+            hubs: Vec::new(),
             active_hub: None,
             root_speed: 0,
             pending_hub_endpoint: None,
-            freed_slots: [0; MAX_DEVICES],
+            freed_slots: Vec::new(),
             stage: EnumStage::Scan,
             last_completion: 0,
             last_event_type: 0,
@@ -1910,13 +2025,13 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         let mut offset = 0;
         while offset < layout.total {
             let chunk = (layout.total - offset).min(zeros.len());
-            dma.write(offset, &zeros[..chunk])?;
+            dma.write(layout.base + offset, &zeros[..chunk])?;
             offset += chunk;
         }
 
         // The single event ring segment table entry: segment base and
         // size in TRBs.
-        let event_phys = dma.phys() + layout.event_segment as u64;
+        let event_phys = dma.phys_of(layout.event_segment)?;
         let segment_trbs = u32::try_from(RING_TRBS).map_err(|_| DriverError::LengthOutOfRange)?;
         let mut erst = [0u8; 16];
         erst[..8].copy_from_slice(&event_phys.to_le_bytes());
@@ -1924,7 +2039,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         dma.write(layout.erst, &erst)?;
 
         let mut make_ring = |offset: usize| -> Result<ProducerRing, DriverError> {
-            let (ring, link) = ProducerRing::new(RING_TRBS, dma.phys() + offset as u64)?;
+            let (ring, link) = ProducerRing::new(RING_TRBS, dma.phys_of(offset)?)?;
             dma.write(offset + ring.link_slot() * trb::TRB_LEN, &link.to_bytes())?;
             Ok(ring)
         };
@@ -1941,18 +2056,18 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         // controller reporting `0` skips this entirely.
         if layout.scratchpad_count > 0 {
             for index in 0..layout.scratchpad_count {
-                let page = dma.phys() + (layout.scratchpad_pages + index * layout.page_size) as u64;
+                let page = dma.phys_of(layout.scratchpad_pages + index * layout.page_size)?;
                 dma.write(layout.scratchpad_array + index * 8, &page.to_le_bytes())?;
             }
-            let array = dma.phys() + layout.scratchpad_array as u64;
+            let array = dma.phys_of(layout.scratchpad_array)?;
             dma.write(layout.dcbaa, &array.to_le_bytes())?;
         }
 
         xhci.start(
             &DmaProgram {
-                dcbaap: dma.phys() + layout.dcbaa as u64,
-                command_ring: dma.phys() + layout.command_ring as u64,
-                erst: dma.phys() + layout.erst as u64,
+                dcbaap: dma.phys_of(layout.dcbaa)?,
+                command_ring: dma.phys_of(layout.command_ring)?,
+                erst: dma.phys_of(layout.erst)?,
                 event_segment: event_phys,
             },
             budget,
@@ -1981,9 +2096,25 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         self.hubs.get_mut(hub_index).and_then(Option::as_mut)
     }
 
-    /// A free hub-table index, `None` when every entry is live.
-    fn free_hub_index(&self) -> Option<usize> {
-        self.hubs.iter().position(Option::is_none)
+    /// Claim a hub-table entry: reuse a free one or grow the table. The
+    /// table is bounded by the controller's own slot count — every tracked
+    /// hub holds an xHCI slot — so growth is silicon-derived, never a
+    /// hand-picked ceiling.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::NoSpace`] if every entry is live and the table
+    ///   already covers the controller's slot count.
+    /// * [`DriverError::LengthOutOfRange`] on bookkeeping-heap exhaustion
+    ///   (deterministic OOM).
+    fn claim_hub_entry(&mut self) -> Result<usize, DriverError> {
+        if let Some(index) = self.hubs.iter().position(Option::is_none) {
+            return Ok(index);
+        }
+        if self.hubs.len() >= usize::from(self.xhci.max_slots()) {
+            return Err(DriverError::NoSpace);
+        }
+        push_free_entry(&mut self.hubs)
     }
 
     /// Index of the live device the hub at `hub_index` serves on its
@@ -2006,23 +2137,141 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         })
     }
 
-    /// A free device-table index, if the table has room. A region claimed
-    /// by a downstream hub's contexts ([`HubState::device_region`]) is not
-    /// free even though no served device occupies its table entry.
-    fn free_device_index(&self) -> Option<usize> {
-        self.devices.iter().enumerate().position(|(index, entry)| {
-            entry.is_none()
-                && !self.hubs.iter().any(|hub| {
-                    hub.as_ref()
-                        .is_some_and(|hub| hub.device_region == Some(index))
-                })
-        })
+    /// Claim a device-table entry and allocate its DMA region: reuse a
+    /// free entry (one with no live device *and* no claimed region — a
+    /// region kept by a downstream hub's contexts,
+    /// [`HubState::device_region`], is not free even though no served
+    /// device occupies its entry) or grow the table, then grow a fresh
+    /// region chunk for it. The table is bounded by the controller's
+    /// reported slot count times the servable interfaces per slot (a
+    /// composite device's sibling interfaces share one slot) — a
+    /// silicon-derived ceiling, never a hand-picked one.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::NoSpace`] if every entry is claimed and the table
+    ///   already covers the silicon-derived ceiling.
+    /// * [`DriverError::LengthOutOfRange`] on DMA or bookkeeping-heap
+    ///   exhaustion (deterministic OOM — the attach fails closed and every
+    ///   already-served device keeps its service).
+    fn claim_device_entry(&mut self) -> Result<usize, DriverError> {
+        let free = (0..self.devices.len())
+            .find(|&index| self.devices[index].is_none() && self.regions[index].is_none());
+        let index = if let Some(index) = free {
+            index
+        } else {
+            let ceiling = usize::from(self.xhci.max_slots()) * MAX_INTERFACES;
+            if self.devices.len() >= ceiling {
+                return Err(DriverError::NoSpace);
+            }
+            let index = push_free_entry(&mut self.devices)?;
+            match push_free_entry(&mut self.regions) {
+                Ok(region_index) => debug_assert_eq!(region_index, index),
+                Err(err) => {
+                    // Keep the tables index-aligned on the failed path.
+                    self.devices.pop();
+                    return Err(err);
+                }
+            }
+            index
+        };
+        let base = self
+            .dma
+            .grow(DeviceRegion::layout_len(self.layout.ctx_size))?;
+        self.regions[index] = Some(DeviceRegion::at(base, self.layout.ctx_size));
+        Ok(index)
+    }
+
+    /// The claimed DMA region backing device-table entry `index`.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::OutOfRange`] if the entry has no claimed region (a
+    /// stale or forged index — fail closed).
+    fn device_region(&self, index: usize) -> Result<DeviceRegion, DriverError> {
+        self.regions
+            .get(index)
+            .copied()
+            .flatten()
+            .ok_or(DriverError::OutOfRange)
+    }
+
+    /// Release device-table entry `index`'s claimed DMA region, returning
+    /// its chunk to the bank. A no-op for an entry with no claimed region.
+    fn release_device_region(&mut self, index: usize) {
+        if let Some(region) = self.regions.get_mut(index).and_then(Option::take) {
+            // The chunk base was minted by `grow`; a release refusal would
+            // mean corrupted bookkeeping, and the entry is already logically
+            // freed either way — the engine carries no logging seam, and the
+            // fail-closed property (a stale offset maps to no chunk) holds
+            // regardless.
+            let _ = self.dma.release(region.base);
+        }
+    }
+
+    /// Release every claimed region that no live device occupies, no hub's
+    /// contexts own, and the active EP0 cursor does not point into — the
+    /// chunks a failed enumeration stranded. Idempotent; called on the
+    /// error paths of the attach flows so an aborted attach leaks no DMA.
+    fn release_unattached_regions(&mut self) {
+        for index in 0..self.regions.len() {
+            let Some(region) = self.regions[index] else {
+                continue;
+            };
+            if self.devices[index].is_some() {
+                continue;
+            }
+            let hub_claimed = self.hubs.iter().any(|hub| {
+                hub.as_ref()
+                    .is_some_and(|hub| hub.device_region == Some(index))
+            });
+            if hub_claimed || self.ep0_ring_off == region.ep0_ring {
+                continue;
+            }
+            self.release_device_region(index);
+        }
+    }
+
+    /// Drop every tracked device and hub and release their
+    /// demand-allocated chunks, leaving only the shared chunk live — the
+    /// common teardown of the full re-enumeration paths (a root-hub
+    /// disconnect, or a full controller reset that rebuilds the tree from
+    /// scratch).
+    fn reset_device_tracking(&mut self) {
+        self.slot = 0;
+        self.active_device = None;
+        self.active_hub = None;
+        self.pending_hub_endpoint = None;
+        // Rest the EP0 cursor on the root ring first, so no released chunk
+        // remains the active control target.
+        self.ep0_ring_off = self.layout.ep0_ring;
+        self.output_ctx_off = self.layout.output_ctx;
+        for index in 0..self.devices.len() {
+            self.devices[index] = None;
+            self.release_device_region(index);
+        }
+        self.devices.clear();
+        self.regions.clear();
+        let hubs = core::mem::take(&mut self.hubs);
+        for hub in hubs.into_iter().flatten() {
+            let _ = self.dma.release(hub.region.base);
+        }
+        self.freed_slots.clear();
     }
 
     /// Whether a served device is live at `index`.
     #[must_use]
     pub fn device_live(&self, index: usize) -> bool {
         self.device(index).is_some()
+    }
+
+    /// Number of device-table entries (live or free) — the index bound a
+    /// consumer reconciles its per-index state against
+    /// ([`Self::device_live`] indices lie below it). Grows as devices
+    /// attach and shrinks only on a full re-enumeration.
+    #[must_use]
+    pub fn device_table_len(&self) -> usize {
+        self.devices.len()
     }
 
     /// Whether any served device is live.
@@ -2088,9 +2337,14 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         self.xhci.acknowledge_interrupt()
     }
 
-    /// Device-visible address of byte `offset` within the region.
-    fn phys_of(&self, offset: usize) -> u64 {
-        self.dma.phys() + offset as u64
+    /// Device-visible address of the bank's virtual offset `offset`.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::OutOfRange`] if `offset` lies in no live chunk (a
+    /// stale offset kept past its chunk's release — fail closed).
+    fn phys_of(&self, offset: usize) -> Result<u64, DriverError> {
+        self.dma.phys_of(offset)
     }
 
     /// Consume the next controller event, advancing `ERDP` when one
@@ -2133,7 +2387,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         }
         let event = self.event_cursor.pop(&trbs)?;
         if event.is_some() {
-            let erdp = self.phys_of(self.layout.event_segment)
+            let erdp = self.phys_of(self.layout.event_segment)?
                 + (self.event_cursor.dequeue_index() * trb::TRB_LEN) as u64;
             self.xhci.ack_event(erdp)?;
         }
@@ -2471,7 +2725,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             };
             let data_trb = Trb::new(
                 TrbType::DataStage,
-                self.phys_of(self.layout.ctrl_data),
+                self.phys_of(self.layout.ctrl_data)?,
                 data_len,
                 data_flags,
             );
@@ -2584,7 +2838,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             self.dma
                 .write(self.ep0_ring_off + ring_slot * trb::TRB_LEN, &zeros)?;
         }
-        let base = self.phys_of(self.ep0_ring_off);
+        let base = self.phys_of(self.ep0_ring_off)?;
         let (ring, link) = ProducerRing::new(RING_TRBS, base)?;
         self.dma.write(
             self.ep0_ring_off + ring.link_slot() * trb::TRB_LEN,
@@ -2621,12 +2875,12 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     /// Normal TRB pointing at the report buffer paired with the ring slot
     /// it lands in.
     fn arm_report(&mut self, index: usize) -> Result<(), DriverError> {
-        let base = self.dma.phys();
+        let region = self.device(index).ok_or(DriverError::NotFound)?.region;
+        let bufs_phys = self.phys_of(region.report_bufs)?;
         let device = self.device_mut(index).ok_or(DriverError::NotFound)?;
-        let region = device.region;
         let ring = device.int_ring.as_mut().ok_or(DriverError::DeviceFault)?;
         let slot = ring.enqueue_slot();
-        let buffer = base + (region.report_bufs + slot * REPORT_LEN) as u64;
+        let buffer = bufs_phys + (slot * REPORT_LEN) as u64;
         let report_len = u32::try_from(REPORT_LEN).map_err(|_| DriverError::LengthOutOfRange)?;
         let normal = Trb::new(
             TrbType::Normal,
@@ -2664,10 +2918,10 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
                 EP_TYPE_CONTROL,
                 max_packet,
                 0,
-                self.phys_of(self.ep0_ring_off),
+                self.phys_of(self.ep0_ring_off)?,
             ),
         )?;
-        let output_ctx = self.phys_of(self.output_ctx_off);
+        let output_ctx = self.phys_of(self.output_ctx_off)?;
         self.dma.write(
             self.layout.dcbaa + usize::from(slot) * 8,
             &output_ctx.to_le_bytes(),
@@ -2675,7 +2929,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         self.stage = EnumStage::AddressDevice;
         self.command(Trb::new(
             TrbType::AddressDevice,
-            self.phys_of(self.layout.input_ctx),
+            self.phys_of(self.layout.input_ctx)?,
             0,
             trb::control_slot(slot),
         ))?;
@@ -2704,12 +2958,12 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
                 EP_TYPE_CONTROL,
                 max_packet,
                 0,
-                self.phys_of(self.ep0_ring_off),
+                self.phys_of(self.ep0_ring_off)?,
             ),
         )?;
         self.command(Trb::new(
             TrbType::EvaluateContext,
-            self.phys_of(self.layout.input_ctx),
+            self.phys_of(self.layout.input_ctx)?,
             0,
             trb::control_slot(slot),
         ))?;
@@ -2870,8 +3124,15 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         self.root_speed = status.speed();
         let base = SlotCtxBase::root(status.speed(), port);
         self.address_device(base, slot, max_packet)?;
-        let index = self.free_device_index().ok_or(DriverError::NoSpace)?;
-        self.finish_enumeration(slot, base, index, 0, 0)
+        let index = self.claim_device_entry()?;
+        let result = self.finish_enumeration(slot, base, index, 0, 0);
+        // A root device that turned out to be a hub installs no table entry
+        // (its contexts live on the shared chunk's root output context and
+        // EP0 ring), and a failed enumeration strands its claims either
+        // way: release whatever no live device owns, so the entry — and its
+        // chunk — are free for the devices behind the hub.
+        self.release_unattached_regions();
+        result
     }
 
     /// Complete enumeration of the device already Enable-Slotted into
@@ -2974,11 +3235,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             let (Some((target, iface)), Some(configured)) = (entry, rings_slot.take()) else {
                 continue;
             };
-            let region = *self
-                .layout
-                .device_regions
-                .get(*target)
-                .ok_or(DriverError::OutOfRange)?;
+            let region = self.device_region(*target)?;
             // The interrupt DCI is live exactly when its ring was
             // configured: a HID report endpoint, or a bulk interface's CBI
             // completion endpoint.
@@ -3009,7 +3266,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             // such completion has long since arrived in the detach→attach
             // window).
             self.active_device = Some(index);
-            self.freed_slots = [0; MAX_DEVICES];
+            self.freed_slots.clear();
         }
         self.stage = EnumStage::Configured;
         Ok(descriptor)
@@ -3017,22 +3274,22 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
 
     /// Plan which interfaces of the decoded set are served and at which
     /// device-table index: the first servable one takes the caller's
-    /// `index`; each further one — a composite device's sibling function,
-    /// e.g. the mouse interface of a wireless keyboard+mouse receiver —
-    /// takes its own free table index (and that index's ring region),
-    /// sharing the device's slot and EP0. An interface beyond the table's
-    /// room is left unserved rather than displacing a live device. A hub,
-    /// or an interface this engine serves no transfer type for, is not
-    /// planned.
+    /// `index` (whose entry and region the caller already claimed); each
+    /// further one — a composite device's sibling function, e.g. the mouse
+    /// interface of a wireless keyboard+mouse receiver — claims its own
+    /// table entry and region ([`Self::claim_device_entry`]), sharing the
+    /// device's slot and EP0. An interface the claim cannot supply memory
+    /// for is left unserved rather than displacing a live device (the
+    /// failed-enumeration sweep releases anything a later fault strands).
+    /// A hub, or an interface this engine serves no transfer type for, is
+    /// not planned.
     fn plan_interfaces(
-        &self,
+        &mut self,
         index: usize,
         interfaces: &[Option<InterfaceInfo>; MAX_INTERFACES],
     ) -> [Option<(usize, InterfaceInfo)>; MAX_INTERFACES] {
         let mut plan: [Option<(usize, InterfaceInfo)>; MAX_INTERFACES] = [None; MAX_INTERFACES];
         let mut planned = 0usize;
-        let mut claimed = [false; MAX_DEVICES];
-        claimed[index] = true;
         for iface in interfaces.iter().flatten() {
             if !iface.is_servable() {
                 continue;
@@ -3040,17 +3297,11 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             let target = if planned == 0 {
                 index
             } else {
-                let free = self
-                    .devices
-                    .iter()
-                    .enumerate()
-                    .position(|(entry_index, entry)| entry.is_none() && !claimed[entry_index]);
-                let Some(free) = free else {
+                let Ok(claimed) = self.claim_device_entry() else {
                     break;
                 };
-                free
+                claimed
             };
-            claimed[target] = true;
             plan[planned] = Some((target, *iface));
             planned += 1;
         }
@@ -3074,11 +3325,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         iface: &InterfaceInfo,
         max_dci: u8,
     ) -> Result<ConfiguredRings, DriverError> {
-        let region = *self
-            .layout
-            .device_regions
-            .get(target)
-            .ok_or(DriverError::OutOfRange)?;
+        let region = self.device_region(target)?;
         if !iface.is_hid() {
             // A non-HID interface carrying the bulk endpoint pair (e.g. a
             // mass-storage interface) gets its bulk endpoints configured;
@@ -3124,7 +3371,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             self.dma
                 .write(region.int_ring + ring_slot * trb::TRB_LEN, &zeros)?;
         }
-        let ring_base = self.phys_of(region.int_ring);
+        let ring_base = self.phys_of(region.int_ring)?;
         let (ring, link) = ProducerRing::new(RING_TRBS, ring_base)?;
         self.dma.write(
             region.int_ring + ring.link_slot() * trb::TRB_LEN,
@@ -3144,7 +3391,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         self.stage = EnumStage::ConfigureEndpoint;
         self.command(Trb::new(
             TrbType::ConfigureEndpoint,
-            self.phys_of(self.layout.input_ctx),
+            self.phys_of(self.layout.input_ctx)?,
             0,
             trb::control_slot(slot),
         ))?;
@@ -3238,7 +3485,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             self.dma
                 .write(ring_off + slot_index * trb::TRB_LEN, &zeros)?;
         }
-        let base = self.phys_of(ring_off);
+        let base = self.phys_of(ring_off)?;
         let (ring, link) = ProducerRing::new(BULK_RING_TRBS, base)?;
         self.dma
             .write(ring_off + ring.link_slot() * trb::TRB_LEN, &link.to_bytes())?;
@@ -3297,7 +3544,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
                 EP_TYPE_BULK_IN,
                 u32::from(interface.bulk_in_max_packet),
                 0,
-                self.phys_of(region.bulk_in_ring),
+                self.phys_of(region.bulk_in_ring)?,
             ),
         )?;
         self.write_input_ctx(
@@ -3306,7 +3553,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
                 EP_TYPE_BULK_OUT,
                 u32::from(interface.bulk_out_max_packet),
                 0,
-                self.phys_of(region.bulk_out_ring),
+                self.phys_of(region.bulk_out_ring)?,
             ),
         )?;
         if secondary {
@@ -3316,7 +3563,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
                     EP_TYPE_BULK_IN,
                     u32::from(interface.bulk_in2_max_packet),
                     0,
-                    self.phys_of(region.bulk_in2_ring),
+                    self.phys_of(region.bulk_in2_ring)?,
                 ),
             )?;
             self.write_input_ctx(
@@ -3325,14 +3572,14 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
                     EP_TYPE_BULK_OUT,
                     u32::from(interface.bulk_out2_max_packet),
                     0,
-                    self.phys_of(region.bulk_out2_ring),
+                    self.phys_of(region.bulk_out2_ring)?,
                 ),
             )?;
         }
         self.stage = EnumStage::ConfigureEndpoint;
         self.command(Trb::new(
             TrbType::ConfigureEndpoint,
-            self.phys_of(self.layout.input_ctx),
+            self.phys_of(self.layout.input_ctx)?,
             0,
             trb::control_slot(slot),
         ))?;
@@ -3392,7 +3639,8 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     ///   as the root hub and descends it (`Self::descend_hub`): its ports
     ///   are powered and every connected one attached — a further hub is
     ///   installed, watched, and descended in turn, a leaf device served,
-    ///   up to [`MAX_DEVICES`] devices at once, so a keyboard and a storage
+    ///   each on its own demand-allocated region, bounded only by the
+    ///   controller's reported slots — so a keyboard and a storage
     ///   stick plugged in together are both served, neither displacing the
     ///   other. A port whose device fails enumeration is skipped
     ///   fail-closed (its slot is released), never allowed to cost the
@@ -3626,7 +3874,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         self.stage = EnumStage::ConfigureEndpoint;
         self.command(Trb::new(
             TrbType::ConfigureEndpoint,
-            self.phys_of(self.layout.input_ctx),
+            self.phys_of(self.layout.input_ctx)?,
             0,
             trb::control_slot(self.slot),
         ))?;
@@ -3764,11 +4012,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     /// (every hub stays addressed for status-change watching and per-port
     /// class requests).
     fn rebind_to_device_region(&mut self, index: usize) -> Result<(), DriverError> {
-        let region = *self
-            .layout
-            .device_regions
-            .get(index)
-            .ok_or(DriverError::OutOfRange)?;
+        let region = self.device_region(index)?;
         // Zero the region before building a fresh ring: a re-attach reuses the
         // same memory, and stale TRBs left at the producer cycle from a prior
         // device would be consumed past the new enqueue pointer (their cycle
@@ -3778,7 +4022,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             self.dma
                 .write(region.ep0_ring + slot * trb::TRB_LEN, &zeros)?;
         }
-        let base = self.phys_of(region.ep0_ring);
+        let base = self.phys_of(region.ep0_ring)?;
         let (ring, link) = ProducerRing::new(RING_TRBS, base)?;
         self.dma.write(
             region.ep0_ring + ring.link_slot() * trb::TRB_LEN,
@@ -4025,17 +4269,13 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         if self.slot == 0 {
             return Err(DriverError::DeviceFault);
         }
-        let hub_index = self.free_hub_index().ok_or(DriverError::NoSpace)?;
+        let hub_index = self.claim_hub_entry()?;
         let depth = match parent {
             None => 0,
             Some(parent_index) => self.hub(parent_index).ok_or(DriverError::NotFound)?.depth + 1,
         };
         let (num_ports, _tt_think_time) = self.configure_hub_slot()?;
-        let region = *self
-            .layout
-            .hub_regions
-            .get(hub_index)
-            .ok_or(DriverError::OutOfRange)?;
+        let region = HubRegion::at(self.dma.grow(HubRegion::layout_len())?);
         self.hubs[hub_index] = Some(HubState {
             slot: self.slot,
             parent,
@@ -4106,7 +4346,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         if self.hub(hub_index).is_none() {
             return Err(DriverError::DeviceFault);
         }
-        let index = self.free_device_index().ok_or(DriverError::NoSpace)?;
+        let index = self.claim_device_entry()?;
         let max_packet = ep0_max_packet(speed)?;
 
         self.rebind_to_device_region(index)?;
@@ -4131,6 +4371,12 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         } else {
             Ok(())
         };
+        // Release every claim nothing owns — a failed attach's stranded
+        // chunk(s), or the claimed entry of a child that turned out to be
+        // served another way — so no attach outcome leaks DMA. On a clean
+        // attach every claim is owned (the device's entry is live, or the
+        // installed hub holds its region) and the sweep is a no-op.
+        self.release_unattached_regions();
         let outcome = result?;
         restored?;
         drained?;
@@ -4257,14 +4503,11 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             if !hub_port_connected(status) {
                 continue;
             }
-            if self.free_device_index().is_none() {
-                // Table full: further devices stay unserved until one
-                // detaches — fail closed, never displace a served device.
-                break;
-            }
             // One broken or hostile device must not cost the other ports
-            // their service: a failed attach releases its slot inside
-            // `attach_hub_port` and the walk continues.
+            // their service: a failed attach releases its slot and chunks
+            // inside `attach_hub_port` and the walk continues. A port the
+            // bank can supply no memory for stays unserved fail-closed,
+            // never displacing a served device.
             let _ = self.attach_hub_port(hub_index, port, delay);
         }
         self.configure_hub_watch(hub_index)
@@ -4278,12 +4521,16 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         if slot == 0 || self.freed_slots.contains(&slot) {
             return;
         }
-        if let Some(entry) = self.freed_slots.iter_mut().find(|entry| **entry == 0) {
-            *entry = slot;
-            return;
+        if self.freed_slots.try_reserve(1).is_err() {
+            // Bookkeeping-heap exhaustion: replace the oldest entry — its
+            // trailing events have had the longest window to arrive —
+            // rather than growing or failing the detach.
+            if self.freed_slots.is_empty() {
+                return;
+            }
+            self.freed_slots.remove(0);
         }
-        self.freed_slots.rotate_left(1);
-        self.freed_slots[MAX_DEVICES - 1] = slot;
+        self.freed_slots.push(slot);
     }
 
     /// Configure and arm the interrupt-IN status-change endpoint (USB 2.0
@@ -4312,7 +4559,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         };
         let (hub_slot, region, output_ctx) = (hub.slot, hub.region, hub.output_ctx);
         // Build the status-change endpoint's interrupt-IN transfer ring.
-        let base = self.phys_of(region.int_ring);
+        let base = self.phys_of(region.int_ring)?;
         let (ring, link) = ProducerRing::new(RING_TRBS, base)?;
         self.dma.write(
             region.int_ring + ring.link_slot() * trb::TRB_LEN,
@@ -4338,7 +4585,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         self.stage = EnumStage::ConfigureEndpoint;
         self.command(Trb::new(
             TrbType::ConfigureEndpoint,
-            self.phys_of(self.layout.input_ctx),
+            self.phys_of(self.layout.input_ctx)?,
             0,
             trb::control_slot(hub_slot),
         ))?;
@@ -4354,7 +4601,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     /// buffer).
     fn arm_hub_report(&mut self, hub_index: usize) -> Result<(), DriverError> {
         let region = self.hub(hub_index).ok_or(DriverError::DeviceFault)?.region;
-        let buffer = self.phys_of(region.report);
+        let buffer = self.phys_of(region.report)?;
         let report_len =
             u32::try_from(HUB_REPORT_LEN).map_err(|_| DriverError::LengthOutOfRange)?;
         let normal = Trb::new(
@@ -4450,6 +4697,9 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
                 self.active_device = None;
             }
             self.devices[entry_index] = None;
+            // Return the entry's DMA chunk to the bank; a re-attach is a
+            // brand-new enumeration on a brand-new chunk.
+            self.release_device_region(entry_index);
         }
         if slot != 0 {
             self.disable_slot_best_effort(slot);
@@ -4483,7 +4733,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         if self.hub(hub_index).is_none() {
             return Ok(());
         }
-        for index in 0..MAX_DEVICES {
+        for index in 0..self.devices.len() {
             let behind = self.devices[index]
                 .as_ref()
                 .is_some_and(|device| device.hub_port != 0 && device.parent_hub == hub_index);
@@ -4491,7 +4741,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
                 self.detach_device(index)?;
             }
         }
-        for child in 0..MAX_HUBS {
+        for child in 0..self.hubs.len() {
             let behind = self
                 .hub(child)
                 .is_some_and(|hub| hub.parent == Some(hub_index));
@@ -4510,6 +4760,12 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         let Some(hub) = self.hubs[hub_index].take() else {
             return Ok(());
         };
+        // Return the hub's status-change watch chunk — and the device-region
+        // chunk its contexts were enumerated on — to the bank.
+        let _ = self.dma.release(hub.region.base);
+        if let Some(region_index) = hub.device_region {
+            self.release_device_region(region_index);
+        }
         self.disable_slot_best_effort(hub.slot);
         self.dma.write(
             self.layout.dcbaa + usize::from(hub.slot) * 8,
@@ -4618,7 +4874,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     /// Never returns `Err`; the signature mirrors the sibling detach helpers so
     /// the HCD handles all three outcomes uniformly.
     pub fn detach_if_hub_root_gone(&mut self) -> Result<bool, DriverError> {
-        if self.hubs[0].is_none() || self.root_port == 0 {
+        if self.hub(0).is_none() || self.root_port == 0 {
             return Ok(false);
         }
         let connected = self
@@ -4630,15 +4886,10 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         }
         // The hub assembly is physically gone — and every deeper tier and
         // device with it. Drop all hub watches and every tracked
-        // device/ring so the controller falls back to awaiting a fresh
-        // root-port connect; the reconnect's full reset rebuilds the rest.
-        self.slot = 0;
-        self.devices = [const { None }; MAX_DEVICES];
-        self.active_device = None;
-        self.hubs = [const { None }; MAX_HUBS];
-        self.active_hub = None;
-        self.pending_hub_endpoint = None;
-        self.freed_slots = [0; MAX_DEVICES];
+        // device/ring — releasing their DMA chunks — so the controller
+        // falls back to awaiting a fresh root-port connect; the
+        // reconnect's full reset rebuilds the rest.
+        self.reset_device_tracking();
         self.root_port = 0;
         self.root_speed = 0;
         self.stage = EnumStage::Scan;
@@ -4829,7 +5080,6 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
                     .device_index_for_hub_and_port(hub_index, port)
                     .is_none()
                 && self.hub_index_for_hub_and_port(hub_index, port).is_none()
-                && self.free_device_index().is_some()
             {
                 match self.attach_hub_port(hub_index, port, delay) {
                     Ok(AttachOutcome::Device(index)) => return Ok(HubEvent::Attached(index)),
@@ -4901,17 +5151,9 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         self.command_ring = command_ring;
         self.ep0_ring = ep0_ring;
         self.event_cursor = event_cursor;
-        self.ep0_ring_off = self.layout.ep0_ring;
-        self.output_ctx_off = self.layout.output_ctx;
+        self.reset_device_tracking();
         self.root_port = 0;
         self.root_speed = 0;
-        self.slot = 0;
-        self.devices = [const { None }; MAX_DEVICES];
-        self.active_device = None;
-        self.hubs = [const { None }; MAX_HUBS];
-        self.active_hub = None;
-        self.pending_hub_endpoint = None;
-        self.freed_slots = [0; MAX_DEVICES];
         self.stage = EnumStage::Scan;
         self.reset_event_diagnostics();
         self.bring_up(delay)
@@ -5075,7 +5317,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
 }
 
 #[cfg(test)]
-impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
+impl<H: XhciHost, M: DmaBank> UsbDevice<H, M> {
     /// Test-only access to the register seam, so the crate's unit
     /// tests can drive and assert the mock controller's state.
     pub(crate) fn host_mut(&mut self) -> &mut H {
@@ -5099,9 +5341,15 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     pub(crate) fn device_identity(&self, index: usize) -> Option<DeviceIdentity> {
         self.device(index).map(|device| device.identity)
     }
+
+    /// Test-only view of the DMA bank, so a test can observe its chunk
+    /// accounting (a region allocated on attach, released on detach).
+    pub(crate) fn dma_ref(&self) -> &M {
+        &self.dma
+    }
 }
 
-impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
+impl<H: XhciHost, M: DmaBank> UsbDevice<H, M> {
     /// Decode one completed interrupt-IN [`TrbType::TransferEvent`] (already
     /// confirmed to target device `index`'s slot and interrupt endpoint)
     /// into a report length, copying the report bytes into `buf`.
@@ -5124,7 +5372,8 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         event: Trb,
         buf: &mut [u8],
     ) -> Result<usize, DriverError> {
-        let base = self.dma.phys();
+        let region = self.device(index).ok_or(DriverError::NotFound)?.region;
+        let ring_base = self.phys_of(region.int_ring)?;
         let device = self.device_mut(index).ok_or(DriverError::NotFound)?;
         if !matches!(
             event.completion_code(),
@@ -5139,10 +5388,8 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             device.last_report_fault_code = event.completion_code_raw();
             return Err(DriverError::DeviceFault);
         }
-        let region = device.region;
         // Map the completed TRB back to its slot's report buffer,
         // validating every step of the controller's claim.
-        let ring_base = base + region.int_ring as u64;
         let offset = event
             .parameter
             .checked_sub(ring_base)
@@ -5196,7 +5443,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
 /// decoded asynchronously off the shared event ring, and a device STALL is
 /// recovered in place (Reset Endpoint → Set TR Dequeue Pointer →
 /// `CLEAR_FEATURE(ENDPOINT_HALT)`) with every abandoned TD answered.
-impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
+impl<H: XhciHost, M: DmaBank> UsbDevice<H, M> {
     /// Region ring offset, staging-buffer offset, endpoint DCI, and xHCI
     /// slot of device `index`'s configured bulk endpoint for `direction`.
     ///
@@ -5299,7 +5546,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         if let Some(bytes) = data {
             self.dma.write(bufs_off + slot * BULK_BUF_LEN, bytes)?;
         }
-        let buffer = self.phys_of(bufs_off + slot * BULK_BUF_LEN);
+        let buffer = self.phys_of(bufs_off + slot * BULK_BUF_LEN)?;
         let normal = Trb::new(
             TrbType::Normal,
             buffer,
@@ -5404,7 +5651,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         // Map the completed TRB back to its ring slot, validating every
         // step of the controller's claim: alignment, range, and in-order
         // completion (the event must name the oldest in-flight TD).
-        let ring_base = self.phys_of(ring_off);
+        let ring_base = self.phys_of(ring_off)?;
         let offset = event
             .parameter
             .checked_sub(ring_base)
@@ -5514,7 +5761,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             self.dma
                 .write(ring_off + slot_index * trb::TRB_LEN, &zeros)?;
         }
-        let base = self.phys_of(ring_off);
+        let base = self.phys_of(ring_off)?;
         let (ring, link) = ProducerRing::new(BULK_RING_TRBS, base)?;
         self.dma
             .write(ring_off + ring.link_slot() * trb::TRB_LEN, &link.to_bytes())?;
@@ -5539,7 +5786,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     }
 }
 
-impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
+impl<H: XhciHost, M: DmaBank> UsbDevice<H, M> {
     /// Deliver device `index`'s next interrupt-IN report into `buf`, arming
     /// a transfer when none is in flight. Never blocks: `Ok(None)` when no
     /// report has arrived yet.
@@ -5637,18 +5884,18 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
 /// control transfers activate that device's EP0 ring, interrupt reads drain
 /// its report endpoint, bulk transfers use its ring pair — so one
 /// interface's URB service can never reach another device's endpoints.
-pub struct DeviceEngine<'a, H: XhciHost, M: DmaRegion> {
+pub struct DeviceEngine<'a, H: XhciHost, M: DmaBank> {
     engine: &'a mut UsbDevice<H, M>,
     index: usize,
 }
 
-impl<H: XhciHost, M: DmaRegion> rustos_abi::driver::input::ReportSource for DeviceEngine<'_, H, M> {
+impl<H: XhciHost, M: DmaBank> rustos_abi::driver::input::ReportSource for DeviceEngine<'_, H, M> {
     fn next_report(&mut self, buf: &mut [u8]) -> Result<Option<usize>, DriverError> {
         self.engine.next_report(self.index, buf)
     }
 }
 
-impl<H: XhciHost, M: DmaRegion> crate::transport::UrbEngine for DeviceEngine<'_, H, M> {
+impl<H: XhciHost, M: DmaBank> crate::transport::UrbEngine for DeviceEngine<'_, H, M> {
     fn control_in(&mut self, setup: [u8; 8], data: &mut [u8]) -> Result<usize, DriverError> {
         // The engine's control transfer lands the IN data in the shared
         // control-data DMA buffer; copy out only the bytes the device
@@ -5733,7 +5980,7 @@ impl<H: XhciHost, M: DmaRegion> crate::transport::UrbEngine for DeviceEngine<'_,
     }
 }
 
-impl<H: XhciHost, M: DmaRegion> DeviceEngine<'_, H, M> {
+impl<H: XhciHost, M: DmaBank> DeviceEngine<'_, H, M> {
     /// The configured bulk pipe of this device whose endpoint *number* is
     /// `endpoint` in `direction`, `None` when no configured pipe matches
     /// (the URB is refused fail-closed).
