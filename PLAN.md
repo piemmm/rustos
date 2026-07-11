@@ -3017,9 +3017,18 @@ transfer, landed in increments:
   it), and the files app's production `VfsDirectorySource` engine
   (validated path spelling — one spelling shared with `Browser::path` —
   plus stream→`Entry` mapping, host-proven end to end over encoded
-  streams). Remaining: AW2 window protocol + engine, AW3 session window
-  server + files `Run` bundle + vertical, AW4 terminal (stream wait
-  source + pipe/spawn `ShellSource`), AW5 CU6 picker descriptors.
+  streams). **AW2 is done:** the fixed-width, fuzzed
+  `rustos_abi::window_ipc` vocabulary (requests + create reply +
+  app-ward events, `WINDOW_ENDPOINT` reserved in
+  `is_reserved_endpoint`) and the `lib/window` engine crate hosting both
+  halves — the `WindowServer` the session composes (caller attested via
+  the `call_peer_origin` seam, windows keyed to the owner's `ProcId`,
+  map-once shm regions, per-client cap, fail-closed teardown, validated
+  event routing) and the `WindowClient`/`WindowEvents` an app links
+  (typed calls + parked event wait) — host-proven through an in-process
+  loopback. Remaining: AW3 session window server + files `Run` bundle +
+  vertical, AW4 terminal (stream wait source + pipe/spawn
+  `ShellSource`), AW5 CU6 picker descriptors.
 - The platform-RNG `EntropySource` that seeds the reserve — **DONE**
   (`.junie/PREREQUISITES.md` P-0): the Arch-HAL `rustos_arch_api::entropy`
   slice (x86_64 `RDSEED`/`RDRAND`, aarch64 `RNDR` `Supported`; riscv64 `Zkr` /

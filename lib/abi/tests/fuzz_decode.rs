@@ -41,6 +41,7 @@ use rustos_abi::time::{Duration64, Time64};
 use rustos_abi::users_admin::{
     decode_group_list, decode_user_list, UsersAdminRequest, USERS_ADMIN_MAX_REQUEST,
 };
+use rustos_abi::window_ipc::{decode_create_reply, WindowEvent, WindowRequest};
 use rustos_abi::{
     AppInfoHeader, IpcMessageHeader, LoadImage, ManifestHeader, NeededLibrary, PortName,
     SYSCALL_TABLE_HASH_LEN,
@@ -181,6 +182,25 @@ fn exercise_display_ipc(bytes: &[u8]) {
     let _ = decode_mode_reply(bytes);
 }
 
+/// Drive the window-channel protocol decoders on `bytes` (one arm of
+/// [`exercise`]): an accepted window request or event must round-trip
+/// through its encoder, and the create-reply decoder — untrusted session
+/// output an app parses — must refuse a corrupt frame cleanly, never
+/// panic.
+fn exercise_window_ipc(bytes: &[u8]) {
+    if let Ok(request) = WindowRequest::from_bytes(bytes) {
+        let redecoded = WindowRequest::from_bytes(&request.to_le_bytes())
+            .expect("round-trip of an accepted request must succeed");
+        assert_eq!(request, redecoded);
+    }
+    if let Ok(event) = WindowEvent::from_bytes(bytes) {
+        let redecoded = WindowEvent::from_bytes(&event.to_le_bytes())
+            .expect("round-trip of an accepted event must succeed");
+        assert_eq!(event, redecoded);
+    }
+    let _ = decode_create_reply(bytes);
+}
+
 /// Drive every ABI decoder on `bytes`.
 ///
 /// Returns silently. The contract is "must not panic for any input"; a
@@ -213,6 +233,7 @@ fn exercise(bytes: &[u8]) {
     exercise_sysinfo_records(bytes);
     exercise_seatmgr(bytes);
     exercise_display_ipc(bytes);
+    exercise_window_ipc(bytes);
     exercise_elevate(bytes);
     if let Ok(time) = Time64::from_bytes(bytes) {
         let redecoded = Time64::from_bytes(&time.to_le_bytes())

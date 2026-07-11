@@ -53,6 +53,7 @@ pub mod usb_urb;
 pub mod users_admin;
 pub mod volume;
 pub mod waitset;
+pub mod window_ipc;
 
 pub use appinfo::{
     body_len as appinfo_body_len, digest_bundle_contents, mime_type_at, resolve_library,

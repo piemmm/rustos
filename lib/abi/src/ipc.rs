@@ -25,7 +25,8 @@ pub const IPC_MESSAGE_MAX_PAYLOAD_LEN: u32 = 1 << 20;
 /// mailbox service ([`crate::mailbox_ipc::MAILBOX_ENDPOINT`]), the System
 /// Information service ([`crate::sysinfo::SYSINFO_ENDPOINT`]), the seat
 /// manager ([`crate::seat::SEATMGR_ENDPOINT`]), the display service
-/// ([`crate::display_ipc::DISPLAY_ENDPOINT`]), and the
+/// ([`crate::display_ipc::DISPLAY_ENDPOINT`]), the desktop session's
+/// window service ([`crate::window_ipc::WINDOW_ENDPOINT`]), and the
 /// per-console elevation supervisors
 /// ([`crate::elevate::ELEVATE_ENDPOINT_BASE`] through
 /// `ELEVATE_ENDPOINT_BASE + CONSOLE_INDEX_MAX`).
@@ -46,6 +47,7 @@ pub const fn is_reserved_endpoint(id: u64) -> bool {
         || id == crate::sysinfo::SYSINFO_ENDPOINT
         || id == crate::seat::SEATMGR_ENDPOINT
         || id == crate::display_ipc::DISPLAY_ENDPOINT
+        || id == crate::window_ipc::WINDOW_ENDPOINT
     {
         return true;
     }
@@ -352,6 +354,7 @@ mod tests {
         assert!(is_reserved_endpoint(crate::sysinfo::SYSINFO_ENDPOINT));
         assert!(is_reserved_endpoint(crate::seat::SEATMGR_ENDPOINT));
         assert!(is_reserved_endpoint(crate::display_ipc::DISPLAY_ENDPOINT));
+        assert!(is_reserved_endpoint(crate::window_ipc::WINDOW_ENDPOINT));
         let base = crate::elevate::ELEVATE_ENDPOINT_BASE;
         let max = u64::from(crate::process::CONSOLE_INDEX_MAX);
         assert!(is_reserved_endpoint(base));

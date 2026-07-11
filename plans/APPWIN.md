@@ -90,18 +90,28 @@ speculative:
   binary in AW3, exactly as staged consumers landed for the encrypted-swap
   layer and the SP11 stack spans.
 
-### AW2 — the window protocol + engine `[ ]`
+### AW2 — the window protocol + engine `[x]`
 
-- `lib/abi::window_ipc`: the fixed-width, versioned request/reply/event
-  vocabulary (create window with a granted shm surface, present with
-  damage, close; focus/key/pointer events app-ward), `display_ipc`-shaped:
-  bounded fail-closed decode, reply status frames, fuzz harness enrolled.
-- A `lib/*` engine crate with both halves (the `lib/display` precedent):
-  the server side the desktop session composes (window table keyed by the
-  kernel-attested requesting task, per-window surface bookkeeping,
-  fail-closed teardown on client exit) and the client side an app links
-  (connect, create, present, parked event wait). Host-tested against an
-  in-process loopback; no kernel change.
+- `rustos_abi::window_ipc` — the fixed-width, versioned, fail-closed
+  vocabulary: `WindowRequest` (`Create` with the granted shm surface, the
+  app's event endpoint — reserved endpoints refused — geometry, and a
+  bounded control-character-free `WindowTitle`; `Present` by frame index
+  + non-empty damage; `Close`), the 12-byte create reply carrying the
+  session-minted non-zero window id, and the app-ward `WindowEvent`s
+  (`Focus`, `Key` embedding the one `KeyInput` codec, window-local
+  `Pointer`, `CloseRequested`). `WINDOW_ENDPOINT` (`0x5749_1001`) joined
+  `is_reserved_endpoint`; the decoders are enrolled in `fuzz_decode`.
+- `lib/window` — both halves over injected seams (the `lib/display`
+  precedent): `WindowServer` (decode → `CallerIdentity` attestation
+  (`call_peer_origin`) → owner/bounds validation → the `WindowHost`
+  compositor bridge; windows keyed to the owner's `ProcId`, `NotFound`
+  for any window the caller does not own, map-once regions via the
+  shared `rustos_display::ShmMapper`, `WINDOWS_PER_CLIENT_MAX` cap,
+  `client_exited` teardown, `deliver_event` app-ward routing validated
+  against the live window) and `WindowClient`/`WindowEvents` (typed
+  calls over `WindowTransport`, parked — never polling — event wait
+  over `EventSource`). Host-proven against an in-process loopback; no
+  kernel change.
 
 ### AW3 — session window server + the files app goes live `[ ]`
 

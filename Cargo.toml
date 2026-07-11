@@ -86,6 +86,7 @@ members = [
     "lib/virtio",
     "lib/virtio_input",
     "lib/vt",
+    "lib/window",
 
     # Drivers — display
     "drivers/display/vesa",

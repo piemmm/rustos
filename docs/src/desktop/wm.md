@@ -153,6 +153,51 @@ fallback rather than crashing the compositor (`AGENTS.md` §2.9).
 Pre-rasterised bitmaps may exist as a cache or fallback, never as the only
 path.
 
+## The window channel (`rustos_abi::window_ipc` + `lib/window`)
+
+Application windows reach the compositor over the **window channel**
+(`plans/APPWIN.md` AW2): a fixed-width, versioned IPC protocol on the
+reserved `WINDOW_ENDPOINT` (squat-protected — binding it requires
+`CAP_IPC_BIND_PRIVILEGED`, exactly like the display service's endpoint).
+The desktop session serves it; an app's `Run` binary calls it.
+
+The transport is zero-copy, the display protocol's shape one layer up: an
+app `shm_create`s a region holding its window frames, `shm_grant`s it to
+the session once (`Create`), and thereafter presents by **frame index**
+plus a damage rectangle (`Present`) — pixels never cross the IPC. A
+`Create` also carries the frame geometry, a bounded, validated
+`WindowTitle` (UTF-8, no control characters — it crosses into the taskbar
+renderer), and the app's own **event endpoint**; the reply is the
+session-minted, never-reused window id. Input travels the other way as
+fixed-width `WindowEvent`s — focus changes, key events (embedding the one
+desktop `KeyInput` codec), window-local pointer events, and
+`CloseRequested` (the app owns the close decision) — delivered to that
+endpoint, where the app **parks** until one arrives; it never polls.
+
+`lib/window` hosts both halves of the behaviour so they cannot drift:
+
+- `WindowServer` — the engine the session composes. Every request is
+  attributed to the kernel-attested `ProcId` of the in-flight caller
+  (`call_peer_origin` behind the `CallerIdentity` seam), and every window
+  is keyed to its creator: a `Present` or `Close` naming another client's
+  window answers `NotFound`, indistinguishable from a window that never
+  existed. The granted region is mapped **once** at create (the shared
+  `rustos_display::ShmMapper` seam) and validated to hold every frame;
+  each present hands the session's compositor bridge (`WindowHost`) a
+  bounds-checked frame slice and a damage rectangle validated inside the
+  window's surface. A per-client window cap bounds pinned memory, a dead
+  client's windows are torn down via `client_exited`, and app-ward events
+  are validated against the live window before delivery.
+- `WindowClient` / `WindowEvents` — the app half over the `WindowTransport`
+  (`ipc_call`) and `EventSource` (parked endpoint wait) seams.
+
+Every decode fails closed (`rustos_abi::window_ipc`, enrolled in the
+`fuzz_decode` harness), and the loopback suite in `lib/window/src/tests.rs`
+proves both halves against one real server: ownership isolation,
+create/present bounds, the client cap, refused-open rollback, teardown,
+and event routing. The session-side serving loop and the first windowed
+apps land with `plans/APPWIN.md` AW3/AW4.
+
 ## Tests
 
 `cargo test -p rustos-wm` runs the headless suite against a virtual

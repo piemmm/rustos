@@ -799,9 +799,19 @@ rustos/
 │   │                    #   shared by the kernel verticals and the user-space
 │   │                    #   input driver (§2.2/§17.4 — the virtio analogue of
 │   │                    #   lib/hid ↔ drivers/input/usb_hid).
-│   └── vt/              # Shared ANSI/VT/xterm vocabulary (plans/CURSES.md C1):
-│                        #   one control/SGR/colour/screen-op definition with an
-│                        #   emitter + streaming parser over the same tables (§2.2).
+│   ├── vt/              # Shared ANSI/VT/xterm vocabulary (plans/CURSES.md C1):
+│   │                    #   one control/SGR/colour/screen-op definition with an
+│   │                    #   emitter + streaming parser over the same tables (§2.2).
+│   └── window/          # Window-channel protocol engine (plans/APPWIN.md AW2):
+│                        #   the one definition of the zero-copy, owner-keyed
+│                        #   app-window semantics over the reserved
+│                        #   WINDOW_ENDPOINT — the WindowServer engine the
+│                        #   desktop session composes (call_peer_origin-attested
+│                        #   owners, map-once shm frame regions, per-client cap,
+│                        #   fail-closed teardown, validated app-ward event
+│                        #   routing) and the WindowClient/WindowEvents halves an
+│                        #   app's Run binary links (typed calls + parked event
+│                        #   wait) (§2.2).
 │
 ├── userland/            # Grouped by <class>/<crate>, mirroring drivers/.
 │   ├── system/          # Long-running system services.
